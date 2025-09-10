@@ -386,7 +386,7 @@ def compute_full_quote(xlsx_path: str,
     if rel == "New":        margin_adj += DEFAULT_PARAMS["Relationship_New_Pct"]
     if rel == "Key Account":margin_adj += DEFAULT_PARAMS["Relationship_KeyAccount_Pct"]
 
-    # Manual Deburring / Edge Break Labor
+    # Manual Deburring / Edge Break
     deb = choices.get("Manual Deburring / Edge Break Labor") or choices.get("FIN-01")
     if deb == "Standard Edge Break":
         buckets["finish"] += 0.2

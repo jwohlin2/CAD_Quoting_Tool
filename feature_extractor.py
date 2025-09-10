@@ -1,140 +1,78 @@
 import cadquery as cq
-import ezdxf
-from ezdxf import bbox
-from stl import mesh
-import numpy as np
-import os
-import argparse
-import sys
+import math
 
-def analyze_step_file(file_path):
+def analyze_cad_file(file_path):
     """
-    Analyzes a .STEP file to extract its features and parameters.
+    Analyzes a .STEP or .STL file to extract a rich set of geometric features.
 
     Args:
-        file_path (str): The path to the .STEP file.
+        file_path (str): The path to the CAD file.
 
     Returns:
-        tuple: A tuple containing the extracted parameters (dict) and a status message (str).
+        dict: A dictionary containing the extracted features, or None on error.
     """
     try:
+        # Load the solid from the file
         solid = cq.importers.importStep(file_path)
+
+        # --- Basic Dimensions ---
         bb = solid.val().BoundingBox()
-        parameters = {
-            "file_name": file_path,
-            "length_mm": bb.xlen,
-            "width_mm": bb.ylen,
-            "height_mm": bb.zlen,
-            "volume_mm3": solid.val().Volume(),
-            "surface_area_mm2": solid.val().Area(),
-            "num_faces": len(solid.faces().vals()),
-            "num_edges": len(solid.edges().vals()),
-        }
-        return parameters, "Success: STEP Analysis complete!"
-
-    except Exception as e:
-        return None, f"Error processing STEP file {file_path}: {e}"
-
-def analyze_dxf_file(file_path):
-    """
-    Analyzes a .DXF file to extract its features and parameters.
-
-    Args:
-        file_path (str): The path to the .DXF file.
-
-    Returns:
-        tuple: A tuple containing the extracted parameters (dict) and a status message (str).
-    """
-    try:
-        doc = ezdxf.readfile(file_path)
-        msp = doc.modelspace()
         
-        try:
-            extents = bbox.extents(msp)
-            length = extents.size.x
-            width = extents.size.y
-            height = extents.size.z
-        except (IndexError, ValueError, ezdxf.DXFError):
-            length = 0
-            width = 0
-            height = 0
+        # --- Advanced Feature Analysis ---
+        
+        # 1. Hole Detection: Find circular faces and get their radii
+        hole_radii = []
+        for face in solid.faces().vals():
+            if face.geomType() == "PLANE" and len(face.Edges()) == 1:
+                edge = face.Edges()[0]
+                if edge.geomType() == "CIRCLE":
+                    hole_radii.append(edge.radius())
+        
+        # 2. Smallest Corner Radius (Approximation)
+        # We check the radius of all non-straight edges. This is a heuristic.
+        min_radius = float('inf')
+        for edge in solid.edges().vals():
+            if edge.geomType() == "CIRCLE" and edge.radius() < min_radius:
+                # We ignore large holes for this calculation
+                if edge.radius() > 0.001 and edge.radius() < (bb.xlen / 4):
+                     min_radius = edge.radius()
 
-        parameters = {
-            "file_name": file_path,
-            "length_mm": length,
-            "width_mm": width,
-            "height_mm": height,
-            "surface_area_mm2": 0, # Not applicable for 2D drawings
-            "num_entities": len(msp),
+        # 3. Complexity Score (Heuristic)
+        # A simple score based on the ratio of faces to volume.
+        # A higher number suggests more complex geometry.
+        volume = solid.val().Volume()
+        num_faces = len(solid.faces().vals())
+        complexity_score = (num_faces / volume) * 100 if volume > 0 else 0
+
+        # --- Assemble the data package for the LLM ---
+        features = {
+            "GEO-01_Length_mm": bb.xlen,
+            "GEO-02_Width_mm": bb.ylen,
+            "GEO-03_Height_mm": bb.zlen,
+            "Calculated_Volume_cm3": volume / 1000,
+            "Feature_Face_Count": num_faces,
+            "Feature_Hole_Count": len(hole_radii),
+            "Feature_Detected_Hole_Radii_mm": [round(r, 3) for r in hole_radii],
+            "GEO-06_Smallest_Internal_Radius_mm": round(min_radius, 3) if min_radius != float('inf') else "Not Found",
+            "Heuristic_Complexity_Score": round(complexity_score, 2)
         }
-        return parameters, "Success: DXF Analysis complete!"
+        
+        print("✅ Advanced analysis complete!")
+        return features
 
     except Exception as e:
-        return None, f"Error processing DXF file {file_path}: {e}"
+        print(f"❌ Error processing file {file_path}: {e}")
+        return None
 
-def analyze_stl_file(file_path):
-    """
-    Analyzes a .STL file to extract its features and parameters.
-
-    Args:
-        file_path (str): The path to the .STL file.
-
-    Returns:
-        tuple: A tuple containing the extracted parameters (dict) and a status message (str).
-    """
-    try:
-        stl_mesh = mesh.Mesh.from_file(file_path)
-        xmin, xmax, ymin, ymax, zmin, zmax = stl_mesh.min_[0], stl_mesh.max_[0], stl_mesh.min_[1], stl_mesh.max_[1], stl_mesh.min_[2], stl_mesh.max_[2]
-        parameters = {
-            "file_name": file_path,
-            "length_mm": xmax - xmin,
-            "width_mm": ymax - ymin,
-            "height_mm": zmax - zmin,
-            "volume_mm3": stl_mesh.get_mass_properties()[0],
-            "surface_area_mm2": stl_mesh.areas.sum(),
-            "num_triangles": len(stl_mesh.vectors),
-        }
-        return parameters, "Success: STL Analysis complete!"
-
-    except Exception as e:
-        return None, f"Error processing STL file {file_path}: {e}"
-
-def print_parameters(extracted_data):
-    """Prints the extracted parameters in a readable format."""
-    if extracted_data:
-        print("\n--- Extracted Parameters ---")
-        for key, value in extracted_data.items():
-            if isinstance(value, float):
-                print(f"{key}: {value:.2f}")
-            else:
-                print(f"{key}: {value}")
-        print("--------------------------")
-
-# --- Main execution ---
+# --- Main execution for testing ---
 if __name__ == "__main__":
-    if len(sys.argv) == 1:
-        print("Launching GUI...")
-        os.system("python gui.py")
-        sys.exit(0)
-
-    parser = argparse.ArgumentParser(description='Analyze CAD files for quoting.')
-    parser.add_argument('file_path', type=str, help='The path to the CAD file (.step, .dxf, or .stl)')
-    args = parser.parse_args()
-
-    cad_file = args.file_path
-    file_ext = os.path.splitext(cad_file)[1].lower()
+    # Replace with the path to your CAD file
+    cad_file = "your_part.step" 
     
-    extracted_data, message = None, None
-    if file_ext == ".step" or file_ext == ".stp":
-        extracted_data, message = analyze_step_file(cad_file)
-    elif file_ext == ".dxf":
-        extracted_data, message = analyze_dxf_file(cad_file)
-    elif file_ext == ".stl":
-        extracted_data, message = analyze_stl_file(cad_file)
-    else:
-        print(f"Unsupported file type: {file_ext}")
+    extracted_data = analyze_cad_file(cad_file)
 
-    if message:
-        print(message)
     if extracted_data:
-        print_parameters(extracted_data)
+        import json
+        print("\n--- Extracted Data for LLM ---")
+        print(json.dumps(extracted_data, indent=4))
+        print("----------------------------")

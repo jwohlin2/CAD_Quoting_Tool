@@ -1,0 +1,3 @@
+Variable ID,Item,Why it Matters,Typical Price Swing*,Data Type / Input Method,Example Values / Options
+MAT-10,Material Scrap / Remnant Value,Potential credit from recycling valuable scrap material.,-$5–$50 credit on large jobs.,Number,-50
+QC-08,Expected Scrap Rate,A percentage added to account for the statistical likelihood of some bad parts.,1–5% to total material and labor cost.,Number,2
