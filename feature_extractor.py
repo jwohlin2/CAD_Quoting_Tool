@@ -26,6 +26,7 @@ def analyze_step_file(file_path):
             "width_mm": bb.ylen,
             "height_mm": bb.zlen,
             "volume_mm3": solid.val().Volume(),
+            "surface_area_mm2": solid.val().Area(),
             "num_faces": len(solid.faces().vals()),
             "num_edges": len(solid.edges().vals()),
         }
@@ -63,6 +64,7 @@ def analyze_dxf_file(file_path):
             "length_mm": length,
             "width_mm": width,
             "height_mm": height,
+            "surface_area_mm2": 0, # Not applicable for 2D drawings
             "num_entities": len(msp),
         }
         return parameters, "Success: DXF Analysis complete!"
@@ -89,6 +91,7 @@ def analyze_stl_file(file_path):
             "width_mm": ymax - ymin,
             "height_mm": zmax - zmin,
             "volume_mm3": stl_mesh.get_mass_properties()[0],
+            "surface_area_mm2": stl_mesh.areas.sum(),
             "num_triangles": len(stl_mesh.vectors),
         }
         return parameters, "Success: STL Analysis complete!"
