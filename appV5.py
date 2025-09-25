@@ -30,19 +30,19 @@ from OCP.TopoDS   import TopoDS, TopoDS_Face, TopoDS_Shape
 from OCP.BRep     import BRep_Tool
 from OCP.BRepAdaptor import BRepAdaptor_Surface as _BAS
 import pandas as pd
-# single caster that works on your wheel
-def _TO_FACE(s: TopoDS_Shape) -> TopoDS_Face:
+
+
+def FACE_OF(s: TopoDS_Shape) -> TopoDS_Face:
     # already a Face?
     if isinstance(s, TopoDS_Face) or type(s).__name__ == "TopoDS_Face":
         return s
-    # your wheel exposes the static caster on TopoDS
+    # cast Shape→Face using the static caster present in your wheel
     if hasattr(TopoDS, "Face_s"):
         f = TopoDS.Face_s(s)
-        # null-check
         if hasattr(f, "IsNull") and f.IsNull():
             raise TypeError("TopoDS.Face_s returned null")
         return f
-    raise TypeError("This OCP wheel doesn’t expose a usable face caster (no Face_s).")
+    raise TypeError("No Face_s caster available in this OCP wheel.")
 
 
 SHOW_LLM_HOURS_DEBUG = False # set True only when debugging
@@ -254,7 +254,7 @@ try:
     BACKEND = "ocp"
 except Exception:
     from OCC.Core.BRep import BRep_Tool
-    from OCC.Core.TopoDS import topods_Face, topods_Edge, topods_Shell, topods_Solid
+    from OCC.Core.TopoDS import topods_Edge, topods_Shell, topods_Solid
     from OCC.Core.TopAbs import TopAbs_FACE
     from OCC.Core.TopExp import TopExp_Explorer
     from OCC.Core.TopLoc import TopLoc_Location
@@ -269,7 +269,7 @@ def as_face(obj):
     - If already a Face, return it (don't re-cast).
     - If a tuple (some APIs return (surf, loc) or similar), take first elem.
     - If null/None, raise cleanly.
-    - Otherwise cast with topods_Face.
+    - Otherwise cast with FACE_OF.
     """
     if obj is None:
         raise TypeError("Expected a shape, got None")
@@ -277,25 +277,7 @@ def as_face(obj):
     # unwrap tuples (defensive)
     if isinstance(obj, tuple) and obj:
         obj = obj[0]
-
-    # null guards
-    if hasattr(obj, "IsNull") and obj.IsNull():
-        raise TypeError("Expected non-null TopoDS_Shape")
-
-    # already a Face? (avoid calling topods_Face on a Face)
-    name = _typename(obj)
-    if name in ("TopoDS_Face", "Face"):
-        return obj
-    if hasattr(obj, "ShapeType"):
-        try:
-            st = obj.ShapeType()
-            if st == TopAbs_FACE:
-                return obj
-        except Exception:
-            pass
-
-    # cast Shape→Face using the same backend
-    return to_face(obj)
+    return ensure_face(obj)
 
 def iter_faces(shape):
     exp = TopExp_Explorer(shape, TopAbs_FACE)
@@ -324,26 +306,18 @@ def face_surface(face_like):
 # ---------- Robust casters that work on OCP and pythonocc ----------
 # Lock topods casters to the active backend
 if STACK == "ocp":
-    # Resolve within OCP only (no cross-backend mixing). Avoid topods/Face imports.
-    from OCP.TopoDS import TopoDS_Face, TopoDS_Edge, TopoDS_Solid, TopoDS_Shell
-    def _TO_FACE(shape):
-        return TopoDS_Face.DownCast(shape)
+    from OCP.TopoDS import TopoDS_Edge, TopoDS_Solid, TopoDS_Shell
+
     def _TO_EDGE(shape):
         return TopoDS_Edge.DownCast(shape)
+
     def _TO_SOLID(shape):
         return TopoDS_Solid.DownCast(shape)
+
     def _TO_SHELL(shape):
         return TopoDS_Shell.DownCast(shape)
 else:
     # Resolve within OCC.Core only
-    try:
-        from OCC.Core.TopoDS import topods_Face as _TO_FACE
-    except Exception:
-        try:
-            from OCC.Core.TopoDS import Face as _TO_FACE
-        except Exception:
-            from OCC.Core.TopoDS import topods as _occ_topods
-            _TO_FACE = getattr(_occ_topods, "Face")
     try:
         from OCC.Core.TopoDS import topods_Edge as _TO_EDGE
     except Exception:
@@ -383,21 +357,6 @@ def ensure_shape(obj):
     return obj
 
 # Safe casters: no-ops if already cast; unwrap list nodes; check kind
-def to_face_safe(obj):
-    obj = _unwrap_value(obj)
-    if _is_named(obj, ("TopoDS_Face", "Face")):
-        return obj
-    obj = ensure_shape(obj)
-    # Only cast if it is actually a FACE
-    if hasattr(obj, "ShapeType"):
-        try:
-            from OCP.TopAbs import TopAbs_FACE
-        except Exception:
-            from OCC.Core.TopAbs import TopAbs_FACE
-        if obj.ShapeType() != TopAbs_FACE:
-            raise TypeError(f"to_face_safe expected a FACE, got {obj.ShapeType()}")
-    return _TO_FACE(obj)
-
 def to_edge_safe(obj):
     obj = _unwrap_value(obj)
     if _is_named(obj, ("TopoDS_Edge", "Edge")):
@@ -411,16 +370,12 @@ try:
     from OCP.BRepGProp import BRepGProp as _BRepGProp_mod
     from OCP.TopExp import TopExp as _TopExp_mod
 
-    from OCP.TopoDS import TopoDS_Edge as _OCP_TOPO_E, TopoDS_Face as _OCP_TOPO_F
+    from OCP.TopoDS import TopoDS_Edge as _OCP_TOPO_E
 
     def _to_edge_ocp(s):
         return _OCP_TOPO_E.DownCast(s)
 
-    def _to_face_ocp(s):
-        return _OCP_TOPO_F.DownCast(s)
-
     _TO_EDGE = _to_edge_ocp
-    _TO_FACE = _to_face_ocp
     STACK_GPROP = "ocp"
 except Exception:
     # pythonocc-core
@@ -447,15 +402,7 @@ except Exception:
             from OCC.Core.TopoDS import Edge as _fn
         return _fn(s)
 
-    def _to_face_occ(s):
-        try:
-            from OCC.Core.TopoDS import topods_Face as _fn
-        except Exception:
-            from OCC.Core.TopoDS import Face as _fn
-        return _fn(s)
-
     _TO_EDGE = _to_edge_occ
-    _TO_FACE = _to_face_occ
     STACK_GPROP = "pythonocc"
 
 # Resolve topods casters across bindings
@@ -502,17 +449,12 @@ def ensure_face(obj):
         return obj
     st = obj.ShapeType() if hasattr(obj, "ShapeType") else None
     if st == TopAbs_FACE:
-        return _TO_FACE(obj)  # cast Shape→Face
+        return FACE_OF(obj)
     raise TypeError(f"Not a face: {type(obj).__name__}")
 def to_edge(s):
     if _is_instance(s, ["TopoDS_Edge", "Edge"]):
         return s
     return _TO_EDGE(s)
-
-def to_face(s):
-    if _is_instance(s, ["TopoDS_Face", "Face"]):
-        return s
-    return _TO_FACE(s)
 
 def to_solid(s):
     if _is_instance(s, ["TopoDS_Solid", "Solid"]):
