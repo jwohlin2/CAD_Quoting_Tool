@@ -4598,6 +4598,25 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
         "thickness_mm": thickness_mm,
         "material": material,
     }
+def _to_noncapturing(expr: str) -> str:
+    """
+    Convert every capturing '(' to non-capturing '(?:', preserving
+    escaped parens and existing '(?...)' constructs.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(expr):
+        ch = expr[i]
+        prev = expr[i - 1] if i > 0 else ''
+        nxt = expr[i + 1] if i + 1 < len(expr) else ''
+        if ch == '(' and prev != '\\' and nxt != '?':
+            out.append('(?:')
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return ''.join(out)
+
 def apply_2d_features_to_variables(df, g2d: dict, *, params: dict, rates: dict):
     """Write a few cycle-time rows based on 2D perimeter/holes so compute_quote_from_df() can price it."""
 
@@ -4612,27 +4631,13 @@ def apply_2d_features_to_variables(df, g2d: dict, *, params: dict, rates: dict):
     df = upsert_var_row(df, "Scrap Percent (%)", 15.0, dtype="number")
 
     def set_row(pattern: str, value: float):
-        def _to_noncapturing(expr: str) -> str:
-            out: list[str] = []
-            i = 0
-        while i < len(expr):
-            ch = expr[i]
-            prev = expr[i - 1] if i > 0 else ''
-            nxt = expr[i + 1] if i + 1 < len(expr) else ''
-            if ch == '(' and prev != '\\\\' and nxt != '?':
-                out.append('(?:')
-                i += 1
-                continue
-            out.append(ch)
-            i += 1
-        return ''.join(out)
-
-    regex = _to_noncapturing(pattern)
-    mask = df["Item"].astype(str).str.contains(regex, case=False, regex=True, na=False)
-    if mask.any():
-        df.loc[mask, "Example Values / Options"] = value
-    else:
-        df.loc[len(df)] = [pattern, value, "number"]
+        # Use the module-level helper (fixes NameError in DWG import path).
+        regex = _to_noncapturing(pattern)
+        mask = df["Item"].astype(str).str.contains(regex, case=False, regex=True, na=False)
+        if mask.any():
+            df.loc[mask, "Example Values / Options"] = value
+        else:
+            df.loc[len(df)] = [pattern, value, "number"]
     L = float(g2d.get("profile_length_mm", 0.0))
     t = float(g2d.get("thickness_mm") or 6.0)
     holes = g2d.get("hole_diams_mm", [])
