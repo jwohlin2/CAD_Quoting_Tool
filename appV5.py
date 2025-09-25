@@ -1,4 +1,5 @@
-﻿# app_gui_occ_flow_v8_single_autollm.py
+# -*- coding: utf-8 -*-
+# app_gui_occ_flow_v8_single_autollm.py
 """
 Single-file CAD Quoter (v8)
 - LLM (Qwen via llama-cpp) is ENABLED by default.
@@ -11,15 +12,20 @@ Single-file CAD Quoter (v8)
 - Variables auto-detect, Overrides tab, LLM tab
 """
 from __future__ import annotations
-import os, sys, json, math, tkinter as tk
-import tkinter.font as tkfont
+
+import json
+import math
+import os
 import re
+import sys
 import textwrap
-import pandas as pd
+import tkinter as tk
+import tkinter.font as tkfont
+from importlib import import_module
 from pathlib import Path
 from typing import Any, Dict
 
-from importlib import import_module
+import pandas as pd
 
 SHOW_LLM_HOURS_DEBUG = False # set True only when debugging
 if sys.platform == 'win32':
@@ -76,17 +82,6 @@ def find_default_qwen_model():
     choice = _pick_best_gguf([str(p) for p in ggufs])
     if choice: return choice
     return ""
-
-# ------------------------------------------------------------
-# Embedded: geometry extractor (OCC + STL via trimesh)
-# ------------------------------------------------------------
-
-# ------------------------------------------------------------
-# Embedded: geometry extractor (OCC + STL via trimesh)
-# ------------------------------------------------------------
-
-import math
-from pathlib import Path
 
 # Optional trimesh for STL
 try:
@@ -232,91 +227,180 @@ except Exception:
 
     STACK = "pythonocc"
 # ---------- end shim ----------
-# --- BRep_Tool surface shim (works on OCP and pythonocc-core variants) ---
+# ----- one-backend imports -----
 try:
-    # OCP / CadQuery bindings
-    from OCP.BRep import BRep_Tool as _BRep_Tool
-    from OCP.TopLoc import TopLoc_Location
-    _BREP_STACK = "ocp"
+    from OCP.BRep import BRep_Tool
+    from OCP.TopoDS import topods_Face, topods_Edge, topods_Shell, topods_Solid
+    from OCP.TopAbs import TopAbs_FACE
+    from OCP.TopExp import TopExp_Explorer
+    BACKEND = "ocp"
 except Exception:
-    # pythonocc-core
-    from OCC.Core.BRep import BRep_Tool as _BRep_Tool
-    from OCC.Core.TopLoc import TopLoc_Location
-    _BREP_STACK = "pythonocc"
+    from OCC.Core.BRep import BRep_Tool
+    from OCC.Core.TopoDS import topods_Face, topods_Edge, topods_Shell, topods_Solid
+    from OCC.Core.TopAbs import TopAbs_FACE
+    from OCC.Core.TopExp import TopExp_Explorer
+    BACKEND = "pythonocc"
 
-def brep_surface(face_like):
-    """Return (Geom_Surface, TopLoc_Location) for a given face-like object."""
-    f = ensure_face(face_like)
+def _typename(o):  # small helper
+    return getattr(o, "__class__", type(o)).__name__
 
-    fn = getattr(_BRep_Tool, "Surface", None)
-    if callable(fn):
-        out = fn(f)
-        if isinstance(out, tuple) and len(out) == 2:
-            return out[0], out[1]
-        loc = getattr(_BRep_Tool, "Location", None)
-        return out, (loc(f) if callable(loc) else TopLoc_Location())
+def as_face(obj):
+    """
+    Return a TopoDS_Face for the *current backend*.
+    - If already a Face, return it (don't re-cast).
+    - If a tuple (some APIs return (surf, loc) or similar), take first elem.
+    - If null/None, raise cleanly.
+    - Otherwise cast with topods_Face.
+    """
+    if obj is None:
+        raise TypeError("Expected a shape, got None")
 
-    fn = getattr(_BRep_Tool, "Surface_s", None)
-    if callable(fn):
-        out = fn(f)
-        if isinstance(out, tuple) and len(out) == 2:
-            return out[0], out[1]
-        loc = getattr(_BRep_Tool, "Location", None)
-        return out, (loc(f) if callable(loc) else TopLoc_Location())
+    # unwrap tuples (defensive)
+    if isinstance(obj, tuple) and obj:
+        obj = obj[0]
 
+    # null guards
+    if hasattr(obj, "IsNull") and obj.IsNull():
+        raise TypeError("Expected non-null TopoDS_Shape")
+
+    # already a Face? (avoid calling topods_Face on a Face)
+    name = _typename(obj)
+    if name in ("TopoDS_Face", "Face"):
+        return obj
+    if hasattr(obj, "ShapeType"):
+        try:
+            st = obj.ShapeType()
+            if st == TopAbs_FACE:
+                return obj
+        except Exception:
+            pass
+
+    # cast Shape→Face using the same backend
+    return topods_Face(obj)
+
+def iter_faces(shape):
+    """Explorer that yields proper Faces, safely cast."""
+    exp = TopExp_Explorer(shape, TopAbs_FACE)
+    while exp.More():
+        yield as_face(exp.Current())   # safe cast (no double-cast)
+        exp.Next()
+
+def face_surface(face_like):
+    """
+    Return (Geom_Surface, Location) across OCP/pythonocc variants.
+    Handles Surface vs Surface_s; falls back to BRepAdaptor_Surface.
+    """
+    f = as_face(face_like)
+
+    if hasattr(BRep_Tool, "Surface"):
+        s = BRep_Tool.Surface(f)
+        loc = (BRep_Tool.Location(f) if hasattr(BRep_Tool, "Location")
+               else (f.Location() if hasattr(f, "Location") else None))
+        return (s[0], s[1]) if isinstance(s, tuple) else (s, loc)
+
+    if hasattr(BRep_Tool, "Surface_s"):
+        s = BRep_Tool.Surface_s(f)
+        loc = (BRep_Tool.Location(f) if hasattr(BRep_Tool, "Location")
+               else (f.Location() if hasattr(f, "Location") else None))
+        return s, loc
+
+    # Fallback is very tolerant
     try:
-        from OCP.BRep import BRep_Tool_Surface as _fn  # type: ignore
-        out = _fn(f)
-        if isinstance(out, tuple) and len(out) == 2:
-            return out[0], out[1]
-        loc = getattr(_BRep_Tool, "Location", None)
-        return out, (loc(f) if callable(loc) else TopLoc_Location())
+        from OCP.BRepAdaptor import BRepAdaptor_Surface as _BAS
     except Exception:
-        pass
-    try:
-        from OCC.Core.BRep import BRep_Tool_Surface as _fn  # type: ignore
-        out = _fn(f)
-        if isinstance(out, tuple) and len(out) == 2:
-            return out[0], out[1]
-        loc = getattr(_BRep_Tool, "Location", None)
-        return out, (loc(f) if callable(loc) else TopLoc_Location())
-    except Exception:
-        pass
-
-    try:
-        adaptor = BRepAdaptor_Surface(f)
-        surf = adaptor.Surface()
-        if hasattr(surf, "Surface"):
-            surf = surf.Surface()
-        loc_method = getattr(f, "Location", None)
-        loc_val = loc_method() if callable(loc_method) else loc_method
-        if loc_val is None:
-            loc_val = TopLoc_Location()
-        return surf, loc_val
-    except Exception:
-        pass
-
-    raise AttributeError("No compatible BRep_Tool.Surface variant found in this binding")
+        from OCC.Core.BRepAdaptor import BRepAdaptor_Surface as _BAS
+    a = _BAS(f)
+    s = a.Surface()
+    if hasattr(s, "Surface"):  # unwrap handle if present
+        s = s.Surface()
+    loc = f.Location() if hasattr(f, "Location") else None
+    return s, loc
 
 # ---------- OCCT compat (OCP or pythonocc-core) ----------
 # ---------- Robust casters that work on OCP and pythonocc ----------
-# Resolve the topods module
-try:
-    from OCP.TopoDS import topods as _topods
-except Exception:
-    from OCC.Core.TopoDS import topods as _topods
-
-def _resolve_cast(name_opts):
-    for n in name_opts:
-        fn = getattr(_topods, n, None)
-        if callable(fn):
-            return fn
-    raise ImportError(f"topods caster not found: {name_opts}")
-
-_TO_FACE  = _resolve_cast(["Face", "topods_Face"])
-_TO_EDGE  = _resolve_cast(["Edge", "topods_Edge"])
-_TO_SOLID = _resolve_cast(["Solid", "topods_Solid"])
-_TO_SHELL = _resolve_cast(["Shell", "topods_Shell"])
+# Lock topods casters to the active backend
+if STACK == "ocp":
+    # Resolve within OCP only (no cross-backend mixing)
+    try:
+        from OCP.TopoDS import TopoDS_Face
+        def _TO_FACE(shape):
+            return TopoDS_Face.DownCast(shape)
+    except ImportError:
+        try:
+            from OCP.TopoDS import topods
+            _TO_FACE = topods.Face
+        except (ImportError, AttributeError):
+            try:
+                from OCP.TopoDS import Face as _TO_FACE
+            except ImportError:
+                raise ImportError("Could not import a valid 'Face' caster from OCP")
+    try:
+        from OCP.TopoDS import TopoDS_Edge
+        def _TO_EDGE(shape):
+            return TopoDS_Edge.DownCast(shape)
+    except ImportError:
+        try:
+            from OCP.TopoDS import topods
+            _TO_EDGE = topods.Edge
+        except (ImportError, AttributeError):
+            try:
+                from OCP.TopoDS import Edge as _TO_EDGE
+            except ImportError:
+                raise ImportError("Could not import a valid 'Edge' caster from OCP")
+    try:
+        from OCP.TopoDS import TopoDS_Solid
+        def _TO_SOLID(shape):
+            return TopoDS_Solid.DownCast(shape)
+    except ImportError:
+        try:
+            from OCP.TopoDS import topods
+            _TO_SOLID = topods.Solid
+        except (ImportError, AttributeError):
+            try:
+                from OCP.TopoDS import Solid as _TO_SOLID
+            except ImportError:
+                raise ImportError("Could not import a valid 'Solid' caster from OCP")
+    try:
+        from OCP.TopoDS import TopoDS_Shell
+        def _TO_SHELL(shape):
+            return TopoDS_Shell.DownCast(shape)
+    except ImportError:
+        try:
+            from OCP.TopoDS import topods
+            _TO_SHELL = topods.Shell
+        except (ImportError, AttributeError):
+            try:
+                from OCP.TopoDS import Shell as _TO_SHELL
+            except ImportError:
+                raise ImportError("Could not import a valid 'Shell' caster from OCP")
+else:
+    # Resolve within OCC.Core only
+    try:
+        from OCC.Core.TopoDS import topods_Face as _TO_FACE
+    except Exception:
+        try:
+            from OCC.Core.TopoDS import Face as _TO_FACE
+        except Exception:
+            from OCC.Core.TopoDS import topods as _occ_topods
+            _TO_FACE = getattr(_occ_topods, "Face")
+    try:
+        from OCC.Core.TopoDS import topods_Edge as _TO_EDGE
+    except Exception:
+        try:
+            from OCC.Core.TopoDS import Edge as _TO_EDGE
+        except Exception:
+            from OCC.Core.TopoDS import topods as _occ_topods
+            _TO_EDGE = getattr(_occ_topods, "Edge")
+    try:
+        from OCC.Core.TopoDS import topods_Solid as _TO_SOLID
+    except Exception:
+        from OCC.Core.TopoDS import topods as _occ_topods
+        _TO_SOLID = getattr(_occ_topods, "Solid")
+    try:
+        from OCC.Core.TopoDS import topods_Shell as _TO_SHELL
+    except Exception:
+        from OCC.Core.TopoDS import topods as _occ_topods
+        _TO_SHELL = getattr(_occ_topods, "Shell")
 
 # Type guards
 def _is_named(obj, names: tuple[str, ...]) -> bool:
@@ -421,57 +505,6 @@ except Exception:
 
 # Resolve topods casters across bindings
 
-def _resolve_topods_caster(target: str):
-    attr_variants = [
-        target,
-        f"topods_{target}",
-        f"TopoDS_{target}",
-    ]
-    module_variants = [
-        "OCP.topods",
-        "OCP.TopoDS",
-        "OCC.Core.topods",
-        "OCC.Core.TopoDS",
-    ]
-    for mod_name in module_variants:
-        try:
-            module = import_module(mod_name)
-        except ImportError:
-            continue
-        for attr in attr_variants:
-            obj = getattr(module, attr, None)
-            if callable(obj) and not isinstance(obj, type):
-                return obj
-            if isinstance(obj, type) and hasattr(obj, 'DownCast') and callable(getattr(obj, 'DownCast')):
-                def _ctor(shape, cls=obj):
-                    try:
-                        cast = cls.DownCast(shape)
-                        if cast is not None and not cast.IsNull():
-                            return cast
-                    except Exception:
-                        pass
-                    return shape
-                return _ctor
-    # Static methods on TopoDS class (Face_s, Edge_s, ...)
-    class_candidates = [
-        ("OCP.TopoDS", "TopoDS"),
-        ("OCC.Core.TopoDS", "TopoDS"),
-    ]
-    for mod_name, cls_name in class_candidates:
-        try:
-            module = import_module(mod_name)
-            cls = getattr(module, cls_name)
-            method = getattr(cls, f"{target}_s", None)
-            if callable(method):
-                return method
-        except (ImportError, AttributeError):
-            continue
-    return lambda s: s
-
-_TO_EDGE = _resolve_topods_caster("Edge") or (lambda s: s)
-_TO_FACE = _resolve_topods_caster("Face") or (lambda s: s)
-_TO_SOLID = _resolve_topods_caster("Solid") or (lambda s: s)
-_TO_SHELL = _resolve_topods_caster("Shell") or (lambda s: s)
 
 # ---- modern wrappers (no deprecation warnings)
 # ---- modern wrappers (no deprecation warnings)
@@ -508,23 +541,26 @@ def _is_instance(obj, qualnames):
     return name in qualnames  # e.g. ["TopoDS_Face", "Face"]
 
 def ensure_face(obj):
-    """Return a TopoDS_Face instance or raise if the input is not a face."""
-    if _is_instance(obj, ["TopoDS_Face", "Face"]):
+    # already a Face class? return it
+    if type(obj).__name__ in ("TopoDS_Face", "Face"):
         return obj
-    shape_type = getattr(obj, "ShapeType", None)
-    try:
-        st = shape_type() if callable(shape_type) else shape_type
-    except Exception:
-        st = shape_type
-    if st == TopAbs_FACE:
-        print("DEBUG cast attempt:", type(obj).__name__, "null:", getattr(obj, "IsNull", lambda: "n/a")())
-        try:
-            return to_face(obj)
-        except Exception as exc:
-            print("DEBUG cast failed:", type(obj).__name__, "null:", getattr(obj, "IsNull", lambda: "n/a")())
-            raise TypeError("Failed to cast shape to TopoDS_Face") from exc
-    raise TypeError(f"Expected a Face, got {type(obj).__name__}")
 
+    # unwrap & null checks...
+    obj = _unwrap_value(obj)
+    if obj is None or (hasattr(obj, "IsNull") and obj.IsNull()):
+        raise TypeError("Expected non-null TopoDS_Shape")
+
+    # if it is a FACE, just return obj — don't cross-cast
+    try:
+        from OCP.TopAbs import TopAbs_FACE
+    except Exception:
+        from OCC.Core.TopAbs import TopAbs_FACE
+    st = obj.ShapeType() if callable(getattr(obj, "ShapeType", None)) else None
+    if st == TopAbs_FACE:
+        return obj
+
+    # otherwise it's not a face
+    raise TypeError(f"Expected a Face, got {type(obj).__name__}")
 def to_edge(s):
     if _is_instance(s, ["TopoDS_Edge", "Edge"]):
         return s
@@ -620,33 +656,6 @@ def get_import_diagnostics_text() -> str:
     wrapper = Path(__file__).with_name("dwg2dxf_wrapper.bat")
     lines.append(f"Local wrapper present: {wrapper.exists()} ({wrapper})")
     return "\n".join(lines)
-CORE_COLS = ["Item", "Example Values / Options", "Data Type / Input Method"]
-
-def sanitize_vars_df(df):
-    """
-    Return a copy with only the 3 core columns needed by compute_quote_from_df.
-    - Does NOT mutate or overwrite the original file.
-    - Creates any missing core columns as blanks.
-    - Normalizes dtypes (Item=str, Example numeric/text, Data Type=str).
-    """
-    import pandas as pd
-
-    # Keep only the core columns (ignore others)
-    core = df.filter(CORE_COLS, axis=1)  # drops extras if present
-
-    # Add any missing core columns
-    for c in CORE_COLS:
-        if c not in core.columns:
-            core[c] = "" if c != "Example Values / Options" else None
-
-    # Reorder & copy to detach from the original df
-    core = core[CORE_COLS].copy()
-
-    # Light normalization
-    core["Item"] = core["Item"].astype(str)
-    core["Data Type / Input Method"] = core["Data Type / Input Method"].astype(str).str.lower()
-
-    return core
 # Optional PDF stack
 try:
     import fitz  # PyMuPDF
@@ -1049,107 +1058,6 @@ def read_step_or_iges_or_brep(path: str) -> TopoDS_Shape:
         return _brep_read(str(p))
     raise RuntimeError(f"Unsupported OCC format: {ext}")
 
-def _triangle_face(p0, p1, p2):
-    poly = BRepBuilderAPI_MakePolygon()
-    for p in (p0,p1,p2,p0):
-        poly.Add(gp_Pnt(*p))
-    wire = poly.Wire()
-    return BRepBuilderAPI_MakeFace(wire, True).Face()
-
-def _sew_faces(faces):
-    sew = BRepBuilderAPI_Sewing(1.0e-6, True, True, True, True)
-    for f in faces: sew.Add(f)
-    sew.Perform()
-    return sew.SewedShape()
-
-def _compound_of_faces(faces):
-    builder = BRep_Builder()
-    comp = TopoDS_Compound()
-    builder.MakeCompound(comp)
-    for f in faces:
-        builder.Add(comp, f)
-    return comp
-
-def read_dxf_as_occ_shape(dxf_path: str) -> TopoDS_Shape:
-    doc = ezdxf.readfile(dxf_path)
-    msp = doc.modelspace()
-
-    # Units (INSUNITS) ? mm
-    INSUNITS = doc.header.get("$INSUNITS", 1)  # 1=inches, 4=mm, 6=meters, etc.
-    u2mm = {1:25.4, 4:1.0, 2:304.8, 6:1000.0}.get(INSUNITS, 1.0)  # default assume mm
-
-    tris = []
-
-    # 3DFACE
-    for e in msp.query("3DFACE"):
-        vs = [e.dxf.vtx0, e.dxf.vtx1, e.dxf.vtx2, e.dxf.vtx3]
-        # vtx3 may repeat vtx2 in triangles
-        p = [(v[0]*u2mm, v[1]*u2mm, v[2]*u2mm) for v in vs]
-        if np.linalg.norm(np.array(params[2]) - np.array(params[3])) < 1e-12:
-            tris.append((params[0],params[1],params[2]))
-        else:
-            tris.append((params[0],params[1],params[2]))
-            tris.append((params[0],params[2],params[3]))
-
-    # POLYFACE / MESH as triangles
-    for e in msp.query("POLYFACE"):
-        # ezdxf renders mesh faces as indices (+/- orientation)
-        for f in e.faces():
-            pts = [tuple((v.dxf.location.x*u2mm, v.dxf.location.y*u2mm, v.dxf.location.z*u2mm)) for v in f.vertices()]
-            if len(pts) >= 3:
-                tris.append((pts[0], pts[1], pts[2]))
-                for k in range(3, len(pts)):
-                    tris.append((pts[0], pts[k-1], pts[k]))
-    for e in msp.query("MESH"):
-        for f in e.faces_as_vertices():
-            pts = [(v.x*u2mm, v.y*u2mm, v.z*u2mm) for v in f]
-            if len(pts) >= 3:
-                tris.append((pts[0], pts[1], pts[2]))
-                for k in range(3, len(pts)):
-                    tris.append((pts[0], pts[k-1], pts[k]))
-
-    faces = [_triangle_face(*t) for t in tris]
-    shape = None
-
-    if faces:
-        sewed = _sew_faces(faces)
-        # try to solidify
-        try:
-            solid = BRepBuilderAPI_MakeSolid()
-            exp = TopExp_Explorer(sewed, TopAbs_FACE)
-            while exp.More():
-                solid.Add(exp.Current())
-                exp.Next()
-            s = solid.Solid()
-            fixer = ShapeFix_Solid(s)
-            fixer.Perform()
-            shape = fixer.Solid()
-        except Exception:
-            shape = sewed
-
-    # Fallback: extrude closed polylines by a small thickness if no 3D entities
-    if shape is None or shape.IsNull():
-        closed = list(msp.query("LWPOLYLINE"))
-        if closed:
-            # find a closed one
-            for pl in closed:
-                if pl.closed:
-                    pts2d = [(x*u2mm, y*u2mm, 0.0) for x,y,_ in pl.get_points("xyb")]
-                    poly = BRepBuilderAPI_MakePolygon()
-                    for p in pts2d: poly.Add(gp_Pnt(*p))
-                    poly.Close()
-                    face = BRepBuilderAPI_MakeFace(poly.Wire(), True).Face()
-                    # ask user/provide default thickness
-                    thk_mm = 5.0
-                    prism = BRepPrimAPI_MakePrism(face, gp_Vec(0,0,thk_mm)).Shape()
-                    shape = prism
-                    break
-
-    if shape is None or shape.IsNull():
-        raise RuntimeError("DXF contained no 3D geometry I can use. Export STEP/SAT if possible.")
-
-    return shape
-
 def convert_dwg_to_dxf(dwg_path: str, *, out_ver="ACAD2013") -> str:
     """
     Robust DWG?DXF wrapper.
@@ -1211,31 +1119,11 @@ def convert_dwg_to_dxf(dwg_path: str, *, out_ver="ACAD2013") -> str:
 
 
 
-def read_step_or_iges_or_brep(path: str):
-    p = Path(path)
-    ext = p.suffix.lower()
-    if ext in (".step", ".stp"):
-        return read_step_shape(str(p))
-    if ext in (".iges", ".igs"):
-        ig = IGESControl_Reader()
-        assert ig.ReadFile(str(p)) == IFSelect_RetDone
-        ig.TransferRoots()
-        return _shape_from_reader(ig)
-    if ext == ".brep":
-        return _brep_read(str(p))
-    raise RuntimeError(f"Unsupported OCC format: {ext}")
-
 ANG_TOL = math.radians(5.0)
 DOT_TOL = math.cos(ANG_TOL)
 SMALL = 1e-7
 
-def iter_faces(shape: TopoDS_Shape):
-    exp = TopExp_Explorer(shape, TopAbs_FACE)
-    while exp.More():
-        dbg = exp.Current()
-        face = ensure_face(dbg)
-        yield face
-        exp.Next()
+
 
 def iter_solids(shape: TopoDS_Shape):
     exp = TopExp_Explorer(shape, TopAbs_SOLID)
@@ -1288,8 +1176,12 @@ def _face_midpoint_uv(face):
 
 def _face_normal(face):
     try:
+        try:
+            from OCP.BRepLProp import BRepLProp_SLProps
+        except ImportError:
+            from OCC.Core.BRepLProp import BRepLProp_SLProps
         u, v = _face_midpoint_uv(face)
-        props = BRepLProp_SLProps(brep_surface(face)[0], u, v, 1, SMALL)
+        props = BRepLProp_SLProps(face_surface(face)[0], u, v, 1, SMALL)
         if props.IsNormalDefined():
             n = props.Normal()
             if face.Orientation().Name() == "REVERSED":
@@ -1300,7 +1192,7 @@ def _face_normal(face):
     return None
 
 def _face_type(face) -> str:
-    surf = brep_surface(face)[0]
+    surf = face_surface(face)[0]
     ga = GeomAdaptor_Surface(surf)
     st = ga.GetType()
     if st == GeomAbs_Plane: return "planar"
@@ -1384,7 +1276,7 @@ def _min_wall_between_parallel_planes(shape):
             n = _face_normal(f)
             if n:
                 umin, umax, vmin, vmax = BRepTools_UVBounds(f)
-                surf, _ = brep_surface(f)
+                surf, _ = face_surface(f)
                 sas = ShapeAnalysis_Surface(surf)
                 pnt = sas.Value(0.5*(umin+umax), 0.5*(vmin+vmax))
                 d = n.X()*pnt.X() + n.Y()*pnt.Y() + n.Z()*pnt.Z()
@@ -1415,7 +1307,7 @@ def _hole_groups_from_cylinders(shape, bbox=None):
     groups = defaultdict(lambda: {"dia_mm":0.0,"depth_mm":0.0,"through":False,"count":0})
     for f in iter_faces(shape):
         if _face_type(f) == "cylindrical":
-            ga = GeomAdaptor_Surface(brep_surface(f)[0])
+            ga = GeomAdaptor_Surface(face_surface(f)[0])
             try:
                 cyl = ga.Cylinder(); r = abs(cyl.Radius()); ax = cyl.Axis().Direction()
                 fb = _bbox(f)
@@ -1649,12 +1541,12 @@ def read_cad_any(path: str):
             raise RuntimeError("BREP read failed")
         return s
     if ext == ".dxf":
-        return _read_dxf_as_occ_shape(path)
+        return read_dxf_as_occ_shape(path)
     if ext == ".dwg":
         conv = os.environ.get("ODA_CONVERTER_EXE") or os.environ.get("DWG2DXF_EXE")
         print(f"INFO: Using DWG converter: {conv}")
-        dxf_path = _convert_dwg_to_dxf(path)
-        return _read_dxf_as_occ_shape(dxf_path)
+        dxf_path = convert_dwg_to_dxf(path)
+        return read_dxf_as_occ_shape(dxf_path)
     raise RuntimeError(f"Unsupported CAD format: {ext}")
 
 # ----------------- Offline Qwen via llama-cpp -----------------
@@ -3163,28 +3055,7 @@ def edit_variables_tk(df):
         messagebox.showinfo("Saved","Variables updated in memory; Save in app to persist.")
     tree.bind("<Button-1>", on_click); entry.bind("<Return>", on_return); ttk.Button(win,text="Save",command=on_save).pack()
     win.grab_set(); win.wait_window(); return df
-# --- DWG/DXF support ---
-import os, tempfile, subprocess
-from pathlib import Path
-
-def _convert_dwg_to_dxf(dwg_path: str) -> str:
-    exe = (os.environ.get("ODA_CONVERTER_EXE") or
-           os.environ.get("DWG2DXF_EXE"))
-    if not exe or not Path(exe).exists():
-        raise RuntimeError(
-            "DWG import needs a DWG?DXF converter.\n"
-            "Set ODA_CONVERTER_EXE (recommended) or DWG2DXF_EXE to an exe/batch that accepts:  <input.dwg> <output.dxf>\n"
-            "Or upload DXF/STEP/SAT instead."
-        )
-    dwg = Path(dwg_path)
-    tmp = Path(tempfile.mkdtemp(prefix="dwg2dxf_"))
-    out_dxf = tmp / (dwg.stem + ".dxf")
-    subprocess.run([exe, str(dwg), str(out_dxf)], check=True)
-    if not out_dxf.exists():
-        raise RuntimeError("DWG?DXF converter ran but no DXF was created.")
-    return str(out_dxf)
-
-def _read_dxf_as_occ_shape(dxf_path: str):
+def read_dxf_as_occ_shape(dxf_path: str):
     # minimal DXF?OCC triangulated shape (3DFACE/MESH/POLYFACE), fallback: extrude closed polyline
     import ezdxf, numpy as np
     from OCP.BRepBuilderAPI import (BRepBuilderAPI_MakeFace, BRepBuilderAPI_MakePolygon,
@@ -3215,12 +3086,16 @@ def _read_dxf_as_occ_shape(dxf_path: str):
     tris = []
     # 3DFACE
     for e in msp.query("3DFACE"):
-        v = [e.dxf.vtx0, e.dxf.vtx1, e.dxf.vtx2, e.dxf.vtx3]
-        p = [(vx*u2mm, vy*u2mm, vz*u2mm) for (vx,vy,vz) in v]
-        if np.linalg.norm(np.array(params[2]) - np.array(params[3])) < 1e-12:
-            tris.append((params[0], params[1], params[2]))
-        else:
-            tris.append((params[0], params[1], params[2])); tris.append((params[0], params[2], params[3]))
+        verts = [e.dxf.vtx0, e.dxf.vtx1, e.dxf.vtx2, e.dxf.vtx3]
+        pts = [(vx * u2mm, vy * u2mm, vz * u2mm) for (vx, vy, vz) in verts]
+        if len(pts) < 3:
+            continue
+        tris.append((pts[0], pts[1], pts[2]))
+        if len(pts) == 4:
+            v3 = np.array(pts[2])
+            v4 = np.array(pts[3])
+            if np.linalg.norm(v3 - v4) > 1e-12:
+                tris.append((pts[0], pts[2], pts[3]))
     # POLYFACE
     for e in msp.query("POLYFACE"):
         for f in e.faces():
@@ -3268,35 +3143,6 @@ def _read_dxf_as_occ_shape(dxf_path: str):
     if (shape is None) or shape.IsNull():
         raise RuntimeError("DXF contained no 3D geometry I can use. Prefer STEP/SAT if possible.")
     return shape
-
-def read_cad_any(path: str):
-    from OCP.IFSelect import IFSelect_RetDone
-    from OCP.ShapeFix import ShapeFix_Shape
-    from OCP.IGESControl import IGESControl_Reader
-    from OCP.TopoDS import TopoDS_Shape
-
-    ext = Path(path).suffix.lower()
-    if ext in (".step", ".stp"):
-        return read_step_shape(path)
-    if ext in (".iges", ".igs"):
-        ig = IGESControl_Reader()
-        if ig.ReadFile(path) != IFSelect_RetDone:
-            raise RuntimeError("IGES read failed")
-        ig.TransferRoots()
-        return _shape_from_reader(ig)
-    if ext == ".brep":
-        s = TopoDS_Shape()
-        if not BRepTools.Read(s, path, None):
-            raise RuntimeError("BREP read failed")
-        return s
-    if ext == ".dxf":
-        return _read_dxf_as_occ_shape(path)
-    if ext == ".dwg":
-        conv = os.environ.get("ODA_CONVERTER_EXE") or os.environ.get("DWG2DXF_EXE")
-        print(f"INFO: Using DWG converter: {conv}")
-        dxf_path = _convert_dwg_to_dxf(path)
-        return _read_dxf_as_occ_shape(dxf_path)
-    raise RuntimeError(f"Unsupported CAD format: {ext}")
 
 # ---- 2D: PDF (PyMuPDF) -------------------------------------------------------
 try:
@@ -3575,49 +3421,6 @@ def merge_estimate_into_vars(vars_df: pd.DataFrame, estimate: dict) -> pd.DataFr
         vars_df.loc[mask, "Example Values / Options"] = value
     return vars_df
 # ---- 2D: DXF / DWG (ezdxf) ---------------------------------------------------
-try:
-    import ezdxf
-    _HAS_EZDXF = True
-except Exception:
-    _HAS_EZDXF = False
-
-def convert_dwg_to_dxf(dwg_path: str, *, out_ver="ACAD2013") -> str:
-    """Works with either ODAFileConverter.exe or a simple <in> <out> wrapper (.bat)."""
-    exe = os.environ.get("ODA_CONVERTER_EXE") or os.environ.get("DWG2DXF_EXE")
-    if not exe or not Path(exe).exists():
-        raise RuntimeError(
-            "DWG import needs a DWG?DXF converter. "
-            "Set ODA_CONVERTER_EXE (recommended) or DWG2DXF_EXE to an exe/batch that accepts <input.dwg> <output.dxf>."
-        )
-
-    dwg = Path(dwg_path)
-    out_dir = Path(tempfile.mkdtemp(prefix="dwg2dxf_"))
-    out_dxf = out_dir / (dwg.stem + ".dxf")
-
-    exe_name = Path(exe).name.lower()
-    try:
-        if "odafileconverter" in exe_name:
-            # ODAFileConverter.exe "<in_dir>" "<out_dir>" "<version>" "<DXF>" "<recurse 0|1>" "<audit 0|1>" "<filter>"
-            cmd = [exe, str(dwg.parent), str(out_dir), out_ver, "DXF", "0", "0", dwg.name]
-            subprocess.run(cmd, check=True)
-            if not (out_dir / (dwg.stem + ".dxf")).exists():
-                raise RuntimeError("ODAFileConverter ran but no DXF was produced.")
-        else:
-            # Your wrapper: <in> <out>
-            cmd = [exe, str(dwg), str(out_dxf)]
-            subprocess.run(cmd, check=True)
-
-        if not out_dxf.exists():
-            # ODA wrote to out_dir with original name
-            produced = out_dir / (dwg.stem + ".dxf")
-            if produced.exists():
-                produced.replace(out_dxf)
-        if not out_dxf.exists():
-            raise RuntimeError("Converter ran but no DXF created.")
-        return str(out_dxf)
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"DWG?DXF conversion failed: {e}") from e
-
 def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     if not _HAS_EZDXF:
         raise RuntimeError("ezdxf not installed. pip/conda install ezdxf")
