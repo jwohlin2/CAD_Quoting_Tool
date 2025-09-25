@@ -34,6 +34,119 @@ from OCP.BRepAdaptor import BRepAdaptor_Surface as _BAS
 import pandas as pd
 
 
+def _normalize_lookup_key(value: str) -> str:
+    cleaned = re.sub(r"[^0-9a-z]+", " ", str(value).strip().lower())
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+MATERIAL_DROPDOWN_OPTIONS = [
+    "Aluminum",
+    "Berylium Copper",
+    "Bismuth",
+    "Brass",
+    "Carbide",
+    "Ceramic",
+    "Cobalt",
+    "Copper",
+    "Gold",
+    "Inconel",
+    "Indium",
+    "Lead",
+    "Nickel",
+    "Nickel Silver",
+    "Palladium",
+    "Phosphor Bronze",
+    "Phosphorus",
+    "Silver",
+    "Stainless Steel",
+    "Steel",
+    "Tin",
+    "Titanium",
+    "Tool Steel",
+    "Tungsten",
+    "Other (enter custom price)",
+]
+
+_MATERIAL_ADDITIONAL_KEYWORDS = {
+    "Aluminum": {"aluminium"},
+    "Berylium Copper": {"beryllium copper", "c172", "cube"},
+    "Brass": {"c360", "c260"},
+    "Copper": {"cu"},
+    "Inconel": {"in718", "in625"},
+    "Nickel": {"ni"},
+    "Nickel Silver": {"german silver"},
+    "Phosphor Bronze": {"phosphorbronze"},
+    "Stainless Steel": {"stainless"},
+    "Steel": {"carbon steel"},
+    "Titanium": {"ti", "ti6al4v"},
+    "Tool Steel": {"h13", "o1", "a2", "d2"},
+}
+
+MATERIAL_KEYWORDS: Dict[str, set[str]] = {}
+for display in MATERIAL_DROPDOWN_OPTIONS:
+    key = _normalize_lookup_key(display)
+    if not key:
+        continue
+    extras = {_normalize_lookup_key(term) for term in _MATERIAL_ADDITIONAL_KEYWORDS.get(display, set())}
+    extras.discard("")
+    MATERIAL_KEYWORDS[key] = {key} | extras
+
+MATERIAL_DISPLAY_BY_KEY: Dict[str, str] = {}
+for display in MATERIAL_DROPDOWN_OPTIONS:
+    key = _normalize_lookup_key(display)
+    if key:
+        MATERIAL_DISPLAY_BY_KEY[key] = display
+
+MATERIAL_OTHER_KEY = _normalize_lookup_key(MATERIAL_DROPDOWN_OPTIONS[-1])
+
+
+def _coerce_float_or_none(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        try:
+            return float(value)
+        except Exception:
+            return None
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        cleaned = cleaned.replace("$", "").replace(",", "").strip()
+        if not cleaned:
+            return None
+        try:
+            return float(cleaned)
+        except Exception:
+            m = re.search(r"-?\d+(?:\.\d+)?", cleaned)
+            if m:
+                try:
+                    return float(m.group(0))
+                except Exception:
+                    return None
+    return None
+
+
+def _price_value_to_per_gram(value: float, label: str) -> float | None:
+    try:
+        base = float(value)
+    except Exception:
+        return None
+    label_lower = str(label or "").lower()
+    label_compact = label_lower.replace(" ", "")
+
+    def _has_any(*patterns: str) -> bool:
+        return any(p in label_lower or p in label_compact for p in patterns)
+
+    if _has_any("perg", "/g", "$/g", "per gram"):
+        return base
+    if _has_any("perkg", "/kg", "$/kg", "per kilogram"):
+        return base / 1000.0
+    if _has_any("perlb", "/lb", "$/lb", "per pound", "/lbs", "$/lbs"):
+        return base / 453.59237
+    if _has_any("peroz", "/oz", "$/oz", "per ounce"):
+        return base / 28.349523125
+    return None
+
+
 def FACE_OF(s: TopoDS_Shape) -> TopoDS_Face:
     # already a Face?
     if isinstance(s, TopoDS_Face) or type(s).__name__ == "TopoDS_Face":
@@ -2234,6 +2347,9 @@ def render_quote(
 
     process_meta = {str(k).lower(): v or {} for k, v in (breakdown.get("process_meta", {}) or {}).items()}
     pass_meta = {str(k).lower(): v or {} for k, v in (breakdown.get("pass_meta", {}) or {}).items()}
+    fixture_material_cost = float(breakdown.get("fixture_material_cost", fix_detail.get("mat_cost", 0.0) or 0.0))
+    material_direct_cost = float(breakdown.get("material_direct_cost", pass_through.get("material_direct_cost", 0.0) or 0.0))
+    total_direct_costs = float(breakdown.get("total_direct_costs", totals.get("direct_costs", 0.0) or 0.0))
 
     lines: list[str] = []
     divider = "-" * page_width
@@ -2248,6 +2364,12 @@ def render_quote(
         if len(left) > max_left:
             left = left[: max_left - 1] + "..."
         lines.append(left + " " * (page_width - len(left) - len(right)) + right)
+
+    def _nonzero(value: Any) -> bool:
+        try:
+            return not math.isclose(float(value), 0.0, abs_tol=1e-9)
+        except Exception:
+            return bool(value)
 
     def row(label: str, value, indent: str = "") -> None:
         write_line(label, _m(value), indent)
@@ -2283,17 +2405,23 @@ def render_quote(
     # NRE / Setup
     lines.append("NRE / Setup Costs (per lot)")
     lines.append(divider)
-    if prog_detail:
-        row("Programming & Eng:", prog_detail.get("per_lot", 0.0))
-        if prog_detail.get('prog_hr'):
-            write_line(f"- Programmer: {_h(prog_detail['prog_hr'])} @ {_m(prog_detail.get('prog_rate', 0))}/hr", indent="    ")
-        if prog_detail.get('cam_hr'):
-            write_line(f"- CAM: {_h(prog_detail['cam_hr'])} @ {_m(prog_detail.get('cam_rate', 0))}/hr", indent="    ")
-    if fix_detail:
-        row("Fixturing:", fix_detail.get("per_lot", 0.0))
-        if fix_detail.get('build_hr'):
-            write_line(f"- Build Labor: {_h(fix_detail['build_hr'])} @ {_m(fix_detail.get('build_rate', 0))}/hr", indent="    ")
-        write_line(f"- Materials: {_m(fix_detail.get('mat_cost', 0))}", indent="    ")
+    prog_per_lot = float(prog_detail.get("per_lot", 0.0) or 0.0)
+    if prog_detail and (_nonzero(prog_per_lot) or show_zeros):
+        row("Programming & Eng:", prog_per_lot)
+        prog_hr = prog_detail.get('prog_hr', 0.0)
+        if _nonzero(prog_hr) or show_zeros:
+            write_line(f"- Programmer: {_h(prog_hr)} @ {_m(prog_detail.get('prog_rate', 0))}/hr", indent="    ")
+        cam_hr = prog_detail.get('cam_hr', 0.0)
+        if _nonzero(cam_hr) or show_zeros:
+            write_line(f"- CAM: {_h(cam_hr)} @ {_m(prog_detail.get('cam_rate', 0))}/hr", indent="    ")
+    fix_per_lot = float(fix_detail.get("per_lot", 0.0) or 0.0)
+    if fix_detail and (_nonzero(fix_per_lot) or show_zeros):
+        row("Fixturing:", fix_per_lot)
+        build_hr = fix_detail.get('build_hr', 0.0)
+        if _nonzero(build_hr) or show_zeros:
+            write_line(f"- Build Labor: {_h(build_hr)} @ {_m(fix_detail.get('build_rate', 0))}/hr", indent="    ")
+        if fixture_material_cost or show_zeros:
+            write_line(f"- Fixture Material Cost: {_m(fixture_material_cost)}", indent="    ")
     lines.append("")
 
     # Process & Labor
@@ -2301,7 +2429,7 @@ def render_quote(
     lines.append(divider)
     proc_total = 0.0
     for key, value in sorted(process_costs.items(), key=lambda kv: kv[1], reverse=True):
-        if value > 0 or show_zeros:
+        if _nonzero(value) or show_zeros:
             label = key.replace('_', ' ').title()
             row(label, value, indent="  ")
             add_process_notes(key, indent="  ")
@@ -2312,14 +2440,43 @@ def render_quote(
     # Pass-Through
     lines.append("Pass-Through & Direct Costs")
     lines.append(divider)
-    pass_total = 0.0
+    def _pass_value(key: str) -> float:
+        try:
+            return float(pass_through.get(key, 0.0) or 0.0)
+        except Exception:
+            return 0.0
+
+    consumables_hr_cost = _pass_value("consumables_hr_cost")
+    utilities_cost = _pass_value("utilities_cost")
+    consumables_flat = _pass_value("consumables_flat")
+
+    if _nonzero(consumables_hr_cost) or show_zeros:
+        row("Consumables /Hr Cost", consumables_hr_cost, indent="  ")
+        add_pass_basis("consumables_hr_cost", indent="  ")
+    if _nonzero(utilities_cost) or show_zeros:
+        row("Utilities Cost", utilities_cost, indent="  ")
+        add_pass_basis("utilities_cost", indent="  ")
+    if _nonzero(consumables_flat) or show_zeros:
+        row("Consumables Flat", consumables_flat, indent="  ")
+        add_pass_basis("consumables_flat", indent="  ")
+
+    if _nonzero(material_direct_cost) or show_zeros:
+        row("Material", material_direct_cost, indent="  ")
+        add_pass_basis("material_direct_cost", indent="  ")
+    if _nonzero(fixture_material_cost) or show_zeros:
+        row("Fixture Material Cost", fixture_material_cost, indent="  ")
+        add_pass_basis("fixture_material_cost", indent="  ")
+
+    handled_keys = {"consumables_hr_cost", "utilities_cost", "consumables_flat", "material_direct_cost", "fixture_material_cost"}
     for key, value in pass_through.items():
-        if value > 0 or show_zeros:
+        if key in handled_keys:
+            continue
+        if _nonzero(value) or show_zeros:
             label = key.replace('_', ' ').replace('hr', '/hr').title()
             row(label, value, indent="  ")
             add_pass_basis(key, indent="  ")
-            pass_total += float(value)
-    row("Total", pass_total, indent="  ")
+
+    row("Total", total_direct_costs, indent="  ")
     lines.append("")
 
     # Pricing ladder
@@ -2573,6 +2730,7 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     material_cost = max(unit_price_per_g * mass_g, supplier_min_charge) * (1.0 + surcharge_pct)
     material_cost = max(material_cost, explicit_mat)
+    material_direct_cost = float(material_cost)
 
     # ---- programming / cam / dfm --------------------------------------------
     prog_hr = sum_time(r"(?:Programming|2D\s*CAM|3D\s*CAM|Simulation|Verification|DFM|Setup\s*Sheets)", exclude_pattern=r"\bCMM\b")
@@ -2775,15 +2933,25 @@ def compute_quote_from_df(df: pd.DataFrame,
         saw_cost + assembly_cost + packaging_cost + ehs_cost
     )
 
-    direct_costs   = (material_cost + fixture_material_cost + hardware_cost + outsourced_costs + shipping_cost +
-                      consumables_hr_cost + utilities_cost + consumables_flat)
-
-    insurance_cost = insurance_pct * (labor_cost + direct_costs)
+    base_direct_costs = (
+        material_direct_cost
+        + fixture_material_cost
+        + hardware_cost
+        + outsourced_costs
+        + shipping_cost
+        + consumables_hr_cost
+        + utilities_cost
+        + consumables_flat
+    )
+    insurance_cost = insurance_pct * (labor_cost + base_direct_costs)
 
     vendor_markup     = params["VendorMarkupPct"]
     vendor_marked_add = vendor_markup * (outsourced_costs + shipping_cost)
 
-    subtotal = labor_cost + direct_costs + insurance_cost + vendor_marked_add
+    total_direct_costs = base_direct_costs + insurance_cost + vendor_marked_add
+    direct_costs = total_direct_costs
+
+    subtotal = labor_cost + direct_costs
 
     with_overhead = subtotal * (1.0 + OverheadPct)
     with_ga       = with_overhead * (1.0 + GA_Pct)
@@ -2815,17 +2983,19 @@ def compute_quote_from_df(df: pd.DataFrame,
 }
     pass_meta = {
         "consumables_hr_cost": {"basis": "Machine & inspection hours $/hr"},
-        "utilities_cost":      {"basis": "Spindle/inspection hours $/rr"},
+        "utilities_cost":      {"basis": "Spindle/inspection hours $/hr"},
         "insurance_cost":      {"basis": "Applied at insurance pct"},
         "vendor_markup_added": {"basis": "Vendor + freight markup"},
         "consumables_flat":    {"basis": "Fixed shop supplies"},
+        "material_direct_cost": {"basis": "Stock / raw material"},
+        "fixture_material_cost": {"basis": "Fixture raw stock"},
     }
-
-    # Alias for consumers expecting a direct-materials key
-    material_direct_cost = float(material_cost)
 
     breakdown = {
         "qty": Qty,
+        "fixture_material_cost": fixture_material_cost,
+        "material_direct_cost": material_direct_cost,
+        "total_direct_costs": round(total_direct_costs, 2),
         "material": {
             "mass_g": mass_g,
             "unit_price_per_g": unit_price_per_g,
@@ -3473,6 +3643,7 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
     pro    = b.get("process_costs", {}) or {}
     nre    = b.get("nre", {}) or {}
     nre_detail = b.get("nre_detail", {}) or {}
+    pt     = b.get("pass_through", {}) or {}
 
     # --- Heuristic fallback (no LLM / error)
     def _fallback() -> str:
@@ -3483,8 +3654,11 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
         if top:
             parts = ", ".join(f"{k.replace('_',' ')} ${v:,.0f}" for k, v in top)
             bits.append(f"largest labor buckets are {parts}")
-        if totals.get("direct_costs", 0):
-            bits.append(f"directs (material/vendors/shipping) are ${totals['direct_costs']:.0f}")
+        directs_sum = float(b.get("total_direct_costs") or totals.get("direct_costs") or 0.0)
+        if directs_sum:
+            mat_val = float(b.get("material_direct_cost") or pt.get("material_direct_cost") or 0.0)
+            material_str = f"materials ${mat_val:,.0f}" if mat_val else "directs"
+            bits.append(f"({material_str}/vendors/shipping) are ${directs_sum:,.0f}")
         return " / ".join(bits) or "Costs are driven mostly by setup/NRE and the primary machining steps."
 
     # If no model on disk, just return fallback
@@ -3694,6 +3868,23 @@ class App(tk.Tk):
         skip_items = {normalize_item(item) for item in raw_skip_items}
 
 
+        material_lookup: Dict[str, float] = {}
+        for _, row_data in df.iterrows():
+            item_label = str(row_data.get("Item", ""))
+            raw_value = _coerce_float_or_none(row_data.get("Example Values / Options"))
+            if raw_value is None:
+                continue
+            per_g = _price_value_to_per_gram(raw_value, item_label)
+            if per_g is None:
+                continue
+            normalized_label = _normalize_lookup_key(item_label)
+            for canonical_key, keywords in MATERIAL_KEYWORDS.items():
+                if canonical_key == MATERIAL_OTHER_KEY:
+                    continue
+                if any((kw and kw in normalized_label) for kw in keywords):
+                    material_lookup[canonical_key] = per_g
+                    break
+
         current_row = 0
 
         quote_frame = ttk.Labelframe(self.editor_widgets_frame, text="Quote-Specific Variables", padding=(10, 5))
@@ -3701,15 +3892,72 @@ class App(tk.Tk):
         current_row += 1
 
         row_index = 0
+        material_choice_var: tk.StringVar | None = None
+        material_price_var: tk.StringVar | None = None
+
+        def update_material_price(*_):
+            if material_choice_var is None or material_price_var is None:
+                return
+            choice = material_choice_var.get().strip()
+            if not choice:
+                return
+            norm_choice = _normalize_lookup_key(choice)
+            if norm_choice == MATERIAL_OTHER_KEY:
+                return
+            price = material_lookup.get(norm_choice)
+            if price is None:
+                # allow manual override for custom entries
+                return
+            current_val = _coerce_float_or_none(material_price_var.get())
+            if current_val is not None and abs(current_val - price) < 1e-6:
+                return
+            material_price_var.set(f"{price:.4f}")
+
         for _, row_data in df.iterrows():
             item_name = str(row_data["Item"])
-            if normalize_item(item_name) in skip_items:
+            normalized_name = normalize_item(item_name)
+            if normalized_name in skip_items:
                 continue
             ttk.Label(quote_frame, text=item_name, wraplength=400).grid(row=row_index, column=0, sticky="w", padx=5, pady=2)
-            var = tk.StringVar(value=str(row_data["Example Values / Options"]))
-            ttk.Entry(quote_frame, textvariable=var, width=30).grid(row=row_index, column=1, sticky="w", padx=5, pady=2)
-            self.quote_vars[item_name] = var
+            initial_raw = row_data["Example Values / Options"]
+            initial_value = str(initial_raw) if initial_raw is not None else ""
+            if normalized_name in {"material"}:
+                var = tk.StringVar(value=initial_value)
+                normalized_initial = _normalize_lookup_key(initial_value)
+                for canonical_key, keywords in MATERIAL_KEYWORDS.items():
+                    if canonical_key == MATERIAL_OTHER_KEY:
+                        continue
+                    if any(kw and kw in normalized_initial for kw in keywords):
+                        display = MATERIAL_DISPLAY_BY_KEY.get(canonical_key)
+                        if display:
+                            var.set(display)
+                        break
+                combo = ttk.Combobox(
+                    quote_frame,
+                    textvariable=var,
+                    values=MATERIAL_DROPDOWN_OPTIONS,
+                    width=32,
+                )
+                combo.grid(row=row_index, column=1, sticky="w", padx=5, pady=2)
+                combo.bind("<<ComboboxSelected>>", update_material_price)
+                var.trace_add("write", update_material_price)
+                material_choice_var = var
+                self.quote_vars[item_name] = var
+            elif re.search(r"(Material\s*Price.*(per\s*gram|per\s*g|/g)|Unit\s*Price\s*/\s*g)", item_name, flags=re.IGNORECASE):
+                var = tk.StringVar(value=initial_value)
+                ttk.Entry(quote_frame, textvariable=var, width=30).grid(row=row_index, column=1, sticky="w", padx=5, pady=2)
+                material_price_var = var
+                self.quote_vars[item_name] = var
+            else:
+                var = tk.StringVar(value=initial_value)
+                ttk.Entry(quote_frame, textvariable=var, width=30).grid(row=row_index, column=1, sticky="w", padx=5, pady=2)
+                self.quote_vars[item_name] = var
             row_index += 1
+
+        if material_choice_var is not None and material_price_var is not None:
+            existing = _coerce_float_or_none(material_price_var.get())
+            if existing is None or abs(existing) < 1e-9:
+                update_material_price()
 
         def create_global_entries(parent_frame: ttk.Labelframe, keys, data_source, var_dict, columns: int = 2) -> None:
             for i, key in enumerate(keys):
