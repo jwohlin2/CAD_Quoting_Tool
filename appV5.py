@@ -24,8 +24,26 @@ import tkinter.font as tkfont
 from importlib import import_module
 from pathlib import Path
 from typing import Any, Dict
-
+from OCP.TopAbs   import TopAbs_FACE
+from OCP.TopExp   import TopExp_Explorer
+from OCP.TopoDS   import TopoDS, TopoDS_Face, TopoDS_Shape
+from OCP.BRep     import BRep_Tool
+from OCP.BRepAdaptor import BRepAdaptor_Surface as _BAS
 import pandas as pd
+# single caster that works on your wheel
+def _TO_FACE(s: TopoDS_Shape) -> TopoDS_Face:
+    # already a Face?
+    if isinstance(s, TopoDS_Face) or type(s).__name__ == "TopoDS_Face":
+        return s
+    # your wheel exposes the static caster on TopoDS
+    if hasattr(TopoDS, "Face_s"):
+        f = TopoDS.Face_s(s)
+        # null-check
+        if hasattr(f, "IsNull") and f.IsNull():
+            raise TypeError("TopoDS.Face_s returned null")
+        return f
+    raise TypeError("This OCP wheel doesn’t expose a usable face caster (no Face_s).")
+
 
 SHOW_LLM_HOURS_DEBUG = False # set True only when debugging
 if sys.platform == 'win32':
@@ -230,7 +248,6 @@ except Exception:
 # ----- one-backend imports -----
 try:
     from OCP.BRep import BRep_Tool
-    from OCP.TopoDS import topods_Face, topods_Edge, topods_Shell, topods_Solid
     from OCP.TopAbs import TopAbs_FACE
     from OCP.TopExp import TopExp_Explorer
     from OCP.TopLoc import TopLoc_Location
@@ -278,143 +295,45 @@ def as_face(obj):
             pass
 
     # cast Shape→Face using the same backend
-    return topods_Face(obj)
+    return to_face(obj)
 
 def iter_faces(shape):
-    """Explorer that yields proper Faces, safely cast."""
     exp = TopExp_Explorer(shape, TopAbs_FACE)
     while exp.More():
-        yield as_face(exp.Current())   # safe cast (no double-cast)
+        yield ensure_face(exp.Current())
         exp.Next()
 
 def face_surface(face_like):
-    """
-    Return (Geom_Surface, Location) across OCP/pythonocc variants.
-    Handles Surface vs Surface_s; falls back to BRepAdaptor_Surface.
-    """
-    f = as_face(face_like)
-
-    def _call_surface(fn):
-        loc_from_tool = None
-        if hasattr(BRep_Tool, "Location"):
-            try:
-                loc_from_tool = BRep_Tool.Location(f)
-            except Exception:
-                loc_from_tool = None
-
-        # Prepare a location placeholder for signatures that expect one.
-        loc_arg = None
-        try:
-            loc_arg = TopLoc_Location()
-        except Exception:
-            loc_arg = None
-
-        # First try the simple call.
-        try:
-            surf = fn(f)
-            loc = loc_from_tool if loc_from_tool is not None else (
-                f.Location() if hasattr(f, "Location") else None)
-            return surf, loc
-        except TypeError:
-            pass
-
-        # Then try signatures that need a location object to be passed in.
-        if loc_arg is not None:
-            try:
-                surf = fn(f, loc_arg)
-                return surf, loc_arg
-            except TypeError:
-                pass
-
-        # give up for this function
-        raise
-
-    for attr in ("Surface", "Surface_s"):
-        fn = getattr(BRep_Tool, attr, None)
-        if not fn:
-            continue
-        try:
-            surf, loc = _call_surface(fn)
-            if isinstance(surf, tuple):
-                surf, loc = surf
-            if hasattr(surf, "Surface"):
-                try:
-                    surf = surf.Surface()
-                except Exception:
-                    pass
-            return surf, loc
-        except Exception:
-            continue
-
-    # Fallback is very tolerant
-    try:
-        from OCP.BRepAdaptor import BRepAdaptor_Surface as _BAS
-    except Exception:
-        from OCC.Core.BRepAdaptor import BRepAdaptor_Surface as _BAS
-    a = _BAS(f)
-    s = a.Surface()
-    if hasattr(s, "Surface"):  # unwrap handle if present
-        s = s.Surface()
-    loc = f.Location() if hasattr(f, "Location") else None
+    f = ensure_face(face_like)
+    if hasattr(BRep_Tool, "Surface_s"):
+        s = BRep_Tool.Surface_s(f)
+    else:
+        s = BRep_Tool.Surface(f)
+    loc = (BRep_Tool.Location(f) if hasattr(BRep_Tool, "Location")
+           else (f.Location() if hasattr(f, "Location") else None))
+    if isinstance(s, tuple):
+        s, loc2 = s
+        loc = loc or loc2
+    if hasattr(s, "Surface"):
+        s = s.Surface()  # unwrap handle
     return s, loc
-
+ 
+ 
+    
 # ---------- OCCT compat (OCP or pythonocc-core) ----------
 # ---------- Robust casters that work on OCP and pythonocc ----------
 # Lock topods casters to the active backend
 if STACK == "ocp":
-    # Resolve within OCP only (no cross-backend mixing)
-    try:
-        from OCP.TopoDS import TopoDS_Face
-        def _TO_FACE(shape):
-            return TopoDS_Face.DownCast(shape)
-    except ImportError:
-        try:
-            from OCP.TopoDS import topods
-            _TO_FACE = topods.Face
-        except (ImportError, AttributeError):
-            try:
-                from OCP.TopoDS import Face as _TO_FACE
-            except ImportError:
-                raise ImportError("Could not import a valid 'Face' caster from OCP")
-    try:
-        from OCP.TopoDS import TopoDS_Edge
-        def _TO_EDGE(shape):
-            return TopoDS_Edge.DownCast(shape)
-    except ImportError:
-        try:
-            from OCP.TopoDS import topods
-            _TO_EDGE = topods.Edge
-        except (ImportError, AttributeError):
-            try:
-                from OCP.TopoDS import Edge as _TO_EDGE
-            except ImportError:
-                raise ImportError("Could not import a valid 'Edge' caster from OCP")
-    try:
-        from OCP.TopoDS import TopoDS_Solid
-        def _TO_SOLID(shape):
-            return TopoDS_Solid.DownCast(shape)
-    except ImportError:
-        try:
-            from OCP.TopoDS import topods
-            _TO_SOLID = topods.Solid
-        except (ImportError, AttributeError):
-            try:
-                from OCP.TopoDS import Solid as _TO_SOLID
-            except ImportError:
-                raise ImportError("Could not import a valid 'Solid' caster from OCP")
-    try:
-        from OCP.TopoDS import TopoDS_Shell
-        def _TO_SHELL(shape):
-            return TopoDS_Shell.DownCast(shape)
-    except ImportError:
-        try:
-            from OCP.TopoDS import topods
-            _TO_SHELL = topods.Shell
-        except (ImportError, AttributeError):
-            try:
-                from OCP.TopoDS import Shell as _TO_SHELL
-            except ImportError:
-                raise ImportError("Could not import a valid 'Shell' caster from OCP")
+    # Resolve within OCP only (no cross-backend mixing). Avoid topods/Face imports.
+    from OCP.TopoDS import TopoDS_Face, TopoDS_Edge, TopoDS_Solid, TopoDS_Shell
+    def _TO_FACE(shape):
+        return TopoDS_Face.DownCast(shape)
+    def _TO_EDGE(shape):
+        return TopoDS_Edge.DownCast(shape)
+    def _TO_SOLID(shape):
+        return TopoDS_Solid.DownCast(shape)
+    def _TO_SHELL(shape):
+        return TopoDS_Shell.DownCast(shape)
 else:
     # Resolve within OCC.Core only
     try:
@@ -492,19 +411,13 @@ try:
     from OCP.BRepGProp import BRepGProp as _BRepGProp_mod
     from OCP.TopExp import TopExp as _TopExp_mod
 
+    from OCP.TopoDS import TopoDS_Edge as _OCP_TOPO_E, TopoDS_Face as _OCP_TOPO_F
+
     def _to_edge_ocp(s):
-        try:
-            from OCP.TopoDS import topods_Edge as _fn
-        except Exception:
-            from OCP.TopoDS import Edge as _fn
-        return _fn(s)
+        return _OCP_TOPO_E.DownCast(s)
 
     def _to_face_ocp(s):
-        try:
-            from OCP.TopoDS import topods_Face as _fn
-        except Exception:
-            from OCP.TopoDS import Face as _fn
-        return _fn(s)
+        return _OCP_TOPO_F.DownCast(s)
 
     _TO_EDGE = _to_edge_ocp
     _TO_FACE = _to_face_ocp
@@ -583,26 +496,14 @@ def _is_instance(obj, qualnames):
     return name in qualnames  # e.g. ["TopoDS_Face", "Face"]
 
 def ensure_face(obj):
-    # already a Face class? return it
-    if type(obj).__name__ in ("TopoDS_Face", "Face"):
+    if obj is None:
+        raise TypeError("Expected a face, got None")
+    if isinstance(obj, TopoDS_Face) or type(obj).__name__ == "TopoDS_Face":
         return obj
-
-    # unwrap & null checks...
-    obj = _unwrap_value(obj)
-    if obj is None or (hasattr(obj, "IsNull") and obj.IsNull()):
-        raise TypeError("Expected non-null TopoDS_Shape")
-
-    # if it is a FACE, just return obj — don't cross-cast
-    try:
-        from OCP.TopAbs import TopAbs_FACE
-    except Exception:
-        from OCC.Core.TopAbs import TopAbs_FACE
-    st = obj.ShapeType() if callable(getattr(obj, "ShapeType", None)) else None
+    st = obj.ShapeType() if hasattr(obj, "ShapeType") else None
     if st == TopAbs_FACE:
-        return obj
-
-    # otherwise it's not a face
-    raise TypeError(f"Expected a Face, got {type(obj).__name__}")
+        return _TO_FACE(obj)  # cast Shape→Face
+    raise TypeError(f"Not a face: {type(obj).__name__}")
 def to_edge(s):
     if _is_instance(s, ["TopoDS_Edge", "Edge"]):
         return s
@@ -1073,6 +974,19 @@ def read_step_shape(path: str) -> TopoDS_Shape:
     if shape.IsNull():
         raise RuntimeError("STEP produced a null TopoDS_Shape.")
 
+    # DEBUG: sanity probe for STEP faces
+    if os.environ.get("STEP_PROBE", "0") == "1":
+        cnt = 0
+        try:
+            for f in iter_faces(shape):
+                _surf, _loc = face_surface(f)
+                cnt += 1
+        except Exception as _e:
+            # Keep debug non-fatal; report and continue
+            print(f"[STEP_PROBE] error during face probe: {_e}")
+        else:
+            print(f"[STEP_PROBE] faces={cnt}")
+
     fx = ShapeFix_Shape(shape)
     fx.Perform()
     return fx.Shape()
@@ -1373,7 +1287,7 @@ def _turning_score(shape, areas_by_type):
     axes = []
     for f in iter_faces(shape):
         if _face_type(f) == "cylindrical":
-            ga = GeomAdaptor_Surface(brep_surface(f)[0])
+            ga = GeomAdaptor_Surface(face_surface(f)[0])
             try: axes.append(ga.Cylinder().Axis().Direction())
             except Exception: pass
     if axes:
@@ -4293,5 +4207,3 @@ if __name__ == "__main__":
     App().mainloop()
 # Base dir for logs and resources
 BASE_DIR = Path(__file__).resolve().parent
-
-
