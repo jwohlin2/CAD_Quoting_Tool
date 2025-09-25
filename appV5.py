@@ -14,18 +14,21 @@ Single-file CAD Quoter (v8)
 """
 from __future__ import annotations
 
-import json
-import math
-import os
+import json, math, os, time
+from pathlib import Path
+
+LLM_DEBUG = bool(int(os.getenv("LLM_DEBUG", "1")))   # set 0 to disable
+LLM_DEBUG_DIR = Path(__file__).with_name("llm_debug")
+LLM_DEBUG_DIR.mkdir(exist_ok=True)
+
+import copy
 import re
 import sys
 import textwrap
-import time
 import tkinter as tk
 import tkinter.font as tkfont
 import urllib.request
 from importlib import import_module
-from pathlib import Path
 from typing import Any, Dict
 from OCP.TopAbs   import TopAbs_EDGE, TopAbs_FACE
 from OCP.TopExp   import TopExp, TopExp_Explorer
@@ -1754,56 +1757,64 @@ class _LocalLLM:
                     pass
             self._llm = self._Llama(**llama_kwargs)
 
-    @staticmethod
-    def _extract_json(text: str) -> dict:
-        import re, json
-        m = re.search(r"```json\s*(\{.*?\})\s*```", text, re.S|re.I)
-        if not m:
-            m = re.search(r"(\{.*\})", text, re.S)
-        if not m:
-            return {}
-        try:
-            return json.loads(m.group(1))
-        except Exception:
-            return {}
-
-    def ask_json(self, system_prompt: str, user_prompt: str, temperature: float = 0.2, max_tokens: int = 2048) -> dict:
+    def ask_json(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = 0.2,
+        max_tokens: int = 2048,
+        context: dict | None = None,
+        params: dict | None = None,
+    ):
         self._ensure()
-        llm = self._llm
-        temp = float(os.getenv("QWEN_TEMP", temperature))
-        top_p = float(os.getenv("QWEN_TOP_P", 0.90))
-        repeat_penalty = float(os.getenv("QWEN_REPEAT_PENALTY", 1.05))
-        max_toks = int(os.getenv("QWEN_MAX_TOKENS", max_tokens))
+        p = {
+            "temperature": float(os.getenv("QWEN_TEMP", temperature)),
+            "top_p": float(os.getenv("QWEN_TOP_P", 0.90)),
+            "repeat_penalty": float(os.getenv("QWEN_REPEAT_PENALTY", 1.05)),
+            "max_tokens": int(os.getenv("QWEN_MAX_TOKENS", max_tokens)),
+        }
+        if params:
+            p.update(params)
+
+        req = {
+            "model": getattr(self, "model_path", "local"),
+            "n_ctx": getattr(self, "n_ctx", None),
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "params": p,
+            "context_payload": context or {},
+            "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+        out = self._llm.create_chat_completion(
+            messages=req["messages"],
+            temperature=p["temperature"],
+            top_p=p["top_p"],
+            repeat_penalty=p["repeat_penalty"],
+            max_tokens=p["max_tokens"],
+        )
+        text = out["choices"][0]["message"]["content"]
+        usage = out.get("usage", {})
+
+        parsed = None
         try:
-            out = llm.create_chat_completion(
-                messages=[{"role":"system","content":system_prompt},
-                          {"role":"user","content":user_prompt}],
-                temperature=temp,
-                top_p=top_p,
-                repeat_penalty=repeat_penalty,
-                max_tokens=max_toks,
-            )
-            text = out["choices"][0]["message"]["content"]
-            js = self._extract_json(text)
-            if js: return js
+            parsed = json.loads(text)
         except Exception:
             pass
-        try:
-            prompt = f"<<SYS>>{system_prompt}<<SYS>>\n\n{user_prompt}\n\nJSON ONLY:"
-            out = llm(
-                prompt=prompt,
-                temperature=temp,
-                top_p=top_p,
-                repeat_penalty=repeat_penalty,
-                max_tokens=max_toks,
-                stop=["\n\n"],
-            )
-            text = out["choices"][0]["text"]
-            js = self._extract_json(text)
-            if js: return js
-        except Exception:
-            pass
-        return {}
+
+        if LLM_DEBUG:
+            snap = {
+                "request": req,
+                "raw_response_text": text,
+                "parsed_response": parsed,
+                "usage": usage,
+            }
+            fn = LLM_DEBUG_DIR / f"llm_snapshot_{int(time.time())}.json"
+            fn.write_text(json.dumps(snap, indent=2), encoding="utf-8")
+
+        return parsed, text, usage
 
 # ---- LLM hours inference ----
 def infer_hours_and_overrides_from_geo(geo: dict, params: dict | None = None, rates: dict | None = None) -> dict:
@@ -1894,9 +1905,14 @@ Return JSON with this structure (numbers only, minutes only for CMM_RunTime_min)
         mp = os.environ.get("QWEN_GGUF_PATH")
         if mp and Path(mp).is_file():
             q = _LocalLLM(mp)
-            out = q.ask_json(system, prompt, temperature=0.1, max_tokens=1024)
-            if isinstance(out, dict) and "hours" in out:
-                return out
+            parsed, _raw_text, _usage = q.ask_json(
+                system,
+                prompt,
+                temperature=0.1,
+                max_tokens=1024,
+            )
+            if isinstance(parsed, dict) and "hours" in parsed:
+                return parsed
     except Exception:
         pass
 
@@ -2566,18 +2582,23 @@ def render_quote(
             if matcost or show_zeros: row("Material Cost (computed):", float(matcost or 0.0))
             if mass_g or show_zeros:  write_line(f"Mass: {float(mass_g or 0.0):,.1f} g", "  ")
             if upg or show_zeros:
-                per_bits: list[str] = []
-                if unit_price_kg:
-                    per_bits.append(f"{_m(unit_price_kg)} / kg")
-                if unit_price_lb:
-                    per_bits.append(f"{_m(unit_price_lb)} / lb")
-                extra_parts: list[str] = []
-                if per_bits:
-                    extra_parts.append(f"({', '.join(per_bits)})")
+                per_kg = f"{_m(unit_price_kg)} / kg" if unit_price_kg else ""
+                per_lb = f"{_m(unit_price_lb)} / lb" if unit_price_lb else ""
+                per_g = f"{currency}{float(upg or 0):,.4f} / g"
+                extras: list[str] = []
+                display_line = per_g
+                if per_kg:
+                    display_line = per_kg
+                    if per_lb:
+                        extras.append(per_lb)
+                    extras.append(per_g)
+                elif per_lb:
+                    display_line = per_lb
+                    extras.append(per_g)
                 if price_asof:
-                    extra_parts.append(f"as of {price_asof}")
-                extra = f" {' '.join(extra_parts)}" if extra_parts else ""
-                write_line(f"Unit Price: {_m(upg or 0)} / g{extra}", "  ")
+                    extras.append(f"as of {price_asof}")
+                extra = f" ({', '.join(extras)})" if extras else ""
+                write_line(f"Unit Price: {display_line}{extra}", "  ")
             if price_source:
                 write_line(f"Source: {price_source}", "  ")
             if minchg or show_zeros:  write_line(f"Supplier Min Charge: {_m(minchg or 0)}", "  ")
@@ -3103,7 +3124,12 @@ def estimate_drilling_hours(hole_diams_mm: list[float], thickness_mm: float, mat
     return sec / 3600.0
 
 
-def validate_quote_before_pricing(geo: dict, process_costs: dict[str, float], pass_through: dict[str, Any]) -> None:
+def validate_quote_before_pricing(
+    geo: dict,
+    process_costs: dict[str, float],
+    pass_through: dict[str, Any],
+    process_hours: dict[str, float] | None = None,
+) -> None:
     issues: list[str] = []
     hole_cost = sum(float(process_costs.get(k, 0.0)) for k in ("drilling", "milling"))
     if geo.get("hole_diams_mm") and hole_cost < 50:
@@ -3111,6 +3137,17 @@ def validate_quote_before_pricing(geo: dict, process_costs: dict[str, float], pa
     material_cost = float(pass_through.get("Material", 0.0) or 0.0)
     if material_cost < 5.0:
         issues.append("Material cost is near zero; check material & thickness.")
+    try:
+        hole_count_val = int(float(geo.get("hole_count", 0)))
+    except Exception:
+        hole_count_val = len(geo.get("hole_diams_mm") or [])
+    if hole_count_val <= 0:
+        hole_count_val = len(geo.get("hole_diams_mm") or [])
+    drill_hr_val = 0.0
+    if process_hours:
+        drill_hr_val = float(process_hours.get("drilling", 0.0) or 0.0)
+    if hole_count_val >= 50 and drill_hr_val < 1.0:
+        raise ValueError("Quote blocked: drilling hours unrealistically low for hole count.")
     if issues:
         raise ValueError("Quote blocked:\n- " + "\n- ".join(issues))
 
@@ -3141,6 +3178,8 @@ def compute_quote_from_df(df: pd.DataFrame,
     rates.setdefault("DrillingRate", rates.get("MillingRate", 0.0))
     if llm_model_path is None:
         llm_model_path = str(params.get("LLMModelPath", "") or "")
+    else:
+        params["LLMModelPath"] = llm_model_path
     if ui_vars is None:
         try:
             ui_vars = {
@@ -3619,10 +3658,35 @@ def compute_quote_from_df(df: pd.DataFrame,
         hole_diams_list.append(float(val))
     if hole_diams_list:
         geo_context["hole_diams_mm"] = hole_diams_list
+
+    hole_count_override = _coerce_float_or_none(ui_vars.get("Hole Count (override)"))
+    avg_hole_diam_override = _coerce_float_or_none(ui_vars.get("Avg Hole Diameter (mm)"))
+    if (not hole_diams_list) and hole_count_override and hole_count_override > 0:
+        avg_val = float(avg_hole_diam_override or 0.0)
+        if avg_val <= 0:
+            avg_val = float(_coerce_float_or_none(geo_context.get("avg_hole_diameter_mm")) or 5.0)
+        hole_diams_list = [float(avg_val)] * int(min(1000, max(1, round(hole_count_override))))
+        geo_context.setdefault("hole_diams_mm", hole_diams_list)
+        geo_context.setdefault("hole_count", int(max(1, round(hole_count_override))))
+
     thickness_for_drill = _coerce_float_or_none(geo_context.get("thickness_mm")) or 0.0
+    if thickness_for_drill <= 0:
+        thickness_in_ui = _coerce_float_or_none(ui_vars.get("Thickness (in)"))
+        if thickness_in_ui and thickness_in_ui > 0:
+            thickness_for_drill = float(thickness_in_ui) * 25.4
+
     drill_material_key = geo_context.get("material") or material_name
     drill_hr = estimate_drilling_hours(hole_diams_list, float(thickness_for_drill or 0.0), drill_material_key or "")
     drill_rate = float(rates.get("DrillingRate") or rates.get("MillingRate", 0.0) or 0.0)
+    hole_count_geo = _coerce_float_or_none(geo_context.get("hole_count"))
+    hole_count_for_tripwire = 0
+    if hole_count_geo and hole_count_geo > 0:
+        hole_count_for_tripwire = int(round(hole_count_geo))
+    elif hole_diams_list:
+        hole_count_for_tripwire = len(hole_diams_list)
+    elif hole_count_override and hole_count_override > 0:
+        hole_count_for_tripwire = int(round(hole_count_override))
+    geo_context["hole_count"] = hole_count_for_tripwire
 
     # ---- roll-ups ------------------------------------------------------------
     inspection_hr_total = inproc_hr + final_hr + cmm_prog_hr + cmm_run_hr + fair_hr + srcinsp_hr
@@ -3641,7 +3705,11 @@ def compute_quote_from_df(df: pd.DataFrame,
         "packaging": packaging_cost,
         "ehs_compliance": ehs_cost,
     }
-    process_costs["drilling"] = drill_hr * drill_rate
+    existing_drill_cost = float(process_costs.get("drilling", 0.0) or 0.0)
+    existing_drill_hr = existing_drill_cost / drill_rate if drill_rate else 0.0
+    baseline_drill_hr = max(existing_drill_hr, float(drill_hr or 0.0))
+    process_costs["drilling"] = baseline_drill_hr * drill_rate
+    process_costs_baseline = {k: float(v) for k, v in process_costs.items()}
 
     process_meta = {
         "milling":          {"hr": eff(milling_hr), "rate": rates.get("MillingRate", 0.0)},
@@ -3658,11 +3726,13 @@ def compute_quote_from_df(df: pd.DataFrame,
         "packaging":        {"hr": packaging_hr,    "rate": rates.get("PackagingRate", rates.get("AssemblyRate", 0.0))},
         "ehs_compliance":   {"hr": ehs_hr,          "rate": rates.get("InspectionRate", 0.0)},
     }
-    process_meta["drilling"] = {"hr": drill_hr, "rate": drill_rate}
+    process_meta["drilling"] = {"hr": baseline_drill_hr, "rate": drill_rate}
     for key, meta in process_meta.items():
         rate = float(meta.get("rate", 0.0))
         hr = float(meta.get("hr", 0.0))
         meta["base_extra"] = process_costs.get(key, 0.0) - hr * rate
+
+    process_hours_baseline = {k: float(meta.get("hr", 0.0)) for k, meta in process_meta.items()}
 
 
     pass_meta = {
@@ -3694,6 +3764,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         "Utilities": utilities_cost,
         "Consumables Flat": consumables_flat,
     }
+    pass_through_baseline = {k: float(v) for k, v in pass_through.items()}
 
     fix_detail = nre_detail.get("fixture", {})
 
@@ -3714,35 +3785,93 @@ def compute_quote_from_df(df: pd.DataFrame,
     hole_tool_sizes = sorted({round(x, 2) for x in hole_diams_list}) if hole_diams_list else []
     features.update({
         "is_2d": bool(is_plate_2d),
-        "hole_count": len(hole_diams_list),
+        "hole_count": hole_count_for_tripwire,
         "hole_tool_sizes": hole_tool_sizes,
         "profile_length_mm": float(_coerce_float_or_none(geo_context.get("profile_length_mm")) or 0.0),
         "thickness_mm": float(_coerce_float_or_none(geo_context.get("thickness_mm")) or 0.0),
         "material_key": geo_context.get("material") or material_name,
-        "drilling_hr_baseline": drill_hr,
+        "drilling_hr_baseline": baseline_drill_hr,
     })
+    if hole_count_override and hole_count_override > 0:
+        features["hole_count_override"] = int(round(hole_count_override))
+    if avg_hole_diam_override and avg_hole_diam_override > 0:
+        features["avg_hole_diam_override_mm"] = float(avg_hole_diam_override)
 
     base_costs = {
-        "process_costs": {k: float(v) for k, v in process_costs.items()},
-        "pass_through": {k: float(v) for k, v in pass_through.items()},
-        "nre_detail": nre_detail,
-        "rates": rates,
-        "params": params,
+        "process_costs": process_costs_baseline,
+        "pass_through": pass_through_baseline,
+        "nre_detail": copy.deepcopy(nre_detail),
+        "rates": {k: (float(v) if isinstance(v, (int, float)) else v) for k, v in rates.items()},
+        "params": dict(params),
+    }
+
+    def _jsonable(val):
+        if isinstance(val, (str, int, float, bool)) or val is None:
+            return val
+        if isinstance(val, (list, tuple)):
+            return [_jsonable(v) for v in val]
+        if isinstance(val, dict):
+            return {str(k): _jsonable(v) for k, v in val.items()}
+        try:
+            return float(val)
+        except Exception:
+            try:
+                return val.item()  # numpy scalar
+            except Exception:
+                return str(val)
+
+    hole_diams_ctx = sorted([round(x, 3) for x in hole_diams_list])[:200] if hole_diams_list else []
+    quote_inputs_ctx = {str(k): _jsonable(v) for k, v in ui_vars.items()}
+    geo_payload = _jsonable(dict(geo_context))
+    if hole_diams_ctx:
+        geo_payload["hole_diams_mm"] = hole_diams_ctx
+    geo_payload["hole_count"] = hole_count_for_tripwire
+    if hole_count_override and hole_count_override > 0:
+        geo_payload["hole_count_override"] = int(round(hole_count_override))
+    if avg_hole_diam_override and avg_hole_diam_override > 0:
+        geo_payload["avg_hole_diam_override_mm"] = float(avg_hole_diam_override)
+    scrap_pct_baseline = float(features.get("scrap_pct", scrap_pct) or 0.0)
+    llm_ctx = {
+        "geo": geo_payload,
+        "quote_vars": quote_inputs_ctx,
+        "rates": base_costs["rates"],
+        "baseline": {
+            "process_hours": process_hours_baseline,
+            "pass_through": pass_through_baseline,
+            "scrap_pct": scrap_pct_baseline,
+        },
+        "bounds": {
+            "mult_min": 0.5,
+            "mult_max": 3.0,
+            "add_hr_min": 0.0,
+            "add_hr_max": 5.0,
+            "scrap_min": 0.0,
+            "scrap_max": 0.20,
+        },
     }
 
     overrides: dict[str, Any] = {}
+    overrides_meta: dict[str, Any] = {}
     if llm_enabled and llm_model_path:
         try:
-            overrides = get_llm_overrides(llm_model_path, features, base_costs)
+            overrides, overrides_meta = get_llm_overrides(
+                llm_model_path,
+                features,
+                base_costs,
+                context_payload=llm_ctx,
+            )
         except Exception:
-            overrides = {}
+            overrides, overrides_meta = {}, {}
     if not isinstance(overrides, dict):
         overrides = {}
+    if not isinstance(overrides_meta, dict):
+        overrides_meta = {}
 
     llm_notes: list[str] = []
     for note in (overrides.get("notes") or []):
         if isinstance(note, str) and note.strip():
             llm_notes.append(note.strip())
+    notes_from_clamps = list(overrides_meta.get("clamp_notes", [])) if overrides_meta else []
 
     applied_process: dict[str, dict[str, Any]] = {}
     applied_pass: dict[str, dict[str, Any]] = {}
@@ -3886,7 +4015,8 @@ def compute_quote_from_df(df: pd.DataFrame,
         except Exception:
             pass_through[label] = 0.0
 
-    validate_quote_before_pricing(geo_context, process_costs, pass_through)
+    process_hours_final = {k: float(process_meta.get(k, {}).get("hr", 0.0)) for k in process_meta}
+    validate_quote_before_pricing(geo_context, process_costs, pass_through, process_hours_final)
 
     for key, entry in applied_process.items():
         entry["new_hr"] = float(process_meta.get(key, {}).get("hr", entry.get("new_hr", entry["old_hr"])))
@@ -4023,14 +4153,46 @@ def compute_quote_from_df(df: pd.DataFrame,
         if details:
             nre_cost_details[label] = "; ".join(details)
 
+    applied_multipliers_log: dict[str, float] = {}
+    for key, value in (overrides.get("process_hour_multipliers") or {}).items():
+        actual = process_key_map.get(_normalize_key(key), key)
+        try:
+            applied_multipliers_log[actual] = float(value)
+        except Exception:
+            applied_multipliers_log[actual] = value
+
+    applied_adders_log: dict[str, float] = {}
+    for key, value in (overrides.get("process_hour_adders") or {}).items():
+        actual = process_key_map.get(_normalize_key(key), key)
+        try:
+            applied_adders_log[actual] = float(value)
+        except Exception:
+            applied_adders_log[actual] = value
+
     llm_cost_log = {
         "overrides": overrides,
         "applied_process": applied_process,
         "applied_pass": applied_pass,
         "scrap_pct": scrap_pct,
+        "baseline_process_hours": process_hours_baseline,
+        "baseline_pass_through": pass_through_baseline,
+        "baseline_scrap_pct": scrap_pct_baseline,
+        "final_process_hours": process_hours_final,
     }
     if llm_notes:
         llm_cost_log["notes"] = llm_notes
+    if overrides_meta.get("raw") is not None:
+        llm_cost_log["raw_response"] = overrides_meta["raw"]
+    if overrides_meta.get("raw_text"):
+        llm_cost_log["raw_response_text"] = overrides_meta["raw_text"]
+    if overrides_meta.get("usage"):
+        llm_cost_log["usage"] = overrides_meta["usage"]
+    if notes_from_clamps:
+        llm_cost_log["clamp_notes"] = notes_from_clamps
+    if applied_multipliers_log:
+        llm_cost_log["applied_multipliers"] = applied_multipliers_log
+    if applied_adders_log:
+        llm_cost_log["applied_adders"] = applied_adders_log
 
     breakdown = {
         "qty": Qty,
@@ -4078,6 +4240,26 @@ def compute_quote_from_df(df: pd.DataFrame,
         "llm_notes": llm_notes,
         "llm_cost_log": llm_cost_log,
     }
+
+    if LLM_DEBUG and overrides_meta and (
+        overrides_meta.get("raw") is not None or overrides_meta.get("raw_text")
+    ):
+        try:
+            files = sorted(LLM_DEBUG_DIR.glob("llm_snapshot_*.json"))
+            if files:
+                latest = files[-1]
+                snap = json.loads(latest.read_text(encoding="utf-8"))
+                snap["applied"] = {
+                    "process_hour_multipliers": applied_multipliers_log,
+                    "process_hour_adders": applied_adders_log,
+                    "scrap_pct": scrap_pct,
+                    "notes": llm_notes,
+                    "clamped": notes_from_clamps,
+                    "pass_through": {k: v for k, v in applied_pass.items()},
+                }
+                latest.write_text(json.dumps(snap, indent=2), encoding="utf-8")
+        except Exception:
+            pass
 
     return {"price": price, "labor": labor_cost, "with_overhead": with_overhead, "breakdown": breakdown}
 
@@ -4711,18 +4893,30 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
     }
 
     system_prompt = (
-        "You are a helpful manufacturing estimator. Explain the main cost drivers of this quote "
-        "in one short paragraph (1ï¿½3 sentences), friendly and professional. "
-        "Focus on why: big NRE, which processes dominate, and whether directs matter. "
-        "Return JSON only: {\"explanation\": \"...\"}"
+        "You are a helpful manufacturing estimator. In 1-3 sentences explain the main cost "
+        "drivers for this quote based strictly on the provided numbers. Do not invent costs "
+        "that are zero. Return JSON only: {\"explanation\": \"...\"}."
     )
     user_prompt = f"```json\n{json.dumps(summary, indent=2)}\n```"
 
     try:
         llm = _LocalLLM(model_path)  # your local wrapper
-        out = llm.ask_json(system_prompt, user_prompt, temperature=0.4, max_tokens=256)
-        if isinstance(out, dict) and isinstance(out.get("explanation", ""), str) and out["explanation"].strip():
-            return out["explanation"].strip()
+        parsed, _raw_text, _usage = llm.ask_json(
+            system_prompt,
+            user_prompt,
+            temperature=0.4,
+            max_tokens=256,
+            context={
+                "purpose": "quote_explanation",
+                "summary_keys": list(summary.keys()),
+            },
+        )
+        if (
+            isinstance(parsed, dict)
+            and isinstance(parsed.get("explanation", ""), str)
+            and parsed["explanation"].strip()
+        ):
+            return parsed["explanation"].strip()
         return _fallback()
     except Exception:
         return _fallback()
@@ -4745,10 +4939,16 @@ def _safe_get(d, k, typ, default=None):
         return default
 
 
-def get_llm_overrides(model_path: str, features: dict, base_costs: dict) -> dict:
+def get_llm_overrides(
+    model_path: str,
+    features: dict,
+    base_costs: dict,
+    *,
+    context_payload: dict | None = None,
+) -> tuple[dict, dict]:
     """
     Ask the local LLM for cost overrides based on CAD features and base costs.
-    Returns a dict with optional keys:
+    Returns (overrides_dict, meta) where overrides_dict may contain:
       {
         "scrap_pct_override": 0.00-0.50,          # fraction, not %
         "process_hour_multipliers": {"milling": 1.10, "turning": 0.95, ...},
@@ -4758,11 +4958,20 @@ def get_llm_overrides(model_path: str, features: dict, base_costs: dict) -> dict
         "contingency_pct_override": 0.00-0.25,    # optional
         "notes": ["short human-readable bullets"]
       }
+    and meta captures the raw response, usage stats, and clamp notes.
     """
     import json, os
 
-    def _fallback():
-        return {"notes": ["LLM disabled or unavailable; using base costs"]}
+    def _meta(raw=None, raw_text="", usage=None, clamp_notes=None):
+        return {
+            "raw": raw,
+            "raw_text": raw_text or "",
+            "usage": usage or {},
+            "clamp_notes": clamp_notes or [],
+        }
+
+    def _fallback(meta=None):
+        return {"notes": ["LLM disabled or unavailable; using base costs"]}, (meta or _meta())
 
     if not model_path or not os.path.isfile(model_path):
         return _fallback()
@@ -4781,39 +4990,116 @@ def get_llm_overrides(model_path: str, features: dict, base_costs: dict) -> dict
 
     try:
         llm = _LocalLLM(model_path)
-        raw = llm.ask_json(system_prompt, user_prompt, temperature=0.2, max_tokens=256)
+        parsed, raw_text, usage = llm.ask_json(
+            system_prompt,
+            user_prompt,
+            temperature=0.2,
+            max_tokens=256,
+            context=context_payload,
+        )
     except Exception:
         return _fallback()
 
+    if not isinstance(parsed, dict):
+        return _fallback(_meta(raw=parsed, raw_text=raw_text, usage=usage))
+
+    clamp_notes: list[str] = []
     out: dict[str, Any] = {}
-    if not isinstance(raw, dict):
-        return _fallback()
 
-    scr = raw.get("scrap_pct_override", None)
+    scr = parsed.get("scrap_pct_override", None)
     if scr is not None:
-        out["scrap_pct_override"] = clamp(scr, 0.0, 0.50, None)
+        try:
+            orig = float(scr)
+        except Exception:
+            orig = None
+        clamped_scrap = clamp(scr, 0.0, 0.50, None)
+        if clamped_scrap is not None:
+            out["scrap_pct_override"] = clamped_scrap
+            if orig is None:
+                clamp_notes.append("scrap_pct_override non-numeric → default applied")
+            elif not math.isclose(orig, clamped_scrap, abs_tol=1e-6):
+                clamp_notes.append(
+                    f"scrap_pct_override {orig:.3f} → {clamped_scrap:.3f}"
+                )
 
-    mults = _safe_get(raw, "process_hour_multipliers", dict, {})
-    out["process_hour_multipliers"] = {k.lower(): clamp(v, 0.5, 3.0, 1.0) for k, v in mults.items() if isinstance(v, (int, float))}
+    mults = _safe_get(parsed, "process_hour_multipliers", dict, {})
+    clean_mults: dict[str, float] = {}
+    for k, v in (mults or {}).items():
+        if isinstance(v, (int, float)):
+            orig = float(v)
+            clamped_val = clamp(v, 0.5, 3.0, 1.0)
+            clean_mults[k.lower()] = clamped_val
+            if not math.isclose(orig, clamped_val, abs_tol=1e-6):
+                clamp_notes.append(
+                    f"process_hour_multipliers[{k}] {orig:.2f} → {clamped_val:.2f}"
+                )
+        else:
+            clamp_notes.append(f"process_hour_multipliers[{k}] non-numeric")
+    if clean_mults:
+        out["process_hour_multipliers"] = clean_mults
 
-    adds = _safe_get(raw, "process_hour_adders", dict, {})
-    out["process_hour_adders"] = {k.lower(): clamp(v, 0.0, 5.0, 0.0) for k, v in adds.items() if isinstance(v, (int, float))}
+    adds = _safe_get(parsed, "process_hour_adders", dict, {})
+    clean_adders: dict[str, float] = {}
+    for k, v in (adds or {}).items():
+        if isinstance(v, (int, float)):
+            orig = float(v)
+            clamped_val = clamp(v, 0.0, 5.0, 0.0)
+            clean_adders[k.lower()] = clamped_val
+            if not math.isclose(orig, clamped_val, abs_tol=1e-6):
+                clamp_notes.append(
+                    f"process_hour_adders[{k}] {orig:.2f} → {clamped_val:.2f}"
+                )
+        else:
+            clamp_notes.append(f"process_hour_adders[{k}] non-numeric")
+    if clean_adders:
+        out["process_hour_adders"] = clean_adders
 
-    addpt = _safe_get(raw, "add_pass_through", dict, {})
-    out["add_pass_through"] = {str(k): clamp(v, 0.0, 200.0, 0.0) for k, v in addpt.items() if isinstance(v, (int, float))}
+    addpt = _safe_get(parsed, "add_pass_through", dict, {})
+    clean_pass: dict[str, float] = {}
+    for k, v in (addpt or {}).items():
+        if isinstance(v, (int, float)):
+            orig = float(v)
+            clamped_val = clamp(v, 0.0, 200.0, 0.0)
+            clean_pass[str(k)] = clamped_val
+            if not math.isclose(orig, clamped_val, abs_tol=1e-6):
+                clamp_notes.append(
+                    f"add_pass_through[{k}] {orig:.2f} → {clamped_val:.2f}"
+                )
+        else:
+            clamp_notes.append(f"add_pass_through[{k}] non-numeric")
+    if clean_pass:
+        out["add_pass_through"] = clean_pass
 
-    fmd = raw.get("fixture_material_cost_delta", None)
+    fmd = parsed.get("fixture_material_cost_delta", None)
     if isinstance(fmd, (int, float)):
-        out["fixture_material_cost_delta"] = clamp(fmd, -200.0, 200.0, 0.0)
+        orig = float(fmd)
+        clamped_val = clamp(fmd, -200.0, 200.0, 0.0)
+        out["fixture_material_cost_delta"] = clamped_val
+        if not math.isclose(orig, clamped_val, abs_tol=1e-6):
+            clamp_notes.append(
+                f"fixture_material_cost_delta {orig:.2f} → {clamped_val:.2f}"
+            )
 
-    cont = raw.get("contingency_pct_override", None)
+    cont = parsed.get("contingency_pct_override", None)
     if cont is not None:
-        out["contingency_pct_override"] = clamp(cont, 0.0, 0.25, None)
+        try:
+            orig = float(cont)
+        except Exception:
+            orig = None
+        clamped_val = clamp(cont, 0.0, 0.25, None)
+        if clamped_val is not None:
+            out["contingency_pct_override"] = clamped_val
+            if orig is None:
+                clamp_notes.append("contingency_pct_override non-numeric → default applied")
+            elif not math.isclose(orig, clamped_val, abs_tol=1e-6):
+                clamp_notes.append(
+                    f"contingency_pct_override {orig:.3f} → {clamped_val:.3f}"
+                )
 
-    notes = _safe_get(raw, "notes", list, [])
+    notes = _safe_get(parsed, "notes", list, [])
     out["notes"] = [str(n)[:200] for n in notes][:6]
 
-    return out
+    return out, _meta(parsed, raw_text, usage, clamp_notes)
 # ----------------- GUI -----------------
 # ---- scrollable frame helper -----------------------------------------------
 class ScrollableFrame(ttk.Frame):
@@ -4900,6 +5186,7 @@ class App(tk.Tk):
         top = ttk.Frame(self); top.pack(fill="x", pady=(6,8))
         ttk.Button(top, text="1. Load CAD & Vars", command=self.open_flow).pack(side="left", padx=5)
         ttk.Button(top, text="2. Generate Quote", command=self.gen_quote).pack(side="left", padx=5)
+        ttk.Button(top, text="LLM Inspector", command=self.open_llm_inspector).pack(side="left", padx=5)
         self.scrap_var = tk.StringVar(value="Scrap %: –")
         ttk.Label(top, textvariable=self.scrap_var).pack(side="right", padx=5)
 
@@ -4956,6 +5243,8 @@ class App(tk.Tk):
         df = _ensure_row(df, "Plate Length (in)", 12.0, dtype="number")
         df = _ensure_row(df, "Plate Width (in)", 14.0, dtype="number")
         df = _ensure_row(df, "Thickness (in)", 0.25, dtype="number")
+        df = _ensure_row(df, "Hole Count (override)", 0, dtype="number")
+        df = _ensure_row(df, "Avg Hole Diameter (mm)", 0.0, dtype="number")
         df = _ensure_row(df, "Material", "", dtype="text")
         self.vars_df = df
         parent = self.editor_scroll.inner
@@ -5451,7 +5740,40 @@ class App(tk.Tk):
             except Exception:
                 pass
 
-    # ----- Flow + Output ----- 
+    def open_llm_inspector(self):
+        import tkinter as tk
+        from tkinter import ttk, scrolledtext, messagebox
+
+        files = sorted(LLM_DEBUG_DIR.glob("llm_snapshot_*.json"))
+        if not files:
+            messagebox.showinfo("LLM Inspector", "No snapshots yet.")
+            return
+
+        data = json.loads(files[-1].read_text(encoding="utf-8"))
+
+        win = tk.Toplevel(self)
+        win.title(f"LLM Inspector — {files[-1].name}")
+        win.geometry("900x700")
+
+        nb = ttk.Notebook(win)
+        nb.pack(fill="both", expand=True)
+
+        def add_tab(title, payload):
+            frame = ttk.Frame(nb)
+            nb.add(frame, text=title)
+            txt = scrolledtext.ScrolledText(frame, wrap="word")
+            txt.pack(fill="both", expand=True)
+            txt.insert("1.0", json.dumps(payload, indent=2))
+            txt.configure(state="disabled")
+
+        add_tab("Request/messages", data.get("request", {}))
+        add_tab("Context Payload", data.get("request", {}).get("context_payload", {}))
+        add_tab("Raw Response Text", {"text": data.get("raw_response_text", "")})
+        add_tab("Parsed Response", data.get("parsed_response", {}))
+        add_tab("Applied", data.get("applied", {}))
+        add_tab("Usage", data.get("usage", {}))
+
+    # ----- Flow + Output -----
     def _log_geo(self, d):
         self.geo_txt.delete("1.0","end")
         self.geo_txt.insert("end", json.dumps(d, indent=2))
