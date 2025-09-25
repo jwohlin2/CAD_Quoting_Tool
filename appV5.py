@@ -69,6 +69,10 @@ MATERIAL_DROPDOWN_OPTIONS = [
     "Other (enter custom price)",
 ]
 
+# Default material for the dropdown / pricing logic
+DEFAULT_MATERIAL_DISPLAY = "Steel"
+DEFAULT_MATERIAL_KEY = _normalize_lookup_key(DEFAULT_MATERIAL_DISPLAY)
+
 _MATERIAL_ADDITIONAL_KEYWORDS = {
     "Aluminum": {"aluminium"},
     "Berylium Copper": {"beryllium copper", "c172", "cube"},
@@ -165,6 +169,113 @@ def _price_value_to_per_gram(value: float, label: str) -> float | None:
     if _has_any("peroz", "/oz", "$/oz", "per ounce"):
         return base / 28.349523125
     return None
+
+
+# ---------- Material price backup (CSV) ----------
+LB_PER_KG = 2.2046226218
+BACKUP_CSV_NAME = "material_price_backup.csv"
+
+
+def _usdkg_to_usdlb(x: float) -> float:
+    return float(x) / LB_PER_KG if x is not None else x
+
+
+def ensure_material_backup_csv(path: str | None = None) -> str:
+    """
+    Creates a small CSV with dummy prices if it doesn't exist, next to this script.
+    Columns: material_key,usd_per_kg,usd_per_lb,notes
+    """
+    from pathlib import Path
+
+    path = Path(path) if path else Path(__file__).with_name(BACKUP_CSV_NAME)
+    if path.exists():
+        return str(path)
+
+    rows = [
+        # material_key,   usd/kg,  usd/lb (blank -> derived),      notes
+        ("steel",           2.20,   "",  "dummy base"),
+        ("stainless steel", 4.00,   "",  "dummy base"),
+        ("aluminum",        2.80,   "",  "dummy base"),
+        ("copper",          9.50,   "",  "dummy base"),
+        ("brass",           7.80,   "",  "dummy base"),
+        ("titanium",       17.00,   "",  "dummy base"),
+    ]
+
+    lines = ["material_key,usd_per_kg,usd_per_lb,notes\n"]
+    for m, kg, lb, note in rows:
+        if lb in ("", None):
+            lb = kg / LB_PER_KG
+        lines.append(f"{m},{float(kg):.6f},{float(lb):.6f},{note}\n")
+
+    path.write_text("".join(lines), encoding="utf-8")
+    return str(path)
+
+
+def load_backup_prices_csv(path: str | None = None) -> dict:
+    """
+    Returns: {normalized_key: {"usd_per_kg":float,"usd_per_lb":float,"notes":str}, ...}
+    """
+    from pathlib import Path
+    import pandas as pd
+
+    path = Path(path) if path else Path(ensure_material_backup_csv())
+    df = pd.read_csv(path)
+    out = {}
+    for _, r in df.iterrows():
+        key = _normalize_lookup_key(r["material_key"])
+        usdkg = _coerce_float_or_none(r.get("usd_per_kg"))
+        usdlb = _coerce_float_or_none(r.get("usd_per_lb"))
+        if usdkg and not usdlb:
+            usdlb = _usdkg_to_usdlb(usdkg)
+        if usdlb and not usdkg:
+            usdkg = float(usdlb) * LB_PER_KG
+        if usdkg and usdlb:
+            out[key] = {"usd_per_kg": float(usdkg), "usd_per_lb": float(usdlb), "notes": str(r.get("notes", ""))}
+    return out
+
+
+def resolve_material_unit_price(display_name: str, unit: str = "kg") -> tuple[float, str]:
+    """
+    Try Wieland first; if missing/error, fall back to local CSV; finally hardcode steel.
+    unit in {"kg","lb"}; returns (price, source_tag)
+    """
+    key = _normalize_lookup_key(display_name)
+    # 1) Wieland (if installed)
+    try:
+        from wieland_scraper import get_live_material_price
+
+        price, src = get_live_material_price(display_name, unit=unit, fallback_usd_per_kg=float("nan"))
+        if price is not None and math.isfinite(float(price)):
+            return float(price), src
+    except Exception as e:
+        src = f"wieland_error:{type(e).__name__}"
+    else:
+        src = ""
+
+    # 2) CSV
+    try:
+        table = load_backup_prices_csv()
+        rec = table.get(key)
+        if not rec:
+            if "stainless" in key:
+                rec = table.get("stainless steel")
+            elif "steel" in key:
+                rec = table.get("steel")
+            elif "alum" in key:
+                rec = table.get("aluminum")
+            elif "copper" in key or "cu" in key:
+                rec = table.get("copper")
+            elif "brass" in key:
+                rec = table.get("brass")
+        if rec:
+            price = rec["usd_per_kg"] if unit == "kg" else rec["usd_per_lb"]
+            return float(price), f"backup_csv:{BACKUP_CSV_NAME}"
+    except Exception:
+        pass
+
+    # 3) Last-resort hardcoded steel
+    hard = 2.20 if unit == "kg" else (2.20 / LB_PER_KG)
+    return hard, "hardcoded_default"
 
 
 def FACE_OF(s: TopoDS_Shape) -> TopoDS_Face:
@@ -1607,7 +1718,10 @@ class _LocalLLM:
     - Chat if available; otherwise use completion.
     - Always returns best-effort JSON dict.
     """
-    def __init__(self, model_path: str, n_ctx: int = 4096, n_gpu_layers: int = 0, n_threads: int | None = None):
+    def __init__(self, model_path: str,
+                 n_ctx: int = int(os.getenv("QWEN_N_CTX", 32768)),
+                 n_gpu_layers: int = int(os.getenv("QWEN_N_GPU_LAYERS", 0)),
+                 n_threads: int | None = None):
         try:
             from llama_cpp import Llama  # type: ignore
         except Exception as e:
@@ -1623,14 +1737,22 @@ class _LocalLLM:
 
     def _ensure(self):
         if self._llm is None:
-            self._llm = self._Llama(
+            llama_kwargs = dict(
                 model_path=self.model_path,
                 n_ctx=self.n_ctx,
                 n_gpu_layers=self.n_gpu_layers,
                 n_threads=self.n_threads,
+                n_batch=int(os.getenv("QWEN_N_BATCH", 1024)),
                 logits_all=False,
-                verbose=False
+                verbose=False,
             )
+            rope_scale = os.getenv("ROPE_FREQ_SCALE")
+            if rope_scale:
+                try:
+                    llama_kwargs["rope_freq_scale"] = float(rope_scale)
+                except Exception:
+                    pass
+            self._llm = self._Llama(**llama_kwargs)
 
     @staticmethod
     def _extract_json(text: str) -> dict:
@@ -1645,14 +1767,21 @@ class _LocalLLM:
         except Exception:
             return {}
 
-    def ask_json(self, system_prompt: str, user_prompt: str, temperature: float = 0.1, max_tokens: int = 768) -> dict:
+    def ask_json(self, system_prompt: str, user_prompt: str, temperature: float = 0.2, max_tokens: int = 2048) -> dict:
         self._ensure()
         llm = self._llm
+        temp = float(os.getenv("QWEN_TEMP", temperature))
+        top_p = float(os.getenv("QWEN_TOP_P", 0.90))
+        repeat_penalty = float(os.getenv("QWEN_REPEAT_PENALTY", 1.05))
+        max_toks = int(os.getenv("QWEN_MAX_TOKENS", max_tokens))
         try:
             out = llm.create_chat_completion(
                 messages=[{"role":"system","content":system_prompt},
                           {"role":"user","content":user_prompt}],
-                temperature=temperature, max_tokens=max_tokens
+                temperature=temp,
+                top_p=top_p,
+                repeat_penalty=repeat_penalty,
+                max_tokens=max_toks,
             )
             text = out["choices"][0]["message"]["content"]
             js = self._extract_json(text)
@@ -1661,7 +1790,14 @@ class _LocalLLM:
             pass
         try:
             prompt = f"<<SYS>>{system_prompt}<<SYS>>\n\n{user_prompt}\n\nJSON ONLY:"
-            out = llm(prompt=prompt, temperature=temperature, max_tokens=max_tokens, stop=["\n\n"])
+            out = llm(
+                prompt=prompt,
+                temperature=temp,
+                top_p=top_p,
+                repeat_penalty=repeat_penalty,
+                max_tokens=max_toks,
+                stop=["\n\n"],
+            )
             text = out["choices"][0]["text"]
             js = self._extract_json(text)
             if js: return js
@@ -2418,6 +2554,10 @@ def render_quote(
         surpct = material.get("surcharge_pct")
         matcost= material.get("material_cost")
         scrap  = material.get("scrap_pct", None)  # will show only if present in breakdown
+        unit_price_kg = material.get("unit_price_usd_per_kg")
+        unit_price_lb = material.get("unit_price_usd_per_lb")
+        price_source  = material.get("unit_price_source") or material.get("source")
+        price_asof    = material.get("unit_price_asof")
 
         have_any = any(v for v in [mass_g, upg, minchg, surpct, matcost, scrap])
         if have_any:
@@ -2425,7 +2565,21 @@ def render_quote(
             mat_lines.append(divider)
             if matcost or show_zeros: row("Material Cost (computed):", float(matcost or 0.0))
             if mass_g or show_zeros:  write_line(f"Mass: {float(mass_g or 0.0):,.1f} g", "  ")
-            if upg or show_zeros:     write_line(f"Unit Price: {_m(upg or 0)} / g", "  ")
+            if upg or show_zeros:
+                per_bits: list[str] = []
+                if unit_price_kg:
+                    per_bits.append(f"{_m(unit_price_kg)} / kg")
+                if unit_price_lb:
+                    per_bits.append(f"{_m(unit_price_lb)} / lb")
+                extra_parts: list[str] = []
+                if per_bits:
+                    extra_parts.append(f"({', '.join(per_bits)})")
+                if price_asof:
+                    extra_parts.append(f"as of {price_asof}")
+                extra = f" {' '.join(extra_parts)}" if extra_parts else ""
+                write_line(f"Unit Price: {_m(upg or 0)} / g{extra}", "  ")
+            if price_source:
+                write_line(f"Source: {price_source}", "  ")
             if minchg or show_zeros:  write_line(f"Supplier Min Charge: {_m(minchg or 0)}", "  ")
             if surpct or show_zeros:  write_line(f"Surcharge: {_pct(surpct or 0)}", "  ")
             if scrap is not None:     write_line(f"Scrap %: {_pct(scrap)}", "  ")
@@ -2805,6 +2959,24 @@ def compute_material_cost(material_name: str,
         usd_per_kg, source = get_usd_per_kg(symbol, basis)
         basis_used = basis
 
+    # Final fallback to local resolver (Wieland → CSV → default steel)
+    if (usd_per_kg is None) or (not math.isfinite(float(usd_per_kg))) or (usd_per_kg <= 0):
+        resolver_name = material_name or ""
+        if not resolver_name:
+            resolver_name = MATERIAL_DISPLAY_BY_KEY.get(DEFAULT_MATERIAL_KEY, DEFAULT_MATERIAL_DISPLAY)
+        try:
+            resolved_price, resolver_source = resolve_material_unit_price(resolver_name, unit="kg")
+        except Exception:
+            resolved_price, resolver_source = None, ""
+        if resolved_price and math.isfinite(float(resolved_price)):
+            usd_per_kg = float(resolved_price)
+            source = resolver_source or source or "resolver"
+            basis_used = "usd_per_kg"
+
+    if usd_per_kg is None:
+        usd_per_kg = 0.0
+        source = source or "price_unavailable"
+
     premium = float(meta.get("premium_usd_per_kg", 0.0))
     premium_override = overrides.get("premium_usd_per_kg")
     if premium_override is not None:
@@ -2838,9 +3010,15 @@ def compute_material_cost(material_name: str,
         "scrap_pct": scrap_frac,
         "loss_factor": loss_factor,
         "unit_price_usd_per_kg": unit_price,
+        "unit_price_usd_per_lb": unit_price / LB_PER_KG if unit_price else 0.0,
+        "unit_price_source": source,
         "vendor_premium_usd_per_kg": premium,
         "material_cost": cost,
     }
+    if source:
+        m = re.search(r"\(([^)]+)\)\s*$", source)
+        if m:
+            detail["unit_price_asof"] = m.group(1)
     if price_candidates:
         detail["price_lookup_keys"] = price_candidates
     return cost, detail
@@ -3600,15 +3778,21 @@ def compute_quote_from_df(df: pd.DataFrame,
             source = material_detail_for_breakdown.get("source")
             symbol = material_detail_for_breakdown.get("symbol")
             unit_price_kg = material_detail_for_breakdown.get("unit_price_usd_per_kg")
+            unit_price_lb = material_detail_for_breakdown.get("unit_price_usd_per_lb")
             premium = material_detail_for_breakdown.get("vendor_premium_usd_per_kg")
+            asof = material_detail_for_breakdown.get("unit_price_asof")
             if source:
                 detail_bits.append(f"Source: {source}")
             if symbol:
                 detail_bits.append(f"Symbol: {symbol}")
             if unit_price_kg:
                 detail_bits.append(f"Unit ${unit_price_kg:,.2f}/kg")
+            if unit_price_lb:
+                detail_bits.append(f"Unit ${unit_price_lb:,.2f}/lb")
             if premium:
                 detail_bits.append(f"Premium ${premium:,.2f}/kg")
+            if asof:
+                detail_bits.append(f"As of {asof}")
         pass_notes = applied_pass.get(label, {}).get("notes")
         if pass_notes:
             detail_bits.append("LLM: " + ", ".join(pass_notes))
@@ -4556,6 +4740,8 @@ class App(tk.Tk):
     def _populate_editor_tab(self, df: pd.DataFrame) -> None:
         df = coerce_or_make_vars_df(df)
         """Rebuild the Quote Editor tab using the latest variables dataframe."""
+        df = upsert_var_row(df, "Scrap Percent (%)", 15.0, dtype="number")
+        self.vars_df = df
         parent = self.editor_scroll.inner
         for child in parent.winfo_children():
             child.destroy()
@@ -4630,6 +4816,7 @@ class App(tk.Tk):
         row_index = 0
         material_choice_var: tk.StringVar | None = None
         material_price_var: tk.StringVar | None = None
+        self.var_material: tk.StringVar | None = None
 
         def update_material_price(*_):
             if material_choice_var is None or material_price_var is None:
@@ -4642,8 +4829,13 @@ class App(tk.Tk):
                 return
             price = material_lookup.get(norm_choice)
             if price is None:
-                # allow manual override for custom entries
-                return
+                try:
+                    price_per_kg, _src = resolve_material_unit_price(choice, unit="kg")
+                except Exception:
+                    return
+                if not price_per_kg:
+                    return
+                price = float(price_per_kg) / 1000.0
             current_val = _coerce_float_or_none(material_price_var.get())
             if current_val is not None and abs(current_val - price) < 1e-6:
                 return
@@ -4658,8 +4850,10 @@ class App(tk.Tk):
             initial_raw = row_data["Example Values / Options"]
             initial_value = str(initial_raw) if initial_raw is not None else ""
             if normalized_name in {"material"}:
-                var = tk.StringVar(value=initial_value)
-                normalized_initial = _normalize_lookup_key(initial_value)
+                var = tk.StringVar(value=DEFAULT_MATERIAL_DISPLAY)
+                if initial_value:
+                    var.set(initial_value)
+                normalized_initial = _normalize_lookup_key(var.get())
                 for canonical_key, keywords in MATERIAL_KEYWORDS.items():
                     if canonical_key == MATERIAL_OTHER_KEY:
                         continue
@@ -4678,6 +4872,7 @@ class App(tk.Tk):
                 combo.bind("<<ComboboxSelected>>", update_material_price)
                 var.trace_add("write", update_material_price)
                 material_choice_var = var
+                self.var_material = var
                 self.quote_vars[item_name] = var
             elif re.search(r"(Material\s*Price.*(per\s*gram|per\s*g|/g)|Unit\s*Price\s*/\s*g)", item_name, flags=re.IGNORECASE):
                 var = tk.StringVar(value=initial_value)
