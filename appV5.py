@@ -3705,10 +3705,12 @@ def compute_quote_from_df(df: pd.DataFrame,
         "packaging": packaging_cost,
         "ehs_compliance": ehs_cost,
     }
+
     existing_drill_cost = float(process_costs.get("drilling", 0.0) or 0.0)
     existing_drill_hr = existing_drill_cost / drill_rate if drill_rate else 0.0
     baseline_drill_hr = max(existing_drill_hr, float(drill_hr or 0.0))
     process_costs["drilling"] = baseline_drill_hr * drill_rate
+
     process_costs_baseline = {k: float(v) for k, v in process_costs.items()}
 
     process_meta = {
@@ -3822,6 +3824,7 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     hole_diams_ctx = sorted([round(x, 3) for x in hole_diams_list])[:200] if hole_diams_list else []
     quote_inputs_ctx = {str(k): _jsonable(v) for k, v in ui_vars.items()}
+
     geo_payload = _jsonable(dict(geo_context))
     if hole_diams_ctx:
         geo_payload["hole_diams_mm"] = hole_diams_ctx
@@ -3846,6 +3849,7 @@ def compute_quote_from_df(df: pd.DataFrame,
             "add_hr_min": 0.0,
             "add_hr_max": 5.0,
             "scrap_min": 0.0,
+
             "scrap_max": 0.20,
         },
     }
@@ -4254,6 +4258,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                     "process_hour_adders": applied_adders_log,
                     "scrap_pct": scrap_pct,
                     "notes": llm_notes,
+
                     "clamped": notes_from_clamps,
                     "pass_through": {k: v for k, v in applied_pass.items()},
                 }
@@ -4906,10 +4911,12 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
             user_prompt,
             temperature=0.4,
             max_tokens=256,
+
             context={
                 "purpose": "quote_explanation",
                 "summary_keys": list(summary.keys()),
             },
+
         )
         if (
             isinstance(parsed, dict)
