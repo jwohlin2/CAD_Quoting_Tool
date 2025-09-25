@@ -2687,6 +2687,7 @@ def render_quote(
 RATES_DEFAULT = {
     "ProgrammingRate": 120.0,
     "MillingRate": 120.0,
+    "DrillingRate": 120.0,
     "TurningRate": 115.0,
     "WireEDMRate": 140.0,
     "SinkerEDMRate": 150.0,
@@ -3024,12 +3025,104 @@ def compute_material_cost(material_name: str,
     return cost, detail
 
 
+def _material_family(material: str) -> str:
+    name = (material or "").strip().lower()
+    if not name:
+        return "steel"
+    if any(tag in name for tag in ("alum", "6061", "7075", "2024", "5052", "5083")):
+        return "alum"
+    if any(tag in name for tag in ("stainless", "17-4", "17 4", "316", "304", "ss")):
+        return "stainless"
+    return "steel"
+
+
+def require_plate_inputs(geo: dict, ui_vars: dict[str, Any] | None) -> None:
+    ui_vars = ui_vars or {}
+    thickness_val = ui_vars.get("Thickness (in)")
+    thickness_in = _coerce_float_or_none(thickness_val)
+    if thickness_in is None:
+        try:
+            thickness_in = float(thickness_val)
+        except Exception:
+            thickness_in = 0.0
+    material = str(ui_vars.get("Material") or "").strip()
+    geo_missing: list[str] = []
+
+    if not material:
+        geo_missing.append("material")
+    if not geo.get("thickness_mm") and (thickness_in or 0.0) <= 0:
+        geo_missing.append("thickness")
+
+    if geo_missing:
+        raise ValueError(
+            "Missing required inputs for plate quote: "
+            + ", ".join(geo_missing)
+            + ". Set Material and Thickness in the Quote Editor."
+        )
+
+    thickness_in = float(thickness_in or 0.0)
+    if thickness_in > 0 and not geo.get("thickness_mm"):
+        geo["thickness_mm"] = thickness_in * 25.4
+    if material and not geo.get("material"):
+        geo["material"] = material
+
+
+def estimate_drilling_hours(hole_diams_mm: list[float], thickness_mm: float, mat_key: str) -> float:
+    """Crudely estimate drilling cycle time (hours) for plate holes."""
+    if not hole_diams_mm or thickness_mm <= 0:
+        return 0.0
+
+    mat = (mat_key or "").lower()
+    f_mm_rev = 0.10
+    if "alum" in mat:
+        f_mm_rev = 0.25
+    elif "stainless" in mat or "17-4" in mat or "17 4" in mat or "316" in mat:
+        f_mm_rev = 0.06
+
+    rpm_cap = 3500
+    retract_factor = 1.30
+    toolchange_s_per_group = 18.0
+
+    from collections import Counter
+
+    groups = Counter(round(float(d), 2) for d in hole_diams_mm if d and math.isfinite(d))
+
+    sec = 0.0
+    for d_mm, qty in groups.items():
+        if qty <= 0:
+            continue
+        diameter = max(1.0, float(d_mm))
+        vc_m_min = 120 if "alum" in mat else 50
+        rpm = min(rpm_cap, max(200, (vc_m_min * 1000.0) / (math.pi * diameter)))
+        feed_mm_min = max(60.0, rpm * f_mm_rev)
+        depth_mm = float(thickness_mm)
+        time_per = retract_factor * (depth_mm / feed_mm_min)
+        sec += qty * time_per * 60.0
+        sec += toolchange_s_per_group
+
+    return sec / 3600.0
+
+
+def validate_quote_before_pricing(geo: dict, process_costs: dict[str, float], pass_through: dict[str, Any]) -> None:
+    issues: list[str] = []
+    hole_cost = sum(float(process_costs.get(k, 0.0)) for k in ("drilling", "milling"))
+    if geo.get("hole_diams_mm") and hole_cost < 50:
+        issues.append("Unusually low machining time for number of holes.")
+    material_cost = float(pass_through.get("Material", 0.0) or 0.0)
+    if material_cost < 5.0:
+        issues.append("Material cost is near zero; check material & thickness.")
+    if issues:
+        raise ValueError("Quote blocked:\n- " + "\n- ".join(issues))
+
+
 def compute_quote_from_df(df: pd.DataFrame,
                           params: Dict[str, Any] | None = None,
                           rates: Dict[str, float] | None = None,
                           *,
                           llm_enabled: bool = True,
-                          llm_model_path: str | None = None) -> Dict[str, Any]:
+                          llm_model_path: str | None = None,
+                          geo: dict[str, Any] | None = None,
+                          ui_vars: dict[str, Any] | None = None) -> Dict[str, Any]:
     """
     Estimator that consumes variables from the sheet (Item, Example Values / Options, Data Type / Input Method).
 
@@ -3045,8 +3138,23 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     params = {**PARAMS_DEFAULT, **(params or {})}
     rates = {**RATES_DEFAULT, **(rates or {})}
+    rates.setdefault("DrillingRate", rates.get("MillingRate", 0.0))
     if llm_model_path is None:
         llm_model_path = str(params.get("LLMModelPath", "") or "")
+    if ui_vars is None:
+        try:
+            ui_vars = {
+                str(row["Item"]): row["Example Values / Options"]
+                for _, row in df.iterrows()
+            }
+        except Exception:
+            ui_vars = {}
+    else:
+        ui_vars = dict(ui_vars)
+    geo_context = dict(geo or {})
+    is_plate_2d = str(geo_context.get("kind", "")).lower() == "2d"
+    if is_plate_2d:
+        require_plate_inputs(geo_context, ui_vars)
     # ---- sheet views ---------------------------------------------------------
     items = df["Item"].astype(str)
     vals  = df["Example Values / Options"]
@@ -3181,6 +3289,37 @@ def compute_quote_from_df(df: pd.DataFrame,
         if fallback_name and not re.fullmatch(r"\s*[$0-9.,]+\s*", str(fallback_name)):
             material_name_raw = fallback_name
     material_name = str(material_name_raw or "").strip()
+    if not material_name and geo_context.get("material"):
+        material_name = str(geo_context.get("material"))
+    if material_name:
+        geo_context.setdefault("material", material_name)
+    material_name = str(geo_context.get("material") or material_name or "").strip()
+
+    if is_plate_2d:
+        length_in_val = _coerce_float_or_none(ui_vars.get("Plate Length (in)"))
+        width_in_val = _coerce_float_or_none(ui_vars.get("Plate Width (in)"))
+        thickness_mm_val = _coerce_float_or_none(geo_context.get("thickness_mm"))
+        if thickness_mm_val is None:
+            t_in = _coerce_float_or_none(ui_vars.get("Thickness (in)"))
+            if t_in is not None:
+                thickness_mm_val = float(t_in) * 25.4
+        thickness_mm_val = float(thickness_mm_val or 0.0)
+        if thickness_mm_val > 0:
+            geo_context["thickness_mm"] = thickness_mm_val
+        length_mm = float(length_in_val or 0.0) * 25.4
+        width_mm = float(width_in_val or 0.0) * 25.4
+        if length_mm > 0:
+            geo_context.setdefault("plate_length_mm", length_mm)
+        if width_mm > 0:
+            geo_context.setdefault("plate_width_mm", width_mm)
+        vol_mm3_plate = max(1.0, length_mm * width_mm * max(thickness_mm_val, 0.0))
+        vol_cm3 = max(vol_cm3, vol_mm3_plate / 1000.0)
+        GEO_vol_mm3 = max(GEO_vol_mm3, vol_mm3_plate)
+        density_lookup = {"steel": 7.85, "stainless": 7.9, "alum": 2.70}
+        density_g_cc = density_lookup.get(
+            _material_family(geo_context.get("material") or material_name),
+            density_lookup["steel"],
+        )
 
     net_mass_g = max(0.0, vol_cm3 * density_g_cc)
     effective_mass_g = net_mass_g * (1.0 + scrap_pct)
@@ -3251,6 +3390,29 @@ def compute_quote_from_df(df: pd.DataFrame,
     material_detail_for_breakdown["material_direct_cost"] = material_direct_cost
     if provider_cost is not None:
         material_detail_for_breakdown["provider_cost"] = float(provider_cost)
+
+    if is_plate_2d:
+        scrap_frac = float(scrap_pct or 0.0)
+        mat_for_price = geo_context.get("material") or material_name
+        try:
+            mat_usd_per_kg, mat_src = resolve_material_unit_price(mat_for_price, unit="kg")
+        except Exception:
+            mat_usd_per_kg, mat_src = 0.0, ""
+        mat_usd_per_kg = float(mat_usd_per_kg or 0.0)
+        material_cost = mass_kg * (1.0 + scrap_frac) * mat_usd_per_kg
+        material_direct_cost = round(material_cost, 2)
+        material_detail_for_breakdown.update({
+            "material_name": mat_for_price,
+            "mass_g_net": mass_kg * 1000.0,
+            "mass_g": mass_kg * 1000.0 * (1.0 + scrap_frac),
+            "scrap_pct": scrap_frac,
+            "unit_price_usd_per_kg": mat_usd_per_kg,
+            "unit_price_per_g": mat_usd_per_kg / 1000.0 if mat_usd_per_kg else material_detail_for_breakdown.get("unit_price_per_g", 0.0),
+            "unit_price_usd_per_lb": (mat_usd_per_kg / LB_PER_KG) if mat_usd_per_kg else material_detail_for_breakdown.get("unit_price_usd_per_lb"),
+            "source": mat_src or material_detail_for_breakdown.get("source", ""),
+        })
+        material_detail_for_breakdown["material_cost"] = material_direct_cost
+        material_detail_for_breakdown["material_direct_cost"] = material_direct_cost
 
     # ---- programming / cam / dfm --------------------------------------------
     prog_hr = sum_time(r"(?:Programming|2D\s*CAM|3D\s*CAM|Simulation|Verification|DFM|Setup\s*Sheets)", exclude_pattern=r"\bCMM\b")
@@ -3445,6 +3607,23 @@ def compute_quote_from_df(df: pd.DataFrame,
     ehs_hr   = sum_time(r"(?:EHS|Compliance|Training|Waste\s*Handling)")
     ehs_cost = ehs_hr * rates["InspectionRate"]
 
+    raw_holes = geo_context.get("hole_diams_mm") or []
+    hole_diams_list: list[float] = []
+    for _d in raw_holes:
+        val = _coerce_float_or_none(_d)
+        if val is None:
+            try:
+                val = float(_d)
+            except Exception:
+                continue
+        hole_diams_list.append(float(val))
+    if hole_diams_list:
+        geo_context["hole_diams_mm"] = hole_diams_list
+    thickness_for_drill = _coerce_float_or_none(geo_context.get("thickness_mm")) or 0.0
+    drill_material_key = geo_context.get("material") or material_name
+    drill_hr = estimate_drilling_hours(hole_diams_list, float(thickness_for_drill or 0.0), drill_material_key or "")
+    drill_rate = float(rates.get("DrillingRate") or rates.get("MillingRate", 0.0) or 0.0)
+
     # ---- roll-ups ------------------------------------------------------------
     inspection_hr_total = inproc_hr + final_hr + cmm_prog_hr + cmm_run_hr + fair_hr + srcinsp_hr
 
@@ -3462,6 +3641,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         "packaging": packaging_cost,
         "ehs_compliance": ehs_cost,
     }
+    process_costs["drilling"] = drill_hr * drill_rate
 
     process_meta = {
         "milling":          {"hr": eff(milling_hr), "rate": rates.get("MillingRate", 0.0)},
@@ -3478,6 +3658,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         "packaging":        {"hr": packaging_hr,    "rate": rates.get("PackagingRate", rates.get("AssemblyRate", 0.0))},
         "ehs_compliance":   {"hr": ehs_hr,          "rate": rates.get("InspectionRate", 0.0)},
     }
+    process_meta["drilling"] = {"hr": drill_hr, "rate": drill_rate}
     for key, meta in process_meta.items():
         rate = float(meta.get("rate", 0.0))
         hr = float(meta.get("hr", 0.0))
@@ -3530,6 +3711,16 @@ def compute_quote_from_df(df: pd.DataFrame,
         "scrap_pct": scrap_pct,
         "material_cost_baseline": material_cost,
     }
+    hole_tool_sizes = sorted({round(x, 2) for x in hole_diams_list}) if hole_diams_list else []
+    features.update({
+        "is_2d": bool(is_plate_2d),
+        "hole_count": len(hole_diams_list),
+        "hole_tool_sizes": hole_tool_sizes,
+        "profile_length_mm": float(_coerce_float_or_none(geo_context.get("profile_length_mm")) or 0.0),
+        "thickness_mm": float(_coerce_float_or_none(geo_context.get("thickness_mm")) or 0.0),
+        "material_key": geo_context.get("material") or material_name,
+        "drilling_hr_baseline": drill_hr,
+    })
 
     base_costs = {
         "process_costs": {k: float(v) for k, v in process_costs.items()},
@@ -3596,7 +3787,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         actual = process_key_map.get(_normalize_key(key))
         if not actual:
             continue
-        mult = clamp(mult, 0.6, 1.6, 1.0)
+        mult = clamp(mult, 0.5, 3.0, 1.0)
         old_cost = float(process_costs.get(actual, 0.0))
         if old_cost <= 0:
             continue
@@ -3624,7 +3815,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     for key, add_hr in (ph_add or {}).items():
         if not isinstance(add_hr, (int, float)):
             continue
-        add_hr = clamp(add_hr, 0.0, 3.0, 0.0)
+        add_hr = clamp(add_hr, 0.0, 5.0, 0.0)
         if add_hr <= 0:
             continue
         actual = process_key_map.get(_normalize_key(key))
@@ -3694,6 +3885,8 @@ def compute_quote_from_df(df: pd.DataFrame,
             pass_through[label] = round(float(value), 2)
         except Exception:
             pass_through[label] = 0.0
+
+    validate_quote_before_pricing(geo_context, process_costs, pass_through)
 
     for key, entry in applied_process.items():
         entry["new_hr"] = float(process_meta.get(key, {}).get("hr", entry.get("new_hr", entry["old_hr"])))
@@ -4410,10 +4603,18 @@ def apply_2d_features_to_variables(df, g2d: dict, *, params: dict, rates: dict):
 
 
 
-def set_row(pattern: str, value: float):
-    def _to_noncapturing(expr: str) -> str:
-        out: list[str] = []
-        i = 0
+    thickness_mm = _coerce_float_or_none(g2d.get("thickness_mm"))
+    thickness_in = (float(thickness_mm) / 25.4) if thickness_mm else 0.0
+    df = upsert_var_row(df, "Material", g2d.get("material") or "", dtype="text")
+    df = upsert_var_row(df, "Thickness (in)", round(thickness_in, 4) if thickness_in else 0.0, dtype="number")
+    df = upsert_var_row(df, "Plate Length (in)", 12.0, dtype="number")
+    df = upsert_var_row(df, "Plate Width (in)", 14.0, dtype="number")
+    df = upsert_var_row(df, "Scrap Percent (%)", 15.0, dtype="number")
+
+    def set_row(pattern: str, value: float):
+        def _to_noncapturing(expr: str) -> str:
+            out: list[str] = []
+            i = 0
         while i < len(expr):
             ch = expr[i]
             prev = expr[i - 1] if i > 0 else ''
@@ -4565,8 +4766,8 @@ def get_llm_overrides(model_path: str, features: dict, base_costs: dict) -> dict
         "You are a manufacturing cost advisor. Given CAD/quote features and base costs, "
         "propose small, bounded overrides ONLY when justified by geometry/material/complexity. "
         "Hard constraints: "
-        "scrap_pct_override in [0, 0.50]; each process_hour_multipliers value in [0.6, 1.6]; "
-        "adders in hours in [0.0, 3.0]; added pass-through dollars in [0, 200.0] per item; "
+        "scrap_pct_override in [0, 0.50]; each process_hour_multipliers value in [0.5, 3.0]; "
+        "adders in hours in [0.0, 5.0]; added pass-through dollars in [0, 200.0] per item; "
         "fixture_material_cost_delta in [-200.0, 200.0]; contingency_pct_override in [0.0, 0.25]. "
         "Return compact JSON only with the keys you want to change."
     )
@@ -4588,10 +4789,10 @@ def get_llm_overrides(model_path: str, features: dict, base_costs: dict) -> dict
         out["scrap_pct_override"] = clamp(scr, 0.0, 0.50, None)
 
     mults = _safe_get(raw, "process_hour_multipliers", dict, {})
-    out["process_hour_multipliers"] = {k.lower(): clamp(v, 0.6, 1.6, 1.0) for k, v in mults.items() if isinstance(v, (int, float))}
+    out["process_hour_multipliers"] = {k.lower(): clamp(v, 0.5, 3.0, 1.0) for k, v in mults.items() if isinstance(v, (int, float))}
 
     adds = _safe_get(raw, "process_hour_adders", dict, {})
-    out["process_hour_adders"] = {k.lower(): clamp(v, 0.0, 3.0, 0.0) for k, v in adds.items() if isinstance(v, (int, float))}
+    out["process_hour_adders"] = {k.lower(): clamp(v, 0.0, 5.0, 0.0) for k, v in adds.items() if isinstance(v, (int, float))}
 
     addpt = _safe_get(raw, "add_pass_through", dict, {})
     out["add_pass_through"] = {str(k): clamp(v, 0.0, 200.0, 0.0) for k, v in addpt.items() if isinstance(v, (int, float))}
@@ -4740,7 +4941,17 @@ class App(tk.Tk):
     def _populate_editor_tab(self, df: pd.DataFrame) -> None:
         df = coerce_or_make_vars_df(df)
         """Rebuild the Quote Editor tab using the latest variables dataframe."""
-        df = upsert_var_row(df, "Scrap Percent (%)", 15.0, dtype="number")
+        def _ensure_row(dataframe: pd.DataFrame, item: str, value: Any, dtype: str = "number") -> pd.DataFrame:
+            mask = dataframe["Item"].astype(str).str.fullmatch(item, case=False)
+            if mask.any():
+                return dataframe
+            return upsert_var_row(dataframe, item, value, dtype=dtype)
+
+        df = _ensure_row(df, "Scrap Percent (%)", 15.0, dtype="number")
+        df = _ensure_row(df, "Plate Length (in)", 12.0, dtype="number")
+        df = _ensure_row(df, "Plate Width (in)", 14.0, dtype="number")
+        df = _ensure_row(df, "Thickness (in)", 0.25, dtype="number")
+        df = _ensure_row(df, "Material", "", dtype="text")
         self.vars_df = df
         parent = self.editor_scroll.inner
         for child in parent.winfo_children():
@@ -5255,13 +5466,28 @@ class App(tk.Tk):
 
         self.apply_overrides(notify=False)
 
-        res = compute_quote_from_df(
-            self.vars_df,
-            params=self.params,
-            rates=self.rates,
-            llm_enabled=self.llm_enabled.get(),
-            llm_model_path=self.llm_model_path.get().strip() or None,
-        )
+        try:
+            ui_vars = {
+                str(row["Item"]): row["Example Values / Options"]
+                for _, row in self.vars_df.iterrows()
+            }
+        except Exception:
+            ui_vars = {}
+
+        try:
+            res = compute_quote_from_df(
+                self.vars_df,
+                params=self.params,
+                rates=self.rates,
+                llm_enabled=self.llm_enabled.get(),
+                llm_model_path=self.llm_model_path.get().strip() or None,
+                geo=self.geo,
+                ui_vars=ui_vars,
+            )
+        except ValueError as err:
+            messagebox.showerror("Quote blocked", str(err))
+            self.status_var.set("Quote blocked.")
+            return
         model_path = self.llm_model_path.get().strip()
         llm_explanation = get_llm_quote_explanation(res, model_path)
         report = render_quote(res, currency="$", show_zeros=False, llm_explanation=llm_explanation)
