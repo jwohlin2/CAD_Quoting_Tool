@@ -20,8 +20,10 @@ import os
 import re
 import sys
 import textwrap
+import time
 import tkinter as tk
 import tkinter.font as tkfont
+import urllib.request
 from importlib import import_module
 from pathlib import Path
 from typing import Any, Dict
@@ -98,6 +100,24 @@ for display in MATERIAL_DROPDOWN_OPTIONS:
         MATERIAL_DISPLAY_BY_KEY[key] = display
 
 MATERIAL_OTHER_KEY = _normalize_lookup_key(MATERIAL_DROPDOWN_OPTIONS[-1])
+
+
+MATERIAL_MAP: dict[str, dict[str, float | str]] = {
+    # Aluminum alloys → Aluminum cash index
+    "6061": {"symbol": "XAL", "basis": "index_usd_per_tonne", "loss_factor": 0.0, "wieland_key": "6061"},
+    "6061-T6": {"symbol": "XAL", "basis": "index_usd_per_tonne", "wieland_key": "6061-T6"},
+    "7075": {"symbol": "XAL", "basis": "index_usd_per_tonne", "wieland_key": "7075"},
+
+    # Stainless → approximate with Nickel + premium or use vendor CSV override
+    "304": {"symbol": "XNI", "basis": "index_usd_per_tonne", "premium_usd_per_kg": 1.20, "wieland_key": "304"},
+    "316": {"symbol": "XNI", "basis": "index_usd_per_tonne", "premium_usd_per_kg": 1.80, "wieland_key": "316"},
+
+    # Copper alloys → Copper
+    "C110": {"symbol": "XCU", "basis": "index_usd_per_tonne", "wieland_key": "C110"},
+
+    # Precious (if you ever quote)
+    "AU-9999": {"symbol": "XAU", "basis": "usd_per_troy_oz"},
+}
 
 
 def _coerce_float_or_none(value: Any) -> float | None:
@@ -2324,9 +2344,26 @@ def render_quote(
     llm_explanation: str = "",
     page_width: int = 74,
 ) -> str:
-    breakdown = result.get("breakdown", {}) or {}
-    price = float(result.get("price", 0.0))
-    qty = int(breakdown.get("qty", 1) or 1)
+    """Pretty printer for a full quote with auto-included non-zero lines."""
+    breakdown    = result.get("breakdown", {}) or {}
+    totals       = breakdown.get("totals", {}) or {}
+    nre_detail   = breakdown.get("nre_detail", {}) or {}
+    nre          = breakdown.get("nre", {}) or {}
+    material     = breakdown.get("material", {}) or {}
+    process_costs= breakdown.get("process_costs", {}) or {}
+    pass_through = breakdown.get("pass_through", {}) or {}
+    applied_pcts = breakdown.get("applied_pcts", {}) or {}
+    process_meta = {str(k).lower(): (v or {}) for k, v in (breakdown.get("process_meta", {}) or {}).items()}
+    rates        = breakdown.get("rates", {}) or {}
+    params       = breakdown.get("params", {}) or {}
+    qty          = int(breakdown.get("qty", 1) or 1)
+    price        = float(result.get("price", totals.get("price", 0.0)))
+
+    # Optional: LLM decision bullets can be placed either on result or breakdown
+    llm_notes = (result.get("llm_notes") or breakdown.get("llm_notes") or [])[:8]
+
+    # ---- helpers -------------------------------------------------------------
+    divider = "-" * int(page_width)
 
     def _m(x) -> str:
         return f"{currency}{float(x):,.2f}"
@@ -2337,167 +2374,153 @@ def render_quote(
     def _pct(x) -> str:
         return f"{float(x or 0.0) * 100:.1f}%"
 
-    totals = breakdown.get("totals", {}) or {}
-    nre_detail = breakdown.get("nre_detail", {}) or {}
-    prog_detail = nre_detail.get("programming", {}) or {}
-    fix_detail = nre_detail.get("fixture", {}) or {}
-    process_costs = breakdown.get("process_costs", {}) or {}
-    pass_through = breakdown.get("pass_through", {}) or {}
-    applied_pcts = breakdown.get("applied_pcts", {}) or {}
+    def write_line(s: str, indent: str = ""):
+        lines.append(f"{indent}{s}")
 
-    process_meta = {str(k).lower(): v or {} for k, v in (breakdown.get("process_meta", {}) or {}).items()}
-    pass_meta = {str(k).lower(): v or {} for k, v in (breakdown.get("pass_meta", {}) or {}).items()}
-    fixture_material_cost = float(breakdown.get("fixture_material_cost", fix_detail.get("mat_cost", 0.0) or 0.0))
-    material_direct_cost = float(breakdown.get("material_direct_cost", pass_through.get("material_direct_cost", 0.0) or 0.0))
-    total_direct_costs = float(breakdown.get("total_direct_costs", totals.get("direct_costs", 0.0) or 0.0))
+    def row(label: str, val: float, indent: str = ""):
+        # left-label, right-amount aligned to page_width
+        left = f"{indent}{label}"
+        right = _m(val)
+        pad = max(1, page_width - len(left) - len(right))
+        lines.append(f"{left}{' ' * pad}{right}")
 
-    lines: list[str] = []
-    divider = "-" * page_width
-
-    def write_line(left: str, right: str = "", indent: str = "") -> None:
-        left = f"{indent}{left}"
-        right = str(right)
-        if not right:
-            lines.append(left)
-            return
-        max_left = max(1, page_width - len(right) - 1)
-        if len(left) > max_left:
-            left = left[: max_left - 1] + "..."
-        lines.append(left + " " * (page_width - len(left) - len(right)) + right)
-
-    def _nonzero(value: Any) -> bool:
-        try:
-            return not math.isclose(float(value), 0.0, abs_tol=1e-9)
-        except Exception:
-            return bool(value)
-
-    def row(label: str, value, indent: str = "") -> None:
-        write_line(label, _m(value), indent)
-
-    def add_process_notes(key: str, indent: str = "  ") -> None:
-        meta = process_meta.get(key) or process_meta.get(key.replace('_', ' ').title())
-        if not meta:
-            return
-        hr = float(meta.get("hr") or 0.0)
-        rate = float(meta.get("rate") or 0.0)
+    def add_process_notes(key: str, indent: str = "    "):
+        k = str(key).lower()
+        meta = process_meta.get(k) or {}
+        # show hours/rate if available
+        hr  = meta.get("hr")
+        rate= meta.get("rate") or rates.get(k.title() + "Rate")
         if hr:
-            note = _h(hr)
-            if rate:
-                note += f" @ {_m(rate)}/hr"
-            write_line(note, indent=indent + "    ")
+            write_line(f"{_h(hr)} @ {_m(rate or 0)}/hr", indent)
 
-    def add_pass_basis(key: str, indent: str = "  ") -> None:
-        meta = pass_meta.get(key) or pass_meta.get(key.replace('_', ' ').title())
-        if not meta:
-            return
-        basis = meta.get("basis")
-        if basis:
-            write_line(basis, indent=indent + "    ")
+    def add_pass_basis(key: str, indent: str = "    "):
+        basis_map = breakdown.get("pass_basis", {}) or {}
+        info = basis_map.get(key) or {}
+        txt = info.get("basis") or info.get("note")
+        if txt:
+            write_line(str(txt), indent)
 
-    # Header
+    # ---- header --------------------------------------------------------------
+    lines: list[str] = []
     lines.append(f"QUOTE SUMMARY - Qty {qty}")
     lines.append(divider)
     row("Final Price per Part:", price)
-    row("Total Labor Cost:", totals.get("labor_cost", 0.0))
-    row("Total Direct Costs:", totals.get("direct_costs", 0.0))
+    row("Total Labor Cost:", float(totals.get("labor_cost", 0.0)))
+    row("Total Direct Costs:", float(totals.get("direct_costs", 0.0)))
     lines.append("")
 
-    # NRE / Setup
+    # ---- material & stock (compact; shown only if we actually have data) -----
+    mat_lines = []
+    if material:
+        mass_g = material.get("mass_g")
+        upg    = material.get("unit_price_per_g")
+        minchg = material.get("supplier_min_charge")
+        surpct = material.get("surcharge_pct")
+        matcost= material.get("material_cost")
+        scrap  = material.get("scrap_pct", None)  # will show only if present in breakdown
+
+        have_any = any(v for v in [mass_g, upg, minchg, surpct, matcost, scrap])
+        if have_any:
+            mat_lines.append("Material & Stock")
+            mat_lines.append(divider)
+            if matcost or show_zeros: row("Material Cost (computed):", float(matcost or 0.0))
+            if mass_g or show_zeros:  write_line(f"Mass: {float(mass_g or 0.0):,.1f} g", "  ")
+            if upg or show_zeros:     write_line(f"Unit Price: {_m(upg or 0)} / g", "  ")
+            if minchg or show_zeros:  write_line(f"Supplier Min Charge: {_m(minchg or 0)}", "  ")
+            if surpct or show_zeros:  write_line(f"Surcharge: {_pct(surpct or 0)}", "  ")
+            if scrap is not None:     write_line(f"Scrap %: {_pct(scrap)}", "  ")
+            mat_lines.append("")
+
+    lines.extend(mat_lines)
+
+    # ---- NRE / Setup costs ---------------------------------------------------
     lines.append("NRE / Setup Costs (per lot)")
     lines.append(divider)
-    prog_per_lot = float(prog_detail.get("per_lot", 0.0) or 0.0)
-    if prog_detail and (_nonzero(prog_per_lot) or show_zeros):
-        row("Programming & Eng:", prog_per_lot)
-        prog_hr = prog_detail.get('prog_hr', 0.0)
-        if _nonzero(prog_hr) or show_zeros:
-            write_line(f"- Programmer: {_h(prog_hr)} @ {_m(prog_detail.get('prog_rate', 0))}/hr", indent="    ")
-        cam_hr = prog_detail.get('cam_hr', 0.0)
-        if _nonzero(cam_hr) or show_zeros:
-            write_line(f"- CAM: {_h(cam_hr)} @ {_m(prog_detail.get('cam_rate', 0))}/hr", indent="    ")
-    fix_per_lot = float(fix_detail.get("per_lot", 0.0) or 0.0)
-    if fix_detail and (_nonzero(fix_per_lot) or show_zeros):
-        row("Fixturing:", fix_per_lot)
-        build_hr = fix_detail.get('build_hr', 0.0)
-        if _nonzero(build_hr) or show_zeros:
-            write_line(f"- Build Labor: {_h(build_hr)} @ {_m(fix_detail.get('build_rate', 0))}/hr", indent="    ")
-        if fixture_material_cost or show_zeros:
-            write_line(f"- Fixture Material Cost: {_m(fixture_material_cost)}", indent="    ")
-    lines.append("")
+    prog = nre_detail.get("programming") or {}
+    fix  = nre_detail.get("fixture") or {}
 
-    # Process & Labor
+    # Programming & Eng (auto-hide if zero unless show_zeros)
+    if (prog.get("per_lot", 0.0) > 0) or show_zeros or any(prog.get(k) for k in ("prog_hr", "cam_hr", "eng_hr")):
+        row("Programming & Eng:", float(prog.get("per_lot", 0.0)))
+        if prog.get("prog_hr"): write_line(f"- Programmer: {_h(prog['prog_hr'])} @ {_m(prog.get('prog_rate', 0))}/hr", "    ")
+        if prog.get("cam_hr"):  write_line(f"- CAM: {_h(prog['cam_hr'])} @ {_m(prog.get('cam_rate', 0))}/hr", "    ")
+        if prog.get("eng_hr"):  write_line(f"- Engineering: {_h(prog['eng_hr'])} @ {_m(prog.get('eng_rate', 0))}/hr", "    ")
+
+    # Fixturing (with renamed subline)
+    if (fix.get("per_lot", 0.0) > 0) or show_zeros or any(fix.get(k) for k in ("build_hr", "mat_cost")):
+        row("Fixturing:", float(fix.get("per_lot", 0.0)))
+        if fix.get("build_hr"):
+            write_line(f"- Build Labor: {_h(fix['build_hr'])} @ {_m(fix.get('build_rate', 0))}/hr", "    ")
+        write_line(f"- Fixture Material Cost: {_m(fix.get('mat_cost', 0.0))}", "    ")
+
+    # Any other NRE numeric keys (auto include)
+    other_nre_total = 0.0
+    for k, v in (nre or {}).items():
+        if k in ("programming_per_part", "fixture_per_part"):  # these are per-part rollups
+            continue
+        if isinstance(v, (int, float)) and (v > 0 or show_zeros):
+            row(k.replace("_", " ").title() + ":", float(v))
+            other_nre_total += float(v)
+    if (prog or fix or other_nre_total > 0) and not lines[-1].strip() == "":
+        lines.append("")
+
+    # ---- Process & Labor (auto include non-zeros; sorted desc) ---------------
     lines.append("Process & Labor Costs")
     lines.append(divider)
     proc_total = 0.0
-    for key, value in sorted(process_costs.items(), key=lambda kv: kv[1], reverse=True):
-        if _nonzero(value) or show_zeros:
-            label = key.replace('_', ' ').title()
-            row(label, value, indent="  ")
-            add_process_notes(key, indent="  ")
-            proc_total += float(value)
+    for key, value in sorted((process_costs or {}).items(), key=lambda kv: kv[1], reverse=True):
+        if (value > 0) or show_zeros:
+            label = key.replace("_", " ").title()
+            row(label, float(value), indent="  ")
+            add_process_notes(key, indent="    ")
+            proc_total += float(value or 0.0)
     row("Total", proc_total, indent="  ")
     lines.append("")
 
-    # Pass-Through
+    # ---- Pass-Through & Direct (auto include non-zeros; sorted desc) --------
     lines.append("Pass-Through & Direct Costs")
     lines.append(divider)
-    def _pass_value(key: str) -> float:
-        try:
-            return float(pass_through.get(key, 0.0) or 0.0)
-        except Exception:
-            return 0.0
-
-    consumables_hr_cost = _pass_value("consumables_hr_cost")
-    utilities_cost = _pass_value("utilities_cost")
-    consumables_flat = _pass_value("consumables_flat")
-
-    if _nonzero(consumables_hr_cost) or show_zeros:
-        row("Consumables /Hr Cost", consumables_hr_cost, indent="  ")
-        add_pass_basis("consumables_hr_cost", indent="  ")
-    if _nonzero(utilities_cost) or show_zeros:
-        row("Utilities Cost", utilities_cost, indent="  ")
-        add_pass_basis("utilities_cost", indent="  ")
-    if _nonzero(consumables_flat) or show_zeros:
-        row("Consumables Flat", consumables_flat, indent="  ")
-        add_pass_basis("consumables_flat", indent="  ")
-
-    if _nonzero(material_direct_cost) or show_zeros:
-        row("Material", material_direct_cost, indent="  ")
-        add_pass_basis("material_direct_cost", indent="  ")
-    if _nonzero(fixture_material_cost) or show_zeros:
-        row("Fixture Material Cost", fixture_material_cost, indent="  ")
-        add_pass_basis("fixture_material_cost", indent="  ")
-
-    handled_keys = {"consumables_hr_cost", "utilities_cost", "consumables_flat", "material_direct_cost", "fixture_material_cost"}
-    for key, value in pass_through.items():
-        if key in handled_keys:
-            continue
-        if _nonzero(value) or show_zeros:
-            label = key.replace('_', ' ').replace('hr', '/hr').title()
-            row(label, value, indent="  ")
-            add_pass_basis(key, indent="  ")
-
-    row("Total", total_direct_costs, indent="  ")
+    pass_total = 0.0
+    for key, value in sorted((pass_through or {}).items(), key=lambda kv: kv[1], reverse=True):
+        if (value > 0) or show_zeros:
+            # cosmetic: "consumables_hr_cost" → "Consumables /Hr Cost"
+            label = key.replace("_", " ").replace("hr", "/hr").title()
+            row(label, float(value), indent="  ")
+            add_pass_basis(key, indent="    ")
+            pass_total += float(value or 0.0)
+    row("Total", pass_total, indent="  ")
     lines.append("")
 
-    # Pricing ladder
+    # ---- Pricing ladder ------------------------------------------------------
     lines.append("Pricing Ladder")
     lines.append(divider)
-    subtotal = float(totals.get("subtotal", 0.0))
-    with_overhead = float(totals.get("with_overhead", subtotal))
-    with_ga = float(totals.get("with_ga", with_overhead))
+    subtotal         = float(totals.get("subtotal",         proc_total + pass_total))
+    with_overhead    = float(totals.get("with_overhead",    subtotal))
+    with_ga          = float(totals.get("with_ga",          with_overhead))
     with_contingency = float(totals.get("with_contingency", with_ga))
-    with_expedite = float(totals.get("with_expedite", with_contingency))
+    with_expedite    = float(totals.get("with_expedite",    with_contingency))
 
     row("Subtotal (Labor + Directs):", subtotal)
-    row(f"+ Overhead ({_pct(applied_pcts.get('OverheadPct'))}):", with_overhead - subtotal)
-    row(f"+ G&A ({_pct(applied_pcts.get('GA_Pct'))}):", with_ga - with_overhead)
+    row(f"+ Overhead ({_pct(applied_pcts.get('OverheadPct'))}):",     with_overhead - subtotal)
+    row(f"+ G&A ({_pct(applied_pcts.get('GA_Pct'))}):",               with_ga - with_overhead)
     row(f"+ Contingency ({_pct(applied_pcts.get('ContingencyPct'))}):", with_contingency - with_ga)
-    if applied_pcts.get('ExpeditePct'):
+    if applied_pcts.get("ExpeditePct"):
         row(f"+ Expedite ({_pct(applied_pcts.get('ExpeditePct'))}):", with_expedite - with_contingency)
     row("= Subtotal before Margin:", with_expedite)
     row(f"Final Price with Margin ({_pct(applied_pcts.get('MarginPct'))}):", price)
     lines.append("")
 
+    # ---- LLM adjustments bullets (optional) ---------------------------------
+    if llm_notes:
+        lines.append("LLM Adjustments")
+        lines.append(divider)
+        import textwrap as _tw
+        for n in llm_notes:
+            for w in _tw.wrap(str(n), width=page_width):
+                lines.append(f"- {w}")
+        lines.append("")
+
+    # ---- Why This Price (your existing free-form LLM explanation) -----------
     if llm_explanation:
         lines.append("Why This Price")
         lines.append(divider)
@@ -2554,6 +2577,7 @@ PARAMS_DEFAULT = {
     "ConsumablesFlat": 35.0,
     # Misc
     "MaterialOther": 50.0,
+    "MaterialVendorCSVPath": "",
     "LLMModelPath": "",
 }
 
@@ -2575,9 +2599,259 @@ def pct(value: Any, default: float = 0.0) -> float:
     except Exception:
         return default
 
+
+PRICE_CACHE: dict[str, tuple[float, float, str]] = {}
+CACHE_TTL_S = 60 * 30  # 30 minutes
+
+
+def _usd_per_kg_from_quote(symbol: str, quote: float, basis: str) -> float:
+    if basis == "index_usd_per_tonne":
+        return float(quote) / 1000.0
+    if basis == "usd_per_troy_oz":
+        return float(quote) / 31.1034768 * 1000.0
+    if basis == "usd_per_lb":
+        return float(quote) / 2.2046226218
+    return float(quote)
+
+
+class PriceProvider:
+    name = "base"
+
+    def get(self, symbol: str) -> tuple[float, str]:
+        raise NotImplementedError
+
+
+class MetalsAPI(PriceProvider):
+    """Metals-API / Commodities-API compatible provider."""
+
+    name = "metals_api"
+    base_url = "https://api.metals-api.com/v1/latest"
+
+    def get(self, symbol: str) -> tuple[float, str]:
+        api_key = os.getenv("METALS_API_KEY")
+        if not api_key:
+            raise RuntimeError("METALS_API_KEY not set")
+        url = f"{self.base_url}?access_key={api_key}&base=USD&symbols={symbol}"
+        with urllib.request.urlopen(url, timeout=8) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        if not data.get("success", True) and "rates" not in data:
+            raise RuntimeError(str(data)[:200])
+        rate = float(data["rates"][symbol])
+        ts = data.get("timestamp")
+        asof = time.strftime("%Y-%m-%d %H:%M", time.gmtime(ts)) if ts else "now"
+        return rate, asof
+
+
+class VendorCSV(PriceProvider):
+    name = "vendor_csv"
+
+    def __init__(self, path: str):
+        self.path = path
+        self._rows: dict[str, float] | None = None
+
+    def _load(self) -> None:
+        if self._rows is not None:
+            return
+        import csv
+
+        self._rows = {}
+        if os.path.isfile(self.path):
+            with open(self.path, "r", newline="", encoding="utf-8") as handle:
+                reader = csv.reader(handle)
+                for row in reader:
+                    if not row:
+                        continue
+                    sym, usd_per_kg, *_ = row
+                    self._rows[sym.strip().upper()] = float(usd_per_kg)
+
+    def get(self, symbol: str) -> tuple[float, str]:
+        self._load()
+        assert self._rows is not None
+        price = self._rows.get(symbol.upper())
+        if price is None:
+            raise KeyError(symbol)
+        return float(price), "vendor_csv"
+
+
+PROVIDERS: list[PriceProvider] = []
+CURRENT_VENDOR_CSV_PATH: str | None = None
+
+
+def init_providers(vendor_csv_path: str | None = None) -> None:
+    global PROVIDERS, CURRENT_VENDOR_CSV_PATH
+    PROVIDERS = []
+    CURRENT_VENDOR_CSV_PATH = vendor_csv_path or ""
+    if vendor_csv_path:
+        PROVIDERS.append(VendorCSV(vendor_csv_path))
+    PROVIDERS.append(MetalsAPI())
+
+
+def _try_wieland_price(candidates: list[str]) -> tuple[float | None, str]:
+    """Attempt to use the Wieland scraper for USD/kg pricing."""
+    try:
+        from wieland_scraper import get_live_material_price_usd_per_kg
+    except Exception:
+        return None, ""
+
+    for candidate in candidates:
+        label = str(candidate or "").strip()
+        if not label:
+            continue
+        try:
+            price, source = get_live_material_price_usd_per_kg(label, fallback_usd_per_kg=-1.0)
+        except Exception:
+            continue
+        if not isinstance(price, (int, float)):
+            continue
+        if not math.isfinite(price) or price <= 0:
+            continue
+        if str(source or "").lower().startswith("house_rate"):
+            continue
+        return float(price), str(source)
+
+    return None, ""
+
+
+def get_usd_per_kg(symbol: str, basis: str) -> tuple[float, str]:
+    cached = PRICE_CACHE.get(symbol)
+    now = time.time()
+    if cached and (now - cached[0] < CACHE_TTL_S):
+        _, usd_per_kg, source = cached
+        return usd_per_kg, source
+
+    last_err: Exception | None = None
+    for provider in PROVIDERS:
+        try:
+            quote, asof = provider.get(symbol)
+            usd_per_kg = _usd_per_kg_from_quote(symbol, quote, basis)
+            PRICE_CACHE[symbol] = (now, usd_per_kg, f"{provider.name}@{asof}")
+            return usd_per_kg, f"{provider.name}@{asof}"
+        except Exception as err:  # pragma: no cover - provider failures fall back below
+            last_err = err
+
+    raise RuntimeError(f"All price providers failed for {symbol}: {last_err}")
+
+
+def compute_material_cost(material_name: str,
+                          mass_kg: float,
+                          scrap_frac: float,
+                          overrides: dict[str, Any] | None,
+                          vendor_csv: str | None) -> tuple[float, dict[str, Any]]:
+    global CURRENT_VENDOR_CSV_PATH
+    vendor_csv = vendor_csv or ""
+    if (not PROVIDERS) or (vendor_csv != (CURRENT_VENDOR_CSV_PATH or "")):
+        init_providers(vendor_csv)
+
+    overrides = overrides or {}
+    key = (material_name or "").strip().upper()
+    meta = MATERIAL_MAP.get(key)
+    if meta is None:
+        if "AL" in key or "6061" in key:
+            meta = MATERIAL_MAP["6061"].copy()
+        elif "C110" in key or "COPPER" in key:
+            meta = MATERIAL_MAP["C110"].copy()
+        else:
+            meta = {"symbol": key or "XAL", "basis": "usd_per_kg"}
+    else:
+        meta = meta.copy()
+
+    symbol = str(meta.get("symbol", key or "XAL"))
+    basis = str(meta.get("basis", "index_usd_per_tonne"))
+
+    usd_per_kg: float | None = None
+    source = ""
+    basis_used = basis
+
+    # Highest priority: explicit vendor CSV overrides
+    if vendor_csv:
+        for provider in PROVIDERS:
+            if not isinstance(provider, VendorCSV):
+                continue
+            try:
+                vendor_price, vendor_asof = provider.get(symbol)
+            except Exception:
+                continue
+            usd_per_kg = float(vendor_price)
+            source = f"{provider.name}@{vendor_asof}" if vendor_asof else provider.name
+            basis_used = "usd_per_kg"
+            break
+
+    # Next try Wieland scraped data
+    if usd_per_kg is None:
+        price_candidates = []
+        wieland_key = meta.get("wieland_key")
+        if wieland_key:
+            price_candidates.append(str(wieland_key))
+        if material_name:
+            price_candidates.append(str(material_name))
+        if key:
+            price_candidates.append(str(key))
+        if symbol:
+            price_candidates.append(str(symbol))
+
+        usd_wieland, source_wieland = _try_wieland_price(price_candidates)
+        if usd_wieland is not None:
+            usd_per_kg = usd_wieland
+            source = source_wieland or "wieland"
+            basis_used = "usd_per_kg"
+        else:
+            price_candidates = []
+
+    else:
+        price_candidates = []
+
+    # Fallback to live/index providers
+    if usd_per_kg is None:
+        usd_per_kg, source = get_usd_per_kg(symbol, basis)
+        basis_used = basis
+
+    premium = float(meta.get("premium_usd_per_kg", 0.0))
+    premium_override = overrides.get("premium_usd_per_kg")
+    if premium_override is not None:
+        try:
+            premium = float(premium_override)
+        except Exception:
+            pass
+
+    scrap_override = overrides.get("scrap_pct_override")
+    if scrap_override is not None:
+        try:
+            scrap_frac = float(scrap_override)
+        except Exception:
+            pass
+    scrap_frac = max(0.0, float(scrap_frac))
+
+    loss_factor = float(meta.get("loss_factor", 0.0))
+    effective_scrap = max(0.0, scrap_frac + max(0.0, loss_factor))
+    effective_kg = float(mass_kg) * (1.0 + effective_scrap)
+
+    unit_price = usd_per_kg + premium
+    cost = effective_kg * unit_price
+
+    detail = {
+        "material_name": material_name,
+        "symbol": symbol,
+        "basis": basis_used,
+        "source": source,
+        "mass_g_net": float(mass_kg) * 1000.0,
+        "mass_g": effective_kg * 1000.0,
+        "scrap_pct": scrap_frac,
+        "loss_factor": loss_factor,
+        "unit_price_usd_per_kg": unit_price,
+        "vendor_premium_usd_per_kg": premium,
+        "material_cost": cost,
+    }
+    if price_candidates:
+        detail["price_lookup_keys"] = price_candidates
+    return cost, detail
+
+
 def compute_quote_from_df(df: pd.DataFrame,
                           params: Dict[str, Any] | None = None,
-                          rates: Dict[str, float] | None = None) -> Dict[str, Any]:
+                          rates: Dict[str, float] | None = None,
+                          *,
+                          llm_enabled: bool = True,
+                          llm_model_path: str | None = None) -> Dict[str, Any]:
     """
     Estimator that consumes variables from the sheet (Item, Example Values / Options, Data Type / Input Method).
 
@@ -2593,6 +2867,8 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     params = {**PARAMS_DEFAULT, **(params or {})}
     rates = {**RATES_DEFAULT, **(rates or {})}
+    if llm_model_path is None:
+        llm_model_path = str(params.get("LLMModelPath", "") or "")
     # ---- sheet views ---------------------------------------------------------
     items = df["Item"].astype(str)
     vals  = df["Example Values / Options"]
@@ -2721,16 +2997,82 @@ def compute_quote_from_df(df: pd.DataFrame,
     vol_cm3       = first_num(r"\b(?:Net\s*Volume|Volume_net|Volume\s*\(cm\^?3\))\b", GEO_vol_mm3 / 1000.0)
     density_g_cc  = first_num(r"\b(?:Density|Material\s*Density)\b", 14.5)
     scrap_pct     = num_pct(r"\b(?:Scrap\s*%|Expected\s*Scrap)\b", 0.0)
-    mass_g        = max(0.0, vol_cm3 * density_g_cc * (1.0 + scrap_pct))
+    material_name_raw = sheet_text(r"(?i)Material\s*(?:Name|Grade|Alloy|Type)")
+    if not material_name_raw:
+        fallback_name = strv(r"(?i)^Material$", "")
+        if fallback_name and not re.fullmatch(r"\s*[$0-9.,]+\s*", str(fallback_name)):
+            material_name_raw = fallback_name
+    material_name = str(material_name_raw or "").strip()
+
+    net_mass_g = max(0.0, vol_cm3 * density_g_cc)
+    effective_mass_g = net_mass_g * (1.0 + scrap_pct)
+    mass_g = effective_mass_g
+    mass_kg = net_mass_g / 1000.0
 
     unit_price_per_g  = first_num(r"\b(?:Material\s*Price.*(?:per\s*g|/g)|Unit\s*Price\s*/\s*g)\b", 0.0)
-    supplier_min_charge    = first_num(r"\b(?:Supplier\s*Min\s*Charge|min\s*charge)\b", 0.0)
+    supplier_min_charge = first_num(r"\b(?:Supplier\s*Min\s*Charge|min\s*charge)\b", 0.0)
     surcharge_pct = num_pct(r"\b(?:Material\s*Surcharge|Volatility)\b", 0.0)
     explicit_mat  = num(r"\b(?:Material\s*Cost|Raw\s*Material\s*Cost)\b", 0.0)
 
-    material_cost = max(unit_price_per_g * mass_g, supplier_min_charge) * (1.0 + surcharge_pct)
-    material_cost = max(material_cost, explicit_mat)
+    material_vendor_csv = str(params.get("MaterialVendorCSVPath", "") or "")
+    material_overrides: dict[str, Any] = {}
+    provider_cost: float | None = None
+    material_detail: dict[str, Any] = {}
+
+    try:
+        provider_cost, material_detail = compute_material_cost(
+            material_name,
+            mass_kg,
+            scrap_pct,
+            material_overrides,
+            material_vendor_csv,
+        )
+    except Exception as err:
+        material_detail = {
+            "material_name": material_name,
+            "mass_g": effective_mass_g,
+            "mass_g_net": net_mass_g,
+            "scrap_pct": scrap_pct,
+            "error": str(err),
+        }
+        provider_cost = None
+
+    manual_baseline = unit_price_per_g * effective_mass_g
+    base_cost = provider_cost if provider_cost is not None else manual_baseline
+    base_cost = float(base_cost or 0.0)
+
+    cost_with_min = max(base_cost, float(supplier_min_charge or 0.0))
+    cost_with_surcharge = cost_with_min * (1.0 + max(0.0, float(surcharge_pct or 0.0)))
+    material_cost = max(cost_with_surcharge, float(explicit_mat or 0.0))
+
+    if material_detail:
+        material_detail.update({
+            "supplier_min_charge": float(supplier_min_charge or 0.0),
+            "surcharge_pct": float(surcharge_pct or 0.0),
+            "explicit_cost_override": float(explicit_mat or 0.0),
+            "material_cost_before_overrides": base_cost,
+            "material_cost": float(material_cost),
+        })
+        unit_price_from_detail = material_detail.get("unit_price_usd_per_kg")
+        if unit_price_from_detail is not None:
+            try:
+                unit_price_per_g = float(unit_price_from_detail) / 1000.0
+            except Exception:
+                pass
+
     material_direct_cost = float(material_cost)
+
+    material_detail_for_breakdown = dict(material_detail)
+    material_detail_for_breakdown.setdefault("material_name", material_name)
+    material_detail_for_breakdown.setdefault("mass_g", mass_g)
+    material_detail_for_breakdown.setdefault("mass_g_net", net_mass_g)
+    material_detail_for_breakdown.setdefault("scrap_pct", scrap_pct)
+    material_detail_for_breakdown["unit_price_per_g"] = float(unit_price_per_g or 0.0)
+    if "unit_price_usd_per_kg" not in material_detail_for_breakdown and unit_price_per_g:
+        material_detail_for_breakdown["unit_price_usd_per_kg"] = float(unit_price_per_g) * 1000.0
+    material_detail_for_breakdown["material_direct_cost"] = material_direct_cost
+    if provider_cost is not None:
+        material_detail_for_breakdown["provider_cost"] = float(provider_cost)
 
     # ---- programming / cam / dfm --------------------------------------------
     prog_hr = sum_time(r"(?:Programming|2D\s*CAM|3D\s*CAM|Simulation|Verification|DFM|Setup\s*Sheets)", exclude_pattern=r"\bCMM\b")
@@ -2926,27 +3268,285 @@ def compute_quote_from_df(df: pd.DataFrame,
     ehs_cost = ehs_hr * rates["InspectionRate"]
 
     # ---- roll-ups ------------------------------------------------------------
-    labor_cost = (
-        programming_per_part + fixture_labor_per_part +
-        milling_cost + turning_cost + wedm_cost + sinker_cost +
-        grinding_cost + lap_cost + finishing_cost + inspection_cost +
-        saw_cost + assembly_cost + packaging_cost + ehs_cost
-    )
+    inspection_hr_total = inproc_hr + final_hr + cmm_prog_hr + cmm_run_hr + fair_hr + srcinsp_hr
 
-    base_direct_costs = (
-        material_direct_cost
-        + fixture_material_cost
-        + hardware_cost
-        + outsourced_costs
-        + shipping_cost
-        + consumables_hr_cost
-        + utilities_cost
-        + consumables_flat
-    )
+    process_costs = {
+        "milling": milling_cost,
+        "turning": turning_cost,
+        "wire_edm": wedm_cost,
+        "sinker_edm": sinker_cost,
+        "grinding": grinding_cost,
+        "lapping_honing": lap_cost,
+        "finishing_deburr": finishing_cost,
+        "inspection": inspection_cost,
+        "saw_waterjet": saw_cost,
+        "assembly": assembly_cost,
+        "packaging": packaging_cost,
+        "ehs_compliance": ehs_cost,
+    }
+
+    process_meta = {
+        "milling":          {"hr": eff(milling_hr), "rate": rates.get("MillingRate", 0.0)},
+        "turning":          {"hr": eff(turning_hr), "rate": rates.get("TurningRate", 0.0)},
+        "wire_edm":         {"hr": eff(wedm_hr),    "rate": rates.get("WireEDMRate", 0.0)},
+        "sinker_edm":       {"hr": eff(sinker_hr),  "rate": rates.get("SinkerEDMRate", 0.0)},
+        "grinding":         {"hr": eff(grinding_hr),"rate": rates.get("SurfaceGrindRate", 0.0)},
+        "lapping_honing":   {"hr": lap_hr,          "rate": rates.get("LappingRate", 0.0)},
+        "finishing_deburr": {"hr": deburr_hr + tumble_hr + blast_hr + laser_mark_hr + masking_hr,
+                             "rate": rates.get("FinishingRate", 0.0)},
+        "inspection":       {"hr": inspection_hr_total, "rate": rates.get("InspectionRate", 0.0)},
+        "saw_waterjet":     {"hr": sawing_hr,       "rate": rates.get("SawWaterjetRate", 0.0)},
+        "assembly":         {"hr": assembly_hr,     "rate": rates.get("AssemblyRate", 0.0)},
+        "packaging":        {"hr": packaging_hr,    "rate": rates.get("PackagingRate", rates.get("AssemblyRate", 0.0))},
+        "ehs_compliance":   {"hr": ehs_hr,          "rate": rates.get("InspectionRate", 0.0)},
+    }
+    for key, meta in process_meta.items():
+        rate = float(meta.get("rate", 0.0))
+        hr = float(meta.get("hr", 0.0))
+        meta["base_extra"] = process_costs.get(key, 0.0) - hr * rate
+
+
+    pass_meta = {
+        "Material": {"basis": "Stock / raw material"},
+        "Fixture Material": {"basis": "Fixture raw stock"},
+        "Hardware / BOM": {"basis": "Pass-through hardware / BOM"},
+        "Outsourced Vendors": {"basis": "Outside processing vendors"},
+        "Shipping": {"basis": "Freight & logistics"},
+        "Consumables /Hr": {"basis": "Machine & inspection hours $/hr"},
+        "Utilities": {"basis": "Spindle/inspection hours $/hr"},
+        "Consumables Flat": {"basis": "Fixed shop supplies"},
+    }
+
+    mat_source = material_detail_for_breakdown.get("source")
+    if mat_source:
+        mat_symbol = material_detail_for_breakdown.get("symbol")
+        if mat_symbol:
+            pass_meta["Material"]["basis"] = f"{mat_symbol} via {mat_source}"
+        else:
+            pass_meta["Material"]["basis"] = f"Source: {mat_source}"
+
+    pass_through = {
+        "Material": material_direct_cost,
+        "Fixture Material": fixture_material_cost,
+        "Hardware / BOM": hardware_cost,
+        "Outsourced Vendors": outsourced_costs,
+        "Shipping": shipping_cost,
+        "Consumables /Hr": consumables_hr_cost,
+        "Utilities": utilities_cost,
+        "Consumables Flat": consumables_flat,
+    }
+
+    fix_detail = nre_detail.get("fixture", {})
+
+    features = {
+        "qty": Qty,
+        "max_dim_mm": max_dim,
+        "setups": setups,
+        "rough_hr": rough_hr,
+        "semi_hr": semi_hr,
+        "finish_hr": finish_hr,
+        "milling_hr": milling_hr,
+        "wedm_len_mm": GEO_wedm_len_mm,
+        "volume_cm3": vol_cm3,
+        "density_g_cc": density_g_cc,
+        "scrap_pct": scrap_pct,
+        "material_cost_baseline": material_cost,
+    }
+
+    base_costs = {
+        "process_costs": {k: float(v) for k, v in process_costs.items()},
+        "pass_through": {k: float(v) for k, v in pass_through.items()},
+        "nre_detail": nre_detail,
+        "rates": rates,
+        "params": params,
+    }
+
+    overrides: dict[str, Any] = {}
+    if llm_enabled and llm_model_path:
+        try:
+            overrides = get_llm_overrides(llm_model_path, features, base_costs)
+        except Exception:
+            overrides = {}
+    if not isinstance(overrides, dict):
+        overrides = {}
+
+    llm_notes: list[str] = []
+    for note in (overrides.get("notes") or []):
+        if isinstance(note, str) and note.strip():
+            llm_notes.append(note.strip())
+
+    applied_process: dict[str, dict[str, Any]] = {}
+    applied_pass: dict[str, dict[str, Any]] = {}
+
+    def _normalize_key(name: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_")
+
+    process_key_map = {_normalize_key(k): k for k in process_costs.keys()}
+    pass_key_map = {_normalize_key(k): k for k in pass_through.keys()}
+
+    def _friendly_process(name: str) -> str:
+        return name.replace("_", " ").title()
+
+    def _cost_of(proc_key: str, hours: float) -> float:
+        parts = proc_key.replace("_", " ").split()
+        rate_key = "".join(part.title() for part in parts) + "Rate"
+        return float(hours) * float(rates.get(rate_key, rates.get("MillingRate", 120.0)))
+
+    material_direct_cost_base = material_direct_cost
+    fixture_material_cost_base = fixture_material_cost
+
+    old_scrap = float(features.get("scrap_pct", scrap_pct) or 0.0)
+    new_scrap = overrides.get("scrap_pct_override") if overrides else None
+    if new_scrap is not None:
+        new_scrap = clamp(new_scrap, 0.0, 0.50, old_scrap)
+        if new_scrap is not None and not math.isclose(new_scrap, old_scrap, abs_tol=1e-6):
+            baseline = float(features.get("material_cost_baseline", material_direct_cost_base))
+            scaled = baseline * ((1.0 + new_scrap) / max(1e-6, (1.0 + old_scrap)))
+            scaled = round(scaled, 2)
+            pass_through["Material"] = scaled
+            entry = applied_pass.setdefault("Material", {"old_value": float(material_direct_cost_base), "notes": []})
+            entry["notes"].append(f"scrap to {new_scrap * 100:.1f}%")
+            entry["new_value"] = scaled
+            features["scrap_pct"] = new_scrap
+            scrap_pct = new_scrap
+            llm_notes.append(f"Scrap {old_scrap * 100:.1f}% → {new_scrap * 100:.1f}%")
+
+    ph_mult = overrides.get("process_hour_multipliers") if overrides else {}
+    for key, mult in (ph_mult or {}).items():
+        if not isinstance(mult, (int, float)):
+            continue
+        actual = process_key_map.get(_normalize_key(key))
+        if not actual:
+            continue
+        mult = clamp(mult, 0.6, 1.6, 1.0)
+        old_cost = float(process_costs.get(actual, 0.0))
+        if old_cost <= 0:
+            continue
+        entry = applied_process.setdefault(
+            actual,
+            {
+                "old_hr": float(process_meta.get(actual, {}).get("hr", 0.0)),
+                "old_cost": old_cost,
+                "notes": [],
+            },
+        )
+        process_costs[actual] = round(old_cost * mult, 2)
+        entry["notes"].append(f"x{mult:.2f}")
+        meta = process_meta.get(actual)
+        if meta:
+            rate = float(meta.get("rate", 0.0))
+            base_extra = float(meta.get("base_extra", 0.0))
+            if rate > 0:
+                meta["hr"] = max(0.0, (process_costs[actual] - base_extra) / rate)
+        entry["new_hr"] = float(process_meta.get(actual, {}).get("hr", entry["old_hr"]))
+        entry["new_cost"] = process_costs[actual]
+        llm_notes.append(f"{_friendly_process(actual)} hours x{mult:.2f}")
+
+    ph_add = overrides.get("process_hour_adders") if overrides else {}
+    for key, add_hr in (ph_add or {}).items():
+        if not isinstance(add_hr, (int, float)):
+            continue
+        add_hr = clamp(add_hr, 0.0, 3.0, 0.0)
+        if add_hr <= 0:
+            continue
+        actual = process_key_map.get(_normalize_key(key))
+        if not actual:
+            continue
+        entry = applied_process.setdefault(
+            actual,
+            {
+                "old_hr": float(process_meta.get(actual, {}).get("hr", 0.0)),
+                "old_cost": float(process_costs.get(actual, 0.0)),
+                "notes": [],
+            },
+        )
+        delta_cost = _cost_of(actual, add_hr)
+        process_costs[actual] = round(float(process_costs.get(actual, 0.0)) + delta_cost, 2)
+        meta = process_meta.get(actual)
+        if meta:
+            meta["hr"] = float(meta.get("hr", 0.0)) + float(add_hr)
+        entry["notes"].append(f"+{float(add_hr):.2f} hr")
+        entry["new_hr"] = float(process_meta.get(actual, {}).get("hr", entry["old_hr"]))
+        entry["new_cost"] = process_costs[actual]
+        llm_notes.append(f"{_friendly_process(actual)} +{float(add_hr):.2f} hr")
+
+    add_pass = overrides.get("add_pass_through") if overrides else {}
+    for label, add_val in (add_pass or {}).items():
+        if not isinstance(add_val, (int, float)):
+            continue
+        add_val = clamp(add_val, 0.0, 200.0, 0.0)
+        if add_val <= 0:
+            continue
+        actual_label = pass_key_map.get(_normalize_key(label), str(label))
+        old_val = float(pass_through.get(actual_label, 0.0))
+        new_val = round(old_val + float(add_val), 2)
+        pass_through[actual_label] = new_val
+        pass_key_map[_normalize_key(actual_label)] = actual_label
+        entry = applied_pass.setdefault(actual_label, {"old_value": old_val, "notes": []})
+        entry["notes"].append(f"+${float(add_val):,.2f}")
+        entry["new_value"] = new_val
+        if actual_label not in pass_meta:
+            pass_meta[actual_label] = {"basis": "LLM override"}
+        llm_notes.append(f"{actual_label}: +${float(add_val):,.0f}")
+
+    delta_fix_mat = overrides.get("fixture_material_cost_delta") if overrides else None
+    if isinstance(delta_fix_mat, (int, float)) and delta_fix_mat:
+        delta_fix_mat = clamp(delta_fix_mat, -200.0, 200.0, 0.0)
+        if delta_fix_mat:
+            old_val = float(pass_through.get("Fixture Material", fixture_material_cost_base))
+            new_val = round(old_val + float(delta_fix_mat), 2)
+            pass_through["Fixture Material"] = new_val
+            pass_key_map[_normalize_key("Fixture Material")] = "Fixture Material"
+            entry = applied_pass.setdefault("Fixture Material", {"old_value": old_val, "notes": []})
+            entry["notes"].append(f"Δ${float(delta_fix_mat):+.2f}")
+            entry["new_value"] = new_val
+            fix_detail["mat_cost"] = round(float(fix_detail.get("mat_cost", 0.0)) + float(delta_fix_mat), 2)
+            llm_notes.append(f"Fixture material ${float(delta_fix_mat):+.0f}")
+
+    cont_override = overrides.get("contingency_pct_override") if overrides else None
+    if cont_override is not None:
+        cont_val = clamp(cont_override, 0.0, 0.25, ContingencyPct)
+        if cont_val is not None:
+            ContingencyPct = float(cont_val)
+            params["ContingencyPct"] = ContingencyPct
+            llm_notes.append(f"Contingency set to {ContingencyPct * 100:.1f}%")
+
+    for label, value in list(pass_through.items()):
+        try:
+            pass_through[label] = round(float(value), 2)
+        except Exception:
+            pass_through[label] = 0.0
+
+    for key, entry in applied_process.items():
+        entry["new_hr"] = float(process_meta.get(key, {}).get("hr", entry.get("new_hr", entry["old_hr"])))
+        entry["new_cost"] = float(process_costs.get(key, entry.get("new_cost", entry["old_cost"])))
+        entry["delta_hr"] = entry["new_hr"] - entry["old_hr"]
+        entry["delta_cost"] = entry["new_cost"] - entry["old_cost"]
+
+    for label, entry in applied_pass.items():
+        entry["new_value"] = float(pass_through.get(label, entry.get("new_value", entry["old_value"])))
+        entry["delta_value"] = entry["new_value"] - entry["old_value"]
+
+    material_direct_cost = float(pass_through.get("Material", material_direct_cost_base))
+    fixture_material_cost = float(pass_through.get("Fixture Material", fixture_material_cost_base))
+    hardware_cost = float(pass_through.get("Hardware / BOM", hardware_cost))
+    outsourced_costs = float(pass_through.get("Outsourced Vendors", outsourced_costs))
+    shipping_cost = float(pass_through.get("Shipping", shipping_cost))
+    consumables_hr_cost = float(pass_through.get("Consumables /Hr", consumables_hr_cost))
+    utilities_cost = float(pass_through.get("Utilities", utilities_cost))
+    consumables_flat = float(pass_through.get("Consumables Flat", consumables_flat))
+
+    labor_cost = programming_per_part + fixture_labor_per_part + sum(process_costs.values())
+
+    base_direct_costs = sum(pass_through.values())
+    vendor_markup = params["VendorMarkupPct"]
     insurance_cost = insurance_pct * (labor_cost + base_direct_costs)
-
-    vendor_markup     = params["VendorMarkupPct"]
     vendor_marked_add = vendor_markup * (outsourced_costs + shipping_cost)
+
+    pass_meta.setdefault("Insurance", {"basis": "Applied at insurance pct"})
+    pass_meta.setdefault("Vendor Markup Added", {"basis": "Vendor + freight markup"})
+    pass_through["Insurance"] = round(insurance_cost, 2)
+    pass_through["Vendor Markup Added"] = round(vendor_marked_add, 2)
 
     total_direct_costs = base_direct_costs + insurance_cost + vendor_marked_add
     direct_costs = total_direct_costs
@@ -2954,8 +3554,8 @@ def compute_quote_from_df(df: pd.DataFrame,
     subtotal = labor_cost + direct_costs
 
     with_overhead = subtotal * (1.0 + OverheadPct)
-    with_ga       = with_overhead * (1.0 + GA_Pct)
-    with_cont     = with_ga * (1.0 + ContingencyPct)
+    with_ga = with_overhead * (1.0 + GA_Pct)
+    with_cont = with_ga * (1.0 + ContingencyPct)
     with_expedite = with_cont * (1.0 + ExpeditePct)
 
     price_before_margin = with_expedite
@@ -2965,78 +3565,118 @@ def compute_quote_from_df(df: pd.DataFrame,
     if price < min_lot:
         price = min_lot
 
-    # ---- meta for pretty output ---------------------------------------------
-    inspection_hr_total = inproc_hr + final_hr + cmm_prog_hr + cmm_run_hr + fair_hr + srcinsp_hr
-    process_meta = {
-    "milling":          {"hr": eff(milling_hr), "rate": rates.get("MillingRate", 0.0)},
-    "turning":          {"hr": eff(turning_hr), "rate": rates.get("TurningRate", 0.0)},
-    "wire_edm":         {"hr": eff(wedm_hr),    "rate": rates.get("WireEDMRate", 0.0)},
-    "sinker_edm":       {"hr": eff(sinker_hr),  "rate": rates.get("SinkerEDMRate", 0.0)},
-    "grinding":         {"hr": eff(grinding_hr),"rate": rates.get("SurfaceGrindRate", 0.0)},
-    "lapping_honing":   {"hr": lap_hr,          "rate": rates.get("LappingRate", 0.0)},
-    "finishing_deburr": {"hr": deburr_hr + tumble_hr + blast_hr + laser_mark_hr + masking_hr,
-                         "rate": rates.get("FinishingRate", 0.0)},
-    "inspection":       {"hr": inspection_hr_total, "rate": rates.get("InspectionRate", 0.0)},
-    "saw_waterjet":     {"hr": sawing_hr,       "rate": rates.get("SawWaterjetRate", 0.0)},
-    "assembly":         {"hr": assembly_hr,     "rate": rates.get("AssemblyRate", 0.0)},
-    "packaging":        {"hr": packaging_hr,    "rate": rates.get("PackagingRate", rates.get("AssemblyRate", 0.0))},
-}
-    pass_meta = {
-        "consumables_hr_cost": {"basis": "Machine & inspection hours $/hr"},
-        "utilities_cost":      {"basis": "Spindle/inspection hours $/hr"},
-        "insurance_cost":      {"basis": "Applied at insurance pct"},
-        "vendor_markup_added": {"basis": "Vendor + freight markup"},
-        "consumables_flat":    {"basis": "Fixed shop supplies"},
-        "material_direct_cost": {"basis": "Stock / raw material"},
-        "fixture_material_cost": {"basis": "Fixture raw stock"},
+    labor_costs_display: dict[str, float] = {}
+    labor_cost_details: dict[str, str] = {}
+    for key, value in sorted(process_costs.items(), key=lambda kv: kv[1], reverse=True):
+        label = key.replace('_', ' ').title()
+        labor_costs_display[label] = value
+        meta = process_meta.get(key, {})
+        hr = float(meta.get("hr", 0.0))
+        rate = float(meta.get("rate", 0.0))
+        extra = float(meta.get("base_extra", 0.0))
+        detail_bits: list[str] = []
+        if hr > 0:
+            detail_bits.append(f"{hr:.2f} hr @ ${rate:,.2f}/hr")
+        if abs(extra) > 1e-6:
+            detail_bits.append(f"includes ${extra:,.2f} extras")
+        proc_notes = applied_process.get(key, {}).get("notes")
+        if proc_notes:
+            detail_bits.append("LLM: " + ", ".join(proc_notes))
+        if detail_bits:
+            labor_cost_details[label] = "; ".join(detail_bits)
+
+    direct_costs_display: dict[str, float] = {label: float(value) for label, value in pass_through.items()}
+    direct_cost_details: dict[str, str] = {}
+    for label, value in direct_costs_display.items():
+        detail_bits: list[str] = []
+        basis = pass_meta.get(label, {}).get("basis")
+        if basis:
+            detail_bits.append(f"Basis: {basis}")
+        if label == "Insurance":
+            detail_bits.append(f"Applied {insurance_pct:.1%} of labor + directs")
+        elif label == "Vendor Markup Added":
+            detail_bits.append(f"Markup {vendor_markup:.1%} on vendors + shipping")
+        elif label == "Material":
+            source = material_detail_for_breakdown.get("source")
+            symbol = material_detail_for_breakdown.get("symbol")
+            unit_price_kg = material_detail_for_breakdown.get("unit_price_usd_per_kg")
+            premium = material_detail_for_breakdown.get("vendor_premium_usd_per_kg")
+            if source:
+                detail_bits.append(f"Source: {source}")
+            if symbol:
+                detail_bits.append(f"Symbol: {symbol}")
+            if unit_price_kg:
+                detail_bits.append(f"Unit ${unit_price_kg:,.2f}/kg")
+            if premium:
+                detail_bits.append(f"Premium ${premium:,.2f}/kg")
+        pass_notes = applied_pass.get(label, {}).get("notes")
+        if pass_notes:
+            detail_bits.append("LLM: " + ", ".join(pass_notes))
+        if detail_bits:
+            direct_cost_details[label] = "; ".join(detail_bits)
+
+    prog_detail = nre_detail.get("programming", {})
+    fix_detail = nre_detail.get("fixture", {})
+    nre_costs_display: dict[str, float] = {}
+    nre_cost_details: dict[str, str] = {}
+
+    prog_per_lot = float(prog_detail.get("per_lot", 0.0) or 0.0)
+    if prog_per_lot:
+        label = "Programming & Eng (per lot)"
+        nre_costs_display[label] = prog_per_lot
+        details = []
+        if prog_detail.get("prog_hr"):
+            details.append(f"Programmer {prog_detail['prog_hr']:.2f} hr @ ${prog_detail.get('prog_rate',0):,.2f}/hr")
+        if prog_detail.get("cam_hr"):
+            details.append(f"CAM {prog_detail['cam_hr']:.2f} hr @ ${prog_detail.get('cam_rate',0):,.2f}/hr")
+        if prog_detail.get("eng_hr"):
+            details.append(f"Engineer {prog_detail['eng_hr']:.2f} hr @ ${prog_detail.get('eng_rate',0):,.2f}/hr")
+        if details:
+            nre_cost_details[label] = "; ".join(details)
+
+    fix_per_lot = float(fix_detail.get("per_lot", 0.0) or 0.0)
+    if fix_per_lot:
+        label = "Fixturing (per lot)"
+        nre_costs_display[label] = fix_per_lot
+        details = []
+        if fix_detail.get("build_hr"):
+            details.append(f"Build {fix_detail['build_hr']:.2f} hr @ ${fix_detail.get('build_rate',0):,.2f}/hr")
+        if fixture_material_cost:
+            details.append(f"Material ${fixture_material_cost:,.2f}")
+        if details:
+            nre_cost_details[label] = "; ".join(details)
+
+    llm_cost_log = {
+        "overrides": overrides,
+        "applied_process": applied_process,
+        "applied_pass": applied_pass,
+        "scrap_pct": scrap_pct,
     }
+    if llm_notes:
+        llm_cost_log["notes"] = llm_notes
 
     breakdown = {
         "qty": Qty,
+        "scrap_pct": scrap_pct,
         "fixture_material_cost": fixture_material_cost,
         "material_direct_cost": material_direct_cost,
         "total_direct_costs": round(total_direct_costs, 2),
-        "material": {
-            "mass_g": mass_g,
-            "unit_price_per_g": unit_price_per_g,
-            "supplier_min_charge": supplier_min_charge,
-            "surcharge_pct": surcharge_pct,
-            "material_cost": material_cost,
-            "material_direct_cost": material_direct_cost,
-        },
+        "material": material_detail_for_breakdown,
         "nre": {
             "programming_per_part": programming_per_part,
             "fixture_per_part": fixture_per_part,
-            "extra_nre_cost": 0.0,  # (gauge/other NRE hook, keep for compat)
+            "extra_nre_cost": 0.0,
         },
         "nre_detail": nre_detail,
-        "process_costs": {
-            "milling": milling_cost,
-            "turning": turning_cost,
-            "wire_edm": wedm_cost,
-            "sinker_edm": sinker_cost,
-            "grinding": grinding_cost,
-            "lapping_honing": lap_cost,
-            "finishing_deburr": finishing_cost,
-            "inspection": inspection_cost,
-            "saw_waterjet": saw_cost,
-            "assembly": assembly_cost,
-            "packaging": packaging_cost,
-            "ehs_compliance": ehs_cost,
-        },
+        "nre_costs": nre_costs_display,
+        "nre_cost_details": nre_cost_details,
+        "process_costs": process_costs,
         "process_meta": process_meta,
-        "pass_through": {
-            "hardware_bom": hardware_cost,
-            "outsourced_vendors": outsourced_costs,
-            "shipping": shipping_cost,
-            "insurance_cost": insurance_cost,
-            "consumables_hr_cost": consumables_hr_cost,
-            "utilities_cost": utilities_cost,
-            "consumables_flat": consumables_flat,
-            "vendor_markup_added": vendor_marked_add,
-            "material_direct_cost": material_direct_cost,
-            "fixture_material_cost": fixture_material_cost,
-        },
+        "labor_costs": labor_costs_display,
+        "labor_cost_details": labor_cost_details,
+        "pass_through": pass_through,
+        "direct_costs": direct_costs_display,
+        "direct_cost_details": direct_cost_details,
         "pass_meta": pass_meta,
         "totals": {
             "labor_cost": labor_cost,
@@ -3046,7 +3686,7 @@ def compute_quote_from_df(df: pd.DataFrame,
             "with_ga": with_ga,
             "with_contingency": with_cont,
             "with_expedite": with_expedite,
-            "price": price
+            "price": price,
         },
         "applied_pcts": {
             "OverheadPct": OverheadPct,
@@ -3055,8 +3695,11 @@ def compute_quote_from_df(df: pd.DataFrame,
             "ExpeditePct": ExpeditePct,
             "MarginPct": MarginPct,
             "InsurancePct": insurance_pct,
-            "VendorMarkupPct": vendor_markup
-        }
+            "VendorMarkupPct": vendor_markup,
+        },
+        "llm_overrides": overrides,
+        "llm_notes": llm_notes,
+        "llm_cost_log": llm_cost_log,
     }
 
     return {"price": price, "labor": labor_cost, "with_overhead": with_overhead, "breakdown": breakdown}
@@ -3089,8 +3732,11 @@ def explain_quote(breakdown: dict[str,Any], hour_trace=None) -> str:
     if major:
         top=sorted(major.items(), key=lambda kv: kv[1], reverse=True)[:4]
         lines.append("Major processes: " + ", ".join(f"{k.replace('_',' ')} ${v:,.0f}" for k,v in top))
-    if pt.get("hardware_bom",0) or pt.get("outsourced_vendors",0):
-        lines.append(f"Pass-throughs: hardware ${pt.get('hardware_bom',0):.0f}, vendors ${pt.get('outsourced_vendors',0):.0f}, ship ${pt.get('shipping',0):.0f}")
+    if pt.get("Hardware / BOM",0) or pt.get("Outsourced Vendors",0):
+        lines.append(
+            f"Pass-throughs: hardware ${pt.get('Hardware / BOM',0):.0f}, "
+            f"vendors ${pt.get('Outsourced Vendors',0):.0f}, ship ${pt.get('Shipping',0):.0f}"
+        )
     if hour_trace:
         for bucket, rows in hour_trace.items():
             total=sum(v for _,v in rows)
@@ -3690,6 +4336,94 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
         return _fallback()
     except Exception:
         return _fallback()
+
+
+# ==== LLM DECISION ENGINE =====================================================
+def clamp(x, lo, hi, default=None):
+    try:
+        v = float(x)
+    except Exception:
+        return default if default is not None else lo
+    return max(lo, min(hi, v))
+
+
+def _safe_get(d, k, typ, default=None):
+    try:
+        v = d.get(k, default)
+        return v if isinstance(v, typ) else default
+    except Exception:
+        return default
+
+
+def get_llm_overrides(model_path: str, features: dict, base_costs: dict) -> dict:
+    """
+    Ask the local LLM for cost overrides based on CAD features and base costs.
+    Returns a dict with optional keys:
+      {
+        "scrap_pct_override": 0.00-0.50,          # fraction, not %
+        "process_hour_multipliers": {"milling": 1.10, "turning": 0.95, ...},
+        "process_hour_adders": {"milling": 0.25, "inspection": 0.10},   # hours
+        "add_pass_through": {"Material": 12.0, "Tooling": 30.0},        # dollars
+        "fixture_material_cost_delta": 0.0,       # dollars (+/-)
+        "contingency_pct_override": 0.00-0.25,    # optional
+        "notes": ["short human-readable bullets"]
+      }
+    """
+    import json, os
+
+    def _fallback():
+        return {"notes": ["LLM disabled or unavailable; using base costs"]}
+
+    if not model_path or not os.path.isfile(model_path):
+        return _fallback()
+
+    system_prompt = (
+        "You are a manufacturing cost advisor. Given CAD/quote features and base costs, "
+        "propose small, bounded overrides ONLY when justified by geometry/material/complexity. "
+        "Hard constraints: "
+        "scrap_pct_override in [0, 0.50]; each process_hour_multipliers value in [0.6, 1.6]; "
+        "adders in hours in [0.0, 3.0]; added pass-through dollars in [0, 200.0] per item; "
+        "fixture_material_cost_delta in [-200.0, 200.0]; contingency_pct_override in [0.0, 0.25]. "
+        "Return compact JSON only with the keys you want to change."
+    )
+    user_prompt = "FEATURES:\n```json\n" + json.dumps(features, indent=2) + \
+                  "\n```\nBASE_COSTS:\n```json\n" + json.dumps(base_costs, indent=2) + "\n```"
+
+    try:
+        llm = _LocalLLM(model_path)
+        raw = llm.ask_json(system_prompt, user_prompt, temperature=0.2, max_tokens=256)
+    except Exception:
+        return _fallback()
+
+    out: dict[str, Any] = {}
+    if not isinstance(raw, dict):
+        return _fallback()
+
+    scr = raw.get("scrap_pct_override", None)
+    if scr is not None:
+        out["scrap_pct_override"] = clamp(scr, 0.0, 0.50, None)
+
+    mults = _safe_get(raw, "process_hour_multipliers", dict, {})
+    out["process_hour_multipliers"] = {k.lower(): clamp(v, 0.6, 1.6, 1.0) for k, v in mults.items() if isinstance(v, (int, float))}
+
+    adds = _safe_get(raw, "process_hour_adders", dict, {})
+    out["process_hour_adders"] = {k.lower(): clamp(v, 0.0, 3.0, 0.0) for k, v in adds.items() if isinstance(v, (int, float))}
+
+    addpt = _safe_get(raw, "add_pass_through", dict, {})
+    out["add_pass_through"] = {str(k): clamp(v, 0.0, 200.0, 0.0) for k, v in addpt.items() if isinstance(v, (int, float))}
+
+    fmd = raw.get("fixture_material_cost_delta", None)
+    if isinstance(fmd, (int, float)):
+        out["fixture_material_cost_delta"] = clamp(fmd, -200.0, 200.0, 0.0)
+
+    cont = raw.get("contingency_pct_override", None)
+    if cont is not None:
+        out["contingency_pct_override"] = clamp(cont, 0.0, 0.25, None)
+
+    notes = _safe_get(raw, "notes", list, [])
+    out["notes"] = [str(n)[:200] for n in notes][:6]
+
+    return out
 # ----------------- GUI -----------------
 # ---- scrollable frame helper -----------------------------------------------
 class ScrollableFrame(ttk.Frame):
@@ -3776,6 +4510,8 @@ class App(tk.Tk):
         top = ttk.Frame(self); top.pack(fill="x", pady=(6,8))
         ttk.Button(top, text="1. Load CAD & Vars", command=self.open_flow).pack(side="left", padx=5)
         ttk.Button(top, text="2. Generate Quote", command=self.gen_quote).pack(side="left", padx=5)
+        self.scrap_var = tk.StringVar(value="Scrap %: –")
+        ttk.Label(top, textvariable=self.scrap_var).pack(side="right", padx=5)
 
         # Tabs
         self.nb = ttk.Notebook(self); self.nb.pack(fill="both", expand=True)
@@ -3975,7 +4711,7 @@ class App(tk.Tk):
         current_row += 1
         comm_keys = [
             "OverheadPct", "GA_Pct", "MarginPct", "ContingencyPct",
-            "ExpeditePct", "VendorMarkupPct", "InsurancePct", "MinLotCharge", "Quantity",
+            "ExpeditePct", "VendorMarkupPct", "InsurancePct", "MinLotCharge", "Quantity", "MaterialVendorCSVPath",
         ]
         create_global_entries(comm_frame, comm_keys, self.params, self.param_vars)
 
@@ -4155,7 +4891,7 @@ class App(tk.Tk):
 
         updates = {}
         for key, raw_value in raw_param_values.items():
-            if key == "LLMModelPath":
+            if key.endswith("Path"):
                 updates[key] = raw_value
                 continue
             try:
@@ -4324,12 +5060,31 @@ class App(tk.Tk):
 
         self.apply_overrides(notify=False)
 
-        res = compute_quote_from_df(self.vars_df, params=self.params, rates=self.rates)
+        res = compute_quote_from_df(
+            self.vars_df,
+            params=self.params,
+            rates=self.rates,
+            llm_enabled=self.llm_enabled.get(),
+            llm_model_path=self.llm_model_path.get().strip() or None,
+        )
         model_path = self.llm_model_path.get().strip()
         llm_explanation = get_llm_quote_explanation(res, model_path)
         report = render_quote(res, currency="$", show_zeros=False, llm_explanation=llm_explanation)
         self.out_txt.delete("1.0", "end")
         self.out_txt.insert("end", report, "rcol")
+
+        breakdown = res.get("breakdown", {}) or {}
+        scrap_pct = breakdown.get("scrap_pct")
+        if scrap_pct is None:
+            scrap_pct = (breakdown.get("material", {}) or {}).get("scrap_pct")
+        if scrap_pct is not None:
+            try:
+                pct_val = float(scrap_pct) * 100.0
+                self.scrap_var.set(f"Scrap %: {pct_val:.1f}%")
+            except Exception:
+                self.scrap_var.set("Scrap %: –")
+        else:
+            self.scrap_var.set("Scrap %: –")
 
         self.nb.select(self.tab_out)
         self.status_var.set(f"Quote Generated! Final Price: ${res.get('price', 0):,.2f}")
