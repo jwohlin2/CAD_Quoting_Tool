@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 # app_gui_occ_flow_v8_single_autollm.py
 """
@@ -24,8 +25,9 @@ import tkinter.font as tkfont
 from importlib import import_module
 from pathlib import Path
 from typing import Any, Dict
-from OCP.TopAbs   import TopAbs_FACE
-from OCP.TopExp   import TopExp_Explorer
+from OCP.TopAbs   import TopAbs_EDGE, TopAbs_FACE
+from OCP.TopExp   import TopExp, TopExp_Explorer
+from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
 from OCP.TopoDS   import TopoDS, TopoDS_Face, TopoDS_Shape
 from OCP.BRep     import BRep_Tool
 from OCP.BRepAdaptor import BRepAdaptor_Surface as _BAS
@@ -308,14 +310,32 @@ def face_surface(face_like):
 if STACK == "ocp":
     from OCP.TopoDS import TopoDS_Edge, TopoDS_Solid, TopoDS_Shell
 
-    def _TO_EDGE(shape):
-        return TopoDS_Edge.DownCast(shape)
+    def _TO_EDGE(s):
+        if type(s).__name__ in ("TopoDS_Edge", "Edge"):
+            return s
+        if hasattr(TopoDS, "Edge_s"):
+            return TopoDS.Edge_s(s)
+        try:
+            from OCP.TopoDS import topods as _topods
+            return _topods.Edge(s)
+        except Exception as e:
+            raise TypeError(f"Cannot cast to Edge from {type(s).__name__}") from e
 
-    def _TO_SOLID(shape):
-        return TopoDS_Solid.DownCast(shape)
+    def _TO_SOLID(s):
+        if type(s).__name__ in ("TopoDS_Solid", "Solid"):
+            return s
+        if hasattr(TopoDS, "Solid_s"):
+            return TopoDS.Solid_s(s)
+        from OCP.TopoDS import topods as _topods
+        return _topods.Solid(s)
 
-    def _TO_SHELL(shape):
-        return TopoDS_Shell.DownCast(shape)
+    def _TO_SHELL(s):
+        if type(s).__name__ in ("TopoDS_Shell", "Shell"):
+            return s
+        if hasattr(TopoDS, "Shell_s"):
+            return TopoDS.Shell_s(s)
+        from OCP.TopoDS import topods as _topods
+        return _topods.Shell(s)
 else:
     # Resolve within OCC.Core only
     try:
@@ -368,14 +388,6 @@ def to_edge_safe(obj):
 try:
     # OCP / CadQuery bindings
     from OCP.BRepGProp import BRepGProp as _BRepGProp_mod
-    from OCP.TopExp import TopExp as _TopExp_mod
-
-    from OCP.TopoDS import TopoDS_Edge as _OCP_TOPO_E
-
-    def _to_edge_ocp(s):
-        return _OCP_TOPO_E.DownCast(s)
-
-    _TO_EDGE = _to_edge_ocp
     STACK_GPROP = "ocp"
 except Exception:
     # pythonocc-core
@@ -393,8 +405,6 @@ except Exception:
             SurfaceProperties=_sp,
             VolumeProperties=_vp,
         )
-    from OCC.Core.TopExp import TopExp as _TopExp_mod
-
     def _to_edge_occ(s):
         try:
             from OCC.Core.TopoDS import topods_Edge as _fn
@@ -423,14 +433,23 @@ def linear_properties(edge, gprops):
             raise
     return fn(edge, gprops)
 
-def map_shapes_and_ancestors(shape, subshape_type, ancestor_type, amap):
-    """TopExp.MapShapesAndAncestors(shape, sub, ancestor, amap) with fallback."""
-    fn = getattr(_TopExp_mod, "MapShapesAndAncestors", None)
+def map_shapes_and_ancestors(root_shape, sub_enum, anc_enum):
+    """Return TopTools_IndexedDataMapOfShapeListOfShape for (sub → ancestors)."""
+    # Ensure we pass a *Shape*, not a Face
+    if root_shape is None:
+        raise TypeError("root_shape is None")
+    if not hasattr(root_shape, "IsNull") or root_shape.IsNull():
+        # If someone handed us a Face, try to grab its TShape parent; else fail.
+        # Safer: require a real TopoDS_Shape from STEP/IGES root.
+        pass
+
+    amap = TopTools_IndexedDataMapOfShapeListOfShape()
+    # static/instance variants across wheels
+    fn = getattr(TopExp, "MapShapesAndAncestors", None) or getattr(TopExp, "MapShapesAndAncestors_s", None)
     if fn is None:
-        # old function name
-        from OCC.Core.TopExp import topexp_MapShapesAndAncestors as _old  # type: ignore
-        return _old(shape, subshape_type, ancestor_type, amap)
-    return fn(shape, subshape_type, ancestor_type, amap)
+        raise RuntimeError("TopExp.MapShapesAndAncestors not available in this OCP wheel")
+    fn(root_shape, sub_enum, anc_enum, amap)
+    return amap
 
 # modern topods casters: topods.Edge(shape) / topods.Face(shape)
 # ---- Robust topods casters that are no-ops for already-cast objects ----
@@ -818,13 +837,7 @@ except Exception:
         def VolumeProperties_s(shape, gprops):         brepgprop_VolumeProperties(shape, gprops)
     BRepGProp = _BRepGPropShim
 
-    # ADD: TopExp shim to provide MapShapesAndAncestors
-    from OCC.Core.TopExp import topexp_MapShapesAndAncestors
-    class _TopExpShim:
-        @staticmethod
-        def MapShapesAndAncestors(shape, subshape_type, ancestor_type, a_map):
-            topexp_MapShapesAndAncestors(shape, subshape_type, ancestor_type, a_map)
-    TopExp = _TopExpShim
+
 
     # UV bounds and brep read are free functions
     from OCC.Core.BRepTools import BRepTools, breptools_Read as _occ_breptools_read
@@ -915,7 +928,10 @@ def read_step_shape(path: str) -> TopoDS_Shape:
 
     if shape.IsNull():
         raise RuntimeError("STEP produced a null TopoDS_Shape.")
-
+    # Verify we truly pass a Shape to MapShapesAndAncestors
+    print("[DBG] shape type:", type(shape).__name__, "IsNull:", getattr(shape, "IsNull", lambda: True)())
+    amap = map_shapes_and_ancestors(shape, TopAbs_EDGE, TopAbs_FACE)
+    print("[DBG] map size:", amap.Size())
     # DEBUG: sanity probe for STEP faces
     if os.environ.get("STEP_PROBE", "0") == "1":
         cnt = 0
@@ -1113,8 +1129,7 @@ def _cluster_normals(normals):
 
 def _sum_edge_length_sharp(shape, angle_thresh_deg=175.0) -> float:
     angle_thresh = math.radians(angle_thresh_deg)
-    edge2faces = TopTools_IndexedDataMapOfShapeListOfShape()
-    map_shapes_and_ancestors(shape, TopAbs_EDGE, TopAbs_FACE, edge2faces)
+    edge2faces = map_shapes_and_ancestors(shape, TopAbs_EDGE, TopAbs_FACE)
     total = 0.0
     for i in range(1, map_size(edge2faces) + 1):
         edge = to_edge(edge2faces.FindKey(i))
@@ -2589,8 +2604,12 @@ def compute_quote_from_df(df: pd.DataFrame,
     # ---- fixture -------------------------------------------------------------
     fixture_build_hr = sum_time(r"(?:Fixture\s*Build|Custom\s*Fixture\s*Build)")
     fixture_mat_cost = num(r"(?:Fixture\s*Material\s*Cost|Fixture\s*Hardware)")
-    fixture_cost     = fixture_build_hr * rates["FixtureBuildRate"] + fixture_mat_cost
-    fixture_per_part = (fixture_cost / Qty) if Qty > 1 else fixture_cost
+    # Explicit fields for clarity downstream
+    fixture_material_cost = float(fixture_mat_cost)
+    fixture_labor_cost    = float(fixture_build_hr) * float(rates["FixtureBuildRate"])
+    fixture_cost          = fixture_labor_cost + fixture_material_cost
+    fixture_labor_per_part = (fixture_labor_cost / Qty) if Qty > 1 else fixture_labor_cost
+    fixture_per_part       = (fixture_cost / Qty) if Qty > 1 else fixture_cost
 
     nre_detail = {
         "programming": {
@@ -2602,7 +2621,8 @@ def compute_quote_from_df(df: pd.DataFrame,
         },
         "fixture": {
             "build_hr": float(fixture_build_hr), "build_rate": rates["FixtureBuildRate"],
-            "mat_cost": float(fixture_mat_cost),
+            "labor_cost": float(fixture_labor_cost),
+            "mat_cost": float(fixture_material_cost),
             "per_lot": fixture_cost, "per_part": fixture_per_part
         }
     }
@@ -2749,13 +2769,13 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     # ---- roll-ups ------------------------------------------------------------
     labor_cost = (
-        programming_per_part + fixture_per_part +
+        programming_per_part + fixture_labor_per_part +
         milling_cost + turning_cost + wedm_cost + sinker_cost +
         grinding_cost + lap_cost + finishing_cost + inspection_cost +
         saw_cost + assembly_cost + packaging_cost + ehs_cost
     )
 
-    direct_costs   = (material_cost + hardware_cost + outsourced_costs + shipping_cost +
+    direct_costs   = (material_cost + fixture_material_cost + hardware_cost + outsourced_costs + shipping_cost +
                       consumables_hr_cost + utilities_cost + consumables_flat)
 
     insurance_cost = insurance_pct * (labor_cost + direct_costs)
@@ -2795,11 +2815,14 @@ def compute_quote_from_df(df: pd.DataFrame,
 }
     pass_meta = {
         "consumables_hr_cost": {"basis": "Machine & inspection hours $/hr"},
-        "utilities_cost":      {"basis": "Spindle/inspection hours $/hrr"},
+        "utilities_cost":      {"basis": "Spindle/inspection hours $/rr"},
         "insurance_cost":      {"basis": "Applied at insurance pct"},
         "vendor_markup_added": {"basis": "Vendor + freight markup"},
         "consumables_flat":    {"basis": "Fixed shop supplies"},
     }
+
+    # Alias for consumers expecting a direct-materials key
+    material_direct_cost = float(material_cost)
 
     breakdown = {
         "qty": Qty,
@@ -2809,6 +2832,7 @@ def compute_quote_from_df(df: pd.DataFrame,
             "supplier_min_charge": supplier_min_charge,
             "surcharge_pct": surcharge_pct,
             "material_cost": material_cost,
+            "material_direct_cost": material_direct_cost,
         },
         "nre": {
             "programming_per_part": programming_per_part,
@@ -2840,6 +2864,8 @@ def compute_quote_from_df(df: pd.DataFrame,
             "utilities_cost": utilities_cost,
             "consumables_flat": consumables_flat,
             "vendor_markup_added": vendor_marked_add,
+            "material_direct_cost": material_direct_cost,
+            "fixture_material_cost": fixture_material_cost,
         },
         "pass_meta": pass_meta,
         "totals": {
