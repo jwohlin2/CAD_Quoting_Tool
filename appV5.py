@@ -44,6 +44,28 @@ def _normalize_lookup_key(value: str) -> str:
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
+def parse_llm_json(text: str):
+    """
+    Accepts raw model text. Strips ``` fences, grabs the first {...} block,
+    returns dict or {}.
+    """
+    if not isinstance(text, str):
+        return {}
+    text2 = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.IGNORECASE | re.MULTILINE).strip()
+    m = re.search(r"\{.*\}", text2, flags=re.DOTALL)
+    if not m:
+        return {}
+    frag = m.group(0)
+    try:
+        return json.loads(frag)
+    except Exception:
+        frag2 = re.sub(r",\s*([}\]])", r"\1", frag)
+        try:
+            return json.loads(frag2)
+        except Exception:
+            return {}
+
+
 MATERIAL_DROPDOWN_OPTIONS = [
     "Aluminum",
     "Berylium Copper",
@@ -1802,7 +1824,9 @@ class _LocalLLM:
         try:
             parsed = json.loads(text)
         except Exception:
-            pass
+            parsed = None
+        if not isinstance(parsed, dict):
+            parsed = parse_llm_json(text)
 
         if LLM_DEBUG:
             snap = {
@@ -1905,12 +1929,14 @@ Return JSON with this structure (numbers only, minutes only for CMM_RunTime_min)
         mp = os.environ.get("QWEN_GGUF_PATH")
         if mp and Path(mp).is_file():
             q = _LocalLLM(mp)
-            parsed, _raw_text, _usage = q.ask_json(
+            parsed, raw_text, _usage = q.ask_json(
                 system,
                 prompt,
                 temperature=0.1,
                 max_tokens=1024,
             )
+            if not isinstance(parsed, dict):
+                parsed = parse_llm_json(raw_text)
             if isinstance(parsed, dict) and "hours" in parsed:
                 return parsed
     except Exception:
@@ -2216,9 +2242,14 @@ def llm_sheet_and_param_overrides(geo: dict, df, params: dict, model_path: str) 
     prompt_sha = hashlib.sha256((sys + "\n" + usr).encode("utf-8")).hexdigest()
 
     error_text = ""
+    raw_text = ""
+    usage = {}
     try:
         llm = _LocalLLM(model_path)
-        js = llm.ask_json(sys, usr, temperature=0.15, max_tokens=900)
+        parsed, raw_text, usage = llm.ask_json(sys, usr, temperature=0.15, max_tokens=900)
+        if not isinstance(parsed, dict):
+            parsed = parse_llm_json(raw_text)
+        js = parsed if isinstance(parsed, dict) else {}
         model_name = Path(model_path).name
     except Exception as e:
         js, model_name = {}, "LLM-unavailable"
@@ -2262,7 +2293,14 @@ def llm_sheet_and_param_overrides(geo: dict, df, params: dict, model_path: str) 
                 if pv is not None:
                     param_edits[k] = pv
 
-    meta = {"model": model_name, "prompt_sha256": prompt_sha, "allowed_items_count": len(allowed), "error": error_text}
+    meta = {
+        "model": model_name,
+        "prompt_sha256": prompt_sha,
+        "allowed_items_count": len(allowed),
+        "error": error_text,
+        "raw_text": raw_text,
+        "usage": usage,
+    }
     return {"sheet_edits": sheet_edits, "params": param_edits, "param_whys": param_whys, "allowed_items": allowed, "meta": meta}
 
 # --- APPLY LLM OUTPUT ---------------------------------------------------------
@@ -2735,6 +2773,49 @@ PARAMS_DEFAULT = {
     "VendorMarkupPct": 0.00,
     "MinLotCharge": 0.00,
     "Quantity": 1,
+    # Machine capability (shared with LLM for drilling/setup planning)
+    "MachineMaxRPM": 8000,
+    "MachineMaxTorqueNm": 70.0,
+    "MachineMaxZTravel_mm": 500.0,
+    # Light stock catalog so the LLM can pick reasonable blanks
+    "StockCatalog": [
+        {
+            "sku": "plate_steel_0.25_12x12",
+            "material": "steel",
+            "form": "plate",
+            "length_mm": 304.8,
+            "width_mm": 304.8,
+            "thickness_mm": 6.35,
+            "max_weight_kg": 7.0,
+        },
+        {
+            "sku": "plate_steel_0.5_12x12",
+            "material": "steel",
+            "form": "plate",
+            "length_mm": 304.8,
+            "width_mm": 304.8,
+            "thickness_mm": 12.7,
+            "max_weight_kg": 14.0,
+        },
+        {
+            "sku": "plate_aluminum_0.25_12x24",
+            "material": "aluminum",
+            "form": "plate",
+            "length_mm": 609.6,
+            "width_mm": 304.8,
+            "thickness_mm": 6.35,
+            "max_weight_kg": 12.0,
+        },
+        {
+            "sku": "plate_aluminum_0.5_12x24",
+            "material": "aluminum",
+            "form": "plate",
+            "length_mm": 609.6,
+            "width_mm": 304.8,
+            "thickness_mm": 12.7,
+            "max_weight_kg": 24.0,
+        },
+    ],
     # Programming heuristics
     "ProgSimpleDim_mm": 80.0,
     "ProgCapHr": 1.0,
@@ -3089,39 +3170,59 @@ def require_plate_inputs(geo: dict, ui_vars: dict[str, Any] | None) -> None:
 
 
 def estimate_drilling_hours(hole_diams_mm: list[float], thickness_mm: float, mat_key: str) -> float:
-    """Crudely estimate drilling cycle time (hours) for plate holes."""
+    """
+    Conservative plate-drilling model with floors so 100+ holes don't collapse to minutes.
+    """
     if not hole_diams_mm or thickness_mm <= 0:
         return 0.0
 
     mat = (mat_key or "").lower()
-    f_mm_rev = 0.10
-    if "alum" in mat:
-        f_mm_rev = 0.25
-    elif "stainless" in mat or "17-4" in mat or "17 4" in mat or "316" in mat:
-        f_mm_rev = 0.06
 
-    rpm_cap = 3500
-    retract_factor = 1.30
-    toolchange_s_per_group = 18.0
+    def sec_per_hole(d_mm: float) -> float:
+        if d_mm <= 3.5:
+            return 10.0
+        if d_mm <= 6.0:
+            return 14.0
+        if d_mm <= 10.0:
+            return 18.0
+        if d_mm <= 13.0:
+            return 22.0
+        if d_mm <= 20.0:
+            return 30.0
+        if d_mm <= 32.0:
+            return 45.0
+        return 60.0
+
+    mfac = 0.8 if "alum" in mat else (1.15 if "stainless" in mat else 1.0)
+    tfac = max(0.7, min(2.0, thickness_mm / 6.35))
 
     from collections import Counter
 
     groups = Counter(round(float(d), 2) for d in hole_diams_mm if d and math.isfinite(d))
+    toolchange_s = 15.0
 
-    sec = 0.0
-    for d_mm, qty in groups.items():
+    total_sec = 0.0
+    for d, qty in groups.items():
         if qty <= 0:
             continue
-        diameter = max(1.0, float(d_mm))
-        vc_m_min = 120 if "alum" in mat else 50
-        rpm = min(rpm_cap, max(200, (vc_m_min * 1000.0) / (math.pi * diameter)))
-        feed_mm_min = max(60.0, rpm * f_mm_rev)
-        depth_mm = float(thickness_mm)
-        time_per = retract_factor * (depth_mm / feed_mm_min)
-        sec += qty * time_per * 60.0
-        sec += toolchange_s_per_group
+        per = sec_per_hole(float(d)) * mfac * tfac
+        total_sec += qty * per
+        total_sec += toolchange_s
 
-    return sec / 3600.0
+    return total_sec / 3600.0
+
+
+def _drilling_floor_hours(hole_count: int) -> float:
+    floor_hr = hole_count * 0.09 / 60.0 + 0.10
+    min_abs = 0.35 if hole_count >= 50 else 0.10
+    return max(floor_hr, min_abs)
+
+
+def validate_drilling_reasonableness(hole_count: int, drill_hr_after_overrides: float) -> tuple[bool, str]:
+    floor_hr = _drilling_floor_hours(hole_count)
+    ok = drill_hr_after_overrides >= floor_hr
+    msg = f"drilling hours ({drill_hr_after_overrides:.2f} h) below floor ({floor_hr:.2f} h) for {hole_count} holes"
+    return ok, msg
 
 
 def validate_quote_before_pricing(
@@ -3143,11 +3244,6 @@ def validate_quote_before_pricing(
         hole_count_val = len(geo.get("hole_diams_mm") or [])
     if hole_count_val <= 0:
         hole_count_val = len(geo.get("hole_diams_mm") or [])
-    drill_hr_val = 0.0
-    if process_hours:
-        drill_hr_val = float(process_hours.get("drilling", 0.0) or 0.0)
-    if hole_count_val >= 50 and drill_hr_val < 1.0:
-        raise ValueError("Quote blocked: drilling hours unrealistically low for hole count.")
     if issues:
         raise ValueError("Quote blocked:\n- " + "\n- ".join(issues))
 
@@ -3770,6 +3866,86 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     fix_detail = nre_detail.get("fixture", {})
 
+    def _clean_stock_entry(entry: dict[str, Any]) -> dict[str, Any]:
+        cleaned: dict[str, Any] = {}
+        for k, v in entry.items():
+            key = str(k)
+            if isinstance(v, (str, int, float, bool)) or v is None:
+                cleaned[key] = v
+            else:
+                try:
+                    cleaned[key] = float(v)
+                except Exception:
+                    cleaned[key] = str(v)
+        return cleaned
+
+    stock_catalog_param = params.get("StockCatalog")
+    stock_catalog: list[dict[str, Any]] = []
+    if isinstance(stock_catalog_param, (list, tuple)):
+        for entry in list(stock_catalog_param)[:12]:
+            if isinstance(entry, dict):
+                stock_catalog.append(_clean_stock_entry(entry))
+
+    machine_limits = {
+        "max_rpm": float(_coerce_float_or_none(params.get("MachineMaxRPM")) or 0.0),
+        "max_torque_nm": float(_coerce_float_or_none(params.get("MachineMaxTorqueNm")) or 0.0),
+        "max_z_travel_mm": float(_coerce_float_or_none(params.get("MachineMaxZTravel_mm")) or 0.0),
+    }
+
+    bbox_info: dict[str, float] = {}
+    bbox_src = (
+        ("GEO-01_Length_mm", "length_mm"),
+        ("GEO-02_Width_mm", "width_mm"),
+        ("GEO-03_Height_mm", "height_mm"),
+    )
+    dims_for_stock: list[float] = []
+    for src_key, dest_key in bbox_src:
+        val = _coerce_float_or_none(geo_context.get(src_key))
+        if val is not None:
+            fval = float(val)
+            bbox_info[dest_key] = fval
+            if fval > 0:
+                dims_for_stock.append(fval)
+    if dims_for_stock:
+        bbox_info["max_dim_mm"] = max(dims_for_stock)
+        bbox_info["min_dim_mm"] = min(dims_for_stock)
+
+    vol_cm3 = float(_coerce_float_or_none(geo_context.get("volume_cm3")) or 0.0)
+    density_g_cc = float(_coerce_float_or_none(geo_context.get("density_g_cc")) or 0.0)
+    part_mass_g_est = 0.0
+    if vol_cm3 > 0 and density_g_cc > 0:
+        part_mass_g_est = vol_cm3 * density_g_cc
+
+    hole_groups_geo = geo_context.get("GEO_Hole_Groups")
+    if isinstance(hole_groups_geo, list):
+        hole_groups_clean: list[dict[str, Any]] = []
+        for grp in hole_groups_geo:
+            if not isinstance(grp, dict):
+                continue
+            cleaned = {
+                "dia_mm": _coerce_float_or_none(grp.get("dia_mm")),
+                "depth_mm": _coerce_float_or_none(grp.get("depth_mm")),
+                "through": bool(grp.get("through")),
+                "count": int(_coerce_float_or_none(grp.get("count")) or 0),
+            }
+            hole_groups_clean.append(cleaned)
+        hole_groups_geo = hole_groups_clean
+
+    dfm_geo = {
+        "min_wall_mm": _coerce_float_or_none(geo_context.get("GEO_MinWall_mm")),
+        "thin_wall": bool(geo_context.get("GEO_ThinWall_Present")),
+        "largest_plane_mm2": _coerce_float_or_none(geo_context.get("GEO_LargestPlane_Area_mm2")),
+        "unique_normals": int(_coerce_float_or_none(geo_context.get("GEO_Setup_UniqueNormals")) or 0),
+        "face_count": int(_coerce_float_or_none(geo_context.get("Feature_Face_Count")) or 0),
+        "deburr_edge_len_mm": _coerce_float_or_none(geo_context.get("GEO_Deburr_EdgeLen_mm")),
+    }
+
+    tolerance_inputs: dict[str, Any] = {}
+    for key, value in (ui_vars or {}).items():
+        label = str(key)
+        if re.search(r"(tolerance|finish|surface)", label, re.IGNORECASE):
+            tolerance_inputs[label] = value
+
     features = {
         "qty": Qty,
         "max_dim_mm": max_dim,
@@ -3783,12 +3959,18 @@ def compute_quote_from_df(df: pd.DataFrame,
         "density_g_cc": density_g_cc,
         "scrap_pct": scrap_pct,
         "material_cost_baseline": material_cost,
+        "bbox_mm": bbox_info,
+        "machine_limits": machine_limits,
+        "stock_catalog": stock_catalog,
+        "part_mass_g_est": part_mass_g_est,
+        "dfm_geo": dfm_geo,
     }
     hole_tool_sizes = sorted({round(x, 2) for x in hole_diams_list}) if hole_diams_list else []
     features.update({
         "is_2d": bool(is_plate_2d),
         "hole_count": hole_count_for_tripwire,
         "hole_tool_sizes": hole_tool_sizes,
+        "hole_groups": hole_groups_geo,
         "profile_length_mm": float(_coerce_float_or_none(geo_context.get("profile_length_mm")) or 0.0),
         "thickness_mm": float(_coerce_float_or_none(geo_context.get("thickness_mm")) or 0.0),
         "material_key": geo_context.get("material") or material_name,
@@ -3798,6 +3980,16 @@ def compute_quote_from_df(df: pd.DataFrame,
         features["hole_count_override"] = int(round(hole_count_override))
     if avg_hole_diam_override and avg_hole_diam_override > 0:
         features["avg_hole_diam_override_mm"] = float(avg_hole_diam_override)
+    if tolerance_inputs:
+        features["tolerance_inputs"] = tolerance_inputs
+    if fix_detail:
+        setup_hint = {}
+        if fix_detail.get("strategy"):
+            setup_hint["fixture_strategy"] = fix_detail.get("strategy")
+        if fix_detail.get("build_hr"):
+            setup_hint["fixture_build_hr"] = _coerce_float_or_none(fix_detail.get("build_hr"))
+        if setup_hint:
+            features["fixture_plan"] = setup_hint
 
     base_costs = {
         "process_costs": process_costs_baseline,
@@ -3843,6 +4035,9 @@ def compute_quote_from_df(df: pd.DataFrame,
             "pass_through": pass_through_baseline,
             "scrap_pct": scrap_pct_baseline,
         },
+        "catalogs": {
+            "stock": stock_catalog,
+        },
         "bounds": {
             "mult_min": 0.5,
             "mult_max": 3.0,
@@ -3850,7 +4045,7 @@ def compute_quote_from_df(df: pd.DataFrame,
             "add_hr_max": 5.0,
             "scrap_min": 0.0,
 
-            "scrap_max": 0.20,
+            "scrap_max": 0.25,
         },
     }
 
@@ -3877,6 +4072,99 @@ def compute_quote_from_df(df: pd.DataFrame,
             llm_notes.append(note.strip())
     notes_from_clamps = list(overrides_meta.get("clamp_notes", [])) if overrides_meta else []
 
+    drilling_groups = overrides.get("drilling_groups") if isinstance(overrides, dict) else None
+    if isinstance(drilling_groups, list) and drilling_groups:
+        bits: list[str] = []
+        for grp in drilling_groups[:3]:
+            if not isinstance(grp, dict):
+                continue
+            qty = grp.get("qty")
+            dia = grp.get("dia_mm")
+            try:
+                qty_i = int(qty)
+            except Exception:
+                qty_i = None
+            dia_v = None
+            try:
+                dia_v = float(dia) if dia is not None else None
+            except Exception:
+                dia_v = None
+            if qty_i and dia_v:
+                label = f"{qty_i}×{dia_v:.1f}mm"
+            elif qty_i:
+                label = f"{qty_i} holes"
+            elif dia_v:
+                label = f"Ø{dia_v:.1f}mm"
+            else:
+                continue
+            peck = grp.get("peck")
+            if isinstance(peck, str) and peck.strip():
+                label += f" ({peck.strip()[:24]})"
+            bits.append(label)
+        if bits:
+            llm_notes.append("Drilling groups: " + ", ".join(bits))
+
+    stock_plan = overrides.get("stock_recommendation") if isinstance(overrides, dict) else None
+    if isinstance(stock_plan, dict) and stock_plan:
+        item = stock_plan.get("stock_item") or stock_plan.get("form")
+        L = stock_plan.get("length_mm")
+        W = stock_plan.get("width_mm")
+        T = stock_plan.get("thickness_mm")
+        dims: list[str] = []
+        for val in (L, W, T):
+            try:
+                dims.append(f"{float(val):.0f}")
+            except Exception:
+                dims.append(None)
+        dims_clean = [d for d in dims if d is not None]
+        dim_str = " × ".join(dims_clean) + " mm" if dims_clean else ""
+        label = f"Stock: {item}" if item else "Stock plan applied"
+        if dim_str.strip():
+            label += f" ({dim_str.strip()})"
+        cut = stock_plan.get("cut_count")
+        try:
+            cut_i = int(cut)
+        except Exception:
+            cut_i = 0
+        if cut_i:
+            label += f", {cut_i} cuts"
+        llm_notes.append(label)
+
+    setup_plan = overrides.get("setup_recommendation") if isinstance(overrides, dict) else None
+    if isinstance(setup_plan, dict) and setup_plan:
+        setups_val = setup_plan.get("setups")
+        try:
+            setups_i = int(setups_val)
+        except Exception:
+            setups_i = None
+        fixture = setup_plan.get("fixture")
+        if setups_i or fixture:
+            piece = f"Setups: {setups_i}" if setups_i else "Setups updated"
+            if isinstance(fixture, str) and fixture.strip():
+                piece += f" ({fixture.strip()[:60]})"
+            llm_notes.append(piece)
+
+    dfm_risks = overrides.get("dfm_risks") if isinstance(overrides, dict) else None
+    if isinstance(dfm_risks, list) and dfm_risks:
+        risks_clean = [str(r).strip() for r in dfm_risks if str(r).strip()]
+        if risks_clean:
+            llm_notes.append("DFM risks: " + "; ".join(risks_clean[:4]))
+
+    tol_plan = overrides.get("tolerance_impacts") if isinstance(overrides, dict) else None
+    if isinstance(tol_plan, dict) and tol_plan:
+        tol_bits: list[str] = []
+        for key in ("in_process_inspection_hr", "final_inspection_hr", "finishing_hr"):
+            if key in tol_plan:
+                try:
+                    tol_bits.append(f"{key.replace('_',' ')} +{float(tol_plan[key]):.2f}h")
+                except Exception:
+                    continue
+        surface = tol_plan.get("suggested_finish")
+        if isinstance(surface, str) and surface.strip():
+            tol_bits.append(surface.strip()[:80])
+        if tol_bits:
+            llm_notes.append("Tolerance/finish: " + "; ".join(tol_bits))
+
     applied_process: dict[str, dict[str, Any]] = {}
     applied_pass: dict[str, dict[str, Any]] = {}
 
@@ -3900,7 +4188,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     old_scrap = float(features.get("scrap_pct", scrap_pct) or 0.0)
     new_scrap = overrides.get("scrap_pct_override") if overrides else None
     if new_scrap is not None:
-        new_scrap = clamp(new_scrap, 0.0, 0.50, old_scrap)
+        new_scrap = clamp(new_scrap, 0.0, 0.25, old_scrap)
         if new_scrap is not None and not math.isclose(new_scrap, old_scrap, abs_tol=1e-6):
             baseline = float(features.get("material_cost_baseline", material_direct_cost_base))
             scaled = baseline * ((1.0 + new_scrap) / max(1e-6, (1.0 + old_scrap)))
@@ -4020,6 +4308,54 @@ def compute_quote_from_df(df: pd.DataFrame,
             pass_through[label] = 0.0
 
     process_hours_final = {k: float(process_meta.get(k, {}).get("hr", 0.0)) for k in process_meta}
+
+    hole_count_for_guard = 0
+    try:
+        hole_count_for_guard = int(float(geo_context.get("hole_count", 0) or 0))
+    except Exception:
+        pass
+    if hole_count_for_guard <= 0:
+        hole_count_for_guard = len(geo_context.get("hole_diams_mm", []) or [])
+
+    if hole_count_for_guard > 0:
+        drill_hr_after_overrides = float(process_hours_final.get("drilling", 0.0))
+        ok, why = validate_drilling_reasonableness(hole_count_for_guard, drill_hr_after_overrides)
+        if not ok:
+            floor_hr = _drilling_floor_hours(hole_count_for_guard)
+            new_hr = max(drill_hr_after_overrides, floor_hr)
+            drill_meta = process_meta.get("drilling")
+            if drill_meta:
+                rate = float(drill_meta.get("rate", 0.0))
+                base_extra = float(drill_meta.get("base_extra", 0.0))
+                old_cost = float(process_costs.get("drilling", 0.0))
+                entry = applied_process.setdefault(
+                    "drilling",
+                    {
+                        "old_hr": float(drill_meta.get("hr", 0.0)),
+                        "old_cost": old_cost,
+                        "notes": [],
+                    },
+                )
+                entry.setdefault("notes", []).append(f"Raised to floor {floor_hr:.2f} h")
+                drill_meta["hr"] = new_hr
+                process_costs["drilling"] = round(new_hr * rate + base_extra, 2)
+            process_hours_final["drilling"] = new_hr
+            llm_notes.append(f"Raised drilling to floor: {why}")
+            process_hours_final = {k: float(process_meta.get(k, {}).get("hr", 0.0)) for k in process_meta}
+
+    baseline_total_hours = sum(float(process_hours_baseline.get(k, 0.0)) for k in process_hours_baseline)
+    final_total_hours = sum(float(process_hours_final.get(k, 0.0)) for k in process_hours_final)
+    if baseline_total_hours > 1e-6:
+        ratio = final_total_hours / baseline_total_hours if baseline_total_hours else 1.0
+        if ratio < 0.6 or ratio > 3.0:
+            msg = (
+                f"Process hours shift {baseline_total_hours:.2f}h → {final_total_hours:.2f}h "
+                f"({ratio:.2f}×); confirm change"
+            )
+            overrides_meta.setdefault("alerts", []).append(msg)
+            overrides_meta["confirm_required"] = True
+            llm_notes.append(f"Requires confirm: {msg}")
+
     validate_quote_before_pricing(geo_context, process_costs, pass_through, process_hours_final)
 
     for key, entry in applied_process.items():
@@ -4957,7 +5293,7 @@ def get_llm_overrides(
     Ask the local LLM for cost overrides based on CAD features and base costs.
     Returns (overrides_dict, meta) where overrides_dict may contain:
       {
-        "scrap_pct_override": 0.00-0.50,          # fraction, not %
+        "scrap_pct_override": 0.00-0.25,          # fraction, not %
         "process_hour_multipliers": {"milling": 1.10, "turning": 0.95, ...},
         "process_hour_adders": {"milling": 0.25, "inspection": 0.10},   # hours
         "add_pass_through": {"Material": 12.0, "Tooling": 30.0},        # dollars
@@ -4983,35 +5319,336 @@ def get_llm_overrides(
     if not model_path or not os.path.isfile(model_path):
         return _fallback()
 
-    system_prompt = (
-        "You are a manufacturing cost advisor. Given CAD/quote features and base costs, "
-        "propose small, bounded overrides ONLY when justified by geometry/material/complexity. "
-        "Hard constraints: "
-        "scrap_pct_override in [0, 0.50]; each process_hour_multipliers value in [0.5, 3.0]; "
-        "adders in hours in [0.0, 5.0]; added pass-through dollars in [0, 200.0] per item; "
-        "fixture_material_cost_delta in [-200.0, 200.0]; contingency_pct_override in [0.0, 0.25]. "
-        "Return compact JSON only with the keys you want to change."
-    )
-    user_prompt = "FEATURES:\n```json\n" + json.dumps(features, indent=2) + \
-                  "\n```\nBASE_COSTS:\n```json\n" + json.dumps(base_costs, indent=2) + "\n```"
-
     try:
         llm = _LocalLLM(model_path)
-        parsed, raw_text, usage = llm.ask_json(
-            system_prompt,
-            user_prompt,
-            temperature=0.2,
-            max_tokens=256,
-            context=context_payload,
-        )
     except Exception:
         return _fallback()
 
-    if not isinstance(parsed, dict):
-        return _fallback(_meta(raw=parsed, raw_text=raw_text, usage=usage))
-
     clamp_notes: list[str] = []
     out: dict[str, Any] = {}
+
+    def _as_float(value):
+        res = _coerce_float_or_none(value)
+        return float(res) if res is not None else None
+
+    def _as_int(value, default: int = 0) -> int:
+        res = _as_float(value)
+        if res is None:
+            return default
+        try:
+            return int(round(res))
+        except Exception:
+            return default
+
+    hole_count_feature = max(0, _as_int(features.get("hole_count"), 0))
+    thickness_feature = _as_float(features.get("thickness_mm")) or 0.0
+    density_feature = _as_float(features.get("density_g_cc")) or 0.0
+    volume_feature = _as_float(features.get("volume_cm3")) or 0.0
+    part_mass_est = _as_float(features.get("part_mass_g_est")) or 0.0
+    if part_mass_est <= 0 and density_feature > 0 and volume_feature > 0:
+        part_mass_est = density_feature * volume_feature
+    density_for_stock = density_feature if density_feature > 0 else 7.85
+
+    bbox_feature = features.get("bbox_mm") if isinstance(features.get("bbox_mm"), dict) else {}
+    part_dims: list[float] = []
+    for key in ("length_mm", "width_mm", "height_mm"):
+        val = _as_float(bbox_feature.get(key))
+        if val and val > 0:
+            part_dims.append(val)
+    if thickness_feature and thickness_feature > 0:
+        part_dims.append(thickness_feature)
+    part_dims_sorted = sorted([d for d in part_dims if d > 0], reverse=True)
+
+    stock_catalog_raw = features.get("stock_catalog")
+    stock_catalog = stock_catalog_raw if isinstance(stock_catalog_raw, (list, tuple)) else []
+    catalog_dims_sorted: list[list[float]] = []
+    for entry in stock_catalog:
+        if not isinstance(entry, dict):
+            continue
+        dims = []
+        for key in ("length_mm", "width_mm", "height_mm", "thickness_mm"):
+            val = _as_float(entry.get(key))
+            if val and val > 0:
+                dims.append(val)
+        if dims:
+            dims = sorted(dims, reverse=True)
+            catalog_dims_sorted.append(dims[:3])
+
+    part_fits_catalog = True
+    if part_dims_sorted and catalog_dims_sorted:
+        part_fits_catalog = any(
+            all(
+                part_dims_sorted[i] <= dims[i] + 1e-6
+                for i in range(min(len(part_dims_sorted), len(dims)))
+            )
+            for dims in catalog_dims_sorted
+        )
+
+    task_meta: dict[str, dict[str, Any]] = {}
+    task_outputs: dict[str, dict[str, Any]] = {}
+    combined_usage: dict[str, float] = {}
+
+    def _merge_usage(usage: dict | None):
+        if not isinstance(usage, dict):
+            return
+        for key, value in usage.items():
+            try:
+                combined_usage[key] = combined_usage.get(key, 0.0) + float(value)
+            except Exception:
+                continue
+
+    ctx = copy.deepcopy(context_payload or {})
+    ctx.setdefault("geo", {})
+    ctx.setdefault("quote_vars", {})
+    catalogs_ctx = dict(ctx.get("catalogs") or {})
+    catalogs_ctx["stock"] = stock_catalog
+    ctx["catalogs"] = catalogs_ctx
+    bounds_ctx = dict(ctx.get("bounds") or {})
+    bounds_ctx.update(
+        {
+            "mult_min": 0.5,
+            "mult_max": 3.0,
+            "add_hr_min": 0.0,
+            "add_hr_max": 5.0,
+            "scrap_min": 0.0,
+            "scrap_max": 0.25,
+        }
+    )
+    ctx["bounds"] = bounds_ctx
+    baseline_ctx = dict(ctx.get("baseline") or {})
+    baseline_ctx.setdefault("scrap_pct", float(features.get("scrap_pct") or 0.0))
+    baseline_ctx.setdefault("pass_through", base_costs.get("pass_through", {}))
+    ctx["baseline"] = baseline_ctx
+    ctx.setdefault("rates", base_costs.get("rates", {}))
+
+    def _jsonify(obj):
+        if isinstance(obj, dict):
+            return {str(k): _jsonify(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [_jsonify(v) for v in obj]
+        if isinstance(obj, (int, float, str, bool)) or obj is None:
+            return obj
+        try:
+            return float(obj)
+        except Exception:
+            return str(obj)
+
+    def _run_task(name: str, system_prompt: str, payload: dict, *, temperature: float = 0.2, max_tokens: int = 256):
+        entry = {"system_prompt": system_prompt, "payload": payload}
+        task_meta[name] = entry
+        try:
+            try:
+                prompt_body = json.dumps(payload, indent=2)
+            except TypeError:
+                prompt_body = json.dumps(_jsonify(payload), indent=2)
+            prompt = "```json\n" + prompt_body + "\n```"
+            parsed, raw_text, usage = llm.ask_json(
+                system_prompt,
+                prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                context=ctx,
+            )
+            entry["raw"] = parsed
+            entry["raw_text"] = raw_text or ""
+            entry["usage"] = usage or {}
+            _merge_usage(usage)
+            if not isinstance(parsed, dict):
+                parsed = parse_llm_json(raw_text)
+            if isinstance(parsed, dict):
+                task_outputs[name] = parsed
+                return parsed
+            return {}
+        except Exception as exc:
+            entry["error"] = repr(exc)
+            return {}
+
+    # ---- Capability prompts -------------------------------------------------
+    hole_payload = {
+        "hole_count": hole_count_feature,
+        "hole_groups": features.get("hole_groups"),
+        "hole_diams_mm": features.get("hole_tool_sizes") or features.get("hole_diams_mm"),
+        "thickness_mm": thickness_feature,
+        "material": features.get("material_key"),
+        "baseline_drilling_hr": _as_float(features.get("drilling_hr_baseline")),
+        "machine_limits": features.get("machine_limits"),
+    }
+    if hole_count_feature >= 1:
+        drilling_system = (
+            "You are a manufacturing estimator. Cluster similar holes by tool diameter/depth,"
+            " suggest a pecking strategy, and recommend bounded drilling time tweaks."
+            " Return JSON only with optional keys: {\"drilling_groups\":[{...}],"
+            " \"process_hour_multipliers\":{\"drilling\":float},"
+            " \"process_hour_adders\":{\"drilling\":float}, \"notes\":[""...""]}."
+            " If hole_count < 5 or data is insufficient, return {}."
+            " Respect multipliers in [0.5,3.0] and adders in [0,5] hours."
+            " When hole_count ≥ 50 and thickness_mm ≥ 3, consider multipliers up to 2.0."
+        )
+        _run_task("drilling", drilling_system, hole_payload, max_tokens=384)
+
+    stock_payload = {
+        "bbox_mm": bbox_feature,
+        "part_mass_g_est": part_mass_est,
+        "material": features.get("material_key"),
+        "scrap_pct_baseline": float(features.get("scrap_pct") or 0.0),
+    }
+    if stock_catalog and bbox_feature:
+        stock_system = (
+            "You are a manufacturing estimator. Choose a stock item from `catalogs.stock` that"
+            " minimally encloses bbox LxWxT (mm). Return JSON only: {\"stock_recommendation\":{...},"
+            " \"scrap_pct\":0.14, \"process_hour_adders\":{\"sawing\":0.2,\"handling\":0.1},"
+            " \"notes\":[""...""]}. Keep scrap_pct within [0,0.25] and hour adders within [0,5]."
+            " Do not invent SKUs. If none fit, return {\"needs_user_input\":\"no stock fits\"}."
+        )
+        _run_task("stock", stock_system, stock_payload, max_tokens=384)
+
+    setup_payload = {
+        "baseline_setups": _as_int(features.get("setups"), 0),
+        "unique_normals": features.get("dfm_geo", {}).get("unique_normals"),
+        "face_count": features.get("dfm_geo", {}).get("face_count"),
+        "fixture_plan": features.get("fixture_plan"),
+        "qty": features.get("qty"),
+    }
+    setup_system = (
+        "You are a manufacturing estimator. Suggest the number of milling setups and fixture"
+        " approach for the feature summary. Return JSON only: {\"setups\":int,"
+        " \"fixture\":\"...\", \"setup_adders_hr\":0.0, \"notes\":[""...""]}."
+        " Do not exceed 4 setups without explicit approval; if unsure, return {}."
+    )
+    _run_task("setups", setup_system, setup_payload, max_tokens=256)
+
+    dfm_payload = {
+        "dfm_geo": features.get("dfm_geo"),
+        "material": features.get("material_key"),
+        "tall_features": features.get("tall_features"),
+        "hole_groups": features.get("hole_groups"),
+    }
+    dfm_system = (
+        "You are a manufacturing estimator. Flag genuine DFM risks (thin walls, deep pockets,"
+        " tiny radii, thread density) only when thresholds you define are exceeded."
+        " Return JSON only: {\"dfm_risks\":[""thin walls <2mm""],"
+        " \"process_hour_multipliers\":{...}, \"process_hour_adders\":{...}, \"notes\":[...]}"
+        " or {} if no issues. Keep multipliers within [0.5,3.0] and adders within [0,5]."
+    )
+    _run_task("dfm", dfm_system, dfm_payload, max_tokens=320)
+
+    baseline_proc_hours = ctx.get("baseline", {}).get("process_hours") if isinstance(ctx.get("baseline"), dict) else {}
+    if not isinstance(baseline_proc_hours, dict):
+        baseline_proc_hours = {}
+    tol_payload = {
+        "tolerance_inputs": features.get("tolerance_inputs"),
+        "baseline_inspection_hr": {
+            "in_process": _as_float(baseline_proc_hours.get("inspection")),
+            "final": _as_float(baseline_proc_hours.get("final_inspection")),
+        },
+    }
+    if tol_payload["tolerance_inputs"]:
+        tol_system = (
+            "You are a manufacturing estimator. When tolerances/finishes are tight, add bounded"
+            " inspection or finishing time and suggest surface-finish ops. Return JSON only:"
+            " {\"tolerance_impacts\":{\"in_process_inspection_hr\":0.2,"
+            " \"final_inspection_hr\":0.1, \"finishing_hr\":0.1, \"suggested_surface_finish\":\"...\","
+            " \"notes\":[...]}}. Keep hour adders within [0,5] and return {} if no change is needed."
+        )
+        _run_task("tolerance", tol_system, tol_payload, max_tokens=320)
+
+    raw_text_combined = "\n\n".join(
+        f"{name}: {meta.get('raw_text', '').strip()}".strip()
+        for name, meta in task_meta.items()
+        if meta.get("raw_text")
+    ).strip()
+    raw_by_task = {name: meta.get("raw") for name, meta in task_meta.items() if "raw" in meta}
+
+    merged: dict[str, Any] = {}
+
+    def _merge_result(dest: dict, src: dict | None):
+        if not isinstance(src, dict):
+            return
+        for key, value in src.items():
+            if key in {"notes", "dfm_risks", "risks"} and isinstance(value, list):
+                dest.setdefault(key, [])
+                for item in value:
+                    if isinstance(item, str):
+                        dest[key].append(item)
+            elif key in {"process_hour_multipliers", "process_hour_adders", "add_pass_through"} and isinstance(value, dict):
+                dest.setdefault(key, {})
+                dest[key].update(value)
+            elif key == "scrap_pct":
+                dest.setdefault("scrap_pct_override", value)
+            elif key == "drilling_groups" and isinstance(value, list):
+                dest.setdefault(key, [])
+                for grp in value:
+                    if isinstance(grp, dict):
+                        dest[key].append(grp)
+            else:
+                dest[key] = value
+
+    for data in task_outputs.values():
+        _merge_result(merged, data)
+
+    parsed = merged
+    needs_input_msg = parsed.get("needs_user_input") if isinstance(parsed, dict) else None
+    if needs_input_msg:
+        clamp_notes.append(f"needs_user_input: {needs_input_msg}")
+
+    clean_mults: dict[str, float] = {}
+    clean_adders: dict[str, float] = {}
+
+    def _ensure_mults_dict() -> dict[str, float]:
+        if "process_hour_multipliers" in out:
+            return out["process_hour_multipliers"]
+        out["process_hour_multipliers"] = clean_mults
+        return clean_mults
+
+    def _ensure_adders_dict() -> dict[str, float]:
+        if "process_hour_adders" in out:
+            return out["process_hour_adders"]
+        out["process_hour_adders"] = clean_adders
+        return clean_adders
+
+    def _merge_multiplier(name: str, value, source: str) -> None:
+        val = _as_float(value)
+        if val is None:
+            return
+        clamped = clamp(val, 0.5, 3.0, 1.0)
+        container = _ensure_mults_dict()
+        norm = str(name).lower()
+        prev = container.get(norm)
+        if prev is None:
+            container[norm] = clamped
+            return
+        new_val = clamp(prev * clamped, 0.5, 3.0, 1.0)
+        if not math.isclose(prev * clamped, new_val, abs_tol=1e-6):
+            clamp_notes.append(f"{source} multiplier clipped for {norm}")
+        container[norm] = new_val
+
+    def _merge_adder(name: str, value, source: str) -> None:
+        val = _as_float(value)
+        if val is None:
+            return
+        clamped = clamp(val, 0.0, 5.0, 0.0)
+        if clamped <= 0:
+            return
+        container = _ensure_adders_dict()
+        norm = str(name).lower()
+        prev = float(container.get(norm, 0.0))
+        new_val = clamp(prev + clamped, 0.0, 5.0, 0.0)
+        if not math.isclose(prev + clamped, new_val, abs_tol=1e-6):
+            clamp_notes.append(f"{source} {prev + clamped:.2f} hr clipped to 5.0 for {norm}")
+        container[norm] = new_val
+
+    def _clean_notes_list(values, limit: int = 6) -> list[str]:
+        clean: list[str] = []
+        if not isinstance(values, list):
+            return clean
+        for item in values:
+            text = str(item).strip()
+            if not text:
+                continue
+            clean.append(text[:200])
+            if len(clean) >= limit:
+                break
+        return clean
 
     scr = parsed.get("scrap_pct_override", None)
     if scr is not None:
@@ -5019,7 +5656,7 @@ def get_llm_overrides(
             orig = float(scr)
         except Exception:
             orig = None
-        clamped_scrap = clamp(scr, 0.0, 0.50, None)
+        clamped_scrap = clamp(scr, 0.0, 0.25, None)
         if clamped_scrap is not None:
             out["scrap_pct_override"] = clamped_scrap
             if orig is None:
@@ -5030,7 +5667,6 @@ def get_llm_overrides(
                 )
 
     mults = _safe_get(parsed, "process_hour_multipliers", dict, {})
-    clean_mults: dict[str, float] = {}
     for k, v in (mults or {}).items():
         if isinstance(v, (int, float)):
             orig = float(v)
@@ -5042,11 +5678,8 @@ def get_llm_overrides(
                 )
         else:
             clamp_notes.append(f"process_hour_multipliers[{k}] non-numeric")
-    if clean_mults:
-        out["process_hour_multipliers"] = clean_mults
 
     adds = _safe_get(parsed, "process_hour_adders", dict, {})
-    clean_adders: dict[str, float] = {}
     for k, v in (adds or {}).items():
         if isinstance(v, (int, float)):
             orig = float(v)
@@ -5058,8 +5691,6 @@ def get_llm_overrides(
                 )
         else:
             clamp_notes.append(f"process_hour_adders[{k}] non-numeric")
-    if clean_adders:
-        out["process_hour_adders"] = clean_adders
 
     addpt = _safe_get(parsed, "add_pass_through", dict, {})
     clean_pass: dict[str, float] = {}
@@ -5103,10 +5734,214 @@ def get_llm_overrides(
                     f"contingency_pct_override {orig:.3f} → {clamped_val:.3f}"
                 )
 
+    drill_groups_raw = _safe_get(parsed, "drilling_groups", list, [])
+    if drill_groups_raw:
+        if hole_count_feature < 5:
+            clamp_notes.append("ignored drilling_groups; hole_count < 5")
+        else:
+            drill_groups_clean: list[dict[str, Any]] = []
+            for grp in drill_groups_raw:
+                if not isinstance(grp, dict):
+                    continue
+                dia = _as_float(grp.get("dia_mm") or grp.get("diameter_mm"))
+                qty = _as_int(grp.get("qty") or grp.get("count"), 0)
+                depth = _as_float(grp.get("depth_mm") or grp.get("depth"))
+                peck = grp.get("peck") or grp.get("strategy")
+                notes = grp.get("notes")
+                if dia is None or qty <= 0:
+                    continue
+                qty = max(1, min(hole_count_feature, qty))
+                cleaned_group: dict[str, Any] = {
+                    "dia_mm": round(dia, 3),
+                    "qty": qty,
+                }
+                if depth is not None and depth > 0:
+                    cleaned_group["depth_mm"] = round(depth, 2)
+                if isinstance(peck, str) and peck.strip():
+                    cleaned_group["peck"] = peck.strip()[:40]
+                group_notes = _clean_notes_list(notes, limit=3)
+                if group_notes:
+                    cleaned_group["notes"] = group_notes
+                drill_groups_clean.append(cleaned_group)
+            if drill_groups_clean:
+                out["drilling_groups"] = drill_groups_clean
+
+    stock_plan_raw = (
+        parsed.get("stock_recommendation")
+        or parsed.get("stock_plan")
+        or parsed.get("stock")
+    )
+    if isinstance(stock_plan_raw, dict):
+        length = _as_float(stock_plan_raw.get("length_mm"))
+        width = _as_float(stock_plan_raw.get("width_mm"))
+        thickness = _as_float(stock_plan_raw.get("thickness_mm"))
+        dims_field = stock_plan_raw.get("size_mm") or stock_plan_raw.get("dimensions_mm")
+        if isinstance(dims_field, dict):
+            length = length or _as_float(dims_field.get("length")) or _as_float(dims_field.get("length_mm"))
+            width = width or _as_float(dims_field.get("width")) or _as_float(dims_field.get("width_mm"))
+            thickness = thickness or _as_float(dims_field.get("thickness")) or _as_float(dims_field.get("height")) or _as_float(dims_field.get("thickness_mm"))
+        elif isinstance(dims_field, (list, tuple)):
+            dims_nums = [d for d in (_as_float(x) for x in dims_field) if d and d > 0]
+            if len(dims_nums) >= 1 and length is None:
+                length = dims_nums[0]
+            if len(dims_nums) >= 2 and width is None:
+                width = dims_nums[1]
+            if len(dims_nums) >= 3 and thickness is None:
+                thickness = dims_nums[2]
+
+        dims_plan = [d for d in (length, width, thickness) if d and d > 0]
+        dims_plan_sorted = sorted(dims_plan, reverse=True)
+        fits_part = True
+        if part_dims_sorted and dims_plan_sorted:
+            fits_part = all(
+                part_dims_sorted[i] <= dims_plan_sorted[i] + 1e-6
+                for i in range(min(len(part_dims_sorted), len(dims_plan_sorted)))
+            )
+        mass_ratio_ok = True
+        stock_mass_g = None
+        if length and width and thickness and density_for_stock > 0 and part_mass_est > 0:
+            stock_volume_cm3 = (length * width * thickness) / 1000.0
+            stock_mass_g = stock_volume_cm3 * density_for_stock
+            if stock_mass_g > 3.0 * part_mass_est + 1e-6:
+                mass_ratio_ok = False
+
+        if not fits_part:
+            clamp_notes.append("stock_recommendation ignored: stock smaller than part bbox")
+        elif not part_fits_catalog and catalog_dims_sorted:
+            clamp_notes.append("stock_recommendation ignored: part exceeds stock catalog")
+        elif not mass_ratio_ok:
+            clamp_notes.append("stock_recommendation ignored: stock mass >3× part mass")
+        elif not (length and width and thickness):
+            clamp_notes.append("stock_recommendation ignored: missing stock dimensions")
+        else:
+            clean_stock_plan: dict[str, Any] = {}
+            label = stock_plan_raw.get("stock_item") or stock_plan_raw.get("item")
+            if label:
+                clean_stock_plan["stock_item"] = str(label)
+            material_label = stock_plan_raw.get("material")
+            if material_label:
+                clean_stock_plan["material"] = str(material_label)
+            form_label = stock_plan_raw.get("form") or stock_plan_raw.get("shape")
+            if form_label:
+                clean_stock_plan["form"] = str(form_label)
+            clean_stock_plan["length_mm"] = round(float(length), 3)
+            clean_stock_plan["width_mm"] = round(float(width), 3)
+            clean_stock_plan["thickness_mm"] = round(float(thickness), 3)
+            clean_stock_plan["count"] = max(1, _as_int(stock_plan_raw.get("count") or stock_plan_raw.get("quantity"), 1))
+            clean_stock_plan["cut_count"] = max(0, _as_int(stock_plan_raw.get("cut_count") or stock_plan_raw.get("cuts"), 0))
+            if stock_mass_g is not None:
+                clean_stock_plan["stock_mass_g_est"] = round(stock_mass_g, 1)
+
+            scrap_val = stock_plan_raw.get("scrap_pct")
+            if scrap_val is None:
+                scrap_val = stock_plan_raw.get("scrap_fraction")
+            scrap_frac = None
+            if scrap_val is not None:
+                frac = pct(scrap_val, None)
+                if frac is None:
+                    frac = _as_float(scrap_val)
+                if frac is not None:
+                    scrap_frac = clamp(frac, 0.0, 0.25, None)
+            if scrap_frac is not None:
+                clean_stock_plan["scrap_pct"] = scrap_frac
+                if "scrap_pct_override" not in out:
+                    out["scrap_pct_override"] = scrap_frac
+
+            plan_notes = _clean_notes_list(stock_plan_raw.get("notes"))
+            if plan_notes:
+                clean_stock_plan["notes"] = plan_notes
+
+            saw_hr = _as_float(stock_plan_raw.get("sawing_hr") or stock_plan_raw.get("saw_hr"))
+            if saw_hr and saw_hr > 0:
+                saw_hr_clamped = clamp(saw_hr, 0.0, 5.0, 0.0)
+                clean_stock_plan["sawing_hr"] = saw_hr_clamped
+                _merge_adder("saw_waterjet", saw_hr_clamped, "stock_plan.sawing_hr")
+            handling_hr = _as_float(stock_plan_raw.get("handling_hr"))
+            if handling_hr and handling_hr > 0:
+                handling_hr_clamped = clamp(handling_hr, 0.0, 5.0, 0.0)
+                clean_stock_plan["handling_hr"] = handling_hr_clamped
+                _merge_adder("assembly", handling_hr_clamped, "stock_plan.handling_hr")
+
+            plan_adders = _safe_get(stock_plan_raw, "process_hour_adders", dict, {})
+            for key, val in (plan_adders or {}).items():
+                _merge_adder(key, val, "stock_plan.process_hour_adders")
+            plan_mults = _safe_get(stock_plan_raw, "process_hour_multipliers", dict, {})
+            for key, val in (plan_mults or {}).items():
+                _merge_multiplier(key, val, "stock_plan.process_hour_multipliers")
+
+            out["stock_recommendation"] = clean_stock_plan
+
+    setup_plan_raw = parsed.get("setup_recommendation") or parsed.get("setup_plan")
+    if isinstance(setup_plan_raw, dict):
+        clean_setup: dict[str, Any] = {}
+        setups_val = _as_int(setup_plan_raw.get("setups") or setup_plan_raw.get("count"), 0)
+        if setups_val > 0:
+            if setups_val > 4:
+                clamp_notes.append(f"setup_recommendation setups {setups_val} → 4")
+                setups_val = 4
+            clean_setup["setups"] = setups_val
+        fixture = setup_plan_raw.get("fixture") or setup_plan_raw.get("fixture_type")
+        if isinstance(fixture, str) and fixture.strip():
+            clean_setup["fixture"] = fixture.strip()[:120]
+        setup_hr = _as_float(setup_plan_raw.get("setup_adders_hr") or setup_plan_raw.get("setup_hours"))
+        if setup_hr and setup_hr > 0:
+            clean_setup["setup_adders_hr"] = clamp(setup_hr, 0.0, 5.0, 0.0)
+        setup_notes = _clean_notes_list(setup_plan_raw.get("notes"))
+        if setup_notes:
+            clean_setup["notes"] = setup_notes
+        if clean_setup:
+            out["setup_recommendation"] = clean_setup
+
+    risks_raw = parsed.get("dfm_risks") or parsed.get("risks")
+    risk_notes = _clean_notes_list(risks_raw, limit=8)
+    if risk_notes:
+        out["dfm_risks"] = risk_notes
+
+    tol_raw = parsed.get("tolerance_impacts")
+    if isinstance(tol_raw, dict):
+        clean_tol: dict[str, Any] = {}
+        inproc_hr = _as_float(tol_raw.get("in_process_inspection_hr") or tol_raw.get("in_process_hr"))
+        if inproc_hr and inproc_hr > 0:
+            inproc_clamped = clamp(inproc_hr, 0.0, 5.0, 0.0)
+            clean_tol["in_process_inspection_hr"] = inproc_clamped
+            _merge_adder("inspection", inproc_clamped, "tolerance_in_process_hr")
+        final_hr = _as_float(tol_raw.get("final_inspection_hr") or tol_raw.get("final_hr"))
+        if final_hr and final_hr > 0:
+            final_clamped = clamp(final_hr, 0.0, 5.0, 0.0)
+            clean_tol["final_inspection_hr"] = final_clamped
+            _merge_adder("inspection", final_clamped, "tolerance_final_hr")
+        finish_hr = _as_float(tol_raw.get("finishing_hr") or tol_raw.get("finish_hr"))
+        if finish_hr and finish_hr > 0:
+            finish_clamped = clamp(finish_hr, 0.0, 5.0, 0.0)
+            clean_tol["finishing_hr"] = finish_clamped
+            _merge_adder("finishing_deburr", finish_clamped, "tolerance_finishing_hr")
+        surface = tol_raw.get("surface_finish") or tol_raw.get("suggested_surface_finish")
+        if isinstance(surface, str) and surface.strip():
+            clean_tol["suggested_finish"] = surface.strip()[:160]
+        tol_notes = _clean_notes_list(tol_raw.get("notes"))
+        if tol_notes:
+            clean_tol["notes"] = tol_notes
+        if clean_tol:
+            out["tolerance_impacts"] = clean_tol
+
+    if clean_mults:
+        out["process_hour_multipliers"] = clean_mults
+    elif "process_hour_multipliers" in out:
+        out.pop("process_hour_multipliers", None)
+
+    if clean_adders:
+        out["process_hour_adders"] = clean_adders
+    elif "process_hour_adders" in out:
+        out.pop("process_hour_adders", None)
+
     notes = _safe_get(parsed, "notes", list, [])
     out["notes"] = [str(n)[:200] for n in notes][:6]
 
-    return out, _meta(parsed, raw_text, usage, clamp_notes)
+    meta = _meta(raw=raw_by_task, raw_text=raw_text_combined, usage=combined_usage, clamp_notes=clamp_notes)
+    meta["tasks"] = task_meta
+    meta["task_outputs"] = task_outputs
+    meta["context"] = ctx
+    return out, meta
 # ----------------- GUI -----------------
 # ---- scrollable frame helper -----------------------------------------------
 class ScrollableFrame(ttk.Frame):
