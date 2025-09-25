@@ -38,6 +38,7 @@ def _normalize_lookup_key(value: str) -> str:
     cleaned = re.sub(r"[^0-9a-z]+", " ", str(value).strip().lower())
     return re.sub(r"\s+", " ", cleaned).strip()
 
+GRAMS_PER_POUND = 453.59237
 
 MATERIAL_DROPDOWN_OPTIONS = [
     "Aluminum",
@@ -99,6 +100,13 @@ for display in MATERIAL_DROPDOWN_OPTIONS:
 
 MATERIAL_OTHER_KEY = _normalize_lookup_key(MATERIAL_DROPDOWN_OPTIONS[-1])
 
+
+DEFAULT_DUMMY_PRICE_PER_G = 1.0 / GRAMS_PER_POUND
+DUMMY_MATERIAL_PRICE_PER_G = {
+    key: DEFAULT_DUMMY_PRICE_PER_G
+    for key in MATERIAL_DISPLAY_BY_KEY
+    if key and key != MATERIAL_OTHER_KEY
+}
 
 def _coerce_float_or_none(value: Any) -> float | None:
     if isinstance(value, (int, float)):
@@ -2402,6 +2410,30 @@ def render_quote(
     row("Total Direct Costs:", totals.get("direct_costs", 0.0))
     lines.append("")
 
+    material_info = breakdown.get("material", {}) or {}
+    material_name = str(material_info.get("name") or "").strip()
+    scrap_factor = float(material_info.get("scrap_pct") or 0.0)
+    unit_price_lb = float(material_info.get("unit_price_per_lb") or 0.0)
+    custom_price_lb = float(material_info.get("custom_price_per_lb") or 0.0)
+    display_unit_price_lb = unit_price_lb or custom_price_lb
+    mass_lb = float(material_info.get("mass_lb") or 0.0)
+    mass_g = float(material_info.get("mass_g") or 0.0)
+
+    if material_name or _nonzero(material_direct_cost) or _nonzero(mass_lb) or _nonzero(scrap_factor):
+        lines.append("Material Summary")
+        lines.append(divider)
+        if material_name:
+            write_line("Material:", material_name)
+        if _nonzero(display_unit_price_lb):
+            write_line("Unit Price (per lb):", f"{_m(display_unit_price_lb)} /lb")
+        if _nonzero(mass_lb):
+            write_line(f"Net Mass (incl. scrap): {mass_lb:,.2f} lb ({mass_g:,.0f} g)", indent="  ")
+        if _nonzero(scrap_factor):
+            write_line("Scrap Factor:", _pct(scrap_factor), indent="  ")
+        if _nonzero(material_direct_cost):
+            row("Material Cost Contribution:", material_direct_cost, indent="  ")
+        lines.append("")
+
     # NRE / Setup
     lines.append("NRE / Setup Costs (per lot)")
     lines.append(divider)
@@ -2723,7 +2755,14 @@ def compute_quote_from_df(df: pd.DataFrame,
     scrap_pct     = num_pct(r"\b(?:Scrap\s*%|Expected\s*Scrap)\b", 0.0)
     mass_g        = max(0.0, vol_cm3 * density_g_cc * (1.0 + scrap_pct))
 
+    material_name_raw = strv(r"\bMaterial\b", "").strip()
+    material_key = _normalize_lookup_key(material_name_raw)
+    material_display = MATERIAL_DISPLAY_BY_KEY.get(material_key, material_name_raw)
+
     unit_price_per_g  = first_num(r"\b(?:Material\s*Price.*(?:per\s*g|/g)|Unit\s*Price\s*/\s*g)\b", 0.0)
+    custom_price_per_lb = first_num(r"\bMaterial\s*Custom\s*Price.*(?:per\s*lb|/lb)\b", 0.0)
+    if (unit_price_per_g or 0.0) <= 0.0 and custom_price_per_lb:
+        unit_price_per_g = custom_price_per_lb / GRAMS_PER_POUND
     supplier_min_charge    = first_num(r"\b(?:Supplier\s*Min\s*Charge|min\s*charge)\b", 0.0)
     surcharge_pct = num_pct(r"\b(?:Material\s*Surcharge|Volatility)\b", 0.0)
     explicit_mat  = num(r"\b(?:Material\s*Cost|Raw\s*Material\s*Cost)\b", 0.0)
@@ -2731,6 +2770,9 @@ def compute_quote_from_df(df: pd.DataFrame,
     material_cost = max(unit_price_per_g * mass_g, supplier_min_charge) * (1.0 + surcharge_pct)
     material_cost = max(material_cost, explicit_mat)
     material_direct_cost = float(material_cost)
+
+    unit_price_per_lb = unit_price_per_g * GRAMS_PER_POUND if unit_price_per_g else 0.0
+
 
     # ---- programming / cam / dfm --------------------------------------------
     prog_hr = sum_time(r"(?:Programming|2D\s*CAM|3D\s*CAM|Simulation|Verification|DFM|Setup\s*Sheets)", exclude_pattern=r"\bCMM\b")
@@ -2997,10 +3039,17 @@ def compute_quote_from_df(df: pd.DataFrame,
         "material_direct_cost": material_direct_cost,
         "total_direct_costs": round(total_direct_costs, 2),
         "material": {
+            "name": material_display or material_name_raw,
+            "raw_name": material_name_raw,
+            "normalized_key": material_key,
             "mass_g": mass_g,
+            "mass_lb": mass_g / GRAMS_PER_POUND if mass_g else 0.0,
             "unit_price_per_g": unit_price_per_g,
+            "unit_price_per_lb": unit_price_per_lb,
+            "custom_price_per_lb": custom_price_per_lb,
             "supplier_min_charge": supplier_min_charge,
             "surcharge_pct": surcharge_pct,
+            "scrap_pct": scrap_pct,
             "material_cost": material_cost,
             "material_direct_cost": material_direct_cost,
         },
@@ -3788,6 +3837,7 @@ class App(tk.Tk):
 
         # Dictionaries to hold editor variables
         self.quote_vars = {}
+        self.quote_var_types = {}
         self.param_vars = {}
         self.rate_vars = {}
         self.editor_widgets_frame = None
@@ -3825,6 +3875,7 @@ class App(tk.Tk):
             child.destroy()
 
         self.quote_vars.clear()
+        self.quote_var_types.clear()
         self.param_vars.clear()
         self.rate_vars.clear()
 
@@ -3848,6 +3899,16 @@ class App(tk.Tk):
                 qty_value = float(self.params.get("Quantity", 1) or 1)
             self.params["Quantity"] = max(1, int(round(qty_value)))
 
+        custom_price_item_name = "Material Custom Price ($/lb)"
+        custom_price_initial = ""
+        custom_price_norm = _normalize_lookup_key(custom_price_item_name)
+        custom_price_mask = normalized_items == custom_price_norm
+        if custom_price_mask.any():
+            custom_price_item_name = str(items_series[custom_price_mask].iloc[0])
+            custom_price_value = df.loc[custom_price_mask, "Example Values / Options"].iloc[0]
+            if pd.notna(custom_price_value):
+                custom_price_initial = str(custom_price_value)
+
         raw_skip_items = {
             "Overhead %", "Overhead",
             "G&A %", "G&A", "GA %", "GA",
@@ -3866,6 +3927,8 @@ class App(tk.Tk):
             "Quantity", "Qty", "Lot Size",
         }
         skip_items = {normalize_item(item) for item in raw_skip_items}
+        if custom_price_mask.any():
+            skip_items.add(custom_price_norm)
 
 
         material_lookup: Dict[str, float] = {}
@@ -3885,6 +3948,10 @@ class App(tk.Tk):
                     material_lookup[canonical_key] = per_g
                     break
 
+
+        for canonical_key, default_price in DUMMY_MATERIAL_PRICE_PER_G.items():
+            if material_lookup.get(canonical_key, 0.0) <= 0.0:
+                material_lookup[canonical_key] = default_price
         current_row = 0
 
         quote_frame = ttk.Labelframe(self.editor_widgets_frame, text="Quote-Specific Variables", padding=(10, 5))
@@ -3895,6 +3962,12 @@ class App(tk.Tk):
         material_choice_var: tk.StringVar | None = None
         material_price_var: tk.StringVar | None = None
 
+        custom_price_lb_var: tk.StringVar | None = None
+        custom_price_frame: ttk.Frame | None = None
+        scrap_var: tk.StringVar | None = None
+        scrap_item_name: str | None = None
+
+
         def update_material_price(*_):
             if material_choice_var is None or material_price_var is None:
                 return
@@ -3902,16 +3975,45 @@ class App(tk.Tk):
             if not choice:
                 return
             norm_choice = _normalize_lookup_key(choice)
+
+            if custom_price_frame is not None:
+                if norm_choice == MATERIAL_OTHER_KEY:
+                    custom_price_frame.grid()
+                else:
+                    custom_price_frame.grid_remove()
+                    if custom_price_lb_var is not None:
+                        custom_price_lb_var.set("")
             if norm_choice == MATERIAL_OTHER_KEY:
+                if custom_price_lb_var is not None:
+                    update_custom_price_lb()
+                    if _coerce_float_or_none(custom_price_lb_var.get()) is None:
+                        material_price_var.set("")
                 return
             price = material_lookup.get(norm_choice)
             if price is None:
-                # allow manual override for custom entries
-                return
+                price = DUMMY_MATERIAL_PRICE_PER_G.get(norm_choice)
+                if price is None:
+                    return
             current_val = _coerce_float_or_none(material_price_var.get())
             if current_val is not None and abs(current_val - price) < 1e-6:
                 return
             material_price_var.set(f"{price:.4f}")
+
+
+        def update_custom_price_lb(*_):
+            if (
+                custom_price_lb_var is None
+                or material_price_var is None
+                or material_choice_var is None
+            ):
+                return
+            if _normalize_lookup_key(material_choice_var.get()) != MATERIAL_OTHER_KEY:
+                return
+            per_lb = _coerce_float_or_none(custom_price_lb_var.get())
+            if per_lb is None:
+                return
+            per_g = per_lb / GRAMS_PER_POUND
+            material_price_var.set(f"{per_g:.6f}")
 
         for _, row_data in df.iterrows():
             item_name = str(row_data["Item"])
@@ -3921,6 +4023,13 @@ class App(tk.Tk):
             ttk.Label(quote_frame, text=item_name, wraplength=400).grid(row=row_index, column=0, sticky="w", padx=5, pady=2)
             initial_raw = row_data["Example Values / Options"]
             initial_value = str(initial_raw) if initial_raw is not None else ""
+
+            dtype_raw = row_data.get("Data Type / Input Method", "")
+            dtype_value = str(dtype_raw).strip().lower()
+            if dtype_value in {"", "nan"}:
+                dtype_value = "text"
+            self.quote_var_types[item_name] = dtype_value
+
             if normalized_name in {"material"}:
                 var = tk.StringVar(value=initial_value)
                 normalized_initial = _normalize_lookup_key(initial_value)
@@ -3943,21 +4052,54 @@ class App(tk.Tk):
                 var.trace_add("write", update_material_price)
                 material_choice_var = var
                 self.quote_vars[item_name] = var
+
+                if custom_price_frame is None:
+                    custom_price_frame = ttk.Frame(quote_frame)
+                    custom_price_frame.grid(row=row_index + 1, column=0, columnspan=2, sticky="w", padx=5, pady=(0, 4))
+                    custom_price_lb_var = tk.StringVar(value=custom_price_initial)
+                    lbl = ttk.Label(custom_price_frame, text="Custom Material Price ($/lb)")
+                    ent = ttk.Entry(custom_price_frame, textvariable=custom_price_lb_var, width=20)
+                    lbl.grid(row=0, column=0, sticky="w", padx=(0, 6))
+                    ent.grid(row=0, column=1, sticky="w")
+                    custom_price_frame.grid_remove()
+                    custom_price_lb_var.trace_add("write", update_custom_price_lb)
+                    self.quote_vars[custom_price_item_name] = custom_price_lb_var
+                    self.quote_var_types[custom_price_item_name] = "number"
+                    row_index += 1
+
             elif re.search(r"(Material\s*Price.*(per\s*gram|per\s*g|/g)|Unit\s*Price\s*/\s*g)", item_name, flags=re.IGNORECASE):
                 var = tk.StringVar(value=initial_value)
                 ttk.Entry(quote_frame, textvariable=var, width=30).grid(row=row_index, column=1, sticky="w", padx=5, pady=2)
                 material_price_var = var
                 self.quote_vars[item_name] = var
+
+            elif re.search(r"(Scrap\s*%|Expected\s*Scrap)", item_name, flags=re.IGNORECASE):
+                var = tk.StringVar(value=initial_value)
+                ttk.Entry(quote_frame, textvariable=var, width=30).grid(row=row_index, column=1, sticky="w", padx=5, pady=2)
+                scrap_var = var
+                scrap_item_name = item_name
+                self.quote_vars[item_name] = var
+
             else:
                 var = tk.StringVar(value=initial_value)
                 ttk.Entry(quote_frame, textvariable=var, width=30).grid(row=row_index, column=1, sticky="w", padx=5, pady=2)
                 self.quote_vars[item_name] = var
             row_index += 1
 
+        if scrap_var is None:
+            scrap_item_name = "Scrap %"
+            scrap_var = tk.StringVar(value="0.0")
+            ttk.Label(quote_frame, text=scrap_item_name, wraplength=400).grid(row=row_index, column=0, sticky="w", padx=5, pady=2)
+            ttk.Entry(quote_frame, textvariable=scrap_var, width=30).grid(row=row_index, column=1, sticky="w", padx=5, pady=2)
+            self.quote_vars[scrap_item_name] = scrap_var
+            self.quote_var_types[scrap_item_name] = "number"
+            row_index += 1
+        elif scrap_item_name is not None:
+            self.quote_var_types[scrap_item_name] = "number"
+
         if material_choice_var is not None and material_price_var is not None:
-            existing = _coerce_float_or_none(material_price_var.get())
-            if existing is None or abs(existing) < 1e-9:
-                update_material_price()
+            update_material_price()
+
 
         def create_global_entries(parent_frame: ttk.Labelframe, keys, data_source, var_dict, columns: int = 2) -> None:
             for i, key in enumerate(keys):
@@ -4318,9 +4460,18 @@ class App(tk.Tk):
         if self.vars_df is None:
             self.vars_df = coerce_or_make_vars_df(None)
         for item_name, string_var in self.quote_vars.items():
-            mask = self.vars_df["Item"] == item_name
+            mask = self.vars_df["Item"].astype(str) == str(item_name)
+            value = string_var.get()
             if mask.any():
-                self.vars_df.loc[mask, "Example Values / Options"] = string_var.get()
+                self.vars_df.loc[mask, "Example Values / Options"] = value
+            else:
+                dtype = self.quote_var_types.get(item_name, "text")
+                new_row = {
+                    "Item": item_name,
+                    "Example Values / Options": value,
+                    "Data Type / Input Method": dtype,
+                }
+                self.vars_df = pd.concat([self.vars_df, pd.DataFrame([new_row])], ignore_index=True)
 
         self.apply_overrides(notify=False)
 
