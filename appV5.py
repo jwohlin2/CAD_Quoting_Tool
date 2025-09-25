@@ -2582,18 +2582,23 @@ def render_quote(
             if matcost or show_zeros: row("Material Cost (computed):", float(matcost or 0.0))
             if mass_g or show_zeros:  write_line(f"Mass: {float(mass_g or 0.0):,.1f} g", "  ")
             if upg or show_zeros:
-                per_bits: list[str] = []
-                if unit_price_kg:
-                    per_bits.append(f"{_m(unit_price_kg)} / kg")
-                if unit_price_lb:
-                    per_bits.append(f"{_m(unit_price_lb)} / lb")
-                extra_parts: list[str] = []
-                if per_bits:
-                    extra_parts.append(f"({', '.join(per_bits)})")
+                per_kg = f"{_m(unit_price_kg)} / kg" if unit_price_kg else ""
+                per_lb = f"{_m(unit_price_lb)} / lb" if unit_price_lb else ""
+                per_g = f"{currency}{float(upg or 0):,.4f} / g"
+                extras: list[str] = []
+                display_line = per_g
+                if per_kg:
+                    display_line = per_kg
+                    if per_lb:
+                        extras.append(per_lb)
+                    extras.append(per_g)
+                elif per_lb:
+                    display_line = per_lb
+                    extras.append(per_g)
                 if price_asof:
-                    extra_parts.append(f"as of {price_asof}")
-                extra = f" {' '.join(extra_parts)}" if extra_parts else ""
-                write_line(f"Unit Price: {_m(upg or 0)} / g{extra}", "  ")
+                    extras.append(f"as of {price_asof}")
+                extra = f" ({', '.join(extras)})" if extras else ""
+                write_line(f"Unit Price: {display_line}{extra}", "  ")
             if price_source:
                 write_line(f"Source: {price_source}", "  ")
             if minchg or show_zeros:  write_line(f"Supplier Min Charge: {_m(minchg or 0)}", "  ")
@@ -3119,7 +3124,12 @@ def estimate_drilling_hours(hole_diams_mm: list[float], thickness_mm: float, mat
     return sec / 3600.0
 
 
-def validate_quote_before_pricing(geo: dict, process_costs: dict[str, float], pass_through: dict[str, Any]) -> None:
+def validate_quote_before_pricing(
+    geo: dict,
+    process_costs: dict[str, float],
+    pass_through: dict[str, Any],
+    process_hours: dict[str, float] | None = None,
+) -> None:
     issues: list[str] = []
     hole_cost = sum(float(process_costs.get(k, 0.0)) for k in ("drilling", "milling"))
     if geo.get("hole_diams_mm") and hole_cost < 50:
@@ -3127,6 +3137,17 @@ def validate_quote_before_pricing(geo: dict, process_costs: dict[str, float], pa
     material_cost = float(pass_through.get("Material", 0.0) or 0.0)
     if material_cost < 5.0:
         issues.append("Material cost is near zero; check material & thickness.")
+    try:
+        hole_count_val = int(float(geo.get("hole_count", 0)))
+    except Exception:
+        hole_count_val = len(geo.get("hole_diams_mm") or [])
+    if hole_count_val <= 0:
+        hole_count_val = len(geo.get("hole_diams_mm") or [])
+    drill_hr_val = 0.0
+    if process_hours:
+        drill_hr_val = float(process_hours.get("drilling", 0.0) or 0.0)
+    if hole_count_val >= 50 and drill_hr_val < 1.0:
+        raise ValueError("Quote blocked: drilling hours unrealistically low for hole count.")
     if issues:
         raise ValueError("Quote blocked:\n- " + "\n- ".join(issues))
 
@@ -3157,6 +3178,8 @@ def compute_quote_from_df(df: pd.DataFrame,
     rates.setdefault("DrillingRate", rates.get("MillingRate", 0.0))
     if llm_model_path is None:
         llm_model_path = str(params.get("LLMModelPath", "") or "")
+    else:
+        params["LLMModelPath"] = llm_model_path
     if ui_vars is None:
         try:
             ui_vars = {
@@ -3635,10 +3658,35 @@ def compute_quote_from_df(df: pd.DataFrame,
         hole_diams_list.append(float(val))
     if hole_diams_list:
         geo_context["hole_diams_mm"] = hole_diams_list
+
+    hole_count_override = _coerce_float_or_none(ui_vars.get("Hole Count (override)"))
+    avg_hole_diam_override = _coerce_float_or_none(ui_vars.get("Avg Hole Diameter (mm)"))
+    if (not hole_diams_list) and hole_count_override and hole_count_override > 0:
+        avg_val = float(avg_hole_diam_override or 0.0)
+        if avg_val <= 0:
+            avg_val = float(_coerce_float_or_none(geo_context.get("avg_hole_diameter_mm")) or 5.0)
+        hole_diams_list = [float(avg_val)] * int(min(1000, max(1, round(hole_count_override))))
+        geo_context.setdefault("hole_diams_mm", hole_diams_list)
+        geo_context.setdefault("hole_count", int(max(1, round(hole_count_override))))
+
     thickness_for_drill = _coerce_float_or_none(geo_context.get("thickness_mm")) or 0.0
+    if thickness_for_drill <= 0:
+        thickness_in_ui = _coerce_float_or_none(ui_vars.get("Thickness (in)"))
+        if thickness_in_ui and thickness_in_ui > 0:
+            thickness_for_drill = float(thickness_in_ui) * 25.4
+
     drill_material_key = geo_context.get("material") or material_name
     drill_hr = estimate_drilling_hours(hole_diams_list, float(thickness_for_drill or 0.0), drill_material_key or "")
     drill_rate = float(rates.get("DrillingRate") or rates.get("MillingRate", 0.0) or 0.0)
+    hole_count_geo = _coerce_float_or_none(geo_context.get("hole_count"))
+    hole_count_for_tripwire = 0
+    if hole_count_geo and hole_count_geo > 0:
+        hole_count_for_tripwire = int(round(hole_count_geo))
+    elif hole_diams_list:
+        hole_count_for_tripwire = len(hole_diams_list)
+    elif hole_count_override and hole_count_override > 0:
+        hole_count_for_tripwire = int(round(hole_count_override))
+    geo_context["hole_count"] = hole_count_for_tripwire
 
     # ---- roll-ups ------------------------------------------------------------
     inspection_hr_total = inproc_hr + final_hr + cmm_prog_hr + cmm_run_hr + fair_hr + srcinsp_hr
@@ -3657,7 +3705,12 @@ def compute_quote_from_df(df: pd.DataFrame,
         "packaging": packaging_cost,
         "ehs_compliance": ehs_cost,
     }
-    process_costs["drilling"] = drill_hr * drill_rate
+
+    existing_drill_cost = float(process_costs.get("drilling", 0.0) or 0.0)
+    existing_drill_hr = existing_drill_cost / drill_rate if drill_rate else 0.0
+    baseline_drill_hr = max(existing_drill_hr, float(drill_hr or 0.0))
+    process_costs["drilling"] = baseline_drill_hr * drill_rate
+
     process_costs_baseline = {k: float(v) for k, v in process_costs.items()}
 
     process_meta = {
@@ -3675,11 +3728,13 @@ def compute_quote_from_df(df: pd.DataFrame,
         "packaging":        {"hr": packaging_hr,    "rate": rates.get("PackagingRate", rates.get("AssemblyRate", 0.0))},
         "ehs_compliance":   {"hr": ehs_hr,          "rate": rates.get("InspectionRate", 0.0)},
     }
-    process_meta["drilling"] = {"hr": drill_hr, "rate": drill_rate}
+    process_meta["drilling"] = {"hr": baseline_drill_hr, "rate": drill_rate}
     for key, meta in process_meta.items():
         rate = float(meta.get("rate", 0.0))
         hr = float(meta.get("hr", 0.0))
         meta["base_extra"] = process_costs.get(key, 0.0) - hr * rate
+
+    process_hours_baseline = {k: float(meta.get("hr", 0.0)) for k, meta in process_meta.items()}
 
 
     pass_meta = {
@@ -3732,13 +3787,17 @@ def compute_quote_from_df(df: pd.DataFrame,
     hole_tool_sizes = sorted({round(x, 2) for x in hole_diams_list}) if hole_diams_list else []
     features.update({
         "is_2d": bool(is_plate_2d),
-        "hole_count": len(hole_diams_list),
+        "hole_count": hole_count_for_tripwire,
         "hole_tool_sizes": hole_tool_sizes,
         "profile_length_mm": float(_coerce_float_or_none(geo_context.get("profile_length_mm")) or 0.0),
         "thickness_mm": float(_coerce_float_or_none(geo_context.get("thickness_mm")) or 0.0),
         "material_key": geo_context.get("material") or material_name,
-        "drilling_hr_baseline": drill_hr,
+        "drilling_hr_baseline": baseline_drill_hr,
     })
+    if hole_count_override and hole_count_override > 0:
+        features["hole_count_override"] = int(round(hole_count_override))
+    if avg_hole_diam_override and avg_hole_diam_override > 0:
+        features["avg_hole_diam_override_mm"] = float(avg_hole_diam_override)
 
     base_costs = {
         "process_costs": process_costs_baseline,
@@ -3765,26 +3824,32 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     hole_diams_ctx = sorted([round(x, 3) for x in hole_diams_list])[:200] if hole_diams_list else []
     quote_inputs_ctx = {str(k): _jsonable(v) for k, v in ui_vars.items()}
+
+    geo_payload = _jsonable(dict(geo_context))
+    if hole_diams_ctx:
+        geo_payload["hole_diams_mm"] = hole_diams_ctx
+    geo_payload["hole_count"] = hole_count_for_tripwire
+    if hole_count_override and hole_count_override > 0:
+        geo_payload["hole_count_override"] = int(round(hole_count_override))
+    if avg_hole_diam_override and avg_hole_diam_override > 0:
+        geo_payload["avg_hole_diam_override_mm"] = float(avg_hole_diam_override)
+    scrap_pct_baseline = float(features.get("scrap_pct", scrap_pct) or 0.0)
     llm_ctx = {
-        "geo_summary": {
-            "is_2d": bool(is_plate_2d),
-            "hole_count": len(hole_diams_list),
-            "hole_diams_mm": hole_diams_ctx,
-            "profile_length_mm": _jsonable(geo_context.get("profile_length_mm")),
-            "thickness_mm": _jsonable(geo_context.get("thickness_mm")),
-            "material": _jsonable(geo_context.get("material")),
-            "bbox_mm": _jsonable(geo_context.get("bbox_mm")),
-        },
-        "quote_inputs": quote_inputs_ctx,
+        "geo": geo_payload,
+        "quote_vars": quote_inputs_ctx,
         "rates": base_costs["rates"],
-        "current_process_costs": process_costs_baseline,
-        "current_pass_through": pass_through_baseline,
-        "clamp_bounds": {
-            "multiplier_min": 0.5,
-            "multiplier_max": 3.0,
-            "adder_min_hr": 0.0,
-            "adder_max_hr": 5.0,
-            "scrap_min": 0.00,
+        "baseline": {
+            "process_hours": process_hours_baseline,
+            "pass_through": pass_through_baseline,
+            "scrap_pct": scrap_pct_baseline,
+        },
+        "bounds": {
+            "mult_min": 0.5,
+            "mult_max": 3.0,
+            "add_hr_min": 0.0,
+            "add_hr_max": 5.0,
+            "scrap_min": 0.0,
+
             "scrap_max": 0.20,
         },
     }
@@ -3954,7 +4019,8 @@ def compute_quote_from_df(df: pd.DataFrame,
         except Exception:
             pass_through[label] = 0.0
 
-    validate_quote_before_pricing(geo_context, process_costs, pass_through)
+    process_hours_final = {k: float(process_meta.get(k, {}).get("hr", 0.0)) for k in process_meta}
+    validate_quote_before_pricing(geo_context, process_costs, pass_through, process_hours_final)
 
     for key, entry in applied_process.items():
         entry["new_hr"] = float(process_meta.get(key, {}).get("hr", entry.get("new_hr", entry["old_hr"])))
@@ -4112,6 +4178,10 @@ def compute_quote_from_df(df: pd.DataFrame,
         "applied_process": applied_process,
         "applied_pass": applied_pass,
         "scrap_pct": scrap_pct,
+        "baseline_process_hours": process_hours_baseline,
+        "baseline_pass_through": pass_through_baseline,
+        "baseline_scrap_pct": scrap_pct_baseline,
+        "final_process_hours": process_hours_final,
     }
     if llm_notes:
         llm_cost_log["notes"] = llm_notes
@@ -4188,7 +4258,9 @@ def compute_quote_from_df(df: pd.DataFrame,
                     "process_hour_adders": applied_adders_log,
                     "scrap_pct": scrap_pct,
                     "notes": llm_notes,
-                    "violations": notes_from_clamps,
+
+                    "clamped": notes_from_clamps,
+                    "pass_through": {k: v for k, v in applied_pass.items()},
                 }
                 latest.write_text(json.dumps(snap, indent=2), encoding="utf-8")
         except Exception:
@@ -4826,10 +4898,9 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
     }
 
     system_prompt = (
-        "You are a helpful manufacturing estimator. Explain the main cost drivers of this quote "
-        "in one short paragraph (1ï¿½3 sentences), friendly and professional. "
-        "Focus on why: big NRE, which processes dominate, and whether directs matter. "
-        "Return JSON only: {\"explanation\": \"...\"}"
+        "You are a helpful manufacturing estimator. In 1-3 sentences explain the main cost "
+        "drivers for this quote based strictly on the provided numbers. Do not invent costs "
+        "that are zero. Return JSON only: {\"explanation\": \"...\"}."
     )
     user_prompt = f"```json\n{json.dumps(summary, indent=2)}\n```"
 
@@ -4840,6 +4911,12 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
             user_prompt,
             temperature=0.4,
             max_tokens=256,
+
+            context={
+                "purpose": "quote_explanation",
+                "summary_keys": list(summary.keys()),
+            },
+
         )
         if (
             isinstance(parsed, dict)
@@ -5173,6 +5250,8 @@ class App(tk.Tk):
         df = _ensure_row(df, "Plate Length (in)", 12.0, dtype="number")
         df = _ensure_row(df, "Plate Width (in)", 14.0, dtype="number")
         df = _ensure_row(df, "Thickness (in)", 0.25, dtype="number")
+        df = _ensure_row(df, "Hole Count (override)", 0, dtype="number")
+        df = _ensure_row(df, "Avg Hole Diameter (mm)", 0.0, dtype="number")
         df = _ensure_row(df, "Material", "", dtype="text")
         self.vars_df = df
         parent = self.editor_scroll.inner
