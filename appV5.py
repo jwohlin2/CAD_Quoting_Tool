@@ -233,12 +233,14 @@ try:
     from OCP.TopoDS import topods_Face, topods_Edge, topods_Shell, topods_Solid
     from OCP.TopAbs import TopAbs_FACE
     from OCP.TopExp import TopExp_Explorer
+    from OCP.TopLoc import TopLoc_Location
     BACKEND = "ocp"
 except Exception:
     from OCC.Core.BRep import BRep_Tool
     from OCC.Core.TopoDS import topods_Face, topods_Edge, topods_Shell, topods_Solid
     from OCC.Core.TopAbs import TopAbs_FACE
     from OCC.Core.TopExp import TopExp_Explorer
+    from OCC.Core.TopLoc import TopLoc_Location
     BACKEND = "pythonocc"
 
 def _typename(o):  # small helper
@@ -292,17 +294,57 @@ def face_surface(face_like):
     """
     f = as_face(face_like)
 
-    if hasattr(BRep_Tool, "Surface"):
-        s = BRep_Tool.Surface(f)
-        loc = (BRep_Tool.Location(f) if hasattr(BRep_Tool, "Location")
-               else (f.Location() if hasattr(f, "Location") else None))
-        return (s[0], s[1]) if isinstance(s, tuple) else (s, loc)
+    def _call_surface(fn):
+        loc_from_tool = None
+        if hasattr(BRep_Tool, "Location"):
+            try:
+                loc_from_tool = BRep_Tool.Location(f)
+            except Exception:
+                loc_from_tool = None
 
-    if hasattr(BRep_Tool, "Surface_s"):
-        s = BRep_Tool.Surface_s(f)
-        loc = (BRep_Tool.Location(f) if hasattr(BRep_Tool, "Location")
-               else (f.Location() if hasattr(f, "Location") else None))
-        return s, loc
+        # Prepare a location placeholder for signatures that expect one.
+        loc_arg = None
+        try:
+            loc_arg = TopLoc_Location()
+        except Exception:
+            loc_arg = None
+
+        # First try the simple call.
+        try:
+            surf = fn(f)
+            loc = loc_from_tool if loc_from_tool is not None else (
+                f.Location() if hasattr(f, "Location") else None)
+            return surf, loc
+        except TypeError:
+            pass
+
+        # Then try signatures that need a location object to be passed in.
+        if loc_arg is not None:
+            try:
+                surf = fn(f, loc_arg)
+                return surf, loc_arg
+            except TypeError:
+                pass
+
+        # give up for this function
+        raise
+
+    for attr in ("Surface", "Surface_s"):
+        fn = getattr(BRep_Tool, attr, None)
+        if not fn:
+            continue
+        try:
+            surf, loc = _call_surface(fn)
+            if isinstance(surf, tuple):
+                surf, loc = surf
+            if hasattr(surf, "Surface"):
+                try:
+                    surf = surf.Surface()
+                except Exception:
+                    pass
+            return surf, loc
+        except Exception:
+            continue
 
     # Fallback is very tolerant
     try:
