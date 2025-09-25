@@ -38,7 +38,6 @@ def _normalize_lookup_key(value: str) -> str:
     cleaned = re.sub(r"[^0-9a-z]+", " ", str(value).strip().lower())
     return re.sub(r"\s+", " ", cleaned).strip()
 
-
 GRAMS_PER_POUND = 453.59237
 
 MATERIAL_DROPDOWN_OPTIONS = [
@@ -101,13 +100,13 @@ for display in MATERIAL_DROPDOWN_OPTIONS:
 
 MATERIAL_OTHER_KEY = _normalize_lookup_key(MATERIAL_DROPDOWN_OPTIONS[-1])
 
+
 DEFAULT_DUMMY_PRICE_PER_G = 1.0 / GRAMS_PER_POUND
 DUMMY_MATERIAL_PRICE_PER_G = {
     key: DEFAULT_DUMMY_PRICE_PER_G
     for key in MATERIAL_DISPLAY_BY_KEY
     if key and key != MATERIAL_OTHER_KEY
 }
-
 
 def _coerce_float_or_none(value: Any) -> float | None:
     if isinstance(value, (int, float)):
@@ -2771,7 +2770,9 @@ def compute_quote_from_df(df: pd.DataFrame,
     material_cost = max(unit_price_per_g * mass_g, supplier_min_charge) * (1.0 + surcharge_pct)
     material_cost = max(material_cost, explicit_mat)
     material_direct_cost = float(material_cost)
+
     unit_price_per_lb = unit_price_per_g * GRAMS_PER_POUND if unit_price_per_g else 0.0
+
 
     # ---- programming / cam / dfm --------------------------------------------
     prog_hr = sum_time(r"(?:Programming|2D\s*CAM|3D\s*CAM|Simulation|Verification|DFM|Setup\s*Sheets)", exclude_pattern=r"\bCMM\b")
@@ -3947,10 +3948,10 @@ class App(tk.Tk):
                     material_lookup[canonical_key] = per_g
                     break
 
+
         for canonical_key, default_price in DUMMY_MATERIAL_PRICE_PER_G.items():
             if material_lookup.get(canonical_key, 0.0) <= 0.0:
                 material_lookup[canonical_key] = default_price
-
         current_row = 0
 
         quote_frame = ttk.Labelframe(self.editor_widgets_frame, text="Quote-Specific Variables", padding=(10, 5))
@@ -3960,10 +3961,12 @@ class App(tk.Tk):
         row_index = 0
         material_choice_var: tk.StringVar | None = None
         material_price_var: tk.StringVar | None = None
+
         custom_price_lb_var: tk.StringVar | None = None
         custom_price_frame: ttk.Frame | None = None
         scrap_var: tk.StringVar | None = None
         scrap_item_name: str | None = None
+
 
         def update_material_price(*_):
             if material_choice_var is None or material_price_var is None:
@@ -3972,6 +3975,7 @@ class App(tk.Tk):
             if not choice:
                 return
             norm_choice = _normalize_lookup_key(choice)
+
             if custom_price_frame is not None:
                 if norm_choice == MATERIAL_OTHER_KEY:
                     custom_price_frame.grid()
@@ -3994,6 +3998,7 @@ class App(tk.Tk):
             if current_val is not None and abs(current_val - price) < 1e-6:
                 return
             material_price_var.set(f"{price:.4f}")
+
 
         def update_custom_price_lb(*_):
             if (
@@ -4018,6 +4023,7 @@ class App(tk.Tk):
             ttk.Label(quote_frame, text=item_name, wraplength=400).grid(row=row_index, column=0, sticky="w", padx=5, pady=2)
             initial_raw = row_data["Example Values / Options"]
             initial_value = str(initial_raw) if initial_raw is not None else ""
+
             dtype_raw = row_data.get("Data Type / Input Method", "")
             dtype_value = str(dtype_raw).strip().lower()
             if dtype_value in {"", "nan"}:
@@ -4046,6 +4052,7 @@ class App(tk.Tk):
                 var.trace_add("write", update_material_price)
                 material_choice_var = var
                 self.quote_vars[item_name] = var
+
                 if custom_price_frame is None:
                     custom_price_frame = ttk.Frame(quote_frame)
                     custom_price_frame.grid(row=row_index + 1, column=0, columnspan=2, sticky="w", padx=5, pady=(0, 4))
@@ -4059,17 +4066,20 @@ class App(tk.Tk):
                     self.quote_vars[custom_price_item_name] = custom_price_lb_var
                     self.quote_var_types[custom_price_item_name] = "number"
                     row_index += 1
+
             elif re.search(r"(Material\s*Price.*(per\s*gram|per\s*g|/g)|Unit\s*Price\s*/\s*g)", item_name, flags=re.IGNORECASE):
                 var = tk.StringVar(value=initial_value)
                 ttk.Entry(quote_frame, textvariable=var, width=30).grid(row=row_index, column=1, sticky="w", padx=5, pady=2)
                 material_price_var = var
                 self.quote_vars[item_name] = var
+
             elif re.search(r"(Scrap\s*%|Expected\s*Scrap)", item_name, flags=re.IGNORECASE):
                 var = tk.StringVar(value=initial_value)
                 ttk.Entry(quote_frame, textvariable=var, width=30).grid(row=row_index, column=1, sticky="w", padx=5, pady=2)
                 scrap_var = var
                 scrap_item_name = item_name
                 self.quote_vars[item_name] = var
+
             else:
                 var = tk.StringVar(value=initial_value)
                 ttk.Entry(quote_frame, textvariable=var, width=30).grid(row=row_index, column=1, sticky="w", padx=5, pady=2)
@@ -4089,6 +4099,7 @@ class App(tk.Tk):
 
         if material_choice_var is not None and material_price_var is not None:
             update_material_price()
+
 
         def create_global_entries(parent_frame: ttk.Labelframe, keys, data_source, var_dict, columns: int = 2) -> None:
             for i, key in enumerate(keys):
