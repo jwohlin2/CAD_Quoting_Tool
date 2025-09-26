@@ -18,7 +18,7 @@ import json, math, os, time, gc, shlex
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-
+import os, subprocess, tempfile, pathlib
 LLM_DEBUG = bool(int(os.getenv("LLM_DEBUG", "1")))   # set 0 to disable
 LLM_DEBUG_DIR = Path(__file__).with_name("llm_debug")
 LLM_DEBUG_DIR.mkdir(exist_ok=True)
@@ -2654,7 +2654,7 @@ def require_ezdxf():
 
 def get_dwg_converter_path() -> str:
     """Resolve a DWG?DXF converter path (.bat/.cmd/.exe)."""
-
+    
     banned_names = DWG_CONVERTER_BANNED_EXEC_TOKENS
     banned_arg_tokens = DWG_CONVERTER_BANNED_ARG_TOKENS
 
@@ -2686,6 +2686,7 @@ def get_dwg_converter_path() -> str:
             return str(expanded)
 
     return ""
+
 
 def have_dwg_support() -> bool:
     """True if we can open DWG (either odafc or an external converter is available)."""
@@ -3233,146 +3234,155 @@ DWG_CONVERTER_BANNED_EXEC_TOKENS = {
 DWG_CONVERTER_BANNED_ARG_TOKENS = {"-background", "--background"}
 
 
-def convert_dwg_to_dxf(dwg_path: str, *, out_ver="ACAD2013") -> str:
-    """
-    Robust DWG?DXF wrapper.
-    Works with:
-      - A .bat/.cmd wrapper that accepts:  <input.dwg> <output.dxf>
-      - A custom exe that accepts:         <input.dwg> <output.dxf>
-      - ODAFileConverter.exe (7-arg form): <in_dir> <out_dir> <ver> DXF 0 0 <filter>
-    Looks for the converter via env var or common local paths and prints
-    the exact command used on failure.
-    """
-    # 1) find converter (and sanitize env misconfigurations)
-    banned_names = DWG_CONVERTER_BANNED_EXEC_TOKENS
-    banned_arg_tokens = DWG_CONVERTER_BANNED_ARG_TOKENS
-    ignored_reasons: List[str] = []
+def _get_env_exe(name: str) -> str | None:
+    val = os.environ.get(name) or ""
+    val = val.strip().strip('"').strip("'")   # keep spaces inside the path
+    return val if (val and os.path.isfile(val)) else None
 
-    def _consider_candidate(raw: str | None, label: str, *, track_missing: bool = True):
-        if not raw:
-            return None
-        exe_token, extra_tokens = _split_command_tokens(raw)
-        if not exe_token:
-            return None
-        token_set = _collect_command_tokens([exe_token, *extra_tokens])
-        if token_set & banned_names or token_set & banned_arg_tokens:
-            ignored_reasons.append(
-                f"{label}: ignored because it looks like an ImageMagick command ({raw})."
-            )
-            return None
-        resolved = _resolve_executable_path(exe_token)
-        if not resolved:
-            if track_missing:
-                ignored_reasons.append(f"{label}: {exe_token} not found on disk.")
-            return None
-        return resolved, extra_tokens, label   
-    exe_env_oda = os.environ.get("ODA_CONVERTER_EXE")
-    exe_env_d2d = os.environ.get("DWG2DXF_EXE")
-    force_wrapper = os.environ.get("FORCE_DWG_WRAPPER", "0") == "1"
-    wrapper1 = str(Path(__file__).with_name("dwg2dxf_wrapper.bat"))
-    wrapper2 = r"D:\CAD_Quoting_Tool\dwg2dxf_wrapper.bat"
-    candidates: List[tuple[str, List[str], str]] = []
-    if force_wrapper:
-       for label, raw in (
-            ("dwg2dxf_wrapper.bat", wrapper1),
-            ("dwg2dxf_wrapper.bat", wrapper2),
-        ):
-            cand = _consider_candidate(raw, label)
-            if cand:
-                candidates.append(cand)
-    else:
-        for label, raw, track in (
-            ("ODA_CONVERTER_EXE", exe_env_oda, True),
-            ("DWG2DXF_EXE", exe_env_d2d, True),
-            ("dwg2dxf_wrapper.bat", wrapper1, False),
-            ("dwg2dxf_wrapper.bat", wrapper2, False),
-        ):
-            cand = _consider_candidate(raw, label, track_missing=track)
-            if cand:
-                candidates.append(cand)
+def _run(cmd):
+    if os.environ.get("DWG_DEBUG") == "1":
+        print("DWG DEBUG:", cmd)
+    return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
-    exe_info = next(iter(candidates), None)
-    if not exe_info:
-        detail = "\n".join(f"- {msg}" for msg in ignored_reasons) if ignored_reasons else ""
-        hint = "\n\nIgnored candidates:\n" + detail if detail else ""
+def _find_dxfs(out_dir: str, wanted_stem: str):
+    outp = None
+    for p in pathlib.Path(out_dir).rglob("*.dxf"):
+        if p.stem.lower() == wanted_stem.lower():
+            return p
+        outp = outp or p
+    return outp  # fallback: newest/first
+
+def _try_oda_26x(oda_exe: str, dwg_path: str, out_dxf: pathlib.Path) -> str | None:
+    """ODA 26.x: TYPE-first. Try with/without mask and ACAD2018/R2018."""
+    in_dir  = str(pathlib.Path(dwg_path).parent)
+    out_dir = str(out_dxf.parent)
+    mask    = pathlib.Path(dwg_path).name
+
+    variants = [["DXF", "ACAD2018"], ["DXF", "R2018"]]
+    patterns = [
+        lambda t,v: [oda_exe, in_dir, out_dir, t, v, "0", "1"],
+        lambda t,v: [oda_exe, in_dir, out_dir, t, v, "0", "1", mask],
+    ]
+    for (t, v) in variants:
+        for mk in patterns:
+            cmd = mk(t, v)
+            r = _run(cmd)
+            if r.returncode == 0:
+                found = _find_dxfs(out_dir, pathlib.Path(dwg_path).stem)
+                if found:
+                    if found != out_dxf:
+                        try:
+                            out_dxf.write_bytes(found.read_bytes())
+                        except Exception:
+                            pass
+                    if out_dxf.exists():
+                        return str(out_dxf)
+    return None
+
+def _try_oda_legacy(oda_exe: str, dwg_path: str, out_dxf: pathlib.Path) -> str | None:
+    """Older ODA: inVer outVer TYPE … (kept for backward compat)."""
+    in_dir  = str(pathlib.Path(dwg_path).parent)
+    out_dir = str(out_dxf.parent)
+    mask    = pathlib.Path(dwg_path).name
+    variants = [["ACAD2018", "ACAD2018", "DXF"], ["R2018", "R2018", "DXF"]]
+    patterns = [
+        lambda vin,vout,typ: [oda_exe, in_dir, out_dir, vin, vout, typ, "0", "1"],
+        lambda vin,vout,typ: [oda_exe, in_dir, out_dir, vin, vout, typ, "0", "1", mask],
+    ]
+    for (vin, vout, typ) in variants:
+        for mk in patterns:
+            cmd = mk(vin, vout, typ)
+            r = _run(cmd)
+            if r.returncode == 0:
+                found = _find_dxfs(out_dir, pathlib.Path(dwg_path).stem)
+                if found:
+                    if found != out_dxf:
+                        try:
+                            out_dxf.write_bytes(found.read_bytes())
+                        except Exception:
+                            pass
+                    if out_dxf.exists():
+                        return str(out_dxf)
+    return None
+
+def _try_oda_convert(oda_exe: str, dwg_path: str, out_dxf: pathlib.Path) -> str | None:
+    """Try multiple known ODAFileConverter CLI patterns; return str(out_dxf) on success."""
+    in_dir  = str(pathlib.Path(dwg_path).parent)
+    out_dir = str(out_dxf.parent)
+    stem_lo = pathlib.Path(dwg_path).stem.lower()
+
+    versions = [("ACAD2018","ACAD2018"), ("R2018","R2018")]
+    patterns: list[typing.Callable[[str,str], list[str]]] = []
+
+    # Pattern A (older ODA): inDir outDir inVer outVer TYPE recurse audit
+    patterns.append(lambda vin, vout: [oda_exe, in_dir, out_dir, vin, vout, "DXF", "0", "1"])
+    # Pattern B (newer ODA): inDir outDir TYPE outVer recurse audit
+    patterns.append(lambda _vin, vout: [oda_exe, in_dir, out_dir, "DXF", vout, "0", "1"])
+
+    def _debug(cmd):
+        if os.environ.get("DWG_DEBUG") == "1":
+            print("DWG DEBUG:", cmd)
+
+    for vin, vout in versions:
+        for mk in patterns:
+            cmd = mk(vin, vout)
+            _debug(cmd)
+            r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            if r.returncode == 0:
+                found = None
+                for p in pathlib.Path(out_dir).rglob("*.dxf"):
+                    if p.stem.lower() == stem_lo:
+                        found = p
+                        break
+                if not found:
+                    dxf_list = sorted(pathlib.Path(out_dir).rglob("*.dxf"), key=lambda p: p.stat().st_mtime, reverse=True)
+                    found = dxf_list[0] if dxf_list else None
+                if found:
+                    try:
+                        if found != out_dxf:
+                            out_dxf.write_bytes(found.read_bytes())
+                    except Exception:
+                        pass
+                    if out_dxf.exists():
+                        return str(out_dxf)
+            else:
+                if "invalid" in (r.stdout or "").lower():
+                    _debug("ODA said invalid arg(s). Trying alternate pattern…")
+    return None
+
+def convert_dwg_to_dxf(dwg_path: str) -> str:
+    oda_exe = _get_env_exe("ODA_CONVERTER_EXE")
+    bat_exe = _get_env_exe("DWG2DXF_EXE")
+
+    if not (oda_exe or bat_exe):
         raise RuntimeError(
-            "DWG import needs a DWG?DXF converter.\n"
+            "DWG import needs a DWG↔DXF converter.\n"
             "Set ODA_CONVERTER_EXE (recommended) or DWG2DXF_EXE to a .bat/.cmd/.exe.\n"
             "Expected .bat signature:  <input.dwg> <output.dxf>"
-            + hint
         )
 
-    exe, extra_args, source_label = exe_info
-    exe_path = Path(exe)
-    if not exe_path.exists():
-        resolved = _resolve_executable_path(exe)
-        if resolved:
-            exe = resolved
-            exe_path = Path(exe)
-    if not exe_path.exists():
-        detail = "\n".join(f"- {msg}" for msg in ignored_reasons) if ignored_reasons else ""
-        hint = f"\nChecked: {exe} ({source_label})"
-        if detail:
-            hint += "\n" + detail
-        raise RuntimeError(
-            "DWG import could not resolve the converter executable." + hint
-        )
+    tmp_dir = pathlib.Path(tempfile.gettempdir())
+    out_dxf = tmp_dir / (pathlib.Path(dwg_path).stem + ".dxf")
 
-    dwg = Path(dwg_path)
-    out_dir = Path(tempfile.mkdtemp(prefix="dwg2dxf_"))
-    out_dxf = out_dir / (dwg.stem + ".dxf")
+    def debug_print(cmd):
+        if os.environ.get("DWG_DEBUG") == "1":
+            print("DWG DEBUG:", cmd)
 
-    exe_lower = exe_path.name.lower()
-    try:
-        if exe_lower.endswith(".bat") or exe_lower.endswith(".cmd"):
-            # ? run batch via cmd.exe so it actually executes
-            cmd = ["cmd", "/c", exe, *extra_args, str(dwg), str(out_dxf)]
-        elif "odafileconverter" in exe_lower:
-            # ? official ODAFileConverter CLI
-            cmd = [exe, *extra_args, str(dwg.parent), str(out_dir), out_ver, "DXF", "0", "0", dwg.name]
-        else:
-            # ? generic exe that accepts <in> <out>
-            cmd = [exe, *extra_args, str(dwg), str(out_dxf)]
+    # 1) Try ODA (new/legacy patterns with/without mask)
+    if oda_exe:
+        res = _try_oda_26x(oda_exe, dwg_path, out_dxf) or _try_oda_legacy(oda_exe, dwg_path, out_dxf)
+        if res:
+            return res
 
-        hint = _imagemagick_misconfiguration_hint(cmd)
-        if hint:
-            raise RuntimeError(hint)
+    # 2) Try wrapper (.bat/.cmd) contract: <exe> "<in>" "<out>"
+    if bat_exe:
+        cmd = [bat_exe, dwg_path, str(out_dxf)]
+        debug_print(cmd)
+        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, shell=False)
+        if r.returncode == 0 and out_dxf.exists():
+            return str(out_dxf)
 
-        proc = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        post_hint = _imagemagick_misconfiguration_hint(cmd, proc.stdout, proc.stderr)
-        if post_hint:
-            raise RuntimeError(post_hint)
-        if os.environ.get("DWG_DEBUG", "0") == "1":
-            print(f"[DWG2DXF] ok: {' '.join(cmd)}")
-    except subprocess.CalledProcessError as e:
-        if os.environ.get("DWG_DEBUG", "0") == "1":
-            print(f"[DWG2DXF] fail: {' '.join(cmd)}\nstdout:\n{e.stdout}\nstderr:\n{e.stderr}")
-        hint = ""
-        im_hint = _imagemagick_misconfiguration_hint(cmd, e.stdout, e.stderr)
-        if im_hint:
-            raise RuntimeError(im_hint) from e
-        if ignored_reasons:
-            detail = "\n".join(f"- {msg}" for msg in ignored_reasons)
-            hint = f"\nIgnored candidates before failure:\n{detail}"
-        raise RuntimeError(
-            "DWG?DXF conversion failed.\n"
-            f"cmd: {' '.join(cmd)}\n"
-            f"stdout:\n{e.stdout}\n"
-            f"stderr:\n{e.stderr}" + hint
-        ) from e
-
-    # 2) resolve the produced DXF
-    produced = out_dxf if out_dxf.exists() else (out_dir / (dwg.stem + ".dxf"))
-    if not produced.exists():
-        missing_hint = _imagemagick_misconfiguration_hint(cmd, getattr(proc, "stdout", ""), getattr(proc, "stderr", ""))
-        extra = f"\n{missing_hint}" if missing_hint else ""
-        raise RuntimeError(
-            "Converter returned success but DXF not found.\n"
-            f"cmd: {' '.join(cmd)}\n"
-            f"checked: {out_dxf} | {produced}" + extra
-        )
-    return str(produced)
-
+    raise RuntimeError("All DWG→DXF candidates failed; enable DWG_DEBUG=1 to see commands/output.")
 
 
 ANG_TOL = math.radians(5.0)
