@@ -23,6 +23,9 @@ LLM_DEBUG = bool(int(os.getenv("LLM_DEBUG", "1")))   # set 0 to disable
 LLM_DEBUG_DIR = Path(__file__).with_name("llm_debug")
 LLM_DEBUG_DIR.mkdir(exist_ok=True)
 
+# Defaults
+DEFAULT_THICKNESS_IN = float(os.environ.get("QUOTER_DEFAULT_THICKNESS_IN", "1.0"))
+
 import copy
 import re
 import sys
@@ -733,6 +736,7 @@ class QuoteState:
     accept_llm: dict = field(default_factory=dict)
     bounds: dict = field(default_factory=dict)
     material_source: str | None = None
+    app_ref: Any | None = None
 
 
 def _as_float_or_none(value: Any) -> float | None:
@@ -5097,6 +5101,9 @@ def compute_quote_from_df(df: pd.DataFrame,
         llm_model_path = str(params.get("LLMModelPath", "") or "")
     else:
         params["LLMModelPath"] = llm_model_path
+    if quote_state is None:
+        quote_state = QuoteState()
+
     if ui_vars is None:
         try:
             ui_vars = {
@@ -5107,23 +5114,84 @@ def compute_quote_from_df(df: pd.DataFrame,
             ui_vars = {}
     else:
         ui_vars = dict(ui_vars)
-    if quote_state is None:
-        quote_state = QuoteState()
-    quote_state.ui_vars = dict(ui_vars)
-    quote_state.rates = dict(rates)
+
     geo_context = dict(geo or {})
 
     MM_PER_IN = 25.4
 
+    def _get_editor_float(df, label, default=None):
+        try:
+            m = df["Item"].astype(str).str.fullmatch(label, case=False, na=False)
+            raw = str(df.loc[m, "Example Values / Options"].iloc[0]).strip()
+            return float(raw) if raw != "" else default
+        except Exception:
+            return default
+
     def _read_editor_num(df, label: str):
         """Read a numeric value from the Quote Editor table by label; returns float|None."""
 
+        return _get_editor_float(df, label, default=None)
+
+    app_ref = getattr(quote_state, "app_ref", None)
+
+    # ---- thickness resolution order ----
+    thickness_in = _get_editor_float(df, r"Thickness \(in\)", default=None)
+
+    if thickness_in is None:
+        t_geo = geo_context.get("thickness_mm")
         try:
-            mask = df["Item"].astype(str).str.fullmatch(label, case=False, na=False)
-            val = str(df.loc[mask, "Example Values / Options"].iloc[0]).strip()
-            return float(val)
+            if isinstance(t_geo, dict):
+                t_geo = t_geo.get("value")
+            thickness_in = float(t_geo) / MM_PER_IN if t_geo else None
         except Exception:
-            return None
+            thickness_in = None
+
+    if thickness_in is None or thickness_in <= 0:
+        thickness_in = DEFAULT_THICKNESS_IN
+        try:
+            mask = df["Item"].astype(str).str.fullmatch(r"Thickness \(in\)", case=False, na=False)
+            if mask.any():
+                df.loc[mask, "Example Values / Options"] = f"{thickness_in:.3f}"
+        except Exception:
+            pass
+        try:
+            ui_vars["Thickness (in)"] = f"{thickness_in:.3f}"
+        except Exception:
+            pass
+        try:
+            app_obj = app_ref if app_ref is not None else None
+            v = None
+            if app_obj is not None and hasattr(app_obj, "editor_vars"):
+                v = app_obj.editor_vars.get("Thickness (in)")
+            if v is not None:
+                current_val = ""
+                try:
+                    current_val = v.get()
+                except Exception:
+                    current_val = ""
+                text = (current_val or "").strip()
+                needs_update = text == ""
+                if not needs_update:
+                    try:
+                        needs_update = float(text) <= 0
+                    except Exception:
+                        needs_update = False
+                if needs_update:
+                    v.set(f"{thickness_in:.3f}")
+                    try:
+                        app_obj._mark_label_source("Thickness (in)", "Default")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+    else:
+        try:
+            ui_vars.setdefault("Thickness (in)", f"{thickness_in:.3f}")
+        except Exception:
+            pass
+
+    quote_state.ui_vars = dict(ui_vars)
+    quote_state.rates = dict(rates)
 
     # --- thickness for LLM --------------------------------------------------------
     thickness_for_llm: float | None = None
@@ -5147,9 +5215,12 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     # Fallback: Quote Editor "Thickness (in)"
     if thickness_for_llm is None:
-        t_in = _read_editor_num(df, r"Thickness \(in\)")
-        if t_in is not None:
-            thickness_for_llm = t_in * MM_PER_IN
+        if thickness_in is not None:
+            thickness_for_llm = thickness_in * MM_PER_IN
+        else:
+            t_in = _read_editor_num(df, r"Thickness \(in\)")
+            if t_in is not None:
+                thickness_for_llm = t_in * MM_PER_IN
 
     # Last-ditch: Z dimension of bbox if present (treat as thickness for plates)
     bbox_for_llm: list[float] | None = None
@@ -8636,6 +8707,37 @@ class CollapsibleSection(ttk.Frame):
             self.body.grid_forget()
 
 
+# ---- Tooltips ----------------------------------------------------------------
+class ToolTip:
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tip: tk.Toplevel | None = None
+        widget.bind("<Enter>", self.show)
+        widget.bind("<Leave>", self.hide)
+
+    def show(self, _event=None):
+        if self.tip or not self.text:
+            return
+        try:
+            x = self.widget.winfo_rootx() + 10
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+        except Exception:
+            return
+        self.tip = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tk.Label(tw, text=self.text, background="#ffffe0", relief="solid", borderwidth=1).pack(ipadx=6, ipady=3)
+        tw.wm_geometry(f"+{x}+{y}")
+
+    def hide(self, _event=None):
+        if self.tip is not None:
+            try:
+                self.tip.destroy()
+            except Exception:
+                pass
+        self.tip = None
+
+
 # ---- Numeric entry with validation ------------------------------------------
 class NumericEntry(ttk.Entry):
     def __init__(self, master, textvariable, allow_int=False, **kw):
@@ -8669,6 +8771,19 @@ def _grid_pair(parent, r, label, var, unit=None, width=10, allow_int=False):
     u = ttk.Label(parent, text=unit or "")
     u.grid(row=r, column=3, sticky="w", padx=(6, 0))
     return lbl, ent, chip
+
+
+# Field help text for tooltips
+FIELD_TIPS = {
+    "Roughing Cycle Time": "Spindle-on roughing time (hr).",
+    "Semi-Finish": "Semi-finishing passes (hr).",
+    "Finishing Cycle Time": "Final passes including contour (hr).",
+    "Drilling": "Cycle time for all drilled holes (hr).",
+    "In-Process Inspection": "Operator checks during machining (hr).",
+    "CMM Run Time min": "CMM inspection minutes (min).",
+    "Scrap Percent (%)": "Expected material loss (% of net).",
+    "Number of Milling Setups": "Distinct part orientations in milling.",
+}
 
 
 # label -> (group, unit, allow_int)
@@ -8731,6 +8846,7 @@ class App(tk.Tk):
         self.params = PARAMS_DEFAULT.copy()
         self.rates = RATES_DEFAULT.copy()
         self.quote_state = QuoteState()
+        self.quote_state.app_ref = self
         self.settings_path = Path(__file__).with_name("app_settings.json")
         self.settings = self._load_settings()
         if isinstance(self.settings, dict):
@@ -8794,6 +8910,8 @@ class App(tk.Tk):
         self.editor_chip_widgets: dict[str, ttk.Label] = {}
         self.editor_label_base: dict[str, str] = {}
         self.editor_value_sources: dict[str, str] = {}
+        self._summary_prov_labels: dict[str, ttk.Label] = {}
+        self._summary_value_labels: dict[str, ttk.Label] = {}
         self._editor_set_depth = 0
         self._building_editor = False
         self._reprice_in_progress = False
@@ -8986,6 +9104,69 @@ class App(tk.Tk):
             return str(int(round(num)))
         return str(num)
 
+    def _ensure_editor_var(self, label: str) -> tk.StringVar:
+        initial = self._initial_editor_value(label)
+        var = self.editor_vars.get(label)
+        if var is None:
+            var = tk.StringVar(value=initial)
+            self.editor_vars[label] = var
+        elif self._building_editor:
+            var.set(initial)
+        return var
+
+    def build_summary_header(self, parent: tk.Misc) -> None:
+        self._summary_prov_labels.clear()
+        self._summary_value_labels.clear()
+        card = ttk.Frame(parent)
+        card.pack(fill="x", padx=8, pady=(2, 8))
+        card.columnconfigure(6, weight=1)
+
+        def chip(label_text: str, varname: str, unit: str = "") -> ttk.Label:
+            frame = ttk.Frame(card)
+            frame.pack(side="left", padx=(0, 14))
+            ttk.Label(frame, text=f"{label_text}:", font=("Segoe UI", 9, "bold")).pack(side="left")
+            var = self._ensure_editor_var(varname)
+            value_lbl = ttk.Label(frame, text=var.get() or "—")
+            value_lbl.pack(side="left", padx=(4, 0))
+
+            def _update(*_):
+                value_lbl.configure(text=var.get() or "—")
+
+            var.trace_add("write", _update)
+            _update()
+            if unit:
+                ttk.Label(frame, text=unit, foreground="#666").pack(side="left", padx=(3, 0))
+            prov_lbl = ttk.Label(frame, text="", foreground="#1463FF")
+            prov_lbl.pack(side="left", padx=(6, 0))
+            self._summary_prov_labels[varname] = prov_lbl
+            self._summary_value_labels[varname] = value_lbl
+            return prov_lbl
+
+        chip("Material", "Material")
+        chip("Thick", "Thickness (in)", "in")
+        lw_prov = chip("L×W", "Plate Length (in)", "in")
+        chip("Setups", "Number of Milling Setups")
+        chip("Scrap", "Scrap Percent (%)", "%")
+        chip("Drill", "Drilling", "hr")
+        chip("Mill", "Roughing Cycle Time", "hr")
+
+        # Share provenance label for plate width as well
+        self._summary_prov_labels["Plate Width (in)"] = lw_prov
+        self._summary_value_labels["Plate Width (in)"] = self._summary_value_labels.get("Plate Length (in)")
+
+        def _lw_update(*_):
+            L = self.editor_vars.get("Plate Length (in)")
+            W = self.editor_vars.get("Plate Width (in)")
+            L_text = L.get() if isinstance(L, tk.StringVar) and L.get() else "—"
+            W_text = W.get() if isinstance(W, tk.StringVar) and W.get() else "—"
+            value_lbl = self._summary_value_labels.get("Plate Length (in)")
+            if value_lbl is not None:
+                value_lbl.configure(text=f"{L_text} × {W_text}")
+
+        self._ensure_editor_var("Plate Width (in)").trace_add("write", _lw_update)
+        self._ensure_editor_var("Plate Length (in)").trace_add("write", _lw_update)
+        _lw_update()
+
     def build_quote_editor(self, parent: tk.Misc) -> None:
         prev_search = getattr(self, "var_search", None)
         prev_hide = getattr(self, "var_hide_zeros", None)
@@ -9005,42 +9186,48 @@ class App(tk.Tk):
             variable=self.var_hide_zeros,
             command=self._apply_editor_filters,
         ).pack(side="left")
+        btns = ttk.Frame(toolbar)
+        btns.pack(side="left", padx=(12, 0))
+        ttk.Button(btns, text="Expand all", command=lambda: self._set_all_sections(True)).pack(side="left")
+        ttk.Button(btns, text="Collapse all", command=lambda: self._set_all_sections(False)).pack(
+            side="left", padx=(6, 0)
+        )
 
-        container = ttk.Frame(parent)
+        inner = ttk.Frame(parent)
+        inner.pack(fill="both", expand=True)
+        inner.columnconfigure(0, weight=1)
+
+        self.build_summary_header(inner)
+
+        container = ttk.Frame(inner)
         container.pack(fill="both", expand=True)
         container.columnconfigure(0, weight=1)
 
         groups = [
-            "Material",
-            "Geometry",
-            "Setups",
-            "Machining",
-            "Inspection / QA",
-            "Finishing",
-            "Pass-Through & Directs",
-            "Pricing",
+            ("Material", True),
+            ("Geometry", False),
+            ("Setups", True),
+            ("Machining", True),
+            ("Inspection / QA", False),
+            ("Finishing", False),
+            ("Pass-Through & Directs", False),
+            ("Pricing", True),
         ]
         self._group_frames: dict[str, ttk.Frame] = {}
-        for group in groups:
-            sec = CollapsibleSection(container, group, initially_open=(group in ("Material", "Machining")))
+        for group, is_open in groups:
+            sec = CollapsibleSection(container, group, initially_open=is_open)
             sec.pack(fill="x", padx=8, pady=2)
             sec.body.columnconfigure(1, weight=1)
             self._group_frames[group] = sec.body
 
-        row_for_group = {g: 0 for g in groups}
+        row_for_group = {g: 0 for g, _ in groups}
         for label, (group, unit, allow_int) in EDITOR_SPEC.items():
             if group not in self._group_frames:
                 continue
-            initial = self._initial_editor_value(label)
-            var = self.editor_vars.get(label)
-            if var is None:
-                var = tk.StringVar(value=initial)
-                self.editor_vars[label] = var
-            else:
-                var.set(initial)
+            var = self._ensure_editor_var(label)
             width = 28 if allow_int is None else 12
             row = row_for_group[group]
-            lbl, _entry, chip = _grid_pair(
+            lbl, entry, chip = _grid_pair(
                 self._group_frames[group],
                 row,
                 label,
@@ -9051,7 +9238,25 @@ class App(tk.Tk):
             )
             row_for_group[group] += 1
             self._register_editor_field(label, var, lbl, chip)
+            if label in FIELD_TIPS:
+                lbl.tooltip = ToolTip(lbl, FIELD_TIPS[label])
+                entry.tooltip = ToolTip(entry, FIELD_TIPS[label])
             self.quote_vars[label] = var
+
+        default_applied = False
+        if "Thickness (in)" not in self.editor_vars:
+            self.editor_vars["Thickness (in)"] = tk.StringVar(value=f"{DEFAULT_THICKNESS_IN:.3f}")
+            self.quote_vars["Thickness (in)"] = self.editor_vars["Thickness (in)"]
+            default_applied = True
+        else:
+            thickness_var = self.editor_vars.get("Thickness (in)")
+            if thickness_var is not None:
+                current_text = (thickness_var.get() or "").strip()
+                if current_text == "":
+                    thickness_var.set(f"{DEFAULT_THICKNESS_IN:.3f}")
+                    default_applied = True
+        if default_applied:
+            self._mark_label_source("Thickness (in)", "Default")
 
         self._build_override_sections(container)
 
@@ -9143,6 +9348,13 @@ class App(tk.Tk):
                 else:
                     child.grid_remove()
 
+    def _set_all_sections(self, open_: bool) -> None:
+        for body in getattr(self, "_group_frames", {}).values():
+            cs = getattr(body, "master", None)
+            if isinstance(cs, CollapsibleSection):
+                cs._open.set(open_)
+                cs._toggle()
+
     def _register_editor_field(
         self,
         label: str,
@@ -9185,30 +9397,45 @@ class App(tk.Tk):
         widget = self.editor_label_widgets.get(label)
         base = self.editor_label_base.get(label, label)
         chip = self.editor_chip_widgets.get(label)
-        if widget is not None:
+        if widget is not None and chip is None:
             widget.configure(text=base, foreground="")
         if chip is not None:
             if src == "LLM":
                 chip.configure(text="LLM", foreground="#1463FF")
             elif src == "User":
                 chip.configure(text="User", foreground="#22863a")
+            elif src == "Default":
+                chip.configure(text="Default", foreground="#6c6c6c")
             elif src:
                 chip.configure(text=str(src), foreground="#4E4E4E")
             else:
                 chip.configure(text="", foreground="#1463FF")
         elif widget is not None:
+            color = ""
+            text = base
             if src == "LLM":
-                widget.configure(text=f"{base}  (LLM)", foreground="#1463FF")
+                color = "#1463FF"
+                text = f"{base}  (LLM)"
             elif src == "User":
-                widget.configure(text=f"{base}  (User)", foreground="#22863a")
+                color = "#22863a"
+                text = f"{base}  (User)"
+            elif src == "Default":
+                color = "#6c6c6c"
+                text = f"{base}  (Default)"
             elif src:
-                widget.configure(text=f"{base}  ({src})", foreground="")
-            else:
-                widget.configure(text=base, foreground="")
+                text = f"{base}  ({src})"
+            widget.configure(text=text, foreground=color)
         if src:
             self.editor_value_sources[label] = src
         else:
             self.editor_value_sources.pop(label, None)
+        prov = getattr(self, "_summary_prov_labels", {}).get(label)
+        if prov is not None:
+            if src:
+                prov_color = "#1463FF" if src == "LLM" else "#22863a" if src == "User" else "#6c6c6c" if src == "Default" else prov.cget("foreground")
+                prov.configure(text=src, foreground=prov_color)
+            else:
+                prov.configure(text="", foreground="")
 
     def log_llm_snapshot(self, **payload: Any) -> None:
         if not LLM_DEBUG:
