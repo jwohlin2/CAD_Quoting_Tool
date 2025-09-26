@@ -31,7 +31,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 import urllib.request
 from importlib import import_module
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 from OCP.TopAbs   import TopAbs_EDGE, TopAbs_FACE
 from OCP.TopExp   import TopExp, TopExp_Explorer
 from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
@@ -3234,155 +3234,90 @@ DWG_CONVERTER_BANNED_EXEC_TOKENS = {
 DWG_CONVERTER_BANNED_ARG_TOKENS = {"-background", "--background"}
 
 
-def _get_env_exe(name: str) -> str | None:
-    val = os.environ.get(name) or ""
-    val = val.strip().strip('"').strip("'")   # keep spaces inside the path
-    return val if (val and os.path.isfile(val)) else None
-
-def _run(cmd):
+def _run_dbg(cmd):
     if os.environ.get("DWG_DEBUG") == "1":
         print("DWG DEBUG:", cmd)
-    return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, shell=False)
 
-def _find_dxfs(out_dir: str, wanted_stem: str):
-    outp = None
+
+def _find_out_dxf(out_dir: str, wanted_stem: str) -> pathlib.Path | None:
+    wanted = wanted_stem.lower()
+    latest = None
     for p in pathlib.Path(out_dir).rglob("*.dxf"):
-        if p.stem.lower() == wanted_stem.lower():
+        latest = latest or p
+        if p.stem.lower() == wanted:
             return p
-        outp = outp or p
-    return outp  # fallback: newest/first
+    return latest
 
 def _try_oda_26x(oda_exe: str, dwg_path: str, out_dxf: pathlib.Path) -> str | None:
-    """ODA 26.x: TYPE-first. Try with/without mask and ACAD2018/R2018."""
+    """ODA 26.x (your build): TYPE-first. Try with/without mask; ACAD2018 then R2018."""
     in_dir  = str(pathlib.Path(dwg_path).parent)
     out_dir = str(out_dxf.parent)
     mask    = pathlib.Path(dwg_path).name
-
-    variants = [["DXF", "ACAD2018"], ["DXF", "R2018"]]
-    patterns = [
-        lambda t,v: [oda_exe, in_dir, out_dir, t, v, "0", "1"],
-        lambda t,v: [oda_exe, in_dir, out_dir, t, v, "0", "1", mask],
-    ]
-    for (t, v) in variants:
+    variants = (("DXF", "ACAD2018"), ("DXF", "R2018"))
+    patterns = (
+        lambda t, v: [oda_exe, in_dir, out_dir, t, v, "0", "1"],
+        lambda t, v: [oda_exe, in_dir, out_dir, t, v, "0", "1", mask],
+    )
+    for t, v in variants:
         for mk in patterns:
             cmd = mk(t, v)
-            r = _run(cmd)
+            r = _run_dbg(cmd)
             if r.returncode == 0:
-                found = _find_dxfs(out_dir, pathlib.Path(dwg_path).stem)
+                found = _find_out_dxf(out_dir, pathlib.Path(dwg_path).stem)
                 if found:
                     if found != out_dxf:
-                        try:
-                            out_dxf.write_bytes(found.read_bytes())
-                        except Exception:
-                            pass
+                        out_dxf.write_bytes(found.read_bytes())
                     if out_dxf.exists():
                         return str(out_dxf)
     return None
 
 def _try_oda_legacy(oda_exe: str, dwg_path: str, out_dxf: pathlib.Path) -> str | None:
-    """Older ODA: inVer outVer TYPE … (kept for backward compat)."""
+    """Older ODA: inVer outVer TYPE …"""
     in_dir  = str(pathlib.Path(dwg_path).parent)
     out_dir = str(out_dxf.parent)
     mask    = pathlib.Path(dwg_path).name
-    variants = [["ACAD2018", "ACAD2018", "DXF"], ["R2018", "R2018", "DXF"]]
-    patterns = [
-        lambda vin,vout,typ: [oda_exe, in_dir, out_dir, vin, vout, typ, "0", "1"],
-        lambda vin,vout,typ: [oda_exe, in_dir, out_dir, vin, vout, typ, "0", "1", mask],
-    ]
-    for (vin, vout, typ) in variants:
+    variants = (("ACAD2018", "ACAD2018", "DXF"), ("R2018", "R2018", "DXF"))
+    patterns = (
+        lambda vin, vout, typ: [oda_exe, in_dir, out_dir, vin, vout, typ, "0", "1"],
+        lambda vin, vout, typ: [oda_exe, in_dir, out_dir, vin, vout, typ, "0", "1", mask],
+    )
+    for vin, vout, typ in variants:
         for mk in patterns:
             cmd = mk(vin, vout, typ)
-            r = _run(cmd)
+            r = _run_dbg(cmd)
             if r.returncode == 0:
-                found = _find_dxfs(out_dir, pathlib.Path(dwg_path).stem)
+                found = _find_out_dxf(out_dir, pathlib.Path(dwg_path).stem)
                 if found:
                     if found != out_dxf:
-                        try:
-                            out_dxf.write_bytes(found.read_bytes())
-                        except Exception:
-                            pass
+                        out_dxf.write_bytes(found.read_bytes())
                     if out_dxf.exists():
                         return str(out_dxf)
-    return None
-
-def _try_oda_convert(oda_exe: str, dwg_path: str, out_dxf: pathlib.Path) -> str | None:
-    """Try multiple known ODAFileConverter CLI patterns; return str(out_dxf) on success."""
-    in_dir  = str(pathlib.Path(dwg_path).parent)
-    out_dir = str(out_dxf.parent)
-    stem_lo = pathlib.Path(dwg_path).stem.lower()
-
-    versions = [("ACAD2018","ACAD2018"), ("R2018","R2018")]
-    patterns: list[typing.Callable[[str,str], list[str]]] = []
-
-    # Pattern A (older ODA): inDir outDir inVer outVer TYPE recurse audit
-    patterns.append(lambda vin, vout: [oda_exe, in_dir, out_dir, vin, vout, "DXF", "0", "1"])
-    # Pattern B (newer ODA): inDir outDir TYPE outVer recurse audit
-    patterns.append(lambda _vin, vout: [oda_exe, in_dir, out_dir, "DXF", vout, "0", "1"])
-
-    def _debug(cmd):
-        if os.environ.get("DWG_DEBUG") == "1":
-            print("DWG DEBUG:", cmd)
-
-    for vin, vout in versions:
-        for mk in patterns:
-            cmd = mk(vin, vout)
-            _debug(cmd)
-            r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-            if r.returncode == 0:
-                found = None
-                for p in pathlib.Path(out_dir).rglob("*.dxf"):
-                    if p.stem.lower() == stem_lo:
-                        found = p
-                        break
-                if not found:
-                    dxf_list = sorted(pathlib.Path(out_dir).rglob("*.dxf"), key=lambda p: p.stat().st_mtime, reverse=True)
-                    found = dxf_list[0] if dxf_list else None
-                if found:
-                    try:
-                        if found != out_dxf:
-                            out_dxf.write_bytes(found.read_bytes())
-                    except Exception:
-                        pass
-                    if out_dxf.exists():
-                        return str(out_dxf)
-            else:
-                if "invalid" in (r.stdout or "").lower():
-                    _debug("ODA said invalid arg(s). Trying alternate pattern…")
     return None
 
 def convert_dwg_to_dxf(dwg_path: str) -> str:
-    oda_exe = _get_env_exe("ODA_CONVERTER_EXE")
-    bat_exe = _get_env_exe("DWG2DXF_EXE")
+    oda_exe = (os.environ.get("ODA_CONVERTER_EXE") or "").strip().strip('"').strip("'")
+    oda_exe = oda_exe if (oda_exe and os.path.isfile(oda_exe)) else None
+
+    bat_exe = (os.environ.get("DWG2DXF_EXE") or "").strip().strip('"').strip("'")
+    bat_exe = bat_exe if (bat_exe and os.path.isfile(bat_exe)) else None
 
     if not (oda_exe or bat_exe):
-        raise RuntimeError(
-            "DWG import needs a DWG↔DXF converter.\n"
-            "Set ODA_CONVERTER_EXE (recommended) or DWG2DXF_EXE to a .bat/.cmd/.exe.\n"
-            "Expected .bat signature:  <input.dwg> <output.dxf>"
-        )
+        raise RuntimeError("DWG↔DXF converter not found. Set ODA_CONVERTER_EXE or DWG2DXF_EXE.")
 
-    tmp_dir = pathlib.Path(tempfile.gettempdir())
-    out_dxf = tmp_dir / (pathlib.Path(dwg_path).stem + ".dxf")
+    out_dxf = pathlib.Path(tempfile.gettempdir()) / (pathlib.Path(dwg_path).stem + ".dxf")
 
-    def debug_print(cmd):
-        if os.environ.get("DWG_DEBUG") == "1":
-            print("DWG DEBUG:", cmd)
-
-    # 1) Try ODA (new/legacy patterns with/without mask)
     if oda_exe:
         res = _try_oda_26x(oda_exe, dwg_path, out_dxf) or _try_oda_legacy(oda_exe, dwg_path, out_dxf)
         if res:
             return res
 
-    # 2) Try wrapper (.bat/.cmd) contract: <exe> "<in>" "<out>"
     if bat_exe:
-        cmd = [bat_exe, dwg_path, str(out_dxf)]
-        debug_print(cmd)
-        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, shell=False)
+        r = _run_dbg([bat_exe, dwg_path, str(out_dxf)])
         if r.returncode == 0 and out_dxf.exists():
             return str(out_dxf)
 
-    raise RuntimeError("All DWG→DXF candidates failed; enable DWG_DEBUG=1 to see commands/output.")
+    raise RuntimeError("All DWG→DXF candidates failed; enable DWG_DEBUG=1 and check printed commands.")
 
 
 ANG_TOL = math.radians(5.0)
@@ -7677,7 +7612,7 @@ def merge_estimate_into_vars(vars_df: pd.DataFrame, estimate: dict) -> pd.DataFr
         vars_df.loc[mask, "Example Values / Options"] = value
     return vars_df
 # ---- 2D: DXF / DWG (ezdxf) ---------------------------------------------------
-def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
+def extract_2d_features_from_dxf_or_dwg(path: str, *, convert_fn: Callable[[str], str] | None = None) -> dict:
     if not _HAS_EZDXF:
         raise RuntimeError("ezdxf not installed. pip/conda install ezdxf")
 
@@ -7685,12 +7620,13 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     dxf_text_path: str | None = None
     doc = None
     lower_path = path.lower()
+    convert = convert_fn or convert_dwg_to_dxf
     if lower_path.endswith(".dwg"):
         if _HAS_ODAFC:
             # uses ODAFileConverter through ezdxf, no env var needed
             doc = odafc.readfile(path)
         else:
-            dxf_path = convert_dwg_to_dxf(path)  # needs ODA_CONVERTER_EXE or DWG2DXF_EXE
+            dxf_path = convert(path)  # needs ODA_CONVERTER_EXE or DWG2DXF_EXE
             dxf_text_path = dxf_path
             doc = ezdxf.readfile(dxf_path)
     else:
@@ -7768,6 +7704,8 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
         "thickness_mm": thickness_mm,
         "material": material,
     }
+    if dxf_text_path:
+        result["dxf_path"] = dxf_text_path
     if entity_holes_mm:
         result["hole_diams_mm_precise"] = entity_holes_mm
     if chart_ops:
@@ -9236,6 +9174,8 @@ class App(tk.Tk):
         self.params = PARAMS_DEFAULT.copy()
         self.rates = RATES_DEFAULT.copy()
         self.quote_state = QuoteState()
+        self.last_converted_dxf: str | None = None
+        self.current_dxf_path: str | None = None
         self.settings_path = Path(__file__).with_name("app_settings.json")
         self.settings = self._load_settings()
         if isinstance(self.settings, dict):
@@ -9362,6 +9302,12 @@ class App(tk.Tk):
             path.write_text(json.dumps(self.settings, indent=2), encoding="utf-8")
         except Exception:
             pass
+
+    def _convert_dwg_and_track(self, dwg_path: str) -> str:
+        dxf_path = convert_dwg_to_dxf(dwg_path)
+        self.last_converted_dxf = dxf_path
+        self.current_dxf_path = dxf_path
+        return dxf_path
 
     def set_status(self, msg: str = "", kind: str = "info", timeout_ms: int = 4000) -> None:
         colors = {"info": "", "warn": "#B58900", "err": "#CB4B16"}
@@ -10020,7 +9966,18 @@ class App(tk.Tk):
                     structured_pdf = extract_pdf_all(Path(path))
                     g2d = extract_2d_features_from_pdf_vector(path)   # PyMuPDF vector-only MVP
                 else:
-                    g2d = extract_2d_features_from_dxf_or_dwg(path)   # ezdxf / ODA
+                    g2d = extract_2d_features_from_dxf_or_dwg(path, convert_fn=self._convert_dwg_and_track)   # ezdxf / ODA
+
+                if ext == ".dxf":
+                    self.current_dxf_path = path
+                    self.last_converted_dxf = path
+                elif ext == ".dwg":
+                    cached_dxf = None
+                    if isinstance(g2d, dict):
+                        cached_dxf = g2d.get("dxf_path")
+                    if cached_dxf:
+                        self.current_dxf_path = cached_dxf
+                        self.last_converted_dxf = cached_dxf
 
                 if self.vars_df is None:
                     vp = find_variables_near(path) or filedialog.askopenfilename(title="Select variables CSV/XLSX")
