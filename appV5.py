@@ -2111,6 +2111,159 @@ try:
 except Exception:
     extract_text_lines_from_dxf = None
 
+# ---- DWG/DXF auto-fill for plate inputs -------------------------------------
+# Requires: ezdxf (only for DXF reading). If your DWG gets converted to DXF
+# by your ODA wrapper, pass that DXF path in.
+
+from math import isfinite
+
+IN2MM = 25.4
+MM2IN = 1.0 / 25.4
+
+
+def _is_ordinate(dim) -> bool:
+    """Best-effort test for ORDinate dimensions across ezdxf versions."""
+
+    try:
+        # ezdxf 1.1+ has enums; 6 is ordinate
+        return int(dim.dxf.dimtype) & 6 == 6 or int(dim.dxf.dimtype) == 6
+    except Exception:
+        return False
+
+
+def _dim_measure(dim) -> float | None:
+    """Dimension numeric value, preferring true measurement over override text."""
+
+    try:
+        m = dim.get_measurement()  # ezdxf computes it
+        return float(m) if isfinite(m) else None
+    except Exception:
+        pass
+    # Fallback: parse the displayed text if present (e.g., "12.00")
+    try:
+        txt = (dim.dxf.text or "").strip()
+        m = re.search(r"([-+]?\d+(?:\.\d+)?)", txt)
+        return float(m.group(1)) if m else None
+    except Exception:
+        return None
+
+
+def _all_mtext_and_text(doc):
+    for e in doc.modelspace().query("MTEXT,TEXT"):
+        yield e
+    # also scan paper space layouts (hole tables often live there)
+    for name in doc.layouts.names_in_taborder():
+        try:
+            if name.lower() in ("model", "defpoints"):
+                continue
+            for e in doc.layouts.get(name).entity_space.query("MTEXT,TEXT"):
+                yield e
+        except Exception:
+            continue
+
+
+def _units_scale(doc) -> float:
+    """Return factor to convert the document's values to inches."""
+
+    try:
+        # $INSUNITS: 1=in, 4=mm in DXF R2000+
+        u = int(doc.header.get("$INSUNITS", 1))
+    except Exception:
+        u = 1
+    return 1.0 if u == 1 else MM2IN if u in (4, 13) else 1.0
+
+
+def infer_plate_from_dxf(dxf_path: str) -> dict:
+    """
+    Returns {
+        'length_in': float|None,
+        'width_in':  float|None,
+        'thickness_in': float|None,
+        'notes': [str]
+    }
+    """
+
+    out = {"length_in": None, "width_in": None, "thickness_in": None, "notes": []}
+    if not ezdxf:
+        out["notes"].append("ezdxf not installed; skipped DXF mining.")
+        return out
+    try:
+        doc = ezdxf.readfile(dxf_path)
+    except Exception as e:
+        out["notes"].append(f"DXF read failed: {e}")
+        return out
+
+    to_in = _units_scale(doc)
+
+    # --- 1) ORDinate dimensions → plate X/Y extents --------------------------
+    vals = []
+    try:
+        for dim in doc.modelspace().query("DIMENSION"):
+            if not _is_ordinate(dim):
+                continue
+            m = _dim_measure(dim)
+            if m is None:
+                continue
+            vals.append(abs(m) * to_in)
+        # also try on paper space; some drawings place dims there:
+        for name in doc.layouts.names_in_taborder():
+            if name.lower() in ("model", "defpoints"):
+                continue
+            try:
+                for dim in doc.layouts.get(name).entity_space.query("DIMENSION"):
+                    if not _is_ordinate(dim):
+                        continue
+                    m = _dim_measure(dim)
+                    if m is None:
+                        continue
+                    vals.append(abs(m) * to_in)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Heuristic: the two largest distinct values (rounded 0.01) are L & W
+    if vals:
+        uniq = sorted({round(v, 3) for v in vals if v > 0.25}, reverse=True)
+        if len(uniq) >= 1:
+            out["length_in"] = float(uniq[0])
+        if len(uniq) >= 2:
+            out["width_in"] = float(uniq[1])
+        if out["length_in"] or out["width_in"]:
+            out["notes"].append(
+                f"ORDINATE extents → L≈{out['length_in'] or '?'} in, W≈{out['width_in'] or '?'} in"
+            )
+
+    # --- 2) HOLE TABLE / notes → thickness from deepest depth ----------------
+    # Scan all visible text for 'THRU' / 'DEEP' etc. and take the largest depth
+    depth_candidates = []
+    for e in _all_mtext_and_text(doc):
+        try:
+            s = e.text if e.dxftype() == "TEXT" else e.plain_text()
+        except Exception:
+            continue
+        s_up = s.upper()
+
+        # Only consider lines likely to be hole specs
+        if not any(k in s_up for k in ("THRU", "TAP", "C'BORE", "CBORE", "DEEP", "DRILL")):
+            continue
+
+        # Extract numbers (inches). Ignore obvious small chamfers like ".03 x 45"
+        for m in re.finditer(r"(?<!\d)(\d+(?:\.\d+)?)(?!\d)", s_up):
+            val = float(m.group(1))
+            if 0.1 <= val <= 10.0:  # plausible thickness/hole depths in inches
+                # try to ignore 0.03/0.06 chamfers
+                if val <= 0.08 and "45" in s_up:
+                    continue
+                depth_candidates.append(val)
+
+    if depth_candidates:
+        t = max(depth_candidates)
+        out["thickness_in"] = float(round(t, 3))
+        out["notes"].append(f"HOLE TABLE depth max → thickness≈{out['thickness_in']} in")
+
+    return out
+
 # numpy is optional for a few small calcs; degrade gracefully if missing
 try:
     import numpy as np  # type: ignore
@@ -8570,153 +8723,288 @@ def get_llm_overrides(
     meta["context"] = ctx
     return out, meta
 # ----------------- GUI -----------------
-# ---- scrollable frame helper -----------------------------------------------
-class ScrollableFrame(ttk.Frame):
-    def __init__(self, parent, *args, **kwargs):
-        super().__init__(parent, *args, **kwargs)
-        self.canvas = tk.Canvas(self, highlightthickness=0)
-        self.vbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
-        self.inner = ttk.Frame(self.canvas)
+# -------------------- QUOTE EDITOR — CLEAN UI ---------------------------------
+def init_editor_styles(root):
+    style = ttk.Style(root)
+    try:
+        style.theme_use("clam")
+    except Exception:
+        pass
+    BG = "#F7F7F9"
+    CARD_BG = "#FFFFFF"
+    BORDER = "#E5E7EB"
+    ACCENT = "#2563EB"
+    OK = "#22863a"
+    MUTED = "#6B7280"
+    style.configure("TFrame", background=BG)
+    style.configure("TLabel", background=BG)
+    style.configure("Card.TFrame", background=CARD_BG, relief="solid", borderwidth=1)
+    style.map("Card.TFrame", background=[("active", CARD_BG)])
+    style.configure("SectionTitle.TLabel", font=("Segoe UI", 12, "bold"))
+    style.configure("FieldLabel.TLabel", font=("Segoe UI", 10))
+    style.configure("Unit.TLabel", foreground=MUTED, background=CARD_BG)
+    style.configure("ChipLLM.TLabel", foreground=ACCENT, background=CARD_BG, font=("Segoe UI", 9, "bold"))
+    style.configure("ChipUser.TLabel", foreground=OK, background=CARD_BG, font=("Segoe UI", 9, "bold"))
+    style.configure("Nav.TButton", padding=6)
+    return {"BG": BG, "CARD_BG": CARD_BG, "ACCENT": ACCENT, "MUTED": MUTED, "BORDER": BORDER}
 
-        self.inner.bind(
-            "<Configure>",
-            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-        )
-        self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
-        self.canvas.configure(yscrollcommand=self.vbar.set)
 
+class ScrollFrame(ttk.Frame):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.canvas = tk.Canvas(self, bd=0, highlightthickness=0, bg=self["background"])
+        self.vsb = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.vsb.set)
+        self.vsb.pack(side="right", fill="y")
         self.canvas.pack(side="left", fill="both", expand=True)
-        self.vbar.pack(side="right", fill="y")
+        self.inner = ttk.Frame(self)
+        self._win = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self.inner.bind("<Configure>", self._on_cfg)
+        self.canvas.bind("<Configure>", self._on_canvas)
 
-        # Bind wheel only while cursor is over this widget
-        self.inner.bind("<Enter>", self._bind_mousewheel)
-        self.inner.bind("<Leave>", self._unbind_mousewheel)
+    def _on_cfg(self, _):
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
-    # Windows & macOS wheel
-    def _on_mousewheel(self, event):
-        self.canvas.yview_scroll(-int(event.delta/120), "units")
-
-    # Linux wheel
-    def _on_mousewheel_linux(self, event):
-        self.canvas.yview_scroll(-1 if event.num == 4 else 1, "units")
-
-    def _bind_mousewheel(self, _):
-        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
-        self.canvas.bind_all("<Button-4>",  self._on_mousewheel_linux)
-        self.canvas.bind_all("<Button-5>",  self._on_mousewheel_linux)
-
-    def _unbind_mousewheel(self, _):
-        self.canvas.unbind_all("<MouseWheel>")
-        self.canvas.unbind_all("<Button-4>")
-        self.canvas.unbind_all("<Button-5>")
+    def _on_canvas(self, e):
+        self.canvas.itemconfigure(self._win, width=e.width)
 
 
-# ---- Collapsible section -----------------------------------------------------
-class CollapsibleSection(ttk.Frame):
-    def __init__(self, master, title, *args, initially_open=True, **kwargs):
-        super().__init__(master, *args, **kwargs)
-        self._open = tk.BooleanVar(value=initially_open)
-        self._btn = ttk.Checkbutton(
-            self,
-            text=title,
-            style="Toolbutton",
-            variable=self._open,
-            command=self._toggle,
-        )
-        self._btn.grid(row=0, column=0, sticky="w", pady=(8, 2))
-        self.body = ttk.Frame(self)
-        if initially_open:
-            self.body.grid(row=1, column=0, sticky="nsew")
-        self.columnconfigure(0, weight=1)
+def _field_row(parent, row, label, var, unit="", allow_int=False):
+    lbl = ttk.Label(parent, text=label, style="FieldLabel.TLabel", background=parent["background"])
+    lbl.grid(row=row, column=0, sticky="w", padx=(6, 8), pady=3)
 
-    def _toggle(self):
-        if self._open.get():
-            self.body.grid(row=1, column=0, sticky="nsew")
-        else:
-            self.body.grid_forget()
-
-
-# ---- Numeric entry with validation ------------------------------------------
-class NumericEntry(ttk.Entry):
-    def __init__(self, master, textvariable, allow_int=False, **kw):
-        super().__init__(master, textvariable=textvariable, **kw)
-        self._allow_int = allow_int
-        vcmd = (self.register(self._validate), "%P")
-        self.configure(validate="key", validatecommand=vcmd)
-
-    def _validate(self, proposed):
-        if proposed == "" or proposed == "-" or proposed == ".":
-            return True
-        try:
-            float(proposed) if not self._allow_int else int(float(proposed))
-            return True
-        except Exception:
-            self.bell()
-            return False
-
-
-# ---- Small utility -----------------------------------------------------------
-def _grid_pair(parent, r, label, var, unit=None, width=10, allow_int=False):
-    lbl = ttk.Label(parent, text=label)
-    lbl.grid(row=r, column=0, sticky="w", padx=(2, 8), pady=2)
     if allow_int is None:
-        ent = ttk.Entry(parent, textvariable=var, width=width)
+        ent = ttk.Entry(parent, textvariable=var, width=18)
     else:
-        ent = NumericEntry(parent, textvariable=var, width=width, allow_int=allow_int)
-    ent.grid(row=r, column=1, sticky="we", pady=2)
-    chip = ttk.Label(parent, text="", foreground="#1463FF")
-    chip.grid(row=r, column=2, sticky="w", padx=(6, 0))
-    u = ttk.Label(parent, text=unit or "")
-    u.grid(row=r, column=3, sticky="w", padx=(6, 0))
-    return lbl, ent, chip
+        def _validate(P):
+            if P in ("", "-", "."):
+                return True
+            try:
+                float(P) if not allow_int else int(float(P))
+                return True
+            except Exception:
+                return False
+
+        vcmd = (parent.register(_validate), "%P")
+        ent = ttk.Entry(parent, textvariable=var, width=12, validate="key", validatecommand=vcmd)
+    ent.grid(row=row, column=1, sticky="w", pady=3)
+    chip = ttk.Label(parent, text="", style="ChipLLM.TLabel")
+    chip.grid(row=row, column=2, sticky="w", padx=(8, 0))
+    unit_lbl = ttk.Label(parent, text=unit, style="Unit.TLabel")
+    unit_lbl.grid(row=row, column=3, sticky="w", padx=(8, 6))
+    return lbl, ent, chip, unit_lbl
 
 
-# label -> (group, unit, allow_int)
+class EditorCard(ttk.Frame):
+    def __init__(self, parent, title, styles):
+        super().__init__(parent, style="Card.TFrame", padding=(12, 10))
+        self["borderwidth"] = 1
+        self.styles = styles
+        self.title = ttk.Label(self, text=title, style="SectionTitle.TLabel", background=self["background"])
+        self.title.grid(row=0, column=0, columnspan=4, sticky="w", pady=(2, 8))
+        self.body = ttk.Frame(self, style="Card.TFrame")
+        self.body.grid(row=1, column=0, columnspan=4, sticky="nsew")
+        self.body.columnconfigure(1, weight=1)
+
+
 EDITOR_SPEC = {
-    # Material & stock
-    "Material": ("Material", "", None),
-    "Scrap Percent (%)": ("Material", "%", False),
-    "Thickness (in)": ("Material", "in", False),
-    "Plate Length (in)": ("Material", "in", False),
-    "Plate Width (in)": ("Material", "in", False),
-
-    # Geometry cues
-    "GEO_Deburr_EdgeLen_mm": ("Geometry", "mm", False),
-    "Hole Count (override)": ("Geometry", "", True),
-    "Avg Hole Diameter (mm)": ("Geometry", "mm", False),
-
-    # Setups & planning
-    "Number of Milling Setups": ("Setups", "", True),
-    "Setup Time per Setup": ("Setups", "hr", False),
-    "Programming": ("Setups", "hr", False),
-    "2D CAM": ("Setups", "hr", False),
-
-    # Machining
-    "Roughing Cycle Time": ("Machining", "hr", False),
-    "Semi-Finish": ("Machining", "hr", False),
-    "Finishing Cycle Time": ("Machining", "hr", False),
-    "Drilling": ("Machining", "hr", False),
-    "Sawing": ("Machining", "hr", False),
-
-    # Inspection & QA
-    "In-Process Inspection": ("Inspection / QA", "hr", False),
-    "Final Inspection": ("Inspection / QA", "hr", False),
-    "CMM Run Time min": ("Inspection / QA", "min", False),
-
-    # Finishing / secondary ops
-    "Deburr": ("Finishing", "hr", False),
-    "Edge Break": ("Finishing", "hr", False),
-    "Bead Blasting": ("Finishing", "hr", False),
-
-    # Pass-Through (editable knobs)
-    "Consumables /Hr": ("Pass-Through & Directs", "$/hr", False),
-    "Consumables Flat": ("Pass-Through & Directs", "$", False),
-    "Utilities Per Spindle Hr": ("Pass-Through & Directs", "$/hr", False),
-    "Shipping Cost": ("Pass-Through & Directs", "$", False),
-
-    # Pricing
-    "Contingency %": ("Pricing", "%", False),
+    "Material": [
+        ("Material", "", None),
+        ("Scrap Percent (%)", "%", False),
+        ("Thickness (in)", "in", False),
+        ("Plate Length (in)", "in", False),
+        ("Plate Width (in)", "in", False),
+    ],
+    "Geometry": [
+        ("GEO_Deburr_EdgeLen_mm", "mm", False),
+        ("Hole Count (override)", "", True),
+        ("Avg Hole Diameter (mm)", "mm", False),
+    ],
+    "Setups & Planning": [
+        ("Number of Milling Setups", "", True),
+        ("Setup Time per Setup", "hr", False),
+        ("Programming", "hr", False),
+        ("2D CAM", "hr", False),
+    ],
+    "Machining": [
+        ("Roughing Cycle Time", "hr", False),
+        ("Semi-Finish", "hr", False),
+        ("Finishing Cycle Time", "hr", False),
+        ("Drilling", "hr", False),
+        ("Sawing", "hr", False),
+    ],
+    "Inspection / QA": [
+        ("In-Process Inspection", "hr", False),
+        ("Final Inspection", "hr", False),
+        ("CMM Run Time min", "min", False),
+    ],
+    "Finishing": [
+        ("Deburr", "hr", False),
+        ("Edge Break", "hr", False),
+        ("Bead Blasting", "hr", False),
+    ],
+    "Pass-Through & Directs": [
+        ("Consumables /Hr", "$/hr", False),
+        ("Consumables Flat", "$", False),
+        ("Utilities Per Spindle Hr", "$/hr", False),
+        ("Shipping Cost", "$", False),
+    ],
+    "Pricing": [
+        ("Contingency %", "%", False),
+    ],
 }
+
+
+COMMERCIAL_OVERRIDE_FIELDS = [
+    ("OverheadPct", "%", False),
+    ("GA_Pct", "%", False),
+    ("MarginPct", "%", False),
+    ("ContingencyPct", "%", False),
+    ("ExpeditePct", "%", False),
+    ("VendorMarkupPct", "%", False),
+    ("InsurancePct", "%", False),
+    ("MinLotCharge", "$", False),
+    ("Quantity", "", True),
+]
+
+
+def build_quote_editor_clean(self, parent):
+    styles = init_editor_styles(getattr(self, "root", self))
+    prev_search = getattr(self, "var_search", None)
+    prev_hide = getattr(self, "var_hide_zeros", None)
+    search_val = prev_search.get() if isinstance(prev_search, tk.StringVar) else ""
+    hide_val = bool(prev_hide.get()) if isinstance(prev_hide, tk.BooleanVar) else False
+
+    for child in parent.winfo_children():
+        child.destroy()
+
+    container = ttk.Frame(parent)
+    container.pack(fill="both", expand=True)
+    left = ttk.Frame(container, width=180)
+    left.pack(side="left", fill="y", padx=(8, 6), pady=8)
+    right = ttk.Frame(container)
+    right.pack(side="left", fill="both", expand=True, padx=(0, 8), pady=8)
+
+    toolbar = ttk.Frame(right)
+    toolbar.pack(fill="x")
+    ttk.Label(toolbar, text="Search:", foreground=styles["MUTED"]).pack(side="left", padx=(2, 6))
+    self.var_search = tk.StringVar(value=search_val)
+    ent = ttk.Entry(toolbar, textvariable=self.var_search, width=28)
+    ent.pack(side="left")
+    self.var_hide_zeros = tk.BooleanVar(value=hide_val)
+    ttk.Checkbutton(
+        toolbar,
+        text="Hide zeros",
+        variable=self.var_hide_zeros,
+        command=lambda: self._apply_editor_filters(),
+    ).pack(side="left", padx=(12, 0))
+
+    sc = ScrollFrame(right)
+    sc.pack(fill="both", expand=True, pady=(8, 0))
+
+    cards: dict[str, EditorCard] = {}
+    self._editor_cards = {}
+    self._editor_card_for_label = {}
+    self._editor_card_pack_opts = {}
+
+    self.editor_vars = getattr(self, "editor_vars", {})
+    self.editor_label_widgets = getattr(self, "editor_label_widgets", {})
+    self.editor_chip_widgets = getattr(self, "editor_chip_widgets", {})
+    self.editor_label_base = getattr(self, "editor_label_base", {})
+
+    for group, fields in EDITOR_SPEC.items():
+        card = EditorCard(sc.inner, group, styles)
+        card.pack(fill="x", padx=2, pady=6)
+        cards[group] = card
+        self._editor_cards[group] = card
+        self._editor_card_pack_opts[card] = {"fill": "x", "padx": 2, "pady": 6}
+        r = 0
+        for label, unit, allow_int in fields:
+            initial = ""
+            if hasattr(self, "_initial_editor_value"):
+                try:
+                    initial = self._initial_editor_value(label)
+                except Exception:
+                    initial = ""
+            var = self.editor_vars.get(label)
+            if var is None:
+                var = tk.StringVar(value=initial)
+            else:
+                var.set(initial)
+            lbl, _entry, chip, _unit_lbl = _field_row(card.body, r, label, var, unit, allow_int)
+            self._editor_card_for_label[label] = card
+            if hasattr(self, "_register_editor_field"):
+                self._register_editor_field(label, var, lbl, chip)
+            else:
+                self.editor_vars[label] = var
+                self.editor_label_widgets[label] = lbl
+            if hasattr(self, "quote_vars"):
+                self.quote_vars[label] = var
+            r += 1
+
+    if COMMERCIAL_OVERRIDE_FIELDS:
+        card = EditorCard(sc.inner, "Global Overrides: Commercial & General", styles)
+        card.pack(fill="x", padx=2, pady=6)
+        cards[card.title.cget("text")] = card
+        self._editor_cards[card.title.cget("text")] = card
+        self._editor_card_pack_opts[card] = {"fill": "x", "padx": 2, "pady": 6}
+        for idx, (label, unit, allow_int) in enumerate(COMMERCIAL_OVERRIDE_FIELDS):
+            var = self.param_vars.get(label) if hasattr(self, "param_vars") else None
+            current = ""
+            if hasattr(self, "params"):
+                current = str(self.params.get(label, ""))
+            if label == "Quantity":
+                try:
+                    current = str(int(float(current or 0)))
+                except Exception:
+                    current = str(getattr(self, "params", {}).get("Quantity", 1))
+            if var is None:
+                var = tk.StringVar(value=current)
+            else:
+                var.set(current)
+            if hasattr(self, "param_vars"):
+                self.param_vars[label] = var
+            lbl, _entry, chip, _unit_lbl = _field_row(card.body, idx, label, var, unit, allow_int)
+            self._editor_card_for_label[label] = card
+            if hasattr(self, "_register_editor_field"):
+                self._register_editor_field(label, var, lbl, chip)
+
+    rate_keys = sorted(getattr(self, "rates", {}).keys())
+    if rate_keys:
+        card = EditorCard(sc.inner, "Global Overrides: Hourly Rates ($/hr)", styles)
+        card.pack(fill="x", padx=2, pady=6)
+        cards[card.title.cget("text")] = card
+        self._editor_cards[card.title.cget("text")] = card
+        self._editor_card_pack_opts[card] = {"fill": "x", "padx": 2, "pady": 6}
+        for idx, label in enumerate(rate_keys):
+            var = self.rate_vars.get(label) if hasattr(self, "rate_vars") else None
+            current = ""
+            if hasattr(self, "rates"):
+                current = str(self.rates.get(label, ""))
+            if var is None:
+                var = tk.StringVar(value=current)
+            else:
+                var.set(current)
+            if hasattr(self, "rate_vars"):
+                self.rate_vars[label] = var
+            lbl, _entry, chip, _unit_lbl = _field_row(card.body, idx, label, var, "", False)
+            self._editor_card_for_label[label] = card
+            if hasattr(self, "_register_editor_field"):
+                self._register_editor_field(label, var, lbl, chip)
+
+    ttk.Label(left, text="Sections", style="SectionTitle.TLabel").pack(anchor="w", pady=(2, 6))
+    for group, card in cards.items():
+        ttk.Button(left, text=group, style="Nav.TButton", command=lambda c=card: _scroll_to(c, sc.canvas)).pack(fill="x", pady=2)
+
+    self.var_search.trace_add("write", lambda *_: self._apply_editor_filters())
+    self._apply_editor_filters()
+
+    def _scroll_to(widget, canvas):
+        try:
+            y = widget.winfo_rooty() - canvas.winfo_rooty() + canvas.canvasy(0)
+            canvas.yview_moveto(max(0, y / max(1, canvas.bbox("all")[3])))
+        except Exception:
+            pass
 
 
 class App(tk.Tk):
@@ -8779,8 +9067,7 @@ class App(tk.Tk):
         self.nb = ttk.Notebook(self); self.nb.pack(fill="both", expand=True)
         self.tab_geo = ttk.Frame(self.nb); self.nb.add(self.tab_geo, text="GEO")
         self.tab_editor = ttk.Frame(self.nb); self.nb.add(self.tab_editor, text="Quote Editor")
-        self.editor_scroll = ScrollableFrame(self.tab_editor)
-        self.editor_scroll.pack(fill="both", expand=True)
+        init_editor_styles(self)
         self.tab_out = ttk.Frame(self.nb); self.nb.add(self.tab_out, text="Output")
         self.tab_llm = ttk.Frame(self)
 
@@ -8936,7 +9223,7 @@ class App(tk.Tk):
             self.params["Quantity"] = max(1, int(round(qty_value)))
 
         self.vars_df = df
-        parent = self.editor_scroll.inner
+        parent = self.tab_editor
         for child in parent.winfo_children():
             child.destroy()
 
@@ -8951,7 +9238,7 @@ class App(tk.Tk):
 
         self._building_editor = True
         self.editor_widgets_frame = parent
-        self.build_quote_editor(parent)
+        build_quote_editor_clean(self, parent)
         self._building_editor = False
         try:
             self._run_llm_fill_editor_zeros()
@@ -8986,125 +9273,6 @@ class App(tk.Tk):
             return str(int(round(num)))
         return str(num)
 
-    def build_quote_editor(self, parent: tk.Misc) -> None:
-        prev_search = getattr(self, "var_search", None)
-        prev_hide = getattr(self, "var_hide_zeros", None)
-        search_val = prev_search.get() if isinstance(prev_search, tk.StringVar) else ""
-        hide_val = bool(prev_hide.get()) if isinstance(prev_hide, tk.BooleanVar) else False
-
-        toolbar = ttk.Frame(parent)
-        toolbar.pack(fill="x", pady=(4, 6))
-        ttk.Label(toolbar, text="Search:").pack(side="left")
-        self.var_search = tk.StringVar(value=search_val)
-        ent_search = ttk.Entry(toolbar, textvariable=self.var_search, width=24)
-        ent_search.pack(side="left", padx=(6, 12))
-        self.var_hide_zeros = tk.BooleanVar(value=hide_val)
-        ttk.Checkbutton(
-            toolbar,
-            text="Hide zeros",
-            variable=self.var_hide_zeros,
-            command=self._apply_editor_filters,
-        ).pack(side="left")
-
-        container = ttk.Frame(parent)
-        container.pack(fill="both", expand=True)
-        container.columnconfigure(0, weight=1)
-
-        groups = [
-            "Material",
-            "Geometry",
-            "Setups",
-            "Machining",
-            "Inspection / QA",
-            "Finishing",
-            "Pass-Through & Directs",
-            "Pricing",
-        ]
-        self._group_frames: dict[str, ttk.Frame] = {}
-        for group in groups:
-            sec = CollapsibleSection(container, group, initially_open=(group in ("Material", "Machining")))
-            sec.pack(fill="x", padx=8, pady=2)
-            sec.body.columnconfigure(1, weight=1)
-            self._group_frames[group] = sec.body
-
-        row_for_group = {g: 0 for g in groups}
-        for label, (group, unit, allow_int) in EDITOR_SPEC.items():
-            if group not in self._group_frames:
-                continue
-            initial = self._initial_editor_value(label)
-            var = self.editor_vars.get(label)
-            if var is None:
-                var = tk.StringVar(value=initial)
-                self.editor_vars[label] = var
-            else:
-                var.set(initial)
-            width = 28 if allow_int is None else 12
-            row = row_for_group[group]
-            lbl, _entry, chip = _grid_pair(
-                self._group_frames[group],
-                row,
-                label,
-                var,
-                unit,
-                width=width,
-                allow_int=allow_int,
-            )
-            row_for_group[group] += 1
-            self._register_editor_field(label, var, lbl, chip)
-            self.quote_vars[label] = var
-
-        self._build_override_sections(container)
-
-        self.var_search.trace_add("write", lambda *_: self._apply_editor_filters())
-        self._apply_editor_filters()
-
-    def _build_override_sections(self, container: ttk.Frame) -> None:
-        comm_fields = [
-            ("OverheadPct", "%", False),
-            ("GA_Pct", "%", False),
-            ("MarginPct", "%", False),
-            ("ContingencyPct", "%", False),
-            ("ExpeditePct", "%", False),
-            ("VendorMarkupPct", "%", False),
-            ("InsurancePct", "%", False),
-            ("MinLotCharge", "$", False),
-            ("Quantity", "", True),
-        ]
-        if comm_fields:
-            sec = CollapsibleSection(container, "Global Overrides: Commercial & General", initially_open=False)
-            sec.pack(fill="x", padx=8, pady=(10, 4))
-            sec.body.columnconfigure(1, weight=1)
-            for idx, (label, unit, allow_int) in enumerate(comm_fields):
-                var = self.param_vars.get(label)
-                if var is None:
-                    current = self.params.get(label, "")
-                    if label == "Quantity":
-                        try:
-                            current = int(current or 0)
-                        except Exception:
-                            current = self.params.get("Quantity", 1)
-                    var = tk.StringVar(value=str(current))
-                else:
-                    var.set(str(self.params.get(label, "")))
-                self.param_vars[label] = var
-                lbl, _entry, chip = _grid_pair(sec.body, idx, label, var, unit, width=14, allow_int=allow_int)
-                self._register_editor_field(label, var, lbl, chip)
-
-        rate_keys = sorted(self.rates.keys())
-        if rate_keys:
-            sec = CollapsibleSection(container, "Global Overrides: Hourly Rates ($/hr)", initially_open=False)
-            sec.pack(fill="x", padx=8, pady=(4, 8))
-            sec.body.columnconfigure(1, weight=1)
-            for idx, label in enumerate(rate_keys):
-                var = self.rate_vars.get(label)
-                if var is None:
-                    var = tk.StringVar(value=str(self.rates.get(label, "")))
-                else:
-                    var.set(str(self.rates.get(label, "")))
-                self.rate_vars[label] = var
-                lbl, _entry, chip = _grid_pair(sec.body, idx, label, var, "", width=14, allow_int=False)
-                self._register_editor_field(label, var, lbl, chip)
-
     def _apply_editor_filters(self) -> None:
         if not hasattr(self, "editor_label_widgets"):
             return
@@ -9114,6 +9282,10 @@ class App(tk.Tk):
         hide_zero = False
         if hasattr(self, "var_hide_zeros") and isinstance(self.var_hide_zeros, tk.BooleanVar):
             hide_zero = bool(self.var_hide_zeros.get())
+
+        card_visibility: dict[ttk.Frame, bool] = {}
+        card_map = getattr(self, "_editor_card_for_label", {})
+        pack_opts = getattr(self, "_editor_card_pack_opts", {})
 
         for label, widget in self.editor_label_widgets.items():
             if widget is None:
@@ -9142,6 +9314,17 @@ class App(tk.Tk):
                     child.grid()
                 else:
                     child.grid_remove()
+            card = card_map.get(label)
+            if isinstance(card, ttk.Frame):
+                card_visibility[card] = card_visibility.get(card, False) or show
+
+        for card, visible in card_visibility.items():
+            if visible:
+                if card.winfo_manager() == "":
+                    opts = pack_opts.get(card, {"fill": "x", "padx": 2, "pady": 6})
+                    card.pack(**opts)
+            else:
+                card.pack_forget()
 
     def _register_editor_field(
         self,
@@ -9264,6 +9447,68 @@ class App(tk.Tk):
             return False
         self._set_editor(label, value, source_tag)
         return True
+
+    def _auto_fill_plate_inputs(self) -> None:
+        def _get_editor(label: str) -> str:
+            var = self.editor_vars.get(label)
+            if isinstance(var, tk.StringVar):
+                return (var.get() or "").strip()
+            return ""
+
+        material = _get_editor("Material")
+        thickness_txt = _get_editor("Thickness (in)")
+        try:
+            thickness_in = float(thickness_txt) if thickness_txt else None
+        except Exception:
+            thickness_in = None
+
+        need_material = not material
+        need_thickness = (not thickness_in) or (thickness_in is not None and thickness_in <= 0)
+
+        if not (need_material or need_thickness):
+            return
+
+        dxf_path = getattr(self, "last_converted_dxf", None) or getattr(self, "current_dxf_path", None)
+        inferred: dict[str, Any] = {}
+        if dxf_path:
+            inferred = infer_plate_from_dxf(dxf_path)
+
+        if need_thickness and inferred.get("thickness_in"):
+            self._set_editor("Thickness (in)", inferred["thickness_in"], "Auto")
+
+        if need_material:
+            self._set_editor("Material", "Steel", "Auto")
+
+        if inferred.get("length_in") and "Plate Length (in)" in self.editor_vars:
+            cur_len = _get_editor("Plate Length (in)")
+            try:
+                cur_len_val = float(cur_len) if cur_len else 0.0
+            except Exception:
+                cur_len_val = 0.0 if not cur_len else None
+            if (not cur_len) or (cur_len_val is not None and cur_len_val <= 0):
+                self._set_editor("Plate Length (in)", inferred["length_in"], "Auto")
+
+        if inferred.get("width_in") and "Plate Width (in)" in self.editor_vars:
+            cur_w = _get_editor("Plate Width (in)")
+            try:
+                cur_w_val = float(cur_w) if cur_w else 0.0
+            except Exception:
+                cur_w_val = 0.0 if not cur_w else None
+            if (not cur_w) or (cur_w_val is not None and cur_w_val <= 0):
+                self._set_editor("Plate Width (in)", inferred["width_in"], "Auto")
+
+        notes = " ; ".join(inferred.get("notes", [])) or "Defaulted Material=Steel"
+        self.set_status(f"Filled missing inputs: {notes}", kind="info", timeout_ms=5000)
+
+        material = _get_editor("Material")
+        thickness_txt = _get_editor("Thickness (in)")
+        try:
+            thickness_in = float(thickness_txt) if thickness_txt else None
+        except Exception:
+            thickness_in = None
+
+        if not material or not thickness_in or thickness_in <= 0:
+            raise RuntimeError("Missing required inputs for plate quote: material/thickness.")
 
     def _clamp_for_label(self, label: str, value: float) -> float:
         bounds = LLM_TARGETS[label]
@@ -9916,30 +10161,57 @@ class App(tk.Tk):
 
             self.apply_overrides(notify=False)
 
-            try:
-                ui_vars = {
-                    str(row["Item"]): row["Example Values / Options"]
-                    for _, row in self.vars_df.iterrows()
-                }
-            except Exception:
-                ui_vars = {}
+            res: dict[str, Any] | None = None
+            last_err: ValueError | None = None
+            attempt = 0
+            while attempt < 2:
+                attempt += 1
+                try:
+                    ui_vars = {
+                        str(row["Item"]): row["Example Values / Options"]
+                        for _, row in self.vars_df.iterrows()
+                    }
+                except Exception:
+                    ui_vars = {}
 
-            try:
-                res = compute_quote_from_df(
-                    self.vars_df,
-                    params=self.params,
-                    rates=self.rates,
-                    material_vendor_csv=self.settings.get("material_vendor_csv", "") if isinstance(self.settings, dict) else "",
-                    llm_enabled=self.llm_enabled.get(),
-                    llm_model_path=self.llm_model_path.get().strip() or None,
-                    geo=self.geo,
-                    ui_vars=ui_vars,
-                    quote_state=self.quote_state,
-                    reuse_suggestions=reuse_suggestions,
-                    llm_suggest=self.LLM_SUGGEST,
+                try:
+                    res = compute_quote_from_df(
+                        self.vars_df,
+                        params=self.params,
+                        rates=self.rates,
+                        material_vendor_csv=self.settings.get("material_vendor_csv", "") if isinstance(self.settings, dict) else "",
+                        llm_enabled=self.llm_enabled.get(),
+                        llm_model_path=self.llm_model_path.get().strip() or None,
+                        geo=self.geo,
+                        ui_vars=ui_vars,
+                        quote_state=self.quote_state,
+                        reuse_suggestions=reuse_suggestions,
+                        llm_suggest=self.LLM_SUGGEST,
+                    )
+                    break
+                except ValueError as err:
+                    last_err = err
+                    msg = str(err)
+                    if attempt == 1 and "Missing required inputs for plate quote" in msg:
+                        try:
+                            self._auto_fill_plate_inputs()
+                        except Exception as auto_exc:
+                            messagebox.showerror("Quote blocked", str(auto_exc))
+                            self.set_status("Quote blocked.", "warn", 5000)
+                            return
+                        for item_name, string_var in self.quote_vars.items():
+                            mask = self.vars_df["Item"] == item_name
+                            if mask.any():
+                                self.vars_df.loc[mask, "Example Values / Options"] = string_var.get()
+                        continue
+                    messagebox.showerror("Quote blocked", msg)
+                    self.set_status("Quote blocked.", "warn", 5000)
+                    return
+            else:
+                messagebox.showerror(
+                    "Quote blocked",
+                    str(last_err) if last_err else "Unknown error during quote generation.",
                 )
-            except ValueError as err:
-                messagebox.showerror("Quote blocked", str(err))
                 self.set_status("Quote blocked.", "warn", 5000)
                 return
 
