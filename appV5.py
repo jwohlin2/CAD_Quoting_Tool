@@ -14,7 +14,7 @@ Single-file CAD Quoter (v8)
 """
 from __future__ import annotations
 
-import json, math, os, time
+import json, math, os, time, gc
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -114,6 +114,97 @@ ALWAYS return a complete JSON object with THESE KEYS, even if values are unchang
 All outputs MUST respect bounds in `bounds`.
 Prefer small, explainable changes (±10–50%). Never leave fields out.
 You may use payload["seed"] heuristics to bias adjustments when helpful."""
+
+
+# Field mapping: LLM suggestion key -> (Editor label, to_editor, from_editor)
+SUGG_TO_EDITOR = {
+    "scrap_pct": (
+        "Scrap Percent (%)",
+        lambda f: f * 100.0,
+        lambda s: float(s) / 100.0,
+    ),
+    "setups": (
+        "Number of Milling Setups",
+        int,
+        int,
+    ),
+    ("process_hour_adders", "inspection"): (
+        "In-Process Inspection Hours",
+        float,
+        float,
+    ),
+    "fixture": (
+        "Fixture plan",
+        str,
+        str,
+    ),
+}
+
+# Multipliers are applied to computed process hours, then we push the new hours to editor fields.
+PROC_MULT_TARGETS = {
+    "drilling": ("CMM Run Time min", 60.0),
+    "milling": ("Roughing Cycle Time", 1.0),
+}
+
+EDITOR_TO_SUGG = {spec[0]: key for key, spec in SUGG_TO_EDITOR.items()}
+EDITOR_FROM_UI = {spec[0]: spec[2] for _, spec in SUGG_TO_EDITOR.items()}
+
+
+VL_MODEL = r"D:\CAD_Quoting_Tool\models\qwen2.5-vl-7b-instruct-q4_k_m.gguf"
+MM_PROJ = r"D:\CAD_Quoting_Tool\models\mmproj-Qwen2.5-VL-3B-Instruct-Q8_0.gguf"
+
+
+def load_qwen_vl(n_ctx: int = 8192, n_gpu_layers: int = 20, n_threads: int | None = None):
+    """Load Qwen2.5-VL with vision projector configured for llama.cpp."""
+
+    from llama_cpp import Llama  # type: ignore
+
+    if n_threads is None:
+        try:
+            n_threads = max(4, os.cpu_count() // 2)
+        except Exception:
+            n_threads = 8
+
+    try:
+        llm = Llama(
+            model_path=VL_MODEL,
+            mmproj_path=MM_PROJ,
+            n_ctx=n_ctx,
+            n_threads=n_threads,
+            n_gpu_layers=n_gpu_layers,
+            chat_format="qwen2_vl",
+            verbose=False,
+        )
+        _ = llm.create_chat_completion(
+            messages=[
+                {"role": "system", "content": "Return JSON only: {\"ok\":true}."},
+                {"role": "user", "content": "ping"},
+            ],
+            max_tokens=16,
+            temperature=0,
+        )
+        return llm
+    except Exception as exc:
+        if n_ctx > 4096:
+            gc.collect()
+            return load_qwen_vl(n_ctx=4096, n_gpu_layers=0, n_threads=n_threads)
+        raise exc
+
+
+def _auto_accept_suggestions(suggestions: dict[str, Any] | None) -> dict[str, Any]:
+    accept: dict[str, Any] = {}
+    if not isinstance(suggestions, dict):
+        return accept
+    for bucket in ("process_hour_multipliers", "process_hour_adders", "add_pass_through"):
+        data = suggestions.get(bucket)
+        if isinstance(data, dict) and data:
+            accept[bucket] = {str(k): True for k in data.keys()}
+    for scalar_key in ("scrap_pct", "contingency_pct", "setups", "fixture"):
+        if scalar_key in suggestions:
+            accept[scalar_key] = True
+    if suggestions.get("notes"):
+        accept["notes"] = True
+    return accept
 
 
 
@@ -4750,7 +4841,8 @@ def compute_quote_from_df(df: pd.DataFrame,
                           geo: dict[str, Any] | None = None,
                           ui_vars: dict[str, Any] | None = None,
                           quote_state: QuoteState | None = None,
-                          reuse_suggestions: bool = False) -> Dict[str, Any]:
+                          reuse_suggestions: bool = False,
+                          llm_suggest: Any | None = None) -> Dict[str, Any]:
     """
     Estimator that consumes variables from the sheet (Item, Example Values / Options, Data Type / Input Method).
 
@@ -5656,48 +5748,92 @@ def compute_quote_from_df(df: pd.DataFrame,
         s_raw: dict[str, Any] = {}
         s_text = ""
         s_usage: dict[str, Any] = {}
-        if llm_enabled and llm_model_path:
-            try:
-                llm_obj = _LocalLLM(llm_model_path)
-                s_raw, s_text, s_usage = run_llm_suggestions(llm_obj, payload)
-                sanitized_struct = sanitize_suggestions(s_raw, llm_bounds)
-            except Exception as exc:
+        sanitized_struct = {}
+        if llm_enabled:
+            if llm_suggest is not None:
+                try:
+                    chat_out = llm_suggest.create_chat_completion(
+                        messages=[
+                            {"role": "system", "content": SYSTEM_SUGGEST},
+                            {"role": "user", "content": json.dumps(payload, indent=2)},
+                        ],
+                        temperature=0.3,
+                        top_p=0.9,
+                        max_tokens=512,
+                    )
+                    s_usage = chat_out.get("usage", {}) or {}
+                    choice = (chat_out.get("choices") or [{}])[0]
+                    message = choice.get("message") or {}
+                    s_text = str(message.get("content") or "")
+                    s_raw = parse_llm_json(s_text) or {}
+                    sanitized_struct = sanitize_suggestions(s_raw, llm_bounds)
+                    overrides_meta["model"] = "qwen2.5-vl"
+                    overrides_meta["n_ctx"] = getattr(llm_suggest, "n_ctx", None)
+                except Exception as exc:
+                    fallback_struct = {
+                        "process_hour_multipliers": {"drilling": 1.0, "milling": 1.0},
+                        "process_hour_adders": {"inspection": 0.0},
+                        "scrap_pct": llm_baseline_payload.get("scrap_pct", 0.0),
+                        "setups": llm_baseline_payload.get("setups", baseline_setups),
+                        "fixture": llm_baseline_payload.get("fixture") or baseline_fixture or "standard",
+                        "notes": [f"llm error: {exc}"],
+                        "no_change_reason": "exception",
+                    }
+                    sanitized_struct = sanitize_suggestions(fallback_struct, llm_bounds)
+                    overrides_meta["error"] = repr(exc)
+                    s_raw = {}
+                    s_text = ""
+                    s_usage = {}
+            elif llm_model_path:
+                try:
+                    llm_obj = _LocalLLM(llm_model_path)
+                    s_raw, s_text, s_usage = run_llm_suggestions(llm_obj, payload)
+                    sanitized_struct = sanitize_suggestions(s_raw, llm_bounds)
+                except Exception as exc:
+                    fallback_struct = {
+                        "process_hour_multipliers": {"drilling": 1.0, "milling": 1.0},
+                        "process_hour_adders": {"inspection": 0.0},
+                        "scrap_pct": llm_baseline_payload.get("scrap_pct", 0.0),
+                        "setups": llm_baseline_payload.get("setups", baseline_setups),
+                        "fixture": llm_baseline_payload.get("fixture") or baseline_fixture or "standard",
+                        "notes": [f"llm error: {exc}"],
+                        "no_change_reason": "exception",
+                    }
+                    sanitized_struct = sanitize_suggestions(fallback_struct, llm_bounds)
+                    overrides_meta["error"] = repr(exc)
+                    s_raw = {}
+                    s_text = ""
+                    s_usage = {}
+            else:
+                reason = "model_missing"
                 fallback_struct = {
                     "process_hour_multipliers": {"drilling": 1.0, "milling": 1.0},
                     "process_hour_adders": {"inspection": 0.0},
                     "scrap_pct": llm_baseline_payload.get("scrap_pct", 0.0),
                     "setups": llm_baseline_payload.get("setups", baseline_setups),
                     "fixture": llm_baseline_payload.get("fixture") or baseline_fixture or "standard",
-                    "notes": [f"llm error: {exc}"],
-                    "no_change_reason": "exception",
+                    "notes": ["LLM model missing"],
+                    "no_change_reason": reason,
                 }
                 sanitized_struct = sanitize_suggestions(fallback_struct, llm_bounds)
-                overrides_meta["error"] = repr(exc)
-                s_raw = s_raw or {}
-                s_text = s_text or ""
-                s_usage = s_usage or {}
+                overrides_meta["error"] = reason
         else:
-            reason = "llm_disabled" if not llm_enabled else "model_missing"
-            fallback_note = "LLM disabled" if not llm_enabled else "LLM model missing"
             fallback_struct = {
                 "process_hour_multipliers": {"drilling": 1.0, "milling": 1.0},
                 "process_hour_adders": {"inspection": 0.0},
                 "scrap_pct": llm_baseline_payload.get("scrap_pct", 0.0),
                 "setups": llm_baseline_payload.get("setups", baseline_setups),
                 "fixture": llm_baseline_payload.get("fixture") or baseline_fixture or "standard",
-                "notes": [fallback_note],
-                "no_change_reason": reason,
+                "notes": ["LLM disabled"],
+                "no_change_reason": "llm_disabled",
             }
             sanitized_struct = sanitize_suggestions(fallback_struct, llm_bounds)
-            overrides_meta["error"] = reason
-            s_raw = {}
-            s_text = ""
-            s_usage = {}
+            overrides_meta["error"] = "llm_disabled"
         suggestions_struct = copy.deepcopy(sanitized_struct)
         applied_effective = apply_suggestions(baseline_data, sanitized_struct)
+        overrides_meta.setdefault("model", getattr(llm_obj, "model_path", None) if llm_obj is not None else (llm_model_path or "unavailable"))
+        overrides_meta.setdefault("n_ctx", getattr(llm_obj, "n_ctx", None) if llm_obj is not None else overrides_meta.get("n_ctx"))
         overrides_meta.update({
-            "model": getattr(llm_obj, "model_path", None) if llm_obj is not None else llm_model_path or "unavailable",
-            "n_ctx": getattr(llm_obj, "n_ctx", None) if llm_obj is not None else None,
             "raw_response_text": s_text,
             "parsed_response": s_raw,
             "sanitized": sanitized_struct,
@@ -5725,6 +5861,7 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     quote_state.llm_raw = dict(overrides_meta)
     quote_state.suggestions = sanitized_struct if isinstance(sanitized_struct, dict) else {}
+    quote_state.accept_llm = _auto_accept_suggestions(quote_state.suggestions)
     quote_state.bounds = dict(llm_bounds)
     reprice_with_effective(quote_state)
     effective_struct = quote_state.effective
@@ -8174,15 +8311,6 @@ class App(tk.Tk):
         self.tab_editor = ttk.Frame(self.nb); self.nb.add(self.tab_editor, text="Quote Editor")
         self.editor_scroll = ScrollableFrame(self.tab_editor)
         self.editor_scroll.pack(fill="both", expand=True)
-        self.adjustments_section = ttk.Labelframe(self.tab_editor, text="Adjustments", padding=(10, 5))
-        self.adjustments_section.pack(fill="both", expand=True, padx=10, pady=8)
-        sugg_top = ttk.Frame(self.adjustments_section)
-        sugg_top.pack(fill="x")
-        self.suggestions_status = tk.StringVar(value="No suggestions yet.")
-        ttk.Label(sugg_top, textvariable=self.suggestions_status).pack(side="left")
-        ttk.Button(sugg_top, text="Apply & Reprice", command=self.apply_and_reprice).pack(side="right")
-        self.suggestions_scroll = ScrollableFrame(self.adjustments_section)
-        self.suggestions_scroll.pack(fill="both", expand=True, pady=(6, 0))
         self.tab_out = ttk.Frame(self.nb); self.nb.add(self.tab_out, text="Output")
         self.tab_llm = ttk.Frame(self)
 
@@ -8191,7 +8319,17 @@ class App(tk.Tk):
         self.param_vars = {}
         self.rate_vars = {}
         self.editor_widgets_frame = None
-        self.suggestion_widgets: dict[str, dict[str, Any]] = {}
+        self.editor_vars: dict[str, tk.StringVar] = {}
+        self.editor_label_widgets: dict[str, ttk.Label] = {}
+        self.editor_label_base: dict[str, str] = {}
+        self.editor_value_sources: dict[str, str] = {}
+        self._editor_set_depth = 0
+        self._building_editor = False
+        self._reprice_in_progress = False
+        self.effective_process_hours: dict[str, float] = {}
+        self.effective_scrap: float = 0.0
+        self.effective_setups: int = 1
+        self.effective_fixture: str = "standard"
 
         # Status Bar
         self.status_var = tk.StringVar(value="Ready")
@@ -8216,6 +8354,17 @@ class App(tk.Tk):
         except tk.TclError:
             self.out_txt.tag_configure("rcol", tabs=("4.8i right",))
         #self.out_txt = tk.Text(self.tab_out, wrap="word", font=("Consolas", 10)); self.out_txt.pack(fill="both", expand=True)
+
+        self.LLM_SUGGEST = None
+        try:
+            self.LLM_SUGGEST = load_qwen_vl(n_ctx=8192, n_gpu_layers=20)
+        except Exception as exc:
+            self.status_var.set(f"Vision LLM failed ({exc}); retrying CPU mode.")
+            try:
+                self.LLM_SUGGEST = load_qwen_vl(n_ctx=4096, n_gpu_layers=0)
+            except Exception as exc2:
+                self.status_var.set(f"Vision LLM unavailable: {exc2}")
+                self.LLM_SUGGEST = None
 
     def _load_settings(self) -> dict[str, Any]:
         path = getattr(self, "settings_path", None)
@@ -8287,6 +8436,12 @@ class App(tk.Tk):
         self.quote_vars.clear()
         self.param_vars.clear()
         self.rate_vars.clear()
+        self.editor_vars.clear()
+        self.editor_label_widgets.clear()
+        self.editor_label_base.clear()
+        self.editor_value_sources.clear()
+
+        self._building_editor = True
 
         self.editor_widgets_frame = parent
         self.editor_widgets_frame.grid_columnconfigure(0, weight=1)
@@ -8384,7 +8539,8 @@ class App(tk.Tk):
             normalized_name = normalize_item(item_name)
             if normalized_name in skip_items:
                 continue
-            ttk.Label(quote_frame, text=item_name, wraplength=400).grid(row=row_index, column=0, sticky="w", padx=5, pady=2)
+            label_widget = ttk.Label(quote_frame, text=item_name, wraplength=400)
+            label_widget.grid(row=row_index, column=0, sticky="w", padx=5, pady=2)
             initial_raw = row_data["Example Values / Options"]
             initial_value = str(initial_raw) if initial_raw is not None else ""
             if normalized_name in {"material"}:
@@ -8412,15 +8568,18 @@ class App(tk.Tk):
                 material_choice_var = var
                 self.var_material = var
                 self.quote_vars[item_name] = var
+                self._register_editor_field(item_name, var, label_widget)
             elif re.search(r"(Material\s*Price.*(per\s*gram|per\s*g|/g)|Unit\s*Price\s*/\s*g)", item_name, flags=re.IGNORECASE):
                 var = tk.StringVar(value=initial_value)
                 ttk.Entry(quote_frame, textvariable=var, width=30).grid(row=row_index, column=1, sticky="w", padx=5, pady=2)
                 material_price_var = var
                 self.quote_vars[item_name] = var
+                self._register_editor_field(item_name, var, label_widget)
             else:
                 var = tk.StringVar(value=initial_value)
                 ttk.Entry(quote_frame, textvariable=var, width=30).grid(row=row_index, column=1, sticky="w", padx=5, pady=2)
                 self.quote_vars[item_name] = var
+                self._register_editor_field(item_name, var, label_widget)
             row_index += 1
 
         if material_choice_var is not None and material_price_var is not None:
@@ -8431,13 +8590,15 @@ class App(tk.Tk):
         def create_global_entries(parent_frame: ttk.Labelframe, keys, data_source, var_dict, columns: int = 2) -> None:
             for i, key in enumerate(keys):
                 row, col = divmod(i, columns)
-                ttk.Label(parent_frame, text=key).grid(row=row, column=col * 2, sticky="e", padx=5, pady=2)
+                label_widget = ttk.Label(parent_frame, text=key)
+                label_widget.grid(row=row, column=col * 2, sticky="e", padx=5, pady=2)
                 var = tk.StringVar(value=str(data_source.get(key, "")))
                 entry = ttk.Entry(parent_frame, textvariable=var, width=15)
                 if "Path" in key:
                     entry.config(width=50)
                 entry.grid(row=row, column=col * 2 + 1, sticky="w", padx=5, pady=2)
                 var_dict[key] = var
+                self._register_editor_field(key, var, label_widget)
 
         comm_frame = ttk.Labelframe(self.editor_widgets_frame, text="Global Overrides: Commercial & General", padding=(10, 5))
         comm_frame.grid(row=current_row, column=0, sticky="ew", padx=10, pady=5)
@@ -8453,7 +8614,158 @@ class App(tk.Tk):
         current_row += 1
         create_global_entries(rates_frame, sorted(self.rates.keys()), self.rates, self.rate_vars, columns=3)
 
-    # ----- Full flow: CAD ? GEO ? LLM ? Quote ----- 
+        self._building_editor = False
+
+    def _register_editor_field(self, label: str, var: tk.StringVar, label_widget: ttk.Label | None) -> None:
+        if not isinstance(label, str) or not isinstance(var, tk.StringVar):
+            return
+        self.editor_vars[label] = var
+        if label_widget is not None:
+            self.editor_label_widgets[label] = label_widget
+            self.editor_label_base[label] = label
+        else:
+            self.editor_label_base.setdefault(label, label)
+        self.editor_value_sources.pop(label, None)
+        self._mark_label_source(label, None)
+        self._bind_editor_var(label, var)
+
+    def _bind_editor_var(self, label: str, var: tk.StringVar) -> None:
+        def _on_write(*_):
+            if self._building_editor or self._editor_set_depth > 0:
+                return
+            self._update_editor_override_from_label(label, var.get())
+            self._mark_label_source(label, "User")
+            self.reprice()
+
+        var.trace_add("write", _on_write)
+
+    def _mark_label_source(self, label: str, src: str | None) -> None:
+        widget = self.editor_label_widgets.get(label)
+        base = self.editor_label_base.get(label, label)
+        if widget is not None:
+            if src == "LLM":
+                widget.configure(text=f"{base}  (LLM)", foreground="#1463FF")
+            elif src == "User":
+                widget.configure(text=f"{base}  (User)", foreground="#22863a")
+            else:
+                widget.configure(text=base, foreground="")
+        if src:
+            self.editor_value_sources[label] = src
+        else:
+            self.editor_value_sources.pop(label, None)
+
+    def _set_editor(self, label: str, value: Any, source_tag: str = "LLM") -> None:
+        if self.editor_value_sources.get(label) == "User":
+            return
+        var = self.editor_vars.get(label)
+        if var is None:
+            return
+        if isinstance(value, float):
+            txt = f"{value:.3f}"
+        else:
+            txt = str(value)
+        self._editor_set_depth += 1
+        try:
+            var.set(txt)
+        finally:
+            self._editor_set_depth -= 1
+        self._mark_label_source(label, source_tag)
+
+    def _update_editor_override_from_label(self, label: str, raw_value: str) -> None:
+        key = EDITOR_TO_SUGG.get(label)
+        if key is None:
+            return
+        converter = EDITOR_FROM_UI.get(label)
+        value: Any | None = None
+        if converter is not None:
+            try:
+                value = converter(raw_value)
+            except Exception:
+                value = None
+        path = key if isinstance(key, tuple) else (key,)
+        if value is None:
+            self._set_user_override_value(path, None)
+        else:
+            self._set_user_override_value(path, value)
+
+    def apply_llm_to_editor(self, sugg: dict, baseline_ctx: dict) -> None:
+        if not isinstance(sugg, dict) or not isinstance(baseline_ctx, dict):
+            return
+        for key, spec in SUGG_TO_EDITOR.items():
+            label, to_ui, _ = spec
+            if isinstance(key, tuple):
+                root, sub = key
+                val = ((sugg.get(root) or {}).get(sub))
+            else:
+                val = sugg.get(key)
+            if val is None:
+                continue
+            try:
+                ui_val = to_ui(val)
+            except Exception:
+                continue
+            self._set_editor(label, ui_val, "LLM")
+
+        mults = sugg.get("process_hour_multipliers") or {}
+        eff_hours: dict[str, float] = {}
+        base_hours = baseline_ctx.get("process_hours")
+        if isinstance(base_hours, dict):
+            for proc, hours in base_hours.items():
+                val = _coerce_float_or_none(hours)
+                if val is not None:
+                    eff_hours[str(proc)] = float(val)
+        for proc, mult in mults.items():
+            if proc in eff_hours:
+                try:
+                    eff_hours[proc] = float(eff_hours[proc]) * float(mult)
+                except Exception:
+                    continue
+        for proc, (label, scale) in PROC_MULT_TARGETS.items():
+            if proc in eff_hours:
+                try:
+                    derived = eff_hours[proc] * float(scale)
+                except Exception:
+                    continue
+                self._set_editor(label, derived, "LLM")
+
+        self.effective_process_hours = eff_hours
+        self.effective_scrap = float(sugg.get("scrap_pct", baseline_ctx.get("scrap_pct", 0.0)) or 0.0)
+        self.effective_setups = int(sugg.get("setups", baseline_ctx.get("setups", 1)) or 1)
+        self.effective_fixture = str(sugg.get("fixture", baseline_ctx.get("fixture", "standard")) or "standard")
+
+        if not self._reprice_in_progress:
+            self.reprice()
+
+    def _set_user_override_value(self, path: Tuple[str, ...], value: Any):
+        cur = self.quote_state.user_overrides
+        if not isinstance(cur, dict):
+            self.quote_state.user_overrides = {}
+            cur = self.quote_state.user_overrides
+        node = cur
+        stack: list[tuple[dict, str]] = []
+        for key in path[:-1]:
+            stack.append((node, key))
+            nxt = node.get(key)
+            if not isinstance(nxt, dict):
+                if value is None:
+                    return
+                nxt = {}
+                node[key] = nxt
+            node = nxt
+        leaf_key = path[-1]
+        if value is None:
+            node.pop(leaf_key, None)
+            while stack:
+                parent, pkey = stack.pop()
+                child = parent.get(pkey)
+                if isinstance(child, dict) and not child:
+                    parent.pop(pkey, None)
+                else:
+                    break
+        else:
+            node[leaf_key] = value
+
+    # ----- Full flow: CAD ? GEO ? LLM ? Quote -----
     def action_full_flow(self):
         # ---------- choose file ----------
         self.status_var.set("Opening CAD/Drawingï¿½")
@@ -8715,165 +9027,6 @@ class App(tk.Tk):
     def _path_key(self, path: Tuple[str, ...]) -> str:
         return ".".join(path)
 
-    def _refresh_suggestions_panel(self):
-        frame = self.suggestions_scroll.inner
-        for child in frame.winfo_children():
-            child.destroy()
-        self.suggestion_widgets.clear()
-
-        rows = iter_suggestion_rows(self.quote_state)
-        if not rows:
-            self.suggestions_status.set("No suggestions yet. Generate a quote to populate this section.")
-            ttk.Label(frame, text="No adjustable suggestions available.").grid(row=0, column=0, sticky="w", padx=10, pady=10)
-            return
-
-        self.suggestions_status.set("Review suggestions. User overrides take priority. Click Apply & Reprice to update pricing.")
-
-        headings = ["Field", "Baseline", "LLM", "User override", "Accept LLM", "Effective"]
-        for col, label in enumerate(headings):
-            ttk.Label(frame, text=label, font=("Segoe UI", 9, "bold")).grid(row=0, column=col, sticky="w", padx=6, pady=(0,4))
-
-        for idx, row in enumerate(rows, start=1):
-            path = tuple(row.get("path", ()))
-            key = self._path_key(path)
-            label_txt = row.get("label", key)
-            ttk.Label(frame, text=label_txt).grid(row=idx, column=0, sticky="w", padx=6, pady=2)
-
-            ttk.Label(frame, text=_format_value(row.get("baseline"), row.get("kind", "float"))).grid(row=idx, column=1, sticky="w", padx=6, pady=2)
-            llm_lbl = ttk.Label(frame, text=_format_value(row.get("llm"), row.get("kind", "float")))
-            llm_lbl.grid(row=idx, column=2, sticky="w", padx=6, pady=2)
-
-            override_var = tk.StringVar(value=_format_entry_value(row.get("user"), row.get("kind", "float")))
-            entry = ttk.Entry(frame, textvariable=override_var, width=14)
-            entry.grid(row=idx, column=3, sticky="we", padx=6, pady=2)
-            entry.bind("<FocusOut>", lambda e, p=path, var=override_var, kind=row.get("kind", "float"): self._on_override_change(p, var.get(), kind))
-            entry.bind("<Return>", lambda e, p=path, var=override_var, kind=row.get("kind", "float"): self._on_override_change(p, var.get(), kind))
-
-            accept_var = tk.BooleanVar(value=bool(row.get("accept")))
-            chk = ttk.Checkbutton(frame, variable=accept_var, command=lambda p=path, var=accept_var: self._on_accept_toggle(p, var.get()))
-            chk.grid(row=idx, column=4, padx=6, pady=2)
-            if row.get("llm") is None:
-                chk.state(["disabled"])
-                accept_var.set(False)
-
-            eff_label = ttk.Label(frame, text=_format_value(row.get("effective"), row.get("kind", "float")))
-            eff_label.grid(row=idx, column=5, sticky="w", padx=6, pady=2)
-            source = row.get("source")
-            if source and isinstance(source, str):
-                eff_label.configure(text=f"{_format_value(row.get('effective'), row.get('kind', 'float'))} ({source})")
-
-            self.suggestion_widgets[key] = {
-                "path": path,
-                "kind": row.get("kind", "float"),
-                "override_var": override_var,
-                "accept_var": accept_var,
-                "accept_widget": chk,
-                "effective_label": eff_label,
-                "llm_label": llm_lbl,
-            }
-
-        notes = self.quote_state.suggestions.get("notes") if isinstance(self.quote_state.suggestions, dict) else []
-        if notes:
-            start_row = len(rows) + 1
-            ttk.Label(frame, text="LLM Notes:", font=("Segoe UI", 9, "bold")).grid(row=start_row, column=0, sticky="w", padx=6, pady=(10, 2))
-            for i, note in enumerate(notes, start=1):
-                ttk.Label(frame, text=f"• {note}").grid(row=start_row + i, column=0, columnspan=6, sticky="w", padx=12, pady=1)
-
-    def _update_suggestion_effective_labels(self):
-        rows = {self._path_key(tuple(row.get("path", ()) or ())): row for row in iter_suggestion_rows(self.quote_state)}
-        for key, widgets in self.suggestion_widgets.items():
-            row = rows.get(key)
-            if not row:
-                continue
-            label = widgets.get("effective_label")
-            if label:
-                text = _format_value(row.get("effective"), row.get("kind", "float"))
-                src = row.get("source")
-                if src and isinstance(src, str):
-                    text = f"{text} ({src})"
-                label.configure(text=text)
-            override_var = widgets.get("override_var")
-            if override_var is not None:
-                desired = _format_entry_value(row.get("user"), row.get("kind", "float"))
-                if override_var.get() != desired:
-                    override_var.set(desired)
-            accept_var = widgets.get("accept_var")
-            if accept_var is not None:
-                accept_var.set(bool(row.get("accept")))
-            llm_label = widgets.get("llm_label")
-            if llm_label is not None:
-                llm_label.configure(text=_format_value(row.get("llm"), row.get("kind", "float")))
-            chk_widget = widgets.get("accept_widget")
-            if chk_widget is not None:
-                if row.get("llm") is None:
-                    chk_widget.state(["disabled"])
-                    if accept_var is not None:
-                        accept_var.set(False)
-                else:
-                    chk_widget.state(["!disabled"])
-
-    def _on_accept_toggle(self, path: Tuple[str, ...], value: bool):
-        cur = self.quote_state.accept_llm
-        if not isinstance(cur, dict):
-            self.quote_state.accept_llm = {}
-            cur = self.quote_state.accept_llm
-        node = cur
-        for key in path[:-1]:
-            nxt = node.get(key)
-            if not isinstance(nxt, dict):
-                nxt = {}
-                node[key] = nxt
-            node = nxt
-        node[path[-1]] = bool(value)
-        reprice_with_effective(self.quote_state)
-        self._update_suggestion_effective_labels()
-        self.suggestions_status.set("Accept toggles updated. Click Apply & Reprice to update pricing.")
-
-    def _set_user_override_value(self, path: Tuple[str, ...], value: Any):
-        cur = self.quote_state.user_overrides
-        if not isinstance(cur, dict):
-            self.quote_state.user_overrides = {}
-            cur = self.quote_state.user_overrides
-        node = cur
-        stack: list[tuple[dict, str]] = []
-        for key in path[:-1]:
-            stack.append((node, key))
-            nxt = node.get(key)
-            if not isinstance(nxt, dict):
-                if value is None:
-                    return
-                nxt = {}
-                node[key] = nxt
-            node = nxt
-        leaf_key = path[-1]
-        if value is None:
-            node.pop(leaf_key, None)
-            while stack:
-                parent, pkey = stack.pop()
-                child = parent.get(pkey)
-                if isinstance(child, dict) and not child:
-                    parent.pop(pkey, None)
-                else:
-                    break
-        else:
-            node[leaf_key] = value
-
-    def _on_override_change(self, path: Tuple[str, ...], raw_value: Any, kind: str):
-        value = _coerce_user_value(raw_value, kind)
-        if value is None and (raw_value is None or str(raw_value).strip() == ""):
-            self._set_user_override_value(path, None)
-        else:
-            self._set_user_override_value(path, value)
-        reprice_with_effective(self.quote_state)
-        self._update_suggestion_effective_labels()
-        self.suggestions_status.set("User overrides updated. Click Apply & Reprice to update pricing.")
-
-    def apply_and_reprice(self):
-        if self.vars_df is None:
-            messagebox.showinfo("Adjustments", "Load CAD and run an initial quote before repricing.")
-            return
-        self.gen_quote(reuse_suggestions=True)
-
     def load_overrides(self):
         path = filedialog.askopenfilename(filetypes=[("JSON","*.json"),("All","*.*")])
         if not path: return
@@ -8977,51 +9130,68 @@ class App(tk.Tk):
         self.out_txt.insert("end", d+"\n")
         self.out_txt.see("end")
 
-    def gen_quote(self, reuse_suggestions: bool = False) -> None:
-
-        if self.vars_df is None:
-            self.vars_df = coerce_or_make_vars_df(None)
-        for item_name, string_var in self.quote_vars.items():
-            mask = self.vars_df["Item"] == item_name
-            if mask.any():
-                self.vars_df.loc[mask, "Example Values / Options"] = string_var.get()
-
-        self.apply_overrides(notify=False)
-
-        try:
-            ui_vars = {
-                str(row["Item"]): row["Example Values / Options"]
-                for _, row in self.vars_df.iterrows()
-            }
-        except Exception:
-            ui_vars = {}
-
-        try:
-            res = compute_quote_from_df(
-                self.vars_df,
-                params=self.params,
-                rates=self.rates,
-                material_vendor_csv=self.settings.get("material_vendor_csv", "") if isinstance(self.settings, dict) else "",
-                llm_enabled=self.llm_enabled.get(),
-                llm_model_path=self.llm_model_path.get().strip() or None,
-                geo=self.geo,
-                ui_vars=ui_vars,
-                quote_state=self.quote_state,
-                reuse_suggestions=reuse_suggestions,
-            )
-        except ValueError as err:
-            messagebox.showerror("Quote blocked", str(err))
-            self.status_var.set("Quote blocked.")
+    def reprice(self) -> None:
+        if self._reprice_in_progress:
             return
-        model_path = self.llm_model_path.get().strip()
-        llm_explanation = get_llm_quote_explanation(res, model_path)
-        report = render_quote(res, currency="$", show_zeros=False, llm_explanation=llm_explanation)
-        self.out_txt.delete("1.0", "end")
-        self.out_txt.insert("end", report, "rcol")
+        self.gen_quote(reuse_suggestions=True)
 
-        self._refresh_suggestions_panel()
-        self.nb.select(self.tab_out)
-        self.status_var.set(f"Quote Generated! Final Price: ${res.get('price', 0):,.2f}")
+    def gen_quote(self, reuse_suggestions: bool = False) -> None:
+        already_repricing = self._reprice_in_progress
+        if not already_repricing:
+            self._reprice_in_progress = True
+        try:
+            if self.vars_df is None:
+                self.vars_df = coerce_or_make_vars_df(None)
+            for item_name, string_var in self.quote_vars.items():
+                mask = self.vars_df["Item"] == item_name
+                if mask.any():
+                    self.vars_df.loc[mask, "Example Values / Options"] = string_var.get()
+
+            self.apply_overrides(notify=False)
+
+            try:
+                ui_vars = {
+                    str(row["Item"]): row["Example Values / Options"]
+                    for _, row in self.vars_df.iterrows()
+                }
+            except Exception:
+                ui_vars = {}
+
+            try:
+                res = compute_quote_from_df(
+                    self.vars_df,
+                    params=self.params,
+                    rates=self.rates,
+                    material_vendor_csv=self.settings.get("material_vendor_csv", "") if isinstance(self.settings, dict) else "",
+                    llm_enabled=self.llm_enabled.get(),
+                    llm_model_path=self.llm_model_path.get().strip() or None,
+                    geo=self.geo,
+                    ui_vars=ui_vars,
+                    quote_state=self.quote_state,
+                    reuse_suggestions=reuse_suggestions,
+                    llm_suggest=self.LLM_SUGGEST,
+                )
+            except ValueError as err:
+                messagebox.showerror("Quote blocked", str(err))
+                self.status_var.set("Quote blocked.")
+                return
+
+            baseline_ctx = self.quote_state.baseline or {}
+            suggestions_ctx = self.quote_state.suggestions or {}
+            if baseline_ctx and suggestions_ctx:
+                self.apply_llm_to_editor(suggestions_ctx, baseline_ctx)
+
+            model_path = self.llm_model_path.get().strip()
+            llm_explanation = get_llm_quote_explanation(res, model_path)
+            report = render_quote(res, currency="$", show_zeros=False, llm_explanation=llm_explanation)
+            self.out_txt.delete("1.0", "end")
+            self.out_txt.insert("end", report, "rcol")
+
+            self.nb.select(self.tab_out)
+            self.status_var.set(f"Quote Generated! Final Price: ${res.get('price', 0):,.2f}")
+        finally:
+            if not already_repricing:
+                self._reprice_in_progress = False
 
 # Helper: map our existing enrich_geo_* output to GEO__ keys
 def _map_geo_to_double_underscore(g: dict) -> dict:
