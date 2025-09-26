@@ -99,6 +99,24 @@ def parse_llm_json(text: str):
             return {}
 
 
+SYSTEM_SUGGEST = """You are a manufacturing estimator.
+Given GEO + baseline + bounds, propose bounded adjustments that improve realism.
+ALWAYS return a complete JSON object with THESE KEYS, even if values are unchanged:
+{
+  "process_hour_multipliers": {"drilling": <float>, "milling": <float>},
+  "process_hour_adders": {"inspection": <float>},
+  "scrap_pct": <float>,           // fraction 0.00–0.25
+  "setups": <int>,                // 1–4
+  "fixture": "<string>",          // short phrase
+  "notes": ["<short reason>"],
+  "no_change_reason": "<why you kept near baseline, if so>"
+}
+All outputs MUST respect bounds in `bounds`.
+Prefer small, explainable changes (±10–50%). Never leave fields out.
+You may use payload["seed"] heuristics to bias adjustments when helpful."""
+
+
+
 def bin_diams_mm(diams: Iterable[float | int | None], step: float = 0.1) -> Dict[float, int]:
     """Return a histogram of diameters rounded to ``step`` millimetres.
 
@@ -520,217 +538,209 @@ def _as_float_or_none(value: Any) -> float | None:
     return None
 
 
-def _sanitize_llm_suggestions(
-    raw: dict | None,
-    baseline: dict | None,
-    bounds: dict | None,
-) -> tuple[dict, list[str], list[str]]:
-    """Clamp/process raw LLM output into the internal suggestions structure."""
 
-    raw = raw or {}
+def build_suggest_payload(geo, baseline, rates, bounds) -> dict:
+    geo = geo or {}
     baseline = baseline or {}
+    rates = rates or {}
     bounds = bounds or {}
 
-    mult_min = _as_float_or_none(bounds.get("mult_min")) or 0.5
-    mult_max = _as_float_or_none(bounds.get("mult_max")) or 3.0
-    adder_max = _as_float_or_none(bounds.get("adder_max_hr")) or 5.0
-    scrap_min = max(0.0, _as_float_or_none(bounds.get("scrap_min")) or 0.0)
-    scrap_max = _as_float_or_none(bounds.get("scrap_max")) or 0.25
+    derived = geo.get("derived") or {}
+    hole_bins = derived.get("hole_bins") or {}
+    hole_bins_top = {}
+    if isinstance(hole_bins, dict):
+        hole_bins_top = dict(sorted(hole_bins.items(), key=lambda kv: -kv[1])[:8])
 
-    sanitized: dict[str, Any] = {}
-    clamp_notes: list[str] = []
-    warnings: list[str] = []
+    raw_thickness = geo.get("thickness_mm")
+    thickness_mm = None
+    if isinstance(raw_thickness, dict):
+        for key in ("value", "mm", "thickness_mm"):
+            if raw_thickness.get(key) is not None:
+                try:
+                    thickness_mm = float(raw_thickness.get(key))
+                    break
+                except Exception:
+                    continue
+    else:
+        try:
+            thickness_mm = float(raw_thickness)
+        except Exception:
+            thickness_mm = None
+    if thickness_mm is None:
+        try:
+            thickness_mm = float(geo.get("thickness"))
+        except Exception:
+            thickness_mm = None
 
-    baseline_proc = {}
-    for key, value in (baseline.get("process_hours") or {}).items():
-        val = _as_float_or_none(value)
-        if val is not None:
-            baseline_proc[str(key)] = float(val)
+    material_val = geo.get("material")
+    if isinstance(material_val, dict):
+        material_name = material_val.get("name") or material_val.get("display")
+    else:
+        material_name = material_val
 
-    # Process hour multipliers
-    mults_clean: dict[str, float] = {}
-    if isinstance(raw.get("process_hour_multipliers"), dict):
-        for proc, value in raw["process_hour_multipliers"].items():
-            proc_name = str(proc)
-            val = _as_float_or_none(value)
-            if val is None:
-                clamp_notes.append(f"process_hour_multipliers[{proc_name}] non-numeric")
-                continue
-            clamped = max(mult_min, min(mult_max, float(val)))
-            if not math.isclose(clamped, float(val), rel_tol=1e-6, abs_tol=1e-6):
-                clamp_notes.append(
-                    f"process_hour_multipliers[{proc_name}] {float(val):.3f} → {clamped:.3f}"
-                )
-            mults_clean[proc_name] = clamped
-    if mults_clean:
-        sanitized["process_hour_multipliers"] = mults_clean
+    hole_count_val = _as_float_or_none(geo.get("hole_count"))
+    if hole_count_val is None:
+        hole_count_val = _as_float_or_none(derived.get("hole_count"))
+    hole_count = int(hole_count_val or 0)
 
-    # Process hour adders
-    adders_clean: dict[str, float] = {}
-    if isinstance(raw.get("process_hour_adders"), dict):
-        for proc, value in raw["process_hour_adders"].items():
-            proc_name = str(proc)
-            val = _as_float_or_none(value)
-            if val is None:
-                clamp_notes.append(f"process_hour_adders[{proc_name}] non-numeric")
-                continue
-            clamped = max(0.0, min(adder_max, float(val)))
-            if not math.isclose(clamped, float(val), rel_tol=1e-6, abs_tol=1e-6):
-                clamp_notes.append(
-                    f"process_hour_adders[{proc_name}] {float(val):.3f} → {clamped:.3f}"
-                )
-            if clamped > 0:
-                adders_clean[proc_name] = clamped
-    if adders_clean:
-        sanitized["process_hour_adders"] = adders_clean
+    tap_qty = derived.get("tap_qty")
+    try:
+        tap_qty = int(tap_qty)
+    except Exception:
+        tap_qty = 0
 
-    scrap_val = _as_float_or_none(raw.get("scrap_pct"))
-    if scrap_val is not None:
-        clamped = max(scrap_min, min(scrap_max, float(scrap_val)))
-        if not math.isclose(clamped, float(scrap_val), rel_tol=1e-6, abs_tol=1e-6):
-            clamp_notes.append(f"scrap_pct {float(scrap_val):.3f} → {clamped:.3f}")
-        sanitized["scrap_pct"] = clamped
+    cbore_qty = derived.get("cbore_qty")
+    try:
+        cbore_qty = int(cbore_qty)
+    except Exception:
+        cbore_qty = 0
 
-    setups_val = _as_float_or_none(raw.get("setups"))
-    if setups_val is not None:
-        clamped_int = int(max(1, min(4, round(setups_val))))
-        if not math.isclose(float(clamped_int), float(setups_val), abs_tol=1e-6):
-            clamp_notes.append(f"setups {float(setups_val):.3f} → {clamped_int}")
-        sanitized["setups"] = clamped_int
-
-    fixture_val = raw.get("fixture")
-    if isinstance(fixture_val, str) and fixture_val.strip():
-        sanitized["fixture"] = fixture_val.strip()[:200]
-
-    notes_val = raw.get("notes")
-    if isinstance(notes_val, list):
-        clean_notes: list[str] = []
-        for note in notes_val:
-            if isinstance(note, str):
-                text = note.strip()
-                if text:
-                    clean_notes.append(text[:200])
-        if clean_notes:
-            sanitized["notes"] = clean_notes
-
-    # Warning on extreme hour shifts
-    base_total = sum(baseline_proc.values())
-    if base_total > 1e-6:
-        total = 0.0
-        for proc, base_hr in baseline_proc.items():
-            mult = mults_clean.get(proc, 1.0)
-            total += base_hr * mult
-        for proc, add_hr in adders_clean.items():
-            total += float(add_hr)
-        ratio = total / base_total if base_total else 1.0
-        if ratio > 3.0 or ratio < 0.6:
-            warn_msg = (
-                f"Process hours shift {base_total:.2f}h → {total:.2f}h ({ratio:.2f}×); review"
-            )
-            warnings.append(warn_msg)
-            sanitized["_warning"] = warn_msg
-
-    return sanitized, clamp_notes, warnings
-
-
-def sanitize_suggestions(
-    raw: dict | None,
-    bounds: dict | None,
-    baseline: dict | None = None,
-) -> dict:
-    """Public sanitizer entry point that annotates clamp metadata in-place."""
-
-    sanitized, clamp_notes, warnings = _sanitize_llm_suggestions(raw, baseline, bounds)
-    if clamp_notes or warnings:
-        meta = sanitized.setdefault("_meta", {})
-        if clamp_notes:
-            meta.setdefault("clamp_notes", []).extend(clamp_notes)
-        if warnings:
-            meta.setdefault("warnings", []).extend(warnings)
-    return sanitized
-
-
-def build_llm_context(geo: dict, baseline: dict, rates: dict, bounds: dict) -> dict:
-    ctx = {
-        "geo": geo or {},
-        "baseline": baseline or {},
-        "rates": rates or {},
-        "bounds": bounds or {},
-    }
-    return ctx
-
-
-def request_llm_suggestions(model_path: str, context: dict) -> tuple[dict, dict]:
-    """Ask the local LLM for pricing suggestions following the contract."""
-
-    meta: dict[str, Any] = {
-        "raw_text": "",
-        "raw_json": {},
-        "clamp_notes": [],
+    seed = {
+        "suggest_drilling_if_many_holes": hole_count >= 50,
+        "suggest_setups_if_from_back_ops": bool(derived.get("needs_back_face")),
+        "nudge_drilling_for_thickness": bool(thickness_mm and thickness_mm > 12.0),
+        "add_inspection_if_many_taps": tap_qty >= 8,
+        "add_milling_if_cbore_present": cbore_qty >= 2,
+        "plate_with_back_ops": bool((geo.get("meta") or {}).get("is_2d_plate") and derived.get("needs_back_face")),
     }
 
-    suggestions: dict[str, Any] = {}
+    return {
+        "purpose": "quote_suggestions",
+        "geo": {
+            "is_2d_plate": (geo.get("meta") or {}).get("is_2d_plate"),
+            "hole_count": hole_count,
+            "tap_qty": tap_qty,
+            "cbore_qty": cbore_qty,
+            "hole_bins_top": hole_bins_top,
+            "thickness_mm": thickness_mm,
+            "material": material_name,
+            "bbox_mm": geo.get("bbox_mm"),
+        },
+        "baseline": {
+            "process_hours": baseline.get("process_hours"),
+            "scrap_pct": baseline.get("scrap_pct", 0.0),
+            "pass_through": baseline.get("pass_through", {}),
+        },
+        "rates": rates,
+        "bounds": bounds,
+        "seed": seed,
+    }
 
-    if not model_path or not os.path.isfile(model_path):
-        meta["error"] = "model_missing"
-        return suggestions, meta
 
-    try:
-        llm = _LocalLLM(model_path)
-    except Exception as exc:
-        meta["error"] = repr(exc)
-        return suggestions, meta
+def run_llm_suggestions(LLM, payload: dict) -> tuple[dict, str, dict]:
+    parsed, raw, usage = LLM.ask_json(
+        system_prompt=SYSTEM_SUGGEST,
+        user_prompt=json.dumps(payload, indent=2),
+        temperature=0.3,
+        max_tokens=512,
+        context=payload,
+        params={"top_p": 0.9},
+    )
+    if not parsed:
+        parsed = parse_llm_json(raw)
+    if not parsed:
+        baseline = payload.get("baseline") or {}
+        parsed = {
+            "process_hour_multipliers": {"drilling": 1.0, "milling": 1.0},
+            "process_hour_adders": {"inspection": 0.0},
+            "scrap_pct": baseline.get("scrap_pct", 0.0),
+            "setups": int(baseline.get("setups", 1) or 1),
+            "fixture": baseline.get("fixture", "standard") or "standard",
+            "notes": ["no parse; using baseline"],
+            "no_change_reason": "fallback",
+        }
+    return parsed, raw, usage or {}
 
-    try:
-        payload_text = json.dumps(context, indent=2)
-    except TypeError:
-        payload_text = json.dumps(context, default=str, indent=2)
 
-    system_prompt = (
-        "You are a manufacturing estimator."
-        " Review the provided quote context and suggest bounded adjustments for"
-        " machining processes. Respond with JSON matching the contract:"
-        " {\"process_hour_multipliers\":{...}, \"process_hour_adders\":{...},"
-        " \"scrap_pct\":float, \"setups\":int, \"fixture\":str, \"notes\":[...]}."
-        " Respect the numeric bounds and do not include commentary outside JSON."
+def sanitize_suggestions(s: dict, bounds: dict) -> dict:
+    bounds = bounds or {}
+
+    def clamp(value, lo, hi):
+        try:
+            return max(lo, min(hi, float(value)))
+        except Exception:
+            return lo
+
+    mults: dict[str, float] = {}
+    for proc, val in (s.get("process_hour_multipliers") or {}).items():
+        try:
+            mults[str(proc)] = clamp(val, bounds.get("mult_min", 0.5), bounds.get("mult_max", 3.0))
+        except Exception:
+            continue
+
+    adders: dict[str, float] = {}
+    for proc, val in (s.get("process_hour_adders") or {}).items():
+        try:
+            adders[str(proc)] = clamp(val, 0.0, bounds.get("adder_max_hr", 5.0))
+        except Exception:
+            continue
+
+    scrap = clamp(
+        s.get("scrap_pct", 0.0),
+        bounds.get("scrap_min", 0.0),
+        bounds.get("scrap_max", 0.25),
     )
 
-    user_prompt = f"Context:\n```json\n{payload_text}\n```"
-
     try:
-        parsed, raw_text, usage = llm.ask_json(
-            system_prompt,
-            user_prompt,
-            temperature=0.2,
-            max_tokens=512,
-            context=context,
-        )
-    except Exception as exc:
-        meta["error"] = repr(exc)
-        return suggestions, meta
+        setups = int(s.get("setups", 1))
+    except Exception:
+        setups = 1
+    setups = max(1, min(4, setups))
 
-    meta["raw_text"] = raw_text or ""
-    if isinstance(usage, dict):
-        meta["usage"] = usage
+    fixture = s.get("fixture", "standard")
+    fixture = str(fixture)[:80] if fixture is not None else "standard"
 
-    if not isinstance(parsed, dict):
-        parsed = parse_llm_json(raw_text)
+    notes_raw = s.get("notes") or []
+    notes: list[str] = []
+    for note in notes_raw:
+        if not isinstance(note, str):
+            continue
+        cleaned = note.strip()
+        if cleaned:
+            notes.append(cleaned[:120])
 
-    if isinstance(parsed, dict):
-        meta["raw_json"] = parsed
-        baseline_ctx = context.get("baseline") if isinstance(context, dict) else {}
-        bounds_ctx = context.get("bounds") if isinstance(context, dict) else {}
-        sanitized, clamp_notes, warnings = _sanitize_llm_suggestions(parsed, baseline_ctx, bounds_ctx)
-        suggestions = sanitized
-        if clamp_notes:
-            meta["clamp_notes"] = clamp_notes
-        if warnings:
-            meta["warnings"] = warnings
-    else:
-        meta["raw_json"] = {}
+    no_change = s.get("no_change_reason") or ""
+    no_change = str(no_change)
 
-    return suggestions, meta
+    return {
+        "process_hour_multipliers": mults or {"drilling": 1.0, "milling": 1.0},
+        "process_hour_adders": adders or {"inspection": 0.0},
+        "scrap_pct": scrap,
+        "setups": setups,
+        "fixture": fixture,
+        "notes": notes,
+        "no_change_reason": no_change,
+    }
 
+
+def apply_suggestions(baseline: dict, s: dict) -> dict:
+    eff = copy.deepcopy(baseline or {})
+    base_hours = eff.get("process_hours") if isinstance(eff.get("process_hours"), dict) else {}
+    ph = {k: float(_as_float_or_none(v) or 0.0) for k, v in base_hours.items()}
+
+    for proc, mult in (s.get("process_hour_multipliers") or {}).items():
+        if proc in ph:
+            try:
+                ph[proc] = ph[proc] * float(mult)
+            except Exception:
+                ph[proc] = ph[proc]
+
+    for proc, add in (s.get("process_hour_adders") or {}).items():
+        base = ph.get(proc, 0.0)
+        try:
+            ph[proc] = float(base) + float(add)
+        except Exception:
+            ph[proc] = float(base)
+
+    eff["process_hours"] = ph
+    eff["scrap_pct"] = s.get("scrap_pct", eff.get("scrap_pct"))
+    eff["setups"] = s.get("setups", eff.get("setups", 1))
+    eff["fixture"] = s.get("fixture", eff.get("fixture", "standard"))
+    notes = list(s.get("notes") or [])
+    if s.get("no_change_reason"):
+        notes.append(f"no_change: {s['no_change_reason']}")
+    eff["_llm_notes"] = notes
+    return eff
 
 def _nested_get(data: dict | None, path: Tuple[str, ...], default: Any = None) -> Any:
     cur = data or {}
@@ -4734,6 +4744,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                           params: Dict[str, Any] | None = None,
                           rates: Dict[str, float] | None = None,
                           *,
+                          material_vendor_csv: str | None = None,
                           llm_enabled: bool = True,
                           llm_model_path: str | None = None,
                           geo: dict[str, Any] | None = None,
@@ -4973,7 +4984,9 @@ def compute_quote_from_df(df: pd.DataFrame,
     surcharge_pct = num_pct(r"\b(?:Material\s*Surcharge|Volatility)\b", 0.0)
     explicit_mat  = num(r"\b(?:Material\s*Cost|Raw\s*Material\s*Cost)\b", 0.0)
 
-    material_vendor_csv = str(params.get("MaterialVendorCSVPath", "") or "")
+    if material_vendor_csv is None:
+        material_vendor_csv = params.get("MaterialVendorCSVPath", "") if isinstance(params, dict) else ""
+    material_vendor_csv = str(material_vendor_csv or "")
     material_overrides: dict[str, Any] = {}
     provider_cost: float | None = None
     material_detail: dict[str, Any] = {}
@@ -5579,39 +5592,16 @@ def compute_quote_from_df(df: pd.DataFrame,
         geo_payload["avg_hole_diam_override_mm"] = float(avg_hole_diam_override)
     quote_state.geo = dict(geo_payload)
 
-    llm_geo_payload: dict[str, Any] = {
-        "hole_count": hole_count_for_tripwire,
-    }
-    if hole_diams_ctx:
-        llm_geo_payload["hole_diams_mm"] = hole_diams_ctx
-    thickness_for_llm = _coerce_float_or_none(geo_context.get("thickness_mm"))
-    if thickness_for_llm is None:
-        thickness_for_llm = _coerce_float_or_none(features.get("thickness_mm"))
-    if thickness_for_llm is not None:
-        llm_geo_payload["thickness_mm"] = float(thickness_for_llm)
-    if bbox_info:
-        llm_geo_payload["bbox_mm"] = {k: float(v) for k, v in bbox_info.items() if _coerce_float_or_none(v) is not None}
-    if material_name:
-        llm_geo_payload["material"] = material_name
-    if chart_reconcile_geo:
-        groups_raw = chart_reconcile_geo.get("chart_bins") or {}
-        groups_clean = {str(k): int(v) for k, v in groups_raw.items()}
-        hole_chart_ctx = {
-            "groups_by_dia_mm": groups_clean,
-            "tap_qty": int(chart_reconcile_geo.get("tap_qty") or 0),
-            "cbore_qty": int(chart_reconcile_geo.get("cbore_qty") or 0),
-            "agreement": bool(chart_reconcile_geo.get("agreement")),
-            "entity_total": int(chart_reconcile_geo.get("entity_total") or 0),
-            "chart_total": int(chart_reconcile_geo.get("chart_total") or 0),
-        }
-        if chart_source_geo:
-            hole_chart_ctx["source"] = chart_source_geo
-        llm_geo_payload["hole_chart"] = hole_chart_ctx
+
+    baseline_setups = int(_as_float_or_none(setups) or _as_float_or_none(baseline_data.get("setups")) or 1)
+    baseline_fixture = baseline_data.get("fixture")
 
     llm_baseline_payload = {
         "process_hours": process_hours_baseline,
         "pass_through": pass_through_baseline,
         "scrap_pct": scrap_pct_baseline,
+        "setups": baseline_setups,
+        "fixture": baseline_fixture,
     }
     llm_bounds = {
         "mult_min": 0.5,
@@ -5620,28 +5610,126 @@ def compute_quote_from_df(df: pd.DataFrame,
         "scrap_min": 0.0,
         "scrap_max": 0.25,
     }
-    llm_ctx = build_llm_context(llm_geo_payload, llm_baseline_payload, base_costs["rates"], llm_bounds)
+
+    tap_qty_seed = int(chart_reconcile_geo.get("tap_qty") or 0) if chart_reconcile_geo else 0
+    cbore_qty_seed = int(chart_reconcile_geo.get("cbore_qty") or 0) if chart_reconcile_geo else 0
+    hole_bins_for_seed: dict[str, int] = {}
+    if chart_reconcile_geo:
+        bins_raw = chart_reconcile_geo.get("chart_bins") or {}
+        hole_bins_for_seed = {str(k): int(v) for k, v in bins_raw.items()}
+
+    needs_back_face_flag = bool(
+        geo_context.get("GEO_Setup_NeedsBackOps")
+        or geo_context.get("needs_back_face")
+        or (bool(is_plate_2d) and baseline_setups > 1)
+    )
+
+    bbox_payload = None
+    if bbox_info:
+        bbox_payload = {k: float(v) for k, v in bbox_info.items() if _coerce_float_or_none(v) is not None}
+
+    geo_for_suggest = {
+        "meta": {"is_2d_plate": bool(is_plate_2d)},
+        "hole_count": hole_count_for_tripwire,
+        "derived": {
+            "tap_qty": tap_qty_seed,
+            "cbore_qty": cbore_qty_seed,
+            "hole_bins": hole_bins_for_seed,
+            "needs_back_face": needs_back_face_flag,
+        },
+        "thickness_mm": float(thickness_for_llm) if thickness_for_llm is not None else None,
+        "material": material_name,
+        "bbox_mm": bbox_payload,
+    }
+
+    payload = build_suggest_payload(geo_for_suggest, llm_baseline_payload, base_costs["rates"], llm_bounds)
 
     suggestions_struct: dict[str, Any] = {}
     overrides_meta: dict[str, Any] = {}
+    sanitized_struct: dict[str, Any] = {}
     if reuse_suggestions and quote_state and quote_state.suggestions:
         suggestions_struct = copy.deepcopy(quote_state.suggestions)
         overrides_meta = dict(quote_state.llm_raw or {})
-    elif llm_enabled and llm_model_path:
-        new_suggestions, overrides_meta = request_llm_suggestions(llm_model_path, llm_ctx)
-        if isinstance(new_suggestions, dict):
-            suggestions_struct = copy.deepcopy(new_suggestions)
+        sanitized_struct = suggestions_struct if isinstance(suggestions_struct, dict) else {}
+    else:
+        llm_obj = None
+        s_raw: dict[str, Any] = {}
+        s_text = ""
+        s_usage: dict[str, Any] = {}
+        if llm_enabled and llm_model_path:
+            try:
+                llm_obj = _LocalLLM(llm_model_path)
+                s_raw, s_text, s_usage = run_llm_suggestions(llm_obj, payload)
+                sanitized_struct = sanitize_suggestions(s_raw, llm_bounds)
+            except Exception as exc:
+                fallback_struct = {
+                    "process_hour_multipliers": {"drilling": 1.0, "milling": 1.0},
+                    "process_hour_adders": {"inspection": 0.0},
+                    "scrap_pct": llm_baseline_payload.get("scrap_pct", 0.0),
+                    "setups": llm_baseline_payload.get("setups", baseline_setups),
+                    "fixture": llm_baseline_payload.get("fixture") or baseline_fixture or "standard",
+                    "notes": [f"llm error: {exc}"],
+                    "no_change_reason": "exception",
+                }
+                sanitized_struct = sanitize_suggestions(fallback_struct, llm_bounds)
+                overrides_meta["error"] = repr(exc)
+                s_raw = s_raw or {}
+                s_text = s_text or ""
+                s_usage = s_usage or {}
+        else:
+            reason = "llm_disabled" if not llm_enabled else "model_missing"
+            fallback_note = "LLM disabled" if not llm_enabled else "LLM model missing"
+            fallback_struct = {
+                "process_hour_multipliers": {"drilling": 1.0, "milling": 1.0},
+                "process_hour_adders": {"inspection": 0.0},
+                "scrap_pct": llm_baseline_payload.get("scrap_pct", 0.0),
+                "setups": llm_baseline_payload.get("setups", baseline_setups),
+                "fixture": llm_baseline_payload.get("fixture") or baseline_fixture or "standard",
+                "notes": [fallback_note],
+                "no_change_reason": reason,
+            }
+            sanitized_struct = sanitize_suggestions(fallback_struct, llm_bounds)
+            overrides_meta["error"] = reason
+            s_raw = {}
+            s_text = ""
+            s_usage = {}
+        suggestions_struct = copy.deepcopy(sanitized_struct)
+        applied_effective = apply_suggestions(baseline_data, sanitized_struct)
+        overrides_meta.update({
+            "model": getattr(llm_obj, "model_path", None) if llm_obj is not None else llm_model_path or "unavailable",
+            "n_ctx": getattr(llm_obj, "n_ctx", None) if llm_obj is not None else None,
+            "raw_response_text": s_text,
+            "parsed_response": s_raw,
+            "sanitized": sanitized_struct,
+            "payload": payload,
+            "usage": s_usage,
+            "applied_effective": applied_effective,
+        })
+        if LLM_DEBUG:
+            snap = {
+                "model": overrides_meta.get("model"),
+                "n_ctx": overrides_meta.get("n_ctx"),
+                "messages": [
+                    {"role": "system", "content": SYSTEM_SUGGEST},
+                    {"role": "user", "content": json.dumps(payload, indent=2)},
+                ],
+                "params": {"temperature": 0.3, "top_p": 0.9, "max_tokens": 512},
+                "context_payload": payload,
+                "raw_response_text": s_text,
+                "parsed_response": s_raw,
+                "sanitized": sanitized_struct,
+                "usage": s_usage,
+            }
+            snap_path = LLM_DEBUG_DIR / f"llm_snapshot_{int(time.time())}.json"
+            snap_path.write_text(json.dumps(snap, indent=2), encoding="utf-8")
+
     quote_state.llm_raw = dict(overrides_meta)
-    sanitized_struct = suggestions_struct if isinstance(suggestions_struct, dict) else {}
-    if sanitized_struct and not reuse_suggestions:
-        sanitized_struct = sanitize_suggestions(sanitized_struct, llm_bounds, llm_baseline_payload)
     quote_state.suggestions = sanitized_struct if isinstance(sanitized_struct, dict) else {}
     quote_state.bounds = dict(llm_bounds)
     reprice_with_effective(quote_state)
     effective_struct = quote_state.effective
     effective_sources = quote_state.effective_sources
     overrides = effective_to_overrides(effective_struct, quote_state.baseline)
-
     effective_scrap_val = scrap_pct_baseline
     if isinstance(effective_struct, dict) and effective_struct.get("scrap_pct") is not None:
         effective_scrap_val = effective_struct.get("scrap_pct")
@@ -6273,6 +6361,13 @@ def compute_quote_from_df(df: pd.DataFrame,
         except Exception:
             pass
 
+    material_source_final = (
+        quote_state.material_source
+        or material_detail_for_breakdown.get("source")
+        or (pass_meta.get("Material", {}) or {}).get("basis")
+        or "shop defaults"
+    )
+
     return {
         "price": price,
         "labor": labor_cost,
@@ -6280,6 +6375,9 @@ def compute_quote_from_df(df: pd.DataFrame,
         "breakdown": breakdown,
         "narrative": narrative_text,
         "decision_state": decision_state,
+        "geo": copy.deepcopy(quote_state.geo),
+        "ui_vars": copy.deepcopy(quote_state.ui_vars),
+        "material_source": material_source_final,
     }
 
 
@@ -7055,74 +7153,244 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
     Returns a single-paragraph, friendly explanation of the main cost drivers.
     Works with the local _LocalLLM.ask_json(), and has a safe fallback if no model.
     """
-    import os, json, textwrap
+    import json
+    import os
 
-    b = result.get("breakdown", {}) or {}
-    totals = b.get("totals", {}) or {}
-    pro    = b.get("process_costs", {}) or {}
-    nre    = b.get("nre", {}) or {}
-    nre_detail = b.get("nre_detail", {}) or {}
-    pt     = b.get("pass_through", {}) or {}
+    breakdown = result.get("breakdown", {}) or {}
+    totals = breakdown.get("totals", {}) or {}
+    process_costs = breakdown.get("process_costs", {}) or {}
+    material_detail = breakdown.get("material", {}) or {}
+    pass_meta = breakdown.get("pass_meta", {}) or {}
 
-    # --- Heuristic fallback (no LLM / error)
-    def _fallback() -> str:
-        top = sorted([(k, v) for k, v in pro.items() if v], key=lambda kv: kv[1], reverse=True)[:3]
-        bits = []
-        if nre.get("programming_per_part", 0):
-            bits.append(f"NRE (programming/fixturing) adds ${nre['programming_per_part']:.0f} per part")
-        if top:
-            parts = ", ".join(f"{k.replace('_',' ')} ${v:,.0f}" for k, v in top)
-            bits.append(f"largest labor buckets are {parts}")
-        directs_sum = float(b.get("total_direct_costs") or totals.get("direct_costs") or 0.0)
-        if directs_sum:
-            mat_val = float(b.get("material_direct_cost") or pt.get("material_direct_cost") or 0.0)
-            material_str = f"materials ${mat_val:,.0f}" if mat_val else "directs"
-            bits.append(f"({material_str}/vendors/shipping) are ${directs_sum:,.0f}")
-        return " / ".join(bits) or "Costs are driven mostly by setup/NRE and the primary machining steps."
+    geo = result.get("geo") or {}
+    ui_vars = result.get("ui_vars") or {}
 
-    # If no model on disk, just return fallback
-    if not model_path or not os.path.isfile(model_path):
-        return _fallback()
+    final_price = float(result.get("price", totals.get("price", 0.0) or 0.0))
+    labor_cost = float(totals.get("labor_cost", 0.0) or 0.0)
+    direct_costs = float(totals.get("direct_costs", 0.0) or 0.0)
+    subtotal = labor_cost + direct_costs
 
-    summary = {
-        "final_price": result.get("price", 0.0),
-        "labor_cost": totals.get("labor_cost", 0.0),
-        "direct_costs": totals.get("direct_costs", 0.0),
-        "nre_programming_cost": (nre_detail.get("programming", {}) or {}).get("per_lot", 0.0),
-        "nre_fixture_cost": (nre_detail.get("fixture", {}) or {}).get("per_lot", 0.0),
-        "process_costs": pro,
+    def _to_float(value):
+        try:
+            if isinstance(value, (int, float)):
+                return float(value)
+            if isinstance(value, str):
+                cleaned = value.strip()
+                if not cleaned:
+                    return None
+                return float(cleaned)
+        except Exception:
+            return None
+        return None
+
+    proc_pairs = []
+    for key, value in (process_costs or {}).items():
+        val = _to_float(value)
+        if val is None:
+            continue
+        proc_pairs.append((str(key), val))
+    proc_pairs.sort(key=lambda kv: kv[1], reverse=True)
+    proc_top = proc_pairs[:3]
+
+    def _to_int(value):
+        try:
+            if isinstance(value, bool):
+                return int(value)
+            return int(float(value))
+        except Exception:
+            return None
+
+    hole_count = _to_int((geo or {}).get("hole_count"))
+
+    thickness_mm = _to_float(geo.get("thickness_mm"))
+    if thickness_mm is None:
+        thickness_mm = _to_float(ui_vars.get("Thickness (in)"))
+    thickness_in = round(thickness_mm * 0.0393701, 2) if thickness_mm is not None else None
+
+    material_name = geo.get("material") or ui_vars.get("Material")
+    if isinstance(material_name, str):
+        material_name = material_name.strip() or None
+
+    material_source = (
+        result.get("material_source")
+        or material_detail.get("source")
+        or (pass_meta.get("Material", {}) or {}).get("basis")
+        or "shop defaults"
+    )
+
+    effective_scrap = material_detail.get("scrap_pct")
+    if effective_scrap is None:
+        effective_scrap = breakdown.get("scrap_pct")
+    effective_scrap = _ensure_scrap_pct(effective_scrap)
+    scrap_pct_percent = round(100.0 * effective_scrap, 1)
+
+    ctx = {
+        "purpose": "quote_explanation",
+        "rollup": {
+            "final_price": final_price,
+            "labor_cost": labor_cost,
+            "direct_costs": direct_costs,
+            "subtotal": subtotal,
+            "labor_pct": round(100.0 * labor_cost / subtotal, 1) if subtotal else 0.0,
+            "directs_pct": round(100.0 * direct_costs / subtotal, 1) if subtotal else 0.0,
+            "top_processes": [
+                {"name": name.replace("_", " "), "usd": val}
+                for name, val in proc_top
+            ],
+        },
+        "geo_summary": {
+            "hole_count": hole_count,
+            "thickness_in": thickness_in,
+            "material": material_name,
+        },
+        "material_source": material_source,
+        "scrap_pct": scrap_pct_percent,
     }
 
+    def _render_explanation(parsed: dict | None = None, raw_text: str = "") -> str:
+        data = parsed if isinstance(parsed, dict) else {}
+        if not data and raw_text:
+            data = parse_llm_json(raw_text) or {}
+
+        fallback_drivers = [
+            {
+                "label": "Labor",
+                "usd": labor_cost,
+                "pct_of_subtotal": round(100.0 * labor_cost / subtotal, 1) if subtotal else 0.0,
+            },
+            {
+                "label": "Directs",
+                "usd": direct_costs,
+                "pct_of_subtotal": round(100.0 * direct_costs / subtotal, 1) if subtotal else 0.0,
+            },
+        ]
+
+        drivers_raw = data.get("drivers") if isinstance(data.get("drivers"), list) else []
+        drivers: list[dict[str, float]] = []
+        for idx, default in enumerate(fallback_drivers):
+            entry = drivers_raw[idx] if idx < len(drivers_raw) and isinstance(drivers_raw[idx], dict) else {}
+            label = str(entry.get("label") or default["label"]).strip() or default["label"]
+            usd = _to_float(entry.get("usd"))
+            pct = _to_float(entry.get("pct_of_subtotal"))
+            drivers.append(
+                {
+                    "label": label,
+                    "usd": usd if usd is not None else float(default["usd"]),
+                    "pct_of_subtotal": pct if pct is not None else float(default["pct_of_subtotal"]),
+                }
+            )
+        while len(drivers) < 2:
+            drivers.append({"label": f"Bucket {len(drivers) + 1}", "usd": 0.0, "pct_of_subtotal": 0.0})
+
+        geo_notes_raw = data.get("geo_notes") if isinstance(data.get("geo_notes"), list) else []
+        geo_notes = [str(note).strip() for note in geo_notes_raw if str(note).strip()]
+        if not geo_notes:
+            geo_notes = [
+                f"{ctx['geo_summary']['hole_count']} holes" if ctx["geo_summary"].get("hole_count") else None,
+                f"{ctx['geo_summary']['thickness_in']} in thick" if ctx["geo_summary"].get("thickness_in") else None,
+                ctx["geo_summary"].get("material"),
+            ]
+            geo_notes = [str(note).strip() for note in geo_notes if note]
+
+        top_processes_raw = data.get("top_processes") if isinstance(data.get("top_processes"), list) else []
+        top_processes: list[dict[str, float]] = []
+        for entry in top_processes_raw:
+            if not isinstance(entry, dict):
+                continue
+            name_val = str(entry.get("name") or "").strip()
+            usd_val = _to_float(entry.get("usd"))
+            if name_val and usd_val is not None:
+                top_processes.append({"name": name_val, "usd": usd_val})
+        if not top_processes:
+            top_processes = []
+            for proc in ctx["rollup"].get("top_processes", []):
+                name_val = str(proc.get("name") or "").strip()
+                usd_val = _to_float(proc.get("usd"))
+                if name_val and usd_val is not None:
+                    top_processes.append({"name": name_val, "usd": usd_val})
+
+        material_section = data.get("material") if isinstance(data.get("material"), dict) else {}
+        scrap_val = _to_float(material_section.get("scrap_pct"))
+        if scrap_val is None:
+            scrap_val = float(ctx["scrap_pct"])
+        material_struct = {
+            "source": str(material_section.get("source") or material_source).strip() or material_source,
+            "scrap_pct": round(float(scrap_val), 1),
+        }
+
+        explanation = data.get("explanation") if isinstance(data.get("explanation"), str) else ""
+        explanation = explanation.strip()
+
+        if not explanation:
+            top_text = ""
+            if top_processes:
+                top_bits = [
+                    f"{proc['name']} ${proc['usd']:.0f}"
+                    for proc in top_processes
+                    if proc.get("name") and _to_float(proc.get("usd")) is not None
+                ]
+                if top_bits:
+                    top_text = "Top processes: " + ", ".join(top_bits) + ". "
+
+            geo_text = ""
+            if geo_notes:
+                geo_text = "Geometry: " + ", ".join(geo_notes) + ". "
+
+            scrap_display = material_struct.get("scrap_pct", ctx["scrap_pct"])
+            try:
+                scrap_str = f"{float(scrap_display):.1f}"
+            except Exception:
+                scrap_str = str(scrap_display)
+
+            material_text = ""
+            if material_struct.get("source"):
+                material_text = f"Material via {material_struct['source']}; scrap {scrap_str}% applied."
+            else:
+                material_text = f"Scrap {scrap_str}% applied."
+
+            explanation = (
+                f"Labor ${labor_cost:.2f} ({drivers[0]['pct_of_subtotal']:.1f}%) and directs "
+                f"${direct_costs:.2f} ({drivers[1]['pct_of_subtotal']:.1f}%) drive cost. "
+                + top_text
+                + geo_text
+                + material_text
+            ).strip()
+
+        return explanation
+
+    if not model_path or not os.path.isfile(model_path):
+        return _render_explanation()
+
     system_prompt = (
-        "You are a helpful manufacturing estimator. In 1-3 sentences explain the main cost "
-        "drivers for this quote based strictly on the provided numbers. Do not invent costs "
-        "that are zero. Return JSON only: {\"explanation\": \"...\"}."
+        "You are a manufacturing estimator. Using ONLY the provided fields, produce a concise JSON explanation.\n"
+        "Do not invent numbers. Mention the biggest cost buckets and key geometry drivers if present.\n\n"
+        "Return JSON only:\n"
+        "{\n"
+        '  "explanation": "…1–3 sentences…",\n'
+        '  "drivers": [\n'
+        '    {"label":"Labor","usd": <number>,"pct_of_subtotal": <number>},\n'
+        '    {"label":"Directs","usd": <number>,"pct_of_subtotal": <number>}\n'
+        "  ],\n"
+        '  "top_processes": [{"name":"drilling","usd": <number>}],\n'
+        '  "geo_notes": ["<e.g., 163 holes in 0.25 in steel>"],\n'
+        '  "material": {"source":"<string>","scrap_pct": <number>}\n'
+        "}"
     )
-    user_prompt = f"```json\n{json.dumps(summary, indent=2)}\n```"
+
+    user_prompt = "```json\n" + json.dumps(ctx, indent=2, sort_keys=True) + "\n```"
 
     try:
-        llm = _LocalLLM(model_path)  # your local wrapper
-        parsed, _raw_text, _usage = llm.ask_json(
+        llm = _LocalLLM(model_path)
+        parsed, raw_text, _usage = llm.ask_json(
             system_prompt,
             user_prompt,
             temperature=0.4,
             max_tokens=256,
-
-            context={
-                "purpose": "quote_explanation",
-                "summary_keys": list(summary.keys()),
-            },
-
+            context=ctx,
         )
-        if (
-            isinstance(parsed, dict)
-            and isinstance(parsed.get("explanation", ""), str)
-            and parsed["explanation"].strip()
-        ):
-            return parsed["explanation"].strip()
-        return _fallback()
+        return _render_explanation(parsed, raw_text)
     except Exception:
-        return _fallback()
+        return _render_explanation()
 
 
 # ==== LLM DECISION ENGINE =====================================================
@@ -7847,7 +8115,7 @@ class ScrollableFrame(ttk.Frame):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("CAD Quoter ï¿½ SINGLE FILE (v8, LLM default ON)")
+        self.title("Compos-AI")
         self.geometry("1260x900")
 
         self.vars_df = None
@@ -7856,6 +8124,12 @@ class App(tk.Tk):
         self.params = PARAMS_DEFAULT.copy()
         self.rates = RATES_DEFAULT.copy()
         self.quote_state = QuoteState()
+        self.settings_path = Path(__file__).with_name("app_settings.json")
+        self.settings = self._load_settings()
+        if isinstance(self.settings, dict):
+            vendor_csv = str(self.settings.get("material_vendor_csv", "") or "")
+            if vendor_csv:
+                self.params["MaterialVendorCSVPath"] = vendor_csv
 
         # LLM defaults: ON + auto model discovery
         default_model = find_default_qwen_model()
@@ -7877,6 +8151,9 @@ class App(tk.Tk):
         file_menu.add_command(label="Load Overrides...", command=self.load_overrides)
         file_menu.add_command(label="Save Overrides...", command=self.save_overrides)
         file_menu.add_separator()
+        file_menu.add_command(label="Set Material Vendor CSV...", command=self.set_material_vendor_csv)
+        file_menu.add_command(label="Clear Material Vendor CSV", command=self.clear_material_vendor_csv)
+        file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.quit)
         
         help_menu = tk.Menu(menubar, tearoff=0)
@@ -7890,16 +8167,22 @@ class App(tk.Tk):
         ttk.Button(top, text="1. Load CAD & Vars", command=self.open_flow).pack(side="left", padx=5)
         ttk.Button(top, text="2. Generate Quote", command=self.gen_quote).pack(side="left", padx=5)
         ttk.Button(top, text="LLM Inspector", command=self.open_llm_inspector).pack(side="left", padx=5)
-        self.scrap_var = tk.StringVar(value="Scrap %: –")
-        ttk.Label(top, textvariable=self.scrap_var).pack(side="right", padx=5)
 
         # Tabs
         self.nb = ttk.Notebook(self); self.nb.pack(fill="both", expand=True)
         self.tab_geo = ttk.Frame(self.nb); self.nb.add(self.tab_geo, text="GEO")
         self.tab_editor = ttk.Frame(self.nb); self.nb.add(self.tab_editor, text="Quote Editor")
-        self.tab_suggestions = ttk.Frame(self.nb); self.nb.add(self.tab_suggestions, text="Suggestions")
         self.editor_scroll = ScrollableFrame(self.tab_editor)
         self.editor_scroll.pack(fill="both", expand=True)
+        self.adjustments_section = ttk.Labelframe(self.tab_editor, text="Adjustments", padding=(10, 5))
+        self.adjustments_section.pack(fill="both", expand=True, padx=10, pady=8)
+        sugg_top = ttk.Frame(self.adjustments_section)
+        sugg_top.pack(fill="x")
+        self.suggestions_status = tk.StringVar(value="No suggestions yet.")
+        ttk.Label(sugg_top, textvariable=self.suggestions_status).pack(side="left")
+        ttk.Button(sugg_top, text="Apply & Reprice", command=self.apply_and_reprice).pack(side="right")
+        self.suggestions_scroll = ScrollableFrame(self.adjustments_section)
+        self.suggestions_scroll.pack(fill="both", expand=True, pady=(6, 0))
         self.tab_out = ttk.Frame(self.nb); self.nb.add(self.tab_out, text="Output")
         self.tab_llm = ttk.Frame(self)
 
@@ -7908,6 +8191,7 @@ class App(tk.Tk):
         self.param_vars = {}
         self.rate_vars = {}
         self.editor_widgets_frame = None
+        self.suggestion_widgets: dict[str, dict[str, Any]] = {}
 
         # Status Bar
         self.status_var = tk.StringVar(value="Ready")
@@ -7916,16 +8200,6 @@ class App(tk.Tk):
 
         # GEO (single pane; CAD open handled by top bar)
         self.geo_txt = tk.Text(self.tab_geo, wrap="word"); self.geo_txt.pack(fill="both", expand=True)
-
-        sugg_top = ttk.Frame(self.tab_suggestions)
-        sugg_top.pack(fill="x", padx=10, pady=5)
-        self.suggestions_status = tk.StringVar(value="No suggestions yet.")
-        ttk.Label(sugg_top, textvariable=self.suggestions_status).pack(side="left")
-        ttk.Button(sugg_top, text="Apply & Reprice", command=self.apply_and_reprice).pack(side="right")
-        self.suggestions_scroll = ScrollableFrame(self.tab_suggestions)
-        self.suggestions_scroll.pack(fill="both", expand=True)
-        self.suggestion_widgets: dict[str, dict[str, Any]] = {}
-
 
         # LLM (hidden frame is still built to keep functionality without a visible tab)
         if hasattr(self, "_build_llm"):
@@ -7942,6 +8216,52 @@ class App(tk.Tk):
         except tk.TclError:
             self.out_txt.tag_configure("rcol", tabs=("4.8i right",))
         #self.out_txt = tk.Text(self.tab_out, wrap="word", font=("Consolas", 10)); self.out_txt.pack(fill="both", expand=True)
+
+    def _load_settings(self) -> dict[str, Any]:
+        path = getattr(self, "settings_path", None)
+        if not isinstance(path, Path):
+            return {}
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+        return {}
+
+    def _save_settings(self) -> None:
+        path = getattr(self, "settings_path", None)
+        if not isinstance(path, Path):
+            return
+        try:
+            path.write_text(json.dumps(self.settings, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def set_material_vendor_csv(self) -> None:
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="Select Material Vendor CSV",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        if not isinstance(self.settings, dict):
+            self.settings = {}
+        self.settings["material_vendor_csv"] = path
+        self.params["MaterialVendorCSVPath"] = path
+        self._save_settings()
+        self.status_var.set(f"Material vendor CSV set to {path}")
+
+    def clear_material_vendor_csv(self) -> None:
+        if not isinstance(self.settings, dict):
+            self.settings = {}
+        self.settings["material_vendor_csv"] = ""
+        self.params["MaterialVendorCSVPath"] = ""
+        self._save_settings()
+        self.status_var.set("Material vendor CSV cleared.")
 
     def _populate_editor_tab(self, df: pd.DataFrame) -> None:
         df = coerce_or_make_vars_df(df)
@@ -8124,7 +8444,7 @@ class App(tk.Tk):
         current_row += 1
         comm_keys = [
             "OverheadPct", "GA_Pct", "MarginPct", "ContingencyPct",
-            "ExpeditePct", "VendorMarkupPct", "InsurancePct", "MinLotCharge", "Quantity", "MaterialVendorCSVPath",
+            "ExpeditePct", "VendorMarkupPct", "InsurancePct", "MinLotCharge", "Quantity",
         ]
         create_global_entries(comm_frame, comm_keys, self.params, self.param_vars)
 
@@ -8403,7 +8723,7 @@ class App(tk.Tk):
 
         rows = iter_suggestion_rows(self.quote_state)
         if not rows:
-            self.suggestions_status.set("No suggestions yet. Generate a quote to populate this panel.")
+            self.suggestions_status.set("No suggestions yet. Generate a quote to populate this section.")
             ttk.Label(frame, text="No adjustable suggestions available.").grid(row=0, column=0, sticky="w", padx=10, pady=10)
             return
 
@@ -8550,7 +8870,7 @@ class App(tk.Tk):
 
     def apply_and_reprice(self):
         if self.vars_df is None:
-            messagebox.showinfo("Suggestions", "Load CAD and run an initial quote before repricing.")
+            messagebox.showinfo("Adjustments", "Load CAD and run an initial quote before repricing.")
             return
         self.gen_quote(reuse_suggestions=True)
 
@@ -8616,37 +8936,37 @@ class App(tk.Tk):
                 pass
 
     def open_llm_inspector(self):
+        import json
         import tkinter as tk
-        from tkinter import ttk, scrolledtext, messagebox
+        from tkinter import scrolledtext, messagebox
+        from pathlib import Path
 
-        files = sorted(LLM_DEBUG_DIR.glob("llm_snapshot_*.json"))
+        debug_dir = Path(__file__).with_name("llm_debug")
+        files = sorted(debug_dir.glob("llm_snapshot_*.json"))
         if not files:
             messagebox.showinfo("LLM Inspector", "No snapshots yet.")
             return
 
-        data = json.loads(files[-1].read_text(encoding="utf-8"))
+        latest = files[-1]
+        try:
+            raw = latest.read_text(encoding="utf-8")
+            try:
+                data = json.loads(raw)
+                shown = json.dumps(data, indent=2)
+            except Exception:
+                shown = raw
+        except Exception as e:
+            messagebox.showerror("LLM Inspector", f"Failed to read: {e}")
+            return
 
         win = tk.Toplevel(self)
-        win.title(f"LLM Inspector — {files[-1].name}")
+        win.title(f"LLM Inspector — {latest.name}")
         win.geometry("900x700")
 
-        nb = ttk.Notebook(win)
-        nb.pack(fill="both", expand=True)
-
-        def add_tab(title, payload):
-            frame = ttk.Frame(nb)
-            nb.add(frame, text=title)
-            txt = scrolledtext.ScrolledText(frame, wrap="word")
-            txt.pack(fill="both", expand=True)
-            txt.insert("1.0", json.dumps(payload, indent=2))
-            txt.configure(state="disabled")
-
-        add_tab("Request/messages", data.get("request", {}))
-        add_tab("Context Payload", data.get("request", {}).get("context_payload", {}))
-        add_tab("Raw Response Text", {"text": data.get("raw_response_text", "")})
-        add_tab("Parsed Response", data.get("parsed_response", {}))
-        add_tab("Applied", data.get("applied", {}))
-        add_tab("Usage", data.get("usage", {}))
+        txt = scrolledtext.ScrolledText(win, wrap="word")
+        txt.pack(fill="both", expand=True)
+        txt.insert("1.0", shown)
+        txt.configure(state="disabled")
 
     # ----- Flow + Output -----
     def _log_geo(self, d):
@@ -8681,6 +9001,7 @@ class App(tk.Tk):
                 self.vars_df,
                 params=self.params,
                 rates=self.rates,
+                material_vendor_csv=self.settings.get("material_vendor_csv", "") if isinstance(self.settings, dict) else "",
                 llm_enabled=self.llm_enabled.get(),
                 llm_model_path=self.llm_model_path.get().strip() or None,
                 geo=self.geo,
@@ -8697,19 +9018,6 @@ class App(tk.Tk):
         report = render_quote(res, currency="$", show_zeros=False, llm_explanation=llm_explanation)
         self.out_txt.delete("1.0", "end")
         self.out_txt.insert("end", report, "rcol")
-
-        breakdown = res.get("breakdown", {}) or {}
-        scrap_pct = breakdown.get("scrap_pct")
-        if scrap_pct is None:
-            scrap_pct = (breakdown.get("material", {}) or {}).get("scrap_pct")
-        if scrap_pct is not None:
-            try:
-                pct_val = float(scrap_pct) * 100.0
-                self.scrap_var.set(f"Scrap %: {pct_val:.1f}%")
-            except Exception:
-                self.scrap_var.set("Scrap %: –")
-        else:
-            self.scrap_var.set("Scrap %: –")
 
         self._refresh_suggestions_panel()
         self.nb.select(self.tab_out)
