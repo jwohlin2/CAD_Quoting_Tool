@@ -46,6 +46,37 @@ def _normalize_lookup_key(value: str) -> str:
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
+def _ensure_scrap_pct(val) -> float:
+    """
+    Coerce UI/LLM scrap into a sane fraction in [0, 0.25].
+    Accepts 15 (percent) or 0.15 (fraction).
+    """
+
+    try:
+        x = float(val)
+    except Exception:
+        return 0.0
+    if x > 1.0:  # looks like %
+        x = x / 100.0
+    if not (x >= 0.0 and math.isfinite(x)):
+        return 0.0
+    return min(0.25, max(0.0, x))
+
+
+def _match_items_contains(items: pd.Series, pattern: str) -> pd.Series:
+    """
+    Case-insensitive regex match over Items.
+    Convert capturing groups to non-capturing to avoid pandas warning.
+    Fall back to literal if regex fails.
+    """
+
+    pat = _to_noncapturing(pattern) if "_to_noncapturing" in globals() else pattern
+    try:
+        return items.str.contains(pat, case=False, regex=True, na=False)
+    except Exception:
+        return items.str.contains(re.escape(pattern), case=False, regex=True, na=False)
+
+
 def parse_llm_json(text: str):
     """
     Accepts raw model text. Strips ``` fences, grabs the first {...} block,
@@ -4756,7 +4787,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     dtt   = df["Data Type / Input Method"].astype(str).str.lower()
     # --- lookups --------------------------------------------------------------
     def contains(pattern: str):
-        return items.str.contains(pattern, case=False, regex=True, na=False)
+        return _match_items_contains(items, pattern)
 
     def first_num(pattern: str, default: float = 0.0) -> float:
         m = contains(pattern)
@@ -4877,7 +4908,8 @@ def compute_quote_from_df(df: pd.DataFrame,
     # ---- material ------------------------------------------------------------
     vol_cm3       = first_num(r"\b(?:Net\s*Volume|Volume_net|Volume\s*\(cm\^?3\))\b", GEO_vol_mm3 / 1000.0)
     density_g_cc  = first_num(r"\b(?:Density|Material\s*Density)\b", 14.5)
-    scrap_pct     = num_pct(r"\b(?:Scrap\s*%|Expected\s*Scrap)\b", 0.0)
+    scrap_pct_raw = num_pct(r"\b(?:Scrap\s*%|Expected\s*Scrap)\b", 0.0)
+    scrap_pct = _ensure_scrap_pct(scrap_pct_raw)
     material_name_raw = sheet_text(r"(?i)Material\s*(?:Name|Grade|Alloy|Type)")
     if not material_name_raw:
         fallback_name = strv(r"(?i)^Material$", "")
@@ -4889,6 +4921,21 @@ def compute_quote_from_df(df: pd.DataFrame,
     if material_name:
         geo_context.setdefault("material", material_name)
     material_name = str(geo_context.get("material") or material_name or "").strip()
+
+    # --- SCRAP BASELINE (always defined) ---
+    try:
+        ui_scrap_val = ui_vars.get("Scrap Percent (%)") if "ui_vars" in locals() else None
+    except Exception:
+        ui_scrap_val = None
+
+    if ui_scrap_val is None:
+        try:
+            mask = df["Item"].astype(str).str.fullmatch(r"Scrap Percent \(%\)", case=False, na=False)
+            ui_scrap_val = float(df.loc[mask, "Example Values / Options"].iloc[0])
+        except Exception:
+            ui_scrap_val = 0.0
+
+    scrap_pct_baseline = _ensure_scrap_pct(ui_scrap_val)
 
     if is_plate_2d:
         length_in_val = _coerce_float_or_none(ui_vars.get("Plate Length (in)"))
@@ -4987,20 +5034,21 @@ def compute_quote_from_df(df: pd.DataFrame,
         material_detail_for_breakdown["provider_cost"] = float(provider_cost)
 
     if is_plate_2d:
-        scrap_frac = float(scrap_pct or 0.0)
         mat_for_price = geo_context.get("material") or material_name
         try:
             mat_usd_per_kg, mat_src = resolve_material_unit_price(mat_for_price, unit="kg")
         except Exception:
             mat_usd_per_kg, mat_src = 0.0, ""
         mat_usd_per_kg = float(mat_usd_per_kg or 0.0)
-        material_cost = mass_kg * (1.0 + scrap_frac) * mat_usd_per_kg
+        effective_scrap_source = scrap_pct if scrap_pct else scrap_pct_baseline
+        effective_scrap = _ensure_scrap_pct(effective_scrap_source)
+        material_cost = mass_kg * (1.0 + effective_scrap) * mat_usd_per_kg
         material_direct_cost = round(material_cost, 2)
         material_detail_for_breakdown.update({
             "material_name": mat_for_price,
             "mass_g_net": mass_kg * 1000.0,
-            "mass_g": mass_kg * 1000.0 * (1.0 + scrap_frac),
-            "scrap_pct": scrap_frac,
+            "mass_g": mass_kg * 1000.0 * (1.0 + effective_scrap),
+            "scrap_pct": effective_scrap,
             "unit_price_usd_per_kg": mat_usd_per_kg,
             "unit_price_per_g": mat_usd_per_kg / 1000.0 if mat_usd_per_kg else material_detail_for_breakdown.get("unit_price_per_g", 0.0),
             "unit_price_usd_per_lb": (mat_usd_per_kg / LB_PER_KG) if mat_usd_per_kg else material_detail_for_breakdown.get("unit_price_usd_per_lb"),
@@ -5008,6 +5056,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         })
         material_detail_for_breakdown["material_cost"] = material_direct_cost
         material_detail_for_breakdown["material_direct_cost"] = material_direct_cost
+        scrap_pct = effective_scrap
 
     # ---- programming / cam / dfm --------------------------------------------
     prog_hr = sum_time(r"(?:Programming|2D\s*CAM|3D\s*CAM|Simulation|Verification|DFM|Setup\s*Sheets)", exclude_pattern=r"\bCMM\b")
@@ -5529,7 +5578,6 @@ def compute_quote_from_df(df: pd.DataFrame,
     if avg_hole_diam_override and avg_hole_diam_override > 0:
         geo_payload["avg_hole_diam_override_mm"] = float(avg_hole_diam_override)
     quote_state.geo = dict(geo_payload)
-    scrap_pct_baseline = float(features.get("scrap_pct", scrap_pct) or 0.0)
 
     llm_geo_payload: dict[str, Any] = {
         "hole_count": hole_count_for_tripwire,
@@ -5593,6 +5641,13 @@ def compute_quote_from_df(df: pd.DataFrame,
     effective_struct = quote_state.effective
     effective_sources = quote_state.effective_sources
     overrides = effective_to_overrides(effective_struct, quote_state.baseline)
+
+    effective_scrap_val = scrap_pct_baseline
+    if isinstance(effective_struct, dict) and effective_struct.get("scrap_pct") is not None:
+        effective_scrap_val = effective_struct.get("scrap_pct")
+    elif isinstance(quote_state.suggestions, dict) and quote_state.suggestions.get("scrap_pct") is not None:
+        effective_scrap_val = quote_state.suggestions.get("scrap_pct")
+    scrap_pct = _ensure_scrap_pct(effective_scrap_val)
 
     llm_notes: list[str] = []
     suggestion_notes = []
@@ -5734,11 +5789,11 @@ def compute_quote_from_df(df: pd.DataFrame,
     material_direct_cost_base = material_direct_cost
     fixture_material_cost_base = fixture_material_cost
 
-    old_scrap = float(features.get("scrap_pct", scrap_pct) or 0.0)
+    old_scrap = _ensure_scrap_pct(features.get("scrap_pct", scrap_pct))
     new_scrap = overrides.get("scrap_pct_override") if overrides else None
     if new_scrap is not None:
-        new_scrap = clamp(new_scrap, 0.0, 0.25, old_scrap)
-        if new_scrap is not None and not math.isclose(new_scrap, old_scrap, abs_tol=1e-6):
+        new_scrap = _ensure_scrap_pct(new_scrap)
+        if not math.isclose(new_scrap, old_scrap, abs_tol=1e-6):
             baseline = float(features.get("material_cost_baseline", material_direct_cost_base))
             scaled = baseline * ((1.0 + new_scrap) / max(1e-6, (1.0 + old_scrap)))
             scaled = round(scaled, 2)
@@ -5755,6 +5810,8 @@ def compute_quote_from_df(df: pd.DataFrame,
             elif src_tag == "llm":
                 suffix = " (LLM)"
             llm_notes.append(f"Scrap {old_scrap * 100:.1f}% → {new_scrap * 100:.1f}%{suffix}")
+
+    material_detail_for_breakdown["scrap_pct"] = scrap_pct
 
     src_mult_map = {}
     if isinstance(quote_state.effective_sources, dict):
