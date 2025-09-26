@@ -3135,6 +3135,78 @@ def _resolve_executable_path(exe: str) -> str:
     return resolved or ""
 
 
+def _collect_command_tokens(parts: Sequence[str]) -> set[str]:
+    tokens: set[str] = set()
+    for raw in parts:
+        if not raw:
+            continue
+        cleaned = str(raw).strip().strip("\"'")
+        if not cleaned:
+            continue
+        lowered = cleaned.lower()
+        tokens.add(lowered)
+        tokens.add(Path(cleaned).name.lower())
+        if "=" in lowered:
+            tokens.update(seg for seg in lowered.split("=") if seg)
+        if ":" in lowered and not lowered.startswith("\\\\"):
+            tokens.update(seg for seg in lowered.split(":"))
+    return tokens
+
+
+def _looks_like_imagemagick_output(stdout: str = "", stderr: str = "") -> bool:
+    text = f"{stdout}\n{stderr}".lower()
+    if not text.strip():
+        return False
+    keywords = (
+        "imagemagick",
+        "magick:",
+        "convert:",
+        "im4java",
+        "unknown option '-background'",
+        "unrecognized option '-background'",
+        "no decode delegate for this image format",
+        "invalid argument for option '-background'",
+    )
+    return any(word in text for word in keywords)
+
+
+def _imagemagick_misconfiguration_hint(cmd: Sequence[str], stdout: str = "", stderr: str = "") -> str | None:
+    """Return a descriptive hint if the command/output looks like ImageMagick."""
+
+    tokens = _collect_command_tokens(cmd)
+    if tokens & DWG_CONVERTER_BANNED_EXEC_TOKENS or tokens & DWG_CONVERTER_BANNED_ARG_TOKENS:
+        return (
+            "Selected DWG converter command still appears to be ImageMagick/convert.\n"
+            f"cmd: {' '.join(cmd)}\n"
+            "Please point ODA_CONVERTER_EXE or DWG2DXF_EXE to a real DWG→DXF tool."
+        )
+    if _looks_like_imagemagick_output(stdout, stderr):
+        sample = stderr.strip() or stdout.strip()
+        excerpt = sample.splitlines()[:5]
+        snippet = "\n".join(excerpt)
+        if snippet:
+            snippet = textwrap.indent(snippet, "    ")
+        return (
+            "Converter output looks like ImageMagick/convert, which cannot read DWG files.\n"
+            f"cmd: {' '.join(cmd)}\n"
+            f"stderr/stdout excerpt:\n{snippet}\n"
+            "Set ODA_CONVERTER_EXE (recommended) or DWG2DXF_EXE to a DWG→DXF converter that accepts <input.dwg> <output.dxf>."
+        )
+    return None
+
+
+DWG_CONVERTER_BANNED_EXEC_TOKENS = {
+    "convert",
+    "convert.exe",
+    "magick",
+    "magick.exe",
+    "imagemagick",
+    "imagemagick.exe",
+}
+
+DWG_CONVERTER_BANNED_ARG_TOKENS = {"-background", "--background"}
+
+
 def convert_dwg_to_dxf(dwg_path: str, *, out_ver="ACAD2013") -> str:
     """
     Robust DWG?DXF wrapper.
@@ -3146,15 +3218,8 @@ def convert_dwg_to_dxf(dwg_path: str, *, out_ver="ACAD2013") -> str:
     the exact command used on failure.
     """
     # 1) find converter (and sanitize env misconfigurations)
-    banned_names = {
-        "convert",
-        "convert.exe",
-        "magick",
-        "magick.exe",
-        "imagemagick",
-        "imagemagick.exe",
-    }
-    banned_fragments = (" -background", " --background", " imagemagick", " magick ")
+    banned_names = DWG_CONVERTER_BANNED_EXEC_TOKENS
+    banned_arg_tokens = DWG_CONVERTER_BANNED_ARG_TOKENS
     ignored_reasons: List[str] = []
 
     def _consider_candidate(raw: str | None, label: str, *, track_missing: bool = True):
@@ -3163,16 +3228,8 @@ def convert_dwg_to_dxf(dwg_path: str, *, out_ver="ACAD2013") -> str:
         exe_token, extra_tokens = _split_command_tokens(raw)
         if not exe_token:
             return None
-        tokens_lower = [Path(exe_token).name.lower()]
-        tokens_lower.extend(
-            Path(tok.strip("\"' ")).name.lower()
-            for tok in extra_tokens
-            if tok and not tok.startswith("-")
-        )
-        command_blob = " ".join([exe_token] + extra_tokens).lower()
-        if any(tok in banned_names for tok in tokens_lower) or any(
-            frag in command_blob for frag in banned_fragments
-        ):
+        token_set = _collect_command_tokens([exe_token, *extra_tokens])
+        if token_set & banned_names or token_set & banned_arg_tokens:
             ignored_reasons.append(
                 f"{label}: ignored because it looks like an ImageMagick command ({raw})."
             )
@@ -3251,23 +3308,23 @@ def convert_dwg_to_dxf(dwg_path: str, *, out_ver="ACAD2013") -> str:
             # ? generic exe that accepts <in> <out>
             cmd = [exe, *extra_args, str(dwg), str(out_dxf)]
 
-        cmd_blob = " ".join(cmd).lower()
-        if any(frag in cmd_blob for frag in banned_fragments) or any(
-            name in cmd_blob for name in banned_names
-        ):
-            raise RuntimeError(
-                "Selected DWG converter command still appears to be ImageMagick/convert.\n"
-                f"cmd: {' '.join(cmd)}\n"
-                "Please point ODA_CONVERTER_EXE or DWG2DXF_EXE to a real DWG→DXF tool."
-            )
+        hint = _imagemagick_misconfiguration_hint(cmd)
+        if hint:
+            raise RuntimeError(hint)
 
         proc = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        post_hint = _imagemagick_misconfiguration_hint(cmd, proc.stdout, proc.stderr)
+        if post_hint:
+            raise RuntimeError(post_hint)
         if os.environ.get("DWG_DEBUG", "0") == "1":
             print(f"[DWG2DXF] ok: {' '.join(cmd)}")
     except subprocess.CalledProcessError as e:
         if os.environ.get("DWG_DEBUG", "0") == "1":
             print(f"[DWG2DXF] fail: {' '.join(cmd)}\nstdout:\n{e.stdout}\nstderr:\n{e.stderr}")
         hint = ""
+        im_hint = _imagemagick_misconfiguration_hint(cmd, e.stdout, e.stderr)
+        if im_hint:
+            raise RuntimeError(im_hint) from e
         if ignored_reasons:
             detail = "\n".join(f"- {msg}" for msg in ignored_reasons)
             hint = f"\nIgnored candidates before failure:\n{detail}"
@@ -3281,10 +3338,12 @@ def convert_dwg_to_dxf(dwg_path: str, *, out_ver="ACAD2013") -> str:
     # 2) resolve the produced DXF
     produced = out_dxf if out_dxf.exists() else (out_dir / (dwg.stem + ".dxf"))
     if not produced.exists():
+        missing_hint = _imagemagick_misconfiguration_hint(cmd, getattr(proc, "stdout", ""), getattr(proc, "stderr", ""))
+        extra = f"\n{missing_hint}" if missing_hint else ""
         raise RuntimeError(
             "Converter returned success but DXF not found.\n"
             f"cmd: {' '.join(cmd)}\n"
-            f"checked: {out_dxf} | {produced}"
+            f"checked: {out_dxf} | {produced}" + extra
         )
     return str(produced)
 
