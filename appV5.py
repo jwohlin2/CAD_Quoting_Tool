@@ -15,6 +15,8 @@ Single-file CAD Quoter (v8)
 from __future__ import annotations
 
 import json, math, os, time
+from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import Path
 
 LLM_DEBUG = bool(int(os.getenv("LLM_DEBUG", "1")))   # set 0 to disable
@@ -29,7 +31,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 import urllib.request
 from importlib import import_module
-from typing import Any, Dict
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from OCP.TopAbs   import TopAbs_EDGE, TopAbs_FACE
 from OCP.TopExp   import TopExp, TopExp_Explorer
 from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
@@ -64,6 +66,1430 @@ def parse_llm_json(text: str):
             return json.loads(frag2)
         except Exception:
             return {}
+
+
+def bin_diams_mm(diams: Iterable[float | int | None], step: float = 0.1) -> Dict[float, int]:
+    """Return a histogram of diameters rounded to ``step`` millimetres.
+
+    ``None`` values and non-numeric entries are ignored.  The resulting
+    dictionary is sorted by quantity descending (and diameter ascending when
+    counts match) so callers can easily present the most common tool families
+    first in downstream UI tables or LLM payloads.
+    """
+
+    if step <= 0:
+        raise ValueError("step must be positive")
+
+    counter: Counter[float] = Counter()
+    for value in diams:
+        if value is None:
+            continue
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            continue
+        counter[round(num / step) * step] += 1
+
+    return dict(sorted(counter.items(), key=lambda item: (-item[1], item[0])))
+
+
+try:  # Optional dependency – ezdxf may be missing in some environments.
+    import ezdxf  # type: ignore
+except Exception as _ezdxf_exc:  # pragma: no cover - import guard
+    ezdxf = None  # type: ignore
+    _EZDXF_IMPORT_ERROR: Exception | None = _ezdxf_exc
+else:  # pragma: no cover - exercised when ezdxf is installed
+    _EZDXF_IMPORT_ERROR = None
+
+
+_INSUNITS_TO_MM = {
+    0: 1.0,
+    1: 25.4,
+    2: 304.8,
+    3: 914.4,
+    4: 1.0,
+    5: 10.0,
+    6: 1000.0,
+    7: 1.0,
+    8: 0.0254,
+    9: 0.0000254,
+    10: 1_000_000.0,
+}
+
+
+def _require_ezdxf() -> None:
+    if ezdxf is None:  # pragma: no cover - defensive guard
+        raise RuntimeError(
+            "ezdxf is required for DXF parsing but is not installed"
+        ) from _EZDXF_IMPORT_ERROR
+
+
+def _unit_scale(doc) -> float:
+    insunits = int((doc.header.get("$INSUNITS", 4)) if doc else 4)
+    return float(_INSUNITS_TO_MM.get(insunits, 1.0))
+
+
+def read_dxf(path: str):
+    """Load ``path`` with :mod:`ezdxf` and return the document object."""
+
+    _require_ezdxf()
+    path = str(path)
+    if not Path(path).exists():
+        raise FileNotFoundError(path)
+    return ezdxf.readfile(path)
+
+
+def extract_entities(doc) -> Dict[str, Any]:
+    """Return a deterministic feature summary for ``doc``."""
+
+    scale = _unit_scale(doc)
+    bbox_info = contours_from_polylines(doc, _scale=scale)
+    holes = holes_from_circles(doc, _scale=scale)
+    lines = text_harvest(doc)
+
+    provenance: List[Dict[str, Any]] = []
+    if bbox_info.get("bbox_mm"):
+        provenance.append({"field": "bbox_mm", "source": "dxf_poly"})
+
+    return {
+        "bbox_mm": bbox_info.get("bbox_mm"),
+        "perimeter_mm": bbox_info.get("perimeter_mm"),
+        "hole_diams_mm": holes,
+        "lines": lines,
+        "provenance": provenance,
+    }
+
+
+def text_harvest(doc) -> List[str]:
+    """Collect text strings from TEXT/MTEXT entities (including blocks)."""
+
+    if doc is None:
+        return []
+
+    lines: List[str] = []
+    msp = doc.modelspace()
+
+    def _append_text(entity) -> None:
+        if entity is None:
+            return
+        try:
+            if entity.dxftype() == "MTEXT":
+                text = entity.plain_text()
+            else:
+                text = entity.dxf.text
+        except Exception:
+            text = None
+        if text:
+            for frag in str(text).splitlines():
+                frag = frag.strip()
+                if frag:
+                    lines.append(frag)
+
+    for entity in msp:
+        etype = entity.dxftype()
+        if etype in {"TEXT", "MTEXT"}:
+            _append_text(entity)
+        elif etype == "INSERT":
+            try:
+                for sub in entity.virtual_entities():
+                    if sub.dxftype() in {"TEXT", "MTEXT"}:
+                        _append_text(sub)
+            except Exception:
+                continue
+
+    return lines
+
+
+def contours_from_polylines(
+    doc,
+    *,
+    _scale: float | None = None,
+) -> Dict[str, Any]:
+    """Compute bounding box and perimeter from closed polylines."""
+
+    if doc is None:
+        return {"bbox_mm": None, "perimeter_mm": None}
+
+    scale = float(_scale or _unit_scale(doc))
+    msp = doc.modelspace()
+
+    def _iter_points(entity) -> Sequence[Tuple[float, float]]:
+        if entity.dxftype() == "LWPOLYLINE":
+            return [
+                (float(x) * scale, float(y) * scale)
+                for x, y, *_ in entity.get_points("xy")
+            ]
+        if entity.dxftype() == "POLYLINE":
+            return [
+                (float(v.dxf.location.x) * scale, float(v.dxf.location.y) * scale)
+                for v in entity.vertices()
+            ]
+        return []
+
+    def _polygon_area(pts: Sequence[Tuple[float, float]]) -> float:
+        if len(pts) < 3:
+            return 0.0
+        area = 0.0
+        for (x1, y1), (x2, y2) in zip(pts, pts[1:] + pts[:1]):
+            area += x1 * y2 - x2 * y1
+        return area / 2.0
+
+    def _perimeter(pts: Sequence[Tuple[float, float]]) -> float:
+        if len(pts) < 2:
+            return 0.0
+        per = 0.0
+        for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
+            per += math.hypot(x2 - x1, y2 - y1)
+        per += math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1])
+        return per
+
+    best_pts: Sequence[Tuple[float, float]] = []
+    best_area = 0.0
+    total_perimeter = 0.0
+
+    for entity in msp:
+        if entity.dxftype() not in {"LWPOLYLINE", "POLYLINE"}:
+            continue
+        closed = bool(getattr(entity, "closed", False))
+        if entity.dxftype() == "POLYLINE":
+            closed = bool(entity.is_closed)
+        if not closed:
+            continue
+        pts = list(_iter_points(entity))
+        if len(pts) < 3:
+            continue
+        area = abs(_polygon_area(pts))
+        total_perimeter += _perimeter(pts)
+        if area > best_area:
+            best_pts = pts
+            best_area = area
+
+    if not best_pts:
+        return {"bbox_mm": None, "perimeter_mm": None}
+
+    xs = [p[0] for p in best_pts]
+    ys = [p[1] for p in best_pts]
+    bbox_mm = [max(xs) - min(xs), max(ys) - min(ys)]
+
+    return {"bbox_mm": bbox_mm, "perimeter_mm": total_perimeter}
+
+
+def holes_from_circles(doc, *, _scale: float | None = None) -> List[float]:
+    """Return diameters (mm) for CIRCLE entities and full arcs."""
+
+    if doc is None:
+        return []
+
+    scale = float(_scale or _unit_scale(doc))
+    msp = doc.modelspace()
+    holes: List[float] = []
+
+    def _maybe_add(radius: float) -> None:
+        if radius <= 0:
+            return
+        holes.append(2.0 * float(radius) * scale)
+
+    for entity in msp:
+        etype = entity.dxftype()
+        if etype == "CIRCLE":
+            _maybe_add(float(entity.dxf.radius))
+        elif etype == "ARC":
+            start = float(entity.dxf.start_angle)
+            end = float(entity.dxf.end_angle)
+            sweep = (end - start) % 360.0
+            if math.isclose(sweep, 360.0, abs_tol=1e-3):
+                _maybe_add(float(entity.dxf.radius))
+
+    return holes
+
+
+def read_step(path: str) -> "TopoDS_Shape":
+    """Wrapper around :func:`read_step_shape` with extra validation."""
+
+    shape = read_step_shape(str(path))
+    if shape is None or shape.IsNull():
+        raise RuntimeError("STEP produced an empty shape")
+    return shape
+
+
+def compute_mass_props(shape) -> Dict[str, float | None]:
+    """Return volume/area mass properties for ``shape``."""
+
+    if shape is None or (hasattr(shape, "IsNull") and shape.IsNull()):
+        raise ValueError("shape must be a valid TopoDS_Shape")
+
+    surf_props = GProp_GProps()
+    BRepGProp.SurfaceProperties_s(shape, surf_props)
+    area = float(surf_props.Mass())
+
+    vol_props = GProp_GProps()
+    BRepGProp.VolumeProperties_s(shape, vol_props)
+    volume = float(vol_props.Mass())
+
+    return {"volume_mm3": volume, "area_mm2": area, "mass_kg": None}
+
+
+def find_cylindrical_faces(shape) -> List[Dict[str, Any]]:
+    """Return cylindrical faces with basic geometric descriptors."""
+
+    results: List[Dict[str, Any]] = []
+    if shape is None or (hasattr(shape, "IsNull") and shape.IsNull()):
+        return results
+
+    try:
+        from OCP.GeomAbs import GeomAbs_Cylinder  # type: ignore
+    except Exception:
+        from OCC.Core.GeomAbs import GeomAbs_Cylinder  # type: ignore
+
+    explorer = TopExp_Explorer(shape, TopAbs_FACE)
+    while explorer.More():
+        try:
+            face = ensure_face(explorer.Current())
+        except Exception:
+            explorer.Next()
+            continue
+
+        try:
+            surf_adaptor = _BAS(face)
+            st = surf_adaptor.GetType()
+        except Exception:
+            explorer.Next()
+            continue
+
+        if st != GeomAbs_Cylinder:
+            explorer.Next()
+            continue
+
+        try:
+            cylinder = surf_adaptor.Cylinder()
+            axis = cylinder.Axis()
+            loc = axis.Location()
+            direction = axis.Direction()
+            results.append(
+                {
+                    "face": face,
+                    "r_mm": float(cylinder.Radius()),
+                    "axis": [loc.X(), loc.Y(), loc.Z()],
+                    "dir": [direction.X(), direction.Y(), direction.Z()],
+                }
+            )
+        except Exception:
+            pass
+
+        explorer.Next()
+
+    return results
+
+
+def detect_through_holes(shape, cyl_faces: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Best-effort through-hole classification from cylindrical faces."""
+
+    holes: List[Dict[str, Any]] = []
+    if shape is None or (hasattr(shape, "IsNull") and shape.IsNull()):
+        return holes
+
+    for idx, entry in enumerate(cyl_faces):
+        radius = float(entry.get("r_mm", 0.0))
+        axis = entry.get("axis")
+        direction = entry.get("dir")
+        holes.append(
+            {
+                "dia_mm": radius * 2.0 if radius else None,
+                "depth_mm": None,
+                "thru": None,
+                "axis": {"origin": axis, "dir": direction},
+                "face_id": idx,
+                "source": "step_cyl",
+            }
+        )
+
+    return holes
+
+
+def find_planar_pockets(shape) -> List[Dict[str, Any]]:
+    """Return planar faces as pocket placeholders with area estimates."""
+
+    pockets: List[Dict[str, Any]] = []
+    if shape is None or (hasattr(shape, "IsNull") and shape.IsNull()):
+        return pockets
+
+    try:
+        from OCP.GeomAbs import GeomAbs_Plane  # type: ignore
+    except Exception:
+        from OCC.Core.GeomAbs import GeomAbs_Plane  # type: ignore
+
+    explorer = TopExp_Explorer(shape, TopAbs_FACE)
+    while explorer.More():
+        try:
+            face = ensure_face(explorer.Current())
+        except Exception:
+            explorer.Next()
+            continue
+
+        try:
+            surf_adaptor = _BAS(face)
+            st = surf_adaptor.GetType()
+        except Exception:
+            explorer.Next()
+            continue
+
+        if st != GeomAbs_Plane:
+            explorer.Next()
+            continue
+
+        try:
+            props = GProp_GProps()
+            BRepGProp.SurfaceProperties_s(face, props)
+            pockets.append(
+                {
+                    "depth_mm": None,
+                    "floor_area_mm2": float(props.Mass()),
+                    "source": "step_planar",
+                }
+            )
+        except Exception:
+            pass
+
+        explorer.Next()
+
+    return pockets
+
+
+def render_step_thumbs(shape, out_dir: str) -> Dict[str, str]:
+    raise RuntimeError("STEP thumbnail rendering is not supported in this environment")
+
+
+@dataclass
+class QuoteState:
+    geo: dict = field(default_factory=dict)
+    ui_vars: dict = field(default_factory=dict)
+    rates: dict = field(default_factory=dict)
+    baseline: dict = field(default_factory=dict)
+    llm_raw: dict = field(default_factory=dict)
+    suggestions: dict = field(default_factory=dict)
+    user_overrides: dict = field(default_factory=dict)
+    effective: dict = field(default_factory=dict)
+    effective_sources: dict = field(default_factory=dict)
+    accept_llm: dict = field(default_factory=dict)
+    bounds: dict = field(default_factory=dict)
+    material_source: str | None = None
+
+
+def _as_float_or_none(value: Any) -> float | None:
+    try:
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if not cleaned:
+                return None
+            return float(cleaned)
+    except Exception:
+        return None
+    return None
+
+
+def _sanitize_llm_suggestions(
+    raw: dict | None,
+    baseline: dict | None,
+    bounds: dict | None,
+) -> tuple[dict, list[str], list[str]]:
+    """Clamp/process raw LLM output into the internal suggestions structure."""
+
+    raw = raw or {}
+    baseline = baseline or {}
+    bounds = bounds or {}
+
+    mult_min = _as_float_or_none(bounds.get("mult_min")) or 0.5
+    mult_max = _as_float_or_none(bounds.get("mult_max")) or 3.0
+    adder_max = _as_float_or_none(bounds.get("adder_max_hr")) or 5.0
+    scrap_min = max(0.0, _as_float_or_none(bounds.get("scrap_min")) or 0.0)
+    scrap_max = _as_float_or_none(bounds.get("scrap_max")) or 0.25
+
+    sanitized: dict[str, Any] = {}
+    clamp_notes: list[str] = []
+    warnings: list[str] = []
+
+    baseline_proc = {}
+    for key, value in (baseline.get("process_hours") or {}).items():
+        val = _as_float_or_none(value)
+        if val is not None:
+            baseline_proc[str(key)] = float(val)
+
+    # Process hour multipliers
+    mults_clean: dict[str, float] = {}
+    if isinstance(raw.get("process_hour_multipliers"), dict):
+        for proc, value in raw["process_hour_multipliers"].items():
+            proc_name = str(proc)
+            val = _as_float_or_none(value)
+            if val is None:
+                clamp_notes.append(f"process_hour_multipliers[{proc_name}] non-numeric")
+                continue
+            clamped = max(mult_min, min(mult_max, float(val)))
+            if not math.isclose(clamped, float(val), rel_tol=1e-6, abs_tol=1e-6):
+                clamp_notes.append(
+                    f"process_hour_multipliers[{proc_name}] {float(val):.3f} → {clamped:.3f}"
+                )
+            mults_clean[proc_name] = clamped
+    if mults_clean:
+        sanitized["process_hour_multipliers"] = mults_clean
+
+    # Process hour adders
+    adders_clean: dict[str, float] = {}
+    if isinstance(raw.get("process_hour_adders"), dict):
+        for proc, value in raw["process_hour_adders"].items():
+            proc_name = str(proc)
+            val = _as_float_or_none(value)
+            if val is None:
+                clamp_notes.append(f"process_hour_adders[{proc_name}] non-numeric")
+                continue
+            clamped = max(0.0, min(adder_max, float(val)))
+            if not math.isclose(clamped, float(val), rel_tol=1e-6, abs_tol=1e-6):
+                clamp_notes.append(
+                    f"process_hour_adders[{proc_name}] {float(val):.3f} → {clamped:.3f}"
+                )
+            if clamped > 0:
+                adders_clean[proc_name] = clamped
+    if adders_clean:
+        sanitized["process_hour_adders"] = adders_clean
+
+    scrap_val = _as_float_or_none(raw.get("scrap_pct"))
+    if scrap_val is not None:
+        clamped = max(scrap_min, min(scrap_max, float(scrap_val)))
+        if not math.isclose(clamped, float(scrap_val), rel_tol=1e-6, abs_tol=1e-6):
+            clamp_notes.append(f"scrap_pct {float(scrap_val):.3f} → {clamped:.3f}")
+        sanitized["scrap_pct"] = clamped
+
+    setups_val = _as_float_or_none(raw.get("setups"))
+    if setups_val is not None:
+        clamped_int = int(max(1, min(4, round(setups_val))))
+        if not math.isclose(float(clamped_int), float(setups_val), abs_tol=1e-6):
+            clamp_notes.append(f"setups {float(setups_val):.3f} → {clamped_int}")
+        sanitized["setups"] = clamped_int
+
+    fixture_val = raw.get("fixture")
+    if isinstance(fixture_val, str) and fixture_val.strip():
+        sanitized["fixture"] = fixture_val.strip()[:200]
+
+    notes_val = raw.get("notes")
+    if isinstance(notes_val, list):
+        clean_notes: list[str] = []
+        for note in notes_val:
+            if isinstance(note, str):
+                text = note.strip()
+                if text:
+                    clean_notes.append(text[:200])
+        if clean_notes:
+            sanitized["notes"] = clean_notes
+
+    # Warning on extreme hour shifts
+    base_total = sum(baseline_proc.values())
+    if base_total > 1e-6:
+        total = 0.0
+        for proc, base_hr in baseline_proc.items():
+            mult = mults_clean.get(proc, 1.0)
+            total += base_hr * mult
+        for proc, add_hr in adders_clean.items():
+            total += float(add_hr)
+        ratio = total / base_total if base_total else 1.0
+        if ratio > 3.0 or ratio < 0.6:
+            warn_msg = (
+                f"Process hours shift {base_total:.2f}h → {total:.2f}h ({ratio:.2f}×); review"
+            )
+            warnings.append(warn_msg)
+            sanitized["_warning"] = warn_msg
+
+    return sanitized, clamp_notes, warnings
+
+
+def sanitize_suggestions(
+    raw: dict | None,
+    bounds: dict | None,
+    baseline: dict | None = None,
+) -> dict:
+    """Public sanitizer entry point that annotates clamp metadata in-place."""
+
+    sanitized, clamp_notes, warnings = _sanitize_llm_suggestions(raw, baseline, bounds)
+    if clamp_notes or warnings:
+        meta = sanitized.setdefault("_meta", {})
+        if clamp_notes:
+            meta.setdefault("clamp_notes", []).extend(clamp_notes)
+        if warnings:
+            meta.setdefault("warnings", []).extend(warnings)
+    return sanitized
+
+
+def build_llm_context(geo: dict, baseline: dict, rates: dict, bounds: dict) -> dict:
+    ctx = {
+        "geo": geo or {},
+        "baseline": baseline or {},
+        "rates": rates or {},
+        "bounds": bounds or {},
+    }
+    return ctx
+
+
+def request_llm_suggestions(model_path: str, context: dict) -> tuple[dict, dict]:
+    """Ask the local LLM for pricing suggestions following the contract."""
+
+    meta: dict[str, Any] = {
+        "raw_text": "",
+        "raw_json": {},
+        "clamp_notes": [],
+    }
+
+    suggestions: dict[str, Any] = {}
+
+    if not model_path or not os.path.isfile(model_path):
+        meta["error"] = "model_missing"
+        return suggestions, meta
+
+    try:
+        llm = _LocalLLM(model_path)
+    except Exception as exc:
+        meta["error"] = repr(exc)
+        return suggestions, meta
+
+    try:
+        payload_text = json.dumps(context, indent=2)
+    except TypeError:
+        payload_text = json.dumps(context, default=str, indent=2)
+
+    system_prompt = (
+        "You are a manufacturing estimator."
+        " Review the provided quote context and suggest bounded adjustments for"
+        " machining processes. Respond with JSON matching the contract:"
+        " {\"process_hour_multipliers\":{...}, \"process_hour_adders\":{...},"
+        " \"scrap_pct\":float, \"setups\":int, \"fixture\":str, \"notes\":[...]}."
+        " Respect the numeric bounds and do not include commentary outside JSON."
+    )
+
+    user_prompt = f"Context:\n```json\n{payload_text}\n```"
+
+    try:
+        parsed, raw_text, usage = llm.ask_json(
+            system_prompt,
+            user_prompt,
+            temperature=0.2,
+            max_tokens=512,
+            context=context,
+        )
+    except Exception as exc:
+        meta["error"] = repr(exc)
+        return suggestions, meta
+
+    meta["raw_text"] = raw_text or ""
+    if isinstance(usage, dict):
+        meta["usage"] = usage
+
+    if not isinstance(parsed, dict):
+        parsed = parse_llm_json(raw_text)
+
+    if isinstance(parsed, dict):
+        meta["raw_json"] = parsed
+        baseline_ctx = context.get("baseline") if isinstance(context, dict) else {}
+        bounds_ctx = context.get("bounds") if isinstance(context, dict) else {}
+        sanitized, clamp_notes, warnings = _sanitize_llm_suggestions(parsed, baseline_ctx, bounds_ctx)
+        suggestions = sanitized
+        if clamp_notes:
+            meta["clamp_notes"] = clamp_notes
+        if warnings:
+            meta["warnings"] = warnings
+    else:
+        meta["raw_json"] = {}
+
+    return suggestions, meta
+
+
+def _nested_get(data: dict | None, path: Tuple[str, ...], default: Any = None) -> Any:
+    cur = data or {}
+    for key in path:
+        if not isinstance(cur, dict):
+            return default
+        cur = cur.get(key)
+    return cur if cur is not None else default
+
+
+def _nested_set(data: dict, path: Tuple[str, ...], value: Any) -> None:
+    cur = data
+    for key in path[:-1]:
+        nxt = cur.get(key)
+        if not isinstance(nxt, dict):
+            nxt = {}
+            cur[key] = nxt
+        cur = nxt
+    cur[path[-1]] = value
+
+
+def _ensure_nested_bool(data: dict, path: Tuple[str, ...], default: bool = False) -> bool:
+    cur = data
+    for key in path[:-1]:
+        nxt = cur.get(key)
+        if not isinstance(nxt, dict):
+            nxt = {}
+            cur[key] = nxt
+        cur = nxt
+    leaf = cur.get(path[-1])
+    if not isinstance(leaf, bool):
+        cur[path[-1]] = bool(default)
+    return bool(cur[path[-1]])
+
+
+def _coerce_user_value(raw: Any, kind: str) -> Any:
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if raw == "":
+            return None
+    try:
+        if kind in {"float", "currency", "percent", "multiplier", "hours"}:
+            return float(raw)
+        if kind == "int":
+            return int(round(float(raw)))
+    except Exception:
+        return None
+    if kind == "text":
+        return str(raw)
+    return raw
+
+
+def _format_value(value: Any, kind: str) -> str:
+    if value is None:
+        return "–"
+    try:
+        if kind == "percent":
+            return f"{float(value) * 100:.1f}%"
+        if kind in {"float", "hours", "multiplier"}:
+            return f"{float(value):.3f}"
+        if kind == "currency":
+            return f"${float(value):,.2f}"
+        if kind == "int":
+            return f"{int(round(float(value)))}"
+    except Exception:
+        return str(value)
+    return str(value)
+
+
+def _format_entry_value(value: Any, kind: str) -> str:
+    if value is None:
+        return ""
+    try:
+        if kind == "int":
+            return str(int(round(float(value))))
+        if kind == "currency":
+            return f"{float(value):.2f}"
+        if kind in {"percent", "multiplier", "hours", "float"}:
+            return f"{float(value):.3f}"
+    except Exception:
+        return str(value)
+    return str(value)
+
+
+def overrides_to_suggestions(overrides: dict | None) -> dict:
+    overrides = overrides or {}
+    suggestions: dict[str, Any] = {}
+    if isinstance(overrides.get("process_hour_multipliers"), dict):
+        suggestions["process_hour_multipliers"] = dict(overrides["process_hour_multipliers"])
+    if isinstance(overrides.get("process_hour_adders"), dict):
+        suggestions["process_hour_adders"] = dict(overrides["process_hour_adders"])
+    if isinstance(overrides.get("add_pass_through"), dict):
+        suggestions["add_pass_through"] = dict(overrides["add_pass_through"])
+    if overrides.get("scrap_pct_override") is not None:
+        suggestions["scrap_pct"] = overrides.get("scrap_pct_override")
+    if overrides.get("fixture_material_cost_delta") is not None:
+        suggestions["fixture_material_cost_delta"] = overrides.get("fixture_material_cost_delta")
+    if overrides.get("contingency_pct_override") is not None:
+        suggestions["contingency_pct"] = overrides.get("contingency_pct_override")
+    setup_plan = overrides.get("setup_recommendation")
+    if isinstance(setup_plan, dict):
+        if setup_plan.get("setups") is not None:
+            suggestions["setups"] = setup_plan.get("setups")
+        if setup_plan.get("fixture") is not None:
+            suggestions["fixture"] = setup_plan.get("fixture")
+    elif overrides.get("setups") is not None:
+        suggestions["setups"] = overrides.get("setups")
+    if overrides.get("fixture") is not None:
+        suggestions["fixture"] = overrides.get("fixture")
+    if isinstance(overrides.get("notes"), list):
+        suggestions["notes"] = list(overrides["notes"])
+    return suggestions
+
+
+def suggestions_to_overrides(suggestions: dict | None) -> dict:
+    suggestions = suggestions or {}
+    out: dict[str, Any] = {}
+    phm = suggestions.get("process_hour_multipliers")
+    if isinstance(phm, dict):
+        out["process_hour_multipliers"] = dict(phm)
+    pha = suggestions.get("process_hour_adders")
+    if isinstance(pha, dict):
+        out["process_hour_adders"] = dict(pha)
+    apt = suggestions.get("add_pass_through")
+    if isinstance(apt, dict):
+        out["add_pass_through"] = dict(apt)
+    if suggestions.get("scrap_pct") is not None:
+        out["scrap_pct_override"] = suggestions.get("scrap_pct")
+    if suggestions.get("fixture_material_cost_delta") is not None:
+        out["fixture_material_cost_delta"] = suggestions.get("fixture_material_cost_delta")
+    if suggestions.get("contingency_pct") is not None:
+        out["contingency_pct_override"] = suggestions.get("contingency_pct")
+    setups = suggestions.get("setups")
+    fixture = suggestions.get("fixture")
+    if setups is not None or fixture is not None:
+        out["setup_recommendation"] = {}
+        if setups is not None:
+            out["setup_recommendation"]["setups"] = setups
+        if fixture is not None:
+            out["setup_recommendation"]["fixture"] = fixture
+    if isinstance(suggestions.get("notes"), list):
+        out["notes"] = list(suggestions["notes"])
+    return out
+
+
+def _collect_process_keys(*dicts: Iterable[dict]) -> set[str]:
+    keys: set[str] = set()
+    for d in dicts:
+        if isinstance(d, dict):
+            keys.update(str(k) for k in d.keys())
+    return keys
+
+
+def merge_effective(
+    baseline: dict | None,
+    suggestions: dict | None,
+    overrides: dict | None,
+) -> dict:
+    """Tri-state merge for baseline vs LLM suggestions vs user overrides."""
+
+    baseline = copy.deepcopy(baseline or {})
+    suggestions = suggestions or {}
+    overrides = overrides or {}
+
+    bounds = baseline.get("_bounds") if isinstance(baseline, dict) else None
+    if isinstance(bounds, dict):
+        bounds = {str(k): v for k, v in bounds.items()}
+    else:
+        bounds = {}
+
+    def _clamp(value: float, kind: str, label: str, source: str) -> tuple[float, bool]:
+        clamped = value
+        changed = False
+        if kind == "multiplier":
+            mult_min = _as_float_or_none(bounds.get("mult_min")) or 0.5
+            mult_max = _as_float_or_none(bounds.get("mult_max")) or 3.0
+            clamped = max(mult_min, min(mult_max, float(value)))
+        elif kind == "adder":
+            adder_max = _as_float_or_none(bounds.get("adder_max_hr")) or 5.0
+            clamped = max(0.0, min(adder_max, float(value)))
+        elif kind == "scrap":
+            scrap_min = max(0.0, _as_float_or_none(bounds.get("scrap_min")) or 0.0)
+            scrap_max = _as_float_or_none(bounds.get("scrap_max")) or 0.25
+            clamped = max(scrap_min, min(scrap_max, float(value)))
+        elif kind == "setups":
+            clamped = int(max(1, min(4, round(float(value)))))
+        if not math.isclose(float(clamped), float(value), rel_tol=1e-6, abs_tol=1e-6):
+            note = f"{label} {float(value):.3f} → {float(clamped):.3f} ({source})"
+            clamp_notes.append(note)
+            changed = True
+        return clamped, changed
+
+    eff = copy.deepcopy(baseline)
+    eff.pop("_bounds", None)
+    clamp_notes: list[str] = []
+    source_tags: dict[str, Any] = {}
+
+    baseline_hours_raw = baseline.get("process_hours") if isinstance(baseline.get("process_hours"), dict) else {}
+    baseline_hours: dict[str, float] = {}
+    for proc, hours in (baseline_hours_raw or {}).items():
+        val = _as_float_or_none(hours)
+        if val is not None:
+            baseline_hours[str(proc)] = float(val)
+
+    sugg_mult = suggestions.get("process_hour_multipliers") if isinstance(suggestions.get("process_hour_multipliers"), dict) else {}
+    over_mult = overrides.get("process_hour_multipliers") if isinstance(overrides.get("process_hour_multipliers"), dict) else {}
+    mult_keys = sorted(_collect_process_keys(baseline_hours, sugg_mult, over_mult))
+    final_hours: dict[str, float] = dict(baseline_hours)
+    final_mults: dict[str, float] = {}
+    mult_sources: dict[str, str] = {}
+    for proc in mult_keys:
+        base_hr = baseline_hours.get(proc, 0.0)
+        source = "baseline"
+        val = 1.0
+        if proc in over_mult and over_mult[proc] is not None:
+            cand = _as_float_or_none(over_mult.get(proc))
+            if cand is not None:
+                val = float(cand)
+                val, _ = _clamp(val, "multiplier", f"multiplier[{proc}]", "user override")
+                source = "user"
+        elif proc in sugg_mult and sugg_mult[proc] is not None:
+            cand = _as_float_or_none(sugg_mult.get(proc))
+            if cand is not None:
+                val = float(cand)
+                val, _ = _clamp(val, "multiplier", f"multiplier[{proc}]", "LLM")
+                source = "llm"
+        final_mults[proc] = float(val)
+        mult_sources[proc] = source
+        final_hours[proc] = float(base_hr) * float(val)
+
+    sugg_add = suggestions.get("process_hour_adders") if isinstance(suggestions.get("process_hour_adders"), dict) else {}
+    over_add = overrides.get("process_hour_adders") if isinstance(overrides.get("process_hour_adders"), dict) else {}
+    add_keys = sorted(_collect_process_keys(sugg_add, over_add))
+    final_adders: dict[str, float] = {}
+    add_sources: dict[str, str] = {}
+    for proc in add_keys:
+        source = "baseline"
+        add_val = 0.0
+        if proc in over_add and over_add[proc] is not None:
+            cand = _as_float_or_none(over_add.get(proc))
+            if cand is not None:
+                add_val = float(cand)
+                add_val, _ = _clamp(add_val, "adder", f"adder[{proc}]", "user override")
+                source = "user"
+        elif proc in sugg_add and sugg_add[proc] is not None:
+            cand = _as_float_or_none(sugg_add.get(proc))
+            if cand is not None:
+                add_val = float(cand)
+                add_val, _ = _clamp(add_val, "adder", f"adder[{proc}]", "LLM")
+                source = "llm"
+        if not math.isclose(add_val, 0.0, abs_tol=1e-9):
+            final_adders[proc] = add_val
+            final_hours[proc] = final_hours.get(proc, 0.0) + add_val
+        add_sources[proc] = source
+
+    sugg_pass = suggestions.get("add_pass_through") if isinstance(suggestions.get("add_pass_through"), dict) else {}
+    over_pass = overrides.get("add_pass_through") if isinstance(overrides.get("add_pass_through"), dict) else {}
+    pass_keys = sorted(_collect_process_keys(sugg_pass, over_pass))
+    final_pass: dict[str, float] = {}
+    pass_sources: dict[str, str] = {}
+    for key in pass_keys:
+        source = "baseline"
+        val = 0.0
+        if key in over_pass and over_pass[key] is not None:
+            cand = _as_float_or_none(over_pass.get(key))
+            if cand is not None:
+                val = float(cand)
+                source = "user"
+        elif key in sugg_pass and sugg_pass[key] is not None:
+            cand = _as_float_or_none(sugg_pass.get(key))
+            if cand is not None:
+                val = float(cand)
+                source = "llm"
+        if not math.isclose(val, 0.0, abs_tol=1e-9):
+            final_pass[key] = val
+        pass_sources[key] = source
+    eff["process_hour_multipliers"] = final_mults
+    if mult_sources:
+        source_tags["process_hour_multipliers"] = mult_sources
+    eff["process_hour_adders"] = final_adders
+    if add_sources:
+        source_tags["process_hour_adders"] = add_sources
+    if final_pass:
+        eff["add_pass_through"] = final_pass
+    if pass_sources:
+        source_tags["add_pass_through"] = pass_sources
+    eff["process_hours"] = {k: float(v) for k, v in final_hours.items() if abs(float(v)) > 1e-9}
+
+    scrap_base = baseline.get("scrap_pct")
+    scrap_user = overrides.get("scrap_pct") or overrides.get("scrap_pct_override")
+    scrap_sugg = suggestions.get("scrap_pct")
+    scrap_source = "baseline"
+    scrap_val = scrap_base if scrap_base is not None else 0.0
+    if scrap_user is not None:
+        cand = _as_float_or_none(scrap_user)
+        if cand is not None:
+            scrap_val = float(cand)
+            scrap_val, _ = _clamp(scrap_val, "scrap", "scrap_pct", "user override")
+            scrap_source = "user"
+    elif scrap_sugg is not None:
+        cand = _as_float_or_none(scrap_sugg)
+        if cand is not None:
+            scrap_val = float(cand)
+            scrap_val, _ = _clamp(scrap_val, "scrap", "scrap_pct", "LLM")
+            scrap_source = "llm"
+    eff["scrap_pct"] = float(scrap_val)
+    source_tags["scrap_pct"] = scrap_source
+
+    fixture_delta_user = overrides.get("fixture_material_cost_delta")
+    fixture_delta_sugg = suggestions.get("fixture_material_cost_delta")
+    fixture_delta_source = "baseline"
+    fixture_delta_val = None
+    if fixture_delta_user is not None:
+        cand = _as_float_or_none(fixture_delta_user)
+        if cand is not None:
+            fixture_delta_val = float(cand)
+            fixture_delta_source = "user"
+    elif fixture_delta_sugg is not None:
+        cand = _as_float_or_none(fixture_delta_sugg)
+        if cand is not None:
+            fixture_delta_val = float(cand)
+            fixture_delta_source = "llm"
+    if fixture_delta_val is not None:
+        eff["fixture_material_cost_delta"] = fixture_delta_val
+    source_tags["fixture_material_cost_delta"] = fixture_delta_source
+
+    contingency_base = baseline.get("contingency_pct")
+    contingency_user = overrides.get("contingency_pct") or overrides.get("contingency_pct_override")
+    contingency_sugg = suggestions.get("contingency_pct")
+    contingency_source = "baseline"
+    contingency_val = contingency_base if contingency_base is not None else None
+    if contingency_user is not None:
+        cand = _as_float_or_none(contingency_user)
+        if cand is not None:
+            contingency_val = float(cand)
+            contingency_val, _ = _clamp(contingency_val, "scrap", "contingency_pct", "user override")
+            contingency_source = "user"
+    elif contingency_sugg is not None:
+        cand = _as_float_or_none(contingency_sugg)
+        if cand is not None:
+            contingency_val = float(cand)
+            contingency_val, _ = _clamp(contingency_val, "scrap", "contingency_pct", "LLM")
+            contingency_source = "llm"
+    if contingency_val is not None:
+        eff["contingency_pct"] = float(contingency_val)
+        source_tags["contingency_pct"] = contingency_source
+
+    setups_base = baseline.get("setups") or 1
+    setups_user = overrides.get("setups")
+    setups_sugg = suggestions.get("setups")
+    setups_source = "baseline"
+    setups_val = setups_base
+    if setups_user is not None:
+        cand = _as_float_or_none(setups_user)
+        if cand is not None:
+            setups_val, _ = _clamp(cand, "setups", "setups", "user override")
+            setups_source = "user"
+    elif setups_sugg is not None:
+        cand = _as_float_or_none(setups_sugg)
+        if cand is not None:
+            setups_val, _ = _clamp(cand, "setups", "setups", "LLM")
+            setups_source = "llm"
+    eff["setups"] = int(setups_val)
+    source_tags["setups"] = setups_source
+
+    fixture_base = baseline.get("fixture")
+    fixture_user = overrides.get("fixture")
+    fixture_sugg = suggestions.get("fixture")
+    fixture_source = "baseline"
+    fixture_val = fixture_base
+    if isinstance(fixture_user, str) and fixture_user.strip():
+        fixture_val = fixture_user.strip()
+        fixture_source = "user"
+    elif isinstance(fixture_sugg, str) and fixture_sugg.strip():
+        fixture_val = fixture_sugg.strip()
+        fixture_source = "llm"
+    if fixture_val is not None:
+        eff["fixture"] = fixture_val
+    source_tags["fixture"] = fixture_source
+
+    notes_val = []
+    if isinstance(suggestions.get("notes"), list):
+        notes_val.extend([str(n).strip() for n in suggestions["notes"] if isinstance(n, str) and n.strip()])
+    if isinstance(overrides.get("notes"), list):
+        notes_val.extend([str(n).strip() for n in overrides["notes"] if isinstance(n, str) and n.strip()])
+    if notes_val:
+        eff["notes"] = notes_val
+
+    if clamp_notes:
+        eff["_clamp_notes"] = clamp_notes
+    eff["_source_tags"] = source_tags
+    return eff
+
+
+def compute_effective_state(state: QuoteState) -> tuple[dict, dict]:
+    baseline = state.baseline or {}
+    suggestions = state.suggestions or {}
+    overrides = state.user_overrides or {}
+    accept = state.accept_llm or {}
+
+    bounds = state.bounds or baseline.get("_bounds") or {}
+
+    applied: dict[str, Any] = {}
+
+    def include_bucket(bucket: str) -> dict:
+        data = suggestions.get(bucket)
+        if not isinstance(data, dict):
+            return {}
+        acc_map = accept.get(bucket)
+        result: dict[str, Any] = {}
+        for key, value in data.items():
+            if isinstance(acc_map, dict):
+                if not acc_map.get(key):
+                    continue
+            elif not accept.get(bucket):
+                continue
+            result[str(key)] = value
+        return result
+
+    for bucket in ("process_hour_multipliers", "process_hour_adders", "add_pass_through"):
+        selected = include_bucket(bucket)
+        if selected:
+            applied[bucket] = selected
+
+    for scalar_key in ("scrap_pct", "contingency_pct", "setups", "fixture"):
+        if scalar_key in suggestions and accept.get(scalar_key):
+            applied[scalar_key] = suggestions.get(scalar_key)
+
+    if "notes" in suggestions:
+        applied["notes"] = suggestions.get("notes")
+
+    baseline_for_merge = copy.deepcopy(baseline)
+    if bounds:
+        baseline_for_merge["_bounds"] = dict(bounds)
+
+    merged = merge_effective(baseline_for_merge, applied, overrides)
+    sources = merged.pop("_source_tags", {})
+    clamp_notes = merged.pop("_clamp_notes", None)
+    if clamp_notes:
+        log = state.llm_raw.setdefault("clamp_notes", [])
+        for note in clamp_notes:
+            if note not in log:
+                log.append(note)
+    state.effective = merged
+    state.effective_sources = sources
+    return merged, sources
+
+def reprice_with_effective(state: QuoteState) -> QuoteState:
+    """Recompute effective values and enforce guardrails before pricing."""
+
+    ensure_accept_flags(state)
+    merged, sources = compute_effective_state(state)
+    state.effective = merged
+    state.effective_sources = sources
+
+    # drilling floor guard
+    eff_hours = state.effective.get("process_hours") if isinstance(state.effective.get("process_hours"), dict) else {}
+    if eff_hours:
+        hole_count = 0
+        try:
+            hole_count = int(float(state.geo.get("hole_count", 0) or 0))
+        except Exception:
+            hole_count = 0
+        if hole_count <= 0:
+            holes = state.geo.get("hole_diams_mm")
+            if isinstance(holes, (list, tuple)):
+                hole_count = len(holes)
+        if hole_count > 0 and "drilling" in eff_hours:
+            current = _as_float_or_none(eff_hours.get("drilling")) or 0.0
+            floor_hr = _drilling_floor_hours(hole_count)
+            if current < floor_hr:
+                eff_hours["drilling"] = floor_hr
+                state.effective["process_hours"] = eff_hours
+                note = f"Raised drilling to floor for {hole_count} holes"
+                notes = state.effective.setdefault("notes", [])
+                if note not in notes:
+                    notes.append(note)
+    return state
+def build_narrative(state: QuoteState) -> str:
+    g = state.geo or {}
+    b = state.baseline or {}
+    e = state.effective or {}
+
+    def _as_int(val):
+        try:
+            return int(float(val))
+        except Exception:
+            return 0
+
+    holes = _as_int(g.get("hole_count"))
+    if holes <= 0:
+        holes = _as_int(g.get("hole_count_override"))
+    if holes <= 0:
+        diam_list = g.get("hole_diams_mm")
+        if isinstance(diam_list, (list, tuple)):
+            holes = len(diam_list)
+
+    thick_mm = _as_float_or_none(g.get("thickness_mm"))
+    if thick_mm is None:
+        thick_mm = _as_float_or_none(state.ui_vars.get("Thickness (in)"))
+        if thick_mm is not None:
+            thick_mm *= 25.4
+    mat = g.get("material") or state.ui_vars.get("Material") or "material"
+    mat = str(mat).title()
+
+    setups = int(_as_float_or_none(e.get("setups")) or _as_float_or_none(b.get("setups")) or 1)
+    scrap_pct = round(100.0 * float(_as_float_or_none(e.get("scrap_pct")) or 0.0), 1)
+
+    proc_hours = e.get("process_hours") if isinstance(e.get("process_hours"), dict) else {}
+    top = []
+    for name, hours in sorted(proc_hours.items(), key=lambda kv: kv[1], reverse=True)[:3]:
+        try:
+            top.append(f"{name} {float(hours):.2f} h")
+        except Exception:
+            continue
+    top_text = ", ".join(top) if top else "Baseline machining"
+
+    deltas: list[str] = []
+    base_hours = b.get("process_hours") if isinstance(b.get("process_hours"), dict) else {}
+    for proc, base_hr in base_hours.items():
+        try:
+            base_val = float(base_hr)
+            new_val = float(proc_hours.get(proc, 0.0))
+        except Exception:
+            continue
+        diff = new_val - base_val
+        if abs(diff) >= 0.01:
+            sign = "↑" if diff > 0 else "↓"
+            deltas.append(f"{proc} {sign}{abs(diff):.2f} h")
+    delta_text = ", ".join(deltas)
+
+    parts: list[str] = []
+    if holes and thick_mm:
+        parts.append(f"Plate in {mat}, thickness {thick_mm/25.4:.2f} in with {holes} holes.")
+    elif holes:
+        parts.append(f"Part with {holes} holes in {mat}.")
+    else:
+        parts.append(f"Part in {mat}.")
+    if setups > 1:
+        fixture = e.get("fixture") or b.get("fixture") or "standard"
+        parts.append(f"Estimated {setups} setups; fixture: {fixture}.")
+    parts.append(f"Major labor: {top_text}.")
+    if delta_text:
+        parts.append(f"Adjustments vs baseline: {delta_text}.")
+
+    material_source = state.material_source or "shop defaults"
+    parts.append(f"Material priced via {material_source}; scrap {scrap_pct}% applied.")
+
+    return " ".join(parts)
+
+
+def effective_to_overrides(effective: dict, baseline: dict | None = None) -> dict:
+    baseline = baseline or {}
+    out: dict[str, Any] = {}
+    mults = effective.get("process_hour_multipliers") if isinstance(effective.get("process_hour_multipliers"), dict) else {}
+    if mults:
+        cleaned = {k: float(v) for k, v in mults.items() if v is not None and not math.isclose(float(v), 1.0, rel_tol=1e-6, abs_tol=1e-6)}
+        if cleaned:
+            out["process_hour_multipliers"] = cleaned
+    adders = effective.get("process_hour_adders") if isinstance(effective.get("process_hour_adders"), dict) else {}
+    if adders:
+        cleaned_add = {k: float(v) for k, v in adders.items() if v is not None and not math.isclose(float(v), 0.0, abs_tol=1e-6)}
+        if cleaned_add:
+            out["process_hour_adders"] = cleaned_add
+    passes = effective.get("add_pass_through") if isinstance(effective.get("add_pass_through"), dict) else {}
+    if passes:
+        cleaned_pass = {k: float(v) for k, v in passes.items() if v is not None and not math.isclose(float(v), 0.0, abs_tol=1e-6)}
+        if cleaned_pass:
+            out["add_pass_through"] = cleaned_pass
+    scrap_eff = effective.get("scrap_pct")
+    scrap_base = baseline.get("scrap_pct")
+    if scrap_eff is not None and (scrap_base is None or not math.isclose(float(scrap_eff), float(scrap_base or 0.0), abs_tol=1e-6)):
+        out["scrap_pct_override"] = float(scrap_eff)
+    fixture_delta = effective.get("fixture_material_cost_delta")
+    if fixture_delta is not None and not math.isclose(float(fixture_delta), 0.0, abs_tol=1e-6):
+        out["fixture_material_cost_delta"] = float(fixture_delta)
+    contingency_eff = effective.get("contingency_pct")
+    contingency_base = baseline.get("contingency_pct")
+    if contingency_eff is not None and (contingency_base is None or not math.isclose(float(contingency_eff), float(contingency_base or 0.0), abs_tol=1e-6)):
+        out["contingency_pct_override"] = float(contingency_eff)
+    setups_eff = effective.get("setups")
+    fixture_eff = effective.get("fixture")
+    if setups_eff is not None or fixture_eff is not None:
+        out["setup_recommendation"] = {}
+        if setups_eff is not None:
+            out["setup_recommendation"]["setups"] = setups_eff
+        if fixture_eff is not None:
+            out["setup_recommendation"]["fixture"] = fixture_eff
+    return out
+
+
+def ensure_accept_flags(state: QuoteState) -> None:
+    suggestions = state.suggestions or {}
+    accept = state.accept_llm
+    if not isinstance(accept, dict):
+        state.accept_llm = {}
+        accept = state.accept_llm
+
+    for key in ("process_hour_multipliers", "process_hour_adders", "add_pass_through"):
+        sugg = suggestions.get(key)
+        if not isinstance(sugg, dict):
+            continue
+        bucket = accept.setdefault(key, {})
+        for subkey in sugg.keys():
+            if subkey not in bucket or not isinstance(bucket.get(subkey), bool):
+                bucket[subkey] = False
+        # remove stale keys
+        for stale in list(bucket.keys()):
+            if stale not in sugg:
+                bucket.pop(stale, None)
+
+    for key in ("scrap_pct", "fixture_material_cost_delta", "contingency_pct", "setups", "fixture"):
+        if key in suggestions and not isinstance(accept.get(key), bool):
+            accept[key] = False
+        if key not in suggestions and key in accept and not isinstance(accept.get(key), dict):
+            # keep user toggles if overrides exist even without suggestions
+            continue
+
+
+def iter_suggestion_rows(state: QuoteState) -> list[dict]:
+    rows: list[dict] = []
+    baseline = state.baseline or {}
+    suggestions = state.suggestions or {}
+    overrides = state.user_overrides or {}
+    effective = state.effective or {}
+    sources = state.effective_sources or {}
+    accept = state.accept_llm or {}
+
+    baseline_hours_raw = baseline.get("process_hours") if isinstance(baseline.get("process_hours"), dict) else {}
+    baseline_hours = {}
+    for key, value in (baseline_hours_raw or {}).items():
+        try:
+            if abs(float(value)) > 1e-6:
+                baseline_hours[key] = float(value)
+        except Exception:
+            continue
+    sugg_mult = suggestions.get("process_hour_multipliers") if isinstance(suggestions.get("process_hour_multipliers"), dict) else {}
+    over_mult = overrides.get("process_hour_multipliers") if isinstance(overrides.get("process_hour_multipliers"), dict) else {}
+    eff_mult = effective.get("process_hour_multipliers") if isinstance(effective.get("process_hour_multipliers"), dict) else {}
+    src_mult = sources.get("process_hour_multipliers") if isinstance(sources.get("process_hour_multipliers"), dict) else {}
+    keys_mult = sorted(_collect_process_keys(baseline_hours, sugg_mult, over_mult))
+    for key in keys_mult:
+        rows.append({
+            "path": ("process_hour_multipliers", key),
+            "label": f"Process × {key}",
+            "kind": "multiplier",
+            "baseline": 1.0,
+            "llm": sugg_mult.get(key),
+            "user": over_mult.get(key),
+            "accept": bool((accept.get("process_hour_multipliers") or {}).get(key)),
+            "effective": eff_mult.get(key, 1.0),
+            "source": src_mult.get(key, "baseline"),
+        })
+
+    sugg_add = suggestions.get("process_hour_adders") if isinstance(suggestions.get("process_hour_adders"), dict) else {}
+    over_add = overrides.get("process_hour_adders") if isinstance(overrides.get("process_hour_adders"), dict) else {}
+    eff_add = effective.get("process_hour_adders") if isinstance(effective.get("process_hour_adders"), dict) else {}
+    src_add = sources.get("process_hour_adders") if isinstance(sources.get("process_hour_adders"), dict) else {}
+    keys_add = sorted(_collect_process_keys(baseline_hours, sugg_add, over_add))
+    for key in keys_add:
+        rows.append({
+            "path": ("process_hour_adders", key),
+            "label": f"Process +hr {key}",
+            "kind": "hours",
+            "baseline": 0.0,
+            "llm": sugg_add.get(key),
+            "user": over_add.get(key),
+            "accept": bool((accept.get("process_hour_adders") or {}).get(key)),
+            "effective": eff_add.get(key, 0.0),
+            "source": src_add.get(key, "baseline"),
+        })
+
+    sugg_pass = suggestions.get("add_pass_through") if isinstance(suggestions.get("add_pass_through"), dict) else {}
+    over_pass = overrides.get("add_pass_through") if isinstance(overrides.get("add_pass_through"), dict) else {}
+    base_pass = baseline.get("pass_through") if isinstance(baseline.get("pass_through"), dict) else {}
+    eff_pass = effective.get("add_pass_through") if isinstance(effective.get("add_pass_through"), dict) else {}
+    src_pass = sources.get("add_pass_through") if isinstance(sources.get("add_pass_through"), dict) else {}
+    keys_pass = sorted(_collect_process_keys(base_pass, sugg_pass, over_pass))
+    for key in keys_pass:
+        base_amount = base_pass.get(key)
+        label = f"Pass-through Δ {key}"
+        if base_amount not in (None, ""):
+            try:
+                label = f"{label} (base {_format_value(base_amount, 'currency')})"
+            except Exception:
+                pass
+        rows.append({
+            "path": ("add_pass_through", key),
+            "label": label,
+            "kind": "currency",
+            "baseline": 0.0,
+            "llm": sugg_pass.get(key),
+            "user": over_pass.get(key),
+            "accept": bool((accept.get("add_pass_through") or {}).get(key)),
+            "effective": eff_pass.get(key, 0.0),
+            "source": src_pass.get(key, "baseline"),
+        })
+
+    scrap_base = baseline.get("scrap_pct")
+    scrap_llm = suggestions.get("scrap_pct")
+    scrap_user = overrides.get("scrap_pct")
+    scrap_eff = effective.get("scrap_pct")
+    scrap_src = sources.get("scrap_pct", "baseline")
+    if any(v is not None for v in (scrap_base, scrap_llm, scrap_user)):
+        rows.append({
+            "path": ("scrap_pct",),
+            "label": "Scrap %",
+            "kind": "percent",
+            "baseline": scrap_base,
+            "llm": scrap_llm,
+            "user": scrap_user,
+            "accept": bool(accept.get("scrap_pct")),
+            "effective": scrap_eff,
+            "source": scrap_src,
+        })
+
+    cont_base = baseline.get("contingency_pct")
+    cont_llm = suggestions.get("contingency_pct")
+    cont_user = overrides.get("contingency_pct")
+    cont_eff = effective.get("contingency_pct")
+    cont_src = sources.get("contingency_pct", "baseline")
+    if any(v is not None for v in (cont_base, cont_llm, cont_user)):
+        rows.append({
+            "path": ("contingency_pct",),
+            "label": "Contingency %",
+            "kind": "percent",
+            "baseline": cont_base,
+            "llm": cont_llm,
+            "user": cont_user,
+            "accept": bool(accept.get("contingency_pct")),
+            "effective": cont_eff,
+            "source": cont_src,
+        })
+
+    fixture_delta_llm = suggestions.get("fixture_material_cost_delta")
+    fixture_delta_user = overrides.get("fixture_material_cost_delta")
+    fixture_delta_eff = effective.get("fixture_material_cost_delta")
+    fixture_delta_src = sources.get("fixture_material_cost_delta", "baseline")
+    if any(v is not None for v in (fixture_delta_llm, fixture_delta_user, fixture_delta_eff)):
+        rows.append({
+            "path": ("fixture_material_cost_delta",),
+            "label": "Fixture material Δ",
+            "kind": "currency",
+            "baseline": 0.0,
+            "llm": fixture_delta_llm,
+            "user": fixture_delta_user,
+            "accept": bool(accept.get("fixture_material_cost_delta")),
+            "effective": fixture_delta_eff or 0.0,
+            "source": fixture_delta_src,
+        })
+
+    setups_base = baseline.get("setups")
+    setups_llm = suggestions.get("setups")
+    setups_user = overrides.get("setups")
+    setups_eff = effective.get("setups")
+    setups_src = sources.get("setups", "baseline")
+    if any(v is not None for v in (setups_base, setups_llm, setups_user)):
+        rows.append({
+            "path": ("setups",),
+            "label": "Setups",
+            "kind": "int",
+            "baseline": setups_base,
+            "llm": setups_llm,
+            "user": setups_user,
+            "accept": bool(accept.get("setups")),
+            "effective": setups_eff,
+            "source": setups_src,
+        })
+
+    fixture_base = baseline.get("fixture")
+    fixture_llm = suggestions.get("fixture")
+    fixture_user = overrides.get("fixture")
+    fixture_eff = effective.get("fixture")
+    fixture_src = sources.get("fixture", "baseline")
+    if any(v is not None for v in (fixture_base, fixture_llm, fixture_user, fixture_eff)):
+        rows.append({
+            "path": ("fixture",),
+            "label": "Fixture plan",
+            "kind": "text",
+            "baseline": fixture_base,
+            "llm": fixture_llm,
+            "user": fixture_user,
+            "accept": bool(accept.get("fixture")),
+            "effective": fixture_eff,
+            "source": fixture_src,
+        })
+
+    return rows
 
 
 MATERIAL_DROPDOWN_OPTIONS = [
@@ -397,6 +1823,17 @@ try:
         _HAS_ODAFC = True
 except Exception:
     _HAS_ODAFC = False
+
+# Hole chart helpers (optional)
+try:
+    from hole_table_parser import parse_hole_table_lines
+except Exception:
+    parse_hole_table_lines = None
+
+try:
+    from dxf_text_extract import extract_text_lines_from_dxf
+except Exception:
+    extract_text_lines_from_dxf = None
 
 # numpy is optional for a few small calcs; degrade gracefully if missing
 try:
@@ -2599,6 +4036,20 @@ def render_quote(
     row("Total Direct Costs:", float(totals.get("direct_costs", 0.0)))
     lines.append("")
 
+    narrative = result.get("narrative") or breakdown.get("narrative")
+    if narrative:
+        lines.append("Why this price")
+        lines.append(divider)
+        if isinstance(narrative, str):
+            parts = [seg.strip() for seg in re.split(r"(?<=\.)\s+", narrative) if seg.strip()]
+            if not parts:
+                parts = [narrative.strip()]
+        else:
+            parts = [str(line).strip() for line in narrative if str(line).strip()]
+        for line in parts:
+            write_line(line, "  ")
+        lines.append("")
+
     # ---- material & stock (compact; shown only if we actually have data) -----
     mat_lines = []
     if material:
@@ -3255,7 +4706,9 @@ def compute_quote_from_df(df: pd.DataFrame,
                           llm_enabled: bool = True,
                           llm_model_path: str | None = None,
                           geo: dict[str, Any] | None = None,
-                          ui_vars: dict[str, Any] | None = None) -> Dict[str, Any]:
+                          ui_vars: dict[str, Any] | None = None,
+                          quote_state: QuoteState | None = None,
+                          reuse_suggestions: bool = False) -> Dict[str, Any]:
     """
     Estimator that consumes variables from the sheet (Item, Example Values / Options, Data Type / Input Method).
 
@@ -3286,7 +4739,14 @@ def compute_quote_from_df(df: pd.DataFrame,
             ui_vars = {}
     else:
         ui_vars = dict(ui_vars)
+    if quote_state is None:
+        quote_state = QuoteState()
+    quote_state.ui_vars = dict(ui_vars)
+    quote_state.rates = dict(rates)
     geo_context = dict(geo or {})
+    chart_ops_geo = geo_context.get("chart_ops") if isinstance(geo_context.get("chart_ops"), list) else None
+    chart_reconcile_geo = geo_context.get("chart_reconcile") if isinstance(geo_context.get("chart_reconcile"), dict) else None
+    chart_source_geo = geo_context.get("chart_source") if isinstance(geo_context.get("chart_source"), str) else None
     is_plate_2d = str(geo_context.get("kind", "")).lower() == "2d"
     if is_plate_2d:
         require_plate_inputs(geo_context, ui_vars)
@@ -3851,6 +5311,7 @@ def compute_quote_from_df(df: pd.DataFrame,
             pass_meta["Material"]["basis"] = f"{mat_symbol} via {mat_source}"
         else:
             pass_meta["Material"]["basis"] = f"Source: {mat_source}"
+    quote_state.material_source = pass_meta.get("Material", {}).get("basis") or mat_source or "shop defaults"
 
     pass_through = {
         "Material": material_direct_cost,
@@ -3865,6 +5326,39 @@ def compute_quote_from_df(df: pd.DataFrame,
     pass_through_baseline = {k: float(v) for k, v in pass_through.items()}
 
     fix_detail = nre_detail.get("fixture", {})
+    fixture_plan_desc = None
+    try:
+        fb = float(fixture_build_hr)
+    except Exception:
+        fb = 0.0
+    try:
+        fm = float(fixture_material_cost)
+    except Exception:
+        fm = 0.0
+    if fb or fm:
+        pieces: list[str] = []
+        if fb:
+            pieces.append(f"{fb:.2f} hr build")
+        if fm:
+            pieces.append(f"${fm:,.2f} material")
+        fixture_plan_desc = ", ".join(pieces)
+    strategy = fix_detail.get("strategy") if isinstance(fix_detail, dict) else None
+    if isinstance(strategy, str) and strategy.strip():
+        if fixture_plan_desc:
+            fixture_plan_desc = f"{fixture_plan_desc} ({strategy.strip()})"
+        else:
+            fixture_plan_desc = strategy.strip()
+
+    baseline_data = {
+        "process_hours": process_hours_baseline,
+        "pass_through": pass_through_baseline,
+        "scrap_pct": scrap_pct_baseline,
+        "setups": int(setups),
+        "contingency_pct": ContingencyPct,
+    }
+    if fixture_plan_desc:
+        baseline_data["fixture"] = fixture_plan_desc
+    quote_state.baseline = baseline_data
 
     def _clean_stock_entry(entry: dict[str, Any]) -> dict[str, Any]:
         cleaned: dict[str, Any] = {}
@@ -3965,6 +5459,15 @@ def compute_quote_from_df(df: pd.DataFrame,
         "part_mass_g_est": part_mass_g_est,
         "dfm_geo": dfm_geo,
     }
+    if chart_source_geo:
+        features["chart_source"] = chart_source_geo
+    if chart_ops_geo:
+        features["chart_ops"] = chart_ops_geo
+    if chart_reconcile_geo:
+        features["hole_chart_reconcile"] = chart_reconcile_geo
+        features["hole_chart_agreement"] = bool(chart_reconcile_geo.get("agreement"))
+        features["hole_chart_tap_qty"] = int(chart_reconcile_geo.get("tap_qty") or 0)
+        features["hole_chart_cbore_qty"] = int(chart_reconcile_geo.get("cbore_qty") or 0)
     hole_tool_sizes = sorted({round(x, 2) for x in hole_diams_list}) if hole_diams_list else []
     features.update({
         "is_2d": bool(is_plate_2d),
@@ -4025,52 +5528,84 @@ def compute_quote_from_df(df: pd.DataFrame,
         geo_payload["hole_count_override"] = int(round(hole_count_override))
     if avg_hole_diam_override and avg_hole_diam_override > 0:
         geo_payload["avg_hole_diam_override_mm"] = float(avg_hole_diam_override)
+    quote_state.geo = dict(geo_payload)
     scrap_pct_baseline = float(features.get("scrap_pct", scrap_pct) or 0.0)
-    llm_ctx = {
-        "geo": geo_payload,
-        "quote_vars": quote_inputs_ctx,
-        "rates": base_costs["rates"],
-        "baseline": {
-            "process_hours": process_hours_baseline,
-            "pass_through": pass_through_baseline,
-            "scrap_pct": scrap_pct_baseline,
-        },
-        "catalogs": {
-            "stock": stock_catalog,
-        },
-        "bounds": {
-            "mult_min": 0.5,
-            "mult_max": 3.0,
-            "add_hr_min": 0.0,
-            "add_hr_max": 5.0,
-            "scrap_min": 0.0,
 
-            "scrap_max": 0.25,
-        },
+    llm_geo_payload: dict[str, Any] = {
+        "hole_count": hole_count_for_tripwire,
     }
+    if hole_diams_ctx:
+        llm_geo_payload["hole_diams_mm"] = hole_diams_ctx
+    thickness_for_llm = _coerce_float_or_none(geo_context.get("thickness_mm"))
+    if thickness_for_llm is None:
+        thickness_for_llm = _coerce_float_or_none(features.get("thickness_mm"))
+    if thickness_for_llm is not None:
+        llm_geo_payload["thickness_mm"] = float(thickness_for_llm)
+    if bbox_info:
+        llm_geo_payload["bbox_mm"] = {k: float(v) for k, v in bbox_info.items() if _coerce_float_or_none(v) is not None}
+    if material_name:
+        llm_geo_payload["material"] = material_name
+    if chart_reconcile_geo:
+        groups_raw = chart_reconcile_geo.get("chart_bins") or {}
+        groups_clean = {str(k): int(v) for k, v in groups_raw.items()}
+        hole_chart_ctx = {
+            "groups_by_dia_mm": groups_clean,
+            "tap_qty": int(chart_reconcile_geo.get("tap_qty") or 0),
+            "cbore_qty": int(chart_reconcile_geo.get("cbore_qty") or 0),
+            "agreement": bool(chart_reconcile_geo.get("agreement")),
+            "entity_total": int(chart_reconcile_geo.get("entity_total") or 0),
+            "chart_total": int(chart_reconcile_geo.get("chart_total") or 0),
+        }
+        if chart_source_geo:
+            hole_chart_ctx["source"] = chart_source_geo
+        llm_geo_payload["hole_chart"] = hole_chart_ctx
 
-    overrides: dict[str, Any] = {}
+    llm_baseline_payload = {
+        "process_hours": process_hours_baseline,
+        "pass_through": pass_through_baseline,
+        "scrap_pct": scrap_pct_baseline,
+    }
+    llm_bounds = {
+        "mult_min": 0.5,
+        "mult_max": 3.0,
+        "adder_max_hr": 5.0,
+        "scrap_min": 0.0,
+        "scrap_max": 0.25,
+    }
+    llm_ctx = build_llm_context(llm_geo_payload, llm_baseline_payload, base_costs["rates"], llm_bounds)
+
+    suggestions_struct: dict[str, Any] = {}
     overrides_meta: dict[str, Any] = {}
-    if llm_enabled and llm_model_path:
-        try:
-            overrides, overrides_meta = get_llm_overrides(
-                llm_model_path,
-                features,
-                base_costs,
-                context_payload=llm_ctx,
-            )
-        except Exception:
-            overrides, overrides_meta = {}, {}
-    if not isinstance(overrides, dict):
-        overrides = {}
-    if not isinstance(overrides_meta, dict):
-        overrides_meta = {}
+    if reuse_suggestions and quote_state and quote_state.suggestions:
+        suggestions_struct = copy.deepcopy(quote_state.suggestions)
+        overrides_meta = dict(quote_state.llm_raw or {})
+    elif llm_enabled and llm_model_path:
+        new_suggestions, overrides_meta = request_llm_suggestions(llm_model_path, llm_ctx)
+        if isinstance(new_suggestions, dict):
+            suggestions_struct = copy.deepcopy(new_suggestions)
+    quote_state.llm_raw = dict(overrides_meta)
+    sanitized_struct = suggestions_struct if isinstance(suggestions_struct, dict) else {}
+    if sanitized_struct and not reuse_suggestions:
+        sanitized_struct = sanitize_suggestions(sanitized_struct, llm_bounds, llm_baseline_payload)
+    quote_state.suggestions = sanitized_struct if isinstance(sanitized_struct, dict) else {}
+    quote_state.bounds = dict(llm_bounds)
+    reprice_with_effective(quote_state)
+    effective_struct = quote_state.effective
+    effective_sources = quote_state.effective_sources
+    overrides = effective_to_overrides(effective_struct, quote_state.baseline)
 
     llm_notes: list[str] = []
-    for note in (overrides.get("notes") or []):
+    suggestion_notes = []
+    if isinstance(quote_state.suggestions, dict):
+        suggestion_notes = quote_state.suggestions.get("notes") or []
+    for note in list(suggestion_notes) + list(overrides.get("notes") or []):
         if isinstance(note, str) and note.strip():
             llm_notes.append(note.strip())
     notes_from_clamps = list(overrides_meta.get("clamp_notes", [])) if overrides_meta else []
+    if overrides_meta.get("warnings"):
+        for warn in overrides_meta["warnings"]:
+            if isinstance(warn, str) and warn.strip():
+                notes_from_clamps.append(warn.strip())
 
     drilling_groups = overrides.get("drilling_groups") if isinstance(overrides, dict) else None
     if isinstance(drilling_groups, list) and drilling_groups:
@@ -4142,7 +5677,21 @@ def compute_quote_from_df(df: pd.DataFrame,
             piece = f"Setups: {setups_i}" if setups_i else "Setups updated"
             if isinstance(fixture, str) and fixture.strip():
                 piece += f" ({fixture.strip()[:60]})"
-            llm_notes.append(piece)
+            suffix = ""
+            if isinstance(quote_state.effective_sources, dict):
+                if setups_i is not None:
+                    src_tag = quote_state.effective_sources.get("setups")
+                    if src_tag == "user":
+                        suffix = " (user override)"
+                    elif src_tag == "llm":
+                        suffix = " (LLM)"
+                elif fixture:
+                    src_tag = quote_state.effective_sources.get("fixture")
+                    if src_tag == "user":
+                        suffix = " (user override)"
+                    elif src_tag == "llm":
+                        suffix = " (LLM)"
+            llm_notes.append(piece + suffix)
 
     dfm_risks = overrides.get("dfm_risks") if isinstance(overrides, dict) else None
     if isinstance(dfm_risks, list) and dfm_risks:
@@ -4199,8 +5748,17 @@ def compute_quote_from_df(df: pd.DataFrame,
             entry["new_value"] = scaled
             features["scrap_pct"] = new_scrap
             scrap_pct = new_scrap
-            llm_notes.append(f"Scrap {old_scrap * 100:.1f}% → {new_scrap * 100:.1f}%")
+            src_tag = (quote_state.effective_sources.get("scrap_pct") if quote_state and isinstance(quote_state.effective_sources, dict) else None)
+            suffix = ""
+            if src_tag == "user":
+                suffix = " (user override)"
+            elif src_tag == "llm":
+                suffix = " (LLM)"
+            llm_notes.append(f"Scrap {old_scrap * 100:.1f}% → {new_scrap * 100:.1f}%{suffix}")
 
+    src_mult_map = {}
+    if isinstance(quote_state.effective_sources, dict):
+        src_mult_map = quote_state.effective_sources.get("process_hour_multipliers") or {}
     ph_mult = overrides.get("process_hour_multipliers") if overrides else {}
     for key, mult in (ph_mult or {}).items():
         if not isinstance(mult, (int, float)):
@@ -4230,8 +5788,17 @@ def compute_quote_from_df(df: pd.DataFrame,
                 meta["hr"] = max(0.0, (process_costs[actual] - base_extra) / rate)
         entry["new_hr"] = float(process_meta.get(actual, {}).get("hr", entry["old_hr"]))
         entry["new_cost"] = process_costs[actual]
-        llm_notes.append(f"{_friendly_process(actual)} hours x{mult:.2f}")
+        src_tag = src_mult_map.get(key)
+        suffix = ""
+        if src_tag == "user":
+            suffix = " (user override)"
+        elif src_tag == "llm":
+            suffix = " (LLM)"
+        llm_notes.append(f"{_friendly_process(actual)} hours x{mult:.2f}{suffix}")
 
+    src_add_map = {}
+    if isinstance(quote_state.effective_sources, dict):
+        src_add_map = quote_state.effective_sources.get("process_hour_adders") or {}
     ph_add = overrides.get("process_hour_adders") if overrides else {}
     for key, add_hr in (ph_add or {}).items():
         if not isinstance(add_hr, (int, float)):
@@ -4258,8 +5825,17 @@ def compute_quote_from_df(df: pd.DataFrame,
         entry["notes"].append(f"+{float(add_hr):.2f} hr")
         entry["new_hr"] = float(process_meta.get(actual, {}).get("hr", entry["old_hr"]))
         entry["new_cost"] = process_costs[actual]
-        llm_notes.append(f"{_friendly_process(actual)} +{float(add_hr):.2f} hr")
+        src_tag = src_add_map.get(key)
+        suffix = ""
+        if src_tag == "user":
+            suffix = " (user override)"
+        elif src_tag == "llm":
+            suffix = " (LLM)"
+        llm_notes.append(f"{_friendly_process(actual)} +{float(add_hr):.2f} hr{suffix}")
 
+    src_pass_map = {}
+    if isinstance(quote_state.effective_sources, dict):
+        src_pass_map = quote_state.effective_sources.get("add_pass_through") or {}
     add_pass = overrides.get("add_pass_through") if overrides else {}
     for label, add_val in (add_pass or {}).items():
         if not isinstance(add_val, (int, float)):
@@ -4277,7 +5853,13 @@ def compute_quote_from_df(df: pd.DataFrame,
         entry["new_value"] = new_val
         if actual_label not in pass_meta:
             pass_meta[actual_label] = {"basis": "LLM override"}
-        llm_notes.append(f"{actual_label}: +${float(add_val):,.0f}")
+        src_tag = src_pass_map.get(label)
+        suffix = ""
+        if src_tag == "user":
+            suffix = " (user override)"
+        elif src_tag == "llm":
+            suffix = " (LLM)"
+        llm_notes.append(f"{actual_label}: +${float(add_val):,.0f}{suffix}")
 
     delta_fix_mat = overrides.get("fixture_material_cost_delta") if overrides else None
     if isinstance(delta_fix_mat, (int, float)) and delta_fix_mat:
@@ -4291,7 +5873,15 @@ def compute_quote_from_df(df: pd.DataFrame,
             entry["notes"].append(f"Δ${float(delta_fix_mat):+.2f}")
             entry["new_value"] = new_val
             fix_detail["mat_cost"] = round(float(fix_detail.get("mat_cost", 0.0)) + float(delta_fix_mat), 2)
-            llm_notes.append(f"Fixture material ${float(delta_fix_mat):+.0f}")
+            src_tag = None
+            if isinstance(quote_state.effective_sources, dict):
+                src_tag = quote_state.effective_sources.get("fixture_material_cost_delta")
+            suffix = ""
+            if src_tag == "user":
+                suffix = " (user override)"
+            elif src_tag == "llm":
+                suffix = " (LLM)"
+            llm_notes.append(f"Fixture material ${float(delta_fix_mat):+.0f}{suffix}")
 
     cont_override = overrides.get("contingency_pct_override") if overrides else None
     if cont_override is not None:
@@ -4299,7 +5889,15 @@ def compute_quote_from_df(df: pd.DataFrame,
         if cont_val is not None:
             ContingencyPct = float(cont_val)
             params["ContingencyPct"] = ContingencyPct
-            llm_notes.append(f"Contingency set to {ContingencyPct * 100:.1f}%")
+            src_tag = None
+            if isinstance(quote_state.effective_sources, dict):
+                src_tag = quote_state.effective_sources.get("contingency_pct")
+            suffix = ""
+            if src_tag == "user":
+                suffix = " (user override)"
+            elif src_tag == "llm":
+                suffix = " (LLM)"
+            llm_notes.append(f"Contingency set to {ContingencyPct * 100:.1f}%{suffix}")
 
     for label, value in list(pass_through.items()):
         try:
@@ -4533,6 +6131,10 @@ def compute_quote_from_df(df: pd.DataFrame,
         llm_cost_log["applied_multipliers"] = applied_multipliers_log
     if applied_adders_log:
         llm_cost_log["applied_adders"] = applied_adders_log
+    if isinstance(quote_state.effective_sources, dict) and quote_state.effective_sources:
+        llm_cost_log["effective_sources"] = quote_state.effective_sources
+    if isinstance(quote_state.user_overrides, dict) and quote_state.user_overrides:
+        llm_cost_log["user_overrides"] = quote_state.user_overrides
 
     breakdown = {
         "qty": Qty,
@@ -4581,6 +6183,18 @@ def compute_quote_from_df(df: pd.DataFrame,
         "llm_cost_log": llm_cost_log,
     }
 
+    decision_state = {
+        "baseline": copy.deepcopy(quote_state.baseline),
+        "suggestions": copy.deepcopy(quote_state.suggestions),
+        "user_overrides": copy.deepcopy(quote_state.user_overrides),
+        "effective": copy.deepcopy(quote_state.effective),
+        "effective_sources": copy.deepcopy(quote_state.effective_sources),
+    }
+    breakdown["decision_state"] = decision_state
+
+    narrative_text = build_narrative(quote_state)
+    breakdown["narrative"] = narrative_text
+
     if LLM_DEBUG and overrides_meta and (
         overrides_meta.get("raw") is not None or overrides_meta.get("raw_text")
     ):
@@ -4602,7 +6216,14 @@ def compute_quote_from_df(df: pd.DataFrame,
         except Exception:
             pass
 
-    return {"price": price, "labor": labor_cost, "with_overhead": with_overhead, "breakdown": breakdown}
+    return {
+        "price": price,
+        "labor": labor_cost,
+        "with_overhead": with_overhead,
+        "breakdown": breakdown,
+        "narrative": narrative_text,
+        "decision_state": decision_state,
+    }
 
 
 # ---------- Tracing ----------
@@ -5066,15 +6687,20 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
         raise RuntimeError("ezdxf not installed. pip/conda install ezdxf")
 
     # --- load doc ---
-    if path.lower().endswith(".dwg"):
+    dxf_text_path: str | None = None
+    doc = None
+    lower_path = path.lower()
+    if lower_path.endswith(".dwg"):
         if _HAS_ODAFC:
             # uses ODAFileConverter through ezdxf, no env var needed
             doc = odafc.readfile(path)
         else:
             dxf_path = convert_dwg_to_dxf(path)  # needs ODA_CONVERTER_EXE or DWG2DXF_EXE
+            dxf_text_path = dxf_path
             doc = ezdxf.readfile(dxf_path)
     else:
         doc = ezdxf.readfile(path)
+        dxf_text_path = path
 
     sp = doc.modelspace()
     ins = int(doc.header.get("$INSUNITS", 4))
@@ -5098,7 +6724,31 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
 
     # holes from circles
     holes = list(sp.query("CIRCLE"))
-    hole_diams_mm = [round(2.0 * c.dxf.radius * u2mm, 2) for c in holes]
+    entity_holes_mm = [float(2.0 * c.dxf.radius * u2mm) for c in holes]
+    hole_diams_mm = [round(val, 2) for val in entity_holes_mm]
+
+    chart_lines: list[str] = []
+    chart_ops: list[dict[str, Any]] = []
+    chart_reconcile: dict[str, Any] | None = None
+    chart_source: str | None = None
+
+    if extract_text_lines_from_dxf and dxf_text_path:
+        try:
+            chart_lines = extract_text_lines_from_dxf(dxf_text_path)
+        except Exception:
+            chart_lines = []
+    if not chart_lines:
+        chart_lines = _extract_text_lines_from_ezdxf_doc(doc)
+
+    if chart_lines and parse_hole_table_lines:
+        try:
+            hole_rows = parse_hole_table_lines(chart_lines)
+        except Exception:
+            hole_rows = []
+        if hole_rows:
+            chart_ops = hole_rows_to_ops(hole_rows)
+            chart_source = "dxf_text_regex"
+            chart_reconcile = reconcile_holes(entity_holes_mm, chart_ops)
 
     # scrape text for thickness/material
     txt = " ".join([t.dxf.text for t in sp.query("TEXT")] +
@@ -5113,14 +6763,167 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     if mm:
         material = mm.group(2).strip()
 
-    return {
-        "kind": "2D", "source": Path(path).suffix.lower().lstrip("."),
+    result: dict[str, Any] = {
+        "kind": "2D",
+        "source": Path(path).suffix.lower().lstrip("."),
         "profile_length_mm": round(per * u2mm, 2),
         "hole_diams_mm": hole_diams_mm,
         "hole_count": len(hole_diams_mm),
         "thickness_mm": thickness_mm,
         "material": material,
     }
+    if entity_holes_mm:
+        result["hole_diams_mm_precise"] = entity_holes_mm
+    if chart_ops:
+        result["chart_ops"] = chart_ops
+    if chart_source:
+        result["chart_source"] = chart_source
+    if chart_lines:
+        result["chart_lines"] = chart_lines
+    if chart_reconcile:
+        result["chart_reconcile"] = chart_reconcile
+        result["hole_chart_agreement"] = bool(chart_reconcile.get("agreement"))
+    return result
+def _extract_text_lines_from_ezdxf_doc(doc: Any) -> list[str]:
+    """Harvest TEXT / MTEXT strings from an ezdxf Drawing."""
+
+    if doc is None:
+        return []
+
+    try:
+        msp = doc.modelspace()
+    except Exception:
+        return []
+
+    lines: list[str] = []
+    for entity in msp:
+        try:
+            kind = entity.dxftype()
+        except Exception:
+            continue
+        if kind in ("TEXT", "MTEXT"):
+            try:
+                text = entity.plain_text() if hasattr(entity, "plain_text") else entity.dxf.text
+            except Exception:
+                text = ""
+            if text:
+                lines.append(text)
+        elif kind == "INSERT":
+            try:
+                for sub in entity.virtual_entities():
+                    try:
+                        sub_kind = sub.dxftype()
+                    except Exception:
+                        continue
+                    if sub_kind in ("TEXT", "MTEXT"):
+                        try:
+                            text = sub.plain_text() if hasattr(sub, "plain_text") else sub.dxf.text
+                        except Exception:
+                            text = ""
+                        if text:
+                            lines.append(text)
+            except Exception:
+                continue
+
+    joined = "\n".join(lines)
+    if "HOLE TABLE" in joined.upper():
+        upper = joined.upper()
+        start = upper.index("HOLE TABLE")
+        joined = joined[start:]
+    return [ln for ln in joined.splitlines() if ln.strip()]
+
+
+def hole_rows_to_ops(rows: Iterable[Any] | None) -> list[dict[str, Any]]:
+    """Flatten parsed HoleRow objects into estimator-friendly operations."""
+
+    ops: list[dict[str, Any]] = []
+    if not rows:
+        return ops
+
+    for row in rows:
+        if row is None:
+            continue
+        try:
+            features = list(getattr(row, "features", []) or [])
+        except Exception:
+            features = []
+        try:
+            qty_val = int(getattr(row, "qty", 0) or 0)
+        except Exception:
+            qty_val = 0
+        ref_val = getattr(row, "ref", "")
+        for feature in features:
+            if not isinstance(feature, dict):
+                continue
+            op = dict(feature)
+            op.setdefault("qty", qty_val or op.get("qty") or 0)
+            op.setdefault("ref", ref_val)
+            ops.append(op)
+    return ops
+
+
+def reconcile_holes(entity_holes_mm: Iterable[Any] | None, chart_ops: Iterable[dict] | None) -> dict[str, Any]:
+    """Compare entity-detected hole sizes with chart-derived operations."""
+
+    def _as_qty(value: Any) -> int:
+        try:
+            qty = int(round(float(value)))
+        except Exception:
+            qty = 0
+        return qty if qty > 0 else 1
+
+    bin_key = lambda dia: round(float(dia), 1)
+
+    ent_bins: Counter[float] = Counter()
+    if entity_holes_mm:
+        for value in entity_holes_mm:
+            try:
+                dia = float(value)
+            except Exception:
+                continue
+            if dia > 0:
+                ent_bins[bin_key(dia)] += 1
+
+    chart_bins: Counter[float] = Counter()
+    tap_qty = 0
+    cbore_qty = 0
+    if chart_ops:
+        for op in chart_ops:
+            if not isinstance(op, dict):
+                continue
+            op_type = str(op.get("type") or "").lower()
+            qty = _as_qty(op.get("qty"))
+            if op_type == "tap":
+                tap_qty += qty
+            if op_type == "cbore":
+                cbore_qty += qty
+            if op_type != "drill":
+                continue
+            try:
+                dia_val = float(op.get("dia_mm"))
+            except Exception:
+                continue
+            if dia_val <= 0:
+                continue
+            chart_bins[bin_key(dia_val)] += qty
+
+    entity_total = sum(ent_bins.values())
+    chart_total = sum(chart_bins.values())
+    max_total = max(entity_total, chart_total)
+    tolerance = max(5, 0.1 * max_total) if max_total else 5
+    agreement = abs(entity_total - chart_total) <= tolerance
+
+    return {
+        "entity_bins": {float(k): int(v) for k, v in ent_bins.items()},
+        "chart_bins": {float(k): int(v) for k, v in chart_bins.items()},
+        "tap_qty": int(tap_qty),
+        "cbore_qty": int(cbore_qty),
+        "agreement": bool(agreement),
+        "entity_total": int(entity_total),
+        "chart_total": int(chart_total),
+    }
+
+
 def _to_noncapturing(expr: str) -> str:
     """
     Convert every capturing '(' to non-capturing '(?:', preserving
@@ -5995,6 +7798,7 @@ class App(tk.Tk):
         self.geo = None
         self.params = PARAMS_DEFAULT.copy()
         self.rates = RATES_DEFAULT.copy()
+        self.quote_state = QuoteState()
 
         # LLM defaults: ON + auto model discovery
         default_model = find_default_qwen_model()
@@ -6036,6 +7840,7 @@ class App(tk.Tk):
         self.nb = ttk.Notebook(self); self.nb.pack(fill="both", expand=True)
         self.tab_geo = ttk.Frame(self.nb); self.nb.add(self.tab_geo, text="GEO")
         self.tab_editor = ttk.Frame(self.nb); self.nb.add(self.tab_editor, text="Quote Editor")
+        self.tab_suggestions = ttk.Frame(self.nb); self.nb.add(self.tab_suggestions, text="Suggestions")
         self.editor_scroll = ScrollableFrame(self.tab_editor)
         self.editor_scroll.pack(fill="both", expand=True)
         self.tab_out = ttk.Frame(self.nb); self.nb.add(self.tab_out, text="Output")
@@ -6054,6 +7859,15 @@ class App(tk.Tk):
 
         # GEO (single pane; CAD open handled by top bar)
         self.geo_txt = tk.Text(self.tab_geo, wrap="word"); self.geo_txt.pack(fill="both", expand=True)
+
+        sugg_top = ttk.Frame(self.tab_suggestions)
+        sugg_top.pack(fill="x", padx=10, pady=5)
+        self.suggestions_status = tk.StringVar(value="No suggestions yet.")
+        ttk.Label(sugg_top, textvariable=self.suggestions_status).pack(side="left")
+        ttk.Button(sugg_top, text="Apply & Reprice", command=self.apply_and_reprice).pack(side="right")
+        self.suggestions_scroll = ScrollableFrame(self.tab_suggestions)
+        self.suggestions_scroll.pack(fill="both", expand=True)
+        self.suggestion_widgets: dict[str, dict[str, Any]] = {}
 
 
         # LLM (hidden frame is still built to keep functionality without a visible tab)
@@ -6521,6 +8335,168 @@ class App(tk.Tk):
             messagebox.showerror("Overrides", f"Save failed:\n{{e}}")
             self.status_var.set("Failed to save overrides.")
 
+    def _path_key(self, path: Tuple[str, ...]) -> str:
+        return ".".join(path)
+
+    def _refresh_suggestions_panel(self):
+        frame = self.suggestions_scroll.inner
+        for child in frame.winfo_children():
+            child.destroy()
+        self.suggestion_widgets.clear()
+
+        rows = iter_suggestion_rows(self.quote_state)
+        if not rows:
+            self.suggestions_status.set("No suggestions yet. Generate a quote to populate this panel.")
+            ttk.Label(frame, text="No adjustable suggestions available.").grid(row=0, column=0, sticky="w", padx=10, pady=10)
+            return
+
+        self.suggestions_status.set("Review suggestions. User overrides take priority. Click Apply & Reprice to update pricing.")
+
+        headings = ["Field", "Baseline", "LLM", "User override", "Accept LLM", "Effective"]
+        for col, label in enumerate(headings):
+            ttk.Label(frame, text=label, font=("Segoe UI", 9, "bold")).grid(row=0, column=col, sticky="w", padx=6, pady=(0,4))
+
+        for idx, row in enumerate(rows, start=1):
+            path = tuple(row.get("path", ()))
+            key = self._path_key(path)
+            label_txt = row.get("label", key)
+            ttk.Label(frame, text=label_txt).grid(row=idx, column=0, sticky="w", padx=6, pady=2)
+
+            ttk.Label(frame, text=_format_value(row.get("baseline"), row.get("kind", "float"))).grid(row=idx, column=1, sticky="w", padx=6, pady=2)
+            llm_lbl = ttk.Label(frame, text=_format_value(row.get("llm"), row.get("kind", "float")))
+            llm_lbl.grid(row=idx, column=2, sticky="w", padx=6, pady=2)
+
+            override_var = tk.StringVar(value=_format_entry_value(row.get("user"), row.get("kind", "float")))
+            entry = ttk.Entry(frame, textvariable=override_var, width=14)
+            entry.grid(row=idx, column=3, sticky="we", padx=6, pady=2)
+            entry.bind("<FocusOut>", lambda e, p=path, var=override_var, kind=row.get("kind", "float"): self._on_override_change(p, var.get(), kind))
+            entry.bind("<Return>", lambda e, p=path, var=override_var, kind=row.get("kind", "float"): self._on_override_change(p, var.get(), kind))
+
+            accept_var = tk.BooleanVar(value=bool(row.get("accept")))
+            chk = ttk.Checkbutton(frame, variable=accept_var, command=lambda p=path, var=accept_var: self._on_accept_toggle(p, var.get()))
+            chk.grid(row=idx, column=4, padx=6, pady=2)
+            if row.get("llm") is None:
+                chk.state(["disabled"])
+                accept_var.set(False)
+
+            eff_label = ttk.Label(frame, text=_format_value(row.get("effective"), row.get("kind", "float")))
+            eff_label.grid(row=idx, column=5, sticky="w", padx=6, pady=2)
+            source = row.get("source")
+            if source and isinstance(source, str):
+                eff_label.configure(text=f"{_format_value(row.get('effective'), row.get('kind', 'float'))} ({source})")
+
+            self.suggestion_widgets[key] = {
+                "path": path,
+                "kind": row.get("kind", "float"),
+                "override_var": override_var,
+                "accept_var": accept_var,
+                "accept_widget": chk,
+                "effective_label": eff_label,
+                "llm_label": llm_lbl,
+            }
+
+        notes = self.quote_state.suggestions.get("notes") if isinstance(self.quote_state.suggestions, dict) else []
+        if notes:
+            start_row = len(rows) + 1
+            ttk.Label(frame, text="LLM Notes:", font=("Segoe UI", 9, "bold")).grid(row=start_row, column=0, sticky="w", padx=6, pady=(10, 2))
+            for i, note in enumerate(notes, start=1):
+                ttk.Label(frame, text=f"• {note}").grid(row=start_row + i, column=0, columnspan=6, sticky="w", padx=12, pady=1)
+
+    def _update_suggestion_effective_labels(self):
+        rows = {self._path_key(tuple(row.get("path", ()) or ())): row for row in iter_suggestion_rows(self.quote_state)}
+        for key, widgets in self.suggestion_widgets.items():
+            row = rows.get(key)
+            if not row:
+                continue
+            label = widgets.get("effective_label")
+            if label:
+                text = _format_value(row.get("effective"), row.get("kind", "float"))
+                src = row.get("source")
+                if src and isinstance(src, str):
+                    text = f"{text} ({src})"
+                label.configure(text=text)
+            override_var = widgets.get("override_var")
+            if override_var is not None:
+                desired = _format_entry_value(row.get("user"), row.get("kind", "float"))
+                if override_var.get() != desired:
+                    override_var.set(desired)
+            accept_var = widgets.get("accept_var")
+            if accept_var is not None:
+                accept_var.set(bool(row.get("accept")))
+            llm_label = widgets.get("llm_label")
+            if llm_label is not None:
+                llm_label.configure(text=_format_value(row.get("llm"), row.get("kind", "float")))
+            chk_widget = widgets.get("accept_widget")
+            if chk_widget is not None:
+                if row.get("llm") is None:
+                    chk_widget.state(["disabled"])
+                    if accept_var is not None:
+                        accept_var.set(False)
+                else:
+                    chk_widget.state(["!disabled"])
+
+    def _on_accept_toggle(self, path: Tuple[str, ...], value: bool):
+        cur = self.quote_state.accept_llm
+        if not isinstance(cur, dict):
+            self.quote_state.accept_llm = {}
+            cur = self.quote_state.accept_llm
+        node = cur
+        for key in path[:-1]:
+            nxt = node.get(key)
+            if not isinstance(nxt, dict):
+                nxt = {}
+                node[key] = nxt
+            node = nxt
+        node[path[-1]] = bool(value)
+        reprice_with_effective(self.quote_state)
+        self._update_suggestion_effective_labels()
+        self.suggestions_status.set("Accept toggles updated. Click Apply & Reprice to update pricing.")
+
+    def _set_user_override_value(self, path: Tuple[str, ...], value: Any):
+        cur = self.quote_state.user_overrides
+        if not isinstance(cur, dict):
+            self.quote_state.user_overrides = {}
+            cur = self.quote_state.user_overrides
+        node = cur
+        stack: list[tuple[dict, str]] = []
+        for key in path[:-1]:
+            stack.append((node, key))
+            nxt = node.get(key)
+            if not isinstance(nxt, dict):
+                if value is None:
+                    return
+                nxt = {}
+                node[key] = nxt
+            node = nxt
+        leaf_key = path[-1]
+        if value is None:
+            node.pop(leaf_key, None)
+            while stack:
+                parent, pkey = stack.pop()
+                child = parent.get(pkey)
+                if isinstance(child, dict) and not child:
+                    parent.pop(pkey, None)
+                else:
+                    break
+        else:
+            node[leaf_key] = value
+
+    def _on_override_change(self, path: Tuple[str, ...], raw_value: Any, kind: str):
+        value = _coerce_user_value(raw_value, kind)
+        if value is None and (raw_value is None or str(raw_value).strip() == ""):
+            self._set_user_override_value(path, None)
+        else:
+            self._set_user_override_value(path, value)
+        reprice_with_effective(self.quote_state)
+        self._update_suggestion_effective_labels()
+        self.suggestions_status.set("User overrides updated. Click Apply & Reprice to update pricing.")
+
+    def apply_and_reprice(self):
+        if self.vars_df is None:
+            messagebox.showinfo("Suggestions", "Load CAD and run an initial quote before repricing.")
+            return
+        self.gen_quote(reuse_suggestions=True)
+
     def load_overrides(self):
         path = filedialog.askopenfilename(filetypes=[("JSON","*.json"),("All","*.*")])
         if not path: return
@@ -6624,7 +8600,7 @@ class App(tk.Tk):
         self.out_txt.insert("end", d+"\n")
         self.out_txt.see("end")
 
-    def gen_quote(self) -> None:
+    def gen_quote(self, reuse_suggestions: bool = False) -> None:
 
         if self.vars_df is None:
             self.vars_df = coerce_or_make_vars_df(None)
@@ -6652,6 +8628,8 @@ class App(tk.Tk):
                 llm_model_path=self.llm_model_path.get().strip() or None,
                 geo=self.geo,
                 ui_vars=ui_vars,
+                quote_state=self.quote_state,
+                reuse_suggestions=reuse_suggestions,
             )
         except ValueError as err:
             messagebox.showerror("Quote blocked", str(err))
@@ -6676,6 +8654,7 @@ class App(tk.Tk):
         else:
             self.scrap_var.set("Scrap %: –")
 
+        self._refresh_suggestions_panel()
         self.nb.select(self.tab_out)
         self.status_var.set(f"Quote Generated! Final Price: ${res.get('price', 0):,.2f}")
 
