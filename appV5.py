@@ -2654,12 +2654,38 @@ def require_ezdxf():
 
 def get_dwg_converter_path() -> str:
     """Resolve a DWG?DXF converter path (.bat/.cmd/.exe)."""
-    exe = os.environ.get("ODA_CONVERTER_EXE") or os.environ.get("DWG2DXF_EXE")
-    # Fall back to a local wrapper next to this script if it exists.
-    local = str(Path(__file__).with_name("dwg2dxf_wrapper.bat"))
-    if not exe and Path(local).exists():
-        exe = local
-    return exe or ""
+
+    banned_names = DWG_CONVERTER_BANNED_EXEC_TOKENS
+    banned_arg_tokens = DWG_CONVERTER_BANNED_ARG_TOKENS
+
+    local_wrapper = Path(__file__).with_name("dwg2dxf_wrapper.bat")
+    default_wrapper = Path(r"D:\CAD_Quoting_Tool\dwg2dxf_wrapper.bat")
+
+    candidates: List[tuple[str, str | None]] = [
+        ("ODA_CONVERTER_EXE", os.environ.get("ODA_CONVERTER_EXE")),
+        ("DWG2DXF_EXE", os.environ.get("DWG2DXF_EXE")),
+        ("dwg2dxf_wrapper.bat", str(local_wrapper) if local_wrapper.exists() else None),
+        ("dwg2dxf_wrapper.bat", str(default_wrapper) if default_wrapper.exists() else None),
+    ]
+
+    for label, raw in candidates:
+        if not raw:
+            continue
+        exe_token, extra_tokens = _split_command_tokens(raw)
+        if not exe_token:
+            continue
+        tokens = _collect_command_tokens([exe_token, *extra_tokens])
+        if tokens & banned_names or tokens & banned_arg_tokens:
+            # Looks like ImageMagick/convert; treat as unavailable.
+            continue
+        resolved = _resolve_executable_path(exe_token)
+        if resolved:
+            return resolved
+        expanded = Path(os.path.expanduser(os.path.expandvars(exe_token)))
+        if expanded.exists():
+            return str(expanded)
+
+    return ""
 
 def have_dwg_support() -> bool:
     """True if we can open DWG (either odafc or an external converter is available)."""
