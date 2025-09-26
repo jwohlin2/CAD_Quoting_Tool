@@ -3117,11 +3117,30 @@ def convert_dwg_to_dxf(dwg_path: str, *, out_ver="ACAD2013") -> str:
     Looks for the converter via env var or common local paths and prints
     the exact command used on failure.
     """
-    # 1) find converter
-    exe = (os.environ.get("ODA_CONVERTER_EXE")
-           or os.environ.get("DWG2DXF_EXE")
-           or str(Path(__file__).with_name("dwg2dxf_wrapper.bat"))
-           or r"D:\CAD_Quoting_Tool\dwg2dxf_wrapper.bat")
+    # 1) find converter (and sanitize env misconfigurations)
+    def _bad_exe_val(s: str | None) -> bool:
+        if not s:
+            return True
+        low = s.lower()
+        # Heuristics: ignore values that clearly include PNG/render flags or background args
+        return any(tok in low for tok in [" -background", " --background", " magick ", " convert ", ".png", ".jpg"])
+
+    exe_env_oda = os.environ.get("ODA_CONVERTER_EXE")
+    exe_env_d2d = os.environ.get("DWG2DXF_EXE")
+    force_wrapper = os.environ.get("FORCE_DWG_WRAPPER", "0") == "1"
+    wrapper1 = str(Path(__file__).with_name("dwg2dxf_wrapper.bat"))
+    wrapper2 = r"D:\CAD_Quoting_Tool\dwg2dxf_wrapper.bat"
+    if force_wrapper:
+        exe = wrapper1 if Path(wrapper1).exists() else (wrapper2 if Path(wrapper2).exists() else "")
+    else:
+        exe_candidates = []
+        if exe_env_oda and not _bad_exe_val(exe_env_oda):
+            exe_candidates.append(exe_env_oda)
+        if exe_env_d2d and not _bad_exe_val(exe_env_d2d):
+            exe_candidates.append(exe_env_d2d)
+        exe_candidates.append(wrapper1)
+        exe_candidates.append(wrapper2)
+        exe = next((e for e in exe_candidates if e and Path(e).exists()), "")
 
     if not exe or not Path(exe).exists():
         raise RuntimeError(
@@ -3148,7 +3167,11 @@ def convert_dwg_to_dxf(dwg_path: str, *, out_ver="ACAD2013") -> str:
             # ? generic exe that accepts <in> <out>
             cmd = [exe, str(dwg), str(out_dxf)]
             proc = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if os.environ.get("DWG_DEBUG", "0") == "1":
+            print(f"[DWG2DXF] ok: {' '.join(cmd)}")
     except subprocess.CalledProcessError as e:
+        if os.environ.get("DWG_DEBUG", "0") == "1":
+            print(f"[DWG2DXF] fail: {' '.join(cmd)}\nstdout:\n{e.stdout}\nstderr:\n{e.stderr}")
         raise RuntimeError(
             "DWG?DXF conversion failed.\n"
             f"cmd: {' '.join(cmd)}\n"
