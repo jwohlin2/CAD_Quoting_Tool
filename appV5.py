@@ -3409,6 +3409,41 @@ class _LocalLLM:
 
         return parsed, text, usage
 
+    def close(self):
+        """Best-effort cleanup to avoid llama-cpp destructor warnings."""
+        try:
+            llm = getattr(self, "_llm", None)
+            self._llm = None
+            if llm is None:
+                return
+            # Ensure attribute exists to satisfy some versions' __del__ checks
+            try:
+                getattr(llm, "sampler")
+            except Exception:
+                try:
+                    setattr(llm, "sampler", None)
+                except Exception:
+                    pass
+            # Prefer explicit close if available
+            try:
+                if hasattr(llm, "close"):
+                    llm.close()
+            except Exception:
+                pass
+            # Drop strong refs
+            try:
+                del llm
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
 # ---- LLM hours inference ----
 def infer_hours_and_overrides_from_geo(geo: dict, params: dict | None = None, rates: dict | None = None) -> dict:
     """
