@@ -40,6 +40,8 @@ from OCP.BRep     import BRep_Tool
 from OCP.BRepAdaptor import BRepAdaptor_Surface as _BAS
 import pandas as pd
 
+from llama_cpp import Llama  # type: ignore
+
 
 def _normalize_lookup_key(value: str) -> str:
     cleaned = re.sub(r"[^0-9a-z]+", " ", str(value).strip().lower())
@@ -154,41 +156,41 @@ VL_MODEL = r"D:\CAD_Quoting_Tool\models\qwen2.5-vl-7b-instruct-q4_k_m.gguf"
 MM_PROJ = r"D:\CAD_Quoting_Tool\models\mmproj-Qwen2.5-VL-3B-Instruct-Q8_0.gguf"
 
 
-def load_qwen_vl(n_ctx: int = 8192, n_gpu_layers: int = 20, n_threads: int | None = None):
+def load_qwen_vl(
+    n_ctx: int = 8192,
+    n_gpu_layers: int = 20,
+    n_threads: int | None = None,
+):
     """Load Qwen2.5-VL with vision projector configured for llama.cpp."""
 
-    from llama_cpp import Llama  # type: ignore
-
     if n_threads is None:
-        try:
-            n_threads = max(4, os.cpu_count() // 2)
-        except Exception:
-            n_threads = 8
+        cpu_count = os.cpu_count() or 8
+        n_threads = max(4, cpu_count // 2)
 
     try:
         llm = Llama(
             model_path=VL_MODEL,
             mmproj_path=MM_PROJ,
             n_ctx=n_ctx,
-            n_threads=n_threads,
             n_gpu_layers=n_gpu_layers,
+            n_threads=n_threads,
             chat_format="qwen2_vl",
             verbose=False,
         )
         _ = llm.create_chat_completion(
             messages=[
-                {"role": "system", "content": "Return JSON only: {\"ok\":true}."},
+                {"role": "system", "content": "Return JSON {\"ok\":true}."},
                 {"role": "user", "content": "ping"},
             ],
             max_tokens=16,
             temperature=0,
         )
         return llm
-    except Exception as exc:
+    except Exception:
         if n_ctx > 4096:
             gc.collect()
             return load_qwen_vl(n_ctx=4096, n_gpu_layers=0, n_threads=n_threads)
-        raise exc
+        raise
 
 
 def _auto_accept_suggestions(suggestions: dict[str, Any] | None) -> dict[str, Any]:
@@ -665,9 +667,15 @@ def build_suggest_payload(geo, baseline, rates, bounds) -> dict:
 
     material_val = geo.get("material")
     if isinstance(material_val, dict):
-        material_name = material_val.get("name") or material_val.get("display")
+        material_name = (
+            material_val.get("name")
+            or material_val.get("display")
+            or material_val.get("material")
+        )
     else:
         material_name = material_val
+    if not material_name:
+        material_name = "Steel"
 
     hole_count_val = _as_float_or_none(geo.get("hole_count"))
     if hole_count_val is None:
@@ -698,7 +706,7 @@ def build_suggest_payload(geo, baseline, rates, bounds) -> dict:
     return {
         "purpose": "quote_suggestions",
         "geo": {
-            "is_2d_plate": (geo.get("meta") or {}).get("is_2d_plate"),
+            "is_2d_plate": bool((geo.get("meta") or {}).get("is_2d_plate", True)),
             "hole_count": hole_count,
             "tap_qty": tap_qty,
             "cbore_qty": cbore_qty,
@@ -4913,6 +4921,57 @@ def compute_quote_from_df(df: pd.DataFrame,
     quote_state.ui_vars = dict(ui_vars)
     quote_state.rates = dict(rates)
     geo_context = dict(geo or {})
+
+    MM_PER_IN = 25.4
+
+    def _read_editor_num(df, label: str):
+        """Read a numeric value from the Quote Editor table by label; returns float|None."""
+
+        try:
+            mask = df["Item"].astype(str).str.fullmatch(label, case=False, na=False)
+            val = str(df.loc[mask, "Example Values / Options"].iloc[0]).strip()
+            return float(val)
+        except Exception:
+            return None
+
+    # --- thickness for LLM --------------------------------------------------------
+    thickness_for_llm: float | None = None
+    geo_for_thickness = geo_context
+    try:
+        t_geo = geo_for_thickness.get("thickness_mm")
+        if isinstance(t_geo, dict):
+            thickness_for_llm = float(t_geo.get("value")) if t_geo.get("value") is not None else None
+        elif t_geo is not None:
+            thickness_for_llm = float(t_geo)
+    except Exception:
+        thickness_for_llm = None
+
+    if thickness_for_llm is None:
+        try:
+            t_geo_raw = geo_for_thickness.get("thickness")
+            if t_geo_raw is not None:
+                thickness_for_llm = float(t_geo_raw)
+        except Exception:
+            thickness_for_llm = None
+
+    # Fallback: Quote Editor "Thickness (in)"
+    if thickness_for_llm is None:
+        t_in = _read_editor_num(df, r"Thickness \(in\)")
+        if t_in is not None:
+            thickness_for_llm = t_in * MM_PER_IN
+
+    # Last-ditch: Z dimension of bbox if present (treat as thickness for plates)
+    bbox_for_llm: list[float] | None = None
+    try:
+        bb = geo_for_thickness.get("bbox_mm")
+        if isinstance(bb, (list, tuple)) and len(bb) == 3:
+            bbox_for_llm = [float(bb[0]), float(bb[1]), float(bb[2])]
+            if thickness_for_llm is None:
+                thickness_for_llm = float(bb[2])
+    except Exception:
+        bbox_for_llm = None
+
+    thickness_for_llm = None if thickness_for_llm is None else float(thickness_for_llm)
     chart_ops_geo = geo_context.get("chart_ops") if isinstance(geo_context.get("chart_ops"), list) else None
     chart_reconcile_geo = geo_context.get("chart_reconcile") if isinstance(geo_context.get("chart_reconcile"), dict) else None
     chart_source_geo = geo_context.get("chart_source") if isinstance(geo_context.get("chart_source"), str) else None
@@ -5751,9 +5810,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         or (bool(is_plate_2d) and baseline_setups > 1)
     )
 
-    bbox_payload = None
-    if bbox_info:
-        bbox_payload = {k: float(v) for k, v in bbox_info.items() if _coerce_float_or_none(v) is not None}
+    bbox_payload = bbox_for_llm
 
     geo_for_suggest = {
         "meta": {"is_2d_plate": bool(is_plate_2d)},
