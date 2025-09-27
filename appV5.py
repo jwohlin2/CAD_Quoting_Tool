@@ -4181,6 +4181,14 @@ def render_quote(
     def _pct(x) -> str:
         return f"{float(x or 0.0) * 100:.1f}%"
 
+    def _fmt_dim(val) -> str:
+        if isinstance(val, (int, float)):
+            return f"{float(val):.3f}".rstrip("0").rstrip(".")
+        if val is None:
+            return "—"
+        text = str(val).strip()
+        return text if text else "—"
+
     def write_line(s: str, indent: str = ""):
         lines.append(f"{indent}{s}")
 
@@ -4209,6 +4217,9 @@ def render_quote(
 
     # ---- header --------------------------------------------------------------
     lines: list[str] = []
+    ui_vars = result.get("ui_vars") or {}
+    if not isinstance(ui_vars, dict):
+        ui_vars = {}
     lines.append(f"QUOTE SUMMARY - Qty {qty}")
     lines.append(divider)
     row("Final Price per Part:", price)
@@ -4273,6 +4284,10 @@ def render_quote(
             if minchg or show_zeros:  write_line(f"Supplier Min Charge: {_m(minchg or 0)}", "  ")
             if surpct or show_zeros:  write_line(f"Surcharge: {_pct(surpct or 0)}", "  ")
             if scrap is not None:     write_line(f"Scrap %: {_pct(scrap)}", "  ")
+            stock_L = _fmt_dim(ui_vars.get("Plate Length (in)"))
+            stock_W = _fmt_dim(ui_vars.get("Plate Width (in)"))
+            stock_T = _fmt_dim(ui_vars.get("Thickness (in)"))
+            mat_lines.append(f"  Stock used: {stock_L} × {stock_W} × {stock_T} in")
             mat_lines.append("")
 
     lines.extend(mat_lines)
@@ -4971,6 +4986,51 @@ def compute_quote_from_df(df: pd.DataFrame,
     quote_state.ui_vars = dict(ui_vars)
     quote_state.rates = dict(rates)
     geo_context = dict(geo or {})
+    inner_geo_raw = geo_context.get("geo")
+    inner_geo = dict(inner_geo_raw) if isinstance(inner_geo_raw, dict) else {}
+    geo_context["geo"] = inner_geo
+
+    def _int_from(value: Any) -> int:
+        num = _coerce_float_or_none(value)
+        if num is None:
+            return 0
+        try:
+            return int(round(num))
+        except Exception:
+            return 0
+
+    def _max_int(*values: Any) -> int:
+        best = 0
+        for value in values:
+            num = _coerce_float_or_none(value)
+            if num is None:
+                continue
+            if num > best:
+                try:
+                    best = int(round(num))
+                except Exception:
+                    continue
+        return max(0, best)
+
+    hole_count_canonical = _int_from(geo_context.get("hole_count"))
+    if hole_count_canonical <= 0 and inner_geo:
+        hole_count_canonical = _int_from(inner_geo.get("hole_count"))
+    hole_count_canonical = max(0, hole_count_canonical)
+    geo_context["hole_count"] = hole_count_canonical
+    if inner_geo:
+        inner_geo["hole_count"] = hole_count_canonical
+
+    feature_counts_geo_raw = geo_context.get("feature_counts")
+    if isinstance(feature_counts_geo_raw, dict):
+        feature_counts_geo = feature_counts_geo_raw
+    else:
+        feature_counts_geo = {}
+        if feature_counts_geo_raw:
+            try:
+                feature_counts_geo.update(dict(feature_counts_geo_raw))
+            except Exception:
+                feature_counts_geo = {}
+        geo_context["feature_counts"] = feature_counts_geo
 
     MM_PER_IN = 25.4
 
@@ -5028,6 +5088,35 @@ def compute_quote_from_df(df: pd.DataFrame,
     is_plate_2d = str(geo_context.get("kind", "")).lower() == "2d"
     if is_plate_2d:
         require_plate_inputs(geo_context, ui_vars)
+
+    chart_tap_qty = _int_from(chart_reconcile_geo.get("tap_qty")) if chart_reconcile_geo else 0
+    chart_cbore_qty = _int_from(chart_reconcile_geo.get("cbore_qty")) if chart_reconcile_geo else 0
+    tap_qty_override_geo = _coerce_float_or_none(ui_vars.get("Tap Qty (LLM/GEO)"))
+    tap_qty_geo = _max_int(
+        chart_tap_qty,
+        feature_counts_geo.get("tap_qty") if isinstance(feature_counts_geo, dict) else None,
+        inner_geo.get("tap_qty") if inner_geo else None,
+        geo_context.get("tap_qty"),
+    )
+    if tap_qty_override_geo and tap_qty_override_geo > 0:
+        tap_qty_geo = int(round(tap_qty_override_geo))
+    cbore_qty_geo = _max_int(
+        chart_cbore_qty,
+        feature_counts_geo.get("cbore_qty") if isinstance(feature_counts_geo, dict) else None,
+        inner_geo.get("cbore_qty") if inner_geo else None,
+        geo_context.get("cbore_qty"),
+    )
+    tap_qty_seed = max(chart_tap_qty, tap_qty_geo)
+    cbore_qty_seed = max(chart_cbore_qty, cbore_qty_geo)
+    geo_context["tap_qty"] = tap_qty_geo
+    inner_geo["tap_qty"] = tap_qty_geo
+    geo_context["cbore_qty"] = cbore_qty_geo
+    inner_geo["cbore_qty"] = cbore_qty_geo
+    if isinstance(feature_counts_geo, dict):
+        if tap_qty_geo:
+            feature_counts_geo["tap_qty"] = tap_qty_geo
+        if cbore_qty_geo:
+            feature_counts_geo["cbore_qty"] = cbore_qty_geo
     # ---- sheet views ---------------------------------------------------------
     items = df["Item"].astype(str)
     vals  = df["Example Values / Options"]
@@ -5470,12 +5559,14 @@ def compute_quote_from_df(df: pd.DataFrame,
     lap_hr   = sum_time(r"(?:Lapping|Honing|Polishing)")
     lap_cost = lap_hr * rates["LappingRate"]
 
-    deburr_hr     = sum_time(r"(?:Deburr|Edge\s*Break)")
-    tumble_hr     = sum_time(r"(?:Tumbling|Vibratory)")
-    blast_hr      = sum_time(r"(?:Bead\s*Blasting|Sanding)")
-    laser_mark_hr = sum_time(r"(?:Laser\s*Mark|Engraving)")
-    masking_hr    = sum_time(r"(?:Masking\s*for\s*Plating|Masking)")
-    finishing_cost = (deburr_hr + tumble_hr + blast_hr + laser_mark_hr + masking_hr) * rates["FinishingRate"]
+    deburr_manual_hr = sum_time(r"(?:Deburr|Edge\s*Break)")
+    tumble_hr        = sum_time(r"(?:Tumbling|Vibratory)")
+    blast_hr         = sum_time(r"(?:Bead\s*Blasting|Sanding)")
+    laser_mark_hr    = sum_time(r"(?:Laser\s*Mark|Engraving)")
+    masking_hr       = sum_time(r"(?:Masking\s*for\s*Plating|Masking)")
+    finishing_rate   = float(rates.get("FinishingRate", 0.0))
+    finishing_misc_hr = tumble_hr + blast_hr + laser_mark_hr + masking_hr
+    finishing_cost   = finishing_misc_hr * finishing_rate
 
     # Inspection & docs
     inproc_hr   = sum_time(r"(?:In[- ]?Process\s*Inspection)")
@@ -5564,22 +5655,6 @@ def compute_quote_from_df(df: pd.DataFrame,
     drill_material_key = geo_context.get("material") or material_name
     drill_hr = estimate_drilling_hours(hole_diams_list, float(thickness_for_drill or 0.0), drill_material_key or "")
     drill_rate = float(rates.get("DrillingRate") or rates.get("MillingRate", 0.0) or 0.0)
-    # Heuristic counterbore time: 0.15 min per counterbore
-    try:
-        cbore_qty_guess = int(_coerce_float_or_none(geo_context.get("cbore_qty")) or 0)
-    except Exception:
-        cbore_qty_guess = 0
-    cbore_hr = (cbore_qty_guess * 0.15) / 60.0
-    # Ensure tap_qty_geo exists before use
-    try:
-        tap_qty_geo  # noqa: F821
-    except Exception:
-        tap_qty_geo = int(_coerce_float_or_none(geo_context.get("tap_qty")) or 0)
-    thickness_in_for_tap = (float(thickness_for_drill) / 25.4) if thickness_for_drill else _coerce_float_or_none(inner_geo.get("deepest_hole_in") if isinstance(inner_geo, dict) else None)
-    if thickness_in_for_tap is None:
-        # Ensure tap_qty_geo is defined before use; default from GEO or 0         try:             tap_qty_geo  # noqa: F821         except Exception:             tap_qty_geo = int(_coerce_float_or_none(geo_context.get("tap_qty")) or 0)
-        thickness_in_for_tap = _coerce_float_or_none(geo_context.get("thickness_in_guess"))
-    tap_hr_est = estimate_tapping_hours(tap_qty_geo, float(thickness_in_for_tap or 0.0), drill_material_key or "")
     hole_count_geo = _coerce_float_or_none(geo_context.get("hole_count"))
     hole_count_for_tripwire = 0
     if hole_count_geo and hole_count_geo > 0:
@@ -5589,13 +5664,33 @@ def compute_quote_from_df(df: pd.DataFrame,
     elif hole_count_override and hole_count_override > 0:
         hole_count_for_tripwire = int(round(hole_count_override))
     geo_context["hole_count"] = hole_count_for_tripwire
-    # Drilling floor: enforce minimum seconds per hole
-    try:
-        min_sec_per_hole = 9.0
-        drill_hr_floor = (float(hole_count_for_tripwire or 0) * min_sec_per_hole) / 3600.0
-        baseline_drill_hr = max(baseline_drill_hr, drill_hr_floor)
-    except Exception:
-        pass
+    avg_tap_min = 0.20
+    avg_cbore_min = 0.15
+    tapping_hr = (tap_qty_geo * avg_tap_min) / 60.0
+    cbore_hr = (cbore_qty_geo * avg_cbore_min) / 60.0
+    tapping_hr_rounded = round(tapping_hr, 3)
+    cbore_hr_rounded = round(cbore_hr, 3)
+
+    edge_len_in = _coerce_float_or_none(geo_context.get("edge_len_in"))
+    if edge_len_in is None:
+        edge_len_in = _coerce_float_or_none(geo_context.get("edge_length_in"))
+    if edge_len_in is None:
+        edge_len_mm = _coerce_float_or_none(geo_context.get("profile_length_mm"))
+        if edge_len_mm is not None:
+            edge_len_in = float(edge_len_mm) / 25.4
+    edge_len_in = float(edge_len_in or 0.0)
+    deburr_ipm_edge = 1000.0
+    deburr_edge_hr_raw = edge_len_in / deburr_ipm_edge if edge_len_in else 0.0
+    sec_per_hole = 5.0
+    hole_count_total = hole_count_for_tripwire if hole_count_for_tripwire else _int_from(hole_count_geo)
+    deburr_holes_hr_raw = (float(hole_count_total) * sec_per_hole) / 3600.0 if hole_count_total else 0.0
+    deburr_auto_hr_raw = deburr_edge_hr_raw + deburr_holes_hr_raw
+    deburr_manual_hr_float = float(deburr_manual_hr or 0.0)
+    deburr_total_hr = round(deburr_manual_hr_float + deburr_auto_hr_raw, 3)
+    deburr_auto_hr = round(deburr_auto_hr_raw, 3)
+    deburr_edge_hr = round(deburr_edge_hr_raw, 3)
+    deburr_holes_hr = round(deburr_holes_hr_raw, 3)
+    deburr_manual_hr_rounded = round(deburr_manual_hr_float, 3)
 
     # ---- roll-ups ------------------------------------------------------------
     inspection_hr_total = inproc_hr + final_hr + cmm_prog_hr + cmm_run_hr + fair_hr + srcinsp_hr
@@ -5617,8 +5712,19 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     existing_drill_cost = float(process_costs.get("drilling", 0.0) or 0.0)
     existing_drill_hr = existing_drill_cost / drill_rate if drill_rate else 0.0
-    baseline_drill_hr = max(existing_drill_hr, float(drill_hr or 0.0)) + float(tap_hr_est or 0.0) + float(cbore_hr or 0.0)
+    baseline_drill_hr = max(existing_drill_hr, float(drill_hr or 0.0))
+    try:
+        min_sec_per_hole = 9.0
+        drill_hr_floor = (float(hole_count_for_tripwire or 0) * min_sec_per_hole) / 3600.0
+        baseline_drill_hr = max(baseline_drill_hr, drill_hr_floor)
+    except Exception:
+        pass
+    baseline_drill_hr = round(baseline_drill_hr, 3)
     process_costs["drilling"] = baseline_drill_hr * drill_rate
+    process_costs["tapping"] = tapping_hr_rounded * drill_rate
+    process_costs["counterbore"] = cbore_hr_rounded * drill_rate
+    deburr_cost = deburr_total_hr * finishing_rate
+    process_costs["deburr"] = deburr_cost
 
     process_costs_baseline = {k: float(v) for k, v in process_costs.items()}
 
@@ -5629,8 +5735,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         "sinker_edm":       {"hr": eff(sinker_hr),  "rate": rates.get("SinkerEDMRate", 0.0)},
         "grinding":         {"hr": eff(grinding_hr),"rate": rates.get("SurfaceGrindRate", 0.0)},
         "lapping_honing":   {"hr": lap_hr,          "rate": rates.get("LappingRate", 0.0)},
-        "finishing_deburr": {"hr": deburr_hr + tumble_hr + blast_hr + laser_mark_hr + masking_hr,
-                             "rate": rates.get("FinishingRate", 0.0)},
+        "finishing_deburr": {"hr": finishing_misc_hr, "rate": finishing_rate},
         "inspection":       {"hr": inspection_hr_total, "rate": rates.get("InspectionRate", 0.0)},
         "saw_waterjet":     {"hr": sawing_hr,       "rate": rates.get("SawWaterjetRate", 0.0)},
         "assembly":         {"hr": assembly_hr,     "rate": rates.get("AssemblyRate", 0.0)},
@@ -5638,8 +5743,17 @@ def compute_quote_from_df(df: pd.DataFrame,
         "ehs_compliance":   {"hr": ehs_hr,          "rate": rates.get("InspectionRate", 0.0)},
     }
     process_meta["drilling"] = {"hr": baseline_drill_hr, "rate": drill_rate}
-    if tap_hr_est:
-        process_meta["drilling"]["tap_hr_est"] = float(tap_hr_est)
+    process_meta["tapping"] = {"hr": tapping_hr_rounded, "rate": drill_rate}
+    process_meta["counterbore"] = {"hr": cbore_hr_rounded, "rate": drill_rate}
+    process_meta["deburr"] = {"hr": deburr_total_hr, "rate": finishing_rate}
+    if deburr_auto_hr:
+        process_meta["deburr"]["auto_calc_hr"] = deburr_auto_hr
+    if deburr_manual_hr_rounded:
+        process_meta["deburr"]["manual_hr"] = deburr_manual_hr_rounded
+    if deburr_edge_hr:
+        process_meta["deburr"]["edge_hr"] = deburr_edge_hr
+    if deburr_holes_hr:
+        process_meta["deburr"]["hole_touch_hr"] = deburr_holes_hr
     for key, meta in process_meta.items():
         rate = float(meta.get("rate", 0.0))
         hr = float(meta.get("hr", 0.0))
@@ -5919,34 +6033,9 @@ def compute_quote_from_df(df: pd.DataFrame,
         "scrap_max": 0.25,
     }
 
-    tap_qty_seed = int(chart_reconcile_geo.get("tap_qty") or 0) if chart_reconcile_geo else 0
-    cbore_qty_seed = int(chart_reconcile_geo.get("cbore_qty") or 0) if chart_reconcile_geo else 0
-    feature_counts_geo = geo_context.get("feature_counts") if isinstance(geo_context.get("feature_counts"), dict) else {}
-    inner_geo = geo_context.get("geo") if isinstance(geo_context.get("geo"), dict) else {}
-
-    tap_qty_geo = tap_qty_seed
-    if tap_qty_geo <= 0:
-        tap_qty_geo = int(_coerce_float_or_none(feature_counts_geo.get("tap_qty")) or 0)
-    if tap_qty_geo <= 0:
-        tap_qty_geo = int(_coerce_float_or_none(inner_geo.get("tap_qty")) or 0)
-    if tap_qty_geo <= 0:
-        tap_qty_geo = int(_coerce_float_or_none(geo_context.get("tap_qty")) or 0)
-    tap_qty_override_geo = _coerce_float_or_none(ui_vars.get("Tap Qty (LLM/GEO)"))
-    if tap_qty_override_geo and tap_qty_override_geo > 0:
-        tap_qty_geo = int(round(tap_qty_override_geo))
-    if tap_qty_geo > 0:
-        tap_qty_seed = tap_qty_geo
+    tap_qty_seed = int(max(tap_qty_seed, tap_qty_geo))
+    cbore_qty_seed = int(max(cbore_qty_seed, cbore_qty_geo))
     geo_context["tap_qty"] = int(tap_qty_geo or 0)
-
-    cbore_qty_geo = cbore_qty_seed
-    if cbore_qty_geo <= 0:
-        cbore_qty_geo = int(_coerce_float_or_none(feature_counts_geo.get("cbore_qty")) or 0)
-    if cbore_qty_geo <= 0:
-        cbore_qty_geo = int(_coerce_float_or_none(inner_geo.get("cbore_qty")) or 0)
-    if cbore_qty_geo <= 0:
-        cbore_qty_geo = int(_coerce_float_or_none(geo_context.get("cbore_qty")) or 0)
-    if cbore_qty_geo > 0:
-        cbore_qty_seed = cbore_qty_geo
     geo_context["cbore_qty"] = int(cbore_qty_geo or 0)
     hole_bins_for_seed: dict[str, int] = {}
     if chart_reconcile_geo:
@@ -7216,6 +7305,7 @@ def merge_estimate_into_vars(vars_df: pd.DataFrame, estimate: dict) -> pd.DataFr
     return vars_df
 # ---- 2D: DXF / DWG (ezdxf) ---------------------------------------------------
 RE_TAP    = re.compile(r"(\(\d+\)\s*)?(#\s*\d{1,2}-\d+|M\d+(?:\.\d+)?x\d+(?:\.\d+)?)\s*TAP", re.I)
+RE_NPT    = re.compile(r"(\d+\/\d+)\s*-\s*N\.?P\.?T\.?", re.I)
 RE_THRU   = re.compile(r"\bTHRU\b", re.I)
 RE_CBORE  = re.compile(r"C[’']?BORE|CBORE|COUNTERBORE", re.I)
 RE_CSK    = re.compile(r"CSK|C'SINK|COUNTERSINK", re.I)
@@ -7390,7 +7480,11 @@ def _parse_hole_line(line: str, to_in: float, *, source: str | None = None) -> d
             thread_spec = mt.group(1)
         entry["tap"] = thread_spec.replace(" ", "") if thread_spec else None
     else:
-        entry["tap"] = None
+        m_npt = RE_NPT.search(U)
+        if m_npt:
+            entry["tap"] = m_npt.group(0).replace(" ", "")
+        else:
+            entry["tap"] = None
     entry["thru"] = bool(RE_THRU.search(U))
     entry["cbore"] = bool(RE_CBORE.search(U))
     entry["csk"] = bool(RE_CSK.search(U))
@@ -7484,7 +7578,7 @@ def summarize_hole_chart_lines(lines: Iterable[str] | None) -> dict[str, Any]:
                 qty = max(1, int(mqty.group(1)))
             except Exception:
                 qty = 1
-        if RE_TAP.search(u):
+        if RE_TAP.search(u) or RE_NPT.search(u):
             tap_qty += qty
         if RE_CBORE.search(u):
             cbore_qty += qty
@@ -8256,14 +8350,32 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
 
     hole_count = _to_int((geo or {}).get("hole_count"))
 
+    thickness_in_val = _to_float(geo.get("thickness_in"))
     thickness_mm = _to_float(geo.get("thickness_mm"))
-    if thickness_mm is None:
-        thickness_mm = _to_float(ui_vars.get("Thickness (in)"))
-    thickness_in = round(thickness_mm * 0.0393701, 2) if thickness_mm is not None else None
+    if thickness_in_val is None and thickness_mm is not None:
+        try:
+            thickness_in_val = float(thickness_mm) / 25.4
+        except Exception:
+            thickness_in_val = None
+    ui_thickness_in = _to_float(ui_vars.get("Thickness (in)"))
+    if thickness_in_val is None and ui_thickness_in is not None:
+        thickness_in_val = float(ui_thickness_in)
+    thickness_in = round(float(thickness_in_val), 2) if thickness_in_val is not None else None
 
     material_name = geo.get("material") or ui_vars.get("Material")
     if isinstance(material_name, str):
         material_name = material_name.strip() or None
+
+    material_display = material_name or "Steel"
+
+    hole_count_val = hole_count if isinstance(hole_count, int) else None
+    geo_notes_default: list[str] = []
+    try:
+        thickness_note_val = float(thickness_in_val) if thickness_in_val is not None else None
+    except Exception:
+        thickness_note_val = None
+    if hole_count_val and thickness_note_val and material_display:
+        geo_notes_default = [f"{hole_count_val} holes in {thickness_note_val:.2f} in {material_display}"]
 
     material_source = (
         result.get("material_source")
@@ -8297,6 +8409,7 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
             "thickness_in": thickness_in,
             "material": material_name,
         },
+        "geo_notes": geo_notes_default,
         "material_source": material_source,
         "scrap_pct": scrap_pct_percent,
     }
@@ -8338,6 +8451,10 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
 
         geo_notes_raw = data.get("geo_notes") if isinstance(data.get("geo_notes"), list) else []
         geo_notes = [str(note).strip() for note in geo_notes_raw if str(note).strip()]
+        if not geo_notes:
+            default_notes = ctx.get("geo_notes") if isinstance(ctx.get("geo_notes"), list) else []
+            if default_notes:
+                geo_notes = [str(note).strip() for note in default_notes if str(note).strip()]
         if not geo_notes:
             hc = ctx.get("geo_summary", {}).get("hole_count")
             thk = ctx.get("geo_summary", {}).get("thickness_in")
