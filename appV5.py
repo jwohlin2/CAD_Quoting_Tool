@@ -26,6 +26,43 @@ LLM_DEBUG_DIR.mkdir(exist_ok=True)
 # Defaults
 DEFAULT_THICKNESS_IN = float(os.environ.get("QUOTER_DEFAULT_THICKNESS_IN", "1.0"))
 
+MATERIAL_CHOICES = [
+    "Steel",
+    "Aluminum 6061",
+    "Aluminum 7075",
+    "Stainless 304",
+    "Stainless 316",
+    "Brass C360",
+    "Copper C110",
+    "Tool Steel A2",
+    "Tool Steel D2",
+]
+
+
+def normalize_material(name: str) -> str | None:
+    if not name:
+        return None
+    s = name.strip().lower()
+    aliases = {
+        "steel": "Steel",
+        "mild steel": "Steel",
+        "ss304": "Stainless 304",
+        "304": "Stainless 304",
+        "ss316": "Stainless 316",
+        "316": "Stainless 316",
+        "6061": "Aluminum 6061",
+        "al 6061": "Aluminum 6061",
+        "7075": "Aluminum 7075",
+        "c110": "Copper C110",
+        "c360": "Brass C360",
+        "a2": "Tool Steel A2",
+        "d2": "Tool Steel D2",
+    }
+    for m in MATERIAL_CHOICES:
+        if s == m.lower():
+            return m
+    return aliases.get(s, None)
+
 import copy
 import re
 import sys
@@ -5119,6 +5156,14 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     MM_PER_IN = 25.4
 
+    def _get_editor_text(df, label, default=None):
+        try:
+            m = df["Item"].astype(str).str.fullmatch(label, case=False, na=False)
+            raw = str(df.loc[m, "Example Values / Options"].iloc[0]).strip()
+            return raw if raw != "" else default
+        except Exception:
+            return default
+
     def _get_editor_float(df, label, default=None):
         try:
             m = df["Item"].astype(str).str.fullmatch(label, case=False, na=False)
@@ -5134,61 +5179,79 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     app_ref = getattr(quote_state, "app_ref", None)
 
-    # ---- thickness resolution order ----
-    thickness_in = _get_editor_float(df, r"Thickness \(in\)", default=None)
+    # --- resolve Material & Thickness with defaults -----------------------
+    material_raw = _get_editor_text(df, r"Material", default=None)
+    material = normalize_material(material_raw or "")
+    material_defaulted = False
+    if not material:
+        geo_mat = geo_context.get("material")
+        material = normalize_material(str(geo_mat or ""))
+    if not material:
+        material = "Steel"
+        material_defaulted = True
 
-    if thickness_in is None:
+    thickness_in = _get_editor_float(df, r"Thickness \(in\)", default=None)
+    if thickness_in is None or thickness_in <= 0:
         t_geo = geo_context.get("thickness_mm")
         try:
             if isinstance(t_geo, dict):
                 t_geo = t_geo.get("value")
-            thickness_in = float(t_geo) / MM_PER_IN if t_geo else None
+            geo_thickness = float(t_geo) / MM_PER_IN if t_geo else None
         except Exception:
-            thickness_in = None
-
-    if thickness_in is None or thickness_in <= 0:
-        thickness_in = DEFAULT_THICKNESS_IN
-        try:
-            mask = df["Item"].astype(str).str.fullmatch(r"Thickness \(in\)", case=False, na=False)
-            if mask.any():
-                df.loc[mask, "Example Values / Options"] = f"{thickness_in:.3f}"
-        except Exception:
-            pass
-        try:
-            ui_vars["Thickness (in)"] = f"{thickness_in:.3f}"
-        except Exception:
-            pass
-        try:
-            app_obj = app_ref if app_ref is not None else None
-            v = None
-            if app_obj is not None and hasattr(app_obj, "editor_vars"):
-                v = app_obj.editor_vars.get("Thickness (in)")
-            if v is not None:
-                current_val = ""
-                try:
-                    current_val = v.get()
-                except Exception:
-                    current_val = ""
-                text = (current_val or "").strip()
-                needs_update = text == ""
-                if not needs_update:
-                    try:
-                        needs_update = float(text) <= 0
-                    except Exception:
-                        needs_update = False
-                if needs_update:
-                    v.set(f"{thickness_in:.3f}")
-                    try:
-                        app_obj._mark_label_source("Thickness (in)", "Default")
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+            geo_thickness = None
+        if geo_thickness is not None and geo_thickness > 0:
+            thickness_in = geo_thickness
+        else:
+            thickness_in = DEFAULT_THICKNESS_IN
+        thickness_defaulted = True
     else:
-        try:
-            ui_vars.setdefault("Thickness (in)", f"{thickness_in:.3f}")
-        except Exception:
-            pass
+        thickness_defaulted = False
+
+    # write back defaults so UI & df stay in sync
+    try:
+        mask = df["Item"].astype(str).str.fullmatch(r"Thickness \(in\)", case=False, na=False)
+        if mask.any():
+            df.loc[mask, "Example Values / Options"] = f"{thickness_in:.3f}"
+    except Exception:
+        pass
+    try:
+        mask = df["Item"].astype(str).str.fullmatch(r"Material", case=False, na=False)
+        if mask.any():
+            df.loc[mask, "Example Values / Options"] = material
+    except Exception:
+        pass
+
+    ui_vars["Material"] = material
+    ui_vars["Thickness (in)"] = f"{thickness_in:.3f}"
+    geo_context["material"] = material
+
+    try:
+        app_obj = app_ref if app_ref is not None else None
+        if app_obj is not None and hasattr(app_obj, "editor_vars"):
+            vmat = app_obj.editor_vars.get("Material")
+            if vmat is not None:
+                current = (vmat.get() or "").strip()
+                if current == "" or normalize_material(current) is None:
+                    vmat.set(material)
+                    if material_defaulted:
+                        app_obj._mark_label_source("Material", "Default")
+            vthk = app_obj.editor_vars.get("Thickness (in)")
+            if vthk is not None:
+                text = (vthk.get() or "").strip()
+                needs_default = False
+                if text == "":
+                    needs_default = True
+                else:
+                    try:
+                        needs_default = float(text) <= 0
+                    except Exception:
+                        needs_default = False
+                if needs_default:
+                    vthk.set(f"{thickness_in:.3f}")
+                    if thickness_defaulted:
+                        app_obj._mark_label_source("Thickness (in)", "Default")
+    except Exception:
+        pass
 
     quote_state.ui_vars = dict(ui_vars)
     quote_state.rates = dict(rates)
@@ -5369,14 +5432,16 @@ def compute_quote_from_df(df: pd.DataFrame,
     density_g_cc  = first_num(r"\b(?:Density|Material\s*Density)\b", 14.5)
     scrap_pct_raw = num_pct(r"\b(?:Scrap\s*%|Expected\s*Scrap)\b", 0.0)
     scrap_pct = _ensure_scrap_pct(scrap_pct_raw)
-    material_name_raw = sheet_text(r"(?i)Material\s*(?:Name|Grade|Alloy|Type)")
+    material_name_raw = material
     if not material_name_raw:
-        fallback_name = strv(r"(?i)^Material$", "")
-        if fallback_name and not re.fullmatch(r"\s*[$0-9.,]+\s*", str(fallback_name)):
-            material_name_raw = fallback_name
+        material_name_raw = sheet_text(r"(?i)Material\s*(?:Name|Grade|Alloy|Type)")
+        if not material_name_raw:
+            fallback_name = strv(r"(?i)^Material$", "")
+            if fallback_name and not re.fullmatch(r"\s*[$0-9.,]+\s*", str(fallback_name)):
+                material_name_raw = fallback_name
     material_name = str(material_name_raw or "").strip()
-    if not material_name and geo_context.get("material"):
-        material_name = str(geo_context.get("material"))
+    if not material_name:
+        material_name = str(geo_context.get("material") or "")
     if material_name:
         geo_context.setdefault("material", material_name)
     material_name = str(geo_context.get("material") or material_name or "").strip()
@@ -8915,6 +8980,12 @@ class App(tk.Tk):
         self._editor_set_depth = 0
         self._building_editor = False
         self._reprice_in_progress = False
+        self._reprice_pending: str | None = None
+        self._focus_out_reprice_labels = {
+            "Scrap Percent (%)",
+            "Plate Length (in)",
+            "Plate Width (in)",
+        }
         self.effective_process_hours: dict[str, float] = {}
         self.effective_scrap: float = 0.0
         self.effective_setups: int = 1
@@ -9221,12 +9292,58 @@ class App(tk.Tk):
             self._group_frames[group] = sec.body
 
         row_for_group = {g: 0 for g, _ in groups}
+
+        def _add_material_field(parent: ttk.Frame, row: int, var_material: tk.StringVar):
+            value = var_material.get() or ""
+            normalized = normalize_material(value)
+            defaulted = False
+            if not value.strip() or normalized is None:
+                var_material.set("Steel")
+                self._mark_label_source("Material", "Default")
+                defaulted = True
+            elif normalized and normalized != value:
+                var_material.set(normalized)
+
+            cb = ttk.Combobox(
+                parent,
+                textvariable=var_material,
+                state="readonly",
+                values=MATERIAL_CHOICES,
+                width=24,
+            )
+            cb.grid(row=row, column=1, sticky="we", pady=2)
+            chip = ttk.Label(parent, text="", foreground="#1463FF")
+            chip.grid(row=row, column=2, sticky="w", padx=(6, 0))
+            ttk.Label(parent, text="").grid(row=row, column=3, sticky="w", padx=(6, 0))
+
+            def on_sel(_e=None):
+                sel = normalize_material(var_material.get()) or "Steel"
+                var_material.set(sel)
+                self._update_editor_override_from_label("Material", sel)
+                self._mark_label_source("Material", "User")
+                self.reprice()
+
+            cb.bind("<<ComboboxSelected>>", on_sel)
+            cb.bind("<Return>", on_sel)
+            return cb, chip, defaulted
+
         for label, (group, unit, allow_int) in EDITOR_SPEC.items():
             if group not in self._group_frames:
                 continue
             var = self._ensure_editor_var(label)
             width = 28 if allow_int is None else 12
             row = row_for_group[group]
+            if label == "Material":
+                frame = self._group_frames[group]
+                lbl = ttk.Label(frame, text=label)
+                lbl.grid(row=row, column=0, sticky="w", padx=(2, 8), pady=2)
+                _combo, chip, defaulted = _add_material_field(frame, row, var)
+                row_for_group[group] += 1
+                self._register_editor_field(label, var, lbl, chip)
+                if defaulted:
+                    self._mark_label_source(label, "Default")
+                self.quote_vars[label] = var
+                continue
             lbl, entry, chip = _grid_pair(
                 self._group_frames[group],
                 row,
@@ -9238,6 +9355,8 @@ class App(tk.Tk):
             )
             row_for_group[group] += 1
             self._register_editor_field(label, var, lbl, chip)
+            if label in self._focus_out_reprice_labels:
+                self._bind_reprice_on_focus_out(entry, var, label)
             if label in FIELD_TIPS:
                 lbl.tooltip = ToolTip(lbl, FIELD_TIPS[label])
                 entry.tooltip = ToolTip(entry, FIELD_TIPS[label])
@@ -9378,13 +9497,48 @@ class App(tk.Tk):
         self._mark_label_source(label, None)
         self._bind_editor_var(label, var)
 
+    def _debounced_reprice(self, delay_ms: int = 300) -> None:
+        try:
+            pending = self._reprice_pending
+        except AttributeError:
+            pending = None
+        if pending:
+            try:
+                self.after_cancel(pending)
+            except Exception:
+                pass
+
+        def _run():
+            self._reprice_pending = None
+            self.reprice()
+
+        self._reprice_pending = self.after(delay_ms, _run)
+
+    def _bind_reprice_on_focus_out(self, widget: tk.Widget, var: tk.StringVar, label: str) -> None:
+        def on_focus_out(_e=None):
+            try:
+                self._mark_label_source(label, "User")
+            except Exception:
+                pass
+            self.reprice()
+
+        try:
+            widget.bind("<FocusOut>", on_focus_out)
+        except Exception:
+            pass
+
     def _bind_editor_var(self, label: str, var: tk.StringVar) -> None:
         def _on_write(*_):
             if self._building_editor or self._editor_set_depth > 0:
                 return
             self._update_editor_override_from_label(label, var.get())
             self._mark_label_source(label, "User")
-            self.reprice()
+            if label == "Material":
+                return
+            if label in getattr(self, "_focus_out_reprice_labels", set()):
+                pass
+            else:
+                self._debounced_reprice()
             if hasattr(self, "_apply_editor_filters"):
                 try:
                     self._apply_editor_filters()
