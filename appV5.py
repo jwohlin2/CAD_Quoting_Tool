@@ -18,6 +18,8 @@ import json, math, os, time, gc, datetime, decimal, uuid
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
+from contextlib import contextmanager
+from types import SimpleNamespace
 
 LLM_DEBUG = bool(int(os.getenv("LLM_DEBUG", "1")))   # set 0 to disable
 LLM_DEBUG_DIR = Path(__file__).with_name("llm_debug")
@@ -103,11 +105,6 @@ def _to_jsonable(x):
             return x.get()
     except Exception:
         pass
-    if callable(x):
-        return f"<callable:{getattr(x, '__name__', type(x).__name__)}>"
-    d = getattr(x, "__dict__", None)
-    if d is not None:
-        return {k: _to_jsonable(v) for k, v in d.items() if not k.startswith("_")}
     try:
         import numpy as np  # type: ignore
         import pandas as pd  # type: ignore
@@ -122,7 +119,12 @@ def _to_jsonable(x):
             return x.to_dict(orient="records")
     except Exception:
         pass
-    if isinstance(x, (set, tuple, list)):
+    if callable(x):
+        return f"<callable:{getattr(x, '__name__', type(x).__name__)}>"
+    d = getattr(x, "__dict__", None)
+    if d is not None:
+        return {k: _to_jsonable(v) for k, v in d.items() if not k.startswith("_")}
+    if isinstance(x, (list, tuple, set)):
         return [_to_jsonable(v) for v in x]
     return repr(x)
 
@@ -133,7 +135,7 @@ def write_snapshot_safe(path: Path, obj: dict) -> None:
         path.write_text(json.dumps(safe, indent=2), encoding="utf-8")
     except Exception as e:
         path.with_suffix(".bad.json").write_text(
-            json.dumps({"error": str(e), "type": type(e).__name__}, indent=2),
+            json.dumps({"error": str(e)}, indent=2),
             encoding="utf-8",
         )
 
@@ -3103,6 +3105,16 @@ def convert_dwg_to_dxf(dwg_path: str) -> str:
             "DWG import requires ODAFileConverter. Set ODA_CONVERTER_EXE to the converter executable."
         )
     return convert_dwg_to_dxf_2018(dwg_path, exe)
+
+
+def ensure_dxf(path: str | Path) -> str:
+    p = Path(path)
+    ext = p.suffix.lower()
+    if ext == ".dxf":
+        return str(p)
+    if ext == ".dwg":
+        return convert_dwg_to_dxf(str(p))
+    raise ValueError(f"Unsupported CAD extension for ensure_dxf: {ext}")
 
 
 
@@ -7493,47 +7505,29 @@ def merge_estimate_into_vars(vars_df: pd.DataFrame, estimate: dict) -> pd.DataFr
         vars_df.loc[mask, "Example Values / Options"] = value
     return vars_df
 # ---- 2D: DXF / DWG (ezdxf) ---------------------------------------------------
-def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
-    if not _HAS_EZDXF:
-        raise RuntimeError("ezdxf not installed. pip/conda install ezdxf")
-
-    # --- load doc ---
-    dxf_text_path: str | None = None
-    doc = None
-    lower_path = path.lower()
-    if lower_path.endswith(".dwg"):
-        if _HAS_ODAFC:
-            # uses ODAFileConverter through ezdxf, no env var needed
-            doc = odafc.readfile(path)
-        else:
-            dxf_path = convert_dwg_to_dxf(path)  # needs ODA_CONVERTER_EXE or DWG2DXF_EXE
-            dxf_text_path = dxf_path
-            doc = ezdxf.readfile(dxf_path)
-    else:
-        doc = ezdxf.readfile(path)
-        dxf_text_path = path
-
+def build_geo_from_dxf(doc: Any, *, source_path: str | None = None) -> dict[str, Any]:
     sp = doc.modelspace()
     ins = int(doc.header.get("$INSUNITS", 4))
-    u2mm = {1:25.4, 4:1.0, 2:304.8, 6:1000.0}.get(ins, 1.0)
+    u2mm = {1: 25.4, 4: 1.0, 2: 304.8, 6: 1000.0}.get(ins, 1.0)
 
-    # perimeter from lightweight polylines, polylines, arcs
     import math
+
     per = 0.0
     for e in sp.query("LWPOLYLINE"):
         pts = e.get_points("xyb")
         for i in range(len(pts)):
-            x1,y1,_ = pts[i]; x2,y2,_ = pts[(i+1) % len(pts)]
-            per += math.hypot(x2-x1, y2-y1)
+            x1, y1, _ = pts[i]
+            x2, y2, _ = pts[(i + 1) % len(pts)]
+            per += math.hypot(x2 - x1, y2 - y1)
     for e in sp.query("POLYLINE"):
         vs = [(v.dxf.location.x, v.dxf.location.y) for v in e.vertices]
-        for i in range(len(vs)-1):
-            x1,y1 = vs[i]; x2,y2 = vs[i+1]
-            per += math.hypot(x2-x1, y2-y1)
+        for i in range(len(vs) - 1):
+            x1, y1 = vs[i]
+            x2, y2 = vs[i + 1]
+            per += math.hypot(x2 - x1, y2 - y1)
     for e in sp.query("ARC"):
-        per += abs(e.dxf.end_angle - e.dxf.start_angle) * math.pi/180.0 * e.dxf.radius
+        per += abs(e.dxf.end_angle - e.dxf.start_angle) * math.pi / 180.0 * e.dxf.radius
 
-    # holes from circles
     holes = list(sp.query("CIRCLE"))
     entity_holes_mm = [float(2.0 * c.dxf.radius * u2mm) for c in holes]
     hole_diams_mm = [round(val, 2) for val in entity_holes_mm]
@@ -7544,9 +7538,9 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     chart_reconcile: dict[str, Any] | None = None
     chart_source: str | None = None
 
-    if extract_text_lines_from_dxf and dxf_text_path:
+    if extract_text_lines_from_dxf and source_path:
         try:
-            chart_lines = extract_text_lines_from_dxf(dxf_text_path)
+            chart_lines = extract_text_lines_from_dxf(source_path)
         except Exception:
             chart_lines = []
     if not chart_lines:
@@ -7562,22 +7556,25 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
             chart_source = "dxf_text_regex"
             chart_reconcile = reconcile_holes(entity_holes_mm, chart_ops)
 
-    # scrape text for thickness/material
-    txt = " ".join([t.dxf.text for t in sp.query("TEXT")] +
-                   [m.plain_text() for m in sp.query("MTEXT")]).lower()
+    txt = " ".join([t.dxf.text for t in sp.query("TEXT")] + [m.plain_text() for m in sp.query("MTEXT")]).lower()
     import re
+
     thickness_mm = None
     m = re.search(r"(thk|thickness)\s*[:=]?\s*([0-9.]+)\s*(mm|in|in\.|\")", txt)
     if m:
-        thickness_mm = float(m.group(2)) * (25.4 if (m.group(3).startswith("in") or m.group(3)=='"') else 1.0)
+        thickness_mm = float(m.group(2)) * (25.4 if (m.group(3).startswith("in") or m.group(3) == '"') else 1.0)
     material = None
     mm = re.search(r"(matl|material)\s*[:=]?\s*([a-z0-9 \-\+]+)", txt)
     if mm:
         material = mm.group(2).strip()
 
+    suffix = ""
+    if source_path:
+        suffix = Path(source_path).suffix.lower().lstrip(".")
+
     result: dict[str, Any] = {
         "kind": "2D",
-        "source": Path(path).suffix.lower().lstrip("."),
+        "source": suffix,
         "profile_length_mm": round(per * u2mm, 2),
         "hole_diams_mm": hole_diams_mm,
         "hole_count": len(hole_diams_mm),
@@ -7624,6 +7621,28 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     if cbore_total:
         derived_block["cbore_qty"] = int(cbore_total)
     return result
+
+
+def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
+    if not _HAS_EZDXF:
+        raise RuntimeError("ezdxf not installed. pip/conda install ezdxf")
+
+    dxf_text_path: str | None = None
+    doc = None
+    lower_path = path.lower()
+    if lower_path.endswith(".dwg"):
+        if _HAS_ODAFC:
+            doc = odafc.readfile(path)
+        else:
+            dxf_path = convert_dwg_to_dxf(path)
+            dxf_text_path = dxf_path
+            doc = ezdxf.readfile(dxf_path)
+    else:
+        doc = ezdxf.readfile(path)
+        dxf_text_path = path
+
+    source_path = dxf_text_path or path
+    return build_geo_from_dxf(doc, source_path=source_path)
 def _extract_text_lines_from_ezdxf_doc(doc: Any) -> list[str]:
     """Harvest TEXT / MTEXT strings from an ezdxf Drawing."""
 
@@ -8955,6 +8974,14 @@ class App(tk.Tk):
         self.title("Compos-AI")
         self.geometry("1260x900")
 
+        self.state = SimpleNamespace(
+            loading=False,
+            computing=False,
+            data_loaded=False,
+        )
+        self._reprice_after = None
+        self.selected_path: Path | None = None
+
         self.vars_df = None
         self.vars_df_full = None
         self.geo = None
@@ -9035,6 +9062,7 @@ class App(tk.Tk):
             "Scrap Percent (%)",
             "Plate Length (in)",
             "Plate Width (in)",
+            "Thickness (in)",
         }
         self.effective_process_hours: dict[str, float] = {}
         self.effective_scrap: float = 0.0
@@ -9074,6 +9102,18 @@ class App(tk.Tk):
 
         self.LLM_SUGGEST = None
         self.init_llm()
+
+    @contextmanager
+    def BusyGuard(self, flag_attr: str):
+        state = self.state
+        if getattr(state, flag_attr, False):
+            yield False
+            return
+        setattr(state, flag_attr, True)
+        try:
+            yield True
+        finally:
+            setattr(state, flag_attr, False)
 
     def _load_settings(self) -> dict[str, Any]:
         path = getattr(self, "settings_path", None)
@@ -9143,6 +9183,7 @@ class App(tk.Tk):
     def _populate_editor_tab(self, df: pd.DataFrame) -> None:
         """Rebuild the Quote Editor tab using the latest variables dataframe."""
         df = coerce_or_make_vars_df(df)
+        self.state.data_loaded = False
 
         def _ensure_row(dataframe: pd.DataFrame, item: str, value: Any, dtype: str = "number") -> pd.DataFrame:
             mask = dataframe["Item"].astype(str).str.fullmatch(item, case=False)
@@ -9197,6 +9238,7 @@ class App(tk.Tk):
         except Exception as exc:
             if LLM_DEBUG:
                 self.log_llm_snapshot(ctx="fill_editor_zeros", error=str(exc))
+        self.state.data_loaded = True
     def _initial_editor_value(self, label: str) -> str:
         if self.vars_df is None:
             return ""
@@ -9548,20 +9590,42 @@ class App(tk.Tk):
         self._bind_editor_var(label, var)
 
     def _debounced_reprice(self, delay_ms: int = 300) -> None:
-        self.schedule_reprice(delay_ms)
+        self._schedule_reprice(delay_ms)
 
     def _bind_reprice_on_focus_out(self, widget: tk.Widget, var: tk.StringVar, label: str) -> None:
-        def on_focus_out(_e=None):
+        def on_focus_out(_e=None, lab: str = label):
             try:
-                self._mark_label_source(label, "User")
+                self._mark_label_source(lab, "User")
             except Exception:
                 pass
-            self.schedule_reprice()
+            if not getattr(self.state, "data_loaded", False) or self.state.loading:
+                return
+            self.reprice()
 
         try:
             widget.bind("<FocusOut>", on_focus_out)
         except Exception:
             pass
+
+    def _on_var_change(self, *_):
+        if not getattr(self.state, "data_loaded", False) or self.state.loading or self.state.computing:
+            return
+        self._schedule_reprice(300)
+
+    def _schedule_reprice(self, delay_ms: int = 300) -> None:
+        if not getattr(self.state, "data_loaded", False) or self.state.loading or self.state.computing:
+            return
+        root = getattr(self, "root", self)
+        handle = getattr(self, "_reprice_after", None)
+        if handle:
+            try:
+                root.after_cancel(handle)
+            except Exception:
+                pass
+        try:
+            self._reprice_after = root.after(delay_ms, self.reprice)
+        except Exception:
+            self.reprice()
 
     def _bind_editor_var(self, label: str, var: tk.StringVar) -> None:
         def _on_write(*_):
@@ -9569,12 +9633,10 @@ class App(tk.Tk):
                 return
             self._update_editor_override_from_label(label, var.get())
             self._mark_label_source(label, "User")
-            if label == "Material":
-                return
-            if label in getattr(self, "_focus_out_reprice_labels", set()):
+            if label == "Material" or label in getattr(self, "_focus_out_reprice_labels", set()):
                 pass
             else:
-                self.schedule_reprice()
+                self._on_var_change()
             if hasattr(self, "_apply_editor_filters"):
                 try:
                     self._apply_editor_filters()
@@ -9633,12 +9695,8 @@ class App(tk.Tk):
         snap = dict(payload)
         snap.setdefault("timestamp", time.strftime("%Y-%m-%d %H:%M:%S"))
         try:
-            text = json.dumps(snap, indent=2, default=str)
-        except Exception:
-            text = json.dumps({"fallback": repr(snap)}, indent=2)
-        try:
             fn = LLM_DEBUG_DIR / f"llm_snapshot_{int(time.time())}.json"
-            fn.write_text(text, encoding="utf-8")
+            write_snapshot_safe(fn, snap)
         except Exception:
             pass
 
@@ -9950,6 +10008,134 @@ class App(tk.Tk):
             node[leaf_key] = value
 
     # ----- Full flow: CAD ? GEO ? LLM ? Quote -----
+    def _finalize_2d_geo(
+        self,
+        geo: dict,
+        *,
+        source_ext: str,
+        structured_pdf: dict | None = None,
+        source_path: str | None = None,
+    ) -> None:
+        if self.vars_df is None:
+            vp = None
+            if source_path:
+                vp = find_variables_near(source_path)
+            if not vp:
+                vp = filedialog.askopenfilename(title="Select variables CSV/XLSX")
+            if vp:
+                try:
+                    core_df, full_df = read_variables_file(vp, return_full=True)
+                    self.vars_df = core_df
+                    self.vars_df_full = full_df
+                except Exception as read_err:
+                    messagebox.showerror(
+                        "Variables",
+                        f"Failed to read variables file:\n{read_err}\n\nContinuing with defaults.",
+                    )
+                    self.vars_df = None
+                    self.vars_df_full = None
+            else:
+                messagebox.showinfo("Variables", "No variables file provided; using defaults.")
+                self.vars_df = None
+
+        self.vars_df = coerce_or_make_vars_df(self.vars_df)
+
+        if structured_pdf:
+            try:
+                estimate = infer_pdf_estimate(structured_pdf)
+            except Exception:
+                estimate = {}
+            if estimate:
+                self.vars_df = merge_estimate_into_vars(self.vars_df, estimate)
+
+        self.vars_df = apply_2d_features_to_variables(
+            self.vars_df,
+            geo,
+            params=self.params,
+            rates=self.rates,
+        )
+        self.geo = geo
+        self._log_geo(geo)
+
+        self._populate_editor_tab(self.vars_df)
+        self.nb.select(self.tab_editor)
+        ext = source_ext.upper() if source_ext else "DXF"
+        self.set_status(f"{ext} variables loaded. Review the Quote Editor and generate the quote.")
+
+    def load_cad_and_vars(self) -> None:
+        if self.state.loading:
+            return
+        selected = self.selected_path
+        if not selected:
+            return
+        self.state.data_loaded = False
+
+        guard_cm = self.BusyGuard("loading")
+        run = guard_cm.__enter__()
+        if not run:
+            return
+
+        released = False
+
+        def _release(exc_type=None, exc=None, tb=None):
+            nonlocal released
+            if not released:
+                released = True
+                guard_cm.__exit__(exc_type, exc, tb)
+
+        import threading
+        import queue
+
+        q: "queue.Queue[tuple[dict | None, Exception | None]]" = queue.Queue()
+
+        def _worker() -> None:
+            err: Exception | None = None
+            geo: dict | None = None
+            try:
+                dxf_path = ensure_dxf(selected)
+                import ezdxf  # type: ignore
+
+                doc = ezdxf.readfile(dxf_path)
+                geo = build_geo_from_dxf(doc, source_path=str(dxf_path))
+            except Exception as e:  # noqa: BLE001
+                err = e
+            q.put((geo, err))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+        def _poll() -> None:
+            if q.empty():
+                try:
+                    self.after(100, _poll)
+                except Exception:
+                    _release()
+                return
+            geo, err = q.get()
+            if err:
+                _release()
+                messagebox.showerror("CAD Load", f"Failed to load CAD: {err}")
+                return
+            try:
+                source_ext = Path(selected).suffix.lower()
+                self._finalize_2d_geo(
+                    geo or {},
+                    source_ext=source_ext,
+                    source_path=str(selected),
+                )
+            except Exception as finalize_err:  # noqa: BLE001
+                _release()
+                messagebox.showerror("CAD Load", f"Failed to load CAD: {finalize_err}")
+                return
+            self.state.data_loaded = True
+            _release()
+            self.reprice()
+
+        try:
+            self.after(100, _poll)
+        except Exception:
+            _release()
+            raise
+
     def action_full_flow(self):
         # ---------- choose file ----------
         self.set_status("Opening CAD/Drawingï¿½")
@@ -9966,48 +10152,24 @@ class App(tk.Tk):
 
         ext = Path(path).suffix.lower()
         self.set_status(f"Processing {os.path.basename(path)}ï¿½")
+        self.state.data_loaded = False
 
         # ---------- 2D branch: PDF / DWG / DXF ----------
         if ext in (".pdf", ".dwg", ".dxf"):
             try:
-                structured_pdf = None
                 if ext == ".pdf":
                     structured_pdf = extract_pdf_all(Path(path))
-                    g2d = extract_2d_features_from_pdf_vector(path)   # PyMuPDF vector-only MVP
-                else:
-                    g2d = extract_2d_features_from_dxf_or_dwg(path)   # ezdxf / ODA
-
-                if self.vars_df is None:
-                    vp = find_variables_near(path) or filedialog.askopenfilename(title="Select variables CSV/XLSX")
-                    if vp:
-                        try:
-                            core_df, full_df = read_variables_file(vp, return_full=True)
-                            self.vars_df = core_df
-                            self.vars_df_full = full_df
-                        except Exception as read_err:
-                            messagebox.showerror("Variables", f"Failed to read variables file:\n{read_err}\n\nContinuing with defaults.")
-                            self.vars_df = None
-                            self.vars_df_full = None
-                    else:
-                        messagebox.showinfo("Variables", "No variables file provided; using defaults.")
-                        self.vars_df = None
-                self.vars_df = coerce_or_make_vars_df(self.vars_df)
-
-                if structured_pdf:
-                    try:
-                        estimate = infer_pdf_estimate(structured_pdf)
-                    except Exception:
-                        estimate = {}
-                    if estimate:
-                        self.vars_df = merge_estimate_into_vars(self.vars_df, estimate)
-
-                self.vars_df = apply_2d_features_to_variables(self.vars_df, g2d, params=self.params, rates=self.rates)
-                self.geo = g2d
-                self._log_geo(g2d)
-
-                self._populate_editor_tab(self.vars_df)
-                self.nb.select(self.tab_editor)
-                self.set_status(f"{ext.upper()} variables loaded. Review the Quote Editor and generate the quote.")
+                    g2d = extract_2d_features_from_pdf_vector(path)
+                    self._finalize_2d_geo(
+                        g2d,
+                        source_ext=ext,
+                        structured_pdf=structured_pdf,
+                        source_path=path,
+                    )
+                    return
+                self.selected_path = Path(path)
+                self.set_status(f"Loading {os.path.basename(path)}…")
+                self.load_cad_and_vars()
                 return
             except Exception as e:
                 messagebox.showerror(
@@ -10315,89 +10477,83 @@ class App(tk.Tk):
         self.out_txt.see("end")
 
     def reprice(self, *args, **kwargs) -> None:
-        # Guard against re-entrancy from multiple UI events
-        if getattr(self, "_repricing", False):
-            return
-        self._repricing = True
-        try:
+        with self.BusyGuard("computing") as run:
+            if not run:
+                return
             return self.gen_quote(reuse_suggestions=True)
-        finally:
-            self._repricing = False
 
     def schedule_reprice(self, delay_ms: int = 300) -> None:
-        root = getattr(self, "root", self)
-        handle = getattr(self, "_reprice_after", None)
-        if handle:
-            try:
-                root.after_cancel(handle)
-            except Exception:
-                pass
-        try:
-            self._reprice_after = root.after(delay_ms, self.reprice)
-        except Exception:
-            self.reprice()
+        self._schedule_reprice(delay_ms)
 
     def gen_quote(self, reuse_suggestions: bool = False) -> None:
-        already_repricing = self._reprice_in_progress
-        if not already_repricing:
-            self._reprice_in_progress = True
-        try:
-            if self.vars_df is None:
-                self.vars_df = coerce_or_make_vars_df(None)
-            for item_name, string_var in self.quote_vars.items():
-                mask = self.vars_df["Item"] == item_name
-                if mask.any():
-                    self.vars_df.loc[mask, "Example Values / Options"] = string_var.get()
-
-            self.apply_overrides(notify=False)
-
-            try:
-                ui_vars = {
-                    str(row["Item"]): row["Example Values / Options"]
-                    for _, row in self.vars_df.iterrows()
-                }
-            except Exception:
-                ui_vars = {}
-
-            try:
-                res = compute_quote_from_df(
-                    self.vars_df,
-                    params=self.params,
-                    rates=self.rates,
-                    material_vendor_csv=self.settings.get("material_vendor_csv", "") if isinstance(self.settings, dict) else "",
-                    llm_enabled=self.llm_enabled.get(),
-                    llm_model_path=self.llm_model_path.get().strip() or None,
-                    geo=self.geo,
-                    ui_vars=ui_vars,
-                    quote_state=self.quote_state,
-                    reuse_suggestions=reuse_suggestions,
-                    llm_suggest=self.LLM_SUGGEST,
-                )
-            except ValueError as err:
-                messagebox.showerror("Quote blocked", str(err))
-                self.set_status("Quote blocked.", "warn", 5000)
-                return
-
-            baseline_ctx = self.quote_state.baseline or {}
-            suggestions_ctx = self.quote_state.suggestions or {}
-            if baseline_ctx and suggestions_ctx:
-                self.apply_llm_to_editor(suggestions_ctx, baseline_ctx)
-
-            model_path = self.llm_model_path.get().strip()
-            llm_explanation = get_llm_quote_explanation(res, model_path)
-            report = render_quote(res, currency="$", show_zeros=False, llm_explanation=llm_explanation)
-            self.out_txt.delete("1.0", "end")
-            self.out_txt.insert("end", report, "rcol")
-
-            self.nb.select(self.tab_out)
-            self.set_status(
-                f"Quote Generated! Final Price: ${res.get('price', 0):,.2f}",
-                "info",
-                6000,
-            )
-        finally:
+        def _run_gen() -> None:
+            already_repricing = self._reprice_in_progress
             if not already_repricing:
-                self._reprice_in_progress = False
+                self._reprice_in_progress = True
+            try:
+                if self.vars_df is None:
+                    self.vars_df = coerce_or_make_vars_df(None)
+                for item_name, string_var in self.quote_vars.items():
+                    mask = self.vars_df["Item"] == item_name
+                    if mask.any():
+                        self.vars_df.loc[mask, "Example Values / Options"] = string_var.get()
+
+                self.apply_overrides(notify=False)
+
+                try:
+                    ui_vars = {
+                        str(row["Item"]): row["Example Values / Options"]
+                        for _, row in self.vars_df.iterrows()
+                    }
+                except Exception:
+                    ui_vars = {}
+
+                try:
+                    res = compute_quote_from_df(
+                        self.vars_df,
+                        params=self.params,
+                        rates=self.rates,
+                        material_vendor_csv=self.settings.get("material_vendor_csv", "") if isinstance(self.settings, dict) else "",
+                        llm_enabled=self.llm_enabled.get(),
+                        llm_model_path=self.llm_model_path.get().strip() or None,
+                        geo=self.geo,
+                        ui_vars=ui_vars,
+                        quote_state=self.quote_state,
+                        reuse_suggestions=reuse_suggestions,
+                        llm_suggest=self.LLM_SUGGEST,
+                    )
+                except ValueError as err:
+                    messagebox.showerror("Quote blocked", str(err))
+                    self.set_status("Quote blocked.", "warn", 5000)
+                    return
+
+                baseline_ctx = self.quote_state.baseline or {}
+                suggestions_ctx = self.quote_state.suggestions or {}
+                if baseline_ctx and suggestions_ctx:
+                    self.apply_llm_to_editor(suggestions_ctx, baseline_ctx)
+
+                model_path = self.llm_model_path.get().strip()
+                llm_explanation = get_llm_quote_explanation(res, model_path)
+                report = render_quote(res, currency="$", show_zeros=False, llm_explanation=llm_explanation)
+                self.out_txt.delete("1.0", "end")
+                self.out_txt.insert("end", report, "rcol")
+
+                self.nb.select(self.tab_out)
+                self.set_status(
+                    f"Quote Generated! Final Price: ${res.get('price', 0):,.2f}",
+                    "info",
+                    6000,
+                )
+            finally:
+                if not already_repricing:
+                    self._reprice_in_progress = False
+
+        if self.state.computing:
+            return _run_gen()
+        with self.BusyGuard("computing") as run:
+            if not run:
+                return
+            return _run_gen()
 
 # Helper: map our existing enrich_geo_* output to GEO__ keys
 def _map_geo_to_double_underscore(g: dict) -> dict:
