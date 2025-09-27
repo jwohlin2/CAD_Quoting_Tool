@@ -4795,6 +4795,37 @@ def require_plate_inputs(geo: dict, ui_vars: dict[str, Any] | None) -> None:
         geo["material"] = material
 
 
+def net_mass_kg(plate_L_in, plate_W_in, t_in, hole_d_mm, density_g_cc: float = 7.85):
+    if not (plate_L_in and plate_W_in and t_in):
+        return None
+    try:
+        L = float(plate_L_in)
+        W = float(plate_W_in)
+        T = float(t_in)
+    except Exception:
+        return None
+    if L <= 0 or W <= 0 or T <= 0:
+        return None
+    vol_plate_in3 = L * W * T
+    try:
+        t_mm = T * 25.4
+    except Exception:
+        t_mm = None
+    if t_mm is None:
+        return None
+    holes_mm = []
+    for d in hole_d_mm or []:
+        val = _coerce_float_or_none(d)
+        if val and val > 0:
+            holes_mm.append(float(val))
+    vol_holes_mm3 = sum(math.pi * (d / 2.0) ** 2 * t_mm for d in holes_mm)
+    vol_holes_in3 = vol_holes_mm3 / 16387.064 if vol_holes_mm3 else 0.0
+    vol_net_in3 = max(0.0, vol_plate_in3 - vol_holes_in3)
+    vol_cc = vol_net_in3 * 16.387064
+    mass_g = vol_cc * float(density_g_cc or 0.0)
+    return mass_g / 1000.0 if mass_g else 0.0
+
+
 def estimate_drilling_hours(hole_diams_mm: list[float], thickness_mm: float, mat_key: str) -> float:
     """
     Conservative plate-drilling model with floors so 100+ holes don't collapse to minutes.
@@ -4835,6 +4866,28 @@ def estimate_drilling_hours(hole_diams_mm: list[float], thickness_mm: float, mat
         total_sec += qty * per
         total_sec += toolchange_s
 
+    return total_sec / 3600.0
+
+
+def estimate_tapping_hours(tap_qty: int, thickness_in: float, mat_key: str) -> float:
+    if not tap_qty or tap_qty <= 0:
+        return 0.0
+    try:
+        depth_in = float(thickness_in or 0.0)
+    except Exception:
+        depth_in = 0.0
+    depth_in = min(2.0, max(0.25, depth_in or 0.0))
+    mat = _material_family(mat_key or "")
+    mat_factor = 1.0
+    if mat == "alum":
+        mat_factor = 0.7
+    elif mat == "stainless":
+        mat_factor = 1.3
+    base_sec = 45.0
+    depth_sec = 25.0 * depth_in
+    change_sec = 8.0
+    per_tap = (base_sec + depth_sec) * mat_factor
+    total_sec = tap_qty * per_tap + max(0, tap_qty - 1) * change_sec
     return total_sec / 3600.0
 
 
@@ -5159,6 +5212,34 @@ def compute_quote_from_df(df: pd.DataFrame,
             _material_family(geo_context.get("material") or material_name),
             density_lookup["steel"],
         )
+        holes_for_mass: list[float] = []
+        hole_sources: list[Any] = []
+        for key in ("hole_diams_mm_precise", "hole_diams_mm"):
+            raw = geo_context.get(key)
+            if isinstance(raw, (list, tuple)):
+                hole_sources.extend(raw)
+        if not hole_sources:
+            inner_geo = geo_context.get("geo")
+            if isinstance(inner_geo, dict):
+                raw_inner = inner_geo.get("hole_diams_mm")
+                if isinstance(raw_inner, (list, tuple)):
+                    hole_sources.extend(raw_inner)
+        for hv in hole_sources:
+            val = _coerce_float_or_none(hv)
+            if val and val > 0:
+                holes_for_mass.append(float(val))
+        thickness_in_for_mass = (thickness_mm_val / 25.4) if thickness_mm_val else _coerce_float_or_none(ui_vars.get("Thickness (in)"))
+        net_mass_calc = net_mass_kg(length_in_val, width_in_val, thickness_in_for_mass, holes_for_mass, density_g_cc)
+        if net_mass_calc:
+            geo_context.setdefault("net_mass_kg_est", float(net_mass_calc))
+            try:
+                vol_cm3_net = (float(net_mass_calc) * 1000.0) / float(density_g_cc or 0.0)
+            except Exception:
+                vol_cm3_net = None
+            if vol_cm3_net and vol_cm3_net > 0:
+                vol_cm3 = max(vol_cm3, vol_cm3_net)
+                GEO_vol_mm3 = max(GEO_vol_mm3, vol_cm3_net * 1000.0)
+                geo_context.setdefault("net_volume_cm3", float(vol_cm3_net))
 
     net_mass_g = max(0.0, vol_cm3 * density_g_cc)
     effective_mass_g = net_mass_g * (1.0 + scrap_pct)
@@ -5270,6 +5351,10 @@ def compute_quote_from_df(df: pd.DataFrame,
     setup_each = first_num(r"(?:Setup\s*Time\s*per\s*Setup|Setup\s*Hours\s*/\s*Setup)", 0.5)
 
     setups = max(1, min(int(round(setups or 1)), 3))
+    from_back_geo_flag = bool(geo_context.get("needs_back_face") or geo_context.get("from_back"))
+    if from_back_geo_flag and setups < 2:
+        setups = 2
+        geo_context["needs_back_face"] = True
     setup_hr  = setups * setup_each
     milling_hr = rough_hr + semi_hr + finish_hr + setup_hr
 
@@ -5482,6 +5567,10 @@ def compute_quote_from_df(df: pd.DataFrame,
     drill_material_key = geo_context.get("material") or material_name
     drill_hr = estimate_drilling_hours(hole_diams_list, float(thickness_for_drill or 0.0), drill_material_key or "")
     drill_rate = float(rates.get("DrillingRate") or rates.get("MillingRate", 0.0) or 0.0)
+    thickness_in_for_tap = (float(thickness_for_drill) / 25.4) if thickness_for_drill else _coerce_float_or_none(inner_geo.get("deepest_hole_in") if isinstance(inner_geo, dict) else None)
+    if thickness_in_for_tap is None:
+        thickness_in_for_tap = _coerce_float_or_none(geo_context.get("thickness_in_guess"))
+    tap_hr_est = estimate_tapping_hours(tap_qty_geo, float(thickness_in_for_tap or 0.0), drill_material_key or "")
     hole_count_geo = _coerce_float_or_none(geo_context.get("hole_count"))
     hole_count_for_tripwire = 0
     if hole_count_geo and hole_count_geo > 0:
@@ -5512,7 +5601,7 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     existing_drill_cost = float(process_costs.get("drilling", 0.0) or 0.0)
     existing_drill_hr = existing_drill_cost / drill_rate if drill_rate else 0.0
-    baseline_drill_hr = max(existing_drill_hr, float(drill_hr or 0.0))
+    baseline_drill_hr = max(existing_drill_hr, float(drill_hr or 0.0)) + float(tap_hr_est or 0.0)
     process_costs["drilling"] = baseline_drill_hr * drill_rate
 
     process_costs_baseline = {k: float(v) for k, v in process_costs.items()}
@@ -5533,6 +5622,8 @@ def compute_quote_from_df(df: pd.DataFrame,
         "ehs_compliance":   {"hr": ehs_hr,          "rate": rates.get("InspectionRate", 0.0)},
     }
     process_meta["drilling"] = {"hr": baseline_drill_hr, "rate": drill_rate}
+    if tap_hr_est:
+        process_meta["drilling"]["tap_hr_est"] = float(tap_hr_est)
     for key, meta in process_meta.items():
         rate = float(meta.get("rate", 0.0))
         hr = float(meta.get("hr", 0.0))
@@ -5707,6 +5798,12 @@ def compute_quote_from_df(df: pd.DataFrame,
         "part_mass_g_est": part_mass_g_est,
         "dfm_geo": dfm_geo,
     }
+    if tap_qty_geo > 0:
+        features["tap_qty_geo"] = int(tap_qty_geo)
+    if cbore_qty_geo > 0:
+        features["cbore_qty_geo"] = int(cbore_qty_geo)
+    if from_back_geo_flag:
+        features["needs_back_face_geo"] = True
     if chart_source_geo:
         features["chart_source"] = chart_source_geo
     if chart_ops_geo:
@@ -5799,6 +5896,33 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     tap_qty_seed = int(chart_reconcile_geo.get("tap_qty") or 0) if chart_reconcile_geo else 0
     cbore_qty_seed = int(chart_reconcile_geo.get("cbore_qty") or 0) if chart_reconcile_geo else 0
+    feature_counts_geo = geo_context.get("feature_counts") if isinstance(geo_context.get("feature_counts"), dict) else {}
+    inner_geo = geo_context.get("geo") if isinstance(geo_context.get("geo"), dict) else {}
+
+    tap_qty_geo = tap_qty_seed
+    if tap_qty_geo <= 0:
+        tap_qty_geo = int(_coerce_float_or_none(feature_counts_geo.get("tap_qty")) or 0)
+    if tap_qty_geo <= 0:
+        tap_qty_geo = int(_coerce_float_or_none(inner_geo.get("tap_qty")) or 0)
+    if tap_qty_geo <= 0:
+        tap_qty_geo = int(_coerce_float_or_none(geo_context.get("tap_qty")) or 0)
+    tap_qty_override_geo = _coerce_float_or_none(ui_vars.get("Tap Qty (LLM/GEO)"))
+    if tap_qty_override_geo and tap_qty_override_geo > 0:
+        tap_qty_geo = int(round(tap_qty_override_geo))
+    if tap_qty_geo > 0:
+        tap_qty_seed = tap_qty_geo
+    geo_context["tap_qty"] = int(tap_qty_geo or 0)
+
+    cbore_qty_geo = cbore_qty_seed
+    if cbore_qty_geo <= 0:
+        cbore_qty_geo = int(_coerce_float_or_none(feature_counts_geo.get("cbore_qty")) or 0)
+    if cbore_qty_geo <= 0:
+        cbore_qty_geo = int(_coerce_float_or_none(inner_geo.get("cbore_qty")) or 0)
+    if cbore_qty_geo <= 0:
+        cbore_qty_geo = int(_coerce_float_or_none(geo_context.get("cbore_qty")) or 0)
+    if cbore_qty_geo > 0:
+        cbore_qty_seed = cbore_qty_geo
+    geo_context["cbore_qty"] = int(cbore_qty_geo or 0)
     hole_bins_for_seed: dict[str, int] = {}
     if chart_reconcile_geo:
         bins_raw = chart_reconcile_geo.get("chart_bins") or {}
@@ -7066,12 +7190,13 @@ def merge_estimate_into_vars(vars_df: pd.DataFrame, estimate: dict) -> pd.DataFr
         vars_df.loc[mask, "Example Values / Options"] = value
     return vars_df
 # ---- 2D: DXF / DWG (ezdxf) ---------------------------------------------------
-RE_TAP    = re.compile(r"(#\s*\d{1,2}-\d+|\bM\d+(?:\.\d+)?x\d+(?:\.\d+)?)\s*TAP", re.I)
+RE_TAP    = re.compile(r"(\(\d+\)\s*)?(#\s*\d{1,2}-\d+|M\d+(?:\.\d+)?x\d+(?:\.\d+)?)\s*TAP", re.I)
 RE_THRU   = re.compile(r"\bTHRU\b", re.I)
 RE_CBORE  = re.compile(r"C[’']?BORE|CBORE|COUNTERBORE", re.I)
 RE_CSK    = re.compile(r"CSK|C'SINK|COUNTERSINK", re.I)
 RE_DEPTH  = re.compile(r"(\d+(?:\.\d+)?)\s*DEEP(?:\s+FROM\s+(FRONT|BACK))?", re.I)
 RE_DIA    = re.compile(r"[Ø⌀\u00D8]?\s*(\d+(?:\.\d+)?)", re.I)
+RE_THICK  = re.compile(r"(\d+(?:\.\d+)?)\s*DEEP(?:\s+FROM\s+(FRONT|BACK))?", re.I)
 RE_MAT    = re.compile(r"\b(MATERIAL|MAT)\b[:\s]*([A-Z0-9\-\s/]+)")
 RE_COAT   = re.compile(r"\b(ANODIZE|BLACK OXIDE|ZINC PLATE|NICKEL PLATE|PASSIVATE|HEAT TREAT)\b", re.I)
 RE_TOL    = re.compile(r"\bUNLESS OTHERWISE SPECIFIED\b.*?([±\+\-]\s*\d+\.\d+)", re.I | re.S)
@@ -7232,7 +7357,15 @@ def _parse_hole_line(line: str, to_in: float, *, source: str | None = None) -> d
         entry["qty"] = int(m_qty.group(1))
 
     mt = RE_TAP.search(U)
-    entry["tap"] = mt.group(1).replace(" ", "") if mt else None
+    if mt:
+        thread_spec = None
+        if mt.lastindex and mt.lastindex >= 2:
+            thread_spec = mt.group(2)
+        else:
+            thread_spec = mt.group(1)
+        entry["tap"] = thread_spec.replace(" ", "") if thread_spec else None
+    else:
+        entry["tap"] = None
     entry["thru"] = bool(RE_THRU.search(U))
     entry["cbore"] = bool(RE_CBORE.search(U))
     entry["csk"] = bool(RE_CSK.search(U))
@@ -7272,6 +7405,7 @@ def _aggregate_hole_entries(entries: Iterable[dict[str, Any]] | None) -> dict[st
     tap_qty = 0
     cbore_qty = 0
     max_depth_in = 0.0
+    back_ops = False
     if entries:
         for entry in entries:
             if not isinstance(entry, dict):
@@ -7296,12 +7430,54 @@ def _aggregate_hole_entries(entries: Iterable[dict[str, Any]] | None) -> dict[st
                     max_depth_in = float(depth)
             except Exception:
                 continue
+            side = str(entry.get("side") or "").upper()
+            if side == "BACK" or (entry.get("raw") and "BACK" in str(entry.get("raw")).upper()):
+                back_ops = True
     return {
         "hole_count": hole_count if hole_count else None,
         "tap_qty": tap_qty,
         "cbore_qty": cbore_qty,
         "deepest_hole_in": max_depth_in if max_depth_in > 0 else None,
         "provenance": "HOLE TABLE / NOTES" if hole_count else None,
+        "from_back": back_ops,
+    }
+
+
+def summarize_hole_chart_lines(lines: Iterable[str] | None) -> dict[str, Any]:
+    tap_qty = 0
+    cbore_qty = 0
+    deepest = 0.0
+    back_ops = False
+    for raw in lines or []:
+        u = str(raw or "").upper()
+        if not u:
+            continue
+        qty = 1
+        mqty = re.search(r"\((\d+)\)", u)
+        if mqty:
+            try:
+                qty = max(1, int(mqty.group(1)))
+            except Exception:
+                qty = 1
+        if RE_TAP.search(u):
+            tap_qty += qty
+        if RE_CBORE.search(u):
+            cbore_qty += qty
+        md = RE_THICK.search(u)
+        if md:
+            try:
+                depth = float(md.group(1))
+            except Exception:
+                depth = None
+            if depth is not None and depth > deepest:
+                deepest = depth
+            if "BACK" in u:
+                back_ops = True
+    return {
+        "tap_qty": tap_qty,
+        "cbore_qty": cbore_qty,
+        "deepest_hole_in": deepest or None,
+        "from_back": back_ops,
     }
 
 
@@ -7389,6 +7565,8 @@ def build_geo_from_dxf(doc) -> dict[str, Any]:
     notes = list(hole_notes)
     if max_depth and (not notes or not any("Max hole depth" in note for note in notes)):
         notes.append(f"Max hole depth detected: {max_depth:.3f} in")
+    if combined_agg.get("from_back") and not any("back" in str(note).lower() for note in notes):
+        notes.append("Hole chart references BACK operations.")
 
     tokens_parts: list[str] = []
     try:
@@ -7408,6 +7586,8 @@ def build_geo_from_dxf(doc) -> dict[str, Any]:
         "hole_count": combined_agg.get("hole_count") or 0,
         "tap_qty": combined_agg.get("tap_qty") or 0,
         "cbore_qty": combined_agg.get("cbore_qty") or 0,
+        "from_back": bool(combined_agg.get("from_back")),
+        "needs_back_face": bool(combined_agg.get("from_back")),
         "provenance": {
             "plate_size": ords.get("provenance"),
             "thickness": "HOLE TABLE depth max" if max_depth else None,
@@ -7473,6 +7653,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     chart_ops: list[dict[str, Any]] = []
     chart_reconcile: dict[str, Any] | None = None
     chart_source: str | None = None
+    chart_summary: dict[str, Any] | None = None
 
     if extract_text_lines_from_dxf and dxf_text_path:
         try:
@@ -7482,6 +7663,8 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     if not chart_lines:
         chart_lines = _extract_text_lines_from_ezdxf_doc(doc)
 
+    if chart_lines:
+        chart_summary = summarize_hole_chart_lines(chart_lines)
     if chart_lines and parse_hole_table_lines:
         try:
             hole_rows = parse_hole_table_lines(chart_lines)
@@ -7491,6 +7674,25 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
             chart_ops = hole_rows_to_ops(hole_rows)
             chart_source = "dxf_text_regex"
             chart_reconcile = reconcile_holes(entity_holes_mm, chart_ops)
+    if chart_summary:
+        geo.setdefault("chart_summary", chart_summary)
+        if chart_summary.get("tap_qty"):
+            geo["tap_qty"] = max(int(geo.get("tap_qty", 0) or 0), int(chart_summary.get("tap_qty") or 0))
+        if chart_summary.get("cbore_qty"):
+            geo["cbore_qty"] = max(int(geo.get("cbore_qty", 0) or 0), int(chart_summary.get("cbore_qty") or 0))
+        deepest_chart = _coerce_float_or_none(chart_summary.get("deepest_hole_in"))
+        if deepest_chart and (not geo.get("thickness_in_guess") or deepest_chart > float(geo.get("thickness_in_guess") or 0.0)):
+            geo["thickness_in_guess"] = deepest_chart
+            prov = geo.get("provenance") or {}
+            if isinstance(prov, dict):
+                prov["thickness"] = "HOLE TABLE depth max"
+                geo["provenance"] = prov
+        if chart_summary.get("from_back"):
+            geo["from_back"] = True
+            geo["needs_back_face"] = True
+            notes = geo.get("notes")
+            if isinstance(notes, list) and not any("back" in str(n).lower() for n in notes):
+                notes.append("Hole chart references BACK operations.")
 
     # scrape text for thickness/material
     txt = " ".join([t.dxf.text for t in sp.query("TEXT")] +
@@ -7535,6 +7737,8 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
         result["chart_source"] = chart_source
     if chart_lines:
         result["chart_lines"] = chart_lines
+    if chart_summary:
+        result["chart_summary"] = chart_summary
     if chart_reconcile:
         result["chart_reconcile"] = chart_reconcile
         result["hole_chart_agreement"] = bool(chart_reconcile.get("agreement"))
@@ -7713,11 +7917,14 @@ def apply_2d_features_to_variables(df, g2d: dict, *, params: dict, rates: dict):
     geo = g2d.get("geo") if isinstance(g2d, dict) else None
     thickness_mm = _coerce_float_or_none(g2d.get("thickness_mm")) if isinstance(g2d, dict) else None
     thickness_in = (float(thickness_mm) / 25.4) if thickness_mm else None
+    thickness_from_deepest = False
     if (not thickness_in) and isinstance(geo, dict):
-        guess = geo.get("thickness_in_guess")
+        guess = _coerce_float_or_none(geo.get("thickness_in_guess"))
         if guess:
             try:
-                thickness_in = float(guess)
+                bounded = min(3.0, max(0.125, float(guess)))
+                thickness_in = bounded
+                thickness_from_deepest = True
             except Exception:
                 thickness_in = None
 
@@ -7726,12 +7933,15 @@ def apply_2d_features_to_variables(df, g2d: dict, *, params: dict, rates: dict):
         material_note = str(geo.get("material_note") or "").strip()
     material_value = material_note or (g2d.get("material") if isinstance(g2d, dict) else "") or "Steel"
     df = upsert_var_row(df, "Material", material_value, dtype="text")
-    df = upsert_var_row(
-        df,
-        "Thickness (in)",
-        round(float(thickness_in), 4) if thickness_in else 0.0,
-        dtype="number",
-    )
+    if thickness_in:
+        df = upsert_var_row(
+            df,
+            "Thickness (in)",
+            round(float(thickness_in), 4),
+            dtype="number",
+        )
+    elif thickness_from_deepest:
+        df = upsert_var_row(df, "Thickness (in)", 0.125, dtype="number")
 
     plate_len = None
     plate_wid = None
@@ -7751,6 +7961,38 @@ def apply_2d_features_to_variables(df, g2d: dict, *, params: dict, rates: dict):
         dtype="number",
     )
     df = upsert_var_row(df, "Scrap Percent (%)", 15.0, dtype="number")
+
+    def _update_if_blank(label: str, value: Any, dtype: str = "number", zero_is_blank: bool = True) -> None:
+        if value is None:
+            return
+        mask = df["Item"].astype(str).str.fullmatch(label, case=False, na=False)
+        if mask.any():
+            existing_raw = str(df.loc[mask, "Example Values / Options"].iloc[0]).strip()
+            existing_val = _coerce_float_or_none(existing_raw)
+            is_blank = (existing_raw == "") or (zero_is_blank and (existing_val is None or abs(existing_val) < 1e-9))
+            if not is_blank:
+                return
+            df.loc[mask, "Example Values / Options"] = value
+            df.loc[mask, "Data Type / Input Method"] = dtype
+        else:
+            df.loc[len(df)] = [label, value, dtype]
+
+    tap_qty_geo = None
+    from_back_geo = False
+    if isinstance(geo, dict):
+        tap_qty_geo = _coerce_float_or_none(geo.get("tap_qty"))
+        from_back_geo = bool(geo.get("needs_back_face") or geo.get("from_back"))
+    if tap_qty_geo and tap_qty_geo > 0:
+        _update_if_blank("Tap Qty (LLM/GEO)", int(round(tap_qty_geo)))
+    if from_back_geo:
+        mask_setups = df["Item"].astype(str).str.fullmatch("Number of Milling Setups", case=False, na=False)
+        if mask_setups.any():
+            current = _coerce_float_or_none(df.loc[mask_setups, "Example Values / Options"].iloc[0])
+            if current is None or current < 2:
+                df.loc[mask_setups, "Example Values / Options"] = 2
+                df.loc[mask_setups, "Data Type / Input Method"] = "number"
+        else:
+            df.loc[len(df)] = ["Number of Milling Setups", 2, "number"]
 
     def set_row(pattern: str, value: float):
         # Use the module-level helper (fixes NameError in DWG import path).
