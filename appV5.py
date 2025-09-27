@@ -14,7 +14,7 @@ Single-file CAD Quoter (v8)
 """
 from __future__ import annotations
 
-import json, math, os, time, gc
+import json, math, os, time, gc, datetime, decimal, uuid
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -83,82 +83,59 @@ import pandas as pd
 from llama_cpp import Llama  # type: ignore
 
 # --- JSON snapshot helpers ----------------------------------------------------
-from pathlib import Path
-import json, datetime, decimal, uuid
-import numpy as np
-import pandas as pd
-
-def _to_jsonable(obj):
-    """Best-effort converter for snapshot logging."""
-    # primitives
-    if obj is None or isinstance(obj, (bool, int, float, str)):
-        return obj
-    # dates / decimals / uuids
-    if isinstance(obj, (datetime.date, datetime.datetime)):
-        return obj.isoformat()
-    if isinstance(obj, decimal.Decimal):
-        return float(obj)
-    if isinstance(obj, uuid.UUID):
-        return str(obj)
-    # pathlib
-    if isinstance(obj, Path):
-        return str(obj)
-    # numpy / pandas
-    if isinstance(obj, (np.integer,)):
-        return int(obj)
-    if isinstance(obj, (np.floating,)):
-        return float(obj)
-    if isinstance(obj, (np.ndarray,)):
-        return obj.tolist()
-    if isinstance(obj, (pd.Series,)):
-        return obj.to_dict()
-    if isinstance(obj, (pd.DataFrame,)):
-        return obj.to_dict(orient="records")
-    # sets/tuples
-    if isinstance(obj, (set, tuple)):
-        return list(obj)
-    # tkinter variables → their current value if possible
+def _to_jsonable(x):
+    if x is None or isinstance(x, (bool, int, float, str)):
+        return x
+    if isinstance(x, (datetime.date, datetime.datetime)):
+        return x.isoformat()
+    if isinstance(x, decimal.Decimal):
+        return float(x)
+    if isinstance(x, uuid.UUID):
+        return str(x)
+    if isinstance(x, Path):
+        return str(x)
+    if isinstance(x, dict):
+        return {str(k): _to_jsonable(v) for k, v in x.items()}
     try:
         import tkinter as tk
-        if isinstance(obj, (tk.StringVar, tk.DoubleVar, tk.IntVar, tk.BooleanVar)):
-            return obj.get()
+
+        if isinstance(x, (tk.StringVar, tk.DoubleVar, tk.IntVar, tk.BooleanVar)):
+            return x.get()
     except Exception:
         pass
-    # callables / methods → repr only (or None if you prefer to drop)
-    if callable(obj):
-        return f"<callable:{getattr(obj, '__name__', type(obj).__name__)}>"
-    # objects with __dict__ → shallow dict of jsonables
-    d = getattr(obj, "__dict__", None)
+    if callable(x):
+        return f"<callable:{getattr(x, '__name__', type(x).__name__)}>"
+    d = getattr(x, "__dict__", None)
     if d is not None:
         return {k: _to_jsonable(v) for k, v in d.items() if not k.startswith("_")}
-    # last resort
-    return repr(obj)
-
-def json_safe(obj):
-    """Recursively map obj to JSON-safe types."""
-    if isinstance(obj, dict):
-        return {str(k): json_safe(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [json_safe(v) for v in obj]
-    return _to_jsonable(obj)
-
-def find_non_jsonables(obj, prefix=""):
-    """Return list of (path, type) that fail json encoding – for diagnostics."""
-    bad = []
     try:
-        json.dumps(obj)
-        return bad
-    except TypeError:
+        import numpy as np  # type: ignore
+        import pandas as pd  # type: ignore
+
+        if isinstance(x, np.generic):
+            return x.item()
+        if isinstance(x, np.ndarray):
+            return x.tolist()
+        if isinstance(x, pd.Series):
+            return x.to_dict()
+        if isinstance(x, pd.DataFrame):
+            return x.to_dict(orient="records")
+    except Exception:
         pass
-    if isinstance(obj, dict):
-            for k, v in obj.items():
-                bad += find_non_jsonables(v, f"{prefix}.{k}" if prefix else str(k))
-    elif isinstance(obj, list):
-            for i, v in enumerate(obj):
-                bad += find_non_jsonables(v, f"{prefix}[{i}]")
-    else:
-        bad.append((prefix or "<root>", type(obj).__name__))
-    return bad
+    if isinstance(x, (set, tuple, list)):
+        return [_to_jsonable(v) for v in x]
+    return repr(x)
+
+
+def write_snapshot_safe(path: Path, obj: dict) -> None:
+    try:
+        safe = _to_jsonable(obj)
+        path.write_text(json.dumps(safe, indent=2), encoding="utf-8")
+    except Exception as e:
+        path.with_suffix(".bad.json").write_text(
+            json.dumps({"error": str(e), "type": type(e).__name__}, indent=2),
+            encoding="utf-8",
+        )
 
 def _normalize_lookup_key(value: str) -> str:
     cleaned = re.sub(r"[^0-9a-z]+", " ", str(value).strip().lower())
@@ -3072,64 +3049,60 @@ def read_step_or_iges_or_brep(path: str) -> TopoDS_Shape:
         return _brep_read(str(p))
     raise RuntimeError(f"Unsupported OCC format: {ext}")
 
-def convert_dwg_to_dxf(dwg_path: str, *, out_ver="ACAD2013") -> str:
+def convert_dwg_to_dxf_2018(dwg_path: str, oda_exe: str) -> str:
     """
-    Robust DWG?DXF wrapper.
-    Works with:
-      - A .bat/.cmd wrapper that accepts:  <input.dwg> <output.dxf>
-      - A custom exe that accepts:         <input.dwg> <output.dxf>
-      - ODAFileConverter.exe (7-arg form): <in_dir> <out_dir> <ver> DXF 0 0 <filter>
-    Looks for the converter via env var or common local paths and prints
-    the exact command used on failure.
+    Returns path to a freshly converted DXF 2018.
+    ODA CLI syntax: ODAFileConverter <in_dir> <out_dir> <in_ver> <out_ver> <recursive 0/1> <audit 0/1>
     """
-    # 1) find converter
-    exe = (os.environ.get("ODA_CONVERTER_EXE")
-           or os.environ.get("DWG2DXF_EXE")
-           or str(Path(__file__).with_name("dwg2dxf_wrapper.bat"))
-           or r"D:\CAD_Quoting_Tool\dwg2dxf_wrapper.bat")
-
-    if not exe or not Path(exe).exists():
-        raise RuntimeError(
-            "DWG import needs a DWG?DXF converter.\n"
-            "Set ODA_CONVERTER_EXE (recommended) or DWG2DXF_EXE to a .bat/.cmd/.exe.\n"
-            "Expected .bat signature:  <input.dwg> <output.dxf>"
-        )
 
     dwg = Path(dwg_path)
-    out_dir = Path(tempfile.mkdtemp(prefix="dwg2dxf_"))
-    out_dxf = out_dir / (dwg.stem + ".dxf")
+    exe = Path(oda_exe)
+    assert dwg.exists(), f"DWG not found: {dwg}"
+    assert exe.exists(), f"ODAFileConverter not found: {exe}"
 
-    exe_lower = Path(exe).name.lower()
-    try:
-        if exe_lower.endswith(".bat") or exe_lower.endswith(".cmd"):
-            # ? run batch via cmd.exe so it actually executes
-            cmd = ["cmd", "/c", exe, str(dwg), str(out_dxf)]
-            proc = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        elif "odafileconverter" in exe_lower:
-            # ? official ODAFileConverter CLI
-            cmd = [exe, str(dwg.parent), str(out_dir), out_ver, "DXF", "0", "0", dwg.name]
-            proc = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        else:
-            # ? generic exe that accepts <in> <out>
-            cmd = [exe, str(dwg), str(out_dxf)]
-            proc = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(
-            "DWG?DXF conversion failed.\n"
-            f"cmd: {' '.join(cmd)}\n"
-            f"stdout:\n{e.stdout}\n"
-            f"stderr:\n{e.stderr}"
-        ) from e
+    tmp = Path(tempfile.mkdtemp(prefix="dwg2dxf_"))
+    in_dir = tmp / "in"
+    out_dir = tmp / "out"
+    in_dir.mkdir()
+    out_dir.mkdir()
 
-    # 2) resolve the produced DXF
-    produced = out_dxf if out_dxf.exists() else (out_dir / (dwg.stem + ".dxf"))
-    if not produced.exists():
+    # ODA wants folders; copy just this file
+    in_copy = in_dir / dwg.name
+    shutil.copy2(dwg, in_copy)
+
+    cmd = [
+        str(exe),
+        str(in_dir),
+        str(out_dir),
+        "ACAD2018",
+        "ACAD2018",
+        "0",
+        "1",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"ODA converter failed: {proc.stderr or proc.stdout}")
+
+    dxf_out = out_dir / (dwg.stem + ".dxf")
+    if not dxf_out.exists():
+        cands = list(out_dir.rglob(dwg.stem + ".dxf"))
+        if not cands:
+            raise FileNotFoundError("Converted DXF not found under output directory.")
+        dxf_out = cands[0]
+    return str(dxf_out)
+
+
+def convert_dwg_to_dxf(dwg_path: str) -> str:
+    exe = (
+        os.environ.get("ODA_CONVERTER_EXE")
+        or os.environ.get("DWG2DXF_EXE")
+        or str(Path(__file__).with_name("ODAFileConverter.exe"))
+    )
+    if not exe:
         raise RuntimeError(
-            "Converter returned success but DXF not found.\n"
-            f"cmd: {' '.join(cmd)}\n"
-            f"checked: {out_dxf} | {produced}"
+            "DWG import requires ODAFileConverter. Set ODA_CONVERTER_EXE to the converter executable."
         )
-    return str(produced)
+    return convert_dwg_to_dxf_2018(dwg_path, exe)
 
 
 
@@ -3667,7 +3640,7 @@ class _LocalLLM:
                 "usage": usage,
             }
             fn = LLM_DEBUG_DIR / f"llm_snapshot_{int(time.time())}.json"
-            fn.write_text(json.dumps(snap, indent=2), encoding="utf-8")
+            write_snapshot_safe(fn, snap)
 
         return parsed, text, usage
 
@@ -6403,13 +6376,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                 "usage": s_usage,
             }
             snap_path = LLM_DEBUG_DIR / ("llm_snapshot_" + str(int(time.time())) + ".json")
-            try:
-                safe = json_safe(snap)
-                snap_path.write_text(json.dumps(safe, indent=2), encoding="utf-8")
-            except Exception:
-                # last-ditch: write a tiny diagnostic so the UI doesn’t die
-                diag = {"non_jsonable": find_non_jsonables(snap)}
-                snap_path.with_suffix(".bad.json").write_text(json.dumps(diag, indent=2), encoding="utf-8")
+            write_snapshot_safe(snap_path, snap)
 
     quote_state.llm_raw = dict(overrides_meta)
     quote_state.suggestions = sanitized_struct if isinstance(sanitized_struct, dict) else {}
@@ -7046,7 +7013,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                     "clamped": notes_from_clamps,
                     "pass_through": {k: v for k, v in applied_pass.items()},
                 }
-                latest.write_text(json.dumps(snap, indent=2), encoding="utf-8")
+                write_snapshot_safe(latest, snap)
         except Exception:
             pass
 
@@ -9404,7 +9371,7 @@ class App(tk.Tk):
                 var_material.set(sel)
                 self._update_editor_override_from_label("Material", sel)
                 self._mark_label_source("Material", "User")
-                self.reprice()
+                self.schedule_reprice()
 
             cb.bind("<<ComboboxSelected>>", on_sel)
             cb.bind("<Return>", on_sel)
@@ -9581,21 +9548,7 @@ class App(tk.Tk):
         self._bind_editor_var(label, var)
 
     def _debounced_reprice(self, delay_ms: int = 300) -> None:
-        try:
-            pending = self._reprice_pending
-        except AttributeError:
-            pending = None
-        if pending:
-            try:
-                self.after_cancel(pending)
-            except Exception:
-                pass
-
-        def _run():
-            self._reprice_pending = None
-            self.reprice()
-
-        self._reprice_pending = self.after(delay_ms, _run)
+        self.schedule_reprice(delay_ms)
 
     def _bind_reprice_on_focus_out(self, widget: tk.Widget, var: tk.StringVar, label: str) -> None:
         def on_focus_out(_e=None):
@@ -9603,7 +9556,7 @@ class App(tk.Tk):
                 self._mark_label_source(label, "User")
             except Exception:
                 pass
-            self.reprice()
+            self.schedule_reprice()
 
         try:
             widget.bind("<FocusOut>", on_focus_out)
@@ -9621,7 +9574,7 @@ class App(tk.Tk):
             if label in getattr(self, "_focus_out_reprice_labels", set()):
                 pass
             else:
-                self._debounced_reprice()
+                self.schedule_reprice()
             if hasattr(self, "_apply_editor_filters"):
                 try:
                     self._apply_editor_filters()
@@ -10372,11 +10325,16 @@ class App(tk.Tk):
             self._repricing = False
 
     def schedule_reprice(self, delay_ms: int = 300) -> None:
-        # Public alias for the existing debounce helper
+        root = getattr(self, "root", self)
+        handle = getattr(self, "_reprice_after", None)
+        if handle:
+            try:
+                root.after_cancel(handle)
+            except Exception:
+                pass
         try:
-            self._debounced_reprice(delay_ms)
+            self._reprice_after = root.after(delay_ms, self.reprice)
         except Exception:
-            # Fallback to immediate if debounce not available
             self.reprice()
 
     def gen_quote(self, reuse_suggestions: bool = False) -> None:
