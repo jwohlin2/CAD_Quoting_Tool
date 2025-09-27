@@ -4875,25 +4875,17 @@ def estimate_drilling_hours(hole_diams_mm: list[float], thickness_mm: float, mat
 
 
 def estimate_tapping_hours(tap_qty: int, thickness_in: float, mat_key: str) -> float:
-    if not tap_qty or tap_qty <= 0:
-        return 0.0
+    """Simple heuristic for tapping: average 0.20 min/hole.
+    If you later classify sizes, split into small/large families and adjust.
+    """
     try:
-        depth_in = float(thickness_in or 0.0)
+        qty = int(tap_qty or 0)
     except Exception:
-        depth_in = 0.0
-    depth_in = min(2.0, max(0.25, depth_in or 0.0))
-    mat = _material_family(mat_key or "")
-    mat_factor = 1.0
-    if mat == "alum":
-        mat_factor = 0.7
-    elif mat == "stainless":
-        mat_factor = 1.3
-    base_sec = 45.0
-    depth_sec = 25.0 * depth_in
-    change_sec = 8.0
-    per_tap = (base_sec + depth_sec) * mat_factor
-    total_sec = tap_qty * per_tap + max(0, tap_qty - 1) * change_sec
-    return total_sec / 3600.0
+        qty = 0
+    if qty <= 0:
+        return 0.0
+    avg_tap_min = 0.20  # minutes per hole
+    return (qty * avg_tap_min) / 60.0
 
 
 def _drilling_floor_hours(hole_count: int) -> float:
@@ -5572,8 +5564,20 @@ def compute_quote_from_df(df: pd.DataFrame,
     drill_material_key = geo_context.get("material") or material_name
     drill_hr = estimate_drilling_hours(hole_diams_list, float(thickness_for_drill or 0.0), drill_material_key or "")
     drill_rate = float(rates.get("DrillingRate") or rates.get("MillingRate", 0.0) or 0.0)
+    # Heuristic counterbore time: 0.15 min per counterbore
+    try:
+        cbore_qty_guess = int(_coerce_float_or_none(geo_context.get("cbore_qty")) or 0)
+    except Exception:
+        cbore_qty_guess = 0
+    cbore_hr = (cbore_qty_guess * 0.15) / 60.0
+    # Ensure tap_qty_geo exists before use
+    try:
+        tap_qty_geo  # noqa: F821
+    except Exception:
+        tap_qty_geo = int(_coerce_float_or_none(geo_context.get("tap_qty")) or 0)
     thickness_in_for_tap = (float(thickness_for_drill) / 25.4) if thickness_for_drill else _coerce_float_or_none(inner_geo.get("deepest_hole_in") if isinstance(inner_geo, dict) else None)
     if thickness_in_for_tap is None:
+        # Ensure tap_qty_geo is defined before use; default from GEO or 0         try:             tap_qty_geo  # noqa: F821         except Exception:             tap_qty_geo = int(_coerce_float_or_none(geo_context.get("tap_qty")) or 0)
         thickness_in_for_tap = _coerce_float_or_none(geo_context.get("thickness_in_guess"))
     tap_hr_est = estimate_tapping_hours(tap_qty_geo, float(thickness_in_for_tap or 0.0), drill_material_key or "")
     hole_count_geo = _coerce_float_or_none(geo_context.get("hole_count"))
@@ -5585,6 +5589,13 @@ def compute_quote_from_df(df: pd.DataFrame,
     elif hole_count_override and hole_count_override > 0:
         hole_count_for_tripwire = int(round(hole_count_override))
     geo_context["hole_count"] = hole_count_for_tripwire
+    # Drilling floor: enforce minimum seconds per hole
+    try:
+        min_sec_per_hole = 9.0
+        drill_hr_floor = (float(hole_count_for_tripwire or 0) * min_sec_per_hole) / 3600.0
+        baseline_drill_hr = max(baseline_drill_hr, drill_hr_floor)
+    except Exception:
+        pass
 
     # ---- roll-ups ------------------------------------------------------------
     inspection_hr_total = inproc_hr + final_hr + cmm_prog_hr + cmm_run_hr + fair_hr + srcinsp_hr
@@ -5606,7 +5617,7 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     existing_drill_cost = float(process_costs.get("drilling", 0.0) or 0.0)
     existing_drill_hr = existing_drill_cost / drill_rate if drill_rate else 0.0
-    baseline_drill_hr = max(existing_drill_hr, float(drill_hr or 0.0)) + float(tap_hr_est or 0.0)
+    baseline_drill_hr = max(existing_drill_hr, float(drill_hr or 0.0)) + float(tap_hr_est or 0.0) + float(cbore_hr or 0.0)
     process_costs["drilling"] = baseline_drill_hr * drill_rate
 
     process_costs_baseline = {k: float(v) for k, v in process_costs.items()}
@@ -5803,10 +5814,19 @@ def compute_quote_from_df(df: pd.DataFrame,
         "part_mass_g_est": part_mass_g_est,
         "dfm_geo": dfm_geo,
     }
-    if tap_qty_geo > 0:
-        features["tap_qty_geo"] = int(tap_qty_geo)
-    if cbore_qty_geo > 0:
-        features["cbore_qty_geo"] = int(cbore_qty_geo)
+    # Safely include tap/cbore counts even if later sections define seeds
+    try:
+        _tq = int(tap_qty_geo)
+    except Exception:
+        _tq = int(_coerce_float_or_none(geo_context.get("tap_qty")) or 0)
+    if _tq > 0:
+        features["tap_qty_geo"] = _tq
+    try:
+        _cq = int(cbore_qty_geo)
+    except Exception:
+        _cq = int(_coerce_float_or_none(geo_context.get("cbore_qty")) or 0)
+    if _cq > 0:
+        features["cbore_qty_geo"] = _cq
     if from_back_geo_flag:
         features["needs_back_face_geo"] = True
     if chart_source_geo:
@@ -8319,12 +8339,14 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
         geo_notes_raw = data.get("geo_notes") if isinstance(data.get("geo_notes"), list) else []
         geo_notes = [str(note).strip() for note in geo_notes_raw if str(note).strip()]
         if not geo_notes:
-            geo_notes = [
-                f"{ctx['geo_summary']['hole_count']} holes" if ctx["geo_summary"].get("hole_count") else None,
-                f"{ctx['geo_summary']['thickness_in']} in thick" if ctx["geo_summary"].get("thickness_in") else None,
-                ctx["geo_summary"].get("material"),
-            ]
-            geo_notes = [str(note).strip() for note in geo_notes if note]
+            hc = ctx.get("geo_summary", {}).get("hole_count")
+            thk = ctx.get("geo_summary", {}).get("thickness_in")
+            mat = ctx.get("geo_summary", {}).get("material")
+            if hc and thk and mat:
+                try:
+                    geo_notes = [f"{int(hc)} holes in {float(thk):.2f} in {mat}"]
+                except Exception:
+                    geo_notes = []
 
         top_processes_raw = data.get("top_processes") if isinstance(data.get("top_processes"), list) else []
         top_processes: list[dict[str, float]] = []
