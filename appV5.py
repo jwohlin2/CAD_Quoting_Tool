@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json, math, os, time, gc
 from collections import Counter
+from fractions import Fraction
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -699,6 +700,24 @@ def build_suggest_payload(geo, baseline, rates, bounds) -> dict:
     except Exception:
         cbore_qty = 0
 
+    csk_qty = derived.get("csk_qty")
+    try:
+        csk_qty = int(csk_qty)
+    except Exception:
+        csk_qty = 0
+
+    tap_minutes_hint = _as_float_or_none(derived.get("tap_minutes_hint"))
+    cbore_minutes_hint = _as_float_or_none(derived.get("cbore_minutes_hint"))
+    csk_minutes_hint = _as_float_or_none(derived.get("csk_minutes_hint"))
+    tap_class_counts = derived.get("tap_class_counts") if isinstance(derived.get("tap_class_counts"), dict) else {}
+    tap_details = derived.get("tap_details") if isinstance(derived.get("tap_details"), list) else []
+    npt_qty = 0
+    try:
+        npt_qty = int(derived.get("npt_qty") or 0)
+    except Exception:
+        npt_qty = 0
+    inference_knobs = derived.get("inference_knobs") if isinstance(derived.get("inference_knobs"), dict) else {}
+
     seed = {
         "suggest_drilling_if_many_holes": hole_count >= 50,
         "suggest_setups_if_from_back_ops": bool(derived.get("needs_back_face")),
@@ -707,6 +726,20 @@ def build_suggest_payload(geo, baseline, rates, bounds) -> dict:
         "add_milling_if_cbore_present": cbore_qty >= 2,
         "plate_with_back_ops": bool((geo.get("meta") or {}).get("is_2d_plate") and derived.get("needs_back_face")),
     }
+    if tap_minutes_hint:
+        seed["tapping_minutes_hint"] = tap_minutes_hint
+    if cbore_minutes_hint:
+        seed["counterbore_minutes_hint"] = cbore_minutes_hint
+    if csk_minutes_hint:
+        seed["countersink_minutes_hint"] = csk_minutes_hint
+    if tap_class_counts:
+        seed["tap_class_counts"] = tap_class_counts
+    if tap_details:
+        seed["tap_details"] = tap_details[:10]
+    if npt_qty:
+        seed["npt_qty"] = npt_qty
+    if inference_knobs:
+        seed["inference_knobs"] = inference_knobs
 
     return {
         "purpose": "quote_suggestions",
@@ -715,10 +748,18 @@ def build_suggest_payload(geo, baseline, rates, bounds) -> dict:
             "hole_count": hole_count,
             "tap_qty": tap_qty,
             "cbore_qty": cbore_qty,
+            "csk_qty": csk_qty,
             "hole_bins_top": hole_bins_top,
             "thickness_mm": thickness_mm,
             "material": material_name,
             "bbox_mm": geo.get("bbox_mm"),
+            "tap_minutes_hint": tap_minutes_hint,
+            "cbore_minutes_hint": cbore_minutes_hint,
+            "csk_minutes_hint": csk_minutes_hint,
+            "tap_class_counts": tap_class_counts,
+            "tap_details": tap_details,
+            "npt_qty": npt_qty,
+            "inference_knobs": inference_knobs,
         },
         "baseline": {
             "process_hours": baseline.get("process_hours"),
@@ -5091,6 +5132,7 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     chart_tap_qty = _int_from(chart_reconcile_geo.get("tap_qty")) if chart_reconcile_geo else 0
     chart_cbore_qty = _int_from(chart_reconcile_geo.get("cbore_qty")) if chart_reconcile_geo else 0
+    chart_csk_qty = _int_from(chart_reconcile_geo.get("csk_qty")) if chart_reconcile_geo else 0
     tap_qty_override_geo = _coerce_float_or_none(ui_vars.get("Tap Qty (LLM/GEO)"))
     tap_qty_geo = _max_int(
         chart_tap_qty,
@@ -5106,17 +5148,28 @@ def compute_quote_from_df(df: pd.DataFrame,
         inner_geo.get("cbore_qty") if inner_geo else None,
         geo_context.get("cbore_qty"),
     )
+    csk_qty_geo = _max_int(
+        chart_csk_qty,
+        feature_counts_geo.get("csk_qty") if isinstance(feature_counts_geo, dict) else None,
+        inner_geo.get("csk_qty") if inner_geo else None,
+        geo_context.get("csk_qty"),
+    )
     tap_qty_seed = max(chart_tap_qty, tap_qty_geo)
     cbore_qty_seed = max(chart_cbore_qty, cbore_qty_geo)
+    csk_qty_seed = max(chart_csk_qty, csk_qty_geo)
     geo_context["tap_qty"] = tap_qty_geo
     inner_geo["tap_qty"] = tap_qty_geo
     geo_context["cbore_qty"] = cbore_qty_geo
     inner_geo["cbore_qty"] = cbore_qty_geo
+    geo_context["csk_qty"] = csk_qty_geo
+    inner_geo["csk_qty"] = csk_qty_geo
     if isinstance(feature_counts_geo, dict):
         if tap_qty_geo:
             feature_counts_geo["tap_qty"] = tap_qty_geo
         if cbore_qty_geo:
             feature_counts_geo["cbore_qty"] = cbore_qty_geo
+        if csk_qty_geo:
+            feature_counts_geo["csk_qty"] = csk_qty_geo
     # ---- sheet views ---------------------------------------------------------
     items = df["Item"].astype(str)
     vals  = df["Example Values / Options"]
@@ -5666,10 +5719,22 @@ def compute_quote_from_df(df: pd.DataFrame,
     geo_context["hole_count"] = hole_count_for_tripwire
     avg_tap_min = 0.20
     avg_cbore_min = 0.15
+    avg_csk_min = 0.12
     tapping_hr = (tap_qty_geo * avg_tap_min) / 60.0
     cbore_hr = (cbore_qty_geo * avg_cbore_min) / 60.0
+    csk_hr = (csk_qty_geo * avg_csk_min) / 60.0
+    tap_minutes_hint_val = _coerce_float_or_none(geo_context.get("tap_minutes_hint"))
+    if tap_minutes_hint_val and tap_minutes_hint_val > 0:
+        tapping_hr = max(tapping_hr, float(tap_minutes_hint_val) / 60.0)
+    cbore_minutes_hint_val = _coerce_float_or_none(geo_context.get("cbore_minutes_hint"))
+    if cbore_minutes_hint_val and cbore_minutes_hint_val > 0:
+        cbore_hr = max(cbore_hr, float(cbore_minutes_hint_val) / 60.0)
+    csk_minutes_hint_val = _coerce_float_or_none(geo_context.get("csk_minutes_hint"))
+    if csk_minutes_hint_val and csk_minutes_hint_val > 0:
+        csk_hr = max(csk_hr, float(csk_minutes_hint_val) / 60.0)
     tapping_hr_rounded = round(tapping_hr, 3)
     cbore_hr_rounded = round(cbore_hr, 3)
+    csk_hr_rounded = round(csk_hr, 3)
 
     edge_len_in = _coerce_float_or_none(geo_context.get("edge_len_in"))
     if edge_len_in is None:
@@ -5723,6 +5788,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     process_costs["drilling"] = baseline_drill_hr * drill_rate
     process_costs["tapping"] = tapping_hr_rounded * drill_rate
     process_costs["counterbore"] = cbore_hr_rounded * drill_rate
+    process_costs["countersink"] = csk_hr_rounded * drill_rate
     deburr_cost = deburr_total_hr * finishing_rate
     process_costs["deburr"] = deburr_cost
 
@@ -5745,6 +5811,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     process_meta["drilling"] = {"hr": baseline_drill_hr, "rate": drill_rate}
     process_meta["tapping"] = {"hr": tapping_hr_rounded, "rate": drill_rate}
     process_meta["counterbore"] = {"hr": cbore_hr_rounded, "rate": drill_rate}
+    process_meta["countersink"] = {"hr": csk_hr_rounded, "rate": drill_rate}
     process_meta["deburr"] = {"hr": deburr_total_hr, "rate": finishing_rate}
     if deburr_auto_hr:
         process_meta["deburr"]["auto_calc_hr"] = deburr_auto_hr
@@ -5941,6 +6008,12 @@ def compute_quote_from_df(df: pd.DataFrame,
         _cq = int(_coerce_float_or_none(geo_context.get("cbore_qty")) or 0)
     if _cq > 0:
         features["cbore_qty_geo"] = _cq
+    try:
+        _sk = int(csk_qty_geo)
+    except Exception:
+        _sk = int(_coerce_float_or_none(geo_context.get("csk_qty")) or 0)
+    if _sk > 0:
+        features["csk_qty_geo"] = _sk
     if from_back_geo_flag:
         features["needs_back_face_geo"] = True
     if chart_source_geo:
@@ -5952,6 +6025,10 @@ def compute_quote_from_df(df: pd.DataFrame,
         features["hole_chart_agreement"] = bool(chart_reconcile_geo.get("agreement"))
         features["hole_chart_tap_qty"] = int(chart_reconcile_geo.get("tap_qty") or 0)
         features["hole_chart_cbore_qty"] = int(chart_reconcile_geo.get("cbore_qty") or 0)
+        if chart_reconcile_geo.get("csk_qty") is not None:
+            features["hole_chart_csk_qty"] = int(chart_reconcile_geo.get("csk_qty") or 0)
+    if geo_context.get("inference_knobs"):
+        features["inference_knobs"] = geo_context.get("inference_knobs")
     hole_tool_sizes = sorted({round(x, 2) for x in hole_diams_list}) if hole_diams_list else []
     features.update({
         "is_2d": bool(is_plate_2d),
@@ -6056,8 +6133,16 @@ def compute_quote_from_df(df: pd.DataFrame,
         "derived": {
             "tap_qty": tap_qty_seed,
             "cbore_qty": cbore_qty_seed,
+            "csk_qty": csk_qty_seed,
             "hole_bins": hole_bins_for_seed,
             "needs_back_face": needs_back_face_flag,
+            "tap_minutes_hint": _coerce_float_or_none(geo_context.get("tap_minutes_hint")),
+            "cbore_minutes_hint": _coerce_float_or_none(geo_context.get("cbore_minutes_hint")),
+            "csk_minutes_hint": _coerce_float_or_none(geo_context.get("csk_minutes_hint")),
+            "tap_class_counts": geo_context.get("tap_class_counts"),
+            "tap_details": geo_context.get("tap_details"),
+            "npt_qty": int(_coerce_float_or_none(geo_context.get("npt_qty")) or 0),
+            "inference_knobs": geo_context.get("inference_knobs"),
         },
         "thickness_mm": float(thickness_for_llm) if thickness_for_llm is not None else None,
         "material": material_name,
@@ -7312,9 +7397,76 @@ RE_CSK    = re.compile(r"CSK|C'SINK|COUNTERSINK", re.I)
 RE_DEPTH  = re.compile(r"(\d+(?:\.\d+)?)\s*DEEP(?:\s+FROM\s+(FRONT|BACK))?", re.I)
 RE_DIA    = re.compile(r"[Ø⌀\u00D8]?\s*(\d+(?:\.\d+)?)", re.I)
 RE_THICK  = re.compile(r"(\d+(?:\.\d+)?)\s*DEEP(?:\s+FROM\s+(FRONT|BACK))?", re.I)
-RE_MAT    = re.compile(r"\b(MATERIAL|MAT)\b[:\s]*([A-Z0-9\-\s/]+)")
-RE_COAT   = re.compile(r"\b(ANODIZE|BLACK OXIDE|ZINC PLATE|NICKEL PLATE|PASSIVATE|HEAT TREAT)\b", re.I)
+RE_MAT    = re.compile(r"\b(MATL?|MATERIAL)\b\s*[:=\-]?\s*([A-Z0-9 \-\+/\.]+)", re.I)
+RE_HARDNESS = re.compile(r"(\d+(?:\.\d+)?)\s*(?:[-–]\s*(\d+(?:\.\d+)?))?\s*HRC", re.I)
+RE_HEAT_TREAT = re.compile(r"HEAT\s*TREAT(?:ED|\s+TO)?|\bQUENCH\b|\bTEMPER\b", re.I)
+RE_COAT   = re.compile(
+    r"\b(ANODIZE(?:\s*(?:CLR|BLACK|BLK))?|BLACK OXIDE|ZINC PLATE|NICKEL PLATE|PASSIVATE|CHEM FILM|IRIDITE|ALODINE|POWDER COAT|E-?COAT|PAINT)\b",
+    re.I,
+)
 RE_TOL    = re.compile(r"\bUNLESS OTHERWISE SPECIFIED\b.*?([±\+\-]\s*\d+\.\d+)", re.I | re.S)
+RE_FRONT_BACK = re.compile(r"FRONT\s*&\s*BACK|FRONT\s+AND\s+BACK|BOTH\s+SIDES|TWO\s+SIDES|2\s+SIDES|OPPOSITE\s+SIDE", re.I)
+RE_FLIP_CALL  = re.compile(r"OP\.\s*\d+\s*FLIP|FLIP\s+PART", re.I)
+RE_JIG_GRIND  = re.compile(r"\bJIG\s*GRIND\b", re.I)
+RE_REAM       = re.compile(r"\bREAM(?:ING)?\b", re.I)
+RE_TIGHT_TOL  = re.compile(r"±\s*0\.000[12]", re.I)
+RE_FIT_CLASS  = re.compile(r"\bH\d\s*/\s*G\d\b", re.I)
+RE_CSK_ANGLE  = re.compile(r"(60|82|90|100|110|120)\s*°", re.I)
+RE_SLOT_NOTE  = re.compile(r"SLOT[^\n]*?(\d+(?:\.\d+)?)\s*(?:WIDE|WIDTH)?", re.I)
+RE_HARDWARE_LINE = re.compile(r"\((\d+)\)\s*([A-Z0-9][A-Z0-9 \-/#\.]+)", re.I)
+
+RE_COORD_HDR = re.compile(r"\bLIST\s+OF\s+COORDINATES\b", re.I)
+RE_COORD_ROW = re.compile(r"([A-Z]\d+)\s+([\-+]?\d+(?:\.\d+)?)\s+([\-+]?\d+(?:\.\d+)?)")
+RE_FINISH_STRONG = re.compile(r"\b(ANODIZE(?:\s+BLACK|\s+CLEAR)?|BLACK OXIDE|ZINC PLATE|NICKEL PLATE|PASSIVATE|PHOSPHATE|ECOAT|E-?COAT)\b", re.I)
+RE_HEAT_TREAT_STRONG = re.compile(r"\b(A2|D2|O1|H13|4140|4340|S7|A36)\b.*?(HRC\s*\d{2}|\d{2}[-–]\d{2}\s*HRC)?", re.I)
+RE_MAT_STRONG = re.compile(r"\b(MATERIAL|MAT)\b[:\s]*([A-Z0-9\-\s/\.]+)")
+RE_TAP_TOKEN = re.compile(r"(?:(\(\s*\d+\s*\))\s*)?(#\s*\d{1,2}-\d+|\d+/\d+\s*-\s*NPT|[0-9.]+\s*-\s*[\d/]+|M\d+(?:\.\d+)?x\d+(?:\.\d+)?)", re.I)
+
+LETTER_DRILL_IN = {
+    "A": 0.234,
+    "B": 0.238,
+    "C": 0.242,
+    "Q": 0.332,
+    "R": 0.339,
+    "S": 0.348,
+    "T": 0.358,
+}
+
+SKIP_LAYERS = {"DEFPOINTS", "DIM", "AM_0", "CENTER", "TEXT", "NOTES", "TITLE", "BORDER"}
+
+WIRE_GAGE_MAJOR_DIA_IN = {
+    0: 0.06,
+    1: 0.073,
+    2: 0.086,
+    3: 0.099,
+    4: 0.112,
+    5: 0.125,
+    6: 0.138,
+    7: 0.151,
+    8: 0.164,
+    9: 0.177,
+    10: 0.19,
+    11: 0.203,
+    12: 0.216,
+}
+
+TAP_MINUTES_BY_CLASS = {
+    "small": 0.22,
+    "medium": 0.3,
+    "large": 0.38,
+    "xl": 0.45,
+    "pipe": 0.55,
+}
+
+CBORE_MIN_PER_SIDE_MIN = 0.15
+CSK_MIN_PER_SIDE_MIN = 0.12
+NPT_INSPECTION_MIN_PER_HOLE = 2.5
+JIG_GRIND_MIN_PER_FEATURE = 15.0
+REAM_MIN_PER_FEATURE = 6.0
+TIGHT_TOL_INSPECTION_MIN = 4.0
+TIGHT_TOL_CMM_MIN = 6.0
+HANDLING_ADDER_RANGE_HR = (0.1, 0.3)
+LB_PER_IN3_PER_GCC = 0.036127292
 
 
 def detect_units_scale(doc) -> dict[str, float | int]:
@@ -7394,16 +7546,348 @@ def harvest_ordinates(doc, to_in: float) -> dict[str, Any]:
     }
 
 
-def _iter_table_text(doc):
+def harvest_outline_bbox(doc, to_in: float) -> dict[str, Any]:
+    biggest: tuple[float, Any] | None = None
+    vertices: list[tuple[float, float]] = []
+    for sp in _spaces(doc) or []:
+        try:
+            polylines = list(sp.query("LWPOLYLINE"))
+        except Exception:
+            polylines = []
+        for pl in polylines:
+            if not getattr(pl, "closed", False):
+                continue
+            try:
+                area = float(pl.area()) * (to_in ** 2)
+            except Exception:
+                continue
+            if biggest is None or area > biggest[0]:
+                biggest = (area, pl)
+    if biggest:
+        pl = biggest[1]
+        try:
+            pts = [(float(x) * to_in, float(y) * to_in) for x, y, *_ in pl.get_points()]
+        except Exception:
+            pts = []
+        vertices.extend(pts)
+
+    if not vertices:
+        return {"plate_len_in": None, "plate_wid_in": None, "prov": "OUTLINE BBOX (none)"}
+
+    xs, ys = zip(*vertices)
+    L = max(ys) - min(ys)
+    W = max(xs) - min(xs)
+    prov = "OUTLINE AABB"
+
+    dx = max(xs) - min(xs)
+    dy = max(ys) - min(ys)
+    if dx and dy and max(dx, dy) / max(L, W) > 1.2:
+        best_len = 0.0
+        best_ang = 0.0
+        for i in range(len(vertices)):
+            x1, y1 = vertices[i]
+            x2, y2 = vertices[(i + 1) % len(vertices)]
+            vx, vy = x2 - x1, y2 - y1
+            el = (vx * vx + vy * vy) ** 0.5
+            if el > best_len:
+                best_len = el
+                best_ang = math.atan2(vy, vx)
+        ca = math.cos(-best_ang)
+        sa = math.sin(-best_ang)
+        rot = [(x * ca - y * sa, x * sa + y * ca) for x, y in vertices]
+        rx, ry = zip(*rot)
+        L = max(ry) - min(ry)
+        W = max(rx) - min(rx)
+        prov = "OUTLINE PCA AABB"
+
+    return {"plate_len_in": round(L, 3), "plate_wid_in": round(W, 3), "prov": prov}
+
+
+def harvest_coordinate_table(doc, to_in: float) -> dict[str, Any]:
+    lines: list[str] = []
+    for sp in _spaces(doc) or []:
+        try:
+            entities = sp.query("MTEXT,TEXT")
+        except Exception:
+            entities = []
+        for e in entities:
+            try:
+                if e.dxftype() == "MTEXT":
+                    text = e.plain_text()
+                else:
+                    text = e.dxf.text
+            except Exception:
+                continue
+            if not text:
+                continue
+            for frag in str(text).splitlines():
+                frag = frag.strip()
+                if frag:
+                    lines.append(frag)
+
+    start_idx = next((i for i, t in enumerate(lines) if RE_COORD_HDR.search(t)), None)
+    if start_idx is None:
+        return {
+            "coord_count": None,
+            "coord_ids": [],
+            "x_span_in": None,
+            "y_span_in": None,
+            "prov": "COORD LIST (none)",
+        }
+
+    window = lines[start_idx : start_idx + 2000]
+    xs: list[float] = []
+    ys: list[float] = []
+    ids: set[str] = set()
+    for row in window:
+        match = RE_COORD_ROW.search(row)
+        if not match:
+            continue
+        ids.add(match.group(1))
+        try:
+            xs.append(float(match.group(2)) * to_in)
+            ys.append(float(match.group(3)) * to_in)
+        except Exception:
+            continue
+
+    if not ids:
+        return {"coord_count": 0, "coord_ids": [], "prov": "COORD LIST (empty)"}
+
+    return {
+        "coord_count": len(ids),
+        "coord_ids": sorted(ids),
+        "x_span_in": round(max(xs) - min(xs), 3) if xs else None,
+        "y_span_in": round(max(ys) - min(ys), 3) if ys else None,
+        "prov": "COORD LIST",
+    }
+
+
+def filtered_circles(doc, to_in: float, plate_bbox: tuple[float, float, float, float] | None = None) -> list[tuple[float, float, float, int]]:
+    circles: list[tuple[float, float, float]] = []
+    for sp in _spaces(doc) or []:
+        try:
+            entities = sp.query("CIRCLE")
+        except Exception:
+            entities = []
+        for c in entities:
+            layer = (getattr(getattr(c, "dxf", object()), "layer", "") or "").upper()
+            if layer in SKIP_LAYERS:
+                continue
+            try:
+                d = round(2.0 * float(c.dxf.radius) * float(to_in), 4)
+            except Exception:
+                continue
+            if not (0.06 <= d <= 2.5):
+                continue
+            try:
+                x, y = c.dxf.center[:2]
+            except Exception:
+                continue
+            if plate_bbox:
+                xmin, ymin, xmax, ymax = plate_bbox
+                if not (xmin <= x <= xmax and ymin <= y <= ymax):
+                    continue
+            circles.append((x, y, d))
+
+    clustered: list[tuple[float, float, float, int]] = []
+    tol = 0.01
+    for x, y, d in circles:
+        for idx, (cx, cy, cd, count) in enumerate(clustered):
+            if abs(cx - x) < tol and abs(cy - y) < tol and abs(cd - d) < 1e-3:
+                clustered[idx] = (cx, cy, cd, count + 1)
+                break
+        else:
+            clustered.append((x, y, d, 1))
+    return clustered
+
+
+def classify_concentric(doc, to_in: float, tol_center: float = 0.005, min_gap_in: float = 0.03) -> dict[str, Any]:
+    pts: list[tuple[float, float, float]] = []
+    for sp in _spaces(doc) or []:
+        try:
+            entities = sp.query("CIRCLE")
+        except Exception:
+            entities = []
+        for c in entities:
+            layer = (getattr(getattr(c, "dxf", object()), "layer", "") or "").upper()
+            if layer in SKIP_LAYERS:
+                continue
+            try:
+                r = float(c.dxf.radius) * float(to_in)
+            except Exception:
+                continue
+            dia = 2.0 * r
+            if not (0.04 <= dia <= 6.0):
+                continue
+            try:
+                x, y = c.dxf.center[:2]
+            except Exception:
+                continue
+            pts.append((x, y, r))
+    pts.sort()
+    cbore_like = 0
+    csk_like = 0
+    for i, (x1, y1, r1) in enumerate(pts):
+        for j in range(i + 1, min(i + 15, len(pts))):
+            x2, y2, r2 = pts[j]
+            if abs(x1 - x2) < tol_center and abs(y1 - y2) < tol_center:
+                gap = abs(r2 - r1)
+                if gap >= min_gap_in:
+                    if gap < 0.15:
+                        cbore_like += 1
+                    else:
+                        csk_like += 1
+    return {"cbore_pairs_geom": cbore_like, "csk_pairs_geom": csk_like, "prov": "CONCENTRIC CIRCLES"}
+
+
+def tap_classes_from_lines(lines: Sequence[str] | None) -> dict[str, int]:
+    classes = {"small": 0, "medium": 0, "large": 0, "npt": 0}
+    if not lines:
+        return classes
+    for raw in lines:
+        if not raw:
+            continue
+        for match in RE_TAP_TOKEN.finditer(raw.upper()):
+            token = match.group(2).replace(" ", "") if match.group(2) else ""
+            if not token:
+                continue
+            if "NPT" in token:
+                classes["npt"] += 1
+                continue
+            dia_in: float | None = None
+            if token.startswith("#"):
+                num_match = re.findall(r"\d+", token)
+                if num_match:
+                    num = int(num_match[0])
+                    approx = {6: 0.138, 8: 0.164, 10: 0.19, 12: 0.216}.get(num, 0.19)
+                    dia_in = approx
+            elif token.startswith("M"):
+                nums = re.findall(r"\d+(?:\.\d+)?", token)
+                if nums:
+                    dia_in = float(nums[0]) / 25.4
+            else:
+                frac = re.findall(r"(\d+)/(\d+)", token)
+                if frac:
+                    num, den = map(int, frac[0])
+                    dia_in = num / den
+                else:
+                    if token in LETTER_DRILL_IN:
+                        dia_in = LETTER_DRILL_IN[token]
+                    else:
+                        nums = re.findall(r"([0-9.]+)", token)
+                        if nums:
+                            dia_in = float(nums[0])
+            if dia_in is None:
+                continue
+            if dia_in < 0.25:
+                classes["small"] += 1
+            elif dia_in < 0.5:
+                classes["medium"] += 1
+            else:
+                classes["large"] += 1
+    return classes
+
+
+def harvest_gdt(doc) -> dict[str, Any]:
+    texts: list[str] = []
+    for sp in _spaces(doc) or []:
+        try:
+            entities = sp.query("MTEXT,TEXT")
+        except Exception:
+            entities = []
+        for e in entities:
+            try:
+                if e.dxftype() == "MTEXT":
+                    txt = e.plain_text()
+                else:
+                    txt = e.dxf.text
+            except Exception:
+                continue
+            if txt:
+                texts.append(txt)
+    upper = "\n".join(texts).upper()
+    return {
+        "gdt": {
+            "true_position": len(re.findall(r"\bTRUE\s*POSITION\b|⌀\s*POS", upper)),
+            "flatness": len(re.findall(r"\bFLATNESS\b", upper)),
+            "parallelism": len(re.findall(r"\bPARALLELISM\b", upper)),
+            "profile": len(re.findall(r"\bPROFILE\b", upper)),
+        },
+        "prov": "TEXT GD&T",
+    }
+
+
+def harvest_finish_ht_material(all_text_upper: str) -> dict[str, Any]:
+    finishes = sorted({m.group(1).upper() for m in RE_FINISH_STRONG.finditer(all_text_upper)})
+    heat_treat = None
+    m_ht = RE_HEAT_TREAT_STRONG.search(all_text_upper)
+    if m_ht:
+        heat_treat = m_ht.group(1).upper()
+        if m_ht.group(2):
+            heat_treat = f"{heat_treat} {m_ht.group(2).upper()}".strip()
+    material_note = None
+    m_mat = RE_MAT_STRONG.search(all_text_upper)
+    if m_mat:
+        material_note = m_mat.group(2).strip().upper()
+    return {"finishes": finishes, "heat_treat": heat_treat, "material_note": material_note}
+
+
+def harvest_hardware_notes(all_text_upper: str) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    for match in re.finditer(r"\((\d+)\)\s*(DOWEL|SHCS|FHCS|BHCS|NUT|WASHER|PIN)\b.*?(\d+[-/]\d+|#\d+|\d+-\d+)", all_text_upper, re.I):
+        qty = int(match.group(1))
+        hardware_type = match.group(2).upper()
+        size = match.group(3)
+        items.append({"qty": qty, "type": hardware_type, "size": size})
+    return {"hardware_items": items, "prov": "NOTES HW"}
+
+
+def quick_deburr_estimates(edge_len_in: float | None, hole_count: int | None) -> dict[str, Any]:
+    deburr_ipm_edge = 1000.0
+    sec_per_hole = 5.0
+    edge_hours = (edge_len_in or 0.0) / deburr_ipm_edge
+    hole_hours = ((hole_count or 0) * sec_per_hole) / 3600.0
+    return {
+        "deburr_edge_hr_suggest": round(edge_hours, 3) if edge_hours else 0.0,
+        "deburr_hole_hr_suggest": round(hole_hours, 3) if hole_hours else 0.0,
+        "prov": "GEOM (edge & holes)",
+    }
+
+
+def _spaces(doc):
     if doc is None:
         return
+    seen: set[int] = set()
     try:
         msp = doc.modelspace()
     except Exception:
         msp = None
-    if msp is not None:
+    if msp is not None and id(msp) not in seen:
+        seen.add(id(msp))
+        yield msp
+    try:
+        layout_names = list(doc.layouts.names_in_taborder())
+    except Exception:
+        layout_names = []
+    for layout_name in layout_names:
+        if layout_name.lower() in ("model", "defpoints"):
+            continue
         try:
-            for t in msp.query("TABLE"):
+            es = doc.layouts.get(layout_name).entity_space
+        except Exception:
+            continue
+        if es is None or id(es) in seen:
+            continue
+        seen.add(id(es))
+        yield es
+
+
+def _iter_table_text(doc):
+    if doc is None:
+        return
+    for sp in _spaces(doc):
+        try:
+            for t in sp.query("TABLE"):
                 try:
                     for r in range(t.dxf.n_rows):
                         row = []
@@ -7420,19 +7904,8 @@ def _iter_table_text(doc):
                     continue
         except Exception:
             pass
-    try:
-        layout_names = list(doc.layouts.names_in_taborder())
-    except Exception:
-        layout_names = []
-    for layout_name in layout_names:
-        if layout_name.lower() in ("model", "defpoints"):
-            continue
         try:
-            es = doc.layouts.get(layout_name).entity_space
-        except Exception:
-            continue
-        try:
-            for e in es.query("MTEXT,TEXT"):
+            for e in sp.query("MTEXT,TEXT"):
                 try:
                     if e.dxftype() == "MTEXT":
                         text = e.plain_text()
@@ -7446,6 +7919,191 @@ def _iter_table_text(doc):
             continue
 
 
+def hole_count_from_acad_table(doc) -> tuple[int, dict] | tuple[None, None]:
+    """
+    Returns (count, families) from a formal ACAD_TABLE.
+    families = {ref_dia_in: qty}
+    """
+    for sp in _spaces(doc):
+        for t in sp.query("TABLE"):
+            try:
+                hdr = [
+                    " ".join(t.get_cell(0, c).get_text().split()).upper()
+                    if t.get_cell(0, c)
+                    else ""
+                    for c in range(t.dxf.n_cols)
+                ]
+            except Exception:
+                continue
+
+            joined_hdr = " ".join(hdr)
+            if "HOLE" not in joined_hdr:
+                continue
+
+            def find_col(name):
+                for idx, txt in enumerate(hdr):
+                    if name in txt:
+                        return idx
+                return None
+
+            col_qty = find_col("QTY")
+            col_ref = find_col("REF")
+            col_desc = find_col("DESCRIPTION")
+
+            if col_qty is None:
+                continue
+
+            total = 0
+            fam: dict[float, int] = {}
+
+            for r in range(1, t.dxf.n_rows):
+                qty_cell = t.get_cell(r, col_qty) if col_qty is not None else None
+                if not qty_cell:
+                    continue
+                try:
+                    s = (qty_cell.get_text() or "").strip()
+                except Exception:
+                    continue
+                if not s.isdigit():
+                    continue
+                q = int(s)
+                total += q
+
+                m = None
+                if col_ref is not None:
+                    cell = t.get_cell(r, col_ref)
+                    ref_text = (cell.get_text() or "").strip() if cell else ""
+                    if ref_text:
+                        m = re.search(r"(\d+(?:\.\d+)?)", ref_text)
+                elif col_desc is not None:
+                    cell = t.get_cell(r, col_desc)
+                    desc_text = (cell.get_text() or "").upper() if cell else ""
+                    if desc_text:
+                        m = re.search(r"[Ø⌀]\s*(\d+(?:\.\d+)?)", desc_text)
+
+                if m:
+                    d = round(float(m.group(1)), 4)
+                    fam[d] = fam.get(d, 0) + q
+
+            if total > 0:
+                return total, fam
+
+    return None, None
+
+
+def hole_count_from_text_table(doc, lines: Sequence[str] | None = None) -> tuple[int, dict] | tuple[None, None]:
+    if lines is None:
+        source_lines = _iter_table_text(doc) or []
+    else:
+        source_lines = lines
+    cleaned = [str(raw).strip() for raw in source_lines if raw]
+    if not cleaned:
+        return None, None
+
+    idx = None
+    for i, s in enumerate(cleaned):
+        if "HOLE TABLE" in s.upper():
+            idx = i
+            break
+    if idx is None:
+        return None, None
+
+    total = 0
+    fam: dict[float, int] = {}
+    for s in cleaned[idx + 1 :]:
+        u = s.upper()
+        if not u or "DESCRIPTION" in u:
+            continue
+        if "LIST OF COORDINATES" in u or "SEE SHEET" in u:
+            break
+
+        mqty = re.search(r"\bQTY\b[:\s]*([0-9]+)", u)
+        if not mqty:
+            cols = [c.strip() for c in u.split("|")]
+            for c in cols:
+                if c.isdigit():
+                    mqty = re.match(r"(\d+)$", c)
+                    if mqty:
+                        break
+        if mqty:
+            q = int(mqty.group(1))
+            total += q
+        else:
+            q = None
+
+        mref = re.search(r"\bREF\s*[Ø⌀]?\s*(\d+(?:\.\d+)?)", u)
+        if not mref:
+            mref = re.search(r"[Ø⌀]\s*(\d+(?:\.\d+)?)", u)
+        if mref and mqty:
+            d = round(float(mref.group(1)), 4)
+            fam[d] = fam.get(d, 0) + int(mqty.group(1))
+
+    return (total, fam) if total else (None, None)
+
+
+def hole_count_from_geometry(doc, to_in, plate_bbox=None) -> tuple[int, dict]:
+    clustered = filtered_circles(doc, to_in, plate_bbox=plate_bbox)
+    fam: dict[float, int] = {}
+    for _, _, d, _ in clustered:
+        fam[d] = fam.get(d, 0) + 1
+    return len(clustered), fam
+
+
+def _major_diameter_from_thread(spec: str) -> float | None:
+    if not spec:
+        return None
+    spec_clean = spec.strip().upper().replace(" ", "")
+    if "NPT" in spec_clean:
+        # treat nominal pipe size as fractional portion before NPT
+        parts = spec_clean.split("NPT", 1)[0]
+        parts = parts.rstrip("-")
+        if not parts:
+            return None
+        try:
+            return float(Fraction(parts))
+        except Exception:
+            pass
+        try:
+            return float(parts)
+        except Exception:
+            return None
+    if spec_clean.startswith("#"):
+        try:
+            gauge = int(re.sub(r"[^0-9]", "", spec_clean.split("-", 1)[0]))
+        except Exception:
+            return None
+        return WIRE_GAGE_MAJOR_DIA_IN.get(gauge)
+    if spec_clean.startswith("M"):
+        try:
+            mm_val = float(re.findall(r"M(\d+(?:\.\d+)?)", spec_clean)[0])
+        except Exception:
+            return None
+        return mm_val / 25.4
+    # fractional or decimal imperial (e.g., 5/16-18 or 0.375-16)
+    lead = spec_clean.split("-", 1)[0]
+    try:
+        if "/" in lead:
+            return float(Fraction(lead))
+        return float(lead)
+    except Exception:
+        return None
+
+
+def _classify_thread_spec(spec: str) -> tuple[str, float, bool]:
+    major = _major_diameter_from_thread(spec)
+    if spec and "NPT" in spec.upper():
+        return "pipe", TAP_MINUTES_BY_CLASS["pipe"], True
+    if major is None:
+        return "unknown", TAP_MINUTES_BY_CLASS["medium"], False
+    if major <= 0.2:
+        return "small", TAP_MINUTES_BY_CLASS["small"], False
+    if major <= 0.3125:
+        return "medium", TAP_MINUTES_BY_CLASS["medium"], False
+    if major <= 0.5:
+        return "large", TAP_MINUTES_BY_CLASS["large"], False
+    return "xl", TAP_MINUTES_BY_CLASS["xl"], False
+
+
 def _parse_hole_line(line: str, to_in: float, *, source: str | None = None) -> dict[str, Any] | None:
     if not line:
         return None
@@ -7456,12 +8114,16 @@ def _parse_hole_line(line: str, to_in: float, *, source: str | None = None) -> d
     entry: dict[str, Any] = {
         "qty": None,
         "tap": None,
+        "tap_class": None,
+        "tap_minutes_per": None,
+        "tap_is_npt": False,
         "thru": False,
         "cbore": False,
         "csk": False,
         "ref_dia_in": None,
         "depth_in": None,
         "side": None,
+        "double_sided": False,
         "raw": line,
     }
     if source:
@@ -7478,16 +8140,32 @@ def _parse_hole_line(line: str, to_in: float, *, source: str | None = None) -> d
             thread_spec = mt.group(2)
         else:
             thread_spec = mt.group(1)
-        entry["tap"] = thread_spec.replace(" ", "") if thread_spec else None
+        if thread_spec:
+            cleaned = thread_spec.replace(" ", "")
+        else:
+            cleaned = None
+        entry["tap"] = cleaned
+        if cleaned:
+            cls, minutes_per, is_npt = _classify_thread_spec(cleaned)
+            entry["tap_class"] = cls
+            entry["tap_minutes_per"] = minutes_per
+            entry["tap_is_npt"] = is_npt
     else:
         m_npt = RE_NPT.search(U)
         if m_npt:
-            entry["tap"] = m_npt.group(0).replace(" ", "")
+            cleaned = m_npt.group(0).replace(" ", "")
+            entry["tap"] = cleaned
+            cls, minutes_per, is_npt = _classify_thread_spec(cleaned)
+            entry["tap_class"] = cls
+            entry["tap_minutes_per"] = minutes_per
+            entry["tap_is_npt"] = is_npt
         else:
             entry["tap"] = None
     entry["thru"] = bool(RE_THRU.search(U))
     entry["cbore"] = bool(RE_CBORE.search(U))
     entry["csk"] = bool(RE_CSK.search(U))
+    if RE_FRONT_BACK.search(U):
+        entry["double_sided"] = True
 
     md = RE_DEPTH.search(U)
     if md:
@@ -7523,8 +8201,17 @@ def _aggregate_hole_entries(entries: Iterable[dict[str, Any]] | None) -> dict[st
     hole_count = 0
     tap_qty = 0
     cbore_qty = 0
+    csk_qty = 0
     max_depth_in = 0.0
     back_ops = False
+    tap_details: dict[str, dict[str, Any]] = {}
+    tap_minutes_total = 0.0
+    tap_class_counter: Counter[str] = Counter()
+    npt_qty = 0
+    double_cbore = False
+    double_csk = False
+    cbore_minutes_total = 0.0
+    csk_minutes_total = 0.0
     if entries:
         for entry in entries:
             if not isinstance(entry, dict):
@@ -7541,8 +8228,35 @@ def _aggregate_hole_entries(entries: Iterable[dict[str, Any]] | None) -> dict[st
             hole_count += qty
             if entry.get("tap"):
                 tap_qty += qty
+                spec = str(entry.get("tap") or "").strip()
+                cls = entry.get("tap_class") or "unknown"
+                minutes_per = entry.get("tap_minutes_per") or TAP_MINUTES_BY_CLASS.get("medium", 0.3)
+                tap_minutes_total += qty * float(minutes_per)
+                tap_class_counter[str(cls)] += qty
+                detail = tap_details.setdefault(spec, {
+                    "spec": spec,
+                    "qty": 0,
+                    "class": cls,
+                    "minutes_per_hole": float(minutes_per),
+                    "total_minutes": 0.0,
+                    "is_npt": bool(entry.get("tap_is_npt")),
+                })
+                detail["qty"] += qty
+                detail["total_minutes"] += qty * float(minutes_per)
+                if entry.get("tap_is_npt"):
+                    npt_qty += qty
             if entry.get("cbore"):
-                cbore_qty += qty
+                ops_qty = qty * (2 if entry.get("double_sided") else 1)
+                cbore_qty += ops_qty
+                cbore_minutes_total += ops_qty * CBORE_MIN_PER_SIDE_MIN
+                if entry.get("double_sided"):
+                    double_cbore = True
+            if entry.get("csk"):
+                ops_qty = qty * (2 if entry.get("double_sided") else 1)
+                csk_qty += ops_qty
+                csk_minutes_total += ops_qty * CSK_MIN_PER_SIDE_MIN
+                if entry.get("double_sided"):
+                    double_csk = True
             depth = entry.get("depth_in")
             try:
                 if depth and float(depth) > max_depth_in:
@@ -7552,57 +8266,490 @@ def _aggregate_hole_entries(entries: Iterable[dict[str, Any]] | None) -> dict[st
             side = str(entry.get("side") or "").upper()
             if side == "BACK" or (entry.get("raw") and "BACK" in str(entry.get("raw")).upper()):
                 back_ops = True
+            elif entry.get("double_sided") and (entry.get("cbore") or entry.get("csk")):
+                back_ops = True
+    tap_details_list = []
+    for spec, detail in tap_details.items():
+        detail["qty"] = int(detail.get("qty", 0) or 0)
+        detail["total_minutes"] = round(float(detail.get("total_minutes", 0.0)), 3)
+        detail["minutes_per_hole"] = round(float(detail.get("minutes_per_hole", 0.0)), 3)
+        tap_details_list.append(detail)
+    tap_details_list.sort(key=lambda d: -d.get("qty", 0))
+    tap_class_counts = {cls: int(qty) for cls, qty in tap_class_counter.items() if qty}
     return {
         "hole_count": hole_count if hole_count else None,
         "tap_qty": tap_qty,
         "cbore_qty": cbore_qty,
+        "csk_qty": csk_qty,
         "deepest_hole_in": max_depth_in if max_depth_in > 0 else None,
         "provenance": "HOLE TABLE / NOTES" if hole_count else None,
         "from_back": back_ops,
+        "tap_details": tap_details_list,
+        "tap_minutes_hint": round(tap_minutes_total, 3) if tap_minutes_total else None,
+        "tap_class_counts": tap_class_counts,
+        "npt_qty": npt_qty,
+        "cbore_minutes_hint": round(cbore_minutes_total, 3) if cbore_minutes_total else None,
+        "csk_minutes_hint": round(csk_minutes_total, 3) if csk_minutes_total else None,
+        "double_sided_cbore": double_cbore,
+        "double_sided_csk": double_csk,
     }
 
 
 def summarize_hole_chart_lines(lines: Iterable[str] | None) -> dict[str, Any]:
-    tap_qty = 0
-    cbore_qty = 0
-    deepest = 0.0
-    back_ops = False
+    entries: list[dict[str, Any]] = []
     for raw in lines or []:
-        u = str(raw or "").upper()
-        if not u:
+        text = str(raw or "")
+        if not text.strip():
             continue
-        qty = 1
-        mqty = re.search(r"\((\d+)\)", u)
-        if mqty:
-            try:
-                qty = max(1, int(mqty.group(1)))
-            except Exception:
-                qty = 1
-        if RE_TAP.search(u) or RE_NPT.search(u):
-            tap_qty += qty
-        if RE_CBORE.search(u):
-            cbore_qty += qty
-        md = RE_THICK.search(u)
-        if md:
-            try:
-                depth = float(md.group(1))
-            except Exception:
-                depth = None
-            if depth is not None and depth > deepest:
-                deepest = depth
-            if "BACK" in u:
-                back_ops = True
+        entry = _parse_hole_line(text, 1.0, source="CHART")
+        if not entry:
+            continue
+        if not entry.get("qty"):
+            mqty = re.search(r"\((\d+)\)", text)
+            if mqty:
+                try:
+                    entry["qty"] = int(mqty.group(1))
+                except Exception:
+                    pass
+        entries.append(entry)
+    agg = _aggregate_hole_entries(entries)
     return {
-        "tap_qty": tap_qty,
-        "cbore_qty": cbore_qty,
-        "deepest_hole_in": deepest or None,
-        "from_back": back_ops,
+        "tap_qty": int(agg.get("tap_qty") or 0),
+        "cbore_qty": int(agg.get("cbore_qty") or 0),
+        "csk_qty": int(agg.get("csk_qty") or 0),
+        "deepest_hole_in": agg.get("deepest_hole_in"),
+        "from_back": bool(agg.get("from_back")),
+        "tap_details": agg.get("tap_details") or [],
+        "tap_minutes_hint": agg.get("tap_minutes_hint"),
+        "tap_class_counts": agg.get("tap_class_counts") or {},
+        "npt_qty": int(agg.get("npt_qty") or 0),
+        "cbore_minutes_hint": agg.get("cbore_minutes_hint"),
+        "csk_minutes_hint": agg.get("csk_minutes_hint"),
+        "double_sided_cbore": bool(agg.get("double_sided_cbore")),
+        "double_sided_csk": bool(agg.get("double_sided_csk")),
     }
 
 
-def harvest_hole_specs(doc, to_in: float):
+def derive_inference_knobs(
+    tokens_text: str,
+    combined_agg: dict[str, Any],
+    *,
+    hole_families: dict | None = None,
+    geom_families: dict | None = None,
+    material_info: dict | None = None,
+    thickness_guess: float | None = None,
+    thickness_provenance: str | None = None,
+    pocket_metrics: dict | None = None,
+    stock_plan: dict | None = None,
+    table_hole_count: int | None = None,
+    geometry_hole_count: int | None = None,
+) -> dict[str, Any]:
+    tokens_upper = tokens_text.upper() if isinstance(tokens_text, str) else ""
+    token_lines = [ln.strip() for ln in (tokens_text.splitlines() if tokens_text else []) if ln.strip()]
+    knobs: dict[str, Any] = {}
+
+    # --- Setups / handling ---------------------------------------------------
+    setup_signals: list[str] = []
+    if combined_agg.get("from_back"):
+        setup_signals.append("Hole table flags BACK operations")
+    if RE_FRONT_BACK.search(tokens_upper):
+        setup_signals.append("Text includes FRONT & BACK")
+    if re.search(r"FROM\s+BACK", tokens_upper):
+        setup_signals.append("Note: FROM BACK callout")
+    if "BACK SIDE" in tokens_upper:
+        setup_signals.append("Note references BACK SIDE")
+    if RE_FLIP_CALL.search(tokens_upper):
+        setup_signals.append("Operation flip callout present")
+    if setup_signals:
+        signal_count = len(setup_signals)
+        handling = HANDLING_ADDER_RANGE_HR[0] + max(0, signal_count - 1) * 0.05
+        handling = min(HANDLING_ADDER_RANGE_HR[1], handling)
+        knobs["setups"] = {
+            "confidence": "high",
+            "signals": setup_signals,
+            "recommended": {
+                "setups_min": 2,
+                "fixture_plan": "pins + toe clamps",
+                "handling_adder_hr": round(handling, 3),
+                "handling_bounds_hr": [round(HANDLING_ADDER_RANGE_HR[0], 3), round(HANDLING_ADDER_RANGE_HR[1], 3)],
+            },
+            "targets": [
+                "setups",
+                "fixture",
+                "process_hour_adders.handling",
+            ],
+        }
+
+    # --- Tapping --------------------------------------------------------------
+    tap_details = combined_agg.get("tap_details") or []
+    tap_minutes_total = float(combined_agg.get("tap_minutes_hint") or 0.0)
+    npt_qty = int(combined_agg.get("npt_qty") or 0)
+    if tap_details or tap_minutes_total:
+        tap_signals = []
+        for detail in tap_details:
+            try:
+                qty = int(detail.get("qty", 0) or 0)
+            except Exception:
+                qty = 0
+            spec = detail.get("spec") or ""
+            if qty and spec:
+                tap_signals.append(f"{qty}×{spec}")
+        if not tap_signals and combined_agg.get("tap_qty"):
+            tap_signals.append(f"Tap qty {combined_agg.get('tap_qty')}")
+        npt_inspection_hr = 0.0
+        if npt_qty:
+            npt_inspection_hr = npt_qty * (NPT_INSPECTION_MIN_PER_HOLE / 60.0)
+            tap_signals.append(f"Pipe taps detected ({npt_qty})")
+        knobs["tapping"] = {
+            "confidence": "high" if tap_signals else "medium",
+            "signals": tap_signals,
+            "recommended": {
+                "tapping_minutes": round(tap_minutes_total, 3) if tap_minutes_total else None,
+                "tapping_hours": round(tap_minutes_total / 60.0, 3) if tap_minutes_total else None,
+                "tap_details": tap_details,
+                "npt_qty": npt_qty or None,
+                "npt_inspection_hr": round(npt_inspection_hr, 3) if npt_inspection_hr else None,
+            },
+            "targets": [
+                "process_hour_multipliers.drilling",
+                "process_hour_adders.inspection",
+            ],
+        }
+
+    # --- Counterbores ---------------------------------------------------------
+    cbore_qty = int(combined_agg.get("cbore_qty") or 0)
+    if cbore_qty:
+        cbore_minutes = float(combined_agg.get("cbore_minutes_hint") or (cbore_qty * CBORE_MIN_PER_SIDE_MIN))
+        cbore_signals = [f"Counterbores qty {cbore_qty}"]
+        if combined_agg.get("double_sided_cbore"):
+            cbore_signals.append("Counterbore FRONT/BACK callout")
+        knobs["counterbore"] = {
+            "confidence": "high",
+            "signals": cbore_signals,
+            "recommended": {
+                "minutes": round(cbore_minutes, 3),
+                "hours": round(cbore_minutes / 60.0, 3),
+                "double_sided": bool(combined_agg.get("double_sided_cbore")),
+            },
+            "targets": ["process_hour_multipliers.drilling"],
+        }
+
+    # --- Countersinks --------------------------------------------------------
+    csk_qty = int(combined_agg.get("csk_qty") or 0)
+    if csk_qty:
+        csk_minutes = float(combined_agg.get("csk_minutes_hint") or (csk_qty * CSK_MIN_PER_SIDE_MIN))
+        csk_signals = [f"Countersinks qty {csk_qty}"]
+        if combined_agg.get("double_sided_csk"):
+            csk_signals.append("Countersink FRONT/BACK callout")
+        angle_matches = sorted({match.group(1) for match in RE_CSK_ANGLE.finditer(tokens_upper)})
+        if angle_matches:
+            csk_signals.append(f"Countersink angles {', '.join(angle_matches)}°")
+        knobs["countersink"] = {
+            "confidence": "high",
+            "signals": csk_signals,
+            "recommended": {
+                "minutes": round(csk_minutes, 3),
+                "hours": round(csk_minutes / 60.0, 3),
+                "double_sided": bool(combined_agg.get("double_sided_csk")),
+                "angles": angle_matches or None,
+            },
+            "targets": ["process_hour_multipliers.drilling"],
+        }
+
+    # --- Precision finishing (ream / jig grind) -----------------------------
+    jig_matches = list(RE_JIG_GRIND.finditer(tokens_upper))
+    ream_matches = list(RE_REAM.finditer(tokens_upper))
+    tight_tol_matches = list(RE_TIGHT_TOL.finditer(tokens_upper))
+    fit_matches = list(RE_FIT_CLASS.finditer(tokens_upper))
+    precision_signals: list[str] = []
+    if jig_matches:
+        precision_signals.append(f"JIG GRIND callouts ×{len(jig_matches)}")
+    if ream_matches:
+        precision_signals.append(f"REAM instructions ×{len(ream_matches)}")
+    if tight_tol_matches:
+        precision_signals.append(f"±0.0002 tolerance mentions ×{len(tight_tol_matches)}")
+    if fit_matches:
+        precision_signals.append(f"Fit classes (H/G) ×{len(fit_matches)}")
+    if precision_signals:
+        jig_hr = len(jig_matches) * (JIG_GRIND_MIN_PER_FEATURE / 60.0)
+        ream_hr = len(ream_matches) * (REAM_MIN_PER_FEATURE / 60.0)
+        inspection_hr = (len(tight_tol_matches) + len(fit_matches) + len(ream_matches)) * (TIGHT_TOL_INSPECTION_MIN / 60.0)
+        cmm_min = (len(tight_tol_matches) + len(fit_matches)) * TIGHT_TOL_CMM_MIN
+        knobs["precision_finish"] = {
+            "confidence": "high",
+            "signals": precision_signals,
+            "recommended": {
+                "jig_grind_hr": round(jig_hr, 3) if jig_hr else None,
+                "ream_hr": round(ream_hr, 3) if ream_hr else None,
+                "inspection_hr": round(inspection_hr, 3) if inspection_hr else None,
+                "cmm_minutes": round(cmm_min, 1) if cmm_min else None,
+            },
+            "targets": [
+                "process_hour_adders.inspection",
+                "process_hour_multipliers.milling",
+            ],
+        }
+
+    # --- Material & heat treat -----------------------------------------------
+    material_signals: list[str] = []
+    mat_family = None
+    density = None
+    price_class = None
+    hardness_range = None
+    heat_treat_required = False
+    if isinstance(material_info, dict):
+        mat_note = material_info.get("material_note")
+        if mat_note:
+            material_signals.append(mat_note)
+        mat_family = material_info.get("material_family")
+        density = material_info.get("density_g_cc")
+        price_class = material_info.get("material_price_class")
+        hardness_range = material_info.get("hardness_hrc_range")
+        heat_treat_required = bool(material_info.get("heat_treat_required"))
+        for line in material_info.get("heat_treat_notes", []) or []:
+            material_signals.append(line)
+        if hardness_range:
+            lo, hi = hardness_range
+            material_signals.append(f"Hardness target {lo:.0f}–{hi:.0f} HRC" if lo != hi else f"Hardness target {lo:.0f} HRC")
+        if heat_treat_required and "HEAT TREAT" not in material_signals:
+            material_signals.append("HEAT TREAT callout")
+    if material_signals:
+        wear_multiplier = 1.0
+        if hardness_range:
+            hi = hardness_range[1]
+            wear_multiplier = 1.15 if hi >= 55 else 1.1
+        elif heat_treat_required:
+            wear_multiplier = 1.1
+        heat_treat_pass = 0.0
+        if heat_treat_required:
+            heat_treat_pass = 120.0
+        knobs["material_heat_treat"] = {
+            "confidence": "high",
+            "signals": material_signals,
+            "recommended": {
+                "material_family": mat_family,
+                "density_g_cc": density,
+                "price_class": price_class,
+                "heat_treat_pass_through": round(heat_treat_pass, 2) if heat_treat_pass else None,
+                "milling_tool_wear_multiplier": round(wear_multiplier, 3),
+            },
+            "targets": [
+                "density_g_cc",
+                "add_pass_through.Outsourced Vendors",
+                "process_hour_multipliers.milling",
+            ],
+        }
+
+    # --- Finish / coating ----------------------------------------------------
+    finishes = []
+    mask_required = False
+    if isinstance(material_info, dict):
+        finishes = material_info.get("finishes") or []
+        mask_required = bool(material_info.get("finish_masking_required"))
+    if finishes:
+        finish_signals = list(finishes)
+        if mask_required:
+            finish_signals.append("MASK callout")
+        handling_hr = 0.2 + 0.05 * max(len(finishes) - 1, 0)
+        vendor_cost = 90.0 + 20.0 * max(len(finishes) - 1, 0)
+        masking_hr = 0.3 if (mask_required and any("ANODIZE" in f for f in finishes)) else 0.0
+        knobs["finish_coating"] = {
+            "confidence": "high",
+            "signals": finish_signals,
+            "recommended": {
+                "vendor_pass_through": round(vendor_cost, 2),
+                "handling_hr": round(handling_hr, 3),
+                "masking_hr": round(masking_hr, 3) if masking_hr else None,
+            },
+            "targets": [
+                "add_pass_through.Outsourced Vendors",
+                "process_hour_adders.handling",
+                "process_hour_adders.masking",
+            ],
+        }
+
+    # --- Thickness fallback --------------------------------------------------
+    if thickness_guess and thickness_provenance:
+        thickness_signals = [f"Blind feature depth {thickness_guess:.3f} in"]
+        knobs["thickness_fallback"] = {
+            "confidence": "medium",
+            "signals": thickness_signals,
+            "recommended": {
+                "thickness_in": round(thickness_guess, 3),
+                "provenance": thickness_provenance,
+            },
+            "targets": ["material.thickness_in"],
+        }
+
+    # --- Toolchange / diameter families -------------------------------------
+    hole_family_count = len(hole_families or geom_families or {})
+    tap_family_count = len({(detail.get("spec") or "").upper() for detail in combined_agg.get("tap_details") or [] if detail.get("spec")})
+    csk_angles = sorted({match.group(1) for match in RE_CSK_ANGLE.finditer(tokens_upper)})
+    if hole_family_count or tap_family_count or csk_angles:
+        total_families = hole_family_count + tap_family_count + len(csk_angles)
+        toolchange_hours = total_families * 0.03
+        tool_signals = []
+        if hole_family_count:
+            tool_signals.append(f"Hole diameter families {hole_family_count}")
+        if tap_family_count:
+            tool_signals.append(f"Tap sizes {tap_family_count}")
+        if csk_angles:
+            tool_signals.append(f"CSK angles {', '.join(csk_angles)}°")
+        knobs["toolchange_families"] = {
+            "confidence": "high",
+            "signals": tool_signals,
+            "recommended": {
+                "families_total": total_families,
+                "toolchange_hours": round(toolchange_hours, 3),
+            },
+            "targets": [
+                "process_hour_adders.setup_toolchanges",
+                "process_hour_multipliers.drilling",
+                "process_hour_multipliers.milling",
+            ],
+        }
+
+    # --- Pocketing / slotting ------------------------------------------------
+    pocket_area = 0.0
+    pocket_count = 0
+    if pocket_metrics:
+        pocket_area = float(pocket_metrics.get("pocket_area_total_in2") or 0.0)
+        pocket_count = int(pocket_metrics.get("pocket_count") or 0)
+    slot_matches = [match for match in RE_SLOT_NOTE.finditer(tokens_upper)]
+    slot_signals = [match.group(0) for match in slot_matches]
+    if pocket_area or slot_signals:
+        depth_guess = thickness_guess or 0.25
+        milling_adder = pocket_area * depth_guess * 0.02
+        if slot_signals:
+            milling_adder += max(0.05, 0.03 * len(slot_signals))
+        milling_adder = max(0.1 if pocket_area or slot_signals else 0.0, min(milling_adder, 2.0))
+        knob_signals = []
+        if pocket_area:
+            knob_signals.append(f"Pocket area ~{pocket_area:.2f} in² across {pocket_count} loops")
+        knob_signals.extend(slot_signals)
+        knobs["pocketing_slotting"] = {
+            "confidence": "medium",
+            "signals": knob_signals,
+            "recommended": {
+                "milling_hour_adder": round(milling_adder, 3),
+                "depth_basis_in": round(depth_guess, 3),
+            },
+            "targets": ["process_hour_adders.milling"],
+        }
+
+    # --- Hardware / assembly -------------------------------------------------
+    hardware_items: list[tuple[int, str]] = []
+    for line in token_lines:
+        m = RE_HARDWARE_LINE.search(line)
+        if not m:
+            continue
+        qty = int(m.group(1))
+        item = m.group(2).upper()
+        if any(keyword in item for keyword in ("DOWEL", "PIN", "SHCS", "SOCKET", "SCREW", "BOLT", "INSERT", "BUSH")):
+            hardware_items.append((qty, item))
+    if hardware_items:
+        total_qty = sum(q for q, _ in hardware_items)
+        hardware_signals = [f"({qty}) {item}" for qty, item in hardware_items]
+        assembly_hours = total_qty * 0.05
+        hardware_cost = total_qty * 5.0
+        knobs["hardware_assembly"] = {
+            "confidence": "medium",
+            "signals": hardware_signals,
+            "recommended": {
+                "hardware_pass_through": round(hardware_cost, 2),
+                "assembly_hours": round(assembly_hours, 3),
+            },
+            "targets": [
+                "add_pass_through.Hardware / BOM",
+                "process_hour_adders.assembly",
+            ],
+        }
+
+    # --- Stock selection -----------------------------------------------------
+    if stock_plan:
+        stock_signals = []
+        stock_len = stock_plan.get("stock_len_in")
+        stock_wid = stock_plan.get("stock_wid_in")
+        stock_thk = stock_plan.get("stock_thk_in")
+        if stock_len and stock_wid and stock_thk:
+            stock_signals.append(f"Stock {stock_len}×{stock_wid}×{stock_thk} in")
+        if stock_plan.get("part_mass_lb"):
+            stock_signals.append(f"Net mass ≈ {stock_plan['part_mass_lb']:.2f} lb")
+        if stock_signals:
+            knobs["stock_selection"] = {
+                "confidence": "high",
+                "signals": stock_signals,
+                "recommended": {
+                    "stock_plan": stock_plan,
+                },
+                "targets": ["material.stock"],
+            }
+
+    # --- Risk / contingency --------------------------------------------------
+    risk_signals: list[str] = []
+    tolerance_mentions = re.findall(r"±\s*0\.00\d", tokens_upper)
+    gd_t_mentions = re.findall(r"\b(MMC|LMC|TP|POSITION|PROFILE|FLATNESS)\b", tokens_upper)
+    if len(tolerance_mentions) >= 3:
+        risk_signals.append(f"Multiple tight tolerances ({len(tolerance_mentions)})")
+    if len(gd_t_mentions) >= 2:
+        risk_signals.append(f"GD&T callouts ({len(gd_t_mentions)})")
+    if "CRITICAL" in tokens_upper:
+        risk_signals.append("CRITICAL note present")
+    if isinstance(material_info, dict) and material_info.get("material_family") in {"tool steel", "copper", "brass"}:
+        risk_signals.append(f"Material family {material_info.get('material_family')}")
+    if risk_signals:
+        contingency = 0.03 + 0.01 * max(len(risk_signals) - 1, 0)
+        contingency = min(contingency, 0.05)
+        knobs["risk_contingency"] = {
+            "confidence": "medium",
+            "signals": risk_signals,
+            "recommended": {
+                "contingency_pct": round(contingency, 3),
+            },
+            "targets": ["contingency_pct"],
+        }
+
+    # --- Packaging / shipping ------------------------------------------------
+    packaging_signals: list[str] = []
+    part_mass_lb = None
+    if stock_plan:
+        part_mass_lb = stock_plan.get("part_mass_lb")
+        if stock_plan.get("stock_len_in") and stock_plan.get("stock_wid_in"):
+            max_dim = max(stock_plan["stock_len_in"], stock_plan["stock_wid_in"], stock_plan.get("stock_thk_in", 0.0))
+        else:
+            max_dim = None
+    else:
+        max_dim = None
+    if part_mass_lb and part_mass_lb > 20:
+        packaging_signals.append(f"Mass ~{part_mass_lb:.1f} lb")
+    if max_dim and max_dim > 18:
+        packaging_signals.append(f"Largest dimension ~{max_dim:.1f} in")
+    if "FRAGILE" in tokens_upper or "HANDLE WITH CARE" in tokens_upper:
+        packaging_signals.append("Fragility note present")
+    if packaging_signals:
+        packaging_hours = 0.25 + (0.1 if part_mass_lb and part_mass_lb > 40 else 0.0)
+        packaging_flat = 25.0 + (10.0 if part_mass_lb and part_mass_lb > 40 else 0.0)
+        knobs["packaging_shipping"] = {
+            "confidence": "medium",
+            "signals": packaging_signals,
+            "recommended": {
+                "packaging_hours": round(packaging_hours, 3),
+                "packaging_flat_cost": round(packaging_flat, 2),
+                "shipping_weight_lb": round(part_mass_lb, 2) if part_mass_lb else None,
+            },
+            "targets": [
+                "process_hour_adders.packaging",
+                "add_pass_through.Shipping",
+            ],
+        }
+
+    return knobs
+
+
+def harvest_hole_specs(doc, to_in: float, table_lines: Sequence[str] | None = None):
     holes: list[dict[str, Any]] = []
-    for line in _iter_table_text(doc) or []:
+    lines = list(table_lines) if table_lines is not None else list(_iter_table_text(doc) or [])
+    for line in lines:
         entry = _parse_hole_line(line, to_in, source="TABLE")
         if entry:
             holes.append(entry)
@@ -7648,26 +8795,239 @@ def harvest_leaders(doc) -> list[str]:
     return [t for t in texts if t]
 
 
+def _infer_material_family_details(material_note: str | None) -> tuple[str | None, float | None, str | None]:
+    if not material_note:
+        return (None, None, None)
+    note = material_note.strip().upper()
+    families = [
+        ("aluminum", ["6061", "5052", "5083", "2024", "7050", "7075"], 2.7, "commodity"),
+        ("stainless steel", ["17-4", "15-5", "316", "304", "303", "410", "420"], 7.9, "premium"),
+        ("tool steel", ["A2", "D2", "S7", "O1", "H13", "AISI A2", "AISI D2"], 7.8, "premium"),
+        ("alloy steel", ["4140", "4340", "8620", "1045", "4130"], 7.85, "commodity"),
+        ("copper", ["C110", "COPPER"], 8.9, "premium"),
+        ("brass", ["BRASS", "C260", "C360"], 8.5, "premium"),
+        ("plastic", ["DELRIN", "ACETAL", "NYLON", "UHMW", "PEEK", "PVC", "ABS"], 1.4, "commodity"),
+    ]
+    for family, tokens, density, price_class in families:
+        for token in tokens:
+            if token in note:
+                return (family, density, price_class)
+    if "AL" in note or "ALUMIN" in note:
+        return ("aluminum", 2.7, "commodity")
+    if "STAINLESS" in note:
+        return ("stainless steel", 7.9, "premium")
+    if any(key in note for key in ("TOOL", "A2", "D2", "S7")):
+        return ("tool steel", 7.8, "premium")
+    if "STEEL" in note:
+        return ("alloy steel", 7.85, "commodity")
+    return (None, None, None)
+
+
 def harvest_material_finish(tokens_text: str) -> dict[str, Any]:
-    U = tokens_text.upper() if isinstance(tokens_text, str) else ""
+    text = tokens_text or ""
+    U = text.upper()
     mat = None
-    m = RE_MAT.search(U)
-    if m:
-        mat = m.group(2).strip()
+    hardness_range: tuple[float, float] | None = None
+    heat_treat_required = False
+    heat_treat_notes: list[str] = []
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    for line in lines:
+        if not mat:
+            m = RE_MAT.search(line)
+            if m:
+                mat = m.group(2).strip()
+        if RE_HEAT_TREAT.search(line):
+            heat_treat_required = True
+            heat_treat_notes.append(line.strip())
+        hmatch = RE_HARDNESS.search(line)
+        if hmatch:
+            try:
+                lo = float(hmatch.group(1))
+                hi = float(hmatch.group(2)) if hmatch.group(2) else lo
+                hardness_range = (min(lo, hi), max(lo, hi))
+            except Exception:
+                pass
+    if not mat:
+        m = RE_MAT.search(U)
+        if m:
+            mat = m.group(2).strip()
+    if mat and " HT" in mat.upper():
+        heat_treat_required = True
+    if RE_HEAT_TREAT.search(U):
+        heat_treat_required = True
     coats = sorted({match.group(0).upper() for match in RE_COAT.finditer(U)})
     tol = None
     mt = RE_TOL.search(U)
     if mt:
         tol = mt.group(1).replace(" ", "")
-    return {"material_note": mat, "finishes": coats, "default_tol": tol}
+    family, density, price_class = _infer_material_family_details(mat)
+    finish_masking = "MASK" in U
+    result: dict[str, Any] = {
+        "material_note": mat,
+        "material_family": family,
+        "density_g_cc": density,
+        "material_price_class": price_class,
+        "finishes": coats,
+        "default_tol": tol,
+        "heat_treat_required": bool(heat_treat_required),
+        "heat_treat_notes": heat_treat_notes,
+        "hardness_hrc_range": hardness_range,
+        "finish_masking_required": finish_masking,
+    }
+    return result
+
+
+def _polygon_area(points: Sequence[tuple[float, float]]) -> float:
+    if len(points) < 3:
+        return 0.0
+    area = 0.0
+    for i in range(len(points)):
+        x1, y1 = points[i]
+        x2, y2 = points[(i + 1) % len(points)]
+        area += x1 * y2 - x2 * y1
+    return area / 2.0
+
+
+def detect_pockets_and_islands(doc, to_in: float) -> dict[str, Any]:
+    if doc is None:
+        return {}
+    areas_in2: list[float] = []
+    pocket_details: list[float] = []
+    for sp in _spaces(doc) or []:
+        try:
+            polylines = list(sp.query("LWPOLYLINE"))
+        except Exception:
+            polylines = []
+        for pl in polylines:
+            try:
+                pts = pl.get_points("xy")
+            except Exception:
+                continue
+            if len(pts) < 3:
+                continue
+            flags = getattr(getattr(pl, "dxf", object()), "flags", 0)
+            is_closed = bool(getattr(pl, "closed", False)) or bool(flags & 1)
+            if not is_closed:
+                continue
+            xy_pts = [(float(x) * to_in, float(y) * to_in) for x, y in pts]
+            area = abs(_polygon_area(xy_pts))
+            if area < 0.05:
+                continue
+            areas_in2.append(area)
+        try:
+            lwps = list(sp.query("POLYLINE"))
+        except Exception:
+            lwps = []
+        for poly in lwps:
+            vertices = []
+            for v in getattr(poly, "vertices", []):
+                try:
+                    vertices.append((float(v.dxf.location.x) * to_in, float(v.dxf.location.y) * to_in))
+                except Exception:
+                    continue
+            if len(vertices) < 3:
+                continue
+            if vertices[0] != vertices[-1]:
+                vertices.append(vertices[0])
+            area = abs(_polygon_area(vertices))
+            if area < 0.05:
+                continue
+            areas_in2.append(area)
+    if not areas_in2:
+        return {}
+    largest = max(areas_in2)
+    for area in areas_in2:
+        if area < 0.9 * largest:
+            pocket_details.append(area)
+    pocket_total = sum(pocket_details)
+    return {
+        "closed_loop_areas_in2": [round(a, 3) for a in areas_in2],
+        "pocket_candidate_areas_in2": [round(a, 3) for a in pocket_details],
+        "pocket_area_total_in2": round(pocket_total, 3) if pocket_total else 0.0,
+        "pocket_count": len(pocket_details),
+    }
+
+
+def plan_stock_blank(
+    plate_len_in: float | None,
+    plate_wid_in: float | None,
+    thickness_in: float | None,
+    density_g_cc: float | None,
+    hole_families: dict | None,
+) -> dict[str, Any]:
+    if not plate_len_in or not plate_wid_in or not thickness_in:
+        return {}
+    stock_lengths = [6, 8, 10, 12, 18, 24, 36, 48]
+    stock_widths = [6, 8, 10, 12, 18, 24, 36]
+    stock_thicknesses = [0.125, 0.1875, 0.25, 0.375, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0]
+
+    def pick_size(value: float, options: Sequence[float]) -> float:
+        for opt in options:
+            if value <= opt:
+                return opt
+        return math.ceil(value)
+
+    stock_len = pick_size(float(plate_len_in) * 1.05, stock_lengths)
+    stock_wid = pick_size(float(plate_wid_in) * 1.05, stock_widths)
+    stock_thk = pick_size(float(thickness_in) * 1.05, stock_thicknesses)
+    volume_in3 = float(plate_len_in) * float(plate_wid_in) * float(thickness_in)
+    hole_area = 0.0
+    if hole_families:
+        for dia_in, qty in hole_families.items():
+            try:
+                d = float(dia_in)
+                q = float(qty)
+            except Exception:
+                continue
+            hole_area += math.pi * (d / 2.0) ** 2 * q
+    net_volume_in3 = max(volume_in3 - hole_area * float(thickness_in), 0.0)
+    density = float(density_g_cc or 0.0)
+    part_mass_lb = density * LB_PER_IN3_PER_GCC * net_volume_in3 if density > 0 else None
+    stock_volume_in3 = stock_len * stock_wid * stock_thk
+    stock_mass_lb = density * LB_PER_IN3_PER_GCC * stock_volume_in3 if density > 0 else None
+    return {
+        "stock_len_in": round(stock_len, 3),
+        "stock_wid_in": round(stock_wid, 3),
+        "stock_thk_in": round(stock_thk, 3),
+        "part_volume_in3": round(volume_in3, 3),
+        "stock_volume_in3": round(stock_volume_in3, 3),
+        "net_volume_in3": round(net_volume_in3, 3),
+        "part_mass_lb": round(part_mass_lb, 3) if part_mass_lb else None,
+        "stock_mass_lb": round(stock_mass_lb, 3) if stock_mass_lb else None,
+    }
 
 
 def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
     units = detect_units_scale(doc)
     to_in = units.get("to_in", 1.0) or 1.0
     ords = harvest_ordinates(doc, float(to_in))
-    holes, hole_agg, hole_notes = harvest_hole_specs(doc, float(to_in))
+    table_lines = list(_iter_table_text(doc) or [])
+    coord_info = harvest_coordinate_table(doc, float(to_in))
+    outline_hint = harvest_outline_bbox(doc, float(to_in))
+    holes, hole_agg, hole_notes = harvest_hole_specs(doc, float(to_in), table_lines=table_lines)
     leaders = harvest_leaders(doc)
+
+    plate_len = ords.get("plate_len_in")
+    plate_wid = ords.get("plate_wid_in")
+    plate_prov = ords.get("provenance")
+    if (plate_len is None or plate_wid is None) and outline_hint:
+        if plate_len is None and outline_hint.get("plate_len_in"):
+            plate_len = outline_hint.get("plate_len_in")
+            plate_prov = outline_hint.get("prov")
+        if plate_wid is None and outline_hint.get("plate_wid_in"):
+            plate_wid = outline_hint.get("plate_wid_in")
+            plate_prov = outline_hint.get("prov")
+    if (plate_len is None or plate_wid is None) and coord_info:
+        if plate_wid is None and coord_info.get("x_span_in"):
+            plate_wid = coord_info.get("x_span_in")
+            plate_prov = coord_info.get("prov")
+        if plate_len is None and coord_info.get("y_span_in"):
+            plate_len = coord_info.get("y_span_in")
+            plate_prov = coord_info.get("prov")
+    ords["plate_len_in"] = plate_len
+    ords["plate_wid_in"] = plate_wid
+    if plate_prov:
+        ords["provenance"] = plate_prov
 
     leader_entries: list[dict[str, Any]] = []
     for text in leaders:
@@ -7692,24 +9052,118 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
         tokens_parts.extend(text_harvest(doc))
     except Exception:
         pass
-    for line in _iter_table_text(doc) or []:
+    for line in table_lines:
         tokens_parts.append(line)
     tokens_parts.extend(leaders)
     tokens_blob = "\n".join(p for p in tokens_parts if p)
+    tokens_upper = tokens_blob.upper()
     material_info = harvest_material_finish(tokens_blob)
+    strong_material = harvest_finish_ht_material(tokens_upper)
+    if strong_material.get("material_note") and not material_info.get("material_note"):
+        material_info["material_note"] = strong_material.get("material_note")
+    if strong_material.get("finishes"):
+        combined_fin = set(material_info.get("finishes") or []) | set(strong_material.get("finishes") or [])
+        material_info["finishes"] = sorted(combined_fin)
+    if strong_material.get("heat_treat"):
+        notes = material_info.get("heat_treat_notes") or []
+        if strong_material["heat_treat"] not in notes:
+            notes.append(strong_material["heat_treat"])
+        material_info["heat_treat_notes"] = notes
+        material_info["heat_treat_required"] = True
+    hardware_notes = harvest_hardware_notes(tokens_upper)
+    gdt_summary = harvest_gdt(doc)
+    concentric_info = classify_concentric(doc, float(to_in))
+    if concentric_info.get("cbore_pairs_geom"):
+        existing = int(combined_agg.get("cbore_qty") or 0)
+        combined_agg["cbore_qty"] = max(existing, int(concentric_info.get("cbore_pairs_geom") or 0))
+    if concentric_info.get("csk_pairs_geom"):
+        existing_csk = int(combined_agg.get("csk_qty") or 0)
+        combined_agg["csk_qty"] = max(existing_csk, int(concentric_info.get("csk_pairs_geom") or 0))
+
+    max_depth = combined_agg.get("deepest_hole_in")
+    thickness_guess = None
+    thickness_provenance = None
+    if max_depth:
+        try:
+            depth_val = float(max_depth)
+        except Exception:
+            depth_val = 0.0
+        if depth_val > 0.0:
+            clamped = min(3.0, max(0.125, depth_val))
+            thickness_guess = clamped
+            thickness_provenance = "GEO hole depth fallback"
+            if clamped != depth_val:
+                msg = f"Thickness inferred from hole depth {depth_val:.3f} in (clamped to {clamped:.3f} in)"
+            else:
+                msg = f"Thickness inferred from hole depth {clamped:.3f} in"
+            if msg not in notes:
+                notes.append(msg)
+
+    # unified hole counting with fallbacks
+    cnt, fam = hole_count_from_acad_table(doc)
+    source = "HOLE TABLE (ACAD_TABLE)"
+    if not cnt:
+        cnt, fam = hole_count_from_text_table(doc, table_lines)
+        source = "HOLE TABLE (TEXT)" if cnt else source
+
+    geom_cnt, geom_fam = hole_count_from_geometry(doc, float(to_in))
+    if not cnt and geom_cnt:
+        cnt, fam = geom_cnt, geom_fam
+        source = "GEOMETRY CIRCLE COUNT"
+
+    flags: list[str] | None = None
+    if cnt and geom_cnt:
+        if abs(cnt - geom_cnt) / max(cnt, geom_cnt) > 0.15:
+            flags = [f"hole_count_conflict: table={cnt}, geom={geom_cnt}"]
+    coord_count = coord_info.get("coord_count") if isinstance(coord_info, dict) else None
+    if coord_count and cnt:
+        if abs(coord_count - cnt) / max(cnt, coord_count) > 0.15:
+            if not flags:
+                flags = []
+            flags.append(f"hole_count_coord_conflict: table={cnt}, coord={coord_count}")
+
+    pocket_metrics = detect_pockets_and_islands(doc, float(to_in))
+    stock_plan = plan_stock_blank(
+        ords.get("plate_len_in"),
+        ords.get("plate_wid_in"),
+        thickness_guess,
+        material_info.get("density_g_cc") if isinstance(material_info, dict) else None,
+        fam or geom_fam,
+    )
+
+    inference_knobs = derive_inference_knobs(
+        tokens_blob,
+        combined_agg,
+        hole_families=fam,
+        geom_families=geom_fam,
+        material_info=material_info,
+        thickness_guess=thickness_guess,
+        thickness_provenance=thickness_provenance,
+        pocket_metrics=pocket_metrics,
+        stock_plan=stock_plan,
+        table_hole_count=cnt,
+        geometry_hole_count=geom_cnt,
+    )
 
     geo = {
         "plate_len_in": ords.get("plate_len_in"),
         "plate_wid_in": ords.get("plate_wid_in"),
-        "thickness_in_guess": combined_agg.get("deepest_hole_in"),
+        "thickness_in_guess": thickness_guess,
         "hole_count": combined_agg.get("hole_count") or 0,
         "tap_qty": combined_agg.get("tap_qty") or 0,
         "cbore_qty": combined_agg.get("cbore_qty") or 0,
+        "csk_qty": combined_agg.get("csk_qty") or 0,
+        "tap_details": combined_agg.get("tap_details") or [],
+        "tap_minutes_hint": combined_agg.get("tap_minutes_hint"),
+        "tap_class_counts": combined_agg.get("tap_class_counts") or {},
+        "npt_qty": combined_agg.get("npt_qty") or 0,
+        "cbore_minutes_hint": combined_agg.get("cbore_minutes_hint"),
+        "csk_minutes_hint": combined_agg.get("csk_minutes_hint"),
         "from_back": bool(combined_agg.get("from_back")),
         "needs_back_face": bool(combined_agg.get("from_back")),
         "provenance": {
             "plate_size": ords.get("provenance"),
-            "thickness": "HOLE TABLE depth max" if max_depth else None,
+            "thickness": thickness_provenance,
             "holes": combined_agg.get("provenance"),
         },
         "notes": notes,
@@ -7717,6 +9171,78 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
         "units": units,
     }
     geo.update(material_info)
+    if hardware_notes.get("hardware_items") is not None:
+        geo["hardware_items"] = hardware_notes.get("hardware_items")
+        if hardware_notes.get("prov"):
+            geo.setdefault("provenance", {})["hardware"] = hardware_notes.get("prov")
+    if gdt_summary.get("gdt"):
+        geo["gdt"] = gdt_summary.get("gdt")
+    if gdt_summary.get("prov"):
+        geo.setdefault("provenance", {})["gdt"] = gdt_summary.get("prov")
+    if table_lines:
+        geo["chart_lines"] = list(table_lines)
+    if inference_knobs:
+        geo["inference_knobs"] = inference_knobs
+    geo["hole_count"] = int(cnt or 0)
+    geo["hole_diam_families_in"] = fam or {}
+    geo.setdefault("provenance", {})["holes"] = source
+    geo["hole_count_geom"] = geom_cnt or 0
+    if geom_fam:
+        geo["hole_diam_families_geom_in"] = geom_fam
+    if coord_info:
+        if coord_info.get("coord_count") is not None:
+            geo["coord_count"] = coord_info.get("coord_count")
+        if coord_info.get("coord_ids"):
+            geo["coord_ids"] = coord_info.get("coord_ids")
+        if coord_info.get("x_span_in") is not None:
+            geo.setdefault("outline_hint", {})["x_span_in"] = coord_info.get("x_span_in")
+            geo["x_span_in"] = coord_info.get("x_span_in")
+        if coord_info.get("y_span_in") is not None:
+            geo.setdefault("outline_hint", {})["y_span_in"] = coord_info.get("y_span_in")
+            geo["y_span_in"] = coord_info.get("y_span_in")
+        if coord_info.get("prov"):
+            geo.setdefault("provenance", {})["coord_list"] = coord_info.get("prov")
+    if outline_hint:
+        geo["outline_bbox"] = outline_hint
+        if outline_hint.get("prov"):
+            geo.setdefault("provenance", {})["outline_bbox"] = outline_hint.get("prov")
+    if concentric_info:
+        if concentric_info.get("cbore_pairs_geom") is not None:
+            geo["cbore_pairs_geom"] = concentric_info.get("cbore_pairs_geom")
+        if concentric_info.get("csk_pairs_geom") is not None:
+            geo["csk_pairs_geom"] = concentric_info.get("csk_pairs_geom")
+        if concentric_info.get("prov"):
+            geo.setdefault("provenance", {})["concentric"] = concentric_info.get("prov")
+    if thickness_provenance:
+        geo.setdefault("provenance", {})["thickness"] = thickness_provenance
+    if material_info.get("density_g_cc"):
+        geo["density_g_cc"] = material_info.get("density_g_cc")
+    if material_info.get("material_family"):
+        geo["material_family"] = material_info.get("material_family")
+    if material_info.get("material_price_class"):
+        geo["material_price_class"] = material_info.get("material_price_class")
+    if material_info.get("heat_treat_required"):
+        geo["heat_treat_required"] = True
+    if material_info.get("hardness_hrc_range"):
+        geo["hardness_hrc_range"] = material_info.get("hardness_hrc_range")
+    if material_info.get("finish_masking_required"):
+        geo["finish_masking_required"] = bool(material_info.get("finish_masking_required"))
+    if pocket_metrics:
+        geo["pocket_metrics"] = pocket_metrics
+        if pocket_metrics.get("pocket_area_total_in2"):
+            geo["pocket_area_total_in2"] = pocket_metrics.get("pocket_area_total_in2")
+            geo["pocket_count"] = pocket_metrics.get("pocket_count")
+    if stock_plan:
+        geo["stock_plan_guess"] = stock_plan
+    geo["hole_family_count"] = len(fam or geom_fam or {})
+    geo["tap_classes"] = tap_classes_from_lines(geo.get("chart_lines"))
+    deburr_hints = quick_deburr_estimates(geo.get("edge_len_in"), geo.get("hole_count"))
+    deburr_prov = deburr_hints.pop("prov", None)
+    geo.update(deburr_hints)
+    if deburr_prov:
+        geo.setdefault("provenance", {})["deburr"] = deburr_prov
+    if flags:
+        geo["flags"] = flags
     return geo
 
 
@@ -7892,6 +9418,8 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
             geo["tap_qty"] = max(int(geo.get("tap_qty", 0) or 0), int(chart_summary.get("tap_qty") or 0))
         if chart_summary.get("cbore_qty"):
             geo["cbore_qty"] = max(int(geo.get("cbore_qty", 0) or 0), int(chart_summary.get("cbore_qty") or 0))
+        if chart_summary.get("csk_qty"):
+            geo["csk_qty"] = max(int(geo.get("csk_qty", 0) or 0), int(chart_summary.get("csk_qty") or 0))
         deepest_chart = _coerce_float_or_none(chart_summary.get("deepest_hole_in"))
         if deepest_chart and (not geo.get("thickness_in_guess") or deepest_chart > float(geo.get("thickness_in_guess") or 0.0)):
             geo["thickness_in_guess"] = deepest_chart
@@ -7936,10 +9464,11 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     }
     if geo.get("hole_count"):
         result["hole_count_table"] = geo.get("hole_count")
-    if geo.get("tap_qty") or geo.get("cbore_qty"):
+    if geo.get("tap_qty") or geo.get("cbore_qty") or geo.get("csk_qty"):
         result["feature_counts"] = {
             "tap_qty": geo.get("tap_qty", 0),
             "cbore_qty": geo.get("cbore_qty", 0),
+            "csk_qty": geo.get("csk_qty", 0),
         }
     if entity_holes_mm:
         result["hole_diams_mm_precise"] = entity_holes_mm
@@ -7996,13 +9525,15 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
                 result["material"] = geo_read_more.get("material_note")
             if geo_read_more.get("chart_lines") and not result.get("chart_lines"):
                 result["chart_lines"] = list(geo_read_more.get("chart_lines") or [])
-            if geo_read_more.get("tap_qty") or geo_read_more.get("cbore_qty"):
+            if geo_read_more.get("tap_qty") or geo_read_more.get("cbore_qty") or geo_read_more.get("csk_qty"):
                 feature_counts = result.get("feature_counts") if isinstance(result.get("feature_counts"), dict) else {}
                 feature_counts = dict(feature_counts)
                 if geo_read_more.get("tap_qty"):
                     feature_counts["tap_qty"] = max(int(feature_counts.get("tap_qty", 0) or 0), int(geo_read_more.get("tap_qty") or 0))
                 if geo_read_more.get("cbore_qty"):
                     feature_counts["cbore_qty"] = max(int(feature_counts.get("cbore_qty", 0) or 0), int(geo_read_more.get("cbore_qty") or 0))
+                if geo_read_more.get("csk_qty"):
+                    feature_counts["csk_qty"] = max(int(feature_counts.get("csk_qty", 0) or 0), int(geo_read_more.get("csk_qty") or 0))
                 if feature_counts:
                     result["feature_counts"] = feature_counts
             for qty_key in ("tap_qty", "cbore_qty", "csk_qty"):
@@ -8128,6 +9659,8 @@ def reconcile_holes(entity_holes_mm: Iterable[Any] | None, chart_ops: Iterable[d
                 tap_qty += qty
             if op_type == "cbore":
                 cbore_qty += qty
+            if op_type in {"csk", "countersink"}:
+                csk_qty += qty
             if op_type != "drill":
                 continue
             try:
@@ -8149,6 +9682,7 @@ def reconcile_holes(entity_holes_mm: Iterable[Any] | None, chart_ops: Iterable[d
         "chart_bins": {float(k): int(v) for k, v in chart_bins.items()},
         "tap_qty": int(tap_qty),
         "cbore_qty": int(cbore_qty),
+        "csk_qty": int(csk_qty),
         "agreement": bool(agreement),
         "entity_total": int(entity_total),
         "chart_total": int(chart_total),
