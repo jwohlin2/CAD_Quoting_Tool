@@ -2818,7 +2818,7 @@ def read_step_or_iges_or_brep(path: str) -> TopoDS_Shape:
         return _brep_read(str(p))
     raise RuntimeError(f"Unsupported OCC format: {ext}")
 
-def convert_dwg_to_dxf(dwg_path: str, *, out_ver="ACAD2013") -> str:
+def convert_dwg_to_dxf(dwg_path: str, *, out_ver="ACAD2018") -> str:
     """
     Robust DWG?DXF wrapper.
     Works with:
@@ -7066,6 +7066,361 @@ def merge_estimate_into_vars(vars_df: pd.DataFrame, estimate: dict) -> pd.DataFr
         vars_df.loc[mask, "Example Values / Options"] = value
     return vars_df
 # ---- 2D: DXF / DWG (ezdxf) ---------------------------------------------------
+RE_TAP    = re.compile(r"(#\s*\d{1,2}-\d+|\bM\d+(?:\.\d+)?x\d+(?:\.\d+)?)\s*TAP", re.I)
+RE_THRU   = re.compile(r"\bTHRU\b", re.I)
+RE_CBORE  = re.compile(r"C[’']?BORE|CBORE|COUNTERBORE", re.I)
+RE_CSK    = re.compile(r"CSK|C'SINK|COUNTERSINK", re.I)
+RE_DEPTH  = re.compile(r"(\d+(?:\.\d+)?)\s*DEEP(?:\s+FROM\s+(FRONT|BACK))?", re.I)
+RE_DIA    = re.compile(r"[Ø⌀\u00D8]?\s*(\d+(?:\.\d+)?)", re.I)
+RE_MAT    = re.compile(r"\b(MATERIAL|MAT)\b[:\s]*([A-Z0-9\-\s/]+)")
+RE_COAT   = re.compile(r"\b(ANODIZE|BLACK OXIDE|ZINC PLATE|NICKEL PLATE|PASSIVATE|HEAT TREAT)\b", re.I)
+RE_TOL    = re.compile(r"\bUNLESS OTHERWISE SPECIFIED\b.*?([±\+\-]\s*\d+\.\d+)", re.I | re.S)
+
+
+def detect_units_scale(doc) -> dict[str, float | int]:
+    try:
+        u = int(doc.header.get("$INSUNITS", 1))
+    except Exception:
+        u = 1
+    to_in = 1.0 if u == 1 else (1 / 25.4) if u in (4, 13) else 1.0
+    return {"insunits": u, "to_in": float(to_in)}
+
+
+def harvest_ordinates(doc, to_in: float) -> dict[str, Any]:
+    vals_x: list[float] = []
+    vals_y: list[float] = []
+    spaces: list[Any] = []
+    try:
+        spaces.append(doc.modelspace())
+    except Exception:
+        pass
+    try:
+        for name in doc.layouts.names_in_taborder():
+            if name.lower() in {"model", "defpoints"}:
+                continue
+            try:
+                spaces.append(doc.layouts.get(name).entity_space)
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    for space in spaces:
+        try:
+            dims = space.query("DIMENSION")
+        except Exception:
+            continue
+        for dim in dims:
+            try:
+                dimtype = int(dim.dxf.dimtype)
+            except Exception:
+                continue
+            try:
+                is_ord = (dimtype & 6) == 6 or dimtype == 6
+            except Exception:
+                is_ord = False
+            if not is_ord:
+                continue
+            try:
+                m = float(dim.get_measurement()) * to_in
+            except Exception:
+                continue
+            if not (0.05 <= m <= 1000):
+                continue
+            try:
+                angle = float(getattr(dim.dxf, "text_rotation", 0.0)) % 180.0
+            except Exception:
+                angle = 0.0
+            target = vals_y if 60.0 <= angle <= 120.0 else vals_x
+            target.append(m)
+
+    def pick_pair(vals: Sequence[float]) -> tuple[float | None, float | None]:
+        if not vals:
+            return (None, None)
+        uniq = sorted({round(v, 3) for v in vals if v > 0.2})
+        if not uniq:
+            return (None, None)
+        if len(uniq) == 1:
+            return (uniq[0], None)
+        return (uniq[-1], uniq[-2])
+
+    L1, L2 = pick_pair(vals_x)
+    W1, W2 = pick_pair(vals_y)
+    return {
+        "plate_len_in": round(W1, 3) if W1 else None,
+        "plate_wid_in": round(L1, 3) if L1 else None,
+        "candidates": {"x": vals_x, "y": vals_y, "x2": L2, "y2": W2},
+        "provenance": "ORDINATE DIMENSIONS" if (W1 or L1) else None,
+    }
+
+
+def _iter_table_text(doc):
+    if doc is None:
+        return
+    try:
+        msp = doc.modelspace()
+    except Exception:
+        msp = None
+    if msp is not None:
+        try:
+            for t in msp.query("TABLE"):
+                try:
+                    for r in range(t.dxf.n_rows):
+                        row = []
+                        for c in range(t.dxf.n_cols):
+                            try:
+                                cell = t.get_cell(r, c)
+                            except Exception:
+                                cell = None
+                            row.append(cell.get_text() if cell else "")
+                        line = " | ".join(s.strip() for s in row if s)
+                        if line:
+                            yield line
+                except Exception:
+                    continue
+        except Exception:
+            pass
+    try:
+        layout_names = list(doc.layouts.names_in_taborder())
+    except Exception:
+        layout_names = []
+    for layout_name in layout_names:
+        if layout_name.lower() in ("model", "defpoints"):
+            continue
+        try:
+            es = doc.layouts.get(layout_name).entity_space
+        except Exception:
+            continue
+        try:
+            for e in es.query("MTEXT,TEXT"):
+                try:
+                    if e.dxftype() == "MTEXT":
+                        text = e.plain_text()
+                    else:
+                        text = e.dxf.text
+                except Exception:
+                    text = None
+                if text:
+                    yield text.strip()
+        except Exception:
+            continue
+
+
+def _parse_hole_line(line: str, to_in: float, *, source: str | None = None) -> dict[str, Any] | None:
+    if not line:
+        return None
+    U = line.upper()
+    if not any(k in U for k in ("HOLE", "TAP", "THRU", "CBORE", "C'BORE", "DRILL")):
+        return None
+
+    entry: dict[str, Any] = {
+        "qty": None,
+        "tap": None,
+        "thru": False,
+        "cbore": False,
+        "csk": False,
+        "ref_dia_in": None,
+        "depth_in": None,
+        "side": None,
+        "raw": line,
+    }
+    if source:
+        entry["source"] = source
+
+    m_qty = re.search(r"\bQTY\b[:\s]*(\d+)", U)
+    if m_qty:
+        entry["qty"] = int(m_qty.group(1))
+
+    mt = RE_TAP.search(U)
+    entry["tap"] = mt.group(1).replace(" ", "") if mt else None
+    entry["thru"] = bool(RE_THRU.search(U))
+    entry["cbore"] = bool(RE_CBORE.search(U))
+    entry["csk"] = bool(RE_CSK.search(U))
+
+    md = RE_DEPTH.search(U)
+    if md:
+        try:
+            depth = float(md.group(1)) * float(to_in)
+        except Exception:
+            depth = None
+        side = (md.group(2) or "").upper() or None
+        if depth is not None:
+            entry["depth_in"] = depth
+        if side:
+            entry["side"] = side
+
+    mref = re.search(r"REF\s*[Ø⌀]\s*(\d+(?:\.\d+)?)", U)
+    if mref:
+        try:
+            entry["ref_dia_in"] = float(mref.group(1)) * float(to_in)
+        except Exception:
+            entry["ref_dia_in"] = None
+
+    if entry.get("ref_dia_in") is None:
+        mdia = RE_DIA.search(U)
+        if mdia and ("Ø" in U or "⌀" in U or " REF" in U):
+            try:
+                entry["ref_dia_in"] = float(mdia.group(1)) * float(to_in)
+            except Exception:
+                entry["ref_dia_in"] = None
+
+    return entry
+
+
+def _aggregate_hole_entries(entries: Iterable[dict[str, Any]] | None) -> dict[str, Any]:
+    hole_count = 0
+    tap_qty = 0
+    cbore_qty = 0
+    max_depth_in = 0.0
+    if entries:
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            qty_val = entry.get("qty")
+            try:
+                qty = int(qty_val)
+            except Exception:
+                try:
+                    qty = int(round(float(qty_val)))
+                except Exception:
+                    qty = 0
+            qty = qty if qty > 0 else 1
+            hole_count += qty
+            if entry.get("tap"):
+                tap_qty += qty
+            if entry.get("cbore"):
+                cbore_qty += qty
+            depth = entry.get("depth_in")
+            try:
+                if depth and float(depth) > max_depth_in:
+                    max_depth_in = float(depth)
+            except Exception:
+                continue
+    return {
+        "hole_count": hole_count if hole_count else None,
+        "tap_qty": tap_qty,
+        "cbore_qty": cbore_qty,
+        "deepest_hole_in": max_depth_in if max_depth_in > 0 else None,
+        "provenance": "HOLE TABLE / NOTES" if hole_count else None,
+    }
+
+
+def harvest_hole_specs(doc, to_in: float):
+    holes: list[dict[str, Any]] = []
+    for line in _iter_table_text(doc) or []:
+        entry = _parse_hole_line(line, to_in, source="TABLE")
+        if entry:
+            holes.append(entry)
+    agg = _aggregate_hole_entries(holes)
+    notes: list[str] = []
+    if agg.get("deepest_hole_in"):
+        notes.append(f"Max hole depth detected: {agg['deepest_hole_in']:.3f} in")
+    return holes, agg, notes
+
+
+def harvest_leaders(doc) -> list[str]:
+    texts: list[str] = []
+    spaces: list[Any] = []
+    try:
+        spaces.append(doc.modelspace())
+    except Exception:
+        pass
+    try:
+        for name in doc.layouts.names_in_taborder():
+            if name.lower() in {"model", "defpoints"}:
+                continue
+            try:
+                spaces.append(doc.layouts.get(name).entity_space)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    for space in spaces:
+        try:
+            for ml in space.query("MLEADER"):
+                try:
+                    texts.append(ml.get_mtext().plain_text())
+                except Exception:
+                    continue
+        except Exception:
+            continue
+        try:
+            for _ld in space.query("LEADER"):
+                # Many LEADER entities lack attached text; skip
+                pass
+        except Exception:
+            continue
+    return [t for t in texts if t]
+
+
+def harvest_material_finish(tokens_text: str) -> dict[str, Any]:
+    U = tokens_text.upper() if isinstance(tokens_text, str) else ""
+    mat = None
+    m = RE_MAT.search(U)
+    if m:
+        mat = m.group(2).strip()
+    coats = sorted({match.group(0).upper() for match in RE_COAT.finditer(U)})
+    tol = None
+    mt = RE_TOL.search(U)
+    if mt:
+        tol = mt.group(1).replace(" ", "")
+    return {"material_note": mat, "finishes": coats, "default_tol": tol}
+
+
+def build_geo_from_dxf(doc) -> dict[str, Any]:
+    units = detect_units_scale(doc)
+    to_in = units.get("to_in", 1.0) or 1.0
+    ords = harvest_ordinates(doc, float(to_in))
+    holes, hole_agg, hole_notes = harvest_hole_specs(doc, float(to_in))
+    leaders = harvest_leaders(doc)
+
+    leader_entries: list[dict[str, Any]] = []
+    for text in leaders:
+        entry = _parse_hole_line(text, float(to_in), source="LEADER")
+        if entry:
+            leader_entries.append(entry)
+    if leader_entries:
+        holes.extend(leader_entries)
+
+    combined_agg = _aggregate_hole_entries(holes)
+    if combined_agg.get("provenance") is None and isinstance(hole_agg, dict):
+        combined_agg["provenance"] = hole_agg.get("provenance")
+    max_depth = combined_agg.get("deepest_hole_in")
+    notes = list(hole_notes)
+    if max_depth and (not notes or not any("Max hole depth" in note for note in notes)):
+        notes.append(f"Max hole depth detected: {max_depth:.3f} in")
+
+    tokens_parts: list[str] = []
+    try:
+        tokens_parts.extend(text_harvest(doc))
+    except Exception:
+        pass
+    for line in _iter_table_text(doc) or []:
+        tokens_parts.append(line)
+    tokens_parts.extend(leaders)
+    tokens_blob = "\n".join(p for p in tokens_parts if p)
+    material_info = harvest_material_finish(tokens_blob)
+
+    geo = {
+        "plate_len_in": ords.get("plate_len_in"),
+        "plate_wid_in": ords.get("plate_wid_in"),
+        "thickness_in_guess": combined_agg.get("deepest_hole_in"),
+        "hole_count": combined_agg.get("hole_count") or 0,
+        "tap_qty": combined_agg.get("tap_qty") or 0,
+        "cbore_qty": combined_agg.get("cbore_qty") or 0,
+        "provenance": {
+            "plate_size": ords.get("provenance"),
+            "thickness": "HOLE TABLE depth max" if max_depth else None,
+            "holes": combined_agg.get("provenance"),
+        },
+        "notes": notes,
+        "raw": {"holes": holes, "leaders": leaders, "leader_entries": leader_entries},
+        "units": units,
+    }
+    geo.update(material_info)
+    return geo
+
+
 def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     if not _HAS_EZDXF:
         raise RuntimeError("ezdxf not installed. pip/conda install ezdxf")
@@ -7079,7 +7434,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
             # uses ODAFileConverter through ezdxf, no env var needed
             doc = odafc.readfile(path)
         else:
-            dxf_path = convert_dwg_to_dxf(path)  # needs ODA_CONVERTER_EXE or DWG2DXF_EXE
+            dxf_path = convert_dwg_to_dxf(path, out_ver="ACAD2018")  # needs ODA_CONVERTER_EXE or DWG2DXF_EXE
             dxf_text_path = dxf_path
             doc = ezdxf.readfile(dxf_path)
     else:
@@ -7087,8 +7442,11 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
         dxf_text_path = path
 
     sp = doc.modelspace()
-    ins = int(doc.header.get("$INSUNITS", 4))
-    u2mm = {1:25.4, 4:1.0, 2:304.8, 6:1000.0}.get(ins, 1.0)
+    units = detect_units_scale(doc)
+    to_in = float(units.get("to_in", 1.0) or 1.0)
+    u2mm = to_in * 25.4
+
+    geo = build_geo_from_dxf(doc)
 
     # perimeter from lightweight polylines, polylines, arcs
     import math
@@ -7147,6 +7505,11 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     if mm:
         material = mm.group(2).strip()
 
+    if not thickness_mm and geo.get("thickness_in_guess"):
+        thickness_mm = float(geo["thickness_in_guess"]) * 25.4
+    if not material:
+        material = geo.get("material_note")
+
     result: dict[str, Any] = {
         "kind": "2D",
         "source": Path(path).suffix.lower().lstrip("."),
@@ -7155,7 +7518,15 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
         "hole_count": len(hole_diams_mm),
         "thickness_mm": thickness_mm,
         "material": material,
+        "geo": geo,
     }
+    if geo.get("hole_count"):
+        result["hole_count_table"] = geo.get("hole_count")
+    if geo.get("tap_qty") or geo.get("cbore_qty"):
+        result["feature_counts"] = {
+            "tap_qty": geo.get("tap_qty", 0),
+            "cbore_qty": geo.get("cbore_qty", 0),
+        }
     if entity_holes_mm:
         result["hole_diams_mm_precise"] = entity_holes_mm
     if chart_ops:
@@ -7167,6 +7538,13 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     if chart_reconcile:
         result["chart_reconcile"] = chart_reconcile
         result["hole_chart_agreement"] = bool(chart_reconcile.get("agreement"))
+    if geo.get("finishes"):
+        result["finishes"] = geo.get("finishes")
+    if geo.get("default_tol"):
+        result["default_tolerance"] = geo.get("default_tol")
+    if geo.get("notes"):
+        result["notes"] = list(geo.get("notes") or [])
+    result["units"] = units
     return result
 def _extract_text_lines_from_ezdxf_doc(doc: Any) -> list[str]:
     """Harvest TEXT / MTEXT strings from an ezdxf Drawing."""
@@ -7332,12 +7710,46 @@ def apply_2d_features_to_variables(df, g2d: dict, *, params: dict, rates: dict):
 
 
 
-    thickness_mm = _coerce_float_or_none(g2d.get("thickness_mm"))
-    thickness_in = (float(thickness_mm) / 25.4) if thickness_mm else 0.0
-    df = upsert_var_row(df, "Material", g2d.get("material") or "", dtype="text")
-    df = upsert_var_row(df, "Thickness (in)", round(thickness_in, 4) if thickness_in else 0.0, dtype="number")
-    df = upsert_var_row(df, "Plate Length (in)", 12.0, dtype="number")
-    df = upsert_var_row(df, "Plate Width (in)", 14.0, dtype="number")
+    geo = g2d.get("geo") if isinstance(g2d, dict) else None
+    thickness_mm = _coerce_float_or_none(g2d.get("thickness_mm")) if isinstance(g2d, dict) else None
+    thickness_in = (float(thickness_mm) / 25.4) if thickness_mm else None
+    if (not thickness_in) and isinstance(geo, dict):
+        guess = geo.get("thickness_in_guess")
+        if guess:
+            try:
+                thickness_in = float(guess)
+            except Exception:
+                thickness_in = None
+
+    material_note = ""
+    if isinstance(geo, dict) and geo.get("material_note"):
+        material_note = str(geo.get("material_note") or "").strip()
+    material_value = material_note or (g2d.get("material") if isinstance(g2d, dict) else "") or "Steel"
+    df = upsert_var_row(df, "Material", material_value, dtype="text")
+    df = upsert_var_row(
+        df,
+        "Thickness (in)",
+        round(float(thickness_in), 4) if thickness_in else 0.0,
+        dtype="number",
+    )
+
+    plate_len = None
+    plate_wid = None
+    if isinstance(geo, dict):
+        plate_len = geo.get("plate_len_in")
+        plate_wid = geo.get("plate_wid_in")
+    df = upsert_var_row(
+        df,
+        "Plate Length (in)",
+        round(float(plate_len), 3) if plate_len else 12.0,
+        dtype="number",
+    )
+    df = upsert_var_row(
+        df,
+        "Plate Width (in)",
+        round(float(plate_wid), 3) if plate_wid else 14.0,
+        dtype="number",
+    )
     df = upsert_var_row(df, "Scrap Percent (%)", 15.0, dtype="number")
 
     def set_row(pattern: str, value: float):
