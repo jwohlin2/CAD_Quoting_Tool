@@ -42,6 +42,11 @@ import pandas as pd
 
 from llama_cpp import Llama  # type: ignore
 
+try:
+    from geo_read_more import build_geo_from_dxf as build_geo_from_dxf_path
+except Exception:
+    build_geo_from_dxf_path = None  # type: ignore[assignment]
+
 
 def _normalize_lookup_key(value: str) -> str:
     cleaned = re.sub(r"[^0-9a-z]+", " ", str(value).strip().lower())
@@ -7543,7 +7548,7 @@ def harvest_material_finish(tokens_text: str) -> dict[str, Any]:
     return {"material_note": mat, "finishes": coats, "default_tol": tol}
 
 
-def build_geo_from_dxf(doc) -> dict[str, Any]:
+def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
     units = detect_units_scale(doc)
     to_in = units.get("to_in", 1.0) or 1.0
     ords = harvest_ordinates(doc, float(to_in))
@@ -7626,7 +7631,100 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     to_in = float(units.get("to_in", 1.0) or 1.0)
     u2mm = to_in * 25.4
 
-    geo = build_geo_from_dxf(doc)
+    geo = _build_geo_from_ezdxf_doc(doc)
+
+    geo_read_more: dict[str, Any] | None = None
+    if build_geo_from_dxf_path and dxf_text_path:
+        try:
+            geo_read_more = build_geo_from_dxf_path(dxf_text_path)
+        except Exception as exc:  # pragma: no cover - diagnostic only
+            geo_read_more = {"ok": False, "error": str(exc)}
+
+    if geo_read_more:
+        geo["geo_read_more"] = geo_read_more
+        if geo_read_more.get("ok"):
+            def _should_replace(current: Any) -> bool:
+                if current is None:
+                    return True
+                if isinstance(current, str):
+                    stripped = current.strip()
+                    if not stripped:
+                        return True
+                    try:
+                        return float(stripped) == 0.0
+                    except Exception:
+                        return False
+                if isinstance(current, (int, float)):
+                    try:
+                        return float(current) == 0.0
+                    except Exception:
+                        return False
+                return False
+
+            def _adopt(target: str, source_key: str) -> None:
+                if target not in geo or _should_replace(geo.get(target)):
+                    value = geo_read_more.get(source_key)
+                    if value not in (None, ""):
+                        geo[target] = value
+
+            _adopt("plate_len_in", "plate_len_in")
+            _adopt("plate_wid_in", "plate_wid_in")
+            _adopt("thickness_in_guess", "deepest_hole_in")
+            _adopt("material_note", "material_note")
+            if not geo.get("finishes") and geo_read_more.get("finishes"):
+                geo["finishes"] = list(geo_read_more.get("finishes") or [])
+            if not geo.get("default_tol") and geo_read_more.get("default_tol"):
+                geo["default_tol"] = geo_read_more.get("default_tol")
+            if not geo.get("revision") and geo_read_more.get("revision"):
+                geo["revision"] = geo_read_more.get("revision")
+
+            for qty_key in ("tap_qty", "cbore_qty", "csk_qty"):
+                try:
+                    current = int(float(geo.get(qty_key, 0) or 0))
+                except Exception:
+                    current = 0
+                try:
+                    candidate = int(float(geo_read_more.get(qty_key, 0) or 0))
+                except Exception:
+                    candidate = 0
+                if candidate > current:
+                    geo[qty_key] = candidate
+
+            if geo_read_more.get("holes_from_back"):
+                geo["from_back"] = True
+                geo["needs_back_face"] = True
+
+            for key in (
+                "edge_len_in",
+                "outline_area_in2",
+                "hole_diam_families_in",
+                "hole_table_families_in",
+                "hole_count_geom",
+                "min_hole_in",
+                "max_hole_in",
+            ):
+                value = geo_read_more.get(key)
+                if value not in (None, ""):
+                    geo[key] = value
+
+            more_prov = geo_read_more.get("provenance")
+            if isinstance(more_prov, dict):
+                prov = geo.get("provenance") if isinstance(geo.get("provenance"), dict) else {}
+                merged = dict(prov)
+                for key, value in more_prov.items():
+                    if key not in merged and value:
+                        merged[key] = value
+                geo["provenance"] = merged
+
+            if geo_read_more.get("chart_lines"):
+                existing_lines = list(geo.get("chart_lines") or []) if isinstance(geo.get("chart_lines"), list) else []
+                for line in geo_read_more.get("chart_lines") or []:
+                    if line not in existing_lines:
+                        existing_lines.append(line)
+                if existing_lines:
+                    geo["chart_lines"] = existing_lines
+        else:
+            geo.setdefault("geo_read_more_error", geo_read_more.get("error"))
 
     # perimeter from lightweight polylines, polylines, arcs
     import math
@@ -7748,6 +7846,59 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
         result["default_tolerance"] = geo.get("default_tol")
     if geo.get("notes"):
         result["notes"] = list(geo.get("notes") or [])
+    if geo_read_more:
+        result["geo_read_more"] = geo_read_more
+        if geo_read_more.get("ok"):
+            try:
+                edge_len_in = float(geo_read_more.get("edge_len_in"))
+            except Exception:
+                edge_len_in = None
+            if edge_len_in and edge_len_in > 0:
+                result["edge_length_in"] = edge_len_in
+                result["edge_len_in"] = edge_len_in
+                result["profile_length_mm"] = round(edge_len_in * 25.4, 2)
+            try:
+                outline_area_in2 = float(geo_read_more.get("outline_area_in2"))
+            except Exception:
+                outline_area_in2 = None
+            if outline_area_in2 and outline_area_in2 > 0:
+                result["outline_area_in2"] = outline_area_in2
+                result["outline_area_mm2"] = round(outline_area_in2 * (25.4 ** 2), 2)
+            if geo_read_more.get("hole_diam_families_in"):
+                result["hole_diam_families_in"] = dict(geo_read_more.get("hole_diam_families_in") or {})
+            if geo_read_more.get("hole_table_families_in"):
+                result["hole_table_families_in"] = dict(geo_read_more.get("hole_table_families_in") or {})
+            try:
+                hole_count_geom = int(float(geo_read_more.get("hole_count_geom")))
+            except Exception:
+                hole_count_geom = None
+            if hole_count_geom and hole_count_geom > int(result.get("hole_count", 0) or 0):
+                result["hole_count"] = hole_count_geom
+            if geo_read_more.get("holes_from_back"):
+                result["holes_from_back"] = True
+            if geo_read_more.get("material_note"):
+                result.setdefault("material_note", geo_read_more.get("material_note"))
+            if geo_read_more.get("material_note") and not result.get("material"):
+                result["material"] = geo_read_more.get("material_note")
+            if geo_read_more.get("chart_lines") and not result.get("chart_lines"):
+                result["chart_lines"] = list(geo_read_more.get("chart_lines") or [])
+            if geo_read_more.get("tap_qty") or geo_read_more.get("cbore_qty"):
+                feature_counts = result.get("feature_counts") if isinstance(result.get("feature_counts"), dict) else {}
+                feature_counts = dict(feature_counts)
+                if geo_read_more.get("tap_qty"):
+                    feature_counts["tap_qty"] = max(int(feature_counts.get("tap_qty", 0) or 0), int(geo_read_more.get("tap_qty") or 0))
+                if geo_read_more.get("cbore_qty"):
+                    feature_counts["cbore_qty"] = max(int(feature_counts.get("cbore_qty", 0) or 0), int(geo_read_more.get("cbore_qty") or 0))
+                if feature_counts:
+                    result["feature_counts"] = feature_counts
+            for qty_key in ("tap_qty", "cbore_qty", "csk_qty"):
+                try:
+                    candidate = int(float(geo_read_more.get(qty_key, 0) or 0))
+                except Exception:
+                    candidate = 0
+                if candidate:
+                    current = int(float(result.get(qty_key, 0) or 0)) if result.get(qty_key) else 0
+                    result[qty_key] = max(current, candidate)
     result["units"] = units
     return result
 def _extract_text_lines_from_ezdxf_doc(doc: Any) -> list[str]:
@@ -9004,6 +9155,7 @@ class App(tk.Tk):
         self.vars_df = None
         self.vars_df_full = None
         self.geo = None
+        self.geo_context: dict[str, Any] = {}
         self.params = PARAMS_DEFAULT.copy()
         self.rates = RATES_DEFAULT.copy()
         self.quote_state = QuoteState()
@@ -9361,6 +9513,10 @@ class App(tk.Tk):
         create_global_entries(rates_frame, sorted(self.rates.keys()), self.rates, self.rate_vars, columns=3)
 
         self._building_editor = False
+        try:
+            self._apply_geo_defaults(self.geo)
+        except Exception:
+            pass
 
     def _register_editor_field(self, label: str, var: tk.StringVar, label_widget: ttk.Label | None) -> None:
         if not isinstance(label, str) or not isinstance(var, tk.StringVar):
@@ -9416,6 +9572,92 @@ class App(tk.Tk):
         finally:
             self._editor_set_depth -= 1
         self._mark_label_source(label, source_tag)
+
+    def _fill_editor_if_blank(self, label: str, value: Any, source: str = "GEO") -> None:
+        if value is None:
+            return
+        if self.editor_value_sources.get(label) == "User":
+            return
+        var = self.editor_vars.get(label)
+        if var is None:
+            return
+        raw = var.get()
+        current = str(raw).strip() if raw is not None else ""
+        fill = False
+        if not current:
+            fill = True
+        else:
+            try:
+                fill = float(current) == 0.0
+            except Exception:
+                fill = False
+        if not fill:
+            return
+        if isinstance(value, (int, float)):
+            txt = f"{float(value):.3f}"
+        else:
+            txt = str(value)
+        self._editor_set_depth += 1
+        try:
+            var.set(txt)
+        finally:
+            self._editor_set_depth -= 1
+        self._mark_label_source(label, source)
+
+    def _apply_geo_defaults(self, geo_data: dict[str, Any] | None) -> None:
+        if not isinstance(geo_data, dict):
+            return
+
+        sources: list[dict[str, Any]] = []
+        seen: set[int] = set()
+
+        def collect(obj: Any) -> None:
+            if not isinstance(obj, dict):
+                return
+            oid = id(obj)
+            if oid in seen:
+                return
+            seen.add(oid)
+            sources.append(obj)
+            for val in obj.values():
+                collect(val)
+
+        collect(geo_data)
+        if not sources:
+            return
+
+        def find_value(*keys: str) -> Any:
+            for key in keys:
+                for src in sources:
+                    if key in src:
+                        val = src.get(key)
+                        if val not in (None, ""):
+                            return val
+            return None
+
+        plate_len_in = find_value("plate_len_in", "plate_length_in")
+        plate_wid_in = find_value("plate_wid_in", "plate_width_in")
+
+        thickness_in = find_value("thickness_in_guess", "thickness_in", "deepest_hole_in")
+        if thickness_in is None:
+            thickness_mm = find_value("thickness_mm")
+            if thickness_mm is not None:
+                try:
+                    thickness_in = float(thickness_mm) / 25.4
+                except Exception:
+                    thickness_in = None
+
+        self._fill_editor_if_blank("Plate Length (in)", plate_len_in)
+        self._fill_editor_if_blank("Plate Width (in)", plate_wid_in)
+        self._fill_editor_if_blank("Thickness (in)", thickness_in)
+
+        from_back = False
+        for key in ("holes_from_back", "needs_back_face", "from_back"):
+            if any(bool(src.get(key)) for src in sources if isinstance(src, dict)):
+                from_back = True
+                break
+        if from_back:
+            self._fill_editor_if_blank("Number of Milling Setups", 2, source="GEO")
 
     def _update_editor_override_from_label(self, label: str, raw_value: str) -> None:
         key = EDITOR_TO_SUGG.get(label)
@@ -9565,6 +9807,40 @@ class App(tk.Tk):
 
                 self.vars_df = apply_2d_features_to_variables(self.vars_df, g2d, params=self.params, rates=self.rates)
                 self.geo = g2d
+                self.geo_context = dict(g2d or {})
+                inner_geo = g2d.get("geo") if isinstance(g2d.get("geo"), dict) else {}
+                read_more_geo = g2d.get("geo_read_more") if isinstance(g2d.get("geo_read_more"), dict) else {}
+                hole_count_val = (
+                    _coerce_float_or_none(read_more_geo.get("hole_count_geom"))
+                    or _coerce_float_or_none(inner_geo.get("hole_count"))
+                    or _coerce_float_or_none(g2d.get("hole_count"))
+                    or 0
+                )
+                edge_len_in = (
+                    _coerce_float_or_none(read_more_geo.get("edge_len_in"))
+                    or _coerce_float_or_none(inner_geo.get("edge_len_in"))
+                    or 0.0
+                )
+                tap_qty_val = int(
+                    _coerce_float_or_none(read_more_geo.get("tap_qty"))
+                    or _coerce_float_or_none(inner_geo.get("tap_qty"))
+                    or _coerce_float_or_none(g2d.get("tap_qty"))
+                    or 0
+                )
+                cbore_qty_val = int(
+                    _coerce_float_or_none(read_more_geo.get("cbore_qty"))
+                    or _coerce_float_or_none(inner_geo.get("cbore_qty"))
+                    or _coerce_float_or_none(g2d.get("cbore_qty"))
+                    or 0
+                )
+                self.geo_context.update(
+                    {
+                        "hole_count": int(hole_count_val or 0),
+                        "edge_len_in": float(edge_len_in or 0.0),
+                        "tap_qty": tap_qty_val,
+                        "cbore_qty": cbore_qty_val,
+                    }
+                )
                 self._log_geo(g2d)
 
                 self._populate_editor_tab(self.vars_df)
@@ -9665,6 +9941,7 @@ class App(tk.Tk):
         est = clamp_llm_hours(est_raw, geo, params=self.params)
         self.vars_df = apply_llm_hours_to_variables(self.vars_df, est, allow_overwrite_nonzero=True, log=decision_log)
         self.geo = geo
+        self.geo_context = dict(geo or {})
         self._log_geo(geo)
 
         self._populate_editor_tab(self.vars_df)
