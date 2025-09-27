@@ -14,56 +14,14 @@ Single-file CAD Quoter (v8)
 """
 from __future__ import annotations
 
-import json, math, os, time, gc, datetime, decimal, uuid
+import json, math, os, time, gc
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from contextlib import contextmanager
-from types import SimpleNamespace
 
 LLM_DEBUG = bool(int(os.getenv("LLM_DEBUG", "1")))   # set 0 to disable
 LLM_DEBUG_DIR = Path(__file__).with_name("llm_debug")
 LLM_DEBUG_DIR.mkdir(exist_ok=True)
-
-# Defaults
-DEFAULT_THICKNESS_IN = float(os.environ.get("QUOTER_DEFAULT_THICKNESS_IN", "1.0"))
-
-MATERIAL_CHOICES = [
-    "Steel",
-    "Aluminum 6061",
-    "Aluminum 7075",
-    "Stainless 304",
-    "Stainless 316",
-    "Brass C360",
-    "Copper C110",
-    "Tool Steel A2",
-    "Tool Steel D2",
-]
-
-
-def normalize_material(name: str) -> str | None:
-    if not name:
-        return None
-    s = name.strip().lower()
-    aliases = {
-        "steel": "Steel",
-        "mild steel": "Steel",
-        "ss304": "Stainless 304",
-        "304": "Stainless 304",
-        "ss316": "Stainless 316",
-        "316": "Stainless 316",
-        "6061": "Aluminum 6061",
-        "al 6061": "Aluminum 6061",
-        "7075": "Aluminum 7075",
-        "c110": "Copper C110",
-        "c360": "Brass C360",
-        "a2": "Tool Steel A2",
-        "d2": "Tool Steel D2",
-    }
-    for m in MATERIAL_CHOICES:
-        if s == m.lower():
-            return m
-    return aliases.get(s, None)
 
 import copy
 import re
@@ -84,60 +42,6 @@ import pandas as pd
 
 from llama_cpp import Llama  # type: ignore
 
-# --- JSON snapshot helpers ----------------------------------------------------
-def _to_jsonable(x):
-    if x is None or isinstance(x, (bool, int, float, str)):
-        return x
-    if isinstance(x, (datetime.date, datetime.datetime)):
-        return x.isoformat()
-    if isinstance(x, decimal.Decimal):
-        return float(x)
-    if isinstance(x, uuid.UUID):
-        return str(x)
-    if isinstance(x, Path):
-        return str(x)
-    if isinstance(x, dict):
-        return {str(k): _to_jsonable(v) for k, v in x.items()}
-    try:
-        import tkinter as tk
-
-        if isinstance(x, (tk.StringVar, tk.DoubleVar, tk.IntVar, tk.BooleanVar)):
-            return x.get()
-    except Exception:
-        pass
-    try:
-        import numpy as np  # type: ignore
-        import pandas as pd  # type: ignore
-
-        if isinstance(x, np.generic):
-            return x.item()
-        if isinstance(x, np.ndarray):
-            return x.tolist()
-        if isinstance(x, pd.Series):
-            return x.to_dict()
-        if isinstance(x, pd.DataFrame):
-            return x.to_dict(orient="records")
-    except Exception:
-        pass
-    if callable(x):
-        return f"<callable:{getattr(x, '__name__', type(x).__name__)}>"
-    d = getattr(x, "__dict__", None)
-    if d is not None:
-        return {k: _to_jsonable(v) for k, v in d.items() if not k.startswith("_")}
-    if isinstance(x, (list, tuple, set)):
-        return [_to_jsonable(v) for v in x]
-    return repr(x)
-
-
-def write_snapshot_safe(path: Path, obj: dict) -> None:
-    try:
-        safe = _to_jsonable(obj)
-        path.write_text(json.dumps(safe, indent=2), encoding="utf-8")
-    except Exception as e:
-        path.with_suffix(".bad.json").write_text(
-            json.dumps({"error": str(e)}, indent=2),
-            encoding="utf-8",
-        )
 
 def _normalize_lookup_key(value: str) -> str:
     cleaned = re.sub(r"[^0-9a-z]+", " ", str(value).strip().lower())
@@ -214,100 +118,6 @@ Prefer small, explainable changes (±10–50%). Never leave fields out.
 You may use payload["seed"] heuristics to bias adjustments when helpful."""
 
 
-# --- fields that LLM may set (label in Quote Editor, numeric bounds) ----------
-LLM_TARGETS = {
-    "Drilling":                 {"min": 0.0, "max": 24.0, "unit": "hr"},
-    "Drilling Hours":           {"min": 0.0, "max": 24.0, "unit": "hr"},
-    "ID Boring/Drilling Hours": {"min": 0.0, "max": 24.0, "unit": "hr"},
-    "Roughing Cycle Time":      {"min": 0.0, "max": 24.0, "unit": "hr"},
-    "Semi-Finish":              {"min": 0.0, "max": 24.0, "unit": "hr"},
-    "Semi-Finish Cycle Time":   {"min": 0.0, "max": 24.0, "unit": "hr"},
-    "Finishing Cycle Time":     {"min": 0.0, "max": 24.0, "unit": "hr"},
-    "In-Process Inspection":    {"min": 0.0, "max": 10.0, "unit": "hr"},
-    "In-Process Inspection Hours": {"min": 0.0, "max": 10.0, "unit": "hr"},
-    "CMM Run Time min":         {"min": 0.0, "max": 600.0, "unit": "min"},
-    "Deburr":                   {"min": 0.0, "max": 8.0,  "unit": "hr"},
-    "Deburr Hours":             {"min": 0.0, "max": 8.0,  "unit": "hr"},
-    "Edge Break":               {"min": 0.0, "max": 8.0,  "unit": "hr"},
-    "Edge Break Hours":         {"min": 0.0, "max": 8.0,  "unit": "hr"},
-    "Bead Blasting":            {"min": 0.0, "max": 8.0,  "unit": "hr"},
-    "Bead Blasting Hours":      {"min": 0.0, "max": 8.0,  "unit": "hr"},
-    "Programming":              {"min": 0.0, "max": 12.0, "unit": "hr"},
-    "Programming Hours":        {"min": 0.0, "max": 12.0, "unit": "hr"},
-    "2D CAM":                   {"min": 0.0, "max": 12.0, "unit": "hr"},
-    "CAM Programming Hours":    {"min": 0.0, "max": 12.0, "unit": "hr"},
-    "Number of Milling Setups": {"min": 1,   "max": 4,    "unit": "int"},
-    "Scrap Percent (%)":        {"min": 0.0, "max": 25.0, "unit": "pct"},
-}
-
-SYSTEM_FILL_ZEROS = """You are a manufacturing estimator.
-Using the provided GEO summary and existing editor values, FILL ONLY THE FIELDS THAT ARE CURRENTLY ZERO/BLANK.
-Update realistic time/qty values (hours or minutes) and setups/scrap. Do not change monetary rates or costs.
-Return JSON ONLY with this shape:
-
-{
-  "editor_updates": {
-    "<Quote Editor label>": <number>,
-    ...
-  },
-  "notes": ["short reasons referencing geometry (e.g., '163 holes → drilling & CMM'", "..."]
-}
-
-Rules:
-- Only use labels that appear in `allowed_targets`.
-- Clamp to the given bounds.
-- Units: 'Scrap Percent (%)' is PERCENT (e.g., 10 for 10%). 'CMM Run Time min' is minutes. All others are hours.
-- If a field already has a nonzero value, do not propose a change unless the evidence is overwhelming; prefer leaving it alone.
-"""
-
-
-def build_fill_payload(geo, editor_values: dict) -> dict:
-    geo = geo or {}
-    editor_values = editor_values or {}
-    cues = {
-        "hole_count": geo.get("hole_count"),
-        "tap_qty": (geo.get("derived", {}) or {}).get("tap_qty", 0),
-        "cbore_qty": (geo.get("derived", {}) or {}).get("cbore_qty", 0),
-        "thickness_mm": (
-            (geo.get("thickness_mm", {}) or {}).get("value")
-            if isinstance(geo.get("thickness_mm"), dict)
-            else geo.get("thickness_mm")
-        ),
-        "material": (
-            (geo.get("material") or {}).get("name")
-            if isinstance(geo.get("material"), dict)
-            else geo.get("material")
-            or "Steel"
-        ),
-        "bbox_mm": geo.get("bbox_mm"),
-        "edge_len_mm": geo.get("GEO_Deburr_EdgeLen_mm")
-            or geo.get("GEO_Deburr_EdgeLen", 0.0),
-    }
-    zeros: dict[str, Any] = {}
-    for label, value in editor_values.items():
-        if label not in LLM_TARGETS:
-            continue
-        if value is None:
-            zeros[label] = value
-            continue
-        text = str(value).strip()
-        if not text:
-            zeros[label] = value
-            continue
-        try:
-            if float(text) == 0.0:
-                zeros[label] = value
-        except Exception:
-            zeros[label] = value
-    return {
-        "purpose": "fill_editor_zeros",
-        "allowed_targets": LLM_TARGETS,
-        "editor_zero_fields": list(zeros.keys()),
-        "editor_current": {k: editor_values.get(k) for k in LLM_TARGETS.keys()},
-        "geo": cues,
-    }
-
-
 # Field mapping: LLM suggestion key -> (Editor label, to_editor, from_editor)
 SUGG_TO_EDITOR = {
     "scrap_pct": (
@@ -346,65 +156,41 @@ VL_MODEL = r"D:\CAD_Quoting_Tool\models\qwen2.5-vl-7b-instruct-q4_k_m.gguf"
 MM_PROJ = r"D:\CAD_Quoting_Tool\models\mmproj-Qwen2.5-VL-3B-Instruct-Q8_0.gguf"
 
 
-def _smoke_test(llm: Llama) -> bool:
-    """Return ``True`` if the model can handle a trivial JSON prompt."""
-
-    try:
-        out = llm.create_chat_completion(
-            messages=[
-                {"role": "system", "content": "Return JSON only: {\"ok\":true}."},
-                {"role": "user", "content": "ping"},
-            ],
-            max_tokens=16,
-            temperature=0,
-        )
-    except Exception:
-        return False
-    return '"ok":' in str(out).lower()
-
-
 def load_qwen_vl(
     n_ctx: int = 8192,
     n_gpu_layers: int = 20,
     n_threads: int | None = None,
 ):
-    """Load Qwen2.5-VL with fallback chat templates and resource tuning."""
+    """Load Qwen2.5-VL with vision projector configured for llama.cpp."""
 
     if n_threads is None:
-        n_threads = max(4, (os.cpu_count() or 8) // 2)
-
-    def attempt(kwargs: dict[str, Any]) -> Llama:
-        llm = Llama(**kwargs)
-        if not _smoke_test(llm):
-            raise RuntimeError("VL model smoke test failed")
-        return llm
-
-    base: dict[str, Any] = dict(
-        model_path=VL_MODEL,
-        mmproj_path=MM_PROJ,
-        n_ctx=n_ctx,
-        n_gpu_layers=n_gpu_layers,
-        n_threads=n_threads,
-        verbose=False,
-    )
+        cpu_count = os.cpu_count() or 8
+        n_threads = max(4, cpu_count // 2)
 
     try:
-        return attempt(base)
-    except Exception as e_auto:
-        try:
-            return attempt({**base, "chat_format": "qwen"})
-        except Exception as e_qwen:
-            try:
-                return attempt({**base, "chat_format": "chatml"})
-            except Exception as e_chatml:
-                if n_ctx > 4096:
-                    gc.collect()
-                    time.sleep(0.1)
-                    return load_qwen_vl(n_ctx=4096, n_gpu_layers=0, n_threads=n_threads)
-                raise RuntimeError(
-                    "Failed to load Qwen2.5-VL with mmproj.\n"
-                    f"auto: {e_auto}\nqwen: {e_qwen}\nchatml: {e_chatml}"
-                )
+        llm = Llama(
+            model_path=VL_MODEL,
+            mmproj_path=MM_PROJ,
+            n_ctx=n_ctx,
+            n_gpu_layers=n_gpu_layers,
+            n_threads=n_threads,
+            chat_format="qwen2_vl",
+            verbose=False,
+        )
+        _ = llm.create_chat_completion(
+            messages=[
+                {"role": "system", "content": "Return JSON {\"ok\":true}."},
+                {"role": "user", "content": "ping"},
+            ],
+            max_tokens=16,
+            temperature=0,
+        )
+        return llm
+    except Exception:
+        if n_ctx > 4096:
+            gc.collect()
+            return load_qwen_vl(n_ctx=4096, n_gpu_layers=0, n_threads=n_threads)
+        raise
 
 
 def _auto_accept_suggestions(suggestions: dict[str, Any] | None) -> dict[str, Any]:
@@ -829,7 +615,6 @@ class QuoteState:
     accept_llm: dict = field(default_factory=dict)
     bounds: dict = field(default_factory=dict)
     material_source: str | None = None
-    app_ref: Any | None = None
 
 
 def _as_float_or_none(value: Any) -> float | None:
@@ -909,11 +694,6 @@ def build_suggest_payload(geo, baseline, rates, bounds) -> dict:
     except Exception:
         cbore_qty = 0
 
-    try:
-        drilling_seed_mult_val = float(derived.get("drilling_seed_mult"))
-    except Exception:
-        drilling_seed_mult_val = min(1.0 + 0.01 * max(0, hole_count - 50), 1.5)
-
     seed = {
         "suggest_drilling_if_many_holes": hole_count >= 50,
         "suggest_setups_if_from_back_ops": bool(derived.get("needs_back_face")),
@@ -921,7 +701,6 @@ def build_suggest_payload(geo, baseline, rates, bounds) -> dict:
         "add_inspection_if_many_taps": tap_qty >= 8,
         "add_milling_if_cbore_present": cbore_qty >= 2,
         "plate_with_back_ops": bool((geo.get("meta") or {}).get("is_2d_plate") and derived.get("needs_back_face")),
-        "drilling_seed_mult": round(drilling_seed_mult_val, 2),
     }
 
     return {
@@ -1000,12 +779,6 @@ def sanitize_suggestions(s: dict, bounds: dict) -> dict:
         bounds.get("scrap_min", 0.0),
         bounds.get("scrap_max", 0.25),
     )
-    scrap_floor = bounds.get("scrap_floor")
-    if scrap_floor is not None:
-        try:
-            scrap = max(scrap, float(scrap_floor))
-        except Exception:
-            pass
 
     try:
         setups = int(s.get("setups", 1))
@@ -1373,11 +1146,6 @@ def merge_effective(
         if cand is not None:
             scrap_val = float(cand)
             scrap_val, _ = _clamp(scrap_val, "scrap", "scrap_pct", "LLM")
-            if scrap_base is not None:
-                try:
-                    scrap_val = max(scrap_val, float(scrap_base))
-                except Exception:
-                    pass
             scrap_source = "llm"
     eff["scrap_pct"] = float(scrap_val)
     source_tags["scrap_pct"] = scrap_source
@@ -1996,7 +1764,6 @@ def _price_value_to_per_gram(value: float, label: str) -> float | None:
 
 # ---------- Material price backup (CSV) ----------
 LB_PER_KG = 2.2046226218
-KG_PER_LB = 0.45359237
 BACKUP_CSV_NAME = "material_price_backup.csv"
 
 
@@ -3051,70 +2818,64 @@ def read_step_or_iges_or_brep(path: str) -> TopoDS_Shape:
         return _brep_read(str(p))
     raise RuntimeError(f"Unsupported OCC format: {ext}")
 
-def convert_dwg_to_dxf_2018(dwg_path: str, oda_exe: str) -> str:
+def convert_dwg_to_dxf(dwg_path: str, *, out_ver="ACAD2013") -> str:
     """
-    Returns path to a freshly converted DXF 2018.
-    ODA CLI syntax: ODAFileConverter <in_dir> <out_dir> <in_ver> <out_ver> <recursive 0/1> <audit 0/1>
+    Robust DWG?DXF wrapper.
+    Works with:
+      - A .bat/.cmd wrapper that accepts:  <input.dwg> <output.dxf>
+      - A custom exe that accepts:         <input.dwg> <output.dxf>
+      - ODAFileConverter.exe (7-arg form): <in_dir> <out_dir> <ver> DXF 0 0 <filter>
+    Looks for the converter via env var or common local paths and prints
+    the exact command used on failure.
     """
+    # 1) find converter
+    exe = (os.environ.get("ODA_CONVERTER_EXE")
+           or os.environ.get("DWG2DXF_EXE")
+           or str(Path(__file__).with_name("dwg2dxf_wrapper.bat"))
+           or r"D:\CAD_Quoting_Tool\dwg2dxf_wrapper.bat")
+
+    if not exe or not Path(exe).exists():
+        raise RuntimeError(
+            "DWG import needs a DWG?DXF converter.\n"
+            "Set ODA_CONVERTER_EXE (recommended) or DWG2DXF_EXE to a .bat/.cmd/.exe.\n"
+            "Expected .bat signature:  <input.dwg> <output.dxf>"
+        )
 
     dwg = Path(dwg_path)
-    exe = Path(oda_exe)
-    assert dwg.exists(), f"DWG not found: {dwg}"
-    assert exe.exists(), f"ODAFileConverter not found: {exe}"
+    out_dir = Path(tempfile.mkdtemp(prefix="dwg2dxf_"))
+    out_dxf = out_dir / (dwg.stem + ".dxf")
 
-    tmp = Path(tempfile.mkdtemp(prefix="dwg2dxf_"))
-    in_dir = tmp / "in"
-    out_dir = tmp / "out"
-    in_dir.mkdir()
-    out_dir.mkdir()
-
-    # ODA wants folders; copy just this file
-    in_copy = in_dir / dwg.name
-    shutil.copy2(dwg, in_copy)
-
-    cmd = [
-        str(exe),
-        str(in_dir),
-        str(out_dir),
-        "ACAD2018",
-        "ACAD2018",
-        "0",
-        "1",
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise RuntimeError(f"ODA converter failed: {proc.stderr or proc.stdout}")
-
-    dxf_out = out_dir / (dwg.stem + ".dxf")
-    if not dxf_out.exists():
-        cands = list(out_dir.rglob(dwg.stem + ".dxf"))
-        if not cands:
-            raise FileNotFoundError("Converted DXF not found under output directory.")
-        dxf_out = cands[0]
-    return str(dxf_out)
-
-
-def convert_dwg_to_dxf(dwg_path: str) -> str:
-    exe = (
-        os.environ.get("ODA_CONVERTER_EXE")
-        or os.environ.get("DWG2DXF_EXE")
-        or str(Path(__file__).with_name("ODAFileConverter.exe"))
-    )
-    if not exe:
+    exe_lower = Path(exe).name.lower()
+    try:
+        if exe_lower.endswith(".bat") or exe_lower.endswith(".cmd"):
+            # ? run batch via cmd.exe so it actually executes
+            cmd = ["cmd", "/c", exe, str(dwg), str(out_dxf)]
+            proc = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        elif "odafileconverter" in exe_lower:
+            # ? official ODAFileConverter CLI
+            cmd = [exe, str(dwg.parent), str(out_dir), out_ver, "DXF", "0", "0", dwg.name]
+            proc = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        else:
+            # ? generic exe that accepts <in> <out>
+            cmd = [exe, str(dwg), str(out_dxf)]
+            proc = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    except subprocess.CalledProcessError as e:
         raise RuntimeError(
-            "DWG import requires ODAFileConverter. Set ODA_CONVERTER_EXE to the converter executable."
+            "DWG?DXF conversion failed.\n"
+            f"cmd: {' '.join(cmd)}\n"
+            f"stdout:\n{e.stdout}\n"
+            f"stderr:\n{e.stderr}"
+        ) from e
+
+    # 2) resolve the produced DXF
+    produced = out_dxf if out_dxf.exists() else (out_dir / (dwg.stem + ".dxf"))
+    if not produced.exists():
+        raise RuntimeError(
+            "Converter returned success but DXF not found.\n"
+            f"cmd: {' '.join(cmd)}\n"
+            f"checked: {out_dxf} | {produced}"
         )
-    return convert_dwg_to_dxf_2018(dwg_path, exe)
-
-
-def ensure_dxf(path: str | Path) -> str:
-    p = Path(path)
-    ext = p.suffix.lower()
-    if ext == ".dxf":
-        return str(p)
-    if ext == ".dwg":
-        return convert_dwg_to_dxf(str(p))
-    raise ValueError(f"Unsupported CAD extension for ensure_dxf: {ext}")
+    return str(produced)
 
 
 
@@ -3652,7 +3413,7 @@ class _LocalLLM:
                 "usage": usage,
             }
             fn = LLM_DEBUG_DIR / f"llm_snapshot_{int(time.time())}.json"
-            write_snapshot_safe(fn, snap)
+            fn.write_text(json.dumps(snap, indent=2), encoding="utf-8")
 
         return parsed, text, usage
 
@@ -4854,55 +4615,6 @@ def get_usd_per_kg(symbol: str, basis: str) -> tuple[float, str]:
     raise RuntimeError(f"All price providers failed for {symbol}: {last_err}")
 
 
-def _material_cost_totals(
-    mass_kg: float,
-    price_value: float,
-    price_units: str,
-    scrap_frac: float,
-) -> dict[str, float]:
-    """Normalize unit price, apply scrap once, and return cost breakdown."""
-
-    try:
-        mass = max(0.0, float(mass_kg))
-    except Exception:
-        mass = 0.0
-
-    try:
-        price = float(price_value)
-    except Exception:
-        price = 0.0
-
-    units = (price_units or "kg").strip().lower()
-    if units.startswith("lb"):
-        usd_per_kg = price * LB_PER_KG
-    else:
-        usd_per_kg = price
-
-    usd_per_lb = usd_per_kg / LB_PER_KG if usd_per_kg else 0.0
-
-    try:
-        scrap = max(0.0, float(scrap_frac))
-    except Exception:
-        scrap = 0.0
-
-    base = mass * usd_per_kg
-    total = base * (1.0 + scrap)
-    effective_mass = mass * (1.0 + scrap)
-
-    narrative_unit = f"${usd_per_kg:.2f} / kg  (${usd_per_lb:.2f} / lb)" if usd_per_kg else ""
-
-    return {
-        "usd_per_kg": usd_per_kg,
-        "usd_per_lb": usd_per_lb,
-        "base": base,
-        "total": total,
-        "scrap_frac": scrap,
-        "mass_kg": mass,
-        "mass_kg_with_scrap": effective_mass,
-        "narrative_unit": narrative_unit,
-    }
-
-
 def compute_material_cost(material_name: str,
                           mass_kg: float,
                           scrap_frac: float,
@@ -5012,31 +4724,25 @@ def compute_material_cost(material_name: str,
 
     loss_factor = float(meta.get("loss_factor", 0.0))
     effective_scrap = max(0.0, scrap_frac + max(0.0, loss_factor))
+    effective_kg = float(mass_kg) * (1.0 + effective_scrap)
 
     unit_price = usd_per_kg + premium
-    totals = _material_cost_totals(mass_kg, unit_price, "kg", effective_scrap)
-    cost = totals["total"]
-
-    mass_net_kg = totals["mass_kg"]
-    mass_effective_kg = totals["mass_kg_with_scrap"]
+    cost = effective_kg * unit_price
 
     detail = {
         "material_name": material_name,
         "symbol": symbol,
         "basis": basis_used,
         "source": source,
-        "mass_g_net": mass_net_kg * 1000.0,
-        "mass_g": mass_effective_kg * 1000.0,
+        "mass_g_net": float(mass_kg) * 1000.0,
+        "mass_g": effective_kg * 1000.0,
         "scrap_pct": scrap_frac,
-        "effective_scrap_pct": effective_scrap,
         "loss_factor": loss_factor,
-        "unit_price_usd_per_kg": totals["usd_per_kg"],
-        "unit_price_usd_per_lb": totals["usd_per_lb"],
+        "unit_price_usd_per_kg": unit_price,
+        "unit_price_usd_per_lb": unit_price / LB_PER_KG if unit_price else 0.0,
         "unit_price_source": source,
         "vendor_premium_usd_per_kg": premium,
-        "material_cost_base": totals["base"],
         "material_cost": cost,
-        "narrative_unit": totals["narrative_unit"],
     }
     if source:
         m = re.search(r"\(([^)]+)\)\s*$", source)
@@ -5200,9 +4906,6 @@ def compute_quote_from_df(df: pd.DataFrame,
         llm_model_path = str(params.get("LLMModelPath", "") or "")
     else:
         params["LLMModelPath"] = llm_model_path
-    if quote_state is None:
-        quote_state = QuoteState()
-
     if ui_vars is None:
         try:
             ui_vars = {
@@ -5213,110 +4916,23 @@ def compute_quote_from_df(df: pd.DataFrame,
             ui_vars = {}
     else:
         ui_vars = dict(ui_vars)
-
+    if quote_state is None:
+        quote_state = QuoteState()
+    quote_state.ui_vars = dict(ui_vars)
+    quote_state.rates = dict(rates)
     geo_context = dict(geo or {})
 
     MM_PER_IN = 25.4
 
-    def _get_editor_text(df, label, default=None):
-        try:
-            m = df["Item"].astype(str).str.fullmatch(label, case=False, na=False)
-            raw = str(df.loc[m, "Example Values / Options"].iloc[0]).strip()
-            return raw if raw != "" else default
-        except Exception:
-            return default
-
-    def _get_editor_float(df, label, default=None):
-        try:
-            m = df["Item"].astype(str).str.fullmatch(label, case=False, na=False)
-            raw = str(df.loc[m, "Example Values / Options"].iloc[0]).strip()
-            return float(raw) if raw != "" else default
-        except Exception:
-            return default
-
     def _read_editor_num(df, label: str):
         """Read a numeric value from the Quote Editor table by label; returns float|None."""
 
-        return _get_editor_float(df, label, default=None)
-
-    app_ref = getattr(quote_state, "app_ref", None)
-
-    # --- resolve Material & Thickness with defaults -----------------------
-    material_raw = _get_editor_text(df, r"Material", default=None)
-    material = normalize_material(material_raw or "")
-    material_defaulted = False
-    if not material:
-        geo_mat = geo_context.get("material")
-        material = normalize_material(str(geo_mat or ""))
-    if not material:
-        material = "Steel"
-        material_defaulted = True
-
-    thickness_in = _get_editor_float(df, r"Thickness \(in\)", default=None)
-    if thickness_in is None or thickness_in <= 0:
-        t_geo = geo_context.get("thickness_mm")
         try:
-            if isinstance(t_geo, dict):
-                t_geo = t_geo.get("value")
-            geo_thickness = float(t_geo) / MM_PER_IN if t_geo else None
+            mask = df["Item"].astype(str).str.fullmatch(label, case=False, na=False)
+            val = str(df.loc[mask, "Example Values / Options"].iloc[0]).strip()
+            return float(val)
         except Exception:
-            geo_thickness = None
-        if geo_thickness is not None and geo_thickness > 0:
-            thickness_in = geo_thickness
-        else:
-            thickness_in = DEFAULT_THICKNESS_IN
-        thickness_defaulted = True
-    else:
-        thickness_defaulted = False
-
-    # write back defaults so UI & df stay in sync
-    try:
-        mask = df["Item"].astype(str).str.fullmatch(r"Thickness \(in\)", case=False, na=False)
-        if mask.any():
-            df.loc[mask, "Example Values / Options"] = f"{thickness_in:.3f}"
-    except Exception:
-        pass
-    try:
-        mask = df["Item"].astype(str).str.fullmatch(r"Material", case=False, na=False)
-        if mask.any():
-            df.loc[mask, "Example Values / Options"] = material
-    except Exception:
-        pass
-
-    ui_vars["Material"] = material
-    ui_vars["Thickness (in)"] = f"{thickness_in:.3f}"
-    geo_context["material"] = material
-
-    try:
-        app_obj = app_ref if app_ref is not None else None
-        if app_obj is not None and hasattr(app_obj, "editor_vars"):
-            vmat = app_obj.editor_vars.get("Material")
-            if vmat is not None:
-                current = (vmat.get() or "").strip()
-                if current == "" or normalize_material(current) is None:
-                    vmat.set(material)
-                    if material_defaulted:
-                        app_obj._mark_label_source("Material", "Default")
-            vthk = app_obj.editor_vars.get("Thickness (in)")
-            if vthk is not None:
-                text = (vthk.get() or "").strip()
-                needs_default = False
-                if text == "":
-                    needs_default = True
-                else:
-                    try:
-                        needs_default = float(text) <= 0
-                    except Exception:
-                        needs_default = False
-                if needs_default:
-                    vthk.set(f"{thickness_in:.3f}")
-                    if thickness_defaulted:
-                        app_obj._mark_label_source("Thickness (in)", "Default")
-    except Exception:
-        pass
-
-    quote_state.ui_vars = dict(ui_vars)
-    quote_state.rates = dict(rates)
+            return None
 
     # --- thickness for LLM --------------------------------------------------------
     thickness_for_llm: float | None = None
@@ -5340,12 +4956,9 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     # Fallback: Quote Editor "Thickness (in)"
     if thickness_for_llm is None:
-        if thickness_in is not None:
-            thickness_for_llm = thickness_in * MM_PER_IN
-        else:
-            t_in = _read_editor_num(df, r"Thickness \(in\)")
-            if t_in is not None:
-                thickness_for_llm = t_in * MM_PER_IN
+        t_in = _read_editor_num(df, r"Thickness \(in\)")
+        if t_in is not None:
+            thickness_for_llm = t_in * MM_PER_IN
 
     # Last-ditch: Z dimension of bbox if present (treat as thickness for plates)
     bbox_for_llm: list[float] | None = None
@@ -5494,16 +5107,14 @@ def compute_quote_from_df(df: pd.DataFrame,
     density_g_cc  = first_num(r"\b(?:Density|Material\s*Density)\b", 14.5)
     scrap_pct_raw = num_pct(r"\b(?:Scrap\s*%|Expected\s*Scrap)\b", 0.0)
     scrap_pct = _ensure_scrap_pct(scrap_pct_raw)
-    material_name_raw = material
+    material_name_raw = sheet_text(r"(?i)Material\s*(?:Name|Grade|Alloy|Type)")
     if not material_name_raw:
-        material_name_raw = sheet_text(r"(?i)Material\s*(?:Name|Grade|Alloy|Type)")
-        if not material_name_raw:
-            fallback_name = strv(r"(?i)^Material$", "")
-            if fallback_name and not re.fullmatch(r"\s*[$0-9.,]+\s*", str(fallback_name)):
-                material_name_raw = fallback_name
+        fallback_name = strv(r"(?i)^Material$", "")
+        if fallback_name and not re.fullmatch(r"\s*[$0-9.,]+\s*", str(fallback_name)):
+            material_name_raw = fallback_name
     material_name = str(material_name_raw or "").strip()
-    if not material_name:
-        material_name = str(geo_context.get("material") or "")
+    if not material_name and geo_context.get("material"):
+        material_name = str(geo_context.get("material"))
     if material_name:
         geo_context.setdefault("material", material_name)
     material_name = str(geo_context.get("material") or material_name or "").strip()
@@ -5584,23 +5195,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         }
         provider_cost = None
 
-    detail_mass_g = material_detail.get("mass_g") if material_detail else None
-    if detail_mass_g is not None:
-        try:
-            mass_g = float(detail_mass_g)
-        except Exception:
-            mass_g = effective_mass_g
-    else:
-        mass_g = effective_mass_g
-
-    detail_mass_net_g = material_detail.get("mass_g_net") if material_detail else None
-    if detail_mass_net_g is not None:
-        try:
-            net_mass_g = float(detail_mass_net_g)
-        except Exception:
-            pass
-
-    manual_baseline = unit_price_per_g * mass_g
+    manual_baseline = unit_price_per_g * effective_mass_g
     base_cost = provider_cost if provider_cost is not None else manual_baseline
     base_cost = float(base_cost or 0.0)
 
@@ -5623,26 +5218,17 @@ def compute_quote_from_df(df: pd.DataFrame,
             except Exception:
                 pass
 
-    material_direct_cost_unrounded = float(material_cost)
-    material_direct_cost = round(material_direct_cost_unrounded, 2)
+    material_direct_cost = float(material_cost)
 
     material_detail_for_breakdown = dict(material_detail)
     material_detail_for_breakdown.setdefault("material_name", material_name)
     material_detail_for_breakdown.setdefault("mass_g", mass_g)
     material_detail_for_breakdown.setdefault("mass_g_net", net_mass_g)
-    material_detail_for_breakdown.setdefault(
-        "scrap_pct", material_detail.get("effective_scrap_pct", scrap_pct)
-    )
-    if "effective_scrap_pct" not in material_detail_for_breakdown and material_detail.get("effective_scrap_pct") is not None:
-        material_detail_for_breakdown["effective_scrap_pct"] = material_detail.get("effective_scrap_pct")
+    material_detail_for_breakdown.setdefault("scrap_pct", scrap_pct)
     material_detail_for_breakdown["unit_price_per_g"] = float(unit_price_per_g or 0.0)
     if "unit_price_usd_per_kg" not in material_detail_for_breakdown and unit_price_per_g:
         material_detail_for_breakdown["unit_price_usd_per_kg"] = float(unit_price_per_g) * 1000.0
-    if material_detail.get("narrative_unit"):
-        material_detail_for_breakdown.setdefault("narrative_unit", material_detail.get("narrative_unit"))
     material_detail_for_breakdown["material_direct_cost"] = material_direct_cost
-    material_detail_for_breakdown["material_cost"] = material_direct_cost
-    material_detail_for_breakdown["material_cost_unrounded"] = material_direct_cost_unrounded
     if provider_cost is not None:
         material_detail_for_breakdown["provider_cost"] = float(provider_cost)
 
@@ -5655,26 +5241,20 @@ def compute_quote_from_df(df: pd.DataFrame,
         mat_usd_per_kg = float(mat_usd_per_kg or 0.0)
         effective_scrap_source = scrap_pct if scrap_pct else scrap_pct_baseline
         effective_scrap = _ensure_scrap_pct(effective_scrap_source)
-        totals_plate = _material_cost_totals(mass_kg, mat_usd_per_kg, "kg", effective_scrap)
-        material_direct_cost_unrounded = totals_plate["total"]
-        material_direct_cost = round(material_direct_cost_unrounded, 2)
-        material_cost = material_direct_cost_unrounded
+        material_cost = mass_kg * (1.0 + effective_scrap) * mat_usd_per_kg
+        material_direct_cost = round(material_cost, 2)
         material_detail_for_breakdown.update({
             "material_name": mat_for_price,
-            "mass_g_net": totals_plate["mass_kg"] * 1000.0,
-            "mass_g": totals_plate["mass_kg_with_scrap"] * 1000.0,
+            "mass_g_net": mass_kg * 1000.0,
+            "mass_g": mass_kg * 1000.0 * (1.0 + effective_scrap),
             "scrap_pct": effective_scrap,
-            "effective_scrap_pct": effective_scrap,
-            "unit_price_usd_per_kg": totals_plate["usd_per_kg"],
-            "unit_price_per_g": totals_plate["usd_per_kg"] / 1000.0 if totals_plate["usd_per_kg"] else material_detail_for_breakdown.get("unit_price_per_g", 0.0),
-            "unit_price_usd_per_lb": totals_plate["usd_per_lb"] if totals_plate["usd_per_lb"] else material_detail_for_breakdown.get("unit_price_usd_per_lb"),
+            "unit_price_usd_per_kg": mat_usd_per_kg,
+            "unit_price_per_g": mat_usd_per_kg / 1000.0 if mat_usd_per_kg else material_detail_for_breakdown.get("unit_price_per_g", 0.0),
+            "unit_price_usd_per_lb": (mat_usd_per_kg / LB_PER_KG) if mat_usd_per_kg else material_detail_for_breakdown.get("unit_price_usd_per_lb"),
             "source": mat_src or material_detail_for_breakdown.get("source", ""),
         })
-        if totals_plate.get("narrative_unit"):
-            material_detail_for_breakdown["narrative_unit"] = totals_plate["narrative_unit"]
         material_detail_for_breakdown["material_cost"] = material_direct_cost
         material_detail_for_breakdown["material_direct_cost"] = material_direct_cost
-        material_detail_for_breakdown["material_cost_unrounded"] = material_direct_cost_unrounded
         scrap_pct = effective_scrap
 
     # ---- programming / cam / dfm --------------------------------------------
@@ -5911,11 +5491,6 @@ def compute_quote_from_df(df: pd.DataFrame,
     elif hole_count_override and hole_count_override > 0:
         hole_count_for_tripwire = int(round(hole_count_override))
     geo_context["hole_count"] = hole_count_for_tripwire
-    derived_geo_ctx = geo_context.setdefault("derived", {}) if isinstance(geo_context, dict) else {}
-    try:
-        derived_geo_ctx.setdefault("hole_count", hole_count_for_tripwire)
-    except Exception:
-        pass
 
     # ---- roll-ups ------------------------------------------------------------
     inspection_hr_total = inproc_hr + final_hr + cmm_prog_hr + cmm_run_hr + fair_hr + srcinsp_hr
@@ -5938,13 +5513,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     existing_drill_cost = float(process_costs.get("drilling", 0.0) or 0.0)
     existing_drill_hr = existing_drill_cost / drill_rate if drill_rate else 0.0
     baseline_drill_hr = max(existing_drill_hr, float(drill_hr or 0.0))
-    drilling_seed_mult = min(1.0 + 0.01 * max(0, hole_count_for_tripwire - 50), 1.5)
-    baseline_drill_hr *= drilling_seed_mult
     process_costs["drilling"] = baseline_drill_hr * drill_rate
-    try:
-        derived_geo_ctx["drilling_seed_mult"] = drilling_seed_mult
-    except Exception:
-        pass
 
     process_costs_baseline = {k: float(v) for k, v in process_costs.items()}
 
@@ -5984,19 +5553,12 @@ def compute_quote_from_df(df: pd.DataFrame,
     }
 
     mat_source = material_detail_for_breakdown.get("source")
-    mat_symbol = material_detail_for_breakdown.get("symbol")
-    narrative_unit = material_detail_for_breakdown.get("narrative_unit")
-    basis_parts: list[str] = []
-    if narrative_unit:
-        basis_parts.append(str(narrative_unit))
-    if mat_symbol:
-        basis_parts.append(str(mat_symbol))
     if mat_source:
-        basis_parts.append(f"via {mat_source}")
-    if basis_parts:
-        pass_meta["Material"]["basis"] = " | ".join(part.strip() for part in basis_parts if part)
-    elif mat_source:
-        pass_meta["Material"]["basis"] = f"Source: {mat_source}"
+        mat_symbol = material_detail_for_breakdown.get("symbol")
+        if mat_symbol:
+            pass_meta["Material"]["basis"] = f"{mat_symbol} via {mat_source}"
+        else:
+            pass_meta["Material"]["basis"] = f"Source: {mat_source}"
     quote_state.material_source = pass_meta.get("Material", {}).get("basis") or mat_source or "shop defaults"
 
     pass_through = {
@@ -6233,7 +5795,6 @@ def compute_quote_from_df(df: pd.DataFrame,
         "adder_max_hr": 5.0,
         "scrap_min": 0.0,
         "scrap_max": 0.25,
-        "scrap_floor": float(scrap_pct_baseline or 0.0),
     }
 
     tap_qty_seed = int(chart_reconcile_geo.get("tap_qty") or 0) if chart_reconcile_geo else 0
@@ -6387,8 +5948,8 @@ def compute_quote_from_df(df: pd.DataFrame,
                 "sanitized": sanitized_struct,
                 "usage": s_usage,
             }
-            snap_path = LLM_DEBUG_DIR / ("llm_snapshot_" + str(int(time.time())) + ".json")
-            write_snapshot_safe(snap_path, snap)
+            snap_path = LLM_DEBUG_DIR / f"llm_snapshot_{int(time.time())}.json"
+            snap_path.write_text(json.dumps(snap, indent=2), encoding="utf-8")
 
     quote_state.llm_raw = dict(overrides_meta)
     quote_state.suggestions = sanitized_struct if isinstance(sanitized_struct, dict) else {}
@@ -7025,7 +6586,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                     "clamped": notes_from_clamps,
                     "pass_through": {k: v for k, v in applied_pass.items()},
                 }
-                write_snapshot_safe(latest, snap)
+                latest.write_text(json.dumps(snap, indent=2), encoding="utf-8")
         except Exception:
             pass
 
@@ -7505,42 +7066,59 @@ def merge_estimate_into_vars(vars_df: pd.DataFrame, estimate: dict) -> pd.DataFr
         vars_df.loc[mask, "Example Values / Options"] = value
     return vars_df
 # ---- 2D: DXF / DWG (ezdxf) ---------------------------------------------------
-def build_geo_from_dxf(doc: Any, *, source_path: str | None = None) -> dict[str, Any]:
+def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
+    if not _HAS_EZDXF:
+        raise RuntimeError("ezdxf not installed. pip/conda install ezdxf")
+
+    # --- load doc ---
+    dxf_text_path: str | None = None
+    doc = None
+    lower_path = path.lower()
+    if lower_path.endswith(".dwg"):
+        if _HAS_ODAFC:
+            # uses ODAFileConverter through ezdxf, no env var needed
+            doc = odafc.readfile(path)
+        else:
+            dxf_path = convert_dwg_to_dxf(path)  # needs ODA_CONVERTER_EXE or DWG2DXF_EXE
+            dxf_text_path = dxf_path
+            doc = ezdxf.readfile(dxf_path)
+    else:
+        doc = ezdxf.readfile(path)
+        dxf_text_path = path
+
     sp = doc.modelspace()
     ins = int(doc.header.get("$INSUNITS", 4))
-    u2mm = {1: 25.4, 4: 1.0, 2: 304.8, 6: 1000.0}.get(ins, 1.0)
+    u2mm = {1:25.4, 4:1.0, 2:304.8, 6:1000.0}.get(ins, 1.0)
 
+    # perimeter from lightweight polylines, polylines, arcs
     import math
-
     per = 0.0
     for e in sp.query("LWPOLYLINE"):
         pts = e.get_points("xyb")
         for i in range(len(pts)):
-            x1, y1, _ = pts[i]
-            x2, y2, _ = pts[(i + 1) % len(pts)]
-            per += math.hypot(x2 - x1, y2 - y1)
+            x1,y1,_ = pts[i]; x2,y2,_ = pts[(i+1) % len(pts)]
+            per += math.hypot(x2-x1, y2-y1)
     for e in sp.query("POLYLINE"):
         vs = [(v.dxf.location.x, v.dxf.location.y) for v in e.vertices]
-        for i in range(len(vs) - 1):
-            x1, y1 = vs[i]
-            x2, y2 = vs[i + 1]
-            per += math.hypot(x2 - x1, y2 - y1)
+        for i in range(len(vs)-1):
+            x1,y1 = vs[i]; x2,y2 = vs[i+1]
+            per += math.hypot(x2-x1, y2-y1)
     for e in sp.query("ARC"):
-        per += abs(e.dxf.end_angle - e.dxf.start_angle) * math.pi / 180.0 * e.dxf.radius
+        per += abs(e.dxf.end_angle - e.dxf.start_angle) * math.pi/180.0 * e.dxf.radius
 
+    # holes from circles
     holes = list(sp.query("CIRCLE"))
     entity_holes_mm = [float(2.0 * c.dxf.radius * u2mm) for c in holes]
     hole_diams_mm = [round(val, 2) for val in entity_holes_mm]
 
     chart_lines: list[str] = []
     chart_ops: list[dict[str, Any]] = []
-    hole_rows: list[Any] = []
     chart_reconcile: dict[str, Any] | None = None
     chart_source: str | None = None
 
-    if extract_text_lines_from_dxf and source_path:
+    if extract_text_lines_from_dxf and dxf_text_path:
         try:
-            chart_lines = extract_text_lines_from_dxf(source_path)
+            chart_lines = extract_text_lines_from_dxf(dxf_text_path)
         except Exception:
             chart_lines = []
     if not chart_lines:
@@ -7556,25 +7134,22 @@ def build_geo_from_dxf(doc: Any, *, source_path: str | None = None) -> dict[str,
             chart_source = "dxf_text_regex"
             chart_reconcile = reconcile_holes(entity_holes_mm, chart_ops)
 
-    txt = " ".join([t.dxf.text for t in sp.query("TEXT")] + [m.plain_text() for m in sp.query("MTEXT")]).lower()
+    # scrape text for thickness/material
+    txt = " ".join([t.dxf.text for t in sp.query("TEXT")] +
+                   [m.plain_text() for m in sp.query("MTEXT")]).lower()
     import re
-
     thickness_mm = None
     m = re.search(r"(thk|thickness)\s*[:=]?\s*([0-9.]+)\s*(mm|in|in\.|\")", txt)
     if m:
-        thickness_mm = float(m.group(2)) * (25.4 if (m.group(3).startswith("in") or m.group(3) == '"') else 1.0)
+        thickness_mm = float(m.group(2)) * (25.4 if (m.group(3).startswith("in") or m.group(3)=='"') else 1.0)
     material = None
     mm = re.search(r"(matl|material)\s*[:=]?\s*([a-z0-9 \-\+]+)", txt)
     if mm:
         material = mm.group(2).strip()
 
-    suffix = ""
-    if source_path:
-        suffix = Path(source_path).suffix.lower().lstrip(".")
-
     result: dict[str, Any] = {
         "kind": "2D",
-        "source": suffix,
+        "source": Path(path).suffix.lower().lstrip("."),
         "profile_length_mm": round(per * u2mm, 2),
         "hole_diams_mm": hole_diams_mm,
         "hole_count": len(hole_diams_mm),
@@ -7592,57 +7167,7 @@ def build_geo_from_dxf(doc: Any, *, source_path: str | None = None) -> dict[str,
     if chart_reconcile:
         result["chart_reconcile"] = chart_reconcile
         result["hole_chart_agreement"] = bool(chart_reconcile.get("agreement"))
-    derived_block = result.setdefault("derived", {})
-    tap_total = 0
-    cbore_total = 0
-    if chart_reconcile:
-        tap_total = int(chart_reconcile.get("tap_qty") or 0)
-        cbore_total = int(chart_reconcile.get("cbore_qty") or 0)
-    if tap_total == 0 or cbore_total == 0:
-        for row in hole_rows or []:
-            qty = 0
-            try:
-                qty = int(getattr(row, "qty", 0) or 0)
-            except Exception:
-                qty = 0
-            for feat in list(getattr(row, "features", []) or []):
-                f_type = str(feat.get("type") or "").lower()
-                feat_qty = qty
-                try:
-                    feat_qty = int(feat.get("qty", qty) or qty)
-                except Exception:
-                    feat_qty = qty
-                if f_type == "tap":
-                    tap_total += max(feat_qty, qty)
-                elif f_type == "cbore":
-                    cbore_total += max(feat_qty, qty)
-    if tap_total:
-        derived_block["tap_qty"] = int(tap_total)
-    if cbore_total:
-        derived_block["cbore_qty"] = int(cbore_total)
     return result
-
-
-def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
-    if not _HAS_EZDXF:
-        raise RuntimeError("ezdxf not installed. pip/conda install ezdxf")
-
-    dxf_text_path: str | None = None
-    doc = None
-    lower_path = path.lower()
-    if lower_path.endswith(".dwg"):
-        if _HAS_ODAFC:
-            doc = odafc.readfile(path)
-        else:
-            dxf_path = convert_dwg_to_dxf(path)
-            dxf_text_path = dxf_path
-            doc = ezdxf.readfile(dxf_path)
-    else:
-        doc = ezdxf.readfile(path)
-        dxf_text_path = path
-
-    source_path = dxf_text_path or path
-    return build_geo_from_dxf(doc, source_path=source_path)
 def _extract_text_lines_from_ezdxf_doc(doc: Any) -> list[str]:
     """Harvest TEXT / MTEXT strings from an ezdxf Drawing."""
 
@@ -8816,171 +8341,11 @@ class ScrollableFrame(ttk.Frame):
         self.canvas.unbind_all("<Button-5>")
 
 
-# ---- Collapsible section -----------------------------------------------------
-class CollapsibleSection(ttk.Frame):
-    def __init__(self, master, title, *args, initially_open=True, **kwargs):
-        super().__init__(master, *args, **kwargs)
-        self._open = tk.BooleanVar(value=initially_open)
-        self._btn = ttk.Checkbutton(
-            self,
-            text=title,
-            style="Toolbutton",
-            variable=self._open,
-            command=self._toggle,
-        )
-        self._btn.grid(row=0, column=0, sticky="w", pady=(8, 2))
-        self.body = ttk.Frame(self)
-        if initially_open:
-            self.body.grid(row=1, column=0, sticky="nsew")
-        self.columnconfigure(0, weight=1)
-
-    def _toggle(self):
-        if self._open.get():
-            self.body.grid(row=1, column=0, sticky="nsew")
-        else:
-            self.body.grid_forget()
-
-
-# ---- Tooltips ----------------------------------------------------------------
-class ToolTip:
-    def __init__(self, widget, text):
-        self.widget = widget
-        self.text = text
-        self.tip: tk.Toplevel | None = None
-        widget.bind("<Enter>", self.show)
-        widget.bind("<Leave>", self.hide)
-
-    def show(self, _event=None):
-        if self.tip or not self.text:
-            return
-        try:
-            x = self.widget.winfo_rootx() + 10
-            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
-        except Exception:
-            return
-        self.tip = tw = tk.Toplevel(self.widget)
-        tw.wm_overrideredirect(True)
-        tk.Label(tw, text=self.text, background="#ffffe0", relief="solid", borderwidth=1).pack(ipadx=6, ipady=3)
-        tw.wm_geometry(f"+{x}+{y}")
-
-    def hide(self, _event=None):
-        if self.tip is not None:
-            try:
-                self.tip.destroy()
-            except Exception:
-                pass
-        self.tip = None
-
-
-# ---- Numeric entry with validation ------------------------------------------
-class NumericEntry(ttk.Entry):
-    def __init__(self, master, textvariable, allow_int=False, **kw):
-        super().__init__(master, textvariable=textvariable, **kw)
-        self._allow_int = allow_int
-        vcmd = (self.register(self._validate), "%P")
-        self.configure(validate="key", validatecommand=vcmd)
-
-    def _validate(self, proposed):
-        if proposed == "" or proposed == "-" or proposed == ".":
-            return True
-        try:
-            float(proposed) if not self._allow_int else int(float(proposed))
-            return True
-        except Exception:
-            self.bell()
-            return False
-
-
-# ---- Small utility -----------------------------------------------------------
-def _grid_pair(parent, r, label, var, unit=None, width=10, allow_int=False):
-    lbl = ttk.Label(parent, text=label)
-    lbl.grid(row=r, column=0, sticky="w", padx=(2, 8), pady=2)
-    if allow_int is None:
-        ent = ttk.Entry(parent, textvariable=var, width=width)
-    else:
-        ent = NumericEntry(parent, textvariable=var, width=width, allow_int=allow_int)
-    ent.grid(row=r, column=1, sticky="we", pady=2)
-    chip = ttk.Label(parent, text="", foreground="#1463FF")
-    chip.grid(row=r, column=2, sticky="w", padx=(6, 0))
-    u = ttk.Label(parent, text=unit or "")
-    u.grid(row=r, column=3, sticky="w", padx=(6, 0))
-    return lbl, ent, chip
-
-
-# Field help text for tooltips
-FIELD_TIPS = {
-    "Roughing Cycle Time": "Spindle-on roughing time (hr).",
-    "Semi-Finish": "Semi-finishing passes (hr).",
-    "Finishing Cycle Time": "Final passes including contour (hr).",
-    "Drilling": "Cycle time for all drilled holes (hr).",
-    "In-Process Inspection": "Operator checks during machining (hr).",
-    "CMM Run Time min": "CMM inspection minutes (min).",
-    "Scrap Percent (%)": "Expected material loss (% of net).",
-    "Number of Milling Setups": "Distinct part orientations in milling.",
-}
-
-
-# label -> (group, unit, allow_int)
-EDITOR_SPEC = {
-    # Material & stock
-    "Material": ("Material", "", None),
-    "Scrap Percent (%)": ("Material", "%", False),
-    "Thickness (in)": ("Material", "in", False),
-    "Plate Length (in)": ("Material", "in", False),
-    "Plate Width (in)": ("Material", "in", False),
-
-    # Geometry cues
-    "GEO_Deburr_EdgeLen_mm": ("Geometry", "mm", False),
-    "Hole Count (override)": ("Geometry", "", True),
-    "Avg Hole Diameter (mm)": ("Geometry", "mm", False),
-
-    # Setups & planning
-    "Number of Milling Setups": ("Setups", "", True),
-    "Setup Time per Setup": ("Setups", "hr", False),
-    "Programming": ("Setups", "hr", False),
-    "2D CAM": ("Setups", "hr", False),
-
-    # Machining
-    "Roughing Cycle Time": ("Machining", "hr", False),
-    "Semi-Finish": ("Machining", "hr", False),
-    "Finishing Cycle Time": ("Machining", "hr", False),
-    "Drilling": ("Machining", "hr", False),
-    "Sawing": ("Machining", "hr", False),
-
-    # Inspection & QA
-    "In-Process Inspection": ("Inspection / QA", "hr", False),
-    "Final Inspection": ("Inspection / QA", "hr", False),
-    "CMM Run Time min": ("Inspection / QA", "min", False),
-
-    # Finishing / secondary ops
-    "Deburr": ("Finishing", "hr", False),
-    "Edge Break": ("Finishing", "hr", False),
-    "Bead Blasting": ("Finishing", "hr", False),
-
-    # Pass-Through (editable knobs)
-    "Consumables /Hr": ("Pass-Through & Directs", "$/hr", False),
-    "Consumables Flat": ("Pass-Through & Directs", "$", False),
-    "Utilities Per Spindle Hr": ("Pass-Through & Directs", "$/hr", False),
-    "Shipping Cost": ("Pass-Through & Directs", "$", False),
-
-    # Pricing
-    "Contingency %": ("Pricing", "%", False),
-}
-
-
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Compos-AI")
         self.geometry("1260x900")
-
-        self.state = SimpleNamespace(
-            loading=False,
-            computing=False,
-            data_loaded=False,
-        )
-        self._reprice_after = None
-        self.selected_path: Path | None = None
 
         self.vars_df = None
         self.vars_df_full = None
@@ -8988,7 +8353,6 @@ class App(tk.Tk):
         self.params = PARAMS_DEFAULT.copy()
         self.rates = RATES_DEFAULT.copy()
         self.quote_state = QuoteState()
-        self.quote_state.app_ref = self
         self.settings_path = Path(__file__).with_name("app_settings.json")
         self.settings = self._load_settings()
         if isinstance(self.settings, dict):
@@ -9049,37 +8413,20 @@ class App(tk.Tk):
         self.editor_widgets_frame = None
         self.editor_vars: dict[str, tk.StringVar] = {}
         self.editor_label_widgets: dict[str, ttk.Label] = {}
-        self.editor_chip_widgets: dict[str, ttk.Label] = {}
         self.editor_label_base: dict[str, str] = {}
         self.editor_value_sources: dict[str, str] = {}
-        self._summary_prov_labels: dict[str, ttk.Label] = {}
-        self._summary_value_labels: dict[str, ttk.Label] = {}
         self._editor_set_depth = 0
         self._building_editor = False
         self._reprice_in_progress = False
-        self._reprice_pending: str | None = None
-        self._focus_out_reprice_labels = {
-            "Scrap Percent (%)",
-            "Plate Length (in)",
-            "Plate Width (in)",
-            "Thickness (in)",
-        }
         self.effective_process_hours: dict[str, float] = {}
         self.effective_scrap: float = 0.0
         self.effective_setups: int = 1
         self.effective_fixture: str = "standard"
 
         # Status Bar
-        self.status_var = tk.StringVar(value="")
-        self.status_label = ttk.Label(
-            self,
-            textvariable=self.status_var,
-            relief=tk.SUNKEN,
-            anchor="w",
-            padding=5,
-        )
-        self.status_label.pack(side="bottom", fill="x")
-        self.set_status("Ready", timeout_ms=2000)
+        self.status_var = tk.StringVar(value="Ready")
+        status_bar = ttk.Label(self, textvariable=self.status_var, relief=tk.SUNKEN, anchor="w", padding=5)
+        status_bar.pack(side="bottom", fill="x")
 
         # GEO (single pane; CAD open handled by top bar)
         self.geo_txt = tk.Text(self.tab_geo, wrap="word"); self.geo_txt.pack(fill="both", expand=True)
@@ -9101,19 +8448,15 @@ class App(tk.Tk):
         #self.out_txt = tk.Text(self.tab_out, wrap="word", font=("Consolas", 10)); self.out_txt.pack(fill="both", expand=True)
 
         self.LLM_SUGGEST = None
-        self.init_llm()
-
-    @contextmanager
-    def BusyGuard(self, flag_attr: str):
-        state = self.state
-        if getattr(state, flag_attr, False):
-            yield False
-            return
-        setattr(state, flag_attr, True)
         try:
-            yield True
-        finally:
-            setattr(state, flag_attr, False)
+            self.LLM_SUGGEST = load_qwen_vl(n_ctx=8192, n_gpu_layers=20)
+        except Exception as exc:
+            self.status_var.set(f"Vision LLM failed ({exc}); retrying CPU mode.")
+            try:
+                self.LLM_SUGGEST = load_qwen_vl(n_ctx=4096, n_gpu_layers=0)
+            except Exception as exc2:
+                self.status_var.set(f"Vision LLM unavailable: {exc2}")
+                self.LLM_SUGGEST = None
 
     def _load_settings(self) -> dict[str, Any]:
         path = getattr(self, "settings_path", None)
@@ -9138,25 +8481,6 @@ class App(tk.Tk):
         except Exception:
             pass
 
-    def set_status(self, msg: str = "", kind: str = "info", timeout_ms: int = 4000) -> None:
-        colors = {"info": "", "warn": "#B58900", "err": "#CB4B16"}
-        self.status_var.set(msg)
-        if hasattr(self, "status_label"):
-            self.status_label.configure(foreground=colors.get(kind, ""))
-        if timeout_ms:
-            try:
-                self.after(int(timeout_ms), lambda: self.status_var.set(""))
-            except Exception:
-                pass
-
-    def init_llm(self) -> None:
-        try:
-            self.LLM_SUGGEST = load_qwen_vl(n_ctx=8192, n_gpu_layers=20)
-            self.set_status("Vision LLM ready (Qwen2.5-VL).", "info", 2500)
-        except Exception as exc:
-            self.set_status(f"Vision LLM unavailable: {exc}", "warn", 6000)
-            self.LLM_SUGGEST = None
-
     def set_material_vendor_csv(self) -> None:
         path = filedialog.askopenfilename(
             parent=self,
@@ -9170,7 +8494,7 @@ class App(tk.Tk):
         self.settings["material_vendor_csv"] = path
         self.params["MaterialVendorCSVPath"] = path
         self._save_settings()
-        self.set_status(f"Material vendor CSV set to {path}")
+        self.status_var.set(f"Material vendor CSV set to {path}")
 
     def clear_material_vendor_csv(self) -> None:
         if not isinstance(self.settings, dict):
@@ -9178,13 +8502,11 @@ class App(tk.Tk):
         self.settings["material_vendor_csv"] = ""
         self.params["MaterialVendorCSVPath"] = ""
         self._save_settings()
-        self.set_status("Material vendor CSV cleared.")
+        self.status_var.set("Material vendor CSV cleared.")
 
     def _populate_editor_tab(self, df: pd.DataFrame) -> None:
-        """Rebuild the Quote Editor tab using the latest variables dataframe."""
         df = coerce_or_make_vars_df(df)
-        self.state.data_loaded = False
-
+        """Rebuild the Quote Editor tab using the latest variables dataframe."""
         def _ensure_row(dataframe: pd.DataFrame, item: str, value: Any, dtype: str = "number") -> pd.DataFrame:
             mask = dataframe["Item"].astype(str).str.fullmatch(item, case=False)
             if mask.any():
@@ -9198,12 +8520,30 @@ class App(tk.Tk):
         df = _ensure_row(df, "Hole Count (override)", 0, dtype="number")
         df = _ensure_row(df, "Avg Hole Diameter (mm)", 0.0, dtype="number")
         df = _ensure_row(df, "Material", "", dtype="text")
+        self.vars_df = df
+        parent = self.editor_scroll.inner
+        for child in parent.winfo_children():
+            child.destroy()
 
-        def _normalize_item(value: str) -> str:
+        self.quote_vars.clear()
+        self.param_vars.clear()
+        self.rate_vars.clear()
+        self.editor_vars.clear()
+        self.editor_label_widgets.clear()
+        self.editor_label_base.clear()
+        self.editor_value_sources.clear()
+
+        self._building_editor = True
+
+        self.editor_widgets_frame = parent
+        self.editor_widgets_frame.grid_columnconfigure(0, weight=1)
+
+        def normalize_item(value: str) -> str:
             cleaned = re.sub(r"[^0-9a-z&$]+", " ", str(value).strip().lower())
             return re.sub(r"\s+", " ", cleaned).strip()
 
-        normalized_items = df["Item"].astype(str).apply(_normalize_item)
+        items_series = df["Item"].astype(str)
+        normalized_items = items_series.apply(normalize_item)
         qty_mask = normalized_items.isin({"quantity", "qty", "lot size"})
         if qty_mask.any():
             qty_raw = df.loc[qty_mask, "Example Values / Options"].iloc[0]
@@ -9215,364 +8555,160 @@ class App(tk.Tk):
                 qty_value = float(self.params.get("Quantity", 1) or 1)
             self.params["Quantity"] = max(1, int(round(qty_value)))
 
-        self.vars_df = df
-        parent = self.editor_scroll.inner
-        for child in parent.winfo_children():
-            child.destroy()
+        raw_skip_items = {
+            "Overhead %", "Overhead",
+            "G&A %", "G&A", "GA %", "GA",
+            "Contingency %", "Contingency",
+            "Profit Margin %", "Profit Margin", "Margin %", "Margin",
+            "Expedite %", "Expedite",
+            "Insurance %", "Insurance",
+            "Vendor Markup %", "Vendor Markup",
+            "Min Lot Charge",
+            "Programmer $/hr",
+            "CAM Programmer $/hr",
+            "Milling $/hr",
+            "Inspection $/hr",
+            "Deburr $/hr",
+            "Packaging $/hr",
+            "Quantity", "Qty", "Lot Size",
+        }
+        skip_items = {normalize_item(item) for item in raw_skip_items}
 
-        self.quote_vars.clear()
-        self.param_vars.clear()
-        self.rate_vars.clear()
-        self.editor_vars.clear()
-        self.editor_label_widgets.clear()
-        self.editor_chip_widgets.clear()
-        self.editor_label_base.clear()
-        self.editor_value_sources.clear()
 
-        self._building_editor = True
-        self.editor_widgets_frame = parent
-        self.build_quote_editor(parent)
-        self._building_editor = False
-        try:
-            self._run_llm_fill_editor_zeros()
-        except Exception as exc:
-            if LLM_DEBUG:
-                self.log_llm_snapshot(ctx="fill_editor_zeros", error=str(exc))
-        self.state.data_loaded = True
-    def _initial_editor_value(self, label: str) -> str:
-        if self.vars_df is None:
-            return ""
-        try:
-            items = self.vars_df["Item"].astype(str)
-        except Exception:
-            return ""
-        mask = items == label
-        if not mask.any():
-            return ""
-        try:
-            value = self.vars_df.loc[mask, "Example Values / Options"].iloc[0]
-        except Exception:
-            return ""
-        if value is None:
-            return ""
-        if isinstance(value, str):
-            return value
-        try:
-            num = float(value)
-        except Exception:
-            return str(value)
-        if math.isnan(num):
-            return ""
-        if float(num).is_integer():
-            return str(int(round(num)))
-        return str(num)
-
-    def _ensure_editor_var(self, label: str) -> tk.StringVar:
-        initial = self._initial_editor_value(label)
-        var = self.editor_vars.get(label)
-        if var is None:
-            var = tk.StringVar(value=initial)
-            self.editor_vars[label] = var
-        elif self._building_editor:
-            var.set(initial)
-        return var
-
-    def build_summary_header(self, parent: tk.Misc) -> None:
-        self._summary_prov_labels.clear()
-        self._summary_value_labels.clear()
-        card = ttk.Frame(parent)
-        card.pack(fill="x", padx=8, pady=(2, 8))
-        card.columnconfigure(6, weight=1)
-
-        def chip(label_text: str, varname: str, unit: str = "") -> ttk.Label:
-            frame = ttk.Frame(card)
-            frame.pack(side="left", padx=(0, 14))
-            ttk.Label(frame, text=f"{label_text}:", font=("Segoe UI", 9, "bold")).pack(side="left")
-            var = self._ensure_editor_var(varname)
-            value_lbl = ttk.Label(frame, text=var.get() or "—")
-            value_lbl.pack(side="left", padx=(4, 0))
-
-            def _update(*_):
-                value_lbl.configure(text=var.get() or "—")
-
-            var.trace_add("write", _update)
-            _update()
-            if unit:
-                ttk.Label(frame, text=unit, foreground="#666").pack(side="left", padx=(3, 0))
-            prov_lbl = ttk.Label(frame, text="", foreground="#1463FF")
-            prov_lbl.pack(side="left", padx=(6, 0))
-            self._summary_prov_labels[varname] = prov_lbl
-            self._summary_value_labels[varname] = value_lbl
-            return prov_lbl
-
-        chip("Material", "Material")
-        chip("Thick", "Thickness (in)", "in")
-        lw_prov = chip("L×W", "Plate Length (in)", "in")
-        chip("Setups", "Number of Milling Setups")
-        chip("Scrap", "Scrap Percent (%)", "%")
-        chip("Drill", "Drilling", "hr")
-        chip("Mill", "Roughing Cycle Time", "hr")
-
-        # Share provenance label for plate width as well
-        self._summary_prov_labels["Plate Width (in)"] = lw_prov
-        self._summary_value_labels["Plate Width (in)"] = self._summary_value_labels.get("Plate Length (in)")
-
-        def _lw_update(*_):
-            L = self.editor_vars.get("Plate Length (in)")
-            W = self.editor_vars.get("Plate Width (in)")
-            L_text = L.get() if isinstance(L, tk.StringVar) and L.get() else "—"
-            W_text = W.get() if isinstance(W, tk.StringVar) and W.get() else "—"
-            value_lbl = self._summary_value_labels.get("Plate Length (in)")
-            if value_lbl is not None:
-                value_lbl.configure(text=f"{L_text} × {W_text}")
-
-        self._ensure_editor_var("Plate Width (in)").trace_add("write", _lw_update)
-        self._ensure_editor_var("Plate Length (in)").trace_add("write", _lw_update)
-        _lw_update()
-
-    def build_quote_editor(self, parent: tk.Misc) -> None:
-        prev_search = getattr(self, "var_search", None)
-        prev_hide = getattr(self, "var_hide_zeros", None)
-        search_val = prev_search.get() if isinstance(prev_search, tk.StringVar) else ""
-        hide_val = bool(prev_hide.get()) if isinstance(prev_hide, tk.BooleanVar) else False
-
-        toolbar = ttk.Frame(parent)
-        toolbar.pack(fill="x", pady=(4, 6))
-        ttk.Label(toolbar, text="Search:").pack(side="left")
-        self.var_search = tk.StringVar(value=search_val)
-        ent_search = ttk.Entry(toolbar, textvariable=self.var_search, width=24)
-        ent_search.pack(side="left", padx=(6, 12))
-        self.var_hide_zeros = tk.BooleanVar(value=hide_val)
-        ttk.Checkbutton(
-            toolbar,
-            text="Hide zeros",
-            variable=self.var_hide_zeros,
-            command=self._apply_editor_filters,
-        ).pack(side="left")
-        btns = ttk.Frame(toolbar)
-        btns.pack(side="left", padx=(12, 0))
-        ttk.Button(btns, text="Expand all", command=lambda: self._set_all_sections(True)).pack(side="left")
-        ttk.Button(btns, text="Collapse all", command=lambda: self._set_all_sections(False)).pack(
-            side="left", padx=(6, 0)
-        )
-
-        inner = ttk.Frame(parent)
-        inner.pack(fill="both", expand=True)
-        inner.columnconfigure(0, weight=1)
-
-        self.build_summary_header(inner)
-
-        container = ttk.Frame(inner)
-        container.pack(fill="both", expand=True)
-        container.columnconfigure(0, weight=1)
-
-        groups = [
-            ("Material", True),
-            ("Geometry", False),
-            ("Setups", True),
-            ("Machining", True),
-            ("Inspection / QA", False),
-            ("Finishing", False),
-            ("Pass-Through & Directs", False),
-            ("Pricing", True),
-        ]
-        self._group_frames: dict[str, ttk.Frame] = {}
-        for group, is_open in groups:
-            sec = CollapsibleSection(container, group, initially_open=is_open)
-            sec.pack(fill="x", padx=8, pady=2)
-            sec.body.columnconfigure(1, weight=1)
-            self._group_frames[group] = sec.body
-
-        row_for_group = {g: 0 for g, _ in groups}
-
-        def _add_material_field(parent: ttk.Frame, row: int, var_material: tk.StringVar):
-            value = var_material.get() or ""
-            normalized = normalize_material(value)
-            defaulted = False
-            if not value.strip() or normalized is None:
-                var_material.set("Steel")
-                self._mark_label_source("Material", "Default")
-                defaulted = True
-            elif normalized and normalized != value:
-                var_material.set(normalized)
-
-            cb = ttk.Combobox(
-                parent,
-                textvariable=var_material,
-                state="readonly",
-                values=MATERIAL_CHOICES,
-                width=24,
-            )
-            cb.grid(row=row, column=1, sticky="we", pady=2)
-            chip = ttk.Label(parent, text="", foreground="#1463FF")
-            chip.grid(row=row, column=2, sticky="w", padx=(6, 0))
-            ttk.Label(parent, text="").grid(row=row, column=3, sticky="w", padx=(6, 0))
-
-            def on_sel(_e=None):
-                sel = normalize_material(var_material.get()) or "Steel"
-                var_material.set(sel)
-                self._update_editor_override_from_label("Material", sel)
-                self._mark_label_source("Material", "User")
-                self.schedule_reprice()
-
-            cb.bind("<<ComboboxSelected>>", on_sel)
-            cb.bind("<Return>", on_sel)
-            return cb, chip, defaulted
-
-        for label, (group, unit, allow_int) in EDITOR_SPEC.items():
-            if group not in self._group_frames:
+        material_lookup: Dict[str, float] = {}
+        for _, row_data in df.iterrows():
+            item_label = str(row_data.get("Item", ""))
+            raw_value = _coerce_float_or_none(row_data.get("Example Values / Options"))
+            if raw_value is None:
                 continue
-            var = self._ensure_editor_var(label)
-            width = 28 if allow_int is None else 12
-            row = row_for_group[group]
-            if label == "Material":
-                frame = self._group_frames[group]
-                lbl = ttk.Label(frame, text=label)
-                lbl.grid(row=row, column=0, sticky="w", padx=(2, 8), pady=2)
-                _combo, chip, defaulted = _add_material_field(frame, row, var)
-                row_for_group[group] += 1
-                self._register_editor_field(label, var, lbl, chip)
-                if defaulted:
-                    self._mark_label_source(label, "Default")
-                self.quote_vars[label] = var
+            per_g = _price_value_to_per_gram(raw_value, item_label)
+            if per_g is None:
                 continue
-            lbl, entry, chip = _grid_pair(
-                self._group_frames[group],
-                row,
-                label,
-                var,
-                unit,
-                width=width,
-                allow_int=allow_int,
-            )
-            row_for_group[group] += 1
-            self._register_editor_field(label, var, lbl, chip)
-            if label in self._focus_out_reprice_labels:
-                self._bind_reprice_on_focus_out(entry, var, label)
-            if label in FIELD_TIPS:
-                lbl.tooltip = ToolTip(lbl, FIELD_TIPS[label])
-                entry.tooltip = ToolTip(entry, FIELD_TIPS[label])
-            self.quote_vars[label] = var
+            normalized_label = _normalize_lookup_key(item_label)
+            for canonical_key, keywords in MATERIAL_KEYWORDS.items():
+                if canonical_key == MATERIAL_OTHER_KEY:
+                    continue
+                if any((kw and kw in normalized_label) for kw in keywords):
+                    material_lookup[canonical_key] = per_g
+                    break
 
-        default_applied = False
-        if "Thickness (in)" not in self.editor_vars:
-            self.editor_vars["Thickness (in)"] = tk.StringVar(value=f"{DEFAULT_THICKNESS_IN:.3f}")
-            self.quote_vars["Thickness (in)"] = self.editor_vars["Thickness (in)"]
-            default_applied = True
-        else:
-            thickness_var = self.editor_vars.get("Thickness (in)")
-            if thickness_var is not None:
-                current_text = (thickness_var.get() or "").strip()
-                if current_text == "":
-                    thickness_var.set(f"{DEFAULT_THICKNESS_IN:.3f}")
-                    default_applied = True
-        if default_applied:
-            self._mark_label_source("Thickness (in)", "Default")
+        current_row = 0
 
-        self._build_override_sections(container)
+        quote_frame = ttk.Labelframe(self.editor_widgets_frame, text="Quote-Specific Variables", padding=(10, 5))
+        quote_frame.grid(row=current_row, column=0, sticky="ew", padx=10, pady=5)
+        current_row += 1
 
-        self.var_search.trace_add("write", lambda *_: self._apply_editor_filters())
-        self._apply_editor_filters()
+        row_index = 0
+        material_choice_var: tk.StringVar | None = None
+        material_price_var: tk.StringVar | None = None
+        self.var_material: tk.StringVar | None = None
 
-    def _build_override_sections(self, container: ttk.Frame) -> None:
-        comm_fields = [
-            ("OverheadPct", "%", False),
-            ("GA_Pct", "%", False),
-            ("MarginPct", "%", False),
-            ("ContingencyPct", "%", False),
-            ("ExpeditePct", "%", False),
-            ("VendorMarkupPct", "%", False),
-            ("InsurancePct", "%", False),
-            ("MinLotCharge", "$", False),
-            ("Quantity", "", True),
-        ]
-        if comm_fields:
-            sec = CollapsibleSection(container, "Global Overrides: Commercial & General", initially_open=False)
-            sec.pack(fill="x", padx=8, pady=(10, 4))
-            sec.body.columnconfigure(1, weight=1)
-            for idx, (label, unit, allow_int) in enumerate(comm_fields):
-                var = self.param_vars.get(label)
-                if var is None:
-                    current = self.params.get(label, "")
-                    if label == "Quantity":
-                        try:
-                            current = int(current or 0)
-                        except Exception:
-                            current = self.params.get("Quantity", 1)
-                    var = tk.StringVar(value=str(current))
-                else:
-                    var.set(str(self.params.get(label, "")))
-                self.param_vars[label] = var
-                lbl, _entry, chip = _grid_pair(sec.body, idx, label, var, unit, width=14, allow_int=allow_int)
-                self._register_editor_field(label, var, lbl, chip)
-
-        rate_keys = sorted(self.rates.keys())
-        if rate_keys:
-            sec = CollapsibleSection(container, "Global Overrides: Hourly Rates ($/hr)", initially_open=False)
-            sec.pack(fill="x", padx=8, pady=(4, 8))
-            sec.body.columnconfigure(1, weight=1)
-            for idx, label in enumerate(rate_keys):
-                var = self.rate_vars.get(label)
-                if var is None:
-                    var = tk.StringVar(value=str(self.rates.get(label, "")))
-                else:
-                    var.set(str(self.rates.get(label, "")))
-                self.rate_vars[label] = var
-                lbl, _entry, chip = _grid_pair(sec.body, idx, label, var, "", width=14, allow_int=False)
-                self._register_editor_field(label, var, lbl, chip)
-
-    def _apply_editor_filters(self) -> None:
-        if not hasattr(self, "editor_label_widgets"):
-            return
-        q = ""
-        if hasattr(self, "var_search") and isinstance(self.var_search, tk.StringVar):
-            q = (self.var_search.get() or "").strip().lower()
-        hide_zero = False
-        if hasattr(self, "var_hide_zeros") and isinstance(self.var_hide_zeros, tk.BooleanVar):
-            hide_zero = bool(self.var_hide_zeros.get())
-
-        for label, widget in self.editor_label_widgets.items():
-            if widget is None:
-                continue
-            info = widget.grid_info()
-            if not info:
-                continue
-            row_parent = widget.master
-            row_index = int(info.get("row", 0))
-            show = True
-            if q and q not in label.lower():
-                show = False
-            if hide_zero:
-                var = self.editor_vars.get(label)
-                val = ""
-                if isinstance(var, tk.StringVar):
-                    val = (var.get() or "").strip()
+        def update_material_price(*_):
+            if material_choice_var is None or material_price_var is None:
+                return
+            choice = material_choice_var.get().strip()
+            if not choice:
+                return
+            norm_choice = _normalize_lookup_key(choice)
+            if norm_choice == MATERIAL_OTHER_KEY:
+                return
+            price = material_lookup.get(norm_choice)
+            if price is None:
                 try:
-                    is_zero = (val == "" or float(val) == 0.0)
+                    price_per_kg, _src = resolve_material_unit_price(choice, unit="kg")
                 except Exception:
-                    is_zero = (val == "")
-                if is_zero and not q:
-                    show = False
-            for child in row_parent.grid_slaves(row=row_index):
-                if show:
-                    child.grid()
-                else:
-                    child.grid_remove()
+                    return
+                if not price_per_kg:
+                    return
+                price = float(price_per_kg) / 1000.0
+            current_val = _coerce_float_or_none(material_price_var.get())
+            if current_val is not None and abs(current_val - price) < 1e-6:
+                return
+            material_price_var.set(f"{price:.4f}")
 
-    def _set_all_sections(self, open_: bool) -> None:
-        for body in getattr(self, "_group_frames", {}).values():
-            cs = getattr(body, "master", None)
-            if isinstance(cs, CollapsibleSection):
-                cs._open.set(open_)
-                cs._toggle()
+        for _, row_data in df.iterrows():
+            item_name = str(row_data["Item"])
+            normalized_name = normalize_item(item_name)
+            if normalized_name in skip_items:
+                continue
+            label_widget = ttk.Label(quote_frame, text=item_name, wraplength=400)
+            label_widget.grid(row=row_index, column=0, sticky="w", padx=5, pady=2)
+            initial_raw = row_data["Example Values / Options"]
+            initial_value = str(initial_raw) if initial_raw is not None else ""
+            if normalized_name in {"material"}:
+                var = tk.StringVar(value=DEFAULT_MATERIAL_DISPLAY)
+                if initial_value:
+                    var.set(initial_value)
+                normalized_initial = _normalize_lookup_key(var.get())
+                for canonical_key, keywords in MATERIAL_KEYWORDS.items():
+                    if canonical_key == MATERIAL_OTHER_KEY:
+                        continue
+                    if any(kw and kw in normalized_initial for kw in keywords):
+                        display = MATERIAL_DISPLAY_BY_KEY.get(canonical_key)
+                        if display:
+                            var.set(display)
+                        break
+                combo = ttk.Combobox(
+                    quote_frame,
+                    textvariable=var,
+                    values=MATERIAL_DROPDOWN_OPTIONS,
+                    width=32,
+                )
+                combo.grid(row=row_index, column=1, sticky="w", padx=5, pady=2)
+                combo.bind("<<ComboboxSelected>>", update_material_price)
+                var.trace_add("write", update_material_price)
+                material_choice_var = var
+                self.var_material = var
+                self.quote_vars[item_name] = var
+                self._register_editor_field(item_name, var, label_widget)
+            elif re.search(r"(Material\s*Price.*(per\s*gram|per\s*g|/g)|Unit\s*Price\s*/\s*g)", item_name, flags=re.IGNORECASE):
+                var = tk.StringVar(value=initial_value)
+                ttk.Entry(quote_frame, textvariable=var, width=30).grid(row=row_index, column=1, sticky="w", padx=5, pady=2)
+                material_price_var = var
+                self.quote_vars[item_name] = var
+                self._register_editor_field(item_name, var, label_widget)
+            else:
+                var = tk.StringVar(value=initial_value)
+                ttk.Entry(quote_frame, textvariable=var, width=30).grid(row=row_index, column=1, sticky="w", padx=5, pady=2)
+                self.quote_vars[item_name] = var
+                self._register_editor_field(item_name, var, label_widget)
+            row_index += 1
 
-    def _register_editor_field(
-        self,
-        label: str,
-        var: tk.StringVar,
-        label_widget: ttk.Label | None,
-        chip_widget: ttk.Label | None = None,
-    ) -> None:
+        if material_choice_var is not None and material_price_var is not None:
+            existing = _coerce_float_or_none(material_price_var.get())
+            if existing is None or abs(existing) < 1e-9:
+                update_material_price()
+
+        def create_global_entries(parent_frame: ttk.Labelframe, keys, data_source, var_dict, columns: int = 2) -> None:
+            for i, key in enumerate(keys):
+                row, col = divmod(i, columns)
+                label_widget = ttk.Label(parent_frame, text=key)
+                label_widget.grid(row=row, column=col * 2, sticky="e", padx=5, pady=2)
+                var = tk.StringVar(value=str(data_source.get(key, "")))
+                entry = ttk.Entry(parent_frame, textvariable=var, width=15)
+                if "Path" in key:
+                    entry.config(width=50)
+                entry.grid(row=row, column=col * 2 + 1, sticky="w", padx=5, pady=2)
+                var_dict[key] = var
+                self._register_editor_field(key, var, label_widget)
+
+        comm_frame = ttk.Labelframe(self.editor_widgets_frame, text="Global Overrides: Commercial & General", padding=(10, 5))
+        comm_frame.grid(row=current_row, column=0, sticky="ew", padx=10, pady=5)
+        current_row += 1
+        comm_keys = [
+            "OverheadPct", "GA_Pct", "MarginPct", "ContingencyPct",
+            "ExpeditePct", "VendorMarkupPct", "InsurancePct", "MinLotCharge", "Quantity",
+        ]
+        create_global_entries(comm_frame, comm_keys, self.params, self.param_vars)
+
+        rates_frame = ttk.Labelframe(self.editor_widgets_frame, text="Global Overrides: Hourly Rates ($/hr)", padding=(10, 5))
+        rates_frame.grid(row=current_row, column=0, sticky="ew", padx=10, pady=5)
+        current_row += 1
+        create_global_entries(rates_frame, sorted(self.rates.keys()), self.rates, self.rate_vars, columns=3)
+
+        self._building_editor = False
+
+    def _register_editor_field(self, label: str, var: tk.StringVar, label_widget: ttk.Label | None) -> None:
         if not isinstance(label, str) or not isinstance(var, tk.StringVar):
             return
         self.editor_vars[label] = var
@@ -9581,51 +8717,9 @@ class App(tk.Tk):
             self.editor_label_base[label] = label
         else:
             self.editor_label_base.setdefault(label, label)
-        if chip_widget is not None:
-            self.editor_chip_widgets[label] = chip_widget
-        elif label in self.editor_chip_widgets:
-            self.editor_chip_widgets.pop(label, None)
         self.editor_value_sources.pop(label, None)
         self._mark_label_source(label, None)
         self._bind_editor_var(label, var)
-
-    def _debounced_reprice(self, delay_ms: int = 300) -> None:
-        self._schedule_reprice(delay_ms)
-
-    def _bind_reprice_on_focus_out(self, widget: tk.Widget, var: tk.StringVar, label: str) -> None:
-        def on_focus_out(_e=None, lab: str = label):
-            try:
-                self._mark_label_source(lab, "User")
-            except Exception:
-                pass
-            if not getattr(self.state, "data_loaded", False) or self.state.loading:
-                return
-            self.reprice()
-
-        try:
-            widget.bind("<FocusOut>", on_focus_out)
-        except Exception:
-            pass
-
-    def _on_var_change(self, *_):
-        if not getattr(self.state, "data_loaded", False) or self.state.loading or self.state.computing:
-            return
-        self._schedule_reprice(300)
-
-    def _schedule_reprice(self, delay_ms: int = 300) -> None:
-        if not getattr(self.state, "data_loaded", False) or self.state.loading or self.state.computing:
-            return
-        root = getattr(self, "root", self)
-        handle = getattr(self, "_reprice_after", None)
-        if handle:
-            try:
-                root.after_cancel(handle)
-            except Exception:
-                pass
-        try:
-            self._reprice_after = root.after(delay_ms, self.reprice)
-        except Exception:
-            self.reprice()
 
     def _bind_editor_var(self, label: str, var: tk.StringVar) -> None:
         def _on_write(*_):
@@ -9633,72 +8727,24 @@ class App(tk.Tk):
                 return
             self._update_editor_override_from_label(label, var.get())
             self._mark_label_source(label, "User")
-            if label == "Material" or label in getattr(self, "_focus_out_reprice_labels", set()):
-                pass
-            else:
-                self._on_var_change()
-            if hasattr(self, "_apply_editor_filters"):
-                try:
-                    self._apply_editor_filters()
-                except Exception:
-                    pass
+            self.reprice()
 
         var.trace_add("write", _on_write)
 
     def _mark_label_source(self, label: str, src: str | None) -> None:
         widget = self.editor_label_widgets.get(label)
         base = self.editor_label_base.get(label, label)
-        chip = self.editor_chip_widgets.get(label)
-        if widget is not None and chip is None:
-            widget.configure(text=base, foreground="")
-        if chip is not None:
+        if widget is not None:
             if src == "LLM":
-                chip.configure(text="LLM", foreground="#1463FF")
+                widget.configure(text=f"{base}  (LLM)", foreground="#1463FF")
             elif src == "User":
-                chip.configure(text="User", foreground="#22863a")
-            elif src == "Default":
-                chip.configure(text="Default", foreground="#6c6c6c")
-            elif src:
-                chip.configure(text=str(src), foreground="#4E4E4E")
+                widget.configure(text=f"{base}  (User)", foreground="#22863a")
             else:
-                chip.configure(text="", foreground="#1463FF")
-        elif widget is not None:
-            color = ""
-            text = base
-            if src == "LLM":
-                color = "#1463FF"
-                text = f"{base}  (LLM)"
-            elif src == "User":
-                color = "#22863a"
-                text = f"{base}  (User)"
-            elif src == "Default":
-                color = "#6c6c6c"
-                text = f"{base}  (Default)"
-            elif src:
-                text = f"{base}  ({src})"
-            widget.configure(text=text, foreground=color)
+                widget.configure(text=base, foreground="")
         if src:
             self.editor_value_sources[label] = src
         else:
             self.editor_value_sources.pop(label, None)
-        prov = getattr(self, "_summary_prov_labels", {}).get(label)
-        if prov is not None:
-            if src:
-                prov_color = "#1463FF" if src == "LLM" else "#22863a" if src == "User" else "#6c6c6c" if src == "Default" else prov.cget("foreground")
-                prov.configure(text=src, foreground=prov_color)
-            else:
-                prov.configure(text="", foreground="")
-
-    def log_llm_snapshot(self, **payload: Any) -> None:
-        if not LLM_DEBUG:
-            return
-        snap = dict(payload)
-        snap.setdefault("timestamp", time.strftime("%Y-%m-%d %H:%M:%S"))
-        try:
-            fn = LLM_DEBUG_DIR / f"llm_snapshot_{int(time.time())}.json"
-            write_snapshot_safe(fn, snap)
-        except Exception:
-            pass
 
     def _set_editor(self, label: str, value: Any, source_tag: str = "LLM") -> None:
         if self.editor_value_sources.get(label) == "User":
@@ -9716,202 +8762,6 @@ class App(tk.Tk):
         finally:
             self._editor_set_depth -= 1
         self._mark_label_source(label, source_tag)
-
-    def get_editor_values(self) -> dict[str, Any]:
-        values: dict[str, Any] = {}
-        for label, var in self.editor_vars.items():
-            try:
-                values[label] = var.get()
-            except Exception:
-                values[label] = ""
-        return values
-
-    def _set_editor_if_zero(self, label: str, value: float, source_tag: str = "Seed") -> bool:
-        var = self.editor_vars.get(label)
-        if var is None:
-            return False
-        current = str(var.get() or "").strip()
-        try:
-            is_zero = (current == "" or float(current) == 0.0)
-        except Exception:
-            is_zero = (current == "")
-        if not is_zero:
-            return False
-        self._set_editor(label, value, source_tag)
-        return True
-
-    def _clamp_for_label(self, label: str, value: float) -> float:
-        bounds = LLM_TARGETS[label]
-        unit = bounds.get("unit")
-        x = float(value)
-        if unit == "pct":
-            x = max(bounds["min"], min(bounds["max"], x))
-            scrap_floor = bounds.get("min", 0.0)
-            baseline = None
-            if isinstance(self.quote_state.baseline, dict):
-                baseline = self.quote_state.baseline.get("scrap_pct")
-            if baseline is not None:
-                try:
-                    base_pct = float(baseline)
-                    if base_pct <= 1.0:
-                        base_pct *= 100.0
-                    scrap_floor = max(scrap_floor, base_pct)
-                except Exception:
-                    pass
-            try:
-                var = self.editor_vars.get(label)
-                if var is not None:
-                    cur = var.get()
-                    if cur:
-                        scrap_floor = max(scrap_floor, float(cur))
-            except Exception:
-                pass
-            x = max(scrap_floor, x)
-        elif unit == "int":
-            x = int(round(x))
-            x = int(max(bounds["min"], min(bounds["max"], x)))
-        else:
-            x = max(bounds["min"], min(bounds["max"], x))
-        return x
-
-    def _apply_editor_updates_if_zero(self, updates: dict | None) -> bool:
-        if not isinstance(updates, dict):
-            return False
-        updated = False
-        for label, value in updates.items():
-            if label not in LLM_TARGETS:
-                continue
-            var = self.editor_vars.get(label)
-            if var is None:
-                continue
-            current = str(var.get() or "").strip()
-            try:
-                is_zero = (current == "" or float(current) == 0.0)
-            except Exception:
-                is_zero = (current == "")
-            if not is_zero:
-                continue
-            try:
-                clamped = self._clamp_for_label(label, float(value))
-            except Exception:
-                continue
-            unit = LLM_TARGETS[label].get("unit")
-            if unit == "int":
-                to_set: Any = int(clamped)
-            else:
-                to_set = float(clamped)
-            self._set_editor(label, to_set, "LLM")
-            updated = True
-        if updated and not self._reprice_in_progress:
-            self.reprice()
-        return updated
-
-    def _seed_baselines_from_geo(self) -> None:
-        if not isinstance(self.geo, dict):
-            return
-        geo = self.geo or {}
-        try:
-            holes = int(geo.get("hole_count") or 0)
-        except Exception:
-            holes = 0
-        if holes > 0:
-            drill_hours = (0.35 * holes) / 60.0
-            for label in ("Drilling", "Drilling Hours", "ID Boring/Drilling Hours"):
-                self._set_editor_if_zero(label, drill_hours, "Seed")
-            cmm_minutes = max(15.0, 0.25 * holes)
-            self._set_editor_if_zero("CMM Run Time min", cmm_minutes, "Seed")
-
-    def _run_llm_fill_editor_zeros(self) -> None:
-        if self._reprice_in_progress:
-            return
-        if not self.llm_enabled.get():
-            return
-        if not isinstance(self.geo, dict):
-            return
-        try:
-            self._seed_baselines_from_geo()
-        except Exception:
-            pass
-        editor_values = self.get_editor_values()
-        payload = build_fill_payload(self.geo, editor_values)
-        zero_fields = payload.get("editor_zero_fields") or []
-        if not zero_fields:
-            return
-        llm_client = self.LLM_SUGGEST
-        raw_text = ""
-        usage: dict[str, Any] | None = None
-        model_name = None
-        if llm_client is None:
-            model_path = self.llm_model_path.get().strip() if hasattr(self, "llm_model_path") else ""
-            if not (model_path and Path(model_path).is_file()):
-                return
-            local_llm = None
-            try:
-                local_llm = _LocalLLM(model_path)
-                parsed, raw_text, usage = local_llm.ask_json(
-                    SYSTEM_FILL_ZEROS,
-                    json.dumps(payload, indent=2),
-                    temperature=0.2,
-                    max_tokens=512,
-                )
-                if isinstance(parsed, dict) and not raw_text:
-                    raw_text = json.dumps(parsed)
-                model_name = getattr(local_llm, "model_path", "local")
-            except Exception as exc:
-                self.log_llm_snapshot(
-                    ctx="fill_editor_zeros",
-                    error=str(exc),
-                    payload=payload,
-                )
-                return
-            finally:
-                try:
-                    if local_llm is not None:
-                        local_llm.close()
-                except Exception:
-                    pass
-        else:
-            try:
-                chat_out = llm_client.create_chat_completion(
-                    messages=[
-                        {"role": "system", "content": SYSTEM_FILL_ZEROS},
-                        {"role": "user", "content": json.dumps(payload, indent=2)},
-                    ],
-                    temperature=0.2,
-                    top_p=0.9,
-                    max_tokens=512,
-                )
-                usage = chat_out.get("usage", {})
-                choice = (chat_out.get("choices") or [{}])[0]
-                message = choice.get("message") or {}
-                raw_text = str(message.get("content") or "")
-                model_name = "qwen2.5-vl"
-            except Exception as exc:
-                self.log_llm_snapshot(
-                    ctx="fill_editor_zeros",
-                    error=str(exc),
-                    payload=payload,
-                )
-                return
-        resp = parse_llm_json(raw_text) or {}
-        if not resp:
-            resp = {"editor_updates": {}, "notes": ["no-parse"]}
-        else:
-            resp.setdefault("editor_updates", {})
-            notes = resp.get("notes")
-            if not isinstance(notes, list):
-                resp["notes"] = [str(notes)] if notes is not None else []
-        try:
-            self._apply_editor_updates_if_zero(resp.get("editor_updates"))
-        finally:
-            self.log_llm_snapshot(
-                ctx="fill_editor_zeros",
-                model=model_name,
-                payload=payload,
-                raw_text=raw_text,
-                parsed=resp,
-                usage=usage,
-            )
 
     def _update_editor_override_from_label(self, label: str, raw_value: str) -> None:
         key = EDITOR_TO_SUGG.get(label)
@@ -10008,137 +8858,9 @@ class App(tk.Tk):
             node[leaf_key] = value
 
     # ----- Full flow: CAD ? GEO ? LLM ? Quote -----
-    def _finalize_2d_geo(
-        self,
-        geo: dict,
-        *,
-        source_ext: str,
-        structured_pdf: dict | None = None,
-        source_path: str | None = None,
-    ) -> None:
-        if self.vars_df is None:
-            vp = None
-            if source_path:
-                vp = find_variables_near(source_path)
-            if not vp:
-                vp = filedialog.askopenfilename(title="Select variables CSV/XLSX")
-            if vp:
-                try:
-                    core_df, full_df = read_variables_file(vp, return_full=True)
-                    self.vars_df = core_df
-                    self.vars_df_full = full_df
-                except Exception as read_err:
-                    messagebox.showerror(
-                        "Variables",
-                        f"Failed to read variables file:\n{read_err}\n\nContinuing with defaults.",
-                    )
-                    self.vars_df = None
-                    self.vars_df_full = None
-            else:
-                messagebox.showinfo("Variables", "No variables file provided; using defaults.")
-                self.vars_df = None
-
-        self.vars_df = coerce_or_make_vars_df(self.vars_df)
-
-        if structured_pdf:
-            try:
-                estimate = infer_pdf_estimate(structured_pdf)
-            except Exception:
-                estimate = {}
-            if estimate:
-                self.vars_df = merge_estimate_into_vars(self.vars_df, estimate)
-
-        self.vars_df = apply_2d_features_to_variables(
-            self.vars_df,
-            geo,
-            params=self.params,
-            rates=self.rates,
-        )
-        self.geo = geo
-        self._log_geo(geo)
-
-        self._populate_editor_tab(self.vars_df)
-        self.nb.select(self.tab_editor)
-        ext = source_ext.upper() if source_ext else "DXF"
-        self.set_status(f"{ext} variables loaded. Review the Quote Editor and generate the quote.")
-
-    def load_cad_and_vars(self) -> None:
-        if self.state.loading:
-            return
-        selected = self.selected_path
-        if not selected:
-            return
-        self.state.data_loaded = False
-
-        guard_cm = self.BusyGuard("loading")
-        run = guard_cm.__enter__()
-        if not run:
-            return
-
-        released = False
-
-        def _release(exc_type=None, exc=None, tb=None):
-            nonlocal released
-            if not released:
-                released = True
-                guard_cm.__exit__(exc_type, exc, tb)
-
-        import threading
-        import queue
-
-        q: "queue.Queue[tuple[dict | None, Exception | None]]" = queue.Queue()
-
-        def _worker() -> None:
-            err: Exception | None = None
-            geo: dict | None = None
-            try:
-                dxf_path = ensure_dxf(selected)
-                import ezdxf  # type: ignore
-
-                doc = ezdxf.readfile(dxf_path)
-                geo = build_geo_from_dxf(doc, source_path=str(dxf_path))
-            except Exception as e:  # noqa: BLE001
-                err = e
-            q.put((geo, err))
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-        def _poll() -> None:
-            if q.empty():
-                try:
-                    self.after(100, _poll)
-                except Exception:
-                    _release()
-                return
-            geo, err = q.get()
-            if err:
-                _release()
-                messagebox.showerror("CAD Load", f"Failed to load CAD: {err}")
-                return
-            try:
-                source_ext = Path(selected).suffix.lower()
-                self._finalize_2d_geo(
-                    geo or {},
-                    source_ext=source_ext,
-                    source_path=str(selected),
-                )
-            except Exception as finalize_err:  # noqa: BLE001
-                _release()
-                messagebox.showerror("CAD Load", f"Failed to load CAD: {finalize_err}")
-                return
-            self.state.data_loaded = True
-            _release()
-            self.reprice()
-
-        try:
-            self.after(100, _poll)
-        except Exception:
-            _release()
-            raise
-
     def action_full_flow(self):
         # ---------- choose file ----------
-        self.set_status("Opening CAD/Drawingï¿½")
+        self.status_var.set("Opening CAD/Drawingï¿½")
         path = filedialog.askopenfilename(
             title="Select CAD/Drawing",
             filetypes=[
@@ -10147,29 +8869,53 @@ class App(tk.Tk):
             ],
         )
         if not path:
-            self.set_status("Ready", timeout_ms=2000)
+            self.status_var.set("Ready")
             return
 
         ext = Path(path).suffix.lower()
-        self.set_status(f"Processing {os.path.basename(path)}ï¿½")
-        self.state.data_loaded = False
+        self.status_var.set(f"Processing {os.path.basename(path)}ï¿½")
 
         # ---------- 2D branch: PDF / DWG / DXF ----------
         if ext in (".pdf", ".dwg", ".dxf"):
             try:
+                structured_pdf = None
                 if ext == ".pdf":
                     structured_pdf = extract_pdf_all(Path(path))
-                    g2d = extract_2d_features_from_pdf_vector(path)
-                    self._finalize_2d_geo(
-                        g2d,
-                        source_ext=ext,
-                        structured_pdf=structured_pdf,
-                        source_path=path,
-                    )
-                    return
-                self.selected_path = Path(path)
-                self.set_status(f"Loading {os.path.basename(path)}…")
-                self.load_cad_and_vars()
+                    g2d = extract_2d_features_from_pdf_vector(path)   # PyMuPDF vector-only MVP
+                else:
+                    g2d = extract_2d_features_from_dxf_or_dwg(path)   # ezdxf / ODA
+
+                if self.vars_df is None:
+                    vp = find_variables_near(path) or filedialog.askopenfilename(title="Select variables CSV/XLSX")
+                    if vp:
+                        try:
+                            core_df, full_df = read_variables_file(vp, return_full=True)
+                            self.vars_df = core_df
+                            self.vars_df_full = full_df
+                        except Exception as read_err:
+                            messagebox.showerror("Variables", f"Failed to read variables file:\n{read_err}\n\nContinuing with defaults.")
+                            self.vars_df = None
+                            self.vars_df_full = None
+                    else:
+                        messagebox.showinfo("Variables", "No variables file provided; using defaults.")
+                        self.vars_df = None
+                self.vars_df = coerce_or_make_vars_df(self.vars_df)
+
+                if structured_pdf:
+                    try:
+                        estimate = infer_pdf_estimate(structured_pdf)
+                    except Exception:
+                        estimate = {}
+                    if estimate:
+                        self.vars_df = merge_estimate_into_vars(self.vars_df, estimate)
+
+                self.vars_df = apply_2d_features_to_variables(self.vars_df, g2d, params=self.params, rates=self.rates)
+                self.geo = g2d
+                self._log_geo(g2d)
+
+                self._populate_editor_tab(self.vars_df)
+                self.nb.select(self.tab_editor)
+                self.status_var.set(f"{ext.upper()} variables loaded. Review the Quote Editor and generate the quote.")
                 return
             except Exception as e:
                 messagebox.showerror(
@@ -10177,7 +8923,7 @@ class App(tk.Tk):
                     f"Failed to process {ext.upper()} file:\n{e}\n\n"
                     "Tip (DWG): set ODA_CONVERTER_EXE or DWG2DXF_EXE to a converter that accepts <input.dwg> <output.dxf>."
                 )
-                self.set_status("Ready", timeout_ms=2000)
+                self.status_var.set("Ready")
                 return
 
         # ---------- 3D branch: STEP / IGES / BREP / STL ----------
@@ -10200,14 +8946,14 @@ class App(tk.Tk):
                         "2D Import Error",
                         f"Failed to process STL file:\n{e}\n\n{tb}"
                     )
-                    self.set_status("Ready", timeout_ms=2000)
+                    self.status_var.set("Ready")
                     return
                 if stl_geo is None:
                     messagebox.showerror(
                         "2D Import Error",
                         "STL import produced no 2D geometry."
                     )
-                    self.set_status("Ready", timeout_ms=2000)
+                    self.status_var.set("Ready")
                     return
                 geo = _map_geo_to_double_underscore(stl_geo)
             else:
@@ -10225,7 +8971,7 @@ class App(tk.Tk):
                         f"Failed to read CAD file:\n{e}\n\n"
                         "Tip (DWG): upload DXF/STEP/SAT, or set ODA_CONVERTER_EXE to your dwg2dxf wrapper."
                     )
-                    self.set_status("Ready", timeout_ms=2000)
+                    self.status_var.set("Ready")
                     return
         # ---------- variables + LLM hours + quote ----------
         if self.vars_df is None:
@@ -10234,7 +8980,7 @@ class App(tk.Tk):
                 vp = filedialog.askopenfilename(title="Select variables CSV/XLSX")
             if not vp:
                 messagebox.showinfo("Variables", "No variables file provided.")
-                self.set_status("Ready", timeout_ms=2000)
+                self.status_var.set("Ready")
                 return
             try:
                 core_df, full_df = read_variables_file(vp, return_full=True)
@@ -10244,7 +8990,7 @@ class App(tk.Tk):
                 import traceback
                 tb = traceback.format_exc()
                 messagebox.showerror("Variables", f"Failed to read variables file:\n{e}\n\n{tb}")
-                self.set_status("Ready", timeout_ms=2000)
+                self.status_var.set("Ready")
                 return
 
         self.vars_df = coerce_or_make_vars_df(self.vars_df)
@@ -10255,11 +9001,11 @@ class App(tk.Tk):
                 self.vars_df = upsert_var_row(self.vars_df, k, v, dtype="number")
         except Exception as e:
             messagebox.showerror("Variables", f"Failed to update variables with GEO rows:\n{e}")
-            self.set_status("Ready", timeout_ms=2000)
+            self.status_var.set("Ready")
             return
 
         # LLM hour estimation
-        self.set_status("Estimating hours with LLMï¿½")
+        self.status_var.set("Estimating hours with LLMï¿½")
         decision_log = {}
         est_raw = infer_hours_and_overrides_from_geo(geo, params=self.params, rates=self.rates)
         est = clamp_llm_hours(est_raw, geo, params=self.params)
@@ -10269,7 +9015,7 @@ class App(tk.Tk):
 
         self._populate_editor_tab(self.vars_df)
         self.nb.select(self.tab_editor)
-        self.set_status("Variables loaded. Review the Quote Editor and click Generate Quote.")
+        self.status_var.set("Variables loaded. Review the Quote Editor and click Generate Quote.")
         return
 
     # Back-compat: keep the old button working
@@ -10353,7 +9099,7 @@ class App(tk.Tk):
 
         if notify:
             messagebox.showinfo("Overrides", "Overrides applied.")
-        self.set_status("Overrides applied.")
+        self.status_var.set("Overrides applied.")
 
     def save_overrides(self):
 
@@ -10365,10 +9111,10 @@ class App(tk.Tk):
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
             messagebox.showinfo("Overrides", f"Saved to:\n{{path}}")
-            self.set_status(f"Saved overrides to {path}")
+            self.status_var.set(f"Saved overrides to {path}")
         except Exception as e:
             messagebox.showerror("Overrides", f"Save failed:\n{{e}}")
-            self.set_status("Failed to save overrides.", "err", 6000)
+            self.status_var.set("Failed to save overrides.")
 
     def _path_key(self, path: Tuple[str, ...]) -> str:
         return ".".join(path)
@@ -10384,10 +9130,10 @@ class App(tk.Tk):
             for k,v in self.param_vars.items(): v.set(str(self.params.get(k, "")))
             for k,v in self.rate_vars.items():  v.set(str(self.rates.get(k, "")))
             messagebox.showinfo("Overrides", "Overrides loaded.")
-            self.set_status(f"Loaded overrides from {path}")
+            self.status_var.set(f"Loaded overrides from {path}")
         except Exception as e:
             messagebox.showerror("Overrides", f"Load failed:\n{{e}}")
-            self.set_status("Failed to load overrides.", "err", 6000)
+            self.status_var.set("Failed to load overrides.")
 
     # ----- LLM tab ----- 
     def _build_llm(self, parent):
@@ -10476,84 +9222,68 @@ class App(tk.Tk):
         self.out_txt.insert("end", d+"\n")
         self.out_txt.see("end")
 
-    def reprice(self, *args, **kwargs) -> None:
-        with self.BusyGuard("computing") as run:
-            if not run:
-                return
-            return self.gen_quote(reuse_suggestions=True)
-
-    def schedule_reprice(self, delay_ms: int = 300) -> None:
-        self._schedule_reprice(delay_ms)
+    def reprice(self) -> None:
+        if self._reprice_in_progress:
+            return
+        self.gen_quote(reuse_suggestions=True)
 
     def gen_quote(self, reuse_suggestions: bool = False) -> None:
-        def _run_gen() -> None:
-            already_repricing = self._reprice_in_progress
-            if not already_repricing:
-                self._reprice_in_progress = True
+        already_repricing = self._reprice_in_progress
+        if not already_repricing:
+            self._reprice_in_progress = True
+        try:
+            if self.vars_df is None:
+                self.vars_df = coerce_or_make_vars_df(None)
+            for item_name, string_var in self.quote_vars.items():
+                mask = self.vars_df["Item"] == item_name
+                if mask.any():
+                    self.vars_df.loc[mask, "Example Values / Options"] = string_var.get()
+
+            self.apply_overrides(notify=False)
+
             try:
-                if self.vars_df is None:
-                    self.vars_df = coerce_or_make_vars_df(None)
-                for item_name, string_var in self.quote_vars.items():
-                    mask = self.vars_df["Item"] == item_name
-                    if mask.any():
-                        self.vars_df.loc[mask, "Example Values / Options"] = string_var.get()
+                ui_vars = {
+                    str(row["Item"]): row["Example Values / Options"]
+                    for _, row in self.vars_df.iterrows()
+                }
+            except Exception:
+                ui_vars = {}
 
-                self.apply_overrides(notify=False)
-
-                try:
-                    ui_vars = {
-                        str(row["Item"]): row["Example Values / Options"]
-                        for _, row in self.vars_df.iterrows()
-                    }
-                except Exception:
-                    ui_vars = {}
-
-                try:
-                    res = compute_quote_from_df(
-                        self.vars_df,
-                        params=self.params,
-                        rates=self.rates,
-                        material_vendor_csv=self.settings.get("material_vendor_csv", "") if isinstance(self.settings, dict) else "",
-                        llm_enabled=self.llm_enabled.get(),
-                        llm_model_path=self.llm_model_path.get().strip() or None,
-                        geo=self.geo,
-                        ui_vars=ui_vars,
-                        quote_state=self.quote_state,
-                        reuse_suggestions=reuse_suggestions,
-                        llm_suggest=self.LLM_SUGGEST,
-                    )
-                except ValueError as err:
-                    messagebox.showerror("Quote blocked", str(err))
-                    self.set_status("Quote blocked.", "warn", 5000)
-                    return
-
-                baseline_ctx = self.quote_state.baseline or {}
-                suggestions_ctx = self.quote_state.suggestions or {}
-                if baseline_ctx and suggestions_ctx:
-                    self.apply_llm_to_editor(suggestions_ctx, baseline_ctx)
-
-                model_path = self.llm_model_path.get().strip()
-                llm_explanation = get_llm_quote_explanation(res, model_path)
-                report = render_quote(res, currency="$", show_zeros=False, llm_explanation=llm_explanation)
-                self.out_txt.delete("1.0", "end")
-                self.out_txt.insert("end", report, "rcol")
-
-                self.nb.select(self.tab_out)
-                self.set_status(
-                    f"Quote Generated! Final Price: ${res.get('price', 0):,.2f}",
-                    "info",
-                    6000,
+            try:
+                res = compute_quote_from_df(
+                    self.vars_df,
+                    params=self.params,
+                    rates=self.rates,
+                    material_vendor_csv=self.settings.get("material_vendor_csv", "") if isinstance(self.settings, dict) else "",
+                    llm_enabled=self.llm_enabled.get(),
+                    llm_model_path=self.llm_model_path.get().strip() or None,
+                    geo=self.geo,
+                    ui_vars=ui_vars,
+                    quote_state=self.quote_state,
+                    reuse_suggestions=reuse_suggestions,
+                    llm_suggest=self.LLM_SUGGEST,
                 )
-            finally:
-                if not already_repricing:
-                    self._reprice_in_progress = False
-
-        if self.state.computing:
-            return _run_gen()
-        with self.BusyGuard("computing") as run:
-            if not run:
+            except ValueError as err:
+                messagebox.showerror("Quote blocked", str(err))
+                self.status_var.set("Quote blocked.")
                 return
-            return _run_gen()
+
+            baseline_ctx = self.quote_state.baseline or {}
+            suggestions_ctx = self.quote_state.suggestions or {}
+            if baseline_ctx and suggestions_ctx:
+                self.apply_llm_to_editor(suggestions_ctx, baseline_ctx)
+
+            model_path = self.llm_model_path.get().strip()
+            llm_explanation = get_llm_quote_explanation(res, model_path)
+            report = render_quote(res, currency="$", show_zeros=False, llm_explanation=llm_explanation)
+            self.out_txt.delete("1.0", "end")
+            self.out_txt.insert("end", report, "rcol")
+
+            self.nb.select(self.tab_out)
+            self.status_var.set(f"Quote Generated! Final Price: ${res.get('price', 0):,.2f}")
+        finally:
+            if not already_repricing:
+                self._reprice_in_progress = False
 
 # Helper: map our existing enrich_geo_* output to GEO__ keys
 def _map_geo_to_double_underscore(g: dict) -> dict:
