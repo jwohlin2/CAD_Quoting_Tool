@@ -82,6 +82,83 @@ import pandas as pd
 
 from llama_cpp import Llama  # type: ignore
 
+# --- JSON snapshot helpers ----------------------------------------------------
+from pathlib import Path
+import json, datetime, decimal, uuid
+import numpy as np
+import pandas as pd
+
+def _to_jsonable(obj):
+    """Best-effort converter for snapshot logging."""
+    # primitives
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        return obj
+    # dates / decimals / uuids
+    if isinstance(obj, (datetime.date, datetime.datetime)):
+        return obj.isoformat()
+    if isinstance(obj, decimal.Decimal):
+        return float(obj)
+    if isinstance(obj, uuid.UUID):
+        return str(obj)
+    # pathlib
+    if isinstance(obj, Path):
+        return str(obj)
+    # numpy / pandas
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    if isinstance(obj, (np.ndarray,)):
+        return obj.tolist()
+    if isinstance(obj, (pd.Series,)):
+        return obj.to_dict()
+    if isinstance(obj, (pd.DataFrame,)):
+        return obj.to_dict(orient="records")
+    # sets/tuples
+    if isinstance(obj, (set, tuple)):
+        return list(obj)
+    # tkinter variables → their current value if possible
+    try:
+        import tkinter as tk
+        if isinstance(obj, (tk.StringVar, tk.DoubleVar, tk.IntVar, tk.BooleanVar)):
+            return obj.get()
+    except Exception:
+        pass
+    # callables / methods → repr only (or None if you prefer to drop)
+    if callable(obj):
+        return f"<callable:{getattr(obj, '__name__', type(obj).__name__)}>"
+    # objects with __dict__ → shallow dict of jsonables
+    d = getattr(obj, "__dict__", None)
+    if d is not None:
+        return {k: _to_jsonable(v) for k, v in d.items() if not k.startswith("_")}
+    # last resort
+    return repr(obj)
+
+def json_safe(obj):
+    """Recursively map obj to JSON-safe types."""
+    if isinstance(obj, dict):
+        return {str(k): json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [json_safe(v) for v in obj]
+    return _to_jsonable(obj)
+
+def find_non_jsonables(obj, prefix=""):
+    """Return list of (path, type) that fail json encoding – for diagnostics."""
+    bad = []
+    try:
+        json.dumps(obj)
+        return bad
+    except TypeError:
+        pass
+    if isinstance(obj, dict):
+            for k, v in obj.items():
+                bad += find_non_jsonables(v, f"{prefix}.{k}" if prefix else str(k))
+    elif isinstance(obj, list):
+            for i, v in enumerate(obj):
+                bad += find_non_jsonables(v, f"{prefix}[{i}]")
+    else:
+        bad.append((prefix or "<root>", type(obj).__name__))
+    return bad
 
 def _normalize_lookup_key(value: str) -> str:
     cleaned = re.sub(r"[^0-9a-z]+", " ", str(value).strip().lower())
@@ -6325,8 +6402,14 @@ def compute_quote_from_df(df: pd.DataFrame,
                 "sanitized": sanitized_struct,
                 "usage": s_usage,
             }
-            snap_path = LLM_DEBUG_DIR / f"llm_snapshot_{int(time.time())}.json"
-            snap_path.write_text(json.dumps(snap, indent=2), encoding="utf-8")
+            snap_path = LLM_DEBUG_DIR / ("llm_snapshot_" + str(int(time.time())) + ".json")
+            try:
+                safe = json_safe(snap)
+                snap_path.write_text(json.dumps(safe, indent=2), encoding="utf-8")
+            except Exception:
+                # last-ditch: write a tiny diagnostic so the UI doesn’t die
+                diag = {"non_jsonable": find_non_jsonables(snap)}
+                snap_path.with_suffix(".bad.json").write_text(json.dumps(diag, indent=2), encoding="utf-8")
 
     quote_state.llm_raw = dict(overrides_meta)
     quote_state.suggestions = sanitized_struct if isinstance(sanitized_struct, dict) else {}
@@ -10278,10 +10361,23 @@ class App(tk.Tk):
         self.out_txt.insert("end", d+"\n")
         self.out_txt.see("end")
 
-    def reprice(self) -> None:
-        if self._reprice_in_progress:
+    def reprice(self, *args, **kwargs) -> None:
+        # Guard against re-entrancy from multiple UI events
+        if getattr(self, "_repricing", False):
             return
-        self.gen_quote(reuse_suggestions=True)
+        self._repricing = True
+        try:
+            return self.gen_quote(reuse_suggestions=True)
+        finally:
+            self._repricing = False
+
+    def schedule_reprice(self, delay_ms: int = 300) -> None:
+        # Public alias for the existing debounce helper
+        try:
+            self._debounced_reprice(delay_ms)
+        except Exception:
+            # Fallback to immediate if debounce not available
+            self.reprice()
 
     def gen_quote(self, reuse_suggestions: bool = False) -> None:
         already_repricing = self._reprice_in_progress
