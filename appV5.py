@@ -146,6 +146,31 @@ SUGG_TO_EDITOR = {
         str,
         str,
     ),
+    ("add_pass_through", "Consumables /Hr"): (
+        "Consumables /Hr Cost",
+        float,
+        float,
+    ),
+    ("add_pass_through", "Utilities"): (
+        "Utilities Cost",
+        float,
+        float,
+    ),
+    ("add_pass_through", "Shipping"): (
+        "Shipping Cost",
+        float,
+        float,
+    ),
+    "contingency_pct": (
+        "ContingencyPct",
+        float,
+        float,
+    ),
+    "fixture_material_cost_delta": (
+        "Fixture Material Cost",
+        float,
+        float,
+    ),
 }
 
 # Multipliers are applied to computed process hours, then we push the new hours to editor fields.
@@ -621,6 +646,7 @@ class QuoteState:
     accept_llm: dict = field(default_factory=dict)
     bounds: dict = field(default_factory=dict)
     material_source: str | None = None
+    guard_context: dict = field(default_factory=dict)
 
 
 def _as_float_or_none(value: Any) -> float | None:
@@ -717,6 +743,19 @@ def build_suggest_payload(geo, baseline, rates, bounds) -> dict:
     except Exception:
         npt_qty = 0
     inference_knobs = derived.get("inference_knobs") if isinstance(derived.get("inference_knobs"), dict) else {}
+    has_ldr_notes = bool(derived.get("has_ldr_notes"))
+    max_hole_depth_in = _as_float_or_none(derived.get("max_hole_depth_in"))
+    plate_area_in2 = _as_float_or_none(derived.get("plate_area_in2"))
+    finish_flags_raw = derived.get("finish_flags")
+    if isinstance(finish_flags_raw, (list, tuple, set)):
+        finish_flags = [str(flag).strip() for flag in finish_flags_raw if isinstance(flag, str) and flag.strip()]
+    elif isinstance(finish_flags_raw, str) and finish_flags_raw.strip():
+        finish_flags = [finish_flags_raw.strip()]
+    else:
+        finish_flags = []
+    has_tight_tol = bool(derived.get("has_tight_tol"))
+    stock_guess_val = derived.get("stock_guess")
+    stock_guess = str(stock_guess_val).strip() if isinstance(stock_guess_val, str) and stock_guess_val.strip() else None
 
     seed = {
         "suggest_drilling_if_many_holes": hole_count >= 50,
@@ -726,6 +765,18 @@ def build_suggest_payload(geo, baseline, rates, bounds) -> dict:
         "add_milling_if_cbore_present": cbore_qty >= 2,
         "plate_with_back_ops": bool((geo.get("meta") or {}).get("is_2d_plate") and derived.get("needs_back_face")),
     }
+    if has_ldr_notes:
+        seed["has_leader_notes"] = True
+    if max_hole_depth_in is not None:
+        seed["max_hole_depth_in"] = max_hole_depth_in
+    if plate_area_in2 is not None:
+        seed["plate_area_in2"] = plate_area_in2
+    if has_tight_tol:
+        seed["has_tight_tol"] = True
+    if finish_flags:
+        seed["finish_flags"] = finish_flags[:6]
+    if stock_guess:
+        seed["stock_guess"] = stock_guess
     if tap_minutes_hint:
         seed["tapping_minutes_hint"] = tap_minutes_hint
     if cbore_minutes_hint:
@@ -760,6 +811,12 @@ def build_suggest_payload(geo, baseline, rates, bounds) -> dict:
             "tap_details": tap_details,
             "npt_qty": npt_qty,
             "inference_knobs": inference_knobs,
+            "has_leader_notes": has_ldr_notes,
+            "max_hole_depth_in": max_hole_depth_in,
+            "plate_area_in2": plate_area_in2,
+            "has_tight_tol": has_tight_tol,
+            "finish_flags": finish_flags,
+            "stock_guess": stock_guess,
         },
         "baseline": {
             "process_hours": baseline.get("process_hours"),
@@ -1045,12 +1102,15 @@ def merge_effective(
     baseline: dict | None,
     suggestions: dict | None,
     overrides: dict | None,
+    *,
+    guard_ctx: dict | None = None,
 ) -> dict:
     """Tri-state merge for baseline vs LLM suggestions vs user overrides."""
 
     baseline = copy.deepcopy(baseline or {})
     suggestions = suggestions or {}
     overrides = overrides or {}
+    guard_ctx = guard_ctx or {}
 
     bounds = baseline.get("_bounds") if isinstance(baseline, dict) else None
     if isinstance(bounds, dict):
@@ -1276,6 +1336,85 @@ def merge_effective(
     if notes_val:
         eff["notes"] = notes_val
 
+    final_hours_dict = eff.get("process_hours") if isinstance(eff.get("process_hours"), dict) else {}
+    hole_count_guard = _coerce_float_or_none(guard_ctx.get("hole_count"))
+    try:
+        hole_count_guard_int = int(round(float(hole_count_guard))) if hole_count_guard is not None else 0
+    except Exception:
+        hole_count_guard_int = 0
+    min_sec_per_hole = _as_float_or_none(guard_ctx.get("min_sec_per_hole"))
+    min_sec_per_hole = float(min_sec_per_hole) if min_sec_per_hole is not None else 9.0
+    if hole_count_guard_int > 0 and isinstance(final_hours_dict, dict) and "drilling" in final_hours_dict:
+        current_drill = _as_float_or_none(final_hours_dict.get("drilling"))
+        if current_drill is not None:
+            drill_floor_hr = (hole_count_guard_int * min_sec_per_hole) / 3600.0
+            if current_drill < drill_floor_hr - 1e-6:
+                clamp_notes.append(
+                    f"process_hours[drilling] {current_drill:.3f} → {drill_floor_hr:.3f} (guardrail)"
+                )
+                final_hours_dict["drilling"] = drill_floor_hr
+
+    tap_qty_guard = _coerce_float_or_none(guard_ctx.get("tap_qty"))
+    try:
+        tap_qty_guard_int = int(round(float(tap_qty_guard))) if tap_qty_guard is not None else 0
+    except Exception:
+        tap_qty_guard_int = 0
+    min_min_per_tap = _as_float_or_none(guard_ctx.get("min_min_per_tap"))
+    min_min_per_tap = float(min_min_per_tap) if min_min_per_tap is not None else 0.2
+    if tap_qty_guard_int > 0 and isinstance(final_hours_dict, dict) and "tapping" in final_hours_dict:
+        current_tap = _as_float_or_none(final_hours_dict.get("tapping"))
+        if current_tap is not None:
+            tap_floor_hr = (tap_qty_guard_int * min_min_per_tap) / 60.0
+            if current_tap < tap_floor_hr - 1e-6:
+                clamp_notes.append(
+                    f"process_hours[tapping] {current_tap:.3f} → {tap_floor_hr:.3f} (guardrail)"
+                )
+                final_hours_dict["tapping"] = tap_floor_hr
+
+    if guard_ctx.get("needs_back_face"):
+        current_setups = eff.get("setups")
+        setups_val = _as_float_or_none(current_setups)
+        try:
+            setups_int = int(round(float(setups_val))) if setups_val is not None else int(current_setups)
+        except Exception:
+            try:
+                setups_int = int(current_setups)
+            except Exception:
+                setups_int = 0
+        if setups_int < 2:
+            eff["setups"] = 2
+            clamp_notes.append(f"setups {setups_int} → 2 (back-side guardrail)")
+            source_tags["setups"] = "guardrail"
+
+    finish_flags_ctx = guard_ctx.get("finish_flags")
+    baseline_pass_ctx = guard_ctx.get("baseline_pass_through") if isinstance(guard_ctx.get("baseline_pass_through"), dict) else {}
+    finish_pass_key = str(guard_ctx.get("finish_pass_key") or "Outsourced Vendors")
+    finish_floor = _as_float_or_none(guard_ctx.get("finish_cost_floor"))
+    finish_floor = float(finish_floor) if finish_floor is not None else 50.0
+    if finish_flags_ctx and finish_floor > 0:
+        combined_pass: dict[str, float] = {}
+        for key, value in baseline_pass_ctx.items():
+            val = _as_float_or_none(value)
+            if val is not None:
+                combined_pass[str(key)] = float(val)
+        for key, value in (final_pass.items() if isinstance(final_pass, dict) else []):
+            val = _as_float_or_none(value)
+            if val is not None:
+                combined_pass[key] = combined_pass.get(key, 0.0) + float(val)
+        current_finish_cost = combined_pass.get(finish_pass_key, 0.0)
+        if current_finish_cost < finish_floor - 1e-6:
+            needed = finish_floor - current_finish_cost
+            if needed > 0:
+                if not isinstance(final_pass, dict):
+                    final_pass = {}
+                final_pass[finish_pass_key] = float(final_pass.get(finish_pass_key, 0.0) or 0.0) + needed
+                clamp_notes.append(
+                    f"add_pass_through[{finish_pass_key}] {current_finish_cost:.2f} → {finish_floor:.2f} (finish guardrail)"
+                )
+                pass_sources[finish_pass_key] = "guardrail"
+                eff["add_pass_through"] = final_pass
+                source_tags["add_pass_through"] = pass_sources
+
     if clamp_notes:
         eff["_clamp_notes"] = clamp_notes
     eff["_source_tags"] = source_tags
@@ -1323,7 +1462,12 @@ def compute_effective_state(state: QuoteState) -> tuple[dict, dict]:
     if bounds:
         baseline_for_merge["_bounds"] = dict(bounds)
 
-    merged = merge_effective(baseline_for_merge, applied, overrides)
+    merged = merge_effective(
+        baseline_for_merge,
+        applied,
+        overrides,
+        guard_ctx=getattr(state, "guard_context", None),
+    )
     sources = merged.pop("_source_tags", {})
     clamp_notes = merged.pop("_clamp_notes", None)
     if clamp_notes:
@@ -1338,6 +1482,39 @@ def compute_effective_state(state: QuoteState) -> tuple[dict, dict]:
 def reprice_with_effective(state: QuoteState) -> QuoteState:
     """Recompute effective values and enforce guardrails before pricing."""
 
+    geo_ctx = state.geo or {}
+    inner_geo_ctx = geo_ctx.get("geo") if isinstance(geo_ctx.get("geo"), dict) else {}
+    hole_count_guard = _coerce_float_or_none(geo_ctx.get("hole_count"))
+    if hole_count_guard is None:
+        hole_count_guard = _coerce_float_or_none(inner_geo_ctx.get("hole_count"))
+    tap_qty_guard = _coerce_float_or_none(geo_ctx.get("tap_qty"))
+    if tap_qty_guard is None:
+        tap_qty_guard = _coerce_float_or_none(inner_geo_ctx.get("tap_qty"))
+    finish_flags_guard: set[str] = set()
+    finishes_geo = geo_ctx.get("finishes") or inner_geo_ctx.get("finishes")
+    if isinstance(finishes_geo, (list, tuple, set)):
+        finish_flags_guard.update(str(flag).strip().upper() for flag in finishes_geo if isinstance(flag, str) and flag.strip())
+    explicit_finish_flags = geo_ctx.get("finish_flags") or inner_geo_ctx.get("finish_flags")
+    if isinstance(explicit_finish_flags, (list, tuple, set)):
+        finish_flags_guard.update(str(flag).strip().upper() for flag in explicit_finish_flags if isinstance(flag, str) and flag.strip())
+    guard_ctx: dict[str, Any] = {
+        "hole_count": hole_count_guard,
+        "tap_qty": tap_qty_guard,
+        "min_sec_per_hole": 9.0,
+        "min_min_per_tap": 0.2,
+        "needs_back_face": bool(
+            geo_ctx.get("needs_back_face")
+            or geo_ctx.get("from_back")
+            or inner_geo_ctx.get("needs_back_face")
+            or inner_geo_ctx.get("from_back")
+        ),
+        "baseline_pass_through": (state.baseline.get("pass_through") if isinstance(state.baseline.get("pass_through"), dict) else {}),
+    }
+    if finish_flags_guard:
+        guard_ctx["finish_flags"] = sorted(finish_flags_guard)
+        guard_ctx.setdefault("finish_cost_floor", 50.0)
+    state.guard_context = guard_ctx
+
     ensure_accept_flags(state)
     merged, sources = compute_effective_state(state)
     state.effective = merged
@@ -1346,18 +1523,19 @@ def reprice_with_effective(state: QuoteState) -> QuoteState:
     # drilling floor guard
     eff_hours = state.effective.get("process_hours") if isinstance(state.effective.get("process_hours"), dict) else {}
     if eff_hours:
-        hole_count = 0
         try:
-            hole_count = int(float(state.geo.get("hole_count", 0) or 0))
+            hole_count_geo = int(float(state.geo.get("hole_count", 0) or 0))
         except Exception:
-            hole_count = 0
+            hole_count_geo = 0
+        hole_count = hole_count_geo
         if hole_count <= 0:
             holes = state.geo.get("hole_diams_mm")
             if isinstance(holes, (list, tuple)):
                 hole_count = len(holes)
         if hole_count > 0 and "drilling" in eff_hours:
             current = _as_float_or_none(eff_hours.get("drilling")) or 0.0
-            floor_hr = _drilling_floor_hours(hole_count)
+            min_sec_per_hole = 9.0
+            floor_hr = (hole_count * min_sec_per_hole) / 3600.0
             if current < floor_hr:
                 eff_hours["drilling"] = floor_hr
                 state.effective["process_hours"] = eff_hours
@@ -4327,7 +4505,12 @@ def render_quote(
             if scrap is not None:     write_line(f"Scrap %: {_pct(scrap)}", "  ")
             stock_L = _fmt_dim(ui_vars.get("Plate Length (in)"))
             stock_W = _fmt_dim(ui_vars.get("Plate Width (in)"))
-            stock_T = _fmt_dim(ui_vars.get("Thickness (in)"))
+            th_in = ui_vars.get("Thickness (in)")
+            if th_in in (None, ""):
+                th_in = g.get("thickness_in_guess")
+            if not th_in:
+                th_in = 1.0
+            stock_T = _fmt_dim(th_in)
             mat_lines.append(f"  Stock used: {stock_L} × {stock_W} × {stock_T} in")
             mat_lines.append("")
 
@@ -4945,9 +5128,8 @@ def estimate_tapping_hours(tap_qty: int, thickness_in: float, mat_key: str) -> f
 
 
 def _drilling_floor_hours(hole_count: int) -> float:
-    floor_hr = hole_count * 0.09 / 60.0 + 0.10
-    min_abs = 0.35 if hole_count >= 50 else 0.10
-    return max(floor_hr, min_abs)
+    min_sec_per_hole = 9.0
+    return max((float(hole_count or 0) * min_sec_per_hole) / 3600.0, 0.0)
 
 
 def validate_drilling_reasonableness(hole_count: int, drill_hr_after_overrides: float) -> tuple[bool, str]:
@@ -5720,7 +5902,26 @@ def compute_quote_from_df(df: pd.DataFrame,
     avg_tap_min = 0.20
     avg_cbore_min = 0.15
     avg_csk_min = 0.12
-    tapping_hr = (tap_qty_geo * avg_tap_min) / 60.0
+    tap_class_counts_geo = geo_context.get("tap_class_counts") if isinstance(geo_context.get("tap_class_counts"), dict) else {}
+    tapping_minutes_total = 0.0
+    if tap_class_counts_geo:
+        for cls_key, qty_val in tap_class_counts_geo.items():
+            try:
+                qty_int = int(qty_val)
+            except Exception:
+                continue
+            if qty_int <= 0:
+                continue
+            key = str(cls_key).lower()
+            if key == "npt":
+                minutes_per = TAP_MINUTES_BY_CLASS.get("pipe", TAP_MINUTES_BY_CLASS.get("medium", 0.3))
+            else:
+                minutes_per = TAP_MINUTES_BY_CLASS.get(key, TAP_MINUTES_BY_CLASS.get("medium", 0.3))
+            tapping_minutes_total += qty_int * float(minutes_per)
+    if tapping_minutes_total > 0:
+        tapping_hr = tapping_minutes_total / 60.0
+    else:
+        tapping_hr = (tap_qty_geo * avg_tap_min) / 60.0
     cbore_hr = (cbore_qty_geo * avg_cbore_min) / 60.0
     csk_hr = (csk_qty_geo * avg_csk_min) / 60.0
     tap_minutes_hint_val = _coerce_float_or_none(geo_context.get("tap_minutes_hint"))
@@ -6119,6 +6320,140 @@ def compute_quote_from_df(df: pd.DataFrame,
         bins_raw = chart_reconcile_geo.get("chart_bins") or {}
         hole_bins_for_seed = {str(k): int(v) for k, v in bins_raw.items()}
 
+    raw_geo_block = geo_context.get("raw") if isinstance(geo_context.get("raw"), dict) else {}
+    leader_texts: list[str] = []
+    if isinstance(raw_geo_block, dict):
+        leaders = raw_geo_block.get("leaders")
+        if isinstance(leaders, (list, tuple)):
+            leader_texts.extend(str(txt) for txt in leaders if txt)
+        leader_entries = raw_geo_block.get("leader_entries")
+        if isinstance(leader_entries, (list, tuple)):
+            for entry in leader_entries:
+                if isinstance(entry, dict):
+                    raw_txt = entry.get("raw")
+                    if raw_txt:
+                        leader_texts.append(str(raw_txt))
+    has_leader_notes = False
+    leader_keywords = ("FROM BACK", "BACK SIDE", "OPP SIDE", "JIG GRIND")
+    for text in leader_texts:
+        upper = text.upper()
+        if any(keyword in upper for keyword in leader_keywords):
+            has_leader_notes = True
+            break
+
+    def _first_float(*values: Any) -> float | None:
+        for value in values:
+            cand = _coerce_float_or_none(value)
+            if cand is not None:
+                return float(cand)
+        return None
+
+    max_hole_depth_in = _first_float(
+        geo_context.get("deepest_hole_in"),
+        (geo_context.get("chart_summary") or {}).get("deepest_hole_in") if isinstance(geo_context.get("chart_summary"), dict) else None,
+        (geo_context.get("geo_read_more") or {}).get("deepest_hole_in") if isinstance(geo_context.get("geo_read_more"), dict) else None,
+        inner_geo.get("deepest_hole_in") if inner_geo else None,
+    )
+
+    plate_len_val = _coerce_float_or_none(
+        geo_context.get("plate_len_in")
+        or inner_geo.get("plate_len_in")
+    )
+    plate_wid_val = _coerce_float_or_none(
+        geo_context.get("plate_wid_in")
+        or inner_geo.get("plate_wid_in")
+    )
+    outline_area_val = _coerce_float_or_none(
+        geo_context.get("outline_area_in2")
+        or inner_geo.get("outline_area_in2")
+    )
+    plate_area_in2 = None
+    if plate_len_val and plate_wid_val:
+        try:
+            plate_area_in2 = float(plate_len_val) * float(plate_wid_val)
+        except Exception:
+            plate_area_in2 = None
+    elif outline_area_val:
+        plate_area_in2 = float(outline_area_val)
+
+    text_candidates: list[str] = []
+    if isinstance(geo_context.get("notes"), (list, tuple)):
+        text_candidates.extend(str(val) for val in geo_context.get("notes") if val)
+    if isinstance(geo_context.get("chart_lines"), (list, tuple)):
+        text_candidates.extend(str(val) for val in geo_context.get("chart_lines") if val)
+    if leader_texts:
+        text_candidates.extend(leader_texts)
+    default_tol_text = geo_context.get("default_tol") or geo_context.get("default_tolerance")
+    if default_tol_text:
+        text_candidates.append(str(default_tol_text))
+    material_note_txt = geo_context.get("material_note")
+    if material_note_txt:
+        text_candidates.append(str(material_note_txt))
+
+    has_tight_tol_flag = False
+    for snippet in text_candidates:
+        upper = snippet.upper()
+        if RE_TIGHT_TOL.search(upper):
+            has_tight_tol_flag = True
+            break
+        for match in re.findall(r"0\.000\d+", upper):
+            try:
+                if float(match) <= 0.0003:
+                    has_tight_tol_flag = True
+                    break
+            except Exception:
+                continue
+        if has_tight_tol_flag:
+            break
+
+    finish_flags_set: set[str] = set()
+    finishes_geo = geo_context.get("finishes") or inner_geo.get("finishes") if inner_geo else None
+    if isinstance(finishes_geo, (list, tuple, set)):
+        for fin in finishes_geo:
+            if isinstance(fin, str) and fin.strip():
+                finish_flags_set.add(fin.strip().upper())
+    finish_keywords = {
+        "BLACK OXIDE": ("BLACK OXIDE", "BLK OX"),
+        "ANODIZE": ("ANODIZE", "ANODIZED", "ANODISE"),
+        "PASSIVATION": ("PASSIVATE", "PASSIVATION"),
+    }
+    for snippet in text_candidates:
+        upper = snippet.upper()
+        for canonical, tokens in finish_keywords.items():
+            if any(token in upper for token in tokens):
+                finish_flags_set.add(canonical)
+    finish_flags_list = sorted(finish_flags_set)
+
+    stock_guess = None
+    material_family = geo_context.get("material_family") or (inner_geo.get("material_family") if inner_geo else None)
+    if isinstance(material_family, str) and material_family.strip():
+        lower = material_family.lower()
+        if "alum" in lower:
+            stock_guess = "Aluminum"
+        elif "brass" in lower:
+            stock_guess = "Brass"
+        elif "copper" in lower:
+            stock_guess = "Copper"
+        elif "steel" in lower:
+            stock_guess = "Steel"
+    material_text_parts: list[str] = []
+    for key in ("material_note", "material", "material_family"):
+        val = geo_context.get(key)
+        if not val and inner_geo:
+            val = inner_geo.get(key)
+        if val:
+            material_text_parts.append(str(val))
+    combined_material_text = " ".join(material_text_parts).upper()
+    if not stock_guess and combined_material_text:
+        if any(tok in combined_material_text for tok in ("6061", "7075", "ALUMIN", "ALUM.")):
+            stock_guess = "Aluminum"
+        elif any(tok in combined_material_text for tok in ("A2", "D2", "H13", "STEEL", "17-4", "15-5", "S7", "O1", "4140", "4340")):
+            stock_guess = "Steel"
+        elif any(tok in combined_material_text for tok in ("C360", "BRASS", "C260")):
+            stock_guess = "Brass"
+        elif any(tok in combined_material_text for tok in ("C110", "COPPER")):
+            stock_guess = "Copper"
+
     needs_back_face_flag = bool(
         geo_context.get("GEO_Setup_NeedsBackOps")
         or geo_context.get("needs_back_face")
@@ -6148,6 +6483,17 @@ def compute_quote_from_df(df: pd.DataFrame,
         "material": material_name,
         "bbox_mm": bbox_payload,
     }
+    derived_block = geo_for_suggest["derived"]
+    derived_block["has_ldr_notes"] = has_leader_notes
+    derived_block["has_tight_tol"] = has_tight_tol_flag
+    if max_hole_depth_in is not None:
+        derived_block["max_hole_depth_in"] = max_hole_depth_in
+    if plate_area_in2 is not None:
+        derived_block["plate_area_in2"] = plate_area_in2
+    if finish_flags_list:
+        derived_block["finish_flags"] = finish_flags_list
+    if stock_guess:
+        derived_block["stock_guess"] = stock_guess
 
     payload = build_suggest_payload(geo_for_suggest, llm_baseline_payload, base_costs["rates"], llm_bounds)
 
@@ -7420,7 +7766,10 @@ RE_COORD_ROW = re.compile(r"([A-Z]\d+)\s+([\-+]?\d+(?:\.\d+)?)\s+([\-+]?\d+(?:\.
 RE_FINISH_STRONG = re.compile(r"\b(ANODIZE(?:\s+BLACK|\s+CLEAR)?|BLACK OXIDE|ZINC PLATE|NICKEL PLATE|PASSIVATE|PHOSPHATE|ECOAT|E-?COAT)\b", re.I)
 RE_HEAT_TREAT_STRONG = re.compile(r"\b(A2|D2|O1|H13|4140|4340|S7|A36)\b.*?(HRC\s*\d{2}|\d{2}[-–]\d{2}\s*HRC)?", re.I)
 RE_MAT_STRONG = re.compile(r"\b(MATERIAL|MAT)\b[:\s]*([A-Z0-9\-\s/\.]+)")
-RE_TAP_TOKEN = re.compile(r"(?:(\(\s*\d+\s*\))\s*)?(#\s*\d{1,2}-\d+|\d+/\d+\s*-\s*NPT|[0-9.]+\s*-\s*[\d/]+|M\d+(?:\.\d+)?x\d+(?:\.\d+)?)", re.I)
+RE_TAP_TOKEN = re.compile(
+    r"(#\d{1,2}-\d+|\d+/\d+-\d+|M\d+(?:\.\d+)?x\d+(?:\.\d+)?|\d+/\d+\s*-\s*NPT|N\.?P\.?T)",
+    re.I,
+)
 
 LETTER_DRILL_IN = {
     "A": 0.234,
@@ -7740,6 +8089,56 @@ def classify_concentric(doc, to_in: float, tol_center: float = 0.005, min_gap_in
     return {"cbore_pairs_geom": cbore_like, "csk_pairs_geom": csk_like, "prov": "CONCENTRIC CIRCLES"}
 
 
+def tap_classes_from_row_text(u: str, qty: int) -> dict[str, int]:
+    cls = {"small": 0, "medium": 0, "large": 0, "npt": 0}
+    if qty <= 0:
+        return cls
+    text = (u or "")
+    if not text:
+        return cls
+    upper = text.upper()
+    for m in RE_TAP_TOKEN.finditer(upper):
+        tok = m.group(1).upper().replace(" ", "").replace(".", "") if m.group(1) else ""
+        if not tok:
+            continue
+        if "NPT" in tok:
+            cls["npt"] += qty
+            continue
+        dia_in = None
+        if tok.startswith("#"):
+            nums = re.findall(r"\d+", tok)
+            if nums:
+                num = int(nums[0])
+                dia_in = {6: 0.138, 8: 0.164, 10: 0.19, 12: 0.216}.get(num, 0.19)
+        elif tok.startswith("M"):
+            nums = re.findall(r"\d+(?:\.\d+)?", tok)
+            if nums:
+                dia_in = float(nums[0]) / 25.4
+        elif "/" in tok:
+            try:
+                num, den = map(int, tok.split("-", 1)[0].split("/"))
+                dia_in = num / den
+            except Exception:
+                dia_in = None
+        else:
+            frac = re.findall(r"([0-9.]+)", tok)
+            if frac:
+                try:
+                    dia_in = float(frac[0])
+                except Exception:
+                    dia_in = None
+        if dia_in is None:
+            continue
+        if dia_in < 0.250:
+            cls["small"] += qty
+        elif dia_in < 0.500:
+            cls["medium"] += qty
+        else:
+            cls["large"] += qty
+        break
+    return cls
+
+
 def tap_classes_from_lines(lines: Sequence[str] | None) -> dict[str, int]:
     classes = {"small": 0, "medium": 0, "large": 0, "npt": 0}
     if not lines:
@@ -7747,44 +8146,19 @@ def tap_classes_from_lines(lines: Sequence[str] | None) -> dict[str, int]:
     for raw in lines:
         if not raw:
             continue
-        for match in RE_TAP_TOKEN.finditer(raw.upper()):
-            token = match.group(2).replace(" ", "") if match.group(2) else ""
-            if not token:
-                continue
-            if "NPT" in token:
-                classes["npt"] += 1
-                continue
-            dia_in: float | None = None
-            if token.startswith("#"):
-                num_match = re.findall(r"\d+", token)
-                if num_match:
-                    num = int(num_match[0])
-                    approx = {6: 0.138, 8: 0.164, 10: 0.19, 12: 0.216}.get(num, 0.19)
-                    dia_in = approx
-            elif token.startswith("M"):
-                nums = re.findall(r"\d+(?:\.\d+)?", token)
-                if nums:
-                    dia_in = float(nums[0]) / 25.4
-            else:
-                frac = re.findall(r"(\d+)/(\d+)", token)
-                if frac:
-                    num, den = map(int, frac[0])
-                    dia_in = num / den
-                else:
-                    if token in LETTER_DRILL_IN:
-                        dia_in = LETTER_DRILL_IN[token]
-                    else:
-                        nums = re.findall(r"([0-9.]+)", token)
-                        if nums:
-                            dia_in = float(nums[0])
-            if dia_in is None:
-                continue
-            if dia_in < 0.25:
-                classes["small"] += 1
-            elif dia_in < 0.5:
-                classes["medium"] += 1
-            else:
-                classes["large"] += 1
+        text = str(raw)
+        qty = 1
+        try:
+            upper_text = text.upper()
+            m_qty = re.search(r"\bQTY\b[:\s]*(\d+)", upper_text)
+            if m_qty:
+                qty = int(m_qty.group(1))
+        except Exception:
+            qty = 1
+        row_cls = tap_classes_from_row_text(text, qty)
+        for key, val in row_cls.items():
+            if val:
+                classes[key] = classes.get(key, 0) + int(val)
     return classes
 
 
@@ -7919,76 +8293,106 @@ def _iter_table_text(doc):
             continue
 
 
-def hole_count_from_acad_table(doc) -> tuple[int, dict] | tuple[None, None]:
-    """
-    Returns (count, families) from a formal ACAD_TABLE.
-    families = {ref_dia_in: qty}
-    """
-    for sp in _spaces(doc):
-        for t in sp.query("TABLE"):
+def hole_count_from_acad_table(doc) -> dict[str, Any]:
+    """Extract hole and tap data from an AutoCAD TABLE entity."""
+
+    result: dict[str, Any] = {}
+    if doc is None:
+        return result
+
+    for sp in _spaces(doc) or []:
+        try:
+            tables = sp.query("TABLE")
+        except Exception:
+            tables = []
+        for t in tables:
             try:
                 hdr = [
-                    " ".join(t.get_cell(0, c).get_text().split()).upper()
+                    " ".join((t.get_cell(0, c).get_text() or "").split()).upper()
                     if t.get_cell(0, c)
                     else ""
                     for c in range(t.dxf.n_cols)
                 ]
             except Exception:
                 continue
-
-            joined_hdr = " ".join(hdr)
-            if "HOLE" not in joined_hdr:
+            if "HOLE" not in " ".join(hdr):
                 continue
 
-            def find_col(name):
-                for idx, txt in enumerate(hdr):
+            def find_col(name: str) -> int | None:
+                for i, txt in enumerate(hdr):
                     if name in txt:
-                        return idx
+                        return i
                 return None
 
-            col_qty = find_col("QTY")
-            col_ref = find_col("REF")
-            col_desc = find_col("DESCRIPTION")
-
-            if col_qty is None:
-                continue
+            c_qty = find_col("QTY")
+            c_desc = find_col("DESCRIPTION")
+            c_ref = find_col("REF")
 
             total = 0
-            fam: dict[float, int] = {}
+            families: dict[float, int] = {}
+            row_taps = 0
+            tap_classes = {"small": 0, "medium": 0, "large": 0, "npt": 0}
 
             for r in range(1, t.dxf.n_rows):
-                qty_cell = t.get_cell(r, col_qty) if col_qty is not None else None
-                if not qty_cell:
-                    continue
+                cell = t.get_cell(r, c_qty) if c_qty is not None else None
                 try:
-                    s = (qty_cell.get_text() or "").strip()
+                    qty_text = (cell.get_text() if cell else "0") or "0"
                 except Exception:
+                    qty_text = "0"
+                try:
+                    qty = int(float(qty_text.strip() or "0"))
+                except Exception:
+                    digits = re.findall(r"\d+", qty_text)
+                    qty = int(digits[0]) if digits else 0
+                if qty <= 0:
                     continue
-                if not s.isdigit():
-                    continue
-                q = int(s)
-                total += q
+                total += qty
 
-                m = None
-                if col_ref is not None:
-                    cell = t.get_cell(r, col_ref)
-                    ref_text = (cell.get_text() or "").strip() if cell else ""
-                    if ref_text:
-                        m = re.search(r"(\d+(?:\.\d+)?)", ref_text)
-                elif col_desc is not None:
-                    cell = t.get_cell(r, col_desc)
-                    desc_text = (cell.get_text() or "").upper() if cell else ""
-                    if desc_text:
-                        m = re.search(r"[Ø⌀]\s*(\d+(?:\.\d+)?)", desc_text)
-
+                ref_txt = ""
+                desc = ""
+                if c_ref is not None:
+                    ref_cell = t.get_cell(r, c_ref)
+                    try:
+                        ref_txt = (ref_cell.get_text() if ref_cell else "") or ""
+                    except Exception:
+                        ref_txt = ""
+                if c_desc is not None:
+                    desc_cell = t.get_cell(r, c_desc)
+                    try:
+                        desc = (desc_cell.get_text() if desc_cell else "") or ""
+                    except Exception:
+                        desc = ""
+                u = (ref_txt + " " + desc).upper()
+                m = re.search(r"[Ø⌀]\s*(\d+(?:\.\d+)?)", u)
                 if m:
-                    d = round(float(m.group(1)), 4)
-                    fam[d] = fam.get(d, 0) + q
+                    try:
+                        d = round(float(m.group(1)), 4)
+                        families[d] = families.get(d, 0) + qty
+                    except Exception:
+                        pass
+
+                tap_cls = tap_classes_from_row_text(u, qty)
+                tap_sum = sum(tap_cls.values())
+                if tap_sum:
+                    for key, val in tap_cls.items():
+                        if val:
+                            tap_classes[key] = tap_classes.get(key, 0) + int(val)
+                    row_taps += tap_sum
+                elif "TAP" in u or "N.P.T" in u or "NPT" in u:
+                    row_taps += qty
 
             if total > 0:
-                return total, fam
+                filtered_classes = {k: int(v) for k, v in tap_classes.items() if v}
+                result = {
+                    "hole_count": total,
+                    "hole_diam_families_in": families,
+                    "tap_qty_from_table": row_taps,
+                    "tap_class_counts": filtered_classes,
+                    "provenance_holes": "HOLE TABLE (ACAD_TABLE)",
+                }
+                return result
 
-    return None, None
+    return result
 
 
 def hole_count_from_text_table(doc, lines: Sequence[str] | None = None) -> tuple[int, dict] | tuple[None, None]:
@@ -9100,11 +9504,26 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
                 notes.append(msg)
 
     # unified hole counting with fallbacks
-    cnt, fam = hole_count_from_acad_table(doc)
+    table_info = hole_count_from_acad_table(doc)
+    cnt = None
+    fam: dict | None = None
+    tap_classes_from_table: dict[str, int] | None = None
+    tap_qty_from_table = 0
     source = "HOLE TABLE (ACAD_TABLE)"
+    if table_info:
+        cnt = table_info.get("hole_count")
+        fam = table_info.get("hole_diam_families_in")
+        raw_classes = table_info.get("tap_class_counts") if isinstance(table_info.get("tap_class_counts"), dict) else None
+        if raw_classes:
+            tap_classes_from_table = {k: int(v) for k, v in raw_classes.items() if v}
+        tap_qty_from_table = int(table_info.get("tap_qty_from_table") or 0)
+        if table_info.get("provenance_holes"):
+            source = str(table_info.get("provenance_holes"))
     if not cnt:
-        cnt, fam = hole_count_from_text_table(doc, table_lines)
-        source = "HOLE TABLE (TEXT)" if cnt else source
+        text_cnt, text_fam = hole_count_from_text_table(doc, table_lines)
+        if text_cnt:
+            cnt, fam = text_cnt, text_fam
+            source = "HOLE TABLE (TEXT)"
 
     geom_cnt, geom_fam = hole_count_from_geometry(doc, float(to_in))
     if not cnt and geom_cnt:
@@ -9121,6 +9540,15 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
             if not flags:
                 flags = []
             flags.append(f"hole_count_coord_conflict: table={cnt}, coord={coord_count}")
+
+    if cnt:
+        combined_agg["hole_count"] = int(cnt)
+    if tap_classes_from_table:
+        combined_agg["tap_class_counts"] = dict(tap_classes_from_table)
+    if tap_qty_from_table:
+        combined_agg["tap_qty"] = max(int(tap_qty_from_table), int(combined_agg.get("tap_qty") or 0))
+    if not combined_agg.get("provenance") and table_info and table_info.get("provenance_holes"):
+        combined_agg["provenance"] = table_info.get("provenance_holes")
 
     pocket_metrics = detect_pockets_and_islands(doc, float(to_in))
     stock_plan = plan_stock_blank(
@@ -9235,7 +9663,10 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
     if stock_plan:
         geo["stock_plan_guess"] = stock_plan
     geo["hole_family_count"] = len(fam or geom_fam or {})
-    geo["tap_classes"] = tap_classes_from_lines(geo.get("chart_lines"))
+    if tap_classes_from_table:
+        geo["tap_classes"] = dict(tap_classes_from_table)
+    else:
+        geo["tap_classes"] = tap_classes_from_lines(geo.get("chart_lines"))
     deburr_hints = quick_deburr_estimates(geo.get("edge_len_in"), geo.get("hole_count"))
     deburr_prov = deburr_hints.pop("prov", None)
     geo.update(deburr_hints)
