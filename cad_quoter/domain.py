@@ -1,5 +1,6 @@
 """Domain helpers and state containers for quoting workflows."""
 
+
 from __future__ import annotations
 
 import math
@@ -9,12 +10,14 @@ from typing import Any, Dict
 
 
 def _normalize_lookup_key(value: str) -> str:
+
     cleaned = re.sub(r"[^0-9a-z]+", " ", str(value).strip().lower())
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
 def _ensure_scrap_pct(val) -> float:
     """Coerce UI/LLM scrap into a sane fraction in ``[0, 0.25]``."""
+
 
     try:
         x = float(val)
@@ -25,6 +28,7 @@ def _ensure_scrap_pct(val) -> float:
     if not (x >= 0.0 and math.isfinite(x)):
         return 0.0
     return min(0.25, max(0.0, x))
+
 
 
 @dataclass
@@ -67,6 +71,7 @@ def build_suggest_payload(geo, baseline, rates, bounds) -> dict:
     derived = geo.get("derived") or {}
     hole_bins = derived.get("hole_bins") or {}
     hole_bins_top: Dict[str, int] = {}
+
     if isinstance(hole_bins, dict):
         hole_bins_top = dict(sorted(hole_bins.items(), key=lambda kv: -kv[1])[:8])
 
@@ -106,6 +111,7 @@ def build_suggest_payload(geo, baseline, rates, bounds) -> dict:
     hole_count_val = _as_float_or_none(geo.get("hole_count"))
     if hole_count_val is None:
         hole_count_val = _as_float_or_none(derived.get("hole_count"))
+
     hole_count = int(hole_count_val or 0)
 
     tap_qty = derived.get("tap_qty")
@@ -132,6 +138,7 @@ def build_suggest_payload(geo, baseline, rates, bounds) -> dict:
     tap_class_counts = (
         derived.get("tap_class_counts") if isinstance(derived.get("tap_class_counts"), dict) else {}
     )
+
     tap_details = derived.get("tap_details") if isinstance(derived.get("tap_details"), list) else []
     npt_qty = 0
     try:
@@ -150,6 +157,7 @@ def build_suggest_payload(geo, baseline, rates, bounds) -> dict:
             str(flag).strip()
             for flag in finish_flags_raw
             if isinstance(flag, str) and flag.strip()
+
         ]
     elif isinstance(finish_flags_raw, str) and finish_flags_raw.strip():
         finish_flags = [finish_flags_raw.strip()]
@@ -194,6 +202,7 @@ def build_suggest_payload(geo, baseline, rates, bounds) -> dict:
         seed["tap_class_counts"] = top_counts
     if tap_details:
         seed["tap_details"] = tap_details[:12]
+
     if npt_qty:
         seed["npt_qty"] = npt_qty
     if inference_knobs:
@@ -206,11 +215,13 @@ def build_suggest_payload(geo, baseline, rates, bounds) -> dict:
         "geo": {
             "material": material_name,
             "thickness_mm": thickness_mm,
+
             "hole_count": hole_count,
             "tap_qty": tap_qty,
             "cbore_qty": cbore_qty,
             "csk_qty": csk_qty,
             "npt_qty": npt_qty,
+
             "tap_minutes_hint": tap_minutes_hint,
             "cbore_minutes_hint": cbore_minutes_hint,
             "csk_minutes_hint": csk_minutes_hint,
@@ -238,3 +249,4 @@ __all__ = [
     "_normalize_lookup_key",
     "build_suggest_payload",
 ]
+

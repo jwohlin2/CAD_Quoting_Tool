@@ -1,10 +1,14 @@
+
 """Configuration helpers for the CAD Quoter application."""
+
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+
+
 
 
 @dataclass(frozen=True)
@@ -22,6 +26,7 @@ class AppEnvironment:
             debug_dir = Path(debug_dir_raw)
         else:
             debug_dir = Path(__file__).resolve().parent.parent / "llm_debug"
+
         debug_dir.mkdir(exist_ok=True)
         return cls(llm_debug_enabled=debug_enabled, llm_debug_dir=debug_dir)
 
@@ -46,4 +51,6 @@ def describe_runtime_environment() -> dict[str, str]:
     return info
 
 
+
 __all__ = ["APP_ENV", "AppEnvironment", "describe_runtime_environment"]
+
