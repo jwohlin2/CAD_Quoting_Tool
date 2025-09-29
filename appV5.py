@@ -670,21 +670,7 @@ def render_step_thumbs(shape, out_dir: str) -> Dict[str, str]:
     raise RuntimeError("STEP thumbnail rendering is not supported in this environment")
 
 
-@dataclass
-class QuoteState:
-    geo: dict = field(default_factory=dict)
-    ui_vars: dict = field(default_factory=dict)
-    rates: dict = field(default_factory=dict)
-    baseline: dict = field(default_factory=dict)
-    llm_raw: dict = field(default_factory=dict)
-    suggestions: dict = field(default_factory=dict)
-    user_overrides: dict = field(default_factory=dict)
-    effective: dict = field(default_factory=dict)
-    effective_sources: dict = field(default_factory=dict)
-    accept_llm: dict = field(default_factory=dict)
-    bounds: dict = field(default_factory=dict)
-    material_source: str | None = None
-    guard_context: dict = field(default_factory=dict)
+from cad_quoter.domain import QuoteState
 
 
 def _as_float_or_none(value: Any) -> float | None:
@@ -11328,6 +11314,9 @@ class App(tk.Tk):
         file_menu.add_command(label="Load Overrides...", command=self.load_overrides)
         file_menu.add_command(label="Save Overrides...", command=self.save_overrides)
         file_menu.add_separator()
+        file_menu.add_command(label="Import Quote Session...", command=self.import_quote_session)
+        file_menu.add_command(label="Export Quote Session...", command=self.export_quote_session)
+        file_menu.add_separator()
         file_menu.add_command(label="Set Material Vendor CSV...", command=self.set_material_vendor_csv)
         file_menu.add_command(label="Clear Material Vendor CSV", command=self.clear_material_vendor_csv)
         file_menu.add_separator()
@@ -12207,6 +12196,178 @@ class App(tk.Tk):
         except Exception as e:
             messagebox.showerror("Overrides", f"Load failed:\n{{e}}")
             self.status_var.set("Failed to load overrides.")
+
+    def _exportable_vars_records(self) -> list[dict[str, Any]]:
+        if self.vars_df is None:
+            return []
+        df_snapshot = self.vars_df.copy(deep=True)
+        try:
+            for item_name, string_var in self.quote_vars.items():
+                mask = df_snapshot["Item"] == item_name
+                if mask.any():
+                    df_snapshot.loc[mask, "Example Values / Options"] = string_var.get()
+        except Exception:
+            pass
+
+        records: list[dict[str, Any]] = []
+        for _, row in df_snapshot.iterrows():
+            record: dict[str, Any] = {}
+            for column, value in row.items():
+                if pd.isna(value):
+                    record[column] = None
+                elif hasattr(value, "item"):
+                    try:
+                        record[column] = value.item()
+                    except Exception:
+                        record[column] = value
+                else:
+                    record[column] = value
+            records.append(record)
+        return records
+
+    def export_quote_session(self) -> None:
+        if self.vars_df is None:
+            messagebox.showinfo("Export Quote Session", "Load a quote before exporting the session.")
+            return
+
+        path = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("Quote Session", "*.json"), ("JSON", "*.json"), ("All", "*.*")],
+            initialfile="quote_session.json",
+        )
+        if not path:
+            return
+
+        previous_status = self.status_var.get()
+        try:
+            self.apply_overrides()
+        finally:
+            self.status_var.set(previous_status)
+
+        ui_vars = {label: var.get() for label, var in self.quote_vars.items()}
+        if ui_vars:
+            self.quote_state.ui_vars = dict(ui_vars)
+        self.quote_state.rates = dict(self.rates)
+        if self.geo:
+            self.quote_state.geo = dict(self.geo)
+
+        session_payload = {
+            "version": 1,
+            "exported_at": time.time(),
+            "params": dict(self.params),
+            "rates": dict(self.rates),
+            "geo": dict(self.geo or {}),
+            "geo_context": dict(self.geo_context or {}),
+            "vars_df": self._exportable_vars_records(),
+            "quote_state": self.quote_state.to_dict(),
+            "llm": {
+                "enabled": bool(self.llm_enabled.get()),
+                "apply_adjustments": bool(self.apply_llm_adj.get()),
+                "model_path": self.llm_model_path.get().strip(),
+            },
+            "status": self.status_var.get(),
+        }
+
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(session_payload, handle, indent=2)
+            messagebox.showinfo("Export Quote Session", f"Session saved to:\n{path}")
+            self.status_var.set(f"Quote session exported to {path}")
+        except Exception as exc:
+            messagebox.showerror("Export Quote Session", f"Failed to export session:\n{exc}")
+            self.status_var.set("Failed to export quote session.")
+
+    def import_quote_session(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Import Quote Session",
+            filetypes=[("Quote Session", "*.json"), ("JSON", "*.json"), ("All", "*.*")],
+        )
+        if not path:
+            return
+
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except Exception as exc:
+            messagebox.showerror("Import Quote Session", f"Failed to read session:\n{exc}")
+            self.status_var.set("Failed to import quote session.")
+            return
+
+        if not isinstance(payload, dict):
+            messagebox.showerror("Import Quote Session", "Session file is not a valid JSON object.")
+            self.status_var.set("Invalid quote session file.")
+            return
+
+        params_payload = payload.get("params")
+        self.params = PARAMS_DEFAULT.copy()
+        if isinstance(params_payload, dict):
+            self.params.update(params_payload)
+
+        rates_payload = payload.get("rates")
+        self.rates = RATES_DEFAULT.copy()
+        if isinstance(rates_payload, dict):
+            self.rates.update(rates_payload)
+
+        llm_payload = payload.get("llm") or {}
+        if isinstance(llm_payload, dict):
+            self.llm_enabled.set(bool(llm_payload.get("enabled", True)))
+            self.apply_llm_adj.set(bool(llm_payload.get("apply_adjustments", True)))
+            model_path = llm_payload.get("model_path")
+            if isinstance(model_path, str):
+                self.llm_model_path.set(model_path)
+
+        geo_payload = payload.get("geo")
+        self.geo = dict(geo_payload) if isinstance(geo_payload, dict) else {}
+        geo_context_payload = payload.get("geo_context")
+        if isinstance(geo_context_payload, dict):
+            self.geo_context = dict(geo_context_payload)
+        else:
+            self.geo_context = dict(self.geo)
+
+        vars_payload = payload.get("vars_df")
+        has_records = isinstance(vars_payload, list) and len(vars_payload) > 0
+        if isinstance(vars_payload, list):
+            try:
+                self.vars_df = pd.DataFrame.from_records(vars_payload)
+            except Exception:
+                self.vars_df = None
+        else:
+            self.vars_df = None
+
+        quote_state_payload = payload.get("quote_state")
+        try:
+            self.quote_state = QuoteState.from_dict(quote_state_payload)
+        except Exception as exc:
+            messagebox.showerror("Import Quote Session", f"Quote state invalid:\n{exc}")
+            self.status_var.set("Failed to import quote session.")
+            return
+
+        ensure_accept_flags(self.quote_state)
+
+        self.quote_state.rates = dict(self.rates)
+        if not self.quote_state.geo and self.geo:
+            self.quote_state.geo = dict(self.geo)
+
+        if self.geo:
+            try:
+                self._log_geo(self.geo)
+            except Exception:
+                pass
+
+        if self.vars_df is not None:
+            self._populate_editor_tab(self.vars_df)
+        else:
+            self._populate_editor_tab(coerce_or_make_vars_df(None))
+
+        for key, var in self.param_vars.items():
+            var.set(str(self.params.get(key, "")))
+        for key, var in self.rate_vars.items():
+            var.set(str(self.rates.get(key, "")))
+
+        self.status_var.set(f"Quote session imported from {path}")
+
+        if has_records and self.vars_df is not None and not self.vars_df.empty:
+            self.gen_quote(reuse_suggestions=True)
 
     # ----- LLM tab ----- 
     def _build_llm(self, parent):
