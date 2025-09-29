@@ -11,6 +11,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+
 # Optional trimesh for STL
 try:
     import trimesh  # type: ignore
@@ -26,6 +27,7 @@ try:
     import ezdxf
     _EZDXF_VER = getattr(ezdxf, "__version__", "unknown")
     _HAS_EZDXF = True
+
 except Exception:
     ezdxf = None  # keep name defined
 
@@ -47,6 +49,7 @@ try:
     from dxf_text_extract import extract_text_lines_from_dxf
 except Exception:
     extract_text_lines_from_dxf = None
+
 
 # numpy is optional for a few small calcs; degrade gracefully if missing
 try:
@@ -295,6 +298,7 @@ def ensure_shape(obj):
         raise TypeError("Expected non-null TopoDS_Shape")
     return obj
 
+
 # Safe casters: no-ops if already cast; unwrap list nodes; check kind
 def to_edge_safe(obj):
     obj = _unwrap_value(obj)
@@ -433,6 +437,7 @@ def list_iter(lst):
 def require_ezdxf():
     """Raise a clear error if ezdxf is missing."""
     if not _HAS_EZDXF:
+
         raise RuntimeError("ezdxf not installed. Install with pip/conda (package name: 'ezdxf').")
     return ezdxf
 
@@ -448,6 +453,7 @@ def get_dwg_converter_path() -> str:
 def have_dwg_support() -> bool:
     """True if we can open DWG (either odafc or an external converter is available)."""
     return _HAS_ODAFC or bool(get_dwg_converter_path())
+
 def get_import_diagnostics_text() -> str:
     import sys, shutil, os
     lines = []
@@ -543,6 +549,7 @@ def load_drawing(path: Path) -> Drawing:
             return ezdxf.readfile(dxf_path)
         # Fallback: odafc (requires ODAFileConverter on PATH)
         if _HAS_ODAFC:
+
             return odafc.readfile(str(path))
         raise RuntimeError(
             "DWG import needs ODA File Converter. Set ODA_CONVERTER_EXE to the exe "
@@ -650,6 +657,7 @@ def build_llm_payload(structured: dict, page_image_path: str | None):
 
 
 # ==== OpenCascade compat (works with OCP OR OCC.Core) ====
+
 from pathlib import Path
 
 try:
@@ -862,6 +870,7 @@ def read_step_shape(path: str) -> TopoDS_Shape:
             print(f"[STEP_PROBE] error during face probe: {_e}")
         else:
             print(f"[STEP_PROBE] faces={cnt}")
+
 
     fx = ShapeFix_Shape(shape)
     fx.Perform()
@@ -1252,6 +1261,7 @@ def enrich_geo_stl(path):
     start_time = time.time()
     print(f"[{time.time() - start_time:.2f}s] Starting enrich_geo_stl for {path}")
     if not _HAS_TRIMESH:
+
         raise RuntimeError("trimesh not available to process STL")
     
     print(f"[{time.time() - start_time:.2f}s] Loading mesh...")
@@ -1349,7 +1359,7 @@ def load_cad_any(path: str) -> TopoDS_Shape:
         return read_dxf_as_occ_shape(dxf_path)
     if ext == "dxf":
         return read_dxf_as_occ_shape(path)
-    
+
     raise RuntimeError(f"Unsupported file type for shape loading: {ext}")
 def read_cad_any(path: str):
     from OCP.IFSelect import IFSelect_RetDone
@@ -1568,4 +1578,3 @@ except Exception:
         _HAS_PYMUPDF = True
     except Exception:
         fitz = None  # allow the rest of the app to import
-

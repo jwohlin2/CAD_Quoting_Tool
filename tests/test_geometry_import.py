@@ -1,5 +1,6 @@
 """Smoke-test for cad_quoter.geometry imports."""
 
+
 import sys
 from pathlib import Path
 
@@ -19,3 +20,4 @@ def test_geometry_service_imports() -> None:
     service = geometry.GeometryService()
     assert hasattr(service, "load_model")
     assert isinstance(geometry.HAS_TRIMESH, bool)
+
