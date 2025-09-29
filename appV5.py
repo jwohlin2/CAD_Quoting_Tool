@@ -4439,12 +4439,6 @@ def render_quote(
     ui_vars = result.get("ui_vars") or {}
     if not isinstance(ui_vars, dict):
         ui_vars = {}
-    geo_context_render = result.get("geo") or breakdown.get("geo") or {}
-    editor_thickness_render = _coerce_float_or_none(ui_vars.get("Thickness (in)"))
-    guess_thickness_render = _coerce_float_or_none(
-        geo_context_render.get("thickness_in_guess") if isinstance(geo_context_render, dict) else None
-    )
-    thickness_render = float(editor_thickness_render or guess_thickness_render or 1.0)
     lines.append(f"QUOTE SUMMARY - Qty {qty}")
     lines.append(divider)
     row("Final Price per Part:", price)
@@ -4511,7 +4505,12 @@ def render_quote(
             if scrap is not None:     write_line(f"Scrap %: {_pct(scrap)}", "  ")
             stock_L = _fmt_dim(ui_vars.get("Plate Length (in)"))
             stock_W = _fmt_dim(ui_vars.get("Plate Width (in)"))
-            stock_T = _fmt_dim(thickness_render)
+            th_in = ui_vars.get("Thickness (in)")
+            if th_in in (None, ""):
+                th_in = g.get("thickness_in_guess")
+            if not th_in:
+                th_in = 1.0
+            stock_T = _fmt_dim(th_in)
             mat_lines.append(f"  Stock used: {stock_L} × {stock_W} × {stock_T} in")
             mat_lines.append("")
 
@@ -5680,13 +5679,6 @@ def compute_quote_from_df(df: pd.DataFrame,
     setup_hr  = setups * setup_each
     milling_hr = rough_hr + semi_hr + finish_hr + setup_hr
 
-    pocket_hr_hint_geo = _coerce_float_or_none(geo_context.get("pocket_milling_hr_hint"))
-    if pocket_hr_hint_geo and pocket_hr_hint_geo > 0:
-        milling_hr += float(pocket_hr_hint_geo)
-        hints = geo_context.setdefault("process_hour_hints", {})
-        if isinstance(hints, dict):
-            hints["milling_pocket_hr"] = float(pocket_hr_hint_geo)
-
     max_dim   = first_num(r"\bGEO__MaxDim_mm\b", 0.0)
     is_simple = (max_dim and max_dim <= params["ProgSimpleDim_mm"] and setups <= 2)
     if is_simple:
@@ -6017,8 +6009,6 @@ def compute_quote_from_df(df: pd.DataFrame,
         "packaging":        {"hr": packaging_hr,    "rate": rates.get("PackagingRate", rates.get("AssemblyRate", 0.0))},
         "ehs_compliance":   {"hr": ehs_hr,          "rate": rates.get("InspectionRate", 0.0)},
     }
-    if pocket_hr_hint_geo and pocket_hr_hint_geo > 0:
-        process_meta["milling"]["pocket_hr_hint"] = round(float(pocket_hr_hint_geo), 3)
     process_meta["drilling"] = {"hr": baseline_drill_hr, "rate": drill_rate}
     process_meta["tapping"] = {"hr": tapping_hr_rounded, "rate": drill_rate}
     process_meta["counterbore"] = {"hr": cbore_hr_rounded, "rate": drill_rate}
@@ -6959,24 +6949,6 @@ def compute_quote_from_df(df: pd.DataFrame,
             pass_through[label] = 0.0
 
     process_hours_final = {k: float(process_meta.get(k, {}).get("hr", 0.0)) for k in process_meta}
-
-    hole_count_canonical = int(geo_context.get("hole_count") or 0)
-    geo_context["hole_count"] = hole_count_canonical
-    if inner_geo:
-        inner_geo["hole_count"] = hole_count_canonical
-    min_sec_per_hole = 9.0
-    drill_hr_floor = (hole_count_canonical * min_sec_per_hole) / 3600.0
-    if drill_hr_floor > float(process_hours_final.get("drilling", 0.0)):
-        process_hours_final["drilling"] = drill_hr_floor
-        drill_meta = process_meta.get("drilling")
-        if drill_meta:
-            drill_meta["hr"] = max(float(drill_meta.get("hr", 0.0)), drill_hr_floor)
-            rate = float(drill_meta.get("rate", 0.0))
-            base_extra = float(drill_meta.get("base_extra", 0.0))
-            process_meta["drilling"] = drill_meta
-            process_costs["drilling"] = round(drill_meta["hr"] * rate + base_extra, 2)
-            process_costs_baseline["drilling"] = process_costs.get("drilling", process_costs_baseline.get("drilling", 0.0))
-            process_hours_baseline["drilling"] = float(drill_meta["hr"])
 
     hole_count_for_guard = 0
     try:
@@ -8244,26 +8216,11 @@ def harvest_hardware_notes(all_text_upper: str) -> dict[str, Any]:
     return {"hardware_items": items, "prov": "NOTES HW"}
 
 
-def quick_deburr_estimates(
-    edge_len_in: float | None,
-    hole_count: int | None,
-    profile_length_mm: float | None = None,
-) -> dict[str, Any]:
+def quick_deburr_estimates(edge_len_in: float | None, hole_count: int | None) -> dict[str, Any]:
     deburr_ipm_edge = 1000.0
     sec_per_hole = 5.0
-
-    edge_len_val = _coerce_float_or_none(edge_len_in)
-    if edge_len_val is None and profile_length_mm is not None:
-        try:
-            edge_len_mm = float(profile_length_mm)
-        except Exception:
-            edge_len_mm = None
-        if edge_len_mm and edge_len_mm > 0:
-            edge_len_val = edge_len_mm / 25.4
-
-    edge_hours = (edge_len_val or 0.0) / deburr_ipm_edge
-    hole_qty = int(hole_count or 0)
-    hole_hours = (hole_qty * sec_per_hole) / 3600.0
+    edge_hours = (edge_len_in or 0.0) / deburr_ipm_edge
+    hole_hours = ((hole_count or 0) * sec_per_hole) / 3600.0
     return {
         "deburr_edge_hr_suggest": round(edge_hours, 3) if edge_hours else 0.0,
         "deburr_hole_hr_suggest": round(hole_hours, 3) if hole_hours else 0.0,
@@ -8337,30 +8294,13 @@ def _iter_table_text(doc):
 
 
 def hole_count_from_acad_table(doc) -> dict[str, Any]:
-    """Extract hole/tap metadata from AutoCAD TABLE entities."""
+    """Extract hole and tap data from an AutoCAD TABLE entity."""
 
+    result: dict[str, Any] = {}
     if doc is None:
-        return {}
+        return result
 
-    spaces: list[Any] = []
-    try:
-        spaces.append(doc.modelspace())
-    except Exception:
-        pass
-    try:
-        for layout in doc.layouts:
-            try:
-                if layout.name.lower() in {"model", "defpoints"}:
-                    continue
-                spaces.append(layout.entity_space)
-            except Exception:
-                continue
-    except Exception:
-        pass
-
-    for sp in spaces:
-        if sp is None:
-            continue
+    for sp in _spaces(doc) or []:
         try:
             tables = sp.query("TABLE")
         except Exception:
@@ -8379,78 +8319,81 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
                 continue
 
             def find_col(name: str) -> int | None:
-                for idx, txt in enumerate(hdr):
+                for i, txt in enumerate(hdr):
                     if name in txt:
-                        return idx
+                        return i
                 return None
 
             c_qty = find_col("QTY")
-            c_ref = find_col("REF")
             c_desc = find_col("DESCRIPTION")
+            c_ref = find_col("REF")
 
             total = 0
-            fam: dict[float, int] = {}
-            taps = 0
+            families: dict[float, int] = {}
+            row_taps = 0
             tap_classes = {"small": 0, "medium": 0, "large": 0, "npt": 0}
 
             for r in range(1, t.dxf.n_rows):
-                qty = 0
-                if c_qty is not None and t.get_cell(r, c_qty):
-                    try:
-                        qty_text = (t.get_cell(r, c_qty).get_text() or "").strip()
-                    except Exception:
-                        qty_text = ""
-                    qty = int(qty_text) if qty_text.isdigit() else 0
+                cell = t.get_cell(r, c_qty) if c_qty is not None else None
+                try:
+                    qty_text = (cell.get_text() if cell else "0") or "0"
+                except Exception:
+                    qty_text = "0"
+                try:
+                    qty = int(float(qty_text.strip() or "0"))
+                except Exception:
+                    digits = re.findall(r"\d+", qty_text)
+                    qty = int(digits[0]) if digits else 0
                 if qty <= 0:
                     continue
                 total += qty
 
                 ref_txt = ""
-                desc_txt = ""
-                if c_ref is not None and t.get_cell(r, c_ref):
+                desc = ""
+                if c_ref is not None:
+                    ref_cell = t.get_cell(r, c_ref)
                     try:
-                        ref_txt = t.get_cell(r, c_ref).get_text() or ""
+                        ref_txt = (ref_cell.get_text() if ref_cell else "") or ""
                     except Exception:
                         ref_txt = ""
-                if c_desc is not None and t.get_cell(r, c_desc):
+                if c_desc is not None:
+                    desc_cell = t.get_cell(r, c_desc)
                     try:
-                        desc_txt = t.get_cell(r, c_desc).get_text() or ""
+                        desc = (desc_cell.get_text() if desc_cell else "") or ""
                     except Exception:
-                        desc_txt = ""
-                combined = (ref_txt + " " + desc_txt).strip()
-                upper = combined.upper()
-
-                m = re.search(r"[Ø⌀]\s*(\d+(?:\.\d+)?)", upper)
+                        desc = ""
+                u = (ref_txt + " " + desc).upper()
+                m = re.search(r"[Ø⌀]\s*(\d+(?:\.\d+)?)", u)
                 if m:
                     try:
-                        dia = round(float(m.group(1)), 4)
-                        fam[dia] = fam.get(dia, 0) + qty
+                        d = round(float(m.group(1)), 4)
+                        families[d] = families.get(d, 0) + qty
                     except Exception:
                         pass
 
-                row_classes = tap_classes_from_row_text(upper, qty)
-                tap_sum = sum(row_classes.values())
+                tap_cls = tap_classes_from_row_text(u, qty)
+                tap_sum = sum(tap_cls.values())
                 if tap_sum:
-                    for key, val in row_classes.items():
+                    for key, val in tap_cls.items():
                         if val:
                             tap_classes[key] = tap_classes.get(key, 0) + int(val)
-                    taps += tap_sum
-                elif "TAP" in upper or "NPT" in upper or "N.P.T" in upper:
-                    taps += qty
+                    row_taps += tap_sum
+                elif "TAP" in u or "N.P.T" in u or "NPT" in u:
+                    row_taps += qty
 
             if total > 0:
-                result: dict[str, Any] = {
+                filtered_classes = {k: int(v) for k, v in tap_classes.items() if v}
+                result = {
                     "hole_count": total,
-                    "hole_diam_families_in": fam,
-                    "tap_qty_from_table": taps,
+                    "hole_diam_families_in": families,
+                    "tap_qty_from_table": row_taps,
+                    "tap_class_counts": filtered_classes,
                     "provenance_holes": "HOLE TABLE (ACAD_TABLE)",
                 }
-                filtered = {k: int(v) for k, v in tap_classes.items() if v}
-                if filtered:
-                    result["tap_class_counts"] = filtered
                 return result
 
-    return {}
+    return result
+
 
 def hole_count_from_text_table(doc, lines: Sequence[str] | None = None) -> tuple[int, dict] | tuple[None, None]:
     if lines is None:
@@ -8508,76 +8451,6 @@ def hole_count_from_geometry(doc, to_in, plate_bbox=None) -> tuple[int, dict]:
     for _, _, d, _ in clustered:
         fam[d] = fam.get(d, 0) + 1
     return len(clustered), fam
-
-
-def coalesced_lines(lines, width: int = 3) -> list[str]:
-    L = list(lines or [])
-    out: list[str] = []
-    for i in range(len(L)):
-        chunk = " ".join(s.strip() for s in L[i : i + width] if s and s.strip())
-        if chunk:
-            out.append(chunk)
-    return out
-
-
-RE_DEPTH = re.compile(r"\b(X|\b)\s*(\d+(?:\.\d+)?)\s*DEEP(?:\s+FROM\s+(FRONT|BACK))?", re.I)
-RE_TAP = re.compile(r"(#\s*\d{1,2}-\d+|\d+/\d+-\d+|M\d+(?:\.\d+)?x\d+(?:\.\d+)?|\d+/\d+\s*-\s*NPT|N\.P\.T|NPT)", re.I)
-
-
-def hole_table_enrich_from_text(chart_lines: Sequence[str] | None) -> dict[str, Any]:
-    taps = 0
-    deepest = 0.0
-    from_back = False
-    tap_class = {"small": 0, "medium": 0, "large": 0, "npt": 0}
-    for chunk in coalesced_lines(chart_lines):
-        u = chunk.upper()
-        for m in RE_TAP.finditer(u):
-            tok = m.group(1).replace(" ", "").upper()
-            taps += 1
-            if "NPT" in tok or "N.P.T" in tok:
-                tap_class["npt"] += 1
-                continue
-            dia = None
-            if tok.startswith("#"):
-                nums = re.findall(r"\d+", tok)
-                if nums:
-                    n = int(nums[0])
-                    dia = {6: 0.138, 8: 0.164, 10: 0.19, 12: 0.216}.get(n, 0.19)
-            elif tok.startswith("M"):
-                nums = re.findall(r"\d+(?:\.\d+)?", tok)
-                if nums:
-                    dia = float(nums[0]) / 25.4
-            elif "/" in tok:
-                try:
-                    num, den = map(int, tok.split("-", 1)[0].split("/"))
-                    dia = num / den
-                except Exception:
-                    dia = None
-            if dia is not None:
-                if dia < 0.250:
-                    tap_class["small"] += 1
-                elif dia < 0.5:
-                    tap_class["medium"] += 1
-                else:
-                    tap_class["large"] += 1
-
-        depth_match = RE_DEPTH.search(u)
-        if depth_match:
-            try:
-                val = float(depth_match.group(2))
-            except Exception:
-                val = 0.0
-            deepest = max(deepest, val)
-            pos = depth_match.group(3)
-            if (pos or "").upper() == "BACK" or "FROM BACK" in u:
-                from_back = True
-
-    return {
-        "tap_qty_text": taps,
-        "tap_class_counts": tap_class,
-        "deepest_hole_in": deepest or None,
-        "from_back": from_back,
-    }
 
 
 def _major_diameter_from_thread(spec: str) -> float | None:
@@ -9633,60 +9506,42 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
     # unified hole counting with fallbacks
     table_info = hole_count_from_acad_table(doc)
     cnt = None
-    table_cnt: int | None = None
     fam: dict | None = None
     tap_classes_from_table: dict[str, int] | None = None
     tap_qty_from_table = 0
-    source = "GEOMETRY CIRCLE COUNT"
+    source = "HOLE TABLE (ACAD_TABLE)"
     if table_info:
-        cnt_raw = table_info.get("hole_count")
-        try:
-            cnt = int(cnt_raw) if cnt_raw is not None else None
-            table_cnt = cnt
-        except Exception:
-            cnt = None
+        cnt = table_info.get("hole_count")
         fam = table_info.get("hole_diam_families_in")
+        raw_classes = table_info.get("tap_class_counts") if isinstance(table_info.get("tap_class_counts"), dict) else None
+        if raw_classes:
+            tap_classes_from_table = {k: int(v) for k, v in raw_classes.items() if v}
         tap_qty_from_table = int(table_info.get("tap_qty_from_table") or 0)
-        if isinstance(table_info.get("tap_class_counts"), dict):
-            tap_classes_from_table = {
-                str(k): int(v) for k, v in table_info.get("tap_class_counts", {}).items() if v
-            }
         if table_info.get("provenance_holes"):
             source = str(table_info.get("provenance_holes"))
-        else:
-            source = "HOLE TABLE (ACAD_TABLE)"
     if not cnt:
         text_cnt, text_fam = hole_count_from_text_table(doc, table_lines)
         if text_cnt:
-            cnt = int(text_cnt)
-            fam = text_fam
+            cnt, fam = text_cnt, text_fam
             source = "HOLE TABLE (TEXT)"
 
     geom_cnt, geom_fam = hole_count_from_geometry(doc, float(to_in))
     if not cnt and geom_cnt:
-        cnt = int(geom_cnt)
-        fam = geom_fam
+        cnt, fam = geom_cnt, geom_fam
         source = "GEOMETRY CIRCLE COUNT"
 
-    flags: list[str] = []
-    conflict_badges: list[str] = []
+    flags: list[str] | None = None
     if cnt and geom_cnt:
-        delta = abs(cnt - geom_cnt) / max(cnt, geom_cnt)
-        if delta > 0.15:
-            msg = f"hole_count_conflict: table={cnt}, geom={geom_cnt}"
-            flags.append(msg)
-            badge_text = (
-                f"Hole count conflict (>15%): table {cnt}, geometry {geom_cnt} — using table"
-            )
-            conflict_badges.append(badge_text)
-            if badge_text not in notes:
-                notes.append(badge_text)
+        if abs(cnt - geom_cnt) / max(cnt, geom_cnt) > 0.15:
+            flags = [f"hole_count_conflict: table={cnt}, geom={geom_cnt}"]
     coord_count = coord_info.get("coord_count") if isinstance(coord_info, dict) else None
     if coord_count and cnt:
         if abs(coord_count - cnt) / max(cnt, coord_count) > 0.15:
+            if not flags:
+                flags = []
             flags.append(f"hole_count_coord_conflict: table={cnt}, coord={coord_count}")
 
-    if cnt is not None:
+    if cnt:
         combined_agg["hole_count"] = int(cnt)
     if tap_classes_from_table:
         combined_agg["tap_class_counts"] = dict(tap_classes_from_table)
@@ -9718,20 +9573,14 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
         geometry_hole_count=geom_cnt,
     )
 
-    hole_count_final = int(cnt or 0)
-    fam = fam or geom_fam or {}
-    tap_qty_val = max(int(combined_agg.get("tap_qty") or 0), int(tap_qty_from_table or 0))
-    cbore_qty_val = int(combined_agg.get("cbore_qty") or 0)
-    csk_qty_val = int(combined_agg.get("csk_qty") or 0)
-
     geo = {
         "plate_len_in": ords.get("plate_len_in"),
         "plate_wid_in": ords.get("plate_wid_in"),
         "thickness_in_guess": thickness_guess,
-        "hole_count": hole_count_final,
-        "tap_qty": tap_qty_val,
-        "cbore_qty": cbore_qty_val,
-        "csk_qty": csk_qty_val,
+        "hole_count": combined_agg.get("hole_count") or 0,
+        "tap_qty": combined_agg.get("tap_qty") or 0,
+        "cbore_qty": combined_agg.get("cbore_qty") or 0,
+        "csk_qty": combined_agg.get("csk_qty") or 0,
         "tap_details": combined_agg.get("tap_details") or [],
         "tap_minutes_hint": combined_agg.get("tap_minutes_hint"),
         "tap_class_counts": combined_agg.get("tap_class_counts") or {},
@@ -9749,8 +9598,6 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
         "raw": {"holes": holes, "leaders": leaders, "leader_entries": leader_entries},
         "units": units,
     }
-    if table_cnt is not None:
-        geo["hole_count_table"] = int(table_cnt)
     geo.update(material_info)
     if hardware_notes.get("hardware_items") is not None:
         geo["hardware_items"] = hardware_notes.get("hardware_items")
@@ -9764,12 +9611,7 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
         geo["chart_lines"] = list(table_lines)
     if inference_knobs:
         geo["inference_knobs"] = inference_knobs
-    geo["feature_counts"] = {
-        "tap_qty": tap_qty_val,
-        "cbore_qty": cbore_qty_val,
-        "csk_qty": csk_qty_val,
-    }
-    geo["hole_count"] = hole_count_final
+    geo["hole_count"] = int(cnt or 0)
     geo["hole_diam_families_in"] = fam or {}
     geo.setdefault("provenance", {})["holes"] = source
     geo["hole_count_geom"] = geom_cnt or 0
@@ -9818,28 +9660,6 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
         if pocket_metrics.get("pocket_area_total_in2"):
             geo["pocket_area_total_in2"] = pocket_metrics.get("pocket_area_total_in2")
             geo["pocket_count"] = pocket_metrics.get("pocket_count")
-            try:
-                pocket_area_total = float(pocket_metrics.get("pocket_area_total_in2") or 0.0)
-            except Exception:
-                pocket_area_total = 0.0
-            if pocket_area_total > 0:
-                depth_basis = _coerce_float_or_none(thickness_guess)
-                if depth_basis is None:
-                    depth_basis = _coerce_float_or_none(geo.get("deepest_hole_in"))
-                if depth_basis is None:
-                    depth_basis = 0.25
-                depth_basis = max(0.1, min(float(depth_basis), 1.5))
-                conservative_mrr = 1.5  # cubic inches per minute
-                try:
-                    milling_minutes = (pocket_area_total * depth_basis) / conservative_mrr
-                except Exception:
-                    milling_minutes = 0.0
-                pocket_hr_hint = milling_minutes / 60.0 if milling_minutes > 0 else 0.0
-                if pocket_hr_hint > 0:
-                    geo["pocket_milling_hr_hint"] = round(pocket_hr_hint, 3)
-                    geo.setdefault("provenance", {})["pocket_milling"] = (
-                        "Pocket area × depth / 1.5 in³/min"
-                    )
     if stock_plan:
         geo["stock_plan_guess"] = stock_plan
     geo["hole_family_count"] = len(fam or geom_fam or {})
@@ -9847,17 +9667,11 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
         geo["tap_classes"] = dict(tap_classes_from_table)
     else:
         geo["tap_classes"] = tap_classes_from_lines(geo.get("chart_lines"))
-    deburr_hints = quick_deburr_estimates(
-        geo.get("edge_len_in"),
-        geo.get("hole_count"),
-        geo.get("profile_length_mm"),
-    )
+    deburr_hints = quick_deburr_estimates(geo.get("edge_len_in"), geo.get("hole_count"))
     deburr_prov = deburr_hints.pop("prov", None)
     geo.update(deburr_hints)
     if deburr_prov:
         geo.setdefault("provenance", {})["deburr"] = deburr_prov
-    if conflict_badges:
-        geo.setdefault("badges", []).extend(conflict_badges)
     if flags:
         geo["flags"] = flags
     return geo
@@ -10051,44 +9865,6 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
             if isinstance(notes, list) and not any("back" in str(n).lower() for n in notes):
                 notes.append("Hole chart references BACK operations.")
 
-    enrich = hole_table_enrich_from_text(geo.get("chart_lines") or [])
-    if enrich:
-        chart_summary_local = geo.setdefault("chart_summary", {})
-        deepest_text = enrich.get("deepest_hole_in")
-        if deepest_text:
-            current = _coerce_float_or_none(chart_summary_local.get("deepest_hole_in"))
-            try:
-                depth_val = float(deepest_text)
-            except Exception:
-                depth_val = None
-            if depth_val is not None:
-                if current is None or depth_val > current:
-                    chart_summary_local["deepest_hole_in"] = depth_val
-                if not geo.get("thickness_in_guess"):
-                    guess = max(0.125, min(3.0, depth_val))
-                    geo["thickness_in_guess"] = guess
-        chart_summary_local["from_back"] = bool(enrich.get("from_back"))
-        if enrich.get("from_back"):
-            geo["from_back"] = True
-            geo["needs_back_face"] = True
-        feature_counts = geo.setdefault("feature_counts", {})
-        feature_counts["tap_qty"] = max(
-            int(feature_counts.get("tap_qty", 0) or 0), int(enrich.get("tap_qty_text") or 0)
-        )
-        geo["tap_qty"] = max(int(geo.get("tap_qty", 0) or 0), feature_counts["tap_qty"])
-        tap_classes_geo = geo.get("tap_class_counts") or {}
-        if enrich.get("tap_class_counts"):
-            for key, val in enrich["tap_class_counts"].items():
-                if not val:
-                    continue
-                prev = int(tap_classes_geo.get(key, 0) or 0)
-                tap_classes_geo[key] = max(prev, int(val))
-            geo["tap_class_counts"] = tap_classes_geo
-    feature_counts = geo.setdefault("feature_counts", {})
-    feature_counts["tap_qty"] = int(geo.get("tap_qty", 0) or 0)
-    feature_counts["cbore_qty"] = int(geo.get("cbore_qty", 0) or 0)
-    feature_counts["csk_qty"] = int(geo.get("csk_qty", 0) or 0)
-
     # scrape text for thickness/material
     txt = " ".join([t.dxf.text for t in sp.query("TEXT")] +
                    [m.plain_text() for m in sp.query("MTEXT")]).lower()
@@ -10112,13 +9888,13 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
         "source": Path(path).suffix.lower().lstrip("."),
         "profile_length_mm": round(per * u2mm, 2),
         "hole_diams_mm": hole_diams_mm,
-        "hole_count": int(geo.get("hole_count") or len(hole_diams_mm)),
+        "hole_count": len(hole_diams_mm),
         "thickness_mm": thickness_mm,
         "material": material,
         "geo": geo,
     }
-    if table_cnt is not None and table_cnt > 0:
-        result["hole_count_table"] = int(table_cnt)
+    if geo.get("hole_count"):
+        result["hole_count_table"] = geo.get("hole_count")
     if geo.get("tap_qty") or geo.get("cbore_qty") or geo.get("csk_qty"):
         result["feature_counts"] = {
             "tap_qty": geo.get("tap_qty", 0),
@@ -10170,11 +9946,8 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
                 hole_count_geom = int(float(geo_read_more.get("hole_count_geom")))
             except Exception:
                 hole_count_geom = None
-            if hole_count_geom:
-                current_hole_count = int(float(result.get("hole_count", 0) or 0))
-                table_authoritative = bool(int(float(result.get("hole_count_table", 0) or 0)))
-                if hole_count_geom > current_hole_count and not table_authoritative:
-                    result["hole_count"] = hole_count_geom
+            if hole_count_geom and hole_count_geom > int(result.get("hole_count", 0) or 0):
+                result["hole_count"] = hole_count_geom
             if geo_read_more.get("holes_from_back"):
                 result["holes_from_back"] = True
             if geo_read_more.get("material_note"):
@@ -10540,27 +10313,34 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
         except Exception:
             return None
 
-    hole_count = _to_int((geo or {}).get("hole_count")) or 0
+    hole_count = _to_int((geo or {}).get("hole_count"))
 
-    editor_thickness_in = _to_float(ui_vars.get("Thickness (in)"))
-    thickness_guess = _to_float((geo or {}).get("thickness_in_guess"))
-    thickness_in_val = editor_thickness_in if editor_thickness_in is not None else thickness_guess
-    if thickness_in_val is None:
-        thickness_in_val = _to_float(geo.get("thickness_in"))
-    if thickness_in_val is None:
-        thickness_mm = _to_float(geo.get("thickness_mm"))
-        if thickness_mm is not None:
-            try:
-                thickness_in_val = float(thickness_mm) / 25.4
-            except Exception:
-                thickness_in_val = None
-    th_in = float(thickness_in_val or 1.0)
+    thickness_in_val = _to_float(geo.get("thickness_in"))
+    thickness_mm = _to_float(geo.get("thickness_mm"))
+    if thickness_in_val is None and thickness_mm is not None:
+        try:
+            thickness_in_val = float(thickness_mm) / 25.4
+        except Exception:
+            thickness_in_val = None
+    ui_thickness_in = _to_float(ui_vars.get("Thickness (in)"))
+    if thickness_in_val is None and ui_thickness_in is not None:
+        thickness_in_val = float(ui_thickness_in)
+    thickness_in = round(float(thickness_in_val), 2) if thickness_in_val is not None else None
 
-    editor_material = ui_vars.get("Material")
-    material_name = str(editor_material).strip() if isinstance(editor_material, str) else ""
+    material_name = geo.get("material") or ui_vars.get("Material")
+    if isinstance(material_name, str):
+        material_name = material_name.strip() or None
+
     material_display = material_name or "Steel"
 
-    geo_notes_default = [f"{int(hole_count)} holes in {th_in:.2f} in {material_display}"]
+    hole_count_val = hole_count if isinstance(hole_count, int) else None
+    geo_notes_default: list[str] = []
+    try:
+        thickness_note_val = float(thickness_in_val) if thickness_in_val is not None else None
+    except Exception:
+        thickness_note_val = None
+    if hole_count_val and thickness_note_val and material_display:
+        geo_notes_default = [f"{hole_count_val} holes in {thickness_note_val:.2f} in {material_display}"]
 
     material_source = (
         result.get("material_source")
@@ -10590,9 +10370,9 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
             ],
         },
         "geo_summary": {
-            "hole_count": int(hole_count),
-            "thickness_in": round(th_in, 2),
-            "material": material_name or None,
+            "hole_count": hole_count,
+            "thickness_in": thickness_in,
+            "material": material_name,
         },
         "geo_notes": geo_notes_default,
         "material_source": material_source,
