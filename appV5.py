@@ -18,49 +18,17 @@ import argparse
 import json, math, os, time, gc
 from collections import Counter
 from fractions import Fraction
-from dataclasses import dataclass, field
 from pathlib import Path
 
-@dataclass(frozen=True)
-class AppEnvironment:
-    """Runtime configuration extracted from environment variables.
-
-    Centralising this logic makes it trivial for reviewers to audit which
-    environment variables are consulted and how defaults are derived.  The
-    configuration can also be serialised for diagnostics without touching
-    global module state.
-    """
-
-    llm_debug_enabled: bool = False
-    llm_debug_dir: Path = field(default_factory=Path)
-
-    @classmethod
-    def from_env(cls) -> "AppEnvironment":
-        debug_enabled = bool(int(os.getenv("LLM_DEBUG", "1")))
-        debug_dir_raw = os.getenv("LLM_DEBUG_DIR")
-        debug_dir = Path(debug_dir_raw) if debug_dir_raw else Path(__file__).with_name("llm_debug")
-        debug_dir.mkdir(exist_ok=True)
-        return cls(llm_debug_enabled=debug_enabled, llm_debug_dir=debug_dir)
-
-
-APP_ENV = AppEnvironment.from_env()
-
-
-def describe_runtime_environment() -> dict[str, str]:
-    """Return a redacted snapshot of runtime configuration for auditors."""
-
-    info = {"llm_debug_enabled": str(APP_ENV.llm_debug_enabled)}
-    info["llm_debug_dir"] = str(APP_ENV.llm_debug_dir)
-    for key in ("QWEN_GGUF_PATH", "ODA_CONVERTER_EXE", "DWG2DXF_EXE", "METALS_API_KEY"):
-        value = os.getenv(key)
-        if not value:
-            info[key.lower()] = ""
-            continue
-        if key.endswith("_KEY"):
-            info[key.lower()] = "<redacted>"
-        else:
-            info[key.lower()] = value
-    return info
+from cad_quoter.config import APP_ENV, describe_runtime_environment
+from cad_quoter.domain import (
+    QuoteState,
+    as_float_or_none as _as_float_or_none,
+    build_suggest_payload,
+    ensure_scrap_pct as _ensure_scrap_pct,
+    match_items_contains as _match_items_contains,
+    normalize_lookup_key as _normalize_lookup_key,
+)
 
 import copy
 import re
@@ -73,6 +41,7 @@ from importlib import import_module
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from cad_quoter import geometry
+
 import pandas as pd
 
 from llama_cpp import Llama  # type: ignore
@@ -81,42 +50,6 @@ try:
     from geo_read_more import build_geo_from_dxf as build_geo_from_dxf_path
 except Exception:
     build_geo_from_dxf_path = None  # type: ignore[assignment]
-
-
-def _normalize_lookup_key(value: str) -> str:
-    cleaned = re.sub(r"[^0-9a-z]+", " ", str(value).strip().lower())
-    return re.sub(r"\s+", " ", cleaned).strip()
-
-
-def _ensure_scrap_pct(val) -> float:
-    """
-    Coerce UI/LLM scrap into a sane fraction in [0, 0.25].
-    Accepts 15 (percent) or 0.15 (fraction).
-    """
-
-    try:
-        x = float(val)
-    except Exception:
-        return 0.0
-    if x > 1.0:  # looks like %
-        x = x / 100.0
-    if not (x >= 0.0 and math.isfinite(x)):
-        return 0.0
-    return min(0.25, max(0.0, x))
-
-
-def _match_items_contains(items: pd.Series, pattern: str) -> pd.Series:
-    """
-    Case-insensitive regex match over Items.
-    Convert capturing groups to non-capturing to avoid pandas warning.
-    Fall back to literal if regex fails.
-    """
-
-    pat = _to_noncapturing(pattern) if "_to_noncapturing" in globals() else pattern
-    try:
-        return items.str.contains(pat, case=False, regex=True, na=False)
-    except Exception:
-        return items.str.contains(re.escape(pattern), case=False, regex=True, na=False)
 
 
 def parse_llm_json(text: str):
@@ -510,6 +443,7 @@ def holes_from_circles(doc, *, _scale: float | None = None) -> List[float]:
     return holes
 
 
+
 @dataclass
 class QuoteState:
     geo: dict = field(default_factory=dict)
@@ -604,107 +538,8 @@ def build_suggest_payload(geo, baseline, rates, bounds) -> dict:
     except Exception:
         cbore_qty = 0
 
-    csk_qty = derived.get("csk_qty")
-    try:
-        csk_qty = int(csk_qty)
-    except Exception:
-        csk_qty = 0
 
-    tap_minutes_hint = _as_float_or_none(derived.get("tap_minutes_hint"))
-    cbore_minutes_hint = _as_float_or_none(derived.get("cbore_minutes_hint"))
-    csk_minutes_hint = _as_float_or_none(derived.get("csk_minutes_hint"))
-    tap_class_counts = derived.get("tap_class_counts") if isinstance(derived.get("tap_class_counts"), dict) else {}
-    tap_details = derived.get("tap_details") if isinstance(derived.get("tap_details"), list) else []
-    npt_qty = 0
-    try:
-        npt_qty = int(derived.get("npt_qty") or 0)
-    except Exception:
-        npt_qty = 0
-    inference_knobs = derived.get("inference_knobs") if isinstance(derived.get("inference_knobs"), dict) else {}
-    has_ldr_notes = bool(derived.get("has_ldr_notes"))
-    max_hole_depth_in = _as_float_or_none(derived.get("max_hole_depth_in"))
-    plate_area_in2 = _as_float_or_none(derived.get("plate_area_in2"))
-    finish_flags_raw = derived.get("finish_flags")
-    if isinstance(finish_flags_raw, (list, tuple, set)):
-        finish_flags = [str(flag).strip() for flag in finish_flags_raw if isinstance(flag, str) and flag.strip()]
-    elif isinstance(finish_flags_raw, str) and finish_flags_raw.strip():
-        finish_flags = [finish_flags_raw.strip()]
-    else:
-        finish_flags = []
-    has_tight_tol = bool(derived.get("has_tight_tol"))
-    stock_guess_val = derived.get("stock_guess")
-    stock_guess = str(stock_guess_val).strip() if isinstance(stock_guess_val, str) and stock_guess_val.strip() else None
 
-    seed = {
-        "suggest_drilling_if_many_holes": hole_count >= 50,
-        "suggest_setups_if_from_back_ops": bool(derived.get("needs_back_face")),
-        "nudge_drilling_for_thickness": bool(thickness_mm and thickness_mm > 12.0),
-        "add_inspection_if_many_taps": tap_qty >= 8,
-        "add_milling_if_cbore_present": cbore_qty >= 2,
-        "plate_with_back_ops": bool((geo.get("meta") or {}).get("is_2d_plate") and derived.get("needs_back_face")),
-    }
-    if has_ldr_notes:
-        seed["has_leader_notes"] = True
-    if max_hole_depth_in is not None:
-        seed["max_hole_depth_in"] = max_hole_depth_in
-    if plate_area_in2 is not None:
-        seed["plate_area_in2"] = plate_area_in2
-    if has_tight_tol:
-        seed["has_tight_tol"] = True
-    if finish_flags:
-        seed["finish_flags"] = finish_flags[:6]
-    if stock_guess:
-        seed["stock_guess"] = stock_guess
-    if tap_minutes_hint:
-        seed["tapping_minutes_hint"] = tap_minutes_hint
-    if cbore_minutes_hint:
-        seed["counterbore_minutes_hint"] = cbore_minutes_hint
-    if csk_minutes_hint:
-        seed["countersink_minutes_hint"] = csk_minutes_hint
-    if tap_class_counts:
-        seed["tap_class_counts"] = tap_class_counts
-    if tap_details:
-        seed["tap_details"] = tap_details[:10]
-    if npt_qty:
-        seed["npt_qty"] = npt_qty
-    if inference_knobs:
-        seed["inference_knobs"] = inference_knobs
-
-    return {
-        "purpose": "quote_suggestions",
-        "geo": {
-            "is_2d_plate": bool((geo.get("meta") or {}).get("is_2d_plate", True)),
-            "hole_count": hole_count,
-            "tap_qty": tap_qty,
-            "cbore_qty": cbore_qty,
-            "csk_qty": csk_qty,
-            "hole_bins_top": hole_bins_top,
-            "thickness_mm": thickness_mm,
-            "material": material_name,
-            "bbox_mm": geo.get("bbox_mm"),
-            "tap_minutes_hint": tap_minutes_hint,
-            "cbore_minutes_hint": cbore_minutes_hint,
-            "csk_minutes_hint": csk_minutes_hint,
-            "tap_class_counts": tap_class_counts,
-            "tap_details": tap_details,
-            "npt_qty": npt_qty,
-            "inference_knobs": inference_knobs,
-            "has_leader_notes": has_ldr_notes,
-            "max_hole_depth_in": max_hole_depth_in,
-            "plate_area_in2": plate_area_in2,
-            "has_tight_tol": has_tight_tol,
-            "finish_flags": finish_flags,
-            "stock_guess": stock_guess,
-        },
-        "baseline": {
-            "process_hours": baseline.get("process_hours"),
-            "scrap_pct": baseline.get("scrap_pct", 0.0),
-            "pass_through": baseline.get("pass_through", {}),
-        },
-        "rates": rates,
-        "bounds": bounds,
-        "seed": seed,
-    }
 
 
 def run_llm_suggestions(LLM, payload: dict) -> tuple[dict, str, dict]:
@@ -3203,6 +3038,60 @@ PARAMS_DEFAULT = {
     "LLMModelPath": "",
 }
 
+# ---- Service containers -----------------------------------------------------
+
+
+@dataclass
+class QuoteConfiguration:
+    """Container for default parameter configuration used by the UI."""
+
+    default_params: Dict[str, Any] = field(default_factory=lambda: copy.deepcopy(PARAMS_DEFAULT))
+    default_material_display: str = DEFAULT_MATERIAL_DISPLAY
+
+    def copy_default_params(self) -> Dict[str, Any]:
+        """Return a deep copy of the default parameter set."""
+
+        return copy.deepcopy(self.default_params)
+
+    @property
+    def default_material_key(self) -> str:
+        return _normalize_lookup_key(self.default_material_display)
+
+
+@dataclass
+class PricingRegistry:
+    """Provide access to default shop rates for pricing calculations."""
+
+    default_rates: Dict[str, float] = field(default_factory=lambda: copy.deepcopy(RATES_DEFAULT))
+
+    def copy_default_rates(self) -> Dict[str, float]:
+        return copy.deepcopy(self.default_rates)
+
+
+@dataclass
+class GeometryLoader:
+    """Expose helpers used when enriching DXF geometry with extra context."""
+
+    build_geo_from_dxf: Optional[Callable[[str], Dict[str, Any]]] = None
+
+
+@dataclass
+class LLMClient:
+    """Provide callables for constructing optional LLM helpers."""
+
+    primary_loader: Optional[Callable[[], Any]] = None
+    fallback_loader: Optional[Callable[[], Any]] = None
+
+    def load_primary(self) -> Any:
+        if self.primary_loader is None:
+            raise RuntimeError("No primary LLM loader configured")
+        return self.primary_loader()
+
+    def load_fallback(self) -> Any:
+        if self.fallback_loader is None:
+            raise RuntimeError("No fallback LLM loader configured")
+        return self.fallback_loader()
+
 # Common regex pieces (kept non-capturing to avoid pandas warnings)
 TIME_RE = r"\b(?:hours?|hrs?|hr|time|min(?:ute)?s?)\b"
 MONEY_RE = r"(?:rate|/hr|per\s*hour|per\s*hr|price|cost|$)"
@@ -3358,7 +3247,9 @@ def compute_material_cost(material_name: str,
                           mass_kg: float,
                           scrap_frac: float,
                           overrides: dict[str, Any] | None,
-                          vendor_csv: str | None) -> tuple[float, dict[str, Any]]:
+                          vendor_csv: str | None,
+                          *,
+                          default_material_display: str = DEFAULT_MATERIAL_DISPLAY) -> tuple[float, dict[str, Any]]:
     global CURRENT_VENDOR_CSV_PATH
     vendor_csv = vendor_csv or ""
     if (not PROVIDERS) or (vendor_csv != (CURRENT_VENDOR_CSV_PATH or "")):
@@ -3431,7 +3322,8 @@ def compute_material_cost(material_name: str,
     if (usd_per_kg is None) or (not math.isfinite(float(usd_per_kg))) or (usd_per_kg <= 0):
         resolver_name = material_name or ""
         if not resolver_name:
-            resolver_name = MATERIAL_DISPLAY_BY_KEY.get(DEFAULT_MATERIAL_KEY, DEFAULT_MATERIAL_DISPLAY)
+            fallback_key = _normalize_lookup_key(default_material_display)
+            resolver_name = MATERIAL_DISPLAY_BY_KEY.get(fallback_key, default_material_display)
         try:
             resolved_price, resolver_source = resolve_material_unit_price(resolver_name, unit="kg")
         except Exception:
@@ -3661,6 +3553,9 @@ def compute_quote_from_df(df: pd.DataFrame,
                           params: Dict[str, Any] | None = None,
                           rates: Dict[str, float] | None = None,
                           *,
+                          default_params: Dict[str, Any] | None = None,
+                          default_rates: Dict[str, float] | None = None,
+                          default_material_display: str | None = None,
                           material_vendor_csv: str | None = None,
                           llm_enabled: bool = True,
                           llm_model_path: str | None = None,
@@ -3682,8 +3577,10 @@ def compute_quote_from_df(df: pd.DataFrame,
     """
     # ---- merge configs (easy to edit) ---------------------------------------
 
-    params = {**PARAMS_DEFAULT, **(params or {})}
-    rates = {**RATES_DEFAULT, **(rates or {})}
+    params_defaults = default_params if default_params is not None else QuoteConfiguration().default_params
+    rates_defaults = default_rates if default_rates is not None else PricingRegistry().default_rates
+    params = {**params_defaults, **(params or {})}
+    rates = {**rates_defaults, **(rates or {})}
     rates.setdefault("DrillingRate", rates.get("MillingRate", 0.0))
     if llm_model_path is None:
         llm_model_path = str(params.get("LLMModelPath", "") or "")
@@ -4081,6 +3978,7 @@ def compute_quote_from_df(df: pd.DataFrame,
             scrap_pct,
             material_overrides,
             material_vendor_csv,
+            default_material_display=default_material_display or DEFAULT_MATERIAL_DISPLAY,
         )
     except Exception as err:
         material_detail = {
@@ -8175,6 +8073,7 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
 def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     _require_ezdxf()
 
+
     # --- load doc ---
     dxf_text_path: str | None = None
     doc = None
@@ -8201,9 +8100,10 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     geo = _build_geo_from_ezdxf_doc(doc)
 
     geo_read_more: dict[str, Any] | None = None
-    if build_geo_from_dxf_path and dxf_text_path:
+    extra_geo_loader = build_geo_from_dxf or build_geo_from_dxf_path
+    if extra_geo_loader and dxf_text_path:
         try:
-            geo_read_more = build_geo_from_dxf_path(dxf_text_path)
+            geo_read_more = extra_geo_loader(dxf_text_path)
         except Exception as exc:  # pragma: no cover - diagnostic only
             geo_read_more = {"ok": False, "error": str(exc)}
 
@@ -9748,7 +9648,15 @@ class ScrollableFrame(ttk.Frame):
 
 class App(tk.Tk):
     def __init__(self, geometry_service: geometry.GeometryService | None = None):
+
         super().__init__()
+        self.configuration = configuration or QuoteConfiguration()
+        self.geometry_loader = geometry_loader or GeometryLoader(build_geo_from_dxf=build_geo_from_dxf_path)
+        self.pricing_registry = pricing_registry or PricingRegistry()
+        self.llm_client = llm_client or LLMClient(
+            primary_loader=lambda: load_qwen_vl(n_ctx=8192, n_gpu_layers=20),
+            fallback_loader=lambda: load_qwen_vl(n_ctx=4096, n_gpu_layers=0),
+        )
         self.title("Compos-AI")
         self.geometry("1260x900")
 
@@ -9756,8 +9664,8 @@ class App(tk.Tk):
         self.vars_df_full = None
         self.geo = None
         self.geo_context: dict[str, Any] = {}
-        self.params = PARAMS_DEFAULT.copy()
-        self.rates = RATES_DEFAULT.copy()
+        self.params = self.configuration.copy_default_params()
+        self.rates = self.pricing_registry.copy_default_rates()
         self.quote_state = QuoteState()
         self.geometry_service = geometry_service or geometry.DEFAULT_SERVICE
         self.settings_path = Path(__file__).with_name("app_settings.json")
@@ -9855,15 +9763,16 @@ class App(tk.Tk):
         #self.out_txt = tk.Text(self.tab_out, wrap="word", font=("Consolas", 10)); self.out_txt.pack(fill="both", expand=True)
 
         self.LLM_SUGGEST = None
-        try:
-            self.LLM_SUGGEST = load_qwen_vl(n_ctx=8192, n_gpu_layers=20)
-        except Exception as exc:
-            self.status_var.set(f"Vision LLM failed ({exc}); retrying CPU mode.")
+        if self.llm_client.primary_loader is not None:
             try:
-                self.LLM_SUGGEST = load_qwen_vl(n_ctx=4096, n_gpu_layers=0)
-            except Exception as exc2:
-                self.status_var.set(f"Vision LLM unavailable: {exc2}")
-                self.LLM_SUGGEST = None
+                self.LLM_SUGGEST = self.llm_client.load_primary()
+            except Exception as exc:
+                self.status_var.set(f"Vision LLM failed ({exc}); retrying CPU mode.")
+                try:
+                    self.LLM_SUGGEST = self.llm_client.load_fallback()
+                except Exception as exc2:
+                    self.status_var.set(f"Vision LLM unavailable: {exc2}")
+                    self.LLM_SUGGEST = None
 
     def _load_settings(self) -> dict[str, Any]:
         path = getattr(self, "settings_path", None)
@@ -10043,7 +9952,7 @@ class App(tk.Tk):
             initial_raw = row_data["Example Values / Options"]
             initial_value = str(initial_raw) if initial_raw is not None else ""
             if normalized_name in {"material"}:
-                var = tk.StringVar(value=DEFAULT_MATERIAL_DISPLAY)
+                var = tk.StringVar(value=self.configuration.default_material_display)
                 if initial_value:
                     var.set(initial_value)
                 normalized_initial = _normalize_lookup_key(var.get())
@@ -10380,7 +10289,10 @@ class App(tk.Tk):
                     structured_pdf = extract_pdf_all(Path(path))
                     g2d = extract_2d_features_from_pdf_vector(path)   # PyMuPDF vector-only MVP
                 else:
-                    g2d = extract_2d_features_from_dxf_or_dwg(path)   # ezdxf / ODA
+                    g2d = extract_2d_features_from_dxf_or_dwg(
+                        path,
+                        build_geo_from_dxf=self.geometry_loader.build_geo_from_dxf,
+                    )   # ezdxf / ODA
 
                 if self.vars_df is None:
                     vp = find_variables_near(path) or filedialog.askopenfilename(title="Select variables CSV/XLSX")
@@ -10784,6 +10696,9 @@ class App(tk.Tk):
                     self.vars_df,
                     params=self.params,
                     rates=self.rates,
+                    default_params=self.configuration.default_params,
+                    default_rates=self.pricing_registry.default_rates,
+                    default_material_display=self.configuration.default_material_display,
                     material_vendor_csv=self.settings.get("material_vendor_csv", "") if isinstance(self.settings, dict) else "",
                     llm_enabled=self.llm_enabled.get(),
                     llm_model_path=self.llm_model_path.get().strip() or None,
@@ -10928,6 +10843,7 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
 
     geometry_service = geometry.GeometryService()
     App(geometry_service=geometry_service).mainloop()
+
     return 0
 
 
