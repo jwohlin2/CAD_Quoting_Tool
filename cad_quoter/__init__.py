@@ -1,7 +1,4 @@
-"""CAD Quoter package root."""
+"""Core package for CAD Quoting Tool extensions."""
 
-from . import geometry  # re-export for convenience
-
-__all__ = ["geometry"]
-
+__all__ = ["pricing"]
 
