@@ -1,2 +1,1 @@
-"""CAD Quoter package utilities."""
-
+"""CAD Quoter package."""
