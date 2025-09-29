@@ -18,49 +18,17 @@ import argparse
 import json, math, os, time, gc
 from collections import Counter
 from fractions import Fraction
-from dataclasses import dataclass, field
 from pathlib import Path
 
-@dataclass(frozen=True)
-class AppEnvironment:
-    """Runtime configuration extracted from environment variables.
-
-    Centralising this logic makes it trivial for reviewers to audit which
-    environment variables are consulted and how defaults are derived.  The
-    configuration can also be serialised for diagnostics without touching
-    global module state.
-    """
-
-    llm_debug_enabled: bool = False
-    llm_debug_dir: Path = field(default_factory=Path)
-
-    @classmethod
-    def from_env(cls) -> "AppEnvironment":
-        debug_enabled = bool(int(os.getenv("LLM_DEBUG", "1")))
-        debug_dir_raw = os.getenv("LLM_DEBUG_DIR")
-        debug_dir = Path(debug_dir_raw) if debug_dir_raw else Path(__file__).with_name("llm_debug")
-        debug_dir.mkdir(exist_ok=True)
-        return cls(llm_debug_enabled=debug_enabled, llm_debug_dir=debug_dir)
-
-
-APP_ENV = AppEnvironment.from_env()
-
-
-def describe_runtime_environment() -> dict[str, str]:
-    """Return a redacted snapshot of runtime configuration for auditors."""
-
-    info = {"llm_debug_enabled": str(APP_ENV.llm_debug_enabled)}
-    info["llm_debug_dir"] = str(APP_ENV.llm_debug_dir)
-    for key in ("QWEN_GGUF_PATH", "ODA_CONVERTER_EXE", "DWG2DXF_EXE", "METALS_API_KEY"):
-        value = os.getenv(key)
-        if not value:
-            info[key.lower()] = ""
-            continue
-        if key.endswith("_KEY"):
-            info[key.lower()] = "<redacted>"
-        else:
-            info[key.lower()] = value
-    return info
+from cad_quoter.config import APP_ENV, describe_runtime_environment
+from cad_quoter.domain import (
+    QuoteState,
+    as_float_or_none as _as_float_or_none,
+    build_suggest_payload,
+    ensure_scrap_pct as _ensure_scrap_pct,
+    match_items_contains as _match_items_contains,
+    normalize_lookup_key as _normalize_lookup_key,
+)
 
 import copy
 import re
@@ -85,42 +53,6 @@ try:
     from geo_read_more import build_geo_from_dxf as build_geo_from_dxf_path
 except Exception:
     build_geo_from_dxf_path = None  # type: ignore[assignment]
-
-
-def _normalize_lookup_key(value: str) -> str:
-    cleaned = re.sub(r"[^0-9a-z]+", " ", str(value).strip().lower())
-    return re.sub(r"\s+", " ", cleaned).strip()
-
-
-def _ensure_scrap_pct(val) -> float:
-    """
-    Coerce UI/LLM scrap into a sane fraction in [0, 0.25].
-    Accepts 15 (percent) or 0.15 (fraction).
-    """
-
-    try:
-        x = float(val)
-    except Exception:
-        return 0.0
-    if x > 1.0:  # looks like %
-        x = x / 100.0
-    if not (x >= 0.0 and math.isfinite(x)):
-        return 0.0
-    return min(0.25, max(0.0, x))
-
-
-def _match_items_contains(items: pd.Series, pattern: str) -> pd.Series:
-    """
-    Case-insensitive regex match over Items.
-    Convert capturing groups to non-capturing to avoid pandas warning.
-    Fall back to literal if regex fails.
-    """
-
-    pat = _to_noncapturing(pattern) if "_to_noncapturing" in globals() else pattern
-    try:
-        return items.str.contains(pat, case=False, regex=True, na=False)
-    except Exception:
-        return items.str.contains(re.escape(pattern), case=False, regex=True, na=False)
 
 
 def parse_llm_json(text: str):
@@ -670,201 +602,8 @@ def render_step_thumbs(shape, out_dir: str) -> Dict[str, str]:
     raise RuntimeError("STEP thumbnail rendering is not supported in this environment")
 
 
-@dataclass
-class QuoteState:
-    geo: dict = field(default_factory=dict)
-    ui_vars: dict = field(default_factory=dict)
-    rates: dict = field(default_factory=dict)
-    baseline: dict = field(default_factory=dict)
-    llm_raw: dict = field(default_factory=dict)
-    suggestions: dict = field(default_factory=dict)
-    user_overrides: dict = field(default_factory=dict)
-    effective: dict = field(default_factory=dict)
-    effective_sources: dict = field(default_factory=dict)
-    accept_llm: dict = field(default_factory=dict)
-    bounds: dict = field(default_factory=dict)
-    material_source: str | None = None
-    guard_context: dict = field(default_factory=dict)
 
 
-def _as_float_or_none(value: Any) -> float | None:
-    try:
-        if isinstance(value, (int, float)):
-            return float(value)
-        if isinstance(value, str):
-            cleaned = value.strip()
-            if not cleaned:
-                return None
-            return float(cleaned)
-    except Exception:
-        return None
-    return None
-
-
-
-def build_suggest_payload(geo, baseline, rates, bounds) -> dict:
-    geo = geo or {}
-    baseline = baseline or {}
-    rates = rates or {}
-    bounds = bounds or {}
-
-    derived = geo.get("derived") or {}
-    hole_bins = derived.get("hole_bins") or {}
-    hole_bins_top = {}
-    if isinstance(hole_bins, dict):
-        hole_bins_top = dict(sorted(hole_bins.items(), key=lambda kv: -kv[1])[:8])
-
-    raw_thickness = geo.get("thickness_mm")
-    thickness_mm = None
-    if isinstance(raw_thickness, dict):
-        for key in ("value", "mm", "thickness_mm"):
-            if raw_thickness.get(key) is not None:
-                try:
-                    thickness_mm = float(raw_thickness.get(key))
-                    break
-                except Exception:
-                    continue
-    else:
-        try:
-            thickness_mm = float(raw_thickness)
-        except Exception:
-            thickness_mm = None
-    if thickness_mm is None:
-        try:
-            thickness_mm = float(geo.get("thickness"))
-        except Exception:
-            thickness_mm = None
-
-    material_val = geo.get("material")
-    if isinstance(material_val, dict):
-        material_name = (
-            material_val.get("name")
-            or material_val.get("display")
-            or material_val.get("material")
-        )
-    else:
-        material_name = material_val
-    if not material_name:
-        material_name = "Steel"
-
-    hole_count_val = _as_float_or_none(geo.get("hole_count"))
-    if hole_count_val is None:
-        hole_count_val = _as_float_or_none(derived.get("hole_count"))
-    hole_count = int(hole_count_val or 0)
-
-    tap_qty = derived.get("tap_qty")
-    try:
-        tap_qty = int(tap_qty)
-    except Exception:
-        tap_qty = 0
-
-    cbore_qty = derived.get("cbore_qty")
-    try:
-        cbore_qty = int(cbore_qty)
-    except Exception:
-        cbore_qty = 0
-
-    csk_qty = derived.get("csk_qty")
-    try:
-        csk_qty = int(csk_qty)
-    except Exception:
-        csk_qty = 0
-
-    tap_minutes_hint = _as_float_or_none(derived.get("tap_minutes_hint"))
-    cbore_minutes_hint = _as_float_or_none(derived.get("cbore_minutes_hint"))
-    csk_minutes_hint = _as_float_or_none(derived.get("csk_minutes_hint"))
-    tap_class_counts = derived.get("tap_class_counts") if isinstance(derived.get("tap_class_counts"), dict) else {}
-    tap_details = derived.get("tap_details") if isinstance(derived.get("tap_details"), list) else []
-    npt_qty = 0
-    try:
-        npt_qty = int(derived.get("npt_qty") or 0)
-    except Exception:
-        npt_qty = 0
-    inference_knobs = derived.get("inference_knobs") if isinstance(derived.get("inference_knobs"), dict) else {}
-    has_ldr_notes = bool(derived.get("has_ldr_notes"))
-    max_hole_depth_in = _as_float_or_none(derived.get("max_hole_depth_in"))
-    plate_area_in2 = _as_float_or_none(derived.get("plate_area_in2"))
-    finish_flags_raw = derived.get("finish_flags")
-    if isinstance(finish_flags_raw, (list, tuple, set)):
-        finish_flags = [str(flag).strip() for flag in finish_flags_raw if isinstance(flag, str) and flag.strip()]
-    elif isinstance(finish_flags_raw, str) and finish_flags_raw.strip():
-        finish_flags = [finish_flags_raw.strip()]
-    else:
-        finish_flags = []
-    has_tight_tol = bool(derived.get("has_tight_tol"))
-    stock_guess_val = derived.get("stock_guess")
-    stock_guess = str(stock_guess_val).strip() if isinstance(stock_guess_val, str) and stock_guess_val.strip() else None
-
-    seed = {
-        "suggest_drilling_if_many_holes": hole_count >= 50,
-        "suggest_setups_if_from_back_ops": bool(derived.get("needs_back_face")),
-        "nudge_drilling_for_thickness": bool(thickness_mm and thickness_mm > 12.0),
-        "add_inspection_if_many_taps": tap_qty >= 8,
-        "add_milling_if_cbore_present": cbore_qty >= 2,
-        "plate_with_back_ops": bool((geo.get("meta") or {}).get("is_2d_plate") and derived.get("needs_back_face")),
-    }
-    if has_ldr_notes:
-        seed["has_leader_notes"] = True
-    if max_hole_depth_in is not None:
-        seed["max_hole_depth_in"] = max_hole_depth_in
-    if plate_area_in2 is not None:
-        seed["plate_area_in2"] = plate_area_in2
-    if has_tight_tol:
-        seed["has_tight_tol"] = True
-    if finish_flags:
-        seed["finish_flags"] = finish_flags[:6]
-    if stock_guess:
-        seed["stock_guess"] = stock_guess
-    if tap_minutes_hint:
-        seed["tapping_minutes_hint"] = tap_minutes_hint
-    if cbore_minutes_hint:
-        seed["counterbore_minutes_hint"] = cbore_minutes_hint
-    if csk_minutes_hint:
-        seed["countersink_minutes_hint"] = csk_minutes_hint
-    if tap_class_counts:
-        seed["tap_class_counts"] = tap_class_counts
-    if tap_details:
-        seed["tap_details"] = tap_details[:10]
-    if npt_qty:
-        seed["npt_qty"] = npt_qty
-    if inference_knobs:
-        seed["inference_knobs"] = inference_knobs
-
-    return {
-        "purpose": "quote_suggestions",
-        "geo": {
-            "is_2d_plate": bool((geo.get("meta") or {}).get("is_2d_plate", True)),
-            "hole_count": hole_count,
-            "tap_qty": tap_qty,
-            "cbore_qty": cbore_qty,
-            "csk_qty": csk_qty,
-            "hole_bins_top": hole_bins_top,
-            "thickness_mm": thickness_mm,
-            "material": material_name,
-            "bbox_mm": geo.get("bbox_mm"),
-            "tap_minutes_hint": tap_minutes_hint,
-            "cbore_minutes_hint": cbore_minutes_hint,
-            "csk_minutes_hint": csk_minutes_hint,
-            "tap_class_counts": tap_class_counts,
-            "tap_details": tap_details,
-            "npt_qty": npt_qty,
-            "inference_knobs": inference_knobs,
-            "has_leader_notes": has_ldr_notes,
-            "max_hole_depth_in": max_hole_depth_in,
-            "plate_area_in2": plate_area_in2,
-            "has_tight_tol": has_tight_tol,
-            "finish_flags": finish_flags,
-            "stock_guess": stock_guess,
-        },
-        "baseline": {
-            "process_hours": baseline.get("process_hours"),
-            "scrap_pct": baseline.get("scrap_pct", 0.0),
-            "pass_through": baseline.get("pass_through", {}),
-        },
-        "rates": rates,
-        "bounds": bounds,
-        "seed": seed,
-    }
 
 
 def run_llm_suggestions(LLM, payload: dict) -> tuple[dict, str, dict]:
