@@ -29,7 +29,10 @@ import tkinter as tk
 import tkinter.font as tkfont
 import urllib.request
 from importlib import import_module
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+from cad_quoter import geometry
+
 from OCP.TopAbs   import TopAbs_EDGE, TopAbs_FACE
 from OCP.TopExp   import TopExp, TopExp_Explorer
 from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
@@ -71,6 +74,69 @@ def _match_items_contains(items: pd.Series, pattern: str) -> pd.Series:
     try:
         return items.str.contains(pat, case=False, regex=True, na=False)
     except Exception:
+
+
+
+# Geometry helpers (re-exported for backward compatibility)
+load_model = geometry.load_model
+load_cad_any = geometry.load_cad_any
+read_cad_any = geometry.read_cad_any
+read_step_shape = geometry.read_step_shape
+read_step_or_iges_or_brep = geometry.read_step_or_iges_or_brep
+convert_dwg_to_dxf = geometry.convert_dwg_to_dxf
+enrich_geo_occ = geometry.enrich_geo_occ
+enrich_geo_stl = geometry.enrich_geo_stl
+safe_bbox = geometry.safe_bbox
+safe_bounding_box = geometry.safe_bounding_box
+iter_solids = geometry.iter_solids
+explode_compound = geometry.explode_compound
+parse_hole_table_lines = geometry.parse_hole_table_lines
+extract_text_lines_from_dxf = geometry.extract_text_lines_from_dxf
+upsert_var_row = geometry.upsert_var_row
+require_ezdxf = geometry.require_ezdxf
+get_dwg_converter_path = geometry.get_dwg_converter_path
+have_dwg_support = geometry.have_dwg_support
+get_import_diagnostics_text = geometry.get_import_diagnostics_text
+_HAS_TRIMESH = geometry.HAS_TRIMESH
+_HAS_EZDXF = geometry.HAS_EZDXF
+_HAS_ODAFC = geometry.HAS_ODAFC
+_EZDXF_VER = geometry.EZDXF_VERSION
+
+
+def _normalize_lookup_key(value: str) -> str:
+    cleaned = re.sub(r"[^0-9a-z]+", " ", str(value).strip().lower())
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _ensure_scrap_pct(val) -> float:
+    """
+    Coerce UI/LLM scrap into a sane fraction in [0, 0.25].
+    Accepts 15 (percent) or 0.15 (fraction).
+    """
+
+    try:
+        x = float(val)
+    except Exception:
+        return 0.0
+    if x > 1.0:  # looks like %
+        x = x / 100.0
+    if not (x >= 0.0 and math.isfinite(x)):
+        return 0.0
+    return min(0.25, max(0.0, x))
+
+
+def _match_items_contains(items: pd.Series, pattern: str) -> pd.Series:
+    """
+    Case-insensitive regex match over Items.
+    Convert capturing groups to non-capturing to avoid pandas warning.
+    Fall back to literal if regex fails.
+    """
+
+    pat = _to_noncapturing(pattern) if "_to_noncapturing" in globals() else pattern
+    try:
+        return items.str.contains(pat, case=False, regex=True, na=False)
+    except Exception:
+        return items.str.contains(re.escape(pattern), case=False, regex=True, na=False)
 
 
 
@@ -5751,106 +5817,6 @@ def edit_variables_tk(df):
         messagebox.showinfo("Saved","Variables updated in memory; Save in app to persist.")
     tree.bind("<Button-1>", on_click); entry.bind("<Return>", on_return); ttk.Button(win,text="Save",command=on_save).pack()
     win.grab_set(); win.wait_window(); return df
-def read_dxf_as_occ_shape(dxf_path: str):
-    # minimal DXF?OCC triangulated shape (3DFACE/MESH/POLYFACE), fallback: extrude closed polyline
-    import ezdxf, numpy as np
-    from OCP.BRepBuilderAPI import (BRepBuilderAPI_MakeFace, BRepBuilderAPI_MakePolygon,
-                                    BRepBuilderAPI_Sewing, BRepBuilderAPI_MakeSolid)
-    from OCP.gp import gp_Pnt, gp_Vec
-    from OCP.BRepPrimAPI import BRepPrimAPI_MakePrism
-    from OCP.ShapeFix import ShapeFix_Solid
-    from OCP.TopExp import TopExp_Explorer
-    from OCP.TopAbs import TopAbs_FACE
-
-    def tri_face(p0,p1,p2):
-        poly = BRepBuilderAPI_MakePolygon()
-        for p in (p0,p1,p2,p0):
-            poly.Add(gp_Pnt(*p))
-        return BRepBuilderAPI_MakeFace(poly.Wire(), True).Face()
-
-    def sew(faces):
-        sew = BRepBuilderAPI_Sewing(1.0e-6, True, True, True, True)
-        for f in faces: sew.Add(f)
-        sew.Perform()
-        return sew.SewedShape()
-
-    doc = ezdxf.readfile(dxf_path)
-    msp = doc.modelspace()
-    INSUNITS = doc.header.get("$INSUNITS", 1)  # 1=in, 4=mm, 2=ft, 6=m
-    u2mm = {1:25.4, 4:1.0, 2:304.8, 6:1000.0}.get(INSUNITS, 1.0)
-
-    tris = []
-    # 3DFACE
-    for e in msp.query("3DFACE"):
-        verts = [e.dxf.vtx0, e.dxf.vtx1, e.dxf.vtx2, e.dxf.vtx3]
-        pts = [(vx * u2mm, vy * u2mm, vz * u2mm) for (vx, vy, vz) in verts]
-        if len(pts) < 3:
-            continue
-        tris.append((pts[0], pts[1], pts[2]))
-        if len(pts) == 4:
-            v3 = np.array(pts[2])
-            v4 = np.array(pts[3])
-            if np.linalg.norm(v3 - v4) > 1e-12:
-                tris.append((pts[0], pts[2], pts[3]))
-    # POLYFACE
-    for e in msp.query("POLYFACE"):
-        for f in e.faces():
-            pts=[(v.dxf.location.x*u2mm, v.dxf.location.y*u2mm, v.dxf.location.z*u2mm) for v in f.vertices()]
-            if len(pts)>=3:
-                tris.append((pts[0], pts[1], pts[2]))
-                for k in range(3,len(pts)):
-                    tris.append((pts[0], pts[k-1], pts[k]))
-    # MESH
-    for e in msp.query("MESH"):
-        for f in e.faces_as_vertices():
-            pts=[(v.x*u2mm, v.y*u2mm, v.z*u2mm) for v in f]
-            if len(pts)>=3:
-                tris.append((pts[0], pts[1], pts[2]))
-                for k in range(3,len(pts)):
-                    tris.append((pts[0], pts[k-1], pts[k]))
-
-    faces = [tri_face(*t) for t in tris]
-    shape = None
-    if faces:
-        sewed = sew(faces)
-        try:
-            solid = BRepBuilderAPI_MakeSolid()
-            exp = TopExp_Explorer(sewed, TopAbs_FACE)
-            while exp.More():
-                solid.Add(exp.Current()); exp.Next()
-            fix = ShapeFix_Solid(solid.Solid()); fix.Perform()
-            shape = fix.Solid()
-        except Exception:
-            shape = sewed
-
-    # Fallback: 2D closed polyline ? extrude small thickness
-    if (shape is None) or shape.IsNull():
-        for pl in msp.query("LWPOLYLINE"):
-            if pl.closed:
-                pts2d = [(x*u2mm, y*u2mm, 0.0) for x,y,_ in pl.get_points("xyb")]
-                poly = BRepBuilderAPI_MakePolygon()
-                for q in pts2d: poly.Add(gp_Pnt(*q))
-                poly.Close()
-                face = BRepBuilderAPI_MakeFace(poly.Wire(), True).Face()
-                thk_mm = float(os.environ.get("DXF_EXTRUDE_THK_MM", "5.0"))
-                shape = BRepPrimAPI_MakePrism(face, gp_Vec(0,0,thk_mm)).Shape()
-                break
-
-    if (shape is None) or shape.IsNull():
-        raise RuntimeError("DXF contained no 3D geometry I can use. Prefer STEP/SAT if possible.")
-    return shape
-
-# ---- 2D: PDF (PyMuPDF) -------------------------------------------------------
-try:
-    import fitz  # old import name
-    _HAS_PYMUPDF = True
-except Exception:
-    try:
-        import pymupdf as fitz  # new import name
-        _HAS_PYMUPDF = True
-    except Exception:
-        fitz = None  # allow the rest of the app to import
-
 def extract_2d_features_from_pdf_vector(pdf_path: str) -> dict:
     if not _HAS_PYMUPDF:
         raise RuntimeError("PyMuPDF (fitz) not installed. pip install pymupdf")
@@ -9716,14 +9682,8 @@ class ScrollableFrame(ttk.Frame):
 
 
 class App(tk.Tk):
-    def __init__(
-        self,
-        configuration: UIConfiguration | None = None,
-        *,
-        geometry_loader: GeometryLoader | None = None,
-        pricing_registry: PricingRegistry | None = None,
-        llm_client: LLMClient | None = None,
-    ):
+    def __init__(self, geometry_service: Optional[geometry.GeometryService] = None):
+
         super().__init__()
 
         self.configuration = configuration or UIConfiguration()
@@ -9736,6 +9696,8 @@ class App(tk.Tk):
         if getattr(self.configuration, "window_geometry", None):
             self.geometry(self.configuration.window_geometry)
 
+
+        self.geometry_service = geometry_service or geometry.GeometryService()
 
         self.vars_df = None
         self.vars_df_full = None
@@ -10457,7 +10419,7 @@ class App(tk.Tk):
         geo = None
         try:
             # Fast path (your OCC feature extractor for 3D)
-            geo = self.geometry_loader.extract_features_with_occ(path)  # handles STEP/IGES/BREP
+            geo = self.geometry_service.extract_occ_features(path)  # handles STEP/IGES/BREP
 
         except Exception:
             geo = None
@@ -10466,7 +10428,7 @@ class App(tk.Tk):
             if ext == ".stl":
                 stl_geo = None
                 try:
-                    stl_geo = self.geometry_loader.enrich_geo_stl(path)  # trimesh-based
+                    stl_geo = self.geometry_service.enrich_stl(path)  # trimesh-based
 
                 except Exception as e:
                     import traceback
@@ -10488,11 +10450,11 @@ class App(tk.Tk):
             else:
                 try:
                     if ext in (".step", ".stp"):
-                        shape = self.geometry_loader.read_step_shape(path)
+                        shape = self.geometry_service.read_step(path)
                     else:
-                        shape = self.geometry_loader.read_cad_any(path)            # IGES/BREP and others
-                    _ = self.geometry_loader.safe_bbox(shape)
-                    g = self.geometry_loader.enrich_geo_occ(shape)             # OCC-based geometry features
+                        shape = self.geometry_service.read_model(path)            # IGES/BREP and others
+                    _ = safe_bbox(shape)
+                    g = self.geometry_service.enrich_occ(shape)             # OCC-based geometry features
 
                     geo = _map_geo_to_double_underscore(g)
                 except Exception as e:
@@ -10930,17 +10892,8 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
     if args.no_gui:
         return 0
 
-    configuration = UIConfiguration()
-    geometry_loader = GeometryLoader()
-    pricing_registry = PricingRegistry()
-    llm_client = LLMClient()
-
-    App(
-        configuration=configuration,
-        geometry_loader=geometry_loader,
-        pricing_registry=pricing_registry,
-        llm_client=llm_client,
-    ).mainloop()
+    geo_service = geometry.GeometryService()
+    App(geometry_service=geo_service).mainloop()
 
     return 0
 

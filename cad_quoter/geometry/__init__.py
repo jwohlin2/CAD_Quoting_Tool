@@ -1,39 +1,55 @@
-"""Geometry helpers extracted from appV5."""
+# -*- coding: utf-8 -*-
+"""Geometry loading and enrichment utilities."""
 from __future__ import annotations
 
+import json
 import math
 import os
+import re
 import subprocess
 import tempfile
-import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
 
 # Optional trimesh for STL
 try:
     import trimesh  # type: ignore
-    HAS_TRIMESH = True
+    _HAS_TRIMESH = True
 except Exception:
-    HAS_TRIMESH = False
+    _HAS_TRIMESH = False
 
-HAS_EZDXF  = False
-HAS_ODAFC  = False      # ezdxf.addons.odafc (uses ODA File Converter)
-EZDXF_VERSION  = "unknown"
+_HAS_EZDXF  = False
+_HAS_ODAFC  = False      # ezdxf.addons.odafc (uses ODA File Converter)
+_EZDXF_VER  = "unknown"
 
 try:
     import ezdxf
-    EZDXF_VERSION = getattr(ezdxf, "__version__", "unknown")
-    HAS_EZDXF = True
+    _EZDXF_VER = getattr(ezdxf, "__version__", "unknown")
+    _HAS_EZDXF = True
+
 except Exception:
     ezdxf = None  # keep name defined
 
 # odafc is optional; don't fail if it's not present
 try:
-    if HAS_EZDXF:
+    if _HAS_EZDXF:
         from ezdxf.addons import odafc  # type: ignore
-        HAS_ODAFC = True
+        _HAS_ODAFC = True
 except Exception:
-    HAS_ODAFC = False
+    _HAS_ODAFC = False
+
+# Hole chart helpers (optional)
+try:
+    from hole_table_parser import parse_hole_table_lines
+except Exception:
+    parse_hole_table_lines = None
+
+try:
+    from dxf_text_extract import extract_text_lines_from_dxf
+except Exception:
+    extract_text_lines_from_dxf = None
+
 
 # numpy is optional for a few small calcs; degrade gracefully if missing
 try:
@@ -282,16 +298,6 @@ def ensure_shape(obj):
         raise TypeError("Expected non-null TopoDS_Shape")
     return obj
 
-# Static caster used throughout OCC helpers
-def FACE_OF(s: TopoDS_Shape) -> TopoDS_Face:
-    if isinstance(s, TopoDS_Face) or type(s).__name__ == "TopoDS_Face":
-        return s
-    if hasattr(TopoDS, "Face_s"):
-        face = TopoDS.Face_s(s)
-        if hasattr(face, "IsNull") and face.IsNull():
-            raise TypeError("TopoDS.Face_s returned null")
-        return face
-    raise TypeError("No Face_s caster available in this wheel")
 
 # Safe casters: no-ops if already cast; unwrap list nodes; check kind
 def to_edge_safe(obj):
@@ -430,7 +436,8 @@ def list_iter(lst):
 # ---- tiny helpers you can use elsewhere --------------------------------------
 def require_ezdxf():
     """Raise a clear error if ezdxf is missing."""
-    if not HAS_EZDXF:
+    if not _HAS_EZDXF:
+
         raise RuntimeError("ezdxf not installed. Install with pip/conda (package name: 'ezdxf').")
     return ezdxf
 
@@ -445,7 +452,8 @@ def get_dwg_converter_path() -> str:
 
 def have_dwg_support() -> bool:
     """True if we can open DWG (either odafc or an external converter is available)."""
-    return HAS_ODAFC or bool(get_dwg_converter_path())
+    return _HAS_ODAFC or bool(get_dwg_converter_path())
+
 def get_import_diagnostics_text() -> str:
     import sys, shutil, os
     lines = []
@@ -540,7 +548,8 @@ def load_drawing(path: Path) -> Drawing:
             dxf_path = convert_dwg_to_dxf(str(path))
             return ezdxf.readfile(dxf_path)
         # Fallback: odafc (requires ODAFileConverter on PATH)
-        if HAS_ODAFC:
+        if _HAS_ODAFC:
+
             return odafc.readfile(str(path))
         raise RuntimeError(
             "DWG import needs ODA File Converter. Set ODA_CONVERTER_EXE to the exe "
@@ -648,7 +657,7 @@ def build_llm_payload(structured: dict, page_image_path: str | None):
 
 
 # ==== OpenCascade compat (works with OCP OR OCC.Core) ====
-import tempfile, subprocess
+
 from pathlib import Path
 
 try:
@@ -845,10 +854,29 @@ def read_step_shape(path: str) -> TopoDS_Shape:
 
     if shape.IsNull():
         raise RuntimeError("STEP produced a null TopoDS_Shape.")
+    # Verify we truly pass a Shape to MapShapesAndAncestors
+    print("[DBG] shape type:", type(shape).__name__, "IsNull:", getattr(shape, "IsNull", lambda: True)())
+    amap = map_shapes_and_ancestors(shape, TopAbs_EDGE, TopAbs_FACE)
+    print("[DBG] map size:", amap.Size())
+    # DEBUG: sanity probe for STEP faces
+    if os.environ.get("STEP_PROBE", "0") == "1":
+        cnt = 0
+        try:
+            for f in iter_faces(shape):
+                _surf, _loc = face_surface(f)
+                cnt += 1
+        except Exception as _e:
+            # Keep debug non-fatal; report and continue
+            print(f"[STEP_PROBE] error during face probe: {_e}")
+        else:
+            print(f"[STEP_PROBE] faces={cnt}")
+
 
     fx = ShapeFix_Shape(shape)
     fx.Perform()
     return fx.Shape()
+
+from OCP.TopoDS import TopoDS_Shape  # or OCC.Core.TopoDS on pythonocc
 
 def safe_bbox(shape: TopoDS_Shape):
     if shape is None or shape.IsNull():
@@ -1232,7 +1260,8 @@ def enrich_geo_stl(path):
     import time
     start_time = time.time()
     print(f"[{time.time() - start_time:.2f}s] Starting enrich_geo_stl for {path}")
-    if not HAS_TRIMESH:
+    if not _HAS_TRIMESH:
+
         raise RuntimeError("trimesh not available to process STL")
     
     print(f"[{time.time() - start_time:.2f}s] Loading mesh...")
@@ -1362,62 +1391,190 @@ def read_cad_any(path: str):
     raise RuntimeError(f"Unsupported CAD format: {ext}")
 
 
+HAS_TRIMESH = _HAS_TRIMESH
+HAS_EZDXF = _HAS_EZDXF
+HAS_ODAFC = _HAS_ODAFC
+EZDXF_VERSION = _EZDXF_VER
+
+
+def load_model(path: str) -> TopoDS_Shape:
+    """Load any supported CAD file into an OCC :class:`TopoDS_Shape`."""
+
+    return load_cad_any(path)
+
+
+def extract_features_with_occ(path: str) -> Optional[Dict[str, Any]]:
+    """Best-effort OCC feature extraction from STEP/IGES/BREP inputs."""
+
+    ext = Path(path).suffix.lower()
+    if ext not in {".step", ".stp", ".iges", ".igs", ".brep"}:
+        return None
+    shape = read_step_or_iges_or_brep(path)
+    return enrich_geo_occ(shape)
+
+
 class GeometryService:
-    """High-level facade used by the UI to access geometry helpers."""
+    """Facade exposing high-level geometry operations for the UI layer."""
 
     def load_model(self, path: str) -> TopoDS_Shape:
-        return load_cad_any(path)
+        return load_model(path)
 
-    def enrich_shape(self, shape: TopoDS_Shape) -> Dict[str, Any]:
+    def read_model(self, path: str) -> TopoDS_Shape:
+        return read_cad_any(path)
+
+    def read_step(self, path: str) -> TopoDS_Shape:
+        return read_step_shape(path)
+
+    def convert_dwg(self, path: str, *, out_ver: str = "ACAD2018") -> str:
+        return convert_dwg_to_dxf(path, out_ver=out_ver)
+
+    def enrich_occ(self, shape: TopoDS_Shape) -> Dict[str, Any]:
         return enrich_geo_occ(shape)
 
     def enrich_stl(self, path: str) -> Dict[str, Any]:
         return enrich_geo_stl(path)
 
-    def extract_features(self, path: str) -> Dict[str, Any]:
-        ext = Path(path).suffix.lower()
-        if ext == ".stl":
-            return self.enrich_stl(path)
-        shape = self.load_model(path)
-        return self.enrich_shape(shape)
+    def extract_occ_features(self, path: str) -> Optional[Dict[str, Any]]:
+        return extract_features_with_occ(path)
 
+    @property
+    def has_trimesh(self) -> bool:
+        return HAS_TRIMESH
 
-DEFAULT_SERVICE = GeometryService()
+    @property
+    def has_ezdxf(self) -> bool:
+        return HAS_EZDXF
 
-
-def load_model(path: str) -> TopoDS_Shape:
-    return DEFAULT_SERVICE.load_model(path)
-
-
-def enrich_shape(shape: TopoDS_Shape) -> Dict[str, Any]:
-    return DEFAULT_SERVICE.enrich_shape(shape)
-
-
-def enrich_stl(path: str) -> Dict[str, Any]:
-    return DEFAULT_SERVICE.enrich_stl(path)
-
-
-def extract_features(path: str) -> Dict[str, Any]:
-    return DEFAULT_SERVICE.extract_features(path)
+    @property
+    def has_odafc(self) -> bool:
+        return HAS_ODAFC
 
 
 __all__ = [
+    "HAS_TRIMESH",
+    "HAS_EZDXF",
+    "HAS_ODAFC",
+    "EZDXF_VERSION",
     "GeometryService",
-    "DEFAULT_SERVICE",
-    "extract_features",
-    "enrich_geo_occ",
-    "enrich_geo_stl",
-    "enrich_shape",
-    "enrich_stl",
-    "load_cad_any",
     "load_model",
+    "load_cad_any",
     "read_cad_any",
     "read_step_shape",
     "read_step_or_iges_or_brep",
+    "convert_dwg_to_dxf",
+    "enrich_geo_occ",
+    "enrich_geo_stl",
+    "safe_bbox",
+    "safe_bounding_box",
+    "iter_solids",
+    "explode_compound",
+    "extract_features_with_occ",
+    "parse_hole_table_lines",
+    "extract_text_lines_from_dxf",
     "require_ezdxf",
     "get_dwg_converter_path",
     "have_dwg_support",
-    "convert_dwg_to_dxf",
-    "read_dxf_as_occ_shape",
+    "get_import_diagnostics_text",
+    "upsert_var_row",
 ]
 
+
+def read_dxf_as_occ_shape(dxf_path: str):
+    # minimal DXF?OCC triangulated shape (3DFACE/MESH/POLYFACE), fallback: extrude closed polyline
+    import ezdxf, numpy as np
+    from OCP.BRepBuilderAPI import (BRepBuilderAPI_MakeFace, BRepBuilderAPI_MakePolygon,
+                                    BRepBuilderAPI_Sewing, BRepBuilderAPI_MakeSolid)
+    from OCP.gp import gp_Pnt, gp_Vec
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakePrism
+    from OCP.ShapeFix import ShapeFix_Solid
+    from OCP.TopExp import TopExp_Explorer
+    from OCP.TopAbs import TopAbs_FACE
+
+    def tri_face(p0,p1,p2):
+        poly = BRepBuilderAPI_MakePolygon()
+        for p in (p0,p1,p2,p0):
+            poly.Add(gp_Pnt(*p))
+        return BRepBuilderAPI_MakeFace(poly.Wire(), True).Face()
+
+    def sew(faces):
+        sew = BRepBuilderAPI_Sewing(1.0e-6, True, True, True, True)
+        for f in faces: sew.Add(f)
+        sew.Perform()
+        return sew.SewedShape()
+
+    doc = ezdxf.readfile(dxf_path)
+    msp = doc.modelspace()
+    INSUNITS = doc.header.get("$INSUNITS", 1)  # 1=in, 4=mm, 2=ft, 6=m
+    u2mm = {1:25.4, 4:1.0, 2:304.8, 6:1000.0}.get(INSUNITS, 1.0)
+
+    tris = []
+    # 3DFACE
+    for e in msp.query("3DFACE"):
+        verts = [e.dxf.vtx0, e.dxf.vtx1, e.dxf.vtx2, e.dxf.vtx3]
+        pts = [(vx * u2mm, vy * u2mm, vz * u2mm) for (vx, vy, vz) in verts]
+        if len(pts) < 3:
+            continue
+        tris.append((pts[0], pts[1], pts[2]))
+        if len(pts) == 4:
+            v3 = np.array(pts[2])
+            v4 = np.array(pts[3])
+            if np.linalg.norm(v3 - v4) > 1e-12:
+                tris.append((pts[0], pts[2], pts[3]))
+    # POLYFACE
+    for e in msp.query("POLYFACE"):
+        for f in e.faces():
+            pts=[(v.dxf.location.x*u2mm, v.dxf.location.y*u2mm, v.dxf.location.z*u2mm) for v in f.vertices()]
+            if len(pts)>=3:
+                tris.append((pts[0], pts[1], pts[2]))
+                for k in range(3,len(pts)):
+                    tris.append((pts[0], pts[k-1], pts[k]))
+    # MESH
+    for e in msp.query("MESH"):
+        for f in e.faces_as_vertices():
+            pts=[(v.x*u2mm, v.y*u2mm, v.z*u2mm) for v in f]
+            if len(pts)>=3:
+                tris.append((pts[0], pts[1], pts[2]))
+                for k in range(3,len(pts)):
+                    tris.append((pts[0], pts[k-1], pts[k]))
+
+    faces = [tri_face(*t) for t in tris]
+    shape = None
+    if faces:
+        sewed = sew(faces)
+        try:
+            solid = BRepBuilderAPI_MakeSolid()
+            exp = TopExp_Explorer(sewed, TopAbs_FACE)
+            while exp.More():
+                solid.Add(exp.Current()); exp.Next()
+            fix = ShapeFix_Solid(solid.Solid()); fix.Perform()
+            shape = fix.Solid()
+        except Exception:
+            shape = sewed
+
+    # Fallback: 2D closed polyline ? extrude small thickness
+    if (shape is None) or shape.IsNull():
+        for pl in msp.query("LWPOLYLINE"):
+            if pl.closed:
+                pts2d = [(x*u2mm, y*u2mm, 0.0) for x,y,_ in pl.get_points("xyb")]
+                poly = BRepBuilderAPI_MakePolygon()
+                for q in pts2d: poly.Add(gp_Pnt(*q))
+                poly.Close()
+                face = BRepBuilderAPI_MakeFace(poly.Wire(), True).Face()
+                thk_mm = float(os.environ.get("DXF_EXTRUDE_THK_MM", "5.0"))
+                shape = BRepPrimAPI_MakePrism(face, gp_Vec(0,0,thk_mm)).Shape()
+                break
+
+    if (shape is None) or shape.IsNull():
+        raise RuntimeError("DXF contained no 3D geometry I can use. Prefer STEP/SAT if possible.")
+    return shape
+
+# ---- 2D: PDF (PyMuPDF) -------------------------------------------------------
+try:
+    import fitz  # old import name
+    _HAS_PYMUPDF = True
+except Exception:
+    try:
+        import pymupdf as fitz  # new import name
+        _HAS_PYMUPDF = True
+    except Exception:
+        fitz = None  # allow the rest of the app to import
