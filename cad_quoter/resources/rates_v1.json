@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "data": {
+    "ProgrammingRate": 120.0,
+    "MillingRate": 120.0,
+    "DrillingRate": 120.0,
+    "TurningRate": 115.0,
+    "WireEDMRate": 140.0,
+    "SinkerEDMRate": 150.0,
+    "SurfaceGrindRate": 120.0,
+    "ODIDGrindRate": 125.0,
+    "JigGrindRate": 150.0,
+    "LappingRate": 130.0,
+    "InspectionRate": 110.0,
+    "FinishingRate": 100.0,
+    "SawWaterjetRate": 100.0,
+    "FixtureBuildRate": 120.0,
+    "AssemblyRate": 110.0,
+    "EngineerRate": 140.0,
+    "CAMRate": 125.0
+  }
+}
