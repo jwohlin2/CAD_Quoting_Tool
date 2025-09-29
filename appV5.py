@@ -44,22 +44,7 @@ import pandas as pd
 
 from llama_cpp import Llama  # type: ignore
 
-from cad_quoter.llm import (
-    EDITOR_FROM_UI,
-    EDITOR_TO_SUGG,
-    LLMClient,
-    SUGG_TO_EDITOR,
-    SYSTEM_SUGGEST,
-    infer_hours_and_overrides_from_geo,
-    parse_llm_json,
-    run_llm_suggestions,
-)
-
-# Multipliers are applied to computed process hours, then we push the new hours to editor fields.
-PROC_MULT_TARGETS = {
-    "drilling": ("CMM Run Time min", 60.0),
-    "milling": ("Roughing Cycle Time", 1.0),
-}
+from cad_quoter.config import ConfigError, load_default_params, load_default_rates
 
 
 try:
@@ -2546,100 +2531,19 @@ def render_quote(
 
     return "\n".join(lines)
 # ===== QUOTE CONFIG (edit-friendly) ==========================================
-RATES_DEFAULT = {
-    "ProgrammingRate": 120.0,
-    "MillingRate": 120.0,
-    "DrillingRate": 120.0,
-    "TurningRate": 115.0,
-    "WireEDMRate": 140.0,
-    "SinkerEDMRate": 150.0,
-    "SurfaceGrindRate": 120.0,
-    "ODIDGrindRate": 125.0,
-    "JigGrindRate": 150.0,
-    "LappingRate": 130.0,
-    "InspectionRate": 110.0,
-    "FinishingRate": 100.0,
-    "SawWaterjetRate": 100.0,
-    "FixtureBuildRate": 120.0,
-    "AssemblyRate": 110.0,
-    "EngineerRate": 140.0,
-    "CAMRate": 125.0,
-}
+CONFIG_INIT_ERRORS: list[str] = []
 
-PARAMS_DEFAULT = {
-    "OverheadPct": 0.15,
-    "GA_Pct": 0.08,
-    "ContingencyPct": 0.00,
-    "ExpeditePct": 0.00,
-    "MarginPct": 0.35,
-    "InsurancePct": 0.00,
-    "VendorMarkupPct": 0.00,
-    "MinLotCharge": 0.00,
-    "Quantity": 1,
-    # Machine capability (shared with LLM for drilling/setup planning)
-    "MachineMaxRPM": 8000,
-    "MachineMaxTorqueNm": 70.0,
-    "MachineMaxZTravel_mm": 500.0,
-    # Light stock catalog so the LLM can pick reasonable blanks
-    "StockCatalog": [
-        {
-            "sku": "plate_steel_0.25_12x12",
-            "material": "steel",
-            "form": "plate",
-            "length_mm": 304.8,
-            "width_mm": 304.8,
-            "thickness_mm": 6.35,
-            "max_weight_kg": 7.0,
-        },
-        {
-            "sku": "plate_steel_0.5_12x12",
-            "material": "steel",
-            "form": "plate",
-            "length_mm": 304.8,
-            "width_mm": 304.8,
-            "thickness_mm": 12.7,
-            "max_weight_kg": 14.0,
-        },
-        {
-            "sku": "plate_aluminum_0.25_12x24",
-            "material": "aluminum",
-            "form": "plate",
-            "length_mm": 609.6,
-            "width_mm": 304.8,
-            "thickness_mm": 6.35,
-            "max_weight_kg": 12.0,
-        },
-        {
-            "sku": "plate_aluminum_0.5_12x24",
-            "material": "aluminum",
-            "form": "plate",
-            "length_mm": 609.6,
-            "width_mm": 304.8,
-            "thickness_mm": 12.7,
-            "max_weight_kg": 24.0,
-        },
-    ],
-    # Programming heuristics
-    "ProgSimpleDim_mm": 80.0,
-    "ProgCapHr": 1.0,
-    "ProgMaxToMillingRatio": 1.5,
-    # Efficiency & multipliers
-    "OEE_EfficiencyPct": 1.0,
-    "FiveAxisMultiplier": 1.0,
-    "TightToleranceMultiplier": 1.0,
-    # Adders
-    "MillingConsumablesPerHr": 4.0,
-    "TurningConsumablesPerHr": 3.0,
-    "EDMConsumablesPerHr": 6.0,
-    "GrindingConsumablesPerHr": 3.0,
-    "InspectionConsumablesPerHr": 1.0,
-    "UtilitiesPerSpindleHr": 2.5,
-    "ConsumablesFlat": 35.0,
-    # Misc
-    "MaterialOther": 50.0,
-    "MaterialVendorCSVPath": "",
-    "LLMModelPath": "",
-}
+try:
+    RATES_DEFAULT = load_default_rates()
+except ConfigError as exc:
+    RATES_DEFAULT = {}
+    CONFIG_INIT_ERRORS.append(f"Rates configuration error: {exc}")
+
+try:
+    PARAMS_DEFAULT = load_default_params()
+except ConfigError as exc:
+    PARAMS_DEFAULT = {}
+    CONFIG_INIT_ERRORS.append(f"Parameter configuration error: {exc}")
 
 # ---- Service containers -----------------------------------------------------
 
@@ -9167,7 +9071,7 @@ class App(tk.Tk):
         self.geo_context: dict[str, Any] = {}
         self.params = PARAMS_DEFAULT.copy()
         self.rates = RATES_DEFAULT.copy()
-        self.pricing = pricing or PricingEngine(create_default_registry())
+        self.config_errors = list(CONFIG_INIT_ERRORS)
 
         self.quote_state = QuoteState()
         self.llm_events: list[dict[str, Any]] = []
@@ -9252,6 +9156,11 @@ class App(tk.Tk):
         self.status_var = tk.StringVar(value="Ready")
         status_bar = ttk.Label(self, textvariable=self.status_var, relief=tk.SUNKEN, anchor="w", padding=5)
         status_bar.pack(side="bottom", fill="x")
+
+        if self.config_errors:
+            message = "Configuration errors detected:\n- " + "\n- ".join(self.config_errors)
+            messagebox.showerror("Configuration", message)
+            self.status_var.set("Configuration error: see dialog for details.")
 
         # GEO (single pane; CAD open handled by top bar)
         self.geo_txt = tk.Text(self.tab_geo, wrap="word"); self.geo_txt.pack(fill="both", expand=True)
