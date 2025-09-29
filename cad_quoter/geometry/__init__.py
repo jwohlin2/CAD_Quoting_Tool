@@ -1476,7 +1476,28 @@ __all__ = [
     "have_dwg_support",
     "get_import_diagnostics_text",
     "upsert_var_row",
+    "map_geo_to_double_underscore",
+    "collect_geo_features_from_df",
+    "update_variables_df_with_geo",
 ]
+
+
+def map_geo_to_double_underscore(geo: dict) -> dict:
+    from cad_quoter.geometry_wrappers import map_geo_to_double_underscore as _impl
+
+    return _impl(geo)
+
+
+def collect_geo_features_from_df(df):
+    from cad_quoter.geometry_wrappers import collect_geo_features_from_df as _impl
+
+    return _impl(df)
+
+
+def update_variables_df_with_geo(df, geo: dict):
+    from cad_quoter.geometry_wrappers import update_variables_df_with_geo as _impl
+
+    return _impl(df, geo)
 
 
 def read_dxf_as_occ_shape(dxf_path: str):

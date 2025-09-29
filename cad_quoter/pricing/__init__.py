@@ -6,6 +6,15 @@ from typing import Any, Dict, List, Sequence, Tuple
 
 from .base import PriceProvider, ProviderFactory, PriceQuote
 from .cache import PriceCache, PriceCacheEntry
+from .materials import (
+    BACKUP_CSV_NAME,
+    LB_PER_KG,
+    ensure_material_backup_csv,
+    load_backup_prices_csv,
+    price_value_to_per_gram,
+    resolve_material_unit_price,
+    usdkg_to_usdlb,
+)
 from .metals_api import MetalsAPI
 from .vendor_csv import VendorCSV
 
@@ -162,6 +171,8 @@ def create_default_registry() -> ProviderRegistry:
 
 
 __all__ = [
+    "BACKUP_CSV_NAME",
+    "LB_PER_KG",
     "PriceProvider",
     "ProviderFactory",
     "PriceQuote",
@@ -169,5 +180,10 @@ __all__ = [
     "PriceCacheEntry",
     "ProviderRegistry",
     "PricingEngine",
+    "ensure_material_backup_csv",
+    "load_backup_prices_csv",
+    "price_value_to_per_gram",
+    "resolve_material_unit_price",
+    "usdkg_to_usdlb",
     "create_default_registry",
 ]
