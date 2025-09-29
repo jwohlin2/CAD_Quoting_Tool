@@ -70,7 +70,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 import urllib.request
 from importlib import import_module
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 from OCP.TopAbs   import TopAbs_EDGE, TopAbs_FACE
 from OCP.TopExp   import TopExp, TopExp_Explorer
 from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
@@ -11247,6 +11247,86 @@ def get_llm_overrides(
     meta["context"] = ctx
     return out, meta
 # ----------------- GUI -----------------
+# ---- service containers ----------------------------------------------------
+
+
+@dataclass(slots=True)
+class UIConfiguration:
+    """Aggregate user-interface defaults for the desktop application."""
+
+    title: str = "Compos-AI"
+    window_geometry: str = "1260x900"
+    llm_enabled_default: bool = True
+    apply_llm_adjustments_default: bool = True
+    settings_path: Path = field(default_factory=lambda: Path(__file__).with_name("app_settings.json"))
+    default_llm_model_path: str | None = None
+
+
+class GeometryLoader:
+    """Facade around geometry helper functions used by the UI layer."""
+
+    def extract_pdf_all(self, path: str | Path, dpi: int = 300) -> dict:
+        return extract_pdf_all(Path(path), dpi=dpi)
+
+    def extract_2d_features_from_pdf_vector(self, path: str | Path) -> dict:
+        return extract_2d_features_from_pdf_vector(str(path))
+
+    def extract_2d_features_from_dxf_or_dwg(self, path: str | Path) -> dict:
+        return extract_2d_features_from_dxf_or_dwg(str(path))
+
+    def extract_features_with_occ(self, path: str | Path):
+        return extract_features_with_occ(str(path))
+
+    def enrich_geo_stl(self, path: str | Path):
+        return enrich_geo_stl(str(path))
+
+    def read_step_shape(self, path: str | Path) -> TopoDS_Shape:
+        return read_step_shape(str(path))
+
+    def read_cad_any(self, path: str | Path) -> TopoDS_Shape:
+        return read_cad_any(str(path))
+
+    def safe_bbox(self, shape: TopoDS_Shape):
+        return safe_bbox(shape)
+
+    def enrich_geo_occ(self, shape: TopoDS_Shape):
+        return enrich_geo_occ(shape)
+
+
+@dataclass(slots=True)
+class PricingRegistry:
+    """Provide mutable copies of editable pricing defaults to the UI."""
+
+    param_defaults: dict[str, Any] = field(default_factory=lambda: copy.deepcopy(PARAMS_DEFAULT))
+    rate_defaults: dict[str, float] = field(default_factory=lambda: copy.deepcopy(RATES_DEFAULT))
+
+    def create_params(self) -> dict[str, Any]:
+        return copy.deepcopy(self.param_defaults)
+
+    def create_rates(self) -> dict[str, float]:
+        return copy.deepcopy(self.rate_defaults)
+
+
+@dataclass(slots=True)
+class LLMClient:
+    """Thin wrapper that exposes LLM helpers required by the UI."""
+
+    default_model_locator: Callable[[], str] = find_default_qwen_model
+    vision_loader: Callable[..., Any] = load_qwen_vl
+
+    def default_model_path(self) -> str:
+        return self.default_model_locator() or ""
+
+    def load_vision_model(
+        self,
+        *,
+        n_ctx: int = 8192,
+        n_gpu_layers: int = 20,
+        n_threads: int | None = None,
+    ):
+        return self.vision_loader(n_ctx=n_ctx, n_gpu_layers=n_gpu_layers, n_threads=n_threads)
+
+
 # ---- scrollable frame helper -----------------------------------------------
 class ScrollableFrame(ttk.Frame):
     def __init__(self, parent, *args, **kwargs):
@@ -11289,19 +11369,39 @@ class ScrollableFrame(ttk.Frame):
 
 
 class App(tk.Tk):
-    def __init__(self):
+    def __init__(
+        self,
+        configuration: UIConfiguration | None = None,
+        *,
+        geometry_loader: GeometryLoader | None = None,
+        pricing_registry: PricingRegistry | None = None,
+        llm_client: LLMClient | None = None,
+    ):
         super().__init__()
-        self.title("Compos-AI")
-        self.geometry("1260x900")
+
+        self.configuration = configuration or UIConfiguration()
+        self.geometry_loader = geometry_loader or GeometryLoader()
+        self.pricing_registry = pricing_registry or PricingRegistry()
+        self.llm_client = llm_client or LLMClient()
+
+        if getattr(self.configuration, "title", None):
+            self.title(self.configuration.title)
+        if getattr(self.configuration, "window_geometry", None):
+            self.geometry(self.configuration.window_geometry)
 
         self.vars_df = None
         self.vars_df_full = None
         self.geo = None
         self.geo_context: dict[str, Any] = {}
-        self.params = PARAMS_DEFAULT.copy()
-        self.rates = RATES_DEFAULT.copy()
+        self.params = self.pricing_registry.create_params()
+        self.rates = self.pricing_registry.create_rates()
         self.quote_state = QuoteState()
-        self.settings_path = Path(__file__).with_name("app_settings.json")
+
+        settings_path = getattr(self.configuration, "settings_path", None)
+        if settings_path:
+            self.settings_path = Path(settings_path)
+        else:
+            self.settings_path = Path(__file__).with_name("app_settings.json")
         self.settings = self._load_settings()
         if isinstance(self.settings, dict):
             vendor_csv = str(self.settings.get("material_vendor_csv", "") or "")
@@ -11309,13 +11409,17 @@ class App(tk.Tk):
                 self.params["MaterialVendorCSVPath"] = vendor_csv
 
         # LLM defaults: ON + auto model discovery
-        default_model = find_default_qwen_model()
+        default_model = (
+            self.configuration.default_llm_model_path
+            if getattr(self.configuration, "default_llm_model_path", None)
+            else self.llm_client.default_model_path()
+        )
         if default_model:
             os.environ["QWEN_GGUF_PATH"] = default_model
             self.params["LLMModelPath"] = default_model
 
-        self.llm_enabled = tk.BooleanVar(value=True)
-        self.apply_llm_adj = tk.BooleanVar(value=True)
+        self.llm_enabled = tk.BooleanVar(value=self.configuration.llm_enabled_default)
+        self.apply_llm_adj = tk.BooleanVar(value=self.configuration.apply_llm_adjustments_default)
         self.llm_model_path = tk.StringVar(value=default_model)
 
         # Create a Menu Bar
@@ -11397,11 +11501,11 @@ class App(tk.Tk):
 
         self.LLM_SUGGEST = None
         try:
-            self.LLM_SUGGEST = load_qwen_vl(n_ctx=8192, n_gpu_layers=20)
+            self.LLM_SUGGEST = self.llm_client.load_vision_model(n_ctx=8192, n_gpu_layers=20)
         except Exception as exc:
             self.status_var.set(f"Vision LLM failed ({exc}); retrying CPU mode.")
             try:
-                self.LLM_SUGGEST = load_qwen_vl(n_ctx=4096, n_gpu_layers=0)
+                self.LLM_SUGGEST = self.llm_client.load_vision_model(n_ctx=4096, n_gpu_layers=0)
             except Exception as exc2:
                 self.status_var.set(f"Vision LLM unavailable: {exc2}")
                 self.LLM_SUGGEST = None
@@ -11918,10 +12022,10 @@ class App(tk.Tk):
             try:
                 structured_pdf = None
                 if ext == ".pdf":
-                    structured_pdf = extract_pdf_all(Path(path))
-                    g2d = extract_2d_features_from_pdf_vector(path)   # PyMuPDF vector-only MVP
+                    structured_pdf = self.geometry_loader.extract_pdf_all(path)
+                    g2d = self.geometry_loader.extract_2d_features_from_pdf_vector(path)   # PyMuPDF vector-only MVP
                 else:
-                    g2d = extract_2d_features_from_dxf_or_dwg(path)   # ezdxf / ODA
+                    g2d = self.geometry_loader.extract_2d_features_from_dxf_or_dwg(path)   # ezdxf / ODA
 
                 if self.vars_df is None:
                     vp = find_variables_near(path) or filedialog.askopenfilename(title="Select variables CSV/XLSX")
@@ -12002,7 +12106,7 @@ class App(tk.Tk):
         geo = None
         try:
             # Fast path (your OCC feature extractor for 3D)
-            geo = extract_features_with_occ(path)  # handles STEP/IGES/BREP
+            geo = self.geometry_loader.extract_features_with_occ(path)  # handles STEP/IGES/BREP
         except Exception:
             geo = None
 
@@ -12010,7 +12114,7 @@ class App(tk.Tk):
             if ext == ".stl":
                 stl_geo = None
                 try:
-                    stl_geo = enrich_geo_stl(path)  # trimesh-based
+                    stl_geo = self.geometry_loader.enrich_geo_stl(path)  # trimesh-based
                 except Exception as e:
                     import traceback
                     tb = traceback.format_exc()
@@ -12031,11 +12135,11 @@ class App(tk.Tk):
             else:
                 try:
                     if ext in (".step", ".stp"):
-                        shape = read_step_shape(path)
+                        shape = self.geometry_loader.read_step_shape(path)
                     else:
-                        shape = read_cad_any(path)            # IGES/BREP and others
-                    _ = safe_bbox(shape)
-                    g = enrich_geo_occ(shape)             # OCC-based geometry features
+                        shape = self.geometry_loader.read_cad_any(path)            # IGES/BREP and others
+                    _ = self.geometry_loader.safe_bbox(shape)
+                    g = self.geometry_loader.enrich_geo_occ(shape)             # OCC-based geometry features
                     geo = _map_geo_to_double_underscore(g)
                 except Exception as e:
                     messagebox.showerror(
@@ -12469,7 +12573,17 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
     if args.no_gui:
         return 0
 
-    App().mainloop()
+    configuration = UIConfiguration()
+    geometry_loader = GeometryLoader()
+    pricing_registry = PricingRegistry()
+    llm_client = LLMClient()
+
+    App(
+        configuration=configuration,
+        geometry_loader=geometry_loader,
+        pricing_registry=pricing_registry,
+        llm_client=llm_client,
+    ).mainloop()
     return 0
 
 
