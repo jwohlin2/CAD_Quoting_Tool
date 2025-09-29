@@ -19,30 +19,16 @@ import json, math, os, time, gc
 from collections import Counter
 from fractions import Fraction
 from pathlib import Path
+from dataclasses import dataclass, field
 
-from cad_quoter.config import configure_logging, logger
-
-@dataclass(frozen=True)
-class AppEnvironment:
-    """Runtime configuration extracted from environment variables.
-
-    Centralising this logic makes it trivial for reviewers to audit which
-    environment variables are consulted and how defaults are derived.  The
-    configuration can also be serialised for diagnostics without touching
-    global module state.
-    """
-
-    llm_debug_enabled: bool = False
-    llm_debug_dir: Path = field(default_factory=Path)
-
-    @classmethod
-    def from_env(cls) -> "AppEnvironment":
-        debug_enabled = bool(int(os.getenv("LLM_DEBUG", "1")))
-        debug_dir_raw = os.getenv("LLM_DEBUG_DIR")
-        debug_dir = Path(debug_dir_raw) if debug_dir_raw else Path(__file__).with_name("llm_debug")
-        debug_dir.mkdir(exist_ok=True)
-        return cls(llm_debug_enabled=debug_enabled, llm_debug_dir=debug_dir)
-
+from cad_quoter.app.container import ServiceContainer, create_default_container
+from cad_quoter.config import (
+    AppEnvironment,
+    ConfigError,
+    configure_logging,
+    describe_runtime_environment as _describe_runtime_environment,
+    logger,
+)
 
 APP_ENV = AppEnvironment.from_env()
 
@@ -50,17 +36,9 @@ APP_ENV = AppEnvironment.from_env()
 def describe_runtime_environment() -> dict[str, str]:
     """Return a redacted snapshot of runtime configuration for auditors."""
 
-    info = {"llm_debug_enabled": str(APP_ENV.llm_debug_enabled)}
+    info = _describe_runtime_environment()
+    info["llm_debug_enabled"] = str(APP_ENV.llm_debug_enabled)
     info["llm_debug_dir"] = str(APP_ENV.llm_debug_dir)
-    for key in ("QWEN_GGUF_PATH", "ODA_CONVERTER_EXE", "DWG2DXF_EXE", "METALS_API_KEY"):
-        value = os.getenv(key)
-        if not value:
-            info[key.lower()] = ""
-            continue
-        if key.endswith("_KEY"):
-            info[key.lower()] = "<redacted>"
-        else:
-            info[key.lower()] = value
     return info
 
 
@@ -73,7 +51,30 @@ import tkinter.font as tkfont
 import urllib.request
 from importlib import import_module
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
-from cad_quoter.pricing import PricingEngine, create_default_registry
+import cad_quoter.geometry as geometry
+
+from cad_quoter.domain_models import (
+    DEFAULT_MATERIAL_DISPLAY,
+    DEFAULT_MATERIAL_KEY,
+    MATERIAL_DISPLAY_BY_KEY,
+    MATERIAL_DROPDOWN_OPTIONS,
+    MATERIAL_KEYWORDS,
+    MATERIAL_MAP,
+    MATERIAL_OTHER_KEY,
+    coerce_float_or_none as _coerce_float_or_none,
+    normalize_material_key as _normalize_lookup_key,
+)
+from cad_quoter.pricing import (
+    BACKUP_CSV_NAME,
+    LB_PER_KG,
+    PricingEngine,
+    create_default_registry,
+    ensure_material_backup_csv,
+    load_backup_prices_csv,
+    price_value_to_per_gram as _price_value_to_per_gram,
+    resolve_material_unit_price as _resolve_material_unit_price,
+    usdkg_to_usdlb as _usdkg_to_usdlb,
+)
 from cad_quoter.pricing.wieland import lookup_price as lookup_wieland_price
 
 from OCP.TopAbs   import TopAbs_EDGE, TopAbs_FACE
@@ -87,26 +88,20 @@ import pandas as pd
 
 from llama_cpp import Llama  # type: ignore
 
-from cad_quoter.config import ConfigError, load_default_params, load_default_rates
-
-
 try:
     from geo_read_more import build_geo_from_dxf as build_geo_from_dxf_path
 except Exception:
     build_geo_from_dxf_path = None  # type: ignore[assignment]
 
+
 def _match_items_contains(items: pd.Series, pattern: str) -> pd.Series:
-    """
-    Case-insensitive regex match over Items.
-    Convert capturing groups to non-capturing to avoid pandas warning.
-    Fall back to literal if regex fails.
-    """
+    """Case-insensitive regex match over Items."""
 
     pat = _to_noncapturing(pattern) if "_to_noncapturing" in globals() else pattern
     try:
         return items.str.contains(pat, case=False, regex=True, na=False)
     except Exception:
-
+        return items.str.contains(re.escape(pattern), case=False, regex=True, na=False)
 
 
 # Geometry helpers (re-exported for backward compatibility)
@@ -1702,243 +1697,6 @@ def iter_suggestion_rows(state: QuoteState) -> list[dict]:
         })
 
     return rows
-
-
-MATERIAL_DROPDOWN_OPTIONS = [
-    "Aluminum",
-    "Berylium Copper",
-    "Bismuth",
-    "Brass",
-    "Carbide",
-    "Ceramic",
-    "Cobalt",
-    "Copper",
-    "Gold",
-    "Inconel",
-    "Indium",
-    "Lead",
-    "Nickel",
-    "Nickel Silver",
-    "Palladium",
-    "Phosphor Bronze",
-    "Phosphorus",
-    "Silver",
-    "Stainless Steel",
-    "Steel",
-    "Tin",
-    "Titanium",
-    "Tool Steel",
-    "Tungsten",
-    "Other (enter custom price)",
-]
-
-# Default material for the dropdown / pricing logic
-DEFAULT_MATERIAL_DISPLAY = "Steel"
-DEFAULT_MATERIAL_KEY = _normalize_lookup_key(DEFAULT_MATERIAL_DISPLAY)
-
-_MATERIAL_ADDITIONAL_KEYWORDS = {
-    "Aluminum": {"aluminium"},
-    "Berylium Copper": {"beryllium copper", "c172", "cube"},
-    "Brass": {"c360", "c260"},
-    "Copper": {"cu"},
-    "Inconel": {"in718", "in625"},
-    "Nickel": {"ni"},
-    "Nickel Silver": {"german silver"},
-    "Phosphor Bronze": {"phosphorbronze"},
-    "Stainless Steel": {"stainless"},
-    "Steel": {"carbon steel"},
-    "Titanium": {"ti", "ti6al4v"},
-    "Tool Steel": {"h13", "o1", "a2", "d2"},
-}
-
-MATERIAL_KEYWORDS: Dict[str, set[str]] = {}
-for display in MATERIAL_DROPDOWN_OPTIONS:
-    key = _normalize_lookup_key(display)
-    if not key:
-        continue
-    extras = {_normalize_lookup_key(term) for term in _MATERIAL_ADDITIONAL_KEYWORDS.get(display, set())}
-    extras.discard("")
-    MATERIAL_KEYWORDS[key] = {key} | extras
-
-MATERIAL_DISPLAY_BY_KEY: Dict[str, str] = {}
-for display in MATERIAL_DROPDOWN_OPTIONS:
-    key = _normalize_lookup_key(display)
-    if key:
-        MATERIAL_DISPLAY_BY_KEY[key] = display
-
-MATERIAL_OTHER_KEY = _normalize_lookup_key(MATERIAL_DROPDOWN_OPTIONS[-1])
-
-
-MATERIAL_MAP: dict[str, dict[str, float | str]] = {
-    # Aluminum alloys → Aluminum cash index
-    "6061": {"symbol": "XAL", "basis": "index_usd_per_tonne", "loss_factor": 0.0, "wieland_key": "6061"},
-    "6061-T6": {"symbol": "XAL", "basis": "index_usd_per_tonne", "wieland_key": "6061-T6"},
-    "7075": {"symbol": "XAL", "basis": "index_usd_per_tonne", "wieland_key": "7075"},
-
-    # Stainless → approximate with Nickel + premium or use vendor CSV override
-    "304": {"symbol": "XNI", "basis": "index_usd_per_tonne", "premium_usd_per_kg": 1.20, "wieland_key": "304"},
-    "316": {"symbol": "XNI", "basis": "index_usd_per_tonne", "premium_usd_per_kg": 1.80, "wieland_key": "316"},
-
-    # Copper alloys → Copper
-    "C110": {"symbol": "XCU", "basis": "index_usd_per_tonne", "wieland_key": "C110"},
-
-    # Precious (if you ever quote)
-    "AU-9999": {"symbol": "XAU", "basis": "usd_per_troy_oz"},
-}
-
-
-def _coerce_float_or_none(value: Any) -> float | None:
-    if isinstance(value, (int, float)):
-        try:
-            return float(value)
-        except Exception:
-            return None
-    if isinstance(value, str):
-        cleaned = value.strip()
-        if not cleaned:
-            return None
-        cleaned = cleaned.replace("$", "").replace(",", "").strip()
-        if not cleaned:
-            return None
-        try:
-            return float(cleaned)
-        except Exception:
-            m = re.search(r"-?\d+(?:\.\d+)?", cleaned)
-            if m:
-                try:
-                    return float(m.group(0))
-                except Exception:
-                    return None
-    return None
-
-
-def _price_value_to_per_gram(value: float, label: str) -> float | None:
-    try:
-        base = float(value)
-    except Exception:
-        return None
-    label_lower = str(label or "").lower()
-    label_compact = label_lower.replace(" ", "")
-
-    def _has_any(*patterns: str) -> bool:
-        return any(p in label_lower or p in label_compact for p in patterns)
-
-    if _has_any("perg", "/g", "$/g", "per gram"):
-        return base
-    if _has_any("perkg", "/kg", "$/kg", "per kilogram"):
-        return base / 1000.0
-    if _has_any("perlb", "/lb", "$/lb", "per pound", "/lbs", "$/lbs"):
-        return base / 453.59237
-    if _has_any("peroz", "/oz", "$/oz", "per ounce"):
-        return base / 28.349523125
-    return None
-
-
-# ---------- Material price backup (CSV) ----------
-LB_PER_KG = 2.2046226218
-BACKUP_CSV_NAME = "material_price_backup.csv"
-
-
-def _usdkg_to_usdlb(x: float) -> float:
-    return float(x) / LB_PER_KG if x is not None else x
-
-
-def ensure_material_backup_csv(path: str | None = None) -> str:
-    """
-    Creates a small CSV with dummy prices if it doesn't exist, next to this script.
-    Columns: material_key,usd_per_kg,usd_per_lb,notes
-    """
-    from pathlib import Path
-
-    path = Path(path) if path else Path(__file__).with_name(BACKUP_CSV_NAME)
-    if path.exists():
-        return str(path)
-
-    rows = [
-        # material_key,   usd/kg,  usd/lb (blank -> derived),      notes
-        ("steel",           2.20,   "",  "dummy base"),
-        ("stainless steel", 4.00,   "",  "dummy base"),
-        ("aluminum",        2.80,   "",  "dummy base"),
-        ("copper",          9.50,   "",  "dummy base"),
-        ("brass",           7.80,   "",  "dummy base"),
-        ("titanium",       17.00,   "",  "dummy base"),
-    ]
-
-    lines = ["material_key,usd_per_kg,usd_per_lb,notes\n"]
-    for m, kg, lb, note in rows:
-        if lb in ("", None):
-            lb = kg / LB_PER_KG
-        lines.append(f"{m},{float(kg):.6f},{float(lb):.6f},{note}\n")
-
-    path.write_text("".join(lines), encoding="utf-8")
-    return str(path)
-
-
-def load_backup_prices_csv(path: str | None = None) -> dict:
-    """
-    Returns: {normalized_key: {"usd_per_kg":float,"usd_per_lb":float,"notes":str}, ...}
-    """
-    from pathlib import Path
-    import pandas as pd
-
-    path = Path(path) if path else Path(ensure_material_backup_csv())
-    df = pd.read_csv(path)
-    out = {}
-    for _, r in df.iterrows():
-        key = _normalize_lookup_key(r["material_key"])
-        usdkg = _coerce_float_or_none(r.get("usd_per_kg"))
-        usdlb = _coerce_float_or_none(r.get("usd_per_lb"))
-        if usdkg and not usdlb:
-            usdlb = _usdkg_to_usdlb(usdkg)
-        if usdlb and not usdkg:
-            usdkg = float(usdlb) * LB_PER_KG
-        if usdkg and usdlb:
-            out[key] = {"usd_per_kg": float(usdkg), "usd_per_lb": float(usdlb), "notes": str(r.get("notes", ""))}
-    return out
-
-
-def resolve_material_unit_price(display_name: str, unit: str = "kg") -> tuple[float, str]:
-    """
-    Try Wieland first; if missing/error, fall back to local CSV; finally hardcode steel.
-    unit in {"kg","lb"}; returns (price, source_tag)
-    """
-    key = _normalize_lookup_key(display_name)
-    # 1) Wieland (if installed)
-    try:
-        from wieland_scraper import get_live_material_price
-
-        price, src = get_live_material_price(display_name, unit=unit, fallback_usd_per_kg=float("nan"))
-        if price is not None and math.isfinite(float(price)):
-            return float(price), src
-    except Exception as e:
-        src = f"wieland_error:{type(e).__name__}"
-    else:
-        src = ""
-
-    # 2) CSV
-    try:
-        table = load_backup_prices_csv()
-        rec = table.get(key)
-        if not rec:
-            if "stainless" in key:
-                rec = table.get("stainless steel")
-            elif "steel" in key:
-                rec = table.get("steel")
-            elif "alum" in key:
-                rec = table.get("aluminum")
-            elif "copper" in key or "cu" in key:
-                rec = table.get("copper")
-            elif "brass" in key:
-                rec = table.get("brass")
-        if rec:
-            price = rec["usd_per_kg"] if unit == "kg" else rec["usd_per_lb"]
-            return float(price), f"backup_csv:{BACKUP_CSV_NAME}"
-    except Exception:
-        pass
-
-    # 3) Last-resort hardcoded steel
-    hard = 2.20 if unit == "kg" else (2.20 / LB_PER_KG)
-    return hard, "hardcoded_default"
 
 
 SHOW_LLM_HOURS_DEBUG = False # set True only when debugging
@@ -4332,16 +4090,36 @@ def render_quote(
 CONFIG_INIT_ERRORS: list[str] = []
 
 try:
-    RATES_DEFAULT = load_default_rates()
+    SERVICE_CONTAINER = create_default_container()
+except Exception as exc:
+    CONFIG_INIT_ERRORS.append(f"Service container initialisation error: {exc}")
+
+    def _empty_params() -> dict[str, Any]:
+        return {}
+
+    SERVICE_CONTAINER = ServiceContainer(
+        load_params=_empty_params,
+        load_rates=lambda: {},
+        pricing_engine_factory=lambda: PricingEngine(create_default_registry()),
+    )
+
+try:
+    RATES_DEFAULT = SERVICE_CONTAINER.load_rates()
 except ConfigError as exc:
     RATES_DEFAULT = {}
     CONFIG_INIT_ERRORS.append(f"Rates configuration error: {exc}")
+except Exception as exc:
+    RATES_DEFAULT = {}
+    CONFIG_INIT_ERRORS.append(f"Unexpected rates configuration error: {exc}")
 
 try:
-    PARAMS_DEFAULT = load_default_params()
+    PARAMS_DEFAULT = SERVICE_CONTAINER.load_params()
 except ConfigError as exc:
     PARAMS_DEFAULT = {}
     CONFIG_INIT_ERRORS.append(f"Parameter configuration error: {exc}")
+except Exception as exc:
+    PARAMS_DEFAULT = {}
+    CONFIG_INIT_ERRORS.append(f"Unexpected parameter configuration error: {exc}")
 
 # ---- Service containers -----------------------------------------------------
 
@@ -4416,7 +4194,7 @@ def pct(value: Any, default: float = 0.0) -> float:
         return default
 
 
-_DEFAULT_PRICING_ENGINE = PricingEngine(create_default_registry())
+_DEFAULT_PRICING_ENGINE = SERVICE_CONTAINER.get_pricing_engine()
 
 
 def compute_material_cost(material_name: str,
@@ -10846,7 +10624,16 @@ class ScrollableFrame(ttk.Frame):
 
 
 class App(tk.Tk):
-    def __init__(self, pricing: PricingEngine | None = None):
+    def __init__(
+        self,
+        pricing: PricingEngine | None = None,
+        *,
+        configuration: UIConfiguration | None = None,
+        geometry_loader: GeometryLoader | None = None,
+        pricing_registry: PricingRegistry | None = None,
+        llm_client: LLMClient | None = None,
+        geometry_service: geometry.GeometryService | None = None,
+    ):
 
         super().__init__()
 
