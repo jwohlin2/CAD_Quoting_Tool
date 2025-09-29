@@ -21,6 +21,8 @@ from fractions import Fraction
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from cad_quoter.config import configure_logging, logger
+
 @dataclass(frozen=True)
 class AppEnvironment:
     """Runtime configuration extracted from environment variables.
@@ -3037,9 +3039,13 @@ def read_step_shape(path: str) -> TopoDS_Shape:
     if shape.IsNull():
         raise RuntimeError("STEP produced a null TopoDS_Shape.")
     # Verify we truly pass a Shape to MapShapesAndAncestors
-    print("[DBG] shape type:", type(shape).__name__, "IsNull:", getattr(shape, "IsNull", lambda: True)())
+    logger.debug(
+        "Shape type: %s IsNull: %s",
+        type(shape).__name__,
+        getattr(shape, "IsNull", lambda: True)(),
+    )
     amap = map_shapes_and_ancestors(shape, TopAbs_EDGE, TopAbs_FACE)
-    print("[DBG] map size:", amap.Size())
+    logger.debug("Shape ancestor map size: %d", amap.Size())
     # DEBUG: sanity probe for STEP faces
     if os.environ.get("STEP_PROBE", "0") == "1":
         cnt = 0
@@ -3047,11 +3053,11 @@ def read_step_shape(path: str) -> TopoDS_Shape:
             for f in iter_faces(shape):
                 _surf, _loc = face_surface(f)
                 cnt += 1
-        except Exception as _e:
+        except Exception:
             # Keep debug non-fatal; report and continue
-            print(f"[STEP_PROBE] error during face probe: {_e}")
+            logger.exception("STEP_PROBE face probe failed")
         else:
-            print(f"[STEP_PROBE] faces={cnt}")
+            logger.debug("STEP_PROBE faces=%d", cnt)
 
     fx = ShapeFix_Shape(shape)
     fx.Perform()
@@ -3440,13 +3446,17 @@ def enrich_geo_occ(shape):
 def enrich_geo_stl(path):
     import time
     start_time = time.time()
-    print(f"[{time.time() - start_time:.2f}s] Starting enrich_geo_stl for {path}")
+    logger.info("[%.2fs] Starting enrich_geo_stl for %s", time.time() - start_time, path)
     if not _HAS_TRIMESH:
         raise RuntimeError("trimesh not available to process STL")
     
-    print(f"[{time.time() - start_time:.2f}s] Loading mesh...")
+    logger.info("[%.2fs] Loading mesh...", time.time() - start_time)
     mesh = trimesh.load(path, force='mesh')
-    print(f"[{time.time() - start_time:.2f}s] Mesh loaded. Faces: {len(mesh.faces)}")
+    logger.info(
+        "[%.2fs] Mesh loaded. Faces: %d",
+        time.time() - start_time,
+        len(mesh.faces),
+    )
     
     if mesh.is_empty:
         raise RuntimeError("Empty STL mesh")
@@ -3457,7 +3467,7 @@ def enrich_geo_stl(path):
     volume = float(mesh.volume) if mesh.is_volume else 0.0
     faces = int(len(mesh.faces))
     
-    print(f"[{time.time() - start_time:.2f}s] Calculating WEDM length...")
+    logger.info("[%.2fs] Calculating WEDM length...", time.time() - start_time)
     z_vals = [zmin + 0.25*(zmax-zmin), zmin + 0.50*(zmax-zmin), zmin + 0.75*(zmax-zmin)]
     wedm_len = 0.0
     for z in z_vals:
@@ -3469,9 +3479,9 @@ def enrich_geo_stl(path):
             wedm_len += float(planar.length)
         except Exception:
             pass
-    print(f"[{time.time() - start_time:.2f}s] WEDM length calculated.")
+    logger.info("[%.2fs] WEDM length calculated.", time.time() - start_time)
     
-    print(f"[{time.time() - start_time:.2f}s] Calculating deburr length...")
+    logger.info("[%.2fs] Calculating deburr length...", time.time() - start_time)
     try:
         import numpy as np
         angles = mesh.face_adjacency_angles
@@ -3485,12 +3495,12 @@ def enrich_geo_stl(path):
             deburr_len = 0.0
     except Exception:
         deburr_len = 0.0
-    print(f"[{time.time() - start_time:.2f}s] Deburr length calculated.")
+    logger.info("[%.2fs] Deburr length calculated.", time.time() - start_time)
     
     bbox_vol = max(L*W*H, 1e-9)
     complexity = (faces / max(volume, bbox_vol)) * 100.0
     
-    print(f"[{time.time() - start_time:.2f}s] Calculating 3-axis accessibility...")
+    logger.info("[%.2fs] Calculating 3-axis accessibility...", time.time() - start_time)
     try:
         n = mesh.face_normals
         area_faces = mesh.area_faces.reshape(-1,1)
@@ -3501,14 +3511,14 @@ def enrich_geo_stl(path):
         access = float((area_faces[close].sum() / area_faces.sum())) if area_faces.sum() > 0 else 0.0
     except Exception:
         access = 0.0
-    print(f"[{time.time() - start_time:.2f}s] 3-axis accessibility calculated.")
+    logger.info("[%.2fs] 3-axis accessibility calculated.", time.time() - start_time)
     
     try:
         center = list(map(float, mesh.center_mass))
     except Exception:
         center = [0.0,0.0,0.0]
     
-    print(f"[{time.time() - start_time:.2f}s] Finished enrich_geo_stl.")
+    logger.info("[%.2fs] Finished enrich_geo_stl.", time.time() - start_time)
     return {
         "GEO-01_Length_mm": round(L,3),
         "GEO-02_Width_mm": round(W,3),
@@ -3565,7 +3575,7 @@ def read_cad_any(path: str):
         return read_dxf_as_occ_shape(path)
     if ext == ".dwg":
         conv = os.environ.get("ODA_CONVERTER_EXE") or os.environ.get("DWG2DXF_EXE")
-        print(f"INFO: Using DWG converter: {conv}")
+        logger.info("Using DWG converter: %s", conv)
         dxf_path = convert_dwg_to_dxf(path)
         return read_dxf_as_occ_shape(dxf_path)
     raise RuntimeError(f"Unsupported CAD format: {ext}")
@@ -12459,11 +12469,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def _main(argv: Optional[Sequence[str]] = None) -> int:
+    configure_logging()
     parser = build_arg_parser()
     args = parser.parse_args(argv)
 
     if args.print_env:
-        print(json.dumps(describe_runtime_environment(), indent=2))
+        logger.info("Runtime environment:\n%s", json.dumps(describe_runtime_environment(), indent=2))
         return 0
 
     if args.no_gui:
