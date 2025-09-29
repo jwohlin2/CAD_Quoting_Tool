@@ -1,36 +1,23 @@
-"""Domain helpers shared across the CAD Quoter application."""
+"""Domain helpers and state containers for quoting workflows."""
+
+
 from __future__ import annotations
 
 import math
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:  # pragma: no cover - used for type hints only
-    import pandas as pd
-
-__all__ = [
-    "QuoteState",
-    "as_float_or_none",
-    "build_suggest_payload",
-    "ensure_scrap_pct",
-    "match_items_contains",
-    "normalize_lookup_key",
-]
+from typing import Any, Dict
 
 
-_CAPTURING_GROUP_RE = re.compile(r"\((?!\?[:P<!=])")
-
-
-def normalize_lookup_key(value: str) -> str:
-    """Normalise user input for dictionary lookups."""
+def _normalize_lookup_key(value: str) -> str:
 
     cleaned = re.sub(r"[^0-9a-z]+", " ", str(value).strip().lower())
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
-def ensure_scrap_pct(val) -> float:
-    """Coerce UI/LLM scrap into a sane fraction in [0, 0.25]."""
+def _ensure_scrap_pct(val) -> float:
+    """Coerce UI/LLM scrap into a sane fraction in ``[0, 0.25]``."""
+
 
     try:
         x = float(val)
@@ -42,32 +29,6 @@ def ensure_scrap_pct(val) -> float:
         return 0.0
     return min(0.25, max(0.0, x))
 
-
-def match_items_contains(items: "pd.Series", pattern: str) -> "pd.Series":
-    """Case-insensitive regex match over items with graceful fallback."""
-
-    def _to_noncapturing(expr: str) -> str:
-        return _CAPTURING_GROUP_RE.sub("(?:", expr)
-
-    pat = _to_noncapturing(pattern)
-    try:
-        return items.str.contains(pat, case=False, regex=True, na=False)
-    except Exception:
-        return items.str.contains(re.escape(pattern), case=False, regex=True, na=False)
-
-
-def as_float_or_none(value: Any) -> float | None:
-    try:
-        if isinstance(value, (int, float)):
-            return float(value)
-        if isinstance(value, str):
-            cleaned = value.strip()
-            if not cleaned:
-                return None
-            return float(cleaned)
-    except Exception:
-        return None
-    return None
 
 
 @dataclass
@@ -87,6 +48,20 @@ class QuoteState:
     guard_context: dict = field(default_factory=dict)
 
 
+def _as_float_or_none(value: Any) -> float | None:
+    try:
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if not cleaned:
+                return None
+            return float(cleaned)
+    except Exception:
+        return None
+    return None
+
+
 def build_suggest_payload(geo, baseline, rates, bounds) -> dict:
     geo = geo or {}
     baseline = baseline or {}
@@ -95,7 +70,8 @@ def build_suggest_payload(geo, baseline, rates, bounds) -> dict:
 
     derived = geo.get("derived") or {}
     hole_bins = derived.get("hole_bins") or {}
-    hole_bins_top = {}
+    hole_bins_top: Dict[str, int] = {}
+
     if isinstance(hole_bins, dict):
         hole_bins_top = dict(sorted(hole_bins.items(), key=lambda kv: -kv[1])[:8])
 
@@ -132,9 +108,10 @@ def build_suggest_payload(geo, baseline, rates, bounds) -> dict:
     if not material_name:
         material_name = "Steel"
 
-    hole_count_val = as_float_or_none(geo.get("hole_count"))
+    hole_count_val = _as_float_or_none(geo.get("hole_count"))
     if hole_count_val is None:
-        hole_count_val = as_float_or_none(derived.get("hole_count"))
+        hole_count_val = _as_float_or_none(derived.get("hole_count"))
+
     hole_count = int(hole_count_val or 0)
 
     tap_qty = derived.get("tap_qty")
@@ -155,24 +132,32 @@ def build_suggest_payload(geo, baseline, rates, bounds) -> dict:
     except Exception:
         csk_qty = 0
 
-    tap_minutes_hint = as_float_or_none(derived.get("tap_minutes_hint"))
-    cbore_minutes_hint = as_float_or_none(derived.get("cbore_minutes_hint"))
-    csk_minutes_hint = as_float_or_none(derived.get("csk_minutes_hint"))
-    tap_class_counts = derived.get("tap_class_counts") if isinstance(derived.get("tap_class_counts"), dict) else {}
+    tap_minutes_hint = _as_float_or_none(derived.get("tap_minutes_hint"))
+    cbore_minutes_hint = _as_float_or_none(derived.get("cbore_minutes_hint"))
+    csk_minutes_hint = _as_float_or_none(derived.get("csk_minutes_hint"))
+    tap_class_counts = (
+        derived.get("tap_class_counts") if isinstance(derived.get("tap_class_counts"), dict) else {}
+    )
+
     tap_details = derived.get("tap_details") if isinstance(derived.get("tap_details"), list) else []
     npt_qty = 0
     try:
         npt_qty = int(derived.get("npt_qty") or 0)
     except Exception:
         npt_qty = 0
-    inference_knobs = derived.get("inference_knobs") if isinstance(derived.get("inference_knobs"), dict) else {}
+    inference_knobs = (
+        derived.get("inference_knobs") if isinstance(derived.get("inference_knobs"), dict) else {}
+    )
     has_ldr_notes = bool(derived.get("has_ldr_notes"))
-    max_hole_depth_in = as_float_or_none(derived.get("max_hole_depth_in"))
-    plate_area_in2 = as_float_or_none(derived.get("plate_area_in2"))
+    max_hole_depth_in = _as_float_or_none(derived.get("max_hole_depth_in"))
+    plate_area_in2 = _as_float_or_none(derived.get("plate_area_in2"))
     finish_flags_raw = derived.get("finish_flags")
     if isinstance(finish_flags_raw, (list, tuple, set)):
         finish_flags = [
-            str(flag).strip() for flag in finish_flags_raw if isinstance(flag, str) and flag.strip()
+            str(flag).strip()
+            for flag in finish_flags_raw
+            if isinstance(flag, str) and flag.strip()
+
         ]
     elif isinstance(finish_flags_raw, str) and finish_flags_raw.strip():
         finish_flags = [finish_flags_raw.strip()]
@@ -209,57 +194,59 @@ def build_suggest_payload(geo, baseline, rates, bounds) -> dict:
     if tap_minutes_hint:
         seed["tapping_minutes_hint"] = tap_minutes_hint
     if cbore_minutes_hint:
-        seed["counterbore_minutes_hint"] = cbore_minutes_hint
+        seed["cbore_minutes_hint"] = cbore_minutes_hint
     if csk_minutes_hint:
-        seed["countersink_minutes_hint"] = csk_minutes_hint
+        seed["csk_minutes_hint"] = csk_minutes_hint
     if tap_class_counts:
-        seed["tap_class_counts"] = tap_class_counts
+        top_counts = dict(sorted(tap_class_counts.items(), key=lambda kv: -kv[1])[:6])
+        seed["tap_class_counts"] = top_counts
     if tap_details:
-        seed["tap_details"] = tap_details[:10]
+        seed["tap_details"] = tap_details[:12]
+
     if npt_qty:
         seed["npt_qty"] = npt_qty
     if inference_knobs:
         seed["inference_knobs"] = inference_knobs
+    if hole_bins_top:
+        seed["hole_bins_top"] = hole_bins_top
 
-    return {
-        "purpose": "quote_suggestions",
+    payload = {
+        "seed": seed,
         "geo": {
-            "is_2d_plate": bool((geo.get("meta") or {}).get("is_2d_plate", True)),
+            "material": material_name,
+            "thickness_mm": thickness_mm,
+
             "hole_count": hole_count,
             "tap_qty": tap_qty,
             "cbore_qty": cbore_qty,
             "csk_qty": csk_qty,
-            "hole_bins_top": hole_bins_top,
-            "thickness_mm": thickness_mm,
-            "material": material_name,
-            "bbox_mm": geo.get("bbox_mm"),
+            "npt_qty": npt_qty,
+
             "tap_minutes_hint": tap_minutes_hint,
             "cbore_minutes_hint": cbore_minutes_hint,
             "csk_minutes_hint": csk_minutes_hint,
             "tap_class_counts": tap_class_counts,
             "tap_details": tap_details,
-            "npt_qty": npt_qty,
-            "inference_knobs": inference_knobs,
-            "has_leader_notes": has_ldr_notes,
+            "hole_bins_top": hole_bins_top,
+            "finish_flags": finish_flags,
+            "has_tight_tol": has_tight_tol,
+            "stock_guess": stock_guess,
             "max_hole_depth_in": max_hole_depth_in,
             "plate_area_in2": plate_area_in2,
-            "has_tight_tol": has_tight_tol,
-            "finish_flags": finish_flags,
-            "stock_guess": stock_guess,
         },
-        "baseline": {
-            "process_hours": baseline.get("process_hours"),
-            "scrap_pct": baseline.get("scrap_pct", 0.0),
-            "pass_through": baseline.get("pass_through", {}),
-        },
+        "baseline": baseline,
         "rates": rates,
         "bounds": bounds,
-        "seed": seed,
     }
 
+    return payload
 
-# Backwards compatibility aliases for legacy imports
-_normalize_lookup_key = normalize_lookup_key
-_ensure_scrap_pct = ensure_scrap_pct
-_match_items_contains = match_items_contains
-_as_float_or_none = as_float_or_none
+
+__all__ = [
+    "QuoteState",
+    "_as_float_or_none",
+    "_ensure_scrap_pct",
+    "_normalize_lookup_key",
+    "build_suggest_payload",
+]
+
