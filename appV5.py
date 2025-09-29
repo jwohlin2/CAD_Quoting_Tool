@@ -81,6 +81,23 @@ import pandas as pd
 
 from llama_cpp import Llama  # type: ignore
 
+from cad_quoter.llm import (
+    EDITOR_FROM_UI,
+    EDITOR_TO_SUGG,
+    LLMClient,
+    SUGG_TO_EDITOR,
+    SYSTEM_SUGGEST,
+    infer_hours_and_overrides_from_geo,
+    parse_llm_json,
+    run_llm_suggestions,
+)
+
+# Multipliers are applied to computed process hours, then we push the new hours to editor fields.
+PROC_MULT_TARGETS = {
+    "drilling": ("CMM Run Time min", 60.0),
+    "milling": ("Roughing Cycle Time", 1.0),
+}
+
 try:
     from geo_read_more import build_geo_from_dxf as build_geo_from_dxf_path
 except Exception:
@@ -123,102 +140,6 @@ def _match_items_contains(items: pd.Series, pattern: str) -> pd.Series:
         return items.str.contains(re.escape(pattern), case=False, regex=True, na=False)
 
 
-def parse_llm_json(text: str):
-    """
-    Accepts raw model text. Strips ``` fences, grabs the first {...} block,
-    returns dict or {}.
-    """
-    if not isinstance(text, str):
-        return {}
-    text2 = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.IGNORECASE | re.MULTILINE).strip()
-    m = re.search(r"\{.*\}", text2, flags=re.DOTALL)
-    if not m:
-        return {}
-    frag = m.group(0)
-    try:
-        return json.loads(frag)
-    except Exception:
-        frag2 = re.sub(r",\s*([}\]])", r"\1", frag)
-        try:
-            return json.loads(frag2)
-        except Exception:
-            return {}
-
-
-SYSTEM_SUGGEST = """You are a manufacturing estimator.
-Given GEO + baseline + bounds, propose bounded adjustments that improve realism.
-ALWAYS return a complete JSON object with THESE KEYS, even if values are unchanged:
-{
-  "process_hour_multipliers": {"drilling": <float>, "milling": <float>},
-  "process_hour_adders": {"inspection": <float>},
-  "scrap_pct": <float>,           // fraction 0.00–0.25
-  "setups": <int>,                // 1–4
-  "fixture": "<string>",          // short phrase
-  "notes": ["<short reason>"],
-  "no_change_reason": "<why you kept near baseline, if so>"
-}
-All outputs MUST respect bounds in `bounds`.
-Prefer small, explainable changes (±10–50%). Never leave fields out.
-You may use payload["seed"] heuristics to bias adjustments when helpful."""
-
-
-# Field mapping: LLM suggestion key -> (Editor label, to_editor, from_editor)
-SUGG_TO_EDITOR = {
-    "scrap_pct": (
-        "Scrap Percent (%)",
-        lambda f: f * 100.0,
-        lambda s: float(s) / 100.0,
-    ),
-    "setups": (
-        "Number of Milling Setups",
-        int,
-        int,
-    ),
-    ("process_hour_adders", "inspection"): (
-        "In-Process Inspection Hours",
-        float,
-        float,
-    ),
-    "fixture": (
-        "Fixture plan",
-        str,
-        str,
-    ),
-    ("add_pass_through", "Consumables /Hr"): (
-        "Consumables /Hr Cost",
-        float,
-        float,
-    ),
-    ("add_pass_through", "Utilities"): (
-        "Utilities Cost",
-        float,
-        float,
-    ),
-    ("add_pass_through", "Shipping"): (
-        "Shipping Cost",
-        float,
-        float,
-    ),
-    "contingency_pct": (
-        "ContingencyPct",
-        float,
-        float,
-    ),
-    "fixture_material_cost_delta": (
-        "Fixture Material Cost",
-        float,
-        float,
-    ),
-}
-
-# Multipliers are applied to computed process hours, then we push the new hours to editor fields.
-PROC_MULT_TARGETS = {
-    "drilling": ("CMM Run Time min", 60.0),
-    "milling": ("Roughing Cycle Time", 1.0),
-}
-
-EDITOR_TO_SUGG = {spec[0]: key for key, spec in SUGG_TO_EDITOR.items()}
-EDITOR_FROM_UI = {spec[0]: spec[2] for _, spec in SUGG_TO_EDITOR.items()}
 
 
 VL_MODEL = r"D:\CAD_Quoting_Tool\models\qwen2.5-vl-7b-instruct-q4_k_m.gguf"
@@ -685,6 +606,8 @@ class QuoteState:
     bounds: dict = field(default_factory=dict)
     material_source: str | None = None
     guard_context: dict = field(default_factory=dict)
+    llm_events: list = field(default_factory=list)
+    llm_errors: list = field(default_factory=list)
 
 
 def _as_float_or_none(value: Any) -> float | None:
@@ -865,31 +788,6 @@ def build_suggest_payload(geo, baseline, rates, bounds) -> dict:
         "bounds": bounds,
         "seed": seed,
     }
-
-
-def run_llm_suggestions(LLM, payload: dict) -> tuple[dict, str, dict]:
-    parsed, raw, usage = LLM.ask_json(
-        system_prompt=SYSTEM_SUGGEST,
-        user_prompt=json.dumps(payload, indent=2),
-        temperature=0.3,
-        max_tokens=512,
-        context=payload,
-        params={"top_p": 0.9},
-    )
-    if not parsed:
-        parsed = parse_llm_json(raw)
-    if not parsed:
-        baseline = payload.get("baseline") or {}
-        parsed = {
-            "process_hour_multipliers": {"drilling": 1.0, "milling": 1.0},
-            "process_hour_adders": {"inspection": 0.0},
-            "scrap_pct": baseline.get("scrap_pct", 0.0),
-            "setups": int(baseline.get("setups", 1) or 1),
-            "fixture": baseline.get("fixture", "standard") or "standard",
-            "notes": ["no parse; using baseline"],
-            "no_change_reason": "fallback",
-        }
-    return parsed, raw, usage or {}
 
 
 def sanitize_suggestions(s: dict, bounds: dict) -> dict:
@@ -3570,397 +3468,6 @@ def read_cad_any(path: str):
         return read_dxf_as_occ_shape(dxf_path)
     raise RuntimeError(f"Unsupported CAD format: {ext}")
 
-# ----------------- Offline Qwen via llama-cpp -----------------
-def _llama_missing_msg():
-    return ("llama-cpp-python is not installed.\n" 
-            "Install in your env:\n" 
-            "  python -m pip install -U llama-cpp-python\n")
-
-class _LocalLLM:
-    """
-    Minimal, tolerant wrapper around llama-cpp-python.
-    - Chat if available; otherwise use completion.
-    - Always returns best-effort JSON dict.
-    """
-    def __init__(self, model_path: str,
-                 n_ctx: int = int(os.getenv("QWEN_N_CTX", 32768)),
-                 n_gpu_layers: int = int(os.getenv("QWEN_N_GPU_LAYERS", 0)),
-                 n_threads: int | None = None):
-        try:
-            from llama_cpp import Llama  # type: ignore
-        except Exception as e:
-            raise RuntimeError(_llama_missing_msg()) from e
-        if not os.path.isfile(model_path):
-            raise FileNotFoundError(f"Model GGUF not found: {model_path}")
-        self._Llama = Llama
-        self._llm = None
-        self.model_path = model_path
-        self.n_ctx = n_ctx
-        self.n_gpu_layers = n_gpu_layers
-        self.n_threads = n_threads
-
-    def _ensure(self):
-        if self._llm is None:
-            llama_kwargs = dict(
-                model_path=self.model_path,
-                n_ctx=self.n_ctx,
-                n_gpu_layers=self.n_gpu_layers,
-                n_threads=self.n_threads,
-                n_batch=int(os.getenv("QWEN_N_BATCH", 1024)),
-                logits_all=False,
-                verbose=False,
-            )
-            rope_scale = os.getenv("ROPE_FREQ_SCALE")
-            if rope_scale:
-                try:
-                    llama_kwargs["rope_freq_scale"] = float(rope_scale)
-                except Exception:
-                    pass
-            self._llm = self._Llama(**llama_kwargs)
-
-    def ask_json(
-        self,
-        system_prompt: str,
-        user_prompt: str,
-        temperature: float = 0.2,
-        max_tokens: int = 2048,
-        context: dict | None = None,
-        params: dict | None = None,
-    ):
-        self._ensure()
-        p = {
-            "temperature": float(os.getenv("QWEN_TEMP", temperature)),
-            "top_p": float(os.getenv("QWEN_TOP_P", 0.90)),
-            "repeat_penalty": float(os.getenv("QWEN_REPEAT_PENALTY", 1.05)),
-            "max_tokens": int(os.getenv("QWEN_MAX_TOKENS", max_tokens)),
-        }
-        if params:
-            p.update(params)
-
-        req = {
-            "model": getattr(self, "model_path", "local"),
-            "n_ctx": getattr(self, "n_ctx", None),
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            "params": p,
-            "context_payload": context or {},
-            "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
-        }
-
-        out = self._llm.create_chat_completion(
-            messages=req["messages"],
-            temperature=p["temperature"],
-            top_p=p["top_p"],
-            repeat_penalty=p["repeat_penalty"],
-            max_tokens=p["max_tokens"],
-        )
-        text = out["choices"][0]["message"]["content"]
-        usage = out.get("usage", {})
-
-        parsed = None
-        try:
-            parsed = json.loads(text)
-        except Exception:
-            parsed = None
-        if not isinstance(parsed, dict):
-            parsed = parse_llm_json(text)
-
-        if APP_ENV.llm_debug_enabled:
-            snap = {
-                "request": req,
-                "raw_response_text": text,
-                "parsed_response": parsed,
-                "usage": usage,
-            }
-            fn = APP_ENV.llm_debug_dir / f"llm_snapshot_{int(time.time())}.json"
-            fn.write_text(json.dumps(snap, indent=2), encoding="utf-8")
-
-        return parsed, text, usage
-
-    def close(self):
-        """Best-effort cleanup to avoid llama-cpp destructor warnings."""
-        try:
-            llm = getattr(self, "_llm", None)
-            self._llm = None
-            if llm is None:
-                return
-            # Ensure attribute exists to satisfy some versions' __del__ checks
-            try:
-                getattr(llm, "sampler")
-            except Exception:
-                try:
-                    setattr(llm, "sampler", None)
-                except Exception:
-                    pass
-            # Prefer explicit close if available
-            try:
-                if hasattr(llm, "close"):
-                    llm.close()
-            except Exception:
-                pass
-            # Drop strong refs
-            try:
-                del llm
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-    def __del__(self):
-        try:
-            self.close()
-        except Exception:
-            pass
-
-# ---- LLM hours inference ----
-def infer_hours_and_overrides_from_geo(geo: dict, params: dict | None = None, rates: dict | None = None) -> dict:
-    """
-    Ask the local LLM to estimate HOURS for each process + a few knobs.
-    Returns a dict with 'hours', 'setups', 'inspection', 'notes'.
-    """
-    params = params or {}
-    rates = rates or {}
-
-    system = (
-        "You are a senior manufacturing estimator in a tool & die/CNC job shop. "
-        "Given CAD GEO features (mm/mm2/mm3), estimate realistic HOURS for a small lot of machined parts. "
-        "Prefer simple, conservative estimates. Output ONLY JSON."
-    )
-
-    # keep schema explicit and small; minutes only where noted
-    schema = {
-        "hours": {
-            "Programming_Hours": 0.0,
-            "CAM_Programming_Hours": 0.0,
-            "Engineering_Hours": 0.0,
-            "Fixture_Build_Hours": 0.0,
-
-            "Roughing_Cycle_Time_hr": 0.0,
-            "Semi_Finish_Cycle_Time_hr": 0.0,
-            "Finishing_Cycle_Time_hr": 0.0,
-
-            "OD_Turning_Hours": 0.0,
-            "ID_Bore_Drill_Hours": 0.0,
-            "Threading_Hours": 0.0,
-            "Cutoff_Hours": 0.0,
-
-            "WireEDM_Hours": 0.0,
-            "SinkerEDM_Hours": 0.0,
-
-            "Grinding_Surface_Hours": 0.0,
-            "Grinding_ODID_Hours": 0.0,
-            "Jig_Grind_Hours": 0.0,
-
-            "Lapping_Hours": 0.0,
-            "Deburr_Hours": 0.0,
-            "Tumble_Hours": 0.0,
-            "Blast_Hours": 0.0,
-            "Laser_Mark_Hours": 0.0,
-            "Masking_Hours": 0.0,
-
-            "InProcess_Inspection_Hours": 0.0,
-            "Final_Inspection_Hours": 0.0,
-            "CMM_Programming_Hours": 0.0,
-            "CMM_RunTime_min": 0.0,  # minutes
-
-            "Saw_Waterjet_Hours": 0.0,
-            "Assembly_Hours": 0.0,
-            "Packaging_Labor_Hours": 0.0,
-
-            "EHS_Hours": 0.0
-        },
-        "setups": {
-            "Milling_Setups": 1,
-            "Setup_Hours_per_Setup": 0.3
-        },
-        "inspection": {
-            "FAIR_Required": False,
-            "Source_Inspection_Required": False
-        },
-        "notes": []
-    }
-
-    prompt = f'''
-GEO (mm / mm2 / mm3):
-{json.dumps(geo, indent=2)}
-
-Rules of thumb:
-- Small rectangular blocks with few features: Programming 0.2ï¿½1.0 hr, CAM 0.2ï¿½1.0 hr, Engineering 0 hr.
-- Use setups 1ï¿½2 unless 3-axis accessibility is low (<0.6) or faces with unique normals > 4.
-- Deburr 0.1ï¿½0.4 hr unless thin walls/freeform edges (then up to 0.8 hr).
-- Final inspection ~0.2ï¿½0.6 hr; CMM only if tolerances < 0.02 mm or GD&T heavy.
-- Grinding/EDM/Turning hours should be 0 unless features clearly require them.
-- Never return huge numbers for tiny parts (<80 mm max dim).
-
-Return JSON with this structure (numbers only, minutes only for CMM_RunTime_min):
-{json.dumps(schema, indent=2)}
-'''
-
-    # try local GGUF if available
-    try:
-        mp = os.environ.get("QWEN_GGUF_PATH")
-        if mp and Path(mp).is_file():
-            q = _LocalLLM(mp)
-            parsed, raw_text, _usage = q.ask_json(
-                system,
-                prompt,
-                temperature=0.1,
-                max_tokens=1024,
-            )
-            if not isinstance(parsed, dict):
-                parsed = parse_llm_json(raw_text)
-            if isinstance(parsed, dict) and "hours" in parsed:
-                return parsed
-    except Exception:
-        pass
-
-    # Fallback heuristics if LLM unavailable
-    faces = float(geo.get("GEO__Face_Count", 0) or 0)
-    max_dim = float(geo.get("GEO__MaxDim_mm", 0) or 0)
-    small_simple = (max_dim and max_dim <= 80.0 and faces < 300)
-
-    hours = {k: 0.0 for k in schema["hours"]}
-    if small_simple:
-        hours["Programming_Hours"] = 0.5
-        hours["CAM_Programming_Hours"] = 0.5
-        hours["Engineering_Hours"] = 0.0
-        hours["Roughing_Cycle_Time_hr"] = 0.5
-        hours["Finishing_Cycle_Time_hr"] = 0.2
-        hours["Deburr_Hours"] = 0.2
-        hours["Final_Inspection_Hours"] = 0.2
-        setups = {"Milling_Setups": 1, "Setup_Hours_per_Setup": 0.3}
-    else:
-        setups = {"Milling_Setups": 2, "Setup_Hours_per_Setup": 0.4}
-
-    return {"hours": hours, "setups": setups, "inspection": {"FAIR_Required": False, "Source_Inspection_Required": False}, "notes": ["heuristic fallback"]}
-
-def clamp_llm_hours(est: dict, geo: dict, params: dict | None = None) -> dict:
-    params = params or {}
-    h = est.get("hours", {}).copy()
-
-    max_dim = float(geo.get("GEO__MaxDim_mm", 0) or 0)
-    setups  = int(round(est.get("setups", {}).get("Milling_Setups", 1)))
-    simple  = (max_dim and max_dim <= 80.0 and setups <= 2)
-
-    # default caps (you can expose these in Overrides UI)
-    caps_simple = {
-        "Programming_Hours": 1.0, "CAM_Programming_Hours": 1.0, "Engineering_Hours": 1.0,
-        "Roughing_Cycle_Time_hr": 1.0, "Finishing_Cycle_Time_hr": 0.6, "Semi_Finish_Cycle_Time_hr": 0.4,
-        "Deburr_Hours": 0.6, "Final_Inspection_Hours": 0.6,
-        "Assembly_Hours": 0.5
-    }
-    caps_general = {
-        "Programming_Hours": 4.0, "CAM_Programming_Hours": 4.0, "Engineering_Hours": 8.0,
-        "Deburr_Hours": 2.0, "Final_Inspection_Hours": 2.0,
-    }
-
-    for k, v in list(h.items()):
-        v = max(0.0, float(v or 0))
-        cap = (caps_simple if simple else caps_general).get(k, None)
-        if cap is not None:
-            v = min(v, cap)
-        h[k] = v
-
-    # Minutes sanity
-    if "CMM_RunTime_min" in h:
-        h["CMM_RunTime_min"] = max(0.0, min(float(h["CMM_RunTime_min"] or 0), 120.0))
-
-    est["hours"] = h
-    return est
-
-def apply_llm_hours_to_variables(df, est: dict, allow_overwrite_nonzero=False, log: dict | None = None):
-    """
-    Writes LLM hour estimates into the Variables df.
-    Only touches time rows; if allow_overwrite_nonzero=False, it will skip rows that already have a non-zero value.
-    """
-    import pandas as pd
-    mapping = {
-        "Programming_Hours":              "Programming Hours",
-        "CAM_Programming_Hours":          "CAM Programming Hours",
-        "Engineering_Hours":              "Engineering (Docs/Fixture Design) Hours",
-        "Fixture_Build_Hours":            "Fixture Build Hours",
-
-        "Roughing_Cycle_Time_hr":         "Roughing Cycle Time",
-        "Semi_Finish_Cycle_Time_hr":      "Semi-Finish Cycle Time",
-        "Finishing_Cycle_Time_hr":        "Finishing Cycle Time",
-
-        "OD_Turning_Hours":               "OD Turning Hours",
-        "ID_Bore_Drill_Hours":            "ID Boring/Drilling Hours",
-        "Threading_Hours":                "Threading Hours",
-        "Cutoff_Hours":                   "Cut-Off / Parting Hours",
-
-        "WireEDM_Hours":                  "WEDM Hours",
-        "SinkerEDM_Hours":                "Sinker EDM Hours",
-
-        "Grinding_Surface_Hours":         "Grinding (Surface) Hours",
-        "Grinding_ODID_Hours":            "Grinding (OD/ID) Hours",
-        "Jig_Grind_Hours":                "Jig Grind Hours",
-
-        "Lapping_Hours":                  "Lapping Hours",
-        "Deburr_Hours":                   "Deburr Hours",
-        "Tumble_Hours":                   "Tumbling Hours",
-        "Blast_Hours":                    "Bead Blasting Hours",
-        "Laser_Mark_Hours":               "Laser Mark Hours",
-        "Masking_Hours":                  "Masking Hours",
-
-        "InProcess_Inspection_Hours":     "In-Process Inspection Hours",
-        "Final_Inspection_Hours":         "Final Inspection Hours",
-        "CMM_Programming_Hours":          "CMM Programming Hours",
-        "CMM_RunTime_min":                "CMM Run Time min",
-
-        "Saw_Waterjet_Hours":             "Sawing Hours",
-        "Assembly_Hours":                 "Assembly Hours",
-        "Packaging_Labor_Hours":          "Packaging Labor Hours",
-        "EHS_Hours":                      "EHS Training/Compliance Hours"
-    }
-
-    def upsert(name, value, dtype="number"):
-        nonlocal df
-        # ensure core columns exist
-        for c in ("Item", "Example Values / Options", "Data Type / Input Method"):
-            if c not in df.columns: df[c] = ""
-        m = df["Item"].astype(str).str.fullmatch(str(name), case=False, na=False)
-        if m.any():
-            cur = pd.to_numeric(df.loc[m, "Example Values / Options"], errors="coerce").fillna(0.0).iloc[0]
-            if (not allow_overwrite_nonzero) and (float(cur) != 0.0):
-                return False
-            df.loc[m, "Example Values / Options"] = value
-            df.loc[m, "Data Type / Input Method"] = dtype
-        else:
-            row = {c: None for c in df.columns}
-            row["Item"] = name
-            row["Example Values / Options"] = value
-            row["Data Type / Input Method"] = dtype
-            df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-        return True
-
-    applied = {}
-    for k, v in (est.get("hours") or {}).items():
-        item = mapping.get(k)
-        if not item: continue
-        ok = upsert(item, round(float(v or 0), 3), "number")
-        if ok: applied[item] = v
-
-    # Setups
-    setups = est.get("setups") or {}
-    if "Milling_Setups" in setups:
-        upsert("Number of Milling Setups", int(setups["Milling_Setups"]), "number")
-    if "Setup_Hours_per_Setup" in setups:
-        upsert("Setup Hours / Setup", round(float(setups["Setup_Hours_per_Setup"]), 3), "number")
-
-    # Inspection flags ? set to 0/1 as numbers
-    insp = est.get("inspection", {}) or {}
-    if "FAIR_Required" in insp:
-        upsert("FAIR Required", 1 if insp.get("FAIR_Required") else 0, "number")
-    if "Source_Inspection_Required" in insp:
-        upsert("Source Inspection Requirement", 1 if insp.get("Source_Inspection_Required") else 0, "number")
-
-    if log is not None:
-        log["llm_hours_applied"] = applied
-    return df
-
 # --- WHICH SHEET ROWS MATTER TO THE ESTIMATOR --------------------------------
 def _estimator_patterns():
     pats = [
@@ -4041,143 +3548,15 @@ def _items_used_by_estimator(df):
             used.append(it)
     return used
 
-# --- Build prompt + run model -----------------------------------------------
+# --- APPLY LLM OUTPUT ---------------------------------------------------------
 def _parse_pct_like(x):
     try:
         v = float(x)
-        return v/100.0 if v > 1.0 else v
+        return v / 100.0 if v > 1.0 else v
     except Exception:
         return None
 
-def build_llm_sheet_prompt(geo: dict, allowed_items: list[str], params_snapshot: dict) -> tuple[str, str]:
-    sys = (
-        "You are a manufacturing estimator for precision machining (milling/turning/EDM/grinding). "
-        "You will receive:\n" 
-        "1) GEO_* features extracted from CAD (units in mm/mm^2/mm^3), and\n" 
-        "2) a list of allowed Variables sheet row names you may edit.\n" 
-        "Return STRICT JSON only.\n" 
-        "Rules:\n" 
-        "- Only edit rows that are in the provided allowed_items list.\n" 
-        "- Use numbers only (no text). Time is in HOURS unless the row name includes 'min'.\n" 
-        "- Pass counts/integers for fields like '... Passes' or '... Count'.\n" 
-        "- Percents must be decimals (e.g., 0.20 for 20%).\n" 
-        "- Be conservative; if you are unsure, skip the edit.\n" 
-        "- You may also suggest param nudges in 'params' for: OEE_EfficiencyPct, FiveAxisMultiplier, TightToleranceMultiplier,\n" 
-        "  MillingConsumablesPerHr, TurningConsumablesPerHr, EDMConsumablesPerHr, GrindingConsumablesPerHr, InspectionConsumablesPerHr,\n" 
-        "  UtilitiesPerSpindleHr, ConsumablesFlat. Do not include other keys.\n"
-    )
-    import json, textwrap
-    u = {
-        "geo": geo,
-        "allowed_items": allowed_items,
-        "params_snapshot": {k: params_snapshot.get(k) for k in [
-            "OEE_EfficiencyPct","FiveAxisMultiplier","TightToleranceMultiplier",
-            "MillingConsumablesPerHr","TurningConsumablesPerHr","EDMConsumablesPerHr",
-            "GrindingConsumablesPerHr","InspectionConsumablesPerHr",
-            "UtilitiesPerSpindleHr","ConsumablesFlat"
-        ]},
-        "output_shape": {
-            "sheet_edits": [{"item": "<exact string from allowed_items>", "value": 0.0, "why": "<short reason, optional>"}],
-            "params": {
-                "OEE_EfficiencyPct": 1.0,
-                "FiveAxisMultiplier": 1.0,
-                "TightToleranceMultiplier": 1.0,
-                "MillingConsumablesPerHr": 0.0,
-                "TurningConsumablesPerHr": 0.0,
-                "EDMConsumablesPerHr": 0.0,
-                "GrindingConsumablesPerHr": 0.0,
-                "InspectionConsumablesPerHr": 0.0,
-                "UtilitiesPerSpindleHr": 0.0,
-                "ConsumablesFlat": 0.0
-                # you may also include optional reasons per param as:
-                # "_why": {"OEE_EfficiencyPct":"...", "FiveAxisMultiplier":"...", ...}
-            }
-        }
-    }
-    user = textwrap.dedent(
-        "Given the following, produce JSON ONLY in the shape shown above. "
-        "Prefer these typical relationships:\n" 
-        "- WEDM: more path length/thickness -> higher 'EDM Passes' (int) or 'WEDM Hours'; adjust 'EDM Cut Rate_mm^2/min' if too aggressive.\n" 
-        "- Grinding: large grind volume -> adjust 'Grind MRR_mm^3/min', 'Grinding Passes', and 'Dress Frequency passes' / 'Dress Time min'.\n" 
-        "- Milling setups: high face count or multiple normals -> increase 'Number of Milling Setups' and 'Setup Hours / Setup'.\n" 
-        "- Small min wall or high area/volume -> consider 'Thin Wall Factor' and 'Tolerance Multiplier'.\n" 
-        "- Inspection: very small parts or tight tolerance -> bump 'CMM Run Time min' or 'Final Inspection'.\n" 
-        "- Only include edits you are confident about.\n\n"
-        f"INPUT:\n{json.dumps(u, ensure_ascii=False)}"
-    )
-    return sys, user
 
-def llm_sheet_and_param_overrides(geo: dict, df, params: dict, model_path: str) -> dict:
-    allowed = _items_used_by_estimator(df)
-    if not allowed:
-        return {"sheet_edits": [], "params": {}, "meta": {}}
-
-    sys, usr = build_llm_sheet_prompt(geo, allowed, params)
-    prompt_sha = hashlib.sha256((sys + "\n" + usr).encode("utf-8")).hexdigest()
-
-    error_text = ""
-    raw_text = ""
-    usage = {}
-    try:
-        llm = _LocalLLM(model_path)
-        parsed, raw_text, usage = llm.ask_json(sys, usr, temperature=0.15, max_tokens=900)
-        if not isinstance(parsed, dict):
-            parsed = parse_llm_json(raw_text)
-        js = parsed if isinstance(parsed, dict) else {}
-        model_name = Path(model_path).name
-    except Exception as e:
-        js, model_name = {}, "LLM-unavailable"
-        try:
-            error_text = f"{type(e).__name__}: {e}"
-        except Exception:
-            error_text = "LLM error"
-
-    sheet_edits = []
-    for e in js.get("sheet_edits", []):
-        item = str(e.get("item","")); item = item.strip()
-        if item and item in allowed:
-            val = e.get("value", None)
-            why = e.get("why", "").strip() if isinstance(e.get("why",""), str) else ""
-            if isinstance(val, (int, float, str)):
-                try:
-                    v = float(val)
-                except Exception:
-                    v = _parse_pct_like(val)
-                    if v is None:
-                        continue
-                sheet_edits.append({"item": item, "value": v, "why": why})
-
-    param_allow = {
-        "OEE_EfficiencyPct","FiveAxisMultiplier","TightToleranceMultiplier",
-        "MillingConsumablesPerHr","TurningConsumablesPerHr","EDMConsumablesPerHr",
-        "GrindingConsumablesPerHr","InspectionConsumablesPerHr",
-        "UtilitiesPerSpindleHr","ConsumablesFlat"
-    }
-    pmap = js.get("params", {}) if isinstance(js.get("params", {}), dict) else {}
-    param_whys = pmap.get("_why", {}) if isinstance(pmap.get("_why", {}), dict) else {}
-    param_edits = {}
-    for k, v in pmap.items():
-        if k == "_why":
-            continue
-        if k in param_allow:
-            try:
-                param_edits[k] = float(v)
-            except Exception:
-                pv = _parse_pct_like(v)
-                if pv is not None:
-                    param_edits[k] = pv
-
-    meta = {
-        "model": model_name,
-        "prompt_sha256": prompt_sha,
-        "allowed_items_count": len(allowed),
-        "error": error_text,
-        "raw_text": raw_text,
-        "usage": usage,
-    }
-    return {"sheet_edits": sheet_edits, "params": param_edits, "param_whys": param_whys, "allowed_items": allowed, "meta": meta}
-
-# --- APPLY LLM OUTPUT ---------------------------------------------------------
 def apply_sheet_edits_to_df(df, sheet_edits: list[dict]):
     if not sheet_edits:
         return df, []
@@ -5207,6 +4586,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                           material_vendor_csv: str | None = None,
                           llm_enabled: bool = True,
                           llm_model_path: str | None = None,
+                          llm_client: LLMClient | None = None,
                           geo: dict[str, Any] | None = None,
                           ui_vars: dict[str, Any] | None = None,
                           quote_state: QuoteState | None = None,
@@ -6585,8 +5965,17 @@ def compute_quote_from_df(df: pd.DataFrame,
                     s_usage = {}
             elif llm_model_path:
                 try:
-                    llm_obj = _LocalLLM(llm_model_path)
-                    s_raw, s_text, s_usage = run_llm_suggestions(llm_obj, payload)
+                    client = llm_client
+                    created_client = False
+                    if client is None or not client.available or client.model_path != llm_model_path:
+                        client = LLMClient(
+                            llm_model_path,
+                            debug_enabled=APP_ENV.llm_debug_enabled,
+                            debug_dir=APP_ENV.llm_debug_dir,
+                        )
+                        created_client = True
+                    llm_obj = client
+                    s_raw, s_text, s_usage = run_llm_suggestions(client, payload)
                     sanitized_struct = sanitize_suggestions(s_raw, llm_bounds)
                 except Exception as exc:
                     fallback_struct = {
@@ -6603,6 +5992,12 @@ def compute_quote_from_df(df: pd.DataFrame,
                     s_raw = {}
                     s_text = ""
                     s_usage = {}
+                finally:
+                    if created_client:
+                        try:
+                            client.close()
+                        except Exception:
+                            pass
             else:
                 reason = "model_missing"
                 fallback_struct = {
@@ -10302,7 +9697,7 @@ def apply_2d_features_to_variables(df, g2d: dict, *, params: dict, rates: dict):
 def get_llm_quote_explanation(result: dict, model_path: str) -> str:
     """
     Returns a single-paragraph, friendly explanation of the main cost drivers.
-    Works with the local _LocalLLM.ask_json(), and has a safe fallback if no model.
+    Works with the local LLMClient.ask_json(), and has a safe fallback if no model.
     """
     import json
     import os
@@ -10555,11 +9950,16 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
 
     user_prompt = "```json\n" + json.dumps(ctx, indent=2, sort_keys=True) + "\n```"
 
+    client: LLMClient | None = None
     try:
-        llm = _LocalLLM(model_path)
-        parsed, raw_text, _usage = llm.ask_json(
-            system_prompt,
-            user_prompt,
+        client = LLMClient(
+            model_path,
+            debug_enabled=APP_ENV.llm_debug_enabled,
+            debug_dir=APP_ENV.llm_debug_dir,
+        )
+        parsed, raw_text, _usage = client.ask_json(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
             temperature=0.4,
             max_tokens=256,
             context=ctx,
@@ -10567,6 +9967,12 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
         return _render_explanation(parsed, raw_text)
     except Exception:
         return _render_explanation()
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
 
 
 # ==== LLM DECISION ENGINE =====================================================
@@ -10624,7 +10030,11 @@ def get_llm_overrides(
         return _fallback()
 
     try:
-        llm = _LocalLLM(model_path)
+        llm = LLMClient(
+            model_path,
+            debug_enabled=APP_ENV.llm_debug_enabled,
+            debug_dir=APP_ENV.llm_debug_dir,
+        )
     except Exception:
         return _fallback()
 
@@ -10747,8 +10157,8 @@ def get_llm_overrides(
                 prompt_body = json.dumps(_jsonify(payload), indent=2)
             prompt = "```json\n" + prompt_body + "\n```"
             parsed, raw_text, usage = llm.ask_json(
-                system_prompt,
-                prompt,
+                system_prompt=system_prompt,
+                user_prompt=prompt,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 context=ctx,
@@ -11245,6 +10655,10 @@ def get_llm_overrides(
     meta["tasks"] = task_meta
     meta["task_outputs"] = task_outputs
     meta["context"] = ctx
+    try:
+        llm.close()
+    except Exception:
+        pass
     return out, meta
 # ----------------- GUI -----------------
 # ---- scrollable frame helper -----------------------------------------------
@@ -11301,6 +10715,9 @@ class App(tk.Tk):
         self.params = PARAMS_DEFAULT.copy()
         self.rates = RATES_DEFAULT.copy()
         self.quote_state = QuoteState()
+        self.llm_events: list[dict[str, Any]] = []
+        self.llm_errors: list[dict[str, Any]] = []
+        self._llm_client_cache: LLMClient | None = None
         self.settings_path = Path(__file__).with_name("app_settings.json")
         self.settings = self._load_settings()
         if isinstance(self.settings, dict):
@@ -11405,6 +10822,60 @@ class App(tk.Tk):
             except Exception as exc2:
                 self.status_var.set(f"Vision LLM unavailable: {exc2}")
                 self.LLM_SUGGEST = None
+
+    def _reset_llm_logs(self) -> None:
+        self.llm_events.clear()
+        self.llm_errors.clear()
+        if isinstance(self.quote_state, QuoteState):
+            self.quote_state.llm_events = []
+            self.quote_state.llm_errors = []
+
+    def _llm_log_event(self, kind: str, payload: dict[str, Any]) -> None:
+        entry = {"kind": kind, "payload": payload, "ts": time.time()}
+        self.llm_events.append(entry)
+        if len(self.llm_events) > 100:
+            self.llm_events = self.llm_events[-100:]
+        if isinstance(self.quote_state, QuoteState):
+            self.quote_state.llm_events = list(self.llm_events)
+
+    def _llm_handle_error(self, exc: Exception, context: dict[str, Any]) -> None:
+        entry = {"error": repr(exc), "context": context, "ts": time.time()}
+        self.llm_errors.append(entry)
+        if len(self.llm_errors) > 50:
+            self.llm_errors = self.llm_errors[-50:]
+        if isinstance(self.quote_state, QuoteState):
+            self.quote_state.llm_errors = list(self.llm_errors)
+        try:
+            self.status_var.set(f"LLM error: {exc}")
+        except Exception:
+            pass
+
+    def get_llm_client(self, model_path: str | None = None) -> LLMClient | None:
+        path = (model_path or "").strip()
+        if not path and hasattr(self, "llm_model_path"):
+            path = (self.llm_model_path.get().strip() if self.llm_model_path.get() else "")
+        if not path:
+            path = os.environ.get("QWEN_GGUF_PATH", "")
+        path = path.strip()
+        if not path:
+            return None
+        cached = getattr(self, "_llm_client_cache", None)
+        if cached and cached.model_path == path:
+            return cached
+        if cached:
+            try:
+                cached.close()
+            except Exception:
+                pass
+        client = LLMClient(
+            path,
+            debug_enabled=APP_ENV.llm_debug_enabled,
+            debug_dir=APP_ENV.llm_debug_dir,
+            on_event=self._llm_log_event,
+            on_error=self._llm_handle_error,
+        )
+        self._llm_client_cache = client
+        return client
 
     def _load_settings(self) -> dict[str, Any]:
         path = getattr(self, "settings_path", None)
@@ -12078,8 +11549,12 @@ class App(tk.Tk):
 
         # LLM hour estimation
         self.status_var.set("Estimating hours with LLMï¿½")
+        self._reset_llm_logs()
         decision_log = {}
-        est_raw = infer_hours_and_overrides_from_geo(geo, params=self.params, rates=self.rates)
+        client = None
+        if self.llm_enabled.get():
+            client = self.get_llm_client(self.llm_model_path.get().strip() or None)
+        est_raw = infer_hours_and_overrides_from_geo(geo, params=self.params, rates=self.rates, client=client)
         est = clamp_llm_hours(est_raw, geo, params=self.params)
         self.vars_df = apply_llm_hours_to_variables(self.vars_df, est, allow_overwrite_nonzero=True, log=decision_log)
         self.geo = geo
@@ -12323,6 +11798,10 @@ class App(tk.Tk):
                 ui_vars = {}
 
             try:
+                self._reset_llm_logs()
+                client = None
+                if self.llm_enabled.get():
+                    client = self.get_llm_client(self.llm_model_path.get().strip() or None)
                 res = compute_quote_from_df(
                     self.vars_df,
                     params=self.params,
@@ -12330,6 +11809,7 @@ class App(tk.Tk):
                     material_vendor_csv=self.settings.get("material_vendor_csv", "") if isinstance(self.settings, dict) else "",
                     llm_enabled=self.llm_enabled.get(),
                     llm_model_path=self.llm_model_path.get().strip() or None,
+                    llm_client=client,
                     geo=self.geo,
                     ui_vars=ui_vars,
                     quote_state=self.quote_state,
