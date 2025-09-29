@@ -71,6 +71,8 @@ import tkinter.font as tkfont
 import urllib.request
 from importlib import import_module
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from cad_quoter.pricing import PricingEngine, create_default_registry
+from cad_quoter.pricing.wieland import lookup_price as lookup_wieland_price
 from OCP.TopAbs   import TopAbs_EDGE, TopAbs_FACE
 from OCP.TopExp   import TopExp, TopExp_Explorer
 from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
@@ -4765,149 +4767,18 @@ def pct(value: Any, default: float = 0.0) -> float:
         return default
 
 
-PRICE_CACHE: dict[str, tuple[float, float, str]] = {}
-CACHE_TTL_S = 60 * 30  # 30 minutes
-
-
-def _usd_per_kg_from_quote(symbol: str, quote: float, basis: str) -> float:
-    if basis == "index_usd_per_tonne":
-        return float(quote) / 1000.0
-    if basis == "usd_per_troy_oz":
-        return float(quote) / 31.1034768 * 1000.0
-    if basis == "usd_per_lb":
-        return float(quote) / 2.2046226218
-    return float(quote)
-
-
-class PriceProvider:
-    name = "base"
-
-    def get(self, symbol: str) -> tuple[float, str]:
-        raise NotImplementedError
-
-
-class MetalsAPI(PriceProvider):
-    """Metals-API / Commodities-API compatible provider."""
-
-    name = "metals_api"
-    base_url = "https://api.metals-api.com/v1/latest"
-
-    def get(self, symbol: str) -> tuple[float, str]:
-        api_key = os.getenv("METALS_API_KEY")
-        if not api_key:
-            raise RuntimeError("METALS_API_KEY not set")
-        url = f"{self.base_url}?access_key={api_key}&base=USD&symbols={symbol}"
-        with urllib.request.urlopen(url, timeout=8) as response:
-            data = json.loads(response.read().decode("utf-8"))
-        if not data.get("success", True) and "rates" not in data:
-            raise RuntimeError(str(data)[:200])
-        rate = float(data["rates"][symbol])
-        ts = data.get("timestamp")
-        asof = time.strftime("%Y-%m-%d %H:%M", time.gmtime(ts)) if ts else "now"
-        return rate, asof
-
-
-class VendorCSV(PriceProvider):
-    name = "vendor_csv"
-
-    def __init__(self, path: str):
-        self.path = path
-        self._rows: dict[str, float] | None = None
-
-    def _load(self) -> None:
-        if self._rows is not None:
-            return
-        import csv
-
-        self._rows = {}
-        if os.path.isfile(self.path):
-            with open(self.path, "r", newline="", encoding="utf-8") as handle:
-                reader = csv.reader(handle)
-                for row in reader:
-                    if not row:
-                        continue
-                    sym, usd_per_kg, *_ = row
-                    self._rows[sym.strip().upper()] = float(usd_per_kg)
-
-    def get(self, symbol: str) -> tuple[float, str]:
-        self._load()
-        assert self._rows is not None
-        price = self._rows.get(symbol.upper())
-        if price is None:
-            raise KeyError(symbol)
-        return float(price), "vendor_csv"
-
-
-PROVIDERS: list[PriceProvider] = []
-CURRENT_VENDOR_CSV_PATH: str | None = None
-
-
-def init_providers(vendor_csv_path: str | None = None) -> None:
-    global PROVIDERS, CURRENT_VENDOR_CSV_PATH
-    PROVIDERS = []
-    CURRENT_VENDOR_CSV_PATH = vendor_csv_path or ""
-    if vendor_csv_path:
-        PROVIDERS.append(VendorCSV(vendor_csv_path))
-    PROVIDERS.append(MetalsAPI())
-
-
-def _try_wieland_price(candidates: list[str]) -> tuple[float | None, str]:
-    """Attempt to use the Wieland scraper for USD/kg pricing."""
-    try:
-        from wieland_scraper import get_live_material_price_usd_per_kg
-    except Exception:
-        return None, ""
-
-    for candidate in candidates:
-        label = str(candidate or "").strip()
-        if not label:
-            continue
-        try:
-            price, source = get_live_material_price_usd_per_kg(label, fallback_usd_per_kg=-1.0)
-        except Exception:
-            continue
-        if not isinstance(price, (int, float)):
-            continue
-        if not math.isfinite(price) or price <= 0:
-            continue
-        if str(source or "").lower().startswith("house_rate"):
-            continue
-        return float(price), str(source)
-
-    return None, ""
-
-
-def get_usd_per_kg(symbol: str, basis: str) -> tuple[float, str]:
-    cached = PRICE_CACHE.get(symbol)
-    now = time.time()
-    if cached and (now - cached[0] < CACHE_TTL_S):
-        _, usd_per_kg, source = cached
-        return usd_per_kg, source
-
-    last_err: Exception | None = None
-    for provider in PROVIDERS:
-        try:
-            quote, asof = provider.get(symbol)
-            usd_per_kg = _usd_per_kg_from_quote(symbol, quote, basis)
-            PRICE_CACHE[symbol] = (now, usd_per_kg, f"{provider.name}@{asof}")
-            return usd_per_kg, f"{provider.name}@{asof}"
-        except Exception as err:  # pragma: no cover - provider failures fall back below
-            last_err = err
-
-    raise RuntimeError(f"All price providers failed for {symbol}: {last_err}")
+_DEFAULT_PRICING_ENGINE = PricingEngine(create_default_registry())
 
 
 def compute_material_cost(material_name: str,
                           mass_kg: float,
                           scrap_frac: float,
                           overrides: dict[str, Any] | None,
-                          vendor_csv: str | None) -> tuple[float, dict[str, Any]]:
-    global CURRENT_VENDOR_CSV_PATH
-    vendor_csv = vendor_csv or ""
-    if (not PROVIDERS) or (vendor_csv != (CURRENT_VENDOR_CSV_PATH or "")):
-        init_providers(vendor_csv)
-
+                          vendor_csv: str | None,
+                          pricing: PricingEngine | None = None) -> tuple[float, dict[str, Any]]:
     overrides = overrides or {}
+    pricing_engine = pricing or _DEFAULT_PRICING_ENGINE
+
     key = (material_name or "").strip().upper()
     meta = MATERIAL_MAP.get(key)
     if meta is None:
@@ -4923,27 +4794,28 @@ def compute_material_cost(material_name: str,
     symbol = str(meta.get("symbol", key or "XAL"))
     basis = str(meta.get("basis", "index_usd_per_tonne"))
 
+    vendor_csv = vendor_csv or ""
     usd_per_kg: float | None = None
     source = ""
     basis_used = basis
+    price_candidates: list[str] = []
 
-    # Highest priority: explicit vendor CSV overrides
     if vendor_csv:
-        for provider in PROVIDERS:
-            if not isinstance(provider, VendorCSV):
-                continue
-            try:
-                vendor_price, vendor_asof = provider.get(symbol)
-            except Exception:
-                continue
-            usd_per_kg = float(vendor_price)
-            source = f"{provider.name}@{vendor_asof}" if vendor_asof else provider.name
-            basis_used = "usd_per_kg"
-            break
+        try:
+            vendor_quote = pricing_engine.get_usd_per_kg(
+                symbol,
+                basis,
+                vendor_csv=vendor_csv,
+                providers=("vendor_csv",),
+            )
+        except Exception:
+            vendor_quote = None
+        if vendor_quote:
+            usd_per_kg = vendor_quote.usd_per_kg
+            source = vendor_quote.source
+            basis_used = vendor_quote.basis
 
-    # Next try Wieland scraped data
     if usd_per_kg is None:
-        price_candidates = []
         wieland_key = meta.get("wieland_key")
         if wieland_key:
             price_candidates.append(str(wieland_key))
@@ -4954,23 +4826,28 @@ def compute_material_cost(material_name: str,
         if symbol:
             price_candidates.append(str(symbol))
 
-        usd_wieland, source_wieland = _try_wieland_price(price_candidates)
+        usd_wieland, source_wieland = lookup_wieland_price(price_candidates)
         if usd_wieland is not None:
             usd_per_kg = usd_wieland
             source = source_wieland or "wieland"
             basis_used = "usd_per_kg"
-        else:
-            price_candidates = []
 
-    else:
-        price_candidates = []
-
-    # Fallback to live/index providers
+    provider_error: Exception | None = None
     if usd_per_kg is None:
-        usd_per_kg, source = get_usd_per_kg(symbol, basis)
-        basis_used = basis
+        try:
+            provider_quote = pricing_engine.get_usd_per_kg(
+                symbol,
+                basis,
+                vendor_csv=vendor_csv if vendor_csv else None,
+            )
+        except Exception as err:
+            provider_quote = None
+            provider_error = err
+        else:
+            usd_per_kg = provider_quote.usd_per_kg
+            source = provider_quote.source
+            basis_used = provider_quote.basis
 
-    # Final fallback to local resolver (Wieland → CSV → default steel)
     if (usd_per_kg is None) or (not math.isfinite(float(usd_per_kg))) or (usd_per_kg <= 0):
         resolver_name = material_name or ""
         if not resolver_name:
@@ -4986,7 +4863,7 @@ def compute_material_cost(material_name: str,
 
     if usd_per_kg is None:
         usd_per_kg = 0.0
-        source = source or "price_unavailable"
+        source = source or (str(provider_error) if provider_error else "price_unavailable")
 
     premium = float(meta.get("premium_usd_per_kg", 0.0))
     premium_override = overrides.get("premium_usd_per_kg")
@@ -5032,6 +4909,9 @@ def compute_material_cost(material_name: str,
             detail["unit_price_asof"] = m.group(1)
     if price_candidates:
         detail["price_lookup_keys"] = price_candidates
+    if provider_error and "error" not in detail:
+        detail.setdefault("provider_error", str(provider_error))
+
     return cost, detail
 
 
@@ -5211,7 +5091,8 @@ def compute_quote_from_df(df: pd.DataFrame,
                           ui_vars: dict[str, Any] | None = None,
                           quote_state: QuoteState | None = None,
                           reuse_suggestions: bool = False,
-                          llm_suggest: Any | None = None) -> Dict[str, Any]:
+                          llm_suggest: Any | None = None,
+                          pricing: PricingEngine | None = None) -> Dict[str, Any]:
     """
     Estimator that consumes variables from the sheet (Item, Example Values / Options, Data Type / Input Method).
 
@@ -5244,6 +5125,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         ui_vars = dict(ui_vars)
     if quote_state is None:
         quote_state = QuoteState()
+    pricing_engine = pricing or _DEFAULT_PRICING_ENGINE
     quote_state.ui_vars = dict(ui_vars)
     quote_state.rates = dict(rates)
     geo_context = dict(geo or {})
@@ -5624,6 +5506,7 @@ def compute_quote_from_df(df: pd.DataFrame,
             scrap_pct,
             material_overrides,
             material_vendor_csv,
+            pricing=pricing_engine,
         )
     except Exception as err:
         material_detail = {
@@ -11289,7 +11172,7 @@ class ScrollableFrame(ttk.Frame):
 
 
 class App(tk.Tk):
-    def __init__(self):
+    def __init__(self, pricing: PricingEngine | None = None):
         super().__init__()
         self.title("Compos-AI")
         self.geometry("1260x900")
@@ -11300,6 +11183,7 @@ class App(tk.Tk):
         self.geo_context: dict[str, Any] = {}
         self.params = PARAMS_DEFAULT.copy()
         self.rates = RATES_DEFAULT.copy()
+        self.pricing = pricing or PricingEngine(create_default_registry())
         self.quote_state = QuoteState()
         self.settings_path = Path(__file__).with_name("app_settings.json")
         self.settings = self._load_settings()
@@ -11442,6 +11326,10 @@ class App(tk.Tk):
         self.settings["material_vendor_csv"] = path
         self.params["MaterialVendorCSVPath"] = path
         self._save_settings()
+        try:
+            self.pricing.clear_cache()
+        except Exception:
+            pass
         self.status_var.set(f"Material vendor CSV set to {path}")
 
     def clear_material_vendor_csv(self) -> None:
@@ -11450,6 +11338,10 @@ class App(tk.Tk):
         self.settings["material_vendor_csv"] = ""
         self.params["MaterialVendorCSVPath"] = ""
         self._save_settings()
+        try:
+            self.pricing.clear_cache()
+        except Exception:
+            pass
         self.status_var.set("Material vendor CSV cleared.")
 
     def _populate_editor_tab(self, df: pd.DataFrame) -> None:
@@ -12335,6 +12227,7 @@ class App(tk.Tk):
                     quote_state=self.quote_state,
                     reuse_suggestions=reuse_suggestions,
                     llm_suggest=self.LLM_SUGGEST,
+                    pricing=self.pricing,
                 )
             except ValueError as err:
                 messagebox.showerror("Quote blocked", str(err))
@@ -12469,7 +12362,9 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
     if args.no_gui:
         return 0
 
-    App().mainloop()
+    pricing_registry = create_default_registry()
+    pricing_engine = PricingEngine(pricing_registry)
+    App(pricing_engine).mainloop()
     return 0
 
 
