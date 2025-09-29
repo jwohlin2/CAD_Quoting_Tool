@@ -20,15 +20,6 @@ from collections import Counter
 from fractions import Fraction
 from pathlib import Path
 
-from cad_quoter.config import APP_ENV, describe_runtime_environment
-from cad_quoter.domain import (
-    QuoteState,
-    as_float_or_none as _as_float_or_none,
-    build_suggest_payload,
-    ensure_scrap_pct as _ensure_scrap_pct,
-    match_items_contains as _match_items_contains,
-    normalize_lookup_key as _normalize_lookup_key,
-)
 
 import copy
 import re
@@ -50,10 +41,37 @@ import pandas as pd
 
 from llama_cpp import Llama  # type: ignore
 
+from cad_quoter.config import APP_ENV, describe_runtime_environment
+from cad_quoter.domain import (
+    QuoteState,
+    _as_float_or_none,
+    _ensure_scrap_pct,
+    _normalize_lookup_key,
+    build_suggest_payload,
+)
+
+# Smoke test to ensure the refactored modules import cleanly and do not
+# introduce circular dependencies when appV5 is imported as a module.
+for _module_name in ("cad_quoter.config", "cad_quoter.domain"):
+    import_module(_module_name)
+
 try:
     from geo_read_more import build_geo_from_dxf as build_geo_from_dxf_path
 except Exception:
     build_geo_from_dxf_path = None  # type: ignore[assignment]
+
+def _match_items_contains(items: pd.Series, pattern: str) -> pd.Series:
+    """
+    Case-insensitive regex match over Items.
+    Convert capturing groups to non-capturing to avoid pandas warning.
+    Fall back to literal if regex fails.
+    """
+
+    pat = _to_noncapturing(pattern) if "_to_noncapturing" in globals() else pattern
+    try:
+        return items.str.contains(pat, case=False, regex=True, na=False)
+    except Exception:
+
 
 
 def parse_llm_json(text: str):
@@ -448,39 +466,6 @@ def holes_from_circles(doc, *, _scale: float | None = None) -> List[float]:
 
 
 
-@dataclass
-class QuoteState:
-    geo: dict = field(default_factory=dict)
-    ui_vars: dict = field(default_factory=dict)
-    rates: dict = field(default_factory=dict)
-    baseline: dict = field(default_factory=dict)
-    llm_raw: dict = field(default_factory=dict)
-    suggestions: dict = field(default_factory=dict)
-    user_overrides: dict = field(default_factory=dict)
-    effective: dict = field(default_factory=dict)
-    effective_sources: dict = field(default_factory=dict)
-    accept_llm: dict = field(default_factory=dict)
-    bounds: dict = field(default_factory=dict)
-    material_source: str | None = None
-    guard_context: dict = field(default_factory=dict)
-
-
-def _as_float_or_none(value: Any) -> float | None:
-    try:
-        if isinstance(value, (int, float)):
-            return float(value)
-        if isinstance(value, str):
-            cleaned = value.strip()
-            if not cleaned:
-                return None
-            return float(cleaned)
-    except Exception:
-        return None
-    return None
-
-
-
-def build_suggest_payload(geo, baseline, rates, bounds) -> dict:
     geo = geo or {}
     baseline = baseline or {}
     rates = rates or {}

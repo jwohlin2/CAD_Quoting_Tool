@@ -1,8 +1,22 @@
+"""Utilities and data models shared across CAD Quoter components."""
 
-"""Helper packages for the CAD Quoting Tool."""
-from __future__ import annotations
+from .config import APP_ENV, AppEnvironment, describe_runtime_environment
+from .domain import (
+    QuoteState,
+    _as_float_or_none,
+    _ensure_scrap_pct,
+    _normalize_lookup_key,
+    build_suggest_payload,
+)
 
-from . import geometry
-
-__all__ = ["geometry"]
+__all__ = [
+    "APP_ENV",
+    "AppEnvironment",
+    "QuoteState",
+    "_as_float_or_none",
+    "_ensure_scrap_pct",
+    "_normalize_lookup_key",
+    "build_suggest_payload",
+    "describe_runtime_environment",
+]
 
