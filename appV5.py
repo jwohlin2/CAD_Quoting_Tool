@@ -18,49 +18,7 @@ import argparse
 import json, math, os, time, gc
 from collections import Counter
 from fractions import Fraction
-from dataclasses import dataclass, field
 from pathlib import Path
-
-@dataclass(frozen=True)
-class AppEnvironment:
-    """Runtime configuration extracted from environment variables.
-
-    Centralising this logic makes it trivial for reviewers to audit which
-    environment variables are consulted and how defaults are derived.  The
-    configuration can also be serialised for diagnostics without touching
-    global module state.
-    """
-
-    llm_debug_enabled: bool = False
-    llm_debug_dir: Path = field(default_factory=Path)
-
-    @classmethod
-    def from_env(cls) -> "AppEnvironment":
-        debug_enabled = bool(int(os.getenv("LLM_DEBUG", "1")))
-        debug_dir_raw = os.getenv("LLM_DEBUG_DIR")
-        debug_dir = Path(debug_dir_raw) if debug_dir_raw else Path(__file__).with_name("llm_debug")
-        debug_dir.mkdir(exist_ok=True)
-        return cls(llm_debug_enabled=debug_enabled, llm_debug_dir=debug_dir)
-
-
-APP_ENV = AppEnvironment.from_env()
-
-
-def describe_runtime_environment() -> dict[str, str]:
-    """Return a redacted snapshot of runtime configuration for auditors."""
-
-    info = {"llm_debug_enabled": str(APP_ENV.llm_debug_enabled)}
-    info["llm_debug_dir"] = str(APP_ENV.llm_debug_dir)
-    for key in ("QWEN_GGUF_PATH", "ODA_CONVERTER_EXE", "DWG2DXF_EXE", "METALS_API_KEY"):
-        value = os.getenv(key)
-        if not value:
-            info[key.lower()] = ""
-            continue
-        if key.endswith("_KEY"):
-            info[key.lower()] = "<redacted>"
-        else:
-            info[key.lower()] = value
-    return info
 
 import copy
 import re
@@ -81,34 +39,24 @@ import pandas as pd
 
 from llama_cpp import Llama  # type: ignore
 
+from cad_quoter.config import APP_ENV, describe_runtime_environment
+from cad_quoter.domain import (
+    QuoteState,
+    _as_float_or_none,
+    _ensure_scrap_pct,
+    _normalize_lookup_key,
+    build_suggest_payload,
+)
+
+# Smoke test to ensure the refactored modules import cleanly and do not
+# introduce circular dependencies when appV5 is imported as a module.
+for _module_name in ("cad_quoter.config", "cad_quoter.domain"):
+    import_module(_module_name)
+
 try:
     from geo_read_more import build_geo_from_dxf as build_geo_from_dxf_path
 except Exception:
     build_geo_from_dxf_path = None  # type: ignore[assignment]
-
-
-def _normalize_lookup_key(value: str) -> str:
-    cleaned = re.sub(r"[^0-9a-z]+", " ", str(value).strip().lower())
-    return re.sub(r"\s+", " ", cleaned).strip()
-
-
-def _ensure_scrap_pct(val) -> float:
-    """
-    Coerce UI/LLM scrap into a sane fraction in [0, 0.25].
-    Accepts 15 (percent) or 0.15 (fraction).
-    """
-
-    try:
-        x = float(val)
-    except Exception:
-        return 0.0
-    if x > 1.0:  # looks like %
-        x = x / 100.0
-    if not (x >= 0.0 and math.isfinite(x)):
-        return 0.0
-    return min(0.25, max(0.0, x))
-
-
 def _match_items_contains(items: pd.Series, pattern: str) -> pd.Series:
     """
     Case-insensitive regex match over Items.
@@ -670,39 +618,6 @@ def render_step_thumbs(shape, out_dir: str) -> Dict[str, str]:
     raise RuntimeError("STEP thumbnail rendering is not supported in this environment")
 
 
-@dataclass
-class QuoteState:
-    geo: dict = field(default_factory=dict)
-    ui_vars: dict = field(default_factory=dict)
-    rates: dict = field(default_factory=dict)
-    baseline: dict = field(default_factory=dict)
-    llm_raw: dict = field(default_factory=dict)
-    suggestions: dict = field(default_factory=dict)
-    user_overrides: dict = field(default_factory=dict)
-    effective: dict = field(default_factory=dict)
-    effective_sources: dict = field(default_factory=dict)
-    accept_llm: dict = field(default_factory=dict)
-    bounds: dict = field(default_factory=dict)
-    material_source: str | None = None
-    guard_context: dict = field(default_factory=dict)
-
-
-def _as_float_or_none(value: Any) -> float | None:
-    try:
-        if isinstance(value, (int, float)):
-            return float(value)
-        if isinstance(value, str):
-            cleaned = value.strip()
-            if not cleaned:
-                return None
-            return float(cleaned)
-    except Exception:
-        return None
-    return None
-
-
-
-def build_suggest_payload(geo, baseline, rates, bounds) -> dict:
     geo = geo or {}
     baseline = baseline or {}
     rates = rates or {}
