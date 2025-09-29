@@ -23,6 +23,7 @@ CLI:
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
@@ -31,6 +32,8 @@ import time
 import tempfile
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple, Optional, List
+
+from cad_quoter.config import configure_logging, logger
 
 import requests
 from bs4 import BeautifulSoup
@@ -121,7 +124,7 @@ def _get_soup(debug: bool = False) -> BeautifulSoup:
         snap = os.path.join(tempfile.gettempdir(), "wieland_snapshot.html")
         with open(snap, "w", encoding="utf-8") as f:
             f.write(r.text)
-        print(f"[debug] saved HTML snapshot: {snap}", file=sys.stderr)
+        logger.debug("Saved HTML snapshot to %s", snap)
     return BeautifulSoup(r.text, "lxml")
 
 
@@ -446,36 +449,44 @@ def _main(argv: List[str]) -> int:
     ap.add_argument("--fallback", type=float, default=8.0, help="Fallback USD/kg if not found")
     args = ap.parse_args(argv)
 
+    configure_logging(logging.DEBUG if args.debug else logging.INFO, force=args.debug)
+
     try:
         data = scrape_wieland_prices(force=args.force, debug=args.debug)
     except Exception as e:
-        print(f"ERROR: {e}", file=sys.stderr)
+        logger.error("Failed to fetch Wieland data: %s", e)
         return 2
 
     if args.json:
-        print(json.dumps(data, indent=2))
+        logger.info("Wieland pricing JSON:\n%s", json.dumps(data, indent=2))
         return 0
 
     if args.material:
         if args.unit == "both":
             p_kg, src = get_live_material_price(args.material, unit="kg", fallback_usd_per_kg=args.fallback)
             p_lb, _   = get_live_material_price(args.material, unit="lb", fallback_usd_per_kg=args.fallback)
-            print(f"{args.material}: ${p_kg:.4f} / kg   |   ${p_lb:.4f} / lb  (source: {src})")
+            logger.info(
+                "%s: $%.4f / kg   |   $%.4f / lb  (source: %s)",
+                args.material,
+                p_kg,
+                p_lb,
+                src,
+            )
         else:
             p, src = get_live_material_price(args.material, unit=args.unit, fallback_usd_per_kg=args.fallback)
-            print(f"{args.material}: ${p:.4f} / {args.unit}  (source: {src})")
+            logger.info("%s: $%.4f / %s  (source: %s)", args.material, p, args.unit, src)
         return 0
     asof = data.get("asof", "today")
-    print(f"Wieland metal info (as of {asof})")
-    print("FX:", data.get("fx"))
-    print("LME: USD/kg:", data.get("lme_usd_per_kg"))
-    print("     USD/lb:", data.get("lme_usd_per_lb"))
-    def _head(d: Dict[str, float], n=6): 
+    logger.info("Wieland metal info (as of %s)", asof)
+    logger.info("FX: %s", data.get("fx"))
+    logger.info("LME: USD/kg: %s", data.get("lme_usd_per_kg"))
+    logger.info("LME: USD/lb: %s", data.get("lme_usd_per_lb"))
+    def _head(d: Dict[str, float], n=6):
         items = list(d.items()); return items[:n] + ([("...", "...")],) if len(items) > n else items
-    print("Wieland list USD/kg:", _head(data.get("wieland_usd_per_kg", {})))
-    print("Wieland list USD/lb:", _head(data.get("wieland_usd_per_lb", {})))
-    print("England USD/kg:", _head(data.get("england_usd_per_kg", {})))
-    print("England USD/lb:", _head(data.get("england_usd_per_lb", {})))
+    logger.info("Wieland list USD/kg: %s", _head(data.get("wieland_usd_per_kg", {})))
+    logger.info("Wieland list USD/lb: %s", _head(data.get("wieland_usd_per_lb", {})))
+    logger.info("England USD/kg: %s", _head(data.get("england_usd_per_kg", {})))
+    logger.info("England USD/lb: %s", _head(data.get("england_usd_per_lb", {})))
     return 0
 
 
