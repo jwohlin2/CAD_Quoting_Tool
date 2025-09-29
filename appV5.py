@@ -11396,15 +11396,8 @@ class App(tk.Tk):
         #self.out_txt = tk.Text(self.tab_out, wrap="word", font=("Consolas", 10)); self.out_txt.pack(fill="both", expand=True)
 
         self.LLM_SUGGEST = None
-        try:
-            self.LLM_SUGGEST = load_qwen_vl(n_ctx=8192, n_gpu_layers=20)
-        except Exception as exc:
-            self.status_var.set(f"Vision LLM failed ({exc}); retrying CPU mode.")
-            try:
-                self.LLM_SUGGEST = load_qwen_vl(n_ctx=4096, n_gpu_layers=0)
-            except Exception as exc2:
-                self.status_var.set(f"Vision LLM unavailable: {exc2}")
-                self.LLM_SUGGEST = None
+        self._llm_load_attempted = False
+        self._llm_load_error: Exception | None = None
 
     def _load_settings(self) -> dict[str, Any]:
         path = getattr(self, "settings_path", None)
@@ -11451,6 +11444,58 @@ class App(tk.Tk):
         self.params["MaterialVendorCSVPath"] = ""
         self._save_settings()
         self.status_var.set("Material vendor CSV cleared.")
+
+    def _ensure_llm_loaded(self):
+        """Load the optional vision LLM on-demand.
+
+        The original implementation performed this work during ``__init__`` of
+        the Tk application, which meant we blocked the UI event loop for
+        several seconds (or longer if large models needed to be paged in).
+        Loading lazily keeps the first paint of the window snappy while still
+        providing feedback the moment the user requests LLM features.
+        """
+
+        if self.LLM_SUGGEST is not None:
+            return self.LLM_SUGGEST
+        if self._llm_load_attempted and self._llm_load_error is not None:
+            return None
+
+        self._llm_load_attempted = True
+        start = time.perf_counter()
+
+        try:
+            self.status_var.set("Loading Vision LLM (GPU)…")
+            self.update_idletasks()
+        except Exception:
+            pass
+
+        try:
+            self.LLM_SUGGEST = load_qwen_vl(n_ctx=8192, n_gpu_layers=20)
+        except Exception as exc:
+            self._llm_load_error = exc
+            try:
+                self.status_var.set(f"Vision LLM GPU load failed ({exc}); retrying CPU mode…")
+                self.update_idletasks()
+            except Exception:
+                pass
+            try:
+                self.LLM_SUGGEST = load_qwen_vl(n_ctx=4096, n_gpu_layers=0)
+            except Exception as exc2:
+                self._llm_load_error = exc2
+                try:
+                    self.status_var.set(f"Vision LLM unavailable: {exc2}")
+                except Exception:
+                    pass
+                return None
+        else:
+            self._llm_load_error = None
+
+        duration = time.perf_counter() - start
+        try:
+            self.status_var.set(f"Vision LLM ready in {duration:.1f}s")
+        except Exception:
+            pass
+        return self.LLM_SUGGEST
 
     def _populate_editor_tab(self, df: pd.DataFrame) -> None:
         df = coerce_or_make_vars_df(df)
@@ -12322,6 +12367,10 @@ class App(tk.Tk):
             except Exception:
                 ui_vars = {}
 
+            llm_suggest = self.LLM_SUGGEST
+            if self.llm_enabled.get() and llm_suggest is None:
+                llm_suggest = self._ensure_llm_loaded()
+
             try:
                 res = compute_quote_from_df(
                     self.vars_df,
@@ -12334,7 +12383,7 @@ class App(tk.Tk):
                     ui_vars=ui_vars,
                     quote_state=self.quote_state,
                     reuse_suggestions=reuse_suggestions,
-                    llm_suggest=self.LLM_SUGGEST,
+                    llm_suggest=llm_suggest,
                 )
             except ValueError as err:
                 messagebox.showerror("Quote blocked", str(err))
