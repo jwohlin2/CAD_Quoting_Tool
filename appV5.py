@@ -14,15 +14,53 @@ Single-file CAD Quoter (v8)
 """
 from __future__ import annotations
 
+import argparse
 import json, math, os, time, gc
 from collections import Counter
 from fractions import Fraction
 from dataclasses import dataclass, field
 from pathlib import Path
 
-LLM_DEBUG = bool(int(os.getenv("LLM_DEBUG", "1")))   # set 0 to disable
-LLM_DEBUG_DIR = Path(__file__).with_name("llm_debug")
-LLM_DEBUG_DIR.mkdir(exist_ok=True)
+@dataclass(frozen=True)
+class AppEnvironment:
+    """Runtime configuration extracted from environment variables.
+
+    Centralising this logic makes it trivial for reviewers to audit which
+    environment variables are consulted and how defaults are derived.  The
+    configuration can also be serialised for diagnostics without touching
+    global module state.
+    """
+
+    llm_debug_enabled: bool = False
+    llm_debug_dir: Path = field(default_factory=Path)
+
+    @classmethod
+    def from_env(cls) -> "AppEnvironment":
+        debug_enabled = bool(int(os.getenv("LLM_DEBUG", "1")))
+        debug_dir_raw = os.getenv("LLM_DEBUG_DIR")
+        debug_dir = Path(debug_dir_raw) if debug_dir_raw else Path(__file__).with_name("llm_debug")
+        debug_dir.mkdir(exist_ok=True)
+        return cls(llm_debug_enabled=debug_enabled, llm_debug_dir=debug_dir)
+
+
+APP_ENV = AppEnvironment.from_env()
+
+
+def describe_runtime_environment() -> dict[str, str]:
+    """Return a redacted snapshot of runtime configuration for auditors."""
+
+    info = {"llm_debug_enabled": str(APP_ENV.llm_debug_enabled)}
+    info["llm_debug_dir"] = str(APP_ENV.llm_debug_dir)
+    for key in ("QWEN_GGUF_PATH", "ODA_CONVERTER_EXE", "DWG2DXF_EXE", "METALS_API_KEY"):
+        value = os.getenv(key)
+        if not value:
+            info[key.lower()] = ""
+            continue
+        if key.endswith("_KEY"):
+            info[key.lower()] = "<redacted>"
+        else:
+            info[key.lower()] = value
+    return info
 
 import copy
 import re
@@ -3629,14 +3667,14 @@ class _LocalLLM:
         if not isinstance(parsed, dict):
             parsed = parse_llm_json(text)
 
-        if LLM_DEBUG:
+        if APP_ENV.llm_debug_enabled:
             snap = {
                 "request": req,
                 "raw_response_text": text,
                 "parsed_response": parsed,
                 "usage": usage,
             }
-            fn = LLM_DEBUG_DIR / f"llm_snapshot_{int(time.time())}.json"
+            fn = APP_ENV.llm_debug_dir / f"llm_snapshot_{int(time.time())}.json"
             fn.write_text(json.dumps(snap, indent=2), encoding="utf-8")
 
         return parsed, text, usage
@@ -6602,7 +6640,7 @@ def compute_quote_from_df(df: pd.DataFrame,
             "usage": s_usage,
             "applied_effective": applied_effective,
         })
-        if LLM_DEBUG:
+        if APP_ENV.llm_debug_enabled:
             snap = {
                 "model": overrides_meta.get("model"),
                 "n_ctx": overrides_meta.get("n_ctx"),
@@ -6617,7 +6655,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                 "sanitized": sanitized_struct,
                 "usage": s_usage,
             }
-            snap_path = LLM_DEBUG_DIR / f"llm_snapshot_{int(time.time())}.json"
+            snap_path = APP_ENV.llm_debug_dir / f"llm_snapshot_{int(time.time())}.json"
             snap_path.write_text(json.dumps(snap, indent=2), encoding="utf-8")
 
     quote_state.llm_raw = dict(overrides_meta)
@@ -7238,11 +7276,11 @@ def compute_quote_from_df(df: pd.DataFrame,
     narrative_text = build_narrative(quote_state)
     breakdown["narrative"] = narrative_text
 
-    if LLM_DEBUG and overrides_meta and (
+    if APP_ENV.llm_debug_enabled and overrides_meta and (
         overrides_meta.get("raw") is not None or overrides_meta.get("raw_text")
     ):
         try:
-            files = sorted(LLM_DEBUG_DIR.glob("llm_snapshot_*.json"))
+            files = sorted(APP_ENV.llm_debug_dir.glob("llm_snapshot_*.json"))
             if files:
                 latest = files[-1]
                 snap = json.loads(latest.read_text(encoding="utf-8"))
@@ -12405,7 +12443,35 @@ def suggest_overrides_from_cad(df_vars, params, rates, model_path: str):
     merged_r = {**rates,  **base.get("rates", {}),  **llm_json.get("rates", {})}
     return {"params": merged_p, "rates": merged_r, "geo": geo}
 
-if __name__ == "__main__":
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="CAD Quoting Tool UI")
+    parser.add_argument(
+        "--print-env",
+        action="store_true",
+        help="Print a JSON dump of relevant environment configuration and exit.",
+    )
+    parser.add_argument(
+        "--no-gui",
+        action="store_true",
+        help="Initialise subsystems but do not launch the Tkinter GUI.",
+    )
+    return parser
+
+
+def _main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
+
+    if args.print_env:
+        print(json.dumps(describe_runtime_environment(), indent=2))
+        return 0
+
+    if args.no_gui:
+        return 0
+
     App().mainloop()
-# Base dir for logs and resources
-BASE_DIR = Path(__file__).resolve().parent
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(_main())
