@@ -1,3 +1,38 @@
 Variable ID,Item,Why it Matters,Typical Price Swing*,Data Type / Input Method,Example Values / Options
 MAT-10,Material Scrap / Remnant Value,Potential credit from recycling valuable scrap material.,-$5–$50 credit on large jobs.,Number,-50
+FIN-08,Masking Labor for Plating,Time spent carefully covering features that should not be plated.,$5–$50 per part.,Number,0.1
+MAT-08,Blank Sawing / Waterjet Time,Labor and machine time to cut the raw stock to a usable size.,$20–$200 per blank.,Number,0.15
+QC-02,Final Inspection Labor (Manual),QC department time using hand tools.,0.1–1.0 hours labor per part (+$10–$100).,Number,0.2
+ENG-10,Tool Library & Setup Sheet Creation,Time to document the exact tools, holders, and offsets for a job.,0.5–2 hours per setup (+$40–$160).,Number,0.25
+MAT-11,Blank Squaring / Pre-Op Grinding,Time spent preparing the blank with initial flat and parallel surfaces.,0.2–1.0 hours labor per blank (+$20–$100).,Number,0.25
+QC-04,CMM Run Time per Part,The time the CMM takes to automatically inspect a part.,0.1–1.0 hours machine time per part.,Number,0.4
+ENG-08,Process Sheet / Traveler Creation,Admin time to create detailed work instructions for the shop floor.,0.5–2 hours of admin time (+$40–$160).,Number,0.5
+FIN-03,Bead Blasting / Sanding Labor,Time spent texturing or cleaning surfaces.,$10–$50 per part.,Number,0.5
+ASM-05,CNC Support for Assembly (Machinist),When an assembly requires minor secondary machining like drilling final alignment holes, reaming, or prepping components for fitment.,Billed at a standard CNC Machinist rate ($85–$130/hr).,Number,1
+ENG-04,CAM Simulation & Verification Time,Using software to check for crashes and errors before running.,0.5–8 hours of programming time (+$50–$800).,Number,1.5
+ENG-03,2D CAM Programming Hours (Lathe/WEDM),Generally faster than 3D, but still a skilled labor cost.,$75–$500.,Number,2
 QC-08,Expected Scrap Rate,A percentage added to account for the statistical likelihood of some bad parts.,1–5% to total material and labor cost.,Number,2
+ASM-06,Final Process Touch-up (Grinding/EDM),Labor for final, critical operations like jig grinding a bore to match a shaft post-assembly or using EDM to create a final feature.,Billed at the specific machine/skill rate (e.g., Jig Grind @ $110–$160/hr).,Number,2.5
+FIN-04,Lapping / Honing Labor,High-skill labor for achieving very flat surfaces or precise bores.,$100–$500 per critical surface.,Number,3
+ASM-03,Tool & Die Maker (journeyman),Setups, precision fitting, jig grind calls, solving tolerance stackups,Billed at a standard journeyman rate ($85–$130/hr).,Number,4.5
+FIN-05,Polishing Labor,Time spent achieving a mirror or optical finish.,$50–$1000+ per surface.,Number,5
+MAT-07,Material Surcharge / Volatility Adder,A buffer for fluctuating market prices of metals.,5–15% on material cost.,Number,5
+MIL-06,Number of Unique Tools,Each tool requires a tool change, adding to non-cutting time.,15–60 seconds per tool; can be significant.,Number,5
+QC-03,CMM Programming Time,Time to program the Coordinate Measuring Machine.,2–16 hours NRE (+$200–$1600).,Number,6
+ENG-02,3D CAM Programming Hours (Milling),Time for a skilled programmer to create toolpaths for a mill.,$100–$5000+ depending on complexity.,Number,8
+GRD-09,Electrode Manufacturing Time,Labor and machine time to create the custom copper or graphite electrode.,$200–$1500 NRE per unique electrode.,Number,8
+QC-01,In-Process Inspection Labor,Operator time spent checking parts at the machine.,5–15% to cycle time.,Number,10
+ENG-06,Fixture Build Labor Hours,Toolmaker time to assemble and qualify the custom fixture.,4–40 hours of toolmaker time (+$300–$3000).,Number,12
+PM-08,Project Manager Hours,Complex projects with many milestones require dedicated management time.,$500–$5000+ for dedicated project management.,Number,20
+COM-07,Profit Margin,The percentage added to the total cost to arrive at the final price.,15–40% of total cost.,Number,35
+ASM-02,Hardware / BOM Cost,The purchase cost of all fasteners and components to be installed.,Direct cost input.,Number,75.5
+MAT-09,Number of Blanks Required,Total pieces of raw stock needed for the job.,Direct cost multiplier.,Number,102
+COM-03,Freight / Shipping Cost,The direct cost charged by the carrier.,Direct cost input.,Number,125
+GRD-04,Grinding Wheel Cost & Dressing Time,Cost of the abrasive wheel and the time spent preparing it.,$100–$500 NRE; +0.1 hr labor per part.,Number,200
+MIL-02,Number of Milling Setups,Each re-fixturing of the part adds significant labor.,0.5–2.0 hours labor per setup (+$50–$200).,Number,200
+TRN-09,Tooling Cost (Carbide Inserts),Cost of consumable turning inserts.,$20–$500 on tooling cost line item.,Number,225
+MAT-06,Material Vendor Lead Time,Long lead-time materials can delay the entire project.,Can add weeks to lead time; +$100s in expedite fees.,Number,250
+ENG-07,Fixture Material Cost,Cost of the raw materials for the fixture.,$100–$2000 in material NRE.,Number,350
+MIL-09,Tooling Cost (Carbide Endmills),Cost of consumable cutters, amortized over the job.,$50–$1000+ on tooling cost line item.,Number,450
+MAT-05,Material MOQ,If the job requires less than the MOQ, you must buy and store the excess.,Can increase material cost by 100-500% for small jobs.,Number,500
+ASM-01,Manual Assembly Labor,Time for installing hardware (helicoils, dowel pins, bearings).,$5–$150 per assembly.,Number,2000
