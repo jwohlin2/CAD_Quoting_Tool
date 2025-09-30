@@ -11787,10 +11787,23 @@ class App(tk.Tk):
         self.settings_path = Path(__file__).with_name("app_settings.json")
 
         self.settings = self._load_settings()
-        if isinstance(self.settings, dict):
-            vendor_csv = str(self.settings.get("material_vendor_csv", "") or "")
-            if vendor_csv:
-                self.params["MaterialVendorCSVPath"] = vendor_csv
+        if not isinstance(self.settings, dict):
+            self.settings = {}
+
+        vendor_csv = str(self.settings.get("material_vendor_csv", "") or "")
+        if vendor_csv:
+            self.params["MaterialVendorCSVPath"] = vendor_csv
+
+        saved_vars_path = self._get_last_variables_path()
+        if saved_vars_path:
+            path_obj = Path(saved_vars_path)
+            if path_obj.exists() and path_obj.suffix.lower() in (".csv", ".xlsx"):
+                try:
+                    core_df, full_df = read_variables_file(saved_vars_path, return_full=True)
+                except Exception:
+                    logger.warning("Failed to preload variables from %s", saved_vars_path, exc_info=True)
+                else:
+                    self._refresh_variables_cache(core_df, full_df)
 
         # LLM defaults: ON + auto model discovery
         default_model = (
@@ -11973,6 +11986,45 @@ class App(tk.Tk):
             path.write_text(json.dumps(self.settings, indent=2), encoding="utf-8")
         except Exception:
             pass
+
+    def _get_last_variables_path(self) -> str:
+        if isinstance(self.settings, dict):
+            return str(self.settings.get("last_variables_path", "") or "").strip()
+        return ""
+
+    def _set_last_variables_path(self, path: str | None) -> None:
+        if not isinstance(self.settings, dict):
+            self.settings = {}
+        value = str(path) if path else ""
+        self.settings["last_variables_path"] = value
+        self._save_settings()
+
+    def _variables_dialog_defaults(self) -> dict[str, str]:
+        defaults: dict[str, str] = {}
+        saved = self._get_last_variables_path()
+        if not saved:
+            return defaults
+        saved_path = Path(saved)
+        if saved_path.exists():
+            defaults["initialdir"] = str(saved_path.parent)
+            defaults["initialfile"] = saved_path.name
+            return defaults
+
+        if saved_path.name:
+            defaults["initialfile"] = saved_path.name
+        parent = saved_path.parent
+        try:
+            if parent and str(parent):
+                if parent.exists():
+                    defaults.setdefault("initialdir", str(parent))
+        except Exception:
+            pass
+        self._set_last_variables_path("")
+        return defaults
+
+    def _refresh_variables_cache(self, core_df: pd.DataFrame, full_df: pd.DataFrame) -> None:
+        self.vars_df = core_df
+        self.vars_df_full = full_df
 
     def set_material_vendor_csv(self) -> None:
         path = filedialog.askopenfilename(
@@ -12536,12 +12588,16 @@ class App(tk.Tk):
 
 
                 if self.vars_df is None:
-                    vp = find_variables_near(path) or filedialog.askopenfilename(title="Select variables CSV/XLSX")
+                    vp = find_variables_near(path)
+                    if not vp:
+                        dialog_kwargs = {"title": "Select variables CSV/XLSX"}
+                        dialog_kwargs.update(self._variables_dialog_defaults())
+                        vp = filedialog.askopenfilename(**dialog_kwargs)
                     if vp:
                         try:
                             core_df, full_df = read_variables_file(vp, return_full=True)
-                            self.vars_df = core_df
-                            self.vars_df_full = full_df
+                            self._refresh_variables_cache(core_df, full_df)
+                            self._set_last_variables_path(vp)
                         except Exception as read_err:
                             messagebox.showerror("Variables", f"Failed to read variables file:\n{read_err}\n\nContinuing with defaults.")
                             self.vars_df = None
@@ -12664,15 +12720,17 @@ class App(tk.Tk):
         if self.vars_df is None:
             vp = find_variables_near(path)
             if not vp:
-                vp = filedialog.askopenfilename(title="Select variables CSV/XLSX")
+                dialog_kwargs = {"title": "Select variables CSV/XLSX"}
+                dialog_kwargs.update(self._variables_dialog_defaults())
+                vp = filedialog.askopenfilename(**dialog_kwargs)
             if not vp:
                 messagebox.showinfo("Variables", "No variables file provided.")
                 self.status_var.set("Ready")
                 return
             try:
                 core_df, full_df = read_variables_file(vp, return_full=True)
-                self.vars_df = core_df
-                self.vars_df_full = full_df
+                self._refresh_variables_cache(core_df, full_df)
+                self._set_last_variables_path(vp)
             except Exception as e:
                 import traceback
                 tb = traceback.format_exc()
