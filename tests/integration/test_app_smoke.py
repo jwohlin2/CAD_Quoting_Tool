@@ -185,7 +185,6 @@ def test_geo_read_more_hook_override_roundtrip() -> None:
     finally:
         appV5.set_build_geo_from_dxf_hook(None)
 
-
 def test_discover_qwen_vl_assets_prefers_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     model = tmp_path / "custom-model.gguf"
     model.write_text("model", encoding="utf-8")
@@ -234,7 +233,6 @@ def test_discover_qwen_vl_assets_errors_when_missing(monkeypatch: pytest.MonkeyP
     assert "QWEN_VL_GGUF_PATH" in message
     assert "QWEN_VL_MMPROJ_PATH" in message
 
-
 def test_validate_quote_allows_small_material_cost_with_thickness() -> None:
     geo = {"GEO-03_Height_mm": 6.0, "material": "6061"}
     pass_through = {"Material": 2.0}
@@ -255,3 +253,4 @@ def test_validate_quote_blocks_when_material_unknown() -> None:
         appV5.validate_quote_before_pricing(geo, process_costs, pass_through, {})
 
     assert "Material cost is near zero" in str(exc.value)
+
