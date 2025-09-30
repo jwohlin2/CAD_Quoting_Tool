@@ -1,4 +1,8 @@
-"""Provider that sources prices from a user-supplied CSV file."""
+"""Provider that sources prices from a user-supplied CSV file.
+
+The CSV may include an optional header row. Each populated row should
+contain a symbol followed by a numeric USD-per-kilogram value.
+"""
 from __future__ import annotations
 
 import csv
@@ -29,7 +33,11 @@ class VendorCSV(PriceProvider):
                     if not row:
                         continue
                     symbol, usd_per_kg, *_ = row
-                    self._rows[symbol.strip().upper()] = float(usd_per_kg)
+                    try:
+                        price = float(usd_per_kg)
+                    except ValueError:
+                        continue
+                    self._rows[symbol.strip().upper()] = price
 
     def get(self, symbol: str) -> tuple[float, str]:
         self._load()

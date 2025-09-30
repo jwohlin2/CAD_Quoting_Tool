@@ -51,7 +51,7 @@ import tkinter.font as tkfont
 import urllib.request
 import importlib.util
 from importlib import import_module
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import cad_quoter.geometry as geometry
 
@@ -5184,6 +5184,7 @@ def compute_material_cost(
                 resolver_name,
                 unit="kg",
             )
+
         except Exception:
             resolved_price, resolver_source = None, ""
         if resolved_price and math.isfinite(float(resolved_price)):
@@ -5243,6 +5244,46 @@ def compute_material_cost(
         detail.setdefault("provider_error", str(provider_error))
 
     return cost, detail
+
+
+def _material_price_per_g_from_choice(
+    choice: str,
+    material_lookup: Mapping[str, float],
+) -> tuple[float | None, str]:
+    """Return a price-per-gram for a UI material selection."""
+
+    choice = (choice or "").strip()
+    if not choice:
+        return None, ""
+
+    normalized = _normalize_lookup_key(choice)
+    if normalized == MATERIAL_OTHER_KEY:
+        return None, ""
+
+    price = material_lookup.get(normalized)
+    if price is not None:
+        try:
+            return float(price), "vendor_table"
+        except Exception:
+            return None, ""
+
+    try:
+        price_per_kg, source = _resolve_material_unit_price(choice, unit="kg")
+    except Exception:
+        return None, ""
+
+    if not price_per_kg:
+        return None, ""
+
+    try:
+        price_float = float(price_per_kg)
+    except Exception:
+        return None, ""
+
+    if not math.isfinite(price_float):
+        return None, ""
+
+    return price_float / 1000.0, source or ""
 
 
 def _material_family(material: str) -> str:
@@ -6026,6 +6067,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                 mat_for_price,
                 unit="kg",
             )
+
         except Exception:
             mat_usd_per_kg, mat_src = 0.0, ""
         mat_usd_per_kg = float(mat_usd_per_kg or 0.0)
@@ -12466,6 +12508,7 @@ class App(tk.Tk):
                 material_price_var,
                 material_lookup,
             )
+
 
         for _, row_data in df.iterrows():
             item_name = str(row_data["Item"])

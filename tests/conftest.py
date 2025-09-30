@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import importlib.machinery
 import types
 from importlib.machinery import ModuleSpec
 from pathlib import Path
@@ -332,9 +333,11 @@ def _install_pandas_stub() -> None:
 
 
 _install_runtime_dependency_stubs()
+
 _install_ocp_stubs()
 _install_llama_stub()
 _install_pandas_stub()
+_install_runtime_dep_stubs()
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
