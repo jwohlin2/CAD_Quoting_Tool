@@ -9,7 +9,7 @@ def lookup_price(candidates: Iterable[str]) -> Tuple[float | None, str]:
     """Attempt to look up a USD/kg price using the Wieland scraper."""
 
     try:
-        from wieland_scraper import get_live_material_price_usd_per_kg
+        from .wieland_scraper import get_live_material_price_usd_per_kg
     except Exception:
         return None, ""
 

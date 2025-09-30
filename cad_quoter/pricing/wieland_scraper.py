@@ -15,9 +15,9 @@ Public API:
   get_live_material_price_usd_per_kg(material_key: str, fallback_usd_per_kg=8.0) -> (float, source)
 
 CLI:
-  python wieland_scraper.py --json
-  python wieland_scraper.py --material 6061
-  python wieland_scraper.py --force --debug
+  python -m cad_quoter.pricing.wieland_scraper --json
+  python -m cad_quoter.pricing.wieland_scraper --material 6061
+  python -m cad_quoter.pricing.wieland_scraper --force --debug
 """
 
 from __future__ import annotations
