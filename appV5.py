@@ -236,15 +236,58 @@ def _auto_accept_suggestions(suggestions: dict[str, Any] | None) -> dict[str, An
     accept: dict[str, Any] = {}
     if not isinstance(suggestions, dict):
         return accept
+    meta = suggestions.get("_meta") if isinstance(suggestions.get("_meta"), dict) else {}
+
+    def _confidence_for(path: tuple[str, ...]) -> float | None:
+        node: Any = meta
+        for key in path:
+            if not isinstance(node, dict):
+                return None
+            node = node.get(key)
+        if isinstance(node, dict):
+            conf_val = node.get("confidence")
+            if isinstance(conf_val, (int, float)):
+                return float(conf_val)
+        return None
+
     for bucket in ("process_hour_multipliers", "process_hour_adders", "add_pass_through"):
         data = suggestions.get(bucket)
         if isinstance(data, dict) and data:
-            accept[bucket] = {str(k): True for k in data.keys()}
-    for scalar_key in ("scrap_pct", "contingency_pct", "setups", "fixture"):
+            bucket_accept: dict[str, bool] = {}
+            for subkey in data.keys():
+                conf = _confidence_for((bucket, str(subkey)))
+                bucket_accept[str(subkey)] = True if conf is None else conf >= 0.6
+            accept[bucket] = bucket_accept
+    scalar_keys = (
+        "scrap_pct",
+        "contingency_pct",
+        "setups",
+        "fixture",
+        "fixture_build_hr",
+        "fixture_material_cost",
+        "soft_jaw_hr",
+        "soft_jaw_material_cost",
+        "handling_adder_hr",
+        "cmm_minutes",
+        "in_process_inspection_hr",
+        "fai_required",
+        "fai_prep_hr",
+        "packaging_hours",
+        "packaging_flat_cost",
+        "shipping_hint",
+    )
+    for scalar_key in scalar_keys:
         if scalar_key in suggestions:
-            accept[scalar_key] = True
+            conf = _confidence_for((scalar_key,))
+            accept[scalar_key] = True if conf is None else conf >= 0.6
     if suggestions.get("notes"):
         accept["notes"] = True
+    if isinstance(suggestions.get("operation_sequence"), list):
+        conf = _confidence_for(("operation_sequence",))
+        accept["operation_sequence"] = True if conf is None else conf >= 0.6
+    if isinstance(suggestions.get("drilling_strategy"), dict):
+        conf = _confidence_for(("drilling_strategy",))
+        accept["drilling_strategy"] = True if conf is None else conf >= 0.6
     return accept
 
 
@@ -657,6 +700,13 @@ def _as_float_or_none(value: Any) -> float | None:
         return None
     return None
 
+def build_suggest_payload(
+    geo: dict | None,
+    baseline: dict | None,
+    rates: dict | None,
+    bounds: dict | None,
+) -> dict:
+    """Assemble the JSON payload passed to the suggestion LLM."""
 
     geo = geo or {}
     baseline = baseline or {}
@@ -664,31 +714,94 @@ def _as_float_or_none(value: Any) -> float | None:
     bounds = bounds or {}
 
     derived = geo.get("derived") or {}
+
+    def _coerce_float(value: Any) -> float | None:
+        try:
+            if isinstance(value, bool):
+                return float(value)
+            if isinstance(value, (int, float)):
+                return float(value)
+            if isinstance(value, str):
+                text = value.strip()
+                if not text:
+                    return None
+                return float(text)
+        except Exception:
+            return None
+        return None
+
+    def _coerce_int(value: Any) -> int | None:
+        try:
+            if isinstance(value, bool):
+                return int(value)
+            if isinstance(value, (int, float)):
+                return int(round(float(value)))
+            if isinstance(value, str):
+                text = value.strip()
+                if not text:
+                    return None
+                return int(round(float(text)))
+        except Exception:
+            return None
+        return None
+
+    def _clean_nested(value: Any, depth: int = 0, max_depth: int = 3, limit: int = 24):
+        if depth >= max_depth:
+            return None
+        if isinstance(value, dict):
+            cleaned: dict[str, Any] = {}
+            for idx, (key, val) in enumerate(value.items()):
+                if idx >= limit:
+                    break
+                cleaned_val = _clean_nested(val, depth + 1, max_depth, limit)
+                if cleaned_val is not None:
+                    cleaned[str(key)] = cleaned_val
+            return cleaned
+        if isinstance(value, (list, tuple, set)):
+            cleaned_list: list[Any] = []
+            for idx, item in enumerate(value):
+                if idx >= limit:
+                    break
+                cleaned_val = _clean_nested(item, depth + 1, max_depth, limit)
+                if cleaned_val is not None:
+                    cleaned_list.append(cleaned_val)
+            return cleaned_list
+        if isinstance(value, (int, float)):
+            try:
+                return float(value)
+            except Exception:
+                return None
+        if isinstance(value, bool):
+            return bool(value)
+        if isinstance(value, str):
+            return value.strip()
+        coerced = _coerce_float(value)
+        if coerced is not None:
+            return coerced
+        try:
+            return str(value)
+        except Exception:
+            return None
+
     hole_bins = derived.get("hole_bins") or {}
-    hole_bins_top = {}
+    hole_bins_top: dict[str, int] = {}
     if isinstance(hole_bins, dict):
-        hole_bins_top = dict(sorted(hole_bins.items(), key=lambda kv: -kv[1])[:8])
+        sorted_bins = sorted(
+            ((str(k), _coerce_int(v) or 0) for k, v in hole_bins.items()),
+            key=lambda kv: (-kv[1], kv[0]),
+        )
+        hole_bins_top = {k: int(v) for k, v in sorted_bins[:8] if v}
 
     raw_thickness = geo.get("thickness_mm")
-    thickness_mm = None
-    if isinstance(raw_thickness, dict):
+    thickness_mm = _coerce_float(raw_thickness)
+    if thickness_mm is None and isinstance(raw_thickness, dict):
         for key in ("value", "mm", "thickness_mm"):
-            if raw_thickness.get(key) is not None:
-                try:
-                    thickness_mm = float(raw_thickness.get(key))
-                    break
-                except Exception:
-                    continue
-    else:
-        try:
-            thickness_mm = float(raw_thickness)
-        except Exception:
-            thickness_mm = None
+            candidate = _coerce_float(raw_thickness.get(key))
+            if candidate is not None:
+                thickness_mm = candidate
+                break
     if thickness_mm is None:
-        try:
-            thickness_mm = float(geo.get("thickness"))
-        except Exception:
-            thickness_mm = None
+        thickness_mm = _coerce_float(geo.get("thickness"))
 
     material_val = geo.get("material")
     if isinstance(material_val, dict):
@@ -699,25 +812,210 @@ def _as_float_or_none(value: Any) -> float | None:
         )
     else:
         material_name = material_val
-    if not material_name:
-        material_name = "Steel"
+    material_name = str(material_name).strip() if material_name else "Steel"
 
-    hole_count_val = _as_float_or_none(geo.get("hole_count"))
+    hole_count_val = _coerce_float(geo.get("hole_count"))
     if hole_count_val is None:
-        hole_count_val = _as_float_or_none(derived.get("hole_count"))
+        hole_count_val = _coerce_float(derived.get("hole_count"))
     hole_count = int(hole_count_val or 0)
 
-    tap_qty = derived.get("tap_qty")
-    try:
-        tap_qty = int(tap_qty)
-    except Exception:
-        tap_qty = 0
+    tap_qty = _coerce_int(derived.get("tap_qty")) or 0
+    cbore_qty = _coerce_int(derived.get("cbore_qty")) or 0
+    csk_qty = _coerce_int(derived.get("csk_qty")) or 0
 
-    cbore_qty = derived.get("cbore_qty")
-    try:
-        cbore_qty = int(cbore_qty)
-    except Exception:
-        cbore_qty = 0
+    finish_flags: list[str] = []
+    raw_finish = derived.get("finish_flags") or geo.get("finish_flags")
+    if isinstance(raw_finish, (list, tuple, set)):
+        finish_flags = [str(flag).strip().upper() for flag in raw_finish if str(flag).strip()]
+
+    needs_back_face = bool(
+        derived.get("needs_back_face")
+        or geo.get("needs_back_face")
+        or geo.get("from_back")
+    )
+
+    derived_summary: dict[str, Any] = {}
+    for key in (
+        "tap_minutes_hint",
+        "cbore_minutes_hint",
+        "csk_minutes_hint",
+        "tap_class_counts",
+        "tap_details",
+        "npt_qty",
+        "max_hole_depth_in",
+        "finish_flags",
+        "stock_guess",
+        "has_ldr_notes",
+        "pocket_area_total_in2",
+        "slot_count",
+        "edge_len_in",
+        "hole_table_source",
+    ):
+        value = derived.get(key)
+        if value in (None, ""):
+            continue
+        if key in {"tap_minutes_hint", "cbore_minutes_hint", "csk_minutes_hint"}:
+            cleaned = _coerce_float(value)
+        elif key in {"npt_qty", "slot_count"}:
+            cleaned = _coerce_int(value)
+        elif key in {"has_ldr_notes"}:
+            cleaned = bool(value)
+        else:
+            cleaned = _clean_nested(value, limit=12)
+        if cleaned not in (None, "", [], {}):
+            derived_summary[key] = cleaned
+
+    if finish_flags and "finish_flags" not in derived_summary:
+        derived_summary["finish_flags"] = finish_flags
+
+    bbox_mm = _clean_nested(geo.get("bbox_mm"), limit=6)
+
+    hole_groups: list[dict[str, Any]] = []
+    raw_groups = geo.get("hole_groups")
+    if isinstance(raw_groups, (list, tuple)):
+        for idx, entry in enumerate(raw_groups):
+            if idx >= 12:
+                break
+            if not isinstance(entry, dict):
+                continue
+            cleaned_entry = {
+                "dia_mm": _coerce_float(entry.get("dia_mm")),
+                "depth_mm": _coerce_float(entry.get("depth_mm")),
+                "through": bool(entry.get("through")) if entry.get("through") is not None else None,
+                "count": _coerce_int(entry.get("count")),
+            }
+            hole_groups.append({k: v for k, v in cleaned_entry.items() if v not in (None, "")})
+
+    geo_notes: list[str] = []
+    raw_notes = geo.get("notes")
+    if isinstance(raw_notes, (list, tuple, set)):
+        geo_notes = [str(note).strip() for note in raw_notes if str(note).strip()][:8]
+
+    gdt_counts: dict[str, int] = {}
+    raw_gdt = geo.get("gdt")
+    if isinstance(raw_gdt, dict):
+        for key, value in raw_gdt.items():
+            val = _coerce_int(value)
+            if val:
+                gdt_counts[str(key)] = val
+
+    baseline_hours_raw = baseline.get("process_hours") if isinstance(baseline.get("process_hours"), dict) else {}
+    baseline_hours: dict[str, float] = {}
+    for proc, hours in (baseline_hours_raw or {}).items():
+        val = _coerce_float(hours)
+        if val is not None:
+            baseline_hours[str(proc)] = float(val)
+
+    baseline_pass_raw = baseline.get("pass_through") if isinstance(baseline.get("pass_through"), dict) else {}
+    baseline_pass: dict[str, float] = {}
+    for label, amount in (baseline_pass_raw or {}).items():
+        val = _coerce_float(amount)
+        if val is not None:
+            baseline_pass[str(label)] = float(val)
+
+    top_process_hours = sorted(baseline_hours.items(), key=lambda kv: (-kv[1], kv[0]))[:6]
+    top_pass_through = sorted(baseline_pass.items(), key=lambda kv: (-kv[1], kv[0]))[:6]
+
+    baseline_summary = {
+        "scrap_pct": _coerce_float(baseline.get("scrap_pct")) or 0.0,
+        "setups": _coerce_int(baseline.get("setups")) or 1,
+        "fixture": baseline.get("fixture"),
+        "process_hours": baseline_hours,
+        "pass_through": baseline_pass,
+        "top_process_hours": top_process_hours,
+        "top_pass_through": top_pass_through,
+    }
+
+    rates_of_interest = {
+        key: _coerce_float(rates.get(key))
+        for key in (
+            "MillingRate",
+            "TurningRate",
+            "WireEDMRate",
+            "SinkerEDMRate",
+            "SurfaceGrindRate",
+            "InspectionRate",
+            "FixtureBuildRate",
+            "AssemblyRate",
+            "PackagingRate",
+            "DeburrRate",
+            "DrillingRate",
+        )
+        if rates.get(key) is not None and _coerce_float(rates.get(key)) is not None
+    }
+
+    signals: dict[str, Any] = {
+        "hole_bins_top": hole_bins_top,
+        "tap_qty": tap_qty,
+        "cbore_qty": cbore_qty,
+        "csk_qty": csk_qty,
+        "needs_back_face": needs_back_face,
+    }
+
+    for key in (
+        "tap_minutes_hint",
+        "cbore_minutes_hint",
+        "csk_minutes_hint",
+        "tap_class_counts",
+        "tap_details",
+        "npt_qty",
+        "stock_guess",
+        "pocket_area_total_in2",
+        "slot_count",
+        "edge_len_in",
+    ):
+        if key in derived_summary:
+            signals[key] = derived_summary[key]
+
+    if gdt_counts:
+        signals["gdt_counts"] = gdt_counts
+
+    geo_summary = {
+        "material": material_name,
+        "thickness_mm": thickness_mm,
+        "hole_count": hole_count,
+        "finish_flags": finish_flags,
+        "needs_back_face": needs_back_face,
+        "bbox_mm": bbox_mm,
+        "hole_groups": hole_groups,
+        "notes": geo_notes,
+        "derived": derived_summary,
+        "gdt": gdt_counts,
+    }
+
+    if geo.get("meta"):
+        geo_summary["meta"] = _clean_nested(geo.get("meta"), limit=12)
+    if geo.get("provenance"):
+        geo_summary["provenance"] = _clean_nested(geo.get("provenance"), limit=12)
+
+    bounds_summary = {
+        "mult_min": _coerce_float(bounds.get("mult_min")) or 0.5,
+        "mult_max": _coerce_float(bounds.get("mult_max")) or 3.0,
+        "adder_max_hr": _coerce_float(bounds.get("adder_max_hr")) or 5.0,
+        "scrap_min": _coerce_float(bounds.get("scrap_min")) or 0.0,
+        "scrap_max": _coerce_float(bounds.get("scrap_max")) or 0.25,
+    }
+
+    seed = {
+        "top_process_hours": top_process_hours,
+        "top_pass_through": top_pass_through,
+        "hole_count": hole_count,
+        "setups": baseline_summary["setups"],
+        "finish_flags": finish_flags,
+    }
+
+    payload = {
+        "geo": geo_summary,
+        "baseline": baseline_summary,
+        "signals": signals,
+        "rates": rates_of_interest,
+        "bounds": bounds_summary,
+        "seed": seed,
+    }
+
+    return payload
+
+
 
 
 
@@ -726,62 +1024,322 @@ def _as_float_or_none(value: Any) -> float | None:
 def sanitize_suggestions(s: dict, bounds: dict) -> dict:
     bounds = bounds or {}
 
-    def clamp(value, lo, hi):
-        try:
-            return max(lo, min(hi, float(value)))
-        except Exception:
-            return lo
+    mult_min = _as_float_or_none(bounds.get("mult_min")) or 0.5
+    mult_max = _as_float_or_none(bounds.get("mult_max")) or 3.0
+    adder_max = _as_float_or_none(bounds.get("adder_max_hr")) or 5.0
+    scrap_min = max(0.0, _as_float_or_none(bounds.get("scrap_min")) or 0.0)
+    scrap_max = _as_float_or_none(bounds.get("scrap_max")) or 0.25
+
+    meta_info: dict[str, Any] = {}
+
+    def _normalize_conf(value: Any) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            mapping = {
+                "low": 0.3,
+                "medium": 0.6,
+                "med": 0.6,
+                "mid": 0.6,
+                "high": 0.85,
+                "very high": 0.95,
+                "certain": 0.98,
+            }
+            key = value.strip().lower()
+            if key in mapping:
+                return mapping[key]
+        conf = _as_float_or_none(value)
+        if conf is None:
+            return None
+        return max(0.0, min(1.0, float(conf)))
+
+    def _extract_detail(raw: Any) -> tuple[Any, dict[str, Any]]:
+        detail: dict[str, Any] = {}
+        value = raw
+        if isinstance(raw, dict):
+            if "value" in raw:
+                value = raw.get("value")
+            reason = str(raw.get("reason") or "").strip()
+            if reason:
+                detail["reason"] = reason[:160]
+            conf = _normalize_conf(raw.get("confidence"))
+            if conf is not None:
+                detail["confidence"] = conf
+            source_raw = raw.get("source") or raw.get("sources")
+            sources: list[str] = []
+            if isinstance(source_raw, str):
+                sources = [source_raw]
+            elif isinstance(source_raw, (list, tuple, set)):
+                sources = list(source_raw)
+            cleaned_sources = []
+            for src in sources:
+                if not src:
+                    continue
+                cleaned_sources.append(str(src).strip().upper()[:24])
+            if cleaned_sources:
+                detail["source"] = cleaned_sources
+        return value, detail
+
+    def _store_meta(path: tuple[str, ...], detail: dict[str, Any], value: Any) -> None:
+        cleaned = {k: v for k, v in detail.items() if v not in (None, "", [], {})}
+        if not cleaned:
+            return
+        cleaned["value"] = value
+        node = meta_info
+        for key in path[:-1]:
+            node = node.setdefault(key, {})
+        node[path[-1]] = cleaned
+
+    def _extract_float_field(
+        raw: Any, lo: float | None, hi: float | None, path: tuple[str, ...]
+    ) -> float | None:
+        if raw is None:
+            return None
+        value, detail = _extract_detail(raw)
+        num = _as_float_or_none(value)
+        if num is None:
+            return None
+        if lo is not None:
+            num = max(lo, num)
+        if hi is not None:
+            num = min(hi, num)
+        _store_meta(path, detail, num)
+        return num
+
+    def _coerce_bool(value: Any) -> bool | None:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"y", "yes", "true", "1"}:
+                return True
+            if lowered in {"n", "no", "false", "0"}:
+                return False
+        return None
+
+    def _extract_bool_field(raw: Any, path: tuple[str, ...]) -> bool | None:
+        if raw is None:
+            return None
+        value, detail = _extract_detail(raw)
+        flag = _coerce_bool(value)
+        if flag is None:
+            return None
+        _store_meta(path, detail, flag)
+        return flag
+
+    # Flatten optional setup block into primary keys for backward compatibility.
+    setup_block = None
+    if isinstance(s.get("setup_recommendation"), dict):
+        setup_block = dict(s.get("setup_recommendation"))
+    elif isinstance(s.get("setup_plan"), dict):
+        setup_block = dict(s.get("setup_plan"))
+    if setup_block:
+        for key in ("setups", "fixture", "notes"):
+            if key not in s and setup_block.get(key) is not None:
+                s[key] = setup_block.get(key)
+        if "fixture_build_hr" in setup_block and "fixture_build_hr" not in s:
+            s["fixture_build_hr"] = setup_block.get("fixture_build_hr")
+        if "fixture_material_cost" in setup_block and "fixture_material_cost" not in s:
+            s["fixture_material_cost"] = setup_block.get("fixture_material_cost")
 
     mults: dict[str, float] = {}
-    for proc, val in (s.get("process_hour_multipliers") or {}).items():
-        try:
-            mults[str(proc)] = clamp(val, bounds.get("mult_min", 0.5), bounds.get("mult_max", 3.0))
-        except Exception:
+    for proc, raw_val in (s.get("process_hour_multipliers") or {}).items():
+        value, detail = _extract_detail(raw_val)
+        num = _as_float_or_none(value)
+        if num is None:
             continue
+        num = max(mult_min, min(mult_max, num))
+        proc_key = str(proc)
+        mults[proc_key] = num
+        _store_meta(("process_hour_multipliers", proc_key), detail, num)
 
     adders: dict[str, float] = {}
-    for proc, val in (s.get("process_hour_adders") or {}).items():
-        try:
-            adders[str(proc)] = clamp(val, 0.0, bounds.get("adder_max_hr", 5.0))
-        except Exception:
+    for proc, raw_val in (s.get("process_hour_adders") or {}).items():
+        value, detail = _extract_detail(raw_val)
+        num = _as_float_or_none(value)
+        if num is None:
             continue
+        num = max(0.0, min(adder_max, num))
+        proc_key = str(proc)
+        adders[proc_key] = num
+        _store_meta(("process_hour_adders", proc_key), detail, num)
 
-    scrap = clamp(
-        s.get("scrap_pct", 0.0),
-        bounds.get("scrap_min", 0.0),
-        bounds.get("scrap_max", 0.25),
-    )
+    raw_scrap = s.get("scrap_pct", 0.0)
+    scrap_val, scrap_detail = _extract_detail(raw_scrap)
+    scrap_float = _as_float_or_none(scrap_val)
+    if scrap_float is None:
+        scrap_float = 0.0
+    scrap_float = max(scrap_min, min(scrap_max, scrap_float))
+    _store_meta(("scrap_pct",), scrap_detail, scrap_float)
 
+    raw_setups = s.get("setups", 1)
+    setups_val, setups_detail = _extract_detail(raw_setups)
     try:
-        setups = int(s.get("setups", 1))
+        setups_int = int(round(float(setups_val)))
     except Exception:
-        setups = 1
-    setups = max(1, min(4, setups))
+        setups_int = 1
+    setups_int = max(1, min(4, setups_int))
+    _store_meta(("setups",), setups_detail, setups_int)
 
-    fixture = s.get("fixture", "standard")
-    fixture = str(fixture)[:80] if fixture is not None else "standard"
+    raw_fixture = s.get("fixture", "standard")
+    fixture_val, fixture_detail = _extract_detail(raw_fixture)
+    fixture_str = str(fixture_val).strip() if fixture_val is not None else "standard"
+    if not fixture_str:
+        fixture_str = "standard"
+    fixture_str = fixture_str[:120]
+    _store_meta(("fixture",), fixture_detail, fixture_str)
 
     notes_raw = s.get("notes") or []
     notes: list[str] = []
     for note in notes_raw:
+        if isinstance(note, dict):
+            value, detail = _extract_detail(note)
+            text = str(value).strip()
+            if text:
+                trimmed = text[:160]
+                notes.append(trimmed)
+                _store_meta(("notes", str(len(notes) - 1)), detail, trimmed)
+            continue
         if not isinstance(note, str):
             continue
         cleaned = note.strip()
         if cleaned:
-            notes.append(cleaned[:120])
+            notes.append(cleaned[:160])
 
-    no_change = s.get("no_change_reason") or ""
-    no_change = str(no_change)
+    raw_no_change = s.get("no_change_reason")
+    no_change_val, no_change_detail = _extract_detail(raw_no_change)
+    no_change_str = str(no_change_val or "")
+    if no_change_str.strip():
+        _store_meta(("no_change_reason",), no_change_detail, no_change_str.strip())
 
-    return {
+    extra: dict[str, Any] = {}
+
+    fixture_build_raw = s.get("fixture_build_hr")
+    if fixture_build_raw is None and setup_block:
+        fixture_build_raw = setup_block.get("fixture_build_hr")
+    fixture_build_hr = _extract_float_field(fixture_build_raw, 0.0, 2.0, ("fixture_build_hr",))
+    if fixture_build_hr is not None:
+        extra["fixture_build_hr"] = fixture_build_hr
+
+    fixture_material_raw = s.get("fixture_material_cost")
+    if fixture_material_raw is None and setup_block:
+        fixture_material_raw = setup_block.get("fixture_material_cost")
+    fixture_material_cost = _extract_float_field(fixture_material_raw, 0.0, 250.0, ("fixture_material_cost",))
+    if fixture_material_cost is not None:
+        extra["fixture_material_cost"] = fixture_material_cost
+
+    soft_block = s.get("soft_jaw_plan") if isinstance(s.get("soft_jaw_plan"), dict) else None
+    soft_hr_raw = s.get("soft_jaw_hr")
+    soft_cost_raw = s.get("soft_jaw_material_cost")
+    if soft_block:
+        if soft_hr_raw is None:
+            soft_hr_raw = soft_block.get("hours") or soft_block.get("hr")
+        if soft_cost_raw is None:
+            soft_cost_raw = soft_block.get("stock_cost") or soft_block.get("material_cost")
+    soft_hr = _extract_float_field(soft_hr_raw, 0.0, 1.0, ("soft_jaw_hr",))
+    if soft_hr is not None:
+        extra["soft_jaw_hr"] = soft_hr
+    soft_cost = _extract_float_field(soft_cost_raw, 0.0, 60.0, ("soft_jaw_material_cost",))
+    if soft_cost is not None:
+        extra["soft_jaw_material_cost"] = soft_cost
+
+    op_block = s.get("operation_sequence")
+    op_steps_raw: Any = None
+    op_handling_raw: Any = None
+    if isinstance(op_block, dict):
+        op_steps_raw = op_block.get("ops") or op_block.get("sequence")
+        op_handling_raw = op_block.get("handling_adder_hr") or op_block.get("handling_hr")
+    elif isinstance(op_block, (list, tuple, set)):
+        op_steps_raw = op_block
+    if op_handling_raw is None:
+        op_handling_raw = s.get("handling_adder_hr")
+    if isinstance(op_steps_raw, (list, tuple, set)):
+        op_steps_clean = [str(step).strip()[:80] for step in op_steps_raw if str(step).strip()]
+        if op_steps_clean:
+            extra["operation_sequence"] = op_steps_clean[:12]
+    handling_hr = _extract_float_field(op_handling_raw, 0.0, 0.2, ("handling_adder_hr",))
+    if handling_hr is not None:
+        extra["handling_adder_hr"] = handling_hr
+
+    drilling_block = s.get("drilling_strategy") or s.get("drilling_plan")
+    if isinstance(drilling_block, dict):
+        drilling_clean: dict[str, Any] = {}
+        mult_val, mult_detail = _extract_detail(drilling_block.get("multiplier"))
+        mult = _as_float_or_none(mult_val)
+        if mult is not None:
+            mult = max(0.8, min(1.5, mult))
+            drilling_clean["multiplier"] = mult
+            _store_meta(("drilling_strategy", "multiplier"), mult_detail, mult)
+        floor_val, floor_detail = _extract_detail(
+            drilling_block.get("per_hole_floor_sec") or drilling_block.get("floor_sec_per_hole")
+        )
+        floor = _as_float_or_none(floor_val)
+        if floor is not None:
+            floor = max(0.0, floor)
+            drilling_clean["per_hole_floor_sec"] = floor
+            _store_meta(("drilling_strategy", "per_hole_floor_sec"), floor_detail, floor)
+        if drilling_block.get("note") or drilling_block.get("reason"):
+            note_text = str(drilling_block.get("note") or drilling_block.get("reason")).strip()
+            if note_text:
+                drilling_clean["note"] = note_text[:160]
+        if drilling_clean:
+            extra["drilling_strategy"] = drilling_clean
+
+    cmm_raw = s.get("cmm_minutes") or s.get("cmm_min")
+    cmm_minutes = _extract_float_field(cmm_raw, 0.0, 60.0, ("cmm_minutes",))
+    if cmm_minutes is not None:
+        extra["cmm_minutes"] = cmm_minutes
+
+    inproc_raw = s.get("in_process_inspection_hr")
+    inproc_hr = _extract_float_field(inproc_raw, 0.0, 0.5, ("in_process_inspection_hr",))
+    if inproc_hr is not None:
+        extra["in_process_inspection_hr"] = inproc_hr
+
+    fai_flag = _extract_bool_field(s.get("fai_required"), ("fai_required",))
+    if fai_flag is not None:
+        extra["fai_required"] = fai_flag
+
+    fai_prep = _extract_float_field(s.get("fai_prep_hr"), 0.0, 1.0, ("fai_prep_hr",))
+    if fai_prep is not None:
+        extra["fai_prep_hr"] = fai_prep
+
+    packaging_hr = _extract_float_field(s.get("packaging_hours"), 0.0, 0.5, ("packaging_hours",))
+    if packaging_hr is not None:
+        extra["packaging_hours"] = packaging_hr
+
+    packaging_cost = _extract_float_field(s.get("packaging_flat_cost"), 0.0, 25.0, ("packaging_flat_cost",))
+    if packaging_cost is not None:
+        extra["packaging_flat_cost"] = packaging_cost
+
+    shipping_hint = s.get("shipping_hint") or s.get("shipping_class")
+    if isinstance(shipping_hint, dict):
+        value, detail = _extract_detail(shipping_hint)
+        hint = str(value).strip()
+        if hint:
+            extra["shipping_hint"] = hint[:80]
+            _store_meta(("shipping_hint",), detail, hint[:80])
+    elif isinstance(shipping_hint, str) and shipping_hint.strip():
+        extra["shipping_hint"] = shipping_hint.strip()[:80]
+
+    sanitized = {
         "process_hour_multipliers": mults or {"drilling": 1.0, "milling": 1.0},
         "process_hour_adders": adders or {"inspection": 0.0},
-        "scrap_pct": scrap,
-        "setups": setups,
-        "fixture": fixture,
+        "scrap_pct": scrap_float,
+        "setups": setups_int,
+        "fixture": fixture_str,
         "notes": notes,
-        "no_change_reason": no_change,
+        "no_change_reason": no_change_str,
     }
+
+    if extra:
+        sanitized.update(extra)
+
+    if meta_info:
+        sanitized["_meta"] = meta_info
+
+    return sanitized
 
 
 def apply_suggestions(baseline: dict, s: dict) -> dict:
@@ -925,6 +1483,26 @@ def overrides_to_suggestions(overrides: dict | None) -> dict:
         suggestions["fixture"] = overrides.get("fixture")
     if isinstance(overrides.get("notes"), list):
         suggestions["notes"] = list(overrides["notes"])
+    for key in (
+        "fixture_build_hr",
+        "fixture_material_cost",
+        "soft_jaw_hr",
+        "soft_jaw_material_cost",
+        "handling_adder_hr",
+        "cmm_minutes",
+        "in_process_inspection_hr",
+        "fai_required",
+        "fai_prep_hr",
+        "packaging_hours",
+        "packaging_flat_cost",
+        "shipping_hint",
+    ):
+        if overrides.get(key) is not None:
+            suggestions[key] = overrides.get(key)
+    if isinstance(overrides.get("operation_sequence"), list):
+        suggestions["operation_sequence"] = list(overrides["operation_sequence"])
+    if isinstance(overrides.get("drilling_strategy"), dict):
+        suggestions["drilling_strategy"] = dict(overrides["drilling_strategy"])
     return suggestions
 
 
@@ -956,6 +1534,26 @@ def suggestions_to_overrides(suggestions: dict | None) -> dict:
             out["setup_recommendation"]["fixture"] = fixture
     if isinstance(suggestions.get("notes"), list):
         out["notes"] = list(suggestions["notes"])
+    for key in (
+        "fixture_build_hr",
+        "fixture_material_cost",
+        "soft_jaw_hr",
+        "soft_jaw_material_cost",
+        "handling_adder_hr",
+        "cmm_minutes",
+        "in_process_inspection_hr",
+        "fai_required",
+        "fai_prep_hr",
+        "packaging_hours",
+        "packaging_flat_cost",
+        "shipping_hint",
+    ):
+        if suggestions.get(key) is not None:
+            out[key] = suggestions.get(key)
+    if isinstance(suggestions.get("operation_sequence"), list):
+        out["operation_sequence"] = list(suggestions["operation_sequence"])
+    if isinstance(suggestions.get("drilling_strategy"), dict):
+        out["drilling_strategy"] = dict(suggestions["drilling_strategy"])
     return out
 
 
@@ -1008,6 +1606,124 @@ def merge_effective(
             clamp_notes.append(note)
             changed = True
         return clamped, changed
+
+    def _clamp_range(value: float, lo: float | None, hi: float | None, label: str, source: str) -> tuple[float, bool]:
+        num = float(value)
+        changed = False
+        orig = num
+        if lo is not None and num < lo:
+            num = lo
+            changed = True
+        if hi is not None and num > hi:
+            num = hi
+            changed = True
+        if changed:
+            clamp_notes.append(f"{label} {orig:.3f} → {num:.3f} ({source})")
+        return num, changed
+
+    def _merge_numeric_field(key: str, lo: float | None, hi: float | None, label: str) -> None:
+        base_val = _as_float_or_none(baseline.get(key)) if baseline.get(key) is not None else None
+        value = base_val
+        source = "baseline"
+        if overrides.get(key) is not None:
+            cand = _as_float_or_none(overrides.get(key))
+            if cand is not None:
+                value, _ = _clamp_range(cand, lo, hi, label, "user override")
+                source = "user"
+        elif suggestions.get(key) is not None:
+            cand = _as_float_or_none(suggestions.get(key))
+            if cand is not None:
+                value, _ = _clamp_range(cand, lo, hi, label, "LLM")
+                source = "llm"
+        if value is not None:
+            eff[key] = float(value)
+        elif key in eff:
+            eff.pop(key, None)
+        source_tags[key] = source
+
+    def _coerce_bool_value(raw: Any) -> bool | None:
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, (int, float)):
+            return bool(raw)
+        if isinstance(raw, str):
+            lowered = raw.strip().lower()
+            if lowered in {"y", "yes", "true", "1"}:
+                return True
+            if lowered in {"n", "no", "false", "0"}:
+                return False
+        return None
+
+    def _merge_bool_field(key: str) -> None:
+        base_val = baseline.get(key) if isinstance(baseline.get(key), bool) else None
+        value = base_val
+        source = "baseline"
+        if key in overrides:
+            cand = _coerce_bool_value(overrides.get(key))
+            if cand is not None:
+                value = cand
+                source = "user"
+        elif key in suggestions:
+            cand = _coerce_bool_value(suggestions.get(key))
+            if cand is not None:
+                value = cand
+                source = "llm"
+        if value is not None:
+            eff[key] = bool(value)
+        elif key in eff:
+            eff.pop(key, None)
+        source_tags[key] = source
+
+    def _merge_text_field(key: str, *, max_len: int = 160) -> None:
+        base_val = baseline.get(key) if isinstance(baseline.get(key), str) else None
+        value = base_val
+        source = "baseline"
+        override_val = overrides.get(key)
+        if isinstance(override_val, str) and override_val.strip():
+            value = override_val.strip()[:max_len]
+            source = "user"
+        elif isinstance(suggestions.get(key), str) and suggestions.get(key).strip():
+            value = suggestions.get(key).strip()[:max_len]
+            source = "llm"
+        if value is not None:
+            eff[key] = value
+        elif key in eff:
+            eff.pop(key, None)
+        source_tags[key] = source
+
+    def _merge_list_field(key: str) -> None:
+        base_val = baseline.get(key) if isinstance(baseline.get(key), list) else None
+        value = base_val
+        source = "baseline"
+        override_val = overrides.get(key)
+        if isinstance(override_val, list):
+            value = [str(item).strip()[:80] for item in override_val if str(item).strip()]
+            source = "user"
+        elif isinstance(suggestions.get(key), list):
+            value = [str(item).strip()[:80] for item in suggestions.get(key) if str(item).strip()]
+            source = "llm"
+        if value:
+            eff[key] = value
+        elif key in eff:
+            eff.pop(key, None)
+        source_tags[key] = source
+
+    def _merge_dict_field(key: str) -> None:
+        base_val = baseline.get(key) if isinstance(baseline.get(key), dict) else None
+        value = base_val
+        source = "baseline"
+        override_val = overrides.get(key)
+        if isinstance(override_val, dict):
+            value = copy.deepcopy(override_val)
+            source = "user"
+        elif isinstance(suggestions.get(key), dict):
+            value = copy.deepcopy(suggestions.get(key))
+            source = "llm"
+        if value is not None:
+            eff[key] = value
+        elif key in eff:
+            eff.pop(key, None)
+        source_tags[key] = source
 
     eff = copy.deepcopy(baseline)
     eff.pop("_bounds", None)
@@ -1205,6 +1921,21 @@ def merge_effective(
     if notes_val:
         eff["notes"] = notes_val
 
+    _merge_numeric_field("fixture_build_hr", 0.0, 2.0, "fixture_build_hr")
+    _merge_numeric_field("fixture_material_cost", 0.0, 250.0, "fixture_material_cost")
+    _merge_numeric_field("soft_jaw_hr", 0.0, 1.0, "soft_jaw_hr")
+    _merge_numeric_field("soft_jaw_material_cost", 0.0, 60.0, "soft_jaw_material_cost")
+    _merge_numeric_field("handling_adder_hr", 0.0, 0.2, "handling_adder_hr")
+    _merge_numeric_field("cmm_minutes", 0.0, 60.0, "cmm_minutes")
+    _merge_numeric_field("in_process_inspection_hr", 0.0, 0.5, "in_process_inspection_hr")
+    _merge_bool_field("fai_required")
+    _merge_numeric_field("fai_prep_hr", 0.0, 1.0, "fai_prep_hr")
+    _merge_numeric_field("packaging_hours", 0.0, 0.5, "packaging_hours")
+    _merge_numeric_field("packaging_flat_cost", 0.0, 25.0, "packaging_flat_cost")
+    _merge_text_field("shipping_hint", max_len=80)
+    _merge_list_field("operation_sequence")
+    _merge_dict_field("drilling_strategy")
+
     final_hours_dict = eff.get("process_hours") if isinstance(eff.get("process_hours"), dict) else {}
     hole_count_guard = _coerce_float_or_none(guard_ctx.get("hole_count"))
     try:
@@ -1320,12 +2051,34 @@ def compute_effective_state(state: QuoteState) -> tuple[dict, dict]:
         if selected:
             applied[bucket] = selected
 
-    for scalar_key in ("scrap_pct", "contingency_pct", "setups", "fixture"):
+    scalar_keys = (
+        "scrap_pct",
+        "contingency_pct",
+        "setups",
+        "fixture",
+        "fixture_build_hr",
+        "fixture_material_cost",
+        "soft_jaw_hr",
+        "soft_jaw_material_cost",
+        "handling_adder_hr",
+        "cmm_minutes",
+        "in_process_inspection_hr",
+        "fai_required",
+        "fai_prep_hr",
+        "packaging_hours",
+        "packaging_flat_cost",
+        "shipping_hint",
+    )
+    for scalar_key in scalar_keys:
         if scalar_key in suggestions and accept.get(scalar_key):
             applied[scalar_key] = suggestions.get(scalar_key)
 
     if "notes" in suggestions:
         applied["notes"] = suggestions.get("notes")
+    if accept.get("operation_sequence") and isinstance(suggestions.get("operation_sequence"), list):
+        applied["operation_sequence"] = suggestions.get("operation_sequence")
+    if accept.get("drilling_strategy") and isinstance(suggestions.get("drilling_strategy"), dict):
+        applied["drilling_strategy"] = suggestions.get("drilling_strategy")
 
     baseline_for_merge = copy.deepcopy(baseline)
     if bounds:
@@ -1523,6 +2276,45 @@ def effective_to_overrides(effective: dict, baseline: dict | None = None) -> dic
             out["setup_recommendation"]["setups"] = setups_eff
         if fixture_eff is not None:
             out["setup_recommendation"]["fixture"] = fixture_eff
+    numeric_keys = {
+        "fixture_build_hr": (0.0, None),
+        "fixture_material_cost": (0.0, None),
+        "soft_jaw_hr": (0.0, None),
+        "soft_jaw_material_cost": (0.0, None),
+        "handling_adder_hr": (0.0, None),
+        "cmm_minutes": (0.0, None),
+        "in_process_inspection_hr": (0.0, None),
+        "fai_prep_hr": (0.0, None),
+        "packaging_hours": (0.0, None),
+        "packaging_flat_cost": (0.0, None),
+    }
+    for key, (_default, _) in numeric_keys.items():
+        eff_val = effective.get(key)
+        base_val = baseline.get(key) if isinstance(baseline, dict) else None
+        if eff_val is None:
+            continue
+        if base_val is None or not math.isclose(float(eff_val), float(base_val or 0.0), rel_tol=1e-6, abs_tol=1e-6):
+            out[key] = float(eff_val)
+    bool_keys = ["fai_required"]
+    for key in bool_keys:
+        eff_val = effective.get(key)
+        base_val = baseline.get(key) if isinstance(baseline, dict) else None
+        if eff_val is None:
+            continue
+        if base_val is None or bool(eff_val) != bool(base_val):
+            out[key] = bool(eff_val)
+    text_keys = ["shipping_hint"]
+    for key in text_keys:
+        eff_val = effective.get(key)
+        base_val = baseline.get(key) if isinstance(baseline, dict) else None
+        if eff_val is None:
+            continue
+        if (base_val or "") != (eff_val or ""):
+            out[key] = eff_val
+    if effective.get("operation_sequence"):
+        out["operation_sequence"] = list(effective["operation_sequence"])
+    if isinstance(effective.get("drilling_strategy"), dict):
+        out["drilling_strategy"] = copy.deepcopy(effective["drilling_strategy"])
     return out
 
 
@@ -1546,12 +2338,34 @@ def ensure_accept_flags(state: QuoteState) -> None:
             if stale not in sugg:
                 bucket.pop(stale, None)
 
-    for key in ("scrap_pct", "fixture_material_cost_delta", "contingency_pct", "setups", "fixture"):
+    for key in (
+        "scrap_pct",
+        "fixture_material_cost_delta",
+        "contingency_pct",
+        "setups",
+        "fixture",
+        "fixture_build_hr",
+        "fixture_material_cost",
+        "soft_jaw_hr",
+        "soft_jaw_material_cost",
+        "handling_adder_hr",
+        "cmm_minutes",
+        "in_process_inspection_hr",
+        "fai_required",
+        "fai_prep_hr",
+        "packaging_hours",
+        "packaging_flat_cost",
+        "shipping_hint",
+    ):
         if key in suggestions and not isinstance(accept.get(key), bool):
             accept[key] = False
         if key not in suggestions and key in accept and not isinstance(accept.get(key), dict):
             # keep user toggles if overrides exist even without suggestions
             continue
+    if isinstance(suggestions.get("operation_sequence"), list) and not isinstance(accept.get("operation_sequence"), bool):
+        accept["operation_sequence"] = False
+    if isinstance(suggestions.get("drilling_strategy"), dict) and not isinstance(accept.get("drilling_strategy"), bool):
+        accept["drilling_strategy"] = False
 
 
 def iter_suggestion_rows(state: QuoteState) -> list[dict]:
@@ -1721,6 +2535,41 @@ def iter_suggestion_rows(state: QuoteState) -> list[dict]:
             "effective": fixture_eff,
             "source": fixture_src,
         })
+
+    def _add_scalar_row(path: tuple[str, ...], label: str, kind: str, key: str) -> None:
+        base_val = baseline.get(key)
+        llm_val = suggestions.get(key)
+        user_val = overrides.get(key)
+        eff_val = effective.get(key)
+        src_val = sources.get(key, "baseline")
+        if not any(value not in (None, {}, []) for value in (base_val, llm_val, user_val, eff_val)):
+            return
+        rows.append(
+            {
+                "path": path,
+                "label": label,
+                "kind": kind,
+                "baseline": base_val,
+                "llm": llm_val,
+                "user": user_val,
+                "accept": bool(accept.get(key)),
+                "effective": eff_val,
+                "source": src_val,
+            }
+        )
+
+    _add_scalar_row(("fixture_build_hr",), "Fixture Build Hours", "hours", "fixture_build_hr")
+    _add_scalar_row(("fixture_material_cost",), "Fixture Material $", "currency", "fixture_material_cost")
+    _add_scalar_row(("soft_jaw_hr",), "Soft Jaw Hours", "hours", "soft_jaw_hr")
+    _add_scalar_row(("soft_jaw_material_cost",), "Soft Jaw Material $", "currency", "soft_jaw_material_cost")
+    _add_scalar_row(("handling_adder_hr",), "Handling Adder Hours", "hours", "handling_adder_hr")
+    _add_scalar_row(("cmm_minutes",), "CMM Minutes", "float", "cmm_minutes")
+    _add_scalar_row(("in_process_inspection_hr",), "In-process Inspection Hr", "hours", "in_process_inspection_hr")
+    _add_scalar_row(("fai_required",), "FAI Required", "text", "fai_required")
+    _add_scalar_row(("fai_prep_hr",), "FAI Prep Hours", "hours", "fai_prep_hr")
+    _add_scalar_row(("packaging_hours",), "Packaging Hours", "hours", "packaging_hours")
+    _add_scalar_row(("packaging_flat_cost",), "Packaging Flat $", "currency", "packaging_flat_cost")
+    _add_scalar_row(("shipping_hint",), "Shipping Hint", "text", "shipping_hint")
 
     return rows
 
@@ -5029,6 +5878,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         "Consumables /Hr": {"basis": "Machine & inspection hours $/hr"},
         "Utilities": {"basis": "Spindle/inspection hours $/hr"},
         "Consumables Flat": {"basis": "Fixed shop supplies"},
+        "Packaging Flat": {"basis": "Packaging materials & crates"},
     }
 
     mat_source = material_detail_for_breakdown.get("source")
@@ -5049,6 +5899,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         "Consumables /Hr": consumables_hr_cost,
         "Utilities": utilities_cost,
         "Consumables Flat": consumables_flat,
+        "Packaging Flat": packaging_flat_base,
     }
     pass_through_baseline = {k: float(v) for k, v in pass_through.items()}
 
@@ -5076,12 +5927,36 @@ def compute_quote_from_df(df: pd.DataFrame,
         else:
             fixture_plan_desc = strategy.strip()
 
+    fixture_build_hr_base = float(fixture_build_hr or 0.0)
+    packaging_flat_base = float((crate_nre_cost or 0.0) + (packaging_mat or 0.0))
+    cmm_minutes_base = float((cmm_run_hr or 0.0) * 60.0)
+    inproc_hr_base = float(inproc_hr or 0.0)
+    packaging_hr_base = float(packaging_hr or 0.0)
+    fai_flag_base = False
+    if isinstance(ui_vars, dict):
+        raw_fai = ui_vars.get("FAIR Required")
+        cand = _coerce_float_or_none(raw_fai)
+        if cand is not None:
+            fai_flag_base = bool(int(round(float(cand))))
+
     baseline_data = {
         "process_hours": process_hours_baseline,
         "pass_through": pass_through_baseline,
         "scrap_pct": scrap_pct_baseline,
         "setups": int(setups),
         "contingency_pct": ContingencyPct,
+        "fixture_build_hr": fixture_build_hr_base,
+        "fixture_material_cost": float(fixture_material_cost),
+        "soft_jaw_hr": 0.0,
+        "soft_jaw_material_cost": 0.0,
+        "handling_adder_hr": 0.0,
+        "cmm_minutes": cmm_minutes_base,
+        "in_process_inspection_hr": inproc_hr_base,
+        "fai_required": fai_flag_base,
+        "fai_prep_hr": 0.0,
+        "packaging_hours": packaging_hr_base,
+        "packaging_flat_cost": packaging_flat_base,
+        "shipping_hint": "",
     }
     if fixture_plan_desc:
         baseline_data["fixture"] = fixture_plan_desc
@@ -5185,6 +6060,17 @@ def compute_quote_from_df(df: pd.DataFrame,
         "stock_catalog": stock_catalog,
         "part_mass_g_est": part_mass_g_est,
         "dfm_geo": dfm_geo,
+        "fixture_build_hr": float(fixture_build_hr or 0.0),
+        "fixture_material_cost": float(fixture_material_cost),
+        "cmm_minutes": float((cmm_run_hr or 0.0) * 60.0),
+        "in_process_inspection_hr": float(inproc_hr or 0.0),
+        "packaging_hours": float(packaging_hr or 0.0),
+        "packaging_flat_cost": float((crate_nre_cost or 0.0) + (packaging_mat or 0.0)),
+        "fai_required": bool(
+            int(round(float(_coerce_float_or_none(ui_vars.get("FAIR Required")) or 0.0)))
+            if isinstance(ui_vars, dict)
+            else False
+        ),
     }
     # Safely include tap/cbore counts even if later sections define seeds
     try:
@@ -5760,8 +6646,90 @@ def compute_quote_from_df(df: pd.DataFrame,
         if tol_bits:
             llm_notes.append("Tolerance/finish: " + "; ".join(tol_bits))
 
+    op_sequence = overrides.get("operation_sequence") if isinstance(overrides, dict) else None
+    if isinstance(op_sequence, list) and op_sequence:
+        cleaned_ops = [str(step).strip() for step in op_sequence if str(step).strip()]
+        if cleaned_ops:
+            llm_notes.append("Ops: " + " → ".join(cleaned_ops[:8]))
+
+    drilling_strategy = overrides.get("drilling_strategy") if isinstance(overrides, dict) else None
+    if isinstance(drilling_strategy, dict) and drilling_strategy:
+        strat_bits: list[str] = []
+        mult_val = drilling_strategy.get("multiplier")
+        if isinstance(mult_val, (int, float)):
+            strat_bits.append(f"mult ×{float(mult_val):.2f}")
+        floor_val = drilling_strategy.get("per_hole_floor_sec")
+        if isinstance(floor_val, (int, float)):
+            strat_bits.append(f">={float(floor_val):.0f}s/hole")
+        note_val = drilling_strategy.get("note") or drilling_strategy.get("reason")
+        if isinstance(note_val, str) and note_val.strip():
+            strat_bits.append(note_val.strip()[:80])
+        if strat_bits:
+            llm_notes.append("Drilling strategy: " + "; ".join(strat_bits))
+
+    shipping_hint = overrides.get("shipping_hint") if isinstance(overrides, dict) else None
+    if isinstance(shipping_hint, str) and shipping_hint.strip():
+        llm_notes.append(f"Shipping: {shipping_hint.strip()[:80]}")
+
+    fai_flag_override = overrides.get("fai_required") if isinstance(overrides, dict) else None
+    if fai_flag_override:
+        llm_notes.append("FAI required")
+
     applied_process: dict[str, dict[str, Any]] = {}
     applied_pass: dict[str, dict[str, Any]] = {}
+
+    def _clamp_override(value: Any, lo: float | None, hi: float | None) -> float | None:
+        if value is None:
+            return None
+        try:
+            num = float(value)
+        except Exception:
+            return None
+        if lo is not None:
+            num = max(lo, num)
+        if hi is not None:
+            num = min(hi, num)
+        return num
+
+    def _ensure_process_entry(proc_key: str) -> dict[str, Any]:
+        entry = applied_process.setdefault(
+            proc_key,
+            {
+                "old_hr": float(process_meta.get(proc_key, {}).get("hr", 0.0)),
+                "old_cost": float(process_costs.get(proc_key, 0.0)),
+                "notes": [],
+            },
+        )
+        entry.setdefault("notes", [])
+        return entry
+
+    def _update_process_hours(proc_key: str, new_hr: float, note: str | None = None) -> None:
+        meta = process_meta.get(proc_key)
+        if not meta:
+            return
+        old_hr = float(meta.get("hr", 0.0))
+        if math.isclose(new_hr, old_hr, abs_tol=1e-6):
+            return
+        entry = _ensure_process_entry(proc_key)
+        if note:
+            entry["notes"].append(note)
+        meta["hr"] = new_hr
+        rate = float(meta.get("rate", 0.0))
+        base_extra = float(meta.get("base_extra", 0.0))
+        new_cost = new_hr * rate + base_extra
+        process_costs[proc_key] = round(new_cost, 2)
+        entry["new_hr"] = new_hr
+        entry["new_cost"] = process_costs[proc_key]
+
+    source_lookup = quote_state.effective_sources if isinstance(quote_state.effective_sources, dict) else {}
+
+    def _source_suffix(key: str) -> str:
+        tag = source_lookup.get(key)
+        if tag == "user":
+            return " (user override)"
+        if tag == "llm":
+            return " (LLM)"
+        return ""
 
     def _normalize_key(name: str) -> str:
         return re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_")
@@ -5776,6 +6744,114 @@ def compute_quote_from_df(df: pd.DataFrame,
         parts = proc_key.replace("_", " ").split()
         rate_key = "".join(part.title() for part in parts) + "Rate"
         return float(hours) * float(rates.get(rate_key, rates.get("MillingRate", 120.0)))
+
+    fixture_notes: list[str] = []
+    fixture_build_override = _clamp_override((overrides or {}).get("fixture_build_hr"), 0.0, 2.0)
+    soft_jaw_hr_override = _clamp_override((overrides or {}).get("soft_jaw_hr"), 0.0, 1.0) or 0.0
+    soft_jaw_cost_override = _clamp_override((overrides or {}).get("soft_jaw_material_cost"), 0.0, 60.0) or 0.0
+    fixture_material_override = _clamp_override((overrides or {}).get("fixture_material_cost"), 0.0, 250.0)
+
+    total_fixture_hr = fixture_build_override if fixture_build_override is not None else fixture_build_hr_base
+    if soft_jaw_hr_override > 0:
+        total_fixture_hr += soft_jaw_hr_override
+        fixture_notes.append(f"Soft jaw prep +{soft_jaw_hr_override:.2f} h{_source_suffix('soft_jaw_hr')}")
+    if fixture_build_override is not None:
+        fixture_notes.append(f"Fixture build set to {fixture_build_override:.2f} h{_source_suffix('fixture_build_hr')}")
+
+    fixture_material_updated = fixture_material_cost
+    if fixture_material_override is not None:
+        fixture_material_updated = fixture_material_override
+        fixture_notes.append(f"Fixture material set to ${fixture_material_override:,.2f}{_source_suffix('fixture_material_cost')}")
+    if soft_jaw_cost_override > 0:
+        fixture_material_updated += soft_jaw_cost_override
+        fixture_notes.append(f"Soft jaw stock +${soft_jaw_cost_override:,.2f}{_source_suffix('soft_jaw_material_cost')}")
+
+    if total_fixture_hr != fixture_build_hr_base or fixture_material_updated != fixture_material_cost:
+        fixture_build_hr = total_fixture_hr
+        fixture_material_cost = fixture_material_updated
+        fixture_labor_cost = fixture_build_hr * float(rates.get("FixtureBuildRate", 0.0))
+        fixture_cost = fixture_labor_cost + fixture_material_cost
+        fixture_labor_per_part = (fixture_labor_cost / Qty) if Qty > 1 else fixture_labor_cost
+        fixture_per_part = (fixture_cost / Qty) if Qty > 1 else fixture_cost
+        nre_detail.setdefault("fixture", {})
+        nre_detail["fixture"].update(
+            {
+                "build_hr": float(fixture_build_hr),
+                "labor_cost": float(fixture_labor_cost),
+                "mat_cost": float(fixture_material_cost),
+                "per_lot": float(fixture_cost),
+                "per_part": float(fixture_per_part),
+                "soft_jaw_hr": float(soft_jaw_hr_override),
+                "soft_jaw_mat": float(soft_jaw_cost_override),
+            }
+        )
+        pass_through["Fixture Material"] = float(fixture_material_cost)
+        fixture_material_cost_base = float(fixture_material_cost)
+        features["fixture_build_hr"] = float(fixture_build_hr)
+        features["fixture_material_cost"] = float(fixture_material_cost)
+
+    handling_override = _clamp_override((overrides or {}).get("handling_adder_hr"), 0.0, 0.2)
+    if handling_override and handling_override > 0:
+        base_milling_hr = float(process_meta.get("milling", {}).get("hr", 0.0))
+        _update_process_hours(
+            "milling",
+            base_milling_hr + handling_override,
+            f"+{handling_override:.2f} h handling{_source_suffix('handling_adder_hr')}",
+        )
+        llm_notes.append(f"Handling adder +{handling_override:.2f} h{_source_suffix('handling_adder_hr')}")
+
+    packaging_hours_override = _clamp_override((overrides or {}).get("packaging_hours"), 0.0, 0.5)
+    if packaging_hours_override is not None:
+        _update_process_hours(
+            "packaging",
+            packaging_hours_override,
+            f"Packaging set to {packaging_hours_override:.2f} h{_source_suffix('packaging_hours')}",
+        )
+
+    packaging_flat_override = _clamp_override((overrides or {}).get("packaging_flat_cost"), 0.0, 25.0)
+    if packaging_flat_override is not None:
+        baseline_val = float(pass_through_baseline.get("Packaging Flat", 0.0))
+        entry = applied_pass.setdefault("Packaging Flat", {"old_value": baseline_val, "notes": []})
+        entry["notes"].append(f"set to ${packaging_flat_override:,.2f}{_source_suffix('packaging_flat_cost')}")
+        entry["new_value"] = float(packaging_flat_override)
+        pass_through["Packaging Flat"] = float(packaging_flat_override)
+
+    cmm_minutes_override = _clamp_override((overrides or {}).get("cmm_minutes"), 0.0, 60.0)
+    if cmm_minutes_override is not None:
+        base_cmm_hr = float(cmm_run_hr or 0.0)
+        target_cmm_hr = float(cmm_minutes_override) / 60.0
+        total_inspection_hr = float(process_meta.get("inspection", {}).get("hr", 0.0))
+        adjusted_hr = max(0.0, total_inspection_hr - base_cmm_hr + target_cmm_hr)
+        _update_process_hours(
+            "inspection",
+            adjusted_hr,
+            f"CMM {target_cmm_hr:.2f} h{_source_suffix('cmm_minutes')}",
+        )
+        llm_notes.append(f"CMM runtime {target_cmm_hr:.2f} h{_source_suffix('cmm_minutes')}")
+        cmm_run_hr = target_cmm_hr
+
+    inproc_override = _clamp_override((overrides or {}).get("in_process_inspection_hr"), 0.0, 0.5)
+    if inproc_override and inproc_override > 0:
+        current_inspection_hr = float(process_meta.get("inspection", {}).get("hr", 0.0))
+        _update_process_hours(
+            "inspection",
+            current_inspection_hr + inproc_override,
+            f"+{inproc_override:.2f} h in-process{_source_suffix('in_process_inspection_hr')}",
+        )
+        llm_notes.append(f"In-process inspection +{inproc_override:.2f} h{_source_suffix('in_process_inspection_hr')}")
+
+    fai_prep_override = _clamp_override((overrides or {}).get("fai_prep_hr"), 0.0, 1.0)
+    if fai_prep_override and fai_prep_override > 0:
+        current_inspection_hr = float(process_meta.get("inspection", {}).get("hr", 0.0))
+        _update_process_hours(
+            "inspection",
+            current_inspection_hr + fai_prep_override,
+            f"+{fai_prep_override:.2f} h FAI prep{_source_suffix('fai_prep_hr')}",
+        )
+        llm_notes.append(f"FAI prep +{fai_prep_override:.2f} h{_source_suffix('fai_prep_hr')}")
+
+    if fixture_notes:
+        llm_notes.extend(fixture_notes)
 
     material_direct_cost_base = material_direct_cost
     fixture_material_cost_base = fixture_material_cost
