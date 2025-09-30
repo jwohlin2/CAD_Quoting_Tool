@@ -102,7 +102,23 @@ except Exception:
     build_geo_from_dxf_path = None  # type: ignore[assignment]
 
 
-build_geo_from_dxf: Optional[Callable[[str], Dict[str, Any]]] = None
+_build_geo_from_dxf_hook: Optional[Callable[[str], Dict[str, Any]]] = None
+
+
+def set_build_geo_from_dxf_hook(func: Optional[Callable[[str], Dict[str, Any]]]) -> None:
+    """Install or clear an override for DXF enrichment."""
+
+    global _build_geo_from_dxf_hook
+    _build_geo_from_dxf_hook = func
+
+
+def build_geo_from_dxf(path: str) -> dict:
+    """Best-effort DXF enrichment helper used by legacy integrations."""
+
+    loader = _build_geo_from_dxf_hook or build_geo_from_dxf_path
+    if not loader:
+        raise RuntimeError("DXF enrichment helper is unavailable")
+    return loader(path)
 
 def _match_items_contains(items: pd.Series, pattern: str) -> pd.Series:
     """Case-insensitive regex match over Items."""
@@ -178,11 +194,166 @@ def _match_items_contains(items: pd.Series, pattern: str) -> pd.Series:
 VL_MODEL = r"D:\CAD_Quoting_Tool\models\qwen2.5-vl-7b-instruct-q4_k_m.gguf"
 MM_PROJ = r"D:\CAD_Quoting_Tool\models\mmproj-Qwen2.5-VL-3B-Instruct-Q8_0.gguf"
 
+_LEGACY_VL_MODEL = Path(VL_MODEL)
+_LEGACY_MM_PROJ = Path(MM_PROJ)
+
+_DEFAULT_VL_MODEL_NAMES = (
+    _LEGACY_VL_MODEL.name,
+    "qwen2.5-vl-7b-instruct-q4_0.gguf",
+    "qwen2.5-vl-7b-instruct-q4_k_s.gguf",
+    "qwen2-vl-7b-instruct-q4_0.gguf",
+)
+
+_DEFAULT_MM_PROJ_NAMES = (
+    _LEGACY_MM_PROJ.name,
+    "mmproj-Qwen2.5-VL-3B-Instruct-Q4_0.gguf",
+    "mmproj-Qwen2-VL-7B-Instruct-Q4_0.gguf",
+)
+
+
+def _dedupe_paths(paths: Iterable[Path]) -> list[Path]:
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for raw in paths:
+        try:
+            candidate = raw.expanduser()
+        except Exception:
+            continue
+        key = str(candidate.resolve() if candidate.exists() else candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(candidate)
+    return unique
+
+
+def _collect_model_dirs(*paths: str | Path | None) -> list[Path]:
+    dirs: list[Path] = []
+    for value in paths:
+        if not value:
+            continue
+        try:
+            candidate = Path(value).expanduser()
+        except Exception:
+            continue
+        if candidate.is_file():
+            dirs.append(candidate.parent)
+        elif candidate.is_dir():
+            dirs.append(candidate)
+        else:
+            dirs.append(candidate.parent)
+    for env_var in ("QWEN_MODELS_DIR", "QWEN_VL_MODELS_DIR"):
+        env_value = os.environ.get(env_var)
+        if env_value:
+            try:
+                dirs.append(Path(env_value).expanduser())
+            except Exception:
+                continue
+    dirs.extend(Path(d) for d in PREFERRED_MODEL_DIRS)
+    try:
+        dirs.append(Path(__file__).resolve().parent / "models")
+    except Exception:
+        pass
+    dirs.append(Path.cwd() / "models")
+    return [d for d in _dedupe_paths(dirs) if str(d)]
+
+
+def _find_weight_file(
+    names: Sequence[str],
+    directories: Sequence[Path],
+    glob: str,
+) -> str:
+    for directory in directories:
+        try:
+            if not directory.exists():
+                continue
+        except Exception:
+            continue
+        for name in names:
+            candidate = directory / name
+            if candidate.is_file():
+                return str(candidate)
+        try:
+            matches = list(directory.glob(glob))
+        except Exception:
+            matches = []
+        if matches:
+            try:
+                matches.sort(key=lambda p: (-p.stat().st_size, p.name))
+            except Exception:
+                matches.sort()
+            return str(matches[0])
+    return ""
+
+
+def discover_qwen_vl_assets(
+    *,
+    model_path: str | None = None,
+    mmproj_path: str | None = None,
+) -> tuple[str, str]:
+    """Locate Qwen vision model + projector weights on disk.
+
+    The desktop application historically shipped with hard-coded Windows
+    paths.  Modern deployments may store the weights alongside the script or
+    expose them via environment variables.  This helper consolidates the
+    discovery logic and returns fully-qualified filesystem paths.  A
+    ``RuntimeError`` is raised with actionable guidance when the assets cannot
+    be resolved.
+    """
+
+    model_candidates = [
+        model_path,
+        os.environ.get("QWEN_VL_GGUF_PATH"),
+        os.environ.get("QWEN_GGUF_PATH"),
+        str(_LEGACY_VL_MODEL),
+    ]
+    mmproj_candidates = [
+        mmproj_path,
+        os.environ.get("QWEN_VL_MMPROJ_PATH"),
+        os.environ.get("QWEN_MMPROJ_PATH"),
+        str(_LEGACY_MM_PROJ),
+    ]
+
+    def _first_existing(paths: Sequence[str | None]) -> str:
+        for value in paths:
+            if not value:
+                continue
+            try:
+                candidate = Path(value).expanduser()
+            except Exception:
+                continue
+            if candidate.is_file():
+                return str(candidate)
+        return ""
+
+    model_file = _first_existing(model_candidates)
+    mmproj_file = _first_existing(mmproj_candidates)
+
+    search_dirs = _collect_model_dirs(*(model_candidates + mmproj_candidates))
+
+    if not model_file:
+        model_file = _find_weight_file(_DEFAULT_VL_MODEL_NAMES, search_dirs, "*vl*.gguf")
+    if not mmproj_file:
+        mmproj_file = _find_weight_file(_DEFAULT_MM_PROJ_NAMES, search_dirs, "*mmproj*.gguf")
+
+    if not model_file or not mmproj_file:
+        searched = ", ".join(str(d) for d in search_dirs if d)
+        raise RuntimeError(
+            "Vision LLM weights not found. Set QWEN_VL_GGUF_PATH and "
+            "QWEN_VL_MMPROJ_PATH (or place matching *.gguf files in one of: "
+            f"{searched or 'the known model directories'})."
+        )
+
+    return model_file, mmproj_file
+
 
 def load_qwen_vl(
     n_ctx: int = 8192,
     n_gpu_layers: int = 20,
     n_threads: int | None = None,
+    *,
+    model_path: str | None = None,
+    mmproj_path: str | None = None,
 ):
     """Load Qwen2.5-VL with vision projector configured for llama.cpp."""
 
@@ -190,10 +361,15 @@ def load_qwen_vl(
         cpu_count = os.cpu_count() or 8
         n_threads = max(4, cpu_count // 2)
 
+    model_file, mmproj_file = discover_qwen_vl_assets(
+        model_path=model_path,
+        mmproj_path=mmproj_path,
+    )
+
     try:
         llm = Llama(
-            model_path=VL_MODEL,
-            mmproj_path=MM_PROJ,
+            model_path=model_file,
+            mmproj_path=mmproj_file,
             n_ctx=n_ctx,
             n_gpu_layers=n_gpu_layers,
             n_threads=n_threads,
@@ -8596,7 +8772,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     geo = _build_geo_from_ezdxf_doc(doc)
 
     geo_read_more: dict[str, Any] | None = None
-    extra_geo_loader = build_geo_from_dxf or build_geo_from_dxf_path
+    extra_geo_loader = _build_geo_from_dxf_hook or build_geo_from_dxf_path
     if extra_geo_loader and dxf_text_path:
         try:
             geo_read_more = extra_geo_loader(dxf_text_path)
@@ -10133,6 +10309,11 @@ class UIConfiguration:
     apply_llm_adjustments_default: bool = True
     settings_path: Path = field(default_factory=lambda: Path(__file__).with_name("app_settings.json"))
     default_llm_model_path: str | None = None
+    default_params: dict[str, Any] = field(default_factory=lambda: copy.deepcopy(PARAMS_DEFAULT))
+    default_material_display: str = DEFAULT_MATERIAL_DISPLAY
+
+    def create_params(self) -> dict[str, Any]:
+        return copy.deepcopy(self.default_params)
 
 
 class GeometryLoader:
@@ -10170,14 +10351,14 @@ class GeometryLoader:
 class PricingRegistry:
     """Provide mutable copies of editable pricing defaults to the UI."""
 
-    param_defaults: dict[str, Any] = field(default_factory=lambda: copy.deepcopy(PARAMS_DEFAULT))
-    rate_defaults: dict[str, float] = field(default_factory=lambda: copy.deepcopy(RATES_DEFAULT))
+    default_params: dict[str, Any] = field(default_factory=lambda: copy.deepcopy(PARAMS_DEFAULT))
+    default_rates: dict[str, float] = field(default_factory=lambda: copy.deepcopy(RATES_DEFAULT))
 
     def create_params(self) -> dict[str, Any]:
-        return copy.deepcopy(self.param_defaults)
+        return copy.deepcopy(self.default_params)
 
     def create_rates(self) -> dict[str, float]:
-        return copy.deepcopy(self.rate_defaults)
+        return copy.deepcopy(self.default_rates)
 
 
 @dataclass(slots=True)
@@ -10272,8 +10453,23 @@ class App(tk.Tk):
         self.vars_df_full = None
         self.geo = None
         self.geo_context: dict[str, Any] = {}
-        self.params = PARAMS_DEFAULT.copy()
-        self.rates = RATES_DEFAULT.copy()
+        if hasattr(self.configuration, "create_params"):
+            try:
+                self.params = self.configuration.create_params()
+            except Exception:
+                self.params = copy.deepcopy(PARAMS_DEFAULT)
+        else:
+            base_params = getattr(self.configuration, "default_params", PARAMS_DEFAULT)
+            self.params = copy.deepcopy(base_params if isinstance(base_params, dict) else PARAMS_DEFAULT)
+
+        if hasattr(self.pricing_registry, "create_rates"):
+            try:
+                self.rates = self.pricing_registry.create_rates()
+            except Exception:
+                self.rates = copy.deepcopy(RATES_DEFAULT)
+        else:
+            base_rates = getattr(self.pricing_registry, "default_rates", RATES_DEFAULT)
+            self.rates = copy.deepcopy(base_rates if isinstance(base_rates, dict) else RATES_DEFAULT)
         self.config_errors = list(CONFIG_INIT_ERRORS)
 
         self.quote_state = QuoteState()
