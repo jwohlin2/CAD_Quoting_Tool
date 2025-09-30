@@ -160,3 +160,9 @@ def test_app_instantiation_smoke(monkeypatch: pytest.MonkeyPatch) -> None:
         app.status_var.set("Ready")
     finally:
         app.destroy()
+
+
+def test_geo_read_more_hook_is_optional() -> None:
+    assert hasattr(appV5, "build_geo_from_dxf")
+    hook = appV5.build_geo_from_dxf
+    assert hook is None or callable(hook)
