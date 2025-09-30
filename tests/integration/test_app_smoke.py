@@ -185,7 +185,6 @@ def test_geo_read_more_hook_override_roundtrip() -> None:
     finally:
         appV5.set_build_geo_from_dxf_hook(None)
 
-
 def test_discover_qwen_vl_assets_prefers_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     model = tmp_path / "custom-model.gguf"
     model.write_text("model", encoding="utf-8")
@@ -233,3 +232,4 @@ def test_discover_qwen_vl_assets_errors_when_missing(monkeypatch: pytest.MonkeyP
     message = str(exc.value)
     assert "QWEN_VL_GGUF_PATH" in message
     assert "QWEN_VL_MMPROJ_PATH" in message
+
