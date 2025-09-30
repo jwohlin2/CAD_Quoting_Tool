@@ -51,7 +51,7 @@ import tkinter.font as tkfont
 import urllib.request
 import importlib.util
 from importlib import import_module
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import cad_quoter.geometry as geometry
 
@@ -5135,7 +5135,7 @@ def compute_material_cost(
             fallback_key = _normalize_lookup_key(default_material_display)
             resolver_name = MATERIAL_DISPLAY_BY_KEY.get(fallback_key, default_material_display)
         try:
-            resolved_price, resolver_source = resolve_material_unit_price(resolver_name, unit="kg")
+            resolved_price, resolver_source = _resolve_material_unit_price(resolver_name, unit="kg")
         except Exception:
             resolved_price, resolver_source = None, ""
         if resolved_price and math.isfinite(float(resolved_price)):
@@ -5195,6 +5195,46 @@ def compute_material_cost(
         detail.setdefault("provider_error", str(provider_error))
 
     return cost, detail
+
+
+def _material_price_per_g_from_choice(
+    choice: str,
+    material_lookup: Mapping[str, float],
+) -> tuple[float | None, str]:
+    """Return a price-per-gram for a UI material selection."""
+
+    choice = (choice or "").strip()
+    if not choice:
+        return None, ""
+
+    normalized = _normalize_lookup_key(choice)
+    if normalized == MATERIAL_OTHER_KEY:
+        return None, ""
+
+    price = material_lookup.get(normalized)
+    if price is not None:
+        try:
+            return float(price), "vendor_table"
+        except Exception:
+            return None, ""
+
+    try:
+        price_per_kg, source = _resolve_material_unit_price(choice, unit="kg")
+    except Exception:
+        return None, ""
+
+    if not price_per_kg:
+        return None, ""
+
+    try:
+        price_float = float(price_per_kg)
+    except Exception:
+        return None, ""
+
+    if not math.isfinite(price_float):
+        return None, ""
+
+    return price_float / 1000.0, source or ""
 
 
 def _material_family(material: str) -> str:
@@ -5974,7 +6014,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     if is_plate_2d:
         mat_for_price = geo_context.get("material") or material_name
         try:
-            mat_usd_per_kg, mat_src = resolve_material_unit_price(mat_for_price, unit="kg")
+            mat_usd_per_kg, mat_src = _resolve_material_unit_price(mat_for_price, unit="kg")
         except Exception:
             mat_usd_per_kg, mat_src = 0.0, ""
         mat_usd_per_kg = float(mat_usd_per_kg or 0.0)
@@ -12415,18 +12455,9 @@ class App(tk.Tk):
             choice = material_choice_var.get().strip()
             if not choice:
                 return
-            norm_choice = _normalize_lookup_key(choice)
-            if norm_choice == MATERIAL_OTHER_KEY:
-                return
-            price = material_lookup.get(norm_choice)
+            price, _price_source = _material_price_per_g_from_choice(choice, material_lookup)
             if price is None:
-                try:
-                    price_per_kg, _src = resolve_material_unit_price(choice, unit="kg")
-                except Exception:
-                    return
-                if not price_per_kg:
-                    return
-                price = float(price_per_kg) / 1000.0
+                return
             current_val = _coerce_float_or_none(material_price_var.get())
             if current_val is not None and abs(current_val - price) < 1e-6:
                 return
