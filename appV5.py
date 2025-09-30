@@ -4595,6 +4595,9 @@ def render_quote(
     process_meta = {str(k).lower(): (v or {}) for k, v in (breakdown.get("process_meta", {}) or {}).items()}
     rates        = breakdown.get("rates", {}) or {}
     params       = breakdown.get("params", {}) or {}
+    nre_cost_details = breakdown.get("nre_cost_details", {}) or {}
+    labor_cost_details = breakdown.get("labor_cost_details", {}) or {}
+    direct_cost_details = breakdown.get("direct_cost_details", {}) or {}
     qty          = int(breakdown.get("qty", 1) or 1)
     price        = float(result.get("price", totals.get("price", 0.0)))
 
@@ -4623,6 +4626,22 @@ def render_quote(
 
     def write_line(s: str, indent: str = ""):
         lines.append(f"{indent}{s}")
+
+    def write_wrapped(text: str, indent: str = ""):
+        if text is None:
+            return
+        txt = str(text).strip()
+        if not txt:
+            return
+        wrapper = textwrap.TextWrapper(width=max(10, page_width - len(indent)))
+        for chunk in wrapper.wrap(txt):
+            write_line(chunk, indent)
+
+    def write_detail(detail: str, indent: str = "    "):
+        if not detail:
+            return
+        for segment in re.split(r";\s*", str(detail)):
+            write_wrapped(segment, indent)
 
     def row(label: str, val: float, indent: str = ""):
         # left-label, right-amount aligned to page_width
@@ -4660,17 +4679,27 @@ def render_quote(
     lines.append("")
 
     narrative = result.get("narrative") or breakdown.get("narrative")
+    why_parts: list[str] = []
     if narrative:
-        lines.append("Why this price")
-        lines.append(divider)
         if isinstance(narrative, str):
             parts = [seg.strip() for seg in re.split(r"(?<=\.)\s+", narrative) if seg.strip()]
             if not parts:
                 parts = [narrative.strip()]
         else:
             parts = [str(line).strip() for line in narrative if str(line).strip()]
-        for line in parts:
-            write_line(line, "  ")
+        why_parts.extend(parts)
+    if llm_explanation:
+        if isinstance(llm_explanation, str):
+            text = llm_explanation.strip()
+            if text:
+                why_parts.append(text)
+        else:
+            why_parts.extend([str(item).strip() for item in llm_explanation if str(item).strip()])
+    if why_parts:
+        lines.append("Why this price")
+        lines.append(divider)
+        for part in why_parts:
+            write_wrapped(part, "  ")
         lines.append("")
 
     # ---- material & stock (compact; shown only if we actually have data) -----
@@ -4741,6 +4770,7 @@ def render_quote(
         if prog.get("prog_hr"): write_line(f"- Programmer: {_h(prog['prog_hr'])} @ {_m(prog.get('prog_rate', 0))}/hr", "    ")
         if prog.get("cam_hr"):  write_line(f"- CAM: {_h(prog['cam_hr'])} @ {_m(prog.get('cam_rate', 0))}/hr", "    ")
         if prog.get("eng_hr"):  write_line(f"- Engineering: {_h(prog['eng_hr'])} @ {_m(prog.get('eng_rate', 0))}/hr", "    ")
+        write_detail(nre_cost_details.get("Programming & Eng (per lot)"))
 
     # Fixturing (with renamed subline)
     if (fix.get("per_lot", 0.0) > 0) or show_zeros or any(fix.get(k) for k in ("build_hr", "mat_cost")):
@@ -4748,6 +4778,7 @@ def render_quote(
         if fix.get("build_hr"):
             write_line(f"- Build Labor: {_h(fix['build_hr'])} @ {_m(fix.get('build_rate', 0))}/hr", "    ")
         write_line(f"- Fixture Material Cost: {_m(fix.get('mat_cost', 0.0))}", "    ")
+        write_detail(nre_cost_details.get("Fixturing (per lot)"))
 
     # Any other NRE numeric keys (auto include)
     other_nre_total = 0.0
@@ -4769,6 +4800,7 @@ def render_quote(
             label = key.replace("_", " ").title()
             row(label, float(value), indent="  ")
             add_process_notes(key, indent="    ")
+            write_detail(labor_cost_details.get(label), indent="    ")
             proc_total += float(value or 0.0)
     row("Total", proc_total, indent="  ")
     lines.append("")
@@ -4783,6 +4815,7 @@ def render_quote(
             label = key.replace("_", " ").replace("hr", "/hr").title()
             row(label, float(value), indent="  ")
             add_pass_basis(key, indent="    ")
+            write_detail(direct_cost_details.get(key), indent="    ")
             pass_total += float(value or 0.0)
     row("Total", pass_total, indent="  ")
     lines.append("")
@@ -4815,14 +4848,6 @@ def render_quote(
             for w in _tw.wrap(str(n), width=page_width):
                 lines.append(f"- {w}")
         lines.append("")
-
-    # ---- Why This Price (your existing free-form LLM explanation) -----------
-    if llm_explanation:
-        lines.append("Why This Price")
-        lines.append(divider)
-        import textwrap
-        for snippet in textwrap.wrap(llm_explanation.strip(), width=page_width):
-            lines.append(snippet)
 
     return "\n".join(lines)
 # ===== QUOTE CONFIG (edit-friendly) ==========================================
