@@ -13,6 +13,19 @@ class DummyVar:
         self._value = value
 
 
+def _make_stub_app():
+    app = appV5.App.__new__(appV5.App)
+    app.editor_vars = {
+        "Hole Count (override)": DummyVar(""),
+        "Avg Hole Diameter (mm)": DummyVar(""),
+    }
+    app.editor_value_sources = {}
+    app.editor_label_widgets = {}
+    app.editor_label_base = {}
+    app._editor_set_depth = 0
+    return app
+
+
 def test_update_material_price_field_uses_fallback(monkeypatch):
     choice_var = DummyVar("Custom Alloy")
     price_var = DummyVar("")
@@ -73,3 +86,4 @@ def test_infer_geo_override_defaults_uses_bins_and_back_face():
     assert defaults["Avg Hole Diameter (mm)"] == pytest.approx(expected_avg)
     assert defaults["Number of Milling Setups"] == 2
     assert defaults["Scrap Percent (%)"] == pytest.approx(8.0)
+

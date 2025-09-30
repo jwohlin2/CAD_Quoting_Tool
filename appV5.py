@@ -12926,7 +12926,6 @@ class App(tk.Tk):
                 continue
 
             self._fill_editor_if_blank(label, value, source="GEO")
-
     def _update_editor_override_from_label(self, label: str, raw_value: str) -> None:
         key = EDITOR_TO_SUGG.get(label)
         if key is None:
