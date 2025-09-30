@@ -90,6 +90,19 @@ from cad_quoter.llm import (
     SYSTEM_SUGGEST,
 )
 
+# Mapping of process keys to editor labels for propagating derived hours from
+# LLM suggestions. The scale term allows lightweight conversions if we need to
+# express the hour totals in another unit for a given field.
+PROC_MULT_TARGETS: dict[str, tuple[str, float]] = {
+    # Processes that have direct counterparts in the default variables sheet.
+    "inspection": ("In-Process Inspection Hours", 1.0),
+    "finishing_deburr": ("Deburr Hours", 1.0),
+    "deburr": ("Deburr Hours", 1.0),
+    "saw_waterjet": ("Sawing Hours", 1.0),
+    "assembly": ("Assembly Hours", 1.0),
+    "packaging": ("Packaging Labor Hours", 1.0),
+}
+
 from OCP.TopAbs   import TopAbs_EDGE, TopAbs_FACE
 from OCP.TopExp   import TopExp, TopExp_Explorer
 from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
