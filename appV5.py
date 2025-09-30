@@ -102,7 +102,23 @@ except Exception:
     build_geo_from_dxf_path = None  # type: ignore[assignment]
 
 
-build_geo_from_dxf: Optional[Callable[[str], Dict[str, Any]]] = None
+_build_geo_from_dxf_hook: Optional[Callable[[str], Dict[str, Any]]] = None
+
+
+def set_build_geo_from_dxf_hook(func: Optional[Callable[[str], Dict[str, Any]]]) -> None:
+    """Install or clear an override for DXF enrichment."""
+
+    global _build_geo_from_dxf_hook
+    _build_geo_from_dxf_hook = func
+
+
+def build_geo_from_dxf(path: str) -> dict:
+    """Best-effort DXF enrichment helper used by legacy integrations."""
+
+    loader = _build_geo_from_dxf_hook or build_geo_from_dxf_path
+    if not loader:
+        raise RuntimeError("DXF enrichment helper is unavailable")
+    return loader(path)
 
 def _match_items_contains(items: pd.Series, pattern: str) -> pd.Series:
     """Case-insensitive regex match over Items."""
@@ -8596,7 +8612,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     geo = _build_geo_from_ezdxf_doc(doc)
 
     geo_read_more: dict[str, Any] | None = None
-    extra_geo_loader = build_geo_from_dxf or build_geo_from_dxf_path
+    extra_geo_loader = _build_geo_from_dxf_hook or build_geo_from_dxf_path
     if extra_geo_loader and dxf_text_path:
         try:
             geo_read_more = extra_geo_loader(dxf_text_path)
