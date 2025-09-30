@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import importlib.machinery
 import types
 from pathlib import Path
 from typing import Callable, Dict
@@ -296,9 +297,19 @@ def _install_pandas_stub() -> None:
     sys.modules["pandas"] = pandas_stub
 
 
+def _install_runtime_dep_stubs() -> None:
+    for name in ("requests", "bs4", "lxml"):
+        if name in sys.modules:
+            continue
+        module = types.ModuleType(name)
+        module.__spec__ = importlib.machinery.ModuleSpec(name, loader=None)
+        sys.modules[name] = module
+
+
 _install_ocp_stubs()
 _install_llama_stub()
 _install_pandas_stub()
+_install_runtime_dep_stubs()
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
