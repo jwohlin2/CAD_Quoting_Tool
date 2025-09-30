@@ -5,19 +5,19 @@ import pandas as pd, re, math
 
 # ---------- Keyword buckets (extendable) ----------
 BUCKET_KEYWORDS = {
-    "programming":        [r"Programming", r"Simulation", r"Verification", r"Tool Library", r"Process Sheet", r"Traveler Creation", r"DFM Review"],
+    "programming":        [r"Programming", r"Simulation", r"Verification", r"Tool Library", r"Setup Sheet", r"Process Sheet", r"Traveler Creation", r"DFM Review"],
     "wedm":               [r"Wire EDM Burn Time", r"\bWEDM\b", r"Wire EDM"],
     "sinker":             [r"Sinker EDM", r"Ram EDM", r"Electrode Burn"],
     "electrodes":         [r"Electrode Manufacturing Time"],
-    "grind":              [r"Surface Grind", r"\bGrinding\b", r"Pre-Op Grinding"],
+    "grind":              [r"Surface Grind", r"\bGrinding\b", r"Pre-Op Grinding", r"Blank Squaring"],
     "jig":                [r"Jig Grind", r"\bOD/ID Grind"],
     "lap":                [r"Lapping", r"Honing", r"Polishing"],
     "inspection":         [r"\bInspection\b", r"CMM Run"],
     "cmm_programming":    [r"CMM Programming"],
     "finish":             [r"Bead Blasting", r"Sanding", r"Masking", r"Passivation", r"Laser Marking", r"Deburring", r"Edge Break"],
-    "saw":                [r"Sawing", r"Waterjet"],
+    "saw":                [r"Sawing", r"Waterjet", r"Blank Saw"],
     "fixture":            [r"Fixture Build", r"Fixture Design"],
-    "assembly":           [r"\bAssembly\b", r"Touch-up", r"Precision Fitting"],
+    "assembly":           [r"\bAssembly\b", r"Touch-up", r"Precision Fitting", r"Support for Assembly"],
     # milling/turning buckets (from Calculated Value or future hours)
     "milling":            [r"Milling", r"Roughing Cycle", r"Semi-Finishing", r"Finishing Cycle"],
     "turning":            [r"Turning", r"Threading", r"Cut-Off / Parting", r"ID Boring / Drilling"],
@@ -213,9 +213,18 @@ def compute_full_quote(xlsx_path: str,
         if re.search(r"Surcharge", itm, flags=re.IGNORECASE):
             params["MaterialSurchargePct"] = val/100.0
             return ("meta", 0.0)
-        # Direct costs (BOM, freight, MOQ, fixture material, tooling costs)
-        if re.search(r"Cost|Freight|MOQ|Material Vendor|Fixture Material|Tooling Cost", itm, flags=re.IGNORECASE):
-            return ("direct_cost", val)
+        # Material driven direct costs (BOM, fixture material, MOQ)
+        if re.search(r"Hardware|BOM|Fixture Material|Material MOQ", itm, flags=re.IGNORECASE):
+            return ("material_cost", val)
+        # Freight / shipping / lead time surcharges treated as logistics direct cost
+        if re.search(r"Freight|Shipping|Lead Time", itm, flags=re.IGNORECASE):
+            return ("freight_cost", val)
+        # Tooling consumables
+        if re.search(r"Tooling Cost|Grinding Wheel", itm, flags=re.IGNORECASE):
+            return ("tooling_cost", val)
+        # Remaining numeric costs
+        if re.search(r"Cost", itm, flags=re.IGNORECASE):
+            return ("other_direct_cost", val)
         # Role / time keywords
         if re.search(r"Project Manager Hours", itm, flags=re.IGNORECASE):
             return ("pm_hours", val)
@@ -255,7 +264,8 @@ def compute_full_quote(xlsx_path: str,
     generic_contrib = {
         "pm_hours":0.0, "toolmaker_hours":0.0, "setup_hours":0.0, "programming_hours":0.0,
         "blank_handling_hours":0.0, "assembly_hours":0.0, "inspection_hours":0.0, "grind_hours":0.0,
-        "sinker_hours":0.0, "wedm_hours":0.0, "saw_hours":0.0, "lap_hours":0.0, "direct_cost":0.0
+        "sinker_hours":0.0, "wedm_hours":0.0, "saw_hours":0.0, "lap_hours":0.0,
+        "material_cost":0.0, "freight_cost":0.0, "tooling_cost":0.0, "other_direct_cost":0.0
     }
 
     for _, row in generic_rows.iterrows():
@@ -523,18 +533,24 @@ def compute_full_quote(xlsx_path: str,
     role_costs = pm_cost + toolmk_cost + setup_cost + blank_cost
 
     # Direct numeric costs picked up earlier
-    direct_costs = generic_contrib["direct_cost"] + coating_cost + heat_cost + packaging_cost + cert_admin_cost
+    direct_costs = (
+        generic_contrib["freight_cost"]
+        + generic_contrib["tooling_cost"]
+        + generic_contrib["other_direct_cost"]
+        + coating_cost + heat_cost + packaging_cost + cert_admin_cost
+    )
 
     labor_subtotal = sum(costs.values()) + role_costs
     labor_post_scrap = labor_subtotal * scrap_mult
 
     # Material subtotal + surcharge (on positive portion only)
-    material_other = params["MaterialOther"]
+    material_base = params["MaterialOther"] + generic_contrib["material_cost"]
     material_surcharge_pct = params.get("MaterialSurchargePct", 0.0)
-    material_surcharge = max(material_other, 0.0) * material_surcharge_pct
+    material_surcharge = max(material_base, 0.0) * material_surcharge_pct
 
     material_credit = _sum_if(df_num, [r"Material Scrap / Remnant Value"])
-    material_subtotal = material_other + material_surcharge + material_credit
+    material_post_scrap = material_base * scrap_mult
+    material_subtotal = material_post_scrap + material_surcharge + material_credit
 
     # Base subtotal + consumables + NRE + overhead (base OverheadPct + lookup adders + payment terms)
     base_subtotal = labor_post_scrap + material_subtotal + params["ConsumablesFlat"] + params["NRE_FixturesEtc"] + direct_costs
@@ -555,7 +571,7 @@ def compute_full_quote(xlsx_path: str,
             if any(re.search(p, itm, flags=re.IGNORECASE) for p in pats):
                 return True
         # Or if it hit generic rules
-        if re.search(r"Profit Margin|Surcharge|Cost|Freight|MOQ|Material Vendor|Fixture Material|Tooling Cost|Project Manager Hours|Tool & Die Maker|Precision Fitting|Number of Milling Setups|Number of Unique Tools|Number of Blanks Required|Labor|Time|Hours", itm, flags=re.IGNORECASE):
+        if re.search(r"Profit Margin|Surcharge|Cost|Freight|MOQ|Material Vendor|Fixture Material|Tooling Cost|Lead Time|Hardware|BOM|Project Manager Hours|Tool & Die Maker|Precision Fitting|Number of Milling Setups|Number of Unique Tools|Number of Blanks Required|Labor|Time|Hours", itm, flags=re.IGNORECASE):
             return True
         return False
 
@@ -568,10 +584,15 @@ def compute_full_quote(xlsx_path: str,
             "labor_post_scrap": labor_post_scrap,
             "scrap_pct": scrap_pct,
             "material_subtotal": material_subtotal,
-            "material_other": material_other,
+            "material_base": material_base,
             "material_surcharge_pct": material_surcharge_pct,
             "material_surcharge": material_surcharge,
             "material_credit": material_credit,
+            "material_post_scrap": material_post_scrap,
+            "material_sheet_inputs": generic_contrib["material_cost"],
+            "freight_costs": generic_contrib["freight_cost"],
+            "tooling_costs": generic_contrib["tooling_cost"],
+            "other_direct_costs": generic_contrib["other_direct_cost"],
             "direct_costs": direct_costs,
             "base_subtotal": base_subtotal,
             "overhead_pct_total": overhead_pct_total,
