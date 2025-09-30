@@ -1,3 +1,10 @@
-beautifulsoup4
-lxml
-requests
+# Core runtime dependencies for appV5.py
+beautifulsoup4>=4.12
+lxml>=4.9
+requests>=2.31
+pandas>=1.5
+openpyxl>=3.1
+OCP>=7.7
+trimesh>=3.22
+ezdxf>=1.0
+llama-cpp-python>=0.2.0
