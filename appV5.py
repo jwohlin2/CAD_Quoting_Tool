@@ -19,30 +19,16 @@ import json, math, os, time, gc
 from collections import Counter
 from fractions import Fraction
 from pathlib import Path
+from dataclasses import dataclass, field
 
-from cad_quoter.config import configure_logging, logger
-
-@dataclass(frozen=True)
-class AppEnvironment:
-    """Runtime configuration extracted from environment variables.
-
-    Centralising this logic makes it trivial for reviewers to audit which
-    environment variables are consulted and how defaults are derived.  The
-    configuration can also be serialised for diagnostics without touching
-    global module state.
-    """
-
-    llm_debug_enabled: bool = False
-    llm_debug_dir: Path = field(default_factory=Path)
-
-    @classmethod
-    def from_env(cls) -> "AppEnvironment":
-        debug_enabled = bool(int(os.getenv("LLM_DEBUG", "1")))
-        debug_dir_raw = os.getenv("LLM_DEBUG_DIR")
-        debug_dir = Path(debug_dir_raw) if debug_dir_raw else Path(__file__).with_name("llm_debug")
-        debug_dir.mkdir(exist_ok=True)
-        return cls(llm_debug_enabled=debug_enabled, llm_debug_dir=debug_dir)
-
+from cad_quoter.app.container import ServiceContainer, create_default_container
+from cad_quoter.config import (
+    AppEnvironment,
+    ConfigError,
+    configure_logging,
+    describe_runtime_environment as _describe_runtime_environment,
+    logger,
+)
 
 APP_ENV = AppEnvironment.from_env()
 
@@ -50,17 +36,9 @@ APP_ENV = AppEnvironment.from_env()
 def describe_runtime_environment() -> dict[str, str]:
     """Return a redacted snapshot of runtime configuration for auditors."""
 
-    info = {"llm_debug_enabled": str(APP_ENV.llm_debug_enabled)}
+    info = _describe_runtime_environment()
+    info["llm_debug_enabled"] = str(APP_ENV.llm_debug_enabled)
     info["llm_debug_dir"] = str(APP_ENV.llm_debug_dir)
-    for key in ("QWEN_GGUF_PATH", "ODA_CONVERTER_EXE", "DWG2DXF_EXE", "METALS_API_KEY"):
-        value = os.getenv(key)
-        if not value:
-            info[key.lower()] = ""
-            continue
-        if key.endswith("_KEY"):
-            info[key.lower()] = "<redacted>"
-        else:
-            info[key.lower()] = value
     return info
 
 
@@ -72,9 +50,39 @@ import tkinter as tk
 import tkinter.font as tkfont
 import urllib.request
 from importlib import import_module
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
-from cad_quoter.pricing import PricingEngine, create_default_registry
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+import cad_quoter.geometry as geometry
+
+from cad_quoter.domain_models import (
+    DEFAULT_MATERIAL_DISPLAY,
+    DEFAULT_MATERIAL_KEY,
+    MATERIAL_DISPLAY_BY_KEY,
+    MATERIAL_DROPDOWN_OPTIONS,
+    MATERIAL_KEYWORDS,
+    MATERIAL_MAP,
+    MATERIAL_OTHER_KEY,
+    coerce_float_or_none as _coerce_float_or_none,
+    normalize_material_key as _normalize_lookup_key,
+)
+from cad_quoter.pricing import (
+    BACKUP_CSV_NAME,
+    LB_PER_KG,
+    PricingEngine,
+    create_default_registry,
+    ensure_material_backup_csv,
+    load_backup_prices_csv,
+    price_value_to_per_gram as _price_value_to_per_gram,
+    resolve_material_unit_price as _resolve_material_unit_price,
+    usdkg_to_usdlb as _usdkg_to_usdlb,
+)
 from cad_quoter.pricing.wieland import lookup_price as lookup_wieland_price
+from cad_quoter.llm import (
+    LLMClient,
+    infer_hours_and_overrides_from_geo as _infer_hours_and_overrides_from_geo,
+    llm_sheet_and_param_overrides,
+    parse_llm_json,
+    run_llm_suggestions,
+)
 
 from OCP.TopAbs   import TopAbs_EDGE, TopAbs_FACE
 from OCP.TopExp   import TopExp, TopExp_Explorer
@@ -87,26 +95,23 @@ import pandas as pd
 
 from llama_cpp import Llama  # type: ignore
 
-from cad_quoter.config import ConfigError, load_default_params, load_default_rates
-
-
 try:
     from geo_read_more import build_geo_from_dxf as build_geo_from_dxf_path
 except Exception:
     build_geo_from_dxf_path = None  # type: ignore[assignment]
 
+
+build_geo_from_dxf: Optional[Callable[[str], Dict[str, Any]]] = None
+
+
 def _match_items_contains(items: pd.Series, pattern: str) -> pd.Series:
-    """
-    Case-insensitive regex match over Items.
-    Convert capturing groups to non-capturing to avoid pandas warning.
-    Fall back to literal if regex fails.
-    """
+    """Case-insensitive regex match over Items."""
 
     pat = _to_noncapturing(pattern) if "_to_noncapturing" in globals() else pattern
     try:
         return items.str.contains(pat, case=False, regex=True, na=False)
     except Exception:
-
+        return items.str.contains(re.escape(pattern), case=False, regex=True, na=False)
 
 
 # Geometry helpers (re-exported for backward compatibility)
@@ -1704,243 +1709,6 @@ def iter_suggestion_rows(state: QuoteState) -> list[dict]:
     return rows
 
 
-MATERIAL_DROPDOWN_OPTIONS = [
-    "Aluminum",
-    "Berylium Copper",
-    "Bismuth",
-    "Brass",
-    "Carbide",
-    "Ceramic",
-    "Cobalt",
-    "Copper",
-    "Gold",
-    "Inconel",
-    "Indium",
-    "Lead",
-    "Nickel",
-    "Nickel Silver",
-    "Palladium",
-    "Phosphor Bronze",
-    "Phosphorus",
-    "Silver",
-    "Stainless Steel",
-    "Steel",
-    "Tin",
-    "Titanium",
-    "Tool Steel",
-    "Tungsten",
-    "Other (enter custom price)",
-]
-
-# Default material for the dropdown / pricing logic
-DEFAULT_MATERIAL_DISPLAY = "Steel"
-DEFAULT_MATERIAL_KEY = _normalize_lookup_key(DEFAULT_MATERIAL_DISPLAY)
-
-_MATERIAL_ADDITIONAL_KEYWORDS = {
-    "Aluminum": {"aluminium"},
-    "Berylium Copper": {"beryllium copper", "c172", "cube"},
-    "Brass": {"c360", "c260"},
-    "Copper": {"cu"},
-    "Inconel": {"in718", "in625"},
-    "Nickel": {"ni"},
-    "Nickel Silver": {"german silver"},
-    "Phosphor Bronze": {"phosphorbronze"},
-    "Stainless Steel": {"stainless"},
-    "Steel": {"carbon steel"},
-    "Titanium": {"ti", "ti6al4v"},
-    "Tool Steel": {"h13", "o1", "a2", "d2"},
-}
-
-MATERIAL_KEYWORDS: Dict[str, set[str]] = {}
-for display in MATERIAL_DROPDOWN_OPTIONS:
-    key = _normalize_lookup_key(display)
-    if not key:
-        continue
-    extras = {_normalize_lookup_key(term) for term in _MATERIAL_ADDITIONAL_KEYWORDS.get(display, set())}
-    extras.discard("")
-    MATERIAL_KEYWORDS[key] = {key} | extras
-
-MATERIAL_DISPLAY_BY_KEY: Dict[str, str] = {}
-for display in MATERIAL_DROPDOWN_OPTIONS:
-    key = _normalize_lookup_key(display)
-    if key:
-        MATERIAL_DISPLAY_BY_KEY[key] = display
-
-MATERIAL_OTHER_KEY = _normalize_lookup_key(MATERIAL_DROPDOWN_OPTIONS[-1])
-
-
-MATERIAL_MAP: dict[str, dict[str, float | str]] = {
-    # Aluminum alloys → Aluminum cash index
-    "6061": {"symbol": "XAL", "basis": "index_usd_per_tonne", "loss_factor": 0.0, "wieland_key": "6061"},
-    "6061-T6": {"symbol": "XAL", "basis": "index_usd_per_tonne", "wieland_key": "6061-T6"},
-    "7075": {"symbol": "XAL", "basis": "index_usd_per_tonne", "wieland_key": "7075"},
-
-    # Stainless → approximate with Nickel + premium or use vendor CSV override
-    "304": {"symbol": "XNI", "basis": "index_usd_per_tonne", "premium_usd_per_kg": 1.20, "wieland_key": "304"},
-    "316": {"symbol": "XNI", "basis": "index_usd_per_tonne", "premium_usd_per_kg": 1.80, "wieland_key": "316"},
-
-    # Copper alloys → Copper
-    "C110": {"symbol": "XCU", "basis": "index_usd_per_tonne", "wieland_key": "C110"},
-
-    # Precious (if you ever quote)
-    "AU-9999": {"symbol": "XAU", "basis": "usd_per_troy_oz"},
-}
-
-
-def _coerce_float_or_none(value: Any) -> float | None:
-    if isinstance(value, (int, float)):
-        try:
-            return float(value)
-        except Exception:
-            return None
-    if isinstance(value, str):
-        cleaned = value.strip()
-        if not cleaned:
-            return None
-        cleaned = cleaned.replace("$", "").replace(",", "").strip()
-        if not cleaned:
-            return None
-        try:
-            return float(cleaned)
-        except Exception:
-            m = re.search(r"-?\d+(?:\.\d+)?", cleaned)
-            if m:
-                try:
-                    return float(m.group(0))
-                except Exception:
-                    return None
-    return None
-
-
-def _price_value_to_per_gram(value: float, label: str) -> float | None:
-    try:
-        base = float(value)
-    except Exception:
-        return None
-    label_lower = str(label or "").lower()
-    label_compact = label_lower.replace(" ", "")
-
-    def _has_any(*patterns: str) -> bool:
-        return any(p in label_lower or p in label_compact for p in patterns)
-
-    if _has_any("perg", "/g", "$/g", "per gram"):
-        return base
-    if _has_any("perkg", "/kg", "$/kg", "per kilogram"):
-        return base / 1000.0
-    if _has_any("perlb", "/lb", "$/lb", "per pound", "/lbs", "$/lbs"):
-        return base / 453.59237
-    if _has_any("peroz", "/oz", "$/oz", "per ounce"):
-        return base / 28.349523125
-    return None
-
-
-# ---------- Material price backup (CSV) ----------
-LB_PER_KG = 2.2046226218
-BACKUP_CSV_NAME = "material_price_backup.csv"
-
-
-def _usdkg_to_usdlb(x: float) -> float:
-    return float(x) / LB_PER_KG if x is not None else x
-
-
-def ensure_material_backup_csv(path: str | None = None) -> str:
-    """
-    Creates a small CSV with dummy prices if it doesn't exist, next to this script.
-    Columns: material_key,usd_per_kg,usd_per_lb,notes
-    """
-    from pathlib import Path
-
-    path = Path(path) if path else Path(__file__).with_name(BACKUP_CSV_NAME)
-    if path.exists():
-        return str(path)
-
-    rows = [
-        # material_key,   usd/kg,  usd/lb (blank -> derived),      notes
-        ("steel",           2.20,   "",  "dummy base"),
-        ("stainless steel", 4.00,   "",  "dummy base"),
-        ("aluminum",        2.80,   "",  "dummy base"),
-        ("copper",          9.50,   "",  "dummy base"),
-        ("brass",           7.80,   "",  "dummy base"),
-        ("titanium",       17.00,   "",  "dummy base"),
-    ]
-
-    lines = ["material_key,usd_per_kg,usd_per_lb,notes\n"]
-    for m, kg, lb, note in rows:
-        if lb in ("", None):
-            lb = kg / LB_PER_KG
-        lines.append(f"{m},{float(kg):.6f},{float(lb):.6f},{note}\n")
-
-    path.write_text("".join(lines), encoding="utf-8")
-    return str(path)
-
-
-def load_backup_prices_csv(path: str | None = None) -> dict:
-    """
-    Returns: {normalized_key: {"usd_per_kg":float,"usd_per_lb":float,"notes":str}, ...}
-    """
-    from pathlib import Path
-    import pandas as pd
-
-    path = Path(path) if path else Path(ensure_material_backup_csv())
-    df = pd.read_csv(path)
-    out = {}
-    for _, r in df.iterrows():
-        key = _normalize_lookup_key(r["material_key"])
-        usdkg = _coerce_float_or_none(r.get("usd_per_kg"))
-        usdlb = _coerce_float_or_none(r.get("usd_per_lb"))
-        if usdkg and not usdlb:
-            usdlb = _usdkg_to_usdlb(usdkg)
-        if usdlb and not usdkg:
-            usdkg = float(usdlb) * LB_PER_KG
-        if usdkg and usdlb:
-            out[key] = {"usd_per_kg": float(usdkg), "usd_per_lb": float(usdlb), "notes": str(r.get("notes", ""))}
-    return out
-
-
-def resolve_material_unit_price(display_name: str, unit: str = "kg") -> tuple[float, str]:
-    """
-    Try Wieland first; if missing/error, fall back to local CSV; finally hardcode steel.
-    unit in {"kg","lb"}; returns (price, source_tag)
-    """
-    key = _normalize_lookup_key(display_name)
-    # 1) Wieland (if installed)
-    try:
-        from wieland_scraper import get_live_material_price
-
-        price, src = get_live_material_price(display_name, unit=unit, fallback_usd_per_kg=float("nan"))
-        if price is not None and math.isfinite(float(price)):
-            return float(price), src
-    except Exception as e:
-        src = f"wieland_error:{type(e).__name__}"
-    else:
-        src = ""
-
-    # 2) CSV
-    try:
-        table = load_backup_prices_csv()
-        rec = table.get(key)
-        if not rec:
-            if "stainless" in key:
-                rec = table.get("stainless steel")
-            elif "steel" in key:
-                rec = table.get("steel")
-            elif "alum" in key:
-                rec = table.get("aluminum")
-            elif "copper" in key or "cu" in key:
-                rec = table.get("copper")
-            elif "brass" in key:
-                rec = table.get("brass")
-        if rec:
-            price = rec["usd_per_kg"] if unit == "kg" else rec["usd_per_lb"]
-            return float(price), f"backup_csv:{BACKUP_CSV_NAME}"
-    except Exception:
-        pass
-
-    # 3) Last-resort hardcoded steel
-    hard = 2.20 if unit == "kg" else (2.20 / LB_PER_KG)
-    return hard, "hardcoded_default"
-
-
 SHOW_LLM_HOURS_DEBUG = False # set True only when debugging
 if sys.platform == 'win32':
     occ_bin = os.path.join(sys.prefix, 'Library', 'bin')
@@ -3375,397 +3143,22 @@ def read_cad_any(path: str):
         return read_dxf_as_occ_shape(dxf_path)
     raise RuntimeError(f"Unsupported CAD format: {ext}")
 
-# ----------------- Offline Qwen via llama-cpp -----------------
-def _llama_missing_msg():
-    return ("llama-cpp-python is not installed.\n" 
-            "Install in your env:\n" 
-            "  python -m pip install -U llama-cpp-python\n")
-
-class _LocalLLM:
-    """
-    Minimal, tolerant wrapper around llama-cpp-python.
-    - Chat if available; otherwise use completion.
-    - Always returns best-effort JSON dict.
-    """
-    def __init__(self, model_path: str,
-                 n_ctx: int = int(os.getenv("QWEN_N_CTX", 32768)),
-                 n_gpu_layers: int = int(os.getenv("QWEN_N_GPU_LAYERS", 0)),
-                 n_threads: int | None = None):
-        try:
-            from llama_cpp import Llama  # type: ignore
-        except Exception as e:
-            raise RuntimeError(_llama_missing_msg()) from e
-        if not os.path.isfile(model_path):
-            raise FileNotFoundError(f"Model GGUF not found: {model_path}")
-        self._Llama = Llama
-        self._llm = None
-        self.model_path = model_path
-        self.n_ctx = n_ctx
-        self.n_gpu_layers = n_gpu_layers
-        self.n_threads = n_threads
-
-    def _ensure(self):
-        if self._llm is None:
-            llama_kwargs = dict(
-                model_path=self.model_path,
-                n_ctx=self.n_ctx,
-                n_gpu_layers=self.n_gpu_layers,
-                n_threads=self.n_threads,
-                n_batch=int(os.getenv("QWEN_N_BATCH", 1024)),
-                logits_all=False,
-                verbose=False,
-            )
-            rope_scale = os.getenv("ROPE_FREQ_SCALE")
-            if rope_scale:
-                try:
-                    llama_kwargs["rope_freq_scale"] = float(rope_scale)
-                except Exception:
-                    pass
-            self._llm = self._Llama(**llama_kwargs)
-
-    def ask_json(
-        self,
-        system_prompt: str,
-        user_prompt: str,
-        temperature: float = 0.2,
-        max_tokens: int = 2048,
-        context: dict | None = None,
-        params: dict | None = None,
-    ):
-        self._ensure()
-        p = {
-            "temperature": float(os.getenv("QWEN_TEMP", temperature)),
-            "top_p": float(os.getenv("QWEN_TOP_P", 0.90)),
-            "repeat_penalty": float(os.getenv("QWEN_REPEAT_PENALTY", 1.05)),
-            "max_tokens": int(os.getenv("QWEN_MAX_TOKENS", max_tokens)),
-        }
-        if params:
-            p.update(params)
-
-        req = {
-            "model": getattr(self, "model_path", "local"),
-            "n_ctx": getattr(self, "n_ctx", None),
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            "params": p,
-            "context_payload": context or {},
-            "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
-        }
-
-        out = self._llm.create_chat_completion(
-            messages=req["messages"],
-            temperature=p["temperature"],
-            top_p=p["top_p"],
-            repeat_penalty=p["repeat_penalty"],
-            max_tokens=p["max_tokens"],
-        )
-        text = out["choices"][0]["message"]["content"]
-        usage = out.get("usage", {})
-
-        parsed = None
-        try:
-            parsed = json.loads(text)
-        except Exception:
-            parsed = None
-        if not isinstance(parsed, dict):
-            parsed = parse_llm_json(text)
-
-        if APP_ENV.llm_debug_enabled:
-            snap = {
-                "request": req,
-                "raw_response_text": text,
-                "parsed_response": parsed,
-                "usage": usage,
-            }
-            fn = APP_ENV.llm_debug_dir / f"llm_snapshot_{int(time.time())}.json"
-            fn.write_text(json.dumps(snap, indent=2), encoding="utf-8")
-
-        return parsed, text, usage
-
-    def close(self):
-        """Best-effort cleanup to avoid llama-cpp destructor warnings."""
-        try:
-            llm = getattr(self, "_llm", None)
-            self._llm = None
-            if llm is None:
-                return
-            # Ensure attribute exists to satisfy some versions' __del__ checks
-            try:
-                getattr(llm, "sampler")
-            except Exception:
-                try:
-                    setattr(llm, "sampler", None)
-                except Exception:
-                    pass
-            # Prefer explicit close if available
-            try:
-                if hasattr(llm, "close"):
-                    llm.close()
-            except Exception:
-                pass
-            # Drop strong refs
-            try:
-                del llm
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-    def __del__(self):
-        try:
-            self.close()
-        except Exception:
-            pass
-
 # ---- LLM hours inference ----
-def infer_hours_and_overrides_from_geo(geo: dict, params: dict | None = None, rates: dict | None = None) -> dict:
-    """
-    Ask the local LLM to estimate HOURS for each process + a few knobs.
-    Returns a dict with 'hours', 'setups', 'inspection', 'notes'.
-    """
-    params = params or {}
-    rates = rates or {}
+def infer_hours_and_overrides_from_geo(
+    geo: dict,
+    params: dict | None = None,
+    rates: dict | None = None,
+    *,
+    client: LLMClient | None = None,
+) -> dict:
+    """Delegate to the shared LLM module for hour estimation."""
 
-    system = (
-        "You are a senior manufacturing estimator in a tool & die/CNC job shop. "
-        "Given CAD GEO features (mm/mm2/mm3), estimate realistic HOURS for a small lot of machined parts. "
-        "Prefer simple, conservative estimates. Output ONLY JSON."
+    return _infer_hours_and_overrides_from_geo(
+        geo,
+        params=params,
+        rates=rates,
+        client=client,
     )
-
-    # keep schema explicit and small; minutes only where noted
-    schema = {
-        "hours": {
-            "Programming_Hours": 0.0,
-            "CAM_Programming_Hours": 0.0,
-            "Engineering_Hours": 0.0,
-            "Fixture_Build_Hours": 0.0,
-
-            "Roughing_Cycle_Time_hr": 0.0,
-            "Semi_Finish_Cycle_Time_hr": 0.0,
-            "Finishing_Cycle_Time_hr": 0.0,
-
-            "OD_Turning_Hours": 0.0,
-            "ID_Bore_Drill_Hours": 0.0,
-            "Threading_Hours": 0.0,
-            "Cutoff_Hours": 0.0,
-
-            "WireEDM_Hours": 0.0,
-            "SinkerEDM_Hours": 0.0,
-
-            "Grinding_Surface_Hours": 0.0,
-            "Grinding_ODID_Hours": 0.0,
-            "Jig_Grind_Hours": 0.0,
-
-            "Lapping_Hours": 0.0,
-            "Deburr_Hours": 0.0,
-            "Tumble_Hours": 0.0,
-            "Blast_Hours": 0.0,
-            "Laser_Mark_Hours": 0.0,
-            "Masking_Hours": 0.0,
-
-            "InProcess_Inspection_Hours": 0.0,
-            "Final_Inspection_Hours": 0.0,
-            "CMM_Programming_Hours": 0.0,
-            "CMM_RunTime_min": 0.0,  # minutes
-
-            "Saw_Waterjet_Hours": 0.0,
-            "Assembly_Hours": 0.0,
-            "Packaging_Labor_Hours": 0.0,
-
-            "EHS_Hours": 0.0
-        },
-        "setups": {
-            "Milling_Setups": 1,
-            "Setup_Hours_per_Setup": 0.3
-        },
-        "inspection": {
-            "FAIR_Required": False,
-            "Source_Inspection_Required": False
-        },
-        "notes": []
-    }
-
-    prompt = f'''
-GEO (mm / mm2 / mm3):
-{json.dumps(geo, indent=2)}
-
-Rules of thumb:
-- Small rectangular blocks with few features: Programming 0.2ï¿½1.0 hr, CAM 0.2ï¿½1.0 hr, Engineering 0 hr.
-- Use setups 1ï¿½2 unless 3-axis accessibility is low (<0.6) or faces with unique normals > 4.
-- Deburr 0.1ï¿½0.4 hr unless thin walls/freeform edges (then up to 0.8 hr).
-- Final inspection ~0.2ï¿½0.6 hr; CMM only if tolerances < 0.02 mm or GD&T heavy.
-- Grinding/EDM/Turning hours should be 0 unless features clearly require them.
-- Never return huge numbers for tiny parts (<80 mm max dim).
-
-Return JSON with this structure (numbers only, minutes only for CMM_RunTime_min):
-{json.dumps(schema, indent=2)}
-'''
-
-    # try local GGUF if available
-    try:
-        mp = os.environ.get("QWEN_GGUF_PATH")
-        if mp and Path(mp).is_file():
-            q = _LocalLLM(mp)
-            parsed, raw_text, _usage = q.ask_json(
-                system,
-                prompt,
-                temperature=0.1,
-                max_tokens=1024,
-            )
-            if not isinstance(parsed, dict):
-                parsed = parse_llm_json(raw_text)
-            if isinstance(parsed, dict) and "hours" in parsed:
-                return parsed
-    except Exception:
-        pass
-
-    # Fallback heuristics if LLM unavailable
-    faces = float(geo.get("GEO__Face_Count", 0) or 0)
-    max_dim = float(geo.get("GEO__MaxDim_mm", 0) or 0)
-    small_simple = (max_dim and max_dim <= 80.0 and faces < 300)
-
-    hours = {k: 0.0 for k in schema["hours"]}
-    if small_simple:
-        hours["Programming_Hours"] = 0.5
-        hours["CAM_Programming_Hours"] = 0.5
-        hours["Engineering_Hours"] = 0.0
-        hours["Roughing_Cycle_Time_hr"] = 0.5
-        hours["Finishing_Cycle_Time_hr"] = 0.2
-        hours["Deburr_Hours"] = 0.2
-        hours["Final_Inspection_Hours"] = 0.2
-        setups = {"Milling_Setups": 1, "Setup_Hours_per_Setup": 0.3}
-    else:
-        setups = {"Milling_Setups": 2, "Setup_Hours_per_Setup": 0.4}
-
-    return {"hours": hours, "setups": setups, "inspection": {"FAIR_Required": False, "Source_Inspection_Required": False}, "notes": ["heuristic fallback"]}
-
-def clamp_llm_hours(est: dict, geo: dict, params: dict | None = None) -> dict:
-    params = params or {}
-    h = est.get("hours", {}).copy()
-
-    max_dim = float(geo.get("GEO__MaxDim_mm", 0) or 0)
-    setups  = int(round(est.get("setups", {}).get("Milling_Setups", 1)))
-    simple  = (max_dim and max_dim <= 80.0 and setups <= 2)
-
-    # default caps (you can expose these in Overrides UI)
-    caps_simple = {
-        "Programming_Hours": 1.0, "CAM_Programming_Hours": 1.0, "Engineering_Hours": 1.0,
-        "Roughing_Cycle_Time_hr": 1.0, "Finishing_Cycle_Time_hr": 0.6, "Semi_Finish_Cycle_Time_hr": 0.4,
-        "Deburr_Hours": 0.6, "Final_Inspection_Hours": 0.6,
-        "Assembly_Hours": 0.5
-    }
-    caps_general = {
-        "Programming_Hours": 4.0, "CAM_Programming_Hours": 4.0, "Engineering_Hours": 8.0,
-        "Deburr_Hours": 2.0, "Final_Inspection_Hours": 2.0,
-    }
-
-    for k, v in list(h.items()):
-        v = max(0.0, float(v or 0))
-        cap = (caps_simple if simple else caps_general).get(k, None)
-        if cap is not None:
-            v = min(v, cap)
-        h[k] = v
-
-    # Minutes sanity
-    if "CMM_RunTime_min" in h:
-        h["CMM_RunTime_min"] = max(0.0, min(float(h["CMM_RunTime_min"] or 0), 120.0))
-
-    est["hours"] = h
-    return est
-
-def apply_llm_hours_to_variables(df, est: dict, allow_overwrite_nonzero=False, log: dict | None = None):
-    """
-    Writes LLM hour estimates into the Variables df.
-    Only touches time rows; if allow_overwrite_nonzero=False, it will skip rows that already have a non-zero value.
-    """
-    import pandas as pd
-    mapping = {
-        "Programming_Hours":              "Programming Hours",
-        "CAM_Programming_Hours":          "CAM Programming Hours",
-        "Engineering_Hours":              "Engineering (Docs/Fixture Design) Hours",
-        "Fixture_Build_Hours":            "Fixture Build Hours",
-
-        "Roughing_Cycle_Time_hr":         "Roughing Cycle Time",
-        "Semi_Finish_Cycle_Time_hr":      "Semi-Finish Cycle Time",
-        "Finishing_Cycle_Time_hr":        "Finishing Cycle Time",
-
-        "OD_Turning_Hours":               "OD Turning Hours",
-        "ID_Bore_Drill_Hours":            "ID Boring/Drilling Hours",
-        "Threading_Hours":                "Threading Hours",
-        "Cutoff_Hours":                   "Cut-Off / Parting Hours",
-
-        "WireEDM_Hours":                  "WEDM Hours",
-        "SinkerEDM_Hours":                "Sinker EDM Hours",
-
-        "Grinding_Surface_Hours":         "Grinding (Surface) Hours",
-        "Grinding_ODID_Hours":            "Grinding (OD/ID) Hours",
-        "Jig_Grind_Hours":                "Jig Grind Hours",
-
-        "Lapping_Hours":                  "Lapping Hours",
-        "Deburr_Hours":                   "Deburr Hours",
-        "Tumble_Hours":                   "Tumbling Hours",
-        "Blast_Hours":                    "Bead Blasting Hours",
-        "Laser_Mark_Hours":               "Laser Mark Hours",
-        "Masking_Hours":                  "Masking Hours",
-
-        "InProcess_Inspection_Hours":     "In-Process Inspection Hours",
-        "Final_Inspection_Hours":         "Final Inspection Hours",
-        "CMM_Programming_Hours":          "CMM Programming Hours",
-        "CMM_RunTime_min":                "CMM Run Time min",
-
-        "Saw_Waterjet_Hours":             "Sawing Hours",
-        "Assembly_Hours":                 "Assembly Hours",
-        "Packaging_Labor_Hours":          "Packaging Labor Hours",
-        "EHS_Hours":                      "EHS Training/Compliance Hours"
-    }
-
-    def upsert(name, value, dtype="number"):
-        nonlocal df
-        # ensure core columns exist
-        for c in ("Item", "Example Values / Options", "Data Type / Input Method"):
-            if c not in df.columns: df[c] = ""
-        m = df["Item"].astype(str).str.fullmatch(str(name), case=False, na=False)
-        if m.any():
-            cur = pd.to_numeric(df.loc[m, "Example Values / Options"], errors="coerce").fillna(0.0).iloc[0]
-            if (not allow_overwrite_nonzero) and (float(cur) != 0.0):
-                return False
-            df.loc[m, "Example Values / Options"] = value
-            df.loc[m, "Data Type / Input Method"] = dtype
-        else:
-            row = {c: None for c in df.columns}
-            row["Item"] = name
-            row["Example Values / Options"] = value
-            row["Data Type / Input Method"] = dtype
-            df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-        return True
-
-    applied = {}
-    for k, v in (est.get("hours") or {}).items():
-        item = mapping.get(k)
-        if not item: continue
-        ok = upsert(item, round(float(v or 0), 3), "number")
-        if ok: applied[item] = v
-
-    # Setups
-    setups = est.get("setups") or {}
-    if "Milling_Setups" in setups:
-        upsert("Number of Milling Setups", int(setups["Milling_Setups"]), "number")
-    if "Setup_Hours_per_Setup" in setups:
-        upsert("Setup Hours / Setup", round(float(setups["Setup_Hours_per_Setup"]), 3), "number")
-
-    # Inspection flags ? set to 0/1 as numbers
-    insp = est.get("inspection", {}) or {}
-    if "FAIR_Required" in insp:
-        upsert("FAIR Required", 1 if insp.get("FAIR_Required") else 0, "number")
-    if "Source_Inspection_Required" in insp:
-        upsert("Source Inspection Requirement", 1 if insp.get("Source_Inspection_Required") else 0, "number")
-
-    if log is not None:
-        log["llm_hours_applied"] = applied
-    return df
-
 
 # --- WHICH SHEET ROWS MATTER TO THE ESTIMATOR --------------------------------
 def _estimator_patterns():
@@ -4332,16 +3725,36 @@ def render_quote(
 CONFIG_INIT_ERRORS: list[str] = []
 
 try:
-    RATES_DEFAULT = load_default_rates()
+    SERVICE_CONTAINER = create_default_container()
+except Exception as exc:
+    CONFIG_INIT_ERRORS.append(f"Service container initialisation error: {exc}")
+
+    def _empty_params() -> dict[str, Any]:
+        return {}
+
+    SERVICE_CONTAINER = ServiceContainer(
+        load_params=_empty_params,
+        load_rates=lambda: {},
+        pricing_engine_factory=lambda: PricingEngine(create_default_registry()),
+    )
+
+try:
+    RATES_DEFAULT = SERVICE_CONTAINER.load_rates()
 except ConfigError as exc:
     RATES_DEFAULT = {}
     CONFIG_INIT_ERRORS.append(f"Rates configuration error: {exc}")
+except Exception as exc:
+    RATES_DEFAULT = {}
+    CONFIG_INIT_ERRORS.append(f"Unexpected rates configuration error: {exc}")
 
 try:
-    PARAMS_DEFAULT = load_default_params()
+    PARAMS_DEFAULT = SERVICE_CONTAINER.load_params()
 except ConfigError as exc:
     PARAMS_DEFAULT = {}
     CONFIG_INIT_ERRORS.append(f"Parameter configuration error: {exc}")
+except Exception as exc:
+    PARAMS_DEFAULT = {}
+    CONFIG_INIT_ERRORS.append(f"Unexpected parameter configuration error: {exc}")
 
 # ---- Service containers -----------------------------------------------------
 
@@ -4380,23 +3793,6 @@ class GeometryLoader:
     build_geo_from_dxf: Optional[Callable[[str], Dict[str, Any]]] = None
 
 
-@dataclass
-class LLMClient:
-    """Provide callables for constructing optional LLM helpers."""
-
-    primary_loader: Optional[Callable[[], Any]] = None
-    fallback_loader: Optional[Callable[[], Any]] = None
-
-    def load_primary(self) -> Any:
-        if self.primary_loader is None:
-            raise RuntimeError("No primary LLM loader configured")
-        return self.primary_loader()
-
-    def load_fallback(self) -> Any:
-        if self.fallback_loader is None:
-            raise RuntimeError("No fallback LLM loader configured")
-        return self.fallback_loader()
-
 # Common regex pieces (kept non-capturing to avoid pandas warnings)
 TIME_RE = r"\b(?:hours?|hrs?|hr|time|min(?:ute)?s?)\b"
 MONEY_RE = r"(?:rate|/hr|per\s*hour|per\s*hr|price|cost|$)"
@@ -4416,7 +3812,7 @@ def pct(value: Any, default: float = 0.0) -> float:
         return default
 
 
-_DEFAULT_PRICING_ENGINE = PricingEngine(create_default_registry())
+_DEFAULT_PRICING_ENGINE = SERVICE_CONTAINER.get_pricing_engine()
 
 
 def compute_material_cost(material_name: str,
@@ -10785,8 +10181,8 @@ class PricingRegistry:
 
 
 @dataclass(slots=True)
-class LLMClient:
-    """Thin wrapper that exposes LLM helpers required by the UI."""
+class LLMServices:
+    """Helper hooks for locating default models and loading vision LLMs."""
 
     default_model_locator: Callable[[], str] = find_default_qwen_model
     vision_loader: Callable[..., Any] = load_qwen_vl
@@ -10846,14 +10242,23 @@ class ScrollableFrame(ttk.Frame):
 
 
 class App(tk.Tk):
-    def __init__(self, pricing: PricingEngine | None = None):
+    def __init__(
+        self,
+        pricing: PricingEngine | None = None,
+        *,
+        configuration: UIConfiguration | None = None,
+        geometry_loader: GeometryLoader | None = None,
+        pricing_registry: PricingRegistry | None = None,
+        llm_services: LLMServices | None = None,
+        geometry_service: geometry.GeometryService | None = None,
+    ):
 
         super().__init__()
 
         self.configuration = configuration or UIConfiguration()
         self.geometry_loader = geometry_loader or GeometryLoader()
         self.pricing_registry = pricing_registry or PricingRegistry()
-        self.llm_client = llm_client or LLMClient()
+        self.llm_services = llm_services or LLMServices()
 
         if getattr(self.configuration, "title", None):
             self.title(self.configuration.title)
@@ -10887,7 +10292,7 @@ class App(tk.Tk):
         default_model = (
             self.configuration.default_llm_model_path
             if getattr(self.configuration, "default_llm_model_path", None)
-            else self.llm_client.default_model_path()
+            else self.llm_services.default_model_path()
         )
         if default_model:
             os.environ["QWEN_GGUF_PATH"] = default_model
@@ -11121,7 +10526,10 @@ class App(tk.Tk):
             pass
 
         try:
-            self.LLM_SUGGEST = load_qwen_vl(n_ctx=8192, n_gpu_layers=20)
+            self.LLM_SUGGEST = self.llm_services.load_vision_model(
+                n_ctx=8192,
+                n_gpu_layers=20,
+            )
         except Exception as exc:
             self._llm_load_error = exc
             try:
@@ -11130,7 +10538,10 @@ class App(tk.Tk):
             except Exception:
                 pass
             try:
-                self.LLM_SUGGEST = load_qwen_vl(n_ctx=4096, n_gpu_layers=0)
+                self.LLM_SUGGEST = self.llm_services.load_vision_model(
+                    n_ctx=4096,
+                    n_gpu_layers=0,
+                )
             except Exception as exc2:
                 self._llm_load_error = exc2
                 try:
