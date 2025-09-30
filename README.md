@@ -2,8 +2,13 @@
 
 ## Setup
 
-1. Create and activate a Python 3.11+ virtual environment.
-2. Install the runtime dependencies:
+1. Install Python 3.11 or newer on the target machine.
+2. Create and activate a virtual environment:
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate  # Windows: .venv\\Scripts\\activate
+   ```
+3. Install the runtime dependencies:
    ```bash
    pip install -r requirements.txt
    ```
@@ -16,4 +21,11 @@ After installing the dependencies, run the main application entry point:
 python appV5.py
 ```
 
-If any required packages are missing, the application will exit with an informative error message.
+You can quickly verify the environment configuration without launching the UI:
+
+```bash
+python appV5.py --print-env
+```
+
+Refer to the [deployment guide](docs/deployment_guide.md) for end-to-end packaging and
+host preparation steps when moving the tool to another device.
