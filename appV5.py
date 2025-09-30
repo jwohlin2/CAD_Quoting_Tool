@@ -11956,6 +11956,228 @@ class LLMServices:
         return self.vision_loader(n_ctx=n_ctx, n_gpu_layers=n_gpu_layers, n_threads=n_threads)
 
 
+# ---- GEO defaults helpers ---------------------------------------------------
+
+def _parse_numeric_text(value: str) -> float | None:
+    if not isinstance(value, str):
+        return _coerce_float_or_none(value)
+    text = value.strip()
+    if not text:
+        return None
+    cleaned = re.sub(r"[^0-9./\s-]", " ", text)
+    parts = [part.strip() for part in cleaned.split() if part.strip()]
+    if not parts:
+        return None
+    total = 0.0
+    for part in parts:
+        try:
+            total += float(Fraction(part))
+            continue
+        except Exception:
+            pass
+        try:
+            total += float(part)
+        except Exception:
+            return None
+    return total
+
+
+def _parse_length_to_mm(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        if math.isfinite(float(value)):
+            return float(value)
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    lower = text.lower()
+    unit = None
+    for suffix in ("millimeters", "millimetres", "millimeter", "millimetre", "mm"):
+        if lower.endswith(suffix):
+            unit = "mm"
+            text = text[: -len(suffix)]
+            break
+    if unit is None:
+        for suffix in ("inches", "inch", "in", "\""):
+            if lower.endswith(suffix):
+                unit = "in"
+                text = text[: -len(suffix)]
+                break
+    if unit is None and "\"" in text:
+        unit = "in"
+        text = text.replace("\"", "")
+    if unit is None and "mm" in lower:
+        unit = "mm"
+        text = re.sub(r"mm", "", text, flags=re.IGNORECASE)
+    numeric_val = _parse_numeric_text(text)
+    if numeric_val is None:
+        return None
+    if unit == "in":
+        return float(numeric_val) * 25.4
+    return float(numeric_val)
+
+
+def infer_geo_override_defaults(geo_data: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(geo_data, dict):
+        return {}
+
+    sources: list[dict[str, Any]] = []
+    seen: set[int] = set()
+
+    def collect(obj: Any) -> None:
+        if not isinstance(obj, dict):
+            return
+        oid = id(obj)
+        if oid in seen:
+            return
+        seen.add(oid)
+        sources.append(obj)
+        for val in obj.values():
+            collect(val)
+
+    collect(geo_data)
+    if not sources:
+        return {}
+
+    def find_value(*keys: str) -> Any:
+        for key in keys:
+            for src in sources:
+                if key in src:
+                    val = src.get(key)
+                    if val not in (None, ""):
+                        return val
+        return None
+
+    overrides: dict[str, Any] = {}
+
+    plate_len_in = _coerce_float_or_none(find_value("plate_len_in", "plate_length_in"))
+    if plate_len_in is None:
+        plate_len_mm = _parse_length_to_mm(find_value("plate_len_mm", "plate_length_mm"))
+        if plate_len_mm is not None:
+            plate_len_in = float(plate_len_mm) / 25.4
+    if plate_len_in is not None and plate_len_in > 0:
+        overrides["Plate Length (in)"] = float(plate_len_in)
+
+    plate_wid_in = _coerce_float_or_none(find_value("plate_wid_in", "plate_width_in"))
+    if plate_wid_in is None:
+        plate_wid_mm = _parse_length_to_mm(find_value("plate_wid_mm", "plate_width_mm"))
+        if plate_wid_mm is not None:
+            plate_wid_in = float(plate_wid_mm) / 25.4
+    if plate_wid_in is not None and plate_wid_in > 0:
+        overrides["Plate Width (in)"] = float(plate_wid_in)
+
+    thickness_in = _coerce_float_or_none(
+        find_value("thickness_in_guess", "thickness_in", "deepest_hole_in")
+    )
+    if thickness_in is None:
+        thickness_mm = _parse_length_to_mm(find_value("thickness_mm", "thickness_mm_guess"))
+        if thickness_mm is not None:
+            thickness_in = float(thickness_mm) / 25.4
+    if thickness_in is not None and thickness_in > 0:
+        overrides["Thickness (in)"] = float(thickness_in)
+
+    scrap_pct_val = _coerce_float_or_none(find_value("scrap_pct", "scrap_percent"))
+    if scrap_pct_val is not None and scrap_pct_val > 0:
+        overrides["Scrap Percent (%)"] = float(scrap_pct_val) * 100.0
+
+    from_back = any(
+        bool(src.get(key))
+        for key in ("holes_from_back", "needs_back_face", "from_back")
+        for src in sources
+        if isinstance(src, dict)
+    )
+
+    setups_val = _coerce_float_or_none(find_value("setups", "milling_setups", "number_of_setups"))
+    setups_int = int(round(setups_val)) if setups_val and setups_val > 0 else None
+    if setups_int and setups_int > 0:
+        overrides["Number of Milling Setups"] = max(1, setups_int)
+    elif from_back:
+        overrides["Number of Milling Setups"] = 2
+
+    material_value = None
+    for key in ("material", "material_note", "stock_guess", "stock_material", "material_name"):
+        candidate = find_value(key)
+        if isinstance(candidate, str) and candidate.strip():
+            material_value = candidate.strip()
+            break
+    if material_value:
+        overrides["Material"] = material_value
+
+    fai_flag = find_value("fai_required", "fai")
+    if fai_flag is not None:
+        overrides["FAIR Required"] = 1 if bool(fai_flag) else 0
+
+    def _coerce_count(label: str, *keys: str) -> None:
+        val = _coerce_float_or_none(find_value(*keys))
+        if val is None:
+            return
+        try:
+            count = int(round(val))
+        except Exception:
+            return
+        if count > 0:
+            overrides[label] = count
+
+    _coerce_count("Tap Qty (LLM/GEO)", "tap_qty", "tap_count")
+    _coerce_count("Cbore Qty (LLM/GEO)", "cbore_qty", "counterbore_qty")
+    _coerce_count("Csk Qty (LLM/GEO)", "csk_qty", "countersink_qty")
+
+    hole_sum = 0.0
+    hole_total = 0
+
+    raw_holes_mm = find_value("hole_diams_mm", "hole_diams_mm_precise")
+    if isinstance(raw_holes_mm, (list, tuple)) and raw_holes_mm:
+        for entry in raw_holes_mm:
+            val = _coerce_float_or_none(entry)
+            if val is None and entry is not None:
+                val = _parse_length_to_mm(entry)
+            if val is None or val <= 0:
+                continue
+            hole_sum += float(val)
+            hole_total += 1
+
+    if hole_total == 0:
+        raw_holes_in = find_value("hole_diams_in")
+        if isinstance(raw_holes_in, (list, tuple)):
+            for entry in raw_holes_in:
+                val = _coerce_float_or_none(entry)
+                if val is None and entry is not None:
+                    try:
+                        val = float(Fraction(str(entry)))
+                    except Exception:
+                        val = None
+                if val is None or val <= 0:
+                    continue
+                hole_sum += float(val) * 25.4
+                hole_total += 1
+
+    if hole_total == 0:
+        bins_data = find_value("hole_bins", "hole_bins_top")
+        if isinstance(bins_data, dict):
+            for diam_key, count_val in bins_data.items():
+                count = _coerce_float_or_none(count_val)
+                if count is None or count <= 0:
+                    continue
+                diam_mm = _parse_length_to_mm(diam_key)
+                if diam_mm is None or diam_mm <= 0:
+                    continue
+                hole_sum += float(diam_mm) * float(count)
+                hole_total += int(round(count))
+
+    hole_count_val = _coerce_float_or_none(find_value("hole_count", "hole_count_geom"))
+    if hole_count_val is not None and hole_count_val > 0:
+        overrides["Hole Count (override)"] = int(round(hole_count_val))
+    elif hole_total:
+        overrides["Hole Count (override)"] = int(hole_total)
+
+    if hole_total and hole_sum > 0:
+        overrides["Avg Hole Diameter (mm)"] = hole_sum / float(hole_total)
+
+    return overrides
+
+
 # ---- scrollable frame helper -----------------------------------------------
 class ScrollableFrame(ttk.Frame):
     def __init__(self, parent, *args, **kwargs):
@@ -12683,121 +12905,27 @@ class App(tk.Tk):
         self._mark_label_source(label, source)
 
     def _apply_geo_defaults(self, geo_data: dict[str, Any] | None) -> None:
-        if not isinstance(geo_data, dict):
+        defaults = infer_geo_override_defaults(geo_data)
+        if not defaults:
             return
 
-        sources: list[dict[str, Any]] = []
-        seen: set[int] = set()
-
-        def collect(obj: Any) -> None:
-            if not isinstance(obj, dict):
-                return
-            oid = id(obj)
-            if oid in seen:
-                return
-            seen.add(oid)
-            sources.append(obj)
-            for val in obj.values():
-                collect(val)
-
-        collect(geo_data)
-        if not sources:
-            return
-
-        def find_value(*keys: str) -> Any:
-            for key in keys:
-                for src in sources:
-                    if key in src:
-                        val = src.get(key)
-                        if val not in (None, ""):
-                            return val
-            return None
-
-        plate_len_in = find_value("plate_len_in", "plate_length_in")
-        plate_wid_in = find_value("plate_wid_in", "plate_width_in")
-
-        thickness_in = find_value("thickness_in_guess", "thickness_in", "deepest_hole_in")
-        if thickness_in is None:
-            thickness_mm = find_value("thickness_mm")
-            if thickness_mm is not None:
-                try:
-                    thickness_in = float(thickness_mm) / 25.4
-                except Exception:
-                    thickness_in = None
-
-        self._fill_editor_if_blank("Plate Length (in)", plate_len_in)
-        self._fill_editor_if_blank("Plate Width (in)", plate_wid_in)
-        self._fill_editor_if_blank("Thickness (in)", thickness_in)
-
-        def _positive_float(value: Any) -> float | None:
-            try:
-                num = float(value)
-            except (TypeError, ValueError):
-                return None
-            if math.isnan(num) or num <= 0:
-                return None
-            return num
-
-        hole_counts: list[int] = []
-        hole_diams_list: list[float] = []
-        hole_bins_total = 0.0
-        hole_bins_weighted = 0.0
-
-        for src in sources:
-            if not isinstance(src, dict):
+        for label, value in defaults.items():
+            if value is None:
                 continue
-            for key in ("hole_count", "hole_count_geom"):
-                val = _positive_float(src.get(key))
-                if val is not None:
-                    hole_counts.append(int(round(val)))
-            feature_counts = src.get("feature_counts")
-            if isinstance(feature_counts, Mapping):
-                val = _positive_float(feature_counts.get("hole_count"))
-                if val is not None:
-                    hole_counts.append(int(round(val)))
-            hole_diams = src.get("hole_diams_mm")
-            if isinstance(hole_diams, Sequence) and not isinstance(hole_diams, (str, bytes)):
-                for diam in hole_diams:
-                    diam_val = _positive_float(diam)
-                    if diam_val is not None:
-                        hole_diams_list.append(diam_val)
-            hole_bins = src.get("hole_bins")
-            if isinstance(hole_bins, Mapping):
-                for diam, count in hole_bins.items():
-                    diam_val = _positive_float(diam)
-                    count_val = _positive_float(count)
-                    if diam_val is None or count_val is None:
+            if isinstance(value, str):
+                var = self.editor_vars.get(label)
+                if var is None:
+                    continue
+                current = str(var.get() or "").strip()
+                if label == "Material":
+                    if current and current != self.default_material_display:
                         continue
-                    hole_bins_weighted += diam_val * count_val
-                    hole_bins_total += count_val
-                if hole_bins_total > 0:
-                    hole_counts.append(int(round(hole_bins_total)))
+                elif current:
+                    continue
+                self._set_editor(label, value, "GEO")
+                continue
 
-        hole_count_val = max(hole_counts) if hole_counts else None
-        if hole_count_val is None and hole_diams_list:
-            hole_count_val = len(hole_diams_list)
-        elif hole_count_val is None and hole_bins_total > 0:
-            hole_count_val = int(round(hole_bins_total))
-
-        avg_hole_diam = None
-        if hole_diams_list:
-            avg_hole_diam = sum(hole_diams_list) / len(hole_diams_list)
-        elif hole_bins_total > 0:
-            avg_hole_diam = hole_bins_weighted / hole_bins_total if hole_bins_total else None
-
-        if hole_count_val and hole_count_val > 0:
-            self._fill_editor_if_blank("Hole Count (override)", int(round(hole_count_val)))
-        if avg_hole_diam and avg_hole_diam > 0:
-            self._fill_editor_if_blank("Avg Hole Diameter (mm)", avg_hole_diam)
-
-        from_back = False
-        for key in ("holes_from_back", "needs_back_face", "from_back"):
-            if any(bool(src.get(key)) for src in sources if isinstance(src, dict)):
-                from_back = True
-                break
-        if from_back:
-            self._fill_editor_if_blank("Number of Milling Setups", 2, source="GEO")
-
+            self._fill_editor_if_blank(label, value, source="GEO")
     def _update_editor_override_from_label(self, label: str, raw_value: str) -> None:
         key = EDITOR_TO_SUGG.get(label)
         if key is None:
