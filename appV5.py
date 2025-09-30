@@ -4153,6 +4153,27 @@ def _material_family(material: str) -> str:
     return "steel"
 
 
+def _density_for_material(material: str, default: float = 7.85) -> float:
+    """Return a rough density guess (g/cc) for the requested material."""
+
+    name = (material or "").strip().lower()
+    if not name:
+        return default
+    if any(tag in name for tag in ("alum", "6061", "5052", "7075", "2024", "5083")):
+        return 2.70
+    if any(tag in name for tag in ("stainless", "17-4", "17 4", "316", "304", "ss")):
+        return 7.90
+    if any(tag in name for tag in ("titanium", "ti-6al-4v", "ti64", "grade 5")):
+        return 4.43
+    if any(tag in name for tag in ("copper", "c110", "cu")):
+        return 8.96
+    if any(tag in name for tag in ("brass", "c360", "c260")):
+        return 8.40
+    if any(tag in name for tag in ("plastic", "uhmw", "delrin", "acetal", "peek", "abs", "nylon")):
+        return 1.45
+    return default
+
+
 def require_plate_inputs(geo: dict, ui_vars: dict[str, Any] | None) -> None:
     ui_vars = ui_vars or {}
     thickness_val = ui_vars.get("Thickness (in)")
@@ -4296,7 +4317,38 @@ def validate_quote_before_pricing(
         issues.append("Unusually low machining time for number of holes.")
     material_cost = float(pass_through.get("Material", 0.0) or 0.0)
     if material_cost < 5.0:
-        issues.append("Material cost is near zero; check material & thickness.")
+        inner_geo = geo.get("geo") if isinstance(geo.get("geo"), dict) else {}
+
+        def _positive(value: Any) -> bool:
+            num = _coerce_float_or_none(value)
+            return bool(num and num > 0)
+
+        thickness_candidates = [
+            geo.get("thickness_mm"),
+            geo.get("thickness_in"),
+            geo.get("GEO-03_Height_mm"),
+            geo.get("GEO__Stock_Thickness_mm"),
+            inner_geo.get("thickness_mm") if isinstance(inner_geo, dict) else None,
+            inner_geo.get("stock_thickness_mm") if isinstance(inner_geo, dict) else None,
+        ]
+        has_thickness_hint = any(_positive(val) for val in thickness_candidates)
+
+        def _mass_hint(ctx: dict[str, Any] | None) -> bool:
+            if not isinstance(ctx, dict):
+                return False
+            for key in ("net_mass_kg", "net_mass_kg_est", "mass_kg", "net_mass_g"):
+                if key not in ctx:
+                    continue
+                num = _coerce_float_or_none(ctx.get(key))
+                if num and num > 0:
+                    return True
+            return False
+
+        has_mass_hint = _mass_hint(geo) or _mass_hint(inner_geo)
+        has_material = bool(str(geo.get("material") or "").strip() or str(inner_geo.get("material") or "").strip())
+
+        if not (has_thickness_hint or has_mass_hint or has_material):
+            issues.append("Material cost is near zero; check material & thickness.")
     try:
         hole_count_val = int(float(geo.get("hole_count", 0)))
     except Exception:
@@ -4718,6 +4770,74 @@ def compute_quote_from_df(df: pd.DataFrame,
                 geo_context.setdefault("net_volume_cm3", float(vol_cm3_net))
 
     net_mass_g = max(0.0, vol_cm3 * density_g_cc)
+    mass_basis = "volume"
+    fallback_meta: dict[str, Any] = {}
+
+    def _mass_hint_kg(ctx: dict[str, Any] | None) -> float:
+        if not isinstance(ctx, dict):
+            return 0.0
+        hints: list[float] = []
+        for key in ("net_mass_kg", "net_mass_kg_est", "mass_kg"):
+            val = _coerce_float_or_none(ctx.get(key))
+            if val and val > 0:
+                hints.append(float(val))
+        mass_g_hint = _coerce_float_or_none(ctx.get("net_mass_g"))
+        if mass_g_hint and mass_g_hint > 0:
+            hints.append(float(mass_g_hint) / 1000.0)
+        return max(hints) if hints else 0.0
+
+    if net_mass_g <= 0:
+        inner_geo = geo_context.get("geo") if isinstance(geo_context.get("geo"), dict) else {}
+        mass_hint_kg = max(_mass_hint_kg(geo_context), _mass_hint_kg(inner_geo))
+        if mass_hint_kg > 0:
+            net_mass_g = mass_hint_kg * 1000.0
+            mass_basis = "geo_mass_hint"
+            fallback_meta["mass_hint_kg"] = mass_hint_kg
+        else:
+            def _volume_hint_cm3(ctx: dict[str, Any] | None) -> float:
+                if not isinstance(ctx, dict):
+                    return 0.0
+                vol_candidates = [
+                    ctx.get("net_volume_cm3"),
+                    ctx.get("volume_cm3"),
+                ]
+                for key in ("GEO-Volume_mm3", "volume_mm3", "GEO__Volume_mm3"):
+                    mm3_val = _coerce_float_or_none(ctx.get(key))
+                    if mm3_val and mm3_val > 0:
+                        vol_candidates.append(float(mm3_val) / 1000.0)
+                vol_candidates = [
+                    _coerce_float_or_none(val)
+                    for val in vol_candidates
+                    if val is not None
+                ]
+                vols = [float(v) for v in vol_candidates if v and v > 0]
+                if vols:
+                    return max(vols)
+                dims = []
+                for key in ("GEO-01_Length_mm", "GEO-02_Width_mm", "GEO-03_Height_mm"):
+                    val = _coerce_float_or_none(ctx.get(key))
+                    if val and val > 0:
+                        dims.append(float(val))
+                if len(dims) == 3:
+                    return (dims[0] * dims[1] * dims[2]) / 1000.0
+                return 0.0
+
+            inner_geo = geo_context.get("geo") if isinstance(geo_context.get("geo"), dict) else {}
+            bbox_volume_cm3 = max(_volume_hint_cm3(geo_context), _volume_hint_cm3(inner_geo))
+            if bbox_volume_cm3 > 0:
+                density_guess = density_g_cc if density_g_cc > 0 else _density_for_material(material_name or default_material_display)
+                net_mass_g = bbox_volume_cm3 * max(density_guess, 0.5)
+                mass_basis = "bbox_volume"
+                fallback_meta["fallback_volume_cm3"] = bbox_volume_cm3
+                fallback_meta["fallback_density_g_cc"] = density_guess
+            else:
+                density_guess = density_g_cc if density_g_cc > 0 else _density_for_material(material_name or default_material_display)
+                min_mass_kg = 0.05
+                net_mass_g = min_mass_kg * 1000.0
+                mass_basis = "minimum_mass"
+                fallback_meta["fallback_density_g_cc"] = density_guess
+                fallback_meta["minimum_mass_kg"] = min_mass_kg
+
     effective_mass_g = net_mass_g * (1.0 + scrap_pct)
     mass_g = effective_mass_g
     mass_kg = net_mass_g / 1000.0
@@ -4769,6 +4889,7 @@ def compute_quote_from_df(df: pd.DataFrame,
             "explicit_cost_override": float(explicit_mat or 0.0),
             "material_cost_before_overrides": base_cost,
             "material_cost": float(material_cost),
+            "mass_basis": mass_basis,
         })
         unit_price_from_detail = material_detail.get("unit_price_usd_per_kg")
         if unit_price_from_detail is not None:
@@ -4784,6 +4905,10 @@ def compute_quote_from_df(df: pd.DataFrame,
     material_detail_for_breakdown.setdefault("mass_g", mass_g)
     material_detail_for_breakdown.setdefault("mass_g_net", net_mass_g)
     material_detail_for_breakdown.setdefault("scrap_pct", scrap_pct)
+    if mass_basis:
+        material_detail_for_breakdown.setdefault("mass_basis", mass_basis)
+    for key, value in fallback_meta.items():
+        material_detail_for_breakdown.setdefault(key, value)
     material_detail_for_breakdown["unit_price_per_g"] = float(unit_price_per_g or 0.0)
     if "unit_price_usd_per_kg" not in material_detail_for_breakdown and unit_price_per_g:
         material_detail_for_breakdown["unit_price_usd_per_kg"] = float(unit_price_per_g) * 1000.0
