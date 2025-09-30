@@ -49,10 +49,32 @@ import textwrap
 import tkinter as tk
 import tkinter.font as tkfont
 import urllib.request
+import importlib.util
 from importlib import import_module
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import cad_quoter.geometry as geometry
+
+
+_REQUIRED_RUNTIME_PACKAGES = {
+    "requests": "requests",
+    "bs4": "beautifulsoup4",
+    "lxml": "lxml",
+}
+
+_missing_runtime_packages = [
+    (module, dist_name)
+    for module, dist_name in _REQUIRED_RUNTIME_PACKAGES.items()
+    if importlib.util.find_spec(module) is None
+]
+
+if _missing_runtime_packages:
+    missing_dists = ", ".join(dist_name for _, dist_name in _missing_runtime_packages)
+    raise ImportError(
+        "Required runtime dependencies are missing. Install them with "
+        "`pip install -r requirements.txt` before launching appV5.py "
+        f"(missing: {missing_dists})."
+    )
 
 from cad_quoter.domain_models import (
     DEFAULT_MATERIAL_DISPLAY,
