@@ -10247,6 +10247,7 @@ class App(tk.Tk):
         geometry_loader: GeometryLoader | None = None,
         pricing_registry: PricingRegistry | None = None,
         llm_services: LLMServices | None = None,
+
         geometry_service: geometry.GeometryService | None = None,
     ):
 
