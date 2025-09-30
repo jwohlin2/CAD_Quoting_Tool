@@ -102,7 +102,23 @@ except Exception:
     build_geo_from_dxf_path = None  # type: ignore[assignment]
 
 
-build_geo_from_dxf: Optional[Callable[[str], Dict[str, Any]]] = None
+_build_geo_from_dxf_hook: Optional[Callable[[str], Dict[str, Any]]] = None
+
+
+def set_build_geo_from_dxf_hook(func: Optional[Callable[[str], Dict[str, Any]]]) -> None:
+    """Install or clear an override for DXF enrichment."""
+
+    global _build_geo_from_dxf_hook
+    _build_geo_from_dxf_hook = func
+
+
+def build_geo_from_dxf(path: str) -> dict:
+    """Best-effort DXF enrichment helper used by legacy integrations."""
+
+    loader = _build_geo_from_dxf_hook or build_geo_from_dxf_path
+    if not loader:
+        raise RuntimeError("DXF enrichment helper is unavailable")
+    return loader(path)
 
 def _match_items_contains(items: pd.Series, pattern: str) -> pd.Series:
     """Case-insensitive regex match over Items."""
@@ -178,11 +194,166 @@ def _match_items_contains(items: pd.Series, pattern: str) -> pd.Series:
 VL_MODEL = r"D:\CAD_Quoting_Tool\models\qwen2.5-vl-7b-instruct-q4_k_m.gguf"
 MM_PROJ = r"D:\CAD_Quoting_Tool\models\mmproj-Qwen2.5-VL-3B-Instruct-Q8_0.gguf"
 
+_LEGACY_VL_MODEL = Path(VL_MODEL)
+_LEGACY_MM_PROJ = Path(MM_PROJ)
+
+_DEFAULT_VL_MODEL_NAMES = (
+    _LEGACY_VL_MODEL.name,
+    "qwen2.5-vl-7b-instruct-q4_0.gguf",
+    "qwen2.5-vl-7b-instruct-q4_k_s.gguf",
+    "qwen2-vl-7b-instruct-q4_0.gguf",
+)
+
+_DEFAULT_MM_PROJ_NAMES = (
+    _LEGACY_MM_PROJ.name,
+    "mmproj-Qwen2.5-VL-3B-Instruct-Q4_0.gguf",
+    "mmproj-Qwen2-VL-7B-Instruct-Q4_0.gguf",
+)
+
+
+def _dedupe_paths(paths: Iterable[Path]) -> list[Path]:
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for raw in paths:
+        try:
+            candidate = raw.expanduser()
+        except Exception:
+            continue
+        key = str(candidate.resolve() if candidate.exists() else candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(candidate)
+    return unique
+
+
+def _collect_model_dirs(*paths: str | Path | None) -> list[Path]:
+    dirs: list[Path] = []
+    for value in paths:
+        if not value:
+            continue
+        try:
+            candidate = Path(value).expanduser()
+        except Exception:
+            continue
+        if candidate.is_file():
+            dirs.append(candidate.parent)
+        elif candidate.is_dir():
+            dirs.append(candidate)
+        else:
+            dirs.append(candidate.parent)
+    for env_var in ("QWEN_MODELS_DIR", "QWEN_VL_MODELS_DIR"):
+        env_value = os.environ.get(env_var)
+        if env_value:
+            try:
+                dirs.append(Path(env_value).expanduser())
+            except Exception:
+                continue
+    dirs.extend(Path(d) for d in PREFERRED_MODEL_DIRS)
+    try:
+        dirs.append(Path(__file__).resolve().parent / "models")
+    except Exception:
+        pass
+    dirs.append(Path.cwd() / "models")
+    return [d for d in _dedupe_paths(dirs) if str(d)]
+
+
+def _find_weight_file(
+    names: Sequence[str],
+    directories: Sequence[Path],
+    glob: str,
+) -> str:
+    for directory in directories:
+        try:
+            if not directory.exists():
+                continue
+        except Exception:
+            continue
+        for name in names:
+            candidate = directory / name
+            if candidate.is_file():
+                return str(candidate)
+        try:
+            matches = list(directory.glob(glob))
+        except Exception:
+            matches = []
+        if matches:
+            try:
+                matches.sort(key=lambda p: (-p.stat().st_size, p.name))
+            except Exception:
+                matches.sort()
+            return str(matches[0])
+    return ""
+
+
+def discover_qwen_vl_assets(
+    *,
+    model_path: str | None = None,
+    mmproj_path: str | None = None,
+) -> tuple[str, str]:
+    """Locate Qwen vision model + projector weights on disk.
+
+    The desktop application historically shipped with hard-coded Windows
+    paths.  Modern deployments may store the weights alongside the script or
+    expose them via environment variables.  This helper consolidates the
+    discovery logic and returns fully-qualified filesystem paths.  A
+    ``RuntimeError`` is raised with actionable guidance when the assets cannot
+    be resolved.
+    """
+
+    model_candidates = [
+        model_path,
+        os.environ.get("QWEN_VL_GGUF_PATH"),
+        os.environ.get("QWEN_GGUF_PATH"),
+        str(_LEGACY_VL_MODEL),
+    ]
+    mmproj_candidates = [
+        mmproj_path,
+        os.environ.get("QWEN_VL_MMPROJ_PATH"),
+        os.environ.get("QWEN_MMPROJ_PATH"),
+        str(_LEGACY_MM_PROJ),
+    ]
+
+    def _first_existing(paths: Sequence[str | None]) -> str:
+        for value in paths:
+            if not value:
+                continue
+            try:
+                candidate = Path(value).expanduser()
+            except Exception:
+                continue
+            if candidate.is_file():
+                return str(candidate)
+        return ""
+
+    model_file = _first_existing(model_candidates)
+    mmproj_file = _first_existing(mmproj_candidates)
+
+    search_dirs = _collect_model_dirs(*(model_candidates + mmproj_candidates))
+
+    if not model_file:
+        model_file = _find_weight_file(_DEFAULT_VL_MODEL_NAMES, search_dirs, "*vl*.gguf")
+    if not mmproj_file:
+        mmproj_file = _find_weight_file(_DEFAULT_MM_PROJ_NAMES, search_dirs, "*mmproj*.gguf")
+
+    if not model_file or not mmproj_file:
+        searched = ", ".join(str(d) for d in search_dirs if d)
+        raise RuntimeError(
+            "Vision LLM weights not found. Set QWEN_VL_GGUF_PATH and "
+            "QWEN_VL_MMPROJ_PATH (or place matching *.gguf files in one of: "
+            f"{searched or 'the known model directories'})."
+        )
+
+    return model_file, mmproj_file
+
 
 def load_qwen_vl(
     n_ctx: int = 8192,
     n_gpu_layers: int = 20,
     n_threads: int | None = None,
+    *,
+    model_path: str | None = None,
+    mmproj_path: str | None = None,
 ):
     """Load Qwen2.5-VL with vision projector configured for llama.cpp."""
 
@@ -190,10 +361,15 @@ def load_qwen_vl(
         cpu_count = os.cpu_count() or 8
         n_threads = max(4, cpu_count // 2)
 
+    model_file, mmproj_file = discover_qwen_vl_assets(
+        model_path=model_path,
+        mmproj_path=mmproj_path,
+    )
+
     try:
         llm = Llama(
-            model_path=VL_MODEL,
-            mmproj_path=MM_PROJ,
+            model_path=model_file,
+            mmproj_path=mmproj_file,
             n_ctx=n_ctx,
             n_gpu_layers=n_gpu_layers,
             n_threads=n_threads,
@@ -3815,12 +3991,16 @@ def pct(value: Any, default: float = 0.0) -> float:
 _DEFAULT_PRICING_ENGINE = SERVICE_CONTAINER.get_pricing_engine()
 
 
-def compute_material_cost(material_name: str,
-                          mass_kg: float,
-                          scrap_frac: float,
-                          overrides: dict[str, Any] | None,
-                          vendor_csv: str | None,
-                          pricing: PricingEngine | None = None) -> tuple[float, dict[str, Any]]:
+def compute_material_cost(
+    material_name: str,
+    mass_kg: float,
+    scrap_frac: float,
+    overrides: dict[str, Any] | None,
+    vendor_csv: str | None,
+    *,
+    default_material_display: str = DEFAULT_MATERIAL_DISPLAY,
+    pricing: PricingEngine | None = None,
+) -> tuple[float, dict[str, Any]]:
 
     overrides = overrides or {}
     pricing_engine = pricing or _DEFAULT_PRICING_ENGINE
@@ -3973,6 +4153,27 @@ def _material_family(material: str) -> str:
     return "steel"
 
 
+def _density_for_material(material: str, default: float = 7.85) -> float:
+    """Return a rough density guess (g/cc) for the requested material."""
+
+    name = (material or "").strip().lower()
+    if not name:
+        return default
+    if any(tag in name for tag in ("alum", "6061", "5052", "7075", "2024", "5083")):
+        return 2.70
+    if any(tag in name for tag in ("stainless", "17-4", "17 4", "316", "304", "ss")):
+        return 7.90
+    if any(tag in name for tag in ("titanium", "ti-6al-4v", "ti64", "grade 5")):
+        return 4.43
+    if any(tag in name for tag in ("copper", "c110", "cu")):
+        return 8.96
+    if any(tag in name for tag in ("brass", "c360", "c260")):
+        return 8.40
+    if any(tag in name for tag in ("plastic", "uhmw", "delrin", "acetal", "peek", "abs", "nylon")):
+        return 1.45
+    return default
+
+
 def require_plate_inputs(geo: dict, ui_vars: dict[str, Any] | None) -> None:
     ui_vars = ui_vars or {}
     thickness_val = ui_vars.get("Thickness (in)")
@@ -4116,7 +4317,38 @@ def validate_quote_before_pricing(
         issues.append("Unusually low machining time for number of holes.")
     material_cost = float(pass_through.get("Material", 0.0) or 0.0)
     if material_cost < 5.0:
-        issues.append("Material cost is near zero; check material & thickness.")
+        inner_geo = geo.get("geo") if isinstance(geo.get("geo"), dict) else {}
+
+        def _positive(value: Any) -> bool:
+            num = _coerce_float_or_none(value)
+            return bool(num and num > 0)
+
+        thickness_candidates = [
+            geo.get("thickness_mm"),
+            geo.get("thickness_in"),
+            geo.get("GEO-03_Height_mm"),
+            geo.get("GEO__Stock_Thickness_mm"),
+            inner_geo.get("thickness_mm") if isinstance(inner_geo, dict) else None,
+            inner_geo.get("stock_thickness_mm") if isinstance(inner_geo, dict) else None,
+        ]
+        has_thickness_hint = any(_positive(val) for val in thickness_candidates)
+
+        def _mass_hint(ctx: dict[str, Any] | None) -> bool:
+            if not isinstance(ctx, dict):
+                return False
+            for key in ("net_mass_kg", "net_mass_kg_est", "mass_kg", "net_mass_g"):
+                if key not in ctx:
+                    continue
+                num = _coerce_float_or_none(ctx.get(key))
+                if num and num > 0:
+                    return True
+            return False
+
+        has_mass_hint = _mass_hint(geo) or _mass_hint(inner_geo)
+        has_material = bool(str(geo.get("material") or "").strip() or str(inner_geo.get("material") or "").strip())
+
+        if not (has_thickness_hint or has_mass_hint or has_material):
+            issues.append("Material cost is near zero; check material & thickness.")
     try:
         hole_count_val = int(float(geo.get("hole_count", 0)))
     except Exception:
@@ -4159,6 +4391,8 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     params_defaults = default_params if default_params is not None else QuoteConfiguration().default_params
     rates_defaults = default_rates if default_rates is not None else PricingRegistry().default_rates
+    if not isinstance(default_material_display, str) or not default_material_display.strip():
+        default_material_display = DEFAULT_MATERIAL_DISPLAY
     params = {**params_defaults, **(params or {})}
     rates = {**rates_defaults, **(rates or {})}
     rates.setdefault("DrillingRate", rates.get("MillingRate", 0.0))
@@ -4536,6 +4770,74 @@ def compute_quote_from_df(df: pd.DataFrame,
                 geo_context.setdefault("net_volume_cm3", float(vol_cm3_net))
 
     net_mass_g = max(0.0, vol_cm3 * density_g_cc)
+    mass_basis = "volume"
+    fallback_meta: dict[str, Any] = {}
+
+    def _mass_hint_kg(ctx: dict[str, Any] | None) -> float:
+        if not isinstance(ctx, dict):
+            return 0.0
+        hints: list[float] = []
+        for key in ("net_mass_kg", "net_mass_kg_est", "mass_kg"):
+            val = _coerce_float_or_none(ctx.get(key))
+            if val and val > 0:
+                hints.append(float(val))
+        mass_g_hint = _coerce_float_or_none(ctx.get("net_mass_g"))
+        if mass_g_hint and mass_g_hint > 0:
+            hints.append(float(mass_g_hint) / 1000.0)
+        return max(hints) if hints else 0.0
+
+    if net_mass_g <= 0:
+        inner_geo = geo_context.get("geo") if isinstance(geo_context.get("geo"), dict) else {}
+        mass_hint_kg = max(_mass_hint_kg(geo_context), _mass_hint_kg(inner_geo))
+        if mass_hint_kg > 0:
+            net_mass_g = mass_hint_kg * 1000.0
+            mass_basis = "geo_mass_hint"
+            fallback_meta["mass_hint_kg"] = mass_hint_kg
+        else:
+            def _volume_hint_cm3(ctx: dict[str, Any] | None) -> float:
+                if not isinstance(ctx, dict):
+                    return 0.0
+                vol_candidates = [
+                    ctx.get("net_volume_cm3"),
+                    ctx.get("volume_cm3"),
+                ]
+                for key in ("GEO-Volume_mm3", "volume_mm3", "GEO__Volume_mm3"):
+                    mm3_val = _coerce_float_or_none(ctx.get(key))
+                    if mm3_val and mm3_val > 0:
+                        vol_candidates.append(float(mm3_val) / 1000.0)
+                vol_candidates = [
+                    _coerce_float_or_none(val)
+                    for val in vol_candidates
+                    if val is not None
+                ]
+                vols = [float(v) for v in vol_candidates if v and v > 0]
+                if vols:
+                    return max(vols)
+                dims = []
+                for key in ("GEO-01_Length_mm", "GEO-02_Width_mm", "GEO-03_Height_mm"):
+                    val = _coerce_float_or_none(ctx.get(key))
+                    if val and val > 0:
+                        dims.append(float(val))
+                if len(dims) == 3:
+                    return (dims[0] * dims[1] * dims[2]) / 1000.0
+                return 0.0
+
+            inner_geo = geo_context.get("geo") if isinstance(geo_context.get("geo"), dict) else {}
+            bbox_volume_cm3 = max(_volume_hint_cm3(geo_context), _volume_hint_cm3(inner_geo))
+            if bbox_volume_cm3 > 0:
+                density_guess = density_g_cc if density_g_cc > 0 else _density_for_material(material_name or default_material_display)
+                net_mass_g = bbox_volume_cm3 * max(density_guess, 0.5)
+                mass_basis = "bbox_volume"
+                fallback_meta["fallback_volume_cm3"] = bbox_volume_cm3
+                fallback_meta["fallback_density_g_cc"] = density_guess
+            else:
+                density_guess = density_g_cc if density_g_cc > 0 else _density_for_material(material_name or default_material_display)
+                min_mass_kg = 0.05
+                net_mass_g = min_mass_kg * 1000.0
+                mass_basis = "minimum_mass"
+                fallback_meta["fallback_density_g_cc"] = density_guess
+                fallback_meta["minimum_mass_kg"] = min_mass_kg
+
     effective_mass_g = net_mass_g * (1.0 + scrap_pct)
     mass_g = effective_mass_g
     mass_kg = net_mass_g / 1000.0
@@ -4559,6 +4861,7 @@ def compute_quote_from_df(df: pd.DataFrame,
             scrap_pct,
             material_overrides,
             material_vendor_csv,
+            default_material_display=default_material_display,
             pricing=pricing_engine,
         )
     except Exception as err:
@@ -4586,6 +4889,7 @@ def compute_quote_from_df(df: pd.DataFrame,
             "explicit_cost_override": float(explicit_mat or 0.0),
             "material_cost_before_overrides": base_cost,
             "material_cost": float(material_cost),
+            "mass_basis": mass_basis,
         })
         unit_price_from_detail = material_detail.get("unit_price_usd_per_kg")
         if unit_price_from_detail is not None:
@@ -4601,6 +4905,10 @@ def compute_quote_from_df(df: pd.DataFrame,
     material_detail_for_breakdown.setdefault("mass_g", mass_g)
     material_detail_for_breakdown.setdefault("mass_g_net", net_mass_g)
     material_detail_for_breakdown.setdefault("scrap_pct", scrap_pct)
+    if mass_basis:
+        material_detail_for_breakdown.setdefault("mass_basis", mass_basis)
+    for key, value in fallback_meta.items():
+        material_detail_for_breakdown.setdefault(key, value)
     material_detail_for_breakdown["unit_price_per_g"] = float(unit_price_per_g or 0.0)
     if "unit_price_usd_per_kg" not in material_detail_for_breakdown and unit_price_per_g:
         material_detail_for_breakdown["unit_price_usd_per_kg"] = float(unit_price_per_g) * 1000.0
@@ -8596,7 +8904,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     geo = _build_geo_from_ezdxf_doc(doc)
 
     geo_read_more: dict[str, Any] | None = None
-    extra_geo_loader = build_geo_from_dxf or build_geo_from_dxf_path
+    extra_geo_loader = _build_geo_from_dxf_hook or build_geo_from_dxf_path
     if extra_geo_loader and dxf_text_path:
         try:
             geo_read_more = extra_geo_loader(dxf_text_path)
@@ -10133,6 +10441,11 @@ class UIConfiguration:
     apply_llm_adjustments_default: bool = True
     settings_path: Path = field(default_factory=lambda: Path(__file__).with_name("app_settings.json"))
     default_llm_model_path: str | None = None
+    default_params: dict[str, Any] = field(default_factory=lambda: copy.deepcopy(PARAMS_DEFAULT))
+    default_material_display: str = DEFAULT_MATERIAL_DISPLAY
+
+    def create_params(self) -> dict[str, Any]:
+        return copy.deepcopy(self.default_params)
 
 
 class GeometryLoader:
@@ -10170,14 +10483,14 @@ class GeometryLoader:
 class PricingRegistry:
     """Provide mutable copies of editable pricing defaults to the UI."""
 
-    param_defaults: dict[str, Any] = field(default_factory=lambda: copy.deepcopy(PARAMS_DEFAULT))
-    rate_defaults: dict[str, float] = field(default_factory=lambda: copy.deepcopy(RATES_DEFAULT))
+    default_params: dict[str, Any] = field(default_factory=lambda: copy.deepcopy(PARAMS_DEFAULT))
+    default_rates: dict[str, float] = field(default_factory=lambda: copy.deepcopy(RATES_DEFAULT))
 
     def create_params(self) -> dict[str, Any]:
-        return copy.deepcopy(self.param_defaults)
+        return copy.deepcopy(self.default_params)
 
     def create_rates(self) -> dict[str, float]:
-        return copy.deepcopy(self.rate_defaults)
+        return copy.deepcopy(self.default_rates)
 
 
 @dataclass(slots=True)
@@ -10260,6 +10573,15 @@ class App(tk.Tk):
         self.pricing_registry = pricing_registry or PricingRegistry()
         self.llm_services = llm_services or LLMServices()
 
+        default_material_display = getattr(
+            self.configuration,
+            "default_material_display",
+            DEFAULT_MATERIAL_DISPLAY,
+        )
+        if not isinstance(default_material_display, str) or not default_material_display.strip():
+            default_material_display = DEFAULT_MATERIAL_DISPLAY
+        self.default_material_display = default_material_display
+
         if getattr(self.configuration, "title", None):
             self.title(self.configuration.title)
         if getattr(self.configuration, "window_geometry", None):
@@ -10272,8 +10594,35 @@ class App(tk.Tk):
         self.vars_df_full = None
         self.geo = None
         self.geo_context: dict[str, Any] = {}
-        self.params = PARAMS_DEFAULT.copy()
-        self.rates = RATES_DEFAULT.copy()
+        if hasattr(self.configuration, "create_params"):
+            try:
+                params = self.configuration.create_params()
+            except Exception:
+                params = copy.deepcopy(PARAMS_DEFAULT)
+            if not isinstance(params, dict):
+                params = copy.deepcopy(PARAMS_DEFAULT)
+            self.params = params
+            self.default_params_template = copy.deepcopy(params)
+        else:
+            base_params = getattr(self.configuration, "default_params", PARAMS_DEFAULT)
+            template_params = base_params if isinstance(base_params, dict) else PARAMS_DEFAULT
+            self.default_params_template = copy.deepcopy(template_params)
+            self.params = copy.deepcopy(self.default_params_template)
+
+        if hasattr(self.pricing_registry, "create_rates"):
+            try:
+                rates = self.pricing_registry.create_rates()
+            except Exception:
+                rates = copy.deepcopy(RATES_DEFAULT)
+            if not isinstance(rates, dict):
+                rates = copy.deepcopy(RATES_DEFAULT)
+            self.rates = rates
+            self.default_rates_template = copy.deepcopy(rates)
+        else:
+            base_rates = getattr(self.pricing_registry, "default_rates", RATES_DEFAULT)
+            template_rates = base_rates if isinstance(base_rates, dict) else RATES_DEFAULT
+            self.default_rates_template = copy.deepcopy(template_rates)
+            self.rates = copy.deepcopy(self.default_rates_template)
         self.config_errors = list(CONFIG_INIT_ERRORS)
 
         self.quote_state = QuoteState()
@@ -10691,7 +11040,7 @@ class App(tk.Tk):
             initial_raw = row_data["Example Values / Options"]
             initial_value = str(initial_raw) if initial_raw is not None else ""
             if normalized_name in {"material"}:
-                var = tk.StringVar(value=self.configuration.default_material_display)
+                var = tk.StringVar(value=self.default_material_display)
                 if initial_value:
                     var.set(initial_value)
                 normalized_initial = _normalize_lookup_key(var.get())
@@ -11622,9 +11971,9 @@ class App(tk.Tk):
                     self.vars_df,
                     params=self.params,
                     rates=self.rates,
-                    default_params=self.configuration.default_params,
-                    default_rates=self.pricing_registry.default_rates,
-                    default_material_display=self.configuration.default_material_display,
+                    default_params=self.default_params_template,
+                    default_rates=self.default_rates_template,
+                    default_material_display=self.default_material_display,
                     material_vendor_csv=self.settings.get("material_vendor_csv", "") if isinstance(self.settings, dict) else "",
                     llm_enabled=self.llm_enabled.get(),
                     llm_model_path=self.llm_model_path.get().strip() or None,
