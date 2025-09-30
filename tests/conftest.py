@@ -37,6 +37,9 @@ def _install_runtime_dependency_stubs() -> None:
         sys.modules["lxml"] = lxml_stub
 
 
+_install_runtime_dep_stubs = _install_runtime_dependency_stubs
+
+
 def _install_ocp_stubs() -> None:
     if "OCP" in sys.modules:
         return
