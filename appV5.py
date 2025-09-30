@@ -83,6 +83,11 @@ from cad_quoter.llm import (
     llm_sheet_and_param_overrides,
     parse_llm_json,
     run_llm_suggestions,
+    # editor mapping + prompt constants used in overrides UI
+    SUGG_TO_EDITOR,
+    EDITOR_TO_SUGG,
+    EDITOR_FROM_UI,
+    SYSTEM_SUGGEST,
 )
 
 from OCP.TopAbs   import TopAbs_EDGE, TopAbs_FACE
@@ -942,6 +947,67 @@ def sanitize_suggestions(s: dict, bounds: dict) -> dict:
         "notes": notes,
         "no_change_reason": no_change,
     }
+
+
+def build_suggest_payload(
+    geo: dict | None,
+    baseline: dict | None,
+    rates: dict | None,
+    bounds: dict | None,
+) -> dict:
+    """Build the JSON payload passed to the LLM suggestor.
+
+    Keeps only JSON-serializable fields and includes a compact `seed` section
+    from `geo['derived']` with useful nudges.
+    """
+    def _to_float_maybe(x):
+        v = _as_float_or_none(x)
+        return v if v is not None else x
+
+    geo = dict(geo or {})
+    baseline = dict(baseline or {})
+    bounds = dict(bounds or {})
+    rates_in = dict(rates or {})
+
+    rates_norm: dict[str, float | str] = {}
+    for k, v in rates_in.items():
+        rates_norm[str(k)] = _to_float_maybe(v)
+
+    derived = geo.get("derived") if isinstance(geo.get("derived"), dict) else {}
+    seed = {}
+    for key in (
+        "tap_qty",
+        "cbore_qty",
+        "csk_qty",
+        "hole_bins",
+        "needs_back_face",
+        "tap_minutes_hint",
+        "cbore_minutes_hint",
+        "csk_minutes_hint",
+        "tap_class_counts",
+        "tap_details",
+        "npt_qty",
+        "inference_knobs",
+        "has_ldr_notes",
+        "has_tight_tol",
+        "max_hole_depth_in",
+        "plate_area_in2",
+        "finish_flags",
+        "stock_guess",
+    ):
+        if key in derived:
+            seed[key] = derived[key]
+
+    payload = {
+        "geo": geo,
+        "baseline": baseline,
+        "bounds": bounds,
+        "rates": rates_norm,
+    }
+    if seed:
+        payload["seed"] = seed
+
+    return payload
 
 
 def apply_suggestions(baseline: dict, s: dict) -> dict:
