@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import importlib.machinery
 import types
+from importlib.machinery import ModuleSpec
 from pathlib import Path
 from typing import Callable, Dict
 
@@ -10,6 +11,31 @@ import pytest
 
 
 # ----- stub heavy optional dependencies before importing application code -----
+
+
+def _install_runtime_dependency_stubs() -> None:
+    if "requests" not in sys.modules:
+        requests_stub = types.ModuleType("requests")
+        requests_stub.__spec__ = ModuleSpec("requests", loader=None)
+        sys.modules["requests"] = requests_stub
+
+    if "bs4" not in sys.modules:
+        bs4_stub = types.ModuleType("bs4")
+        bs4_stub.__spec__ = ModuleSpec("bs4", loader=None)
+
+        class _BeautifulSoup:  # pragma: no cover - behaviour not needed in tests
+            def __init__(self, *args, **kwargs):
+                self.args = args
+                self.kwargs = kwargs
+
+        bs4_stub.BeautifulSoup = _BeautifulSoup
+        sys.modules["bs4"] = bs4_stub
+
+    if "lxml" not in sys.modules:
+        lxml_stub = types.ModuleType("lxml")
+        lxml_stub.__spec__ = ModuleSpec("lxml", loader=None)
+        sys.modules["lxml"] = lxml_stub
+
 
 def _install_ocp_stubs() -> None:
     if "OCP" in sys.modules:
@@ -291,20 +317,22 @@ def _install_pandas_stub() -> None:
             for idx, row in enumerate(self._rows):
                 yield idx, row
 
+    import csv
+
     pandas_stub = types.ModuleType("pandas")
     pandas_stub.DataFrame = DataFrame
     pandas_stub.Series = Series
+
+    def read_csv(path):
+        with open(path, newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            return DataFrame(reader)
+
+    pandas_stub.read_csv = read_csv
     sys.modules["pandas"] = pandas_stub
 
 
-def _install_runtime_dep_stubs() -> None:
-    for name in ("requests", "bs4", "lxml"):
-        if name in sys.modules:
-            continue
-        module = types.ModuleType(name)
-        module.__spec__ = importlib.machinery.ModuleSpec(name, loader=None)
-        sys.modules[name] = module
-
+_install_runtime_dependency_stubs()
 
 _install_ocp_stubs()
 _install_llama_stub()
