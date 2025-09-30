@@ -5,6 +5,7 @@ import pytest
 from cad_quoter.domain import (
     QuoteState,
     compute_effective_state,
+    effective_to_overrides,
     merge_effective,
     reprice_with_effective,
 )
@@ -83,3 +84,43 @@ def test_reprice_with_effective_applies_drilling_floor() -> None:
     floor = (8 * 9.0) / 3600.0
     assert state.effective["process_hours"]["drilling"] == pytest.approx(floor)
     assert state.guard_context["hole_count"] == 8
+
+
+def test_merge_effective_tracks_new_fields() -> None:
+    baseline = {
+        "fixture_build_hr": 0.5,
+        "fixture_material_cost": 40.0,
+        "_bounds": {"scrap_max": 0.25},
+    }
+    suggestions = {
+        "fixture_build_hr": 1.2,
+        "soft_jaw_hr": 0.3,
+        "packaging_flat_cost": 12.0,
+        "shipping_hint": "Foam inserts",
+    }
+    overrides = {"fai_required": True}
+
+    merged = merge_effective(baseline, suggestions, overrides)
+
+    assert merged["fixture_build_hr"] == pytest.approx(1.2)
+    assert merged["soft_jaw_hr"] == pytest.approx(0.3)
+    assert merged["packaging_flat_cost"] == pytest.approx(12.0)
+    assert merged["fai_required"] is True
+    assert merged["shipping_hint"] == "Foam inserts"
+
+
+def test_effective_to_overrides_emits_new_keys() -> None:
+    effective = {
+        "fixture_build_hr": 1.0,
+        "soft_jaw_hr": 0.25,
+        "cmm_minutes": 18.0,
+        "packaging_hours": 0.2,
+        "shipping_hint": "Double box",
+    }
+    overrides = effective_to_overrides(effective, {})
+
+    assert overrides["fixture_build_hr"] == pytest.approx(1.0)
+    assert overrides["soft_jaw_hr"] == pytest.approx(0.25)
+    assert overrides["cmm_minutes"] == pytest.approx(18.0)
+    assert overrides["packaging_hours"] == pytest.approx(0.2)
+    assert overrides["shipping_hint"] == "Double box"

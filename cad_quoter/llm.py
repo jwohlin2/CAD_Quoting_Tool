@@ -70,6 +70,35 @@ SUGG_TO_EDITOR = {
         str,
         str,
     ),
+    "fixture_build_hr": (
+        "Fixture Build Hours",
+        float,
+        float,
+    ),
+    "in_process_inspection_hr": (
+        "In-Process Inspection Hours",
+        float,
+        float,
+    ),
+    "cmm_minutes": (
+        "CMM Run Time min",
+        float,
+        float,
+    ),
+    "packaging_hours": (
+        "Packaging Labor Hours",
+        float,
+        float,
+    ),
+    "fai_required": (
+        "FAIR Required",
+        lambda flag: 1 if flag else 0,
+        lambda raw: (
+            str(raw).strip().lower() in {"1", "true", "yes", "y"}
+            if raw not in (None, "")
+            else False
+        ),
+    ),
     ("add_pass_through", "Consumables /Hr"): (
         "Consumables /Hr Cost",
         float,
