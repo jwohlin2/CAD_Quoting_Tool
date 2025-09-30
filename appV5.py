@@ -12332,6 +12332,12 @@ class App(tk.Tk):
         if not isinstance(self.settings, dict):
             self.settings = {}
 
+        thread_setting = str(self.settings.get("llm_thread_limit", "") or "").strip()
+        env_thread_setting = os.environ.get("QWEN_N_THREADS", "").strip()
+        initial_thread_setting = thread_setting or env_thread_setting
+        self.llm_thread_limit = tk.StringVar(value=initial_thread_setting)
+        self._llm_thread_limit_applied: int | None = None
+
         vendor_csv = str(self.settings.get("material_vendor_csv", "") or "")
         if vendor_csv:
             self.params["MaterialVendorCSVPath"] = vendor_csv
@@ -12360,6 +12366,12 @@ class App(tk.Tk):
         self.llm_enabled = tk.BooleanVar(value=self.configuration.llm_enabled_default)
         self.apply_llm_adj = tk.BooleanVar(value=self.configuration.apply_llm_adjustments_default)
         self.llm_model_path = tk.StringVar(value=default_model)
+
+        if hasattr(self.llm_thread_limit, "trace_add"):
+            self.llm_thread_limit.trace_add("write", self._on_llm_thread_limit_changed)
+        elif hasattr(self.llm_thread_limit, "trace"):
+            self.llm_thread_limit.trace("w", lambda *_: self._on_llm_thread_limit_changed())
+        self._apply_llm_thread_limit_env(persist=False)
 
         # Create a Menu Bar
         menubar = tk.Menu(self)
@@ -12487,6 +12499,7 @@ class App(tk.Tk):
         path = path.strip()
         if not path:
             return None
+        self._apply_llm_thread_limit_env(persist=False)
         cached = getattr(self, "_llm_client_cache", None)
         if cached and cached.model_path == path:
             return cached
@@ -12540,6 +12553,59 @@ class App(tk.Tk):
         value = str(path) if path else ""
         self.settings["last_variables_path"] = value
         self._save_settings()
+
+    def _validate_thread_limit(self, proposed: str) -> bool:
+        text = str(proposed).strip()
+        return text.isdigit() or text == ""
+
+    def _current_llm_thread_limit(self) -> int | None:
+        try:
+            raw = self.llm_thread_limit.get()
+        except Exception:
+            return None
+        text = str(raw).strip()
+        if not text:
+            return None
+        try:
+            value = int(text, 10)
+        except Exception:
+            return None
+        if value <= 0:
+            return None
+        return value
+
+    def _invalidate_llm_client_cache(self) -> None:
+        cached = getattr(self, "_llm_client_cache", None)
+        if cached is not None:
+            try:
+                cached.close()
+            except Exception:
+                pass
+        self._llm_client_cache = None
+
+    def _apply_llm_thread_limit_env(self, *, persist: bool = True) -> int | None:
+        limit = self._current_llm_thread_limit()
+        prior = getattr(self, "_llm_thread_limit_applied", None)
+
+        if limit is None:
+            os.environ.pop("QWEN_N_THREADS", None)
+        else:
+            os.environ["QWEN_N_THREADS"] = str(limit)
+
+        if persist:
+            if not isinstance(self.settings, dict):
+                self.settings = {}
+            self.settings["llm_thread_limit"] = str(limit) if limit is not None else ""
+            self._save_settings()
+
+        if limit != prior:
+            self._llm_thread_limit_applied = limit
+            self._invalidate_llm_client_cache()
+
+        return limit
+
+    def _on_llm_thread_limit_changed(self, *_: object) -> None:
+        self._apply_llm_thread_limit_env(persist=True)
 
     def _variables_dialog_defaults(self) -> dict[str, str]:
         defaults: dict[str, str] = {}
@@ -12618,7 +12684,11 @@ class App(tk.Tk):
         start = time.perf_counter()
 
         try:
-            self.status_var.set("Loading Vision LLM (GPU)…")
+            limit = self._apply_llm_thread_limit_env(persist=False)
+            status = "Loading Vision LLM (GPU)…"
+            if limit:
+                status = f"Loading Vision LLM (GPU, {limit} CPU threads)…"
+            self.status_var.set(status)
             self.update_idletasks()
         except Exception:
             pass
@@ -12627,11 +12697,16 @@ class App(tk.Tk):
             self.LLM_SUGGEST = self.llm_services.load_vision_model(
                 n_ctx=8192,
                 n_gpu_layers=20,
+                n_threads=limit,
             )
         except Exception as exc:
             self._llm_load_error = exc
             try:
-                self.status_var.set(f"Vision LLM GPU load failed ({exc}); retrying CPU mode…")
+                limit = self._apply_llm_thread_limit_env(persist=False)
+                msg = f"Vision LLM GPU load failed ({exc}); retrying CPU mode…"
+                if limit:
+                    msg = f"{msg[:-1]} with {limit} CPU threads…)"
+                self.status_var.set(msg)
                 self.update_idletasks()
             except Exception:
                 pass
@@ -12639,6 +12714,7 @@ class App(tk.Tk):
                 self.LLM_SUGGEST = self.llm_services.load_vision_model(
                     n_ctx=4096,
                     n_gpu_layers=0,
+                    n_threads=limit,
                 )
             except Exception as exc2:
                 self._llm_load_error = exc2
@@ -13446,6 +13522,7 @@ class App(tk.Tk):
                 "enabled": bool(self.llm_enabled.get()),
                 "apply_adjustments": bool(self.apply_llm_adj.get()),
                 "model_path": self.llm_model_path.get().strip(),
+                "thread_limit": self.llm_thread_limit.get().strip(),
             },
             "status": self.status_var.get(),
         }
@@ -13497,6 +13574,15 @@ class App(tk.Tk):
             model_path = llm_payload.get("model_path")
             if isinstance(model_path, str):
                 self.llm_model_path.set(model_path)
+            thread_limit = llm_payload.get("thread_limit")
+            if isinstance(thread_limit, str):
+                self.llm_thread_limit.set(thread_limit)
+            elif isinstance(thread_limit, (int, float)):
+                try:
+                    self.llm_thread_limit.set(str(int(thread_limit)))
+                except Exception:
+                    self.llm_thread_limit.set("")
+            self._apply_llm_thread_limit_env(persist=True)
 
         geo_payload = payload.get("geo")
         self.geo = dict(geo_payload) if isinstance(geo_payload, dict) else {}
@@ -13558,6 +13644,20 @@ class App(tk.Tk):
         ttk.Label(parent, text="Qwen GGUF model path").grid(row=row, column=0, sticky="e", padx=5, pady=3)
         ttk.Entry(parent, textvariable=self.llm_model_path, width=80).grid(row=row, column=1, sticky="w", padx=5, pady=3)
         ttk.Button(parent, text="Browse...", command=self._pick_model).grid(row=row, column=2, padx=5); row+=1
+        validate_cmd = self.register(self._validate_thread_limit)
+        ttk.Label(parent, text="Max CPU threads (blank = auto)").grid(row=row, column=0, sticky="e", padx=5, pady=3)
+        ttk.Entry(
+            parent,
+            textvariable=self.llm_thread_limit,
+            width=12,
+            validate="key",
+            validatecommand=(validate_cmd, "%P"),
+        ).grid(row=row, column=1, sticky="w", padx=5, pady=3)
+        ttk.Label(
+            parent,
+            text="Lower this if llama.cpp overwhelms your machine.",
+        ).grid(row=row, column=2, sticky="w", padx=5, pady=3)
+        row += 1
         ttk.Checkbutton(parent, text="Apply LLM adjustments to params", variable=self.apply_llm_adj).grid(row=row, column=0, sticky="w", pady=(0,6)); row+=1
         ttk.Button(parent, text="Run LLM on current GEO", command=self.run_llm).grid(row=row, column=0, sticky="w", padx=5, pady=6); row+=1
         self.llm_txt = tk.Text(parent, wrap="word", height=24); self.llm_txt.grid(row=row, column=0, columnspan=3, sticky="nsew")
