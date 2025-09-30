@@ -1021,9 +1021,18 @@ def build_suggest_payload(
         "tap_details",
         "npt_qty",
         "max_hole_depth_in",
+        "plate_area_in2",
         "finish_flags",
         "stock_guess",
         "has_ldr_notes",
+        "has_tight_tol",
+        "dfm_geo",
+        "tolerance_inputs",
+        "default_tolerance_note",
+        "stock_catalog",
+        "machine_limits",
+        "fixture_plan",
+        "fai_required",
         "pocket_area_total_in2",
         "slot_count",
         "edge_len_in",
@@ -1138,6 +1147,14 @@ def build_suggest_payload(
         "tap_details",
         "npt_qty",
         "stock_guess",
+        "has_tight_tol",
+        "dfm_geo",
+        "tolerance_inputs",
+        "default_tolerance_note",
+        "stock_catalog",
+        "machine_limits",
+        "fixture_plan",
+        "fai_required",
         "pocket_area_total_in2",
         "slot_count",
         "edge_len_in",
@@ -1174,6 +1191,67 @@ def build_suggest_payload(
         "scrap_max": _coerce_float(bounds.get("scrap_max")) or 0.25,
     }
 
+    seed_extra: dict[str, Any] = {}
+    dfm_geo_summary = derived_summary.get("dfm_geo")
+    if isinstance(dfm_geo_summary, dict) and dfm_geo_summary:
+        dfm_bits: list[str] = []
+        min_wall = _coerce_float(dfm_geo_summary.get("min_wall_mm"))
+        if min_wall is not None:
+            dfm_bits.append(f"min_wall≈{min_wall:.1f}mm")
+        if dfm_geo_summary.get("thin_wall"):
+            dfm_bits.append("thin_walls")
+        unique_normals = _coerce_int(dfm_geo_summary.get("unique_normals"))
+        if unique_normals:
+            dfm_bits.append(f"{unique_normals} normals")
+        deburr_edge = _coerce_float(dfm_geo_summary.get("deburr_edge_len_mm"))
+        if deburr_edge and deburr_edge > 0:
+            dfm_bits.append(f"deburr_edge≈{deburr_edge:.0f}mm")
+        face_count = _coerce_int(dfm_geo_summary.get("face_count"))
+        if face_count and face_count > 0:
+            dfm_bits.append(f"{face_count} faces")
+        if dfm_bits:
+            seed_extra["dfm_summary"] = dfm_bits[:5]
+
+    tol_inputs_summary = derived_summary.get("tolerance_inputs")
+    if isinstance(tol_inputs_summary, dict) and tol_inputs_summary:
+        tol_labels = [str(k).strip() for k in tol_inputs_summary.keys() if str(k).strip()]
+        if tol_labels:
+            seed_extra["tolerance_focus"] = sorted(tol_labels)[:6]
+
+    has_tight_tol_seed = derived_summary.get("has_tight_tol")
+    if has_tight_tol_seed is not None:
+        seed_extra["has_tight_tol"] = bool(has_tight_tol_seed)
+
+    default_tol_note = derived_summary.get("default_tolerance_note")
+    if isinstance(default_tol_note, str) and default_tol_note.strip():
+        seed_extra["default_tolerance_note"] = default_tol_note.strip()[:160]
+
+    if derived_summary.get("fai_required") is not None:
+        seed_extra["fai_required"] = bool(derived_summary.get("fai_required"))
+
+    stock_catalog_summary = derived_summary.get("stock_catalog")
+    stock_focus: list[str] = []
+    if isinstance(stock_catalog_summary, dict):
+        for entry in stock_catalog_summary.values():
+            label = None
+            if isinstance(entry, dict):
+                label = entry.get("item") or entry.get("name") or entry.get("stock")
+            elif isinstance(entry, str):
+                label = entry
+            if label:
+                label = str(label).strip()
+            if label:
+                stock_focus.append(label)
+        if not stock_focus:
+            stock_focus = [str(k).strip() for k in stock_catalog_summary.keys() if str(k).strip()]
+    elif isinstance(stock_catalog_summary, (list, tuple, set)):
+        for entry in stock_catalog_summary:
+            label = str(entry).strip()
+            if label:
+                stock_focus.append(label)
+    if stock_focus:
+        seed_extra["stock_focus"] = stock_focus[:6]
+
     seed = {
         "top_process_hours": top_process_hours,
         "top_pass_through": top_pass_through,
@@ -1181,6 +1259,8 @@ def build_suggest_payload(
         "setups": baseline_summary["setups"],
         "finish_flags": finish_flags,
     }
+    if seed_extra:
+        seed.update(seed_extra)
 
     payload = {
         "geo": geo_summary,
@@ -6733,6 +6813,8 @@ def compute_quote_from_df(df: pd.DataFrame,
     derived_block = geo_for_suggest["derived"]
     derived_block["has_ldr_notes"] = has_leader_notes
     derived_block["has_tight_tol"] = has_tight_tol_flag
+    if default_tol_text:
+        derived_block["default_tolerance_note"] = str(default_tol_text)
     if max_hole_depth_in is not None:
         derived_block["max_hole_depth_in"] = max_hole_depth_in
     if plate_area_in2 is not None:
@@ -6741,6 +6823,18 @@ def compute_quote_from_df(df: pd.DataFrame,
         derived_block["finish_flags"] = finish_flags_list
     if stock_guess:
         derived_block["stock_guess"] = stock_guess
+    dfm_geo_block = features.get("dfm_geo") if isinstance(features.get("dfm_geo"), dict) else None
+    if dfm_geo_block and any(val not in (None, "", []) for val in dfm_geo_block.values()):
+        derived_block["dfm_geo"] = dfm_geo_block
+    tol_inputs_block = tolerance_inputs if isinstance(tolerance_inputs, dict) else None
+    if tol_inputs_block:
+        derived_block["tolerance_inputs"] = tol_inputs_block
+    for extra_key in ("stock_catalog", "machine_limits", "fixture_plan"):
+        extra_val = features.get(extra_key)
+        if extra_val not in (None, "", [], {}):
+            derived_block[extra_key] = extra_val
+    if "fai_required" in features:
+        derived_block["fai_required"] = bool(features.get("fai_required"))
 
     payload = build_suggest_payload(geo_for_suggest, llm_baseline_payload, base_costs["rates"], llm_bounds)
 
@@ -7001,6 +7095,60 @@ def compute_quote_from_df(df: pd.DataFrame,
         risks_clean = [str(r).strip() for r in dfm_risks if str(r).strip()]
         if risks_clean:
             llm_notes.append("DFM risks: " + "; ".join(risks_clean[:4]))
+
+    dfm_context_bits: list[str] = []
+    derived_for_notes = geo_for_suggest.get("derived") if isinstance(geo_for_suggest, dict) else {}
+    dfm_geo_notes = derived_for_notes.get("dfm_geo") if isinstance(derived_for_notes, dict) else None
+    if not isinstance(dfm_geo_notes, dict) and isinstance(features.get("dfm_geo"), dict):
+        dfm_geo_notes = features.get("dfm_geo")
+    if isinstance(dfm_geo_notes, dict):
+        min_wall_val = dfm_geo_notes.get("min_wall_mm")
+        try:
+            min_wall_num = float(min_wall_val) if min_wall_val is not None else None
+        except Exception:
+            min_wall_num = None
+        if min_wall_num:
+            dfm_context_bits.append(f"min wall ≈ {min_wall_num:.1f} mm")
+        if dfm_geo_notes.get("thin_wall"):
+            dfm_context_bits.append("thin walls flagged")
+        unique_normals_val = dfm_geo_notes.get("unique_normals")
+        try:
+            unique_normals_int = int(unique_normals_val) if unique_normals_val is not None else None
+        except Exception:
+            unique_normals_int = None
+        if unique_normals_int:
+            dfm_context_bits.append(f"{unique_normals_int} unique normals")
+        face_count_val = dfm_geo_notes.get("face_count")
+        try:
+            face_count_int = int(face_count_val) if face_count_val is not None else None
+        except Exception:
+            face_count_int = None
+        if face_count_int and face_count_int > 0:
+            dfm_context_bits.append(f"{face_count_int} faces")
+        deburr_edge_val = dfm_geo_notes.get("deburr_edge_len_mm")
+        try:
+            deburr_edge_num = float(deburr_edge_val) if deburr_edge_val is not None else None
+        except Exception:
+            deburr_edge_num = None
+        if deburr_edge_num and deburr_edge_num > 0:
+            dfm_context_bits.append(f"deburr edge ≈ {deburr_edge_num:.0f} mm")
+
+    if has_tight_tol_flag:
+        dfm_context_bits.append("tight tolerance callouts")
+
+    tol_inputs_for_notes = tolerance_inputs if isinstance(tolerance_inputs, dict) else None
+    if tol_inputs_for_notes:
+        tol_labels = [str(k).strip() for k in tol_inputs_for_notes.keys() if str(k).strip()]
+        if tol_labels:
+            dfm_context_bits.append("tolerance inputs: " + ", ".join(sorted(tol_labels)[:3]))
+
+    default_tol_note_for_notes = derived_for_notes.get("default_tolerance_note")
+    if isinstance(default_tol_note_for_notes, str) and default_tol_note_for_notes.strip():
+        dfm_context_bits.append(default_tol_note_for_notes.strip()[:120])
+
+    if dfm_context_bits:
+        unique_bits = list(dict.fromkeys(dfm_context_bits))
+        llm_notes.append("DFM factors: " + "; ".join(unique_bits[:4]))
 
     tol_plan = overrides.get("tolerance_impacts") if isinstance(overrides, dict) else None
     if isinstance(tol_plan, dict) and tol_plan:

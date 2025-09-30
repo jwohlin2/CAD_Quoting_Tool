@@ -46,7 +46,10 @@ ALWAYS return a complete JSON object with THESE KEYS, even if values are unchang
 }
 All outputs MUST respect bounds in `bounds`.
 Prefer small, explainable changes (±10–50%). Never leave fields out.
-You may use payload["seed"] heuristics to bias adjustments when helpful."""
+`signals` exposes dfm/tolerance context such as `dfm_geo` (thin walls, unique normals, deburr edge length),
+`tolerance_inputs`, `default_tolerance_note`, `has_tight_tol`, `stock_catalog`, and `machine_limits`.
+Use these when suggesting scrap, inspection, fixture, setup, or stock strategies and cite them in your notes.
+You may use payload["seed"] heuristics (e.g., `dfm_summary`, `tolerance_focus`, `stock_focus`, `has_tight_tol`) to bias adjustments when helpful."""
 
 
 SUGG_TO_EDITOR = {
