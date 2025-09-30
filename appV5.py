@@ -12729,6 +12729,67 @@ class App(tk.Tk):
         self._fill_editor_if_blank("Plate Width (in)", plate_wid_in)
         self._fill_editor_if_blank("Thickness (in)", thickness_in)
 
+        def _positive_float(value: Any) -> float | None:
+            try:
+                num = float(value)
+            except (TypeError, ValueError):
+                return None
+            if math.isnan(num) or num <= 0:
+                return None
+            return num
+
+        hole_counts: list[int] = []
+        hole_diams_list: list[float] = []
+        hole_bins_total = 0.0
+        hole_bins_weighted = 0.0
+
+        for src in sources:
+            if not isinstance(src, dict):
+                continue
+            for key in ("hole_count", "hole_count_geom"):
+                val = _positive_float(src.get(key))
+                if val is not None:
+                    hole_counts.append(int(round(val)))
+            feature_counts = src.get("feature_counts")
+            if isinstance(feature_counts, Mapping):
+                val = _positive_float(feature_counts.get("hole_count"))
+                if val is not None:
+                    hole_counts.append(int(round(val)))
+            hole_diams = src.get("hole_diams_mm")
+            if isinstance(hole_diams, Sequence) and not isinstance(hole_diams, (str, bytes)):
+                for diam in hole_diams:
+                    diam_val = _positive_float(diam)
+                    if diam_val is not None:
+                        hole_diams_list.append(diam_val)
+            hole_bins = src.get("hole_bins")
+            if isinstance(hole_bins, Mapping):
+                for diam, count in hole_bins.items():
+                    diam_val = _positive_float(diam)
+                    count_val = _positive_float(count)
+                    if diam_val is None or count_val is None:
+                        continue
+                    hole_bins_weighted += diam_val * count_val
+                    hole_bins_total += count_val
+                if hole_bins_total > 0:
+                    hole_counts.append(int(round(hole_bins_total)))
+
+        hole_count_val = max(hole_counts) if hole_counts else None
+        if hole_count_val is None and hole_diams_list:
+            hole_count_val = len(hole_diams_list)
+        elif hole_count_val is None and hole_bins_total > 0:
+            hole_count_val = int(round(hole_bins_total))
+
+        avg_hole_diam = None
+        if hole_diams_list:
+            avg_hole_diam = sum(hole_diams_list) / len(hole_diams_list)
+        elif hole_bins_total > 0:
+            avg_hole_diam = hole_bins_weighted / hole_bins_total if hole_bins_total else None
+
+        if hole_count_val and hole_count_val > 0:
+            self._fill_editor_if_blank("Hole Count (override)", int(round(hole_count_val)))
+        if avg_hole_diam and avg_hole_diam > 0:
+            self._fill_editor_if_blank("Avg Hole Diameter (mm)", avg_hole_diam)
+
         from_back = False
         for key in ("holes_from_back", "needs_back_face", "from_back"):
             if any(bool(src.get(key)) for src in sources if isinstance(src, dict)):
