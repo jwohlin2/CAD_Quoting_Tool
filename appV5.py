@@ -3991,12 +3991,16 @@ def pct(value: Any, default: float = 0.0) -> float:
 _DEFAULT_PRICING_ENGINE = SERVICE_CONTAINER.get_pricing_engine()
 
 
-def compute_material_cost(material_name: str,
-                          mass_kg: float,
-                          scrap_frac: float,
-                          overrides: dict[str, Any] | None,
-                          vendor_csv: str | None,
-                          pricing: PricingEngine | None = None) -> tuple[float, dict[str, Any]]:
+def compute_material_cost(
+    material_name: str,
+    mass_kg: float,
+    scrap_frac: float,
+    overrides: dict[str, Any] | None,
+    vendor_csv: str | None,
+    *,
+    default_material_display: str = DEFAULT_MATERIAL_DISPLAY,
+    pricing: PricingEngine | None = None,
+) -> tuple[float, dict[str, Any]]:
 
     overrides = overrides or {}
     pricing_engine = pricing or _DEFAULT_PRICING_ENGINE
@@ -4335,6 +4339,8 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     params_defaults = default_params if default_params is not None else QuoteConfiguration().default_params
     rates_defaults = default_rates if default_rates is not None else PricingRegistry().default_rates
+    if not isinstance(default_material_display, str) or not default_material_display.strip():
+        default_material_display = DEFAULT_MATERIAL_DISPLAY
     params = {**params_defaults, **(params or {})}
     rates = {**rates_defaults, **(rates or {})}
     rates.setdefault("DrillingRate", rates.get("MillingRate", 0.0))
@@ -4735,6 +4741,7 @@ def compute_quote_from_df(df: pd.DataFrame,
             scrap_pct,
             material_overrides,
             material_vendor_csv,
+            default_material_display=default_material_display,
             pricing=pricing_engine,
         )
     except Exception as err:
@@ -10441,6 +10448,15 @@ class App(tk.Tk):
         self.pricing_registry = pricing_registry or PricingRegistry()
         self.llm_services = llm_services or LLMServices()
 
+        default_material_display = getattr(
+            self.configuration,
+            "default_material_display",
+            DEFAULT_MATERIAL_DISPLAY,
+        )
+        if not isinstance(default_material_display, str) or not default_material_display.strip():
+            default_material_display = DEFAULT_MATERIAL_DISPLAY
+        self.default_material_display = default_material_display
+
         if getattr(self.configuration, "title", None):
             self.title(self.configuration.title)
         if getattr(self.configuration, "window_geometry", None):
@@ -10455,21 +10471,33 @@ class App(tk.Tk):
         self.geo_context: dict[str, Any] = {}
         if hasattr(self.configuration, "create_params"):
             try:
-                self.params = self.configuration.create_params()
+                params = self.configuration.create_params()
             except Exception:
-                self.params = copy.deepcopy(PARAMS_DEFAULT)
+                params = copy.deepcopy(PARAMS_DEFAULT)
+            if not isinstance(params, dict):
+                params = copy.deepcopy(PARAMS_DEFAULT)
+            self.params = params
+            self.default_params_template = copy.deepcopy(params)
         else:
             base_params = getattr(self.configuration, "default_params", PARAMS_DEFAULT)
-            self.params = copy.deepcopy(base_params if isinstance(base_params, dict) else PARAMS_DEFAULT)
+            template_params = base_params if isinstance(base_params, dict) else PARAMS_DEFAULT
+            self.default_params_template = copy.deepcopy(template_params)
+            self.params = copy.deepcopy(self.default_params_template)
 
         if hasattr(self.pricing_registry, "create_rates"):
             try:
-                self.rates = self.pricing_registry.create_rates()
+                rates = self.pricing_registry.create_rates()
             except Exception:
-                self.rates = copy.deepcopy(RATES_DEFAULT)
+                rates = copy.deepcopy(RATES_DEFAULT)
+            if not isinstance(rates, dict):
+                rates = copy.deepcopy(RATES_DEFAULT)
+            self.rates = rates
+            self.default_rates_template = copy.deepcopy(rates)
         else:
             base_rates = getattr(self.pricing_registry, "default_rates", RATES_DEFAULT)
-            self.rates = copy.deepcopy(base_rates if isinstance(base_rates, dict) else RATES_DEFAULT)
+            template_rates = base_rates if isinstance(base_rates, dict) else RATES_DEFAULT
+            self.default_rates_template = copy.deepcopy(template_rates)
+            self.rates = copy.deepcopy(self.default_rates_template)
         self.config_errors = list(CONFIG_INIT_ERRORS)
 
         self.quote_state = QuoteState()
@@ -10887,7 +10915,7 @@ class App(tk.Tk):
             initial_raw = row_data["Example Values / Options"]
             initial_value = str(initial_raw) if initial_raw is not None else ""
             if normalized_name in {"material"}:
-                var = tk.StringVar(value=self.configuration.default_material_display)
+                var = tk.StringVar(value=self.default_material_display)
                 if initial_value:
                     var.set(initial_value)
                 normalized_initial = _normalize_lookup_key(var.get())
@@ -11818,9 +11846,9 @@ class App(tk.Tk):
                     self.vars_df,
                     params=self.params,
                     rates=self.rates,
-                    default_params=self.configuration.default_params,
-                    default_rates=self.pricing_registry.default_rates,
-                    default_material_display=self.configuration.default_material_display,
+                    default_params=self.default_params_template,
+                    default_rates=self.default_rates_template,
+                    default_material_display=self.default_material_display,
                     material_vendor_csv=self.settings.get("material_vendor_csv", "") if isinstance(self.settings, dict) else "",
                     llm_enabled=self.llm_enabled.get(),
                     llm_model_path=self.llm_model_path.get().strip() or None,
