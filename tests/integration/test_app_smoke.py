@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 import appV5
@@ -182,3 +184,52 @@ def test_geo_read_more_hook_override_roundtrip() -> None:
         assert captured == ["/tmp/file.dxf"]
     finally:
         appV5.set_build_geo_from_dxf_hook(None)
+
+def test_discover_qwen_vl_assets_prefers_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    model = tmp_path / "custom-model.gguf"
+    model.write_text("model", encoding="utf-8")
+    mmproj = tmp_path / "custom-mmproj.gguf"
+    mmproj.write_text("proj", encoding="utf-8")
+
+    monkeypatch.setenv("QWEN_VL_GGUF_PATH", str(model))
+    monkeypatch.setenv("QWEN_VL_MMPROJ_PATH", str(mmproj))
+    monkeypatch.setenv("QWEN_GGUF_PATH", "")
+    monkeypatch.setenv("QWEN_MMPROJ_PATH", "")
+
+    found_model, found_mmproj = appV5.discover_qwen_vl_assets()
+    assert Path(found_model) == model
+    assert Path(found_mmproj) == mmproj
+
+
+def test_discover_qwen_vl_assets_scans_known_dirs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("QWEN_VL_GGUF_PATH", raising=False)
+    monkeypatch.delenv("QWEN_VL_MMPROJ_PATH", raising=False)
+    monkeypatch.delenv("QWEN_GGUF_PATH", raising=False)
+    monkeypatch.delenv("QWEN_MMPROJ_PATH", raising=False)
+
+    monkeypatch.setattr(appV5, "PREFERRED_MODEL_DIRS", [str(tmp_path)], raising=False)
+
+    model = tmp_path / appV5._DEFAULT_VL_MODEL_NAMES[0]
+    mmproj = tmp_path / appV5._DEFAULT_MM_PROJ_NAMES[0]
+    model.write_text("model", encoding="utf-8")
+    mmproj.write_text("proj", encoding="utf-8")
+
+    found_model, found_mmproj = appV5.discover_qwen_vl_assets()
+    assert Path(found_model) == model
+    assert Path(found_mmproj) == mmproj
+
+
+def test_discover_qwen_vl_assets_errors_when_missing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("QWEN_VL_GGUF_PATH", raising=False)
+    monkeypatch.delenv("QWEN_VL_MMPROJ_PATH", raising=False)
+    monkeypatch.delenv("QWEN_GGUF_PATH", raising=False)
+    monkeypatch.delenv("QWEN_MMPROJ_PATH", raising=False)
+    monkeypatch.setattr(appV5, "PREFERRED_MODEL_DIRS", [str(tmp_path)], raising=False)
+
+    with pytest.raises(RuntimeError) as exc:
+        appV5.discover_qwen_vl_assets()
+
+    message = str(exc.value)
+    assert "QWEN_VL_GGUF_PATH" in message
+    assert "QWEN_VL_MMPROJ_PATH" in message
+
