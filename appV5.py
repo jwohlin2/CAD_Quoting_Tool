@@ -5046,6 +5046,51 @@ def pct(value: Any, default: float = 0.0) -> float:
 _DEFAULT_PRICING_ENGINE = SERVICE_CONTAINER.get_pricing_engine()
 
 
+def _material_price_from_choice(choice: str, material_lookup: dict[str, float]) -> float | None:
+    """Resolve a material price per-gram for the editor helpers."""
+
+    choice = str(choice or "").strip()
+    if not choice:
+        return None
+
+    norm_choice = _normalize_lookup_key(choice)
+    if norm_choice == MATERIAL_OTHER_KEY:
+        return None
+
+    price = material_lookup.get(norm_choice)
+    if price is None:
+        try:
+            price_per_kg, _src = _resolve_material_unit_price(choice, unit="kg")
+        except Exception:
+            return None
+        if not price_per_kg:
+            return None
+        price = float(price_per_kg) / 1000.0
+    return float(price)
+
+
+def _update_material_price_field(
+    material_choice_var: Any,
+    material_price_var: Any,
+    material_lookup: dict[str, float],
+) -> bool:
+    """Update the UI material price field, returning ``True`` when changed."""
+
+    if material_choice_var is None or material_price_var is None:
+        return False
+
+    price = _material_price_from_choice(material_choice_var.get(), material_lookup)
+    if price is None:
+        return False
+
+    current_val = _coerce_float_or_none(material_price_var.get())
+    if current_val is not None and abs(current_val - price) < 1e-6:
+        return False
+
+    material_price_var.set(f"{price:.4f}")
+    return True
+
+
 def compute_material_cost(
     material_name: str,
     mass_kg: float,
@@ -5135,7 +5180,10 @@ def compute_material_cost(
             fallback_key = _normalize_lookup_key(default_material_display)
             resolver_name = MATERIAL_DISPLAY_BY_KEY.get(fallback_key, default_material_display)
         try:
-            resolved_price, resolver_source = resolve_material_unit_price(resolver_name, unit="kg")
+            resolved_price, resolver_source = _resolve_material_unit_price(
+                resolver_name,
+                unit="kg",
+            )
         except Exception:
             resolved_price, resolver_source = None, ""
         if resolved_price and math.isfinite(float(resolved_price)):
@@ -5974,7 +6022,10 @@ def compute_quote_from_df(df: pd.DataFrame,
     if is_plate_2d:
         mat_for_price = geo_context.get("material") or material_name
         try:
-            mat_usd_per_kg, mat_src = resolve_material_unit_price(mat_for_price, unit="kg")
+            mat_usd_per_kg, mat_src = _resolve_material_unit_price(
+                mat_for_price,
+                unit="kg",
+            )
         except Exception:
             mat_usd_per_kg, mat_src = 0.0, ""
         mat_usd_per_kg = float(mat_usd_per_kg or 0.0)
@@ -12410,27 +12461,11 @@ class App(tk.Tk):
         self.var_material: tk.StringVar | None = None
 
         def update_material_price(*_):
-            if material_choice_var is None or material_price_var is None:
-                return
-            choice = material_choice_var.get().strip()
-            if not choice:
-                return
-            norm_choice = _normalize_lookup_key(choice)
-            if norm_choice == MATERIAL_OTHER_KEY:
-                return
-            price = material_lookup.get(norm_choice)
-            if price is None:
-                try:
-                    price_per_kg, _src = resolve_material_unit_price(choice, unit="kg")
-                except Exception:
-                    return
-                if not price_per_kg:
-                    return
-                price = float(price_per_kg) / 1000.0
-            current_val = _coerce_float_or_none(material_price_var.get())
-            if current_val is not None and abs(current_val - price) < 1e-6:
-                return
-            material_price_var.set(f"{price:.4f}")
+            _update_material_price_field(
+                material_choice_var,
+                material_price_var,
+                material_lookup,
+            )
 
         for _, row_data in df.iterrows():
             item_name = str(row_data["Item"])
