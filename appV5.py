@@ -4631,7 +4631,39 @@ def read_variables_file(path: str, return_full: bool = False):
         sheet_name = "Variables" if "Variables" in xl.sheet_names else xl.sheet_names[0]
         df_full = pd.read_excel(path, sheet_name=sheet_name)
     elif lp.endswith(".csv"):
-        df_full = pd.read_csv(path, encoding="utf-8-sig")
+        try:
+            df_full = pd.read_csv(path, encoding="utf-8-sig")
+        except Exception as csv_err:
+            # When pandas' default engine hits irregular commas (extra columns
+            # from free-form notes, etc.) fall back to a more forgiving parser
+            # that collapses spill-over cells into the final column so that the
+            # sheet still loads for the estimator instead of forcing users back
+            # through the file picker.
+            import csv as _csv
+
+            with open(path, encoding="utf-8-sig", newline="") as f:
+                rows = list(_csv.reader(f))
+
+            if not rows:
+                raise csv_err
+
+            header = rows[0]
+            if not header:
+                raise csv_err
+            normalized: list[list[str]] = []
+            for row in rows[1:]:
+                if len(row) > len(header):
+                    keep = len(header) - 1
+                    merged_tail = ",".join(row[keep:]) if keep >= 0 else ""
+                    row = row[:keep] + [merged_tail]
+                elif len(row) < len(header):
+                    row = row + [""] * (len(header) - len(row))
+                normalized.append(row)
+
+            try:
+                df_full = pd.DataFrame(normalized, columns=header)
+            except Exception:
+                raise csv_err
     else:
         raise ValueError("Variables must be .xlsx or .csv")
 
