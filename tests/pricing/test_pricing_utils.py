@@ -17,9 +17,9 @@ def test_price_value_to_per_gram_converts_common_units() -> None:
 
 
 def test_resolve_material_unit_price_prefers_wieland(monkeypatch: pytest.MonkeyPatch) -> None:
-    module = types.ModuleType("wieland_scraper")
+    module = types.ModuleType("cad_quoter.pricing.wieland_scraper")
     module.get_live_material_price = lambda *args, **kwargs: (17.5, "wieland-live")
-    monkeypatch.setitem(sys.modules, "wieland_scraper", module)
+    monkeypatch.setitem(sys.modules, "cad_quoter.pricing.wieland_scraper", module)
 
     price, source = pricing.resolve_material_unit_price("6061 aluminum", unit="kg")
     assert price == pytest.approx(17.5)
@@ -29,9 +29,9 @@ def test_resolve_material_unit_price_prefers_wieland(monkeypatch: pytest.MonkeyP
 def test_resolve_material_unit_price_falls_back_to_csv(
     monkeypatch: pytest.MonkeyPatch, sample_pricing_table: dict
 ) -> None:
-    module = types.ModuleType("wieland_scraper")
+    module = types.ModuleType("cad_quoter.pricing.wieland_scraper")
     module.get_live_material_price = lambda *args, **kwargs: (None, "wieland-offline")
-    monkeypatch.setitem(sys.modules, "wieland_scraper", module)
+    monkeypatch.setitem(sys.modules, "cad_quoter.pricing.wieland_scraper", module)
 
     monkeypatch.setattr(pricing, "load_backup_prices_csv", lambda path=None: sample_pricing_table)
 

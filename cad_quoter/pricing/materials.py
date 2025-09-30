@@ -98,7 +98,7 @@ def resolve_material_unit_price(display_name: str, unit: str = "kg") -> tuple[fl
     key = normalize_material_key(display_name)
 
     try:
-        from wieland_scraper import get_live_material_price  # type: ignore
+        from .wieland_scraper import get_live_material_price  # type: ignore
 
         price, source = get_live_material_price(display_name, unit=unit, fallback_usd_per_kg=float("nan"))
         if price is not None and math.isfinite(float(price)):
