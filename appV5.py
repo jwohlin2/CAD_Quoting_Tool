@@ -51,6 +51,7 @@ import tkinter.font as tkfont
 import urllib.request
 from importlib import import_module
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+
 import cad_quoter.geometry as geometry
 
 from cad_quoter.domain_models import (
@@ -102,7 +103,6 @@ except Exception:
 
 
 build_geo_from_dxf: Optional[Callable[[str], Dict[str, Any]]] = None
-
 
 def _match_items_contains(items: pd.Series, pattern: str) -> pd.Series:
     """Case-insensitive regex match over Items."""
