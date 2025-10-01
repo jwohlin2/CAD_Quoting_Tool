@@ -17,6 +17,8 @@
     "FixtureBuildRate": 120.0,
     "AssemblyRate": 110.0,
     "EngineerRate": 140.0,
+    "ProjectManagementRate": 135.0,
+    "ToolmakerSupportRate": 125.0,
     "CAMRate": 125.0
   }
 }

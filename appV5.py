@@ -4385,6 +4385,8 @@ def _estimator_patterns():
         r"(Fixture\s*Design|Process\s*Sheet|Traveler|Documentation|Complex\s*Assembly\s*Doc)",
 
         r"(Fixture\s*Build|Custom\s*Fixture\s*Build)", r"(Fixture\s*Material\s*Cost|Fixture\s*Hardware)",
+        r"(Project\s*(?:Manager|Management|Mgmt)|Program\s*Manager|Project\s*Coordination)",
+        r"(Tool\s*(?:&|and)\s*Die\s*Maker|Toolmaker|Tool\s*(?:&|and)\s*Die\s*Support|Tooling\s*Support|Tool\s*Room)",
 
         r"(Roughing\s*Cycle\s*Time|Adaptive|HSM)", r"(Semi[- ]?Finish|Rest\s*Milling)", r"(Finishing\s*Cycle\s*Time)",
         r"(Number\s*of\s*Milling\s*Setups|Milling\s*Setups)", r"(Setup\s*Time\s*per\s*Setup|Setup\s*Hours\s*/\s*Setup)",
@@ -5208,7 +5210,7 @@ class GeometryLoader:
 
 # Common regex pieces (kept non-capturing to avoid pandas warnings)
 TIME_RE = r"\b(?:hours?|hrs?|hr|time|min(?:ute)?s?)\b"
-MONEY_RE = r"(?:rate|/hr|per\s*hour|per\s*hr|price|cost|$)"
+MONEY_RE = r"(?:rate|/hr|per\s*hour|per\s*hr|price|cost|\$)"
 
 # ===== QUOTE HELPERS ========================================================
 
@@ -5722,6 +5724,8 @@ def compute_quote_from_df(df: pd.DataFrame,
     params = {**params_defaults, **(params or {})}
     rates = {**rates_defaults, **(rates or {})}
     rates.setdefault("DrillingRate", rates.get("MillingRate", 0.0))
+    rates.setdefault("ProjectManagementRate", rates.get("EngineerRate", 0.0))
+    rates.setdefault("ToolmakerSupportRate", rates.get("FixtureBuildRate", rates.get("EngineerRate", 0.0)))
     if llm_model_path is None:
         llm_model_path = str(params.get("LLMModelPath", "") or "")
     else:
@@ -5990,6 +5994,11 @@ def compute_quote_from_df(df: pd.DataFrame,
     rate_from_sheet(r"Rate\s*-\s*Fixture\s*Build","FixtureBuildRate")
     rate_from_sheet(r"Rate\s*-\s*Assembly",      "AssemblyRate")
     rate_from_sheet(r"Rate\s*-\s*Packaging",     "PackagingRate")
+    rate_from_sheet(r"Rate\s*-\s*Project\s*Mgmt", "ProjectManagementRate")
+    rate_from_sheet(r"Rate\s*-\s*Project\s*Management", "ProjectManagementRate")
+    rate_from_sheet(r"Rate\s*-\s*Project\s*Manager", "ProjectManagementRate")
+    rate_from_sheet(r"Rate\s*-\s*Toolmaker",     "ToolmakerSupportRate")
+    rate_from_sheet(r"Rate\s*-\s*Tool\s*&\s*Die", "ToolmakerSupportRate")
 
     # ---- knobs & qty ---------------------------------------------------------
     OverheadPct    = num_pct(r"\b" + alt('Overhead','Shop Overhead') + r"\b", params["OverheadPct"])
@@ -6452,6 +6461,13 @@ def compute_quote_from_df(df: pd.DataFrame,
     assembly_cost = assembly_hr * rates["AssemblyRate"]
     hardware_cost = num(r"(?:Hardware|BOM\s*Cost|Fasteners|Bearings|CFM\s*Hardware)")
 
+    project_mgmt_hr = sum_time(r"(?:Project\s*(?:Manager|Management|Mgmt)|Program\s*Manager|Project\s*Coordination)")
+    toolmaker_support_hr = sum_time(r"(?:Tool\s*(?:&|and)\s*Die\s*Maker|Toolmaker|Tool\s*(?:&|and)\s*Die\s*Support|Tooling\s*Support|Tool\s*Room)")
+    project_mgmt_rate = float(rates.get("ProjectManagementRate", rates.get("EngineerRate", 0.0)))
+    toolmaker_support_rate = float(rates.get("ToolmakerSupportRate", rates.get("FixtureBuildRate", rates.get("EngineerRate", 0.0))))
+    project_mgmt_cost = project_mgmt_hr * project_mgmt_rate
+    toolmaker_support_cost = toolmaker_support_hr * toolmaker_support_rate
+
     # Outsourced vendors
     heat_treat_cost  = num(r"(?:Outsourced\s*Heat\s*Treat|Heat\s*Treat\s*Cost)")
     coating_cost     = num(r"(?:Plating|Coating|Anodize|Black\s*Oxide|DLC|PVD|CVD)")
@@ -6465,6 +6481,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     shipping_cost     = num(r"(?:Freight|Shipping\s*Cost)")
     insurance_pct     = num_pct(r"(?:Insurance|Liability\s*Adder)", params["InsurancePct"])
     packaging_cost    = packaging_hr * rates["AssemblyRate"] + crate_nre_cost + packaging_mat
+    packaging_flat_base = float((crate_nre_cost or 0.0) + (packaging_mat or 0.0))
 
     # EHS / compliance
     ehs_hr   = sum_time(r"(?:EHS|Compliance|Training|Waste\s*Handling)")
@@ -6584,6 +6601,8 @@ def compute_quote_from_df(df: pd.DataFrame,
         "inspection": inspection_cost,
         "saw_waterjet": saw_cost,
         "assembly": assembly_cost,
+        "project_management": project_mgmt_cost,
+        "toolmaker_support": toolmaker_support_cost,
         "packaging": packaging_cost,
         "ehs_compliance": ehs_cost,
     }
@@ -6618,6 +6637,8 @@ def compute_quote_from_df(df: pd.DataFrame,
         "inspection":       {"hr": inspection_hr_total, "rate": rates.get("InspectionRate", 0.0)},
         "saw_waterjet":     {"hr": sawing_hr,       "rate": rates.get("SawWaterjetRate", 0.0)},
         "assembly":         {"hr": assembly_hr,     "rate": rates.get("AssemblyRate", 0.0)},
+        "project_management": {"hr": project_mgmt_hr, "rate": project_mgmt_rate},
+        "toolmaker_support":  {"hr": toolmaker_support_hr, "rate": toolmaker_support_rate},
         "packaging":        {"hr": packaging_hr,    "rate": rates.get("PackagingRate", rates.get("AssemblyRate", 0.0))},
         "ehs_compliance":   {"hr": ehs_hr,          "rate": rates.get("InspectionRate", 0.0)},
     }
@@ -6701,7 +6722,6 @@ def compute_quote_from_df(df: pd.DataFrame,
             fixture_plan_desc = strategy.strip()
 
     fixture_build_hr_base = float(fixture_build_hr or 0.0)
-    packaging_flat_base = float((crate_nre_cost or 0.0) + (packaging_mat or 0.0))
     cmm_minutes_base = float((cmm_run_hr or 0.0) * 60.0)
     inproc_hr_base = float(inproc_hr or 0.0)
     packaging_hr_base = float(packaging_hr or 0.0)
