@@ -13337,12 +13337,7 @@ class App(tk.Tk):
                 ttk.Entry(control_container, textvariable=var, width=30).grid(row=0, column=0, sticky="w")
                 base_text = control_spec.base_text.strip() if isinstance(control_spec.base_text, str) else ""
                 if base_text:
-                    ttk.Label(
-                        control_container,
-                        text=f"Based on: {base_text}",
-                        wraplength=260,
-                        foreground="#555555",
-                    ).grid(row=0, column=1, sticky="w", padx=(6, 0))
+                    _add_info_label(f"Based on: {base_text}")
                 self.quote_vars[item_name] = var
                 self._register_editor_field(item_name, var, label_widget)
 
