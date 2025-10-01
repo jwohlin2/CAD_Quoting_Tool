@@ -4575,6 +4575,12 @@ except Exception:
 
 CORE_COLS = ["Item", "Example Values / Options", "Data Type / Input Method"]
 
+_MASTER_VARIABLES_CACHE: dict[str, Any] = {
+    "loaded": False,
+    "core": None,
+    "full": None,
+}
+
 def _coerce_core_types(df_core: "pd.DataFrame") -> "pd.DataFrame":
     """Light normalization for estimator expectations."""
     core = df_core.copy()
@@ -4820,6 +4826,44 @@ def read_variables_file(path: str, return_full: bool = False):
     core = sanitize_vars_df(df_full)
 
     return (core, df_full) if return_full else core
+
+
+def _load_master_variables() -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+    """Load the packaged master variables sheet once and serve cached copies."""
+    if not _HAS_PANDAS:
+        return (None, None)
+
+    global _MASTER_VARIABLES_CACHE
+    cache = _MASTER_VARIABLES_CACHE
+
+    if cache.get("loaded"):
+        core_cached = cache.get("core")
+        full_cached = cache.get("full")
+        core_copy = core_cached.copy() if core_cached is not None else None
+        full_copy = full_cached.copy() if full_cached is not None else None
+        return (core_copy, full_copy)
+
+    master_path = Path(__file__).with_name("Master_Variables.csv")
+    if not master_path.exists():
+        cache["loaded"] = True
+        cache["core"] = None
+        cache["full"] = None
+        return (None, None)
+
+    try:
+        core_df, full_df = read_variables_file(str(master_path), return_full=True)
+    except Exception:
+        logger.warning("Failed to load master variables CSV from %s", master_path, exc_info=True)
+        cache["loaded"] = True
+        cache["core"] = None
+        cache["full"] = None
+        return (None, None)
+
+    cache["loaded"] = True
+    cache["core"] = core_df
+    cache["full"] = full_df
+    return (core_df.copy(), full_df.copy())
+
 
 def find_variables_near(cad_path: str):
     """Look for variables.* in the same folder, then one level up."""
@@ -8370,6 +8414,10 @@ def extract_2d_features_from_pdf_vector(pdf_path: str) -> dict:
 REQUIRED_COLS = ["Item", "Example Values / Options", "Data Type / Input Method"]
 
 def default_variables_template() -> pd.DataFrame:
+    if _HAS_PANDAS:
+        core_df, _ = _load_master_variables()
+        if core_df is not None:
+            return core_df
     rows = [
         ("Overhead %", 0.15, "number"),
         ("G&A %", 0.08, "number"),
@@ -12967,6 +13015,10 @@ class App(tk.Tk):
 
     def _populate_editor_tab(self, df: pd.DataFrame) -> None:
         df = coerce_or_make_vars_df(df)
+        if self.vars_df_full is None:
+            _, master_full = _load_master_variables()
+            if master_full is not None:
+                self.vars_df_full = master_full
         """Rebuild the Quote Editor tab using the latest variables dataframe."""
         def _ensure_row(dataframe: pd.DataFrame, item: str, value: Any, dtype: str = "number") -> pd.DataFrame:
             mask = dataframe["Item"].astype(str).str.fullmatch(item, case=False)
