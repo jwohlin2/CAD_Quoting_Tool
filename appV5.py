@@ -5152,13 +5152,6 @@ def render_quote(
     row("Total", pass_total, indent="  ")
     lines.append("")
 
-    if why_parts:
-        lines.append("Why this price")
-        lines.append(divider)
-        for part in why_parts:
-            write_wrapped(part, "  ")
-        lines.append("")
-
     # ---- Pricing ladder ------------------------------------------------------
     lines.append("Pricing Ladder")
     lines.append(divider)
@@ -5187,6 +5180,16 @@ def render_quote(
             for w in _tw.wrap(str(n), width=page_width):
                 lines.append(f"- {w}")
         lines.append("")
+
+    if why_parts:
+        if lines and lines[-1]:
+            lines.append("")
+        lines.append("Why this price")
+        lines.append(divider)
+        for part in why_parts:
+            write_wrapped(part, "  ")
+        if lines[-1]:
+            lines.append("")
 
     return "\n".join(lines)
 # ===== QUOTE CONFIG (edit-friendly) ==========================================
