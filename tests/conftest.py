@@ -209,6 +209,22 @@ def _install_pandas_stub() -> None:
         def __getitem__(self, idx):
             return self.values[idx]
 
+        def _combine(self, other, op):
+            if isinstance(other, _Mask):
+                other_values = other.values
+            else:
+                other_values = [bool(v) for v in other]
+            return _Mask(op(a, b) for a, b in zip(self.values, other_values))
+
+        def __and__(self, other):
+            return self._combine(other, lambda a, b: a and b)
+
+        def __or__(self, other):
+            return self._combine(other, lambda a, b: a or b)
+
+        def __invert__(self):
+            return _Mask(not v for v in self.values)
+
     class _StringMethods:
         def __init__(self, series):
             self._series = series
@@ -234,6 +250,28 @@ def _install_pandas_stub() -> None:
                 values.append(text.startswith(pref))
             return _Mask(values)
 
+        def contains(self, pattern: str, case: bool = True, regex: bool = True, na: bool = False):
+            import re
+
+            flags = 0 if case else re.IGNORECASE
+            compiled = re.compile(pattern, flags) if regex else None
+            needle = pattern if case else pattern.lower()
+            values = []
+            for item in self._series.data:
+                if item is None:
+                    values.append(bool(na))
+                    continue
+                text = str(item)
+                if compiled is not None:
+                    values.append(bool(compiled.search(text)))
+                else:
+                    haystack = text if case else text.lower()
+                    values.append(needle in haystack)
+            return _Mask(values)
+
+        def lower(self):
+            return Series(("" if item is None else str(item).lower()) for item in self._series.data)
+
     class Series:
         def __init__(self, data):
             self.data = list(data)
@@ -251,7 +289,45 @@ def _install_pandas_stub() -> None:
             return iter(self.data)
 
         def __getitem__(self, idx):
+            if isinstance(idx, _Mask):
+                return Series(val for val, flag in zip(self.data, idx) if flag)
+            if isinstance(idx, (list, tuple)):
+                return Series(self.data[i] for i in idx)
             return self.data[idx]
+
+        def __len__(self):
+            return len(self.data)
+
+        class _ILoc:
+            def __init__(self, series):
+                self._series = series
+
+            def __getitem__(self, idx):
+                return self._series.data[idx]
+
+        @property
+        def iloc(self):
+            return Series._ILoc(self)
+
+        def fillna(self, value):
+            def _replace(item):
+                if item is None:
+                    return value
+                if isinstance(item, float) and item != item:
+                    return value
+                return item
+
+            return Series(_replace(item) for item in self.data)
+
+        def sum(self):
+            total = 0.0
+            for item in self.data:
+                if item is None:
+                    continue
+                if isinstance(item, float) and item != item:
+                    continue
+                total += float(item)
+            return total
 
     class DataFrame:
         def __init__(self, rows):
@@ -326,12 +402,56 @@ def _install_pandas_stub() -> None:
     pandas_stub.DataFrame = DataFrame
     pandas_stub.Series = Series
 
+    def to_numeric(values, errors="raise"):
+        scalar = False
+        if isinstance(values, Series):
+            iterable = values.data
+        elif isinstance(values, (list, tuple)):
+            iterable = list(values)
+        elif isinstance(values, (str, bytes)):
+            iterable = [values]
+            scalar = True
+        else:
+            try:
+                iterable = list(values)
+            except TypeError:
+                iterable = [values]
+                scalar = True
+
+        converted = []
+        for item in iterable:
+            try:
+                converted.append(float(item))
+            except (TypeError, ValueError):
+                if errors == "coerce":
+                    converted.append(float("nan"))
+                else:
+                    raise
+        if scalar and len(converted) == 1:
+            return converted[0]
+        return Series(converted)
+
     def read_csv(path):
         with open(path, newline="", encoding="utf-8") as handle:
             reader = csv.DictReader(handle)
             return DataFrame(reader)
 
     pandas_stub.read_csv = read_csv
+    pandas_stub.to_numeric = to_numeric
+
+    def notna(value):
+        def _is_not_na(item):
+            if item is None:
+                return False
+            if isinstance(item, float) and item != item:
+                return False
+            return True
+
+        if isinstance(value, Series):
+            return _Mask(_is_not_na(item) for item in value.data)
+        return _is_not_na(value)
+
+    pandas_stub.notna = notna
     sys.modules["pandas"] = pandas_stub
 
 
