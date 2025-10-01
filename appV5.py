@@ -12360,6 +12360,86 @@ def infer_geo_override_defaults(geo_data: dict[str, Any] | None) -> dict[str, An
     return overrides
 
 
+# ---- tk tooltip helper -----------------------------------------------------
+
+
+class CreateToolTip:
+    """Attach a lightweight tooltip to a Tk widget."""
+
+    def __init__(
+        self,
+        widget: tk.Widget,
+        text: str,
+        *,
+        delay: int = 500,
+        wraplength: int = 320,
+    ) -> None:
+        self.widget = widget
+        self.text = text
+        self.delay = delay
+        self.wraplength = wraplength
+        self._after_id: str | None = None
+        self._tip_window: tk.Toplevel | None = None
+        self._label: ttk.Label | None = None
+
+        self.widget.bind("<Enter>", self._schedule_show, add="+")
+        self.widget.bind("<Leave>", self._hide, add="+")
+        self.widget.bind("<FocusIn>", self._schedule_show, add="+")
+        self.widget.bind("<FocusOut>", self._hide, add="+")
+        self.widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def update_text(self, text: str) -> None:
+        self.text = text
+        if self._label is not None:
+            self._label.configure(text=text)
+
+    def _schedule_show(self, _event: tk.Event | None = None) -> None:
+        self._cancel_scheduled()
+        if not self.text:
+            return
+        self._after_id = self.widget.after(self.delay, self._show)
+
+    def _cancel_scheduled(self) -> None:
+        if self._after_id is not None:
+            try:
+                self.widget.after_cancel(self._after_id)
+            finally:
+                self._after_id = None
+
+    def _show(self) -> None:
+        if self._tip_window is not None or not self.text:
+            return
+
+        x = self.widget.winfo_rootx() + 20
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+
+        tip = tk.Toplevel(self.widget)
+        tip.wm_overrideredirect(True)
+        tip.wm_transient(self.widget)
+        tip.wm_geometry(f"+{x}+{y}")
+
+        label = ttk.Label(
+            tip,
+            text=self.text,
+            justify="left",
+            padding=(6, 4),
+            relief="solid",
+            borderwidth=1,
+            wraplength=self.wraplength,
+        )
+        label.pack()
+
+        self._tip_window = tip
+        self._label = label
+
+    def _hide(self, _event: tk.Event | None = None) -> None:
+        self._cancel_scheduled()
+        if self._tip_window is not None:
+            self._tip_window.destroy()
+            self._tip_window = None
+        self._label = None
+
+
 # ---- scrollable frame helper -----------------------------------------------
 class ScrollableFrame(ttk.Frame):
     def __init__(self, parent, *args, **kwargs):
@@ -13055,27 +13135,38 @@ class App(tk.Tk):
             label_widget.grid(row=0, column=0, sticky="w", padx=(0, 6))
 
             control_row = 0
-            info_row = 1
-            info_labels: list[ttk.Label] = []
+            info_indicator: ttk.Label | None = None
+            info_tooltip: CreateToolTip | None = None
+            info_text_parts: list[str] = []
 
             control_container = ttk.Frame(row_container)
             control_container.grid(row=control_row, column=1, sticky="ew", padx=5)
             control_container.grid_columnconfigure(0, weight=1)
             control_container.grid_columnconfigure(1, weight=1)
+            control_container.grid_columnconfigure(2, weight=0)
 
 
             def _add_info_label(text: str) -> None:
+                nonlocal info_indicator, info_tooltip
+
+                text = text.strip()
                 if not text:
                     return
-                label = ttk.Label(row_container, text=text, wraplength=360, foreground="#555555")
-                label.grid(
-                    row=len(info_labels) + info_row,
-                    column=1,
-                    columnspan=2,
-                    sticky="w",
-                    pady=(2, 0),
-                )
-                info_labels.append(label)
+                info_text_parts.append(text)
+                combined_text = "\n\n".join(info_text_parts)
+
+                if info_indicator is None:
+                    info_indicator = ttk.Label(
+                        control_container,
+                        text="ⓘ",
+                        padding=(4, 0),
+                        cursor="question_arrow",
+                        takefocus=0,
+                    )
+                    info_indicator.grid(row=control_row, column=2, sticky="nw", padx=(6, 0))
+                    info_tooltip = CreateToolTip(info_indicator, combined_text, wraplength=360)
+                elif info_tooltip is not None:
+                    info_tooltip.update_text(combined_text)
 
             if normalized_name in {"material"}:
                 var = tk.StringVar(value=self.default_material_display)
