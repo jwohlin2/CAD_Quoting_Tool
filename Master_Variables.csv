@@ -1,0 +1,97 @@
+Variable ID	Item	Why it Matters	Typical Price Swing*	Data Type / Input Method	Example Values / Options
+MAT-10	Material Scrap / Remnant Value	Potential credit from recycling valuable scrap material.	-$5–$50 credit on large jobs.	Number	-50
+FIN-08	Masking Labor for Plating	Time spent carefully covering features that should not be plated.	$5–$50 per part.	Number	0.1
+MAT-08	Blank Sawing / Waterjet Time	Labor and machine time to cut the raw stock to a usable size.	$20–$200 per blank.	Number	0.15
+QC-02	Final Inspection Labor (Manual)	QC department time using hand tools.	0.1–1.0 hours labor per part (+$10–$100).	Number	0.2
+ENG-10	Tool Library & Setup Sheet Creation	Time to document the exact tools, holders, and offsets for a job.	0.5–2 hours per setup (+$40–$160).	Number	0.25
+MAT-11	Blank Squaring / Pre-Op Grinding	Time spent preparing the blank with initial flat and parallel surfaces.	0.2–1.0 hours labor per blank (+$20–$100).	Number	0.25
+QC-04	CMM Run Time per Part	The time the CMM takes to automatically inspect a part.	0.1–1.0 hours machine time per part.	Number	0.4
+ENG-08	Process Sheet / Traveler Creation	Admin time to create detailed work instructions for the shop floor.	0.5–2 hours of admin time (+$40–$160).	Number	0.5
+FIN-03	Bead Blasting / Sanding Labor	Time spent texturing or cleaning surfaces.	$10–$50 per part.	Number	0.5
+ASM-05	CNC Support for Assembly (Machinist)	When an assembly requires minor secondary machining like drilling final alignment holes, reaming, or prepping components for fitment.	Billed at a standard CNC Machinist rate ($85–$130/hr).	Number	1
+ENG-04	CAM Simulation & Verification Time	Using software to check for crashes and errors before running.	0.5–8 hours of programming time (+$50–$800).	Number	1.5
+ENG-03	2D CAM Programming Hours (Lathe/WEDM)	Generally faster than 3D, but still a skilled labor cost.	$75–$500.	Number	2
+QC-08	Expected Scrap Rate	A percentage added to account for the statistical likelihood of some bad parts.	1–5% to total material and labor cost.	Number	2
+ASM-06	Final Process Touch-up (Grinding/EDM)	Labor for final, critical operations like jig grinding a bore to match a shaft post-assembly or using EDM to create a final feature.	Billed at the specific machine/skill rate (e.g., Jig Grind @ $110–$160/hr).	Number	2.5
+FIN-04	Lapping / Honing Labor	High-skill labor for achieving very flat surfaces or precise bores.	$100–$500 per critical surface.	Number	3
+ASM-03	Tool & Die Maker (journeyman)	Setups, precision fitting, jig grind calls, solving tolerance stackups	Billed at a standard journeyman rate ($85–$130/hr).	Number	4.5
+FIN-05	Polishing Labor	Time spent achieving a mirror or optical finish.	$50–$1000+ per surface.	Number	5
+MAT-07	Material Surcharge / Volatility Adder	A buffer for fluctuating market prices of metals.	5–15% on material cost.	Number	5
+MIL-06	Number of Unique Tools	Each tool requires a tool change, adding to non-cutting time.	15–60 seconds per tool; can be significant.	Number	5
+QC-03	CMM Programming Time	Time to program the Coordinate Measuring Machine.	2–16 hours NRE (+$200–$1600).	Number	6
+ENG-02	3D CAM Programming Hours (Milling)	Time for a skilled programmer to create toolpaths for a mill.	$100–$5000+ depending on complexity.	Number	8
+GRD-09	Electrode Manufacturing Time	Labor and machine time to create the custom copper or graphite electrode.	$200–$1500 NRE per unique electrode.	Number	8
+QC-01	In-Process Inspection Labor	Operator time spent checking parts at the machine.	5–15% to cycle time.	Number	10
+ENG-06	Fixture Build Labor Hours	Toolmaker time to assemble and qualify the custom fixture.	4–40 hours of toolmaker time (+$300–$3000).	Number	12
+PM-08	Project Manager Hours	Complex projects with many milestones require dedicated management time.	$500–$5000+ for dedicated project management.	Number	20
+COM-07	Profit Margin	The percentage added to the total cost to arrive at the final price.	15–40% of total cost.	Number	35
+ASM-02	Hardware / BOM Cost	The purchase cost of all fasteners and components to be installed.	Direct cost input.	Number	75.5
+GRD-01	Surface Grinder Rate	Hourly cost for precision surface grinding.	$70–$90 per hour.	Lookup Value (Rate)	$80.00
+GRD-02	OD/ID Grinder Rate	Hourly cost for cylindrical grinding.	$80–$120 per hour.	Lookup Value (Rate)	$100.00
+MAT-09	Number of Blanks Required	Total pieces of raw stock needed for the job.	Direct cost multiplier.	Number	102
+COM-03	Freight / Shipping Cost	The direct cost charged by the carrier.	Direct cost input.	Number	125
+GRD-04	Grinding Wheel Cost & Dressing Time	Cost of the abrasive wheel and the time spent preparing it.	$100–$500 NRE; +0.1 hr labor per part.	Number	200
+MIL-02	Number of Milling Setups	Each re-fixturing of the part adds significant labor.	0.5–2.0 hours labor per setup (+$50–$200).	Number	200
+TRN-09	Tooling Cost (Carbide Inserts)	Cost of consumable turning inserts.	$20–$500 on tooling cost line item.	Number	225
+MAT-06	Material Vendor Lead Time	Long lead-time materials can delay the entire project.	Can add weeks to lead time; +$100s in expedite fees.	Number	250
+ENG-07	Fixture Material Cost	Cost of the raw materials for the fixture.	$100–$2000 in material NRE.	Number	350
+MIL-09	Tooling Cost (Carbide Endmills)	Cost of consumable cutters, amortized over the job.	$50–$1000+ on tooling cost line item.	Number	450
+MAT-05	Material MOQ	If the job requires less than the MOQ, you must buy and store the excess.	Can increase material cost by 100-500% for small jobs.	Number	500
+ASM-01	Manual Assembly Labor	Time for installing hardware (helicoils, dowel pins, bearings).	$5–$150 per assembly.	Number	2000
+TRN-08	Cut-Off / Parting Time	Time to separate the finished part from the bar stock.	Direct multiplier of machine rate.	Calculated Value	(BarDiameter / 25.4) * 0.5
+GRD-10	Sinker EDM Burn Time	Time the machine spends eroding the feature.	Direct multiplier of machine rate.	Calculated Value	(Feature_Volume_cm3 * 5.5)
+TRN-06	ID Boring / Drilling Cycle Time	Time spent on internal features.	Direct multiplier of machine rate.	Calculated Value	(HoleDepth / (FeedRate * SpindleSpeed))
+TRN-05	OD Turning Cycle Time	Time spent machining the outside diameter.	Direct multiplier of machine rate.	Calculated Value	(LengthOfCut / (FeedRate * SpindleSpeed))
+MIL-03	Roughing Cycle Time	Estimated time the machine spends on bulk material removal.	Direct multiplier of machine rate.	Calculated Value	(Material_Volume_cm3 / 15) * MaterialMultiplier
+GRD-06	WEDM Burn Time	The primary driver of EDM cost.	Direct multiplier of machine rate.	Calculated Value	(Perimeter / 25.4) * Thickness * 0.8
+MIL-04	Semi-Finishing Cycle Time	Time for passes that prepare surfaces for the final cut.	Direct multiplier of machine rate.	Calculated Value	(SurfaceArea_cm2 / 100) * ToleranceMultiplier
+MIL-05	Finishing Cycle Time	Time for the final, precise passes that determine surface finish and accuracy.	Direct multiplier of machine rate.	Calculated Value	(SurfaceArea_cm2 / 50) * ToleranceMultiplier
+TRN-07	Threading Cycle Time	Time for creating threads.	Direct multiplier of machine rate.	Calculated Value	(ThreadLength * Passes * 2)
+MIL-01	Primary Milling Machine Rate	Hourly cost for the specific VMC or HMC being used.	$75/hr (3-Axis) vs. $150/hr (5-Axis).	Dropdown	3-Axis Mill, 5-Axis Mill, Lathe, Wire EDM
+MAT-01	Material Alloy & Grade	The primary driver of cost per pound/kilogram.	Aluminum ($2/lb) vs. Inconel ($30/lb) = 15x swing.	Dropdown	Aluminum 6061, Stainless Steel 304, Tool Steel A2
+PM-09	Non-Recurring Engineering (NRE) Type	Is NRE a separate line item or amortized into the part price?	Affects unit price vs. initial invoice structure.	Dropdown	Amortize, Line Item
+MAT-03	Material Starting Condition (Annealed, Pre-Hard)	Pre-hardened material is more expensive and slower to machine.	20% material cost; +40% machine time.	Dropdown	Annealed, Pre-Hardened
+ENG-05	Fixture Design Hours	Engineering time to design custom workholding.	2–20 hours of engineering time (+$200–$2000).	Dropdown	Auto-Detect, Yes, No
+ENG-09	Solid Model Quality	Poor quality models require repair time.	1–5 hours of programming time (+$100–$500).	Dropdown	Clean, Needs Repair
+PM-03	RFQ Completeness	Incomplete RFQs add significant time for clarification.	0.5–2.0 hours of engineering time (+$50–$200).	Dropdown	Complete, Incomplete
+PM-04	Revision Control Complexity	History of frequent revisions suggests a higher risk of mid-production changes.	5–10% contingency on labor and management costs.	Dropdown	Low, High
+COM-05	Shop Supplies Overhead	A percentage to cover coolants, oils, cleaning supplies, etc.	3–5% of machining cost.	Lookup Value (Percentage)	MachiningCost * 0.04
+PM-06	Payment Terms	Net 60/90 terms affect cash flow and may require adding a financing cost.	1–3% of total price for terms beyond Net 30.	Dropdown	Net 30, Net 60, Net 90
+PM-02	Customer Relationship	New customers may require more vetting and have higher perceived risk.	~+/- 5% on margin depending on trust and history.	Dropdown	New, Existing, Key Account
+FIN-07	Outsourced Plating / Coating Cost	Vendor price for anodizing, black oxide, nickel plating, etc.	$200–$1000 per batch.	Dropdown	None, Anodize, Black Oxide, Nickel Plate
+FIN-06	Outsourced Heat Treat Cost	Vendor price for hardening, annealing, or stress relieving.	$150–$800 per batch.	Dropdown	None, Harden & Temper, Anneal, Nitride
+PM-05	Required Certifications (ITAR, AS9100)	Compliance adds significant overhead, auditing, and documentation costs.	10–25% to total quote price as a compliance adder.	Dropdown	None, ITAR, AS9100
+FIN-01	Manual Deburring / Edge Break Labor	Time for a person to manually remove sharp edges with hand tools.	$2–$100 per part depending on complexity.	Dropdown	None, Standard Edge Break, Full Cosmetic
+MAT-02	Material Form Factor (Plate, Bar, Casting)	Affects initial sawing/prep time and material utilization (yield).	~+/- 20% on final material cost.	Dropdown	Plate, Bar Stock, Casting
+MIL-08	4th/5th Axis Utilization	Adds complexity and cost but can reduce setups.	Increases machine rate but can save hours of setup labor.	Dropdown	Standard (3-Axis), Positional (3+2), Full 5-Axis
+COM-01	Standard Packaging & Boxing Labor	Time to wrap and box parts for safe transit.	$2–$10 per part/package.	Dropdown	Standard Box, Custom Crate, ESD Bagging
+MAT-12	Material Handling (Weight/Size)	Very large or heavy stock requires cranes and multiple people to handle.	$100–$1000+ for rigging/handling on large parts.	Dropdown	Standard, Heavy/Oversize
+PM-01	Quoting Lead Time	Rush quotes require immediate attention, pulling estimators off other work.	$50–$250 flat fee for "while-you-wait" quotes.	Dropdown	Standard, Rush
+COM-06	G&A (General & Admin) Overhead	A percentage to cover rent, utilities, office staff, and other business costs.	15–25% of total cost.	Lookup Value (Percentage)	Subtotal * 0.20
+MAT-04	Material Cost per Unit (kg/lb/ft)	The direct purchase price from the supplier.	Direct cost input.	Lookup Value	The formula fetches this cost from a MaterialData table based on the Material Selection input.
+TRN-01	Primary Lathe / Turning Center Rate	Hourly cost for the specific turning machine.	$80/hr (Standard) vs. $140/hr (Mill-Turn).	Lookup Value	The formula fetches this hourly rate from a MachineRates table.
+COM-04	Insurance / Liability Adder	A factor to cover the risk of damage or loss during production.	1–3% of total cost.	Lookup Value (Percentage)	TotalCost * 0.02
+ASM-04	Precision Fitting Labor (Toolmaker)	High-skill labor for custom fitting, resolving tolerance stack-ups, and making final adjustments to tenths-level precision.	Billed at a premium Tool & Die Maker rate ($100–$150/hr).	Checkbox	True / False
+ASM-07	Complex Assembly Documentation	Labor for creating detailed assembly instructions, taking photos, and documenting procedures for complex, multi-part assemblies.	Billed at a Process Engineer rate ($110–$160/hr).	Checkbox	True / False
+COM-02	Custom Crating NRE	Cost to build a custom wooden crate for large or delicate items.	$200–$1500 flat fee.	Checkbox	True / False
+ENG-01	DFM Review	Time spent analyzing a design and suggesting cost-saving changes.	1–4 hours of engineering time (+$100–$400).	Checkbox	True / False
+FIN-02	Tumbling / Vibratory Finishing Time	A batch process for automated deburring of many parts.	$50–$300 per batch.	Checkbox	True / False
+FIN-09	Laser Marking / Engraving Time	Machine time for adding part numbers or logos.	$5–$25 per part.	Checkbox	True / False
+FIN-10	Passivation / Cleaning	Process for cleaning and protecting materials like stainless steel.	$100–$300 per batch.	Checkbox	True / False
+GRD-03	Jig Grinder Rate	A very high-cost, high-precision machine.	$150–$250 per hour.	Checkbox	True / False
+GRD-05	Wire EDM (WEDM) Rate	Hourly cost for the wire EDM machine.	$90–$140 per hour.	Checkbox	True / False
+GRD-08	Sinker EDM (Ram EDM) Rate	Hourly cost for the sinker machine.	$80–$120 per hour.	Checkbox	True / False
+MIL-07	Pallet Changer / Automation Use	Reduces labor but may carry a higher machine rate.	-20–50% on labor for high-volume jobs.	Checkbox	True / False
+MIL-10	HSM Toolpaths	Reduces cycle time but requires more programming and a capable machine.	-10–40% on cycle time; +10% on programming time.	Checkbox	True / False
+MIL-11	Deep Pocket / Long Reach Milling	Requires special, expensive tooling and slower, more careful machining.	50–200% on cycle time for those features; +$200 on tooling.	Checkbox	True / False
+MIL-12	Thin Wall Machining Factor	A multiplier to account for slower, chatter-prone machining.	25–100% on cycle time for delicate features.	Checkbox	True / False
+PM-07	Expedite Request	Expedited jobs require overtime, schedule disruption, and premium shipping.	25–100% on total price; depends on severity.	Checkbox	True / False
+PM-10	Customer-Furnished Material (CFM)	Handling CFM requires tracking, inspection, and assumes liability for scrap.	$100–$500 handling fee per lot.	Checkbox	True / False
+QC-05	First Article Inspection Report (FAIR) Labor	Admin time to create the detailed documentation package.	$300–$2000 flat fee per FAIR.	Checkbox	True / False
+QC-06	Source Inspection Requirement	Need to accommodate a customer representative witnessing inspection.	2–4 hours of QC labor for coordination (+$150–$300).	Checkbox	True / False
+QC-07	Gauge / Check Fixture NRE	Cost to design and build a custom gauge for a specific feature.	$500–$5000+ NRE.	Checkbox	True / False
+TRN-02	Bar Feeder Utilization	Enables automation for high-volume jobs, reducing labor.	-30–60% on labor for high-volume jobs.	Checkbox	True / False
+TRN-03	Live Tooling / Mill-Turn Ops Time	Cycle time for milled features done on the lathe.	Billed at the higher mill-turn machine rate.	Checkbox	True / False
+TRN-04	Sub-Spindle Utilization	Enables working on the back side of a part in one setup.	Eliminates a secondary setup (saves +$75–$200).	Checkbox	True / False
+TRN-10	Form Tool Requirement	Need for custom-ground tools for special profiles adds NRE.	$200–$1000 NRE for custom tool.	Checkbox	True / False
+GRD-07	WEDM Wire Consumption Cost	The cost of the consumable brass or coated wire.	~$2–$5 per hour of burn time.	Calculated Value	WEDM_Burn_Time * 4.50
