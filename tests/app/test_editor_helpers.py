@@ -23,6 +23,7 @@ def _make_stub_app():
     app.editor_label_widgets = {}
     app.editor_label_base = {}
     app._editor_set_depth = 0
+    app.default_material_display = ""
     return app
 
 
@@ -86,4 +87,21 @@ def test_infer_geo_override_defaults_uses_bins_and_back_face():
     assert defaults["Avg Hole Diameter (mm)"] == pytest.approx(expected_avg)
     assert defaults["Number of Milling Setups"] == 2
     assert defaults["Scrap Percent (%)"] == pytest.approx(8.0)
+
+
+def test_apply_geo_defaults_populates_thickness(monkeypatch):
+    app = _make_stub_app()
+    thickness_var = DummyVar("0.0")
+    app.editor_vars["Thickness (in)"] = thickness_var
+
+    monkeypatch.setattr(
+        appV5,
+        "infer_geo_override_defaults",
+        lambda geo: {"Thickness (in)": 1.0},
+    )
+
+    app._apply_geo_defaults({})
+
+    assert thickness_var.get() == "1.000"
+    assert app.editor_value_sources["Thickness (in)"] == "GEO"
 

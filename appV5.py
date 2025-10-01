@@ -13095,7 +13095,7 @@ class App(tk.Tk):
         df = _ensure_row(df, "Scrap Percent (%)", 15.0, dtype="number")
         df = _ensure_row(df, "Plate Length (in)", 12.0, dtype="number")
         df = _ensure_row(df, "Plate Width (in)", 14.0, dtype="number")
-        df = _ensure_row(df, "Thickness (in)", 0.25, dtype="number")
+        df = _ensure_row(df, "Thickness (in)", 0.0, dtype="number")
         df = _ensure_row(df, "Hole Count (override)", 0, dtype="number")
         df = _ensure_row(df, "Avg Hole Diameter (mm)", 0.0, dtype="number")
         df = _ensure_row(df, "Material", "", dtype="text")
