@@ -5549,6 +5549,17 @@ def _material_family(material: str) -> str:
         return "alum"
     if any(tag in name for tag in ("stainless", "17-4", "17 4", "316", "304", "ss")):
         return "stainless"
+    if any(tag in name for tag in ("titanium", "ti-6al-4v", "ti64", "grade 5")):
+        return "titanium"
+    if any(tag in name for tag in ("copper", "c110", "cu")):
+        return "copper"
+    if any(tag in name for tag in ("brass", "c360", "c260")):
+        return "brass"
+    if any(
+        tag in name
+        for tag in ("plastic", "uhmw", "delrin", "acetal", "peek", "abs", "nylon")
+    ):
+        return "plastic"
     return "steel"
 
 
@@ -6141,11 +6152,41 @@ def compute_quote_from_df(df: pd.DataFrame,
         vol_mm3_plate = max(1.0, length_mm * width_mm * max(thickness_mm_val, 0.0))
         vol_cm3 = max(vol_cm3, vol_mm3_plate / 1000.0)
         GEO_vol_mm3 = max(GEO_vol_mm3, vol_mm3_plate)
-        density_lookup = {"steel": 7.85, "stainless": 7.9, "alum": 2.70}
-        density_g_cc = density_lookup.get(
-            _material_family(geo_context.get("material") or material_name),
-            density_lookup["steel"],
+        density_lookup = {
+            "steel": 7.85,
+            "stainless": 7.90,
+            "alum": 2.70,
+            "titanium": 4.43,
+            "copper": 8.96,
+            "brass": 8.40,
+            "plastic": 1.45,
+        }
+
+        def _context_density(ctx: dict[str, Any] | None) -> float | None:
+            if not isinstance(ctx, dict):
+                return None
+            val = _coerce_float_or_none(ctx.get("density_g_cc"))
+            if val and val > 0:
+                return float(val)
+            return None
+
+        inner_geo_ctx = geo_context.get("geo") if isinstance(geo_context.get("geo"), dict) else None
+        density_candidates: list[float] = []
+        for ctx in (geo_context, inner_geo_ctx):
+            dens = _context_density(ctx)
+            if dens:
+                density_candidates.append(dens)
+        if not density_candidates:
+            density_candidates.append(
+                _density_for_material(material_name or default_material_display, default=0.0)
+            )
+        density_candidates.append(
+            density_lookup.get(
+                _material_family(geo_context.get("material") or material_name),
+                density_lookup["steel"],
+            )
         )
+        density_g_cc = next((d for d in density_candidates if d and d > 0), density_lookup["steel"])
         holes_for_mass: list[float] = []
         hole_sources: list[Any] = []
         for key in ("hole_diams_mm_precise", "hole_diams_mm"):
