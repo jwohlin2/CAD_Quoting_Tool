@@ -1,3 +1,4 @@
+import math
 import os
 
 import pytest
@@ -100,3 +101,20 @@ def test_to_float_handles_localized_formats() -> None:
     }
     for raw, expected in cases.items():
         assert wieland_scraper._to_float(raw) == pytest.approx(expected)
+
+
+def test_get_live_material_price_steel_prefers_wieland(monkeypatch: pytest.MonkeyPatch) -> None:
+    sample_data = {
+        "asof": "2024-10-05",
+        "wieland_usd_per_kg": {"Direct USD": 6.5},
+        "england_usd_per_kg": {},
+        "lme_usd_per_kg": {"NI": 25.0},
+    }
+
+    monkeypatch.setattr(wieland_scraper, "scrape_wieland_prices", lambda force=False: sample_data)
+
+    price, src = wieland_scraper.get_live_material_price_usd_per_kg("A36", fallback_usd_per_kg=12.34)
+
+    assert math.isfinite(price)
+    assert price == pytest.approx(6.5)
+    assert "Wieland Direct USD" in src

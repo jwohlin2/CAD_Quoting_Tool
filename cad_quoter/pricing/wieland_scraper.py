@@ -725,10 +725,55 @@ MATERIAL_MAP: Dict[str, Dict[str, str]] = {
     "304": {"bucket": "lme_usd_per_kg", "key": "NI"},
     "316": {"bucket": "lme_usd_per_kg", "key": "NI"},
 
+    # Steel (mild/carbon) → prefer direct USD list if available
+    "STEEL": {"bucket": "wieland_usd_per_kg", "key": "Direct USD"},
+    "A36": {"bucket": "wieland_usd_per_kg", "key": "Direct USD"},
+    "1018": {"bucket": "wieland_usd_per_kg", "key": "Direct USD"},
+    "1020": {"bucket": "wieland_usd_per_kg", "key": "Direct USD"},
+    "1045": {"bucket": "wieland_usd_per_kg", "key": "Direct USD"},
+
     # Brass examples (often in the EUR/100 KG block)
     "MS 58I": {"bucket": "wieland_usd_per_kg", "key": "MS 58I"},
     "CW614N": {"bucket": "wieland_usd_per_kg", "key": "MS 58I"},
 }
+
+
+STEEL_KEYWORDS = (
+    "STEEL",
+    "A36",
+    "A-36",
+    "MILD",
+    "CARBON",
+    "HOT ROLLED",
+    "COLD ROLLED",
+    "CRS",
+    "HRS",
+    "1018",
+    "1020",
+    "1045",
+)
+
+
+def _lookup_steel_price(data: Dict[str, Any]) -> Optional[Tuple[float, str, str]]:
+    """Return (price, bucket, key) for the best available steel proxy."""
+
+    # Prefer explicit Wieland USD list price when present
+    direct = get_usd_per_kg(data, "wieland_usd_per_kg", "Direct USD")
+    if direct and math.isfinite(direct):
+        return direct, "wieland_usd_per_kg", "Direct USD"
+
+    # Some feeds provide steel under the England bucket
+    for steel_key in ("Steel", "Steel Scrap", "Steel Billet"):
+        val = get_usd_per_kg(data, "england_usd_per_kg", steel_key)
+        if val and math.isfinite(val):
+            return val, "england_usd_per_kg", steel_key
+
+    # Fall back to LME Nickel as the closest ferrous proxy the scraper exposes
+    ni = get_usd_per_kg(data, "lme_usd_per_kg", "NI")
+    if ni and math.isfinite(ni):
+        return ni, "lme_usd_per_kg", "NI"
+
+    return None
 
 
 def get_usd_per_kg(data: Dict[str, Any], bucket: str, key: str) -> Optional[float]:
@@ -738,6 +783,16 @@ def get_usd_per_kg(data: Dict[str, Any], bucket: str, key: str) -> Optional[floa
         return float(val) if val is not None else None
     except Exception:
         return None
+
+
+def _format_source(bucket: str, key: str) -> str:
+    if bucket == "wieland_usd_per_kg":
+        return f"Wieland {key}"
+    if bucket == "lme_usd_per_kg":
+        return f"Wieland LME {key}"
+    if bucket == "england_usd_per_kg":
+        return f"Wieland England {key}"
+    return f"Wieland {bucket}:{key}"
 
 
 def get_live_material_price_usd_per_kg(material_key: str, fallback_usd_per_kg: float = 8.0) -> Tuple[float, str]:
@@ -754,7 +809,7 @@ def get_live_material_price_usd_per_kg(material_key: str, fallback_usd_per_kg: f
     if m:
         p = get_usd_per_kg(data, m["bucket"], m["key"])
         if p:
-            return p, f"Wieland {m['bucket']}:{m['key']} ({data.get('asof','today')})"
+            return p, f"{_format_source(m['bucket'], m['key'])} ({data.get('asof','today')})"
 
     # Heuristics by family
     if "AL" in key:
@@ -769,6 +824,11 @@ def get_live_material_price_usd_per_kg(material_key: str, fallback_usd_per_kg: f
             src = "Wieland LME CU"
         if p:
             return float(p), f"{src} ({data.get('asof','today')})"
+    if any(token in key for token in STEEL_KEYWORDS):
+        steel_lookup = _lookup_steel_price(data)
+        if steel_lookup:
+            price, bucket, bucket_key = steel_lookup
+            return float(price), f"{_format_source(bucket, bucket_key)} ({data.get('asof','today')})"
 
     # Fallback
     return float(fallback_usd_per_kg), "house_rate"
