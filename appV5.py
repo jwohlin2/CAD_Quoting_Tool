@@ -12574,6 +12574,8 @@ class App(tk.Tk):
         self._editor_set_depth = 0
         self._building_editor = False
         self._reprice_in_progress = False
+        self.auto_reprice_enabled = False
+        self._quote_dirty = False
         self.effective_process_hours: dict[str, float] = {}
         self.effective_scrap: float = 0.0
         self.effective_setups: int = 1
@@ -13114,7 +13116,6 @@ class App(tk.Tk):
             elif control_spec.control == "dropdown":
                 options = list(control_spec.options) or ([control_spec.entry_value] if control_spec.entry_value else [])
                 selected = control_spec.entry_value or (options[0] if options else "")
-
                 var = tk.StringVar(value=selected)
                 combo = ttk.Combobox(
                     control_container,
@@ -13128,7 +13129,6 @@ class App(tk.Tk):
                 self._register_editor_field(item_name, var, label_widget)
             elif control_spec.control == "checkbox":
                 initial_bool = control_spec.checkbox_state
-
                 var = tk.StringVar(value="True" if initial_bool else "False")
                 ttk.Checkbutton(
                     control_container,
@@ -13168,7 +13168,6 @@ class App(tk.Tk):
                 swing_text = str(full_row.get("Typical Price Swing*", "") or "").strip()
             elif "Typical Price Swing*" in row_data:
                 swing_text = str(row_data.get("Typical Price Swing*", "") or "").strip()
-
             if swing_text:
                 _add_info_label(f"Typical swing: {swing_text}")
 
@@ -13231,9 +13230,24 @@ class App(tk.Tk):
                 return
             self._update_editor_override_from_label(label, var.get())
             self._mark_label_source(label, "User")
-            self.reprice()
+            self.reprice(hint=f"Updated {label}.")
 
         var.trace_add("write", _on_write)
+
+    def _mark_quote_dirty(self, hint: str | None = None) -> None:
+        self._quote_dirty = True
+        message = "Quote editor updated."
+        if isinstance(hint, str):
+            cleaned = hint.strip()
+            if cleaned:
+                message = cleaned.splitlines()[0]
+        try:
+            self.status_var.set(f"{message} Click Generate Quote to refresh totals.")
+        except Exception:
+            pass
+
+    def _clear_quote_dirty(self) -> None:
+        self._quote_dirty = False
 
     def _mark_label_source(self, label: str, src: str | None) -> None:
         widget = self.editor_label_widgets.get(label)
@@ -13383,7 +13397,7 @@ class App(tk.Tk):
         self.effective_fixture = str(sugg.get("fixture", baseline_ctx.get("fixture", "standard")) or "standard")
 
         if not self._reprice_in_progress:
-            self.reprice()
+            self.reprice(hint="LLM adjustments applied.")
 
     def _set_user_override_value(self, path: Tuple[str, ...], value: Any):
         cur = self.quote_state.user_overrides
@@ -14024,16 +14038,26 @@ class App(tk.Tk):
         self.out_txt.insert("end", d+"\n")
         self.out_txt.see("end")
 
-    def reprice(self) -> None:
-        if self._reprice_in_progress:
+    def reprice(self, hint: str | None = None) -> None:
+        if self.auto_reprice_enabled:
+            if self._reprice_in_progress:
+                return
+            self.gen_quote(reuse_suggestions=True)
             return
-        self.gen_quote(reuse_suggestions=True)
+
+        self._mark_quote_dirty(hint)
 
     def gen_quote(self, reuse_suggestions: bool = False) -> None:
         already_repricing = self._reprice_in_progress
         if not already_repricing:
             self._reprice_in_progress = True
+        succeeded = False
         try:
+            try:
+                self.status_var.set("Generating quote…")
+                self.update_idletasks()
+            except Exception:
+                pass
             if self.vars_df is None:
                 self.vars_df = coerce_or_make_vars_df(None)
             for item_name, string_var in self.quote_vars.items():
@@ -14096,7 +14120,10 @@ class App(tk.Tk):
 
             self.nb.select(self.tab_out)
             self.status_var.set(f"Quote Generated! Final Price: ${res.get('price', 0):,.2f}")
+            succeeded = True
         finally:
+            if succeeded:
+                self._clear_quote_dirty()
             if not already_repricing:
                 self._reprice_in_progress = False
 
