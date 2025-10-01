@@ -13045,11 +13045,13 @@ class App(tk.Tk):
             if display_hint and display_hint.lower() not in {"number", "text"}:
                 label_text = f"{label_text}\n[{display_hint}]"
 
+
             row_container = ttk.Frame(quote_frame)
             row_container.grid(row=row_index, column=0, columnspan=2, sticky="ew", padx=5, pady=4)
             row_container.grid_columnconfigure(1, weight=1)
 
             label_widget = ttk.Label(row_container, text=label_text, wraplength=400)
+
             label_widget.grid(row=0, column=0, sticky="w", padx=(0, 6))
 
             control_row = 0
@@ -13060,6 +13062,7 @@ class App(tk.Tk):
             control_container.grid(row=control_row, column=1, sticky="ew", padx=5)
             control_container.grid_columnconfigure(0, weight=1)
             control_container.grid_columnconfigure(1, weight=1)
+
 
             def _add_info_label(text: str) -> None:
                 if not text:
