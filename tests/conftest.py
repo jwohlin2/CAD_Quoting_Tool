@@ -330,9 +330,18 @@ def _install_pandas_stub() -> None:
             return total
 
     class DataFrame:
-        def __init__(self, rows):
-            self._rows = [dict(row) for row in rows]
-            self.columns = list(self._rows[0].keys()) if self._rows else []
+        def __init__(self, rows=None, columns=None):
+            if rows is None:
+                self._rows = []
+            else:
+                self._rows = [dict(row) for row in rows]
+            if columns is not None:
+                self.columns = list(columns)
+                for row in self._rows:
+                    for col in self.columns:
+                        row.setdefault(col, None)
+            else:
+                self.columns = list(self._rows[0].keys()) if self._rows else []
 
         def copy(self):
             return DataFrame([dict(row) for row in self._rows])
@@ -342,6 +351,29 @@ def _install_pandas_stub() -> None:
 
         def __getitem__(self, key):
             return Series(row.get(key) for row in self._rows)
+
+        def __setitem__(self, key, value):
+            if isinstance(value, Series):
+                data = list(value.data)
+            elif isinstance(value, (list, tuple)):
+                data = list(value)
+            else:
+                data = [value] * len(self._rows) if self._rows else []
+
+            if not self._rows and data:
+                self._rows = [{} for _ in range(len(data))]
+
+            if len(data) < len(self._rows):
+                data.extend([None] * (len(self._rows) - len(data)))
+            elif len(data) > len(self._rows):
+                for _ in range(len(data) - len(self._rows)):
+                    self._rows.append({})
+
+            for row, item in zip(self._rows, data):
+                row[key] = item
+
+            if key not in self.columns:
+                self.columns.append(key)
 
         class _Loc:
             def __init__(self, df):
@@ -431,9 +463,21 @@ def _install_pandas_stub() -> None:
             return converted[0]
         return Series(converted)
 
-    def read_csv(path):
-        with open(path, newline="", encoding="utf-8") as handle:
-            reader = csv.DictReader(handle)
+    def read_csv(path, sep=",", encoding="utf-8", engine=None, **_kwargs):
+        with open(path, newline="", encoding=encoding) as handle:
+            if sep is None:
+                sample = handle.read(1024)
+                handle.seek(0)
+                try:
+                    dialect = csv.Sniffer().sniff(sample)
+                    delimiter = dialect.delimiter
+                except csv.Error:
+                    delimiter = ","
+            else:
+                delimiter = sep
+            if not delimiter:
+                delimiter = ","
+            reader = csv.DictReader(handle, delimiter=delimiter)
             return DataFrame(reader)
 
     pandas_stub.read_csv = read_csv

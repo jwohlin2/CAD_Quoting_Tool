@@ -4789,8 +4789,21 @@ def read_variables_file(path: str, return_full: bool = False):
         sheet_name = "Variables" if "Variables" in xl.sheet_names else xl.sheet_names[0]
         df_full = pd.read_excel(path, sheet_name=sheet_name)
     elif lp.endswith(".csv"):
+        delimiter = ","
         try:
-            df_full = pd.read_csv(path, encoding="utf-8-sig")
+            with open(path, encoding="utf-8-sig") as sniff:
+                header_line = sniff.readline()
+            if "\t" in header_line:
+                delimiter = "\t"
+        except Exception:
+            delimiter = ","
+
+        read_csv_kwargs: dict[str, Any] = {"encoding": "utf-8-sig"}
+        if delimiter == "\t":
+            read_csv_kwargs["sep"] = "\t"
+
+        try:
+            df_full = pd.read_csv(path, **read_csv_kwargs)
         except Exception as csv_err:
             # When pandas' default engine hits irregular commas (extra columns
             # from free-form notes, etc.) fall back to a more forgiving parser
@@ -4799,8 +4812,10 @@ def read_variables_file(path: str, return_full: bool = False):
             # through the file picker.
             import csv as _csv
 
+            csv_delimiter = "\t" if delimiter == "\t" else ","
+
             with open(path, encoding="utf-8-sig", newline="") as f:
-                rows = list(_csv.reader(f))
+                rows = list(_csv.reader(f, delimiter=csv_delimiter))
 
             if not rows:
                 raise csv_err
@@ -4808,18 +4823,18 @@ def read_variables_file(path: str, return_full: bool = False):
             header = rows[0]
             if not header:
                 raise csv_err
-            normalized: list[list[str]] = []
+            normalized_dicts: list[dict[str, str]] = []
             for row in rows[1:]:
                 if len(row) > len(header):
                     keep = len(header) - 1
-                    merged_tail = ",".join(row[keep:]) if keep >= 0 else ""
+                    merged_tail = csv_delimiter.join(row[keep:]) if keep >= 0 else ""
                     row = row[:keep] + [merged_tail]
                 elif len(row) < len(header):
                     row = row + [""] * (len(header) - len(row))
-                normalized.append(row)
+                normalized_dicts.append(dict(zip(header, row)))
 
             try:
-                df_full = pd.DataFrame(normalized, columns=header)
+                df_full = pd.DataFrame(normalized_dicts)
             except Exception:
                 raise csv_err
     else:
