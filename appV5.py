@@ -12910,7 +12910,6 @@ class App(tk.Tk):
                 non_numeric_options = [opt for opt in option_candidates if not _is_numeric_token(opt)]
                 if non_numeric_options and len(option_candidates) >= 2 and not has_formula_chars:
                     is_dropdown = True
-
             row_container = ttk.Frame(quote_frame)
             row_container.grid(row=row_index, column=0, columnspan=2, sticky="ew", padx=5, pady=4)
             row_container.grid_columnconfigure(1, weight=1)
@@ -12955,6 +12954,7 @@ class App(tk.Tk):
                         break
                 combo = ttk.Combobox(
                     control_container,
+
                     textvariable=var,
                     values=MATERIAL_DROPDOWN_OPTIONS,
                     width=32,
@@ -12962,6 +12962,7 @@ class App(tk.Tk):
                 combo.grid(row=0, column=0, sticky="ew")
                 manual_entry = ttk.Entry(control_container, textvariable=var, width=14)
                 manual_entry.grid(row=0, column=1, sticky="w", padx=(6, 0))
+
                 combo.bind("<<ComboboxSelected>>", update_material_price)
                 var.trace_add("write", update_material_price)
                 material_choice_var = var
@@ -13005,11 +13006,13 @@ class App(tk.Tk):
                     onvalue="True",
                     offvalue="False",
                 ).grid(row=0, column=0, sticky="w")
+
                 self.quote_vars[item_name] = var
                 self._register_editor_field(item_name, var, label_widget)
             else:
                 var = tk.StringVar(value=initial_value)
                 ttk.Entry(control_container, textvariable=var, width=30).grid(row=0, column=0, sticky="w")
+
                 self.quote_vars[item_name] = var
                 self._register_editor_field(item_name, var, label_widget)
 
