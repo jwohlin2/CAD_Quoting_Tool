@@ -4995,16 +4995,24 @@ def render_quote(
         surpct = material.get("surcharge_pct")
         matcost= material.get("material_cost")
         scrap  = material.get("scrap_pct", None)  # will show only if present in breakdown
+        scrap_credit = float(material.get("material_scrap_credit") or 0.0)
         unit_price_kg = material.get("unit_price_usd_per_kg")
         unit_price_lb = material.get("unit_price_usd_per_lb")
         price_source  = material.get("unit_price_source") or material.get("source")
         price_asof    = material.get("unit_price_asof")
 
-        have_any = any(v for v in [mass_g, upg, minchg, surpct, matcost, scrap])
+        have_any = any(v for v in [mass_g, upg, minchg, surpct, matcost, scrap, scrap_credit])
         if have_any:
             mat_lines.append("Material & Stock")
             mat_lines.append(divider)
             if matcost or show_zeros: row("Material Cost (computed):", float(matcost or 0.0))
+            if scrap_credit:
+                credit_display = _m(scrap_credit)
+                if credit_display.startswith(currency):
+                    credit_display = f"-{credit_display}"
+                else:
+                    credit_display = f"-{currency}{float(scrap_credit):,.2f}"
+                write_line(f"Scrap Credit: {credit_display}", "  ")
             if mass_g or show_zeros:  write_line(f"Mass: {float(mass_g or 0.0):,.1f} g", "  ")
             if upg or show_zeros:
                 per_kg = f"{_m(unit_price_kg)} / kg" if unit_price_kg else ""
@@ -6172,6 +6180,9 @@ def compute_quote_from_df(df: pd.DataFrame,
     supplier_min_charge = first_num(r"\b(?:Supplier\s*Min\s*Charge|min\s*charge)\b", 0.0)
     surcharge_pct = num_pct(r"\b(?:Material\s*Surcharge|Volatility)\b", 0.0)
     explicit_mat  = num(r"\b(?:Material\s*Cost|Raw\s*Material\s*Cost)\b", 0.0)
+    material_scrap_credit_raw = num(r"(?:Material\s*Scrap(?:\s*Credit)?|Remnant(?:\s*Credit)?)", 0.0)
+    material_scrap_credit = abs(float(material_scrap_credit_raw or 0.0))
+    material_scrap_credit_applied = 0.0
 
     if material_vendor_csv is None:
         material_vendor_csv = params.get("MaterialVendorCSVPath", "") if isinstance(params, dict) else ""
@@ -6225,6 +6236,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                 pass
 
     material_direct_cost = float(material_cost)
+    material_cost_before_credit = float(material_direct_cost)
 
     material_detail_for_breakdown = dict(material_detail)
     material_detail_for_breakdown.setdefault("material_name", material_name)
@@ -6269,7 +6281,18 @@ def compute_quote_from_df(df: pd.DataFrame,
         })
         material_detail_for_breakdown["material_cost"] = material_direct_cost
         material_detail_for_breakdown["material_direct_cost"] = material_direct_cost
+        material_cost_before_credit = float(material_direct_cost)
         scrap_pct = effective_scrap
+
+    if material_scrap_credit:
+        credit_cap = min(material_scrap_credit, float(material_cost_before_credit))
+        if credit_cap > 0:
+            material_scrap_credit_applied = float(credit_cap)
+            material_direct_cost = max(0.0, float(material_cost_before_credit) - material_scrap_credit_applied)
+            material_detail_for_breakdown["material_scrap_credit"] = material_scrap_credit_applied
+            material_detail_for_breakdown["material_cost_before_credit"] = float(material_cost_before_credit)
+            material_detail_for_breakdown["material_cost"] = material_direct_cost
+            material_detail_for_breakdown["material_direct_cost"] = material_direct_cost
 
     # ---- programming / cam / dfm --------------------------------------------
     prog_hr = sum_time(r"(?:Programming|2D\s*CAM|3D\s*CAM|Simulation|Verification|DFM|Setup\s*Sheets)", exclude_pattern=r"\bCMM\b")
@@ -6653,6 +6676,8 @@ def compute_quote_from_df(df: pd.DataFrame,
         "Consumables Flat": {"basis": "Fixed shop supplies"},
         "Packaging Flat": {"basis": "Packaging materials & crates"},
     }
+    if material_scrap_credit_applied:
+        pass_meta["Material Scrap Credit"] = {"basis": "Scrap / remnant credit"}
 
     mat_source = material_detail_for_breakdown.get("source")
     if mat_source:
@@ -6674,6 +6699,8 @@ def compute_quote_from_df(df: pd.DataFrame,
         "Consumables Flat": consumables_flat,
         "Packaging Flat": packaging_flat_base,
     }
+    if material_scrap_credit_applied:
+        pass_through["Material Scrap Credit"] = -material_scrap_credit_applied
     pass_through_baseline = {k: float(v) for k, v in pass_through.items()}
 
     fix_detail = nre_detail.get("fixture", {})
