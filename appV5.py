@@ -13043,11 +13043,13 @@ class App(tk.Tk):
             if display_hint and display_hint.lower() not in {"number", "text"}:
                 label_text = f"{label_text}\n[{display_hint}]"
 
+
             row_container = ttk.Frame(quote_frame)
             row_container.grid(row=row_index, column=0, columnspan=2, sticky="ew", padx=5, pady=4)
             row_container.grid_columnconfigure(1, weight=1)
 
             label_widget = ttk.Label(row_container, text=label_text, wraplength=400)
+
             label_widget.grid(row=0, column=0, sticky="w", padx=(0, 6))
 
             control_row = 0
@@ -13058,6 +13060,7 @@ class App(tk.Tk):
             control_container.grid(row=control_row, column=1, sticky="ew", padx=5)
             control_container.grid_columnconfigure(0, weight=1)
             control_container.grid_columnconfigure(1, weight=1)
+
 
             def _add_info_label(text: str) -> None:
                 if not text:
@@ -13111,6 +13114,7 @@ class App(tk.Tk):
             elif control_spec.control == "dropdown":
                 options = list(control_spec.options) or ([control_spec.entry_value] if control_spec.entry_value else [])
                 selected = control_spec.entry_value or (options[0] if options else "")
+
                 var = tk.StringVar(value=selected)
                 combo = ttk.Combobox(
                     control_container,
@@ -13124,6 +13128,7 @@ class App(tk.Tk):
                 self._register_editor_field(item_name, var, label_widget)
             elif control_spec.control == "checkbox":
                 initial_bool = control_spec.checkbox_state
+
                 var = tk.StringVar(value="True" if initial_bool else "False")
                 ttk.Checkbutton(
                     control_container,
@@ -13163,6 +13168,7 @@ class App(tk.Tk):
                 swing_text = str(full_row.get("Typical Price Swing*", "") or "").strip()
             elif "Typical Price Swing*" in row_data:
                 swing_text = str(row_data.get("Typical Price Swing*", "") or "").strip()
+
             if swing_text:
                 _add_info_label(f"Typical swing: {swing_text}")
 
