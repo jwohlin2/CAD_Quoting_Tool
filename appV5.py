@@ -4979,12 +4979,6 @@ def render_quote(
                 why_parts.append(text)
         else:
             why_parts.extend([str(item).strip() for item in llm_explanation if str(item).strip()])
-    if why_parts:
-        lines.append("Why this price")
-        lines.append(divider)
-        for part in why_parts:
-            write_wrapped(part, "  ")
-        lines.append("")
 
     # ---- material & stock (compact; shown only if we actually have data) -----
     mat_lines = []
@@ -5103,6 +5097,13 @@ def render_quote(
             pass_total += float(value or 0.0)
     row("Total", pass_total, indent="  ")
     lines.append("")
+
+    if why_parts:
+        lines.append("Why this price")
+        lines.append(divider)
+        for part in why_parts:
+            write_wrapped(part, "  ")
+        lines.append("")
 
     # ---- Pricing ladder ------------------------------------------------------
     lines.append("Pricing Ladder")
