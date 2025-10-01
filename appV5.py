@@ -12845,10 +12845,29 @@ class App(tk.Tk):
             normalized_name = normalize_item(item_name)
             if normalized_name in skip_items:
                 continue
-            label_widget = ttk.Label(quote_frame, text=item_name, wraplength=400)
-            label_widget.grid(row=row_index, column=0, sticky="w", padx=5, pady=2)
+
+            dtype_raw = str(row_data.get("Data Type / Input Method", "") or "").strip().lower()
             initial_raw = row_data["Example Values / Options"]
-            initial_value = str(initial_raw) if initial_raw is not None else ""
+            initial_value = "" if pd.isna(initial_raw) else str(initial_raw)
+
+            row_container = ttk.Frame(quote_frame)
+            row_container.grid(row=row_index, column=0, columnspan=2, sticky="ew", padx=5, pady=4)
+            row_container.grid_columnconfigure(1, weight=1)
+
+            label_widget = ttk.Label(row_container, text=item_name, wraplength=400)
+            label_widget.grid(row=0, column=0, sticky="w", padx=(0, 6))
+
+            control_row = 0
+            info_row = 1
+            info_labels: list[ttk.Label] = []
+
+            def _add_info_label(text: str) -> None:
+                if not text:
+                    return
+                label = ttk.Label(row_container, text=text, wraplength=360, foreground="#555555")
+                label.grid(row=len(info_labels) + info_row, column=1, sticky="w", pady=(2, 0))
+                info_labels.append(label)
+
             if normalized_name in {"material"}:
                 var = tk.StringVar(value=self.default_material_display)
                 if initial_value:
@@ -12863,29 +12882,74 @@ class App(tk.Tk):
                             var.set(display)
                         break
                 combo = ttk.Combobox(
-                    quote_frame,
+                    row_container,
                     textvariable=var,
                     values=MATERIAL_DROPDOWN_OPTIONS,
                     width=32,
                 )
-                combo.grid(row=row_index, column=1, sticky="w", padx=5, pady=2)
+                combo.grid(row=control_row, column=1, sticky="w", padx=5)
                 combo.bind("<<ComboboxSelected>>", update_material_price)
                 var.trace_add("write", update_material_price)
                 material_choice_var = var
                 self.var_material = var
                 self.quote_vars[item_name] = var
                 self._register_editor_field(item_name, var, label_widget)
-            elif re.search(r"(Material\s*Price.*(per\s*gram|per\s*g|/g)|Unit\s*Price\s*/\s*g)", item_name, flags=re.IGNORECASE):
+            elif re.search(
+                r"(Material\s*Price.*(per\s*gram|per\s*g|/g)|Unit\s*Price\s*/\s*g)",
+                item_name,
+                flags=re.IGNORECASE,
+            ):
                 var = tk.StringVar(value=initial_value)
-                ttk.Entry(quote_frame, textvariable=var, width=30).grid(row=row_index, column=1, sticky="w", padx=5, pady=2)
+                ttk.Entry(row_container, textvariable=var, width=30).grid(row=control_row, column=1, sticky="w", padx=5)
                 material_price_var = var
+                self.quote_vars[item_name] = var
+                self._register_editor_field(item_name, var, label_widget)
+            elif "dropdown" in dtype_raw:
+                options = [opt.strip() for opt in re.split(r",|\n", initial_value) if opt.strip()]
+                if not options:
+                    options = [initial_value] if initial_value else []
+                var = tk.StringVar(value=initial_value or (options[0] if options else ""))
+                combo = ttk.Combobox(
+                    row_container,
+                    textvariable=var,
+                    values=options,
+                    width=32,
+                    state="readonly" if options else "normal",
+                )
+                combo.grid(row=control_row, column=1, sticky="w", padx=5)
+                self.quote_vars[item_name] = var
+                self._register_editor_field(item_name, var, label_widget)
+            elif "checkbox" in dtype_raw:
+                truthy = {"true", "1", "yes", "y", "on"}
+                initial_bool = str(initial_value).strip().lower() in truthy
+                var = tk.StringVar(value="True" if initial_bool else "False")
+                ttk.Checkbutton(
+                    row_container,
+                    variable=var,
+                    onvalue="True",
+                    offvalue="False",
+                ).grid(row=control_row, column=1, sticky="w", padx=5)
                 self.quote_vars[item_name] = var
                 self._register_editor_field(item_name, var, label_widget)
             else:
                 var = tk.StringVar(value=initial_value)
-                ttk.Entry(quote_frame, textvariable=var, width=30).grid(row=row_index, column=1, sticky="w", padx=5, pady=2)
+                ttk.Entry(row_container, textvariable=var, width=30).grid(row=control_row, column=1, sticky="w", padx=5)
                 self.quote_vars[item_name] = var
                 self._register_editor_field(item_name, var, label_widget)
+
+                if "lookup" in dtype_raw or "calculated" in dtype_raw:
+                    base_text = initial_value.strip()
+                    if base_text:
+                        _add_info_label(f"Based on: {base_text}")
+
+            why_text = str(row_data.get("Why it Matters", "") or "").strip()
+            if why_text:
+                _add_info_label(why_text)
+
+            swing_text = str(row_data.get("Typical Price Swing*", "") or "").strip()
+            if swing_text:
+                _add_info_label(f"Typical swing: {swing_text}")
+
             row_index += 1
 
         if material_choice_var is not None and material_price_var is not None:
