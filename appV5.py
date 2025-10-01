@@ -4583,6 +4583,156 @@ def _coerce_core_types(df_core: "pd.DataFrame") -> "pd.DataFrame":
     # Leave "Example Values / Options" as-is (can be text or number); estimator coerces later.
     return core
 
+
+@dataclass(frozen=True)
+class EditorControlSpec:
+    """Instruction for rendering a Quote Editor control."""
+
+    control: str
+    entry_value: str = ""
+    options: tuple[str, ...] = ()
+    base_text: str = ""
+    checkbox_state: bool = False
+    display_label: str = ""
+    guessed_dropdown: bool = False
+
+
+_BOOL_PAIR_RE = re.compile(
+    r"^\s*(true|false|yes|no|on|off)\s*(?:/|\||,|\s+or\s+)\s*(true|false|yes|no|on|off)\s*$",
+    re.IGNORECASE,
+)
+_TRUTHY_TOKENS = {"true", "1", "yes", "y", "on"}
+_FALSY_TOKENS = {"false", "0", "no", "n", "off"}
+
+
+def _split_editor_options(text: str) -> list[str]:
+    if not text:
+        return []
+    if _BOOL_PAIR_RE.match(text):
+        parts = re.split(r"[/|,]|\s+or\s+", text, flags=re.IGNORECASE)
+    else:
+        parts = re.split(r"[,\n;|]+", text)
+    return [p.strip() for p in parts if p and p.strip()]
+
+
+def _looks_like_bool_options(options: Sequence[str]) -> bool:
+    if not options or len(options) > 4:
+        return False
+    normalized = {opt.lower() for opt in options}
+    return bool(normalized & _TRUTHY_TOKENS) and bool(normalized & _FALSY_TOKENS)
+
+
+def _is_numeric_token(token: str) -> bool:
+    token = str(token).strip()
+    if not token:
+        return False
+    try:
+        float(token.replace(",", ""))
+        return True
+    except Exception:
+        return False
+
+
+def _format_numeric_entry_value(raw: str) -> tuple[str, bool]:
+    parsed = _coerce_float_or_none(raw)
+    if parsed is None:
+        return str(raw).strip(), False
+    txt = f"{float(parsed):.6f}".rstrip("0").rstrip(".")
+    return (txt if txt else "0", True)
+
+
+def derive_editor_control_spec(dtype_source: str, example_value: Any) -> EditorControlSpec:
+    """Classify a spreadsheet row into a UI control plan."""
+
+    dtype_raw = re.sub(r"\s+", " ", str(dtype_source or "").strip().lower())
+    raw_value = ""
+    if example_value is not None and not (isinstance(example_value, float) and math.isnan(example_value)):
+        raw_value = str(example_value)
+    initial_value = raw_value.strip()
+
+    options = _split_editor_options(initial_value)
+    looks_like_bool = _looks_like_bool_options(options)
+    is_checkbox = "checkbox" in dtype_raw or looks_like_bool
+    declared_dropdown = "dropdown" in dtype_raw or "select" in dtype_raw
+    is_formula_like = any(term in dtype_raw for term in ("lookup", "calculated")) or (
+        "value" in dtype_raw and ("lookup" in dtype_raw or "calculated" in dtype_raw)
+    )
+    if not is_formula_like and "value" in dtype_raw and not declared_dropdown:
+        is_formula_like = True
+    is_numeric_dtype = any(term in dtype_raw for term in ("number", "numeric", "decimal", "integer", "float"))
+
+    has_formula_chars = bool(re.search(r"[=*()+{}]", initial_value))
+    non_numeric_options = [opt for opt in options if not _is_numeric_token(opt)]
+    guessed_dropdown = False
+
+    if is_checkbox:
+        normalized = initial_value.lower()
+        if normalized in _TRUTHY_TOKENS:
+            state = True
+        elif normalized in _FALSY_TOKENS:
+            state = False
+        elif options:
+            first = options[0].lower()
+            state = first in _TRUTHY_TOKENS or first.startswith("y")
+        else:
+            state = False
+        display = dtype_source.strip() if isinstance(dtype_source, str) and dtype_source.strip() else "Checkbox"
+        return EditorControlSpec(
+            control="checkbox",
+            entry_value="True" if state else "False",
+            options=tuple(options),
+            checkbox_state=state,
+            display_label=display,
+        )
+
+    if declared_dropdown or (not is_formula_like and not is_numeric_dtype and non_numeric_options and len(options) >= 2 and not has_formula_chars):
+        guessed_dropdown = not declared_dropdown
+        display = dtype_source.strip() if isinstance(dtype_source, str) and dtype_source.strip() else "Dropdown"
+        selected = initial_value or (options[0] if options else "")
+        if options and selected not in options:
+            selected = options[0]
+        return EditorControlSpec(
+            control="dropdown",
+            entry_value=selected,
+            options=tuple(options),
+            display_label=(display + " (auto)" if guessed_dropdown else display),
+            guessed_dropdown=guessed_dropdown,
+        )
+
+    if is_formula_like or has_formula_chars:
+        display = dtype_source.strip() if isinstance(dtype_source, str) and dtype_source.strip() else "Lookup / Calculated"
+        entry_value, parsed_ok = _format_numeric_entry_value(initial_value)
+        if not parsed_ok:
+            entry_value = ""
+        base_text = initial_value if initial_value else ""
+        return EditorControlSpec(
+            control="formula",
+            entry_value=entry_value,
+            base_text=base_text,
+            display_label=display,
+        )
+
+    if is_numeric_dtype or (_is_numeric_token(initial_value) and not non_numeric_options):
+        display = dtype_source.strip() if isinstance(dtype_source, str) and dtype_source.strip() else "Number"
+        entry_value = ""
+        if initial_value:
+            entry_value, parsed_ok = _format_numeric_entry_value(initial_value)
+            if not parsed_ok:
+                entry_value = initial_value
+        return EditorControlSpec(
+            control="number",
+            entry_value=entry_value,
+            display_label=display,
+        )
+
+    display = dtype_source.strip() if isinstance(dtype_source, str) and dtype_source.strip() else "Text"
+    return EditorControlSpec(
+        control="text",
+        entry_value=initial_value,
+        display_label=display,
+        options=tuple(options),
+    )
+
 def sanitize_vars_df(df_full: "pd.DataFrame") -> "pd.DataFrame":
     """
     Return a copy containing only the 3 core columns the estimator needs.
@@ -12417,7 +12567,7 @@ class App(tk.Tk):
         self.param_vars = {}
         self.rate_vars = {}
         self.editor_widgets_frame = None
-        self.editor_vars: dict[str, tk.StringVar] = {}
+        self.editor_vars: dict[str, tk.Variable] = {}
         self.editor_label_widgets: dict[str, ttk.Label] = {}
         self.editor_label_base: dict[str, str] = {}
         self.editor_value_sources: dict[str, str] = {}
@@ -12840,56 +12990,31 @@ class App(tk.Tk):
             )
 
 
-        dtype_col_name = next(
-            (
-                col
-                for col in df.columns
-                if str(col).strip().lower() == "data type / input method"
-            ),
-            "Data Type / Input Method",
-        )
-        value_col_name = next(
-            (
-                col
-                for col in df.columns
-                if str(col).strip().lower() == "example values / options"
-            ),
-            "Example Values / Options",
-        )
+        # Prefer the headers from the original dataframe if available so that
+        # we can surface the richer context ("Why it Matters", formulas, etc.).
+        def _resolve_column(name: str) -> str:
+            target = name.strip().lower()
+            column_sources: list[pd.Index] = []
+            if self.vars_df_full is not None:
+                column_sources.append(self.vars_df_full.columns)
+            column_sources.append(df.columns)
+            for columns in column_sources:
+                for col in columns:
+                    if str(col).strip().lower() == target:
+                        return col
+            return name
 
-        def _normalize_dtype(raw: str) -> str:
-            lowered = str(raw or "").lower()
-            return re.sub(r"\s+", " ", lowered).strip()
+        dtype_col_name = _resolve_column("Data Type / Input Method")
+        value_col_name = _resolve_column("Example Values / Options")
 
-        bool_pair_re = re.compile(
-            r"^\s*(true|false|yes|no|on|off)\s*(?:/|\||,|\s+or\s+)\s*(true|false|yes|no|on|off)\s*$",
-            re.IGNORECASE,
-        )
-
-        def _split_options(text: str) -> list[str]:
-            if not text:
-                return []
-            if bool_pair_re.match(text):
-                parts = re.split(r"[/|,]|\s+or\s+", text, flags=re.IGNORECASE)
-            else:
-                parts = re.split(r"[,\n;|]+", text)
-            return [p.strip() for p in parts if p and p.strip()]
-
-        truthy_tokens = {"true", "1", "yes", "y", "on"}
-        falsy_tokens = {"false", "0", "no", "n", "off"}
-
-        def _looks_like_bool_options(options: list[str]) -> bool:
-            if not options or len(options) > 4:
-                return False
-            normalized = {opt.lower() for opt in options}
-            return bool(normalized & truthy_tokens) and bool(normalized & falsy_tokens)
-
-        def _is_numeric_token(token: str) -> bool:
-            try:
-                float(token.replace(",", ""))
-                return True
-            except Exception:
-                return False
+        # Build a lookup so each row can pull the descriptive columns from the
+        # original spreadsheet while still operating on the sanitized df copy.
+        full_lookup: dict[str, pd.Series] = {}
+        if self.vars_df_full is not None and "Item" in self.vars_df_full.columns:
+            full_items = self.vars_df_full["Item"].astype(str)
+            for idx, normalized in enumerate(full_items.apply(normalize_item)):
+                if normalized and normalized not in full_lookup:
+                    full_lookup[normalized] = self.vars_df_full.iloc[idx]
 
         for _, row_data in df.iterrows():
             item_name = str(row_data["Item"])
@@ -12897,24 +13022,34 @@ class App(tk.Tk):
             if normalized_name in skip_items:
                 continue
 
-            dtype_raw = _normalize_dtype(row_data.get(dtype_col_name, ""))
+            full_row = full_lookup.get(normalized_name)
+
+            dtype_source = row_data.get(dtype_col_name, "")
+            if full_row is not None:
+                dtype_source = full_row.get(dtype_col_name, dtype_source)
+
             initial_raw = row_data.get(value_col_name, "")
+            if full_row is not None:
+                initial_raw = full_row.get(value_col_name, initial_raw)
             initial_value = "" if pd.isna(initial_raw) else str(initial_raw)
-            option_candidates = _split_options(initial_value)
-            looks_like_bool = _looks_like_bool_options(option_candidates)
-            is_checkbox = "checkbox" in dtype_raw or looks_like_bool
-            is_dropdown = "dropdown" in dtype_raw or "select" in dtype_raw
-            is_formula_like = "lookup" in dtype_raw or "calculated" in dtype_raw
-            if not is_dropdown and not is_checkbox and not is_formula_like:
-                has_formula_chars = bool(re.search(r"[=*()+{}]", initial_value))
-                non_numeric_options = [opt for opt in option_candidates if not _is_numeric_token(opt)]
-                if non_numeric_options and len(option_candidates) >= 2 and not has_formula_chars:
-                    is_dropdown = True
+
+            control_spec = derive_editor_control_spec(dtype_source, initial_raw)
+            label_text = item_name
+            if full_row is not None and "Variable ID" in full_row:
+                var_id = str(full_row.get("Variable ID", "") or "").strip()
+                if var_id:
+                    label_text = f"{var_id} • {label_text}"
+            display_hint = control_spec.display_label.strip()
+            if display_hint and display_hint.lower() not in {"number", "text"}:
+                label_text = f"{label_text}\n[{display_hint}]"
+
+
             row_container = ttk.Frame(quote_frame)
             row_container.grid(row=row_index, column=0, columnspan=2, sticky="ew", padx=5, pady=4)
             row_container.grid_columnconfigure(1, weight=1)
 
-            label_widget = ttk.Label(row_container, text=item_name, wraplength=400)
+            label_widget = ttk.Label(row_container, text=label_text, wraplength=400)
+
             label_widget.grid(row=0, column=0, sticky="w", padx=(0, 6))
 
             control_row = 0
@@ -12924,7 +13059,8 @@ class App(tk.Tk):
             control_container = ttk.Frame(row_container)
             control_container.grid(row=control_row, column=1, sticky="ew", padx=5)
             control_container.grid_columnconfigure(0, weight=1)
-            control_container.grid_columnconfigure(1, weight=0)
+            control_container.grid_columnconfigure(1, weight=1)
+
 
             def _add_info_label(text: str) -> None:
                 if not text:
@@ -12954,15 +13090,11 @@ class App(tk.Tk):
                         break
                 combo = ttk.Combobox(
                     control_container,
-
                     textvariable=var,
                     values=MATERIAL_DROPDOWN_OPTIONS,
                     width=32,
                 )
                 combo.grid(row=0, column=0, sticky="ew")
-                manual_entry = ttk.Entry(control_container, textvariable=var, width=14)
-                manual_entry.grid(row=0, column=1, sticky="w", padx=(6, 0))
-
                 combo.bind("<<ComboboxSelected>>", update_material_price)
                 var.trace_add("write", update_material_price)
                 material_choice_var = var
@@ -12979,26 +13111,24 @@ class App(tk.Tk):
                 material_price_var = var
                 self.quote_vars[item_name] = var
                 self._register_editor_field(item_name, var, label_widget)
-            elif is_dropdown:
-                options = option_candidates or ([initial_value] if initial_value else [])
-                selected = initial_value
-                if options:
-                    if selected not in options:
-                        selected = options[0]
+            elif control_spec.control == "dropdown":
+                options = list(control_spec.options) or ([control_spec.entry_value] if control_spec.entry_value else [])
+                selected = control_spec.entry_value or (options[0] if options else "")
+
                 var = tk.StringVar(value=selected)
                 combo = ttk.Combobox(
                     control_container,
                     textvariable=var,
                     values=options,
                     width=28,
+                    state="readonly" if options else "normal",
                 )
                 combo.grid(row=0, column=0, sticky="ew")
-                manual_entry = ttk.Entry(control_container, textvariable=var, width=14)
-                manual_entry.grid(row=0, column=1, sticky="w", padx=(6, 0))
                 self.quote_vars[item_name] = var
                 self._register_editor_field(item_name, var, label_widget)
-            elif is_checkbox:
-                initial_bool = str(initial_value).strip().lower() in truthy_tokens
+            elif control_spec.control == "checkbox":
+                initial_bool = control_spec.checkbox_state
+
                 var = tk.StringVar(value="True" if initial_bool else "False")
                 ttk.Checkbutton(
                     control_container,
@@ -13006,26 +13136,39 @@ class App(tk.Tk):
                     onvalue="True",
                     offvalue="False",
                 ).grid(row=0, column=0, sticky="w")
-
                 self.quote_vars[item_name] = var
                 self._register_editor_field(item_name, var, label_widget)
             else:
-                var = tk.StringVar(value=initial_value)
+                entry_value = control_spec.entry_value
+                if not entry_value and control_spec.control != "formula":
+                    entry_value = initial_value
+                var = tk.StringVar(value=entry_value)
                 ttk.Entry(control_container, textvariable=var, width=30).grid(row=0, column=0, sticky="w")
-
+                base_text = control_spec.base_text.strip() if isinstance(control_spec.base_text, str) else ""
+                if base_text:
+                    ttk.Label(
+                        control_container,
+                        text=f"Based on: {base_text}",
+                        wraplength=260,
+                        foreground="#555555",
+                    ).grid(row=0, column=1, sticky="w", padx=(6, 0))
                 self.quote_vars[item_name] = var
                 self._register_editor_field(item_name, var, label_widget)
 
-                if "lookup" in dtype_raw or "calculated" in dtype_raw:
-                    base_text = initial_value.strip()
-                    if base_text:
-                        _add_info_label(f"Based on: {base_text}")
-
-            why_text = str(row_data.get("Why it Matters", "") or "").strip()
+            why_text = ""
+            if full_row is not None and "Why it Matters" in full_row:
+                why_text = str(full_row.get("Why it Matters", "") or "").strip()
+            elif "Why it Matters" in row_data:
+                why_text = str(row_data.get("Why it Matters", "") or "").strip()
             if why_text:
                 _add_info_label(why_text)
 
-            swing_text = str(row_data.get("Typical Price Swing*", "") or "").strip()
+            swing_text = ""
+            if full_row is not None and "Typical Price Swing*" in full_row:
+                swing_text = str(full_row.get("Typical Price Swing*", "") or "").strip()
+            elif "Typical Price Swing*" in row_data:
+                swing_text = str(row_data.get("Typical Price Swing*", "") or "").strip()
+
             if swing_text:
                 _add_info_label(f"Typical swing: {swing_text}")
 
@@ -13069,8 +13212,8 @@ class App(tk.Tk):
         except Exception:
             pass
 
-    def _register_editor_field(self, label: str, var: tk.StringVar, label_widget: ttk.Label | None) -> None:
-        if not isinstance(label, str) or not isinstance(var, tk.StringVar):
+    def _register_editor_field(self, label: str, var: tk.Variable, label_widget: ttk.Label | None) -> None:
+        if not isinstance(label, str) or not isinstance(var, tk.Variable):
             return
         self.editor_vars[label] = var
         if label_widget is not None:
@@ -13082,7 +13225,7 @@ class App(tk.Tk):
         self._mark_label_source(label, None)
         self._bind_editor_var(label, var)
 
-    def _bind_editor_var(self, label: str, var: tk.StringVar) -> None:
+    def _bind_editor_var(self, label: str, var: tk.Variable) -> None:
         def _on_write(*_):
             if self._building_editor or self._editor_set_depth > 0:
                 return
