@@ -4637,6 +4637,9 @@ def _load_master_variables() -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
         return (core_copy, full_copy)
 
     master_path = Path(__file__).with_name("Master_Variables.csv")
+    fallback = Path(r"D:\CAD_Quoting_Tool\Master_Variables.csv")
+    if not master_path.exists() and fallback.exists():
+        master_path = fallback
     if not master_path.exists():
         cache["loaded"] = True
         cache["core"] = None
@@ -12415,17 +12418,33 @@ class CreateToolTip:
         self._after_id: str | None = None
         self._tip_window: tk.Toplevel | None = None
         self._label: ttk.Label | None = None
+        self._pinned = False
 
         self.widget.bind("<Enter>", self._schedule_show, add="+")
         self.widget.bind("<Leave>", self._hide, add="+")
         self.widget.bind("<FocusIn>", self._schedule_show, add="+")
         self.widget.bind("<FocusOut>", self._hide, add="+")
-        self.widget.bind("<ButtonPress>", self._hide, add="+")
+        self.widget.bind("<ButtonPress>", self._on_button_press, add="+")
+        self.widget.bind("<Button-1>", self._toggle_pin, add="+")
 
     def update_text(self, text: str) -> None:
         self.text = text
         if self._label is not None:
             self._label.configure(text=text)
+
+    def _on_button_press(self, event: tk.Event | None = None) -> None:
+        if event is not None and getattr(event, "num", None) == 1:
+            return
+        self._hide()
+
+    def _toggle_pin(self, _event: tk.Event | None = None) -> None:
+        if self._pinned:
+            self._pinned = False
+            self._hide()
+        else:
+            self._pinned = True
+            self._cancel_scheduled()
+            self._show()
 
     def _schedule_show(self, _event: tk.Event | None = None) -> None:
         self._cancel_scheduled()
@@ -12487,6 +12506,8 @@ class CreateToolTip:
 
     def _hide(self, _event: tk.Event | None = None) -> None:
         self._cancel_scheduled()
+        if self._pinned:
+            return
         if self._tip_window is not None:
             self._tip_window.destroy()
             self._tip_window = None
