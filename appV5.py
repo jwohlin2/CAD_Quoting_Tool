@@ -8253,7 +8253,38 @@ def default_variables_template() -> pd.DataFrame:
     if _HAS_PANDAS:
         core_df, _ = _load_master_variables()
         if core_df is not None:
-            return core_df
+            updated = core_df.copy()
+            columns = list(updated.columns)
+            for required in REQUIRED_COLS:
+                if required not in columns:
+                    columns.append(required)
+            normalized_targets = {
+                "fair required": "FAIR Required",
+                "source inspection requirement": "Source Inspection Requirement",
+            }
+            seen_items: set[str] = set()
+            adjusted_rows: list[dict[str, Any]] = []
+            for _, row in updated.iterrows():
+                row_dict = dict(row)
+                item_text = str(row_dict.get("Item", "") or "")
+                normalized = item_text.strip().lower()
+                seen_items.add(normalized)
+                if normalized in normalized_targets:
+                    row_dict["Data Type / Input Method"] = "Checkbox"
+                    row_dict["Example Values / Options"] = "False / True"
+                adjusted_rows.append(row_dict)
+            for normalized, display in normalized_targets.items():
+                if normalized not in seen_items:
+                    new_row = {col: "" for col in columns}
+                    new_row.update(
+                        {
+                            "Item": display,
+                            "Data Type / Input Method": "Checkbox",
+                            "Example Values / Options": "False / True",
+                        }
+                    )
+                    adjusted_rows.append(new_row)
+            return pd.DataFrame(adjusted_rows, columns=columns)
     rows = [
         ("Overhead %", 0.15, "number"),
         ("G&A %", 0.08, "number"),
@@ -8286,8 +8317,8 @@ def default_variables_template() -> pd.DataFrame:
         ("Packaging Labor Hours", 0.0, "number"),
         ("Number of Milling Setups", 1, "number"),
         ("Setup Hours / Setup", 0.3, "number"),
-        ("FAIR Required", 0, "number"),
-        ("Source Inspection Requirement", 0, "number"),
+        ("FAIR Required", "False / True", "Checkbox"),
+        ("Source Inspection Requirement", "False / True", "Checkbox"),
         ("Quantity", 1, "number"),
         ("Material", "", "text"),
         ("Thickness (in)", 0.0, "number"),
