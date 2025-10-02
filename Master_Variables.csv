@@ -66,7 +66,7 @@ MAT-02	Material Form Factor (Plate, Bar, Casting)	Affects initial sawing/prep ti
 MIL-08	4th/5th Axis Utilization	Adds complexity and cost but can reduce setups.	Increases machine rate but can save hours of setup labor.	Dropdown	Standard (3-Axis), Positional (3+2), Full 5-Axis
 COM-01	Standard Packaging & Boxing Labor	Time to wrap and box parts for safe transit.	$2–$10 per part/package.	Dropdown	Standard Box, Custom Crate, ESD Bagging
 MAT-12	Material Handling (Weight/Size)	Very large or heavy stock requires cranes and multiple people to handle.	$100–$1000+ for rigging/handling on large parts.	Dropdown	Standard, Heavy/Oversize
-PM-01	Quoting Lead Time	Rush quotes require immediate attention, pulling estimators off other work.	$50–$250 flat fee for "while-you-wait" quotes.	Dropdown	Standard, Rush
+PM-01	Quoting Lead Time	Rush quotes require immediate attention, pulling estimators off other work.	$50–$250 flat fee for while-you-wait quotes.	Dropdown	Standard, Rush
 COM-06	G&A (General & Admin) Overhead	A percentage to cover rent, utilities, office staff, and other business costs.	15–25% of total cost.	Lookup Value (Percentage)	Subtotal * 0.20
 MAT-04	Material Cost per Unit (kg/lb/ft)	The direct purchase price from the supplier.	Direct cost input.	Lookup Value	The formula fetches this cost from a MaterialData table based on the Material Selection input.
 TRN-01	Primary Lathe / Turning Center Rate	Hourly cost for the specific turning machine.	$80/hr (Standard) vs. $140/hr (Mill-Turn).	Lookup Value	The formula fetches this hourly rate from a MachineRates table.
