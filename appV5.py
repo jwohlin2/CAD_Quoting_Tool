@@ -5016,6 +5016,9 @@ def render_quote(
     ui_vars = result.get("ui_vars") or {}
     if not isinstance(ui_vars, dict):
         ui_vars = {}
+    g = result.get("geo") or {}
+    if not isinstance(g, dict):
+        g = {}
     lines.append(f"QUOTE SUMMARY - Qty {qty}")
     lines.append(divider)
     row("Final Price per Part:", price)
@@ -5044,7 +5047,12 @@ def render_quote(
     # ---- material & stock (compact; shown only if we actually have data) -----
     mat_lines = []
     if material:
-        mass_g = material.get("mass_g")
+        mass_g_effective = material.get("effective_mass_g")
+        if mass_g_effective is None:
+            mass_g_effective = material.get("mass_g")
+        mass_g_net = material.get("mass_g_net")
+        if mass_g_net is None:
+            mass_g_net = material.get("net_mass_g")
         upg    = material.get("unit_price_per_g")
         minchg = material.get("supplier_min_charge")
         surpct = material.get("surcharge_pct")
@@ -5056,7 +5064,7 @@ def render_quote(
         price_source  = material.get("unit_price_source") or material.get("source")
         price_asof    = material.get("unit_price_asof")
 
-        have_any = any(v for v in [mass_g, upg, minchg, surpct, matcost, scrap, scrap_credit])
+        have_any = any(v for v in [mass_g_net, mass_g_effective, upg, minchg, surpct, matcost, scrap, scrap_credit])
         if have_any:
             mat_lines.append("Material & Stock")
             mat_lines.append(divider)
@@ -5068,7 +5076,25 @@ def render_quote(
                 else:
                     credit_display = f"-{currency}{float(scrap_credit):,.2f}"
                 write_line(f"Scrap Credit: {credit_display}", "  ")
-            if mass_g or show_zeros:  write_line(f"Mass: {float(mass_g or 0.0):,.1f} g", "  ")
+            mass_net_val = _as_float_or_none(mass_g_net)
+            mass_eff_val = _as_float_or_none(mass_g_effective)
+            mass_display_val = mass_net_val if mass_net_val is not None else mass_eff_val
+            scrap_pct_val = _as_float_or_none(scrap)
+            if mass_display_val is not None or show_zeros:
+                display_float = float(mass_display_val or 0.0)
+                if (
+                    mass_net_val is not None
+                    and mass_eff_val is not None
+                    and scrap_pct_val is not None
+                    and scrap_pct_val > 0
+                    and not math.isclose(mass_net_val, mass_eff_val, rel_tol=1e-6, abs_tol=1e-3)
+                ):
+                    write_line(
+                        f"Mass: {mass_net_val:,.1f} g net (scrap-adjusted {mass_eff_val:,.1f} g)",
+                        "  ",
+                    )
+                else:
+                    write_line(f"Mass: {display_float:,.1f} g", "  ")
             if upg or show_zeros:
                 per_kg = f"{_m(unit_price_kg)} / kg" if unit_price_kg else ""
                 per_lb = f"{_m(unit_price_lb)} / lb" if unit_price_lb else ""
@@ -5474,13 +5500,18 @@ def compute_material_cost(
     unit_price = usd_per_kg + premium
     cost = effective_kg * unit_price
 
+    effective_mass_g = effective_kg * 1000.0
+    net_mass_g = float(mass_kg) * 1000.0
+
     detail = {
         "material_name": material_name,
         "symbol": symbol,
         "basis": basis_used,
         "source": source,
-        "mass_g_net": float(mass_kg) * 1000.0,
-        "mass_g": effective_kg * 1000.0,
+        "mass_g_net": net_mass_g,
+        "net_mass_g": net_mass_g,
+        "mass_g": effective_mass_g,
+        "effective_mass_g": effective_mass_g,
         "scrap_pct": scrap_frac,
         "loss_factor": loss_factor,
         "unit_price_usd_per_kg": unit_price,
@@ -6245,7 +6276,6 @@ def compute_quote_from_df(df: pd.DataFrame,
                 fallback_meta["minimum_mass_kg"] = min_mass_kg
 
     effective_mass_g = net_mass_g * (1.0 + scrap_pct)
-    mass_g = effective_mass_g
     mass_kg = net_mass_g / 1000.0
 
     unit_price_per_g  = first_num(r"\b(?:Material\s*Price.*(?:per\s*g|/g)|Unit\s*Price\s*/\s*g)\b", 0.0)
@@ -6277,7 +6307,9 @@ def compute_quote_from_df(df: pd.DataFrame,
         material_detail = {
             "material_name": material_name,
             "mass_g": effective_mass_g,
+            "effective_mass_g": effective_mass_g,
             "mass_g_net": net_mass_g,
+            "net_mass_g": net_mass_g,
             "scrap_pct": scrap_pct,
             "error": str(err),
         }
@@ -6312,8 +6344,10 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     material_detail_for_breakdown = dict(material_detail)
     material_detail_for_breakdown.setdefault("material_name", material_name)
-    material_detail_for_breakdown.setdefault("mass_g", mass_g)
+    material_detail_for_breakdown.setdefault("mass_g", effective_mass_g)
+    material_detail_for_breakdown.setdefault("effective_mass_g", effective_mass_g)
     material_detail_for_breakdown.setdefault("mass_g_net", net_mass_g)
+    material_detail_for_breakdown.setdefault("net_mass_g", net_mass_g)
     material_detail_for_breakdown.setdefault("scrap_pct", scrap_pct)
     if mass_basis:
         material_detail_for_breakdown.setdefault("mass_basis", mass_basis)
@@ -6344,7 +6378,9 @@ def compute_quote_from_df(df: pd.DataFrame,
         material_detail_for_breakdown.update({
             "material_name": mat_for_price,
             "mass_g_net": mass_kg * 1000.0,
+            "net_mass_g": mass_kg * 1000.0,
             "mass_g": mass_kg * 1000.0 * (1.0 + effective_scrap),
+            "effective_mass_g": mass_kg * 1000.0 * (1.0 + effective_scrap),
             "scrap_pct": effective_scrap,
             "unit_price_usd_per_kg": mat_usd_per_kg,
             "unit_price_per_g": mat_usd_per_kg / 1000.0 if mat_usd_per_kg else material_detail_for_breakdown.get("unit_price_per_g", 0.0),
