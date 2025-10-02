@@ -12408,10 +12408,19 @@ class CreateToolTip:
         x = self.widget.winfo_rootx() + 20
         y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
 
-        tip = tk.Toplevel(self.widget)
+        master = self.widget.winfo_toplevel()
+        tip = tk.Toplevel(master)
         tip.wm_overrideredirect(True)
-        tip.wm_transient(self.widget)
+        try:
+            tip.transient(master)
+        except Exception:
+            tip.wm_transient(master)
         tip.wm_geometry(f"+{x}+{y}")
+        tip.lift()
+        try:
+            tip.attributes("-topmost", True)
+        except Exception:
+            pass
 
         label = ttk.Label(
             tip,
