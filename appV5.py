@@ -12686,13 +12686,29 @@ class App(tk.Tk):
                 pass
 
         # Output
-        self.out_txt = tk.Text(self.tab_out, wrap="word")
-        self.out_txt.pack(fill="both", expand=True)
-        try:
-            self.out_txt.tag_configure("rcol", tabs=("4.8i right",), tabstyle="tabular")
-        except tk.TclError:
-            self.out_txt.tag_configure("rcol", tabs=("4.8i right",))
-        #self.out_txt = tk.Text(self.tab_out, wrap="word", font=("Consolas", 10)); self.out_txt.pack(fill="both", expand=True)
+        self.output_nb = ttk.Notebook(self.tab_out)
+        self.output_nb.pack(fill="both", expand=True)
+
+        self.output_tab_simplified = ttk.Frame(self.output_nb)
+        self.output_nb.add(self.output_tab_simplified, text="Simplified")
+        self.output_tab_full = ttk.Frame(self.output_nb)
+        self.output_nb.add(self.output_tab_full, text="Full Detail")
+
+        self.output_text_widgets: dict[str, tk.Text] = {}
+
+        simplified_txt = tk.Text(self.output_tab_simplified, wrap="word")
+        simplified_txt.pack(fill="both", expand=True)
+        full_txt = tk.Text(self.output_tab_full, wrap="word")
+        full_txt.pack(fill="both", expand=True)
+
+        for name, widget in {"simplified": simplified_txt, "full": full_txt}.items():
+            try:
+                widget.tag_configure("rcol", tabs=("4.8i right",), tabstyle="tabular")
+            except tk.TclError:
+                widget.tag_configure("rcol", tabs=("4.8i right",))
+            self.output_text_widgets[name] = widget
+
+        self.output_nb.select(self.output_tab_simplified)
 
         self.LLM_SUGGEST = None
         self._llm_load_attempted = False
@@ -14129,8 +14145,15 @@ class App(tk.Tk):
         self.geo_txt.insert("end", json.dumps(d, indent=2))
 
     def _log_out(self, d):
-        self.out_txt.insert("end", d+"\n")
-        self.out_txt.see("end")
+        widget = self.output_text_widgets.get("simplified") if hasattr(self, "output_text_widgets") else None
+        if widget is None:
+            return
+        widget.insert("end", d + "\n")
+        widget.see("end")
+        try:
+            self.output_nb.select(self.output_tab_simplified)
+        except Exception:
+            pass
 
     def reprice(self, hint: str | None = None) -> None:
         if self.auto_reprice_enabled:
@@ -14208,9 +14231,33 @@ class App(tk.Tk):
 
             model_path = self.llm_model_path.get().strip()
             llm_explanation = get_llm_quote_explanation(res, model_path)
-            report = render_quote(res, currency="$", show_zeros=False, llm_explanation=llm_explanation)
-            self.out_txt.delete("1.0", "end")
-            self.out_txt.insert("end", report, "rcol")
+            simplified_report = render_quote(
+                res,
+                currency="$",
+                show_zeros=False,
+                llm_explanation=llm_explanation,
+            )
+            full_report = render_quote(
+                res,
+                currency="$",
+                show_zeros=True,
+                llm_explanation=llm_explanation,
+            )
+
+            for name, report_text in (
+                ("simplified", simplified_report),
+                ("full", full_report),
+            ):
+                widget = self.output_text_widgets.get(name)
+                if widget is None:
+                    continue
+                widget.delete("1.0", "end")
+                widget.insert("end", report_text, "rcol")
+
+            try:
+                self.output_nb.select(self.output_tab_simplified)
+            except Exception:
+                pass
 
             self.nb.select(self.tab_out)
             self.status_var.set(f"Quote Generated! Final Price: ${res.get('price', 0):,.2f}")
