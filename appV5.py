@@ -4332,8 +4332,39 @@ class EditorControlSpec:
     options: tuple[str, ...] = ()
     base_text: str = ""
     checkbox_state: bool = False
+    checkbox_label: str = "Enabled"
     display_label: str = ""
     guessed_dropdown: bool = False
+
+
+def _coerce_checkbox_state(value: Any, default: bool = False) -> bool:
+    """Best-effort conversion from spreadsheet text to a boolean."""
+
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        try:
+            if math.isnan(value):
+                return default
+        except Exception:
+            pass
+        return bool(value)
+
+    text = str(value).strip().lower()
+    if not text:
+        return default
+    if text in _TRUTHY_TOKENS or text.startswith("y"):
+        return True
+    if text in _FALSY_TOKENS or text.startswith("n"):
+        return False
+
+    for part in re.split(r"[/|,\s]+", text):
+        if part in _TRUTHY_TOKENS or part.startswith("y"):
+            return True
+        if part in _FALSY_TOKENS or part.startswith("n"):
+            return False
+
+    return default
 
 
 _BOOL_PAIR_RE = re.compile(
@@ -4414,13 +4445,27 @@ def derive_editor_control_spec(dtype_source: str, example_value: Any) -> EditorC
             first = options[0].lower()
             state = first in _TRUTHY_TOKENS or first.startswith("y")
         else:
-            state = False
+            state = _coerce_checkbox_state(initial_value, False)
+
+        truthy_label = next(
+            (
+                opt.strip()
+                for opt in options
+                if opt and (opt.lower() in _TRUTHY_TOKENS or opt.lower().startswith("y"))
+            ),
+            "",
+        )
+        checkbox_label = truthy_label.title() if truthy_label else "Enabled"
+        if checkbox_label.lower() in {"true", "1"}:
+            checkbox_label = "Enabled"
+
         display = dtype_source.strip() if isinstance(dtype_source, str) and dtype_source.strip() else "Checkbox"
         return EditorControlSpec(
             control="checkbox",
             entry_value="True" if state else "False",
             options=tuple(options),
             checkbox_state=state,
+            checkbox_label=checkbox_label,
             display_label=display,
         )
 
@@ -13254,12 +13299,34 @@ class App(tk.Tk):
                 self._register_editor_field(item_name, var, label_widget)
             elif control_spec.control == "checkbox":
                 initial_bool = control_spec.checkbox_state
+                bool_var = tk.BooleanVar(value=bool(initial_bool))
                 var = tk.StringVar(value="True" if initial_bool else "False")
+
+                def _sync_string_from_bool(*_args: Any) -> None:
+                    value = "True" if bool_var.get() else "False"
+                    if var.get() != value:
+                        var.set(value)
+
+                def _sync_bool_from_string(*_args: Any) -> None:
+                    current = var.get()
+                    parsed = _coerce_checkbox_state(current, bool_var.get())
+                    if bool_var.get() != parsed:
+                        bool_var.set(parsed)
+
+                if hasattr(bool_var, "trace_add"):
+                    bool_var.trace_add("write", _sync_string_from_bool)
+                else:  # pragma: no cover - legacy Tk fallback
+                    bool_var.trace("w", lambda *_: _sync_string_from_bool())
+
+                if hasattr(var, "trace_add"):
+                    var.trace_add("write", _sync_bool_from_string)
+                else:  # pragma: no cover - legacy Tk fallback
+                    var.trace("w", lambda *_: _sync_bool_from_string())
+
                 ttk.Checkbutton(
                     control_container,
-                    variable=var,
-                    onvalue="True",
-                    offvalue="False",
+                    variable=bool_var,
+                    text=control_spec.checkbox_label or "Enabled",
                 ).grid(row=0, column=0, sticky="w")
                 self.quote_vars[item_name] = var
                 self._register_editor_field(item_name, var, label_widget)
