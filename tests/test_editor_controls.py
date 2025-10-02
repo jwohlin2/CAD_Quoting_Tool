@@ -1,6 +1,6 @@
 """Unit tests for editor control classification helpers."""
 
-from appV5 import derive_editor_control_spec
+from appV5 import default_variables_template, derive_editor_control_spec
 
 
 def test_number_control_from_declared_dtype():
@@ -44,3 +44,15 @@ def test_options_without_dtype_are_promoted_to_dropdown():
     assert spec.control == "dropdown"
     assert spec.guessed_dropdown
     assert spec.options == ("Low", "Medium", "High")
+
+
+def test_default_template_flags_render_as_checkboxes():
+    df = default_variables_template()
+    for item in ("FAIR Required", "Source Inspection Requirement"):
+        row = next((row for _, row in df.iterrows() if row["Item"] == item), None)
+        assert row is not None, f"Missing {item} in default template"
+        dtype = row["Data Type / Input Method"]
+        example = row["Example Values / Options"]
+        spec = derive_editor_control_spec(dtype, example)
+        assert spec.control == "checkbox"
+        assert spec.checkbox_state is False

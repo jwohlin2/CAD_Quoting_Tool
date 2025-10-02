@@ -76,6 +76,52 @@ for display in MATERIAL_DROPDOWN_OPTIONS:
 
 MATERIAL_OTHER_KEY = normalize_material_key(MATERIAL_DROPDOWN_OPTIONS[-1])
 
+_MATERIAL_DENSITY_G_CC_BY_DISPLAY: Dict[str, float | None] = {
+    "Aluminum": 2.70,
+    "Berylium Copper": 8.25,
+    "Bismuth": 9.78,
+    "Brass": 8.40,
+    "Carbide": 15.60,
+    "Ceramic": 3.90,
+    "Cobalt": 8.90,
+    "Copper": 8.96,
+    "Gold": 19.32,
+    "Inconel": 8.44,
+    "Indium": 7.31,
+    "Lead": 11.34,
+    "Nickel": 8.90,
+    "Nickel Silver": 8.70,
+    "Palladium": 12.02,
+    "Phosphor Bronze": 8.80,
+    "Phosphorus": 1.82,
+    "Silver": 10.49,
+    "Stainless Steel": 7.90,
+    "Steel": 7.85,
+    "Tin": 7.31,
+    "Titanium": 4.43,
+    "Tool Steel": 7.80,
+    "Tungsten": 19.30,
+    "Other (enter custom price)": None,
+}
+
+MATERIAL_DENSITY_G_CC_BY_KEY: Dict[str, float] = {}
+MATERIAL_DENSITY_G_CC_BY_KEYWORD: Dict[str, float] = {}
+
+for display, density in _MATERIAL_DENSITY_G_CC_BY_DISPLAY.items():
+    key = normalize_material_key(display)
+    if not key or density is None:
+        continue
+    MATERIAL_DENSITY_G_CC_BY_KEY[key] = density
+
+for key, keywords in MATERIAL_KEYWORDS.items():
+    density = MATERIAL_DENSITY_G_CC_BY_KEY.get(key)
+    if density is None:
+        continue
+    for token in keywords:
+        if not token:
+            continue
+        MATERIAL_DENSITY_G_CC_BY_KEYWORD[token] = density
+
 MATERIAL_MAP: Dict[str, Dict[str, float | str]] = {
     # Aluminum alloys → Aluminum cash index
     "6061": {"symbol": "XAL", "basis": "index_usd_per_tonne", "loss_factor": 0.0, "wieland_key": "6061"},
@@ -113,6 +159,8 @@ def is_material_match(display: str, keyword: str) -> bool:
 __all__ = [
     "DEFAULT_MATERIAL_DISPLAY",
     "DEFAULT_MATERIAL_KEY",
+    "MATERIAL_DENSITY_G_CC_BY_KEY",
+    "MATERIAL_DENSITY_G_CC_BY_KEYWORD",
     "MATERIAL_DISPLAY_BY_KEY",
     "MATERIAL_DROPDOWN_OPTIONS",
     "MATERIAL_KEYWORDS",
