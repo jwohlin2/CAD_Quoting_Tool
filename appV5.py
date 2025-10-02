@@ -6713,9 +6713,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     fai_flag_base = False
     if isinstance(ui_vars, dict):
         raw_fai = ui_vars.get("FAIR Required")
-        cand = _coerce_float_or_none(raw_fai)
-        if cand is not None:
-            fai_flag_base = bool(int(round(float(cand))))
+        fai_flag_base = _coerce_checkbox_state(raw_fai, False)
 
     baseline_data = {
         "process_hours": process_hours_baseline,
@@ -6844,11 +6842,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         "in_process_inspection_hr": float(inproc_hr or 0.0),
         "packaging_hours": float(packaging_hr or 0.0),
         "packaging_flat_cost": float((crate_nre_cost or 0.0) + (packaging_mat or 0.0)),
-        "fai_required": bool(
-            int(round(float(_coerce_float_or_none(ui_vars.get("FAIR Required")) or 0.0)))
-            if isinstance(ui_vars, dict)
-            else False
-        ),
+        "fai_required": bool(fai_flag_base),
     }
     # Safely include tap/cbore counts even if later sections define seeds
     try:
