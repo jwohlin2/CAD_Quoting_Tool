@@ -98,6 +98,8 @@ def discover_qwen_vl_assets(
 from cad_quoter.domain_models import (
     DEFAULT_MATERIAL_DISPLAY,
     DEFAULT_MATERIAL_KEY,
+    MATERIAL_DENSITY_G_CC_BY_KEY,
+    MATERIAL_DENSITY_G_CC_BY_KEYWORD,
     MATERIAL_DISPLAY_BY_KEY,
     MATERIAL_DROPDOWN_OPTIONS,
     MATERIAL_KEYWORDS,
@@ -4675,6 +4677,10 @@ def render_quote(
     qty          = int(breakdown.get("qty", 1) or 1)
     price        = float(result.get("price", totals.get("price", 0.0)))
 
+    g = breakdown.get("geo_context") or breakdown.get("geo") or result.get("geo") or {}
+    if not isinstance(g, dict):
+        g = {}
+
     # Optional: LLM decision bullets can be placed either on result or breakdown
     llm_notes = (result.get("llm_notes") or breakdown.get("llm_notes") or [])[:8]
 
@@ -4697,6 +4703,29 @@ def render_quote(
             return "—"
         text = str(val).strip()
         return text if text else "—"
+
+    def _format_weight_lb_oz(mass_g: float | None) -> str:
+        grams = max(0.0, float(mass_g or 0.0))
+        if grams <= 0:
+            return "0 oz"
+        pounds_total = grams / 1000.0 * LB_PER_KG
+        total_ounces = pounds_total * 16.0
+        pounds = int(total_ounces // 16)
+        ounces = total_ounces - pounds * 16
+        precision = 1 if pounds > 0 or ounces >= 1.0 else 2
+        ounces = round(ounces, precision)
+        if ounces >= 16.0:
+            pounds += 1
+            ounces = 0.0
+        parts: list[str] = []
+        if pounds > 0:
+            parts.append(f"{pounds} lb" if pounds != 1 else "1 lb")
+        if ounces > 0 or pounds == 0:
+            ounce_text = f"{ounces:.{precision}f}".rstrip("0").rstrip(".")
+            if not ounce_text:
+                ounce_text = "0"
+            parts.append(f"{ounce_text} oz")
+        return " ".join(parts) if parts else "0 oz"
 
     def write_line(s: str, indent: str = ""):
         lines.append(f"{indent}{s}")
@@ -4776,12 +4805,8 @@ def render_quote(
     # ---- material & stock (compact; shown only if we actually have data) -----
     mat_lines = []
     if material:
-        mass_g_effective = material.get("effective_mass_g")
-        if mass_g_effective is None:
-            mass_g_effective = material.get("mass_g")
-        mass_g_net = material.get("mass_g_net")
-        if mass_g_net is None:
-            mass_g_net = material.get("net_mass_g")
+        mass_g = material.get("mass_g")
+        net_mass_g = material.get("mass_g_net")
         upg    = material.get("unit_price_per_g")
         minchg = material.get("supplier_min_charge")
         surpct = material.get("surcharge_pct")
@@ -4793,7 +4818,8 @@ def render_quote(
         price_source  = material.get("unit_price_source") or material.get("source")
         price_asof    = material.get("unit_price_asof")
 
-        have_any = any(v for v in [mass_g_net, mass_g_effective, upg, minchg, surpct, matcost, scrap, scrap_credit])
+        have_any = any(v for v in [mass_g, net_mass_g, upg, minchg, surpct, matcost, scrap, scrap_credit])
+
         if have_any:
             mat_lines.append("Material & Stock")
             mat_lines.append(divider)
@@ -4805,25 +4831,20 @@ def render_quote(
                 else:
                     credit_display = f"-{currency}{float(scrap_credit):,.2f}"
                 write_line(f"Scrap Credit: {credit_display}", "  ")
-            mass_net_val = _as_float_or_none(mass_g_net)
-            mass_eff_val = _as_float_or_none(mass_g_effective)
-            mass_display_val = mass_net_val if mass_net_val is not None else mass_eff_val
-            scrap_pct_val = _as_float_or_none(scrap)
-            if mass_display_val is not None or show_zeros:
-                display_float = float(mass_display_val or 0.0)
-                if (
-                    mass_net_val is not None
-                    and mass_eff_val is not None
-                    and scrap_pct_val is not None
-                    and scrap_pct_val > 0
-                    and not math.isclose(mass_net_val, mass_eff_val, rel_tol=1e-6, abs_tol=1e-3)
-                ):
-                    write_line(
-                        f"Mass: {mass_net_val:,.1f} g net (scrap-adjusted {mass_eff_val:,.1f} g)",
-                        "  ",
-                    )
-                else:
-                    write_line(f"Mass: {display_float:,.1f} g", "  ")
+            net_mass_val = _coerce_float_or_none(net_mass_g)
+            effective_mass_val = _coerce_float_or_none(mass_g)
+            if net_mass_val is None:
+                net_mass_val = effective_mass_val
+            if (net_mass_val and net_mass_val > 0) or show_zeros:
+                write_line(f"Net Weight: {_format_weight_lb_oz(net_mass_val)}", "  ")
+            if (
+                scrap
+                and effective_mass_val
+                and net_mass_val
+                and abs(float(effective_mass_val) - float(net_mass_val)) > 0.05
+            ):
+                write_line(f"With Scrap: {_format_weight_lb_oz(effective_mass_val)}", "  ")
+
             if upg or show_zeros:
                 per_kg = f"{_m(unit_price_kg)} / kg" if unit_price_kg else ""
                 per_lb = f"{_m(unit_price_lb)} / lb" if unit_price_lb else ""
@@ -5301,46 +5322,62 @@ def _material_price_per_g_from_choice(
     return price_float / 1000.0, source or ""
 
 
+_DEFAULT_MATERIAL_DENSITY_G_CC = MATERIAL_DENSITY_G_CC_BY_KEY.get(DEFAULT_MATERIAL_KEY, 7.85)
+
+
 def _material_family(material: str) -> str:
-    name = (material or "").strip().lower()
+    name = _normalize_lookup_key(material)
     if not name:
         return "steel"
     if any(tag in name for tag in ("alum", "6061", "7075", "2024", "5052", "5083")):
         return "alum"
-    if any(tag in name for tag in ("stainless", "17-4", "17 4", "316", "304", "ss")):
+    if any(tag in name for tag in ("stainless", "17 4", "316", "304", "ss")):
         return "stainless"
-    if any(tag in name for tag in ("titanium", "ti-6al-4v", "ti64", "grade 5")):
+    if any(tag in name for tag in ("titanium", "ti 6al 4v", "ti6al4v", "grade 5", "ti")):
         return "titanium"
-    if any(tag in name for tag in ("copper", "c110", "cu")):
+    if any(tag in name for tag in ("copper", "c110", "cube", "bronze", "phosphor")):
         return "copper"
-    if any(tag in name for tag in ("brass", "c360", "c260")):
+    if "brass" in name:
         return "brass"
-    if any(
-        tag in name
-        for tag in ("plastic", "uhmw", "delrin", "acetal", "peek", "abs", "nylon")
-    ):
-        return "plastic"
+    if any(tag in name for tag in ("nickel", "inconel", "cobalt")):
+        return "nickel"
+    if "tungsten" in name:
+        return "tungsten"
+    if any(tag in name for tag in ("gold", "silver", "palladium")):
+        return "precious"
     return "steel"
 
 
-def _density_for_material(material: str, default: float = 7.85) -> float:
+def _density_for_material(material: str, default: float = _DEFAULT_MATERIAL_DENSITY_G_CC) -> float:
     """Return a rough density guess (g/cc) for the requested material."""
 
-    name = (material or "").strip().lower()
-    if not name:
+    raw = (material or "").strip()
+    if not raw:
         return default
-    if any(tag in name for tag in ("alum", "6061", "5052", "7075", "2024", "5083")):
-        return 2.70
-    if any(tag in name for tag in ("stainless", "17-4", "17 4", "316", "304", "ss")):
-        return 7.90
-    if any(tag in name for tag in ("titanium", "ti-6al-4v", "ti64", "grade 5")):
-        return 4.43
-    if any(tag in name for tag in ("copper", "c110", "cu")):
-        return 8.96
-    if any(tag in name for tag in ("brass", "c360", "c260")):
-        return 8.40
-    if any(tag in name for tag in ("plastic", "uhmw", "delrin", "acetal", "peek", "abs", "nylon")):
+
+    normalized = _normalize_lookup_key(raw)
+    collapsed = normalized.replace(" ", "")
+
+    for token in (normalized, collapsed):
+        if token and token in MATERIAL_DENSITY_G_CC_BY_KEYWORD:
+            return MATERIAL_DENSITY_G_CC_BY_KEYWORD[token]
+
+    for token, density in MATERIAL_DENSITY_G_CC_BY_KEYWORD.items():
+        if not token:
+            continue
+        if token in normalized or token in collapsed:
+            return density
+
+    lower = raw.lower()
+    if any(tag in lower for tag in ("plastic", "uhmw", "delrin", "acetal", "peek", "abs", "nylon")):
         return 1.45
+    if any(tag in lower for tag in ("foam", "poly", "composite")):
+        return 1.10
+    if any(tag in lower for tag in ("magnesium", "az31", "az61")):
+        return 1.80
+    if "graphite" in lower:
+        return 1.85
+
     return default
 
 
@@ -5862,7 +5899,7 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     # ---- material ------------------------------------------------------------
     vol_cm3       = first_num(r"\b(?:Net\s*Volume|Volume_net|Volume\s*\(cm\^?3\))\b", GEO_vol_mm3 / 1000.0)
-    density_g_cc  = first_num(r"\b(?:Density|Material\s*Density)\b", 14.5)
+    density_g_cc  = first_num(r"\b(?:Density|Material\s*Density)\b", 0.0)
     scrap_pct_raw = num_pct(r"\b(?:Scrap\s*%|Expected\s*Scrap)\b", 0.0)
     scrap_pct = _ensure_scrap_pct(scrap_pct_raw)
     material_name_raw = sheet_text(r"(?i)Material\s*(?:Name|Grade|Alloy|Type)")
@@ -5876,6 +5913,10 @@ def compute_quote_from_df(df: pd.DataFrame,
     if material_name:
         geo_context.setdefault("material", material_name)
     material_name = str(geo_context.get("material") or material_name or "").strip()
+
+    density_guess_from_material = _density_for_material(material_name, _DEFAULT_MATERIAL_DENSITY_G_CC)
+    if not density_g_cc or density_g_cc <= 0:
+        density_g_cc = density_guess_from_material
 
     # --- SCRAP BASELINE (always defined) ---
     try:
@@ -5912,41 +5953,12 @@ def compute_quote_from_df(df: pd.DataFrame,
         vol_mm3_plate = max(1.0, length_mm * width_mm * max(thickness_mm_val, 0.0))
         vol_cm3 = max(vol_cm3, vol_mm3_plate / 1000.0)
         GEO_vol_mm3 = max(GEO_vol_mm3, vol_mm3_plate)
-        density_lookup = {
-            "steel": 7.85,
-            "stainless": 7.90,
-            "alum": 2.70,
-            "titanium": 4.43,
-            "copper": 8.96,
-            "brass": 8.40,
-            "plastic": 1.45,
-        }
+        density_from_geo = _coerce_float_or_none(geo_context.get("density_g_cc"))
+        if density_from_geo and density_from_geo > 0:
+            density_g_cc = float(density_from_geo)
+        elif density_g_cc <= 0:
+            density_g_cc = density_guess_from_material
 
-        def _context_density(ctx: dict[str, Any] | None) -> float | None:
-            if not isinstance(ctx, dict):
-                return None
-            val = _coerce_float_or_none(ctx.get("density_g_cc"))
-            if val and val > 0:
-                return float(val)
-            return None
-
-        inner_geo_ctx = geo_context.get("geo") if isinstance(geo_context.get("geo"), dict) else None
-        density_candidates: list[float] = []
-        for ctx in (geo_context, inner_geo_ctx):
-            dens = _context_density(ctx)
-            if dens:
-                density_candidates.append(dens)
-        if not density_candidates:
-            density_candidates.append(
-                _density_for_material(material_name or default_material_display, default=0.0)
-            )
-        density_candidates.append(
-            density_lookup.get(
-                _material_family(geo_context.get("material") or material_name),
-                density_lookup["steel"],
-            )
-        )
-        density_g_cc = next((d for d in density_candidates if d and d > 0), density_lookup["steel"])
         holes_for_mass: list[float] = []
         hole_sources: list[Any] = []
         for key in ("hole_diams_mm_precise", "hole_diams_mm"):
@@ -5975,6 +5987,9 @@ def compute_quote_from_df(df: pd.DataFrame,
                 vol_cm3 = max(vol_cm3, vol_cm3_net)
                 GEO_vol_mm3 = max(GEO_vol_mm3, vol_cm3_net * 1000.0)
                 geo_context.setdefault("net_volume_cm3", float(vol_cm3_net))
+
+    if density_g_cc and density_g_cc > 0:
+        geo_context.setdefault("density_g_cc", float(density_g_cc))
 
     net_mass_g = max(0.0, vol_cm3 * density_g_cc)
     mass_basis = "volume"
