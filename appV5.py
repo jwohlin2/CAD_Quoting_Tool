@@ -13239,7 +13239,7 @@ class App(tk.Tk):
                         control_container,
                         text="ⓘ",
                         padding=(4, 0),
-                        cursor="question_arrow",
+                        cursor="question_arrow",  # show question cursor while keeping tooltip
                         takefocus=0,
                     )
                     info_indicator.grid(row=control_row, column=2, sticky="nw", padx=(6, 0))
