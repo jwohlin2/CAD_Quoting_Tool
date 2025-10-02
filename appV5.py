@@ -12405,8 +12405,17 @@ class CreateToolTip:
         if self._tip_window is not None or not self.text:
             return
 
-        x = self.widget.winfo_rootx() + 20
-        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        try:
+            x, y, width, height = self.widget.bbox("insert")
+        except Exception:
+            x = y = 0
+            width = self.widget.winfo_width()
+            height = self.widget.winfo_height()
+
+        root_x = self.widget.winfo_rootx()
+        root_y = self.widget.winfo_rooty()
+        x = root_x + x + width + 12
+        y = root_y + y + height + 12
 
         master = self.widget.winfo_toplevel()
         tip = tk.Toplevel(master)
@@ -12422,16 +12431,17 @@ class CreateToolTip:
         except Exception:
             pass
 
-        label = ttk.Label(
+        label = tk.Label(
             tip,
             text=self.text,
             justify="left",
-            padding=(6, 4),
-            relief="solid",
+            background="#ffffe0",
+            relief=tk.SOLID,
             borderwidth=1,
+            font=("tahoma", "8", "normal"),
             wraplength=self.wraplength,
         )
-        label.pack()
+        label.pack(ipadx=4, ipady=2)
 
         self._tip_window = tip
         self._label = label
