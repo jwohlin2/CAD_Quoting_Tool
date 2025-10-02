@@ -15,13 +15,14 @@ Single-file CAD Quoter (v8)
 from __future__ import annotations
 
 import argparse
-import json, math, os, time, gc
+import json, math, os, time
 from collections import Counter
 from fractions import Fraction
 from pathlib import Path
 from dataclasses import dataclass, field
 
 from cad_quoter.app.container import ServiceContainer, create_default_container
+from cad_quoter.app import runtime as _runtime
 from cad_quoter.config import (
     AppEnvironment,
     ConfigError,
@@ -49,32 +50,50 @@ import textwrap
 import tkinter as tk
 import tkinter.font as tkfont
 import urllib.request
-import importlib.util
-from importlib import import_module
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import cad_quoter.geometry as geometry
 
 
-_REQUIRED_RUNTIME_PACKAGES = {
-    "requests": "requests",
-    "bs4": "beautifulsoup4",
-    "lxml": "lxml",
-}
+ensure_runtime_dependencies = _runtime.ensure_runtime_dependencies
+find_default_qwen_model = _runtime.find_default_qwen_model
+load_qwen_vl = _runtime.load_qwen_vl
 
-_missing_runtime_packages = [
-    (module, dist_name)
-    for module, dist_name in _REQUIRED_RUNTIME_PACKAGES.items()
-    if importlib.util.find_spec(module) is None
-]
+ensure_runtime_dependencies()
 
-if _missing_runtime_packages:
-    missing_dists = ", ".join(dist_name for _, dist_name in _missing_runtime_packages)
-    raise ImportError(
-        "Required runtime dependencies are missing. Install them with "
-        "`pip install -r requirements.txt` before launching appV5.py "
-        f"(missing: {missing_dists})."
-    )
+# Backwards compatibility: legacy module-level names expected by tests/scripts
+_DEFAULT_VL_MODEL_NAMES = _runtime.DEFAULT_VL_MODEL_NAMES
+_DEFAULT_MM_PROJ_NAMES = _runtime.DEFAULT_MM_PROJ_NAMES
+VL_MODEL = str(_runtime.LEGACY_VL_MODEL)
+MM_PROJ = str(_runtime.LEGACY_MM_PROJ)
+LEGACY_VL_MODEL = str(_runtime.LEGACY_VL_MODEL)
+LEGACY_MM_PROJ = str(_runtime.LEGACY_MM_PROJ)
+PREFERRED_MODEL_DIRS: list[str | Path] = [str(p) for p in _runtime.PREFERRED_MODEL_DIRS]
+
+
+def discover_qwen_vl_assets(
+    *,
+    model_path: str | None = None,
+    mmproj_path: str | None = None,
+) -> tuple[str, str]:
+    """Wrapper that honours ``appV5.PREFERRED_MODEL_DIRS`` overrides."""
+
+    previous_dirs = _runtime.PREFERRED_MODEL_DIRS
+    try:
+        override_dirs: list[Path] = []
+        for value in PREFERRED_MODEL_DIRS:
+            try:
+                override_dirs.append(Path(value).expanduser())
+            except Exception:
+                continue
+        if override_dirs:
+            _runtime.PREFERRED_MODEL_DIRS = tuple(override_dirs)
+        return _runtime.discover_qwen_vl_assets(
+            model_path=model_path,
+            mmproj_path=mmproj_path,
+        )
+    finally:
+        _runtime.PREFERRED_MODEL_DIRS = previous_dirs
 
 from cad_quoter.domain_models import (
     DEFAULT_MATERIAL_DISPLAY,
@@ -134,8 +153,6 @@ from OCP.BRepAdaptor import BRepAdaptor_Surface as _BAS
 
 import pandas as pd
 
-from llama_cpp import Llama  # type: ignore
-
 try:
     from geo_read_more import build_geo_from_dxf as build_geo_from_dxf_path
 except Exception:
@@ -159,16 +176,6 @@ def build_geo_from_dxf(path: str) -> dict:
     if not loader:
         raise RuntimeError("DXF enrichment helper is unavailable")
     return loader(path)
-
-def _match_items_contains(items: pd.Series, pattern: str) -> pd.Series:
-    """Case-insensitive regex match over Items."""
-
-    pat = _to_noncapturing(pattern) if "_to_noncapturing" in globals() else pattern
-    try:
-        return items.str.contains(pat, case=False, regex=True, na=False)
-    except Exception:
-        return items.str.contains(re.escape(pattern), case=False, regex=True, na=False)
-
 
 # Geometry helpers (re-exported for backward compatibility)
 load_model = geometry.load_model
@@ -194,12 +201,6 @@ _HAS_TRIMESH = geometry.HAS_TRIMESH
 _HAS_EZDXF = geometry.HAS_EZDXF
 _HAS_ODAFC = geometry.HAS_ODAFC
 _EZDXF_VER = geometry.EZDXF_VERSION
-
-
-def _normalize_lookup_key(value: str) -> str:
-    cleaned = re.sub(r"[^0-9a-z]+", " ", str(value).strip().lower())
-    return re.sub(r"\s+", " ", cleaned).strip()
-
 
 def _ensure_scrap_pct(val) -> float:
     """
@@ -230,207 +231,6 @@ def _match_items_contains(items: pd.Series, pattern: str) -> pd.Series:
         return items.str.contains(pat, case=False, regex=True, na=False)
     except Exception:
         return items.str.contains(re.escape(pattern), case=False, regex=True, na=False)
-
-VL_MODEL = r"D:\CAD_Quoting_Tool\models\qwen2.5-vl-7b-instruct-q4_k_m.gguf"
-MM_PROJ = r"D:\CAD_Quoting_Tool\models\mmproj-Qwen2.5-VL-3B-Instruct-Q8_0.gguf"
-
-_LEGACY_VL_MODEL = Path(VL_MODEL)
-_LEGACY_MM_PROJ = Path(MM_PROJ)
-
-_DEFAULT_VL_MODEL_NAMES = (
-    _LEGACY_VL_MODEL.name,
-    "qwen2.5-vl-7b-instruct-q4_0.gguf",
-    "qwen2.5-vl-7b-instruct-q4_k_s.gguf",
-    "qwen2-vl-7b-instruct-q4_0.gguf",
-)
-
-_DEFAULT_MM_PROJ_NAMES = (
-    _LEGACY_MM_PROJ.name,
-    "mmproj-Qwen2.5-VL-3B-Instruct-Q4_0.gguf",
-    "mmproj-Qwen2-VL-7B-Instruct-Q4_0.gguf",
-)
-
-
-def _dedupe_paths(paths: Iterable[Path]) -> list[Path]:
-    seen: set[str] = set()
-    unique: list[Path] = []
-    for raw in paths:
-        try:
-            candidate = raw.expanduser()
-        except Exception:
-            continue
-        key = str(candidate.resolve() if candidate.exists() else candidate)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(candidate)
-    return unique
-
-
-def _collect_model_dirs(*paths: str | Path | None) -> list[Path]:
-    dirs: list[Path] = []
-    for value in paths:
-        if not value:
-            continue
-        try:
-            candidate = Path(value).expanduser()
-        except Exception:
-            continue
-        if candidate.is_file():
-            dirs.append(candidate.parent)
-        elif candidate.is_dir():
-            dirs.append(candidate)
-        else:
-            dirs.append(candidate.parent)
-    for env_var in ("QWEN_MODELS_DIR", "QWEN_VL_MODELS_DIR"):
-        env_value = os.environ.get(env_var)
-        if env_value:
-            try:
-                dirs.append(Path(env_value).expanduser())
-            except Exception:
-                continue
-    dirs.extend(Path(d) for d in PREFERRED_MODEL_DIRS)
-    try:
-        dirs.append(Path(__file__).resolve().parent / "models")
-    except Exception:
-        pass
-    dirs.append(Path.cwd() / "models")
-    return [d for d in _dedupe_paths(dirs) if str(d)]
-
-
-def _find_weight_file(
-    names: Sequence[str],
-    directories: Sequence[Path],
-    glob: str,
-) -> str:
-    for directory in directories:
-        try:
-            if not directory.exists():
-                continue
-        except Exception:
-            continue
-        for name in names:
-            candidate = directory / name
-            if candidate.is_file():
-                return str(candidate)
-        try:
-            matches = list(directory.glob(glob))
-        except Exception:
-            matches = []
-        if matches:
-            try:
-                matches.sort(key=lambda p: (-p.stat().st_size, p.name))
-            except Exception:
-                matches.sort()
-            return str(matches[0])
-    return ""
-
-
-def discover_qwen_vl_assets(
-    *,
-    model_path: str | None = None,
-    mmproj_path: str | None = None,
-) -> tuple[str, str]:
-    """Locate Qwen vision model + projector weights on disk.
-
-    The desktop application historically shipped with hard-coded Windows
-    paths.  Modern deployments may store the weights alongside the script or
-    expose them via environment variables.  This helper consolidates the
-    discovery logic and returns fully-qualified filesystem paths.  A
-    ``RuntimeError`` is raised with actionable guidance when the assets cannot
-    be resolved.
-    """
-
-    model_candidates = [
-        model_path,
-        os.environ.get("QWEN_VL_GGUF_PATH"),
-        os.environ.get("QWEN_GGUF_PATH"),
-        str(_LEGACY_VL_MODEL),
-    ]
-    mmproj_candidates = [
-        mmproj_path,
-        os.environ.get("QWEN_VL_MMPROJ_PATH"),
-        os.environ.get("QWEN_MMPROJ_PATH"),
-        str(_LEGACY_MM_PROJ),
-    ]
-
-    def _first_existing(paths: Sequence[str | None]) -> str:
-        for value in paths:
-            if not value:
-                continue
-            try:
-                candidate = Path(value).expanduser()
-            except Exception:
-                continue
-            if candidate.is_file():
-                return str(candidate)
-        return ""
-
-    model_file = _first_existing(model_candidates)
-    mmproj_file = _first_existing(mmproj_candidates)
-
-    search_dirs = _collect_model_dirs(*(model_candidates + mmproj_candidates))
-
-    if not model_file:
-        model_file = _find_weight_file(_DEFAULT_VL_MODEL_NAMES, search_dirs, "*vl*.gguf")
-    if not mmproj_file:
-        mmproj_file = _find_weight_file(_DEFAULT_MM_PROJ_NAMES, search_dirs, "*mmproj*.gguf")
-
-    if not model_file or not mmproj_file:
-        searched = ", ".join(str(d) for d in search_dirs if d)
-        raise RuntimeError(
-            "Vision LLM weights not found. Set QWEN_VL_GGUF_PATH and "
-            "QWEN_VL_MMPROJ_PATH (or place matching *.gguf files in one of: "
-            f"{searched or 'the known model directories'})."
-        )
-
-    return model_file, mmproj_file
-
-
-def load_qwen_vl(
-    n_ctx: int = 8192,
-    n_gpu_layers: int = 20,
-    n_threads: int | None = None,
-    *,
-    model_path: str | None = None,
-    mmproj_path: str | None = None,
-):
-    """Load Qwen2.5-VL with vision projector configured for llama.cpp."""
-
-    if n_threads is None:
-        cpu_count = os.cpu_count() or 8
-        n_threads = max(4, cpu_count // 2)
-
-    model_file, mmproj_file = discover_qwen_vl_assets(
-        model_path=model_path,
-        mmproj_path=mmproj_path,
-    )
-
-    try:
-        llm = Llama(
-            model_path=model_file,
-            mmproj_path=mmproj_file,
-            n_ctx=n_ctx,
-            n_gpu_layers=n_gpu_layers,
-            n_threads=n_threads,
-            chat_format="qwen2_vl",
-            verbose=False,
-        )
-        _ = llm.create_chat_completion(
-            messages=[
-                {"role": "system", "content": "Return JSON {\"ok\":true}."},
-                {"role": "user", "content": "ping"},
-            ],
-            max_tokens=16,
-            temperature=0,
-        )
-        return llm
-    except Exception:
-        if n_ctx > 4096:
-            gc.collect()
-            return load_qwen_vl(n_ctx=4096, n_gpu_layers=0, n_threads=n_threads)
-        raise
-
 
 def _auto_accept_suggestions(suggestions: dict[str, Any] | None) -> dict[str, Any]:
     accept: dict[str, Any] = {}
@@ -2924,80 +2724,6 @@ from tkinter import ttk, filedialog, messagebox
 import subprocess, tempfile, shutil
 
 
-# --------------------- helpers: model discovery ---------------------
-PREFERRED_MODEL_DIRS = [
-    r"D:\CAD_Quoting_Tool\models",
-]
-
-def _pick_best_gguf(paths):
-    # Prefer files with 'qwen' and 'instruct'; otherwise choose the largest.
-    if not paths:
-        return ""
-    paths = [Path(p) for p in paths if Path(p).is_file() and p.lower().endswith(".gguf")]
-    if not paths:
-        return ""
-    preferred = [p for p in paths if ("qwen" in p.name.lower() and "instr" in p.name.lower())]
-    pool = preferred or paths
-    # Largest by size
-    try:
-        best = max(pool, key=lambda p: p.stat().st_size)
-    except Exception:
-        best = pool[0]
-    return str(best)
-
-def find_default_qwen_model():
-    # 1) Env
-    envp = os.environ.get("QWEN_GGUF_PATH", "")
-    if envp and Path(envp).is_file():
-        return envp
-    # 2) D:\CAD_Quoting_Tool\models
-    for d in PREFERRED_MODEL_DIRS:
-        dpath = Path(d)
-        if dpath.is_dir():
-            ggufs = list(dpath.glob("*.gguf"))
-            choice = _pick_best_gguf([str(p) for p in ggufs])
-            if choice: return choice
-    # 3) script_dir\models
-    try:
-        sdir = Path(__file__).resolve().parent
-        ggufs = list((sdir / "models").glob("*.gguf"))
-        choice = _pick_best_gguf([str(p) for p in ggufs])
-        if choice: return choice
-    except Exception:
-        pass
-    # 4) cwd\models
-    ggufs = list((Path.cwd() / "models").glob("*.gguf"))
-    choice = _pick_best_gguf([str(p) for p in ggufs])
-    if choice: return choice
-    return ""
-
-# Optional trimesh for STL
-try:
-    import trimesh  # type: ignore
-    _HAS_TRIMESH = True
-except Exception:
-    _HAS_TRIMESH = False
-
-_HAS_EZDXF  = False
-_HAS_ODAFC  = False      # ezdxf.addons.odafc (uses ODA File Converter)
-_EZDXF_VER  = "unknown"
-
-try:
-    import ezdxf
-    _EZDXF_VER = getattr(ezdxf, "__version__", "unknown")
-    _HAS_EZDXF = True
-except Exception:
-    ezdxf = None  # keep name defined
-
-# odafc is optional; don't fail if it's not present
-try:
-    if _HAS_EZDXF:
-        from ezdxf.addons import odafc  # type: ignore
-        _HAS_ODAFC = True
-except Exception:
-    _HAS_ODAFC = False
-
-# Hole chart helpers (optional)
 try:
     from hole_table_parser import parse_hole_table_lines
 except Exception:
@@ -4220,7 +3946,10 @@ def enrich_geo_stl(path):
         raise RuntimeError("trimesh not available to process STL")
     
     logger.info("[%.2fs] Loading mesh...", time.time() - start_time)
-    mesh = trimesh.load(path, force='mesh')
+    trimesh_mod = getattr(geometry, "trimesh", None)
+    if trimesh_mod is None:
+        raise RuntimeError("trimesh is unavailable despite HAS_TRIMESH flag")
+    mesh = trimesh_mod.load(path, force="mesh")
     logger.info(
         "[%.2fs] Mesh loaded. Faces: %d",
         time.time() - start_time,
