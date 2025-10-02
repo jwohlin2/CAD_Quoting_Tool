@@ -4414,7 +4414,11 @@ def _format_numeric_entry_value(raw: str) -> tuple[str, bool]:
 def derive_editor_control_spec(dtype_source: str, example_value: Any) -> EditorControlSpec:
     """Classify a spreadsheet row into a UI control plan."""
 
-    dtype_raw = re.sub(r"\s+", " ", str(dtype_source or "").strip().lower())
+    dtype_raw = re.sub(
+        r"\s+",
+        " ",
+        str((dtype_source or "")).replace("\u00A0", " "),
+    ).strip().lower()
     raw_value = ""
     if example_value is not None and not (isinstance(example_value, float) and math.isnan(example_value)):
         raw_value = str(example_value)
@@ -8448,11 +8452,35 @@ def default_variables_template() -> pd.DataFrame:
     return pd.DataFrame(rows, columns=REQUIRED_COLS)
 
 def coerce_or_make_vars_df(df: pd.DataFrame | None) -> pd.DataFrame:
-    if df is None or not set(REQUIRED_COLS).issubset(df.columns):
+    """Ensure the variables dataframe has the required columns with tolerant matching."""
+    if df is None:
         return default_variables_template().copy()
+
+    import re
+
+    def _norm_col(s: str) -> str:
+        s = str(s).replace("\u00A0", " ")
+        s = re.sub(r"\s+", " ", s).strip().lower()
+        return re.sub(r"[^a-z0-9]", "", s)
+
+    canon_map = {
+        "item": "Item",
+        "examplevaluesoptions": "Example Values / Options",
+        "datatypeinputmethod": "Data Type / Input Method",
+    }
+
+    rename: dict[str, str] = {}
+    for col in list(df.columns):
+        key = _norm_col(col)
+        if key in canon_map:
+            rename[col] = canon_map[key]
+    if rename:
+        df = df.rename(columns=rename)
+
     for col in REQUIRED_COLS:
         if col not in df.columns:
             df[col] = ""
+
     return df
 
 def extract_pdf_all(pdf_path: Path, dpi: int = 300) -> dict:
@@ -13169,14 +13197,21 @@ class App(tk.Tk):
         # Prefer the headers from the original dataframe if available so that
         # we can surface the richer context ("Why it Matters", formulas, etc.).
         def _resolve_column(name: str) -> str:
-            target = name.strip().lower()
+            import re
+
+            def _norm_col(s: str) -> str:
+                s = str(s).replace("\u00A0", " ")
+                s = re.sub(r"\s+", " ", s).strip().lower()
+                return re.sub(r"[^a-z0-9]", "", s)
+
+            target = _norm_col(name)
             column_sources: list[pd.Index] = []
             if self.vars_df_full is not None:
                 column_sources.append(self.vars_df_full.columns)
             column_sources.append(df.columns)
             for columns in column_sources:
                 for col in columns:
-                    if str(col).strip().lower() == target:
+                    if _norm_col(col) == target:
                         return col
             return name
 
