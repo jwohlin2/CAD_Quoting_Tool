@@ -26,3 +26,29 @@ def test_describe_runtime_environment_redacts_keys(monkeypatch: pytest.MonkeyPat
     assert info["llm_debug_enabled"] == "False"
     assert Path(info["llm_debug_dir"]).name == "custom_debug"
     assert info["metals_api_key"] == "<redacted>"
+
+
+def test_load_default_rates_returns_two_buckets() -> None:
+    rates = config.load_default_rates()
+
+    assert set(rates.keys()) == {"labor", "machine"}
+    assert rates["labor"]["Programmer"] == pytest.approx(90.0)
+    assert rates["machine"]["WireEDM"] == pytest.approx(90.0)
+
+
+def test_load_default_rates_migrates_flat_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fake_loader(name: str, version: int) -> dict[str, float]:
+        assert name == "rates"
+        return {
+            "ProgrammingRate": 110.0,
+            "WireEDMRate": 150.0,
+            "SurfaceGrindRate": 120.0,
+        }
+
+    monkeypatch.setattr(config, "load_named_config", _fake_loader)
+
+    migrated = config.load_default_rates()
+
+    assert migrated["labor"]["Programmer"] == pytest.approx(110.0)
+    assert migrated["machine"]["WireEDM"] == pytest.approx(150.0)
+    assert migrated["machine"]["Blanchard"] == pytest.approx(120.0)

@@ -8,6 +8,8 @@ import logging
 from pathlib import Path
 from typing import Any, Mapping, Dict
 
+from cad_quoter.rates import migrate_flat_to_two_bucket
+
 RESOURCE_DIR = Path(__file__).resolve().parent / "resources"
 DEFAULT_VERSION = 1
 
@@ -117,11 +119,49 @@ def load_named_config(name: str, version: int = DEFAULT_VERSION) -> dict[str, An
     )
 
 
-def load_default_rates() -> dict[str, float]:
+def _coerce_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _ensure_two_bucket_rates(raw: Mapping[str, Any]) -> dict[str, dict[str, float]]:
+    labor_raw = raw.get("labor") if isinstance(raw, Mapping) else None
+    machine_raw = raw.get("machine") if isinstance(raw, Mapping) else None
+
+    if isinstance(labor_raw, Mapping) and isinstance(machine_raw, Mapping):
+        labor: dict[str, float] = {}
+        for key, value in labor_raw.items():
+            numeric = _coerce_float(value)
+            if numeric is None:
+                continue
+            labor[str(key)] = numeric
+
+        machine: dict[str, float] = {}
+        for key, value in machine_raw.items():
+            numeric = _coerce_float(value)
+            if numeric is None:
+                continue
+            machine[str(key)] = numeric
+
+        return {"labor": labor, "machine": machine}
+
+    flat: dict[str, float] = {}
+    for key, value in raw.items():
+        numeric = _coerce_float(value)
+        if numeric is None:
+            continue
+        flat[str(key)] = numeric
+
+    return migrate_flat_to_two_bucket(flat)
+
+
+def load_default_rates() -> dict[str, dict[str, float]]:
     """Return the default shop rate configuration."""
 
     data = load_named_config("rates", DEFAULT_VERSION)
-    return {str(k): float(v) for k, v in data.items()}
+    return _ensure_two_bucket_rates(data)
 
 
 def load_default_params() -> dict[str, Any]:

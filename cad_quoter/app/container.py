@@ -20,7 +20,7 @@ class ServiceContainer:
     """Bundle callables used to construct core application services."""
 
     load_params: Callable[[], dict[str, Any]]
-    load_rates: Callable[[], dict[str, float]]
+    load_rates: Callable[[], dict[str, dict[str, float]]]
     pricing_engine_factory: Callable[[], SupportsPricingEngine]
     _pricing_engine_cache: SupportsPricingEngine | None = field(default=None, init=False, repr=False)
 

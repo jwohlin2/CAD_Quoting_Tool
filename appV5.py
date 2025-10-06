@@ -119,6 +119,7 @@ from cad_quoter.pricing import (
     resolve_material_unit_price as _resolve_material_unit_price,
     usdkg_to_usdlb as _usdkg_to_usdlb,
 )
+from cad_quoter.rates import migrate_flat_to_two_bucket, two_bucket_to_flat
 from cad_quoter.pricing.wieland import lookup_price as lookup_wieland_price
 from cad_quoter.llm import (
     LLMClient,
@@ -4897,6 +4898,33 @@ def render_quote(
             effective_mass_val = _coerce_float_or_none(mass_g)
             if net_mass_val is None:
                 net_mass_val = effective_mass_val
+            show_mass_in_grams = False
+            if net_mass_val is not None:
+                try:
+                    net_abs = abs(float(net_mass_val))
+                    eff_abs = abs(float(effective_mass_val)) if effective_mass_val is not None else net_abs
+                    show_mass_in_grams = net_abs < 1000.0 and eff_abs < 1000.0
+                except Exception:
+                    show_mass_in_grams = False
+            if show_mass_in_grams and net_mass_val is not None:
+                try:
+                    net_text = f"{float(net_mass_val):.1f} g net"
+                except Exception:
+                    net_text = ""
+                extra_parts: list[str] = []
+                if (
+                    scrap
+                    and effective_mass_val
+                    and net_mass_val
+                    and abs(float(effective_mass_val) - float(net_mass_val)) > 0.05
+                ):
+                    try:
+                        extra_parts.append(f"scrap-adjusted {float(effective_mass_val):.1f} g")
+                    except Exception:
+                        pass
+                details = ", ".join([part for part in [net_text] + extra_parts if part])
+                if details:
+                    write_line(f"Mass: {details}", "  ")
             if (net_mass_val and net_mass_val > 0) or show_zeros:
                 write_line(f"Net Weight: {_format_weight_lb_oz(net_mass_val)}", "  ")
             if (
@@ -5078,18 +5106,53 @@ except Exception as exc:
 
     SERVICE_CONTAINER = ServiceContainer(
         load_params=_empty_params,
-        load_rates=lambda: {},
+        load_rates=lambda: {"labor": {}, "machine": {}},
         pricing_engine_factory=lambda: PricingEngine(create_default_registry()),
     )
 
+def _coerce_two_bucket_rates(value: Any) -> dict[str, dict[str, float]]:
+    if isinstance(value, dict):
+        labor_raw = value.get("labor")
+        machine_raw = value.get("machine")
+        if isinstance(labor_raw, dict) and isinstance(machine_raw, dict):
+            labor: dict[str, float] = {}
+            for key, raw in labor_raw.items():
+                try:
+                    labor[str(key)] = float(raw)
+                except Exception:
+                    continue
+            machine: dict[str, float] = {}
+            for key, raw in machine_raw.items():
+                try:
+                    machine[str(key)] = float(raw)
+                except Exception:
+                    continue
+            return {"labor": labor, "machine": machine}
+
+        flat: dict[str, float] = {}
+        for key, raw in value.items():
+            try:
+                flat[str(key)] = float(raw)
+            except Exception:
+                continue
+        if flat:
+            return migrate_flat_to_two_bucket(flat)
+
+    return {"labor": {}, "machine": {}}
+
+
 try:
-    RATES_DEFAULT = SERVICE_CONTAINER.load_rates()
+    _rates_raw = SERVICE_CONTAINER.load_rates()
 except ConfigError as exc:
-    RATES_DEFAULT = {}
+    RATES_TWO_BUCKET_DEFAULT = {"labor": {}, "machine": {}}
     CONFIG_INIT_ERRORS.append(f"Rates configuration error: {exc}")
 except Exception as exc:
-    RATES_DEFAULT = {}
+    RATES_TWO_BUCKET_DEFAULT = {"labor": {}, "machine": {}}
     CONFIG_INIT_ERRORS.append(f"Unexpected rates configuration error: {exc}")
+else:
+    RATES_TWO_BUCKET_DEFAULT = _coerce_two_bucket_rates(_rates_raw)
+
+RATES_DEFAULT = two_bucket_to_flat(RATES_TWO_BUCKET_DEFAULT)
 
 LABOR_RATE_KEYS: set[str] = {
     "ProgrammingRate",
