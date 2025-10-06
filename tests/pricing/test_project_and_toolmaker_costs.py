@@ -38,14 +38,14 @@ def test_project_management_and_toolmaker_rows_rendered() -> None:
     result = appV5.compute_quote_from_df(df, llm_enabled=False)
     breakdown = result["breakdown"]
     process_costs = breakdown["process_costs"]
-    project_meta = breakdown["process_meta"]["project_management"]
+    project_meta = breakdown["process_meta"].get("project_management")
     toolmaker_meta = breakdown["process_meta"]["toolmaker_support"]
 
-    assert project_meta["hr"] > 0, breakdown
+    assert project_meta is None or project_meta.get("hr", 0.0) == 0.0, breakdown
     assert toolmaker_meta["hr"] > 0, breakdown
-    assert process_costs["project_management"] > 0, breakdown
+    assert "project_management" not in process_costs or process_costs["project_management"] == 0.0, breakdown
     assert process_costs["toolmaker_support"] > 0, breakdown
 
     rendered = appV5.render_quote(result, currency="$")
-    assert "Project Management" in rendered
+    assert "Project Management" not in rendered
     assert "Toolmaker Support" in rendered

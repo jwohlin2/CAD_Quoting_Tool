@@ -6449,11 +6449,8 @@ def compute_quote_from_df(df: pd.DataFrame,
     assembly_cost = assembly_hr * rates["AssemblyRate"]
     hardware_cost = num(r"(?:Hardware|BOM\s*Cost|Fasteners|Bearings|CFM\s*Hardware)")
 
-    project_mgmt_hr = sum_time(r"(?:Project\s*(?:Manager|Management|Mgmt)|Program\s*Manager|Project\s*Coordination)")
     toolmaker_support_hr = sum_time(r"(?:Tool\s*(?:&|and)\s*Die\s*Maker|Toolmaker|Tool\s*(?:&|and)\s*Die\s*Support|Tooling\s*Support|Tool\s*Room)")
-    project_mgmt_rate = float(rates.get("ProjectManagementRate", rates.get("EngineerRate", 0.0)))
     toolmaker_support_rate = float(rates.get("ToolmakerSupportRate", rates.get("FixtureBuildRate", rates.get("EngineerRate", 0.0))))
-    project_mgmt_cost = project_mgmt_hr * project_mgmt_rate
     toolmaker_support_cost = toolmaker_support_hr * toolmaker_support_rate
 
     # Outsourced vendors
@@ -6589,7 +6586,6 @@ def compute_quote_from_df(df: pd.DataFrame,
         "inspection": inspection_cost,
         "saw_waterjet": saw_cost,
         "assembly": assembly_cost,
-        "project_management": project_mgmt_cost,
         "toolmaker_support": toolmaker_support_cost,
         "packaging": packaging_cost,
         "ehs_compliance": ehs_cost,
@@ -6625,7 +6621,6 @@ def compute_quote_from_df(df: pd.DataFrame,
         "inspection":       {"hr": inspection_hr_total, "rate": rates.get("InspectionRate", 0.0)},
         "saw_waterjet":     {"hr": sawing_hr,       "rate": rates.get("SawWaterjetRate", 0.0)},
         "assembly":         {"hr": assembly_hr,     "rate": rates.get("AssemblyRate", 0.0)},
-        "project_management": {"hr": project_mgmt_hr, "rate": project_mgmt_rate},
         "toolmaker_support":  {"hr": toolmaker_support_hr, "rate": toolmaker_support_rate},
         "packaging":        {"hr": packaging_hr,    "rate": rates.get("PackagingRate", rates.get("AssemblyRate", 0.0))},
         "ehs_compliance":   {"hr": ehs_hr,          "rate": rates.get("InspectionRate", 0.0)},
