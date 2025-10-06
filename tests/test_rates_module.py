@@ -19,6 +19,14 @@ def test_migrate_flat_to_two_bucket_handles_aliases() -> None:
     assert migrated["machine"]["Blanchard"] == 115.0
 
 
+def test_migrate_flat_to_two_bucket_handles_cam_rate_only() -> None:
+    flat = {"CAMRate": 110.0}
+
+    migrated = rates.migrate_flat_to_two_bucket(flat)
+
+    assert migrated["labor"]["Programmer"] == 110.0
+
+
 def test_two_bucket_to_flat_prefers_known_keys() -> None:
     two_bucket = {
         "labor": {"Programmer": 130.0, "Machinist": 90.0},
@@ -30,6 +38,7 @@ def test_two_bucket_to_flat_prefers_known_keys() -> None:
     assert flat["ProgrammingRate"] == 130.0
     assert flat["WireEDMRate"] == 150.0
     assert flat["Machinist"] == 90.0
+    assert "CAMRate" not in flat
 
 
 def test_op_cost_combines_machine_and_labor_minutes() -> None:

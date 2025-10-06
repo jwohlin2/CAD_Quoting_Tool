@@ -5001,15 +5001,12 @@ def render_quote(
     fix  = nre_detail.get("fixture") or {}
 
     # Programming & Eng (auto-hide if zero unless show_zeros)
-    if (prog.get("per_lot", 0.0) > 0) or show_zeros or any(prog.get(k) for k in ("prog_hr", "cam_hr", "eng_hr")):
+    if (prog.get("per_lot", 0.0) > 0) or show_zeros or any(prog.get(k) for k in ("prog_hr", "eng_hr")):
         row("Programming & Eng:", float(prog.get("per_lot", 0.0)))
         has_detail = False
         if prog.get("prog_hr"):
             has_detail = True
             write_line(f"- Programmer: {_h(prog['prog_hr'])} @ {_m(prog.get('prog_rate', 0))}/hr", "    ")
-        if prog.get("cam_hr"):
-            has_detail = True
-            write_line(f"- CAM: {_h(prog['cam_hr'])} @ {_m(prog.get('cam_rate', 0))}/hr", "    ")
         if prog.get("eng_hr"):
             has_detail = True
             write_line(f"- Engineering: {_h(prog['eng_hr'])} @ {_m(prog.get('eng_rate', 0))}/hr", "    ")
@@ -5195,7 +5192,6 @@ RATES_DEFAULT = two_bucket_to_flat(RATES_TWO_BUCKET_DEFAULT)
 
 LABOR_RATE_KEYS: set[str] = {
     "ProgrammingRate",
-    "CAMRate",
     "EngineerRate",
     "InspectionRate",
     "FinishingRate",
@@ -6394,7 +6390,6 @@ def compute_quote_from_df(df: pd.DataFrame,
             rates[key] = v
 
     rate_from_sheet(r"Rate\s*-\s*Programming",   "ProgrammingRate")
-    rate_from_sheet(r"Rate\s*-\s*CAM",           "CAMRate")
     rate_from_sheet(r"Rate\s*-\s*Engineer",      "EngineerRate")
     rate_from_sheet(r"Rate\s*-\s*Milling",       "MillingRate")
     rate_from_sheet(r"Rate\s*-\s*Turning",       "TurningRate")
@@ -6793,7 +6788,8 @@ def compute_quote_from_df(df: pd.DataFrame,
     if milling_hr > 0:
         prog_hr = min(prog_hr, params["ProgMaxToMillingRatio"] * milling_hr)
 
-    programming_cost   = prog_hr * rates["ProgrammingRate"] + cam_hr * rates["CAMRate"] + eng_hr * rates["EngineerRate"]
+    total_prog_hr = prog_hr + cam_hr
+    programming_cost   = total_prog_hr * rates["ProgrammingRate"] + eng_hr * rates["EngineerRate"]
     prog_per_lot       = programming_cost
     programming_per_part = (prog_per_lot / Qty) if (amortize_programming and Qty > 1) else prog_per_lot
 
@@ -6809,9 +6805,8 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     nre_detail = {
         "programming": {
-            "prog_hr": float(prog_hr), "prog_rate": rates["ProgrammingRate"],
-            "cam_hr": float(cam_hr),   "cam_rate": rates["CAMRate"],
-            "eng_hr": float(eng_hr),   "eng_rate": rates["EngineerRate"],
+            "prog_hr": float(total_prog_hr), "prog_rate": rates["ProgrammingRate"],
+            "eng_hr": float(eng_hr),         "eng_rate": rates["EngineerRate"],
             "per_lot": prog_per_lot, "per_part": programming_per_part,
             "amortized": bool(amortize_programming and Qty > 1)
         },
@@ -8856,8 +8851,6 @@ def compute_quote_from_df(df: pd.DataFrame,
         details = []
         if prog_detail.get("prog_hr"):
             details.append(f"Programmer {prog_detail['prog_hr']:.2f} hr @ ${prog_detail.get('prog_rate',0):,.2f}/hr")
-        if prog_detail.get("cam_hr"):
-            details.append(f"CAM {prog_detail['cam_hr']:.2f} hr @ ${prog_detail.get('cam_rate',0):,.2f}/hr")
         if prog_detail.get("eng_hr"):
             details.append(f"Engineer {prog_detail['eng_hr']:.2f} hr @ ${prog_detail.get('eng_rate',0):,.2f}/hr")
         if details:
