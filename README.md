@@ -58,6 +58,38 @@ pytest
 The repository also includes a `docs/` directory with deployment notes and
 integration guides for downstream teams.
 
+## McMaster-Carr sheet scraper
+
+For quick material cost lookups the repository ships with
+`scrape_mcmaster.py`, a Playwright-based scraper that selects the smallest
+stock sheet which meets or exceeds the requested dimensions.
+
+Install the optional dependencies and Playwright browser binaries:
+
+```bash
+pip install playwright rapidfuzz
+python -m playwright install
+```
+
+Example usage:
+
+```bash
+# 5083 cast tooling plate @ 0.75" thick, target 12" × 18"
+python scrape_mcmaster.py tool_jig --material 5083 --thickness "3/4" --width 12 --length 18
+
+# MIC6 cast plate @ 0.5" thick, target 10" × 10"
+python scrape_mcmaster.py tool_jig --material mic6 --thickness 0.5 --width 10 --length 10
+
+# A2 tool steel sheet (tight tolerance) @ 0.375" thick, target 6" × 18"
+python scrape_mcmaster.py a2 --tolerance tight --thickness 3/8 --width 6 --length 18
+```
+
+The script waits for McMaster-Carr's pricing grid to load, scrapes all visible
+sheet sizes for the selected thickness, and chooses the smallest option with
+width ≥ `--width` and length ≥ `--length`.  If your region requires cookies or a
+login to view prices you may need to run the script manually in a desktop
+browser session first so Playwright inherits the necessary site state.
+
 ## Troubleshooting
 
 * Missing packages: ensure `pip install -r requirements.txt` has been executed.
