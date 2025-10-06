@@ -5061,6 +5061,33 @@ except Exception as exc:
     RATES_DEFAULT = {}
     CONFIG_INIT_ERRORS.append(f"Unexpected rates configuration error: {exc}")
 
+LABOR_RATE_KEYS: set[str] = {
+    "ProgrammingRate",
+    "CAMRate",
+    "EngineerRate",
+    "InspectionRate",
+    "FinishingRate",
+    "FixtureBuildRate",
+    "AssemblyRate",
+    "ProjectManagementRate",
+    "ToolmakerSupportRate",
+    "PackagingRate",
+    "DeburrRate",
+}
+
+MACHINE_RATE_KEYS: set[str] = {
+    "MillingRate",
+    "DrillingRate",
+    "TurningRate",
+    "WireEDMRate",
+    "SinkerEDMRate",
+    "SurfaceGrindRate",
+    "ODIDGrindRate",
+    "JigGrindRate",
+    "LappingRate",
+    "SawWaterjetRate",
+}
+
 try:
     PARAMS_DEFAULT = SERVICE_CONTAINER.load_params()
 except ConfigError as exc:
@@ -12664,6 +12691,28 @@ class App(tk.Tk):
         if not isinstance(self.settings, dict):
             self.settings = {}
 
+        saved_rate_mode = str(self.settings.get("rate_mode", "") or "").strip().lower()
+        if saved_rate_mode not in {"simple", "detailed"}:
+            saved_rate_mode = "detailed"
+        self.rate_mode = tk.StringVar(value=saved_rate_mode)
+        self.simple_labor_rate_var = tk.StringVar()
+        self.simple_machine_rate_var = tk.StringVar()
+        self._updating_simple_rates = False
+
+        if hasattr(self.rate_mode, "trace_add"):
+            self.rate_mode.trace_add("write", self._on_rate_mode_changed)
+        elif hasattr(self.rate_mode, "trace"):
+            self.rate_mode.trace("w", lambda *_: self._on_rate_mode_changed())
+
+        def _bind_simple(var: tk.StringVar, kind: str) -> None:
+            if hasattr(var, "trace_add"):
+                var.trace_add("write", lambda *_: self._on_simple_rate_changed(kind))
+            elif hasattr(var, "trace"):
+                var.trace("w", lambda *_: self._on_simple_rate_changed(kind))
+
+        _bind_simple(self.simple_labor_rate_var, "labor")
+        _bind_simple(self.simple_machine_rate_var, "machine")
+
         thread_setting = str(self.settings.get("llm_thread_limit", "") or "").strip()
         env_thread_setting = os.environ.get("QWEN_N_THREADS", "").strip()
         initial_thread_setting = thread_setting or env_thread_setting
@@ -13440,13 +13489,147 @@ class App(tk.Tk):
         rates_frame = ttk.Labelframe(self.editor_widgets_frame, text="Global Overrides: Hourly Rates ($/hr)", padding=(10, 5))
         rates_frame.grid(row=current_row, column=0, sticky="ew", padx=10, pady=5)
         current_row += 1
-        create_global_entries(rates_frame, sorted(self.rates.keys()), self.rates, self.rate_vars, columns=3)
+
+        mode_frame = ttk.Frame(rates_frame)
+        mode_frame.grid(row=0, column=0, sticky="w", pady=(0, 5))
+        ttk.Label(mode_frame, text="Mode:").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ttk.Radiobutton(mode_frame, text="Simple", value="simple", variable=self.rate_mode).grid(
+            row=0, column=1, sticky="w", padx=(0, 8)
+        )
+        ttk.Radiobutton(mode_frame, text="Detailed", value="detailed", variable=self.rate_mode).grid(
+            row=0, column=2, sticky="w"
+        )
+
+        rates_container = ttk.Frame(rates_frame)
+        rates_container.grid(row=1, column=0, sticky="ew")
+        rates_container.grid_columnconfigure(0, weight=1)
+
+        if self._simple_rate_mode_active():
+            self._build_simple_rate_entries(rates_container)
+        else:
+            create_global_entries(
+                rates_container,
+                sorted(self.rates.keys()),
+                self.rates,
+                self.rate_vars,
+                columns=3,
+            )
 
         self._building_editor = False
         try:
             self._apply_geo_defaults(self.geo)
         except Exception:
             pass
+
+    def _simple_rate_mode_active(self) -> bool:
+        try:
+            mode = str(self.rate_mode.get() or "").strip().lower()
+        except Exception:
+            return False
+        return mode == "simple"
+
+    def _format_rate_value(self, value: Any) -> str:
+        if value in (None, ""):
+            return ""
+        try:
+            num = float(value)
+        except Exception:
+            return str(value)
+        text = f"{num:.3f}".rstrip("0").rstrip(".")
+        return text or "0"
+
+    def _build_simple_rate_entries(self, parent: tk.Widget) -> None:
+        known_keys = set(self.rates.keys()) | LABOR_RATE_KEYS | MACHINE_RATE_KEYS
+        for key in sorted(known_keys):
+            formatted = self._format_rate_value(self.rates.get(key, ""))
+            self.rate_vars[key] = tk.StringVar(value=formatted)
+
+        container = ttk.Frame(parent)
+        container.grid(row=0, column=0, sticky="w")
+
+        ttk.Label(container, text="Labor Rate").grid(row=0, column=0, sticky="e", padx=5, pady=2)
+        ttk.Entry(container, textvariable=self.simple_labor_rate_var, width=15).grid(
+            row=0, column=1, sticky="w", padx=5, pady=2
+        )
+        ttk.Label(container, text="Machine Rate").grid(row=1, column=0, sticky="e", padx=5, pady=2)
+        ttk.Entry(container, textvariable=self.simple_machine_rate_var, width=15).grid(
+            row=1, column=1, sticky="w", padx=5, pady=2
+        )
+
+        self._sync_simple_rate_fields()
+
+    def _sync_simple_rate_fields(self) -> None:
+        if not self._simple_rate_mode_active():
+            return
+
+        self._updating_simple_rates = True
+        try:
+            for key, var in self.rate_vars.items():
+                var.set(self._format_rate_value(self.rates.get(key, "")))
+
+            labor_value = next((self.rates.get(k) for k in LABOR_RATE_KEYS if k in self.rates), None)
+            machine_value = next((self.rates.get(k) for k in MACHINE_RATE_KEYS if k in self.rates), None)
+
+            self.simple_labor_rate_var.set(self._format_rate_value(labor_value))
+            self.simple_machine_rate_var.set(self._format_rate_value(machine_value))
+        finally:
+            self._updating_simple_rates = False
+
+    def _update_rate_group(self, keys: Iterable[str], value: float) -> bool:
+        changed = False
+        formatted = self._format_rate_value(value)
+        for key in keys:
+            previous = _coerce_float_or_none(self.rates.get(key))
+            if previous is None or abs(previous - value) > 1e-6:
+                changed = True
+            self.rates[key] = float(value)
+            var = self.rate_vars.get(key)
+            if var is None:
+                self.rate_vars[key] = tk.StringVar(value=formatted)
+            elif var.get() != formatted:
+                var.set(formatted)
+        return changed
+
+    def _apply_simple_rates(self, hint: str | None = None, *, trigger_reprice: bool = True) -> None:
+        if not self._simple_rate_mode_active() or self._updating_simple_rates:
+            return
+
+        labor_value = _coerce_float_or_none(self.simple_labor_rate_var.get())
+        machine_value = _coerce_float_or_none(self.simple_machine_rate_var.get())
+
+        changed = False
+        if labor_value is not None:
+            changed |= self._update_rate_group(LABOR_RATE_KEYS, float(labor_value))
+        if machine_value is not None:
+            changed |= self._update_rate_group(MACHINE_RATE_KEYS, float(machine_value))
+
+        if changed and trigger_reprice:
+            self.reprice(hint=hint or "Updated hourly rates.")
+
+    def _on_simple_rate_changed(self, kind: str) -> None:
+        hint = None
+        if kind == "labor":
+            hint = "Updated labor rates."
+        elif kind == "machine":
+            hint = "Updated machine rates."
+        self._apply_simple_rates(hint=hint)
+
+    def _on_rate_mode_changed(self, *_: Any) -> None:
+        if getattr(self, "_building_editor", False):
+            return
+
+        mode = str(self.rate_mode.get() or "").strip().lower()
+        if isinstance(self.settings, dict):
+            self.settings["rate_mode"] = mode
+            self._save_settings()
+
+        try:
+            if self.vars_df is not None:
+                self._populate_editor_tab(self.vars_df)
+            else:
+                self._populate_editor_tab(coerce_or_make_vars_df(None))
+        except Exception:
+            self._populate_editor_tab(coerce_or_make_vars_df(None))
 
     def _register_editor_field(self, label: str, var: tk.Variable, label_widget: ttk.Label | None) -> None:
         if not isinstance(label, str) or not isinstance(var, tk.Variable):
@@ -13945,14 +14128,23 @@ class App(tk.Tk):
                         self.vars_df.loc[mask, "Example Values / Options"] = value
                         break
 
-        rate_raw_values = {k: var.get() for k, var in self.rate_vars.items()}
-        rate_updates = {}
-        for key, raw_value in rate_raw_values.items():
-            try:
-                rate_updates[key] = float(str(raw_value).strip())
-            except Exception:
-                rate_updates[key] = self.rates.get(key, 0.0)
-        self.rates.update(rate_updates)
+        if self._simple_rate_mode_active():
+            self._apply_simple_rates(trigger_reprice=False)
+            self._sync_simple_rate_fields()
+        else:
+            rate_raw_values = {k: var.get() for k, var in self.rate_vars.items()}
+            rate_updates = {}
+            for key, raw_value in rate_raw_values.items():
+                try:
+                    rate_updates[key] = float(str(raw_value).strip())
+                except Exception:
+                    fallback = _coerce_float_or_none(self.rates.get(key))
+                    rate_updates[key] = fallback if fallback is not None else 0.0
+            self.rates.update(rate_updates)
+            for key, value in rate_updates.items():
+                var = self.rate_vars.get(key)
+                if var is not None:
+                    var.set(self._format_rate_value(value))
 
         if notify:
             messagebox.showinfo("Overrides", "Overrides applied.")
@@ -13983,9 +14175,18 @@ class App(tk.Tk):
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if "params" in data: self.params.update(data["params"])
-            if "rates" in data: self.rates.update(data["rates"])
-            for k,v in self.param_vars.items(): v.set(str(self.params.get(k, "")))
-            for k,v in self.rate_vars.items():  v.set(str(self.rates.get(k, "")))
+            if "rates" in data:
+                try:
+                    self.rates.update({k: float(v) for k, v in data["rates"].items()})
+                except Exception:
+                    self.rates.update(data["rates"])
+            for k,v in self.param_vars.items():
+                v.set(str(self.params.get(k, "")))
+            if self._simple_rate_mode_active():
+                self._sync_simple_rate_fields()
+            else:
+                for k,v in self.rate_vars.items():
+                    v.set(self._format_rate_value(self.rates.get(k, "")))
             messagebox.showinfo("Overrides", "Overrides loaded.")
             self.status_var.set(f"Loaded overrides from {path}")
         except Exception as e:
@@ -14166,8 +14367,11 @@ class App(tk.Tk):
 
         for key, var in self.param_vars.items():
             var.set(str(self.params.get(key, "")))
-        for key, var in self.rate_vars.items():
-            var.set(str(self.rates.get(key, "")))
+        if self._simple_rate_mode_active():
+            self._sync_simple_rate_fields()
+        else:
+            for key, var in self.rate_vars.items():
+                var.set(self._format_rate_value(self.rates.get(key, "")))
 
         self.status_var.set(f"Quote session imported from {path}")
 
