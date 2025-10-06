@@ -56,9 +56,14 @@ OLDKEY_TO_MACHINE = {
 }
 
 
+LEGACY_PROGRAMMER_RATE_KEYS = (
+    "ProgrammingRate",
+    "CAMRate",
+)
+
+
 OLDKEY_TO_LABOR = {
-    "ProgrammingRate": "Programmer",  # same as CAMRate below; we'll reconcile
-    "CAMRate": "Programmer",
+    "ProgrammingRate": "Programmer",
     "EngineerRate": "Engineer",
     "ProjectManagementRate": "ProjectManager",
     "ToolmakerSupportRate": "Toolmaker",
@@ -73,9 +78,9 @@ OLDKEY_TO_LABOR = {
 }
 
 
-# Preferred canonical role for overlapping keys (e.g., ProgrammingRate vs CAMRate)
+# Preferred canonical role names when flattening
 PREFERRED_ROLE_FOR_DUPES = {
-    "Programmer": ["ProgrammingRate", "CAMRate"],
+    "Programmer": ["ProgrammingRate"],
 }
 
 
@@ -85,12 +90,11 @@ def migrate_flat_to_two_bucket(old: Dict[str, float]) -> Dict[str, Dict[str, flo
     labor: Dict[str, float] = {}
     machine: Dict[str, float] = {}
 
-    # Resolve duplicate labor sources
-    for role, keys in PREFERRED_ROLE_FOR_DUPES.items():
-        for key in keys:
-            if key in old:
-                labor[role] = float(old[key])
-                break
+    # Resolve programmer rate (handle legacy CAMRate alias)
+    for key in LEGACY_PROGRAMMER_RATE_KEYS:
+        if key in old:
+            labor["Programmer"] = float(old[key])
+            break
 
     # Map remaining labor keys
     for key, role in OLDKEY_TO_LABOR.items():
