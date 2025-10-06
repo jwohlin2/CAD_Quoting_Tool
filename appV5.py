@@ -126,7 +126,7 @@ from cad_quoter.pricing.time_estimator import (
     ToolParams as _TimeToolParams,
     estimate_time_min as _estimate_time_min,
 )
-from cad_quoter.rates import two_bucket_to_flat
+from cad_quoter.rates import migrate_flat_to_two_bucket, two_bucket_to_flat
 from cad_quoter.pricing.wieland import lookup_price as lookup_wieland_price
 from cad_quoter.llm import (
     LLMClient,
@@ -140,6 +140,7 @@ from cad_quoter.llm import (
     EDITOR_FROM_UI,
     SYSTEM_SUGGEST,
 )
+from cad_quoter.decision_tree import generate_decision_tree_quote
 
 try:
     from process_planner import plan_job as _process_plan_job
@@ -4841,14 +4842,27 @@ def render_quote(
         text = str(key or "").replace("_", " ").strip()
         return text.title() if text else ""
 
-    def add_process_notes(key: str, indent: str = "    "):
+    def add_process_notes(key: str, indent: str = "    ", *, detail_present: bool = False):
         k = str(key).lower()
         meta = process_meta.get(k) or {}
         # show hours/rate if available
         hr  = meta.get("hr")
         rate= meta.get("rate") or rates.get(k.title() + "Rate")
-        if hr:
+        if hr and not detail_present:
             write_line(f"{_h(hr)} @ {_m(rate or 0)}/hr", indent)
+        extra = meta.get("base_extra")
+        try:
+            extra_val = float(extra)
+        except Exception:
+            extra_val = 0.0
+        if extra_val and rate:
+            try:
+                rate_val = float(rate)
+            except Exception:
+                rate_val = 0.0
+            if rate_val:
+                extra_hr = extra_val / rate_val
+                write_line(f"includes {extra_hr:.2f} hr extras", indent)
 
     def add_pass_basis(key: str, indent: str = "    "):
         basis_map = breakdown.get("pass_basis", {}) or {}
@@ -5050,6 +5064,7 @@ def render_quote(
             detail_text = labor_cost_details.get(label)
             if detail_text:
                 write_detail(detail_text, indent="    ")
+                add_process_notes(key, indent="    ", detail_present=True)
             else:
                 add_process_notes(key, indent="    ")
             proc_total += float(value or 0.0)
@@ -8810,6 +8825,52 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     if process_plan_summary:
         breakdown["process_plan"] = copy.deepcopy(process_plan_summary)
+
+    decision_tree_result: dict[str, Any] | None = None
+    try:
+        two_bucket_rates = migrate_flat_to_two_bucket(rates)
+        for bucket in ("labor", "machine"):
+            merged = dict(RATES_TWO_BUCKET_DEFAULT.get(bucket, {}))
+            merged.update(two_bucket_rates.get(bucket, {}))
+            two_bucket_rates[bucket] = merged
+        decision_tree_result = generate_decision_tree_quote(
+            df,
+            params=params,
+            rates=two_bucket_rates,
+            geo=geo_context,
+        )
+    except Exception as exc:
+        logger.debug("Decision tree quote generation failed: %s", exc)
+        decision_tree_result = None
+
+    if decision_tree_result:
+        breakdown["legacy_totals"] = copy.deepcopy(breakdown.get("totals", {}))
+        breakdown["decision_tree_quote"] = decision_tree_result
+
+        dt_totals = decision_tree_result.get("totals", {})
+        labor_cost = float(dt_totals.get("labor_cost", 0.0) or 0.0)
+        direct_costs = max(float(dt_totals.get("direct_costs", 0.0) or 0.0) - labor_cost, 0.0)
+        total_direct_costs = direct_costs
+        subtotal = labor_cost + direct_costs
+        with_overhead = float(dt_totals.get("with_overhead", subtotal))
+        with_ga = float(dt_totals.get("with_ga", with_overhead))
+        with_cont = float(dt_totals.get("with_contingency", with_ga))
+        with_expedite = float(dt_totals.get("with_expedite", with_cont))
+        price = float(dt_totals.get("price_total", with_expedite))
+
+        breakdown.setdefault("totals", {})
+        breakdown["totals"].update(
+            {
+                "labor_cost": round(labor_cost, 2),
+                "direct_costs": round(direct_costs, 2),
+                "subtotal": round(subtotal, 2),
+                "with_overhead": round(with_overhead, 2),
+                "with_ga": round(with_ga, 2),
+                "with_contingency": round(with_cont, 2),
+                "with_expedite": round(with_expedite, 2),
+                "price": round(price, 2),
+            }
+        )
 
     decision_state = {
         "baseline": copy.deepcopy(quote_state.baseline),
