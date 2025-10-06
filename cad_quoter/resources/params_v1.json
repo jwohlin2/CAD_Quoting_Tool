@@ -13,6 +13,14 @@
     "MachineMaxRPM": 8000,
     "MachineMaxTorqueNm": 70.0,
     "MachineMaxZTravel_mm": 500.0,
+    "MachineRapidIPM": 300.0,
+    "MachineHorsepower": 15.0,
+    "MachineHpToMrrFactor": 1.0,
+    "SpeedsFeedsCSVPath": "",
+    "DrillToolchangeMinutes": 0.5,
+    "DrillApproachRetractIn": 0.25,
+    "DrillPeckPenaltyMinPerIn": 0.03,
+    "DrillDwellMinutes": 0.0,
     "StockCatalog": [
       {
         "sku": "plate_steel_0.25_12x12",
