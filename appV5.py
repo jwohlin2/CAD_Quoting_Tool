@@ -8633,14 +8633,23 @@ def compute_quote_from_df(df: pd.DataFrame,
         rate = float(meta.get("rate", 0.0))
         extra = float(meta.get("base_extra", 0.0))
         detail_bits: list[str] = []
-        if hr > 0:
+
+        if hr > 0 and rate > 0:
             detail_bits.append(f"{hr:.2f} hr @ ${rate:,.2f}/hr")
+        elif hr > 0:
+            detail_bits.append(f"{hr:.2f} hr")
+
         if abs(extra) > 1e-6:
             if rate > 0:
-                extra_hr = extra / rate
-                detail_bits.append(f"includes {extra_hr:.2f} hr extras")
+                extra_hr = extra / rate if rate else 0.0
+                if hr == 0:
+                    # When there are only extra charges (e.g., Grinding), display as standard hours @ rate
+                    detail_bits.append(f"{extra_hr:.2f} hr @ ${rate:,.2f}/hr")
+                else:
+                    detail_bits.append(f"includes {extra_hr:.2f} hr extras")
             else:
                 detail_bits.append(f"includes ${extra:,.2f} extras")
+
         proc_notes = applied_process.get(key, {}).get("notes")
         if proc_notes:
             detail_bits.append("LLM: " + ", ".join(proc_notes))
