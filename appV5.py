@@ -19,7 +19,7 @@ import json, math, os, time
 from collections import Counter
 from fractions import Fraction
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from cad_quoter.app.container import ServiceContainer, create_default_container
 from cad_quoter.app import runtime as _runtime
@@ -119,7 +119,13 @@ from cad_quoter.pricing import (
     resolve_material_unit_price as _resolve_material_unit_price,
     usdkg_to_usdlb as _usdkg_to_usdlb,
 )
-from cad_quoter.rates import migrate_flat_to_two_bucket, two_bucket_to_flat
+from cad_quoter.pricing.time_estimator import (
+    MachineParams as _TimeMachineParams,
+    OperationGeometry as _TimeOperationGeometry,
+    OverheadParams as _TimeOverheadParams,
+    ToolParams as _TimeToolParams,
+    estimate_time_min as _estimate_time_min,
+)
 from cad_quoter.pricing.wieland import lookup_price as lookup_wieland_price
 from cad_quoter.llm import (
     LLMClient,
@@ -4321,6 +4327,8 @@ _MASTER_VARIABLES_CACHE: dict[str, Any] = {
     "full": None,
 }
 
+_SPEEDS_FEEDS_CACHE: dict[str, "pd.DataFrame" | None] = {}
+
 def _coerce_core_types(df_core: "pd.DataFrame") -> "pd.DataFrame":
     """Light normalization for estimator expectations."""
     core = df_core.copy()
@@ -4904,33 +4912,30 @@ def render_quote(
             effective_mass_val = _coerce_float_or_none(mass_g)
             if net_mass_val is None:
                 net_mass_val = effective_mass_val
-            show_mass_in_grams = False
-            if net_mass_val is not None:
-                try:
-                    net_abs = abs(float(net_mass_val))
-                    eff_abs = abs(float(effective_mass_val)) if effective_mass_val is not None else net_abs
-                    show_mass_in_grams = net_abs < 1000.0 and eff_abs < 1000.0
-                except Exception:
-                    show_mass_in_grams = False
-            if show_mass_in_grams and net_mass_val is not None:
-                try:
-                    net_text = f"{float(net_mass_val):.1f} g net"
-                except Exception:
-                    net_text = ""
-                extra_parts: list[str] = []
+            show_mass_line = (
+                (net_mass_val and net_mass_val > 0)
+                or (effective_mass_val and effective_mass_val > 0)
+                or show_zeros
+            )
+            if show_mass_line:
+                net_display = f"{float(net_mass_val or 0.0):.1f} g"
+                mass_desc: list[str] = [f"{net_display} net"]
+                mass_source_present = material.get("effective_mass_g") is not None
                 if (
-                    scrap
-                    and effective_mass_val
+                    effective_mass_val
                     and net_mass_val
                     and abs(float(effective_mass_val) - float(net_mass_val)) > 0.05
                 ):
-                    try:
-                        extra_parts.append(f"scrap-adjusted {float(effective_mass_val):.1f} g")
-                    except Exception:
-                        pass
-                details = ", ".join([part for part in [net_text] + extra_parts if part])
-                if details:
-                    write_line(f"Mass: {details}", "  ")
+                    mass_desc.append(
+                        f"scrap-adjusted {float(effective_mass_val):.1f} g"
+                    )
+                elif effective_mass_val and not net_mass_val:
+                    mass_desc.append(
+                        f"scrap-adjusted {float(effective_mass_val):.1f} g"
+                    )
+                if mass_source_present:
+                    write_line(f"Mass: {' '.join(mass_desc)}", "  ")
+
             if (net_mass_val and net_mass_val > 0) or show_zeros:
                 write_line(f"Net Weight: {_format_weight_lb_oz(net_mass_val)}", "  ")
             if (
@@ -5621,14 +5626,286 @@ def net_mass_kg(plate_L_in, plate_W_in, t_in, hole_d_mm, density_g_cc: float = 7
     return mass_g / 1000.0 if mass_g else 0.0
 
 
-def estimate_drilling_hours(hole_diams_mm: list[float], thickness_mm: float, mat_key: str) -> float:
+def _normalize_speeds_feeds_df(df: "pd.DataFrame") -> "pd.DataFrame":
+    rename: dict[str, str] = {}
+    for col in df.columns:
+        normalized = re.sub(r"[^0-9a-z]+", "_", str(col).strip().lower())
+        normalized = normalized.strip("_")
+        rename[col] = normalized
+    normalized_df = df.rename(columns=rename)
+    return normalized_df
+
+
+def _load_speeds_feeds_table(path: str | None) -> "pd.DataFrame" | None:
+    if not path:
+        return None
+    try:
+        resolved = Path(str(path)).expanduser()
+    except Exception:
+        return None
+    key = str(resolved)
+    if key in _SPEEDS_FEEDS_CACHE:
+        return _SPEEDS_FEEDS_CACHE[key]
+    if not resolved.is_file():
+        _SPEEDS_FEEDS_CACHE[key] = None
+        return None
+    try:
+        df = pd.read_csv(resolved)
+    except Exception:
+        _SPEEDS_FEEDS_CACHE[key] = None
+        return None
+    normalized = _normalize_speeds_feeds_df(df)
+    _SPEEDS_FEEDS_CACHE[key] = normalized
+    return normalized
+
+
+def _select_speeds_feeds_row(
+    table: "pd.DataFrame" | None,
+    operation: str,
+    material_key: str | None = None,
+) -> Mapping[str, Any] | None:
+    if table is None:
+        return None
+    try:
+        if getattr(table, "empty"):
+            return None
+    except Exception:
+        try:
+            if len(table) == 0:
+                return None
+        except Exception:
+            pass
+    op_col = next((col for col in ("operation", "op", "process") if col in table.columns), None)
+    if op_col is None:
+        return None
+    op_target = str(operation or "").strip().lower().replace("-", "_").replace(" ", "_")
+    try:
+        records = table.to_dict("records")  # type: ignore[attr-defined]
+    except Exception:
+        records = getattr(table, "_rows", None)
+        if records is None:
+            records = []
+    if not records:
+        return None
+    def _normalize(text: Any) -> str:
+        raw = "" if text is None else str(text)
+        return raw.strip().lower().replace("-", "_").replace(" ", "_")
+
+    candidates = [
+        (idx, row, _normalize(row.get(op_col)))
+        for idx, row in enumerate(records)
+    ]
+    matches = [row for _, row, norm in candidates if norm == op_target]
+    if not matches:
+        matches = [row for _, row, norm in candidates if op_target and op_target in norm]
+    if not matches:
+        return None
+    if material_key:
+        mat_col = next(
+            (col for col in ("material", "material_family", "material_group") if col in matches[0]),
+            None,
+        )
+        if mat_col:
+            mat_target = str(material_key).strip().lower()
+            exact = [row for row in matches if _normalize(row.get(mat_col)) == mat_target]
+            if exact:
+                matches = exact
+            else:
+                partial = [row for row in matches if mat_target in _normalize(row.get(mat_col))]
+                if partial:
+                    matches = partial
+    return matches[0] if matches else None
+
+
+def _resolve_speeds_feeds_path(
+    params: Mapping[str, Any] | None,
+    ui_vars: Mapping[str, Any] | None = None,
+) -> str | None:
+    candidates: list[str | None] = []
+    if ui_vars:
+        for key in (
+            "SpeedsFeedsCSVPath",
+            "Speeds Feeds CSV",
+            "Speeds/Feeds CSV",
+            "Speeds & Feeds CSV",
+        ):
+            value = ui_vars.get(key) if isinstance(ui_vars, Mapping) else None
+            if value:
+                candidates.append(str(value))
+    if isinstance(params, Mapping):
+        candidates.append(str(params.get("SpeedsFeedsCSVPath")) if params.get("SpeedsFeedsCSVPath") else None)
+    candidates.append(os.environ.get("SPEEDS_FEEDS_CSV"))
+    for candidate in candidates:
+        if not candidate:
+            continue
+        text = str(candidate).strip()
+        if text:
+            return text
+    return None
+
+
+def _machine_params_from_params(params: Mapping[str, Any] | None) -> _TimeMachineParams:
+    rapid = _coerce_float_or_none(params.get("MachineRapidIPM")) if isinstance(params, Mapping) else None
+    hp = _coerce_float_or_none(params.get("MachineHorsepower")) if isinstance(params, Mapping) else None
+    mrr_factor = (
+        _coerce_float_or_none(params.get("MachineHpToMrrFactor"))
+        if isinstance(params, Mapping)
+        else None
+    )
+    return _TimeMachineParams(
+        rapid_ipm=float(rapid) if rapid and rapid > 0 else 300.0,
+        hp_available=float(hp) if hp and hp > 0 else None,
+        hp_to_mrr_factor=float(mrr_factor) if mrr_factor and mrr_factor > 0 else None,
+    )
+
+
+def _drill_overhead_from_params(params: Mapping[str, Any] | None) -> _TimeOverheadParams:
+    toolchange = (
+        _coerce_float_or_none(params.get("DrillToolchangeMinutes"))
+        if isinstance(params, Mapping)
+        else None
+    )
+    approach = (
+        _coerce_float_or_none(params.get("DrillApproachRetractIn"))
+        if isinstance(params, Mapping)
+        else None
+    )
+    peck = (
+        _coerce_float_or_none(params.get("DrillPeckPenaltyMinPerIn"))
+        if isinstance(params, Mapping)
+        else None
+    )
+    dwell = (
+        _coerce_float_or_none(params.get("DrillDwellMinutes"))
+        if isinstance(params, Mapping)
+        else None
+    )
+    return _TimeOverheadParams(
+        toolchange_min=float(toolchange) if toolchange and toolchange >= 0 else 0.5,
+        approach_retract_in=float(approach) if approach and approach >= 0 else 0.25,
+        peck_penalty_min_per_in_depth=float(peck) if peck and peck >= 0 else 0.03,
+        dwell_min=float(dwell) if dwell and dwell >= 0 else None,
+    )
+
+
+def _clean_hole_groups(raw: Any) -> list[dict[str, Any]] | None:
+    if not isinstance(raw, list):
+        return None
+    cleaned: list[dict[str, Any]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        dia = _coerce_float_or_none(entry.get("dia_mm"))
+        depth = _coerce_float_or_none(entry.get("depth_mm"))
+        count = _coerce_float_or_none(entry.get("count"))
+        if dia is None or dia <= 0:
+            continue
+        qty = int(round(count)) if count is not None else 0
+        if qty <= 0:
+            qty = 1
+        cleaned.append(
+            {
+                "dia_mm": float(dia),
+                "depth_mm": float(depth) if depth is not None else None,
+                "count": qty,
+                "through": bool(entry.get("through")),
+            }
+        )
+    return cleaned if cleaned else None
+
+
+def estimate_drilling_hours(
+    hole_diams_mm: list[float],
+    thickness_mm: float,
+    mat_key: str,
+    *,
+    hole_groups: list[Mapping[str, Any]] | None = None,
+    speeds_feeds_table: "pd.DataFrame" | None = None,
+    machine_params: _TimeMachineParams | None = None,
+    overhead_params: _TimeOverheadParams | None = None,
+) -> float:
     """
     Conservative plate-drilling model with floors so 100+ holes don't collapse to minutes.
     """
-    if not hole_diams_mm or thickness_mm <= 0:
-        return 0.0
-
     mat = (mat_key or "").lower()
+
+    group_specs: list[tuple[float, int, float]] = []
+    fallback_counts: Counter[float] | None = None
+
+    if hole_groups:
+        fallback_counts = Counter()
+        for entry in hole_groups:
+            if not isinstance(entry, Mapping):
+                continue
+            dia_mm = _coerce_float_or_none(entry.get("dia_mm"))
+            count = _coerce_float_or_none(entry.get("count"))
+            depth_mm = _coerce_float_or_none(entry.get("depth_mm"))
+            if dia_mm is None or dia_mm <= 0:
+                continue
+            qty = int(round(count)) if count is not None else 0
+            if qty <= 0:
+                qty = int(max(1, round(count or 1)))
+            depth_in = 0.0
+            if depth_mm and depth_mm > 0:
+                depth_in = float(depth_mm) / 25.4
+            elif thickness_mm and thickness_mm > 0:
+                depth_in = float(thickness_mm) / 25.4
+            group_specs.append((float(dia_mm) / 25.4, qty, depth_in))
+            fallback_counts[round(float(dia_mm), 3)] += qty
+    if not group_specs:
+        if not hole_diams_mm or thickness_mm <= 0:
+            return 0.0
+        depth_in = float(thickness_mm) / 25.4
+        counts = Counter(round(float(d), 3) for d in hole_diams_mm if d and math.isfinite(d))
+        for dia_mm, qty in counts.items():
+            if qty <= 0:
+                continue
+            group_specs.append((float(dia_mm) / 25.4, int(qty), depth_in))
+        fallback_counts = counts
+    else:
+        if fallback_counts is None:
+            fallback_counts = Counter()
+            for dia_in, qty, _ in group_specs:
+                fallback_counts[round(dia_in * 25.4, 3)] += qty
+
+    if speeds_feeds_table is not None and group_specs:
+        row = _select_speeds_feeds_row(speeds_feeds_table, "drill", mat)
+        if row:
+            machine = machine_params or _machine_params_from_params(None)
+            overhead = overhead_params or _drill_overhead_from_params(None)
+            per_hole_overhead = replace(overhead, toolchange_min=0.0)
+            total_min = 0.0
+            for diameter_in, qty, depth_in in group_specs:
+                if qty <= 0 or diameter_in <= 0 or depth_in <= 0:
+                    continue
+                geom = _TimeOperationGeometry(
+                    diameter_in=float(diameter_in),
+                    hole_depth_in=float(depth_in),
+                    point_angle_deg=118.0,
+                )
+                minutes = _estimate_time_min(
+                    row,
+                    geom,
+                    _TimeToolParams(teeth_z=1),
+                    machine,
+                    per_hole_overhead,
+                )
+                if minutes <= 0:
+                    continue
+                total_min += minutes * int(qty)
+                if overhead.toolchange_min and qty > 0:
+                    total_min += float(overhead.toolchange_min)
+            if total_min > 0:
+                return total_min / 60.0
+
+    thickness_for_fallback = float(thickness_mm or 0.0)
+    if thickness_for_fallback <= 0:
+        depth_candidates = [depth for _, _, depth in group_specs if depth and depth > 0]
+        if depth_candidates:
+            thickness_for_fallback = max(depth_candidates) * 25.4
+
+    if not fallback_counts or thickness_for_fallback <= 0:
+        return 0.0
 
     def sec_per_hole(d_mm: float) -> float:
         if d_mm <= 3.5:
@@ -5646,15 +5923,11 @@ def estimate_drilling_hours(hole_diams_mm: list[float], thickness_mm: float, mat
         return 60.0
 
     mfac = 0.8 if "alum" in mat else (1.15 if "stainless" in mat else 1.0)
-    tfac = max(0.7, min(2.0, thickness_mm / 6.35))
-
-    from collections import Counter
-
-    groups = Counter(round(float(d), 2) for d in hole_diams_mm if d and math.isfinite(d))
+    tfac = max(0.7, min(2.0, thickness_for_fallback / 6.35))
     toolchange_s = 15.0
 
     total_sec = 0.0
-    for d, qty in groups.items():
+    for d, qty in fallback_counts.items():
         if qty <= 0:
             continue
         per = sec_per_hole(float(d)) * mfac * tfac
@@ -6628,6 +6901,10 @@ def compute_quote_from_df(df: pd.DataFrame,
     if hole_diams_list:
         geo_context["hole_diams_mm"] = hole_diams_list
 
+    hole_groups_geo = _clean_hole_groups(geo_context.get("GEO_Hole_Groups"))
+    if hole_groups_geo is not None:
+        geo_context["GEO_Hole_Groups"] = hole_groups_geo
+
     hole_count_override = _coerce_float_or_none(ui_vars.get("Hole Count (override)"))
     avg_hole_diam_override = _coerce_float_or_none(ui_vars.get("Avg Hole Diameter (mm)"))
     if (not hole_diams_list) and hole_count_override and hole_count_override > 0:
@@ -6645,7 +6922,26 @@ def compute_quote_from_df(df: pd.DataFrame,
             thickness_for_drill = float(thickness_in_ui) * 25.4
 
     drill_material_key = geo_context.get("material") or material_name
-    drill_hr = estimate_drilling_hours(hole_diams_list, float(thickness_for_drill or 0.0), drill_material_key or "")
+    speeds_feeds_path = _resolve_speeds_feeds_path(params, ui_vars)
+    speeds_feeds_table = _load_speeds_feeds_table(speeds_feeds_path)
+    if quote_state is not None and speeds_feeds_path:
+        try:
+            guard_ctx = quote_state.guard_context
+        except Exception:
+            guard_ctx = None
+        if isinstance(guard_ctx, dict) and "speeds_feeds_path" not in guard_ctx:
+            guard_ctx["speeds_feeds_path"] = speeds_feeds_path
+    machine_params_default = _machine_params_from_params(params)
+    drill_overhead_default = _drill_overhead_from_params(params)
+    drill_hr = estimate_drilling_hours(
+        hole_diams_list,
+        float(thickness_for_drill or 0.0),
+        drill_material_key or "",
+        hole_groups=hole_groups_geo,
+        speeds_feeds_table=speeds_feeds_table,
+        machine_params=machine_params_default,
+        overhead_params=drill_overhead_default,
+    )
     drill_rate = float(rates.get("DrillingRate") or rates.get("MillingRate", 0.0) or 0.0)
     hole_count_geo = _coerce_float_or_none(geo_context.get("hole_count"))
     hole_count_for_tripwire = 0
@@ -6860,6 +7156,8 @@ def compute_quote_from_df(df: pd.DataFrame,
         raw_fai = ui_vars.get("FAIR Required")
         fai_flag_base = _coerce_checkbox_state(raw_fai, False)
 
+    process_plan_summary: dict[str, Any] = {}
+
     baseline_data = {
         "process_hours": process_hours_baseline,
         "pass_through": pass_through_baseline,
@@ -6937,19 +7235,6 @@ def compute_quote_from_df(df: pd.DataFrame,
         part_mass_g_est = vol_cm3 * density_g_cc
 
     hole_groups_geo = geo_context.get("GEO_Hole_Groups")
-    if isinstance(hole_groups_geo, list):
-        hole_groups_clean: list[dict[str, Any]] = []
-        for grp in hole_groups_geo:
-            if not isinstance(grp, dict):
-                continue
-            cleaned = {
-                "dia_mm": _coerce_float_or_none(grp.get("dia_mm")),
-                "depth_mm": _coerce_float_or_none(grp.get("depth_mm")),
-                "through": bool(grp.get("through")),
-                "count": int(_coerce_float_or_none(grp.get("count")) or 0),
-            }
-            hole_groups_clean.append(cleaned)
-        hole_groups_geo = hole_groups_clean
 
     dfm_geo = {
         "min_wall_mm": _coerce_float_or_none(geo_context.get("GEO_MinWall_mm")),
@@ -7052,7 +7337,6 @@ def compute_quote_from_df(df: pd.DataFrame,
         if setup_hint:
             features["fixture_plan"] = setup_hint
 
-    process_plan_summary: dict[str, Any] = {}
     if _process_plan_job is not None:
         def _compact_dict(data: dict[str, Any]) -> dict[str, Any]:
             cleaned: dict[str, Any] = {}

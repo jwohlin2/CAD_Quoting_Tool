@@ -1,2 +1,1 @@
-"""Test helpers for the desktop UI app package."""
-
+# Marker file to treat tests.app as a package for pytest collection.
