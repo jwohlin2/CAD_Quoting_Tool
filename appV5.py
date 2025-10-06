@@ -133,6 +133,12 @@ from cad_quoter.llm import (
     SYSTEM_SUGGEST,
 )
 
+try:
+    from process_planner import plan_job as _process_plan_job
+except Exception:  # pragma: no cover - planner is optional at runtime
+    _process_plan_job = None
+
+
 # Mapping of process keys to editor labels for propagating derived hours from
 # LLM suggestions. The scale term allows lightweight conversions if we need to
 # express the hour totals in another unit for a given field.
@@ -5738,6 +5744,10 @@ def compute_quote_from_df(df: pd.DataFrame,
     inner_geo = dict(inner_geo_raw) if isinstance(inner_geo_raw, dict) else {}
     geo_context["geo"] = inner_geo
 
+    plate_length_in_val: float | None = None
+    plate_width_in_val: float | None = None
+    plate_thickness_in_val: float | None = None
+
     def _int_from(value: Any) -> int:
         num = _coerce_float_or_none(value)
         if num is None:
@@ -6051,6 +6061,10 @@ def compute_quote_from_df(df: pd.DataFrame,
             if t_in is not None:
                 thickness_mm_val = float(t_in) * 25.4
         thickness_mm_val = float(thickness_mm_val or 0.0)
+        if length_in_val and length_in_val > 0:
+            plate_length_in_val = float(length_in_val)
+        if width_in_val and width_in_val > 0:
+            plate_width_in_val = float(width_in_val)
         if thickness_mm_val > 0:
             geo_context["thickness_mm"] = thickness_mm_val
         length_mm = float(length_in_val or 0.0) * 25.4
@@ -6125,6 +6139,15 @@ def compute_quote_from_df(df: pd.DataFrame,
                 vol_cm3 = max(vol_cm3, vol_cm3_net)
                 GEO_vol_mm3 = max(GEO_vol_mm3, vol_cm3_net * 1000.0)
                 geo_context.setdefault("net_volume_cm3", float(vol_cm3_net))
+
+        if thickness_mm_val > 0:
+            plate_thickness_in_val = float(thickness_mm_val) / 25.4
+        elif thickness_in_for_mass and thickness_in_for_mass > 0:
+            plate_thickness_in_val = float(thickness_in_for_mass)
+        else:
+            t_in_hint = _coerce_float_or_none(ui_vars.get("Thickness (in)"))
+            if t_in_hint and t_in_hint > 0:
+                plate_thickness_in_val = float(t_in_hint)
 
     if density_g_cc and density_g_cc > 0:
         geo_context.setdefault("density_g_cc", float(density_g_cc))
@@ -6795,7 +6818,10 @@ def compute_quote_from_df(df: pd.DataFrame,
     }
     if fixture_plan_desc:
         baseline_data["fixture"] = fixture_plan_desc
+    if process_plan_summary:
+        baseline_data["process_plan"] = copy.deepcopy(process_plan_summary)
     quote_state.baseline = baseline_data
+    quote_state.process_plan = copy.deepcopy(process_plan_summary)
 
     def _clean_stock_entry(entry: dict[str, Any]) -> dict[str, Any]:
         cleaned: dict[str, Any] = {}
@@ -6962,6 +6988,202 @@ def compute_quote_from_df(df: pd.DataFrame,
             setup_hint["fixture_build_hr"] = _coerce_float_or_none(fix_detail.get("build_hr"))
         if setup_hint:
             features["fixture_plan"] = setup_hint
+
+    process_plan_summary: dict[str, Any] = {}
+    if _process_plan_job is not None:
+        def _compact_dict(data: dict[str, Any]) -> dict[str, Any]:
+            cleaned: dict[str, Any] = {}
+            for key, value in data.items():
+                if value is None:
+                    continue
+                if isinstance(value, (list, tuple)) and not value:
+                    continue
+                if isinstance(value, dict) and not value:
+                    continue
+                cleaned[key] = value
+            return cleaned
+
+        def _first_numeric(patterns: tuple[str, ...], *sources: Mapping[str, Any]) -> float | None:
+            for source in sources:
+                if not isinstance(source, Mapping):
+                    continue
+                for label, raw_value in source.items():
+                    key = str(label)
+                    if any(re.search(pattern, key, re.IGNORECASE) for pattern in patterns):
+                        num = _coerce_float_or_none(raw_value)
+                        if num is not None:
+                            return float(num)
+            return None
+
+        def _first_text(patterns: tuple[str, ...], *sources: Mapping[str, Any]) -> str | None:
+            for source in sources:
+                if not isinstance(source, Mapping):
+                    continue
+                for label, raw_value in source.items():
+                    key = str(label)
+                    if any(re.search(pattern, key, re.IGNORECASE) for pattern in patterns):
+                        text = str(raw_value).strip()
+                        if text:
+                            return text
+            return None
+
+        def _count_from_ui(patterns: tuple[str, ...]) -> int:
+            val = _first_numeric(patterns, ui_vars)
+            if val is None:
+                return 0
+            try:
+                qty = int(round(val))
+            except Exception:
+                return 0
+            return qty if qty > 0 else 0
+
+        planner_family: str | None = None
+        planner_inputs: dict[str, Any] | None = None
+
+        if is_plate_2d:
+            planner_family = "die_plate"
+            inputs: dict[str, Any] = {
+                "material": material_name or default_material_display,
+                "qty": int(Qty),
+            }
+            if plate_length_in_val and plate_width_in_val:
+                inputs["plate_LxW"] = [float(plate_length_in_val), float(plate_width_in_val)]
+            if plate_thickness_in_val and plate_thickness_in_val > 0:
+                inputs["thickness"] = float(plate_thickness_in_val)
+
+            flatness_spec = _first_numeric((r"flatness",), tolerance_inputs, ui_vars)
+            if flatness_spec is not None:
+                inputs["flatness_spec"] = float(flatness_spec)
+
+            parallelism_spec = _first_numeric((r"parallel",), tolerance_inputs, ui_vars)
+            if parallelism_spec is not None:
+                inputs["parallelism_spec"] = float(parallelism_spec)
+
+            profile_tol = _first_numeric((r"profile",), tolerance_inputs, ui_vars)
+            if profile_tol is not None:
+                inputs["profile_tol"] = float(profile_tol)
+
+            corner_radius = _first_numeric((r"(corner|inside).*(radius|r)",), tolerance_inputs, ui_vars)
+            if corner_radius is not None:
+                inputs["window_corner_radius_req"] = float(corner_radius)
+
+            windows_need_sharp = bool(GEO_wedm_len_mm and GEO_wedm_len_mm > 0)
+            if not windows_need_sharp:
+                sharp_hint = _first_text((r"sharp", r"wedm"), ui_vars)
+                if sharp_hint:
+                    lowered = sharp_hint.lower()
+                    if "sharp" in lowered or "wedm" in lowered:
+                        windows_need_sharp = True
+            inputs["windows_need_sharp"] = bool(windows_need_sharp)
+
+            incoming_cut = str(geo_context.get("incoming_cut") or "").strip().lower()
+            if not incoming_cut:
+                incoming_text = _first_text((r"(incoming|blank).*(saw|water|flame|plasma|laser)", r"(saw|waterjet|flame|plasma|laser)"), ui_vars)
+                if incoming_text:
+                    lowered = incoming_text.lower()
+                    if "water" in lowered:
+                        incoming_cut = "waterjet"
+                    elif any(token in lowered for token in ("flame", "oxy", "plasma")):
+                        incoming_cut = "flame"
+                    elif "laser" in lowered:
+                        incoming_cut = "waterjet"
+                    elif "saw" in lowered or "band" in lowered:
+                        incoming_cut = "saw"
+            if incoming_cut not in {"saw", "waterjet", "flame"}:
+                incoming_cut = "saw"
+            inputs["incoming_cut"] = incoming_cut
+
+            stress_relief_risk = str(geo_context.get("stress_relief_risk") or "").strip().lower()
+            if not stress_relief_risk:
+                sr_text = _first_text((r"stress\s*relief", r"stress\s*risk"), ui_vars)
+                if sr_text:
+                    lowered = sr_text.lower()
+                    if "high" in lowered:
+                        stress_relief_risk = "high"
+                    elif "med" in lowered:
+                        stress_relief_risk = "med"
+                    elif "low" in lowered:
+                        stress_relief_risk = "low"
+            if stress_relief_risk == "medium":
+                stress_relief_risk = "med"
+            if stress_relief_risk not in {"low", "med", "high"}:
+                stress_relief_risk = "low"
+            inputs["stress_relief_risk"] = stress_relief_risk
+
+            marking_value: str | None = None
+            mark_text = _first_text((r"mark", r"engrave"), ui_vars)
+            if mark_text:
+                lowered = mark_text.lower()
+                if any(token in lowered for token in ("laser", "engrave", "etch")):
+                    marking_value = "laser"
+                elif "stamp" in lowered:
+                    marking_value = "stamp"
+                elif "none" in lowered:
+                    marking_value = "none"
+            if marking_value is None:
+                mark_hours = _coerce_float_or_none(ui_vars.get("Laser Marking / Engraving Time"))
+                if mark_hours and mark_hours > 0:
+                    marking_value = "laser"
+            if marking_value is None:
+                for label, value in ui_vars.items():
+                    if re.search(r"(laser\s*mark|engrave)", str(label), re.IGNORECASE):
+                        if _coerce_checkbox_state(value, False):
+                            marking_value = "laser"
+                            break
+            if marking_value is None:
+                marking_value = "none"
+            inputs["marking"] = marking_value
+
+            hole_sets: list[dict[str, Any]] = []
+            total_taps = 0
+            if isinstance(tap_class_counts_geo, dict):
+                for qty in tap_class_counts_geo.values():
+                    num = _coerce_float_or_none(qty)
+                    if num and num > 0:
+                        try:
+                            total_taps += int(round(num))
+                        except Exception:
+                            continue
+            if total_taps <= 0 and tap_qty_geo:
+                try:
+                    total_taps = int(round(float(tap_qty_geo)))
+                except Exception:
+                    total_taps = 0
+            if total_taps > 0:
+                hole_sets.append({"type": "tapped", "qty": total_taps})
+
+            dowel_press_qty = _count_from_ui((r"dowel.*press", r"press.*dowel"))
+            if dowel_press_qty:
+                hole_sets.append({"type": "dowel_press", "qty": dowel_press_qty})
+
+            dowel_slip_qty = _count_from_ui((r"dowel.*slip", r"slip.*dowel"))
+            if dowel_slip_qty:
+                hole_sets.append({"type": "dowel_slip", "qty": dowel_slip_qty})
+
+            if hole_sets:
+                inputs["hole_sets"] = hole_sets
+
+            planner_inputs = _compact_dict(inputs)
+
+        if planner_family and planner_inputs:
+            try:
+                planner_result = _process_plan_job(planner_family, planner_inputs)
+            except Exception as planner_err:  # pragma: no cover - defensive logging
+                logger.debug("Process planner failed for %s: %s", planner_family, planner_err)
+                process_plan_summary = {
+                    "family": planner_family,
+                    "inputs": planner_inputs,
+                    "error": str(planner_err),
+                }
+            else:
+                process_plan_summary = {
+                    "family": planner_family,
+                    "inputs": planner_inputs,
+                    "plan": planner_result,
+                }
+
+    if process_plan_summary:
+        features["process_plan"] = copy.deepcopy(process_plan_summary)
 
     base_costs = {
         "process_costs": process_costs_baseline,
@@ -8150,6 +8372,8 @@ def compute_quote_from_df(df: pd.DataFrame,
         llm_cost_log["usage"] = overrides_meta["usage"]
     if notes_from_clamps:
         llm_cost_log["clamp_notes"] = notes_from_clamps
+    if process_plan_summary:
+        llm_cost_log["process_plan"] = copy.deepcopy(process_plan_summary)
     if applied_multipliers_log:
         llm_cost_log["applied_multipliers"] = applied_multipliers_log
     if applied_adders_log:
@@ -8206,6 +8430,9 @@ def compute_quote_from_df(df: pd.DataFrame,
         "llm_cost_log": llm_cost_log,
     }
 
+    if process_plan_summary:
+        breakdown["process_plan"] = copy.deepcopy(process_plan_summary)
+
     decision_state = {
         "baseline": copy.deepcopy(quote_state.baseline),
         "suggestions": copy.deepcopy(quote_state.suggestions),
@@ -8255,6 +8482,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         "decision_state": decision_state,
         "geo": copy.deepcopy(quote_state.geo),
         "ui_vars": copy.deepcopy(quote_state.ui_vars),
+        "process_plan": copy.deepcopy(quote_state.process_plan),
         "material_source": material_source_final,
     }
 
