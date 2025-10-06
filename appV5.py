@@ -4737,10 +4737,16 @@ def render_quote(
     pass_through = breakdown.get("pass_through", {}) or {}
     applied_pcts = breakdown.get("applied_pcts", {}) or {}
     process_meta = {str(k).lower(): (v or {}) for k, v in (breakdown.get("process_meta", {}) or {}).items()}
+    applied_process_raw = breakdown.get("applied_process", {}) or {}
+    applied_process = {str(k).lower(): (v or {}) for k, v in applied_process_raw.items()}
     rates        = breakdown.get("rates", {}) or {}
     params       = breakdown.get("params", {}) or {}
     nre_cost_details = breakdown.get("nre_cost_details", {}) or {}
-    labor_cost_details = breakdown.get("labor_cost_details", {}) or {}
+    labor_cost_details_input_raw = breakdown.get("labor_cost_details", {}) or {}
+    labor_cost_details_input = {
+        str(label): str(detail) for label, detail in labor_cost_details_input_raw.items()
+    }
+    labor_cost_details: dict[str, str] = dict(labor_cost_details_input)
     direct_cost_details = breakdown.get("direct_cost_details", {}) or {}
     qty          = int(breakdown.get("qty", 1) or 1)
     price        = float(result.get("price", totals.get("price", 0.0)))
@@ -4840,6 +4846,24 @@ def render_quote(
     def _process_label(key: str | None) -> str:
         text = str(key or "").replace("_", " ").strip()
         return text.title() if text else ""
+
+    def _merge_detail(existing: str | None, new_bits: list[str]) -> str | None:
+        segments: list[str] = []
+        seen: set[str] = set()
+        for bit in new_bits:
+            seg = str(bit).strip()
+            if seg and seg not in seen:
+                segments.append(seg)
+                seen.add(seg)
+        if existing:
+            for segment in re.split(r";\s*", str(existing)):
+                seg = segment.strip()
+                if seg and seg not in seen:
+                    segments.append(seg)
+                    seen.add(seg)
+        if segments:
+            return "; ".join(segments)
+        return str(existing).strip() if existing else None
 
     def add_process_notes(key: str, indent: str = "    "):
         k = str(key).lower()
@@ -5047,9 +5071,37 @@ def render_quote(
         if (value > 0) or show_zeros:
             label = _process_label(key)
             row(label, float(value), indent="  ")
-            detail_text = labor_cost_details.get(label)
-            if detail_text:
-                write_detail(detail_text, indent="    ")
+            meta = process_meta.get(str(key).lower(), {})
+            detail_bits: list[str] = []
+            try:
+                hr_val = float(meta.get("hr", 0.0) or 0.0)
+            except Exception:
+                hr_val = 0.0
+            try:
+                rate_val = float(meta.get("rate", 0.0) or 0.0)
+            except Exception:
+                rate_val = 0.0
+            try:
+                extra_val = float(meta.get("base_extra", 0.0) or 0.0)
+            except Exception:
+                extra_val = 0.0
+            if hr_val > 0:
+                detail_bits.append(f"{hr_val:.2f} hr @ ${rate_val:,.2f}/hr")
+            if abs(extra_val) > 1e-6:
+                if rate_val > 0:
+                    extra_hr = extra_val / rate_val
+                    detail_bits.append(f"includes {extra_hr:.2f} hr extras")
+                else:
+                    detail_bits.append(f"includes ${extra_val:,.2f} extras")
+            proc_notes = applied_process.get(str(key).lower(), {}).get("notes")
+            if proc_notes:
+                detail_bits.append("LLM: " + ", ".join(proc_notes))
+
+            existing_detail = labor_cost_details.get(label)
+            merged_detail = _merge_detail(existing_detail, detail_bits)
+            if merged_detail:
+                labor_cost_details[label] = merged_detail
+                write_detail(merged_detail, indent="    ")
             else:
                 add_process_notes(key, indent="    ")
             proc_total += float(value or 0.0)
@@ -5267,6 +5319,58 @@ class GeometryLoader:
 
 # Common regex pieces (kept non-capturing to avoid pandas warnings)
 TIME_RE = r"\b(?:hours?|hrs?|hr|time|min(?:ute)?s?)\b"
+
+
+def _sum_time_from_series(
+    items: pd.Series,
+    values: pd.Series,
+    data_types: pd.Series,
+    mask: pd.Series,
+    *,
+    default: float = 0.0,
+    exclude_mask: pd.Series | None = None,
+) -> float:
+    """Shared implementation for extracting hour totals from sheet rows."""
+
+    try:
+        if not mask.any():
+            return float(default)
+    except Exception:
+        return float(default)
+
+    looks_time = items.str.contains(TIME_RE, case=False, regex=True, na=False)
+    looks_money = items.str.contains(MONEY_RE, case=False, regex=True, na=False)
+    typed_money = data_types.str.contains(r"(?:rate|currency|price|cost)", case=False, na=False)
+
+    excl = looks_money | typed_money
+    if exclude_mask is not None:
+        try:
+            excl = excl | exclude_mask
+        except Exception:
+            pass
+
+    matched = mask & ~excl & looks_time
+    try:
+        if not matched.any():
+            return float(default)
+    except Exception:
+        return float(default)
+
+    numeric_candidates = pd.to_numeric(values[matched], errors="coerce")
+    mask_numeric = pd.notna(numeric_candidates)
+    try:
+        has_numeric = mask_numeric.any()
+    except Exception:
+        has_numeric = any(bool(flag) for flag in mask_numeric)
+    if not has_numeric:
+        return float(default)
+
+    mins_mask = items.str.contains(r"\bmin(?:ute)?s?\b", case=False, regex=True, na=False) & matched
+    hrs_mask = matched & ~mins_mask
+
+    hrs_sum = pd.to_numeric(values[hrs_mask], errors="coerce").fillna(0.0).sum()
+    mins_sum = pd.to_numeric(values[mins_mask], errors="coerce").fillna(0.0).sum()
+    return float(hrs_sum) + float(mins_sum) / 60.0
 MONEY_RE = r"(?:rate|/hr|per\s*hour|per\s*hr|price|cost|\$)"
 
 # ===== QUOTE HELPERS ========================================================
@@ -6280,26 +6384,17 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     def sum_time(pattern: str, default: float = 0.0, exclude_pattern: str | None = None) -> float:
         """Sum only time-like rows; minutes are converted to hours."""
-        m  = contains(pattern)
-        if not m.any():
-            return float(default)
 
-        looks_time   = items.str.contains(TIME_RE,   case=False, regex=True, na=False)
-        looks_money  = items.str.contains(MONEY_RE,  case=False, regex=True, na=False)
-        typed_money  = dtt.str.contains(r"(?:rate|currency|price|cost)", case=False, na=False)
-        excl = looks_money | typed_money
-        if exclude_pattern:
-            excl = excl | contains(exclude_pattern)
-
-        mm = m & ~excl & looks_time
-        if not mm.any():
-            return float(default)
-
-        mins_mask = items.str.contains(r"\bmin(?:ute)?s?\b", case=False, regex=True, na=False) & mm
-        hrs_mask  = mm & ~mins_mask
-        hrs_sum  = pd.to_numeric(vals[hrs_mask],  errors="coerce").fillna(0.0).sum()
-        mins_sum = pd.to_numeric(vals[mins_mask], errors="coerce").fillna(0.0).sum()
-        return float(hrs_sum) + float(mins_sum) / 60.0
+        mask = contains(pattern)
+        exclude_mask = contains(exclude_pattern) if exclude_pattern else None
+        return _sum_time_from_series(
+            items,
+            vals,
+            dtt,
+            mask,
+            default=float(default),
+            exclude_mask=exclude_mask,
+        )
 
     # --- OPTIONAL: let sheet override params/rates if those rows exist ---
     def sheet_num(pat, default=None):
@@ -8623,8 +8718,9 @@ def compute_quote_from_df(df: pd.DataFrame,
     if price < min_lot:
         price = min_lot
 
-    labor_costs_display: dict[str, float] = {}
+    labor_cost_details_input: dict[str, str] = {}
     labor_cost_details: dict[str, str] = {}
+    labor_costs_display: dict[str, float] = {}
     for key, value in sorted(process_costs.items(), key=lambda kv: kv[1], reverse=True):
         label = key.replace('_', ' ').title()
         labor_costs_display[label] = value
@@ -8644,8 +8740,17 @@ def compute_quote_from_df(df: pd.DataFrame,
         proc_notes = applied_process.get(key, {}).get("notes")
         if proc_notes:
             detail_bits.append("LLM: " + ", ".join(proc_notes))
-        if detail_bits:
-            labor_cost_details[label] = "; ".join(detail_bits)
+        existing_detail = labor_cost_details_input.get(label)
+        if detail_bits or existing_detail:
+            merged_bits: list[str] = []
+            merged_bits.extend(detail_bits)
+            if existing_detail:
+                for segment in re.split(r";\s*", existing_detail):
+                    seg = segment.strip()
+                    if seg and seg not in merged_bits:
+                        merged_bits.append(seg)
+            if merged_bits:
+                labor_cost_details[label] = "; ".join(merged_bits)
 
     direct_costs_display: dict[str, float] = {label: float(value) for label, value in pass_through.items()}
     direct_cost_details: dict[str, str] = {}
