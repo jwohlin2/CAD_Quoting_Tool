@@ -76,7 +76,8 @@ def test_render_quote_does_not_duplicate_detail_lines() -> None:
                 "grinding": {"hr": 1.5, "rate": 120.0, "base_extra": 200.0},
             },
             "labor_cost_details": {
-                "Grinding": "1.50 hr @ $120.00/hr; includes 1.67 hr extras",
+                "Grinding": "1.50 hr @ $120.00/hr; includes $200.00 extras",
+
             },
             "pass_through": {},
             "applied_pcts": {},
@@ -90,5 +91,6 @@ def test_render_quote_does_not_duplicate_detail_lines() -> None:
 
     assert rendered.count("- Programmer: 1.00 hr @ $75.00/hr") == 1
     assert rendered.count("Programmer 1.00 hr @ $75.00/hr") == 0
+    assert rendered.count("includes $200.00 extras") == 1
     assert rendered.count("includes 1.67 hr extras") == 1
     assert rendered.count("1.50 hr @ $120.00/hr") == 1
