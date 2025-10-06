@@ -5288,6 +5288,48 @@ def pct(value: Any, default: float = 0.0) -> float:
 _DEFAULT_PRICING_ENGINE = SERVICE_CONTAINER.get_pricing_engine()
 
 
+def compute_mass_and_scrap_after_removal(
+    net_mass_g: float | None,
+    scrap_frac: float | None,
+    removal_mass_g: float | None,
+    *,
+    scrap_min: float = 0.0,
+    scrap_max: float = 0.25,
+) -> tuple[float, float, float]:
+    """Return updated net mass, scrap fraction and effective mass after removal.
+
+    ``net_mass_g`` and ``scrap_frac`` represent the current part state while
+    ``removal_mass_g`` is the expected mass machined away from the finished
+    part.  The removal is treated as additional scrap, so the effective mass
+    that must be purchased increases accordingly even though the finished
+    part becomes lighter.
+
+    Scrap bounds mirror the UI constraints, clamping the resulting fraction
+    into ``[scrap_min, scrap_max]``.
+    """
+
+    base_net = max(0.0, float(net_mass_g or 0.0))
+    base_scrap = _ensure_scrap_pct(scrap_frac)
+    removal = max(0.0, float(removal_mass_g or 0.0))
+
+    if base_net <= 0 or removal <= 0:
+        effective_mass = base_net * (1.0 + base_scrap)
+        return base_net, base_scrap, effective_mass
+
+    removal = min(removal, base_net)
+    net_after = max(1e-6, base_net - removal)
+
+    scrap_min = max(0.0, float(scrap_min))
+    scrap_max = max(scrap_min, float(scrap_max))
+
+    scrap_mass = base_net * base_scrap + removal
+    scrap_after = scrap_mass / net_after if net_after > 0 else scrap_max
+    scrap_after = max(scrap_min, min(scrap_max, scrap_after))
+
+    effective_mass = net_after * (1.0 + scrap_after)
+    return net_after, scrap_after, effective_mass
+
+
 def _material_price_from_choice(choice: str, material_lookup: dict[str, float]) -> float | None:
     """Resolve a material price per-gram for the editor helpers."""
 
@@ -8365,26 +8407,132 @@ def compute_quote_from_df(df: pd.DataFrame,
     fixture_material_cost_base = fixture_material_cost
 
     old_scrap = _ensure_scrap_pct(features.get("scrap_pct", scrap_pct))
-    new_scrap = overrides.get("scrap_pct_override") if overrides else None
-    if new_scrap is not None:
-        new_scrap = _ensure_scrap_pct(new_scrap)
-        if not math.isclose(new_scrap, old_scrap, abs_tol=1e-6):
-            baseline = float(features.get("material_cost_baseline", material_direct_cost_base))
-            scaled = baseline * ((1.0 + new_scrap) / max(1e-6, (1.0 + old_scrap)))
-            scaled = round(scaled, 2)
-            pass_through["Material"] = scaled
-            entry = applied_pass.setdefault("Material", {"old_value": float(material_direct_cost_base), "notes": []})
-            entry["notes"].append(f"scrap to {new_scrap * 100:.1f}%")
-            entry["new_value"] = scaled
-            features["scrap_pct"] = new_scrap
-            scrap_pct = new_scrap
-            src_tag = (quote_state.effective_sources.get("scrap_pct") if quote_state and isinstance(quote_state.effective_sources, dict) else None)
+    base_net_mass_g = _coerce_float_or_none(material_detail_for_breakdown.get("net_mass_g")) or 0.0
+
+    removal_mass_g: float | None = None
+    removal_lb: float | None = None
+    if isinstance(overrides, dict):
+        for key in ("material_removed_mass_g", "material_removed_g"):
+            val = overrides.get(key)
+            num = _coerce_float_or_none(val)
+            if num is not None and num > 0:
+                removal_mass_g = float(num)
+                break
+        if removal_mass_g is None:
+            removal_lb_val = _coerce_float_or_none(overrides.get("material_removed_lb"))
+            if removal_lb_val is not None and removal_lb_val > 0:
+                removal_lb = float(removal_lb_val)
+                removal_mass_g = removal_lb / LB_PER_KG * 1000.0
+    if removal_mass_g is not None and removal_mass_g > 0 and removal_lb is None:
+        removal_lb = removal_mass_g / 1000.0 * LB_PER_KG
+
+    bounds = quote_state.bounds if isinstance(quote_state.bounds, dict) else {}
+    scrap_min_bound = max(0.0, _coerce_float_or_none(bounds.get("scrap_min")) or 0.0)
+    scrap_max_bound = _coerce_float_or_none(bounds.get("scrap_max")) or 0.25
+
+    net_after = base_net_mass_g
+    scrap_after = old_scrap
+    effective_mass_after = base_net_mass_g * (1.0 + old_scrap)
+    mass_scale = 1.0
+    removal_applied = False
+
+    if removal_mass_g and removal_mass_g > 0 and base_net_mass_g > 0:
+        net_after, scrap_after, effective_mass_after = compute_mass_and_scrap_after_removal(
+            base_net_mass_g,
+            old_scrap,
+            removal_mass_g,
+            scrap_min=scrap_min_bound,
+            scrap_max=scrap_max_bound,
+        )
+        mass_scale = net_after / max(1e-6, base_net_mass_g)
+        removal_applied = True
+
+    scrap_override_raw = overrides.get("scrap_pct_override") if isinstance(overrides, dict) else None
+    scrap_override_applied = False
+    if scrap_override_raw is not None:
+        override_scrap = _ensure_scrap_pct(scrap_override_raw)
+        if not math.isclose(override_scrap, scrap_after, abs_tol=1e-6):
+            scrap_override_applied = True
+        scrap_after = override_scrap
+        effective_mass_after = net_after * (1.0 + scrap_after)
+
+    scrap_scale = (1.0 + scrap_after) / max(1e-6, (1.0 + old_scrap))
+    total_scale = mass_scale * scrap_scale
+
+    scrap_changed = not math.isclose(scrap_after, old_scrap, abs_tol=1e-6)
+    change_triggered = removal_applied or scrap_override_applied or scrap_changed or not math.isclose(total_scale, 1.0, abs_tol=1e-6)
+
+    if change_triggered:
+        baseline = float(features.get("material_cost_baseline", material_direct_cost_base))
+        scaled = round(baseline * total_scale, 2)
+        pass_through["Material"] = scaled
+        entry = applied_pass.setdefault("Material", {"old_value": float(material_direct_cost_base), "notes": []})
+        if removal_applied and removal_lb is not None:
+            entry["notes"].append(f"material removal -{removal_lb:.2f} lb")
+        elif removal_applied:
+            entry["notes"].append(f"material removal -{removal_mass_g:.1f} g")
+        if scrap_changed:
+            src_tag = (
+                quote_state.effective_sources.get("scrap_pct")
+                if quote_state and isinstance(quote_state.effective_sources, dict)
+                else None
+            )
             suffix = ""
-            if src_tag == "user":
-                suffix = " (user override)"
-            elif src_tag == "llm":
-                suffix = " (LLM)"
-            llm_notes.append(f"Scrap {old_scrap * 100:.1f}% → {new_scrap * 100:.1f}%{suffix}")
+            if scrap_override_applied:
+                if src_tag == "user":
+                    suffix = " (user override)"
+                elif src_tag == "llm":
+                    suffix = " (LLM)"
+            elif removal_applied:
+                suffix = " (material removal)"
+            entry["notes"].append(
+                f"scrap {old_scrap * 100:.1f}% → {scrap_after * 100:.1f}%{suffix}"
+            )
+        entry["new_value"] = scaled
+
+        if removal_applied:
+            removal_note = (
+                f"Material removal -{removal_lb:.2f} lb → net {net_after / 1000.0 * LB_PER_KG:.2f} lb"
+                if removal_lb is not None
+                else f"Material removal -{removal_mass_g:.1f} g"
+            )
+            llm_notes.append(removal_note)
+        if scrap_changed:
+            src_tag = (
+                quote_state.effective_sources.get("scrap_pct")
+                if quote_state and isinstance(quote_state.effective_sources, dict)
+                else None
+            )
+            suffix = ""
+            if scrap_override_applied:
+                if src_tag == "user":
+                    suffix = " (user override)"
+                elif src_tag == "llm":
+                    suffix = " (LLM)"
+            elif removal_applied:
+                suffix = " (material removal)"
+            llm_notes.append(
+                f"Scrap {old_scrap * 100:.1f}% → {scrap_after * 100:.1f}%{suffix}"
+            )
+
+        features["scrap_pct"] = scrap_after
+        if removal_applied:
+            features["material_removed_mass_g"] = removal_mass_g
+            features["net_mass_g"] = net_after
+
+    scrap_pct = scrap_after
+    material_detail_for_breakdown["mass_g_net"] = net_after
+    material_detail_for_breakdown["net_mass_g"] = net_after
+    material_detail_for_breakdown["effective_mass_g"] = effective_mass_after
+    material_detail_for_breakdown["mass_g"] = effective_mass_after
+    material_detail_for_breakdown["scrap_pct"] = scrap_pct
+    if change_triggered:
+        material_detail_for_breakdown["material_cost"] = pass_through.get(
+            "Material", material_detail_for_breakdown.get("material_cost")
+        )
+        material_detail_for_breakdown["material_direct_cost"] = pass_through.get(
+            "Material", material_detail_for_breakdown.get("material_direct_cost")
+        )
 
     material_detail_for_breakdown["scrap_pct"] = scrap_pct
 
