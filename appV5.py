@@ -143,9 +143,33 @@ from cad_quoter.llm import (
 )
 
 try:
-    from process_planner import plan_job as _process_plan_job
+    from process_planner import (
+        PLANNERS as _PROCESS_PLANNERS,
+        choose_skims as _planner_choose_skims,
+        choose_wire_size as _planner_choose_wire_size,
+        needs_wedm_for_windows as _planner_needs_wedm_for_windows,
+        plan_job as _process_plan_job,
+    )
 except Exception:  # pragma: no cover - planner is optional at runtime
     _process_plan_job = None
+    _PROCESS_PLANNERS = {}
+    _planner_choose_wire_size = None
+    _planner_choose_skims = None
+    _planner_needs_wedm_for_windows = None
+else:  # pragma: no cover - defensive guard for unexpected exports
+    if not isinstance(_PROCESS_PLANNERS, dict):
+        _PROCESS_PLANNERS = {}
+
+
+_PROCESS_PLANNER_HELPERS: dict[str, Callable[..., Any]] = {}
+if "_planner_choose_wire_size" in globals() and callable(_planner_choose_wire_size):
+    _PROCESS_PLANNER_HELPERS["choose_wire_size"] = _planner_choose_wire_size  # type: ignore[index]
+if "_planner_choose_skims" in globals() and callable(_planner_choose_skims):
+    _PROCESS_PLANNER_HELPERS["choose_skims"] = _planner_choose_skims  # type: ignore[index]
+if "_planner_needs_wedm_for_windows" in globals() and callable(
+    _planner_needs_wedm_for_windows
+):
+    _PROCESS_PLANNER_HELPERS["needs_wedm_for_windows"] = _planner_needs_wedm_for_windows  # type: ignore[index]
 
 
 # Mapping of process keys to editor labels for propagating derived hours from
@@ -7330,32 +7354,6 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     process_plan_summary: dict[str, Any] = {}
 
-    baseline_data = {
-        "process_hours": process_hours_baseline,
-        "pass_through": pass_through_baseline,
-        "scrap_pct": scrap_pct_baseline,
-        "setups": int(setups),
-        "contingency_pct": ContingencyPct,
-        "fixture_build_hr": fixture_build_hr_base,
-        "fixture_material_cost": float(fixture_material_cost),
-        "soft_jaw_hr": 0.0,
-        "soft_jaw_material_cost": 0.0,
-        "handling_adder_hr": 0.0,
-        "cmm_minutes": cmm_minutes_base,
-        "in_process_inspection_hr": inproc_hr_base,
-        "fai_required": fai_flag_base,
-        "fai_prep_hr": 0.0,
-        "packaging_hours": packaging_hr_base,
-        "packaging_flat_cost": packaging_flat_base,
-        "shipping_hint": "",
-    }
-    if fixture_plan_desc:
-        baseline_data["fixture"] = fixture_plan_desc
-    if process_plan_summary:
-        baseline_data["process_plan"] = copy.deepcopy(process_plan_summary)
-    quote_state.baseline = baseline_data
-    quote_state.process_plan = copy.deepcopy(process_plan_summary)
-
     def _clean_stock_entry(entry: dict[str, Any]) -> dict[str, Any]:
         cleaned: dict[str, Any] = {}
         for k, v in entry.items():
@@ -7509,6 +7507,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         if setup_hint:
             features["fixture_plan"] = setup_hint
 
+
     if _process_plan_job is not None:
         def _compact_dict(data: dict[str, Any]) -> dict[str, Any]:
             cleaned: dict[str, Any] = {}
@@ -7556,11 +7555,94 @@ def compute_quote_from_df(df: pd.DataFrame,
                 return 0
             return qty if qty > 0 else 0
 
-        planner_family: str | None = None
-        planner_inputs: dict[str, Any] | None = None
+        def _mm_to_in(val: float | None) -> float | None:
+            if val is None:
+                return None
+            try:
+                return float(val) / 25.4
+            except Exception:
+                return None
 
-        if is_plate_2d:
-            planner_family = "die_plate"
+        _known_planner_families = set(_PROCESS_PLANNERS.keys() if _PROCESS_PLANNERS else [])
+        if not _known_planner_families:
+            _known_planner_families = {
+                "die_plate",
+                "punch",
+                "pilot_punch",
+                "bushing_id_critical",
+                "cam_or_hemmer",
+                "flat_die_chaser",
+                "pm_compaction_die",
+                "shear_blade",
+                "extrude_hone",
+            }
+
+        def _normalize_family(value: Any) -> str | None:
+            if value is None:
+                return None
+            text = str(value).strip().lower()
+            if not text:
+                return None
+            text = re.sub(r"[^a-z0-9]+", "_", text)
+            synonyms = {
+                "dieplates": "die_plate",
+                "die_plate_plate": "die_plate",
+                "plate": "die_plate",
+                "punches": "punch",
+                "pilot": "pilot_punch",
+                "pilot_punches": "pilot_punch",
+                "bushing": "bushing_id_critical",
+                "ring_gauge": "bushing_id_critical",
+                "ring_gauges": "bushing_id_critical",
+                "cam": "cam_or_hemmer",
+                "hemmer": "cam_or_hemmer",
+                "hemming": "cam_or_hemmer",
+                "flat_die_chasers": "flat_die_chaser",
+                "pm_die": "pm_compaction_die",
+                "pm_compaction": "pm_compaction_die",
+                "shear": "shear_blade",
+                "shear_blades": "shear_blade",
+                "extrudehone": "extrude_hone",
+                "extrude_hone_process": "extrude_hone",
+            }
+            text = synonyms.get(text, text)
+            if text not in _known_planner_families and text.endswith("s"):
+                singular = text[:-1]
+                if singular in _known_planner_families:
+                    text = singular
+            return text if text in _known_planner_families else None
+
+        def _collect_text_hints() -> list[str]:
+            hints: list[str] = []
+
+            def _push(val: Any) -> None:
+                if val is None:
+                    return
+                if isinstance(val, str):
+                    stripped = val.strip()
+                    if stripped:
+                        hints.append(stripped)
+                elif isinstance(val, Mapping):
+                    for sub_val in val.values():
+                        _push(sub_val)
+                elif isinstance(val, (list, tuple, set)):
+                    for sub_val in val:
+                        _push(sub_val)
+
+            _push(geo_context.get("part_name"))
+            _push(geo_context.get("title"))
+            _push(geo_context.get("description"))
+            _push(geo_context.get("notes"))
+            _push(geo_context.get("chart_lines"))
+            _push(geo_context.get("process_notes"))
+            _push(geo_context.get("process_family"))
+            if isinstance(ui_vars, Mapping):
+                for label, value in ui_vars.items():
+                    _push(label)
+                    _push(value)
+            return hints
+
+        def _build_die_plate_inputs() -> dict[str, Any]:
             inputs: dict[str, Any] = {
                 "material": material_name or default_material_display,
                 "qty": int(Qty),
@@ -7586,18 +7668,34 @@ def compute_quote_from_df(df: pd.DataFrame,
             if corner_radius is not None:
                 inputs["window_corner_radius_req"] = float(corner_radius)
 
-            windows_need_sharp = bool(GEO_wedm_len_mm and GEO_wedm_len_mm > 0)
+            hole_qty = max(
+                _coerce_float_or_none(geo_context.get("hole_count")) or 0.0,
+                _coerce_float_or_none(geo_context.get("hole_count_geo")) or 0.0,
+                float(hole_count_for_tripwire or 0),
+            )
+            if hole_qty > 0:
+                inputs["hole_count"] = int(round(hole_qty))
+
+            windows_need_sharp = bool(geo_context.get("windows_need_sharp"))
+            if not windows_need_sharp and GEO_wedm_len_mm:
+                try:
+                    windows_need_sharp = float(GEO_wedm_len_mm) > 0
+                except Exception:
+                    windows_need_sharp = bool(windows_need_sharp)
             if not windows_need_sharp:
-                sharp_hint = _first_text((r"sharp", r"wedm"), ui_vars)
-                if sharp_hint:
-                    lowered = sharp_hint.lower()
+                window_text = _first_text((r"sharp", r"wedm"), tolerance_inputs, ui_vars)
+                if window_text:
+                    lowered = window_text.lower()
                     if "sharp" in lowered or "wedm" in lowered:
                         windows_need_sharp = True
             inputs["windows_need_sharp"] = bool(windows_need_sharp)
 
             incoming_cut = str(geo_context.get("incoming_cut") or "").strip().lower()
             if not incoming_cut:
-                incoming_text = _first_text((r"(incoming|blank).*(saw|water|flame|plasma|laser)", r"(saw|waterjet|flame|plasma|laser)"), ui_vars)
+                incoming_text = _first_text(
+                    (r"(incoming|blank).*(saw|water|flame|plasma|laser)", r"(saw|waterjet|flame|plasma|laser)"),
+                    ui_vars,
+                )
                 if incoming_text:
                     lowered = incoming_text.lower()
                     if "water" in lowered:
@@ -7643,7 +7741,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                 mark_hours = _coerce_float_or_none(ui_vars.get("Laser Marking / Engraving Time"))
                 if mark_hours and mark_hours > 0:
                     marking_value = "laser"
-            if marking_value is None:
+            if marking_value is None and isinstance(ui_vars, Mapping):
                 for label, value in ui_vars.items():
                     if re.search(r"(laser\s*mark|engrave)", str(label), re.IGNORECASE):
                         if _coerce_checkbox_state(value, False):
@@ -7682,27 +7780,259 @@ def compute_quote_from_df(df: pd.DataFrame,
             if hole_sets:
                 inputs["hole_sets"] = hole_sets
 
-            planner_inputs = _compact_dict(inputs)
+            return _compact_dict(inputs)
 
-        if planner_family and planner_inputs:
+        def _bbox_inches() -> tuple[float | None, float | None, float | None]:
+            length = _mm_to_in(_coerce_float_or_none(geo_context.get("plate_length_mm")) or bbox_info.get("max_dim_mm"))
+            width = _mm_to_in(_coerce_float_or_none(geo_context.get("plate_width_mm")) or bbox_info.get("min_dim_mm"))
+            thickness = _mm_to_in(_coerce_float_or_none(geo_context.get("thickness_mm")) or bbox_info.get("min_dim_mm"))
+            return length, width, thickness
+
+        def _build_punch_inputs() -> dict[str, Any]:
+            length_in, width_in, thickness_in = _bbox_inches()
+            feature_candidates = [val for val in (width_in, thickness_in) if val and val > 0]
+            min_feature = min(feature_candidates) if feature_candidates else None
+            inputs: dict[str, Any] = {
+                "material": material_name or default_material_display,
+                "overall_length": length_in,
+                "min_feature_width": min_feature,
+                "min_inside_radius": _mm_to_in(_coerce_float_or_none(geo_context.get("min_inside_radius_mm"))),
+                "profile_tol": _first_numeric((r"profile",), tolerance_inputs, ui_vars),
+            }
+
+            blind_relief_flag = bool(geo_context.get("blind_relief"))
+            if not blind_relief_flag:
+                blind_text = _first_text((r"blind\s*relief", r"blind\s*pocket"), ui_vars)
+                if blind_text:
+                    blind_relief_flag = True
+            inputs["blind_relief"] = blind_relief_flag
+
+            edge_text = _first_text((r"edge\s*(condition|prep)",), ui_vars)
+            if edge_text:
+                inputs["edge_condition"] = edge_text
+
+            coating_text = _first_text((r"coat(ing)?",), ui_vars)
+            if coating_text:
+                inputs["coating"] = coating_text
+
+            runout_val = _first_numeric((r"runout", r"tir"), tolerance_inputs, ui_vars)
+            if runout_val is None:
+                runout_val = _coerce_float_or_none(geo_context.get("runout_to_shank"))
+            inputs["runout_to_shank"] = runout_val
+
+            bearing_width = _first_numeric((r"bearing\s*(land|width)",), ui_vars)
+            bearing_ra = _first_numeric((r"bearing.*ra", r"surface\s*finish"), tolerance_inputs, ui_vars)
+            if bearing_width or bearing_ra:
+                inputs["bearing_land_spec"] = _compact_dict({"width": bearing_width, "Ra": bearing_ra})
+
+            return _compact_dict(inputs)
+
+        def _build_bushing_inputs() -> dict[str, Any]:
+            inputs: dict[str, Any] = {
+                "material": material_name or default_material_display,
+                "tight_od": not _coerce_checkbox_state(ui_vars.get("OD Not Critical"), False)
+                if isinstance(ui_vars, Mapping)
+                else True,
+                "target_id_Ra": _first_numeric((r"ID\s*Ra", r"ID\s*finish"), tolerance_inputs, ui_vars),
+            }
+            wire_text = _first_text((r"wire", r"wedm"), ui_vars)
+            if wire_text:
+                lowered = wire_text.lower()
+                inputs["create_id_by_wire_first"] = "wire" in lowered or "wedm" in lowered
+            return _compact_dict(inputs)
+
+        def _build_cam_inputs() -> dict[str, Any]:
+            inputs: dict[str, Any] = {
+                "material": material_name or default_material_display,
+                "profile_tol": _first_numeric((r"profile",), tolerance_inputs, ui_vars),
+            }
+            if geo_context.get("windows_need_sharp"):
+                inputs["windows_need_sharp"] = True
+            else:
+                sharp_text = _first_text((r"sharp", r"wedm"), tolerance_inputs, ui_vars)
+                if sharp_text and any(word in sharp_text.lower() for word in ("sharp", "wedm")):
+                    inputs["windows_need_sharp"] = True
+            return _compact_dict(inputs)
+
+        def _build_extrude_hone_inputs() -> dict[str, Any]:
+            return _compact_dict(
+                {
+                    "target_Ra": _first_numeric((r"target\s*ra", r"surface\s*finish"), tolerance_inputs, ui_vars)
+                    or _coerce_float_or_none(geo_context.get("target_Ra")),
+                }
+            )
+
+        def _derive_planner_hints(
+            family: str | None, inputs: Mapping[str, Any] | None
+        ) -> dict[str, Any]:
+            if not family or not inputs or not _PROCESS_PLANNER_HELPERS:
+                return {}
+
+            choose_wire = _PROCESS_PLANNER_HELPERS.get("choose_wire_size")
+            choose_skims = _PROCESS_PLANNER_HELPERS.get("choose_skims")
+            needs_wedm = _PROCESS_PLANNER_HELPERS.get("needs_wedm_for_windows")
+
+            def _float(value: Any) -> float | None:
+                try:
+                    if value is None:
+                        return None
+                    return float(value)
+                except (TypeError, ValueError):
+                    return None
+
+            hints: dict[str, Any] = {}
+
+            if family == "die_plate":
+                windows_need_sharp = bool(inputs.get("windows_need_sharp"))
+                corner_r = _float(inputs.get("window_corner_radius_req"))
+                profile_tol = _float(inputs.get("profile_tol"))
+                wedm_needed: bool | None = None
+                if needs_wedm:
+                    wedm_needed = bool(needs_wedm(windows_need_sharp, corner_r, profile_tol))
+                    hints["windows_wedm_recommended"] = wedm_needed
+                if choose_wire and (wedm_needed or wedm_needed is None):
+                    hints["recommended_wire_in"] = float(choose_wire(corner_r, None))
+                if choose_skims and profile_tol is not None:
+                    skims = int(choose_skims(profile_tol))
+                    hints["recommended_wire_passes"] = f"R+{skims}S"
+                    hints["recommended_wire_skims"] = skims
+
+            if family in {"punch", "pilot_punch"}:
+                min_feature = _float(inputs.get("min_feature_width"))
+                min_inside = _float(inputs.get("min_inside_radius"))
+                profile_tol = _float(inputs.get("profile_tol"))
+                if choose_wire:
+                    hints["recommended_wire_in"] = float(choose_wire(min_inside, min_feature))
+                if choose_skims and profile_tol is not None:
+                    skims = int(choose_skims(profile_tol))
+                    hints["recommended_wire_passes"] = f"R+{skims}S"
+                    hints["recommended_wire_skims"] = skims
+
+            if family == "cam_or_hemmer":
+                profile_tol = _float(inputs.get("profile_tol"))
+                windows_need_sharp = bool(inputs.get("windows_need_sharp"))
+                wedm_needed: bool | None = None
+                if needs_wedm:
+                    wedm_needed = bool(needs_wedm(windows_need_sharp, None, profile_tol))
+                    hints["wedm_preferred"] = wedm_needed
+                if choose_wire and (wedm_needed or wedm_needed is None):
+                    hints["recommended_wire_in"] = float(choose_wire(None, None))
+                if choose_skims and profile_tol is not None:
+                    skims = int(choose_skims(profile_tol))
+                    hints["recommended_wire_passes"] = f"R+{skims}S"
+                    hints["recommended_wire_skims"] = skims
+
+            return _compact_dict(hints)
+
+        planner_family: str | None = None
+        planner_inputs: dict[str, Any] | None = None
+
+        explicit_family_sources = [
+            geo_context.get("process_planner_family"),
+            geo_context.get("planner_family"),
+            geo_context.get("process_family"),
+        ]
+        if isinstance(ui_vars, Mapping):
+            for label, value in ui_vars.items():
+                normalized_label = str(label).strip().lower()
+                if any(token in normalized_label for token in ("planner family", "process family")):
+                    explicit_family_sources.append(value)
+        for candidate in explicit_family_sources:
+            planner_family = _normalize_family(candidate)
+            if planner_family:
+                break
+
+        if planner_family == "die_plate" or (planner_family is None and is_plate_2d):
+            planner_family = "die_plate"
+            planner_inputs = _build_die_plate_inputs()
+
+        if planner_family is None:
+            text_hints = "\n".join(_collect_text_hints()).lower()
+            keyword_map = [
+                ("pilot_punch", ("pilot punch", "piloted punch")),
+                ("punch", ("punch", "insert", "pierce insert", "form insert")),
+                ("bushing_id_critical", ("bushing", "ring gauge", "guide bushing")),
+                ("cam_or_hemmer", ("cam", "hemmer", "hemming")),
+                ("flat_die_chaser", ("die chaser", "chaser")),
+                ("pm_compaction_die", ("pm compaction", "compaction die")),
+                ("shear_blade", ("shear blade", "shear knife", "shear die")),
+                ("extrude_hone", ("extrude hone", "abrasive flow")),
+            ]
+            for family_key, keywords in keyword_map:
+                if any(keyword in text_hints for keyword in keywords):
+                    planner_family = family_key if family_key in _known_planner_families else None
+                    if planner_family:
+                        break
+
+        if planner_family == "punch":
+            planner_inputs = _build_punch_inputs()
+        elif planner_family == "pilot_punch":
+            planner_inputs = _build_punch_inputs()
+            if planner_inputs is None:
+                planner_inputs = {}
+            planner_inputs = _compact_dict({**planner_inputs, "runout_to_shank": planner_inputs.get("runout_to_shank", 0.0003)})
+        elif planner_family == "bushing_id_critical":
+            planner_inputs = _build_bushing_inputs()
+        elif planner_family == "cam_or_hemmer":
+            planner_inputs = _build_cam_inputs()
+        elif planner_family == "flat_die_chaser":
+            planner_inputs = {}
+        elif planner_family == "pm_compaction_die":
+            planner_inputs = {}
+        elif planner_family == "shear_blade":
+            planner_inputs = {"material": material_name or default_material_display}
+        elif planner_family == "extrude_hone":
+            planner_inputs = _build_extrude_hone_inputs()
+
+        planner_hints: dict[str, Any] = {}
+        if planner_family and planner_inputs is None:
+            planner_inputs = {}
+
+        if planner_family and planner_inputs is not None:
+            planner_hints = _derive_planner_hints(planner_family, planner_inputs)
+            process_plan_summary = {
+                "family": planner_family,
+                "inputs": planner_inputs,
+            }
+            if planner_hints:
+                process_plan_summary["derived"] = planner_hints
+
             try:
                 planner_result = _process_plan_job(planner_family, planner_inputs)
             except Exception as planner_err:  # pragma: no cover - defensive logging
                 logger.debug("Process planner failed for %s: %s", planner_family, planner_err)
-                process_plan_summary = {
-                    "family": planner_family,
-                    "inputs": planner_inputs,
-                    "error": str(planner_err),
-                }
+                process_plan_summary["error"] = str(planner_err)
             else:
-                process_plan_summary = {
-                    "family": planner_family,
-                    "inputs": planner_inputs,
-                    "plan": planner_result,
-                }
+                process_plan_summary["plan"] = planner_result
 
     if process_plan_summary:
         features["process_plan"] = copy.deepcopy(process_plan_summary)
+
+    baseline_data = {
+        "process_hours": process_hours_baseline,
+        "pass_through": pass_through_baseline,
+        "scrap_pct": scrap_pct_baseline,
+        "setups": int(setups),
+        "contingency_pct": ContingencyPct,
+        "fixture_build_hr": fixture_build_hr_base,
+        "fixture_material_cost": float(fixture_material_cost),
+        "soft_jaw_hr": 0.0,
+        "soft_jaw_material_cost": 0.0,
+        "handling_adder_hr": 0.0,
+        "cmm_minutes": cmm_minutes_base,
+        "in_process_inspection_hr": inproc_hr_base,
+        "fai_required": fai_flag_base,
+        "fai_prep_hr": 0.0,
+        "packaging_hours": packaging_hr_base,
+        "packaging_flat_cost": packaging_flat_base,
+        "shipping_hint": "",
+    }
+    if fixture_plan_desc:
+        baseline_data["fixture"] = fixture_plan_desc
+    if process_plan_summary:
+        baseline_data["process_plan"] = copy.deepcopy(process_plan_summary)
+    quote_state.baseline = baseline_data
+    quote_state.process_plan = copy.deepcopy(process_plan_summary)
 
     base_costs = {
         "process_costs": process_costs_baseline,
