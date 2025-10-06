@@ -50,3 +50,54 @@ def test_render_quote_places_why_after_pricing_ladder_and_llm_adjustments() -> N
     assert pricing_idx < llm_idx < why_idx
     assert lines[why_idx - 1] == ""
     assert rendered.endswith("\n")
+
+
+def test_render_quote_includes_hour_summary() -> None:
+    result = {
+        "price": 120.0,
+        "breakdown": {
+            "qty": 2,
+            "totals": {
+                "labor_cost": 80.0,
+                "direct_costs": 20.0,
+                "subtotal": 100.0,
+                "with_overhead": 110.0,
+                "with_ga": 115.0,
+                "with_contingency": 117.3,
+                "with_expedite": 117.3,
+            },
+            "nre_detail": {},
+            "nre": {},
+            "material": {},
+            "process_costs": {"milling": 60.0, "deburr": 20.0},
+            "process_meta": {
+                "milling": {"hr": 4.0},
+                "deburr": {"hr": 1.5},
+                "inspection": {"hr": 0.5},
+            },
+            "pass_through": {"material": 20.0},
+            "applied_pcts": {
+                "OverheadPct": 0.10,
+                "GA_Pct": 0.05,
+                "ContingencyPct": 0.02,
+                "MarginPct": 0.15,
+            },
+            "rates": {},
+            "params": {},
+            "labor_cost_details": {},
+            "direct_cost_details": {},
+        },
+    }
+
+    rendered = appV5.render_quote(result, currency="$")
+    lines = rendered.splitlines()
+
+    assert "Labor Hour Summary" in lines
+    summary_idx = lines.index("Labor Hour Summary")
+    divider_idx = summary_idx + 1
+    assert lines[divider_idx].startswith("-")
+    summary_block = lines[summary_idx:summary_idx + 6]
+    assert any("Milling" in line and "4.00 hr" in line for line in summary_block)
+    assert any("Deburr" in line and "1.50 hr" in line for line in summary_block)
+    assert any("Inspection" in line and "0.50 hr" in line for line in summary_block)
+    assert any("Total Hours" in line and "6.00 hr" in line for line in summary_block)
