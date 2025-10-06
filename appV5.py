@@ -126,6 +126,7 @@ from cad_quoter.pricing.time_estimator import (
     ToolParams as _TimeToolParams,
     estimate_time_min as _estimate_time_min,
 )
+from cad_quoter.rates import two_bucket_to_flat
 from cad_quoter.pricing.wieland import lookup_price as lookup_wieland_price
 from cad_quoter.llm import (
     LLMClient,
@@ -6855,7 +6856,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     finishing_cost   = finishing_misc_hr * finishing_rate
 
     # Inspection & docs
-    inproc_hr   = sum_time(r"(?:In[- ]?Process\s*Inspection)")
+    inproc_hr   = sum_time(r"(?:In[- ]?Process\s*Inspection)", default=1.0)
     final_hr    = sum_time(r"(?:Final\s*Inspection|Manual\s*Inspection)")
     cmm_prog_hr = sum_time(r"(?:CMM\s*Programming)")
     cmm_run_hr  = sum_time(r"(?:CMM\s*Run\s*Time)\b") + sum_time(r"(?:CMM\s*Run\s*Time\s*min)")
@@ -8635,7 +8636,11 @@ def compute_quote_from_df(df: pd.DataFrame,
         if hr > 0:
             detail_bits.append(f"{hr:.2f} hr @ ${rate:,.2f}/hr")
         if abs(extra) > 1e-6:
-            detail_bits.append(f"includes ${extra:,.2f} extras")
+            if rate > 0:
+                extra_hr = extra / rate
+                detail_bits.append(f"includes {extra_hr:.2f} hr extras")
+            else:
+                detail_bits.append(f"includes ${extra:,.2f} extras")
         proc_notes = applied_process.get(key, {}).get("notes")
         if proc_notes:
             detail_bits.append("LLM: " + ", ".join(proc_notes))
@@ -9082,7 +9087,7 @@ def default_variables_template() -> pd.DataFrame:
         ("Roughing Cycle Time", 0.0, "number"),
         ("Semi-Finish Cycle Time", 0.0, "number"),
         ("Finishing Cycle Time", 0.0, "number"),
-        ("In-Process Inspection Hours", 0.0, "number"),
+        ("In-Process Inspection Hours", 1.0, "number"),
         ("Final Inspection Hours", 0.0, "number"),
         ("CMM Programming Hours", 0.0, "number"),
         ("CMM Run Time min", 0.0, "number"),
