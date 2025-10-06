@@ -42,5 +42,53 @@ def test_render_quote_shows_net_mass_when_scrap_present() -> None:
     rendered = appV5.render_quote(result, currency="$", show_zeros=False)
     mass_line = next(line for line in rendered.splitlines() if "Mass:" in line)
 
-    assert "100.0 g net" in mass_line
-    assert "scrap-adjusted 120.0 g" in mass_line
+    assert "0.22 lb net" in mass_line
+    assert "scrap-adjusted 0.26 lb" in mass_line
+
+
+def test_render_quote_does_not_duplicate_detail_lines() -> None:
+    result = {
+        "price": 10.0,
+        "breakdown": {
+            "qty": 1,
+            "totals": _base_totals(),
+            "material": {},
+            "nre": {},
+            "nre_detail": {
+                "programming": {
+                    "per_lot": 150.0,
+                    "prog_hr": 1.0,
+                    "prog_rate": 75.0,
+                },
+                "fixture": {
+                    "per_lot": 80.0,
+                    "build_hr": 0.5,
+                    "build_rate": 60.0,
+                    "mat_cost": 20.0,
+                },
+            },
+            "nre_cost_details": {
+                "Programming & Eng (per lot)": "Programmer 1.00 hr @ $75.00/hr",
+                "Fixturing (per lot)": "Build 0.50 hr @ $60.00/hr; Material $20.00",
+            },
+            "process_costs": {"grinding": 300.0},
+            "process_meta": {
+                "grinding": {"hr": 1.5, "rate": 120.0, "base_extra": 200.0},
+            },
+            "labor_cost_details": {
+                "Grinding": "1.50 hr @ $120.00/hr; includes $200.00 extras",
+            },
+            "pass_through": {},
+            "applied_pcts": {},
+            "rates": {},
+            "params": {},
+            "direct_cost_details": {},
+        },
+    }
+
+    rendered = appV5.render_quote(result, currency="$", show_zeros=False)
+
+    assert rendered.count("- Programmer: 1.00 hr @ $75.00/hr") == 1
+    assert rendered.count("Programmer 1.00 hr @ $75.00/hr") == 0
+    assert rendered.count("includes $200.00 extras") == 1
+    assert rendered.count("1.50 hr @ $120.00/hr") == 1
