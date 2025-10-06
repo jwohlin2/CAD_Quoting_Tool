@@ -4805,6 +4805,16 @@ def render_quote(
         pad = max(1, page_width - len(left) - len(right))
         lines.append(f"{left}{' ' * pad}{right}")
 
+    def hours_row(label: str, val: float, indent: str = ""):
+        left = f"{indent}{label}"
+        right = _h(val)
+        pad = max(1, page_width - len(left) - len(right))
+        lines.append(f"{left}{' ' * pad}{right}")
+
+    def _process_label(key: str | None) -> str:
+        text = str(key or "").replace("_", " ").strip()
+        return text.title() if text else ""
+
     def add_process_notes(key: str, indent: str = "    "):
         k = str(key).lower()
         meta = process_meta.get(k) or {}
@@ -4972,12 +4982,32 @@ def render_quote(
     proc_total = 0.0
     for key, value in sorted((process_costs or {}).items(), key=lambda kv: kv[1], reverse=True):
         if (value > 0) or show_zeros:
-            label = key.replace("_", " ").title()
+            label = _process_label(key)
             row(label, float(value), indent="  ")
             add_process_notes(key, indent="    ")
             write_detail(labor_cost_details.get(label), indent="    ")
             proc_total += float(value or 0.0)
     row("Total", proc_total, indent="  ")
+
+    hour_summary_entries: list[tuple[str, float]] = []
+    total_hours = 0.0
+    for key, meta in sorted((process_meta or {}).items()):
+        meta = meta or {}
+        try:
+            hr_val = float(meta.get("hr", 0.0) or 0.0)
+        except Exception:
+            hr_val = 0.0
+        if hr_val > 0 or show_zeros:
+            hour_summary_entries.append((_process_label(key), hr_val))
+            total_hours += hr_val if hr_val else 0.0
+
+    if hour_summary_entries:
+        lines.append("")
+        lines.append("Labor Hour Summary")
+        lines.append(divider)
+        for label, hr_val in sorted(hour_summary_entries, key=lambda kv: kv[1], reverse=True):
+            hours_row(label, hr_val, indent="  ")
+        hours_row("Total Hours", total_hours, indent="  ")
     lines.append("")
 
     # ---- Pass-Through & Direct (auto include non-zeros; sorted desc) --------
