@@ -4772,6 +4772,16 @@ def render_quote(
         text = str(val).strip()
         return text if text else "—"
 
+    def _format_weight_lb_decimal(mass_g: float | None) -> str:
+        grams = max(0.0, float(mass_g or 0.0))
+        pounds = grams / 1000.0 * LB_PER_KG
+        if pounds <= 0:
+            return "0.00 lb"
+        text = f"{pounds:.2f}"
+        if "." in text:
+            text = text.rstrip("0").rstrip(".")
+        return f"{text} lb"
+
     def _format_weight_lb_oz(mass_g: float | None) -> str:
         grams = max(0.0, float(mass_g or 0.0))
         if grams <= 0:
@@ -4919,7 +4929,7 @@ def render_quote(
                 or show_zeros
             )
             if show_mass_line:
-                net_display = f"{float(net_mass_val or 0.0):.1f} g"
+                net_display = _format_weight_lb_decimal(net_mass_val)
                 mass_desc: list[str] = [f"{net_display} net"]
                 mass_source_present = material.get("effective_mass_g") is not None
                 if (
@@ -4928,11 +4938,11 @@ def render_quote(
                     and abs(float(effective_mass_val) - float(net_mass_val)) > 0.05
                 ):
                     mass_desc.append(
-                        f"scrap-adjusted {float(effective_mass_val):.1f} g"
+                        f"scrap-adjusted {_format_weight_lb_decimal(effective_mass_val)}"
                     )
                 elif effective_mass_val and not net_mass_val:
                     mass_desc.append(
-                        f"scrap-adjusted {float(effective_mass_val):.1f} g"
+                        f"scrap-adjusted {_format_weight_lb_decimal(effective_mass_val)}"
                     )
                 if mass_source_present:
                     write_line(f"Mass: {' '.join(mass_desc)}", "  ")
@@ -4992,18 +5002,31 @@ def render_quote(
     # Programming & Eng (auto-hide if zero unless show_zeros)
     if (prog.get("per_lot", 0.0) > 0) or show_zeros or any(prog.get(k) for k in ("prog_hr", "cam_hr", "eng_hr")):
         row("Programming & Eng:", float(prog.get("per_lot", 0.0)))
-        if prog.get("prog_hr"): write_line(f"- Programmer: {_h(prog['prog_hr'])} @ {_m(prog.get('prog_rate', 0))}/hr", "    ")
-        if prog.get("cam_hr"):  write_line(f"- CAM: {_h(prog['cam_hr'])} @ {_m(prog.get('cam_rate', 0))}/hr", "    ")
-        if prog.get("eng_hr"):  write_line(f"- Engineering: {_h(prog['eng_hr'])} @ {_m(prog.get('eng_rate', 0))}/hr", "    ")
-        write_detail(nre_cost_details.get("Programming & Eng (per lot)"))
+        has_detail = False
+        if prog.get("prog_hr"):
+            has_detail = True
+            write_line(f"- Programmer: {_h(prog['prog_hr'])} @ {_m(prog.get('prog_rate', 0))}/hr", "    ")
+        if prog.get("cam_hr"):
+            has_detail = True
+            write_line(f"- CAM: {_h(prog['cam_hr'])} @ {_m(prog.get('cam_rate', 0))}/hr", "    ")
+        if prog.get("eng_hr"):
+            has_detail = True
+            write_line(f"- Engineering: {_h(prog['eng_hr'])} @ {_m(prog.get('eng_rate', 0))}/hr", "    ")
+        if not has_detail:
+            write_detail(nre_cost_details.get("Programming & Eng (per lot)"))
 
     # Fixturing (with renamed subline)
     if (fix.get("per_lot", 0.0) > 0) or show_zeros or any(fix.get(k) for k in ("build_hr", "mat_cost")):
         row("Fixturing:", float(fix.get("per_lot", 0.0)))
+        has_detail = False
         if fix.get("build_hr"):
+            has_detail = True
             write_line(f"- Build Labor: {_h(fix['build_hr'])} @ {_m(fix.get('build_rate', 0))}/hr", "    ")
-        write_line(f"- Fixture Material Cost: {_m(fix.get('mat_cost', 0.0))}", "    ")
-        write_detail(nre_cost_details.get("Fixturing (per lot)"))
+        if fix.get("mat_cost"):
+            has_detail = True
+            write_line(f"- Fixture Material Cost: {_m(fix.get('mat_cost', 0.0))}", "    ")
+        if not has_detail:
+            write_detail(nre_cost_details.get("Fixturing (per lot)"))
 
     # Any other NRE numeric keys (auto include)
     other_nre_total = 0.0
@@ -5024,8 +5047,11 @@ def render_quote(
         if (value > 0) or show_zeros:
             label = _process_label(key)
             row(label, float(value), indent="  ")
-            add_process_notes(key, indent="    ")
-            write_detail(labor_cost_details.get(label), indent="    ")
+            detail_text = labor_cost_details.get(label)
+            if detail_text:
+                write_detail(detail_text, indent="    ")
+            else:
+                add_process_notes(key, indent="    ")
             proc_total += float(value or 0.0)
     row("Total", proc_total, indent="  ")
 
@@ -6830,7 +6856,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     finishing_cost   = finishing_misc_hr * finishing_rate
 
     # Inspection & docs
-    inproc_hr   = sum_time(r"(?:In[- ]?Process\s*Inspection)")
+    inproc_hr   = sum_time(r"(?:In[- ]?Process\s*Inspection)", default=1.0)
     final_hr    = sum_time(r"(?:Final\s*Inspection|Manual\s*Inspection)")
     cmm_prog_hr = sum_time(r"(?:CMM\s*Programming)")
     cmm_run_hr  = sum_time(r"(?:CMM\s*Run\s*Time)\b") + sum_time(r"(?:CMM\s*Run\s*Time\s*min)")
@@ -8610,7 +8636,11 @@ def compute_quote_from_df(df: pd.DataFrame,
         if hr > 0:
             detail_bits.append(f"{hr:.2f} hr @ ${rate:,.2f}/hr")
         if abs(extra) > 1e-6:
-            detail_bits.append(f"includes ${extra:,.2f} extras")
+            if rate > 0:
+                extra_hr = extra / rate
+                detail_bits.append(f"includes {extra_hr:.2f} hr extras")
+            else:
+                detail_bits.append(f"includes ${extra:,.2f} extras")
         proc_notes = applied_process.get(key, {}).get("notes")
         if proc_notes:
             detail_bits.append("LLM: " + ", ".join(proc_notes))
@@ -9057,7 +9087,7 @@ def default_variables_template() -> pd.DataFrame:
         ("Roughing Cycle Time", 0.0, "number"),
         ("Semi-Finish Cycle Time", 0.0, "number"),
         ("Finishing Cycle Time", 0.0, "number"),
-        ("In-Process Inspection Hours", 0.0, "number"),
+        ("In-Process Inspection Hours", 1.0, "number"),
         ("Final Inspection Hours", 0.0, "number"),
         ("CMM Programming Hours", 0.0, "number"),
         ("CMM Run Time min", 0.0, "number"),

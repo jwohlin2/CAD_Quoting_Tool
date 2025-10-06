@@ -3,12 +3,67 @@ from __future__ import annotations
 
 from pathlib import Path
 import math
+import os
 from typing import Dict
 
 from cad_quoter.domain_models import coerce_float_or_none, normalize_material_key
 
 LB_PER_KG = 2.2046226218
 BACKUP_CSV_NAME = "material_price_backup.csv"
+
+_MCM_DISABLE_ENV = os.environ.get("CAD_QUOTER_DISABLE_MCM_SCRAPER", "").strip().lower() in {"1", "true", "yes", "on"}
+_MCM_DISABLED = _MCM_DISABLE_ENV
+_MCM_CACHE: Dict[str, Dict[str, float | str]] = {}
+
+
+def _mcmaster_family_from_key(key: str) -> str:
+    if not key:
+        return ""
+    if "carbide" in key:
+        return "carbide"
+    if "tool" in key and "steel" in key:
+        return "tool_steel"
+    if any(token in key for token in ("alum", "6061", "7075", "2024", "5083", "mic6")):
+        return "aluminum"
+    return ""
+
+
+def _maybe_get_mcmaster_price(display_name: str, normalized_key: str) -> Dict[str, float | str] | None:
+    global _MCM_DISABLED
+    if _MCM_DISABLED:
+        return None
+
+    family = _mcmaster_family_from_key(normalized_key)
+    if not family:
+        return None
+
+    cached = _MCM_CACHE.get(family)
+    if cached:
+        return cached
+
+    try:
+        from scrape_mcmaster import get_standard_stock_unit_prices  # type: ignore
+    except Exception:
+        _MCM_DISABLED = True
+        return None
+
+    try:
+        record = get_standard_stock_unit_prices(display_name)
+    except Exception:
+        _MCM_DISABLED = True
+        return None
+
+    if not record:
+        return None
+
+    try:
+        record["usd_per_kg"] = float(record["usd_per_kg"])
+        record["usd_per_lb"] = float(record["usd_per_lb"])
+    except Exception:
+        return None
+
+    _MCM_CACHE[family] = record
+    return record
 
 
 def price_value_to_per_gram(value: float, label: str) -> float | None:
@@ -96,6 +151,14 @@ def resolve_material_unit_price(display_name: str, unit: str = "kg") -> tuple[fl
     """Resolve a material price in the requested unit with layered fallbacks."""
 
     key = normalize_material_key(display_name)
+
+    mcm_record = _maybe_get_mcmaster_price(display_name, key)
+    if mcm_record:
+        source = str(mcm_record.get("source", "mcmaster"))
+        if unit == "lb":
+            return float(mcm_record["usd_per_lb"]), source
+        # default to kg when unspecified or unexpected units
+        return float(mcm_record["usd_per_kg"]), source
 
     try:
         from .wieland_scraper import get_live_material_price  # type: ignore
