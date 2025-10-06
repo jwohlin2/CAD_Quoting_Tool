@@ -23,7 +23,7 @@ def test_service_container_caches_pricing_engine() -> None:
 
     container = ServiceContainer(
         load_params=lambda: {"ok": True},
-        load_rates=lambda: {"rate": 1.0},
+        load_rates=lambda: {"labor": {"Programmer": 1.0}, "machine": {}},
         pricing_engine_factory=factory,
     )
 
@@ -37,7 +37,7 @@ def test_service_container_caches_pricing_engine() -> None:
 def test_service_container_create_pricing_engine_returns_new_instance() -> None:
     container = ServiceContainer(
         load_params=lambda: {},
-        load_rates=lambda: {},
+        load_rates=lambda: {"labor": {}, "machine": {}},
         pricing_engine_factory=DummyEngine,
     )
 

@@ -1,24 +1,27 @@
 {
   "version": 1,
   "data": {
-    "ProgrammingRate": 90.0,
-    "MillingRate": 90.0,
-    "DrillingRate": 90.0,
-    "TurningRate": 90.0,
-    "WireEDMRate": 90.0,
-    "SinkerEDMRate": 90.0,
-    "SurfaceGrindRate": 90.0,
-    "ODIDGrindRate": 90.0,
-    "JigGrindRate": 90.0,
-    "LappingRate": 90.0,
-    "InspectionRate": 90.0,
-    "FinishingRate": 90.0,
-    "SawWaterjetRate": 90.0,
-    "FixtureBuildRate": 90.0,
-    "AssemblyRate": 90.0,
-    "EngineerRate": 90.0,
-    "ProjectManagementRate": 90.0,
-    "ToolmakerSupportRate": 90.0,
-    "CAMRate": 90.0
+    "labor": {
+      "Programmer": 90.0,
+      "Engineer": 90.0,
+      "ProjectManager": 90.0,
+      "Toolmaker": 90.0,
+      "FixtureBuilder": 90.0,
+      "Finisher": 90.0,
+      "Lapper": 90.0,
+      "Inspector": 90.0,
+      "Assembler": 90.0
+    },
+    "machine": {
+      "WireEDM": 90.0,
+      "SinkerEDM": 90.0,
+      "CNC_Mill": 90.0,
+      "DrillPress": 90.0,
+      "Lathe": 90.0,
+      "Waterjet": 90.0,
+      "SurfaceGrind": 90.0,
+      "ODIDGrind": 90.0,
+      "JigGrind": 90.0
+    }
   }
 }
