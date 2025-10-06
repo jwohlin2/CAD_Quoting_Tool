@@ -62,6 +62,7 @@ class QuoteState:
     bounds: dict[str, Any] = field(default_factory=dict)
     material_source: str | None = None
     guard_context: dict[str, Any] = field(default_factory=dict)
+    process_plan: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise the entire state tree to plain Python structures."""
@@ -94,6 +95,7 @@ class QuoteState:
             "accept_llm",
             "bounds",
             "guard_context",
+            "process_plan",
         }
 
         kwargs: dict[str, Any] = {}
