@@ -114,6 +114,7 @@ from cad_quoter.pricing import (
     PricingEngine,
     create_default_registry,
     ensure_material_backup_csv,
+    get_mcmaster_unit_price as _get_mcmaster_unit_price,
     load_backup_prices_csv,
     price_value_to_per_gram as _price_value_to_per_gram,
     resolve_material_unit_price as _resolve_material_unit_price,
@@ -5381,6 +5382,18 @@ def compute_material_cost(
             usd_per_kg = vendor_quote.usd_per_kg
             source = vendor_quote.source
             basis_used = vendor_quote.basis
+
+    if usd_per_kg is None:
+        lookup_label = material_name or key or symbol
+        if lookup_label:
+            try:
+                mcm_price, mcm_source = _get_mcmaster_unit_price(lookup_label, unit="kg")
+            except Exception:
+                mcm_price, mcm_source = None, ""
+            if mcm_price and math.isfinite(float(mcm_price)):
+                usd_per_kg = float(mcm_price)
+                source = mcm_source or "mcmaster"
+                basis_used = "usd_per_kg"
 
     if usd_per_kg is None:
         wieland_key = meta.get("wieland_key")
