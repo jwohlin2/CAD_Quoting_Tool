@@ -5117,18 +5117,53 @@ except Exception as exc:
 
     SERVICE_CONTAINER = ServiceContainer(
         load_params=_empty_params,
-        load_rates=lambda: {},
+        load_rates=lambda: {"labor": {}, "machine": {}},
         pricing_engine_factory=lambda: PricingEngine(create_default_registry()),
     )
 
+def _coerce_two_bucket_rates(value: Any) -> dict[str, dict[str, float]]:
+    if isinstance(value, dict):
+        labor_raw = value.get("labor")
+        machine_raw = value.get("machine")
+        if isinstance(labor_raw, dict) and isinstance(machine_raw, dict):
+            labor: dict[str, float] = {}
+            for key, raw in labor_raw.items():
+                try:
+                    labor[str(key)] = float(raw)
+                except Exception:
+                    continue
+            machine: dict[str, float] = {}
+            for key, raw in machine_raw.items():
+                try:
+                    machine[str(key)] = float(raw)
+                except Exception:
+                    continue
+            return {"labor": labor, "machine": machine}
+
+        flat: dict[str, float] = {}
+        for key, raw in value.items():
+            try:
+                flat[str(key)] = float(raw)
+            except Exception:
+                continue
+        if flat:
+            return migrate_flat_to_two_bucket(flat)
+
+    return {"labor": {}, "machine": {}}
+
+
 try:
-    RATES_DEFAULT = SERVICE_CONTAINER.load_rates()
+    _rates_raw = SERVICE_CONTAINER.load_rates()
 except ConfigError as exc:
-    RATES_DEFAULT = {}
+    RATES_TWO_BUCKET_DEFAULT = {"labor": {}, "machine": {}}
     CONFIG_INIT_ERRORS.append(f"Rates configuration error: {exc}")
 except Exception as exc:
-    RATES_DEFAULT = {}
+    RATES_TWO_BUCKET_DEFAULT = {"labor": {}, "machine": {}}
     CONFIG_INIT_ERRORS.append(f"Unexpected rates configuration error: {exc}")
+else:
+    RATES_TWO_BUCKET_DEFAULT = _coerce_two_bucket_rates(_rates_raw)
+
+RATES_DEFAULT = two_bucket_to_flat(RATES_TWO_BUCKET_DEFAULT)
 
 LABOR_RATE_KEYS: set[str] = {
     "ProgrammingRate",
