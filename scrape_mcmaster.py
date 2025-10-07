@@ -6,6 +6,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass
+import os
 from math import gcd
 from typing import Dict, List, Optional, Tuple
 
@@ -608,6 +609,8 @@ def parse_arguments() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_arguments()
+    # Expose for helper functions that need CLI switches
+    globals()['CLI_ARGS'] = args
     thickness_in = frac_to_float(str(args.thickness))
 
     with sync_playwright() as playwright:
