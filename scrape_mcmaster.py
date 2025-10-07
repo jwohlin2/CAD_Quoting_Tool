@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from math import gcd
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import unquote, urlparse
 
 from playwright.sync_api import TimeoutError as PWTimeout
 from playwright.sync_api import sync_playwright
@@ -46,20 +47,30 @@ class SheetOption:
 
 
 def frac_to_float(txt: str) -> float:
-    """Parse fractional strings such as '1 1/2' or '3/8' into floats."""
+    """Parse strings like '1 1/2', '3/8', '0.5', '12"', '1 ft', etc. into inches."""
     txt = txt.replace('"', '').replace('in', '').strip()
+    # feet -> inches
     if 'ft' in txt:
-        match = re.findall(r'(\d+)\s*ft', txt)
-        return float(match[0]) * 12.0 if match else 0.0
+        m = re.findall(r'(\d+)\s*ft', txt)
+        return float(m[0]) * 12.0 if m else 0.0
 
-    match = NUM_RE.match(txt)
-    if not match:
-        return float(re.sub(r"[^\d.]+", "", txt)) if re.search(r"\d", txt) else 0.0
+    # 1) mixed number: 1 1/2
+    m = re.match(r'^\s*(\d+)\s+(\d+)\s*/\s*(\d+)\s*$', txt)
+    if m:
+        return float(m.group(1)) + float(m.group(2)) / float(m.group(3))
 
-    whole = float(match.group(1))
-    if match.group(2) and match.group(3):
-        whole += float(match.group(2)) / float(match.group(3))
-    return whole
+    # 2) pure fraction: 1/2
+    m = re.match(r'^\s*(\d+)\s*/\s*(\d+)\s*$', txt)
+    if m:
+        return float(m.group(1)) / float(m.group(2))
+
+    # 3) plain number: 0.5 or 12
+    m = re.match(r'^\s*(\d+(?:\.\d+)?)\s*$', txt)
+    if m:
+        return float(m.group(1))
+
+    # last resort
+    return float(re.sub(r"[^\d.]+", "", txt)) if re.search(r"\d", txt) else 0.0
 
 
 def to_frac_label(value: float) -> str:
@@ -106,10 +117,15 @@ def parse_bar_dimensions(text: str) -> Optional[Tuple[float, float, float]]:
 
 
 def price_to_float(text: str) -> Optional[float]:
-    match = re.search(r'\$\s*([0-9][0-9,]*(?:\.\d{2})?)', text)
-    if not match:
-        return None
-    return float(match.group(1).replace(',', ''))
+    # Prefer a $-prefixed amount
+    m = re.search(r'\$\s*([0-9][0-9,]*(?:\.\d{2})?)', text)
+    if not m:
+        # Fallback to a bare number that looks like a price (last amount in the cell)
+        m = re.findall(r'([0-9][0-9,]*(?:\.\d{2})?)', text)
+        if not m:
+            return None
+        return float(m[-1].replace(',', ''))
+    return float(m.group(1).replace(',', ''))
 
 
 def closest_bigger(target_w: float, target_l: float, candidates: List[SheetOption]) -> Optional[SheetOption]:
@@ -388,12 +404,20 @@ def parse_current_sheet_page(page, thickness_in: float, w_in: float, l_in: float
 
 
 def parse_file_tool_jig(page, html_path: str, thickness_in: float, w_in: float, l_in: float) -> Dict:
-    # Accept either a Windows path or a file:// URI
-    if isinstance(html_path, str) and html_path.lower().startswith(('file://', 'http://', 'https://')):
-        uri = html_path
+    # Accept Windows path or file:// URI; read file and set page content directly (fast, offline)
+    if isinstance(html_path, str) and html_path.lower().startswith('file://'):
+        p = Path(unquote(urlparse(html_path).path))
     else:
-        uri = Path(html_path).absolute().as_uri()
-    page.goto(uri, wait_until='domcontentloaded')
+        p = Path(html_path)
+    html = p.read_text(encoding='utf-8', errors='ignore')
+
+    # Abort any accidental resource requests (defense in depth)
+    try:
+        page.route("**/*", lambda route: route.abort())
+    except Exception:
+        pass
+
+    page.set_content(html, wait_until="domcontentloaded")  # no navigation, no external loads
     return parse_current_sheet_page(page, thickness_in, w_in, l_in)
 
 
