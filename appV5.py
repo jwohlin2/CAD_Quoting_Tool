@@ -114,6 +114,7 @@ from cad_quoter.pricing import (
     PricingEngine,
     create_default_registry,
     ensure_material_backup_csv,
+    get_mcmaster_unit_price as _get_mcmaster_unit_price,
     load_backup_prices_csv,
     price_value_to_per_gram as _price_value_to_per_gram,
     resolve_material_unit_price as _resolve_material_unit_price,
@@ -142,9 +143,33 @@ from cad_quoter.llm import (
 )
 
 try:
-    from process_planner import plan_job as _process_plan_job
+    from process_planner import (
+        PLANNERS as _PROCESS_PLANNERS,
+        choose_skims as _planner_choose_skims,
+        choose_wire_size as _planner_choose_wire_size,
+        needs_wedm_for_windows as _planner_needs_wedm_for_windows,
+        plan_job as _process_plan_job,
+    )
 except Exception:  # pragma: no cover - planner is optional at runtime
     _process_plan_job = None
+    _PROCESS_PLANNERS = {}
+    _planner_choose_wire_size = None
+    _planner_choose_skims = None
+    _planner_needs_wedm_for_windows = None
+else:  # pragma: no cover - defensive guard for unexpected exports
+    if not isinstance(_PROCESS_PLANNERS, dict):
+        _PROCESS_PLANNERS = {}
+
+
+_PROCESS_PLANNER_HELPERS: dict[str, Callable[..., Any]] = {}
+if "_planner_choose_wire_size" in globals() and callable(_planner_choose_wire_size):
+    _PROCESS_PLANNER_HELPERS["choose_wire_size"] = _planner_choose_wire_size  # type: ignore[index]
+if "_planner_choose_skims" in globals() and callable(_planner_choose_skims):
+    _PROCESS_PLANNER_HELPERS["choose_skims"] = _planner_choose_skims  # type: ignore[index]
+if "_planner_needs_wedm_for_windows" in globals() and callable(
+    _planner_needs_wedm_for_windows
+):
+    _PROCESS_PLANNER_HELPERS["needs_wedm_for_windows"] = _planner_needs_wedm_for_windows  # type: ignore[index]
 
 
 # Mapping of process keys to editor labels for propagating derived hours from
@@ -4737,10 +4762,16 @@ def render_quote(
     pass_through = breakdown.get("pass_through", {}) or {}
     applied_pcts = breakdown.get("applied_pcts", {}) or {}
     process_meta = {str(k).lower(): (v or {}) for k, v in (breakdown.get("process_meta", {}) or {}).items()}
+    applied_process_raw = breakdown.get("applied_process", {}) or {}
+    applied_process = {str(k).lower(): (v or {}) for k, v in applied_process_raw.items()}
     rates        = breakdown.get("rates", {}) or {}
     params       = breakdown.get("params", {}) or {}
     nre_cost_details = breakdown.get("nre_cost_details", {}) or {}
-    labor_cost_details = breakdown.get("labor_cost_details", {}) or {}
+    labor_cost_details_input_raw = breakdown.get("labor_cost_details", {}) or {}
+    labor_cost_details_input = {
+        str(label): str(detail) for label, detail in labor_cost_details_input_raw.items()
+    }
+    labor_cost_details: dict[str, str] = dict(labor_cost_details_input)
     direct_cost_details = breakdown.get("direct_cost_details", {}) or {}
     qty          = int(breakdown.get("qty", 1) or 1)
     price        = float(result.get("price", totals.get("price", 0.0)))
@@ -4840,6 +4871,24 @@ def render_quote(
     def _process_label(key: str | None) -> str:
         text = str(key or "").replace("_", " ").strip()
         return text.title() if text else ""
+
+    def _merge_detail(existing: str | None, new_bits: list[str]) -> str | None:
+        segments: list[str] = []
+        seen: set[str] = set()
+        for bit in new_bits:
+            seg = str(bit).strip()
+            if seg and seg not in seen:
+                segments.append(seg)
+                seen.add(seg)
+        if existing:
+            for segment in re.split(r";\s*", str(existing)):
+                seg = segment.strip()
+                if seg and seg not in seen:
+                    segments.append(seg)
+                    seen.add(seg)
+        if segments:
+            return "; ".join(segments)
+        return str(existing).strip() if existing else None
 
     def add_process_notes(key: str, indent: str = "    "):
         k = str(key).lower()
@@ -5000,15 +5049,12 @@ def render_quote(
     fix  = nre_detail.get("fixture") or {}
 
     # Programming & Eng (auto-hide if zero unless show_zeros)
-    if (prog.get("per_lot", 0.0) > 0) or show_zeros or any(prog.get(k) for k in ("prog_hr", "cam_hr", "eng_hr")):
+    if (prog.get("per_lot", 0.0) > 0) or show_zeros or any(prog.get(k) for k in ("prog_hr", "eng_hr")):
         row("Programming & Eng:", float(prog.get("per_lot", 0.0)))
         has_detail = False
         if prog.get("prog_hr"):
             has_detail = True
             write_line(f"- Programmer: {_h(prog['prog_hr'])} @ {_m(prog.get('prog_rate', 0))}/hr", "    ")
-        if prog.get("cam_hr"):
-            has_detail = True
-            write_line(f"- CAM: {_h(prog['cam_hr'])} @ {_m(prog.get('cam_rate', 0))}/hr", "    ")
         if prog.get("eng_hr"):
             has_detail = True
             write_line(f"- Engineering: {_h(prog['eng_hr'])} @ {_m(prog.get('eng_rate', 0))}/hr", "    ")
@@ -5047,9 +5093,37 @@ def render_quote(
         if (value > 0) or show_zeros:
             label = _process_label(key)
             row(label, float(value), indent="  ")
-            detail_text = labor_cost_details.get(label)
-            if detail_text:
-                write_detail(detail_text, indent="    ")
+            meta = process_meta.get(str(key).lower(), {})
+            detail_bits: list[str] = []
+            try:
+                hr_val = float(meta.get("hr", 0.0) or 0.0)
+            except Exception:
+                hr_val = 0.0
+            try:
+                rate_val = float(meta.get("rate", 0.0) or 0.0)
+            except Exception:
+                rate_val = 0.0
+            try:
+                extra_val = float(meta.get("base_extra", 0.0) or 0.0)
+            except Exception:
+                extra_val = 0.0
+            if hr_val > 0:
+                detail_bits.append(f"{hr_val:.2f} hr @ ${rate_val:,.2f}/hr")
+            if abs(extra_val) > 1e-6:
+                if rate_val > 0:
+                    extra_hr = extra_val / rate_val
+                    detail_bits.append(f"includes {extra_hr:.2f} hr extras")
+                else:
+                    detail_bits.append(f"includes ${extra_val:,.2f} extras")
+            proc_notes = applied_process.get(str(key).lower(), {}).get("notes")
+            if proc_notes:
+                detail_bits.append("LLM: " + ", ".join(proc_notes))
+
+            existing_detail = labor_cost_details.get(label)
+            merged_detail = _merge_detail(existing_detail, detail_bits)
+            if merged_detail:
+                labor_cost_details[label] = merged_detail
+                write_detail(merged_detail, indent="    ")
             else:
                 add_process_notes(key, indent="    ")
             proc_total += float(value or 0.0)
@@ -5194,7 +5268,6 @@ RATES_DEFAULT = two_bucket_to_flat(RATES_TWO_BUCKET_DEFAULT)
 
 LABOR_RATE_KEYS: set[str] = {
     "ProgrammingRate",
-    "CAMRate",
     "EngineerRate",
     "InspectionRate",
     "FinishingRate",
@@ -5267,6 +5340,58 @@ class GeometryLoader:
 
 # Common regex pieces (kept non-capturing to avoid pandas warnings)
 TIME_RE = r"\b(?:hours?|hrs?|hr|time|min(?:ute)?s?)\b"
+
+
+def _sum_time_from_series(
+    items: pd.Series,
+    values: pd.Series,
+    data_types: pd.Series,
+    mask: pd.Series,
+    *,
+    default: float = 0.0,
+    exclude_mask: pd.Series | None = None,
+) -> float:
+    """Shared implementation for extracting hour totals from sheet rows."""
+
+    try:
+        if not mask.any():
+            return float(default)
+    except Exception:
+        return float(default)
+
+    looks_time = items.str.contains(TIME_RE, case=False, regex=True, na=False)
+    looks_money = items.str.contains(MONEY_RE, case=False, regex=True, na=False)
+    typed_money = data_types.str.contains(r"(?:rate|currency|price|cost)", case=False, na=False)
+
+    excl = looks_money | typed_money
+    if exclude_mask is not None:
+        try:
+            excl = excl | exclude_mask
+        except Exception:
+            pass
+
+    matched = mask & ~excl & looks_time
+    try:
+        if not matched.any():
+            return float(default)
+    except Exception:
+        return float(default)
+
+    numeric_candidates = pd.to_numeric(values[matched], errors="coerce")
+    mask_numeric = pd.notna(numeric_candidates)
+    try:
+        has_numeric = mask_numeric.any()
+    except Exception:
+        has_numeric = any(bool(flag) for flag in mask_numeric)
+    if not has_numeric:
+        return float(default)
+
+    mins_mask = items.str.contains(r"\bmin(?:ute)?s?\b", case=False, regex=True, na=False) & matched
+    hrs_mask = matched & ~mins_mask
+
+    hrs_sum = pd.to_numeric(values[hrs_mask], errors="coerce").fillna(0.0).sum()
+    mins_sum = pd.to_numeric(values[mins_mask], errors="coerce").fillna(0.0).sum()
+    return float(hrs_sum) + float(mins_sum) / 60.0
 MONEY_RE = r"(?:rate|/hr|per\s*hour|per\s*hr|price|cost|\$)"
 
 # ===== QUOTE HELPERS ========================================================
@@ -5285,6 +5410,48 @@ def pct(value: Any, default: float = 0.0) -> float:
 
 
 _DEFAULT_PRICING_ENGINE = SERVICE_CONTAINER.get_pricing_engine()
+
+
+def compute_mass_and_scrap_after_removal(
+    net_mass_g: float | None,
+    scrap_frac: float | None,
+    removal_mass_g: float | None,
+    *,
+    scrap_min: float = 0.0,
+    scrap_max: float = 0.25,
+) -> tuple[float, float, float]:
+    """Return updated net mass, scrap fraction and effective mass after removal.
+
+    ``net_mass_g`` and ``scrap_frac`` represent the current part state while
+    ``removal_mass_g`` is the expected mass machined away from the finished
+    part.  The removal is treated as additional scrap, so the effective mass
+    that must be purchased increases accordingly even though the finished
+    part becomes lighter.
+
+    Scrap bounds mirror the UI constraints, clamping the resulting fraction
+    into ``[scrap_min, scrap_max]``.
+    """
+
+    base_net = max(0.0, float(net_mass_g or 0.0))
+    base_scrap = _ensure_scrap_pct(scrap_frac)
+    removal = max(0.0, float(removal_mass_g or 0.0))
+
+    if base_net <= 0 or removal <= 0:
+        effective_mass = base_net * (1.0 + base_scrap)
+        return base_net, base_scrap, effective_mass
+
+    removal = min(removal, base_net)
+    net_after = max(1e-6, base_net - removal)
+
+    scrap_min = max(0.0, float(scrap_min))
+    scrap_max = max(scrap_min, float(scrap_max))
+
+    scrap_mass = base_net * base_scrap + removal
+    scrap_after = scrap_mass / net_after if net_after > 0 else scrap_max
+    scrap_after = max(scrap_min, min(scrap_max, scrap_after))
+
+    effective_mass = net_after * (1.0 + scrap_after)
+    return net_after, scrap_after, effective_mass
 
 
 def _material_price_from_choice(choice: str, material_lookup: dict[str, float]) -> float | None:
@@ -5381,6 +5548,18 @@ def compute_material_cost(
             usd_per_kg = vendor_quote.usd_per_kg
             source = vendor_quote.source
             basis_used = vendor_quote.basis
+
+    if usd_per_kg is None:
+        lookup_label = material_name or key or symbol
+        if lookup_label:
+            try:
+                mcm_price, mcm_source = _get_mcmaster_unit_price(lookup_label, unit="kg")
+            except Exception:
+                mcm_price, mcm_source = None, ""
+            if mcm_price and math.isfinite(float(mcm_price)):
+                usd_per_kg = float(mcm_price)
+                source = mcm_source or "mcmaster"
+                basis_used = "usd_per_kg"
 
     if usd_per_kg is None:
         wieland_key = meta.get("wieland_key")
@@ -6280,26 +6459,17 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     def sum_time(pattern: str, default: float = 0.0, exclude_pattern: str | None = None) -> float:
         """Sum only time-like rows; minutes are converted to hours."""
-        m  = contains(pattern)
-        if not m.any():
-            return float(default)
 
-        looks_time   = items.str.contains(TIME_RE,   case=False, regex=True, na=False)
-        looks_money  = items.str.contains(MONEY_RE,  case=False, regex=True, na=False)
-        typed_money  = dtt.str.contains(r"(?:rate|currency|price|cost)", case=False, na=False)
-        excl = looks_money | typed_money
-        if exclude_pattern:
-            excl = excl | contains(exclude_pattern)
-
-        mm = m & ~excl & looks_time
-        if not mm.any():
-            return float(default)
-
-        mins_mask = items.str.contains(r"\bmin(?:ute)?s?\b", case=False, regex=True, na=False) & mm
-        hrs_mask  = mm & ~mins_mask
-        hrs_sum  = pd.to_numeric(vals[hrs_mask],  errors="coerce").fillna(0.0).sum()
-        mins_sum = pd.to_numeric(vals[mins_mask], errors="coerce").fillna(0.0).sum()
-        return float(hrs_sum) + float(mins_sum) / 60.0
+        mask = contains(pattern)
+        exclude_mask = contains(exclude_pattern) if exclude_pattern else None
+        return _sum_time_from_series(
+            items,
+            vals,
+            dtt,
+            mask,
+            default=float(default),
+            exclude_mask=exclude_mask,
+        )
 
     # --- OPTIONAL: let sheet override params/rates if those rows exist ---
     def sheet_num(pat, default=None):
@@ -6339,7 +6509,6 @@ def compute_quote_from_df(df: pd.DataFrame,
             rates[key] = v
 
     rate_from_sheet(r"Rate\s*-\s*Programming",   "ProgrammingRate")
-    rate_from_sheet(r"Rate\s*-\s*CAM",           "CAMRate")
     rate_from_sheet(r"Rate\s*-\s*Engineer",      "EngineerRate")
     rate_from_sheet(r"Rate\s*-\s*Milling",       "MillingRate")
     rate_from_sheet(r"Rate\s*-\s*Turning",       "TurningRate")
@@ -6738,7 +6907,8 @@ def compute_quote_from_df(df: pd.DataFrame,
     if milling_hr > 0:
         prog_hr = min(prog_hr, params["ProgMaxToMillingRatio"] * milling_hr)
 
-    programming_cost   = prog_hr * rates["ProgrammingRate"] + cam_hr * rates["CAMRate"] + eng_hr * rates["EngineerRate"]
+    total_prog_hr = prog_hr + cam_hr
+    programming_cost   = total_prog_hr * rates["ProgrammingRate"] + eng_hr * rates["EngineerRate"]
     prog_per_lot       = programming_cost
     programming_per_part = (prog_per_lot / Qty) if (amortize_programming and Qty > 1) else prog_per_lot
 
@@ -6754,9 +6924,8 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     nre_detail = {
         "programming": {
-            "prog_hr": float(prog_hr), "prog_rate": rates["ProgrammingRate"],
-            "cam_hr": float(cam_hr),   "cam_rate": rates["CAMRate"],
-            "eng_hr": float(eng_hr),   "eng_rate": rates["EngineerRate"],
+            "prog_hr": float(total_prog_hr), "prog_rate": rates["ProgrammingRate"],
+            "eng_hr": float(eng_hr),         "eng_rate": rates["EngineerRate"],
             "per_lot": prog_per_lot, "per_part": programming_per_part,
             "amortized": bool(amortize_programming and Qty > 1)
         },
@@ -7185,32 +7354,6 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     process_plan_summary: dict[str, Any] = {}
 
-    baseline_data = {
-        "process_hours": process_hours_baseline,
-        "pass_through": pass_through_baseline,
-        "scrap_pct": scrap_pct_baseline,
-        "setups": int(setups),
-        "contingency_pct": ContingencyPct,
-        "fixture_build_hr": fixture_build_hr_base,
-        "fixture_material_cost": float(fixture_material_cost),
-        "soft_jaw_hr": 0.0,
-        "soft_jaw_material_cost": 0.0,
-        "handling_adder_hr": 0.0,
-        "cmm_minutes": cmm_minutes_base,
-        "in_process_inspection_hr": inproc_hr_base,
-        "fai_required": fai_flag_base,
-        "fai_prep_hr": 0.0,
-        "packaging_hours": packaging_hr_base,
-        "packaging_flat_cost": packaging_flat_base,
-        "shipping_hint": "",
-    }
-    if fixture_plan_desc:
-        baseline_data["fixture"] = fixture_plan_desc
-    if process_plan_summary:
-        baseline_data["process_plan"] = copy.deepcopy(process_plan_summary)
-    quote_state.baseline = baseline_data
-    quote_state.process_plan = copy.deepcopy(process_plan_summary)
-
     def _clean_stock_entry(entry: dict[str, Any]) -> dict[str, Any]:
         cleaned: dict[str, Any] = {}
         for k, v in entry.items():
@@ -7364,6 +7507,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         if setup_hint:
             features["fixture_plan"] = setup_hint
 
+
     if _process_plan_job is not None:
         def _compact_dict(data: dict[str, Any]) -> dict[str, Any]:
             cleaned: dict[str, Any] = {}
@@ -7411,11 +7555,94 @@ def compute_quote_from_df(df: pd.DataFrame,
                 return 0
             return qty if qty > 0 else 0
 
-        planner_family: str | None = None
-        planner_inputs: dict[str, Any] | None = None
+        def _mm_to_in(val: float | None) -> float | None:
+            if val is None:
+                return None
+            try:
+                return float(val) / 25.4
+            except Exception:
+                return None
 
-        if is_plate_2d:
-            planner_family = "die_plate"
+        _known_planner_families = set(_PROCESS_PLANNERS.keys() if _PROCESS_PLANNERS else [])
+        if not _known_planner_families:
+            _known_planner_families = {
+                "die_plate",
+                "punch",
+                "pilot_punch",
+                "bushing_id_critical",
+                "cam_or_hemmer",
+                "flat_die_chaser",
+                "pm_compaction_die",
+                "shear_blade",
+                "extrude_hone",
+            }
+
+        def _normalize_family(value: Any) -> str | None:
+            if value is None:
+                return None
+            text = str(value).strip().lower()
+            if not text:
+                return None
+            text = re.sub(r"[^a-z0-9]+", "_", text)
+            synonyms = {
+                "dieplates": "die_plate",
+                "die_plate_plate": "die_plate",
+                "plate": "die_plate",
+                "punches": "punch",
+                "pilot": "pilot_punch",
+                "pilot_punches": "pilot_punch",
+                "bushing": "bushing_id_critical",
+                "ring_gauge": "bushing_id_critical",
+                "ring_gauges": "bushing_id_critical",
+                "cam": "cam_or_hemmer",
+                "hemmer": "cam_or_hemmer",
+                "hemming": "cam_or_hemmer",
+                "flat_die_chasers": "flat_die_chaser",
+                "pm_die": "pm_compaction_die",
+                "pm_compaction": "pm_compaction_die",
+                "shear": "shear_blade",
+                "shear_blades": "shear_blade",
+                "extrudehone": "extrude_hone",
+                "extrude_hone_process": "extrude_hone",
+            }
+            text = synonyms.get(text, text)
+            if text not in _known_planner_families and text.endswith("s"):
+                singular = text[:-1]
+                if singular in _known_planner_families:
+                    text = singular
+            return text if text in _known_planner_families else None
+
+        def _collect_text_hints() -> list[str]:
+            hints: list[str] = []
+
+            def _push(val: Any) -> None:
+                if val is None:
+                    return
+                if isinstance(val, str):
+                    stripped = val.strip()
+                    if stripped:
+                        hints.append(stripped)
+                elif isinstance(val, Mapping):
+                    for sub_val in val.values():
+                        _push(sub_val)
+                elif isinstance(val, (list, tuple, set)):
+                    for sub_val in val:
+                        _push(sub_val)
+
+            _push(geo_context.get("part_name"))
+            _push(geo_context.get("title"))
+            _push(geo_context.get("description"))
+            _push(geo_context.get("notes"))
+            _push(geo_context.get("chart_lines"))
+            _push(geo_context.get("process_notes"))
+            _push(geo_context.get("process_family"))
+            if isinstance(ui_vars, Mapping):
+                for label, value in ui_vars.items():
+                    _push(label)
+                    _push(value)
+            return hints
+
+        def _build_die_plate_inputs() -> dict[str, Any]:
             inputs: dict[str, Any] = {
                 "material": material_name or default_material_display,
                 "qty": int(Qty),
@@ -7441,18 +7668,34 @@ def compute_quote_from_df(df: pd.DataFrame,
             if corner_radius is not None:
                 inputs["window_corner_radius_req"] = float(corner_radius)
 
-            windows_need_sharp = bool(GEO_wedm_len_mm and GEO_wedm_len_mm > 0)
+            hole_qty = max(
+                _coerce_float_or_none(geo_context.get("hole_count")) or 0.0,
+                _coerce_float_or_none(geo_context.get("hole_count_geo")) or 0.0,
+                float(hole_count_for_tripwire or 0),
+            )
+            if hole_qty > 0:
+                inputs["hole_count"] = int(round(hole_qty))
+
+            windows_need_sharp = bool(geo_context.get("windows_need_sharp"))
+            if not windows_need_sharp and GEO_wedm_len_mm:
+                try:
+                    windows_need_sharp = float(GEO_wedm_len_mm) > 0
+                except Exception:
+                    windows_need_sharp = bool(windows_need_sharp)
             if not windows_need_sharp:
-                sharp_hint = _first_text((r"sharp", r"wedm"), ui_vars)
-                if sharp_hint:
-                    lowered = sharp_hint.lower()
+                window_text = _first_text((r"sharp", r"wedm"), tolerance_inputs, ui_vars)
+                if window_text:
+                    lowered = window_text.lower()
                     if "sharp" in lowered or "wedm" in lowered:
                         windows_need_sharp = True
             inputs["windows_need_sharp"] = bool(windows_need_sharp)
 
             incoming_cut = str(geo_context.get("incoming_cut") or "").strip().lower()
             if not incoming_cut:
-                incoming_text = _first_text((r"(incoming|blank).*(saw|water|flame|plasma|laser)", r"(saw|waterjet|flame|plasma|laser)"), ui_vars)
+                incoming_text = _first_text(
+                    (r"(incoming|blank).*(saw|water|flame|plasma|laser)", r"(saw|waterjet|flame|plasma|laser)"),
+                    ui_vars,
+                )
                 if incoming_text:
                     lowered = incoming_text.lower()
                     if "water" in lowered:
@@ -7498,7 +7741,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                 mark_hours = _coerce_float_or_none(ui_vars.get("Laser Marking / Engraving Time"))
                 if mark_hours and mark_hours > 0:
                     marking_value = "laser"
-            if marking_value is None:
+            if marking_value is None and isinstance(ui_vars, Mapping):
                 for label, value in ui_vars.items():
                     if re.search(r"(laser\s*mark|engrave)", str(label), re.IGNORECASE):
                         if _coerce_checkbox_state(value, False):
@@ -7537,27 +7780,259 @@ def compute_quote_from_df(df: pd.DataFrame,
             if hole_sets:
                 inputs["hole_sets"] = hole_sets
 
-            planner_inputs = _compact_dict(inputs)
+            return _compact_dict(inputs)
 
-        if planner_family and planner_inputs:
+        def _bbox_inches() -> tuple[float | None, float | None, float | None]:
+            length = _mm_to_in(_coerce_float_or_none(geo_context.get("plate_length_mm")) or bbox_info.get("max_dim_mm"))
+            width = _mm_to_in(_coerce_float_or_none(geo_context.get("plate_width_mm")) or bbox_info.get("min_dim_mm"))
+            thickness = _mm_to_in(_coerce_float_or_none(geo_context.get("thickness_mm")) or bbox_info.get("min_dim_mm"))
+            return length, width, thickness
+
+        def _build_punch_inputs() -> dict[str, Any]:
+            length_in, width_in, thickness_in = _bbox_inches()
+            feature_candidates = [val for val in (width_in, thickness_in) if val and val > 0]
+            min_feature = min(feature_candidates) if feature_candidates else None
+            inputs: dict[str, Any] = {
+                "material": material_name or default_material_display,
+                "overall_length": length_in,
+                "min_feature_width": min_feature,
+                "min_inside_radius": _mm_to_in(_coerce_float_or_none(geo_context.get("min_inside_radius_mm"))),
+                "profile_tol": _first_numeric((r"profile",), tolerance_inputs, ui_vars),
+            }
+
+            blind_relief_flag = bool(geo_context.get("blind_relief"))
+            if not blind_relief_flag:
+                blind_text = _first_text((r"blind\s*relief", r"blind\s*pocket"), ui_vars)
+                if blind_text:
+                    blind_relief_flag = True
+            inputs["blind_relief"] = blind_relief_flag
+
+            edge_text = _first_text((r"edge\s*(condition|prep)",), ui_vars)
+            if edge_text:
+                inputs["edge_condition"] = edge_text
+
+            coating_text = _first_text((r"coat(ing)?",), ui_vars)
+            if coating_text:
+                inputs["coating"] = coating_text
+
+            runout_val = _first_numeric((r"runout", r"tir"), tolerance_inputs, ui_vars)
+            if runout_val is None:
+                runout_val = _coerce_float_or_none(geo_context.get("runout_to_shank"))
+            inputs["runout_to_shank"] = runout_val
+
+            bearing_width = _first_numeric((r"bearing\s*(land|width)",), ui_vars)
+            bearing_ra = _first_numeric((r"bearing.*ra", r"surface\s*finish"), tolerance_inputs, ui_vars)
+            if bearing_width or bearing_ra:
+                inputs["bearing_land_spec"] = _compact_dict({"width": bearing_width, "Ra": bearing_ra})
+
+            return _compact_dict(inputs)
+
+        def _build_bushing_inputs() -> dict[str, Any]:
+            inputs: dict[str, Any] = {
+                "material": material_name or default_material_display,
+                "tight_od": not _coerce_checkbox_state(ui_vars.get("OD Not Critical"), False)
+                if isinstance(ui_vars, Mapping)
+                else True,
+                "target_id_Ra": _first_numeric((r"ID\s*Ra", r"ID\s*finish"), tolerance_inputs, ui_vars),
+            }
+            wire_text = _first_text((r"wire", r"wedm"), ui_vars)
+            if wire_text:
+                lowered = wire_text.lower()
+                inputs["create_id_by_wire_first"] = "wire" in lowered or "wedm" in lowered
+            return _compact_dict(inputs)
+
+        def _build_cam_inputs() -> dict[str, Any]:
+            inputs: dict[str, Any] = {
+                "material": material_name or default_material_display,
+                "profile_tol": _first_numeric((r"profile",), tolerance_inputs, ui_vars),
+            }
+            if geo_context.get("windows_need_sharp"):
+                inputs["windows_need_sharp"] = True
+            else:
+                sharp_text = _first_text((r"sharp", r"wedm"), tolerance_inputs, ui_vars)
+                if sharp_text and any(word in sharp_text.lower() for word in ("sharp", "wedm")):
+                    inputs["windows_need_sharp"] = True
+            return _compact_dict(inputs)
+
+        def _build_extrude_hone_inputs() -> dict[str, Any]:
+            return _compact_dict(
+                {
+                    "target_Ra": _first_numeric((r"target\s*ra", r"surface\s*finish"), tolerance_inputs, ui_vars)
+                    or _coerce_float_or_none(geo_context.get("target_Ra")),
+                }
+            )
+
+        def _derive_planner_hints(
+            family: str | None, inputs: Mapping[str, Any] | None
+        ) -> dict[str, Any]:
+            if not family or not inputs or not _PROCESS_PLANNER_HELPERS:
+                return {}
+
+            choose_wire = _PROCESS_PLANNER_HELPERS.get("choose_wire_size")
+            choose_skims = _PROCESS_PLANNER_HELPERS.get("choose_skims")
+            needs_wedm = _PROCESS_PLANNER_HELPERS.get("needs_wedm_for_windows")
+
+            def _float(value: Any) -> float | None:
+                try:
+                    if value is None:
+                        return None
+                    return float(value)
+                except (TypeError, ValueError):
+                    return None
+
+            hints: dict[str, Any] = {}
+
+            if family == "die_plate":
+                windows_need_sharp = bool(inputs.get("windows_need_sharp"))
+                corner_r = _float(inputs.get("window_corner_radius_req"))
+                profile_tol = _float(inputs.get("profile_tol"))
+                wedm_needed: bool | None = None
+                if needs_wedm:
+                    wedm_needed = bool(needs_wedm(windows_need_sharp, corner_r, profile_tol))
+                    hints["windows_wedm_recommended"] = wedm_needed
+                if choose_wire and (wedm_needed or wedm_needed is None):
+                    hints["recommended_wire_in"] = float(choose_wire(corner_r, None))
+                if choose_skims and profile_tol is not None:
+                    skims = int(choose_skims(profile_tol))
+                    hints["recommended_wire_passes"] = f"R+{skims}S"
+                    hints["recommended_wire_skims"] = skims
+
+            if family in {"punch", "pilot_punch"}:
+                min_feature = _float(inputs.get("min_feature_width"))
+                min_inside = _float(inputs.get("min_inside_radius"))
+                profile_tol = _float(inputs.get("profile_tol"))
+                if choose_wire:
+                    hints["recommended_wire_in"] = float(choose_wire(min_inside, min_feature))
+                if choose_skims and profile_tol is not None:
+                    skims = int(choose_skims(profile_tol))
+                    hints["recommended_wire_passes"] = f"R+{skims}S"
+                    hints["recommended_wire_skims"] = skims
+
+            if family == "cam_or_hemmer":
+                profile_tol = _float(inputs.get("profile_tol"))
+                windows_need_sharp = bool(inputs.get("windows_need_sharp"))
+                wedm_needed: bool | None = None
+                if needs_wedm:
+                    wedm_needed = bool(needs_wedm(windows_need_sharp, None, profile_tol))
+                    hints["wedm_preferred"] = wedm_needed
+                if choose_wire and (wedm_needed or wedm_needed is None):
+                    hints["recommended_wire_in"] = float(choose_wire(None, None))
+                if choose_skims and profile_tol is not None:
+                    skims = int(choose_skims(profile_tol))
+                    hints["recommended_wire_passes"] = f"R+{skims}S"
+                    hints["recommended_wire_skims"] = skims
+
+            return _compact_dict(hints)
+
+        planner_family: str | None = None
+        planner_inputs: dict[str, Any] | None = None
+
+        explicit_family_sources = [
+            geo_context.get("process_planner_family"),
+            geo_context.get("planner_family"),
+            geo_context.get("process_family"),
+        ]
+        if isinstance(ui_vars, Mapping):
+            for label, value in ui_vars.items():
+                normalized_label = str(label).strip().lower()
+                if any(token in normalized_label for token in ("planner family", "process family")):
+                    explicit_family_sources.append(value)
+        for candidate in explicit_family_sources:
+            planner_family = _normalize_family(candidate)
+            if planner_family:
+                break
+
+        if planner_family == "die_plate" or (planner_family is None and is_plate_2d):
+            planner_family = "die_plate"
+            planner_inputs = _build_die_plate_inputs()
+
+        if planner_family is None:
+            text_hints = "\n".join(_collect_text_hints()).lower()
+            keyword_map = [
+                ("pilot_punch", ("pilot punch", "piloted punch")),
+                ("punch", ("punch", "insert", "pierce insert", "form insert")),
+                ("bushing_id_critical", ("bushing", "ring gauge", "guide bushing")),
+                ("cam_or_hemmer", ("cam", "hemmer", "hemming")),
+                ("flat_die_chaser", ("die chaser", "chaser")),
+                ("pm_compaction_die", ("pm compaction", "compaction die")),
+                ("shear_blade", ("shear blade", "shear knife", "shear die")),
+                ("extrude_hone", ("extrude hone", "abrasive flow")),
+            ]
+            for family_key, keywords in keyword_map:
+                if any(keyword in text_hints for keyword in keywords):
+                    planner_family = family_key if family_key in _known_planner_families else None
+                    if planner_family:
+                        break
+
+        if planner_family == "punch":
+            planner_inputs = _build_punch_inputs()
+        elif planner_family == "pilot_punch":
+            planner_inputs = _build_punch_inputs()
+            if planner_inputs is None:
+                planner_inputs = {}
+            planner_inputs = _compact_dict({**planner_inputs, "runout_to_shank": planner_inputs.get("runout_to_shank", 0.0003)})
+        elif planner_family == "bushing_id_critical":
+            planner_inputs = _build_bushing_inputs()
+        elif planner_family == "cam_or_hemmer":
+            planner_inputs = _build_cam_inputs()
+        elif planner_family == "flat_die_chaser":
+            planner_inputs = {}
+        elif planner_family == "pm_compaction_die":
+            planner_inputs = {}
+        elif planner_family == "shear_blade":
+            planner_inputs = {"material": material_name or default_material_display}
+        elif planner_family == "extrude_hone":
+            planner_inputs = _build_extrude_hone_inputs()
+
+        planner_hints: dict[str, Any] = {}
+        if planner_family and planner_inputs is None:
+            planner_inputs = {}
+
+        if planner_family and planner_inputs is not None:
+            planner_hints = _derive_planner_hints(planner_family, planner_inputs)
+            process_plan_summary = {
+                "family": planner_family,
+                "inputs": planner_inputs,
+            }
+            if planner_hints:
+                process_plan_summary["derived"] = planner_hints
+
             try:
                 planner_result = _process_plan_job(planner_family, planner_inputs)
             except Exception as planner_err:  # pragma: no cover - defensive logging
                 logger.debug("Process planner failed for %s: %s", planner_family, planner_err)
-                process_plan_summary = {
-                    "family": planner_family,
-                    "inputs": planner_inputs,
-                    "error": str(planner_err),
-                }
+                process_plan_summary["error"] = str(planner_err)
             else:
-                process_plan_summary = {
-                    "family": planner_family,
-                    "inputs": planner_inputs,
-                    "plan": planner_result,
-                }
+                process_plan_summary["plan"] = planner_result
 
     if process_plan_summary:
         features["process_plan"] = copy.deepcopy(process_plan_summary)
+
+    baseline_data = {
+        "process_hours": process_hours_baseline,
+        "pass_through": pass_through_baseline,
+        "scrap_pct": scrap_pct_baseline,
+        "setups": int(setups),
+        "contingency_pct": ContingencyPct,
+        "fixture_build_hr": fixture_build_hr_base,
+        "fixture_material_cost": float(fixture_material_cost),
+        "soft_jaw_hr": 0.0,
+        "soft_jaw_material_cost": 0.0,
+        "handling_adder_hr": 0.0,
+        "cmm_minutes": cmm_minutes_base,
+        "in_process_inspection_hr": inproc_hr_base,
+        "fai_required": fai_flag_base,
+        "fai_prep_hr": 0.0,
+        "packaging_hours": packaging_hr_base,
+        "packaging_flat_cost": packaging_flat_base,
+        "shipping_hint": "",
+    }
+    if fixture_plan_desc:
+        baseline_data["fixture"] = fixture_plan_desc
+    if process_plan_summary:
+        baseline_data["process_plan"] = copy.deepcopy(process_plan_summary)
+    quote_state.baseline = baseline_data
+    quote_state.process_plan = copy.deepcopy(process_plan_summary)
 
     base_costs = {
         "process_costs": process_costs_baseline,
@@ -8352,26 +8827,132 @@ def compute_quote_from_df(df: pd.DataFrame,
     fixture_material_cost_base = fixture_material_cost
 
     old_scrap = _ensure_scrap_pct(features.get("scrap_pct", scrap_pct))
-    new_scrap = overrides.get("scrap_pct_override") if overrides else None
-    if new_scrap is not None:
-        new_scrap = _ensure_scrap_pct(new_scrap)
-        if not math.isclose(new_scrap, old_scrap, abs_tol=1e-6):
-            baseline = float(features.get("material_cost_baseline", material_direct_cost_base))
-            scaled = baseline * ((1.0 + new_scrap) / max(1e-6, (1.0 + old_scrap)))
-            scaled = round(scaled, 2)
-            pass_through["Material"] = scaled
-            entry = applied_pass.setdefault("Material", {"old_value": float(material_direct_cost_base), "notes": []})
-            entry["notes"].append(f"scrap to {new_scrap * 100:.1f}%")
-            entry["new_value"] = scaled
-            features["scrap_pct"] = new_scrap
-            scrap_pct = new_scrap
-            src_tag = (quote_state.effective_sources.get("scrap_pct") if quote_state and isinstance(quote_state.effective_sources, dict) else None)
+    base_net_mass_g = _coerce_float_or_none(material_detail_for_breakdown.get("net_mass_g")) or 0.0
+
+    removal_mass_g: float | None = None
+    removal_lb: float | None = None
+    if isinstance(overrides, dict):
+        for key in ("material_removed_mass_g", "material_removed_g"):
+            val = overrides.get(key)
+            num = _coerce_float_or_none(val)
+            if num is not None and num > 0:
+                removal_mass_g = float(num)
+                break
+        if removal_mass_g is None:
+            removal_lb_val = _coerce_float_or_none(overrides.get("material_removed_lb"))
+            if removal_lb_val is not None and removal_lb_val > 0:
+                removal_lb = float(removal_lb_val)
+                removal_mass_g = removal_lb / LB_PER_KG * 1000.0
+    if removal_mass_g is not None and removal_mass_g > 0 and removal_lb is None:
+        removal_lb = removal_mass_g / 1000.0 * LB_PER_KG
+
+    bounds = quote_state.bounds if isinstance(quote_state.bounds, dict) else {}
+    scrap_min_bound = max(0.0, _coerce_float_or_none(bounds.get("scrap_min")) or 0.0)
+    scrap_max_bound = _coerce_float_or_none(bounds.get("scrap_max")) or 0.25
+
+    net_after = base_net_mass_g
+    scrap_after = old_scrap
+    effective_mass_after = base_net_mass_g * (1.0 + old_scrap)
+    mass_scale = 1.0
+    removal_applied = False
+
+    if removal_mass_g and removal_mass_g > 0 and base_net_mass_g > 0:
+        net_after, scrap_after, effective_mass_after = compute_mass_and_scrap_after_removal(
+            base_net_mass_g,
+            old_scrap,
+            removal_mass_g,
+            scrap_min=scrap_min_bound,
+            scrap_max=scrap_max_bound,
+        )
+        mass_scale = net_after / max(1e-6, base_net_mass_g)
+        removal_applied = True
+
+    scrap_override_raw = overrides.get("scrap_pct_override") if isinstance(overrides, dict) else None
+    scrap_override_applied = False
+    if scrap_override_raw is not None:
+        override_scrap = _ensure_scrap_pct(scrap_override_raw)
+        if not math.isclose(override_scrap, scrap_after, abs_tol=1e-6):
+            scrap_override_applied = True
+        scrap_after = override_scrap
+        effective_mass_after = net_after * (1.0 + scrap_after)
+
+    scrap_scale = (1.0 + scrap_after) / max(1e-6, (1.0 + old_scrap))
+    total_scale = mass_scale * scrap_scale
+
+    scrap_changed = not math.isclose(scrap_after, old_scrap, abs_tol=1e-6)
+    change_triggered = removal_applied or scrap_override_applied or scrap_changed or not math.isclose(total_scale, 1.0, abs_tol=1e-6)
+
+    if change_triggered:
+        baseline = float(features.get("material_cost_baseline", material_direct_cost_base))
+        scaled = round(baseline * total_scale, 2)
+        pass_through["Material"] = scaled
+        entry = applied_pass.setdefault("Material", {"old_value": float(material_direct_cost_base), "notes": []})
+        if removal_applied and removal_lb is not None:
+            entry["notes"].append(f"material removal -{removal_lb:.2f} lb")
+        elif removal_applied:
+            entry["notes"].append(f"material removal -{removal_mass_g:.1f} g")
+        if scrap_changed:
+            src_tag = (
+                quote_state.effective_sources.get("scrap_pct")
+                if quote_state and isinstance(quote_state.effective_sources, dict)
+                else None
+            )
             suffix = ""
-            if src_tag == "user":
-                suffix = " (user override)"
-            elif src_tag == "llm":
-                suffix = " (LLM)"
-            llm_notes.append(f"Scrap {old_scrap * 100:.1f}% → {new_scrap * 100:.1f}%{suffix}")
+            if scrap_override_applied:
+                if src_tag == "user":
+                    suffix = " (user override)"
+                elif src_tag == "llm":
+                    suffix = " (LLM)"
+            elif removal_applied:
+                suffix = " (material removal)"
+            entry["notes"].append(
+                f"scrap {old_scrap * 100:.1f}% → {scrap_after * 100:.1f}%{suffix}"
+            )
+        entry["new_value"] = scaled
+
+        if removal_applied:
+            removal_note = (
+                f"Material removal -{removal_lb:.2f} lb → net {net_after / 1000.0 * LB_PER_KG:.2f} lb"
+                if removal_lb is not None
+                else f"Material removal -{removal_mass_g:.1f} g"
+            )
+            llm_notes.append(removal_note)
+        if scrap_changed:
+            src_tag = (
+                quote_state.effective_sources.get("scrap_pct")
+                if quote_state and isinstance(quote_state.effective_sources, dict)
+                else None
+            )
+            suffix = ""
+            if scrap_override_applied:
+                if src_tag == "user":
+                    suffix = " (user override)"
+                elif src_tag == "llm":
+                    suffix = " (LLM)"
+            elif removal_applied:
+                suffix = " (material removal)"
+            llm_notes.append(
+                f"Scrap {old_scrap * 100:.1f}% → {scrap_after * 100:.1f}%{suffix}"
+            )
+
+        features["scrap_pct"] = scrap_after
+        if removal_applied:
+            features["material_removed_mass_g"] = removal_mass_g
+            features["net_mass_g"] = net_after
+
+    scrap_pct = scrap_after
+    material_detail_for_breakdown["mass_g_net"] = net_after
+    material_detail_for_breakdown["net_mass_g"] = net_after
+    material_detail_for_breakdown["effective_mass_g"] = effective_mass_after
+    material_detail_for_breakdown["mass_g"] = effective_mass_after
+    material_detail_for_breakdown["scrap_pct"] = scrap_pct
+    if change_triggered:
+        material_detail_for_breakdown["material_cost"] = pass_through.get(
+            "Material", material_detail_for_breakdown.get("material_cost")
+        )
+        material_detail_for_breakdown["material_direct_cost"] = pass_through.get(
+            "Material", material_detail_for_breakdown.get("material_direct_cost")
+        )
 
     material_detail_for_breakdown["scrap_pct"] = scrap_pct
 
@@ -8623,8 +9204,9 @@ def compute_quote_from_df(df: pd.DataFrame,
     if price < min_lot:
         price = min_lot
 
-    labor_costs_display: dict[str, float] = {}
+    labor_cost_details_input: dict[str, str] = {}
     labor_cost_details: dict[str, str] = {}
+    labor_costs_display: dict[str, float] = {}
     for key, value in sorted(process_costs.items(), key=lambda kv: kv[1], reverse=True):
         label = key.replace('_', ' ').title()
         labor_costs_display[label] = value
@@ -8653,8 +9235,17 @@ def compute_quote_from_df(df: pd.DataFrame,
         proc_notes = applied_process.get(key, {}).get("notes")
         if proc_notes:
             detail_bits.append("LLM: " + ", ".join(proc_notes))
-        if detail_bits:
-            labor_cost_details[label] = "; ".join(detail_bits)
+        existing_detail = labor_cost_details_input.get(label)
+        if detail_bits or existing_detail:
+            merged_bits: list[str] = []
+            merged_bits.extend(detail_bits)
+            if existing_detail:
+                for segment in re.split(r";\s*", existing_detail):
+                    seg = segment.strip()
+                    if seg and seg not in merged_bits:
+                        merged_bits.append(seg)
+            if merged_bits:
+                labor_cost_details[label] = "; ".join(merged_bits)
 
     direct_costs_display: dict[str, float] = {label: float(value) for label, value in pass_through.items()}
     direct_cost_details: dict[str, str] = {}
@@ -8704,8 +9295,6 @@ def compute_quote_from_df(df: pd.DataFrame,
         details = []
         if prog_detail.get("prog_hr"):
             details.append(f"Programmer {prog_detail['prog_hr']:.2f} hr @ ${prog_detail.get('prog_rate',0):,.2f}/hr")
-        if prog_detail.get("cam_hr"):
-            details.append(f"CAM {prog_detail['cam_hr']:.2f} hr @ ${prog_detail.get('cam_rate',0):,.2f}/hr")
         if prog_detail.get("eng_hr"):
             details.append(f"Engineer {prog_detail['eng_hr']:.2f} hr @ ${prog_detail.get('eng_rate',0):,.2f}/hr")
         if details:

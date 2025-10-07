@@ -21,6 +21,32 @@ class _FailingPricingEngine:
         raise RuntimeError("metals api unavailable")
 
 
+def test_compute_material_cost_prefers_mcmaster_before_wieland(monkeypatch):
+    def _fake_mcmaster(name: str, *, unit: str = "kg") -> tuple[float, str]:
+        assert unit == "kg"
+        return 123.45, "mcmaster:aluminum"
+
+    def _fail_wieland(_keys):
+        raise AssertionError("wieland lookup should not run when McMaster succeeds")
+
+    monkeypatch.setattr(appV5, "_get_mcmaster_unit_price", _fake_mcmaster)
+    monkeypatch.setattr(appV5, "lookup_wieland_price", _fail_wieland)
+
+    cost, detail = appV5.compute_material_cost(
+        material_name="Aluminum",
+        mass_kg=1.0,
+        scrap_frac=0.0,
+        overrides={},
+        vendor_csv=None,
+        pricing=_FailingPricingEngine(),
+    )
+
+    assert cost == pytest.approx(123.45)
+    assert detail["unit_price_usd_per_kg"] == pytest.approx(123.45)
+    assert detail["unit_price_source"] == "mcmaster:aluminum"
+    assert detail["source"] == "mcmaster:aluminum"
+
+
 def test_compute_material_cost_uses_resolver_when_providers_fail(monkeypatch):
     monkeypatch.setattr(appV5, "lookup_wieland_price", lambda _keys: (None, None))
 

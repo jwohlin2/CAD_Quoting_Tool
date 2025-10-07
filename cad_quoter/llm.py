@@ -141,6 +141,34 @@ def _llama_missing_msg() -> str:
     )
 
 
+def _llama_load_error_msg(model_path: str, exc: Exception) -> str:
+    """Return a user-facing error message when llama.cpp fails to load."""
+
+    path_hint = model_path.strip()
+    base = [
+        "Failed to initialize the local LLM.",
+        (
+            "Ensure the Qwen GGUF file exists and update the LLM model path "
+            "(Settings → LLM or the QWEN_GGUF_PATH environment variable)."
+        ),
+    ]
+
+    if path_hint:
+        base.append(f"Attempted path: {path_hint}")
+        if ":" in path_hint and "\\" in path_hint:
+            base.append(
+                "The detected path looks like a Windows drive. If you moved the "
+                "tool to another machine, copy the model or point the setting to "
+                "its new location."
+            )
+
+    details = str(exc).strip()
+    if details:
+        base.append(f"Original error: {details}")
+
+    return "\n".join(base)
+
+
 @dataclass
 class _ModelConfig:
     model_path: str
@@ -189,7 +217,11 @@ class _LocalLLM:
             if self._config.rope_freq_scale is not None:
                 kwargs["rope_freq_scale"] = self._config.rope_freq_scale
             kwargs = {k: v for k, v in kwargs.items() if v is not None}
-            self._llm = self._Llama(**kwargs)
+            try:
+                self._llm = self._Llama(**kwargs)
+            except Exception as exc:
+                msg = _llama_load_error_msg(self._config.model_path, exc)
+                raise RuntimeError(msg) from exc
 
     def create_chat_completion(self, **kwargs):
         self._ensure()

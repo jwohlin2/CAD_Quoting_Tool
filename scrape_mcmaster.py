@@ -292,21 +292,10 @@ def maybe_accept_cookies(page) -> None:
         pass
 
 
-def _raise_if_restricted(page, url: str, allow_manual: bool = False) -> None:
-    """Detect restriction/login walls.
+def _raise_if_restricted(page, url: str) -> None:
+    """Detect McMaster's access restriction wall and raise a helpful error."""
 
-    If ``allow_manual`` is True and we're headful, pause to let the user log in,
-    then continue. Otherwise, raise with a helpful message.
-    """
-
-    if page.locator('text=Access has been restricted').count() > 0 or page.locator('text=To continue browsing, please log in').count() > 0:
-        if allow_manual:
-            print("Access is restricted or login required. Please log in in the opened browser window, then press Enter to continue...", file=sys.stderr)
-            try:
-                input()
-            except Exception:
-                pass
-            return
+    if page.locator('text=Access has been restricted').count() > 0:
         raise RuntimeError(
             "McMaster has temporarily restricted automated access for this browser session. "
             "Open the scraper with --headful and --keep-open, log in manually, and allow the "
@@ -331,12 +320,7 @@ def scrape_tool_jig(page, material: str, thickness_in: float, w_in: float, l_in:
     url = 'https://www.mcmaster.com/products/tool-and-jig-plates/'
     page.goto(url, wait_until='networkidle')
 
-    from typing import cast
-    try:
-        manual = bool(cast(object, globals().get('CLI_ARGS')).manual_login) and bool(cast(object, globals().get('CLI_ARGS')).headful)
-    except Exception:
-        manual = False
-    _raise_if_restricted(page, url, allow_manual=manual)
+    _raise_if_restricted(page, url)
 
     click_filter_buttons(page, ['Inch', 'Sheet'])
     maybe_accept_cookies(page)
@@ -620,7 +604,6 @@ def parse_arguments() -> argparse.Namespace:
         default='chromium',
         help='Browser engine/channel to use',
     )
-    parser.add_argument('--manual-login', action='store_true', help='If restricted/login appears, pause headful browser so you can log in, then continue and save cookies.')
     return parser.parse_args()
 
 

@@ -66,6 +66,21 @@ def _maybe_get_mcmaster_price(display_name: str, normalized_key: str) -> Dict[st
     return record
 
 
+def get_mcmaster_unit_price(display_name: str, *, unit: str = "kg") -> tuple[float | None, str]:
+    """Return a McMaster price for ``display_name`` when the scraper supports it."""
+
+    key = normalize_material_key(display_name)
+    record = _maybe_get_mcmaster_price(display_name, key)
+    if not record:
+        return None, ""
+
+    source = str(record.get("source", "mcmaster"))
+    if unit == "lb":
+        return float(record["usd_per_lb"]), source
+    # default to kg for any unexpected units
+    return float(record["usd_per_kg"]), source
+
+
 def price_value_to_per_gram(value: float, label: str) -> float | None:
     """Normalise user-entered price labels to USD per gram when possible."""
 
@@ -206,6 +221,7 @@ def resolve_material_unit_price(display_name: str, unit: str = "kg") -> tuple[fl
 __all__ = [
     "BACKUP_CSV_NAME",
     "LB_PER_KG",
+    "get_mcmaster_unit_price",
     "ensure_material_backup_csv",
     "load_backup_prices_csv",
     "price_value_to_per_gram",
