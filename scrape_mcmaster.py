@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -290,6 +291,19 @@ def maybe_accept_cookies(page) -> None:
         pass
 
 
+def _raise_if_restricted(page, url: str) -> None:
+    """Detect McMaster's access restriction wall and raise a helpful error."""
+
+    if page.locator('text=Access has been restricted').count() > 0:
+        raise RuntimeError(
+            "McMaster has temporarily restricted automated access for this browser session. "
+            "Open the scraper with --headful and --keep-open, log in manually, and allow the "
+            "script to save the resulting cookies using --state-file so subsequent headless "
+            "runs reuse that session. You may also need to wait before retrying."
+            f" (while visiting {url})"
+        )
+
+
 def extract_candidates(page, section_selector: str, thickness_label: str) -> List[SheetOption]:
     section = page.locator(section_selector)
     wait_for_prices(section)
@@ -304,6 +318,8 @@ def extract_candidates(page, section_selector: str, thickness_label: str) -> Lis
 def scrape_tool_jig(page, material: str, thickness_in: float, w_in: float, l_in: float) -> Dict:
     url = 'https://www.mcmaster.com/products/tool-and-jig-plates/'
     page.goto(url, wait_until='networkidle')
+
+    _raise_if_restricted(page, url)
 
     click_filter_buttons(page, ['Inch', 'Sheet'])
     maybe_accept_cookies(page)
@@ -364,6 +380,8 @@ def scrape_a2(page, tolerance: str, thickness_in: float, w_in: float, l_in: floa
     url = 'https://www.mcmaster.com/products/steel/material~a2-tool-steel/'
     page.goto(url, wait_until='networkidle')
 
+    _raise_if_restricted(page, url)
+
     click_filter_buttons(page, ['Inch', 'Sheet'])
 
     thickness_label = to_frac_label(thickness_in)
@@ -407,6 +425,8 @@ def scrape_carbide_bar(page, thickness_in: float, w_in: float, l_in: float) -> D
     url = 'https://www.mcmaster.com/products/~/material~tungsten-carbide/shape~bar-1/?s=carbide'
     page.goto(url, wait_until='networkidle')
 
+    _raise_if_restricted(page, url)
+
     click_filter_buttons(page, ['Inch'])
 
     section = _find_section_with_keywords(page, 'carbide', 'bar')
@@ -444,13 +464,22 @@ def scrape_carbide_bar(page, thickness_in: float, w_in: float, l_in: float) -> D
     }
 
 
-def _run_scraper_job(job):
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True)
+def _run_scraper_job(job, engine: str = 'chromium', headful: bool = False, state_file: Optional[str] = None, slow_mo: int = 0):
+    with sync_playwright() as pw:
+        if engine in ('chrome', 'msedge'):
+            browser = pw.chromium.launch(channel=engine, headless=not headful, slow_mo=slow_mo)
+        elif engine == 'firefox':
+            browser = pw.firefox.launch(headless=not headful, slow_mo=slow_mo)
+        elif engine == 'webkit':
+            browser = pw.webkit.launch(headless=not headful, slow_mo=slow_mo)
+        else:
+            browser = pw.chromium.launch(headless=not headful, slow_mo=slow_mo)
+
+        storage_state = state_file if (state_file and os.path.isfile(state_file)) else None
         context = browser.new_context(
             viewport={'width': 1400, 'height': 1000},
             java_script_enabled=True,
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118 Safari/537.36',
+            storage_state=storage_state,
         )
         page = context.new_page()
         try:
@@ -568,6 +597,12 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument('--keep-open', action='store_true', help='Keep the browser open until you press Enter (headful only).')
     parser.add_argument('--state-file', default='.playwright_state.json', help='Path to persist cookies/storage state for subsequent runs.')
     parser.add_argument('--slowmo', type=int, default=0, help='Slow down headful actions by N ms for debugging (headful only).')
+    parser.add_argument(
+        '--engine',
+        choices=['chromium', 'chrome', 'msedge', 'firefox', 'webkit'],
+        default='chromium',
+        help='Browser engine/channel to use',
+    )
     return parser.parse_args()
 
 
@@ -578,12 +613,20 @@ def main() -> None:
     with sync_playwright() as playwright:
         headful = bool(getattr(args, 'headful', False))
         slow_mo = int(getattr(args, 'slowmo', 0)) if headful else 0
-        browser = playwright.chromium.launch(headless=not headful, slow_mo=slow_mo)
+        engine = getattr(args, 'engine', 'chromium')
+
+        if engine in ('chrome', 'msedge'):
+            browser = playwright.chromium.launch(channel=engine, headless=not headful, slow_mo=slow_mo)
+        elif engine == 'firefox':
+            browser = playwright.firefox.launch(headless=not headful, slow_mo=slow_mo)
+        elif engine == 'webkit':
+            browser = playwright.webkit.launch(headless=not headful, slow_mo=slow_mo)
+        else:
+            browser = playwright.chromium.launch(headless=not headful, slow_mo=slow_mo)
 
         storage_state = None
         try:
             # If a previous state file exists, reuse it so prices are visible without prompting again
-            import os
             if args.state_file and os.path.isfile(args.state_file):
                 storage_state = args.state_file
         except Exception:
@@ -592,7 +635,6 @@ def main() -> None:
         context = browser.new_context(
             viewport={'width': 1400, 'height': 1000},
             java_script_enabled=True,
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118 Safari/537.36',
             storage_state=storage_state,
         )
         page = context.new_page()
