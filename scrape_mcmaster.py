@@ -238,8 +238,17 @@ def _score_button(label: str, candidate: str) -> int:
 
 def click_filter_buttons(page, labels: List[str]) -> None:
     for label in labels:
-        locator = page.locator(f'button:has-text("{label}")')
+        # Try robust role-based matching first
+        locator = page.get_by_role("button", name=label)
         if locator.count() == 0:
+            # Fallback: :has-text with single quotes to allow inch (") characters
+            locator = page.locator(f"button:has-text('{label}')")
+        if locator.count() == 0:
+            # Fallback: :has-text with escaped double quotes
+            safe = label.replace('"', '\\"')
+            locator = page.locator(f'button:has-text("{safe}")')
+        if locator.count() == 0:
+            # Last resort: fuzzy match over all buttons
             buttons = page.locator('button')
             best_index = -1
             best_score = 0
@@ -254,6 +263,31 @@ def click_filter_buttons(page, labels: List[str]) -> None:
         if locator.count() > 0:
             locator.first.click()
             page.wait_for_timeout(300)
+
+
+def maybe_accept_cookies(page) -> None:
+    """Best-effort acceptance of cookie/location banners to reveal prices."""
+    try:
+        candidates = [
+            "Accept",
+            "I Agree",
+            "Agree",
+            "OK",
+            "Got it",
+            "Allow",
+            "Continue",
+            "Close",
+        ]
+        for label in candidates:
+            btn = page.get_by_role("button", name=label)
+            if btn.count() > 0:
+                try:
+                    btn.first.click()
+                    page.wait_for_timeout(500)
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
 
 def extract_candidates(page, section_selector: str, thickness_label: str) -> List[SheetOption]:
@@ -272,6 +306,7 @@ def scrape_tool_jig(page, material: str, thickness_in: float, w_in: float, l_in:
     page.goto(url, wait_until='networkidle')
 
     click_filter_buttons(page, ['Inch', 'Sheet'])
+    maybe_accept_cookies(page)
     material = material.lower()
     material_label = 'MIC6 Aluminum' if material.startswith('mic') else '5083 Aluminum'
     click_filter_buttons(page, [material_label])
@@ -282,7 +317,25 @@ def scrape_tool_jig(page, material: str, thickness_in: float, w_in: float, l_in:
     heading = 'Easy-to-Machine MIC6' if 'MIC6' in material_label else 'Easy-to-Machine Cast Aluminum for Tool and Jig Plates'
     section_selector = f'section:has(h3:has-text("{heading}"))'
 
-    candidates = extract_candidates(page, section_selector, thickness_label)
+    try:
+        candidates = extract_candidates(page, section_selector, thickness_label)
+    except Exception:
+        # Fallback: try to locate a likely section by keywords if the exact heading changes
+        section = _find_section_with_keywords(page, 'aluminum', 'tool', 'jig')
+        if section is not None:
+            try:
+                wait_for_prices(section, timeout=30000)
+            except Exception:
+                pass
+            candidates = extract_sheet_table(section, thickness_label)
+        else:
+            # Last resort: scan the first section for any table we can parse
+            section = page.locator('section').first
+            try:
+                wait_for_prices(section, timeout=30000)
+            except Exception:
+                pass
+            candidates = extract_sheet_table(section, thickness_label)
 
     best = closest_bigger(w_in, l_in, candidates) or closest_bigger(l_in, w_in, candidates)
     if not best:
@@ -511,6 +564,10 @@ def parse_arguments() -> argparse.Namespace:
     carbide.add_argument('--width', type=float, required=True, help='Target width in inches.')
     carbide.add_argument('--length', type=float, required=True, help='Target length in inches.')
 
+    parser.add_argument('--headful', action='store_true', help='Run visible browser (disable headless).')
+    parser.add_argument('--keep-open', action='store_true', help='Keep the browser open until you press Enter (headful only).')
+    parser.add_argument('--state-file', default='.playwright_state.json', help='Path to persist cookies/storage state for subsequent runs.')
+    parser.add_argument('--slowmo', type=int, default=0, help='Slow down headful actions by N ms for debugging (headful only).')
     return parser.parse_args()
 
 
@@ -519,11 +576,24 @@ def main() -> None:
     thickness_in = frac_to_float(str(args.thickness))
 
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True)
+        headful = bool(getattr(args, 'headful', False))
+        slow_mo = int(getattr(args, 'slowmo', 0)) if headful else 0
+        browser = playwright.chromium.launch(headless=not headful, slow_mo=slow_mo)
+
+        storage_state = None
+        try:
+            # If a previous state file exists, reuse it so prices are visible without prompting again
+            import os
+            if args.state_file and os.path.isfile(args.state_file):
+                storage_state = args.state_file
+        except Exception:
+            storage_state = None
+
         context = browser.new_context(
             viewport={'width': 1400, 'height': 1000},
             java_script_enabled=True,
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118 Safari/537.36',
+            storage_state=storage_state,
         )
         page = context.new_page()
 
@@ -541,6 +611,17 @@ def main() -> None:
             )
             raise exc
         finally:
+            # Save storage state to reuse accepted cookies or login across runs
+            try:
+                if getattr(args, 'state_file', None):
+                    context.storage_state(path=args.state_file)
+            except Exception:
+                pass
+            if headful and getattr(args, 'keep_open', False):
+                try:
+                    input('Headful browser is open. Press Enter to close...')
+                except Exception:
+                    pass
             context.close()
             browser.close()
 
