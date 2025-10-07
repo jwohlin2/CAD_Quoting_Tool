@@ -162,6 +162,7 @@ def extract_sheet_table(section, thickness_label: str) -> List[SheetOption]:
             continue
 
         cells = row.locator('td')
+
         try:
             last_cell_text = cells.nth(cells.count() - 1).inner_text().strip()
         except PWTimeout:
@@ -314,6 +315,36 @@ def extract_candidates(page, section_selector: str, thickness_label: str) -> Lis
             f'No price rows found for thickness {thickness_label}. The site layout may have changed or prices are gated.'
         )
     return candidates
+
+
+def parse_current_sheet_page(page, thickness_in: float, w_in: float, l_in: float) -> Dict:
+    thickness_label = to_frac_label(thickness_in)
+    section = _find_section_with_keywords(page, 'aluminum', 'tool', 'jig') or page.locator('section').first
+    try:
+        wait_for_prices(section, timeout=30000)
+    except Exception:
+        pass
+    candidates = extract_sheet_table(section, thickness_label)
+    best = closest_bigger(w_in, l_in, candidates) or closest_bigger(l_in, w_in, candidates)
+    if not best:
+        raise RuntimeError('No sheet found meeting/exceeding requested size on current page.')
+    return {
+        'product_family': 'Manual Page Parse',
+        'url': page.url,
+        'requested': {
+            'width_in': w_in,
+            'length_in': l_in,
+            'thickness_in': thickness_in,
+        },
+        'selected': {
+            'size_label': best.size_label,
+            'width_in': best.width_in,
+            'length_in': best.length_in,
+            'thickness_in': best.thickness_in,
+            'price_each_text': best.price_text,
+            'price_each_value': None if best.price_value < 0 else best.price_value,
+        },
+    }
 
 
 def scrape_tool_jig(page, material: str, thickness_in: float, w_in: float, l_in: float) -> Dict:
@@ -604,6 +635,12 @@ def parse_arguments() -> argparse.Namespace:
         default='chromium',
         help='Browser engine/channel to use',
     )
+    parser.add_argument('--user-data-dir', help='Path to a persistent Chrome/Edge/Chromium profile')
+    parser.add_argument(
+        '--no-click',
+        action='store_true',
+        help='Manual mode: you navigate & filter; script only reads the table on the current page',
+    )
     return parser.parse_args()
 
 
@@ -618,37 +655,63 @@ def main() -> None:
         slow_mo = int(getattr(args, 'slowmo', 0)) if headful else 0
         engine = getattr(args, 'engine', 'chromium')
 
-        if engine in ('chrome', 'msedge'):
-            browser = playwright.chromium.launch(channel=engine, headless=not headful, slow_mo=slow_mo)
-        elif engine == 'firefox':
-            browser = playwright.firefox.launch(headless=not headful, slow_mo=slow_mo)
-        elif engine == 'webkit':
-            browser = playwright.webkit.launch(headless=not headful, slow_mo=slow_mo)
-        else:
-            browser = playwright.chromium.launch(headless=not headful, slow_mo=slow_mo)
-
-        storage_state = None
-        try:
-            # If a previous state file exists, reuse it so prices are visible without prompting again
-            if args.state_file and os.path.isfile(args.state_file):
-                storage_state = args.state_file
-        except Exception:
-            storage_state = None
-
-        context = browser.new_context(
-            viewport={'width': 1400, 'height': 1000},
-            java_script_enabled=True,
-            storage_state=storage_state,
-        )
-        page = context.new_page()
+        persistent = bool(getattr(args, 'user_data_dir', None)) and engine in ('chromium', 'chrome', 'msedge')
+        browser = None
+        context = None
+        result = None
 
         try:
-            if args.mode == 'tool_jig':
-                result = scrape_tool_jig(page, args.material, thickness_in, args.width, args.length)
-            elif args.mode == 'a2':
-                result = scrape_a2(page, args.tolerance, thickness_in, args.width, args.length)
+            if persistent:
+                context = playwright.chromium.launch_persistent_context(
+                    args.user_data_dir,
+                    channel=engine if engine in ('chrome', 'msedge') else None,
+                    headless=not headful,
+                    slow_mo=slow_mo,
+                    viewport={'width': 1400, 'height': 1000},
+                )
             else:
-                result = scrape_carbide_bar(page, thickness_in, args.width, args.length)
+                if engine in ('chrome', 'msedge'):
+                    browser = playwright.chromium.launch(channel=engine, headless=not headful, slow_mo=slow_mo)
+                elif engine == 'firefox':
+                    browser = playwright.firefox.launch(headless=not headful, slow_mo=slow_mo)
+                elif engine == 'webkit':
+                    browser = playwright.webkit.launch(headless=not headful, slow_mo=slow_mo)
+                else:
+                    browser = playwright.chromium.launch(headless=not headful, slow_mo=slow_mo)
+
+                storage_state = None
+                try:
+                    # If a previous state file exists, reuse it so prices are visible without prompting again
+                    if args.state_file and os.path.isfile(args.state_file):
+                        storage_state = args.state_file
+                except Exception:
+                    storage_state = None
+
+                context = browser.new_context(
+                    viewport={'width': 1400, 'height': 1000},
+                    java_script_enabled=True,
+                    storage_state=storage_state,
+                )
+
+            page = context.new_page()
+
+            if headful and getattr(args, 'no_click', False):
+                print(
+                    'Headful manual mode: open the exact McMaster page and set the filters you want. '
+                    'Press Enter once the table is visible…'
+                )
+                input()
+                if args.mode == 'tool_jig':
+                    result = parse_current_sheet_page(page, thickness_in, args.width, args.length)
+                else:
+                    raise RuntimeError('Manual mode parser currently only supports tool_jig scraping.')
+            else:
+                if args.mode == 'tool_jig':
+                    result = scrape_tool_jig(page, args.material, thickness_in, args.width, args.length)
+                elif args.mode == 'a2':
+                    result = scrape_a2(page, args.tolerance, thickness_in, args.width, args.length)
+                else:
+                    result = scrape_carbide_bar(page, thickness_in, args.width, args.length)
         except PWTimeout as exc:
             print(
                 'Timed out waiting for prices. If you see items but no prices, McMaster may require a location cookie or login.',
@@ -657,18 +720,21 @@ def main() -> None:
             raise exc
         finally:
             # Save storage state to reuse accepted cookies or login across runs
-            try:
-                if getattr(args, 'state_file', None):
-                    context.storage_state(path=args.state_file)
-            except Exception:
-                pass
+            if not persistent:
+                try:
+                    if getattr(args, 'state_file', None) and context is not None:
+                        context.storage_state(path=args.state_file)
+                except Exception:
+                    pass
             if headful and getattr(args, 'keep_open', False):
                 try:
                     input('Headful browser is open. Press Enter to close...')
                 except Exception:
                     pass
-            context.close()
-            browser.close()
+            if context is not None:
+                context.close()
+            if browser is not None:
+                browser.close()
 
     json.dump(result, sys.stdout, indent=2)
     print()
