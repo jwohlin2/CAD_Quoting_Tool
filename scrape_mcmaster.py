@@ -1,841 +1,744 @@
-from __future__ import annotations
 
-import argparse
-import json
-import os
-import re
-import sys
+#!/usr/bin/env python3
+# onlinemetals_scraper.py
+#
+# Zero-login, Requests-only scraper for OnlineMetals listing/product pages.
+# Supports:
+#   - MIC-6 aluminum plate category (width x length options with prices)
+#   - A2 tool steel rectangle bar category (thickness x width with length/price options)
+#   - Tungsten carbide rectangle bar (C2 or Standard Micrograin) via product pages
+#
+# Usage examples:
+#   python onlinemetals_scraper.py mic6 --width 12 --length 12 --thickness 0.5
+#   python onlinemetals_scraper.py a2 --thickness 0.0625 --width 1 --length 36
+#   python onlinemetals_scraper.py carbide --thickness 0.25 --width 1
+#
+# Notes:
+# - Be polite: low request rate, cache results if you can.
+# - This script relies primarily on text parsing to avoid brittle CSS class coupling.
+#
+import argparse, json, math, re, sys, time, atexit
 from dataclasses import dataclass
-from math import gcd
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-from urllib.parse import unquote, urlparse
+from typing import List, Optional, Dict, Tuple
+import requests
+from bs4 import BeautifulSoup
+try:
+    # Playwright is optional; used when requests gets 403 or when --browser is set
+    from playwright.sync_api import sync_playwright
+    _PLAYWRIGHT_AVAILABLE = True
+except Exception:
+    _PLAYWRIGHT_AVAILABLE = False
 
-from playwright.sync_api import TimeoutError as PWTimeout
-from playwright.sync_api import sync_playwright
-from rapidfuzz import fuzz
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Dest": "document",
+}
 
-SIZE_RE = re.compile(r'(\d+\s*\d*(?:/\d+)?)"\s*[×x]\s*(\d+\s*\d*(?:/\d+)?)"\s*')
-NUM_RE = re.compile(r'^\s*(\d+)(?:\s+(\d+)/(\d+))?\s*$')
-DIM_WITH_LABEL_RE = re.compile(
-    r'(\d+(?:\s+\d+/\d+)?|\d+/\d+|\d*\.\d+)\s*"?\s*(thick(?:ness)?|width|wide|height|tall|length|long)',
-    re.IGNORECASE,
-)
+# Global fetch mode and browser config (set from CLI in main())
+GET_MODE = "auto"  # one of: "requests", "browser", "auto"
+_BROWSER_ENGINE = "chromium"  # chromium|msedge|chrome|firefox|webkit
+_HEADFUL = False
+_SLOWMO = 0
+_USER_DATA_DIR = None
+_DISABLE_JS = False
+DEBUG_DIR = None
 
-IN3_TO_CC = 16.387064
-LB_PER_KG = 2.2046226218
+_PW = None
+_BROWSER = None
+_CONTEXT = None
+_PAGE = None
 
-
-def _debug(msg: str) -> None:
+def _close_browser():
+    global _PW, _BROWSER, _CONTEXT, _PAGE
     try:
-        args = globals().get('CLI_ARGS', None)
+        if _PAGE:
+            _PAGE.close()
     except Exception:
-        args = None
-    if args is not None and getattr(args, 'debug', False):
-        print(f"[debug] {msg}", file=sys.stderr)
+        pass
+    try:
+        if _CONTEXT:
+            _CONTEXT.close()
+    except Exception:
+        pass
+    try:
+        if _BROWSER:
+            _BROWSER.close()
+    except Exception:
+        pass
+    try:
+        if _PW:
+            _PW.stop()
+    except Exception:
+        pass
 
+atexit.register(_close_browser)
 
-@dataclass
-class SheetOption:
-    size_label: str
-    width_in: float
-    length_in: float
-    thickness_in: float
-    price_text: str
-    price_value: float
-    row_text: str
+MIC6_URL = "https://www.onlinemetals.com/en/buy/aluminum-sheet-plate-mic-6"
+A2_URL = "https://www.onlinemetals.com/en/buy/tool-steel-rectangle-bar-a2"
+CARBIDE_CAT_URL = "https://www.onlinemetals.com/en/buy/tungsten-carbide-rectangle-bar"
 
+# ---------- utilities ----------
 
 def frac_to_float(txt: str) -> float:
-    """Parse strings like '1 1/2', '3/8', '0.5', '12"', '1 ft', etc. into inches."""
-    txt = txt.replace('"', '').replace('in', '').strip()
-    # feet -> inches
-    if 'ft' in txt:
-        m = re.findall(r'(\d+)\s*ft', txt)
-        return float(m[0]) * 12.0 if m else 0.0
-
-    # 1) mixed number: 1 1/2
-    m = re.match(r'^\s*(\d+)\s+(\d+)\s*/\s*(\d+)\s*$', txt)
+    """Parse '1 1/2', '3/8', '0.5', '12', '12″' to float inches."""
+    s = (txt or "").strip().lower().replace('″','"').replace('in.','').replace('in','').replace('”','"')
+    s = s.replace('\xa0',' ').strip()
+    # feet not expected; ignore
+    # mixed number: 1 1/2
+    m = re.match(r'^\s*(\d+)\s+(\d+)\s*/\s*(\d+)\s*"?\s*$', s)
     if m:
-        return float(m.group(1)) + float(m.group(2)) / float(m.group(3))
-
-    # 2) pure fraction: 1/2
-    m = re.match(r'^\s*(\d+)\s*/\s*(\d+)\s*$', txt)
+        return float(m.group(1)) + float(m.group(2))/float(m.group(3))
+    # fraction only: 3/8
+    m = re.match(r'^\s*(\d+)\s*/\s*(\d+)\s*"?\s*$', s)
     if m:
-        return float(m.group(1)) / float(m.group(2))
-
-    # 3) plain number: 0.5 or 12
-    m = re.match(r'^\s*(\d+(?:\.\d+)?)\s*$', txt)
+        return float(m.group(1))/float(m.group(2))
+    # decimal/integer: 0.5 or 12
+    m = re.match(r'^\s*(\d+(?:\.\d+)?)\s*"?\s*$', s)
     if m:
         return float(m.group(1))
-
-    # last resort
-    return float(re.sub(r"[^\d.]+", "", txt)) if re.search(r"\d", txt) else 0.0
-
-
-def to_frac_label(value: float) -> str:
-    """Convert decimal inches to the label used in McMaster filters (nearest 1/16)."""
-    sixteenths = round(value * 16)
-    value = sixteenths / 16.0
-    whole = int(value)
-    remainder = sixteenths - whole * 16
-    if remainder == 0:
-        return f'{whole}"'
-    reduced_gcd = gcd(remainder, 16)
-    numerator = remainder // reduced_gcd
-    denominator = 16 // reduced_gcd
-    return f'{whole} {numerator}/{denominator}"' if whole else f'{numerator}/{denominator}"'
-
-
-def parse_size_label(txt: str) -> Optional[Tuple[float, float]]:
-    match = SIZE_RE.search(txt)
-    if not match:
-        return None
-    width = frac_to_float(match.group(1))
-    length = frac_to_float(match.group(2))
-    return width, length
-
-
-def parse_bar_dimensions(text: str) -> Optional[Tuple[float, float, float]]:
-    """Extract thickness, width, and length measurements from a table row."""
-
-    dims: dict[str, float] = {}
-    for match in DIM_WITH_LABEL_RE.finditer(text):
-        value = frac_to_float(match.group(1))
-        label = match.group(2).lower()
-        if "thick" in label or "tall" in label:
-            dims.setdefault("thickness", value)
-        elif "width" in label or "wide" in label:
-            dims.setdefault("width", value)
-        elif "length" in label or "long" in label:
-            dims.setdefault("length", value)
-        elif "height" in label:
-            dims.setdefault("thickness", value)
-    if {"thickness", "width", "length"}.issubset(dims.keys()):
-        return dims["thickness"], dims["width"], dims["length"]
-    return None
-
+    # last resort: keep digits & dot
+    m = re.findall(r'[\d.]+', s)
+    return float(m[0]) if m else 0.0
 
 def price_to_float(text: str) -> Optional[float]:
-    # Prefer a $-prefixed amount
-    m = re.search(r'\$\s*([0-9][0-9,]*(?:\.\d{2})?)', text)
-    if not m:
-        # Fallback to a bare number that looks like a price (last amount in the cell)
-        m = re.findall(r'([0-9][0-9,]*(?:\.\d{2})?)', text)
-        if not m:
-            return None
-        return float(m[-1].replace(',', ''))
-    return float(m.group(1).replace(',', ''))
+    s = str(text or "")
+    m = re.search(r'\$\s*([0-9][0-9,]*(?:\.\d{2})?)', s)
+    if m:
+        return float(m.group(1).replace(',', ''))
+    m2 = re.findall(r'([0-9][0-9,]*(?:\.\d{2})?)', s)
+    return float(m2[-1].replace(',', '')) if m2 else None
 
+def _ensure_browser():
+    global _PW, _BROWSER, _CONTEXT, _PAGE
+    if _PW is not None and _PAGE is not None:
+        return
+    if not _PLAYWRIGHT_AVAILABLE:
+        raise RuntimeError("Playwright not installed. Install with: pip install playwright && playwright install")
+    _PW = sync_playwright().start()
+    engine = (_BROWSER_ENGINE or "chromium").lower()
+    headless = not _HEADFUL
+    slow_mo = int(_SLOWMO or 0)
+    if engine in ("msedge", "edge"):
+        _BROWSER = _PW.chromium.launch(channel="msedge", headless=headless, slow_mo=slow_mo)
+    elif engine in ("chrome", "google-chrome"):
+        _BROWSER = _PW.chromium.launch(channel="chrome", headless=headless, slow_mo=slow_mo)
+    elif engine == "chromium":
+        _BROWSER = _PW.chromium.launch(headless=headless, slow_mo=slow_mo)
+    elif engine == "firefox":
+        _BROWSER = _PW.firefox.launch(headless=headless, slow_mo=slow_mo)
+    elif engine == "webkit":
+        _BROWSER = _PW.webkit.launch(headless=headless, slow_mo=slow_mo)
+    else:
+        _BROWSER = _PW.chromium.launch(headless=headless, slow_mo=slow_mo)
+    ctx_kwargs = {
+        "java_script_enabled": not _DISABLE_JS,
+        "extra_http_headers": HEADERS,
+    }
+    if _USER_DATA_DIR and engine in ("chromium", "msedge", "edge", "chrome", "google-chrome"):
+        # Use a persistent context to keep cookies, if requested
+        _CONTEXT = _PW.chromium.launch_persistent_context(_USER_DATA_DIR, channel=("msedge" if engine in ("msedge","edge") else ("chrome" if engine in ("chrome","google-chrome") else None)), headless=headless, slow_mo=slow_mo, **ctx_kwargs)
+    else:
+        _CONTEXT = _BROWSER.new_context(**ctx_kwargs)
+    _PAGE = _CONTEXT.new_page()
 
-def closest_bigger(target_w: float, target_l: float, candidates: List[SheetOption]) -> Optional[SheetOption]:
-    fits = [candidate for candidate in candidates if candidate.width_in >= target_w and candidate.length_in >= target_l]
-    if not fits:
-        return None
-    fits.sort(key=lambda option: (option.width_in * option.length_in, option.width_in, option.length_in))
-    return fits[0]
-
-
-def closest_bigger_bar(
-    target_t: float, target_w: float, target_l: float, candidates: List[SheetOption]
-) -> Optional[SheetOption]:
-    fits = [
-        candidate
-        for candidate in candidates
-        if candidate.thickness_in >= target_t and candidate.width_in >= target_w and candidate.length_in >= target_l
-    ]
-    if not fits:
-        return None
-    fits.sort(
-        key=lambda option: (
-            option.thickness_in * option.width_in * option.length_in,
-            option.thickness_in,
-            option.width_in,
-            option.length_in,
-        )
-    )
-    return fits[0]
-
-
-def wait_for_prices(section, timeout: int = 15000) -> None:
-    section.locator('text=Sheets').first.wait_for(timeout=timeout)
-    table = section.locator('xpath=.//*[normalize-space(text())="Sheets"]/following::table[1]')
-    table.wait_for(timeout=timeout)
-    table.locator(':text-is("$")').first.wait_for(timeout=timeout)
-
-
-def extract_sheet_table(section, thickness_label: str) -> List[SheetOption]:
-    # Prefer the table following a heading labeled "Sheets"; fall back to any table containing prices
-    table = section.locator('xpath=.//*[normalize-space(text())="Sheets"]/following::table[1]')
-    rows = table.locator('tr')
+def browser_get(url: str, timeout=30000) -> str:
+    _ensure_browser()
+    _PAGE.goto(url, wait_until="load", timeout=timeout)
+    # Try to allow client-side rendering to finish
     try:
-        row_count = rows.count()
+        _PAGE.wait_for_load_state("networkidle", timeout=timeout)
     except Exception:
-        row_count = 0
-    _debug(f"initial rows.count={row_count}")
-    if row_count == 0:
-        try:
-            # Fallback: any table in this section with a dollar sign
-            fallback = section.locator('table').filter(has_text="$").first
-            if fallback.count() > 0:
-                table = fallback
-                rows = table.locator('tr')
-                _debug("using fallback table with '$' in text")
+        pass
+    # Give a short settle time and try to wait for any price text
+    try:
+        _PAGE.locator("text=/\\$\\s*[0-9]/").first.wait_for(timeout=2000)
+    except Exception:
+        time.sleep(0.5)
+    return _PAGE.content()
+
+def requests_get(url: str, timeout=20) -> str:
+    # Use a Session with retries & headers
+    s = requests.Session()
+    s.headers.update(HEADERS)
+    r = s.get(url, timeout=timeout)
+    if r.status_code == 403:
+        # propagate; caller will decide fallback
+        r.raise_for_status()
+    r.raise_for_status()
+    return r.text
+
+def get(url: str, timeout=20) -> str:
+    mode = (GET_MODE or "auto").lower()
+    if mode == "requests":
+        return requests_get(url, timeout=timeout)
+    if mode == "browser":
+        return browser_get(url)
+    # auto: try requests, if 403 then browser
+    try:
+        return requests_get(url, timeout=timeout)
+    except requests.HTTPError as e:
+        if getattr(e.response, "status_code", None) == 403:
+            return browser_get(url)
+        raise
+
+def textify(html: str) -> str:
+    soup = BeautifulSoup(html, "lxml")
+    return soup.get_text("\n", strip=True)
+
+def lines(html: str) -> List[str]:
+    txt = textify(html)
+    return [ln for ln in (ln.strip() for ln in txt.splitlines()) if ln]
+
+# ---------- MIC-6 (sheet/plate) ----------
+
+MIC6_SIZE_PRICE_RE = re.compile(
+    r'(?P<w>(?:\d+(?:\.\d+)?|\d+\s*/\s*\d+))\s*["″]\s*[×xX]\s*'
+    r'(?P<l>(?:\d+(?:\.\d+)?|\d+\s*/\s*\d+))\s*["″].{0,80}?\$'
+    r'(?P<p>[0-9][0-9,]*\.\d{2})\s*ea\.', re.IGNORECASE
+)
+
+MIC6_THICK_TITLE_RE = re.compile(
+    r'(?P<t>(?:\d+(?:\.\d+)?|\d+\s*/\s*\d+))\s*["″]\s*Aluminum\s+Plate\s+MIC-6', re.IGNORECASE
+)
+
+def scrape_mic6(url: str = MIC6_URL) -> List[Dict]:
+    html = get(url)
+    raw = textify(html)
+    out: List[Dict] = []
+    # find all size/price matches and assign to nearest previous thickness heading
+    # build list of (pos, thickness_in) markers
+    thickness_markers: List[Tuple[int, float]] = []
+    for m in MIC6_THICK_TITLE_RE.finditer(raw):
+        thickness_markers.append((m.start(), frac_to_float(m.group('t'))))
+    # ensure sorted
+    thickness_markers.sort()
+    def nearest_thickness(pos: int) -> Optional[float]:
+        prev = None
+        for p,t in thickness_markers:
+            if p <= pos:
+                prev = (p,t)
             else:
-                # Last resort: first table in section
-                any_table = section.locator('table').first
-                if any_table.count() > 0:
-                    table = any_table
-                    rows = table.locator('tr')
-                    _debug("using first table in section as last resort")
-        except Exception as e:
-            _debug(f"fallback selection failed: {e}")
+                break
+        return prev[1] if prev else None
 
-    options: List[SheetOption] = []
-    current_label: Optional[str] = None
-    current_dims: Optional[Tuple[float, float]] = None
-
-    row_count = rows.count()
-    _debug(f"final rows.count={row_count}")
-    for index in range(row_count):
-        row = rows.nth(index)
-        text = row.inner_text().strip()
-        dimensions = parse_size_label(text)
-        if dimensions:
-            current_label = SIZE_RE.search(text).group(0)
-            current_dims = dimensions
+    for m in MIC6_SIZE_PRICE_RE.finditer(raw):
+        w = frac_to_float(m.group('w'))
+        l = frac_to_float(m.group('l'))
+        p = price_to_float(m.group('p'))
+        t = nearest_thickness(m.start())
+        if t is None or p is None:
             continue
-        if not current_label or not current_dims:
-            continue
-        if thickness_label not in text:
-            continue
-
-        cells = row.locator('td')
-
-        try:
-            last_cell_text = cells.nth(cells.count() - 1).inner_text().strip()
-        except PWTimeout:
-            last_cell_text = text
-
-        price_value = price_to_float(last_cell_text) or price_to_float(text) or -1.0
-        price_text = last_cell_text if '$' in last_cell_text else (re.search(r'\$.*', text).group(0) if re.search(r'\$.*', text) else last_cell_text)
-
-        options.append(
-            SheetOption(
-                size_label=current_label,
-                width_in=current_dims[0],
-                length_in=current_dims[1],
-                thickness_in=frac_to_float(thickness_label),
-                price_text=price_text,
-                price_value=price_value,
-                row_text=text,
-            )
+        out.append({
+            "material": "MIC6",
+            "thickness_in": t,
+            "width_in": w,
+            "length_in": l,
+            "price_each": p,
+            "source_url": url
+        })
+    # Fallback extraction if nothing matched: be more permissive around price and dims
+    if not out:
+        dim_re = re.compile(
+            r'(?P<w>(?:\d+(?:\.\d+)?|\d+\s*/\s*\d+))\s*(?:["”]?|in\.?)?\s*(?:[xX×])\s*'
+            r'(?P<l>(?:\d+(?:\.\d+)?|\d+\s*/\s*\d+))\s*(?:["”]?|in\.?)?',
+            re.IGNORECASE,
         )
-
-    _debug(f"extracted {len(options)} options for thickness '{thickness_label}'")
-    return options
-
-
-def extract_bar_table(section) -> List[SheetOption]:
-    table = section.locator('table').first
-    rows = table.locator('tr')
-    options: List[SheetOption] = []
-    row_count = rows.count()
-    for index in range(row_count):
-        row = rows.nth(index)
-        text = row.inner_text().strip()
-        dims = parse_bar_dimensions(text)
-        if not dims:
-            continue
-        thickness, width, length = dims
-        cells = row.locator('td')
-        try:
-            last_cell_text = cells.nth(cells.count() - 1).inner_text().strip()
-        except PWTimeout:
-            last_cell_text = text
-        price_value = price_to_float(last_cell_text) or price_to_float(text) or -1.0
-        price_text = last_cell_text if '$' in last_cell_text else (re.search(r'\$.*', text).group(0) if re.search(r'\$.*', text) else last_cell_text)
-        options.append(
-            SheetOption(
-                size_label=f"{thickness}\" × {width}\" × {length}\"",
-                width_in=width,
-                length_in=length,
-                thickness_in=thickness,
-                price_text=price_text,
-                price_value=price_value,
-                row_text=text,
-            )
+        price_re = re.compile(r'\$\s*([0-9][0-9,]*(?:\.\d{2})?)\s*(?:ea\.?|each)?', re.IGNORECASE)
+        # rebuild thickness markers using a looser title pattern
+        thick_re = re.compile(
+            r'(?P<t>(?:\d+(?:\.\d+)?|\d+\s*/\s*\d+))\s*(?:["”]?|in\.?)?\s+(?:Aluminum|Cast)\b.*?MIC[\-\s]?6',
+            re.IGNORECASE,
         )
-    return options
-
-
-def _find_section_with_keywords(page, *keywords: str):
-    lowered = [kw.lower() for kw in keywords]
-    sections = page.locator('section')
-    count = sections.count()
-    for index in range(count):
-        section = sections.nth(index)
-        try:
-            heading = section.locator('h3').first.inner_text().strip()
-        except Exception:
-            continue
-        heading_lower = heading.lower()
-        if all(keyword in heading_lower for keyword in lowered):
-            return section
-    return None
-
-
-def _score_button(label: str, candidate: str) -> int:
-    return fuzz.partial_ratio(label.lower(), candidate.lower())
-
-
-def click_filter_buttons(page, labels: List[str]) -> None:
-    for label in labels:
-        # Try robust role-based matching first
-        locator = page.get_by_role("button", name=label)
-        if locator.count() == 0:
-            # Fallback: :has-text with single quotes to allow inch (") characters
-            locator = page.locator(f"button:has-text('{label}')")
-        if locator.count() == 0:
-            # Fallback: :has-text with escaped double quotes
-            safe = label.replace('"', '\\"')
-            locator = page.locator(f'button:has-text("{safe}")')
-        if locator.count() == 0:
-            # Last resort: fuzzy match over all buttons
-            buttons = page.locator('button')
-            best_index = -1
-            best_score = 0
-            for i in range(buttons.count()):
-                candidate_text = buttons.nth(i).inner_text().strip()
-                score = _score_button(label, candidate_text)
-                if score > best_score:
-                    best_score = score
-                    best_index = i
-            if best_index >= 0 and best_score >= 75:
-                locator = buttons.nth(best_index)
-        if locator.count() > 0:
-            locator.first.click()
-            page.wait_for_timeout(300)
-
-
-def maybe_accept_cookies(page) -> None:
-    """Best-effort acceptance of cookie/location banners to reveal prices."""
-    try:
-        candidates = [
-            "Accept",
-            "I Agree",
-            "Agree",
-            "OK",
-            "Got it",
-            "Allow",
-            "Continue",
-            "Close",
-        ]
-        for label in candidates:
-            btn = page.get_by_role("button", name=label)
-            if btn.count() > 0:
-                try:
-                    btn.first.click()
-                    page.wait_for_timeout(500)
-                except Exception:
-                    pass
-    except Exception:
-        pass
-
-
-def _raise_if_restricted(page, url: str) -> None:
-    """Detect McMaster's access restriction wall and raise a helpful error."""
-
-    if page.locator('text=Access has been restricted').count() > 0:
-        raise RuntimeError(
-            "McMaster has temporarily restricted automated access for this browser session. "
-            "Open the scraper with --headful and --keep-open, log in manually, and allow the "
-            "script to save the resulting cookies using --state-file so subsequent headless "
-            "runs reuse that session. You may also need to wait before retrying."
-            f" (while visiting {url})"
-        )
-
-
-def extract_candidates(page, section_selector: str, thickness_label: str) -> List[SheetOption]:
-    section = page.locator(section_selector)
-    wait_for_prices(section)
-    candidates = extract_sheet_table(section, thickness_label)
-    if not candidates:
-        raise RuntimeError(
-            f'No price rows found for thickness {thickness_label}. The site layout may have changed or prices are gated.'
-        )
-    return candidates
-
-
-def parse_current_sheet_page(page, thickness_in: float, w_in: float, l_in: float) -> Dict:
-    thickness_label = to_frac_label(thickness_in)
-    section = _find_section_with_keywords(page, 'aluminum', 'tool', 'jig') or page.locator('section').first
-    try:
-        wait_for_prices(section, timeout=30000)
-    except Exception:
-        pass
-    candidates = extract_sheet_table(section, thickness_label)
-    if not candidates:
-        _debug("no candidates in section; falling back to body")
-        try:
-            candidates = extract_sheet_table(page.locator('body'), thickness_label)
-        except Exception as e:
-            _debug(f"body fallback failed: {e}")
-    best = closest_bigger(w_in, l_in, candidates) or closest_bigger(l_in, w_in, candidates)
-    if not best:
-        raise RuntimeError('No sheet found meeting/exceeding requested size on current page.')
-    return {
-        'product_family': 'Manual Page Parse',
-        'url': page.url,
-        'requested': {
-            'width_in': w_in,
-            'length_in': l_in,
-            'thickness_in': thickness_in,
-        },
-        'selected': {
-            'size_label': best.size_label,
-            'width_in': best.width_in,
-            'length_in': best.length_in,
-            'thickness_in': best.thickness_in,
-            'price_each_text': best.price_text,
-            'price_each_value': None if best.price_value < 0 else best.price_value,
-        },
-    }
-
-
-def parse_file_tool_jig(page, html_path: str, thickness_in: float, w_in: float, l_in: float) -> Dict:
-    # Accept Windows path or file:// URI; read file and set page content directly (fast, offline)
-    if isinstance(html_path, str) and html_path.lower().startswith('file://'):
-        p = Path(unquote(urlparse(html_path).path))
-    else:
-        p = Path(html_path)
-    html = p.read_text(encoding='utf-8', errors='ignore')
-
-    # Abort any accidental resource requests (defense in depth)
-    try:
-        page.route("**/*", lambda route: route.abort())
-    except Exception:
-        pass
-
-    page.set_content(html, wait_until="domcontentloaded")  # no navigation, no external loads
-    return parse_current_sheet_page(page, thickness_in, w_in, l_in)
-
-
-def scrape_tool_jig(page, material: str, thickness_in: float, w_in: float, l_in: float) -> Dict:
-    url = 'https://www.mcmaster.com/products/tool-and-jig-plates/'
-    page.goto(url, wait_until='networkidle')
-
-    _raise_if_restricted(page, url)
-
-    click_filter_buttons(page, ['Inch', 'Sheet'])
-    maybe_accept_cookies(page)
-    material = material.lower()
-    material_label = 'MIC6 Aluminum' if material.startswith('mic') else '5083 Aluminum'
-    click_filter_buttons(page, [material_label])
-
-    thickness_label = to_frac_label(thickness_in)
-    click_filter_buttons(page, [thickness_label])
-
-    heading = 'Easy-to-Machine MIC6' if 'MIC6' in material_label else 'Easy-to-Machine Cast Aluminum for Tool and Jig Plates'
-    section_selector = f'section:has(h3:has-text("{heading}"))'
-
-    try:
-        candidates = extract_candidates(page, section_selector, thickness_label)
-    except Exception:
-        # Fallback: try to locate a likely section by keywords if the exact heading changes
-        section = _find_section_with_keywords(page, 'aluminum', 'tool', 'jig')
-        if section is not None:
-            try:
-                wait_for_prices(section, timeout=30000)
-            except Exception:
-                pass
-            candidates = extract_sheet_table(section, thickness_label)
-        else:
-            # Last resort: scan the first section for any table we can parse
-            section = page.locator('section').first
-            try:
-                wait_for_prices(section, timeout=30000)
-            except Exception:
-                pass
-            candidates = extract_sheet_table(section, thickness_label)
-
-    best = closest_bigger(w_in, l_in, candidates) or closest_bigger(l_in, w_in, candidates)
-    if not best:
-        raise RuntimeError('No sheet found that meets or exceeds the requested dimensions.')
-
-    return {
-        'product_family': f'{material_label} Sheets',
-        'url': url,
-        'requested': {
-            'width_in': w_in,
-            'length_in': l_in,
-            'thickness_in': thickness_in,
-        },
-        'selected': {
-            'size_label': best.size_label,
-            'width_in': best.width_in,
-            'length_in': best.length_in,
-            'thickness_in': best.thickness_in,
-            'price_each_text': best.price_text,
-            'price_each_value': None if best.price_value < 0 else best.price_value,
-        },
-    }
-
-
-def scrape_a2(page, tolerance: str, thickness_in: float, w_in: float, l_in: float) -> Dict:
-    url = 'https://www.mcmaster.com/products/steel/material~a2-tool-steel/'
-    page.goto(url, wait_until='networkidle')
-
-    _raise_if_restricted(page, url)
-
-    click_filter_buttons(page, ['Inch', 'Sheet'])
-
-    thickness_label = to_frac_label(thickness_in)
-    click_filter_buttons(page, [thickness_label])
-
-    tolerance = (tolerance or 'tight').lower()
-    if 'tight' in tolerance:
-        heading = 'Tight-Tolerance Multipurpose Air-Hardening A2 Tool Steel Sheets and Bars'
-        family = 'A2 Tool Steel Sheets (Tight Tolerance)'
-    else:
-        heading = 'Oversized Multipurpose Air-Hardening A2 Tool Steel Sheets and Bars'
-        family = 'A2 Tool Steel Sheets (Oversized)'
-    section_selector = f'section:has(h3:has-text("{heading}"))'
-
-    candidates = extract_candidates(page, section_selector, thickness_label)
-
-    best = closest_bigger(w_in, l_in, candidates) or closest_bigger(l_in, w_in, candidates)
-    if not best:
-        raise RuntimeError('No sheet found that meets or exceeds the requested dimensions.')
-
-    return {
-        'product_family': family,
-        'url': url,
-        'requested': {
-            'width_in': w_in,
-            'length_in': l_in,
-            'thickness_in': thickness_in,
-        },
-        'selected': {
-            'size_label': best.size_label,
-            'width_in': best.width_in,
-            'length_in': best.length_in,
-            'thickness_in': best.thickness_in,
-            'price_each_text': best.price_text,
-            'price_each_value': None if best.price_value < 0 else best.price_value,
-        },
-    }
-
-
-def scrape_carbide_bar(page, thickness_in: float, w_in: float, l_in: float) -> Dict:
-    url = 'https://www.mcmaster.com/products/~/material~tungsten-carbide/shape~bar-1/?s=carbide'
-    page.goto(url, wait_until='networkidle')
-
-    _raise_if_restricted(page, url)
-
-    click_filter_buttons(page, ['Inch'])
-
-    section = _find_section_with_keywords(page, 'carbide', 'bar')
-    if section is None:
-        raise RuntimeError('Unable to locate tungsten carbide bar pricing section.')
-
-    candidates = extract_bar_table(section)
-    if not candidates:
-        raise RuntimeError('No tungsten carbide bar price rows found.')
-
-    best = closest_bigger_bar(thickness_in, w_in, l_in, candidates)
-    if not best:
-        # fall back to the largest available option to avoid failing hard
-        best = max(
-            candidates,
-            key=lambda option: option.thickness_in * option.width_in * option.length_in,
-        )
-
-    return {
-        'product_family': 'Tungsten Carbide Rectangular Bars',
-        'url': url,
-        'requested': {
-            'width_in': w_in,
-            'length_in': l_in,
-            'thickness_in': thickness_in,
-        },
-        'selected': {
-            'size_label': best.size_label,
-            'width_in': best.width_in,
-            'length_in': best.length_in,
-            'thickness_in': best.thickness_in,
-            'price_each_text': best.price_text,
-            'price_each_value': None if best.price_value < 0 else best.price_value,
-        },
-    }
-
-
-def _run_scraper_job(job, engine: str = 'chromium', headful: bool = False, state_file: Optional[str] = None, slow_mo: int = 0):
-    with sync_playwright() as pw:
-        if engine in ('chrome', 'msedge'):
-            browser = pw.chromium.launch(channel=engine, headless=not headful, slow_mo=slow_mo)
-        elif engine == 'firefox':
-            browser = pw.firefox.launch(headless=not headful, slow_mo=slow_mo)
-        elif engine == 'webkit':
-            browser = pw.webkit.launch(headless=not headful, slow_mo=slow_mo)
-        else:
-            browser = pw.chromium.launch(headless=not headful, slow_mo=slow_mo)
-
-        storage_state = state_file if (state_file and os.path.isfile(state_file)) else None
-        context = browser.new_context(
-            viewport={'width': 1400, 'height': 1000},
-            java_script_enabled=True,
-            storage_state=storage_state,
-        )
-        page = context.new_page()
-        try:
-            return job(page)
-        finally:
-            context.close()
-            browser.close()
-
-
-def _mass_kg_from_dimensions(thickness_in: float, width_in: float, length_in: float, density_g_cc: float) -> float:
-    volume_in3 = max(0.0, thickness_in) * max(0.0, width_in) * max(0.0, length_in)
-    mass_g = volume_in3 * IN3_TO_CC * max(0.0, density_g_cc)
-    return mass_g / 1000.0
-
-
-def _compute_unit_prices_from_result(result: Dict, density_g_cc: float) -> Optional[Dict[str, float]]:
-    selected = result.get('selected') or {}
-    price_each = selected.get('price_each_value')
-    if price_each in (None, -1.0):
-        price_each = price_to_float(selected.get('price_each_text', ''))
-    if price_each in (None, -1.0):
-        return None
-
-    try:
-        thickness = float(selected.get('thickness_in'))
-        width = float(selected.get('width_in'))
-        length = float(selected.get('length_in'))
-    except Exception:
-        return None
-
-    mass_kg = _mass_kg_from_dimensions(thickness, width, length, density_g_cc)
-    if mass_kg <= 0:
-        return None
-
-    usd_per_kg = float(price_each) / mass_kg
-    usd_per_lb = usd_per_kg / LB_PER_KG
-    return {
-        'usd_per_kg': usd_per_kg,
-        'usd_per_lb': usd_per_lb,
-        'price_each': float(price_each),
-        'mass_kg': mass_kg,
-    }
-
-
-def get_standard_stock_unit_prices(material_name: str) -> Optional[Dict[str, float | str]]:
-    """Scrape McMaster for representative stock and convert to unit pricing."""
-
-    name = (material_name or '').lower()
-    specs = [
-        {
-            'key': 'aluminum',
-            'match': lambda n: any(token in n for token in ('alum', '5083', 'mic6', '6061')),
-            'job': lambda page: scrape_tool_jig(page, '5083', 0.5, 12.0, 12.0),
-            'density_g_cc': 2.66,
-        },
-        {
-            'key': 'tool_steel',
-            'match': lambda n: 'tool' in n and 'steel' in n,
-            'job': lambda page: scrape_a2(page, 'tight', 0.5, 6.0, 18.0),
-            'density_g_cc': 7.85,
-        },
-        {
-            'key': 'carbide',
-            'match': lambda n: 'carbide' in n,
-            'job': lambda page: scrape_carbide_bar(page, 0.25, 1.0, 12.0),
-            'density_g_cc': 15.5,
-        },
-    ]
-
-    for spec in specs:
-        try:
-            if not spec['match'](name):
+        thickness_markers = []
+        for m in thick_re.finditer(raw):
+            thickness_markers.append((m.start(), frac_to_float(m.group('t'))))
+        thickness_markers.sort()
+        def nearest_thickness2(pos: int) -> Optional[float]:
+            prev = None
+            for p,t in thickness_markers:
+                if p <= pos:
+                    prev = (p,t)
+                else:
+                    break
+            return prev[1] if prev else None
+        for mp in price_re.finditer(raw):
+            p = float(mp.group(1).replace(',',''))
+            start = max(0, mp.start() - 300)
+            window = raw[start:mp.start()]
+            dm = None
+            for _dm in dim_re.finditer(window):
+                dm = _dm
+            if not dm:
                 continue
+            w = frac_to_float(dm.group('w'))
+            l = frac_to_float(dm.group('l'))
+            t = nearest_thickness2(mp.start())
+            if t is None:
+                continue
+            out.append({
+                "material": "MIC6",
+                "thickness_in": t,
+                "width_in": w,
+                "length_in": l,
+                "price_each": p,
+                "source_url": url
+            })
+    return out
+
+# ---------- A2 tool steel rectangle bar ----------
+
+A2_TITLE_RE = re.compile(
+    r'(?P<t>(?:\d+(?:\.\d+)?|\d+\s*/\s*\d+))\s*["″]\s*x\s*'
+    r'(?P<w>(?:\d+(?:\.\d+)?|\d+\s*/\s*\d+))\s*["″]\s*Tool\s*Steel\s*Rectangle\s*Bar\s*A2',
+    re.IGNORECASE
+)
+A2_LENGTH_PRICE_RE = re.compile(
+    r'(?P<len>(?:\d+(?:\.\d+)?|\d+\s*/\s*\d+))\s*["′ftin\)\( ]*-\s*\$'
+    r'(?P<p>[0-9][0-9,]*\.\d{2})\s*ea\.', re.IGNORECASE
+)
+
+def scrape_a2(url: str = A2_URL) -> List[Dict]:
+    html = get(url)
+    raw = textify(html)
+    out: List[Dict] = []
+    # We scan forward: whenever a title match appears, capture subsequent length/price lines until next title.
+    spans = list(A2_TITLE_RE.finditer(raw))
+    spans.append(re.compile(r'$').search(raw))  # sentinel end
+    for i in range(len(spans)-1):
+        m = spans[i]
+        t = frac_to_float(m.group('t')); w = frac_to_float(m.group('w'))
+        block = raw[m.end():spans[i+1].start()]
+        for mp in A2_LENGTH_PRICE_RE.finditer(block):
+            L = frac_to_float(mp.group('len'))
+            p = price_to_float(mp.group('p'))
+            if p is None:
+                continue
+            out.append({
+                "material": "A2",
+                "thickness_in": t,
+                "width_in": w,
+                "length_in": L,
+                "price_each": p,
+                "source_url": url
+            })
+    # Fallback: permissive scan if no matches
+    if not out:
+        # Find dimension titles with A2 and dimensions
+        title_re = re.compile(
+            r'(?:A2\s*Tool\s*Steel).*?(?:Rectangle\s*Bar)?[^\n]{0,120}?'
+            r'(?P<t>(?:\d+(?:\.\d+)?|\d+\s*/\s*\d+))\s*(?:["”]?|in\.?)?\s*(?:[xX×])\s*'
+            r'(?P<w>(?:\d+(?:\.\d+)?|\d+\s*/\s*\d+))',
+            re.IGNORECASE,
+        )
+        lp_re = re.compile(
+            r'(?P<len>(?:\d+(?:\.\d+)?|\d+\s*/\s*\d+))\s*(?:["”]?|in\.?|ft)?\s*(?:-|–|—)?\s*\$\s*'
+            r'(?P<p>[0-9][0-9,]*(?:\.\d{2})?)\s*(?:ea\.?|each)?',
+            re.IGNORECASE,
+        )
+        titles = list(title_re.finditer(raw))
+        titles.append(re.compile(r'$').search(raw))
+        for i in range(len(titles)-1):
+            m = titles[i]
+            t = frac_to_float(m.group('t')); w = frac_to_float(m.group('w'))
+            block = raw[m.end():titles[i+1].start()]
+            for mp in lp_re.finditer(block):
+                L = frac_to_float(mp.group('len'))
+                p = float(mp.group('p').replace(',',''))
+                out.append({
+                    "material": "A2",
+                    "thickness_in": t,
+                    "width_in": w,
+                    "length_in": L,
+                    "price_each": p,
+                    "source_url": url
+                })
+    return out
+
+# ---------- Tungsten Carbide rectangle bar ----------
+
+HREF_RE = re.compile(r'href=["\'](?P<h>[^"\']+)["\']')
+
+def absolute(url: str, href: str) -> str:
+    if href.startswith('http'):
+        return href
+    base = "https://www.onlinemetals.com"
+    if href.startswith('/'):
+        return base + href
+    # category pages use absolute paths; fallback:
+    return base + '/' + href
+
+def scrape_carbide(category_url: str = CARBIDE_CAT_URL, max_items: int = 100) -> List[Dict]:
+    """Collect product links from the carbide rectangle bar category (both C2 & micrograin),
+    then open product pages to read price and dimensions."""
+    out: List[Dict] = []
+    html = get(category_url)
+    # collect product hrefs
+    hrefs = set()
+    for h in HREF_RE.findall(html):
+        if '/en/buy/tungsten-carbide/' in h and ('rectangle-bar' in h or 'rectangle' in h) and '/pid/' in h:
+            hrefs.add(absolute(category_url, h))
+    href_list = list(hrefs)[:max_items]
+    for idx, h in enumerate(href_list):
+        time.sleep(0.6)  # be polite
+        try:
+            ph = get(h)
         except Exception:
             continue
+        txt = textify(ph)
+        # price near "ea."
+        pm = re.search(r'\$[ \t]*([0-9][0-9,]*\.\d{2})\s*ea\.', txt, re.IGNORECASE)
+        price = float(pm.group(1).replace(',', '')) if pm else None
+        # dimensions list (Thickness, Width) often shown
+        tm = re.search(r'Thickness:\s*([0-9/.\s″"]+)', txt, re.IGNORECASE)
+        wm = re.search(r'Width:\s*([0-9/.\s″"]+)', txt, re.IGNORECASE)
+        t = frac_to_float(tm.group(1)) if tm else None
+        w = frac_to_float(wm.group(1)) if wm else None
+        # some pages include length; grab if present
+        lm = re.search(r'Length:\s*([0-9/.\s″"]+)', txt, re.IGNORECASE)
+        L = frac_to_float(lm.group(1)) if lm else None
+        if price is None or t is None or w is None:
+            continue
+        out.append({
+            "material": "Carbide",
+            "grade": "C2_or_StandardMicrograin",
+            "thickness_in": t,
+            "width_in": w,
+            "length_in": L,
+            "price_each": price,
+            "source_url": h
+        })
+    return out
 
-        result = _run_scraper_job(spec['job'])
-        unit_prices = _compute_unit_prices_from_result(result, spec['density_g_cc'])
-        if not unit_prices:
-            return None
-        unit_prices['source'] = f"mcmaster:{result.get('product_family', spec['key'])}"
-        if result.get('url'):
-            unit_prices['url'] = result['url']
-        unit_prices['product_family'] = result.get('product_family')
-        unit_prices['requested'] = result.get('requested')
-        return unit_prices
+# ---------- selection helpers ----------
 
-    return None
+def closest_bigger_sheet(rows: List[Dict], t_in: float, w_in: float, l_in: float) -> Optional[Dict]:
+    cands = [r for r in rows if abs(r['thickness_in'] - t_in) < 1e-6 and r['width_in'] >= w_in and r['length_in'] >= l_in]
+    if not cands:
+        # allow rotation
+        cands = [r for r in rows if abs(r['thickness_in'] - t_in) < 1e-6 and r['width_in'] >= l_in and r['length_in'] >= w_in]
+        rotated = True
+    else:
+        rotated = False
+    if not cands:
+        return None
+    cands.sort(key=lambda r: (r['width_in']*r['length_in'], r['price_each']))
+    sel = dict(cands[0])
+    sel['rotated'] = rotated
+    return sel
 
+def closest_a2_bar(rows: List[Dict], t_in: float, w_in: float, L_in: float) -> Optional[Dict]:
+    # choose smallest width >= requested and length >= requested at exact thickness
+    cands = [r for r in rows if abs(r['thickness_in'] - t_in) < 1e-6 and r['width_in'] >= w_in and r['length_in'] >= L_in]
+    if not cands:
+        # allow taller bar rotated (swap w with t) -> generally not applicable; skip
+        return None
+    cands.sort(key=lambda r: (r['width_in'], r['length_in'], r['price_each']))
+    return cands[0]
 
-def parse_arguments() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description='Scrape McMaster-Carr for the smallest sheet larger than requested dimensions.'
-    )
-    subparsers = parser.add_subparsers(dest='mode', required=True)
+def closest_carbide_bar(rows: List[Dict], t_in: float, w_in: float) -> Optional[Dict]:
+    cands = [r for r in rows if abs(r['thickness_in'] - t_in) < 1e-6 and r['width_in'] >= w_in]
+    if not cands:
+        cands = [r for r in rows if r['thickness_in'] >= t_in and r['width_in'] >= w_in]
+    if not cands:
+        return None
+    cands.sort(key=lambda r: (r['thickness_in'], r['width_in'], r['price_each']))
+    return cands[0]
 
-    tooling = subparsers.add_parser('tool_jig', help='Cast tooling plate sheets (MIC6 or 5083).')
-    tooling.add_argument('--material', choices=['5083', 'mic6'], default='5083')
-    tooling.add_argument('--thickness', required=True, help='Thickness in inches (e.g., 0.5 or "1/2").')
-    tooling.add_argument('--width', type=float, required=True, help='Target width in inches.')
-    tooling.add_argument('--length', type=float, required=True, help='Target length in inches.')
+# ---------- CLI ----------
 
-    a2 = subparsers.add_parser('a2', help='A2 tool steel sheets.')
-    a2.add_argument('--tolerance', choices=['tight', 'oversized'], default='tight')
-    a2.add_argument('--thickness', required=True, help='Thickness in inches (e.g., 0.375 or "3/8").')
-    a2.add_argument('--width', type=float, required=True, help='Target width in inches.')
-    a2.add_argument('--length', type=float, required=True, help='Target length in inches.')
+def main():
+    ap = argparse.ArgumentParser(description="OnlineMetals scraper (requests + browser fallback)")
+    sub = ap.add_subparsers(dest="mode", required=True)
 
-    carbide = subparsers.add_parser('carbide', help='Tungsten carbide rectangular bars.')
-    carbide.add_argument('--thickness', required=True, help='Thickness in inches (e.g., 0.25 or "1/4").')
-    carbide.add_argument('--width', type=float, required=True, help='Target width in inches.')
-    carbide.add_argument('--length', type=float, required=True, help='Target length in inches.')
+    mic6 = sub.add_parser("mic6", help="Scrape MIC-6 category and pick a size")
+    mic6.add_argument("--width", type=float, required=True)
+    mic6.add_argument("--length", type=float, required=True)
+    mic6.add_argument("--thickness", required=True, help='inches, e.g. 0.5 or "1/2"')
+    mic6.add_argument("--url", default=MIC6_URL)
+    mic6.add_argument("--dump", action="store_true", help="Dump parsed rows as JSON instead of selecting")
 
-    file_tooling = subparsers.add_parser(
-        'file_tool_jig',
-        help='Parse a saved HTML of the Tool & Jig Plates page (offline).',
-    )
-    file_tooling.add_argument(
-        '--html',
-        required=True,
-        help='Path or file:// URI to a saved .html/.htm file (Webpage, Complete).',
-    )
-    file_tooling.add_argument('--thickness', required=True, help='Thickness in inches (e.g., 0.5 or "1/2").')
-    file_tooling.add_argument('--width', type=float, required=True, help='Target width in inches.')
-    file_tooling.add_argument('--length', type=float, required=True, help='Target length in inches.')
+    a2 = sub.add_parser("a2", help="Scrape A2 rectangle bar and pick a bar")
+    a2.add_argument("--thickness", required=True, help='inches, e.g. 0.0625 or "1/16"')
+    a2.add_argument("--width", type=float, required=True, help="bar width in inches")
+    a2.add_argument("--length", type=float, required=True, help="requested length, inches (choose 18 or 36 typically)")
+    a2.add_argument("--url", default=A2_URL)
+    a2.add_argument("--dump", action="store_true", help="Dump parsed rows as JSON instead of selecting")
 
-    parser.add_argument('--headful', action='store_true', help='Run visible browser (disable headless).')
-    parser.add_argument('--keep-open', action='store_true', help='Keep the browser open until you press Enter (headful only).')
-    parser.add_argument('--state-file', default='.playwright_state.json', help='Path to persist cookies/storage state for subsequent runs.')
-    parser.add_argument('--slowmo', type=int, default=0, help='Slow down headful actions by N ms for debugging (headful only).')
-    parser.add_argument(
-        '--engine',
-        choices=['chromium', 'chrome', 'msedge', 'firefox', 'webkit'],
-        default='chromium',
-        help='Browser engine/channel to use',
-    )
-    parser.add_argument('--user-data-dir', help='Path to a persistent Chrome/Edge/Chromium profile')
-    parser.add_argument('--disable-js', action='store_true', help='Disable JavaScript (useful for saved HTML files)')
-    parser.add_argument(
-        '--no-click',
-        action='store_true',
-        help='Manual mode: you navigate & filter; script only reads the table on the current page',
-    )
-    parser.add_argument('--start-url', help='If set, open this URL in the headful window (manual mode).')
-    parser.add_argument('--debug', action='store_true', help='Print parsing details to stderr')
-    return parser.parse_args()
+    carb = sub.add_parser("carbide", help="Scrape carbide rectangle bar product pages and pick a bar")
+    carb.add_argument("--thickness", required=True, help='inches, e.g. 0.25')
+    carb.add_argument("--width", type=float, required=True)
+    carb.add_argument("--category-url", default=CARBIDE_CAT_URL)
+    carb.add_argument("--dump", action="store_true", help="Dump parsed rows as JSON instead of selecting")
 
+    # global fetch controls
+    ap.add_argument("--dump", action="store_true", help="Dump parsed rows as JSON instead of selecting")
+    ap.add_argument("--sleep", type=float, default=0.8, help="delay between pages/requests (sec)")
+    ap.add_argument("--requests-only", action="store_true", help="Force Requests only (no browser)")
+    ap.add_argument("--browser", action="store_true", help="Force browser fetch (Playwright)")
+    ap.add_argument("--engine", choices=["chromium","msedge","chrome","firefox","webkit"], default="chromium")
+    ap.add_argument("--headful", action="store_true", help="Show the browser window when using Playwright")
+    ap.add_argument("--user-data-dir", default=None, help="Persistent profile dir for Playwright (keeps cookies)")
+    ap.add_argument("--disable-js", action="store_true", help="Disable JavaScript in Playwright context")
+    ap.add_argument("--slowmo", type=int, default=0, help="Playwright slow_mo in ms")
+    ap.add_argument("--debug-dir", default=None, help="If set, dump rendered text/HTML for debugging to this directory")
 
-def main() -> None:
-    args = parse_arguments()
-    # Expose for helper functions that need CLI switches
-    globals()['CLI_ARGS'] = args
-    thickness_in = frac_to_float(str(args.thickness))
+    args = ap.parse_args()
 
-    with sync_playwright() as playwright:
-        headful = bool(getattr(args, 'headful', False))
-        slow_mo = int(getattr(args, 'slowmo', 0)) if headful else 0
-        engine = getattr(args, 'engine', 'chromium')
-
-        persistent = bool(getattr(args, 'user_data_dir', None)) and engine in ('chromium', 'chrome', 'msedge')
-        browser = None
-        context = None
-        result = None
-
+    # Set globals for fetch mode
+    global GET_MODE, _BROWSER_ENGINE, _HEADFUL, _USER_DATA_DIR, _DISABLE_JS, _SLOWMO
+    if args.requests_only:
+        GET_MODE = "requests"
+    elif args.browser:
+        GET_MODE = "browser"
+    else:
+        GET_MODE = "auto"
+    _BROWSER_ENGINE = args.engine
+    _HEADFUL = bool(args.headful)
+    _USER_DATA_DIR = args.user_data_dir
+    _DISABLE_JS = bool(args.disable_js)
+    _SLOWMO = int(args.slowmo or 0)
+    global DEBUG_DIR
+    DEBUG_DIR = args.debug_dir
+    # Initialize debug directory early if requested
+    if DEBUG_DIR:
         try:
-            if persistent:
-                context = playwright.chromium.launch_persistent_context(
-                    args.user_data_dir,
-                    channel=engine if engine in ('chrome', 'msedge') else None,
-                    headless=not headful,
-                    slow_mo=slow_mo,
-                    viewport={'width': 1400, 'height': 1000},
-                )
-            else:
-                if engine in ('chrome', 'msedge'):
-                    browser = playwright.chromium.launch(channel=engine, headless=not headful, slow_mo=slow_mo)
-                elif engine == 'firefox':
-                    browser = playwright.firefox.launch(headless=not headful, slow_mo=slow_mo)
-                elif engine == 'webkit':
-                    browser = playwright.webkit.launch(headless=not headful, slow_mo=slow_mo)
-                else:
-                    browser = playwright.chromium.launch(headless=not headful, slow_mo=slow_mo)
+            import os, json as _json
+            os.makedirs(DEBUG_DIR, exist_ok=True)
+            with open(os.path.join(DEBUG_DIR, "_debug_enabled.txt"), "w", encoding="utf-8") as f:
+                f.write("debug enabled\n")
+            with open(os.path.join(DEBUG_DIR, "_args.json"), "w", encoding="utf-8") as f:
+                f.write(_json.dumps(vars(args), indent=2, default=str))
+        except Exception:
+            pass
 
-                storage_state = None
-                try:
-                    # If a previous state file exists, reuse it so prices are visible without prompting again
-                    if args.state_file and os.path.isfile(args.state_file):
-                        storage_state = args.state_file
-                except Exception:
-                    storage_state = None
+    if args.mode == "mic6":
+        t = frac_to_float(args.thickness)
+        rows = scrape_mic6(args.url)
+        if args.dump:
+            print(json.dumps(rows, indent=2)); return
+        sel = closest_bigger_sheet(rows, t, args.width, args.length)
+        out = {
+            "ok": bool(sel),
+            "requested": {"material": "MIC6", "thickness_in": t, "width_in": args.width, "length_in": args.length},
+            "selected": sel,
+            "source": {"url": args.url}
+        }
+        print(json.dumps(out, indent=2)); return
 
-                context = browser.new_context(
-                    viewport={'width': 1400, 'height': 1000},
-                    java_script_enabled=not bool(getattr(args, 'disable_js', False)),
-                    storage_state=storage_state,
-                )
+    if args.mode == "a2":
+        t = frac_to_float(args.thickness)
+        rows = scrape_a2(args.url)
+        if args.dump:
+            print(json.dumps(rows, indent=2)); return
+        sel = closest_a2_bar(rows, t, args.width, args.length)
+        out = {
+            "ok": bool(sel),
+            "requested": {"material": "A2", "thickness_in": t, "width_in": args.width, "length_in": args.length},
+            "selected": sel,
+            "source": {"url": args.url}
+        }
+        print(json.dumps(out, indent=2)); return
 
-            if getattr(args, 'no_click', False) and not headful:
-                raise RuntimeError('--no-click requires --headful (so you can drive the page manually).')
+    if args.mode == "carbide":
+        t = frac_to_float(args.thickness)
+        rows = scrape_carbide(args.category_url)
+        if args.dump:
+            print(json.dumps(rows, indent=2)); return
+        sel = closest_carbide_bar(rows, t, args.width)
+        out = {
+            "ok": bool(sel),
+            "requested": {"material": "Carbide", "thickness_in": t, "width_in": args.width},
+            "selected": sel,
+            "source": {"url": args.category_url}
+        }
+        print(json.dumps(out, indent=2)); return
 
-            page = context.new_page()
+## main() entry is moved to end of file so all helpers are defined first
 
-            if headful and getattr(args, 'no_click', False):
-                if getattr(args, 'start_url', None):
-                    page.goto(args.start_url, wait_until='domcontentloaded')
-                print(
-                    'Manual mode: Use the visible browser to navigate and apply filters yourself. '
-                    'When the table with prices is visible, return here and press Enter…'
-                )
-                input()
-                if args.mode == 'tool_jig':
-                    result = parse_current_sheet_page(page, thickness_in, args.width, args.length)
-                else:
-                    raise RuntimeError('Manual mode parser currently only supports tool_jig scraping.')
-            else:
-                if args.mode == 'tool_jig':
-                    result = scrape_tool_jig(page, args.material, thickness_in, args.width, args.length)
-                elif args.mode == 'a2':
-                    result = scrape_a2(page, args.tolerance, thickness_in, args.width, args.length)
-                elif args.mode == 'file_tool_jig':
-                    result = parse_file_tool_jig(page, args.html, thickness_in, args.width, args.length)
-                else:
-                    result = scrape_carbide_bar(page, thickness_in, args.width, args.length)
-        except PWTimeout as exc:
-            print(
-                'Timed out waiting for prices. If you see items but no prices, McMaster may require a location cookie or login.',
-                file=sys.stderr,
+
+# --- pagination helper ---
+def collect_pages(start_url: str, max_pages: int = 20) -> List[str]:
+    """Return a list of category page URLs to fetch (start + discovered)."""
+    visited = set()
+    queue = [start_url]
+    out = []
+    while queue and len(out) < max_pages:
+        url = queue.pop(0)
+        if url in visited: 
+            continue
+        visited.add(url)
+        out.append(url)
+        try:
+            html = get(url)
+        except Exception:
+            continue
+        # discover "next" style links
+        for h in HREF_RE.findall(html):
+            ah = absolute(url, h)
+            if ('/en/buy/' in ah and ('?p=' in ah or '?page=' in ah)) and ah.startswith(start_url.split('?')[0]):
+                if ah not in visited and ah not in queue and len(out)+len(queue) < max_pages:
+                    queue.append(ah)
+    return out
+
+def scrape_a2(url: str = A2_URL) -> List[Dict]:
+    pages = collect_pages(url, max_pages=12)  # first ~12 pages if present
+    out: List[Dict] = []
+    for page_index, u in enumerate(pages):
+        html = get(u); raw = textify(html)
+        if DEBUG_DIR:
+            try:
+                import os
+                os.makedirs(DEBUG_DIR, exist_ok=True)
+                with open(os.path.join(DEBUG_DIR, f"a2_cat_{page_index}.txt"), "w", encoding="utf-8") as f:
+                    f.write(raw)
+                with open(os.path.join(DEBUG_DIR, f"a2_cat_{page_index}.html"), "w", encoding="utf-8") as f:
+                    f.write(html)
+            except Exception:
+                pass
+        spans = list(A2_TITLE_RE.finditer(raw))
+        spans.append(re.compile(r'$').search(raw))  # sentinel end
+        for i in range(len(spans)-1):
+            m = spans[i]
+            t = frac_to_float(m.group('t')); w = frac_to_float(m.group('w'))
+            block = raw[m.end():spans[i+1].start()]
+            for mp in A2_LENGTH_PRICE_RE.finditer(block):
+                L = frac_to_float(mp.group('len'))
+                p = price_to_float(mp.group('p'))
+                if p is None:
+                    continue
+                out.append({
+                    "material": "A2",
+                    "thickness_in": t,
+                    "width_in": w,
+                    "length_in": L,
+                    "price_each": p,
+                    "source_url": u
+                })
+        # Fallback on this page if nothing found
+        if not out:
+            title_re = re.compile(
+                r'(?:A2\s*Tool\s*Steel).*?(?:Rectangle\s*Bar)?[^\n]{0,120}?'
+                r'(?P<t>(?:\d+(?:\.\d+)?|\d+\s*/\s*\d+))\s*(?:["”]?|in\.?)?\s*(?:[xX×])\s*'
+                r'(?P<w>(?:\d+(?:\.\d+)?|\d+\s*/\s*\d+))',
+                re.IGNORECASE,
             )
-            raise exc
-        finally:
-            # Save storage state to reuse accepted cookies or login across runs
-            if not persistent:
-                try:
-                    if getattr(args, 'state_file', None) and context is not None:
-                        context.storage_state(path=args.state_file)
-                except Exception:
-                    pass
-            if headful and getattr(args, 'keep_open', False):
-                try:
-                    input('Headful browser is open. Press Enter to close...')
-                except Exception:
-                    pass
-            if context is not None:
-                context.close()
-            if browser is not None:
-                browser.close()
+            lp_re = re.compile(
+                r'(?P<len>(?:\d+(?:\.\d+)?|\d+\s*/\s*\d+))\s*(?:["”]?|in\.?|ft)?\s*(?:-|–|—)?\s*\$\s*'
+                r'(?P<p>[0-9][0-9,]*(?:\.\d{2})?)\s*(?:ea\.?|each)?',
+                re.IGNORECASE,
+            )
+            titles = list(title_re.finditer(raw))
+            titles.append(re.compile(r'$').search(raw))
+            for i in range(len(titles)-1):
+                m = titles[i]
+                t = frac_to_float(m.group('t')); w = frac_to_float(m.group('w'))
+                block = raw[m.end():titles[i+1].start()]
+                for mp in lp_re.finditer(block):
+                    L = frac_to_float(mp.group('len'))
+                    p = float(mp.group('p').replace(',',''))
+                    out.append({
+                        "material": "A2",
+                        "thickness_in": t,
+                        "width_in": w,
+                        "length_in": L,
+                        "price_each": p,
+                        "source_url": u
+                    })
+    if out:
+        return out
+    # Product-page fallback: follow product links and parse lengths/prices
+    def parse_a2_product(purl: str) -> List[Dict]:
+        try:
+            ph = get(purl)
+        except Exception:
+            return []
+        soup = BeautifulSoup(ph, "lxml")
+        txt = soup.get_text("\n", strip=True)
+        if DEBUG_DIR:
+            try:
+                import os, hashlib
+                os.makedirs(DEBUG_DIR, exist_ok=True)
+                h = hashlib.sha1(purl.encode()).hexdigest()[:8]
+                with open(os.path.join(DEBUG_DIR, f"a2_prod_{h}.txt"), "w", encoding="utf-8") as f:
+                    f.write(txt)
+            except Exception:
+                pass
+        # Try to find thickness/width
+        tm = re.search(r'Thickness:\s*([0-9/.\s�?3"]+)', txt, re.IGNORECASE)
+        wm = re.search(r'Width:\s*([0-9/.\s�?3"]+)', txt, re.IGNORECASE)
+        if tm and wm:
+            t = frac_to_float(tm.group(1)); w = frac_to_float(wm.group(1))
+        else:
+            # Try title form: A2 Tool Steel ... t x w
+            m = re.search(r'A2[^\n]{0,80}?(?:Rectangle|Rectangular)?\s*Bar[^\n]{0,80}?'
+                          r'(?P<t>[0-9/.\s]+)\s*(?:["”]?|in\.?)*\s*(?:x|×)\s*'
+                          r'(?P<w>[0-9/.\s]+)', txt, re.IGNORECASE)
+            if not m:
+                return []
+            t = frac_to_float(m.group('t')); w = frac_to_float(m.group('w'))
+        # Length/price pairs anywhere in text (near each other)
+        results: List[Dict] = []
+        for mp in re.finditer(r'(?P<len>(?:\d+(?:\.\d+)?|\d+\s*/\s*\d+))\s*(?:["”]?|in\.?|ft)\b.{0,40}?\$\s*(?P<p>[0-9][0-9,]*(?:\.\d{2})?)',
+                               txt, re.IGNORECASE | re.DOTALL):
+            L = frac_to_float(mp.group('len'))
+            price = float(mp.group('p').replace(',', ''))
+            results.append({
+                "material": "A2",
+                "thickness_in": t,
+                "width_in": w,
+                "length_in": L,
+                "price_each": price,
+                "source_url": purl
+            })
+        if results:
+            return results
+        # Fallback: a single price without explicit length
+        sp = re.search(r'(?:Starting\s+at|From)\s*\$\s*([0-9][0-9,]*(?:\.\d{2})?)', txt, re.IGNORECASE)
+        if sp:
+            price = float(sp.group(1).replace(',', ''))
+            return [{
+                "material": "A2",
+                "thickness_in": t,
+                "width_in": w,
+                "length_in": None,
+                "price_each": price,
+                "source_url": purl
+            }]
+        return []
 
-    json.dump(result, sys.stdout, indent=2)
-    print()
+    # Gather product links from category pages
+    hrefs = set()
+    for u in pages:
+        try:
+            html = get(u)
+        except Exception:
+            continue
+        for h in HREF_RE.findall(html):
+            ah = absolute(u, h)
+            if ('/en/buy/' in ah and '/pid/' in ah and 'tool-steel' in ah and 
+                (('rectangle' in ah) or ('rectangular' in ah) or ('bar' in ah))):
+                hrefs.add(ah)
+    href_list = list(hrefs)[:120]
+    if DEBUG_DIR:
+        try:
+            import os
+            os.makedirs(DEBUG_DIR, exist_ok=True)
+            with open(os.path.join(DEBUG_DIR, "a2_hrefs.txt"), "w", encoding="utf-8") as f:
+                for h in sorted(href_list):
+                    f.write(h+"\n")
+        except Exception:
+            pass
+    for h in href_list:
+        out.extend(parse_a2_product(h))
+    return out
 
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
