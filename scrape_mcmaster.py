@@ -6,8 +6,8 @@ import os
 import re
 import sys
 from dataclasses import dataclass
-import os
 from math import gcd
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from playwright.sync_api import TimeoutError as PWTimeout
@@ -347,6 +347,12 @@ def parse_current_sheet_page(page, thickness_in: float, w_in: float, l_in: float
     }
 
 
+def parse_file_tool_jig(page, html_path: str, thickness_in: float, w_in: float, l_in: float) -> Dict:
+    uri = Path(html_path).absolute().as_uri()
+    page.goto(uri, wait_until='domcontentloaded')
+    return parse_current_sheet_page(page, thickness_in, w_in, l_in)
+
+
 def scrape_tool_jig(page, material: str, thickness_in: float, w_in: float, l_in: float) -> Dict:
     url = 'https://www.mcmaster.com/products/tool-and-jig-plates/'
     page.goto(url, wait_until='networkidle')
@@ -625,6 +631,15 @@ def parse_arguments() -> argparse.Namespace:
     carbide.add_argument('--width', type=float, required=True, help='Target width in inches.')
     carbide.add_argument('--length', type=float, required=True, help='Target length in inches.')
 
+    file_tooling = subparsers.add_parser(
+        'file_tool_jig',
+        help='Parse a saved HTML of the Tool & Jig Plates page (offline).',
+    )
+    file_tooling.add_argument('--html', required=True, help='Path to a saved .html file (Webpage, Complete).')
+    file_tooling.add_argument('--thickness', required=True, help='Thickness in inches (e.g., 0.5 or "1/2").')
+    file_tooling.add_argument('--width', type=float, required=True, help='Target width in inches.')
+    file_tooling.add_argument('--length', type=float, required=True, help='Target length in inches.')
+
     parser.add_argument('--headful', action='store_true', help='Run visible browser (disable headless).')
     parser.add_argument('--keep-open', action='store_true', help='Keep the browser open until you press Enter (headful only).')
     parser.add_argument('--state-file', default='.playwright_state.json', help='Path to persist cookies/storage state for subsequent runs.')
@@ -641,6 +656,7 @@ def parse_arguments() -> argparse.Namespace:
         action='store_true',
         help='Manual mode: you navigate & filter; script only reads the table on the current page',
     )
+    parser.add_argument('--start-url', help='If set, open this URL in the headful window (manual mode).')
     return parser.parse_args()
 
 
@@ -693,12 +709,17 @@ def main() -> None:
                     storage_state=storage_state,
                 )
 
+            if getattr(args, 'no_click', False) and not headful:
+                raise RuntimeError('--no-click requires --headful (so you can drive the page manually).')
+
             page = context.new_page()
 
             if headful and getattr(args, 'no_click', False):
+                if getattr(args, 'start_url', None):
+                    page.goto(args.start_url, wait_until='domcontentloaded')
                 print(
-                    'Headful manual mode: open the exact McMaster page and set the filters you want. '
-                    'Press Enter once the table is visible…'
+                    'Manual mode: Use the visible browser to navigate and apply filters yourself. '
+                    'When the table with prices is visible, return here and press Enter…'
                 )
                 input()
                 if args.mode == 'tool_jig':
@@ -710,6 +731,8 @@ def main() -> None:
                     result = scrape_tool_jig(page, args.material, thickness_in, args.width, args.length)
                 elif args.mode == 'a2':
                     result = scrape_a2(page, args.tolerance, thickness_in, args.width, args.length)
+                elif args.mode == 'file_tool_jig':
+                    result = parse_file_tool_jig(page, args.html, thickness_in, args.width, args.length)
                 else:
                     result = scrape_carbide_bar(page, thickness_in, args.width, args.length)
         except PWTimeout as exc:
