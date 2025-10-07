@@ -25,6 +25,15 @@ IN3_TO_CC = 16.387064
 LB_PER_KG = 2.2046226218
 
 
+def _debug(msg: str) -> None:
+    try:
+        args = globals().get('CLI_ARGS', None)
+    except Exception:
+        args = None
+    if args is not None and getattr(args, 'debug', False):
+        print(f"[debug] {msg}", file=sys.stderr)
+
+
 @dataclass
 class SheetOption:
     size_label: str
@@ -140,14 +149,38 @@ def wait_for_prices(section, timeout: int = 15000) -> None:
 
 
 def extract_sheet_table(section, thickness_label: str) -> List[SheetOption]:
+    # Prefer the table following a heading labeled "Sheets"; fall back to any table containing prices
     table = section.locator('xpath=.//*[normalize-space(text())="Sheets"]/following::table[1]')
     rows = table.locator('tr')
+    try:
+        row_count = rows.count()
+    except Exception:
+        row_count = 0
+    _debug(f"initial rows.count={row_count}")
+    if row_count == 0:
+        try:
+            # Fallback: any table in this section with a dollar sign
+            fallback = section.locator('table').filter(has_text="$").first
+            if fallback.count() > 0:
+                table = fallback
+                rows = table.locator('tr')
+                _debug("using fallback table with '$' in text")
+            else:
+                # Last resort: first table in section
+                any_table = section.locator('table').first
+                if any_table.count() > 0:
+                    table = any_table
+                    rows = table.locator('tr')
+                    _debug("using first table in section as last resort")
+        except Exception as e:
+            _debug(f"fallback selection failed: {e}")
 
     options: List[SheetOption] = []
     current_label: Optional[str] = None
     current_dims: Optional[Tuple[float, float]] = None
 
     row_count = rows.count()
+    _debug(f"final rows.count={row_count}")
     for index in range(row_count):
         row = rows.nth(index)
         text = row.inner_text().strip()
@@ -183,6 +216,7 @@ def extract_sheet_table(section, thickness_label: str) -> List[SheetOption]:
             )
         )
 
+    _debug(f"extracted {len(options)} options for thickness '{thickness_label}'")
     return options
 
 
@@ -325,6 +359,12 @@ def parse_current_sheet_page(page, thickness_in: float, w_in: float, l_in: float
     except Exception:
         pass
     candidates = extract_sheet_table(section, thickness_label)
+    if not candidates:
+        _debug("no candidates in section; falling back to body")
+        try:
+            candidates = extract_sheet_table(page.locator('body'), thickness_label)
+        except Exception as e:
+            _debug(f"body fallback failed: {e}")
     best = closest_bigger(w_in, l_in, candidates) or closest_bigger(l_in, w_in, candidates)
     if not best:
         raise RuntimeError('No sheet found meeting/exceeding requested size on current page.')
@@ -348,7 +388,11 @@ def parse_current_sheet_page(page, thickness_in: float, w_in: float, l_in: float
 
 
 def parse_file_tool_jig(page, html_path: str, thickness_in: float, w_in: float, l_in: float) -> Dict:
-    uri = Path(html_path).absolute().as_uri()
+    # Accept either a Windows path or a file:// URI
+    if isinstance(html_path, str) and html_path.lower().startswith(('file://', 'http://', 'https://')):
+        uri = html_path
+    else:
+        uri = Path(html_path).absolute().as_uri()
     page.goto(uri, wait_until='domcontentloaded')
     return parse_current_sheet_page(page, thickness_in, w_in, l_in)
 
@@ -635,7 +679,11 @@ def parse_arguments() -> argparse.Namespace:
         'file_tool_jig',
         help='Parse a saved HTML of the Tool & Jig Plates page (offline).',
     )
-    file_tooling.add_argument('--html', required=True, help='Path to a saved .html file (Webpage, Complete).')
+    file_tooling.add_argument(
+        '--html',
+        required=True,
+        help='Path or file:// URI to a saved .html/.htm file (Webpage, Complete).',
+    )
     file_tooling.add_argument('--thickness', required=True, help='Thickness in inches (e.g., 0.5 or "1/2").')
     file_tooling.add_argument('--width', type=float, required=True, help='Target width in inches.')
     file_tooling.add_argument('--length', type=float, required=True, help='Target length in inches.')
@@ -651,12 +699,14 @@ def parse_arguments() -> argparse.Namespace:
         help='Browser engine/channel to use',
     )
     parser.add_argument('--user-data-dir', help='Path to a persistent Chrome/Edge/Chromium profile')
+    parser.add_argument('--disable-js', action='store_true', help='Disable JavaScript (useful for saved HTML files)')
     parser.add_argument(
         '--no-click',
         action='store_true',
         help='Manual mode: you navigate & filter; script only reads the table on the current page',
     )
     parser.add_argument('--start-url', help='If set, open this URL in the headful window (manual mode).')
+    parser.add_argument('--debug', action='store_true', help='Print parsing details to stderr')
     return parser.parse_args()
 
 
@@ -705,7 +755,7 @@ def main() -> None:
 
                 context = browser.new_context(
                     viewport={'width': 1400, 'height': 1000},
-                    java_script_enabled=True,
+                    java_script_enabled=not bool(getattr(args, 'disable_js', False)),
                     storage_state=storage_state,
                 )
 
