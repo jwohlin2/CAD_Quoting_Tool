@@ -161,8 +161,7 @@ def test_render_quote_does_not_duplicate_detail_lines() -> None:
     assert "Fixture Build (amortized)" in rendered
     assert "- Programmer (lot): 1.00 hr @ $75.00/hr" in rendered
     assert "- Build labor (lot): 0.50 hr @ $60.00/hr" in rendered
-    assert rendered.count("includes $200.00 extras") == 1
-    assert rendered.count("includes 1.67 hr extras") == 0
+    assert "includes $200.00 extras" not in rendered
     assert rendered.count("1.50 hr @ $120.00/hr") == 1
 
 

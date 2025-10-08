@@ -5022,18 +5022,27 @@ def render_quote(
         text = str(key or "").replace("_", " ").strip()
         return text.title() if text else ""
 
+    extra_detail_pattern = re.compile(r"^includes\b.*extras\b", re.IGNORECASE)
+
+    def _is_extra_segment(segment: str) -> bool:
+        return bool(extra_detail_pattern.match(segment))
+
     def _merge_detail(existing: str | None, new_bits: list[str]) -> str | None:
         segments: list[str] = []
         seen: set[str] = set()
         for bit in new_bits:
             seg = str(bit).strip()
-            if seg and seg not in seen:
+            if not seg or _is_extra_segment(seg):
+                continue
+            if seg not in seen:
                 segments.append(seg)
                 seen.add(seg)
         if existing:
             for segment in re.split(r";\s*", str(existing)):
                 seg = segment.strip()
-                if seg and seg not in seen:
+                if not seg or _is_extra_segment(seg):
+                    continue
+                if seg not in seen:
                     segments.append(seg)
                     seen.add(seg)
         if segments:
@@ -5090,7 +5099,6 @@ def render_quote(
             why_parts.extend([str(item).strip() for item in llm_explanation if str(item).strip()])
 
     # ---- material & stock (compact; shown only if we actually have data) -----
-    mat_lines = []
     if material:
         mass_g = material.get("mass_g")
         net_mass_g = material.get("mass_g_net")
@@ -5121,11 +5129,13 @@ def render_quote(
         )
 
         detail_lines: list[str] = []
+        total_material_cost: float | None = None
 
         if have_any:
-            mat_lines.append("Material & Stock")
-            mat_lines.append(divider)
-            if matcost or show_zeros: row("Material Cost (computed):", float(matcost or 0.0))
+            lines.append("Material & Stock")
+            lines.append(divider)
+            if matcost or show_zeros:
+                total_material_cost = float(matcost or 0.0)
             if scrap_credit_entered and scrap_credit:
                 credit_display = _m(scrap_credit)
                 if credit_display.startswith(currency):
@@ -5133,6 +5143,17 @@ def render_quote(
                 else:
                     credit_display = f"-{currency}{float(scrap_credit):,.2f}"
                 detail_lines.append(f"  Scrap Credit: {credit_display}")
+                scrap_credit_mass_lb = _coerce_float_or_none(
+                    material.get("scrap_credit_mass_lb")
+                )
+                scrap_credit_unit_price_lb = _coerce_float_or_none(
+                    material.get("scrap_credit_unit_price_usd_per_lb")
+                )
+                if scrap_credit_mass_lb and scrap_credit_unit_price_lb:
+                    detail_lines.append(
+                        "    based on "
+                        f"{float(scrap_credit_mass_lb):.2f} lb × {currency}{float(scrap_credit_unit_price_lb):,.2f} / lb"
+                    )
             net_mass_val = _coerce_float_or_none(net_mass_g)
             effective_mass_val = _coerce_float_or_none(mass_g)
             removal_mass_val = None
@@ -5238,10 +5259,22 @@ def render_quote(
             elif show_zeros:
                 write_line("Scrap Weight: 0 oz", "  ")
             if (net_mass_val and net_mass_val > 0) or show_zeros:
-                write_line(
-                    f"Net Weight: {_format_weight_lb_oz(net_mass_val)}",
-                    "  ",
+                detail_lines.append(
+                    f"  Net Weight: {_format_weight_lb_oz(net_mass_val)}"
                 )
+            with_scrap_mass = scrap_adjusted_mass_val
+            if with_scrap_mass is None:
+                with_scrap_mass = effective_mass_val if scrap else None
+            if with_scrap_mass is not None:
+                show_with_scrap = False
+                if net_mass_val:
+                    show_with_scrap = abs(float(with_scrap_mass) - float(net_mass_val)) > 0.05
+                else:
+                    show_with_scrap = bool(with_scrap_mass) or show_zeros
+                if show_with_scrap or show_zeros:
+                    detail_lines.append(
+                        f"  With Scrap: {_format_weight_lb_oz(with_scrap_mass)}"
+                    )
 
             if upg or unit_price_kg or unit_price_lb or show_zeros:
                 grams_per_lb = 1000.0 / LB_PER_KG
@@ -5278,12 +5311,12 @@ def render_quote(
             if not th_in:
                 th_in = 1.0
             stock_T = _fmt_dim(th_in)
-            mat_lines.append(f"  Stock used: {stock_L} × {stock_W} × {stock_T} in")
+            lines.append(f"  Stock used: {stock_L} × {stock_W} × {stock_T} in")
             if detail_lines:
-                mat_lines.extend(detail_lines)
-            mat_lines.append("")
-
-    lines.extend(mat_lines)
+                lines.extend(detail_lines)
+            if total_material_cost is not None:
+                row("Total Material Cost :", total_material_cost, indent="  ")
+            lines.append("")
 
     # ---- NRE / Setup costs ---------------------------------------------------
     lines.append("NRE / Setup Costs (per lot)")
@@ -5379,14 +5412,11 @@ def render_quote(
                 extra_val = 0.0
             if hr_val > 0:
                 detail_bits.append(f"{hr_val:.2f} hr @ ${rate_val:,.2f}/hr")
-            if abs(extra_val) > 1e-6:
-                if hr_val <= 1e-6 and rate_val > 0:
-                    extra_hours = extra_val / rate_val
-                    detail_bits.append(
-                        f"{extra_hours:.2f} hr @ ${rate_val:,.2f}/hr"
-                    )
-                else:
-                    detail_bits.append(f"includes ${extra_val:,.2f} extras")
+            if abs(extra_val) > 1e-6 and hr_val <= 1e-6 and rate_val > 0:
+                extra_hours = extra_val / rate_val
+                detail_bits.append(
+                    f"{extra_hours:.2f} hr @ ${rate_val:,.2f}/hr"
+                )
             proc_notes = applied_process.get(str(key).lower(), {}).get("notes")
             if proc_notes:
                 detail_bits.append("LLM: " + ", ".join(proc_notes))
@@ -7336,7 +7366,6 @@ def compute_quote_from_df(df: pd.DataFrame,
     for key, value in fallback_meta.items():
         material_detail_for_breakdown.setdefault(key, value)
     material_detail_for_breakdown["unit_price_per_g"] = float(unit_price_per_g or 0.0)
-    material_detail_for_breakdown["material_scrap_credit_entered"] = material_scrap_credit_entered
     if "unit_price_usd_per_kg" not in material_detail_for_breakdown and unit_price_per_g:
         material_detail_for_breakdown["unit_price_usd_per_kg"] = float(unit_price_per_g) * 1000.0
     material_detail_for_breakdown["material_direct_cost"] = material_direct_cost
@@ -7374,6 +7403,60 @@ def compute_quote_from_df(df: pd.DataFrame,
         material_detail_for_breakdown["material_direct_cost"] = material_direct_cost
         material_cost_before_credit = float(material_direct_cost)
         scrap_pct = effective_scrap
+
+    scrap_credit_from_weight = 0.0
+    scrap_credit_mass_lb = 0.0
+    scrap_credit_unit_price_lb = None
+    eff_mass_for_credit = _coerce_float_or_none(material_detail_for_breakdown.get("mass_g"))
+    if eff_mass_for_credit is None:
+        eff_mass_for_credit = _coerce_float_or_none(
+            material_detail_for_breakdown.get("effective_mass_g")
+        )
+    net_mass_for_credit = _coerce_float_or_none(
+        material_detail_for_breakdown.get("net_mass_g")
+    )
+    if net_mass_for_credit is None:
+        net_mass_for_credit = _coerce_float_or_none(
+            material_detail_for_breakdown.get("mass_g_net")
+        )
+    if eff_mass_for_credit is not None and net_mass_for_credit is not None:
+        scrap_mass_g = max(0.0, float(eff_mass_for_credit) - float(net_mass_for_credit))
+        if scrap_mass_g > 0:
+            scrap_credit_mass_lb = scrap_mass_g / 1000.0 * LB_PER_KG
+            scrap_credit_unit_price_lb = _coerce_float_or_none(
+                material_detail_for_breakdown.get("unit_price_usd_per_lb")
+            )
+            if scrap_credit_unit_price_lb is None:
+                scrap_credit_unit_price_kg = _coerce_float_or_none(
+                    material_detail_for_breakdown.get("unit_price_usd_per_kg")
+                )
+                if scrap_credit_unit_price_kg is not None:
+                    scrap_credit_unit_price_lb = float(scrap_credit_unit_price_kg) / LB_PER_KG
+            if scrap_credit_unit_price_lb is None:
+                unit_price_per_g_val = _coerce_float_or_none(
+                    material_detail_for_breakdown.get("unit_price_per_g")
+                )
+                if unit_price_per_g_val is not None:
+                    scrap_credit_unit_price_lb = float(unit_price_per_g_val) * (1000.0 / LB_PER_KG)
+            if scrap_credit_unit_price_lb is not None and scrap_credit_unit_price_lb > 0:
+                scrap_credit_from_weight = round(
+                    scrap_credit_mass_lb * float(scrap_credit_unit_price_lb), 2
+                )
+                material_detail_for_breakdown["material_scrap_credit_calculated"] = (
+                    scrap_credit_from_weight
+                )
+                material_detail_for_breakdown["scrap_credit_mass_lb"] = scrap_credit_mass_lb
+                material_detail_for_breakdown[
+                    "scrap_credit_unit_price_usd_per_lb"
+                ] = float(scrap_credit_unit_price_lb)
+
+    if scrap_credit_from_weight > 0:
+        material_scrap_credit = scrap_credit_from_weight
+        material_scrap_credit_entered = True
+
+    material_detail_for_breakdown["material_scrap_credit_entered"] = (
+        material_scrap_credit_entered
+    )
 
     if material_scrap_credit:
         credit_cap = min(material_scrap_credit, float(material_cost_before_credit))
@@ -9881,13 +9964,17 @@ def compute_quote_from_df(df: pd.DataFrame,
         seen: set[str] = set()
         for bit in detail_bits:
             seg = str(bit).strip()
-            if seg and seg not in seen:
+            if not seg or _is_extra_segment(seg):
+                continue
+            if seg not in seen:
                 merged_bits.append(seg)
                 seen.add(seg)
         if existing_detail:
             for segment in re.split(r";\s*", existing_detail):
                 seg = segment.strip()
-                if seg and seg not in seen:
+                if not seg or _is_extra_segment(seg):
+                    continue
+                if seg not in seen:
                     merged_bits.append(seg)
                     seen.add(seg)
         if merged_bits:
@@ -9905,9 +9992,6 @@ def compute_quote_from_df(df: pd.DataFrame,
             detail_bits.append(f"{hr:.2f} hr @ ${rate:,.2f}/hr")
         elif hr > 0:
             detail_bits.append(f"{hr:.2f} hr")
-
-        if abs(extra) > 1e-6:
-            detail_bits.append(f"includes ${extra:,.2f} extras")
 
         proc_notes = applied_process.get(key, {}).get("notes")
         if proc_notes:
