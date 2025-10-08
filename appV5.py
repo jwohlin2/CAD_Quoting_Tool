@@ -6332,22 +6332,30 @@ def compute_material_cost(
 
             if L_mm and W_mm and T_mm and (L_mm > 0) and (W_mm > 0) and (T_mm > 0):
                 try:
-                    sku, price_each, uom, _dims_in = lookup_sku_and_price_for_mm(
-                        material_name or symbol, float(L_mm), float(W_mm), float(T_mm), qty=1
+                    sku, price_each, uom, dims_in = lookup_sku_and_price_for_mm(
+                        material_name or symbol,
+                        float(L_mm),
+                        float(W_mm),
+                        float(T_mm),
+                        qty=1,
                     )
                 except Exception:
-                    sku, price_each, uom = None, None, None
-                if sku and price_each and isinstance(uom, str) and uom.lower().startswith("each"):
+                    sku, price_each, uom, dims_in = None, None, None, (None, None, None)
+                if sku and price_each and isinstance(uom, str) and uom.strip().lower() == "each":
                     norm_key = _normalize_lookup_key(material_name or symbol)
                     density_g_cc = (
                         MATERIAL_DENSITY_G_CC_BY_KEYWORD.get(norm_key)
                         or MATERIAL_DENSITY_G_CC_BY_KEY.get(symbol)
                         or MATERIAL_DENSITY_G_CC_BY_KEY.get(norm_key)
                     )
+                    dims_tuple = tuple(float(x) if x is not None else 0.0 for x in (dims_in or ()))
+                    if len(dims_tuple) != 3 or not all(val > 0 for val in dims_tuple):
+                        dims_tuple = (float(L_mm) / 25.4, float(W_mm) / 25.4, float(T_mm) / 25.4)
                     if density_g_cc and density_g_cc > 0:
-                        volume_cm3 = (float(L_mm) * float(W_mm) * float(T_mm)) / 1000.0
+                        L_stock_mm, W_stock_mm, T_stock_mm = (val * 25.4 for val in dims_tuple)
+                        volume_cm3 = (L_stock_mm * W_stock_mm * T_stock_mm) / 1000.0
                         stock_mass_kg = (volume_cm3 * float(density_g_cc)) / 1000.0
-                        if stock_mass_kg > 0:
+                        if stock_mass_kg and stock_mass_kg > 0:
                             usd_per_kg = float(price_each) / float(stock_mass_kg)
                             source = f"mcmaster_stock:{sku}"
                             basis_used = "usd_per_kg"
