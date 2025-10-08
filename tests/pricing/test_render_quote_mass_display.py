@@ -1,4 +1,29 @@
 import appV5
+from cad_quoter.pricing.materials import LB_PER_KG
+
+
+def _format_weight_lb_oz_for_test(mass_g: float | None) -> str:
+    grams = max(0.0, float(mass_g or 0.0))
+    if grams <= 0:
+        return "0 oz"
+    pounds_total = grams / 1000.0 * LB_PER_KG
+    total_ounces = pounds_total * 16.0
+    pounds = int(total_ounces // 16)
+    ounces = total_ounces - pounds * 16
+    precision = 1 if pounds > 0 or ounces >= 1.0 else 2
+    ounces = round(ounces, precision)
+    if ounces >= 16.0:
+        pounds += 1
+        ounces = 0.0
+    parts: list[str] = []
+    if pounds > 0:
+        parts.append(f"{pounds} lb" if pounds != 1 else "1 lb")
+    if ounces > 0 or pounds == 0:
+        ounce_text = f"{ounces:.{precision}f}".rstrip("0").rstrip(".")
+        if not ounce_text:
+            ounce_text = "0"
+        parts.append(f"{ounce_text} oz")
+    return " ".join(parts)
 
 
 def _base_totals() -> dict:
@@ -65,6 +90,26 @@ def test_render_quote_uses_net_mass_g_fallback() -> None:
     assert "Starting Weight: 32 lb 12.4 oz" in rendered
     assert "Scrap Weight: 8 lb 3.1 oz" in rendered
     assert "Net Weight: 24 lb 9.3 oz" in rendered
+
+
+def test_render_quote_omits_unlabeled_scrap_adjusted_mass() -> None:
+    start_g = 14866.489927078912
+    net_g = 11149.867445309184
+    material = {
+        "mass_g": start_g,
+        "effective_mass_g": start_g,
+        "net_mass_g": net_g,
+        "scrap_pct": 0.25,
+    }
+
+    rendered = appV5.render_quote(
+        _base_material_quote(material), currency="$", show_zeros=False
+    )
+
+    scrap_adjusted_mass = net_g * (1.0 - material["scrap_pct"])
+    unexpected_line = _format_weight_lb_oz_for_test(scrap_adjusted_mass)
+
+    assert unexpected_line not in rendered.splitlines()
 
 
 def _base_material_quote(material: dict) -> dict:
