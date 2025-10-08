@@ -46,6 +46,63 @@ def test_render_quote_shows_net_mass_when_scrap_present() -> None:
     assert "scrap-adjusted 0.26 lb" in mass_line
 
 
+def _base_material_quote(material: dict) -> dict:
+    return {
+        "price": 10.0,
+        "breakdown": {
+            "qty": 1,
+            "totals": _base_totals(),
+            "material": material,
+            "nre": {},
+            "nre_detail": {},
+            "process_costs": {},
+            "process_meta": {},
+            "pass_through": {},
+            "applied_pcts": {},
+            "rates": {},
+            "params": {},
+            "nre_cost_details": {},
+            "labor_cost_details": {},
+            "direct_cost_details": {},
+        },
+    }
+
+
+def test_render_quote_unit_price_prefers_lb_over_metric() -> None:
+    result = _base_material_quote(
+        {
+            "mass_g": 120.0,
+            "effective_mass_g": 120.0,
+            "unit_price_usd_per_kg": 20.0,
+            "unit_price_asof": "2024-01-01",
+        }
+    )
+
+    rendered = appV5.render_quote(result, currency="$", show_zeros=False)
+    unit_line = next(line for line in rendered.splitlines() if "Unit Price:" in line)
+
+    assert unit_line.strip().startswith("Unit Price: $9.07 / lb")
+    assert "/ kg" not in unit_line
+    assert "/ g" not in unit_line
+
+
+def test_render_quote_unit_price_converts_from_per_gram() -> None:
+    result = _base_material_quote(
+        {
+            "mass_g": 120.0,
+            "effective_mass_g": 120.0,
+            "unit_price_per_g": 0.012,
+        }
+    )
+
+    rendered = appV5.render_quote(result, currency="$", show_zeros=False)
+    unit_line = next(line for line in rendered.splitlines() if "Unit Price:" in line)
+
+    assert unit_line.strip().startswith("Unit Price: $5.44 / lb")
+    assert "/ kg" not in unit_line
+    assert "/ g" not in unit_line
+
+
 def test_render_quote_does_not_duplicate_detail_lines() -> None:
     result = {
         "price": 10.0,
