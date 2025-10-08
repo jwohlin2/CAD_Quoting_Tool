@@ -57,7 +57,7 @@ def minutes_wedm(d: Dict[str, Any]) -> float:
 
     ipm_r = IPM_WEDM[wire]["rough"]
     ipm_s = IPM_WEDM[wire]["skim"]
-    cut_min = (perim/ipm_r)*60.0 + (passes-1)*(perim/ipm_s)*60.0
+    cut_min = (perim / ipm_r) + (passes - 1) * (perim / ipm_s)
     anc_min = starts*WEDM_START_STOP_MIN + tabs*WEDM_TAB_BREAK_MIN
     return cut_min + anc_min
 
@@ -66,7 +66,7 @@ def minutes_surface_grind(d: Dict[str, Any]) -> float:
     stock = d.get("stock_in", 0.001)
     passes = ceil(max(0.0, stock) / SG_PASS_REMOVAL_IN)
     # simple raster time: (area / eff_width) / feed * passes
-    strokes = (area / SG_EFF_WIDTH_IN) / SG_TRAVERSE_IPM * 60.0
+    strokes = (area / SG_EFF_WIDTH_IN) / SG_TRAVERSE_IPM
     return SG_SETUP_MIN + passes * strokes
 
 def minutes_blanchard(d: Dict[str, Any]) -> float:
