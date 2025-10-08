@@ -10493,7 +10493,12 @@ def harvest_coordinate_table(doc, to_in: float) -> dict[str, Any]:
     }
 
 
-def _circle_candidates(doc, to_in: float, plate_bbox: tuple[float, float, float, float] | None = None) -> list[tuple[float, float, float, float]]:
+def _circle_candidates(
+    doc,
+    to_in: float,
+    plate_bbox: tuple[float, float, float, float] | None = None,
+    diameter_range: tuple[float, float] | None = None,
+) -> list[tuple[float, float, float, float]]:
     """Collect circle data, preferring model space to avoid duplicate layout views."""
 
     if doc is None:
@@ -10523,8 +10528,10 @@ def _circle_candidates(doc, to_in: float, plate_bbox: tuple[float, float, float,
             except Exception:
                 continue
             diameter_in = round(2.0 * radius_in, 4)
-            if not (0.06 <= diameter_in <= 2.5):
-                continue
+            if diameter_range is not None:
+                min_dia, max_dia = diameter_range
+                if not (min_dia <= diameter_in <= max_dia):
+                    continue
             try:
                 x, y = c.dxf.center[:2]
             except Exception:
@@ -10554,7 +10561,12 @@ def _circle_candidates(doc, to_in: float, plate_bbox: tuple[float, float, float,
 
 
 def filtered_circles(doc, to_in: float, plate_bbox: tuple[float, float, float, float] | None = None) -> list[tuple[float, float, float, int]]:
-    circles_raw = _circle_candidates(doc, to_in, plate_bbox=plate_bbox)
+    circles_raw = _circle_candidates(
+        doc,
+        to_in,
+        plate_bbox=plate_bbox,
+        diameter_range=(0.06, 2.5),
+    )
 
     clustered: list[tuple[float, float, float, int]] = []
     tol = 0.01
@@ -10570,10 +10582,8 @@ def filtered_circles(doc, to_in: float, plate_bbox: tuple[float, float, float, f
 
 def classify_concentric(doc, to_in: float, tol_center: float = 0.005, min_gap_in: float = 0.03) -> dict[str, Any]:
     pts: list[tuple[float, float, float]] = []
-    for x, y, _, radius_in in _circle_candidates(doc, to_in):
+    for x, y, _, radius_in in _circle_candidates(doc, to_in, diameter_range=(0.04, 6.0)):
         dia = 2.0 * radius_in
-        if not (0.04 <= dia <= 6.0):
-            continue
         pts.append((x, y, radius_in))
     pts.sort()
     cbore_like = 0
