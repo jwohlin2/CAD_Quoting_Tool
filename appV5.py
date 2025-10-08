@@ -2643,14 +2643,39 @@ def build_narrative(state: QuoteState) -> str:
     setups = int(_as_float_or_none(e.get("setups")) or _as_float_or_none(b.get("setups")) or 1)
     scrap_pct = round(100.0 * float(_as_float_or_none(e.get("scrap_pct")) or 0.0), 1)
 
+    top_text = ""
+    if (
+        b.get("pricing_source") == "planner"
+        and isinstance(b.get("process_plan_pricing"), dict)
+    ):
+        items = b["process_plan_pricing"].get("line_items", [])
+        if isinstance(items, list):
+            by_min = sorted(
+                (
+                    (str(i.get("op", "")), float(i.get("minutes", 0.0) or 0.0))
+                    for i in items
+                ),
+                key=lambda x: x[1],
+                reverse=True,
+            )
+            planner_top: list[str] = []
+            for name, minutes in by_min[:3]:
+                name = str(name).strip()
+                if not name or minutes <= 0:
+                    continue
+                planner_top.append(f"{name} {minutes / 60.0:.2f} h")
+            if planner_top:
+                top_text = ", ".join(planner_top)
+
     proc_hours = e.get("process_hours") if isinstance(e.get("process_hours"), dict) else {}
-    top = []
-    for name, hours in sorted(proc_hours.items(), key=lambda kv: kv[1], reverse=True)[:3]:
-        try:
-            top.append(f"{name} {float(hours):.2f} h")
-        except Exception:
-            continue
-    top_text = ", ".join(top) if top else "Baseline machining"
+    if not top_text:
+        top = []
+        for name, hours in sorted(proc_hours.items(), key=lambda kv: kv[1], reverse=True)[:3]:
+            try:
+                top.append(f"{name} {float(hours):.2f} h")
+            except Exception:
+                continue
+        top_text = ", ".join(top) if top else "Baseline machining"
 
     deltas: list[str] = []
     base_hours = b.get("process_hours") if isinstance(b.get("process_hours"), dict) else {}
@@ -5290,6 +5315,9 @@ def render_quote(
     row("Final Price per Part:", price)
     row("Total Labor Cost:", float(totals.get("labor_cost", 0.0)))
     row("Total Direct Costs:", float(totals.get("direct_costs", 0.0)))
+    pricing_source_value = breakdown.get("pricing_source")
+    if pricing_source_value:
+        lines.append(f"Pricing Source: {pricing_source_value}")
     lines.append("")
 
     narrative = result.get("narrative") or breakdown.get("narrative")
@@ -5770,39 +5798,92 @@ def render_quote(
 
     hour_summary_entries: list[tuple[str, float]] = []
     total_hours = 0.0
-    for key, meta in sorted((process_meta or {}).items()):
-        meta = meta or {}
-        try:
-            hr_val = float(meta.get("hr", 0.0) or 0.0)
-        except Exception:
-            hr_val = 0.0
-        if hr_val > 0 or show_zeros:
-            hour_summary_entries.append((_process_label(key), hr_val))
-            total_hours += hr_val if hr_val else 0.0
+
+    def _record_hour_entry(label: str, value: float, *, include_in_total: bool = True) -> None:
+        nonlocal total_hours
+        if not ((value > 0) or show_zeros):
+            return
+        hour_summary_entries.append((label, value))
+        if include_in_total and value:
+            total_hours += value
 
     programming_meta = (nre_detail or {}).get("programming") or {}
     try:
         programming_hours = float(programming_meta.get("prog_hr", 0.0) or 0.0)
     except Exception:
         programming_hours = 0.0
-    if programming_hours > 0 or show_zeros:
-        hour_summary_entries.append(("Programming", programming_hours))
-        total_hours += programming_hours if programming_hours else 0.0
 
     fixture_meta = (nre_detail or {}).get("fixture") or {}
     try:
         fixture_hours = float(fixture_meta.get("build_hr", 0.0) or 0.0)
     except Exception:
         fixture_hours = 0.0
-    if fixture_hours > 0 or show_zeros:
-        hour_summary_entries.append(("Fixture Build", fixture_hours))
-        total_hours += fixture_hours if fixture_hours else 0.0
+
+    if str(pricing_source_value).lower() == "planner":
+        planner_total_meta = process_meta.get("planner_total") or {}
+        planner_items = planner_total_meta.get("line_items") if isinstance(planner_total_meta, dict) else None
+        total_minutes = 0.0
+        if isinstance(planner_items, list):
+            for item in planner_items:
+                try:
+                    total_minutes += max(0.0, float(item.get("minutes", 0.0) or 0.0))
+                except Exception:
+                    continue
+        if total_minutes <= 0:
+            try:
+                total_minutes = float(planner_total_meta.get("minutes", 0.0) or 0.0)
+            except Exception:
+                total_minutes = 0.0
+        try:
+            planner_total_hr = float(planner_total_meta.get("hr", 0.0) or 0.0)
+        except Exception:
+            planner_total_hr = 0.0
+        if total_minutes > 0:
+            planner_total_hr = total_minutes / 60.0
+
+        def _planner_hours_for(key: str) -> float:
+            meta = process_meta.get(key) or {}
+            try:
+                minutes_val = float(meta.get("minutes", 0.0) or 0.0)
+            except Exception:
+                minutes_val = 0.0
+            if minutes_val > 0:
+                return minutes_val / 60.0
+            try:
+                return float(meta.get("hr", 0.0) or 0.0)
+            except Exception:
+                return 0.0
+
+        _record_hour_entry("Planner Total", planner_total_hr)
+        _record_hour_entry("Planner Labor", _planner_hours_for("planner_labor"), include_in_total=False)
+        _record_hour_entry(
+            "Planner Machine",
+            _planner_hours_for("planner_machine"),
+            include_in_total=False,
+        )
+        _record_hour_entry("Programming (amortized)", programming_hours)
+        _record_hour_entry("Fixture Build (amortized)", fixture_hours)
+    else:
+        for key, meta in sorted((process_meta or {}).items()):
+            meta = meta or {}
+            try:
+                hr_val = float(meta.get("hr", 0.0) or 0.0)
+            except Exception:
+                hr_val = 0.0
+            _record_hour_entry(_process_label(key), hr_val)
+
+        _record_hour_entry("Programming", programming_hours)
+        _record_hour_entry("Fixture Build", fixture_hours)
 
     if hour_summary_entries:
         lines.append("")
         lines.append("Labor Hour Summary")
         lines.append(divider)
-        for label, hr_val in sorted(hour_summary_entries, key=lambda kv: kv[1], reverse=True):
+        if str(pricing_source_value).lower() == "planner":
+            entries_iter = hour_summary_entries
+        else:
+            entries_iter = sorted(hour_summary_entries, key=lambda kv: kv[1], reverse=True)
+        for label, hr_val in entries_iter:
             hours_row(label, hr_val, indent="  ")
         hours_row("Total Hours", total_hours, indent="  ")
     lines.append("")
@@ -10519,54 +10600,65 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     process_hours_final = {k: float(process_meta.get(k, {}).get("hr", 0.0)) for k in process_meta}
 
-    hole_count_for_guard = 0
-    try:
-        hole_count_for_guard = int(float(geo_context.get("hole_count", 0) or 0))
-    except Exception:
-        pass
-    if hole_count_for_guard <= 0:
-        hole_count_for_guard = len(geo_context.get("hole_diams_mm", []) or [])
+    if pricing_source != "planner":
+        hole_count_for_guard = 0
+        try:
+            hole_count_for_guard = int(float(geo_context.get("hole_count", 0) or 0))
+        except Exception:
+            pass
+        if hole_count_for_guard <= 0:
+            hole_count_for_guard = len(geo_context.get("hole_diams_mm", []) or [])
 
-    if hole_count_for_guard > 0:
-        drill_hr_after_overrides = float(process_hours_final.get("drilling", 0.0))
-        ok, why = validate_drilling_reasonableness(hole_count_for_guard, drill_hr_after_overrides)
-        if not ok:
-            floor_hr = _drilling_floor_hours(hole_count_for_guard)
-            new_hr = max(drill_hr_after_overrides, floor_hr)
-            drill_meta = process_meta.get("drilling")
-            if drill_meta:
-                rate = float(drill_meta.get("rate", 0.0))
-                base_extra = float(drill_meta.get("base_extra", 0.0))
-                old_cost = float(process_costs.get("drilling", 0.0))
-                entry = applied_process.setdefault(
-                    "drilling",
-                    {
-                        "old_hr": float(drill_meta.get("hr", 0.0)),
-                        "old_cost": old_cost,
-                        "notes": [],
-                    },
-                )
-                entry.setdefault("notes", []).append(f"Raised to floor {floor_hr:.2f} h")
-                drill_meta["hr"] = new_hr
-                process_costs["drilling"] = round(new_hr * rate + base_extra, 2)
-            process_hours_final["drilling"] = new_hr
-            llm_notes.append(f"Raised drilling to floor: {why}")
-            process_hours_final = {k: float(process_meta.get(k, {}).get("hr", 0.0)) for k in process_meta}
-
-    baseline_total_hours = sum(float(process_hours_baseline.get(k, 0.0)) for k in process_hours_baseline)
-    final_total_hours = sum(float(process_hours_final.get(k, 0.0)) for k in process_hours_final)
-    if baseline_total_hours > 1e-6:
-        ratio = final_total_hours / baseline_total_hours if baseline_total_hours else 1.0
-        if ratio < 0.6 or ratio > 3.0:
-            msg = (
-                f"Process hours shift {baseline_total_hours:.2f}h → {final_total_hours:.2f}h "
-                f"({ratio:.2f}×); confirm change"
+        if hole_count_for_guard > 0:
+            drill_hr_after_overrides = float(process_hours_final.get("drilling", 0.0))
+            ok, why = validate_drilling_reasonableness(
+                hole_count_for_guard, drill_hr_after_overrides
             )
-            overrides_meta.setdefault("alerts", []).append(msg)
-            overrides_meta["confirm_required"] = True
-            llm_notes.append(f"Requires confirm: {msg}")
+            if not ok:
+                floor_hr = _drilling_floor_hours(hole_count_for_guard)
+                new_hr = max(drill_hr_after_overrides, floor_hr)
+                drill_meta = process_meta.get("drilling")
+                if drill_meta:
+                    rate = float(drill_meta.get("rate", 0.0))
+                    base_extra = float(drill_meta.get("base_extra", 0.0))
+                    old_cost = float(process_costs.get("drilling", 0.0))
+                    entry = applied_process.setdefault(
+                        "drilling",
+                        {
+                            "old_hr": float(drill_meta.get("hr", 0.0)),
+                            "old_cost": old_cost,
+                            "notes": [],
+                        },
+                    )
+                    entry.setdefault("notes", []).append(f"Raised to floor {floor_hr:.2f} h")
+                    drill_meta["hr"] = new_hr
+                    process_costs["drilling"] = round(new_hr * rate + base_extra, 2)
+                process_hours_final["drilling"] = new_hr
+                llm_notes.append(f"Raised drilling to floor: {why}")
+                process_hours_final = {
+                    k: float(process_meta.get(k, {}).get("hr", 0.0)) for k in process_meta
+                }
 
-    validate_quote_before_pricing(geo_context, process_costs, pass_through, process_hours_final)
+        baseline_total_hours = sum(
+            float(process_hours_baseline.get(k, 0.0)) for k in process_hours_baseline
+        )
+        final_total_hours = sum(
+            float(process_hours_final.get(k, 0.0)) for k in process_hours_final
+        )
+        if baseline_total_hours > 1e-6:
+            ratio = final_total_hours / baseline_total_hours if baseline_total_hours else 1.0
+            if ratio < 0.6 or ratio > 3.0:
+                msg = (
+                    f"Process hours shift {baseline_total_hours:.2f}h → {final_total_hours:.2f}h "
+                    f"({ratio:.2f}×); confirm change"
+                )
+                overrides_meta.setdefault("alerts", []).append(msg)
+                overrides_meta["confirm_required"] = True
+                llm_notes.append(f"Requires confirm: {msg}")
+
+        validate_quote_before_pricing(
+            geo_context, process_costs, pass_through, process_hours_final
+        )
 
     for key, entry in applied_process.items():
         entry["new_hr"] = float(process_meta.get(key, {}).get("hr", entry.get("new_hr", entry["old_hr"])))
