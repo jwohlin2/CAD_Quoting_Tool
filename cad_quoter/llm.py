@@ -696,8 +696,14 @@ Return JSON with this structure (numbers only, minutes only for CMM_RunTime_min)
     deburr = min(0.8, 0.1 + deburr_len / 5000.0)
     deburr = deburr * (1.5 if thin_wall else 1.0)
     deburr = max(deburr, 0.15 if thin_wall else 0.1)
-    programming = 0.3 + (faces / 40.0)
-    programming = min(programming, 2.5)
+    # The rules-of-thumb above call out a 0.2–1.0 hr range for simple blocks.
+    # When the LLM is unavailable we historically extrapolated programming
+    # hours from face count, but that heuristic could explode for dense parts
+    # (e.g. 500+ faces would yield 13+ hours).  Those huge defaults caused the
+    # UI to display five-figure programming costs with no user input.  To keep
+    # the fallback conservative, clamp the automatic estimate to a single hour
+    # so that manual overrides always start from a sane baseline.
+    programming = 1.0
     cam = min(2.0, 0.3 + complexity / 100.0)
     engineering = 0.0 if access > 0.6 else 0.5
     fixture = 0.0 if max_dim < 150 else 1.0
