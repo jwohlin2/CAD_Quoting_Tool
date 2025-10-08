@@ -10582,8 +10582,10 @@ def filtered_circles(doc, to_in: float, plate_bbox: tuple[float, float, float, f
 
 def classify_concentric(doc, to_in: float, tol_center: float = 0.005, min_gap_in: float = 0.03) -> dict[str, Any]:
     pts: list[tuple[float, float, float]] = []
-    for x, y, _, radius_in in _circle_candidates(doc, to_in, diameter_range=(0.04, 6.0)):
+    for x, y, _, radius_in in _circle_candidates(doc, to_in):
         dia = 2.0 * radius_in
+        if not (0.04 <= dia <= 6.0):
+            continue
         pts.append((x, y, radius_in))
     pts.sort()
     cbore_like = 0
