@@ -4964,6 +4964,31 @@ def render_quote(
             parts.append(f"{ounce_text} oz")
         return " ".join(parts) if parts else "0 oz"
 
+    def _is_truthy_flag(value) -> bool:
+        """Return True only for explicit truthy values.
+
+        Material scrap credit overrides are stored as flags that may round-trip
+        through JSON/CSV layers. Those conversions can turn ``False`` into the
+        string "false", which would previously evaluate truthy and cause the
+        scrap credit line to render even when no override was entered. Treat
+        only well-known truthy strings/numbers as True; unknown or falsy inputs
+        default to False so that the credit row is hidden unless a user-supplied
+        override is present.
+        """
+
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"1", "true", "t", "yes", "y", "on"}:
+                return True
+            if lowered in {"", "0", "false", "f", "no", "n", "off"}:
+                return False
+            return False
+        return False
+
     def write_line(s: str, indent: str = ""):
         lines.append(f"{indent}{s}")
 
@@ -5102,7 +5127,9 @@ def render_quote(
         minchg = material.get("supplier_min_charge")
         matcost= material.get("material_cost")
         scrap  = material.get("scrap_pct", None)  # will show only if present in breakdown
-        scrap_credit_entered = bool(material.get("material_scrap_credit_entered"))
+        scrap_credit_entered = _is_truthy_flag(
+            material.get("material_scrap_credit_entered")
+        )
         scrap_credit = float(material.get("material_scrap_credit") or 0.0)
         unit_price_kg = material.get("unit_price_usd_per_kg")
         unit_price_lb = material.get("unit_price_usd_per_lb")
