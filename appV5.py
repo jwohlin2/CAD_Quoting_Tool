@@ -4964,6 +4964,31 @@ def render_quote(
             parts.append(f"{ounce_text} oz")
         return " ".join(parts) if parts else "0 oz"
 
+    def _is_truthy_flag(value) -> bool:
+        """Return True only for explicit truthy values.
+
+        Material scrap credit overrides are stored as flags that may round-trip
+        through JSON/CSV layers. Those conversions can turn ``False`` into the
+        string "false", which would previously evaluate truthy and cause the
+        scrap credit line to render even when no override was entered. Treat
+        only well-known truthy strings/numbers as True; unknown or falsy inputs
+        default to False so that the credit row is hidden unless a user-supplied
+        override is present.
+        """
+
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"1", "true", "t", "yes", "y", "on"}:
+                return True
+            if lowered in {"", "0", "false", "f", "no", "n", "off"}:
+                return False
+            return False
+        return False
+
     def write_line(s: str, indent: str = ""):
         lines.append(f"{indent}{s}")
 
@@ -4991,27 +5016,34 @@ def render_quote(
         clean = clean.lstrip("= ")
         return clean.lower().startswith("total")
 
-    def _ensure_total_separator():
+    def _ensure_total_separator(width: int) -> None:
         if not lines:
+            return
+        width = max(0, int(width))
+        if width <= 0:
             return
         if lines[-1] == divider:
             return
-        lines.append(divider)
+        pad = max(0, page_width - width)
+        short_divider = " " * pad + "-" * width
+        if lines[-1] == short_divider:
+            return
+        lines.append(short_divider)
 
     def row(label: str, val: float, indent: str = ""):
-        if _is_total_label(label):
-            _ensure_total_separator()
         # left-label, right-amount aligned to page_width
         left = f"{indent}{label}"
         right = _m(val)
+        if _is_total_label(label):
+            _ensure_total_separator(len(right))
         pad = max(1, page_width - len(left) - len(right))
         lines.append(f"{left}{' ' * pad}{right}")
 
     def hours_row(label: str, val: float, indent: str = ""):
-        if _is_total_label(label):
-            _ensure_total_separator()
         left = f"{indent}{label}"
         right = _h(val)
+        if _is_total_label(label):
+            _ensure_total_separator(len(right))
         pad = max(1, page_width - len(left) - len(right))
         lines.append(f"{left}{' ' * pad}{right}")
 
@@ -5095,7 +5127,9 @@ def render_quote(
         minchg = material.get("supplier_min_charge")
         matcost= material.get("material_cost")
         scrap  = material.get("scrap_pct", None)  # will show only if present in breakdown
-        scrap_credit_entered = bool(material.get("material_scrap_credit_entered"))
+        scrap_credit_entered = _is_truthy_flag(
+            material.get("material_scrap_credit_entered")
+        )
         scrap_credit = float(material.get("material_scrap_credit") or 0.0)
         unit_price_kg = material.get("unit_price_usd_per_kg")
         unit_price_lb = material.get("unit_price_usd_per_lb")
@@ -5130,6 +5164,32 @@ def render_quote(
                 detail_lines.append(f"  Scrap Credit: {credit_display}")
             net_mass_val = _coerce_float_or_none(net_mass_g)
             effective_mass_val = _coerce_float_or_none(mass_g)
+            removal_mass_val = None
+            for removal_key in ("material_removed_mass_g", "material_removed_mass_g_est"):
+                removal_mass_val = _coerce_float_or_none(material.get(removal_key))
+                if removal_mass_val:
+                    break
+            scrap_fraction_val = _coerce_scrap_fraction(scrap)
+            if scrap_fraction_val is not None and scrap_fraction_val <= 0:
+                scrap_fraction_val = None
+            base_mass_for_scrap = None
+            if net_mass_val and net_mass_val > 0:
+                base_mass_for_scrap = float(net_mass_val)
+            elif effective_mass_val and effective_mass_val > 0:
+                base_mass_for_scrap = float(effective_mass_val)
+            scrap_adjusted_mass_val: float | None = None
+            if base_mass_for_scrap:
+                if removal_mass_val and removal_mass_val > 0:
+                    scrap_adjusted_mass_val = max(0.0, base_mass_for_scrap - float(removal_mass_val))
+                elif scrap_fraction_val is not None:
+                    scrap_adjusted_mass_val = max(0.0, base_mass_for_scrap * (1.0 - scrap_fraction_val))
+                elif (
+                    effective_mass_val is not None
+                    and net_mass_val is not None
+                ):
+                    diff_mass = abs(float(effective_mass_val) - float(net_mass_val))
+                    base_candidate = max(float(effective_mass_val), float(net_mass_val))
+                    scrap_adjusted_mass_val = max(0.0, base_candidate - diff_mass)
             if net_mass_val is None:
                 net_mass_val = effective_mass_val
             show_mass_line = (
@@ -5140,13 +5200,18 @@ def render_quote(
             if show_mass_line:
                 net_display = _format_weight_lb_decimal(net_mass_val)
                 mass_desc: list[str] = [f"{net_display} net"]
+                scrap_desc_mass = scrap_adjusted_mass_val
+                if scrap_desc_mass is None:
+                    scrap_desc_mass = effective_mass_val
                 if (
-                    effective_mass_val
-                    and net_mass_val
-                    and abs(float(effective_mass_val) - float(net_mass_val)) > 0.05
+                    scrap_desc_mass is not None
+                    and (
+                        not net_mass_val
+                        or abs(float(scrap_desc_mass) - float(net_mass_val)) > 0.05
+                    )
                 ):
                     mass_desc.append(
-                        f"scrap-adjusted {_format_weight_lb_decimal(effective_mass_val)}"
+                        f"scrap-adjusted {_format_weight_lb_decimal(scrap_desc_mass)}"
                     )
                 elif effective_mass_val and not net_mass_val:
                     mass_desc.append(
@@ -5154,18 +5219,18 @@ def render_quote(
                     )
 
             if (net_mass_val and net_mass_val > 0) or show_zeros:
-                detail_lines.append(
-                    f"  Net Weight: {_format_weight_lb_oz(net_mass_val)}"
-                )
-            if (
-                scrap
-                and effective_mass_val
-                and net_mass_val
-                and abs(float(effective_mass_val) - float(net_mass_val)) > 0.05
-            ):
-                detail_lines.append(
-                    f"  With Scrap: {_format_weight_lb_oz(effective_mass_val)}"
-                )
+                write_line(f"Net Weight: {_format_weight_lb_oz(net_mass_val)}", "  ")
+            with_scrap_mass = scrap_adjusted_mass_val
+            if with_scrap_mass is None:
+                with_scrap_mass = effective_mass_val if scrap else None
+            if with_scrap_mass is not None:
+                show_with_scrap = False
+                if net_mass_val:
+                    show_with_scrap = abs(float(with_scrap_mass) - float(net_mass_val)) > 0.05
+                else:
+                    show_with_scrap = bool(with_scrap_mass) or show_zeros
+                if show_with_scrap or show_zeros:
+                    write_line(f"With Scrap: {_format_weight_lb_oz(with_scrap_mass)}", "  ")
 
             if upg or unit_price_kg or unit_price_lb or show_zeros:
                 grams_per_lb = 1000.0 / LB_PER_KG

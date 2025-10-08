@@ -44,10 +44,10 @@ def test_render_quote_places_why_after_pricing_ladder_and_llm_adjustments() -> N
     assert "Why this price" in lines
 
     total_labor_idx = next(i for i, line in enumerate(lines) if "Total Labor Cost" in line)
-    assert set(lines[total_labor_idx - 1]) == {"-"}
+    assert set(lines[total_labor_idx - 1].strip()) == {"-"}
 
     total_direct_idx = next(i for i, line in enumerate(lines) if "Total Direct Costs" in line)
-    assert set(lines[total_direct_idx - 1]) == {"-"}
+    assert set(lines[total_direct_idx - 1].strip()) == {"-"}
 
     pricing_idx = lines.index("Pricing Ladder")
     llm_idx = lines.index("LLM Adjustments")
