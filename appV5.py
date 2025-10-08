@@ -5141,6 +5141,15 @@ def render_quote(
             hour_summary_entries.append((_process_label(key), hr_val))
             total_hours += hr_val if hr_val else 0.0
 
+    programming_meta = (nre_detail or {}).get("programming") or {}
+    try:
+        programming_hours = float(programming_meta.get("prog_hr", 0.0) or 0.0)
+    except Exception:
+        programming_hours = 0.0
+    if programming_hours > 0 or show_zeros:
+        hour_summary_entries.append(("Programming", programming_hours))
+        total_hours += programming_hours if programming_hours else 0.0
+
     if hour_summary_entries:
         lines.append("")
         lines.append("Labor Hour Summary")
