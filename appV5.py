@@ -243,7 +243,10 @@ _HAS_EZDXF = geometry.HAS_EZDXF
 _HAS_ODAFC = geometry.HAS_ODAFC
 _EZDXF_VER = geometry.EZDXF_VERSION
 
-def _ensure_scrap_pct(val) -> float:
+SCRAP_DEFAULT_GUESS = 0.15
+
+
+def _ensure_scrap_pct(val, *, default: float = 0.0) -> float:
     """
     Coerce UI/LLM scrap into a sane fraction in [0, 0.25].
     Accepts 15 (percent) or 0.15 (fraction).
@@ -252,12 +255,76 @@ def _ensure_scrap_pct(val) -> float:
     try:
         x = float(val)
     except Exception:
-        return 0.0
+        return float(default)
     if x > 1.0:  # looks like %
         x = x / 100.0
     if not (x >= 0.0 and math.isfinite(x)):
-        return 0.0
+        return float(default)
     return min(0.25, max(0.0, x))
+
+
+def _coerce_scrap_fraction(val: Any) -> float | None:
+    """Return a clamped scrap fraction or ``None`` when conversion fails."""
+
+    if val is None:
+        return None
+    if isinstance(val, str):
+        stripped = val.strip()
+        if not stripped:
+            return None
+        if stripped.endswith("%"):
+            try:
+                raw = float(stripped.rstrip("%")) / 100.0
+            except Exception:
+                return None
+            if raw < 0.0:
+                raw = 0.0
+            return min(0.25, raw)
+        try:
+            raw = float(stripped)
+        except Exception:
+            return None
+    else:
+        try:
+            raw = float(val)
+        except Exception:
+            return None
+    if not math.isfinite(raw):
+        return None
+    if raw > 1.0:
+        raw = raw / 100.0
+    if raw < 0.0:
+        raw = 0.0
+    return min(0.25, raw)
+
+
+def _estimate_scrap_from_stock_plan(geo_ctx: Mapping[str, Any] | None) -> tuple[float | None, str | None]:
+    """Attempt to infer a scrap fraction from stock planning hints."""
+
+    contexts: list[Mapping[str, Any]] = []
+    if isinstance(geo_ctx, Mapping):
+        contexts.append(geo_ctx)
+        inner = geo_ctx.get("geo")
+        if isinstance(inner, Mapping):
+            contexts.append(inner)
+
+    for ctx in contexts:
+        plan = ctx.get("stock_plan_guess") or ctx.get("stock_plan")
+        if not isinstance(plan, Mapping):
+            continue
+        net_vol = _coerce_float_or_none(plan.get("net_volume_in3"))
+        stock_vol = _coerce_float_or_none(plan.get("stock_volume_in3"))
+        scrap: float | None = None
+        if net_vol and net_vol > 0 and stock_vol and stock_vol > 0:
+            scrap = max(0.0, (stock_vol - net_vol) / net_vol)
+        else:
+            part_mass_lb = _coerce_float_or_none(plan.get("part_mass_lb"))
+            stock_mass_lb = _coerce_float_or_none(plan.get("stock_mass_lb"))
+            if part_mass_lb and part_mass_lb > 0 and stock_mass_lb and stock_mass_lb > 0:
+                scrap = max(0.0, (stock_mass_lb - part_mass_lb) / part_mass_lb)
+        if scrap is not None:
+            return min(0.25, float(scrap)), "stock_plan_guess"
+    return None, None
 
 
 def _match_items_contains(items: pd.Series, pattern: str) -> pd.Series:
@@ -6551,8 +6618,52 @@ def compute_quote_from_df(df: pd.DataFrame,
     # ---- material ------------------------------------------------------------
     vol_cm3       = first_num(r"\b(?:Net\s*Volume|Volume_net|Volume\s*\(cm\^?3\))\b", GEO_vol_mm3 / 1000.0)
     density_g_cc  = first_num(r"\b(?:Density|Material\s*Density)\b", 0.0)
-    scrap_pct_raw = num_pct(r"\b(?:Scrap\s*%|Expected\s*Scrap)\b", 0.0)
-    scrap_pct = _ensure_scrap_pct(scrap_pct_raw)
+
+    scrap_pattern = r"\b(?:Scrap\s*%|Expected\s*Scrap)\b"
+    scrap_sheet_fraction: float | None = None
+    try:
+        sheet_has_scrap = contains(scrap_pattern)
+    except Exception:
+        sheet_has_scrap = pd.Series(dtype=bool)
+    if hasattr(sheet_has_scrap, "any") and sheet_has_scrap.any():
+        scrap_candidate = first_num(scrap_pattern, float("nan"))
+        if scrap_candidate == scrap_candidate:  # not NaN
+            scrap_sheet_fraction = _coerce_scrap_fraction(scrap_candidate)
+
+    scrap_auto: float | None = None
+    scrap_source_label: str | None = None
+    if scrap_sheet_fraction is not None:
+        scrap_auto = scrap_sheet_fraction
+        scrap_source_label = "sheet"
+    else:
+        scrap_from_stock, stock_source = _estimate_scrap_from_stock_plan(geo_context)
+        if scrap_from_stock is not None:
+            scrap_auto = scrap_from_stock
+            scrap_source_label = stock_source or "stock_plan"
+    if scrap_auto is None:
+        scrap_auto = SCRAP_DEFAULT_GUESS
+        scrap_source_label = "default_guess"
+
+    try:
+        ui_scrap_raw = ui_vars.get("Scrap Percent (%)") if "ui_vars" in locals() else None
+    except Exception:
+        ui_scrap_raw = None
+    ui_scrap_val = _coerce_scrap_fraction(ui_scrap_raw)
+    if ui_scrap_val is None:
+        try:
+            mask = df["Item"].astype(str).str.fullmatch(r"Scrap Percent \(%\)", case=False, na=False)
+            candidate = df.loc[mask, "Example Values / Options"].iloc[0]
+            ui_scrap_val = _coerce_scrap_fraction(candidate)
+        except Exception:
+            ui_scrap_val = None
+
+    if ui_scrap_val is not None:
+        scrap_pct = _ensure_scrap_pct(ui_scrap_val)
+        scrap_pct_baseline = scrap_pct
+        scrap_source_label = "ui"
+    else:
+        scrap_pct = _ensure_scrap_pct(scrap_auto, default=SCRAP_DEFAULT_GUESS)
+        scrap_pct_baseline = scrap_pct
     material_name_raw = sheet_text(r"(?i)Material\s*(?:Name|Grade|Alloy|Type)")
     if not material_name_raw:
         fallback_name = strv(r"(?i)^Material$", "")
@@ -6568,21 +6679,6 @@ def compute_quote_from_df(df: pd.DataFrame,
     density_guess_from_material = _density_for_material(material_name, _DEFAULT_MATERIAL_DENSITY_G_CC)
     if not density_g_cc or density_g_cc <= 0:
         density_g_cc = density_guess_from_material
-
-    # --- SCRAP BASELINE (always defined) ---
-    try:
-        ui_scrap_val = ui_vars.get("Scrap Percent (%)") if "ui_vars" in locals() else None
-    except Exception:
-        ui_scrap_val = None
-
-    if ui_scrap_val is None:
-        try:
-            mask = df["Item"].astype(str).str.fullmatch(r"Scrap Percent \(%\)", case=False, na=False)
-            ui_scrap_val = float(df.loc[mask, "Example Values / Options"].iloc[0])
-        except Exception:
-            ui_scrap_val = 0.0
-
-    scrap_pct_baseline = _ensure_scrap_pct(ui_scrap_val)
 
     if is_plate_2d:
         length_in_val = _coerce_float_or_none(ui_vars.get("Plate Length (in)"))
@@ -6687,6 +6783,8 @@ def compute_quote_from_df(df: pd.DataFrame,
     net_mass_g = max(0.0, vol_cm3 * density_g_cc)
     mass_basis = "volume"
     fallback_meta: dict[str, Any] = {}
+    if scrap_source_label:
+        fallback_meta.setdefault("scrap_source", scrap_source_label)
 
     def _mass_hint_kg(ctx: dict[str, Any] | None) -> float:
         if not isinstance(ctx, dict):
@@ -6827,6 +6925,8 @@ def compute_quote_from_df(df: pd.DataFrame,
     material_detail_for_breakdown.setdefault("mass_g_net", net_mass_g)
     material_detail_for_breakdown.setdefault("net_mass_g", net_mass_g)
     material_detail_for_breakdown.setdefault("scrap_pct", scrap_pct)
+    if scrap_source_label:
+        material_detail_for_breakdown.setdefault("scrap_source", scrap_source_label)
     if mass_basis:
         material_detail_for_breakdown.setdefault("mass_basis", mass_basis)
     for key, value in fallback_meta.items():
@@ -7433,6 +7533,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         "volume_cm3": vol_cm3,
         "density_g_cc": density_g_cc,
         "scrap_pct": scrap_pct,
+        "scrap_source": scrap_source_label,
         "material_cost_baseline": material_cost,
         "bbox_mm": bbox_info,
         "machine_limits": machine_limits,
