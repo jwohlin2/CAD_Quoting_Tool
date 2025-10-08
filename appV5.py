@@ -12158,6 +12158,97 @@ def derive_inference_knobs(
             ],
         }
 
+    # --- Fixture build hours -------------------------------------------------
+    fixture_signals: list[str] = []
+    fixture_components: dict[str, float] = {}
+    fixture_hours = 0.0
+
+    hole_count_hint = max(
+        int(combined_agg.get("hole_count") or 0),
+        int(table_hole_count or 0),
+        int(geometry_hole_count or 0),
+    )
+    if hole_count_hint:
+        fixture_signals.append(f"Hole count ≈ {hole_count_hint}")
+        hole_component = max(0.0, min(8.0, hole_count_hint / 16.0))
+        if hole_component > 0:
+            fixture_components["hole_population_hr"] = round(hole_component, 3)
+            fixture_hours += hole_component
+
+    if combined_agg.get("from_back"):
+        fixture_signals.append("Back-side ops flagged")
+        back_component = 1.0
+        fixture_components["second_op_setup_hr"] = round(back_component, 3)
+        fixture_hours += back_component
+
+    thickness_in = thickness_guess
+    if thickness_in is None and stock_plan:
+        thickness_in = stock_plan.get("stock_thk_in")
+    if isinstance(thickness_in, (int, float)) and thickness_in > 0:
+        fixture_signals.append(f"Thickness ≈ {float(thickness_in):.2f} in")
+        if thickness_in >= 2.0:
+            thick_component = 1.0
+        elif thickness_in >= 1.25:
+            thick_component = 0.6
+        else:
+            thick_component = 0.0
+        if thick_component > 0:
+            fixture_components["thickness_penalty_hr"] = round(thick_component, 3)
+            fixture_hours += thick_component
+
+    stock_len = float(stock_plan.get("stock_len_in") or 0.0) if stock_plan else 0.0
+    stock_wid = float(stock_plan.get("stock_wid_in") or 0.0) if stock_plan else 0.0
+    if stock_len and stock_wid:
+        fixture_signals.append(f"Stock blank ≈ {stock_len:.1f}×{stock_wid:.1f} in")
+        blank_area = stock_len * stock_wid
+        if blank_area >= 400:
+            area_component = 1.2
+        elif blank_area >= 225:
+            area_component = 0.6
+        else:
+            area_component = 0.0
+        if area_component > 0:
+            fixture_components["blank_envelope_hr"] = round(area_component, 3)
+            fixture_hours += area_component
+
+    part_mass_lb = float(stock_plan.get("part_mass_lb") or 0.0) if stock_plan else 0.0
+    if part_mass_lb:
+        fixture_signals.append(f"Part mass ≈ {part_mass_lb:.1f} lb")
+        if part_mass_lb >= 45:
+            mass_component = 1.5
+        elif part_mass_lb >= 25:
+            mass_component = 0.9
+        elif part_mass_lb >= 15:
+            mass_component = 0.5
+        else:
+            mass_component = 0.0
+        if mass_component > 0:
+            fixture_components["mass_handling_hr"] = round(mass_component, 3)
+            fixture_hours += mass_component
+
+    if fixture_hours > 0:
+        base_component = 0.5
+        fixture_components["base_setup_hr"] = round(base_component, 3)
+        fixture_hours += base_component
+
+    if fixture_hours > 0:
+        fixture_hours = max(0.0, min(20.0, fixture_hours))
+        confidence = "medium"
+        if len(fixture_signals) >= 4:
+            confidence = "high"
+        elif len(fixture_signals) <= 1:
+            confidence = "low"
+        knobs["fixture_build"] = {
+            "confidence": confidence,
+            "signals": fixture_signals,
+            "recommended": {
+                "build_hours": round(fixture_hours, 3),
+                "bounds_hr": [0.0, 20.0],
+                "components": fixture_components,
+            },
+            "targets": ["fixture_build_hr"],
+        }
+
     # --- Tapping --------------------------------------------------------------
     tap_details = combined_agg.get("tap_details") or []
     tap_minutes_total = float(combined_agg.get("tap_minutes_hint") or 0.0)
