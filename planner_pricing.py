@@ -1,7 +1,8 @@
-from typing import Dict, Any, Tuple
-from process_planner import plan_job
-from rates import OP_TO_MACHINE, OP_TO_LABOR, rate_for_machine, rate_for_role
+from typing import Any, Dict, Tuple
+
 import time_models as tm
+from cad_quoter.rates import OP_TO_LABOR, OP_TO_MACHINE, rate_for_machine, rate_for_role
+from process_planner import plan_job
 
 ATTENDANCE = {  # operator attendance fraction of a labor role during machine ops (optional)
     "WireEDM": 0.20,
