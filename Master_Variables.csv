@@ -24,7 +24,7 @@ QC-01,In-Process Inspection Labor,Operator time spent checking parts at the mach
 ENG-06,Fixture Build Labor Hours,Toolmaker time to assemble and qualify the custom fixture.,4–40 hours of toolmaker time (+$300–$3000).,Number,12,hr,
 PM-08,Project Manager Hours,Complex projects with many milestones require dedicated management time.,$500–$5000+ for dedicated project management.,Number,20,hr,
 COM-07,Profit Margin,The percentage added to the total cost to arrive at the final price.,15–40% of total cost.,Number,35,,
-ASM-02,Hardware / BOM Cost,The purchase cost of all fasteners and components to be installed.,Direct cost input.,Number,75.5,$,
+ASM-02,Hardware Cost,The purchase cost of all fasteners and components to be installed.,Direct cost input.,Number,75.5,$,
 GRD-01,Surface Grinder Rate,Hourly cost for precision surface grinding.,$70–$90 per hour.,Lookup – Rate,$80.00,$/hr,GRD_01
 GRD-02,OD/ID Grinder Rate,Hourly cost for cylindrical grinding.,$80–$120 per hour.,Lookup – Rate,$100.00,$/hr,GRD_02
 MAT-09,Number of Blanks Required,Total pieces of raw stock needed for the job.,Direct cost multiplier.,Number,102,,

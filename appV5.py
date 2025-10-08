@@ -185,6 +185,22 @@ PROC_MULT_TARGETS: dict[str, tuple[str, float]] = {
     "packaging": ("Packaging Labor Hours", 1.0),
 }
 
+HARDWARE_PASS_LABEL = "Hardware"
+LEGACY_HARDWARE_PASS_LABEL = "Hardware / BOM"
+_HARDWARE_LABEL_ALIASES = {
+    HARDWARE_PASS_LABEL.lower(),
+    LEGACY_HARDWARE_PASS_LABEL.lower(),
+    "hardware/bom",
+    "hardware bom",
+}
+
+
+def _canonical_pass_label(label: str | None) -> str:
+    name = str(label or "").strip()
+    if name.lower() in _HARDWARE_LABEL_ALIASES:
+        return HARDWARE_PASS_LABEL
+    return name
+
 from OCP.TopAbs   import TopAbs_EDGE, TopAbs_FACE
 from OCP.TopExp   import TopExp, TopExp_Explorer
 from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
@@ -1027,7 +1043,8 @@ def build_suggest_payload(
     for label, amount in (baseline_pass_raw or {}).items():
         val = _coerce_float(amount)
         if val is not None:
-            baseline_pass[str(label)] = float(val)
+            canon_label = _canonical_pass_label(label)
+            baseline_pass[canon_label] = float(val)
 
     top_process_hours = sorted(baseline_hours.items(), key=lambda kv: (-kv[1], kv[0]))[:6]
     top_pass_through = sorted(baseline_pass.items(), key=lambda kv: (-kv[1], kv[0]))[:6]
@@ -7800,6 +7817,10 @@ def compute_quote_from_df(df: pd.DataFrame,
         "Consumables Flat": consumables_flat,
         "Packaging Flat": packaging_flat_base,
     }
+    pass_through = {
+        _canonical_pass_label(label): float(value)
+        for label, value in pass_through.items()
+    }
     if material_scrap_credit_applied:
         pass_through["Material Scrap Credit"] = -material_scrap_credit_applied
     pass_through_baseline = {k: float(v) for k, v in pass_through.items()}
@@ -9189,7 +9210,11 @@ def compute_quote_from_df(df: pd.DataFrame,
         return re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_")
 
     process_key_map = {_normalize_key(k): k for k in process_costs.keys()}
-    pass_key_map = {_normalize_key(k): k for k in pass_through.keys()}
+    pass_key_map = {
+        _normalize_key(_canonical_pass_label(k)): _canonical_pass_label(k)
+        for k in pass_through.keys()
+    }
+    pass_key_map[_normalize_key(LEGACY_HARDWARE_PASS_LABEL)] = HARDWARE_PASS_LABEL
 
     def _friendly_process(name: str) -> str:
         return name.replace("_", " ").title()
@@ -10016,16 +10041,17 @@ def trace_hours_from_df(df):
 # ---------- Explanation ----------
 def explain_quote(breakdown: dict[str,Any], hour_trace=None) -> str:
     tot=breakdown.get("totals",{}); pro=breakdown.get("process_costs",{}); nre=breakdown.get("nre",{}); pt=breakdown.get("pass_through",{}); ap=breakdown.get("applied_pcts",{})
+    pt_canon={_canonical_pass_label(k):v for k,v in (pt or {}).items()}
     lines=[f"Includes Overhead {ap.get('OverheadPct',0):.0%}, Margin {ap.get('MarginPct',0):.0%}."]
     if nre.get("programming_per_part",0)>0: lines.append(f"NRE spread across lot: ${nre['programming_per_part']:.2f}")
     major={k:v for k,v in pro.items() if v and v>0}
     if major:
         top=sorted(major.items(), key=lambda kv: kv[1], reverse=True)[:4]
         lines.append("Major processes: " + ", ".join(f"{k.replace('_',' ')} ${v:,.0f}" for k,v in top))
-    if pt.get("Hardware / BOM",0) or pt.get("Outsourced Vendors",0):
+    if pt_canon.get(HARDWARE_PASS_LABEL,0) or pt_canon.get("Outsourced Vendors",0):
         lines.append(
-            f"Pass-throughs: hardware ${pt.get('Hardware / BOM',0):.0f}, "
-            f"vendors ${pt.get('Outsourced Vendors',0):.0f}, ship ${pt.get('Shipping',0):.0f}"
+            f"Pass-throughs: hardware ${pt_canon.get(HARDWARE_PASS_LABEL,0):.0f}, "
+            f"vendors ${pt_canon.get('Outsourced Vendors',0):.0f}, ship ${pt_canon.get('Shipping',0):.0f}"
         )
     if hour_trace:
         for bucket, rows in hour_trace.items():
@@ -11739,7 +11765,8 @@ def derive_inference_knobs(
                 "assembly_hours": round(assembly_hours, 3),
             },
             "targets": [
-                "add_pass_through.Hardware / BOM",
+                f"add_pass_through.{HARDWARE_PASS_LABEL}",
+                f"add_pass_through.{LEGACY_HARDWARE_PASS_LABEL}",
                 "process_hour_adders.assembly",
             ],
         }
