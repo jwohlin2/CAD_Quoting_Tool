@@ -4,46 +4,39 @@ from planner_pricing import price_with_planner
 def test_price_with_planner_uses_geometry_minutes() -> None:
     rates = {
         "machine": {
-            "WireEDM": 120.0,
-            "CNC_Mill": 95.0,
-            "SurfaceGrind": 85.0,
+            "WireEDMRate": 120.0,
+            "MillingRate": 95.0,
+            "DrillingRate": 80.0,
+            "SurfaceGrindRate": 85.0,
         },
         "labor": {
-            "Machinist": 60.0,
-            "Finisher": 45.0,
-            "Assembler": 40.0,
-            "Inspector": 55.0,
-            "Grinder": 58.0,
-            "Engineer": 70.0,
+            "InspectionRate": 55.0,
+            "FixtureBuildRate": 60.0,
+            "ProgrammingRate": 70.0,
+            "DeburrRate": 42.0,
         },
     }
 
     params = {
         "material": "tool_steel_annealed",
-        "overall_length": 3.0,
-        "min_feature_width": 0.5,
-        "min_inside_radius": 0.05,
         "profile_tol": 0.0005,
-        "blind_relief": False,
-        "edge_condition": "sharp",
+        "flatness_spec": 0.0008,
+        "parallelism_spec": 0.0012,
     }
 
     geom = {
-        "wedm": {
-            "perimeter_in": 12.0,
-            "starts": 1,
-            "tabs": 0,
-            "passes": 2,
-            "wire_in": 0.010,
-        },
-        "milling": {"volume_cuin": 8.0},
-        "sg": {"area_sq_in": 18.0, "stock_in": 0.002},
-        "drill": [{"dia_in": 0.25, "depth_in": 0.75}],
-        "length_ft_edges": 3.0,
-        "lap_area_sq_in": 1.5,
+        "hole_count": 16,
+        "tap_qty": 4,
+        "cbore_qty": 2,
+        "slot_count": 3,
+        "edge_len_in": 24.0,
+        "pocket_area_total_in2": 12.0,
+        "plate_area_in2": 60.0,
+        "thickness_in": 1.5,
+        "setups": 3,
     }
 
-    result = price_with_planner("punch", params, geom, rates, oee=1.0)
+    result = price_with_planner("die_plate", params, geom, rates, oee=0.9)
 
     assert "ops" in result["plan"]
     assert "ops_seen" in result["assumptions"]
