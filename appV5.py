@@ -5106,32 +5106,39 @@ def render_quote(
 
         numeric_value = float(value or 0.0)
         has_displayable_cost = (numeric_value > 0.0) or show_zeros or (abs(extra_val) > 1e-6)
-        if has_displayable_cost:
-            label = _process_label(key)
-            row(label, numeric_value, indent="  ")
+        if not has_displayable_cost:
+            continue
 
-            detail_bits: list[str] = []
-            if hr_val > 0:
-                detail_bits.append(f"{hr_val:.2f} hr @ ${rate_val:,.2f}/hr")
-            if abs(extra_val) > 1e-6:
-                if rate_val > 0 and hr_val > 0:
-                    extra_hr = extra_val / rate_val
-                    detail_bits.append(f"includes {extra_hr:.2f} hr extras")
-                else:
-                    detail_bits.append(f"includes ${extra_val:,.2f} extras")
-            proc_notes = applied_process.get(str(key).lower(), {}).get("notes")
-            if proc_notes:
-                detail_bits.append("LLM: " + ", ".join(proc_notes))
+        label = _process_label(key)
 
-            existing_detail = labor_cost_details.get(label)
-            merged_detail = _merge_detail(existing_detail, detail_bits)
-            if merged_detail:
-                labor_cost_details[label] = merged_detail
-                write_detail(merged_detail, indent="    ")
+        display_value = numeric_value
+        if display_value <= 0.0 and abs(extra_val) > 1e-6:
+            display_value = extra_val
+
+        row(label, display_value, indent="  ")
+
+        detail_bits: list[str] = []
+        if hr_val > 0:
+            detail_bits.append(f"{hr_val:.2f} hr @ ${rate_val:,.2f}/hr")
+        if abs(extra_val) > 1e-6:
+            if rate_val > 0 and hr_val > 0:
+                extra_hr = extra_val / rate_val
+                detail_bits.append(f"includes {extra_hr:.2f} hr extras")
             else:
-                add_process_notes(key, indent="    ")
+                detail_bits.append(f"includes ${extra_val:,.2f} extras")
+        proc_notes = applied_process.get(str(key).lower(), {}).get("notes")
+        if proc_notes:
+            detail_bits.append("LLM: " + ", ".join(proc_notes))
 
-            proc_total += numeric_value
+        existing_detail = labor_cost_details.get(label)
+        merged_detail = _merge_detail(existing_detail, detail_bits)
+        if merged_detail:
+            labor_cost_details[label] = merged_detail
+            write_detail(merged_detail, indent="    ")
+        else:
+            add_process_notes(key, indent="    ")
+
+        proc_total += display_value
     row("Total", proc_total, indent="  ")
 
     hour_summary_entries: list[tuple[str, float]] = []
