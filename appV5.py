@@ -5644,6 +5644,8 @@ def render_quote(
     lines.append(divider)
     pass_total = 0.0
     for key, value in sorted((pass_through or {}).items(), key=lambda kv: kv[1], reverse=True):
+        if key == "Material":
+            continue
         if (value > 0) or show_zeros:
             # cosmetic: "consumables_hr_cost" → "Consumables /Hr Cost"
             label = key.replace("_", " ").replace("hr", "/hr").title()
