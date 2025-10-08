@@ -7223,6 +7223,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     quote_state.ui_vars = dict(ui_vars)
     quote_state.rates = dict(rates)
     geo_context = dict(geo or {})
+    tolerance_inputs: dict[str, Any] | None = None
     inner_geo_raw = geo_context.get("geo")
     inner_geo = dict(inner_geo_raw) if isinstance(inner_geo_raw, dict) else {}
     geo_context["geo"] = inner_geo
@@ -7397,6 +7398,31 @@ def compute_quote_from_df(df: pd.DataFrame,
     def strv(pattern: str, default: str = "") -> str:
         m = contains(pattern)
         return (str(vals[m].iloc[0]) if m.any() else default)
+
+    def _collect_tolerance_inputs() -> dict[str, Any] | None:
+        tol_inputs_local: dict[str, Any] | None = None
+        try:
+            _tol_in = geo_context.get("tolerance_inputs")
+            if isinstance(_tol_in, Mapping):
+                tol_inputs_local = dict(_tol_in)
+        except Exception:
+            tol_inputs_local = None
+        if tol_inputs_local is None and isinstance(ui_vars, Mapping):
+            try:
+                tol_like: dict[str, Any] = {}
+                tol_key_re = re.compile(
+                    r"flatness|parallel|profile|runout|\btir\b|\bra\b|surface\s*finish|id\s*(ra|finish)|od\s*(ra|finish)",
+                    re.IGNORECASE,
+                )
+                for label, value in ui_vars.items():
+                    key = str(label)
+                    if tol_key_re.search(key):
+                        tol_like[key] = value
+                if tol_like:
+                    tol_inputs_local = tol_like
+            except Exception:
+                pass
+        return tol_inputs_local
 
     def num_pct(pattern: str, default: float = 0.0) -> float:
         return pct(first_num(pattern, default * 100.0), default)
@@ -8021,6 +8047,27 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     max_dim   = first_num(r"\bGEO__MaxDim_mm\b", 0.0)
     is_simple = (max_dim and max_dim <= params["ProgSimpleDim_mm"] and setups <= 2)
+
+    if tolerance_inputs is None:
+        tolerance_inputs = _collect_tolerance_inputs()
+    min_tol_for_fixture: float | None = None
+    if tolerance_inputs:
+        tol_candidates: list[float] = []
+        for raw_value in tolerance_inputs.values():
+            try:
+                tol_candidates.extend(_tolerance_values_from_any(raw_value))
+            except Exception:
+                continue
+        tol_candidates = [
+            float(val)
+            for val in tol_candidates
+            if isinstance(val, (int, float)) and math.isfinite(float(val)) and float(val) > 0.0
+        ]
+        if tol_candidates:
+            try:
+                min_tol_for_fixture = min(tol_candidates)
+            except Exception:
+                min_tol_for_fixture = None
 
     # ---- fixture -------------------------------------------------------------
     fixture_sheet_hr = sum_time(r"(?:Fixture\s*Build|Custom\s*Fixture\s*Build)")
@@ -8728,18 +8775,8 @@ def compute_quote_from_df(df: pd.DataFrame,
             tolerance_inputs = dict(_tol_in)
     except Exception:
         tolerance_inputs = None
-    if tolerance_inputs is None and isinstance(ui_vars, Mapping):
-        try:
-            tol_like: dict[str, Any] = {}
-            tol_key_re = re.compile(r"flatness|parallel|profile|runout|\btir\b|\bra\b|surface\s*finish|id\s*(ra|finish)|od\s*(ra|finish)", re.IGNORECASE)
-            for label, value in ui_vars.items():
-                key = str(label)
-                if tol_key_re.search(key):
-                    tol_like[key] = value
-            if tol_like:
-                tolerance_inputs = tol_like
-        except Exception:
-            pass
+    if tolerance_inputs is None:
+        tolerance_inputs = _collect_tolerance_inputs()
     if hole_count_override and hole_count_override > 0:
         features["hole_count_override"] = int(round(hole_count_override))
     if avg_hole_diam_override and avg_hole_diam_override > 0:
