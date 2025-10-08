@@ -6531,6 +6531,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     params["ProgCapHr"]                = sheet_num(r"\b(Programming\s*Cap\s*Hr)\b", params.get("ProgCapHr"))
     params["ProgSimpleDim_mm"]         = sheet_num(r"\b(Prog\s*Simple\s*Dim_mm)\b", params.get("ProgSimpleDim_mm"))
     params["ProgMaxToMillingRatio"]    = sheet_num(r"\b(Prog\s*Max\s*To\s*Milling\s*Ratio)\b", params.get("ProgMaxToMillingRatio"))
+    prog_hr_override = sheet_num(r"\b(Programming\s*(?:Override|Manual)(?:\s*H(?:ou)?rs?)?)\b", None)
     params["MillingConsumablesPerHr"]  = sheet_num(r"(?i)Milling\s*Consumables\s*/\s*Hr", params.get("MillingConsumablesPerHr"))
     params["TurningConsumablesPerHr"]  = sheet_num(r"(?i)Turning\s*Consumables\s*/\s*Hr", params.get("TurningConsumablesPerHr"))
     params["EDMConsumablesPerHr"]      = sheet_num(r"(?i)EDM\s*Consumables\s*/\s*Hr", params.get("EDMConsumablesPerHr"))
@@ -6975,7 +6976,10 @@ def compute_quote_from_df(df: pd.DataFrame,
             material_detail_for_breakdown["material_direct_cost"] = material_direct_cost
 
     # ---- programming / cam / dfm --------------------------------------------
-    prog_hr = sum_time(r"(?:Programming|2D\s*CAM|3D\s*CAM|Simulation|Verification|DFM|Setup\s*Sheets)", exclude_pattern=r"\bCMM\b")
+    prog_hr = sum_time(
+        r"(?:Programming|2D\s*CAM|3D\s*CAM|Simulation|Verification|DFM|Setup\s*Sheets)",
+        exclude_pattern=r"\b(?:CMM|Override|Manual)\b",
+    )
     cam_hr  = sum_time(r"(?:CAM\s*Programming|CAM\s*Sim|Post\s*Processing)")
     eng_hr  = sum_time(r"(?:Fixture\s*Design|Process\s*Sheet|Traveler|Documentation)")
 
@@ -7002,6 +7006,16 @@ def compute_quote_from_df(df: pd.DataFrame,
         prog_hr = min(prog_hr, params["ProgMaxToMillingRatio"] * milling_hr)
 
     total_prog_hr = prog_hr + cam_hr
+    auto_prog_hr = float(total_prog_hr)
+    prog_override_applied = False
+    if prog_hr_override is not None:
+        try:
+            override_val = max(0.0, float(prog_hr_override))
+        except Exception:
+            override_val = None
+        else:
+            total_prog_hr = override_val
+            prog_override_applied = True
     programming_cost   = total_prog_hr * rates["ProgrammingRate"] + eng_hr * rates["EngineerRate"]
     prog_per_lot       = programming_cost
     programming_per_part = (prog_per_lot / Qty) if (amortize_programming and Qty > 1) else prog_per_lot
@@ -7016,13 +7030,18 @@ def compute_quote_from_df(df: pd.DataFrame,
     fixture_labor_per_part = (fixture_labor_cost / Qty) if Qty > 1 else fixture_labor_cost
     fixture_per_part       = (fixture_cost / Qty) if Qty > 1 else fixture_cost
 
+    programming_detail = {
+        "prog_hr": float(total_prog_hr), "prog_rate": rates["ProgrammingRate"],
+        "eng_hr": float(eng_hr),         "eng_rate": rates["EngineerRate"],
+        "per_lot": prog_per_lot, "per_part": programming_per_part,
+        "amortized": bool(amortize_programming and Qty > 1)
+    }
+    if prog_override_applied:
+        programming_detail["override_applied"] = True
+        programming_detail["auto_prog_hr"] = auto_prog_hr
+
     nre_detail = {
-        "programming": {
-            "prog_hr": float(total_prog_hr), "prog_rate": rates["ProgrammingRate"],
-            "eng_hr": float(eng_hr),         "eng_rate": rates["EngineerRate"],
-            "per_lot": prog_per_lot, "per_part": programming_per_part,
-            "amortized": bool(amortize_programming and Qty > 1)
-        },
+        "programming": programming_detail,
         "fixture": {
             "build_hr": float(fixture_build_hr), "build_rate": rates["FixtureBuildRate"],
             "labor_cost": float(fixture_labor_cost),
