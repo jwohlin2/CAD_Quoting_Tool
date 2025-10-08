@@ -5814,17 +5814,33 @@ def require_plate_inputs(geo: dict, ui_vars: dict[str, Any] | None) -> None:
         geo["material"] = material
 
 
-def net_mass_kg(plate_L_in, plate_W_in, t_in, hole_d_mm, density_g_cc: float = 7.85):
+def net_mass_kg(
+    plate_L_in,
+    plate_W_in,
+    t_in,
+    hole_d_mm,
+    density_g_cc: float = 7.85,
+    *,
+    return_removed_mass: bool = False,
+):
+    """Estimate the net mass of a rectangular plate and optional removed material.
+
+    When ``return_removed_mass`` is true the function returns a tuple
+    ``(net_mass_kg, removed_mass_g)`` where ``removed_mass_g`` is the grams of
+    material evacuated by the provided circular holes.  Otherwise the previous
+    behaviour of returning only the net mass in kilograms is preserved.
+    """
+
     if not (plate_L_in and plate_W_in and t_in):
-        return None
+        return (None, None) if return_removed_mass else None
     try:
         L = float(plate_L_in)
         W = float(plate_W_in)
         T = float(t_in)
     except Exception:
-        return None
+        return (None, None) if return_removed_mass else None
     if L <= 0 or W <= 0 or T <= 0:
-        return None
+        return (None, None) if return_removed_mass else None
     vol_plate_in3 = L * W * T
     try:
         t_mm = T * 25.4
@@ -5842,7 +5858,12 @@ def net_mass_kg(plate_L_in, plate_W_in, t_in, hole_d_mm, density_g_cc: float = 7
     vol_net_in3 = max(0.0, vol_plate_in3 - vol_holes_in3)
     vol_cc = vol_net_in3 * 16.387064
     mass_g = vol_cc * float(density_g_cc or 0.0)
-    return mass_g / 1000.0 if mass_g else 0.0
+    removed_mass_g = vol_holes_in3 * 16.387064 * float(density_g_cc or 0.0)
+
+    net_mass = mass_g / 1000.0 if mass_g else 0.0
+    if return_removed_mass:
+        return net_mass, removed_mass_g
+    return net_mass
 
 
 def _normalize_speeds_feeds_df(df: "pd.DataFrame") -> "pd.DataFrame":
@@ -6302,6 +6323,9 @@ def compute_quote_from_df(df: pd.DataFrame,
     plate_length_in_val: float | None = None
     plate_width_in_val: float | None = None
     plate_thickness_in_val: float | None = None
+    removal_mass_g_est: float | None = None
+    hole_scrap_frac_est: float = 0.0
+    hole_scrap_clamped_val: float = 0.0
 
     def _int_from(value: Any) -> int:
         num = _coerce_float_or_none(value)
@@ -6673,7 +6697,19 @@ def compute_quote_from_df(df: pd.DataFrame,
             if val and val > 0:
                 holes_for_mass.append(float(val))
         thickness_in_for_mass = (thickness_mm_val / 25.4) if thickness_mm_val else _coerce_float_or_none(ui_vars.get("Thickness (in)"))
-        net_mass_calc = net_mass_kg(length_in_val, width_in_val, thickness_in_for_mass, holes_for_mass, density_g_cc)
+        net_mass_calc_tuple = net_mass_kg(
+            length_in_val,
+            width_in_val,
+            thickness_in_for_mass,
+            holes_for_mass,
+            density_g_cc,
+            return_removed_mass=True,
+        )
+        if isinstance(net_mass_calc_tuple, tuple):
+            net_mass_calc, removed_mass_candidate = net_mass_calc_tuple
+        else:
+            net_mass_calc, removed_mass_candidate = net_mass_calc_tuple, None
+
         if net_mass_calc:
             geo_context.setdefault("net_mass_kg_est", float(net_mass_calc))
             try:
@@ -6685,6 +6721,18 @@ def compute_quote_from_df(df: pd.DataFrame,
                 GEO_vol_mm3 = max(GEO_vol_mm3, vol_cm3_net * 1000.0)
                 geo_context.setdefault("net_volume_cm3", float(vol_cm3_net))
 
+        if removed_mass_candidate and removed_mass_candidate > 0:
+            removal_mass_g_est = float(removed_mass_candidate)
+            if net_mass_calc:
+                try:
+                    ratio = removal_mass_g_est / max(1e-6, float(net_mass_calc) * 1000.0)
+                except Exception:
+                    ratio = 0.0
+            else:
+                ratio = 0.0
+            if ratio > 0:
+                hole_scrap_frac_est = max(hole_scrap_frac_est, float(ratio))
+
         if thickness_mm_val > 0:
             plate_thickness_in_val = float(thickness_mm_val) / 25.4
         elif thickness_in_for_mass and thickness_in_for_mass > 0:
@@ -6693,6 +6741,21 @@ def compute_quote_from_df(df: pd.DataFrame,
             t_in_hint = _coerce_float_or_none(ui_vars.get("Thickness (in)"))
             if t_in_hint and t_in_hint > 0:
                 plate_thickness_in_val = float(t_in_hint)
+
+    if removal_mass_g_est and removal_mass_g_est > 0:
+        geo_context.setdefault("material_removed_mass_g_est", float(removal_mass_g_est))
+        if inner_geo is not None:
+            inner_geo.setdefault("material_removed_mass_g_est", float(removal_mass_g_est))
+
+    if hole_scrap_frac_est and hole_scrap_frac_est > 0:
+        hole_scrap_clamped_val = max(0.0, min(0.25, float(hole_scrap_frac_est)))
+        scrap_pct = max(scrap_pct, hole_scrap_clamped_val)
+        scrap_pct_baseline = max(scrap_pct_baseline, hole_scrap_clamped_val)
+        geo_context.setdefault("scrap_pct_from_holes", float(hole_scrap_frac_est))
+        geo_context.setdefault("scrap_pct_from_holes_clamped", hole_scrap_clamped_val)
+        if inner_geo is not None:
+            inner_geo.setdefault("scrap_pct_from_holes", float(hole_scrap_frac_est))
+            inner_geo.setdefault("scrap_pct_from_holes_clamped", hole_scrap_clamped_val)
 
     if density_g_cc and density_g_cc > 0:
         geo_context.setdefault("density_g_cc", float(density_g_cc))
@@ -6852,6 +6915,11 @@ def compute_quote_from_df(df: pd.DataFrame,
     material_detail_for_breakdown.setdefault("mass_g_net", net_mass_g)
     material_detail_for_breakdown.setdefault("net_mass_g", net_mass_g)
     material_detail_for_breakdown.setdefault("scrap_pct", scrap_pct)
+    if removal_mass_g_est and removal_mass_g_est > 0:
+        material_detail_for_breakdown.setdefault("material_removed_mass_g_est", float(removal_mass_g_est))
+    if hole_scrap_clamped_val > 0:
+        material_detail_for_breakdown.setdefault("scrap_pct_from_holes", float(hole_scrap_frac_est))
+        material_detail_for_breakdown.setdefault("scrap_pct_from_holes_clamped", float(hole_scrap_clamped_val))
     if mass_basis:
         material_detail_for_breakdown.setdefault("mass_basis", mass_basis)
     for key, value in fallback_meta.items():
@@ -7473,6 +7541,12 @@ def compute_quote_from_df(df: pd.DataFrame,
         "packaging_flat_cost": float((crate_nre_cost or 0.0) + (packaging_mat or 0.0)),
         "fai_required": bool(fai_flag_base),
     }
+    if removal_mass_g_est and removal_mass_g_est > 0:
+        features["material_removed_mass_g_est"] = float(removal_mass_g_est)
+    if hole_scrap_frac_est and hole_scrap_frac_est > 0:
+        features["scrap_pct_holes_est"] = float(hole_scrap_frac_est)
+        if hole_scrap_clamped_val:
+            features["scrap_pct_holes_clamped"] = float(hole_scrap_clamped_val)
     # Safely include tap/cbore counts even if later sections define seeds
     try:
         _tq = int(tap_qty_geo)
