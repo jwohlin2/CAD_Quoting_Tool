@@ -5149,6 +5149,8 @@ def render_quote(
             ]
         )
 
+        detail_lines: list[str] = []
+
         if have_any:
             mat_lines.append("Material & Stock")
             mat_lines.append(divider)
@@ -5159,7 +5161,7 @@ def render_quote(
                     credit_display = f"-{credit_display}"
                 else:
                     credit_display = f"-{currency}{float(scrap_credit):,.2f}"
-                write_line(f"Scrap Credit: {credit_display}", "  ")
+                detail_lines.append(f"  Scrap Credit: {credit_display}")
             net_mass_val = _coerce_float_or_none(net_mass_g)
             effective_mass_val = _coerce_float_or_none(mass_g)
             removal_mass_val = None
@@ -5250,11 +5252,13 @@ def render_quote(
                     if price_asof:
                         extras.append(f"as of {price_asof}")
                     extra = f" ({', '.join(extras)})" if extras else ""
-                    write_line(f"Unit Price: {display_line}{extra}", "  ")
+                    detail_lines.append(f"  Unit Price: {display_line}{extra}")
             if price_source:
-                write_line(f"Source: {price_source}", "  ")
-            if minchg or show_zeros:  write_line(f"Supplier Min Charge: {_m(minchg or 0)}", "  ")
-            if scrap is not None:     write_line(f"Scrap %: {_pct(scrap)}", "  ")
+                detail_lines.append(f"  Source: {price_source}")
+            if minchg or show_zeros:
+                detail_lines.append(f"  Supplier Min Charge: {_m(minchg or 0)}")
+            if scrap is not None:
+                detail_lines.append(f"  Scrap %: {_pct(scrap)}")
             stock_L = _fmt_dim(ui_vars.get("Plate Length (in)"))
             stock_W = _fmt_dim(ui_vars.get("Plate Width (in)"))
             th_in = ui_vars.get("Thickness (in)")
@@ -5264,6 +5268,8 @@ def render_quote(
                 th_in = 1.0
             stock_T = _fmt_dim(th_in)
             mat_lines.append(f"  Stock used: {stock_L} × {stock_W} × {stock_T} in")
+            if detail_lines:
+                mat_lines.extend(detail_lines)
             mat_lines.append("")
 
     lines.extend(mat_lines)
