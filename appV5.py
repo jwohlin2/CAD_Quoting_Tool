@@ -8095,7 +8095,10 @@ def compute_quote_from_df(df: pd.DataFrame,
         per_setup = float(params.get("FixturePerSetupHr", 0.15))  # small add per extra setup
         fixture_build_hr = base + per_setup * max(0, setups - 1)
         # (Optional) tiny tolerance bump without caps:
-        min_tol_in = min_tol_for_fixture
+        try:
+            min_tol_in = float(min_tol_for_fixture) if min_tol_for_fixture else None
+        except Exception:
+            min_tol_in = None
         if min_tol_in and min_tol_in > 0:
             norm = max(0.0, min(1.0, (INPROC_REF_TOL_IN - min_tol_in) / INPROC_REF_TOL_IN))
             fixture_build_hr *= (1.0 + 0.20 * (norm ** 0.6))  # ≤ ~+20% at very tight
