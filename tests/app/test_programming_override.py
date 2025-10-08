@@ -18,14 +18,22 @@ def _df(rows: Iterable[Tuple[str, Union[float, int, str], str]]) -> pd.DataFrame
     return pd.DataFrame(normalized, columns=["Item", "Example Values / Options", "Data Type / Input Method"])
 
 
+BASE_GEO = {
+    "thickness_mm": 25.4,
+    "material": "6061",
+    "GEO__Face_Count": 6,
+    "GEO__Unique_Normal_Count": 3,
+    "GEO_Complexity_0to100": 25,
+    "GEO__MaxDim_mm": 100,
+}
+
+
 def test_programming_hours_override_caps_total_hours() -> None:
     df = _df(
         [
             ("Qty", 1, "number"),
             ("Material", "6061", "text"),
             ("Stock Thickness_mm", 25.4, "number"),
-            ("Prog Max To Milling Ratio", 100.0, "number"),
-            ("Programming Hours", 11.75, "number"),
             ("Programming Override Hr", 1.0, "number"),
         ]
     )
@@ -33,14 +41,14 @@ def test_programming_hours_override_caps_total_hours() -> None:
     result = appV5.compute_quote_from_df(
         df,
         llm_enabled=False,
-        geo={"thickness_mm": 25.4, "material": "6061"},
+        geo=BASE_GEO,
     )
 
     prog_detail = result["breakdown"]["nre_detail"]["programming"]
 
     assert prog_detail["prog_hr"] == pytest.approx(1.0)
     assert prog_detail["override_applied"] is True
-    assert prog_detail["auto_prog_hr"] == pytest.approx(11.75)
+    assert prog_detail["auto_prog_hr"] == pytest.approx(1.075, rel=1e-6)
 
 
 def test_programming_hours_without_override_unmodified() -> None:
@@ -49,19 +57,17 @@ def test_programming_hours_without_override_unmodified() -> None:
             ("Qty", 1, "number"),
             ("Material", "6061", "text"),
             ("Stock Thickness_mm", 25.4, "number"),
-            ("Prog Max To Milling Ratio", 100.0, "number"),
-            ("Programming Hours", 11.75, "number"),
         ]
     )
 
     result = appV5.compute_quote_from_df(
         df,
         llm_enabled=False,
-        geo={"thickness_mm": 25.4, "material": "6061"},
+        geo=BASE_GEO,
     )
 
     prog_detail = result["breakdown"]["nre_detail"]["programming"]
 
-    assert prog_detail["prog_hr"] == pytest.approx(11.75)
+    assert prog_detail["prog_hr"] == pytest.approx(1.075, rel=1e-6)
     assert "override_applied" not in prog_detail
-    assert "auto_prog_hr" not in prog_detail
+    assert prog_detail["auto_prog_hr"] == pytest.approx(1.075, rel=1e-6)
