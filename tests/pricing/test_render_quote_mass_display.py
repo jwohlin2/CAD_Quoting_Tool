@@ -40,10 +40,10 @@ def test_render_quote_shows_net_mass_when_scrap_present() -> None:
     }
 
     rendered = appV5.render_quote(result, currency="$", show_zeros=False)
-    mass_line = next(line for line in rendered.splitlines() if "Mass:" in line)
 
-    assert "0.22 lb net" in mass_line
-    assert "scrap-adjusted 0.26 lb" in mass_line
+    assert "Mass:" not in rendered
+    assert "Net Weight: 3.5 oz" in rendered
+    assert "With Scrap: 4.2 oz" in rendered
 
 
 def test_render_quote_does_not_duplicate_detail_lines() -> None:
