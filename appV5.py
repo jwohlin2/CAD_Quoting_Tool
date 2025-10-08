@@ -388,7 +388,6 @@ def _auto_accept_suggestions(suggestions: dict[str, Any] | None) -> dict[str, An
         "setups",
         "fixture",
         "fixture_build_hr",
-        "fixture_material_cost",
         "soft_jaw_hr",
         "soft_jaw_material_cost",
         "handling_adder_hr",
@@ -1346,9 +1345,6 @@ def sanitize_suggestions(s: dict, bounds: dict) -> dict:
                 s[key] = setup_block.get(key)
         if "fixture_build_hr" in setup_block and "fixture_build_hr" not in s:
             s["fixture_build_hr"] = setup_block.get("fixture_build_hr")
-        if "fixture_material_cost" in setup_block and "fixture_material_cost" not in s:
-            s["fixture_material_cost"] = setup_block.get("fixture_material_cost")
-
     mults: dict[str, float] = {}
     for proc, raw_val in (s.get("process_hour_multipliers") or {}).items():
         value, detail = _extract_detail(raw_val)
@@ -1427,13 +1423,6 @@ def sanitize_suggestions(s: dict, bounds: dict) -> dict:
     fixture_build_hr = _extract_float_field(fixture_build_raw, 0.0, 2.0, ("fixture_build_hr",))
     if fixture_build_hr is not None:
         extra["fixture_build_hr"] = fixture_build_hr
-
-    fixture_material_raw = s.get("fixture_material_cost")
-    if fixture_material_raw is None and setup_block:
-        fixture_material_raw = setup_block.get("fixture_material_cost")
-    fixture_material_cost = _extract_float_field(fixture_material_raw, 0.0, 250.0, ("fixture_material_cost",))
-    if fixture_material_cost is not None:
-        extra["fixture_material_cost"] = fixture_material_cost
 
     soft_block = s.get("soft_jaw_plan") if isinstance(s.get("soft_jaw_plan"), dict) else None
     soft_hr_raw = s.get("soft_jaw_hr")
@@ -1517,6 +1506,9 @@ def sanitize_suggestions(s: dict, bounds: dict) -> dict:
     packaging_cost = _extract_float_field(s.get("packaging_flat_cost"), 0.0, 25.0, ("packaging_flat_cost",))
     if packaging_cost is not None:
         extra["packaging_flat_cost"] = packaging_cost
+    shipping_override_val = _extract_float_field(s.get("shipping_cost"), 0.0, None, ("shipping_cost",))
+    if shipping_override_val is not None:
+        extra["shipping_cost"] = shipping_override_val
 
     shipping_hint = s.get("shipping_hint") or s.get("shipping_class")
     if isinstance(shipping_hint, dict):
@@ -1733,8 +1725,6 @@ def overrides_to_suggestions(overrides: dict | None) -> dict:
         suggestions["add_pass_through"] = dict(overrides["add_pass_through"])
     if overrides.get("scrap_pct_override") is not None:
         suggestions["scrap_pct"] = overrides.get("scrap_pct_override")
-    if overrides.get("fixture_material_cost_delta") is not None:
-        suggestions["fixture_material_cost_delta"] = overrides.get("fixture_material_cost_delta")
     if overrides.get("contingency_pct_override") is not None:
         suggestions["contingency_pct"] = overrides.get("contingency_pct_override")
     setup_plan = overrides.get("setup_recommendation")
@@ -1751,7 +1741,6 @@ def overrides_to_suggestions(overrides: dict | None) -> dict:
         suggestions["notes"] = list(overrides["notes"])
     for key in (
         "fixture_build_hr",
-        "fixture_material_cost",
         "soft_jaw_hr",
         "soft_jaw_material_cost",
         "handling_adder_hr",
@@ -1761,6 +1750,7 @@ def overrides_to_suggestions(overrides: dict | None) -> dict:
         "fai_prep_hr",
         "packaging_hours",
         "packaging_flat_cost",
+        "shipping_cost",
         "shipping_hint",
     ):
         if overrides.get(key) is not None:
@@ -1786,8 +1776,6 @@ def suggestions_to_overrides(suggestions: dict | None) -> dict:
         out["add_pass_through"] = dict(apt)
     if suggestions.get("scrap_pct") is not None:
         out["scrap_pct_override"] = suggestions.get("scrap_pct")
-    if suggestions.get("fixture_material_cost_delta") is not None:
-        out["fixture_material_cost_delta"] = suggestions.get("fixture_material_cost_delta")
     if suggestions.get("contingency_pct") is not None:
         out["contingency_pct_override"] = suggestions.get("contingency_pct")
     setups = suggestions.get("setups")
@@ -1802,7 +1790,6 @@ def suggestions_to_overrides(suggestions: dict | None) -> dict:
         out["notes"] = list(suggestions["notes"])
     for key in (
         "fixture_build_hr",
-        "fixture_material_cost",
         "soft_jaw_hr",
         "soft_jaw_material_cost",
         "handling_adder_hr",
@@ -1812,6 +1799,7 @@ def suggestions_to_overrides(suggestions: dict | None) -> dict:
         "fai_prep_hr",
         "packaging_hours",
         "packaging_flat_cost",
+        "shipping_cost",
         "shipping_hint",
     ):
         if suggestions.get(key) is not None:
@@ -2107,24 +2095,6 @@ def merge_effective(
     eff["scrap_pct"] = float(scrap_val)
     source_tags["scrap_pct"] = scrap_source
 
-    fixture_delta_user = overrides.get("fixture_material_cost_delta")
-    fixture_delta_sugg = suggestions.get("fixture_material_cost_delta")
-    fixture_delta_source = "baseline"
-    fixture_delta_val = None
-    if fixture_delta_user is not None:
-        cand = _as_float_or_none(fixture_delta_user)
-        if cand is not None:
-            fixture_delta_val = float(cand)
-            fixture_delta_source = "user"
-    elif fixture_delta_sugg is not None:
-        cand = _as_float_or_none(fixture_delta_sugg)
-        if cand is not None:
-            fixture_delta_val = float(cand)
-            fixture_delta_source = "llm"
-    if fixture_delta_val is not None:
-        eff["fixture_material_cost_delta"] = fixture_delta_val
-    source_tags["fixture_material_cost_delta"] = fixture_delta_source
-
     contingency_base = baseline.get("contingency_pct")
     contingency_user = overrides.get("contingency_pct") or overrides.get("contingency_pct_override")
     contingency_sugg = suggestions.get("contingency_pct")
@@ -2188,7 +2158,6 @@ def merge_effective(
         eff["notes"] = notes_val
 
     _merge_numeric_field("fixture_build_hr", 0.0, 2.0, "fixture_build_hr")
-    _merge_numeric_field("fixture_material_cost", 0.0, 250.0, "fixture_material_cost")
     _merge_numeric_field("soft_jaw_hr", 0.0, 1.0, "soft_jaw_hr")
     _merge_numeric_field("soft_jaw_material_cost", 0.0, 60.0, "soft_jaw_material_cost")
     _merge_numeric_field("handling_adder_hr", 0.0, 0.2, "handling_adder_hr")
@@ -2199,6 +2168,7 @@ def merge_effective(
     _merge_numeric_field("fai_prep_hr", 0.0, 1.0, "fai_prep_hr")
     _merge_numeric_field("packaging_hours", 0.0, 0.5, "packaging_hours")
     _merge_numeric_field("packaging_flat_cost", 0.0, 25.0, "packaging_flat_cost")
+    _merge_numeric_field("shipping_cost", 0.0, None, "shipping_cost")
     _merge_text_field("shipping_hint", max_len=80)
     _merge_list_field("operation_sequence")
     _merge_dict_field("drilling_strategy")
@@ -2324,7 +2294,6 @@ def compute_effective_state(state: QuoteState) -> tuple[dict, dict]:
         "setups",
         "fixture",
         "fixture_build_hr",
-        "fixture_material_cost",
         "soft_jaw_hr",
         "soft_jaw_material_cost",
         "handling_adder_hr",
@@ -2528,9 +2497,6 @@ def effective_to_overrides(effective: dict, baseline: dict | None = None) -> dic
     scrap_base = baseline.get("scrap_pct")
     if scrap_eff is not None and (scrap_base is None or not math.isclose(float(scrap_eff), float(scrap_base or 0.0), abs_tol=1e-6)):
         out["scrap_pct_override"] = float(scrap_eff)
-    fixture_delta = effective.get("fixture_material_cost_delta")
-    if fixture_delta is not None and not math.isclose(float(fixture_delta), 0.0, abs_tol=1e-6):
-        out["fixture_material_cost_delta"] = float(fixture_delta)
     contingency_eff = effective.get("contingency_pct")
     contingency_base = baseline.get("contingency_pct")
     if contingency_eff is not None and (contingency_base is None or not math.isclose(float(contingency_eff), float(contingency_base or 0.0), abs_tol=1e-6)):
@@ -2545,7 +2511,6 @@ def effective_to_overrides(effective: dict, baseline: dict | None = None) -> dic
             out["setup_recommendation"]["fixture"] = fixture_eff
     numeric_keys = {
         "fixture_build_hr": (0.0, None),
-        "fixture_material_cost": (0.0, None),
         "soft_jaw_hr": (0.0, None),
         "soft_jaw_material_cost": (0.0, None),
         "handling_adder_hr": (0.0, None),
@@ -2554,6 +2519,7 @@ def effective_to_overrides(effective: dict, baseline: dict | None = None) -> dic
         "fai_prep_hr": (0.0, None),
         "packaging_hours": (0.0, None),
         "packaging_flat_cost": (0.0, None),
+        "shipping_cost": (0.0, None),
     }
     for key, (_default, _) in numeric_keys.items():
         eff_val = effective.get(key)
@@ -2607,12 +2573,10 @@ def ensure_accept_flags(state: QuoteState) -> None:
 
     for key in (
         "scrap_pct",
-        "fixture_material_cost_delta",
         "contingency_pct",
         "setups",
         "fixture",
         "fixture_build_hr",
-        "fixture_material_cost",
         "soft_jaw_hr",
         "soft_jaw_material_cost",
         "handling_adder_hr",
@@ -2750,23 +2714,6 @@ def iter_suggestion_rows(state: QuoteState) -> list[dict]:
             "source": cont_src,
         })
 
-    fixture_delta_llm = suggestions.get("fixture_material_cost_delta")
-    fixture_delta_user = overrides.get("fixture_material_cost_delta")
-    fixture_delta_eff = effective.get("fixture_material_cost_delta")
-    fixture_delta_src = sources.get("fixture_material_cost_delta", "baseline")
-    if any(v is not None for v in (fixture_delta_llm, fixture_delta_user, fixture_delta_eff)):
-        rows.append({
-            "path": ("fixture_material_cost_delta",),
-            "label": "Fixture material Δ",
-            "kind": "currency",
-            "baseline": 0.0,
-            "llm": fixture_delta_llm,
-            "user": fixture_delta_user,
-            "accept": bool(accept.get("fixture_material_cost_delta")),
-            "effective": fixture_delta_eff or 0.0,
-            "source": fixture_delta_src,
-        })
-
     setups_base = baseline.get("setups")
     setups_llm = suggestions.get("setups")
     setups_user = overrides.get("setups")
@@ -2826,7 +2773,6 @@ def iter_suggestion_rows(state: QuoteState) -> list[dict]:
         )
 
     _add_scalar_row(("fixture_build_hr",), "Fixture Build Hours", "hours", "fixture_build_hr")
-    _add_scalar_row(("fixture_material_cost",), "Fixture Material $", "currency", "fixture_material_cost")
     _add_scalar_row(("soft_jaw_hr",), "Soft Jaw Hours", "hours", "soft_jaw_hr")
     _add_scalar_row(("soft_jaw_material_cost",), "Soft Jaw Material $", "currency", "soft_jaw_material_cost")
     _add_scalar_row(("handling_adder_hr",), "Handling Adder Hours", "hours", "handling_adder_hr")
@@ -2837,6 +2783,7 @@ def iter_suggestion_rows(state: QuoteState) -> list[dict]:
     _add_scalar_row(("fai_prep_hr",), "FAI Prep Hours", "hours", "fai_prep_hr")
     _add_scalar_row(("packaging_hours",), "Packaging Hours", "hours", "packaging_hours")
     _add_scalar_row(("packaging_flat_cost",), "Packaging Flat $", "currency", "packaging_flat_cost")
+    _add_scalar_row(("shipping_cost",), "Shipping $", "currency", "shipping_cost")
     _add_scalar_row(("shipping_hint",), "Shipping Hint", "text", "shipping_hint")
 
     return rows
@@ -4917,6 +4864,13 @@ def render_quote(
         str(label): str(detail) for label, detail in labor_cost_details_input_raw.items()
     }
     labor_cost_details: dict[str, str] = dict(labor_cost_details_input)
+    labor_cost_totals_raw = breakdown.get("labor_costs", {}) or {}
+    labor_cost_totals: dict[str, float] = {}
+    for key, value in labor_cost_totals_raw.items():
+        try:
+            labor_cost_totals[str(key)] = float(value)
+        except Exception:
+            continue
     direct_cost_details = breakdown.get("direct_cost_details", {}) or {}
     qty          = int(breakdown.get("qty", 1) or 1)
     price        = float(result.get("price", totals.get("price", 0.0)))
@@ -4981,6 +4935,31 @@ def render_quote(
             parts.append(f"{ounce_text} oz")
         return " ".join(parts) if parts else "0 oz"
 
+    def _is_truthy_flag(value) -> bool:
+        """Return True only for explicit truthy values.
+
+        Material scrap credit overrides are stored as flags that may round-trip
+        through JSON/CSV layers. Those conversions can turn ``False`` into the
+        string "false", which would previously evaluate truthy and cause the
+        scrap credit line to render even when no override was entered. Treat
+        only well-known truthy strings/numbers as True; unknown or falsy inputs
+        default to False so that the credit row is hidden unless a user-supplied
+        override is present.
+        """
+
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"1", "true", "t", "yes", "y", "on"}:
+                return True
+            if lowered in {"", "0", "false", "f", "no", "n", "off"}:
+                return False
+            return False
+        return False
+
     def write_line(s: str, indent: str = ""):
         lines.append(f"{indent}{s}")
 
@@ -5008,27 +4987,34 @@ def render_quote(
         clean = clean.lstrip("= ")
         return clean.lower().startswith("total")
 
-    def _ensure_total_separator():
+    def _ensure_total_separator(width: int) -> None:
         if not lines:
+            return
+        width = max(0, int(width))
+        if width <= 0:
             return
         if lines[-1] == divider:
             return
-        lines.append(divider)
+        pad = max(0, page_width - width)
+        short_divider = " " * pad + "-" * width
+        if lines[-1] == short_divider:
+            return
+        lines.append(short_divider)
 
     def row(label: str, val: float, indent: str = ""):
-        if _is_total_label(label):
-            _ensure_total_separator()
         # left-label, right-amount aligned to page_width
         left = f"{indent}{label}"
         right = _m(val)
+        if _is_total_label(label):
+            _ensure_total_separator(len(right))
         pad = max(1, page_width - len(left) - len(right))
         lines.append(f"{left}{' ' * pad}{right}")
 
     def hours_row(label: str, val: float, indent: str = ""):
-        if _is_total_label(label):
-            _ensure_total_separator()
         left = f"{indent}{label}"
         right = _h(val)
+        if _is_total_label(label):
+            _ensure_total_separator(len(right))
         pad = max(1, page_width - len(left) - len(right))
         lines.append(f"{left}{' ' * pad}{right}")
 
@@ -5112,7 +5098,9 @@ def render_quote(
         minchg = material.get("supplier_min_charge")
         matcost= material.get("material_cost")
         scrap  = material.get("scrap_pct", None)  # will show only if present in breakdown
-        scrap_credit_entered = bool(material.get("material_scrap_credit_entered"))
+        scrap_credit_entered = _is_truthy_flag(
+            material.get("material_scrap_credit_entered")
+        )
         scrap_credit = float(material.get("material_scrap_credit") or 0.0)
         unit_price_kg = material.get("unit_price_usd_per_kg")
         unit_price_lb = material.get("unit_price_usd_per_lb")
@@ -5132,6 +5120,8 @@ def render_quote(
             ]
         )
 
+        detail_lines: list[str] = []
+
         if have_any:
             mat_lines.append("Material & Stock")
             mat_lines.append(divider)
@@ -5142,9 +5132,35 @@ def render_quote(
                     credit_display = f"-{credit_display}"
                 else:
                     credit_display = f"-{currency}{float(scrap_credit):,.2f}"
-                write_line(f"Scrap Credit: {credit_display}", "  ")
+                detail_lines.append(f"  Scrap Credit: {credit_display}")
             net_mass_val = _coerce_float_or_none(net_mass_g)
             effective_mass_val = _coerce_float_or_none(mass_g)
+            removal_mass_val = None
+            for removal_key in ("material_removed_mass_g", "material_removed_mass_g_est"):
+                removal_mass_val = _coerce_float_or_none(material.get(removal_key))
+                if removal_mass_val:
+                    break
+            scrap_fraction_val = _coerce_scrap_fraction(scrap)
+            if scrap_fraction_val is not None and scrap_fraction_val <= 0:
+                scrap_fraction_val = None
+            base_mass_for_scrap = None
+            if net_mass_val and net_mass_val > 0:
+                base_mass_for_scrap = float(net_mass_val)
+            elif effective_mass_val and effective_mass_val > 0:
+                base_mass_for_scrap = float(effective_mass_val)
+            scrap_adjusted_mass_val: float | None = None
+            if base_mass_for_scrap:
+                if removal_mass_val and removal_mass_val > 0:
+                    scrap_adjusted_mass_val = max(0.0, base_mass_for_scrap - float(removal_mass_val))
+                elif scrap_fraction_val is not None:
+                    scrap_adjusted_mass_val = max(0.0, base_mass_for_scrap * (1.0 - scrap_fraction_val))
+                elif (
+                    effective_mass_val is not None
+                    and net_mass_val is not None
+                ):
+                    diff_mass = abs(float(effective_mass_val) - float(net_mass_val))
+                    base_candidate = max(float(effective_mass_val), float(net_mass_val))
+                    scrap_adjusted_mass_val = max(0.0, base_candidate - diff_mass)
             if net_mass_val is None:
                 net_mass_val = effective_mass_val
             show_mass_line = (
@@ -5155,13 +5171,18 @@ def render_quote(
             if show_mass_line:
                 net_display = _format_weight_lb_decimal(net_mass_val)
                 mass_desc: list[str] = [f"{net_display} net"]
+                scrap_desc_mass = scrap_adjusted_mass_val
+                if scrap_desc_mass is None:
+                    scrap_desc_mass = effective_mass_val
                 if (
-                    effective_mass_val
-                    and net_mass_val
-                    and abs(float(effective_mass_val) - float(net_mass_val)) > 0.05
+                    scrap_desc_mass is not None
+                    and (
+                        not net_mass_val
+                        or abs(float(scrap_desc_mass) - float(net_mass_val)) > 0.05
+                    )
                 ):
                     mass_desc.append(
-                        f"scrap-adjusted {_format_weight_lb_decimal(effective_mass_val)}"
+                        f"scrap-adjusted {_format_weight_lb_decimal(scrap_desc_mass)}"
                     )
                 elif effective_mass_val and not net_mass_val:
                     mass_desc.append(
@@ -5170,13 +5191,17 @@ def render_quote(
 
             if (net_mass_val and net_mass_val > 0) or show_zeros:
                 write_line(f"Net Weight: {_format_weight_lb_oz(net_mass_val)}", "  ")
-            if (
-                scrap
-                and effective_mass_val
-                and net_mass_val
-                and abs(float(effective_mass_val) - float(net_mass_val)) > 0.05
-            ):
-                write_line(f"With Scrap: {_format_weight_lb_oz(effective_mass_val)}", "  ")
+            with_scrap_mass = scrap_adjusted_mass_val
+            if with_scrap_mass is None:
+                with_scrap_mass = effective_mass_val if scrap else None
+            if with_scrap_mass is not None:
+                show_with_scrap = False
+                if net_mass_val:
+                    show_with_scrap = abs(float(with_scrap_mass) - float(net_mass_val)) > 0.05
+                else:
+                    show_with_scrap = bool(with_scrap_mass) or show_zeros
+                if show_with_scrap or show_zeros:
+                    write_line(f"With Scrap: {_format_weight_lb_oz(with_scrap_mass)}", "  ")
 
             if upg or unit_price_kg or unit_price_lb or show_zeros:
                 grams_per_lb = 1000.0 / LB_PER_KG
@@ -5198,11 +5223,13 @@ def render_quote(
                     if price_asof:
                         extras.append(f"as of {price_asof}")
                     extra = f" ({', '.join(extras)})" if extras else ""
-                    write_line(f"Unit Price: {display_line}{extra}", "  ")
+                    detail_lines.append(f"  Unit Price: {display_line}{extra}")
             if price_source:
-                write_line(f"Source: {price_source}", "  ")
-            if minchg or show_zeros:  write_line(f"Supplier Min Charge: {_m(minchg or 0)}", "  ")
-            if scrap is not None:     write_line(f"Scrap %: {_pct(scrap)}", "  ")
+                detail_lines.append(f"  Source: {price_source}")
+            if minchg or show_zeros:
+                detail_lines.append(f"  Supplier Min Charge: {_m(minchg or 0)}")
+            if scrap is not None:
+                detail_lines.append(f"  Scrap %: {_pct(scrap)}")
             stock_L = _fmt_dim(ui_vars.get("Plate Length (in)"))
             stock_W = _fmt_dim(ui_vars.get("Plate Width (in)"))
             th_in = ui_vars.get("Thickness (in)")
@@ -5212,6 +5239,8 @@ def render_quote(
                 th_in = 1.0
             stock_T = _fmt_dim(th_in)
             mat_lines.append(f"  Stock used: {stock_L} × {stock_W} × {stock_T} in")
+            if detail_lines:
+                mat_lines.extend(detail_lines)
             mat_lines.append("")
 
     lines.extend(mat_lines)
@@ -5236,15 +5265,12 @@ def render_quote(
             write_detail(nre_cost_details.get("Programming & Eng (per lot)"))
 
     # Fixturing (with renamed subline)
-    if (fix.get("per_lot", 0.0) > 0) or show_zeros or any(fix.get(k) for k in ("build_hr", "mat_cost")):
+    if (fix.get("per_lot", 0.0) > 0) or show_zeros or fix.get("build_hr"):
         row("Fixturing:", float(fix.get("per_lot", 0.0)))
         has_detail = False
         if fix.get("build_hr"):
             has_detail = True
             write_line(f"- Build Labor: {_h(fix['build_hr'])} @ {_m(fix.get('build_rate', 0))}/hr", "    ")
-        if fix.get("mat_cost"):
-            has_detail = True
-            write_line(f"- Fixture Material Cost: {_m(fix.get('mat_cost', 0.0))}", "    ")
         if not has_detail:
             write_detail(nre_cost_details.get("Fixturing (per lot)"))
 
@@ -5263,10 +5289,40 @@ def render_quote(
     lines.append("Process & Labor Costs")
     lines.append(divider)
     proc_total = 0.0
+
+    def _add_labor_cost_line(
+        label: str,
+        amount: float,
+        *,
+        process_key: str | None = None,
+        detail_bits: list[str] | None = None,
+        fallback_detail: str | None = None,
+    ) -> None:
+        nonlocal proc_total
+        if not ((amount > 0) or show_zeros):
+            return
+        row(label, float(amount), indent="  ")
+        existing_detail = labor_cost_details.get(label)
+        merged_detail = _merge_detail(existing_detail, detail_bits or [])
+        detail_to_write: str | None
+        if merged_detail:
+            labor_cost_details[label] = merged_detail
+            detail_to_write = merged_detail
+        elif fallback_detail:
+            detail_to_write = fallback_detail
+            labor_cost_details.setdefault(label, fallback_detail)
+        else:
+            detail_to_write = None
+
+        if detail_to_write:
+            write_detail(detail_to_write, indent="    ")
+        elif process_key is not None:
+            add_process_notes(process_key, indent="    ")
+        proc_total += float(amount or 0.0)
+
     for key, value in sorted((process_costs or {}).items(), key=lambda kv: kv[1], reverse=True):
         if (value > 0) or show_zeros:
             label = _process_label(key)
-            row(label, float(value), indent="  ")
             meta = process_meta.get(str(key).lower(), {})
             detail_bits: list[str] = []
             try:
@@ -5284,19 +5340,113 @@ def render_quote(
             if hr_val > 0:
                 detail_bits.append(f"{hr_val:.2f} hr @ ${rate_val:,.2f}/hr")
             if abs(extra_val) > 1e-6:
-                detail_bits.append(f"includes ${extra_val:,.2f} extras")
+                if hr_val <= 1e-6 and rate_val > 0:
+                    extra_hours = extra_val / rate_val
+                    detail_bits.append(
+                        f"{extra_hours:.2f} hr @ ${rate_val:,.2f}/hr"
+                    )
+                else:
+                    detail_bits.append(f"includes ${extra_val:,.2f} extras")
             proc_notes = applied_process.get(str(key).lower(), {}).get("notes")
             if proc_notes:
                 detail_bits.append("LLM: " + ", ".join(proc_notes))
 
-            existing_detail = labor_cost_details.get(label)
-            merged_detail = _merge_detail(existing_detail, detail_bits)
-            if merged_detail:
-                labor_cost_details[label] = merged_detail
-                write_detail(merged_detail, indent="    ")
+            _add_labor_cost_line(
+                label,
+                float(value),
+                process_key=str(key),
+                detail_bits=detail_bits,
+            )
+
+    programming_per_part_cost = labor_cost_totals.get("Programming (amortized)")
+    if programming_per_part_cost is None:
+        programming_per_part_cost = float(nre.get("programming_per_part", 0.0) or 0.0)
+    if programming_per_part_cost > 0 or show_zeros:
+        programming_detail = (nre_detail or {}).get("programming") or {}
+        prog_bits: list[str] = []
+        try:
+            prog_hr = float(programming_detail.get("prog_hr", 0.0) or 0.0)
+        except Exception:
+            prog_hr = 0.0
+        try:
+            prog_rate = float(programming_detail.get("prog_rate", 0.0) or 0.0)
+        except Exception:
+            prog_rate = 0.0
+        if prog_hr > 0:
+            if prog_rate > 0:
+                prog_bits.append(
+                    f"- Programmer (lot): {prog_hr:.2f} hr @ ${prog_rate:,.2f}/hr"
+                )
             else:
-                add_process_notes(key, indent="    ")
-            proc_total += float(value or 0.0)
+                prog_bits.append(f"- Programmer (lot): {prog_hr:.2f} hr")
+        try:
+            eng_hr = float(programming_detail.get("eng_hr", 0.0) or 0.0)
+        except Exception:
+            eng_hr = 0.0
+        try:
+            eng_rate = float(programming_detail.get("eng_rate", 0.0) or 0.0)
+        except Exception:
+            eng_rate = 0.0
+        if eng_hr > 0:
+            if eng_rate > 0:
+                prog_bits.append(
+                    f"- Engineering (lot): {eng_hr:.2f} hr @ ${eng_rate:,.2f}/hr"
+                )
+            else:
+                prog_bits.append(f"- Engineering (lot): {eng_hr:.2f} hr")
+        if qty > 1 and programming_per_part_cost > 0:
+            prog_bits.append(f"Amortized across {qty} pcs")
+
+        _add_labor_cost_line(
+            "Programming (amortized)",
+            programming_per_part_cost,
+            detail_bits=prog_bits,
+        )
+
+    fixture_detail = (nre_detail or {}).get("fixture") or {}
+    fixture_labor_per_part_cost = labor_cost_totals.get("Fixture Build (amortized)")
+    if fixture_labor_per_part_cost is None:
+        try:
+            fixture_labor_total = float(fixture_detail.get("labor_cost", 0.0) or 0.0)
+        except Exception:
+            fixture_labor_total = 0.0
+        fixture_labor_per_part_cost = (
+            fixture_labor_total / qty if qty > 0 else fixture_labor_total
+        )
+    if fixture_labor_per_part_cost > 0 or show_zeros:
+        fixture_bits: list[str] = []
+        try:
+            fixture_hr = float(fixture_detail.get("build_hr", 0.0) or 0.0)
+        except Exception:
+            fixture_hr = 0.0
+        try:
+            fixture_rate = float(
+                fixture_detail.get("build_rate", rates.get("FixtureBuildRate", 0.0)) or 0.0
+            )
+        except Exception:
+            fixture_rate = 0.0
+        if fixture_hr > 0:
+            if fixture_rate > 0:
+                fixture_bits.append(
+                    f"- Build labor (lot): {fixture_hr:.2f} hr @ ${fixture_rate:,.2f}/hr"
+                )
+            else:
+                fixture_bits.append(f"- Build labor (lot): {fixture_hr:.2f} hr")
+        try:
+            soft_jaw_hr = float(fixture_detail.get("soft_jaw_hr", 0.0) or 0.0)
+        except Exception:
+            soft_jaw_hr = 0.0
+        if soft_jaw_hr > 0:
+            fixture_bits.append(f"Soft jaw prep {soft_jaw_hr:.2f} hr")
+        if qty > 1 and fixture_labor_per_part_cost > 0:
+            fixture_bits.append(f"Amortized across {qty} pcs")
+
+        _add_labor_cost_line(
+            "Fixture Build (amortized)",
+            fixture_labor_per_part_cost,
+            detail_bits=fixture_bits,
+        )
+
     row("Total", proc_total, indent="  ")
 
     hour_summary_entries: list[tuple[str, float]] = []
@@ -5319,6 +5469,15 @@ def render_quote(
     if programming_hours > 0 or show_zeros:
         hour_summary_entries.append(("Programming", programming_hours))
         total_hours += programming_hours if programming_hours else 0.0
+
+    fixture_meta = (nre_detail or {}).get("fixture") or {}
+    try:
+        fixture_hours = float(fixture_meta.get("build_hr", 0.0) or 0.0)
+    except Exception:
+        fixture_hours = 0.0
+    if fixture_hours > 0 or show_zeros:
+        hour_summary_entries.append(("Fixture Build", fixture_hours))
+        total_hours += fixture_hours if fixture_hours else 0.0
 
     if hour_summary_entries:
         lines.append("")
@@ -6945,8 +7104,12 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     if hole_scrap_frac_est and hole_scrap_frac_est > 0:
         hole_scrap_clamped_val = max(0.0, min(0.25, float(hole_scrap_frac_est)))
-        scrap_pct = max(scrap_pct, hole_scrap_clamped_val)
-        scrap_pct_baseline = max(scrap_pct_baseline, hole_scrap_clamped_val)
+        if scrap_source_label == "default_guess":
+            scrap_pct = hole_scrap_clamped_val
+            scrap_pct_baseline = hole_scrap_clamped_val
+        else:
+            scrap_pct = max(scrap_pct, hole_scrap_clamped_val)
+            scrap_pct_baseline = max(scrap_pct_baseline, hole_scrap_clamped_val)
         geo_context.setdefault("scrap_pct_from_holes", float(hole_scrap_frac_est))
         geo_context.setdefault("scrap_pct_from_holes_clamped", hole_scrap_clamped_val)
         if inner_geo is not None:
@@ -7227,11 +7390,9 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     # ---- fixture -------------------------------------------------------------
     fixture_build_hr = sum_time(r"(?:Fixture\s*Build|Custom\s*Fixture\s*Build)")
-    fixture_mat_cost = num(r"(?:Fixture\s*Material\s*Cost|Fixture\s*Hardware)")
-    # Explicit fields for clarity downstream
-    fixture_material_cost = float(fixture_mat_cost)
+    # Fixture material cost is no longer applied; only labor is considered.
     fixture_labor_cost    = float(fixture_build_hr) * float(rates["FixtureBuildRate"])
-    fixture_cost          = fixture_labor_cost + fixture_material_cost
+    fixture_cost          = fixture_labor_cost
     fixture_labor_per_part = (fixture_labor_cost / Qty) if Qty > 1 else fixture_labor_cost
     fixture_per_part       = (fixture_cost / Qty) if Qty > 1 else fixture_cost
 
@@ -7250,7 +7411,6 @@ def compute_quote_from_df(df: pd.DataFrame,
         "fixture": {
             "build_hr": float(fixture_build_hr), "build_rate": rates["FixtureBuildRate"],
             "labor_cost": float(fixture_labor_cost),
-            "mat_cost": float(fixture_material_cost),
             "per_lot": fixture_cost, "per_part": fixture_per_part
         }
     }
@@ -7398,10 +7558,25 @@ def compute_quote_from_df(df: pd.DataFrame,
     packaging_hr      = sum_time(r"(?:Packaging|Boxing|Crating\s*Labor)")
     crate_nre_cost    = num(r"(?:Custom\s*Crate\s*NRE)")
     packaging_mat     = num(r"(?:Packaging\s*Materials|Foam|Trays)")
-    shipping_cost     = num(r"(?:Freight|Shipping\s*Cost)")
+    shipping_mask     = contains(r"(?:Freight|Shipping\s*Cost)")
+    shipping_entered  = bool(getattr(shipping_mask, "any", lambda: False)())
+    shipping_manual   = num(r"(?:Freight|Shipping\s*Cost)")
+    shipping_pct_of_material = float(params.get("ShippingPctOfMaterial", 0.15) or 0.0)
+    shipping_cost_default = round(material_direct_cost * shipping_pct_of_material, 2) if shipping_pct_of_material else 0.0
+    shipping_cost     = float(shipping_manual if shipping_entered else shipping_cost_default)
     insurance_pct     = num_pct(r"(?:Insurance|Liability\s*Adder)", params["InsurancePct"])
     packaging_cost    = packaging_hr * rates["AssemblyRate"] + crate_nre_cost + packaging_mat
     packaging_flat_base = float((crate_nre_cost or 0.0) + (packaging_mat or 0.0))
+    shipping_basis_desc = (
+        "Freight & logistics (sheet entry)"
+        if shipping_entered
+        else (
+            f"Freight & logistics (~{shipping_pct_of_material:.0%} of material)"
+            if shipping_pct_of_material
+            else "Freight & logistics"
+        )
+    )
+    shipping_cost_base = float(shipping_cost)
 
     # EHS / compliance
     ehs_hr   = sum_time(r"(?:EHS|Compliance|Training|Waste\s*Handling)")
@@ -7612,10 +7787,9 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     pass_meta = {
         "Material": {"basis": "Stock / raw material"},
-        "Fixture Material": {"basis": "Fixture raw stock"},
-        HARDWARE_PASS_LABEL: {"basis": "Pass-through hardware & BOM"},
+        "Hardware / BOM": {"basis": "Pass-through hardware / BOM"},
         "Outsourced Vendors": {"basis": "Outside processing vendors"},
-        "Shipping": {"basis": "Freight & logistics"},
+        "Shipping": {"basis": shipping_basis_desc},
         "Consumables /Hr": {"basis": "Machine & inspection hours $/hr"},
         "Utilities": {"basis": "Spindle/inspection hours $/hr"},
         "Consumables Flat": {"basis": "Fixed shop supplies"},
@@ -7635,8 +7809,7 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     pass_through = {
         "Material": material_direct_cost,
-        "Fixture Material": fixture_material_cost,
-        HARDWARE_PASS_LABEL: hardware_cost,
+        "Hardware / BOM": hardware_cost,
         "Outsourced Vendors": outsourced_costs,
         "Shipping": shipping_cost,
         "Consumables /Hr": consumables_hr_cost,
@@ -7658,17 +7831,8 @@ def compute_quote_from_df(df: pd.DataFrame,
         fb = float(fixture_build_hr)
     except Exception:
         fb = 0.0
-    try:
-        fm = float(fixture_material_cost)
-    except Exception:
-        fm = 0.0
-    if fb or fm:
-        pieces: list[str] = []
-        if fb:
-            pieces.append(f"{fb:.2f} hr build")
-        if fm:
-            pieces.append(f"${fm:,.2f} material")
-        fixture_plan_desc = ", ".join(pieces)
+    if fb:
+        fixture_plan_desc = f"{fb:.2f} hr build"
     strategy = fix_detail.get("strategy") if isinstance(fix_detail, dict) else None
     if isinstance(strategy, str) and strategy.strip():
         if fixture_plan_desc:
@@ -7774,7 +7938,6 @@ def compute_quote_from_df(df: pd.DataFrame,
         "part_mass_g_est": part_mass_g_est,
         "dfm_geo": dfm_geo,
         "fixture_build_hr": float(fixture_build_hr or 0.0),
-        "fixture_material_cost": float(fixture_material_cost),
         "cmm_minutes": float((cmm_run_hr or 0.0) * 60.0),
         "in_process_inspection_hr": float(inproc_hr or 0.0),
         "packaging_hours": float(packaging_hr or 0.0),
@@ -8355,7 +8518,6 @@ def compute_quote_from_df(df: pd.DataFrame,
         "setups": int(setups),
         "contingency_pct": ContingencyPct,
         "fixture_build_hr": fixture_build_hr_base,
-        "fixture_material_cost": float(fixture_material_cost),
         "soft_jaw_hr": 0.0,
         "soft_jaw_material_cost": 0.0,
         "handling_adder_hr": 0.0,
@@ -8367,6 +8529,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         "fai_prep_hr": 0.0,
         "packaging_hours": packaging_hr_base,
         "packaging_flat_cost": packaging_flat_base,
+        "shipping_cost": shipping_cost_base,
         "shipping_hint": "",
     }
     if fixture_plan_desc:
@@ -9065,7 +9228,6 @@ def compute_quote_from_df(df: pd.DataFrame,
     fixture_build_override = _clamp_override((overrides or {}).get("fixture_build_hr"), 0.0, 2.0)
     soft_jaw_hr_override = _clamp_override((overrides or {}).get("soft_jaw_hr"), 0.0, 1.0) or 0.0
     soft_jaw_cost_override = _clamp_override((overrides or {}).get("soft_jaw_material_cost"), 0.0, 60.0) or 0.0
-    fixture_material_override = _clamp_override((overrides or {}).get("fixture_material_cost"), 0.0, 250.0)
 
     total_fixture_hr = fixture_build_override if fixture_build_override is not None else fixture_build_hr_base
     if soft_jaw_hr_override > 0:
@@ -9074,19 +9236,13 @@ def compute_quote_from_df(df: pd.DataFrame,
     if fixture_build_override is not None:
         fixture_notes.append(f"Fixture build set to {fixture_build_override:.2f} h{_source_suffix('fixture_build_hr')}")
 
-    fixture_material_updated = fixture_material_cost
-    if fixture_material_override is not None:
-        fixture_material_updated = fixture_material_override
-        fixture_notes.append(f"Fixture material set to ${fixture_material_override:,.2f}{_source_suffix('fixture_material_cost')}")
     if soft_jaw_cost_override > 0:
-        fixture_material_updated += soft_jaw_cost_override
         fixture_notes.append(f"Soft jaw stock +${soft_jaw_cost_override:,.2f}{_source_suffix('soft_jaw_material_cost')}")
 
-    if total_fixture_hr != fixture_build_hr_base or fixture_material_updated != fixture_material_cost:
+    if total_fixture_hr != fixture_build_hr_base or soft_jaw_cost_override > 0:
         fixture_build_hr = total_fixture_hr
-        fixture_material_cost = fixture_material_updated
         fixture_labor_cost = fixture_build_hr * float(rates.get("FixtureBuildRate", 0.0))
-        fixture_cost = fixture_labor_cost + fixture_material_cost
+        fixture_cost = fixture_labor_cost
         fixture_labor_per_part = (fixture_labor_cost / Qty) if Qty > 1 else fixture_labor_cost
         fixture_per_part = (fixture_cost / Qty) if Qty > 1 else fixture_cost
         nre_detail.setdefault("fixture", {})
@@ -9094,17 +9250,13 @@ def compute_quote_from_df(df: pd.DataFrame,
             {
                 "build_hr": float(fixture_build_hr),
                 "labor_cost": float(fixture_labor_cost),
-                "mat_cost": float(fixture_material_cost),
                 "per_lot": float(fixture_cost),
                 "per_part": float(fixture_per_part),
                 "soft_jaw_hr": float(soft_jaw_hr_override),
                 "soft_jaw_mat": float(soft_jaw_cost_override),
             }
         )
-        pass_through["Fixture Material"] = float(fixture_material_cost)
-        fixture_material_cost_base = float(fixture_material_cost)
         features["fixture_build_hr"] = float(fixture_build_hr)
-        features["fixture_material_cost"] = float(fixture_material_cost)
 
     handling_override = _clamp_override((overrides or {}).get("handling_adder_hr"), 0.0, 0.2)
     if handling_override and handling_override > 0:
@@ -9131,6 +9283,16 @@ def compute_quote_from_df(df: pd.DataFrame,
         entry["notes"].append(f"set to ${packaging_flat_override:,.2f}{_source_suffix('packaging_flat_cost')}")
         entry["new_value"] = float(packaging_flat_override)
         pass_through["Packaging Flat"] = float(packaging_flat_override)
+
+    shipping_override = _clamp_override((overrides or {}).get("shipping_cost"), 0.0, None)
+    if shipping_override is not None:
+        baseline_val = float(pass_through_baseline.get("Shipping", shipping_cost_base))
+        entry = applied_pass.setdefault("Shipping", {"old_value": baseline_val, "notes": []})
+        entry["notes"].append(f"set to ${shipping_override:,.2f}{_source_suffix('shipping_cost')}")
+        entry["new_value"] = float(shipping_override)
+        pass_through["Shipping"] = float(shipping_override)
+        pass_key_map[_normalize_key("Shipping")] = "Shipping"
+        pass_meta.setdefault("Shipping", {})["basis"] = "Freight & logistics (user override)"
 
     cmm_minutes_override = _clamp_override((overrides or {}).get("cmm_minutes"), 0.0, 60.0)
     if cmm_minutes_override is not None:
@@ -9196,7 +9358,6 @@ def compute_quote_from_df(df: pd.DataFrame,
         llm_notes.extend(fixture_notes)
 
     material_direct_cost_base = material_direct_cost
-    fixture_material_cost_base = fixture_material_cost
 
     old_scrap = _ensure_scrap_pct(features.get("scrap_pct", scrap_pct))
     base_net_mass_g = _coerce_float_or_none(material_detail_for_breakdown.get("net_mass_g")) or 0.0
@@ -9433,28 +9594,6 @@ def compute_quote_from_df(df: pd.DataFrame,
             suffix = " (LLM)"
         llm_notes.append(f"{actual_label}: +${float(add_val):,.0f}{suffix}")
 
-    delta_fix_mat = overrides.get("fixture_material_cost_delta") if overrides else None
-    if isinstance(delta_fix_mat, (int, float)) and delta_fix_mat:
-        delta_fix_mat = clamp(delta_fix_mat, -200.0, 200.0, 0.0)
-        if delta_fix_mat:
-            old_val = float(pass_through.get("Fixture Material", fixture_material_cost_base))
-            new_val = round(old_val + float(delta_fix_mat), 2)
-            pass_through["Fixture Material"] = new_val
-            pass_key_map[_normalize_key("Fixture Material")] = "Fixture Material"
-            entry = applied_pass.setdefault("Fixture Material", {"old_value": old_val, "notes": []})
-            entry["notes"].append(f"Δ${float(delta_fix_mat):+.2f}")
-            entry["new_value"] = new_val
-            fix_detail["mat_cost"] = round(float(fix_detail.get("mat_cost", 0.0)) + float(delta_fix_mat), 2)
-            src_tag = None
-            if isinstance(quote_state.effective_sources, dict):
-                src_tag = quote_state.effective_sources.get("fixture_material_cost_delta")
-            suffix = ""
-            if src_tag == "user":
-                suffix = " (user override)"
-            elif src_tag == "llm":
-                suffix = " (LLM)"
-            llm_notes.append(f"Fixture material ${float(delta_fix_mat):+.0f}{suffix}")
-
     cont_override = overrides.get("contingency_pct_override") if overrides else None
     if cont_override is not None:
         cont_val = clamp(cont_override, 0.0, 0.25, ContingencyPct)
@@ -9539,10 +9678,9 @@ def compute_quote_from_df(df: pd.DataFrame,
         entry["delta_value"] = entry["new_value"] - entry["old_value"]
 
     material_direct_cost = float(pass_through.get("Material", material_direct_cost_base))
-    fixture_material_cost = float(pass_through.get("Fixture Material", fixture_material_cost_base))
-    hardware_cost = float(pass_through.get(HARDWARE_PASS_LABEL, hardware_cost))
+    hardware_cost = float(pass_through.get("Hardware / BOM", hardware_cost))
     outsourced_costs = float(pass_through.get("Outsourced Vendors", outsourced_costs))
-    shipping_cost = float(pass_through.get("Shipping", shipping_cost))
+    shipping_cost = float(pass_through.get("Shipping", shipping_cost_base))
     consumables_hr_cost = float(pass_through.get("Consumables /Hr", consumables_hr_cost))
     utilities_cost = float(pass_through.get("Utilities", utilities_cost))
     consumables_flat = float(pass_through.get("Consumables Flat", consumables_flat))
@@ -9579,9 +9717,31 @@ def compute_quote_from_df(df: pd.DataFrame,
     labor_cost_details_input: dict[str, str] = {}
     labor_cost_details: dict[str, str] = {}
     labor_costs_display: dict[str, float] = {}
+
+    def _merge_labor_detail(label: str, amount: float, detail_bits: list[str]) -> None:
+        labor_costs_display[label] = float(amount)
+        existing_detail = labor_cost_details_input.get(label)
+        if not detail_bits and not existing_detail:
+            return
+
+        merged_bits: list[str] = []
+        seen: set[str] = set()
+        for bit in detail_bits:
+            seg = str(bit).strip()
+            if seg and seg not in seen:
+                merged_bits.append(seg)
+                seen.add(seg)
+        if existing_detail:
+            for segment in re.split(r";\s*", existing_detail):
+                seg = segment.strip()
+                if seg and seg not in seen:
+                    merged_bits.append(seg)
+                    seen.add(seg)
+        if merged_bits:
+            labor_cost_details[label] = "; ".join(merged_bits)
+
     for key, value in sorted(process_costs.items(), key=lambda kv: kv[1], reverse=True):
         label = key.replace('_', ' ').title()
-        labor_costs_display[label] = value
         meta = process_meta.get(key, {})
         hr = float(meta.get("hr", 0.0))
         rate = float(meta.get("rate", 0.0))
@@ -9599,17 +9759,53 @@ def compute_quote_from_df(df: pd.DataFrame,
         proc_notes = applied_process.get(key, {}).get("notes")
         if proc_notes:
             detail_bits.append("LLM: " + ", ".join(proc_notes))
-        existing_detail = labor_cost_details_input.get(label)
-        if detail_bits or existing_detail:
-            merged_bits: list[str] = []
-            merged_bits.extend(detail_bits)
-            if existing_detail:
-                for segment in re.split(r";\s*", existing_detail):
-                    seg = segment.strip()
-                    if seg and seg not in merged_bits:
-                        merged_bits.append(seg)
-            if merged_bits:
-                labor_cost_details[label] = "; ".join(merged_bits)
+
+        _merge_labor_detail(label, value, detail_bits)
+
+    programming_bits: list[str] = []
+    prog_hr_detail = float(programming_detail.get("prog_hr", 0.0) or 0.0)
+    prog_rate_detail = float(programming_detail.get("prog_rate", 0.0) or 0.0)
+    if prog_hr_detail > 0:
+        if prog_rate_detail > 0:
+            programming_bits.append(
+                f"- Programmer (lot): {prog_hr_detail:.2f} hr @ ${prog_rate_detail:,.2f}/hr"
+            )
+        else:
+            programming_bits.append(f"- Programmer (lot): {prog_hr_detail:.2f} hr")
+    eng_hr_detail = float(programming_detail.get("eng_hr", 0.0) or 0.0)
+    eng_rate_detail = float(programming_detail.get("eng_rate", 0.0) or 0.0)
+    if eng_hr_detail > 0:
+        if eng_rate_detail > 0:
+            programming_bits.append(
+                f"- Engineering (lot): {eng_hr_detail:.2f} hr @ ${eng_rate_detail:,.2f}/hr"
+            )
+        else:
+            programming_bits.append(f"- Engineering (lot): {eng_hr_detail:.2f} hr")
+    if Qty > 1 and programming_per_part > 0:
+        programming_bits.append(f"Amortized across {Qty} pcs")
+
+    if programming_per_part > 0:
+        _merge_labor_detail("Programming (amortized)", programming_per_part, programming_bits)
+
+    fixture_bits: list[str] = []
+    fixture_detail = nre_detail.get("fixture", {}) if isinstance(nre_detail, dict) else {}
+    fixture_build_hr_detail = float(fixture_detail.get("build_hr", 0.0) or 0.0)
+    fixture_rate_detail = float(fixture_detail.get("build_rate", rates.get("FixtureBuildRate", 0.0)))
+    if fixture_build_hr_detail > 0:
+        if fixture_rate_detail > 0:
+            fixture_bits.append(
+                f"- Build labor (lot): {fixture_build_hr_detail:.2f} hr @ ${fixture_rate_detail:,.2f}/hr"
+            )
+        else:
+            fixture_bits.append(f"- Build labor (lot): {fixture_build_hr_detail:.2f} hr")
+    soft_jaw_hr = float(fixture_detail.get("soft_jaw_hr", 0.0) or 0.0)
+    if soft_jaw_hr > 0:
+        fixture_bits.append(f"Soft jaw prep {soft_jaw_hr:.2f} hr")
+    if Qty > 1 and fixture_labor_per_part > 0:
+        fixture_bits.append(f"Amortized across {Qty} pcs")
+
+    if fixture_labor_per_part > 0:
+        _merge_labor_detail("Fixture Build (amortized)", fixture_labor_per_part, fixture_bits)
 
     direct_costs_display: dict[str, float] = {label: float(value) for label, value in pass_through.items()}
     direct_cost_details: dict[str, str] = {}
@@ -9671,8 +9867,6 @@ def compute_quote_from_df(df: pd.DataFrame,
         details = []
         if fix_detail.get("build_hr"):
             details.append(f"Build {fix_detail['build_hr']:.2f} hr @ ${fix_detail.get('build_rate',0):,.2f}/hr")
-        if fixture_material_cost:
-            details.append(f"Material ${fixture_material_cost:,.2f}")
         if details:
             nre_cost_details[label] = "; ".join(details)
 
@@ -9726,7 +9920,6 @@ def compute_quote_from_df(df: pd.DataFrame,
     breakdown = {
         "qty": Qty,
         "scrap_pct": scrap_pct,
-        "fixture_material_cost": fixture_material_cost,
         "material_direct_cost": material_direct_cost,
         "total_direct_costs": round(total_direct_costs, 2),
         "material": material_detail_for_breakdown,
@@ -13086,7 +13279,6 @@ def get_llm_overrides(
         "process_hour_multipliers": {"milling": 1.10, "turning": 0.95, ...},
         "process_hour_adders": {"milling": 0.25, "inspection": 0.10},   # hours
         "add_pass_through": {"Material": 12.0, "Tooling": 30.0},        # dollars
-        "fixture_material_cost_delta": 0.0,       # dollars (+/-)
         "contingency_pct_override": 0.00-0.25,    # optional
         "notes": ["short human-readable bullets"]
       }
@@ -13500,16 +13692,6 @@ def get_llm_overrides(
             clamp_notes.append(f"add_pass_through[{k}] non-numeric")
     if clean_pass:
         out["add_pass_through"] = clean_pass
-
-    fmd = parsed.get("fixture_material_cost_delta", None)
-    if isinstance(fmd, (int, float)):
-        orig = float(fmd)
-        clamped_val = clamp(fmd, -200.0, 200.0, 0.0)
-        out["fixture_material_cost_delta"] = clamped_val
-        if not math.isclose(orig, clamped_val, abs_tol=1e-6):
-            clamp_notes.append(
-                f"fixture_material_cost_delta {orig:.2f} → {clamped_val:.2f}"
-            )
 
     cont = parsed.get("contingency_pct_override", None)
     if cont is not None:

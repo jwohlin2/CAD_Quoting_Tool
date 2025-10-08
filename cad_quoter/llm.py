@@ -93,6 +93,11 @@ SUGG_TO_EDITOR = {
         float,
         float,
     ),
+    "shipping_cost": (
+        "Shipping Cost Override",
+        float,
+        float,
+    ),
     "fai_required": (
         "FAIR Required",
         lambda flag: 1 if flag else 0,
@@ -119,11 +124,6 @@ SUGG_TO_EDITOR = {
     ),
     "contingency_pct": (
         "ContingencyPct",
-        float,
-        float,
-    ),
-    "fixture_material_cost_delta": (
-        "Fixture Material Cost",
         float,
         float,
     ),
@@ -696,8 +696,14 @@ Return JSON with this structure (numbers only, minutes only for CMM_RunTime_min)
     deburr = min(0.8, 0.1 + deburr_len / 5000.0)
     deburr = deburr * (1.5 if thin_wall else 1.0)
     deburr = max(deburr, 0.15 if thin_wall else 0.1)
-    programming = 0.3 + (faces / 40.0)
-    programming = min(programming, 2.5)
+    # The rules-of-thumb above call out a 0.2–1.0 hr range for simple blocks.
+    # When the LLM is unavailable we historically extrapolated programming
+    # hours from face count, but that heuristic could explode for dense parts
+    # (e.g. 500+ faces would yield 13+ hours).  Those huge defaults caused the
+    # UI to display five-figure programming costs with no user input.  To keep
+    # the fallback conservative, clamp the automatic estimate to a single hour
+    # so that manual overrides always start from a sane baseline.
+    programming = 1.0
     cam = min(2.0, 0.3 + complexity / 100.0)
     engineering = 0.0 if access > 0.6 else 0.5
     fixture = 0.0 if max_dim < 150 else 1.0
@@ -802,7 +808,7 @@ def _estimator_patterns():
         r"(Programming|CAM\s*Programming|2D\s*CAM|3D\s*CAM|Simulation|Verification|DFM\s*Review|Tool\s*Library|Setup\s*Sheets)",
         r"\b(CAM\s*Programming|CAM\s*Sim|Post\s*Processing)\b",
         r"(Fixture\s*Design|Process\s*Sheet|Traveler|Documentation|Complex\s*Assembly\s*Doc)",
-        r"(Fixture\s*Build|Custom\s*Fixture\s*Build)", r"(Fixture\s*Material\s*Cost|Fixture\s*Hardware)",
+        r"(Fixture\s*Build|Custom\s*Fixture\s*Build)",
         r"(Roughing\s*Cycle\s*Time|Adaptive|HSM)", r"(Semi[- ]?Finish|Rest\s*Milling)", r"(Finishing\s*Cycle\s*Time)",
         r"(Number\s*of\s*Milling\s*Setups|Milling\s*Setups)", r"(Setup\s*Time\s*per\s*Setup|Setup\s*Hours\s*/\s*Setup)",
         r"(Thin\s*Wall\s*Factor|Thin\s*Wall\s*Multiplier)", r"(Tolerance\s*Multiplier|Tight\s*Tolerance\s*Factor)",

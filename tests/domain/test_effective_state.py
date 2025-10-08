@@ -89,22 +89,23 @@ def test_reprice_with_effective_applies_drilling_floor() -> None:
 def test_merge_effective_tracks_new_fields() -> None:
     baseline = {
         "fixture_build_hr": 0.5,
-        "fixture_material_cost": 40.0,
         "_bounds": {"scrap_max": 0.25},
     }
     suggestions = {
         "fixture_build_hr": 1.2,
         "soft_jaw_hr": 0.3,
         "packaging_flat_cost": 12.0,
+        "shipping_cost": 30.0,
         "shipping_hint": "Foam inserts",
     }
-    overrides = {"fai_required": True}
+    overrides = {"fai_required": True, "shipping_cost": 20.0}
 
     merged = merge_effective(baseline, suggestions, overrides)
 
     assert merged["fixture_build_hr"] == pytest.approx(1.2)
     assert merged["soft_jaw_hr"] == pytest.approx(0.3)
     assert merged["packaging_flat_cost"] == pytest.approx(12.0)
+    assert merged["shipping_cost"] == pytest.approx(20.0)
     assert merged["fai_required"] is True
     assert merged["shipping_hint"] == "Foam inserts"
 
@@ -115,6 +116,7 @@ def test_effective_to_overrides_emits_new_keys() -> None:
         "soft_jaw_hr": 0.25,
         "cmm_minutes": 18.0,
         "packaging_hours": 0.2,
+        "shipping_cost": 18.0,
         "shipping_hint": "Double box",
     }
     overrides = effective_to_overrides(effective, {})
@@ -123,4 +125,5 @@ def test_effective_to_overrides_emits_new_keys() -> None:
     assert overrides["soft_jaw_hr"] == pytest.approx(0.25)
     assert overrides["cmm_minutes"] == pytest.approx(18.0)
     assert overrides["packaging_hours"] == pytest.approx(0.2)
+    assert overrides["shipping_cost"] == pytest.approx(18.0)
     assert overrides["shipping_hint"] == "Double box"
