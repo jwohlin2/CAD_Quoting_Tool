@@ -8066,11 +8066,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     insurance_pct     = num_pct(r"(?:Insurance|Liability\s*Adder)", params["InsurancePct"])
     packaging_cost    = packaging_hr * rates["AssemblyRate"] + crate_nre_cost + packaging_mat
     packaging_flat_base = float((crate_nre_cost or 0.0) + (packaging_mat or 0.0))
-    shipping_basis_desc = (
-        f"Freight & logistics (~{shipping_pct_of_material:.0%} of material)"
-        if shipping_pct_of_material
-        else "Freight & logistics"
-    )
+    shipping_basis_desc = "Freight & logistics"
     shipping_cost_base = float(shipping_cost)
 
     # EHS / compliance
