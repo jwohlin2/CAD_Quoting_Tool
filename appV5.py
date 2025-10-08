@@ -131,6 +131,7 @@ from cad_quoter.pricing import (
     resolve_material_unit_price as _resolve_material_unit_price,
     usdkg_to_usdlb as _usdkg_to_usdlb,
 )
+from cad_quoter.vendors.mcmaster_stock import lookup_sku_and_price_for_mm
 from cad_quoter.pricing.time_estimator import (
     MachineParams as _TimeMachineParams,
     OperationGeometry as _TimeOperationGeometry,
@@ -6316,6 +6317,40 @@ def compute_material_cost(
             usd_per_kg = vendor_quote.usd_per_kg
             source = vendor_quote.source
             basis_used = vendor_quote.basis
+
+    if usd_per_kg is None:
+        # If overrides include a stock plan with explicit dims, derive USD/kg
+        try:
+            stock_plan = overrides.get("stock_recommendation") if isinstance(overrides, dict) else None
+        except Exception:
+            stock_plan = None
+
+        if isinstance(stock_plan, dict) and (usd_per_kg is None):
+            L_mm = _coerce_float_or_none(stock_plan.get("length_mm"))
+            W_mm = _coerce_float_or_none(stock_plan.get("width_mm"))
+            T_mm = _coerce_float_or_none(stock_plan.get("thickness_mm"))
+
+            if L_mm and W_mm and T_mm and (L_mm > 0) and (W_mm > 0) and (T_mm > 0):
+                try:
+                    sku, price_each, uom, _dims_in = lookup_sku_and_price_for_mm(
+                        material_name or symbol, float(L_mm), float(W_mm), float(T_mm), qty=1
+                    )
+                except Exception:
+                    sku, price_each, uom = None, None, None
+                if sku and price_each and isinstance(uom, str) and uom.lower().startswith("each"):
+                    norm_key = _normalize_lookup_key(material_name or symbol)
+                    density_g_cc = (
+                        MATERIAL_DENSITY_G_CC_BY_KEYWORD.get(norm_key)
+                        or MATERIAL_DENSITY_G_CC_BY_KEY.get(symbol)
+                        or MATERIAL_DENSITY_G_CC_BY_KEY.get(norm_key)
+                    )
+                    if density_g_cc and density_g_cc > 0:
+                        volume_cm3 = (float(L_mm) * float(W_mm) * float(T_mm)) / 1000.0
+                        stock_mass_kg = (volume_cm3 * float(density_g_cc)) / 1000.0
+                        if stock_mass_kg > 0:
+                            usd_per_kg = float(price_each) / float(stock_mass_kg)
+                            source = f"mcmaster_stock:{sku}"
+                            basis_used = "usd_per_kg"
 
     if usd_per_kg is None:
         lookup_label = material_name or key or symbol
