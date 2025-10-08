@@ -113,3 +113,51 @@ When a pass-through field is populated in the workbook, the raw monetary value
 flows into the corresponding row unchanged.  That is why a small entry such as
 `$0.10` on "Outsourced Vendors" reflects the exact total imported from the
 source spreadsheet or manual override rather than a derived or marked-up number.
+
+## Geometry metrics expected from CAD/worksheet imports
+
+The quoting pipeline normalises raw CAD features and worksheet entries into a
+`geom` dictionary so downstream pricing heuristics can read consistent keys
+regardless of the import source.  Populate the following metrics whenever they
+are available; missing values fall back to conservative defaults so estimates
+still complete, but richer geometry produces noticeably better machining time
+predictions.
+
+### Die plates
+
+```python
+geom = {
+    "wedm": {"perimeter_in": 240.0, "starts": 6, "tabs": 6, "passes": 2, "wire_in": 0.010},
+    "sg":   {"area_sq_in": 18.0 * 8.0 * 2, "stock_in": 0.001},           # both faces
+    "blanchard": {"area_sq_in": 18.0 * 8.0, "stock_in": 0.004},
+    "milling": {"volume_cuin": 12.0},                                   # pocket volume
+    "drill": [{"dia_in": 0.375, "depth_in": 1.25}] * 8 +
+              [{"dia_in": 0.500, "depth_in": 1.0}] * 4,
+    "tapped_count": 8,
+    "bores": [
+        {"method": "jig_grind", "tol": 0.0003},
+        {"method": "jig_bore", "tol": 0.0005},
+    ],
+    "length_ft_edges": 12.0,
+    "lap_area_sq_in": 0.0,
+}
+```
+
+### Punches
+
+```python
+geom = {
+    "wedm": {"perimeter_in": 6.5, "starts": 1, "tabs": 2, "passes": 3, "wire_in": 0.008},
+    "sg":   {"area_sq_in": 2.0, "stock_in": 0.0008},
+    "drill": [],
+    "bores": [],
+    "sinker": [],  # or [{"vol_cuin": 0.02, "finish": True}]
+    "length_ft_edges": 0.5,
+    "lap_area_sq_in": 0.15,
+}
+```
+
+Extending the schema for other part families follows the same pattern: aggregate
+volumes, perimeters, pass counts, and any special operations into nested
+dictionaries so Codex and pricing estimators can consume a single geometry
+payload.
