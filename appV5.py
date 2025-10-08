@@ -2110,6 +2110,7 @@ def merge_effective(
     _merge_numeric_field("handling_adder_hr", 0.0, 0.2, "handling_adder_hr")
     _merge_numeric_field("cmm_minutes", 0.0, 60.0, "cmm_minutes")
     _merge_numeric_field("in_process_inspection_hr", 0.0, 0.5, "in_process_inspection_hr")
+    _merge_numeric_field("inspection_total_hr", 0.0, 12.0, "inspection_total_hr")
     _merge_bool_field("fai_required")
     _merge_numeric_field("fai_prep_hr", 0.0, 1.0, "fai_prep_hr")
     _merge_numeric_field("packaging_hours", 0.0, 0.5, "packaging_hours")
@@ -2746,6 +2747,7 @@ def iter_suggestion_rows(state: QuoteState) -> list[dict]:
     _add_scalar_row(("soft_jaw_material_cost",), "Soft Jaw Material $", "currency", "soft_jaw_material_cost")
     _add_scalar_row(("handling_adder_hr",), "Handling Adder Hours", "hours", "handling_adder_hr")
     _add_scalar_row(("cmm_minutes",), "CMM Minutes", "float", "cmm_minutes")
+    _add_scalar_row(("inspection_total_hr",), "Inspection Total Hours", "hours", "inspection_total_hr")
     _add_scalar_row(("in_process_inspection_hr",), "In-process Inspection Hr", "hours", "in_process_inspection_hr")
     _add_scalar_row(("fai_required",), "FAI Required", "text", "fai_required")
     _add_scalar_row(("fai_prep_hr",), "FAI Prep Hours", "hours", "fai_prep_hr")
@@ -7232,13 +7234,18 @@ def compute_quote_from_df(df: pd.DataFrame,
     fair_hr     = sum_time(r"(?:FAIR|ISIR|PPAP)")
     srcinsp_hr  = sum_time(r"(?:Source\s*Inspection)")
 
-    inspection_cost = (
-        (inproc_hr + final_hr) * rates["InspectionRate"] +
-        cmm_prog_hr * rates["InspectionRate"] +
-        cmm_run_hr  * rates["InspectionRate"] +
-        fair_hr     * rates["InspectionRate"] +
-        srcinsp_hr  * rates["InspectionRate"]
-    )
+    inspection_components: dict[str, float] = {
+        "in_process": float(inproc_hr or 0.0),
+        "final": float(final_hr or 0.0),
+        "cmm_programming": float(cmm_prog_hr or 0.0),
+        "cmm_run": float(cmm_run_hr or 0.0),
+        "fair": float(fair_hr or 0.0),
+        "source": float(srcinsp_hr or 0.0),
+    }
+    inspection_adjustments: dict[str, float] = {}
+    inspection_hr_total = sum(inspection_components.values())
+
+    inspection_cost = inspection_hr_total * rates["InspectionRate"]
 
     # Consumables & utilities
     spindle_hr = (eff(milling_hr) + turning_hr + wedm_hr + sinker_hr + surf_grind_hr + jig_grind_hr + odid_grind_hr)
@@ -7247,7 +7254,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         params["TurningConsumablesPerHr"]    * turning_hr +
         params["EDMConsumablesPerHr"]        * (wedm_hr + sinker_hr) +
         params["GrindingConsumablesPerHr"]   * (surf_grind_hr + jig_grind_hr + odid_grind_hr) +
-        params["InspectionConsumablesPerHr"] * (inproc_hr + final_hr + cmm_prog_hr + cmm_run_hr + fair_hr + srcinsp_hr)
+        params["InspectionConsumablesPerHr"] * inspection_hr_total
     )
     utilities_cost   = params["UtilitiesPerSpindleHr"] * spindle_hr
     consumables_flat = float(params["ConsumablesFlat"] or 0.0)
@@ -7453,7 +7460,13 @@ def compute_quote_from_df(df: pd.DataFrame,
         "grinding":         {"hr": eff(grinding_hr),"rate": rates.get("SurfaceGrindRate", 0.0)},
         "lapping_honing":   {"hr": lap_hr,          "rate": rates.get("LappingRate", 0.0)},
         "finishing_deburr": {"hr": finishing_misc_hr, "rate": finishing_rate},
-        "inspection":       {"hr": inspection_hr_total, "rate": rates.get("InspectionRate", 0.0)},
+        "inspection":       {
+            "hr": inspection_hr_total,
+            "rate": rates.get("InspectionRate", 0.0),
+            "baseline_hr": inspection_hr_total,
+            "components": inspection_components,
+            "adjustments": inspection_adjustments,
+        },
         "saw_waterjet":     {"hr": sawing_hr,       "rate": rates.get("SawWaterjetRate", 0.0)},
         "assembly":         {"hr": assembly_hr,     "rate": rates.get("AssemblyRate", 0.0)},
         "toolmaker_support":  {"hr": toolmaker_support_hr, "rate": toolmaker_support_rate},
@@ -8227,6 +8240,8 @@ def compute_quote_from_df(df: pd.DataFrame,
         "handling_adder_hr": 0.0,
         "cmm_minutes": cmm_minutes_base,
         "in_process_inspection_hr": inproc_hr_base,
+        "inspection_total_hr": inspection_hr_total,
+        "inspection_components": {k: float(v) for k, v in inspection_components.items()},
         "fai_required": fai_flag_base,
         "fai_prep_hr": 0.0,
         "packaging_hours": packaging_hr_base,
@@ -9004,6 +9019,9 @@ def compute_quote_from_df(df: pd.DataFrame,
             f"CMM {target_cmm_hr:.2f} h{_source_suffix('cmm_minutes')}",
         )
         llm_notes.append(f"CMM runtime {target_cmm_hr:.2f} h{_source_suffix('cmm_minutes')}")
+        delta_cmm = target_cmm_hr - base_cmm_hr
+        if abs(delta_cmm) > 1e-9:
+            inspection_adjustments["cmm_run"] = inspection_adjustments.get("cmm_run", 0.0) + delta_cmm
         cmm_run_hr = target_cmm_hr
 
     inproc_override = _clamp_override((overrides or {}).get("in_process_inspection_hr"), 0.0, 0.5)
@@ -9015,6 +9033,9 @@ def compute_quote_from_df(df: pd.DataFrame,
             f"+{inproc_override:.2f} h in-process{_source_suffix('in_process_inspection_hr')}",
         )
         llm_notes.append(f"In-process inspection +{inproc_override:.2f} h{_source_suffix('in_process_inspection_hr')}")
+        inspection_adjustments["in_process"] = (
+            inspection_adjustments.get("in_process", 0.0) + inproc_override
+        )
 
     fai_prep_override = _clamp_override((overrides or {}).get("fai_prep_hr"), 0.0, 1.0)
     if fai_prep_override and fai_prep_override > 0:
@@ -9025,6 +9046,26 @@ def compute_quote_from_df(df: pd.DataFrame,
             f"+{fai_prep_override:.2f} h FAI prep{_source_suffix('fai_prep_hr')}",
         )
         llm_notes.append(f"FAI prep +{fai_prep_override:.2f} h{_source_suffix('fai_prep_hr')}")
+        inspection_adjustments["fai_prep"] = (
+            inspection_adjustments.get("fai_prep", 0.0) + fai_prep_override
+        )
+
+    inspection_total_override = _clamp_override((overrides or {}).get("inspection_total_hr"), 0.0, 12.0)
+    if inspection_total_override is not None:
+        current_inspection_hr = float(process_meta.get("inspection", {}).get("hr", 0.0))
+        _update_process_hours(
+            "inspection",
+            inspection_total_override,
+            f"Inspection set to {inspection_total_override:.2f} h{_source_suffix('inspection_total_hr')}",
+        )
+        llm_notes.append(
+            f"Inspection total set to {inspection_total_override:.2f} h{_source_suffix('inspection_total_hr')}"
+        )
+        delta_total = inspection_total_override - current_inspection_hr
+        if abs(delta_total) > 1e-9:
+            inspection_adjustments["total_override"] = (
+                inspection_adjustments.get("total_override", 0.0) + delta_total
+            )
 
     if fixture_notes:
         llm_notes.extend(fixture_notes)
