@@ -7599,7 +7599,6 @@ def compute_quote_from_df(df: pd.DataFrame,
         "Hardware / BOM": {"basis": "Pass-through hardware / BOM"},
         "Outsourced Vendors": {"basis": "Outside processing vendors"},
         "Shipping": {"basis": "Freight & logistics"},
-        "Consumables /Hr": {"basis": "Machine & inspection hours $/hr"},
         "Utilities": {"basis": "Spindle/inspection hours $/hr"},
         "Consumables Flat": {"basis": "Fixed shop supplies"},
         "Packaging Flat": {"basis": "Packaging materials & crates"},
@@ -7622,7 +7621,6 @@ def compute_quote_from_df(df: pd.DataFrame,
         "Hardware / BOM": hardware_cost,
         "Outsourced Vendors": outsourced_costs,
         "Shipping": shipping_cost,
-        "Consumables /Hr": consumables_hr_cost,
         "Utilities": utilities_cost,
         "Consumables Flat": consumables_flat,
         "Packaging Flat": packaging_flat_base,
@@ -9518,7 +9516,6 @@ def compute_quote_from_df(df: pd.DataFrame,
     hardware_cost = float(pass_through.get("Hardware / BOM", hardware_cost))
     outsourced_costs = float(pass_through.get("Outsourced Vendors", outsourced_costs))
     shipping_cost = float(pass_through.get("Shipping", shipping_cost))
-    consumables_hr_cost = float(pass_through.get("Consumables /Hr", consumables_hr_cost))
     utilities_cost = float(pass_through.get("Utilities", utilities_cost))
     consumables_flat = float(pass_through.get("Consumables Flat", consumables_flat))
 

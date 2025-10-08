@@ -102,11 +102,6 @@ SUGG_TO_EDITOR = {
             else False
         ),
     ),
-    ("add_pass_through", "Consumables /Hr"): (
-        "Consumables /Hr Cost",
-        float,
-        float,
-    ),
     ("add_pass_through", "Utilities"): (
         "Utilities Cost",
         float,
