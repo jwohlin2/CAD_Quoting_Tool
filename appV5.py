@@ -1,4 +1,4 @@
-
+﻿
 # -*- coding: utf-8 -*-
 # app_gui_occ_flow_v8_single_autollm.py
 """
@@ -8021,66 +8021,6 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     max_dim   = first_num(r"\bGEO__MaxDim_mm\b", 0.0)
     is_simple = (max_dim and max_dim <= params["ProgSimpleDim_mm"] and setups <= 2)
-    current_prog_hr = locals().get("prog_hr", 0.0)
-    if is_simple:
-        current_prog_hr = min(current_prog_hr, params["ProgCapHr"])
-    if milling_hr > 0:
-        current_prog_hr = min(current_prog_hr, params["ProgMaxToMillingRatio"] * milling_hr)
-    prog_hr = current_prog_hr
-
-    tolerance_inputs: dict[str, Any] = {}
-    for key, value in (ui_vars or {}).items():
-        label = str(key)
-        if re.search(r"(tolerance|finish|surface)", label, re.IGNORECASE):
-            tolerance_inputs[label] = value
-
-    tolerance_notes_extra: list[Any] = []
-    tol_notes_geo = geo_context.get("tolerance_notes")
-    if isinstance(tol_notes_geo, (list, tuple, set)):
-        tolerance_notes_extra.extend(tol_notes_geo)
-    elif tol_notes_geo:
-        tolerance_notes_extra.append(tol_notes_geo)
-    for extra_key in ("default_tolerance_note", "tolerance_note"):
-        extra_val = geo_context.get(extra_key)
-        if extra_val:
-            tolerance_notes_extra.append(extra_val)
-    if isinstance(inner_geo, dict):
-        tol_notes_inner = inner_geo.get("tolerance_notes")
-        if isinstance(tol_notes_inner, (list, tuple, set)):
-            tolerance_notes_extra.extend(tol_notes_inner)
-        elif tol_notes_inner:
-            tolerance_notes_extra.append(tol_notes_inner)
-
-    default_tol_text = (
-        geo_context.get("default_tol")
-        or geo_context.get("default_tolerance")
-        or ui_vars.get("Default Tolerance Note")
-        or ui_vars.get("Default Tolerance")
-    )
-
-    tolerance_candidates_for_fixture: list[float] = []
-    for value in tolerance_inputs.values():
-        tolerance_candidates_for_fixture.extend(_tolerance_values_from_any(value))
-    if default_tol_text is not None:
-        tolerance_candidates_for_fixture.extend(
-            _tolerance_values_from_any(default_tol_text)
-        )
-    for extra in tolerance_notes_extra:
-        tolerance_candidates_for_fixture.extend(_tolerance_values_from_any(extra))
-    try:
-        min_tol_for_fixture = (
-            float(min(tolerance_candidates_for_fixture))
-            if tolerance_candidates_for_fixture
-            else None
-        )
-    except Exception:
-        min_tol_for_fixture = None
-
-    inproc_default = _estimate_inprocess_default_from_tolerance(
-        tolerance_inputs,
-        default_tol_text,
-        tolerance_notes_extra,
-    )
 
     # ---- fixture -------------------------------------------------------------
     fixture_sheet_hr = sum_time(r"(?:Fixture\s*Build|Custom\s*Fixture\s*Build)")
@@ -8207,8 +8147,10 @@ def compute_quote_from_df(df: pd.DataFrame,
     finishing_cost   = finishing_misc_hr * finishing_rate
 
     # Inspection & docs
+    inproc_default = sheet_num(r"\bIn-Process\s*Inspection\s*Hours\b", 1.0)
+    final_default  = sheet_num(r"\bFinal\s*Inspection\s*Hours\b", 0.0)
     inproc_hr   = sum_time(r"(?:In[- ]?Process\s*Inspection)", default=inproc_default)
-    final_hr    = sum_time(r"(?:Final\s*Inspection|Manual\s*Inspection)")
+    final_hr    = sum_time(r"(?:Final\s*Inspection|Manual\s*Inspection)", default=final_default)
     cmm_prog_hr = sum_time(r"(?:CMM\s*Programming)")
     cmm_run_hr  = sum_time(r"(?:CMM\s*Run\s*Time)\b") + sum_time(r"(?:CMM\s*Run\s*Time\s*min)")
     fair_hr     = sum_time(r"(?:FAIR|ISIR|PPAP)")
@@ -8777,6 +8719,27 @@ def compute_quote_from_df(df: pd.DataFrame,
         "material_key": geo_context.get("material") or material_name,
         "drilling_hr_baseline": baseline_drill_hr,
     })
+    # Normalize tolerance inputs (optional). Prefer explicit geo_context input; otherwise
+    # lightly harvest likely tolerance fields from UI labels.
+    tolerance_inputs = None
+    try:
+        _tol_in = geo_context.get("tolerance_inputs")
+        if isinstance(_tol_in, Mapping):
+            tolerance_inputs = dict(_tol_in)
+    except Exception:
+        tolerance_inputs = None
+    if tolerance_inputs is None and isinstance(ui_vars, Mapping):
+        try:
+            tol_like: dict[str, Any] = {}
+            tol_key_re = re.compile(r"flatness|parallel|profile|runout|\btir\b|\bra\b|surface\s*finish|id\s*(ra|finish)|od\s*(ra|finish)", re.IGNORECASE)
+            for label, value in ui_vars.items():
+                key = str(label)
+                if tol_key_re.search(key):
+                    tol_like[key] = value
+            if tol_like:
+                tolerance_inputs = tol_like
+        except Exception:
+            pass
     if hole_count_override and hole_count_override > 0:
         features["hole_count_override"] = int(round(hole_count_override))
     if avg_hole_diam_override and avg_hole_diam_override > 0:
@@ -10515,6 +10478,17 @@ def compute_quote_from_df(df: pd.DataFrame,
             total_prog_hr = override_val
             prog_override_applied = True
 
+    # Apply programming caps after auto/override is known
+    try:
+        if is_simple:
+            total_prog_hr = min(float(total_prog_hr), float(params.get("ProgCapHr", total_prog_hr)))
+        if milling_hr and float(milling_hr) > 0:
+            ratio_cap = float(params.get("ProgMaxToMillingRatio", 1.0)) * float(milling_hr)
+            total_prog_hr = min(float(total_prog_hr), ratio_cap)
+    except Exception:
+        # Defensive: do not fail rendering if caps are malformed; keep computed hours
+        pass
+
     programming_cost = total_prog_hr * float(rates.get("ProgrammingRate", 0.0)) + eng_hr * float(rates.get("EngineerRate", 0.0))
     prog_per_lot = programming_cost
     programming_per_part = (prog_per_lot / Qty) if (amortize_programming and Qty > 1) else prog_per_lot
@@ -10576,6 +10550,14 @@ def compute_quote_from_df(df: pd.DataFrame,
     labor_cost_details_input: dict[str, str] = {}
     labor_cost_details: dict[str, str] = {}
     labor_costs_display: dict[str, float] = {}
+
+    # Local helper mirrors the renderer's filter so summary details stay clean
+    _extra_detail_pattern = re.compile(r"^includes\b.*extras\b", re.IGNORECASE)
+    def _is_extra_segment(segment: str) -> bool:
+        try:
+            return bool(_extra_detail_pattern.match(str(segment)))
+        except Exception:
+            return False
 
     def _merge_labor_detail(label: str, amount: float, detail_bits: list[str]) -> None:
         labor_costs_display[label] = float(amount)
