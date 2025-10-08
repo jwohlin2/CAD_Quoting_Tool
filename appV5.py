@@ -5489,17 +5489,13 @@ def render_quote(
                 weight_lines.append("  Scrap Weight: 0 oz")
             if scrap is not None:
                 weight_lines.append(f"  Scrap Percentage: {_pct(scrap)}")
-            with_scrap_mass = scrap_adjusted_mass_val
-            if with_scrap_mass is None:
-                with_scrap_mass = effective_mass_val if scrap else None
-            if with_scrap_mass is not None:
-                show_with_scrap = False
-                if net_mass_val:
-                    show_with_scrap = abs(float(with_scrap_mass) - float(net_mass_val)) > 0.05
-                else:
-                    show_with_scrap = bool(with_scrap_mass) or show_zeros
-                if show_with_scrap or show_zeros:
-                    weight_lines.append(f"{_format_weight_lb_oz(with_scrap_mass)}")
+            # Historically the renderer would emit an extra weight-only line here when
+            # ``scrap_adjusted_mass`` was available.  The value was the computed "with
+            # scrap" mass, but because it lacked a label it rendered as a stray line like
+            # ``9 lb 6.4 oz`` in the middle of the material section.  That formatting is
+            # confusing and does not provide any additional context to the reader, so we
+            # intentionally skip adding that line.  The net, starting, and scrap weights
+            # already convey the information a customer needs.
 
             detail_lines.extend(weight_lines)
             if scrap_credit_lines:
