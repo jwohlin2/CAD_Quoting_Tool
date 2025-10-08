@@ -61,8 +61,9 @@ def test_render_quote_displays_weight_in_pounds_ounces() -> None:
 
     text = render_quote(result)
 
+    assert "Starting Weight: 13 lb 3.6 oz" in text
+    assert "Scrap Weight: 7.1 oz" in text
     assert "Net Weight: 12 lb 12.6 oz" in text
-    assert "With Scrap: 12 lb 2.4 oz" in text
     weight_lines = "\n".join(
         line for line in text.splitlines() if "Weight" in line or "Mass" in line
     )

@@ -5161,8 +5161,17 @@ def render_quote(
                     diff_mass = abs(float(effective_mass_val) - float(net_mass_val))
                     base_candidate = max(float(effective_mass_val), float(net_mass_val))
                     scrap_adjusted_mass_val = max(0.0, base_candidate - diff_mass)
+            starting_mass_val = _coerce_float_or_none(material.get("effective_mass_g"))
+            if starting_mass_val is None:
+                starting_mass_val = effective_mass_val
             if net_mass_val is None:
                 net_mass_val = effective_mass_val
+            if (
+                net_mass_val is None
+                and starting_mass_val is not None
+                and removal_mass_val is not None
+            ):
+                net_mass_val = max(0.0, float(starting_mass_val) - float(removal_mass_val))
             show_mass_line = (
                 (net_mass_val and net_mass_val > 0)
                 or (effective_mass_val and effective_mass_val > 0)
@@ -5189,19 +5198,50 @@ def render_quote(
                         f"scrap-adjusted {_format_weight_lb_decimal(effective_mass_val)}"
                     )
 
+            scrap_mass_val: float | None = None
+            if (
+                starting_mass_val is not None
+                and net_mass_val is not None
+            ):
+                scrap_mass_val = max(0.0, float(starting_mass_val) - float(net_mass_val))
+            if scrap_mass_val is None and removal_mass_val is not None:
+                scrap_mass_val = max(0.0, float(removal_mass_val))
+            if (
+                scrap_mass_val is None
+                and scrap_fraction_val is not None
+                and starting_mass_val is not None
+            ):
+                scrap_mass_val = max(
+                    0.0, float(starting_mass_val) * float(scrap_fraction_val)
+                )
+            if (
+                scrap_mass_val is None
+                and scrap_adjusted_mass_val is not None
+                and net_mass_val is not None
+            ):
+                scrap_mass_val = max(
+                    0.0,
+                    abs(float(scrap_adjusted_mass_val) - float(net_mass_val)),
+                )
+
+            if (starting_mass_val and starting_mass_val > 0) or show_zeros:
+                write_line(
+                    f"Starting Weight: {_format_weight_lb_oz(starting_mass_val)}",
+                    "  ",
+                )
+            if scrap_mass_val is not None:
+                if scrap_mass_val > 0 or show_zeros:
+                    write_line(
+                        f"Scrap Weight: {_format_weight_lb_oz(scrap_mass_val)}",
+                        "  ",
+                    )
+            elif show_zeros:
+                write_line("Scrap Weight: 0 oz", "  ")
             if (net_mass_val and net_mass_val > 0) or show_zeros:
-                write_line(f"Net Weight: {_format_weight_lb_oz(net_mass_val)}", "  ")
-            with_scrap_mass = scrap_adjusted_mass_val
-            if with_scrap_mass is None:
-                with_scrap_mass = effective_mass_val if scrap else None
-            if with_scrap_mass is not None:
-                show_with_scrap = False
-                if net_mass_val:
-                    show_with_scrap = abs(float(with_scrap_mass) - float(net_mass_val)) > 0.05
-                else:
-                    show_with_scrap = bool(with_scrap_mass) or show_zeros
-                if show_with_scrap or show_zeros:
-                    write_line(f"With Scrap: {_format_weight_lb_oz(with_scrap_mass)}", "  ")
+                write_line(
+                    f"Net Weight: {_format_weight_lb_oz(net_mass_val)}",
+                    "  ",
+                )
 
             if upg or unit_price_kg or unit_price_lb or show_zeros:
                 grams_per_lb = 1000.0 / LB_PER_KG
