@@ -5133,6 +5133,17 @@ def render_quote(
                 else:
                     credit_display = f"-{currency}{float(scrap_credit):,.2f}"
                 detail_lines.append(f"  Scrap Credit: {credit_display}")
+                scrap_credit_mass_lb = _coerce_float_or_none(
+                    material.get("scrap_credit_mass_lb")
+                )
+                scrap_credit_unit_price_lb = _coerce_float_or_none(
+                    material.get("scrap_credit_unit_price_usd_per_lb")
+                )
+                if scrap_credit_mass_lb and scrap_credit_unit_price_lb:
+                    detail_lines.append(
+                        "    based on "
+                        f"{float(scrap_credit_mass_lb):.2f} lb × {currency}{float(scrap_credit_unit_price_lb):,.2f} / lb"
+                    )
             net_mass_val = _coerce_float_or_none(net_mass_g)
             effective_mass_val = _coerce_float_or_none(mass_g)
             removal_mass_val = None
@@ -7296,7 +7307,6 @@ def compute_quote_from_df(df: pd.DataFrame,
     for key, value in fallback_meta.items():
         material_detail_for_breakdown.setdefault(key, value)
     material_detail_for_breakdown["unit_price_per_g"] = float(unit_price_per_g or 0.0)
-    material_detail_for_breakdown["material_scrap_credit_entered"] = material_scrap_credit_entered
     if "unit_price_usd_per_kg" not in material_detail_for_breakdown and unit_price_per_g:
         material_detail_for_breakdown["unit_price_usd_per_kg"] = float(unit_price_per_g) * 1000.0
     material_detail_for_breakdown["material_direct_cost"] = material_direct_cost
@@ -7334,6 +7344,60 @@ def compute_quote_from_df(df: pd.DataFrame,
         material_detail_for_breakdown["material_direct_cost"] = material_direct_cost
         material_cost_before_credit = float(material_direct_cost)
         scrap_pct = effective_scrap
+
+    scrap_credit_from_weight = 0.0
+    scrap_credit_mass_lb = 0.0
+    scrap_credit_unit_price_lb = None
+    eff_mass_for_credit = _coerce_float_or_none(material_detail_for_breakdown.get("mass_g"))
+    if eff_mass_for_credit is None:
+        eff_mass_for_credit = _coerce_float_or_none(
+            material_detail_for_breakdown.get("effective_mass_g")
+        )
+    net_mass_for_credit = _coerce_float_or_none(
+        material_detail_for_breakdown.get("net_mass_g")
+    )
+    if net_mass_for_credit is None:
+        net_mass_for_credit = _coerce_float_or_none(
+            material_detail_for_breakdown.get("mass_g_net")
+        )
+    if eff_mass_for_credit is not None and net_mass_for_credit is not None:
+        scrap_mass_g = max(0.0, float(eff_mass_for_credit) - float(net_mass_for_credit))
+        if scrap_mass_g > 0:
+            scrap_credit_mass_lb = scrap_mass_g / 1000.0 * LB_PER_KG
+            scrap_credit_unit_price_lb = _coerce_float_or_none(
+                material_detail_for_breakdown.get("unit_price_usd_per_lb")
+            )
+            if scrap_credit_unit_price_lb is None:
+                scrap_credit_unit_price_kg = _coerce_float_or_none(
+                    material_detail_for_breakdown.get("unit_price_usd_per_kg")
+                )
+                if scrap_credit_unit_price_kg is not None:
+                    scrap_credit_unit_price_lb = float(scrap_credit_unit_price_kg) / LB_PER_KG
+            if scrap_credit_unit_price_lb is None:
+                unit_price_per_g_val = _coerce_float_or_none(
+                    material_detail_for_breakdown.get("unit_price_per_g")
+                )
+                if unit_price_per_g_val is not None:
+                    scrap_credit_unit_price_lb = float(unit_price_per_g_val) * (1000.0 / LB_PER_KG)
+            if scrap_credit_unit_price_lb is not None and scrap_credit_unit_price_lb > 0:
+                scrap_credit_from_weight = round(
+                    scrap_credit_mass_lb * float(scrap_credit_unit_price_lb), 2
+                )
+                material_detail_for_breakdown["material_scrap_credit_calculated"] = (
+                    scrap_credit_from_weight
+                )
+                material_detail_for_breakdown["scrap_credit_mass_lb"] = scrap_credit_mass_lb
+                material_detail_for_breakdown[
+                    "scrap_credit_unit_price_usd_per_lb"
+                ] = float(scrap_credit_unit_price_lb)
+
+    if scrap_credit_from_weight > 0:
+        material_scrap_credit = scrap_credit_from_weight
+        material_scrap_credit_entered = True
+
+    material_detail_for_breakdown["material_scrap_credit_entered"] = (
+        material_scrap_credit_entered
+    )
 
     if material_scrap_credit:
         credit_cap = min(material_scrap_credit, float(material_cost_before_credit))
