@@ -16,7 +16,6 @@ ASM-06,Final Process Touch-up (Grinding/EDM),"Labor for final, critical operatio
 FIN-04,Lapping / Honing Labor,High-skill labor for achieving very flat surfaces or precise bores.,$100–$500 per critical surface.,Number,3,,
 ASM-03,Tool & Die Maker (journeyman),"Setups, precision fitting, jig grind calls, solving tolerance stackups",Billed at a standard journeyman rate ($85–$130/hr).,Number,4.5,,
 FIN-05,Polishing Labor,Time spent achieving a mirror or optical finish.,$50–$1000+ per surface.,Number,5,,
-MAT-07,Material Surcharge / Volatility Adder,A buffer for fluctuating market prices of metals.,5–15% on material cost.,Number,5,,
 MIL-06,Number of Unique Tools,"Each tool requires a tool change, adding to non-cutting time.",15–60 seconds per tool; can be significant.,Number,5,,
 QC-03,CMM Programming Time,Time to program the Coordinate Measuring Machine.,2–16 hours NRE (+$200–$1600).,Number,6,,
 ENG-02,3D CAM Programming Hours (Milling),Time for a skilled programmer to create toolpaths for a mill.,$100–$5000+ depending on complexity.,Number,8,hr,
