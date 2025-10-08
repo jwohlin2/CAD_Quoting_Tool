@@ -92,5 +92,5 @@ def test_render_quote_does_not_duplicate_detail_lines() -> None:
     assert rendered.count("- Programmer: 1.00 hr @ $75.00/hr") == 1
     assert rendered.count("Programmer 1.00 hr @ $75.00/hr") == 0
     assert rendered.count("includes $200.00 extras") == 1
-    assert rendered.count("includes 1.67 hr extras") == 1
+    assert rendered.count("includes 1.67 hr extras") == 0
     assert rendered.count("1.50 hr @ $120.00/hr") == 1
