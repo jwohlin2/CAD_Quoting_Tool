@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json, math, os, time
 from collections import Counter
+from collections.abc import Mapping as _MappingABC
 from fractions import Fraction
 from pathlib import Path
 from dataclasses import dataclass, field, replace
@@ -32,6 +33,16 @@ from cad_quoter.config import (
 )
 
 APP_ENV = AppEnvironment.from_env()
+
+
+def _coerce_env_bool(value: str | None) -> bool:
+    if value is None:
+        return False
+    text = value.strip().lower()
+    return text in {"1", "true", "yes", "on"}
+
+
+FORCE_PLANNER = _coerce_env_bool(os.environ.get("FORCE_PLANNER"))
 
 
 def describe_runtime_environment() -> dict[str, str]:
@@ -8061,6 +8072,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     planner_pricing_result: dict[str, Any] | None = None
     planner_pricing_error: str | None = None
     planner_process_minutes: float | None = None
+    used_planner = False
 
     # ---- primary processes ---------------------------------------------------
     # OEE-adjusted helper
@@ -8373,14 +8385,15 @@ def compute_quote_from_df(df: pd.DataFrame,
     except Exception:
         pass
     baseline_drill_hr = round(baseline_drill_hr, 3)
-    process_costs["drilling"] = baseline_drill_hr * drill_rate
-    process_costs["tapping"] = tapping_hr_rounded * drill_rate
-    process_costs["counterbore"] = cbore_hr_rounded * drill_rate
-    process_costs["countersink"] = csk_hr_rounded * drill_rate
     deburr_cost = deburr_total_hr * finishing_rate
-    process_costs["deburr"] = deburr_cost
 
-    process_costs_baseline = {k: float(v) for k, v in process_costs.items()}
+    legacy_process_costs = {
+        "drilling": baseline_drill_hr * drill_rate,
+        "tapping": tapping_hr_rounded * drill_rate,
+        "counterbore": cbore_hr_rounded * drill_rate,
+        "countersink": csk_hr_rounded * drill_rate,
+        "deburr": deburr_cost,
+    }
 
     process_meta = {
         "milling":          {"hr": eff(milling_hr), "rate": rates.get("MillingRate", 0.0)},
@@ -8403,111 +8416,44 @@ def compute_quote_from_df(df: pd.DataFrame,
         "packaging":        {"hr": packaging_hr,    "rate": rates.get("PackagingRate", rates.get("AssemblyRate", 0.0))},
         "ehs_compliance":   {"hr": ehs_hr,          "rate": rates.get("InspectionRate", 0.0)},
     }
-    process_meta["drilling"] = {"hr": baseline_drill_hr, "rate": drill_rate}
-    process_meta["tapping"] = {"hr": tapping_hr_rounded, "rate": drill_rate}
-    process_meta["counterbore"] = {"hr": cbore_hr_rounded, "rate": drill_rate}
-    process_meta["countersink"] = {"hr": csk_hr_rounded, "rate": drill_rate}
-    process_meta["deburr"] = {"hr": deburr_total_hr, "rate": finishing_rate}
+    legacy_process_meta = {
+        "drilling": {"hr": baseline_drill_hr, "rate": drill_rate},
+        "tapping": {"hr": tapping_hr_rounded, "rate": drill_rate},
+        "counterbore": {"hr": cbore_hr_rounded, "rate": drill_rate},
+        "countersink": {"hr": csk_hr_rounded, "rate": drill_rate},
+        "deburr": {"hr": deburr_total_hr, "rate": finishing_rate},
+    }
     if deburr_auto_hr:
-        process_meta["deburr"]["auto_calc_hr"] = deburr_auto_hr
+        legacy_process_meta["deburr"]["auto_calc_hr"] = deburr_auto_hr
     if deburr_manual_hr_rounded:
-        process_meta["deburr"]["manual_hr"] = deburr_manual_hr_rounded
+        legacy_process_meta["deburr"]["manual_hr"] = deburr_manual_hr_rounded
     if deburr_edge_hr:
-        process_meta["deburr"]["edge_hr"] = deburr_edge_hr
+        legacy_process_meta["deburr"]["edge_hr"] = deburr_edge_hr
     if deburr_holes_hr:
-        process_meta["deburr"]["hole_touch_hr"] = deburr_holes_hr
-    for key, meta in process_meta.items():
-        rate = float(meta.get("rate", 0.0))
-        hr = float(meta.get("hr", 0.0))
-        meta["base_extra"] = process_costs.get(key, 0.0) - hr * rate
+        legacy_process_meta["deburr"]["hole_touch_hr"] = deburr_holes_hr
 
-    process_hours_baseline = {k: float(meta.get("hr", 0.0)) for k, meta in process_meta.items()}
-
-    if planner_pricing_result:
-        totals = planner_pricing_result.get("totals", {}) if isinstance(planner_pricing_result, dict) else {}
-        line_items_raw = planner_pricing_result.get("line_items", []) if isinstance(planner_pricing_result, dict) else []
-        line_items: list[dict[str, Any]] = []
-        if isinstance(line_items_raw, list):
-            for entry in line_items_raw:
-                if isinstance(entry, dict):
-                    line_items.append({k: entry.get(k) for k in ("op", "minutes", "machine_cost", "labor_cost")})
-
-        machine_cost_total = float(totals.get("machine_cost", 0.0) or 0.0)
-        labor_cost_total = float(totals.get("labor_cost", 0.0) or 0.0)
-        total_minutes = float(totals.get("minutes", 0.0) or 0.0)
-
-        machine_minutes = 0.0
-        labor_minutes = 0.0
-        for entry in line_items:
-            minutes_val = float(entry.get("minutes", 0.0) or 0.0)
-            if float(entry.get("machine_cost", 0.0) or 0.0) > 0.0:
-                machine_minutes += minutes_val
-            if float(entry.get("labor_cost", 0.0) or 0.0) > 0.0:
-                labor_minutes += minutes_val
-
-        planner_process_minutes = total_minutes
-
-        process_costs = {
-            "Machine": round(machine_cost_total, 2),
-            "Labor": round(labor_cost_total, 2),
-        }
-        process_costs_baseline = dict(process_costs)
-
-        existing_process_meta = dict(process_meta)
-        process_meta = dict(existing_process_meta)
-        process_meta["planner_machine"] = {
-            "hr": round(machine_minutes / 60.0, 3),
-            "minutes": round(machine_minutes, 1),
-            "rate": 0.0,
-            "cost": round(machine_cost_total, 2),
-        }
-        process_meta["planner_labor"] = {
-            "hr": round(labor_minutes / 60.0, 3),
-            "minutes": round(labor_minutes, 1),
-            "rate": 0.0,
-            "cost": round(labor_cost_total, 2),
-        }
-        if line_items:
-            process_meta["planner_total"] = {
-                "hr": round(total_minutes / 60.0, 3),
-                "minutes": round(total_minutes, 1),
-                "rate": 0.0,
-                "cost": round(machine_cost_total + labor_cost_total, 2),
-                "line_items": copy.deepcopy(line_items),
-            }
-            for entry in line_items:
-                name = str(entry.get("op") or "").strip()
-                if not name:
-                    continue
-                minutes_val = float(entry.get("minutes", 0.0) or 0.0)
-                hours_val = minutes_val / 60.0 if minutes_val else 0.0
-                cost_val = float(entry.get("machine_cost") or entry.get("labor_cost") or 0.0)
-                rate_val = (cost_val / hours_val) if hours_val > 0 else 0.0
-                key_norm = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
-                process_meta[key_norm] = {
-                    "minutes": round(minutes_val, 2),
-                    "hr": round(hours_val, 3),
-                    "cost": round(cost_val, 2),
-                    "rate": round(rate_val, 2) if rate_val else 0.0,
-                }
-
-        for key, meta in process_meta.items():
-            rate_val = float(meta.get("rate", 0.0) or 0.0)
-            hr_val = float(meta.get("hr", 0.0) or 0.0)
-            meta["base_extra"] = process_costs.get(key, 0.0) - hr_val * rate_val
-
-        process_hours_baseline = {
-            key: float(meta.get("hr", 0.0) or 0.0)
-            for key, meta in process_meta.items()
-            if isinstance(meta, dict)
-        }
-
-        inspection_components = {}
-        inspection_adjustments = {}
-        inspection_hr_total = 0.0
-
+    if planner_pricing_result is not None:
         quote_state.process_plan.setdefault("pricing", copy.deepcopy(planner_pricing_result))
 
+    if not used_planner:
+        for key, value in legacy_process_costs.items():
+            process_costs[key] = float(value)
+        for key, meta in legacy_process_meta.items():
+            process_meta[key] = dict(meta)
+
+    for key, meta in list(process_meta.items()):
+        if not isinstance(meta, dict):
+            continue
+        rate_val = float(meta.get("rate", 0.0) or 0.0)
+        hr_val = float(meta.get("hr", 0.0) or 0.0)
+        meta["base_extra"] = process_costs.get(key, 0.0) - hr_val * rate_val
+
+    process_hours_baseline = {
+        key: float(meta.get("hr", 0.0) or 0.0)
+        for key, meta in process_meta.items()
+        if isinstance(meta, dict)
+    }
+    process_costs_baseline = {k: float(v) for k, v in process_costs.items()}
 
     pass_meta = {
         "Material": {"basis": "Stock / raw material"},
@@ -9253,6 +9199,10 @@ def compute_quote_from_df(df: pd.DataFrame,
             except Exception as planner_err:  # pragma: no cover - defensive logging
                 logger.debug("Process planner failed for %s: %s", planner_family, planner_err)
                 process_plan_summary["error"] = str(planner_err)
+                if FORCE_PLANNER:
+                    raise ConfigError(
+                        "FORCE_PLANNER enabled but process planner execution failed"
+                    ) from planner_err
             else:
                 process_plan_summary["plan"] = planner_result
                 if planner_result.get("ops"):
@@ -9260,13 +9210,21 @@ def compute_quote_from_df(df: pd.DataFrame,
                         from planner_pricing import price_with_planner  # type: ignore
                     except Exception as pricing_import_err:  # pragma: no cover - optional dependency
                         planner_pricing_error = str(pricing_import_err)
+                        if FORCE_PLANNER:
+                            raise ConfigError(
+                                "FORCE_PLANNER enabled but planner pricing module is unavailable"
+                            ) from pricing_import_err
                     else:
                         try:
                             two_bucket_rates = migrate_flat_to_two_bucket(rates)
                         except Exception as rate_err:
                             planner_pricing_error = str(rate_err)
+                            if FORCE_PLANNER:
+                                raise ConfigError(
+                                    "FORCE_PLANNER enabled but planner pricing could not derive rates"
+                                ) from rate_err
                         else:
-                            geom_payload: dict[str, Any] = {}
+                            geom_payload: dict[str, Any] = {"source": "appV5"}
                             geom_candidates = [
                                 geo_context.get("planner_geom"),
                                 geo_context.get("time_models"),
@@ -9288,11 +9246,117 @@ def compute_quote_from_df(df: pd.DataFrame,
                                 planner_pricing_error = str(price_err)
                             else:
                                 process_plan_summary["pricing"] = copy.deepcopy(planner_pricing_result)
+                else:
+                    if FORCE_PLANNER:
+                        raise ConfigError("FORCE_PLANNER enabled but process planner returned no operations")
+                    if planner_pricing_error is None:
+                        planner_pricing_error = "Planner returned no operations"
+
+    elif FORCE_PLANNER:
+        raise ConfigError("FORCE_PLANNER enabled but process planner is unavailable")
 
     if process_plan_summary:
         features["process_plan"] = copy.deepcopy(process_plan_summary)
         if planner_pricing_error and "pricing" not in process_plan_summary:
             process_plan_summary["pricing_error"] = planner_pricing_error
+
+    planner_line_items: list[dict[str, Any]] = []
+    planner_machine_cost_total = 0.0
+    planner_labor_cost_total = 0.0
+    planner_total_minutes = 0.0
+
+    if planner_pricing_result is not None:
+        totals = planner_pricing_result.get("totals", {}) if isinstance(planner_pricing_result, dict) else {}
+        line_items_raw = planner_pricing_result.get("line_items", []) if isinstance(planner_pricing_result, dict) else []
+        recognized_line_items = 0
+        if isinstance(line_items_raw, list):
+            for entry in line_items_raw:
+                if isinstance(entry, _MappingABC):
+                    planner_line_items.append({k: entry.get(k) for k in ("op", "minutes", "machine_cost", "labor_cost")})
+                    recognized_line_items += 1
+
+        planner_machine_cost_total = float(totals.get("machine_cost", 0.0) or 0.0)
+        planner_labor_cost_total = float(totals.get("labor_cost", 0.0) or 0.0)
+        planner_total_minutes = float(totals.get("minutes", 0.0) or 0.0)
+
+        machine_minutes = 0.0
+        labor_minutes = 0.0
+        for entry in planner_line_items:
+            minutes_val = float(entry.get("minutes", 0.0) or 0.0)
+            if float(entry.get("machine_cost", 0.0) or 0.0) > 0.0:
+                machine_minutes += minutes_val
+            if float(entry.get("labor_cost", 0.0) or 0.0) > 0.0:
+                labor_minutes += minutes_val
+
+        planner_totals_present = any(
+            float(val) > 0.0 for val in (planner_machine_cost_total, planner_labor_cost_total, planner_total_minutes)
+        )
+
+        if recognized_line_items > 0 or planner_totals_present:
+            used_planner = True
+
+        if recognized_line_items == 0:
+            if planner_totals_present and planner_total_minutes > 0.0:
+                if planner_machine_cost_total > 0.0 and planner_labor_cost_total <= 0.0:
+                    machine_minutes = planner_total_minutes
+                elif planner_labor_cost_total > 0.0 and planner_machine_cost_total <= 0.0:
+                    labor_minutes = planner_total_minutes
+            if FORCE_PLANNER:
+                raise ConfigError("FORCE_PLANNER enabled but planner pricing returned no line items")
+            if planner_pricing_error is None:
+                planner_pricing_error = "Planner pricing returned no line items"
+
+        if used_planner:
+            planner_process_minutes = planner_total_minutes
+            process_costs = {
+                "Machine": round(planner_machine_cost_total, 2),
+                "Labor": round(planner_labor_cost_total, 2),
+            }
+
+            existing_process_meta = {key: dict(value) for key, value in process_meta.items()}
+            process_meta = existing_process_meta
+            process_meta["planner_machine"] = {
+                "hr": round(machine_minutes / 60.0, 3),
+                "minutes": round(machine_minutes, 1),
+                "rate": 0.0,
+                "cost": round(planner_machine_cost_total, 2),
+            }
+            process_meta["planner_labor"] = {
+                "hr": round(labor_minutes / 60.0, 3),
+                "minutes": round(labor_minutes, 1),
+                "rate": 0.0,
+                "cost": round(planner_labor_cost_total, 2),
+            }
+            total_cost = planner_machine_cost_total + planner_labor_cost_total
+            process_meta["planner_total"] = {
+                "hr": round(planner_total_minutes / 60.0, 3),
+                "minutes": round(planner_total_minutes, 1),
+                "rate": 0.0,
+                "cost": round(total_cost, 2),
+            }
+            if planner_line_items:
+                process_meta["planner_total"]["line_items"] = copy.deepcopy(planner_line_items)
+                for entry in planner_line_items:
+                    name = str(entry.get("op") or "").strip()
+                    if not name:
+                        continue
+                    minutes_val = float(entry.get("minutes", 0.0) or 0.0)
+                    hours_val = minutes_val / 60.0 if minutes_val else 0.0
+                    cost_val = float(entry.get("machine_cost") or entry.get("labor_cost") or 0.0)
+                    rate_val = (cost_val / hours_val) if hours_val > 0 else 0.0
+                    key_norm = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+                    process_meta[key_norm] = {
+                        "minutes": round(minutes_val, 2),
+                        "hr": round(hours_val, 3),
+                        "cost": round(cost_val, 2),
+                        "rate": round(rate_val, 2) if rate_val else 0.0,
+                    }
+
+            inspection_components = {}
+            inspection_adjustments = {}
+            inspection_hr_total = 0.0
+
+    pricing_source = "planner" if used_planner else "legacy"
 
     baseline_data = {
         "process_hours": process_hours_baseline,
@@ -9315,13 +9379,14 @@ def compute_quote_from_df(df: pd.DataFrame,
         "shipping_cost": shipping_cost_base,
         "shipping_hint": "",
     }
+    baseline_data["pricing_source"] = pricing_source
     if fixture_plan_desc:
         baseline_data["fixture"] = fixture_plan_desc
     if process_plan_summary:
         baseline_data["process_plan"] = copy.deepcopy(process_plan_summary)
     if planner_process_minutes is not None:
         baseline_data["process_minutes"] = round(float(planner_process_minutes), 1)
-    if planner_pricing_result:
+    if planner_pricing_result is not None:
         baseline_data["process_plan_pricing"] = copy.deepcopy(planner_pricing_result)
     quote_state.baseline = baseline_data
     quote_state.process_plan = copy.deepcopy(process_plan_summary)
@@ -10791,11 +10856,13 @@ def compute_quote_from_df(df: pd.DataFrame,
         "llm_cost_log": llm_cost_log,
     }
 
+    breakdown["pricing_source"] = pricing_source
+
     if process_plan_summary:
         breakdown["process_plan"] = copy.deepcopy(process_plan_summary)
     if planner_process_minutes is not None:
         breakdown["process_minutes"] = round(float(planner_process_minutes), 1)
-    if planner_pricing_result:
+    if planner_pricing_result is not None:
         breakdown["process_plan_pricing"] = copy.deepcopy(planner_pricing_result)
 
     decision_state = {
