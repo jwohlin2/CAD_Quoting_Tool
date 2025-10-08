@@ -8036,23 +8036,16 @@ def compute_quote_from_df(df: pd.DataFrame,
     packaging_hr      = sum_time(r"(?:Packaging|Boxing|Crating\s*Labor)")
     crate_nre_cost    = num(r"(?:Custom\s*Crate\s*NRE)")
     packaging_mat     = num(r"(?:Packaging\s*Materials|Foam|Trays)")
-    shipping_mask     = contains(r"(?:Freight|Shipping\s*Cost)")
-    shipping_entered  = bool(getattr(shipping_mask, "any", lambda: False)())
-    shipping_manual   = num(r"(?:Freight|Shipping\s*Cost)")
     shipping_pct_of_material = float(params.get("ShippingPctOfMaterial", 0.15) or 0.0)
     shipping_cost_default = round(material_direct_cost * shipping_pct_of_material, 2) if shipping_pct_of_material else 0.0
-    shipping_cost     = float(shipping_manual if shipping_entered else shipping_cost_default)
+    shipping_cost     = float(shipping_cost_default)
     insurance_pct     = num_pct(r"(?:Insurance|Liability\s*Adder)", params["InsurancePct"])
     packaging_cost    = packaging_hr * rates["AssemblyRate"] + crate_nre_cost + packaging_mat
     packaging_flat_base = float((crate_nre_cost or 0.0) + (packaging_mat or 0.0))
     shipping_basis_desc = (
-        "Freight & logistics (sheet entry)"
-        if shipping_entered
-        else (
-            f"Freight & logistics (~{shipping_pct_of_material:.0%} of material)"
-            if shipping_pct_of_material
-            else "Freight & logistics"
-        )
+        f"Freight & logistics (~{shipping_pct_of_material:.0%} of material)"
+        if shipping_pct_of_material
+        else "Freight & logistics"
     )
     shipping_cost_base = float(shipping_cost)
 
