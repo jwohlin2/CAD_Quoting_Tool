@@ -5006,24 +5006,27 @@ def render_quote(
             ):
                 write_line(f"With Scrap: {_format_weight_lb_oz(effective_mass_val)}", "  ")
 
-            if upg or show_zeros:
-                per_kg = f"{_m(unit_price_kg)} / kg" if unit_price_kg else ""
-                per_lb = f"{_m(unit_price_lb)} / lb" if unit_price_lb else ""
-                per_g = f"{currency}{float(upg or 0):,.4f} / g"
-                extras: list[str] = []
-                display_line = per_g
-                if per_kg:
-                    display_line = per_kg
-                    if per_lb:
-                        extras.append(per_lb)
-                    extras.append(per_g)
-                elif per_lb:
-                    display_line = per_lb
-                    extras.append(per_g)
-                if price_asof:
-                    extras.append(f"as of {price_asof}")
-                extra = f" ({', '.join(extras)})" if extras else ""
-                write_line(f"Unit Price: {display_line}{extra}", "  ")
+            if upg or unit_price_kg or unit_price_lb or show_zeros:
+                grams_per_lb = 1000.0 / LB_PER_KG
+                per_lb_value = _coerce_float_or_none(unit_price_lb)
+                if per_lb_value is None:
+                    per_kg_value = _coerce_float_or_none(unit_price_kg)
+                    if per_kg_value is not None:
+                        per_lb_value = per_kg_value / LB_PER_KG
+                if per_lb_value is None:
+                    per_g_value = _coerce_float_or_none(upg)
+                    if per_g_value is not None:
+                        per_lb_value = per_g_value * grams_per_lb
+                if per_lb_value is None and show_zeros:
+                    per_lb_value = 0.0
+
+                if per_lb_value is not None:
+                    display_line = f"{_m(per_lb_value)} / lb"
+                    extras: list[str] = []
+                    if price_asof:
+                        extras.append(f"as of {price_asof}")
+                    extra = f" ({', '.join(extras)})" if extras else ""
+                    write_line(f"Unit Price: {display_line}{extra}", "  ")
             if price_source:
                 write_line(f"Source: {price_source}", "  ")
             if minchg or show_zeros:  write_line(f"Supplier Min Charge: {_m(minchg or 0)}", "  ")
