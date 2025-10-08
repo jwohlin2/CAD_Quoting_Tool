@@ -2468,6 +2468,7 @@ def effective_to_overrides(effective: dict, baseline: dict | None = None) -> dic
         "cmm_minutes": (0.0, None),
         "in_process_inspection_hr": (0.0, None),
         "fai_prep_hr": (0.0, None),
+        "inspection_total_hr": (0.0, None),
         "packaging_hours": (0.0, None),
         "packaging_flat_cost": (0.0, None),
     }
