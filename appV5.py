@@ -194,6 +194,20 @@ _HARDWARE_LABEL_ALIASES = {
     "hardware bom",
 }
 
+# --- In-process inspection curve knobs ---
+INPROC_REF_TOL_IN = 0.002   # ref tolerance where no premium starts
+INPROC_BASE_HR    = 0.30    # hours at/looser than ref
+INPROC_SCALE_HR   = 1.60    # how much to add as tolerance tightens
+INPROC_EXP        = 0.60    # curve shape: lower=flatter
+
+# small, bounded adders for “many tight callouts”
+INPROC_TIGHT_PER   = 0.15   # +hr per extra tight tol (≤0.0015")
+INPROC_TIGHT_MAX   = 0.60
+INPROC_SUBTHOU_PER = 0.20   # +hr per sub-thou tol (≤0.0005")
+INPROC_SUBTHOU_MAX = 0.40
+INPROC_MENTION_PER = 0.10   # “tight tolerance” textual mentions
+INPROC_MENTION_MAX = 0.30
+
 
 def _canonical_pass_label(label: str | None) -> str:
     name = str(label or "").strip()
@@ -6059,27 +6073,25 @@ def _estimate_inprocess_default_from_tolerance(
     min_tol = min(candidates) if candidates else None
     base_hours = 1.0
     if min_tol is not None:
-        # Use a smooth curve instead of rigid breakpoints so the hours scale
-        # proportionally with tolerance precision.  The minimum tolerance value is
-        # expressed in inches; normalize the value against a 0.002" reference and
-        # clamp it to [0, 1] so the curve stays bounded.
         min_tol = max(float(min_tol), 1e-6)
-        normalized = max(0.0, min(1.0, (0.002 - min_tol) / 0.002))
-        base_hours = 0.6 + 3.0 * normalized ** 0.7
+        normalized = max(
+            0.0, min(1.0, (INPROC_REF_TOL_IN - min_tol) / INPROC_REF_TOL_IN)
+        )
 
-        # Reward drawings that call out multiple tight tolerances by adding a
-        # gentle premium.  This keeps the impact sub-linear so a large number of
-        # similar callouts does not explode the estimate.
+        # smoother, lower curve (no cap; just gentler)
+        base_hours = INPROC_BASE_HR + INPROC_SCALE_HR * (normalized ** INPROC_EXP)
+
+        # gentle, bounded adders (nonlinear feel without hard limits)
         tight_count = sum(1 for val in candidates if val <= 0.0015)
         if tight_count > 1:
-            base_hours += min(1.2, 0.25 * (tight_count - 1))
+            base_hours += min(INPROC_TIGHT_MAX, INPROC_TIGHT_PER * (tight_count - 1))
 
         sub_thou_count = sum(1 for val in candidates if val <= 0.0005)
         if sub_thou_count:
-            base_hours += min(0.8, 0.35 * sub_thou_count)
+            base_hours += min(INPROC_SUBTHOU_MAX, INPROC_SUBTHOU_PER * sub_thou_count)
 
         if tight_mentions:
-            base_hours += min(0.5, 0.15 * tight_mentions)
+            base_hours += min(INPROC_MENTION_MAX, INPROC_MENTION_PER * tight_mentions)
     elif tight_mentions:
         base_hours = 1.5
 
@@ -8013,8 +8025,78 @@ def compute_quote_from_df(df: pd.DataFrame,
     if milling_hr > 0:
         prog_hr = min(prog_hr, params["ProgMaxToMillingRatio"] * milling_hr)
 
+    tolerance_inputs: dict[str, Any] = {}
+    for key, value in (ui_vars or {}).items():
+        label = str(key)
+        if re.search(r"(tolerance|finish|surface)", label, re.IGNORECASE):
+            tolerance_inputs[label] = value
+
+    tolerance_notes_extra: list[Any] = []
+    tol_notes_geo = geo_context.get("tolerance_notes")
+    if isinstance(tol_notes_geo, (list, tuple, set)):
+        tolerance_notes_extra.extend(tol_notes_geo)
+    elif tol_notes_geo:
+        tolerance_notes_extra.append(tol_notes_geo)
+    for extra_key in ("default_tolerance_note", "tolerance_note"):
+        extra_val = geo_context.get(extra_key)
+        if extra_val:
+            tolerance_notes_extra.append(extra_val)
+    if isinstance(inner_geo, dict):
+        tol_notes_inner = inner_geo.get("tolerance_notes")
+        if isinstance(tol_notes_inner, (list, tuple, set)):
+            tolerance_notes_extra.extend(tol_notes_inner)
+        elif tol_notes_inner:
+            tolerance_notes_extra.append(tol_notes_inner)
+
+    default_tol_text = (
+        geo_context.get("default_tol")
+        or geo_context.get("default_tolerance")
+        or ui_vars.get("Default Tolerance Note")
+        or ui_vars.get("Default Tolerance")
+    )
+
+    tolerance_candidates_for_fixture: list[float] = []
+    for value in tolerance_inputs.values():
+        tolerance_candidates_for_fixture.extend(_tolerance_values_from_any(value))
+    if default_tol_text is not None:
+        tolerance_candidates_for_fixture.extend(
+            _tolerance_values_from_any(default_tol_text)
+        )
+    for extra in tolerance_notes_extra:
+        tolerance_candidates_for_fixture.extend(_tolerance_values_from_any(extra))
+    try:
+        min_tol_for_fixture = (
+            float(min(tolerance_candidates_for_fixture))
+            if tolerance_candidates_for_fixture
+            else None
+        )
+    except Exception:
+        min_tol_for_fixture = None
+
+    inproc_default = _estimate_inprocess_default_from_tolerance(
+        tolerance_inputs,
+        default_tol_text,
+        tolerance_notes_extra,
+    )
+
     # ---- fixture -------------------------------------------------------------
-    fixture_build_hr = sum_time(r"(?:Fixture\s*Build|Custom\s*Fixture\s*Build)")
+    fixture_sheet_hr = sum_time(r"(?:Fixture\s*Build|Custom\s*Fixture\s*Build)")
+    setups = max(1, min(int(round(setups or 1)), 3))  # you already computed setups above
+
+    if fixture_sheet_hr and fixture_sheet_hr > 0:
+        # honor an explicit entry from the sheet/UI if present
+        fixture_build_hr = float(fixture_sheet_hr)
+    else:
+        # gentle, setup-driven curve (no hard cap)
+        base = float(params.get("FixtureBaseHr", 0.70))   # ~0.7 hr base
+        per_setup = float(params.get("FixturePerSetupHr", 0.15))  # small add per extra setup
+        fixture_build_hr = base + per_setup * max(0, setups - 1)
+        # (Optional) tiny tolerance bump without caps:
+        min_tol_in = min_tol_for_fixture
+        if min_tol_in and min_tol_in > 0:
+            norm = max(0.0, min(1.0, (INPROC_REF_TOL_IN - min_tol_in) / INPROC_REF_TOL_IN))
+            fixture_build_hr *= (1.0 + 0.20 * (norm ** 0.6))  # ≤ ~+20% at very tight
+
     # Fixture material cost is no longer applied; only labor is considered.
     fixture_labor_cost    = float(fixture_build_hr) * float(rates["FixtureBuildRate"])
     fixture_cost          = fixture_labor_cost
@@ -8120,42 +8202,6 @@ def compute_quote_from_df(df: pd.DataFrame,
     finishing_rate   = float(rates.get("FinishingRate", 0.0))
     finishing_misc_hr = tumble_hr + blast_hr + laser_mark_hr + masking_hr
     finishing_cost   = finishing_misc_hr * finishing_rate
-
-    tolerance_inputs: dict[str, Any] = {}
-    for key, value in (ui_vars or {}).items():
-        label = str(key)
-        if re.search(r"(tolerance|finish|surface)", label, re.IGNORECASE):
-            tolerance_inputs[label] = value
-
-    tolerance_notes_extra: list[Any] = []
-    tol_notes_geo = geo_context.get("tolerance_notes")
-    if isinstance(tol_notes_geo, (list, tuple, set)):
-        tolerance_notes_extra.extend(tol_notes_geo)
-    elif tol_notes_geo:
-        tolerance_notes_extra.append(tol_notes_geo)
-    for extra_key in ("default_tolerance_note", "tolerance_note"):
-        extra_val = geo_context.get(extra_key)
-        if extra_val:
-            tolerance_notes_extra.append(extra_val)
-    if isinstance(inner_geo, dict):
-        tol_notes_inner = inner_geo.get("tolerance_notes")
-        if isinstance(tol_notes_inner, (list, tuple, set)):
-            tolerance_notes_extra.extend(tol_notes_inner)
-        elif tol_notes_inner:
-            tolerance_notes_extra.append(tol_notes_inner)
-
-    default_tol_text = (
-        geo_context.get("default_tol")
-        or geo_context.get("default_tolerance")
-        or ui_vars.get("Default Tolerance Note")
-        or ui_vars.get("Default Tolerance")
-    )
-
-    inproc_default = _estimate_inprocess_default_from_tolerance(
-        tolerance_inputs,
-        default_tol_text,
-        tolerance_notes_extra,
-    )
 
     # Inspection & docs
     inproc_hr   = sum_time(r"(?:In[- ]?Process\s*Inspection)", default=inproc_default)
