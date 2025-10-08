@@ -4890,6 +4890,25 @@ def render_quote(
             return "; ".join(segments)
         return str(existing).strip() if existing else None
 
+    def _build_process_detail_bits(
+        hr_val: float,
+        rate_val: float,
+        extra_val: float,
+        proc_notes: Iterable[str] | None,
+    ) -> list[str]:
+        bits: list[str] = []
+        if hr_val > 1e-9:
+            bits.append(f"{hr_val:.2f} hr @ ${rate_val:,.2f}/hr")
+        if abs(extra_val) > 1e-6:
+            if rate_val > 0 and hr_val > 0:
+                extra_hr = extra_val / rate_val
+                bits.append(f"includes {extra_hr:.2f} hr extras")
+            else:
+                bits.append(f"includes ${extra_val:,.2f} extras")
+        if proc_notes:
+            bits.append("LLM: " + ", ".join(proc_notes))
+        return bits
+
     def add_process_notes(key: str, indent: str = "    "):
         k = str(key).lower()
         meta = process_meta.get(k) or {}
@@ -5117,18 +5136,13 @@ def render_quote(
 
         row(label, display_value, indent="  ")
 
-        detail_bits: list[str] = []
-        if hr_val > 0:
-            detail_bits.append(f"{hr_val:.2f} hr @ ${rate_val:,.2f}/hr")
-        if abs(extra_val) > 1e-6:
-            if rate_val > 0 and hr_val > 0:
-                extra_hr = extra_val / rate_val
-                detail_bits.append(f"includes {extra_hr:.2f} hr extras")
-            else:
-                detail_bits.append(f"includes ${extra_val:,.2f} extras")
         proc_notes = applied_process.get(str(key).lower(), {}).get("notes")
-        if proc_notes:
-            detail_bits.append("LLM: " + ", ".join(proc_notes))
+        detail_bits = _build_process_detail_bits(
+            hr_val=hr_val,
+            rate_val=rate_val,
+            extra_val=extra_val,
+            proc_notes=proc_notes,
+        )
 
         existing_detail = labor_cost_details.get(label)
         merged_detail = _merge_detail(existing_detail, detail_bits)
