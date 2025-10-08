@@ -4900,6 +4900,13 @@ def render_quote(
         str(label): str(detail) for label, detail in labor_cost_details_input_raw.items()
     }
     labor_cost_details: dict[str, str] = dict(labor_cost_details_input)
+    labor_cost_totals_raw = breakdown.get("labor_costs", {}) or {}
+    labor_cost_totals: dict[str, float] = {}
+    for key, value in labor_cost_totals_raw.items():
+        try:
+            labor_cost_totals[str(key)] = float(value)
+        except Exception:
+            continue
     direct_cost_details = breakdown.get("direct_cost_details", {}) or {}
     qty          = int(breakdown.get("qty", 1) or 1)
     price        = float(result.get("price", totals.get("price", 0.0)))
@@ -5321,10 +5328,40 @@ def render_quote(
     lines.append("Process & Labor Costs")
     lines.append(divider)
     proc_total = 0.0
+
+    def _add_labor_cost_line(
+        label: str,
+        amount: float,
+        *,
+        process_key: str | None = None,
+        detail_bits: list[str] | None = None,
+        fallback_detail: str | None = None,
+    ) -> None:
+        nonlocal proc_total
+        if not ((amount > 0) or show_zeros):
+            return
+        row(label, float(amount), indent="  ")
+        existing_detail = labor_cost_details.get(label)
+        merged_detail = _merge_detail(existing_detail, detail_bits or [])
+        detail_to_write: str | None
+        if merged_detail:
+            labor_cost_details[label] = merged_detail
+            detail_to_write = merged_detail
+        elif fallback_detail:
+            detail_to_write = fallback_detail
+            labor_cost_details.setdefault(label, fallback_detail)
+        else:
+            detail_to_write = None
+
+        if detail_to_write:
+            write_detail(detail_to_write, indent="    ")
+        elif process_key is not None:
+            add_process_notes(process_key, indent="    ")
+        proc_total += float(amount or 0.0)
+
     for key, value in sorted((process_costs or {}).items(), key=lambda kv: kv[1], reverse=True):
         if (value > 0) or show_zeros:
             label = _process_label(key)
-            row(label, float(value), indent="  ")
             meta = process_meta.get(str(key).lower(), {})
             detail_bits: list[str] = []
             try:
@@ -5347,14 +5384,102 @@ def render_quote(
             if proc_notes:
                 detail_bits.append("LLM: " + ", ".join(proc_notes))
 
-            existing_detail = labor_cost_details.get(label)
-            merged_detail = _merge_detail(existing_detail, detail_bits)
-            if merged_detail:
-                labor_cost_details[label] = merged_detail
-                write_detail(merged_detail, indent="    ")
+            _add_labor_cost_line(
+                label,
+                float(value),
+                process_key=str(key),
+                detail_bits=detail_bits,
+            )
+
+    programming_per_part_cost = labor_cost_totals.get("Programming (amortized)")
+    if programming_per_part_cost is None:
+        programming_per_part_cost = float(nre.get("programming_per_part", 0.0) or 0.0)
+    if programming_per_part_cost > 0 or show_zeros:
+        programming_detail = (nre_detail or {}).get("programming") or {}
+        prog_bits: list[str] = []
+        try:
+            prog_hr = float(programming_detail.get("prog_hr", 0.0) or 0.0)
+        except Exception:
+            prog_hr = 0.0
+        try:
+            prog_rate = float(programming_detail.get("prog_rate", 0.0) or 0.0)
+        except Exception:
+            prog_rate = 0.0
+        if prog_hr > 0:
+            if prog_rate > 0:
+                prog_bits.append(
+                    f"- Programmer (lot): {prog_hr:.2f} hr @ ${prog_rate:,.2f}/hr"
+                )
             else:
-                add_process_notes(key, indent="    ")
-            proc_total += float(value or 0.0)
+                prog_bits.append(f"- Programmer (lot): {prog_hr:.2f} hr")
+        try:
+            eng_hr = float(programming_detail.get("eng_hr", 0.0) or 0.0)
+        except Exception:
+            eng_hr = 0.0
+        try:
+            eng_rate = float(programming_detail.get("eng_rate", 0.0) or 0.0)
+        except Exception:
+            eng_rate = 0.0
+        if eng_hr > 0:
+            if eng_rate > 0:
+                prog_bits.append(
+                    f"- Engineering (lot): {eng_hr:.2f} hr @ ${eng_rate:,.2f}/hr"
+                )
+            else:
+                prog_bits.append(f"- Engineering (lot): {eng_hr:.2f} hr")
+        if qty > 1 and programming_per_part_cost > 0:
+            prog_bits.append(f"Amortized across {qty} pcs")
+
+        _add_labor_cost_line(
+            "Programming (amortized)",
+            programming_per_part_cost,
+            detail_bits=prog_bits,
+        )
+
+    fixture_detail = (nre_detail or {}).get("fixture") or {}
+    fixture_labor_per_part_cost = labor_cost_totals.get("Fixture Build (amortized)")
+    if fixture_labor_per_part_cost is None:
+        try:
+            fixture_labor_total = float(fixture_detail.get("labor_cost", 0.0) or 0.0)
+        except Exception:
+            fixture_labor_total = 0.0
+        fixture_labor_per_part_cost = (
+            fixture_labor_total / qty if qty > 0 else fixture_labor_total
+        )
+    if fixture_labor_per_part_cost > 0 or show_zeros:
+        fixture_bits: list[str] = []
+        try:
+            fixture_hr = float(fixture_detail.get("build_hr", 0.0) or 0.0)
+        except Exception:
+            fixture_hr = 0.0
+        try:
+            fixture_rate = float(
+                fixture_detail.get("build_rate", rates.get("FixtureBuildRate", 0.0)) or 0.0
+            )
+        except Exception:
+            fixture_rate = 0.0
+        if fixture_hr > 0:
+            if fixture_rate > 0:
+                fixture_bits.append(
+                    f"- Build labor (lot): {fixture_hr:.2f} hr @ ${fixture_rate:,.2f}/hr"
+                )
+            else:
+                fixture_bits.append(f"- Build labor (lot): {fixture_hr:.2f} hr")
+        try:
+            soft_jaw_hr = float(fixture_detail.get("soft_jaw_hr", 0.0) or 0.0)
+        except Exception:
+            soft_jaw_hr = 0.0
+        if soft_jaw_hr > 0:
+            fixture_bits.append(f"Soft jaw prep {soft_jaw_hr:.2f} hr")
+        if qty > 1 and fixture_labor_per_part_cost > 0:
+            fixture_bits.append(f"Amortized across {qty} pcs")
+
+        _add_labor_cost_line(
+            "Fixture Build (amortized)",
+            fixture_labor_per_part_cost,
+            detail_bits=fixture_bits,
+        )
+
     row("Total", proc_total, indent="  ")
 
     hour_summary_entries: list[tuple[str, float]] = []
@@ -5377,6 +5502,15 @@ def render_quote(
     if programming_hours > 0 or show_zeros:
         hour_summary_entries.append(("Programming", programming_hours))
         total_hours += programming_hours if programming_hours else 0.0
+
+    fixture_meta = (nre_detail or {}).get("fixture") or {}
+    try:
+        fixture_hours = float(fixture_meta.get("build_hr", 0.0) or 0.0)
+    except Exception:
+        fixture_hours = 0.0
+    if fixture_hours > 0 or show_zeros:
+        hour_summary_entries.append(("Fixture Build", fixture_hours))
+        total_hours += fixture_hours if fixture_hours else 0.0
 
     if hour_summary_entries:
         lines.append("")
@@ -9629,9 +9763,31 @@ def compute_quote_from_df(df: pd.DataFrame,
     labor_cost_details_input: dict[str, str] = {}
     labor_cost_details: dict[str, str] = {}
     labor_costs_display: dict[str, float] = {}
+
+    def _merge_labor_detail(label: str, amount: float, detail_bits: list[str]) -> None:
+        labor_costs_display[label] = float(amount)
+        existing_detail = labor_cost_details_input.get(label)
+        if not detail_bits and not existing_detail:
+            return
+
+        merged_bits: list[str] = []
+        seen: set[str] = set()
+        for bit in detail_bits:
+            seg = str(bit).strip()
+            if seg and seg not in seen:
+                merged_bits.append(seg)
+                seen.add(seg)
+        if existing_detail:
+            for segment in re.split(r";\s*", existing_detail):
+                seg = segment.strip()
+                if seg and seg not in seen:
+                    merged_bits.append(seg)
+                    seen.add(seg)
+        if merged_bits:
+            labor_cost_details[label] = "; ".join(merged_bits)
+
     for key, value in sorted(process_costs.items(), key=lambda kv: kv[1], reverse=True):
         label = key.replace('_', ' ').title()
-        labor_costs_display[label] = value
         meta = process_meta.get(key, {})
         hr = float(meta.get("hr", 0.0))
         rate = float(meta.get("rate", 0.0))
@@ -9649,17 +9805,53 @@ def compute_quote_from_df(df: pd.DataFrame,
         proc_notes = applied_process.get(key, {}).get("notes")
         if proc_notes:
             detail_bits.append("LLM: " + ", ".join(proc_notes))
-        existing_detail = labor_cost_details_input.get(label)
-        if detail_bits or existing_detail:
-            merged_bits: list[str] = []
-            merged_bits.extend(detail_bits)
-            if existing_detail:
-                for segment in re.split(r";\s*", existing_detail):
-                    seg = segment.strip()
-                    if seg and seg not in merged_bits:
-                        merged_bits.append(seg)
-            if merged_bits:
-                labor_cost_details[label] = "; ".join(merged_bits)
+
+        _merge_labor_detail(label, value, detail_bits)
+
+    programming_bits: list[str] = []
+    prog_hr_detail = float(programming_detail.get("prog_hr", 0.0) or 0.0)
+    prog_rate_detail = float(programming_detail.get("prog_rate", 0.0) or 0.0)
+    if prog_hr_detail > 0:
+        if prog_rate_detail > 0:
+            programming_bits.append(
+                f"- Programmer (lot): {prog_hr_detail:.2f} hr @ ${prog_rate_detail:,.2f}/hr"
+            )
+        else:
+            programming_bits.append(f"- Programmer (lot): {prog_hr_detail:.2f} hr")
+    eng_hr_detail = float(programming_detail.get("eng_hr", 0.0) or 0.0)
+    eng_rate_detail = float(programming_detail.get("eng_rate", 0.0) or 0.0)
+    if eng_hr_detail > 0:
+        if eng_rate_detail > 0:
+            programming_bits.append(
+                f"- Engineering (lot): {eng_hr_detail:.2f} hr @ ${eng_rate_detail:,.2f}/hr"
+            )
+        else:
+            programming_bits.append(f"- Engineering (lot): {eng_hr_detail:.2f} hr")
+    if Qty > 1 and programming_per_part > 0:
+        programming_bits.append(f"Amortized across {Qty} pcs")
+
+    if programming_per_part > 0:
+        _merge_labor_detail("Programming (amortized)", programming_per_part, programming_bits)
+
+    fixture_bits: list[str] = []
+    fixture_detail = nre_detail.get("fixture", {}) if isinstance(nre_detail, dict) else {}
+    fixture_build_hr_detail = float(fixture_detail.get("build_hr", 0.0) or 0.0)
+    fixture_rate_detail = float(fixture_detail.get("build_rate", rates.get("FixtureBuildRate", 0.0)))
+    if fixture_build_hr_detail > 0:
+        if fixture_rate_detail > 0:
+            fixture_bits.append(
+                f"- Build labor (lot): {fixture_build_hr_detail:.2f} hr @ ${fixture_rate_detail:,.2f}/hr"
+            )
+        else:
+            fixture_bits.append(f"- Build labor (lot): {fixture_build_hr_detail:.2f} hr")
+    soft_jaw_hr = float(fixture_detail.get("soft_jaw_hr", 0.0) or 0.0)
+    if soft_jaw_hr > 0:
+        fixture_bits.append(f"Soft jaw prep {soft_jaw_hr:.2f} hr")
+    if Qty > 1 and fixture_labor_per_part > 0:
+        fixture_bits.append(f"Amortized across {Qty} pcs")
+
+    if fixture_labor_per_part > 0:
+        _merge_labor_detail("Fixture Build (amortized)", fixture_labor_per_part, fixture_bits)
 
     direct_costs_display: dict[str, float] = {label: float(value) for label, value in pass_through.items()}
     direct_cost_details: dict[str, str] = {}
