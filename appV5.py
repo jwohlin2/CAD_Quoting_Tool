@@ -5176,15 +5176,30 @@ def render_quote(
         if have_any:
             lines.append("Material & Stock")
             lines.append(divider)
+            material_name_display = (
+                material.get("material_name")
+                or material.get("material")
+                or g.get("material")
+                or ui_vars.get("Material")
+                or ""
+            )
+            if isinstance(material_name_display, str):
+                material_name_display = material_name_display.strip()
+            else:
+                material_name_display = str(material_name_display).strip()
+            if material_name_display:
+                lines.append(f"  Material used:  {material_name_display}")
+
             if matcost or show_zeros:
                 total_material_cost = float(matcost or 0.0)
+            scrap_credit_lines: list[str] = []
             if scrap_credit_entered and scrap_credit:
                 credit_display = _m(scrap_credit)
                 if credit_display.startswith(currency):
                     credit_display = f"-{credit_display}"
                 else:
                     credit_display = f"-{currency}{float(scrap_credit):,.2f}"
-                detail_lines.append(f"  Scrap Credit: {credit_display}")
+                scrap_credit_lines.append(f"  Scrap Credit: {credit_display}")
                 scrap_credit_mass_lb = _coerce_float_or_none(
                     material.get("scrap_credit_mass_lb")
                 )
@@ -5192,9 +5207,12 @@ def render_quote(
                     material.get("scrap_credit_unit_price_usd_per_lb")
                 )
                 if scrap_credit_mass_lb and scrap_credit_unit_price_lb:
-                    detail_lines.append(
+                    scrap_credit_mass_g = (
+                        float(scrap_credit_mass_lb) / LB_PER_KG * 1000.0
+                    )
+                    scrap_credit_lines.append(
                         "    based on "
-                        f"{float(scrap_credit_mass_lb):.2f} lb × {currency}{float(scrap_credit_unit_price_lb):,.2f} / lb"
+                        f"{_format_weight_lb_oz(scrap_credit_mass_g)} × {currency}{float(scrap_credit_unit_price_lb):,.2f} / lb"
                     )
             net_mass_val = _coerce_float_or_none(net_mass_g)
             effective_mass_val = _coerce_float_or_none(mass_g)
@@ -5287,23 +5305,24 @@ def render_quote(
                     abs(float(scrap_adjusted_mass_val) - float(net_mass_val)),
                 )
 
+            weight_lines: list[str] = []
             if (starting_mass_val and starting_mass_val > 0) or show_zeros:
-                write_line(
-                    f"Starting Weight: {_format_weight_lb_oz(starting_mass_val)}",
-                    "  ",
+                weight_lines.append(
+                    f"  Starting Weight: {_format_weight_lb_oz(starting_mass_val)}"
+                )
+            if (net_mass_val and net_mass_val > 0) or show_zeros:
+                weight_lines.append(
+                    f"  Net Weight: {_format_weight_lb_oz(net_mass_val)}"
                 )
             if scrap_mass_val is not None:
                 if scrap_mass_val > 0 or show_zeros:
-                    write_line(
-                        f"Scrap Weight: {_format_weight_lb_oz(scrap_mass_val)}",
-                        "  ",
+                    weight_lines.append(
+                        f"  Scrap Weight: {_format_weight_lb_oz(scrap_mass_val)}"
                     )
             elif show_zeros:
-                write_line("Scrap Weight: 0 oz", "  ")
-            if (net_mass_val and net_mass_val > 0) or show_zeros:
-                detail_lines.append(
-                    f"  Net Weight: {_format_weight_lb_oz(net_mass_val)}"
-                )
+                weight_lines.append("  Scrap Weight: 0 oz")
+            if scrap is not None:
+                weight_lines.append(f"  Scrap Percentage: {_pct(scrap)}")
             with_scrap_mass = scrap_adjusted_mass_val
             if with_scrap_mass is None:
                 with_scrap_mass = effective_mass_val if scrap else None
@@ -5314,9 +5333,15 @@ def render_quote(
                 else:
                     show_with_scrap = bool(with_scrap_mass) or show_zeros
                 if show_with_scrap or show_zeros:
-                    detail_lines.append(
+                    weight_lines.append(
                         f"  With Scrap: {_format_weight_lb_oz(with_scrap_mass)}"
                     )
+
+            detail_lines.extend(weight_lines)
+            if scrap_credit_lines:
+                if detail_lines and detail_lines[-1] != "":
+                    detail_lines.append("")
+                detail_lines.extend(scrap_credit_lines)
 
             if upg or unit_price_kg or unit_price_lb or show_zeros:
                 grams_per_lb = 1000.0 / LB_PER_KG
@@ -5338,13 +5363,19 @@ def render_quote(
                     if price_asof:
                         extras.append(f"as of {price_asof}")
                     extra = f" ({', '.join(extras)})" if extras else ""
-                    detail_lines.append(f"  Unit Price: {display_line}{extra}")
+                    price_lines = [f"  Material Price: {display_line}{extra}"]
+                else:
+                    price_lines = []
+            else:
+                price_lines = []
             if price_source:
-                detail_lines.append(f"  Source: {price_source}")
+                price_lines.append(f"  Source: {price_source}")
             if minchg or show_zeros:
-                detail_lines.append(f"  Supplier Min Charge: {_m(minchg or 0)}")
-            if scrap is not None:
-                detail_lines.append(f"  Scrap %: {_pct(scrap)}")
+                price_lines.append(f"  Supplier Min Charge: {_m(minchg or 0)}")
+            if price_lines:
+                if detail_lines and detail_lines[-1] != "":
+                    detail_lines.append("")
+                detail_lines.extend(price_lines)
             stock_L = _fmt_dim(ui_vars.get("Plate Length (in)"))
             stock_W = _fmt_dim(ui_vars.get("Plate Width (in)"))
             th_in = ui_vars.get("Thickness (in)")

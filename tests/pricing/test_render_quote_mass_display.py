@@ -45,6 +45,7 @@ def test_render_quote_shows_net_mass_when_scrap_present() -> None:
     assert "Starting Weight: 4.2 oz" in rendered
     assert "Scrap Weight: 0.71 oz" in rendered
     assert "Net Weight: 3.5 oz" in rendered
+    assert "Scrap Percentage: 20.0%" in rendered
 
 
 def _base_material_quote(material: dict) -> dict:
@@ -80,9 +81,9 @@ def test_render_quote_unit_price_prefers_lb_over_metric() -> None:
     )
 
     rendered = appV5.render_quote(result, currency="$", show_zeros=False)
-    unit_line = next(line for line in rendered.splitlines() if "Unit Price:" in line)
+    unit_line = next(line for line in rendered.splitlines() if "Material Price:" in line)
 
-    assert unit_line.strip().startswith("Unit Price: $9.07 / lb")
+    assert unit_line.strip().startswith("Material Price: $9.07 / lb")
     assert "/ kg" not in unit_line
     assert "/ g" not in unit_line
 
@@ -97,9 +98,9 @@ def test_render_quote_unit_price_converts_from_per_gram() -> None:
     )
 
     rendered = appV5.render_quote(result, currency="$", show_zeros=False)
-    unit_line = next(line for line in rendered.splitlines() if "Unit Price:" in line)
+    unit_line = next(line for line in rendered.splitlines() if "Material Price:" in line)
 
-    assert unit_line.strip().startswith("Unit Price: $5.44 / lb")
+    assert unit_line.strip().startswith("Material Price: $5.44 / lb")
     assert "/ kg" not in unit_line
     assert "/ g" not in unit_line
 
