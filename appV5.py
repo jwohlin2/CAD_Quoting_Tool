@@ -5267,7 +5267,13 @@ def render_quote(
             if hr_val > 0:
                 detail_bits.append(f"{hr_val:.2f} hr @ ${rate_val:,.2f}/hr")
             if abs(extra_val) > 1e-6:
-                detail_bits.append(f"includes ${extra_val:,.2f} extras")
+                if hr_val <= 1e-6 and rate_val > 0:
+                    extra_hours = extra_val / rate_val
+                    detail_bits.append(
+                        f"{extra_hours:.2f} hr @ ${rate_val:,.2f}/hr"
+                    )
+                else:
+                    detail_bits.append(f"includes ${extra_val:,.2f} extras")
             proc_notes = applied_process.get(str(key).lower(), {}).get("notes")
             if proc_notes:
                 detail_bits.append("LLM: " + ", ".join(proc_notes))
