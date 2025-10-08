@@ -5022,18 +5022,27 @@ def render_quote(
         text = str(key or "").replace("_", " ").strip()
         return text.title() if text else ""
 
+    extra_detail_pattern = re.compile(r"^includes\b.*extras\b", re.IGNORECASE)
+
+    def _is_extra_segment(segment: str) -> bool:
+        return bool(extra_detail_pattern.match(segment))
+
     def _merge_detail(existing: str | None, new_bits: list[str]) -> str | None:
         segments: list[str] = []
         seen: set[str] = set()
         for bit in new_bits:
             seg = str(bit).strip()
-            if seg and seg not in seen:
+            if not seg or _is_extra_segment(seg):
+                continue
+            if seg not in seen:
                 segments.append(seg)
                 seen.add(seg)
         if existing:
             for segment in re.split(r";\s*", str(existing)):
                 seg = segment.strip()
-                if seg and seg not in seen:
+                if not seg or _is_extra_segment(seg):
+                    continue
+                if seg not in seen:
                     segments.append(seg)
                     seen.add(seg)
         if segments:
@@ -5355,14 +5364,11 @@ def render_quote(
                 extra_val = 0.0
             if hr_val > 0:
                 detail_bits.append(f"{hr_val:.2f} hr @ ${rate_val:,.2f}/hr")
-            if abs(extra_val) > 1e-6:
-                if hr_val <= 1e-6 and rate_val > 0:
-                    extra_hours = extra_val / rate_val
-                    detail_bits.append(
-                        f"{extra_hours:.2f} hr @ ${rate_val:,.2f}/hr"
-                    )
-                else:
-                    detail_bits.append(f"includes ${extra_val:,.2f} extras")
+            if abs(extra_val) > 1e-6 and hr_val <= 1e-6 and rate_val > 0:
+                extra_hours = extra_val / rate_val
+                detail_bits.append(
+                    f"{extra_hours:.2f} hr @ ${rate_val:,.2f}/hr"
+                )
             proc_notes = applied_process.get(str(key).lower(), {}).get("notes")
             if proc_notes:
                 detail_bits.append("LLM: " + ", ".join(proc_notes))
@@ -9910,13 +9916,17 @@ def compute_quote_from_df(df: pd.DataFrame,
         seen: set[str] = set()
         for bit in detail_bits:
             seg = str(bit).strip()
-            if seg and seg not in seen:
+            if not seg or _is_extra_segment(seg):
+                continue
+            if seg not in seen:
                 merged_bits.append(seg)
                 seen.add(seg)
         if existing_detail:
             for segment in re.split(r";\s*", existing_detail):
                 seg = segment.strip()
-                if seg and seg not in seen:
+                if not seg or _is_extra_segment(seg):
+                    continue
+                if seg not in seen:
                     merged_bits.append(seg)
                     seen.add(seg)
         if merged_bits:
@@ -9934,9 +9944,6 @@ def compute_quote_from_df(df: pd.DataFrame,
             detail_bits.append(f"{hr:.2f} hr @ ${rate:,.2f}/hr")
         elif hr > 0:
             detail_bits.append(f"{hr:.2f} hr")
-
-        if abs(extra) > 1e-6:
-            detail_bits.append(f"includes ${extra:,.2f} extras")
 
         proc_notes = applied_process.get(key, {}).get("notes")
         if proc_notes:
