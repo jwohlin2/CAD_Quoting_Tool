@@ -6528,6 +6528,167 @@ def validate_drilling_reasonableness(hole_count: int, drill_hr_after_overrides: 
     return ok, msg
 
 
+def _estimate_programming_hours_auto(
+    geo: Mapping[str, Any] | None,
+    process_meta: Mapping[str, Mapping[str, Any] | Any] | None,
+    params: Mapping[str, Any] | None,
+    *,
+    setups_hint: float | None = None,
+) -> tuple[float, dict[str, float]]:
+    """Heuristic programming-hour estimate driven by process + geometry context."""
+
+    params = params or {}
+    geo_outer = dict(geo or {})
+    inner_geo_raw = geo_outer.get("geo")
+    inner_geo = dict(inner_geo_raw) if isinstance(inner_geo_raw, Mapping) else {}
+
+    def _geo_lookup(*keys: str) -> Any:
+        for key in keys:
+            if key in geo_outer and geo_outer[key] is not None:
+                return geo_outer[key]
+            if key in inner_geo and inner_geo[key] is not None:
+                return inner_geo[key]
+        return None
+
+    def _float(value: Any, default: float = 0.0) -> float:
+        num = _coerce_float_or_none(value)
+        return float(num) if num is not None else float(default)
+
+    def _int(value: Any, default: int = 0) -> int:
+        num = _coerce_float_or_none(value)
+        if num is None:
+            return default
+        try:
+            return int(round(num))
+        except Exception:
+            return default
+
+    faces = max(4.0, _float(_geo_lookup("GEO__Face_Count", "face_count"), 6.0))
+    unique_normals = max(1.0, _float(_geo_lookup("GEO__Unique_Normal_Count", "unique_normals"), faces / 2.0))
+    hole_count = _int(_geo_lookup("hole_count", "GEO__Hole_Count"), 0)
+    if hole_count <= 0:
+        hole_list = _geo_lookup("hole_diams_mm", "holes")
+        if isinstance(hole_list, Sequence) and not isinstance(hole_list, (str, bytes)):
+            hole_count = len(hole_list)
+    pocket_count = max(0, _int(_geo_lookup("pocket_count", "GEO__Pocket_Count"), 0))
+    slot_count = max(0, _int(_geo_lookup("slot_count", "GEO__Slot_Count"), 0))
+
+    complexity_raw = _float(_geo_lookup("GEO_Complexity_0to100", "complexity_score"), 25.0)
+    complexity = max(0.0, min(1.0, complexity_raw / 100.0))
+    max_dim_mm = _float(_geo_lookup("GEO__MaxDim_mm", "max_dim_mm", "bounding_box_max_mm"), 100.0)
+    thin_wall = bool(_geo_lookup("GEO__ThinWall_Present", "thin_wall_present", "thin_walls"))
+
+    setups_val = None
+    if setups_hint is not None:
+        try:
+            setups_val = float(setups_hint)
+        except Exception:
+            setups_val = None
+    if setups_val is None:
+        setups_val = _float(
+            _geo_lookup(
+                "setups_hint",
+                "baseline_setups",
+                "Milling_Setups",
+                "setups",
+                "milling_setups",
+            ),
+            0.0,
+        )
+    if setups_val <= 0.0:
+        if unique_normals <= 4.0:
+            setups_val = 1.0
+        elif unique_normals <= 6.0:
+            setups_val = 2.0
+        else:
+            setups_val = 3.0
+    setups = max(1, min(int(round(setups_val)), 5))
+
+    def _norm_key(name: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_")
+
+    normalized_meta: dict[str, Mapping[str, Any]] = {}
+    if isinstance(process_meta, Mapping):
+        for key, meta in process_meta.items():
+            if isinstance(meta, Mapping):
+                normalized_meta[_norm_key(key)] = meta
+
+    def _hours_for(*keys: str) -> float:
+        total = 0.0
+        for key in keys:
+            meta = normalized_meta.get(_norm_key(key))
+            if not isinstance(meta, Mapping):
+                continue
+            try:
+                total += float(meta.get("hr", 0.0) or 0.0)
+            except Exception:
+                continue
+        return total
+
+    milling_hr = _hours_for("milling")
+    turning_hr = _hours_for("turning")
+    wire_edm_hr = _hours_for("wire_edm", "wireedm")
+    sinker_hr = _hours_for("sinker_edm", "ram_edm")
+    grinding_hr = _hours_for("grinding", "surface_grind", "jig_grind", "odid_grind")
+    drilling_like_hr = _hours_for("drilling", "tapping", "counterbore", "countersink")
+    saw_hr = _hours_for("saw_waterjet", "sawing", "waterjet")
+    finishing_hr = _hours_for("finishing_deburr", "deburr") + _hours_for("lapping_honing", "lapping", "honing")
+    inspection_hr = _hours_for("inspection")
+
+    total_cutting_hr = milling_hr + turning_hr + wire_edm_hr + sinker_hr + grinding_hr + drilling_like_hr + saw_hr
+    special_processes = sum(
+        1 for hr in (turning_hr, wire_edm_hr, sinker_hr, grinding_hr) if hr > 1e-3
+    )
+
+    contributions: dict[str, float] = {}
+    contributions["setups"] = 0.25 + 0.35 * setups
+    feature_term = max(0.0, (faces - 6.0) * 0.02) + hole_count * 0.015 + pocket_count * 0.03 + slot_count * 0.02
+    if feature_term:
+        contributions["features"] = feature_term
+    complexity_term = complexity * 0.9 + max(0.0, (unique_normals - 3.0) * 0.05)
+    if complexity_term:
+        contributions["complexity"] = complexity_term
+    size_term = min(0.5, max_dim_mm / 400.0)
+    if size_term:
+        contributions["size"] = size_term
+    machining_term = min(2.5, math.log1p(max(0.0, total_cutting_hr) * 60.0) / 3.2)
+    if machining_term:
+        contributions["machining"] = machining_term
+    finishing_term = min(0.5, finishing_hr * 0.2)
+    if finishing_term:
+        contributions["finishing"] = finishing_term
+    inspection_term = min(0.3, inspection_hr * 0.15)
+    if inspection_term:
+        contributions["inspection"] = inspection_term
+    if thin_wall:
+        contributions["thin_wall"] = 0.2
+    if special_processes:
+        contributions["multi_process"] = 0.18 * special_processes
+
+    raw_total = sum(contributions.values())
+
+    total = raw_total
+    prog_cap = _coerce_float_or_none(params.get("ProgCapHr")) if isinstance(params, Mapping) else None
+    prog_simple_dim = _coerce_float_or_none(params.get("ProgSimpleDim_mm")) if isinstance(params, Mapping) else None
+    if prog_cap and prog_simple_dim and max_dim_mm and max_dim_mm <= prog_simple_dim and setups <= 2:
+        total = min(total, float(prog_cap))
+    prog_ratio = _coerce_float_or_none(params.get("ProgMaxToMillingRatio")) if isinstance(params, Mapping) else None
+    if prog_ratio and milling_hr > 0:
+        total = min(total, float(prog_ratio) * milling_hr)
+
+    floor_hr = _coerce_float_or_none(params.get("ProgAutoFloorHr")) if isinstance(params, Mapping) else None
+    if floor_hr is None or floor_hr <= 0:
+        floor_hr = 0.35
+    total = max(float(floor_hr), total)
+
+    components = {key: round(val, 4) for key, val in contributions.items() if val}
+    components["_raw_total"] = round(raw_total, 4)
+    if abs(total - raw_total) > 1e-6:
+        components["_capped_total"] = round(total, 4)
+
+    return float(total), components
+
+
 def validate_quote_before_pricing(
     geo: dict,
     process_costs: dict[str, float],
@@ -7346,11 +7507,6 @@ def compute_quote_from_df(df: pd.DataFrame,
             material_detail_for_breakdown["material_direct_cost"] = material_direct_cost
 
     # ---- programming / cam / dfm --------------------------------------------
-    prog_hr = sum_time(
-        r"(?:Programming|2D\s*CAM|3D\s*CAM|Simulation|Verification|DFM|Setup\s*Sheets)",
-        exclude_pattern=r"\b(?:CMM|Override|Manual)\b",
-    )
-    cam_hr  = sum_time(r"(?:CAM\s*Programming|CAM\s*Sim|Post\s*Processing)")
     eng_hr  = sum_time(r"(?:Fixture\s*Design|Process\s*Sheet|Traveler|Documentation)")
 
     # ---- milling hours & caps ------------------------------------------------
@@ -7375,21 +7531,6 @@ def compute_quote_from_df(df: pd.DataFrame,
     if milling_hr > 0:
         prog_hr = min(prog_hr, params["ProgMaxToMillingRatio"] * milling_hr)
 
-    total_prog_hr = prog_hr + cam_hr
-    auto_prog_hr = float(total_prog_hr)
-    prog_override_applied = False
-    if prog_hr_override is not None:
-        try:
-            override_val = max(0.0, float(prog_hr_override))
-        except Exception:
-            override_val = None
-        else:
-            total_prog_hr = override_val
-            prog_override_applied = True
-    programming_cost   = total_prog_hr * rates["ProgrammingRate"] + eng_hr * rates["EngineerRate"]
-    prog_per_lot       = programming_cost
-    programming_per_part = (prog_per_lot / Qty) if (amortize_programming and Qty > 1) else prog_per_lot
-
     # ---- fixture -------------------------------------------------------------
     fixture_build_hr = sum_time(r"(?:Fixture\s*Build|Custom\s*Fixture\s*Build)")
     # Fixture material cost is no longer applied; only labor is considered.
@@ -7398,18 +7539,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     fixture_labor_per_part = (fixture_labor_cost / Qty) if Qty > 1 else fixture_labor_cost
     fixture_per_part       = (fixture_cost / Qty) if Qty > 1 else fixture_cost
 
-    programming_detail = {
-        "prog_hr": float(total_prog_hr), "prog_rate": rates["ProgrammingRate"],
-        "eng_hr": float(eng_hr),         "eng_rate": rates["EngineerRate"],
-        "per_lot": prog_per_lot, "per_part": programming_per_part,
-        "amortized": bool(amortize_programming and Qty > 1)
-    }
-    if prog_override_applied:
-        programming_detail["override_applied"] = True
-        programming_detail["auto_prog_hr"] = auto_prog_hr
-
     nre_detail = {
-        "programming": programming_detail,
         "fixture": {
             "build_hr": float(fixture_build_hr), "build_rate": rates["FixtureBuildRate"],
             "labor_cost": float(fixture_labor_cost),
@@ -9789,6 +9919,44 @@ def compute_quote_from_df(df: pd.DataFrame,
     for label, entry in applied_pass.items():
         entry["new_value"] = float(pass_through.get(label, entry.get("new_value", entry["old_value"])))
         entry["delta_value"] = entry["new_value"] - entry["old_value"]
+
+    auto_prog_hr, auto_components = _estimate_programming_hours_auto(
+        geo_context,
+        process_meta,
+        params,
+        setups_hint=float(setups),
+    )
+    total_prog_hr = float(auto_prog_hr)
+    prog_override_applied = False
+    if prog_hr_override is not None:
+        try:
+            override_val = max(0.0, float(prog_hr_override))
+        except Exception:
+            override_val = None
+        else:
+            total_prog_hr = override_val
+            prog_override_applied = True
+
+    programming_cost = total_prog_hr * float(rates.get("ProgrammingRate", 0.0)) + eng_hr * float(rates.get("EngineerRate", 0.0))
+    prog_per_lot = programming_cost
+    programming_per_part = (prog_per_lot / Qty) if (amortize_programming and Qty > 1) else prog_per_lot
+
+    programming_detail = {
+        "prog_hr": float(total_prog_hr),
+        "prog_rate": float(rates.get("ProgrammingRate", 0.0)),
+        "eng_hr": float(eng_hr),
+        "eng_rate": float(rates.get("EngineerRate", 0.0)),
+        "per_lot": float(prog_per_lot),
+        "per_part": float(programming_per_part),
+        "amortized": bool(amortize_programming and Qty > 1),
+        "auto_prog_hr": float(auto_prog_hr),
+    }
+    if auto_components:
+        programming_detail["auto_components"] = {k: float(v) for k, v in auto_components.items()}
+    if prog_override_applied:
+        programming_detail["override_applied"] = True
+
+    nre_detail["programming"] = programming_detail
 
     material_direct_cost = float(pass_through.get("Material", material_direct_cost_base))
     hardware_cost = float(pass_through.get("Hardware / BOM", hardware_cost))
