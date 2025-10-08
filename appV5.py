@@ -5090,43 +5090,47 @@ def render_quote(
     lines.append(divider)
     proc_total = 0.0
     for key, value in sorted((process_costs or {}).items(), key=lambda kv: kv[1], reverse=True):
-        if (value > 0) or show_zeros:
-            label = _process_label(key)
-            row(label, float(value), indent="  ")
-            meta = process_meta.get(str(key).lower(), {})
-            detail_bits: list[str] = []
-            try:
-                hr_val = float(meta.get("hr", 0.0) or 0.0)
-            except Exception:
-                hr_val = 0.0
-            try:
-                rate_val = float(meta.get("rate", 0.0) or 0.0)
-            except Exception:
-                rate_val = 0.0
-            try:
-                extra_val = float(meta.get("base_extra", 0.0) or 0.0)
-            except Exception:
-                extra_val = 0.0
-            if hr_val > 0:
-                detail_bits.append(f"{hr_val:.2f} hr @ ${rate_val:,.2f}/hr")
-            if abs(extra_val) > 1e-6:
-                if rate_val > 0 and hr_val > 0:
-                    extra_hr = extra_val / rate_val
-                    detail_bits.append(f"includes {extra_hr:.2f} hr extras")
-                else:
-                    detail_bits.append(f"includes ${extra_val:,.2f} extras")
-            proc_notes = applied_process.get(str(key).lower(), {}).get("notes")
-            if proc_notes:
-                detail_bits.append("LLM: " + ", ".join(proc_notes))
+        if not ((value > 0) or show_zeros):
+            continue
 
-            existing_detail = labor_cost_details.get(label)
-            merged_detail = _merge_detail(existing_detail, detail_bits)
-            if merged_detail:
-                labor_cost_details[label] = merged_detail
-                write_detail(merged_detail, indent="    ")
+        label = _process_label(key)
+        row(label, float(value), indent="  ")
+        meta = process_meta.get(str(key).lower(), {})
+        detail_bits: list[str] = []
+        try:
+            hr_val = float(meta.get("hr", 0.0) or 0.0)
+        except Exception:
+            hr_val = 0.0
+        try:
+            rate_val = float(meta.get("rate", 0.0) or 0.0)
+        except Exception:
+            rate_val = 0.0
+        try:
+            extra_val = float(meta.get("base_extra", 0.0) or 0.0)
+        except Exception:
+            extra_val = 0.0
+        if hr_val > 0:
+            detail_bits.append(f"{hr_val:.2f} hr @ ${rate_val:,.2f}/hr")
+        if abs(extra_val) > 1e-6:
+            if rate_val > 0 and hr_val > 0:
+                extra_hr = extra_val / rate_val
+                detail_bits.append(f"includes {extra_hr:.2f} hr extras")
             else:
-                add_process_notes(key, indent="    ")
-            proc_total += float(value or 0.0)
+                detail_bits.append(f"includes ${extra_val:,.2f} extras")
+
+        proc_notes = applied_process.get(str(key).lower(), {}).get("notes")
+        if proc_notes:
+            detail_bits.append("LLM: " + ", ".join(proc_notes))
+
+        existing_detail = labor_cost_details.get(label)
+        merged_detail = _merge_detail(existing_detail, detail_bits)
+        if merged_detail:
+            labor_cost_details[label] = merged_detail
+            write_detail(merged_detail, indent="    ")
+        else:
+            add_process_notes(key, indent="    ")
+
+        proc_total += float(value or 0.0)
     row("Total", proc_total, indent="  ")
 
     hour_summary_entries: list[tuple[str, float]] = []
