@@ -122,11 +122,6 @@ SUGG_TO_EDITOR = {
         float,
         float,
     ),
-    "fixture_material_cost_delta": (
-        "Fixture Material Cost",
-        float,
-        float,
-    ),
 }
 
 EDITOR_TO_SUGG = {spec[0]: key for key, spec in SUGG_TO_EDITOR.items()}
@@ -808,7 +803,7 @@ def _estimator_patterns():
         r"(Programming|CAM\s*Programming|2D\s*CAM|3D\s*CAM|Simulation|Verification|DFM\s*Review|Tool\s*Library|Setup\s*Sheets)",
         r"\b(CAM\s*Programming|CAM\s*Sim|Post\s*Processing)\b",
         r"(Fixture\s*Design|Process\s*Sheet|Traveler|Documentation|Complex\s*Assembly\s*Doc)",
-        r"(Fixture\s*Build|Custom\s*Fixture\s*Build)", r"(Fixture\s*Material\s*Cost|Fixture\s*Hardware)",
+        r"(Fixture\s*Build|Custom\s*Fixture\s*Build)",
         r"(Roughing\s*Cycle\s*Time|Adaptive|HSM)", r"(Semi[- ]?Finish|Rest\s*Milling)", r"(Finishing\s*Cycle\s*Time)",
         r"(Number\s*of\s*Milling\s*Setups|Milling\s*Setups)", r"(Setup\s*Time\s*per\s*Setup|Setup\s*Hours\s*/\s*Setup)",
         r"(Thin\s*Wall\s*Factor|Thin\s*Wall\s*Multiplier)", r"(Tolerance\s*Multiplier|Tight\s*Tolerance\s*Factor)",
