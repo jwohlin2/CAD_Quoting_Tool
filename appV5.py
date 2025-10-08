@@ -55,6 +55,15 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 import cad_quoter.geometry as geometry
 
 
+EXTRA_DETAIL_PATTERN = re.compile(r"^includes\b.*extras\b", re.IGNORECASE)
+
+
+def _is_extra_segment(segment: str) -> bool:
+    """Return True when a labor detail segment only repeats extras info."""
+
+    return bool(EXTRA_DETAIL_PATTERN.match(str(segment).strip()))
+
+
 ensure_runtime_dependencies = _runtime.ensure_runtime_dependencies
 find_default_qwen_model = _runtime.find_default_qwen_model
 load_qwen_vl = _runtime.load_qwen_vl
@@ -5021,11 +5030,6 @@ def render_quote(
     def _process_label(key: str | None) -> str:
         text = str(key or "").replace("_", " ").strip()
         return text.title() if text else ""
-
-    extra_detail_pattern = re.compile(r"^includes\b.*extras\b", re.IGNORECASE)
-
-    def _is_extra_segment(segment: str) -> bool:
-        return bool(extra_detail_pattern.match(segment))
 
     def _merge_detail(existing: str | None, new_bits: list[str]) -> str | None:
         segments: list[str] = []
