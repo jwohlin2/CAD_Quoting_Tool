@@ -5141,8 +5141,7 @@ def render_quote(
                 )
                 if scrap_credit_mass_lb and scrap_credit_unit_price_lb:
                     detail_lines.append(
-                        "    based on "
-                        f"{float(scrap_credit_mass_lb):.2f} lb × {currency}{float(scrap_credit_unit_price_lb):,.2f} / lb"
+                        f"    based on {float(scrap_credit_mass_lb):.2f} lb × {currency}{float(scrap_credit_unit_price_lb):,.2f} / lb"
                     )
             net_mass_val = _coerce_float_or_none(net_mass_g)
             effective_mass_val = _coerce_float_or_none(mass_g)
