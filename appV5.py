@@ -5879,11 +5879,21 @@ def _estimate_inprocess_default_from_tolerance(
     if min_tol is not None:
         # Use a smooth curve instead of rigid breakpoints so the hours scale
         # proportionally with tolerance precision.  The minimum tolerance value is
-        # expressed in inches; normalize the value against a 0.002" reference and
-        # clamp it to [0, 1] so the curve stays bounded.
+        # expressed in inches; map it logarithmically between a "loose" anchor
+        # (≈±0.008") and a "tight" anchor (≈±0.0002").  This keeps moderate
+        # tolerances distinct while still rewarding extremely tight callouts.
         min_tol = max(float(min_tol), 1e-6)
-        normalized = max(0.0, min(1.0, (0.002 - min_tol) / 0.002))
-        base_hours = 0.6 + 3.0 * normalized ** 0.7
+        loose_anchor = 0.008
+        tight_anchor = 0.0002
+        anchor_span = math.log10(loose_anchor) - math.log10(tight_anchor)
+        if anchor_span <= 0:
+            normalized = 1.0
+        else:
+            normalized = (
+                math.log10(loose_anchor) - math.log10(min_tol)
+            ) / anchor_span
+        normalized = max(0.0, min(1.0, normalized))
+        base_hours = 0.6 + 1.8 * normalized ** 1.05
 
         # Reward drawings that call out multiple tight tolerances by adding a
         # gentle premium.  This keeps the impact sub-linear so a large number of
