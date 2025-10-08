@@ -4275,7 +4275,7 @@ def _estimator_patterns():
         r"\b(Density|Material\s*Density)\b", r"\b(Scrap\s*%|Expected\s*Scrap)\b",
         r"\b(Material\s*Price.*(per\s*g|/g)|Unit\s*Price\s*/\s*g)\b",
         r"\b(Supplier\s*Min\s*Charge|min\s*charge)\b",
-        r"\b(Material\s*MOQ)\b", r"\b(Material\s*Surcharge|Volatility)\b",
+        r"\b(Material\s*MOQ)\b",
         r"\b(Material\s*Cost|Raw\s*Material\s*Cost)\b",
 
         r"(Programming|CAM\s*Programming|2D\s*CAM|3D\s*CAM|Simulation|Verification|DFM\s*Review|Tool\s*Library|Setup\s*Sheets)",
@@ -5093,7 +5093,6 @@ def render_quote(
         net_mass_g = material.get("mass_g_net")
         upg    = material.get("unit_price_per_g")
         minchg = material.get("supplier_min_charge")
-        surpct = material.get("surcharge_pct")
         matcost= material.get("material_cost")
         scrap  = material.get("scrap_pct", None)  # will show only if present in breakdown
         scrap_credit_entered = bool(material.get("material_scrap_credit_entered"))
@@ -5110,7 +5109,6 @@ def render_quote(
                 net_mass_g,
                 upg,
                 minchg,
-                surpct,
                 matcost,
                 scrap,
                 scrap_credit if scrap_credit_entered else 0.0,
@@ -5187,7 +5185,6 @@ def render_quote(
             if price_source:
                 write_line(f"Source: {price_source}", "  ")
             if minchg or show_zeros:  write_line(f"Supplier Min Charge: {_m(minchg or 0)}", "  ")
-            if surpct or show_zeros:  write_line(f"Surcharge: {_pct(surpct or 0)}", "  ")
             if scrap is not None:     write_line(f"Scrap %: {_pct(scrap)}", "  ")
             stock_L = _fmt_dim(ui_vars.get("Plate Length (in)"))
             stock_W = _fmt_dim(ui_vars.get("Plate Width (in)"))
@@ -5269,11 +5266,7 @@ def render_quote(
                 extra_val = 0.0
             if hr_val > 0:
                 detail_bits.append(f"{hr_val:.2f} hr @ ${rate_val:,.2f}/hr")
-        if abs(extra_val) > 1e-6:
-            if rate_val > 0 and hr_val > 0:
-                extra_hr = extra_val / rate_val
-                detail_bits.append(f"includes {extra_hr:.2f} hr extras")
-            else:
+            if abs(extra_val) > 1e-6:
                 detail_bits.append(f"includes ${extra_val:,.2f} extras")
             proc_notes = applied_process.get(str(key).lower(), {}).get("notes")
             if proc_notes:
@@ -7022,16 +7015,26 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     unit_price_per_g  = first_num(r"\b(?:Material\s*Price.*(?:per\s*g|/g)|Unit\s*Price\s*/\s*g)\b", 0.0)
     supplier_min_charge = first_num(r"\b(?:Supplier\s*Min\s*Charge|min\s*charge)\b", 0.0)
-    surcharge_pct = num_pct(r"\b(?:Material\s*Surcharge|Volatility)\b", 0.0)
     explicit_mat  = num(r"\b(?:Material\s*Cost|Raw\s*Material\s*Cost)\b", 0.0)
     scrap_credit_pattern = r"(?:Material\s*Scrap(?:\s*Credit)?|Remnant(?:\s*Credit)?)"
     scrap_credit_mask = contains(scrap_credit_pattern)
     material_scrap_credit_entered = False
     if scrap_credit_mask.any():
         scrap_credit_values = pd.to_numeric(vals[scrap_credit_mask], errors="coerce")
-        material_scrap_credit_entered = bool(
-            scrap_credit_values.dropna().abs().gt(0).any()
-        )
+        if hasattr(scrap_credit_values, "tolist"):
+            iter_values = scrap_credit_values.tolist()
+        elif isinstance(scrap_credit_values, (list, tuple)):
+            iter_values = list(scrap_credit_values)
+        else:
+            try:
+                iter_values = list(scrap_credit_values)
+            except TypeError:
+                iter_values = [scrap_credit_values]
+        for raw_value in iter_values:
+            coerced = _coerce_float_or_none(raw_value)
+            if coerced is not None and abs(float(coerced)) > 0:
+                material_scrap_credit_entered = True
+                break
     material_scrap_credit_raw = (
         num(scrap_credit_pattern, 0.0) if material_scrap_credit_entered else 0.0
     )
@@ -7074,13 +7077,11 @@ def compute_quote_from_df(df: pd.DataFrame,
     base_cost = float(base_cost or 0.0)
 
     cost_with_min = max(base_cost, float(supplier_min_charge or 0.0))
-    cost_with_surcharge = cost_with_min * (1.0 + max(0.0, float(surcharge_pct or 0.0)))
-    material_cost = max(cost_with_surcharge, float(explicit_mat or 0.0))
+    material_cost = max(cost_with_min, float(explicit_mat or 0.0))
 
     if material_detail:
         material_detail.update({
             "supplier_min_charge": float(supplier_min_charge or 0.0),
-            "surcharge_pct": float(surcharge_pct or 0.0),
             "explicit_cost_override": float(explicit_mat or 0.0),
             "material_cost_before_overrides": base_cost,
             "material_cost": float(material_cost),
@@ -9568,11 +9569,7 @@ def compute_quote_from_df(df: pd.DataFrame,
             detail_bits.append(f"{hr:.2f} hr")
 
         if abs(extra) > 1e-6:
-            if rate > 0 and hr > 0:
-                extra_hr = extra / rate if rate else 0.0
-                detail_bits.append(f"includes {extra_hr:.2f} hr extras")
-            else:
-                detail_bits.append(f"includes ${extra:,.2f} extras")
+            detail_bits.append(f"includes ${extra:,.2f} extras")
 
         proc_notes = applied_process.get(key, {}).get("notes")
         if proc_notes:

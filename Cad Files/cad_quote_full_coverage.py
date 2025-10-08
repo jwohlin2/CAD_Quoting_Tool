@@ -209,14 +209,10 @@ def compute_full_quote(xlsx_path: str,
         # Expected Scrap Rate handled later
         if re.search(r"Expected Scrap Rate", itm, flags=re.IGNORECASE):
             return ("meta", 0.0)
-        # Material surcharge: treat as percentage on material subtotal later
-        if re.search(r"Surcharge", itm, flags=re.IGNORECASE):
-            params["MaterialSurchargePct"] = val/100.0
-            return ("meta", 0.0)
         # Material driven direct costs (BOM, fixture material, MOQ)
         if re.search(r"Hardware|BOM|Fixture Material|Material MOQ", itm, flags=re.IGNORECASE):
             return ("material_cost", val)
-        # Freight / shipping / lead time surcharges treated as logistics direct cost
+        # Freight / shipping / lead time fees treated as logistics direct cost
         if re.search(r"Freight|Shipping|Lead Time", itm, flags=re.IGNORECASE):
             return ("freight_cost", val)
         # Tooling consumables
@@ -543,14 +539,12 @@ def compute_full_quote(xlsx_path: str,
     labor_subtotal = sum(costs.values()) + role_costs
     labor_post_scrap = labor_subtotal * scrap_mult
 
-    # Material subtotal + surcharge (on positive portion only)
+    # Material subtotal (on positive portion only)
     material_base = params["MaterialOther"] + generic_contrib["material_cost"]
-    material_surcharge_pct = params.get("MaterialSurchargePct", 0.0)
-    material_surcharge = max(material_base, 0.0) * material_surcharge_pct
 
     material_credit = _sum_if(df_num, [r"Material Scrap / Remnant Value"])
     material_post_scrap = material_base * scrap_mult
-    material_subtotal = material_post_scrap + material_surcharge + material_credit
+    material_subtotal = material_post_scrap + material_credit
 
     # Base subtotal + consumables + NRE + overhead (base OverheadPct + lookup adders + payment terms)
     base_subtotal = labor_post_scrap + material_subtotal + params["ConsumablesFlat"] + params["NRE_FixturesEtc"] + direct_costs
@@ -571,7 +565,7 @@ def compute_full_quote(xlsx_path: str,
             if any(re.search(p, itm, flags=re.IGNORECASE) for p in pats):
                 return True
         # Or if it hit generic rules
-        if re.search(r"Profit Margin|Surcharge|Cost|Freight|MOQ|Material Vendor|Fixture Material|Tooling Cost|Lead Time|Hardware|BOM|Project Manager Hours|Tool & Die Maker|Precision Fitting|Number of Milling Setups|Number of Unique Tools|Number of Blanks Required|Labor|Time|Hours", itm, flags=re.IGNORECASE):
+        if re.search(r"Profit Margin|Cost|Freight|MOQ|Material Vendor|Fixture Material|Tooling Cost|Lead Time|Hardware|BOM|Project Manager Hours|Tool & Die Maker|Precision Fitting|Number of Milling Setups|Number of Unique Tools|Number of Blanks Required|Labor|Time|Hours", itm, flags=re.IGNORECASE):
             return True
         return False
 
@@ -585,8 +579,6 @@ def compute_full_quote(xlsx_path: str,
             "scrap_pct": scrap_pct,
             "material_subtotal": material_subtotal,
             "material_base": material_base,
-            "material_surcharge_pct": material_surcharge_pct,
-            "material_surcharge": material_surcharge,
             "material_credit": material_credit,
             "material_post_scrap": material_post_scrap,
             "material_sheet_inputs": generic_contrib["material_cost"],

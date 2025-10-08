@@ -797,7 +797,7 @@ def _estimator_patterns():
         r"\b(Density|Material\s*Density)\b", r"\b(Scrap\s*%|Expected\s*Scrap)\b",
         r"\b(Material\s*Price.*(per\s*g|/g)|Unit\s*Price\s*/\s*g)\b",
         r"\b(Supplier\s*Min\s*Charge|min\s*charge)\b",
-        r"\b(Material\s*MOQ)\b", r"\b(Material\s*Surcharge|Volatility)\b",
+        r"\b(Material\s*MOQ)\b",
         r"\b(Material\s*Cost|Raw\s*Material\s*Cost)\b",
         r"(Programming|CAM\s*Programming|2D\s*CAM|3D\s*CAM|Simulation|Verification|DFM\s*Review|Tool\s*Library|Setup\s*Sheets)",
         r"\b(CAM\s*Programming|CAM\s*Sim|Post\s*Processing)\b",
