@@ -5090,7 +5090,6 @@ def render_quote(
             why_parts.extend([str(item).strip() for item in llm_explanation if str(item).strip()])
 
     # ---- material & stock (compact; shown only if we actually have data) -----
-    mat_lines = []
     if material:
         mass_g = material.get("mass_g")
         net_mass_g = material.get("mass_g_net")
@@ -5121,11 +5120,13 @@ def render_quote(
         )
 
         detail_lines: list[str] = []
+        total_material_cost: float | None = None
 
         if have_any:
-            mat_lines.append("Material & Stock")
-            mat_lines.append(divider)
-            if matcost or show_zeros: row("Material Cost (computed):", float(matcost or 0.0))
+            lines.append("Material & Stock")
+            lines.append(divider)
+            if matcost or show_zeros:
+                total_material_cost = float(matcost or 0.0)
             if scrap_credit_entered and scrap_credit:
                 credit_display = _m(scrap_credit)
                 if credit_display.startswith(currency):
@@ -5201,7 +5202,9 @@ def render_quote(
                     )
 
             if (net_mass_val and net_mass_val > 0) or show_zeros:
-                write_line(f"Net Weight: {_format_weight_lb_oz(net_mass_val)}", "  ")
+                detail_lines.append(
+                    f"  Net Weight: {_format_weight_lb_oz(net_mass_val)}"
+                )
             with_scrap_mass = scrap_adjusted_mass_val
             if with_scrap_mass is None:
                 with_scrap_mass = effective_mass_val if scrap else None
@@ -5212,7 +5215,9 @@ def render_quote(
                 else:
                     show_with_scrap = bool(with_scrap_mass) or show_zeros
                 if show_with_scrap or show_zeros:
-                    write_line(f"With Scrap: {_format_weight_lb_oz(with_scrap_mass)}", "  ")
+                    detail_lines.append(
+                        f"  With Scrap: {_format_weight_lb_oz(with_scrap_mass)}"
+                    )
 
             if upg or unit_price_kg or unit_price_lb or show_zeros:
                 grams_per_lb = 1000.0 / LB_PER_KG
@@ -5249,12 +5254,12 @@ def render_quote(
             if not th_in:
                 th_in = 1.0
             stock_T = _fmt_dim(th_in)
-            mat_lines.append(f"  Stock used: {stock_L} × {stock_W} × {stock_T} in")
+            lines.append(f"  Stock used: {stock_L} × {stock_W} × {stock_T} in")
             if detail_lines:
-                mat_lines.extend(detail_lines)
-            mat_lines.append("")
-
-    lines.extend(mat_lines)
+                lines.extend(detail_lines)
+            if total_material_cost is not None:
+                row("Total Material Cost :", total_material_cost, indent="  ")
+            lines.append("")
 
     # ---- NRE / Setup costs ---------------------------------------------------
     lines.append("NRE / Setup Costs (per lot)")
