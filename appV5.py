@@ -11453,6 +11453,53 @@ def _classify_thread_spec(spec: str) -> tuple[str, float, bool]:
     return "xl", TAP_MINUTES_BY_CLASS["xl"], False
 
 
+def _normalize_hole_text(text: str | None) -> str:
+    """Return a normalized representation of a hole note.
+
+    The goal is to aggressively collapse whitespace and case differences so
+    that duplicated callouts from leaders and table rows can be identified even
+    if their formatting differs slightly.
+    """
+
+    if not text:
+        return ""
+    cleaned = re.sub(r"\s+", " ", str(text)).strip().upper()
+    # Normalize the most common diameter symbols so that a leader that uses
+    # "Ø" matches a table row that omits it or substitutes "⌀".
+    cleaned = cleaned.replace("Ø", "").replace("⌀", "")
+    return cleaned
+
+
+def _dedupe_hole_entries(
+    existing_entries: Iterable[dict[str, Any]],
+    new_entries: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Filter ``new_entries`` to those that are not duplicates of ``existing_entries``.
+
+    Duplicate detection is based on the normalized ``raw`` text attached to each
+    entry.  This keeps leader annotations that simply restate a table row from
+    inflating the hole counts while still allowing genuinely new callouts to be
+    considered.
+    """
+
+    seen: set[str] = {
+        _normalize_hole_text(entry.get("raw"))
+        for entry in existing_entries
+        if isinstance(entry, dict)
+    }
+    unique_entries: list[dict[str, Any]] = []
+    for entry in new_entries:
+        if not isinstance(entry, dict):
+            continue
+        fingerprint = _normalize_hole_text(entry.get("raw"))
+        if fingerprint and fingerprint in seen:
+            continue
+        if fingerprint:
+            seen.add(fingerprint)
+        unique_entries.append(entry)
+    return unique_entries
+
+
 def _parse_hole_line(line: str, to_in: float, *, source: str | None = None) -> dict[str, Any] | None:
     if not line:
         return None
@@ -12385,7 +12432,9 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
         if entry:
             leader_entries.append(entry)
     if leader_entries:
-        holes.extend(leader_entries)
+        unique_leaders = _dedupe_hole_entries(holes, leader_entries)
+        if unique_leaders:
+            holes.extend(unique_leaders)
 
     combined_agg = _aggregate_hole_entries(holes)
     if combined_agg.get("provenance") is None and isinstance(hole_agg, dict):
