@@ -244,6 +244,17 @@ def test_validate_quote_allows_small_material_cost_with_thickness() -> None:
         pytest.fail(f"unexpected validation error: {exc}")
 
 
+def test_validate_quote_accepts_planner_bucket_costs() -> None:
+    geo = {"hole_diams_mm": [5.0, 5.0, 5.0]}
+    pass_through = {"Material": 12.0}
+    process_costs = {"Machine": 180.0, "Labor": 60.0}
+
+    try:
+        appV5.validate_quote_before_pricing(geo, process_costs, pass_through, {})
+    except ValueError as exc:  # pragma: no cover - should not raise
+        pytest.fail(f"unexpected validation error: {exc}")
+
+
 def test_validate_quote_blocks_when_material_unknown() -> None:
     geo = {}
     pass_through = {"Material": 0.0}
