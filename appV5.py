@@ -5792,6 +5792,114 @@ class GeometryLoader:
 TIME_RE = r"\b(?:hours?|hrs?|hr|time|min(?:ute)?s?)\b"
 
 
+_TOLERANCE_VALUE_RE = re.compile(
+    r"(?:±|\+/-|\+-)?\s*(?P<value>(?:\d+)?\.?\d+)\s*(?P<unit>mm|millimeters?|µm|um|in|inch(?:es)?|\"|thou|thousandths)?",
+    re.IGNORECASE,
+)
+_TIGHT_TOL_TRIGGER_RE = re.compile(r"(±\s*0\.000[12])|(tight\s*tolerance)", re.IGNORECASE)
+
+
+def _tolerance_values_from_any(value: Any) -> list[float]:
+    """Return tolerance magnitudes (inches) parsed from an arbitrary input value."""
+
+    results: list[float] = []
+    if value is None:
+        return results
+    if isinstance(value, (list, tuple, set)):
+        for entry in value:
+            results.extend(_tolerance_values_from_any(entry))
+        return results
+    if isinstance(value, (int, float)):
+        try:
+            num = abs(float(value))
+        except Exception:
+            return results
+        if 0.0 < num <= 0.25:
+            results.append(num)
+        return results
+
+    text = str(value or "").strip()
+    if not text:
+        return results
+
+    for match in _TOLERANCE_VALUE_RE.finditer(text):
+        raw_value = match.group("value")
+        unit = (match.group("unit") or "").lower()
+        try:
+            magnitude = abs(float(raw_value))
+        except Exception:
+            continue
+        if magnitude <= 0.0:
+            continue
+        if unit in {"mm", "millimeter", "millimeters"}:
+            magnitude /= 25.4
+        elif unit in {"µm", "um"}:
+            magnitude /= 1000.0  # to mm
+            magnitude /= 25.4
+        elif unit in {"thou", "thousandths"}:
+            magnitude /= 1000.0
+        elif unit in {"in", "inch", "inches", '"'}:
+            pass
+        else:
+            if magnitude > 0.25:
+                continue
+        if magnitude <= 0.0:
+            continue
+        if magnitude <= 0.25:
+            results.append(magnitude)
+    return results
+
+
+def _estimate_inprocess_default_from_tolerance(
+    tolerance_inputs: Mapping[str, Any] | None,
+    default_tolerance_note: Any = None,
+    extra_texts: Iterable[Any] | None = None,
+) -> float:
+    """Infer baseline in-process inspection hours from tolerance information."""
+
+    candidates: list[float] = []
+    tight_mentions = 0
+    if tolerance_inputs:
+        for value in tolerance_inputs.values():
+            candidates.extend(_tolerance_values_from_any(value))
+            if isinstance(value, str) and _TIGHT_TOL_TRIGGER_RE.search(value):
+                tight_mentions += 1
+    if default_tolerance_note is not None:
+        candidates.extend(_tolerance_values_from_any(default_tolerance_note))
+        if isinstance(default_tolerance_note, str) and _TIGHT_TOL_TRIGGER_RE.search(default_tolerance_note):
+            tight_mentions += 1
+    if extra_texts:
+        for text in extra_texts:
+            candidates.extend(_tolerance_values_from_any(text))
+            if isinstance(text, str) and _TIGHT_TOL_TRIGGER_RE.search(text):
+                tight_mentions += 1
+
+    min_tol = min(candidates) if candidates else None
+    base_hours = 1.0
+    if min_tol is not None:
+        if min_tol <= 0.0002:
+            base_hours = 3.0
+        elif min_tol <= 0.0005:
+            base_hours = 2.2
+        elif min_tol <= 0.001:
+            base_hours = 1.6
+        elif min_tol <= 0.002:
+            base_hours = 1.3
+        elif min_tol <= 0.005:
+            base_hours = 1.0
+        elif min_tol <= 0.010:
+            base_hours = 0.8
+        else:
+            base_hours = 0.6
+        tight_count = sum(1 for val in candidates if val <= 0.0015)
+        if tight_count > 1:
+            base_hours += min(1.0, 0.2 * (tight_count - 1))
+    elif tight_mentions:
+        base_hours = 1.5
+
+    return max(0.5, round(base_hours, 3))
+
+
 def _sum_time_from_series(
     items: pd.Series,
     values: pd.Series,
@@ -7674,8 +7782,44 @@ def compute_quote_from_df(df: pd.DataFrame,
     finishing_misc_hr = tumble_hr + blast_hr + laser_mark_hr + masking_hr
     finishing_cost   = finishing_misc_hr * finishing_rate
 
+    tolerance_inputs: dict[str, Any] = {}
+    for key, value in (ui_vars or {}).items():
+        label = str(key)
+        if re.search(r"(tolerance|finish|surface)", label, re.IGNORECASE):
+            tolerance_inputs[label] = value
+
+    tolerance_notes_extra: list[Any] = []
+    tol_notes_geo = geo_context.get("tolerance_notes")
+    if isinstance(tol_notes_geo, (list, tuple, set)):
+        tolerance_notes_extra.extend(tol_notes_geo)
+    elif tol_notes_geo:
+        tolerance_notes_extra.append(tol_notes_geo)
+    for extra_key in ("default_tolerance_note", "tolerance_note"):
+        extra_val = geo_context.get(extra_key)
+        if extra_val:
+            tolerance_notes_extra.append(extra_val)
+    if isinstance(inner_geo, dict):
+        tol_notes_inner = inner_geo.get("tolerance_notes")
+        if isinstance(tol_notes_inner, (list, tuple, set)):
+            tolerance_notes_extra.extend(tol_notes_inner)
+        elif tol_notes_inner:
+            tolerance_notes_extra.append(tol_notes_inner)
+
+    default_tol_text = (
+        geo_context.get("default_tol")
+        or geo_context.get("default_tolerance")
+        or ui_vars.get("Default Tolerance Note")
+        or ui_vars.get("Default Tolerance")
+    )
+
+    inproc_default = _estimate_inprocess_default_from_tolerance(
+        tolerance_inputs,
+        default_tol_text,
+        tolerance_notes_extra,
+    )
+
     # Inspection & docs
-    inproc_hr   = sum_time(r"(?:In[- ]?Process\s*Inspection)", default=1.0)
+    inproc_hr   = sum_time(r"(?:In[- ]?Process\s*Inspection)", default=inproc_default)
     final_hr    = sum_time(r"(?:Final\s*Inspection|Manual\s*Inspection)")
     cmm_prog_hr = sum_time(r"(?:CMM\s*Programming)")
     cmm_run_hr  = sum_time(r"(?:CMM\s*Run\s*Time)\b") + sum_time(r"(?:CMM\s*Run\s*Time\s*min)")
@@ -8156,12 +8300,6 @@ def compute_quote_from_df(df: pd.DataFrame,
         "face_count": int(_coerce_float_or_none(geo_context.get("Feature_Face_Count")) or 0),
         "deburr_edge_len_mm": _coerce_float_or_none(geo_context.get("GEO_Deburr_EdgeLen_mm")),
     }
-
-    tolerance_inputs: dict[str, Any] = {}
-    for key, value in (ui_vars or {}).items():
-        label = str(key)
-        if re.search(r"(tolerance|finish|surface)", label, re.IGNORECASE):
-            tolerance_inputs[label] = value
 
     features = {
         "qty": Qty,
