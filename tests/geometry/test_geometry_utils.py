@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 import pytest
 
 from cad_quoter.geometry import (
     collect_geo_features_from_df,
+    _hole_groups_from_cylinders,
     map_geo_to_double_underscore,
     update_variables_df_with_geo,
 )
@@ -48,3 +51,35 @@ def test_collect_geo_features_from_df_round_trips(sample_geo_metrics: dict) -> N
 
     for key, value in mapped.items():
         assert extracted[key] == pytest.approx(float(value))
+
+
+def test_hole_groups_do_not_double_count_through_holes() -> None:
+    try:
+        from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox, BRepPrimAPI_MakeCylinder
+        from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut
+        from OCP.gp import gp_Ax2, gp_Pnt, gp_Dir
+    except Exception:  # pragma: no cover - pythonocc fallback
+        from OCC.Core.BRepPrimAPI import BRepPrimAPI_MakeBox, BRepPrimAPI_MakeCylinder
+        from OCC.Core.BRepAlgoAPI import BRepAlgoAPI_Cut
+        from OCC.Core.gp import gp_Ax2, gp_Pnt, gp_Dir
+
+    block_builder = BRepPrimAPI_MakeBox(40.0, 40.0, 20.0)
+    if not hasattr(block_builder, "Shape"):
+        pytest.skip("OCC geometry kernel unavailable for hole detection test")
+    block = block_builder.Shape()
+    axis = gp_Ax2(gp_Pnt(20.0, 20.0, 0.0), gp_Dir(0.0, 0.0, 1.0))
+    cutter_builder = BRepPrimAPI_MakeCylinder(axis, 5.0, 20.0)
+    if not hasattr(cutter_builder, "Shape"):
+        pytest.skip("OCC geometry kernel unavailable for hole detection test")
+    cutter = cutter_builder.Shape()
+    solid_builder = BRepAlgoAPI_Cut(block, cutter)
+    if not hasattr(solid_builder, "Shape"):
+        pytest.skip("OCC geometry kernel unavailable for hole detection test")
+    solid = solid_builder.Shape()
+
+    holes = _hole_groups_from_cylinders(solid)
+
+    matching = [h for h in holes if math.isclose(h["dia_mm"], 10.0, abs_tol=1e-3)]
+
+    assert matching, "Expected to find a 10 mm through hole"
+    assert matching[0]["count"] == 1
