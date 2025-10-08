@@ -5070,6 +5070,7 @@ def render_quote(
             labor_cost_totals[str(key)] = float(value)
         except Exception:
             continue
+    prog_hr: float = 0.0
     direct_cost_details = breakdown.get("direct_cost_details", {}) or {}
     qty          = int(breakdown.get("qty", 1) or 1)
     price        = float(result.get("price", totals.get("price", 0.0)))
@@ -8020,10 +8021,12 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     max_dim   = first_num(r"\bGEO__MaxDim_mm\b", 0.0)
     is_simple = (max_dim and max_dim <= params["ProgSimpleDim_mm"] and setups <= 2)
+    current_prog_hr = locals().get("prog_hr", 0.0)
     if is_simple:
-        prog_hr = min(prog_hr, params["ProgCapHr"])
+        current_prog_hr = min(current_prog_hr, params["ProgCapHr"])
     if milling_hr > 0:
-        prog_hr = min(prog_hr, params["ProgMaxToMillingRatio"] * milling_hr)
+        current_prog_hr = min(current_prog_hr, params["ProgMaxToMillingRatio"] * milling_hr)
+    prog_hr = current_prog_hr
 
     tolerance_inputs: dict[str, Any] = {}
     for key, value in (ui_vars or {}).items():
@@ -8505,19 +8508,19 @@ def compute_quote_from_df(df: pd.DataFrame,
         }
         process_costs_baseline = dict(process_costs)
 
-        process_meta = {
-            "Machine": {
-                "hr": round(machine_minutes / 60.0, 3),
-                "minutes": round(machine_minutes, 1),
-                "rate": 0.0,
-                "cost": round(machine_cost_total, 2),
-            },
-            "Labor": {
-                "hr": round(labor_minutes / 60.0, 3),
-                "minutes": round(labor_minutes, 1),
-                "rate": 0.0,
-                "cost": round(labor_cost_total, 2),
-            },
+        existing_process_meta = dict(process_meta)
+        process_meta = dict(existing_process_meta)
+        process_meta["planner_machine"] = {
+            "hr": round(machine_minutes / 60.0, 3),
+            "minutes": round(machine_minutes, 1),
+            "rate": 0.0,
+            "cost": round(machine_cost_total, 2),
+        }
+        process_meta["planner_labor"] = {
+            "hr": round(labor_minutes / 60.0, 3),
+            "minutes": round(labor_minutes, 1),
+            "rate": 0.0,
+            "cost": round(labor_cost_total, 2),
         }
         if line_items:
             process_meta["planner_total"] = {
@@ -8527,6 +8530,21 @@ def compute_quote_from_df(df: pd.DataFrame,
                 "cost": round(machine_cost_total + labor_cost_total, 2),
                 "line_items": copy.deepcopy(line_items),
             }
+            for entry in line_items:
+                name = str(entry.get("op") or "").strip()
+                if not name:
+                    continue
+                minutes_val = float(entry.get("minutes", 0.0) or 0.0)
+                hours_val = minutes_val / 60.0 if minutes_val else 0.0
+                cost_val = float(entry.get("machine_cost") or entry.get("labor_cost") or 0.0)
+                rate_val = (cost_val / hours_val) if hours_val > 0 else 0.0
+                key_norm = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+                process_meta[key_norm] = {
+                    "minutes": round(minutes_val, 2),
+                    "hr": round(hours_val, 3),
+                    "cost": round(cost_val, 2),
+                    "rate": round(rate_val, 2) if rate_val else 0.0,
+                }
 
         for key, meta in process_meta.items():
             rate_val = float(meta.get("rate", 0.0) or 0.0)
@@ -10569,7 +10587,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         seen: set[str] = set()
         for bit in detail_bits:
             seg = str(bit).strip()
-            if not seg or _is_extra_segment(seg):
+            if not seg or re.match(r"^includes\b.*extras\b", seg, re.IGNORECASE):
                 continue
             if seg not in seen:
                 merged_bits.append(seg)
@@ -10577,7 +10595,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         if existing_detail:
             for segment in re.split(r";\s*", existing_detail):
                 seg = segment.strip()
-                if not seg or _is_extra_segment(seg):
+                if not seg or re.match(r"^includes\b.*extras\b", seg, re.IGNORECASE):
                     continue
                 if seg not in seen:
                     merged_bits.append(seg)

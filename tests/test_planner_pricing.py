@@ -46,9 +46,11 @@ def test_price_with_planner_uses_geometry_minutes() -> None:
     result = price_with_planner("punch", params, geom, rates, oee=1.0)
 
     assert "ops" in result["plan"]
+    assert "ops_seen" in result["assumptions"]
+    assert "wire_edm_outline" in result["assumptions"]["ops_seen"]
     assert result["totals"]["minutes"] > 0.0
     assert result["totals"]["machine_cost"] > 0.0
 
-    wire_items = [item for item in result["line_items"] if item["op"] == "wire_edm_outline"]
-    assert wire_items, "expected WEDM operation in planner output"
+    wire_items = [item for item in result["line_items"] if item["op"] == "Wire EDM"]
+    assert wire_items, "expected Wire EDM bucket in planner pricing"
     assert wire_items[0]["minutes"] > 1.0
