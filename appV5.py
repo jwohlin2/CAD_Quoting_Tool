@@ -2459,7 +2459,7 @@ def effective_to_overrides(effective: dict, baseline: dict | None = None) -> dic
             out["setup_recommendation"]["setups"] = setups_eff
         if fixture_eff is not None:
             out["setup_recommendation"]["fixture"] = fixture_eff
-    numeric_keys = {
+    numeric_keys: dict[str, tuple[float, float | None]] = {
         "fixture_build_hr": (0.0, None),
         "fixture_material_cost": (0.0, None),
         "soft_jaw_hr": (0.0, None),

@@ -114,6 +114,7 @@ def test_effective_to_overrides_emits_new_keys() -> None:
         "fixture_build_hr": 1.0,
         "soft_jaw_hr": 0.25,
         "cmm_minutes": 18.0,
+        "inspection_total_hr": 4.5,
         "packaging_hours": 0.2,
         "shipping_hint": "Double box",
     }
@@ -122,5 +123,6 @@ def test_effective_to_overrides_emits_new_keys() -> None:
     assert overrides["fixture_build_hr"] == pytest.approx(1.0)
     assert overrides["soft_jaw_hr"] == pytest.approx(0.25)
     assert overrides["cmm_minutes"] == pytest.approx(18.0)
+    assert overrides["inspection_total_hr"] == pytest.approx(4.5)
     assert overrides["packaging_hours"] == pytest.approx(0.2)
     assert overrides["shipping_hint"] == "Double box"
