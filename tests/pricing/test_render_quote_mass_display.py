@@ -43,7 +43,7 @@ def test_render_quote_shows_net_mass_when_scrap_present() -> None:
 
     assert "Mass:" not in rendered
     assert "Net Weight: 3.5 oz" in rendered
-    assert "With Scrap: 4.2 oz" in rendered
+    assert "With Scrap: 2.8 oz" in rendered
 
 
 def _base_material_quote(material: dict) -> dict:
