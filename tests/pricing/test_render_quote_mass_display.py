@@ -40,10 +40,67 @@ def test_render_quote_shows_net_mass_when_scrap_present() -> None:
     }
 
     rendered = appV5.render_quote(result, currency="$", show_zeros=False)
-    mass_line = next(line for line in rendered.splitlines() if "Mass:" in line)
 
-    assert "0.22 lb net" in mass_line
-    assert "scrap-adjusted 0.26 lb" in mass_line
+    assert "Mass:" not in rendered
+    assert "Net Weight: 3.5 oz" in rendered
+    assert "With Scrap: 4.2 oz" in rendered
+
+
+def _base_material_quote(material: dict) -> dict:
+    return {
+        "price": 10.0,
+        "breakdown": {
+            "qty": 1,
+            "totals": _base_totals(),
+            "material": material,
+            "nre": {},
+            "nre_detail": {},
+            "process_costs": {},
+            "process_meta": {},
+            "pass_through": {},
+            "applied_pcts": {},
+            "rates": {},
+            "params": {},
+            "nre_cost_details": {},
+            "labor_cost_details": {},
+            "direct_cost_details": {},
+        },
+    }
+
+
+def test_render_quote_unit_price_prefers_lb_over_metric() -> None:
+    result = _base_material_quote(
+        {
+            "mass_g": 120.0,
+            "effective_mass_g": 120.0,
+            "unit_price_usd_per_kg": 20.0,
+            "unit_price_asof": "2024-01-01",
+        }
+    )
+
+    rendered = appV5.render_quote(result, currency="$", show_zeros=False)
+    unit_line = next(line for line in rendered.splitlines() if "Unit Price:" in line)
+
+    assert unit_line.strip().startswith("Unit Price: $9.07 / lb")
+    assert "/ kg" not in unit_line
+    assert "/ g" not in unit_line
+
+
+def test_render_quote_unit_price_converts_from_per_gram() -> None:
+    result = _base_material_quote(
+        {
+            "mass_g": 120.0,
+            "effective_mass_g": 120.0,
+            "unit_price_per_g": 0.012,
+        }
+    )
+
+    rendered = appV5.render_quote(result, currency="$", show_zeros=False)
+    unit_line = next(line for line in rendered.splitlines() if "Unit Price:" in line)
+
+    assert unit_line.strip().startswith("Unit Price: $5.44 / lb")
+    assert "/ kg" not in unit_line
+    assert "/ g" not in unit_line
 
 
 def test_render_quote_does_not_duplicate_detail_lines() -> None:
@@ -94,3 +151,32 @@ def test_render_quote_does_not_duplicate_detail_lines() -> None:
     assert rendered.count("includes $200.00 extras") == 1
     assert rendered.count("includes 1.67 hr extras") == 0
     assert rendered.count("1.50 hr @ $120.00/hr") == 1
+
+
+def test_render_quote_shows_flat_extras_when_no_hours() -> None:
+    result = {
+        "price": 10.0,
+        "breakdown": {
+            "qty": 1,
+            "totals": _base_totals(),
+            "material": {},
+            "nre": {},
+            "nre_detail": {},
+            "nre_cost_details": {},
+            "process_costs": {"grinding": 200.0},
+            "process_meta": {
+                "grinding": {"hr": 0.0, "rate": 90.0, "base_extra": 200.0},
+            },
+            "labor_cost_details": {},
+            "pass_through": {},
+            "applied_pcts": {},
+            "rates": {},
+            "params": {},
+            "direct_cost_details": {},
+        },
+    }
+
+    rendered = appV5.render_quote(result, currency="$", show_zeros=False)
+
+    assert rendered.count("includes $200.00 extras") == 1
+    assert "hr extras" not in rendered
