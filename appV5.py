@@ -4949,19 +4949,32 @@ def render_quote(
         surpct = material.get("surcharge_pct")
         matcost= material.get("material_cost")
         scrap  = material.get("scrap_pct", None)  # will show only if present in breakdown
+        scrap_credit_entered = bool(material.get("material_scrap_credit_entered"))
         scrap_credit = float(material.get("material_scrap_credit") or 0.0)
         unit_price_kg = material.get("unit_price_usd_per_kg")
         unit_price_lb = material.get("unit_price_usd_per_lb")
         price_source  = material.get("unit_price_source") or material.get("source")
         price_asof    = material.get("unit_price_asof")
 
-        have_any = any(v for v in [mass_g, net_mass_g, upg, minchg, surpct, matcost, scrap, scrap_credit])
+        have_any = any(
+            v
+            for v in [
+                mass_g,
+                net_mass_g,
+                upg,
+                minchg,
+                surpct,
+                matcost,
+                scrap,
+                scrap_credit if scrap_credit_entered else 0.0,
+            ]
+        )
 
         if have_any:
             mat_lines.append("Material & Stock")
             mat_lines.append(divider)
             if matcost or show_zeros: row("Material Cost (computed):", float(matcost or 0.0))
-            if scrap_credit:
+            if scrap_credit_entered and scrap_credit:
                 credit_display = _m(scrap_credit)
                 if credit_display.startswith(currency):
                     credit_display = f"-{credit_display}"
@@ -6760,8 +6773,20 @@ def compute_quote_from_df(df: pd.DataFrame,
     supplier_min_charge = first_num(r"\b(?:Supplier\s*Min\s*Charge|min\s*charge)\b", 0.0)
     surcharge_pct = num_pct(r"\b(?:Material\s*Surcharge|Volatility)\b", 0.0)
     explicit_mat  = num(r"\b(?:Material\s*Cost|Raw\s*Material\s*Cost)\b", 0.0)
-    material_scrap_credit_raw = num(r"(?:Material\s*Scrap(?:\s*Credit)?|Remnant(?:\s*Credit)?)", 0.0)
-    material_scrap_credit = abs(float(material_scrap_credit_raw or 0.0))
+    scrap_credit_pattern = r"(?:Material\s*Scrap(?:\s*Credit)?|Remnant(?:\s*Credit)?)"
+    scrap_credit_mask = contains(scrap_credit_pattern)
+    material_scrap_credit_entered = False
+    if scrap_credit_mask.any():
+        scrap_credit_values = pd.to_numeric(vals[scrap_credit_mask], errors="coerce")
+        material_scrap_credit_entered = bool(
+            scrap_credit_values.dropna().abs().gt(0).any()
+        )
+    material_scrap_credit_raw = (
+        num(scrap_credit_pattern, 0.0) if material_scrap_credit_entered else 0.0
+    )
+    material_scrap_credit = (
+        abs(float(material_scrap_credit_raw or 0.0)) if material_scrap_credit_entered else 0.0
+    )
     material_scrap_credit_applied = 0.0
 
     if material_vendor_csv is None:
@@ -6832,6 +6857,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     for key, value in fallback_meta.items():
         material_detail_for_breakdown.setdefault(key, value)
     material_detail_for_breakdown["unit_price_per_g"] = float(unit_price_per_g or 0.0)
+    material_detail_for_breakdown["material_scrap_credit_entered"] = material_scrap_credit_entered
     if "unit_price_usd_per_kg" not in material_detail_for_breakdown and unit_price_per_g:
         material_detail_for_breakdown["unit_price_usd_per_kg"] = float(unit_price_per_g) * 1000.0
     material_detail_for_breakdown["material_direct_cost"] = material_direct_cost
