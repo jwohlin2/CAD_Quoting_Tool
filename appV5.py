@@ -5404,7 +5404,11 @@ def render_quote(
                     diff_mass = abs(float(effective_mass_val) - float(net_mass_val))
                     base_candidate = max(float(effective_mass_val), float(net_mass_val))
                     scrap_adjusted_mass_val = max(0.0, base_candidate - diff_mass)
-            starting_mass_val = _coerce_float_or_none(material.get("effective_mass_g"))
+            starting_mass_val = _coerce_float_or_none(material.get("mass_g"))
+            if starting_mass_val is None:
+                starting_mass_val = _coerce_float_or_none(
+                    material.get("effective_mass_g")
+                )
             if starting_mass_val is None:
                 starting_mass_val = effective_mass_val
             if (
