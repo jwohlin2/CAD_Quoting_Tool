@@ -110,7 +110,6 @@ def test_render_quote_does_not_duplicate_detail_lines() -> None:
             "qty": 1,
             "totals": _base_totals(),
             "material": {},
-            "nre": {},
             "nre_detail": {
                 "programming": {
                     "per_lot": 150.0,
@@ -122,6 +121,7 @@ def test_render_quote_does_not_duplicate_detail_lines() -> None:
                     "build_hr": 0.5,
                     "build_rate": 60.0,
                     "mat_cost": 20.0,
+                    "labor_cost": 30.0,
                 },
             },
             "nre_cost_details": {
@@ -141,6 +141,14 @@ def test_render_quote_does_not_duplicate_detail_lines() -> None:
             "rates": {},
             "params": {},
             "direct_cost_details": {},
+            "labor_costs": {
+                "Programming (amortized)": 150.0,
+                "Fixture Build (amortized)": 30.0,
+            },
+            "nre": {
+                "programming_per_part": 150.0,
+                "fixture_per_part": 30.0,
+            },
         },
     }
 
@@ -148,6 +156,10 @@ def test_render_quote_does_not_duplicate_detail_lines() -> None:
 
     assert rendered.count("- Programmer: 1.00 hr @ $75.00/hr") == 1
     assert rendered.count("Programmer 1.00 hr @ $75.00/hr") == 0
+    assert "Programming (amortized)" in rendered
+    assert "Fixture Build (amortized)" in rendered
+    assert "- Programmer (lot): 1.00 hr @ $75.00/hr" in rendered
+    assert "- Build labor (lot): 0.50 hr @ $60.00/hr" in rendered
     assert rendered.count("includes $200.00 extras") == 1
     assert rendered.count("includes 1.67 hr extras") == 0
     assert rendered.count("1.50 hr @ $120.00/hr") == 1
