@@ -4991,27 +4991,34 @@ def render_quote(
         clean = clean.lstrip("= ")
         return clean.lower().startswith("total")
 
-    def _ensure_total_separator():
+    def _ensure_total_separator(width: int) -> None:
         if not lines:
+            return
+        width = max(0, int(width))
+        if width <= 0:
             return
         if lines[-1] == divider:
             return
-        lines.append(divider)
+        pad = max(0, page_width - width)
+        short_divider = " " * pad + "-" * width
+        if lines[-1] == short_divider:
+            return
+        lines.append(short_divider)
 
     def row(label: str, val: float, indent: str = ""):
-        if _is_total_label(label):
-            _ensure_total_separator()
         # left-label, right-amount aligned to page_width
         left = f"{indent}{label}"
         right = _m(val)
+        if _is_total_label(label):
+            _ensure_total_separator(len(right))
         pad = max(1, page_width - len(left) - len(right))
         lines.append(f"{left}{' ' * pad}{right}")
 
     def hours_row(label: str, val: float, indent: str = ""):
-        if _is_total_label(label):
-            _ensure_total_separator()
         left = f"{indent}{label}"
         right = _h(val)
+        if _is_total_label(label):
+            _ensure_total_separator(len(right))
         pad = max(1, page_width - len(left) - len(right))
         lines.append(f"{left}{' ' * pad}{right}")
 
