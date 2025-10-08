@@ -33,7 +33,6 @@ GRD-04,Grinding Wheel Cost & Dressing Time,Cost of the abrasive wheel and the ti
 MIL-02,Number of Milling Setups,Each re-fixturing of the part adds significant labor.,0.5–2.0 hours labor per setup (+$50–$200).,Number,200,,
 TRN-09,Tooling Cost (Carbide Inserts),Cost of consumable turning inserts.,$20–$500 on tooling cost line item.,Number,225,$,
 MAT-06,Material Vendor Lead Time,Long lead-time materials can delay the entire project.,Can add weeks to lead time; +$100s in expedite fees.,Number,250,,
-ENG-07,Fixture Material Cost,Cost of the raw materials for the fixture.,$100–$2000 in material NRE.,Number,350,$,
 MIL-09,Tooling Cost (Carbide Endmills),"Cost of consumable cutters, amortized over the job.",$50–$1000+ on tooling cost line item.,Number,450,$,
 MAT-05,Material MOQ,"If the job requires less than the MOQ, you must buy and store the excess.",Can increase material cost by 100-500% for small jobs.,Number,500,,
 ASM-01,Manual Assembly Labor,"Time for installing hardware (helicoils, dowel pins, bearings).",$5–$150 per assembly.,Number,2000,,

@@ -210,7 +210,7 @@ def compute_full_quote(xlsx_path: str,
         if re.search(r"Expected Scrap Rate", itm, flags=re.IGNORECASE):
             return ("meta", 0.0)
         # Material driven direct costs (BOM, fixture material, MOQ)
-        if re.search(r"Hardware|BOM|Fixture Material|Material MOQ", itm, flags=re.IGNORECASE):
+        if re.search(r"Hardware|BOM|Material MOQ", itm, flags=re.IGNORECASE):
             return ("material_cost", val)
         # Freight / shipping / lead time fees treated as logistics direct cost
         if re.search(r"Freight|Shipping|Lead Time", itm, flags=re.IGNORECASE):
@@ -565,7 +565,7 @@ def compute_full_quote(xlsx_path: str,
             if any(re.search(p, itm, flags=re.IGNORECASE) for p in pats):
                 return True
         # Or if it hit generic rules
-        if re.search(r"Profit Margin|Cost|Freight|MOQ|Material Vendor|Fixture Material|Tooling Cost|Lead Time|Hardware|BOM|Project Manager Hours|Tool & Die Maker|Precision Fitting|Number of Milling Setups|Number of Unique Tools|Number of Blanks Required|Labor|Time|Hours", itm, flags=re.IGNORECASE):
+        if re.search(r"Profit Margin|Cost|Freight|MOQ|Material Vendor|Tooling Cost|Lead Time|Hardware|BOM|Project Manager Hours|Tool & Die Maker|Precision Fitting|Number of Milling Setups|Number of Unique Tools|Number of Blanks Required|Labor|Time|Hours", itm, flags=re.IGNORECASE):
             return True
         return False
 
