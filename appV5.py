@@ -10493,9 +10493,23 @@ def harvest_coordinate_table(doc, to_in: float) -> dict[str, Any]:
     }
 
 
-def filtered_circles(doc, to_in: float, plate_bbox: tuple[float, float, float, float] | None = None) -> list[tuple[float, float, float, int]]:
-    circles: list[tuple[float, float, float]] = []
+def _circle_candidates(doc, to_in: float, plate_bbox: tuple[float, float, float, float] | None = None) -> list[tuple[float, float, float, float]]:
+    """Collect circle data, preferring model space to avoid duplicate layout views."""
+
+    if doc is None:
+        return []
+
+    try:
+        modelspace = doc.modelspace()
+        modelspace_id = id(modelspace)
+    except Exception:
+        modelspace = None
+        modelspace_id = None
+
+    per_space: list[tuple[bool, list[tuple[float, float, float, float]]]] = []
     for sp in _spaces(doc) or []:
+        is_model = modelspace_id is not None and id(sp) == modelspace_id
+        local: list[tuple[float, float, float, float]] = []
         try:
             entities = sp.query("CIRCLE")
         except Exception:
@@ -10505,10 +10519,11 @@ def filtered_circles(doc, to_in: float, plate_bbox: tuple[float, float, float, f
             if layer in SKIP_LAYERS:
                 continue
             try:
-                d = round(2.0 * float(c.dxf.radius) * float(to_in), 4)
+                radius_in = float(c.dxf.radius) * float(to_in)
             except Exception:
                 continue
-            if not (0.06 <= d <= 2.5):
+            diameter_in = round(2.0 * radius_in, 4)
+            if not (0.06 <= diameter_in <= 2.5):
                 continue
             try:
                 x, y = c.dxf.center[:2]
@@ -10518,11 +10533,32 @@ def filtered_circles(doc, to_in: float, plate_bbox: tuple[float, float, float, f
                 xmin, ymin, xmax, ymax = plate_bbox
                 if not (xmin <= x <= xmax and ymin <= y <= ymax):
                     continue
-            circles.append((x, y, d))
+            local.append((x, y, diameter_in, radius_in))
+        if local:
+            per_space.append((is_model, local))
+
+    if not per_space:
+        return []
+
+    if any(is_model and entries for is_model, entries in per_space):
+        circles: list[tuple[float, float, float, float]] = []
+        for is_model, entries in per_space:
+            if is_model:
+                circles.extend(entries)
+        return circles
+
+    circles: list[tuple[float, float, float, float]] = []
+    for _, entries in per_space:
+        circles.extend(entries)
+    return circles
+
+
+def filtered_circles(doc, to_in: float, plate_bbox: tuple[float, float, float, float] | None = None) -> list[tuple[float, float, float, int]]:
+    circles_raw = _circle_candidates(doc, to_in, plate_bbox=plate_bbox)
 
     clustered: list[tuple[float, float, float, int]] = []
     tol = 0.01
-    for x, y, d in circles:
+    for x, y, d, _ in circles_raw:
         for idx, (cx, cy, cd, count) in enumerate(clustered):
             if abs(cx - x) < tol and abs(cy - y) < tol and abs(cd - d) < 1e-3:
                 clustered[idx] = (cx, cy, cd, count + 1)
@@ -10534,27 +10570,11 @@ def filtered_circles(doc, to_in: float, plate_bbox: tuple[float, float, float, f
 
 def classify_concentric(doc, to_in: float, tol_center: float = 0.005, min_gap_in: float = 0.03) -> dict[str, Any]:
     pts: list[tuple[float, float, float]] = []
-    for sp in _spaces(doc) or []:
-        try:
-            entities = sp.query("CIRCLE")
-        except Exception:
-            entities = []
-        for c in entities:
-            layer = (getattr(getattr(c, "dxf", object()), "layer", "") or "").upper()
-            if layer in SKIP_LAYERS:
-                continue
-            try:
-                r = float(c.dxf.radius) * float(to_in)
-            except Exception:
-                continue
-            dia = 2.0 * r
-            if not (0.04 <= dia <= 6.0):
-                continue
-            try:
-                x, y = c.dxf.center[:2]
-            except Exception:
-                continue
-            pts.append((x, y, r))
+    for x, y, _, radius_in in _circle_candidates(doc, to_in):
+        dia = 2.0 * radius_in
+        if not (0.04 <= dia <= 6.0):
+            continue
+        pts.append((x, y, radius_in))
     pts.sort()
     cbore_like = 0
     csk_like = 0
