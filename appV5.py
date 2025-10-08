@@ -3611,7 +3611,7 @@ def build_llm_payload(structured: dict, page_image_path: str | None):
     messages = [
         {"role":"system","content": QWEN_SYSTEM},
         {"role":"user","content":[
-            {"type":"text","text":"Vector-extracted data (trusted):\n" + json.dumps(structured, ensure_ascii=False)},
+            {"type":"text","text":"Vector-extracted data (trusted):\n" + json.dumps(structured, ensure_ascii=False, default=str)},
         ]}
     ]
     if page_image_path:
@@ -7207,7 +7207,11 @@ def validate_quote_before_pricing(
     if hole_count_val <= 0:
         hole_count_val = len(geo.get("hole_diams_mm") or [])
     if issues:
-        raise ValueError("Quote blocked:\n- " + "\n- ".join(issues))
+        allow = str(os.getenv("QUOTE_ALLOW_LOW_MATERIAL", "")).strip().lower()
+        if allow in {"1", "true", "yes", "on"}:
+            issues.clear()
+        else:
+            raise ValueError("Quote blocked:\n- " + "\n- ".join(issues))
 
 
 def compute_quote_from_df(df: pd.DataFrame,
@@ -9697,10 +9701,12 @@ def compute_quote_from_df(df: pd.DataFrame,
         if llm_enabled:
             if llm_suggest is not None:
                 try:
+                    # Prepare a safe JSON body for the LLM message; default=str guards non-serializable entries
+                    _payload_body = json.dumps(payload, indent=2, default=str)
                     chat_out = llm_suggest.create_chat_completion(
                         messages=[
                             {"role": "system", "content": SYSTEM_SUGGEST},
-                            {"role": "user", "content": json.dumps(payload, indent=2)},
+                            {"role": "user", "content": _payload_body},
                         ],
                         temperature=0.3,
                         top_p=0.9,
@@ -9807,7 +9813,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                 "n_ctx": overrides_meta.get("n_ctx"),
                 "messages": [
                     {"role": "system", "content": SYSTEM_SUGGEST},
-                    {"role": "user", "content": json.dumps(payload, indent=2)},
+                    {"role": "user", "content": json.dumps(payload, indent=2, default=str)},
                 ],
                 "params": {"temperature": 0.3, "top_p": 0.9, "max_tokens": 512},
                 "context_payload": payload,
@@ -9817,7 +9823,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                 "usage": s_usage,
             }
             snap_path = APP_ENV.llm_debug_dir / f"llm_snapshot_{int(time.time())}.json"
-            snap_path.write_text(json.dumps(snap, indent=2), encoding="utf-8")
+            snap_path.write_text(json.dumps(snap, indent=2, default=str), encoding="utf-8")
 
     quote_state.llm_raw = dict(overrides_meta)
     quote_state.suggestions = sanitized_struct if isinstance(sanitized_struct, dict) else {}
@@ -14314,7 +14320,7 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
         "}"
     )
 
-    user_prompt = "```json\n" + json.dumps(ctx, indent=2, sort_keys=True) + "\n```"
+    user_prompt = "```json\n" + json.dumps(ctx, indent=2, sort_keys=True, default=str) + "\n```"
 
     client: LLMClient | None = None
     try:
@@ -17425,6 +17431,18 @@ class App(tk.Tk):
                 messagebox.showerror("Quote blocked", str(err))
                 self.status_var.set("Quote blocked.")
                 return
+            except Exception as err:
+                # Catch-all so failures surface in the UI and logs
+                import traceback, datetime
+                tb = traceback.format_exc()
+                try:
+                    with open("debug.log", "a", encoding="utf-8") as f:
+                        f.write(f"\n[{datetime.datetime.now().isoformat()}] Quote error:\n{tb}\n")
+                except Exception:
+                    pass
+                messagebox.showerror("Quote error", f"Unexpected error during pricing. Check debug.log.\n\n{err}")
+                self.status_var.set("Quote failed.")
+                return
 
             baseline_ctx = self.quote_state.baseline or {}
             suggestions_ctx = self.quote_state.suggestions or {}
@@ -17433,6 +17451,8 @@ class App(tk.Tk):
 
             model_path = self.llm_model_path.get().strip()
             llm_explanation = get_llm_quote_explanation(res, model_path)
+            if not isinstance(res, dict):
+                res = {}
             simplified_report = render_quote(
                 res,
                 currency="$",
