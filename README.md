@@ -161,3 +161,34 @@ Extending the schema for other part families follows the same pattern: aggregate
 volumes, perimeters, pass counts, and any special operations into nested
 dictionaries so Codex and pricing estimators can consume a single geometry
 payload.
+
+## McMaster-Carr API client (official)
+
+The repository includes `mcmaster_api.py`, a simple CLI that authenticates to
+McMaster-Carr’s official API using mutual TLS (client PFX certificate) and
+prints price tiers for a given part number.
+
+Setup:
+
+- Install extra dependencies:
+  - `pip install requests-pkcs12 truststore python-dotenv`
+- Obtain your McMaster-Carr API credentials and a `.pfx` client certificate.
+- Provide credentials via environment variables or a `.env` file in the repo
+  root:
+
+```
+MCMASTER_USER=your_email@example.com
+MCMASTER_PASS=your_password
+MCMASTER_PFX_PATH=D:\\path\\to\\client.pfx
+MCMASTER_PFX_PASS=optional_pfx_password
+```
+
+Run:
+
+```
+python mcmaster_api.py
+```
+
+You will be prompted for any missing values and for a part number (e.g.,
+`4936K451`). The tool logs in, subscribes the product if required, and prints
+the returned pricing tiers.

@@ -221,7 +221,8 @@ def load_qwen_vl(
             n_ctx=n_ctx,
             n_gpu_layers=n_gpu_layers,
             n_threads=n_threads,
-            chat_format="qwen2_vl",
+            # Qwen2.5-VL models require the updated chat handler name in llama.cpp
+            chat_format="qwen2.5_vl",
             verbose=False,
         )
         _ = llm.create_chat_completion(
