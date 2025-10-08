@@ -378,12 +378,60 @@ def _collection_has_text(value: Any) -> bool:
     return False
 
 
+_OUTSOURCED_TEXT_TOKENS = (
+    "ANODIZE",
+    "ANODIZED",
+    "ANODISE",
+    "BLACK OXIDE",
+    "BLK OX",
+    "PASSIVATE",
+    "PASSIVATION",
+)
+
+
+def _iter_outsourced_text_fragments(ctx: Mapping[str, Any]) -> Iterable[str]:
+    notes = ctx.get("notes")
+    if isinstance(notes, (list, tuple)):
+        for entry in notes:
+            if entry:
+                yield str(entry)
+    chart_lines = ctx.get("chart_lines")
+    if isinstance(chart_lines, (list, tuple)):
+        for entry in chart_lines:
+            if entry:
+                yield str(entry)
+    default_tol_text = ctx.get("default_tol") or ctx.get("default_tolerance")
+    if default_tol_text:
+        yield str(default_tol_text)
+    material_note = ctx.get("material_note")
+    if material_note:
+        yield str(material_note)
+    raw_geo_block = ctx.get("raw") if isinstance(ctx.get("raw"), Mapping) else None
+    if isinstance(raw_geo_block, Mapping):
+        leaders = raw_geo_block.get("leaders")
+        if isinstance(leaders, (list, tuple)):
+            for entry in leaders:
+                if entry:
+                    yield str(entry)
+        leader_entries = raw_geo_block.get("leader_entries")
+        if isinstance(leader_entries, (list, tuple)):
+            for entry in leader_entries:
+                if isinstance(entry, Mapping):
+                    raw_txt = entry.get("raw")
+                    if raw_txt:
+                        yield str(raw_txt)
+
+
 def _geo_mentions_outsourced(geo_context: Mapping[str, Any] | None) -> bool:
     for ctx in _iter_geo_contexts(geo_context):
         if _collection_has_text(ctx.get("finishes")):
             return True
         if _collection_has_text(ctx.get("finish_flags")):
             return True
+        for fragment in _iter_outsourced_text_fragments(ctx):
+            upper = fragment.upper()
+            if any(token in upper for token in _OUTSOURCED_TEXT_TOKENS):
+                return True
     return False
 
 

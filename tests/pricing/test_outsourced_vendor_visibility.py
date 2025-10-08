@@ -24,3 +24,8 @@ def test_outsourced_pass_shown_when_nested_geo_has_finish_flags() -> None:
 def test_outsourced_pass_hidden_for_blank_finish_entries() -> None:
     geo = {"finishes": ["", None, "  "], "finish_flags": []}
     assert not appV5._should_include_outsourced_pass(0.0, geo)
+
+
+def test_outsourced_pass_shown_for_textual_finish_request() -> None:
+    geo = {"notes": ["Please anodize Type II"], "chart_lines": []}
+    assert appV5._should_include_outsourced_pass(0.0, geo)
