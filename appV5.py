@@ -356,6 +356,48 @@ def _match_items_contains(items: pd.Series, pattern: str) -> pd.Series:
     except Exception:
         return items.str.contains(re.escape(pattern), case=False, regex=True, na=False)
 
+
+def _iter_geo_contexts(geo_context: Mapping[str, Any] | None) -> Iterable[Mapping[str, Any]]:
+    if isinstance(geo_context, Mapping):
+        yield geo_context
+        inner = geo_context.get("geo")
+        if isinstance(inner, Mapping):
+            yield inner
+
+
+def _collection_has_text(value: Any) -> bool:
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, Mapping):
+        for candidate in value.values():
+            if _collection_has_text(candidate):
+                return True
+        return False
+    if isinstance(value, (list, tuple, set)):
+        return any(_collection_has_text(candidate) for candidate in value)
+    return False
+
+
+def _geo_mentions_outsourced(geo_context: Mapping[str, Any] | None) -> bool:
+    for ctx in _iter_geo_contexts(geo_context):
+        if _collection_has_text(ctx.get("finishes")):
+            return True
+        if _collection_has_text(ctx.get("finish_flags")):
+            return True
+    return False
+
+
+def _should_include_outsourced_pass(
+    outsourced_cost: float, geo_context: Mapping[str, Any] | None
+) -> bool:
+    try:
+        cost_val = float(outsourced_cost)
+    except Exception:
+        cost_val = 0.0
+    if abs(cost_val) > 1e-6:
+        return True
+    return _geo_mentions_outsourced(geo_context)
+
 def _auto_accept_suggestions(suggestions: dict[str, Any] | None) -> dict[str, Any]:
     accept: dict[str, Any] = {}
     if not isinstance(suggestions, dict):
@@ -7683,6 +7725,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     coating_cost     = num(r"(?:Plating|Coating|Anodize|Black\s*Oxide|DLC|PVD|CVD)")
     passivation_cost = num(r"(?:Passivation|Cleaning\s*Vendor)")
     outsourced_costs = heat_treat_cost + coating_cost + passivation_cost
+    include_outsourced_pass = _should_include_outsourced_pass(outsourced_costs, geo_context)
 
     # Packaging / logistics
     packaging_hr      = sum_time(r"(?:Packaging|Boxing|Crating\s*Labor)")
@@ -8010,12 +8053,17 @@ def compute_quote_from_df(df: pd.DataFrame,
     pass_through = {
         "Material": material_direct_cost,
         "Hardware / BOM": hardware_cost,
-        "Outsourced Vendors": outsourced_costs,
-        "Shipping": shipping_cost,
-        "Utilities": utilities_cost,
-        "Consumables": consumables_flat,
-        "Packaging Flat": packaging_flat_base,
     }
+    if include_outsourced_pass:
+        pass_through["Outsourced Vendors"] = outsourced_costs
+    pass_through.update(
+        {
+            "Shipping": shipping_cost,
+            "Utilities": utilities_cost,
+            "Consumables": consumables_flat,
+            "Packaging Flat": packaging_flat_base,
+        }
+    )
     pass_through = {
         _canonical_pass_label(label): float(value)
         for label, value in pass_through.items()
