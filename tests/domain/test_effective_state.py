@@ -89,8 +89,6 @@ def test_reprice_with_effective_applies_drilling_floor() -> None:
 def test_merge_effective_tracks_new_fields() -> None:
     baseline = {
         "fixture_build_hr": 0.5,
-        "fixture_material_cost": 40.0,
-        "shipping_cost": 25.0,
         "_bounds": {"scrap_max": 0.25},
     }
     suggestions = {
