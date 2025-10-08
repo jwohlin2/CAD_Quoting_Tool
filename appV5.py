@@ -1500,6 +1500,9 @@ def sanitize_suggestions(s: dict, bounds: dict) -> dict:
     packaging_cost = _extract_float_field(s.get("packaging_flat_cost"), 0.0, 25.0, ("packaging_flat_cost",))
     if packaging_cost is not None:
         extra["packaging_flat_cost"] = packaging_cost
+    shipping_override_val = _extract_float_field(s.get("shipping_cost"), 0.0, None, ("shipping_cost",))
+    if shipping_override_val is not None:
+        extra["shipping_cost"] = shipping_override_val
 
     shipping_hint = s.get("shipping_hint") or s.get("shipping_class")
     if isinstance(shipping_hint, dict):
@@ -1744,6 +1747,7 @@ def overrides_to_suggestions(overrides: dict | None) -> dict:
         "fai_prep_hr",
         "packaging_hours",
         "packaging_flat_cost",
+        "shipping_cost",
         "shipping_hint",
     ):
         if overrides.get(key) is not None:
@@ -1795,6 +1799,7 @@ def suggestions_to_overrides(suggestions: dict | None) -> dict:
         "fai_prep_hr",
         "packaging_hours",
         "packaging_flat_cost",
+        "shipping_cost",
         "shipping_hint",
     ):
         if suggestions.get(key) is not None:
@@ -2182,6 +2187,7 @@ def merge_effective(
     _merge_numeric_field("fai_prep_hr", 0.0, 1.0, "fai_prep_hr")
     _merge_numeric_field("packaging_hours", 0.0, 0.5, "packaging_hours")
     _merge_numeric_field("packaging_flat_cost", 0.0, 25.0, "packaging_flat_cost")
+    _merge_numeric_field("shipping_cost", 0.0, None, "shipping_cost")
     _merge_text_field("shipping_hint", max_len=80)
     _merge_list_field("operation_sequence")
     _merge_dict_field("drilling_strategy")
@@ -2537,6 +2543,7 @@ def effective_to_overrides(effective: dict, baseline: dict | None = None) -> dic
         "fai_prep_hr": (0.0, None),
         "packaging_hours": (0.0, None),
         "packaging_flat_cost": (0.0, None),
+        "shipping_cost": (0.0, None),
     }
     for key, (_default, _) in numeric_keys.items():
         eff_val = effective.get(key)
@@ -2820,6 +2827,7 @@ def iter_suggestion_rows(state: QuoteState) -> list[dict]:
     _add_scalar_row(("fai_prep_hr",), "FAI Prep Hours", "hours", "fai_prep_hr")
     _add_scalar_row(("packaging_hours",), "Packaging Hours", "hours", "packaging_hours")
     _add_scalar_row(("packaging_flat_cost",), "Packaging Flat $", "currency", "packaging_flat_cost")
+    _add_scalar_row(("shipping_cost",), "Shipping $", "currency", "shipping_cost")
     _add_scalar_row(("shipping_hint",), "Shipping Hint", "text", "shipping_hint")
 
     return rows
@@ -7381,10 +7389,25 @@ def compute_quote_from_df(df: pd.DataFrame,
     packaging_hr      = sum_time(r"(?:Packaging|Boxing|Crating\s*Labor)")
     crate_nre_cost    = num(r"(?:Custom\s*Crate\s*NRE)")
     packaging_mat     = num(r"(?:Packaging\s*Materials|Foam|Trays)")
-    shipping_cost     = num(r"(?:Freight|Shipping\s*Cost)")
+    shipping_mask     = contains(r"(?:Freight|Shipping\s*Cost)")
+    shipping_entered  = bool(getattr(shipping_mask, "any", lambda: False)())
+    shipping_manual   = num(r"(?:Freight|Shipping\s*Cost)")
+    shipping_pct_of_material = float(params.get("ShippingPctOfMaterial", 0.15) or 0.0)
+    shipping_cost_default = round(material_direct_cost * shipping_pct_of_material, 2) if shipping_pct_of_material else 0.0
+    shipping_cost     = float(shipping_manual if shipping_entered else shipping_cost_default)
     insurance_pct     = num_pct(r"(?:Insurance|Liability\s*Adder)", params["InsurancePct"])
     packaging_cost    = packaging_hr * rates["AssemblyRate"] + crate_nre_cost + packaging_mat
     packaging_flat_base = float((crate_nre_cost or 0.0) + (packaging_mat or 0.0))
+    shipping_basis_desc = (
+        "Freight & logistics (sheet entry)"
+        if shipping_entered
+        else (
+            f"Freight & logistics (~{shipping_pct_of_material:.0%} of material)"
+            if shipping_pct_of_material
+            else "Freight & logistics"
+        )
+    )
+    shipping_cost_base = float(shipping_cost)
 
     # EHS / compliance
     ehs_hr   = sum_time(r"(?:EHS|Compliance|Training|Waste\s*Handling)")
@@ -7598,7 +7621,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         "Fixture Material": {"basis": "Fixture raw stock"},
         "Hardware / BOM": {"basis": "Pass-through hardware / BOM"},
         "Outsourced Vendors": {"basis": "Outside processing vendors"},
-        "Shipping": {"basis": "Freight & logistics"},
+        "Shipping": {"basis": shipping_basis_desc},
         "Consumables /Hr": {"basis": "Machine & inspection hours $/hr"},
         "Utilities": {"basis": "Spindle/inspection hours $/hr"},
         "Consumables Flat": {"basis": "Fixed shop supplies"},
@@ -8346,6 +8369,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         "fai_prep_hr": 0.0,
         "packaging_hours": packaging_hr_base,
         "packaging_flat_cost": packaging_flat_base,
+        "shipping_cost": shipping_cost_base,
         "shipping_hint": "",
     }
     if fixture_plan_desc:
@@ -9107,6 +9131,16 @@ def compute_quote_from_df(df: pd.DataFrame,
         entry["new_value"] = float(packaging_flat_override)
         pass_through["Packaging Flat"] = float(packaging_flat_override)
 
+    shipping_override = _clamp_override((overrides or {}).get("shipping_cost"), 0.0, None)
+    if shipping_override is not None:
+        baseline_val = float(pass_through_baseline.get("Shipping", shipping_cost_base))
+        entry = applied_pass.setdefault("Shipping", {"old_value": baseline_val, "notes": []})
+        entry["notes"].append(f"set to ${shipping_override:,.2f}{_source_suffix('shipping_cost')}")
+        entry["new_value"] = float(shipping_override)
+        pass_through["Shipping"] = float(shipping_override)
+        pass_key_map[_normalize_key("Shipping")] = "Shipping"
+        pass_meta.setdefault("Shipping", {})["basis"] = "Freight & logistics (user override)"
+
     cmm_minutes_override = _clamp_override((overrides or {}).get("cmm_minutes"), 0.0, 60.0)
     if cmm_minutes_override is not None:
         base_cmm_hr = float(cmm_run_hr or 0.0)
@@ -9517,7 +9551,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     fixture_material_cost = float(pass_through.get("Fixture Material", fixture_material_cost_base))
     hardware_cost = float(pass_through.get("Hardware / BOM", hardware_cost))
     outsourced_costs = float(pass_through.get("Outsourced Vendors", outsourced_costs))
-    shipping_cost = float(pass_through.get("Shipping", shipping_cost))
+    shipping_cost = float(pass_through.get("Shipping", shipping_cost_base))
     consumables_hr_cost = float(pass_through.get("Consumables /Hr", consumables_hr_cost))
     utilities_cost = float(pass_through.get("Utilities", utilities_cost))
     consumables_flat = float(pass_through.get("Consumables Flat", consumables_flat))

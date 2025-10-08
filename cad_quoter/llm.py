@@ -93,6 +93,11 @@ SUGG_TO_EDITOR = {
         float,
         float,
     ),
+    "shipping_cost": (
+        "Shipping Cost Override",
+        float,
+        float,
+    ),
     "fai_required": (
         "FAIR Required",
         lambda flag: 1 if flag else 0,
