@@ -24,14 +24,13 @@ QC-01,In-Process Inspection Labor,Operator time spent checking parts at the mach
 ENG-06,Fixture Build Labor Hours,Toolmaker time to assemble and qualify the custom fixture.,4–40 hours of toolmaker time (+$300–$3000).,Number,12
 PM-08,Project Manager Hours,Complex projects with many milestones require dedicated management time.,$500–$5000+ for dedicated project management.,Number,20
 COM-07,Profit Margin,The percentage added to the total cost to arrive at the final price.,15–40% of total cost.,Number,35
-ASM-02,Hardware / BOM Cost,The purchase cost of all fasteners and components to be installed.,Direct cost input.,Number,75.5
+ASM-02,Hardware Cost,The purchase cost of all fasteners and components to be installed.,Direct cost input.,Number,75.5
 MAT-09,Number of Blanks Required,Total pieces of raw stock needed for the job.,Direct cost multiplier.,Number,102
 COM-03,Freight / Shipping Cost,The direct cost charged by the carrier.,Direct cost input.,Number,125
 GRD-04,Grinding Wheel Cost & Dressing Time,Cost of the abrasive wheel and the time spent preparing it.,$100–$500 NRE; +0.1 hr labor per part.,Number,200
 MIL-02,Number of Milling Setups,Each re-fixturing of the part adds significant labor.,0.5–2.0 hours labor per setup (+$50–$200).,Number,200
 TRN-09,Tooling Cost (Carbide Inserts),Cost of consumable turning inserts.,$20–$500 on tooling cost line item.,Number,225
 MAT-06,Material Vendor Lead Time,Long lead-time materials can delay the entire project.,Can add weeks to lead time; +$100s in expedite fees.,Number,250
-ENG-07,Fixture Material Cost,Cost of the raw materials for the fixture.,$100–$2000 in material NRE.,Number,350
 MIL-09,Tooling Cost (Carbide Endmills),Cost of consumable cutters, amortized over the job.,$50–$1000+ on tooling cost line item.,Number,450
 MAT-05,Material MOQ,If the job requires less than the MOQ, you must buy and store the excess.,Can increase material cost by 100-500% for small jobs.,Number,500
 ASM-01,Manual Assembly Labor,Time for installing hardware (helicoils, dowel pins, bearings).,$5–$150 per assembly.,Number,2000
