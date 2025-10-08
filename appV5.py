@@ -7792,7 +7792,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         "Shipping": {"basis": shipping_basis_desc},
         "Consumables /Hr": {"basis": "Machine & inspection hours $/hr"},
         "Utilities": {"basis": "Spindle/inspection hours $/hr"},
-        "Consumables Flat": {"basis": "Fixed shop supplies"},
+        "Consumables": {"basis": "Fixed shop supplies"},
         "Packaging Flat": {"basis": "Packaging materials & crates"},
     }
     if material_scrap_credit_applied:
@@ -7813,7 +7813,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         "Outsourced Vendors": outsourced_costs,
         "Shipping": shipping_cost,
         "Utilities": utilities_cost,
-        "Consumables Flat": consumables_flat,
+        "Consumables": consumables_flat,
         "Packaging Flat": packaging_flat_base,
     }
     pass_through = {
@@ -9682,7 +9682,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     shipping_cost = float(pass_through.get("Shipping", shipping_cost_base))
     consumables_hr_cost = float(pass_through.get("Consumables /Hr", consumables_hr_cost))
     utilities_cost = float(pass_through.get("Utilities", utilities_cost))
-    consumables_flat = float(pass_through.get("Consumables Flat", consumables_flat))
+    consumables_flat = float(pass_through.get("Consumables", consumables_flat))
 
     labor_cost = programming_per_part + fixture_labor_per_part + sum(process_costs.values())
 
