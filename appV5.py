@@ -9591,31 +9591,14 @@ def compute_quote_from_df(df: pd.DataFrame,
     for label, value in direct_costs_display.items():
         detail_bits: list[str] = []
         basis = pass_meta.get(label, {}).get("basis")
-        if basis:
+        if basis and label != "Material":
             detail_bits.append(f"Basis: {basis}")
         if label == "Insurance":
             detail_bits.append(f"Applied {insurance_pct:.1%} of labor + directs")
         elif label == "Vendor Markup Added":
             detail_bits.append(f"Markup {vendor_markup:.1%} on vendors + shipping")
         elif label == "Material":
-            source = material_detail_for_breakdown.get("source")
-            symbol = material_detail_for_breakdown.get("symbol")
-            unit_price_kg = material_detail_for_breakdown.get("unit_price_usd_per_kg")
-            unit_price_lb = material_detail_for_breakdown.get("unit_price_usd_per_lb")
-            premium = material_detail_for_breakdown.get("vendor_premium_usd_per_kg")
-            asof = material_detail_for_breakdown.get("unit_price_asof")
-            if source:
-                detail_bits.append(f"Source: {source}")
-            if symbol:
-                detail_bits.append(f"Symbol: {symbol}")
-            if unit_price_kg:
-                detail_bits.append(f"Unit ${unit_price_kg:,.2f}/kg")
-            if unit_price_lb:
-                detail_bits.append(f"Unit ${unit_price_lb:,.2f}/lb")
-            if premium:
-                detail_bits.append(f"Premium ${premium:,.2f}/kg")
-            if asof:
-                detail_bits.append(f"As of {asof}")
+            pass
         pass_notes = applied_pass.get(label, {}).get("notes")
         if pass_notes:
             detail_bits.append("LLM: " + ", ".join(pass_notes))
