@@ -5877,23 +5877,27 @@ def _estimate_inprocess_default_from_tolerance(
     min_tol = min(candidates) if candidates else None
     base_hours = 1.0
     if min_tol is not None:
-        if min_tol <= 0.0002:
-            base_hours = 3.0
-        elif min_tol <= 0.0005:
-            base_hours = 2.2
-        elif min_tol <= 0.001:
-            base_hours = 1.6
-        elif min_tol <= 0.002:
-            base_hours = 1.3
-        elif min_tol <= 0.005:
-            base_hours = 1.0
-        elif min_tol <= 0.010:
-            base_hours = 0.8
-        else:
-            base_hours = 0.6
+        # Use a smooth curve instead of rigid breakpoints so the hours scale
+        # proportionally with tolerance precision.  The minimum tolerance value is
+        # expressed in inches; normalize the value against a 0.002" reference and
+        # clamp it to [0, 1] so the curve stays bounded.
+        min_tol = max(float(min_tol), 1e-6)
+        normalized = max(0.0, min(1.0, (0.002 - min_tol) / 0.002))
+        base_hours = 0.6 + 3.0 * normalized ** 0.7
+
+        # Reward drawings that call out multiple tight tolerances by adding a
+        # gentle premium.  This keeps the impact sub-linear so a large number of
+        # similar callouts does not explode the estimate.
         tight_count = sum(1 for val in candidates if val <= 0.0015)
         if tight_count > 1:
-            base_hours += min(1.0, 0.2 * (tight_count - 1))
+            base_hours += min(1.2, 0.25 * (tight_count - 1))
+
+        sub_thou_count = sum(1 for val in candidates if val <= 0.0005)
+        if sub_thou_count:
+            base_hours += min(0.8, 0.35 * sub_thou_count)
+
+        if tight_mentions:
+            base_hours += min(0.5, 0.15 * tight_mentions)
     elif tight_mentions:
         base_hours = 1.5
 
