@@ -5341,9 +5341,7 @@ def render_quote(
                 else:
                     show_with_scrap = bool(with_scrap_mass) or show_zeros
                 if show_with_scrap or show_zeros:
-                    weight_lines.append(
-                        f"  With Scrap: {_format_weight_lb_oz(with_scrap_mass)}"
-                    )
+                    weight_lines.append(f"{_format_weight_lb_oz(with_scrap_mass)}")
 
             detail_lines.extend(weight_lines)
             if scrap_credit_lines:
