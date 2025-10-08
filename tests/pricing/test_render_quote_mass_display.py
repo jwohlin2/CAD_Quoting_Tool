@@ -190,5 +190,5 @@ def test_render_quote_shows_flat_extras_when_no_hours() -> None:
 
     rendered = appV5.render_quote(result, currency="$", show_zeros=False)
 
-    assert rendered.count("includes $200.00 extras") == 1
-    assert "hr extras" not in rendered
+    assert "includes $200.00 extras" not in rendered
+    assert rendered.count("2.22 hr @ $90.00/hr") == 1
