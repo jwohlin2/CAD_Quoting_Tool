@@ -2468,10 +2468,11 @@ def effective_to_overrides(effective: dict, baseline: dict | None = None) -> dic
         "cmm_minutes": (0.0, None),
         "in_process_inspection_hr": (0.0, None),
         "fai_prep_hr": (0.0, None),
-        "inspection_total_hr": (0.0, None),
         "packaging_hours": (0.0, None),
         "packaging_flat_cost": (0.0, None),
     }
+    # Ensure inspection total overrides survive the sanitize pass.
+    numeric_keys["inspection_total_hr"] = (0.0, None)
     for key, (_default, _) in numeric_keys.items():
         eff_val = effective.get(key)
         base_val = baseline.get(key) if isinstance(baseline, dict) else None
@@ -8845,7 +8846,12 @@ def compute_quote_from_df(df: pd.DataFrame,
             inspection_adjustments.get("fai_prep", 0.0) + fai_prep_override
         )
 
-    inspection_total_override = _clamp_override((overrides or {}).get("inspection_total_hr"), 0.0, 12.0)
+    inspection_total_raw = None
+    if isinstance(overrides, dict):
+        inspection_total_raw = overrides.get("inspection_total_hr")
+    if inspection_total_raw is None and isinstance(quote_state.user_overrides, dict):
+        inspection_total_raw = quote_state.user_overrides.get("inspection_total_hr")
+    inspection_total_override = _clamp_override(inspection_total_raw, 0.0, 12.0)
     if inspection_total_override is not None:
         current_inspection_hr = float(process_meta.get("inspection", {}).get("hr", 0.0))
         _update_process_hours(
