@@ -1462,7 +1462,9 @@ def sanitize_suggestions(s: dict, bounds: dict) -> dict:
     fixture_build_raw = s.get("fixture_build_hr")
     if fixture_build_raw is None and setup_block:
         fixture_build_raw = setup_block.get("fixture_build_hr")
-    fixture_build_hr = _extract_float_field(fixture_build_raw, 0.0, 2.0, ("fixture_build_hr",))
+    fixture_build_hr = _extract_float_field(
+        fixture_build_raw, 0.0, 20.0, ("fixture_build_hr",)
+    )
     if fixture_build_hr is not None:
         extra["fixture_build_hr"] = fixture_build_hr
 
@@ -2199,7 +2201,7 @@ def merge_effective(
     if notes_val:
         eff["notes"] = notes_val
 
-    _merge_numeric_field("fixture_build_hr", 0.0, 2.0, "fixture_build_hr")
+    _merge_numeric_field("fixture_build_hr", 0.0, 20.0, "fixture_build_hr")
     _merge_numeric_field("soft_jaw_hr", 0.0, 1.0, "soft_jaw_hr")
     _merge_numeric_field("soft_jaw_material_cost", 0.0, 60.0, "soft_jaw_material_cost")
     _merge_numeric_field("handling_adder_hr", 0.0, 0.2, "handling_adder_hr")
@@ -9777,7 +9779,9 @@ def compute_quote_from_df(df: pd.DataFrame,
         return float(hours) * float(rates.get(rate_key, rates.get("MillingRate", 120.0)))
 
     fixture_notes: list[str] = []
-    fixture_build_override = _clamp_override((overrides or {}).get("fixture_build_hr"), 0.0, 2.0)
+    fixture_build_override = _clamp_override(
+        (overrides or {}).get("fixture_build_hr"), 0.0, 20.0
+    )
     soft_jaw_hr_override = _clamp_override((overrides or {}).get("soft_jaw_hr"), 0.0, 1.0) or 0.0
     soft_jaw_cost_override = _clamp_override((overrides or {}).get("soft_jaw_material_cost"), 0.0, 60.0) or 0.0
 
