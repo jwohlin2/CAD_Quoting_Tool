@@ -5090,23 +5090,27 @@ def render_quote(
     lines.append(divider)
     proc_total = 0.0
     for key, value in sorted((process_costs or {}).items(), key=lambda kv: kv[1], reverse=True):
-        if (value > 0) or show_zeros:
+        meta = process_meta.get(str(key).lower(), {})
+        try:
+            hr_val = float(meta.get("hr", 0.0) or 0.0)
+        except Exception:
+            hr_val = 0.0
+        try:
+            rate_val = float(meta.get("rate", 0.0) or 0.0)
+        except Exception:
+            rate_val = 0.0
+        try:
+            extra_val = float(meta.get("base_extra", 0.0) or 0.0)
+        except Exception:
+            extra_val = 0.0
+
+        numeric_value = float(value or 0.0)
+        has_displayable_cost = (numeric_value > 0.0) or show_zeros or (abs(extra_val) > 1e-6)
+        if has_displayable_cost:
             label = _process_label(key)
-            row(label, float(value), indent="  ")
-            meta = process_meta.get(str(key).lower(), {})
+            row(label, numeric_value, indent="  ")
+
             detail_bits: list[str] = []
-            try:
-                hr_val = float(meta.get("hr", 0.0) or 0.0)
-            except Exception:
-                hr_val = 0.0
-            try:
-                rate_val = float(meta.get("rate", 0.0) or 0.0)
-            except Exception:
-                rate_val = 0.0
-            try:
-                extra_val = float(meta.get("base_extra", 0.0) or 0.0)
-            except Exception:
-                extra_val = 0.0
             if hr_val > 0:
                 detail_bits.append(f"{hr_val:.2f} hr @ ${rate_val:,.2f}/hr")
             if abs(extra_val) > 1e-6:
@@ -5126,7 +5130,8 @@ def render_quote(
                 write_detail(merged_detail, indent="    ")
             else:
                 add_process_notes(key, indent="    ")
-            proc_total += float(value or 0.0)
+
+            proc_total += numeric_value
     row("Total", proc_total, indent="  ")
 
     hour_summary_entries: list[tuple[str, float]] = []

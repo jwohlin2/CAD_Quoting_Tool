@@ -123,3 +123,7 @@ def test_render_quote_shows_flat_extras_when_no_hours() -> None:
 
     assert rendered.count("includes $200.00 extras") == 1
     assert "hr extras" not in rendered
+    process_total_line = next(
+        line for line in rendered.splitlines() if line.startswith("  Total")
+    )
+    assert process_total_line.strip().endswith("$200.00")
