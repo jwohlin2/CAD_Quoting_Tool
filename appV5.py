@@ -4993,7 +4993,6 @@ def render_quote(
             if show_mass_line:
                 net_display = _format_weight_lb_decimal(net_mass_val)
                 mass_desc: list[str] = [f"{net_display} net"]
-                mass_source_present = material.get("effective_mass_g") is not None
                 if (
                     effective_mass_val
                     and net_mass_val
@@ -5006,8 +5005,6 @@ def render_quote(
                     mass_desc.append(
                         f"scrap-adjusted {_format_weight_lb_decimal(effective_mass_val)}"
                     )
-                if mass_source_present:
-                    write_line(f"Mass: {' '.join(mass_desc)}", "  ")
 
             if (net_mass_val and net_mass_val > 0) or show_zeros:
                 write_line(f"Net Weight: {_format_weight_lb_oz(net_mass_val)}", "  ")
