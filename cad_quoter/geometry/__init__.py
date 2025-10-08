@@ -678,7 +678,7 @@ try:
     )
     from OCP.BRepPrimAPI import BRepPrimAPI_MakePrism
     from OCP.BRepAlgoAPI import BRepAlgoAPI_Section
-    from OCP.BRepAdaptor import BRepAdaptor_Surface
+    from OCP.BRepAdaptor import BRepAdaptor_Surface, BRepAdaptor_Curve
     
     # ADD THESE TWO IMPORTS
     from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
@@ -690,7 +690,7 @@ try:
     from OCP.GeomAdaptor import GeomAdaptor_Surface
     from OCP.GeomAbs import (
         GeomAbs_Plane, GeomAbs_Cylinder, GeomAbs_Torus, GeomAbs_Cone,
-        GeomAbs_BSplineSurface, GeomAbs_BezierSurface
+        GeomAbs_BSplineSurface, GeomAbs_BezierSurface, GeomAbs_Circle,
     )
     from OCP.ShapeAnalysis import ShapeAnalysis_Surface
     from OCP.gp import gp_Pnt, gp_Vec, gp_Dir, gp_Pln
@@ -730,7 +730,7 @@ except Exception:
     )
     from OCC.Core.BRepPrimAPI import BRepPrimAPI_MakePrism
     from OCC.Core.BRepAlgoAPI import BRepAlgoAPI_Section
-    from OCC.Core.BRepAdaptor import BRepAdaptor_Surface
+    from OCC.Core.BRepAdaptor import BRepAdaptor_Surface, BRepAdaptor_Curve
     # ADD TopTools import and TopoDS_Face for the fix below
     from OCC.Core.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
     from OCC.Core.TopoDS import (
@@ -742,7 +742,7 @@ except Exception:
     from OCC.Core.GeomAdaptor import GeomAdaptor_Surface
     from OCC.Core.GeomAbs import (
         GeomAbs_Plane, GeomAbs_Cylinder, GeomAbs_Torus, GeomAbs_Cone,
-        GeomAbs_BSplineSurface, GeomAbs_BezierSurface
+        GeomAbs_BSplineSurface, GeomAbs_BezierSurface, GeomAbs_Circle,
     )
     from OCC.Core.ShapeAnalysis import ShapeAnalysis_Surface
     from OCC.Core.gp import gp_Pnt, gp_Vec, gp_Dir, gp_Pln
@@ -1141,28 +1141,87 @@ def _min_wall_between_parallel_planes(shape):
                     if (min_th is None) or (th < min_th): min_th = th
     return min_th
 
+def _hole_face_identifier(face, cylinder, face_bbox):
+    centers = []
+    try:
+        exp = TopExp_Explorer(face, TopAbs_EDGE)
+    except Exception:
+        exp = None
+    while exp and exp.More():
+        try:
+            edge = to_edge(exp.Current())
+            curve = BRepAdaptor_Curve(edge)
+            if curve.GetType() == GeomAbs_Circle:
+                circ = curve.Circle()
+                loc = circ.Location()
+                centers.append((round(loc.X(), 3), round(loc.Y(), 3), round(loc.Z(), 3)))
+        except Exception:
+            pass
+        finally:
+            exp.Next()
+    if centers:
+        return ("edges", tuple(sorted(centers)))
+    loc = cylinder.Axis().Location()
+    center = (
+        round(0.5 * (face_bbox[0] + face_bbox[3]), 3),
+        round(0.5 * (face_bbox[1] + face_bbox[4]), 3),
+        round(0.5 * (face_bbox[2] + face_bbox[5]), 3),
+    )
+    return (
+        "fallback",
+        (
+            round(loc.X(), 3),
+            round(loc.Y(), 3),
+            round(loc.Z(), 3),
+            *center,
+        ),
+    )
+
+
 def _hole_groups_from_cylinders(shape, bbox=None):
-    if bbox is None: bbox = _bbox(shape)
-    from collections import defaultdict
-    groups = defaultdict(lambda: {"dia_mm":0.0,"depth_mm":0.0,"through":False,"count":0})
+    if bbox is None:
+        bbox = _bbox(shape)
+    groups = {}
     for f in iter_faces(shape):
-        if _face_type(f) == "cylindrical":
-            ga = GeomAdaptor_Surface(face_surface(f)[0])
-            try:
-                cyl = ga.Cylinder(); r = abs(cyl.Radius()); ax = cyl.Axis().Direction()
-                fb = _bbox(f)
-                def proj(x,y,z): return x*ax.X() + y*ax.Y() + z*ax.Z()
-                span = abs(proj(fb[3],fb[4],fb[5]) - proj(fb[0],fb[1],fb[2]))
-                dia = 2.0*r
-                bmin = proj(*bbox[:3]); bmax = proj(*bbox[3:]); bspan = abs(bmax-bmin)
-                through = span > 0.9*bspan
-                key = (round(dia,2), round(span,2), through)
-                groups[key]["dia_mm"] = round(dia,2)
-                groups[key]["depth_mm"] = round(span,2)
-                groups[key]["through"] = through
-                groups[key]["count"] += 1
-            except Exception:
-                pass
+        if _face_type(f) != "cylindrical":
+            continue
+        ga = GeomAdaptor_Surface(face_surface(f)[0])
+        try:
+            cyl = ga.Cylinder()
+            r = abs(cyl.Radius())
+            ax = cyl.Axis().Direction()
+            fb = _bbox(f)
+
+            def proj(x, y, z):
+                return x * ax.X() + y * ax.Y() + z * ax.Z()
+
+            span = abs(proj(fb[3], fb[4], fb[5]) - proj(fb[0], fb[1], fb[2]))
+            dia = 2.0 * r
+            bmin = proj(*bbox[:3])
+            bmax = proj(*bbox[3:])
+            bspan = abs(bmax - bmin)
+            through = span > 0.9 * bspan
+            key = (round(dia, 2), round(span, 2), through)
+            hole_id = _hole_face_identifier(f, cyl, fb)
+        except Exception:
+            continue
+
+        entry = groups.setdefault(
+            key,
+            {
+                "dia_mm": round(dia, 2),
+                "depth_mm": round(span, 2),
+                "through": through,
+                "count": 0,
+                "_ids": set(),
+            },
+        )
+        if hole_id in entry["_ids"]:
+            continue
+        entry["_ids"].add(hole_id)
+        entry["count"] += 1
+    for entry in groups.values():
+        entry.pop("_ids", None)
     return list(groups.values())
 
 def _turning_score(shape, areas_by_type):
