@@ -4968,19 +4968,32 @@ def render_quote(
         surpct = material.get("surcharge_pct")
         matcost= material.get("material_cost")
         scrap  = material.get("scrap_pct", None)  # will show only if present in breakdown
+        scrap_credit_entered = bool(material.get("material_scrap_credit_entered"))
         scrap_credit = float(material.get("material_scrap_credit") or 0.0)
         unit_price_kg = material.get("unit_price_usd_per_kg")
         unit_price_lb = material.get("unit_price_usd_per_lb")
         price_source  = material.get("unit_price_source") or material.get("source")
         price_asof    = material.get("unit_price_asof")
 
-        have_any = any(v for v in [mass_g, net_mass_g, upg, minchg, surpct, matcost, scrap, scrap_credit])
+        have_any = any(
+            v
+            for v in [
+                mass_g,
+                net_mass_g,
+                upg,
+                minchg,
+                surpct,
+                matcost,
+                scrap,
+                scrap_credit if scrap_credit_entered else 0.0,
+            ]
+        )
 
         if have_any:
             mat_lines.append("Material & Stock")
             mat_lines.append(divider)
             if matcost or show_zeros: row("Material Cost (computed):", float(matcost or 0.0))
-            if scrap_credit:
+            if scrap_credit_entered and scrap_credit:
                 credit_display = _m(scrap_credit)
                 if credit_display.startswith(currency):
                     credit_display = f"-{credit_display}"
@@ -4999,7 +5012,6 @@ def render_quote(
             if show_mass_line:
                 net_display = _format_weight_lb_decimal(net_mass_val)
                 mass_desc: list[str] = [f"{net_display} net"]
-                mass_source_present = material.get("effective_mass_g") is not None
                 if (
                     effective_mass_val
                     and net_mass_val
@@ -5012,8 +5024,6 @@ def render_quote(
                     mass_desc.append(
                         f"scrap-adjusted {_format_weight_lb_decimal(effective_mass_val)}"
                     )
-                if mass_source_present:
-                    write_line(f"Mass: {' '.join(mass_desc)}", "  ")
 
             if (net_mass_val and net_mass_val > 0) or show_zeros:
                 write_line(f"Net Weight: {_format_weight_lb_oz(net_mass_val)}", "  ")
@@ -5025,24 +5035,27 @@ def render_quote(
             ):
                 write_line(f"With Scrap: {_format_weight_lb_oz(effective_mass_val)}", "  ")
 
-            if upg or show_zeros:
-                per_kg = f"{_m(unit_price_kg)} / kg" if unit_price_kg else ""
-                per_lb = f"{_m(unit_price_lb)} / lb" if unit_price_lb else ""
-                per_g = f"{currency}{float(upg or 0):,.4f} / g"
-                extras: list[str] = []
-                display_line = per_g
-                if per_kg:
-                    display_line = per_kg
-                    if per_lb:
-                        extras.append(per_lb)
-                    extras.append(per_g)
-                elif per_lb:
-                    display_line = per_lb
-                    extras.append(per_g)
-                if price_asof:
-                    extras.append(f"as of {price_asof}")
-                extra = f" ({', '.join(extras)})" if extras else ""
-                write_line(f"Unit Price: {display_line}{extra}", "  ")
+            if upg or unit_price_kg or unit_price_lb or show_zeros:
+                grams_per_lb = 1000.0 / LB_PER_KG
+                per_lb_value = _coerce_float_or_none(unit_price_lb)
+                if per_lb_value is None:
+                    per_kg_value = _coerce_float_or_none(unit_price_kg)
+                    if per_kg_value is not None:
+                        per_lb_value = per_kg_value / LB_PER_KG
+                if per_lb_value is None:
+                    per_g_value = _coerce_float_or_none(upg)
+                    if per_g_value is not None:
+                        per_lb_value = per_g_value * grams_per_lb
+                if per_lb_value is None and show_zeros:
+                    per_lb_value = 0.0
+
+                if per_lb_value is not None:
+                    display_line = f"{_m(per_lb_value)} / lb"
+                    extras: list[str] = []
+                    if price_asof:
+                        extras.append(f"as of {price_asof}")
+                    extra = f" ({', '.join(extras)})" if extras else ""
+                    write_line(f"Unit Price: {display_line}{extra}", "  ")
             if price_source:
                 write_line(f"Source: {price_source}", "  ")
             if minchg or show_zeros:  write_line(f"Supplier Min Charge: {_m(minchg or 0)}", "  ")
@@ -5128,12 +5141,12 @@ def render_quote(
                 extra_val = 0.0
             if hr_val > 0:
                 detail_bits.append(f"{hr_val:.2f} hr @ ${rate_val:,.2f}/hr")
-            if abs(extra_val) > 1e-6:
-                if rate_val > 0:
-                    extra_hr = extra_val / rate_val
-                    detail_bits.append(f"includes {extra_hr:.2f} hr extras")
-                else:
-                    detail_bits.append(f"includes ${extra_val:,.2f} extras")
+        if abs(extra_val) > 1e-6:
+            if rate_val > 0 and hr_val > 0:
+                extra_hr = extra_val / rate_val
+                detail_bits.append(f"includes {extra_hr:.2f} hr extras")
+            else:
+                detail_bits.append(f"includes ${extra_val:,.2f} extras")
             proc_notes = applied_process.get(str(key).lower(), {}).get("notes")
             if proc_notes:
                 detail_bits.append("LLM: " + ", ".join(proc_notes))
@@ -5159,6 +5172,15 @@ def render_quote(
         if hr_val > 0 or show_zeros:
             hour_summary_entries.append((_process_label(key), hr_val))
             total_hours += hr_val if hr_val else 0.0
+
+    programming_meta = (nre_detail or {}).get("programming") or {}
+    try:
+        programming_hours = float(programming_meta.get("prog_hr", 0.0) or 0.0)
+    except Exception:
+        programming_hours = 0.0
+    if programming_hours > 0 or show_zeros:
+        hour_summary_entries.append(("Programming", programming_hours))
+        total_hours += programming_hours if programming_hours else 0.0
 
     if hour_summary_entries:
         lines.append("")
@@ -5820,17 +5842,33 @@ def require_plate_inputs(geo: dict, ui_vars: dict[str, Any] | None) -> None:
         geo["material"] = material
 
 
-def net_mass_kg(plate_L_in, plate_W_in, t_in, hole_d_mm, density_g_cc: float = 7.85):
+def net_mass_kg(
+    plate_L_in,
+    plate_W_in,
+    t_in,
+    hole_d_mm,
+    density_g_cc: float = 7.85,
+    *,
+    return_removed_mass: bool = False,
+):
+    """Estimate the net mass of a rectangular plate and optional removed material.
+
+    When ``return_removed_mass`` is true the function returns a tuple
+    ``(net_mass_kg, removed_mass_g)`` where ``removed_mass_g`` is the grams of
+    material evacuated by the provided circular holes.  Otherwise the previous
+    behaviour of returning only the net mass in kilograms is preserved.
+    """
+
     if not (plate_L_in and plate_W_in and t_in):
-        return None
+        return (None, None) if return_removed_mass else None
     try:
         L = float(plate_L_in)
         W = float(plate_W_in)
         T = float(t_in)
     except Exception:
-        return None
+        return (None, None) if return_removed_mass else None
     if L <= 0 or W <= 0 or T <= 0:
-        return None
+        return (None, None) if return_removed_mass else None
     vol_plate_in3 = L * W * T
     try:
         t_mm = T * 25.4
@@ -5848,7 +5886,12 @@ def net_mass_kg(plate_L_in, plate_W_in, t_in, hole_d_mm, density_g_cc: float = 7
     vol_net_in3 = max(0.0, vol_plate_in3 - vol_holes_in3)
     vol_cc = vol_net_in3 * 16.387064
     mass_g = vol_cc * float(density_g_cc or 0.0)
-    return mass_g / 1000.0 if mass_g else 0.0
+    removed_mass_g = vol_holes_in3 * 16.387064 * float(density_g_cc or 0.0)
+
+    net_mass = mass_g / 1000.0 if mass_g else 0.0
+    if return_removed_mass:
+        return net_mass, removed_mass_g
+    return net_mass
 
 
 def _normalize_speeds_feeds_df(df: "pd.DataFrame") -> "pd.DataFrame":
@@ -6308,6 +6351,9 @@ def compute_quote_from_df(df: pd.DataFrame,
     plate_length_in_val: float | None = None
     plate_width_in_val: float | None = None
     plate_thickness_in_val: float | None = None
+    removal_mass_g_est: float | None = None
+    hole_scrap_frac_est: float = 0.0
+    hole_scrap_clamped_val: float = 0.0
 
     def _int_from(value: Any) -> int:
         num = _coerce_float_or_none(value)
@@ -6513,6 +6559,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     params["ProgCapHr"]                = sheet_num(r"\b(Programming\s*Cap\s*Hr)\b", params.get("ProgCapHr"))
     params["ProgSimpleDim_mm"]         = sheet_num(r"\b(Prog\s*Simple\s*Dim_mm)\b", params.get("ProgSimpleDim_mm"))
     params["ProgMaxToMillingRatio"]    = sheet_num(r"\b(Prog\s*Max\s*To\s*Milling\s*Ratio)\b", params.get("ProgMaxToMillingRatio"))
+    prog_hr_override = sheet_num(r"\b(Programming\s*(?:Override|Manual)(?:\s*H(?:ou)?rs?)?)\b", None)
     params["MillingConsumablesPerHr"]  = sheet_num(r"(?i)Milling\s*Consumables\s*/\s*Hr", params.get("MillingConsumablesPerHr"))
     params["TurningConsumablesPerHr"]  = sheet_num(r"(?i)Turning\s*Consumables\s*/\s*Hr", params.get("TurningConsumablesPerHr"))
     params["EDMConsumablesPerHr"]      = sheet_num(r"(?i)EDM\s*Consumables\s*/\s*Hr", params.get("EDMConsumablesPerHr"))
@@ -6679,7 +6726,19 @@ def compute_quote_from_df(df: pd.DataFrame,
             if val and val > 0:
                 holes_for_mass.append(float(val))
         thickness_in_for_mass = (thickness_mm_val / 25.4) if thickness_mm_val else _coerce_float_or_none(ui_vars.get("Thickness (in)"))
-        net_mass_calc = net_mass_kg(length_in_val, width_in_val, thickness_in_for_mass, holes_for_mass, density_g_cc)
+        net_mass_calc_tuple = net_mass_kg(
+            length_in_val,
+            width_in_val,
+            thickness_in_for_mass,
+            holes_for_mass,
+            density_g_cc,
+            return_removed_mass=True,
+        )
+        if isinstance(net_mass_calc_tuple, tuple):
+            net_mass_calc, removed_mass_candidate = net_mass_calc_tuple
+        else:
+            net_mass_calc, removed_mass_candidate = net_mass_calc_tuple, None
+
         if net_mass_calc:
             geo_context.setdefault("net_mass_kg_est", float(net_mass_calc))
             try:
@@ -6691,6 +6750,18 @@ def compute_quote_from_df(df: pd.DataFrame,
                 GEO_vol_mm3 = max(GEO_vol_mm3, vol_cm3_net * 1000.0)
                 geo_context.setdefault("net_volume_cm3", float(vol_cm3_net))
 
+        if removed_mass_candidate and removed_mass_candidate > 0:
+            removal_mass_g_est = float(removed_mass_candidate)
+            if net_mass_calc:
+                try:
+                    ratio = removal_mass_g_est / max(1e-6, float(net_mass_calc) * 1000.0)
+                except Exception:
+                    ratio = 0.0
+            else:
+                ratio = 0.0
+            if ratio > 0:
+                hole_scrap_frac_est = max(hole_scrap_frac_est, float(ratio))
+
         if thickness_mm_val > 0:
             plate_thickness_in_val = float(thickness_mm_val) / 25.4
         elif thickness_in_for_mass and thickness_in_for_mass > 0:
@@ -6699,6 +6770,21 @@ def compute_quote_from_df(df: pd.DataFrame,
             t_in_hint = _coerce_float_or_none(ui_vars.get("Thickness (in)"))
             if t_in_hint and t_in_hint > 0:
                 plate_thickness_in_val = float(t_in_hint)
+
+    if removal_mass_g_est and removal_mass_g_est > 0:
+        geo_context.setdefault("material_removed_mass_g_est", float(removal_mass_g_est))
+        if inner_geo is not None:
+            inner_geo.setdefault("material_removed_mass_g_est", float(removal_mass_g_est))
+
+    if hole_scrap_frac_est and hole_scrap_frac_est > 0:
+        hole_scrap_clamped_val = max(0.0, min(0.25, float(hole_scrap_frac_est)))
+        scrap_pct = max(scrap_pct, hole_scrap_clamped_val)
+        scrap_pct_baseline = max(scrap_pct_baseline, hole_scrap_clamped_val)
+        geo_context.setdefault("scrap_pct_from_holes", float(hole_scrap_frac_est))
+        geo_context.setdefault("scrap_pct_from_holes_clamped", hole_scrap_clamped_val)
+        if inner_geo is not None:
+            inner_geo.setdefault("scrap_pct_from_holes", float(hole_scrap_frac_est))
+            inner_geo.setdefault("scrap_pct_from_holes_clamped", hole_scrap_clamped_val)
 
     if density_g_cc and density_g_cc > 0:
         geo_context.setdefault("density_g_cc", float(density_g_cc))
@@ -6779,8 +6865,20 @@ def compute_quote_from_df(df: pd.DataFrame,
     supplier_min_charge = first_num(r"\b(?:Supplier\s*Min\s*Charge|min\s*charge)\b", 0.0)
     surcharge_pct = num_pct(r"\b(?:Material\s*Surcharge|Volatility)\b", 0.0)
     explicit_mat  = num(r"\b(?:Material\s*Cost|Raw\s*Material\s*Cost)\b", 0.0)
-    material_scrap_credit_raw = num(r"(?:Material\s*Scrap(?:\s*Credit)?|Remnant(?:\s*Credit)?)", 0.0)
-    material_scrap_credit = abs(float(material_scrap_credit_raw or 0.0))
+    scrap_credit_pattern = r"(?:Material\s*Scrap(?:\s*Credit)?|Remnant(?:\s*Credit)?)"
+    scrap_credit_mask = contains(scrap_credit_pattern)
+    material_scrap_credit_entered = False
+    if scrap_credit_mask.any():
+        scrap_credit_values = pd.to_numeric(vals[scrap_credit_mask], errors="coerce")
+        material_scrap_credit_entered = bool(
+            scrap_credit_values.dropna().abs().gt(0).any()
+        )
+    material_scrap_credit_raw = (
+        num(scrap_credit_pattern, 0.0) if material_scrap_credit_entered else 0.0
+    )
+    material_scrap_credit = (
+        abs(float(material_scrap_credit_raw or 0.0)) if material_scrap_credit_entered else 0.0
+    )
     material_scrap_credit_applied = 0.0
 
     if material_vendor_csv is None:
@@ -6846,11 +6944,17 @@ def compute_quote_from_df(df: pd.DataFrame,
     material_detail_for_breakdown.setdefault("mass_g_net", net_mass_g)
     material_detail_for_breakdown.setdefault("net_mass_g", net_mass_g)
     material_detail_for_breakdown.setdefault("scrap_pct", scrap_pct)
+    if removal_mass_g_est and removal_mass_g_est > 0:
+        material_detail_for_breakdown.setdefault("material_removed_mass_g_est", float(removal_mass_g_est))
+    if hole_scrap_clamped_val > 0:
+        material_detail_for_breakdown.setdefault("scrap_pct_from_holes", float(hole_scrap_frac_est))
+        material_detail_for_breakdown.setdefault("scrap_pct_from_holes_clamped", float(hole_scrap_clamped_val))
     if mass_basis:
         material_detail_for_breakdown.setdefault("mass_basis", mass_basis)
     for key, value in fallback_meta.items():
         material_detail_for_breakdown.setdefault(key, value)
     material_detail_for_breakdown["unit_price_per_g"] = float(unit_price_per_g or 0.0)
+    material_detail_for_breakdown["material_scrap_credit_entered"] = material_scrap_credit_entered
     if "unit_price_usd_per_kg" not in material_detail_for_breakdown and unit_price_per_g:
         material_detail_for_breakdown["unit_price_usd_per_kg"] = float(unit_price_per_g) * 1000.0
     material_detail_for_breakdown["material_direct_cost"] = material_direct_cost
@@ -6900,7 +7004,10 @@ def compute_quote_from_df(df: pd.DataFrame,
             material_detail_for_breakdown["material_direct_cost"] = material_direct_cost
 
     # ---- programming / cam / dfm --------------------------------------------
-    prog_hr = sum_time(r"(?:Programming|2D\s*CAM|3D\s*CAM|Simulation|Verification|DFM|Setup\s*Sheets)", exclude_pattern=r"\bCMM\b")
+    prog_hr = sum_time(
+        r"(?:Programming|2D\s*CAM|3D\s*CAM|Simulation|Verification|DFM|Setup\s*Sheets)",
+        exclude_pattern=r"\b(?:CMM|Override|Manual)\b",
+    )
     cam_hr  = sum_time(r"(?:CAM\s*Programming|CAM\s*Sim|Post\s*Processing)")
     eng_hr  = sum_time(r"(?:Fixture\s*Design|Process\s*Sheet|Traveler|Documentation)")
 
@@ -6927,6 +7034,16 @@ def compute_quote_from_df(df: pd.DataFrame,
         prog_hr = min(prog_hr, params["ProgMaxToMillingRatio"] * milling_hr)
 
     total_prog_hr = prog_hr + cam_hr
+    auto_prog_hr = float(total_prog_hr)
+    prog_override_applied = False
+    if prog_hr_override is not None:
+        try:
+            override_val = max(0.0, float(prog_hr_override))
+        except Exception:
+            override_val = None
+        else:
+            total_prog_hr = override_val
+            prog_override_applied = True
     programming_cost   = total_prog_hr * rates["ProgrammingRate"] + eng_hr * rates["EngineerRate"]
     prog_per_lot       = programming_cost
     programming_per_part = (prog_per_lot / Qty) if (amortize_programming and Qty > 1) else prog_per_lot
@@ -6941,13 +7058,18 @@ def compute_quote_from_df(df: pd.DataFrame,
     fixture_labor_per_part = (fixture_labor_cost / Qty) if Qty > 1 else fixture_labor_cost
     fixture_per_part       = (fixture_cost / Qty) if Qty > 1 else fixture_cost
 
+    programming_detail = {
+        "prog_hr": float(total_prog_hr), "prog_rate": rates["ProgrammingRate"],
+        "eng_hr": float(eng_hr),         "eng_rate": rates["EngineerRate"],
+        "per_lot": prog_per_lot, "per_part": programming_per_part,
+        "amortized": bool(amortize_programming and Qty > 1)
+    }
+    if prog_override_applied:
+        programming_detail["override_applied"] = True
+        programming_detail["auto_prog_hr"] = auto_prog_hr
+
     nre_detail = {
-        "programming": {
-            "prog_hr": float(total_prog_hr), "prog_rate": rates["ProgrammingRate"],
-            "eng_hr": float(eng_hr),         "eng_rate": rates["EngineerRate"],
-            "per_lot": prog_per_lot, "per_part": programming_per_part,
-            "amortized": bool(amortize_programming and Qty > 1)
-        },
+        "programming": programming_detail,
         "fixture": {
             "build_hr": float(fixture_build_hr), "build_rate": rates["FixtureBuildRate"],
             "labor_cost": float(fixture_labor_cost),
@@ -7466,6 +7588,12 @@ def compute_quote_from_df(df: pd.DataFrame,
         "packaging_flat_cost": float((crate_nre_cost or 0.0) + (packaging_mat or 0.0)),
         "fai_required": bool(fai_flag_base),
     }
+    if removal_mass_g_est and removal_mass_g_est > 0:
+        features["material_removed_mass_g_est"] = float(removal_mass_g_est)
+    if hole_scrap_frac_est and hole_scrap_frac_est > 0:
+        features["scrap_pct_holes_est"] = float(hole_scrap_frac_est)
+        if hole_scrap_clamped_val:
+            features["scrap_pct_holes_clamped"] = float(hole_scrap_clamped_val)
     # Safely include tap/cbore counts even if later sections define seeds
     try:
         _tq = int(tap_qty_geo)
@@ -9241,13 +9369,9 @@ def compute_quote_from_df(df: pd.DataFrame,
             detail_bits.append(f"{hr:.2f} hr")
 
         if abs(extra) > 1e-6:
-            if rate > 0:
+            if rate > 0 and hr > 0:
                 extra_hr = extra / rate if rate else 0.0
-                if hr == 0:
-                    # When there are only extra charges (e.g., Grinding), display as standard hours @ rate
-                    detail_bits.append(f"{extra_hr:.2f} hr @ ${rate:,.2f}/hr")
-                else:
-                    detail_bits.append(f"includes {extra_hr:.2f} hr extras")
+                detail_bits.append(f"includes {extra_hr:.2f} hr extras")
             else:
                 detail_bits.append(f"includes ${extra:,.2f} extras")
 
