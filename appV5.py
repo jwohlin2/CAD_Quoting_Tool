@@ -262,6 +262,149 @@ _EZDXF_VER = geometry.EZDXF_VERSION
 SCRAP_DEFAULT_GUESS = 0.15
 
 
+# --- holes-based scrap helpers ---
+HOLE_SCRAP_MULT = 1.0  # tune 0.5–1.5 if you want holes to “count” more/less than area ratio
+
+
+def _iter_hole_diams_mm(geo_ctx: Mapping[str, Any] | None) -> list[float]:
+    """Collect hole diameters (mm) from DXF and STEP-derived context."""
+
+    if not isinstance(geo_ctx, Mapping):
+        return []
+    derived = geo_ctx.get("derived") if isinstance(geo_ctx.get("derived"), Mapping) else {}
+    out: list[float] = []
+
+    # DXF path: app already stores list of diameters as millimetres.
+    # See holes_from_circles → "hole_diams_mm".
+    # (DXF radius→dia, full arcs treated as circles.)
+    dxf_diams = derived.get("hole_diams_mm")
+    if isinstance(dxf_diams, (list, tuple)):
+        for d in dxf_diams:
+            try:
+                v = float(d)
+            except Exception:
+                continue
+            if v > 0:
+                out.append(v)
+
+    # STEP path: cylindrical faces → list of dicts with "dia_mm".
+    step_holes = derived.get("holes")
+    if isinstance(step_holes, (list, tuple)):
+        for h in step_holes:
+            try:
+                v = float(h.get("dia_mm"))
+            except Exception:
+                continue
+            if v > 0:
+                out.append(v)
+    return out
+
+
+def _plate_bbox_mm2(geo_ctx: Mapping[str, Any] | None) -> float:
+    """Approximate plate area from bbox (mm^2); fall back to UI plate L×W (in)."""
+
+    if not isinstance(geo_ctx, Mapping):
+        return 0.0
+    # Preferred: derived bbox from DXF polylines
+    derived = geo_ctx.get("derived") if isinstance(geo_ctx.get("derived"), Mapping) else {}
+    bbox_mm = derived.get("bbox_mm")
+    if (
+        isinstance(bbox_mm, (list, tuple))
+        and len(bbox_mm) == 2
+        and all(isinstance(x, (int, float)) and x > 0 for x in bbox_mm)
+    ):
+        return float(bbox_mm[0]) * float(bbox_mm[1])
+
+    # Fallback: UI plate Length/Width (inches) already present in sheet/vars
+    try:
+        L_in = float(geo_ctx.get("plate_length_mm") or 0.0) / 25.4  # if caller put mm there
+    except Exception:
+        L_in = None
+    try:
+        W_in = float(geo_ctx.get("plate_width_mm") or 0.0) / 25.4
+    except Exception:
+        W_in = None
+
+    # If the mm fields aren't set, check UI vars stuffed into geo_ctx
+    if not (L_in and W_in):
+        try:
+            L_in = L_in or float(geo_ctx.get("plate_length_in"))
+        except Exception:
+            pass
+        try:
+            W_in = W_in or float(geo_ctx.get("plate_width_in"))
+        except Exception:
+            pass
+
+    if L_in and W_in and L_in > 0 and W_in > 0:
+        return float(L_in * 25.4) * float(W_in * 25.4)
+    return 0.0
+
+
+def _holes_scrap_fraction(geo_ctx: Mapping[str, Any] | None, *, cap: float = 0.25) -> float:
+    """Scrap ~= sum(hole areas) / plate area (clamped)."""
+
+    diams = _iter_hole_diams_mm(geo_ctx)
+    if not diams:
+        return 0.0
+    plate_area_mm2 = _plate_bbox_mm2(geo_ctx)
+    if plate_area_mm2 <= 0:
+        return 0.0
+    holes_area_mm2 = 0.0
+    for d in diams:
+        r = 0.5 * float(d)
+        holes_area_mm2 += math.pi * r * r
+    frac = HOLE_SCRAP_MULT * (holes_area_mm2 / plate_area_mm2)
+    if not math.isfinite(frac) or frac < 0:
+        return 0.0
+    return min(cap, float(frac))
+
+
+def _holes_removed_mass_g(geo_ctx: Mapping[str, Any] | None) -> float | None:
+    """
+    Optional: estimate grams removed by (through) holes = Σ(πr^2 * thickness) * density.
+    Uses thickness_mm from geo_ctx and material density map; safe to skip if unknown.
+    """
+
+    if not isinstance(geo_ctx, Mapping):
+        return None
+    # thickness
+    thickness_mm = None
+    for key in ("thickness_mm", ("geo", "thickness_mm")):
+        try:
+            if isinstance(key, tuple):
+                thickness_mm = float(geo_ctx.get(key[0], {}).get(key[1]))
+            else:
+                thickness_mm = float(geo_ctx.get(key))
+        except Exception:
+            thickness_mm = None
+        if thickness_mm and thickness_mm > 0:
+            break
+    if not thickness_mm or thickness_mm <= 0:
+        return None
+
+    diams = _iter_hole_diams_mm(geo_ctx)
+    if not diams:
+        return None
+    vol_mm3 = 0.0
+    for d in diams:
+        r = 0.5 * float(d)
+        vol_mm3 += math.pi * r * r * float(thickness_mm)
+
+    # material density lookup (g/cc)
+    name = str((geo_ctx.get("material") or "")).strip().lower()
+    key = _normalize_lookup_key(name) if name else None
+    dens = None
+    if key and key in MATERIAL_DENSITY_G_CC_BY_KEY:
+        dens = MATERIAL_DENSITY_G_CC_BY_KEY[key]
+    if not dens and name:
+        dens = MATERIAL_DENSITY_G_CC_BY_KEYWORD.get(name)
+    if not dens:
+        dens = 7.85  # steel-ish default
+    grams = (vol_mm3 / 1000.0) * float(dens)
+    return grams if grams > 0 else None
+
+
 def _ensure_scrap_pct(val, *, default: float = 0.0) -> float:
     """
     Coerce UI/LLM scrap into a sane fraction in [0, 0.25].
@@ -7398,6 +7541,17 @@ def compute_quote_from_df(df: pd.DataFrame,
     else:
         scrap_pct = _ensure_scrap_pct(scrap_auto, default=SCRAP_DEFAULT_GUESS)
         scrap_pct_baseline = scrap_pct
+
+    holes_scrap = _holes_scrap_fraction(geo_context)
+    if holes_scrap and holes_scrap > 0:
+        # Take the more conservative (larger) scrap figure so we don’t underquote.
+        scrap_pct = _ensure_scrap_pct(
+            max(scrap_pct_baseline, holes_scrap), default=SCRAP_DEFAULT_GUESS
+        )
+        scrap_pct_baseline = scrap_pct
+        scrap_source_label = (scrap_source_label or "auto") + "+holes"
+    else:
+        scrap_pct = scrap_pct_baseline
     material_name_raw = sheet_text(r"(?i)Material\s*(?:Name|Grade|Alloy|Type)")
     if not material_name_raw:
         fallback_name = strv(r"(?i)^Material$", "")
@@ -8505,6 +8659,13 @@ def compute_quote_from_df(df: pd.DataFrame,
         "packaging_flat_cost": float((crate_nre_cost or 0.0) + (packaging_mat or 0.0)),
         "fai_required": bool(fai_flag_base),
     }
+    try:
+        removal_g = _holes_removed_mass_g(geo_context)
+    except Exception:
+        removal_g = None
+    if removal_g and removal_g > 0:
+        features["material_removed_mass_g"] = float(removal_g)
+        material_detail_for_breakdown.setdefault("material_removed_mass_g", float(removal_g))
     if removal_mass_g_est and removal_mass_g_est > 0:
         features["material_removed_mass_g_est"] = float(removal_mass_g_est)
     if hole_scrap_frac_est and hole_scrap_frac_est > 0:
