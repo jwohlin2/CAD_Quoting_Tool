@@ -43,6 +43,12 @@ def test_render_quote_places_why_after_pricing_ladder_and_llm_adjustments() -> N
     assert "LLM Adjustments" in lines
     assert "Why this price" in lines
 
+    total_labor_idx = next(i for i, line in enumerate(lines) if "Total Labor Cost" in line)
+    assert set(lines[total_labor_idx - 1]) == {"-"}
+
+    total_direct_idx = next(i for i, line in enumerate(lines) if "Total Direct Costs" in line)
+    assert set(lines[total_direct_idx - 1]) == {"-"}
+
     pricing_idx = lines.index("Pricing Ladder")
     llm_idx = lines.index("LLM Adjustments")
     why_idx = lines.index("Why this price")
@@ -96,7 +102,7 @@ def test_render_quote_includes_hour_summary() -> None:
     summary_idx = lines.index("Labor Hour Summary")
     divider_idx = summary_idx + 1
     assert lines[divider_idx].startswith("-")
-    summary_block = lines[summary_idx:summary_idx + 6]
+    summary_block = lines[summary_idx:summary_idx + 7]
     assert any("Milling" in line and "4.00 hr" in line for line in summary_block)
     assert any("Deburr" in line and "1.50 hr" in line for line in summary_block)
     assert any("Inspection" in line and "0.50 hr" in line for line in summary_block)

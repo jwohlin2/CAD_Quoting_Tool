@@ -4855,7 +4855,24 @@ def render_quote(
         for segment in re.split(r";\s*", str(detail)):
             write_wrapped(segment, indent)
 
+    def _is_total_label(label: str) -> bool:
+        clean = str(label or "").strip()
+        if not clean:
+            return False
+        clean = clean.rstrip(":")
+        clean = clean.lstrip("= ")
+        return clean.lower().startswith("total")
+
+    def _ensure_total_separator():
+        if not lines:
+            return
+        if lines[-1] == divider:
+            return
+        lines.append(divider)
+
     def row(label: str, val: float, indent: str = ""):
+        if _is_total_label(label):
+            _ensure_total_separator()
         # left-label, right-amount aligned to page_width
         left = f"{indent}{label}"
         right = _m(val)
@@ -4863,6 +4880,8 @@ def render_quote(
         lines.append(f"{left}{' ' * pad}{right}")
 
     def hours_row(label: str, val: float, indent: str = ""):
+        if _is_total_label(label):
+            _ensure_total_separator()
         left = f"{indent}{label}"
         right = _h(val)
         pad = max(1, page_width - len(left) - len(right))
