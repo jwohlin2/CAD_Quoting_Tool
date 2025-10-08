@@ -97,3 +97,19 @@ browser session first so Playwright inherits the necessary site state.
   required `.gguf` files into a `models/` directory.
 * DXF enrichment: install `ezdxf` and (optionally) ODA File Converter to enable
   the DXF parsing shortcuts used by the geometry helpers.
+
+## Pass-through cost categories
+
+The quote breakdown includes a "Pass Through" table that exposes supplemental
+line items which are transferred directly to the customer.  Each entry is
+defined in `appV5.py` alongside its descriptive "basis" label.  For example, the
+"Outsourced Vendors" row is backed by the `outsourced_costs` aggregate which
+sums any detected heat treat, plating/coating, or passivation values parsed from
+the estimating worksheet.  The label shown in the UI ("Basis: Outside processing
+vendors") comes from the `pass_meta` dictionary declared near line 7,600 of the
+same file.
+
+When a pass-through field is populated in the workbook, the raw monetary value
+flows into the corresponding row unchanged.  That is why a small entry such as
+`$0.10` on "Outsourced Vendors" reflects the exact total imported from the
+source spreadsheet or manual override rather than a derived or marked-up number.
