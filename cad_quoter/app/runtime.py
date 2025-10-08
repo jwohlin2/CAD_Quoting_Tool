@@ -214,31 +214,50 @@ def load_qwen_vl(
         mmproj_path=mmproj_path,
     )
 
-    try:
-        llm = Llama(
-            model_path=model_file,
-            mmproj_path=mmproj_file,
-            n_ctx=n_ctx,
-            n_gpu_layers=n_gpu_layers,
-            n_threads=n_threads,
-            # Qwen2.5-VL models require the updated chat handler name in llama.cpp
-            chat_format="qwen2.5_vl",
-            verbose=False,
-        )
-        _ = llm.create_chat_completion(
-            messages=[
-                {"role": "system", "content": "Return JSON {\"ok\":true}."},
-                {"role": "user", "content": "ping"},
-            ],
-            max_tokens=16,
-            temperature=0,
-        )
-        return llm
-    except Exception:
-        if n_ctx > 4096:
-            gc.collect()
-            return load_qwen_vl(n_ctx=4096, n_gpu_layers=0, n_threads=n_threads)
-        raise
+    attempted_chat_formats: tuple[str, ...] = ("qwen2.5_vl", "qwen")
+    last_invalid_chat_error: Exception | None = None
+
+    for chat_format in attempted_chat_formats:
+        try:
+            llm = Llama(
+                model_path=model_file,
+                mmproj_path=mmproj_file,
+                n_ctx=n_ctx,
+                n_gpu_layers=n_gpu_layers,
+                n_threads=n_threads,
+                chat_format=chat_format,
+                verbose=False,
+            )
+            _ = llm.create_chat_completion(
+                messages=[
+                    {"role": "system", "content": "Return JSON {\"ok\":true}."},
+                    {"role": "user", "content": "ping"},
+                ],
+                max_tokens=16,
+                temperature=0,
+            )
+            return llm
+        except Exception as exc:
+            message = str(exc)
+            if "Invalid chat handler" in message:
+                last_invalid_chat_error = exc
+                continue
+            if n_ctx > 4096:
+                gc.collect()
+                return load_qwen_vl(
+                    n_ctx=4096,
+                    n_gpu_layers=0,
+                    n_threads=n_threads,
+                    model_path=model_file,
+                    mmproj_path=mmproj_file,
+                )
+            raise
+
+    assert last_invalid_chat_error is not None  # for type checkers
+    raise RuntimeError(
+        "Vision LLM unavailable: llama.cpp build is missing Qwen chat handlers. "
+        "Upgrade llama.cpp to a version that includes qwen2.5_vl support."
+    ) from last_invalid_chat_error
 
 
 def _pick_best_gguf(paths: Iterable[str]) -> str:
