@@ -48,6 +48,25 @@ def test_render_quote_shows_net_mass_when_scrap_present() -> None:
     assert "Scrap Percentage: 20.0%" in rendered
 
 
+def test_render_quote_uses_net_mass_g_fallback() -> None:
+    start_g = 14866.489927078912
+    net_g = 11149.867445309184
+    material = {
+        "mass_g": start_g,
+        "effective_mass_g": start_g,
+        "net_mass_g": net_g,
+        "scrap_pct": 0.25,
+    }
+
+    result = _base_material_quote(material)
+
+    rendered = appV5.render_quote(result, currency="$", show_zeros=False)
+
+    assert "Starting Weight: 32 lb 12.4 oz" in rendered
+    assert "Scrap Weight: 8 lb 3.1 oz" in rendered
+    assert "Net Weight: 24 lb 9.3 oz" in rendered
+
+
 def _base_material_quote(material: dict) -> dict:
     return {
         "price": 10.0,

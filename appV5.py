@@ -5144,6 +5144,10 @@ def render_quote(
     if material:
         mass_g = material.get("mass_g")
         net_mass_g = material.get("mass_g_net")
+        if _coerce_float_or_none(net_mass_g) is None:
+            fallback_net_mass = material.get("net_mass_g")
+            if _coerce_float_or_none(fallback_net_mass) is not None:
+                net_mass_g = fallback_net_mass
         upg    = material.get("unit_price_per_g")
         minchg = material.get("supplier_min_charge")
         matcost= material.get("material_cost")
@@ -5245,14 +5249,18 @@ def render_quote(
             starting_mass_val = _coerce_float_or_none(material.get("effective_mass_g"))
             if starting_mass_val is None:
                 starting_mass_val = effective_mass_val
-            if net_mass_val is None:
-                net_mass_val = effective_mass_val
             if (
                 net_mass_val is None
-                and starting_mass_val is not None
                 and removal_mass_val is not None
+                and removal_mass_val >= 0
             ):
-                net_mass_val = max(0.0, float(starting_mass_val) - float(removal_mass_val))
+                base_for_net = starting_mass_val
+                if base_for_net is None:
+                    base_for_net = effective_mass_val
+                if base_for_net is not None:
+                    net_mass_val = max(0.0, float(base_for_net) - float(removal_mass_val))
+            if net_mass_val is None:
+                net_mass_val = effective_mass_val
             show_mass_line = (
                 (net_mass_val and net_mass_val > 0)
                 or (effective_mass_val and effective_mass_val > 0)
