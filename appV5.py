@@ -7330,7 +7330,19 @@ def compute_quote_from_df(df: pd.DataFrame,
     if priority not in ("expedite", "critical"):
         ExpeditePct = 0.0
 
-    Qty = max(1, int(first_num(r"\b" + alt('Qty','Lot Size','Quantity') + r"\b", 1)))
+    qty_override_val = None
+    if isinstance(params, Mapping):
+        qty_override_val = _coerce_float_or_none(params.get("Quantity"))
+
+    sheet_qty_raw = first_num(r"\b" + alt('Qty','Lot Size','Quantity') + r"\b", float("nan"))
+    sheet_qty_val = sheet_qty_raw if sheet_qty_raw == sheet_qty_raw else None
+
+    if qty_override_val is not None:
+        Qty = max(1, int(round(qty_override_val)))
+    elif sheet_qty_val is not None:
+        Qty = max(1, int(round(sheet_qty_val)))
+    else:
+        Qty = 1
     amortize_programming = True  # single switch if you want to expose later
 
     # ---- geometry (optional) -------------------------------------------------
