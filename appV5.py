@@ -7803,7 +7803,8 @@ def render_quote(
     pass_total = 0.0
     pass_through_labor_total = 0.0
     for key, value in sorted((pass_through or {}).items(), key=lambda kv: kv[1], reverse=True):
-        if key == "Material":
+        canonical_label = _canonical_pass_label(key)
+        if canonical_label.lower() == "material":
             continue
         if (value > 0) or show_zeros:
             # cosmetic: "consumables_hr_cost" → "Consumables /Hr Cost"
@@ -7813,7 +7814,7 @@ def render_quote(
             write_detail(direct_cost_details.get(key), indent="    ")
             amount_val = float(value or 0.0)
             pass_total += amount_val
-            canonical_pass_label = _canonical_pass_label(key)
+            canonical_pass_label = canonical_label
             if "labor" in canonical_pass_label.lower():
                 pass_through_labor_total += amount_val
     row("Total", pass_total, indent="  ")
