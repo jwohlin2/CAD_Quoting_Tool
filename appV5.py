@@ -295,24 +295,55 @@ _AMORTIZED_LABEL_PATTERN = re.compile(
 
 
 def _canonical_amortized_label(label: Any) -> tuple[str, bool]:
-    """Normalize labels that include an amortized suffix.
-
-    Returns a tuple of ``(canonical_label, is_amortized)`` where amortized labels are
-    collapsed to a ``"(amortized)"`` suffix so that display rows and stored totals use
-    consistent keys regardless of how the source spelled the suffix.
-    """
+    """Return a canonical label and flag for amortized cost rows."""
 
     text = str(label or "").strip()
     if not text:
-        return ("", False)
+        return "", False
+
+    normalized = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+    normalized = normalized.replace("perpart", "per part")
+    normalized = normalized.replace("perpiece", "per piece")
+    tokens = normalized.split()
+    token_set = set(tokens)
+
+    def _has(*want: str) -> bool:
+        return all(token in token_set for token in want)
+
+    amortized_tokens = {"amortized", "amortised"}
+    has_amortized = any(token in token_set for token in amortized_tokens)
+
+    if has_amortized:
+        per_part = (
+            _has("per", "part")
+            or _has("per", "pc")
+            or _has("per", "piece")
+            or "per piece" in normalized
+            or "per unit" in normalized
+        )
+        if "programming" in token_set:
+            canonical = (
+                "Programming (amortized per part)"
+                if per_part
+                else "Programming (amortized)"
+            )
+            return canonical, True
+        if "fixture" in token_set or "fixturing" in token_set:
+            canonical = (
+                "Fixture Build (amortized per part)"
+                if per_part
+                else "Fixture Build (amortized)"
+            )
+            return canonical, True
+        return text, True
 
     match = _AMORTIZED_LABEL_PATTERN.search(text)
-    if not match:
-        return (text, False)
+    if match:
+        prefix = text[: match.start()].rstrip()
+        canonical = f"{prefix} (amortized)" if prefix else match.group(1).lower()
+        return canonical, True
 
-    prefix = text[: match.start()].rstrip()
-    canonical = f"{prefix} (amortized)" if prefix else match.group(1).lower()
-    return (canonical, True)
+    return text, False
 
 from OCP.TopAbs   import TopAbs_EDGE, TopAbs_FACE
 from OCP.TopExp   import TopExp, TopExp_Explorer
@@ -5355,19 +5386,6 @@ def _normalize_bucket_key(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_")
 
 
-def _fold_buckets(process_costs: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Return a plain dictionary for downstream processing."""
-
-    if isinstance(process_costs, Mapping):
-        return dict(process_costs)
-    if process_costs is None:
-        return {}
-    try:
-        return dict(process_costs)
-    except Exception:
-        return {}
-
-
 def _canonical_bucket_key(name: str) -> str:
     normalized = _normalize_bucket_key(name)
     if not normalized:
@@ -5407,54 +5425,6 @@ def canonicalize_costs(process_costs: Mapping[str, Any] | None) -> dict[str, flo
     return out
 
 
-def _canonical_amortized_label(label: Any) -> tuple[str, bool]:
-    """Return a normalized amortized label and flag indicating it was amortized."""
-
-    text = str(label or "").strip()
-    if not text:
-        return "", False
-
-    lowered = text.lower()
-    if "amortized" not in lowered:
-        return text, False
-
-    amortized_map = {
-        "programming": "Programming (amortized)",
-        "fixture": "Fixture Build (amortized)",
-    }
-    for keyword, canonical in amortized_map.items():
-        if keyword in lowered:
-            return canonical, True
-
-    return text, True
-
-
-def _fold_buckets(process_costs: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Return a copy of ``process_costs`` with amortized buckets removed."""
-
-    if isinstance(process_costs, Mapping):
-        items = list(process_costs.items())
-    elif process_costs is None:
-        items = []
-    else:
-        try:
-            items = list(process_costs)
-        except Exception:
-            items = []
-
-    folded: dict[str, Any] = {}
-    for key, value in items:
-        canonical, is_amortized = _canonical_amortized_label(key)
-        if (
-            is_amortized
-            and canonical
-            in {"Programming (amortized)", "Fixture Build (amortized)"}
-        ):
-            continue
-        folded[key] = value
-    return folded
-
-
 def _process_label(key: str | None) -> str:
     raw = str(key or "").strip().lower().replace(" ", "_")
     canon = re.sub(r"[^a-z0-9]+", "_", raw).strip("_")
@@ -5483,40 +5453,6 @@ def _display_bucket_label(
     if canon_key in overrides:
         return overrides[canon_key]
     return _process_label(canon_key)
-
-
-def _canonical_amortized_label(label: Any) -> tuple[str | None, str]:
-    """Return a canonical/storage label for amortized cost rows."""
-
-    text = str(label or "").strip()
-    if not text:
-        return ("", "")
-
-    normalized = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
-    # Normalise common collapsed forms such as "perpart" → "per part"
-    normalized = normalized.replace("perpart", "per part")
-    normalized = normalized.replace("perpiece", "per piece")
-    tokens = normalized.split()
-    token_set = set(tokens)
-
-    def _has(*want: str) -> bool:
-        return all(token in token_set for token in want)
-
-    if "programming" in token_set and "amortized" in token_set:
-        if _has("per", "part") or _has("per", "pc") or "per piece" in normalized:
-            canonical = "Programming (amortized per part)"
-        else:
-            canonical = "Programming (amortized)"
-        return (canonical, canonical)
-
-    if ("fixture" in token_set or "fixturing" in token_set) and "amortized" in token_set:
-        if _has("per", "part") or _has("per", "pc") or "per piece" in normalized:
-            canonical = "Fixture Build (amortized per part)"
-        else:
-            canonical = "Fixture Build (amortized)"
-        return (canonical, canonical)
-
-    return (text, text)
 
 
 def _format_planner_bucket_line(
@@ -6223,30 +6159,6 @@ def render_quote(
             return False
         return canonical_key.startswith("planner_") or canonical_key == "planner_total"
 
-    def _fold_buckets(values: Mapping[str, Any] | None) -> dict[str, float]:
-        if not isinstance(values, Mapping):
-            return {}
-
-        totals_by_canonical: dict[str, float] = {}
-        display_key_by_canonical: dict[str, str] = {}
-
-        for key, raw_value in values.items():
-            canonical_key = _canonical_bucket_key(key)
-            if not canonical_key:
-                canonical_key = str(key)
-            try:
-                amount = float(raw_value or 0.0)
-            except Exception:
-                continue
-
-            totals_by_canonical[canonical_key] = totals_by_canonical.get(canonical_key, 0.0) + amount
-            display_key_by_canonical.setdefault(canonical_key, key)
-
-        return {
-            display_key_by_canonical[canonical_key]: total
-            for canonical_key, total in totals_by_canonical.items()
-        }
-
     def _safe_float(value: Any, default: float = 0.0) -> float:
         try:
             return float(value or 0.0)
@@ -6430,30 +6342,6 @@ def render_quote(
 
         return base
 
-    def _fold_buckets(costs: Mapping[str, Any] | None) -> dict[str, float]:
-        folded: dict[str, float] = {}
-        if not isinstance(costs, Mapping):
-            return folded
-
-        for raw_key, raw_value in costs.items():
-            alias_key = str(raw_key)
-            if _is_planner_meta(alias_key):
-                try:
-                    folded[alias_key] = folded.get(alias_key, 0.0) + float(raw_value or 0.0)
-                except Exception:
-                    continue
-                continue
-            canon_key = _canonical_bucket_key(raw_key)
-            if not canon_key:
-                continue
-            try:
-                amount = float(raw_value or 0.0)
-            except Exception:
-                continue
-            folded[canon_key] = folded.get(canon_key, 0.0) + amount
-
-        return folded
-
     process_meta, bucket_alias_map = _fold_process_meta(process_meta_raw)
     applied_process = _fold_applied_process(applied_process_raw, bucket_alias_map)
 
@@ -6633,136 +6521,6 @@ def render_quote(
             ops.sort(key=lambda item: (-item.get("minutes", 0.0), item.get("op", "")))
 
     process_costs_canon = canonicalize_costs(process_costs)
-
-    def _fold_buckets(cost_map: Mapping[str, Any] | None) -> dict[str, float]:
-        if isinstance(cost_map, Mapping):
-            raw_items = list(cost_map.items())
-        else:
-            try:
-                raw_items = list(dict(cost_map or {}).items())
-            except Exception:
-                raw_items = []
-
-        folded: dict[str, float] = {}
-
-        def _add_amount(key: str, amount: Any) -> None:
-            if not key:
-                return
-            try:
-                amount_val = float(amount or 0.0)
-            except Exception:
-                amount_val = 0.0
-            folded[key] = folded.get(key, 0.0) + amount_val
-
-        for canon_key, info in canonical_process_buckets.items():
-            if canon_key == "misc":
-                continue
-            total_amount = 0.0
-            if isinstance(info, Mapping):
-                try:
-                    total_amount = float(info.get("total", 0.0) or 0.0)
-                except Exception:
-                    total_amount = 0.0
-            if canon_key not in folded or total_amount:
-                _add_amount(canon_key, total_amount)
-
-        seen_canon_keys = {_canonical_bucket_key(key) for key in folded.keys()}
-        for raw_key, raw_value in raw_items:
-            canon_key = _canonical_bucket_key(raw_key)
-            if canon_key == "misc" or canon_key in seen_canon_keys:
-                continue
-            _add_amount(canon_key or str(raw_key), raw_value)
-            seen_canon_keys.add(canon_key)
-
-        standard_targets: set[str] = set(PROCESS_LABEL_OVERRIDES.keys())
-        standard_targets.update(PREFERRED_PROCESS_BUCKET_ORDER)
-        standard_targets.update(key for key in process_costs_canon.keys() if key != "misc")
-        standard_targets.update(key for key in bucket_rollup_map.keys() if key != "misc")
-        standard_targets.update(key for key in bucket_ops_map.keys() if key != "misc")
-        standard_targets.update(
-            _canonical_bucket_key(existing_key)
-            for existing_key in list(folded.keys())
-            if _canonical_bucket_key(existing_key) not in {"", "misc"}
-        )
-        standard_targets.discard("misc")
-
-        filler_tokens = {"misc", "miscellaneous", "other", "general", "na", "n", "n_a"}
-
-        def _resolve_misc_target(raw_key: Any) -> str:
-            text = str(raw_key or "").strip()
-            if not text:
-                return ""
-
-            def _candidate_keys(source: str) -> Iterable[str]:
-                seen: set[str] = set()
-                direct = _canonical_bucket_key(source)
-                if direct and direct != "misc":
-                    seen.add(direct)
-                    yield direct
-
-                cleaned = re.sub(r"\\b(?:misc|miscellaneous|other|general|n/?a?)\\b", " ", source)
-                cleaned_norm = _canonical_bucket_key(cleaned)
-                if cleaned_norm and cleaned_norm != "misc" and cleaned_norm not in seen:
-                    seen.add(cleaned_norm)
-                    yield cleaned_norm
-
-                tokens = [tok for tok in re.split(r"[^a-z0-9]+", source) if tok]
-                filtered_tokens = [tok for tok in tokens if tok not in filler_tokens]
-                if filtered_tokens:
-                    joined = _canonical_bucket_key("_".join(filtered_tokens))
-                    if joined and joined != "misc" and joined not in seen:
-                        seen.add(joined)
-                        yield joined
-                for tok in filtered_tokens:
-                    cand = _canonical_bucket_key(tok)
-                    if cand and cand != "misc" and cand not in seen:
-                        seen.add(cand)
-                        yield cand
-                for idx in range(len(filtered_tokens) - 1):
-                    pair = _canonical_bucket_key("_".join(filtered_tokens[idx : idx + 2]))
-                    if pair and pair != "misc" and pair not in seen:
-                        seen.add(pair)
-                        yield pair
-
-            lowered = text.lower()
-            for candidate in _candidate_keys(lowered):
-                if candidate in standard_targets:
-                    return candidate
-            return ""
-
-        misc_remaining = 0.0
-        misc_info = canonical_process_buckets.get("misc")
-        misc_sources = []
-        if isinstance(misc_info, Mapping):
-            sources_obj = misc_info.get("sources")
-            if isinstance(sources_obj, list):
-                misc_sources = list(sources_obj)
-            else:
-                try:
-                    misc_remaining = float(misc_info.get("total", 0.0) or 0.0)
-                except Exception:
-                    misc_remaining = 0.0
-
-        for source in misc_sources:
-            if not isinstance(source, Mapping):
-                continue
-            raw_key = source.get("key")
-            try:
-                amount_val = float(source.get("amount", 0.0) or 0.0)
-            except Exception:
-                amount_val = 0.0
-            if not amount_val:
-                continue
-            target = _resolve_misc_target(raw_key)
-            if target:
-                _add_amount(target, amount_val)
-            else:
-                misc_remaining += amount_val
-
-        if misc_remaining:
-            _add_amount("misc", misc_remaining)
-
-        return folded
 
     label_overrides = {
         "finishing_deburr": "Finishing/Deburr",
@@ -7384,10 +7142,7 @@ def render_quote(
                 for proc_key in entry["process_keys"]:
                     add_process_notes(proc_key, indent="    ")
 
-    def _normalize_bucket_key(name: str) -> str:
-        return re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_")
-
-    def _fold_buckets(values: Mapping[str, Any] | None) -> dict[str, float]:
+    def _fold_process_costs(values: Mapping[str, Any] | None) -> dict[str, float]:
         if not isinstance(values, Mapping):
             return {}
 
@@ -7414,7 +7169,7 @@ def render_quote(
 
         return {label: folded[label] for label in order}
 
-    process_costs = _fold_buckets(process_costs)
+    process_costs = _fold_process_costs(process_costs)
 
     process_cost_items_all = list((process_costs or {}).items())
     display_process_cost_items = [
