@@ -2058,13 +2058,20 @@ def merge_effective(
     def _clamp(value: float, kind: str, label: str, source: str) -> tuple[float, bool]:
         clamped = value
         changed = False
+        source_norm = str(source).strip().lower()
         if kind == "multiplier":
             mult_min = _as_float_or_none(bounds.get("mult_min")) or 0.5
             mult_max = _as_float_or_none(bounds.get("mult_max")) or 3.0
             clamped = max(mult_min, min(mult_max, float(value)))
         elif kind == "adder":
-            adder_max = _as_float_or_none(bounds.get("adder_max_hr")) or 5.0
-            clamped = max(0.0, min(adder_max, float(value)))
+            orig_val = float(value)
+            adder_max = _as_float_or_none(bounds.get("add_hr_max")) or 5.0
+            adder_min = _as_float_or_none(bounds.get("add_hr_min"))
+            raw_val = orig_val
+            if source_norm == "llm" and raw_val > 240:
+                raw_val = raw_val / 60.0
+            lower_bound = adder_min if adder_min is not None else 0.0
+            clamped = max(lower_bound, min(adder_max, raw_val))
         elif kind == "scrap":
             scrap_min = max(0.0, _as_float_or_none(bounds.get("scrap_min")) or 0.0)
             scrap_max = _as_float_or_none(bounds.get("scrap_max")) or 0.25
@@ -2279,6 +2286,41 @@ def merge_effective(
         if not math.isclose(val, 0.0, abs_tol=1e-9):
             final_pass[key] = val
         pass_sources[key] = source
+
+    hole_count_guard = _coerce_float_or_none(guard_ctx.get("hole_count"))
+    try:
+        hole_count_guard_int = int(round(float(hole_count_guard))) if hole_count_guard is not None else 0
+    except Exception:
+        hole_count_guard_int = 0
+    min_sec_per_hole = _as_float_or_none(guard_ctx.get("min_sec_per_hole"))
+    min_sec_per_hole = float(min_sec_per_hole) if min_sec_per_hole is not None else 9.0
+    if hole_count_guard_int > 0 and "drilling" in final_hours:
+        current_drill = _as_float_or_none(final_hours.get("drilling"))
+        if current_drill is not None:
+            drill_floor_hr = (hole_count_guard_int * min_sec_per_hole) / 3600.0
+            if current_drill < drill_floor_hr - 1e-6:
+                clamp_notes.append(
+                    f"process_hours[drilling] {current_drill:.3f} → {drill_floor_hr:.3f} (guardrail)"
+                )
+                final_hours["drilling"] = drill_floor_hr
+
+    tap_qty_guard = _coerce_float_or_none(guard_ctx.get("tap_qty"))
+    try:
+        tap_qty_guard_int = int(round(float(tap_qty_guard))) if tap_qty_guard is not None else 0
+    except Exception:
+        tap_qty_guard_int = 0
+    min_min_per_tap = _as_float_or_none(guard_ctx.get("min_min_per_tap"))
+    min_min_per_tap = float(min_min_per_tap) if min_min_per_tap is not None else 0.2
+    if tap_qty_guard_int > 0 and "tapping" in final_hours:
+        current_tap = _as_float_or_none(final_hours.get("tapping"))
+        if current_tap is not None:
+            tap_floor_hr = (tap_qty_guard_int * min_min_per_tap) / 60.0
+            if current_tap < tap_floor_hr - 1e-6:
+                clamp_notes.append(
+                    f"process_hours[tapping] {current_tap:.3f} → {tap_floor_hr:.3f} (guardrail)"
+                )
+                final_hours["tapping"] = tap_floor_hr
+
     eff["process_hour_multipliers"] = final_mults
     if mult_sources:
         source_tags["process_hour_multipliers"] = mult_sources
@@ -2388,41 +2430,6 @@ def merge_effective(
     _merge_text_field("shipping_hint", max_len=80)
     _merge_list_field("operation_sequence")
     _merge_dict_field("drilling_strategy")
-
-    final_hours_dict = eff.get("process_hours") if isinstance(eff.get("process_hours"), dict) else {}
-    hole_count_guard = _coerce_float_or_none(guard_ctx.get("hole_count"))
-    try:
-        hole_count_guard_int = int(round(float(hole_count_guard))) if hole_count_guard is not None else 0
-    except Exception:
-        hole_count_guard_int = 0
-    min_sec_per_hole = _as_float_or_none(guard_ctx.get("min_sec_per_hole"))
-    min_sec_per_hole = float(min_sec_per_hole) if min_sec_per_hole is not None else 9.0
-    if hole_count_guard_int > 0 and isinstance(final_hours_dict, dict) and "drilling" in final_hours_dict:
-        current_drill = _as_float_or_none(final_hours_dict.get("drilling"))
-        if current_drill is not None:
-            drill_floor_hr = (hole_count_guard_int * min_sec_per_hole) / 3600.0
-            if current_drill < drill_floor_hr - 1e-6:
-                clamp_notes.append(
-                    f"process_hours[drilling] {current_drill:.3f} → {drill_floor_hr:.3f} (guardrail)"
-                )
-                final_hours_dict["drilling"] = drill_floor_hr
-
-    tap_qty_guard = _coerce_float_or_none(guard_ctx.get("tap_qty"))
-    try:
-        tap_qty_guard_int = int(round(float(tap_qty_guard))) if tap_qty_guard is not None else 0
-    except Exception:
-        tap_qty_guard_int = 0
-    min_min_per_tap = _as_float_or_none(guard_ctx.get("min_min_per_tap"))
-    min_min_per_tap = float(min_min_per_tap) if min_min_per_tap is not None else 0.2
-    if tap_qty_guard_int > 0 and isinstance(final_hours_dict, dict) and "tapping" in final_hours_dict:
-        current_tap = _as_float_or_none(final_hours_dict.get("tapping"))
-        if current_tap is not None:
-            tap_floor_hr = (tap_qty_guard_int * min_min_per_tap) / 60.0
-            if current_tap < tap_floor_hr - 1e-6:
-                clamp_notes.append(
-                    f"process_hours[tapping] {current_tap:.3f} → {tap_floor_hr:.3f} (guardrail)"
-                )
-                final_hours_dict["tapping"] = tap_floor_hr
 
     if guard_ctx.get("needs_back_face"):
         current_setups = eff.get("setups")
@@ -5319,6 +5326,16 @@ def render_quote(
         g = {}
     lines.append(f"QUOTE SUMMARY - Qty {qty}")
     lines.append(divider)
+    speeds_feeds_display = (
+        result.get("speeds_feeds_path")
+        or breakdown.get("speeds_feeds_path")
+    )
+    path_text = str(speeds_feeds_display).strip() if speeds_feeds_display else ""
+    if path_text:
+        write_wrapped(f"Speeds/Feeds CSV: {path_text}")
+    else:
+        write_line("Speeds/Feeds CSV: (not set)")
+    lines.append("")
     row("Final Price per Part:", price)
     row("Total Labor Cost:", float(totals.get("labor_cost", 0.0)))
     row("Total Direct Costs:", float(totals.get("direct_costs", 0.0)))
@@ -6843,7 +6860,29 @@ def _select_speeds_feeds_row(
     op_col = next((col for col in ("operation", "op", "process") if col in table.columns), None)
     if op_col is None:
         return None
-    op_target = str(operation or "").strip().lower().replace("-", "_").replace(" ", "_")
+    op_raw = str(operation or "").strip().lower()
+    op_target = op_raw.replace("-", "_").replace(" ", "_")
+    op_variants: set[str] = set()
+    if op_target:
+        op_variants.add(op_target)
+        trimmed = op_target.rstrip("_")
+        if trimmed:
+            op_variants.add(trimmed)
+        if op_target.endswith("ing") and len(op_target) > 3:
+            op_variants.add(op_target[:-3])
+        op_variants.add(op_target.replace("_", " "))
+    drill_synonyms = {
+        "drill": {"drill", "drilling"},
+        "deep_drill": {"deep_drill", "deep drilling", "deepdrill"},
+    }
+    for key, synonyms in drill_synonyms.items():
+        key_norm = key.replace("-", "_").replace(" ", "_")
+        if key_norm in op_variants:
+            for syn in synonyms:
+                syn_norm = syn.strip().lower().replace("-", "_").replace(" ", "_")
+                if syn_norm:
+                    op_variants.add(syn_norm)
+    op_variants = {variant for variant in op_variants if variant}
     try:
         records = table.to_dict("records")  # type: ignore[attr-defined]
     except Exception:
@@ -6860,9 +6899,13 @@ def _select_speeds_feeds_row(
         (idx, row, _normalize(row.get(op_col)))
         for idx, row in enumerate(records)
     ]
-    matches = [row for _, row, norm in candidates if norm == op_target]
+    matches = [row for _, row, norm in candidates if norm in op_variants]
     if not matches:
-        matches = [row for _, row, norm in candidates if op_target and op_target in norm]
+        matches = [
+            row
+            for _, row, norm in candidates
+            if any(variant and variant in norm for variant in op_variants)
+        ]
     if not matches:
         return None
     if material_key:
@@ -7037,25 +7080,89 @@ def estimate_drilling_hours(
                 fallback_counts[round(dia_in * 25.4, 3)] += qty
 
     if group_specs:
-        machine = machine_params or _machine_params_from_params(None)
+        base_machine = machine_params or _machine_params_from_params(None)
         overhead = overhead_params or _drill_overhead_from_params(None)
         per_hole_overhead = replace(overhead, toolchange_min=0.0)
         total_min = 0.0
-        row_cache: dict[str, Mapping[str, Any] | None] = {}
+        material_cap_val = _as_float_or_none(material_factor)
+        if material_cap_val is not None and material_cap_val <= 0:
+            material_cap_val = None
+
+        hp_cap_val = _as_float_or_none(getattr(base_machine, "hp_to_mrr_factor", None))
+        combined_cap = None
+        if material_cap_val is not None and hp_cap_val is not None:
+            combined_cap = min(hp_cap_val, material_cap_val)
+        elif material_cap_val is not None:
+            combined_cap = material_cap_val
+        elif hp_cap_val is not None:
+            combined_cap = hp_cap_val
+        if combined_cap is not None:
+            machine_for_cut = _TimeMachineParams(
+                rapid_ipm=base_machine.rapid_ipm,
+                hp_available=base_machine.hp_available,
+                hp_to_mrr_factor=float(combined_cap),
+            )
+        else:
+            machine_for_cut = base_machine
+
+        row_cache: dict[tuple[str, float], tuple[Mapping[str, Any], _TimeToolParams] | None] = {}
+
+        def _build_tool_params(row: Mapping[str, Any]) -> _TimeToolParams:
+            key_map = {
+                str(k).strip().lower().replace("-", "_").replace(" ", "_"): k
+                for k in row.keys()
+            }
+
+            def _row_float(*names: str) -> float | None:
+                for name in names:
+                    actual = key_map.get(name)
+                    if actual is None:
+                        continue
+                    val = _as_float_or_none(row.get(actual))
+                    if val is not None:
+                        return float(val)
+                return None
+
+            teeth_val = _row_float("teeth_z", "flutes", "flute_count", "teeth")
+            teeth_int: int | None = None
+            if teeth_val is not None and teeth_val > 0:
+                try:
+                    teeth_int = int(round(teeth_val))
+                except Exception:
+                    teeth_int = None
+            if teeth_int is None or teeth_int <= 0:
+                teeth_int = 1
+            return _TimeToolParams(teeth_z=teeth_int)
+
         for diameter_in, qty, depth_in in group_specs:
             if qty <= 0 or diameter_in <= 0 or depth_in <= 0:
                 continue
             ratio = depth_in / max(diameter_in, 1e-6)
-            op_name = "Deep_Drill" if ratio >= 8.0 else "Drill"
-            if op_name not in row_cache:
-                row_cache[op_name] = _pick_speeds_row(
+            op_name = "Deep_Drill" if depth_in > 3.0 * diameter_in else "Drill"
+            cache_key = (op_name, round(float(diameter_in), 4))
+            cache_entry = row_cache.get(cache_key)
+            if cache_entry is None:
+                row = _pick_speeds_row(
                     material_label=material_label,
                     operation=op_name,
+                    tool_diameter_in=float(diameter_in),
                     table=speeds_feeds_table,
                 )
-            row = row_cache.get(op_name)
-            if not row:
+                if not row and op_name.lower() == "deep_drill":
+                    row = _pick_speeds_row(
+                        material_label=material_label,
+                        operation="Drill",
+                        tool_diameter_in=float(diameter_in),
+                        table=speeds_feeds_table,
+                    )
+                if row and isinstance(row, Mapping):
+                    cache_entry = (row, _build_tool_params(row))
+                else:
+                    cache_entry = None
+                row_cache[cache_key] = cache_entry
+            if not cache_entry:
                 continue
+            row, tool_params = cache_entry
             geom = _TimeOperationGeometry(
                 diameter_in=float(diameter_in),
                 hole_depth_in=float(depth_in),
@@ -7065,10 +7172,10 @@ def estimate_drilling_hours(
             minutes = _estimate_time_min(
                 row,
                 geom,
-                _TimeToolParams(teeth_z=1),
-                machine,
+                tool_params,
+                machine_for_cut,
                 per_hole_overhead,
-                material_factor=material_factor,
+                material_factor=material_cap_val,
             )
             if minutes <= 0:
                 continue
@@ -9506,7 +9613,6 @@ def compute_quote_from_df(df: pd.DataFrame,
     if planner_pricing_result is not None:
         totals = planner_pricing_result.get("totals", {}) if isinstance(planner_pricing_result, dict) else {}
         line_items_raw = planner_pricing_result.get("line_items", []) if isinstance(planner_pricing_result, dict) else []
-        recognized_line_items = 0
         if isinstance(line_items_raw, list):
             for entry in line_items_raw:
                 if isinstance(entry, _MappingABC):
@@ -9577,8 +9683,17 @@ def compute_quote_from_df(df: pd.DataFrame,
             float(val) > 0.0 for val in (planner_machine_cost_total, planner_labor_cost_total, planner_total_minutes)
         )
 
-        if recognized_line_items > 0 or planner_totals_present:
-            used_planner = True
+        planner_mode = (
+            str(params.get("PlannerMode", "auto")).strip().lower()
+            if isinstance(params, _MappingABC)
+            else "auto"
+        )
+        if planner_mode == "planner":
+            used_planner = (recognized_line_items > 0) or planner_totals_present
+        elif planner_mode == "legacy":
+            used_planner = False
+        else:
+            used_planner = recognized_line_items > 0
 
         if recognized_line_items == 0:
             if planner_totals_present and planner_total_minutes > 0.0:
@@ -9680,6 +9795,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         "shipping_cost": shipping_cost_base,
         "shipping_hint": "",
     }
+    baseline_data["speeds_feeds_path"] = speeds_feeds_path
     baseline_data["pricing_source"] = pricing_source
     if fixture_plan_desc:
         baseline_data["fixture"] = fixture_plan_desc
@@ -11189,6 +11305,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         "pass_through": pass_through,
         "direct_costs": direct_costs_display,
         "direct_cost_details": direct_cost_details,
+        "speeds_feeds_path": speeds_feeds_path,
         "pass_meta": pass_meta,
         "totals": {
             "labor_cost": labor_cost,
@@ -11276,6 +11393,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         "ui_vars": copy.deepcopy(quote_state.ui_vars),
         "process_plan": copy.deepcopy(quote_state.process_plan),
         "material_source": material_source_final,
+        "speeds_feeds_path": speeds_feeds_path,
     }
 
 
