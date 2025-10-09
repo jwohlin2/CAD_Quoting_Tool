@@ -2654,6 +2654,27 @@ def get_why_text(
         except Exception:
             return 0.0
 
+    def _hours_from_any(value: Any) -> float:
+        if isinstance(value, Mapping):
+            hr_val = _as_float_or_none(value.get("hr"))
+            if hr_val is None:
+                minutes_val = _as_float_or_none(value.get("minutes"))
+                if minutes_val is not None:
+                    hr_val = float(minutes_val) / 60.0
+            if hr_val is None and "value" in value:
+                hr_val = _as_float_or_none(value.get("value"))
+            if hr_val is not None:
+                try:
+                    return float(hr_val)
+                except Exception:
+                    return 0.0
+            try:
+                return float(value)
+            except Exception:
+                return 0.0
+        num = _as_float_or_none(value)
+        return float(num) if num is not None else 0.0
+
     holes = _as_int(g.get("hole_count"))
     if holes <= 0:
         holes = _as_int(g.get("hole_count_override"))
@@ -2681,17 +2702,11 @@ def get_why_text(
     final_hours_map: dict[str, float] = {}
     if isinstance(final_hours, Mapping):
         for key, value in final_hours.items():
-            try:
-                final_hours_map[str(key)] = max(0.0, float(value or 0.0))
-            except Exception:
-                continue
+            final_hours_map[str(key)] = max(0.0, _hours_from_any(value))
     else:
         proc_hours = e.get("process_hours") if isinstance(e.get("process_hours"), Mapping) else {}
         for key, value in proc_hours.items():
-            try:
-                final_hours_map[str(key)] = max(0.0, float(value or 0.0))
-            except Exception:
-                continue
+            final_hours_map[str(key)] = max(0.0, _hours_from_any(value))
 
     top_text = ""
     if pricing_source_clean == "planner" and meta_map:
@@ -2755,28 +2770,19 @@ def get_why_text(
         top_text = ", ".join(top_bits) if top_bits else "Baseline machining"
 
     base_hours_raw = b.get("process_hours") if isinstance(b.get("process_hours"), Mapping) else {}
+    base_hours_map: dict[str, float] = {}
+    if isinstance(base_hours_raw, Mapping):
+        for proc, base_hr in base_hours_raw.items():
+            base_hours_map[str(proc)] = max(0.0, _hours_from_any(base_hr))
     deltas: list[str] = []
-    for proc, base_hr in base_hours_raw.items():
-        try:
-            base_val = float(base_hr)
-            new_val = float(final_hours_map.get(str(proc), 0.0))
-        except Exception:
+    for proc_key in sorted(set(base_hours_map) | set(final_hours_map)):
+        base_hr = base_hours_map.get(proc_key, 0.0) or 0.0
+        adj_hr = final_hours_map.get(proc_key, 0.0) or 0.0
+        delta_hr = max(-24.0, min(24.0, float(adj_hr) - float(base_hr)))
+        if abs(delta_hr) < 0.01:
             continue
-        if not (math.isfinite(base_val) and math.isfinite(new_val)):
-            continue
-        diff = new_val - base_val
-        if not math.isfinite(diff) or abs(diff) > 100:
-            continue
-        base_mag = abs(base_val)
-        new_mag = abs(new_val)
-        ratio = float("inf") if base_mag <= 1e-6 and new_mag > 0 else (
-            new_mag / base_mag if base_mag > 1e-6 else 1.0
-        )
-        if ratio > 100:
-            continue
-        if abs(diff) >= 0.01:
-            sign = "↑" if diff > 0 else "↓"
-            deltas.append(f"{proc} {sign}{abs(diff):.2f} h")
+        sign = "↑" if delta_hr > 0 else "↓"
+        deltas.append(f"{proc_key} {sign}{abs(delta_hr):.2f} h")
     delta_text = ", ".join(deltas)
 
     parts: list[str] = []
@@ -5236,6 +5242,15 @@ def render_quote(
     # ---- helpers -------------------------------------------------------------
     divider = "-" * int(page_width)
 
+    red_flags: list[str] = []
+    for source in (result, breakdown):
+        flags_raw = source.get("red_flags") if isinstance(source, Mapping) else None
+        if isinstance(flags_raw, (list, tuple, set)):
+            for flag in flags_raw:
+                text = str(flag).strip()
+                if text and text not in red_flags:
+                    red_flags.append(text)
+
     def _m(x) -> str:
         return f"{currency}{float(x):,.2f}"
 
@@ -5442,6 +5457,12 @@ def render_quote(
     pricing_source_value = breakdown.get("pricing_source")
     if pricing_source_value:
         lines.append(f"Pricing Source: {pricing_source_value}")
+    if red_flags:
+        lines.append("")
+        lines.append("Red Flags")
+        lines.append(divider)
+        for flag in red_flags:
+            write_wrapped(f"⚠️ {flag}", "  ")
     lines.append("")
 
     narrative = result.get("narrative") or breakdown.get("narrative")
@@ -6357,6 +6378,23 @@ def render_quote(
         )
         _record_hour_entry("Programming (amortized)", programming_hours)
         _record_hour_entry("Fixture Build (amortized)", fixture_hours)
+        for key, meta in sorted((process_meta or {}).items()):
+            key_lower = str(key).lower()
+            if key_lower.startswith("planner_") or key_lower == "planner total":
+                continue
+            meta = meta or {}
+            try:
+                hr_val = float(meta.get("hr", 0.0) or 0.0)
+            except Exception:
+                hr_val = 0.0
+            if hr_val <= 0:
+                try:
+                    minutes_val = float(meta.get("minutes", 0.0) or 0.0)
+                except Exception:
+                    minutes_val = 0.0
+                if minutes_val > 0:
+                    hr_val = minutes_val / 60.0
+            _record_hour_entry(_process_label(key), hr_val)
     else:
         for key, meta in sorted((process_meta or {}).items()):
             meta = meta or {}
@@ -7264,7 +7302,8 @@ def _load_speeds_feeds_table(path: str | None) -> "pd.DataFrame" | None:
         return None
     try:
         df = pd.read_csv(resolved)
-    except Exception:
+    except Exception as exc:
+        logger.warning("Failed to read speeds/feeds CSV at %s: %s", resolved, exc)
         _SPEEDS_FEEDS_CACHE[key] = None
         return None
     normalized = _normalize_speeds_feeds_df(df)
@@ -7372,7 +7411,16 @@ def _resolve_speeds_feeds_path(
             if value:
                 candidates.append(str(value))
     if isinstance(params, Mapping):
-        candidates.append(str(params.get("SpeedsFeedsCSVPath")) if params.get("SpeedsFeedsCSVPath") else None)
+        for key in (
+            "SpeedsFeedsCSVPath",
+            "Speeds Feeds CSV",
+            "Speeds/Feeds CSV",
+            "Speeds & Feeds CSV",
+        ):
+            value = params.get(key)
+            if value:
+                candidates.append(str(value))
+    candidates.append(os.environ.get("CADQ_SF_CSV"))
     candidates.append(os.environ.get("SPEEDS_FEEDS_CSV"))
     for candidate in candidates:
         if not candidate:
@@ -7462,6 +7510,7 @@ def estimate_drilling_hours(
     speeds_feeds_table: "pd.DataFrame" | None = None,
     machine_params: _TimeMachineParams | None = None,
     overhead_params: _TimeOverheadParams | None = None,
+    warnings: list[str] | None = None,
 ) -> float:
     """
     Conservative plate-drilling model with floors so 100+ holes don't collapse to minutes.
@@ -7537,6 +7586,7 @@ def estimate_drilling_hours(
             machine_for_cut = base_machine
 
         row_cache: dict[tuple[str, float], tuple[Mapping[str, Any], _TimeToolParams] | None] = {}
+        missing_row_messages: set[tuple[str, str, float]] = set()
 
         def _build_tool_params(row: Mapping[str, Any]) -> _TimeToolParams:
             key_map = {
@@ -7590,6 +7640,17 @@ def estimate_drilling_hours(
                     cache_entry = (row, _build_tool_params(row))
                 else:
                     cache_entry = None
+                    material_display = str(material_label or mat_key or material_lookup or "material").strip()
+                    if not material_display:
+                        material_display = "material"
+                    op_display = "deep drilling" if op_name.lower() == "deep_drill" else "drilling"
+                    missing_row_messages.add(
+                        (
+                            op_display,
+                            material_display,
+                            round(float(diameter_in), 4),
+                        )
+                    )
                 row_cache[cache_key] = cache_entry
             if not cache_entry:
                 continue
@@ -7613,6 +7674,15 @@ def estimate_drilling_hours(
             total_min += minutes * int(qty)
             if overhead.toolchange_min and qty > 0:
                 total_min += float(overhead.toolchange_min)
+        if missing_row_messages and warnings is not None:
+            for op_display, material_display, dia_val in sorted(missing_row_messages):
+                dia_text = f"{dia_val:.3f}".rstrip("0").rstrip(".")
+                warning_text = (
+                    f"No speeds/feeds row for {op_display}/"
+                    f"{material_display.lower()} {dia_text} in — using fallback"
+                )
+                if warning_text not in warnings:
+                    warnings.append(warning_text)
         if total_min > 0:
             return total_min / 60.0
 
@@ -8804,6 +8874,19 @@ def compute_quote_from_df(df: pd.DataFrame,
     planner_process_minutes: float | None = None
     used_planner = False
 
+    red_flag_messages: list[str] = []
+    _red_flag_seen: set[str] = set()
+
+    def _record_red_flag(message: str) -> None:
+        text = str(message or "").strip()
+        if not text:
+            return
+        if text not in _red_flag_seen:
+            _red_flag_seen.add(text)
+            red_flag_messages.append(text)
+
+    force_legacy_pricing = False
+
     # ---- primary processes ---------------------------------------------------
     # OEE-adjusted helper
     oee = max(1e-6, params["OEE_EfficiencyPct"])
@@ -8997,17 +9080,60 @@ def compute_quote_from_df(df: pd.DataFrame,
             thickness_for_drill = float(thickness_in_ui) * 25.4
 
     drill_material_key = geo_context.get("material") or material_name
-    speeds_feeds_path = _resolve_speeds_feeds_path(params, ui_vars)
-    speeds_feeds_table = _load_speeds_feeds_table(speeds_feeds_path)
-    if quote_state is not None and speeds_feeds_path:
+    speeds_feeds_raw = _resolve_speeds_feeds_path(params, ui_vars)
+    speeds_feeds_path: str | None = None
+    speeds_feeds_table: "pd.DataFrame" | None = None
+    raw_path_text = str(speeds_feeds_raw).strip() if speeds_feeds_raw else ""
+    if raw_path_text:
         try:
-            guard_ctx = quote_state.guard_context
-        except Exception:
-            guard_ctx = None
-        if isinstance(guard_ctx, dict) and "speeds_feeds_path" not in guard_ctx:
-            guard_ctx["speeds_feeds_path"] = speeds_feeds_path
+            resolved_candidate = Path(raw_path_text).expanduser()
+        except Exception as exc:
+            logger.warning(
+                "Invalid speeds/feeds CSV path %r: %s; forcing legacy pricing for this quote.",
+                raw_path_text,
+                exc,
+            )
+            speeds_feeds_path = raw_path_text
+            _record_red_flag(
+                f"Speeds/feeds CSV path invalid ({raw_path_text}) — using legacy drilling heuristics."
+            )
+            force_legacy_pricing = True
+        else:
+            speeds_feeds_path = str(resolved_candidate)
+            if resolved_candidate.is_file():
+                speeds_feeds_table = _load_speeds_feeds_table(str(resolved_candidate))
+                if speeds_feeds_table is None:
+                    logger.warning(
+                        "Failed to load speeds/feeds CSV at %s; forcing legacy pricing for this quote.",
+                        resolved_candidate,
+                    )
+                    _record_red_flag(
+                        f"Failed to load speeds/feeds CSV at {resolved_candidate} — using legacy drilling heuristics."
+                    )
+                    force_legacy_pricing = True
+                else:
+                    try:
+                        speeds_feeds_path = str(resolved_candidate.resolve())
+                    except Exception:
+                        speeds_feeds_path = str(resolved_candidate)
+            else:
+                logger.warning(
+                    "Speeds/feeds CSV not found at %s; forcing legacy pricing for this quote.",
+                    resolved_candidate,
+                )
+                _record_red_flag(
+                    f"Speeds/feeds CSV not found at {resolved_candidate} — using legacy drilling heuristics."
+                )
+                force_legacy_pricing = True
+    else:
+        logger.warning(
+            "Speeds/feeds CSV path not configured; forcing legacy pricing for this quote."
+        )
+        _record_red_flag("Speeds/feeds CSV not configured — using legacy drilling heuristics.")
+        force_legacy_pricing = True
     machine_params_default = _machine_params_from_params(params)
     drill_overhead_default = _drill_overhead_from_params(params)
+    speeds_feeds_warnings: list[str] = []
     drill_hr = estimate_drilling_hours(
         hole_diams_list,
         float(thickness_for_drill or 0.0),
@@ -9016,7 +9142,24 @@ def compute_quote_from_df(df: pd.DataFrame,
         speeds_feeds_table=speeds_feeds_table,
         machine_params=machine_params_default,
         overhead_params=drill_overhead_default,
+        warnings=speeds_feeds_warnings,
     )
+    for warning_text in speeds_feeds_warnings:
+        _record_red_flag(warning_text)
+    if quote_state is not None:
+        try:
+            guard_ctx = quote_state.guard_context
+        except Exception:
+            guard_ctx = None
+        if isinstance(guard_ctx, dict):
+            if speeds_feeds_path:
+                guard_ctx.setdefault("speeds_feeds_path", speeds_feeds_path)
+            guard_ctx["speeds_feeds_loaded"] = bool(speeds_feeds_table)
+            if red_flag_messages:
+                ctx_flags = guard_ctx.setdefault("red_flags", [])
+                for msg in red_flag_messages:
+                    if msg not in ctx_flags:
+                        ctx_flags.append(msg)
     drill_rate = float(rates.get("DrillingRate") or rates.get("MillingRate", 0.0) or 0.0)
     hole_count_geo = _coerce_float_or_none(geo_context.get("hole_count"))
     hole_count_for_tripwire = 0
@@ -10154,9 +10297,9 @@ def compute_quote_from_df(df: pd.DataFrame,
         )
 
         planner_mode = (
-            str(params.get("PlannerMode", "auto")).strip().lower()
+            str(params.get("PlannerMode", "legacy")).strip().lower()
             if isinstance(params, _MappingABC)
-            else "auto"
+            else "legacy"
         )
         if planner_mode == "planner":
             used_planner = (recognized_line_items > 0) or planner_totals_present
@@ -10164,6 +10307,9 @@ def compute_quote_from_df(df: pd.DataFrame,
             used_planner = False
         else:
             used_planner = recognized_line_items > 0
+
+        if force_legacy_pricing:
+            used_planner = False
 
         if recognized_line_items == 0:
             if planner_totals_present and planner_total_minutes > 0.0:
@@ -10244,6 +10390,8 @@ def compute_quote_from_df(df: pd.DataFrame,
                     process_meta[b] = update_payload
 
     pricing_source = "planner" if used_planner else "legacy"
+    if force_legacy_pricing:
+        pricing_source = "legacy"
 
     baseline_data = {
         "process_hours": process_hours_baseline,
@@ -10266,6 +10414,8 @@ def compute_quote_from_df(df: pd.DataFrame,
         "shipping_cost": shipping_cost_base,
         "shipping_hint": "",
     }
+    if red_flag_messages:
+        baseline_data["red_flags"] = list(red_flag_messages)
     baseline_data["speeds_feeds_path"] = speeds_feeds_path
     baseline_data["pricing_source"] = pricing_source
     if fixture_plan_desc:
@@ -11441,9 +11591,6 @@ def compute_quote_from_df(df: pd.DataFrame,
                 base_extra_val = float(meta.get("base_extra", 0.0) or 0.0)
                 process_costs[key] = round(hr_val * rate_val + base_extra_val, 2)
 
-    else:
-        process_hours_final = _hours_from_meta()
-
     for proc_key, final_hr in process_hours_final.items():
         meta = meta_lookup.get(proc_key) or {}
         try:
@@ -11863,6 +12010,8 @@ def compute_quote_from_df(df: pd.DataFrame,
     }
 
     breakdown["pricing_source"] = pricing_source
+    if red_flag_messages:
+        breakdown["red_flags"] = list(red_flag_messages)
     if planner_bucket_view is not None:
         breakdown["bucket_view"] = copy.deepcopy(planner_bucket_view)
     if planner_bucket_rollup is not None:
@@ -11925,6 +12074,12 @@ def compute_quote_from_df(df: pd.DataFrame,
         or "shop defaults"
     )
 
+    if isinstance(getattr(quote_state, "guard_context", None), dict) and red_flag_messages:
+        ctx_flags = quote_state.guard_context.setdefault("red_flags", [])
+        for msg in red_flag_messages:
+            if msg not in ctx_flags:
+                ctx_flags.append(msg)
+
     return {
         "price": price,
         "labor": labor_cost,
@@ -11937,6 +12092,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         "process_plan": copy.deepcopy(quote_state.process_plan),
         "material_source": material_source_final,
         "speeds_feeds_path": speeds_feeds_path,
+        "red_flags": list(red_flag_messages),
     }
 
 
