@@ -7761,11 +7761,22 @@ def estimate_drilling_hours(
                 teeth_int = 1
             return _TimeToolParams(teeth_z=teeth_int)
 
+        thickness_in_val: float | None = None
+        if thickness_mm and thickness_mm > 0:
+            try:
+                thickness_in_val = float(thickness_mm) / 25.4
+            except Exception:
+                thickness_in_val = None
+
         for diameter_in, qty, depth_in in group_specs:
             if qty <= 0 or diameter_in <= 0 or depth_in <= 0:
                 continue
-            ratio = depth_in / max(diameter_in, 1e-6)
-            op_name = "Deep_Drill" if depth_in > 3.0 * diameter_in else "Drill"
+            tool_dia_in = float(diameter_in)
+            thickness_for_ratio = thickness_in_val if thickness_in_val and thickness_in_val > 0 else depth_in
+            l_over_d = 0.0
+            if tool_dia_in > 0 and thickness_for_ratio and thickness_for_ratio > 0:
+                l_over_d = float(thickness_for_ratio) / float(tool_dia_in)
+            op_name = "deep_drill" if l_over_d >= 3.0 else "drill"
             cache_key = (op_name, round(float(diameter_in), 4))
             cache_entry = row_cache.get(cache_key)
             if cache_entry is None:
@@ -7799,7 +7810,7 @@ def estimate_drilling_hours(
                 if not row and op_name.lower() == "deep_drill":
                     row = _pick_speeds_row(
                         material_label=material_label,
-                        operation="Drill",
+                        operation="drill",
                         tool_diameter_in=float(diameter_in),
                         table=speeds_feeds_table,
                     )
@@ -7826,7 +7837,7 @@ def estimate_drilling_hours(
                 diameter_in=float(diameter_in),
                 hole_depth_in=float(depth_in),
                 point_angle_deg=118.0,
-                ld_ratio=ratio,
+                ld_ratio=l_over_d,
             )
             minutes = _estimate_time_min(
                 row,
