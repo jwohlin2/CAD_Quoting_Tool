@@ -5503,6 +5503,10 @@ def render_quote(
     def _canonical_bucket_key(name: str) -> str:
         return re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_")
 
+    def _is_planner_meta(key: str) -> bool:
+        k = str(key).lower().strip()
+        return k.startswith("planner_") or k == "planner total"
+
     def _planner_bucket_for_op(name: str) -> str:
         text = str(name or "").lower()
         if not text:
@@ -6233,6 +6237,13 @@ def render_quote(
     def _normalize_bucket_key(name: str) -> str:
         return re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_")
 
+    process_cost_items_all = list((process_costs or {}).items())
+    display_process_cost_items = [
+        (key, value)
+        for key, value in process_cost_items_all
+        if not _is_planner_meta(key)
+    ]
+
     preferred_bucket_order = [
         "milling",
         "drilling",
@@ -6249,7 +6260,7 @@ def render_quote(
     seen_keys: set[str] = set()
 
     for bucket in preferred_bucket_order:
-        for key, value in (process_costs or {}).items():
+        for key, value in display_process_cost_items:
             if _normalize_bucket_key(key) != bucket:
                 continue
             if not ((value > 0) or show_zeros):
@@ -6259,7 +6270,7 @@ def render_quote(
 
     remaining_items = [
         (key, value)
-        for key, value in (process_costs or {}).items()
+        for key, value in display_process_cost_items
         if key not in seen_keys and ((value > 0) or show_zeros)
     ]
     remaining_items.sort(key=lambda kv: _normalize_bucket_key(kv[0]))
