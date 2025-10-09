@@ -250,6 +250,59 @@ def test_render_quote_does_not_duplicate_detail_lines() -> None:
     assert rendered.count("1.50 hr @ $120.00/hr") == 1
 
 
+def test_render_quote_normalizes_amortized_aliases() -> None:
+    breakdown = {
+        "qty": 5,
+        "totals": _base_totals(),
+        "nre_detail": {
+            "programming": {
+                "prog_hr": 2.0,
+                "prog_rate": 50.0,
+                "eng_hr": 1.0,
+                "eng_rate": 60.0,
+                "per_lot": 0.0,
+            },
+            "fixture": {
+                "build_hr": 1.5,
+                "build_rate": 45.0,
+                "per_lot": 0.0,
+            },
+        },
+        "nre": {},
+        "material": {},
+        "process_costs": {
+            "Programming Amortized": 120.0,
+            "Fixture Build Amortized": 45.0,
+            "Milling": 10.0,
+        },
+        "process_meta": {},
+        "pass_through": {},
+        "applied_pcts": {},
+        "rates": {"FixtureBuildRate": 45.0, "ProgrammingRate": 50.0},
+        "params": {},
+        "nre_cost_details": {},
+        "labor_cost_details": {
+            "Programming AMORTIZED": "legacy detail",
+            "fixture build amortized": "legacy fixture detail",
+        },
+        "direct_cost_details": {},
+        "labor_costs": {
+            "Programming amortized": 12.0,
+            "Fixture build amortized": 6.0,
+        },
+        "pass_meta": {},
+    }
+
+    result = {"price": 10.0, "breakdown": breakdown}
+
+    rendered = appV5.render_quote(result, currency="$", show_zeros=False)
+
+    assert "Programming Amortized" not in rendered
+    assert "Fixture Build Amortized" not in rendered
+    assert rendered.count("Programming (amortized)") == 1
+    assert rendered.count("Fixture Build (amortized)") == 1
+
+
 def test_render_quote_shows_flat_extras_when_no_hours() -> None:
     result = {
         "price": 10.0,

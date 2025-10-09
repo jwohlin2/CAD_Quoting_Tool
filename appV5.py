@@ -63,6 +63,39 @@ import tkinter.font as tkfont
 import urllib.request
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+
+_AMORTIZED_PROGRAMMING_LABEL = "Programming (amortized)"
+_AMORTIZED_FIXTURE_LABEL = "Fixture Build (amortized)"
+_AMORTIZED_CANONICAL_LABELS = {
+    _AMORTIZED_PROGRAMMING_LABEL,
+    _AMORTIZED_FIXTURE_LABEL,
+}
+
+
+def _canonical_amortized_label(label: str | None) -> tuple[str, bool]:
+    """Return a canonical amortized label (if applicable).
+
+    The quoting pipeline can emit a handful of historical variations for the
+    programming/fixture amortized labels (different casing, missing
+    parentheses, etc.).  Collapse anything that looks like one of those legacy
+    variants down to the single canonical display labels so the renderer does
+    not duplicate lines.
+    """
+
+    text = re.sub(r"\s+", " ", str(label or "")).strip()
+    if not text:
+        return "", False
+
+    lower = text.lower()
+    canonical = text
+    if "amort" in lower:
+        if "program" in lower:
+            canonical = _AMORTIZED_PROGRAMMING_LABEL
+        elif "fixture" in lower:
+            canonical = _AMORTIZED_FIXTURE_LABEL
+
+    return canonical, canonical != text
+
 import cad_quoter.geometry as geometry
 from bucketizer import bucketize
 
@@ -5228,15 +5261,46 @@ def render_quote(
     params       = breakdown.get("params", {}) or {}
     nre_cost_details = breakdown.get("nre_cost_details", {}) or {}
     labor_cost_details_input_raw = breakdown.get("labor_cost_details", {}) or {}
-    labor_cost_details_input = {
-        str(label): str(detail) for label, detail in labor_cost_details_input_raw.items()
-    }
+
+    def _merge_detail_text(existing: str | None, new_value: Any) -> str:
+        segments: list[str] = []
+        seen: set[str] = set()
+        for candidate in (existing, new_value):
+            if candidate is None:
+                continue
+            for segment in re.split(r";\s*", str(candidate)):
+                seg = segment.strip()
+                if not seg:
+                    continue
+                if seg not in seen:
+                    segments.append(seg)
+                    seen.add(seg)
+        if segments:
+            return "; ".join(segments)
+        if existing is None and new_value is None:
+            return ""
+        if new_value is None:
+            return existing or ""
+        return str(new_value)
+
+    labor_cost_details_input: dict[str, str] = {}
+    for raw_label, raw_detail in labor_cost_details_input_raw.items():
+        canonical_label, _ = _canonical_amortized_label(raw_label)
+        if not canonical_label:
+            canonical_label = str(raw_label)
+        merged = _merge_detail_text(labor_cost_details_input.get(canonical_label), raw_detail)
+        labor_cost_details_input[canonical_label] = merged
+
     labor_cost_details: dict[str, str] = dict(labor_cost_details_input)
+
     labor_cost_totals_raw = breakdown.get("labor_costs", {}) or {}
     labor_cost_totals: dict[str, float] = {}
     for key, value in labor_cost_totals_raw.items():
+        canonical_label, _ = _canonical_amortized_label(key)
+        if not canonical_label:
+            canonical_label = str(key)
         try:
-            labor_cost_totals[str(key)] = float(value)
+            labor_cost_totals[canonical_label] = labor_cost_totals.get(canonical_label, 0.0) + float(value)
         except Exception:
             continue
     prog_hr: float = 0.0
@@ -6233,6 +6297,18 @@ def render_quote(
     def _normalize_bucket_key(name: str) -> str:
         return re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_")
 
+    remaining_costs: dict[str, float] = {}
+    for raw_key, raw_value in (process_costs or {}).items():
+        try:
+            remaining_costs[raw_key] = float(raw_value)
+        except Exception:
+            continue
+
+    for alias_key in list(remaining_costs.keys()):
+        canonical_label, _ = _canonical_amortized_label(alias_key)
+        if canonical_label in _AMORTIZED_CANONICAL_LABELS:
+            remaining_costs.pop(alias_key, None)
+
     preferred_bucket_order = [
         "milling",
         "drilling",
@@ -6249,7 +6325,7 @@ def render_quote(
     seen_keys: set[str] = set()
 
     for bucket in preferred_bucket_order:
-        for key, value in (process_costs or {}).items():
+        for key, value in remaining_costs.items():
             if _normalize_bucket_key(key) != bucket:
                 continue
             if not ((value > 0) or show_zeros):
@@ -6259,7 +6335,7 @@ def render_quote(
 
     remaining_items = [
         (key, value)
-        for key, value in (process_costs or {}).items()
+        for key, value in remaining_costs.items()
         if key not in seen_keys and ((value > 0) or show_zeros)
     ]
     remaining_items.sort(key=lambda kv: _normalize_bucket_key(kv[0]))
@@ -11958,8 +12034,11 @@ def compute_quote_from_df(df: pd.DataFrame,
             return False
 
     def _merge_labor_detail(label: str, amount: float, detail_bits: list[str]) -> None:
-        labor_costs_display[label] = float(amount)
-        existing_detail = labor_cost_details_input.get(label)
+        canonical_label, _ = _canonical_amortized_label(label)
+        if not canonical_label:
+            canonical_label = str(label)
+        labor_costs_display[canonical_label] = float(amount)
+        existing_detail = labor_cost_details_input.get(canonical_label)
         if not detail_bits and not existing_detail:
             return
 
@@ -11981,7 +12060,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                     merged_bits.append(seg)
                     seen.add(seg)
         if merged_bits:
-            labor_cost_details[label] = "; ".join(merged_bits)
+            labor_cost_details[canonical_label] = "; ".join(merged_bits)
 
     for key, value in sorted(process_costs.items(), key=lambda kv: kv[1], reverse=True):
         label = key.replace('_', ' ').title()
