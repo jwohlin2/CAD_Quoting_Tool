@@ -77,7 +77,7 @@ def _resolve_planner_mode(params: Mapping[str, Any] | None) -> str:
 
     if FORCE_PLANNER:
         return "planner"
-    default_mode = "planner"
+    default_mode = "auto"
     if not isinstance(params, _MappingABC):
         return default_mode
     try:
@@ -102,14 +102,25 @@ def _resolve_planner_usage(
     """Determine whether planner pricing should be used and the mode."""
 
     planner_mode = _resolve_planner_mode(params)
-    used_planner = bool(planner_pricing_result) or bool(planner_line_items)
+    has_line_items = bool(planner_line_items)
     has_recognized = recognized_line_items > 0
+    has_pricing = bool(planner_pricing_result)
+    has_totals = bool(planner_totals_present)
+
+    # Base signal prefers the planner when it returned structured data.
+    used_planner = has_line_items or has_pricing or has_totals or has_recognized
+
     if planner_mode == "planner":
-        used_planner = used_planner or has_recognized or bool(planner_totals_present)
+        # Explicit planner mode honours any planner signal, even if minimal.
+        used_planner = used_planner or has_totals
     elif planner_mode == "legacy":
-        used_planner = False
-    else:
+        # Legacy mode only wins if we truly have no planner outputs to trust.
+        used_planner = has_line_items or has_recognized
+    else:  # auto / default
         used_planner = used_planner or has_recognized
+
+    if has_line_items:
+        used_planner = True
     return used_planner, planner_mode
 
 import cad_quoter.geometry as geometry
@@ -12554,15 +12565,7 @@ def compute_quote_from_df(df: pd.DataFrame,
             recognized_line_items=recognized_line_items,
             planner_totals_present=planner_totals_present,
         )
-        used_planner = bool(planner_pricing_result) or bool(planner_line_items)
         force_planner_for_recognized = recognized_line_items > 0
-        if planner_mode == "planner":
-            used_planner = used_planner or planner_totals_present
-        elif planner_mode == "legacy":
-            if not force_planner_for_recognized:
-                used_planner = False
-        else:
-            used_planner = used_planner or force_planner_for_recognized
 
         if force_planner_for_recognized:
             used_planner = True
@@ -12595,6 +12598,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                 features["drilling_hr_baseline"] = baseline_drill_hr
 
         if used_planner:
+            pricing_source = "planner"
             if legacy_baseline_had_values:
                 legacy_baseline_ignored = True
             planner_process_minutes = planner_total_minutes
