@@ -6259,6 +6259,8 @@ def render_quote(
     ordered_process_items: list[tuple[str, float]] = []
     seen_keys: set[str] = set()
 
+    process_costs = _fold_buckets(process_costs)
+
     for bucket in preferred_bucket_order:
         for key, value in display_process_cost_items:
             if _normalize_bucket_key(key) != bucket:
