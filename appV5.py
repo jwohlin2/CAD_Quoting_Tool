@@ -2625,16 +2625,34 @@ def reprice_with_effective(state: QuoteState) -> QuoteState:
                 if note not in notes:
                     notes.append(note)
     return state
-def build_narrative(state: QuoteState) -> str:
+
+
+def get_why_text(
+    state: QuoteState,
+    *,
+    pricing_source: str,
+    process_meta: Mapping[str, Any] | None = None,
+    final_hours: Mapping[str, Any] | None = None,
+) -> str:
     g = state.geo or {}
     b = state.baseline or {}
     e = state.effective or {}
 
-    def _as_int(val):
+    def _as_int(val: Any) -> int:
         try:
             return int(float(val))
         except Exception:
             return 0
+
+    def _friendly_label(name: str) -> str:
+        text = str(name or "").replace("_", " ").strip()
+        return text.title() if text else ""
+
+    def _as_float(val: Any) -> float:
+        try:
+            return float(val)
+        except Exception:
+            return 0.0
 
     holes = _as_int(g.get("hole_count"))
     if holes <= 0:
@@ -2655,50 +2673,106 @@ def build_narrative(state: QuoteState) -> str:
     setups = int(_as_float_or_none(e.get("setups")) or _as_float_or_none(b.get("setups")) or 1)
     scrap_pct = round(100.0 * float(_as_float_or_none(e.get("scrap_pct")) or 0.0), 1)
 
-    top_text = ""
-    if (
-        b.get("pricing_source") == "planner"
-        and isinstance(b.get("process_plan_pricing"), dict)
-    ):
-        items = b["process_plan_pricing"].get("line_items", [])
-        if isinstance(items, list):
-            by_min = sorted(
-                (
-                    (str(i.get("op", "")), float(i.get("minutes", 0.0) or 0.0))
-                    for i in items
-                ),
-                key=lambda x: x[1],
-                reverse=True,
-            )
-            planner_top: list[str] = []
-            for name, minutes in by_min[:3]:
-                name = str(name).strip()
-                if not name or minutes <= 0:
-                    continue
-                planner_top.append(f"{name} {minutes / 60.0:.2f} h")
-            if planner_top:
-                top_text = ", ".join(planner_top)
+    pricing_source_clean = str(pricing_source or "").strip().lower()
+    meta_map: dict[str, Any] = {}
+    if isinstance(process_meta, Mapping):
+        meta_map = {str(k): v for k, v in process_meta.items()}
 
-    proc_hours = e.get("process_hours") if isinstance(e.get("process_hours"), dict) else {}
-    if not top_text:
-        top = []
-        for name, hours in sorted(proc_hours.items(), key=lambda kv: kv[1], reverse=True)[:3]:
+    final_hours_map: dict[str, float] = {}
+    if isinstance(final_hours, Mapping):
+        for key, value in final_hours.items():
             try:
-                top.append(f"{name} {float(hours):.2f} h")
+                final_hours_map[str(key)] = max(0.0, float(value or 0.0))
             except Exception:
                 continue
-        top_text = ", ".join(top) if top else "Baseline machining"
+    else:
+        proc_hours = e.get("process_hours") if isinstance(e.get("process_hours"), Mapping) else {}
+        for key, value in proc_hours.items():
+            try:
+                final_hours_map[str(key)] = max(0.0, float(value or 0.0))
+            except Exception:
+                continue
 
+    top_text = ""
+    if pricing_source_clean == "planner" and meta_map:
+        planner_total_meta = None
+        for cand_key in ("planner_total", "planner total"):
+            if cand_key in meta_map:
+                planner_total_meta = meta_map[cand_key]
+                break
+        if isinstance(planner_total_meta, Mapping):
+            raw_items = planner_total_meta.get("line_items")
+            if isinstance(raw_items, list):
+                planner_entries: list[tuple[str, float]] = []
+                for item in raw_items:
+                    if not isinstance(item, Mapping):
+                        continue
+                    name = str(item.get("op") or "").strip()
+                    if not name:
+                        continue
+                    minutes_val = _as_float(item.get("minutes"))
+                    if minutes_val <= 0:
+                        continue
+                    planner_entries.append((name, minutes_val))
+                planner_entries.sort(key=lambda pair: pair[1], reverse=True)
+                top_bits: list[str] = []
+                for name, minutes_val in planner_entries[:3]:
+                    top_bits.append(f"{name} {minutes_val / 60.0:.2f} h")
+                if top_bits:
+                    top_text = ", ".join(top_bits)
+        if not top_text and final_hours_map:
+            bucket_candidates: list[tuple[str, float]] = []
+            for key, hours in final_hours_map.items():
+                key_lower = key.lower()
+                if hours <= 0:
+                    continue
+                if key_lower.startswith("planner_") or key_lower in {"planner_total"}:
+                    continue
+                bucket_candidates.append((key, hours))
+            bucket_candidates.sort(key=lambda pair: pair[1], reverse=True)
+            top_bits: list[str] = []
+            for name, hours in bucket_candidates[:3]:
+                label = _friendly_label(name) or name
+                top_bits.append(f"{label} {hours:.2f} h")
+            if top_bits:
+                top_text = ", ".join(top_bits)
+
+    if not top_text:
+        if not final_hours_map:
+            proc_hours = e.get("process_hours") if isinstance(e.get("process_hours"), Mapping) else {}
+            for key, value in proc_hours.items():
+                try:
+                    final_hours_map[str(key)] = max(0.0, float(value or 0.0))
+                except Exception:
+                    continue
+        top_candidates = sorted(final_hours_map.items(), key=lambda kv: kv[1], reverse=True)
+        top_bits: list[str] = []
+        for name, hours in top_candidates[:3]:
+            if hours <= 0:
+                continue
+            label = _friendly_label(name) or name
+            top_bits.append(f"{label} {hours:.2f} h")
+        top_text = ", ".join(top_bits) if top_bits else "Baseline machining"
+
+    base_hours_raw = b.get("process_hours") if isinstance(b.get("process_hours"), Mapping) else {}
     deltas: list[str] = []
-    base_hours = b.get("process_hours") if isinstance(b.get("process_hours"), dict) else {}
-    for proc, base_hr in base_hours.items():
+    for proc, base_hr in base_hours_raw.items():
         try:
             base_val = float(base_hr)
-            new_val = float(proc_hours.get(proc, 0.0))
+            new_val = float(final_hours_map.get(str(proc), 0.0))
         except Exception:
+            continue
+        if not (math.isfinite(base_val) and math.isfinite(new_val)):
             continue
         diff = new_val - base_val
         if not math.isfinite(diff) or abs(diff) > 100:
+            continue
+        base_mag = abs(base_val)
+        new_mag = abs(new_val)
+        ratio = float("inf") if base_mag <= 1e-6 and new_mag > 0 else (
+            new_mag / base_mag if base_mag > 1e-6 else 1.0
+        )
+        if ratio > 100:
             continue
         if abs(diff) >= 0.01:
             sign = "↑" if diff > 0 else "↓"
@@ -2723,6 +2797,32 @@ def build_narrative(state: QuoteState) -> str:
     parts.append(f"Material priced via {material_source}; scrap {scrap_pct}% applied.")
 
     return " ".join(parts)
+
+
+def build_narrative(state: QuoteState) -> str:
+    """Backward compatibility wrapper for legacy callers."""
+
+    pricing_source = str(
+        state.effective.get("pricing_source")
+        or state.baseline.get("pricing_source")
+        or ""
+    )
+    process_meta = (
+        state.effective.get("process_meta")
+        if isinstance(state.effective.get("process_meta"), Mapping)
+        else None
+    )
+    final_hours = (
+        state.effective.get("process_hours")
+        if isinstance(state.effective.get("process_hours"), Mapping)
+        else None
+    )
+    return get_why_text(
+        state,
+        pricing_source=pricing_source,
+        process_meta=process_meta,
+        final_hours=final_hours,
+    )
 
 
 def effective_to_overrides(effective: dict, baseline: dict | None = None) -> dict:
@@ -8742,6 +8842,16 @@ def compute_quote_from_df(df: pd.DataFrame,
         for key, meta in legacy_process_meta.items():
             process_meta[key] = dict(meta)
 
+    inspection_meta_entry = process_meta.get("inspection")
+    if isinstance(inspection_meta_entry, Mapping):
+        inspection_meta_entry["components"] = inspection_components
+        inspection_meta_entry["adjustments"] = inspection_adjustments
+        inspection_meta_entry.setdefault("baseline_hr", float(inspection_hr_total))
+        if os.environ.get("DEBUG_INSPECTION_META") == "1":
+            import pdb
+
+            pdb.set_trace()
+
     for key, meta in list(process_meta.items()):
         if not isinstance(meta, dict):
             continue
@@ -9605,6 +9715,7 @@ def compute_quote_from_df(df: pd.DataFrame,
             process_plan_summary["pricing_error"] = planner_pricing_error
 
     planner_line_items: list[dict[str, Any]] = []
+    recognized_line_items = 0
     planner_machine_cost_total = 0.0
     planner_labor_cost_total = 0.0
     planner_total_minutes = 0.0
@@ -9761,16 +9872,17 @@ def compute_quote_from_df(df: pd.DataFrame,
                 hr = info["minutes"] / 60.0 if info["minutes"] else 0.0
                 cost = info["total_cost"]
                 rate = (cost / hr) if hr > 0 else 0.0
-                process_meta[b] = {
+                update_payload = {
                     "minutes": round(info["minutes"], 1),
                     "hr": round(hr, 3),
                     "rate": round(rate, 2),
                     "cost": round(cost, 2),
                 }
-
-            inspection_components = {}
-            inspection_adjustments = {}
-            inspection_hr_total = 0.0
+                existing_meta = process_meta.get(b)
+                if isinstance(existing_meta, Mapping):
+                    existing_meta.update(update_payload)
+                else:
+                    process_meta[b] = update_payload
 
     pricing_source = "planner" if used_planner else "legacy"
 
@@ -10889,7 +11001,23 @@ def compute_quote_from_df(df: pd.DataFrame,
         except Exception:
             pass_through[label] = 0.0
 
-    process_hours_final = {k: float(process_meta.get(k, {}).get("hr", 0.0)) for k in process_meta}
+    meta_lookup: dict[str, Mapping[str, Any]] = {}
+
+    def _hours_from_meta() -> dict[str, float]:
+        meta_lookup.clear()
+        hours: dict[str, float] = {}
+        for raw_key, raw_meta in process_meta.items():
+            key_str = str(raw_key)
+            meta_dict = raw_meta if isinstance(raw_meta, Mapping) else {}
+            meta_lookup[key_str] = meta_dict
+            try:
+                hr_val = float(meta_dict.get("hr", 0.0) or 0.0)
+            except Exception:
+                hr_val = 0.0
+            hours[key_str] = max(0.0, hr_val)
+        return hours
+
+    process_hours_final: dict[str, float] = {}
 
     if pricing_source != "planner":
         hole_count_for_guard = 0
@@ -10901,7 +11029,11 @@ def compute_quote_from_df(df: pd.DataFrame,
             hole_count_for_guard = len(geo_context.get("hole_diams_mm", []) or [])
 
         if hole_count_for_guard > 0:
-            drill_hr_after_overrides = float(process_hours_final.get("drilling", 0.0))
+            drill_meta_current = process_meta.get("drilling") or {}
+            try:
+                drill_hr_after_overrides = float(drill_meta_current.get("hr", 0.0) or 0.0)
+            except Exception:
+                drill_hr_after_overrides = 0.0
             ok, why = validate_drilling_reasonableness(
                 hole_count_for_guard, drill_hr_after_overrides
             )
@@ -10924,12 +11056,8 @@ def compute_quote_from_df(df: pd.DataFrame,
                     entry.setdefault("notes", []).append(f"Raised to floor {floor_hr:.2f} h")
                     drill_meta["hr"] = new_hr
                     process_costs["drilling"] = round(new_hr * rate + base_extra, 2)
-                process_hours_final["drilling"] = new_hr
                 llm_notes.append(f"Raised drilling to floor: {why}")
-                process_hours_final = {
-                    k: float(process_meta.get(k, {}).get("hr", 0.0)) for k in process_meta
-                }
-
+        process_hours_final = _hours_from_meta()
         baseline_total_hours = sum(
             float(process_hours_baseline.get(k, 0.0)) for k in process_hours_baseline
         )
@@ -10951,8 +11079,37 @@ def compute_quote_from_df(df: pd.DataFrame,
             geo_context, process_costs, pass_through, process_hours_final
         )
 
+    else:
+        process_hours_final = _hours_from_meta()
+
+    for proc_key, final_hr in process_hours_final.items():
+        meta = meta_lookup.get(proc_key) or {}
+        try:
+            rate = float(meta.get("rate", 0.0) or 0.0)
+        except Exception:
+            rate = 0.0
+        try:
+            base_extra = float(meta.get("base_extra", 0.0) or 0.0)
+        except Exception:
+            base_extra = 0.0
+        hr_clean = max(0.0, float(final_hr or 0.0))
+        if rate > 0 or base_extra != 0.0:
+            new_cost = hr_clean * rate + base_extra
+            process_costs[proc_key] = round(new_cost, 2)
+        elif "cost" in meta:
+            try:
+                process_costs[proc_key] = round(float(meta.get("cost", 0.0) or 0.0), 2)
+            except Exception:
+                pass
+
     for key, entry in applied_process.items():
-        entry["new_hr"] = float(process_meta.get(key, {}).get("hr", entry.get("new_hr", entry["old_hr"])))
+        final_hr = process_hours_final.get(key)
+        if final_hr is None:
+            try:
+                final_hr = float(process_meta.get(key, {}).get("hr", entry.get("new_hr", entry["old_hr"])))
+            except Exception:
+                final_hr = entry.get("new_hr", entry["old_hr"])
+        entry["new_hr"] = float(final_hr or 0.0)
         entry["new_cost"] = float(process_costs.get(key, entry.get("new_cost", entry["old_cost"])))
         entry["delta_hr"] = entry["new_hr"] - entry["old_hr"]
         entry["delta_cost"] = entry["new_cost"] - entry["old_cost"]
@@ -11351,7 +11508,17 @@ def compute_quote_from_df(df: pd.DataFrame,
     }
     breakdown["decision_state"] = decision_state
 
-    narrative_text = build_narrative(quote_state)
+    if os.environ.get("DEBUG_INSPECTION_META") == "1":
+        import pdb
+
+        pdb.set_trace()
+
+    narrative_text = get_why_text(
+        quote_state,
+        pricing_source=str(pricing_source),
+        process_meta=process_meta,
+        final_hours=process_hours_final,
+    )
     breakdown["narrative"] = narrative_text
 
     if APP_ENV.llm_debug_enabled and overrides_meta and (
