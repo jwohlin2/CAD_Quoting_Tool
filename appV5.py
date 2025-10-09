@@ -7346,6 +7346,16 @@ def render_quote(
 
         return normalized_label
 
+    _HOUR_LABEL_CANON = {
+        "finishing deburr": "Finishing/Deburr",
+        "finishing/deburr": "Finishing/Deburr",
+        "deburr": "Finishing/Deburr",
+    }
+
+    def _canonical_hour_label(label: str) -> str:
+        key = str(label or "").strip().lower()
+        return _HOUR_LABEL_CANON.get(key, label)
+
     def _add_labor_cost_line(
         label: str,
         amount: float,
@@ -7362,7 +7372,7 @@ def render_quote(
             return
 
         storage_key = _labor_storage_key(str(label), process_key)
-        display_text = display_override or str(label)
+        display_text = _canonical_hour_label(display_override or str(label))
 
         entry = labor_row_data.get(storage_key)
         if entry is None:
@@ -7398,14 +7408,40 @@ def render_quote(
         proc_total += amount_val
 
     def _emit_labor_cost_lines() -> None:
+        merged_entries: dict[str, dict[str, Any]] = {}
+        merged_order: list[str] = []
+
         for storage_key in labor_row_order:
             entry = labor_row_data[storage_key]
-            row(entry["label"], entry["amount"], indent="  ")
+            canonical_label = _canonical_hour_label(entry["label"])
+            merged_entry = merged_entries.get(canonical_label)
+            if merged_entry is None:
+                merged_entry = {
+                    "label": canonical_label,
+                    "amount": 0.0,
+                    "detail_texts": [],
+                    "process_keys_no_detail": [],
+                }
+                merged_entries[canonical_label] = merged_entry
+                merged_order.append(canonical_label)
+
+            merged_entry["amount"] += entry["amount"]
+
             detail_text = labor_cost_details.get(storage_key)
             if detail_text:
-                write_detail(detail_text, indent="    ")
+                merged_entry["detail_texts"].append(detail_text)
             else:
                 for proc_key in entry["process_keys"]:
+                    if proc_key not in merged_entry["process_keys_no_detail"]:
+                        merged_entry["process_keys_no_detail"].append(proc_key)
+
+        for canonical_label in merged_order:
+            merged_entry = merged_entries[canonical_label]
+            row(merged_entry["label"], merged_entry["amount"], indent="  ")
+            for detail_text in merged_entry["detail_texts"]:
+                write_detail(detail_text, indent="    ")
+            if not merged_entry["detail_texts"] or merged_entry["process_keys_no_detail"]:
+                for proc_key in merged_entry["process_keys_no_detail"]:
                     add_process_notes(proc_key, indent="    ")
 
     def _normalize_bucket_key(name: str) -> str:
@@ -7810,12 +7846,26 @@ def render_quote(
         lines.append("Labor Hour Summary")
         lines.append(divider)
         if str(pricing_source_value).lower() == "planner":
-            entries_iter = hour_summary_entries.items()
+            entries_iter = list(hour_summary_entries.items())
         else:
-            entries_iter = sorted(hour_summary_entries.items(), key=lambda kv: kv[1][0], reverse=True)
-        total_hours = 0.0
+            entries_iter = list(
+                sorted(hour_summary_entries.items(), key=lambda kv: kv[1][0], reverse=True)
+            )
+        folded_entries: dict[str, list[Any]] = {}
+        folded_order: list[str] = []
         for label, (hr_val, include_in_total) in entries_iter:
-            hours_row(label, hr_val, indent="  ")
+            canonical_label = _canonical_hour_label(label)
+            folded = folded_entries.get(canonical_label)
+            if folded is None:
+                folded_entries[canonical_label] = [hr_val, bool(include_in_total)]
+                folded_order.append(canonical_label)
+            else:
+                folded[0] += hr_val
+                folded[1] = folded[1] or bool(include_in_total)
+        total_hours = 0.0
+        for canonical_label in folded_order:
+            hr_val, include_in_total = folded_entries[canonical_label]
+            hours_row(canonical_label, hr_val, indent="  ")
             if include_in_total and hr_val:
                 total_hours += hr_val
         hours_row("Total Hours", total_hours, indent="  ")
