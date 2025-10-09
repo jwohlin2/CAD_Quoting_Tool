@@ -47,6 +47,12 @@ def _coerce_env_bool(value: str | None) -> bool:
 FORCE_PLANNER = _coerce_env_bool(os.environ.get("FORCE_PLANNER"))
 
 
+# Guardrails for LLM-generated process adjustments.
+LLM_MULT_MIN = 0.25
+LLM_MULT_MAX = 4.0
+LLM_ADD_MAX_HR = 8.0
+
+
 def describe_runtime_environment() -> dict[str, str]:
     """Return a redacted snapshot of runtime configuration for auditors."""
 
@@ -1390,9 +1396,11 @@ def build_suggest_payload(
         geo_summary["provenance"] = _clean_nested(geo.get("provenance"), limit=12)
 
     bounds_summary = {
-        "mult_min": _coerce_float(bounds.get("mult_min")) or 0.5,
-        "mult_max": _coerce_float(bounds.get("mult_max")) or 3.0,
-        "adder_max_hr": _coerce_float(bounds.get("adder_max_hr")) or 5.0,
+        "mult_min": _coerce_float(bounds.get("mult_min")) or LLM_MULT_MIN,
+        "mult_max": _coerce_float(bounds.get("mult_max")) or LLM_MULT_MAX,
+        "adder_max_hr": _coerce_float(
+            bounds.get("adder_max_hr") or bounds.get("add_hr_max")
+        ) or LLM_ADD_MAX_HR,
         "scrap_min": _coerce_float(bounds.get("scrap_min")) or 0.0,
         "scrap_max": _coerce_float(bounds.get("scrap_max")) or 0.25,
     }
@@ -1488,9 +1496,13 @@ def build_suggest_payload(
 def sanitize_suggestions(s: dict, bounds: dict) -> dict:
     bounds = bounds or {}
 
-    mult_min = _as_float_or_none(bounds.get("mult_min")) or 0.5
-    mult_max = _as_float_or_none(bounds.get("mult_max")) or 3.0
-    adder_max = _as_float_or_none(bounds.get("adder_max_hr")) or 5.0
+    mult_min = _as_float_or_none(bounds.get("mult_min")) or LLM_MULT_MIN
+    mult_max = _as_float_or_none(bounds.get("mult_max")) or LLM_MULT_MAX
+    adder_max = (
+        _as_float_or_none(bounds.get("adder_max_hr"))
+        or _as_float_or_none(bounds.get("add_hr_max"))
+        or LLM_ADD_MAX_HR
+    )
     scrap_min = max(0.0, _as_float_or_none(bounds.get("scrap_min")) or 0.0)
     scrap_max = _as_float_or_none(bounds.get("scrap_max")) or 0.25
 
@@ -2104,13 +2116,19 @@ def merge_effective(
         changed = False
         source_norm = str(source).strip().lower()
         if kind == "multiplier":
-            mult_min = _as_float_or_none(bounds.get("mult_min")) or 0.5
-            mult_max = _as_float_or_none(bounds.get("mult_max")) or 3.0
+            mult_min = _as_float_or_none(bounds.get("mult_min")) or LLM_MULT_MIN
+            mult_max = _as_float_or_none(bounds.get("mult_max")) or LLM_MULT_MAX
             clamped = max(mult_min, min(mult_max, float(value)))
         elif kind == "adder":
             orig_val = float(value)
-            adder_max = _as_float_or_none(bounds.get("add_hr_max")) or 5.0
+            adder_max = (
+                _as_float_or_none(bounds.get("add_hr_max"))
+                or _as_float_or_none(bounds.get("adder_max_hr"))
+                or LLM_ADD_MAX_HR
+            )
             adder_min = _as_float_or_none(bounds.get("add_hr_min"))
+            if adder_min is None:
+                adder_min = _as_float_or_none(bounds.get("adder_min_hr"))
             raw_val = orig_val
             if source_norm == "llm" and raw_val > 240:
                 raw_val = raw_val / 60.0
@@ -11825,9 +11843,12 @@ def compute_quote_from_df(df: pd.DataFrame,
         "fixture": baseline_fixture,
     }
     llm_bounds = {
-        "mult_min": 0.5,
-        "mult_max": 3.0,
-        "adder_max_hr": 5.0,
+        "mult_min": LLM_MULT_MIN,
+        "mult_max": LLM_MULT_MAX,
+        "adder_max_hr": LLM_ADD_MAX_HR,
+        "add_hr_max": LLM_ADD_MAX_HR,
+        "add_hr_min": 0.0,
+        "adder_min_hr": 0.0,
         "scrap_min": 0.0,
         "scrap_max": 0.25,
     }
@@ -12742,7 +12763,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         actual = process_key_map.get(_normalize_key(key))
         if not actual:
             continue
-        mult = clamp(mult, 0.5, 3.0, 1.0)
+        mult = clamp(mult, LLM_MULT_MIN, LLM_MULT_MAX, 1.0)
         old_cost = float(process_costs.get(actual, 0.0))
         if old_cost <= 0:
             continue
@@ -12779,7 +12800,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     for key, add_hr in (ph_add or {}).items():
         if not isinstance(add_hr, (int, float)):
             continue
-        add_hr = clamp(add_hr, 0.0, 5.0, 0.0)
+        add_hr = clamp(add_hr, 0.0, LLM_ADD_MAX_HR, 0.0)
         if add_hr <= 0:
             continue
         actual = process_key_map.get(_normalize_key(key))
@@ -17088,10 +17109,12 @@ def get_llm_overrides(
     bounds_ctx = dict(ctx.get("bounds") or {})
     bounds_ctx.update(
         {
-            "mult_min": 0.5,
-            "mult_max": 3.0,
+            "mult_min": LLM_MULT_MIN,
+            "mult_max": LLM_MULT_MAX,
             "add_hr_min": 0.0,
-            "add_hr_max": 5.0,
+            "add_hr_max": LLM_ADD_MAX_HR,
+            "adder_min_hr": 0.0,
+            "adder_max_hr": LLM_ADD_MAX_HR,
             "scrap_min": 0.0,
             "scrap_max": 0.25,
         }
@@ -17163,7 +17186,7 @@ def get_llm_overrides(
             " \"process_hour_multipliers\":{\"drilling\":float},"
             " \"process_hour_adders\":{\"drilling\":float}, \"notes\":[""...""]}."
             " If hole_count < 5 or data is insufficient, return {}."
-            " Respect multipliers in [0.5,3.0] and adders in [0,5] hours."
+            " Respect multipliers in [0.25,4.0] and adders in [0,8] hours."
             " When hole_count ≥ 50 and thickness_mm ≥ 3, consider multipliers up to 2.0."
         )
         _run_task("drilling", drilling_system, hole_payload, max_tokens=384)
@@ -17179,7 +17202,7 @@ def get_llm_overrides(
             "You are a manufacturing estimator. Choose a stock item from `catalogs.stock` that"
             " minimally encloses bbox LxWxT (mm). Return JSON only: {\"stock_recommendation\":{...},"
             " \"scrap_pct\":0.14, \"process_hour_adders\":{\"sawing\":0.2,\"handling\":0.1},"
-            " \"notes\":[""...""]}. Keep scrap_pct within [0,0.25] and hour adders within [0,5]."
+            " \"notes\":[""...""]}. Keep scrap_pct within [0,0.25] and hour adders within [0,8]."
             " Do not invent SKUs. If none fit, return {\"needs_user_input\":\"no stock fits\"}."
         )
         _run_task("stock", stock_system, stock_payload, max_tokens=384)
@@ -17210,7 +17233,7 @@ def get_llm_overrides(
         " tiny radii, thread density) only when thresholds you define are exceeded."
         " Return JSON only: {\"dfm_risks\":[""thin walls <2mm""],"
         " \"process_hour_multipliers\":{...}, \"process_hour_adders\":{...}, \"notes\":[...]}"
-        " or {} if no issues. Keep multipliers within [0.5,3.0] and adders within [0,5]."
+        " or {} if no issues. Keep multipliers within [0.25,4.0] and adders within [0,8]."
     )
     _run_task("dfm", dfm_system, dfm_payload, max_tokens=320)
 
@@ -17230,7 +17253,7 @@ def get_llm_overrides(
             " inspection or finishing time and suggest surface-finish ops. Return JSON only:"
             " {\"tolerance_impacts\":{\"in_process_inspection_hr\":0.2,"
             " \"final_inspection_hr\":0.1, \"finishing_hr\":0.1, \"suggested_surface_finish\":\"...\","
-            " \"notes\":[...]}}. Keep hour adders within [0,5] and return {} if no change is needed."
+            " \"notes\":[...]}}. Keep hour adders within [0,8] and return {} if no change is needed."
         )
         _run_task("tolerance", tol_system, tol_payload, max_tokens=320)
 
@@ -17292,14 +17315,14 @@ def get_llm_overrides(
         val = _as_float(value)
         if val is None:
             return
-        clamped = clamp(val, 0.5, 3.0, 1.0)
+        clamped = clamp(val, LLM_MULT_MIN, LLM_MULT_MAX, 1.0)
         container = _ensure_mults_dict()
         norm = str(name).lower()
         prev = container.get(norm)
         if prev is None:
             container[norm] = clamped
             return
-        new_val = clamp(prev * clamped, 0.5, 3.0, 1.0)
+        new_val = clamp(prev * clamped, LLM_MULT_MIN, LLM_MULT_MAX, 1.0)
         if not math.isclose(prev * clamped, new_val, abs_tol=1e-6):
             clamp_notes.append(f"{source} multiplier clipped for {norm}")
         container[norm] = new_val
@@ -17308,15 +17331,17 @@ def get_llm_overrides(
         val = _as_float(value)
         if val is None:
             return
-        clamped = clamp(val, 0.0, 5.0, 0.0)
+        clamped = clamp(val, 0.0, LLM_ADD_MAX_HR, 0.0)
         if clamped <= 0:
             return
         container = _ensure_adders_dict()
         norm = str(name).lower()
         prev = float(container.get(norm, 0.0))
-        new_val = clamp(prev + clamped, 0.0, 5.0, 0.0)
+        new_val = clamp(prev + clamped, 0.0, LLM_ADD_MAX_HR, 0.0)
         if not math.isclose(prev + clamped, new_val, abs_tol=1e-6):
-            clamp_notes.append(f"{source} {prev + clamped:.2f} hr clipped to 5.0 for {norm}")
+            clamp_notes.append(
+                f"{source} {prev + clamped:.2f} hr clipped to {LLM_ADD_MAX_HR:.1f} for {norm}"
+            )
         container[norm] = new_val
 
     def _clean_notes_list(values, limit: int = 6) -> list[str]:
@@ -17352,7 +17377,7 @@ def get_llm_overrides(
     for k, v in (mults or {}).items():
         if isinstance(v, (int, float)):
             orig = float(v)
-            clamped_val = clamp(v, 0.5, 3.0, 1.0)
+            clamped_val = clamp(v, LLM_MULT_MIN, LLM_MULT_MAX, 1.0)
             clean_mults[k.lower()] = clamped_val
             if not math.isclose(orig, clamped_val, abs_tol=1e-6):
                 clamp_notes.append(
@@ -17365,7 +17390,7 @@ def get_llm_overrides(
     for k, v in (adds or {}).items():
         if isinstance(v, (int, float)):
             orig = float(v)
-            clamped_val = clamp(v, 0.0, 5.0, 0.0)
+            clamped_val = clamp(v, 0.0, LLM_ADD_MAX_HR, 0.0)
             clean_adders[k.lower()] = clamped_val
             if not math.isclose(orig, clamped_val, abs_tol=1e-6):
                 clamp_notes.append(
@@ -17525,12 +17550,12 @@ def get_llm_overrides(
 
             saw_hr = _as_float(stock_plan_raw.get("sawing_hr") or stock_plan_raw.get("saw_hr"))
             if saw_hr and saw_hr > 0:
-                saw_hr_clamped = clamp(saw_hr, 0.0, 5.0, 0.0)
+                saw_hr_clamped = clamp(saw_hr, 0.0, LLM_ADD_MAX_HR, 0.0)
                 clean_stock_plan["sawing_hr"] = saw_hr_clamped
                 _merge_adder("saw_waterjet", saw_hr_clamped, "stock_plan.sawing_hr")
             handling_hr = _as_float(stock_plan_raw.get("handling_hr"))
             if handling_hr and handling_hr > 0:
-                handling_hr_clamped = clamp(handling_hr, 0.0, 5.0, 0.0)
+                handling_hr_clamped = clamp(handling_hr, 0.0, LLM_ADD_MAX_HR, 0.0)
                 clean_stock_plan["handling_hr"] = handling_hr_clamped
                 _merge_adder("assembly", handling_hr_clamped, "stock_plan.handling_hr")
 
@@ -17557,7 +17582,7 @@ def get_llm_overrides(
             clean_setup["fixture"] = fixture.strip()[:120]
         setup_hr = _as_float(setup_plan_raw.get("setup_adders_hr") or setup_plan_raw.get("setup_hours"))
         if setup_hr and setup_hr > 0:
-            clean_setup["setup_adders_hr"] = clamp(setup_hr, 0.0, 5.0, 0.0)
+            clean_setup["setup_adders_hr"] = clamp(setup_hr, 0.0, LLM_ADD_MAX_HR, 0.0)
         setup_notes = _clean_notes_list(setup_plan_raw.get("notes"))
         if setup_notes:
             clean_setup["notes"] = setup_notes
@@ -17574,17 +17599,17 @@ def get_llm_overrides(
         clean_tol: dict[str, Any] = {}
         inproc_hr = _as_float(tol_raw.get("in_process_inspection_hr") or tol_raw.get("in_process_hr"))
         if inproc_hr and inproc_hr > 0:
-            inproc_clamped = clamp(inproc_hr, 0.0, 5.0, 0.0)
+            inproc_clamped = clamp(inproc_hr, 0.0, LLM_ADD_MAX_HR, 0.0)
             clean_tol["in_process_inspection_hr"] = inproc_clamped
             _merge_adder("inspection", inproc_clamped, "tolerance_in_process_hr")
         final_hr = _as_float(tol_raw.get("final_inspection_hr") or tol_raw.get("final_hr"))
         if final_hr and final_hr > 0:
-            final_clamped = clamp(final_hr, 0.0, 5.0, 0.0)
+            final_clamped = clamp(final_hr, 0.0, LLM_ADD_MAX_HR, 0.0)
             clean_tol["final_inspection_hr"] = final_clamped
             _merge_adder("inspection", final_clamped, "tolerance_final_hr")
         finish_hr = _as_float(tol_raw.get("finishing_hr") or tol_raw.get("finish_hr"))
         if finish_hr and finish_hr > 0:
-            finish_clamped = clamp(finish_hr, 0.0, 5.0, 0.0)
+            finish_clamped = clamp(finish_hr, 0.0, LLM_ADD_MAX_HR, 0.0)
             clean_tol["finishing_hr"] = finish_clamped
             _merge_adder("finishing_deburr", finish_clamped, "tolerance_finishing_hr")
         surface = tol_raw.get("surface_finish") or tol_raw.get("suggested_surface_finish")
@@ -19274,9 +19299,14 @@ class App(tk.Tk):
         for proc, mult in mults.items():
             if proc in eff_hours:
                 try:
-                    eff_hours[proc] = float(eff_hours[proc]) * float(mult)
+                    base_val = float(eff_hours[proc])
                 except Exception:
                     continue
+                clamped_mult = clamp(mult, LLM_MULT_MIN, LLM_MULT_MAX, 1.0)
+                try:
+                    eff_hours[proc] = base_val * float(clamped_mult)
+                except Exception:
+                    eff_hours[proc] = base_val
         for proc, (label, scale) in PROC_MULT_TARGETS.items():
             if proc in eff_hours:
                 try:
