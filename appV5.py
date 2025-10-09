@@ -6076,6 +6076,8 @@ def render_quote(
                 text = str(entry).strip()
                 if text and text not in drill_debug_entries:
                     drill_debug_entries.append(text)
+    # Canonical QUOTE SUMMARY header (legacy variants removed in favour of this
+    # block so the Speeds/Feeds status + Drill Debug output stay consistent).
     lines.append(f"QUOTE SUMMARY - Qty {qty}")
     lines.append(divider)
     speeds_feeds_display = (
@@ -6145,6 +6147,9 @@ def render_quote(
         if pricing_source_value is not None
         else ""
     )
+    if pricing_source_text:
+        lines.append(f"Pricing Source: {pricing_source_text}")
+    pricing_source_lower = pricing_source_text.lower()
     if red_flags:
         lines.append("")
         lines.append("Red Flags")
