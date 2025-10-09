@@ -287,6 +287,33 @@ def _canonical_pass_label(label: str | None) -> str:
         return HARDWARE_PASS_LABEL
     return name
 
+
+_AMORTIZED_LABEL_PATTERN = re.compile(
+    r"\s*\((amortized|amortised)(?:\s+(?:per\s+(?:part|piece|pc|unit)|each|ea))?\)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _canonical_amortized_label(label: Any) -> tuple[str, bool]:
+    """Normalize labels that include an amortized suffix.
+
+    Returns a tuple of ``(canonical_label, is_amortized)`` where amortized labels are
+    collapsed to a ``"(amortized)"`` suffix so that display rows and stored totals use
+    consistent keys regardless of how the source spelled the suffix.
+    """
+
+    text = str(label or "").strip()
+    if not text:
+        return ("", False)
+
+    match = _AMORTIZED_LABEL_PATTERN.search(text)
+    if not match:
+        return (text, False)
+
+    prefix = text[: match.start()].rstrip()
+    canonical = f"{prefix} (amortized)" if prefix else match.group(1).lower()
+    return (canonical, True)
+
 from OCP.TopAbs   import TopAbs_EDGE, TopAbs_FACE
 from OCP.TopExp   import TopExp, TopExp_Explorer
 from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
@@ -5328,6 +5355,19 @@ def _normalize_bucket_key(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_")
 
 
+def _fold_buckets(process_costs: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Return a plain dictionary for downstream processing."""
+
+    if isinstance(process_costs, Mapping):
+        return dict(process_costs)
+    if process_costs is None:
+        return {}
+    try:
+        return dict(process_costs)
+    except Exception:
+        return {}
+
+
 def _canonical_bucket_key(name: str) -> str:
     normalized = _normalize_bucket_key(name)
     if not normalized:
@@ -5953,14 +5993,17 @@ def render_quote(
             return
         lines.append(short_divider)
 
-    def row(label: str, val: float, indent: str = ""):
-        # left-label, right-amount aligned to page_width
+    def _format_row(label: str, val: float, indent: str = "") -> str:
         left = f"{indent}{label}"
         right = _m(val)
-        if _is_total_label(label):
-            _ensure_total_separator(len(right))
         pad = max(1, page_width - len(left) - len(right))
-        lines.append(f"{left}{' ' * pad}{right}")
+        return f"{left}{' ' * pad}{right}"
+
+    def row(label: str, val: float, indent: str = ""):
+        # left-label, right-amount aligned to page_width
+        if _is_total_label(label):
+            _ensure_total_separator(len(_m(val)))
+        lines.append(_format_row(label, val, indent))
 
     def hours_row(label: str, val: float, indent: str = ""):
         left = f"{indent}{label}"
@@ -6067,7 +6110,9 @@ def render_quote(
             write_wrapped(entry, "  ")
         lines.append("")
     row("Final Price per Part:", price)
-    row("Total Labor Cost:", float(totals.get("labor_cost", 0.0)))
+    total_labor_label = "Total Labor Cost:"
+    row(total_labor_label, float(totals.get("labor_cost", 0.0)))
+    total_labor_row_index = len(lines) - 1
     row("Total Direct Costs:", float(totals.get("direct_costs", 0.0)))
     pricing_source_value = breakdown.get("pricing_source")
     if pricing_source_value:
@@ -7245,6 +7290,12 @@ def render_quote(
             detail_bits=fixture_bits,
         )
 
+    displayed_process_total = sum(float(value or 0.0) for value in labor_costs_display.values())
+    if not math.isclose(proc_total, displayed_process_total, rel_tol=1e-9, abs_tol=0.01):
+        raise AssertionError(
+            "Displayed process rows do not add up to the accumulated labor total."
+        )
+    proc_total = displayed_process_total
     row("Total", proc_total, indent="  ")
 
     hour_summary_entries: dict[str, tuple[float, bool]] = {}
@@ -7414,6 +7465,7 @@ def render_quote(
     lines.append("Pass-Through & Direct Costs")
     lines.append(divider)
     pass_total = 0.0
+    pass_through_labor_total = 0.0
     for key, value in sorted((pass_through or {}).items(), key=lambda kv: kv[1], reverse=True):
         if key == "Material":
             continue
@@ -7423,14 +7475,30 @@ def render_quote(
             row(label, float(value), indent="  ")
             add_pass_basis(key, indent="    ")
             write_detail(direct_cost_details.get(key), indent="    ")
-            pass_total += float(value or 0.0)
+            amount_val = float(value or 0.0)
+            pass_total += amount_val
+            canonical_pass_label = _canonical_pass_label(key)
+            if "labor" in canonical_pass_label.lower():
+                pass_through_labor_total += amount_val
     row("Total", pass_total, indent="  ")
+
+    computed_total_labor_cost = proc_total + pass_through_labor_total
+    if isinstance(totals, dict):
+        totals["labor_cost"] = computed_total_labor_cost
+    if 0 <= total_labor_row_index < len(lines):
+        lines[total_labor_row_index] = _format_row(
+            total_labor_label,
+            computed_total_labor_cost,
+        )
+
+    computed_subtotal = proc_total + pass_total
+    declared_subtotal = float(totals.get("subtotal", computed_subtotal))
     lines.append("")
 
     # ---- Pricing ladder ------------------------------------------------------
     lines.append("Pricing Ladder")
     lines.append(divider)
-    subtotal         = float(totals.get("subtotal",         proc_total + pass_total))
+    subtotal         = declared_subtotal
     with_overhead    = float(totals.get("with_overhead",    subtotal))
     with_ga          = float(totals.get("with_ga",          with_overhead))
     with_contingency = float(totals.get("with_contingency", with_ga))
