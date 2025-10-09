@@ -7423,17 +7423,24 @@ def render_quote(
         if not _is_planner_meta(key)
     ]
 
-    preferred_bucket_order = [
-        "milling",
-        "drilling",
-        "counterbore",
-        "countersink",
-        "tapping",
-        "grinding",
-        "finishing_deburr",
-        "saw_waterjet",
-        "inspection",
-    ]
+    # Maintain a stable ordering of process cost buckets that prioritizes the
+    # preferred buckets while appending any "extra" buckets after them.  The
+    # `bucket_keys` list already contains the preferred order followed by any
+    # additional keys sourced from the rollup/ops maps; we reuse that ordering
+    # here and extend it with any further keys that appear only in the display
+    # data so that everything receives a deterministic slot.
+    bucket_sort_order: list[str] = list(bucket_keys) if bucket_keys else list(bucket_order)
+
+    existing_bucket_keys = set(bucket_sort_order)
+    for key, _ in display_process_cost_items:
+        canon = _normalize_bucket_key(key)
+        if canon.startswith("planner_"):
+            continue
+        if canon and canon not in existing_bucket_keys:
+            bucket_sort_order.append(canon)
+            existing_bucket_keys.add(canon)
+
+    bucket_sort_rank = {canon: idx for idx, canon in enumerate(bucket_sort_order)}
 
     def _is_planner_rollup_key(name: str | None) -> bool:
         if pricing_source_lower != "planner":
@@ -7443,32 +7450,27 @@ def render_quote(
             return False
         if canon in {"planner_total", "planner_machine", "planner_labor"}:
             return True
+        norm = _normalize_bucket_key(name)
         return norm.startswith("planner_")
 
     ordered_process_items: list[tuple[str, float]] = []
-    seen_keys: set[str] = set()
+    for original_index, (key, value) in enumerate(display_process_cost_items):
+        norm = _normalize_bucket_key(key)
+        if norm.startswith("planner_"):
+            continue
+        if not ((value > 0) or show_zeros):
+            continue
 
-    for bucket in preferred_bucket_order:
-        for key, value in display_process_cost_items:
-            norm = _normalize_bucket_key(key)
-            if norm.startswith("planner_"):
-                continue
-            if norm != bucket:
-                continue
-            if not ((value > 0) or show_zeros):
-                continue
-            ordered_process_items.append((key, value))
-            seen_keys.add(key)
+        sort_rank = bucket_sort_rank.get(norm)
+        if sort_rank is None:
+            # Fallback for any stray keys: place them after the known buckets in
+            # their original order to keep the output deterministic.
+            sort_rank = len(bucket_sort_rank) + original_index
 
-    remaining_items = [
-        (key, value)
-        for key, value in display_process_cost_items
-        if key not in seen_keys
-        and not _normalize_bucket_key(key).startswith("planner_")
-        and ((value > 0) or show_zeros)
-    ]
-    remaining_items.sort(key=_normalize_bucket_key)
-    ordered_process_items.extend(remaining_items)
+        ordered_process_items.append(((sort_rank, original_index), (key, value)))
+
+    ordered_process_items.sort(key=lambda item: item[0])
+    ordered_process_items = [item[1] for item in ordered_process_items]
 
     display_process_costs: dict[str, Any] = {}
     for key, value in (process_costs or {}).items():
