@@ -5953,10 +5953,74 @@ def render_quote(
             add_process_notes(process_key, indent="    ")
         proc_total += float(amount or 0.0)
 
-    label_overrides_proc = {
-        "finishing_deburr": "Finishing/Deburr",
-        "saw_waterjet": "Saw/Waterjet",
-    }
+    def _normalize_bucket_key(name: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_")
+
+    preferred_bucket_order = [
+        "milling",
+        "drilling",
+        "counterbore",
+        "countersink",
+        "tapping",
+        "grinding",
+        "finishing_deburr",
+        "saw_waterjet",
+        "inspection",
+    ]
+
+    ordered_process_items: list[tuple[str, float]] = []
+    seen_keys: set[str] = set()
+
+    for bucket in preferred_bucket_order:
+        for key, value in (process_costs or {}).items():
+            if _normalize_bucket_key(key) != bucket:
+                continue
+            if not ((value > 0) or show_zeros):
+                continue
+            ordered_process_items.append((key, value))
+            seen_keys.add(key)
+
+    remaining_items = [
+        (key, value)
+        for key, value in (process_costs or {}).items()
+        if key not in seen_keys and ((value > 0) or show_zeros)
+    ]
+    remaining_items.sort(key=lambda kv: _normalize_bucket_key(kv[0]))
+    ordered_process_items.extend(remaining_items)
+
+    for key, value in ordered_process_items:
+        label = _process_label(key)
+        meta = process_meta.get(str(key).lower(), {})
+        detail_bits: list[str] = []
+        try:
+            hr_val = float(meta.get("hr", 0.0) or 0.0)
+        except Exception:
+            hr_val = 0.0
+        try:
+            rate_val = float(meta.get("rate", 0.0) or 0.0)
+        except Exception:
+            rate_val = 0.0
+        try:
+            extra_val = float(meta.get("base_extra", 0.0) or 0.0)
+        except Exception:
+            extra_val = 0.0
+        if hr_val > 0:
+            detail_bits.append(f"{hr_val:.2f} hr @ ${rate_val:,.2f}/hr")
+        if abs(extra_val) > 1e-6 and hr_val <= 1e-6 and rate_val > 0:
+            extra_hours = extra_val / rate_val
+            detail_bits.append(
+                f"{extra_hours:.2f} hr @ ${rate_val:,.2f}/hr"
+            )
+        proc_notes = applied_process.get(str(key).lower(), {}).get("notes")
+        if proc_notes:
+            detail_bits.append("LLM: " + ", ".join(proc_notes))
+
+        _add_labor_cost_line(
+            label,
+            float(value),
+            process_key=str(key),
+            detail_bits=detail_bits,
+        )
 
     remaining_costs: dict[str, Any] = dict(process_costs or {})
     for special_key in list(remaining_costs.keys()):
@@ -8998,11 +9062,6 @@ def compute_quote_from_df(df: pd.DataFrame,
     if deburr_holes_hr:
         legacy_process_meta["deburr"]["hole_touch_hr"] = deburr_holes_hr
 
-    if planner_pricing_result is not None:
-        quote_state.process_plan.setdefault("pricing", copy.deepcopy(planner_pricing_result))
-        if planner_bucket_view is not None:
-            quote_state.process_plan.setdefault("bucket_view", copy.deepcopy(planner_bucket_view))
-
     if not used_planner:
         for key, value in legacy_process_costs.items():
             process_costs[key] = float(value)
@@ -9023,16 +9082,19 @@ def compute_quote_from_df(df: pd.DataFrame,
     }
     process_costs_baseline = {k: float(v) for k, v in process_costs.items()}
 
-    pass_meta = {
-        "Material": {"basis": "Stock / raw material"},
-        HARDWARE_PASS_LABEL: {"basis": "Pass-through hardware / BOM"},
-        "Outsourced Vendors": {"basis": "Outside processing vendors"},
-        "Shipping": {"basis": shipping_basis_desc},
-        "Consumables /Hr": {"basis": "Machine & inspection hours $/hr"},
-        "Utilities": {"basis": "Spindle/inspection hours $/hr"},
-        "Consumables": {"basis": "Fixed shop supplies"},
-        "Packaging Flat": {"basis": "Packaging materials & crates"},
-    }
+    def _default_pass_meta(shipping_basis_desc: str) -> dict[str, dict[str, str]]:
+        return {
+            "Material": {"basis": "Stock / raw material"},
+            HARDWARE_PASS_LABEL: {"basis": "Pass-through hardware / BOM"},
+            "Outsourced Vendors": {"basis": "Outside processing vendors"},
+            "Shipping": {"basis": shipping_basis_desc},
+            "Consumables /Hr": {"basis": "Machine & inspection hours $/hr"},
+            "Utilities": {"basis": "Spindle/inspection hours $/hr"},
+            "Consumables": {"basis": "Fixed shop supplies"},
+            "Packaging Flat": {"basis": "Packaging materials & crates"},
+        }
+
+    pass_meta = _default_pass_meta(shipping_basis_desc)
 
     def _build_pass_through(
         planner_directs,
@@ -9879,6 +9941,8 @@ def compute_quote_from_df(df: pd.DataFrame,
     planner_bucket_rollup: dict[str, dict[str, float]] | None = None
 
     if planner_pricing_result is not None:
+        # Canonical planner integration + bucketization path
+        quote_state.process_plan.setdefault("pricing", copy.deepcopy(planner_pricing_result))
         totals = planner_pricing_result.get("totals", {}) if isinstance(planner_pricing_result, dict) else {}
         line_items_raw = planner_pricing_result.get("line_items", []) if isinstance(planner_pricing_result, dict) else []
         if isinstance(line_items_raw, list):
@@ -9891,62 +9955,73 @@ def compute_quote_from_df(df: pd.DataFrame,
         planner_labor_cost_total = float(totals.get("labor_cost", 0.0) or 0.0)
         planner_total_minutes = float(totals.get("minutes", 0.0) or 0.0)
 
-        def _to_bucket(name: str) -> str:
-            n = (name or "").lower()
-            if any(k in n for k in ("milling", "mill", "t-slot", "pocket", "profile")):
-                return "milling"
-            if any(k in n for k in ("c'bore", "counterbore")):
-                return "counterbore"
-            if any(k in n for k in ("csk", "countersink")):
-                return "countersink"
-            if any(
-                k in n
-                for k in (
-                    "tap",
-                    "thread mill",
-                    "thread_mill",
-                    "rigid tap",
-                    "rigid_tap",
-                )
-            ):
-                return "tapping"
-            if any(k in n for k in ("drill", "ream", "bore")):
-                return "drilling"
-            if any(k in n for k in ("grind", "od grind", "id grind", "surface grind", "jig grind")):
-                return "grinding"
-            if "wire" in n or "wedm" in n:
-                return "wire_edm"
-            if "edm" in n:
-                return "sinker_edm"
-            if any(k in n for k in ("saw", "waterjet")):
-                return "saw_waterjet"
-            if "deburr" in n or "finish" in n:
-                return "finishing_deburr"
-            if "inspect" in n or "cmm" in n or "fai" in n:
-                return "inspection"
-            if any(k in n for k in ("assembly", "fit", "bench")):
-                return "assembly"
-            return "misc"
+        def _planner_bucketize(entries: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
+            def _resolve_bucket(name: str) -> str:
+                text = (name or "").lower()
+                if not text:
+                    return "milling"
 
-        bucket_view: dict[str, dict[str, float]] = {}
-        for e in planner_line_items:
-            b = _to_bucket(str(e.get("op", "")))
-            m = float(e.get("minutes") or 0.0)
-            mc = float(e.get("machine_cost") or 0.0)
-            lc = float(e.get("labor_cost") or 0.0)
-            d = bucket_view.setdefault(
-                b,
-                {
-                    "minutes": 0.0,
-                    "labor_cost": 0.0,
-                    "machine_cost": 0.0,
-                    "total_cost": 0.0,
-                },
-            )
-            d["minutes"] += m
-            d["labor_cost"] += lc
-            d["machine_cost"] += mc
-            d["total_cost"] += lc + mc
+                def _contains(*tokens: str) -> bool:
+                    return any(token in text for token in tokens)
+
+                if _contains("countersink", "counter sink", "csk", "c-sink", "c sink"):
+                    return "countersink"
+                if _contains("counterbore", "c'bore", "c bore", "cbore", "spotface"):
+                    return "counterbore"
+                if "tap" in text or _contains("thread mill", "threadmill"):
+                    return "tapping"
+                if _contains("grind", "od grind", "id grind", "surface grind", "jig grind"):
+                    return "grinding"
+                if "wire" in text or "wedm" in text:
+                    return "wire_edm"
+                if "edm" in text:
+                    return "sinker_edm"
+                if _contains("saw", "waterjet", "water jet"):
+                    return "saw_waterjet"
+                if _contains("deburr", "finish", "polish", "blend"):
+                    return "finishing_deburr"
+                if _contains("inspect", "cmm", "fai", "first article", "qc", "quality"):
+                    return "inspection"
+                if _contains("assembly", "fit", "bench", "install"):
+                    return "assembly"
+                if _contains("toolmaker", "tooling support"):
+                    return "toolmaker_support"
+                if _contains("package", "pack-out", "pack out", "boxing"):
+                    return "packaging"
+                if _contains("ehs", "environment", "safety"):
+                    return "ehs_compliance"
+                if _contains("turn", "lathe"):
+                    return "turning"
+                if _contains("lap", "hone"):
+                    return "lapping_honing"
+                if _contains("drill", "ream", "bore", "hole"):
+                    return "drilling"
+                if _contains("milling", "mill", "t-slot", "pocket", "profile"):
+                    return "milling"
+                return "misc"
+
+            bucket_view: dict[str, dict[str, float]] = {}
+            for entry in entries:
+                bucket = _resolve_bucket(str(entry.get("op", "")))
+                minutes_val = float(entry.get("minutes") or 0.0)
+                machine_cost = float(entry.get("machine_cost") or 0.0)
+                labor_cost = float(entry.get("labor_cost") or 0.0)
+                bucket_totals = bucket_view.setdefault(
+                    bucket,
+                    {
+                        "minutes": 0.0,
+                        "labor_cost": 0.0,
+                        "machine_cost": 0.0,
+                        "total_cost": 0.0,
+                    },
+                )
+                bucket_totals["minutes"] += minutes_val
+                bucket_totals["labor_cost"] += labor_cost
+                bucket_totals["machine_cost"] += machine_cost
+                bucket_totals["total_cost"] += labor_cost + machine_cost
+            return bucket_view
+
+        bucket_view = _planner_bucketize(planner_line_items)
 
         if bucket_view:
             planner_bucket_rollup = copy.deepcopy(bucket_view)
@@ -11173,6 +11248,10 @@ def compute_quote_from_df(df: pd.DataFrame,
         except Exception:
             pass_through[label] = 0.0
 
+    process_hours_final = {
+        k: float(process_meta.get(k, {}).get("hr", 0.0)) for k in process_meta
+    }
+
     if pricing_source != "planner":
         hole_count_for_guard = 0
         try:
@@ -11194,37 +11273,27 @@ def compute_quote_from_df(df: pd.DataFrame,
             if not ok:
                 floor_hr = _drilling_floor_hours(hole_count_for_guard)
                 new_hr = max(drill_hr_after_overrides, floor_hr)
-                drill_meta = process_meta.get("drilling")
-                if drill_meta:
-                    rate = float(drill_meta.get("rate", 0.0))
-                    base_extra = float(drill_meta.get("base_extra", 0.0))
-                    old_cost = float(process_costs.get("drilling", 0.0))
-                    entry = applied_process.setdefault(
-                        "drilling",
-                        {
-                            "old_hr": float(drill_meta.get("hr", 0.0)),
-                            "old_cost": old_cost,
-                            "notes": [],
-                        },
-                    )
-                    entry.setdefault("notes", []).append(f"Raised to floor {floor_hr:.2f} h")
-                    drill_meta["hr"] = new_hr
-                    process_costs["drilling"] = round(new_hr * rate + base_extra, 2)
+                drill_meta = process_meta.setdefault("drilling", {})
+                rate = float(drill_meta.get("rate", 0.0) or 0.0)
+                base_extra = float(drill_meta.get("base_extra", 0.0) or 0.0)
+                old_hr = float(drill_meta.get("hr", 0.0) or 0.0)
+                old_cost = float(process_costs.get("drilling", 0.0) or 0.0)
+                entry = applied_process.setdefault(
+                    "drilling",
+                    {
+                        "old_hr": old_hr,
+                        "old_cost": old_cost,
+                        "notes": [],
+                    },
+                )
+                entry.setdefault("notes", []).append(f"Raised to floor {floor_hr:.2f} h")
+                drill_meta["hr"] = new_hr
+                process_costs["drilling"] = round(new_hr * rate + base_extra, 2)
+                process_hours_final["drilling"] = new_hr
                 llm_notes.append(f"Raised drilling to floor: {why}")
-        process_hours_final = {}
-        for key, meta in process_meta.items():
-            if not isinstance(meta, dict):
-                continue
-            try:
-                hr_val = float(meta.get("hr", 0.0) or 0.0)
-            except Exception:
-                hr_val = 0.0
-            process_hours_final[key] = hr_val
-            if key in process_costs:
-                rate_val = float(meta.get("rate", 0.0) or 0.0)
-                base_extra_val = float(meta.get("base_extra", 0.0) or 0.0)
-                process_costs[key] = round(hr_val * rate_val + base_extra_val, 2)
-
+        process_hours_final = {
+            k: float(process_meta.get(k, {}).get("hr", 0.0)) for k in process_meta
+        }
         baseline_total_hours = sum(
             float(process_hours_baseline.get(k, 0.0)) for k in process_hours_baseline
         )
@@ -11376,12 +11445,24 @@ def compute_quote_from_df(df: pd.DataFrame,
     insurance_cost = insurance_pct * (labor_cost + base_direct_costs)
     vendor_marked_add = vendor_markup * (outsourced_costs + shipping_cost)
 
-    pass_meta.setdefault("Insurance", {"basis": "Applied at insurance pct"})
-    pass_meta.setdefault("Vendor Markup Added", {"basis": "Vendor + freight markup"})
-    pass_through["Insurance"] = round(insurance_cost, 2)
-    pass_through["Vendor Markup Added"] = round(vendor_marked_add, 2)
+    base_directs_excluding_ship_mat = sum(
+        float(value)
+        for label, value in pass_through.items()
+        if label not in ("Material", "Shipping", "Material Scrap Credit")
+    )
 
-    total_direct_costs = base_direct_costs + insurance_cost + vendor_marked_add
+    if base_directs_excluding_ship_mat > 0:
+        pass_meta.setdefault("Insurance", {"basis": "Applied at insurance pct"})
+        pass_meta.setdefault("Vendor Markup Added", {"basis": "Vendor + freight markup"})
+        insurance_cost = round(insurance_cost, 2)
+        vendor_marked_add = round(vendor_marked_add, 2)
+        pass_through["Insurance"] = insurance_cost
+        pass_through["Vendor Markup Added"] = vendor_marked_add
+        total_direct_costs = base_direct_costs + insurance_cost + vendor_marked_add
+    else:
+        insurance_cost = 0.0
+        vendor_marked_add = 0.0
+        total_direct_costs = base_direct_costs
     direct_costs = total_direct_costs
 
     subtotal = labor_cost + direct_costs
