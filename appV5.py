@@ -5407,6 +5407,54 @@ def canonicalize_costs(process_costs: Mapping[str, Any] | None) -> dict[str, flo
     return out
 
 
+def _canonical_amortized_label(label: Any) -> tuple[str, bool]:
+    """Return a normalized amortized label and flag indicating it was amortized."""
+
+    text = str(label or "").strip()
+    if not text:
+        return "", False
+
+    lowered = text.lower()
+    if "amortized" not in lowered:
+        return text, False
+
+    amortized_map = {
+        "programming": "Programming (amortized)",
+        "fixture": "Fixture Build (amortized)",
+    }
+    for keyword, canonical in amortized_map.items():
+        if keyword in lowered:
+            return canonical, True
+
+    return text, True
+
+
+def _fold_buckets(process_costs: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Return a copy of ``process_costs`` with amortized buckets removed."""
+
+    if isinstance(process_costs, Mapping):
+        items = list(process_costs.items())
+    elif process_costs is None:
+        items = []
+    else:
+        try:
+            items = list(process_costs)
+        except Exception:
+            items = []
+
+    folded: dict[str, Any] = {}
+    for key, value in items:
+        canonical, is_amortized = _canonical_amortized_label(key)
+        if (
+            is_amortized
+            and canonical
+            in {"Programming (amortized)", "Fixture Build (amortized)"}
+        ):
+            continue
+        folded[key] = value
+    return folded
+
+
 def _process_label(key: str | None) -> str:
     raw = str(key or "").strip().lower().replace(" ", "_")
     canon = re.sub(r"[^a-z0-9]+", "_", raw).strip("_")
@@ -7237,6 +7285,7 @@ def render_quote(
         eng_rate = 0.0
     if eng_hr > 0:
         prog_bits.append(f"- Engineering (lot): {_hours_with_rate_text(eng_hr, eng_rate)}")
+    show_programming_amortized = _should_show_amortized_cost(programming_per_part_cost)
     if qty > 1 and programming_per_part_cost > 0:
         prog_bits.append(f"Amortized across {qty} pcs")
 
