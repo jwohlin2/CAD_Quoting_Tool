@@ -10297,19 +10297,14 @@ def compute_quote_from_df(df: pd.DataFrame,
         )
 
         planner_mode = (
-            str(params.get("PlannerMode", "legacy")).strip().lower()
+            str(params.get("PlannerMode", "auto")).strip().lower()
             if isinstance(params, _MappingABC)
-            else "legacy"
+            else "auto"
         )
-        if planner_mode == "planner":
-            used_planner = (recognized_line_items > 0) or planner_totals_present
-        elif planner_mode == "legacy":
+        if planner_mode == "legacy":
             used_planner = False
         else:
-            used_planner = recognized_line_items > 0
-
-        if force_legacy_pricing:
-            used_planner = False
+            used_planner = (recognized_line_items > 0) or planner_totals_present
 
         if recognized_line_items == 0:
             if planner_totals_present and planner_total_minutes > 0.0:
@@ -10390,8 +10385,6 @@ def compute_quote_from_df(df: pd.DataFrame,
                     process_meta[b] = update_payload
 
     pricing_source = "planner" if used_planner else "legacy"
-    if force_legacy_pricing:
-        pricing_source = "legacy"
 
     baseline_data = {
         "process_hours": process_hours_baseline,
