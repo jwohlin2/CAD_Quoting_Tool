@@ -35,7 +35,9 @@ def test_canonicalize_costs_groups_aliases_and_skips_planner_total() -> None:
     assert "planner_total" not in canon
 
 
-def test_render_process_costs_orders_rows_and_rates() -> None:
+def test_render_process_costs_orders_rows_and_rates(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DEBUG_MISC", raising=False)
+
     table = TableCollector()
     process_costs = {
         "milling": 100.0,
@@ -62,27 +64,23 @@ def test_render_process_costs_orders_rows_and_rates() -> None:
         "Milling",
         "Drilling",
         "Finishing/Deburr",
-        "Misc",
     ]
-    assert total == pytest.approx(145.0)
+    assert total == pytest.approx(135.0)
 
     expected_hours = {
         "Milling": 2.0,
         "Drilling": 0.25,
         "Finishing/Deburr": 1.5,
-        "Misc": 0.5,
     }
     expected_rates = {
         "Milling": 60.0,
         "Drilling": 55.0,
         "Finishing/Deburr": 45.0,
-        "Misc": 20.0,
     }
     expected_costs = {
         "Milling": 100.0,
         "Drilling": 5.0,
         "Finishing/Deburr": 30.0,
-        "Misc": 10.0,
     }
 
     for row in table.rows:
@@ -92,3 +90,29 @@ def test_render_process_costs_orders_rows_and_rates() -> None:
         assert row["cost"] == pytest.approx(expected_costs[label])
 
     assert all(label in ORDER for label in canonicalize_costs(process_costs))
+
+
+def test_render_process_costs_shows_misc_when_significant(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DEBUG_MISC", raising=False)
+
+    table = TableCollector()
+    process_costs = {"Misc": 75.0}
+
+    total = render_process_costs(table, process_costs, rates={}, minutes_detail={})
+
+    assert [row["label"] for row in table.rows] == ["Misc"]
+    assert total == pytest.approx(75.0)
+
+
+def test_render_process_costs_shows_misc_when_debug(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEBUG_MISC", "1")
+
+    table = TableCollector()
+    process_costs = {"Misc": 10.0}
+
+    total = render_process_costs(table, process_costs, rates={}, minutes_detail={})
+
+    assert [row["label"] for row in table.rows] == ["Misc"]
+    assert total == pytest.approx(10.0)
+
+    monkeypatch.delenv("DEBUG_MISC", raising=False)
