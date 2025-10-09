@@ -154,3 +154,90 @@ def test_render_quote_hour_summary_adds_programming_hours() -> None:
     assert any("Programming" in line and "2.00 hr" in line for line in summary_block)
     assert any("Fixture Build" in line and "1.50 hr" in line for line in summary_block)
     assert any("Total Hours" in line and "6.50 hr" in line for line in summary_block)
+
+
+def test_render_quote_includes_explain_quote_lines() -> None:
+    result = {
+        "price": 42.0,
+        "breakdown": {
+            "qty": 7,
+            "totals": {
+                "labor_cost": 12.0,
+                "direct_costs": 5.0,
+                "subtotal": 17.0,
+                "with_overhead": 18.7,
+                "with_ga": 19.635,
+                "with_contingency": 20.029,
+                "with_expedite": 20.029,
+            },
+            "nre_detail": {},
+            "nre": {"programming_per_part": 1.25},
+            "material": {},
+            "process_costs": {"milling": 9.0, "deburr": 3.0},
+            "process_meta": {},
+            "pass_through": {"Material": 2.5},
+            "applied_pcts": {
+                "OverheadPct": 0.12,
+                "GA_Pct": 0.04,
+                "ContingencyPct": 0.02,
+                "MarginPct": 0.18,
+            },
+            "rates": {},
+            "params": {},
+            "labor_cost_details": {},
+            "direct_cost_details": {},
+        },
+    }
+
+    rendered = appV5.render_quote(result, currency="$")
+    lines = rendered.splitlines()
+
+    why_idx = lines.index("Why this price")
+    why_block = lines[why_idx + 2 : why_idx + 6]
+    assert any("Includes Overhead" in line for line in why_block)
+    assert any("Major processes:" in line for line in why_block)
+
+
+def test_render_quote_shows_drill_debug_block() -> None:
+    debug_lines = ["MISS drilling steel 0.250\""]
+    result = {
+        "price": 10.0,
+        "drill_debug": debug_lines,
+        "breakdown": {
+            "qty": 1,
+            "totals": {
+                "labor_cost": 3.0,
+                "direct_costs": 1.5,
+                "subtotal": 4.5,
+                "with_overhead": 4.95,
+                "with_ga": 5.198,
+                "with_contingency": 5.302,
+                "with_expedite": 5.302,
+            },
+            "nre_detail": {},
+            "nre": {},
+            "material": {},
+            "process_costs": {},
+            "process_meta": {},
+            "pass_through": {},
+            "applied_pcts": {
+                "OverheadPct": 0.1,
+                "GA_Pct": 0.05,
+                "ContingencyPct": 0.02,
+                "MarginPct": 0.15,
+            },
+            "rates": {},
+            "params": {},
+            "labor_cost_details": {},
+            "direct_cost_details": {},
+            "drill_debug": debug_lines,
+        },
+    }
+
+    rendered = appV5.render_quote(result, currency="$")
+    lines = rendered.splitlines()
+
+    assert "Drill Debug" in lines
+    debug_idx = lines.index("Drill Debug")
+    block = lines[debug_idx + 2 : debug_idx + 5]
+    assert any("MISS drilling steel" in line for line in block)

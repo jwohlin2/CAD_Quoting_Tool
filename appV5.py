@@ -5451,6 +5451,16 @@ def render_quote(
     g = result.get("geo") or {}
     if not isinstance(g, dict):
         g = {}
+    drill_debug_entries: list[str] = []
+    for source in (result, breakdown):
+        if not isinstance(source, Mapping):
+            continue
+        entries = source.get("drill_debug")
+        if isinstance(entries, (list, tuple, set)):
+            for entry in entries:
+                text = str(entry).strip()
+                if text and text not in drill_debug_entries:
+                    drill_debug_entries.append(text)
     lines.append(f"QUOTE SUMMARY - Qty {qty}")
     lines.append(divider)
     speeds_feeds_display = (
@@ -5463,6 +5473,12 @@ def render_quote(
     else:
         write_line("Speeds/Feeds CSV: (not set)")
     lines.append("")
+    if drill_debug_entries:
+        lines.append("Drill Debug")
+        lines.append(divider)
+        for entry in drill_debug_entries:
+            write_wrapped(entry, "  ")
+        lines.append("")
     row("Final Price per Part:", price)
     row("Total Labor Cost:", float(totals.get("labor_cost", 0.0)))
     row("Total Direct Costs:", float(totals.get("direct_costs", 0.0)))
@@ -5499,6 +5515,24 @@ def render_quote(
                 why_parts.append(text)
         else:
             why_parts.extend([str(item).strip() for item in llm_explanation if str(item).strip()])
+
+    hour_trace_data = None
+    if isinstance(result, Mapping):
+        hour_trace_data = result.get("hour_trace")
+    if hour_trace_data is None and isinstance(breakdown, Mapping):
+        hour_trace_data = breakdown.get("hour_trace")
+    explanation_lines: list[str] = []
+    try:
+        explanation_text = explain_quote(breakdown, hour_trace=hour_trace_data)
+    except Exception:
+        explanation_text = ""
+    if explanation_text:
+        for line in str(explanation_text).splitlines():
+            text = line.strip()
+            if text:
+                explanation_lines.append(text)
+    if explanation_lines:
+        why_parts = explanation_lines + why_parts
 
     def _canonical_bucket_key(name: str) -> str:
         return re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_")
@@ -7605,6 +7639,7 @@ def estimate_drilling_hours(
     machine_params: _TimeMachineParams | None = None,
     overhead_params: _TimeOverheadParams | None = None,
     warnings: list[str] | None = None,
+    debug: list[str] | None = None,
 ) -> float:
     """
     Conservative plate-drilling model with floors so 100+ holes don't collapse to minutes.
@@ -7613,6 +7648,20 @@ def estimate_drilling_hours(
     material_lookup = _normalize_lookup_key(mat_key) if mat_key else ""
     material_label = MATERIAL_DISPLAY_BY_KEY.get(material_lookup, mat_key)
     material_factor = _unit_hp_cap(material_label)
+    debug_list = debug if debug is not None else None
+    seen_debug: set[str] = set()
+
+    def _log_debug(entry: str) -> None:
+        if debug_list is None:
+            return
+        text = str(entry or "").strip()
+        if not text or text in seen_debug:
+            return
+        debug_list.append(text)
+        seen_debug.add(text)
+
+    if debug_list is not None and speeds_feeds_table is None:
+        _log_debug("MISS table: using heuristic fallback")
 
     group_specs: list[tuple[float, int, float]] = []
     fallback_counts: Counter[float] | None = None
@@ -7732,6 +7781,49 @@ def estimate_drilling_hours(
                     )
                 if row and isinstance(row, Mapping):
                     cache_entry = (row, _build_tool_params(row))
+                    if debug_list is not None:
+                        row_material = str(
+                            row.get("material")
+                            or row.get("material_family")
+                            or material_label
+                            or mat_key
+                            or material_lookup
+                            or ""
+                        ).strip()
+                        qty_display = qty
+                        try:
+                            qty_display = int(qty)
+                        except Exception:
+                            pass
+                        depth_display = depth_in
+                        try:
+                            depth_display = float(depth_in)
+                        except Exception:
+                            depth_display = depth_in
+                        sfm_val = _as_float_or_none(row.get("sfm_start") or row.get("sfm"))
+                        feed_val = _as_float_or_none(
+                            row.get("fz_ipr_0_25in")
+                            or row.get("feed_ipr")
+                            or row.get("fz")
+                            or row.get("ipr")
+                        )
+                        info_bits: list[str] = [
+                            f"OK {op_name}",
+                            f"{float(diameter_in):.3f}\"",
+                        ]
+                        if depth_display:
+                            try:
+                                info_bits.append(f"depth {float(depth_display):.3f}\"")
+                            except Exception:
+                                info_bits.append(f"depth {depth_display}")
+                        info_bits.append(f"qty {qty_display}")
+                        if row_material:
+                            info_bits.append(row_material)
+                        if sfm_val is not None:
+                            info_bits.append(f"{sfm_val:g} sfm")
+                        if feed_val is not None:
+                            info_bits.append(f"{feed_val:g} ipr")
+                        _log_debug(" | ".join(info_bits))
                 else:
                     cache_entry = None
                     material_display = str(material_label or mat_key or material_lookup or "material").strip()
@@ -7744,6 +7836,9 @@ def estimate_drilling_hours(
                             material_display,
                             round(float(diameter_in), 4),
                         )
+                    )
+                    _log_debug(
+                        f"MISS {op_display} {material_display.lower()} {round(float(diameter_in), 4):.3f}\""
                     )
                 row_cache[cache_key] = cache_entry
             if not cache_entry:
@@ -7815,6 +7910,22 @@ def estimate_drilling_hours(
         per = sec_per_hole(float(d)) * mfac * tfac
         total_sec += qty * per
         total_sec += toolchange_s
+
+    if debug_list is not None:
+        hole_total = 0
+        for qty in fallback_counts.values():
+            if not qty:
+                continue
+            try:
+                hole_total += int(qty)
+            except Exception:
+                try:
+                    hole_total += int(float(qty))
+                except Exception:
+                    continue
+        _log_debug(
+            f"FALLBACK heuristic for {hole_total} holes (thk {thickness_for_fallback:.1f} mm)"
+        )
 
     return total_sec / 3600.0
 
@@ -9177,6 +9288,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     drill_material_key = geo_context.get("material") or material_name
     speeds_feeds_raw = _resolve_speeds_feeds_path(params, ui_vars)
     speeds_feeds_path: str | None = None
+    speeds_feeds_resolved_path: str | None = None
     speeds_feeds_table: "pd.DataFrame" | None = None
     raw_path_text = str(speeds_feeds_raw).strip() if speeds_feeds_raw else ""
     if raw_path_text:
@@ -9206,9 +9318,14 @@ def compute_quote_from_df(df: pd.DataFrame,
                     )
                 else:
                     try:
-                        speeds_feeds_path = str(resolved_candidate.resolve())
+                        resolved_path_obj = resolved_candidate.resolve()
                     except Exception:
-                        speeds_feeds_path = str(resolved_candidate)
+                        try:
+                            resolved_path_obj = resolved_candidate.absolute()
+                        except Exception:
+                            resolved_path_obj = resolved_candidate
+                    speeds_feeds_path = str(resolved_path_obj)
+                    speeds_feeds_resolved_path = speeds_feeds_path
             else:
                 logger.warning(
                     "Speeds/feeds CSV not found at %s; using legacy drilling heuristics for this quote.",
@@ -9222,9 +9339,12 @@ def compute_quote_from_df(df: pd.DataFrame,
             "Speeds/feeds CSV path not configured; using legacy drilling heuristics for this quote."
         )
         _record_red_flag("Speeds/feeds CSV not configured — using legacy drilling heuristics.")
+    if speeds_feeds_resolved_path:
+        speeds_feeds_path = speeds_feeds_resolved_path
     machine_params_default = _machine_params_from_params(params)
     drill_overhead_default = _drill_overhead_from_params(params)
     speeds_feeds_warnings: list[str] = []
+    drill_debug_entries: list[str] = []
     drill_hr = estimate_drilling_hours(
         hole_diams_list,
         float(thickness_for_drill or 0.0),
@@ -9234,6 +9354,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         machine_params=machine_params_default,
         overhead_params=drill_overhead_default,
         warnings=speeds_feeds_warnings,
+        debug=drill_debug_entries,
     )
     holes = int(geo_context.get("hole_count") or 0)
     if holes <= 0:
@@ -12162,6 +12283,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         "direct_costs": direct_costs_display,
         "direct_cost_details": direct_cost_details,
         "speeds_feeds_path": speeds_feeds_path,
+        "drill_debug": list(drill_debug_entries),
         "pass_meta": pass_meta,
         "totals": {
             "labor_cost": labor_cost,
@@ -12270,6 +12392,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         "process_plan": copy.deepcopy(quote_state.process_plan),
         "material_source": material_source_final,
         "speeds_feeds_path": speeds_feeds_path,
+        "drill_debug": list(drill_debug_entries),
         "red_flags": list(red_flag_messages),
     }
 
