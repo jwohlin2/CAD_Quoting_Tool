@@ -7605,6 +7605,7 @@ def estimate_drilling_hours(
     machine_params: _TimeMachineParams | None = None,
     overhead_params: _TimeOverheadParams | None = None,
     warnings: list[str] | None = None,
+    debug_lines: list[str] | None = None,
 ) -> float:
     """
     Conservative plate-drilling model with floors so 100+ holes don't collapse to minutes.
@@ -7755,6 +7756,9 @@ def estimate_drilling_hours(
                 point_angle_deg=118.0,
                 ld_ratio=ratio,
             )
+            debug_payload: dict[str, Any] | None = None
+            if debug_lines is not None:
+                debug_payload = {}
             minutes = _estimate_time_min(
                 row,
                 geom,
@@ -7762,12 +7766,58 @@ def estimate_drilling_hours(
                 machine_for_cut,
                 per_hole_overhead,
                 material_factor=material_cap_val,
+                debug=debug_payload,
             )
             if minutes <= 0:
                 continue
             total_min += minutes * int(qty)
             if overhead.toolchange_min and qty > 0:
                 total_min += float(overhead.toolchange_min)
+            if debug_payload is not None:
+                try:
+                    operation_name = str(debug_payload.get("operation") or op_name).lower()
+                except Exception:
+                    operation_name = op_name.lower()
+                sfm_val = debug_payload.get("sfm")
+                ipr_val = debug_payload.get("ipr")
+                rpm_val = debug_payload.get("rpm")
+                ipm_val = debug_payload.get("ipm")
+                depth_val = debug_payload.get("axial_depth_in")
+                minutes_per = debug_payload.get("minutes_per_hole")
+                qty_int = int(qty) if qty else 0
+                total_hr = (minutes_per or 0.0) * qty_int / 60.0 if qty_int > 0 else 0.0
+                mat_display = str(material_label or mat_key or material_lookup or "").strip()
+                if not mat_display:
+                    mat_display = "material"
+                sfm_text = f"{sfm_val:.0f}" if isinstance(sfm_val, (int, float)) else "-"
+                ipr_text = (
+                    f"{ipr_val:.4f}"
+                    if isinstance(ipr_val, (int, float)) and math.isfinite(float(ipr_val))
+                    else "-"
+                )
+                rpm_text = f"{rpm_val:.0f}" if isinstance(rpm_val, (int, float)) else "-"
+                ipm_text = (
+                    f"{float(ipm_val):.1f}" if isinstance(ipm_val, (int, float)) else "-"
+                )
+                depth_text = (
+                    f"{float(depth_val):.2f}" if isinstance(depth_val, (int, float)) else "-"
+                )
+                minutes_text = (
+                    f"{float(minutes_per):.2f}" if isinstance(minutes_per, (int, float)) else "-"
+                )
+                total_hr_text = (
+                    f"{float(total_hr):.2f}" if isinstance(total_hr, (int, float)) else "-"
+                )
+                debug_lines.append(
+                    "Drill calc → "
+                    f"op={operation_name}, mat={mat_display}, "
+                    f"row=SFM:{sfm_text} IPR:{ipr_text}; "
+                    f"RPM:{rpm_text} IPM:{ipm_text}; "
+                    f"depth/hole: {depth_text} in; "
+                    f"holes: {int(qty)}; "
+                    f"min/hole: {minutes_text}; "
+                    f"total hr: {total_hr_text}."
+                )
         if missing_row_messages and warnings is not None:
             for op_display, material_display, dia_val in sorted(missing_row_messages):
                 dia_text = f"{dia_val:.3f}".rstrip("0").rstrip(".")
@@ -9225,6 +9275,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     machine_params_default = _machine_params_from_params(params)
     drill_overhead_default = _drill_overhead_from_params(params)
     speeds_feeds_warnings: list[str] = []
+    drill_debug_lines: list[str] | None = [] if APP_ENV.llm_debug_enabled else None
     drill_hr = estimate_drilling_hours(
         hole_diams_list,
         float(thickness_for_drill or 0.0),
@@ -9234,6 +9285,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         machine_params=machine_params_default,
         overhead_params=drill_overhead_default,
         warnings=speeds_feeds_warnings,
+        debug_lines=drill_debug_lines,
     )
     holes = int(geo_context.get("hole_count") or 0)
     if holes <= 0:
@@ -9266,6 +9318,8 @@ def compute_quote_from_df(df: pd.DataFrame,
                 for msg in red_flag_messages:
                     if msg not in ctx_flags:
                         ctx_flags.append(msg)
+            if drill_debug_lines:
+                guard_ctx.setdefault("drill_debug_lines", drill_debug_lines)
     drill_rate = float(rates.get("DrillingRate") or rates.get("MillingRate", 0.0) or 0.0)
     hole_count_geo = _coerce_float_or_none(geo_context.get("hole_count"))
     hole_count_for_tripwire = 0
@@ -10432,12 +10486,17 @@ def compute_quote_from_df(df: pd.DataFrame,
             else "auto"
         )
         used_planner = bool(planner_pricing_result) or bool(planner_line_items)
+        force_planner_for_recognized = recognized_line_items > 0
         if planner_mode == "planner":
-            used_planner = used_planner or (recognized_line_items > 0) or planner_totals_present
+            used_planner = used_planner or planner_totals_present
         elif planner_mode == "legacy":
-            used_planner = False
+            if not force_planner_for_recognized:
+                used_planner = False
         else:
-            used_planner = used_planner or (recognized_line_items > 0)
+            used_planner = used_planner or force_planner_for_recognized
+
+        if force_planner_for_recognized:
+            used_planner = True
 
         if recognized_line_items == 0:
             if planner_totals_present and planner_total_minutes > 0.0:

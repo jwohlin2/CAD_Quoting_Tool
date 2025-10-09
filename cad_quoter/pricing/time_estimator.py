@@ -254,6 +254,8 @@ def time_drill(
     tool: ToolParams,
     machine: MachineParams,
     overhead: OverheadParams,
+    *,
+    debug: dict[str, Any] | None = None,
 ) -> float:
     sfm = to_num(row.sfm_start, 0.0) or 0.0
     rpm = rpm_from_sfm(sfm, geom.diameter_in)
@@ -273,7 +275,18 @@ def time_drill(
     rapid_ipm = to_num(machine.rapid_ipm, 0.0) or 1.0
     rapid_min = (2.0 * approach) / max(rapid_ipm, 1.0)
 
-    return cut_min + peck + rapid_min + noncut_time_min(overhead, 1)
+    noncut = noncut_time_min(overhead, 1)
+    total = cut_min + peck + rapid_min + noncut
+
+    if debug is not None:
+        debug.setdefault("sfm", sfm)
+        debug.setdefault("ipr", ipr)
+        debug.setdefault("rpm", rpm)
+        debug.setdefault("ipm", ipm)
+        debug.setdefault("axial_depth_in", axial_depth)
+        debug.setdefault("minutes_per_hole", total)
+
+    return total
 
 
 def time_deep_drill(
@@ -282,8 +295,10 @@ def time_deep_drill(
     tool: ToolParams,
     machine: MachineParams,
     overhead: OverheadParams,
+    *,
+    debug: dict[str, Any] | None = None,
 ) -> float:
-    return time_drill(row, geom, tool, machine, overhead)
+    return time_drill(row, geom, tool, machine, overhead, debug=debug)
 
 
 def time_ream(
@@ -415,6 +430,8 @@ def estimate_time_min(
     machine: MachineParams,
     overhead: OverheadParams,
     material_factor: float | None = None,
+    *,
+    debug: dict[str, Any] | None = None,
 ) -> float:
     """Dispatch to the appropriate time estimator based on the operation."""
 
@@ -428,9 +445,13 @@ def estimate_time_min(
     if "endmill_slot" in op:
         return time_endmill_slot(row_view, geom, tool, machine, overhead, material_factor)
     if op == "drill":
-        return time_drill(row_view, geom, tool, machine, overhead)
+        if debug is not None:
+            debug.setdefault("operation", op)
+        return time_drill(row_view, geom, tool, machine, overhead, debug=debug)
     if "deep_drill" in op:
-        return time_deep_drill(row_view, geom, tool, machine, overhead)
+        if debug is not None:
+            debug.setdefault("operation", op)
+        return time_deep_drill(row_view, geom, tool, machine, overhead, debug=debug)
     if "ream" in op:
         return time_ream(row_view, geom, tool, machine, overhead)
     if "tap" in op:
