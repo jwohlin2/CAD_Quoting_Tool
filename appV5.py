@@ -5503,6 +5503,10 @@ def render_quote(
     def _canonical_bucket_key(name: str) -> str:
         return re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_")
 
+    def _is_planner_meta(key: str) -> bool:
+        k = str(key).lower().strip()
+        return k.startswith("planner_") or k == "planner total"
+
     def _planner_bucket_for_op(name: str) -> str:
         text = str(name or "").lower()
         if not text:
@@ -6233,12 +6237,12 @@ def render_quote(
     def _normalize_bucket_key(name: str) -> str:
         return re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_")
 
-    def _fold_buckets(process_costs: dict[str, float]) -> dict[str, float]:
-        folded: dict[str, float] = {}
-        for k, v in (process_costs or {}).items():
-            canon = _canonical_bucket_key(k)  # e.g., deburr -> finishing_deburr
-            folded[canon] = folded.get(canon, 0.0) + float(v or 0.0)
-        return folded
+    process_cost_items_all = list((process_costs or {}).items())
+    display_process_cost_items = [
+        (key, value)
+        for key, value in process_cost_items_all
+        if not _is_planner_meta(key)
+    ]
 
     preferred_bucket_order = [
         "milling",
@@ -6258,7 +6262,7 @@ def render_quote(
     process_costs = _fold_buckets(process_costs)
 
     for bucket in preferred_bucket_order:
-        for key, value in (process_costs or {}).items():
+        for key, value in display_process_cost_items:
             if _normalize_bucket_key(key) != bucket:
                 continue
             if not ((value > 0) or show_zeros):
@@ -6268,7 +6272,7 @@ def render_quote(
 
     remaining_items = [
         (key, value)
-        for key, value in (process_costs or {}).items()
+        for key, value in display_process_cost_items
         if key not in seen_keys and ((value > 0) or show_zeros)
     ]
     remaining_items.sort(key=lambda kv: _normalize_bucket_key(kv[0]))
@@ -6276,6 +6280,8 @@ def render_quote(
 
     for key, value in ordered_process_items:
         canon_key = _canonical_bucket_key(key)
+        if canon_key.startswith("planner_"):
+            continue
         meta_key = str(key).lower()
         meta = process_meta.get(meta_key, {}) if isinstance(process_meta, dict) else {}
         detail_bits: list[str] = []
@@ -7483,7 +7489,11 @@ def _select_speeds_feeds_row(
         return None
     if material_key:
         mat_col = next(
-            (col for col in ("material", "material_family", "material_group") if col in matches[0]),
+            (
+                col
+                for col in ("material_group", "material_family", "material")
+                if col in matches[0]
+            ),
             None,
         )
         if mat_col:
