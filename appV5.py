@@ -5889,10 +5889,27 @@ def render_quote(
         or breakdown.get("speeds_feeds_path")
     )
     path_text = str(speeds_feeds_display).strip() if speeds_feeds_display else ""
-    if path_text:
-        write_wrapped(f"Speeds/Feeds CSV: {path_text}")
+    speeds_feeds_loaded_display: bool | None = None
+    for source in (result, breakdown):
+        if not isinstance(source, Mapping):
+            continue
+        if "speeds_feeds_loaded" in source:
+            raw_flag = source.get("speeds_feeds_loaded")
+            speeds_feeds_loaded_display = None if raw_flag is None else bool(raw_flag)
+            break
+    if speeds_feeds_loaded_display is True:
+        status_suffix = " (loaded)"
+    elif speeds_feeds_loaded_display is False:
+        status_suffix = " (not loaded)"
     else:
-        write_line("Speeds/Feeds CSV: (not set)")
+        status_suffix = ""
+    if path_text:
+        write_wrapped(f"Speeds/Feeds CSV: {path_text}{status_suffix}")
+    else:
+        if status_suffix:
+            write_wrapped(f"Speeds/Feeds CSV: (not set){status_suffix}")
+        else:
+            write_line("Speeds/Feeds CSV: (not set)")
     lines.append("")
     if drill_debug_entries:
         lines.append("Drill Debug")
@@ -5959,8 +5976,34 @@ def render_quote(
         return re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_")
 
     def _is_planner_meta(key: str) -> bool:
-        k = str(key).lower().strip()
-        return k.startswith("planner_") or k == "planner total"
+        canonical_key = _canonical_bucket_key(key)
+        if not canonical_key:
+            return False
+        return canonical_key.startswith("planner_") or canonical_key == "planner_total"
+
+    def _fold_buckets(values: Mapping[str, Any] | None) -> dict[str, float]:
+        if not isinstance(values, Mapping):
+            return {}
+
+        totals_by_canonical: dict[str, float] = {}
+        display_key_by_canonical: dict[str, str] = {}
+
+        for key, raw_value in values.items():
+            canonical_key = _canonical_bucket_key(key)
+            if not canonical_key:
+                canonical_key = str(key)
+            try:
+                amount = float(raw_value or 0.0)
+            except Exception:
+                continue
+
+            totals_by_canonical[canonical_key] = totals_by_canonical.get(canonical_key, 0.0) + amount
+            display_key_by_canonical.setdefault(canonical_key, key)
+
+        return {
+            display_key_by_canonical[canonical_key]: total
+            for canonical_key, total in totals_by_canonical.items()
+        }
 
     def _planner_bucket_for_op(name: str) -> str:
         text = str(name or "").lower()
@@ -6750,8 +6793,93 @@ def render_quote(
             write_detail(detail_to_write, indent="    ")
         elif process_key is not None:
             add_process_notes(process_key, indent="    ")
-
         proc_total += amount_val
+
+    def _normalize_bucket_key(name: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_")
+
+    def _fold_buckets(values: Mapping[str, Any] | None) -> dict[str, float]:
+        if not isinstance(values, Mapping):
+            return {}
+
+        # Preserve the first-seen label for each canonical bucket key while
+        # summing duplicate entries together.
+        folded: dict[str, float] = {}
+        label_map: dict[str, str] = {}
+        order: list[str] = []
+
+        for raw_key, raw_val in values.items():
+            canon_key = _canonical_bucket_key(raw_key)
+            try:
+                numeric_val = float(raw_val or 0.0)
+            except Exception:
+                numeric_val = 0.0
+
+            existing_label = label_map.get(canon_key)
+            if existing_label is None:
+                label_map[canon_key] = raw_key
+                order.append(raw_key)
+                folded[raw_key] = numeric_val
+            else:
+                folded[existing_label] += numeric_val
+
+        return {label: folded[label] for label in order}
+
+    process_costs = _fold_buckets(process_costs)
+
+    process_cost_items_all = list((process_costs or {}).items())
+    display_process_cost_items = [
+        (key, value)
+        for key, value in process_cost_items_all
+        if not _is_planner_meta(key)
+    ]
+
+    preferred_bucket_order = [
+        "milling",
+        "drilling",
+        "counterbore",
+        "countersink",
+        "tapping",
+        "grinding",
+        "finishing_deburr",
+        "saw_waterjet",
+        "inspection",
+    ]
+
+    def _is_planner_rollup_key(name: str | None) -> bool:
+        if pricing_source_lower != "planner":
+            return False
+        norm = _normalize_bucket_key(name)
+        if not norm:
+            return False
+        if norm in {"planner_total", "planner_machine", "planner_labor"}:
+            return True
+        return norm.startswith("planner_")
+
+    ordered_process_items: list[tuple[str, float]] = []
+    seen_keys: set[str] = set()
+
+    for bucket in preferred_bucket_order:
+        for key, value in display_process_cost_items:
+            norm = _normalize_bucket_key(key)
+            if norm.startswith("planner_"):
+                continue
+            if norm != bucket:
+                continue
+            if not ((value > 0) or show_zeros):
+                continue
+            ordered_process_items.append((key, value))
+            seen_keys.add(key)
+
+    remaining_items = [
+        (key, value)
+        for key, value in display_process_cost_items
+        if key not in seen_keys
+        and not _normalize_bucket_key(key).startswith("planner_")
+        and ((value > 0) or show_zeros)
+    ]
+    remaining_items.sort(key=_normalize_bucket_key)
+    ordered_process_items.extend(remaining_items)
 
     display_process_costs: dict[str, Any] = {}
     for key, value in (process_costs or {}).items():
@@ -6782,9 +6910,8 @@ def render_quote(
         _add_labor_cost_line(
             entry.label,
             entry.amount,
-            process_key=canon_key or entry.process_key,
+            process_key=str(entry.process_key),
             detail_bits=list(entry.detail_bits),
-            fallback_detail=fallback_detail,
             display_override=entry.display_override,
         )
 
@@ -6885,16 +7012,12 @@ def render_quote(
 
     row("Total", proc_total, indent="  ")
 
-    hour_summary_entries: list[tuple[str, float]] = []
-    total_hours = 0.0
+    hour_summary_entries: dict[str, tuple[float, bool]] = {}
 
     def _record_hour_entry(label: str, value: float, *, include_in_total: bool = True) -> None:
-        nonlocal total_hours
         if not ((value > 0) or show_zeros):
             return
-        hour_summary_entries.append((label, value))
-        if include_in_total and value:
-            total_hours += value
+        hour_summary_entries[label] = (value, include_in_total)
 
     programming_meta = (nre_detail or {}).get("programming") or {}
     try:
@@ -7035,11 +7158,14 @@ def render_quote(
         lines.append("Labor Hour Summary")
         lines.append(divider)
         if str(pricing_source_value).lower() == "planner":
-            entries_iter = hour_summary_entries
+            entries_iter = hour_summary_entries.items()
         else:
-            entries_iter = sorted(hour_summary_entries, key=lambda kv: kv[1], reverse=True)
-        for label, hr_val in entries_iter:
+            entries_iter = sorted(hour_summary_entries.items(), key=lambda kv: kv[1][0], reverse=True)
+        total_hours = 0.0
+        for label, (hr_val, include_in_total) in entries_iter:
             hours_row(label, hr_val, indent="  ")
+            if include_in_total and hr_val:
+                total_hours += hr_val
         hours_row("Total Hours", total_hours, indent="  ")
     lines.append("")
 
@@ -8093,7 +8219,12 @@ def _select_speeds_feeds_row(
         op_variants.add(op_target.replace("_", " "))
     drill_synonyms = {
         "drill": {"drill", "drilling"},
-        "deep_drill": {"deep_drill", "deep drilling", "deepdrill"},
+        "deep_drill": {
+            "deep_drill",
+            "deep drilling",
+            "deepdrill",
+            "deep drill",
+        },
     }
     for key, synonyms in drill_synonyms.items():
         key_norm = key.replace("-", "_").replace(" ", "_")
@@ -8128,24 +8259,33 @@ def _select_speeds_feeds_row(
         ]
     if not matches:
         return None
-    if material_key:
-        mat_col = next(
-            (
-                col
-                for col in ("material_group", "material_family", "material")
-                if col in matches[0]
-            ),
-            None,
-        )
-        if mat_col:
-            mat_target = str(material_key).strip().lower()
+    if material_key and matches:
+        preferred_columns = ("material_group", "material_family", "material")
+        candidate_columns: list[str] = []
+        try:
+            table_columns = list(getattr(table, "columns", []))
+        except Exception:
+            table_columns = []
+        for col in preferred_columns:
+            if col in table_columns and col not in candidate_columns:
+                candidate_columns.append(col)
+        if not candidate_columns:
+            seen: set[str] = set()
+            for row in matches:
+                if isinstance(row, Mapping):
+                    for col in preferred_columns:
+                        if col in row and col not in seen:
+                            candidate_columns.append(col)
+                            seen.add(col)
+        mat_target = str(material_key).strip().lower()
+        for mat_col in candidate_columns:
             exact = [row for row in matches if _normalize(row.get(mat_col)) == mat_target]
             if exact:
                 matches = exact
-            else:
-                partial = [row for row in matches if mat_target in _normalize(row.get(mat_col))]
-                if partial:
-                    matches = partial
+                break
+            partial = [row for row in matches if mat_target in _normalize(row.get(mat_col))]
+            if partial:
+                matches = partial
     return matches[0] if matches else None
 
 
@@ -8170,17 +8310,31 @@ def _resolve_speeds_feeds_path(
     params: Mapping[str, Any] | None,
     ui_vars: Mapping[str, Any] | None = None,
 ) -> str | None:
-    candidates: list[str | None] = []
-    if ui_vars:
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def _push(value: Any) -> None:
+        if not value:
+            return
+        try:
+            text = str(value).strip()
+        except Exception:
+            return
+        if not text or text in seen:
+            return
+        seen.add(text)
+        candidates.append(text)
+
+    ui_mapping = ui_vars if isinstance(ui_vars, Mapping) else None
+    if ui_mapping:
         for key in (
             "SpeedsFeedsCSVPath",
             "Speeds Feeds CSV",
             "Speeds/Feeds CSV",
             "Speeds & Feeds CSV",
         ):
-            value = ui_vars.get(key) if isinstance(ui_vars, Mapping) else None
-            if value:
-                candidates.append(str(value))
+            _push(ui_mapping.get(key))
+
     if isinstance(params, Mapping):
         for key in (
             "SpeedsFeedsCSVPath",
@@ -8188,17 +8342,25 @@ def _resolve_speeds_feeds_path(
             "Speeds/Feeds CSV",
             "Speeds & Feeds CSV",
         ):
-            value = params.get(key)
-            if value:
-                candidates.append(str(value))
-    candidates.append(os.environ.get("CADQ_SF_CSV"))
-    candidates.append(os.environ.get("SPEEDS_FEEDS_CSV"))
+            _push(params.get(key))
+
+    for env_key in ("CADQ_SF_CSV", "SPEEDS_FEEDS_CSV", "CAD_QUOTER_SPEEDS_FEEDS"):
+        _push(os.environ.get(env_key))
+
+    script_dir = Path(__file__).resolve().parent
+    repo_root = script_dir.parent
+    fallback_paths: Sequence[Path | str] = (
+        script_dir / "speeds_feeds_merged.csv",
+        repo_root / "speeds_feeds_merged.csv",
+        repo_root / "cad_quoter" / "pricing" / "resources" / "speeds_feeds_merged.csv",
+        r"D:\\CAD_Quoting_Tool\\speeds_feeds_merged.csv",
+    )
+    for candidate in fallback_paths:
+        _push(candidate)
+
     for candidate in candidates:
-        if not candidate:
-            continue
-        text = str(candidate).strip()
-        if text:
-            return text
+        if candidate:
+            return candidate
     return None
 
 
@@ -10154,7 +10316,6 @@ def compute_quote_from_df(df: pd.DataFrame,
     drill_material_key = drill_material_lookup or (drill_material_source or "")
     speeds_feeds_raw = _resolve_speeds_feeds_path(params, ui_vars)
     speeds_feeds_path: str | None = None
-    speeds_feeds_resolved_path: str | None = None
     speeds_feeds_table: "pd.DataFrame" | None = None
     drill_material_group: str | None = None
     raw_path_text = str(speeds_feeds_raw).strip() if speeds_feeds_raw else ""
@@ -10199,6 +10360,8 @@ def compute_quote_from_df(df: pd.DataFrame,
             "Speeds/feeds CSV path not configured; using legacy drilling heuristics for this quote."
         )
         _record_red_flag("Speeds/feeds CSV not configured — using legacy drilling heuristics.")
+    speeds_feeds_loaded_flag = speeds_feeds_table is not None
+
     if (
         drill_material_group is None
         and speeds_feeds_table is not None
@@ -10340,9 +10503,8 @@ def compute_quote_from_df(df: pd.DataFrame,
         except Exception:
             guard_ctx = None
         if isinstance(guard_ctx, dict):
-            if speeds_feeds_path:
-                guard_ctx.setdefault("speeds_feeds_path", speeds_feeds_path)
-            guard_ctx["speeds_feeds_loaded"] = bool(speeds_feeds_table)
+            guard_ctx["speeds_feeds_path"] = speeds_feeds_path or raw_path_text or ""
+            guard_ctx["speeds_feeds_loaded"] = speeds_feeds_loaded_flag
             if drill_debug_line:
                 extras = guard_ctx.get("narrative_extra")
                 if isinstance(extras, list):
@@ -13216,21 +13378,6 @@ def compute_quote_from_df(df: pd.DataFrame,
         if merged_bits:
             labor_cost_details[canonical_label] = "; ".join(merged_bits)
 
-    for key, value in sorted(process_costs.items(), key=lambda kv: kv[1], reverse=True):
-        label = key.replace('_', ' ').title()
-        meta = process_meta.get(key, {})
-        hr = float(meta.get("hr", 0.0))
-        rate = float(meta.get("rate", 0.0))
-        extra = float(meta.get("base_extra", 0.0))
-        detail_bits: list[str] = []
-
-        if hr > 0:
-            detail_bits.append(_hours_with_rate_text(hr, rate))
-
-        proc_notes = applied_process.get(key, {}).get("notes")
-        if proc_notes:
-            detail_bits.append("LLM: " + ", ".join(proc_notes))
-
     for entry in _iter_ordered_process_entries(
         process_costs,
         process_meta=process_meta,
@@ -13509,12 +13656,15 @@ def compute_quote_from_df(df: pd.DataFrame,
         "process_plan": copy.deepcopy(quote_state.process_plan),
         "material_source": material_source_final,
         "speeds_feeds_path": speeds_feeds_path,
+        "speeds_feeds_loaded": speeds_feeds_loaded_flag,
         "drill_debug": list(drill_debug_entries),
         "red_flags": list(red_flag_messages),
     }
 
     breakdown["speeds_feeds_path"] = speeds_feeds_path
+    breakdown["speeds_feeds_loaded"] = speeds_feeds_loaded_flag
     result_payload["speeds_feeds_path"] = speeds_feeds_path
+    result_payload["speeds_feeds_loaded"] = speeds_feeds_loaded_flag
 
     return result_payload
 
