@@ -70,6 +70,7 @@ class OverheadParams:
     approach_retract_in: float | None = None
     peck_penalty_min_per_in_depth: float | None = None
     dwell_min: float | None = None
+    peck_min: float | None = None
 
 
 class _RowView:
@@ -122,6 +123,18 @@ def to_num(value: Any, default: float | None = None) -> float | None:
         return float(value)
     except Exception:
         return default
+
+
+def _precomputed_value(precomputed: Mapping[str, Any] | None, key: str) -> float | None:
+    """Return a numeric value from ``precomputed`` if available."""
+
+    if not precomputed:
+        return None
+    try:
+        value = precomputed.get(key)
+    except AttributeError:  # pragma: no cover - defensive
+        return None
+    return to_num(value)
 
 
 def ipm_from_feed(
@@ -256,11 +269,20 @@ def time_drill(
     overhead: OverheadParams,
     *,
     debug: dict[str, Any] | None = None,
+    precomputed: Mapping[str, Any] | None = None,
 ) -> float:
-    sfm = to_num(row.sfm_start, 0.0) or 0.0
-    rpm = rpm_from_sfm(sfm, geom.diameter_in)
-    ipr = pick_feed_value(row, geom.diameter_in)
-    ipm = ipm_from_feed("ipr", ipr, rpm, None)
+    sfm = _precomputed_value(precomputed, "sfm")
+    if sfm is None:
+        sfm = to_num(row.sfm_start, 0.0) or 0.0
+    rpm = _precomputed_value(precomputed, "rpm")
+    if rpm is None:
+        rpm = rpm_from_sfm(sfm, geom.diameter_in)
+    ipr = _precomputed_value(precomputed, "ipr")
+    if ipr is None:
+        ipr = pick_feed_value(row, geom.diameter_in)
+    ipm = _precomputed_value(precomputed, "ipm")
+    if ipm is None:
+        ipm = ipm_from_feed("ipr", ipr, rpm, None)
 
     axial_depth = (
         max(to_num(geom.hole_depth_in, 0.0) or to_num(geom.depth_in, 0.0) or 0.0, 0.0)
@@ -268,7 +290,10 @@ def time_drill(
         + 0.1 * (to_num(geom.diameter_in, 0.0) or 0.0)
     )
 
-    peck = (to_num(overhead.peck_penalty_min_per_in_depth, 0.0) or 0.0) * axial_depth
+    peck = to_num(overhead.peck_min, None)
+    if peck is None:
+        peck = (to_num(overhead.peck_penalty_min_per_in_depth, 0.0) or 0.0) * axial_depth
+    peck = to_num(peck, 0.0) or 0.0
     cut_min = axial_depth / max(ipm, 1e-6)
 
     approach = to_num(overhead.approach_retract_in, 0.0) or 0.0
@@ -276,7 +301,8 @@ def time_drill(
     rapid_min = (2.0 * approach) / max(rapid_ipm, 1.0)
 
     noncut = noncut_time_min(overhead, 1)
-    total = cut_min + peck + rapid_min + noncut
+    index_min = (to_num(overhead.index_sec_per_hole, 0.0) or 0.0) / 60.0
+    total = cut_min + peck + rapid_min + noncut + index_min
 
     if debug is not None:
         debug.setdefault("sfm", sfm)
@@ -285,6 +311,7 @@ def time_drill(
         debug.setdefault("ipm", ipm)
         debug.setdefault("axial_depth_in", axial_depth)
         debug.setdefault("minutes_per_hole", total)
+        debug.setdefault("index_min", index_min)
 
     return total
 
@@ -297,8 +324,17 @@ def time_deep_drill(
     overhead: OverheadParams,
     *,
     debug: dict[str, Any] | None = None,
+    precomputed: Mapping[str, Any] | None = None,
 ) -> float:
-    return time_drill(row, geom, tool, machine, overhead, debug=debug)
+    return time_drill(
+        row,
+        geom,
+        tool,
+        machine,
+        overhead,
+        debug=debug,
+        precomputed=precomputed,
+    )
 
 
 def time_ream(
@@ -318,7 +354,8 @@ def time_ream(
     approach = to_num(overhead.approach_retract_in, 0.0) or 0.0
     rapid_ipm = to_num(machine.rapid_ipm, 0.0) or 1.0
     rapid_min = (2.0 * approach) / max(rapid_ipm, 1.0)
-    return cut_min + rapid_min + noncut_time_min(overhead, 1)
+    index_min = (to_num(overhead.index_sec_per_hole, 0.0) or 0.0) / 60.0
+    return cut_min + rapid_min + noncut_time_min(overhead, 1) + index_min
 
 
 def time_tap_roll_form(
@@ -343,7 +380,8 @@ def time_tap_roll_form(
     approach = to_num(overhead.approach_retract_in, 0.0) or 0.0
     rapid_ipm = to_num(machine.rapid_ipm, 0.0) or 1.0
     rapid_min = (2.0 * approach) / max(rapid_ipm, 1.0)
-    return down_min + up_min + rapid_min + noncut_time_min(overhead, 1)
+    index_min = (to_num(overhead.index_sec_per_hole, 0.0) or 0.0) / 60.0
+    return down_min + up_min + rapid_min + noncut_time_min(overhead, 1) + index_min
 
 
 def time_thread_mill(
@@ -375,7 +413,8 @@ def time_thread_mill(
     per_pass_len = path_len + 2.0 * approach
     passes = max(int(to_num(geom.pass_count_override, 0.0) or 1), 1)
     cut_min = (per_pass_len / max(ipm, 1e-6)) * passes
-    return cut_min + noncut_time_min(overhead, passes)
+    index_min = (to_num(overhead.index_sec_per_hole, 0.0) or 0.0) / 60.0
+    return cut_min + noncut_time_min(overhead, passes) + index_min
 
 
 def time_turn_rough(
@@ -424,19 +463,42 @@ def time_wire_edm(
 
 
 def estimate_time_min(
-    row: Any,
-    geom: OperationGeometry,
-    tool: ToolParams,
-    machine: MachineParams,
-    overhead: OverheadParams,
+    row: Any | None = None,
+    geom: OperationGeometry | None = None,
+    tool: ToolParams | None = None,
+    machine: MachineParams | None = None,
+    overhead: OverheadParams | None = None,
     material_factor: float | None = None,
     *,
+    operation: str | None = None,
     debug: dict[str, Any] | None = None,
+    precomputed: Mapping[str, Any] | None = None,
 ) -> float:
     """Dispatch to the appropriate time estimator based on the operation."""
 
+    if geom is None or tool is None or machine is None or overhead is None:
+        raise TypeError("estimate_time_min requires geometry, tool, machine, and overhead parameters")
+
+    if row is None:
+        if operation is None:
+            raise TypeError("estimate_time_min requires either a row or an operation name")
+        row = {"operation": operation}
+    elif isinstance(row, str):
+        if operation is None:
+            operation = row
+        row = {"operation": row}
+    elif operation is not None:
+        try:
+            mapping = dict(row)
+        except Exception:
+            mapping = {"operation": operation}
+        else:
+            mapping.setdefault("operation", operation)
+        row = mapping
+
     row_view = _RowView(row)
-    op = (row_view.operation or "").lower().replace("-", "_").replace(" ", "_")
+    op_name = operation or row_view.operation
+    op = (op_name or "").lower().replace("-", "_").replace(" ", "_")
 
     if "wire_edm" in op:
         return time_wire_edm(row_view, geom, overhead)
@@ -447,11 +509,27 @@ def estimate_time_min(
     if op == "drill":
         if debug is not None:
             debug.setdefault("operation", op)
-        return time_drill(row_view, geom, tool, machine, overhead, debug=debug)
+        return time_drill(
+            row_view,
+            geom,
+            tool,
+            machine,
+            overhead,
+            debug=debug,
+            precomputed=precomputed,
+        )
     if "deep_drill" in op:
         if debug is not None:
             debug.setdefault("operation", op)
-        return time_deep_drill(row_view, geom, tool, machine, overhead, debug=debug)
+        return time_deep_drill(
+            row_view,
+            geom,
+            tool,
+            machine,
+            overhead,
+            debug=debug,
+            precomputed=precomputed,
+        )
     if "ream" in op:
         return time_ream(row_view, geom, tool, machine, overhead)
     if "tap" in op:
