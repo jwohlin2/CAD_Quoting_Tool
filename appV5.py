@@ -5688,15 +5688,31 @@ def render_quote(
         for ops in bucket_ops_map.values():
             ops.sort(key=lambda item: (-item.get("minutes", 0.0), item.get("op", "")))
 
-    process_costs_canon: dict[str, float] = {}
-    for key, value in (process_costs or {}).items():
-        canon = _canonical_bucket_key(key)
-        if not canon:
+    canonical_process_buckets: dict[str, dict[str, Any]] = {}
+    for raw_key, raw_value in (process_costs or {}).items():
+        canon_key = _canonical_bucket_key(raw_key)
+        if not canon_key:
             continue
         try:
-            process_costs_canon[canon] = float(value)
+            amount_val = float(raw_value or 0.0)
         except Exception:
-            continue
+            amount_val = 0.0
+        bucket_entry = canonical_process_buckets.setdefault(
+            canon_key,
+            {"total": 0.0, "sources": []},
+        )
+        bucket_entry["total"] += amount_val
+        bucket_entry.setdefault("sources", []).append(
+            {"key": str(raw_key), "amount": amount_val}
+        )
+
+    process_costs_canon: dict[str, float] = {}
+    for canon, info in canonical_process_buckets.items():
+        try:
+            total_amount = float(info.get("total", 0.0) or 0.0)
+        except Exception:
+            total_amount = 0.0
+        process_costs_canon[canon] = total_amount
 
     label_overrides = {
         "finishing_deburr": "Finishing/Deburr",
@@ -5704,6 +5720,33 @@ def render_quote(
     }
 
     label_overrides_proc = dict(label_overrides)
+
+    def _lookup_process_meta(key: str | None) -> Mapping[str, Any] | None:
+        if not isinstance(process_meta, dict):
+            return None
+        candidates: list[str] = []
+        base = str(key or "").lower()
+        if base:
+            candidates.append(base)
+        canon = _canonical_bucket_key(key)
+        if canon and canon not in candidates:
+            candidates.append(canon)
+        variants: list[str] = []
+        for candidate in list(candidates):
+            if "_" in candidate:
+                variants.append(candidate.replace("_", " "))
+            if " " in candidate:
+                variants.append(candidate.replace(" ", "_"))
+        seen: set[str] = set()
+        for candidate in candidates + variants:
+            candidate_key = candidate.strip()
+            if not candidate_key or candidate_key in seen:
+                continue
+            seen.add(candidate_key)
+            meta_entry = process_meta.get(candidate_key)
+            if isinstance(meta_entry, Mapping):
+                return meta_entry
+        return None
 
     def _display_bucket_label(canon_key: str) -> str:
         if canon_key in label_overrides:
@@ -6245,30 +6288,123 @@ def render_quote(
         "inspection",
     ]
 
-    ordered_process_items: list[tuple[str, float]] = []
+    ordered_process_items: list[str] = []
     seen_keys: set[str] = set()
 
     for bucket in preferred_bucket_order:
-        for key, value in (process_costs or {}).items():
-            if _normalize_bucket_key(key) != bucket:
-                continue
-            if not ((value > 0) or show_zeros):
-                continue
-            ordered_process_items.append((key, value))
-            seen_keys.add(key)
+        bucket_info = canonical_process_buckets.get(bucket)
+        if not bucket_info:
+            continue
+        try:
+            bucket_total = float(bucket_info.get("total", 0.0) or 0.0)
+        except Exception:
+            bucket_total = 0.0
+        if not ((bucket_total > 0) or show_zeros):
+            continue
+        ordered_process_items.append(bucket)
+        seen_keys.add(bucket)
 
     remaining_items = [
-        (key, value)
-        for key, value in (process_costs or {}).items()
-        if key not in seen_keys and ((value > 0) or show_zeros)
+        key
+        for key, info in canonical_process_buckets.items()
+        if key not in seen_keys
+        and ((float(info.get("total", 0.0) or 0.0) > 0) or show_zeros)
     ]
-    remaining_items.sort(key=lambda kv: _normalize_bucket_key(kv[0]))
+    remaining_items.sort(key=_normalize_bucket_key)
     ordered_process_items.extend(remaining_items)
 
-    for key, value in ordered_process_items:
-        canon_key = _canonical_bucket_key(key)
-        meta_key = str(key).lower()
-        meta = process_meta.get(meta_key, {}) if isinstance(process_meta, dict) else {}
+    for canon_key in ordered_process_items:
+        bucket_info = canonical_process_buckets.get(canon_key)
+        if not bucket_info:
+            continue
+        try:
+            value = float(bucket_info.get("total", 0.0) or 0.0)
+        except Exception:
+            value = 0.0
+        source_entries = bucket_info.get("sources", []) if isinstance(bucket_info, Mapping) else []
+        if not isinstance(source_entries, list):
+            source_entries = []
+        source_details: list[dict[str, Any]] = []
+        total_hr = 0.0
+        total_extra = 0.0
+        rate_candidates: list[float] = []
+        notes_order: list[str] = []
+        notes_seen: set[str] = set()
+        for entry in source_entries:
+            entry_key = entry.get("key") if isinstance(entry, Mapping) else None
+            meta = _lookup_process_meta(entry_key)
+            try:
+                hr_val = float(meta.get("hr", 0.0) or 0.0) if isinstance(meta, Mapping) else 0.0
+            except Exception:
+                hr_val = 0.0
+            try:
+                rate_val = float(meta.get("rate", 0.0) or 0.0) if isinstance(meta, Mapping) else 0.0
+            except Exception:
+                rate_val = 0.0
+            try:
+                extra_val = float(meta.get("base_extra", 0.0) or 0.0) if isinstance(meta, Mapping) else 0.0
+            except Exception:
+                extra_val = 0.0
+            total_hr += hr_val
+            total_extra += extra_val
+            if rate_val > 0:
+                rate_candidates.append(rate_val)
+            meta_key = str(entry_key or "").lower()
+            notes_raw = applied_process.get(meta_key, {}).get("notes")
+            notes_list: list[str] = []
+            if isinstance(notes_raw, str):
+                note_text = notes_raw.strip()
+                if note_text:
+                    notes_list.append(note_text)
+            elif isinstance(notes_raw, (list, tuple, set)):
+                for note in notes_raw:
+                    note_text = str(note).strip()
+                    if note_text:
+                        notes_list.append(note_text)
+            elif notes_raw:
+                note_text = str(notes_raw).strip()
+                if note_text:
+                    notes_list.append(note_text)
+            for note_text in notes_list:
+                if note_text not in notes_seen:
+                    notes_order.append(note_text)
+                    notes_seen.add(note_text)
+            source_details.append(
+                {
+                    "meta_key": meta_key,
+                    "hr": hr_val,
+                    "rate": rate_val,
+                    "extra": extra_val,
+                }
+            )
+
+        aggregated_meta_source = _lookup_process_meta(canon_key)
+        aggregated_meta = dict(aggregated_meta_source) if isinstance(aggregated_meta_source, Mapping) else {}
+        aggregated_meta.setdefault("hr", 0.0)
+        try:
+            existing_hr = float(aggregated_meta.get("hr", 0.0) or 0.0)
+        except Exception:
+            existing_hr = 0.0
+        if total_hr > 0:
+            aggregated_meta["hr"] = total_hr
+        else:
+            aggregated_meta["hr"] = existing_hr
+        try:
+            aggregated_rate = float(aggregated_meta.get("rate", 0.0) or 0.0)
+        except Exception:
+            aggregated_rate = 0.0
+        if aggregated_rate <= 0:
+            if total_hr > 0 and value > 0:
+                aggregated_rate = value / total_hr
+            elif rate_candidates:
+                aggregated_rate = rate_candidates[0]
+        if aggregated_rate > 0:
+            aggregated_meta["rate"] = aggregated_rate
+        if total_extra:
+            aggregated_meta["base_extra"] = total_extra
+        if isinstance(process_meta, dict):
+            process_meta[canon_key] = dict(aggregated_meta)
+        meta = aggregated_meta
         detail_bits: list[str] = []
         try:
             hr_val = float(meta.get("hr", 0.0) or 0.0)
@@ -6289,10 +6425,21 @@ def render_quote(
             meta if isinstance(meta, Mapping) else {},
         )
         use_display = display_override is not None
-        label = _display_bucket_label(canon_key) if use_display else _process_label(key)
+        label = (
+            _display_bucket_label(canon_key)
+            if use_display or canon_key in label_overrides
+            else _process_label(canon_key)
+        )
 
-        if not use_display and hr_val > 0:
-            detail_bits.append(f"{hr_val:.2f} hr @ ${rate_val:,.2f}/hr")
+        if not use_display:
+            for entry in source_details:
+                entry_hr = entry.get("hr", 0.0)
+                entry_rate = entry.get("rate", 0.0)
+                if entry_hr > 0:
+                    if entry_rate > 0:
+                        detail_bits.append(f"{entry_hr:.2f} hr @ ${entry_rate:,.2f}/hr")
+                    else:
+                        detail_bits.append(f"{entry_hr:.2f} hr")
 
         rate_for_extra = rate_val if rate_val > 0 else display_rate
         if abs(extra_val) > 1e-6:
@@ -6302,14 +6449,13 @@ def render_quote(
                 extra_hours = extra_val / rate_for_extra
                 detail_bits.append(f"{extra_hours:.2f} hr @ ${rate_for_extra:,.2f}/hr")
 
-        proc_notes = applied_process.get(meta_key, {}).get("notes")
-        if proc_notes:
-            detail_bits.append("LLM: " + ", ".join(proc_notes))
+        if notes_order:
+            detail_bits.append("LLM: " + ", ".join(notes_order))
 
         _add_labor_cost_line(
             label,
             amount_override if use_display else float(value),
-            process_key=str(key),
+            process_key=str(canon_key),
             detail_bits=detail_bits,
             display_override=display_override,
         )
