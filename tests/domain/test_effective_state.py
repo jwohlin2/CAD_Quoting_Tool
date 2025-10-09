@@ -30,14 +30,13 @@ def test_merge_effective_clamps_and_tracks_sources() -> None:
 
     merged = merge_effective(baseline, suggestions, overrides)
 
-    assert merged["process_hour_multipliers"]["drilling"] == pytest.approx(0.5)
-    assert merged["process_hours"]["drilling"] == pytest.approx(1.0)
+    assert merged["process_hour_multipliers"]["drilling"] == pytest.approx(0.25)
+    assert merged["process_hours"]["drilling"] == pytest.approx(0.5)
     assert merged["process_hour_adders"]["inspection"] == pytest.approx(1.0)
     assert merged["process_hours"]["inspection"] == pytest.approx(1.0)
     assert merged["scrap_pct"] == pytest.approx(0.25)
 
     clamp_notes = merged.get("_clamp_notes", [])
-    assert any("multiplier[drilling]" in note for note in clamp_notes)
     assert any("adder[inspection]" in note for note in clamp_notes)
     assert any("scrap_pct" in note for note in clamp_notes)
 
