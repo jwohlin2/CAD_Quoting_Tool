@@ -9188,11 +9188,17 @@ def estimate_drilling_hours(
             if qty <= 0:
                 qty = int(max(1, round(count or 1)))
             depth_in = 0.0
+            diameter_in = float(dia_mm) / 25.4
             if depth_mm and depth_mm > 0:
                 depth_in = float(depth_mm) / 25.4
             elif thickness_in and thickness_in > 0:
                 depth_in = float(thickness_in)
-            group_specs.append((float(dia_mm) / 25.4, qty, depth_in))
+            breakthrough_in = max(0.04, 0.2 * diameter_in)
+            if depth_in > 0:
+                depth_in += breakthrough_in
+            else:
+                depth_in = breakthrough_in
+            group_specs.append((diameter_in, qty, depth_in))
             fallback_counts[round(float(dia_mm), 3)] += qty
     if not group_specs:
         if not hole_diams_mm or thickness_in <= 0:
@@ -9202,7 +9208,10 @@ def estimate_drilling_hours(
         for dia_mm, qty in counts.items():
             if qty <= 0:
                 continue
-            group_specs.append((float(dia_mm) / 25.4, int(qty), depth_in))
+            diameter_in = float(dia_mm) / 25.4
+            breakthrough_in = max(0.04, 0.2 * diameter_in)
+            total_depth_in = depth_in + breakthrough_in if depth_in > 0 else breakthrough_in
+            group_specs.append((diameter_in, int(qty), total_depth_in))
         fallback_counts = counts
     else:
         if fallback_counts is None:
