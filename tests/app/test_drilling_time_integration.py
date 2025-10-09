@@ -32,7 +32,7 @@ def test_estimate_drilling_hours_uses_speeds_feeds_table() -> None:
 
     hours = estimate_drilling_hours(
         [6.35, 6.35, 12.7],
-        12.7,
+        0.5,
         "Aluminum",
         hole_groups=[
             {"dia_mm": 6.35, "depth_mm": 12.7, "count": 2},
@@ -47,7 +47,7 @@ def test_estimate_drilling_hours_uses_speeds_feeds_table() -> None:
 
 
 def test_estimate_drilling_hours_fallback_without_table() -> None:
-    hours = estimate_drilling_hours([5.0, 5.0], 6.0, "Steel")
+    hours = estimate_drilling_hours([5.0, 5.0], 0.25, "Steel")
     assert hours > 0.0
 
 
