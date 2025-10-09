@@ -5720,14 +5720,6 @@ def _iter_ordered_process_entries(
             value_float = 0.0
 
         try:
-            hr_val = float(meta.get("hr", 0.0) or 0.0)
-        except Exception:
-            hr_val = 0.0
-        try:
-            rate_val = float(meta.get("rate", 0.0) or 0.0)
-        except Exception:
-            rate_val = 0.0
-        try:
             extra_val = float(meta.get("base_extra", 0.0) or 0.0)
         except Exception:
             extra_val = 0.0
@@ -5748,12 +5740,14 @@ def _iter_ordered_process_entries(
         )
 
         detail_bits: list[str] = []
-        if not use_display and hr_val > 0:
-            detail_bits.append(f"{hr_val:.2f} hr @ {currency_formatter(rate_val)}/hr")
+        if not use_display and display_hr > 0:
+            detail_bits.append(
+                f"{display_hr:.2f} hr @ {currency_formatter(display_rate)}/hr"
+            )
 
-        rate_for_extra = rate_val if rate_val > 0 else display_rate
+        rate_for_extra = display_rate
         if abs(extra_val) > 1e-6:
-            if (not use_display and hr_val <= 1e-6 and rate_for_extra > 0) or (
+            if (not use_display and display_hr <= 1e-6 and rate_for_extra > 0) or (
                 use_display and display_hr <= 1e-6 and rate_for_extra > 0
             ):
                 extra_hours = extra_val / rate_for_extra
