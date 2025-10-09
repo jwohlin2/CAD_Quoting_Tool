@@ -5459,9 +5459,10 @@ def _process_label(key: str | None) -> str:
     raw = str(key or "").strip().lower().replace(" ", "_")
     canon = re.sub(r"[^a-z0-9]+", "_", raw).strip("_")
     alias = {
-        "finishing_deburr": "deburr",
-        "deburring": "deburr",
-        "finish_deburr": "deburr",
+        "finishing_deburr": "finishing/deburr",
+        "deburr": "finishing/deburr",
+        "deburring": "finishing/deburr",
+        "finish_deburr": "finishing/deburr",
         "saw_waterjet": "saw / waterjet",
         "counter_bore": "counterbore",
         "counter_sink": "countersink",
@@ -7084,6 +7085,27 @@ def render_quote(
     lines.append(divider)
     proc_total = 0.0
 
+    labor_row_order: list[str] = []
+    labor_row_data: dict[str, dict[str, Any]] = {}
+
+    def _labor_storage_key(label: str, process_key: str | None) -> str:
+        canonical_label, _ = _canonical_amortized_label(label)
+        normalized_label = canonical_label or str(label)
+        label_lower = normalized_label.lower()
+        is_amortized_label = "amortized" in label_lower
+
+        if process_key is not None:
+            bucket_key = _canonical_bucket_key(process_key)
+            if bucket_key:
+                return bucket_key
+
+        if not is_amortized_label:
+            bucket_from_label = _canonical_bucket_key(normalized_label)
+            if bucket_from_label:
+                return bucket_from_label
+
+        return normalized_label
+
     def _add_labor_cost_line(
         label: str,
         amount: float,
@@ -7099,29 +7121,52 @@ def render_quote(
         if not force and not ((amount_val > 0) or show_zeros):
             return
 
-        canonical_label, _ = _canonical_amortized_label(label)
-        storage_label = canonical_label or str(label)
+        storage_key = _labor_storage_key(str(label), process_key)
         display_text = display_override or str(label)
 
-        row(display_text, amount_val, indent="  ")
-        labor_costs_display[storage_label] = amount_val
+        entry = labor_row_data.get(storage_key)
+        if entry is None:
+            entry = {
+                "label": display_text,
+                "amount": 0.0,
+                "process_keys": [],
+                "has_override": bool(display_override),
+            }
+            labor_row_data[storage_key] = entry
+            labor_row_order.append(storage_key)
+        else:
+            if display_override:
+                entry["label"] = display_text
+                entry["has_override"] = True
+            elif not entry.get("has_override"):
+                entry["label"] = display_text
 
-        existing_detail = labor_cost_details.get(storage_label)
+        entry["amount"] += amount_val
+        if process_key is not None:
+            proc_key_str = str(process_key)
+            if proc_key_str and proc_key_str not in entry["process_keys"]:
+                entry["process_keys"].append(proc_key_str)
+
+        existing_detail = labor_cost_details.get(storage_key)
         merged_detail = _merge_detail(existing_detail, detail_bits or [])
-        detail_to_write: str | None = None
-
         if merged_detail:
-            labor_cost_details[storage_label] = merged_detail
-            detail_to_write = merged_detail
+            labor_cost_details[storage_key] = merged_detail
         elif fallback_detail:
-            labor_cost_details.setdefault(storage_label, fallback_detail)
-            detail_to_write = fallback_detail
+            labor_cost_details.setdefault(storage_key, fallback_detail)
 
-        if detail_to_write:
-            write_detail(detail_to_write, indent="    ")
-        elif process_key is not None:
-            add_process_notes(process_key, indent="    ")
+        labor_costs_display[storage_key] = labor_costs_display.get(storage_key, 0.0) + amount_val
         proc_total += amount_val
+
+    def _emit_labor_cost_lines() -> None:
+        for storage_key in labor_row_order:
+            entry = labor_row_data[storage_key]
+            row(entry["label"], entry["amount"], indent="  ")
+            detail_text = labor_cost_details.get(storage_key)
+            if detail_text:
+                write_detail(detail_text, indent="    ")
+            else:
+                for proc_key in entry["process_keys"]:
+                    add_process_notes(proc_key, indent="    ")
 
     def _normalize_bucket_key(name: str) -> str:
         return re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_")
@@ -7339,6 +7384,8 @@ def render_quote(
             detail_bits=fixture_bits,
         )
 
+    _emit_labor_cost_lines()
+
     displayed_process_total = sum(float(value or 0.0) for value in labor_costs_display.values())
     if not math.isclose(proc_total, displayed_process_total, rel_tol=1e-9, abs_tol=0.01):
         raise AssertionError(
@@ -7350,9 +7397,29 @@ def render_quote(
     hour_summary_entries: dict[str, tuple[float, bool]] = {}
 
     def _record_hour_entry(label: str, value: float, *, include_in_total: bool = True) -> None:
-        if not ((value > 0) or show_zeros):
+        try:
+            numeric_value = float(value or 0.0)
+        except Exception:
+            numeric_value = 0.0
+
+        if not ((numeric_value > 0) or show_zeros):
             return
-        hour_summary_entries[label] = (value, include_in_total)
+
+        single_piece_qty = False
+        try:
+            single_piece_qty = qty_for_hours > 0 and (qty_for_hours == 1 or math.isclose(qty_for_hours, 1.0))
+        except Exception:
+            single_piece_qty = False
+
+        if single_piece_qty and numeric_value > 24.0:
+            warning = (
+                f"{label} hours capped at 24 hr for single-piece quote (was {numeric_value:.2f} hr)."
+            )
+            if warning not in red_flags:
+                red_flags.append(warning)
+            numeric_value = 24.0
+
+        hour_summary_entries[label] = (numeric_value, include_in_total)
 
     programming_meta = (nre_detail or {}).get("programming") or {}
     try:
@@ -8868,7 +8935,10 @@ def estimate_drilling_hours(
             material_label = alt_label
     mat = str(material_label or mat_key or "").lower()
     material_factor = _unit_hp_cap(material_label)
-    debug_list = debug if debug is not None else None
+    debug_list = debug_lines if debug_lines is not None else None
+    speeds_feeds_row: Mapping[str, Any] | None = None
+    selected_op_name = ""
+    avg_dia_in = 0.0
     seen_debug: set[str] = set()
 
     def _log_debug(entry: str) -> None:
@@ -8931,6 +9001,20 @@ def estimate_drilling_hours(
         material_cap_val = _as_float_or_none(material_factor)
         if material_cap_val is not None and material_cap_val <= 0:
             material_cap_val = None
+
+        total_qty_for_avg = 0
+        weighted_dia_sum = 0.0
+        for diameter_in, qty, _ in group_specs:
+            try:
+                qty_int = int(qty)
+            except Exception:
+                qty_int = 0
+            if qty_int <= 0:
+                continue
+            total_qty_for_avg += qty_int
+            weighted_dia_sum += float(diameter_in) * qty_int
+        if total_qty_for_avg > 0:
+            avg_dia_in = weighted_dia_sum / total_qty_for_avg
 
         hp_cap_val = _as_float_or_none(getattr(base_machine, "hp_to_mrr_factor", None))
         combined_cap = None
@@ -9036,6 +9120,8 @@ def estimate_drilling_hours(
                     )
                 if row and isinstance(row, Mapping):
                     cache_entry = (row, _build_tool_params(row))
+                    speeds_feeds_row = row
+                    selected_op_name = op_name
                     if debug_list is not None:
                         row_material = str(
                             row.get("material")
@@ -10889,15 +10975,18 @@ def compute_quote_from_df(df: pd.DataFrame,
     drill_overhead_default = _drill_overhead_from_params(params)
     speeds_feeds_warnings: list[str] = []
     thickness_mm = float(thickness_for_drill or 0.0)
+    thickness_in = thickness_mm / 25.4 if thickness_mm else 0.0
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(
             "Estimating drilling hours with thickness %.3f mm (%.3f in)",
             thickness_mm,
             thickness_mm / 25.4 if thickness_mm else 0.0,
         )
+    drill_debug_lines: list[str] = []
+
     drill_hr = estimate_drilling_hours(
         hole_diams_mm=hole_diams_list,
-        thickness_mm=thickness_mm,
+        thickness_in=thickness_in,
         mat_key=drill_material_key or "",
         hole_groups=hole_groups_geo,
         speeds_feeds_table=speeds_feeds_table,
