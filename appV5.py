@@ -6211,9 +6211,13 @@ def render_quote(
         fallback_detail: str | None = None,
         force: bool = False,
         display_override: str | None = None,
+        record_only: bool = False,
     ) -> None:
         nonlocal proc_total
         amount_val = float(amount or 0.0)
+        if record_only:
+            proc_total += amount_val
+            return
         if not force and not ((amount_val > 0) or show_zeros):
             return
         row(display_override or label, amount_val, indent="  ")
@@ -6270,8 +6274,6 @@ def render_quote(
     ordered_process_items: list[tuple[str, float]] = []
     seen_keys: set[str] = set()
 
-    process_costs = _fold_buckets(process_costs)
-
     for bucket in preferred_bucket_order:
         for key, value in display_process_cost_items:
             if _normalize_bucket_key(key) != bucket:
@@ -6290,11 +6292,14 @@ def render_quote(
     ordered_process_items.extend(remaining_items)
 
     for key, value in ordered_process_items:
-        normalized_key = _normalize_bucket_key(key)
-        if normalized_key == "planner_total" or normalized_key.startswith("planner_"):
-            continue
         canon_key = _canonical_bucket_key(key)
-        if canon_key.startswith("planner_"):
+        if _is_planner_rollup_key(key) or _is_planner_rollup_key(canon_key):
+            _add_labor_cost_line(
+                str(key),
+                float(value),
+                process_key=str(key),
+                record_only=True,
+            )
             continue
         meta_key = str(key).lower()
         meta = process_meta.get(meta_key, {}) if isinstance(process_meta, dict) else {}
