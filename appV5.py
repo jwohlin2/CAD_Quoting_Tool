@@ -7113,9 +7113,7 @@ def render_quote(
             amount_val = 0.0
         if amount_val <= 0:
             return False
-        if qty > 1:
-            return True
-        return show_amortized_single_qty
+        return qty > 1
 
     programming_per_part_cost = labor_cost_totals.get("Programming (amortized)")
     if programming_per_part_cost is None:
@@ -7145,7 +7143,8 @@ def render_quote(
     if qty > 1 and programming_per_part_cost > 0:
         prog_bits.append(f"Amortized across {qty} pcs")
 
-    if qty > 1 and programming_per_part_cost > 0:
+    show_programming_amortized = qty > 1 and programming_per_part_cost > 0
+    if show_programming_amortized and "Programming (amortized)" not in labor_costs_display:
         _add_labor_cost_line(
             "Programming (amortized)",
             programming_per_part_cost,
@@ -7187,7 +7186,7 @@ def render_quote(
     if qty > 1 and fixture_labor_per_part_cost > 0:
         fixture_bits.append(f"Amortized across {qty} pcs")
 
-    if show_fixture_amortized:
+    if show_fixture_amortized and "Fixture Build (amortized)" not in labor_costs_display:
         _add_labor_cost_line(
             "Fixture Build (amortized)",
             fixture_labor_per_part_cost,
