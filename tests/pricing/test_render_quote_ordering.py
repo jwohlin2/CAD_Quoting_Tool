@@ -104,7 +104,10 @@ def test_render_quote_includes_hour_summary() -> None:
     assert lines[divider_idx].startswith("-")
     summary_block = lines[summary_idx:summary_idx + 7]
     assert any("Milling" in line and "4.00 hr" in line for line in summary_block)
-    assert any("Deburr" in line and "1.50 hr" in line for line in summary_block)
+    assert any(
+        "Finishing/Deburr" in line and "1.50 hr" in line for line in summary_block
+        for line in summary_block
+    )
     assert any("Inspection" in line and "0.50 hr" in line for line in summary_block)
     assert any("Total Hours" in line and "6.00 hr" in line for line in summary_block)
 

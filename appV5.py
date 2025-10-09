@@ -5563,6 +5563,9 @@ def render_quote(
 
     # Optional: LLM decision bullets can be placed either on result or breakdown
     llm_notes = (result.get("llm_notes") or breakdown.get("llm_notes") or [])[:8]
+    notes_order = [
+        str(note).strip() for note in llm_notes if str(note).strip()
+    ]
 
     # ---- helpers -------------------------------------------------------------
     divider = "-" * int(page_width)
@@ -7073,6 +7076,12 @@ def render_quote(
                 per_part_fixture_hr,
                 include_in_total=False,
             )
+
+    if total_hours_dirty:
+        total_hours = sum(
+            value for _, value, include in hour_summary_entries if include
+        )
+        total_hours_dirty = False
 
     if hour_summary_entries:
         lines.append("")
