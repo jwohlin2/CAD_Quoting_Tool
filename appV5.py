@@ -7720,7 +7720,12 @@ def estimate_drilling_hours(
             if qty <= 0 or diameter_in <= 0 or depth_in <= 0:
                 continue
             tool_dia_in = float(diameter_in)
-            thickness_for_ratio = thickness_in_val if thickness_in_val and thickness_in_val > 0 else depth_in
+            thickness_for_ratio = depth_in
+            if thickness_in_val and thickness_in_val > 0:
+                if depth_in > thickness_in_val:
+                    thickness_for_ratio = depth_in
+                else:
+                    thickness_for_ratio = thickness_in_val
             l_over_d = 0.0
             if tool_dia_in > 0 and thickness_for_ratio and thickness_for_ratio > 0:
                 l_over_d = float(thickness_for_ratio) / float(tool_dia_in)
