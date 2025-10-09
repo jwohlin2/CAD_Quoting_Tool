@@ -164,34 +164,37 @@ def test_render_quote_hour_summary_adds_programming_hours() -> None:
     assert any("Total Hours" in line and "6.50 hr" in line for line in summary_block)
 
 
-def test_render_quote_planner_hour_summary_uses_lot_labels() -> None:
+def test_render_quote_dedupes_planner_rollup_cost_rows() -> None:
     result = {
         "price": 200.0,
         "breakdown": {
-            "qty": 4,
-            "pricing_source": "planner",
+            "qty": 1,
             "totals": {
-                "labor_cost": 150.0,
-                "direct_costs": 50.0,
-                "subtotal": 200.0,
-                "with_overhead": 220.0,
-                "with_ga": 231.0,
-                "with_contingency": 235.62,
-                "with_expedite": 235.62,
+                "labor_cost": 120.0,
+                "direct_costs": 30.0,
+                "subtotal": 150.0,
+                "with_overhead": 165.0,
+                "with_ga": 173.25,
+                "with_contingency": 178.4475,
+                "with_expedite": 178.4475,
             },
-            "nre_detail": {
-                "programming": {"prog_hr": 4.0, "amortized": True},
-                "fixture": {"build_hr": 1.0, "labor_cost": 120.0, "build_rate": 60.0},
-            },
+            "nre_detail": {},
             "nre": {},
             "material": {},
-            "process_costs": {},
+            "process_costs": {
+                "Planner Total": 120.0,
+                "Planner Machine": 70.0,
+                "planner_labor": 50.0,
+                "milling": 30.0,
+            },
             "process_meta": {
-                "planner_total": {"hr": 6.0},
-                "planner_labor": {"hr": 3.5},
-                "planner_machine": {"hr": 2.5},
+                "planner_total": {"minutes": 240.0},
+                "planner_machine": {"minutes": 120.0},
+                "planner_labor": {"minutes": 120.0},
+                "milling": {"hr": 1.5},
             },
             "pass_through": {},
+            "pricing_source": "planner",
             "applied_pcts": {
                 "OverheadPct": 0.10,
                 "GA_Pct": 0.05,
@@ -210,14 +213,12 @@ def test_render_quote_planner_hour_summary_uses_lot_labels() -> None:
 
     assert "Labor Hour Summary" in lines
     summary_idx = lines.index("Labor Hour Summary")
-    summary_block = lines[summary_idx:summary_idx + 12]
-    assert any("Programming (lot)" in line and "4.00 hr" in line for line in summary_block)
-    assert any(
-        "Programming (amortized per part)" in line and "1.00 hr" in line
-        for line in summary_block
-    )
-    assert any("Fixture Build (lot)" in line and "1.00 hr" in line for line in summary_block)
-    assert any(
-        "Fixture Build (amortized per part)" in line and "0.25 hr" in line
-        for line in summary_block
-    )
+    summary_block = lines[summary_idx: summary_idx + 10]
+    assert any("Planner Total" in line for line in summary_block)
+    assert any("Planner Machine" in line for line in summary_block)
+    assert any("Planner Labor" in line for line in summary_block)
+
+    labor_idx = lines.index("Process & Labor Costs")
+    next_blank = next(i for i in range(labor_idx + 1, len(lines)) if lines[i] == "")
+    labor_section = lines[labor_idx:next_blank]
+    assert not any("Planner" in line for line in labor_section)
