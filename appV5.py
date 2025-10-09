@@ -7474,7 +7474,11 @@ def _select_speeds_feeds_row(
         return None
     if material_key:
         mat_col = next(
-            (col for col in ("material", "material_family", "material_group") if col in matches[0]),
+            (
+                col
+                for col in ("material_group", "material_family", "material")
+                if col in matches[0]
+            ),
             None,
         )
         if mat_col:
