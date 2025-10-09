@@ -9020,7 +9020,7 @@ def compute_quote_from_df(df: pd.DataFrame,
             resolved_candidate = Path(raw_path_text).expanduser()
         except Exception as exc:
             logger.warning(
-                "Invalid speeds/feeds CSV path %r: %s; forcing legacy pricing for this quote.",
+                "Invalid speeds/feeds CSV path %r: %s; using legacy drilling heuristics for this quote.",
                 raw_path_text,
                 exc,
             )
@@ -9028,20 +9028,18 @@ def compute_quote_from_df(df: pd.DataFrame,
             _record_red_flag(
                 f"Speeds/feeds CSV path invalid ({raw_path_text}) — using legacy drilling heuristics."
             )
-            force_legacy_pricing = True
         else:
             speeds_feeds_path = str(resolved_candidate)
             if resolved_candidate.is_file():
                 speeds_feeds_table = _load_speeds_feeds_table(str(resolved_candidate))
                 if speeds_feeds_table is None:
                     logger.warning(
-                        "Failed to load speeds/feeds CSV at %s; forcing legacy pricing for this quote.",
+                        "Failed to load speeds/feeds CSV at %s; using legacy drilling heuristics for this quote.",
                         resolved_candidate,
                     )
                     _record_red_flag(
                         f"Failed to load speeds/feeds CSV at {resolved_candidate} — using legacy drilling heuristics."
                     )
-                    force_legacy_pricing = True
                 else:
                     try:
                         speeds_feeds_path = str(resolved_candidate.resolve())
@@ -9049,19 +9047,17 @@ def compute_quote_from_df(df: pd.DataFrame,
                         speeds_feeds_path = str(resolved_candidate)
             else:
                 logger.warning(
-                    "Speeds/feeds CSV not found at %s; forcing legacy pricing for this quote.",
+                    "Speeds/feeds CSV not found at %s; using legacy drilling heuristics for this quote.",
                     resolved_candidate,
                 )
                 _record_red_flag(
                     f"Speeds/feeds CSV not found at {resolved_candidate} — using legacy drilling heuristics."
                 )
-                force_legacy_pricing = True
     else:
         logger.warning(
-            "Speeds/feeds CSV path not configured; forcing legacy pricing for this quote."
+            "Speeds/feeds CSV path not configured; using legacy drilling heuristics for this quote."
         )
         _record_red_flag("Speeds/feeds CSV not configured — using legacy drilling heuristics.")
-        force_legacy_pricing = True
     machine_params_default = _machine_params_from_params(params)
     drill_overhead_default = _drill_overhead_from_params(params)
     speeds_feeds_warnings: list[str] = []
@@ -9075,6 +9071,21 @@ def compute_quote_from_df(df: pd.DataFrame,
         overhead_params=drill_overhead_default,
         warnings=speeds_feeds_warnings,
     )
+    holes = int(geo_context.get("hole_count") or 0)
+    if holes <= 0:
+        holes = len(hole_diams_list) if hole_diams_list else 0
+
+    if not math.isfinite(drill_hr) or drill_hr < 0:
+        drill_hr = 0.0
+
+    min_min_per_hole = 0.10
+    max_min_per_hole = 2.00
+
+    if holes > 0:
+        drill_hr = max(drill_hr, (holes * min_min_per_hole) / 60.0)
+        drill_hr = min(drill_hr, (holes * max_min_per_hole) / 60.0)
+
+    drill_hr = min(drill_hr, 500.0)
     for warning_text in speeds_feeds_warnings:
         _record_red_flag(warning_text)
     if quote_state is not None:
