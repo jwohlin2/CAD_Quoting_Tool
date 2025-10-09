@@ -10288,6 +10288,12 @@ def compute_quote_from_df(df: pd.DataFrame,
                 drill_meta = legacy_process_meta.setdefault("drilling", {})
                 drill_meta["hr"] = baseline_drill_hr
                 drill_meta.setdefault("rate", drill_rate)
+                drilling_meta = process_meta.setdefault("drilling", {})
+                drilling_meta["hr"] = baseline_drill_hr
+                drilling_meta.setdefault("rate", drill_rate)
+                meta_lookup_drilling = meta_lookup.setdefault("drilling", {})
+                meta_lookup_drilling["hr"] = baseline_drill_hr
+                meta_lookup_drilling.setdefault("rate", drill_rate)
                 legacy_process_costs["drilling"] = baseline_drill_hr * drill_rate
                 process_costs["drilling"] = legacy_process_costs["drilling"]
                 process_costs_baseline["drilling"] = legacy_process_costs["drilling"]
