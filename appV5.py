@@ -63,6 +63,47 @@ import tkinter.font as tkfont
 import urllib.request
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+
+def _resolve_planner_mode(params: Mapping[str, Any] | None) -> str:
+    """Return the normalized planner mode string."""
+
+    if FORCE_PLANNER:
+        return "planner"
+    default_mode = "planner"
+    if not isinstance(params, _MappingABC):
+        return default_mode
+    try:
+        raw_mode = params.get("PlannerMode", default_mode)
+    except Exception:
+        raw_mode = default_mode
+    try:
+        mode = str(raw_mode).strip().lower()
+    except Exception:
+        mode = default_mode
+    return mode or default_mode
+
+
+def _resolve_planner_usage(
+    *,
+    params: Mapping[str, Any] | None,
+    planner_pricing_result: Any,
+    planner_line_items: Any,
+    recognized_line_items: int,
+    planner_totals_present: bool,
+) -> tuple[bool, str]:
+    """Determine whether planner pricing should be used and the mode."""
+
+    planner_mode = _resolve_planner_mode(params)
+    used_planner = bool(planner_pricing_result) or bool(planner_line_items)
+    has_recognized = recognized_line_items > 0
+    if planner_mode == "planner":
+        used_planner = used_planner or has_recognized or bool(planner_totals_present)
+    elif planner_mode == "legacy":
+        used_planner = False
+    else:
+        used_planner = used_planner or has_recognized
+    return used_planner, planner_mode
+
 import cad_quoter.geometry as geometry
 from bucketizer import bucketize
 
@@ -9411,6 +9452,14 @@ def compute_quote_from_df(df: pd.DataFrame,
     if deburr_holes_hr:
         legacy_process_meta["deburr"]["hole_touch_hr"] = deburr_holes_hr
 
+    legacy_baseline_had_values = any(
+        float(value or 0.0) > 0.0 for value in legacy_process_costs.values()
+    ) or any(
+        float(meta.get("hr", 0.0) or 0.0) > 0.0 for meta in legacy_process_meta.values()
+    )
+
+    planner_meta_keys: set[str] = set()
+
     meta_lookup: dict[str, dict[str, Any]] = {
         key: dict(value) for key, value in process_meta.items() if isinstance(value, Mapping)
     }
@@ -9420,6 +9469,8 @@ def compute_quote_from_df(df: pd.DataFrame,
             process_costs[key] = float(value)
         for key, meta in legacy_process_meta.items():
             process_meta[key] = dict(meta)
+
+    legacy_baseline_ignored = False
 
     inspection_meta_entry = process_meta.get("inspection")
     if isinstance(inspection_meta_entry, Mapping):
@@ -10426,18 +10477,13 @@ def compute_quote_from_df(df: pd.DataFrame,
             float(val) > 0.0 for val in (planner_machine_cost_total, planner_labor_cost_total, planner_total_minutes)
         )
 
-        planner_mode = (
-            str(params.get("PlannerMode", "auto")).strip().lower()
-            if isinstance(params, _MappingABC)
-            else "auto"
+        used_planner, planner_mode = _resolve_planner_usage(
+            params=params if isinstance(params, _MappingABC) else None,
+            planner_pricing_result=planner_pricing_result,
+            planner_line_items=planner_line_items,
+            recognized_line_items=recognized_line_items,
+            planner_totals_present=planner_totals_present,
         )
-        used_planner = bool(planner_pricing_result) or bool(planner_line_items)
-        if planner_mode == "planner":
-            used_planner = used_planner or (recognized_line_items > 0) or planner_totals_present
-        elif planner_mode == "legacy":
-            used_planner = False
-        else:
-            used_planner = used_planner or (recognized_line_items > 0)
 
         if recognized_line_items == 0:
             if planner_totals_present and planner_total_minutes > 0.0:
