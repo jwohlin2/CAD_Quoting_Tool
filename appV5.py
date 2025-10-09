@@ -7594,6 +7594,17 @@ def _clean_hole_groups(raw: Any) -> list[dict[str, Any]] | None:
         )
     return cleaned if cleaned else None
 
+MIN_DRILL_MIN_PER_HOLE = 0.10
+MAX_DRILL_MIN_PER_HOLE = 2.00
+
+
+def _apply_drill_minutes_clamp(hours: float, hole_count: int) -> float:
+    if hours <= 0.0 or hole_count <= 0:
+        return hours
+    min_hr = (hole_count * MIN_DRILL_MIN_PER_HOLE) / 60.0
+    max_hr = (hole_count * MAX_DRILL_MIN_PER_HOLE) / 60.0
+    return max(min(hours, max_hr), min_hr)
+
 
 def estimate_drilling_hours(
     hole_diams_mm: list[float],
@@ -7658,6 +7669,7 @@ def estimate_drilling_hours(
         overhead = overhead_params or _drill_overhead_from_params(None)
         per_hole_overhead = replace(overhead, toolchange_min=0.0)
         total_min = 0.0
+        total_holes = 0
         material_cap_val = _as_float_or_none(material_factor)
         if material_cap_val is not None and material_cap_val <= 0:
             material_cap_val = None
@@ -7765,8 +7777,15 @@ def estimate_drilling_hours(
             )
             if minutes <= 0:
                 continue
-            total_min += minutes * int(qty)
-            if overhead.toolchange_min and qty > 0:
+            try:
+                qty_int = int(qty)
+            except Exception:
+                continue
+            if qty_int <= 0:
+                continue
+            total_holes += qty_int
+            total_min += minutes * qty_int
+            if overhead.toolchange_min and qty_int > 0:
                 total_min += float(overhead.toolchange_min)
         if missing_row_messages and warnings is not None:
             for op_display, material_display, dia_val in sorted(missing_row_messages):
@@ -7778,7 +7797,12 @@ def estimate_drilling_hours(
                 if warning_text not in warnings:
                     warnings.append(warning_text)
         if total_min > 0:
-            return total_min / 60.0
+            hole_count = total_holes
+            if hole_count <= 0 and fallback_counts:
+                hole_count = sum(
+                    max(0, int(qty)) for qty in fallback_counts.values() if qty
+                )
+            return _apply_drill_minutes_clamp(total_min / 60.0, hole_count)
 
     thickness_for_fallback = float(thickness_mm or 0.0)
     if thickness_for_fallback <= 0:
@@ -7809,14 +7833,23 @@ def estimate_drilling_hours(
     toolchange_s = 15.0
 
     total_sec = 0.0
+    holes_fallback = 0
     for d, qty in fallback_counts.items():
-        if qty <= 0:
+        if qty is None:
             continue
+        try:
+            qty_int = int(qty)
+        except Exception:
+            continue
+        if qty_int <= 0:
+            continue
+        holes_fallback += qty_int
         per = sec_per_hole(float(d)) * mfac * tfac
-        total_sec += qty * per
+        total_sec += qty_int * per
         total_sec += toolchange_s
 
-    return total_sec / 3600.0
+    hours = total_sec / 3600.0
+    return _apply_drill_minutes_clamp(hours, holes_fallback)
 
 
 def estimate_tapping_hours(tap_qty: int, thickness_in: float, mat_key: str) -> float:
@@ -9237,17 +9270,30 @@ def compute_quote_from_df(df: pd.DataFrame,
     )
     holes = int(geo_context.get("hole_count") or 0)
     if holes <= 0:
-        holes = len(hole_diams_list) if hole_diams_list else 0
+        if hole_diams_list:
+            holes = len(hole_diams_list)
+        elif hole_groups_geo:
+            holes_from_groups = 0
+            for entry in hole_groups_geo:
+                if not isinstance(entry, Mapping):
+                    continue
+                count_val = _coerce_float_or_none(entry.get("count"))
+                qty_int = 0
+                if count_val is not None:
+                    try:
+                        qty_int = int(round(count_val))
+                    except Exception:
+                        qty_int = 0
+                if qty_int <= 0:
+                    qty_int = 1
+                holes_from_groups += qty_int
+            if holes_from_groups > 0:
+                holes = holes_from_groups
 
     if not math.isfinite(drill_hr) or drill_hr < 0:
         drill_hr = 0.0
 
-    min_min_per_hole = 0.10
-    max_min_per_hole = 2.00
-
-    if holes > 0:
-        drill_hr = max(drill_hr, (holes * min_min_per_hole) / 60.0)
-        drill_hr = min(drill_hr, (holes * max_min_per_hole) / 60.0)
+    drill_hr = _apply_drill_minutes_clamp(drill_hr, holes)
 
     drill_hr = min(drill_hr, 500.0)
     for warning_text in speeds_feeds_warnings:
