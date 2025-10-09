@@ -8661,11 +8661,33 @@ MIN_DRILL_MIN_PER_HOLE = 0.10
 MAX_DRILL_MIN_PER_HOLE = 2.00
 
 
-def _apply_drill_minutes_clamp(hours: float, hole_count: int) -> float:
+def _drill_minutes_per_hole_bounds(
+    material_group: str | None = None,
+) -> tuple[float, float]:
+    """Return the (min, max) minutes-per-hole bounds for drilling."""
+
+    min_minutes = MIN_DRILL_MIN_PER_HOLE
+    max_minutes = MAX_DRILL_MIN_PER_HOLE
+    if material_group:
+        key = str(material_group).strip().lower()
+        if any(token in key for token in {"steel", "inconel", "titanium"}):
+            max_minutes = max(max_minutes, 3.0)
+        elif "alum" in key:
+            max_minutes = min(max_minutes, 1.5)
+    return min_minutes, max_minutes
+
+
+def _apply_drill_minutes_clamp(
+    hours: float,
+    hole_count: int,
+    *,
+    material_group: str | None = None,
+) -> float:
     if hours <= 0.0 or hole_count <= 0:
         return hours
-    min_hr = (hole_count * MIN_DRILL_MIN_PER_HOLE) / 60.0
-    max_hr = (hole_count * MAX_DRILL_MIN_PER_HOLE) / 60.0
+    min_min_per_hole, max_min_per_hole = _drill_minutes_per_hole_bounds(material_group)
+    min_hr = (hole_count * min_min_per_hole) / 60.0
+    max_hr = (hole_count * max_min_per_hole) / 60.0
     return max(min(hours, max_hr), min_hr)
 
 
@@ -8691,23 +8713,6 @@ def _count_holes_from_diameters(values: Sequence[Any] | None) -> int:
         if qty and qty > 0:
             total += 1
     return total
-
-
-def _apply_drilling_per_hole_bounds(
-    hours: float,
-    *,
-    hole_count_hint: int | None = None,
-) -> float:
-    if not math.isfinite(hours) or hours <= 0.0:
-        return 0.0
-    holes = int(hole_count_hint or 0)
-    if holes <= 0:
-        return hours
-    min_min_per_hole = 0.10
-    max_min_per_hole = 2.00
-    min_hours = (holes * min_min_per_hole) / 60.0
-    max_hours = (holes * max_min_per_hole) / 60.0
-    return max(min_hours, min(hours, max_hours))
 
 
 def estimate_drilling_hours(
@@ -9231,7 +9236,11 @@ def estimate_drilling_hours(
                 hole_count = sum(
                     max(0, int(qty)) for qty in fallback_counts.values() if qty
                 )
-            return _apply_drill_minutes_clamp(total_min / 60.0, hole_count)
+            return _apply_drill_minutes_clamp(
+                total_min / 60.0,
+                hole_count,
+                material_group=material_label,
+            )
 
     thickness_for_fallback_mm = float(thickness_in or 0.0) * 25.4
     if thickness_for_fallback_mm <= 0:
@@ -9308,7 +9317,11 @@ def estimate_drilling_hours(
         )
 
     hours = total_sec / 3600.0
-    return _apply_drill_minutes_clamp(hours, holes_fallback)
+    return _apply_drill_minutes_clamp(
+        hours,
+        holes_fallback,
+        material_group=material_label,
+    )
 
 
 def estimate_tapping_hours(tap_qty: int, thickness_in: float, mat_key: str) -> float:
@@ -10797,7 +10810,11 @@ def compute_quote_from_df(df: pd.DataFrame,
     if not math.isfinite(drill_hr) or drill_hr < 0:
         drill_hr = 0.0
 
-    drill_hr = _apply_drill_minutes_clamp(drill_hr, holes)
+    drill_hr = _apply_drill_minutes_clamp(
+        drill_hr,
+        holes,
+        material_group=drill_material_group or drill_material_key,
+    )
 
     drill_hr = min(drill_hr, 500.0)
 
