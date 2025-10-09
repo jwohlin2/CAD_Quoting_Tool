@@ -6847,11 +6847,11 @@ def render_quote(
         currency_formatter=_m,
     ):
         _add_labor_cost_line(
-            label,
-            amount_override if use_display else float(value),
-            process_key=str(canon_key),
-            detail_bits=detail_bits,
-            display_override=display_override,
+            entry.label,
+            entry.amount,
+            process_key=str(entry.process_key),
+            detail_bits=list(entry.detail_bits),
+            display_override=entry.display_override,
         )
 
     show_amortized_single_qty = _lookup_config_flag(
@@ -13281,21 +13281,6 @@ def compute_quote_from_df(df: pd.DataFrame,
                     seen.add(seg)
         if merged_bits:
             labor_cost_details[canonical_label] = "; ".join(merged_bits)
-
-    for key, value in sorted(process_costs.items(), key=lambda kv: kv[1], reverse=True):
-        label = key.replace('_', ' ').title()
-        meta = process_meta.get(key, {})
-        hr = float(meta.get("hr", 0.0))
-        rate = float(meta.get("rate", 0.0))
-        extra = float(meta.get("base_extra", 0.0))
-        detail_bits: list[str] = []
-
-        if hr > 0:
-            detail_bits.append(_hours_with_rate_text(hr, rate))
-
-        proc_notes = applied_process.get(key, {}).get("notes")
-        if proc_notes:
-            detail_bits.append("LLM: " + ", ".join(proc_notes))
 
     for entry in _iter_ordered_process_entries(
         process_costs,
