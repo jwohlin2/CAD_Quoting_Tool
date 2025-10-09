@@ -28,6 +28,7 @@ BUCKETS: tuple[str, ...] = (
     "Milling",
     "Drilling",
     "Counterbore",
+    "Countersink",
     "Tapping",
     "Saw Waterjet",
     "Wire EDM",
@@ -112,12 +113,33 @@ def _resolve_bucket_for_op(op: str) -> str:
     if bucket:
         return bucket
 
+    op_lower = op.lower()
+    if any(token in op_lower for token in ("counterbore", "c'bore")):
+        return "Counterbore"
+    if any(token in op_lower for token in ("countersink", "csk")):
+        return "Countersink"
+    if any(
+        token in op_lower
+        for token in (
+            "rigid_tap",
+            "rigid tap",
+            "thread_mill",
+            "thread mill",
+            "tap",
+        )
+    ):
+        return "Tapping"
+
     machine = OP_TO_MACHINE.get(op, "").lower()
     if machine:
         if "grind" in machine:
             return "Grinding"
         if "edm" in machine:
             return "Wire EDM" if "wire" in machine else "Sinker EDM"
+        if "counterbore" in machine:
+            return "Counterbore"
+        if "countersink" in machine or "csk" in machine:
+            return "Countersink"
         if "drill" in machine:
             return "Drilling"
         if "tap" in machine:
