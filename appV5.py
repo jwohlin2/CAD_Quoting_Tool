@@ -2698,6 +2698,8 @@ def build_narrative(state: QuoteState) -> str:
         except Exception:
             continue
         diff = new_val - base_val
+        if not math.isfinite(diff) or abs(diff) > 100:
+            continue
         if abs(diff) >= 0.01:
             sign = "↑" if diff > 0 else "↓"
             deltas.append(f"{proc} {sign}{abs(diff):.2f} h")
@@ -5566,6 +5568,41 @@ def render_quote(
             detail_lines.extend(weight_lines)
             if scrap_credit_lines:
                 detail_lines.extend(scrap_credit_lines)
+
+            shipping_tax_lines: list[str] = []
+            base_cost_before_scrap = _coerce_float_or_none(
+                material.get("material_cost_before_credit")
+            )
+            if base_cost_before_scrap is None:
+                net_mass_for_base = _coerce_float_or_none(net_mass_val)
+                if net_mass_for_base is None:
+                    net_mass_for_base = _coerce_float_or_none(
+                        material.get("net_mass_g")
+                    )
+                if net_mass_for_base is not None and net_mass_for_base > 0:
+                    per_lb_value = _coerce_float_or_none(
+                        material.get("unit_price_usd_per_lb")
+                    )
+                    if per_lb_value is None:
+                        per_g_value = _coerce_float_or_none(
+                            material.get("unit_price_per_g")
+                        )
+                        if per_g_value is not None:
+                            per_lb_value = per_g_value * (1000.0 / LB_PER_KG)
+                    if per_lb_value is not None:
+                        base_cost_before_scrap = (
+                            float(net_mass_for_base) / 1000.0 * LB_PER_KG
+                        ) * float(per_lb_value)
+
+            if base_cost_before_scrap is not None or show_zeros:
+                base_val = float(base_cost_before_scrap or 0.0)
+                shipping_cost = base_val * 0.15
+                tax_cost = base_val * 0.065
+                shipping_tax_lines.append(f"  Shipping: {_m(shipping_cost)}")
+                shipping_tax_lines.append(f"  Material Tax: {_m(tax_cost)}")
+
+            if shipping_tax_lines:
+                detail_lines.extend(shipping_tax_lines)
 
             if upg or unit_price_kg or unit_price_lb or show_zeros:
                 grams_per_lb = 1000.0 / LB_PER_KG
@@ -8721,7 +8758,7 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     pass_meta = {
         "Material": {"basis": "Stock / raw material"},
-        "Hardware / BOM": {"basis": "Pass-through hardware / BOM"},
+        HARDWARE_PASS_LABEL: {"basis": "Pass-through hardware / BOM"},
         "Outsourced Vendors": {"basis": "Outside processing vendors"},
         "Shipping": {"basis": shipping_basis_desc},
         "Consumables /Hr": {"basis": "Machine & inspection hours $/hr"},
@@ -8729,6 +8766,50 @@ def compute_quote_from_df(df: pd.DataFrame,
         "Consumables": {"basis": "Fixed shop supplies"},
         "Packaging Flat": {"basis": "Packaging materials & crates"},
     }
+
+    def _build_pass_through(
+        planner_directs,
+        *,
+        material_direct_cost,
+        shipping_cost,
+        hardware_cost,
+        outsourced_costs,
+        include_outsourced_pass,
+        utilities_cost,
+        consumables_flat,
+        packaging_flat_base,
+        material_scrap_credit_applied,
+    ) -> dict[str, float]:
+        def _on(k: str) -> bool:
+            return bool((planner_directs or {}).get(k))
+
+        pass_through = {
+            "Material": float(material_direct_cost),
+            "Shipping": float(shipping_cost),
+        }
+        if _on("hardware") and float(hardware_cost) > 0:
+            pass_through["Hardware / BOM"] = float(hardware_cost)
+        if (
+            _on("outsourced")
+            and include_outsourced_pass
+            and float(outsourced_costs) > 0
+        ):
+            pass_through["Outsourced Vendors"] = float(outsourced_costs)
+        if _on("utilities") and float(utilities_cost) > 0:
+            pass_through["Utilities"] = float(utilities_cost)
+        if _on("consumables_flat") and float(consumables_flat) > 0:
+            pass_through["Consumables"] = float(consumables_flat)
+        if _on("packaging_flat") and float(packaging_flat_base) > 0:
+            pass_through["Packaging Flat"] = float(packaging_flat_base)
+
+        pass_through = {
+            _canonical_pass_label(k): v for k, v in pass_through.items()
+        }
+
+        credit = float(material_scrap_credit_applied or 0.0)
+        if credit > 0:
+            pass_through["Material Scrap Credit"] = -credit
+        return pass_through
     if material_scrap_credit_applied:
         pass_meta["Material Scrap Credit"] = {"basis": "Scrap / remnant credit"}
 
@@ -8741,36 +8822,23 @@ def compute_quote_from_df(df: pd.DataFrame,
             pass_meta["Material"]["basis"] = f"Source: {mat_source}"
     quote_state.material_source = pass_meta.get("Material", {}).get("basis") or mat_source or "shop defaults"
 
-    pass_through = {
-        "Material": material_direct_cost,
-        "Shipping": shipping_cost,
-    }
-
-    planner_directs = {}
-    try:
-        planner_directs = (process_plan_summary.get("plan") or {}).get("directs") or {}
-    except Exception:
-        planner_directs = {}
-
-    def _direct_on(key: str) -> bool:
-        return bool(planner_directs.get(key))
-
-    if _direct_on("hardware"):
-        pass_through["Hardware / BOM"] = hardware_cost
-    if _direct_on("outsourced") and include_outsourced_pass:
-        pass_through["Outsourced Vendors"] = outsourced_costs
-    if _direct_on("utilities"):
-        pass_through["Utilities"] = utilities_cost
-    if _direct_on("consumables_flat"):
-        pass_through["Consumables"] = consumables_flat
-    if _direct_on("packaging_flat"):
-        pass_through["Packaging Flat"] = packaging_flat_base
-    pass_through = {
-        _canonical_pass_label(label): float(value)
-        for label, value in pass_through.items()
-    }
-    if material_scrap_credit_applied:
-        pass_through["Material Scrap Credit"] = -material_scrap_credit_applied
+    planner_directs = (
+        (process_plan_summary.get("plan") or {}).get("directs") or {}
+        if isinstance(process_plan_summary, dict)
+        else {}
+    )
+    pass_through = _build_pass_through(
+        planner_directs,
+        material_direct_cost=material_direct_cost,
+        shipping_cost=shipping_cost,
+        hardware_cost=hardware_cost,
+        outsourced_costs=outsourced_costs,
+        include_outsourced_pass=include_outsourced_pass,
+        utilities_cost=utilities_cost,
+        consumables_flat=consumables_flat,
+        packaging_flat_base=packaging_flat_base,
+        material_scrap_credit_applied=material_scrap_credit_applied,
+    )
     pass_through_baseline = {k: float(v) for k, v in pass_through.items()}
 
     fix_detail = nre_detail.get("fixture", {})
@@ -9540,8 +9608,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     planner_machine_cost_total = 0.0
     planner_labor_cost_total = 0.0
     planner_total_minutes = 0.0
-    recognized_line_items = 0
-    planner_totals_present = False
+    planner_bucket_view: dict[str, dict[str, float]] | None = None
 
     if planner_pricing_result is not None:
         totals = planner_pricing_result.get("totals", {}) if isinstance(planner_pricing_result, dict) else {}
@@ -9555,6 +9622,53 @@ def compute_quote_from_df(df: pd.DataFrame,
         planner_machine_cost_total = float(totals.get("machine_cost", 0.0) or 0.0)
         planner_labor_cost_total = float(totals.get("labor_cost", 0.0) or 0.0)
         planner_total_minutes = float(totals.get("minutes", 0.0) or 0.0)
+
+        def _to_bucket(name: str) -> str:
+            n = (name or "").lower()
+            if any(k in n for k in ("milling", "mill", "t-slot", "pocket", "profile")):
+                return "milling"
+            if any(k in n for k in ("drill", "ream", "tap", "c'bore", "counterbore", "csk", "countersink")):
+                return "drilling"
+            if any(k in n for k in ("grind", "od grind", "id grind", "surface grind", "jig grind")):
+                return "grinding"
+            if "wire" in n or "wedm" in n:
+                return "wire_edm"
+            if "edm" in n:
+                return "sinker_edm"
+            if any(k in n for k in ("saw", "waterjet")):
+                return "saw_waterjet"
+            if "deburr" in n or "finish" in n:
+                return "finishing_deburr"
+            if "inspect" in n or "cmm" in n or "fai" in n:
+                return "inspection"
+            if any(k in n for k in ("assembly", "fit", "bench")):
+                return "assembly"
+            return "misc"
+
+        bucket_view: dict[str, dict[str, float]] = {}
+        for e in planner_line_items:
+            b = _to_bucket(str(e.get("op", "")))
+            m = float(e.get("minutes") or 0.0)
+            mc = float(e.get("machine_cost") or 0.0)
+            lc = float(e.get("labor_cost") or 0.0)
+            d = bucket_view.setdefault(
+                b,
+                {
+                    "minutes": 0.0,
+                    "labor_cost": 0.0,
+                    "machine_cost": 0.0,
+                    "total_cost": 0.0,
+                },
+            )
+            d["minutes"] += m
+            d["labor_cost"] += lc
+            d["machine_cost"] += mc
+            d["total_cost"] += lc + mc
+
+        if bucket_view:
+            planner_bucket_view = copy.deepcopy(bucket_view)
+            process_plan_summary["bucket_view"] = copy.deepcopy(bucket_view)
+            quote_state.process_plan.setdefault("bucket_view", copy.deepcopy(bucket_view))
 
         machine_minutes = 0.0
         labor_minutes = 0.0
@@ -9594,10 +9708,15 @@ def compute_quote_from_df(df: pd.DataFrame,
 
         if used_planner:
             planner_process_minutes = planner_total_minutes
-            process_costs = {
-                "Machine": round(planner_machine_cost_total, 2),
-                "Labor": round(planner_labor_cost_total, 2),
-            }
+            if bucket_view:
+                process_costs = {
+                    b: round(info["total_cost"], 2) for b, info in bucket_view.items()
+                }
+            else:
+                process_costs = {
+                    "Machine": round(planner_machine_cost_total, 2),
+                    "Labor": round(planner_labor_cost_total, 2),
+                }
 
             existing_process_meta = {key: dict(value) for key, value in process_meta.items()}
             process_meta = existing_process_meta
@@ -9637,6 +9756,17 @@ def compute_quote_from_df(df: pd.DataFrame,
                         "cost": round(cost_val, 2),
                         "rate": round(rate_val, 2) if rate_val else 0.0,
                     }
+
+            for b, info in bucket_view.items():
+                hr = info["minutes"] / 60.0 if info["minutes"] else 0.0
+                cost = info["total_cost"]
+                rate = (cost / hr) if hr > 0 else 0.0
+                process_meta[b] = {
+                    "minutes": round(info["minutes"], 1),
+                    "hr": round(hr, 3),
+                    "rate": round(rate, 2),
+                    "cost": round(cost, 2),
+                }
 
             inspection_components = {}
             inspection_adjustments = {}
@@ -10918,7 +11048,12 @@ def compute_quote_from_df(df: pd.DataFrame,
                 existing_plan.setdefault("bucket_view", copy.deepcopy(planner_bucket_view))
 
     material_direct_cost = float(pass_through.get("Material", material_direct_cost_base))
-    hardware_cost = float(pass_through.get("Hardware / BOM", hardware_cost))
+    hardware_cost = float(
+        pass_through.get(
+            HARDWARE_PASS_LABEL,
+            pass_through.get(LEGACY_HARDWARE_PASS_LABEL, hardware_cost),
+        )
+    )
     outsourced_costs = float(pass_through.get("Outsourced Vendors", outsourced_costs))
     shipping_cost = float(pass_through.get("Shipping", shipping_cost_base))
     consumables_hr_cost = float(pass_through.get("Consumables /Hr", consumables_hr_cost))

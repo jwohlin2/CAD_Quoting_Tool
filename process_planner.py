@@ -65,8 +65,23 @@ def add(plan: Plan, op: str, **params) -> None:
     plan["ops"].append({"op": op, **({k: v for k, v in params.items() if v is not None})})
 
 
+_DIRECT_KEYS = (
+    "hardware",
+    "outsourced",
+    "utilities",
+    "consumables_flat",
+    "packaging_flat",
+)
+
+
 def base_plan() -> Plan:
     return {"ops": [], "fixturing": [], "qa": [], "warnings": [], "directs": {}}
+
+
+def _init_directs(plan: Plan, **initial: bool) -> None:
+    directs = {key: False for key in _DIRECT_KEYS}
+    directs.update({k: bool(v) for k, v in initial.items() if k in directs})
+    plan["directs"] = directs
 
 
 def add_direct(plan: Plan, key: str, value=True) -> None:
@@ -94,6 +109,7 @@ def plan_die_plate(p: Dict[str, Any]) -> Plan:
     """Generate a plan for die plates, shoes, flats, or profiles."""
 
     plan = base_plan()
+    _init_directs(plan)
 
     material = p.get("material", "4140PH")
     L, W = p.get("plate_LxW", (0, 0))
@@ -180,6 +196,10 @@ def plan_die_plate(p: Dict[str, Any]) -> Plan:
     if any(str(name).startswith("heat_treat") for name in opnames):
         add_direct(plan, "outsourced", True)
 
+    if plan.get("ops"):
+        plan["directs"]["utilities"] = True
+        plan["directs"]["consumables_flat"] = True
+
     return plan
 
 
@@ -192,6 +212,7 @@ def plan_punch(p: Dict[str, Any]) -> Plan:
     """Generate a plan for punches and inserts."""
 
     plan = base_plan()
+    _init_directs(plan)
 
     mat = p.get("material", "tool_steel_annealed")
     overall_L = p.get("overall_length", 1.0)
@@ -269,6 +290,18 @@ def plan_punch(p: Dict[str, Any]) -> Plan:
     if any(str(name).startswith("heat_treat") for name in opnames):
         add_direct(plan, "outsourced", True)
 
+    if plan.get("ops"):
+        plan["directs"]["utilities"] = True
+        plan["directs"]["consumables_flat"] = True
+
+    hardware_hints = (
+        p.get("include_hardware"),
+        p.get("hardware_items"),
+        p.get("bom_items"),
+    )
+    if any(bool(hint) for hint in hardware_hints):
+        add_direct(plan, "hardware", True)
+
     return plan
 
 
@@ -292,6 +325,7 @@ def plan_bushing_id_critical(p: Dict[str, Any]) -> Plan:
     """Generate a plan for ID critical guide bushings or ring gauges."""
 
     plan = base_plan()
+    _init_directs(plan)
     if p.get("tight_od", True):
         add(plan, "purchase_OD_ground_blank")
         warn(
@@ -312,6 +346,17 @@ def plan_bushing_id_critical(p: Dict[str, Any]) -> Plan:
         add(plan, "lap_ID", target_Ra=p.get("target_id_Ra", 8))
 
     add_qa(plan, "Calibrate ID with ring/plug masters; certify size & roundness.")
+    if plan.get("ops"):
+        plan["directs"]["utilities"] = True
+        plan["directs"]["consumables_flat"] = True
+
+    hardware_flags = (
+        p.get("include_hardware"),
+        p.get("retainer_spec"),
+        p.get("hardware_items"),
+    )
+    if any(bool(flag) for flag in hardware_flags):
+        add_direct(plan, "hardware", True)
     return plan
 
 
@@ -324,6 +369,7 @@ def plan_cam_or_hemmer(p: Dict[str, Any]) -> Plan:
     """Generate a plan for cams and hemming components."""
 
     plan = base_plan()
+    _init_directs(plan)
     add(plan, "saw_or_mill_rough_blocks")
     if p.get("material", "tool_steel") in {"D2", "A2", "PM", "tool_steel"}:
         add(plan, "heat_treat_if_wear_part")
@@ -343,6 +389,10 @@ def plan_cam_or_hemmer(p: Dict[str, Any]) -> Plan:
     if any(str(name).startswith("heat_treat") for name in opnames):
         add_direct(plan, "outsourced", True)
 
+    if plan.get("ops"):
+        plan["directs"]["utilities"] = True
+        plan["directs"]["consumables_flat"] = True
+
     return plan
 
 
@@ -353,6 +403,7 @@ def plan_cam_or_hemmer(p: Dict[str, Any]) -> Plan:
 
 def plan_flat_die_chaser(p: Optional[Dict[str, Any]] = None) -> Plan:
     plan = base_plan()
+    _init_directs(plan)
     add(plan, "mill_or_wire_rough_form")
     add(plan, "heat_treat")
     add(plan, "profile_grind_flanks_and_reliefs_to_spec")
@@ -363,21 +414,30 @@ def plan_flat_die_chaser(p: Optional[Dict[str, Any]] = None) -> Plan:
     if any(str(name).startswith("heat_treat") for name in opnames):
         add_direct(plan, "outsourced", True)
 
+    if plan.get("ops"):
+        plan["directs"]["utilities"] = True
+        plan["directs"]["consumables_flat"] = True
+
     return plan
 
 
 def plan_pm_compaction_die(p: Dict[str, Any]) -> Plan:
     plan = base_plan()
+    _init_directs(plan)
     add(plan, "start_ground_carbide_ring")
     add(plan, "wire_edm_ID_leave", leave=0.005)
     add(plan, "jig_grind_ID_to_tenths_and_straightness", tol=0.0001)
     add(plan, "lap_bearing_land", target_Ra=8)
     add_qa(plan, "Measure taper/straightness over depth; Ra on land.")
+    if plan.get("ops"):
+        plan["directs"]["utilities"] = True
+        plan["directs"]["consumables_flat"] = True
     return plan
 
 
 def plan_shear_blade(p: Optional[Dict[str, Any]] = None) -> Plan:
     plan = base_plan()
+    _init_directs(plan)
     add(plan, "waterjet_or_saw_blanks")
     add(plan, "heat_treat", material="A2/D2/PM")
     add(plan, "profile_grind_cutting_edges_and_angles")
@@ -389,15 +449,23 @@ def plan_shear_blade(p: Optional[Dict[str, Any]] = None) -> Plan:
     if any(str(name).startswith("heat_treat") for name in opnames):
         add_direct(plan, "outsourced", True)
 
+    if plan.get("ops"):
+        plan["directs"]["utilities"] = True
+        plan["directs"]["consumables_flat"] = True
+
     return plan
 
 
 def plan_extrude_hone(p: Dict[str, Any]) -> Plan:
     plan = base_plan()
+    _init_directs(plan)
     add(plan, "verify_connected_passage_and_masking")
     add(plan, "abrasive_flow_polish", target_Ra=_safe(p.get("target_Ra"), 16))
     add(plan, "clean_and_flush_media")
     add_qa(plan, "Flow/pressure delta or Ra before/after report.")
+    if plan.get("ops"):
+        plan["directs"]["utilities"] = True
+        plan["directs"]["consumables_flat"] = True
     return plan
 
 
