@@ -7769,12 +7769,33 @@ def estimate_drilling_hours(
             cache_key = (op_name, round(float(diameter_in), 4))
             cache_entry = row_cache.get(cache_key)
             if cache_entry is None:
-                row = _pick_speeds_row(
-                    material_label=material_label,
-                    operation=op_name,
-                    tool_diameter_in=float(diameter_in),
-                    table=speeds_feeds_table,
-                )
+                material_for_lookup: str | None = None
+                for candidate in (material_label, mat_key, material_lookup):
+                    if candidate:
+                        material_for_lookup = str(candidate)
+                        break
+
+                row: Mapping[str, Any] | None = None
+                if speeds_feeds_table is not None:
+                    row = _select_speeds_feeds_row(
+                        speeds_feeds_table,
+                        operation=op_name,
+                        material_key=material_for_lookup,
+                    )
+                    if not row and op_name.lower() == "deep_drill":
+                        row = _select_speeds_feeds_row(
+                            speeds_feeds_table,
+                            operation="Drill",
+                            material_key=material_for_lookup,
+                        )
+
+                if not row:
+                    row = _pick_speeds_row(
+                        material_label=material_label,
+                        operation=op_name,
+                        tool_diameter_in=float(diameter_in),
+                        table=speeds_feeds_table,
+                    )
                 if not row and op_name.lower() == "deep_drill":
                     row = _pick_speeds_row(
                         material_label=material_label,
