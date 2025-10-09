@@ -6753,7 +6753,10 @@ def render_quote(
 
     for bucket in preferred_bucket_order:
         for key, value in display_process_cost_items:
-            if _normalize_bucket_key(key) != bucket:
+            norm = _normalize_bucket_key(key)
+            if norm.startswith("planner_"):
+                continue
+            if norm != bucket:
                 continue
             if not ((value > 0) or show_zeros):
                 continue
@@ -6763,7 +6766,9 @@ def render_quote(
     remaining_items = [
         (key, value)
         for key, value in display_process_cost_items
-        if key not in seen_keys and ((value > 0) or show_zeros)
+        if key not in seen_keys
+        and not _normalize_bucket_key(key).startswith("planner_")
+        and ((value > 0) or show_zeros)
     ]
     remaining_items.sort(key=_normalize_bucket_key)
     ordered_process_items.extend(remaining_items)
