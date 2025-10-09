@@ -5536,15 +5536,46 @@ def render_quote(
     params       = breakdown.get("params", {}) or {}
     nre_cost_details = breakdown.get("nre_cost_details", {}) or {}
     labor_cost_details_input_raw = breakdown.get("labor_cost_details", {}) or {}
-    labor_cost_details_input = {
-        str(label): str(detail) for label, detail in labor_cost_details_input_raw.items()
-    }
+
+    def _merge_detail_text(existing: str | None, new_value: Any) -> str:
+        segments: list[str] = []
+        seen: set[str] = set()
+        for candidate in (existing, new_value):
+            if candidate is None:
+                continue
+            for segment in re.split(r";\s*", str(candidate)):
+                seg = segment.strip()
+                if not seg:
+                    continue
+                if seg not in seen:
+                    segments.append(seg)
+                    seen.add(seg)
+        if segments:
+            return "; ".join(segments)
+        if existing is None and new_value is None:
+            return ""
+        if new_value is None:
+            return existing or ""
+        return str(new_value)
+
+    labor_cost_details_input: dict[str, str] = {}
+    for raw_label, raw_detail in labor_cost_details_input_raw.items():
+        canonical_label, _ = _canonical_amortized_label(raw_label)
+        if not canonical_label:
+            canonical_label = str(raw_label)
+        merged = _merge_detail_text(labor_cost_details_input.get(canonical_label), raw_detail)
+        labor_cost_details_input[canonical_label] = merged
+
     labor_cost_details: dict[str, str] = dict(labor_cost_details_input)
+
     labor_cost_totals_raw = breakdown.get("labor_costs", {}) or {}
     labor_cost_totals: dict[str, float] = {}
     for key, value in labor_cost_totals_raw.items():
+        canonical_label, _ = _canonical_amortized_label(key)
+        if not canonical_label:
+            canonical_label = str(key)
         try:
-            labor_cost_totals[str(key)] = float(value)
+            labor_cost_totals[canonical_label] = labor_cost_totals.get(canonical_label, 0.0) + float(value)
         except Exception:
             continue
     labor_costs_display: dict[str, float] = {}
@@ -13194,8 +13225,11 @@ def compute_quote_from_df(df: pd.DataFrame,
             return False
 
     def _merge_labor_detail(label: str, amount: float, detail_bits: list[str]) -> None:
-        labor_costs_display[label] = float(amount)
-        existing_detail = labor_cost_details_input.get(label)
+        canonical_label, _ = _canonical_amortized_label(label)
+        if not canonical_label:
+            canonical_label = str(label)
+        labor_costs_display[canonical_label] = float(amount)
+        existing_detail = labor_cost_details_input.get(canonical_label)
         if not detail_bits and not existing_detail:
             return
 
@@ -13217,7 +13251,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                     merged_bits.append(seg)
                     seen.add(seg)
         if merged_bits:
-            labor_cost_details[label] = "; ".join(merged_bits)
+            labor_cost_details[canonical_label] = "; ".join(merged_bits)
 
     for key, value in sorted(process_costs.items(), key=lambda kv: kv[1], reverse=True):
         label = key.replace('_', ' ').title()
