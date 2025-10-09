@@ -10902,36 +10902,8 @@ def compute_quote_from_df(df: pd.DataFrame,
         warnings=speeds_feeds_warnings,
         debug_lines=drill_debug_lines,
     )
-    holes = int(geo_context.get("hole_count") or 0)
-    if holes <= 0:
-        if hole_diams_list:
-            holes = len(hole_diams_list)
-        elif hole_groups_geo:
-            holes_from_groups = 0
-            for entry in hole_groups_geo:
-                if not isinstance(entry, Mapping):
-                    continue
-                count_val = _coerce_float_or_none(entry.get("count"))
-                qty_int = 0
-                if count_val is not None:
-                    try:
-                        qty_int = int(round(count_val))
-                    except Exception:
-                        qty_int = 0
-                if qty_int <= 0:
-                    qty_int = 1
-                holes_from_groups += qty_int
-            if holes_from_groups > 0:
-                holes = holes_from_groups
-
     if not math.isfinite(drill_hr) or drill_hr < 0:
         drill_hr = 0.0
-
-    drill_hr = _apply_drill_minutes_clamp(
-        drill_hr,
-        holes,
-        material_group=drill_material_group or drill_material_key,
-    )
 
     drill_hr = min(drill_hr, 500.0)
 
@@ -11013,25 +10985,33 @@ def compute_quote_from_df(df: pd.DataFrame,
             guard_ctx = quote_state.guard_context
         except Exception:
             guard_ctx = None
-        if isinstance(guard_ctx, dict):
-            guard_ctx["speeds_feeds_path"] = speeds_feeds_path or raw_path_text or ""
-            guard_ctx["speeds_feeds_loaded"] = speeds_feeds_loaded_flag
-            if drill_debug_line:
-                extras = guard_ctx.get("narrative_extra")
-                if isinstance(extras, list):
-                    if drill_debug_line not in extras:
-                        extras.append(drill_debug_line)
-                elif extras:
-                    guard_ctx["narrative_extra"] = [str(extras), drill_debug_line]
-                else:
-                    guard_ctx["narrative_extra"] = [drill_debug_line]
-            if red_flag_messages:
-                ctx_flags = guard_ctx.setdefault("red_flags", [])
-                for msg in red_flag_messages:
-                    if msg not in ctx_flags:
-                        ctx_flags.append(msg)
-            if drill_debug_lines:
-                guard_ctx.setdefault("drill_debug_lines", drill_debug_lines)
+        if not isinstance(guard_ctx, dict):
+            guard_ctx = {}
+        guard_update: dict[str, Any] = {
+            "speeds_feeds_path": speeds_feeds_path or raw_path_text or "",
+            "speeds_feeds_loaded": speeds_feeds_loaded_flag,
+        }
+        if drill_debug_line:
+            existing_extra = guard_ctx.get("narrative_extra")
+            extras_list: list[str] = []
+            if isinstance(existing_extra, list):
+                extras_list.extend(str(entry) for entry in existing_extra if entry)
+            elif existing_extra:
+                extras_list.append(str(existing_extra))
+            if drill_debug_line not in extras_list:
+                extras_list.append(drill_debug_line)
+            if extras_list:
+                guard_update["narrative_extra"] = extras_list
+        if red_flag_messages:
+            ctx_flags = list(guard_ctx.get("red_flags", []))
+            for msg in red_flag_messages:
+                if msg not in ctx_flags:
+                    ctx_flags.append(msg)
+            guard_update["red_flags"] = ctx_flags
+        if drill_debug_lines and "drill_debug_lines" not in guard_ctx:
+            guard_update["drill_debug_lines"] = list(drill_debug_lines)
+        guard_ctx.update(guard_update)
+        quote_state.guard_context = guard_ctx
     drill_rate = float(rates.get("DrillingRate") or rates.get("MillingRate", 0.0) or 0.0)
     hole_count_geo = _coerce_float_or_none(geo_context.get("hole_count"))
     hole_count_for_tripwire = 0
