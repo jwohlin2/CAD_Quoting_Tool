@@ -5391,6 +5391,37 @@ class ProcessDisplayEntry:
     display_override: str | None = None
 
 
+def _fold_buckets(process_costs: Mapping[str, Any] | None) -> dict[str, float]:
+    """Coalesce duplicate process buckets using their canonical keys."""
+
+    if not isinstance(process_costs, Mapping):
+        return {}
+
+    folded: dict[str, float] = {}
+    preferred_keys: dict[str, str] = {}
+
+    for raw_key, raw_value in process_costs.items():
+        canon = _canonical_bucket_key(raw_key)
+        try:
+            value = float(raw_value or 0.0)
+        except Exception:
+            # Non-numeric values cannot be summed; skip them to avoid crashes.
+            continue
+
+        if not canon:
+            folded[raw_key] = folded.get(raw_key, 0.0) + value
+            continue
+
+        preferred_key = preferred_keys.get(canon)
+        if preferred_key is None:
+            preferred_key = raw_key
+            preferred_keys[canon] = preferred_key
+
+        folded[preferred_key] = folded.get(preferred_key, 0.0) + value
+
+    return folded
+
+
 def _iter_ordered_process_entries(
     process_costs: Mapping[str, Any] | None,
     *,
@@ -6714,123 +6745,23 @@ def render_quote(
             add_process_notes(process_key, indent="    ")
         proc_total += amount_val
 
-    def _normalize_bucket_key(name: str) -> str:
-        return re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_")
-
-    process_cost_items_all = list((process_costs or {}).items())
-    display_process_cost_items = [
-        (key, value)
-        for key, value in process_cost_items_all
-        if not _is_planner_meta(key)
-    ]
-
-    preferred_bucket_order = [
-        "milling",
-        "drilling",
-        "counterbore",
-        "countersink",
-        "tapping",
-        "grinding",
-        "finishing_deburr",
-        "saw_waterjet",
-        "inspection",
-    ]
-
     def _is_planner_rollup_key(name: str | None) -> bool:
         if pricing_source_lower != "planner":
             return False
-        norm = _normalize_bucket_key(name)
-        if not norm:
+        canon = _canonical_bucket_key(name or "")
+        if not canon:
             return False
-        if norm in {"planner_total", "planner_machine", "planner_labor"}:
+        if canon in {"planner_total", "planner_machine", "planner_labor"}:
             return True
-        return norm.startswith("planner_")
+        return canon.startswith("planner_")
 
-    ordered_process_items: list[tuple[str, float]] = []
-    seen_keys: set[str] = set()
+    filtered_process_costs = {
+        key: value
+        for key, value in (process_costs or {}).items()
+        if not _is_planner_meta(key)
+    }
 
-    process_costs = _fold_buckets(process_costs)
-
-    for bucket in preferred_bucket_order:
-        for key, value in display_process_cost_items:
-            if _normalize_bucket_key(key) != bucket:
-                continue
-            if not ((value > 0) or show_zeros):
-                continue
-            ordered_process_items.append((key, value))
-            seen_keys.add(key)
-
-    remaining_items = [
-        (key, value)
-        for key, value in display_process_cost_items
-        if key not in seen_keys and ((value > 0) or show_zeros)
-    ]
-    remaining_items.sort(key=_normalize_bucket_key)
-    ordered_process_items.extend(remaining_items)
-
-    for key, value in ordered_process_items:
-        normalized_key = _normalize_bucket_key(key)
-        if normalized_key == "planner_total" or normalized_key.startswith("planner_"):
-            continue
-        canon_key = _canonical_bucket_key(key)
-        if canon_key.startswith("planner_"):
-            continue
-        meta_key = str(key).lower()
-        meta = process_meta.get(meta_key, {}) if isinstance(process_meta, dict) else {}
-        detail_bits: list[str] = []
-        try:
-            hr_val = float(meta.get("hr", 0.0) or 0.0)
-        except Exception:
-            hr_val = 0.0
-        try:
-            rate_val = float(meta.get("rate", 0.0) or 0.0)
-        except Exception:
-            rate_val = 0.0
-        try:
-            extra_val = float(meta.get("base_extra", 0.0) or 0.0)
-        except Exception:
-            extra_val = 0.0
-
-        display_override, amount_override, display_hr, display_rate = _format_planner_bucket_line(
-            canon_key,
-            float(value),
-            meta if isinstance(meta, Mapping) else {},
-        )
-        use_display = display_override is not None
-        label = (
-            _display_bucket_label(canon_key)
-            if use_display or canon_key in label_overrides
-            else _process_label(canon_key)
-        )
-
-        if not use_display and hr_val > 0:
-            detail_bits.append(_hours_with_rate_text(hr_val, rate_val))
-
-        rate_for_extra = rate_val if rate_val > 0 else display_rate
-        if abs(extra_val) > 1e-6:
-            if (not use_display and hr_val <= 1e-6 and rate_for_extra > 0) or (
-                use_display and display_hr <= 1e-6 and rate_for_extra > 0
-            ):
-                extra_hours = extra_val / rate_for_extra
-                detail_bits.append(_hours_with_rate_text(extra_hours, rate_for_extra))
-
-        if notes_order:
-            detail_bits.append("LLM: " + ", ".join(notes_order))
-
-        if use_display:
-            try:
-                amount_for_display = float(amount_override or 0.0)
-            except Exception:
-                amount_for_display = 0.0
-        else:
-            try:
-                amount_for_display = float(value or 0.0)
-            except Exception:
-                amount_for_display = 0.0
-
-        if label.strip().lower() == "misc":
-            if planner_bucket_display_map or amount_for_display < 1.0:
-                continue
+    process_costs = _fold_buckets(filtered_process_costs)
 
     for entry in _iter_ordered_process_entries(
         process_costs,
@@ -6841,12 +6772,21 @@ def render_quote(
         label_overrides=label_overrides,
         currency_formatter=_m,
     ):
+        if _is_planner_rollup_key(entry.process_key):
+            continue
+        try:
+            amount_for_display = float(entry.amount or 0.0)
+        except Exception:
+            amount_for_display = 0.0
+        if entry.label.strip().lower() == "misc":
+            if planner_bucket_display_map or amount_for_display < 1.0:
+                continue
         _add_labor_cost_line(
-            label,
-            amount_override if use_display else float(value),
-            process_key=str(canon_key),
-            detail_bits=detail_bits,
-            display_override=display_override,
+            entry.label,
+            amount_for_display,
+            process_key=str(entry.process_key),
+            detail_bits=list(entry.detail_bits),
+            display_override=entry.display_override,
         )
 
     show_amortized_single_qty = _lookup_config_flag(
