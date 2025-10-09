@@ -5550,6 +5550,41 @@ def render_quote(
             if scrap_credit_lines:
                 detail_lines.extend(scrap_credit_lines)
 
+            shipping_tax_lines: list[str] = []
+            base_cost_before_scrap = _coerce_float_or_none(
+                material.get("material_cost_before_credit")
+            )
+            if base_cost_before_scrap is None:
+                net_mass_for_base = _coerce_float_or_none(net_mass_val)
+                if net_mass_for_base is None:
+                    net_mass_for_base = _coerce_float_or_none(
+                        material.get("net_mass_g")
+                    )
+                if net_mass_for_base is not None and net_mass_for_base > 0:
+                    per_lb_value = _coerce_float_or_none(
+                        material.get("unit_price_usd_per_lb")
+                    )
+                    if per_lb_value is None:
+                        per_g_value = _coerce_float_or_none(
+                            material.get("unit_price_per_g")
+                        )
+                        if per_g_value is not None:
+                            per_lb_value = per_g_value * (1000.0 / LB_PER_KG)
+                    if per_lb_value is not None:
+                        base_cost_before_scrap = (
+                            float(net_mass_for_base) / 1000.0 * LB_PER_KG
+                        ) * float(per_lb_value)
+
+            if base_cost_before_scrap is not None or show_zeros:
+                base_val = float(base_cost_before_scrap or 0.0)
+                shipping_cost = base_val * 0.15
+                tax_cost = base_val * 0.065
+                shipping_tax_lines.append(f"  Shipping: {_m(shipping_cost)}")
+                shipping_tax_lines.append(f"  Material Tax: {_m(tax_cost)}")
+
+            if shipping_tax_lines:
+                detail_lines.extend(shipping_tax_lines)
+
             if upg or unit_price_kg or unit_price_lb or show_zeros:
                 grams_per_lb = 1000.0 / LB_PER_KG
                 per_lb_value = _coerce_float_or_none(unit_price_lb)
