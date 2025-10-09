@@ -9456,6 +9456,37 @@ def estimate_drilling_hours(
                 point_angle_deg=118.0,
                 ld_ratio=l_over_d,
             )
+            diameter_float = _as_float_or_none(diameter_in)
+            if diameter_float is None:
+                try:
+                    diameter_float = float(diameter_in)
+                except Exception:
+                    diameter_float = None
+            precomputed_speeds: dict[str, float] = {}
+            row_view = _time_estimator._RowView(row)
+            sfm_candidate = getattr(row_view, "sfm_start", None)
+            if sfm_candidate is None:
+                sfm_candidate = getattr(row_view, "sfm", None)
+            sfm_val = _time_estimator.to_num(sfm_candidate)
+            if sfm_val is not None and math.isfinite(sfm_val):
+                precomputed_speeds["sfm"] = float(sfm_val)
+            ipr_val = _time_estimator.pick_feed_value(row_view, float(diameter_float or 0.0))
+            if ipr_val is not None and math.isfinite(ipr_val):
+                precomputed_speeds["ipr"] = float(ipr_val)
+            rpm_val: float | None = None
+            if diameter_float and diameter_float > 0 and "sfm" in precomputed_speeds:
+                rpm_val = (precomputed_speeds["sfm"] * 12.0) / (math.pi * float(diameter_float))
+                if math.isfinite(rpm_val):
+                    precomputed_speeds["rpm"] = float(rpm_val)
+                else:
+                    rpm_val = None
+            ipm_val: float | None = None
+            if rpm_val is not None and "ipr" in precomputed_speeds:
+                ipm_val = float(rpm_val) * precomputed_speeds["ipr"]
+                if math.isfinite(ipm_val):
+                    precomputed_speeds["ipm"] = float(ipm_val)
+                else:
+                    ipm_val = None
             debug_payload: dict[str, Any] | None = None
             tool_params: _TimeToolParams
             minutes: float
@@ -9518,10 +9549,21 @@ def estimate_drilling_hours(
                     operation_name = str(debug_payload.get("operation") or op_name).lower()
                 except Exception:
                     operation_name = op_name.lower()
-                sfm_val = debug_payload.get("sfm")
-                ipr_val = debug_payload.get("ipr")
-                rpm_val = debug_payload.get("rpm")
-                ipm_val = debug_payload.get("ipm")
+                if precomputed_speeds:
+                    for key, value in precomputed_speeds.items():
+                        debug_payload.setdefault(key, value)
+                sfm_val = precomputed_speeds.get("sfm") if precomputed_speeds else None
+                if sfm_val is None:
+                    sfm_val = debug_payload.get("sfm")
+                ipr_val = precomputed_speeds.get("ipr") if precomputed_speeds else None
+                if ipr_val is None:
+                    ipr_val = debug_payload.get("ipr")
+                rpm_val = precomputed_speeds.get("rpm") if precomputed_speeds else None
+                if rpm_val is None:
+                    rpm_val = debug_payload.get("rpm")
+                ipm_val = precomputed_speeds.get("ipm") if precomputed_speeds else None
+                if ipm_val is None:
+                    ipm_val = debug_payload.get("ipm")
                 depth_val = debug_payload.get("axial_depth_in")
                 minutes_per = debug_payload.get("minutes_per_hole")
                 qty_for_debug = int(qty) if qty else 0
@@ -9648,10 +9690,17 @@ def estimate_drilling_hours(
                         return "-"
                     return fmt.format(float(value))
 
-                sfm_text = _format_avg(_avg_value("sfm_sum", "sfm_count"), "{:.0f}")
-                ipr_text = _format_avg(_avg_value("ipr_sum", "ipr_count"), "{:.4f}")
-                rpm_text = _format_avg(_avg_value("rpm_sum", "rpm_count"), "{:.0f}")
-                ipm_text = _format_avg(_avg_value("ipm_sum", "ipm_count"), "{:.1f}")
+                sfm_avg = _avg_value("sfm_sum", "sfm_count")
+                ipr_avg = _avg_value("ipr_sum", "ipr_count")
+                rpm_avg = _avg_value("rpm_sum", "rpm_count")
+                ipm_avg = _avg_value("ipm_sum", "ipm_count")
+                summary["rpm"] = rpm_avg
+                summary["ipm"] = ipm_avg
+                summary["minutes_per_hole"] = minutes_avg
+                sfm_text = _format_avg(sfm_avg, "{:.0f}")
+                ipr_text = _format_avg(ipr_avg, "{:.4f}")
+                rpm_text = _format_avg(rpm_avg, "{:.0f}")
+                ipm_text = _format_avg(ipm_avg, "{:.1f}")
 
                 diam_qty = summary.get("diameter_qty_sum", 0) or 0
                 dia_segment = "Ø-"

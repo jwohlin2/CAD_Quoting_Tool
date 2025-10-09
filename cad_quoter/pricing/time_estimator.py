@@ -125,6 +125,18 @@ def to_num(value: Any, default: float | None = None) -> float | None:
         return default
 
 
+def _precomputed_value(precomputed: Mapping[str, Any] | None, key: str) -> float | None:
+    """Return a numeric value from ``precomputed`` if available."""
+
+    if not precomputed:
+        return None
+    try:
+        value = precomputed.get(key)
+    except AttributeError:  # pragma: no cover - defensive
+        return None
+    return to_num(value)
+
+
 def ipm_from_feed(
     feed_type: str,
     feed_val: float | None,
@@ -257,11 +269,20 @@ def time_drill(
     overhead: OverheadParams,
     *,
     debug: dict[str, Any] | None = None,
+    precomputed: Mapping[str, Any] | None = None,
 ) -> float:
-    sfm = to_num(row.sfm_start, 0.0) or 0.0
-    rpm = rpm_from_sfm(sfm, geom.diameter_in)
-    ipr = pick_feed_value(row, geom.diameter_in)
-    ipm = ipm_from_feed("ipr", ipr, rpm, None)
+    sfm = _precomputed_value(precomputed, "sfm")
+    if sfm is None:
+        sfm = to_num(row.sfm_start, 0.0) or 0.0
+    rpm = _precomputed_value(precomputed, "rpm")
+    if rpm is None:
+        rpm = rpm_from_sfm(sfm, geom.diameter_in)
+    ipr = _precomputed_value(precomputed, "ipr")
+    if ipr is None:
+        ipr = pick_feed_value(row, geom.diameter_in)
+    ipm = _precomputed_value(precomputed, "ipm")
+    if ipm is None:
+        ipm = ipm_from_feed("ipr", ipr, rpm, None)
 
     axial_depth = (
         max(to_num(geom.hole_depth_in, 0.0) or to_num(geom.depth_in, 0.0) or 0.0, 0.0)
@@ -303,8 +324,17 @@ def time_deep_drill(
     overhead: OverheadParams,
     *,
     debug: dict[str, Any] | None = None,
+    precomputed: Mapping[str, Any] | None = None,
 ) -> float:
-    return time_drill(row, geom, tool, machine, overhead, debug=debug)
+    return time_drill(
+        row,
+        geom,
+        tool,
+        machine,
+        overhead,
+        debug=debug,
+        precomputed=precomputed,
+    )
 
 
 def time_ream(
@@ -442,6 +472,7 @@ def estimate_time_min(
     *,
     operation: str | None = None,
     debug: dict[str, Any] | None = None,
+    precomputed: Mapping[str, Any] | None = None,
 ) -> float:
     """Dispatch to the appropriate time estimator based on the operation."""
 
@@ -478,11 +509,27 @@ def estimate_time_min(
     if op == "drill":
         if debug is not None:
             debug.setdefault("operation", op)
-        return time_drill(row_view, geom, tool, machine, overhead, debug=debug)
+        return time_drill(
+            row_view,
+            geom,
+            tool,
+            machine,
+            overhead,
+            debug=debug,
+            precomputed=precomputed,
+        )
     if "deep_drill" in op:
         if debug is not None:
             debug.setdefault("operation", op)
-        return time_deep_drill(row_view, geom, tool, machine, overhead, debug=debug)
+        return time_deep_drill(
+            row_view,
+            geom,
+            tool,
+            machine,
+            overhead,
+            debug=debug,
+            precomputed=precomputed,
+        )
     if "ream" in op:
         return time_ream(row_view, geom, tool, machine, overhead)
     if "tap" in op:
