@@ -9070,15 +9070,32 @@ MAX_DRILL_MIN_PER_HOLE = 2.00
 
 def _drill_minutes_per_hole_bounds(
     material_group: str | None = None,
+    *,
+    depth_in: float | None = None,
 ) -> tuple[float, float]:
     """Return the (min, max) minutes-per-hole bounds for drilling."""
 
     min_minutes = MIN_DRILL_MIN_PER_HOLE
     max_minutes = MAX_DRILL_MIN_PER_HOLE
+    depth_value = None
+    if depth_in is not None:
+        try:
+            depth_value = float(depth_in)
+        except (TypeError, ValueError):
+            depth_value = None
+    if depth_value is not None and depth_value <= 0:
+        depth_value = None
     if material_group:
         key = str(material_group).strip().lower()
         if any(token in key for token in {"steel", "inconel", "titanium"}):
-            max_minutes = max(max_minutes, 3.0)
+            dynamic_cap = None
+            if depth_value is not None:
+                dynamic_cap = 0.9 + 1.2 * depth_value
+            max_minutes = max(
+                max_minutes,
+                5.0,
+                dynamic_cap if dynamic_cap is not None else 0.0,
+            )
         elif "alum" in key:
             max_minutes = min(max_minutes, 1.5)
     return min_minutes, max_minutes
@@ -9089,10 +9106,14 @@ def _apply_drill_minutes_clamp(
     hole_count: int,
     *,
     material_group: str | None = None,
+    depth_in: float | None = None,
 ) -> float:
     if hours <= 0.0 or hole_count <= 0:
         return hours
-    min_min_per_hole, max_min_per_hole = _drill_minutes_per_hole_bounds(material_group)
+    min_min_per_hole, max_min_per_hole = _drill_minutes_per_hole_bounds(
+        material_group,
+        depth_in=depth_in,
+    )
     min_hr = (hole_count * min_min_per_hole) / 60.0
     max_hr = (hole_count * max_min_per_hole) / 60.0
     return max(min(hours, max_hr), min_hr)
@@ -9225,7 +9246,8 @@ def estimate_drilling_hours(
 
         total_qty_for_avg = 0
         weighted_dia_sum = 0.0
-        for diameter_in, qty, _ in group_specs:
+        depth_candidates: list[float] = []
+        for diameter_in, qty, depth_val in group_specs:
             try:
                 qty_int = int(qty)
             except Exception:
@@ -9234,8 +9256,11 @@ def estimate_drilling_hours(
                 continue
             total_qty_for_avg += qty_int
             weighted_dia_sum += float(diameter_in) * qty_int
+            if depth_val and depth_val > 0:
+                depth_candidates.append(float(depth_val))
         if total_qty_for_avg > 0:
             avg_dia_in = weighted_dia_sum / total_qty_for_avg
+        depth_for_bounds = max(depth_candidates) if depth_candidates else None
 
         hp_cap_val = _as_float_or_none(getattr(base_machine, "hp_to_mrr_factor", None))
         combined_cap = None
@@ -9668,6 +9693,7 @@ def estimate_drilling_hours(
                 total_min / 60.0,
                 hole_count,
                 material_group=material_label,
+                depth_in=depth_for_bounds,
             )
 
     thickness_for_fallback_mm = float(thickness_in or 0.0) * 25.4
@@ -9746,10 +9772,14 @@ def estimate_drilling_hours(
         )
 
     hours = total_sec / 3600.0
+    depth_for_bounds = None
+    if thickness_for_fallback_mm and thickness_for_fallback_mm > 0:
+        depth_for_bounds = float(thickness_for_fallback_mm) / 25.4
     return _apply_drill_minutes_clamp(
         hours,
         holes_fallback,
         material_group=material_label,
+        depth_in=depth_for_bounds,
     )
 
 
