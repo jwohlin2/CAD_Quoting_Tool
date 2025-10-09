@@ -7709,11 +7709,13 @@ def estimate_drilling_hours(
                 teeth_int = 1
             return _TimeToolParams(teeth_z=teeth_int)
 
+        DEEP_DRILL_LD_THRESHOLD = 3.0
+
         for diameter_in, qty, depth_in in group_specs:
             if qty <= 0 or diameter_in <= 0 or depth_in <= 0:
                 continue
             ratio = depth_in / max(diameter_in, 1e-6)
-            op_name = "Deep_Drill" if depth_in > 3.0 * diameter_in else "Drill"
+            op_name = "Deep_Drill" if ratio >= DEEP_DRILL_LD_THRESHOLD else "Drill"
             cache_key = (op_name, round(float(diameter_in), 4))
             cache_entry = row_cache.get(cache_key)
             if cache_entry is None:
