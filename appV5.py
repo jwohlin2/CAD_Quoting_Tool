@@ -182,6 +182,7 @@ from cad_quoter.pricing.time_estimator import (
     ToolParams as _TimeToolParams,
     estimate_time_min as _estimate_time_min,
 )
+from cad_quoter.pricing import time_estimator as _time_estimator
 from cad_quoter.pricing.speeds_feeds_selector import (
     pick_speeds_row as _pick_speeds_row,
     unit_hp_cap as _unit_hp_cap,
@@ -8243,7 +8244,8 @@ def estimate_drilling_hours(
                 thickness_in_val = None
 
         for diameter_in, qty, depth_in in group_specs:
-            if qty <= 0 or diameter_in <= 0 or depth_in <= 0:
+            qty_i = int(qty)
+            if qty_i <= 0 or diameter_in <= 0 or depth_in <= 0:
                 continue
             tool_dia_in = float(diameter_in)
             thickness_for_ratio = thickness_in_val if thickness_in_val and thickness_in_val > 0 else depth_in
@@ -8437,6 +8439,22 @@ def estimate_drilling_hours(
                 )
                 if warning_text not in warnings:
                     warnings.append(warning_text)
+        if debug is not None and total_qty > 0:
+            avg_dia_in = weighted_dia / total_qty if total_qty else 0.0
+            debug.update(
+                {
+                    "thickness_in": float(thickness_in or 0.0),
+                    "avg_dia_in": float(avg_dia_in),
+                    "sfm": float(weighted_sfm / total_qty) if total_qty else 0.0,
+                    "ipr": float(weighted_ipr / total_qty) if total_qty else 0.0,
+                    "rpm": float(weighted_rpm / total_qty) if total_qty else 0.0,
+                    "ipm": float(weighted_ipm / total_qty) if total_qty else 0.0,
+                    "min_per_hole": float(total_min_for_debug / total_qty)
+                    if total_qty
+                    else 0.0,
+                    "hole_count": int(total_qty),
+                }
+            )
         if total_min > 0:
             hole_count = total_holes
             if hole_count <= 0 and fallback_counts:
@@ -8488,6 +8506,36 @@ def estimate_drilling_hours(
         per = sec_per_hole(float(d)) * mfac * tfac
         total_sec += qty_int * per
         total_sec += toolchange_s
+        total_qty += int(qty)
+        weighted_dia_in += (float(d) / 25.4) * int(qty)
+
+    if debug is not None and total_qty > 0:
+        avg_dia_in = weighted_dia_in / total_qty if total_qty else 0.0
+        debug.update(
+            {
+                "thickness_in": float(thickness_in or 0.0),
+                "avg_dia_in": float(avg_dia_in),
+                "sfm": None,
+                "ipr": None,
+                "rpm": None,
+                "ipm": None,
+                "min_per_hole": (total_sec / 60.0) / total_qty if total_qty else None,
+                "hole_count": int(total_qty),
+            }
+        )
+    elif debug is not None:
+        debug.update(
+            {
+                "thickness_in": float(thickness_in or 0.0),
+                "avg_dia_in": 0.0,
+                "sfm": None,
+                "ipr": None,
+                "rpm": None,
+                "ipm": None,
+                "min_per_hole": None,
+                "hole_count": 0,
+            }
+        )
 
     hours = total_sec / 3600.0
     return _apply_drill_minutes_clamp(hours, holes_fallback)
