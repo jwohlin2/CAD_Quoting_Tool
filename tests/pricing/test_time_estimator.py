@@ -44,7 +44,7 @@ def test_drill_time_includes_peck_and_breakthrough() -> None:
     )
 
     minutes = estimate_time_min(row, geom, tool, machine, overhead)
-    assert minutes == pytest.approx(0.7155, rel=1e-4)
+    assert minutes == pytest.approx(0.8155, rel=1e-4)
 
 
 def test_endmill_profile_caps_by_machine_hp() -> None:

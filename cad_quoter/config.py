@@ -14,6 +14,31 @@ RESOURCE_DIR = Path(__file__).resolve().parent / "resources"
 DEFAULT_VERSION = 1
 
 
+def _env_flag(name: str, *, default: bool = False) -> bool:
+    """Return a boolean from the environment with tolerant parsing."""
+
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+
+    normalized = raw.strip().lower()
+    if not normalized:
+        return default
+
+    truthy = {"1", "true", "yes", "on"}
+    falsy = {"0", "false", "no", "off"}
+
+    if normalized in truthy:
+        return True
+    if normalized in falsy:
+        return False
+
+    try:
+        return bool(int(normalized))
+    except Exception:
+        return default
+
+
 @dataclass(frozen=True)
 class AppEnvironment:
     """Runtime configuration extracted from environment variables."""
@@ -23,7 +48,7 @@ class AppEnvironment:
 
     @classmethod
     def from_env(cls) -> "AppEnvironment":
-        debug_enabled = bool(int(os.getenv("LLM_DEBUG", "1")))
+        debug_enabled = _env_flag("LLM_DEBUG", default=True)
         debug_dir_raw = os.getenv("LLM_DEBUG_DIR")
         if debug_dir_raw:
             debug_dir = Path(debug_dir_raw)
