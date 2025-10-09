@@ -9236,10 +9236,6 @@ def compute_quote_from_df(df: pd.DataFrame,
     if deburr_holes_hr:
         legacy_process_meta["deburr"]["hole_touch_hr"] = deburr_holes_hr
 
-    meta_lookup: dict[str, dict[str, Any]] = {
-        key: dict(value) for key, value in process_meta.items() if isinstance(value, Mapping)
-    }
-
     if not used_planner:
         for key, value in legacy_process_costs.items():
             process_costs[key] = float(value)
@@ -11573,6 +11569,10 @@ def compute_quote_from_df(df: pd.DataFrame,
                 base_extra_val = float(meta.get("base_extra", 0.0) or 0.0)
                 process_costs[key] = round(hr_val * rate_val + base_extra_val, 2)
         process_hours_final = _collect_process_hours()
+
+    meta_lookup: dict[str, dict[str, Any]] = {
+        key: dict(value) for key, value in process_meta.items() if isinstance(value, Mapping)
+    }
 
     for proc_key, final_hr in process_hours_final.items():
         meta = meta_lookup.get(proc_key) or {}
