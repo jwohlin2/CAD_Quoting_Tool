@@ -18,6 +18,11 @@ from .materials import (
 )
 from .metals_api import MetalsAPI
 from .vendor_csv import VendorCSV
+from .speeds_feeds_selector import (
+    load_csv_as_records,
+    pick_speeds_row,
+    unit_hp_cap,
+)
 
 
 def _usd_per_kg_from_quote(quote: float, basis: str) -> float:
@@ -188,4 +193,7 @@ __all__ = [
     "resolve_material_unit_price",
     "usdkg_to_usdlb",
     "create_default_registry",
+    "load_csv_as_records",
+    "pick_speeds_row",
+    "unit_hp_cap",
 ]
