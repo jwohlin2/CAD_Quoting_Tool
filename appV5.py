@@ -11485,6 +11485,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     planner_total_minutes = 0.0
     planner_bucket_view: dict[str, dict[str, float]] | None = None
     planner_bucket_rollup: dict[str, dict[str, float]] | None = None
+    pricing_source = "legacy"
 
     if planner_pricing_result is not None:
         # Canonical planner integration + bucketization path
@@ -11652,15 +11653,10 @@ def compute_quote_from_df(df: pd.DataFrame,
             if legacy_baseline_had_values:
                 legacy_baseline_ignored = True
             planner_process_minutes = planner_total_minutes
-            if bucket_view:
-                process_costs = {
-                    b: round(info["total_cost"], 2) for b, info in bucket_view.items()
-                }
-            else:
-                process_costs = {
-                    "Machine": round(planner_machine_cost_total, 2),
-                    "Labor": round(planner_labor_cost_total, 2),
-                }
+            process_costs = {
+                "Machine": round(planner_machine_cost_total, 2),
+                "Labor": round(planner_labor_cost_total, 2),
+            }
 
             existing_process_meta = {key: dict(value) for key, value in process_meta.items()}
             process_meta = existing_process_meta
@@ -11723,7 +11719,23 @@ def compute_quote_from_df(df: pd.DataFrame,
                         process_meta[b] = update_payload
                     planner_meta_keys.add(b)
 
-    pricing_source = "planner" if used_planner else "legacy"
+            meta_lookup = {
+                key: dict(value) for key, value in process_meta.items() if isinstance(value, Mapping)
+            }
+            allowed_process_hour_keys = {
+                key
+                for key in planner_meta_keys
+                if key not in legacy_per_process_keys or key.startswith("planner_")
+            }
+            if not allowed_process_hour_keys:
+                allowed_process_hour_keys = set(planner_meta_keys)
+            if "drilling" in legacy_process_meta:
+                allowed_process_hour_keys.add("drilling")
+            process_hours_baseline = {
+                key: float(process_meta.get(key, {}).get("hr", 0.0) or 0.0)
+                for key in allowed_process_hour_keys
+            }
+            process_costs_baseline = {k: float(v) for k, v in process_costs.items()}
 
     baseline_data = {
         "process_hours": process_hours_baseline,
@@ -13170,6 +13182,18 @@ def compute_quote_from_df(df: pd.DataFrame,
     consumables_hr_cost = float(pass_through.get("Consumables /Hr", consumables_hr_cost))
     utilities_cost = float(pass_through.get("Utilities", utilities_cost))
     consumables_flat = float(pass_through.get("Consumables", consumables_flat))
+
+    if used_planner:
+        machine_cost_final = float(
+            process_meta.get("planner_machine", {}).get("cost", planner_machine_cost_total)
+        )
+        labor_cost_final = float(
+            process_meta.get("planner_labor", {}).get("cost", planner_labor_cost_total)
+        )
+        process_costs = {
+            "Machine": round(machine_cost_final, 2),
+            "Labor": round(labor_cost_final, 2),
+        }
 
     labor_cost = programming_per_part + fixture_labor_per_part + sum(process_costs.values())
 
