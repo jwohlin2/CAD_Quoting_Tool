@@ -9336,18 +9336,21 @@ def estimate_drilling_hours(
                         table=speeds_feeds_table,
                     )
                 if row and isinstance(row, Mapping):
+                    chosen_material_label = ""
                     cache_entry = (row, _build_tool_params(row))
                     speeds_feeds_row = row
                     selected_op_name = op_name
+                    # Always use one material label for both Debug and Calc.
+                    chosen_material_label = str(
+                        row.get("material")
+                        or row.get("material_family")
+                        or material_label
+                        or mat_key
+                        or material_lookup
+                        or ""
+                    ).strip()
                     if debug_list is not None:
-                        row_material = str(
-                            row.get("material")
-                            or row.get("material_family")
-                            or material_label
-                            or mat_key
-                            or material_lookup
-                            or ""
-                        ).strip()
+                        row_material = chosen_material_label
                         qty_display = qty
                         try:
                             qty_display = int(qty)
@@ -9446,7 +9449,9 @@ def estimate_drilling_hours(
                 depth_val = debug_payload.get("axial_depth_in")
                 minutes_per = debug_payload.get("minutes_per_hole")
                 qty_for_debug = int(qty) if qty else 0
-                mat_display = str(material_label or mat_key or material_lookup or "").strip()
+                mat_display = chosen_material_label or str(
+                    material_label or mat_key or material_lookup or ""
+                ).strip()
                 if not mat_display:
                     mat_display = "material"
                 if debug_lines is not None:
@@ -9480,7 +9485,12 @@ def estimate_drilling_hours(
                             "dwell_count": 0,
                         },
                     )
-                    if mat_display and (not summary.get("material") or summary.get("material") == "material"):
+                    if chosen_material_label:
+                        summary["material"] = chosen_material_label
+                    elif mat_display and (
+                        not summary.get("material")
+                        or summary.get("material") == "material"
+                    ):
                         summary["material"] = mat_display
                     minutes_val = _as_float_or_none(minutes_per)
                     minutes_per_hole = minutes_val if minutes_val is not None else float(minutes)
