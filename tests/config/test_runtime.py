@@ -16,6 +16,16 @@ def test_app_environment_from_env_uses_defaults(monkeypatch: pytest.MonkeyPatch)
     assert env.llm_debug_dir.exists()
 
 
+def test_app_environment_from_env_parses_boolean_strings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_DEBUG", "TrUe")
+    env_true = config.AppEnvironment.from_env()
+    assert env_true.llm_debug_enabled is True
+
+    monkeypatch.setenv("LLM_DEBUG", "off")
+    env_false = config.AppEnvironment.from_env()
+    assert env_false.llm_debug_enabled is False
+
+
 def test_describe_runtime_environment_redacts_keys(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("LLM_DEBUG", "0")
     monkeypatch.setenv("LLM_DEBUG_DIR", str(tmp_path / "custom_debug"))
