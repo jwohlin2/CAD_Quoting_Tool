@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json, math, os, time
+import typing
 from collections import Counter
 from collections.abc import Mapping as _MappingABC
 from fractions import Fraction
@@ -5585,6 +5586,8 @@ def render_quote(
     )
 
     use_planner_bucket_display = bool(planner_bucket_from_plan) and pricing_source_lower == "planner"
+    if use_planner_bucket_display and set(planner_bucket_from_plan.keys()) == {"misc"}:
+        use_planner_bucket_display = False
     planner_bucket_display_map: dict[str, dict[str, Any]] = (
         dict(planner_bucket_from_plan) if use_planner_bucket_display else {}
     )
@@ -5593,7 +5596,10 @@ def render_quote(
         existing_canon_keys = {_canonical_bucket_key(key) for key in list(process_costs.keys())}
         bucket_canon_keys = set(planner_bucket_from_plan.keys())
         has_only_machine_labor = existing_canon_keys and existing_canon_keys <= {"machine", "labor"}
-        if has_only_machine_labor or not bucket_canon_keys.issubset(existing_canon_keys):
+        replace_machine_labor = has_only_machine_labor or not bucket_canon_keys.issubset(existing_canon_keys)
+        if has_only_machine_labor and bucket_canon_keys == {"misc"}:
+            replace_machine_labor = False
+        if replace_machine_labor:
             for key in list(process_costs.keys()):
                 if _canonical_bucket_key(key) in {"machine", "labor"}:
                     process_costs.pop(key, None)
@@ -7845,6 +7851,24 @@ def validate_drilling_reasonableness(hole_count: int, drill_hr_after_overrides: 
     return ok, msg
 
 
+def validate_process_floor_hours(
+    label: str,
+    process_hr_after_overrides: float,
+    floor_hr: float,
+    context: str = "",
+) -> tuple[bool, str]:
+    floor_val = max(0.0, float(floor_hr or 0.0))
+    if floor_val <= 0.0:
+        return True, ""
+    hr_val = max(0.0, float(process_hr_after_overrides or 0.0))
+    ok = hr_val + 1e-6 >= floor_val
+    friendly = label.replace("_", " ").strip().title()
+    message = f"{friendly} hours ({hr_val:.2f} h) below floor ({floor_val:.2f} h)"
+    if context:
+        message = f"{message} {context}"
+    return ok, message
+
+
 def _estimate_programming_hours_auto(
     geo: Mapping[str, Any] | None,
     process_meta: Mapping[str, Mapping[str, Any] | Any] | None,
@@ -9310,6 +9334,9 @@ def compute_quote_from_df(df: pd.DataFrame,
     csk_minutes_hint_val = _coerce_float_or_none(geo_context.get("csk_minutes_hint"))
     if csk_minutes_hint_val and csk_minutes_hint_val > 0:
         csk_hr = max(csk_hr, float(csk_minutes_hint_val) / 60.0)
+    tapping_hr_floor = float(tapping_hr)
+    cbore_hr_floor = float(cbore_hr)
+    csk_hr_floor = float(csk_hr)
     tapping_hr_rounded = round(tapping_hr, 3)
     cbore_hr_rounded = round(cbore_hr, 3)
     csk_hr_rounded = round(csk_hr, 3)
@@ -9329,11 +9356,13 @@ def compute_quote_from_df(df: pd.DataFrame,
     deburr_holes_hr_raw = (float(hole_count_total) * sec_per_hole) / 3600.0 if hole_count_total else 0.0
     deburr_auto_hr_raw = deburr_edge_hr_raw + deburr_holes_hr_raw
     deburr_manual_hr_float = float(deburr_manual_hr or 0.0)
-    deburr_total_hr = round(deburr_manual_hr_float + deburr_auto_hr_raw, 3)
+    deburr_total_hr_raw = deburr_manual_hr_float + deburr_auto_hr_raw
+    deburr_total_hr = round(deburr_total_hr_raw, 3)
     deburr_auto_hr = round(deburr_auto_hr_raw, 3)
     deburr_edge_hr = round(deburr_edge_hr_raw, 3)
     deburr_holes_hr = round(deburr_holes_hr_raw, 3)
     deburr_manual_hr_rounded = round(deburr_manual_hr_float, 3)
+    deburr_total_hr_floor = max(0.0, float(deburr_total_hr_raw))
 
     # ---- roll-ups ------------------------------------------------------------
     inspection_hr_total = inproc_hr + final_hr + cmm_prog_hr + cmm_run_hr + fair_hr + srcinsp_hr
@@ -9395,6 +9424,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         "packaging":        {"hr": packaging_hr,    "rate": rates.get("PackagingRate", rates.get("AssemblyRate", 0.0))},
         "ehs_compliance":   {"hr": ehs_hr,          "rate": rates.get("InspectionRate", 0.0)},
     }
+    legacy_per_process_keys: set[str] = set(process_meta.keys())
     legacy_process_meta = {
         "drilling": {"hr": baseline_drill_hr, "rate": drill_rate},
         "tapping": {"hr": tapping_hr_rounded, "rate": drill_rate},
@@ -9415,6 +9445,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         key: dict(value) for key, value in process_meta.items() if isinstance(value, Mapping)
     }
 
+    planner_meta_keys: set[str] = set()
     if not used_planner:
         for key, value in legacy_process_costs.items():
             process_costs[key] = float(value)
@@ -9451,6 +9482,10 @@ def compute_quote_from_df(df: pd.DataFrame,
         for key in allowed_process_hour_keys
     }
     process_costs_baseline = {k: float(v) for k, v in process_costs.items()}
+    legacy_baseline_had_values = any(
+        abs(float(val)) > 1e-6 for val in process_costs_baseline.values()
+    )
+    legacy_baseline_ignored = False
 
     def _default_pass_meta(shipping_basis_desc: str) -> dict[str, dict[str, str]]:
         return {
@@ -11702,36 +11737,119 @@ def compute_quote_from_df(df: pd.DataFrame,
         if hole_count_for_guard <= 0:
             hole_count_for_guard = len(geo_context.get("hole_diams_mm", []) or [])
 
-        if hole_count_for_guard > 0:
-            drill_meta_snapshot = process_meta.get("drilling") or {}
+        def _hours_for_guard(key: str) -> float:
+            if key in process_hours_final:
+                return float(process_hours_final.get(key, 0.0) or 0.0)
             try:
-                drill_hr_after_overrides = float(drill_meta_snapshot.get("hr", 0.0) or 0.0)
+                return float(process_meta.get(key, {}).get("hr", 0.0) or 0.0)
             except Exception:
-                drill_hr_after_overrides = 0.0
-            ok, why = validate_drilling_reasonableness(
-                hole_count_for_guard, drill_hr_after_overrides
+                return 0.0
+
+        def _apply_floor_guard(
+            proc_key: str,
+            *,
+            floor_hr: float,
+            validator: typing.Callable[[float], tuple[bool, str]],
+        ) -> None:
+            floor_val = max(0.0, float(floor_hr or 0.0))
+            if floor_val <= 0.0:
+                return
+            current_hr = _hours_for_guard(proc_key)
+            ok, reason = validator(current_hr)
+            if ok:
+                return
+            meta = process_meta.setdefault(proc_key, {})
+            try:
+                rate = float(meta.get("rate", 0.0) or 0.0)
+            except Exception:
+                rate = 0.0
+            try:
+                base_extra = float(meta.get("base_extra", 0.0) or 0.0)
+            except Exception:
+                base_extra = 0.0
+            try:
+                old_hr = float(meta.get("hr", 0.0) or 0.0)
+            except Exception:
+                old_hr = current_hr
+            old_cost = float(process_costs.get(proc_key, 0.0) or 0.0)
+            entry = applied_process.setdefault(
+                proc_key,
+                {
+                    "old_hr": old_hr,
+                    "old_cost": old_cost,
+                    "notes": [],
+                },
             )
-            if not ok:
-                floor_hr = _drilling_floor_hours(hole_count_for_guard)
-                new_hr = max(drill_hr_after_overrides, floor_hr)
-                drill_meta = process_meta.setdefault("drilling", {})
-                rate = float(drill_meta.get("rate", 0.0) or 0.0)
-                base_extra = float(drill_meta.get("base_extra", 0.0) or 0.0)
-                old_hr = float(drill_meta.get("hr", 0.0) or 0.0)
-                old_cost = float(process_costs.get("drilling", 0.0) or 0.0)
-                entry = applied_process.setdefault(
-                    "drilling",
-                    {
-                        "old_hr": old_hr,
-                        "old_cost": old_cost,
-                        "notes": [],
-                    },
-                )
-                entry.setdefault("notes", []).append(f"Raised to floor {floor_hr:.2f} h")
-                drill_meta["hr"] = new_hr
-                process_costs["drilling"] = round(new_hr * rate + base_extra, 2)
-                process_hours_final["drilling"] = new_hr
-                llm_notes.append(f"Raised drilling to floor: {why}")
+            entry.setdefault("notes", []).append(f"Raised to floor {floor_val:.2f} h")
+            meta["hr"] = floor_val
+            process_costs[proc_key] = round(floor_val * rate + base_extra, 2)
+            process_hours_final[proc_key] = floor_val
+            llm_notes.append(
+                f"Raised {_friendly_process(proc_key)} to floor: {reason}"
+            )
+
+        if hole_count_for_guard > 0:
+            floor_hr = _drilling_floor_hours(hole_count_for_guard)
+            _apply_floor_guard(
+                "drilling",
+                floor_hr=floor_hr,
+                validator=lambda hr, count=hole_count_for_guard: validate_drilling_reasonableness(
+                    count, hr
+                ),
+            )
+
+        tap_context = ""
+        if tap_qty_geo:
+            tap_context = f"for {int(tap_qty_geo)} taps"
+        elif tap_minutes_hint_val and tap_minutes_hint_val > 0:
+            tap_context = "(tap minutes hint)"
+        elif tapping_minutes_total > 0:
+            tap_context = "(tap class estimate)"
+        if tapping_hr_floor > 0:
+            _apply_floor_guard(
+                "tapping",
+                floor_hr=tapping_hr_floor,
+                validator=lambda hr, floor=tapping_hr_floor, ctx=tap_context: validate_process_floor_hours(
+                    "tapping", hr, floor, ctx
+                ),
+            )
+
+        cbore_context = ""
+        if cbore_qty_geo:
+            cbore_context = f"for {int(cbore_qty_geo)} counterbores"
+        elif cbore_minutes_hint_val and cbore_minutes_hint_val > 0:
+            cbore_context = "(counterbore minutes hint)"
+        if cbore_hr_floor > 0:
+            _apply_floor_guard(
+                "counterbore",
+                floor_hr=cbore_hr_floor,
+                validator=lambda hr, floor=cbore_hr_floor, ctx=cbore_context: validate_process_floor_hours(
+                    "counterbore", hr, floor, ctx
+                ),
+            )
+
+        csk_context = ""
+        if csk_qty_geo:
+            csk_context = f"for {int(csk_qty_geo)} countersinks"
+        elif csk_minutes_hint_val and csk_minutes_hint_val > 0:
+            csk_context = "(countersink minutes hint)"
+        if csk_hr_floor > 0:
+            _apply_floor_guard(
+                "countersink",
+                floor_hr=csk_hr_floor,
+                validator=lambda hr, floor=csk_hr_floor, ctx=csk_context: validate_process_floor_hours(
+                    "countersink", hr, floor, ctx
+                ),
+            )
+
+        if deburr_total_hr_floor > 0:
+            _apply_floor_guard(
+                "deburr",
+                floor_hr=deburr_total_hr_floor,
+                validator=lambda hr, floor=deburr_total_hr_floor: validate_process_floor_hours(
+                    "deburr", hr, floor, "(auto/manual estimate)"
+                ),
+            )
         process_hours_final = _collect_process_hours()
         baseline_total_hours = sum(
             float(process_hours_baseline.get(k, 0.0)) for k in process_hours_baseline
@@ -11770,6 +11888,8 @@ def compute_quote_from_df(df: pd.DataFrame,
         process_hours_final = _collect_process_hours()
 
     for proc_key, final_hr in process_hours_final.items():
+        if pricing_source == "planner" and proc_key not in process_costs:
+            continue
         meta = meta_lookup.get(proc_key) or {}
         try:
             rate = float(meta.get("rate", 0.0) or 0.0)
@@ -12139,6 +12259,12 @@ def compute_quote_from_df(df: pd.DataFrame,
         llm_cost_log["effective_sources"] = quote_state.effective_sources
     if isinstance(quote_state.user_overrides, dict) and quote_state.user_overrides:
         llm_cost_log["user_overrides"] = quote_state.user_overrides
+
+    if pricing_source == "planner":
+        process_costs = {
+            "Machine": round(planner_machine_cost_total, 2),
+            "Labor": round(planner_labor_cost_total, 2),
+        }
 
     breakdown = {
         "qty": Qty,
