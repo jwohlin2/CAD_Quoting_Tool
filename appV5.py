@@ -6233,6 +6233,13 @@ def render_quote(
     def _normalize_bucket_key(name: str) -> str:
         return re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_")
 
+    def _fold_buckets(process_costs: dict[str, float]) -> dict[str, float]:
+        folded: dict[str, float] = {}
+        for k, v in (process_costs or {}).items():
+            canon = _canonical_bucket_key(k)  # e.g., deburr -> finishing_deburr
+            folded[canon] = folded.get(canon, 0.0) + float(v or 0.0)
+        return folded
+
     preferred_bucket_order = [
         "milling",
         "drilling",
@@ -6247,6 +6254,8 @@ def render_quote(
 
     ordered_process_items: list[tuple[str, float]] = []
     seen_keys: set[str] = set()
+
+    process_costs = _fold_buckets(process_costs)
 
     for bucket in preferred_bucket_order:
         for key, value in (process_costs or {}).items():
