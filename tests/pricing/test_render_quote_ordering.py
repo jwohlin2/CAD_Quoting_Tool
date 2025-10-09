@@ -222,3 +222,63 @@ def test_render_quote_dedupes_planner_rollup_cost_rows() -> None:
     next_blank = next(i for i in range(labor_idx + 1, len(lines)) if lines[i] == "")
     labor_section = lines[labor_idx:next_blank]
     assert not any("Planner" in line for line in labor_section)
+
+
+def test_total_labor_cost_matches_displayed_rows_and_pass_through_labor() -> None:
+    result = {
+        "price": 110.0,
+        "breakdown": {
+            "qty": 4,
+            "totals": {
+                "labor_cost": 5.0,
+                "direct_costs": 22.0,
+                "subtotal": 72.0,
+                "with_overhead": 79.2,
+                "with_ga": 83.16,
+                "with_contingency": 84.8232,
+                "with_expedite": 84.8232,
+            },
+            "process_costs": {"milling": 40.0, "deburr": 10.0},
+            "process_meta": {},
+            "pass_through": {
+                "Material": 12.0,
+                "outside labor": 15.0,
+                "Shipping": 7.0,
+            },
+            "applied_pcts": {
+                "OverheadPct": 0.10,
+                "GA_Pct": 0.05,
+                "ContingencyPct": 0.02,
+                "MarginPct": 0.15,
+            },
+            "rates": {},
+            "params": {},
+            "labor_cost_details": {},
+            "direct_cost_details": {},
+        },
+    }
+
+    rendered = appV5.render_quote(result, currency="$")
+    lines = rendered.splitlines()
+
+    total_labor_line = next(line for line in lines if line.startswith("Total Labor Cost:"))
+    total_labor_amount = float(total_labor_line.split("$")[-1].replace(",", ""))
+
+    process_start = lines.index("Process & Labor Costs")
+    process_end = next(i for i in range(process_start, len(lines)) if lines[i] == "")
+    process_lines = lines[process_start + 2:process_end]
+
+    process_amounts: list[float] = []
+    table_total_amount = 0.0
+    for line in process_lines:
+        if "$" not in line:
+            continue
+        amount = float(line.split("$")[-1].replace(",", ""))
+        label_text = line.split("$")[0].strip()
+        if label_text.lower().startswith("total"):
+            table_total_amount = amount
+        else:
+            process_amounts.append(amount)
+
+    assert sum(process_amounts) == table_total_amount
+    assert total_labor_amount == table_total_amount + 15.0
