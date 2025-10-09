@@ -5368,8 +5368,22 @@ def canonicalize_costs(process_costs: Mapping[str, Any] | None) -> dict[str, flo
 
 
 def _process_label(key: str | None) -> str:
-    text = str(key or "").replace("_", " ").strip()
-    return text.title() if text else ""
+    raw = str(key or "").strip().lower().replace(" ", "_")
+    canon = re.sub(r"[^a-z0-9]+", "_", raw).strip("_")
+    alias = {
+        "finishing_deburr": "deburr",
+        "deburring": "deburr",
+        "finish_deburr": "deburr",
+        "saw_waterjet": "saw / waterjet",
+        "counter_bore": "counterbore",
+        "counter_sink": "countersink",
+        "prog_amortized": "programming (amortized)",
+        "programming_amortized": "programming (amortized)",
+        "fixture_build_amortized": "fixture build (amortized)",
+    }.get(canon, canon)
+    if alias == "saw / waterjet":
+        return "Saw / Waterjet"
+    return alias.replace("_", " ").title()
 
 
 def _display_bucket_label(
