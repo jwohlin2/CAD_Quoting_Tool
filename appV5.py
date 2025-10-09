@@ -5297,12 +5297,66 @@ PREFERRED_PROCESS_BUCKET_ORDER: tuple[str, ...] = (
 )
 
 
+CANON_MAP: dict[str, str] = {
+    "deburr": "finishing_deburr",
+    "finishing": "finishing_deburr",
+    "finishing/deburr": "finishing_deburr",
+    "inspection": "inspection",
+    "milling": "milling",
+    "drilling": "drilling",
+    "counterbore": "counterbore",
+    "tapping": "tapping",
+    "grinding": "grinding",
+    "saw_waterjet": "saw_waterjet",
+    "fixture_build_amortized": "fixture_build_amortized",
+    "programming_amortized": "programming_amortized",
+    "misc": "misc",
+}
+
+PLANNER_META: frozenset[str] = frozenset({"planner_labor", "planner_machine", "planner_total"})
+
+
 def _normalize_bucket_key(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_")
 
 
 def _canonical_bucket_key(name: str) -> str:
-    return _normalize_bucket_key(name)
+    normalized = _normalize_bucket_key(name)
+    if not normalized:
+        return ""
+    return CANON_MAP.get(normalized, normalized)
+
+
+def canonicalize_costs(process_costs: Mapping[str, Any] | None) -> dict[str, float]:
+    items: Iterable[tuple[Any, Any]]
+    if isinstance(process_costs, Mapping):
+        items = process_costs.items()
+    else:
+        try:
+            items = dict(process_costs or {}).items()  # type: ignore[arg-type]
+        except Exception:
+            items = []
+
+    out: dict[str, float] = {}
+    for raw_key, raw_value in items:
+        key = str(raw_key).strip().lower()
+        if not key:
+            continue
+        key = key.replace(" ", "_").replace("-", "_").replace("/", "_")
+        if not key:
+            continue
+        if key.startswith("planner_") or key in PLANNER_META:
+            continue
+        canon_key = CANON_MAP.get(key, key)
+        try:
+            amount = float(raw_value or 0.0)
+        except Exception:
+            amount = 0.0
+        out[canon_key] = out.get(canon_key, 0.0) + amount
+
+    if out.get("misc", 0.0) <= 1.0:
+        out.pop("misc", None)
+    return out
 
 
 def _process_label(key: str | None) -> str:
@@ -5439,6 +5493,7 @@ def _extract_bucket_map(source: Mapping[str, Any] | None) -> dict[str, dict[str,
 @dataclass(frozen=True)
 class ProcessDisplayEntry:
     process_key: str
+    canonical_key: str
     label: str
     amount: float
     detail_bits: tuple[str, ...]
@@ -5490,16 +5545,32 @@ def _iter_ordered_process_entries(
 
     meta_lookup: dict[str, Mapping[str, Any]] = {}
     if isinstance(process_meta, Mapping):
-        meta_lookup = {str(k).lower(): v if isinstance(v, Mapping) else {} for k, v in process_meta.items()}
+        for raw_key, raw_meta in process_meta.items():
+            if not isinstance(raw_meta, Mapping):
+                continue
+            key_lower = str(raw_key).lower()
+            meta_lookup[key_lower] = raw_meta
+            canon = _canonical_bucket_key(raw_key)
+            if canon and canon not in meta_lookup:
+                meta_lookup[canon] = raw_meta
 
     applied_lookup: dict[str, Mapping[str, Any]] = {}
     if isinstance(applied_process, Mapping):
-        applied_lookup = {str(k).lower(): v if isinstance(v, Mapping) else {} for k, v in applied_process.items()}
+        for raw_key, raw_meta in applied_process.items():
+            if not isinstance(raw_meta, Mapping):
+                continue
+            key_lower = str(raw_key).lower()
+            applied_lookup[key_lower] = raw_meta
+            canon = _canonical_bucket_key(raw_key)
+            if canon and canon not in applied_lookup:
+                applied_lookup[canon] = raw_meta
 
     for key, raw_value in ordered_items:
         canon_key = _canonical_bucket_key(key)
         meta_key = str(key).lower()
         meta = meta_lookup.get(meta_key, {})
+        if not meta:
+            meta = meta_lookup.get(canon_key, {})
 
         try:
             value_float = float(raw_value or 0.0)
@@ -5547,6 +5618,8 @@ def _iter_ordered_process_entries(
                 detail_bits.append(f"{extra_hours:.2f} hr @ {currency_formatter(rate_for_extra)}/hr")
 
         notes_entry = applied_lookup.get(meta_key, {})
+        if not notes_entry:
+            notes_entry = applied_lookup.get(canon_key, {})
         proc_notes = notes_entry.get("notes") if isinstance(notes_entry, Mapping) else None
         if proc_notes:
             detail_bits.append("LLM: " + ", ".join(proc_notes))
@@ -5555,6 +5628,7 @@ def _iter_ordered_process_entries(
 
         yield ProcessDisplayEntry(
             process_key=str(key),
+            canonical_key=canon_key,
             label=label,
             amount=amount_to_use,
             detail_bits=tuple(detail_bits),
@@ -6200,38 +6274,12 @@ def render_quote(
         for ops in bucket_ops_map.values():
             ops.sort(key=lambda item: (-item.get("minutes", 0.0), item.get("op", "")))
 
-    canonical_process_buckets: dict[str, dict[str, Any]] = {}
-    for raw_key, raw_value in (process_costs or {}).items():
-        canon_key = _canonical_bucket_key(raw_key)
-        if not canon_key:
-            continue
-        try:
-            amount_val = float(raw_value or 0.0)
-        except Exception:
-            amount_val = 0.0
-        bucket_entry = canonical_process_buckets.setdefault(
-            canon_key,
-            {"total": 0.0, "sources": []},
-        )
-        bucket_entry["total"] += amount_val
-        bucket_entry.setdefault("sources", []).append(
-            {"key": str(raw_key), "amount": amount_val}
-        )
-
-    process_costs_canon: dict[str, float] = {}
-    for canon, info in canonical_process_buckets.items():
-        try:
-            total_amount = float(info.get("total", 0.0) or 0.0)
-        except Exception:
-            total_amount = 0.0
-        process_costs_canon[canon] = total_amount
+    process_costs_canon = canonicalize_costs(process_costs)
 
     label_overrides = {
         "finishing_deburr": "Finishing/Deburr",
         "saw_waterjet": "Saw/Waterjet",
     }
-
-    label_overrides_proc = dict(label_overrides)
 
     def _lookup_process_meta(key: str | None) -> Mapping[str, Any] | None:
         if not isinstance(process_meta, dict):
@@ -6919,6 +6967,7 @@ def render_quote(
             detail_bits=list(entry.detail_bits),
             display_override=entry.display_override,
         )
+
 
     show_amortized_single_qty = _lookup_config_flag(
         "show_amortized_nre_single_qty",
@@ -13537,7 +13586,7 @@ def compute_quote_from_df(df: pd.DataFrame,
             labor_cost_details[canonical_label] = "; ".join(merged_bits)
 
     for entry in _iter_ordered_process_entries(
-        process_costs,
+        canonical_process_costs,
         process_meta=process_meta,
         applied_process=applied_process,
         show_zeros=False,
