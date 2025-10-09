@@ -155,6 +155,13 @@ def _base_material_quote(material: dict) -> dict:
 
 
 def _amortized_breakdown(qty: int, *, config_flags: dict | None = None) -> dict:
+    labor_costs: dict[str, float] = {}
+    if qty > 1:
+        labor_costs = {
+            "Programming (amortized)": 150.0,
+            "Fixture Build (amortized)": 30.0,
+        }
+
     breakdown = {
         "qty": qty,
         "totals": _base_totals(),
@@ -189,10 +196,7 @@ def _amortized_breakdown(qty: int, *, config_flags: dict | None = None) -> dict:
         "rates": {},
         "params": {},
         "direct_cost_details": {},
-        "labor_costs": {
-            "Programming (amortized)": 150.0,
-            "Fixture Build (amortized)": 30.0,
-        },
+        "labor_costs": labor_costs,
         "nre": {
             "programming_per_part": 150.0,
             "fixture_per_part": 30.0,
@@ -262,6 +266,8 @@ def test_render_quote_hides_amortized_nre_for_single_qty() -> None:
         "breakdown": _amortized_breakdown(1),
     }
 
+    assert result["breakdown"]["labor_costs"] == {}
+
     rendered = appV5.render_quote(result, currency="$", show_zeros=False)
 
     assert "Programming (amortized)" not in rendered
@@ -270,7 +276,7 @@ def test_render_quote_hides_amortized_nre_for_single_qty() -> None:
     assert "Fixturing:" in rendered
 
 
-def test_render_quote_can_force_amortized_nre_for_single_qty() -> None:
+def test_render_quote_ignores_force_amortized_flag_for_single_qty() -> None:
     result = {
         "price": 10.0,
         "breakdown": _amortized_breakdown(
@@ -278,10 +284,12 @@ def test_render_quote_can_force_amortized_nre_for_single_qty() -> None:
         ),
     }
 
+    assert result["breakdown"]["labor_costs"] == {}
+
     rendered = appV5.render_quote(result, currency="$", show_zeros=False)
 
-    assert "Programming (amortized)" in rendered
-    assert "Fixture Build (amortized)" in rendered
+    assert "Programming (amortized)" not in rendered
+    assert "Fixture Build (amortized)" not in rendered
     assert "Amortized across" not in rendered
 
 
