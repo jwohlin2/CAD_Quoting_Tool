@@ -7478,7 +7478,7 @@ def _select_speeds_feeds_row(
             None,
         )
         if mat_col:
-            mat_target = str(material_key).strip().lower()
+            mat_target = _normalize(material_key)
             exact = [row for row in matches if _normalize(row.get(mat_col)) == mat_target]
             if exact:
                 matches = exact
