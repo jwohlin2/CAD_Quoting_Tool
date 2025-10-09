@@ -5300,6 +5300,14 @@ def _display_bucket_label(
     return _process_label(canon_key)
 
 
+def _fold_buckets(source: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Fallback bucket folding that preserves mappings when helpers are absent."""
+
+    if isinstance(source, Mapping):
+        return dict(source)
+    return {}
+
+
 def _format_planner_bucket_line(
     canon_key: str,
     amount: float,
@@ -5590,6 +5598,9 @@ def render_quote(
 
     # Optional: LLM decision bullets can be placed either on result or breakdown
     llm_notes = (result.get("llm_notes") or breakdown.get("llm_notes") or [])[:8]
+    notes_order = [
+        str(note).strip() for note in llm_notes if str(note).strip()
+    ]
 
     # ---- helpers -------------------------------------------------------------
     divider = "-" * int(page_width)
@@ -6946,16 +6957,37 @@ def render_quote(
 
     row("Total", proc_total, indent="  ")
 
-    hour_summary_entries: list[tuple[str, float]] = []
+    hour_summary_entries: list[tuple[str, float, bool]] = []
+    hour_entry_lookup: dict[str, int] = {}
     total_hours = 0.0
+    total_hours_dirty = False
+
+    def _canonical_hour_label(label: str) -> str:
+        text = str(label or "").strip()
+        normalized = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+        if normalized in {"deburr", "finishing deburr"}:
+            return "Finishing/Deburr"
+        return text
 
     def _record_hour_entry(label: str, value: float, *, include_in_total: bool = True) -> None:
-        nonlocal total_hours
+        nonlocal total_hours_dirty
         if not ((value > 0) or show_zeros):
             return
-        hour_summary_entries.append((label, value))
-        if include_in_total and value:
-            total_hours += value
+
+        canonical_label = _canonical_hour_label(label)
+        if canonical_label in hour_entry_lookup:
+            idx = hour_entry_lookup[canonical_label]
+            existing_label, existing_value, existing_include = hour_summary_entries[idx]
+            hour_summary_entries[idx] = (
+                existing_label,
+                existing_value + value,
+                existing_include or include_in_total,
+            )
+        else:
+            hour_entry_lookup[canonical_label] = len(hour_summary_entries)
+            hour_summary_entries.append((canonical_label, value, include_in_total))
+
+        total_hours_dirty = True
 
     programming_meta = (nre_detail or {}).get("programming") or {}
     try:
@@ -7091,6 +7123,12 @@ def render_quote(
                 include_in_total=False,
             )
 
+    if total_hours_dirty:
+        total_hours = sum(
+            value for _, value, include in hour_summary_entries if include
+        )
+        total_hours_dirty = False
+
     if hour_summary_entries:
         lines.append("")
         lines.append("Labor Hour Summary")
@@ -7098,8 +7136,10 @@ def render_quote(
         if str(pricing_source_value).lower() == "planner":
             entries_iter = hour_summary_entries
         else:
-            entries_iter = sorted(hour_summary_entries, key=lambda kv: kv[1], reverse=True)
-        for label, hr_val in entries_iter:
+            entries_iter = sorted(
+                hour_summary_entries, key=lambda kv: kv[1], reverse=True
+            )
+        for label, hr_val, _ in entries_iter:
             hours_row(label, hr_val, indent="  ")
         hours_row("Total Hours", total_hours, indent="  ")
     lines.append("")
