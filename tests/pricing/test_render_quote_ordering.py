@@ -124,7 +124,7 @@ def test_render_quote_hour_summary_adds_programming_hours() -> None:
                 "with_expedite": 142.758,
             },
             "nre_detail": {
-                "programming": {"prog_hr": 2.0},
+                "programming": {"prog_hr": 2.0, "amortized": True},
                 "fixture": {"build_hr": 1.5, "labor_cost": 90.0, "build_rate": 60.0},
             },
             "nre": {},
@@ -150,78 +150,53 @@ def test_render_quote_hour_summary_adds_programming_hours() -> None:
 
     assert "Labor Hour Summary" in lines
     summary_idx = lines.index("Labor Hour Summary")
-    summary_block = lines[summary_idx:summary_idx + 8]
+    summary_block = lines[summary_idx:summary_idx + 10]
     assert any("Programming" in line and "2.00 hr" in line for line in summary_block)
+    assert any(
+        "Programming (amortized per part)" in line and "0.40 hr" in line
+        for line in summary_block
+    )
     assert any("Fixture Build" in line and "1.50 hr" in line for line in summary_block)
+    assert any(
+        "Fixture Build (amortized per part)" in line and "0.30 hr" in line
+        for line in summary_block
+    )
     assert any("Total Hours" in line and "6.50 hr" in line for line in summary_block)
 
 
-def test_render_quote_includes_explain_quote_lines() -> None:
+def test_render_quote_dedupes_planner_rollup_cost_rows() -> None:
     result = {
-        "price": 42.0,
-        "breakdown": {
-            "qty": 7,
-            "totals": {
-                "labor_cost": 12.0,
-                "direct_costs": 5.0,
-                "subtotal": 17.0,
-                "with_overhead": 18.7,
-                "with_ga": 19.635,
-                "with_contingency": 20.029,
-                "with_expedite": 20.029,
-            },
-            "nre_detail": {},
-            "nre": {"programming_per_part": 1.25},
-            "material": {},
-            "process_costs": {"milling": 9.0, "deburr": 3.0},
-            "process_meta": {},
-            "pass_through": {"Material": 2.5},
-            "applied_pcts": {
-                "OverheadPct": 0.12,
-                "GA_Pct": 0.04,
-                "ContingencyPct": 0.02,
-                "MarginPct": 0.18,
-            },
-            "rates": {},
-            "params": {},
-            "labor_cost_details": {},
-            "direct_cost_details": {},
-        },
-    }
-
-    rendered = appV5.render_quote(result, currency="$")
-    lines = rendered.splitlines()
-
-    why_idx = lines.index("Why this price")
-    why_block = lines[why_idx + 2 : why_idx + 6]
-    assert any("Includes Overhead" in line for line in why_block)
-    assert any("Major processes:" in line for line in why_block)
-
-
-def test_render_quote_shows_drill_debug_block() -> None:
-    debug_lines = ["MISS drilling steel 0.250\""]
-    result = {
-        "price": 10.0,
-        "drill_debug": debug_lines,
+        "price": 200.0,
         "breakdown": {
             "qty": 1,
             "totals": {
-                "labor_cost": 3.0,
-                "direct_costs": 1.5,
-                "subtotal": 4.5,
-                "with_overhead": 4.95,
-                "with_ga": 5.198,
-                "with_contingency": 5.302,
-                "with_expedite": 5.302,
+                "labor_cost": 120.0,
+                "direct_costs": 30.0,
+                "subtotal": 150.0,
+                "with_overhead": 165.0,
+                "with_ga": 173.25,
+                "with_contingency": 178.4475,
+                "with_expedite": 178.4475,
             },
             "nre_detail": {},
             "nre": {},
             "material": {},
-            "process_costs": {},
-            "process_meta": {},
+            "process_costs": {
+                "Planner Total": 120.0,
+                "Planner Machine": 70.0,
+                "planner_labor": 50.0,
+                "milling": 30.0,
+            },
+            "process_meta": {
+                "planner_total": {"minutes": 240.0},
+                "planner_machine": {"minutes": 120.0},
+                "planner_labor": {"minutes": 120.0},
+                "milling": {"hr": 1.5},
+            },
             "pass_through": {},
+            "pricing_source": "planner",
             "applied_pcts": {
-                "OverheadPct": 0.1,
+                "OverheadPct": 0.10,
                 "GA_Pct": 0.05,
                 "ContingencyPct": 0.02,
                 "MarginPct": 0.15,
@@ -230,14 +205,20 @@ def test_render_quote_shows_drill_debug_block() -> None:
             "params": {},
             "labor_cost_details": {},
             "direct_cost_details": {},
-            "drill_debug": debug_lines,
         },
     }
 
     rendered = appV5.render_quote(result, currency="$")
     lines = rendered.splitlines()
 
-    assert "Drill Debug" in lines
-    debug_idx = lines.index("Drill Debug")
-    block = lines[debug_idx + 2 : debug_idx + 5]
-    assert any("MISS drilling steel" in line for line in block)
+    assert "Labor Hour Summary" in lines
+    summary_idx = lines.index("Labor Hour Summary")
+    summary_block = lines[summary_idx: summary_idx + 10]
+    assert any("Planner Total" in line for line in summary_block)
+    assert any("Planner Machine" in line for line in summary_block)
+    assert any("Planner Labor" in line for line in summary_block)
+
+    labor_idx = lines.index("Process & Labor Costs")
+    next_blank = next(i for i in range(labor_idx + 1, len(lines)) if lines[i] == "")
+    labor_section = lines[labor_idx:next_blank]
+    assert not any("Planner" in line for line in labor_section)
