@@ -5240,6 +5240,7 @@ def render_quote(
             labor_cost_totals[str(key)] = float(value)
         except Exception:
             continue
+    labor_costs_display: dict[str, float] = {}
     prog_hr: float = 0.0
     direct_cost_details = breakdown.get("direct_cost_details", {}) or {}
     qty          = int(breakdown.get("qty", 1) or 1)
@@ -6282,7 +6283,9 @@ def render_quote(
         amount_val = float(amount or 0.0)
         if not force and not ((amount_val > 0) or show_zeros):
             return
-        row(display_override or label, amount_val, indent="  ")
+        display_label = display_override or label
+        row(display_label, amount_val, indent="  ")
+        labor_costs_display[label] = amount_val
         existing_detail = labor_cost_details.get(label)
         merged_detail = _merge_detail(existing_detail, detail_bits or [])
         detail_to_write: str | None
