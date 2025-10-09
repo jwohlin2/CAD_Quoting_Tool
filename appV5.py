@@ -15,6 +15,7 @@ Single-file CAD Quoter (v8)
 from __future__ import annotations
 
 import argparse
+import logging
 import json, math, os, time
 from collections import Counter
 from collections.abc import Mapping as _MappingABC
@@ -9295,10 +9296,17 @@ def compute_quote_from_df(df: pd.DataFrame,
     machine_params_default = _machine_params_from_params(params)
     drill_overhead_default = _drill_overhead_from_params(params)
     speeds_feeds_warnings: list[str] = []
+    thickness_mm = float(thickness_for_drill or 0.0)
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "Estimating drilling hours with thickness %.3f mm (%.3f in)",
+            thickness_mm,
+            thickness_mm / 25.4 if thickness_mm else 0.0,
+        )
     drill_hr = estimate_drilling_hours(
-        hole_diams_list,
-        float(thickness_for_drill or 0.0),
-        drill_material_key or "",
+        hole_diams_mm=hole_diams_list,
+        thickness_mm=thickness_mm,
+        mat_key=drill_material_key or "",
         hole_groups=hole_groups_geo,
         speeds_feeds_table=speeds_feeds_table,
         machine_params=machine_params_default,
