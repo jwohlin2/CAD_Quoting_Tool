@@ -5855,10 +5855,27 @@ def render_quote(
         or breakdown.get("speeds_feeds_path")
     )
     path_text = str(speeds_feeds_display).strip() if speeds_feeds_display else ""
-    if path_text:
-        write_wrapped(f"Speeds/Feeds CSV: {path_text}")
+    speeds_feeds_loaded_display: bool | None = None
+    for source in (result, breakdown):
+        if not isinstance(source, Mapping):
+            continue
+        if "speeds_feeds_loaded" in source:
+            raw_flag = source.get("speeds_feeds_loaded")
+            speeds_feeds_loaded_display = None if raw_flag is None else bool(raw_flag)
+            break
+    if speeds_feeds_loaded_display is True:
+        status_suffix = " (loaded)"
+    elif speeds_feeds_loaded_display is False:
+        status_suffix = " (not loaded)"
     else:
-        write_line("Speeds/Feeds CSV: (not set)")
+        status_suffix = ""
+    if path_text:
+        write_wrapped(f"Speeds/Feeds CSV: {path_text}{status_suffix}")
+    else:
+        if status_suffix:
+            write_wrapped(f"Speeds/Feeds CSV: (not set){status_suffix}")
+        else:
+            write_line("Speeds/Feeds CSV: (not set)")
     lines.append("")
     if drill_debug_entries:
         lines.append("Drill Debug")
@@ -8302,17 +8319,31 @@ def _resolve_speeds_feeds_path(
     params: Mapping[str, Any] | None,
     ui_vars: Mapping[str, Any] | None = None,
 ) -> str | None:
-    candidates: list[str | None] = []
-    if ui_vars:
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def _push(value: Any) -> None:
+        if not value:
+            return
+        try:
+            text = str(value).strip()
+        except Exception:
+            return
+        if not text or text in seen:
+            return
+        seen.add(text)
+        candidates.append(text)
+
+    ui_mapping = ui_vars if isinstance(ui_vars, Mapping) else None
+    if ui_mapping:
         for key in (
             "SpeedsFeedsCSVPath",
             "Speeds Feeds CSV",
             "Speeds/Feeds CSV",
             "Speeds & Feeds CSV",
         ):
-            value = ui_vars.get(key) if isinstance(ui_vars, Mapping) else None
-            if value:
-                candidates.append(str(value))
+            _push(ui_mapping.get(key))
+
     if isinstance(params, Mapping):
         for key in (
             "SpeedsFeedsCSVPath",
@@ -8320,17 +8351,25 @@ def _resolve_speeds_feeds_path(
             "Speeds/Feeds CSV",
             "Speeds & Feeds CSV",
         ):
-            value = params.get(key)
-            if value:
-                candidates.append(str(value))
-    candidates.append(os.environ.get("CADQ_SF_CSV"))
-    candidates.append(os.environ.get("SPEEDS_FEEDS_CSV"))
+            _push(params.get(key))
+
+    for env_key in ("CADQ_SF_CSV", "SPEEDS_FEEDS_CSV", "CAD_QUOTER_SPEEDS_FEEDS"):
+        _push(os.environ.get(env_key))
+
+    script_dir = Path(__file__).resolve().parent
+    repo_root = script_dir.parent
+    fallback_paths: Sequence[Path | str] = (
+        script_dir / "speeds_feeds_merged.csv",
+        repo_root / "speeds_feeds_merged.csv",
+        repo_root / "cad_quoter" / "pricing" / "resources" / "speeds_feeds_merged.csv",
+        r"D:\\CAD_Quoting_Tool\\speeds_feeds_merged.csv",
+    )
+    for candidate in fallback_paths:
+        _push(candidate)
+
     for candidate in candidates:
-        if not candidate:
-            continue
-        text = str(candidate).strip()
-        if text:
-            return text
+        if candidate:
+            return candidate
     return None
 
 
@@ -10286,7 +10325,6 @@ def compute_quote_from_df(df: pd.DataFrame,
     drill_material_key = drill_material_lookup or (drill_material_source or "")
     speeds_feeds_raw = _resolve_speeds_feeds_path(params, ui_vars)
     speeds_feeds_path: str | None = None
-    speeds_feeds_resolved_path: str | None = None
     speeds_feeds_table: "pd.DataFrame" | None = None
     drill_material_group: str | None = None
     raw_path_text = str(speeds_feeds_raw).strip() if speeds_feeds_raw else ""
@@ -10331,6 +10369,8 @@ def compute_quote_from_df(df: pd.DataFrame,
             "Speeds/feeds CSV path not configured; using legacy drilling heuristics for this quote."
         )
         _record_red_flag("Speeds/feeds CSV not configured — using legacy drilling heuristics.")
+    speeds_feeds_loaded_flag = speeds_feeds_table is not None
+
     if (
         drill_material_group is None
         and speeds_feeds_table is not None
@@ -10472,9 +10512,8 @@ def compute_quote_from_df(df: pd.DataFrame,
         except Exception:
             guard_ctx = None
         if isinstance(guard_ctx, dict):
-            if speeds_feeds_path:
-                guard_ctx.setdefault("speeds_feeds_path", speeds_feeds_path)
-            guard_ctx["speeds_feeds_loaded"] = bool(speeds_feeds_table)
+            guard_ctx["speeds_feeds_path"] = speeds_feeds_path or raw_path_text or ""
+            guard_ctx["speeds_feeds_loaded"] = speeds_feeds_loaded_flag
             if drill_debug_line:
                 extras = guard_ctx.get("narrative_extra")
                 if isinstance(extras, list):
@@ -13626,12 +13665,15 @@ def compute_quote_from_df(df: pd.DataFrame,
         "process_plan": copy.deepcopy(quote_state.process_plan),
         "material_source": material_source_final,
         "speeds_feeds_path": speeds_feeds_path,
+        "speeds_feeds_loaded": speeds_feeds_loaded_flag,
         "drill_debug": list(drill_debug_entries),
         "red_flags": list(red_flag_messages),
     }
 
     breakdown["speeds_feeds_path"] = speeds_feeds_path
+    breakdown["speeds_feeds_loaded"] = speeds_feeds_loaded_flag
     result_payload["speeds_feeds_path"] = speeds_feeds_path
+    result_payload["speeds_feeds_loaded"] = speeds_feeds_loaded_flag
 
     return result_payload
 
