@@ -12292,29 +12292,6 @@ def trace_hours_from_df(df):
     grab(r"(Assembly|Precision\s*Fitting|Touch[- ]?up|Final\s*Fit)","Assembly")
     return out
 
-# ---------- Explanation ----------
-def explain_quote(breakdown: dict[str,Any], hour_trace=None) -> str:
-    tot=breakdown.get("totals",{}); pro=breakdown.get("process_costs",{}); nre=breakdown.get("nre",{}); pt=breakdown.get("pass_through",{}); ap=breakdown.get("applied_pcts",{})
-    pt_canon={_canonical_pass_label(k):v for k,v in (pt or {}).items()}
-    lines=[f"Includes Overhead {ap.get('OverheadPct',0):.0%}, Margin {ap.get('MarginPct',0):.0%}."]
-    if nre.get("programming_per_part",0)>0: lines.append(f"NRE spread across lot: ${nre['programming_per_part']:.2f}")
-    major={k:v for k,v in pro.items() if v and v>0}
-    if major:
-        top=sorted(major.items(), key=lambda kv: kv[1], reverse=True)[:4]
-        lines.append("Major processes: " + ", ".join(f"{k.replace('_',' ')} ${v:,.0f}" for k,v in top))
-    if pt_canon.get(HARDWARE_PASS_LABEL,0) or pt_canon.get("Outsourced Vendors",0):
-        lines.append(
-            f"Pass-throughs: hardware ${pt_canon.get(HARDWARE_PASS_LABEL,0):.0f}, "
-            f"vendors ${pt_canon.get('Outsourced Vendors',0):.0f}, ship ${pt_canon.get('Shipping',0):.0f}"
-        )
-    if hour_trace:
-        for bucket, rows in hour_trace.items():
-            total=sum(v for _,v in rows)
-            if total>0:
-                items="; ".join(f"{name}={val}" for name,val in rows[:3])
-                lines.append(f"{bucket} time from: {items} (total ~{total:g} hr)")
-    return "\n".join(lines)
-
 # ---------- Redaction ----------
 def redact_text(s: str) -> str:
     out=s
