@@ -2691,6 +2691,8 @@ def build_narrative(state: QuoteState) -> str:
         except Exception:
             continue
         diff = new_val - base_val
+        if not math.isfinite(diff) or abs(diff) > 100:
+            continue
         if abs(diff) >= 0.01:
             sign = "↑" if diff > 0 else "↓"
             deltas.append(f"{proc} {sign}{abs(diff):.2f} h")
@@ -9468,6 +9470,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     planner_machine_cost_total = 0.0
     planner_labor_cost_total = 0.0
     planner_total_minutes = 0.0
+    planner_bucket_view: dict[str, dict[str, float]] | None = None
 
     if planner_pricing_result is not None:
         totals = planner_pricing_result.get("totals", {}) if isinstance(planner_pricing_result, dict) else {}
@@ -9482,6 +9485,53 @@ def compute_quote_from_df(df: pd.DataFrame,
         planner_machine_cost_total = float(totals.get("machine_cost", 0.0) or 0.0)
         planner_labor_cost_total = float(totals.get("labor_cost", 0.0) or 0.0)
         planner_total_minutes = float(totals.get("minutes", 0.0) or 0.0)
+
+        def _to_bucket(name: str) -> str:
+            n = (name or "").lower()
+            if any(k in n for k in ("milling", "mill", "t-slot", "pocket", "profile")):
+                return "milling"
+            if any(k in n for k in ("drill", "ream", "tap", "c'bore", "counterbore", "csk", "countersink")):
+                return "drilling"
+            if any(k in n for k in ("grind", "od grind", "id grind", "surface grind", "jig grind")):
+                return "grinding"
+            if "wire" in n or "wedm" in n:
+                return "wire_edm"
+            if "edm" in n:
+                return "sinker_edm"
+            if any(k in n for k in ("saw", "waterjet")):
+                return "saw_waterjet"
+            if "deburr" in n or "finish" in n:
+                return "finishing_deburr"
+            if "inspect" in n or "cmm" in n or "fai" in n:
+                return "inspection"
+            if any(k in n for k in ("assembly", "fit", "bench")):
+                return "assembly"
+            return "misc"
+
+        bucket_view: dict[str, dict[str, float]] = {}
+        for e in planner_line_items:
+            b = _to_bucket(str(e.get("op", "")))
+            m = float(e.get("minutes") or 0.0)
+            mc = float(e.get("machine_cost") or 0.0)
+            lc = float(e.get("labor_cost") or 0.0)
+            d = bucket_view.setdefault(
+                b,
+                {
+                    "minutes": 0.0,
+                    "labor_cost": 0.0,
+                    "machine_cost": 0.0,
+                    "total_cost": 0.0,
+                },
+            )
+            d["minutes"] += m
+            d["labor_cost"] += lc
+            d["machine_cost"] += mc
+            d["total_cost"] += lc + mc
+
+        if bucket_view:
+            planner_bucket_view = copy.deepcopy(bucket_view)
+            process_plan_summary["bucket_view"] = copy.deepcopy(bucket_view)
+            quote_state.process_plan.setdefault("bucket_view", copy.deepcopy(bucket_view))
 
         machine_minutes = 0.0
         labor_minutes = 0.0
@@ -9512,10 +9562,15 @@ def compute_quote_from_df(df: pd.DataFrame,
 
         if used_planner:
             planner_process_minutes = planner_total_minutes
-            process_costs = {
-                "Machine": round(planner_machine_cost_total, 2),
-                "Labor": round(planner_labor_cost_total, 2),
-            }
+            if bucket_view:
+                process_costs = {
+                    b: round(info["total_cost"], 2) for b, info in bucket_view.items()
+                }
+            else:
+                process_costs = {
+                    "Machine": round(planner_machine_cost_total, 2),
+                    "Labor": round(planner_labor_cost_total, 2),
+                }
 
             existing_process_meta = {key: dict(value) for key, value in process_meta.items()}
             process_meta = existing_process_meta
@@ -9555,6 +9610,17 @@ def compute_quote_from_df(df: pd.DataFrame,
                         "cost": round(cost_val, 2),
                         "rate": round(rate_val, 2) if rate_val else 0.0,
                     }
+
+            for b, info in bucket_view.items():
+                hr = info["minutes"] / 60.0 if info["minutes"] else 0.0
+                cost = info["total_cost"]
+                rate = (cost / hr) if hr > 0 else 0.0
+                process_meta[b] = {
+                    "minutes": round(info["minutes"], 1),
+                    "hr": round(hr, 3),
+                    "rate": round(rate, 2),
+                    "cost": round(cost, 2),
+                }
 
             inspection_components = {}
             inspection_adjustments = {}
