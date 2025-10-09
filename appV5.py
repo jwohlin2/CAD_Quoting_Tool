@@ -45,6 +45,31 @@ def _coerce_env_bool(value: str | None) -> bool:
 FORCE_PLANNER = _coerce_env_bool(os.environ.get("FORCE_PLANNER"))
 
 
+def _hours_with_rate_text(
+    hours: Any,
+    rate: Any,
+    *,
+    rate_formatter: Callable[[float], str] | None = None,
+    currency: str = "$",
+) -> str:
+    try:
+        hours_val = float(hours or 0.0)
+    except Exception:
+        hours_val = 0.0
+    hours_text = f"{hours_val:.2f} hr"
+    try:
+        rate_val = float(rate or 0.0)
+    except Exception:
+        rate_val = 0.0
+    if rate_val > 0:
+        if rate_formatter is not None:
+            rate_text = rate_formatter(rate_val)
+        else:
+            rate_text = f"{currency}{rate_val:,.2f}"
+        return f"{hours_text} @ {rate_text}/hr"
+    return hours_text
+
+
 def describe_runtime_environment() -> dict[str, str]:
     """Return a redacted snapshot of runtime configuration for auditors."""
 
@@ -5269,20 +5294,6 @@ def render_quote(
     def _h(x) -> str:
         return f"{float(x):.2f} hr"
 
-    def _hours_with_rate_text(hours: Any, rate: Any) -> str:
-        try:
-            hours_val = float(hours or 0.0)
-        except Exception:
-            hours_val = 0.0
-        hours_text = f"{hours_val:.2f} hr"
-        try:
-            rate_val = float(rate or 0.0)
-        except Exception:
-            rate_val = 0.0
-        if rate_val > 0:
-            return f"{hours_text} @ {_m(rate_val)}/hr"
-        return hours_text
-
     def _pct(x) -> str:
         return f"{float(x or 0.0) * 100:.1f}%"
 
@@ -5448,7 +5459,7 @@ def render_quote(
         hr  = meta.get("hr")
         rate= meta.get("rate") or rates.get(k.title() + "Rate")
         if hr:
-            write_line(_hours_with_rate_text(hr, rate), indent)
+            write_line(_hours_with_rate_text(hr, rate, rate_formatter=_m), indent)
 
     def add_pass_basis(key: str, indent: str = "    "):
         basis_map = breakdown.get("pass_basis", {}) or {}
@@ -6179,13 +6190,13 @@ def render_quote(
         if prog.get("prog_hr"):
             has_detail = True
             write_line(
-                f"- Programmer: {_hours_with_rate_text(prog.get('prog_hr'), prog.get('prog_rate'))}",
+                f"- Programmer: {_hours_with_rate_text(prog.get('prog_hr'), prog.get('prog_rate'), rate_formatter=_m)}",
                 "    ",
             )
         if prog.get("eng_hr"):
             has_detail = True
             write_line(
-                f"- Engineering: {_hours_with_rate_text(prog.get('eng_hr'), prog.get('eng_rate'))}",
+                f"- Engineering: {_hours_with_rate_text(prog.get('eng_hr'), prog.get('eng_rate'), rate_formatter=_m)}",
                 "    ",
             )
         if not has_detail:
@@ -6198,7 +6209,7 @@ def render_quote(
         if fix.get("build_hr"):
             has_detail = True
             write_line(
-                f"- Build Labor: {_hours_with_rate_text(fix.get('build_hr'), fix.get('build_rate'))}",
+                f"- Build Labor: {_hours_with_rate_text(fix.get('build_hr'), fix.get('build_rate'), rate_formatter=_m)}",
                 "    ",
             )
         if not has_detail:
@@ -6315,7 +6326,9 @@ def render_quote(
         label = _display_bucket_label(canon_key) if use_display else _process_label(key)
 
         if not use_display and hr_val > 0:
-            detail_bits.append(_hours_with_rate_text(hr_val, rate_val))
+            detail_bits.append(
+                _hours_with_rate_text(hr_val, rate_val, rate_formatter=_m)
+            )
 
         rate_for_extra = rate_val if rate_val > 0 else display_rate
         if abs(extra_val) > 1e-6:
@@ -6323,7 +6336,9 @@ def render_quote(
                 use_display and display_hr <= 1e-6 and rate_for_extra > 0
             ):
                 extra_hours = extra_val / rate_for_extra
-                detail_bits.append(_hours_with_rate_text(extra_hours, rate_for_extra))
+                detail_bits.append(
+                    _hours_with_rate_text(extra_hours, rate_for_extra, rate_formatter=_m)
+                )
 
         proc_notes = applied_process.get(meta_key, {}).get("notes")
         if proc_notes:
@@ -6366,7 +6381,9 @@ def render_quote(
     except Exception:
         prog_rate = 0.0
     if prog_hr > 0:
-        prog_bits.append(f"- Programmer (lot): {_hours_with_rate_text(prog_hr, prog_rate)}")
+        prog_bits.append(
+            f"- Programmer (lot): {_hours_with_rate_text(prog_hr, prog_rate, rate_formatter=_m)}"
+        )
     try:
         eng_hr = float(programming_detail.get("eng_hr", 0.0) or 0.0)
     except Exception:
@@ -6376,7 +6393,9 @@ def render_quote(
     except Exception:
         eng_rate = 0.0
     if eng_hr > 0:
-        prog_bits.append(f"- Engineering (lot): {_hours_with_rate_text(eng_hr, eng_rate)}")
+        prog_bits.append(
+            f"- Engineering (lot): {_hours_with_rate_text(eng_hr, eng_rate, rate_formatter=_m)}"
+        )
     if qty > 1 and programming_per_part_cost > 0:
         prog_bits.append(f"Amortized across {qty} pcs")
 
@@ -6410,7 +6429,7 @@ def render_quote(
         fixture_rate = 0.0
     if fixture_hr > 0:
         fixture_bits.append(
-            f"- Build labor (lot): {_hours_with_rate_text(fixture_hr, fixture_rate)}"
+            f"- Build labor (lot): {_hours_with_rate_text(fixture_hr, fixture_rate, rate_formatter=_m)}"
         )
     try:
         soft_jaw_hr = float(fixture_detail.get("soft_jaw_hr", 0.0) or 0.0)
