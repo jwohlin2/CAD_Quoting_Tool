@@ -6267,6 +6267,8 @@ def render_quote(
 
     for key, value in ordered_process_items:
         canon_key = _canonical_bucket_key(key)
+        if canon_key.startswith("planner_"):
+            continue
         meta_key = str(key).lower()
         meta = process_meta.get(meta_key, {}) if isinstance(process_meta, dict) else {}
         detail_bits: list[str] = []
