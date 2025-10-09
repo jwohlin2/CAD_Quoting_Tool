@@ -8500,6 +8500,7 @@ def estimate_drilling_hours(
 
         row_cache: dict[tuple[str, float], tuple[Mapping[str, Any], _TimeToolParams] | None] = {}
         missing_row_messages: set[tuple[str, str, float]] = set()
+        debug_summary_entries: dict[str, dict[str, Any]] = {}
 
         def _build_tool_params(row: Mapping[str, Any]) -> _TimeToolParams:
             key_map = {
@@ -8675,8 +8676,10 @@ def estimate_drilling_hours(
                 continue
             total_holes += qty_int
             total_min += minutes * qty_int
+            toolchange_added = 0.0
             if overhead.toolchange_min and qty_int > 0:
-                total_min += float(overhead.toolchange_min)
+                toolchange_added = float(overhead.toolchange_min)
+                total_min += toolchange_added
             if debug_payload is not None:
                 try:
                     operation_name = str(debug_payload.get("operation") or op_name).lower()
@@ -8688,40 +8691,190 @@ def estimate_drilling_hours(
                 ipm_val = debug_payload.get("ipm")
                 depth_val = debug_payload.get("axial_depth_in")
                 minutes_per = debug_payload.get("minutes_per_hole")
-                qty_int = int(qty) if qty else 0
-                total_hr = (minutes_per or 0.0) * qty_int / 60.0 if qty_int > 0 else 0.0
+                qty_for_debug = int(qty) if qty else 0
                 mat_display = str(material_label or mat_key or material_lookup or "").strip()
                 if not mat_display:
                     mat_display = "material"
-                sfm_text = f"{sfm_val:.0f}" if isinstance(sfm_val, (int, float)) else "-"
-                ipr_text = (
-                    f"{ipr_val:.4f}"
-                    if isinstance(ipr_val, (int, float)) and math.isfinite(float(ipr_val))
-                    else "-"
-                )
-                rpm_text = f"{rpm_val:.0f}" if isinstance(rpm_val, (int, float)) else "-"
-                ipm_text = (
-                    f"{float(ipm_val):.1f}" if isinstance(ipm_val, (int, float)) else "-"
-                )
-                depth_text = (
-                    f"{float(depth_val):.2f}" if isinstance(depth_val, (int, float)) else "-"
-                )
-                minutes_text = (
-                    f"{float(minutes_per):.2f}" if isinstance(minutes_per, (int, float)) else "-"
-                )
-                total_hr_text = (
-                    f"{float(total_hr):.2f}" if isinstance(total_hr, (int, float)) else "-"
-                )
-                debug_lines.append(
-                    "Drill calc → "
-                    f"op={operation_name}, mat={mat_display}, "
-                    f"row=SFM:{sfm_text} IPR:{ipr_text}; "
-                    f"RPM:{rpm_text} IPM:{ipm_text}; "
-                    f"depth/hole: {depth_text} in; "
-                    f"holes: {int(qty)}; "
-                    f"min/hole: {minutes_text}; "
-                    f"total hr: {total_hr_text}."
-                )
+                if debug_lines is not None:
+                    summary = debug_summary_entries.setdefault(
+                        operation_name,
+                        {
+                            "operation": operation_name,
+                            "material": mat_display,
+                            "qty": 0,
+                            "total_minutes": 0.0,
+                            "toolchange_total": 0.0,
+                            "sfm_sum": 0.0,
+                            "sfm_count": 0,
+                            "ipr_sum": 0.0,
+                            "ipr_count": 0,
+                            "rpm_sum": 0.0,
+                            "rpm_count": 0,
+                            "ipm_sum": 0.0,
+                            "ipm_count": 0,
+                            "diameter_weight_sum": 0.0,
+                            "diameter_qty_sum": 0,
+                            "diam_min": None,
+                            "diam_max": None,
+                            "depth_weight_sum": 0.0,
+                            "depth_qty_sum": 0,
+                            "depth_min": None,
+                            "depth_max": None,
+                            "peck_sum": 0.0,
+                            "peck_count": 0,
+                            "dwell_sum": 0.0,
+                            "dwell_count": 0,
+                        },
+                    )
+                    if mat_display and (not summary.get("material") or summary.get("material") == "material"):
+                        summary["material"] = mat_display
+                    minutes_val = _as_float_or_none(minutes_per)
+                    minutes_per_hole = minutes_val if minutes_val is not None else float(minutes)
+                    summary["qty"] += qty_for_debug
+                    summary["total_minutes"] += minutes_per_hole * qty_for_debug
+                    summary["toolchange_total"] += toolchange_added
+                    sfm_float = _as_float_or_none(sfm_val)
+                    if sfm_float is not None and math.isfinite(sfm_float):
+                        summary["sfm_sum"] += sfm_float * qty_for_debug
+                        summary["sfm_count"] += qty_for_debug
+                    ipr_float = _as_float_or_none(ipr_val)
+                    if ipr_float is not None and math.isfinite(ipr_float):
+                        summary["ipr_sum"] += ipr_float * qty_for_debug
+                        summary["ipr_count"] += qty_for_debug
+                    rpm_float = _as_float_or_none(rpm_val)
+                    if rpm_float is not None and math.isfinite(rpm_float):
+                        summary["rpm_sum"] += rpm_float * qty_for_debug
+                        summary["rpm_count"] += qty_for_debug
+                    ipm_float = _as_float_or_none(ipm_val)
+                    if ipm_float is not None and math.isfinite(ipm_float):
+                        summary["ipm_sum"] += ipm_float * qty_for_debug
+                        summary["ipm_count"] += qty_for_debug
+                    summary["diameter_weight_sum"] += float(tool_dia_in) * qty_for_debug
+                    summary["diameter_qty_sum"] += qty_for_debug
+                    diam_min = summary.get("diam_min")
+                    diam_max = summary.get("diam_max")
+                    if diam_min is None or float(tool_dia_in) < diam_min:
+                        summary["diam_min"] = float(tool_dia_in)
+                    if diam_max is None or float(tool_dia_in) > diam_max:
+                        summary["diam_max"] = float(tool_dia_in)
+                    depth_float = _as_float_or_none(depth_val)
+                    if depth_float is None:
+                        try:
+                            depth_float = float(depth_in)
+                        except Exception:
+                            depth_float = None
+                    if depth_float is not None:
+                        summary["depth_weight_sum"] += float(depth_float) * qty_for_debug
+                        summary["depth_qty_sum"] += qty_for_debug
+                        depth_min = summary.get("depth_min")
+                        depth_max = summary.get("depth_max")
+                        if depth_min is None or float(depth_float) < depth_min:
+                            summary["depth_min"] = float(depth_float)
+                        if depth_max is None or float(depth_float) > depth_max:
+                            summary["depth_max"] = float(depth_float)
+                    peck_rate = _as_float_or_none(per_hole_overhead.peck_penalty_min_per_in_depth)
+                    if depth_float is not None and peck_rate is not None and peck_rate > 0:
+                        peck_total = float(peck_rate) * float(depth_float)
+                        if math.isfinite(peck_total) and peck_total > 0:
+                            summary["peck_sum"] += peck_total * qty_for_debug
+                            summary["peck_count"] += qty_for_debug
+                    dwell_val_float = _as_float_or_none(per_hole_overhead.dwell_min)
+                    if dwell_val_float is not None and dwell_val_float > 0:
+                        summary["dwell_sum"] += float(dwell_val_float) * qty_for_debug
+                        summary["dwell_count"] += qty_for_debug
+                    summary.setdefault("material", mat_display)
+                qty_int = qty_for_debug
+        if debug_lines is not None and debug_summary_entries:
+            for op_key, summary in sorted(debug_summary_entries.items()):
+                qty_total = summary.get("qty", 0)
+                if qty_total <= 0:
+                    continue
+                minutes_total = summary.get("total_minutes", 0.0) or 0.0
+                minutes_avg = minutes_total / qty_total if qty_total else 0.0
+                toolchange_total = summary.get("toolchange_total", 0.0) or 0.0
+                total_hours = (minutes_total + toolchange_total) / 60.0
+
+                def _avg_value(sum_key: str, count_key: str) -> float | None:
+                    total = summary.get(sum_key, 0.0) or 0.0
+                    count = summary.get(count_key, 0) or 0
+                    if count <= 0:
+                        return None
+                    return float(total) / float(count)
+
+                def _format_avg(value: float | None, fmt: str) -> str:
+                    if value is None or not math.isfinite(float(value)):
+                        return "-"
+                    return fmt.format(float(value))
+
+                sfm_text = _format_avg(_avg_value("sfm_sum", "sfm_count"), "{:.0f}")
+                ipr_text = _format_avg(_avg_value("ipr_sum", "ipr_count"), "{:.4f}")
+                rpm_text = _format_avg(_avg_value("rpm_sum", "rpm_count"), "{:.0f}")
+                ipm_text = _format_avg(_avg_value("ipm_sum", "ipm_count"), "{:.1f}")
+
+                diam_qty = summary.get("diameter_qty_sum", 0) or 0
+                dia_segment = "Ø-"
+                if diam_qty > 0:
+                    diam_sum = summary.get("diameter_weight_sum", 0.0) or 0.0
+                    avg_dia = diam_sum / diam_qty if diam_qty else 0.0
+                    diam_min = summary.get("diam_min")
+                    diam_max = summary.get("diam_max")
+                    if (
+                        isinstance(diam_min, (int, float))
+                        and isinstance(diam_max, (int, float))
+                        and math.isfinite(diam_min)
+                        and math.isfinite(diam_max)
+                        and abs(float(diam_max) - float(diam_min)) > 5e-4
+                    ):
+                        dia_segment = f"Ø{float(diam_min):.3f}-{float(diam_max):.3f}\""
+                    else:
+                        dia_segment = f"Ø{float(avg_dia):.3f}\""
+
+                depth_qty = summary.get("depth_qty_sum", 0) or 0
+                depth_text = "-"
+                if depth_qty > 0:
+                    depth_sum = summary.get("depth_weight_sum", 0.0) or 0.0
+                    avg_depth = depth_sum / depth_qty if depth_qty else 0.0
+                    depth_min = summary.get("depth_min")
+                    depth_max = summary.get("depth_max")
+                    if (
+                        isinstance(depth_min, (int, float))
+                        and isinstance(depth_max, (int, float))
+                        and math.isfinite(depth_min)
+                        and math.isfinite(depth_max)
+                        and abs(float(depth_max) - float(depth_min)) > 5e-3
+                    ):
+                        depth_text = f"{float(depth_min):.2f}-{float(depth_max):.2f}"
+                    else:
+                        depth_text = f"{float(avg_depth):.2f}"
+
+                peck_avg = _avg_value("peck_sum", "peck_count")
+                dwell_avg = _avg_value("dwell_sum", "dwell_count")
+                overhead_bits: list[str] = []
+                if peck_avg and math.isfinite(peck_avg) and peck_avg > 0:
+                    overhead_bits.append(f"peck {peck_avg:.2f} min/hole")
+                if dwell_avg and math.isfinite(dwell_avg) and dwell_avg > 0:
+                    overhead_bits.append(f"dwell {dwell_avg:.2f} min/hole")
+                if toolchange_total and math.isfinite(toolchange_total) and toolchange_total > 0:
+                    overhead_bits.append(f"toolchange {toolchange_total:.2f} min")
+
+                op_display = str(summary.get("operation") or "drill").title()
+                mat_display = str(summary.get("material") or "material").strip()
+                if not mat_display:
+                    mat_display = "material"
+
+                line_parts = [
+                    "Drill calc → ",
+                    f"op={op_display}, mat={mat_display}, ",
+                    f"row=SFM:{sfm_text} IPR:{ipr_text}; ",
+                    f"RPM:{rpm_text} IPM:{ipm_text}; ",
+                    f"{dia_segment}; depth/hole: {depth_text} in; ",
+                    f"holes: {qty_total}; ",
+                    f"min/hole: {minutes_avg:.2f}; ",
+                ]
+                if overhead_bits:
+                    line_parts.append("overhead: " + ", ".join(overhead_bits) + "; ")
+                line_parts.append(f"total hr: {total_hours:.2f}.")
+                debug_lines.append("".join(line_parts))
         if missing_row_messages and warnings is not None:
             for op_display, material_display, dia_val in sorted(missing_row_messages):
                 dia_text = f"{dia_val:.3f}".rstrip("0").rstrip(".")
