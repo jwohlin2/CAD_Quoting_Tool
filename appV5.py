@@ -5707,15 +5707,31 @@ def render_quote(
         for ops in bucket_ops_map.values():
             ops.sort(key=lambda item: (-item.get("minutes", 0.0), item.get("op", "")))
 
-    process_costs_canon: dict[str, float] = {}
-    for key, value in (process_costs or {}).items():
-        canon = _canonical_bucket_key(key)
-        if not canon:
+    canonical_process_buckets: dict[str, dict[str, Any]] = {}
+    for raw_key, raw_value in (process_costs or {}).items():
+        canon_key = _canonical_bucket_key(raw_key)
+        if not canon_key:
             continue
         try:
-            process_costs_canon[canon] = float(value)
+            amount_val = float(raw_value or 0.0)
         except Exception:
-            continue
+            amount_val = 0.0
+        bucket_entry = canonical_process_buckets.setdefault(
+            canon_key,
+            {"total": 0.0, "sources": []},
+        )
+        bucket_entry["total"] += amount_val
+        bucket_entry.setdefault("sources", []).append(
+            {"key": str(raw_key), "amount": amount_val}
+        )
+
+    process_costs_canon: dict[str, float] = {}
+    for canon, info in canonical_process_buckets.items():
+        try:
+            total_amount = float(info.get("total", 0.0) or 0.0)
+        except Exception:
+            total_amount = 0.0
+        process_costs_canon[canon] = total_amount
 
     label_overrides = {
         "finishing_deburr": "Finishing/Deburr",
@@ -5723,6 +5739,33 @@ def render_quote(
     }
 
     label_overrides_proc = dict(label_overrides)
+
+    def _lookup_process_meta(key: str | None) -> Mapping[str, Any] | None:
+        if not isinstance(process_meta, dict):
+            return None
+        candidates: list[str] = []
+        base = str(key or "").lower()
+        if base:
+            candidates.append(base)
+        canon = _canonical_bucket_key(key)
+        if canon and canon not in candidates:
+            candidates.append(canon)
+        variants: list[str] = []
+        for candidate in list(candidates):
+            if "_" in candidate:
+                variants.append(candidate.replace("_", " "))
+            if " " in candidate:
+                variants.append(candidate.replace(" ", "_"))
+        seen: set[str] = set()
+        for candidate in candidates + variants:
+            candidate_key = candidate.strip()
+            if not candidate_key or candidate_key in seen:
+                continue
+            seen.add(candidate_key)
+            meta_entry = process_meta.get(candidate_key)
+            if isinstance(meta_entry, Mapping):
+                return meta_entry
+        return None
 
     def _display_bucket_label(canon_key: str) -> str:
         if canon_key in label_overrides:
@@ -6309,7 +6352,7 @@ def render_quote(
         for key, value in display_process_cost_items
         if key not in seen_keys and ((value > 0) or show_zeros)
     ]
-    remaining_items.sort(key=lambda kv: _normalize_bucket_key(kv[0]))
+    remaining_items.sort(key=_normalize_bucket_key)
     ordered_process_items.extend(remaining_items)
 
     for key, value in ordered_process_items:
@@ -6341,7 +6384,11 @@ def render_quote(
             meta if isinstance(meta, Mapping) else {},
         )
         use_display = display_override is not None
-        label = _display_bucket_label(canon_key) if use_display else _process_label(key)
+        label = (
+            _display_bucket_label(canon_key)
+            if use_display or canon_key in label_overrides
+            else _process_label(canon_key)
+        )
 
         if not use_display and hr_val > 0:
             detail_bits.append(_hours_with_rate_text(hr_val, rate_val))
@@ -6354,9 +6401,8 @@ def render_quote(
                 extra_hours = extra_val / rate_for_extra
                 detail_bits.append(_hours_with_rate_text(extra_hours, rate_for_extra))
 
-        proc_notes = applied_process.get(meta_key, {}).get("notes")
-        if proc_notes:
-            detail_bits.append("LLM: " + ", ".join(proc_notes))
+        if notes_order:
+            detail_bits.append("LLM: " + ", ".join(notes_order))
 
         if use_display:
             try:
@@ -6376,7 +6422,7 @@ def render_quote(
         _add_labor_cost_line(
             label,
             amount_override if use_display else float(value),
-            process_key=str(key),
+            process_key=str(canon_key),
             detail_bits=detail_bits,
             display_override=display_override,
         )
