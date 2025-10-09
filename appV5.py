@@ -6584,9 +6584,13 @@ def render_quote(
                 return meta_entry
         return None
 
-    def _display_bucket_label(canon_key: str) -> str:
-        if canon_key in label_overrides:
-            return label_overrides[canon_key]
+    def _display_bucket_label(canon_key: str, overrides: Mapping[str, str] | None = None) -> str:
+        try:
+            _ovr = overrides if isinstance(overrides, Mapping) else label_overrides
+        except Exception:
+            _ovr = label_overrides
+        if isinstance(_ovr, Mapping) and canon_key in _ovr:
+            return str(_ovr[canon_key])
         return _process_label(canon_key)
 
     def _format_planner_bucket_line(
@@ -8954,6 +8958,8 @@ def estimate_drilling_hours(
         _log_debug("MISS table: using heuristic fallback")
 
     group_specs: list[tuple[float, int, float]] = []
+    # Optional aggregate debug dict for callers that want structured details
+    debug: dict[str, Any] | None = {} if debug_lines is not None else None
     fallback_counts: Counter[float] | None = None
 
     if hole_groups:
@@ -9064,12 +9070,11 @@ def estimate_drilling_hours(
                 teeth_int = 1
             return _TimeToolParams(teeth_z=teeth_int)
 
-        thickness_in_val: float | None = None
-        if thickness_mm and thickness_mm > 0:
-            try:
-                thickness_in_val = float(thickness_mm) / 25.4
-            except Exception:
-                thickness_in_val = None
+        # Use the function's input thickness (inches) for L/D heuristics
+        try:
+            thickness_in_val = float(thickness_in) if thickness_in and float(thickness_in) > 0 else None
+        except Exception:
+            thickness_in_val = None
 
         for diameter_in, qty, depth_in in group_specs:
             qty_i = int(qty)
@@ -9421,20 +9426,21 @@ def estimate_drilling_hours(
                 )
                 if warning_text not in warnings:
                     warnings.append(warning_text)
-        if debug is not None and total_qty > 0:
-            avg_dia_in = weighted_dia / total_qty if total_qty else 0.0
+        if debug is not None and total_holes > 0:
+            try:
+                avg_dia_in = float(avg_dia_in)
+            except Exception:
+                avg_dia_in = 0.0
             debug.update(
                 {
                     "thickness_in": float(thickness_in or 0.0),
                     "avg_dia_in": float(avg_dia_in),
-                    "sfm": float(weighted_sfm / total_qty) if total_qty else 0.0,
-                    "ipr": float(weighted_ipr / total_qty) if total_qty else 0.0,
-                    "rpm": float(weighted_rpm / total_qty) if total_qty else 0.0,
-                    "ipm": float(weighted_ipm / total_qty) if total_qty else 0.0,
-                    "min_per_hole": float(total_min_for_debug / total_qty)
-                    if total_qty
-                    else 0.0,
-                    "hole_count": int(total_qty),
+                    "sfm": None,
+                    "ipr": None,
+                    "rpm": None,
+                    "ipm": None,
+                    "min_per_hole": (float(total_min)/float(total_holes)) if total_holes else 0.0,
+                    "hole_count": int(total_holes),
                 }
             )
         if total_min > 0:
@@ -9492,21 +9498,22 @@ def estimate_drilling_hours(
         per = sec_per_hole(float(d)) * mfac * tfac
         total_sec += qty_int * per
         total_sec += toolchange_s
-        total_qty += int(qty)
+        # aggregate counts and weighted diameter
+        # total_qty was not previously initialized; use holes_fallback as the count
         weighted_dia_in += (float(d) / 25.4) * int(qty)
 
-    if debug is not None and total_qty > 0:
-        avg_dia_in = weighted_dia_in / total_qty if total_qty else 0.0
+    if debug is not None and holes_fallback > 0:
+        avg_dia_in = weighted_dia_in / holes_fallback if holes_fallback else 0.0
         debug.update(
             {
-                "thickness_in": float(thickness_in or 0.0),
-                "avg_dia_in": float(avg_dia_in),
-                "sfm": None,
-                "ipr": None,
-                "rpm": None,
-                "ipm": None,
-                "min_per_hole": (total_sec / 60.0) / total_qty if total_qty else None,
-                "hole_count": int(total_qty),
+            "thickness_in": float(thickness_in or 0.0),
+            "avg_dia_in": float(avg_dia_in),
+            "sfm": None,
+            "ipr": None,
+            "rpm": None,
+            "ipm": None,
+            "min_per_hole": (total_sec / 60.0) / holes_fallback if holes_fallback else None,
+            "hole_count": int(holes_fallback),
             }
         )
     elif debug is not None:
@@ -9825,6 +9832,8 @@ def compute_quote_from_df(df: pd.DataFrame,
       6) Return total and a transparent breakdown
     """
     # ---- merge configs (easy to edit) ---------------------------------------
+    # Default pricing source; updated to 'planner' later if planner path is used
+    pricing_source = "legacy"
 
     params_defaults = default_params if default_params is not None else QuoteConfiguration().default_params
     rates_defaults = default_rates if default_rates is not None else PricingRegistry().default_rates
@@ -10983,6 +10992,8 @@ def compute_quote_from_df(df: pd.DataFrame,
             thickness_mm / 25.4 if thickness_mm else 0.0,
         )
     drill_debug_lines: list[str] = []
+    speeds_feeds_row: Mapping[str, Any] | None = None  # ensure defined in outer scope
+    avg_dia_in = 0.0
 
     drill_hr = estimate_drilling_hours(
         hole_diams_mm=hole_diams_list,
@@ -11078,33 +11089,25 @@ def compute_quote_from_df(df: pd.DataFrame,
             guard_ctx = quote_state.guard_context
         except Exception:
             guard_ctx = None
-        if not isinstance(guard_ctx, dict):
-            guard_ctx = {}
-        guard_update: dict[str, Any] = {
-            "speeds_feeds_path": speeds_feeds_path or raw_path_text or "",
-            "speeds_feeds_loaded": speeds_feeds_loaded_flag,
-        }
-        if drill_debug_line:
-            existing_extra = guard_ctx.get("narrative_extra")
-            extras_list: list[str] = []
-            if isinstance(existing_extra, list):
-                extras_list.extend(str(entry) for entry in existing_extra if entry)
-            elif existing_extra:
-                extras_list.append(str(existing_extra))
-            if drill_debug_line not in extras_list:
-                extras_list.append(drill_debug_line)
-            if extras_list:
-                guard_update["narrative_extra"] = extras_list
-        if red_flag_messages:
-            ctx_flags = list(guard_ctx.get("red_flags", []))
-            for msg in red_flag_messages:
-                if msg not in ctx_flags:
-                    ctx_flags.append(msg)
-            guard_update["red_flags"] = ctx_flags
-        if drill_debug_lines and "drill_debug_lines" not in guard_ctx:
-            guard_update["drill_debug_lines"] = list(drill_debug_lines)
-        guard_ctx.update(guard_update)
-        quote_state.guard_context = guard_ctx
+        if isinstance(guard_ctx, dict):
+            if speeds_feeds_path:
+                guard_ctx.setdefault("speeds_feeds_path", speeds_feeds_path)
+            try:
+                loaded_flag = bool(
+                    (speeds_feeds_table is not None)
+                    and (getattr(speeds_feeds_table, "empty", False) is False)
+                )
+            except Exception:
+                try:
+                    loaded_flag = speeds_feeds_table is not None and len(speeds_feeds_table) > 0
+                except Exception:
+                    loaded_flag = False
+            guard_ctx["speeds_feeds_loaded"] = loaded_flag
+            if red_flag_messages:
+                ctx_flags = guard_ctx.setdefault("red_flags", [])
+                for msg in red_flag_messages:
+                    if msg not in ctx_flags:
+                        ctx_flags.append(msg)
     drill_rate = float(rates.get("DrillingRate") or rates.get("MillingRate", 0.0) or 0.0)
     hole_count_geo = _coerce_float_or_none(geo_context.get("hole_count"))
     hole_count_for_tripwire = 0
@@ -11294,6 +11297,8 @@ def compute_quote_from_df(df: pd.DataFrame,
         hr_val = float(meta.get("hr", 0.0) or 0.0)
         meta["base_extra"] = process_costs.get(key, 0.0) - hr_val * rate_val
 
+    # Track process keys populated by the planner so we don't double-count
+    planner_meta_keys: set[str] = set()
     allowed_process_hour_keys: set[str] = set()
     for key, meta in process_meta.items():
         if not isinstance(meta, dict):
@@ -11307,10 +11312,6 @@ def compute_quote_from_df(df: pd.DataFrame,
         for key in allowed_process_hour_keys
     }
     process_costs_baseline = {k: float(v) for k, v in process_costs.items()}
-    legacy_baseline_had_values = any(
-        abs(float(val)) > 1e-6 for val in process_costs_baseline.values()
-    )
-    legacy_baseline_ignored = False
 
     def _default_pass_meta(shipping_basis_desc: str) -> dict[str, dict[str, str]]:
         return {
@@ -12170,7 +12171,6 @@ def compute_quote_from_df(df: pd.DataFrame,
     planner_total_minutes = 0.0
     planner_bucket_view: dict[str, dict[str, float]] | None = None
     planner_bucket_rollup: dict[str, dict[str, float]] | None = None
-    pricing_source = "legacy"
 
     if planner_pricing_result is not None:
         # Canonical planner integration + bucketization path
@@ -13742,6 +13742,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                 process_costs[key] = round(hr_val * rate_val + base_extra_val, 2)
         process_hours_final = _collect_process_hours()
 
+    meta_lookup = process_meta if isinstance(process_meta, dict) else {}
     for proc_key, final_hr in process_hours_final.items():
         if pricing_source == "planner" and proc_key not in process_costs:
             continue
@@ -13973,6 +13974,16 @@ def compute_quote_from_df(df: pd.DataFrame,
         if merged_bits:
             labor_cost_details[canonical_label] = "; ".join(merged_bits)
 
+    # Use current process_costs for ordered iteration of labor detail lines
+    canonical_process_costs = dict(process_costs)
+    # Reuse the same planner bucket display mapping for the breakdown section.
+    # If no planner map exists in this scope, use an empty mapping.
+    try:
+        _tmp_map = planner_bucket_display_map  # may exist in other scopes
+    except Exception:
+        _tmp_map = {}
+    planner_bucket_display_map_breakdown = dict(_tmp_map) if isinstance(_tmp_map, Mapping) else {}
+
     for entry in _iter_ordered_process_entries(
         canonical_process_costs,
         process_meta=process_meta,
@@ -14144,7 +14155,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         "direct_costs": direct_costs_display,
         "direct_cost_details": direct_cost_details,
         "speeds_feeds_path": speeds_feeds_path,
-        "drill_debug": list(drill_debug_entries),
+        "drill_debug": list(drill_debug_lines),
         "pass_meta": pass_meta,
         "totals": {
             "labor_cost": labor_cost,
@@ -14224,7 +14235,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                     "clamped": notes_from_clamps,
                     "pass_through": {k: v for k, v in applied_pass.items()},
                 }
-                latest.write_text(json.dumps(snap, indent=2), encoding="utf-8")
+                latest.write_text(json.dumps(snap, indent=2, default=str), encoding="utf-8")
         except Exception:
             pass
 
@@ -14254,7 +14265,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         "material_source": material_source_final,
         "speeds_feeds_path": speeds_feeds_path,
         "speeds_feeds_loaded": speeds_feeds_loaded_flag,
-        "drill_debug": list(drill_debug_entries),
+        "drill_debug": list(drill_debug_lines),
         "red_flags": list(red_flag_messages),
     }
 
@@ -20718,6 +20729,15 @@ class App(tk.Tk):
 
                 )
             except ValueError as err:
+                # Log full traceback for debugging ambiguous DataFrame truthiness, etc.
+                import traceback, datetime
+                try:
+                    with open("debug.log", "a", encoding="utf-8") as f:
+                        f.write(f"\n[{datetime.datetime.now().isoformat()}] Quote blocked (ValueError):\n")
+                        f.write(traceback.format_exc())
+                        f.write("\n")
+                except Exception:
+                    pass
                 messagebox.showerror("Quote blocked", str(err))
                 self.status_var.set("Quote blocked.")
                 return
