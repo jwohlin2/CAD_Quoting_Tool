@@ -8614,7 +8614,7 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     pass_meta = {
         "Material": {"basis": "Stock / raw material"},
-        "Hardware / BOM": {"basis": "Pass-through hardware / BOM"},
+        HARDWARE_PASS_LABEL: {"basis": "Pass-through hardware / BOM"},
         "Outsourced Vendors": {"basis": "Outside processing vendors"},
         "Shipping": {"basis": shipping_basis_desc},
         "Consumables /Hr": {"basis": "Machine & inspection hours $/hr"},
@@ -8622,6 +8622,50 @@ def compute_quote_from_df(df: pd.DataFrame,
         "Consumables": {"basis": "Fixed shop supplies"},
         "Packaging Flat": {"basis": "Packaging materials & crates"},
     }
+
+    def _build_pass_through(
+        planner_directs,
+        *,
+        material_direct_cost,
+        shipping_cost,
+        hardware_cost,
+        outsourced_costs,
+        include_outsourced_pass,
+        utilities_cost,
+        consumables_flat,
+        packaging_flat_base,
+        material_scrap_credit_applied,
+    ) -> dict[str, float]:
+        def _on(k: str) -> bool:
+            return bool((planner_directs or {}).get(k))
+
+        pass_through = {
+            "Material": float(material_direct_cost),
+            "Shipping": float(shipping_cost),
+        }
+        if _on("hardware") and float(hardware_cost) > 0:
+            pass_through["Hardware / BOM"] = float(hardware_cost)
+        if (
+            _on("outsourced")
+            and include_outsourced_pass
+            and float(outsourced_costs) > 0
+        ):
+            pass_through["Outsourced Vendors"] = float(outsourced_costs)
+        if _on("utilities") and float(utilities_cost) > 0:
+            pass_through["Utilities"] = float(utilities_cost)
+        if _on("consumables_flat") and float(consumables_flat) > 0:
+            pass_through["Consumables"] = float(consumables_flat)
+        if _on("packaging_flat") and float(packaging_flat_base) > 0:
+            pass_through["Packaging Flat"] = float(packaging_flat_base)
+
+        pass_through = {
+            _canonical_pass_label(k): v for k, v in pass_through.items()
+        }
+
+        credit = float(material_scrap_credit_applied or 0.0)
+        if credit > 0:
+            pass_through["Material Scrap Credit"] = -credit
+        return pass_through
     if material_scrap_credit_applied:
         pass_meta["Material Scrap Credit"] = {"basis": "Scrap / remnant credit"}
 
@@ -8634,36 +8678,23 @@ def compute_quote_from_df(df: pd.DataFrame,
             pass_meta["Material"]["basis"] = f"Source: {mat_source}"
     quote_state.material_source = pass_meta.get("Material", {}).get("basis") or mat_source or "shop defaults"
 
-    pass_through = {
-        "Material": material_direct_cost,
-        "Shipping": shipping_cost,
-    }
-
-    planner_directs = {}
-    try:
-        planner_directs = (process_plan_summary.get("plan") or {}).get("directs") or {}
-    except Exception:
-        planner_directs = {}
-
-    def _direct_on(key: str) -> bool:
-        return bool(planner_directs.get(key))
-
-    if _direct_on("hardware"):
-        pass_through["Hardware / BOM"] = hardware_cost
-    if _direct_on("outsourced") and include_outsourced_pass:
-        pass_through["Outsourced Vendors"] = outsourced_costs
-    if _direct_on("utilities"):
-        pass_through["Utilities"] = utilities_cost
-    if _direct_on("consumables_flat"):
-        pass_through["Consumables"] = consumables_flat
-    if _direct_on("packaging_flat"):
-        pass_through["Packaging Flat"] = packaging_flat_base
-    pass_through = {
-        _canonical_pass_label(label): float(value)
-        for label, value in pass_through.items()
-    }
-    if material_scrap_credit_applied:
-        pass_through["Material Scrap Credit"] = -material_scrap_credit_applied
+    planner_directs = (
+        (process_plan_summary.get("plan") or {}).get("directs") or {}
+        if isinstance(process_plan_summary, dict)
+        else {}
+    )
+    pass_through = _build_pass_through(
+        planner_directs,
+        material_direct_cost=material_direct_cost,
+        shipping_cost=shipping_cost,
+        hardware_cost=hardware_cost,
+        outsourced_costs=outsourced_costs,
+        include_outsourced_pass=include_outsourced_pass,
+        utilities_cost=utilities_cost,
+        consumables_flat=consumables_flat,
+        packaging_flat_base=packaging_flat_base,
+        material_scrap_credit_applied=material_scrap_credit_applied,
+    )
     pass_through_baseline = {k: float(v) for k, v in pass_through.items()}
 
     fix_detail = nre_detail.get("fixture", {})
@@ -10800,7 +10831,12 @@ def compute_quote_from_df(df: pd.DataFrame,
                 existing_plan.setdefault("bucket_view", copy.deepcopy(planner_bucket_view))
 
     material_direct_cost = float(pass_through.get("Material", material_direct_cost_base))
-    hardware_cost = float(pass_through.get("Hardware / BOM", hardware_cost))
+    hardware_cost = float(
+        pass_through.get(
+            HARDWARE_PASS_LABEL,
+            pass_through.get(LEGACY_HARDWARE_PASS_LABEL, hardware_cost),
+        )
+    )
     outsourced_costs = float(pass_through.get("Outsourced Vendors", outsourced_costs))
     shipping_cost = float(pass_through.get("Shipping", shipping_cost_base))
     consumables_hr_cost = float(pass_through.get("Consumables /Hr", consumables_hr_cost))
