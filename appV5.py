@@ -8765,11 +8765,6 @@ def compute_quote_from_df(df: pd.DataFrame,
     if deburr_holes_hr:
         legacy_process_meta["deburr"]["hole_touch_hr"] = deburr_holes_hr
 
-    if planner_pricing_result is not None:
-        quote_state.process_plan.setdefault("pricing", copy.deepcopy(planner_pricing_result))
-        if planner_bucket_view is not None:
-            quote_state.process_plan.setdefault("bucket_view", copy.deepcopy(planner_bucket_view))
-
     if not used_planner:
         for key, value in legacy_process_costs.items():
             process_costs[key] = float(value)
@@ -9645,6 +9640,8 @@ def compute_quote_from_df(df: pd.DataFrame,
     planner_bucket_view: dict[str, dict[str, float]] | None = None
 
     if planner_pricing_result is not None:
+        # Canonical planner integration + bucketization path
+        quote_state.process_plan.setdefault("pricing", copy.deepcopy(planner_pricing_result))
         totals = planner_pricing_result.get("totals", {}) if isinstance(planner_pricing_result, dict) else {}
         line_items_raw = planner_pricing_result.get("line_items", []) if isinstance(planner_pricing_result, dict) else []
         if isinstance(line_items_raw, list):
