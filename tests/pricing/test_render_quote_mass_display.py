@@ -154,6 +154,55 @@ def _base_material_quote(material: dict) -> dict:
     }
 
 
+def _amortized_breakdown(qty: int, *, config_flags: dict | None = None) -> dict:
+    breakdown = {
+        "qty": qty,
+        "totals": _base_totals(),
+        "material": {},
+        "nre_detail": {
+            "programming": {
+                "per_lot": 150.0,
+                "prog_hr": 1.0,
+                "prog_rate": 75.0,
+            },
+            "fixture": {
+                "per_lot": 80.0,
+                "build_hr": 0.5,
+                "build_rate": 60.0,
+                "mat_cost": 20.0,
+                "labor_cost": 30.0,
+            },
+        },
+        "nre_cost_details": {
+            "Programming & Eng (per lot)": "Programmer 1.00 hr @ $75.00/hr",
+            "Fixturing (per lot)": "Build 0.50 hr @ $60.00/hr; Material $20.00",
+        },
+        "process_costs": {"grinding": 300.0},
+        "process_meta": {
+            "grinding": {"hr": 1.5, "rate": 120.0, "base_extra": 200.0},
+        },
+        "labor_cost_details": {
+            "Grinding": "1.50 hr @ $120.00/hr; includes $200.00 extras",
+        },
+        "pass_through": {},
+        "applied_pcts": {},
+        "rates": {},
+        "params": {},
+        "direct_cost_details": {},
+        "labor_costs": {
+            "Programming (amortized)": 150.0,
+            "Fixture Build (amortized)": 30.0,
+        },
+        "nre": {
+            "programming_per_part": 150.0,
+            "fixture_per_part": 30.0,
+        },
+    }
+    if config_flags is not None:
+        breakdown["config_flags"] = dict(config_flags)
+    return breakdown
+
+
 def test_render_quote_unit_price_prefers_lb_over_metric() -> None:
     result = _base_material_quote(
         {
@@ -192,50 +241,7 @@ def test_render_quote_unit_price_converts_from_per_gram() -> None:
 def test_render_quote_does_not_duplicate_detail_lines() -> None:
     result = {
         "price": 10.0,
-        "breakdown": {
-            "qty": 1,
-            "totals": _base_totals(),
-            "material": {},
-            "nre_detail": {
-                "programming": {
-                    "per_lot": 150.0,
-                    "prog_hr": 1.0,
-                    "prog_rate": 75.0,
-                },
-                "fixture": {
-                    "per_lot": 80.0,
-                    "build_hr": 0.5,
-                    "build_rate": 60.0,
-                    "mat_cost": 20.0,
-                    "labor_cost": 30.0,
-                },
-            },
-            "nre_cost_details": {
-                "Programming & Eng (per lot)": "Programmer 1.00 hr @ $75.00/hr",
-                "Fixturing (per lot)": "Build 0.50 hr @ $60.00/hr; Material $20.00",
-            },
-            "process_costs": {"grinding": 300.0},
-            "process_meta": {
-                "grinding": {"hr": 1.5, "rate": 120.0, "base_extra": 200.0},
-            },
-            "labor_cost_details": {
-                "Grinding": "1.50 hr @ $120.00/hr; includes $200.00 extras",
-
-            },
-            "pass_through": {},
-            "applied_pcts": {},
-            "rates": {},
-            "params": {},
-            "direct_cost_details": {},
-            "labor_costs": {
-                "Programming (amortized)": 150.0,
-                "Fixture Build (amortized)": 30.0,
-            },
-            "nre": {
-                "programming_per_part": 150.0,
-                "fixture_per_part": 30.0,
-            },
-        },
+        "breakdown": _amortized_breakdown(5),
     }
 
     rendered = appV5.render_quote(result, currency="$", show_zeros=False)
@@ -248,6 +254,35 @@ def test_render_quote_does_not_duplicate_detail_lines() -> None:
     assert "- Build labor (lot): 0.50 hr @ $60.00/hr" in rendered
     assert "includes $200.00 extras" not in rendered
     assert rendered.count("1.50 hr @ $120.00/hr") == 1
+
+
+def test_render_quote_hides_amortized_nre_for_single_qty() -> None:
+    result = {
+        "price": 10.0,
+        "breakdown": _amortized_breakdown(1),
+    }
+
+    rendered = appV5.render_quote(result, currency="$", show_zeros=False)
+
+    assert "Programming (amortized)" not in rendered
+    assert "Fixture Build (amortized)" not in rendered
+    assert "Programming & Eng:" in rendered
+    assert "Fixturing:" in rendered
+
+
+def test_render_quote_can_force_amortized_nre_for_single_qty() -> None:
+    result = {
+        "price": 10.0,
+        "breakdown": _amortized_breakdown(
+            1, config_flags={"show_amortized_nre": True}
+        ),
+    }
+
+    rendered = appV5.render_quote(result, currency="$", show_zeros=False)
+
+    assert "Programming (amortized)" in rendered
+    assert "Fixture Build (amortized)" in rendered
+    assert "Amortized across" not in rendered
 
 
 def test_render_quote_shows_flat_extras_when_no_hours() -> None:
