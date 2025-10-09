@@ -5794,6 +5794,7 @@ def render_quote(
     nre_detail   = breakdown.get("nre_detail", {}) or {}
     nre          = breakdown.get("nre", {}) or {}
     material     = breakdown.get("material", {}) or {}
+    drilling_meta = breakdown.get("drilling_meta", {}) or {}
     process_costs_raw = breakdown.get("process_costs", {}) or {}
     process_costs = (
         dict(process_costs_raw)
@@ -6866,13 +6867,33 @@ def render_quote(
         if have_any:
             lines.append("Material & Stock")
             lines.append(divider)
-            material_name_display = (
-                material.get("material_name")
-                or material.get("material")
-                or g.get("material")
-                or ui_vars.get("Material")
-                or ""
-            )
+            material_name_display = ""
+            if isinstance(drilling_meta, Mapping):
+                drill_display = (
+                    drilling_meta.get("material")
+                    or drilling_meta.get("material_display")
+                )
+                if not drill_display:
+                    drill_display = (
+                        drilling_meta.get("material_key")
+                        or drilling_meta.get("material_lookup")
+                    )
+                    if drill_display:
+                        normalized_key = _normalize_lookup_key(drill_display)
+                        drill_display = MATERIAL_DISPLAY_BY_KEY.get(
+                            normalized_key,
+                            drill_display,
+                        )
+                if drill_display:
+                    material_name_display = str(drill_display)
+            if not material_name_display:
+                material_name_display = (
+                    material.get("material_name")
+                    or material.get("material")
+                    or g.get("material")
+                    or ui_vars.get("Material")
+                    or ""
+                )
             if isinstance(material_name_display, str):
                 material_name_display = material_name_display.strip()
             else:
@@ -11336,6 +11357,27 @@ def compute_quote_from_df(df: pd.DataFrame,
     if drill_material_group:
         drill_material_key = drill_material_group
         geo_context.setdefault("material_group", drill_material_group)
+    drill_material_lookup_final = (
+        _normalize_lookup_key(drill_material_key) if drill_material_key else ""
+    )
+    drill_material_display = MATERIAL_DISPLAY_BY_KEY.get(
+        drill_material_lookup_final,
+        drill_material_key or drill_material_source or "",
+    )
+    if speeds_feeds_table is not None and (
+        not drill_material_display or drill_material_display == drill_material_key
+    ):
+        lookup_for_table = drill_material_lookup_final or drill_material_lookup
+        alt_label = _material_label_from_table(
+            speeds_feeds_table,
+            drill_material_key,
+            lookup_for_table,
+        )
+        if alt_label:
+            drill_material_display = alt_label
+    if not drill_material_display:
+        drill_material_display = str(material_name or drill_material_source or "")
+    drill_material_display = str(drill_material_display or "").strip()
     machine_params_default = _machine_params_from_params(params)
     drill_overhead_default = _drill_overhead_from_params(params)
     speeds_feeds_warnings: list[str] = []
@@ -11437,6 +11479,25 @@ def compute_quote_from_df(df: pd.DataFrame,
                 f"CSV drill feeds ({op_display} {material_group}): "
                 f"{', '.join(debug_bits)} @ Ø{avg_mm:.1f} mm"
             )
+
+    if drill_debug_line:
+        drill_debug_lines.append(drill_debug_line)
+
+    drilling_meta: dict[str, Any] = {
+        "material_key": drill_material_key or "",
+        "material_source": drill_material_source or "",
+        "material_lookup": drill_material_lookup_final,
+        "speeds_feeds_loaded": speeds_feeds_loaded_flag,
+    }
+    if drill_material_group:
+        drilling_meta["material_group"] = drill_material_group
+    if drill_material_display:
+        drilling_meta["material"] = drill_material_display
+        drilling_meta["material_display"] = drill_material_display
+    if speeds_feeds_path:
+        drilling_meta["speeds_feeds_path"] = speeds_feeds_path
+    if drill_debug_line:
+        drilling_meta["speeds_feeds_debug"] = drill_debug_line
 
     for warning_text in speeds_feeds_warnings:
         _record_red_flag(warning_text)
@@ -14632,6 +14693,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         "direct_cost_details": direct_cost_details,
         "speeds_feeds_path": speeds_feeds_path,
         "drill_debug": list(drill_debug_lines),
+        "drilling_meta": drilling_meta,
         "pass_meta": pass_meta,
         "totals": {
             "labor_cost": labor_cost,
@@ -14742,6 +14804,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         "speeds_feeds_path": speeds_feeds_path,
         "speeds_feeds_loaded": speeds_feeds_loaded_flag,
         "drill_debug": list(drill_debug_lines),
+        "drilling_meta": drilling_meta,
         "red_flags": list(red_flag_messages),
     }
 
