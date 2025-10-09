@@ -15,6 +15,7 @@ Single-file CAD Quoter (v8)
 from __future__ import annotations
 
 import argparse
+import logging
 import json, math, os, time
 from collections import Counter
 from collections.abc import Mapping as _MappingABC
@@ -5269,6 +5270,20 @@ def render_quote(
     def _h(x) -> str:
         return f"{float(x):.2f} hr"
 
+    def _hours_with_rate_text(hours: Any, rate: Any) -> str:
+        try:
+            hours_val = float(hours or 0.0)
+        except Exception:
+            hours_val = 0.0
+        hours_text = f"{hours_val:.2f} hr"
+        try:
+            rate_val = float(rate or 0.0)
+        except Exception:
+            rate_val = 0.0
+        if rate_val > 0:
+            return f"{hours_text} @ {_m(rate_val)}/hr"
+        return hours_text
+
     def _pct(x) -> str:
         return f"{float(x or 0.0) * 100:.1f}%"
 
@@ -5434,7 +5449,7 @@ def render_quote(
         hr  = meta.get("hr")
         rate= meta.get("rate") or rates.get(k.title() + "Rate")
         if hr:
-            write_line(f"{_h(hr)} @ {_m(rate or 0)}/hr", indent)
+            write_line(_hours_with_rate_text(hr, rate), indent)
 
     def add_pass_basis(key: str, indent: str = "    "):
         basis_map = breakdown.get("pass_basis", {}) or {}
@@ -5502,6 +5517,10 @@ def render_quote(
 
     def _canonical_bucket_key(name: str) -> str:
         return re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_")
+
+    def _is_planner_meta(key: str) -> bool:
+        k = str(key).lower().strip()
+        return k.startswith("planner_") or k == "planner total"
 
     def _planner_bucket_for_op(name: str) -> str:
         text = str(name or "").lower()
@@ -6207,10 +6226,16 @@ def render_quote(
         has_detail = False
         if prog.get("prog_hr"):
             has_detail = True
-            write_line(f"- Programmer: {_h(prog['prog_hr'])} @ {_m(prog.get('prog_rate', 0))}/hr", "    ")
+            write_line(
+                f"- Programmer: {_hours_with_rate_text(prog.get('prog_hr'), prog.get('prog_rate'))}",
+                "    ",
+            )
         if prog.get("eng_hr"):
             has_detail = True
-            write_line(f"- Engineering: {_h(prog['eng_hr'])} @ {_m(prog.get('eng_rate', 0))}/hr", "    ")
+            write_line(
+                f"- Engineering: {_hours_with_rate_text(prog.get('eng_hr'), prog.get('eng_rate'))}",
+                "    ",
+            )
         if not has_detail:
             write_detail(nre_cost_details.get("Programming & Eng (per lot)"))
 
@@ -6220,7 +6245,10 @@ def render_quote(
         has_detail = False
         if fix.get("build_hr"):
             has_detail = True
-            write_line(f"- Build Labor: {_h(fix['build_hr'])} @ {_m(fix.get('build_rate', 0))}/hr", "    ")
+            write_line(
+                f"- Build Labor: {_hours_with_rate_text(fix.get('build_hr'), fix.get('build_rate'))}",
+                "    ",
+            )
         if not has_detail:
             write_detail(nre_cost_details.get("Fixturing (per lot)"))
 
@@ -6276,6 +6304,13 @@ def render_quote(
     def _normalize_bucket_key(name: str) -> str:
         return re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_")
 
+    process_cost_items_all = list((process_costs or {}).items())
+    display_process_cost_items = [
+        (key, value)
+        for key, value in process_cost_items_all
+        if not _is_planner_meta(key)
+    ]
+
     preferred_bucket_order = [
         "milling",
         "drilling",
@@ -6288,123 +6323,47 @@ def render_quote(
         "inspection",
     ]
 
-    ordered_process_items: list[str] = []
+    def _is_planner_rollup_key(name: str | None) -> bool:
+        if pricing_source_lower != "planner":
+            return False
+        norm = _normalize_bucket_key(name)
+        if not norm:
+            return False
+        if norm in {"planner_total", "planner_machine", "planner_labor"}:
+            return True
+        return norm.startswith("planner_")
+
+    ordered_process_items: list[tuple[str, float]] = []
     seen_keys: set[str] = set()
 
+    process_costs = _fold_buckets(process_costs)
+
     for bucket in preferred_bucket_order:
-        bucket_info = canonical_process_buckets.get(bucket)
-        if not bucket_info:
-            continue
-        try:
-            bucket_total = float(bucket_info.get("total", 0.0) or 0.0)
-        except Exception:
-            bucket_total = 0.0
-        if not ((bucket_total > 0) or show_zeros):
-            continue
-        ordered_process_items.append(bucket)
-        seen_keys.add(bucket)
+        for key, value in display_process_cost_items:
+            if _normalize_bucket_key(key) != bucket:
+                continue
+            if not ((value > 0) or show_zeros):
+                continue
+            ordered_process_items.append((key, value))
+            seen_keys.add(key)
 
     remaining_items = [
-        key
-        for key, info in canonical_process_buckets.items()
-        if key not in seen_keys
-        and ((float(info.get("total", 0.0) or 0.0) > 0) or show_zeros)
+        (key, value)
+        for key, value in display_process_cost_items
+        if key not in seen_keys and ((value > 0) or show_zeros)
     ]
     remaining_items.sort(key=_normalize_bucket_key)
     ordered_process_items.extend(remaining_items)
 
-    for canon_key in ordered_process_items:
-        bucket_info = canonical_process_buckets.get(canon_key)
-        if not bucket_info:
+    for key, value in ordered_process_items:
+        normalized_key = _normalize_bucket_key(key)
+        if normalized_key == "planner_total" or normalized_key.startswith("planner_"):
             continue
-        try:
-            value = float(bucket_info.get("total", 0.0) or 0.0)
-        except Exception:
-            value = 0.0
-        source_entries = bucket_info.get("sources", []) if isinstance(bucket_info, Mapping) else []
-        if not isinstance(source_entries, list):
-            source_entries = []
-        source_details: list[dict[str, Any]] = []
-        total_hr = 0.0
-        total_extra = 0.0
-        rate_candidates: list[float] = []
-        notes_order: list[str] = []
-        notes_seen: set[str] = set()
-        for entry in source_entries:
-            entry_key = entry.get("key") if isinstance(entry, Mapping) else None
-            meta = _lookup_process_meta(entry_key)
-            try:
-                hr_val = float(meta.get("hr", 0.0) or 0.0) if isinstance(meta, Mapping) else 0.0
-            except Exception:
-                hr_val = 0.0
-            try:
-                rate_val = float(meta.get("rate", 0.0) or 0.0) if isinstance(meta, Mapping) else 0.0
-            except Exception:
-                rate_val = 0.0
-            try:
-                extra_val = float(meta.get("base_extra", 0.0) or 0.0) if isinstance(meta, Mapping) else 0.0
-            except Exception:
-                extra_val = 0.0
-            total_hr += hr_val
-            total_extra += extra_val
-            if rate_val > 0:
-                rate_candidates.append(rate_val)
-            meta_key = str(entry_key or "").lower()
-            notes_raw = applied_process.get(meta_key, {}).get("notes")
-            notes_list: list[str] = []
-            if isinstance(notes_raw, str):
-                note_text = notes_raw.strip()
-                if note_text:
-                    notes_list.append(note_text)
-            elif isinstance(notes_raw, (list, tuple, set)):
-                for note in notes_raw:
-                    note_text = str(note).strip()
-                    if note_text:
-                        notes_list.append(note_text)
-            elif notes_raw:
-                note_text = str(notes_raw).strip()
-                if note_text:
-                    notes_list.append(note_text)
-            for note_text in notes_list:
-                if note_text not in notes_seen:
-                    notes_order.append(note_text)
-                    notes_seen.add(note_text)
-            source_details.append(
-                {
-                    "meta_key": meta_key,
-                    "hr": hr_val,
-                    "rate": rate_val,
-                    "extra": extra_val,
-                }
-            )
-
-        aggregated_meta_source = _lookup_process_meta(canon_key)
-        aggregated_meta = dict(aggregated_meta_source) if isinstance(aggregated_meta_source, Mapping) else {}
-        aggregated_meta.setdefault("hr", 0.0)
-        try:
-            existing_hr = float(aggregated_meta.get("hr", 0.0) or 0.0)
-        except Exception:
-            existing_hr = 0.0
-        if total_hr > 0:
-            aggregated_meta["hr"] = total_hr
-        else:
-            aggregated_meta["hr"] = existing_hr
-        try:
-            aggregated_rate = float(aggregated_meta.get("rate", 0.0) or 0.0)
-        except Exception:
-            aggregated_rate = 0.0
-        if aggregated_rate <= 0:
-            if total_hr > 0 and value > 0:
-                aggregated_rate = value / total_hr
-            elif rate_candidates:
-                aggregated_rate = rate_candidates[0]
-        if aggregated_rate > 0:
-            aggregated_meta["rate"] = aggregated_rate
-        if total_extra:
-            aggregated_meta["base_extra"] = total_extra
-        if isinstance(process_meta, dict):
-            process_meta[canon_key] = dict(aggregated_meta)
-        meta = aggregated_meta
+        canon_key = _canonical_bucket_key(key)
+        if canon_key.startswith("planner_"):
+            continue
+        meta_key = str(key).lower()
+        meta = process_meta.get(meta_key, {}) if isinstance(process_meta, dict) else {}
         detail_bits: list[str] = []
         try:
             hr_val = float(meta.get("hr", 0.0) or 0.0)
@@ -6431,15 +6390,8 @@ def render_quote(
             else _process_label(canon_key)
         )
 
-        if not use_display:
-            for entry in source_details:
-                entry_hr = entry.get("hr", 0.0)
-                entry_rate = entry.get("rate", 0.0)
-                if entry_hr > 0:
-                    if entry_rate > 0:
-                        detail_bits.append(f"{entry_hr:.2f} hr @ ${entry_rate:,.2f}/hr")
-                    else:
-                        detail_bits.append(f"{entry_hr:.2f} hr")
+        if not use_display and hr_val > 0:
+            detail_bits.append(_hours_with_rate_text(hr_val, rate_val))
 
         rate_for_extra = rate_val if rate_val > 0 else display_rate
         if abs(extra_val) > 1e-6:
@@ -6447,10 +6399,25 @@ def render_quote(
                 use_display and display_hr <= 1e-6 and rate_for_extra > 0
             ):
                 extra_hours = extra_val / rate_for_extra
-                detail_bits.append(f"{extra_hours:.2f} hr @ ${rate_for_extra:,.2f}/hr")
+                detail_bits.append(_hours_with_rate_text(extra_hours, rate_for_extra))
 
         if notes_order:
             detail_bits.append("LLM: " + ", ".join(notes_order))
+
+        if use_display:
+            try:
+                amount_for_display = float(amount_override or 0.0)
+            except Exception:
+                amount_for_display = 0.0
+        else:
+            try:
+                amount_for_display = float(value or 0.0)
+            except Exception:
+                amount_for_display = 0.0
+
+        if label.strip().lower() == "misc":
+            if planner_bucket_display_map or amount_for_display < 1.0:
+                continue
 
         _add_labor_cost_line(
             label,
@@ -6474,12 +6441,7 @@ def render_quote(
     except Exception:
         prog_rate = 0.0
     if prog_hr > 0:
-        if prog_rate > 0:
-            prog_bits.append(
-                f"- Programmer (lot): {prog_hr:.2f} hr @ ${prog_rate:,.2f}/hr"
-            )
-        else:
-            prog_bits.append(f"- Programmer (lot): {prog_hr:.2f} hr")
+        prog_bits.append(f"- Programmer (lot): {_hours_with_rate_text(prog_hr, prog_rate)}")
     try:
         eng_hr = float(programming_detail.get("eng_hr", 0.0) or 0.0)
     except Exception:
@@ -6489,21 +6451,16 @@ def render_quote(
     except Exception:
         eng_rate = 0.0
     if eng_hr > 0:
-        if eng_rate > 0:
-            prog_bits.append(
-                f"- Engineering (lot): {eng_hr:.2f} hr @ ${eng_rate:,.2f}/hr"
-            )
-        else:
-            prog_bits.append(f"- Engineering (lot): {eng_hr:.2f} hr")
+        prog_bits.append(f"- Engineering (lot): {_hours_with_rate_text(eng_hr, eng_rate)}")
     if qty > 1 and programming_per_part_cost > 0:
         prog_bits.append(f"Amortized across {qty} pcs")
 
-    _add_labor_cost_line(
-        "Programming (amortized)",
-        programming_per_part_cost,
-        detail_bits=prog_bits,
-        force=True,
-    )
+    if qty > 1 and programming_per_part_cost > 0:
+        _add_labor_cost_line(
+            "Programming (amortized)",
+            programming_per_part_cost,
+            detail_bits=prog_bits,
+        )
 
     fixture_detail = (nre_detail or {}).get("fixture") or {}
     fixture_labor_per_part_cost = labor_cost_totals.get("Fixture Build (amortized)")
@@ -6527,12 +6484,9 @@ def render_quote(
     except Exception:
         fixture_rate = 0.0
     if fixture_hr > 0:
-        if fixture_rate > 0:
-            fixture_bits.append(
-                f"- Build labor (lot): {fixture_hr:.2f} hr @ ${fixture_rate:,.2f}/hr"
-            )
-        else:
-            fixture_bits.append(f"- Build labor (lot): {fixture_hr:.2f} hr")
+        fixture_bits.append(
+            f"- Build labor (lot): {_hours_with_rate_text(fixture_hr, fixture_rate)}"
+        )
     try:
         soft_jaw_hr = float(fixture_detail.get("soft_jaw_hr", 0.0) or 0.0)
     except Exception:
@@ -7620,7 +7574,11 @@ def _select_speeds_feeds_row(
         return None
     if material_key:
         mat_col = next(
-            (col for col in ("material", "material_family", "material_group") if col in matches[0]),
+            (
+                col
+                for col in ("material_group", "material_family", "material")
+                if col in matches[0]
+            ),
             None,
         )
         if mat_col:
@@ -7633,6 +7591,23 @@ def _select_speeds_feeds_row(
                 if partial:
                     matches = partial
     return matches[0] if matches else None
+
+
+def _clean_path_text(text: str) -> str:
+    raw = text.strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {'"', "'"}:
+        raw = raw[1:-1].strip()
+    return os.path.expandvars(raw)
+
+
+def _stringify_resolved_path(path_obj: Path) -> str:
+    try:
+        try:
+            return str(path_obj.resolve(strict=False))
+        except TypeError:
+            return str(path_obj.resolve())
+    except Exception:
+        return str(path_obj)
 
 
 def _resolve_speeds_feeds_path(
@@ -7740,6 +7715,17 @@ def _clean_hole_groups(raw: Any) -> list[dict[str, Any]] | None:
         )
     return cleaned if cleaned else None
 
+MIN_DRILL_MIN_PER_HOLE = 0.10
+MAX_DRILL_MIN_PER_HOLE = 2.00
+
+
+def _apply_drill_minutes_clamp(hours: float, hole_count: int) -> float:
+    if hours <= 0.0 or hole_count <= 0:
+        return hours
+    min_hr = (hole_count * MIN_DRILL_MIN_PER_HOLE) / 60.0
+    max_hr = (hole_count * MAX_DRILL_MIN_PER_HOLE) / 60.0
+    return max(min(hours, max_hr), min_hr)
+
 
 def estimate_drilling_hours(
     hole_diams_mm: list[float],
@@ -7804,6 +7790,7 @@ def estimate_drilling_hours(
         overhead = overhead_params or _drill_overhead_from_params(None)
         per_hole_overhead = replace(overhead, toolchange_min=0.0)
         total_min = 0.0
+        total_holes = 0
         material_cap_val = _as_float_or_none(material_factor)
         if material_cap_val is not None and material_cap_val <= 0:
             material_cap_val = None
@@ -7855,24 +7842,56 @@ def estimate_drilling_hours(
                 teeth_int = 1
             return _TimeToolParams(teeth_z=teeth_int)
 
+        thickness_in_val: float | None = None
+        if thickness_mm and thickness_mm > 0:
+            try:
+                thickness_in_val = float(thickness_mm) / 25.4
+            except Exception:
+                thickness_in_val = None
+
         for diameter_in, qty, depth_in in group_specs:
             if qty <= 0 or diameter_in <= 0 or depth_in <= 0:
                 continue
-            ratio = depth_in / max(diameter_in, 1e-6)
-            op_name = "Deep_Drill" if depth_in > 3.0 * diameter_in else "Drill"
+            tool_dia_in = float(diameter_in)
+            thickness_for_ratio = thickness_in_val if thickness_in_val and thickness_in_val > 0 else depth_in
+            l_over_d = 0.0
+            if tool_dia_in > 0 and thickness_for_ratio and thickness_for_ratio > 0:
+                l_over_d = float(thickness_for_ratio) / float(tool_dia_in)
+            op_name = "deep_drill" if l_over_d >= 3.0 else "drill"
             cache_key = (op_name, round(float(diameter_in), 4))
             cache_entry = row_cache.get(cache_key)
             if cache_entry is None:
-                row = _pick_speeds_row(
-                    material_label=material_label,
-                    operation=op_name,
-                    tool_diameter_in=float(diameter_in),
-                    table=speeds_feeds_table,
-                )
+                material_for_lookup: str | None = None
+                for candidate in (material_label, mat_key, material_lookup):
+                    if candidate:
+                        material_for_lookup = str(candidate)
+                        break
+
+                row: Mapping[str, Any] | None = None
+                if speeds_feeds_table is not None:
+                    row = _select_speeds_feeds_row(
+                        speeds_feeds_table,
+                        operation=op_name,
+                        material_key=material_for_lookup,
+                    )
+                    if not row and op_name.lower() == "deep_drill":
+                        row = _select_speeds_feeds_row(
+                            speeds_feeds_table,
+                            operation="Drill",
+                            material_key=material_for_lookup,
+                        )
+
+                if not row:
+                    row = _pick_speeds_row(
+                        material_label=material_label,
+                        operation=op_name,
+                        tool_diameter_in=float(diameter_in),
+                        table=speeds_feeds_table,
+                    )
                 if not row and op_name.lower() == "deep_drill":
                     row = _pick_speeds_row(
                         material_label=material_label,
-                        operation="Drill",
+                        operation="drill",
                         tool_diameter_in=float(diameter_in),
                         table=speeds_feeds_table,
                     )
@@ -7899,7 +7918,7 @@ def estimate_drilling_hours(
                 diameter_in=float(diameter_in),
                 hole_depth_in=float(depth_in),
                 point_angle_deg=118.0,
-                ld_ratio=ratio,
+                ld_ratio=l_over_d,
             )
             minutes = _estimate_time_min(
                 row,
@@ -7911,8 +7930,15 @@ def estimate_drilling_hours(
             )
             if minutes <= 0:
                 continue
-            total_min += minutes * int(qty)
-            if overhead.toolchange_min and qty > 0:
+            try:
+                qty_int = int(qty)
+            except Exception:
+                continue
+            if qty_int <= 0:
+                continue
+            total_holes += qty_int
+            total_min += minutes * qty_int
+            if overhead.toolchange_min and qty_int > 0:
                 total_min += float(overhead.toolchange_min)
         if missing_row_messages and warnings is not None:
             for op_display, material_display, dia_val in sorted(missing_row_messages):
@@ -7924,7 +7950,12 @@ def estimate_drilling_hours(
                 if warning_text not in warnings:
                     warnings.append(warning_text)
         if total_min > 0:
-            return total_min / 60.0
+            hole_count = total_holes
+            if hole_count <= 0 and fallback_counts:
+                hole_count = sum(
+                    max(0, int(qty)) for qty in fallback_counts.values() if qty
+                )
+            return _apply_drill_minutes_clamp(total_min / 60.0, hole_count)
 
     thickness_for_fallback = float(thickness_mm or 0.0)
     if thickness_for_fallback <= 0:
@@ -7955,14 +7986,23 @@ def estimate_drilling_hours(
     toolchange_s = 15.0
 
     total_sec = 0.0
+    holes_fallback = 0
     for d, qty in fallback_counts.items():
-        if qty <= 0:
+        if qty is None:
             continue
+        try:
+            qty_int = int(qty)
+        except Exception:
+            continue
+        if qty_int <= 0:
+            continue
+        holes_fallback += qty_int
         per = sec_per_hole(float(d)) * mfac * tfac
-        total_sec += qty * per
+        total_sec += qty_int * per
         total_sec += toolchange_s
 
-    return total_sec / 3600.0
+    hours = total_sec / 3600.0
+    return _apply_drill_minutes_clamp(hours, holes_fallback)
 
 
 def estimate_tapping_hours(tap_qty: int, thickness_in: float, mat_key: str) -> float:
@@ -9327,7 +9367,8 @@ def compute_quote_from_df(df: pd.DataFrame,
     raw_path_text = str(speeds_feeds_raw).strip() if speeds_feeds_raw else ""
     if raw_path_text:
         try:
-            resolved_candidate = Path(raw_path_text).expanduser()
+            expanded_text = _clean_path_text(raw_path_text)
+            resolved_candidate = Path(expanded_text).expanduser()
         except Exception as exc:
             logger.warning(
                 "Invalid speeds/feeds CSV path %r: %s; using legacy drilling heuristics for this quote.",
@@ -9339,7 +9380,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                 f"Speeds/feeds CSV path invalid ({raw_path_text}) — using legacy drilling heuristics."
             )
         else:
-            speeds_feeds_path = str(resolved_candidate)
+            speeds_feeds_path = _stringify_resolved_path(resolved_candidate)
             if resolved_candidate.is_file():
                 speeds_feeds_table = _load_speeds_feeds_table(str(resolved_candidate))
                 if speeds_feeds_table is None:
@@ -9351,10 +9392,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                         f"Failed to load speeds/feeds CSV at {resolved_candidate} — using legacy drilling heuristics."
                     )
                 else:
-                    try:
-                        speeds_feeds_path = str(resolved_candidate.resolve())
-                    except Exception:
-                        speeds_feeds_path = str(resolved_candidate)
+                    speeds_feeds_path = _stringify_resolved_path(resolved_candidate)
             else:
                 logger.warning(
                     "Speeds/feeds CSV not found at %s; using legacy drilling heuristics for this quote.",
@@ -9371,10 +9409,17 @@ def compute_quote_from_df(df: pd.DataFrame,
     machine_params_default = _machine_params_from_params(params)
     drill_overhead_default = _drill_overhead_from_params(params)
     speeds_feeds_warnings: list[str] = []
+    thickness_mm = float(thickness_for_drill or 0.0)
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "Estimating drilling hours with thickness %.3f mm (%.3f in)",
+            thickness_mm,
+            thickness_mm / 25.4 if thickness_mm else 0.0,
+        )
     drill_hr = estimate_drilling_hours(
-        hole_diams_list,
-        float(thickness_for_drill or 0.0),
-        drill_material_key or "",
+        hole_diams_mm=hole_diams_list,
+        thickness_mm=thickness_mm,
+        mat_key=drill_material_key or "",
         hole_groups=hole_groups_geo,
         speeds_feeds_table=speeds_feeds_table,
         machine_params=machine_params_default,
@@ -9383,17 +9428,30 @@ def compute_quote_from_df(df: pd.DataFrame,
     )
     holes = int(geo_context.get("hole_count") or 0)
     if holes <= 0:
-        holes = len(hole_diams_list) if hole_diams_list else 0
+        if hole_diams_list:
+            holes = len(hole_diams_list)
+        elif hole_groups_geo:
+            holes_from_groups = 0
+            for entry in hole_groups_geo:
+                if not isinstance(entry, Mapping):
+                    continue
+                count_val = _coerce_float_or_none(entry.get("count"))
+                qty_int = 0
+                if count_val is not None:
+                    try:
+                        qty_int = int(round(count_val))
+                    except Exception:
+                        qty_int = 0
+                if qty_int <= 0:
+                    qty_int = 1
+                holes_from_groups += qty_int
+            if holes_from_groups > 0:
+                holes = holes_from_groups
 
     if not math.isfinite(drill_hr) or drill_hr < 0:
         drill_hr = 0.0
 
-    min_min_per_hole = 0.10
-    max_min_per_hole = 2.00
-
-    if holes > 0:
-        drill_hr = max(drill_hr, (holes * min_min_per_hole) / 60.0)
-        drill_hr = min(drill_hr, (holes * max_min_per_hole) / 60.0)
+    drill_hr = _apply_drill_minutes_clamp(drill_hr, holes)
 
     drill_hr = min(drill_hr, 500.0)
     for warning_text in speeds_feeds_warnings:
@@ -12137,10 +12195,8 @@ def compute_quote_from_df(df: pd.DataFrame,
         extra = float(meta.get("base_extra", 0.0))
         detail_bits: list[str] = []
 
-        if hr > 0 and rate > 0:
-            detail_bits.append(f"{hr:.2f} hr @ ${rate:,.2f}/hr")
-        elif hr > 0:
-            detail_bits.append(f"{hr:.2f} hr")
+        if hr > 0:
+            detail_bits.append(_hours_with_rate_text(hr, rate))
 
         proc_notes = applied_process.get(key, {}).get("notes")
         if proc_notes:
@@ -12152,21 +12208,15 @@ def compute_quote_from_df(df: pd.DataFrame,
     prog_hr_detail = float(programming_detail.get("prog_hr", 0.0) or 0.0)
     prog_rate_detail = float(programming_detail.get("prog_rate", 0.0) or 0.0)
     if prog_hr_detail > 0:
-        if prog_rate_detail > 0:
-            programming_bits.append(
-                f"- Programmer (lot): {prog_hr_detail:.2f} hr @ ${prog_rate_detail:,.2f}/hr"
-            )
-        else:
-            programming_bits.append(f"- Programmer (lot): {prog_hr_detail:.2f} hr")
+        programming_bits.append(
+            f"- Programmer (lot): {_hours_with_rate_text(prog_hr_detail, prog_rate_detail)}"
+        )
     eng_hr_detail = float(programming_detail.get("eng_hr", 0.0) or 0.0)
     eng_rate_detail = float(programming_detail.get("eng_rate", 0.0) or 0.0)
     if eng_hr_detail > 0:
-        if eng_rate_detail > 0:
-            programming_bits.append(
-                f"- Engineering (lot): {eng_hr_detail:.2f} hr @ ${eng_rate_detail:,.2f}/hr"
-            )
-        else:
-            programming_bits.append(f"- Engineering (lot): {eng_hr_detail:.2f} hr")
+        programming_bits.append(
+            f"- Engineering (lot): {_hours_with_rate_text(eng_hr_detail, eng_rate_detail)}"
+        )
     if Qty > 1 and programming_per_part > 0:
         programming_bits.append(f"Amortized across {Qty} pcs")
 
@@ -12178,12 +12228,9 @@ def compute_quote_from_df(df: pd.DataFrame,
     fixture_build_hr_detail = float(fixture_detail.get("build_hr", 0.0) or 0.0)
     fixture_rate_detail = float(fixture_detail.get("build_rate", rates.get("FixtureBuildRate", 0.0)))
     if fixture_build_hr_detail > 0:
-        if fixture_rate_detail > 0:
-            fixture_bits.append(
-                f"- Build labor (lot): {fixture_build_hr_detail:.2f} hr @ ${fixture_rate_detail:,.2f}/hr"
-            )
-        else:
-            fixture_bits.append(f"- Build labor (lot): {fixture_build_hr_detail:.2f} hr")
+        fixture_bits.append(
+            f"- Build labor (lot): {_hours_with_rate_text(fixture_build_hr_detail, fixture_rate_detail)}"
+        )
     soft_jaw_hr = float(fixture_detail.get("soft_jaw_hr", 0.0) or 0.0)
     if soft_jaw_hr > 0:
         fixture_bits.append(f"Soft jaw prep {soft_jaw_hr:.2f} hr")

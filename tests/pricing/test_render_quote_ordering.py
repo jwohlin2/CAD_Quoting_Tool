@@ -154,3 +154,63 @@ def test_render_quote_hour_summary_adds_programming_hours() -> None:
     assert any("Programming" in line and "2.00 hr" in line for line in summary_block)
     assert any("Fixture Build" in line and "1.50 hr" in line for line in summary_block)
     assert any("Total Hours" in line and "6.50 hr" in line for line in summary_block)
+
+
+def test_render_quote_dedupes_planner_rollup_cost_rows() -> None:
+    result = {
+        "price": 200.0,
+        "breakdown": {
+            "qty": 1,
+            "totals": {
+                "labor_cost": 120.0,
+                "direct_costs": 30.0,
+                "subtotal": 150.0,
+                "with_overhead": 165.0,
+                "with_ga": 173.25,
+                "with_contingency": 178.4475,
+                "with_expedite": 178.4475,
+            },
+            "nre_detail": {},
+            "nre": {},
+            "material": {},
+            "process_costs": {
+                "Planner Total": 120.0,
+                "Planner Machine": 70.0,
+                "planner_labor": 50.0,
+                "milling": 30.0,
+            },
+            "process_meta": {
+                "planner_total": {"minutes": 240.0},
+                "planner_machine": {"minutes": 120.0},
+                "planner_labor": {"minutes": 120.0},
+                "milling": {"hr": 1.5},
+            },
+            "pass_through": {},
+            "pricing_source": "planner",
+            "applied_pcts": {
+                "OverheadPct": 0.10,
+                "GA_Pct": 0.05,
+                "ContingencyPct": 0.02,
+                "MarginPct": 0.15,
+            },
+            "rates": {},
+            "params": {},
+            "labor_cost_details": {},
+            "direct_cost_details": {},
+        },
+    }
+
+    rendered = appV5.render_quote(result, currency="$")
+    lines = rendered.splitlines()
+
+    assert "Labor Hour Summary" in lines
+    summary_idx = lines.index("Labor Hour Summary")
+    summary_block = lines[summary_idx: summary_idx + 10]
+    assert any("Planner Total" in line for line in summary_block)
+    assert any("Planner Machine" in line for line in summary_block)
+    assert any("Planner Labor" in line for line in summary_block)
+
+    labor_idx = lines.index("Process & Labor Costs")
+    next_blank = next(i for i in range(labor_idx + 1, len(lines)) if lines[i] == "")
+    labor_section = lines[labor_idx:next_blank]
+    assert not any("Planner" in line for line in labor_section)
