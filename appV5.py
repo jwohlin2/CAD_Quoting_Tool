@@ -7381,6 +7381,97 @@ def _normalize_speeds_feeds_df(df: "pd.DataFrame") -> "pd.DataFrame":
     return normalized_df
 
 
+def _coerce_speeds_feeds_records(table: Any | None) -> list[Mapping[str, Any]]:
+    if table is None:
+        return []
+    records: list[Mapping[str, Any]] = []
+    if hasattr(table, "to_dict"):
+        try:
+            raw_records = table.to_dict("records")  # type: ignore[attr-defined]
+        except Exception:
+            raw_records = None
+        if isinstance(raw_records, list):
+            records = [row for row in raw_records if isinstance(row, Mapping)]
+    if not records:
+        stub_rows = getattr(table, "_rows", None)
+        if isinstance(stub_rows, list):
+            records = [row for row in stub_rows if isinstance(row, Mapping)]
+    if not records and isinstance(table, Sequence):
+        records = [row for row in table if isinstance(row, Mapping)]  # type: ignore[arg-type]
+    return records
+
+
+def _record_key_map(record: Mapping[str, Any]) -> dict[str, str]:
+    return {
+        re.sub(r"[^0-9a-z]+", "_", str(key).strip().lower()).strip("_"): key
+        for key in record.keys()
+    }
+
+
+def _lookup_material_group_from_table(
+    table: Any | None,
+    normalized_material_key: str,
+) -> str | None:
+    if not normalized_material_key:
+        return None
+    for record in _coerce_speeds_feeds_records(table):
+        key_map = _record_key_map(record)
+        mat_field = next(
+            (key_map[name] for name in ("material", "material_name", "canonical_material") if name in key_map),
+            None,
+        )
+        group_field = next(
+            (key_map[name] for name in ("material_group", "iso_group", "group") if name in key_map),
+            None,
+        )
+        if mat_field is None or group_field is None:
+            continue
+        material_value = record.get(mat_field)
+        if _normalize_lookup_key(str(material_value or "")) != normalized_material_key:
+            continue
+        group_value = record.get(group_field)
+        if not group_value:
+            continue
+        return str(group_value).strip().upper()
+    return None
+
+
+def _material_label_from_table(
+    table: Any | None,
+    material_key: str | None,
+    normalized_lookup: str,
+) -> str | None:
+    records = _coerce_speeds_feeds_records(table)
+    if not records:
+        return None
+    target_group = str(material_key or "").strip().upper()
+    for record in records:
+        key_map = _record_key_map(record)
+        mat_field = next(
+            (key_map[name] for name in ("material", "material_name", "canonical_material") if name in key_map),
+            None,
+        )
+        group_field = next(
+            (key_map[name] for name in ("material_group", "iso_group", "group") if name in key_map),
+            None,
+        )
+        if mat_field is None:
+            continue
+        row_material = record.get(mat_field)
+        if normalized_lookup:
+            if _normalize_lookup_key(str(row_material or "")) == normalized_lookup:
+                label = str(row_material).strip()
+                if label:
+                    return label
+        if group_field and target_group:
+            group_value = record.get(group_field)
+            if group_value and str(group_value).strip().upper() == target_group:
+                label = str(row_material).strip()
+                if label:
+                    return label
+    return None
+
+
 def _load_speeds_feeds_table(path: str | None) -> "pd.DataFrame" | None:
     if not path:
         return None
@@ -7609,9 +7700,20 @@ def estimate_drilling_hours(
     """
     Conservative plate-drilling model with floors so 100+ holes don't collapse to minutes.
     """
-    mat = (mat_key or "").lower()
     material_lookup = _normalize_lookup_key(mat_key) if mat_key else ""
     material_label = MATERIAL_DISPLAY_BY_KEY.get(material_lookup, mat_key)
+    if (
+        speeds_feeds_table is not None
+        and (not material_label or material_label == mat_key)
+    ):
+        alt_label = _material_label_from_table(
+            speeds_feeds_table,
+            mat_key,
+            material_lookup,
+        )
+        if alt_label:
+            material_label = alt_label
+    mat = str(material_label or mat_key or "").lower()
     material_factor = _unit_hp_cap(material_label)
 
     group_specs: list[tuple[float, int, float]] = []
@@ -9174,10 +9276,17 @@ def compute_quote_from_df(df: pd.DataFrame,
         if thickness_in_ui and thickness_in_ui > 0:
             thickness_for_drill = float(thickness_in_ui) * 25.4
 
-    drill_material_key = geo_context.get("material") or material_name
+    drill_material_source = geo_context.get("material") or material_name
+    drill_material_lookup = (
+        _normalize_lookup_key(drill_material_source)
+        if drill_material_source
+        else ""
+    )
+    drill_material_key = drill_material_lookup or (drill_material_source or "")
     speeds_feeds_raw = _resolve_speeds_feeds_path(params, ui_vars)
     speeds_feeds_path: str | None = None
     speeds_feeds_table: "pd.DataFrame" | None = None
+    drill_material_group: str | None = None
     raw_path_text = str(speeds_feeds_raw).strip() if speeds_feeds_raw else ""
     if raw_path_text:
         try:
@@ -9209,6 +9318,10 @@ def compute_quote_from_df(df: pd.DataFrame,
                         speeds_feeds_path = str(resolved_candidate.resolve())
                     except Exception:
                         speeds_feeds_path = str(resolved_candidate)
+                    drill_material_group = _lookup_material_group_from_table(
+                        speeds_feeds_table,
+                        drill_material_lookup,
+                    )
             else:
                 logger.warning(
                     "Speeds/feeds CSV not found at %s; using legacy drilling heuristics for this quote.",
@@ -9222,6 +9335,18 @@ def compute_quote_from_df(df: pd.DataFrame,
             "Speeds/feeds CSV path not configured; using legacy drilling heuristics for this quote."
         )
         _record_red_flag("Speeds/feeds CSV not configured — using legacy drilling heuristics.")
+    if (
+        drill_material_group is None
+        and speeds_feeds_table is not None
+        and drill_material_lookup
+    ):
+        drill_material_group = _lookup_material_group_from_table(
+            speeds_feeds_table,
+            drill_material_lookup,
+        )
+    if drill_material_group:
+        drill_material_key = drill_material_group
+        geo_context.setdefault("material_group", drill_material_group)
     machine_params_default = _machine_params_from_params(params)
     drill_overhead_default = _drill_overhead_from_params(params)
     speeds_feeds_warnings: list[str] = []
