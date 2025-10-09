@@ -6531,6 +6531,27 @@ def render_quote(
     except Exception:
         fixture_hours = 0.0
 
+    try:
+        qty_for_hours = float(qty)
+    except Exception:
+        qty_for_hours = 0.0
+    if qty_for_hours <= 0:
+        qty_for_hours = 0.0
+
+    try:
+        programming_per_part_amount = float(programming_per_part_cost or 0.0)
+    except Exception:
+        programming_per_part_amount = 0.0
+    programming_is_amortized = bool(programming_meta.get("amortized")) or (
+        qty_for_hours > 1 and programming_per_part_amount > 0
+    )
+
+    try:
+        fixture_per_part_amount = float(fixture_labor_per_part_cost or 0.0)
+    except Exception:
+        fixture_per_part_amount = 0.0
+    fixture_is_amortized = qty_for_hours > 1 and fixture_per_part_amount > 0
+
     if str(pricing_source_value).lower() == "planner":
         planner_total_meta = process_meta.get("planner_total") or {}
         planner_items = planner_total_meta.get("line_items") if isinstance(planner_total_meta, dict) else None
@@ -6573,8 +6594,22 @@ def render_quote(
             _planner_hours_for("planner_machine"),
             include_in_total=False,
         )
-        _record_hour_entry("Programming (amortized)", programming_hours)
-        _record_hour_entry("Fixture Build (amortized)", fixture_hours)
+        _record_hour_entry("Programming (lot)", programming_hours)
+        if programming_is_amortized and qty_for_hours > 0:
+            per_part_prog_hr = programming_hours / qty_for_hours
+            _record_hour_entry(
+                "Programming (amortized per part)",
+                per_part_prog_hr,
+                include_in_total=False,
+            )
+        _record_hour_entry("Fixture Build (lot)", fixture_hours)
+        if fixture_is_amortized and qty_for_hours > 0:
+            per_part_fixture_hr = fixture_hours / qty_for_hours
+            _record_hour_entry(
+                "Fixture Build (amortized per part)",
+                per_part_fixture_hr,
+                include_in_total=False,
+            )
         for key, meta in sorted((process_meta or {}).items()):
             key_lower = str(key).lower()
             if key_lower.startswith("planner_") or key_lower == "planner total":
@@ -6602,7 +6637,21 @@ def render_quote(
             _record_hour_entry(_process_label(key), hr_val)
 
         _record_hour_entry("Programming", programming_hours)
+        if programming_is_amortized and qty_for_hours > 0:
+            per_part_prog_hr = programming_hours / qty_for_hours
+            _record_hour_entry(
+                "Programming (amortized per part)",
+                per_part_prog_hr,
+                include_in_total=False,
+            )
         _record_hour_entry("Fixture Build", fixture_hours)
+        if fixture_is_amortized and qty_for_hours > 0:
+            per_part_fixture_hr = fixture_hours / qty_for_hours
+            _record_hour_entry(
+                "Fixture Build (amortized per part)",
+                per_part_fixture_hr,
+                include_in_total=False,
+            )
 
     if hour_summary_entries:
         lines.append("")

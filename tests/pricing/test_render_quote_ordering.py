@@ -124,7 +124,7 @@ def test_render_quote_hour_summary_adds_programming_hours() -> None:
                 "with_expedite": 142.758,
             },
             "nre_detail": {
-                "programming": {"prog_hr": 2.0},
+                "programming": {"prog_hr": 2.0, "amortized": True},
                 "fixture": {"build_hr": 1.5, "labor_cost": 90.0, "build_rate": 60.0},
             },
             "nre": {},
@@ -150,9 +150,17 @@ def test_render_quote_hour_summary_adds_programming_hours() -> None:
 
     assert "Labor Hour Summary" in lines
     summary_idx = lines.index("Labor Hour Summary")
-    summary_block = lines[summary_idx:summary_idx + 8]
+    summary_block = lines[summary_idx:summary_idx + 10]
     assert any("Programming" in line and "2.00 hr" in line for line in summary_block)
+    assert any(
+        "Programming (amortized per part)" in line and "0.40 hr" in line
+        for line in summary_block
+    )
     assert any("Fixture Build" in line and "1.50 hr" in line for line in summary_block)
+    assert any(
+        "Fixture Build (amortized per part)" in line and "0.30 hr" in line
+        for line in summary_block
+    )
     assert any("Total Hours" in line and "6.50 hr" in line for line in summary_block)
 
 
