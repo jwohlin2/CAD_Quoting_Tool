@@ -7984,14 +7984,16 @@ def estimate_drilling_hours(
                     f"{float(total_hr):.2f}" if isinstance(total_hr, (int, float)) else "-"
                 )
                 debug_lines.append(
-                    "Drill calc → "
-                    f"op={operation_name}, mat={mat_display}, "
-                    f"row=SFM:{sfm_text} IPR:{ipr_text}; "
-                    f"RPM:{rpm_text} IPM:{ipm_text}; "
-                    f"depth/hole: {depth_text} in; "
-                    f"holes: {int(qty)}; "
-                    f"min/hole: {minutes_text}; "
-                    f"total hr: {total_hr_text}."
+                    (
+                        "Drill calc → "
+                        f"op={operation_name}, mat={mat_display}, "
+                        f"row=SFM:{sfm_text} IPR:{ipr_text}; "
+                        f"RPM:{rpm_text} IPM:{ipm_text}; "
+                        f"depth/hole: {depth_text} in; "
+                        f"holes: {int(qty)}; "
+                        f"min/hole: {minutes_text}; "
+                        f"total hr: {total_hr_text}."
+                    )
                 )
         if missing_row_messages and warnings is not None:
             for op_display, material_display, dia_val in sorted(missing_row_messages):
