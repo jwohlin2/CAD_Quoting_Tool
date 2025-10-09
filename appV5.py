@@ -6266,6 +6266,9 @@ def render_quote(
     ordered_process_items.extend(remaining_items)
 
     for key, value in ordered_process_items:
+        normalized_key = _normalize_bucket_key(key)
+        if normalized_key == "planner_total" or normalized_key.startswith("planner_"):
+            continue
         canon_key = _canonical_bucket_key(key)
         meta_key = str(key).lower()
         meta = process_meta.get(meta_key, {}) if isinstance(process_meta, dict) else {}
