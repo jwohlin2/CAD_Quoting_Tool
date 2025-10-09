@@ -6367,12 +6367,12 @@ def render_quote(
     if qty > 1 and programming_per_part_cost > 0:
         prog_bits.append(f"Amortized across {qty} pcs")
 
-    _add_labor_cost_line(
-        "Programming (amortized)",
-        programming_per_part_cost,
-        detail_bits=prog_bits,
-        force=True,
-    )
+    if qty > 1 and programming_per_part_cost > 0:
+        _add_labor_cost_line(
+            "Programming (amortized)",
+            programming_per_part_cost,
+            detail_bits=prog_bits,
+        )
 
     fixture_detail = (nre_detail or {}).get("fixture") or {}
     fixture_labor_per_part_cost = labor_cost_totals.get("Fixture Build (amortized)")
