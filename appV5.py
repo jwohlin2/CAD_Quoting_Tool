@@ -5398,7 +5398,17 @@ def _canonical_bucket_key(name: str) -> str:
     normalized = _normalize_bucket_key(name)
     if not normalized:
         return ""
-    return CANON_MAP.get(normalized, normalized)
+    canon = CANON_MAP.get(normalized)
+    if canon:
+        return canon
+
+    tokens = [tok for tok in normalized.split("_") if tok]
+    if any(tok.startswith("deburr") or tok.startswith("debur") for tok in tokens):
+        return "finishing_deburr"
+    if any(tok.startswith("finish") for tok in tokens):
+        return "finishing_deburr"
+
+    return normalized
 
 
 def canonicalize_costs(process_costs: Mapping[str, Any] | None) -> dict[str, float]:
@@ -5791,7 +5801,10 @@ def render_quote(
     labor_costs_display: dict[str, float] = {}
     prog_hr: float = 0.0
     direct_cost_details = breakdown.get("direct_cost_details", {}) or {}
-    qty          = int(breakdown.get("qty", 1) or 1)
+    qty_raw = result.get("qty")
+    if qty_raw in (None, ""):
+        qty_raw = breakdown.get("qty")
+    qty = int(qty_raw or 1)
     price        = float(result.get("price", totals.get("price", 0.0)))
 
     g = breakdown.get("geo_context") or breakdown.get("geo") or result.get("geo") or {}
@@ -7313,6 +7326,16 @@ def render_quote(
             continue
         display_process_costs[key] = value
 
+    def _append_unique(bits: list[str], value: Any) -> None:
+        text = str(value).strip()
+        if not text:
+            return
+        if text not in bits:
+            bits.append(text)
+
+    aggregated_process_rows: dict[str, dict[str, Any]] = {}
+    aggregated_order: list[str] = []
+
     for entry in _iter_ordered_process_entries(
         display_process_costs,
         process_meta=process_meta,
@@ -7333,13 +7356,71 @@ def render_quote(
         canonical_label, _ = _canonical_amortized_label(entry.label)
         fallback_detail = labor_cost_details_input.get(canonical_label or entry.label)
 
+        bucket = aggregated_process_rows.get(canon_key)
+        if bucket is None:
+            bucket = {
+                "amount": 0.0,
+                "detail_bits": [],
+                "process_keys": [],
+                "fallback_detail": fallback_detail,
+                "display_override": entry.display_override,
+                "representative_key": str(entry.process_key or canon_key),
+            }
+            aggregated_process_rows[canon_key] = bucket
+            aggregated_order.append(canon_key)
+        else:
+            if not bucket.get("fallback_detail") and fallback_detail:
+                bucket["fallback_detail"] = fallback_detail
+            if entry.display_override:
+                bucket["display_override"] = entry.display_override
+
+        try:
+            amount_val = float(entry.amount or 0.0)
+        except Exception:
+            amount_val = 0.0
+        bucket["amount"] += amount_val
+
+        proc_key_text = str(entry.process_key or "").strip()
+        if proc_key_text and proc_key_text not in bucket["process_keys"]:
+            bucket["process_keys"].append(proc_key_text)
+
+        for bit in entry.detail_bits:
+            _append_unique(bucket["detail_bits"], bit)
+
+    hidden_canon_keys = {"planner_labor", "planner_machine", "planner_total", "misc"}
+    remaining_costs = {canon: data["amount"] for canon, data in aggregated_process_rows.items()}
+
+    for canon_key in aggregated_order:
+        if canon_key in hidden_canon_keys or canon_key.startswith("planner_"):
+            continue
+
+        amount = remaining_costs.get(canon_key, 0.0)
+        bucket = aggregated_process_rows[canon_key]
+        process_keys = bucket.get("process_keys") or []
+        representative_key = bucket.get("representative_key")
+        if not process_keys and representative_key:
+            text_key = str(representative_key).strip()
+            if text_key:
+                process_keys = [text_key]
+
+        label = _display_bucket_label(canon_key, label_overrides)
+        primary_process_key = process_keys[0] if process_keys else canon_key
+
         _add_labor_cost_line(
-            entry.label,
-            entry.amount,
-            process_key=str(entry.process_key),
-            detail_bits=list(entry.detail_bits),
-            display_override=entry.display_override,
+            label,
+            amount,
+            process_key=primary_process_key,
+            detail_bits=list(bucket.get("detail_bits", [])),
+            fallback_detail=bucket.get("fallback_detail"),
+            display_override=bucket.get("display_override"),
         )
+
+        storage_key = _labor_storage_key(label, primary_process_key)
+        entry = labor_row_data.get(storage_key)
+        if entry and len(process_keys) > 1:
+            for extra_key in process_keys[1:]:
+                if extra_key not in entry["process_keys"]:
+                    entry["process_keys"].append(extra_key)
 
 
     show_amortized_single_qty = _lookup_config_flag(
@@ -7450,6 +7531,11 @@ def render_quote(
         raise AssertionError(
             "Displayed process rows do not add up to the accumulated labor total."
         )
+
+    expected_labor_total = float(totals.get("labor_cost", 0.0) or 0.0)
+    if abs(displayed_process_total - expected_labor_total) >= 0.01:
+        raise AssertionError("bucket sum mismatch")
+
     proc_total = displayed_process_total
     row("Total", proc_total, indent="  ")
 
