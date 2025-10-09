@@ -187,6 +187,7 @@ def test_render_quote_dedupes_planner_rollup_cost_rows() -> None:
             "process_costs": {
                 "Planner Total": 120.0,
                 "Planner Machine": 70.0,
+                "Planner Labor": 55.0,
                 "planner_labor": 50.0,
                 "milling": 30.0,
             },

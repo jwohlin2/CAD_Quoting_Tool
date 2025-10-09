@@ -1799,67 +1799,6 @@ def sanitize_suggestions(s: dict, bounds: dict) -> dict:
     return sanitized
 
 
-def build_suggest_payload(
-    geo: dict | None,
-    baseline: dict | None,
-    rates: dict | None,
-    bounds: dict | None,
-) -> dict:
-    """Build the JSON payload passed to the LLM suggestor.
-
-    Keeps only JSON-serializable fields and includes a compact `seed` section
-    from `geo['derived']` with useful nudges.
-    """
-    def _to_float_maybe(x):
-        v = _as_float_or_none(x)
-        return v if v is not None else x
-
-    geo = dict(geo or {})
-    baseline = dict(baseline or {})
-    bounds = dict(bounds or {})
-    rates_in = dict(rates or {})
-
-    rates_norm: dict[str, float | str] = {}
-    for k, v in rates_in.items():
-        rates_norm[str(k)] = _to_float_maybe(v)
-
-    derived = geo.get("derived") if isinstance(geo.get("derived"), dict) else {}
-    seed = {}
-    for key in (
-        "tap_qty",
-        "cbore_qty",
-        "csk_qty",
-        "hole_bins",
-        "needs_back_face",
-        "tap_minutes_hint",
-        "cbore_minutes_hint",
-        "csk_minutes_hint",
-        "tap_class_counts",
-        "tap_details",
-        "npt_qty",
-        "inference_knobs",
-        "has_ldr_notes",
-        "has_tight_tol",
-        "max_hole_depth_in",
-        "plate_area_in2",
-        "finish_flags",
-        "stock_guess",
-    ):
-        if key in derived:
-            seed[key] = derived[key]
-
-    payload = {
-        "geo": geo,
-        "baseline": baseline,
-        "bounds": bounds,
-        "rates": rates_norm,
-    }
-    if seed:
-        payload["seed"] = seed
-
-    return payload
-
-
 def apply_suggestions(baseline: dict, s: dict) -> dict:
     eff = copy.deepcopy(baseline or {})
     base_hours = eff.get("process_hours") if isinstance(eff.get("process_hours"), dict) else {}
@@ -5300,12 +5239,38 @@ def _display_bucket_label(
     return _process_label(canon_key)
 
 
-def _fold_buckets(source: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Fallback bucket folding that preserves mappings when helpers are absent."""
+def _canonical_amortized_label(label: Any) -> tuple[str | None, str]:
+    """Return a canonical/storage label for amortized cost rows."""
 
-    if isinstance(source, Mapping):
-        return dict(source)
-    return {}
+    text = str(label or "").strip()
+    if not text:
+        return ("", "")
+
+    normalized = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+    # Normalise common collapsed forms such as "perpart" → "per part"
+    normalized = normalized.replace("perpart", "per part")
+    normalized = normalized.replace("perpiece", "per piece")
+    tokens = normalized.split()
+    token_set = set(tokens)
+
+    def _has(*want: str) -> bool:
+        return all(token in token_set for token in want)
+
+    if "programming" in token_set and "amortized" in token_set:
+        if _has("per", "part") or _has("per", "pc") or "per piece" in normalized:
+            canonical = "Programming (amortized per part)"
+        else:
+            canonical = "Programming (amortized)"
+        return (canonical, canonical)
+
+    if ("fixture" in token_set or "fixturing" in token_set) and "amortized" in token_set:
+        if _has("per", "part") or _has("per", "pc") or "per piece" in normalized:
+            canonical = "Fixture Build (amortized per part)"
+        else:
+            canonical = "Fixture Build (amortized)"
+        return (canonical, canonical)
+
+    return (text, text)
 
 
 def _format_planner_bucket_line(
@@ -5866,10 +5831,27 @@ def render_quote(
         or breakdown.get("speeds_feeds_path")
     )
     path_text = str(speeds_feeds_display).strip() if speeds_feeds_display else ""
-    if path_text:
-        write_wrapped(f"Speeds/Feeds CSV: {path_text}")
+    speeds_feeds_loaded_display: bool | None = None
+    for source in (result, breakdown):
+        if not isinstance(source, Mapping):
+            continue
+        if "speeds_feeds_loaded" in source:
+            raw_flag = source.get("speeds_feeds_loaded")
+            speeds_feeds_loaded_display = None if raw_flag is None else bool(raw_flag)
+            break
+    if speeds_feeds_loaded_display is True:
+        status_suffix = " (loaded)"
+    elif speeds_feeds_loaded_display is False:
+        status_suffix = " (not loaded)"
     else:
-        write_line("Speeds/Feeds CSV: (not set)")
+        status_suffix = ""
+    if path_text:
+        write_wrapped(f"Speeds/Feeds CSV: {path_text}{status_suffix}")
+    else:
+        if status_suffix:
+            write_wrapped(f"Speeds/Feeds CSV: (not set){status_suffix}")
+        else:
+            write_line("Speeds/Feeds CSV: (not set)")
     lines.append("")
     if drill_debug_entries:
         lines.append("Drill Debug")
@@ -5932,12 +5914,35 @@ def render_quote(
     if explanation_lines:
         why_parts = explanation_lines + why_parts
 
-    def _canonical_bucket_key(name: str) -> str:
-        return re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_")
-
     def _is_planner_meta(key: str) -> bool:
-        k = str(key).lower().strip()
-        return k.startswith("planner_") or k == "planner total"
+        canonical_key = _canonical_bucket_key(key)
+        if not canonical_key:
+            return False
+        return canonical_key.startswith("planner_") or canonical_key == "planner_total"
+
+    def _fold_buckets(values: Mapping[str, Any] | None) -> dict[str, float]:
+        if not isinstance(values, Mapping):
+            return {}
+
+        totals_by_canonical: dict[str, float] = {}
+        display_key_by_canonical: dict[str, str] = {}
+
+        for key, raw_value in values.items():
+            canonical_key = _canonical_bucket_key(key)
+            if not canonical_key:
+                canonical_key = str(key)
+            try:
+                amount = float(raw_value or 0.0)
+            except Exception:
+                continue
+
+            totals_by_canonical[canonical_key] = totals_by_canonical.get(canonical_key, 0.0) + amount
+            display_key_by_canonical.setdefault(canonical_key, key)
+
+        return {
+            display_key_by_canonical[canonical_key]: total
+            for canonical_key, total in totals_by_canonical.items()
+        }
 
     def _planner_bucket_for_op(name: str) -> str:
         text = str(name or "").lower()
@@ -5993,21 +5998,6 @@ def render_quote(
                 except Exception:
                     continue
         return 0.0
-
-    def _extract_bucket_map(source: Mapping[str, Any] | None) -> dict[str, dict[str, Any]]:
-        bucket_map: dict[str, dict[str, Any]] = {}
-        if not isinstance(source, Mapping):
-            return bucket_map
-        struct: Mapping[str, Any] = source
-        buckets_obj = source.get("buckets") if isinstance(source, Mapping) else None
-        if isinstance(buckets_obj, Mapping):
-            struct = buckets_obj
-        for raw_key, raw_value in struct.items():
-            canon = _canonical_bucket_key(raw_key)
-            if not canon:
-                continue
-            bucket_map[canon] = raw_value if isinstance(raw_value, Mapping) else {}
-        return bucket_map
 
     process_plan_breakdown_raw = breakdown.get("process_plan")
     process_plan_breakdown: Mapping[str, Any] | None
@@ -6704,20 +6694,24 @@ def render_quote(
         amount_val = float(amount or 0.0)
         if not force and not ((amount_val > 0) or show_zeros):
             return
-        display_label = display_override or label
-        row(display_label, amount_val, indent="  ")
-        labor_costs_display[label] = amount_val
-        existing_detail = labor_cost_details.get(label)
+
+        canonical_label, _ = _canonical_amortized_label(label)
+        storage_label = canonical_label or str(label)
+        display_text = display_override or str(label)
+
+        row(display_text, amount_val, indent="  ")
+        labor_costs_display[storage_label] = amount_val
+
+        existing_detail = labor_cost_details.get(storage_label)
         merged_detail = _merge_detail(existing_detail, detail_bits or [])
-        detail_to_write: str | None
+        detail_to_write: str | None = None
+
         if merged_detail:
-            labor_cost_details[label] = merged_detail
+            labor_cost_details[storage_label] = merged_detail
             detail_to_write = merged_detail
         elif fallback_detail:
+            labor_cost_details.setdefault(storage_label, fallback_detail)
             detail_to_write = fallback_detail
-            labor_cost_details.setdefault(label, fallback_detail)
-        else:
-            detail_to_write = None
 
         if detail_to_write:
             write_detail(detail_to_write, indent="    ")
@@ -6727,6 +6721,35 @@ def render_quote(
 
     def _normalize_bucket_key(name: str) -> str:
         return re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_")
+
+    def _fold_buckets(values: Mapping[str, Any] | None) -> dict[str, float]:
+        if not isinstance(values, Mapping):
+            return {}
+
+        # Preserve the first-seen label for each canonical bucket key while
+        # summing duplicate entries together.
+        folded: dict[str, float] = {}
+        label_map: dict[str, str] = {}
+        order: list[str] = []
+
+        for raw_key, raw_val in values.items():
+            canon_key = _canonical_bucket_key(raw_key)
+            try:
+                numeric_val = float(raw_val or 0.0)
+            except Exception:
+                numeric_val = 0.0
+
+            existing_label = label_map.get(canon_key)
+            if existing_label is None:
+                label_map[canon_key] = raw_key
+                order.append(raw_key)
+                folded[raw_key] = numeric_val
+            else:
+                folded[existing_label] += numeric_val
+
+        return {label: folded[label] for label in order}
+
+    process_costs = _fold_buckets(process_costs)
 
     process_cost_items_all = list((process_costs or {}).items())
     display_process_cost_items = [
@@ -6760,11 +6783,12 @@ def render_quote(
     ordered_process_items: list[tuple[str, float]] = []
     seen_keys: set[str] = set()
 
-    process_costs = _fold_buckets(process_costs)
-
     for bucket in preferred_bucket_order:
         for key, value in display_process_cost_items:
-            if _normalize_bucket_key(key) != bucket:
+            norm = _normalize_bucket_key(key)
+            if norm.startswith("planner_"):
+                continue
+            if norm != bucket:
                 continue
             if not ((value > 0) or show_zeros):
                 continue
@@ -6774,77 +6798,21 @@ def render_quote(
     remaining_items = [
         (key, value)
         for key, value in display_process_cost_items
-        if key not in seen_keys and ((value > 0) or show_zeros)
+        if key not in seen_keys
+        and not _normalize_bucket_key(key).startswith("planner_")
+        and ((value > 0) or show_zeros)
     ]
     remaining_items.sort(key=_normalize_bucket_key)
     ordered_process_items.extend(remaining_items)
 
-    for key, value in ordered_process_items:
-        normalized_key = _normalize_bucket_key(key)
-        if normalized_key == "planner_total" or normalized_key.startswith("planner_"):
+    display_process_costs: dict[str, Any] = {}
+    for key, value in (process_costs or {}).items():
+        if _is_planner_meta(key):
             continue
-        canon_key = _canonical_bucket_key(key)
-        if canon_key.startswith("planner_"):
-            continue
-        meta_key = str(key).lower()
-        meta = process_meta.get(meta_key, {}) if isinstance(process_meta, dict) else {}
-        detail_bits: list[str] = []
-        try:
-            hr_val = float(meta.get("hr", 0.0) or 0.0)
-        except Exception:
-            hr_val = 0.0
-        try:
-            rate_val = float(meta.get("rate", 0.0) or 0.0)
-        except Exception:
-            rate_val = 0.0
-        try:
-            extra_val = float(meta.get("base_extra", 0.0) or 0.0)
-        except Exception:
-            extra_val = 0.0
-
-        display_override, amount_override, display_hr, display_rate = _format_planner_bucket_line(
-            canon_key,
-            float(value),
-            meta if isinstance(meta, Mapping) else {},
-        )
-        use_display = display_override is not None
-        label = (
-            _display_bucket_label(canon_key)
-            if use_display or canon_key in label_overrides
-            else _process_label(canon_key)
-        )
-
-        if not use_display and hr_val > 0:
-            detail_bits.append(_hours_with_rate_text(hr_val, rate_val))
-
-        rate_for_extra = rate_val if rate_val > 0 else display_rate
-        if abs(extra_val) > 1e-6:
-            if (not use_display and hr_val <= 1e-6 and rate_for_extra > 0) or (
-                use_display and display_hr <= 1e-6 and rate_for_extra > 0
-            ):
-                extra_hours = extra_val / rate_for_extra
-                detail_bits.append(_hours_with_rate_text(extra_hours, rate_for_extra))
-
-        if notes_order:
-            detail_bits.append("LLM: " + ", ".join(notes_order))
-
-        if use_display:
-            try:
-                amount_for_display = float(amount_override or 0.0)
-            except Exception:
-                amount_for_display = 0.0
-        else:
-            try:
-                amount_for_display = float(value or 0.0)
-            except Exception:
-                amount_for_display = 0.0
-
-        if label.strip().lower() == "misc":
-            if planner_bucket_display_map or amount_for_display < 1.0:
-                continue
+        display_process_costs[key] = value
 
     for entry in _iter_ordered_process_entries(
-        process_costs,
+        display_process_costs,
         process_meta=process_meta,
         applied_process=applied_process,
         show_zeros=show_zeros,
@@ -6852,12 +6820,23 @@ def render_quote(
         label_overrides=label_overrides,
         currency_formatter=_m,
     ):
+        canon_key = _canonical_bucket_key(entry.process_key)
+        if canon_key.startswith("planner_"):
+            continue
+        if canon_key == "planner_total":
+            continue
+        if canon_key == "misc" and (planner_bucket_display_map or entry.amount < 1.0):
+            continue
+
+        canonical_label, _ = _canonical_amortized_label(entry.label)
+        fallback_detail = labor_cost_details_input.get(canonical_label or entry.label)
+
         _add_labor_cost_line(
-            label,
-            amount_override if use_display else float(value),
-            process_key=str(canon_key),
-            detail_bits=detail_bits,
-            display_override=display_override,
+            entry.label,
+            entry.amount,
+            process_key=str(entry.process_key),
+            detail_bits=list(entry.detail_bits),
+            display_override=entry.display_override,
         )
 
     show_amortized_single_qty = _lookup_config_flag(
@@ -6957,37 +6936,12 @@ def render_quote(
 
     row("Total", proc_total, indent="  ")
 
-    hour_summary_entries: list[tuple[str, float, bool]] = []
-    hour_entry_lookup: dict[str, int] = {}
-    total_hours = 0.0
-    total_hours_dirty = False
-
-    def _canonical_hour_label(label: str) -> str:
-        text = str(label or "").strip()
-        normalized = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
-        if normalized in {"deburr", "finishing deburr"}:
-            return "Finishing/Deburr"
-        return text
+    hour_summary_entries: dict[str, tuple[float, bool]] = {}
 
     def _record_hour_entry(label: str, value: float, *, include_in_total: bool = True) -> None:
-        nonlocal total_hours_dirty
         if not ((value > 0) or show_zeros):
             return
-
-        canonical_label = _canonical_hour_label(label)
-        if canonical_label in hour_entry_lookup:
-            idx = hour_entry_lookup[canonical_label]
-            existing_label, existing_value, existing_include = hour_summary_entries[idx]
-            hour_summary_entries[idx] = (
-                existing_label,
-                existing_value + value,
-                existing_include or include_in_total,
-            )
-        else:
-            hour_entry_lookup[canonical_label] = len(hour_summary_entries)
-            hour_summary_entries.append((canonical_label, value, include_in_total))
-
-        total_hours_dirty = True
+        hour_summary_entries[label] = (value, include_in_total)
 
     programming_meta = (nre_detail or {}).get("programming") or {}
     try:
@@ -7134,13 +7088,14 @@ def render_quote(
         lines.append("Labor Hour Summary")
         lines.append(divider)
         if str(pricing_source_value).lower() == "planner":
-            entries_iter = hour_summary_entries
+            entries_iter = hour_summary_entries.items()
         else:
-            entries_iter = sorted(
-                hour_summary_entries, key=lambda kv: kv[1], reverse=True
-            )
-        for label, hr_val, _ in entries_iter:
+            entries_iter = sorted(hour_summary_entries.items(), key=lambda kv: kv[1][0], reverse=True)
+        total_hours = 0.0
+        for label, (hr_val, include_in_total) in entries_iter:
             hours_row(label, hr_val, indent="  ")
+            if include_in_total and hr_val:
+                total_hours += hr_val
         hours_row("Total Hours", total_hours, indent="  ")
     lines.append("")
 
@@ -7315,23 +7270,6 @@ class QuoteConfiguration:
     @property
     def default_material_key(self) -> str:
         return _normalize_lookup_key(self.default_material_display)
-
-
-@dataclass
-class PricingRegistry:
-    """Provide access to default shop rates for pricing calculations."""
-
-    default_rates: Dict[str, float] = field(default_factory=lambda: copy.deepcopy(RATES_DEFAULT))
-
-    def copy_default_rates(self) -> Dict[str, float]:
-        return copy.deepcopy(self.default_rates)
-
-
-@dataclass
-class GeometryLoader:
-    """Expose helpers used when enriching DXF geometry with extra context."""
-
-    build_geo_from_dxf: Optional[Callable[[str], Dict[str, Any]]] = None
 
 
 # Common regex pieces (kept non-capturing to avoid pandas warnings)
@@ -8194,7 +8132,12 @@ def _select_speeds_feeds_row(
         op_variants.add(op_target.replace("_", " "))
     drill_synonyms = {
         "drill": {"drill", "drilling"},
-        "deep_drill": {"deep_drill", "deep drilling", "deepdrill"},
+        "deep_drill": {
+            "deep_drill",
+            "deep drilling",
+            "deepdrill",
+            "deep drill",
+        },
     }
     for key, synonyms in drill_synonyms.items():
         key_norm = key.replace("-", "_").replace(" ", "_")
@@ -8229,24 +8172,33 @@ def _select_speeds_feeds_row(
         ]
     if not matches:
         return None
-    if material_key:
-        mat_col = next(
-            (
-                col
-                for col in ("material_group", "material_family", "material")
-                if col in matches[0]
-            ),
-            None,
-        )
-        if mat_col:
-            mat_target = str(material_key).strip().lower()
+    if material_key and matches:
+        preferred_columns = ("material_group", "material_family", "material")
+        candidate_columns: list[str] = []
+        try:
+            table_columns = list(getattr(table, "columns", []))
+        except Exception:
+            table_columns = []
+        for col in preferred_columns:
+            if col in table_columns and col not in candidate_columns:
+                candidate_columns.append(col)
+        if not candidate_columns:
+            seen: set[str] = set()
+            for row in matches:
+                if isinstance(row, Mapping):
+                    for col in preferred_columns:
+                        if col in row and col not in seen:
+                            candidate_columns.append(col)
+                            seen.add(col)
+        mat_target = str(material_key).strip().lower()
+        for mat_col in candidate_columns:
             exact = [row for row in matches if _normalize(row.get(mat_col)) == mat_target]
             if exact:
                 matches = exact
-            else:
-                partial = [row for row in matches if mat_target in _normalize(row.get(mat_col))]
-                if partial:
-                    matches = partial
+                break
+            partial = [row for row in matches if mat_target in _normalize(row.get(mat_col))]
+            if partial:
+                matches = partial
     return matches[0] if matches else None
 
 
@@ -8271,17 +8223,31 @@ def _resolve_speeds_feeds_path(
     params: Mapping[str, Any] | None,
     ui_vars: Mapping[str, Any] | None = None,
 ) -> str | None:
-    candidates: list[str | None] = []
-    if ui_vars:
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def _push(value: Any) -> None:
+        if not value:
+            return
+        try:
+            text = str(value).strip()
+        except Exception:
+            return
+        if not text or text in seen:
+            return
+        seen.add(text)
+        candidates.append(text)
+
+    ui_mapping = ui_vars if isinstance(ui_vars, Mapping) else None
+    if ui_mapping:
         for key in (
             "SpeedsFeedsCSVPath",
             "Speeds Feeds CSV",
             "Speeds/Feeds CSV",
             "Speeds & Feeds CSV",
         ):
-            value = ui_vars.get(key) if isinstance(ui_vars, Mapping) else None
-            if value:
-                candidates.append(str(value))
+            _push(ui_mapping.get(key))
+
     if isinstance(params, Mapping):
         for key in (
             "SpeedsFeedsCSVPath",
@@ -8289,17 +8255,25 @@ def _resolve_speeds_feeds_path(
             "Speeds/Feeds CSV",
             "Speeds & Feeds CSV",
         ):
-            value = params.get(key)
-            if value:
-                candidates.append(str(value))
-    candidates.append(os.environ.get("CADQ_SF_CSV"))
-    candidates.append(os.environ.get("SPEEDS_FEEDS_CSV"))
+            _push(params.get(key))
+
+    for env_key in ("CADQ_SF_CSV", "SPEEDS_FEEDS_CSV", "CAD_QUOTER_SPEEDS_FEEDS"):
+        _push(os.environ.get(env_key))
+
+    script_dir = Path(__file__).resolve().parent
+    repo_root = script_dir.parent
+    fallback_paths: Sequence[Path | str] = (
+        script_dir / "speeds_feeds_merged.csv",
+        repo_root / "speeds_feeds_merged.csv",
+        repo_root / "cad_quoter" / "pricing" / "resources" / "speeds_feeds_merged.csv",
+        r"D:\\CAD_Quoting_Tool\\speeds_feeds_merged.csv",
+    )
+    for candidate in fallback_paths:
+        _push(candidate)
+
     for candidate in candidates:
-        if not candidate:
-            continue
-        text = str(candidate).strip()
-        if text:
-            return text
+        if candidate:
+            return candidate
     return None
 
 
@@ -8540,6 +8514,7 @@ def estimate_drilling_hours(
 
         row_cache: dict[tuple[str, float], tuple[Mapping[str, Any], _TimeToolParams] | None] = {}
         missing_row_messages: set[tuple[str, str, float]] = set()
+        debug_summary_entries: dict[str, dict[str, Any]] = {}
 
         def _build_tool_params(row: Mapping[str, Any]) -> _TimeToolParams:
             key_map = {
@@ -8715,8 +8690,10 @@ def estimate_drilling_hours(
                 continue
             total_holes += qty_int
             total_min += minutes * qty_int
+            toolchange_added = 0.0
             if overhead.toolchange_min and qty_int > 0:
-                total_min += float(overhead.toolchange_min)
+                toolchange_added = float(overhead.toolchange_min)
+                total_min += toolchange_added
             if debug_payload is not None:
                 try:
                     operation_name = str(debug_payload.get("operation") or op_name).lower()
@@ -8728,40 +8705,190 @@ def estimate_drilling_hours(
                 ipm_val = debug_payload.get("ipm")
                 depth_val = debug_payload.get("axial_depth_in")
                 minutes_per = debug_payload.get("minutes_per_hole")
-                qty_int = int(qty) if qty else 0
-                total_hr = (minutes_per or 0.0) * qty_int / 60.0 if qty_int > 0 else 0.0
+                qty_for_debug = int(qty) if qty else 0
                 mat_display = str(material_label or mat_key or material_lookup or "").strip()
                 if not mat_display:
                     mat_display = "material"
-                sfm_text = f"{sfm_val:.0f}" if isinstance(sfm_val, (int, float)) else "-"
-                ipr_text = (
-                    f"{ipr_val:.4f}"
-                    if isinstance(ipr_val, (int, float)) and math.isfinite(float(ipr_val))
-                    else "-"
-                )
-                rpm_text = f"{rpm_val:.0f}" if isinstance(rpm_val, (int, float)) else "-"
-                ipm_text = (
-                    f"{float(ipm_val):.1f}" if isinstance(ipm_val, (int, float)) else "-"
-                )
-                depth_text = (
-                    f"{float(depth_val):.2f}" if isinstance(depth_val, (int, float)) else "-"
-                )
-                minutes_text = (
-                    f"{float(minutes_per):.2f}" if isinstance(minutes_per, (int, float)) else "-"
-                )
-                total_hr_text = (
-                    f"{float(total_hr):.2f}" if isinstance(total_hr, (int, float)) else "-"
-                )
-                debug_lines.append(
-                    "Drill calc → "
-                    f"op={operation_name}, mat={mat_display}, "
-                    f"row=SFM:{sfm_text} IPR:{ipr_text}; "
-                    f"RPM:{rpm_text} IPM:{ipm_text}; "
-                    f"depth/hole: {depth_text} in; "
-                    f"holes: {int(qty)}; "
-                    f"min/hole: {minutes_text}; "
-                    f"total hr: {total_hr_text}."
-                )
+                if debug_lines is not None:
+                    summary = debug_summary_entries.setdefault(
+                        operation_name,
+                        {
+                            "operation": operation_name,
+                            "material": mat_display,
+                            "qty": 0,
+                            "total_minutes": 0.0,
+                            "toolchange_total": 0.0,
+                            "sfm_sum": 0.0,
+                            "sfm_count": 0,
+                            "ipr_sum": 0.0,
+                            "ipr_count": 0,
+                            "rpm_sum": 0.0,
+                            "rpm_count": 0,
+                            "ipm_sum": 0.0,
+                            "ipm_count": 0,
+                            "diameter_weight_sum": 0.0,
+                            "diameter_qty_sum": 0,
+                            "diam_min": None,
+                            "diam_max": None,
+                            "depth_weight_sum": 0.0,
+                            "depth_qty_sum": 0,
+                            "depth_min": None,
+                            "depth_max": None,
+                            "peck_sum": 0.0,
+                            "peck_count": 0,
+                            "dwell_sum": 0.0,
+                            "dwell_count": 0,
+                        },
+                    )
+                    if mat_display and (not summary.get("material") or summary.get("material") == "material"):
+                        summary["material"] = mat_display
+                    minutes_val = _as_float_or_none(minutes_per)
+                    minutes_per_hole = minutes_val if minutes_val is not None else float(minutes)
+                    summary["qty"] += qty_for_debug
+                    summary["total_minutes"] += minutes_per_hole * qty_for_debug
+                    summary["toolchange_total"] += toolchange_added
+                    sfm_float = _as_float_or_none(sfm_val)
+                    if sfm_float is not None and math.isfinite(sfm_float):
+                        summary["sfm_sum"] += sfm_float * qty_for_debug
+                        summary["sfm_count"] += qty_for_debug
+                    ipr_float = _as_float_or_none(ipr_val)
+                    if ipr_float is not None and math.isfinite(ipr_float):
+                        summary["ipr_sum"] += ipr_float * qty_for_debug
+                        summary["ipr_count"] += qty_for_debug
+                    rpm_float = _as_float_or_none(rpm_val)
+                    if rpm_float is not None and math.isfinite(rpm_float):
+                        summary["rpm_sum"] += rpm_float * qty_for_debug
+                        summary["rpm_count"] += qty_for_debug
+                    ipm_float = _as_float_or_none(ipm_val)
+                    if ipm_float is not None and math.isfinite(ipm_float):
+                        summary["ipm_sum"] += ipm_float * qty_for_debug
+                        summary["ipm_count"] += qty_for_debug
+                    summary["diameter_weight_sum"] += float(tool_dia_in) * qty_for_debug
+                    summary["diameter_qty_sum"] += qty_for_debug
+                    diam_min = summary.get("diam_min")
+                    diam_max = summary.get("diam_max")
+                    if diam_min is None or float(tool_dia_in) < diam_min:
+                        summary["diam_min"] = float(tool_dia_in)
+                    if diam_max is None or float(tool_dia_in) > diam_max:
+                        summary["diam_max"] = float(tool_dia_in)
+                    depth_float = _as_float_or_none(depth_val)
+                    if depth_float is None:
+                        try:
+                            depth_float = float(depth_in)
+                        except Exception:
+                            depth_float = None
+                    if depth_float is not None:
+                        summary["depth_weight_sum"] += float(depth_float) * qty_for_debug
+                        summary["depth_qty_sum"] += qty_for_debug
+                        depth_min = summary.get("depth_min")
+                        depth_max = summary.get("depth_max")
+                        if depth_min is None or float(depth_float) < depth_min:
+                            summary["depth_min"] = float(depth_float)
+                        if depth_max is None or float(depth_float) > depth_max:
+                            summary["depth_max"] = float(depth_float)
+                    peck_rate = _as_float_or_none(per_hole_overhead.peck_penalty_min_per_in_depth)
+                    if depth_float is not None and peck_rate is not None and peck_rate > 0:
+                        peck_total = float(peck_rate) * float(depth_float)
+                        if math.isfinite(peck_total) and peck_total > 0:
+                            summary["peck_sum"] += peck_total * qty_for_debug
+                            summary["peck_count"] += qty_for_debug
+                    dwell_val_float = _as_float_or_none(per_hole_overhead.dwell_min)
+                    if dwell_val_float is not None and dwell_val_float > 0:
+                        summary["dwell_sum"] += float(dwell_val_float) * qty_for_debug
+                        summary["dwell_count"] += qty_for_debug
+                    summary.setdefault("material", mat_display)
+                qty_int = qty_for_debug
+        if debug_lines is not None and debug_summary_entries:
+            for op_key, summary in sorted(debug_summary_entries.items()):
+                qty_total = summary.get("qty", 0)
+                if qty_total <= 0:
+                    continue
+                minutes_total = summary.get("total_minutes", 0.0) or 0.0
+                minutes_avg = minutes_total / qty_total if qty_total else 0.0
+                toolchange_total = summary.get("toolchange_total", 0.0) or 0.0
+                total_hours = (minutes_total + toolchange_total) / 60.0
+
+                def _avg_value(sum_key: str, count_key: str) -> float | None:
+                    total = summary.get(sum_key, 0.0) or 0.0
+                    count = summary.get(count_key, 0) or 0
+                    if count <= 0:
+                        return None
+                    return float(total) / float(count)
+
+                def _format_avg(value: float | None, fmt: str) -> str:
+                    if value is None or not math.isfinite(float(value)):
+                        return "-"
+                    return fmt.format(float(value))
+
+                sfm_text = _format_avg(_avg_value("sfm_sum", "sfm_count"), "{:.0f}")
+                ipr_text = _format_avg(_avg_value("ipr_sum", "ipr_count"), "{:.4f}")
+                rpm_text = _format_avg(_avg_value("rpm_sum", "rpm_count"), "{:.0f}")
+                ipm_text = _format_avg(_avg_value("ipm_sum", "ipm_count"), "{:.1f}")
+
+                diam_qty = summary.get("diameter_qty_sum", 0) or 0
+                dia_segment = "Ø-"
+                if diam_qty > 0:
+                    diam_sum = summary.get("diameter_weight_sum", 0.0) or 0.0
+                    avg_dia = diam_sum / diam_qty if diam_qty else 0.0
+                    diam_min = summary.get("diam_min")
+                    diam_max = summary.get("diam_max")
+                    if (
+                        isinstance(diam_min, (int, float))
+                        and isinstance(diam_max, (int, float))
+                        and math.isfinite(diam_min)
+                        and math.isfinite(diam_max)
+                        and abs(float(diam_max) - float(diam_min)) > 5e-4
+                    ):
+                        dia_segment = f"Ø{float(diam_min):.3f}-{float(diam_max):.3f}\""
+                    else:
+                        dia_segment = f"Ø{float(avg_dia):.3f}\""
+
+                depth_qty = summary.get("depth_qty_sum", 0) or 0
+                depth_text = "-"
+                if depth_qty > 0:
+                    depth_sum = summary.get("depth_weight_sum", 0.0) or 0.0
+                    avg_depth = depth_sum / depth_qty if depth_qty else 0.0
+                    depth_min = summary.get("depth_min")
+                    depth_max = summary.get("depth_max")
+                    if (
+                        isinstance(depth_min, (int, float))
+                        and isinstance(depth_max, (int, float))
+                        and math.isfinite(depth_min)
+                        and math.isfinite(depth_max)
+                        and abs(float(depth_max) - float(depth_min)) > 5e-3
+                    ):
+                        depth_text = f"{float(depth_min):.2f}-{float(depth_max):.2f}"
+                    else:
+                        depth_text = f"{float(avg_depth):.2f}"
+
+                peck_avg = _avg_value("peck_sum", "peck_count")
+                dwell_avg = _avg_value("dwell_sum", "dwell_count")
+                overhead_bits: list[str] = []
+                if peck_avg and math.isfinite(peck_avg) and peck_avg > 0:
+                    overhead_bits.append(f"peck {peck_avg:.2f} min/hole")
+                if dwell_avg and math.isfinite(dwell_avg) and dwell_avg > 0:
+                    overhead_bits.append(f"dwell {dwell_avg:.2f} min/hole")
+                if toolchange_total and math.isfinite(toolchange_total) and toolchange_total > 0:
+                    overhead_bits.append(f"toolchange {toolchange_total:.2f} min")
+
+                op_display = str(summary.get("operation") or "drill").title()
+                mat_display = str(summary.get("material") or "material").strip()
+                if not mat_display:
+                    mat_display = "material"
+
+                line_parts = [
+                    "Drill calc → ",
+                    f"op={op_display}, mat={mat_display}, ",
+                    f"row=SFM:{sfm_text} IPR:{ipr_text}; ",
+                    f"RPM:{rpm_text} IPM:{ipm_text}; ",
+                    f"{dia_segment}; depth/hole: {depth_text} in; ",
+                    f"holes: {qty_total}; ",
+                    f"min/hole: {minutes_avg:.2f}; ",
+                ]
+                if overhead_bits:
+                    line_parts.append("overhead: " + ", ".join(overhead_bits) + "; ")
+                line_parts.append(f"total hr: {total_hours:.2f}.")
+                debug_lines.append("".join(line_parts))
         if missing_row_messages and warnings is not None:
             for op_display, material_display, dia_val in sorted(missing_row_messages):
                 dia_text = f"{dia_val:.3f}".rstrip("0").rstrip(".")
@@ -10255,7 +10382,6 @@ def compute_quote_from_df(df: pd.DataFrame,
     drill_material_key = drill_material_lookup or (drill_material_source or "")
     speeds_feeds_raw = _resolve_speeds_feeds_path(params, ui_vars)
     speeds_feeds_path: str | None = None
-    speeds_feeds_resolved_path: str | None = None
     speeds_feeds_table: "pd.DataFrame" | None = None
     drill_material_group: str | None = None
     raw_path_text = str(speeds_feeds_raw).strip() if speeds_feeds_raw else ""
@@ -10300,6 +10426,8 @@ def compute_quote_from_df(df: pd.DataFrame,
             "Speeds/feeds CSV path not configured; using legacy drilling heuristics for this quote."
         )
         _record_red_flag("Speeds/feeds CSV not configured — using legacy drilling heuristics.")
+    speeds_feeds_loaded_flag = speeds_feeds_table is not None
+
     if (
         drill_material_group is None
         and speeds_feeds_table is not None
@@ -10441,9 +10569,8 @@ def compute_quote_from_df(df: pd.DataFrame,
         except Exception:
             guard_ctx = None
         if isinstance(guard_ctx, dict):
-            if speeds_feeds_path:
-                guard_ctx.setdefault("speeds_feeds_path", speeds_feeds_path)
-            guard_ctx["speeds_feeds_loaded"] = bool(speeds_feeds_table)
+            guard_ctx["speeds_feeds_path"] = speeds_feeds_path or raw_path_text or ""
+            guard_ctx["speeds_feeds_loaded"] = speeds_feeds_loaded_flag
             if drill_debug_line:
                 extras = guard_ctx.get("narrative_extra")
                 if isinstance(extras, list):
@@ -13317,21 +13444,6 @@ def compute_quote_from_df(df: pd.DataFrame,
         if merged_bits:
             labor_cost_details[canonical_label] = "; ".join(merged_bits)
 
-    for key, value in sorted(process_costs.items(), key=lambda kv: kv[1], reverse=True):
-        label = key.replace('_', ' ').title()
-        meta = process_meta.get(key, {})
-        hr = float(meta.get("hr", 0.0))
-        rate = float(meta.get("rate", 0.0))
-        extra = float(meta.get("base_extra", 0.0))
-        detail_bits: list[str] = []
-
-        if hr > 0:
-            detail_bits.append(_hours_with_rate_text(hr, rate))
-
-        proc_notes = applied_process.get(key, {}).get("notes")
-        if proc_notes:
-            detail_bits.append("LLM: " + ", ".join(proc_notes))
-
     for entry in _iter_ordered_process_entries(
         process_costs,
         process_meta=process_meta,
@@ -13610,12 +13722,15 @@ def compute_quote_from_df(df: pd.DataFrame,
         "process_plan": copy.deepcopy(quote_state.process_plan),
         "material_source": material_source_final,
         "speeds_feeds_path": speeds_feeds_path,
+        "speeds_feeds_loaded": speeds_feeds_loaded_flag,
         "drill_debug": list(drill_debug_entries),
         "red_flags": list(red_flag_messages),
     }
 
     breakdown["speeds_feeds_path"] = speeds_feeds_path
+    breakdown["speeds_feeds_loaded"] = speeds_feeds_loaded_flag
     result_payload["speeds_feeds_path"] = speeds_feeds_path
+    result_payload["speeds_feeds_loaded"] = speeds_feeds_loaded_flag
 
     return result_payload
 
