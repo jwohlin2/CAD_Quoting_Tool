@@ -5508,6 +5508,37 @@ class ProcessDisplayEntry:
     display_override: str | None = None
 
 
+def _fold_buckets(process_costs: Mapping[str, Any] | None) -> dict[str, float]:
+    """Coalesce duplicate process buckets using their canonical keys."""
+
+    if not isinstance(process_costs, Mapping):
+        return {}
+
+    folded: dict[str, float] = {}
+    preferred_keys: dict[str, str] = {}
+
+    for raw_key, raw_value in process_costs.items():
+        canon = _canonical_bucket_key(raw_key)
+        try:
+            value = float(raw_value or 0.0)
+        except Exception:
+            # Non-numeric values cannot be summed; skip them to avoid crashes.
+            continue
+
+        if not canon:
+            folded[raw_key] = folded.get(raw_key, 0.0) + value
+            continue
+
+        preferred_key = preferred_keys.get(canon)
+        if preferred_key is None:
+            preferred_key = raw_key
+            preferred_keys[canon] = preferred_key
+
+        folded[preferred_key] = folded.get(preferred_key, 0.0) + value
+
+    return folded
+
+
 def _iter_ordered_process_entries(
     process_costs: Mapping[str, Any] | None,
     *,
@@ -7039,10 +7070,10 @@ def render_quote(
     def _is_planner_rollup_key(name: str | None) -> bool:
         if pricing_source_lower != "planner":
             return False
-        norm = _normalize_bucket_key(name)
-        if not norm:
+        canon = _canonical_bucket_key(name or "")
+        if not canon:
             return False
-        if norm in {"planner_total", "planner_machine", "planner_labor"}:
+        if canon in {"planner_total", "planner_machine", "planner_labor"}:
             return True
         return norm.startswith("planner_")
 
