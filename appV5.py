@@ -9385,9 +9385,6 @@ def estimate_drilling_hours(
                         f"MISS {op_display} {material_display.lower()} {round(float(diameter_in), 4):.3f}\""
                     )
                 row_cache[cache_key] = cache_entry
-            if not cache_entry:
-                continue
-            row, tool_params = cache_entry
             geom = _TimeOperationGeometry(
                 diameter_in=float(diameter_in),
                 hole_depth_in=float(depth_in),
@@ -9395,17 +9392,48 @@ def estimate_drilling_hours(
                 ld_ratio=l_over_d,
             )
             debug_payload: dict[str, Any] | None = None
-            if debug_lines is not None:
-                debug_payload = {}
-            minutes = _estimate_time_min(
-                row,
-                geom,
-                tool_params,
-                machine_for_cut,
-                per_hole_overhead,
-                material_factor=material_cap_val,
-                debug=debug_payload,
-            )
+            tool_params: _TimeToolParams
+            minutes: float
+            if cache_entry:
+                row, tool_params = cache_entry
+                if debug_lines is not None:
+                    debug_payload = {}
+                minutes = _estimate_time_min(
+                    row,
+                    geom,
+                    tool_params,
+                    machine_for_cut,
+                    per_hole_overhead,
+                    material_factor=material_cap_val,
+                    debug=debug_payload,
+                )
+            else:
+                peck_rate = _as_float_or_none(per_hole_overhead.peck_penalty_min_per_in_depth)
+                peck_min = None
+                if peck_rate and depth_in and depth_in > 0:
+                    peck_min = float(peck_rate) * float(depth_in)
+                dwell_val = _as_float_or_none(per_hole_overhead.dwell_min)
+                legacy_overhead = _TimeOverheadParams(
+                    toolchange_min=0.0,
+                    approach_retract_in=per_hole_overhead.approach_retract_in,
+                    peck_penalty_min_per_in_depth=None,
+                    dwell_min=dwell_val,
+                    peck_min=peck_min,
+                )
+                tool_params = _TimeToolParams(teeth_z=1)
+                if debug_lines is not None:
+                    debug_payload = {}
+                minutes = _estimate_time_min(
+                    geom=geom,
+                    tool=tool_params,
+                    machine=machine_for_cut,
+                    overhead=legacy_overhead,
+                    material_factor=material_cap_val,
+                    operation=op_name,
+                    debug=debug_payload,
+                )
+                if minutes <= 0:
+                    continue
             if minutes <= 0:
                 continue
             try:
