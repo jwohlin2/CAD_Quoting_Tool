@@ -8756,16 +8756,19 @@ def compute_quote_from_df(df: pd.DataFrame,
     }
     process_costs_baseline = {k: float(v) for k, v in process_costs.items()}
 
-    pass_meta = {
-        "Material": {"basis": "Stock / raw material"},
-        HARDWARE_PASS_LABEL: {"basis": "Pass-through hardware / BOM"},
-        "Outsourced Vendors": {"basis": "Outside processing vendors"},
-        "Shipping": {"basis": shipping_basis_desc},
-        "Consumables /Hr": {"basis": "Machine & inspection hours $/hr"},
-        "Utilities": {"basis": "Spindle/inspection hours $/hr"},
-        "Consumables": {"basis": "Fixed shop supplies"},
-        "Packaging Flat": {"basis": "Packaging materials & crates"},
-    }
+    def _default_pass_meta(shipping_basis_desc: str) -> dict[str, dict[str, str]]:
+        return {
+            "Material": {"basis": "Stock / raw material"},
+            HARDWARE_PASS_LABEL: {"basis": "Pass-through hardware / BOM"},
+            "Outsourced Vendors": {"basis": "Outside processing vendors"},
+            "Shipping": {"basis": shipping_basis_desc},
+            "Consumables /Hr": {"basis": "Machine & inspection hours $/hr"},
+            "Utilities": {"basis": "Spindle/inspection hours $/hr"},
+            "Consumables": {"basis": "Fixed shop supplies"},
+            "Packaging Flat": {"basis": "Packaging materials & crates"},
+        }
+
+    pass_meta = _default_pass_meta(shipping_basis_desc)
 
     def _build_pass_through(
         planner_directs,
@@ -11067,12 +11070,24 @@ def compute_quote_from_df(df: pd.DataFrame,
     insurance_cost = insurance_pct * (labor_cost + base_direct_costs)
     vendor_marked_add = vendor_markup * (outsourced_costs + shipping_cost)
 
-    pass_meta.setdefault("Insurance", {"basis": "Applied at insurance pct"})
-    pass_meta.setdefault("Vendor Markup Added", {"basis": "Vendor + freight markup"})
-    pass_through["Insurance"] = round(insurance_cost, 2)
-    pass_through["Vendor Markup Added"] = round(vendor_marked_add, 2)
+    base_directs_excluding_ship_mat = sum(
+        float(value)
+        for label, value in pass_through.items()
+        if label not in ("Material", "Shipping", "Material Scrap Credit")
+    )
 
-    total_direct_costs = base_direct_costs + insurance_cost + vendor_marked_add
+    if base_directs_excluding_ship_mat > 0:
+        pass_meta.setdefault("Insurance", {"basis": "Applied at insurance pct"})
+        pass_meta.setdefault("Vendor Markup Added", {"basis": "Vendor + freight markup"})
+        insurance_cost = round(insurance_cost, 2)
+        vendor_marked_add = round(vendor_marked_add, 2)
+        pass_through["Insurance"] = insurance_cost
+        pass_through["Vendor Markup Added"] = vendor_marked_add
+        total_direct_costs = base_direct_costs + insurance_cost + vendor_marked_add
+    else:
+        insurance_cost = 0.0
+        vendor_marked_add = 0.0
+        total_direct_costs = base_direct_costs
     direct_costs = total_direct_costs
 
     subtotal = labor_cost + direct_costs
