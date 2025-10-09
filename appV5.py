@@ -2809,6 +2809,20 @@ def get_why_text(
     material_source = state.material_source or "shop defaults"
     parts.append(f"Material priced via {material_source}; scrap {scrap_pct}% applied.")
 
+    guard_ctx = state.guard_context if isinstance(state.guard_context, Mapping) else None
+    if isinstance(guard_ctx, Mapping):
+        extras_raw = guard_ctx.get("narrative_extra")
+        if isinstance(extras_raw, str):
+            extra_lines = [extras_raw]
+        elif isinstance(extras_raw, Sequence):
+            extra_lines = [str(line) for line in extras_raw]
+        else:
+            extra_lines = []
+        for line in extra_lines:
+            text = str(line).strip()
+            if text:
+                parts.append(text)
+
     return " ".join(parts)
 
 
@@ -7232,6 +7246,16 @@ def _material_price_per_g_from_choice(
 _DEFAULT_MATERIAL_DENSITY_G_CC = MATERIAL_DENSITY_G_CC_BY_KEY.get(DEFAULT_MATERIAL_KEY, 7.85)
 
 
+_MATERIAL_FAMILY_TO_GROUP = {
+    "alum": "aluminum",
+    "stainless": "stainless",
+    "titanium": "titanium",
+    "copper": "copper",
+    "brass": "brass",
+    "plastic": "plastic",
+}
+
+
 def _material_family(material: str) -> str:
     name = _normalize_lookup_key(material)
     if not name:
@@ -7253,6 +7277,32 @@ def _material_family(material: str) -> str:
         return "plastic"
 
     return "steel"
+
+
+def _material_group_from_name(material: str | None) -> str:
+    raw = (material or "").strip()
+    if not raw:
+        return "steel"
+    norm_key = _normalize_lookup_key(raw)
+    candidate = MATERIAL_MAP.get(norm_key)
+    if candidate is None and norm_key:
+        compact = norm_key.replace(" ", "")
+        candidate = MATERIAL_MAP.get(compact)
+        if candidate is None:
+            candidate = MATERIAL_MAP.get(norm_key.upper())
+            if candidate is None and compact:
+                candidate = MATERIAL_MAP.get(compact.upper())
+    if isinstance(candidate, Mapping):
+        group = candidate.get("material_group") or candidate.get("group")
+        if isinstance(group, str) and group.strip():
+            return group.strip().lower()
+    elif isinstance(candidate, str) and candidate.strip():
+        return candidate.strip().lower()
+
+    family = _material_family(raw)
+    group = _MATERIAL_FAMILY_TO_GROUP.get(family, family)
+    group_text = str(group or norm_key or "steel").strip().lower()
+    return group_text or "steel"
 
 
 def _density_for_material(material: str, default: float = _DEFAULT_MATERIAL_DENSITY_G_CC) -> float:
@@ -7597,7 +7647,7 @@ def _clean_hole_groups(raw: Any) -> list[dict[str, Any]] | None:
 
 def estimate_drilling_hours(
     hole_diams_mm: list[float],
-    thickness_mm: float,
+    thickness_in: float,
     mat_key: str,
     *,
     hole_groups: list[Mapping[str, Any]] | None = None,
@@ -7608,6 +7658,8 @@ def estimate_drilling_hours(
 ) -> float:
     """
     Conservative plate-drilling model with floors so 100+ holes don't collapse to minutes.
+
+    ``hole_diams_mm`` is measured in millimetres; ``thickness_in`` is the plate thickness in inches.
     """
     mat = (mat_key or "").lower()
     material_lookup = _normalize_lookup_key(mat_key) if mat_key else ""
@@ -7633,14 +7685,14 @@ def estimate_drilling_hours(
             depth_in = 0.0
             if depth_mm and depth_mm > 0:
                 depth_in = float(depth_mm) / 25.4
-            elif thickness_mm and thickness_mm > 0:
-                depth_in = float(thickness_mm) / 25.4
+            elif thickness_in and thickness_in > 0:
+                depth_in = float(thickness_in)
             group_specs.append((float(dia_mm) / 25.4, qty, depth_in))
             fallback_counts[round(float(dia_mm), 3)] += qty
     if not group_specs:
-        if not hole_diams_mm or thickness_mm <= 0:
+        if not hole_diams_mm or thickness_in <= 0:
             return 0.0
-        depth_in = float(thickness_mm) / 25.4
+        depth_in = float(thickness_in)
         counts = Counter(round(float(d), 3) for d in hole_diams_mm if d and math.isfinite(d))
         for dia_mm, qty in counts.items():
             if qty <= 0:
@@ -7713,7 +7765,7 @@ def estimate_drilling_hours(
             if qty <= 0 or diameter_in <= 0 or depth_in <= 0:
                 continue
             ratio = depth_in / max(diameter_in, 1e-6)
-            op_name = "Deep_Drill" if depth_in > 3.0 * diameter_in else "Drill"
+            op_name = "deep_drill" if depth_in > 3.0 * diameter_in else "drill"
             cache_key = (op_name, round(float(diameter_in), 4))
             cache_entry = row_cache.get(cache_key)
             if cache_entry is None:
@@ -7780,13 +7832,13 @@ def estimate_drilling_hours(
         if total_min > 0:
             return total_min / 60.0
 
-    thickness_for_fallback = float(thickness_mm or 0.0)
-    if thickness_for_fallback <= 0:
+    thickness_for_fallback_mm = float(thickness_in or 0.0) * 25.4
+    if thickness_for_fallback_mm <= 0:
         depth_candidates = [depth for _, _, depth in group_specs if depth and depth > 0]
         if depth_candidates:
-            thickness_for_fallback = max(depth_candidates) * 25.4
+            thickness_for_fallback_mm = max(depth_candidates) * 25.4
 
-    if not fallback_counts or thickness_for_fallback <= 0:
+    if not fallback_counts or thickness_for_fallback_mm <= 0:
         return 0.0
 
     def sec_per_hole(d_mm: float) -> float:
@@ -7805,7 +7857,7 @@ def estimate_drilling_hours(
         return 60.0
 
     mfac = 0.8 if "alum" in mat else (1.15 if "stainless" in mat else 1.0)
-    tfac = max(0.7, min(2.0, thickness_for_fallback / 6.35))
+    tfac = max(0.7, min(2.0, thickness_for_fallback_mm / 6.35))
     toolchange_s = 15.0
 
     total_sec = 0.0
@@ -9174,7 +9226,17 @@ def compute_quote_from_df(df: pd.DataFrame,
         if thickness_in_ui and thickness_in_ui > 0:
             thickness_for_drill = float(thickness_in_ui) * 25.4
 
-    drill_material_key = geo_context.get("material") or material_name
+    raw_mat = (geo_context.get("material") or material_name or "").strip()
+    norm_key = _normalize_lookup_key(raw_mat) if raw_mat else None
+    mat_lookup = MATERIAL_MAP.get(norm_key) if norm_key else None
+    if isinstance(mat_lookup, Mapping):
+        mat_lookup = mat_lookup.get("material_group") or mat_lookup.get("group")
+    material_group = mat_lookup or norm_key or "steel"
+    if not isinstance(material_group, str):
+        material_group = str(material_group or "steel")
+    material_group = material_group.strip().lower() or "steel"
+    if not material_group or material_group == (norm_key or ""):
+        material_group = _material_group_from_name(raw_mat)
     speeds_feeds_raw = _resolve_speeds_feeds_path(params, ui_vars)
     speeds_feeds_path: str | None = None
     speeds_feeds_table: "pd.DataFrame" | None = None
@@ -9225,10 +9287,42 @@ def compute_quote_from_df(df: pd.DataFrame,
     machine_params_default = _machine_params_from_params(params)
     drill_overhead_default = _drill_overhead_from_params(params)
     speeds_feeds_warnings: list[str] = []
+
+    default_dia_in = 0.25
+    avg_dia_in = default_dia_in
+    if hole_diams_list:
+        avg_dia_in = max(
+            1e-6,
+            (sum(hole_diams_list) / len(hole_diams_list)) / 25.4,
+        )
+    thickness_in = max(0.0, float(thickness_for_drill or 0.0) / 25.4)
+    op_name = "deep_drill" if avg_dia_in > 0 and (thickness_in / avg_dia_in) >= 3.0 else "drill"
+    selected_op_name = op_name
+    speeds_feeds_row = _select_speeds_feeds_row(
+        speeds_feeds_table,
+        op_name,
+        material_key=material_group,
+    )
+    if speeds_feeds_row is None and speeds_feeds_table is not None and op_name != "drill":
+        selected_op_name = "drill"
+        speeds_feeds_row = _select_speeds_feeds_row(
+            speeds_feeds_table,
+            "drill",
+            material_key=material_group,
+        )
+    if speeds_feeds_row is None and speeds_feeds_table is not None:
+        op_display = selected_op_name.replace("_", " ")
+        warn = (
+            f"No speeds/feeds row for {op_display}"
+            f"/{material_group} — using conservative drill defaults."
+        )
+        if warn not in speeds_feeds_warnings:
+            speeds_feeds_warnings.append(warn)
+
     drill_hr = estimate_drilling_hours(
         hole_diams_list,
-        float(thickness_for_drill or 0.0),
-        drill_material_key or "",
+        thickness_in,
+        material_group,
         hole_groups=hole_groups_geo,
         speeds_feeds_table=speeds_feeds_table,
         machine_params=machine_params_default,
@@ -9250,6 +9344,78 @@ def compute_quote_from_df(df: pd.DataFrame,
         drill_hr = min(drill_hr, (holes * max_min_per_hole) / 60.0)
 
     drill_hr = min(drill_hr, 500.0)
+
+    drill_debug_line: str | None = None
+    if speeds_feeds_row and avg_dia_in > 0:
+        key_map = {
+            str(k).strip().lower().replace("-", "_").replace(" ", "_"): k
+            for k in speeds_feeds_row.keys()
+        }
+
+        def _row_float(*names: str) -> float | None:
+            for name in names:
+                actual = key_map.get(name)
+                if actual is None:
+                    continue
+                val = _coerce_float_or_none(speeds_feeds_row.get(actual))
+                if val is not None:
+                    return float(val)
+            return None
+
+        sfm_val = _row_float(
+            "sfm_start",
+            "sfm",
+            "surface_ft_min",
+            "surface_feet_per_min",
+        )
+        ipr_val: float | None = None
+        ipr_candidates: list[tuple[float, float]] = []
+        for norm_key, actual in key_map.items():
+            if not norm_key.startswith("fz_ipr_"):
+                continue
+            raw_val = _coerce_float_or_none(speeds_feeds_row.get(actual))
+            if raw_val is None:
+                continue
+            suffix = norm_key[len("fz_ipr_") :]
+            if suffix.endswith("in"):
+                suffix = suffix[:-2]
+            suffix = suffix.replace("__", "_")
+            try:
+                dia_val = float(suffix.replace("_", "."))
+            except Exception:
+                continue
+            ipr_candidates.append((dia_val, float(raw_val)))
+        if ipr_candidates:
+            ipr_val = min(ipr_candidates, key=lambda pair: abs(pair[0] - avg_dia_in))[1]
+        if ipr_val is None:
+            ipr_val = _row_float("ipr", "feed_per_rev", "feed_rev", "fz_ipr")
+
+        rpm_val: float | None = None
+        if sfm_val and avg_dia_in > 0:
+            rpm_val = (float(sfm_val) * 12.0) / (math.pi * avg_dia_in)
+
+        ipm_val = None
+        if rpm_val and ipr_val:
+            ipm_val = rpm_val * ipr_val
+        if ipm_val is None:
+            ipm_val = _row_float("linear_cut_rate_ipm", "feed_ipm", "feed_rate_ipm")
+
+        debug_bits: list[str] = []
+        if rpm_val and rpm_val > 0:
+            debug_bits.append(f"{rpm_val:.0f} RPM")
+        if ipm_val and ipm_val > 0:
+            debug_bits.append(f"{ipm_val:.1f} IPM")
+        elif ipr_val and ipr_val > 0:
+            debug_bits.append(f"{ipr_val:.4f} IPR")
+
+        if debug_bits:
+            avg_mm = avg_dia_in * 25.4
+            op_display = selected_op_name.replace("_", " ")
+            drill_debug_line = (
+                f"CSV drill feeds ({op_display} {material_group}): "
+                f"{', '.join(debug_bits)} @ Ø{avg_mm:.1f} mm"
+            )
+
     for warning_text in speeds_feeds_warnings:
         _record_red_flag(warning_text)
     if quote_state is not None:
@@ -9261,6 +9427,15 @@ def compute_quote_from_df(df: pd.DataFrame,
             if speeds_feeds_path:
                 guard_ctx.setdefault("speeds_feeds_path", speeds_feeds_path)
             guard_ctx["speeds_feeds_loaded"] = bool(speeds_feeds_table)
+            if drill_debug_line:
+                extras = guard_ctx.get("narrative_extra")
+                if isinstance(extras, list):
+                    if drill_debug_line not in extras:
+                        extras.append(drill_debug_line)
+                elif extras:
+                    guard_ctx["narrative_extra"] = [str(extras), drill_debug_line]
+                else:
+                    guard_ctx["narrative_extra"] = [drill_debug_line]
             if red_flag_messages:
                 ctx_flags = guard_ctx.setdefault("red_flags", [])
                 for msg in red_flag_messages:
@@ -12258,7 +12433,7 @@ def compute_quote_from_df(df: pd.DataFrame,
             if msg not in ctx_flags:
                 ctx_flags.append(msg)
 
-    return {
+    result_payload = {
         "price": price,
         "labor": labor_cost,
         "with_overhead": with_overhead,
@@ -12272,6 +12447,11 @@ def compute_quote_from_df(df: pd.DataFrame,
         "speeds_feeds_path": speeds_feeds_path,
         "red_flags": list(red_flag_messages),
     }
+
+    breakdown["speeds_feeds_path"] = speeds_feeds_path
+    result_payload["speeds_feeds_path"] = speeds_feeds_path
+
+    return result_payload
 
 
 # ---------- Tracing ----------
