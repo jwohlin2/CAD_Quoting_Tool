@@ -7599,7 +7599,7 @@ MAX_DRILL_MIN_PER_HOLE = 2.00
 
 
 def _apply_drill_minutes_clamp(hours: float, hole_count: int) -> float:
-    if hours <= 0.0 or hole_count <= 0:
+    if hole_count <= 0:
         return hours
     min_hr = (hole_count * MIN_DRILL_MIN_PER_HOLE) / 60.0
     max_hr = (hole_count * MAX_DRILL_MIN_PER_HOLE) / 60.0
