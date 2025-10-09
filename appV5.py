@@ -6866,6 +6866,27 @@ def render_quote(
         "saw_waterjet",
         "inspection",
     ]
+    def _planner_bucket_info(bucket_key: str) -> Mapping[str, Any]:
+        rollup_info = bucket_rollup_map.get(bucket_key)
+        display_info = (
+            planner_bucket_display_map.get(bucket_key)
+            if isinstance(planner_bucket_display_map, Mapping)
+            else None
+        )
+        if isinstance(display_info, Mapping):
+            merged: dict[str, Any] = {}
+            if isinstance(rollup_info, Mapping):
+                merged.update(rollup_info)
+            merged.update(display_info)
+            if isinstance(rollup_info, Mapping):
+                for extra_key in ("machine_cost", "machine$", "labor_cost", "labor$"):
+                    if extra_key not in merged and extra_key in rollup_info:
+                        merged[extra_key] = rollup_info[extra_key]
+            return merged
+        if isinstance(rollup_info, Mapping):
+            return rollup_info
+        return {}
+
     bucket_keys = []
     seen_buckets: set[str] = set()
     for key in bucket_order:
@@ -6880,7 +6901,7 @@ def render_quote(
     if bucket_keys:
         planner_why_lines.append("Planner operations (hours & cost):")
         for bucket_key in bucket_keys:
-            info = bucket_rollup_map.get(bucket_key, {})
+            info = _planner_bucket_info(bucket_key)
             minutes_val = _bucket_cost(info, "minutes")
             plan_hr = minutes_val / 60.0 if minutes_val else 0.0
             machine_val = _bucket_cost(info, "machine_cost", "machine$")
@@ -6888,7 +6909,7 @@ def render_quote(
             plan_total = _bucket_cost(info, "total_cost", "total$", "total")
             if plan_total == 0.0:
                 plan_total = machine_val + labor_val
-            final_meta = process_meta.get(bucket_key, {}) if isinstance(process_meta, dict) else {}
+            final_meta = _lookup_process_meta(bucket_key) or {}
             try:
                 final_hr = float(final_meta.get("hr", 0.0) or 0.0)
             except Exception:
