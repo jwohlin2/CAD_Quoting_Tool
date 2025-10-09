@@ -10263,9 +10263,9 @@ def compute_quote_from_df(df: pd.DataFrame,
         )
 
         planner_mode = (
-            str(params.get("PlannerMode", "legacy")).strip().lower()
+            str(params.get("PlannerMode", "auto")).strip().lower()
             if isinstance(params, _MappingABC)
-            else "legacy"
+            else "auto"
         )
         used_planner = bool(planner_pricing_result) or bool(planner_line_items)
         if planner_mode == "planner":
