@@ -9904,8 +9904,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         def _on(k: str) -> bool:
             return bool((planner_directs or {}).get(k))
 
-        pass_through = {
-            "Material": float(material_direct_cost),
+        pass_through: dict[str, float] = {
             "Shipping": float(shipping_cost),
         }
         if _on("hardware") and float(hardware_cost) > 0:
@@ -9960,6 +9959,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         packaging_flat_base=packaging_flat_base,
         material_scrap_credit_applied=material_scrap_credit_applied,
     )
+    pass_through[_canonical_pass_label("Material")] = float(material_direct_cost)
     pass_through_baseline = {k: float(v) for k, v in pass_through.items()}
 
     fix_detail = nre_detail.get("fixture", {})
