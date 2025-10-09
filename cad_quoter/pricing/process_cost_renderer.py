@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from typing import Any
 import math
+import os
 import re
+from typing import Any
 
 
 ORDER: tuple[str, ...] = (
@@ -273,9 +274,16 @@ def render_process_costs(
     minutes = _canonicalize_minutes(minutes_detail)
     flat_rates, normalized_rates = _flatten_rates(rates)
 
+    debug_misc = os.environ.get("DEBUG_MISC") == "1"
+
     shown_total = 0.0
+    hidden_total = 0.0
     for key in ORDER:
-        amount = round(costs.get(key, 0.0), 2)
+        raw_amount = float(costs.get(key, 0.0))
+        amount = round(raw_amount, 2)
+        if key == "misc" and not debug_misc and raw_amount < 50.0:
+            hidden_total += amount
+            continue
         if math.isclose(amount, 0.0, abs_tol=1e-9):
             continue
         hours = max(0.0, float(minutes.get(key, 0.0)) / 60.0)
@@ -291,7 +299,7 @@ def render_process_costs(
         )
         shown_total += amount
 
-    model_total = round(sum(float(value) for value in costs.values()), 2)
+    model_total = round(sum(float(value) for value in costs.values()) - hidden_total, 2)
     if not math.isclose(shown_total, model_total, abs_tol=0.01):
         raise AssertionError((shown_total, model_total))
 
