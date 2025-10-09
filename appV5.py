@@ -10911,6 +10911,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     }
 
     process_plan_summary: dict[str, Any] = {}
+    family_for_breakdown: str | None = None
     planner_pricing_result: dict[str, Any] | None = None
     planner_bucket_view: dict[str, Any] | None = None
     planner_two_bucket_rates: dict[str, Any] | None = None
@@ -12546,93 +12547,156 @@ def compute_quote_from_df(df: pd.DataFrame,
                 process_hours_baseline["drilling"] = baseline_drill_hr
                 features["drilling_hr_baseline"] = baseline_drill_hr
 
-        if used_planner:
-            if legacy_baseline_had_values:
-                legacy_baseline_ignored = True
-            planner_process_minutes = planner_total_minutes
-            process_costs = {
-                "Machine": round(planner_machine_cost_total, 2),
-                "Labor": round(planner_labor_cost_total, 2),
-            }
+    if used_planner:
+        if legacy_baseline_had_values:
+            legacy_baseline_ignored = True
+        planner_process_minutes = planner_total_minutes
+        process_costs = {
+            "Machine": round(planner_machine_cost_total, 2),
+            "Labor": round(planner_labor_cost_total, 2),
+        }
 
-            existing_process_meta = {key: dict(value) for key, value in process_meta.items()}
-            process_meta = existing_process_meta
-            process_meta["planner_machine"] = {
-                "hr": round(machine_minutes / 60.0, 3),
-                "minutes": round(machine_minutes, 1),
-                "rate": 0.0,
-                "cost": round(planner_machine_cost_total, 2),
-            }
-            planner_meta_keys.add("planner_machine")
-            process_meta["planner_labor"] = {
-                "hr": round(labor_minutes / 60.0, 3),
-                "minutes": round(labor_minutes, 1),
-                "rate": 0.0,
-                "cost": round(planner_labor_cost_total, 2),
-            }
-            planner_meta_keys.add("planner_labor")
-            total_cost = planner_machine_cost_total + planner_labor_cost_total
-            process_meta["planner_total"] = {
-                "hr": round(planner_total_minutes / 60.0, 3),
-                "minutes": round(planner_total_minutes, 1),
-                "rate": 0.0,
-                "cost": round(total_cost, 2),
-            }
-            planner_meta_keys.add("planner_total")
-            if planner_line_items:
-                process_meta["planner_total"]["line_items"] = copy.deepcopy(planner_line_items)
-                for entry in planner_line_items:
-                    name = str(entry.get("op") or "").strip()
-                    if not name:
-                        continue
-                    minutes_val = float(entry.get("minutes", 0.0) or 0.0)
-                    hours_val = minutes_val / 60.0 if minutes_val else 0.0
-                    cost_val = float(entry.get("machine_cost") or entry.get("labor_cost") or 0.0)
-                    rate_val = (cost_val / hours_val) if hours_val > 0 else 0.0
-                    key_norm = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
-                    process_meta[key_norm] = {
-                        "minutes": round(minutes_val, 2),
-                        "hr": round(hours_val, 3),
-                        "cost": round(cost_val, 2),
-                        "rate": round(rate_val, 2) if rate_val else 0.0,
-                    }
-                    planner_meta_keys.add(key_norm)
+        existing_process_meta = {key: dict(value) for key, value in process_meta.items()}
+        process_meta = existing_process_meta
+        process_meta["planner_machine"] = {
+            "hr": round(machine_minutes / 60.0, 3),
+            "minutes": round(machine_minutes, 1),
+            "rate": 0.0,
+            "cost": round(planner_machine_cost_total, 2),
+        }
+        planner_meta_keys.add("planner_machine")
+        process_meta["planner_labor"] = {
+            "hr": round(labor_minutes / 60.0, 3),
+            "minutes": round(labor_minutes, 1),
+            "rate": 0.0,
+            "cost": round(planner_labor_cost_total, 2),
+        }
+        planner_meta_keys.add("planner_labor")
+        total_cost = planner_machine_cost_total + planner_labor_cost_total
+        process_meta["planner_total"] = {
+            "hr": round(planner_total_minutes / 60.0, 3),
+            "minutes": round(planner_total_minutes, 1),
+            "rate": 0.0,
+            "cost": round(total_cost, 2),
+        }
+        planner_meta_keys.add("planner_total")
+        if planner_line_items:
+            process_meta["planner_total"]["line_items"] = copy.deepcopy(planner_line_items)
+            for entry in planner_line_items:
+                name = str(entry.get("op") or "").strip()
+                if not name:
+                    continue
+                minutes_val = float(entry.get("minutes", 0.0) or 0.0)
+                hours_val = minutes_val / 60.0 if minutes_val else 0.0
+                cost_val = float(entry.get("machine_cost") or entry.get("labor_cost") or 0.0)
+                rate_val = (cost_val / hours_val) if hours_val > 0 else 0.0
+                key_norm = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+                process_meta[key_norm] = {
+                    "minutes": round(minutes_val, 2),
+                    "hr": round(hours_val, 3),
+                    "cost": round(cost_val, 2),
+                    "rate": round(rate_val, 2) if rate_val else 0.0,
+                }
+                planner_meta_keys.add(key_norm)
 
-            if bucket_view:
-                for b, info in bucket_view.items():
-                    hr = info["minutes"] / 60.0 if info["minutes"] else 0.0
-                    cost = info["total_cost"]
-                    rate = (cost / hr) if hr > 0 else 0.0
-                    update_payload = {
-                        "minutes": round(info["minutes"], 1),
-                        "hr": round(hr, 3),
-                        "rate": round(rate, 2),
-                        "cost": round(cost, 2),
-                    }
-                    existing_meta = process_meta.get(b)
-                    if isinstance(existing_meta, Mapping):
-                        existing_meta.update(update_payload)
-                    else:
-                        process_meta[b] = update_payload
-                    planner_meta_keys.add(b)
+        if bucket_view:
+            for b, info in bucket_view.items():
+                hr = info["minutes"] / 60.0 if info["minutes"] else 0.0
+                cost = info["total_cost"]
+                rate = (cost / hr) if hr > 0 else 0.0
+                update_payload = {
+                    "minutes": round(info["minutes"], 1),
+                    "hr": round(hr, 3),
+                    "rate": round(rate, 2),
+                    "cost": round(cost, 2),
+                }
+                existing_meta = process_meta.get(b)
+                if isinstance(existing_meta, Mapping):
+                    existing_meta.update(update_payload)
+                else:
+                    process_meta[b] = update_payload
+                planner_meta_keys.add(b)
 
-            meta_lookup = {
-                key: dict(value) for key, value in process_meta.items() if isinstance(value, Mapping)
+        meta_lookup = {
+            key: dict(value) for key, value in process_meta.items() if isinstance(value, Mapping)
+        }
+        allowed_process_hour_keys = {
+            key
+            for key in planner_meta_keys
+            if key not in legacy_per_process_keys or key.startswith("planner_")
+        }
+        if not allowed_process_hour_keys:
+            allowed_process_hour_keys = set(planner_meta_keys)
+        if "drilling" in legacy_process_meta:
+            allowed_process_hour_keys.add("drilling")
+        process_hours_baseline = {
+            key: float(process_meta.get(key, {}).get("hr", 0.0) or 0.0)
+            for key in allowed_process_hour_keys
+        }
+        process_costs_baseline = {k: float(v) for k, v in process_costs.items()}
+
+    if family_for_breakdown is None:
+        family_hint_candidates = (
+            planner_family,
+            geo_context.get("process_planner_family"),
+            geo_context.get("planner_family"),
+            geo_context.get("process_family"),
+        )
+        for candidate in family_hint_candidates:
+            if candidate is None:
+                continue
+            normalized_family = _normalize_family(candidate)
+            if normalized_family:
+                family_for_breakdown = normalized_family
+                break
+            text = str(candidate).strip().lower()
+            if text:
+                family_for_breakdown = text
+                break
+
+    die_plate_families = {"die", "die_plate", "die plates", "shoe"}
+    if str(family_for_breakdown or "").strip().lower() in die_plate_families:
+        setups_for_fixture = 0
+        try:
+            setups_for_fixture = int(round(float(setups)))
+        except Exception:
+            setups_for_fixture = 0
+        setups_for_fixture = max(1, setups_for_fixture)
+        fixture_build_hr = max(0.75, 0.33 * setups_for_fixture)
+        fixture_rate = float(rates.get("FixtureBuildRate", 0.0))
+        fixture_labor_cost = float(fixture_build_hr) * fixture_rate
+        fixture_cost = float(fixture_labor_cost)
+        fixture_labor_per_part = (
+            fixture_labor_cost / Qty if Qty > 1 else fixture_labor_cost
+        )
+        fixture_per_part = (
+            fixture_cost / Qty if Qty > 1 else fixture_cost
+        )
+        fixture_entry = nre_detail.setdefault("fixture", {})
+        fixture_entry.update(
+            {
+                "build_hr": float(fixture_build_hr),
+                "build_rate": fixture_rate,
+                "labor_cost": float(fixture_labor_cost),
+                "per_lot": float(fixture_cost),
+                "per_part": float(fixture_per_part),
             }
-            allowed_process_hour_keys = {
-                key
-                for key in planner_meta_keys
-                if key not in legacy_per_process_keys or key.startswith("planner_")
-            }
-            if not allowed_process_hour_keys:
-                allowed_process_hour_keys = set(planner_meta_keys)
-            if "drilling" in legacy_process_meta:
-                allowed_process_hour_keys.add("drilling")
-            process_hours_baseline = {
-                key: float(process_meta.get(key, {}).get("hr", 0.0) or 0.0)
-                for key in allowed_process_hour_keys
-            }
-            process_costs_baseline = {k: float(v) for k, v in process_costs.items()}
+        )
+        features["fixture_build_hr"] = float(fixture_build_hr)
+        fixture_build_hr_base = float(fixture_build_hr or 0.0)
+        fixture_plan_desc = None
+        strategy_text = None
+        if isinstance(fixture_entry, Mapping):
+            strategy_value = fixture_entry.get("strategy")
+            if isinstance(strategy_value, str):
+                strategy_text = strategy_value.strip()
+        if fixture_build_hr > 0:
+            fixture_plan_desc = f"{fixture_build_hr:.2f} hr build"
+        if strategy_text:
+            if fixture_plan_desc:
+                fixture_plan_desc = f"{fixture_plan_desc} ({strategy_text})"
+            else:
+                fixture_plan_desc = strategy_text
 
     baseline_data = {
         "process_hours": process_hours_baseline,
@@ -14347,6 +14411,8 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     breakdown = {
         "qty": Qty,
+        "setups": int(setups) if isinstance(setups, (int, float)) else setups,
+        "family": family_for_breakdown,
         "scrap_pct": scrap_pct,
         "material_direct_cost": material_direct_cost,
         "total_direct_costs": round(total_direct_costs, 2),
