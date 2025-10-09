@@ -5239,6 +5239,7 @@ def render_quote(
             labor_cost_totals[str(key)] = float(value)
         except Exception:
             continue
+    labor_costs_display: dict[str, float] = {}
     prog_hr: float = 0.0
     direct_cost_details = breakdown.get("direct_cost_details", {}) or {}
     qty          = int(breakdown.get("qty", 1) or 1)
@@ -6211,7 +6212,9 @@ def render_quote(
         amount_val = float(amount or 0.0)
         if not force and not ((amount_val > 0) or show_zeros):
             return
-        row(display_override or label, amount_val, indent="  ")
+        display_label = display_override or label
+        row(display_label, amount_val, indent="  ")
+        labor_costs_display[label] = amount_val
         existing_detail = labor_cost_details.get(label)
         merged_detail = _merge_detail(existing_detail, detail_bits or [])
         detail_to_write: str | None
@@ -11944,108 +11947,6 @@ def compute_quote_from_df(df: pd.DataFrame,
     min_lot = float(params["MinLotCharge"] or 0.0)
     if price < min_lot:
         price = min_lot
-
-    labor_cost_details_input: dict[str, str] = {}
-    labor_cost_details: dict[str, str] = {}
-    labor_costs_display: dict[str, float] = {}
-
-    # Local helper mirrors the renderer's filter so summary details stay clean
-    _extra_detail_pattern = re.compile(r"^includes\b.*extras\b", re.IGNORECASE)
-    def _is_extra_segment(segment: str) -> bool:
-        try:
-            return bool(_extra_detail_pattern.match(str(segment)))
-        except Exception:
-            return False
-
-    def _merge_labor_detail(label: str, amount: float, detail_bits: list[str]) -> None:
-        labor_costs_display[label] = float(amount)
-        existing_detail = labor_cost_details_input.get(label)
-        if not detail_bits and not existing_detail:
-            return
-
-        merged_bits: list[str] = []
-        seen: set[str] = set()
-        for bit in detail_bits:
-            seg = str(bit).strip()
-            if not seg or re.match(r"^includes\b.*extras\b", seg, re.IGNORECASE):
-                continue
-            if seg not in seen:
-                merged_bits.append(seg)
-                seen.add(seg)
-        if existing_detail:
-            for segment in re.split(r";\s*", existing_detail):
-                seg = segment.strip()
-                if not seg or re.match(r"^includes\b.*extras\b", seg, re.IGNORECASE):
-                    continue
-                if seg not in seen:
-                    merged_bits.append(seg)
-                    seen.add(seg)
-        if merged_bits:
-            labor_cost_details[label] = "; ".join(merged_bits)
-
-    for key, value in sorted(process_costs.items(), key=lambda kv: kv[1], reverse=True):
-        label = key.replace('_', ' ').title()
-        meta = process_meta.get(key, {})
-        hr = float(meta.get("hr", 0.0))
-        rate = float(meta.get("rate", 0.0))
-        extra = float(meta.get("base_extra", 0.0))
-        detail_bits: list[str] = []
-
-        if hr > 0 and rate > 0:
-            detail_bits.append(f"{hr:.2f} hr @ ${rate:,.2f}/hr")
-        elif hr > 0:
-            detail_bits.append(f"{hr:.2f} hr")
-
-        proc_notes = applied_process.get(key, {}).get("notes")
-        if proc_notes:
-            detail_bits.append("LLM: " + ", ".join(proc_notes))
-
-        _merge_labor_detail(label, value, detail_bits)
-
-    programming_bits: list[str] = []
-    prog_hr_detail = float(programming_detail.get("prog_hr", 0.0) or 0.0)
-    prog_rate_detail = float(programming_detail.get("prog_rate", 0.0) or 0.0)
-    if prog_hr_detail > 0:
-        if prog_rate_detail > 0:
-            programming_bits.append(
-                f"- Programmer (lot): {prog_hr_detail:.2f} hr @ ${prog_rate_detail:,.2f}/hr"
-            )
-        else:
-            programming_bits.append(f"- Programmer (lot): {prog_hr_detail:.2f} hr")
-    eng_hr_detail = float(programming_detail.get("eng_hr", 0.0) or 0.0)
-    eng_rate_detail = float(programming_detail.get("eng_rate", 0.0) or 0.0)
-    if eng_hr_detail > 0:
-        if eng_rate_detail > 0:
-            programming_bits.append(
-                f"- Engineering (lot): {eng_hr_detail:.2f} hr @ ${eng_rate_detail:,.2f}/hr"
-            )
-        else:
-            programming_bits.append(f"- Engineering (lot): {eng_hr_detail:.2f} hr")
-    if Qty > 1 and programming_per_part > 0:
-        programming_bits.append(f"Amortized across {Qty} pcs")
-
-    if programming_per_part > 0:
-        _merge_labor_detail("Programming (amortized)", programming_per_part, programming_bits)
-
-    fixture_bits: list[str] = []
-    fixture_detail = nre_detail.get("fixture", {}) if isinstance(nre_detail, dict) else {}
-    fixture_build_hr_detail = float(fixture_detail.get("build_hr", 0.0) or 0.0)
-    fixture_rate_detail = float(fixture_detail.get("build_rate", rates.get("FixtureBuildRate", 0.0)))
-    if fixture_build_hr_detail > 0:
-        if fixture_rate_detail > 0:
-            fixture_bits.append(
-                f"- Build labor (lot): {fixture_build_hr_detail:.2f} hr @ ${fixture_rate_detail:,.2f}/hr"
-            )
-        else:
-            fixture_bits.append(f"- Build labor (lot): {fixture_build_hr_detail:.2f} hr")
-    soft_jaw_hr = float(fixture_detail.get("soft_jaw_hr", 0.0) or 0.0)
-    if soft_jaw_hr > 0:
-        fixture_bits.append(f"Soft jaw prep {soft_jaw_hr:.2f} hr")
-    if Qty > 1 and fixture_labor_per_part > 0:
-        fixture_bits.append(f"Amortized across {Qty} pcs")
-
-    if fixture_labor_per_part > 0:
-        _merge_labor_detail("Fixture Build (amortized)", fixture_labor_per_part, fixture_bits)
 
     direct_costs_display: dict[str, float] = {label: float(value) for label, value in pass_through.items()}
     direct_cost_details: dict[str, str] = {}
