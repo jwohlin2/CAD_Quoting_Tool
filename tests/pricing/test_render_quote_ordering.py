@@ -124,7 +124,7 @@ def test_render_quote_hour_summary_adds_programming_hours() -> None:
                 "with_expedite": 142.758,
             },
             "nre_detail": {
-                "programming": {"prog_hr": 2.0},
+                "programming": {"prog_hr": 2.0, "amortized": True},
                 "fixture": {"build_hr": 1.5, "labor_cost": 90.0, "build_rate": 60.0},
             },
             "nre": {},
@@ -150,7 +150,74 @@ def test_render_quote_hour_summary_adds_programming_hours() -> None:
 
     assert "Labor Hour Summary" in lines
     summary_idx = lines.index("Labor Hour Summary")
-    summary_block = lines[summary_idx:summary_idx + 8]
+    summary_block = lines[summary_idx:summary_idx + 10]
     assert any("Programming" in line and "2.00 hr" in line for line in summary_block)
+    assert any(
+        "Programming (amortized per part)" in line and "0.40 hr" in line
+        for line in summary_block
+    )
     assert any("Fixture Build" in line and "1.50 hr" in line for line in summary_block)
+    assert any(
+        "Fixture Build (amortized per part)" in line and "0.30 hr" in line
+        for line in summary_block
+    )
     assert any("Total Hours" in line and "6.50 hr" in line for line in summary_block)
+
+
+def test_render_quote_planner_hour_summary_uses_lot_labels() -> None:
+    result = {
+        "price": 200.0,
+        "breakdown": {
+            "qty": 4,
+            "pricing_source": "planner",
+            "totals": {
+                "labor_cost": 150.0,
+                "direct_costs": 50.0,
+                "subtotal": 200.0,
+                "with_overhead": 220.0,
+                "with_ga": 231.0,
+                "with_contingency": 235.62,
+                "with_expedite": 235.62,
+            },
+            "nre_detail": {
+                "programming": {"prog_hr": 4.0, "amortized": True},
+                "fixture": {"build_hr": 1.0, "labor_cost": 120.0, "build_rate": 60.0},
+            },
+            "nre": {},
+            "material": {},
+            "process_costs": {},
+            "process_meta": {
+                "planner_total": {"hr": 6.0},
+                "planner_labor": {"hr": 3.5},
+                "planner_machine": {"hr": 2.5},
+            },
+            "pass_through": {},
+            "applied_pcts": {
+                "OverheadPct": 0.10,
+                "GA_Pct": 0.05,
+                "ContingencyPct": 0.02,
+                "MarginPct": 0.15,
+            },
+            "rates": {},
+            "params": {},
+            "labor_cost_details": {},
+            "direct_cost_details": {},
+        },
+    }
+
+    rendered = appV5.render_quote(result, currency="$")
+    lines = rendered.splitlines()
+
+    assert "Labor Hour Summary" in lines
+    summary_idx = lines.index("Labor Hour Summary")
+    summary_block = lines[summary_idx:summary_idx + 12]
+    assert any("Programming (lot)" in line and "4.00 hr" in line for line in summary_block)
+    assert any(
+        "Programming (amortized per part)" in line and "1.00 hr" in line
+        for line in summary_block
+    )
+    assert any("Fixture Build (lot)" in line and "1.00 hr" in line for line in summary_block)
+    assert any(
+        "Fixture Build (amortized per part)" in line and "0.25 hr" in line
+        for line in summary_block
+    )
