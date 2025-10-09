@@ -5925,8 +5925,34 @@ def render_quote(
         return re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_")
 
     def _is_planner_meta(key: str) -> bool:
-        k = str(key).lower().strip()
-        return k.startswith("planner_") or k == "planner total"
+        canonical_key = _canonical_bucket_key(key)
+        if not canonical_key:
+            return False
+        return canonical_key.startswith("planner_") or canonical_key == "planner_total"
+
+    def _fold_buckets(values: Mapping[str, Any] | None) -> dict[str, float]:
+        if not isinstance(values, Mapping):
+            return {}
+
+        totals_by_canonical: dict[str, float] = {}
+        display_key_by_canonical: dict[str, str] = {}
+
+        for key, raw_value in values.items():
+            canonical_key = _canonical_bucket_key(key)
+            if not canonical_key:
+                canonical_key = str(key)
+            try:
+                amount = float(raw_value or 0.0)
+            except Exception:
+                continue
+
+            totals_by_canonical[canonical_key] = totals_by_canonical.get(canonical_key, 0.0) + amount
+            display_key_by_canonical.setdefault(canonical_key, key)
+
+        return {
+            display_key_by_canonical[canonical_key]: total
+            for canonical_key, total in totals_by_canonical.items()
+        }
 
     def _planner_bucket_for_op(name: str) -> str:
         text = str(name or "").lower()
