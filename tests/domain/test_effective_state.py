@@ -30,14 +30,13 @@ def test_merge_effective_clamps_and_tracks_sources() -> None:
 
     merged = merge_effective(baseline, suggestions, overrides)
 
-    assert merged["process_hour_multipliers"]["drilling"] == pytest.approx(0.5)
-    assert merged["process_hours"]["drilling"] == pytest.approx(1.0)
+    assert merged["process_hour_multipliers"]["drilling"] == pytest.approx(0.25)
+    assert merged["process_hours"]["drilling"] == pytest.approx(0.5)
     assert merged["process_hour_adders"]["inspection"] == pytest.approx(1.0)
     assert merged["process_hours"]["inspection"] == pytest.approx(1.0)
     assert merged["scrap_pct"] == pytest.approx(0.25)
 
     clamp_notes = merged.get("_clamp_notes", [])
-    assert any("multiplier[drilling]" in note for note in clamp_notes)
     assert any("adder[inspection]" in note for note in clamp_notes)
     assert any("scrap_pct" in note for note in clamp_notes)
 
@@ -69,6 +68,23 @@ def test_compute_effective_state_respects_accept_flags() -> None:
     assert merged["scrap_pct"] == pytest.approx(0.2)
     assert sources["process_hour_multipliers"]["milling"] == "llm"
     assert sources["scrap_pct"] == "llm"
+
+
+def test_merge_effective_caps_extreme_values() -> None:
+    baseline = {"process_hours": {"milling": 2.0}}
+    suggestions = {
+        "process_hour_multipliers": {"milling": 12.0},
+        "process_hour_adders": {"milling": 24.0},
+    }
+
+    merged = merge_effective(baseline, suggestions, {})
+
+    assert merged["process_hour_multipliers"]["milling"] == pytest.approx(4.0)
+    assert merged["process_hour_adders"]["milling"] == pytest.approx(8.0)
+    assert merged["process_hours"]["milling"] == pytest.approx((2.0 * 4.0) + 8.0)
+    clamp_notes = merged.get("_clamp_notes", [])
+    assert any("multiplier[milling]" in note for note in clamp_notes)
+    assert any("adder[milling]" in note for note in clamp_notes)
 
 
 def test_reprice_with_effective_applies_drilling_floor() -> None:

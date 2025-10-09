@@ -110,6 +110,11 @@ import cad_quoter.geometry as geometry
 from bucketizer import bucketize
 
 
+LLM_MULTIPLIER_MIN = 0.25
+LLM_MULTIPLIER_MAX = 4.0
+LLM_ADDER_MAX = 8.0
+
+
 ensure_runtime_dependencies = _runtime.ensure_runtime_dependencies
 find_default_qwen_model = _runtime.find_default_qwen_model
 load_qwen_vl = _runtime.load_qwen_vl
@@ -1389,13 +1394,21 @@ def build_suggest_payload(
     if geo.get("provenance"):
         geo_summary["provenance"] = _clean_nested(geo.get("provenance"), limit=12)
 
+    mult_min_raw = _coerce_float(bounds.get("mult_min"))
+    mult_max_raw = _coerce_float(bounds.get("mult_max"))
+    adder_max_raw = _coerce_float(bounds.get("adder_max_hr"))
     bounds_summary = {
-        "mult_min": _coerce_float(bounds.get("mult_min")) or 0.5,
-        "mult_max": _coerce_float(bounds.get("mult_max")) or 3.0,
-        "adder_max_hr": _coerce_float(bounds.get("adder_max_hr")) or 5.0,
+        "mult_min": max(LLM_MULTIPLIER_MIN, mult_min_raw if mult_min_raw is not None else LLM_MULTIPLIER_MIN),
+        "mult_max": max(
+            LLM_MULTIPLIER_MIN,
+            min(LLM_MULTIPLIER_MAX, mult_max_raw if mult_max_raw is not None else LLM_MULTIPLIER_MAX),
+        ),
+        "adder_max_hr": min(LLM_ADDER_MAX, adder_max_raw if adder_max_raw is not None else LLM_ADDER_MAX),
         "scrap_min": _coerce_float(bounds.get("scrap_min")) or 0.0,
         "scrap_max": _coerce_float(bounds.get("scrap_max")) or 0.25,
     }
+    if bounds_summary["mult_max"] < bounds_summary["mult_min"]:
+        bounds_summary["mult_max"] = bounds_summary["mult_min"]
 
     seed_extra: dict[str, Any] = {}
     dfm_geo_summary = derived_summary.get("dfm_geo")
@@ -1488,11 +1501,38 @@ def build_suggest_payload(
 def sanitize_suggestions(s: dict, bounds: dict) -> dict:
     bounds = bounds or {}
 
-    mult_min = _as_float_or_none(bounds.get("mult_min")) or 0.5
-    mult_max = _as_float_or_none(bounds.get("mult_max")) or 3.0
-    adder_max = _as_float_or_none(bounds.get("adder_max_hr")) or 5.0
+    mult_min = _as_float_or_none(bounds.get("mult_min"))
+    mult_max = _as_float_or_none(bounds.get("mult_max"))
+    adder_max_raw = _as_float_or_none(bounds.get("adder_max_hr"))
+    if mult_min is None:
+        mult_min = LLM_MULTIPLIER_MIN
+    else:
+        mult_min = max(LLM_MULTIPLIER_MIN, float(mult_min))
+    if mult_max is None:
+        mult_max = LLM_MULTIPLIER_MAX
+    else:
+        mult_max = min(LLM_MULTIPLIER_MAX, float(mult_max))
+    if mult_max < mult_min:
+        mult_max = mult_min
+    add_hr_cap = _as_float_or_none(bounds.get("add_hr_max"))
+    if adder_max_raw is None and add_hr_cap is not None:
+        adder_max_raw = float(add_hr_cap)
+    elif adder_max_raw is not None and add_hr_cap is not None:
+        adder_max_raw = min(float(adder_max_raw), float(add_hr_cap))
+    base_adder_max = min(
+        LLM_ADDER_MAX,
+        adder_max_raw if adder_max_raw is not None else LLM_ADDER_MAX,
+    )
     scrap_min = max(0.0, _as_float_or_none(bounds.get("scrap_min")) or 0.0)
     scrap_max = _as_float_or_none(bounds.get("scrap_max")) or 0.25
+
+    bucket_caps_raw = bounds.get("adder_bucket_max") or bounds.get("add_hr_bucket_max")
+    bucket_caps: dict[str, float] = {}
+    if isinstance(bucket_caps_raw, dict):
+        for key, raw in bucket_caps_raw.items():
+            cap_val = _as_float_or_none(raw)
+            if cap_val is not None:
+                bucket_caps[str(key).lower()] = float(cap_val)
 
     meta_info: dict[str, Any] = {}
 
@@ -1622,8 +1662,13 @@ def sanitize_suggestions(s: dict, bounds: dict) -> dict:
         num = _as_float_or_none(value)
         if num is None:
             continue
-        num = max(0.0, min(adder_max, num))
         proc_key = str(proc)
+        bucket_cap = bucket_caps.get(proc_key.lower())
+        limit = bucket_cap if bucket_cap is not None else base_adder_max
+        if limit is None:
+            limit = LLM_ADDER_MAX
+        limit = max(0.0, float(limit))
+        num = max(0.0, min(limit, num))
         adders[proc_key] = num
         _store_meta(("process_hour_adders", proc_key), detail, num)
 
@@ -2104,18 +2149,54 @@ def merge_effective(
         changed = False
         source_norm = str(source).strip().lower()
         if kind == "multiplier":
-            mult_min = _as_float_or_none(bounds.get("mult_min")) or 0.5
-            mult_max = _as_float_or_none(bounds.get("mult_max")) or 3.0
+            mult_min_val = _as_float_or_none(bounds.get("mult_min"))
+            mult_max_val = _as_float_or_none(bounds.get("mult_max"))
+            mult_min = max(
+                LLM_MULTIPLIER_MIN,
+                mult_min_val if mult_min_val is not None else LLM_MULTIPLIER_MIN,
+            )
+            mult_max = min(
+                LLM_MULTIPLIER_MAX,
+                mult_max_val if mult_max_val is not None else LLM_MULTIPLIER_MAX,
+            )
+            if mult_max < mult_min:
+                mult_max = mult_min
             clamped = max(mult_min, min(mult_max, float(value)))
         elif kind == "adder":
             orig_val = float(value)
-            adder_max = _as_float_or_none(bounds.get("add_hr_max")) or 5.0
+            add_hr_max_raw = _as_float_or_none(bounds.get("add_hr_max"))
+            adder_max_raw = _as_float_or_none(bounds.get("adder_max_hr"))
+            adder_max_candidates = [
+                LLM_ADDER_MAX,
+                adder_max_raw if adder_max_raw is not None else None,
+                add_hr_max_raw if add_hr_max_raw is not None else None,
+            ]
+            bucket_caps_raw = bounds.get("adder_bucket_max") or bounds.get("add_hr_bucket_max")
+            bucket_caps: dict[str, float] = {}
+            if isinstance(bucket_caps_raw, dict):
+                for key, raw in bucket_caps_raw.items():
+                    cap_val = _as_float_or_none(raw)
+                    if cap_val is not None:
+                        bucket_caps[str(key).lower()] = float(cap_val)
             adder_min = _as_float_or_none(bounds.get("add_hr_min"))
             raw_val = orig_val
             if source_norm == "llm" and raw_val > 240:
                 raw_val = raw_val / 60.0
             lower_bound = adder_min if adder_min is not None else 0.0
-            clamped = max(lower_bound, min(adder_max, raw_val))
+            bucket_name = None
+            if "[" in label and "]" in label:
+                bucket_name = label.split("[", 1)[-1].split("]", 1)[0].strip().lower()
+            bucket_max = None
+            if bucket_name:
+                bucket_max = bucket_caps.get(bucket_name)
+            if bucket_max is not None:
+                adder_max_effective = bucket_max
+            else:
+                filtered = [cand for cand in adder_max_candidates if cand is not None]
+                adder_max_effective = min(filtered) if filtered else LLM_ADDER_MAX
+            if adder_max_effective < lower_bound:
+                adder_max_effective = lower_bound
+            clamped = max(lower_bound, min(adder_max_effective, raw_val))
         elif kind == "scrap":
             scrap_min = max(0.0, _as_float_or_none(bounds.get("scrap_min")) or 0.0)
             scrap_max = _as_float_or_none(bounds.get("scrap_max")) or 0.25
@@ -11825,12 +11906,23 @@ def compute_quote_from_df(df: pd.DataFrame,
         "fixture": baseline_fixture,
     }
     llm_bounds = {
-        "mult_min": 0.5,
-        "mult_max": 3.0,
-        "adder_max_hr": 5.0,
+        "mult_min": LLM_MULTIPLIER_MIN,
+        "mult_max": LLM_MULTIPLIER_MAX,
+        "adder_max_hr": LLM_ADDER_MAX,
         "scrap_min": 0.0,
         "scrap_max": 0.25,
     }
+    baseline_bounds = baseline_data.get("_bounds") if isinstance(baseline_data.get("_bounds"), dict) else None
+    if baseline_bounds:
+        bucket_caps_raw = baseline_bounds.get("adder_bucket_max") or baseline_bounds.get("add_hr_bucket_max")
+        if isinstance(bucket_caps_raw, dict):
+            bucket_caps_clean: dict[str, float] = {}
+            for key, raw in bucket_caps_raw.items():
+                cap_val = _as_float_or_none(raw)
+                if cap_val is not None:
+                    bucket_caps_clean[str(key)] = float(cap_val)
+            if bucket_caps_clean:
+                llm_bounds["adder_bucket_max"] = bucket_caps_clean
 
     tap_qty_seed = int(max(tap_qty_seed, tap_qty_geo))
     cbore_qty_seed = int(max(cbore_qty_seed, cbore_qty_geo))
@@ -12742,7 +12834,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         actual = process_key_map.get(_normalize_key(key))
         if not actual:
             continue
-        mult = clamp(mult, 0.5, 3.0, 1.0)
+        mult = clamp(mult, LLM_MULTIPLIER_MIN, LLM_MULTIPLIER_MAX, 1.0)
         old_cost = float(process_costs.get(actual, 0.0))
         if old_cost <= 0:
             continue
@@ -12779,7 +12871,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     for key, add_hr in (ph_add or {}).items():
         if not isinstance(add_hr, (int, float)):
             continue
-        add_hr = clamp(add_hr, 0.0, 5.0, 0.0)
+        add_hr = clamp(add_hr, 0.0, LLM_ADDER_MAX, 0.0)
         if add_hr <= 0:
             continue
         actual = process_key_map.get(_normalize_key(key))
@@ -17088,10 +17180,10 @@ def get_llm_overrides(
     bounds_ctx = dict(ctx.get("bounds") or {})
     bounds_ctx.update(
         {
-            "mult_min": 0.5,
-            "mult_max": 3.0,
+            "mult_min": LLM_MULTIPLIER_MIN,
+            "mult_max": LLM_MULTIPLIER_MAX,
             "add_hr_min": 0.0,
-            "add_hr_max": 5.0,
+            "add_hr_max": LLM_ADDER_MAX,
             "scrap_min": 0.0,
             "scrap_max": 0.25,
         }
@@ -17163,7 +17255,7 @@ def get_llm_overrides(
             " \"process_hour_multipliers\":{\"drilling\":float},"
             " \"process_hour_adders\":{\"drilling\":float}, \"notes\":[""...""]}."
             " If hole_count < 5 or data is insufficient, return {}."
-            " Respect multipliers in [0.5,3.0] and adders in [0,5] hours."
+            " Respect multipliers in [0.25,4.0] and adders in [0,8] hours."
             " When hole_count ≥ 50 and thickness_mm ≥ 3, consider multipliers up to 2.0."
         )
         _run_task("drilling", drilling_system, hole_payload, max_tokens=384)
@@ -17179,7 +17271,7 @@ def get_llm_overrides(
             "You are a manufacturing estimator. Choose a stock item from `catalogs.stock` that"
             " minimally encloses bbox LxWxT (mm). Return JSON only: {\"stock_recommendation\":{...},"
             " \"scrap_pct\":0.14, \"process_hour_adders\":{\"sawing\":0.2,\"handling\":0.1},"
-            " \"notes\":[""...""]}. Keep scrap_pct within [0,0.25] and hour adders within [0,5]."
+            " \"notes\":[""...""]}. Keep scrap_pct within [0,0.25] and hour adders within [0,8]."
             " Do not invent SKUs. If none fit, return {\"needs_user_input\":\"no stock fits\"}."
         )
         _run_task("stock", stock_system, stock_payload, max_tokens=384)
@@ -17210,7 +17302,7 @@ def get_llm_overrides(
         " tiny radii, thread density) only when thresholds you define are exceeded."
         " Return JSON only: {\"dfm_risks\":[""thin walls <2mm""],"
         " \"process_hour_multipliers\":{...}, \"process_hour_adders\":{...}, \"notes\":[...]}"
-        " or {} if no issues. Keep multipliers within [0.5,3.0] and adders within [0,5]."
+        " or {} if no issues. Keep multipliers within [0.25,4.0] and adders within [0,8]."
     )
     _run_task("dfm", dfm_system, dfm_payload, max_tokens=320)
 
@@ -17230,7 +17322,7 @@ def get_llm_overrides(
             " inspection or finishing time and suggest surface-finish ops. Return JSON only:"
             " {\"tolerance_impacts\":{\"in_process_inspection_hr\":0.2,"
             " \"final_inspection_hr\":0.1, \"finishing_hr\":0.1, \"suggested_surface_finish\":\"...\","
-            " \"notes\":[...]}}. Keep hour adders within [0,5] and return {} if no change is needed."
+            " \"notes\":[...]}}. Keep hour adders within [0,8] and return {} if no change is needed."
         )
         _run_task("tolerance", tol_system, tol_payload, max_tokens=320)
 
@@ -17292,14 +17384,14 @@ def get_llm_overrides(
         val = _as_float(value)
         if val is None:
             return
-        clamped = clamp(val, 0.5, 3.0, 1.0)
+        clamped = clamp(val, LLM_MULTIPLIER_MIN, LLM_MULTIPLIER_MAX, 1.0)
         container = _ensure_mults_dict()
         norm = str(name).lower()
         prev = container.get(norm)
         if prev is None:
             container[norm] = clamped
             return
-        new_val = clamp(prev * clamped, 0.5, 3.0, 1.0)
+        new_val = clamp(prev * clamped, LLM_MULTIPLIER_MIN, LLM_MULTIPLIER_MAX, 1.0)
         if not math.isclose(prev * clamped, new_val, abs_tol=1e-6):
             clamp_notes.append(f"{source} multiplier clipped for {norm}")
         container[norm] = new_val
@@ -17308,15 +17400,17 @@ def get_llm_overrides(
         val = _as_float(value)
         if val is None:
             return
-        clamped = clamp(val, 0.0, 5.0, 0.0)
+        clamped = clamp(val, 0.0, LLM_ADDER_MAX, 0.0)
         if clamped <= 0:
             return
         container = _ensure_adders_dict()
         norm = str(name).lower()
         prev = float(container.get(norm, 0.0))
-        new_val = clamp(prev + clamped, 0.0, 5.0, 0.0)
+        new_val = clamp(prev + clamped, 0.0, LLM_ADDER_MAX, 0.0)
         if not math.isclose(prev + clamped, new_val, abs_tol=1e-6):
-            clamp_notes.append(f"{source} {prev + clamped:.2f} hr clipped to 5.0 for {norm}")
+            clamp_notes.append(
+                f"{source} {prev + clamped:.2f} hr clipped to {LLM_ADDER_MAX:.1f} for {norm}"
+            )
         container[norm] = new_val
 
     def _clean_notes_list(values, limit: int = 6) -> list[str]:
@@ -17352,7 +17446,7 @@ def get_llm_overrides(
     for k, v in (mults or {}).items():
         if isinstance(v, (int, float)):
             orig = float(v)
-            clamped_val = clamp(v, 0.5, 3.0, 1.0)
+            clamped_val = clamp(v, LLM_MULTIPLIER_MIN, LLM_MULTIPLIER_MAX, 1.0)
             clean_mults[k.lower()] = clamped_val
             if not math.isclose(orig, clamped_val, abs_tol=1e-6):
                 clamp_notes.append(
@@ -17365,7 +17459,7 @@ def get_llm_overrides(
     for k, v in (adds or {}).items():
         if isinstance(v, (int, float)):
             orig = float(v)
-            clamped_val = clamp(v, 0.0, 5.0, 0.0)
+            clamped_val = clamp(v, 0.0, LLM_ADDER_MAX, 0.0)
             clean_adders[k.lower()] = clamped_val
             if not math.isclose(orig, clamped_val, abs_tol=1e-6):
                 clamp_notes.append(
@@ -17525,12 +17619,12 @@ def get_llm_overrides(
 
             saw_hr = _as_float(stock_plan_raw.get("sawing_hr") or stock_plan_raw.get("saw_hr"))
             if saw_hr and saw_hr > 0:
-                saw_hr_clamped = clamp(saw_hr, 0.0, 5.0, 0.0)
+                saw_hr_clamped = clamp(saw_hr, 0.0, LLM_ADDER_MAX, 0.0)
                 clean_stock_plan["sawing_hr"] = saw_hr_clamped
                 _merge_adder("saw_waterjet", saw_hr_clamped, "stock_plan.sawing_hr")
             handling_hr = _as_float(stock_plan_raw.get("handling_hr"))
             if handling_hr and handling_hr > 0:
-                handling_hr_clamped = clamp(handling_hr, 0.0, 5.0, 0.0)
+                handling_hr_clamped = clamp(handling_hr, 0.0, LLM_ADDER_MAX, 0.0)
                 clean_stock_plan["handling_hr"] = handling_hr_clamped
                 _merge_adder("assembly", handling_hr_clamped, "stock_plan.handling_hr")
 
@@ -17557,7 +17651,7 @@ def get_llm_overrides(
             clean_setup["fixture"] = fixture.strip()[:120]
         setup_hr = _as_float(setup_plan_raw.get("setup_adders_hr") or setup_plan_raw.get("setup_hours"))
         if setup_hr and setup_hr > 0:
-            clean_setup["setup_adders_hr"] = clamp(setup_hr, 0.0, 5.0, 0.0)
+            clean_setup["setup_adders_hr"] = clamp(setup_hr, 0.0, LLM_ADDER_MAX, 0.0)
         setup_notes = _clean_notes_list(setup_plan_raw.get("notes"))
         if setup_notes:
             clean_setup["notes"] = setup_notes
@@ -17574,17 +17668,17 @@ def get_llm_overrides(
         clean_tol: dict[str, Any] = {}
         inproc_hr = _as_float(tol_raw.get("in_process_inspection_hr") or tol_raw.get("in_process_hr"))
         if inproc_hr and inproc_hr > 0:
-            inproc_clamped = clamp(inproc_hr, 0.0, 5.0, 0.0)
+            inproc_clamped = clamp(inproc_hr, 0.0, LLM_ADDER_MAX, 0.0)
             clean_tol["in_process_inspection_hr"] = inproc_clamped
             _merge_adder("inspection", inproc_clamped, "tolerance_in_process_hr")
         final_hr = _as_float(tol_raw.get("final_inspection_hr") or tol_raw.get("final_hr"))
         if final_hr and final_hr > 0:
-            final_clamped = clamp(final_hr, 0.0, 5.0, 0.0)
+            final_clamped = clamp(final_hr, 0.0, LLM_ADDER_MAX, 0.0)
             clean_tol["final_inspection_hr"] = final_clamped
             _merge_adder("inspection", final_clamped, "tolerance_final_hr")
         finish_hr = _as_float(tol_raw.get("finishing_hr") or tol_raw.get("finish_hr"))
         if finish_hr and finish_hr > 0:
-            finish_clamped = clamp(finish_hr, 0.0, 5.0, 0.0)
+            finish_clamped = clamp(finish_hr, 0.0, LLM_ADDER_MAX, 0.0)
             clean_tol["finishing_hr"] = finish_clamped
             _merge_adder("finishing_deburr", finish_clamped, "tolerance_finishing_hr")
         surface = tol_raw.get("surface_finish") or tol_raw.get("suggested_surface_finish")
