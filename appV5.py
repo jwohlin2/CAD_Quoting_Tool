@@ -6841,20 +6841,17 @@ def render_quote(
         label_overrides=label_overrides,
         currency_formatter=_m,
     ):
+        normalized_label = entry.label.strip().lower()
+        if normalized_label in {"programming (amortized)", "fixture build (amortized)"}:
+            if qty <= 1:
+                continue
         _add_labor_cost_line(
-            label,
-            amount_override if use_display else float(value),
-            process_key=str(canon_key),
-            detail_bits=detail_bits,
-            display_override=display_override,
+            entry.label,
+            float(entry.amount or 0.0),
+            process_key=str(entry.process_key),
+            detail_bits=list(entry.detail_bits),
+            display_override=entry.display_override,
         )
-
-    show_amortized_single_qty = _lookup_config_flag(
-        "show_amortized_nre_single_qty",
-        "show_amortized_nre_for_single_qty",
-        "show_single_qty_amortized_nre",
-        "show_amortized_nre",
-    )
 
     def _should_show_amortized_cost(amount: float) -> bool:
         try:
@@ -6863,9 +6860,7 @@ def render_quote(
             amount_val = 0.0
         if amount_val <= 0:
             return False
-        if qty > 1:
-            return True
-        return show_amortized_single_qty
+        return qty > 1
 
     programming_per_part_cost = labor_cost_totals.get("Programming (amortized)")
     if programming_per_part_cost is None:
@@ -6895,7 +6890,8 @@ def render_quote(
     if qty > 1 and programming_per_part_cost > 0:
         prog_bits.append(f"Amortized across {qty} pcs")
 
-    if qty > 1 and programming_per_part_cost > 0:
+    show_programming_amortized = qty > 1 and programming_per_part_cost > 0
+    if show_programming_amortized and "Programming (amortized)" not in labor_costs_display:
         _add_labor_cost_line(
             "Programming (amortized)",
             programming_per_part_cost,
@@ -6937,7 +6933,7 @@ def render_quote(
     if qty > 1 and fixture_labor_per_part_cost > 0:
         fixture_bits.append(f"Amortized across {qty} pcs")
 
-    if show_fixture_amortized:
+    if show_fixture_amortized and "Fixture Build (amortized)" not in labor_costs_display:
         _add_labor_cost_line(
             "Fixture Build (amortized)",
             fixture_labor_per_part_cost,
