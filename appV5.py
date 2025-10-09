@@ -7730,6 +7730,47 @@ def _apply_drill_minutes_clamp(hours: float, hole_count: int) -> float:
     return max(min(hours, max_hr), min_hr)
 
 
+def _count_holes_from_counts(counts: Mapping[Any, Any] | None) -> int:
+    total = 0
+    if isinstance(counts, Mapping):
+        for qty in counts.values():
+            qty_val = _coerce_float_or_none(qty)
+            if qty_val and qty_val > 0:
+                try:
+                    total += int(round(float(qty_val)))
+                except Exception:
+                    continue
+    return total
+
+
+def _count_holes_from_diameters(values: Sequence[Any] | None) -> int:
+    total = 0
+    if not values:
+        return total
+    for val in values:
+        qty = _coerce_float_or_none(val)
+        if qty and qty > 0:
+            total += 1
+    return total
+
+
+def _apply_drilling_per_hole_bounds(
+    hours: float,
+    *,
+    hole_count_hint: int | None = None,
+) -> float:
+    if not math.isfinite(hours) or hours <= 0.0:
+        return 0.0
+    holes = int(hole_count_hint or 0)
+    if holes <= 0:
+        return hours
+    min_min_per_hole = 0.10
+    max_min_per_hole = 2.00
+    min_hours = (holes * min_min_per_hole) / 60.0
+    max_hours = (holes * max_min_per_hole) / 60.0
+    return max(min_hours, min(hours, max_hours))
+
+
 def estimate_drilling_hours(
     hole_diams_mm: list[float],
     thickness_mm: float,

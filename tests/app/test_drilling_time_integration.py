@@ -1,6 +1,7 @@
 import pandas as pd
 import pytest
 
+import appV5
 from appV5 import estimate_drilling_hours
 from cad_quoter.pricing.time_estimator import (
     MachineParams,
