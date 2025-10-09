@@ -5696,8 +5696,7 @@ def render_quote(
         """Return True if any mapping contains a truthy value for ``keys``.
 
         Configuration toggles can be supplied via several payload containers.
-        Check the common locations so callers can opt-in to behaviours such as
-        forcing amortized NRE rows for single-quantity quotes.
+        Check the common locations so callers can opt-in to optional behaviours.
         """
 
         potential_sources: Sequence[Mapping[str, Any] | None] = (
@@ -6849,13 +6848,6 @@ def render_quote(
             display_override=display_override,
         )
 
-    show_amortized_single_qty = _lookup_config_flag(
-        "show_amortized_nre_single_qty",
-        "show_amortized_nre_for_single_qty",
-        "show_single_qty_amortized_nre",
-        "show_amortized_nre",
-    )
-
     def _should_show_amortized_cost(amount: float) -> bool:
         try:
             amount_val = float(amount or 0.0)
@@ -6863,9 +6855,7 @@ def render_quote(
             amount_val = 0.0
         if amount_val <= 0:
             return False
-        if qty > 1:
-            return True
-        return show_amortized_single_qty
+        return qty > 1
 
     programming_per_part_cost = labor_cost_totals.get("Programming (amortized)")
     if programming_per_part_cost is None:
@@ -13304,40 +13294,42 @@ def compute_quote_from_df(df: pd.DataFrame,
         label = entry.display_override or entry.label
         _merge_labor_detail(label, entry.amount, list(entry.detail_bits))
 
-    programming_bits: list[str] = []
-    prog_hr_detail = float(programming_detail.get("prog_hr", 0.0) or 0.0)
-    prog_rate_detail = float(programming_detail.get("prog_rate", 0.0) or 0.0)
-    if prog_hr_detail > 0:
-        programming_bits.append(
-            f"- Programmer (lot): {_hours_with_rate_text(prog_hr_detail, prog_rate_detail)}"
-        )
-    eng_hr_detail = float(programming_detail.get("eng_hr", 0.0) or 0.0)
-    eng_rate_detail = float(programming_detail.get("eng_rate", 0.0) or 0.0)
-    if eng_hr_detail > 0:
-        programming_bits.append(
-            f"- Engineering (lot): {_hours_with_rate_text(eng_hr_detail, eng_rate_detail)}"
-        )
-    if Qty > 1 and programming_per_part > 0:
+    show_programming_amortized = Qty > 1 and programming_per_part > 0
+    if show_programming_amortized:
+        programming_bits: list[str] = []
+        prog_hr_detail = float(programming_detail.get("prog_hr", 0.0) or 0.0)
+        prog_rate_detail = float(programming_detail.get("prog_rate", 0.0) or 0.0)
+        if prog_hr_detail > 0:
+            programming_bits.append(
+                f"- Programmer (lot): {_hours_with_rate_text(prog_hr_detail, prog_rate_detail)}"
+            )
+        eng_hr_detail = float(programming_detail.get("eng_hr", 0.0) or 0.0)
+        eng_rate_detail = float(programming_detail.get("eng_rate", 0.0) or 0.0)
+        if eng_hr_detail > 0:
+            programming_bits.append(
+                f"- Engineering (lot): {_hours_with_rate_text(eng_hr_detail, eng_rate_detail)}"
+            )
         programming_bits.append(f"Amortized across {Qty} pcs")
 
-    if programming_per_part > 0:
         _merge_labor_detail("Programming (amortized)", programming_per_part, programming_bits)
 
-    fixture_bits: list[str] = []
-    fixture_detail = nre_detail.get("fixture", {}) if isinstance(nre_detail, dict) else {}
-    fixture_build_hr_detail = float(fixture_detail.get("build_hr", 0.0) or 0.0)
-    fixture_rate_detail = float(fixture_detail.get("build_rate", rates.get("FixtureBuildRate", 0.0)))
-    if fixture_build_hr_detail > 0:
-        fixture_bits.append(
-            f"- Build labor (lot): {_hours_with_rate_text(fixture_build_hr_detail, fixture_rate_detail)}"
+    show_fixture_amortized = Qty > 1 and fixture_labor_per_part > 0
+    if show_fixture_amortized:
+        fixture_bits: list[str] = []
+        fixture_detail = nre_detail.get("fixture", {}) if isinstance(nre_detail, dict) else {}
+        fixture_build_hr_detail = float(fixture_detail.get("build_hr", 0.0) or 0.0)
+        fixture_rate_detail = float(
+            fixture_detail.get("build_rate", rates.get("FixtureBuildRate", 0.0))
         )
-    soft_jaw_hr = float(fixture_detail.get("soft_jaw_hr", 0.0) or 0.0)
-    if soft_jaw_hr > 0:
-        fixture_bits.append(f"Soft jaw prep {soft_jaw_hr:.2f} hr")
-    if Qty > 1 and fixture_labor_per_part > 0:
+        if fixture_build_hr_detail > 0:
+            fixture_bits.append(
+                f"- Build labor (lot): {_hours_with_rate_text(fixture_build_hr_detail, fixture_rate_detail)}"
+            )
+        soft_jaw_hr = float(fixture_detail.get("soft_jaw_hr", 0.0) or 0.0)
+        if soft_jaw_hr > 0:
+            fixture_bits.append(f"Soft jaw prep {soft_jaw_hr:.2f} hr")
         fixture_bits.append(f"Amortized across {Qty} pcs")
 
-    if fixture_labor_per_part > 0:
         _merge_labor_detail("Fixture Build (amortized)", fixture_labor_per_part, fixture_bits)
 
     direct_costs_display: dict[str, float] = {label: float(value) for label, value in pass_through.items()}
