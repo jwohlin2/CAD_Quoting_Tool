@@ -5270,6 +5270,20 @@ def render_quote(
     def _h(x) -> str:
         return f"{float(x):.2f} hr"
 
+    def _hours_with_rate_text(hours: Any, rate: Any) -> str:
+        try:
+            hours_val = float(hours or 0.0)
+        except Exception:
+            hours_val = 0.0
+        hours_text = f"{hours_val:.2f} hr"
+        try:
+            rate_val = float(rate or 0.0)
+        except Exception:
+            rate_val = 0.0
+        if rate_val > 0:
+            return f"{hours_text} @ {_m(rate_val)}/hr"
+        return hours_text
+
     def _pct(x) -> str:
         return f"{float(x or 0.0) * 100:.1f}%"
 
@@ -5435,7 +5449,7 @@ def render_quote(
         hr  = meta.get("hr")
         rate= meta.get("rate") or rates.get(k.title() + "Rate")
         if hr:
-            write_line(f"{_h(hr)} @ {_m(rate or 0)}/hr", indent)
+            write_line(_hours_with_rate_text(hr, rate), indent)
 
     def add_pass_basis(key: str, indent: str = "    "):
         basis_map = breakdown.get("pass_basis", {}) or {}
@@ -6169,10 +6183,16 @@ def render_quote(
         has_detail = False
         if prog.get("prog_hr"):
             has_detail = True
-            write_line(f"- Programmer: {_h(prog['prog_hr'])} @ {_m(prog.get('prog_rate', 0))}/hr", "    ")
+            write_line(
+                f"- Programmer: {_hours_with_rate_text(prog.get('prog_hr'), prog.get('prog_rate'))}",
+                "    ",
+            )
         if prog.get("eng_hr"):
             has_detail = True
-            write_line(f"- Engineering: {_h(prog['eng_hr'])} @ {_m(prog.get('eng_rate', 0))}/hr", "    ")
+            write_line(
+                f"- Engineering: {_hours_with_rate_text(prog.get('eng_hr'), prog.get('eng_rate'))}",
+                "    ",
+            )
         if not has_detail:
             write_detail(nre_cost_details.get("Programming & Eng (per lot)"))
 
@@ -6182,7 +6202,10 @@ def render_quote(
         has_detail = False
         if fix.get("build_hr"):
             has_detail = True
-            write_line(f"- Build Labor: {_h(fix['build_hr'])} @ {_m(fix.get('build_rate', 0))}/hr", "    ")
+            write_line(
+                f"- Build Labor: {_hours_with_rate_text(fix.get('build_hr'), fix.get('build_rate'))}",
+                "    ",
+            )
         if not has_detail:
             write_detail(nre_cost_details.get("Fixturing (per lot)"))
 
@@ -6321,7 +6344,7 @@ def render_quote(
         label = _display_bucket_label(canon_key) if use_display else _process_label(key)
 
         if not use_display and hr_val > 0:
-            detail_bits.append(f"{hr_val:.2f} hr @ ${rate_val:,.2f}/hr")
+            detail_bits.append(_hours_with_rate_text(hr_val, rate_val))
 
         rate_for_extra = rate_val if rate_val > 0 else display_rate
         if abs(extra_val) > 1e-6:
@@ -6329,11 +6352,26 @@ def render_quote(
                 use_display and display_hr <= 1e-6 and rate_for_extra > 0
             ):
                 extra_hours = extra_val / rate_for_extra
-                detail_bits.append(f"{extra_hours:.2f} hr @ ${rate_for_extra:,.2f}/hr")
+                detail_bits.append(_hours_with_rate_text(extra_hours, rate_for_extra))
 
         proc_notes = applied_process.get(meta_key, {}).get("notes")
         if proc_notes:
             detail_bits.append("LLM: " + ", ".join(proc_notes))
+
+        if use_display:
+            try:
+                amount_for_display = float(amount_override or 0.0)
+            except Exception:
+                amount_for_display = 0.0
+        else:
+            try:
+                amount_for_display = float(value or 0.0)
+            except Exception:
+                amount_for_display = 0.0
+
+        if label.strip().lower() == "misc":
+            if planner_bucket_display_map or amount_for_display < 1.0:
+                continue
 
         _add_labor_cost_line(
             label,
@@ -6357,12 +6395,7 @@ def render_quote(
     except Exception:
         prog_rate = 0.0
     if prog_hr > 0:
-        if prog_rate > 0:
-            prog_bits.append(
-                f"- Programmer (lot): {prog_hr:.2f} hr @ ${prog_rate:,.2f}/hr"
-            )
-        else:
-            prog_bits.append(f"- Programmer (lot): {prog_hr:.2f} hr")
+        prog_bits.append(f"- Programmer (lot): {_hours_with_rate_text(prog_hr, prog_rate)}")
     try:
         eng_hr = float(programming_detail.get("eng_hr", 0.0) or 0.0)
     except Exception:
@@ -6372,12 +6405,7 @@ def render_quote(
     except Exception:
         eng_rate = 0.0
     if eng_hr > 0:
-        if eng_rate > 0:
-            prog_bits.append(
-                f"- Engineering (lot): {eng_hr:.2f} hr @ ${eng_rate:,.2f}/hr"
-            )
-        else:
-            prog_bits.append(f"- Engineering (lot): {eng_hr:.2f} hr")
+        prog_bits.append(f"- Engineering (lot): {_hours_with_rate_text(eng_hr, eng_rate)}")
     if qty > 1 and programming_per_part_cost > 0:
         prog_bits.append(f"Amortized across {qty} pcs")
 
@@ -6410,12 +6438,9 @@ def render_quote(
     except Exception:
         fixture_rate = 0.0
     if fixture_hr > 0:
-        if fixture_rate > 0:
-            fixture_bits.append(
-                f"- Build labor (lot): {fixture_hr:.2f} hr @ ${fixture_rate:,.2f}/hr"
-            )
-        else:
-            fixture_bits.append(f"- Build labor (lot): {fixture_hr:.2f} hr")
+        fixture_bits.append(
+            f"- Build labor (lot): {_hours_with_rate_text(fixture_hr, fixture_rate)}"
+        )
     try:
         soft_jaw_hr = float(fixture_detail.get("soft_jaw_hr", 0.0) or 0.0)
     except Exception:
@@ -12124,10 +12149,8 @@ def compute_quote_from_df(df: pd.DataFrame,
         extra = float(meta.get("base_extra", 0.0))
         detail_bits: list[str] = []
 
-        if hr > 0 and rate > 0:
-            detail_bits.append(f"{hr:.2f} hr @ ${rate:,.2f}/hr")
-        elif hr > 0:
-            detail_bits.append(f"{hr:.2f} hr")
+        if hr > 0:
+            detail_bits.append(_hours_with_rate_text(hr, rate))
 
         proc_notes = applied_process.get(key, {}).get("notes")
         if proc_notes:
@@ -12139,21 +12162,15 @@ def compute_quote_from_df(df: pd.DataFrame,
     prog_hr_detail = float(programming_detail.get("prog_hr", 0.0) or 0.0)
     prog_rate_detail = float(programming_detail.get("prog_rate", 0.0) or 0.0)
     if prog_hr_detail > 0:
-        if prog_rate_detail > 0:
-            programming_bits.append(
-                f"- Programmer (lot): {prog_hr_detail:.2f} hr @ ${prog_rate_detail:,.2f}/hr"
-            )
-        else:
-            programming_bits.append(f"- Programmer (lot): {prog_hr_detail:.2f} hr")
+        programming_bits.append(
+            f"- Programmer (lot): {_hours_with_rate_text(prog_hr_detail, prog_rate_detail)}"
+        )
     eng_hr_detail = float(programming_detail.get("eng_hr", 0.0) or 0.0)
     eng_rate_detail = float(programming_detail.get("eng_rate", 0.0) or 0.0)
     if eng_hr_detail > 0:
-        if eng_rate_detail > 0:
-            programming_bits.append(
-                f"- Engineering (lot): {eng_hr_detail:.2f} hr @ ${eng_rate_detail:,.2f}/hr"
-            )
-        else:
-            programming_bits.append(f"- Engineering (lot): {eng_hr_detail:.2f} hr")
+        programming_bits.append(
+            f"- Engineering (lot): {_hours_with_rate_text(eng_hr_detail, eng_rate_detail)}"
+        )
     if Qty > 1 and programming_per_part > 0:
         programming_bits.append(f"Amortized across {Qty} pcs")
 
@@ -12165,12 +12182,9 @@ def compute_quote_from_df(df: pd.DataFrame,
     fixture_build_hr_detail = float(fixture_detail.get("build_hr", 0.0) or 0.0)
     fixture_rate_detail = float(fixture_detail.get("build_rate", rates.get("FixtureBuildRate", 0.0)))
     if fixture_build_hr_detail > 0:
-        if fixture_rate_detail > 0:
-            fixture_bits.append(
-                f"- Build labor (lot): {fixture_build_hr_detail:.2f} hr @ ${fixture_rate_detail:,.2f}/hr"
-            )
-        else:
-            fixture_bits.append(f"- Build labor (lot): {fixture_build_hr_detail:.2f} hr")
+        fixture_bits.append(
+            f"- Build labor (lot): {_hours_with_rate_text(fixture_build_hr_detail, fixture_rate_detail)}"
+        )
     soft_jaw_hr = float(fixture_detail.get("soft_jaw_hr", 0.0) or 0.0)
     if soft_jaw_hr > 0:
         fixture_bits.append(f"Soft jaw prep {soft_jaw_hr:.2f} hr")
