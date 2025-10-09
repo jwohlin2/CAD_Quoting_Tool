@@ -5338,6 +5338,43 @@ def render_quote(
             return False
         return False
 
+    def _lookup_config_flag(*keys: str) -> bool:
+        """Return True if any mapping contains a truthy value for ``keys``.
+
+        Configuration toggles can be supplied via several payload containers.
+        Check the common locations so callers can opt-in to behaviours such as
+        forcing amortized NRE rows for single-quantity quotes.
+        """
+
+        potential_sources: Sequence[Mapping[str, Any] | None] = (
+            result,
+            breakdown,
+            breakdown.get("config_flags") if isinstance(breakdown, Mapping) else None,
+            result.get("config_flags") if isinstance(result, Mapping) else None,
+            breakdown.get("config") if isinstance(breakdown, Mapping) else None,
+            result.get("config") if isinstance(result, Mapping) else None,
+            breakdown.get("flags") if isinstance(breakdown, Mapping) else None,
+            result.get("flags") if isinstance(result, Mapping) else None,
+            breakdown.get("ui_flags") if isinstance(breakdown, Mapping) else None,
+            result.get("ui_flags") if isinstance(result, Mapping) else None,
+            breakdown.get("ui_vars") if isinstance(breakdown, Mapping) else None,
+            result.get("ui_vars") if isinstance(result, Mapping) else None,
+            params if isinstance(params, Mapping) else None,
+        )
+
+        for source in potential_sources:
+            if not isinstance(source, Mapping):
+                continue
+            for key in keys:
+                if key in source:
+                    try:
+                        candidate = source.get(key)
+                    except Exception:
+                        candidate = None
+                    if candidate is not None:
+                        return _is_truthy_flag(candidate)
+        return False
+
     def write_line(s: str, indent: str = ""):
         lines.append(f"{indent}{s}")
 
@@ -6314,6 +6351,24 @@ def render_quote(
             display_override=display_override,
         )
 
+    show_amortized_single_qty = _lookup_config_flag(
+        "show_amortized_nre_single_qty",
+        "show_amortized_nre_for_single_qty",
+        "show_single_qty_amortized_nre",
+        "show_amortized_nre",
+    )
+
+    def _should_show_amortized_cost(amount: float) -> bool:
+        try:
+            amount_val = float(amount or 0.0)
+        except Exception:
+            amount_val = 0.0
+        if amount_val <= 0:
+            return False
+        if qty > 1:
+            return True
+        return show_amortized_single_qty
+
     programming_per_part_cost = labor_cost_totals.get("Programming (amortized)")
     if programming_per_part_cost is None:
         programming_per_part_cost = float(nre.get("programming_per_part", 0.0) or 0.0)
@@ -6349,15 +6404,16 @@ def render_quote(
             )
         else:
             prog_bits.append(f"- Engineering (lot): {eng_hr:.2f} hr")
+    show_programming_amortized = _should_show_amortized_cost(programming_per_part_cost)
     if qty > 1 and programming_per_part_cost > 0:
         prog_bits.append(f"Amortized across {qty} pcs")
 
-    _add_labor_cost_line(
-        "Programming (amortized)",
-        programming_per_part_cost,
-        detail_bits=prog_bits,
-        force=True,
-    )
+    if show_programming_amortized:
+        _add_labor_cost_line(
+            "Programming (amortized)",
+            programming_per_part_cost,
+            detail_bits=prog_bits,
+        )
 
     fixture_detail = (nre_detail or {}).get("fixture") or {}
     fixture_labor_per_part_cost = labor_cost_totals.get("Fixture Build (amortized)")
@@ -6393,15 +6449,16 @@ def render_quote(
         soft_jaw_hr = 0.0
     if soft_jaw_hr > 0:
         fixture_bits.append(f"Soft jaw prep {soft_jaw_hr:.2f} hr")
+    show_fixture_amortized = _should_show_amortized_cost(fixture_labor_per_part_cost)
     if qty > 1 and fixture_labor_per_part_cost > 0:
         fixture_bits.append(f"Amortized across {qty} pcs")
 
-    _add_labor_cost_line(
-        "Fixture Build (amortized)",
-        fixture_labor_per_part_cost,
-        detail_bits=fixture_bits,
-        force=True,
-    )
+    if show_fixture_amortized:
+        _add_labor_cost_line(
+            "Fixture Build (amortized)",
+            fixture_labor_per_part_cost,
+            detail_bits=fixture_bits,
+        )
 
     row("Total", proc_total, indent="  ")
 
@@ -6470,8 +6527,14 @@ def render_quote(
             _planner_hours_for("planner_machine"),
             include_in_total=False,
         )
-        _record_hour_entry("Programming (amortized)", programming_hours)
-        _record_hour_entry("Fixture Build (amortized)", fixture_hours)
+        if show_programming_amortized:
+            _record_hour_entry("Programming (amortized)", programming_hours)
+        else:
+            _record_hour_entry("Programming", programming_hours)
+        if show_fixture_amortized:
+            _record_hour_entry("Fixture Build (amortized)", fixture_hours)
+        else:
+            _record_hour_entry("Fixture Build", fixture_hours)
         for key, meta in sorted((process_meta or {}).items()):
             key_lower = str(key).lower()
             if key_lower.startswith("planner_") or key_lower == "planner total":
