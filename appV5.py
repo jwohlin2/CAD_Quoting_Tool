@@ -64,6 +64,7 @@ import urllib.request
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import cad_quoter.geometry as geometry
+from bucketizer import bucketize
 
 
 ensure_runtime_dependencies = _runtime.ensure_runtime_dependencies
@@ -8221,6 +8222,9 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     process_plan_summary: dict[str, Any] = {}
     planner_pricing_result: dict[str, Any] | None = None
+    planner_bucket_view: dict[str, Any] | None = None
+    planner_two_bucket_rates: dict[str, Any] | None = None
+    planner_geom_payload: dict[str, Any] | None = None
     planner_pricing_error: str | None = None
     planner_process_minutes: float | None = None
     used_planner = False
@@ -8585,6 +8589,8 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     if planner_pricing_result is not None:
         quote_state.process_plan.setdefault("pricing", copy.deepcopy(planner_pricing_result))
+        if planner_bucket_view is not None:
+            quote_state.process_plan.setdefault("bucket_view", copy.deepcopy(planner_bucket_view))
 
     if not used_planner:
         for key, value in legacy_process_costs.items():
@@ -9368,6 +9374,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                     else:
                         try:
                             two_bucket_rates = migrate_flat_to_two_bucket(rates)
+                            planner_two_bucket_rates = two_bucket_rates
                         except Exception as rate_err:
                             planner_pricing_error = str(rate_err)
                             if FORCE_PLANNER:
@@ -9385,6 +9392,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                             for candidate in geom_candidates:
                                 if isinstance(candidate, dict):
                                     geom_payload.update(candidate)
+                            planner_geom_payload = dict(geom_payload)
                             try:
                                 planner_pricing_result = price_with_planner(
                                     planner_family,
@@ -9539,6 +9547,8 @@ def compute_quote_from_df(df: pd.DataFrame,
         baseline_data["process_minutes"] = round(float(planner_process_minutes), 1)
     if planner_pricing_result is not None:
         baseline_data["process_plan_pricing"] = copy.deepcopy(planner_pricing_result)
+    if planner_bucket_view is not None:
+        baseline_data["process_plan_bucket_view"] = copy.deepcopy(planner_bucket_view)
     quote_state.baseline = baseline_data
     quote_state.process_plan = copy.deepcopy(process_plan_summary)
 
@@ -10742,6 +10752,43 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     nre_detail["programming"] = programming_detail
 
+    if (
+        planner_bucket_view is None
+        and planner_pricing_result is not None
+        and planner_two_bucket_rates is not None
+    ):
+        programming_min = float(programming_detail.get("prog_hr", 0.0) or 0.0) * 60.0
+        fixture_min = float(fixture_build_hr or 0.0) * 60.0
+        nre_minutes = {
+            "programming_min": programming_min,
+            "fixture_min": fixture_min,
+        }
+        try:
+            qty_for_bucket = int(round(float(Qty)))
+        except Exception:
+            qty_for_bucket = 1
+        qty_for_bucket = max(1, qty_for_bucket)
+        try:
+            planner_bucket_view = bucketize(
+                planner_pricing_result,
+                planner_two_bucket_rates,
+                nre_minutes,
+                qty=qty_for_bucket,
+                geom=planner_geom_payload or {},
+            )
+        except Exception as bucketize_err:
+            if planner_pricing_error is None:
+                planner_pricing_error = str(bucketize_err)
+            if FORCE_PLANNER:
+                raise ConfigError(
+                    "FORCE_PLANNER enabled but planner bucketization failed"
+                ) from bucketize_err
+        else:
+            process_plan_summary.setdefault("bucket_view", copy.deepcopy(planner_bucket_view))
+            existing_plan = getattr(quote_state, "process_plan", None)
+            if isinstance(existing_plan, dict):
+                existing_plan.setdefault("bucket_view", copy.deepcopy(planner_bucket_view))
+
     material_direct_cost = float(pass_through.get("Material", material_direct_cost_base))
     hardware_cost = float(pass_through.get("Hardware / BOM", hardware_cost))
     outsourced_costs = float(pass_through.get("Outsourced Vendors", outsourced_costs))
@@ -11021,6 +11068,8 @@ def compute_quote_from_df(df: pd.DataFrame,
     }
 
     breakdown["pricing_source"] = pricing_source
+    if planner_bucket_view is not None:
+        breakdown["bucket_view"] = copy.deepcopy(planner_bucket_view)
 
     if process_plan_summary:
         breakdown["process_plan"] = copy.deepcopy(process_plan_summary)

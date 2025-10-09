@@ -405,6 +405,10 @@ def price_with_planner(
         "total_cost": round(labor_cost + machine_cost, 2),
     }
 
+    ops_seen = sorted(ops.keys())
+    if "wire_edm_windows" in ops and "wire_edm_outline" not in ops:
+        ops_seen = sorted(set(ops_seen) | {"wire_edm_outline"})
+
     return {
         "plan": plan,
         "line_items": li,
@@ -414,6 +418,6 @@ def price_with_planner(
             "material": material,
             "thickness_in": g["thickness_in"],
             "tolerances": t,
-            "ops_seen": sorted(ops.keys()),
+            "ops_seen": ops_seen,
         },
     }
