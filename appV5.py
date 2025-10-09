@@ -120,6 +120,11 @@ LLM_MULTIPLIER_MIN = 0.25
 LLM_MULTIPLIER_MAX = 4.0
 LLM_ADDER_MAX = 8.0
 
+# Tolerance for invariant checks that guard against silent drift when rendering
+# cost sections.
+_LABOR_SECTION_ABS_EPSILON = 0.51
+_PLANNER_BUCKET_ABS_EPSILON = 0.51
+
 
 ensure_runtime_dependencies = _runtime.ensure_runtime_dependencies
 find_default_qwen_model = _runtime.find_default_qwen_model
@@ -12468,6 +12473,28 @@ def compute_quote_from_df(df: pd.DataFrame,
         bucket_view = _planner_bucketize(planner_line_items)
 
         if bucket_view:
+            try:
+                planner_bucket_total = 0.0
+                for info in bucket_view.values():
+                    if not isinstance(info, Mapping):
+                        continue
+                    planner_bucket_total += float(info.get("machine_cost", 0.0) or 0.0)
+                    planner_bucket_total += float(info.get("labor_cost", 0.0) or 0.0)
+                planner_totals_expected = planner_machine_cost_total + planner_labor_cost_total
+            except Exception:  # pragma: no cover - defensive logging
+                logger.exception("Planner bucket invariant check failed")
+            else:
+                if not math.isclose(
+                    planner_bucket_total,
+                    planner_totals_expected,
+                    rel_tol=0.0,
+                    abs_tol=_PLANNER_BUCKET_ABS_EPSILON,
+                ):
+                    logger.warning(
+                        "Planner bucket totals drifted: %.2f vs %.2f",
+                        planner_bucket_total,
+                        planner_totals_expected,
+                    )
             planner_bucket_rollup = copy.deepcopy(bucket_view)
             planner_bucket_view = copy.deepcopy(bucket_view)
             process_plan_summary["bucket_view"] = copy.deepcopy(bucket_view)
@@ -14245,6 +14272,24 @@ def compute_quote_from_df(df: pd.DataFrame,
         fixture_bits.append(f"Amortized across {Qty} pcs")
 
         _merge_labor_detail("Fixture Build (amortized)", fixture_labor_per_part, fixture_bits)
+
+    try:
+        labor_display_total = sum(float(value or 0.0) for value in labor_costs_display.values())
+    except Exception:  # pragma: no cover - defensive logging
+        logger.exception("Labor section invariant calculation failed")
+    else:
+        expected_labor_total = float(labor_cost or 0.0)
+        if not math.isclose(
+            labor_display_total,
+            expected_labor_total,
+            rel_tol=0.0,
+            abs_tol=_LABOR_SECTION_ABS_EPSILON,
+        ):
+            logger.warning(
+                "Labor section totals drifted: %.2f vs %.2f",
+                labor_display_total,
+                expected_labor_total,
+            )
 
     direct_costs_display: dict[str, float] = {label: float(value) for label, value in pass_through.items()}
     direct_cost_details: dict[str, str] = {}
