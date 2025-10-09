@@ -9263,18 +9263,21 @@ def compute_quote_from_df(df: pd.DataFrame,
         hr_val = float(meta.get("hr", 0.0) or 0.0)
         meta["base_extra"] = process_costs.get(key, 0.0) - hr_val * rate_val
 
-    allowed_process_hour_keys: set[str] = set()
-    for key, meta in process_meta.items():
-        if not isinstance(meta, dict):
-            continue
-        if used_planner and key in legacy_per_process_keys and key not in planner_meta_keys:
-            continue
-        allowed_process_hour_keys.add(key)
+    def _collect_allowed_process_hours() -> tuple[set[str], dict[str, float]]:
+        keys: set[str] = set()
+        for key, meta in process_meta.items():
+            if not isinstance(meta, dict):
+                continue
+            if used_planner and key in legacy_per_process_keys and key not in planner_meta_keys:
+                continue
+            keys.add(key)
+        hours = {
+            key: float(process_meta.get(key, {}).get("hr", 0.0) or 0.0)
+            for key in keys
+        }
+        return keys, hours
 
-    process_hours_baseline = {
-        key: float(process_meta.get(key, {}).get("hr", 0.0) or 0.0)
-        for key in allowed_process_hour_keys
-    }
+    allowed_process_hour_keys, process_hours_baseline = _collect_allowed_process_hours()
     process_costs_baseline = {k: float(v) for k, v in process_costs.items()}
 
     def _default_pass_meta(shipping_basis_desc: str) -> dict[str, dict[str, str]]:
@@ -10365,6 +10368,8 @@ def compute_quote_from_df(df: pd.DataFrame,
                     else:
                         process_meta[b] = update_payload
                     planner_meta_keys.add(b)
+
+    allowed_process_hour_keys, process_hours_baseline = _collect_allowed_process_hours()
 
     pricing_source = "planner" if used_planner else "legacy"
 
