@@ -6245,11 +6245,23 @@ def render_quote(
         "inspection",
     ]
 
+    def _is_planner_rollup_key(name: str | None) -> bool:
+        if pricing_source_lower != "planner":
+            return False
+        norm = _normalize_bucket_key(name)
+        if not norm:
+            return False
+        if norm in {"planner_total", "planner_machine", "planner_labor"}:
+            return True
+        return norm.startswith("planner_")
+
     ordered_process_items: list[tuple[str, float]] = []
     seen_keys: set[str] = set()
 
     for bucket in preferred_bucket_order:
         for key, value in (process_costs or {}).items():
+            if _is_planner_rollup_key(key):
+                continue
             if _normalize_bucket_key(key) != bucket:
                 continue
             if not ((value > 0) or show_zeros):
@@ -6260,7 +6272,9 @@ def render_quote(
     remaining_items = [
         (key, value)
         for key, value in (process_costs or {}).items()
-        if key not in seen_keys and ((value > 0) or show_zeros)
+        if key not in seen_keys
+        and not _is_planner_rollup_key(key)
+        and ((value > 0) or show_zeros)
     ]
     remaining_items.sort(key=lambda kv: _normalize_bucket_key(kv[0]))
     ordered_process_items.extend(remaining_items)
