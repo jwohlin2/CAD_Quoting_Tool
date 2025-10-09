@@ -12713,6 +12713,10 @@ def compute_quote_from_df(df: pd.DataFrame,
                 "Labor": round(planner_labor_cost_total, 2),
             }
 
+            # Using planner pricing should mark the overall pricing source accordingly,
+            # even if drilling falls back to legacy heuristics due to CSV issues.
+            pricing_source = "planner"
+
             existing_process_meta = {key: dict(value) for key, value in process_meta.items()}
             process_meta = existing_process_meta
             process_meta["planner_machine"] = {
