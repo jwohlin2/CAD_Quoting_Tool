@@ -70,6 +70,7 @@ class OverheadParams:
     approach_retract_in: float | None = None
     peck_penalty_min_per_in_depth: float | None = None
     dwell_min: float | None = None
+    peck_min: float | None = None
 
 
 class _RowView:
@@ -268,7 +269,10 @@ def time_drill(
         + 0.1 * (to_num(geom.diameter_in, 0.0) or 0.0)
     )
 
-    peck = (to_num(overhead.peck_penalty_min_per_in_depth, 0.0) or 0.0) * axial_depth
+    peck = to_num(overhead.peck_min, None)
+    if peck is None:
+        peck = (to_num(overhead.peck_penalty_min_per_in_depth, 0.0) or 0.0) * axial_depth
+    peck = to_num(peck, 0.0) or 0.0
     cut_min = axial_depth / max(ipm, 1e-6)
 
     approach = to_num(overhead.approach_retract_in, 0.0) or 0.0
@@ -424,19 +428,41 @@ def time_wire_edm(
 
 
 def estimate_time_min(
-    row: Any,
-    geom: OperationGeometry,
-    tool: ToolParams,
-    machine: MachineParams,
-    overhead: OverheadParams,
+    row: Any | None = None,
+    geom: OperationGeometry | None = None,
+    tool: ToolParams | None = None,
+    machine: MachineParams | None = None,
+    overhead: OverheadParams | None = None,
     material_factor: float | None = None,
     *,
+    operation: str | None = None,
     debug: dict[str, Any] | None = None,
 ) -> float:
     """Dispatch to the appropriate time estimator based on the operation."""
 
+    if geom is None or tool is None or machine is None or overhead is None:
+        raise TypeError("estimate_time_min requires geometry, tool, machine, and overhead parameters")
+
+    if row is None:
+        if operation is None:
+            raise TypeError("estimate_time_min requires either a row or an operation name")
+        row = {"operation": operation}
+    elif isinstance(row, str):
+        if operation is None:
+            operation = row
+        row = {"operation": row}
+    elif operation is not None:
+        try:
+            mapping = dict(row)
+        except Exception:
+            mapping = {"operation": operation}
+        else:
+            mapping.setdefault("operation", operation)
+        row = mapping
+
     row_view = _RowView(row)
-    op = (row_view.operation or "").lower().replace("-", "_").replace(" ", "_")
+    op_name = operation or row_view.operation
+    op = (op_name or "").lower().replace("-", "_").replace(" ", "_")
 
     if "wire_edm" in op:
         return time_wire_edm(row_view, geom, overhead)
