@@ -9305,6 +9305,36 @@ def compute_quote_from_df(df: pd.DataFrame,
     if deburr_holes_hr:
         legacy_process_meta["deburr"]["hole_touch_hr"] = deburr_holes_hr
 
+    legacy_per_process_keys = {
+        "milling",
+        "turning",
+        "wire_edm",
+        "sinker_edm",
+        "grinding",
+        "lapping_honing",
+        "finishing_deburr",
+        "drilling",
+        "tapping",
+        "counterbore",
+        "countersink",
+        "deburr",
+    }
+
+    legacy_baseline_had_values = (
+        any(
+            abs(float((process_meta.get(key) or {}).get("hr", 0.0) or 0.0)) > 1e-6
+            for key in legacy_per_process_keys
+        )
+        or any(abs(float(value or 0.0)) > 1e-6 for value in legacy_process_costs.values())
+        or any(
+            abs(float((legacy_process_meta.get(key) or {}).get("hr", 0.0) or 0.0)) > 1e-6
+            for key in legacy_process_meta
+        )
+    )
+
+    planner_meta_keys: set[str] = set()
+    legacy_baseline_ignored = False
+
     if not used_planner:
         for key, value in legacy_process_costs.items():
             process_costs[key] = float(value)
@@ -9328,10 +9358,17 @@ def compute_quote_from_df(df: pd.DataFrame,
         hr_val = float(meta.get("hr", 0.0) or 0.0)
         meta["base_extra"] = process_costs.get(key, 0.0) - hr_val * rate_val
 
+    allowed_process_hour_keys: set[str] = set()
+    for key, meta in process_meta.items():
+        if not isinstance(meta, dict):
+            continue
+        if used_planner and key in legacy_per_process_keys and key not in planner_meta_keys:
+            continue
+        allowed_process_hour_keys.add(key)
+
     process_hours_baseline = {
-        key: float(meta.get("hr", 0.0) or 0.0)
-        for key, meta in process_meta.items()
-        if isinstance(meta, dict)
+        key: float(process_meta.get(key, {}).get("hr", 0.0) or 0.0)
+        for key in allowed_process_hour_keys
     }
     process_costs_baseline = {k: float(v) for k, v in process_costs.items()}
 
@@ -10323,6 +10360,8 @@ def compute_quote_from_df(df: pd.DataFrame,
                 planner_pricing_error = "Planner pricing returned no line items"
 
         if used_planner:
+            if legacy_baseline_had_values:
+                legacy_baseline_ignored = True
             planner_process_minutes = planner_total_minutes
             if bucket_view:
                 process_costs = {
@@ -10342,12 +10381,14 @@ def compute_quote_from_df(df: pd.DataFrame,
                 "rate": 0.0,
                 "cost": round(planner_machine_cost_total, 2),
             }
+            planner_meta_keys.add("planner_machine")
             process_meta["planner_labor"] = {
                 "hr": round(labor_minutes / 60.0, 3),
                 "minutes": round(labor_minutes, 1),
                 "rate": 0.0,
                 "cost": round(planner_labor_cost_total, 2),
             }
+            planner_meta_keys.add("planner_labor")
             total_cost = planner_machine_cost_total + planner_labor_cost_total
             process_meta["planner_total"] = {
                 "hr": round(planner_total_minutes / 60.0, 3),
@@ -10355,6 +10396,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                 "rate": 0.0,
                 "cost": round(total_cost, 2),
             }
+            planner_meta_keys.add("planner_total")
             if planner_line_items:
                 process_meta["planner_total"]["line_items"] = copy.deepcopy(planner_line_items)
                 for entry in planner_line_items:
@@ -10372,22 +10414,25 @@ def compute_quote_from_df(df: pd.DataFrame,
                         "cost": round(cost_val, 2),
                         "rate": round(rate_val, 2) if rate_val else 0.0,
                     }
+                    planner_meta_keys.add(key_norm)
 
-            for b, info in bucket_view.items():
-                hr = info["minutes"] / 60.0 if info["minutes"] else 0.0
-                cost = info["total_cost"]
-                rate = (cost / hr) if hr > 0 else 0.0
-                update_payload = {
-                    "minutes": round(info["minutes"], 1),
-                    "hr": round(hr, 3),
-                    "rate": round(rate, 2),
-                    "cost": round(cost, 2),
-                }
-                existing_meta = process_meta.get(b)
-                if isinstance(existing_meta, Mapping):
-                    existing_meta.update(update_payload)
-                else:
-                    process_meta[b] = update_payload
+            if bucket_view:
+                for b, info in bucket_view.items():
+                    hr = info["minutes"] / 60.0 if info["minutes"] else 0.0
+                    cost = info["total_cost"]
+                    rate = (cost / hr) if hr > 0 else 0.0
+                    update_payload = {
+                        "minutes": round(info["minutes"], 1),
+                        "hr": round(hr, 3),
+                        "rate": round(rate, 2),
+                        "cost": round(cost, 2),
+                    }
+                    existing_meta = process_meta.get(b)
+                    if isinstance(existing_meta, Mapping):
+                        existing_meta.update(update_payload)
+                    else:
+                        process_meta[b] = update_payload
+                    planner_meta_keys.add(b)
 
     pricing_source = "planner" if used_planner else "legacy"
     if force_legacy_pricing:
@@ -10418,6 +10463,8 @@ def compute_quote_from_df(df: pd.DataFrame,
         baseline_data["red_flags"] = list(red_flag_messages)
     baseline_data["speeds_feeds_path"] = speeds_feeds_path
     baseline_data["pricing_source"] = pricing_source
+    if legacy_baseline_ignored:
+        baseline_data["legacy_baseline_ignored"] = True
     if fixture_plan_desc:
         baseline_data["fixture"] = fixture_plan_desc
     if process_plan_summary:
@@ -10853,6 +10900,9 @@ def compute_quote_from_df(df: pd.DataFrame,
         for warn in overrides_meta["warnings"]:
             if isinstance(warn, str) and warn.strip():
                 notes_from_clamps.append(warn.strip())
+
+    if used_planner and baseline_data.get("legacy_baseline_ignored"):
+        llm_notes.append("Legacy baseline ignored (planner active)")
 
     drilling_groups = overrides.get("drilling_groups") if isinstance(overrides, dict) else None
     if isinstance(drilling_groups, list) and drilling_groups:
@@ -11511,7 +11561,8 @@ def compute_quote_from_df(df: pd.DataFrame,
             pass_through[label] = 0.0
 
     process_hours_final = {
-        k: float(process_meta.get(k, {}).get("hr", 0.0)) for k in process_meta
+        k: float(process_meta.get(k, {}).get("hr", 0.0) or 0.0)
+        for k in allowed_process_hour_keys
     }
 
     if pricing_source != "planner":
@@ -11554,7 +11605,8 @@ def compute_quote_from_df(df: pd.DataFrame,
                 process_hours_final["drilling"] = new_hr
                 llm_notes.append(f"Raised drilling to floor: {why}")
         process_hours_final = {
-            k: float(process_meta.get(k, {}).get("hr", 0.0)) for k in process_meta
+            k: float(process_meta.get(k, {}).get("hr", 0.0) or 0.0)
+            for k in allowed_process_hour_keys
         }
         baseline_total_hours = sum(
             float(process_hours_baseline.get(k, 0.0)) for k in process_hours_baseline
@@ -11579,7 +11631,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     else:
         process_hours_final = {}
         for key, meta in process_meta.items():
-            if not isinstance(meta, dict):
+            if key not in allowed_process_hour_keys or not isinstance(meta, dict):
                 continue
             try:
                 hr_val = float(meta.get("hr", 0.0) or 0.0)
