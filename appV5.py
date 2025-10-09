@@ -9028,11 +9028,17 @@ def _drill_overhead_from_params(params: Mapping[str, Any] | None) -> _TimeOverhe
         if isinstance(params, Mapping)
         else None
     )
+    index_sec = (
+        _coerce_float_or_none(params.get("DrillIndexSecondsPerHole"))
+        if isinstance(params, Mapping)
+        else None
+    )
     return _TimeOverheadParams(
         toolchange_min=float(toolchange) if toolchange and toolchange >= 0 else 0.5,
         approach_retract_in=float(approach) if approach and approach >= 0 else 0.25,
         peck_penalty_min_per_in_depth=float(peck) if peck and peck >= 0 else 0.03,
         dwell_min=float(dwell) if dwell and dwell >= 0 else None,
+        index_sec_per_hole=float(index_sec) if index_sec and index_sec >= 0 else 6.0,
     )
 
 
