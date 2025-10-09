@@ -2774,16 +2774,23 @@ def get_why_text(
     if isinstance(base_hours_raw, Mapping):
         for proc, base_hr in base_hours_raw.items():
             base_hours_map[str(proc)] = max(0.0, _hours_from_any(base_hr))
-    deltas: list[str] = []
+    delta_lines: list[str] = []
     for proc_key in sorted(set(base_hours_map) | set(final_hours_map)):
         base_hr = base_hours_map.get(proc_key, 0.0) or 0.0
         adj_hr = final_hours_map.get(proc_key, 0.0) or 0.0
-        delta_hr = max(-24.0, min(24.0, float(adj_hr) - float(base_hr)))
-        if abs(delta_hr) < 0.01:
+        try:
+            diff = float(adj_hr) - float(base_hr)
+        except Exception:
             continue
-        sign = "↑" if delta_hr > 0 else "↓"
-        deltas.append(f"{proc_key} {sign}{abs(delta_hr):.2f} h")
-    delta_text = ", ".join(deltas)
+        if not math.isfinite(diff):
+            continue
+        diff = max(-24.0, min(24.0, diff))
+        if abs(diff) < 1e-3:
+            continue
+        label = _friendly_label(proc_key) or proc_key
+        arrow = "↑" if diff > 0 else "↓"
+        delta_lines.append(f"  - {label}: {arrow}{abs(diff):.2f} h")
+    delta_text = "\n".join(delta_lines)
 
     parts: list[str] = []
     if holes and thick_mm:
@@ -2797,7 +2804,7 @@ def get_why_text(
         parts.append(f"Estimated {setups} setups; fixture: {fixture}.")
     parts.append(f"Major labor: {top_text}.")
     if delta_text:
-        parts.append(f"Adjustments vs baseline: {delta_text}.")
+        parts.append(f"Adjustments vs baseline:\n{delta_text}")
 
     material_source = state.material_source or "shop defaults"
     parts.append(f"Material priced via {material_source}; scrap {scrap_pct}% applied.")
@@ -6143,83 +6150,6 @@ def render_quote(
             detail_bits=detail_bits,
         )
 
-    remaining_costs: dict[str, Any] = dict(process_costs or {})
-    for special_key in list(remaining_costs.keys()):
-        canon_special = _canonical_bucket_key(special_key)
-        if canon_special in {"programming_amortized", "fixture_build_amortized"}:
-            remaining_costs.pop(special_key, None)
-
-    def _emit_process_line(actual_key: str, *, canonical: str | None = None) -> None:
-        if actual_key not in remaining_costs:
-            return
-        try:
-            amount = float(remaining_costs.get(actual_key, 0.0))
-        except Exception:
-            amount = 0.0
-        if not ((amount > 0) or show_zeros):
-            return
-        canon = canonical or _canonical_bucket_key(actual_key)
-        meta = process_meta.get(canon, {}) if isinstance(process_meta, dict) else {}
-        detail_bits: list[str] = []
-        try:
-            hr_val = float(meta.get("hr", 0.0) or 0.0)
-        except Exception:
-            hr_val = 0.0
-        try:
-            rate_val = float(meta.get("rate", 0.0) or 0.0)
-        except Exception:
-            rate_val = 0.0
-        try:
-            extra_val = float(meta.get("base_extra", 0.0) or 0.0)
-        except Exception:
-            extra_val = 0.0
-        if hr_val > 0:
-            detail_bits.append(f"{hr_val:.2f} hr @ ${rate_val:,.2f}/hr")
-        if abs(extra_val) > 1e-6 and hr_val <= 1e-6 and rate_val > 0:
-            extra_hours = extra_val / rate_val
-            detail_bits.append(f"{extra_hours:.2f} hr @ ${rate_val:,.2f}/hr")
-        proc_notes = applied_process.get(canon, {}).get("notes")
-        if proc_notes:
-            detail_bits.append("LLM: " + ", ".join(proc_notes))
-
-        if canon in label_overrides_proc:
-            label = label_overrides_proc[canon]
-        else:
-            label = _process_label(canon if canonical else actual_key)
-
-        _add_labor_cost_line(
-            label,
-            amount,
-            process_key=canon,
-            detail_bits=detail_bits,
-        )
-        remaining_costs.pop(actual_key, None)
-
-    ordered_proc_keys = [
-        "milling",
-        "drilling",
-        "counterbore",
-        "countersink",
-        "tapping",
-        "grinding",
-        "finishing_deburr",
-        "saw_waterjet",
-        "inspection",
-    ]
-
-    for canon in ordered_proc_keys:
-        actual = next((key for key in list(remaining_costs.keys()) if _canonical_bucket_key(key) == canon), None)
-        if actual is None:
-            continue
-        _emit_process_line(actual, canonical=canon)
-
-    other_keys = sorted(
-        remaining_costs.keys(),
-        key=lambda raw: _process_label(_canonical_bucket_key(raw)),
-    )
-    for key in other_keys:
-        _emit_process_line(key)
-
     programming_per_part_cost = labor_cost_totals.get("Programming (amortized)")
     if programming_per_part_cost is None:
         programming_per_part_cost = float(nre.get("programming_per_part", 0.0) or 0.0)
@@ -8872,6 +8802,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     planner_geom_payload: dict[str, Any] | None = None
     planner_pricing_error: str | None = None
     planner_process_minutes: float | None = None
+    planner_drill_minutes: float | None = None
     used_planner = False
 
     red_flag_messages: list[str] = []
@@ -9305,35 +9236,9 @@ def compute_quote_from_df(df: pd.DataFrame,
     if deburr_holes_hr:
         legacy_process_meta["deburr"]["hole_touch_hr"] = deburr_holes_hr
 
-    legacy_per_process_keys = {
-        "milling",
-        "turning",
-        "wire_edm",
-        "sinker_edm",
-        "grinding",
-        "lapping_honing",
-        "finishing_deburr",
-        "drilling",
-        "tapping",
-        "counterbore",
-        "countersink",
-        "deburr",
+    meta_lookup: dict[str, dict[str, Any]] = {
+        key: dict(value) for key, value in process_meta.items() if isinstance(value, Mapping)
     }
-
-    legacy_baseline_had_values = (
-        any(
-            abs(float((process_meta.get(key) or {}).get("hr", 0.0) or 0.0)) > 1e-6
-            for key in legacy_per_process_keys
-        )
-        or any(abs(float(value or 0.0)) > 1e-6 for value in legacy_process_costs.values())
-        or any(
-            abs(float((legacy_process_meta.get(key) or {}).get("hr", 0.0) or 0.0)) > 1e-6
-            for key in legacy_process_meta
-        )
-    )
-
-    planner_meta_keys: set[str] = set()
-    legacy_baseline_ignored = False
 
     if not used_planner:
         for key, value in legacy_process_costs.items():
@@ -10319,6 +10224,14 @@ def compute_quote_from_df(df: pd.DataFrame,
             planner_bucket_view = copy.deepcopy(bucket_view)
             process_plan_summary["bucket_view"] = copy.deepcopy(bucket_view)
             quote_state.process_plan.setdefault("bucket_view", copy.deepcopy(bucket_view))
+            drill_bucket = bucket_view.get("drilling") if isinstance(bucket_view, _MappingABC) else None
+            if drill_bucket:
+                try:
+                    minutes_val = float(drill_bucket.get("minutes") or 0.0)
+                except Exception:
+                    minutes_val = 0.0
+                if minutes_val > 0.0:
+                    planner_drill_minutes = minutes_val
 
         machine_minutes = 0.0
         labor_minutes = 0.0
@@ -10328,6 +10241,11 @@ def compute_quote_from_df(df: pd.DataFrame,
                 machine_minutes += minutes_val
             if float(entry.get("labor_cost", 0.0) or 0.0) > 0.0:
                 labor_minutes += minutes_val
+            if planner_drill_minutes in (None, 0.0):
+                name = str(entry.get("op") or "").lower()
+                if any(token in name for token in ("drill", "ream", "bore")):
+                    if minutes_val > 0.0:
+                        planner_drill_minutes = minutes_val
 
         planner_totals_present = any(
             float(val) > 0.0 for val in (planner_machine_cost_total, planner_labor_cost_total, planner_total_minutes)
@@ -10338,15 +10256,13 @@ def compute_quote_from_df(df: pd.DataFrame,
             if isinstance(params, _MappingABC)
             else "legacy"
         )
+        used_planner = bool(planner_pricing_result) or bool(planner_line_items)
         if planner_mode == "planner":
-            used_planner = (recognized_line_items > 0) or planner_totals_present
+            used_planner = used_planner or (recognized_line_items > 0) or planner_totals_present
         elif planner_mode == "legacy":
             used_planner = False
         else:
-            used_planner = recognized_line_items > 0
-
-        if force_legacy_pricing:
-            used_planner = False
+            used_planner = used_planner or (recognized_line_items > 0)
 
         if recognized_line_items == 0:
             if planner_totals_present and planner_total_minutes > 0.0:
@@ -10358,6 +10274,22 @@ def compute_quote_from_df(df: pd.DataFrame,
                 raise ConfigError("FORCE_PLANNER enabled but planner pricing returned no line items")
             if planner_pricing_error is None:
                 planner_pricing_error = "Planner pricing returned no line items"
+
+        if (not used_planner) and planner_drill_minutes and planner_drill_minutes > 0.0:
+            planner_drill_hr = planner_drill_minutes / 60.0
+            if planner_drill_hr > 0.0 and drill_hr > 10.0 * planner_drill_hr:
+                _record_red_flag("Legacy drilling estimate outlier — using planner drilling hours.")
+                drill_hr = planner_drill_hr
+                baseline_drill_hr = max(existing_drill_hr, float(drill_hr or 0.0))
+                baseline_drill_hr = round(baseline_drill_hr, 3)
+                drill_meta = legacy_process_meta.setdefault("drilling", {})
+                drill_meta["hr"] = baseline_drill_hr
+                drill_meta.setdefault("rate", drill_rate)
+                legacy_process_costs["drilling"] = baseline_drill_hr * drill_rate
+                process_costs["drilling"] = legacy_process_costs["drilling"]
+                process_costs_baseline["drilling"] = legacy_process_costs["drilling"]
+                process_hours_baseline["drilling"] = baseline_drill_hr
+                features["drilling_hr_baseline"] = baseline_drill_hr
 
         if used_planner:
             if legacy_baseline_had_values:
@@ -10435,8 +10367,6 @@ def compute_quote_from_df(df: pd.DataFrame,
                     planner_meta_keys.add(b)
 
     pricing_source = "planner" if used_planner else "legacy"
-    if force_legacy_pricing:
-        pricing_source = "legacy"
 
     baseline_data = {
         "process_hours": process_hours_baseline,
@@ -11560,10 +11490,33 @@ def compute_quote_from_df(df: pd.DataFrame,
         except Exception:
             pass_through[label] = 0.0
 
-    process_hours_final = {
-        k: float(process_meta.get(k, {}).get("hr", 0.0) or 0.0)
-        for k in allowed_process_hour_keys
-    }
+    try:
+        setups_for_cap = float(setups)
+    except Exception:
+        setups_for_cap = 1.0
+    if not math.isfinite(setups_for_cap) or setups_for_cap <= 0:
+        setups_for_cap = 1.0
+    hour_ceiling = max(0.0, 24.0 * setups_for_cap)
+
+    def _collect_process_hours() -> dict[str, float]:
+        bounded: dict[str, float] = {}
+        for key, meta in process_meta.items():
+            raw_val: Any = meta
+            if isinstance(meta, Mapping):
+                raw_val = meta.get("hr", 0.0)
+            try:
+                hr_val = float(raw_val or 0.0)
+            except Exception:
+                hr_val = 0.0
+            if not math.isfinite(hr_val):
+                hr_val = 0.0
+            hr_val = max(0.0, min(hour_ceiling, hr_val))
+            if isinstance(meta, dict):
+                meta["hr"] = hr_val
+            bounded[key] = hr_val
+        return bounded
+
+    process_hours_final = _collect_process_hours()
 
     if pricing_source != "planner":
         hole_count_for_guard = 0
@@ -11604,10 +11557,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                 process_costs["drilling"] = round(new_hr * rate + base_extra, 2)
                 process_hours_final["drilling"] = new_hr
                 llm_notes.append(f"Raised drilling to floor: {why}")
-        process_hours_final = {
-            k: float(process_meta.get(k, {}).get("hr", 0.0) or 0.0)
-            for k in allowed_process_hour_keys
-        }
+        process_hours_final = _collect_process_hours()
         baseline_total_hours = sum(
             float(process_hours_baseline.get(k, 0.0)) for k in process_hours_baseline
         )
@@ -11642,6 +11592,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                 rate_val = float(meta.get("rate", 0.0) or 0.0)
                 base_extra_val = float(meta.get("base_extra", 0.0) or 0.0)
                 process_costs[key] = round(hr_val * rate_val + base_extra_val, 2)
+        process_hours_final = _collect_process_hours()
 
     for proc_key, final_hr in process_hours_final.items():
         meta = meta_lookup.get(proc_key) or {}
