@@ -9666,7 +9666,8 @@ def estimate_drilling_hours(
                     if dwell_val_float is not None and dwell_val_float > 0:
                         summary["dwell_sum"] += float(dwell_val_float) * qty_for_debug
                         summary["dwell_count"] += qty_for_debug
-                    summary.setdefault("material", mat_display)
+                    if not summary.get("material"):
+                        summary["material"] = "material"
                 qty_int = qty_for_debug
         if debug_lines is not None and debug_summary_entries:
             for op_key, summary in sorted(debug_summary_entries.items()):
