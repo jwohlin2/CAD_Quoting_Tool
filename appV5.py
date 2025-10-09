@@ -6144,6 +6144,136 @@ def render_quote(
             total_amount = 0.0
         process_costs_canon[canon] = total_amount
 
+    def _fold_buckets(cost_map: Mapping[str, Any] | None) -> dict[str, float]:
+        if isinstance(cost_map, Mapping):
+            raw_items = list(cost_map.items())
+        else:
+            try:
+                raw_items = list(dict(cost_map or {}).items())
+            except Exception:
+                raw_items = []
+
+        folded: dict[str, float] = {}
+
+        def _add_amount(key: str, amount: Any) -> None:
+            if not key:
+                return
+            try:
+                amount_val = float(amount or 0.0)
+            except Exception:
+                amount_val = 0.0
+            folded[key] = folded.get(key, 0.0) + amount_val
+
+        for canon_key, info in canonical_process_buckets.items():
+            if canon_key == "misc":
+                continue
+            total_amount = 0.0
+            if isinstance(info, Mapping):
+                try:
+                    total_amount = float(info.get("total", 0.0) or 0.0)
+                except Exception:
+                    total_amount = 0.0
+            if canon_key not in folded or total_amount:
+                _add_amount(canon_key, total_amount)
+
+        seen_canon_keys = {_canonical_bucket_key(key) for key in folded.keys()}
+        for raw_key, raw_value in raw_items:
+            canon_key = _canonical_bucket_key(raw_key)
+            if canon_key == "misc" or canon_key in seen_canon_keys:
+                continue
+            _add_amount(canon_key or str(raw_key), raw_value)
+            seen_canon_keys.add(canon_key)
+
+        standard_targets: set[str] = set(PROCESS_LABEL_OVERRIDES.keys())
+        standard_targets.update(PREFERRED_PROCESS_BUCKET_ORDER)
+        standard_targets.update(key for key in process_costs_canon.keys() if key != "misc")
+        standard_targets.update(key for key in bucket_rollup_map.keys() if key != "misc")
+        standard_targets.update(key for key in bucket_ops_map.keys() if key != "misc")
+        standard_targets.update(
+            _canonical_bucket_key(existing_key)
+            for existing_key in list(folded.keys())
+            if _canonical_bucket_key(existing_key) not in {"", "misc"}
+        )
+        standard_targets.discard("misc")
+
+        filler_tokens = {"misc", "miscellaneous", "other", "general", "na", "n", "n_a"}
+
+        def _resolve_misc_target(raw_key: Any) -> str:
+            text = str(raw_key or "").strip()
+            if not text:
+                return ""
+
+            def _candidate_keys(source: str) -> Iterable[str]:
+                seen: set[str] = set()
+                direct = _canonical_bucket_key(source)
+                if direct and direct != "misc":
+                    seen.add(direct)
+                    yield direct
+
+                cleaned = re.sub(r"\\b(?:misc|miscellaneous|other|general|n/?a?)\\b", " ", source)
+                cleaned_norm = _canonical_bucket_key(cleaned)
+                if cleaned_norm and cleaned_norm != "misc" and cleaned_norm not in seen:
+                    seen.add(cleaned_norm)
+                    yield cleaned_norm
+
+                tokens = [tok for tok in re.split(r"[^a-z0-9]+", source) if tok]
+                filtered_tokens = [tok for tok in tokens if tok not in filler_tokens]
+                if filtered_tokens:
+                    joined = _canonical_bucket_key("_".join(filtered_tokens))
+                    if joined and joined != "misc" and joined not in seen:
+                        seen.add(joined)
+                        yield joined
+                for tok in filtered_tokens:
+                    cand = _canonical_bucket_key(tok)
+                    if cand and cand != "misc" and cand not in seen:
+                        seen.add(cand)
+                        yield cand
+                for idx in range(len(filtered_tokens) - 1):
+                    pair = _canonical_bucket_key("_".join(filtered_tokens[idx : idx + 2]))
+                    if pair and pair != "misc" and pair not in seen:
+                        seen.add(pair)
+                        yield pair
+
+            lowered = text.lower()
+            for candidate in _candidate_keys(lowered):
+                if candidate in standard_targets:
+                    return candidate
+            return ""
+
+        misc_remaining = 0.0
+        misc_info = canonical_process_buckets.get("misc")
+        misc_sources = []
+        if isinstance(misc_info, Mapping):
+            sources_obj = misc_info.get("sources")
+            if isinstance(sources_obj, list):
+                misc_sources = list(sources_obj)
+            else:
+                try:
+                    misc_remaining = float(misc_info.get("total", 0.0) or 0.0)
+                except Exception:
+                    misc_remaining = 0.0
+
+        for source in misc_sources:
+            if not isinstance(source, Mapping):
+                continue
+            raw_key = source.get("key")
+            try:
+                amount_val = float(source.get("amount", 0.0) or 0.0)
+            except Exception:
+                amount_val = 0.0
+            if not amount_val:
+                continue
+            target = _resolve_misc_target(raw_key)
+            if target:
+                _add_amount(target, amount_val)
+            else:
+                misc_remaining += amount_val
+
+        if misc_remaining:
+            _add_amount("misc", misc_remaining)
+
+        return folded
+
     label_overrides = {
         "finishing_deburr": "Finishing/Deburr",
         "saw_waterjet": "Saw/Waterjet",
@@ -6717,7 +6847,8 @@ def render_quote(
     def _normalize_bucket_key(name: str) -> str:
         return re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_")
 
-    process_cost_items_all = list((process_costs or {}).items())
+    folded_process_costs = _fold_buckets(process_costs)
+    process_cost_items_all = list(folded_process_costs.items())
     display_process_cost_items = [
         (key, value)
         for key, value in process_cost_items_all
@@ -6749,8 +6880,6 @@ def render_quote(
     ordered_process_items: list[tuple[str, float]] = []
     seen_keys: set[str] = set()
 
-    process_costs = _fold_buckets(process_costs)
-
     for bucket in preferred_bucket_order:
         for key, value in display_process_cost_items:
             if _normalize_bucket_key(key) != bucket:
@@ -6775,8 +6904,7 @@ def render_quote(
         canon_key = _canonical_bucket_key(key)
         if canon_key.startswith("planner_"):
             continue
-        meta_key = str(key).lower()
-        meta = process_meta.get(meta_key, {}) if isinstance(process_meta, dict) else {}
+        meta = _lookup_process_meta(key) or {}
         detail_bits: list[str] = []
         try:
             hr_val = float(meta.get("hr", 0.0) or 0.0)
@@ -6833,7 +6961,7 @@ def render_quote(
                 continue
 
     for entry in _iter_ordered_process_entries(
-        process_costs,
+        folded_process_costs,
         process_meta=process_meta,
         applied_process=applied_process,
         show_zeros=show_zeros,
