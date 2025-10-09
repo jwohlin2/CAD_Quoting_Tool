@@ -11054,6 +11054,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     }
 
     process_plan_summary: dict[str, Any] = {}
+    family_for_breakdown: str | None = None
     planner_pricing_result: dict[str, Any] | None = None
     planner_bucket_view: dict[str, Any] | None = None
     planner_two_bucket_rates: dict[str, Any] | None = None
@@ -12778,23 +12779,104 @@ def compute_quote_from_df(df: pd.DataFrame,
                         process_meta[b] = update_payload
                     planner_meta_keys.add(b)
 
-            meta_lookup = {
-                key: dict(value) for key, value in process_meta.items() if isinstance(value, Mapping)
+        if bucket_view:
+            for b, info in bucket_view.items():
+                hr = info["minutes"] / 60.0 if info["minutes"] else 0.0
+                cost = info["total_cost"]
+                rate = (cost / hr) if hr > 0 else 0.0
+                update_payload = {
+                    "minutes": round(info["minutes"], 1),
+                    "hr": round(hr, 3),
+                    "rate": round(rate, 2),
+                    "cost": round(cost, 2),
+                }
+                existing_meta = process_meta.get(b)
+                if isinstance(existing_meta, Mapping):
+                    existing_meta.update(update_payload)
+                else:
+                    process_meta[b] = update_payload
+                planner_meta_keys.add(b)
+
+        meta_lookup = {
+            key: dict(value) for key, value in process_meta.items() if isinstance(value, Mapping)
+        }
+        allowed_process_hour_keys = {
+            key
+            for key in planner_meta_keys
+            if key not in legacy_per_process_keys or key.startswith("planner_")
+        }
+        if not allowed_process_hour_keys:
+            allowed_process_hour_keys = set(planner_meta_keys)
+        if "drilling" in legacy_process_meta:
+            allowed_process_hour_keys.add("drilling")
+        process_hours_baseline = {
+            key: float(process_meta.get(key, {}).get("hr", 0.0) or 0.0)
+            for key in allowed_process_hour_keys
+        }
+        process_costs_baseline = {k: float(v) for k, v in process_costs.items()}
+
+    if family_for_breakdown is None:
+        family_hint_candidates = (
+            planner_family,
+            geo_context.get("process_planner_family"),
+            geo_context.get("planner_family"),
+            geo_context.get("process_family"),
+        )
+        for candidate in family_hint_candidates:
+            if candidate is None:
+                continue
+            normalized_family = _normalize_family(candidate)
+            if normalized_family:
+                family_for_breakdown = normalized_family
+                break
+            text = str(candidate).strip().lower()
+            if text:
+                family_for_breakdown = text
+                break
+
+    die_plate_families = {"die", "die_plate", "die plates", "shoe"}
+    if str(family_for_breakdown or "").strip().lower() in die_plate_families:
+        setups_for_fixture = 0
+        try:
+            setups_for_fixture = int(round(float(setups)))
+        except Exception:
+            setups_for_fixture = 0
+        setups_for_fixture = max(1, setups_for_fixture)
+        fixture_build_hr = max(0.75, 0.33 * setups_for_fixture)
+        fixture_rate = float(rates.get("FixtureBuildRate", 0.0))
+        fixture_labor_cost = float(fixture_build_hr) * fixture_rate
+        fixture_cost = float(fixture_labor_cost)
+        fixture_labor_per_part = (
+            fixture_labor_cost / Qty if Qty > 1 else fixture_labor_cost
+        )
+        fixture_per_part = (
+            fixture_cost / Qty if Qty > 1 else fixture_cost
+        )
+        fixture_entry = nre_detail.setdefault("fixture", {})
+        fixture_entry.update(
+            {
+                "build_hr": float(fixture_build_hr),
+                "build_rate": fixture_rate,
+                "labor_cost": float(fixture_labor_cost),
+                "per_lot": float(fixture_cost),
+                "per_part": float(fixture_per_part),
             }
-            allowed_process_hour_keys = {
-                key
-                for key in planner_meta_keys
-                if key not in legacy_per_process_keys or key.startswith("planner_")
-            }
-            if not allowed_process_hour_keys:
-                allowed_process_hour_keys = set(planner_meta_keys)
-            if "drilling" in legacy_process_meta:
-                allowed_process_hour_keys.add("drilling")
-            process_hours_baseline = {
-                key: float(process_meta.get(key, {}).get("hr", 0.0) or 0.0)
-                for key in allowed_process_hour_keys
-            }
-            process_costs_baseline = {k: float(v) for k, v in process_costs.items()}
+        )
+        features["fixture_build_hr"] = float(fixture_build_hr)
+        fixture_build_hr_base = float(fixture_build_hr or 0.0)
+        fixture_plan_desc = None
+        strategy_text = None
+        if isinstance(fixture_entry, Mapping):
+            strategy_value = fixture_entry.get("strategy")
+            if isinstance(strategy_value, str):
+                strategy_text = strategy_value.strip()
+        if fixture_build_hr > 0:
+            fixture_plan_desc = f"{fixture_build_hr:.2f} hr build"
+        if strategy_text:
+            if fixture_plan_desc:
+                fixture_plan_desc = f"{fixture_plan_desc} ({strategy_text})"
+            else:
+                fixture_plan_desc = strategy_text
 
     baseline_data = {
         "process_hours": process_hours_baseline,
@@ -14527,6 +14609,8 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     breakdown = {
         "qty": Qty,
+        "setups": int(setups) if isinstance(setups, (int, float)) else setups,
+        "family": family_for_breakdown,
         "scrap_pct": scrap_pct,
         "material_direct_cost": material_direct_cost,
         "total_direct_costs": round(total_direct_costs, 2),
