@@ -7595,6 +7595,47 @@ def _clean_hole_groups(raw: Any) -> list[dict[str, Any]] | None:
     return cleaned if cleaned else None
 
 
+def _count_holes_from_counts(counts: Mapping[Any, Any] | None) -> int:
+    total = 0
+    if isinstance(counts, Mapping):
+        for qty in counts.values():
+            qty_val = _coerce_float_or_none(qty)
+            if qty_val and qty_val > 0:
+                try:
+                    total += int(round(float(qty_val)))
+                except Exception:
+                    continue
+    return total
+
+
+def _count_holes_from_diameters(values: Sequence[Any] | None) -> int:
+    total = 0
+    if not values:
+        return total
+    for val in values:
+        qty = _coerce_float_or_none(val)
+        if qty and qty > 0:
+            total += 1
+    return total
+
+
+def _apply_drilling_per_hole_bounds(
+    hours: float,
+    *,
+    hole_count_hint: int | None = None,
+) -> float:
+    if not math.isfinite(hours) or hours <= 0.0:
+        return 0.0
+    holes = int(hole_count_hint or 0)
+    if holes <= 0:
+        return hours
+    min_min_per_hole = 0.10
+    max_min_per_hole = 2.00
+    min_hours = (holes * min_min_per_hole) / 60.0
+    max_hours = (holes * max_min_per_hole) / 60.0
+    return max(min_hours, min(hours, max_hours))
+
+
 def estimate_drilling_hours(
     hole_diams_mm: list[float],
     thickness_mm: float,
@@ -7778,7 +7819,11 @@ def estimate_drilling_hours(
                 if warning_text not in warnings:
                     warnings.append(warning_text)
         if total_min > 0:
-            return total_min / 60.0
+            hole_count_hint = _count_holes_from_counts(fallback_counts)
+            if hole_count_hint <= 0:
+                hole_count_hint = _count_holes_from_diameters(hole_diams_mm)
+            hours = total_min / 60.0
+            return _apply_drilling_per_hole_bounds(hours, hole_count_hint=hole_count_hint)
 
     thickness_for_fallback = float(thickness_mm or 0.0)
     if thickness_for_fallback <= 0:
@@ -7816,7 +7861,11 @@ def estimate_drilling_hours(
         total_sec += qty * per
         total_sec += toolchange_s
 
-    return total_sec / 3600.0
+    hole_count_hint = _count_holes_from_counts(fallback_counts)
+    if hole_count_hint <= 0:
+        hole_count_hint = _count_holes_from_diameters(hole_diams_mm)
+    hours = total_sec / 3600.0
+    return _apply_drilling_per_hole_bounds(hours, hole_count_hint=hole_count_hint)
 
 
 def estimate_tapping_hours(tap_qty: int, thickness_in: float, mat_key: str) -> float:
@@ -9242,12 +9291,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     if not math.isfinite(drill_hr) or drill_hr < 0:
         drill_hr = 0.0
 
-    min_min_per_hole = 0.10
-    max_min_per_hole = 2.00
-
-    if holes > 0:
-        drill_hr = max(drill_hr, (holes * min_min_per_hole) / 60.0)
-        drill_hr = min(drill_hr, (holes * max_min_per_hole) / 60.0)
+    drill_hr = _apply_drilling_per_hole_bounds(drill_hr, hole_count_hint=holes)
 
     drill_hr = min(drill_hr, 500.0)
     for warning_text in speeds_feeds_warnings:
