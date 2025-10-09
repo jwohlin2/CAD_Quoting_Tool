@@ -6349,10 +6349,9 @@ def render_quote(
             )
         else:
             prog_bits.append(f"- Engineering (lot): {eng_hr:.2f} hr")
-    if qty > 1 and programming_per_part_cost > 0:
-        prog_bits.append(f"Amortized across {qty} pcs")
-
-    if qty > 1 and programming_per_part_cost > 0:
+    if programming_per_part_cost > 0:
+        if qty > 1:
+            prog_bits.append(f"Amortized across {qty} pcs")
         _add_labor_cost_line(
             "Programming (amortized)",
             programming_per_part_cost,
