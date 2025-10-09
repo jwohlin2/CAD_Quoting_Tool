@@ -7511,6 +7511,23 @@ def _select_speeds_feeds_row(
     return matches[0] if matches else None
 
 
+def _clean_path_text(text: str) -> str:
+    raw = text.strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {'"', "'"}:
+        raw = raw[1:-1].strip()
+    return os.path.expandvars(raw)
+
+
+def _stringify_resolved_path(path_obj: Path) -> str:
+    try:
+        try:
+            return str(path_obj.resolve(strict=False))
+        except TypeError:
+            return str(path_obj.resolve())
+    except Exception:
+        return str(path_obj)
+
+
 def _resolve_speeds_feeds_path(
     params: Mapping[str, Any] | None,
     ui_vars: Mapping[str, Any] | None = None,
@@ -9203,7 +9220,8 @@ def compute_quote_from_df(df: pd.DataFrame,
     raw_path_text = str(speeds_feeds_raw).strip() if speeds_feeds_raw else ""
     if raw_path_text:
         try:
-            resolved_candidate = Path(raw_path_text).expanduser()
+            expanded_text = _clean_path_text(raw_path_text)
+            resolved_candidate = Path(expanded_text).expanduser()
         except Exception as exc:
             logger.warning(
                 "Invalid speeds/feeds CSV path %r: %s; using legacy drilling heuristics for this quote.",
@@ -9215,7 +9233,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                 f"Speeds/feeds CSV path invalid ({raw_path_text}) — using legacy drilling heuristics."
             )
         else:
-            speeds_feeds_path = str(resolved_candidate)
+            speeds_feeds_path = _stringify_resolved_path(resolved_candidate)
             if resolved_candidate.is_file():
                 speeds_feeds_table = _load_speeds_feeds_table(str(resolved_candidate))
                 if speeds_feeds_table is None:
@@ -9227,10 +9245,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                         f"Failed to load speeds/feeds CSV at {resolved_candidate} — using legacy drilling heuristics."
                     )
                 else:
-                    try:
-                        speeds_feeds_path = str(resolved_candidate.resolve())
-                    except Exception:
-                        speeds_feeds_path = str(resolved_candidate)
+                    speeds_feeds_path = _stringify_resolved_path(resolved_candidate)
             else:
                 logger.warning(
                     "Speeds/feeds CSV not found at %s; using legacy drilling heuristics for this quote.",
