@@ -5300,6 +5300,40 @@ def _display_bucket_label(
     return _process_label(canon_key)
 
 
+def _canonical_amortized_label(label: Any) -> tuple[str | None, str]:
+    """Return a canonical/storage label for amortized cost rows."""
+
+    text = str(label or "").strip()
+    if not text:
+        return ("", "")
+
+    normalized = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+    # Normalise common collapsed forms such as "perpart" → "per part"
+    normalized = normalized.replace("perpart", "per part")
+    normalized = normalized.replace("perpiece", "per piece")
+    tokens = normalized.split()
+    token_set = set(tokens)
+
+    def _has(*want: str) -> bool:
+        return all(token in token_set for token in want)
+
+    if "programming" in token_set and "amortized" in token_set:
+        if _has("per", "part") or _has("per", "pc") or "per piece" in normalized:
+            canonical = "Programming (amortized per part)"
+        else:
+            canonical = "Programming (amortized)"
+        return (canonical, canonical)
+
+    if ("fixture" in token_set or "fixturing" in token_set) and "amortized" in token_set:
+        if _has("per", "part") or _has("per", "pc") or "per piece" in normalized:
+            canonical = "Fixture Build (amortized per part)"
+        else:
+            canonical = "Fixture Build (amortized)"
+        return (canonical, canonical)
+
+    return (text, text)
+
+
 def _format_planner_bucket_line(
     canon_key: str,
     amount: float,
@@ -6736,20 +6770,24 @@ def render_quote(
         amount_val = float(amount or 0.0)
         if not force and not ((amount_val > 0) or show_zeros):
             return
-        display_label = display_override or label
-        row(display_label, amount_val, indent="  ")
-        labor_costs_display[label] = amount_val
-        existing_detail = labor_cost_details.get(label)
+
+        canonical_label, _ = _canonical_amortized_label(label)
+        storage_label = canonical_label or str(label)
+        display_text = display_override or str(label)
+
+        row(display_text, amount_val, indent="  ")
+        labor_costs_display[storage_label] = amount_val
+
+        existing_detail = labor_cost_details.get(storage_label)
         merged_detail = _merge_detail(existing_detail, detail_bits or [])
-        detail_to_write: str | None
+        detail_to_write: str | None = None
+
         if merged_detail:
-            labor_cost_details[label] = merged_detail
+            labor_cost_details[storage_label] = merged_detail
             detail_to_write = merged_detail
         elif fallback_detail:
+            labor_cost_details.setdefault(storage_label, fallback_detail)
             detail_to_write = fallback_detail
-            labor_cost_details.setdefault(label, fallback_detail)
-        else:
-            detail_to_write = None
 
         if detail_to_write:
             write_detail(detail_to_write, indent="    ")
@@ -6843,72 +6881,14 @@ def render_quote(
     remaining_items.sort(key=_normalize_bucket_key)
     ordered_process_items.extend(remaining_items)
 
-    for key, value in ordered_process_items:
-        normalized_key = _normalize_bucket_key(key)
-        if normalized_key == "planner_total" or normalized_key.startswith("planner_"):
+    display_process_costs: dict[str, Any] = {}
+    for key, value in (process_costs or {}).items():
+        if _is_planner_meta(key):
             continue
-        canon_key = _canonical_bucket_key(key)
-        if canon_key.startswith("planner_"):
-            continue
-        meta_key = str(key).lower()
-        meta = process_meta.get(meta_key, {}) if isinstance(process_meta, dict) else {}
-        detail_bits: list[str] = []
-        try:
-            hr_val = float(meta.get("hr", 0.0) or 0.0)
-        except Exception:
-            hr_val = 0.0
-        try:
-            rate_val = float(meta.get("rate", 0.0) or 0.0)
-        except Exception:
-            rate_val = 0.0
-        try:
-            extra_val = float(meta.get("base_extra", 0.0) or 0.0)
-        except Exception:
-            extra_val = 0.0
-
-        display_override, amount_override, display_hr, display_rate = _format_planner_bucket_line(
-            canon_key,
-            float(value),
-            meta if isinstance(meta, Mapping) else {},
-        )
-        use_display = display_override is not None
-        label = (
-            _display_bucket_label(canon_key)
-            if use_display or canon_key in label_overrides
-            else _process_label(canon_key)
-        )
-
-        if not use_display and hr_val > 0:
-            detail_bits.append(_hours_with_rate_text(hr_val, rate_val))
-
-        rate_for_extra = rate_val if rate_val > 0 else display_rate
-        if abs(extra_val) > 1e-6:
-            if (not use_display and hr_val <= 1e-6 and rate_for_extra > 0) or (
-                use_display and display_hr <= 1e-6 and rate_for_extra > 0
-            ):
-                extra_hours = extra_val / rate_for_extra
-                detail_bits.append(_hours_with_rate_text(extra_hours, rate_for_extra))
-
-        if notes_order:
-            detail_bits.append("LLM: " + ", ".join(notes_order))
-
-        if use_display:
-            try:
-                amount_for_display = float(amount_override or 0.0)
-            except Exception:
-                amount_for_display = 0.0
-        else:
-            try:
-                amount_for_display = float(value or 0.0)
-            except Exception:
-                amount_for_display = 0.0
-
-        if label.strip().lower() == "misc":
-            if planner_bucket_display_map or amount_for_display < 1.0:
-                continue
+        display_process_costs[key] = value
 
     for entry in _iter_ordered_process_entries(
-        process_costs,
+        display_process_costs,
         process_meta=process_meta,
         applied_process=applied_process,
         show_zeros=show_zeros,
@@ -6916,6 +6896,17 @@ def render_quote(
         label_overrides=label_overrides,
         currency_formatter=_m,
     ):
+        canon_key = _canonical_bucket_key(entry.process_key)
+        if canon_key.startswith("planner_"):
+            continue
+        if canon_key == "planner_total":
+            continue
+        if canon_key == "misc" and (planner_bucket_display_map or entry.amount < 1.0):
+            continue
+
+        canonical_label, _ = _canonical_amortized_label(entry.label)
+        fallback_detail = labor_cost_details_input.get(canonical_label or entry.label)
+
         _add_labor_cost_line(
             entry.label,
             entry.amount,
