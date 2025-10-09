@@ -5221,9 +5221,11 @@ def render_quote(
     )
     pass_through = breakdown.get("pass_through", {}) or {}
     applied_pcts = breakdown.get("applied_pcts", {}) or {}
-    process_meta = {str(k).lower(): (v or {}) for k, v in (breakdown.get("process_meta", {}) or {}).items()}
+    process_meta_raw = breakdown.get("process_meta", {}) or {}
     applied_process_raw = breakdown.get("applied_process", {}) or {}
-    applied_process = {str(k).lower(): (v or {}) for k, v in applied_process_raw.items()}
+    process_meta: dict[str, Any] = {}
+    bucket_alias_map: dict[str, str] = {}
+    applied_process: dict[str, Any] = {}
     rates        = breakdown.get("rates", {}) or {}
     params       = breakdown.get("params", {}) or {}
     nre_cost_details = breakdown.get("nre_cost_details", {}) or {}
@@ -5506,6 +5508,216 @@ def render_quote(
     def _is_planner_meta(key: str) -> bool:
         k = str(key).lower().strip()
         return k.startswith("planner_") or k == "planner total"
+
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value or 0.0)
+        except Exception:
+            return default
+
+    def _merge_process_meta(
+        existing: Mapping[str, Any] | None, incoming: Mapping[str, Any] | Any
+    ) -> dict[str, Any]:
+        merged: dict[str, Any] = dict(existing) if isinstance(existing, Mapping) else {}
+        incoming_map: Mapping[str, Any]
+        if isinstance(incoming, Mapping):
+            incoming_map = incoming
+        else:
+            incoming_map = {}
+
+        if not incoming_map:
+            return merged
+
+        existing_hr = _safe_float(merged.get("hr"))
+        existing_minutes = _safe_float(merged.get("minutes"))
+        existing_extra = _safe_float(merged.get("base_extra"))
+        existing_cost = _safe_float(merged.get("cost"))
+        existing_rate = _safe_float(merged.get("rate"))
+
+        incoming_minutes = _safe_float(incoming_map.get("minutes"))
+        incoming_hr = _safe_float(incoming_map.get("hr"))
+        if incoming_hr <= 0 and incoming_minutes > 0:
+            incoming_hr = incoming_minutes / 60.0
+
+        incoming_extra = _safe_float(incoming_map.get("base_extra"))
+        incoming_cost = _safe_float(incoming_map.get("cost"))
+        incoming_rate = _safe_float(incoming_map.get("rate"))
+
+        if incoming_cost <= 0 and incoming_rate > 0 and incoming_hr > 0:
+            incoming_cost = incoming_rate * incoming_hr
+
+        total_minutes = existing_minutes + incoming_minutes
+        if total_minutes > 0:
+            merged["minutes"] = total_minutes
+        elif "minutes" in merged:
+            merged.pop("minutes", None)
+
+        total_hr = existing_hr + incoming_hr
+        if total_hr > 0:
+            merged["hr"] = total_hr
+        elif "hr" in merged:
+            merged.pop("hr", None)
+
+        total_extra = existing_extra + incoming_extra
+        if abs(total_extra) > 1e-9:
+            merged["base_extra"] = total_extra
+        elif "base_extra" in merged:
+            merged.pop("base_extra", None)
+
+        if existing_cost <= 0 and existing_rate > 0 and existing_hr > 0:
+            existing_cost = existing_rate * existing_hr
+        total_cost = existing_cost + incoming_cost
+        if total_cost > 0:
+            merged["cost"] = total_cost
+        elif "cost" in merged:
+            merged.pop("cost", None)
+
+        if total_hr > 0:
+            if total_cost > 0:
+                merged["rate"] = total_cost / total_hr
+            elif incoming_rate > 0:
+                merged["rate"] = incoming_rate
+            elif existing_rate > 0:
+                merged["rate"] = existing_rate
+            else:
+                merged.pop("rate", None)
+        elif incoming_rate > 0:
+            merged["rate"] = incoming_rate
+
+        def _collect_notes(value: Any, dest: list[str], seen: set[str]) -> None:
+            if isinstance(value, str):
+                text = value.strip()
+                if text and text not in seen:
+                    dest.append(text)
+                    seen.add(text)
+            elif isinstance(value, (list, tuple, set)):
+                for item in value:
+                    text = str(item).strip()
+                    if text and text not in seen:
+                        dest.append(text)
+                        seen.add(text)
+
+        notes: list[str] = []
+        seen_notes: set[str] = set()
+        _collect_notes(merged.get("notes"), notes, seen_notes)
+        _collect_notes(incoming_map.get("notes"), notes, seen_notes)
+        if notes:
+            merged["notes"] = notes
+        elif "notes" in merged:
+            merged.pop("notes", None)
+
+        special_keys = {"hr", "minutes", "base_extra", "cost", "rate", "notes"}
+        for key, value in incoming_map.items():
+            if key in special_keys:
+                continue
+            merged[key] = value
+
+        return merged
+
+    def _fold_process_meta(
+        meta_source: Mapping[str, Any] | None,
+    ) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+        folded: dict[str, dict[str, Any]] = {}
+        alias_map: dict[str, str] = {}
+        if not isinstance(meta_source, Mapping):
+            return {}, {}
+
+        for raw_key, raw_meta in meta_source.items():
+            alias_key = str(raw_key).lower().strip()
+            if not alias_key:
+                continue
+            if _is_planner_meta(alias_key):
+                folded[alias_key] = dict(raw_meta) if isinstance(raw_meta, Mapping) else {}
+                continue
+
+            canon_key = _canonical_bucket_key(raw_key) or alias_key
+            alias_map.setdefault(alias_key, canon_key)
+            existing = folded.get(canon_key)
+            folded[canon_key] = _merge_process_meta(existing, raw_meta)
+
+        result: dict[str, dict[str, Any]] = {key: value for key, value in folded.items()}
+        for alias_key, canon_key in alias_map.items():
+            result[alias_key] = result.get(canon_key, {})
+
+        return result, alias_map
+
+    def _merge_applied_process_entries(entries: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+        merged: dict[str, Any] = {}
+        notes: list[str] = []
+        seen_notes: set[str] = set()
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                continue
+            value_notes = entry.get("notes")
+            if isinstance(value_notes, str):
+                text = value_notes.strip()
+                if text and text not in seen_notes:
+                    notes.append(text)
+                    seen_notes.add(text)
+            elif isinstance(value_notes, (list, tuple, set)):
+                for item in value_notes:
+                    text = str(item).strip()
+                    if text and text not in seen_notes:
+                        notes.append(text)
+                        seen_notes.add(text)
+            for key, value in entry.items():
+                if key == "notes":
+                    continue
+                merged.setdefault(key, value)
+        if notes:
+            merged["notes"] = notes
+        return merged
+
+    def _fold_applied_process(
+        applied_source: Mapping[str, Any] | None, alias_map: Mapping[str, str]
+    ) -> dict[str, Any]:
+        base: dict[str, Any] = {}
+        if isinstance(applied_source, Mapping):
+            base = {str(k).lower().strip(): (v or {}) for k, v in applied_source.items()}
+        if not alias_map:
+            return base
+
+        grouped: dict[str, list[Mapping[str, Any]]] = {}
+        for alias_key, canon_key in alias_map.items():
+            entry = base.get(alias_key)
+            if isinstance(entry, Mapping):
+                grouped.setdefault(canon_key, []).append(entry)
+
+        for canon_key, entries in grouped.items():
+            merged_entry = _merge_applied_process_entries(entries)
+            base[canon_key] = merged_entry
+            for alias_key, alias_canon in alias_map.items():
+                if alias_canon == canon_key:
+                    base[alias_key] = merged_entry
+
+        return base
+
+    def _fold_buckets(costs: Mapping[str, Any] | None) -> dict[str, float]:
+        folded: dict[str, float] = {}
+        if not isinstance(costs, Mapping):
+            return folded
+
+        for raw_key, raw_value in costs.items():
+            alias_key = str(raw_key)
+            if _is_planner_meta(alias_key):
+                try:
+                    folded[alias_key] = folded.get(alias_key, 0.0) + float(raw_value or 0.0)
+                except Exception:
+                    continue
+                continue
+            canon_key = _canonical_bucket_key(raw_key)
+            if not canon_key:
+                continue
+            try:
+                amount = float(raw_value or 0.0)
+            except Exception:
+                continue
+            folded[canon_key] = folded.get(canon_key, 0.0) + amount
+
+        return folded
+
+    process_meta, bucket_alias_map = _fold_process_meta(process_meta_raw)
+    applied_process = _fold_applied_process(applied_process_raw, bucket_alias_map)
 
     def _planner_bucket_for_op(name: str) -> str:
         text = str(name or "").lower()
