@@ -5334,6 +5334,9 @@ PREFERRED_PROCESS_BUCKET_ORDER: tuple[str, ...] = (
 
 CANON_MAP: dict[str, str] = {
     "deburr": "finishing_deburr",
+    "deburring": "finishing_deburr",
+    "finish_deburr": "finishing_deburr",
+    "finishing_deburr": "finishing_deburr",
     "finishing": "finishing_deburr",
     "finishing/deburr": "finishing_deburr",
     "inspection": "inspection",
@@ -5743,7 +5746,7 @@ def _iter_ordered_process_entries(
         use_display = display_override is not None
         label = (
             _display_bucket_label(canon_key, label_overrides)
-            if use_display
+            if canon_key
             else _process_label(key)
         )
 
