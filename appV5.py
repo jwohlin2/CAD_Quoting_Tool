@@ -139,6 +139,10 @@ from cad_quoter.pricing.time_estimator import (
     ToolParams as _TimeToolParams,
     estimate_time_min as _estimate_time_min,
 )
+from cad_quoter.pricing.speeds_feeds_selector import (
+    pick_speeds_row as _pick_speeds_row,
+    unit_hp_cap as _unit_hp_cap,
+)
 from cad_quoter.rates import migrate_flat_to_two_bucket, two_bucket_to_flat
 from cad_quoter.pricing.wieland import lookup_price as lookup_wieland_price
 from cad_quoter.llm import (
@@ -6866,6 +6870,9 @@ def estimate_drilling_hours(
     Conservative plate-drilling model with floors so 100+ holes don't collapse to minutes.
     """
     mat = (mat_key or "").lower()
+    material_lookup = _normalize_lookup_key(mat_key) if mat_key else ""
+    material_label = MATERIAL_DISPLAY_BY_KEY.get(material_lookup, mat_key)
+    material_factor = _unit_hp_cap(material_label)
 
     group_specs: list[tuple[float, int, float]] = []
     fallback_counts: Counter[float] | None = None
@@ -6906,35 +6913,47 @@ def estimate_drilling_hours(
             for dia_in, qty, _ in group_specs:
                 fallback_counts[round(dia_in * 25.4, 3)] += qty
 
-    if speeds_feeds_table is not None and group_specs:
-        row = _select_speeds_feeds_row(speeds_feeds_table, "drill", mat)
-        if row:
-            machine = machine_params or _machine_params_from_params(None)
-            overhead = overhead_params or _drill_overhead_from_params(None)
-            per_hole_overhead = replace(overhead, toolchange_min=0.0)
-            total_min = 0.0
-            for diameter_in, qty, depth_in in group_specs:
-                if qty <= 0 or diameter_in <= 0 or depth_in <= 0:
-                    continue
-                geom = _TimeOperationGeometry(
-                    diameter_in=float(diameter_in),
-                    hole_depth_in=float(depth_in),
-                    point_angle_deg=118.0,
+    if group_specs:
+        machine = machine_params or _machine_params_from_params(None)
+        overhead = overhead_params or _drill_overhead_from_params(None)
+        per_hole_overhead = replace(overhead, toolchange_min=0.0)
+        total_min = 0.0
+        row_cache: dict[str, Mapping[str, Any] | None] = {}
+        for diameter_in, qty, depth_in in group_specs:
+            if qty <= 0 or diameter_in <= 0 or depth_in <= 0:
+                continue
+            ratio = depth_in / max(diameter_in, 1e-6)
+            op_name = "Deep_Drill" if ratio >= 8.0 else "Drill"
+            if op_name not in row_cache:
+                row_cache[op_name] = _pick_speeds_row(
+                    material_label=material_label,
+                    operation=op_name,
+                    table=speeds_feeds_table,
                 )
-                minutes = _estimate_time_min(
-                    row,
-                    geom,
-                    _TimeToolParams(teeth_z=1),
-                    machine,
-                    per_hole_overhead,
-                )
-                if minutes <= 0:
-                    continue
-                total_min += minutes * int(qty)
-                if overhead.toolchange_min and qty > 0:
-                    total_min += float(overhead.toolchange_min)
-            if total_min > 0:
-                return total_min / 60.0
+            row = row_cache.get(op_name)
+            if not row:
+                continue
+            geom = _TimeOperationGeometry(
+                diameter_in=float(diameter_in),
+                hole_depth_in=float(depth_in),
+                point_angle_deg=118.0,
+                ld_ratio=ratio,
+            )
+            minutes = _estimate_time_min(
+                row,
+                geom,
+                _TimeToolParams(teeth_z=1),
+                machine,
+                per_hole_overhead,
+                material_factor=material_factor,
+            )
+            if minutes <= 0:
+                continue
+            total_min += minutes * int(qty)
+            if overhead.toolchange_min and qty > 0:
+                total_min += float(overhead.toolchange_min)
+        if total_min > 0:
+            return total_min / 60.0
 
     thickness_for_fallback = float(thickness_mm or 0.0)
     if thickness_for_fallback <= 0:
