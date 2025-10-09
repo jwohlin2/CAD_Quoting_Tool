@@ -6166,6 +6166,27 @@ def render_quote(
     total_labor_row_index = len(lines) - 1
     row("Total Direct Costs:", float(totals.get("direct_costs", 0.0)))
     pricing_source_value = breakdown.get("pricing_source")
+    # If planner produced hours, treat source as planner for display consistency.
+    if not pricing_source_value:
+        hs_entries = dict(hour_summary_entries or {})
+
+        def _has_positive_planner_hours(value: object) -> bool:
+            base_value: object
+            if isinstance(value, (list, tuple)) and value:
+                base_value = value[0]
+            else:
+                base_value = value
+            try:
+                return float(base_value or 0.0) > 0.0
+            except Exception:
+                return False
+
+        if any(
+            str(label).lower().startswith("planner")
+            and _has_positive_planner_hours(value)
+            for label, value in hs_entries.items()
+        ):
+            pricing_source_value = "planner"
     if pricing_source_value:
         lines.append(f"Pricing Source: {pricing_source_value}")
     pricing_source_lower = (
