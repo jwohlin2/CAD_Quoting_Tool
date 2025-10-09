@@ -9623,47 +9623,73 @@ def compute_quote_from_df(df: pd.DataFrame,
         planner_labor_cost_total = float(totals.get("labor_cost", 0.0) or 0.0)
         planner_total_minutes = float(totals.get("minutes", 0.0) or 0.0)
 
-        def _to_bucket(name: str) -> str:
-            n = (name or "").lower()
-            if any(k in n for k in ("milling", "mill", "t-slot", "pocket", "profile")):
-                return "milling"
-            if any(k in n for k in ("drill", "ream", "tap", "c'bore", "counterbore", "csk", "countersink")):
-                return "drilling"
-            if any(k in n for k in ("grind", "od grind", "id grind", "surface grind", "jig grind")):
-                return "grinding"
-            if "wire" in n or "wedm" in n:
-                return "wire_edm"
-            if "edm" in n:
-                return "sinker_edm"
-            if any(k in n for k in ("saw", "waterjet")):
-                return "saw_waterjet"
-            if "deburr" in n or "finish" in n:
-                return "finishing_deburr"
-            if "inspect" in n or "cmm" in n or "fai" in n:
-                return "inspection"
-            if any(k in n for k in ("assembly", "fit", "bench")):
-                return "assembly"
-            return "misc"
+        def _planner_bucketize(entries: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
+            def _resolve_bucket(name: str) -> str:
+                text = (name or "").lower()
+                if not text:
+                    return "milling"
 
-        bucket_view: dict[str, dict[str, float]] = {}
-        for e in planner_line_items:
-            b = _to_bucket(str(e.get("op", "")))
-            m = float(e.get("minutes") or 0.0)
-            mc = float(e.get("machine_cost") or 0.0)
-            lc = float(e.get("labor_cost") or 0.0)
-            d = bucket_view.setdefault(
-                b,
-                {
-                    "minutes": 0.0,
-                    "labor_cost": 0.0,
-                    "machine_cost": 0.0,
-                    "total_cost": 0.0,
-                },
-            )
-            d["minutes"] += m
-            d["labor_cost"] += lc
-            d["machine_cost"] += mc
-            d["total_cost"] += lc + mc
+                def _contains(*tokens: str) -> bool:
+                    return any(token in text for token in tokens)
+
+                if _contains("countersink", "counter sink", "csk", "c-sink", "c sink"):
+                    return "countersink"
+                if _contains("counterbore", "c'bore", "c bore", "cbore", "spotface"):
+                    return "counterbore"
+                if "tap" in text or _contains("thread mill", "threadmill"):
+                    return "tapping"
+                if _contains("grind", "od grind", "id grind", "surface grind", "jig grind"):
+                    return "grinding"
+                if "wire" in text or "wedm" in text:
+                    return "wire_edm"
+                if "edm" in text:
+                    return "sinker_edm"
+                if _contains("saw", "waterjet", "water jet"):
+                    return "saw_waterjet"
+                if _contains("deburr", "finish", "polish", "blend"):
+                    return "finishing_deburr"
+                if _contains("inspect", "cmm", "fai", "first article", "qc", "quality"):
+                    return "inspection"
+                if _contains("assembly", "fit", "bench", "install"):
+                    return "assembly"
+                if _contains("toolmaker", "tooling support"):
+                    return "toolmaker_support"
+                if _contains("package", "pack-out", "pack out", "boxing"):
+                    return "packaging"
+                if _contains("ehs", "environment", "safety"):
+                    return "ehs_compliance"
+                if _contains("turn", "lathe"):
+                    return "turning"
+                if _contains("lap", "hone"):
+                    return "lapping_honing"
+                if _contains("drill", "ream", "bore", "hole"):
+                    return "drilling"
+                if _contains("milling", "mill", "t-slot", "pocket", "profile"):
+                    return "milling"
+                return "misc"
+
+            bucket_view: dict[str, dict[str, float]] = {}
+            for entry in entries:
+                bucket = _resolve_bucket(str(entry.get("op", "")))
+                minutes_val = float(entry.get("minutes") or 0.0)
+                machine_cost = float(entry.get("machine_cost") or 0.0)
+                labor_cost = float(entry.get("labor_cost") or 0.0)
+                bucket_totals = bucket_view.setdefault(
+                    bucket,
+                    {
+                        "minutes": 0.0,
+                        "labor_cost": 0.0,
+                        "machine_cost": 0.0,
+                        "total_cost": 0.0,
+                    },
+                )
+                bucket_totals["minutes"] += minutes_val
+                bucket_totals["labor_cost"] += labor_cost
+                bucket_totals["machine_cost"] += machine_cost
+                bucket_totals["total_cost"] += labor_cost + machine_cost
+            return bucket_view
+
+        bucket_view = _planner_bucketize(planner_line_items)
 
         if bucket_view:
             planner_bucket_view = copy.deepcopy(bucket_view)
