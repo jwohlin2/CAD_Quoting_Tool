@@ -47,6 +47,12 @@ def _coerce_env_bool(value: str | None) -> bool:
 FORCE_PLANNER = _coerce_env_bool(os.environ.get("FORCE_PLANNER"))
 
 
+# Guardrails for LLM-generated process adjustments.
+LLM_MULT_MIN = 0.25
+LLM_MULT_MAX = 4.0
+LLM_ADD_MAX_HR = 8.0
+
+
 def describe_runtime_environment() -> dict[str, str]:
     """Return a redacted snapshot of runtime configuration for auditors."""
 
@@ -2118,6 +2124,8 @@ def merge_effective(
                     if cap_val is not None:
                         bucket_caps[str(key).lower()] = float(cap_val)
             adder_min = _as_float_or_none(bounds.get("add_hr_min"))
+            if adder_min is None:
+                adder_min = _as_float_or_none(bounds.get("adder_min_hr"))
             raw_val = orig_val
             if source_norm == "llm" and raw_val > 240:
                 raw_val = raw_val / 60.0
@@ -19702,9 +19710,14 @@ class App(tk.Tk):
         for proc, mult in mults.items():
             if proc in eff_hours:
                 try:
-                    eff_hours[proc] = float(eff_hours[proc]) * float(mult)
+                    base_val = float(eff_hours[proc])
                 except Exception:
                     continue
+                clamped_mult = clamp(mult, LLM_MULT_MIN, LLM_MULT_MAX, 1.0)
+                try:
+                    eff_hours[proc] = base_val * float(clamped_mult)
+                except Exception:
+                    eff_hours[proc] = base_val
         for proc, (label, scale) in PROC_MULT_TARGETS.items():
             if proc in eff_hours:
                 try:
