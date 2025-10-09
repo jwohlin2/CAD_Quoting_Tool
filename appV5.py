@@ -7485,10 +7485,10 @@ def render_quote(
         label_overrides=label_overrides,
         currency_formatter=_m,
     ):
-        canon_key = _canonical_bucket_key(entry.process_key)
-        if canon_key.startswith("planner_"):
+        canon_key = entry.canonical_key or _canonical_bucket_key(entry.process_key)
+        if canon_key in {"planner_labor", "planner_machine", "planner_total"}:
             continue
-        if canon_key == "planner_total":
+        if canon_key.startswith("planner_"):
             continue
         if canon_key == "misc" and (planner_bucket_display_map or entry.amount < 1.0):
             continue
