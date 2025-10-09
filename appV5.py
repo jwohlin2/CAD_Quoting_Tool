@@ -5575,12 +5575,62 @@ def render_quote(
                             float(net_mass_for_base) / 1000.0 * LB_PER_KG
                         ) * float(per_lb_value)
 
-            if base_cost_before_scrap is not None or show_zeros:
-                base_val = float(base_cost_before_scrap or 0.0)
-                shipping_cost = base_val * 0.15
-                tax_cost = base_val * 0.065
-                shipping_tax_lines.append(f"  Shipping: {_m(shipping_cost)}")
-                shipping_tax_lines.append(f"  Material Tax: {_m(tax_cost)}")
+            base_val: float | None = None
+            if base_cost_before_scrap is not None:
+                try:
+                    base_val = float(base_cost_before_scrap)
+                except Exception:
+                    base_val = None
+            if base_val is None and show_zeros:
+                base_val = 0.0
+
+            shipping_total: float | None = None
+            for pass_label, pass_value in (pass_through or {}).items():
+                canonical_label = _canonical_pass_label(pass_label).strip().lower()
+                if canonical_label == "shipping":
+                    shipping_total = _coerce_float_or_none(pass_value)
+                    if shipping_total is not None:
+                        break
+
+            if shipping_total is None and (base_val is not None):
+                raw_shipping_pct = params.get("ShippingPctOfMaterial", 0.15)
+                shipping_pct = _coerce_float_or_none(raw_shipping_pct)
+                if shipping_pct is None:
+                    try:
+                        shipping_pct = float(raw_shipping_pct or 0.0)
+                    except Exception:
+                        shipping_pct = 0.0
+                shipping_total = float(base_val) * float(shipping_pct or 0.0)
+
+            if shipping_total is not None and (shipping_total > 0 or show_zeros):
+                shipping_tax_lines.append(f"  Shipping: {_m(shipping_total)}")
+
+            material_tax_total: float | None = None
+            if base_val is not None:
+                tax_pct: float | None = None
+                for candidate in (
+                    params.get("MaterialTaxPct"),
+                    params.get("MaterialTaxRate"),
+                    params.get("SalesTaxPct"),
+                ):
+                    if candidate is None:
+                        continue
+                    tax_pct = _coerce_float_or_none(candidate)
+                    if tax_pct is None:
+                        try:
+                            tax_pct = float(candidate or 0.0)
+                        except Exception:
+                            tax_pct = None
+                    if tax_pct is not None:
+                        break
+                if tax_pct is None:
+                    tax_pct = 0.065
+                material_tax_total = float(base_val) * float(tax_pct or 0.0)
+
+            if material_tax_total is not None and (
+                material_tax_total > 0 or show_zeros
+            ):
+                shipping_tax_lines.append(f"  Material Tax: {_m(material_tax_total)}")
 
             if shipping_tax_lines:
                 detail_lines.extend(shipping_tax_lines)
