@@ -6257,6 +6257,16 @@ def render_quote(
         "inspection",
     ]
 
+    def _is_planner_rollup_key(name: str | None) -> bool:
+        if pricing_source_lower != "planner":
+            return False
+        norm = _normalize_bucket_key(name)
+        if not norm:
+            return False
+        if norm in {"planner_total", "planner_machine", "planner_labor"}:
+            return True
+        return norm.startswith("planner_")
+
     ordered_process_items: list[tuple[str, float]] = []
     seen_keys: set[str] = set()
 
