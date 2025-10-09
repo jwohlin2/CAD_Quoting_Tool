@@ -7594,6 +7594,12 @@ def render_quote(
         "show_amortized_nre",
     )
 
+    try:
+        amortized_qty = int(result.get("qty") or breakdown.get("qty") or qty or 1)
+    except Exception:
+        amortized_qty = qty if qty > 0 else 1
+    show_amortized = amortized_qty > 1
+
     def _should_show_amortized_cost(amount: float) -> bool:
         try:
             amount_val = float(amount or 0.0)
@@ -7601,7 +7607,7 @@ def render_quote(
             amount_val = 0.0
         if amount_val <= 0:
             return False
-        return qty > 1
+        return show_amortized
 
     programming_per_part_cost = labor_cost_totals.get("Programming (amortized)")
     if programming_per_part_cost is None:
@@ -7629,10 +7635,10 @@ def render_quote(
     if eng_hr > 0:
         prog_bits.append(f"- Engineering (lot): {_hours_with_rate_text(eng_hr, eng_rate)}")
     show_programming_amortized = _should_show_amortized_cost(programming_per_part_cost)
-    if qty > 1 and programming_per_part_cost > 0:
+    if show_amortized and programming_per_part_cost > 0:
         prog_bits.append(f"Amortized across {qty} pcs")
 
-    show_programming_amortized = qty > 1 and programming_per_part_cost > 0
+    show_programming_amortized = show_amortized and programming_per_part_cost > 0
     if show_programming_amortized and "Programming (amortized)" not in labor_costs_display:
         _add_labor_cost_line(
             "Programming (amortized)",
@@ -7672,7 +7678,7 @@ def render_quote(
     if soft_jaw_hr > 0:
         fixture_bits.append(f"Soft jaw prep {soft_jaw_hr:.2f} hr")
     show_fixture_amortized = _should_show_amortized_cost(fixture_labor_per_part_cost)
-    if qty > 1 and fixture_labor_per_part_cost > 0:
+    if show_amortized and fixture_labor_per_part_cost > 0:
         fixture_bits.append(f"Amortized across {qty} pcs")
 
     if show_fixture_amortized and "Fixture Build (amortized)" not in labor_costs_display:
