@@ -8630,18 +8630,28 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     pass_through = {
         "Material": material_direct_cost,
-        "Hardware / BOM": hardware_cost,
+        "Shipping": shipping_cost,
     }
-    if include_outsourced_pass:
+
+    planner_directs = {}
+    try:
+        planner_directs = (process_plan_summary.get("plan") or {}).get("directs") or {}
+    except Exception:
+        planner_directs = {}
+
+    def _direct_on(key: str) -> bool:
+        return bool(planner_directs.get(key))
+
+    if _direct_on("hardware"):
+        pass_through["Hardware / BOM"] = hardware_cost
+    if _direct_on("outsourced") and include_outsourced_pass:
         pass_through["Outsourced Vendors"] = outsourced_costs
-    pass_through.update(
-        {
-            "Shipping": shipping_cost,
-            "Utilities": utilities_cost,
-            "Consumables": consumables_flat,
-            "Packaging Flat": packaging_flat_base,
-        }
-    )
+    if _direct_on("utilities"):
+        pass_through["Utilities"] = utilities_cost
+    if _direct_on("consumables_flat"):
+        pass_through["Consumables"] = consumables_flat
+    if _direct_on("packaging_flat"):
+        pass_through["Packaging Flat"] = packaging_flat_base
     pass_through = {
         _canonical_pass_label(label): float(value)
         for label, value in pass_through.items()

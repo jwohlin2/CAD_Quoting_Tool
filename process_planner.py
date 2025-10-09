@@ -66,7 +66,11 @@ def add(plan: Plan, op: str, **params) -> None:
 
 
 def base_plan() -> Plan:
-    return {"ops": [], "fixturing": [], "qa": [], "warnings": []}
+    return {"ops": [], "fixturing": [], "qa": [], "warnings": [], "directs": {}}
+
+
+def add_direct(plan: Plan, key: str, value=True) -> None:
+    plan.setdefault("directs", {})[key] = value
 
 
 def warn(plan: Plan, msg: str) -> None:
@@ -168,6 +172,14 @@ def plan_die_plate(p: Dict[str, Any]) -> Plan:
     if p.get("marking", "laser") != "none":
         add(plan, "mark_id", method=p.get("marking", "laser"))
 
+    hole_types = {h.get("type") for h in p.get("hole_sets", [])}
+    if {"bushing_seat", "post_bore", "dowel_press", "dowel_slip"} & hole_types:
+        add_direct(plan, "hardware", True)
+
+    opnames = [o.get("op") for o in plan.get("ops", [])]
+    if any(str(name).startswith("heat_treat") for name in opnames):
+        add_direct(plan, "outsourced", True)
+
     return plan
 
 
@@ -252,6 +264,11 @@ def plan_punch(p: Dict[str, Any]) -> Plan:
 
     # QA
     add_qa(plan, "Comparator profile vs CAD; measure land width & size; hardness if steel.")
+
+    opnames = [o.get("op") for o in plan.get("ops", [])]
+    if any(str(name).startswith("heat_treat") for name in opnames):
+        add_direct(plan, "outsourced", True)
+
     return plan
 
 
@@ -321,6 +338,11 @@ def plan_cam_or_hemmer(p: Dict[str, Any]) -> Plan:
     add(plan, "profile_or_surface_grind_wear_faces")
     add(plan, "jig_bore_or_grind_pivot_bores", tol=0.0005)
     add_qa(plan, "Inspect cam path size/position; verify bore TIR and hardness.")
+
+    opnames = [o.get("op") for o in plan.get("ops", [])]
+    if any(str(name).startswith("heat_treat") for name in opnames):
+        add_direct(plan, "outsourced", True)
+
     return plan
 
 
@@ -336,6 +358,11 @@ def plan_flat_die_chaser(p: Optional[Dict[str, Any]] = None) -> Plan:
     add(plan, "profile_grind_flanks_and_reliefs_to_spec")
     add(plan, "lap_edges")
     add_qa(plan, "Comparator flank angle/lead; hardness; edge condition.")
+
+    opnames = [o.get("op") for o in plan.get("ops", [])]
+    if any(str(name).startswith("heat_treat") for name in opnames):
+        add_direct(plan, "outsourced", True)
+
     return plan
 
 
@@ -357,6 +384,11 @@ def plan_shear_blade(p: Optional[Dict[str, Any]] = None) -> Plan:
     add(plan, "match_grind_set_for_gap_and_parallelism")
     add(plan, "hone_edge")
     add_qa(plan, "Parallelism & edge angle match; hardness.")
+
+    opnames = [o.get("op") for o in plan.get("ops", [])]
+    if any(str(name).startswith("heat_treat") for name in opnames):
+        add_direct(plan, "outsourced", True)
+
     return plan
 
 
