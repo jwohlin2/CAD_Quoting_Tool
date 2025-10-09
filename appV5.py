@@ -5257,6 +5257,256 @@ def parse_pct(x):
     return v/100.0 if v > 1.0 else v
 
 # ---------- Pretty printer for quote results ----------
+
+PROCESS_LABEL_OVERRIDES: dict[str, str] = {
+    "finishing_deburr": "Finishing/Deburr",
+    "saw_waterjet": "Saw/Waterjet",
+}
+
+PREFERRED_PROCESS_BUCKET_ORDER: tuple[str, ...] = (
+    "milling",
+    "drilling",
+    "counterbore",
+    "countersink",
+    "tapping",
+    "grinding",
+    "finishing_deburr",
+    "saw_waterjet",
+    "inspection",
+)
+
+
+def _normalize_bucket_key(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_")
+
+
+def _canonical_bucket_key(name: str) -> str:
+    return _normalize_bucket_key(name)
+
+
+def _process_label(key: str | None) -> str:
+    text = str(key or "").replace("_", " ").strip()
+    return text.title() if text else ""
+
+
+def _display_bucket_label(
+    canon_key: str,
+    label_overrides: Mapping[str, str] | None = None,
+) -> str:
+    overrides = {str(k): str(v) for k, v in (label_overrides or {}).items()}
+    if canon_key in overrides:
+        return overrides[canon_key]
+    return _process_label(canon_key)
+
+
+def _format_planner_bucket_line(
+    canon_key: str,
+    amount: float,
+    meta: Mapping[str, Any] | None,
+    *,
+    planner_bucket_display_map: Mapping[str, Mapping[str, Any]] | None = None,
+    label_overrides: Mapping[str, str] | None = None,
+    currency_formatter: Callable[[float], str] | None = None,
+) -> tuple[str | None, float, float, float]:
+    if not planner_bucket_display_map:
+        return (None, amount, 0.0, 0.0)
+    info = planner_bucket_display_map.get(canon_key)
+    if not isinstance(info, Mapping):
+        return (None, amount, 0.0, 0.0)
+
+    try:
+        minutes_val = float(info.get("minutes", 0.0) or 0.0)
+    except Exception:
+        minutes_val = 0.0
+
+    hr_val = 0.0
+    if isinstance(meta, Mapping):
+        try:
+            hr_val = float(meta.get("hr", 0.0) or 0.0)
+        except Exception:
+            hr_val = 0.0
+    if hr_val <= 0 and minutes_val > 0:
+        hr_val = minutes_val / 60.0
+
+    total_cost = amount
+    for key_option in ("total_cost", "total$", "total"):
+        if key_option in info:
+            try:
+                candidate = float(info.get(key_option) or 0.0)
+            except Exception:
+                continue
+            if candidate:
+                total_cost = candidate
+                break
+
+    rate_val = 0.0
+    if isinstance(meta, Mapping):
+        try:
+            rate_val = float(meta.get("rate", 0.0) or 0.0)
+        except Exception:
+            rate_val = 0.0
+    if rate_val <= 0 and hr_val > 0 and total_cost > 0:
+        rate_val = total_cost / hr_val
+
+    if currency_formatter is None:
+        currency_formatter = lambda x: f"${float(x):,.2f}"  # pragma: no cover
+
+    hours_text = f"{max(hr_val, 0.0):.2f} hr"
+    if hr_val <= 0:
+        hours_text = "0.00 hr"
+    if rate_val > 0:
+        rate_text = f"{currency_formatter(rate_val)}/hr"
+    else:
+        rate_text = "—"
+
+    display_override = (
+        f"{_display_bucket_label(canon_key, label_overrides)}: {hours_text} × {rate_text} →"
+    )
+    return (display_override, float(total_cost), hr_val, rate_val)
+
+
+def _extract_bucket_map(source: Mapping[str, Any] | None) -> dict[str, dict[str, Any]]:
+    bucket_map: dict[str, dict[str, Any]] = {}
+    if not isinstance(source, Mapping):
+        return bucket_map
+    struct: Mapping[str, Any] = source
+    buckets_obj = source.get("buckets") if isinstance(source, Mapping) else None
+    if isinstance(buckets_obj, Mapping):
+        struct = buckets_obj
+    for raw_key, raw_value in struct.items():
+        canon = _canonical_bucket_key(raw_key)
+        if not canon:
+            continue
+        bucket_map[canon] = raw_value if isinstance(raw_value, Mapping) else {}
+    return bucket_map
+
+
+@dataclass(frozen=True)
+class ProcessDisplayEntry:
+    process_key: str
+    label: str
+    amount: float
+    detail_bits: tuple[str, ...]
+    display_override: str | None = None
+
+
+def _iter_ordered_process_entries(
+    process_costs: Mapping[str, Any] | None,
+    *,
+    process_meta: Mapping[str, Any] | None,
+    applied_process: Mapping[str, Any] | None,
+    show_zeros: bool,
+    planner_bucket_display_map: Mapping[str, Mapping[str, Any]] | None,
+    label_overrides: Mapping[str, str] | None,
+    currency_formatter: Callable[[float], str],
+) -> Iterable[ProcessDisplayEntry]:
+    costs = list((process_costs or {}).items())
+    seen_keys: set[str] = set()
+    ordered_items: list[tuple[str, Any]] = []
+
+    for bucket in PREFERRED_PROCESS_BUCKET_ORDER:
+        for key, value in costs:
+            if _normalize_bucket_key(key) != bucket:
+                continue
+            include = False
+            try:
+                include = (float(value) > 0) or show_zeros
+            except Exception:
+                include = show_zeros
+            if not include:
+                continue
+            ordered_items.append((key, value))
+            seen_keys.add(key)
+
+    remaining_items: list[tuple[str, Any]] = []
+    for key, value in costs:
+        if key in seen_keys:
+            continue
+        include = False
+        try:
+            include = (float(value) > 0) or show_zeros
+        except Exception:
+            include = show_zeros
+        if include:
+            remaining_items.append((key, value))
+
+    remaining_items.sort(key=lambda kv: _normalize_bucket_key(kv[0]))
+    ordered_items.extend(remaining_items)
+
+    meta_lookup: dict[str, Mapping[str, Any]] = {}
+    if isinstance(process_meta, Mapping):
+        meta_lookup = {str(k).lower(): v if isinstance(v, Mapping) else {} for k, v in process_meta.items()}
+
+    applied_lookup: dict[str, Mapping[str, Any]] = {}
+    if isinstance(applied_process, Mapping):
+        applied_lookup = {str(k).lower(): v if isinstance(v, Mapping) else {} for k, v in applied_process.items()}
+
+    for key, raw_value in ordered_items:
+        canon_key = _canonical_bucket_key(key)
+        meta_key = str(key).lower()
+        meta = meta_lookup.get(meta_key, {})
+
+        try:
+            value_float = float(raw_value or 0.0)
+        except Exception:
+            value_float = 0.0
+
+        try:
+            hr_val = float(meta.get("hr", 0.0) or 0.0)
+        except Exception:
+            hr_val = 0.0
+        try:
+            rate_val = float(meta.get("rate", 0.0) or 0.0)
+        except Exception:
+            rate_val = 0.0
+        try:
+            extra_val = float(meta.get("base_extra", 0.0) or 0.0)
+        except Exception:
+            extra_val = 0.0
+
+        display_override, amount_override, display_hr, display_rate = _format_planner_bucket_line(
+            canon_key,
+            value_float,
+            meta,
+            planner_bucket_display_map=planner_bucket_display_map,
+            label_overrides=label_overrides,
+            currency_formatter=currency_formatter,
+        )
+        use_display = display_override is not None
+        label = (
+            _display_bucket_label(canon_key, label_overrides)
+            if use_display
+            else _process_label(key)
+        )
+
+        detail_bits: list[str] = []
+        if not use_display and hr_val > 0:
+            detail_bits.append(f"{hr_val:.2f} hr @ {currency_formatter(rate_val)}/hr")
+
+        rate_for_extra = rate_val if rate_val > 0 else display_rate
+        if abs(extra_val) > 1e-6:
+            if (not use_display and hr_val <= 1e-6 and rate_for_extra > 0) or (
+                use_display and display_hr <= 1e-6 and rate_for_extra > 0
+            ):
+                extra_hours = extra_val / rate_for_extra
+                detail_bits.append(f"{extra_hours:.2f} hr @ {currency_formatter(rate_for_extra)}/hr")
+
+        notes_entry = applied_lookup.get(meta_key, {})
+        proc_notes = notes_entry.get("notes") if isinstance(notes_entry, Mapping) else None
+        if proc_notes:
+            detail_bits.append("LLM: " + ", ".join(proc_notes))
+
+        amount_to_use = amount_override if use_display else value_float
+
+        yield ProcessDisplayEntry(
+            process_key=str(key),
+            label=label,
+            amount=amount_to_use,
+            detail_bits=tuple(detail_bits),
+            display_override=display_override,
+        )
+
+
 def render_quote(
     result: dict,
     currency: str = "$",
@@ -5504,10 +5754,6 @@ def render_quote(
             _ensure_total_separator(len(right))
         pad = max(1, page_width - len(left) - len(right))
         lines.append(f"{left}{' ' * pad}{right}")
-
-    def _process_label(key: str | None) -> str:
-        text = str(key or "").replace("_", " ").strip()
-        return text.title() if text else ""
 
     extra_detail_pattern = re.compile(r"^includes\b.*extras\b", re.IGNORECASE)
 
@@ -5989,7 +6235,7 @@ def render_quote(
             except Exception:
                 final_hr = 0.0
             final_cost = process_costs_canon.get(bucket_key, plan_total)
-            label = _display_bucket_label(bucket_key)
+            label = _display_bucket_label(bucket_key, label_overrides)
             summary_bits: list[str] = []
             if plan_hr > 0:
                 summary_bits.append(f"{plan_hr:.2f} hr plan")
@@ -6549,6 +6795,15 @@ def render_quote(
             if planner_bucket_display_map or amount_for_display < 1.0:
                 continue
 
+    for entry in _iter_ordered_process_entries(
+        process_costs,
+        process_meta=process_meta,
+        applied_process=applied_process,
+        show_zeros=show_zeros,
+        planner_bucket_display_map=planner_bucket_display_map,
+        label_overrides=label_overrides,
+        currency_formatter=_m,
+    ):
         _add_labor_cost_line(
             label,
             amount_override if use_display else float(value),
@@ -12859,7 +13114,17 @@ def compute_quote_from_df(df: pd.DataFrame,
         if proc_notes:
             detail_bits.append("LLM: " + ", ".join(proc_notes))
 
-        _merge_labor_detail(label, value, detail_bits)
+    for entry in _iter_ordered_process_entries(
+        process_costs,
+        process_meta=process_meta,
+        applied_process=applied_process,
+        show_zeros=False,
+        planner_bucket_display_map=planner_bucket_display_map_breakdown,
+        label_overrides=PROCESS_LABEL_OVERRIDES,
+        currency_formatter=lambda val: f"${float(val):,.2f}",
+    ):
+        label = entry.display_override or entry.label
+        _merge_labor_detail(label, entry.amount, list(entry.detail_bits))
 
     programming_bits: list[str] = []
     prog_hr_detail = float(programming_detail.get("prog_hr", 0.0) or 0.0)
