@@ -5547,8 +5547,6 @@ def render_quote(
 
             detail_lines.extend(weight_lines)
             if scrap_credit_lines:
-                if detail_lines and detail_lines[-1] != "":
-                    detail_lines.append("")
                 detail_lines.extend(scrap_credit_lines)
 
             if upg or unit_price_kg or unit_price_lb or show_zeros:
@@ -5581,7 +5579,13 @@ def render_quote(
             if minchg or show_zeros:
                 price_lines.append(f"  Supplier Min Charge: {_m(minchg or 0)}")
             if price_lines:
-                if detail_lines and detail_lines[-1] != "":
+                last_line = detail_lines[-1] if detail_lines else ""
+                if (
+                    detail_lines
+                    and last_line != ""
+                    and not last_line.lstrip().startswith("Scrap Credit:")
+                    and not last_line.lstrip().startswith("based on ")
+                ):
                     detail_lines.append("")
                 detail_lines.extend(price_lines)
             stock_L = _fmt_dim(ui_vars.get("Plate Length (in)"))
