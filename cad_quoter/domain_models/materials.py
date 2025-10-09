@@ -15,6 +15,8 @@ def normalize_material_key(value: str) -> str:
 
 MATERIAL_DROPDOWN_OPTIONS = [
     "Aluminum",
+    "Aluminum 5083",
+    "Aluminum MIC6",
     "Berylium Copper",
     "Bismuth",
     "Brass",
@@ -33,10 +35,14 @@ MATERIAL_DROPDOWN_OPTIONS = [
     "Phosphorus",
     "Silver",
     "Stainless Steel",
+    "Stainless Steel 303",
     "Steel",
+    "Steel Low-Carbon",
+    "Steel Mild",
     "Tin",
     "Titanium",
     "Tool Steel",
+    "Tool Steel A2",
     "Tungsten",
     "Other (enter custom price)",
 ]
@@ -46,6 +52,8 @@ DEFAULT_MATERIAL_KEY = normalize_material_key(DEFAULT_MATERIAL_DISPLAY)
 
 _MATERIAL_ADDITIONAL_KEYWORDS: Dict[str, Set[str]] = {
     "Aluminum": {"aluminium"},
+    "Aluminum 5083": {"5083", "al 5083"},
+    "Aluminum MIC6": {"mic6", "mic-6"},
     "Berylium Copper": {"beryllium copper", "c172", "cube"},
     "Brass": {"c360", "c260"},
     "Copper": {"cu"},
@@ -54,9 +62,13 @@ _MATERIAL_ADDITIONAL_KEYWORDS: Dict[str, Set[str]] = {
     "Nickel Silver": {"german silver"},
     "Phosphor Bronze": {"phosphorbronze"},
     "Stainless Steel": {"stainless"},
+    "Stainless Steel 303": {"ss303", "303"},
     "Steel": {"carbon steel"},
+    "Steel Low-Carbon": {"low carbon", "low carbon steel"},
+    "Steel Mild": {"mild steel"},
     "Titanium": {"ti", "ti6al4v"},
-    "Tool Steel": {"h13", "o1", "a2", "d2"},
+    "Tool Steel": {"h13", "o1", "d2"},
+    "Tool Steel A2": {"a2", "a2 tool steel"},
 }
 
 MATERIAL_KEYWORDS: Dict[str, Set[str]] = {}
@@ -78,6 +90,8 @@ MATERIAL_OTHER_KEY = normalize_material_key(MATERIAL_DROPDOWN_OPTIONS[-1])
 
 _MATERIAL_DENSITY_G_CC_BY_DISPLAY: Dict[str, float | None] = {
     "Aluminum": 2.70,
+    "Aluminum 5083": 2.66,
+    "Aluminum MIC6": 2.70,
     "Berylium Copper": 8.25,
     "Bismuth": 9.78,
     "Brass": 8.40,
@@ -96,10 +110,14 @@ _MATERIAL_DENSITY_G_CC_BY_DISPLAY: Dict[str, float | None] = {
     "Phosphorus": 1.82,
     "Silver": 10.49,
     "Stainless Steel": 7.90,
+    "Stainless Steel 303": 8.00,
     "Steel": 7.85,
+    "Steel Low-Carbon": 7.85,
+    "Steel Mild": 7.87,
     "Tin": 7.31,
     "Titanium": 4.43,
     "Tool Steel": 7.80,
+    "Tool Steel A2": 7.86,
     "Tungsten": 19.30,
     "Other (enter custom price)": None,
 }
