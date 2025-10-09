@@ -5206,7 +5206,12 @@ def render_quote(
     nre_detail   = breakdown.get("nre_detail", {}) or {}
     nre          = breakdown.get("nre", {}) or {}
     material     = breakdown.get("material", {}) or {}
-    process_costs= breakdown.get("process_costs", {}) or {}
+    process_costs_raw = breakdown.get("process_costs", {}) or {}
+    process_costs = (
+        dict(process_costs_raw)
+        if isinstance(process_costs_raw, Mapping)
+        else dict(process_costs_raw or {})
+    )
     pass_through = breakdown.get("pass_through", {}) or {}
     applied_pcts = breakdown.get("applied_pcts", {}) or {}
     process_meta = {str(k).lower(): (v or {}) for k, v in (breakdown.get("process_meta", {}) or {}).items()}
@@ -5457,6 +5462,11 @@ def render_quote(
     pricing_source_value = breakdown.get("pricing_source")
     if pricing_source_value:
         lines.append(f"Pricing Source: {pricing_source_value}")
+    pricing_source_lower = (
+        str(pricing_source_value).strip().lower()
+        if pricing_source_value is not None
+        else ""
+    )
     if red_flags:
         lines.append("")
         lines.append("Red Flags")
@@ -5541,6 +5551,89 @@ def render_quote(
                     continue
         return 0.0
 
+    def _extract_bucket_map(source: Mapping[str, Any] | None) -> dict[str, dict[str, Any]]:
+        bucket_map: dict[str, dict[str, Any]] = {}
+        if not isinstance(source, Mapping):
+            return bucket_map
+        struct: Mapping[str, Any] = source
+        buckets_obj = source.get("buckets") if isinstance(source, Mapping) else None
+        if isinstance(buckets_obj, Mapping):
+            struct = buckets_obj
+        for raw_key, raw_value in struct.items():
+            canon = _canonical_bucket_key(raw_key)
+            if not canon:
+                continue
+            bucket_map[canon] = raw_value if isinstance(raw_value, Mapping) else {}
+        return bucket_map
+
+    process_plan_breakdown_raw = breakdown.get("process_plan")
+    process_plan_breakdown: Mapping[str, Any] | None
+    if isinstance(process_plan_breakdown_raw, Mapping):
+        process_plan_breakdown = process_plan_breakdown_raw
+    else:
+        process_plan_breakdown = None
+
+    planner_bucket_from_plan = _extract_bucket_map(
+        process_plan_breakdown.get("bucket_view") if isinstance(process_plan_breakdown, Mapping) else None
+    )
+
+    use_planner_bucket_display = bool(planner_bucket_from_plan) and pricing_source_lower == "planner"
+    planner_bucket_display_map: dict[str, dict[str, Any]] = (
+        dict(planner_bucket_from_plan) if use_planner_bucket_display else {}
+    )
+
+    if use_planner_bucket_display:
+        existing_canon_keys = {_canonical_bucket_key(key) for key in list(process_costs.keys())}
+        bucket_canon_keys = set(planner_bucket_from_plan.keys())
+        has_only_machine_labor = existing_canon_keys and existing_canon_keys <= {"machine", "labor"}
+        if has_only_machine_labor or not bucket_canon_keys.issubset(existing_canon_keys):
+            for key in list(process_costs.keys()):
+                if _canonical_bucket_key(key) in {"machine", "labor"}:
+                    process_costs.pop(key, None)
+            for canon_key, info in planner_bucket_from_plan.items():
+                total_cost = 0.0
+                for key_option in ("total_cost", "total$", "total"):
+                    if key_option in info:
+                        try:
+                            total_cost = float(info.get(key_option) or 0.0)
+                        except Exception:
+                            continue
+                        if total_cost:
+                            break
+                if total_cost <= 0:
+                    try:
+                        total_cost = float(process_costs.get(canon_key, 0.0) or 0.0)
+                    except Exception:
+                        total_cost = 0.0
+                process_costs[canon_key] = float(total_cost)
+                existing_meta = process_meta.get(canon_key) if isinstance(process_meta, dict) else None
+                meta_update = dict(existing_meta) if isinstance(existing_meta, Mapping) else {}
+                try:
+                    minutes_val = float(info.get("minutes", meta_update.get("minutes", 0.0)) or 0.0)
+                except Exception:
+                    minutes_val = float(meta_update.get("minutes", 0.0) or 0.0)
+                if minutes_val > 0:
+                    meta_update["minutes"] = round(minutes_val, 1)
+                    meta_update["hr"] = round(minutes_val / 60.0, 3)
+                elif "hr" not in meta_update:
+                    try:
+                        meta_update["hr"] = float(meta_update.get("hr", 0.0) or 0.0)
+                    except Exception:
+                        meta_update["hr"] = 0.0
+                try:
+                    hr_for_rate = float(meta_update.get("hr", 0.0) or 0.0)
+                except Exception:
+                    hr_for_rate = 0.0
+                if hr_for_rate > 0 and total_cost > 0:
+                    meta_update["rate"] = round(total_cost / hr_for_rate, 2)
+                else:
+                    try:
+                        meta_update["rate"] = float(meta_update.get("rate", 0.0) or 0.0)
+                    except Exception:
+                        meta_update["rate"] = 0.0
+                meta_update["cost"] = round(total_cost, 2)
+                process_meta[canon_key] = meta_update
+
     bucket_rollup_map: dict[str, dict[str, Any]] = {}
     raw_rollup = breakdown.get("planner_bucket_rollup")
     if isinstance(raw_rollup, Mapping):
@@ -5548,6 +5641,8 @@ def render_quote(
             canon = _canonical_bucket_key(key)
             if canon:
                 bucket_rollup_map[canon] = value if isinstance(value, Mapping) else {}
+    if not bucket_rollup_map and planner_bucket_from_plan:
+        bucket_rollup_map = dict(planner_bucket_from_plan)
     if not bucket_rollup_map:
         bucket_struct = breakdown.get("bucket_view")
         if isinstance(bucket_struct, Mapping):
@@ -5601,10 +5696,62 @@ def render_quote(
         "saw_waterjet": "Saw/Waterjet",
     }
 
+    label_overrides_proc = dict(label_overrides)
+
     def _display_bucket_label(canon_key: str) -> str:
         if canon_key in label_overrides:
             return label_overrides[canon_key]
         return _process_label(canon_key)
+
+    def _format_planner_bucket_line(
+        canon_key: str,
+        amount: float,
+        meta: Mapping[str, Any] | None,
+    ) -> tuple[str | None, float, float, float]:
+        if not planner_bucket_display_map:
+            return (None, amount, 0.0, 0.0)
+        info = planner_bucket_display_map.get(canon_key)
+        if not isinstance(info, Mapping):
+            return (None, amount, 0.0, 0.0)
+        try:
+            minutes_val = float(info.get("minutes", 0.0) or 0.0)
+        except Exception:
+            minutes_val = 0.0
+        hr_val = 0.0
+        if isinstance(meta, Mapping):
+            try:
+                hr_val = float(meta.get("hr", 0.0) or 0.0)
+            except Exception:
+                hr_val = 0.0
+        if hr_val <= 0 and minutes_val > 0:
+            hr_val = minutes_val / 60.0
+        total_cost = amount
+        for key_option in ("total_cost", "total$", "total"):
+            if key_option in info:
+                try:
+                    candidate = float(info.get(key_option) or 0.0)
+                except Exception:
+                    continue
+                if candidate:
+                    total_cost = candidate
+                    break
+        rate_val = 0.0
+        if isinstance(meta, Mapping):
+            try:
+                rate_val = float(meta.get("rate", 0.0) or 0.0)
+            except Exception:
+                rate_val = 0.0
+        if rate_val <= 0 and hr_val > 0 and total_cost > 0:
+            rate_val = total_cost / hr_val
+        hours_text = f"{max(hr_val, 0.0):.2f} hr"
+        if hr_val <= 0:
+            hours_text = "0.00 hr"
+        if rate_val > 0:
+            rate_text = f"{_m(rate_val)}/hr"
+        else:
+            rate_text = "—"
+        display_override = f"{_display_bucket_label(canon_key)}: {hours_text} × {rate_text} →"
+        return (display_override, float(total_cost), hr_val, rate_val)
 
     bucket_order = [
         "milling",
@@ -6051,11 +6198,13 @@ def render_quote(
         detail_bits: list[str] | None = None,
         fallback_detail: str | None = None,
         force: bool = False,
+        display_override: str | None = None,
     ) -> None:
         nonlocal proc_total
-        if not force and not ((amount > 0) or show_zeros):
+        amount_val = float(amount or 0.0)
+        if not force and not ((amount_val > 0) or show_zeros):
             return
-        row(label, float(amount), indent="  ")
+        row(display_override or label, amount_val, indent="  ")
         existing_detail = labor_cost_details.get(label)
         merged_detail = _merge_detail(existing_detail, detail_bits or [])
         detail_to_write: str | None
@@ -6072,7 +6221,7 @@ def render_quote(
             write_detail(detail_to_write, indent="    ")
         elif process_key is not None:
             add_process_notes(process_key, indent="    ")
-        proc_total += float(amount or 0.0)
+        proc_total += amount_val
 
     def _normalize_bucket_key(name: str) -> str:
         return re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_")
@@ -6110,8 +6259,9 @@ def render_quote(
     ordered_process_items.extend(remaining_items)
 
     for key, value in ordered_process_items:
-        label = _process_label(key)
-        meta = process_meta.get(str(key).lower(), {})
+        canon_key = _canonical_bucket_key(key)
+        meta_key = str(key).lower()
+        meta = process_meta.get(meta_key, {}) if isinstance(process_meta, dict) else {}
         detail_bits: list[str] = []
         try:
             hr_val = float(meta.get("hr", 0.0) or 0.0)
@@ -6125,22 +6275,36 @@ def render_quote(
             extra_val = float(meta.get("base_extra", 0.0) or 0.0)
         except Exception:
             extra_val = 0.0
-        if hr_val > 0:
+
+        display_override, amount_override, display_hr, display_rate = _format_planner_bucket_line(
+            canon_key,
+            float(value),
+            meta if isinstance(meta, Mapping) else {},
+        )
+        use_display = display_override is not None
+        label = _display_bucket_label(canon_key) if use_display else _process_label(key)
+
+        if not use_display and hr_val > 0:
             detail_bits.append(f"{hr_val:.2f} hr @ ${rate_val:,.2f}/hr")
-        if abs(extra_val) > 1e-6 and hr_val <= 1e-6 and rate_val > 0:
-            extra_hours = extra_val / rate_val
-            detail_bits.append(
-                f"{extra_hours:.2f} hr @ ${rate_val:,.2f}/hr"
-            )
-        proc_notes = applied_process.get(str(key).lower(), {}).get("notes")
+
+        rate_for_extra = rate_val if rate_val > 0 else display_rate
+        if abs(extra_val) > 1e-6:
+            if (not use_display and hr_val <= 1e-6 and rate_for_extra > 0) or (
+                use_display and display_hr <= 1e-6 and rate_for_extra > 0
+            ):
+                extra_hours = extra_val / rate_for_extra
+                detail_bits.append(f"{extra_hours:.2f} hr @ ${rate_for_extra:,.2f}/hr")
+
+        proc_notes = applied_process.get(meta_key, {}).get("notes")
         if proc_notes:
             detail_bits.append("LLM: " + ", ".join(proc_notes))
 
         _add_labor_cost_line(
             label,
-            float(value),
+            amount_override if use_display else float(value),
             process_key=str(key),
             detail_bits=detail_bits,
+            display_override=display_override,
         )
 
     remaining_costs: dict[str, Any] = dict(process_costs or {})
@@ -6173,11 +6337,24 @@ def render_quote(
             extra_val = float(meta.get("base_extra", 0.0) or 0.0)
         except Exception:
             extra_val = 0.0
-        if hr_val > 0:
+        display_override, amount_override, display_hr, display_rate = _format_planner_bucket_line(
+            canon,
+            amount,
+            meta if isinstance(meta, Mapping) else {},
+        )
+        use_display = display_override is not None
+
+        if not use_display and hr_val > 0:
             detail_bits.append(f"{hr_val:.2f} hr @ ${rate_val:,.2f}/hr")
-        if abs(extra_val) > 1e-6 and hr_val <= 1e-6 and rate_val > 0:
-            extra_hours = extra_val / rate_val
-            detail_bits.append(f"{extra_hours:.2f} hr @ ${rate_val:,.2f}/hr")
+
+        rate_for_extra = rate_val if rate_val > 0 else display_rate
+        if abs(extra_val) > 1e-6:
+            if (not use_display and hr_val <= 1e-6 and rate_for_extra > 0) or (
+                use_display and display_hr <= 1e-6 and rate_for_extra > 0
+            ):
+                extra_hours = extra_val / rate_for_extra
+                detail_bits.append(f"{extra_hours:.2f} hr @ ${rate_for_extra:,.2f}/hr")
+
         proc_notes = applied_process.get(canon, {}).get("notes")
         if proc_notes:
             detail_bits.append("LLM: " + ", ".join(proc_notes))
@@ -6187,11 +6364,15 @@ def render_quote(
         else:
             label = _process_label(canon if canonical else actual_key)
 
+        if use_display:
+            label = _display_bucket_label(canon)
+
         _add_labor_cost_line(
             label,
-            amount,
+            amount_override if use_display else amount,
             process_key=canon,
             detail_bits=detail_bits,
+            display_override=display_override,
         )
         remaining_costs.pop(actual_key, None)
 
