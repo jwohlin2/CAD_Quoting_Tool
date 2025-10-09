@@ -5733,40 +5733,74 @@ def render_quote(
             add_process_notes(process_key, indent="    ")
         proc_total += float(amount or 0.0)
 
-    for key, value in sorted((process_costs or {}).items(), key=lambda kv: kv[1], reverse=True):
-        if (value > 0) or show_zeros:
-            label = _process_label(key)
-            meta = process_meta.get(str(key).lower(), {})
-            detail_bits: list[str] = []
-            try:
-                hr_val = float(meta.get("hr", 0.0) or 0.0)
-            except Exception:
-                hr_val = 0.0
-            try:
-                rate_val = float(meta.get("rate", 0.0) or 0.0)
-            except Exception:
-                rate_val = 0.0
-            try:
-                extra_val = float(meta.get("base_extra", 0.0) or 0.0)
-            except Exception:
-                extra_val = 0.0
-            if hr_val > 0:
-                detail_bits.append(f"{hr_val:.2f} hr @ ${rate_val:,.2f}/hr")
-            if abs(extra_val) > 1e-6 and hr_val <= 1e-6 and rate_val > 0:
-                extra_hours = extra_val / rate_val
-                detail_bits.append(
-                    f"{extra_hours:.2f} hr @ ${rate_val:,.2f}/hr"
-                )
-            proc_notes = applied_process.get(str(key).lower(), {}).get("notes")
-            if proc_notes:
-                detail_bits.append("LLM: " + ", ".join(proc_notes))
+    def _normalize_bucket_key(name: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_")
 
-            _add_labor_cost_line(
-                label,
-                float(value),
-                process_key=str(key),
-                detail_bits=detail_bits,
+    preferred_bucket_order = [
+        "milling",
+        "drilling",
+        "counterbore",
+        "countersink",
+        "tapping",
+        "grinding",
+        "finishing_deburr",
+        "saw_waterjet",
+        "inspection",
+    ]
+
+    ordered_process_items: list[tuple[str, float]] = []
+    seen_keys: set[str] = set()
+
+    for bucket in preferred_bucket_order:
+        for key, value in (process_costs or {}).items():
+            if _normalize_bucket_key(key) != bucket:
+                continue
+            if not ((value > 0) or show_zeros):
+                continue
+            ordered_process_items.append((key, value))
+            seen_keys.add(key)
+
+    remaining_items = [
+        (key, value)
+        for key, value in (process_costs or {}).items()
+        if key not in seen_keys and ((value > 0) or show_zeros)
+    ]
+    remaining_items.sort(key=lambda kv: _normalize_bucket_key(kv[0]))
+    ordered_process_items.extend(remaining_items)
+
+    for key, value in ordered_process_items:
+        label = _process_label(key)
+        meta = process_meta.get(str(key).lower(), {})
+        detail_bits: list[str] = []
+        try:
+            hr_val = float(meta.get("hr", 0.0) or 0.0)
+        except Exception:
+            hr_val = 0.0
+        try:
+            rate_val = float(meta.get("rate", 0.0) or 0.0)
+        except Exception:
+            rate_val = 0.0
+        try:
+            extra_val = float(meta.get("base_extra", 0.0) or 0.0)
+        except Exception:
+            extra_val = 0.0
+        if hr_val > 0:
+            detail_bits.append(f"{hr_val:.2f} hr @ ${rate_val:,.2f}/hr")
+        if abs(extra_val) > 1e-6 and hr_val <= 1e-6 and rate_val > 0:
+            extra_hours = extra_val / rate_val
+            detail_bits.append(
+                f"{extra_hours:.2f} hr @ ${rate_val:,.2f}/hr"
             )
+        proc_notes = applied_process.get(str(key).lower(), {}).get("notes")
+        if proc_notes:
+            detail_bits.append("LLM: " + ", ".join(proc_notes))
+
+        _add_labor_cost_line(
+            label,
+            float(value),
+            process_key=str(key),
+            detail_bits=detail_bits,
+        )
 
     programming_per_part_cost = labor_cost_totals.get("Programming (amortized)")
     if programming_per_part_cost is None:
@@ -10915,7 +10949,9 @@ def compute_quote_from_df(df: pd.DataFrame,
         except Exception:
             pass_through[label] = 0.0
 
-    process_hours_final = {k: float(process_meta.get(k, {}).get("hr", 0.0)) for k in process_meta}
+    process_hours_final = {
+        k: float(process_meta.get(k, {}).get("hr", 0.0)) for k in process_meta
+    }
 
     if pricing_source != "planner":
         hole_count_for_guard = 0
@@ -10934,28 +10970,27 @@ def compute_quote_from_df(df: pd.DataFrame,
             if not ok:
                 floor_hr = _drilling_floor_hours(hole_count_for_guard)
                 new_hr = max(drill_hr_after_overrides, floor_hr)
-                drill_meta = process_meta.get("drilling")
-                if drill_meta:
-                    rate = float(drill_meta.get("rate", 0.0))
-                    base_extra = float(drill_meta.get("base_extra", 0.0))
-                    old_cost = float(process_costs.get("drilling", 0.0))
-                    entry = applied_process.setdefault(
-                        "drilling",
-                        {
-                            "old_hr": float(drill_meta.get("hr", 0.0)),
-                            "old_cost": old_cost,
-                            "notes": [],
-                        },
-                    )
-                    entry.setdefault("notes", []).append(f"Raised to floor {floor_hr:.2f} h")
-                    drill_meta["hr"] = new_hr
-                    process_costs["drilling"] = round(new_hr * rate + base_extra, 2)
+                drill_meta = process_meta.setdefault("drilling", {})
+                rate = float(drill_meta.get("rate", 0.0) or 0.0)
+                base_extra = float(drill_meta.get("base_extra", 0.0) or 0.0)
+                old_hr = float(drill_meta.get("hr", 0.0) or 0.0)
+                old_cost = float(process_costs.get("drilling", 0.0) or 0.0)
+                entry = applied_process.setdefault(
+                    "drilling",
+                    {
+                        "old_hr": old_hr,
+                        "old_cost": old_cost,
+                        "notes": [],
+                    },
+                )
+                entry.setdefault("notes", []).append(f"Raised to floor {floor_hr:.2f} h")
+                drill_meta["hr"] = new_hr
+                process_costs["drilling"] = round(new_hr * rate + base_extra, 2)
                 process_hours_final["drilling"] = new_hr
                 llm_notes.append(f"Raised drilling to floor: {why}")
-                process_hours_final = {
-                    k: float(process_meta.get(k, {}).get("hr", 0.0)) for k in process_meta
-                }
-
+        process_hours_final = {
+            k: float(process_meta.get(k, {}).get("hr", 0.0)) for k in process_meta
+        }
         baseline_total_hours = sum(
             float(process_hours_baseline.get(k, 0.0)) for k in process_hours_baseline
         )
