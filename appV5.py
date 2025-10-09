@@ -7461,7 +7461,12 @@ def render_quote(
                     minutes_val = 0.0
                 if minutes_val > 0:
                     hr_val = minutes_val / 60.0
-            _record_hour_entry(_process_label(key), hr_val)
+            canon_key = _canonical_bucket_key(key)
+            if canon_key:
+                display_label = _display_bucket_label(canon_key)
+            else:
+                display_label = _process_label(key)
+            _record_hour_entry(display_label, hr_val)
     else:
         for key, meta in sorted((process_meta or {}).items()):
             meta = meta or {}
@@ -7469,7 +7474,12 @@ def render_quote(
                 hr_val = float(meta.get("hr", 0.0) or 0.0)
             except Exception:
                 hr_val = 0.0
-            _record_hour_entry(_process_label(key), hr_val)
+            canon_key = _canonical_bucket_key(key)
+            if canon_key:
+                display_label = _display_bucket_label(canon_key)
+            else:
+                display_label = _process_label(key)
+            _record_hour_entry(display_label, hr_val)
 
         _record_hour_entry("Programming", programming_hours)
         if programming_is_amortized and qty_for_hours > 0:
@@ -7487,12 +7497,6 @@ def render_quote(
                 per_part_fixture_hr,
                 include_in_total=False,
             )
-
-    if total_hours_dirty:
-        total_hours = sum(
-            value for _, value, include in hour_summary_entries if include
-        )
-        total_hours_dirty = False
 
     if hour_summary_entries:
         lines.append("")
