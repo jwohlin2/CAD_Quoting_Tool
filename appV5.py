@@ -1121,6 +1121,50 @@ def _as_float_or_none(value: Any) -> float | None:
         return None
     return None
 
+
+def _apply_deep_drill_speed_feed_adjustments(row: Any) -> Any:
+    """Return a copy of ``row`` with deep-drill speed/feed factors applied."""
+
+    if not isinstance(row, Mapping):
+        return row
+
+    adjusted = dict(row)
+
+    def _scale(keys: Sequence[str], factor: float) -> None:
+        for key in keys:
+            if key not in adjusted:
+                continue
+            value = _as_float_or_none(adjusted.get(key))
+            if value is None or not math.isfinite(value):
+                continue
+            adjusted[key] = float(value) * factor
+
+    _scale(
+        (
+            "sfm",
+            "sfm_start",
+            "sfm_mid",
+            "sfm_end",
+            "sfm_min",
+            "sfm_max",
+        ),
+        DEEP_DRILL_SFM_FACTOR,
+    )
+    _scale(
+        (
+            "feed_ipr",
+            "ipr",
+            "fz",
+            "fz_ipr_0_125in",
+            "fz_ipr_0_25in",
+            "fz_ipr_0_5in",
+            "fz_ipr_1_0in",
+            "fpr",
+        ),
+        DEEP_DRILL_IPR_FACTOR,
+    )
+    return adjusted
+
 def build_suggest_payload(
     geo: dict | None,
     baseline: dict | None,
@@ -9064,6 +9108,10 @@ def _clean_hole_groups(raw: Any) -> list[dict[str, Any]] | None:
 MIN_DRILL_MIN_PER_HOLE = 0.10
 MAX_DRILL_MIN_PER_HOLE = 2.00
 
+DEEP_DRILL_SFM_FACTOR = 0.65
+DEEP_DRILL_IPR_FACTOR = 0.70
+DEEP_DRILL_PECK_PENALTY_MIN_PER_IN = 0.07
+
 
 def _drill_minutes_per_hole_bounds(
     material_group: str | None = None,
@@ -9402,6 +9450,14 @@ def estimate_drilling_hours(
             if not cache_entry:
                 continue
             row, tool_params = cache_entry
+            row_for_calc = row
+            overhead_for_calc = per_hole_overhead
+            if op_name.lower() == "deep_drill":
+                row_for_calc = _apply_deep_drill_speed_feed_adjustments(row_for_calc)
+                overhead_for_calc = replace(
+                    per_hole_overhead,
+                    peck_penalty_min_per_in_depth=DEEP_DRILL_PECK_PENALTY_MIN_PER_IN,
+                )
             geom = _TimeOperationGeometry(
                 diameter_in=float(diameter_in),
                 hole_depth_in=float(depth_in),
@@ -9412,11 +9468,11 @@ def estimate_drilling_hours(
             if debug_lines is not None:
                 debug_payload = {}
             minutes = _estimate_time_min(
-                row,
+                row_for_calc,
                 geom,
                 tool_params,
                 machine_for_cut,
-                per_hole_overhead,
+                overhead_for_calc,
                 material_factor=material_cap_val,
                 debug=debug_payload,
             )
@@ -9526,13 +9582,15 @@ def estimate_drilling_hours(
                             summary["depth_min"] = float(depth_float)
                         if depth_max is None or float(depth_float) > depth_max:
                             summary["depth_max"] = float(depth_float)
-                    peck_rate = _as_float_or_none(per_hole_overhead.peck_penalty_min_per_in_depth)
+                    peck_rate = _as_float_or_none(
+                        overhead_for_calc.peck_penalty_min_per_in_depth
+                    )
                     if depth_float is not None and peck_rate is not None and peck_rate > 0:
                         peck_total = float(peck_rate) * float(depth_float)
                         if math.isfinite(peck_total) and peck_total > 0:
                             summary["peck_sum"] += peck_total * qty_for_debug
                             summary["peck_count"] += qty_for_debug
-                    dwell_val_float = _as_float_or_none(per_hole_overhead.dwell_min)
+                    dwell_val_float = _as_float_or_none(overhead_for_calc.dwell_min)
                     if dwell_val_float is not None and dwell_val_float > 0:
                         summary["dwell_sum"] += float(dwell_val_float) * qty_for_debug
                         summary["dwell_count"] += qty_for_debug
