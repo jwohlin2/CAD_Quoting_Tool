@@ -22,9 +22,9 @@ except ImportError:  # pragma: no cover - legacy path when vendored separately
 # Order matters: the rendered quote should display the buckets in this order.
 BUCKETS: tuple[str, ...] = (
     "Programming",
-    "Programming Amortized",
+    "Programming (amortized)",
     "Fixture Build",
-    "Fixture Build Amortized",
+    "Fixture Build (amortized)",
     "Milling",
     "Drilling",
     "Counterbore",
@@ -218,7 +218,12 @@ def bucketize(
         add("Programming", programming_min, 0.0, labor_cost)
         if qty_int:
             per_min = programming_min / qty_int
-            add("Programming Amortized", per_min, 0.0, programmer_rate * (per_min / 60.0))
+            add(
+                "Programming (amortized)",
+                per_min,
+                0.0,
+                programmer_rate * (per_min / 60.0),
+            )
 
     fixture_rate = (
         _safe_rate_for_role(rates_two_bucket, "FixtureBuilder")
@@ -230,7 +235,12 @@ def bucketize(
         add("Fixture Build", fixture_min, 0.0, labor_cost)
         if qty_int:
             per_min = fixture_min / qty_int
-            add("Fixture Build Amortized", per_min, 0.0, fixture_rate * (per_min / 60.0))
+            add(
+                "Fixture Build (amortized)",
+                per_min,
+                0.0,
+                fixture_rate * (per_min / 60.0),
+            )
 
     hole_features = list(_iter_geom_list(geom.get("drill")))
     tapped_count = int(_as_float(geom.get("tapped_count")))

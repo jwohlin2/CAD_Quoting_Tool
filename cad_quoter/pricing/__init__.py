@@ -17,6 +17,7 @@ from .materials import (
     usdkg_to_usdlb,
 )
 from .metals_api import MetalsAPI
+from .process_cost_renderer import render_process_costs
 from .vendor_csv import VendorCSV
 from .speeds_feeds_selector import (
     load_csv_as_records,
@@ -192,6 +193,7 @@ __all__ = [
     "price_value_to_per_gram",
     "resolve_material_unit_price",
     "usdkg_to_usdlb",
+    "render_process_costs",
     "create_default_registry",
     "load_csv_as_records",
     "pick_speeds_row",
