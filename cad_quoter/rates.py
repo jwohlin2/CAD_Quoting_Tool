@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any
 
 # ---- canonical names used by the planner ----
 MACHINES = [
@@ -84,11 +84,11 @@ PREFERRED_ROLE_FOR_DUPES = {
 }
 
 
-def migrate_flat_to_two_bucket(old: Dict[str, float]) -> Dict[str, Dict[str, float]]:
+def migrate_flat_to_two_bucket(old: dict[str, float]) -> dict[str, dict[str, float]]:
     """Convert flat overrides into ``{"labor": {...}, "machine": {...}}``."""
 
-    labor: Dict[str, float] = {}
-    machine: Dict[str, float] = {}
+    labor: dict[str, float] = {}
+    machine: dict[str, float] = {}
 
     # Resolve programmer rate (handle legacy CAMRate alias)
     for key in LEGACY_PROGRAMMER_RATE_KEYS:
@@ -122,11 +122,11 @@ def migrate_flat_to_two_bucket(old: Dict[str, float]) -> Dict[str, Dict[str, flo
 # ---- helpers for costing layers ----
 
 
-def rate_for_machine(rates: Dict[str, Dict[str, float]], machine: str) -> float:
+def rate_for_machine(rates: dict[str, dict[str, float]], machine: str) -> float:
     return float(rates["machine"][machine])
 
 
-def rate_for_role(rates: Dict[str, Dict[str, float]], role: str) -> float:
+def rate_for_role(rates: dict[str, dict[str, float]], role: str) -> float:
     return float(rates["labor"][role])
 
 
@@ -186,22 +186,22 @@ OP_TO_LABOR = {
 }
 
 
-_ROLE_TO_OLDKEY: Dict[str, str] = {}
+_ROLE_TO_OLDKEY: dict[str, str] = {}
 for role, keys in PREFERRED_ROLE_FOR_DUPES.items():
     if keys:
         _ROLE_TO_OLDKEY[role] = keys[0]
 for old_key, role in OLDKEY_TO_LABOR.items():
     _ROLE_TO_OLDKEY.setdefault(role, old_key)
 
-_MACHINE_TO_OLDKEY: Dict[str, str] = {}
+_MACHINE_TO_OLDKEY: dict[str, str] = {}
 for old_key, machine in OLDKEY_TO_MACHINE.items():
     _MACHINE_TO_OLDKEY.setdefault(machine, old_key)
 
 
-def two_bucket_to_flat(rates: Dict[str, Dict[str, Any]]) -> Dict[str, float]:
+def two_bucket_to_flat(rates: dict[str, dict[str, Any]]) -> dict[str, float]:
     """Best-effort conversion of a two-bucket rate tree back to flat keys."""
 
-    flat: Dict[str, float] = {}
+    flat: dict[str, float] = {}
 
     machine_rates = rates.get("machine", {}) if isinstance(rates, dict) else {}
     if isinstance(machine_rates, dict):

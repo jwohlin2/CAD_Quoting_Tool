@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass, field
 import logging
 from pathlib import Path
-from typing import Any, Mapping, Dict
+from typing import Any, Mapping
 
 from cad_quoter.rates import migrate_flat_to_two_bucket
 
@@ -58,11 +58,11 @@ class AppEnvironment:
         return cls(llm_debug_enabled=debug_enabled, llm_debug_dir=debug_dir)
 
 
-def describe_runtime_environment() -> Dict[str, str]:
+def describe_runtime_environment() -> dict[str, str]:
     """Return a redacted snapshot of runtime configuration for auditors."""
 
     env = AppEnvironment.from_env()
-    info: Dict[str, str] = {
+    info: dict[str, str] = {
         "llm_debug_enabled": str(env.llm_debug_enabled),
         "llm_debug_dir": str(env.llm_debug_dir),
     }
