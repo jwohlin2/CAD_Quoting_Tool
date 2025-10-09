@@ -6717,6 +6717,35 @@ def render_quote(
     def _normalize_bucket_key(name: str) -> str:
         return re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_")
 
+    def _fold_buckets(values: Mapping[str, Any] | None) -> dict[str, float]:
+        if not isinstance(values, Mapping):
+            return {}
+
+        # Preserve the first-seen label for each canonical bucket key while
+        # summing duplicate entries together.
+        folded: dict[str, float] = {}
+        label_map: dict[str, str] = {}
+        order: list[str] = []
+
+        for raw_key, raw_val in values.items():
+            canon_key = _canonical_bucket_key(raw_key)
+            try:
+                numeric_val = float(raw_val or 0.0)
+            except Exception:
+                numeric_val = 0.0
+
+            existing_label = label_map.get(canon_key)
+            if existing_label is None:
+                label_map[canon_key] = raw_key
+                order.append(raw_key)
+                folded[raw_key] = numeric_val
+            else:
+                folded[existing_label] += numeric_val
+
+        return {label: folded[label] for label in order}
+
+    process_costs = _fold_buckets(process_costs)
+
     process_cost_items_all = list((process_costs or {}).items())
     display_process_cost_items = [
         (key, value)
@@ -6748,8 +6777,6 @@ def render_quote(
 
     ordered_process_items: list[tuple[str, float]] = []
     seen_keys: set[str] = set()
-
-    process_costs = _fold_buckets(process_costs)
 
     for bucket in preferred_bucket_order:
         for key, value in display_process_cost_items:
@@ -6946,16 +6973,12 @@ def render_quote(
 
     row("Total", proc_total, indent="  ")
 
-    hour_summary_entries: list[tuple[str, float]] = []
-    total_hours = 0.0
+    hour_summary_entries: dict[str, tuple[float, bool]] = {}
 
     def _record_hour_entry(label: str, value: float, *, include_in_total: bool = True) -> None:
-        nonlocal total_hours
         if not ((value > 0) or show_zeros):
             return
-        hour_summary_entries.append((label, value))
-        if include_in_total and value:
-            total_hours += value
+        hour_summary_entries[label] = (value, include_in_total)
 
     programming_meta = (nre_detail or {}).get("programming") or {}
     try:
@@ -7096,11 +7119,14 @@ def render_quote(
         lines.append("Labor Hour Summary")
         lines.append(divider)
         if str(pricing_source_value).lower() == "planner":
-            entries_iter = hour_summary_entries
+            entries_iter = hour_summary_entries.items()
         else:
-            entries_iter = sorted(hour_summary_entries, key=lambda kv: kv[1], reverse=True)
-        for label, hr_val in entries_iter:
+            entries_iter = sorted(hour_summary_entries.items(), key=lambda kv: kv[1][0], reverse=True)
+        total_hours = 0.0
+        for label, (hr_val, include_in_total) in entries_iter:
             hours_row(label, hr_val, indent="  ")
+            if include_in_total and hr_val:
+                total_hours += hr_val
         hours_row("Total Hours", total_hours, indent="  ")
     lines.append("")
 
