@@ -1799,67 +1799,6 @@ def sanitize_suggestions(s: dict, bounds: dict) -> dict:
     return sanitized
 
 
-def build_suggest_payload(
-    geo: dict | None,
-    baseline: dict | None,
-    rates: dict | None,
-    bounds: dict | None,
-) -> dict:
-    """Build the JSON payload passed to the LLM suggestor.
-
-    Keeps only JSON-serializable fields and includes a compact `seed` section
-    from `geo['derived']` with useful nudges.
-    """
-    def _to_float_maybe(x):
-        v = _as_float_or_none(x)
-        return v if v is not None else x
-
-    geo = dict(geo or {})
-    baseline = dict(baseline or {})
-    bounds = dict(bounds or {})
-    rates_in = dict(rates or {})
-
-    rates_norm: dict[str, float | str] = {}
-    for k, v in rates_in.items():
-        rates_norm[str(k)] = _to_float_maybe(v)
-
-    derived = geo.get("derived") if isinstance(geo.get("derived"), dict) else {}
-    seed = {}
-    for key in (
-        "tap_qty",
-        "cbore_qty",
-        "csk_qty",
-        "hole_bins",
-        "needs_back_face",
-        "tap_minutes_hint",
-        "cbore_minutes_hint",
-        "csk_minutes_hint",
-        "tap_class_counts",
-        "tap_details",
-        "npt_qty",
-        "inference_knobs",
-        "has_ldr_notes",
-        "has_tight_tol",
-        "max_hole_depth_in",
-        "plate_area_in2",
-        "finish_flags",
-        "stock_guess",
-    ):
-        if key in derived:
-            seed[key] = derived[key]
-
-    payload = {
-        "geo": geo,
-        "baseline": baseline,
-        "bounds": bounds,
-        "rates": rates_norm,
-    }
-    if seed:
-        payload["seed"] = seed
-
-    return payload
-
-
 def apply_suggestions(baseline: dict, s: dict) -> dict:
     eff = copy.deepcopy(baseline or {})
     base_hours = eff.get("process_hours") if isinstance(eff.get("process_hours"), dict) else {}
@@ -5972,9 +5911,6 @@ def render_quote(
     if explanation_lines:
         why_parts = explanation_lines + why_parts
 
-    def _canonical_bucket_key(name: str) -> str:
-        return re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_")
-
     def _is_planner_meta(key: str) -> bool:
         canonical_key = _canonical_bucket_key(key)
         if not canonical_key:
@@ -6059,21 +5995,6 @@ def render_quote(
                 except Exception:
                     continue
         return 0.0
-
-    def _extract_bucket_map(source: Mapping[str, Any] | None) -> dict[str, dict[str, Any]]:
-        bucket_map: dict[str, dict[str, Any]] = {}
-        if not isinstance(source, Mapping):
-            return bucket_map
-        struct: Mapping[str, Any] = source
-        buckets_obj = source.get("buckets") if isinstance(source, Mapping) else None
-        if isinstance(buckets_obj, Mapping):
-            struct = buckets_obj
-        for raw_key, raw_value in struct.items():
-            canon = _canonical_bucket_key(raw_key)
-            if not canon:
-                continue
-            bucket_map[canon] = raw_value if isinstance(raw_value, Mapping) else {}
-        return bucket_map
 
     process_plan_breakdown_raw = breakdown.get("process_plan")
     process_plan_breakdown: Mapping[str, Any] | None
@@ -7340,23 +7261,6 @@ class QuoteConfiguration:
     @property
     def default_material_key(self) -> str:
         return _normalize_lookup_key(self.default_material_display)
-
-
-@dataclass
-class PricingRegistry:
-    """Provide access to default shop rates for pricing calculations."""
-
-    default_rates: Dict[str, float] = field(default_factory=lambda: copy.deepcopy(RATES_DEFAULT))
-
-    def copy_default_rates(self) -> Dict[str, float]:
-        return copy.deepcopy(self.default_rates)
-
-
-@dataclass
-class GeometryLoader:
-    """Expose helpers used when enriching DXF geometry with extra context."""
-
-    build_geo_from_dxf: Optional[Callable[[str], Dict[str, Any]]] = None
 
 
 # Common regex pieces (kept non-capturing to avoid pandas warnings)
