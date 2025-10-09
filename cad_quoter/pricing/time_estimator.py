@@ -70,6 +70,7 @@ class OverheadParams:
     approach_retract_in: float | None = None
     peck_penalty_min_per_in_depth: float | None = None
     dwell_min: float | None = None
+    index_sec_per_hole: float = 6.0
 
 
 class _RowView:
@@ -276,7 +277,8 @@ def time_drill(
     rapid_min = (2.0 * approach) / max(rapid_ipm, 1.0)
 
     noncut = noncut_time_min(overhead, 1)
-    total = cut_min + peck + rapid_min + noncut
+    index_min = (to_num(overhead.index_sec_per_hole, 0.0) or 0.0) / 60.0
+    total = cut_min + peck + rapid_min + noncut + index_min
 
     if debug is not None:
         debug.setdefault("sfm", sfm)
@@ -285,6 +287,7 @@ def time_drill(
         debug.setdefault("ipm", ipm)
         debug.setdefault("axial_depth_in", axial_depth)
         debug.setdefault("minutes_per_hole", total)
+        debug.setdefault("index_min", index_min)
 
     return total
 
@@ -318,7 +321,8 @@ def time_ream(
     approach = to_num(overhead.approach_retract_in, 0.0) or 0.0
     rapid_ipm = to_num(machine.rapid_ipm, 0.0) or 1.0
     rapid_min = (2.0 * approach) / max(rapid_ipm, 1.0)
-    return cut_min + rapid_min + noncut_time_min(overhead, 1)
+    index_min = (to_num(overhead.index_sec_per_hole, 0.0) or 0.0) / 60.0
+    return cut_min + rapid_min + noncut_time_min(overhead, 1) + index_min
 
 
 def time_tap_roll_form(
@@ -343,7 +347,8 @@ def time_tap_roll_form(
     approach = to_num(overhead.approach_retract_in, 0.0) or 0.0
     rapid_ipm = to_num(machine.rapid_ipm, 0.0) or 1.0
     rapid_min = (2.0 * approach) / max(rapid_ipm, 1.0)
-    return down_min + up_min + rapid_min + noncut_time_min(overhead, 1)
+    index_min = (to_num(overhead.index_sec_per_hole, 0.0) or 0.0) / 60.0
+    return down_min + up_min + rapid_min + noncut_time_min(overhead, 1) + index_min
 
 
 def time_thread_mill(
@@ -375,7 +380,8 @@ def time_thread_mill(
     per_pass_len = path_len + 2.0 * approach
     passes = max(int(to_num(geom.pass_count_override, 0.0) or 1), 1)
     cut_min = (per_pass_len / max(ipm, 1e-6)) * passes
-    return cut_min + noncut_time_min(overhead, passes)
+    index_min = (to_num(overhead.index_sec_per_hole, 0.0) or 0.0) / 60.0
+    return cut_min + noncut_time_min(overhead, passes) + index_min
 
 
 def time_turn_rough(
