@@ -6,7 +6,11 @@ import math
 import os
 from typing import Dict
 
-from cad_quoter.domain_models import coerce_float_or_none, normalize_material_key
+from cad_quoter.domain_models import (
+    MATERIAL_DENSITY_G_CC_BY_KEYWORD,
+    coerce_float_or_none,
+    normalize_material_key,
+)
 
 LB_PER_KG = 2.2046226218
 BACKUP_CSV_NAME = "material_price_backup.csv"
@@ -14,6 +18,33 @@ BACKUP_CSV_NAME = "material_price_backup.csv"
 _MCM_DISABLE_ENV = os.environ.get("CAD_QUOTER_DISABLE_MCM_SCRAPER", "").strip().lower() in {"1", "true", "yes", "on"}
 _MCM_DISABLED = _MCM_DISABLE_ENV
 _MCM_CACHE: Dict[str, Dict[str, float | str]] = {}
+
+CM3_PER_IN3 = 16.387064
+MM_PER_INCH = 25.4
+
+_STANDARD_MCM_REQUESTS: dict[str, tuple[str, float, float, float]] = {
+    # material key, length_in, width_in, thickness_in
+    "aluminum": ("aluminum 5083", 12.0, 12.0, 0.25),
+    "tool_steel": ("tool steel a2", 12.0, 12.0, 0.25),
+}
+
+_FAMILY_DENSITY_FALLBACK = {
+    "aluminum": 2.70,
+    "tool_steel": 7.85,
+    "carbide": 15.60,
+}
+
+
+def _density_for_material(normalized_key: str, family: str) -> float | None:
+    if normalized_key:
+        density = MATERIAL_DENSITY_G_CC_BY_KEYWORD.get(normalized_key)
+        if density:
+            return float(density)
+        for token in normalized_key.split():
+            density = MATERIAL_DENSITY_G_CC_BY_KEYWORD.get(token)
+            if density:
+                return float(density)
+    return _FAMILY_DENSITY_FALLBACK.get(family)
 
 
 def _mcmaster_family_from_key(key: str) -> str:
@@ -41,26 +72,61 @@ def _maybe_get_mcmaster_price(display_name: str, normalized_key: str) -> Dict[st
     if cached:
         return cached
 
+    request = _STANDARD_MCM_REQUESTS.get(family)
+    if not request:
+        return None
+
     try:
-        from scrape_mcmaster import get_standard_stock_unit_prices  # type: ignore
+        from mcmaster_stock import lookup_sku_and_price_for_mm
     except Exception:
         _MCM_DISABLED = True
         return None
 
     try:
-        record = get_standard_stock_unit_prices(display_name)
+        material_key, length_in, width_in, thickness_in = request
+        dims_mm = tuple(val * MM_PER_INCH for val in (length_in, width_in, thickness_in))
+        part, price_each, uom, dims_in = lookup_sku_and_price_for_mm(
+            material_key,
+            dims_mm[0],
+            dims_mm[1],
+            dims_mm[2],
+            qty=1,
+        )
     except Exception:
         _MCM_DISABLED = True
         return None
 
-    if not record:
+    if not part or not price_each or not dims_in:
         return None
 
     try:
-        record["usd_per_kg"] = float(record["usd_per_kg"])
-        record["usd_per_lb"] = float(record["usd_per_lb"])
+        length_in, width_in, thickness_in = map(float, dims_in)
     except Exception:
         return None
+
+    volume_in3 = length_in * width_in * thickness_in
+    if volume_in3 <= 0:
+        return None
+
+    density_g_cc = _density_for_material(normalized_key, family)
+    if not density_g_cc or density_g_cc <= 0:
+        return None
+
+    mass_kg = (volume_in3 * CM3_PER_IN3 * density_g_cc) / 1000.0
+    if mass_kg <= 0:
+        return None
+
+    usd_per_kg = float(price_each) / mass_kg
+    usd_per_lb = usd_per_kg / LB_PER_KG
+
+    record: Dict[str, float | str] = {
+        "usd_per_kg": float(usd_per_kg),
+        "usd_per_lb": float(usd_per_lb),
+        "source": f"mcmaster_api:{part}",
+        "part_number": part,
+        "unit_price": float(price_each),
+        "unit_uom": str(uom or "Each"),
+    }
 
     _MCM_CACHE[family] = record
     return record

@@ -11,5 +11,3 @@ OCP>=7.7
 trimesh>=3.22
 ezdxf>=1.0
 llama-cpp-python>=0.2.0
-playwright>=1.0
-rapidfuzz>=3.0
