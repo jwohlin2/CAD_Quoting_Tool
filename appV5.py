@@ -8154,7 +8154,12 @@ def _select_speeds_feeds_row(
         op_variants.add(op_target.replace("_", " "))
     drill_synonyms = {
         "drill": {"drill", "drilling"},
-        "deep_drill": {"deep_drill", "deep drilling", "deepdrill"},
+        "deep_drill": {
+            "deep_drill",
+            "deep drilling",
+            "deepdrill",
+            "deep drill",
+        },
     }
     for key, synonyms in drill_synonyms.items():
         key_norm = key.replace("-", "_").replace(" ", "_")
@@ -8189,24 +8194,33 @@ def _select_speeds_feeds_row(
         ]
     if not matches:
         return None
-    if material_key:
-        mat_col = next(
-            (
-                col
-                for col in ("material_group", "material_family", "material")
-                if col in matches[0]
-            ),
-            None,
-        )
-        if mat_col:
-            mat_target = str(material_key).strip().lower()
+    if material_key and matches:
+        preferred_columns = ("material_group", "material_family", "material")
+        candidate_columns: list[str] = []
+        try:
+            table_columns = list(getattr(table, "columns", []))
+        except Exception:
+            table_columns = []
+        for col in preferred_columns:
+            if col in table_columns and col not in candidate_columns:
+                candidate_columns.append(col)
+        if not candidate_columns:
+            seen: set[str] = set()
+            for row in matches:
+                if isinstance(row, Mapping):
+                    for col in preferred_columns:
+                        if col in row and col not in seen:
+                            candidate_columns.append(col)
+                            seen.add(col)
+        mat_target = str(material_key).strip().lower()
+        for mat_col in candidate_columns:
             exact = [row for row in matches if _normalize(row.get(mat_col)) == mat_target]
             if exact:
                 matches = exact
-            else:
-                partial = [row for row in matches if mat_target in _normalize(row.get(mat_col))]
-                if partial:
-                    matches = partial
+                break
+            partial = [row for row in matches if mat_target in _normalize(row.get(mat_col))]
+            if partial:
+                matches = partial
     return matches[0] if matches else None
 
 
