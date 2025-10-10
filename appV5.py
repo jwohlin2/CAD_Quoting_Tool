@@ -455,16 +455,65 @@ from cad_quoter.pricing.time_estimator import (
 from cad_quoter.pricing.wieland import lookup_price as lookup_wieland_price
 from cad_quoter.rates import migrate_flat_to_two_bucket, two_bucket_to_flat
 from cad_quoter.vendors.mcmaster_stock import lookup_sku_and_price_for_mm
-from cad_quoter.llm import (
-    EDITOR_FROM_UI,
-    EDITOR_TO_SUGG,
-    LLMClient,
-    SYSTEM_SUGGEST,
-    SUGG_TO_EDITOR,
-    infer_hours_and_overrides_from_geo as _infer_hours_and_overrides_from_geo,
-    parse_llm_json,
-    explain_quote,
-)
+try:  # pragma: no cover - defensive guard when optional LLM helpers are absent
+    from cad_quoter import llm as _cad_llm  # type: ignore
+except Exception:  # pragma: no cover - tolerate partial installs
+    _cad_llm = None
+
+if _cad_llm is not None:
+    SUGG_TO_EDITOR = getattr(_cad_llm, "SUGG_TO_EDITOR", {})
+    EDITOR_TO_SUGG = getattr(_cad_llm, "EDITOR_TO_SUGG", {})
+    EDITOR_FROM_UI = getattr(_cad_llm, "EDITOR_FROM_UI", {})
+    SYSTEM_SUGGEST = getattr(
+        _cad_llm,
+        "SYSTEM_SUGGEST",
+        "You are a manufacturing estimator. Given GEO + baseline + bounds, "
+        "propose bounded adjustments that improve realism.",
+    )
+    _LLMClient = getattr(_cad_llm, "LLMClient", None)
+    if _LLMClient is None:  # pragma: no cover - unexpected in older builds
+        class LLMClient:  # type: ignore[override]
+            """Placeholder used when the optional LLM helpers are unavailable."""
+
+            def __init__(self, *args, **kwargs) -> None:  # pragma: no cover - defensive
+                raise RuntimeError("LLM integration is not available in this environment.")
+
+    else:
+        LLMClient = _LLMClient
+    _infer_hours_and_overrides_from_geo = getattr(
+        _cad_llm,
+        "infer_hours_and_overrides_from_geo",
+        lambda *args, **kwargs: {},
+    )
+    parse_llm_json = getattr(_cad_llm, "parse_llm_json", lambda _text: {})
+    explain_quote = getattr(
+        _cad_llm,
+        "explain_quote",
+        lambda *args, **kwargs: "LLM explanation unavailable.",
+    )
+else:  # pragma: no cover - fallback definitions keep quoting functional without LLM extras
+    SUGG_TO_EDITOR: dict = {}
+    EDITOR_TO_SUGG: dict = {}
+    EDITOR_FROM_UI: dict = {}
+    SYSTEM_SUGGEST = (
+        "You are a manufacturing estimator. Given GEO + baseline + bounds, "
+        "propose bounded adjustments that improve realism."
+    )
+
+    class LLMClient:  # type: ignore[override]
+        """Placeholder used when the optional LLM helpers are unavailable."""
+
+        def __init__(self, *args, **kwargs) -> None:  # pragma: no cover - defensive
+            raise RuntimeError("LLM integration is not available in this environment.")
+
+    def _infer_hours_and_overrides_from_geo(*args, **kwargs):  # pragma: no cover - fallback
+        return {}
+
+    def parse_llm_json(_text: str) -> dict:  # pragma: no cover - fallback
+        return {}
+
+    def explain_quote(*args, **kwargs) -> str:  # pragma: no cover - fallback
+        return "LLM explanation unavailable."
 
 try:
     _TIME_OVERHEAD_FIELD_NAMES = {
