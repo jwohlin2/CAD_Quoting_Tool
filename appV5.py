@@ -10483,13 +10483,25 @@ def estimate_drilling_hours(
                     "dwell_min": dwell_val,
                     "peck_min": peck_min,
                 }
+                legacy_index_kwarg = None
                 if _TIME_OVERHEAD_SUPPORTS_INDEX_SEC:
-                    legacy_kwargs["index_sec_per_hole"] = getattr(
+                    legacy_index_kwarg = getattr(
                         overhead_for_calc,
                         "index_sec_per_hole",
                         None,
                     )
-                legacy_overhead = _TimeOverheadParams(**legacy_kwargs)
+                    legacy_kwargs["index_sec_per_hole"] = legacy_index_kwarg
+                legacy_overhead, legacy_dropped_index = _make_time_overhead_params(
+                    legacy_kwargs
+                )
+                if legacy_index_kwarg is not None and (
+                    legacy_dropped_index
+                    or not hasattr(legacy_overhead, "index_sec_per_hole")
+                ):
+                    try:
+                        setattr(legacy_overhead, "index_sec_per_hole", legacy_index_kwarg)
+                    except Exception:
+                        pass
                 overhead_for_calc = legacy_overhead
                 tool_params = _TimeToolParams(teeth_z=1)
                 if debug_lines is not None:
