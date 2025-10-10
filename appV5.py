@@ -13514,7 +13514,8 @@ def compute_quote_from_df(
             for entry in line_items_raw:
                 if isinstance(entry, _MappingABC):
                     planner_line_items.append({k: entry.get(k) for k in ("op", "minutes", "machine_cost", "labor_cost")})
-                    recognized_line_items += 1
+
+        recognized_line_items = len(planner_line_items)
 
         planner_machine_cost_total = float(totals.get("machine_cost", 0.0) or 0.0)
         planner_labor_cost_total = float(totals.get("labor_cost", 0.0) or 0.0)
