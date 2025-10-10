@@ -1301,12 +1301,7 @@ def build_suggest_payload(
             baseline_hours[str(proc)] = float(val)
 
     baseline_pass_raw = baseline.get("pass_through") if isinstance(baseline.get("pass_through"), dict) else {}
-    baseline_pass: dict[str, float] = {}
-    for label, amount in (baseline_pass_raw or {}).items():
-        val = _coerce_float(amount)
-        if val is not None:
-            canon_label = _canonical_pass_label(label)
-            baseline_pass[canon_label] = float(val)
+    baseline_pass = _canonicalize_pass_through_map(baseline_pass_raw)
 
     top_process_hours = sorted(baseline_hours.items(), key=lambda kv: (-kv[1], kv[0]))[:6]
     top_pass_through = sorted(baseline_pass.items(), key=lambda kv: (-kv[1], kv[0]))[:6]
@@ -2296,24 +2291,30 @@ def merge_effective(
             final_hours[proc] = final_hours.get(proc, 0.0) + add_val
         add_sources[proc] = source
 
-    sugg_pass = suggestions.get("add_pass_through") if isinstance(suggestions.get("add_pass_through"), dict) else {}
-    over_pass = overrides.get("add_pass_through") if isinstance(overrides.get("add_pass_through"), dict) else {}
-    pass_keys = sorted(_collect_process_keys(sugg_pass, over_pass))
+    raw_sugg_pass = (
+        suggestions.get("add_pass_through")
+        if isinstance(suggestions.get("add_pass_through"), dict)
+        else {}
+    )
+    raw_over_pass = (
+        overrides.get("add_pass_through")
+        if isinstance(overrides.get("add_pass_through"), dict)
+        else {}
+    )
+    sugg_pass = _canonicalize_pass_through_map(raw_sugg_pass)
+    over_pass = _canonicalize_pass_through_map(raw_over_pass)
+    pass_keys = sorted(set(sugg_pass) | set(over_pass))
     final_pass: dict[str, float] = {}
     pass_sources: dict[str, str] = {}
     for key in pass_keys:
         source = "baseline"
         val = 0.0
-        if key in over_pass and over_pass[key] is not None:
-            cand = _as_float_or_none(over_pass.get(key))
-            if cand is not None:
-                val = float(cand)
-                source = "user"
-        elif key in sugg_pass and sugg_pass[key] is not None:
-            cand = _as_float_or_none(sugg_pass.get(key))
-            if cand is not None:
-                val = float(cand)
-                source = "llm"
+        if key in over_pass:
+            val = float(over_pass[key])
+            source = "user"
+        elif key in sugg_pass:
+            val = float(sugg_pass[key])
+            source = "llm"
         if not math.isclose(val, 0.0, abs_tol=1e-9):
             final_pass[key] = val
         pass_sources[key] = source
@@ -2478,16 +2479,19 @@ def merge_effective(
             source_tags["setups"] = "guardrail"
 
     finish_flags_ctx = guard_ctx.get("finish_flags")
-    baseline_pass_ctx = guard_ctx.get("baseline_pass_through") if isinstance(guard_ctx.get("baseline_pass_through"), dict) else {}
-    finish_pass_key = str(guard_ctx.get("finish_pass_key") or "Outsourced Vendors")
+    baseline_pass_ctx_raw = (
+        guard_ctx.get("baseline_pass_through")
+        if isinstance(guard_ctx.get("baseline_pass_through"), dict)
+        else {}
+    )
+    baseline_pass_ctx = _canonicalize_pass_through_map(baseline_pass_ctx_raw)
+    finish_pass_key = _canonical_pass_label(
+        guard_ctx.get("finish_pass_key") or "Outsourced Vendors"
+    )
     finish_floor = _as_float_or_none(guard_ctx.get("finish_cost_floor"))
     finish_floor = float(finish_floor) if finish_floor is not None else 50.0
     if finish_flags_ctx and finish_floor > 0:
-        combined_pass: dict[str, float] = {}
-        for key, value in baseline_pass_ctx.items():
-            val = _as_float_or_none(value)
-            if val is not None:
-                combined_pass[str(key)] = float(val)
+        combined_pass: dict[str, float] = dict(baseline_pass_ctx)
         for key, value in (final_pass.items() if isinstance(final_pass, dict) else []):
             val = _as_float_or_none(value)
             if val is not None:
@@ -2896,9 +2900,18 @@ def effective_to_overrides(effective: dict, baseline: dict | None = None) -> dic
         cleaned_add = {k: float(v) for k, v in adders.items() if v is not None and not math.isclose(float(v), 0.0, abs_tol=1e-6)}
         if cleaned_add:
             out["process_hour_adders"] = cleaned_add
-    passes = effective.get("add_pass_through") if isinstance(effective.get("add_pass_through"), dict) else {}
+    passes = (
+        effective.get("add_pass_through")
+        if isinstance(effective.get("add_pass_through"), dict)
+        else {}
+    )
     if passes:
-        cleaned_pass = {k: float(v) for k, v in passes.items() if v is not None and not math.isclose(float(v), 0.0, abs_tol=1e-6)}
+        canonical_passes = _canonicalize_pass_through_map(passes)
+        cleaned_pass = {
+            k: float(v)
+            for k, v in canonical_passes.items()
+            if not math.isclose(float(v), 0.0, abs_tol=1e-6)
+        }
         if cleaned_pass:
             out["add_pass_through"] = cleaned_pass
     scrap_eff = effective.get("scrap_pct")
@@ -3060,12 +3073,37 @@ def iter_suggestion_rows(state: QuoteState) -> list[dict]:
             "source": src_add.get(key, "baseline"),
         })
 
-    sugg_pass = suggestions.get("add_pass_through") if isinstance(suggestions.get("add_pass_through"), dict) else {}
-    over_pass = overrides.get("add_pass_through") if isinstance(overrides.get("add_pass_through"), dict) else {}
-    base_pass = baseline.get("pass_through") if isinstance(baseline.get("pass_through"), dict) else {}
-    eff_pass = effective.get("add_pass_through") if isinstance(effective.get("add_pass_through"), dict) else {}
-    src_pass = sources.get("add_pass_through") if isinstance(sources.get("add_pass_through"), dict) else {}
-    keys_pass = sorted(_collect_process_keys(base_pass, sugg_pass, over_pass))
+    sugg_pass = (
+        _canonicalize_pass_through_map(suggestions.get("add_pass_through"))
+        if isinstance(suggestions.get("add_pass_through"), dict)
+        else {}
+    )
+    over_pass = (
+        _canonicalize_pass_through_map(overrides.get("add_pass_through"))
+        if isinstance(overrides.get("add_pass_through"), dict)
+        else {}
+    )
+    base_pass = (
+        _canonicalize_pass_through_map(baseline.get("pass_through"))
+        if isinstance(baseline.get("pass_through"), dict)
+        else {}
+    )
+    eff_pass = (
+        _canonicalize_pass_through_map(effective.get("add_pass_through"))
+        if isinstance(effective.get("add_pass_through"), dict)
+        else {}
+    )
+    src_pass_raw = (
+        sources.get("add_pass_through")
+        if isinstance(sources.get("add_pass_through"), dict)
+        else {}
+    )
+    src_pass: dict[str, Any] = {}
+    for key, value in src_pass_raw.items():
+        canon_key = _canonical_pass_label(key)
+        if canon_key:
+            src_pass[canon_key] = value
+    keys_pass = sorted(set(base_pass) | set(sugg_pass) | set(over_pass))
     for key in keys_pass:
         base_amount = base_pass.get(key)
         label = f"Pass-through Δ {key}"
@@ -12457,10 +12495,12 @@ def compute_quote_from_df(df: pd.DataFrame,
             return bool((planner_directs or {}).get(k))
 
         pass_through: dict[str, float] = {
-            "Shipping": float(shipping_cost),
+            _canonical_pass_label("Shipping"): float(shipping_cost),
         }
         if _on("hardware") and float(hardware_cost) > 0:
-            pass_through["Hardware / BOM"] = float(hardware_cost)
+            pass_through[_canonical_pass_label(LEGACY_HARDWARE_PASS_LABEL)] = float(
+                hardware_cost
+            )
         if (
             _on("outsourced")
             and include_outsourced_pass
@@ -12474,9 +12514,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         if _on("packaging_flat") and float(packaging_flat_base) > 0:
             pass_through["Packaging Flat"] = float(packaging_flat_base)
 
-        pass_through = {
-            _canonical_pass_label(k): v for k, v in pass_through.items()
-        }
+        pass_through = _canonicalize_pass_through_map(pass_through)
 
         credit = float(material_scrap_credit_applied or 0.0)
         if credit > 0:
@@ -14419,7 +14457,6 @@ def compute_quote_from_df(df: pd.DataFrame,
         _normalize_key(_canonical_pass_label(k)): _canonical_pass_label(k)
         for k in pass_through.keys()
     }
-    pass_key_map[_normalize_key(LEGACY_HARDWARE_PASS_LABEL)] = HARDWARE_PASS_LABEL
 
     def _friendly_process(name: str) -> str:
         return name.replace("_", " ").title()
@@ -14771,10 +14808,16 @@ def compute_quote_from_df(df: pd.DataFrame,
             suffix = " (LLM)"
         llm_notes.append(f"{_friendly_process(actual)} +{float(add_hr):.2f} hr{suffix}")
 
-    src_pass_map = {}
+    src_pass_map: dict[str, Any] = {}
     if isinstance(quote_state.effective_sources, dict):
-        src_pass_map = quote_state.effective_sources.get("add_pass_through") or {}
-    add_pass = overrides.get("add_pass_through") if overrides else {}
+        raw_src_pass = quote_state.effective_sources.get("add_pass_through") or {}
+        if isinstance(raw_src_pass, Mapping):
+            for key, value in raw_src_pass.items():
+                canon_key = _canonical_pass_label(key)
+                if canon_key:
+                    src_pass_map[canon_key] = value
+    add_pass_raw = overrides.get("add_pass_through") if overrides else {}
+    add_pass = _canonicalize_pass_through_map(add_pass_raw)
     for label, add_val in (add_pass or {}).items():
         if not isinstance(add_val, (int, float)):
             continue
@@ -14791,7 +14834,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         entry["new_value"] = new_val
         if actual_label not in pass_meta:
             pass_meta[actual_label] = {"basis": "LLM override"}
-        src_tag = src_pass_map.get(label)
+        src_tag = src_pass_map.get(actual_label)
         suffix = ""
         if src_tag == "user":
             suffix = " (user override)"
@@ -15134,13 +15177,10 @@ def compute_quote_from_df(df: pd.DataFrame,
             if isinstance(existing_plan, dict):
                 existing_plan.setdefault("bucket_view", copy.deepcopy(planner_bucket_view))
 
-    material_direct_cost = float(pass_through.get("Material", material_direct_cost_base))
-    hardware_cost = float(
-        pass_through.get(
-            HARDWARE_PASS_LABEL,
-            pass_through.get(LEGACY_HARDWARE_PASS_LABEL, hardware_cost),
-        )
+    material_direct_cost = float(
+        pass_through.get(_canonical_pass_label("Material"), material_direct_cost_base)
     )
+    hardware_cost = float(pass_through.get(HARDWARE_PASS_LABEL, hardware_cost))
     outsourced_costs = float(pass_through.get("Outsourced Vendors", outsourced_costs))
     shipping_cost = float(pass_through.get("Shipping", shipping_cost_base))
     consumables_hr_cost = float(pass_through.get("Consumables /Hr", consumables_hr_cost))
@@ -17457,7 +17497,6 @@ def derive_inference_knobs(
             },
             "targets": [
                 f"add_pass_through.{HARDWARE_PASS_LABEL}",
-                f"add_pass_through.{LEGACY_HARDWARE_PASS_LABEL}",
                 "process_hour_adders.assembly",
             ],
         }
@@ -19380,7 +19419,10 @@ def get_llm_overrides(
         if isinstance(v, (int, float)):
             orig = float(v)
             clamped_val = clamp(v, 0.0, 200.0, 0.0)
-            clean_pass[str(k)] = clamped_val
+            canon_key = _canonical_pass_label(k)
+            if not canon_key:
+                continue
+            clean_pass[canon_key] = clamped_val
             if not math.isclose(orig, clamped_val, abs_tol=1e-6):
                 clamp_notes.append(
                     f"add_pass_through[{k}] {orig:.2f} → {clamped_val:.2f}"
