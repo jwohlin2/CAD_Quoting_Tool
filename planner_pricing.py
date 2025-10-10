@@ -3,6 +3,7 @@ from math import sqrt, log1p
 from typing import Any, Dict, Tuple, List
 
 from process_planner import plan_job  # uses your decision tree
+from cad_quoter.utils import _dict
 
 # -------- small utils
 def _get_rate(rates2: dict, bucket: str, key: str, default: float = 90.0) -> float:
@@ -19,16 +20,18 @@ def _as_float(x, default=None):
 
 def _geom(geom: dict) -> dict:
     d = dict(geom or {})
-    derived = d.get("derived") if isinstance(d.get("derived"), dict) else {}
+    derived = _dict(d.get("derived"))
     def g(*keys, default=None):
         for k in keys:
             # dotted lookup into derived support
             if "." in k:
                 k1, k2 = k.split(".", 1)
-                if isinstance(d.get(k1), dict) and k2 in d[k1]:
-                    return d[k1][k2]
-                if isinstance(derived.get(k1), dict) and k2 in derived[k1]:
-                    return derived[k1][k2]
+                d_inner = _dict(d.get(k1))
+                if k2 in d_inner:
+                    return d_inner[k2]
+                derived_inner = _dict(derived.get(k1))
+                if k2 in derived_inner:
+                    return derived_inner[k2]
             v = d.get(k)
             if v is None and k in derived:
                 v = derived.get(k)
@@ -42,16 +45,21 @@ def _geom(geom: dict) -> dict:
     out["cbore_qty"] = int(_as_float(g("cbore_qty"), 0) or 0)
     out["slot_count"] = int(_as_float(g("slot_count"), 0) or 0)
     out["edge_len_in"] = _as_float(g("edge_len_in"), 0.0) or 0.0
-    if out["edge_len_in"] <= 0 and isinstance(d.get("wedm"), dict):
-        out["edge_len_in"] = _as_float(d["wedm"].get("perimeter_in"), out["edge_len_in"]) or out["edge_len_in"]
+    if out["edge_len_in"] <= 0:
+        wedm = _dict(d.get("wedm"))
+        if wedm:
+            out["edge_len_in"] = _as_float(wedm.get("perimeter_in"), out["edge_len_in"]) or out["edge_len_in"]
     out["pocket_area_in2"] = _as_float(g("pocket_area_total_in2"), 0.0) or 0.0
-    if out["pocket_area_in2"] <= 0 and isinstance(d.get("milling"), dict):
-        area = _as_float(d["milling"].get("area_in2"))
+    if out["pocket_area_in2"] <= 0:
+        milling = _dict(d.get("milling"))
+        area = _as_float(milling.get("area_in2"))
         if area is not None:
             out["pocket_area_in2"] = area
     out["plate_area_in2"] = _as_float(g("plate_area_in2"), 0.0) or 0.0
-    if out["plate_area_in2"] <= 0 and isinstance(d.get("sg"), dict):
-        out["plate_area_in2"] = _as_float(d["sg"].get("area_sq_in"), out["plate_area_in2"]) or out["plate_area_in2"]
+    if out["plate_area_in2"] <= 0:
+        sg = _dict(d.get("sg"))
+        if sg:
+            out["plate_area_in2"] = _as_float(sg.get("area_sq_in"), out["plate_area_in2"]) or out["plate_area_in2"]
     thk_mm = _as_float(g("thickness_mm"), None)
     out["thickness_in"] = _as_float(g("thickness_in"), thk_mm / 25.4 if thk_mm else 0.0) or 0.0
     return out
