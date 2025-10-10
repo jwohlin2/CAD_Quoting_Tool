@@ -8839,6 +8839,94 @@ def require_plate_inputs(geo: dict, ui_vars: dict[str, Any] | None) -> None:
         geo["material"] = material
 
 
+def _compute_plate_mass_density(
+    ui_vars: Mapping[str, Any] | None,
+    geo_context: dict[str, Any],
+    material_name: str | None,
+    default_material_display: str | None,
+    density_g_cc: float,
+) -> tuple[float, float, float, float | None, float | None]:
+    """Return plate-derived volume and density details."""
+
+    ui_vars = dict(ui_vars or {})
+
+    length_in_val = _coerce_float_or_none(ui_vars.get("Plate Length (in)"))
+    width_in_val = _coerce_float_or_none(ui_vars.get("Plate Width (in)"))
+    thickness_mm_val = _coerce_float_or_none(geo_context.get("thickness_mm"))
+    if thickness_mm_val is None:
+        t_in = _coerce_float_or_none(ui_vars.get("Thickness (in)"))
+        if t_in is not None:
+            thickness_mm_val = float(t_in) * 25.4
+    thickness_mm_val = float(thickness_mm_val or 0.0)
+
+    plate_length_in_val: float | None = None
+    plate_width_in_val: float | None = None
+    if length_in_val and length_in_val > 0:
+        plate_length_in_val = float(length_in_val)
+    if width_in_val and width_in_val > 0:
+        plate_width_in_val = float(width_in_val)
+
+    if thickness_mm_val > 0:
+        geo_context["thickness_mm"] = thickness_mm_val
+
+    length_mm = float(length_in_val or 0.0) * 25.4
+    width_mm = float(width_in_val or 0.0) * 25.4
+    if length_mm > 0:
+        geo_context.setdefault("plate_length_mm", length_mm)
+    if width_mm > 0:
+        geo_context.setdefault("plate_width_mm", width_mm)
+
+    vol_mm3_plate = max(1.0, length_mm * width_mm * max(thickness_mm_val, 0.0))
+    plate_vol_cm3 = vol_mm3_plate / 1000.0
+    plate_geo_vol_mm3 = vol_mm3_plate
+
+    density_lookup = {
+        "steel": 7.85,
+        "stainless": 7.90,
+        "alum": 2.70,
+        "titanium": 4.43,
+        "copper": 8.96,
+        "brass": 8.40,
+        "plastic": 1.45,
+    }
+
+    def _context_density(ctx: Mapping[str, Any] | None) -> float | None:
+        if not isinstance(ctx, Mapping):
+            return None
+        val = _coerce_float_or_none(ctx.get("density_g_cc"))
+        if val and val > 0:
+            return float(val)
+        return None
+
+    inner_geo_ctx = (
+        geo_context.get("geo") if isinstance(geo_context.get("geo"), Mapping) else None
+    )
+    density_candidates: list[float] = []
+    for ctx in (geo_context, inner_geo_ctx):
+        dens = _context_density(ctx)
+        if dens:
+            density_candidates.append(dens)
+    if not density_candidates:
+        density_candidates.append(
+            _density_for_material(material_name or default_material_display, default=0.0)
+        )
+    density_candidates.append(
+        density_lookup.get(
+            _material_family(geo_context.get("material") or material_name),
+            density_lookup["steel"],
+        )
+    )
+    density_g_cc = next((d for d in density_candidates if d and d > 0), density_lookup["steel"])
+
+    return (
+        plate_vol_cm3,
+        plate_geo_vol_mm3,
+        density_g_cc,
+        plate_length_in_val,
+        plate_width_in_val,
+    )
+
+
 @overload
 def net_mass_kg(
     plate_L_in,
@@ -11088,64 +11176,24 @@ def compute_quote_from_df(df: pd.DataFrame,
         density_g_cc = density_guess_from_material
 
     if is_plate_2d:
-        length_in_val = _coerce_float_or_none(ui_vars.get("Plate Length (in)"))
-        width_in_val = _coerce_float_or_none(ui_vars.get("Plate Width (in)"))
-        thickness_mm_val = _coerce_float_or_none(geo_context.get("thickness_mm"))
-        if thickness_mm_val is None:
-            t_in = _coerce_float_or_none(ui_vars.get("Thickness (in)"))
-            if t_in is not None:
-                thickness_mm_val = float(t_in) * 25.4
-        thickness_mm_val = float(thickness_mm_val or 0.0)
-        if length_in_val and length_in_val > 0:
-            plate_length_in_val = float(length_in_val)
-        if width_in_val and width_in_val > 0:
-            plate_width_in_val = float(width_in_val)
-        if thickness_mm_val > 0:
-            geo_context["thickness_mm"] = thickness_mm_val
-        length_mm = float(length_in_val or 0.0) * 25.4
-        width_mm = float(width_in_val or 0.0) * 25.4
-        if length_mm > 0:
-            geo_context.setdefault("plate_length_mm", length_mm)
-        if width_mm > 0:
-            geo_context.setdefault("plate_width_mm", width_mm)
-        vol_mm3_plate = max(1.0, length_mm * width_mm * max(thickness_mm_val, 0.0))
-        vol_cm3 = max(vol_cm3, vol_mm3_plate / 1000.0)
-        GEO_vol_mm3 = max(GEO_vol_mm3, vol_mm3_plate)
-        density_lookup = {
-            "steel": 7.85,
-            "stainless": 7.90,
-            "alum": 2.70,
-            "titanium": 4.43,
-            "copper": 8.96,
-            "brass": 8.40,
-            "plastic": 1.45,
-        }
-
-        def _context_density(ctx: dict[str, Any] | None) -> float | None:
-            if not isinstance(ctx, dict):
-                return None
-            val = _coerce_float_or_none(ctx.get("density_g_cc"))
-            if val and val > 0:
-                return float(val)
-            return None
-
-        inner_geo_ctx = geo_context.get("geo") if isinstance(geo_context.get("geo"), dict) else None
-        density_candidates: list[float] = []
-        for ctx in (geo_context, inner_geo_ctx):
-            dens = _context_density(ctx)
-            if dens:
-                density_candidates.append(dens)
-        if not density_candidates:
-            density_candidates.append(
-                _density_for_material(material_name or default_material_display, default=0.0)
-            )
-        density_candidates.append(
-            density_lookup.get(
-                _material_family(geo_context.get("material") or material_name),
-                density_lookup["steel"],
-            )
+        (
+            plate_vol_cm3,
+            plate_geo_vol_mm3,
+            density_g_cc,
+            plate_length_in_val,
+            plate_width_in_val,
+        ) = _compute_plate_mass_density(
+            ui_vars,
+            geo_context,
+            material_name,
+            default_material_display,
+            density_g_cc,
         )
-        density_g_cc = next((d for d in density_candidates if d and d > 0), density_lookup["steel"])
+        vol_cm3 = max(vol_cm3, plate_vol_cm3)
+        GEO_vol_mm3 = max(GEO_vol_mm3, plate_geo_vol_mm3)
+        thickness_mm_val = float(_coerce_float_or_none(geo_context.get("thickness_mm")) or 0.0)
+        length_in_val = plate_length_in_val
+        width_in_val = plate_width_in_val
         holes_for_mass: list[float] = []
         hole_sources: list[Any] = []
         for key in ("hole_diams_mm_precise", "hole_diams_mm"):
