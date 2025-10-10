@@ -15755,6 +15755,8 @@ def compute_quote_from_df(
             "Labor": round(planner_labor_cost_total, 2),
         }
 
+    canonical_process_costs = canonicalize_costs(process_costs)
+
     app_meta = {"llm_debug_enabled": bool(APP_ENV.llm_debug_enabled)}
 
     breakdown = {
@@ -15775,6 +15777,7 @@ def compute_quote_from_df(
         "nre_costs": nre_costs_display,
         "nre_cost_details": nre_cost_details,
         "process_costs": process_costs,
+        "canonical_process_costs": canonical_process_costs,
         "process_meta": process_meta,
         "labor_costs": labor_costs_display,
         "labor_cost_details": labor_cost_details,
@@ -15831,6 +15834,7 @@ def compute_quote_from_df(
         "effective": copy.deepcopy(quote_state.effective),
         "effective_sources": copy.deepcopy(quote_state.effective_sources),
         "app": dict(app_meta),
+        "canonical_process_costs": canonical_process_costs,
     }
     breakdown["decision_state"] = decision_state
 
@@ -15898,6 +15902,7 @@ def compute_quote_from_df(
         "drilling_meta": drilling_meta,
         "red_flags": list(red_flag_messages),
         "app": dict(app_meta),
+        "canonical_process_costs": canonical_process_costs,
     }
 
     breakdown["speeds_feeds_path"] = speeds_feeds_path
