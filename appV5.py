@@ -14698,6 +14698,36 @@ def compute_quote_from_df(
                     )
             planner_bucket_rollup = copy.deepcopy(bucket_view)
             planner_bucket_view = _prepare_bucket_view(bucket_view)
+            if used_planner:
+                try:
+                    display_labor_total = 0.0
+                    display_machine_total = 0.0
+                    buckets_view = planner_bucket_view.get("buckets")
+                    if isinstance(buckets_view, _MappingABC):
+                        for metrics in buckets_view.values():
+                            if not isinstance(metrics, _MappingABC):
+                                continue
+                            display_labor_total += float(metrics.get("labor$", 0.0) or 0.0)
+                            display_machine_total += float(metrics.get("machine$", 0.0) or 0.0)
+                except Exception:  # pragma: no cover - defensive logging
+                    logger.exception("Planner display totals invariant check failed")
+                else:
+                    display_total_cost = display_labor_total + display_machine_total
+                    if not math.isclose(
+                        display_total_cost,
+                        planner_totals_cost,
+                        rel_tol=0.0,
+                        abs_tol=_PLANNER_BUCKET_ABS_EPSILON,
+                    ):
+                        logger.error(
+                            "Planner display totals drifted: labor %.2f + machine %.2f vs planner %.2f",
+                            display_labor_total,
+                            display_machine_total,
+                            planner_totals_cost,
+                        )
+                        raise AssertionError(
+                            "Planner bucket display totals do not reconcile with planner totals."
+                        )
             planner_bucket_display_map = _extract_bucket_map(planner_bucket_view)
             planner_bucket_view_copy = copy.deepcopy(planner_bucket_view)
             process_plan_summary["bucket_view"] = planner_bucket_view_copy
@@ -16699,35 +16729,38 @@ def compute_quote_from_df(
 
         _merge_labor_detail("Fixture Build (amortized)", fixture_labor_per_part, fixture_bits)
 
-    try:
-        labor_display_total = sum(float(value or 0.0) for value in labor_costs_display.values())
-    except Exception:  # pragma: no cover - defensive logging
-        logger.exception("Labor section invariant calculation failed")
-    else:
-        expected_labor_total = float(labor_cost or 0.0)
-        diff = abs(labor_display_total - expected_labor_total)
-        if diff > 0.5:
-            flag_message = (
-                f"Labor totals drifted by ${diff:,.2f}: "
-                f"rendered ${labor_display_total:,.2f} vs expected ${expected_labor_total:,.2f}"
+    if not used_planner:
+        try:
+            labor_display_total = sum(
+                float(value or 0.0) for value in labor_costs_display.values()
             )
-            _record_red_flag(flag_message)
-            logger.warning(
-                "Labor section totals drifted beyond threshold: %.2f vs %.2f",
+        except Exception:  # pragma: no cover - defensive logging
+            logger.exception("Labor section invariant calculation failed")
+        else:
+            expected_labor_total = float(labor_cost or 0.0)
+            diff = abs(labor_display_total - expected_labor_total)
+            if diff > 0.5:
+                flag_message = (
+                    f"Labor totals drifted by ${diff:,.2f}: "
+                    f"rendered ${labor_display_total:,.2f} vs expected ${expected_labor_total:,.2f}"
+                )
+                _record_red_flag(flag_message)
+                logger.warning(
+                    "Labor section totals drifted beyond threshold: %.2f vs %.2f",
+                    labor_display_total,
+                    expected_labor_total,
+                )
+            elif not math.isclose(
                 labor_display_total,
                 expected_labor_total,
-            )
-        elif not math.isclose(
-            labor_display_total,
-            expected_labor_total,
-            rel_tol=0.0,
-            abs_tol=_LABOR_SECTION_ABS_EPSILON,
-        ):
-            logger.warning(
-                "Labor section totals drifted: %.2f vs %.2f",
-                labor_display_total,
-                expected_labor_total,
-            )
+                rel_tol=0.0,
+                abs_tol=_LABOR_SECTION_ABS_EPSILON,
+            ):
+                logger.warning(
+                    "Labor section totals drifted: %.2f vs %.2f",
+                    labor_display_total,
+                    expected_labor_total,
+                )
 
     direct_costs_display: dict[str, float] = {label: float(value) for label, value in pass_through.items()}
     direct_cost_details: dict[str, str] = {}
