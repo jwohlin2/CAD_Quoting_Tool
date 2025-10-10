@@ -6167,6 +6167,22 @@ def render_quote(
             material_selection = dict(material_selection_raw or {})
         except Exception:
             material_selection = {}
+    canonical_material_breakdown = str(
+        material_selection.get("canonical")
+        or material_selection.get("canonical_material")
+        or ""
+    ).strip()
+    if canonical_material_breakdown:
+        material_selection.setdefault("canonical", canonical_material_breakdown)
+        material_selection.setdefault("canonical_material", canonical_material_breakdown)
+    group_material_breakdown = str(
+        material_selection.get("group")
+        or material_selection.get("material_group")
+        or ""
+    ).strip()
+    if group_material_breakdown:
+        material_selection.setdefault("group", group_material_breakdown)
+        material_selection.setdefault("material_group", group_material_breakdown)
     material = material_block
     drilling_meta = breakdown.get("drilling_meta", {}) or {}
     process_costs_raw = breakdown.get("process_costs", {}) or {}
@@ -10170,6 +10186,8 @@ def _select_speeds_feeds_row(
     table: pd.DataFrame | None,
     operation: str,
     material_key: str | None = None,
+    *,
+    material_group: str | None = None,
 ) -> Mapping[str, Any] | None:
     if table is None:
         return None
@@ -10238,6 +10256,34 @@ def _select_speeds_feeds_row(
         ]
     if not matches:
         return None
+    group_target = str(material_group or "").strip().upper()
+    if group_target and matches:
+        group_columns = ("material_group", "material_family")
+        candidate_group_columns: list[str] = []
+        try:
+            table_columns = list(getattr(table, "columns", []))
+        except Exception:
+            table_columns = []
+        for col in group_columns:
+            if col in table_columns and col not in candidate_group_columns:
+                candidate_group_columns.append(col)
+        if not candidate_group_columns:
+            seen_cols: set[str] = set()
+            for row in matches:
+                if isinstance(row, _MappingABC):
+                    for col in group_columns:
+                        if col in row and col not in seen_cols:
+                            candidate_group_columns.append(col)
+                            seen_cols.add(col)
+        for col in candidate_group_columns:
+            exact_group = [
+                row
+                for row in matches
+                if str(row.get(col) or "").strip().upper() == group_target
+            ]
+            if exact_group:
+                matches = exact_group
+                break
     if material_key and matches:
         preferred_columns = ("material_group", "material_family", "material")
         candidate_columns: list[str] = []
@@ -10699,6 +10745,7 @@ def estimate_drilling_hours(
     thickness_in: float,
     mat_key: str,
     *,
+    material_group: str | None = None,
     hole_groups: list[Mapping[str, Any]] | None = None,
     speeds_feeds_table: pd.DataFrame | None = None,
     machine_params: _TimeMachineParams | None = None,
@@ -10714,6 +10761,7 @@ def estimate_drilling_hours(
     """
     material_lookup = _normalize_lookup_key(mat_key) if mat_key else ""
     material_label = MATERIAL_DISPLAY_BY_KEY.get(material_lookup, mat_key)
+    material_group_override = str(material_group or "").strip().upper()
 
     thickness_mm_val = 0.0
     try:
@@ -10978,12 +11026,14 @@ def estimate_drilling_hours(
                         speeds_feeds_table,
                         operation=op_name,
                         material_key=material_for_lookup,
+                        material_group=material_group_override,
                     )
                     if not row and op_name.lower() == "deep_drill":
                         row = _select_speeds_feeds_row(
                             speeds_feeds_table,
                             operation="Drill",
                             material_key=material_for_lookup,
+                            material_group=material_group_override,
                         )
 
                 if not row:
@@ -10992,6 +11042,7 @@ def estimate_drilling_hours(
                         operation=op_name,
                         tool_diameter_in=float(diameter_in),
                         table=speeds_feeds_table,
+                        material_group=material_group_override or None,
                     )
                 if not row and op_name.lower() == "deep_drill":
                     row = _pick_speeds_row(
@@ -10999,6 +11050,7 @@ def estimate_drilling_hours(
                         operation="drill",
                         tool_diameter_in=float(diameter_in),
                         table=speeds_feeds_table,
+                        material_group=material_group_override or None,
                     )
                 if row and isinstance(row, _MappingABC):
                     cache_entry = (row, _build_tool_params(row))
@@ -11011,6 +11063,8 @@ def estimate_drilling_hours(
                         or material_lookup
                         or ""
                     ).strip()
+                    if material_label:
+                        chosen_material_label = str(material_label).strip()
                 else:
                     cache_entry = None
                     material_display = str(material_label or mat_key or material_lookup or "material").strip()
@@ -11645,7 +11699,9 @@ def estimate_drilling_hours(
                     overhead_bits.append(f"toolchange {toolchange_total:.2f} min")
 
                 op_display = str(summary.get("operation") or "drill").title()
-                mat_display = str(summary.get("material") or "material").strip()
+                mat_display = str(material_label or "").strip()
+                if not mat_display:
+                    mat_display = str(summary.get("material") or "").strip()
                 if not mat_display:
                     mat_display = "material"
                 summary["material"] = mat_display
@@ -12126,6 +12182,7 @@ def compute_quote_from_df(
     labor_cost_details_seed: dict[str, str] = {}
     hole_scrap_clamped_val: float = 0.0
     material_selection: dict[str, Any] = {}
+    material_selected_summary: dict[str, str] = {}
     material_display_for_debug: str = ""
     drill_estimator_hours_for_planner: float = 0.0
     milling_estimator_hours_for_planner: float = 0.0
@@ -12588,6 +12645,7 @@ def compute_quote_from_df(
             material_group = iso_group.upper()
             material_selection["material_group"] = material_group
             material_selection["group"] = material_group
+            material_selected_summary["group"] = material_group
     if not canonical_material:
         canonical_material = MATERIAL_DISPLAY_BY_KEY.get(
             material_lookup_key,
@@ -12596,6 +12654,7 @@ def compute_quote_from_df(
     if canonical_material:
         material_selection["canonical_material"] = canonical_material
         material_selection["canonical"] = canonical_material
+        material_selected_summary["canonical"] = canonical_material
 
     if material_name:
         material_selection["input_material"] = material_name
@@ -13350,6 +13409,14 @@ def compute_quote_from_df(
             thickness_for_drill = float(thickness_in_ui) * 25.4
 
     selected_material_name: str | None = None
+    canonical_material_for_drill = str(
+        material_selection.get("canonical")
+        or material_selection.get("canonical_material")
+        or material_selected_summary.get("canonical")
+        or ""
+    ).strip()
+    if canonical_material_for_drill:
+        selected_material_name = canonical_material_for_drill
     if isinstance(material_detail_for_breakdown, _MappingABC):
         for key in ("material_name", "material", "material_key"):
             raw_value = material_detail_for_breakdown.get(key)
@@ -13392,6 +13459,7 @@ def compute_quote_from_df(
     group_candidate = str(
         material_selection.get("group")
         or material_selection.get("material_group")
+        or material_selected_summary.get("group")
         or ""
     ).strip()
     if group_candidate:
@@ -13450,16 +13518,27 @@ def compute_quote_from_df(
         )
         if table_group:
             drill_material_group = str(table_group).strip()
-    material_key_for_drill = (
+    material_group_for_speeds = str(
         drill_material_group
+        or material_selected_summary.get("group")
+        or ""
+    ).strip().upper()
+    if material_group_for_speeds and not drill_material_group:
+        drill_material_group = material_group_for_speeds
+    material_key_for_drill = (
+        canonical_material_for_drill
+        or drill_material_display
         or drill_material_lookup
         or (drill_material_source or "")
+        or material_group_for_speeds
     )
     material_key_for_drill = str(material_key_for_drill or "").strip()
     if drill_material_group:
         geo_context.setdefault("material_group", drill_material_group)
         material_selection["material_group"] = drill_material_group
         material_selection["group"] = drill_material_group
+        if drill_material_group:
+            material_selected_summary["group"] = drill_material_group
     drill_material_lookup_final = (
         drill_material_lookup
         or (_normalize_lookup_key(material_key_for_drill) if material_key_for_drill else "")
@@ -13491,6 +13570,8 @@ def compute_quote_from_df(
     if drill_material_display:
         material_selection["canonical_material"] = drill_material_display
         material_selection["canonical"] = drill_material_display
+        if drill_material_display:
+            material_selected_summary["canonical"] = drill_material_display
     machine_params_default = _machine_params_from_params(params)
     drill_overhead_default = _drill_overhead_from_params(params)
     speeds_feeds_warnings: list[str] = []
@@ -13551,6 +13632,7 @@ def compute_quote_from_df(
         hole_diams_mm=hole_diams_list,
         thickness_in=thickness_in,
         mat_key=material_key_for_drill or "",
+        material_group=material_group_for_speeds or None,
         hole_groups=hole_groups_geo,
         speeds_feeds_table=speeds_feeds_table,
         machine_params=machine_params_default,
@@ -13680,6 +13762,9 @@ def compute_quote_from_df(
         drill_debug_lines[:] = updated_debug_lines
         material_display_for_debug = final_material_for_debug
         material_selection["canonical_material"] = final_material_for_debug
+        material_selection["canonical"] = final_material_for_debug
+        if final_material_for_debug:
+            material_selected_summary["canonical"] = str(final_material_for_debug)
 
     drill_debug_line: str | None = None
     if (speeds_feeds_summary or speeds_feeds_row) and avg_dia_in > 0:
@@ -13773,7 +13858,8 @@ def compute_quote_from_df(
             avg_mm = avg_dia_in * 25.4
             op_display = selected_op_name.replace("_", " ")
             group_display = str(
-                material_selection.get("group")
+                material_group_for_speeds
+                or material_selection.get("group")
                 or material_selection.get("material_group")
                 or drill_material_group
                 or ""
@@ -13802,11 +13888,16 @@ def compute_quote_from_df(
         drilling_meta["estimator_hours_for_planner"] = float(
             drill_estimator_hours_for_planner
         )
-    final_group = material_selection.get("material_group") or drill_material_group
+    final_group = (
+        material_group_for_speeds
+        or material_selection.get("material_group")
+        or drill_material_group
+    )
     if final_group:
         drilling_meta["material_group"] = final_group
     final_material_display = (
-        material_selection.get("canonical")
+        material_selected_summary.get("canonical")
+        or material_selection.get("canonical")
         or material_selection.get("canonical_material")
         or drill_material_display
     )
@@ -17458,6 +17549,29 @@ def compute_quote_from_df(
 
     canonical_process_costs: dict[str, float] = {}
 
+    canonical_material_display = str(
+        material_selection.get("canonical")
+        or material_selection.get("canonical_material")
+        or material_selected_summary.get("canonical")
+        or ""
+    ).strip()
+    if canonical_material_display:
+        material_selected_summary["canonical"] = canonical_material_display
+    group_display_value = str(
+        material_selection.get("group")
+        or material_selection.get("material_group")
+        or material_selected_summary.get("group")
+        or ""
+    ).strip().upper()
+    if group_display_value:
+        material_selected_summary["group"] = group_display_value
+
+    material_selected_for_breakdown: dict[str, str] = {}
+    if canonical_material_display:
+        material_selected_for_breakdown["canonical"] = canonical_material_display
+    if group_display_value:
+        material_selected_for_breakdown["group"] = group_display_value
+
     if pricing_source == "planner":
         process_costs = {
             "Machine": round(planner_machine_cost_total, 2),
@@ -17480,7 +17594,7 @@ def compute_quote_from_df(
         "material_direct_cost": material_direct_cost,
         "total_direct_costs": round(total_direct_costs, 2),
         "material": material_detail_for_breakdown,
-        "material_selected": dict(material_selection),
+        "material_selected": material_selected_for_breakdown,
         "nre": {
             "programming_per_part": programming_per_part,
             "fixture_per_part": fixture_per_part,
