@@ -2,16 +2,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Protocol, Sequence
 
 from cad_quoter.config import load_default_params, load_default_rates
-from cad_quoter.pricing import PricingEngine, create_default_registry
+from cad_quoter.pricing import PriceQuote, PricingEngine, create_default_registry
 
 
 class SupportsPricingEngine(Protocol):
     """Protocol describing the subset of :class:`PricingEngine` used by the UI."""
 
     def clear_cache(self) -> None:  # pragma: no cover - structural typing helper
+        ...
+
+    def get_usd_per_kg(
+        self,
+        symbol: str,
+        basis: str,
+        *,
+        vendor_csv: str | None = None,
+        providers: Sequence[Any] | None = None,
+    ) -> PriceQuote:  # pragma: no cover - structural typing helper
         ...
 
 

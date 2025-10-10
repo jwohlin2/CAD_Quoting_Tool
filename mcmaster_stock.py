@@ -174,7 +174,10 @@ def lookup_sku_and_price_for_mm(
     W_mm: float,
     T_mm: float,
     qty: int = 1,
-) -> Tuple[str, float, str, Tuple[float, float, float]] | Tuple[None, None, None, Tuple[float, float, float]]:
+) -> (
+    Tuple[str, Optional[float], Optional[str], Tuple[float, float, float]]
+    | Tuple[None, None, None, Tuple[float, float, float]]
+):
     """Resolve a McMaster plate SKU and pricing for the requested dimensions (mm)."""
 
     catalog = _get_catalog()
