@@ -4043,12 +4043,12 @@ except Exception:
 
 def _new_topods_shape() -> Any:
     ctor = cast(Any, TopoDS_Shape)
-    return cast(TopoDS_Shape, ctor())
+    return ctor()
 
 
 def _new_topods_compound() -> Any:
     ctor = cast(Any, TopoDS_Compound)
-    return cast(TopoDS_Compound, ctor())
+    return ctor()
 
 
 def _shape_from_reader(reader):
@@ -6104,7 +6104,7 @@ def render_quote(
     show_zeros: bool = False,
     llm_explanation: str = "",
     page_width: int = 74,
-) -> str:  # pyright: ignore[reportGeneralTypeIssues]
+) -> str:  # type: ignore[reportGeneralTypeIssues]
     """Pretty printer for a full quote with auto-included non-zero lines."""
     breakdown    = result.get("breakdown", {}) or {}
     totals       = breakdown.get("totals", {}) or {}
@@ -11897,7 +11897,7 @@ def compute_quote_from_df(
     reuse_suggestions: bool = False,
     llm_suggest: Any | None = None,
     pricing: PricingEngine | None = None,
-) -> Dict[str, Any]:  # pyright: ignore[reportGeneralTypeIssues]
+) -> Dict[str, Any]:  # type: ignore[reportGeneralTypeIssues]
     """
     Estimator that consumes variables from the sheet (Item, Example Values / Options, Data Type / Input Method).
 
