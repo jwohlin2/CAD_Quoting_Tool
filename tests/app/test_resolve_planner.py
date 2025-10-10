@@ -90,3 +90,21 @@ def test_resolve_planner_line_items_force_usage(reload_appv5):
     )
     assert used is True
     assert mode == "auto"
+
+
+def test_count_recognized_ops_handles_various_entries(reload_appv5):
+    module = reload_appv5
+    assert module._count_recognized_ops(None) == 0
+    assert module._count_recognized_ops({"ops": None}) == 0
+
+    plan_summary = {
+        "ops": [
+            {"name": "rough mill"},
+            {"name": "finish mill"},
+            "drill",
+            None,
+            0,
+        ]
+    }
+
+    assert module._count_recognized_ops(plan_summary) == 3
