@@ -58,7 +58,7 @@ def test_render_quote_places_why_after_pricing_ladder_and_llm_adjustments() -> N
     assert rendered.endswith("\n")
 
 
-def test_render_quote_planner_why_section_uses_final_bucket_view() -> None:
+def test_render_quote_renders_bucket_table_without_planner_why_section() -> None:
     breakdown = {
         "qty": 1,
         "totals": {
@@ -121,22 +121,27 @@ def test_render_quote_planner_why_section_uses_final_bucket_view() -> None:
     rendered = appV5.render_quote(result, currency="$")
     lines = rendered.splitlines()
 
-    heading = "Planner operations (final bucket view):"
-    assert any(line.strip() == heading for line in lines)
-    heading_idx = next(i for i, line in enumerate(lines) if line.strip() == heading)
-    bucket_lines = lines[heading_idx + 1 : heading_idx + 4]
+    assert all("Planner operations" not in line for line in lines)
 
-    assert len(bucket_lines) == 3
-    assert bucket_lines[0].strip().startswith("Milling:")
-    assert "$500.00" in bucket_lines[0]
-    assert "hr" in bucket_lines[0]
-    assert all("overrides" not in line for line in bucket_lines)
+    header_idx = next(
+        i
+        for i, line in enumerate(lines)
+        if line.strip().startswith("Bucket") and "Hours" in line and "Labor $" in line
+    )
+    separator_idx = header_idx + 1
+    separator = lines[separator_idx].replace("|", "").replace(" ", "")
+    assert separator
+    assert set(separator) == {"-"}
 
-    trailing_block = [line.strip() for line in lines[heading_idx + 1 : heading_idx + 10]]
-    assert any(line.startswith("Parts: 4") for line in trailing_block)
-    assert any(line.startswith("Setups: 2") for line in trailing_block)
-    assert any("Scrap: 12.0%" in line for line in trailing_block)
-    assert any("Pass-Through: $175.00" in line for line in trailing_block)
+    bucket_rows: list[str] = []
+    for line in lines[header_idx + 2 :]:
+        if not line.strip():
+            break
+        bucket_rows.append(line)
+
+    assert any("Milling" in line and "$500.00" in line and "2.00" in line for line in bucket_rows)
+    assert any("Drilling" in line and "$300.00" in line and "1.50" in line for line in bucket_rows)
+    assert any("Inspection" in line and "$100.00" in line and "1.00" in line for line in bucket_rows)
 
 
 def test_render_quote_includes_hour_summary() -> None:
