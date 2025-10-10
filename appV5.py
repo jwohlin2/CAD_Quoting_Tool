@@ -7688,16 +7688,14 @@ def render_quote(
         if have_any:
             lines.append("Material & Stock")
             lines.append(divider)
-            material_name_display = ""
+            canonical_material_display = ""
             if isinstance(material_selection, _MappingABC):
-                material_name_display = (
-                    material_selection.get("canonical_material")
-                    or material_selection.get("material_display")
-                    or material_selection.get("input_material")
-                    or material_selection.get("material")
+                canonical_material_display = str(
+                    material_selection.get("canonical")
+                    or material_selection.get("canonical_material")
                     or ""
-                )
-            if not material_name_display and isinstance(drilling_meta, _MappingABC):
+                ).strip()
+            if not canonical_material_display and isinstance(drilling_meta, _MappingABC):
                 drill_display = (
                     drilling_meta.get("material")
                     or drilling_meta.get("material_display")
@@ -7714,7 +7712,8 @@ def render_quote(
                             drill_display,
                         )
                 if drill_display:
-                    material_name_display = str(drill_display)
+                    canonical_material_display = str(drill_display).strip()
+            material_name_display = canonical_material_display
             if not material_name_display:
                 material_name_display = (
                     material.get("material_name")
@@ -12277,13 +12276,16 @@ def compute_quote_from_df(
 
     normalized_material_row = _normalize_material(material_name) if material_name else None
     canonical_material = ""
+    material_group: str = ""
     if normalized_material_row:
         canonical_material = str(
             normalized_material_row.get("canonical_material") or ""
         ).strip()
         iso_group = str(normalized_material_row.get("iso_group") or "").strip()
         if iso_group:
-            material_selection["material_group"] = iso_group.upper()
+            material_group = iso_group.upper()
+            material_selection["material_group"] = material_group
+            material_selection["group"] = material_group
     if not canonical_material:
         canonical_material = MATERIAL_DISPLAY_BY_KEY.get(
             material_lookup_key,
@@ -12291,10 +12293,13 @@ def compute_quote_from_df(
         )
     if canonical_material:
         material_selection["canonical_material"] = canonical_material
+        material_selection["canonical"] = canonical_material
 
     if material_name:
         material_selection["input_material"] = material_name
-    if material_selection.get("material_group"):
+    if material_group:
+        geo_context.setdefault("material_group", material_group)
+    elif material_selection.get("material_group"):
         geo_context.setdefault("material_group", material_selection["material_group"])
 
     density_guess_from_material = _density_for_material(material_name, _DEFAULT_MATERIAL_DENSITY_G_CC)
@@ -12563,14 +12568,22 @@ def compute_quote_from_df(
     material_cost_before_credit = float(material_direct_cost)
 
     material_detail_for_breakdown = dict(material_detail)
-    if material_selection.get("canonical_material"):
-        material_detail_for_breakdown.setdefault(
-            "canonical_material", material_selection["canonical_material"]
-        )
-    if material_selection.get("material_group"):
-        material_detail_for_breakdown.setdefault(
-            "material_group", material_selection["material_group"]
-        )
+    canonical_selection = str(
+        material_selection.get("canonical")
+        or material_selection.get("canonical_material")
+        or ""
+    ).strip()
+    if canonical_selection:
+        material_detail_for_breakdown.setdefault("canonical_material", canonical_selection)
+        material_detail_for_breakdown.setdefault("canonical", canonical_selection)
+    group_selection = str(
+        material_selection.get("group")
+        or material_selection.get("material_group")
+        or ""
+    ).strip()
+    if group_selection:
+        material_detail_for_breakdown.setdefault("material_group", group_selection)
+        material_detail_for_breakdown.setdefault("group", group_selection)
     if material_selection.get("material_lookup"):
         material_detail_for_breakdown.setdefault(
             "material_lookup", material_selection["material_lookup"]
@@ -13053,16 +13066,13 @@ def compute_quote_from_df(
         )
     )
     drill_material_group: str | None = None
-    if material_selection.get("material_group"):
-        group_val = str(material_selection["material_group"]).strip()
-        if group_val:
-            drill_material_group = group_val
-    drill_material_key = (
-        drill_material_group
-        or drill_material_lookup
-        or (drill_material_source or "")
-    )
-    drill_material_key = drill_material_lookup or drill_material_source
+    group_candidate = str(
+        material_selection.get("group")
+        or material_selection.get("material_group")
+        or ""
+    ).strip()
+    if group_candidate:
+        drill_material_group = group_candidate
     speeds_feeds_raw = _resolve_speeds_feeds_path(params, ui_vars)
     speeds_feeds_path: str | None = None
     speeds_feeds_table: pd.DataFrame | None = None
@@ -13116,27 +13126,38 @@ def compute_quote_from_df(
             drill_material_lookup,
         )
         if table_group:
-            drill_material_group = table_group
+            drill_material_group = str(table_group).strip()
+    material_key_for_drill = (
+        drill_material_group
+        or drill_material_lookup
+        or (drill_material_source or "")
+    )
+    material_key_for_drill = str(material_key_for_drill or "").strip()
     if drill_material_group:
-        drill_material_key = drill_material_group
         geo_context.setdefault("material_group", drill_material_group)
         material_selection["material_group"] = drill_material_group
+        material_selection["group"] = drill_material_group
     drill_material_lookup_final = (
-        _normalize_lookup_key(drill_material_key) if drill_material_key else ""
+        drill_material_lookup
+        or (_normalize_lookup_key(material_key_for_drill) if material_key_for_drill else "")
     )
     if drill_material_lookup_final and not material_selection.get("material_lookup"):
         material_selection["material_lookup"] = drill_material_lookup_final
-    drill_material_display = material_selection.get("canonical_material") or MATERIAL_DISPLAY_BY_KEY.get(
-        drill_material_lookup_final,
-        drill_material_key or drill_material_source or "",
+    drill_material_display = (
+        material_selection.get("canonical")
+        or material_selection.get("canonical_material")
+        or MATERIAL_DISPLAY_BY_KEY.get(
+            drill_material_lookup_final,
+            material_key_for_drill or drill_material_source or "",
+        )
     )
     if speeds_feeds_table is not None and (
-        not drill_material_display or drill_material_display == drill_material_key
+        not drill_material_display or drill_material_display == material_key_for_drill
     ):
         lookup_for_table = drill_material_lookup_final or drill_material_lookup
         alt_label = _material_label_from_table(
             speeds_feeds_table,
-            drill_material_key,
+            material_key_for_drill,
             lookup_for_table,
         )
         if alt_label:
@@ -13146,6 +13167,7 @@ def compute_quote_from_df(
     drill_material_display = str(drill_material_display or "").strip()
     if drill_material_display:
         material_selection["canonical_material"] = drill_material_display
+        material_selection["canonical"] = drill_material_display
     machine_params_default = _machine_params_from_params(params)
     drill_overhead_default = _drill_overhead_from_params(params)
     speeds_feeds_warnings: list[str] = []
@@ -13165,11 +13187,14 @@ def compute_quote_from_df(
     speeds_feeds_summary: Mapping[str, Any] | None = None
     speeds_feeds_row: Mapping[str, Any] | None = None
     selected_precomputed: dict[str, float] = {}
-    material_display_for_debug: str = ""
+    material_display_for_debug: str = str(
+        material_selection.get("canonical")
+        or material_selection.get("canonical_material")
+        or ""
+    ).strip()
 
     if not material_display_for_debug:
         for candidate_display in (
-            material_selection.get("canonical_material"),
             material_selection.get("material_display"),
             material_selection.get("input_material"),
             material_selection.get("material"),
@@ -13184,7 +13209,7 @@ def compute_quote_from_df(
     drill_hr = estimate_drilling_hours(
         hole_diams_mm=hole_diams_list,
         thickness_in=thickness_in,
-        mat_key=drill_material_key or "",
+        mat_key=material_key_for_drill or "",
         hole_groups=hole_groups_geo,
         speeds_feeds_table=speeds_feeds_table,
         machine_params=machine_params_default,
@@ -13389,7 +13414,8 @@ def compute_quote_from_df(
             avg_mm = avg_dia_in * 25.4
             op_display = selected_op_name.replace("_", " ")
             group_display = str(
-                material_selection.get("material_group")
+                material_selection.get("group")
+                or material_selection.get("material_group")
                 or drill_material_group
                 or ""
             ).strip()
@@ -13406,17 +13432,25 @@ def compute_quote_from_df(
         drill_debug_lines.append(drill_debug_line)
 
     drilling_meta: dict[str, Any] = {
-        "material_key": drill_material_key or "",
+        "material_key": material_key_for_drill or "",
         "material_source": material_selection.get("input_material")
         or drill_material_source
         or "",
         "material_lookup": drill_material_lookup_final or selected_lookup,
         "speeds_feeds_loaded": speeds_feeds_loaded_flag,
     }
-    final_group = material_selection.get("material_group") or drill_material_group
+    final_group = (
+        material_selection.get("group")
+        or material_selection.get("material_group")
+        or drill_material_group
+    )
     if final_group:
         drilling_meta["material_group"] = final_group
-    final_material_display = material_selection.get("canonical_material") or drill_material_display
+    final_material_display = (
+        material_selection.get("canonical")
+        or material_selection.get("canonical_material")
+        or drill_material_display
+    )
     if final_material_display:
         drilling_meta["material"] = final_material_display
         drilling_meta["material_display"] = final_material_display
