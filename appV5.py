@@ -5714,6 +5714,8 @@ def canonicalize_costs(process_costs: Mapping[str, Any] | None) -> dict[str, flo
         except Exception:
             items = []
 
+    debug_misc = os.environ.get("DEBUG_MISC") == "1"
+
     out: dict[str, float] = {}
     for raw_key, raw_value in items:
         key = str(raw_key).strip().lower()
@@ -5731,8 +5733,15 @@ def canonicalize_costs(process_costs: Mapping[str, Any] | None) -> dict[str, flo
             amount = 0.0
         out[canon_key] = out.get(canon_key, 0.0) + amount
 
-    if out.get("misc", 0.0) <= 1.0:
-        out.pop("misc", None)
+    misc_amount = out.get("misc")
+    if misc_amount is not None and not debug_misc:
+        try:
+            misc_val = float(misc_amount)
+        except Exception:
+            misc_val = 0.0
+        if abs(misc_val) < 50.0:
+            out.pop("misc", None)
+
     return out
 
 
@@ -7924,31 +7933,9 @@ def render_quote(
                     add_process_notes(proc_key, indent="    ")
 
     def _fold_process_costs(values: Mapping[str, Any] | None) -> dict[str, float]:
-        if not isinstance(values, _MappingABC):
+        if not values:
             return {}
-
-        # Preserve the first-seen label for each canonical bucket key while
-        # summing duplicate entries together.
-        folded: dict[str, float] = {}
-        label_map: dict[str, str] = {}
-        order: list[str] = []
-
-        for raw_key, raw_val in values.items():
-            canon_key = _canonical_bucket_key(raw_key)
-            try:
-                numeric_val = float(raw_val or 0.0)
-            except Exception:
-                numeric_val = 0.0
-
-            existing_label = label_map.get(canon_key)
-            if existing_label is None:
-                label_map[canon_key] = raw_key
-                order.append(raw_key)
-                folded[raw_key] = numeric_val
-            else:
-                folded[existing_label] += numeric_val
-
-        return {label: folded[label] for label in order}
+        return canonicalize_costs(values)
 
     process_costs = _fold_process_costs(process_costs)
 
