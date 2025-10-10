@@ -93,7 +93,7 @@ def roughly_equal(a: float | int | str | None, b: float | int | str | None, *, e
 import copy
 import sys
 import textwrap
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, TypeVar
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, TypeVar, cast
 
 
 T = TypeVar("T")
@@ -470,6 +470,7 @@ try:  # Prefer pythonocc-core's OCP bindings when available
     from OCP.TopExp import TopExp, TopExp_Explorer  # type: ignore[import]
     from OCP.TopoDS import TopoDS, TopoDS_Face, TopoDS_Shape  # type: ignore[import]
     from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape  # type: ignore[import]
+    from OCP.BRepTools import BRepTools  # type: ignore[import]
 except ImportError:
     try:  # Fallback to pythonocc-core
         from OCC.Core.BRep import BRep_Tool  # type: ignore[import]
@@ -483,7 +484,7 @@ except ImportError:
         if TYPE_CHECKING:  # Keep type checkers happy without introducing runtime deps
             from typing import Any
 
-            BRep_Tool = TopAbs_EDGE = TopAbs_FACE = TopExp = TopExp_Explorer = Any  # type: ignore[assignment]
+            BRep_Tool = TopAbs_EDGE = TopAbs_FACE = TopExp = TopExp_Explorer = BRepTools = Any  # type: ignore[assignment]
             TopoDS = TopoDS_Face = TopoDS_Shape = Any  # type: ignore[assignment]
             TopTools_IndexedDataMapOfShapeListOfShape = Any  # type: ignore[assignment]
         else:
@@ -497,6 +498,7 @@ except ImportError:
             BRep_Tool = _MissingOCCTModule()
             TopAbs_EDGE = TopAbs_FACE = _MissingOCCTModule()
             TopExp = TopExp_Explorer = _MissingOCCTModule()
+            BRepTools = _MissingOCCTModule()
             TopoDS = TopoDS_Face = TopoDS_Shape = _MissingOCCTModule()
             TopTools_IndexedDataMapOfShapeListOfShape = _MissingOCCTModule()
 
@@ -3751,12 +3753,12 @@ def _min_wall_between_parallel_planes(shape):
 def _hole_face_identifier(face, cylinder, face_bbox):
     centers = []
     try:
-        exp = TopExp_Explorer(face, TopAbs_EDGE)
+        exp = cast(Any, TopExp_Explorer)(face, TopAbs_EDGE)
     except Exception:
         exp = None
     while exp and exp.More():
         try:
-            edge = to_edge(exp.Current())
+            edge = to_edge(cast(Any, exp.Current()))
             curve = BRepAdaptor_Curve(edge)
             if curve.GetType() == GeomAbs_Circle:
                 circ = curve.Circle()
@@ -4110,10 +4112,14 @@ def clamp_llm_hours(
     """Sanitize LLM-derived hour estimates before applying them to the UI."""
 
     cleaned: dict[str, Any] = {}
-    raw = raw or {}
+    raw_map = cast(Mapping[str, Any], raw or {})
 
     hours_out: dict[str, float] = {}
-    hours_src = raw.get("hours") if isinstance(raw.get("hours"), Mapping) else {}
+    hours_val = raw_map.get("hours")
+    if isinstance(hours_val, _MappingABC):
+        hours_src: Mapping[str, Any] = cast(Mapping[str, Any], hours_val)
+    else:
+        hours_src = {}
     for key, value in hours_src.items():
         val = _coerce_float_or_none(value)
         if val is None:
@@ -4126,7 +4132,11 @@ def clamp_llm_hours(
         cleaned["hours"] = hours_out
 
     setups_out: dict[str, Any] = {}
-    setups_src = raw.get("setups") if isinstance(raw.get("setups"), Mapping) else {}
+    setups_val = raw_map.get("setups")
+    if isinstance(setups_val, _MappingABC):
+        setups_src: Mapping[str, Any] = cast(Mapping[str, Any], setups_val)
+    else:
+        setups_src = {}
     if setups_src:
         count_raw = setups_src.get("Milling_Setups")
         if count_raw is not None:
@@ -4141,22 +4151,26 @@ def clamp_llm_hours(
         cleaned["setups"] = setups_out
 
     inspection_out: dict[str, bool] = {}
-    inspection_src = raw.get("inspection") if isinstance(raw.get("inspection"), Mapping) else {}
+    inspection_val = raw_map.get("inspection")
+    if isinstance(inspection_val, _MappingABC):
+        inspection_src: Mapping[str, Any] = cast(Mapping[str, Any], inspection_val)
+    else:
+        inspection_src = {}
     for key in _LLM_INSPECTION_ITEM_MAP:
         if key in inspection_src:
             inspection_out[key] = bool(inspection_src.get(key))
     if inspection_out:
         cleaned["inspection"] = inspection_out
 
-    notes_raw = raw.get("notes")
+    notes_raw = raw_map.get("notes")
     if isinstance(notes_raw, list):
         cleaned["notes"] = [str(n).strip() for n in notes_raw if str(n).strip()][:8]
 
-    meta_raw = raw.get("_meta")
-    if isinstance(meta_raw, Mapping):
+    meta_raw = raw_map.get("_meta")
+    if isinstance(meta_raw, _MappingABC):
         cleaned["_meta"] = dict(meta_raw)
 
-    for key, value in raw.items():
+    for key, value in raw_map.items():
         if key in {"hours", "setups", "inspection", "notes", "_meta"}:
             continue
         cleaned.setdefault(str(key), value)
@@ -4176,7 +4190,7 @@ def apply_llm_hours_to_variables(
     if not _HAS_PANDAS or df is None:
         return df
 
-    estimates = estimates or {}
+    estimates_map = cast(Mapping[str, Any], estimates or {})
     df_out = df.copy(deep=True)
     normalized_items = df_out["Item"].astype(str).apply(_normalize_item_text)
     index_lookup = {norm: idx for idx, norm in zip(df_out.index, normalized_items)}
@@ -4213,7 +4227,11 @@ def apply_llm_hours_to_variables(
                 "previous": previous,
             })
 
-    hours_src = estimates.get("hours") if isinstance(estimates.get("hours"), Mapping) else {}
+    hours_val = estimates_map.get("hours")
+    if isinstance(hours_val, _MappingABC):
+        hours_src: Mapping[str, Any] = cast(Mapping[str, Any], hours_val)
+    else:
+        hours_src = {}
     for key, value in hours_src.items():
         label = _LLM_HOUR_ITEM_MAP.get(str(key))
         if not label:
@@ -4223,7 +4241,11 @@ def apply_llm_hours_to_variables(
             continue
         _write_value(label, float(val), dtype="number")
 
-    setups_src = estimates.get("setups") if isinstance(estimates.get("setups"), Mapping) else {}
+    setups_val = estimates_map.get("setups")
+    if isinstance(setups_val, _MappingABC):
+        setups_src: Mapping[str, Any] = cast(Mapping[str, Any], setups_val)
+    else:
+        setups_src = {}
     for key, value in setups_src.items():
         label = _LLM_SETUP_ITEM_MAP.get(str(key))
         if not label:
@@ -4240,7 +4262,11 @@ def apply_llm_hours_to_variables(
                 continue
             _write_value(label, float(val), dtype="number")
 
-    inspection_src = estimates.get("inspection") if isinstance(estimates.get("inspection"), Mapping) else {}
+    inspection_val = estimates_map.get("inspection")
+    if isinstance(inspection_val, _MappingABC):
+        inspection_src: Mapping[str, Any] = cast(Mapping[str, Any], inspection_val)
+    else:
+        inspection_src = {}
     for key, value in inspection_src.items():
         label = _LLM_INSPECTION_ITEM_MAP.get(str(key))
         if not label:
@@ -4384,7 +4410,7 @@ _MASTER_VARIABLES_CACHE: dict[str, Any] = {
     "full": None,
 }
 
-_SPEEDS_FEEDS_CACHE: dict[str, "pd.DataFrame" | None] = {}
+_SPEEDS_FEEDS_CACHE: dict[str, pd.DataFrame | None] = {}
 
 def _coerce_core_types(df_core: "pd.DataFrame") -> "pd.DataFrame":
     """Light normalization for estimator expectations."""
