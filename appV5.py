@@ -5793,7 +5793,15 @@ def render_quote(
     totals       = breakdown.get("totals", {}) or {}
     nre_detail   = breakdown.get("nre_detail", {}) or {}
     nre          = breakdown.get("nre", {}) or {}
-    material     = breakdown.get("material", {}) or {}
+    material_raw = breakdown.get("material", {}) or {}
+    if isinstance(material_raw, Mapping):
+        material_block = dict(material_raw)
+    else:  # tolerate legacy iterables or unexpected values
+        try:
+            material_block = dict(material_raw or {})
+        except Exception:
+            material_block = {}
+    material = material_block
     drilling_meta = breakdown.get("drilling_meta", {}) or {}
     process_costs_raw = breakdown.get("process_costs", {}) or {}
     process_costs = (
@@ -5801,7 +5809,14 @@ def render_quote(
         if isinstance(process_costs_raw, Mapping)
         else dict(process_costs_raw or {})
     )
-    pass_through = breakdown.get("pass_through", {}) or {}
+    pass_through_raw = breakdown.get("pass_through", {}) or {}
+    if isinstance(pass_through_raw, Mapping):
+        pass_through = dict(pass_through_raw)
+    else:
+        try:
+            pass_through = dict(pass_through_raw or {})
+        except Exception:
+            pass_through = {}
     applied_pcts = breakdown.get("applied_pcts", {}) or {}
     process_meta_raw = breakdown.get("process_meta", {}) or {}
     applied_process_raw = breakdown.get("applied_process", {}) or {}
@@ -5812,6 +5827,32 @@ def render_quote(
     params       = breakdown.get("params", {}) or {}
     nre_cost_details = breakdown.get("nre_cost_details", {}) or {}
     labor_cost_details_input_raw = breakdown.get("labor_cost_details", {}) or {}
+
+    # Shipping is displayed in exactly one section of the quote to avoid
+    # conflicting totals.  Prefer the pass-through value when available and
+    # otherwise fall back to a material-specific entry before rendering.
+    shipping_pipeline = "pass_through"  # pipeline (a) – display under Pass-Through
+    shipping_source = "pass_through"
+    shipping_raw_value: Any = pass_through.get("Shipping")
+    if not shipping_raw_value:
+        shipping_raw_value = material_block.get("shipping")
+        if shipping_raw_value:
+            shipping_source = "material"
+        else:
+            shipping_source = None
+    shipping_total = float(_coerce_float_or_none(shipping_raw_value) or 0.0)
+    if shipping_pipeline == "pass_through":
+        pass_through["Shipping"] = shipping_total
+        material_block.pop("shipping", None)
+        show_material_shipping = False
+    else:
+        pass_through.pop("Shipping", None)
+        if shipping_source:
+            material_block["shipping"] = shipping_total
+        show_material_shipping = (
+            (shipping_total > 0)
+            or (shipping_total == 0 and bool(shipping_source) and show_zeros)
+        )
 
     def _merge_detail_text(existing: str | None, new_value: Any) -> str:
         segments: list[str] = []
@@ -7081,10 +7122,15 @@ def render_quote(
 
             if base_cost_before_scrap is not None or show_zeros:
                 base_val = float(base_cost_before_scrap or 0.0)
-                shipping_cost = base_val * 0.15
+                if show_material_shipping and (shipping_total > 0 or show_zeros):
+                    if shipping_source:
+                        shipping_display = shipping_total
+                    else:
+                        shipping_display = base_val * 0.15
+                    shipping_tax_lines.append(f"  Shipping: {_m(shipping_display)}")
                 tax_cost = base_val * 0.065
-                shipping_tax_lines.append(f"  Shipping: {_m(shipping_cost)}")
-                shipping_tax_lines.append(f"  Material Tax: {_m(tax_cost)}")
+                if tax_cost > 0 or show_zeros:
+                    shipping_tax_lines.append(f"  Material Tax: {_m(tax_cost)}")
 
             if shipping_tax_lines:
                 detail_lines.extend(shipping_tax_lines)
