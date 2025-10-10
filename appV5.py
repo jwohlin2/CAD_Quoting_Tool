@@ -403,11 +403,13 @@ except Exception:  # pragma: no cover - fallback when optional import unavailabl
 try:
     from cad_quoter.utils.text import _match_items_contains
 except Exception:  # pragma: no cover - defensive fallback for optional import paths
-    def _match_items_contains(items, pattern):  # type: ignore[override]
-        try:
-            return items.str.contains(pattern, case=False, regex=True, na=False)
-        except Exception:
-            return items.str.contains(pattern, case=False, regex=False, na=False)
+    _match_items_contains = _fallback_match_items_contains  # type: ignore[assignment]
+else:
+    _match_items_contains = (
+        _imported_match_items_contains
+        if callable(_imported_match_items_contains)
+        else _fallback_match_items_contains
+    )
 from cad_quoter.pricing import (
     LB_PER_KG,
     PricingEngine,
