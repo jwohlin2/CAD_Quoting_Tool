@@ -8393,6 +8393,24 @@ def render_quote(
 
     _emit_labor_cost_lines()
 
+    display_machine = 0.0
+    display_labor_for_ladder = 0.0
+    for storage_key, amount in labor_costs_display.items():
+        try:
+            amount_val = float(amount or 0.0)
+        except Exception:
+            continue
+        canon_key = _canonical_bucket_key(str(storage_key))
+        if canon_key == "machine":
+            display_machine += amount_val
+            continue
+        if canon_key.startswith("planner_"):
+            # Planner rollup buckets are used only for internal reconciliation
+            # and are hidden from the display. They should not contribute to the
+            # visible labor subtotal for the pricing ladder.
+            continue
+        display_labor_for_ladder += amount_val
+
     machine_in_labor_section = any(
         _canonical_bucket_key(str(key)) == "machine"
         for key in labor_costs_display.keys()
@@ -8835,7 +8853,14 @@ def render_quote(
         )
 
     computed_subtotal = proc_total + pass_total
-    declared_subtotal = float(totals.get("subtotal", computed_subtotal))
+    declared_subtotal: float | None = None
+    if isinstance(totals, dict) and "subtotal" in totals:
+        try:
+            declared_subtotal = float(totals.get("subtotal", 0.0) or 0.0)
+        except Exception:
+            declared_subtotal = None
+    if declared_subtotal is None:
+        declared_subtotal = float(computed_subtotal)
     if material_net_cost is None:
         try:
             material_key = next(
@@ -8853,10 +8878,15 @@ def render_quote(
         except Exception:
             material_net_cost = 0.0
     directs = float(material_net_cost) + float(pass_through_total) + float(display_machine)
-    ladder_subtotal = float(display_labor_for_ladder) + directs
-    subtotal = ladder_subtotal
+    ladder_labor_total = float(display_labor_for_ladder)
+    ladder_subtotal = ladder_labor_total + directs
+    subtotal = float(declared_subtotal)
     printed_subtotal = subtotal
-    assert roughly_equal(ladder_subtotal, printed_subtotal, eps=0.01)
+    if not roughly_equal(ladder_subtotal, printed_subtotal, eps=0.01):
+        raise AssertionError(
+            "Labor + Directs does not match subtotal: "
+            f"labor={ladder_labor_total:.2f}, directs={directs:.2f}, subtotal={printed_subtotal:.2f}"
+        )
     lines.append("")
 
     # ---- Pricing ladder ------------------------------------------------------
