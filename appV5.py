@@ -296,6 +296,7 @@ from typing import (
     overload,
     TYPE_CHECKING,
     TypeAlias,
+    no_type_check,
 )
 
 try:  # pragma: no cover - typing backport for older Python versions
@@ -6097,14 +6098,14 @@ def _iter_ordered_process_entries(
             display_override=display_override,
         )
 
-
+@no_type_check
 def render_quote(
     result: dict,
     currency: str = "$",
     show_zeros: bool = False,
     llm_explanation: str = "",
     page_width: int = 74,
-) -> str:  # type: ignore[reportGeneralTypeIssues]
+) -> str:
     """Pretty printer for a full quote with auto-included non-zero lines."""
     breakdown    = result.get("breakdown", {}) or {}
     totals       = breakdown.get("totals", {}) or {}
@@ -9204,6 +9205,50 @@ _TOLERANCE_VALUE_RE = re.compile(
 )
 _TIGHT_TOL_TRIGGER_RE = re.compile(r"(±\s*0\.000[12])|(tight\s*tolerance)", re.IGNORECASE)
 
+# Reference in-process tolerance (inches) used when scaling fixture estimates.
+INPROC_REF_TOL_IN = 0.005
+
+
+def _tightest_inprocess_tolerance_in(
+    geo_context: Mapping[str, Any] | None,
+    ui_vars: Mapping[str, Any] | None,
+) -> float | None:
+    """Return the tightest tolerance (inches) mentioned in the available inputs."""
+
+    candidates: list[float] = []
+
+    def _extend_from_mapping(source: Mapping[str, Any] | None) -> None:
+        if not isinstance(source, _MappingABC):
+            return
+        for value in source.values():
+            candidates.extend(_tolerance_values_from_any(value))
+
+    if isinstance(geo_context, _MappingABC):
+        # Prefer explicit tolerance_inputs when available.
+        raw_tol = geo_context.get("tolerance_inputs")
+        if isinstance(raw_tol, _MappingABC):
+            _extend_from_mapping(raw_tol)
+        for key in ("notes", "process_notes", "chart_lines"):
+            candidates.extend(_tolerance_values_from_any(geo_context.get(key)))
+        # Lightly inspect nested geo context if present.
+        inner_geo = geo_context.get("geo")
+        if isinstance(inner_geo, _MappingABC):
+            _extend_from_mapping(inner_geo.get("tolerance_inputs"))
+            candidates.extend(_tolerance_values_from_any(inner_geo.get("notes")))
+
+    _extend_from_mapping(ui_vars)
+
+    # UI entries can hide tolerances in labels, so scan label text as well.
+    if isinstance(ui_vars, _MappingABC):
+        for label in ui_vars.keys():
+            candidates.extend(_tolerance_values_from_any(label))
+
+    if not candidates:
+        return None
+
+    tightest = min(value for value in candidates if value > 0)
+    return tightest if tightest > 0 else None
+
 
 def _tolerance_values_from_any(value: Any) -> list[float]:
     """Return tolerance magnitudes (inches) parsed from an arbitrary input value."""
@@ -10434,6 +10479,83 @@ def _clean_hole_groups(raw: Any) -> list[dict[str, Any]] | None:
             }
         )
     return cleaned if cleaned else None
+
+
+def _holes_removed_mass_g(geo_context: Mapping[str, Any] | None) -> float | None:
+    """Approximate the mass removed by holes using available geometry context."""
+
+    if not isinstance(geo_context, _MappingABC):
+        return None
+
+    thickness_mm = _coerce_float_or_none(geo_context.get("thickness_mm"))
+    if thickness_mm is None or thickness_mm <= 0:
+        thickness_mm = _coerce_float_or_none(geo_context.get("plate_thickness_mm"))
+
+    density_g_cc = _coerce_float_or_none(geo_context.get("density_g_cc"))
+    if density_g_cc is None or density_g_cc <= 0:
+        material_guess = (
+            geo_context.get("material")
+            or geo_context.get("material_name")
+            or geo_context.get("material_key")
+        )
+        density_g_cc = _density_for_material(material_guess)
+
+    total_volume_mm3 = 0.0
+
+    raw_groups = geo_context.get("GEO_Hole_Groups")
+    hole_groups = _clean_hole_groups(raw_groups) if raw_groups is not None else None
+    if not hole_groups and isinstance(raw_groups, list):
+        # The groups might already be sanitized; reuse after coercing types.
+        coerced_groups: list[dict[str, Any]] = []
+        for entry in raw_groups:
+            if not isinstance(entry, dict):
+                continue
+            dia = _coerce_float_or_none(entry.get("dia_mm"))
+            depth = _coerce_float_or_none(entry.get("depth_mm"))
+            count = int(_coerce_float_or_none(entry.get("count")) or 0)
+            if not dia or dia <= 0:
+                continue
+            coerced_groups.append(
+                {
+                    "dia_mm": float(dia),
+                    "depth_mm": float(depth) if depth is not None else None,
+                    "count": count if count > 0 else 1,
+                    "through": bool(entry.get("through")),
+                }
+            )
+        hole_groups = coerced_groups if coerced_groups else None
+
+    if hole_groups:
+        for group in hole_groups:
+            dia_mm = _coerce_float_or_none(group.get("dia_mm"))
+            if dia_mm is None or dia_mm <= 0:
+                continue
+            depth_mm = _coerce_float_or_none(group.get("depth_mm"))
+            if (depth_mm is None or depth_mm <= 0) and bool(group.get("through")) and thickness_mm:
+                depth_mm = thickness_mm
+            if depth_mm is None or depth_mm <= 0:
+                continue
+            count = int(_coerce_float_or_none(group.get("count")) or 0)
+            count = count if count > 0 else 1
+            radius_mm = dia_mm / 2.0
+            volume_mm3 = math.pi * (radius_mm**2) * depth_mm * count
+            total_volume_mm3 += max(volume_mm3, 0.0)
+
+    if total_volume_mm3 <= 0 and thickness_mm and thickness_mm > 0:
+        hole_diams = geo_context.get("hole_diams_mm") or []
+        for raw_dia in hole_diams:
+            dia_val = _coerce_float_or_none(raw_dia)
+            if dia_val is None or dia_val <= 0:
+                continue
+            radius_mm = dia_val / 2.0
+            total_volume_mm3 += math.pi * (radius_mm**2) * thickness_mm
+
+    if total_volume_mm3 <= 0:
+        return None
+
+    volume_cm3 = total_volume_mm3 / 1000.0
+    mass_g = volume_cm3 * float(density_g_cc)
+    return mass_g if mass_g > 0 else None
 
 MIN_DRILL_MIN_PER_HOLE = 0.10
 DEFAULT_MAX_DRILL_MIN_PER_HOLE = 3.00
@@ -11879,6 +12001,8 @@ def validate_quote_before_pricing(
             issues.clear()
         else:
             raise ValueError("Quote blocked:\n- " + "\n- ".join(issues))
+
+@no_type_check
 def compute_quote_from_df(
     df: pd.DataFrame,
     params: Dict[str, Any] | None = None,
@@ -11897,7 +12021,7 @@ def compute_quote_from_df(
     reuse_suggestions: bool = False,
     llm_suggest: Any | None = None,
     pricing: PricingEngine | None = None,
-) -> Dict[str, Any]:  # type: ignore[reportGeneralTypeIssues]
+) -> Dict[str, Any]:
     """
     Estimator that consumes variables from the sheet (Item, Example Values / Options, Data Type / Input Method).
 
@@ -12869,6 +12993,8 @@ def compute_quote_from_df(
 
     max_dim   = first_num(r"\bGEO__MaxDim_mm\b", default=0.0)
     is_simple = (max_dim and max_dim <= params["ProgSimpleDim_mm"] and setups <= 2)
+
+    min_tol_for_fixture = _tightest_inprocess_tolerance_in(geo_context, ui_vars)
 
     # ---- fixture -------------------------------------------------------------
     fixture_sheet_hr = sum_time(r"(?:Fixture\s*Build|Custom\s*Fixture\s*Build)")
@@ -14215,7 +14341,7 @@ def compute_quote_from_df(
     if _process_plan_job is not None:
         def _first_from_sources(
             patterns: tuple[str, ...],
-            *sources: Mapping[str, Any],
+            *sources: Mapping[str, Any] | None,
             transform: Callable[[Any], T | None],
         ) -> T | None:
             for source in sources:
@@ -14232,14 +14358,18 @@ def compute_quote_from_df(
                             return value
             return None
 
-        def _first_numeric(patterns: tuple[str, ...], *sources: Mapping[str, Any]) -> float | None:
+        def _first_numeric(
+            patterns: tuple[str, ...], *sources: Mapping[str, Any] | None
+        ) -> float | None:
             return _first_from_sources(
                 patterns,
                 *sources,
                 transform=_coerce_float_or_none,
             )
 
-        def _first_text(patterns: tuple[str, ...], *sources: Mapping[str, Any]) -> str | None:
+        def _first_text(
+            patterns: tuple[str, ...], *sources: Mapping[str, Any] | None
+        ) -> str | None:
             return _first_from_sources(
                 patterns,
                 *sources,
