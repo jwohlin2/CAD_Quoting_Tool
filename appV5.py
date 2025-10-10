@@ -240,7 +240,14 @@ from cad_quoter.domain_models import (
 from cad_quoter.coerce import to_float, to_int
 from cad_quoter.utils import compact_dict, sdict
 from cad_quoter.utils.geo_ctx import _should_include_outsourced_pass
-from cad_quoter.utils.text import _match_items_contains
+try:
+    from cad_quoter.utils.text import _match_items_contains
+except Exception:  # pragma: no cover - defensive fallback for optional import paths
+    def _match_items_contains(items, pattern):  # type: ignore[override]
+        try:
+            return items.str.contains(pattern, case=False, regex=True, na=False)
+        except Exception:
+            return items.str.contains(pattern, case=False, regex=False, na=False)
 from cad_quoter.pricing import (
     LB_PER_KG,
     PricingEngine,
@@ -291,6 +298,7 @@ from cad_quoter.llm import (
     EDITOR_FROM_UI,
     EDITOR_TO_SUGG,
     LLMClient,
+    SYSTEM_SUGGEST,
     SUGG_TO_EDITOR,
     infer_hours_and_overrides_from_geo as _infer_hours_and_overrides_from_geo,
     parse_llm_json,
