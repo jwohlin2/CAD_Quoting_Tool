@@ -92,7 +92,7 @@ def roughly_equal(a: float | int | str | None, b: float | int | str | None, *, e
 import copy
 import sys
 import textwrap
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, TypeVar, cast
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, TypeAlias, TypeVar, cast
 
 
 T = TypeVar("T")
@@ -474,18 +474,26 @@ from typing import TYPE_CHECKING, TypedDict
 
 if TYPE_CHECKING:
     try:
-        from OCP.TopoDS import TopoDS_Shape as TopoDSShapeT  # type: ignore[import]
+        from OCP.TopoDS import TopoDS_Shape as _TopoDSShape  # type: ignore[import]
     except ImportError:
         try:
-            from OCC.Core.TopoDS import TopoDS_Shape as TopoDSShapeT  # type: ignore[import]
+            from OCC.Core.TopoDS import TopoDS_Shape as _TopoDSShape  # type: ignore[import]
         except ImportError:  # pragma: no cover - typing-only fallback
-            TopoDSShapeT = typing.Any
+            from typing import Any as _TopoDSShape  # type: ignore[assignment]
+    TopoDSShapeT: TypeAlias = _TopoDSShape
 else:
-    TopoDSShapeT = typing.Any
+    TopoDSShapeT: TypeAlias = Any
 
 try:  # Prefer pythonocc-core's OCP bindings when available
     from OCP.BRep import BRep_Tool  # type: ignore[import]
-    from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE  # type: ignore[import]
+    from OCP.TopAbs import (  # type: ignore[import]
+        TopAbs_COMPOUND,
+        TopAbs_EDGE,
+        TopAbs_FACE,
+        TopAbs_SHELL,
+        TopAbs_SOLID,
+        TopAbs_ShapeEnum,
+    )
     from OCP.TopExp import TopExp, TopExp_Explorer  # type: ignore[import]
     from OCP.TopoDS import TopoDS, TopoDS_Face, TopoDS_Shape  # type: ignore[import]
     from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape  # type: ignore[import]
@@ -493,7 +501,14 @@ try:  # Prefer pythonocc-core's OCP bindings when available
 except ImportError:
     try:  # Fallback to pythonocc-core
         from OCC.Core.BRep import BRep_Tool  # type: ignore[import]
-        from OCC.Core.TopAbs import TopAbs_EDGE, TopAbs_FACE  # type: ignore[import]
+        from OCC.Core.TopAbs import (  # type: ignore[import]
+            TopAbs_COMPOUND,
+            TopAbs_EDGE,
+            TopAbs_FACE,
+            TopAbs_SHELL,
+            TopAbs_SOLID,
+            TopAbs_ShapeEnum,
+        )
         from OCC.Core.TopExp import TopExp, TopExp_Explorer  # type: ignore[import]
         from OCC.Core.TopoDS import TopoDS, TopoDS_Face, TopoDS_Shape  # type: ignore[import]
         from OCC.Core.TopTools import (  # type: ignore[import]
@@ -503,7 +518,7 @@ except ImportError:
         if TYPE_CHECKING:  # Keep type checkers happy without introducing runtime deps
             from typing import Any
 
-            BRep_Tool = TopAbs_EDGE = TopAbs_FACE = TopExp = TopExp_Explorer = BRepTools = Any  # type: ignore[assignment]
+            BRep_Tool = TopAbs_COMPOUND = TopAbs_EDGE = TopAbs_FACE = TopAbs_SHELL = TopAbs_SOLID = TopAbs_ShapeEnum = TopExp = TopExp_Explorer = BRepTools = Any  # type: ignore[assignment]
             TopoDS = TopoDS_Face = TopoDS_Shape = Any  # type: ignore[assignment]
             TopTools_IndexedDataMapOfShapeListOfShape = Any  # type: ignore[assignment]
         else:
@@ -515,7 +530,7 @@ except ImportError:
                     )
 
             BRep_Tool = _MissingOCCTModule()
-            TopAbs_EDGE = TopAbs_FACE = TopAbs_SHELL = TopAbs_SOLID = TopAbs_COMPOUND = _MissingOCCTModule()
+            TopAbs_EDGE = TopAbs_FACE = TopAbs_SHELL = TopAbs_SOLID = TopAbs_COMPOUND = TopAbs_ShapeEnum = _MissingOCCTModule()
             TopExp = TopExp_Explorer = _MissingOCCTModule()
             BRepTools = _MissingOCCTModule()
             TopoDS = TopoDS_Face = TopoDS_Shape = _MissingOCCTModule()
@@ -3591,7 +3606,7 @@ def _shape_from_reader(reader):
     if shape is None or shape.IsNull():
         raise RuntimeError("Reader produced a null TopoDS_Shape")
 
-    fixer = ShapeFix_Shape(shape)
+    fixer = cast(Any, ShapeFix_Shape)(shape)
     fixer.Perform()
     healed = fixer.Shape()
     if healed is None or healed.IsNull():
@@ -3650,7 +3665,7 @@ def read_step_shape(path: str) -> TopoDSShapeT:
         else:
             logger.debug("STEP_PROBE faces=%d", cnt)
 
-    fx = ShapeFix_Shape(shape)
+    fx = cast(Any, ShapeFix_Shape)(shape)
     fx.Perform()
     return fx.Shape()
 
@@ -3744,21 +3759,23 @@ SMALL = 1e-7
 
 
 def iter_solids(shape: TopoDS_Shape):
-    exp = TopExp_Explorer(shape, TopAbs_SOLID)
+    explorer = cast(type[Any], TopExp_Explorer)
+    exp = explorer(shape, cast(TopAbs_ShapeEnum, TopAbs_SOLID))
     while exp.More():
         yield to_solid(exp.Current())
         exp.Next()
 
 def explode_compound(shape: TopoDS_Shape):
     """If the file is a big COMPOUND, break it into shapes (parts/bodies)."""
-    exp = TopExp_Explorer(shape, TopAbs_COMPOUND)
+    explorer = cast(type[Any], TopExp_Explorer)
+    exp = explorer(shape, cast(TopAbs_ShapeEnum, TopAbs_COMPOUND))
     if exp.More():
         # Itï¿½s a compound ï¿½ return its shells/solids/faces as needed
         solids = list(iter_solids(shape))
         if solids:
             return solids
         # fallback to shells
-        sh = TopExp_Explorer(shape, TopAbs_SHELL)
+        sh = explorer(shape, cast(TopAbs_ShapeEnum, TopAbs_SHELL))
         shells = []
         while sh.More():
             shells.append(to_shell(sh.Current()))
@@ -3870,12 +3887,13 @@ def _surface_areas_by_type(shape):
 def _section_perimeter_len(shape, z_values):
     xmin, ymin, zmin, xmax, ymax, zmax = _bbox(shape)
     total = 0.0
+    explorer = cast(type[Any], TopExp_Explorer)
     for z in z_values:
         plane = gp_Pln(gp_Pnt(0,0,z), gp_Dir(0,0,1))
         sec = BRepAlgoAPI_Section(shape, plane, False); sec.Build()
         if not sec.IsDone(): continue
         w = sec.Shape()
-        it = TopExp_Explorer(w, TopAbs_EDGE)
+        it = explorer(w, cast(TopAbs_ShapeEnum, TopAbs_EDGE))
         while it.More():
             e = to_edge(it.Current())
             total += _length_of_edge(e)
@@ -4203,8 +4221,9 @@ def read_cad_any(path: str):
         ig.TransferRoots()
         return _shape_from_reader(ig)
     if ext == ".brep":
-        s = TopoDS_Shape()
-        if not BRepTools.Read(s, path, None):
+        shape_cls = cast(type[Any], TopoDS_Shape)
+        s = shape_cls()
+        if not cast(Any, BRepTools).Read(s, path, None):
             raise RuntimeError("BREP read failed")
         return s
     if ext == ".dxf":
@@ -4925,6 +4944,8 @@ def _load_master_variables() -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
 
     try:
         core_df, full_df = read_variables_file(str(master_path), return_full=True)
+        core_df = cast(pd.DataFrame, core_df)
+        full_df = cast(pd.DataFrame, full_df)
     except Exception:
         logger.warning("Failed to load master variables CSV from %s", master_path, exc_info=True)
         cache["loaded"] = True
