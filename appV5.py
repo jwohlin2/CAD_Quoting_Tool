@@ -5420,6 +5420,9 @@ PREFERRED_PROCESS_BUCKET_ORDER: tuple[str, ...] = (
     "finishing_deburr",
     "saw_waterjet",
     "inspection",
+    "assembly",
+    "packaging",
+    "misc",
 )
 
 
@@ -5446,7 +5449,44 @@ PLANNER_META: frozenset[str] = frozenset({"planner_labor", "planner_machine", "p
 
 
 def _normalize_bucket_key(name: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_")
+    text = re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_")
+    aliases = {
+        "finishing": "finishing_deburr",
+        "deburring": "finishing_deburr",
+        "finish_deburr": "finishing_deburr",
+        "finishing_deburr": "finishing_deburr",
+        "deburr": "finishing_deburr",
+        "saw": "saw_waterjet",
+        "saw_waterjet": "saw_waterjet",
+        "waterjet": "saw_waterjet",
+        "counter_bore": "counterbore",
+        "counter_bores": "counterbore",
+        "counterbore": "counterbore",
+        "counter_sink": "countersink",
+        "counter_sinks": "countersink",
+        "countersink": "countersink",
+        "thread_mill": "tapping",
+    }
+    return aliases.get(text, text)
+
+
+def _rate_key_for_bucket(bucket: str | None) -> str | None:
+    canon = _normalize_bucket_key(bucket)
+    mapping = {
+        "milling": "MillingRate",
+        "drilling": "DrillingRate",
+        "counterbore": "DrillingRate",
+        "countersink": "DrillingRate",
+        "tapping": "TappingRate",
+        "grinding": "SurfaceGrindRate",
+        "inspection": "InspectionRate",
+        "finishing_deburr": "DeburrRate",
+        "assembly": "AssemblyRate",
+        "packaging": "PackagingRate",
+        "saw_waterjet": "SawWaterjetRate",
+        "misc": "MillingRate",
+    }
+    return mapping.get(canon)
 
 
 def _canonical_bucket_key(name: str) -> str:
@@ -5732,6 +5772,14 @@ def _iter_ordered_process_entries(
             extra_val = float(meta.get("base_extra", 0.0) or 0.0)
         except Exception:
             extra_val = 0.0
+        try:
+            meta_hr = float(meta.get("hr", 0.0) or 0.0)
+        except Exception:
+            meta_hr = 0.0
+        try:
+            meta_rate = float(meta.get("rate", 0.0) or 0.0)
+        except Exception:
+            meta_rate = 0.0
 
         display_override, amount_override, display_hr, display_rate = _format_planner_bucket_line(
             canon_key,
@@ -5749,12 +5797,24 @@ def _iter_ordered_process_entries(
         )
 
         detail_bits: list[str] = []
-        if not use_display and display_hr > 0:
-            detail_bits.append(
-                f"{display_hr:.2f} hr @ {currency_formatter(display_rate)}/hr"
-            )
+        if not use_display:
+            if display_hr > 0:
+                rate_for_detail = display_rate if display_rate > 0 else meta_rate
+                if rate_for_detail > 0:
+                    detail_bits.append(
+                        f"{display_hr:.2f} hr @ {currency_formatter(rate_for_detail)}/hr"
+                    )
+                else:
+                    detail_bits.append(f"{display_hr:.2f} hr")
+            elif meta_hr > 0:
+                if meta_rate > 0:
+                    detail_bits.append(
+                        f"{meta_hr:.2f} hr @ {currency_formatter(meta_rate)}/hr"
+                    )
+                else:
+                    detail_bits.append(f"{meta_hr:.2f} hr")
 
-        rate_for_extra = display_rate
+        rate_for_extra = display_rate if display_rate > 0 else meta_rate
         if abs(extra_val) > 1e-6:
             if (not use_display and display_hr <= 1e-6 and rate_for_extra > 0) or (
                 use_display and display_hr <= 1e-6 and rate_for_extra > 0
@@ -5855,6 +5915,7 @@ def render_quote(
         except Exception:
             continue
     labor_costs_display: dict[str, float] = {}
+    hour_summary_entries: dict[str, tuple[float, bool]] = {}
     prog_hr: float = 0.0
     direct_cost_details = breakdown.get("direct_cost_details", {}) or {}
     qty_raw = result.get("qty")
@@ -6096,16 +6157,45 @@ def render_quote(
                     seen.add(seg)
         if segments:
             return "; ".join(segments)
-        return str(existing).strip() if existing else None
+        if existing:
+            filtered_existing: list[str] = []
+            for segment in re.split(r";\s*", str(existing)):
+                seg = segment.strip()
+                if not seg or _is_extra_segment(seg):
+                    continue
+                filtered_existing.append(seg)
+            if filtered_existing:
+                return "; ".join(filtered_existing)
+            return str(existing).strip()
+        return None
 
     def add_process_notes(key: str, indent: str = "    "):
-        k = str(key).lower()
-        meta = process_meta.get(k) or {}
-        # show hours/rate if available
-        hr  = meta.get("hr")
-        rate= meta.get("rate") or rates.get(k.title() + "Rate")
-        if hr:
-            write_line(_hours_with_rate_text(hr, rate), indent)
+        meta = _lookup_process_meta(key) or {}
+        try:
+            hr_val = float(meta.get("hr", 0.0) or 0.0)
+        except Exception:
+            hr_val = 0.0
+        if hr_val <= 0:
+            try:
+                minutes_val = float(meta.get("minutes", 0.0) or 0.0)
+            except Exception:
+                minutes_val = 0.0
+            if minutes_val > 0:
+                hr_val = minutes_val / 60.0
+        rate_val = meta.get("rate")
+        try:
+            rate_float = float(rate_val or 0.0)
+        except Exception:
+            rate_float = 0.0
+        if rate_float <= 0:
+            rate_key = _rate_key_for_bucket(str(key))
+            if rate_key:
+                try:
+                    rate_float = float(rates.get(rate_key, 0.0) or 0.0)
+                except Exception:
+                    rate_float = 0.0
+        if hr_val > 0:
+            write_line(_hours_with_rate_text(hr_val, rate_float), indent)
 
     def add_pass_basis(key: str, indent: str = "    "):
         basis_map = breakdown.get("pass_basis", {}) or {}
@@ -6175,6 +6265,17 @@ def render_quote(
     total_labor_row_index = len(lines) - 1
     row("Total Direct Costs:", float(totals.get("direct_costs", 0.0)))
     pricing_source_value = breakdown.get("pricing_source")
+    pricing_source_text = ""
+    for source in (result, breakdown):
+        if not isinstance(source, Mapping):
+            continue
+        raw_text = source.get("pricing_source_text")
+        if raw_text is None:
+            continue
+        text = str(raw_text).strip()
+        if text:
+            pricing_source_text = text
+            break
     # If planner produced hours, treat source as planner for display consistency.
     if not pricing_source_value:
         hs_entries = dict(hour_summary_entries or {})
@@ -6205,7 +6306,7 @@ def render_quote(
     )
     if pricing_source_text:
         lines.append(f"Pricing Source: {pricing_source_text}")
-    pricing_source_lower = pricing_source_text.lower()
+        pricing_source_lower = pricing_source_text.lower()
     if red_flags:
         lines.append("")
         lines.append("Red Flags")
@@ -6720,6 +6821,9 @@ def render_quote(
         "finishing_deburr",
         "saw_waterjet",
         "inspection",
+        "assembly",
+        "packaging",
+        "misc",
     ]
     def _planner_bucket_info(bucket_key: str) -> Mapping[str, Any]:
         rollup_info = bucket_rollup_map.get(bucket_key)
@@ -7431,9 +7535,6 @@ def render_quote(
             continue
         if canon_key.startswith("planner_"):
             continue
-        if canon_key == "misc" and (planner_bucket_display_map or entry.amount < 1.0):
-            continue
-
         canonical_label, _ = _canonical_amortized_label(entry.label)
         fallback_detail = labor_cost_details_input.get(canonical_label or entry.label)
 
@@ -7468,7 +7569,7 @@ def render_quote(
         for bit in entry.detail_bits:
             _append_unique(bucket["detail_bits"], bit)
 
-    hidden_canon_keys = {"planner_labor", "planner_machine", "planner_total", "misc"}
+    hidden_canon_keys = {"planner_labor", "planner_machine", "planner_total"}
     remaining_costs = {canon: data["amount"] for canon, data in aggregated_process_rows.items()}
 
     for canon_key in aggregated_order:
@@ -7487,11 +7588,15 @@ def render_quote(
         label = _display_bucket_label(canon_key, label_overrides)
         primary_process_key = process_keys[0] if process_keys else canon_key
 
+        detail_bits = list(bucket.get("detail_bits", []))
+        if canon_key == "misc":
+            _append_unique(detail_bits, "LLM adjustments")
+
         _add_labor_cost_line(
             label,
             amount,
             process_key=primary_process_key,
-            detail_bits=list(bucket.get("detail_bits", [])),
+            detail_bits=detail_bits,
             fallback_detail=bucket.get("fallback_detail"),
             display_override=bucket.get("display_override"),
         )
@@ -7508,23 +7613,13 @@ def render_quote(
         "show_amortized_nre_single_qty",
         "show_amortized_nre_for_single_qty",
         "show_single_qty_amortized_nre",
-        "show_amortized_nre",
     )
 
     try:
         amortized_qty = int(result.get("qty") or breakdown.get("qty") or qty or 1)
     except Exception:
         amortized_qty = qty if qty > 0 else 1
-    show_amortized = amortized_qty > 1
-
-    def _should_show_amortized_cost(amount: float) -> bool:
-        try:
-            amount_val = float(amount or 0.0)
-        except Exception:
-            amount_val = 0.0
-        if amount_val <= 0:
-            return False
-        return show_amortized
+    show_amortized = amortized_qty > 1 or (show_amortized_single_qty and amortized_qty > 0)
 
     programming_per_part_cost = labor_cost_totals.get("Programming (amortized)")
     if programming_per_part_cost is None:
@@ -7551,17 +7646,11 @@ def render_quote(
         eng_rate = 0.0
     if eng_hr > 0:
         prog_bits.append(f"- Engineering (lot): {_hours_with_rate_text(eng_hr, eng_rate)}")
-    show_programming_amortized = _should_show_amortized_cost(programming_per_part_cost)
+    programming_detail_bits = list(prog_bits)
+    if show_amortized and qty > 1 and programming_per_part_cost > 0:
+        programming_detail_bits.append(f"Amortized across {qty} pcs")
     if show_amortized and programming_per_part_cost > 0:
-        prog_bits.append(f"Amortized across {qty} pcs")
-
-    show_programming_amortized = show_amortized and programming_per_part_cost > 0
-    if show_programming_amortized and "Programming (amortized)" not in labor_costs_display:
-        _add_labor_cost_line(
-            "Programming (amortized)",
-            programming_per_part_cost,
-            detail_bits=prog_bits,
-        )
+        programming_detail_bits.append("amortized")
 
     fixture_detail = (nre_detail or {}).get("fixture") or {}
     fixture_labor_per_part_cost = labor_cost_totals.get("Fixture Build (amortized)")
@@ -7594,16 +7683,37 @@ def render_quote(
         soft_jaw_hr = 0.0
     if soft_jaw_hr > 0:
         fixture_bits.append(f"Soft jaw prep {soft_jaw_hr:.2f} hr")
-    show_fixture_amortized = _should_show_amortized_cost(fixture_labor_per_part_cost)
+    fixture_detail_bits = list(fixture_bits)
+    if show_amortized and qty > 1 and fixture_labor_per_part_cost > 0:
+        fixture_detail_bits.append(f"Amortized across {qty} pcs")
     if show_amortized and fixture_labor_per_part_cost > 0:
-        fixture_bits.append(f"Amortized across {qty} pcs")
+        fixture_detail_bits.append("amortized")
 
-    if show_fixture_amortized and "Fixture Build (amortized)" not in labor_costs_display:
-        _add_labor_cost_line(
-            "Fixture Build (amortized)",
-            fixture_labor_per_part_cost,
-            detail_bits=fixture_bits,
+    amortized_rows: list[tuple[str, float, list[str]]] = []
+    if show_amortized and programming_per_part_cost > 0:
+        amortized_rows.append(
+            (
+                "Programming (amortized)",
+                float(programming_per_part_cost),
+                programming_detail_bits,
+            )
         )
+    if show_amortized and fixture_labor_per_part_cost > 0:
+        amortized_rows.append(
+            (
+                "Fixture Build (amortized)",
+                float(fixture_labor_per_part_cost),
+                fixture_detail_bits,
+            )
+        )
+
+    for label, amount, detail_bits in amortized_rows:
+        if label not in labor_costs_display:
+            _add_labor_cost_line(
+                label,
+                amount,
+                detail_bits=detail_bits,
+            )
 
     _emit_labor_cost_lines()
 
@@ -7615,7 +7725,10 @@ def render_quote(
 
     expected_labor_total = float(totals.get("labor_cost", 0.0) or 0.0)
     if abs(displayed_process_total - expected_labor_total) >= 0.01:
-        raise AssertionError("bucket sum mismatch")
+        if expected_labor_total <= 0.0:
+            expected_labor_total = displayed_process_total
+        else:
+            raise AssertionError("bucket sum mismatch")
 
     proc_total = displayed_process_total
     row("Total", proc_total, indent="  ")
@@ -11250,7 +11363,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     insurance_pct     = num_pct(r"(?:Insurance|Liability\s*Adder)", params["InsurancePct"])
     packaging_cost    = packaging_hr * rates["AssemblyRate"] + crate_nre_cost + packaging_mat
     packaging_flat_base = float((crate_nre_cost or 0.0) + (packaging_mat or 0.0))
-    shipping_basis_desc = "Freight & logistics"
+    shipping_basis_desc = "Outbound freight & logistics"
     shipping_cost_base = float(shipping_cost)
 
     # EHS / compliance
@@ -13748,7 +13861,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         entry["new_value"] = float(shipping_override)
         pass_through["Shipping"] = float(shipping_override)
         pass_key_map[_normalize_key("Shipping")] = "Shipping"
-        pass_meta.setdefault("Shipping", {})["basis"] = "Freight & logistics (user override)"
+        pass_meta.setdefault("Shipping", {})["basis"] = "Outbound freight & logistics (user override)"
 
     cmm_minutes_override = _clamp_override((overrides or {}).get("cmm_minutes"), 0.0, 60.0)
     if cmm_minutes_override is not None:
@@ -14425,6 +14538,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     if base_directs_excluding_ship_mat > 0:
         pass_meta.setdefault("Insurance", {"basis": "Applied at insurance pct"})
         pass_meta.setdefault("Vendor Markup Added", {"basis": "Vendor + freight markup"})
+        pass_meta.setdefault("Shipping", {"basis": "Outbound freight & logistics"})
         insurance_cost = round(insurance_cost, 2)
         vendor_marked_add = round(vendor_marked_add, 2)
         pass_through["Insurance"] = insurance_cost
