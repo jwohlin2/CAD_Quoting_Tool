@@ -1609,6 +1609,27 @@ def get_llm_bound_defaults() -> dict[str, Any]:
 LLM_BOUND_DEFAULTS: Mapping[str, Any] = MappingProxyType(_default_llm_bounds_dict())
 
 
+def _ensure_llm_bound_defaults_initialized() -> Mapping[str, Any]:
+    """Return a mapping of LLM guardrail defaults, rebuilding when missing."""
+
+    base = globals().get("LLM_BOUND_DEFAULTS")
+    if isinstance(base, _MappingABC):
+        return base
+    if base is None:
+        rebuilt = _default_llm_bounds_dict()
+    else:
+        try:
+            rebuilt = coerce_bounds(base if isinstance(base, _MappingABC) else {})
+        except Exception:
+            rebuilt = _default_llm_bounds_dict()
+    mapping = MappingProxyType(rebuilt)
+    globals()["LLM_BOUND_DEFAULTS"] = mapping
+    return mapping
+
+
+_ensure_llm_bound_defaults_initialized()
+
+
 def build_suggest_payload(
     geo: dict | None,
     baseline: dict | None,
@@ -9665,7 +9686,73 @@ def net_mass_kg(
 ):
     """Estimate the net mass of a rectangular plate and optional removed material."""
 
-    net_mass, removed_mass = _plate_mass_properties(
+    try:
+        plate_mass_fn = _plate_mass_properties  # type: ignore[name-defined]
+    except NameError:
+        plate_mass_fn = None  # type: ignore[assignment]
+
+    if not callable(plate_mass_fn):
+
+        def _plate_mass_properties_fallback(
+            plate_L_in_fallback: Any,
+            plate_W_in_fallback: Any,
+            t_in_fallback: Any,
+            density_g_cc_fallback: Any,
+            hole_d_mm_fallback: Any,
+        ) -> tuple[float | None, float | None]:
+            length_in = _coerce_float_or_none(plate_L_in_fallback)
+            width_in = _coerce_float_or_none(plate_W_in_fallback)
+            thickness_in = _coerce_float_or_none(t_in_fallback)
+            density = _coerce_float_or_none(density_g_cc_fallback)
+
+            if (
+                density is None
+                or density <= 0
+                or length_in is None
+                or width_in is None
+                or thickness_in is None
+                or length_in <= 0
+                or width_in <= 0
+                or thickness_in <= 0
+            ):
+                return (None, None)
+
+            volume_in3 = float(length_in) * float(width_in) * float(thickness_in)
+            plate_volume_cm3 = volume_in3 * 16.387064
+
+            thickness_mm = float(thickness_in) * 25.4
+            removed_volume_mm3 = 0.0
+
+            if thickness_mm > 0:
+                if isinstance(hole_d_mm_fallback, _MappingABC):
+                    hole_iter = hole_d_mm_fallback.values()
+                elif isinstance(hole_d_mm_fallback, Sequence) and not isinstance(
+                    hole_d_mm_fallback, (str, bytes)
+                ):
+                    hole_iter = hole_d_mm_fallback
+                elif hole_d_mm_fallback is None:
+                    hole_iter = ()
+                else:
+                    hole_iter = (hole_d_mm_fallback,)
+
+                for raw_d in hole_iter:
+                    diameter_mm = _coerce_float_or_none(raw_d)
+                    if diameter_mm is None or diameter_mm <= 0:
+                        continue
+                    radius_mm = float(diameter_mm) / 2.0
+                    removed_volume_mm3 += math.pi * (radius_mm**2) * thickness_mm
+
+            removed_volume_cm3 = removed_volume_mm3 / 1000.0
+            removed_mass_g = removed_volume_cm3 * float(density)
+
+            net_volume_cm3 = max(plate_volume_cm3 - removed_volume_cm3, 0.0)
+            net_mass_g = net_volume_cm3 * float(density)
+
+            return (net_mass_g / 1000.0, removed_mass_g)
+
+        plate_mass_fn = _plate_mass_properties_fallback
+
+    net_mass, removed_mass = plate_mass_fn(
         plate_L_in,
         plate_W_in,
         t_in,
