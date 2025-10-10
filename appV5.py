@@ -661,9 +661,12 @@ def _detect_index_support() -> bool:
 _TIME_OVERHEAD_SUPPORTS_INDEX_SEC = _detect_index_support()
 
 
+OverheadLike: TypeAlias = _TimeOverheadParams | SimpleNamespace
+
+
 def _ensure_overhead_index_attr(
     overhead: _TimeOverheadParams, index_value: float | None
-) -> _TimeOverheadParams | SimpleNamespace:
+) -> OverheadLike:
     """Return an overhead object that always exposes ``index_sec_per_hole``."""
 
     if hasattr(overhead, "index_sec_per_hole"):
@@ -9976,7 +9979,7 @@ def _machine_params_from_params(params: Mapping[str, Any] | None) -> _TimeMachin
     )
 
 
-def _drill_overhead_from_params(params: Mapping[str, Any] | None) -> _TimeOverheadParams:
+def _drill_overhead_from_params(params: Mapping[str, Any] | None) -> OverheadLike:
     toolchange = (
         _coerce_float_or_none(params.get("DrillToolchangeMinutes"))
         if isinstance(params, _MappingABC)
@@ -10020,6 +10023,63 @@ def _drill_overhead_from_params(params: Mapping[str, Any] | None) -> _TimeOverhe
         overhead_kwargs.pop("index_sec_per_hole", None)
         overhead = _TimeOverheadParams(**overhead_kwargs)
     return _ensure_overhead_index_attr(overhead, index_kwarg)
+
+
+def _make_time_overhead_params(
+    params: Mapping[str, Any] | None,
+) -> tuple[OverheadLike, bool]:
+    """Instantiate ``OverheadParams`` handling optional index compatibility."""
+
+    kwargs: dict[str, Any] = {}
+    if isinstance(params, Mapping):
+        kwargs = {str(k): v for k, v in params.items()}
+
+    index_kwarg: float | None = None
+    if "index_sec_per_hole" in kwargs:
+        try:
+            index_val = kwargs["index_sec_per_hole"]
+        except Exception:
+            index_val = None
+        else:
+            coerced = _coerce_float_or_none(index_val)
+            index_kwarg = float(coerced) if coerced is not None and coerced >= 0 else None
+        kwargs["index_sec_per_hole"] = index_kwarg
+
+    dropped_index = False
+    try:
+        overhead = _TimeOverheadParams(**kwargs)
+    except TypeError:
+        index_kwarg = kwargs.pop("index_sec_per_hole", None)
+        dropped_index = index_kwarg is not None
+        overhead = _TimeOverheadParams(**kwargs)
+
+    return _ensure_overhead_index_attr(overhead, index_kwarg), dropped_index
+
+
+def _coerce_overhead_dataclass(overhead: OverheadLike) -> _TimeOverheadParams:
+    """Return a dataclass instance compatible with :func:`replace`."""
+
+    if isinstance(overhead, _TimeOverheadParams):
+        return overhead
+
+    payload: dict[str, Any] = {}
+    for name in (
+        "toolchange_min",
+        "approach_retract_in",
+        "peck_penalty_min_per_in_depth",
+        "dwell_min",
+        "peck_min",
+    ):
+        if hasattr(overhead, name):
+            payload[name] = getattr(overhead, name)
+    if _TIME_OVERHEAD_SUPPORTS_INDEX_SEC:
+        payload["index_sec_per_hole"] = getattr(overhead, "index_sec_per_hole", None)
+
+    try:
+        return _TimeOverheadParams(**payload)
+    except TypeError:
+        payload.pop("index_sec_per_hole", None)
+        return _TimeOverheadParams(**payload)
 
 
 def _clean_hole_groups(raw: Any) -> list[dict[str, Any]] | None:
@@ -10277,8 +10337,8 @@ def estimate_drilling_hours(
     if group_specs:
         base_machine = machine_params or _machine_params_from_params(None)
         overhead = overhead_params or _drill_overhead_from_params(None)
-        overhead_for_calc = overhead
-        per_hole_overhead = replace(overhead, toolchange_min=0.0)
+        overhead_for_calc = _coerce_overhead_dataclass(overhead)
+        per_hole_overhead = replace(overhead_for_calc, toolchange_min=0.0)
         total_min = 0.0
         total_toolchange_min = 0.0
         total_holes = 0
@@ -10594,9 +10654,10 @@ def estimate_drilling_hours(
                         None,
                     )
                     legacy_kwargs["index_sec_per_hole"] = legacy_index_kwarg
-                legacy_overhead, legacy_dropped_index = _make_time_overhead_params(
+                legacy_overhead_like, legacy_dropped_index = _make_time_overhead_params(
                     legacy_kwargs
                 )
+                legacy_overhead = _coerce_overhead_dataclass(legacy_overhead_like)
                 if legacy_index_kwarg is not None and (
                     legacy_dropped_index
                     or not hasattr(legacy_overhead, "index_sec_per_hole")
@@ -11137,8 +11198,8 @@ def estimate_drilling_hours(
                 "ipr": None,
                 "rpm": None,
                 "ipm": None,
-                "min_per_hole": (total_sec / 60.0) / holes_fallback if holes_fallback else None,
-                "hole_count": int(holes_fallback),
+                "min_per_hole": (total_sec / 60.0) / total_hole_qty if total_hole_qty else None,
+                "hole_count": int(total_hole_qty),
             }
         )
     elif debug is not None:
