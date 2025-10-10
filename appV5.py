@@ -22,12 +22,12 @@ import os
 import re
 import time
 import typing
-import tkinter as tk
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace, fields as dataclass_fields
 from fractions import Fraction
 from pathlib import Path
+from types import MappingProxyType
 
 from cad_quoter.app import runtime as _runtime
 from cad_quoter.app.container import (
@@ -59,6 +59,12 @@ def _coerce_env_bool(value: str | None) -> bool:
 
 
 FORCE_PLANNER = _coerce_env_bool(os.environ.get("FORCE_PLANNER"))
+
+
+# Guardrails for LLM-generated process adjustments.
+LLM_MULTIPLIER_MIN = 0.25
+LLM_MULTIPLIER_MAX = 4.0
+LLM_ADDER_MAX = 8.0
 
 
 def jdump(obj) -> str:
@@ -112,10 +118,93 @@ from typing import (
     cast,
     Literal,
     overload,
+    TYPE_CHECKING,
 )
 
 
 T = TypeVar("T")
+
+
+if TYPE_CHECKING:  # pragma: no cover - typing helpers only
+    import tkinter as tk  # type: ignore[import]
+    from tkinter import (  # type: ignore[import]
+        filedialog,
+        messagebox,
+        scrolledtext,
+        ttk,
+    )
+
+    def _ensure_tk(action: str = "Tkinter GUI") -> dict[str, Any]: ...
+else:
+    _TK_MODULE_CACHE: dict[str, Any] | None = None
+    _TK_IMPORT_ERROR: Exception | None = None
+
+    def _load_tkinter_modules() -> dict[str, Any] | None:
+        """Best-effort import of Tkinter modules, caching the result."""
+
+        global _TK_MODULE_CACHE, _TK_IMPORT_ERROR
+        if _TK_MODULE_CACHE is not None or _TK_IMPORT_ERROR is not None:
+            return _TK_MODULE_CACHE
+
+        try:
+            import tkinter as _tk_mod  # type: ignore[import]
+            from tkinter import (  # type: ignore[import]
+                filedialog as _filedialog_mod,
+                messagebox as _messagebox_mod,
+                scrolledtext as _scrolledtext_mod,
+                ttk as _ttk_mod,
+            )
+        except Exception as exc:  # pragma: no cover - headless environments
+            _TK_IMPORT_ERROR = exc
+            return None
+
+        _TK_MODULE_CACHE = {
+            "tk": _tk_mod,
+            "filedialog": _filedialog_mod,
+            "messagebox": _messagebox_mod,
+            "scrolledtext": _scrolledtext_mod,
+            "ttk": _ttk_mod,
+        }
+        return _TK_MODULE_CACHE
+
+    def _raise_tkinter_unavailable(action: str) -> None:
+        """Raise a helpful error when GUI functionality is requested headless."""
+
+        if _TK_IMPORT_ERROR is not None:
+            raise RuntimeError(
+                f"{action} requires Tkinter, which is unavailable: {_TK_IMPORT_ERROR}"
+            ) from _TK_IMPORT_ERROR
+        raise RuntimeError(f"{action} requires Tkinter, which is unavailable.")
+
+    def _ensure_tk(action: str = "Tkinter GUI") -> dict[str, Any]:
+        modules = _load_tkinter_modules()
+        if modules is None:
+            _raise_tkinter_unavailable(action)
+        return modules
+
+    class _TkModuleProxy:
+        def __init__(self, key: str, description: str) -> None:
+            self._key = key
+            self._description = description
+
+        def __getattr__(self, attr: str) -> Any:
+            modules = _load_tkinter_modules()
+            if modules is not None:
+                return getattr(modules[self._key], attr)
+            if self._key == "tk" and attr == "Tk":
+
+                class _TkUnavailable:
+                    def __init__(self, *args: Any, **kwargs: Any) -> None:
+                        _raise_tkinter_unavailable("Starting the CAD Quoting Tool GUI")
+
+                return _TkUnavailable
+            _raise_tkinter_unavailable(self._description)
+
+    tk = cast(Any, _TkModuleProxy("tk", "Tkinter GUI"))
+    filedialog = cast(Any, _TkModuleProxy("filedialog", "File dialogs"))
+    messagebox = cast(Any, _TkModuleProxy("messagebox", "Message boxes"))
+    scrolledtext = cast(Any, _TkModuleProxy("scrolledtext", "Scrolled text widgets"))
+    ttk = cast(Any, _TkModuleProxy("ttk", "Themed Tk widgets"))
 
 
 def resolve_planner(
@@ -194,11 +283,6 @@ from cad_quoter.geo2d import (
 )
 from bucketizer import bucketize
 
-# Guardrails for LLM-generated process adjustments.
-LLM_MULTIPLIER_MIN = 0.25
-LLM_MULTIPLIER_MAX = 4.0
-LLM_ADDER_MAX = 8.0
-
 # Tolerance for invariant checks that guard against silent drift when rendering
 # cost sections.
 _LABOR_SECTION_ABS_EPSILON = 0.51
@@ -268,7 +352,14 @@ from cad_quoter.domain_models import (
 from cad_quoter.coerce import to_float, to_int
 from cad_quoter.utils import compact_dict, sdict
 from cad_quoter.utils.geo_ctx import _should_include_outsourced_pass
-from cad_quoter.utils.text import _match_items_contains
+try:
+    from cad_quoter.utils.text import _match_items_contains
+except Exception:  # pragma: no cover - defensive fallback for optional import paths
+    def _match_items_contains(items, pattern):  # type: ignore[override]
+        try:
+            return items.str.contains(pattern, case=False, regex=True, na=False)
+        except Exception:
+            return items.str.contains(pattern, case=False, regex=False, na=False)
 from cad_quoter.pricing import (
     LB_PER_KG,
     PricingEngine,
@@ -321,7 +412,9 @@ from cad_quoter.llm import (
     EDITOR_FROM_UI,
     EDITOR_TO_SUGG,
     LLMClient,
+    SYSTEM_SUGGEST,
     SUGG_TO_EDITOR,
+    SYSTEM_SUGGEST,
     infer_hours_and_overrides_from_geo as _infer_hours_and_overrides_from_geo,
     parse_llm_json,
     explain_quote,
@@ -549,15 +642,27 @@ from typing import TYPE_CHECKING, TypedDict
 
 if TYPE_CHECKING:
     try:
-        from OCP.TopoDS import TopoDS_Shape as _TopoDSShape  # type: ignore[import]
+        from OCP.TopoDS import (  # type: ignore[import]
+            TopoDS_Compound as _TopoDSCompound,
+            TopoDS_Shape as _TopoDSShape,
+        )
     except ImportError:
         try:
-            from OCC.Core.TopoDS import TopoDS_Shape as _TopoDSShape  # type: ignore[import]
+            from OCC.Core.TopoDS import (  # type: ignore[import]
+                TopoDS_Compound as _TopoDSCompound,
+                TopoDS_Shape as _TopoDSShape,
+            )
         except ImportError:  # pragma: no cover - typing-only fallback
+            from typing import Any as _TopoDSCompound  # type: ignore[assignment]
             from typing import Any as _TopoDSShape  # type: ignore[assignment]
-    TopoDSShapeT: TypeAlias = _TopoDSShape
+    _TopoDSShapeT = _TopoDSShape
+    _TopoDSCompoundT = _TopoDSCompound
 else:
-    TopoDSShapeT: TypeAlias = Any
+    _TopoDSShapeT = Any
+    _TopoDSCompoundT = Any
+
+TopoDSShapeT: TypeAlias = _TopoDSShapeT
+TopoDSCompoundT: TypeAlias = _TopoDSCompoundT
 
 class _BRepToolProto(Protocol):
     def Surface(self, face: Any) -> Any: ...
@@ -578,7 +683,6 @@ class _TopoDSProto(Protocol):
 
 
 TopoDSFaceT: TypeAlias = TopoDSShapeT
-TopoDSCompoundT: TypeAlias = TopoDSShapeT
 TopToolsIndexedDataMap: TypeAlias = Any
 
 try:  # Prefer pythonocc-core's OCP bindings when available
@@ -611,6 +715,7 @@ except ImportError:
         from OCC.Core.TopTools import (  # type: ignore[import]
             TopTools_IndexedDataMapOfShapeListOfShape,
         )
+        from OCC.Core.BRepTools import BRepTools  # type: ignore[import]
     except ImportError:  # pragma: no cover - only hit in environments without OCCT
         if TYPE_CHECKING:  # Keep type checkers happy without introducing runtime deps
             from typing import Any
@@ -635,7 +740,17 @@ except ImportError:
 
 BRep_Tool = cast(_BRepToolProto, BRep_Tool)
 TopoDS = cast(_TopoDSProto, TopoDS)
-BRepTools = cast(Any, BRepTools)
+try:
+    BRepTools = cast(Any, BRepTools)
+except NameError:
+    class _MissingBRepTools:
+        def __getattr__(self, item):
+            raise ImportError(
+                "OCCT bindings are required for geometry operations. "
+                "Please install pythonocc-core or the OCP wheels."
+            )
+
+    BRepTools = cast(Any, _MissingBRepTools())
 
 try:
     from geo_read_more import build_geo_from_dxf as build_geo_from_dxf_path
@@ -689,7 +804,6 @@ convert_dwg_to_dxf = _export("convert_dwg_to_dxf")
 enrich_geo_occ = _export("enrich_geo_occ")
 enrich_geo_stl = _export("enrich_geo_stl")
 safe_bbox = _export("safe_bbox")
-safe_bounding_box = _export("safe_bounding_box")
 iter_solids = _export("iter_solids")
 explode_compound = _export("explode_compound")
 parse_hole_table_lines = _export("parse_hole_table_lines")
@@ -700,15 +814,18 @@ text_harvest = _export("text_harvest")
 extract_entities = _export("extract_entities")
 read_dxf = _export("read_dxf")
 upsert_var_row = _export("upsert_var_row")
+require_ezdxf = _export("require_ezdxf")
 get_dwg_converter_path = _export("get_dwg_converter_path")
 have_dwg_support = _export("have_dwg_support")
 get_import_diagnostics_text = _export("get_import_diagnostics_text")
+extract_features_with_occ = _export("extract_features_with_occ")
 
-_geometry_require_ezdxf = getattr(geometry, "require_ezdxf", None)
 _HAS_TRIMESH = getattr(geometry, "HAS_TRIMESH", False)
 _HAS_EZDXF = getattr(geometry, "HAS_EZDXF", False)
 _HAS_ODAFC = getattr(geometry, "HAS_ODAFC", False)
 _EZDXF_VER = geometry.EZDXF_VERSION
+_HAS_PYMUPDF = getattr(geometry, "_HAS_PYMUPDF", getattr(geometry, "HAS_PYMUPDF", False))
+fitz = getattr(geometry, "fitz", None)
 
 if _HAS_EZDXF:
     try:
@@ -727,10 +844,18 @@ else:
     odafc = None  # type: ignore[assignment]
 
 if TYPE_CHECKING:
-    try:
-        from ezdxf.ezdxf import Drawing as _EzdxfDrawing
-    except Exception:  # pragma: no cover - optional dependency
-        _EzdxfDrawing = Any  # type: ignore[assignment]
+    class _EzdxfLayouts(Protocol):
+        def names_in_taborder(self) -> Iterable[str]: ...
+
+        def get(self, name: str) -> Any: ...
+
+    class _EzdxfDrawing(Protocol):
+        header: Mapping[str, Any]
+        layouts: _EzdxfLayouts
+
+        def modelspace(self) -> Any: ...
+
+        def close(self) -> None: ...
 else:
     _EzdxfDrawing = Any  # type: ignore[assignment]
 
@@ -1192,7 +1317,9 @@ def build_suggest_payload(
         )
     else:
         material_name = material_val
-    material_name = str(material_name).strip() if material_name else "Steel"
+    material_name = (
+        str(material_name).strip() if material_name else DEFAULT_MATERIAL_DISPLAY
+    )
 
     hole_count_val = to_float(geo.get("hole_count"))
     if hole_count_val is None:
@@ -2826,6 +2953,7 @@ def effective_to_overrides(effective: dict, baseline: dict | None = None) -> dic
     return out
 
 
+# SINGLE SOURCE
 def ensure_accept_flags(state: QuoteState) -> None:
     suggestions = state.suggestions or {}
     accept = state.accept_llm
@@ -2874,6 +3002,236 @@ def ensure_accept_flags(state: QuoteState) -> None:
         accept["drilling_strategy"] = False
 
 
+def iter_suggestion_rows(state: QuoteState) -> list[dict]:
+    rows: list[dict] = []
+    baseline = state.baseline or {}
+    suggestions = state.suggestions or {}
+    overrides = state.user_overrides or {}
+    effective = state.effective or {}
+    sources = state.effective_sources or {}
+    accept = state.accept_llm or {}
+
+    baseline_hours_raw = baseline.get("process_hours") if isinstance(baseline.get("process_hours"), dict) else {}
+    baseline_hours: dict[str, float] = {}
+    for key, value in (baseline_hours_raw or {}).items():
+        try:
+            if abs(float(value)) > 1e-6:
+                baseline_hours[key] = float(value)
+        except Exception:
+            continue
+
+    sugg_mult = suggestions.get("process_hour_multipliers") if isinstance(suggestions.get("process_hour_multipliers"), dict) else {}
+    over_mult = overrides.get("process_hour_multipliers") if isinstance(overrides.get("process_hour_multipliers"), dict) else {}
+    eff_mult = effective.get("process_hour_multipliers") if isinstance(effective.get("process_hour_multipliers"), dict) else {}
+    src_mult = sources.get("process_hour_multipliers") if isinstance(sources.get("process_hour_multipliers"), dict) else {}
+    keys_mult = sorted(_collect_process_keys(baseline_hours, sugg_mult, over_mult))
+    for key in keys_mult:
+        rows.append(
+            {
+                "path": ("process_hour_multipliers", key),
+                "label": f"Process × {key}",
+                "kind": "multiplier",
+                "baseline": 1.0,
+                "llm": sugg_mult.get(key),
+                "user": over_mult.get(key),
+                "accept": bool((accept.get("process_hour_multipliers") or {}).get(key)),
+                "effective": eff_mult.get(key, 1.0),
+                "source": src_mult.get(key, "baseline"),
+            }
+        )
+
+    sugg_add = suggestions.get("process_hour_adders") if isinstance(suggestions.get("process_hour_adders"), dict) else {}
+    over_add = overrides.get("process_hour_adders") if isinstance(overrides.get("process_hour_adders"), dict) else {}
+    eff_add = effective.get("process_hour_adders") if isinstance(effective.get("process_hour_adders"), dict) else {}
+    src_add = sources.get("process_hour_adders") if isinstance(sources.get("process_hour_adders"), dict) else {}
+    keys_add = sorted(_collect_process_keys(baseline_hours, sugg_add, over_add))
+    for key in keys_add:
+        rows.append(
+            {
+                "path": ("process_hour_adders", key),
+                "label": f"Process +hr {key}",
+                "kind": "hours",
+                "baseline": 0.0,
+                "llm": sugg_add.get(key),
+                "user": over_add.get(key),
+                "accept": bool((accept.get("process_hour_adders") or {}).get(key)),
+                "effective": eff_add.get(key, 0.0),
+                "source": src_add.get(key, "baseline"),
+            }
+        )
+
+    sugg_pass = (
+        _canonicalize_pass_through_map(suggestions.get("add_pass_through"))
+        if isinstance(suggestions.get("add_pass_through"), dict)
+        else {}
+    )
+    over_pass = (
+        _canonicalize_pass_through_map(overrides.get("add_pass_through"))
+        if isinstance(overrides.get("add_pass_through"), dict)
+        else {}
+    )
+    base_pass = (
+        _canonicalize_pass_through_map(baseline.get("pass_through"))
+        if isinstance(baseline.get("pass_through"), dict)
+        else {}
+    )
+    eff_pass = (
+        _canonicalize_pass_through_map(effective.get("add_pass_through"))
+        if isinstance(effective.get("add_pass_through"), dict)
+        else {}
+    )
+    src_pass_raw = (
+        sources.get("add_pass_through")
+        if isinstance(sources.get("add_pass_through"), dict)
+        else {}
+    )
+    src_pass: dict[str, Any] = {}
+    for key, value in src_pass_raw.items():
+        canon_key = _canonical_pass_label(key)
+        if canon_key:
+            src_pass[canon_key] = value
+    keys_pass = sorted(set(base_pass) | set(sugg_pass) | set(over_pass))
+    for key in keys_pass:
+        base_amount = base_pass.get(key)
+        label = f"Pass-through Δ {key}"
+        if base_amount not in (None, ""):
+            try:
+                label = f"{label} (base {_format_value(base_amount, 'currency')})"
+            except Exception:
+                pass
+        rows.append(
+            {
+                "path": ("add_pass_through", key),
+                "label": label,
+                "kind": "currency",
+                "baseline": 0.0,
+                "llm": sugg_pass.get(key),
+                "user": over_pass.get(key),
+                "accept": bool((accept.get("add_pass_through") or {}).get(key)),
+                "effective": eff_pass.get(key, 0.0),
+                "source": src_pass.get(key, "baseline"),
+            }
+        )
+
+    scrap_base = baseline.get("scrap_pct")
+    scrap_llm = suggestions.get("scrap_pct")
+    scrap_user = overrides.get("scrap_pct")
+    scrap_eff = effective.get("scrap_pct")
+    scrap_src = sources.get("scrap_pct", "baseline")
+    if any(v is not None for v in (scrap_base, scrap_llm, scrap_user)):
+        rows.append(
+            {
+                "path": ("scrap_pct",),
+                "label": "Scrap %",
+                "kind": "percent",
+                "baseline": scrap_base,
+                "llm": scrap_llm,
+                "user": scrap_user,
+                "accept": bool(accept.get("scrap_pct")),
+                "effective": scrap_eff,
+                "source": scrap_src,
+            }
+        )
+
+    cont_base = baseline.get("contingency_pct")
+    cont_llm = suggestions.get("contingency_pct")
+    cont_user = overrides.get("contingency_pct")
+    cont_eff = effective.get("contingency_pct")
+    cont_src = sources.get("contingency_pct", "baseline")
+    if any(v is not None for v in (cont_base, cont_llm, cont_user)):
+        rows.append(
+            {
+                "path": ("contingency_pct",),
+                "label": "Contingency %",
+                "kind": "percent",
+                "baseline": cont_base,
+                "llm": cont_llm,
+                "user": cont_user,
+                "accept": bool(accept.get("contingency_pct")),
+                "effective": cont_eff,
+                "source": cont_src,
+            }
+        )
+
+    setups_base = baseline.get("setups")
+    setups_llm = suggestions.get("setups")
+    setups_user = overrides.get("setups")
+    setups_eff = effective.get("setups")
+    setups_src = sources.get("setups", "baseline")
+    if any(v is not None for v in (setups_base, setups_llm, setups_user)):
+        rows.append(
+            {
+                "path": ("setups",),
+                "label": "Setups",
+                "kind": "int",
+                "baseline": setups_base,
+                "llm": setups_llm,
+                "user": setups_user,
+                "accept": bool(accept.get("setups")),
+                "effective": setups_eff,
+                "source": setups_src,
+            }
+        )
+
+    fixture_base = baseline.get("fixture")
+    fixture_llm = suggestions.get("fixture")
+    fixture_user = overrides.get("fixture")
+    fixture_eff = effective.get("fixture")
+    fixture_src = sources.get("fixture", "baseline")
+    if any(v is not None for v in (fixture_base, fixture_llm, fixture_user, fixture_eff)):
+        rows.append(
+            {
+                "path": ("fixture",),
+                "label": "Fixture plan",
+                "kind": "text",
+                "baseline": fixture_base,
+                "llm": fixture_llm,
+                "user": fixture_user,
+                "accept": bool(accept.get("fixture")),
+                "effective": fixture_eff,
+                "source": fixture_src,
+            }
+        )
+
+    def _add_scalar_row(path: tuple[str, ...], label: str, kind: str, key: str) -> None:
+        base_val = baseline.get(key)
+        llm_val = suggestions.get(key)
+        user_val = overrides.get(key)
+        eff_val = effective.get(key)
+        src_val = sources.get(key, "baseline")
+        if not any(value not in (None, {}, []) for value in (base_val, llm_val, user_val, eff_val)):
+            return
+        rows.append(
+            {
+                "path": path,
+                "label": label,
+                "kind": kind,
+                "baseline": base_val,
+                "llm": llm_val,
+                "user": user_val,
+                "accept": bool(accept.get(key)),
+                "effective": eff_val,
+                "source": src_val,
+            }
+        )
+
+    _add_scalar_row(("fixture_build_hr",), "Fixture Build Hours", "hours", "fixture_build_hr")
+    _add_scalar_row(("soft_jaw_hr",), "Soft Jaw Hours", "hours", "soft_jaw_hr")
+    _add_scalar_row(("soft_jaw_material_cost",), "Soft Jaw Material $", "currency", "soft_jaw_material_cost")
+    _add_scalar_row(("handling_adder_hr",), "Handling Adder Hours", "hours", "handling_adder_hr")
+    _add_scalar_row(("cmm_minutes",), "CMM Minutes", "float", "cmm_minutes")
+    _add_scalar_row(("inspection_total_hr",), "Inspection Total Hours", "hours", "inspection_total_hr")
+    _add_scalar_row(("in_process_inspection_hr",), "In-process Inspection Hr", "hours", "in_process_inspection_hr")
+    _add_scalar_row(("fai_required",), "FAI Required", "text", "fai_required")
+    _add_scalar_row(("fai_prep_hr",), "FAI Prep Hours", "hours", "fai_prep_hr")
+    _add_scalar_row(("packaging_hours",), "Packaging Hours", "hours", "packaging_hours")
+    _add_scalar_row(("packaging_flat_cost",), "Packaging Flat $", "currency", "packaging_flat_cost")
+    _add_scalar_row(("shipping_cost",), "Shipping $", "currency", "shipping_cost")
+    _add_scalar_row(("shipping_hint",), "Shipping Hint", "text", "shipping_hint")
+
+    return rows
+
+
 if sys.platform == 'win32':
     occ_bin = os.path.join(sys.prefix, 'Library', 'bin')
     if os.path.isdir(occ_bin):
@@ -2881,7 +3239,6 @@ if sys.platform == 'win32':
 import importlib
 import subprocess
 import tempfile
-from tkinter import filedialog, messagebox, ttk
 
 try:
     from hole_table_parser import parse_hole_table_lines as _parse_hole_table_lines
@@ -3171,7 +3528,7 @@ def as_face(obj: Any) -> TopoDSFaceT:
 
 
 def iter_faces(shape: Any) -> Iterator[TopoDSFaceT]:
-    explorer_cls = cast(type[Any], TopExp_Explorer)
+    explorer_cls = cast(Callable[[Any, Any], Any], TopExp_Explorer)
     exp = explorer_cls(shape, cast(Any, TopAbs_FACE))
     while exp.More():
         yield ensure_face(exp.Current())
@@ -3209,8 +3566,10 @@ if STACK == "ocp":
     def _TO_EDGE(s):
         if type(s).__name__ in ("TopoDS_Edge", "Edge"):
             return s
-        if hasattr(TopoDS, "Edge_s"):
-            return TopoDS.Edge_s(s)
+        topods_any = cast(Any, TopoDS)
+        edge_s = getattr(topods_any, "Edge_s", None)
+        if callable(edge_s):
+            return edge_s(s)
         try:
             from OCP.TopoDS import topods as _topods  # type: ignore[import]
             return _topods.Edge(s)
@@ -3220,16 +3579,20 @@ if STACK == "ocp":
     def _TO_SOLID(s):
         if type(s).__name__ in ("TopoDS_Solid", "Solid"):
             return s
-        if hasattr(TopoDS, "Solid_s"):
-            return TopoDS.Solid_s(s)
+        topods_any = cast(Any, TopoDS)
+        solid_s = getattr(topods_any, "Solid_s", None)
+        if callable(solid_s):
+            return solid_s(s)
         from OCP.TopoDS import topods as _topods  # type: ignore[import]
         return _topods.Solid(s)
 
     def _TO_SHELL(s):
         if type(s).__name__ in ("TopoDS_Shell", "Shell"):
             return s
-        if hasattr(TopoDS, "Shell_s"):
-            return TopoDS.Shell_s(s)
+        topods_any = cast(Any, TopoDS)
+        shell_s = getattr(topods_any, "Shell_s", None)
+        if callable(shell_s):
+            return shell_s(s)
         from OCP.TopoDS import topods as _topods  # type: ignore[import]
         return _topods.Shell(s)
 else:
@@ -3392,102 +3755,10 @@ def ensure_face(obj: Any) -> TopoDSFaceT:
     if st == TopAbs_FACE:
         return FACE_OF(obj)
     raise TypeError(f"Not a face: {type(obj).__name__}")
-def to_edge(s):
-    if _is_instance(s, ["TopoDS_Edge", "Edge"]):
-        return s
-    return _TO_EDGE(s)
-
-def to_solid(s):
-    if _is_instance(s, ["TopoDS_Solid", "Solid"]):
-        return s
-    return _TO_SOLID(s)
-
-def to_shell(s):
-    if _is_instance(s, ["TopoDS_Shell", "Shell"]):
-        return s
-    return _TO_SHELL(s)
-
-# Generic size helpers so we never call Extent() on lists/maps again
-def map_size(m):
-    for name in ("Size", "Extent", "Length"):
-        if hasattr(m, name):
-            return getattr(m, name)()
-    raise AttributeError(f"No size method on {type(m)}")
-
-def list_iter(lst):
-    """
-    Iterate TopTools_ListOfShape across bindings.
-    Use cbegin()/More()/Value()/Next() if available; otherwise fall back to python list conversion.
-    """
-    # OCP + pythonocc expose cbegin iterator on TopTools_ListOfShape
-    if hasattr(lst, "cbegin"):
-        it = lst.cbegin()
-        while it.More():
-            yield it.Value()
-            it.Next()
-    else:
-        # last-resort: try Python iteration (some wheels support it)
-        for v in list(lst):
-            yield v
 # ---------- end compat ----------
 
 
 # ---- tiny helpers you can use elsewhere --------------------------------------
-def require_ezdxf():
-    """Raise a clear error if ezdxf is missing and return the module."""
-
-    if callable(_geometry_require_ezdxf):
-        return _geometry_require_ezdxf()
-
-    if not geometry.HAS_EZDXF:
-        raise RuntimeError("ezdxf not installed. Install with pip/conda (package name: 'ezdxf').")
-
-    try:
-        import ezdxf as _ezdxf
-    except Exception as exc:  # pragma: no cover - defensive fallback
-        raise RuntimeError("Failed to import ezdxf even though HAS_EZDXF is true.") from exc
-
-    return _ezdxf
-
-def get_dwg_converter_path() -> str:
-    """Resolve a DWG?DXF converter path (.bat/.cmd/.exe)."""
-    exe = os.environ.get("ODA_CONVERTER_EXE") or os.environ.get("DWG2DXF_EXE")
-    # Fall back to a local wrapper next to this script if it exists.
-    local = str(Path(__file__).with_name("dwg2dxf_wrapper.bat"))
-    if not exe and Path(local).exists():
-        exe = local
-    return exe or ""
-
-def get_import_diagnostics_text() -> str:
-    import os
-    import sys
-    lines = []
-    lines.append(f"Python: {sys.executable}")
-    try:
-        lines.append("PyMuPDF: OK")
-    except Exception as e:
-        lines.append(f"PyMuPDF: MISSING ({e})")
-
-    try:
-        import ezdxf
-        lines.append(f"ezdxf: {getattr(ezdxf, '__version__', 'unknown')}")
-        try:
-            lines.append("ezdxf.addons.odafc: OK")
-        except Exception as e:
-            lines.append(f"ezdxf.addons.odafc: not available ({e})")
-    except Exception as e:
-        lines.append(f"ezdxf: MISSING ({e})")
-
-    oda = os.environ.get("ODA_CONVERTER_EXE") or "(not set)"
-    d2d = os.environ.get("DWG2DXF_EXE") or "(not set)"
-    lines.append(f"ODA_CONVERTER_EXE: {oda}")
-    lines.append(f"DWG2DXF_EXE: {d2d}")
-
-    # local wrapper presence
-    from pathlib import Path
-    wrapper = Path(__file__).with_name("dwg2dxf_wrapper.bat")
-    lines.append(f"Local wrapper present: {wrapper.exists()} ({wrapper})")
-    return "\n".join(lines)
 # Optional PDF stack
 try:
     import fitz  # PyMuPDF
@@ -3495,51 +3766,6 @@ try:
 except Exception:
     fitz = None  # type: ignore[assignment]
     _HAS_PYMUPDF = False
-
-def upsert_var_row(df, item, value, dtype="number"):
-    """
-    Upsert one row by Item name (case-insensitive).
-    - Forces `item` and `value` to scalars.
-    - Works on the sanitized 3-column df (Item, Example..., Data Type...).
-    """
-    import numpy as np
-
-    # force scalars
-    if isinstance(item, pd.Series):
-        item = item.iloc[0]
-    item = str(item)
-
-    if isinstance(value, pd.Series):
-        value = value.iloc[0]
-    # try to make numeric if it looks numeric; otherwise keep as-is
-    try:
-        if value is None or (isinstance(value, float) and np.isnan(value)):
-            pass
-        else:
-            value = float(value)
-    except Exception:
-        # leave non-numerics (e.g., text) as-is
-        pass
-
-    # build a row with the exact df schema
-    cols = list(df.columns)
-    row: Dict[str, Any] = {c: "" for c in cols}
-    if "Item" in row:
-        row["Item"] = item
-    if "Example Values / Options" in row:
-        row["Example Values / Options"] = value
-    if "Data Type / Input Method" in row:
-        row["Data Type / Input Method"] = dtype
-
-    # case-insensitive exact match on Item
-    m = df["Item"].astype(str).str.casefold() == item.casefold()
-    if m.any():
-        df.loc[m, cols] = [row[c] for c in cols]
-        return df
-
-    # append
-    new_row = pd.DataFrame([[row[c] for c in cols]], columns=cols)
-    return pd.concat([df, new_row], ignore_index=True)
 
 DIM_RE = re.compile(r"(?:ï¿½|DIAM|DIA)\s*([0-9.+-]+)|R\s*([0-9.+-]+)|([0-9.+-]+)\s*[xX]\s*([0-9.+-]+)")
 
@@ -3552,7 +3778,7 @@ def load_drawing(path: Path) -> Drawing:
             dxf_path = convert_dwg_to_dxf(str(path))
             return ezdxf_mod.readfile(dxf_path)
         # Fallback: odafc (requires ODAFileConverter on PATH)
-        if geometry.HAS_ODAFC and odafc is not None:
+        if _HAS_ODAFC and odafc is not None:
             odafc_mod = typing.cast(_OdafcModule, odafc)
             return odafc_mod.readfile(str(path))
         raise RuntimeError(
@@ -3942,15 +4168,15 @@ SMALL = 1e-7
 
 
 def iter_solids(shape: TopoDS_Shape):
-    explorer = cast(type[Any], TopExp_Explorer)
+    explorer = cast(Callable[[Any, Any], Any], TopExp_Explorer)
     exp = explorer(shape, cast(TopAbs_ShapeEnum, TopAbs_SOLID))
     while exp.More():
-        yield to_solid(exp.Current())
+        yield geometry.to_solid(exp.Current())
         exp.Next()
 
-def explode_compound(shape: TopoDS_Shape):
+def explode_compound(shape: TopoDSShapeT) -> list[TopoDSShapeT]:
     """If the file is a big COMPOUND, break it into shapes (parts/bodies)."""
-    explorer = cast(type[Any], TopExp_Explorer)
+    explorer = cast(Callable[[Any, Any], Any], TopExp_Explorer)
     exp = explorer(shape, cast(TopAbs_ShapeEnum, TopAbs_COMPOUND))
     if exp.More():
         # Itï¿½s a compound ï¿½ return its shells/solids/faces as needed
@@ -3961,7 +4187,7 @@ def explode_compound(shape: TopoDS_Shape):
         sh = explorer(shape, cast(TopAbs_ShapeEnum, TopAbs_SHELL))
         shells = []
         while sh.More():
-            shells.append(to_shell(sh.Current()))
+            shells.append(geometry.to_shell(sh.Current()))
             sh.Next()
         return shells
     return [shape]
@@ -4031,10 +4257,10 @@ def _sum_edge_length_sharp(shape, angle_thresh_deg=175.0) -> float:
     angle_thresh = math.radians(angle_thresh_deg)
     edge2faces = map_shapes_and_ancestors(shape, TopAbs_EDGE, TopAbs_FACE)
     total = 0.0
-    for i in range(1, map_size(edge2faces) + 1):
-        edge = to_edge(edge2faces.FindKey(i))
+    for i in range(1, geometry.map_size(edge2faces) + 1):
+        edge = geometry.to_edge(edge2faces.FindKey(i))
         face_list = edge2faces.FindFromIndex(i)
-        faces = [ensure_face(shp) for shp in list_iter(face_list)]
+        faces = [ensure_face(shp) for shp in geometry.list_iter(face_list)]
         if len(faces) < 2:
             continue
         f1, f2 = faces[0], faces[-1]
@@ -4070,7 +4296,7 @@ def _surface_areas_by_type(shape):
 def _section_perimeter_len(shape, z_values):
     xmin, ymin, zmin, xmax, ymax, zmax = _bbox(shape)
     total = 0.0
-    explorer = cast(type[Any], TopExp_Explorer)
+    explorer = cast(Callable[[Any, Any], Any], TopExp_Explorer)
     for z in z_values:
         plane = gp_Pln(gp_Pnt(0,0,z), gp_Dir(0,0,1))
         sec = BRepAlgoAPI_Section(shape, plane, False); sec.Build()
@@ -4078,7 +4304,7 @@ def _section_perimeter_len(shape, z_values):
         w = sec.Shape()
         it = explorer(w, cast(TopAbs_ShapeEnum, TopAbs_EDGE))
         while it.More():
-            e = to_edge(it.Current())
+            e = geometry.to_edge(it.Current())
             total += _length_of_edge(e)
             it.Next()
     return total
@@ -4123,7 +4349,7 @@ def _hole_face_identifier(face, cylinder, face_bbox):
         exp = None
     while exp and exp.More():
         try:
-            edge = to_edge(cast(Any, exp.Current()))
+            edge = geometry.to_edge(cast(Any, exp.Current()))
             curve = BRepAdaptor_Curve(edge)
             if curve.GetType() == GeomAbs_Circle:
                 circ = curve.Circle()
@@ -4293,7 +4519,7 @@ def enrich_geo_stl(path):
     import time
     start_time = time.time()
     logger.info("[%.2fs] Starting enrich_geo_stl for %s", time.time() - start_time, path)
-    if not geometry.HAS_TRIMESH:
+    if not _HAS_TRIMESH:
         raise RuntimeError("trimesh not available to process STL")
 
     logger.info("[%.2fs] Loading mesh...", time.time() - start_time)
@@ -4404,18 +4630,18 @@ def read_cad_any(path: str):
         ig.TransferRoots()
         return _shape_from_reader(ig)
     if ext == ".brep":
-        shape_cls = cast(type[Any], TopoDS_Shape)
-        s = shape_cls()
+        shape_ctor = cast(Callable[[], Any], TopoDS_Shape)
+        s = shape_ctor()
         if not cast(Any, BRepTools).Read(s, path, None):
             raise RuntimeError("BREP read failed")
         return s
     if ext == ".dxf":
-        return geometry.read_dxf_as_occ_shape(path)
+        return read_dxf_as_occ_shape(path)
     if ext == ".dwg":
         conv = os.environ.get("ODA_CONVERTER_EXE") or os.environ.get("DWG2DXF_EXE")
         logger.info("Using DWG converter: %s", conv)
         dxf_path = convert_dwg_to_dxf(path)
-        return geometry.read_dxf_as_occ_shape(dxf_path)
+        return read_dxf_as_occ_shape(dxf_path)
     raise RuntimeError(f"Unsupported CAD format: {ext}")
 
 # ---- LLM hours inference ----
@@ -8876,85 +9102,91 @@ def require_plate_inputs(geo: dict, ui_vars: dict[str, Any] | None) -> None:
         geo["material"] = material
 
 
-def _plate_mass_properties(
-    plate_L_in,
-    plate_W_in,
-    t_in,
-    density_g_cc: float | None,
-    hole_d_mm: Sequence[Any] | None = None,
-) -> tuple[float | None, float]:
-    """Internal helper returning ``(net_mass_kg, removed_mass_g)``."""
+def _compute_plate_mass_density(
+    ui_vars: Mapping[str, Any] | None,
+    geo_context: dict[str, Any],
+    material_name: str | None,
+    default_material_display: str | None,
+    density_g_cc: float,
+) -> tuple[float, float, float, float | None, float | None]:
+    """Return plate-derived volume and density details."""
 
-    if not (plate_L_in and plate_W_in and t_in):
-        return (None, 0.0)
+    ui_vars = dict(ui_vars or {})
 
-    L_val = _coerce_float_or_none(plate_L_in)
-    W_val = _coerce_float_or_none(plate_W_in)
-    T_val = _coerce_float_or_none(t_in)
-    if L_val is None or W_val is None or T_val is None:
-        return (None, 0.0)
+    length_in_val = _coerce_float_or_none(ui_vars.get("Plate Length (in)"))
+    width_in_val = _coerce_float_or_none(ui_vars.get("Plate Width (in)"))
+    thickness_mm_val = _coerce_float_or_none(geo_context.get("thickness_mm"))
+    if thickness_mm_val is None:
+        t_in = _coerce_float_or_none(ui_vars.get("Thickness (in)"))
+        if t_in is not None:
+            thickness_mm_val = float(t_in) * 25.4
+    thickness_mm_val = float(thickness_mm_val or 0.0)
 
-    L = float(L_val)
-    W = float(W_val)
-    T = float(T_val)
-    if L <= 0 or W <= 0 or T <= 0:
-        return (None, 0.0)
+    plate_length_in_val: float | None = None
+    plate_width_in_val: float | None = None
+    if length_in_val and length_in_val > 0:
+        plate_length_in_val = float(length_in_val)
+    if width_in_val and width_in_val > 0:
+        plate_width_in_val = float(width_in_val)
 
-    vol_plate_in3 = L * W * T
-    try:
-        t_mm = T * 25.4
-    except Exception:
-        t_mm = None
-    if t_mm is None:
-        return (None, 0.0)
+    if thickness_mm_val > 0:
+        geo_context["thickness_mm"] = thickness_mm_val
 
-    holes_mm: list[float] = []
-    for d in hole_d_mm or []:
-        val = _coerce_float_or_none(d)
+    length_mm = float(length_in_val or 0.0) * 25.4
+    width_mm = float(width_in_val or 0.0) * 25.4
+    if length_mm > 0:
+        geo_context.setdefault("plate_length_mm", length_mm)
+    if width_mm > 0:
+        geo_context.setdefault("plate_width_mm", width_mm)
+
+    vol_mm3_plate = max(1.0, length_mm * width_mm * max(thickness_mm_val, 0.0))
+    plate_vol_cm3 = vol_mm3_plate / 1000.0
+    plate_geo_vol_mm3 = vol_mm3_plate
+
+    density_lookup = {
+        "steel": 7.85,
+        "stainless": 7.90,
+        "alum": 2.70,
+        "titanium": 4.43,
+        "copper": 8.96,
+        "brass": 8.40,
+        "plastic": 1.45,
+    }
+
+    def _context_density(ctx: Mapping[str, Any] | None) -> float | None:
+        if not isinstance(ctx, Mapping):
+            return None
+        val = _coerce_float_or_none(ctx.get("density_g_cc"))
         if val and val > 0:
-            holes_mm.append(float(val))
-    vol_holes_mm3 = sum(math.pi * (d / 2.0) ** 2 * t_mm for d in holes_mm)
-    vol_holes_in3 = vol_holes_mm3 / 16387.064 if vol_holes_mm3 else 0.0
-    vol_net_in3 = max(0.0, vol_plate_in3 - vol_holes_in3)
-    vol_cc = vol_net_in3 * 16.387064
-    density_val = _coerce_float_or_none(density_g_cc) or 0.0
-    mass_g = vol_cc * float(density_val)
-    removed_mass_g = vol_holes_in3 * 16.387064 * float(density_val)
-    net_mass = mass_g / 1000.0 if mass_g else 0.0
-    return (net_mass, removed_mass_g)
+            return float(val)
+        return None
 
+    inner_geo_ctx = (
+        geo_context.get("geo") if isinstance(geo_context.get("geo"), Mapping) else None
+    )
+    density_candidates: list[float] = []
+    for ctx in (geo_context, inner_geo_ctx):
+        dens = _context_density(ctx)
+        if dens:
+            density_candidates.append(dens)
+    if not density_candidates:
+        density_candidates.append(
+            _density_for_material(material_name or default_material_display, default=0.0)
+        )
+    density_candidates.append(
+        density_lookup.get(
+            _material_family(geo_context.get("material") or material_name),
+            density_lookup["steel"],
+        )
+    )
+    density_g_cc = next((d for d in density_candidates if d and d > 0), density_lookup["steel"])
 
-def _plate_mass_from_dims(
-    length_mm,
-    width_mm,
-    thickness_mm,
-    density_g_cc: float | None,
-    *,
-    dims_in: Sequence[Any] | None = None,
-    hole_d_mm: Sequence[Any] | None = None,
-) -> tuple[float | None, float]:
-    """Wrapper converting dims (mm or in) before delegating to ``_plate_mass_properties``."""
-
-    dims_in_vals: list[float] = []
-    if dims_in:
-        for value in dims_in:
-            coerced = _coerce_float_or_none(value)
-            if coerced and coerced > 0:
-                dims_in_vals.append(float(coerced))
-    if len(dims_in_vals) != 3 or not all(val > 0 for val in dims_in_vals):
-        dims_in_vals = []
-        for mm_val in (length_mm, width_mm, thickness_mm):
-            coerced_mm = _coerce_float_or_none(mm_val)
-            if not coerced_mm or coerced_mm <= 0:
-                return (None, 0.0)
-            dims_in_vals.append(float(coerced_mm) / 25.4)
-
-    return _plate_mass_properties(
-        dims_in_vals[0],
-        dims_in_vals[1],
-        dims_in_vals[2],
+    return (
+        plate_vol_cm3,
+        plate_geo_vol_mm3,
         density_g_cc,
-        hole_d_mm,
+        plate_length_in_val,
+        plate_width_in_val,
     )
 
 
@@ -10727,8 +10959,7 @@ def validate_quote_before_pricing(
             issues.clear()
         else:
             raise ValueError("Quote blocked:\n- " + "\n- ".join(issues))
-
-
+# pyright: ignore[reportGeneralTypeIssues]
 def compute_quote_from_df(df: pd.DataFrame,
                           params: Dict[str, Any] | None = None,
                           rates: Dict[str, float] | None = None,
@@ -10745,7 +10976,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                           quote_state: QuoteState | None = None,
                           reuse_suggestions: bool = False,
                           llm_suggest: Any | None = None,
-                          pricing: PricingEngine | None = None) -> Dict[str, Any]:  # pyright: ignore[reportGeneralTypeIssues]
+                          pricing: PricingEngine | None = None) -> Dict[str, Any]:
     """
     Estimator that consumes variables from the sheet (Item, Example Values / Options, Data Type / Input Method).
 
@@ -11177,64 +11408,24 @@ def compute_quote_from_df(df: pd.DataFrame,
         density_g_cc = density_guess_from_material
 
     if is_plate_2d:
-        length_in_val = _coerce_float_or_none(ui_vars.get("Plate Length (in)"))
-        width_in_val = _coerce_float_or_none(ui_vars.get("Plate Width (in)"))
-        thickness_mm_val = _coerce_float_or_none(geo_context.get("thickness_mm"))
-        if thickness_mm_val is None:
-            t_in = _coerce_float_or_none(ui_vars.get("Thickness (in)"))
-            if t_in is not None:
-                thickness_mm_val = float(t_in) * 25.4
-        thickness_mm_val = float(thickness_mm_val or 0.0)
-        if length_in_val and length_in_val > 0:
-            plate_length_in_val = float(length_in_val)
-        if width_in_val and width_in_val > 0:
-            plate_width_in_val = float(width_in_val)
-        if thickness_mm_val > 0:
-            geo_context["thickness_mm"] = thickness_mm_val
-        length_mm = float(length_in_val or 0.0) * 25.4
-        width_mm = float(width_in_val or 0.0) * 25.4
-        if length_mm > 0:
-            geo_context.setdefault("plate_length_mm", length_mm)
-        if width_mm > 0:
-            geo_context.setdefault("plate_width_mm", width_mm)
-        vol_mm3_plate = max(1.0, length_mm * width_mm * max(thickness_mm_val, 0.0))
-        vol_cm3 = max(vol_cm3, vol_mm3_plate / 1000.0)
-        GEO_vol_mm3 = max(GEO_vol_mm3, vol_mm3_plate)
-        density_lookup = {
-            "steel": 7.85,
-            "stainless": 7.90,
-            "alum": 2.70,
-            "titanium": 4.43,
-            "copper": 8.96,
-            "brass": 8.40,
-            "plastic": 1.45,
-        }
-
-        def _context_density(ctx: dict[str, Any] | None) -> float | None:
-            if not isinstance(ctx, dict):
-                return None
-            val = _coerce_float_or_none(ctx.get("density_g_cc"))
-            if val and val > 0:
-                return float(val)
-            return None
-
-        inner_geo_ctx = geo_context.get("geo") if isinstance(geo_context.get("geo"), dict) else None
-        density_candidates: list[float] = []
-        for ctx in (geo_context, inner_geo_ctx):
-            dens = _context_density(ctx)
-            if dens:
-                density_candidates.append(dens)
-        if not density_candidates:
-            density_candidates.append(
-                _density_for_material(material_name or default_material_display, default=0.0)
-            )
-        density_candidates.append(
-            density_lookup.get(
-                _material_family(geo_context.get("material") or material_name),
-                density_lookup["steel"],
-            )
+        (
+            plate_vol_cm3,
+            plate_geo_vol_mm3,
+            density_g_cc,
+            plate_length_in_val,
+            plate_width_in_val,
+        ) = _compute_plate_mass_density(
+            ui_vars,
+            geo_context,
+            material_name,
+            default_material_display,
+            density_g_cc,
         )
-        density_g_cc = next((d for d in density_candidates if d and d > 0), density_lookup["steel"])
+        vol_cm3 = max(vol_cm3, plate_vol_cm3)
+        GEO_vol_mm3 = max(GEO_vol_mm3, plate_geo_vol_mm3)
+        thickness_mm_val = float(_coerce_float_or_none(geo_context.get("thickness_mm")) or 0.0)
+        length_in_val = plate_length_in_val
+        width_in_val = plate_width_in_val
         holes_for_mass: list[float] = []
         hole_sources: list[Any] = []
         for key in ("hole_diams_mm_precise", "hole_diams_mm"):
@@ -11907,7 +12098,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         selected_material_name
         or geo_context.get("material")
         or material_name
-        or "Steel"
+        or DEFAULT_MATERIAL_DISPLAY
     )
     drill_material_source = str(drill_material_source).strip()
     drill_material_lookup = (
@@ -13822,13 +14013,8 @@ def compute_quote_from_df(df: pd.DataFrame,
         "setups": baseline_setups,
         "fixture": baseline_fixture,
     }
-    llm_bounds = {
-        "mult_min": LLM_MULTIPLIER_MIN,
-        "mult_max": LLM_MULTIPLIER_MAX,
-        "adder_max_hr": LLM_ADDER_MAX,
-        "scrap_min": 0.0,
-        "scrap_max": 0.25,
-    }
+    llm_bounds = dict(LLM_BOUND_DEFAULTS)
+    llm_bounds.update({"scrap_min": 0.0, "scrap_max": 0.25})
     baseline_bounds = baseline_data.get("_bounds") if isinstance(baseline_data.get("_bounds"), dict) else None
     if baseline_bounds:
         bucket_caps_raw = baseline_bounds.get("adder_bucket_max") or baseline_bounds.get("add_hr_bucket_max")
@@ -15382,8 +15568,8 @@ def compute_quote_from_df(df: pd.DataFrame,
                 f"Labor totals drifted by ${diff:,.2f}: "
                 f"rendered ${labor_display_total:,.2f} vs expected ${expected_labor_total:,.2f}"
             )
-            if flag_message not in red_flags:
-                red_flags.append(flag_message)
+            if flag_message not in red_flag_messages:
+                red_flag_messages.append(flag_message)
             logger.warning(
                 "Labor section totals drifted beyond threshold: %.2f vs %.2f",
                 labor_display_total,
@@ -15828,8 +16014,8 @@ def default_variables_template() -> pd.DataFrame:
         ("FAIR Required", "False / True", "Checkbox"),
         ("Source Inspection Requirement", "False / True", "Checkbox"),
         ("Quantity", 1, "number"),
-        ("Material", "", "text"),
-        ("Thickness (in)", 0.0, "number"),
+        ("Material", "Aluminum MIC6", "text"),
+        ("Thickness (in)", 2.0, "number"),
     ]
     return pd.DataFrame(rows, columns=REQUIRED_COLS)
 
@@ -18218,14 +18404,14 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
 
     # --- load doc ---
     dxf_text_path: str | None = None
-    doc = None
+    doc: Drawing | None = None
     lower_path = path.lower()
-    readfile = getattr(ezdxf_mod, "readfile", None)
+    readfile: Callable[[str], Any] | None = getattr(ezdxf_mod, "readfile", None)
     if not callable(readfile):
         raise AttributeError("ezdxf module does not provide a callable 'readfile' function")
 
     if lower_path.endswith(".dwg"):
-        if geometry.HAS_ODAFC:
+        if _HAS_ODAFC:
             # uses ODAFileConverter through ezdxf, no env var needed
             from ezdxf.addons import odafc as _odafc  # type: ignore
 
@@ -18234,14 +18420,17 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
                 raise RuntimeError(
                     "ezdxf.addons.odafc.readfile is unavailable; install ODAFileConverter support."
                 )
-            doc = readfile(path)
+            doc = cast(Drawing, readfile(path))
         else:
             dxf_path = convert_dwg_to_dxf(path, out_ver="ACAD2018")
             dxf_text_path = dxf_path
-            doc = readfile(dxf_path)
+            doc = cast(Drawing, readfile(dxf_path))
     else:
-        doc = readfile(path)
+        doc = cast(Drawing, readfile(path))
         dxf_text_path = path
+
+    if doc is None:
+        raise RuntimeError("Failed to load DXF/DWG document")
 
     sp = doc.modelspace()
     units = detect_units_scale(doc)
@@ -18340,7 +18529,11 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
 
             if geo_read_more.get("chart_lines"):
                 existing_lines_raw = geo.get("chart_lines")
-                existing_lines = list(existing_lines_raw) if isinstance(existing_lines_raw, list) else []
+                existing_lines = (
+                    existing_lines_raw.copy()
+                    if isinstance(existing_lines_raw, list)
+                    else []
+                )
                 new_lines = geo_read_more.get("chart_lines")
                 if not isinstance(new_lines, list):
                     new_lines = []
@@ -18396,7 +18589,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     chart_source: str | None = None
     chart_summary: dict[str, Any] | None = None
 
-    extractor = _extract_text_lines_from_dxf or geometry.extract_text_lines_from_dxf
+    extractor = _extract_text_lines_from_dxf or extract_text_lines_from_dxf
     if extractor and dxf_text_path:
         try:
             chart_lines = extractor(dxf_text_path)
@@ -18407,7 +18600,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
 
     if chart_lines:
         chart_summary = summarize_hole_chart_lines(chart_lines)
-    parser = _parse_hole_table_lines or geometry.parse_hole_table_lines
+    parser = _parse_hole_table_lines or parse_hole_table_lines
     if chart_lines and parser:
         try:
             hole_rows = parser(chart_lines)
@@ -18786,7 +18979,7 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
     if isinstance(material_name, str):
         material_name = material_name.strip() or None
 
-    material_display = material_name or "Steel"
+    material_display = material_name or DEFAULT_MATERIAL_DISPLAY
 
     hole_count_val = hole_count if isinstance(hole_count, int) else None
     geo_notes_default: list[str] = []
@@ -19188,12 +19381,13 @@ def get_llm_overrides(
     catalogs_ctx["stock"] = stock_catalog
     ctx["catalogs"] = catalogs_ctx
     bounds_ctx = dict(ctx.get("bounds") or {})
+    llm_bound_defaults = dict(LLM_BOUND_DEFAULTS)
     bounds_ctx.update(
         {
-            "mult_min": LLM_MULTIPLIER_MIN,
-            "mult_max": LLM_MULTIPLIER_MAX,
+            "mult_min": llm_bound_defaults["mult_min"],
+            "mult_max": llm_bound_defaults["mult_max"],
             "add_hr_min": 0.0,
-            "add_hr_max": LLM_ADDER_MAX,
+            "add_hr_max": llm_bound_defaults["adder_max_hr"],
             "scrap_min": 0.0,
             "scrap_max": 0.25,
         }
@@ -19767,22 +19961,22 @@ class GeometryLoader:
         return extract_2d_features_from_dxf_or_dwg(str(path))
 
     def extract_features_with_occ(self, path: str | Path):
-        return geometry.extract_features_with_occ(str(path))
+        return extract_features_with_occ(str(path))
 
     def enrich_geo_stl(self, path: str | Path):
-        return geometry.enrich_geo_stl(str(path))
+        return enrich_geo_stl(str(path))
 
     def read_step_shape(self, path: str | Path) -> Any:
-        return geometry.read_step_shape(str(path))
+        return read_step_shape(str(path))
 
     def read_cad_any(self, path: str | Path) -> Any:
-        return geometry.read_cad_any(str(path))
+        return read_cad_any(str(path))
 
     def safe_bbox(self, shape: Any):
-        return geometry.safe_bbox(shape)
+        return safe_bbox(shape)
 
     def enrich_geo_occ(self, shape: Any):
-        return geometry.enrich_geo_occ(shape)
+        return enrich_geo_occ(shape)
 
 
 @dataclass(slots=True)
@@ -20107,11 +20301,18 @@ class CreateToolTip:
         if self._tip_window is not None or not self.text:
             return
 
-        bbox = None
+        bbox: tuple[int, int, int, int] | None = None
         bbox_method = getattr(self.widget, "bbox", None)
         if callable(bbox_method):
             try:
-                bbox = bbox_method("insert")  # type: ignore[arg-type]
+                raw_bbox = bbox_method("insert")  # type: ignore[arg-type]
+                if isinstance(raw_bbox, (tuple, list)) and len(raw_bbox) >= 4:
+                    bbox = (
+                        int(raw_bbox[0]),
+                        int(raw_bbox[1]),
+                        int(raw_bbox[2]),
+                        int(raw_bbox[3]),
+                    )
             except Exception:
                 bbox = None
         if bbox:
@@ -20217,6 +20418,8 @@ class App(tk.Tk):
         llm_services: LLMServices | None = None,
         geometry_service: geometry.GeometryService | None = None,
     ):
+
+        _ensure_tk()
 
         super().__init__()
 
@@ -20753,10 +20956,10 @@ class App(tk.Tk):
         df = _ensure_row(df, "Scrap Percent (%)", 15.0, dtype="number")
         df = _ensure_row(df, "Plate Length (in)", 12.0, dtype="number")
         df = _ensure_row(df, "Plate Width (in)", 14.0, dtype="number")
-        df = _ensure_row(df, "Thickness (in)", 0.0, dtype="number")
+        df = _ensure_row(df, "Thickness (in)", 2.0, dtype="number")
         df = _ensure_row(df, "Hole Count (override)", 0, dtype="number")
         df = _ensure_row(df, "Avg Hole Diameter (mm)", 0.0, dtype="number")
-        df = _ensure_row(df, "Material", "", dtype="text")
+        df = _ensure_row(df, "Material", "Aluminum MIC6", dtype="text")
         self.vars_df = df
         parent = self.editor_scroll.inner
         for child in parent.winfo_children():
@@ -22061,9 +22264,13 @@ class App(tk.Tk):
 
     def open_llm_inspector(self):
         import json
-        import tkinter as tk
         from pathlib import Path
-        from tkinter import messagebox, scrolledtext
+
+        try:
+            _ensure_tk("LLM Inspector")
+        except RuntimeError as exc:  # pragma: no cover - headless guard
+            logger.error("Cannot open LLM Inspector: %s", exc)
+            return
 
         debug_dir = Path(__file__).with_name("llm_debug")
         files = sorted(debug_dir.glob("llm_snapshot_*.json"))
@@ -22361,7 +22568,14 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
 
     pricing_registry = create_default_registry()
     pricing_engine = PricingEngine(pricing_registry)
-    App(pricing_engine).mainloop()
+
+    try:
+        app = App(pricing_engine)
+    except RuntimeError as exc:  # pragma: no cover - headless guard
+        logger.error("Unable to start the GUI: %s", exc)
+        return 1
+
+    app.mainloop()
 
     return 0
 

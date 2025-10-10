@@ -974,10 +974,6 @@ def explode_compound(shape: TopoDS_Shape):
 
 
 
-def safe_bounding_box(shape: TopoDS_Shape) -> Bnd_Box:
-    """Public wrapper maintained for compatibility."""
-    return safe_bbox(shape)
-
 def _bbox(shape):
     box = safe_bbox(shape)
     xmin, ymin, zmin, xmax, ymax, zmax = box.Get()
@@ -1506,7 +1502,6 @@ __all__ = [
     "enrich_geo_occ",
     "enrich_geo_stl",
     "safe_bbox",
-    "safe_bounding_box",
     "iter_solids",
     "explode_compound",
     "extract_features_with_occ",
