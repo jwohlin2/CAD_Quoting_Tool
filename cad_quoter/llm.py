@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import json
 import os
 import re
@@ -9,7 +10,7 @@ import time
 import textwrap
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence
 
 from cad_quoter.utils import compact_dict
 
@@ -763,6 +764,147 @@ Return JSON with this structure (numbers only, minutes only for CMM_RunTime_min)
         },
         "notes": ["fallback heuristics"],
     }
+
+
+# ---------------------------------------------------------------------------
+# Quote explanations
+
+
+def explain_quote(
+    breakdown: Mapping[str, Any] | None,
+    *,
+    hour_trace: Mapping[str, Any] | Sequence[tuple[str, Any]] | None = None,
+) -> str:
+    """Return a short natural-language explanation for a rendered quote."""
+
+    if not isinstance(breakdown, Mapping):
+        return ""
+
+    def _coerce_float(value: Any) -> float | None:
+        try:
+            num = float(value)
+        except Exception:
+            return None
+        if not math.isfinite(num):
+            return None
+        return num
+
+    def _coerce_int(value: Any) -> int | None:
+        num = _coerce_float(value)
+        if num is None:
+            return None
+        try:
+            return int(round(num))
+        except Exception:
+            return None
+
+    def _format_pct(value: Any) -> str | None:
+        pct = _coerce_float(value)
+        if pct is None:
+            return None
+        if pct > 1.5:
+            pct = pct / 100.0
+        return f"{pct * 100:.1f}%"
+
+    totals = breakdown.get("totals") or {}
+
+    currency_hint = (
+        breakdown.get("currency")
+        or totals.get("currency")
+        or breakdown.get("currency_code")
+        or totals.get("currency_code")
+    )
+    currency_text = str(currency_hint or "").strip()
+    if not currency_text:
+        currency_prefix = "$"
+    elif len(currency_text) == 1 or currency_text[0] in "$€£¥₹":
+        currency_prefix = currency_text
+    elif currency_text.isalpha() and len(currency_text) <= 4:
+        currency_prefix = f"{currency_text} "
+    else:
+        currency_prefix = currency_text
+
+    def _format_money(value: Any) -> str | None:
+        num = _coerce_float(value)
+        if num is None:
+            return None
+        return f"{currency_prefix}{num:,.2f}"
+
+    lines: list[str] = []
+
+    price_text = _format_money(totals.get("price") or breakdown.get("price"))
+    qty_val = _coerce_int(totals.get("qty") or breakdown.get("qty") or breakdown.get("quantity"))
+    if price_text:
+        if qty_val and qty_val > 0:
+            piece_label = "piece" if qty_val == 1 else "pieces"
+            lines.append(f"Quote total {price_text} for {qty_val} {piece_label}.")
+        else:
+            lines.append(f"Quote total {price_text}.")
+
+    labor_text = _format_money(totals.get("labor_cost"))
+    material_text = _format_money(
+        breakdown.get("material_direct_cost")
+        or totals.get("material_cost")
+        or (breakdown.get("material") or {}).get("material_cost")
+    )
+    if labor_text or material_text:
+        parts: list[str] = []
+        if material_text:
+            parts.append(f"material {material_text}")
+        if labor_text:
+            parts.append(f"labor & machine {labor_text}")
+        lines.append("Cost makeup: " + "; ".join(parts) + ".")
+
+    scrap_text = _format_pct(breakdown.get("scrap_pct"))
+    if scrap_text and _coerce_float(breakdown.get("scrap_pct")):
+        lines.append(f"Includes a {scrap_text} scrap allowance.")
+
+    def _iter_named_values(values: Any) -> Iterable[tuple[str, float]]:
+        items: Iterable[tuple[Any, Any]]
+        if isinstance(values, Mapping):
+            items = values.items()
+        elif isinstance(values, Sequence):
+            items = [tuple(item) for item in values if isinstance(item, (list, tuple)) and len(item) >= 2]
+        else:
+            return []
+        for key, raw in items:
+            amount = _coerce_float(raw)
+            if amount is None or abs(amount) < 1e-2:
+                continue
+            name = str(key).strip()
+            if not name:
+                continue
+            yield name, amount
+
+    def _describe_top(entries: Iterable[tuple[str, float]], *, prefix: str) -> None:
+        ranked = sorted(entries, key=lambda item: item[1], reverse=True)
+        top = [
+            f"{label}: {_format_money(value)}"
+            for label, value in ranked[:3]
+            if _format_money(value)
+        ]
+        if top:
+            lines.append(f"{prefix} → " + "; ".join(top) + ".")
+
+    process_entries = [
+        (label, amount)
+        for label, amount in _iter_named_values(breakdown.get("process_costs"))
+        if not str(label).lower().startswith("planner_")
+    ]
+    if process_entries:
+        _describe_top(process_entries, prefix="Largest process costs")
+
+    pass_through_entries = [
+        (label, amount)
+        for label, amount in _iter_named_values(breakdown.get("pass_through"))
+        if str(label).strip().lower() != "material"
+    ]
+    if pass_through_entries:
+        _describe_top(pass_through_entries, prefix="Pass-through items")
+
+    if lines:
+        return "\n".join(lines)
+    return ""
 
 
 # Helpers imported from appV5 -------------------------------------------------
