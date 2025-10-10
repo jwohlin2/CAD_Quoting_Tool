@@ -11894,6 +11894,7 @@ def compute_quote_from_df(
     planner_drill_minutes: float | None = None
     planner_drilling_override: dict[str, float] | None = None
     used_planner = False
+    planner_meta_keys: set[str] = set()
 
     red_flag_messages: list[str] = []
     # Historically this function exposed a ``red_flags`` list.  Some call
