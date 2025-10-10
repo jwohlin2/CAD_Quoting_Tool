@@ -71,6 +71,8 @@ class OverheadParams:
     peck_penalty_min_per_in_depth: float | None = None
     dwell_min: float | None = None
     peck_min: float | None = None
+    # Optional indexing time per hole (seconds). Some callers still populate
+    # this; default to None so downstream "to_num" handling can coerce safely.
     index_sec_per_hole: float | None = None
 
 
@@ -302,7 +304,7 @@ def time_drill(
     rapid_min = (2.0 * approach) / max(rapid_ipm, 1.0)
 
     noncut = noncut_time_min(overhead, 1)
-    index_min = (to_num(overhead.index_sec_per_hole, 0.0) or 0.0) / 60.0
+    index_min = (to_num(getattr(overhead, "index_sec_per_hole", 0.0), 0.0) or 0.0) / 60.0
     total = cut_min + peck + rapid_min + noncut + index_min
 
     if debug is not None:
@@ -355,7 +357,7 @@ def time_ream(
     approach = to_num(overhead.approach_retract_in, 0.0) or 0.0
     rapid_ipm = to_num(machine.rapid_ipm, 0.0) or 1.0
     rapid_min = (2.0 * approach) / max(rapid_ipm, 1.0)
-    index_min = (to_num(overhead.index_sec_per_hole, 0.0) or 0.0) / 60.0
+    index_min = (to_num(getattr(overhead, "index_sec_per_hole", 0.0), 0.0) or 0.0) / 60.0
     return cut_min + rapid_min + noncut_time_min(overhead, 1) + index_min
 
 
@@ -381,7 +383,7 @@ def time_tap_roll_form(
     approach = to_num(overhead.approach_retract_in, 0.0) or 0.0
     rapid_ipm = to_num(machine.rapid_ipm, 0.0) or 1.0
     rapid_min = (2.0 * approach) / max(rapid_ipm, 1.0)
-    index_min = (to_num(overhead.index_sec_per_hole, 0.0) or 0.0) / 60.0
+    index_min = (to_num(getattr(overhead, "index_sec_per_hole", 0.0), 0.0) or 0.0) / 60.0
     return down_min + up_min + rapid_min + noncut_time_min(overhead, 1) + index_min
 
 
@@ -414,7 +416,7 @@ def time_thread_mill(
     per_pass_len = path_len + 2.0 * approach
     passes = max(int(to_num(geom.pass_count_override, 0.0) or 1), 1)
     cut_min = (per_pass_len / max(ipm, 1e-6)) * passes
-    index_min = (to_num(overhead.index_sec_per_hole, 0.0) or 0.0) / 60.0
+    index_min = (to_num(getattr(overhead, "index_sec_per_hole", 0.0), 0.0) or 0.0) / 60.0
     return cut_min + noncut_time_min(overhead, passes) + index_min
 
 
