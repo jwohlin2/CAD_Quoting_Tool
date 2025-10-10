@@ -22,13 +22,12 @@ import os
 import re
 import time
 import typing
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace, fields as dataclass_fields
 from fractions import Fraction
 from pathlib import Path
+from types import MappingProxyType
 
 from cad_quoter.app import runtime as _runtime
 from cad_quoter.app.container import (
@@ -60,6 +59,12 @@ def _coerce_env_bool(value: str | None) -> bool:
 
 
 FORCE_PLANNER = _coerce_env_bool(os.environ.get("FORCE_PLANNER"))
+
+
+# Guardrails for LLM-generated process adjustments.
+LLM_MULTIPLIER_MIN = 0.25
+LLM_MULTIPLIER_MAX = 4.0
+LLM_ADDER_MAX = 8.0
 
 
 def jdump(obj) -> str:
@@ -113,16 +118,93 @@ from typing import (
     cast,
     Literal,
     overload,
+    TYPE_CHECKING,
 )
 
 
 T = TypeVar("T")
 
 
-if sys.platform == "win32":
-    occ_bin = os.path.join(sys.prefix, "Library", "bin")
-    if os.path.isdir(occ_bin):
-        os.add_dll_directory(occ_bin)
+if TYPE_CHECKING:  # pragma: no cover - typing helpers only
+    import tkinter as tk  # type: ignore[import]
+    from tkinter import (  # type: ignore[import]
+        filedialog,
+        messagebox,
+        scrolledtext,
+        ttk,
+    )
+
+    def _ensure_tk(action: str = "Tkinter GUI") -> dict[str, Any]: ...
+else:
+    _TK_MODULE_CACHE: dict[str, Any] | None = None
+    _TK_IMPORT_ERROR: Exception | None = None
+
+    def _load_tkinter_modules() -> dict[str, Any] | None:
+        """Best-effort import of Tkinter modules, caching the result."""
+
+        global _TK_MODULE_CACHE, _TK_IMPORT_ERROR
+        if _TK_MODULE_CACHE is not None or _TK_IMPORT_ERROR is not None:
+            return _TK_MODULE_CACHE
+
+        try:
+            import tkinter as _tk_mod  # type: ignore[import]
+            from tkinter import (  # type: ignore[import]
+                filedialog as _filedialog_mod,
+                messagebox as _messagebox_mod,
+                scrolledtext as _scrolledtext_mod,
+                ttk as _ttk_mod,
+            )
+        except Exception as exc:  # pragma: no cover - headless environments
+            _TK_IMPORT_ERROR = exc
+            return None
+
+        _TK_MODULE_CACHE = {
+            "tk": _tk_mod,
+            "filedialog": _filedialog_mod,
+            "messagebox": _messagebox_mod,
+            "scrolledtext": _scrolledtext_mod,
+            "ttk": _ttk_mod,
+        }
+        return _TK_MODULE_CACHE
+
+    def _raise_tkinter_unavailable(action: str) -> None:
+        """Raise a helpful error when GUI functionality is requested headless."""
+
+        if _TK_IMPORT_ERROR is not None:
+            raise RuntimeError(
+                f"{action} requires Tkinter, which is unavailable: {_TK_IMPORT_ERROR}"
+            ) from _TK_IMPORT_ERROR
+        raise RuntimeError(f"{action} requires Tkinter, which is unavailable.")
+
+    def _ensure_tk(action: str = "Tkinter GUI") -> dict[str, Any]:
+        modules = _load_tkinter_modules()
+        if modules is None:
+            _raise_tkinter_unavailable(action)
+        return modules
+
+    class _TkModuleProxy:
+        def __init__(self, key: str, description: str) -> None:
+            self._key = key
+            self._description = description
+
+        def __getattr__(self, attr: str) -> Any:
+            modules = _load_tkinter_modules()
+            if modules is not None:
+                return getattr(modules[self._key], attr)
+            if self._key == "tk" and attr == "Tk":
+
+                class _TkUnavailable:
+                    def __init__(self, *args: Any, **kwargs: Any) -> None:
+                        _raise_tkinter_unavailable("Starting the CAD Quoting Tool GUI")
+
+                return _TkUnavailable
+            _raise_tkinter_unavailable(self._description)
+
+    tk = cast(Any, _TkModuleProxy("tk", "Tkinter GUI"))
+    filedialog = cast(Any, _TkModuleProxy("filedialog", "File dialogs"))
+    messagebox = cast(Any, _TkModuleProxy("messagebox", "Message boxes"))
+    scrolledtext = cast(Any, _TkModuleProxy("scrolledtext", "Scrolled text widgets"))
+    ttk = cast(Any, _TkModuleProxy("ttk", "Themed Tk widgets"))
 
 
 def resolve_planner(
@@ -201,11 +283,6 @@ from cad_quoter.geo2d import (
 )
 from bucketizer import bucketize
 
-# Guardrails for LLM-generated process adjustments.
-LLM_MULTIPLIER_MIN = 0.25
-LLM_MULTIPLIER_MAX = 4.0
-LLM_ADDER_MAX = 8.0
-
 # Tolerance for invariant checks that guard against silent drift when rendering
 # cost sections.
 _LABOR_SECTION_ABS_EPSILON = 0.51
@@ -275,8 +352,14 @@ from cad_quoter.domain_models import (
 from cad_quoter.coerce import to_float, to_int
 from cad_quoter.utils import compact_dict, sdict
 from cad_quoter.utils.geo_ctx import _should_include_outsourced_pass
-from cad_quoter.utils.text import _match_items_contains
-from cad_quoter.utils.scrap import _estimate_scrap_from_stock_plan
+try:
+    from cad_quoter.utils.text import _match_items_contains
+except Exception:  # pragma: no cover - defensive fallback for optional import paths
+    def _match_items_contains(items, pattern):  # type: ignore[override]
+        try:
+            return items.str.contains(pattern, case=False, regex=True, na=False)
+        except Exception:
+            return items.str.contains(pattern, case=False, regex=False, na=False)
 from cad_quoter.pricing import (
     LB_PER_KG,
     PricingEngine,
@@ -329,6 +412,7 @@ from cad_quoter.llm import (
     EDITOR_FROM_UI,
     EDITOR_TO_SUGG,
     LLMClient,
+    SYSTEM_SUGGEST,
     SUGG_TO_EDITOR,
     SYSTEM_SUGGEST,
     infer_hours_and_overrides_from_geo as _infer_hours_and_overrides_from_geo,
@@ -556,6 +640,117 @@ def _canonical_amortized_label(label: Any) -> tuple[str, bool]:
 import pandas as pd
 from typing import TYPE_CHECKING, TypedDict
 
+if TYPE_CHECKING:
+    try:
+        from OCP.TopoDS import (  # type: ignore[import]
+            TopoDS_Compound as _TopoDSCompound,
+            TopoDS_Shape as _TopoDSShape,
+        )
+    except ImportError:
+        try:
+            from OCC.Core.TopoDS import (  # type: ignore[import]
+                TopoDS_Compound as _TopoDSCompound,
+                TopoDS_Shape as _TopoDSShape,
+            )
+        except ImportError:  # pragma: no cover - typing-only fallback
+            from typing import Any as _TopoDSCompound  # type: ignore[assignment]
+            from typing import Any as _TopoDSShape  # type: ignore[assignment]
+    _TopoDSShapeT = _TopoDSShape
+    _TopoDSCompoundT = _TopoDSCompound
+else:
+    _TopoDSShapeT = Any
+    _TopoDSCompoundT = Any
+
+TopoDSShapeT: TypeAlias = _TopoDSShapeT
+TopoDSCompoundT: TypeAlias = _TopoDSCompoundT
+
+class _BRepToolProto(Protocol):
+    def Surface(self, face: Any) -> Any: ...
+
+    def Surface_s(self, face: Any) -> Any: ...
+
+    def Location(self, face: Any) -> Any: ...
+
+    def Location_s(self, face: Any) -> Any: ...
+
+
+class _TopoDSProto(Protocol):
+    def Edge_s(self, shape: Any) -> Any: ...
+
+    def Solid_s(self, shape: Any) -> Any: ...
+
+    def Shell_s(self, shape: Any) -> Any: ...
+
+
+TopoDSFaceT: TypeAlias = TopoDSShapeT
+TopToolsIndexedDataMap: TypeAlias = Any
+
+try:  # Prefer pythonocc-core's OCP bindings when available
+    from OCP.BRep import BRep_Tool  # type: ignore[import]
+    from OCP.TopAbs import (  # type: ignore[import]
+        TopAbs_COMPOUND,
+        TopAbs_EDGE,
+        TopAbs_FACE,
+        TopAbs_SHELL,
+        TopAbs_SOLID,
+        TopAbs_ShapeEnum,
+    )
+    from OCP.TopExp import TopExp, TopExp_Explorer  # type: ignore[import]
+    from OCP.TopoDS import TopoDS, TopoDS_Face, TopoDS_Shape  # type: ignore[import]
+    from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape  # type: ignore[import]
+    from OCP.BRepTools import BRepTools  # type: ignore[import]
+except ImportError:
+    try:  # Fallback to pythonocc-core
+        from OCC.Core.BRep import BRep_Tool  # type: ignore[import]
+        from OCC.Core.TopAbs import (  # type: ignore[import]
+            TopAbs_COMPOUND,
+            TopAbs_EDGE,
+            TopAbs_FACE,
+            TopAbs_SHELL,
+            TopAbs_SOLID,
+            TopAbs_ShapeEnum,
+        )
+        from OCC.Core.TopExp import TopExp, TopExp_Explorer  # type: ignore[import]
+        from OCC.Core.TopoDS import TopoDS, TopoDS_Face, TopoDS_Shape  # type: ignore[import]
+        from OCC.Core.TopTools import (  # type: ignore[import]
+            TopTools_IndexedDataMapOfShapeListOfShape,
+        )
+        from OCC.Core.BRepTools import BRepTools  # type: ignore[import]
+    except ImportError:  # pragma: no cover - only hit in environments without OCCT
+        if TYPE_CHECKING:  # Keep type checkers happy without introducing runtime deps
+            from typing import Any
+
+            BRep_Tool = TopAbs_COMPOUND = TopAbs_EDGE = TopAbs_FACE = TopAbs_SHELL = TopAbs_SOLID = TopAbs_ShapeEnum = TopExp = TopExp_Explorer = BRepTools = Any  # type: ignore[assignment]
+            TopoDS = TopoDS_Face = TopoDS_Shape = Any  # type: ignore[assignment]
+            TopTools_IndexedDataMapOfShapeListOfShape = Any  # type: ignore[assignment]
+        else:
+            class _MissingOCCTModule:
+                def __getattr__(self, item):
+                    raise ImportError(
+                        "OCCT bindings are required for geometry operations. "
+                        "Please install pythonocc-core or the OCP wheels."
+                    )
+
+            BRep_Tool = _MissingOCCTModule()
+            TopAbs_EDGE = TopAbs_FACE = TopAbs_SHELL = TopAbs_SOLID = TopAbs_COMPOUND = TopAbs_ShapeEnum = _MissingOCCTModule()
+            TopExp = TopExp_Explorer = _MissingOCCTModule()
+            BRepTools = _MissingOCCTModule()
+            TopoDS = TopoDS_Face = TopoDS_Shape = _MissingOCCTModule()
+            TopTools_IndexedDataMapOfShapeListOfShape = _MissingOCCTModule()
+
+BRep_Tool = cast(_BRepToolProto, BRep_Tool)
+TopoDS = cast(_TopoDSProto, TopoDS)
+try:
+    BRepTools = cast(Any, BRepTools)
+except NameError:
+    class _MissingBRepTools:
+        def __getattr__(self, item):
+            raise ImportError(
+                "OCCT bindings are required for geometry operations. "
+                "Please install pythonocc-core or the OCP wheels."
+            )
+
+    BRepTools = cast(Any, _MissingBRepTools())
 
 try:
     from geo_read_more import build_geo_from_dxf as build_geo_from_dxf_path
@@ -609,7 +804,6 @@ convert_dwg_to_dxf = _export("convert_dwg_to_dxf")
 enrich_geo_occ = _export("enrich_geo_occ")
 enrich_geo_stl = _export("enrich_geo_stl")
 safe_bbox = _export("safe_bbox")
-safe_bounding_box = _export("safe_bounding_box")
 iter_solids = _export("iter_solids")
 explode_compound = _export("explode_compound")
 parse_hole_table_lines = _export("parse_hole_table_lines")
@@ -620,12 +814,12 @@ text_harvest = _export("text_harvest")
 extract_entities = _export("extract_entities")
 read_dxf = _export("read_dxf")
 upsert_var_row = _export("upsert_var_row")
+require_ezdxf = _export("require_ezdxf")
 get_dwg_converter_path = _export("get_dwg_converter_path")
 have_dwg_support = _export("have_dwg_support")
 get_import_diagnostics_text = _export("get_import_diagnostics_text")
-require_ezdxf = _export("require_ezdxf")
+extract_features_with_occ = _export("extract_features_with_occ")
 
-_geometry_require_ezdxf = getattr(geometry, "require_ezdxf", None)
 _HAS_TRIMESH = getattr(geometry, "HAS_TRIMESH", False)
 _HAS_EZDXF = getattr(geometry, "HAS_EZDXF", False)
 _HAS_ODAFC = getattr(geometry, "HAS_ODAFC", False)
@@ -650,10 +844,18 @@ else:
     odafc = None  # type: ignore[assignment]
 
 if TYPE_CHECKING:
-    try:
-        from ezdxf.ezdxf import Drawing as _EzdxfDrawing
-    except Exception:  # pragma: no cover - optional dependency
-        _EzdxfDrawing = Any  # type: ignore[assignment]
+    class _EzdxfLayouts(Protocol):
+        def names_in_taborder(self) -> Iterable[str]: ...
+
+        def get(self, name: str) -> Any: ...
+
+    class _EzdxfDrawing(Protocol):
+        header: Mapping[str, Any]
+        layouts: _EzdxfLayouts
+
+        def modelspace(self) -> Any: ...
+
+        def close(self) -> None: ...
 else:
     _EzdxfDrawing = Any  # type: ignore[assignment]
 
@@ -1115,7 +1317,9 @@ def build_suggest_payload(
         )
     else:
         material_name = material_val
-    material_name = str(material_name).strip() if material_name else "Steel"
+    material_name = (
+        str(material_name).strip() if material_name else DEFAULT_MATERIAL_DISPLAY
+    )
 
     hole_count_val = to_float(geo.get("hole_count"))
     if hole_count_val is None:
@@ -2749,6 +2953,7 @@ def effective_to_overrides(effective: dict, baseline: dict | None = None) -> dic
     return out
 
 
+# SINGLE SOURCE
 def ensure_accept_flags(state: QuoteState) -> None:
     suggestions = state.suggestions or {}
     accept = state.accept_llm
@@ -2797,6 +3002,14 @@ def ensure_accept_flags(state: QuoteState) -> None:
         accept["drilling_strategy"] = False
 
 
+if sys.platform == 'win32':
+    occ_bin = os.path.join(sys.prefix, 'Library', 'bin')
+    if os.path.isdir(occ_bin):
+        os.add_dll_directory(occ_bin)
+import importlib
+import subprocess
+import tempfile
+
 try:
     from hole_table_parser import parse_hole_table_lines as _parse_hole_table_lines
 except Exception:
@@ -2806,6 +3019,1400 @@ try:
     from dxf_text_extract import extract_text_lines_from_dxf as _extract_text_lines_from_dxf
 except Exception:
     _extract_text_lines_from_dxf = None
+
+# ---------- OCC / OCP compatibility ----------
+STACK = None
+
+
+def _import_optional(module_name: str):
+    """Safely import *module_name* and return ``None`` if it is unavailable."""
+
+    try:
+        return importlib.import_module(module_name)
+    except Exception:
+        return None
+
+
+def _make_bnd_add_ocp():
+    # Try every known symbol name in OCP builds
+    candidates = []
+    module = _import_optional("OCP.BRepBndLib")
+    if module is None:
+        raise ImportError("OCP.BRepBndLib is not available")
+
+    for attr in (
+        "Add",
+        "Add_s",
+        "BRepBndLib_Add",
+        "brepbndlib_Add",
+    ):
+        fn = getattr(module, attr, None)
+        if fn:
+            candidates.append(fn)
+
+    klass = getattr(module, "BRepBndLib", None)
+    if klass:
+        for attr in ("Add", "Add_s", "AddClose_s", "AddOptimal_s", "AddOBB_s"):
+            fn = getattr(klass, attr, None)
+            if fn:
+                candidates.append(fn)
+
+    if not candidates:
+        raise ImportError("No BRepBndLib.Add symbol found in OCP")
+
+    # return a dispatcher that tries different call signatures
+    def _bnd_add(shape, box, use_triangulation=True):
+        last_err = None
+        for fn in candidates:
+            # Try 3-arg form
+            try:
+                return fn(shape, box, use_triangulation)
+            except TypeError as e:
+                last_err = e
+            # Try 2-arg form
+            try:
+                return fn(shape, box)
+            except TypeError as e:
+                last_err = e
+            except Exception as e:
+                last_err = e
+        # If we get here, none of the variants worked
+        raise last_err or RuntimeError("No callable BRepBndLib.Add variant succeeded")
+
+    return _bnd_add
+
+_ocp_modules = {
+    "Bnd": _import_optional("OCP.Bnd"),
+    "BRep": _import_optional("OCP.BRep"),
+    "BRepCheck": _import_optional("OCP.BRepCheck"),
+    "IFSelect": _import_optional("OCP.IFSelect"),
+    "ShapeFix": _import_optional("OCP.ShapeFix"),
+    "STEPControl": _import_optional("OCP.STEPControl"),
+    "TopoDS": _import_optional("OCP.TopoDS"),
+}
+
+bnd_add: Callable[[Any, Any, bool], Any]
+
+if all(module is not None for module in _ocp_modules.values()):
+    # Prefer OCP (CadQuery/ocp bindings)
+    bnd_module = cast(Any, _ocp_modules["Bnd"])
+    brep_module = cast(Any, _ocp_modules["BRep"])
+    brepcheck_module = cast(Any, _ocp_modules["BRepCheck"])
+    ifselect_module = cast(Any, _ocp_modules["IFSelect"])
+    shapefix_module = cast(Any, _ocp_modules["ShapeFix"])
+    step_module = cast(Any, _ocp_modules["STEPControl"])
+    topods_module = cast(Any, _ocp_modules["TopoDS"])
+
+    Bnd_Box = bnd_module.Bnd_Box
+    BRep_Builder = brep_module.BRep_Builder
+    BRepCheck_Analyzer = brepcheck_module.BRepCheck_Analyzer
+    IFSelect_RetDone = ifselect_module.IFSelect_RetDone
+    ShapeFix_Shape = shapefix_module.ShapeFix_Shape
+    STEPControl_Reader = step_module.STEPControl_Reader
+    TopoDS_Compound = topods_module.TopoDS_Compound
+    TopoDS_Shape = topods_module.TopoDS_Shape
+
+    try:
+        bnd_add = _make_bnd_add_ocp()
+        STACK = "ocp"
+    except Exception:
+        # Fallback: try dynamic dispatch at call time for OCP builds missing Add
+
+        def _bnd_add_ocp_fallback(shape, box, use_triangulation=True):
+            candidates = [
+                ("OCP.BRepBndLib", "Add"),
+                ("OCP.BRepBndLib", "Add_s"),
+                ("OCP.BRepBndLib", "BRepBndLib_Add"),
+                ("OCP.BRepBndLib", "brepbndlib_Add"),
+                ("OCC.Core.BRepBndLib", "Add"),
+                ("OCC.Core.BRepBndLib", "Add_s"),
+                ("OCC.Core.BRepBndLib", "BRepBndLib_Add"),
+                ("OCC.Core.BRepBndLib", "brepbndlib_Add"),
+            ]
+            for mod_name, attr in candidates:
+                module = _import_optional(mod_name)
+                if module and hasattr(module, attr):
+                    return getattr(module, attr)(shape, box, use_triangulation)
+            raise RuntimeError("No BRepBndLib.Add available in this build")
+
+        bnd_add = _bnd_add_ocp_fallback
+        STACK = "ocp"
+else:
+    # Fallback to pythonocc-core
+    _occ_modules = {
+        "Bnd": _import_optional("OCC.Core.Bnd"),
+        "BRep": _import_optional("OCC.Core.BRep"),
+        "BRepBndLib": _import_optional("OCC.Core.BRepBndLib"),
+        "BRepCheck": _import_optional("OCC.Core.BRepCheck"),
+        "IFSelect": _import_optional("OCC.Core.IFSelect"),
+        "ShapeFix": _import_optional("OCC.Core.ShapeFix"),
+        "STEPControl": _import_optional("OCC.Core.STEPControl"),
+        "TopoDS": _import_optional("OCC.Core.TopoDS"),
+    }
+
+    missing = [name for name, module in _occ_modules.items() if module is None]
+    if missing:
+        raise ImportError(
+            "Required OCC.Core modules are unavailable: {}".format(
+                ", ".join(sorted(missing))
+            )
+        )
+
+    bnd_module = cast(Any, _occ_modules["Bnd"])
+    brep_module = cast(Any, _occ_modules["BRep"])
+    brepbndlib_module = cast(Any, _occ_modules["BRepBndLib"])
+    brepcheck_module = cast(Any, _occ_modules["BRepCheck"])
+    ifselect_module = cast(Any, _occ_modules["IFSelect"])
+    shapefix_module = cast(Any, _occ_modules["ShapeFix"])
+    step_module = cast(Any, _occ_modules["STEPControl"])
+    topods_module = cast(Any, _occ_modules["TopoDS"])
+
+    Bnd_Box = bnd_module.Bnd_Box
+    BRep_Builder = brep_module.BRep_Builder
+    _brep_add = brepbndlib_module.brepbndlib_Add
+    BRepCheck_Analyzer = brepcheck_module.BRepCheck_Analyzer
+    IFSelect_RetDone = ifselect_module.IFSelect_RetDone
+    ShapeFix_Shape = shapefix_module.ShapeFix_Shape
+    STEPControl_Reader = step_module.STEPControl_Reader
+    TopoDS_Compound = topods_module.TopoDS_Compound
+    TopoDS_Shape = topods_module.TopoDS_Shape
+
+    def _bnd_add_pythonocc(shape, box, use_triangulation=True):
+        _brep_add(shape, box, use_triangulation)
+
+    bnd_add = _bnd_add_pythonocc
+    STACK = "pythonocc"
+# ---------- end shim ----------
+# ----- one-backend imports -----
+_backend_modules = {
+    "BRep": _import_optional("OCP.BRep"),
+    "TopAbs": _import_optional("OCP.TopAbs"),
+    "TopExp": _import_optional("OCP.TopExp"),
+}
+
+_brep_mod = _backend_modules["BRep"]
+_topabs_mod = _backend_modules["TopAbs"]
+_topexp_mod = _backend_modules["TopExp"]
+
+if _brep_mod and _topabs_mod and _topexp_mod:
+    BRep_Tool = cast(Any, _brep_mod).BRep_Tool
+    TopAbs_FACE = cast(Any, _topabs_mod).TopAbs_FACE
+    TopExp_Explorer = cast(Any, _topexp_mod).TopExp_Explorer
+    BACKEND = "ocp"
+else:
+    _backend_modules = {
+        "BRep": _import_optional("OCC.Core.BRep"),
+        "TopAbs": _import_optional("OCC.Core.TopAbs"),
+        "TopExp": _import_optional("OCC.Core.TopExp"),
+    }
+
+    missing = [name for name, module in _backend_modules.items() if module is None]
+    if missing:
+        raise ImportError(
+            "Required backend modules are unavailable: {}".format(
+                ", ".join(sorted(missing))
+            )
+        )
+
+    _brep_mod = _backend_modules["BRep"]
+    _topabs_mod = _backend_modules["TopAbs"]
+    _topexp_mod = _backend_modules["TopExp"]
+
+    assert _brep_mod is not None
+    assert _topabs_mod is not None
+    assert _topexp_mod is not None
+
+    BRep_Tool = cast(Any, _brep_mod).BRep_Tool
+    TopAbs_FACE = cast(Any, _topabs_mod).TopAbs_FACE
+    TopExp_Explorer = cast(Any, _topexp_mod).TopExp_Explorer
+    BACKEND = "pythonocc"
+
+
+def _resolve_face_of():
+    """Return a callable that casts a shape-like object to a TopoDS_Face."""
+
+    # Prefer helpers exposed by cad_quoter.geometry when available
+    fn = getattr(geometry, "FACE_OF", None)
+    if callable(fn):
+        return fn
+
+    # Try OCP's modern `topods.Face` helper first
+    try:  # pragma: no cover - depends on optional OCC bindings
+        from OCP.TopoDS import topods as _topods  # type: ignore[import-not-found]
+
+        if hasattr(_topods, "Face"):
+            return _topods.Face  # type: ignore[return-value]
+    except Exception:
+        pass
+
+    # pythonocc-core exposes either topods_Face or topods.Face
+    try:  # pragma: no cover - depends on optional OCC bindings
+        from OCC.Core.TopoDS import topods_Face  # type: ignore[import-not-found]
+
+        return topods_Face  # type: ignore[return-value]
+    except Exception:
+        pass
+    try:  # pragma: no cover - depends on optional OCC bindings
+        from OCC.Core.TopoDS import topods as _occ_topods  # type: ignore[import-not-found]
+
+        face_fn = getattr(_occ_topods, "Face", None)
+        if callable(face_fn):
+            return face_fn
+    except Exception:
+        pass
+
+    # Fall back to methods on the TopoDS namespace (OCP variants expose Face_s)
+    try:  # pragma: no cover - depends on optional OCC bindings
+        from OCP.TopoDS import TopoDS as _TopoDS  # type: ignore[import-not-found]
+
+        for attr in ("Face_s", "Face"):
+            face_fn = getattr(_TopoDS, attr, None)
+            if callable(face_fn):
+                return face_fn
+    except Exception:
+        pass
+
+    def _raise(obj):
+        raise TypeError(f"Cannot cast {type(obj).__name__} to TopoDS_Face")
+
+    return _raise
+
+
+FACE_OF = _resolve_face_of()
+
+def as_face(obj: Any) -> TopoDSFaceT:
+    """
+    Return a TopoDS_Face for the *current backend*.
+    - If already a Face, return it (don't re-cast).
+    - If a tuple (some APIs return (surf, loc) or similar), take first elem.
+    - If null/None, raise cleanly.
+    - Otherwise cast with FACE_OF.
+    """
+    if obj is None:
+        raise TypeError("Expected a shape, got None")
+
+    # unwrap tuples (defensive)
+    if isinstance(obj, tuple) and obj:
+        obj = obj[0]
+    return ensure_face(obj)
+
+
+def iter_faces(shape: Any) -> Iterator[TopoDSFaceT]:
+    explorer_cls = cast(Callable[[Any, Any], Any], TopExp_Explorer)
+    exp = explorer_cls(shape, cast(Any, TopAbs_FACE))
+    while exp.More():
+        yield ensure_face(exp.Current())
+        exp.Next()
+
+
+def face_surface(face_like: Any) -> tuple[Any, Any | None]:
+    f = ensure_face(face_like)
+    tool = cast(Any, BRep_Tool)
+    surface_s = getattr(tool, "Surface_s", None)
+    if callable(surface_s):
+        s = surface_s(f)
+    else:
+        s = tool.Surface(f)
+    location_fn = getattr(tool, "Location", None)
+    if callable(location_fn):
+        loc = location_fn(f)
+    else:
+        face_location = getattr(f, "Location", None)
+        loc = face_location() if callable(face_location) else None
+    if isinstance(s, tuple):
+        s, loc2 = s
+        loc = loc or loc2
+    if hasattr(s, "Surface"):
+        s = cast(Any, s).Surface()  # unwrap handle
+    return s, loc
+
+
+
+# ---------- OCCT compat (OCP or pythonocc-core) ----------
+# ---------- Robust casters that work on OCP and pythonocc ----------
+# Lock topods casters to the active backend
+if STACK == "ocp":
+
+    def _TO_EDGE(s):
+        if type(s).__name__ in ("TopoDS_Edge", "Edge"):
+            return s
+        topods_any = cast(Any, TopoDS)
+        edge_s = getattr(topods_any, "Edge_s", None)
+        if callable(edge_s):
+            return edge_s(s)
+        try:
+            from OCP.TopoDS import topods as _topods  # type: ignore[import]
+            return _topods.Edge(s)
+        except Exception as e:
+            raise TypeError(f"Cannot cast to Edge from {type(s).__name__}") from e
+
+    def _TO_SOLID(s):
+        if type(s).__name__ in ("TopoDS_Solid", "Solid"):
+            return s
+        topods_any = cast(Any, TopoDS)
+        solid_s = getattr(topods_any, "Solid_s", None)
+        if callable(solid_s):
+            return solid_s(s)
+        from OCP.TopoDS import topods as _topods  # type: ignore[import]
+        return _topods.Solid(s)
+
+    def _TO_SHELL(s):
+        if type(s).__name__ in ("TopoDS_Shell", "Shell"):
+            return s
+        topods_any = cast(Any, TopoDS)
+        shell_s = getattr(topods_any, "Shell_s", None)
+        if callable(shell_s):
+            return shell_s(s)
+        from OCP.TopoDS import topods as _topods  # type: ignore[import]
+        return _topods.Shell(s)
+else:
+    # Resolve within OCC.Core only
+    _occ_topods_module = _import_optional("OCC.Core.TopoDS")
+    if _occ_topods_module is None:
+        raise ImportError("OCC.Core.TopoDS is required for pythonocc backend")
+
+    def _resolve_topods_callable(*names: str):
+        for candidate in names:
+            attr = getattr(_occ_topods_module, candidate, None)
+            if attr:
+                return attr
+        nested = getattr(_occ_topods_module, "topods", None)
+        if nested is not None:
+            for candidate in names:
+                attr = getattr(nested, candidate, None)
+                if attr:
+                    return attr
+        raise AttributeError(
+            f"None of {names!r} are available on OCC.Core.TopoDS for casting"
+        )
+
+    _TO_EDGE = _resolve_topods_callable("topods_Edge", "Edge")
+    _TO_SOLID = _resolve_topods_callable("topods_Solid", "Solid")
+    _TO_SHELL = _resolve_topods_callable("topods_Shell", "Shell")
+
+# Type guards
+def _is_named(obj, names: tuple[str, ...]) -> bool:
+    try:
+        return type(obj).__name__ in names
+    except Exception:
+        return False
+
+def _unwrap_value(obj):
+    # Some containers return nodes with .Value()
+    return obj.Value() if hasattr(obj, "Value") and callable(obj.Value) else obj
+
+
+def _shape_is_null(shape: Any) -> bool:
+    """Return True if the passed shape reports itself as null."""
+
+    if shape is None:
+        return True
+    is_null = getattr(shape, "IsNull", None)
+    if not callable(is_null):
+        raise AttributeError("Object does not expose a callable IsNull() method")
+    try:
+        return bool(is_null())
+    except Exception:
+        return True
+
+
+def ensure_shape(obj):
+    obj = _unwrap_value(obj)
+    if obj is None:
+        raise TypeError("Expected TopoDS_Shape, got None")
+    is_null = getattr(obj, "IsNull", None)
+    if callable(is_null) and is_null():
+        raise TypeError("Expected non-null TopoDS_Shape")
+    return obj
+
+# Safe casters: no-ops if already cast; unwrap list nodes; check kind
+# Choose stack
+_BRepGProp_mod = None
+STACK_GPROP = "pythonocc"
+_ocp_brepgprop = _import_optional("OCP.BRepGProp")
+if _ocp_brepgprop is not None and hasattr(_ocp_brepgprop, "BRepGProp"):
+    _BRepGProp_mod = getattr(_ocp_brepgprop, "BRepGProp")
+    STACK_GPROP = "ocp"
+else:
+    _occ_brepgprop = _import_optional("OCC.Core.BRepGProp")
+    if _occ_brepgprop is None:
+        raise ImportError("OCC.Core.BRepGProp is required for pythonocc backend")
+    if hasattr(_occ_brepgprop, "BRepGProp"):
+        _BRepGProp_mod = getattr(_occ_brepgprop, "BRepGProp")
+    else:
+        from types import SimpleNamespace
+
+        from OCC.Core.BRepGProp import (
+            brepgprop_LinearProperties as _lp,  # type: ignore[attr-defined]
+        )
+        from OCC.Core.BRepGProp import (
+            brepgprop_SurfaceProperties as _sp,  # type: ignore[attr-defined]
+        )
+        from OCC.Core.BRepGProp import (
+            brepgprop_VolumeProperties as _vp,  # type: ignore[attr-defined]
+        )
+        _BRepGProp_mod = SimpleNamespace(
+            LinearProperties=getattr(_occ_brepgprop, "brepgprop_LinearProperties"),
+            SurfaceProperties=getattr(_occ_brepgprop, "brepgprop_SurfaceProperties"),
+            VolumeProperties=getattr(_occ_brepgprop, "brepgprop_VolumeProperties"),
+        )
+
+    def _to_edge_occ(s):
+        try:
+            from OCC.Core.TopoDS import topods_Edge as _fn  # type: ignore[attr-defined]
+        except Exception:
+            from OCC.Core.TopoDS import Edge as _fn  # type: ignore[attr-defined]
+        return _fn(s)
+
+    _TO_EDGE = _to_edge_occ
+
+# Resolve topods casters across bindings
+
+
+# ---- modern wrappers (no deprecation warnings)
+# ---- modern wrappers (no deprecation warnings)
+def linear_properties(edge, gprops):
+    """Linear properties across OCP/pythonocc names."""
+    fn = getattr(_BRepGProp_mod, "LinearProperties", None)
+    if fn is None:
+        fn = getattr(_BRepGProp_mod, "LinearProperties_s", None)
+    if fn is None:
+        try:
+            from OCC.Core.BRepGProp import brepgprop_LinearProperties as _old  # type: ignore
+            return _old(edge, gprops)
+        except Exception:
+            raise
+    return fn(edge, gprops)
+
+def map_shapes_and_ancestors(root_shape, sub_enum, anc_enum) -> TopToolsIndexedDataMap:
+    """Return TopTools_IndexedDataMapOfShapeListOfShape for (sub → ancestors)."""
+    # Ensure we pass a *Shape*, not a Face
+    if root_shape is None:
+        raise TypeError("root_shape is None")
+    if not hasattr(root_shape, "IsNull") or _shape_is_null(root_shape):
+        # If someone handed us a Face, try to grab its TShape parent; else fail.
+        # Safer: require a real TopoDS_Shape from STEP/IGES root.
+        pass
+
+    amap = cast(
+        TopToolsIndexedDataMap,
+        TopTools_IndexedDataMapOfShapeListOfShape(),  # type: ignore[call-overload]
+    )
+    # static/instance variants across wheels
+    fn = getattr(TopExp, "MapShapesAndAncestors", None) or getattr(TopExp, "MapShapesAndAncestors_s", None)
+    if fn is None:
+        raise RuntimeError("TopExp.MapShapesAndAncestors not available in this OCP wheel")
+    fn(root_shape, sub_enum, anc_enum, amap)
+    return amap
+
+# modern topods casters: topods.Edge(shape) / topods.Face(shape)
+# ---- Robust topods casters that are no-ops for already-cast objects ----
+def _is_instance(obj, qualnames):
+    """True if obj.__class__.__name__ matches any in qualnames across OCP/OCC."""
+    try:
+        name = type(obj).__name__
+    except Exception:
+        return False
+    return name in qualnames  # e.g. ["TopoDS_Face", "Face"]
+
+def ensure_face(obj: Any) -> TopoDSFaceT:
+    if obj is None:
+        raise TypeError("Expected a face, got None")
+    face_type = cast(type, TopoDSFaceT)
+    if isinstance(obj, face_type) or type(obj).__name__ == "TopoDS_Face":
+        return obj
+    st = obj.ShapeType() if hasattr(obj, "ShapeType") else None
+    if st == TopAbs_FACE:
+        return FACE_OF(obj)
+    raise TypeError(f"Not a face: {type(obj).__name__}")
+# ---------- end compat ----------
+
+
+# ---- tiny helpers you can use elsewhere --------------------------------------
+# Optional PDF stack
+try:
+    import fitz  # PyMuPDF
+    _HAS_PYMUPDF = True
+except Exception:
+    fitz = None  # type: ignore[assignment]
+    _HAS_PYMUPDF = False
+
+DIM_RE = re.compile(r"(?:ï¿½|DIAM|DIA)\s*([0-9.+-]+)|R\s*([0-9.+-]+)|([0-9.+-]+)\s*[xX]\s*([0-9.+-]+)")
+
+def load_drawing(path: Path) -> Drawing:
+    ezdxf_mod = typing.cast(_EzdxfModule, require_ezdxf())
+    if path.suffix.lower() == ".dwg":
+        # Prefer explicit converter/wrapper if configured (works even if ODA isnï¿½t on PATH)
+        exe = get_dwg_converter_path()
+        if exe:
+            dxf_path = convert_dwg_to_dxf(str(path))
+            return ezdxf_mod.readfile(dxf_path)
+        # Fallback: odafc (requires ODAFileConverter on PATH)
+        if _HAS_ODAFC and odafc is not None:
+            odafc_mod = typing.cast(_OdafcModule, odafc)
+            return odafc_mod.readfile(str(path))
+        raise RuntimeError(
+            "DWG import needs ODA File Converter. Set ODA_CONVERTER_EXE to the exe "
+            "or place dwg2dxf_wrapper.bat next to the script."
+        )
+    return ezdxf_mod.readfile(str(path))  # DXF directly
+
+
+# ==== OpenCascade compat (works with OCP OR OCC.Core) ====
+import subprocess
+import tempfile
+from pathlib import Path
+from typing import Any, Callable, Protocol, Tuple, Type
+
+
+def _missing_uv_bounds(_: Any) -> Tuple[float, float, float, float]:
+    raise RuntimeError("BRepTools_UVBounds is unavailable")
+
+
+def _missing_brep_read(_: str):
+    raise RuntimeError("BREP read is unavailable")
+
+
+class _EzdxfModule(Protocol):
+    def readfile(
+        self,
+        filename: str,
+        encoding: str | None = ...,
+        errors: str | None = ...,
+    ) -> "Drawing":
+        ...
+
+
+class _OdafcModule(Protocol):
+    def readfile(self, filename: str) -> "Drawing":
+        ...
+
+
+BRepTools_UVBounds: Callable[[Any], Tuple[float, float, float, float]] = _missing_uv_bounds
+_brep_read = _missing_brep_read
+
+try:
+    # ---- OCP branch ----
+    from OCP.Bnd import Bnd_Box  # type: ignore[import]
+    from OCP.BRep import (  # type: ignore[import]
+        BRep_Builder,
+        BRep_Tool,  # OCP version
+    )  # type: ignore[import]
+    from OCP.BRepAdaptor import BRepAdaptor_Curve  # type: ignore[import]
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Section  # type: ignore[import]
+    from OCP.BRepCheck import BRepCheck_Analyzer  # type: ignore[import]
+    from OCP.BRepGProp import BRepGProp  # type: ignore[import]
+    from OCP.GeomAbs import (  # type: ignore[import]
+        GeomAbs_BezierSurface,
+        GeomAbs_BSplineSurface,
+        GeomAbs_Circle,
+        GeomAbs_Cone,
+        GeomAbs_Cylinder,
+        GeomAbs_Plane,
+        GeomAbs_Torus,
+    )
+    from OCP.GeomAdaptor import GeomAdaptor_Surface  # type: ignore[import]
+    from OCP.gp import gp_Dir, gp_Pln, gp_Pnt  # type: ignore[import]
+    from OCP.GProp import GProp_GProps  # type: ignore[import]
+    from OCP.IFSelect import IFSelect_RetDone  # type: ignore[import]
+    from OCP.IGESControl import IGESControl_Reader  # type: ignore[import]
+    from OCP.ShapeAnalysis import ShapeAnalysis_Surface  # type: ignore[import]
+    from OCP.ShapeFix import ShapeFix_Shape  # type: ignore[import]
+    from OCP.TopAbs import TopAbs_COMPOUND, TopAbs_EDGE, TopAbs_FACE, TopAbs_SHELL, TopAbs_SOLID  # type: ignore[import]
+    from OCP.TopExp import TopExp, TopExp_Explorer  # type: ignore[import]
+    from OCP.TopoDS import TopoDS_Compound, TopoDS_Face, TopoDS_Shape  # type: ignore[import]
+
+    # ADD THESE TWO IMPORTS
+    from OCP.BRepTools import BRepTools  # type: ignore[import]
+    from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape  # type: ignore[import]
+    BACKEND_OCC = "OCP"
+
+    def _ocp_uv_bounds(face: TopoDSFaceT) -> Tuple[float, float, float, float]:
+        tools = cast(Any, BRepTools)
+        return tools.UVBounds(face)
+
+
+    def _ocp_brep_read(path: str) -> TopoDSShapeT:
+        s = _new_topods_shape()
+        builder = BRep_Builder()  # type: ignore[call-arg]
+        read_s = getattr(BRepTools, "Read_s", None)
+        if callable(read_s):
+            ok = read_s(s, str(path), builder)
+        else:
+            tools = cast(Any, BRepTools)
+            ok = tools.Read(s, str(path), builder)
+        if ok is False:
+            raise RuntimeError("BREP read failed")
+        return s
+
+
+    BRepTools_UVBounds = _ocp_uv_bounds
+    _brep_read = _ocp_brep_read
+
+
+
+except Exception:
+    # ---- OCC.Core branch ----
+    from OCC.Core.Bnd import Bnd_Box
+    from OCC.Core.BRep import (
+        BRep_Builder,
+        BRep_Tool,  # ? OCC version
+    )
+    from OCC.Core.BRepAdaptor import BRepAdaptor_Curve
+    from OCC.Core.BRepAlgoAPI import BRepAlgoAPI_Section
+    from OCC.Core.BRepCheck import BRepCheck_Analyzer
+    from OCC.Core.GeomAbs import (
+        GeomAbs_BezierSurface,
+        GeomAbs_BSplineSurface,
+        GeomAbs_Circle,
+        GeomAbs_Cone,
+        GeomAbs_Cylinder,
+        GeomAbs_Plane,
+        GeomAbs_Torus,
+    )
+    from OCC.Core.GeomAdaptor import GeomAdaptor_Surface
+    from OCC.Core.gp import gp_Dir, gp_Pln, gp_Pnt
+    from OCC.Core.GProp import GProp_GProps
+    from OCC.Core.IFSelect import IFSelect_RetDone
+    from OCC.Core.IGESControl import IGESControl_Reader
+    from OCC.Core.ShapeAnalysis import ShapeAnalysis_Surface
+    from OCC.Core.ShapeFix import ShapeFix_Shape
+    from OCC.Core.STEPControl import STEPControl_Reader
+    from OCC.Core.TopAbs import (
+        TopAbs_COMPOUND,
+        TopAbs_EDGE,
+        TopAbs_FACE,
+        TopAbs_SHELL,
+        TopAbs_SOLID,
+    )
+    from OCC.Core.TopExp import TopExp_Explorer
+    from OCC.Core.TopoDS import TopoDS_Compound, TopoDS_Face, TopoDS_Shape
+
+    # ADD TopTools import and TopoDS_Face for the fix below
+    from OCC.Core.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
+    BACKEND_OCC = "OCC.Core"
+
+    # BRepGProp shim (pythonocc uses free functions)
+    import OCC.Core.BRepGProp as _occ_brepgprop  # type: ignore[import]
+
+    brepgprop_LinearProperties = getattr(_occ_brepgprop, "brepgprop_LinearProperties")
+    brepgprop_SurfaceProperties = getattr(_occ_brepgprop, "brepgprop_SurfaceProperties")
+    brepgprop_VolumeProperties = getattr(_occ_brepgprop, "brepgprop_VolumeProperties")
+    class _BRepGPropShim:
+        @staticmethod
+        def SurfaceProperties_s(shape_or_face, gprops): brepgprop_SurfaceProperties(shape_or_face, gprops)
+        @staticmethod
+        def LinearProperties_s(edge, gprops):          brepgprop_LinearProperties(edge, gprops)
+        @staticmethod
+        def VolumeProperties_s(shape, gprops):         brepgprop_VolumeProperties(shape, gprops)
+    BRepGProp = _BRepGPropShim
+
+
+
+    # UV bounds and brep read are free functions
+    import OCC.Core.BRepTools as _occ_breptools
+    BRepTools = cast(Any, _occ_breptools).BRepTools
+
+    def _occ_uv_bounds(face: TopoDSFaceT) -> Tuple[float, float, float, float]:
+        tools = cast(Any, BRepTools)
+        fn = getattr(tools, "UVBounds", None)
+        if fn is None:
+            legacy = getattr(_occ_breptools, "breptools_UVBounds", None)
+            if legacy is None:
+                raise RuntimeError("UV bounds function is unavailable")
+            return legacy(face)
+        return fn(face)
+
+
+    def _occ_brep_read(path: str) -> TopoDSShapeT:
+        read_fn = getattr(_occ_breptools, "breptools_Read", None)
+        if read_fn is None:
+            raise RuntimeError("BREP read is unavailable")
+        s = _new_topods_shape()
+        ok = read_fn(s, str(path), BRep_Builder())
+        if not ok:
+            raise RuntimeError("BREP read failed")
+        return s
+
+
+    BRepTools_UVBounds = _occ_uv_bounds
+    _brep_read = _occ_brep_read
+
+
+def _new_topods_shape() -> TopoDSShapeT:
+    ctor = cast(Any, TopoDS_Shape)
+    return cast(TopoDSShapeT, ctor())
+
+
+def _new_topods_compound() -> TopoDSCompoundT:
+    ctor = cast(Any, TopoDS_Compound)
+    return cast(TopoDSCompoundT, ctor())
+
+
+def _shape_from_reader(reader):
+    """Return a healed TopoDS_Shape from a STEP/IGES reader."""
+    transfer_count = 0
+    if hasattr(reader, "NbShapes"):
+        try:
+            transfer_count = reader.NbShapes()
+        except Exception:
+            transfer_count = 0
+    if not transfer_count and hasattr(reader, "NbRootsForTransfer"):
+        try:
+            transfer_count = reader.NbRootsForTransfer()
+        except Exception:
+            transfer_count = 0
+    if transfer_count <= 0:
+        raise RuntimeError("Reader produced zero shapes")
+
+    if transfer_count == 1:
+        shape = reader.Shape(1)
+    else:
+        builder = BRep_Builder()
+        compound = _new_topods_compound()
+        builder.MakeCompound(compound)
+        added = 0
+        for i in range(1, transfer_count + 1):
+            s = reader.Shape(i)
+            if s is None or _shape_is_null(s):
+                continue
+            builder.Add(compound, s)
+            added += 1
+        if added == 0:
+            raise RuntimeError("Reader produced only null sub-shapes")
+        shape = compound
+
+    if shape is None or _shape_is_null(shape):
+        raise RuntimeError("Reader produced a null TopoDS_Shape")
+
+    fixer = cast(Any, ShapeFix_Shape)(shape)
+    fixer.Perform()
+    healed = fixer.Shape()
+    if healed is None or _shape_is_null(healed):
+        raise RuntimeError("Shape healing failed (null shape)")
+
+    try:
+        analyzer = BRepCheck_Analyzer(healed)
+        # we do not require validity, but invoking the analyzer surfaces issues early
+        analyzer.IsValid()
+    except Exception:
+        pass
+
+    return healed
+
+def read_step_shape(path: str) -> TopoDSShapeT:
+    rdr = STEPControl_Reader()
+    if rdr.ReadFile(path) != IFSelect_RetDone:
+        raise RuntimeError("STEP read failed (file unreadable or unsupported).")
+    rdr.TransferRoots()
+    n = rdr.NbShapes()
+    if n == 0:
+        raise RuntimeError("STEP read produced zero shapes (no transferable roots).")
+
+    if n == 1:
+        shape = rdr.Shape(1)
+    else:
+        builder = BRep_Builder()
+        comp = _new_topods_compound()
+        builder.MakeCompound(comp)
+        for i in range(1, n + 1):
+            s = rdr.Shape(i)
+            if not _shape_is_null(s):
+                builder.Add(comp, s)
+        shape = comp
+
+    if _shape_is_null(shape):
+        raise RuntimeError("STEP produced a null TopoDS_Shape.")
+    # Verify we truly pass a Shape to MapShapesAndAncestors
+    logger.debug(
+        "Shape type: %s IsNull: %s",
+        type(shape).__name__,
+        getattr(shape, "IsNull", lambda: True)(),
+    )
+    amap = map_shapes_and_ancestors(shape, TopAbs_EDGE, TopAbs_FACE)
+    logger.debug("Shape ancestor map size: %d", amap.Size())
+    # DEBUG: sanity probe for STEP faces
+    if os.environ.get("STEP_PROBE", "0") == "1":
+        cnt = 0
+        try:
+            for f in iter_faces(shape):
+                _surf, _loc = face_surface(f)
+                cnt += 1
+        except Exception:
+            # Keep debug non-fatal; report and continue
+            logger.exception("STEP_PROBE face probe failed")
+        else:
+            logger.debug("STEP_PROBE faces=%d", cnt)
+
+    fx = cast(Any, ShapeFix_Shape)(shape)
+    fx.Perform()
+    return fx.Shape()
+
+def safe_bbox(shape: TopoDSShapeT):
+    if _shape_is_null(shape):
+        raise ValueError("Cannot compute bounding box of a null shape.")
+    box = Bnd_Box()
+    bnd_add(shape, box, True)  # <- uses whichever binding is available
+    return box
+def read_step_or_iges_or_brep(path: str) -> TopoDSShapeT:
+    p = Path(path)
+    ext = p.suffix.lower()
+    if ext in (".step", ".stp"):
+        return read_step_shape(str(p))
+    if ext in (".iges", ".igs"):
+        ig = IGESControl_Reader()
+        if ig.ReadFile(str(p)) != IFSelect_RetDone:
+            raise RuntimeError("IGES read failed")
+        ig.TransferRoots()
+        return _shape_from_reader(ig)
+    if ext == ".brep":
+        return _brep_read(str(p))
+    raise RuntimeError(f"Unsupported OCC format: {ext}")
+
+def convert_dwg_to_dxf(dwg_path: str, *, out_ver="ACAD2018") -> str:
+    """
+    Robust DWG?DXF wrapper.
+    Works with:
+      - A .bat/.cmd wrapper that accepts:  <input.dwg> <output.dxf>
+      - A custom exe that accepts:         <input.dwg> <output.dxf>
+      - ODAFileConverter.exe (7-arg form): <in_dir> <out_dir> <ver> DXF 0 0 <filter>
+    Looks for the converter via env var or common local paths and prints
+    the exact command used on failure.
+    """
+    # 1) find converter
+    exe = (os.environ.get("ODA_CONVERTER_EXE")
+           or os.environ.get("DWG2DXF_EXE")
+           or str(Path(__file__).with_name("dwg2dxf_wrapper.bat"))
+           or r"D:\CAD_Quoting_Tool\dwg2dxf_wrapper.bat")
+
+    if not exe or not Path(exe).exists():
+        raise RuntimeError(
+            "DWG import needs a DWG?DXF converter.\n"
+            "Set ODA_CONVERTER_EXE (recommended) or DWG2DXF_EXE to a .bat/.cmd/.exe.\n"
+            "Expected .bat signature:  <input.dwg> <output.dxf>"
+        )
+
+    dwg = Path(dwg_path)
+    out_dir = Path(tempfile.mkdtemp(prefix="dwg2dxf_"))
+    out_dxf = out_dir / (dwg.stem + ".dxf")
+
+    exe_lower = Path(exe).name.lower()
+    cmd: list[str] = []
+    try:
+        if exe_lower.endswith(".bat") or exe_lower.endswith(".cmd"):
+            # ? run batch via cmd.exe so it actually executes
+            cmd = ["cmd", "/c", exe, str(dwg), str(out_dxf)]
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        elif "odafileconverter" in exe_lower:
+            # ? official ODAFileConverter CLI
+            cmd = [exe, str(dwg.parent), str(out_dir), out_ver, "DXF", "0", "0", dwg.name]
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        else:
+            # ? generic exe that accepts <in> <out>
+            cmd = [exe, str(dwg), str(out_dxf)]
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            "DWG?DXF conversion failed.\n"
+            f"cmd: {' '.join(cmd)}\n"
+            f"stdout:\n{e.stdout}\n"
+            f"stderr:\n{e.stderr}"
+        ) from e
+
+    # 2) resolve the produced DXF
+    produced = out_dxf if out_dxf.exists() else (out_dir / (dwg.stem + ".dxf"))
+    if not produced.exists():
+        raise RuntimeError(
+            "Converter returned success but DXF not found.\n"
+            f"cmd: {' '.join(cmd)}\n"
+            f"checked: {out_dxf} | {produced}"
+        )
+    return str(produced)
+
+
+
+ANG_TOL = math.radians(5.0)
+DOT_TOL = math.cos(ANG_TOL)
+SMALL = 1e-7
+
+
+
+def iter_solids(shape: TopoDS_Shape):
+    explorer = cast(Callable[[Any, Any], Any], TopExp_Explorer)
+    exp = explorer(shape, cast(TopAbs_ShapeEnum, TopAbs_SOLID))
+    while exp.More():
+        yield geometry.to_solid(exp.Current())
+        exp.Next()
+
+def explode_compound(shape: TopoDSShapeT) -> list[TopoDSShapeT]:
+    """If the file is a big COMPOUND, break it into shapes (parts/bodies)."""
+    explorer = cast(Callable[[Any, Any], Any], TopExp_Explorer)
+    exp = explorer(shape, cast(TopAbs_ShapeEnum, TopAbs_COMPOUND))
+    if exp.More():
+        # Itï¿½s a compound ï¿½ return its shells/solids/faces as needed
+        solids = list(iter_solids(shape))
+        if solids:
+            return solids
+        # fallback to shells
+        sh = explorer(shape, cast(TopAbs_ShapeEnum, TopAbs_SHELL))
+        shells = []
+        while sh.More():
+            shells.append(geometry.to_shell(sh.Current()))
+            sh.Next()
+        return shells
+    return [shape]
+
+
+
+def _bbox(shape):
+    box = safe_bbox(shape)
+    xmin, ymin, zmin, xmax, ymax, zmax = box.Get()
+    return (xmin, ymin, zmin, xmax, ymax, zmax)
+
+def _area_of_face(face) -> float:
+    props = GProp_GProps()
+    BRepGProp.SurfaceProperties_s(face, props)
+    return float(props.Mass())
+
+def _length_of_edge(edge) -> float:
+    props = GProp_GProps()
+    linear_properties(edge, props)
+    return float(props.Mass())
+
+def _face_midpoint_uv(face):
+    umin, umax, vmin, vmax = BRepTools_UVBounds(face)
+    return (0.5*(umin+umax), 0.5*(vmin+vmax))
+
+
+def _face_normal(face):
+    try:
+        try:
+            from OCP.BRepLProp import BRepLProp_SLProps  # type: ignore[import]
+        except ImportError:
+            from OCC.Core.BRepLProp import BRepLProp_SLProps
+        u, v = _face_midpoint_uv(face)
+        props = BRepLProp_SLProps(face_surface(face)[0], u, v, 1, SMALL)
+        if props.IsNormalDefined():
+            n = props.Normal()
+            if face.Orientation().Name() == "REVERSED":
+                n.Reverse()
+            return gp_Dir(n.X(), n.Y(), n.Z())
+    except Exception:
+        pass
+    return None
+
+def _face_type(face) -> str:
+    surf = face_surface(face)[0]
+    ga = GeomAdaptor_Surface(surf)
+    st = ga.GetType()
+    if st == GeomAbs_Plane: return "planar"
+    if st in (GeomAbs_Cylinder, GeomAbs_Torus, GeomAbs_Cone): return "cylindrical"
+    if st in (GeomAbs_BSplineSurface, GeomAbs_BezierSurface): return "freeform"
+    return "other"
+
+
+
+def _cluster_normals(normals):
+    clusters = []
+    for n in normals:
+        added = False
+        for c in clusters:
+            if abs(n.Dot(c)) > DOT_TOL:
+                added = True; break
+        if not added:
+            clusters.append(n)
+    return clusters
+
+def _sum_edge_length_sharp(shape, angle_thresh_deg=175.0) -> float:
+    angle_thresh = math.radians(angle_thresh_deg)
+    edge2faces = map_shapes_and_ancestors(shape, TopAbs_EDGE, TopAbs_FACE)
+    total = 0.0
+    for i in range(1, geometry.map_size(edge2faces) + 1):
+        edge = geometry.to_edge(edge2faces.FindKey(i))
+        face_list = edge2faces.FindFromIndex(i)
+        faces = [ensure_face(shp) for shp in geometry.list_iter(face_list)]
+        if len(faces) < 2:
+            continue
+        f1, f2 = faces[0], faces[-1]
+        n1 = _face_normal(f1)
+        n2 = _face_normal(f2)
+        if not n1 or not n2:
+            continue
+        ang = math.acos(max(-1.0, min(1.0, abs(n1.Dot(n2)))))
+        if ang < (math.pi - angle_thresh):
+            total += _length_of_edge(edge)
+    return total
+
+def _largest_planar_faces_and_normals(shape):
+    largest_area = 0.0
+    normals = []
+    for f in iter_faces(shape):
+        if _face_type(f) == "planar":
+            a = _area_of_face(f)
+            largest_area = max(largest_area, a)
+            n = _face_normal(f)
+            if n: normals.append(n)
+    clusters = _cluster_normals(normals)
+    return largest_area, clusters
+
+def _surface_areas_by_type(shape):
+    from collections import defaultdict
+    areas = defaultdict(float)
+    for f in iter_faces(shape):
+        t = _face_type(f)
+        areas[t] += _area_of_face(f)
+    return areas
+
+def _section_perimeter_len(shape, z_values):
+    xmin, ymin, zmin, xmax, ymax, zmax = _bbox(shape)
+    total = 0.0
+    explorer = cast(Callable[[Any, Any], Any], TopExp_Explorer)
+    for z in z_values:
+        plane = gp_Pln(gp_Pnt(0,0,z), gp_Dir(0,0,1))
+        sec = BRepAlgoAPI_Section(shape, plane, False); sec.Build()
+        if not sec.IsDone(): continue
+        w = sec.Shape()
+        it = explorer(w, cast(TopAbs_ShapeEnum, TopAbs_EDGE))
+        while it.More():
+            e = geometry.to_edge(it.Current())
+            total += _length_of_edge(e)
+            it.Next()
+    return total
+
+def _min_wall_between_parallel_planes(shape):
+    planes = []
+    for f in iter_faces(shape):
+        if _face_type(f) == "planar":
+            n = _face_normal(f)
+            if n:
+                umin, umax, vmin, vmax = BRepTools_UVBounds(f)
+                surf, _ = face_surface(f)
+                sas = ShapeAnalysis_Surface(surf)
+                pnt = sas.Value(0.5*(umin+umax), 0.5*(vmin+vmax))
+                d = n.X()*pnt.X() + n.Y()*pnt.Y() + n.Z()*pnt.Z()
+                planes.append((f, n, d, _bbox(f)))
+    def overlap(a1, a2, b1, b2): return not (a2 < b1 or b2 < a1)
+    min_th = None
+    for i in range(len(planes)):
+        f1, n1, d1, b1 = planes[i]
+        for j in range(i+1, len(planes)):
+            f2, n2, d2, b2 = planes[j]
+            if abs(abs(n1.Dot(n2)) - 1.0) < 1e-3:
+                nd = (abs(n1.X()), abs(n1.Y()), abs(n1.Z()))
+                normal_axis = nd.index(max(nd))
+                if normal_axis == 2:
+                    ok = overlap(b1[0], b1[3], b2[0], b2[3]) and overlap(b1[1], b1[4], b2[1], b2[4])
+                elif normal_axis == 1:
+                    ok = overlap(b1[0], b1[3], b2[0], b2[3]) and overlap(b1[2], b1[5], b2[2], b2[5])
+                else:
+                    ok = overlap(b1[1], b1[4], b2[1], b2[4]) and overlap(b1[2], b1[5], b2[2], b2[5])
+                if ok:
+                    th = abs(d1 - d2)
+                    if (min_th is None) or (th < min_th): min_th = th
+    return min_th
+
+def _hole_face_identifier(face, cylinder, face_bbox):
+    centers = []
+    try:
+        exp = cast(Any, TopExp_Explorer)(face, TopAbs_EDGE)
+    except Exception:
+        exp = None
+    while exp and exp.More():
+        try:
+            edge = geometry.to_edge(cast(Any, exp.Current()))
+            curve = BRepAdaptor_Curve(edge)
+            if curve.GetType() == GeomAbs_Circle:
+                circ = curve.Circle()
+                loc = circ.Location()
+                centers.append((round(loc.X(), 3), round(loc.Y(), 3), round(loc.Z(), 3)))
+        except Exception:
+            pass
+        finally:
+            exp.Next()
+    if centers:
+        return ("edges", tuple(sorted(centers)))
+    loc = cylinder.Axis().Location()
+    center = (
+        round(0.5 * (face_bbox[0] + face_bbox[3]), 3),
+        round(0.5 * (face_bbox[1] + face_bbox[4]), 3),
+        round(0.5 * (face_bbox[2] + face_bbox[5]), 3),
+    )
+    return (
+        "fallback",
+        (
+            round(loc.X(), 3),
+            round(loc.Y(), 3),
+            round(loc.Z(), 3),
+            *center,
+        ),
+    )
+
+
+def _hole_groups_from_cylinders(shape, bbox=None):
+    if bbox is None:
+        bbox = _bbox(shape)
+    groups = {}
+    for f in iter_faces(shape):
+        if _face_type(f) != "cylindrical":
+            continue
+        ga = GeomAdaptor_Surface(face_surface(f)[0])
+        try:
+            cyl = ga.Cylinder()
+            r = abs(cyl.Radius())
+            ax = cyl.Axis().Direction()
+            fb = _bbox(f)
+
+            def proj(x, y, z):
+                return x * ax.X() + y * ax.Y() + z * ax.Z()
+
+            span = abs(proj(fb[3], fb[4], fb[5]) - proj(fb[0], fb[1], fb[2]))
+            dia = 2.0 * r
+            bmin = proj(*bbox[:3])
+            bmax = proj(*bbox[3:])
+            bspan = abs(bmax - bmin)
+            through = span > 0.9 * bspan
+            key = (round(dia, 2), round(span, 2), through)
+            hole_id = _hole_face_identifier(f, cyl, fb)
+        except Exception:
+            continue
+
+        entry = groups.setdefault(
+            key,
+            {
+                "dia_mm": round(dia, 2),
+                "depth_mm": round(span, 2),
+                "through": through,
+                "count": 0,
+                "_ids": set(),
+            },
+        )
+        if hole_id in entry["_ids"]:
+            continue
+        entry["_ids"].add(hole_id)
+        entry["count"] += 1
+    for entry in groups.values():
+        entry.pop("_ids", None)
+    return list(groups.values())
+
+def _turning_score(shape, areas_by_type):
+    total = sum(areas_by_type.values()) or 1.0
+    cyl_ratio = areas_by_type.get("cylindrical", 0.0)/total
+    axes = []
+    for f in iter_faces(shape):
+        if _face_type(f) == "cylindrical":
+            ga = GeomAdaptor_Surface(face_surface(f)[0])
+            try: axes.append(ga.Cylinder().Axis().Direction())
+            except Exception: pass
+    if axes:
+        ax = gp_Dir(sum(a.X() for a in axes) or 1e-9, sum(a.Y() for a in axes) or 1e-9, sum(a.Z() for a in axes) or 1e-9)
+        align = sum(abs(ax.Dot(a)) for a in axes)/len(axes)
+    else:
+        align = 0.0
+    score = max(0.0, min(1.0, 0.5*cyl_ratio + 0.5*align))
+    xmin,ymin,zmin,xmax,ymax,zmax = _bbox(shape)
+    Lx, Ly, Lz = xmax-xmin, ymax-ymin, zmax-zmin
+    length = max(Lx, Ly, Lz)
+    maxod = sorted([Lx, Ly, Lz])[-2]
+    return {"GEO_Turning_Score_0to1": round(score,3), "GEO_MaxOD_mm": round(maxod,3), "GEO_Length_mm": round(length,3)}
+
+def enrich_geo_occ(shape):
+    xmin,ymin,zmin,xmax,ymax,zmax = _bbox(shape)
+    L,W,H = xmax-xmin, ymax-ymin, zmax-zmin
+
+    props = GProp_GProps()
+    try:
+        BRepGProp.VolumeProperties_s(shape, props); volume = float(props.Mass())
+        com = props.CentreOfMass(); center = [com.X(), com.Y(), com.Z()]
+    except Exception:
+        volume, center = 0.0, [0.0,0.0,0.0]
+    try:
+        BRepGProp.SurfaceProperties_s(shape, props); area_total = float(props.Mass())
+    except Exception:
+        area_total = 0.0
+
+    faces = 0
+    for _ in iter_faces(shape): faces += 1
+
+    areas_by_type = _surface_areas_by_type(shape)
+    largest_planar, normal_clusters = _largest_planar_faces_and_normals(shape)
+    unique_normals = len(normal_clusters)
+
+    min_wall = _min_wall_between_parallel_planes(shape)
+    thinwall_present = (min_wall is not None) and (min_wall < 1.0)
+
+    z_vals = [zmin + 0.25*(zmax-zmin), zmin + 0.50*(zmax-zmin), zmin + 0.75*(zmax-zmin)]
+    wedm_len = _section_perimeter_len(shape, z_vals)
+
+    deburr_len = _sum_edge_length_sharp(shape, angle_thresh_deg=175.0)
+
+    holes = _hole_groups_from_cylinders(shape, (xmin,ymin,zmin,xmax,ymax,zmax))
+
+    bbox_vol = max(L*W*H, 1e-9)
+    free_ratio = areas_by_type.get("freeform", 0.0)/max(area_total, 1e-9)
+    complexity = (faces / (volume if volume>0 else bbox_vol))*100.0 + 30.0*free_ratio
+
+    axis_dirs = [gp_Dir(1,0,0), gp_Dir(-1,0,0), gp_Dir(0,1,0), gp_Dir(0,-1,0), gp_Dir(0,0,1), gp_Dir(0,0,-1)]
+    hit=0; tot=0
+    for f in iter_faces(shape):
+        n = _face_normal(f)
+        if n:
+            tot += 1
+            if any(abs(n.Dot(a))>DOT_TOL for a in axis_dirs): hit += 1
+    access = (hit/tot) if tot else 0.0
+
+    geo = {
+        "GEO-01_Length_mm": round(L,3),
+        "GEO-02_Width_mm": round(W,3),
+        "GEO-03_Height_mm": round(H,3),
+        "GEO-Volume_mm3": round(volume,2),
+        "GEO-SurfaceArea_mm2": round(area_total,2),
+        "Feature_Face_Count": int(faces),
+        "GEO_Area_Planar_mm2": round(areas_by_type.get("planar",0.0),2),
+        "GEO_Area_Cyl_mm2": round(areas_by_type.get("cylindrical",0.0),2),
+        "GEO_Area_Freeform_mm2": round(areas_by_type.get("freeform",0.0),2),
+        "GEO_LargestPlane_Area_mm2": round(largest_planar,2),
+        "GEO_Setup_UniqueNormals": int(unique_normals),
+        "GEO_MinWall_mm": round(min_wall,3) if min_wall is not None else None,
+        "GEO_ThinWall_Present": bool(thinwall_present),
+        "GEO_WEDM_PathLen_mm": round(wedm_len,2),
+        "GEO_Deburr_EdgeLen_mm": round(deburr_len,2),
+        "GEO_Hole_Groups": holes,
+        "GEO_Complexity_0to100": round(complexity,2),
+        "GEO_3Axis_Accessible_Pct": round(access,3),
+        "GEO_CenterOfMass": center,
+        "OCC_Backend": "OCC"
+    }
+    geo.update(_turning_score(shape, areas_by_type))
+    return geo
+
+def enrich_geo_stl(path):
+    import time
+    start_time = time.time()
+    logger.info("[%.2fs] Starting enrich_geo_stl for %s", time.time() - start_time, path)
+    if not _HAS_TRIMESH:
+        raise RuntimeError("trimesh not available to process STL")
+
+    logger.info("[%.2fs] Loading mesh...", time.time() - start_time)
+    trimesh_mod = getattr(geometry, "trimesh", None)
+    if trimesh_mod is None:
+        raise RuntimeError("trimesh is unavailable despite HAS_TRIMESH flag")
+    mesh = trimesh_mod.load(path, force="mesh")
+    logger.info(
+        "[%.2fs] Mesh loaded. Faces: %d",
+        time.time() - start_time,
+        len(mesh.faces),
+    )
+
+    if mesh.is_empty:
+        raise RuntimeError("Empty STL mesh")
+
+    (xmin, ymin, zmin), (xmax, ymax, zmax) = mesh.bounds
+    L, W, H = float(xmax-xmin), float(ymax-ymin), float(zmax-zmin)
+    area_total = float(mesh.area)
+    volume = float(mesh.volume) if mesh.is_volume else 0.0
+    faces = int(len(mesh.faces))
+
+    logger.info("[%.2fs] Calculating WEDM length...", time.time() - start_time)
+    z_vals = [zmin + 0.25*(zmax-zmin), zmin + 0.50*(zmax-zmin), zmin + 0.75*(zmax-zmin)]
+    wedm_len = 0.0
+    for z in z_vals:
+        sec = mesh.section(plane_origin=[0,0,z], plane_normal=[0,0,1])
+        if sec is None:
+            continue
+        planar = sec.to_2D() # Changed to_planar() to to_2D()
+        try:
+            wedm_len += float(planar.length)
+        except Exception:
+            pass
+    logger.info("[%.2fs] WEDM length calculated.", time.time() - start_time)
+
+    logger.info("[%.2fs] Calculating deburr length...", time.time() - start_time)
+    try:
+        import numpy as np
+        angles = mesh.face_adjacency_angles
+        edges = mesh.face_adjacency_edges
+        if len(angles) and len(edges):
+            sharp = angles > math.radians(15.0)
+            vec = mesh.vertices[edges[:,0]] - mesh.vertices[edges[:,1]]
+            lengths = np.linalg.norm(vec, axis=1)
+            deburr_len = float(lengths[sharp].sum())
+        else:
+            deburr_len = 0.0
+    except Exception:
+        deburr_len = 0.0
+    logger.info("[%.2fs] Deburr length calculated.", time.time() - start_time)
+
+    bbox_vol = max(L*W*H, 1e-9)
+    complexity = (faces / max(volume, bbox_vol)) * 100.0
+
+    logger.info("[%.2fs] Calculating 3-axis accessibility...", time.time() - start_time)
+    try:
+        n = mesh.face_normals
+        area_faces = mesh.area_faces.reshape(-1,1)
+        import numpy as np
+        axes = np.array([[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]], dtype=float).T
+        dots = np.abs(n @ axes)  # (F,6)
+        close = (dots > DOT_TOL).any(axis=1)
+        access = float((area_faces[close].sum() / area_faces.sum())) if area_faces.sum() > 0 else 0.0
+    except Exception:
+        access = 0.0
+    logger.info("[%.2fs] 3-axis accessibility calculated.", time.time() - start_time)
+
+    try:
+        center = list(map(float, mesh.center_mass))
+    except Exception:
+        center = [0.0,0.0,0.0]
+
+    logger.info("[%.2fs] Finished enrich_geo_stl.", time.time() - start_time)
+    return {
+        "GEO-01_Length_mm": round(L,3),
+        "GEO-02_Width_mm": round(W,3),
+        "GEO-03_Height_mm": round(H,3),
+        "GEO-Volume_mm3": round(volume,2),
+        "GEO-SurfaceArea_mm2": round(area_total,2),
+        "Feature_Face_Count": faces,
+        "GEO_LargestPlane_Area_mm2": None,
+        "GEO_Setup_UniqueNormals": None,
+        "GEO_MinWall_mm": None,
+        "GEO_ThinWall_Present": False,
+        "GEO_WEDM_PathLen_mm": round(wedm_len,2),
+        "GEO_Deburr_EdgeLen_mm": round(deburr_len,2),
+        "GEO_Hole_Groups": [],
+        "GEO_Complexity_0to100": round(complexity,2),
+        "GEO_3Axis_Accessible_Pct": round(access,3),
+        "GEO_CenterOfMass": center,
+        "OCC_Backend": "trimesh (STL)"
+    }
+
+
+def read_cad_any(path: str):
+    from OCP.IFSelect import IFSelect_RetDone  # type: ignore[import]
+    from OCP.IGESControl import IGESControl_Reader  # type: ignore[import]
+    from OCP.TopoDS import TopoDS_Shape  # type: ignore[import]
+
+    ext = Path(path).suffix.lower()
+    if ext in (".step", ".stp"):
+        return read_step_shape(path)
+    if ext in (".iges", ".igs"):
+        ig = IGESControl_Reader()
+        if ig.ReadFile(path) != IFSelect_RetDone:
+            raise RuntimeError("IGES read failed")
+        ig.TransferRoots()
+        return _shape_from_reader(ig)
+    if ext == ".brep":
+        shape_ctor = cast(Callable[[], Any], TopoDS_Shape)
+        s = shape_ctor()
+        if not cast(Any, BRepTools).Read(s, path, None):
+            raise RuntimeError("BREP read failed")
+        return s
+    if ext == ".dxf":
+        return read_dxf_as_occ_shape(path)
+    if ext == ".dwg":
+        conv = os.environ.get("ODA_CONVERTER_EXE") or os.environ.get("DWG2DXF_EXE")
+        logger.info("Using DWG converter: %s", conv)
+        dxf_path = convert_dwg_to_dxf(path)
+        return read_dxf_as_occ_shape(dxf_path)
+    raise RuntimeError(f"Unsupported CAD format: {ext}")
 
 # ---- LLM hours inference ----
 def infer_hours_and_overrides_from_geo(
@@ -7263,6 +8870,94 @@ def require_plate_inputs(geo: dict, ui_vars: dict[str, Any] | None) -> None:
         geo["material"] = material
 
 
+def _compute_plate_mass_density(
+    ui_vars: Mapping[str, Any] | None,
+    geo_context: dict[str, Any],
+    material_name: str | None,
+    default_material_display: str | None,
+    density_g_cc: float,
+) -> tuple[float, float, float, float | None, float | None]:
+    """Return plate-derived volume and density details."""
+
+    ui_vars = dict(ui_vars or {})
+
+    length_in_val = _coerce_float_or_none(ui_vars.get("Plate Length (in)"))
+    width_in_val = _coerce_float_or_none(ui_vars.get("Plate Width (in)"))
+    thickness_mm_val = _coerce_float_or_none(geo_context.get("thickness_mm"))
+    if thickness_mm_val is None:
+        t_in = _coerce_float_or_none(ui_vars.get("Thickness (in)"))
+        if t_in is not None:
+            thickness_mm_val = float(t_in) * 25.4
+    thickness_mm_val = float(thickness_mm_val or 0.0)
+
+    plate_length_in_val: float | None = None
+    plate_width_in_val: float | None = None
+    if length_in_val and length_in_val > 0:
+        plate_length_in_val = float(length_in_val)
+    if width_in_val and width_in_val > 0:
+        plate_width_in_val = float(width_in_val)
+
+    if thickness_mm_val > 0:
+        geo_context["thickness_mm"] = thickness_mm_val
+
+    length_mm = float(length_in_val or 0.0) * 25.4
+    width_mm = float(width_in_val or 0.0) * 25.4
+    if length_mm > 0:
+        geo_context.setdefault("plate_length_mm", length_mm)
+    if width_mm > 0:
+        geo_context.setdefault("plate_width_mm", width_mm)
+
+    vol_mm3_plate = max(1.0, length_mm * width_mm * max(thickness_mm_val, 0.0))
+    plate_vol_cm3 = vol_mm3_plate / 1000.0
+    plate_geo_vol_mm3 = vol_mm3_plate
+
+    density_lookup = {
+        "steel": 7.85,
+        "stainless": 7.90,
+        "alum": 2.70,
+        "titanium": 4.43,
+        "copper": 8.96,
+        "brass": 8.40,
+        "plastic": 1.45,
+    }
+
+    def _context_density(ctx: Mapping[str, Any] | None) -> float | None:
+        if not isinstance(ctx, Mapping):
+            return None
+        val = _coerce_float_or_none(ctx.get("density_g_cc"))
+        if val and val > 0:
+            return float(val)
+        return None
+
+    inner_geo_ctx = (
+        geo_context.get("geo") if isinstance(geo_context.get("geo"), Mapping) else None
+    )
+    density_candidates: list[float] = []
+    for ctx in (geo_context, inner_geo_ctx):
+        dens = _context_density(ctx)
+        if dens:
+            density_candidates.append(dens)
+    if not density_candidates:
+        density_candidates.append(
+            _density_for_material(material_name or default_material_display, default=0.0)
+        )
+    density_candidates.append(
+        density_lookup.get(
+            _material_family(geo_context.get("material") or material_name),
+            density_lookup["steel"],
+        )
+    )
+    density_g_cc = next((d for d in density_candidates if d and d > 0), density_lookup["steel"])
+
+    return (
+        plate_vol_cm3,
+        plate_geo_vol_mm3,
+        density_g_cc,
+        plate_length_in_val,
+        plate_width_in_val,
+    )
+
+
 @overload
 def net_mass_kg(
     plate_L_in,
@@ -9063,8 +10758,7 @@ def validate_quote_before_pricing(
             issues.clear()
         else:
             raise ValueError("Quote blocked:\n- " + "\n- ".join(issues))
-
-
+# pyright: ignore[reportGeneralTypeIssues]
 def compute_quote_from_df(df: pd.DataFrame,
                           params: Dict[str, Any] | None = None,
                           rates: Dict[str, float] | None = None,
@@ -9081,7 +10775,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                           quote_state: QuoteState | None = None,
                           reuse_suggestions: bool = False,
                           llm_suggest: Any | None = None,
-                          pricing: PricingEngine | None = None) -> Dict[str, Any]:  # pyright: ignore[reportGeneralTypeIssues]
+                          pricing: PricingEngine | None = None) -> Dict[str, Any]:
     """
     Estimator that consumes variables from the sheet (Item, Example Values / Options, Data Type / Input Method).
 
@@ -9513,64 +11207,24 @@ def compute_quote_from_df(df: pd.DataFrame,
         density_g_cc = density_guess_from_material
 
     if is_plate_2d:
-        length_in_val = _coerce_float_or_none(ui_vars.get("Plate Length (in)"))
-        width_in_val = _coerce_float_or_none(ui_vars.get("Plate Width (in)"))
-        thickness_mm_val = _coerce_float_or_none(geo_context.get("thickness_mm"))
-        if thickness_mm_val is None:
-            t_in = _coerce_float_or_none(ui_vars.get("Thickness (in)"))
-            if t_in is not None:
-                thickness_mm_val = float(t_in) * 25.4
-        thickness_mm_val = float(thickness_mm_val or 0.0)
-        if length_in_val and length_in_val > 0:
-            plate_length_in_val = float(length_in_val)
-        if width_in_val and width_in_val > 0:
-            plate_width_in_val = float(width_in_val)
-        if thickness_mm_val > 0:
-            geo_context["thickness_mm"] = thickness_mm_val
-        length_mm = float(length_in_val or 0.0) * 25.4
-        width_mm = float(width_in_val or 0.0) * 25.4
-        if length_mm > 0:
-            geo_context.setdefault("plate_length_mm", length_mm)
-        if width_mm > 0:
-            geo_context.setdefault("plate_width_mm", width_mm)
-        vol_mm3_plate = max(1.0, length_mm * width_mm * max(thickness_mm_val, 0.0))
-        vol_cm3 = max(vol_cm3, vol_mm3_plate / 1000.0)
-        GEO_vol_mm3 = max(GEO_vol_mm3, vol_mm3_plate)
-        density_lookup = {
-            "steel": 7.85,
-            "stainless": 7.90,
-            "alum": 2.70,
-            "titanium": 4.43,
-            "copper": 8.96,
-            "brass": 8.40,
-            "plastic": 1.45,
-        }
-
-        def _context_density(ctx: dict[str, Any] | None) -> float | None:
-            if not isinstance(ctx, dict):
-                return None
-            val = _coerce_float_or_none(ctx.get("density_g_cc"))
-            if val and val > 0:
-                return float(val)
-            return None
-
-        inner_geo_ctx = geo_context.get("geo") if isinstance(geo_context.get("geo"), dict) else None
-        density_candidates: list[float] = []
-        for ctx in (geo_context, inner_geo_ctx):
-            dens = _context_density(ctx)
-            if dens:
-                density_candidates.append(dens)
-        if not density_candidates:
-            density_candidates.append(
-                _density_for_material(material_name or default_material_display, default=0.0)
-            )
-        density_candidates.append(
-            density_lookup.get(
-                _material_family(geo_context.get("material") or material_name),
-                density_lookup["steel"],
-            )
+        (
+            plate_vol_cm3,
+            plate_geo_vol_mm3,
+            density_g_cc,
+            plate_length_in_val,
+            plate_width_in_val,
+        ) = _compute_plate_mass_density(
+            ui_vars,
+            geo_context,
+            material_name,
+            default_material_display,
+            density_g_cc,
         )
-        density_g_cc = next((d for d in density_candidates if d and d > 0), density_lookup["steel"])
+        vol_cm3 = max(vol_cm3, plate_vol_cm3)
+        GEO_vol_mm3 = max(GEO_vol_mm3, plate_geo_vol_mm3)
+        thickness_mm_val = float(_coerce_float_or_none(geo_context.get("thickness_mm")) or 0.0)
+        length_in_val = plate_length_in_val
+        width_in_val = plate_width_in_val
         holes_for_mass: list[float] = []
         hole_sources: list[Any] = []
         for key in ("hole_diams_mm_precise", "hole_diams_mm"):
@@ -10243,7 +11897,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         selected_material_name
         or geo_context.get("material")
         or material_name
-        or "Steel"
+        or DEFAULT_MATERIAL_DISPLAY
     )
     drill_material_source = str(drill_material_source).strip()
     drill_material_lookup = (
@@ -12158,13 +13812,8 @@ def compute_quote_from_df(df: pd.DataFrame,
         "setups": baseline_setups,
         "fixture": baseline_fixture,
     }
-    llm_bounds = {
-        "mult_min": LLM_MULTIPLIER_MIN,
-        "mult_max": LLM_MULTIPLIER_MAX,
-        "adder_max_hr": LLM_ADDER_MAX,
-        "scrap_min": 0.0,
-        "scrap_max": 0.25,
-    }
+    llm_bounds = dict(LLM_BOUND_DEFAULTS)
+    llm_bounds.update({"scrap_min": 0.0, "scrap_max": 0.25})
     baseline_bounds = baseline_data.get("_bounds") if isinstance(baseline_data.get("_bounds"), dict) else None
     if baseline_bounds:
         bucket_caps_raw = baseline_bounds.get("adder_bucket_max") or baseline_bounds.get("add_hr_bucket_max")
@@ -13718,10 +15367,6 @@ def compute_quote_from_df(df: pd.DataFrame,
                 f"Labor totals drifted by ${diff:,.2f}: "
                 f"rendered ${labor_display_total:,.2f} vs expected ${expected_labor_total:,.2f}"
             )
-            if "red_flags" not in locals():
-                red_flags = []  # pragma: no cover - legacy safety net
-            if flag_message not in red_flags:
-                red_flags.append(flag_message)
             if flag_message not in red_flag_messages:
                 red_flag_messages.append(flag_message)
             logger.warning(
@@ -14168,8 +15813,8 @@ def default_variables_template() -> pd.DataFrame:
         ("FAIR Required", "False / True", "Checkbox"),
         ("Source Inspection Requirement", "False / True", "Checkbox"),
         ("Quantity", 1, "number"),
-        ("Material", "", "text"),
-        ("Thickness (in)", 0.0, "number"),
+        ("Material", "Aluminum MIC6", "text"),
+        ("Thickness (in)", 2.0, "number"),
     ]
     return pd.DataFrame(rows, columns=REQUIRED_COLS)
 
@@ -16531,14 +18176,14 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
 
     # --- load doc ---
     dxf_text_path: str | None = None
-    doc = None
+    doc: Drawing | None = None
     lower_path = path.lower()
-    readfile = getattr(ezdxf_mod, "readfile", None)
+    readfile: Callable[[str], Any] | None = getattr(ezdxf_mod, "readfile", None)
     if not callable(readfile):
         raise AttributeError("ezdxf module does not provide a callable 'readfile' function")
 
     if lower_path.endswith(".dwg"):
-        if geometry.HAS_ODAFC:
+        if _HAS_ODAFC:
             # uses ODAFileConverter through ezdxf, no env var needed
             from ezdxf.addons import odafc as _odafc  # type: ignore
 
@@ -16547,14 +18192,17 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
                 raise RuntimeError(
                     "ezdxf.addons.odafc.readfile is unavailable; install ODAFileConverter support."
                 )
-            doc = readfile(path)
+            doc = cast(Drawing, readfile(path))
         else:
             dxf_path = convert_dwg_to_dxf(path, out_ver="ACAD2018")
             dxf_text_path = dxf_path
-            doc = readfile(dxf_path)
+            doc = cast(Drawing, readfile(dxf_path))
     else:
-        doc = readfile(path)
+        doc = cast(Drawing, readfile(path))
         dxf_text_path = path
+
+    if doc is None:
+        raise RuntimeError("Failed to load DXF/DWG document")
 
     sp = doc.modelspace()
     units = detect_units_scale(doc)
@@ -16653,7 +18301,11 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
 
             if geo_read_more.get("chart_lines"):
                 existing_lines_raw = geo.get("chart_lines")
-                existing_lines = list(existing_lines_raw) if isinstance(existing_lines_raw, list) else []
+                existing_lines = (
+                    existing_lines_raw.copy()
+                    if isinstance(existing_lines_raw, list)
+                    else []
+                )
                 new_lines = geo_read_more.get("chart_lines")
                 if not isinstance(new_lines, list):
                     new_lines = []
@@ -16709,7 +18361,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     chart_source: str | None = None
     chart_summary: dict[str, Any] | None = None
 
-    extractor = _extract_text_lines_from_dxf or geometry.extract_text_lines_from_dxf
+    extractor = _extract_text_lines_from_dxf or extract_text_lines_from_dxf
     if extractor and dxf_text_path:
         try:
             chart_lines = extractor(dxf_text_path)
@@ -16720,7 +18372,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
 
     if chart_lines:
         chart_summary = summarize_hole_chart_lines(chart_lines)
-    parser = _parse_hole_table_lines or geometry.parse_hole_table_lines
+    parser = _parse_hole_table_lines or parse_hole_table_lines
     if chart_lines and parser:
         try:
             hole_rows = parser(chart_lines)
@@ -17099,7 +18751,7 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
     if isinstance(material_name, str):
         material_name = material_name.strip() or None
 
-    material_display = material_name or "Steel"
+    material_display = material_name or DEFAULT_MATERIAL_DISPLAY
 
     hole_count_val = hole_count if isinstance(hole_count, int) else None
     geo_notes_default: list[str] = []
@@ -17501,12 +19153,13 @@ def get_llm_overrides(
     catalogs_ctx["stock"] = stock_catalog
     ctx["catalogs"] = catalogs_ctx
     bounds_ctx = dict(ctx.get("bounds") or {})
+    llm_bound_defaults = dict(LLM_BOUND_DEFAULTS)
     bounds_ctx.update(
         {
-            "mult_min": LLM_MULTIPLIER_MIN,
-            "mult_max": LLM_MULTIPLIER_MAX,
+            "mult_min": llm_bound_defaults["mult_min"],
+            "mult_max": llm_bound_defaults["mult_max"],
             "add_hr_min": 0.0,
-            "add_hr_max": LLM_ADDER_MAX,
+            "add_hr_max": llm_bound_defaults["adder_max_hr"],
             "scrap_min": 0.0,
             "scrap_max": 0.25,
         }
@@ -18074,22 +19727,22 @@ class GeometryLoader:
         return extract_2d_features_from_dxf_or_dwg(str(path))
 
     def extract_features_with_occ(self, path: str | Path):
-        return geometry.extract_features_with_occ(str(path))
+        return extract_features_with_occ(str(path))
 
     def enrich_geo_stl(self, path: str | Path):
-        return geometry.enrich_geo_stl(str(path))
+        return enrich_geo_stl(str(path))
 
     def read_step_shape(self, path: str | Path) -> Any:
-        return geometry.read_step_shape(str(path))
+        return read_step_shape(str(path))
 
     def read_cad_any(self, path: str | Path) -> Any:
-        return geometry.read_cad_any(str(path))
+        return read_cad_any(str(path))
 
     def safe_bbox(self, shape: Any):
-        return geometry.safe_bbox(shape)
+        return safe_bbox(shape)
 
     def enrich_geo_occ(self, shape: Any):
-        return geometry.enrich_geo_occ(shape)
+        return enrich_geo_occ(shape)
 
 
 @dataclass(slots=True)
@@ -18414,11 +20067,18 @@ class CreateToolTip:
         if self._tip_window is not None or not self.text:
             return
 
-        bbox = None
+        bbox: tuple[int, int, int, int] | None = None
         bbox_method = getattr(self.widget, "bbox", None)
         if callable(bbox_method):
             try:
-                bbox = bbox_method("insert")  # type: ignore[arg-type]
+                raw_bbox = bbox_method("insert")  # type: ignore[arg-type]
+                if isinstance(raw_bbox, (tuple, list)) and len(raw_bbox) >= 4:
+                    bbox = (
+                        int(raw_bbox[0]),
+                        int(raw_bbox[1]),
+                        int(raw_bbox[2]),
+                        int(raw_bbox[3]),
+                    )
             except Exception:
                 bbox = None
         if bbox:
@@ -18524,6 +20184,8 @@ class App(tk.Tk):
         llm_services: LLMServices | None = None,
         geometry_service: geometry.GeometryService | None = None,
     ):
+
+        _ensure_tk()
 
         super().__init__()
 
@@ -19060,10 +20722,10 @@ class App(tk.Tk):
         df = _ensure_row(df, "Scrap Percent (%)", 15.0, dtype="number")
         df = _ensure_row(df, "Plate Length (in)", 12.0, dtype="number")
         df = _ensure_row(df, "Plate Width (in)", 14.0, dtype="number")
-        df = _ensure_row(df, "Thickness (in)", 0.0, dtype="number")
+        df = _ensure_row(df, "Thickness (in)", 2.0, dtype="number")
         df = _ensure_row(df, "Hole Count (override)", 0, dtype="number")
         df = _ensure_row(df, "Avg Hole Diameter (mm)", 0.0, dtype="number")
-        df = _ensure_row(df, "Material", "", dtype="text")
+        df = _ensure_row(df, "Material", "Aluminum MIC6", dtype="text")
         self.vars_df = df
         parent = self.editor_scroll.inner
         for child in parent.winfo_children():
@@ -20368,9 +22030,13 @@ class App(tk.Tk):
 
     def open_llm_inspector(self):
         import json
-        import tkinter as tk
         from pathlib import Path
-        from tkinter import messagebox, scrolledtext
+
+        try:
+            _ensure_tk("LLM Inspector")
+        except RuntimeError as exc:  # pragma: no cover - headless guard
+            logger.error("Cannot open LLM Inspector: %s", exc)
+            return
 
         debug_dir = Path(__file__).with_name("llm_debug")
         files = sorted(debug_dir.glob("llm_snapshot_*.json"))
@@ -20668,7 +22334,14 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
 
     pricing_registry = create_default_registry()
     pricing_engine = PricingEngine(pricing_registry)
-    App(pricing_engine).mainloop()
+
+    try:
+        app = App(pricing_engine)
+    except RuntimeError as exc:  # pragma: no cover - headless guard
+        logger.error("Unable to start the GUI: %s", exc)
+        return 1
+
+    app.mainloop()
 
     return 0
 

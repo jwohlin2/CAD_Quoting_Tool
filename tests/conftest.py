@@ -542,7 +542,6 @@ def _ensure_geometry_helpers() -> None:
         "enrich_geo_occ": _return_empty_dict,
         "enrich_geo_stl": _return_empty_dict,
         "safe_bbox": _return_bbox,
-        "safe_bounding_box": _return_bbox,
         "iter_solids": _iter_empty,
         "explode_compound": _return_empty_list,
         "parse_hole_table_lines": _return_empty_list,
