@@ -700,11 +700,11 @@ text_harvest = _export("text_harvest")
 extract_entities = _export("extract_entities")
 read_dxf = _export("read_dxf")
 upsert_var_row = _export("upsert_var_row")
+require_ezdxf = _export("require_ezdxf")
 get_dwg_converter_path = _export("get_dwg_converter_path")
 have_dwg_support = _export("have_dwg_support")
 get_import_diagnostics_text = _export("get_import_diagnostics_text")
 
-_geometry_require_ezdxf = getattr(geometry, "require_ezdxf", None)
 _HAS_TRIMESH = getattr(geometry, "HAS_TRIMESH", False)
 _HAS_EZDXF = getattr(geometry, "HAS_EZDXF", False)
 _HAS_ODAFC = getattr(geometry, "HAS_ODAFC", False)
@@ -3433,61 +3433,6 @@ def list_iter(lst):
 
 
 # ---- tiny helpers you can use elsewhere --------------------------------------
-def require_ezdxf():
-    """Raise a clear error if ezdxf is missing and return the module."""
-
-    if callable(_geometry_require_ezdxf):
-        return _geometry_require_ezdxf()
-
-    if not geometry.HAS_EZDXF:
-        raise RuntimeError("ezdxf not installed. Install with pip/conda (package name: 'ezdxf').")
-
-    try:
-        import ezdxf as _ezdxf
-    except Exception as exc:  # pragma: no cover - defensive fallback
-        raise RuntimeError("Failed to import ezdxf even though HAS_EZDXF is true.") from exc
-
-    return _ezdxf
-
-def get_dwg_converter_path() -> str:
-    """Resolve a DWG?DXF converter path (.bat/.cmd/.exe)."""
-    exe = os.environ.get("ODA_CONVERTER_EXE") or os.environ.get("DWG2DXF_EXE")
-    # Fall back to a local wrapper next to this script if it exists.
-    local = str(Path(__file__).with_name("dwg2dxf_wrapper.bat"))
-    if not exe and Path(local).exists():
-        exe = local
-    return exe or ""
-
-def get_import_diagnostics_text() -> str:
-    import os
-    import sys
-    lines = []
-    lines.append(f"Python: {sys.executable}")
-    try:
-        lines.append("PyMuPDF: OK")
-    except Exception as e:
-        lines.append(f"PyMuPDF: MISSING ({e})")
-
-    try:
-        import ezdxf
-        lines.append(f"ezdxf: {getattr(ezdxf, '__version__', 'unknown')}")
-        try:
-            lines.append("ezdxf.addons.odafc: OK")
-        except Exception as e:
-            lines.append(f"ezdxf.addons.odafc: not available ({e})")
-    except Exception as e:
-        lines.append(f"ezdxf: MISSING ({e})")
-
-    oda = os.environ.get("ODA_CONVERTER_EXE") or "(not set)"
-    d2d = os.environ.get("DWG2DXF_EXE") or "(not set)"
-    lines.append(f"ODA_CONVERTER_EXE: {oda}")
-    lines.append(f"DWG2DXF_EXE: {d2d}")
-
-    # local wrapper presence
-    from pathlib import Path
-    wrapper = Path(__file__).with_name("dwg2dxf_wrapper.bat")
-    lines.append(f"Local wrapper present: {wrapper.exists()} ({wrapper})")
-    return "\n".join(lines)
 # Optional PDF stack
 try:
     import fitz  # PyMuPDF
