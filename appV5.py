@@ -1192,7 +1192,9 @@ def build_suggest_payload(
         )
     else:
         material_name = material_val
-    material_name = str(material_name).strip() if material_name else "Steel"
+    material_name = (
+        str(material_name).strip() if material_name else DEFAULT_MATERIAL_DISPLAY
+    )
 
     hole_count_val = to_float(geo.get("hole_count"))
     if hole_count_val is None:
@@ -11854,7 +11856,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         selected_material_name
         or geo_context.get("material")
         or material_name
-        or "Steel"
+        or DEFAULT_MATERIAL_DISPLAY
     )
     drill_material_source = str(drill_material_source).strip()
     drill_material_lookup = (
@@ -15775,8 +15777,8 @@ def default_variables_template() -> pd.DataFrame:
         ("FAIR Required", "False / True", "Checkbox"),
         ("Source Inspection Requirement", "False / True", "Checkbox"),
         ("Quantity", 1, "number"),
-        ("Material", "", "text"),
-        ("Thickness (in)", 0.0, "number"),
+        ("Material", "Aluminum MIC6", "text"),
+        ("Thickness (in)", 2.0, "number"),
     ]
     return pd.DataFrame(rows, columns=REQUIRED_COLS)
 
@@ -18706,7 +18708,7 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
     if isinstance(material_name, str):
         material_name = material_name.strip() or None
 
-    material_display = material_name or "Steel"
+    material_display = material_name or DEFAULT_MATERIAL_DISPLAY
 
     hole_count_val = hole_count if isinstance(hole_count, int) else None
     geo_notes_default: list[str] = []
@@ -20667,10 +20669,10 @@ class App(tk.Tk):
         df = _ensure_row(df, "Scrap Percent (%)", 15.0, dtype="number")
         df = _ensure_row(df, "Plate Length (in)", 12.0, dtype="number")
         df = _ensure_row(df, "Plate Width (in)", 14.0, dtype="number")
-        df = _ensure_row(df, "Thickness (in)", 0.0, dtype="number")
+        df = _ensure_row(df, "Thickness (in)", 2.0, dtype="number")
         df = _ensure_row(df, "Hole Count (override)", 0, dtype="number")
         df = _ensure_row(df, "Avg Hole Diameter (mm)", 0.0, dtype="number")
-        df = _ensure_row(df, "Material", "", dtype="text")
+        df = _ensure_row(df, "Material", "Aluminum MIC6", dtype="text")
         self.vars_df = df
         parent = self.editor_scroll.inner
         for child in parent.winfo_children():
