@@ -1200,6 +1200,11 @@ def coerce_bounds(bounds: Mapping | None) -> dict[str, Any]:
         mult_max = min(LLM_MULTIPLIER_MAX, float(mult_max))
     mult_max = max(mult_max, mult_min)
 
+    adder_min = _as_float_or_none(bounds.get("adder_min_hr"))
+    if adder_min is None:
+        adder_min = _as_float_or_none(bounds.get("add_hr_min"))
+    adder_min = max(0.0, float(adder_min)) if adder_min is not None else 0.0
+
     adder_max = _as_float_or_none(bounds.get("adder_max_hr"))
     add_hr_cap = _as_float_or_none(bounds.get("add_hr_max"))
     if adder_max is None and add_hr_cap is not None:
@@ -1208,13 +1213,14 @@ def coerce_bounds(bounds: Mapping | None) -> dict[str, Any]:
         adder_max = min(float(adder_max), float(add_hr_cap))
     if adder_max is None:
         adder_max = LLM_ADDER_MAX
-    adder_max = max(0.0, min(LLM_ADDER_MAX, float(adder_max)))
+    adder_max = max(adder_min, min(LLM_ADDER_MAX, float(adder_max)))
 
     scrap_min = _as_float_or_none(bounds.get("scrap_min"))
     scrap_min = max(0.0, float(scrap_min)) if scrap_min is not None else 0.0
 
     scrap_max = _as_float_or_none(bounds.get("scrap_max"))
     scrap_max = float(scrap_max) if scrap_max is not None else 0.25
+    scrap_max = max(scrap_max, scrap_min)
 
     bucket_caps_raw = bounds.get("adder_bucket_max") or bounds.get("add_hr_bucket_max")
     bucket_caps: dict[str, float] = {}
@@ -1223,16 +1229,20 @@ def coerce_bounds(bounds: Mapping | None) -> dict[str, Any]:
             cap_val = _as_float_or_none(raw)
             if cap_val is None:
                 continue
-            bucket_caps[str(key).lower()] = max(0.0, float(cap_val))
+            bucket_caps[str(key).lower()] = max(adder_min, min(adder_max, float(cap_val)))
 
     return {
         "mult_min": mult_min,
         "mult_max": mult_max,
+        "adder_min_hr": adder_min,
         "adder_max_hr": adder_max,
         "scrap_min": scrap_min,
         "scrap_max": scrap_max,
         "adder_bucket_max": bucket_caps,
     }
+
+
+LLM_BOUND_DEFAULTS: Mapping[str, Any] = MappingProxyType(coerce_bounds(None))
 
 
 def build_suggest_payload(
@@ -1610,6 +1620,7 @@ def sanitize_suggestions(s: dict, bounds: dict) -> dict:
 
     mult_min = coerced_bounds["mult_min"]
     mult_max = coerced_bounds["mult_max"]
+    adder_min = coerced_bounds["adder_min_hr"]
     base_adder_max = coerced_bounds["adder_max_hr"]
     scrap_min = coerced_bounds["scrap_min"]
     scrap_max = coerced_bounds["scrap_max"]
@@ -1750,10 +1761,8 @@ def sanitize_suggestions(s: dict, bounds: dict) -> dict:
         proc_key = str(proc)
         bucket_cap = bucket_caps.get(proc_key.lower())
         limit = bucket_cap if bucket_cap is not None else base_adder_max
-        if limit is None:
-            limit = LLM_ADDER_MAX
-        limit = max(0.0, float(limit))
-        num = max(0.0, min(limit, num))
+        limit = max(adder_min, float(limit))
+        num = max(adder_min, min(limit, num))
         adders[proc_key] = num
         _store_meta(("process_hour_adders", proc_key), detail, num)
 
@@ -2037,64 +2046,37 @@ def merge_effective(
         bounds = {str(k): v for k, v in bounds.items()}
     else:
         bounds = {}
+    coerced_bounds = coerce_bounds(bounds)
+    mult_min_bound = coerced_bounds["mult_min"]
+    mult_max_bound = coerced_bounds["mult_max"]
+    adder_min_bound = coerced_bounds["adder_min_hr"]
+    adder_max_bound = coerced_bounds["adder_max_hr"]
+    scrap_min_bound = coerced_bounds["scrap_min"]
+    scrap_max_bound = coerced_bounds["scrap_max"]
+    bucket_caps_bound = coerced_bounds.get("adder_bucket_max", {})
 
     def _clamp(value: float, kind: str, label: str, source: str) -> tuple[float, bool]:
         clamped = value
         changed = False
         source_norm = str(source).strip().lower()
         if kind == "multiplier":
-            mult_min_val = to_float(bounds.get("mult_min"))
-            mult_max_val = to_float(bounds.get("mult_max"))
-            mult_min = max(
-                LLM_MULTIPLIER_MIN,
-                mult_min_val if mult_min_val is not None else LLM_MULTIPLIER_MIN,
-            )
-            mult_max = min(
-                LLM_MULTIPLIER_MAX,
-                mult_max_val if mult_max_val is not None else LLM_MULTIPLIER_MAX,
-            )
-            mult_max = max(mult_max, mult_min)
-            clamped = max(mult_min, min(mult_max, float(value)))
+            clamped = max(mult_min_bound, min(mult_max_bound, float(value)))
         elif kind == "adder":
             orig_val = float(value)
-            add_hr_max_raw = to_float(bounds.get("add_hr_max"))
-            adder_max_raw = to_float(bounds.get("adder_max_hr"))
-            adder_max_candidates = [
-                LLM_ADDER_MAX,
-                adder_max_raw if adder_max_raw is not None else None,
-                add_hr_max_raw if add_hr_max_raw is not None else None,
-            ]
-            bucket_caps_raw = bounds.get("adder_bucket_max") or bounds.get("add_hr_bucket_max")
-            bucket_caps: dict[str, float] = {}
-            if isinstance(bucket_caps_raw, dict):
-                for key, raw in bucket_caps_raw.items():
-                    cap_val = to_float(raw)
-                    if cap_val is not None:
-                        bucket_caps[str(key).lower()] = float(cap_val)
-            adder_min = to_float(bounds.get("add_hr_min"))
-            if adder_min is None:
-                adder_min = to_float(bounds.get("adder_min_hr"))
             raw_val = orig_val
             if source_norm == "llm" and raw_val > 240:
                 raw_val = raw_val / 60.0
-            lower_bound = adder_min if adder_min is not None else 0.0
             bucket_name = None
             if "[" in label and "]" in label:
                 bucket_name = label.split("[", 1)[-1].split("]", 1)[0].strip().lower()
-            bucket_max = None
-            if bucket_name:
-                bucket_max = bucket_caps.get(bucket_name)
-            if bucket_max is not None:
-                adder_max_effective = bucket_max
-            else:
-                filtered = [cand for cand in adder_max_candidates if cand is not None]
-                adder_max_effective = min(filtered) if filtered else LLM_ADDER_MAX
-            adder_max_effective = max(adder_max_effective, lower_bound)
-            clamped = max(lower_bound, min(adder_max_effective, raw_val))
+            bucket_max = bucket_caps_bound.get(bucket_name) if bucket_name else None
+            if bucket_max is None and bucket_name:
+                bucket_max = bucket_caps_bound.get(bucket_name.lower())
+            adder_cap = bucket_max if bucket_max is not None else adder_max_bound
+            adder_cap = max(adder_min_bound, float(adder_cap))
+            clamped = max(adder_min_bound, min(adder_cap, raw_val))
         elif kind == "scrap":
-            scrap_min = max(0.0, to_float(bounds.get("scrap_min")) or 0.0)
-            scrap_max = to_float(bounds.get("scrap_max")) or 0.25
-            clamped = max(scrap_min, min(scrap_max, float(value)))
+            clamped = max(scrap_min_bound, min(scrap_max_bound, float(value)))
         elif kind == "setups":
             clamped = int(max(1, min(4, round(float(value)))))
         if not math.isclose(float(clamped), float(value), rel_tol=1e-6, abs_tol=1e-6):
@@ -4705,6 +4687,12 @@ def clamp_llm_hours(
 
     cleaned: dict[str, Any] = {}
     raw_map = cast(Mapping[str, Any], raw or {})
+    params_map = cast(Mapping[str, Any], params or {})
+    bounds_raw = params_map.get("bounds") if isinstance(params_map, Mapping) else None
+    bounds_map = bounds_raw if isinstance(bounds_raw, Mapping) else None
+    coerced_bounds = coerce_bounds(bounds_map)
+    adder_min_bound = coerced_bounds["adder_min_hr"]
+    adder_max_bound = coerced_bounds["adder_max_hr"]
 
     hours_out: dict[str, float] = {}
     hours_val = raw_map.get("hours")
@@ -4738,7 +4726,9 @@ def clamp_llm_hours(
                 pass
         setup_hours = _coerce_float_or_none(setups_src.get("Setup_Hours_per_Setup"))
         if setup_hours is not None:
-            setups_out["Setup_Hours_per_Setup"] = clamp(float(setup_hours), 0.0, LLM_ADDER_MAX, 0.0)
+            setups_out["Setup_Hours_per_Setup"] = clamp(
+                float(setup_hours), adder_min_bound, adder_max_bound, adder_min_bound
+            )
     if setups_out:
         cleaned["setups"] = setups_out
 
@@ -14846,8 +14836,14 @@ def compute_quote_from_df(df: pd.DataFrame,
         removal_lb = removal_mass_g / 1000.0 * LB_PER_KG
 
     bounds = quote_state.bounds if isinstance(quote_state.bounds, dict) else {}
-    scrap_min_bound = max(0.0, _coerce_float_or_none(bounds.get("scrap_min")) or 0.0)
-    scrap_max_bound = _coerce_float_or_none(bounds.get("scrap_max")) or 0.25
+    coerced_bounds = coerce_bounds(bounds)
+    scrap_min_bound = coerced_bounds["scrap_min"]
+    scrap_max_bound = coerced_bounds["scrap_max"]
+    mult_min_bound = coerced_bounds["mult_min"]
+    mult_max_bound = coerced_bounds["mult_max"]
+    adder_min_bound = coerced_bounds["adder_min_hr"]
+    adder_max_bound = coerced_bounds["adder_max_hr"]
+    bucket_caps_bound = coerced_bounds.get("adder_bucket_max", {})
 
     net_after = base_net_mass_g
     scrap_after = old_scrap
@@ -14965,7 +14961,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         actual = process_key_map.get(_normalize_key(key))
         if not actual:
             continue
-        mult = clamp(mult, LLM_MULTIPLIER_MIN, LLM_MULTIPLIER_MAX, 1.0)
+        mult = clamp(mult, mult_min_bound, mult_max_bound, 1.0)
         old_cost = float(process_costs.get(actual, 0.0))
         if old_cost <= 0:
             continue
@@ -15002,7 +14998,11 @@ def compute_quote_from_df(df: pd.DataFrame,
     for key, add_hr in (ph_add or {}).items():
         if not isinstance(add_hr, (int, float)):
             continue
-        add_hr = clamp(add_hr, 0.0, LLM_ADDER_MAX, 0.0)
+        bucket_cap = bucket_caps_bound.get(str(key).lower())
+        if bucket_cap is None:
+            bucket_cap = bucket_caps_bound.get(str(actual).lower())
+        limit = bucket_cap if bucket_cap is not None else adder_max_bound
+        add_hr = clamp(add_hr, adder_min_bound, limit, adder_min_bound)
         if add_hr <= 0:
             continue
         actual = process_key_map.get(_normalize_key(key))
@@ -19395,6 +19395,22 @@ def get_llm_overrides(
         }
     )
     ctx["bounds"] = bounds_ctx
+    coerced_bounds = coerce_bounds(bounds_ctx)
+    mult_min_bound = coerced_bounds["mult_min"]
+    mult_max_bound = coerced_bounds["mult_max"]
+    adder_min_bound = coerced_bounds["adder_min_hr"]
+    adder_max_bound = coerced_bounds["adder_max_hr"]
+    scrap_min_bound = coerced_bounds["scrap_min"]
+    scrap_max_bound = coerced_bounds["scrap_max"]
+    bucket_caps_bound = coerced_bounds.get("adder_bucket_max", {})
+
+    def _adder_limit(name: str | None) -> float:
+        if name is None:
+            return adder_max_bound
+        bucket_cap = bucket_caps_bound.get(str(name).lower())
+        if bucket_cap is None:
+            return adder_max_bound
+        return max(adder_min_bound, float(bucket_cap))
     baseline_ctx = dict(ctx.get("baseline") or {})
     baseline_ctx.setdefault("scrap_pct", float(features.get("scrap_pct") or 0.0))
     baseline_ctx.setdefault("pass_through", base_costs.get("pass_through", {}))
@@ -19590,14 +19606,14 @@ def get_llm_overrides(
         val = _as_float(value)
         if val is None:
             return
-        clamped = clamp(val, LLM_MULTIPLIER_MIN, LLM_MULTIPLIER_MAX, 1.0)
+        clamped = clamp(val, mult_min_bound, mult_max_bound, 1.0)
         container = _ensure_mults_dict()
         norm = str(name).lower()
         prev = container.get(norm)
         if prev is None:
             container[norm] = clamped
             return
-        new_val = clamp(prev * clamped, LLM_MULTIPLIER_MIN, LLM_MULTIPLIER_MAX, 1.0)
+        new_val = clamp(prev * clamped, mult_min_bound, mult_max_bound, 1.0)
         if not math.isclose(prev * clamped, new_val, abs_tol=1e-6):
             clamp_notes.append(f"{source} multiplier clipped for {norm}")
         container[norm] = new_val
@@ -19606,16 +19622,17 @@ def get_llm_overrides(
         val = _as_float(value)
         if val is None:
             return
-        clamped = clamp(val, 0.0, LLM_ADDER_MAX, 0.0)
+        norm = str(name).lower()
+        limit = _adder_limit(norm)
+        clamped = clamp(val, adder_min_bound, limit, adder_min_bound)
         if clamped <= 0:
             return
         container = _ensure_adders_dict()
-        norm = str(name).lower()
         prev = float(container.get(norm, 0.0))
-        new_val = clamp(prev + clamped, 0.0, LLM_ADDER_MAX, 0.0)
+        new_val = clamp(prev + clamped, adder_min_bound, limit, adder_min_bound)
         if not math.isclose(prev + clamped, new_val, abs_tol=1e-6):
             clamp_notes.append(
-                f"{source} {prev + clamped:.2f} hr clipped to {LLM_ADDER_MAX:.1f} for {norm}"
+                f"{source} {prev + clamped:.2f} hr clipped to {limit:.1f} for {norm}"
             )
         container[norm] = new_val
 
@@ -19638,7 +19655,7 @@ def get_llm_overrides(
             orig = float(scr)
         except Exception:
             orig = None
-        clamped_scrap = clamp(scr, 0.0, 0.25, None)
+        clamped_scrap = clamp(scr, scrap_min_bound, scrap_max_bound, None)
         if clamped_scrap is not None:
             out["scrap_pct_override"] = clamped_scrap
             if orig is None:
@@ -19652,7 +19669,7 @@ def get_llm_overrides(
     for k, v in (mults or {}).items():
         if isinstance(v, (int, float)):
             orig = float(v)
-            clamped_val = clamp(v, LLM_MULTIPLIER_MIN, LLM_MULTIPLIER_MAX, 1.0)
+            clamped_val = clamp(v, mult_min_bound, mult_max_bound, 1.0)
             clean_mults[k.lower()] = clamped_val
             if not math.isclose(orig, clamped_val, abs_tol=1e-6):
                 clamp_notes.append(
@@ -19665,7 +19682,8 @@ def get_llm_overrides(
     for k, v in (adds or {}).items():
         if isinstance(v, (int, float)):
             orig = float(v)
-            clamped_val = clamp(v, 0.0, LLM_ADDER_MAX, 0.0)
+            limit = _adder_limit(k)
+            clamped_val = clamp(v, adder_min_bound, limit, adder_min_bound)
             clean_adders[k.lower()] = clamped_val
             if not math.isclose(orig, clamped_val, abs_tol=1e-6):
                 clamp_notes.append(
@@ -19816,7 +19834,7 @@ def get_llm_overrides(
                 if frac is None:
                     frac = _as_float(scrap_val)
                 if frac is not None:
-                    scrap_frac = clamp(frac, 0.0, 0.25, None)
+                    scrap_frac = clamp(frac, scrap_min_bound, scrap_max_bound, None)
             if scrap_frac is not None:
                 clean_stock_plan["scrap_pct"] = scrap_frac
                 if "scrap_pct_override" not in out:
@@ -19828,12 +19846,16 @@ def get_llm_overrides(
 
             saw_hr = _as_float(stock_plan_raw.get("sawing_hr") or stock_plan_raw.get("saw_hr"))
             if saw_hr and saw_hr > 0:
-                saw_hr_clamped = clamp(saw_hr, 0.0, LLM_ADDER_MAX, 0.0)
+                saw_limit = _adder_limit("saw_waterjet")
+                saw_hr_clamped = clamp(saw_hr, adder_min_bound, saw_limit, adder_min_bound)
                 clean_stock_plan["sawing_hr"] = saw_hr_clamped
                 _merge_adder("saw_waterjet", saw_hr_clamped, "stock_plan.sawing_hr")
             handling_hr = _as_float(stock_plan_raw.get("handling_hr"))
             if handling_hr and handling_hr > 0:
-                handling_hr_clamped = clamp(handling_hr, 0.0, LLM_ADDER_MAX, 0.0)
+                handling_limit = _adder_limit("assembly")
+                handling_hr_clamped = clamp(
+                    handling_hr, adder_min_bound, handling_limit, adder_min_bound
+                )
                 clean_stock_plan["handling_hr"] = handling_hr_clamped
                 _merge_adder("assembly", handling_hr_clamped, "stock_plan.handling_hr")
 
@@ -19860,7 +19882,10 @@ def get_llm_overrides(
             clean_setup["fixture"] = fixture.strip()[:120]
         setup_hr = _as_float(setup_plan_raw.get("setup_adders_hr") or setup_plan_raw.get("setup_hours"))
         if setup_hr and setup_hr > 0:
-            clean_setup["setup_adders_hr"] = clamp(setup_hr, 0.0, LLM_ADDER_MAX, 0.0)
+            setup_limit = _adder_limit("setup_adders_hr")
+            clean_setup["setup_adders_hr"] = clamp(
+                setup_hr, adder_min_bound, setup_limit, adder_min_bound
+            )
         setup_notes = _clean_notes_list(setup_plan_raw.get("notes"))
         if setup_notes:
             clean_setup["notes"] = setup_notes
@@ -19877,17 +19902,24 @@ def get_llm_overrides(
         clean_tol: dict[str, Any] = {}
         inproc_hr = _as_float(tol_raw.get("in_process_inspection_hr") or tol_raw.get("in_process_hr"))
         if inproc_hr and inproc_hr > 0:
-            inproc_clamped = clamp(inproc_hr, 0.0, LLM_ADDER_MAX, 0.0)
+            inproc_limit = _adder_limit("inspection")
+            inproc_clamped = clamp(
+                inproc_hr, adder_min_bound, inproc_limit, adder_min_bound
+            )
             clean_tol["in_process_inspection_hr"] = inproc_clamped
             _merge_adder("inspection", inproc_clamped, "tolerance_in_process_hr")
         final_hr = _as_float(tol_raw.get("final_inspection_hr") or tol_raw.get("final_hr"))
         if final_hr and final_hr > 0:
-            final_clamped = clamp(final_hr, 0.0, LLM_ADDER_MAX, 0.0)
+            final_limit = _adder_limit("inspection")
+            final_clamped = clamp(final_hr, adder_min_bound, final_limit, adder_min_bound)
             clean_tol["final_inspection_hr"] = final_clamped
             _merge_adder("inspection", final_clamped, "tolerance_final_hr")
         finish_hr = _as_float(tol_raw.get("finishing_hr") or tol_raw.get("finish_hr"))
         if finish_hr and finish_hr > 0:
-            finish_clamped = clamp(finish_hr, 0.0, LLM_ADDER_MAX, 0.0)
+            finish_limit = _adder_limit("finishing_deburr")
+            finish_clamped = clamp(
+                finish_hr, adder_min_bound, finish_limit, adder_min_bound
+            )
             clean_tol["finishing_hr"] = finish_clamped
             _merge_adder("finishing_deburr", finish_clamped, "tolerance_finishing_hr")
         surface = tol_raw.get("surface_finish") or tol_raw.get("suggested_surface_finish")
@@ -21603,13 +21635,21 @@ class App(tk.Tk):
                 val = _coerce_float_or_none(hours)
                 if val is not None:
                     eff_hours[str(proc)] = float(val)
+        bounds_src = None
+        if isinstance(self.quote_state.bounds, dict):
+            bounds_src = self.quote_state.bounds
+        elif isinstance(baseline_ctx.get("_bounds"), Mapping):
+            bounds_src = baseline_ctx.get("_bounds")
+        coerced_bounds = coerce_bounds(bounds_src if isinstance(bounds_src, Mapping) else None)
+        mult_min_bound = coerced_bounds["mult_min"]
+        mult_max_bound = coerced_bounds["mult_max"]
         for proc, mult in mults.items():
             if proc in eff_hours:
                 try:
                     base_val = float(eff_hours[proc])
                 except Exception:
                     continue
-                clamped_mult = clamp(mult, LLM_MULTIPLIER_MIN, LLM_MULTIPLIER_MAX, 1.0)
+                clamped_mult = clamp(mult, mult_min_bound, mult_max_bound, 1.0)
                 try:
                     eff_hours[proc] = base_val * float(clamped_mult)
                 except Exception:
