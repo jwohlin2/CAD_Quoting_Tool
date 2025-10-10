@@ -469,7 +469,7 @@ from cad_quoter.geo2d import (
     apply_2d_features_to_variables,
     to_noncapturing as _to_noncapturing,
 )
-from bucketizer import bucketize
+from bucketizer import bucketize, _resolve_bucket_for_op
 
 # Tolerance for invariant checks that guard against silent drift when rendering
 # cost sections.
@@ -11923,6 +11923,8 @@ def compute_quote_from_df(
     material_selection: dict[str, Any] = {}
     material_display_for_debug: str = ""
     drill_estimator_hours_for_planner: float = 0.0
+    milling_estimator_hours_for_planner: float = 0.0
+    milling_estimator_machine_cost_for_planner: float = 0.0
 
     def _has_rows(table: Any) -> bool:
         """Return True if the pandas-like table has any rows."""
@@ -12803,6 +12805,7 @@ def compute_quote_from_df(
     planner_process_minutes: float | None = None
     planner_drill_minutes: float | None = None
     planner_drilling_override: dict[str, float] | None = None
+    planner_milling_backfill: dict[str, float] | None = None
     used_planner = False
     _planner_meta_tracker: dict[str, set[str]] = {"keys": set()}
 
@@ -12927,6 +12930,8 @@ def compute_quote_from_df(
 
     # Costs
     milling_cost = eff(milling_hr) * rates["MillingRate"] * five_axis_mult * tight_tol_mult
+    milling_estimator_hours_for_planner = float(eff(milling_hr))
+    milling_estimator_machine_cost_for_planner = float(milling_cost)
     turning_cost = turning_hr * rates["TurningRate"]
     wedm_cost    = wedm_hr * rates["WireEDMRate"] + wire_cost
     sinker_cost  = sinker_hr * rates["SinkerEDMRate"] + electrodes_cost
@@ -13566,6 +13571,7 @@ def compute_quote_from_df(
             "labor_cost": 0.0,
             "total_cost": float(override_cost),
         }
+        drilling_meta["estimator_hours_for_planner"] = float(drill_estimator_hours_for_planner)
     hole_count_geo = _coerce_float_or_none(geo_context.get("hole_count"))
     hole_count_for_tripwire = 0
     if hole_count_geo and hole_count_geo > 0:
@@ -14651,12 +14657,64 @@ def compute_quote_from_df(
                 if isinstance(entry, _MappingABC):
                     planner_line_items.append({k: entry.get(k) for k in ("op", "minutes", "machine_cost", "labor_cost")})
 
-        recognized_line_items = len(planner_line_items)
-
         planner_machine_cost_total = float(totals.get("machine_cost", 0.0) or 0.0)
         planner_labor_cost_total = float(totals.get("labor_cost", 0.0) or 0.0)
         planner_total_minutes = float(totals.get("minutes", 0.0) or 0.0)
         planner_totals_cost = planner_machine_cost_total + planner_labor_cost_total
+
+        def _entry_looks_like_milling(entry: _MappingABC | dict[str, Any]) -> bool:
+            try:
+                op_name = entry.get("op") or entry.get("name")
+            except Exception:
+                op_name = None
+            bucket_guess = _resolve_bucket_for_op(str(op_name or ""))
+            return bucket_guess.lower() == "milling"
+
+        if milling_estimator_hours_for_planner > 0.0 and not any(
+            _entry_looks_like_milling(entry) for entry in planner_line_items
+        ):
+            entry_minutes = float(milling_estimator_hours_for_planner) * 60.0
+            entry_machine_cost = float(milling_estimator_machine_cost_for_planner)
+            if entry_minutes > 0.0 or entry_machine_cost > 0.0:
+                entry_hours = entry_minutes / 60.0 if entry_minutes else 0.0
+                entry_rate = (entry_machine_cost / entry_hours) if entry_hours > 0 else float(
+                    rates.get("MillingRate", 0.0)
+                )
+                milling_entry = {
+                    "op": "cnc_rough_mill",
+                    "minutes": round(entry_minutes, 3),
+                    "machine_cost": round(entry_machine_cost, 2),
+                    "labor_cost": 0.0,
+                }
+                planner_line_items.append(milling_entry)
+                planner_machine_cost_total += entry_machine_cost
+                planner_total_minutes += entry_minutes
+                planner_totals_cost = planner_machine_cost_total + planner_labor_cost_total
+
+                if isinstance(totals, dict):
+                    totals["machine_cost"] = float(totals.get("machine_cost", 0.0) or 0.0) + entry_machine_cost
+                    totals["total_cost"] = float(totals.get("total_cost", 0.0) or 0.0) + entry_machine_cost
+                    totals["minutes"] = float(totals.get("minutes", 0.0) or 0.0) + entry_minutes
+                    totals["machine_minutes"] = float(totals.get("machine_minutes", 0.0) or 0.0) + entry_minutes
+
+                if isinstance(planner_pricing_result, dict):
+                    try:
+                        li_container = planner_pricing_result.get("line_items")
+                    except Exception:
+                        li_container = None
+                    if isinstance(li_container, list):
+                        li_container.append(dict(milling_entry))
+
+                planner_milling_backfill = {
+                    "minutes": entry_minutes,
+                    "hours": entry_hours,
+                    "machine_cost": entry_machine_cost,
+                    "labor_cost": 0.0,
+                    "total_cost": entry_machine_cost,
+                    "rate": entry_rate,
+                }
+
+        recognized_line_items = len(planner_line_items)
 
         if planner_line_items:
             display_machine_cost = 0.0
