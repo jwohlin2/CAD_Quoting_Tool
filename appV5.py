@@ -43,6 +43,9 @@ from cad_quoter.config import (
 APP_ENV = AppEnvironment.from_env()
 
 
+EXTRA_DETAIL_RE = re.compile(r"^includes\b.*extras\b", re.IGNORECASE)
+
+
 def _coerce_env_bool(value: str | None) -> bool:
     if value is None:
         return False
@@ -5335,10 +5338,11 @@ def render_quote(
         pad = max(1, page_width - len(left) - len(right))
         lines.append(f"{left}{' ' * pad}{right}")
 
-    extra_detail_pattern = re.compile(r"^includes\b.*extras\b", re.IGNORECASE)
-
     def _is_extra_segment(segment: str) -> bool:
-        return bool(extra_detail_pattern.match(segment))
+        try:
+            return bool(EXTRA_DETAIL_RE.match(str(segment)))
+        except Exception:
+            return False
 
     def _merge_detail(existing: str | None, new_bits: list[str]) -> str | None:
         segments: list[str] = []
@@ -14294,11 +14298,9 @@ def compute_quote_from_df(df: pd.DataFrame,
     labor_cost_details: dict[str, str] = dict(labor_cost_details_seed)
     labor_costs_display: dict[str, float] = {}
 
-    # Local helper mirrors the renderer's filter so summary details stay clean
-    _extra_detail_pattern = re.compile(r"^includes\b.*extras\b", re.IGNORECASE)
     def _is_extra_segment(segment: str) -> bool:
         try:
-            return bool(_extra_detail_pattern.match(str(segment)))
+            return bool(EXTRA_DETAIL_RE.match(str(segment)))
         except Exception:
             return False
 
