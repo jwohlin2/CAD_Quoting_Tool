@@ -9,6 +9,7 @@ from cad_quoter.domain import (
     merge_effective,
     reprice_with_effective,
 )
+from appV5 import apply_suggestions
 
 
 def test_merge_effective_clamps_and_tracks_sources() -> None:
@@ -143,3 +144,30 @@ def test_effective_to_overrides_emits_new_keys() -> None:
     assert overrides["packaging_hours"] == pytest.approx(0.2)
     assert overrides["shipping_cost"] == pytest.approx(18.0)
     assert overrides["shipping_hint"] == "Double box"
+
+
+def test_apply_suggestions_round_trips_through_merge_effective() -> None:
+    baseline = {
+        "process_hours": {"milling": 2.0, "drilling": 1.0},
+        "scrap_pct": 0.05,
+        "setups": 1,
+        "fixture": "standard",
+    }
+    suggestions = {
+        "process_hour_multipliers": {"milling": 1.5},
+        "process_hour_adders": {"drilling": 0.2},
+        "scrap_pct": 0.12,
+        "setups": 2,
+        "fixture": "soft jaws",
+        "notes": ["Increase inspection"],
+        "no_change_reason": "baseline ok",
+    }
+
+    applied = apply_suggestions(baseline, suggestions)
+
+    expected = merge_effective(baseline, suggestions, {})
+    expected.pop("_source_tags", None)
+    expected.pop("_clamp_notes", None)
+    expected["_llm_notes"] = ["Increase inspection", "no_change: baseline ok"]
+
+    assert applied == expected
