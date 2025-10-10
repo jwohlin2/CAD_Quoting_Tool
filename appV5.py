@@ -12285,6 +12285,18 @@ def compute_quote_from_df(
             _red_flag_seen.add(text)
             red_flag_messages.append(text)
 
+    def _planner_meta_add(key: str) -> None:
+        """Safely add planner-generated process keys to the tracking set."""
+
+        nonlocal planner_meta_keys
+
+        if not isinstance(planner_meta_keys, set):
+            planner_meta_keys = set()
+
+        key_norm = str(key or "").strip()
+        if key_norm:
+            planner_meta_keys.add(key_norm)
+
     force_legacy_pricing = False
 
     # ---- primary processes ---------------------------------------------------
@@ -14156,14 +14168,14 @@ def compute_quote_from_df(
                 "rate": 0.0,
                 "cost": round(planner_machine_cost_total, 2),
             }
-            planner_meta_keys.add("planner_machine")
+            _planner_meta_add("planner_machine")
             process_meta["planner_labor"] = {
                 "hr": round(labor_minutes / 60.0, 3),
                 "minutes": round(labor_minutes, 1),
                 "rate": 0.0,
                 "cost": round(planner_labor_cost_total, 2),
             }
-            planner_meta_keys.add("planner_labor")
+            _planner_meta_add("planner_labor")
             total_cost = planner_machine_cost_total + planner_labor_cost_total
             process_meta["planner_total"] = {
                 "hr": round(planner_total_minutes / 60.0, 3),
@@ -14171,7 +14183,7 @@ def compute_quote_from_df(
                 "rate": 0.0,
                 "cost": round(total_cost, 2),
             }
-            planner_meta_keys.add("planner_total")
+            _planner_meta_add("planner_total")
             if planner_line_items:
                 process_meta["planner_total"]["line_items"] = copy.deepcopy(planner_line_items)
                 for entry in planner_line_items:
@@ -14189,7 +14201,7 @@ def compute_quote_from_df(
                         "cost": round(cost_val, 2),
                         "rate": round(rate_val, 2) if rate_val else 0.0,
                     }
-                    planner_meta_keys.add(key_norm)
+                    _planner_meta_add(key_norm)
 
             if planner_drilling_override:
                 override_minutes = float(planner_drilling_override.get("minutes") or 0.0)
@@ -14241,7 +14253,7 @@ def compute_quote_from_df(
                     "cost": round(override_total_cost, 2),
                     "basis": ["planner_drilling_override"],
                 }
-                planner_meta_keys.add("drilling")
+                _planner_meta_add("drilling")
 
             if bucket_view:
                 for b, info in bucket_view.items():
@@ -14259,7 +14271,7 @@ def compute_quote_from_df(
                         existing_meta.update(update_payload)
                     else:
                         process_meta[b] = update_payload
-                    planner_meta_keys.add(b)
+                    _planner_meta_add(b)
 
         if bucket_view:
             for b, info in bucket_view.items():
@@ -14277,7 +14289,7 @@ def compute_quote_from_df(
                     existing_meta.update(update_payload)
                 else:
                     process_meta[b] = update_payload
-                planner_meta_keys.add(b)
+                _planner_meta_add(b)
 
         meta_lookup = {
             key: dict(value) for key, value in process_meta.items() if isinstance(value, Mapping)
