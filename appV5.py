@@ -1,7 +1,6 @@
-﻿
 # -*- coding: utf-8 -*-
 # app_gui_occ_flow_v8_single_autollm.py
-"""
+r"""
 Single-file CAD Quoter (v8)
 - LLM (Qwen via llama-cpp) is ENABLED by default.
 - Auto-loads a GGUF model from:
@@ -15,26 +14,35 @@ Single-file CAD Quoter (v8)
 from __future__ import annotations
 
 import argparse
+import json
 import logging
-import json, math, os, time
+import math
+import os
+import time
 import typing
+import tkinter as tk
 from collections import Counter
 from collections.abc import Mapping as _MappingABC
+from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
-from dataclasses import dataclass, field, replace
 
-from cad_quoter.app.container import ServiceContainer, create_default_container
 from cad_quoter.app import runtime as _runtime
+from cad_quoter.app.container import ServiceContainer, create_default_container
 from cad_quoter.config import (
     AppEnvironment,
     ConfigError,
     configure_logging,
-    describe_runtime_environment as _describe_runtime_environment,
     logger,
+)
+from cad_quoter.config import (
+    describe_runtime_environment as _describe_runtime_environment,
 )
 
 APP_ENV = AppEnvironment.from_env()
+
+
+EXTRA_DETAIL_RE = re.compile(r"^includes\b.*extras\b", re.IGNORECASE)
 
 
 def _coerce_env_bool(value: str | None) -> bool:
@@ -45,6 +53,10 @@ def _coerce_env_bool(value: str | None) -> bool:
 
 
 FORCE_PLANNER = _coerce_env_bool(os.environ.get("FORCE_PLANNER"))
+
+
+def jdump(obj) -> str:
+    return json.dumps(obj, indent=2, default=str)
 
 
 def describe_runtime_environment() -> dict[str, str]:
@@ -78,7 +90,6 @@ import copy
 import re
 import sys
 import textwrap
-import tkinter as tk
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 
@@ -91,18 +102,17 @@ def resolve_planner(
     default_mode = "auto"
     if FORCE_PLANNER:
         planner_mode = "planner"
-    else:
-        if isinstance(params, _MappingABC):
-            try:
-                raw_mode = params.get("PlannerMode", default_mode)
-            except Exception:
-                raw_mode = default_mode
-            try:
-                planner_mode = str(raw_mode).strip().lower() or default_mode
-            except Exception:
-                planner_mode = default_mode
-        else:
+    elif isinstance(params, _MappingABC):
+        try:
+            raw_mode = params.get("PlannerMode", default_mode)
+        except Exception:
+            raw_mode = default_mode
+        try:
+            planner_mode = str(raw_mode).strip().lower() or default_mode
+        except Exception:
             planner_mode = default_mode
+    else:
+        planner_mode = default_mode
 
     signals_map: Mapping[str, Any]
     if isinstance(signals, _MappingABC):
@@ -134,8 +144,11 @@ def resolve_planner(
     return used_planner, planner_mode
 
 import cad_quoter.geometry as geometry
+from cad_quoter.geo2d import (
+    apply_2d_features_to_variables,
+    to_noncapturing as _to_noncapturing,
+)
 from bucketizer import bucketize
-
 
 # Guardrails for LLM-generated process adjustments.
 LLM_MULTIPLIER_MIN = 0.25
@@ -164,30 +177,6 @@ LEGACY_MM_PROJ = str(_runtime.LEGACY_MM_PROJ)
 PREFERRED_MODEL_DIRS: list[str | Path] = [str(p) for p in _runtime.PREFERRED_MODEL_DIRS]
 
 
-def discover_qwen_vl_assets(
-    *,
-    model_path: str | None = None,
-    mmproj_path: str | None = None,
-) -> tuple[str, str]:
-    """Wrapper that honours ``appV5.PREFERRED_MODEL_DIRS`` overrides."""
-
-    previous_dirs = _runtime.PREFERRED_MODEL_DIRS
-    try:
-        override_dirs: list[Path] = []
-        for value in PREFERRED_MODEL_DIRS:
-            try:
-                override_dirs.append(Path(value).expanduser())
-            except Exception:
-                continue
-        if override_dirs:
-            _runtime.PREFERRED_MODEL_DIRS = tuple(override_dirs)
-        return _runtime.discover_qwen_vl_assets(
-            model_path=model_path,
-            mmproj_path=mmproj_path,
-        )
-    finally:
-        _runtime.PREFERRED_MODEL_DIRS = previous_dirs
-
 from cad_quoter.domain_models import (
     DEFAULT_MATERIAL_DISPLAY,
     DEFAULT_MATERIAL_KEY,
@@ -198,52 +187,72 @@ from cad_quoter.domain_models import (
     MATERIAL_KEYWORDS,
     MATERIAL_MAP,
     MATERIAL_OTHER_KEY,
+)
+from cad_quoter.domain_models import (
     coerce_float_or_none as _coerce_float_or_none,
+)
+from cad_quoter.domain_models import (
     normalize_material_key as _normalize_lookup_key,
 )
 from cad_quoter.coerce import to_float, to_int
+from cad_quoter.utils import sdict
 from cad_quoter.pricing import (
     LB_PER_KG,
     PricingEngine,
     create_default_registry,
-    get_mcmaster_unit_price as _get_mcmaster_unit_price,
-    price_value_to_per_gram as _price_value_to_per_gram,
-    resolve_material_unit_price as _resolve_material_unit_price,
 )
-from cad_quoter.vendors.mcmaster_stock import lookup_sku_and_price_for_mm
-from cad_quoter.pricing.time_estimator import (
-    MachineParams as _TimeMachineParams,
-    OperationGeometry as _TimeOperationGeometry,
-    OverheadParams as _TimeOverheadParams,
-    ToolParams as _TimeToolParams,
-    estimate_time_min as _estimate_time_min,
+from cad_quoter.pricing import (
+    get_mcmaster_unit_price as _get_mcmaster_unit_price,
+)
+from cad_quoter.pricing import (
+    price_value_to_per_gram as _price_value_to_per_gram,
+)
+from cad_quoter.pricing import (
+    resolve_material_unit_price as _resolve_material_unit_price,
 )
 from cad_quoter.pricing import time_estimator as _time_estimator
 from cad_quoter.pricing.speeds_feeds_selector import (
     normalize_material as _normalize_material,
+)
+from cad_quoter.pricing.speeds_feeds_selector import (
     pick_speeds_row as _pick_speeds_row,
+)
+from cad_quoter.pricing.speeds_feeds_selector import (
     unit_hp_cap as _unit_hp_cap,
 )
-from cad_quoter.rates import migrate_flat_to_two_bucket, two_bucket_to_flat
-from cad_quoter.pricing.wieland import lookup_price as lookup_wieland_price
-from cad_quoter.llm import (
-    LLMClient,
-    infer_hours_and_overrides_from_geo as _infer_hours_and_overrides_from_geo,
-    parse_llm_json,
-    run_llm_suggestions,
-    # editor mapping + prompt constants used in overrides UI
-    SUGG_TO_EDITOR,
-    EDITOR_TO_SUGG,
-    EDITOR_FROM_UI,
-    SYSTEM_SUGGEST,
+from cad_quoter.pricing.time_estimator import (
+    MachineParams as _TimeMachineParams,
 )
+from cad_quoter.pricing.time_estimator import (
+    OperationGeometry as _TimeOperationGeometry,
+)
+from cad_quoter.pricing.time_estimator import (
+    OverheadParams as _TimeOverheadParams,
+)
+from cad_quoter.pricing.time_estimator import (
+    ToolParams as _TimeToolParams,
+)
+from cad_quoter.pricing.time_estimator import (
+    estimate_time_min as _estimate_time_min,
+)
+from cad_quoter.pricing.wieland import lookup_price as lookup_wieland_price
+from cad_quoter.rates import migrate_flat_to_two_bucket, two_bucket_to_flat
+from cad_quoter.vendors.mcmaster_stock import lookup_sku_and_price_for_mm
 
 try:
     from process_planner import (
         PLANNERS as _PROCESS_PLANNERS,
+    )
+    from process_planner import (
         choose_skims as _planner_choose_skims,
+    )
+    from process_planner import (
         choose_wire_size as _planner_choose_wire_size,
+    )
+    from process_planner import (
         needs_wedm_for_windows as _planner_needs_wedm_for_windows,
+    )
+    from process_planner import (
         plan_job as _process_plan_job,
     )
 except Exception:  # pragma: no cover - planner is optional at runtime
@@ -369,12 +378,12 @@ def _canonical_amortized_label(label: Any) -> tuple[str, bool]:
 
     return text, False
 
-from OCP.TopAbs   import TopAbs_EDGE, TopAbs_FACE
-from OCP.TopExp   import TopExp, TopExp_Explorer
-from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
-from OCP.TopoDS   import TopoDS, TopoDS_Face, TopoDS_Shape
-from OCP.BRep     import BRep_Tool
 import pandas as pd
+from OCP.BRep import BRep_Tool
+from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE
+from OCP.TopExp import TopExp, TopExp_Explorer
+from OCP.TopoDS import TopoDS, TopoDS_Face, TopoDS_Shape
+from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
 
 try:
     from geo_read_more import build_geo_from_dxf as build_geo_from_dxf_path
@@ -384,21 +393,6 @@ except Exception:
 
 _build_geo_from_dxf_hook: Optional[Callable[[str], Dict[str, Any]]] = None
 
-
-def set_build_geo_from_dxf_hook(func: Optional[Callable[[str], Dict[str, Any]]]) -> None:
-    """Install or clear an override for DXF enrichment."""
-
-    global _build_geo_from_dxf_hook
-    _build_geo_from_dxf_hook = func
-
-
-def build_geo_from_dxf(path: str) -> dict:
-    """Best-effort DXF enrichment helper used by legacy integrations."""
-
-    loader = _build_geo_from_dxf_hook or build_geo_from_dxf_path
-    if not loader:
-        raise RuntimeError("DXF enrichment helper is unavailable")
-    return loader(path)
 
 # Geometry helpers (re-exported for backward compatibility)
 load_model = geometry.load_model
@@ -618,8 +612,7 @@ def normalize_scrap_pct(val: Any, cap: float = 0.25) -> float:
         raw = 0.0
     if raw > 1.0:
         raw = raw / 100.0
-    if raw < 0.0:
-        raw = 0.0
+    raw = max(raw, 0.0)
     return min(cap_val, raw)
 
 
@@ -645,90 +638,6 @@ def _scrap_value_provided(val: Any) -> bool:
         return False
     return math.isfinite(parsed)
 
-
-def _estimate_scrap_from_stock_plan(geo_ctx: Mapping[str, Any] | None) -> tuple[float | None, str | None]:
-    """Attempt to infer a scrap fraction from stock planning hints."""
-
-    contexts: list[Mapping[str, Any]] = []
-    if isinstance(geo_ctx, Mapping):
-        contexts.append(geo_ctx)
-        inner = geo_ctx.get("geo")
-        if isinstance(inner, Mapping):
-            contexts.append(inner)
-
-    for ctx in contexts:
-        plan = ctx.get("stock_plan_guess") or ctx.get("stock_plan")
-        if not isinstance(plan, Mapping):
-            continue
-        net_vol = _coerce_float_or_none(plan.get("net_volume_in3"))
-        stock_vol = _coerce_float_or_none(plan.get("stock_volume_in3"))
-        scrap: float | None = None
-        if net_vol and net_vol > 0 and stock_vol and stock_vol > 0:
-            scrap = max(0.0, (stock_vol - net_vol) / net_vol)
-        else:
-            part_mass_lb = _coerce_float_or_none(plan.get("part_mass_lb"))
-            stock_mass_lb = _coerce_float_or_none(plan.get("stock_mass_lb"))
-            if part_mass_lb and part_mass_lb > 0 and stock_mass_lb and stock_mass_lb > 0:
-                scrap = max(0.0, (stock_mass_lb - part_mass_lb) / part_mass_lb)
-        if scrap is not None:
-            return min(0.25, float(scrap)), "stock_plan_guess"
-    return None, None
-
-
-def _match_items_contains(items: pd.Series, pattern: str) -> pd.Series:
-    """
-    Case-insensitive regex match over Items.
-    Convert capturing groups to non-capturing to avoid pandas warning.
-    Fall back to literal if regex fails.
-    """
-
-    pat = _to_noncapturing(pattern) if "_to_noncapturing" in globals() else pattern
-    try:
-        return items.str.contains(pat, case=False, regex=True, na=False)
-    except Exception:
-        return items.str.contains(re.escape(pattern), case=False, regex=True, na=False)
-
-
-def _iter_geo_contexts(geo_context: Mapping[str, Any] | None) -> Iterable[Mapping[str, Any]]:
-    if isinstance(geo_context, Mapping):
-        yield geo_context
-        inner = geo_context.get("geo")
-        if isinstance(inner, Mapping):
-            yield inner
-
-
-def _collection_has_text(value: Any) -> bool:
-    if isinstance(value, str):
-        return bool(value.strip())
-    if isinstance(value, Mapping):
-        for candidate in value.values():
-            if _collection_has_text(candidate):
-                return True
-        return False
-    if isinstance(value, (list, tuple, set)):
-        return any(_collection_has_text(candidate) for candidate in value)
-    return False
-
-
-def _geo_mentions_outsourced(geo_context: Mapping[str, Any] | None) -> bool:
-    for ctx in _iter_geo_contexts(geo_context):
-        if _collection_has_text(ctx.get("finishes")):
-            return True
-        if _collection_has_text(ctx.get("finish_flags")):
-            return True
-    return False
-
-
-def _should_include_outsourced_pass(
-    outsourced_cost: float, geo_context: Mapping[str, Any] | None
-) -> bool:
-    try:
-        cost_val = float(outsourced_cost)
-    except Exception:
-        cost_val = 0.0
-    if abs(cost_val) > 1e-6:
-        return True
-    return _geo_mentions_outsourced(geo_context)
 
 def _auto_accept_suggestions(suggestions: dict[str, Any] | None) -> dict[str, Any]:
     accept: dict[str, Any] = {}
@@ -786,42 +695,7 @@ def _auto_accept_suggestions(suggestions: dict[str, Any] | None) -> dict[str, An
         conf = _confidence_for(("drilling_strategy",))
         accept["drilling_strategy"] = True if conf is None else conf >= 0.6
     return accept
-
-
-
-def bin_diams_mm(diams: Iterable[float | int | None], step: float = 0.1) -> Dict[float, int]:
-    """Return a histogram of diameters rounded to ``step`` millimetres.
-
-    ``None`` values and non-numeric entries are ignored.  The resulting
-    dictionary is sorted by quantity descending (and diameter ascending when
-    counts match) so callers can easily present the most common tool families
-    first in downstream UI tables or LLM payloads.
-    """
-
-    if step <= 0:
-        raise ValueError("step must be positive")
-
-    counter: Counter[float] = Counter()
-    for value in diams:
-        if value is None:
-            continue
-        try:
-            num = float(value)
-        except (TypeError, ValueError):
-            continue
-        counter[round(num / step) * step] += 1
-
-    return dict(sorted(counter.items(), key=lambda item: (-item[1], item[0])))
-
-
-try:  # Optional dependency – ezdxf may be missing in some environments.
-    import ezdxf  # type: ignore
-except Exception:  # pragma: no cover - import guard
-    ezdxf = None  # type: ignore[assignment]
-
-
 from cad_quoter.domain import QuoteState
-
 
 
 def _as_float_or_none(value: Any) -> float | None:
@@ -854,8 +728,7 @@ def coerce_bounds(bounds: Mapping | None) -> dict[str, Any]:
         mult_max = LLM_MULTIPLIER_MAX
     else:
         mult_max = min(LLM_MULTIPLIER_MAX, float(mult_max))
-    if mult_max < mult_min:
-        mult_max = mult_min
+    mult_max = max(mult_max, mult_min)
 
     adder_max = _as_float_or_none(bounds.get("adder_max_hr"))
     add_hr_cap = _as_float_or_none(bounds.get("add_hr_max"))
@@ -891,49 +764,6 @@ def coerce_bounds(bounds: Mapping | None) -> dict[str, Any]:
         "adder_bucket_max": bucket_caps,
     }
 
-
-def _apply_deep_drill_speed_feed_adjustments(row: Any) -> Any:
-    """Return a copy of ``row`` with deep-drill speed/feed factors applied."""
-
-    if not isinstance(row, Mapping):
-        return row
-
-    adjusted = dict(row)
-
-    def _scale(keys: Sequence[str], factor: float) -> None:
-        for key in keys:
-            if key not in adjusted:
-                continue
-            value = to_float(adjusted.get(key))
-            if value is None or not math.isfinite(value):
-                continue
-            adjusted[key] = float(value) * factor
-
-    _scale(
-        (
-            "sfm",
-            "sfm_start",
-            "sfm_mid",
-            "sfm_end",
-            "sfm_min",
-            "sfm_max",
-        ),
-        DEEP_DRILL_SFM_FACTOR,
-    )
-    _scale(
-        (
-            "feed_ipr",
-            "ipr",
-            "fz",
-            "fz_ipr_0_125in",
-            "fz_ipr_0_25in",
-            "fz_ipr_0_5in",
-            "fz_ipr_1_0in",
-            "fpr",
-        ),
-        DEEP_DRILL_IPR_FACTOR,
-    )
-    return adjusted
 
 def build_suggest_payload(
     geo: dict | None,
@@ -1653,40 +1483,6 @@ def apply_suggestions(baseline: dict, s: dict) -> dict:
     eff["_llm_notes"] = notes
     return eff
 
-def _nested_get(data: dict | None, path: Tuple[str, ...], default: Any = None) -> Any:
-    cur = data or {}
-    for key in path:
-        if not isinstance(cur, dict):
-            return default
-        cur = cur.get(key)
-    return cur if cur is not None else default
-
-
-def _nested_set(data: dict, path: Tuple[str, ...], value: Any) -> None:
-    cur = data
-    for key in path[:-1]:
-        nxt = cur.get(key)
-        if not isinstance(nxt, dict):
-            nxt = {}
-            cur[key] = nxt
-        cur = nxt
-    cur[path[-1]] = value
-
-
-def _ensure_nested_bool(data: dict, path: Tuple[str, ...], default: bool = False) -> bool:
-    cur = data
-    for key in path[:-1]:
-        nxt = cur.get(key)
-        if not isinstance(nxt, dict):
-            nxt = {}
-            cur[key] = nxt
-        cur = nxt
-    leaf = cur.get(path[-1])
-    if not isinstance(leaf, bool):
-        cur[path[-1]] = bool(default)
-    return bool(cur[path[-1]])
-
-
 def _coerce_user_value(raw: Any, kind: str) -> Any:
     if raw is None:
         return None
@@ -1738,8 +1534,6 @@ def _format_entry_value(value: Any, kind: str) -> str:
     return str(value)
 
 
-
-
 def _collect_process_keys(*dicts: Iterable[dict]) -> set[str]:
     keys: set[str] = set()
     for d in dicts:
@@ -1783,8 +1577,7 @@ def merge_effective(
                 LLM_MULTIPLIER_MAX,
                 mult_max_val if mult_max_val is not None else LLM_MULTIPLIER_MAX,
             )
-            if mult_max < mult_min:
-                mult_max = mult_min
+            mult_max = max(mult_max, mult_min)
             clamped = max(mult_min, min(mult_max, float(value)))
         elif kind == "adder":
             orig_val = float(value)
@@ -1820,8 +1613,7 @@ def merge_effective(
             else:
                 filtered = [cand for cand in adder_max_candidates if cand is not None]
                 adder_max_effective = min(filtered) if filtered else LLM_ADDER_MAX
-            if adder_max_effective < lower_bound:
-                adder_max_effective = lower_bound
+            adder_max_effective = max(adder_max_effective, lower_bound)
             clamped = max(lower_bound, min(adder_max_effective, raw_val))
         elif kind == "scrap":
             scrap_min = max(0.0, to_float(bounds.get("scrap_min")) or 0.0)
@@ -2586,32 +2378,6 @@ def get_why_text(
     return " ".join(parts)
 
 
-def build_narrative(state: QuoteState) -> str:
-    """Backward compatibility wrapper for legacy callers."""
-
-    pricing_source = str(
-        state.effective.get("pricing_source")
-        or state.baseline.get("pricing_source")
-        or ""
-    )
-    process_meta = (
-        state.effective.get("process_meta")
-        if isinstance(state.effective.get("process_meta"), Mapping)
-        else None
-    )
-    final_hours = (
-        state.effective.get("process_hours")
-        if isinstance(state.effective.get("process_hours"), Mapping)
-        else None
-    )
-    return get_why_text(
-        state,
-        pricing_source=pricing_source,
-        process_meta=process_meta,
-        final_hours=final_hours,
-    )
-
-
 def effective_to_overrides(effective: dict, baseline: dict | None = None) -> dict:
     baseline = baseline or {}
     out: dict[str, Any] = {}
@@ -2745,16 +2511,13 @@ def ensure_accept_flags(state: QuoteState) -> None:
         accept["drilling_strategy"] = False
 
 
-
-
-SHOW_LLM_HOURS_DEBUG = False # set True only when debugging
 if sys.platform == 'win32':
     occ_bin = os.path.join(sys.prefix, 'Library', 'bin')
     if os.path.isdir(occ_bin):
         os.add_dll_directory(occ_bin)
-from tkinter import ttk, filedialog, messagebox
-import subprocess, tempfile
-
+import subprocess
+import tempfile
+from tkinter import filedialog, messagebox, ttk
 
 try:
     from hole_table_parser import parse_hole_table_lines as _parse_hole_table_lines
@@ -2766,11 +2529,6 @@ try:
 except Exception:
     _extract_text_lines_from_dxf = None
 
-# numpy is optional for a few small calcs; degrade gracefully if missing
-try:
-    import numpy as np  # type: ignore
-except Exception:
-    np = None  # type: ignore
 # ---------- OCC / OCP compatibility ----------
 STACK = None
 
@@ -2836,13 +2594,13 @@ def _make_bnd_add_ocp():
 
 try:
     # Prefer OCP (CadQuery/ocp bindings)
-    from OCP.STEPControl import STEPControl_Reader
-    from OCP.IFSelect import IFSelect_RetDone
-    from OCP.TopoDS import TopoDS_Compound, TopoDS_Shape
-    from OCP.BRep import BRep_Builder
-    from OCP.ShapeFix import ShapeFix_Shape
-    from OCP.BRepCheck import BRepCheck_Analyzer
     from OCP.Bnd import Bnd_Box
+    from OCP.BRep import BRep_Builder
+    from OCP.BRepCheck import BRepCheck_Analyzer
+    from OCP.IFSelect import IFSelect_RetDone
+    from OCP.ShapeFix import ShapeFix_Shape
+    from OCP.STEPControl import STEPControl_Reader
+    from OCP.TopoDS import TopoDS_Compound, TopoDS_Shape
 
     try:
         bnd_add = _make_bnd_add_ocp()
@@ -2870,14 +2628,14 @@ try:
             raise RuntimeError("No BRepBndLib.Add available in this build")
 except Exception:
     # Fallback to pythonocc-core
-    from OCC.Core.STEPControl import STEPControl_Reader
-    from OCC.Core.IFSelect import IFSelect_RetDone
-    from OCC.Core.TopoDS import TopoDS_Compound, TopoDS_Shape
-    from OCC.Core.BRep import BRep_Builder
-    from OCC.Core.ShapeFix import ShapeFix_Shape
-    from OCC.Core.BRepCheck import BRepCheck_Analyzer
     from OCC.Core.Bnd import Bnd_Box
+    from OCC.Core.BRep import BRep_Builder
     from OCC.Core.BRepBndLib import brepbndlib_Add as _brep_add
+    from OCC.Core.BRepCheck import BRepCheck_Analyzer
+    from OCC.Core.IFSelect import IFSelect_RetDone
+    from OCC.Core.ShapeFix import ShapeFix_Shape
+    from OCC.Core.STEPControl import STEPControl_Reader
+    from OCC.Core.TopoDS import TopoDS_Compound, TopoDS_Shape
 
     def bnd_add(shape, box, use_triangulation=True):
         _brep_add(shape, box, use_triangulation)
@@ -2895,9 +2653,6 @@ except Exception:
     from OCC.Core.TopAbs import TopAbs_FACE
     from OCC.Core.TopExp import TopExp_Explorer
     BACKEND = "pythonocc"
-
-def _typename(o):  # small helper
-    return getattr(o, "__class__", type(o)).__name__
 
 def as_face(obj):
     """
@@ -2935,9 +2690,9 @@ def face_surface(face_like):
     if hasattr(s, "Surface"):
         s = s.Surface()  # unwrap handle
     return s, loc
- 
- 
-    
+
+
+
 # ---------- OCCT compat (OCP or pythonocc-core) ----------
 # ---------- Robust casters that work on OCP and pythonocc ----------
 # Lock topods casters to the active backend
@@ -3010,13 +2765,6 @@ def ensure_shape(obj):
     return obj
 
 # Safe casters: no-ops if already cast; unwrap list nodes; check kind
-def to_edge_safe(obj):
-    obj = _unwrap_value(obj)
-    if _is_named(obj, ("TopoDS_Edge", "Edge")):
-        return obj
-    obj = ensure_shape(obj)
-    return _TO_EDGE(obj)
-
 # Choose stack
 try:
     # OCP / CadQuery bindings
@@ -3028,9 +2776,14 @@ except Exception:
         from OCC.Core.BRepGProp import BRepGProp as _BRepGProp_mod
     except Exception:
         from types import SimpleNamespace
+
         from OCC.Core.BRepGProp import (
             brepgprop_LinearProperties as _lp,
+        )
+        from OCC.Core.BRepGProp import (
             brepgprop_SurfaceProperties as _sp,
+        )
+        from OCC.Core.BRepGProp import (
             brepgprop_VolumeProperties as _vp,
         )
         _BRepGProp_mod = SimpleNamespace(
@@ -3062,7 +2815,7 @@ def linear_properties(edge, gprops):
         try:
             from OCC.Core.BRepGProp import brepgprop_LinearProperties as _old  # type: ignore
             return _old(edge, gprops)
-        except Exception as e:
+        except Exception:
             raise
     return fn(edge, gprops)
 
@@ -3159,11 +2912,9 @@ def get_dwg_converter_path() -> str:
         exe = local
     return exe or ""
 
-def have_dwg_support() -> bool:
-    """True if we can open DWG (either odafc or an external converter is available)."""
-    return geometry.HAS_ODAFC or bool(get_dwg_converter_path())
 def get_import_diagnostics_text() -> str:
-    import sys, os
+    import os
+    import sys
     lines = []
     lines.append(f"Python: {sys.executable}")
     try:
@@ -3204,7 +2955,6 @@ def upsert_var_row(df, item, value, dtype="number"):
     - Works on the sanitized 3-column df (Item, Example..., Data Type...).
     """
     import numpy as np
-    import pandas as pd
 
     # force scalars
     if isinstance(item, pd.Series):
@@ -3263,57 +3013,44 @@ def load_drawing(path: Path) -> Drawing:
     return ezdxf.readfile(str(path))  # DXF directly
 
 
-
-QWEN_SYSTEM = """You are a quoting assistant. Only confirm or fill missing parameters.
-Prefer vector-extracted numbers over reading pixels. If units conflict, explain and ask for clarification.
-Return strict JSON with fields:
-{overall_size_mm, thickness_mm, material, hole_counts_by_dia_mm, slots, threads, tolerance_notes, finish, qty, uncertainties[]}"""
-
-def build_llm_payload(structured: dict, page_image_path: str | None):
-    messages = [
-        {"role":"system","content": QWEN_SYSTEM},
-        {"role":"user","content":[
-            {"type":"text","text":"Vector-extracted data (trusted):\n" + json.dumps(structured, ensure_ascii=False, default=str)},
-        ]}
-    ]
-    if page_image_path:
-        messages[1]["content"].append({"type":"image_url","image_url":{"url":"file://"+page_image_path}})
-    return messages
-
-
-
 # ==== OpenCascade compat (works with OCP OR OCC.Core) ====
-import tempfile, subprocess
+import subprocess
+import tempfile
 from pathlib import Path
 
 try:
     # ---- OCP branch ----
+    from OCP.Bnd import Bnd_Box
+    from OCP.BRep import (
+        BRep_Builder,
+        BRep_Tool,  # OCP version
+    )
+    from OCP.BRepAdaptor import BRepAdaptor_Curve
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Section
+    from OCP.BRepCheck import BRepCheck_Analyzer
+    from OCP.BRepGProp import BRepGProp
+    from OCP.GeomAbs import (
+        GeomAbs_BezierSurface,
+        GeomAbs_BSplineSurface,
+        GeomAbs_Circle,
+        GeomAbs_Cone,
+        GeomAbs_Cylinder,
+        GeomAbs_Plane,
+        GeomAbs_Torus,
+    )
+    from OCP.GeomAdaptor import GeomAdaptor_Surface
+    from OCP.gp import gp_Dir, gp_Pln, gp_Pnt
+    from OCP.GProp import GProp_GProps
     from OCP.IFSelect import IFSelect_RetDone
     from OCP.IGESControl import IGESControl_Reader
+    from OCP.ShapeAnalysis import ShapeAnalysis_Surface
     from OCP.ShapeFix import ShapeFix_Shape
-    from OCP.BRepCheck import BRepCheck_Analyzer
-    from OCP.BRep import BRep_Tool        # OCP version
-    from OCP.BRepGProp import BRepGProp
-    from OCP.GProp import GProp_GProps
-    from OCP.Bnd import Bnd_Box
-    from OCP.BRep import BRep_Builder
-    from OCP.BRepAlgoAPI import BRepAlgoAPI_Section
-    from OCP.BRepAdaptor import BRepAdaptor_Curve
-    
+    from OCP.TopAbs import TopAbs_COMPOUND, TopAbs_EDGE, TopAbs_FACE, TopAbs_SHELL, TopAbs_SOLID
+    from OCP.TopExp import TopExp, TopExp_Explorer
+    from OCP.TopoDS import TopoDS_Compound, TopoDS_Face, TopoDS_Shape
+
     # ADD THESE TWO IMPORTS
     from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
-    from OCP.TopoDS import (
-        TopoDS_Shape, TopoDS_Face, TopoDS_Compound
-    )
-    from OCP.TopExp import TopExp_Explorer, TopExp
-    from OCP.TopAbs import TopAbs_FACE, TopAbs_EDGE, TopAbs_SOLID, TopAbs_SHELL, TopAbs_COMPOUND
-    from OCP.GeomAdaptor import GeomAdaptor_Surface
-    from OCP.GeomAbs import (
-        GeomAbs_Plane, GeomAbs_Cylinder, GeomAbs_Torus, GeomAbs_Cone,
-        GeomAbs_BSplineSurface, GeomAbs_BezierSurface, GeomAbs_Circle,
-    )
-    from OCP.ShapeAnalysis import ShapeAnalysis_Surface
-    from OCP.gp import gp_Pnt, gp_Dir, gp_Pln
     BACKEND_OCC = "OCP"
 
     def BRepTools_UVBounds(face):
@@ -3335,38 +3072,49 @@ try:
 
 except Exception:
     # ---- OCC.Core branch ----
-    from OCC.Core.STEPControl import STEPControl_Reader
+    from OCC.Core.Bnd import Bnd_Box
+    from OCC.Core.BRep import (
+        BRep_Builder,
+        BRep_Tool,  # ? OCC version
+    )
+    from OCC.Core.BRepAdaptor import BRepAdaptor_Curve
+    from OCC.Core.BRepAlgoAPI import BRepAlgoAPI_Section
+    from OCC.Core.BRepCheck import BRepCheck_Analyzer
+    from OCC.Core.GeomAbs import (
+        GeomAbs_BezierSurface,
+        GeomAbs_BSplineSurface,
+        GeomAbs_Circle,
+        GeomAbs_Cone,
+        GeomAbs_Cylinder,
+        GeomAbs_Plane,
+        GeomAbs_Torus,
+    )
+    from OCC.Core.GeomAdaptor import GeomAdaptor_Surface
+    from OCC.Core.gp import gp_Dir, gp_Pln, gp_Pnt
+    from OCC.Core.GProp import GProp_GProps
     from OCC.Core.IFSelect import IFSelect_RetDone
     from OCC.Core.IGESControl import IGESControl_Reader
+    from OCC.Core.ShapeAnalysis import ShapeAnalysis_Surface
     from OCC.Core.ShapeFix import ShapeFix_Shape
-    from OCC.Core.BRepCheck import BRepCheck_Analyzer
-    from OCC.Core.BRep import BRep_Tool          # ? OCC version
-    from OCC.Core.GProp import GProp_GProps
-    from OCC.Core.Bnd import Bnd_Box
-    from OCC.Core.BRep import BRep_Builder
-    from OCC.Core.BRepAlgoAPI import BRepAlgoAPI_Section
-    from OCC.Core.BRepAdaptor import BRepAdaptor_Curve
-    # ADD TopTools import and TopoDS_Face for the fix below
-    from OCC.Core.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
-    from OCC.Core.TopoDS import (
-        TopoDS_Shape, TopoDS_Face, TopoDS_Compound,
-        TopoDS_Face
+    from OCC.Core.STEPControl import STEPControl_Reader
+    from OCC.Core.TopAbs import (
+        TopAbs_COMPOUND,
+        TopAbs_EDGE,
+        TopAbs_FACE,
+        TopAbs_SHELL,
+        TopAbs_SOLID,
     )
     from OCC.Core.TopExp import TopExp_Explorer
-    from OCC.Core.TopAbs import TopAbs_FACE, TopAbs_EDGE, TopAbs_SOLID, TopAbs_SHELL, TopAbs_COMPOUND
-    from OCC.Core.GeomAdaptor import GeomAdaptor_Surface
-    from OCC.Core.GeomAbs import (
-        GeomAbs_Plane, GeomAbs_Cylinder, GeomAbs_Torus, GeomAbs_Cone,
-        GeomAbs_BSplineSurface, GeomAbs_BezierSurface, GeomAbs_Circle,
-    )
-    from OCC.Core.ShapeAnalysis import ShapeAnalysis_Surface
-    from OCC.Core.gp import gp_Pnt, gp_Dir, gp_Pln
+    from OCC.Core.TopoDS import TopoDS_Compound, TopoDS_Face, TopoDS_Shape
+
+    # ADD TopTools import and TopoDS_Face for the fix below
+    from OCC.Core.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
     BACKEND_OCC = "OCC.Core"
 
     # BRepGProp shim (pythonocc uses free functions)
     from OCC.Core.BRepGProp import (
-        brepgprop_SurfaceProperties,
         brepgprop_LinearProperties,
+        brepgprop_SurfaceProperties,
         brepgprop_VolumeProperties,
     )
     class _BRepGPropShim:
@@ -3381,7 +3129,8 @@ except Exception:
 
 
     # UV bounds and brep read are free functions
-    from OCC.Core.BRepTools import BRepTools, breptools_Read as _occ_breptools_read
+    from OCC.Core.BRepTools import BRepTools
+    from OCC.Core.BRepTools import breptools_Read as _occ_breptools_read
     def BRepTools_UVBounds(face):
         fn = getattr(BRepTools, "UVBounds", None)
         if fn is None:
@@ -3496,6 +3245,7 @@ def read_step_shape(path: str) -> TopoDS_Shape:
 
 from OCP.TopoDS import TopoDS_Shape  # or OCC.Core.TopoDS on pythonocc
 
+
 def safe_bbox(shape: TopoDS_Shape):
     if shape is None or shape.IsNull():
         raise ValueError("Cannot compute bounding box of a null shape.")
@@ -3549,15 +3299,15 @@ def convert_dwg_to_dxf(dwg_path: str, *, out_ver="ACAD2018") -> str:
         if exe_lower.endswith(".bat") or exe_lower.endswith(".cmd"):
             # ? run batch via cmd.exe so it actually executes
             cmd = ["cmd", "/c", exe, str(dwg), str(out_dxf)]
-            proc = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         elif "odafileconverter" in exe_lower:
             # ? official ODAFileConverter CLI
             cmd = [exe, str(dwg.parent), str(out_dir), out_ver, "DXF", "0", "0", dwg.name]
-            proc = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         else:
             # ? generic exe that accepts <in> <out>
             cmd = [exe, str(dwg), str(out_dxf)]
-            proc = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     except subprocess.CalledProcessError as e:
         raise RuntimeError(
             "DWG?DXF conversion failed.\n"
@@ -3608,10 +3358,6 @@ def explode_compound(shape: TopoDS_Shape):
     return [shape]
 
 
-
-def safe_bounding_box(shape: TopoDS_Shape) -> Bnd_Box:
-    """Public wrapper maintained for compatibility."""
-    return safe_bbox(shape)
 
 def _bbox(shape):
     box = safe_bbox(shape)
@@ -3939,7 +3685,7 @@ def enrich_geo_stl(path):
     logger.info("[%.2fs] Starting enrich_geo_stl for %s", time.time() - start_time, path)
     if not geometry.HAS_TRIMESH:
         raise RuntimeError("trimesh not available to process STL")
-    
+
     logger.info("[%.2fs] Loading mesh...", time.time() - start_time)
     trimesh_mod = getattr(geometry, "trimesh", None)
     if trimesh_mod is None:
@@ -3950,16 +3696,16 @@ def enrich_geo_stl(path):
         time.time() - start_time,
         len(mesh.faces),
     )
-    
+
     if mesh.is_empty:
         raise RuntimeError("Empty STL mesh")
-    
+
     (xmin, ymin, zmin), (xmax, ymax, zmax) = mesh.bounds
     L, W, H = float(xmax-xmin), float(ymax-ymin), float(zmax-zmin)
     area_total = float(mesh.area)
     volume = float(mesh.volume) if mesh.is_volume else 0.0
     faces = int(len(mesh.faces))
-    
+
     logger.info("[%.2fs] Calculating WEDM length...", time.time() - start_time)
     z_vals = [zmin + 0.25*(zmax-zmin), zmin + 0.50*(zmax-zmin), zmin + 0.75*(zmax-zmin)]
     wedm_len = 0.0
@@ -3973,7 +3719,7 @@ def enrich_geo_stl(path):
         except Exception:
             pass
     logger.info("[%.2fs] WEDM length calculated.", time.time() - start_time)
-    
+
     logger.info("[%.2fs] Calculating deburr length...", time.time() - start_time)
     try:
         import numpy as np
@@ -3989,10 +3735,10 @@ def enrich_geo_stl(path):
     except Exception:
         deburr_len = 0.0
     logger.info("[%.2fs] Deburr length calculated.", time.time() - start_time)
-    
+
     bbox_vol = max(L*W*H, 1e-9)
     complexity = (faces / max(volume, bbox_vol)) * 100.0
-    
+
     logger.info("[%.2fs] Calculating 3-axis accessibility...", time.time() - start_time)
     try:
         n = mesh.face_normals
@@ -4005,12 +3751,12 @@ def enrich_geo_stl(path):
     except Exception:
         access = 0.0
     logger.info("[%.2fs] 3-axis accessibility calculated.", time.time() - start_time)
-    
+
     try:
         center = list(map(float, mesh.center_mass))
     except Exception:
         center = [0.0,0.0,0.0]
-    
+
     logger.info("[%.2fs] Finished enrich_geo_stl.", time.time() - start_time)
     return {
         "GEO-01_Length_mm": round(L,3),
@@ -4033,17 +3779,6 @@ def enrich_geo_stl(path):
     }
 
 
-def load_cad_any(path: str) -> TopoDS_Shape:
-    ext = Path(path).suffix.lower().lstrip(".")
-    if ext in ("step", "stp", "iges", "igs", "brep"):
-        return read_step_or_iges_or_brep(path)
-    if ext == "dwg":
-        dxf_path = convert_dwg_to_dxf(path)
-        return read_dxf_as_occ_shape(dxf_path)
-    if ext == "dxf":
-        return read_dxf_as_occ_shape(path)
-    
-    raise RuntimeError(f"Unsupported file type for shape loading: {ext}")
 def read_cad_any(path: str):
     from OCP.IFSelect import IFSelect_RetDone
     from OCP.IGESControl import IGESControl_Reader
@@ -4158,28 +3893,7 @@ def _estimator_patterns():
     import re
     return [re.compile(p, re.I) for p in pats]
 
-def _items_used_by_estimator(df):
-    pats = _estimator_patterns()
-    items = df["Item"].astype(str)
-    used = []
-    import re as _re
-    for it in items:
-        if any(p.search(it) for p in pats):
-            # Skip explicit Rate rows to prevent LLM from editing machine rates
-            if _re.search(r"\brate\b", it, _re.I):
-                continue
-            used.append(it)
-    return used
-
 # --- APPLY LLM OUTPUT ---------------------------------------------------------
-def _parse_pct_like(x):
-    try:
-        v = float(x)
-        return v / 100.0 if v > 1.0 else v
-    except Exception:
-        return None
-
-
 def apply_sheet_edits_to_df(df, sheet_edits: list[dict]):
     if not sheet_edits:
         return df, []
@@ -4195,37 +3909,12 @@ def apply_sheet_edits_to_df(df, sheet_edits: list[dict]):
             applied.append((item, value))
     return df, applied
 
-def apply_param_edits_to_overrides_ui(self, param_edits: dict):
-    if not param_edits:
-        return
-    for k, v in param_edits.items():
-        if hasattr(self, "param_vars") and k in self.param_vars:
-            self.param_vars[k].set(str(v))
-        else:
-            self.params[k] = v
-    if hasattr(self, "apply_overrides"):
-        try:
-            self.apply_overrides()
-            return
-        except Exception:
-            pass
-    # Fallback normalization if apply_overrides is unavailable
-    def fnum(s, d=0.0):
-        try: return float(str(s).strip())
-        except Exception: return d
-    p = {k:fnum(self.param_vars[k].get(), self.params.get(k,0.0)) for k in getattr(self, 'param_vars', {}).keys()}
-    for kk in list(p.keys()):
-        if kk.endswith("Pct"):
-            params[kk] = parse_pct(params[kk])
-    self.params.update(p)
-
 # ================== LLM DECISION LOG / AUDIT ==================
-import json as _json_audit, time as _time_audit
+import json as _json_audit
+import time as _time_audit
+
 LOGS_DIR = Path(r"D:\\CAD_Quoting_Tool\\Logs")
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
-
-def _now_iso():
-    return _time_audit.strftime("%Y-%m-%dT%H:%M:%S")
 
 def _coerce_num(x):
     try:
@@ -4233,69 +3922,13 @@ def _coerce_num(x):
     except Exception:
         return x
 
-def _used_item_values(df, used_items):
-    vals = {}
-    items = df["Item"].astype(str)
-    for name in used_items:
-        m = items.str.fullmatch(name, case=False, na=False)
-        if m.any():
-            v = df.loc[m, "Example Values / Options"].iloc[0]
-            vals[name] = _coerce_num(v)
-    return vals
-
-def _diff_map(before: dict, after: dict):
-    changes = []
-    keys = set(before.keys()) | set(after.keys())
-    for k in sorted(keys):
-        bv = before.get(k, None)
-        av = after.get(k, None)
-        if bv != av:
-            changes.append({"key": k, "before": bv, "after": av})
-    return changes
-
-def render_llm_log_text(log: dict) -> str:
-    m  = lambda v: f"${{float(v):,.2f}}" if isinstance(v, (int, float)) else str(v)
-    lines = []
-    lines.append(f"LLM DECISION LOG ï¿½ {log['timestamp']}")
-    lines.append(f"Model: {log.get('model','?')}  |  Prompt SHA256: {log.get('prompt_sha256','')[:12]}ï¿½")
-    if log.get('llm_error'):
-        lines.append(f"LLM error: {log['llm_error']}")
-    lines.append(f"Allowed items: {log.get('allowed_items_count',0)} | Sheet edits suggested/applied: {log.get('sheet_edits_suggested',0)}/{log.get('sheet_edits_applied',0)}")
-    lines.append("")
-    lines.append(f"Price before: {m(log['price_before'])}   ?   after: {m(log['price_after'])}   " 
-                 f"?: {m(log['price_after']-log['price_before'])} " 
-                 f"({(((log['price_after']-log['price_before'])/log['price_before']*100) if log['price_before'] else 0):.2f}%)")
-    lines.append("")
-    if log.get("sheet_changes"):
-        lines.append("Sheet changes:")
-        for ch in log["sheet_changes"]:
-            why = f"  ï¿½ why: {ch['why']}" if ch.get("why") else ""
-            lines.append(f"  ï¿½ {ch['key']}: {ch['before']} ? {ch['after']}{why}")
-        lines.append("")
-    if log.get("param_changes"):
-        lines.append("Param nudges:")
-        for ch in log["param_changes"]:
-            why = f"  ï¿½ why: {ch['why']}" if ch.get("why") else ""
-            lines.append(f"  ï¿½ {ch['key']}: {ch['before']} ? {ch['after']}{why}")
-        lines.append("")
-    if log.get("geo_summary"):
-        lines.append("GEO summary:")
-        for k, v in log["geo_summary"]:
-            lines.append(f"  - {k}: {v}")
-    return "\n".join(lines)
-def save_llm_log_json(log: dict) -> Path:
-    fname = f"llm_log_{_time_audit.strftime('%Y%m%d_%H%M%S')}.json"
-    path = LOGS_DIR / fname
-    with open(path, "w", encoding="utf-8") as f:
-        _json_audit.dump(log, f, indent=2)
-    return path
 # =============================================================
 
 # ----------------- Variables & quote -----------------
 try:
-    import pandas as pd
+    pd  # type: ignore[name-defined]
     _HAS_PANDAS = True
-except Exception:
+except NameError:
     _HAS_PANDAS = False
 
 CORE_COLS = ["Item", "Example Values / Options", "Data Type / Input Method"]
@@ -4984,7 +4617,7 @@ def _display_bucket_label(
     canon_key: str,
     label_overrides: Mapping[str, str] | None = None,
 ) -> str:
-    overrides = {str(k): str(v) for k, v in (label_overrides or {}).items()}
+    overrides = sdict(label_overrides)
     if canon_key in overrides:
         return overrides[canon_key]
     return _process_label(canon_key)
@@ -5082,37 +4715,6 @@ class ProcessDisplayEntry:
     display_override: str | None = None
 
 
-def _fold_buckets(process_costs: Mapping[str, Any] | None) -> dict[str, float]:
-    """Coalesce duplicate process buckets using their canonical keys."""
-
-    if not isinstance(process_costs, Mapping):
-        return {}
-
-    folded: dict[str, float] = {}
-    preferred_keys: dict[str, str] = {}
-
-    for raw_key, raw_value in process_costs.items():
-        canon = _canonical_bucket_key(raw_key)
-        try:
-            value = float(raw_value or 0.0)
-        except Exception:
-            # Non-numeric values cannot be summed; skip them to avoid crashes.
-            continue
-
-        if not canon:
-            folded[raw_key] = folded.get(raw_key, 0.0) + value
-            continue
-
-        preferred_key = preferred_keys.get(canon)
-        if preferred_key is None:
-            preferred_key = raw_key
-            preferred_keys[canon] = preferred_key
-
-        folded[preferred_key] = folded.get(preferred_key, 0.0) + value
-
-    return folded
-
-
 def _iter_ordered_process_entries(
     process_costs: Mapping[str, Any] | None,
     *,
@@ -5184,15 +4786,6 @@ def _iter_ordered_process_entries(
         meta = meta_lookup.get(meta_key, {})
         if not meta:
             meta = meta_lookup.get(canon_key, {})
-
-        try:
-            meta_hr_value = float(meta.get("hr", 0.0) or 0.0)
-        except Exception:
-            meta_hr_value = 0.0
-        try:
-            meta_rate_value = float(meta.get("rate", 0.0) or 0.0)
-        except Exception:
-            meta_rate_value = 0.0
 
         try:
             value_float = float(raw_value or 0.0)
@@ -5653,10 +5246,11 @@ def render_quote(
         pad = max(1, page_width - len(left) - len(right))
         lines.append(f"{left}{' ' * pad}{right}")
 
-    extra_detail_pattern = re.compile(r"^includes\b.*extras\b", re.IGNORECASE)
-
     def _is_extra_segment(segment: str) -> bool:
-        return bool(extra_detail_pattern.match(segment))
+        try:
+            return bool(EXTRA_DETAIL_RE.match(str(segment)))
+        except Exception:
+            return False
 
     def _merge_detail(existing: str | None, new_bits: list[str]) -> str | None:
         segments: list[str] = []
@@ -5769,11 +5363,10 @@ def render_quote(
         status_suffix = ""
     if path_text:
         write_wrapped(f"Speeds/Feeds CSV: {path_text}{status_suffix}")
+    elif status_suffix:
+        write_wrapped(f"Speeds/Feeds CSV: (not set){status_suffix}")
     else:
-        if status_suffix:
-            write_wrapped(f"Speeds/Feeds CSV: (not set){status_suffix}")
-        else:
-            write_line("Speeds/Feeds CSV: (not set)")
+        write_line("Speeds/Feeds CSV: (not set)")
     lines.append("")
     def _drill_debug_enabled() -> bool:
         """Return True when drill debug output should be rendered."""
@@ -6977,12 +6570,11 @@ def render_quote(
             }
             labor_row_data[storage_key] = entry
             labor_row_order.append(storage_key)
-        else:
-            if display_override:
-                entry["label"] = display_text
-                entry["has_override"] = True
-            elif not entry.get("has_override"):
-                entry["label"] = display_text
+        elif display_override:
+            entry["label"] = display_text
+            entry["has_override"] = True
+        elif not entry.get("has_override"):
+            entry["label"] = display_text
 
         entry["amount"] += amount_val
         if process_key is not None:
@@ -7875,66 +7467,13 @@ def _tolerance_values_from_any(value: Any) -> list[float]:
             magnitude /= 1000.0
         elif unit in {"in", "inch", "inches", '"'}:
             pass
-        else:
-            if magnitude > 0.25:
-                continue
+        elif magnitude > 0.25:
+            continue
         if magnitude <= 0.0:
             continue
         if magnitude <= 0.25:
             results.append(magnitude)
     return results
-
-
-def _estimate_inprocess_default_from_tolerance(
-    tolerance_inputs: Mapping[str, Any] | None,
-    default_tolerance_note: Any = None,
-    extra_texts: Iterable[Any] | None = None,
-) -> float:
-    """Infer baseline in-process inspection hours from tolerance information."""
-
-    candidates: list[float] = []
-    tight_mentions = 0
-    if tolerance_inputs:
-        for value in tolerance_inputs.values():
-            candidates.extend(_tolerance_values_from_any(value))
-            if isinstance(value, str) and _TIGHT_TOL_TRIGGER_RE.search(value):
-                tight_mentions += 1
-    if default_tolerance_note is not None:
-        candidates.extend(_tolerance_values_from_any(default_tolerance_note))
-        if isinstance(default_tolerance_note, str) and _TIGHT_TOL_TRIGGER_RE.search(default_tolerance_note):
-            tight_mentions += 1
-    if extra_texts:
-        for text in extra_texts:
-            candidates.extend(_tolerance_values_from_any(text))
-            if isinstance(text, str) and _TIGHT_TOL_TRIGGER_RE.search(text):
-                tight_mentions += 1
-
-    min_tol = min(candidates) if candidates else None
-    base_hours = 1.0
-    if min_tol is not None:
-        min_tol = max(float(min_tol), 1e-6)
-        normalized = max(
-            0.0, min(1.0, (INPROC_REF_TOL_IN - min_tol) / INPROC_REF_TOL_IN)
-        )
-
-        # smoother, lower curve (no cap; just gentler)
-        base_hours = INPROC_BASE_HR + INPROC_SCALE_HR * (normalized ** INPROC_EXP)
-
-        # gentle, bounded adders (nonlinear feel without hard limits)
-        tight_count = sum(1 for val in candidates if val <= 0.0015)
-        if tight_count > 1:
-            base_hours += min(INPROC_TIGHT_MAX, INPROC_TIGHT_PER * (tight_count - 1))
-
-        sub_thou_count = sum(1 for val in candidates if val <= 0.0005)
-        if sub_thou_count:
-            base_hours += min(INPROC_SUBTHOU_MAX, INPROC_SUBTHOU_PER * sub_thou_count)
-
-        if tight_mentions:
-            base_hours += min(INPROC_MENTION_MAX, INPROC_MENTION_PER * tight_mentions)
-    elif tight_mentions:
-        base_hours = 1.5
-
-    return max(0.5, round(base_hours, 3))
 
 
 def _sum_time_from_series(
@@ -8308,59 +7847,6 @@ def compute_material_cost(
     return cost, detail
 
 
-def _material_price_per_g_from_choice(
-    choice: str,
-    material_lookup: Mapping[str, float],
-) -> tuple[float | None, str]:
-    """Return a price-per-gram for a UI material selection."""
-
-    choice = (choice or "").strip()
-    if not choice:
-        return None, ""
-
-    normalized = _normalize_lookup_key(choice)
-    if normalized == MATERIAL_OTHER_KEY:
-        return None, ""
-
-    price = material_lookup.get(normalized)
-    if price is not None:
-        try:
-            return float(price), "vendor_table"
-        except Exception:
-            return None, ""
-
-    try:
-        price_per_kg, source = _resolve_material_unit_price(choice, unit="kg")
-    except Exception:
-        return None, ""
-
-    if not price_per_kg:
-        return None, ""
-
-    try:
-        price_float = float(price_per_kg)
-    except Exception:
-        return None, ""
-
-    if not math.isfinite(price_float):
-        return None, ""
-
-    return price_float / 1000.0, source or ""
-
-
-_DEFAULT_MATERIAL_DENSITY_G_CC = MATERIAL_DENSITY_G_CC_BY_KEY.get(DEFAULT_MATERIAL_KEY, 7.85)
-
-
-_MATERIAL_FAMILY_TO_GROUP = {
-    "alum": "aluminum",
-    "stainless": "stainless",
-    "titanium": "titanium",
-    "copper": "copper",
-    "brass": "brass",
-    "plastic": "plastic",
-}
-
-
 def _material_family(material: str) -> str:
     name = _normalize_lookup_key(material)
     if not name:
@@ -8382,32 +7868,6 @@ def _material_family(material: str) -> str:
         return "plastic"
 
     return "steel"
-
-
-def _material_group_from_name(material: str | None) -> str:
-    raw = (material or "").strip()
-    if not raw:
-        return "steel"
-    norm_key = _normalize_lookup_key(raw)
-    candidate = MATERIAL_MAP.get(norm_key)
-    if candidate is None and norm_key:
-        compact = norm_key.replace(" ", "")
-        candidate = MATERIAL_MAP.get(compact)
-        if candidate is None:
-            candidate = MATERIAL_MAP.get(norm_key.upper())
-            if candidate is None and compact:
-                candidate = MATERIAL_MAP.get(compact.upper())
-    if isinstance(candidate, Mapping):
-        group = candidate.get("material_group") or candidate.get("group")
-        if isinstance(group, str) and group.strip():
-            return group.strip().lower()
-    elif isinstance(candidate, str) and candidate.strip():
-        return candidate.strip().lower()
-
-    family = _material_family(raw)
-    group = _MATERIAL_FAMILY_TO_GROUP.get(family, family)
-    group_text = str(group or norm_key or "steel").strip().lower()
-    return group_text or "steel"
 
 
 def _density_for_material(material: str, default: float = _DEFAULT_MATERIAL_DENSITY_G_CC) -> float:
@@ -8998,30 +8458,6 @@ def _apply_drill_minutes_clamp(
     return max(min(hours, max_hr), min_hr)
 
 
-def _count_holes_from_counts(counts: Mapping[Any, Any] | None) -> int:
-    total = 0
-    if isinstance(counts, Mapping):
-        for qty in counts.values():
-            qty_val = _coerce_float_or_none(qty)
-            if qty_val and qty_val > 0:
-                try:
-                    total += int(round(float(qty_val)))
-                except Exception:
-                    continue
-    return total
-
-
-def _count_holes_from_diameters(values: Sequence[Any] | None) -> int:
-    total = 0
-    if not values:
-        return total
-    for val in values:
-        qty = _coerce_float_or_none(val)
-        if qty and qty > 0:
-            total += 1
-    return total
-
-
 def estimate_drilling_hours(
     hole_diams_mm: list[float],
     thickness_in: float,
@@ -9065,8 +8501,6 @@ def estimate_drilling_hours(
     debug_list = debug_lines if debug_lines is not None else None
     if debug_summary is not None:
         debug_summary.clear()
-    speeds_feeds_row: Mapping[str, Any] | None = None
-    selected_op_name = ""
     avg_dia_in = 0.0
     seen_debug: set[str] = set()
 
@@ -9139,11 +8573,10 @@ def estimate_drilling_hours(
             total_depth_in = depth_in + breakthrough_in if depth_in > 0 else breakthrough_in
             group_specs.append((diameter_in, int(qty), total_depth_in))
         fallback_counts = counts
-    else:
-        if fallback_counts is None:
-            fallback_counts = Counter()
-            for dia_in, qty, _ in group_specs:
-                fallback_counts[round(dia_in * 25.4, 3)] += qty
+    elif fallback_counts is None:
+        fallback_counts = Counter()
+        for dia_in, qty, _ in group_specs:
+            fallback_counts[round(dia_in * 25.4, 3)] += qty
 
     if group_specs:
         base_machine = machine_params or _machine_params_from_params(None)
@@ -9194,7 +8627,6 @@ def estimate_drilling_hours(
         row_cache: dict[tuple[str, float], tuple[Mapping[str, Any], _TimeToolParams] | None] = {}
         missing_row_messages: set[tuple[str, str, float]] = set()
         debug_summary_entries: dict[str, dict[str, Any]] = {}
-        debug_operation_totals: dict[str, dict[str, Any]] = {}
 
         def _update_range(summary_map: dict[str, Any], min_key: str, max_key: str, value: float | None) -> None:
             try:
@@ -9292,12 +8724,8 @@ def estimate_drilling_hours(
                         table=speeds_feeds_table,
                     )
                 if row and isinstance(row, Mapping):
-                    if op_name.lower() == "deep_drill":
-                        row = _apply_deep_drill_speed_feed_adjustments(row)
                     chosen_material_label = ""
                     cache_entry = (row, _build_tool_params(row))
-                    speeds_feeds_row = row
-                    selected_op_name = op_name
                     # Always use one material label for both Debug and Calc.
                     chosen_material_label = str(
                         row.get("material")
@@ -9530,7 +8958,6 @@ def estimate_drilling_hours(
                     ipm_val = debug_payload.get("ipm")
                 depth_val = debug_payload.get("axial_depth_in")
                 minutes_per = debug_payload.get("minutes_per_hole")
-                index_val = debug_payload.get("index_min")
                 qty_for_debug = int(qty) if qty else 0
                 mat_display = chosen_material_label or str(
                     material_label or mat_key or material_lookup or ""
@@ -9798,7 +9225,6 @@ def estimate_drilling_hours(
                 sfm_avg = _avg_value("sfm_sum", "sfm_count")
                 rpm_avg = _avg_value("rpm_sum", "rpm_count")
                 ipm_avg = _avg_value("ipm_sum", "ipm_count")
-                ipr_avg = _avg_value("ipr_sum", "ipr_count")
                 summary["rpm"] = rpm_avg
                 summary["ipm"] = ipm_avg
                 summary["minutes_per_hole"] = minutes_avg
@@ -10003,20 +9429,6 @@ def estimate_drilling_hours(
         material_group=material_label,
         depth_in=depth_for_bounds,
     )
-
-
-def estimate_tapping_hours(tap_qty: int, thickness_in: float, mat_key: str) -> float:
-    """Simple heuristic for tapping: average 0.20 min/hole.
-    If you later classify sizes, split into small/large families and adjust.
-    """
-    try:
-        qty = int(tap_qty or 0)
-    except Exception:
-        qty = 0
-    if qty <= 0:
-        return 0.0
-    avg_tap_min = 0.20  # minutes per hole
-    return (qty * avg_tap_min) / 60.0
 
 
 def _drilling_floor_hours(hole_count: int) -> float:
@@ -10586,11 +9998,11 @@ def compute_quote_from_df(df: pd.DataFrame,
     # ---- knobs & qty ---------------------------------------------------------
     OverheadPct    = num_pct(r"\b" + alt('Overhead','Shop Overhead') + r"\b", params["OverheadPct"])
     MarginPct      = num_pct(r"\b" + alt('Margin','Profit Margin') + r"\b", params["MarginPct"])
-    GA_Pct         = num_pct(r"\b" + alt('G&A','General\s*&\s*Admin') + r"\b", params["GA_Pct"])
-    ContingencyPct = num_pct(r"\b" + alt('Contingency','Risk\s*Adder') + r"\b",  params["ContingencyPct"])
-    ExpeditePct    = num_pct(r"\b" + alt('Expedite','Rush\s*Fee') + r"\b",      params["ExpeditePct"])
+    GA_Pct         = num_pct(r"\b" + alt('G&A',r'General\s*&\s*Admin') + r"\b", params["GA_Pct"])
+    ContingencyPct = num_pct(r"\b" + alt('Contingency',r'Risk\s*Adder') + r"\b",  params["ContingencyPct"])
+    ExpeditePct    = num_pct(r"\b" + alt('Expedite',r'Rush\s*Fee') + r"\b",      params["ExpeditePct"])
 
-    priority = strv(alt('PM-01_Quote_Priority','Quote\s*Priority'), "").strip().lower()
+    priority = strv(alt('PM-01_Quote_Priority',r'Quote\s*Priority'), "").strip().lower()
     if priority not in ("expedite", "critical"):
         ExpeditePct = 0.0
 
@@ -10707,11 +10119,6 @@ def compute_quote_from_df(df: pd.DataFrame,
         )
     if canonical_material:
         material_selection["canonical_material"] = canonical_material
-
-    if "material_group" not in material_selection:
-        fallback_group = _material_group_from_name(canonical_material or material_name)
-        if fallback_group:
-            material_selection["material_group"] = str(fallback_group).strip()
 
     if material_name:
         material_selection["input_material"] = material_name
@@ -11238,7 +10645,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     # ---- primary processes ---------------------------------------------------
     # OEE-adjusted helper
     oee = max(1e-6, params["OEE_EfficiencyPct"])
-    def eff(hr: float) -> float: 
+    def eff(hr: float) -> float:
         try: return float(hr) / oee
         except Exception: return hr
 
@@ -12728,9 +12135,7 @@ def compute_quote_from_df(df: pd.DataFrame,
             planner_inputs = _build_bushing_inputs()
         elif planner_family == "cam_or_hemmer":
             planner_inputs = _build_cam_inputs()
-        elif planner_family == "flat_die_chaser":
-            planner_inputs = {}
-        elif planner_family == "pm_compaction_die":
+        elif planner_family == "flat_die_chaser" or planner_family == "pm_compaction_die":
             planner_inputs = {}
         elif planner_family == "shear_blade":
             planner_inputs = {"material": material_name or default_material_display}
@@ -13014,14 +12419,16 @@ def compute_quote_from_df(df: pd.DataFrame,
             float(val) > 0.0 for val in (planner_machine_cost_total, planner_labor_cost_total, planner_total_minutes)
         )
 
+        planner_signals = {
+            "line_items": planner_line_items,
+            "pricing_result": planner_pricing_result,
+            "recognized_line_items": recognized_line_items,
+            "totals_present": planner_totals_present,
+        }
+
         used_planner, planner_mode = resolve_planner(
             params=params if isinstance(params, _MappingABC) else None,
-            signals={
-                "line_items": planner_line_items,
-                "pricing_result": planner_pricing_result,
-                "recognized_line_items": recognized_line_items,
-                "totals_present": planner_totals_present,
-            },
+            signals=planner_signals,
         )
         force_planner_for_recognized = recognized_line_items > 0
 
@@ -13599,7 +13006,7 @@ def compute_quote_from_df(df: pd.DataFrame,
             if llm_suggest is not None:
                 try:
                     # Prepare a safe JSON body for the LLM message; default=str guards non-serializable entries
-                    _payload_body = json.dumps(payload, indent=2, default=str)
+                    _payload_body = jdump(payload)
                     chat_out = llm_suggest.create_chat_completion(
                         messages=[
                             {"role": "system", "content": SYSTEM_SUGGEST},
@@ -13710,7 +13117,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                 "n_ctx": overrides_meta.get("n_ctx"),
                 "messages": [
                     {"role": "system", "content": SYSTEM_SUGGEST},
-                    {"role": "user", "content": json.dumps(payload, indent=2, default=str)},
+                    {"role": "user", "content": jdump(payload)},
                 ],
                 "params": {"temperature": 0.3, "top_p": 0.9, "max_tokens": 512},
                 "context_payload": payload,
@@ -13720,7 +13127,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                 "usage": s_usage,
             }
             snap_path = APP_ENV.llm_debug_dir / f"llm_snapshot_{int(time.time())}.json"
-            snap_path.write_text(json.dumps(snap, indent=2, default=str), encoding="utf-8")
+            snap_path.write_text(jdump(snap), encoding="utf-8")
 
     quote_state.llm_raw = dict(overrides_meta)
     quote_state.suggestions = sanitized_struct if isinstance(sanitized_struct, dict) else {}
@@ -14788,18 +14195,15 @@ def compute_quote_from_df(df: pd.DataFrame,
     price = price_before_margin * (1.0 + MarginPct)
 
     min_lot = float(params["MinLotCharge"] or 0.0)
-    if price < min_lot:
-        price = min_lot
+    price = max(price, min_lot)
 
     labor_cost_details_input: dict[str, str] = dict(labor_cost_details_seed)
     labor_cost_details: dict[str, str] = dict(labor_cost_details_seed)
     labor_costs_display: dict[str, float] = {}
 
-    # Local helper mirrors the renderer's filter so summary details stay clean
-    _extra_detail_pattern = re.compile(r"^includes\b.*extras\b", re.IGNORECASE)
     def _is_extra_segment(segment: str) -> bool:
         try:
-            return bool(_extra_detail_pattern.match(str(segment)))
+            return bool(EXTRA_DETAIL_RE.match(str(segment)))
         except Exception:
             return False
 
@@ -15122,7 +14526,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                     "clamped": notes_from_clamps,
                     "pass_through": {k: v for k, v in applied_pass.items()},
                 }
-                latest.write_text(json.dumps(snap, indent=2, default=str), encoding="utf-8")
+                latest.write_text(jdump(snap), encoding="utf-8")
         except Exception:
             pass
 
@@ -15168,7 +14572,6 @@ def compute_quote_from_df(df: pd.DataFrame,
 
 # ---------- Tracing ----------
 def trace_hours_from_df(df):
-    import pandas as pd
     out={}
     def grab(regex,label):
         items=df["Item"].astype(str)
@@ -15185,45 +14588,8 @@ def trace_hours_from_df(df):
     return out
 
 # ---------- Redaction ----------
-
 # ---------- Process router ----------
-def route_process_family(geo: dict[str,Any]) -> str:
-    max_dim=float(geo.get("GEO__MaxDim_mm",0) or 0); wedm=float(geo.get("GEO_WEDM_PathLen_mm",0) or 0); free=float(geo.get("GEO_Area_Freeform_mm2",0) or 0); area=float(geo.get("GEO__SurfaceArea_mm2",1) or 1); fr=(free/area) if area>0 else 0.0
-    if wedm>200 and max_dim<300: return "wire_edm"
-    if fr>0.5: return "die"
-    if max_dim>600: return "plate"
-    return "cnc"
-
 # ---------- Simple Tk editor ----------
-def edit_variables_tk(df):
-    import tkinter as tk
-    from tkinter import ttk, messagebox
-    cols=["Item","Example Values / Options","Data Type / Input Method"]
-    for c in cols:
-        if c not in df.columns: df[c]=""
-    win=tk.Toplevel(); win.title("Edit Variables")
-    tree=ttk.Treeview(win, columns=cols, show="headings")
-    for c in cols: tree.heading(c,text=c); tree.column(c,width=220,anchor="w")
-    for i,row in df[cols].iterrows(): tree.insert("","end",iid=str(i),values=[row[c] for c in cols])
-    tree.pack(fill="both",expand=True)
-    entry=ttk.Entry(win); entry.pack(fill="x")
-    cur={"col":0}
-    def on_click(e):
-        item=tree.focus()
-        if not item: return
-        idx=int(tree.identify_column(e.x).replace("#",""))-1
-        curates["col"]=idx; vals=list(tree.item(item,"values")); entry.delete(0,"end"); entry.insert(0,vals[idx])
-    def on_return(e=None):
-        item=tree.focus()
-        if not item: return
-        idx=curates["col"]; vals=list(tree.item(item,"values")); vals[idx]=entry.get(); tree.item(item,values=vals)
-    def on_save():
-        for iid in tree.get_children():
-            vals=tree.item(iid,"values"); i=int(iid)
-            for k,v in zip(cols, vals): df.at[i,k]=v
-        messagebox.showinfo("Saved","Variables updated in memory; Save in app to persist.")
-    tree.bind("<Button-1>", on_click); entry.bind("<Return>", on_return); ttk.Button(win,text="Save",command=on_save).pack()
-    win.grab_set(); win.wait_window(); return df
 def extract_2d_features_from_pdf_vector(pdf_path: str) -> dict:
     if not _HAS_PYMUPDF:
         raise RuntimeError("PyMuPDF (fitz) not installed. pip install pymupdf")
@@ -15476,7 +14842,7 @@ def _truncate_text(text: str, max_chars: int = 5000) -> str:
 
 def build_llm_prompt(best_page: dict) -> dict:
     text = _truncate_text(best_page.get("text", ""))
-    schema = json.dumps(JSON_SCHEMA, indent=2)
+    schema = jdump(JSON_SCHEMA)
     system = (
         "You are a manufacturing estimator. Read the drawing text and image and return JSON only. "
         "Estimate hours conservatively and do not invent dimensions."
@@ -16549,9 +15915,7 @@ def _aggregate_hole_entries(entries: Iterable[dict[str, Any]] | None) -> dict[st
             except Exception:
                 continue
             side = str(entry.get("side") or "").upper()
-            if side == "BACK" or (entry.get("raw") and "BACK" in str(entry.get("raw")).upper()):
-                back_ops = True
-            elif entry.get("double_sided") and (entry.get("cbore") or entry.get("csk")):
+            if side == "BACK" or (entry.get("raw") and "BACK" in str(entry.get("raw")).upper()) or entry.get("double_sided") and (entry.get("cbore") or entry.get("csk")):
                 back_ops = True
     tap_details_list = []
     for spec, detail in tap_details.items():
@@ -18099,147 +17463,6 @@ def reconcile_holes(entity_holes_mm: Iterable[Any] | None, chart_ops: Iterable[d
     }
 
 
-def _to_noncapturing(expr: str) -> str:
-    """
-    Convert every capturing '(' to non-capturing '(?:', preserving
-    escaped parens and existing '(?...)' constructs.
-    """
-    out: list[str] = []
-    i = 0
-    while i < len(expr):
-        ch = expr[i]
-        prev = expr[i - 1] if i > 0 else ''
-        nxt = expr[i + 1] if i + 1 < len(expr) else ''
-        if ch == '(' and prev != '\\' and nxt != '?':
-            out.append('(?:')
-            i += 1
-            continue
-        out.append(ch)
-        i += 1
-    return ''.join(out)
-
-def apply_2d_features_to_variables(df, g2d: dict, *, params: dict, rates: dict):
-    """Write a few cycle-time rows based on 2D perimeter/holes so compute_quote_from_df() can price it."""
-
-
-
-    geo = g2d.get("geo") if isinstance(g2d, dict) else None
-    thickness_mm = _coerce_float_or_none(g2d.get("thickness_mm")) if isinstance(g2d, dict) else None
-    thickness_in = (float(thickness_mm) / 25.4) if thickness_mm else None
-    thickness_from_deepest = False
-    if (not thickness_in) and isinstance(geo, dict):
-        guess = _coerce_float_or_none(geo.get("thickness_in_guess"))
-        if guess:
-            try:
-                bounded = min(3.0, max(0.125, float(guess)))
-                thickness_in = bounded
-                thickness_from_deepest = True
-            except Exception:
-                thickness_in = None
-
-    material_note = ""
-    if isinstance(geo, dict) and geo.get("material_note"):
-        material_note = str(geo.get("material_note") or "").strip()
-    material_value = material_note or (g2d.get("material") if isinstance(g2d, dict) else "") or "Steel"
-    df = upsert_var_row(df, "Material", material_value, dtype="text")
-    if thickness_in:
-        df = upsert_var_row(
-            df,
-            "Thickness (in)",
-            round(float(thickness_in), 4),
-            dtype="number",
-        )
-    elif thickness_from_deepest:
-        df = upsert_var_row(df, "Thickness (in)", 0.125, dtype="number")
-
-    plate_len = None
-    plate_wid = None
-    if isinstance(geo, dict):
-        plate_len = geo.get("plate_len_in")
-        plate_wid = geo.get("plate_wid_in")
-    df = upsert_var_row(
-        df,
-        "Plate Length (in)",
-        round(float(plate_len), 3) if plate_len else 12.0,
-        dtype="number",
-    )
-    df = upsert_var_row(
-        df,
-        "Plate Width (in)",
-        round(float(plate_wid), 3) if plate_wid else 14.0,
-        dtype="number",
-    )
-    df = upsert_var_row(df, "Scrap Percent (%)", 15.0, dtype="number")
-
-    def _update_if_blank(label: str, value: Any, dtype: str = "number", zero_is_blank: bool = True) -> None:
-        if value is None:
-            return
-        mask = df["Item"].astype(str).str.fullmatch(label, case=False, na=False)
-        if mask.any():
-            existing_raw = str(df.loc[mask, "Example Values / Options"].iloc[0]).strip()
-            existing_val = _coerce_float_or_none(existing_raw)
-            is_blank = (existing_raw == "") or (zero_is_blank and (existing_val is None or abs(existing_val) < 1e-9))
-            if not is_blank:
-                return
-            df.loc[mask, "Example Values / Options"] = value
-            df.loc[mask, "Data Type / Input Method"] = dtype
-        else:
-            df.loc[len(df)] = [label, value, dtype]
-
-    tap_qty_geo = None
-    from_back_geo = False
-    if isinstance(geo, dict):
-        tap_qty_geo = _coerce_float_or_none(geo.get("tap_qty"))
-        from_back_geo = bool(geo.get("needs_back_face") or geo.get("from_back"))
-    if tap_qty_geo and tap_qty_geo > 0:
-        _update_if_blank("Tap Qty (LLM/GEO)", int(round(tap_qty_geo)))
-    if from_back_geo:
-        mask_setups = df["Item"].astype(str).str.fullmatch("Number of Milling Setups", case=False, na=False)
-        if mask_setups.any():
-            current = _coerce_float_or_none(df.loc[mask_setups, "Example Values / Options"].iloc[0])
-            if current is None or current < 2:
-                df.loc[mask_setups, "Example Values / Options"] = 2
-                df.loc[mask_setups, "Data Type / Input Method"] = "number"
-        else:
-            df.loc[len(df)] = ["Number of Milling Setups", 2, "number"]
-
-    def set_row(pattern: str, value: float):
-        # Use the module-level helper (fixes NameError in DWG import path).
-        regex = _to_noncapturing(pattern)
-        mask = df["Item"].astype(str).str.contains(regex, case=False, regex=True, na=False)
-        if mask.any():
-            df.loc[mask, "Example Values / Options"] = value
-        else:
-            df.loc[len(df)] = [pattern, value, "number"]
-    L = float(g2d.get("profile_length_mm", 0.0))
-    t = float(g2d.get("thickness_mm") or 6.0)
-    holes = g2d.get("hole_diams_mm", [])
-    # crude process pick
-    use_jet = (t <= 12.0 and (L >= 300.0 or len(holes) >= 2))
-
-    if use_jet:
-        cut_min = L / (300.0 if t <= 10 else 120.0)   # mm/min ? minutes
-        deburr_min = (L/1000.0) * 2.0
-        set_row(r"(Sawing|Waterjet|Blank\s*Prep)", round(cut_min/60.0, 3))
-        set_row(r"(Deburr|Edge\s*Break)", round(deburr_min/60.0, 3))
-        set_row(r"(Programming|2D\s*CAM)", 0.5)
-        set_row(r"(Setup\s*Time\s*per\s*Setup)", 0.25)
-        set_row(r"(Milling\s*Setups)", 1)
-    else:
-        mill_min = L / 800.0
-        drill_min = max(0.2, (t/50.0)) * max(1, len(holes))
-        deburr_min = (L/1000.0) * 3.0
-        set_row(r"(Finishing\s*Cycle\s*Time)", round(mill_min/60.0, 3))
-        set_row(r"(ID\s*Boring|Drilling|Reaming)", round(drill_min/60.0, 3))
-        set_row(r"(Deburr|Edge\s*Break)", round(deburr_min/60.0, 3))
-        set_row(r"(Programming|2D\s*CAM)", 0.75)
-        set_row(r"(Setup\s*Time\s*per\s*Setup)", 0.5)
-        set_row(r"(Milling\s*Setups)", 1)
-
-    set_row(r"(Final\s*Inspection|Manual\s*Inspection)", 0.2)
-    set_row(r"(Packaging|Boxing|Crating\s*Labor)", 0.1)
-    return df.reset_index(drop=True)
-
 def get_llm_quote_explanation(result: dict, model_path: str) -> str:
     """
     Returns a single-paragraph, friendly explanation of the main cost drivers.
@@ -18550,7 +17773,9 @@ class UIConfiguration:
     window_geometry: str = "1260x900"
     llm_enabled_default: bool = True
     apply_llm_adjustments_default: bool = True
-    settings_path: Path = field(default_factory=lambda: Path(__file__).with_name("app_settings.json"))
+    settings_path: Path = field(
+        default_factory=lambda: Path(__file__).with_name("app_settings.json")
+    )
     default_llm_model_path: str | None = None
     default_params: dict[str, Any] = field(default_factory=lambda: copy.deepcopy(PARAMS_DEFAULT))
     default_material_display: str = DEFAULT_MATERIAL_DISPLAY
@@ -18572,22 +17797,22 @@ class GeometryLoader:
         return extract_2d_features_from_dxf_or_dwg(str(path))
 
     def extract_features_with_occ(self, path: str | Path):
-        return extract_features_with_occ(str(path))
+        return geometry.extract_features_with_occ(str(path))
 
     def enrich_geo_stl(self, path: str | Path):
-        return enrich_geo_stl(str(path))
+        return geometry.enrich_geo_stl(str(path))
 
     def read_step_shape(self, path: str | Path) -> TopoDS_Shape:
-        return read_step_shape(str(path))
+        return geometry.read_step_shape(str(path))
 
     def read_cad_any(self, path: str | Path) -> TopoDS_Shape:
-        return read_cad_any(str(path))
+        return geometry.read_cad_any(str(path))
 
     def safe_bbox(self, shape: TopoDS_Shape):
-        return safe_bbox(shape)
+        return geometry.safe_bbox(shape)
 
     def enrich_geo_occ(self, shape: TopoDS_Shape):
-        return enrich_geo_occ(shape)
+        return geometry.enrich_geo_occ(shape)
 
 
 @dataclass(slots=True)
@@ -19165,7 +18390,7 @@ class App(tk.Tk):
         file_menu.add_command(label="Clear Material Vendor CSV", command=self.clear_material_vendor_csv)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.quit)
-        
+
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Help", menu=help_menu)
         help_menu.add_command(
@@ -19331,7 +18556,7 @@ class App(tk.Tk):
         if not isinstance(path, Path):
             return
         try:
-            path.write_text(json.dumps(self.settings, indent=2), encoding="utf-8")
+            path.write_text(jdump(self.settings), encoding="utf-8")
         except Exception:
             pass
 
@@ -19564,12 +18789,8 @@ class App(tk.Tk):
         self.editor_widgets_frame = parent
         self.editor_widgets_frame.grid_columnconfigure(0, weight=1)
 
-        def normalize_item(value: str) -> str:
-            cleaned = re.sub(r"[^0-9a-z&$]+", " ", str(value).strip().lower())
-            return re.sub(r"\s+", " ", cleaned).strip()
-
         items_series = df["Item"].astype(str)
-        normalized_items = items_series.apply(normalize_item)
+        normalized_items = items_series.apply(_normalize_item_text)
         qty_mask = normalized_items.isin({"quantity", "qty", "lot size"})
         if qty_mask.any():
             qty_raw = df.loc[qty_mask, "Example Values / Options"].iloc[0]
@@ -19598,7 +18819,7 @@ class App(tk.Tk):
             "Packaging $/hr",
             "Quantity", "Qty", "Lot Size",
         }
-        skip_items = {normalize_item(item) for item in raw_skip_items}
+        skip_items = {_normalize_item_text(item) for item in raw_skip_items}
 
 
         material_lookup: Dict[str, float] = {}
@@ -20498,10 +19719,7 @@ class App(tk.Tk):
                 self.param_vars["Quantity"].set(str(quantity_val))
 
         if self.vars_df is not None and raw_param_values:
-            def normalize_item(value: str) -> str:
-                cleaned = re.sub(r"[^0-9a-z&$]+", " ", str(value).strip().lower())
-                return re.sub(r"\s+", " ", cleaned).strip()
-            normalized_items = self.vars_df["Item"].astype(str).apply(normalize_item)
+            normalized_items = self.vars_df["Item"].astype(str).apply(_normalize_item_text)
             param_to_items = {
                 "OverheadPct": ["overhead %", "overhead"],
                 "GA_Pct": ["g&a %", "ga %"],
@@ -20558,9 +19776,9 @@ class App(tk.Tk):
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
-            messagebox.showinfo("Overrides", f"Saved to:\n{{path}}")
+            messagebox.showinfo("Overrides", "Saved to:\n{path}")
             self.status_var.set(f"Saved overrides to {path}")
-        except Exception as e:
+        except Exception:
             messagebox.showerror("Overrides", f"Save failed:\n{{e}}")
             self.status_var.set("Failed to save overrides.")
 
@@ -20588,7 +19806,7 @@ class App(tk.Tk):
                     v.set(self._format_rate_value(self.rates.get(k, "")))
             messagebox.showinfo("Overrides", "Overrides loaded.")
             self.status_var.set(f"Loaded overrides from {path}")
-        except Exception as e:
+        except Exception:
             messagebox.showerror("Overrides", f"Load failed:\n{{e}}")
             self.status_var.set("Failed to load overrides.")
 
@@ -20777,7 +19995,7 @@ class App(tk.Tk):
         if has_records and self.vars_df is not None and not self.vars_df.empty:
             self.gen_quote(reuse_suggestions=True)
 
-    # ----- LLM tab ----- 
+    # ----- LLM tab -----
     def _build_llm(self, parent):
         row=0
         ttk.Checkbutton(parent, text="Enable LLM (Qwen via llama-cpp, offline)", variable=self.llm_enabled).grid(row=row, column=0, sticky="w", pady=(6,2)); row+=1
@@ -20822,9 +20040,9 @@ class App(tk.Tk):
         os.environ["QWEN_GGUF_PATH"]=mp
         try:
             out = infer_shop_overrides_from_geo(self.geo)
-        except Exception as e:
+        except Exception:
             self.llm_txt.insert("end", f"LLM error: {{e}}\n"); return
-        self.llm_txt.insert("end", json.dumps(out, indent=2))
+        self.llm_txt.insert("end", jdump(out))
         if self.apply_llm_adj.get() and isinstance(out, dict):
             adj = out.get("LLM_Adjustments", {})
             try:
@@ -20839,8 +20057,8 @@ class App(tk.Tk):
     def open_llm_inspector(self):
         import json
         import tkinter as tk
-        from tkinter import scrolledtext, messagebox
         from pathlib import Path
+        from tkinter import messagebox, scrolledtext
 
         debug_dir = Path(__file__).with_name("llm_debug")
         files = sorted(debug_dir.glob("llm_snapshot_*.json"))
@@ -20853,7 +20071,7 @@ class App(tk.Tk):
             raw = latest.read_text(encoding="utf-8")
             try:
                 data = json.loads(raw)
-                shown = json.dumps(data, indent=2)
+                shown = jdump(data)
             except Exception:
                 shown = raw
         except Exception as e:
@@ -20872,7 +20090,7 @@ class App(tk.Tk):
     # ----- Flow + Output -----
     def _log_geo(self, d):
         self.geo_txt.delete("1.0","end")
-        self.geo_txt.insert("end", json.dumps(d, indent=2))
+        self.geo_txt.insert("end", jdump(d))
 
     def _log_out(self, d):
         widget = self.output_text_widgets.get("simplified") if hasattr(self, "output_text_widgets") else None
@@ -20951,7 +20169,8 @@ class App(tk.Tk):
                 )
             except ValueError as err:
                 # Log full traceback for debugging ambiguous DataFrame truthiness, etc.
-                import traceback, datetime
+                import datetime
+                import traceback
                 try:
                     with open("debug.log", "a", encoding="utf-8") as f:
                         f.write(f"\n[{datetime.datetime.now().isoformat()}] Quote blocked (ValueError):\n")
@@ -20964,7 +20183,8 @@ class App(tk.Tk):
                 return
             except Exception as err:
                 # Catch-all so failures surface in the UI and logs
-                import traceback, datetime
+                import datetime
+                import traceback
                 tb = traceback.format_exc()
                 try:
                     with open("debug.log", "a", encoding="utf-8") as f:
@@ -21033,22 +20253,29 @@ def _map_geo_to_double_underscore(g: dict) -> dict:
     L = getf("GEO-01_Length_mm")
     W = getf("GEO-02_Width_mm")
     H = getf("GEO-03_Height_mm")
-    if L is not None: out["GEO__BBox_X_mm"] = L
-    if W is not None: out["GEO__BBox_Y_mm"] = W
-    if H is not None: out["GEO__BBox_Z_mm"] = H
-    dims = [d for d in [L,W,H] if d is not None]
+    if L is not None:
+        out["GEO__BBox_X_mm"] = L
+    if W is not None:
+        out["GEO__BBox_Y_mm"] = W
+    if H is not None:
+        out["GEO__BBox_Z_mm"] = H
+    dims = [d for d in [L, W, H] if d is not None]
     if dims:
         out["GEO__MaxDim_mm"] = max(dims)
         out["GEO__MinDim_mm"] = min(dims)
         out["GEO__Stock_Thickness_mm"] = min(dims)
     v = getf("GEO-Volume_mm3") or getf("GEO-Volume_mm3")  # keep both spellings if present
-    if v is not None: out["GEO__Volume_mm3"] = v
+    if v is not None:
+        out["GEO__Volume_mm3"] = v
     a = getf("GEO-SurfaceArea_mm2")
-    if a is not None: out["GEO__SurfaceArea_mm2"] = a
+    if a is not None:
+        out["GEO__SurfaceArea_mm2"] = a
     fc = getf("Feature_Face_Count") or getf("GEO_Face_Count")
-    if fc is not None: out["GEO__Face_Count"] = fc
+    if fc is not None:
+        out["GEO__Face_Count"] = fc
     wedm = getf("GEO_WEDM_PathLen_mm")
-    if wedm is not None: out["GEO__WEDM_PathLen_mm"] = wedm
+    if wedm is not None:
+        out["GEO__WEDM_PathLen_mm"] = wedm
     # derived area/volume ratio if possible
     if a is not None and v:
         try:
@@ -21062,18 +20289,18 @@ def _collect_geo_features_from_df(df):
     if df is None:
         return geo
     items = df["Item"].astype(str)
-    vals  = df["Example Values / Options"]
     m = items.str.startswith("GEO__", na=False)
     for _, row in df.loc[m].iterrows():
         k = str(row["Item"]).strip()
         try:
-            geo[k] = float(row["Example Values / Options"]) if row["Example Values / Options"] is not None else 0.0
+            value = row["Example Values / Options"]
+            geo[k] = float(value) if value is not None else 0.0
         except Exception:
             continue
     return geo
 
 def update_variables_df_with_geo(df, geo: dict):
-    cols = ["Item","Example Values / Options","Data Type / Input Method"]
+    cols = ["Item", "Example Values / Options", "Data Type / Input Method"]
     for col in cols:
         if col not in df.columns:
             raise ValueError("Variables sheet missing column: " + col)
@@ -21091,20 +20318,14 @@ def _rule_based_overrides(geo: dict, params: dict, rates: dict):
     rp, rr = {}, {}
     thk = float(geo.get("GEO__Stock_Thickness_mm", 0.0) or 0.0)
     wedm = float(geo.get("GEO__WEDM_PathLen_mm", 0.0) or 0.0)
-    if thk > 50: rparams["OverheadPct"] = params.get("OverheadPct", 0.15) + 0.02
-    if wedm > 500: rrates["WireEDMRate"] = rates.get("WireEDMRate", 140.0) * 1.05
+    if thk > 50:
+        rparams["OverheadPct"] = params.get("OverheadPct", 0.15) + 0.02
+    if wedm > 500:
+        rrates["WireEDMRate"] = rates.get("WireEDMRate", 140.0) * 1.05
     return {"params": rp, "rates": rr}
 
 def _run_llm_json_stub(prompt: str, model_path: str):
     return {"params": {}, "rates": {}}
-
-def suggest_overrides_from_cad(df_vars, params, rates, model_path: str):
-    geo = _collect_geo_features_from_df(df_vars)
-    base = _rule_based_overrides(geo, params, rates)
-    llm_json = _run_llm_json_stub("", model_path)
-    merged_p = {**params, **base.get("params", {}), **llm_json.get("params", {})}
-    merged_r = {**rates,  **base.get("rates", {}),  **llm_json.get("rates", {})}
-    return {"params": merged_p, "rates": merged_r, "geo": geo}
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="CAD Quoting Tool UI")
@@ -21127,7 +20348,10 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     if args.print_env:
-        logger.info("Runtime environment:\n%s", json.dumps(describe_runtime_environment(), indent=2))
+        logger.info(
+            "Runtime environment:\n%s",
+            json.dumps(describe_runtime_environment(), indent=2),
+        )
         return 0
 
     if args.no_gui:
@@ -21141,4 +20365,22 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(_main())
+    exit_code = _main()
+    if exit_code == 0:
+        try:
+            from cad_quoter.pricing import (
+                PricingEngine,
+                create_default_registry,
+                ensure_material_backup_csv,
+            )
+
+            engine = PricingEngine(create_default_registry())
+            csv_path = ensure_material_backup_csv()
+            quote = engine.get_usd_per_kg(
+                "aluminum", "usd_per_kg", vendor_csv=csv_path, providers=("vendor_csv",)
+            )
+            print(f"[smoke] aluminum ${quote.usd_per_kg:.2f}/kg via {quote.source}")
+        except Exception as exc:  # pragma: no cover - smoke guard
+            print(f"[smoke] pricing run failed: {exc}", file=sys.stderr)
+            exit_code = 1
+    sys.exit(exit_code)
