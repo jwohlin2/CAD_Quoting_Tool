@@ -13221,9 +13221,7 @@ def compute_quote_from_df(
 
     planner_meta_keys: set[str] = set()
 
-    meta_lookup: dict[str, dict[str, Any]] = {
-        key: dict(value) for key, value in process_meta.items() if isinstance(value, _MappingABC)
-    }
+    meta_lookup: dict[str, dict[str, Any]] = _build_process_meta_lookup(process_meta)
 
     planner_meta_keys: set[str] = set()
     if not used_planner:
@@ -14508,9 +14506,7 @@ def compute_quote_from_df(
                     process_meta[b] = update_payload
                 _planner_meta_add(b)
 
-        meta_lookup = {
-            key: dict(value) for key, value in process_meta.items() if isinstance(value, _MappingABC)
-        }
+        meta_lookup = _build_process_meta_lookup(process_meta)
         allowed_process_hour_keys = {
             key
             for key in planner_meta_keys
