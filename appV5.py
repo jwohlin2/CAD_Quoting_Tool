@@ -6387,7 +6387,27 @@ def render_quote(
         else:
             write_line("Speeds/Feeds CSV: (not set)")
     lines.append("")
-    if drill_debug_entries:
+    def _drill_debug_enabled() -> bool:
+        """Return True when drill debug output should be rendered."""
+
+        def _coerce_bool(value: object) -> bool | None:
+            try:
+                return bool(value)
+            except Exception:
+                return None
+
+        for source in (result, breakdown):
+            if not isinstance(source, Mapping):
+                continue
+            for key in ("app", "app_state", "app_meta"):
+                candidate = source.get(key)
+                if isinstance(candidate, Mapping) and "llm_debug_enabled" in candidate:
+                    coerced = _coerce_bool(candidate.get("llm_debug_enabled"))
+                    if coerced is not None:
+                        return coerced
+        return bool(APP_ENV.llm_debug_enabled)
+
+    if drill_debug_entries and _drill_debug_enabled():
         lines.append("Drill Debug")
         lines.append(divider)
         for entry in drill_debug_entries:
@@ -6406,7 +6426,10 @@ def render_quote(
     )
     # If planner produced hours, treat source as planner for display consistency.
     if not pricing_source_value:
-        hs_entries = dict(hour_summary_entries or {})
+        try:
+            hs_entries = dict(hour_summary_entries or {})
+        except UnboundLocalError:
+            hs_entries = {}
 
         def _has_positive_planner_hours(value: object) -> bool:
             base_value: object
@@ -15448,6 +15471,8 @@ def compute_quote_from_df(df: pd.DataFrame,
             "Labor": round(planner_labor_cost_total, 2),
         }
 
+    app_meta = {"llm_debug_enabled": bool(APP_ENV.llm_debug_enabled)}
+
     breakdown = {
         "qty": Qty,
         "setups": int(setups) if isinstance(setups, (int, float)) else setups,
@@ -15521,6 +15546,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         "user_overrides": copy.deepcopy(quote_state.user_overrides),
         "effective": copy.deepcopy(quote_state.effective),
         "effective_sources": copy.deepcopy(quote_state.effective_sources),
+        "app": dict(app_meta),
     }
     breakdown["decision_state"] = decision_state
 
@@ -15587,6 +15613,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         "drill_debug": list(drill_debug_lines),
         "drilling_meta": drilling_meta,
         "red_flags": list(red_flag_messages),
+        "app": dict(app_meta),
     }
 
     breakdown["speeds_feeds_path"] = speeds_feeds_path
