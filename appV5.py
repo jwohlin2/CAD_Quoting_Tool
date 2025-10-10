@@ -11618,6 +11618,7 @@ def compute_quote_from_df(
     plate_thickness_in_val: float | None = None
     removal_mass_g_est: float | None = None
     hole_scrap_frac_est: float = 0.0
+    labor_cost_details_seed: dict[str, str] = {}
     hole_scrap_clamped_val: float = 0.0
     material_selection: dict[str, Any] = {}
     material_display_for_debug: str = ""
@@ -13317,7 +13318,21 @@ def compute_quote_from_df(
         if _on("packaging_flat") and float(packaging_flat_base) > 0:
             pass_through["Packaging Flat"] = float(packaging_flat_base)
 
-        pass_through = canonicalize_pass_through_map(pass_through)
+        canonicalizer_obj = (
+            globals().get("canonicalize_pass_through_map")
+            or globals().get("_canonicalize_pass_through_map")
+        )
+        if callable(canonicalizer_obj):
+            canonicalizer = cast(Callable[[Any], dict[str, float]], canonicalizer_obj)
+            try:
+                pass_through = canonicalizer(pass_through)
+            except Exception:
+                logger.exception(
+                    "Failed to canonicalize pass-through map; falling back to raw map"
+                )
+                pass_through = dict(pass_through)
+        else:
+            pass_through = dict(pass_through)
 
         credit = float(material_scrap_credit_applied or 0.0)
         if credit > 0:
