@@ -7038,6 +7038,8 @@ def render_quote(
     if planner_why_lines:
         why_parts.extend(planner_why_lines)
 
+    material_display_for_debug: str = ""
+
     # ---- material & stock (compact; shown only if we actually have data) -----
     if material:
         mass_g = material.get("mass_g")
@@ -7118,6 +7120,7 @@ def render_quote(
             else:
                 material_name_display = str(material_name_display).strip()
             if material_name_display:
+                material_display_for_debug = material_name_display
                 lines.append(f"  Material used:  {material_name_display}")
 
             if matcost or show_zeros:
@@ -10413,8 +10416,8 @@ def estimate_drilling_hours(
                 line_parts = [
                     "Drill calc → ",
                     f"op={op_display}, mat={mat_display}, ",
-                    f"SFM={sfm_range_text}, IPR={ipr_range_text}; ",
-                    f"RPM {rpm_range_text} IPM {ipm_range_text}; ",
+                    f"SFM={sfm_text}, IPR={ipr_text}; ",
+                    f"RPM {rpm_text} IPM {ipm_text}; ",
                     f"{dia_segment}; {depth_segment}; ",
                     f"holes {qty_total}; ",
                     f"index {index_text}; ",
@@ -12111,6 +12114,18 @@ def compute_quote_from_df(df: pd.DataFrame,
     speeds_feeds_row: Mapping[str, Any] | None = None  # ensure defined in outer scope
     avg_dia_in = 0.0
 
+    if not material_display_for_debug:
+        candidate_display = (
+            material_selection.get("canonical_material")
+            or material_selection.get("material_display")
+            or material_selection.get("input_material")
+            or material_selection.get("material")
+        )
+        if candidate_display:
+            material_display_for_debug = str(candidate_display).strip()
+    if not material_display_for_debug:
+        material_display_for_debug = str(drill_material_display or "").strip()
+
     drill_hr = estimate_drilling_hours(
         hole_diams_mm=hole_diams_list,
         thickness_in=thickness_in,
@@ -12127,6 +12142,23 @@ def compute_quote_from_df(df: pd.DataFrame,
         drill_hr = 0.0
 
     drill_hr = min(drill_hr, 500.0)
+
+    if material_display_for_debug:
+        canonical_material_text = material_display_for_debug
+        updated_debug_lines: list[str] = []
+        for line in drill_debug_lines:
+            if line.startswith("Drill calc") and "mat=" in line:
+                updated_debug_lines.append(
+                    re.sub(
+                        r"(mat=)[^,]+",
+                        rf"\1{canonical_material_text}",
+                        line,
+                        count=1,
+                    )
+                )
+            else:
+                updated_debug_lines.append(line)
+        drill_debug_lines[:] = updated_debug_lines
 
     drill_debug_line: str | None = None
     if speeds_feeds_row and avg_dia_in > 0:
