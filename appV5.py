@@ -28,6 +28,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace, fields as dataclass_fields
 from fractions import Fraction
 from pathlib import Path
+from types import MappingProxyType
 
 from cad_quoter.app import runtime as _runtime
 from cad_quoter.app.container import (
@@ -198,6 +199,13 @@ from bucketizer import bucketize
 LLM_MULTIPLIER_MIN = 0.25
 LLM_MULTIPLIER_MAX = 4.0
 LLM_ADDER_MAX = 8.0
+LLM_BOUND_DEFAULTS: Mapping[str, float] = MappingProxyType(
+    {
+        "mult_min": LLM_MULTIPLIER_MIN,
+        "mult_max": LLM_MULTIPLIER_MAX,
+        "adder_max_hr": LLM_ADDER_MAX,
+    }
+)
 
 # Tolerance for invariant checks that guard against silent drift when rendering
 # cost sections.
@@ -13769,13 +13777,8 @@ def compute_quote_from_df(df: pd.DataFrame,
         "setups": baseline_setups,
         "fixture": baseline_fixture,
     }
-    llm_bounds = {
-        "mult_min": LLM_MULTIPLIER_MIN,
-        "mult_max": LLM_MULTIPLIER_MAX,
-        "adder_max_hr": LLM_ADDER_MAX,
-        "scrap_min": 0.0,
-        "scrap_max": 0.25,
-    }
+    llm_bounds = dict(LLM_BOUND_DEFAULTS)
+    llm_bounds.update({"scrap_min": 0.0, "scrap_max": 0.25})
     baseline_bounds = baseline_data.get("_bounds") if isinstance(baseline_data.get("_bounds"), dict) else None
     if baseline_bounds:
         bucket_caps_raw = baseline_bounds.get("adder_bucket_max") or baseline_bounds.get("add_hr_bucket_max")
@@ -19108,12 +19111,13 @@ def get_llm_overrides(
     catalogs_ctx["stock"] = stock_catalog
     ctx["catalogs"] = catalogs_ctx
     bounds_ctx = dict(ctx.get("bounds") or {})
+    llm_bound_defaults = dict(LLM_BOUND_DEFAULTS)
     bounds_ctx.update(
         {
-            "mult_min": LLM_MULTIPLIER_MIN,
-            "mult_max": LLM_MULTIPLIER_MAX,
+            "mult_min": llm_bound_defaults["mult_min"],
+            "mult_max": llm_bound_defaults["mult_max"],
             "add_hr_min": 0.0,
-            "add_hr_max": LLM_ADDER_MAX,
+            "add_hr_max": llm_bound_defaults["adder_max_hr"],
             "scrap_min": 0.0,
             "scrap_max": 0.25,
         }
