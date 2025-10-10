@@ -19548,7 +19548,7 @@ class CreateToolTip:
         self.wraplength = wraplength
         self._after_id: str | None = None
         self._tip_window: tk.Toplevel | None = None
-        self._label: ttk.Label | None = None
+        self._label: tk.Label | ttk.Label | None = None
         self._pinned = False
 
         self.widget.bind("<Enter>", self._schedule_show, add="+")
@@ -19632,7 +19632,7 @@ class CreateToolTip:
             background="#ffffe0",
             relief=tk.SOLID,
             borderwidth=1,
-            font=("tahoma", "8", "normal"),
+            font=("tahoma", 8, "normal"),
             wraplength=self.wraplength,
         )
         label.pack(ipadx=4, ipady=2)
@@ -19709,6 +19709,7 @@ class App(tk.Tk):
         self.geometry_loader = geometry_loader or GeometryLoader()
         self.pricing_registry = pricing_registry or PricingRegistry()
         self.llm_services = llm_services or LLMServices()
+        self.pricing: PricingEngine = pricing or _DEFAULT_PRICING_ENGINE
 
         default_material_display = getattr(
             self.configuration,
@@ -19813,7 +19814,14 @@ class App(tk.Tk):
                 except Exception:
                     logger.warning("Failed to preload variables from %s", saved_vars_path, exc_info=True)
                 else:
-                    self._refresh_variables_cache(core_df, full_df)
+                    if isinstance(core_df, pd.DataFrame) and isinstance(full_df, pd.DataFrame):
+                        self._refresh_variables_cache(core_df, full_df)
+                    else:
+                        logger.warning(
+                            "Variables preload returned unexpected types: %s, %s",
+                            type(core_df),
+                            type(full_df),
+                        )
 
         # LLM defaults: ON + auto model discovery
         default_model = (
