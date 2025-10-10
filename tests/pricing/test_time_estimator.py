@@ -90,3 +90,31 @@ def test_endmill_profile_caps_by_machine_hp() -> None:
     minutes = estimate_time_min(row, geom, tool, machine, overhead, material_factor=1.0)
     assert minutes == pytest.approx(0.84, rel=1e-6)
 
+
+def test_deep_drill_runs_slower_and_reports_peck() -> None:
+    drill_row = {
+        "operation": "Drill",
+        "sfm_start": 120,
+        "fz_ipr_0_25in": 0.004,
+    }
+    deep_row = {
+        "operation": "Deep_Drill",
+        "sfm_start": 120,
+        "fz_ipr_0_25in": 0.004,
+    }
+    geom = OperationGeometry(diameter_in=0.25, hole_depth_in=0.75, point_angle_deg=118.0)
+    tool = ToolParams(teeth_z=1)
+    machine = MachineParams(rapid_ipm=200)
+    overhead = OverheadParams(approach_retract_in=0.2)
+
+    standard = estimate_time_min(drill_row, geom, tool, machine, overhead)
+    debug: dict[str, float] = {}
+    deep = estimate_time_min(deep_row, geom, tool, machine, overhead, debug=debug)
+
+    assert deep > standard
+    peck_val = debug.get("peck_min_per_hole")
+    assert peck_val is not None and peck_val > 0.0
+    rate = debug.get("deep_drill_peck_rate_min_per_in")
+    assert rate is not None
+    assert 0.05 <= rate <= 0.08
+
