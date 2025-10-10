@@ -46,6 +46,7 @@ from cad_quoter.config import (
 from cad_quoter.config import (
     describe_runtime_environment as _describe_runtime_environment,
 )
+from cad_quoter.utils.scrap import _estimate_scrap_from_stock_plan
 
 APP_ENV = AppEnvironment.from_env()
 
@@ -13910,6 +13911,13 @@ def compute_quote_from_df(
         baseline_data["process_plan_pricing"] = copy.deepcopy(planner_pricing_result)
     if planner_bucket_view is not None:
         baseline_data["process_plan_bucket_view"] = copy.deepcopy(planner_bucket_view)
+        planner_bucket_display_map_for_baseline = _extract_bucket_map(
+            planner_bucket_view
+        )
+        if planner_bucket_display_map_for_baseline:
+            baseline_data["planner_bucket_display_map"] = copy.deepcopy(
+                planner_bucket_display_map_for_baseline
+            )
     quote_state.baseline = baseline_data
     quote_state.process_plan = copy.deepcopy(process_plan_summary)
 
@@ -15705,8 +15713,14 @@ def compute_quote_from_df(
     breakdown["pricing_source"] = pricing_source
     if red_flag_messages:
         breakdown["red_flags"] = list(red_flag_messages)
+    planner_bucket_display_map_breakdown: dict[str, dict[str, Any]] | None = None
     if planner_bucket_view is not None:
+        planner_bucket_display_map_breakdown = _extract_bucket_map(planner_bucket_view)
         breakdown["bucket_view"] = copy.deepcopy(planner_bucket_view)
+        if planner_bucket_display_map_breakdown:
+            breakdown["planner_bucket_display_map"] = copy.deepcopy(
+                planner_bucket_display_map_breakdown
+            )
     if planner_bucket_rollup is not None:
         breakdown["planner_bucket_rollup"] = copy.deepcopy(planner_bucket_rollup)
 
@@ -15792,6 +15806,11 @@ def compute_quote_from_df(
         "red_flags": list(red_flag_messages),
         "app": dict(app_meta),
     }
+
+    if planner_bucket_display_map_breakdown:
+        result_payload["planner_bucket_display_map"] = copy.deepcopy(
+            planner_bucket_display_map_breakdown
+        )
 
     breakdown["speeds_feeds_path"] = speeds_feeds_path
     breakdown["speeds_feeds_loaded"] = speeds_feeds_loaded_flag
