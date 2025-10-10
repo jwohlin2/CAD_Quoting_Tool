@@ -699,12 +699,21 @@ def _holes_removed_mass_g(geo_ctx: Mapping[str, Any] | None) -> float | None:
     # thickness
     thickness_mm = None
     for key in ("thickness_mm", ("geo", "thickness_mm")):
+        raw: Any | None = None
         try:
             if isinstance(key, tuple):
-                thickness_mm = float(geo_ctx.get(key[0], {}).get(key[1]))
+                nested = geo_ctx.get(key[0])
+                if isinstance(nested, Mapping):
+                    raw = nested.get(key[1])
             else:
-                thickness_mm = float(geo_ctx.get(key))
+                raw = geo_ctx.get(key)
         except Exception:
+            raw = None
+        if raw in (None, ""):
+            continue
+        try:
+            thickness_mm = float(raw)
+        except (TypeError, ValueError):
             thickness_mm = None
         if thickness_mm and thickness_mm > 0:
             break
@@ -1426,11 +1435,14 @@ def sanitize_suggestions(s: dict, bounds: dict) -> dict:
         return flag
 
     # Flatten optional setup block into primary keys for backward compatibility.
-    setup_block = None
-    if isinstance(s.get("setup_recommendation"), dict):
-        setup_block = dict(s.get("setup_recommendation"))
-    elif isinstance(s.get("setup_plan"), dict):
-        setup_block = dict(s.get("setup_plan"))
+    setup_block: dict[str, Any] | None = None
+    setup_reco = s.get("setup_recommendation")
+    if isinstance(setup_reco, Mapping):
+        setup_block = dict(setup_reco)
+    else:
+        setup_plan = s.get("setup_plan")
+        if isinstance(setup_plan, Mapping):
+            setup_block = dict(setup_plan)
     if setup_block:
         for key in ("setups", "fixture", "notes"):
             if key not in s and setup_block.get(key) is not None:
