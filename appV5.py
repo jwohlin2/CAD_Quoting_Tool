@@ -102,7 +102,7 @@ def _jsonify_debug_value(value: Any, depth: int = 0, max_depth: int = 6) -> Any:
         return int(value)
     if isinstance(value, float):
         return float(value) if math.isfinite(value) else None
-    if isinstance(value, Mapping):
+    if isinstance(value, _MappingABC):
         return {
             str(key): _jsonify_debug_value(val, depth + 1, max_depth)
             for key, val in value.items()
@@ -231,7 +231,6 @@ from typing import (
     Protocol,
     Sequence,
     Tuple,
-    TypeAlias,
     TypeVar,
     cast,
     Literal,
@@ -239,10 +238,6 @@ from typing import (
     overload,
     TYPE_CHECKING,
 )
-
-
-Mapping: TypeAlias = _MappingABC
-MutableMapping: TypeAlias = _MutableMappingABC
 
 
 T = TypeVar("T")
@@ -388,7 +383,7 @@ def resolve_planner(
 def _count_recognized_ops(plan_summary: Mapping[str, Any] | None) -> int:
     """Return a conservative count of recognized planner operations."""
 
-    if not isinstance(plan_summary, Mapping):
+    if not isinstance(plan_summary, _MappingABC):
         return 0
     try:
         raw_ops = plan_summary.get("ops")
@@ -398,7 +393,7 @@ def _count_recognized_ops(plan_summary: Mapping[str, Any] | None) -> int:
         return 0
     count = 0
     for entry in raw_ops:
-        if isinstance(entry, Mapping):
+        if isinstance(entry, _MappingABC):
             count += 1
         elif entry is not None:
             try:
@@ -6247,11 +6242,11 @@ def _build_process_meta_lookup(
     """
 
     lookup: dict[str, dict[str, Any]] = {}
-    if not isinstance(process_meta, Mapping):
+    if not isinstance(process_meta, _MappingABC):
         return lookup
 
     for raw_key, raw_meta in process_meta.items():
-        if not isinstance(raw_meta, Mapping):
+        if not isinstance(raw_meta, _MappingABC):
             continue
         key_lower = str(raw_key).lower()
         meta_copy = dict(raw_meta)
@@ -10241,7 +10236,7 @@ def _make_time_overhead_params(
     """Instantiate ``OverheadParams`` handling optional index compatibility."""
 
     kwargs: dict[str, Any] = {}
-    if isinstance(params, Mapping):
+    if isinstance(params, _MappingABC):
         kwargs = {str(k): v for k, v in params.items()}
 
     index_kwarg: float | None = None
