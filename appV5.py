@@ -10478,16 +10478,20 @@ def estimate_drilling_hours(
                 )
                 overhead_for_calc = per_hole_overhead
             else:
+                try:
+                    overhead_local = overhead_for_calc
+                except (UnboundLocalError, NameError):  # pragma: no cover - safety net
+                    overhead_local = per_hole_overhead
                 peck_rate = to_float(
-                    overhead_for_calc.peck_penalty_min_per_in_depth
+                    overhead_local.peck_penalty_min_per_in_depth
                 )
                 peck_min = None
                 if peck_rate and depth_in and depth_in > 0:
                     peck_min = float(peck_rate) * float(depth_in)
-                dwell_val = to_float(overhead_for_calc.dwell_min)
+                dwell_val = to_float(overhead_local.dwell_min)
                 legacy_kwargs = {
                     "toolchange_min": 0.0,
-                    "approach_retract_in": overhead_for_calc.approach_retract_in,
+                    "approach_retract_in": overhead_local.approach_retract_in,
                     "peck_penalty_min_per_in_depth": None,
                     "dwell_min": dwell_val,
                     "peck_min": peck_min,
@@ -10743,15 +10747,19 @@ def estimate_drilling_hours(
                             summary["depth_min"] = float(depth_float)
                         if depth_max is None or float(depth_float) > depth_max:
                             summary["depth_max"] = float(depth_float)
+                    try:
+                        overhead_local = overhead_for_calc
+                    except (UnboundLocalError, NameError):  # pragma: no cover - safety net
+                        overhead_local = per_hole_overhead
                     peck_rate = to_float(
-                        overhead_for_calc.peck_penalty_min_per_in_depth
+                        overhead_local.peck_penalty_min_per_in_depth
                     )
                     if depth_float is not None and peck_rate is not None and peck_rate > 0:
                         peck_total = float(peck_rate) * float(depth_float)
                         if math.isfinite(peck_total) and peck_total > 0:
                             summary["peck_sum"] += peck_total * qty_for_debug
                             summary["peck_count"] += qty_for_debug
-                    dwell_val_float = to_float(overhead_for_calc.dwell_min)
+                    dwell_val_float = to_float(overhead_local.dwell_min)
                     if dwell_val_float is not None and dwell_val_float > 0:
                         summary["dwell_sum"] += float(dwell_val_float) * qty_for_debug
                         summary["dwell_count"] += qty_for_debug
@@ -10762,7 +10770,11 @@ def estimate_drilling_hours(
                         )
                     if index_min_val is None:
                         index_sec_val = to_float(
-                            getattr(overhead_for_calc, "index_sec_per_hole", None)
+                            getattr(
+                                overhead_local,
+                                "index_sec_per_hole",
+                                None,
+                            )
                         )
                         if index_sec_val is not None and index_sec_val > 0:
                             index_min_val = float(index_sec_val) / 60.0
