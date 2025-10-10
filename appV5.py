@@ -3382,28 +3382,29 @@ def upsert_var_row(df, item, value, dtype="number"):
 DIM_RE = re.compile(r"(?:ï¿½|DIAM|DIA)\s*([0-9.+-]+)|R\s*([0-9.+-]+)|([0-9.+-]+)\s*[xX]\s*([0-9.+-]+)")
 
 def load_drawing(path: Path) -> Drawing:
-    ezdxf = require_ezdxf()
+    ezdxf_mod = typing.cast(_EzdxfModule, require_ezdxf())
     if path.suffix.lower() == ".dwg":
         # Prefer explicit converter/wrapper if configured (works even if ODA isnï¿½t on PATH)
         exe = get_dwg_converter_path()
         if exe:
             dxf_path = convert_dwg_to_dxf(str(path))
-            return ezdxf.readfile(dxf_path)
+            return ezdxf_mod.readfile(dxf_path)
         # Fallback: odafc (requires ODAFileConverter on PATH)
-        if geometry.HAS_ODAFC:
-            return odafc.readfile(str(path))
+        if geometry.HAS_ODAFC and odafc is not None:
+            odafc_mod = typing.cast(_OdafcModule, odafc)
+            return odafc_mod.readfile(str(path))
         raise RuntimeError(
             "DWG import needs ODA File Converter. Set ODA_CONVERTER_EXE to the exe "
             "or place dwg2dxf_wrapper.bat next to the script."
         )
-    return ezdxf.readfile(str(path))  # DXF directly
+    return ezdxf_mod.readfile(str(path))  # DXF directly
 
 
 # ==== OpenCascade compat (works with OCP OR OCC.Core) ====
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any, Callable, Tuple
+from typing import Any, Callable, Protocol, Tuple, Type
 
 
 def _missing_uv_bounds(_: Any) -> Tuple[float, float, float, float]:
@@ -3412,6 +3413,21 @@ def _missing_uv_bounds(_: Any) -> Tuple[float, float, float, float]:
 
 def _missing_brep_read(_: str):
     raise RuntimeError("BREP read is unavailable")
+
+
+class _EzdxfModule(Protocol):
+    def readfile(
+        self,
+        filename: str,
+        encoding: str | None = ...,
+        errors: str | None = ...,
+    ) -> "Drawing":
+        ...
+
+
+class _OdafcModule(Protocol):
+    def readfile(self, filename: str) -> "Drawing":
+        ...
 
 
 BRepTools_UVBounds: Callable[[Any], Tuple[float, float, float, float]] = _missing_uv_bounds
@@ -3454,16 +3470,20 @@ try:
     BACKEND_OCC = "OCP"
 
     def _ocp_uv_bounds(face: TopoDS_Face) -> Tuple[float, float, float, float]:
-        return BRepTools.UVBounds(face)
+        tools = typing.cast(Any, BRepTools)
+        return tools.UVBounds(face)
 
 
     def _ocp_brep_read(path: str) -> TopoDS_Shape:
-        s = TopoDS_Shape()
-        builder = BRep_Builder()  # type: ignore[call-arg]
-        if hasattr(BRepTools, "Read_s"):
-            ok = BRepTools.Read_s(s, str(path), builder)
+        shape_cls = typing.cast(Type[Any], TopoDS_Shape)
+        s = shape_cls()
+        builder_cls = typing.cast(Type[Any], BRep_Builder)
+        builder = builder_cls()  # type: ignore[call-arg]
+        tools = typing.cast(Any, BRepTools)
+        if hasattr(tools, "Read_s"):
+            ok = tools.Read_s(s, str(path), builder)
         else:
-            ok = BRepTools.Read(s, str(path), builder)
+            ok = tools.Read(s, str(path), builder)
         if ok is False:
             raise RuntimeError("BREP read failed")
         return s
@@ -3518,9 +3538,9 @@ except Exception:
     # BRepGProp shim (pythonocc uses free functions)
     import OCC.Core.BRepGProp as _occ_brepgprop  # type: ignore[import]
 
-    brepgprop_LinearProperties = _occ_brepgprop.brepgprop_LinearProperties
-    brepgprop_SurfaceProperties = _occ_brepgprop.brepgprop_SurfaceProperties
-    brepgprop_VolumeProperties = _occ_brepgprop.brepgprop_VolumeProperties
+    brepgprop_LinearProperties = getattr(_occ_brepgprop, "brepgprop_LinearProperties")
+    brepgprop_SurfaceProperties = getattr(_occ_brepgprop, "brepgprop_SurfaceProperties")
+    brepgprop_VolumeProperties = getattr(_occ_brepgprop, "brepgprop_VolumeProperties")
     class _BRepGPropShim:
         @staticmethod
         def SurfaceProperties_s(shape_or_face, gprops): brepgprop_SurfaceProperties(shape_or_face, gprops)
@@ -3533,11 +3553,14 @@ except Exception:
 
 
     # UV bounds and brep read are free functions
-    from OCC.Core.BRepTools import BRepTools
-    from OCC.Core.BRepTools import breptools_Read as _occ_breptools_read
+    import OCC.Core.BRepTools as _occ_breptools_module
+
+    BRepTools = getattr(_occ_breptools_module, "BRepTools")
+    _occ_breptools_read = getattr(_occ_breptools_module, "breptools_Read")
 
     def _occ_uv_bounds(face: TopoDS_Face) -> Tuple[float, float, float, float]:
-        fn = getattr(BRepTools, "UVBounds", None)
+        tools = typing.cast(Any, BRepTools)
+        fn = getattr(tools, "UVBounds", None)
         if fn is None:
             from OCC.Core.BRepTools import breptools_UVBounds as _legacy
             return _legacy(face)
@@ -3545,8 +3568,11 @@ except Exception:
 
 
     def _occ_brep_read(path: str) -> TopoDS_Shape:
-        s = TopoDS_Shape()
-        ok = _occ_breptools_read(s, str(path), BRep_Builder())
+        shape_cls = typing.cast(Type[Any], TopoDS_Shape)
+        s = shape_cls()
+        builder_cls = typing.cast(Type[Any], BRep_Builder)
+        builder = builder_cls()
+        ok = _occ_breptools_read(s, str(path), builder)
         if not ok:
             raise RuntimeError("BREP read failed")
         return s
