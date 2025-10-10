@@ -202,6 +202,14 @@ from cad_quoter.domain_models import (
     normalize_material_key as _normalize_lookup_key,
 )
 from cad_quoter.coerce import to_float, to_int
+from cad_quoter.utils.geo_ctx import (
+    _collection_has_text,
+    _geo_mentions_outsourced,
+    _iter_geo_contexts,
+    _should_include_outsourced_pass,
+)
+from cad_quoter.utils.scrap import _coerce_scrap_fraction, _estimate_scrap_from_stock_plan
+from cad_quoter.utils.text import _match_items_contains, _to_noncapturing
 from cad_quoter.pricing import (
     LB_PER_KG,
     PricingEngine,
@@ -576,51 +584,7 @@ def _holes_removed_mass_g(geo_ctx: Mapping[str, Any] | None) -> float | None:
     return grams if grams > 0 else None
 
 
-def normalize_scrap_pct(val: Any, cap: float = 0.25) -> float:
-    """Return a clamped scrap fraction within ``[0, cap]``.
-
-    The helper accepts common UI inputs such as ``15`` (percent) or ``0.15``
-    (fraction) and gracefully handles ``None`` or empty strings by falling
-    back to ``0``.
-    """
-
-    try:
-        cap_val = float(cap)
-    except Exception:
-        cap_val = 0.25
-    if not math.isfinite(cap_val):
-        cap_val = 0.25
-    cap_val = max(0.0, cap_val)
-
-    if val is None:
-        raw = 0.0
-    elif isinstance(val, str):
-        stripped = val.strip()
-        if not stripped:
-            raw = 0.0
-        elif stripped.endswith("%"):
-            try:
-                raw = float(stripped.rstrip("%")) / 100.0
-            except Exception:
-                raw = 0.0
-        else:
-            try:
-                raw = float(stripped)
-            except Exception:
-                raw = 0.0
-    else:
-        try:
-            raw = float(val)
-        except Exception:
-            raw = 0.0
-
-    if not math.isfinite(raw):
-        raw = 0.0
-    if raw > 1.0:
-        raw = raw / 100.0
-    if raw < 0.0:
-        raw = 0.0
-    return min(cap_val, raw)
+normalize_scrap_pct = _coerce_scrap_fraction
 
 
 def _scrap_value_provided(val: Any) -> bool:
@@ -645,90 +609,6 @@ def _scrap_value_provided(val: Any) -> bool:
         return False
     return math.isfinite(parsed)
 
-
-def _estimate_scrap_from_stock_plan(geo_ctx: Mapping[str, Any] | None) -> tuple[float | None, str | None]:
-    """Attempt to infer a scrap fraction from stock planning hints."""
-
-    contexts: list[Mapping[str, Any]] = []
-    if isinstance(geo_ctx, Mapping):
-        contexts.append(geo_ctx)
-        inner = geo_ctx.get("geo")
-        if isinstance(inner, Mapping):
-            contexts.append(inner)
-
-    for ctx in contexts:
-        plan = ctx.get("stock_plan_guess") or ctx.get("stock_plan")
-        if not isinstance(plan, Mapping):
-            continue
-        net_vol = _coerce_float_or_none(plan.get("net_volume_in3"))
-        stock_vol = _coerce_float_or_none(plan.get("stock_volume_in3"))
-        scrap: float | None = None
-        if net_vol and net_vol > 0 and stock_vol and stock_vol > 0:
-            scrap = max(0.0, (stock_vol - net_vol) / net_vol)
-        else:
-            part_mass_lb = _coerce_float_or_none(plan.get("part_mass_lb"))
-            stock_mass_lb = _coerce_float_or_none(plan.get("stock_mass_lb"))
-            if part_mass_lb and part_mass_lb > 0 and stock_mass_lb and stock_mass_lb > 0:
-                scrap = max(0.0, (stock_mass_lb - part_mass_lb) / part_mass_lb)
-        if scrap is not None:
-            return min(0.25, float(scrap)), "stock_plan_guess"
-    return None, None
-
-
-def _match_items_contains(items: pd.Series, pattern: str) -> pd.Series:
-    """
-    Case-insensitive regex match over Items.
-    Convert capturing groups to non-capturing to avoid pandas warning.
-    Fall back to literal if regex fails.
-    """
-
-    pat = _to_noncapturing(pattern) if "_to_noncapturing" in globals() else pattern
-    try:
-        return items.str.contains(pat, case=False, regex=True, na=False)
-    except Exception:
-        return items.str.contains(re.escape(pattern), case=False, regex=True, na=False)
-
-
-def _iter_geo_contexts(geo_context: Mapping[str, Any] | None) -> Iterable[Mapping[str, Any]]:
-    if isinstance(geo_context, Mapping):
-        yield geo_context
-        inner = geo_context.get("geo")
-        if isinstance(inner, Mapping):
-            yield inner
-
-
-def _collection_has_text(value: Any) -> bool:
-    if isinstance(value, str):
-        return bool(value.strip())
-    if isinstance(value, Mapping):
-        for candidate in value.values():
-            if _collection_has_text(candidate):
-                return True
-        return False
-    if isinstance(value, (list, tuple, set)):
-        return any(_collection_has_text(candidate) for candidate in value)
-    return False
-
-
-def _geo_mentions_outsourced(geo_context: Mapping[str, Any] | None) -> bool:
-    for ctx in _iter_geo_contexts(geo_context):
-        if _collection_has_text(ctx.get("finishes")):
-            return True
-        if _collection_has_text(ctx.get("finish_flags")):
-            return True
-    return False
-
-
-def _should_include_outsourced_pass(
-    outsourced_cost: float, geo_context: Mapping[str, Any] | None
-) -> bool:
-    try:
-        cost_val = float(outsourced_cost)
-    except Exception:
-        cost_val = 0.0
-    if abs(cost_val) > 1e-6:
-        return True
-    return _geo_mentions_outsourced(geo_context)
 
 def _auto_accept_suggestions(suggestions: dict[str, Any] | None) -> dict[str, Any]:
     accept: dict[str, Any] = {}
@@ -18646,25 +18526,6 @@ def reconcile_holes(entity_holes_mm: Iterable[Any] | None, chart_ops: Iterable[d
         "chart_total": int(chart_total),
     }
 
-
-def _to_noncapturing(expr: str) -> str:
-    """
-    Convert every capturing '(' to non-capturing '(?:', preserving
-    escaped parens and existing '(?...)' constructs.
-    """
-    out: list[str] = []
-    i = 0
-    while i < len(expr):
-        ch = expr[i]
-        prev = expr[i - 1] if i > 0 else ''
-        nxt = expr[i + 1] if i + 1 < len(expr) else ''
-        if ch == '(' and prev != '\\' and nxt != '?':
-            out.append('(?:')
-            i += 1
-            continue
-        out.append(ch)
-        i += 1
-    return ''.join(out)
 
 def apply_2d_features_to_variables(df, g2d: dict, *, params: dict, rates: dict):
     """Write a few cycle-time rows based on 2D perimeter/holes so compute_quote_from_df() can price it."""
