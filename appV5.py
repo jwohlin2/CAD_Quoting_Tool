@@ -362,8 +362,6 @@ from OCP.TopExp   import TopExp, TopExp_Explorer
 from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
 from OCP.TopoDS   import TopoDS, TopoDS_Face, TopoDS_Shape
 from OCP.BRep     import BRep_Tool
-from OCP.BRepAdaptor import BRepAdaptor_Surface as _BAS
-
 import pandas as pd
 
 try:
