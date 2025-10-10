@@ -12273,6 +12273,7 @@ def compute_quote_from_df(
             thickness_mm / 25.4 if thickness_mm else 0.0,
         )
     drill_debug_lines: list[str] = []
+    drill_debug_entries: list[str] = drill_debug_lines  # backwards compatibility alias
     drill_debug_summary: dict[str, dict[str, Any]] = {}
     speeds_feeds_row: Mapping[str, Any] | None = None  # ensure defined in outer scope
     selected_op_name: str = "drill"  # default for debug display
