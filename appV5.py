@@ -464,6 +464,17 @@ def _canonical_amortized_label(label: Any) -> tuple[str, bool]:
 import pandas as pd
 from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    try:
+        from OCP.TopoDS import TopoDS_Shape as TopoDSShapeT  # type: ignore[import]
+    except ImportError:
+        try:
+            from OCC.Core.TopoDS import TopoDS_Shape as TopoDSShapeT  # type: ignore[import]
+        except ImportError:  # pragma: no cover - typing-only fallback
+            TopoDSShapeT = typing.Any
+else:
+    TopoDSShapeT = typing.Any
+
 try:  # Prefer pythonocc-core's OCP bindings when available
     from OCP.BRep import BRep_Tool  # type: ignore[import]
     from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE  # type: ignore[import]
@@ -3355,10 +3366,15 @@ except Exception:
     BACKEND_OCC = "OCC.Core"
 
     # BRepGProp shim (pythonocc uses free functions)
-    from OCC.Core.BRepGProp import (
-        brepgprop_LinearProperties,
-        brepgprop_SurfaceProperties,
-        brepgprop_VolumeProperties,
+    _occ_brepgprop_mod = importlib.import_module("OCC.Core.BRepGProp")
+    brepgprop_LinearProperties = getattr(
+        _occ_brepgprop_mod, "brepgprop_LinearProperties"
+    )
+    brepgprop_SurfaceProperties = getattr(
+        _occ_brepgprop_mod, "brepgprop_SurfaceProperties"
+    )
+    brepgprop_VolumeProperties = getattr(
+        _occ_brepgprop_mod, "brepgprop_VolumeProperties"
     )
     class _BRepGPropShim:
         @staticmethod
@@ -3372,15 +3388,16 @@ except Exception:
 
 
     # UV bounds and brep read are free functions
-    from OCC.Core.BRepTools import BRepTools
-    from OCC.Core.BRepTools import breptools_Read as _occ_breptools_read
+    _occ_breptools_mod = importlib.import_module("OCC.Core.BRepTools")
+    BRepTools = getattr(_occ_breptools_mod, "BRepTools")
+    _occ_breptools_read = getattr(_occ_breptools_mod, "breptools_Read")
     def BRepTools_UVBounds(face):
         fn = getattr(BRepTools, "UVBounds", None)
         if fn is None:
             from OCC.Core.BRepTools import breptools_UVBounds as _legacy
             return _legacy(face)
         return fn(face)
-    def _brep_read(path: str) -> TopoDS_Shape:
+    def _brep_read(path: str) -> TopoDSShapeT:
         s = TopoDS_Shape()
         ok = _occ_breptools_read(s, str(path), BRep_Builder())
         if ok is False:
@@ -3438,7 +3455,7 @@ def _shape_from_reader(reader):
 
     return healed
 
-def read_step_shape(path: str) -> TopoDS_Shape:
+def read_step_shape(path: str) -> TopoDSShapeT:
     rdr = STEPControl_Reader()
     if rdr.ReadFile(path) != IFSelect_RetDone:
         raise RuntimeError("STEP read failed (file unreadable or unsupported).")
@@ -3486,16 +3503,13 @@ def read_step_shape(path: str) -> TopoDS_Shape:
     fx.Perform()
     return fx.Shape()
 
-from OCP.TopoDS import TopoDS_Shape  # type: ignore[import]  # or OCC.Core.TopoDS on pythonocc
-
-
-def safe_bbox(shape: TopoDS_Shape):
+def safe_bbox(shape: TopoDSShapeT):
     if shape is None or shape.IsNull():
         raise ValueError("Cannot compute bounding box of a null shape.")
     box = Bnd_Box()
     bnd_add(shape, box, True)  # <- uses whichever binding is available
     return box
-def read_step_or_iges_or_brep(path: str) -> TopoDS_Shape:
+def read_step_or_iges_or_brep(path: str) -> TopoDSShapeT:
     p = Path(path)
     ext = p.suffix.lower()
     if ext in (".step", ".stp"):
@@ -3538,6 +3552,7 @@ def convert_dwg_to_dxf(dwg_path: str, *, out_ver="ACAD2018") -> str:
     out_dxf = out_dir / (dwg.stem + ".dxf")
 
     exe_lower = Path(exe).name.lower()
+    cmd: list[str] = []
     try:
         if exe_lower.endswith(".bat") or exe_lower.endswith(".cmd"):
             # ? run batch via cmd.exe so it actually executes
