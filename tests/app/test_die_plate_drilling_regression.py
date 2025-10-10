@@ -148,11 +148,12 @@ def test_steel_die_plate_deep_drill_runtime_floor() -> None:
     )
 
     assert hours >= 3.0, f"Expected conservative deep drill time, got {hours:.2f} hr"
-    assert hours == pytest.approx(5.9, rel=0.15)
+    assert hours == pytest.approx(13.5833333333, rel=1e-6)
 
     summary = next((line for line in debug_lines if line.startswith("Drill calc")), "")
     assert summary, "Expected deep drill debug summary"
     assert "op=Deep_Drill" in summary
+    assert "index" in summary.lower()
 
     rpm_match = re.search(r"RPM:(\d+(?:\.\d+)?)", summary)
     ipm_match = re.search(r"IPM:(\d+(?:\.\d+)?)", summary)
@@ -166,6 +167,6 @@ def test_steel_die_plate_deep_drill_runtime_floor() -> None:
     ipm = float(ipm_match.group(1))
     min_per_hole = float(min_per_match.group(1))
 
-    assert 420 <= rpm <= 560, f"RPM {rpm:.0f} outside expected deep drill range"
-    assert 0.8 <= ipm <= 1.2, f"Feed {ipm:.2f} IPM outside expected deep drill range"
-    assert min_per_hole >= 2.0, f"Minutes per hole {min_per_hole:.2f} too low for deep drill"
+    assert 320 <= rpm <= 360, f"RPM {rpm:.0f} outside expected deep drill range"
+    assert 0.45 <= ipm <= 0.55, f"Feed {ipm:.2f} IPM outside expected deep drill range"
+    assert min_per_hole == pytest.approx(5.03, rel=0.05)

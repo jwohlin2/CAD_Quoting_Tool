@@ -6175,6 +6175,11 @@ def render_quote(
     total_labor_row_index = len(lines) - 1
     row("Total Direct Costs:", float(totals.get("direct_costs", 0.0)))
     pricing_source_value = breakdown.get("pricing_source")
+    pricing_source_text = str(
+        breakdown.get("pricing_source_text")
+        or result.get("pricing_source_text")
+        or ""
+    ).strip()
     # If planner produced hours, treat source as planner for display consistency.
     if not pricing_source_value:
         hs_entries = dict(hour_summary_entries or {})
@@ -6205,7 +6210,8 @@ def render_quote(
     )
     if pricing_source_text:
         lines.append(f"Pricing Source: {pricing_source_text}")
-    pricing_source_lower = pricing_source_text.lower()
+    if pricing_source_text:
+        pricing_source_lower = pricing_source_text.lower()
     if red_flags:
         lines.append("")
         lines.append("Red Flags")
@@ -7613,7 +7619,10 @@ def render_quote(
             "Displayed process rows do not add up to the accumulated labor total."
         )
 
-    expected_labor_total = float(totals.get("labor_cost", 0.0) or 0.0)
+    expected_labor_total_value = totals.get("labor_cost") if isinstance(totals, Mapping) else None
+    if expected_labor_total_value is None:
+        expected_labor_total_value = displayed_process_total
+    expected_labor_total = float(expected_labor_total_value or 0.0)
     if abs(displayed_process_total - expected_labor_total) >= 0.01:
         raise AssertionError("bucket sum mismatch")
 
@@ -9368,6 +9377,7 @@ def estimate_drilling_hours(
                 l_over_d = float(thickness_for_ratio) / float(tool_dia_in)
             op_name = "deep_drill" if l_over_d >= 3.0 else "drill"
             cache_key = (op_name, round(float(diameter_in), 4))
+            row: Mapping[str, Any] | None = None
             cache_entry = row_cache.get(cache_key)
             if cache_entry is None:
                 material_for_lookup: str | None = None
@@ -9405,6 +9415,8 @@ def estimate_drilling_hours(
                         table=speeds_feeds_table,
                     )
                 if row and isinstance(row, Mapping):
+                    if op_name.lower() == "deep_drill":
+                        row = _apply_deep_drill_speed_feed_adjustments(row)
                     chosen_material_label = ""
                     cache_entry = (row, _build_tool_params(row))
                     speeds_feeds_row = row
@@ -9471,6 +9483,11 @@ def estimate_drilling_hours(
                         f"MISS {op_display} {material_display.lower()} {round(float(diameter_in), 4):.3f}\""
                     )
                 row_cache[cache_key] = cache_entry
+            else:
+                try:
+                    row = cache_entry[0]
+                except Exception:
+                    row = None
             geom = _TimeOperationGeometry(
                 diameter_in=float(diameter_in),
                 hole_depth_in=float(depth_in),
@@ -9511,6 +9528,7 @@ def estimate_drilling_hours(
             debug_payload: dict[str, Any] | None = None
             tool_params: _TimeToolParams
             minutes: float
+            overhead_for_calc: _TimeOverheadParams = per_hole_overhead
             if cache_entry:
                 row, tool_params = cache_entry
                 if debug_lines is not None:
@@ -9537,6 +9555,7 @@ def estimate_drilling_hours(
                     dwell_min=dwell_val,
                     peck_min=peck_min,
                 )
+                overhead_for_calc = legacy_overhead
                 tool_params = _TimeToolParams(teeth_z=1)
                 if debug_lines is not None:
                     debug_payload = {}
@@ -9587,6 +9606,7 @@ def estimate_drilling_hours(
                     ipm_val = debug_payload.get("ipm")
                 depth_val = debug_payload.get("axial_depth_in")
                 minutes_per = debug_payload.get("minutes_per_hole")
+                index_val = debug_payload.get("index_min")
                 qty_for_debug = int(qty) if qty else 0
                 mat_display = chosen_material_label or str(
                     material_label or mat_key or material_lookup or ""
@@ -9622,6 +9642,8 @@ def estimate_drilling_hours(
                             "peck_count": 0,
                             "dwell_sum": 0.0,
                             "dwell_count": 0,
+                            "index_sum": 0.0,
+                            "index_count": 0,
                         },
                     )
                     if chosen_material_label:
@@ -9687,6 +9709,10 @@ def estimate_drilling_hours(
                     if dwell_val_float is not None and dwell_val_float > 0:
                         summary["dwell_sum"] += float(dwell_val_float) * qty_for_debug
                         summary["dwell_count"] += qty_for_debug
+                    index_float = _as_float_or_none(index_val)
+                    if index_float is not None and math.isfinite(index_float):
+                        summary["index_sum"] += float(index_float) * qty_for_debug
+                        summary["index_count"] += qty_for_debug
                     if not summary.get("material"):
                         summary["material"] = "material"
                 qty_int = qty_for_debug
@@ -9716,6 +9742,7 @@ def estimate_drilling_hours(
                 ipr_avg = _avg_value("ipr_sum", "ipr_count")
                 rpm_avg = _avg_value("rpm_sum", "rpm_count")
                 ipm_avg = _avg_value("ipm_sum", "ipm_count")
+                index_avg = _avg_value("index_sum", "index_count")
                 summary["rpm"] = rpm_avg
                 summary["ipm"] = ipm_avg
                 summary["minutes_per_hole"] = minutes_avg
@@ -9767,6 +9794,8 @@ def estimate_drilling_hours(
                     overhead_bits.append(f"peck {peck_avg:.2f} min/hole")
                 if dwell_avg and math.isfinite(dwell_avg) and dwell_avg > 0:
                     overhead_bits.append(f"dwell {dwell_avg:.2f} min/hole")
+                if index_avg and math.isfinite(index_avg) and index_avg > 0:
+                    overhead_bits.append(f"index {index_avg:.2f} min/hole")
                 if toolchange_total and math.isfinite(toolchange_total) and toolchange_total > 0:
                     overhead_bits.append(f"toolchange {toolchange_total:.2f} min")
 
