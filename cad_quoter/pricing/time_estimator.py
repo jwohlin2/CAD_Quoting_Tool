@@ -71,6 +71,7 @@ class OverheadParams:
     peck_penalty_min_per_in_depth: float | None = None
     dwell_min: float | None = None
     peck_min: float | None = None
+    index_sec_per_hole: float | None = None
 
 
 class _RowView:
