@@ -10053,14 +10053,14 @@ def estimate_drilling_hours(
     mat = str(material_label or mat_key or "").lower()
     material_factor = _unit_hp_cap(material_label)
     # ``debug_state`` collects aggregate drilling metrics for callers that
-    # requested debugging information.  A previous refactor attempted to use a
-    # ``debug`` variable without guaranteeing it was defined, which manifested
-    # as a ``NameError`` during quoting.  Initialise the container up-front and
-    # only populate it when a caller has supplied either ``debug_lines`` or
-    # ``debug_summary``.
+    # requested debugging information.  Older revisions attempted to update a
+    # ``debug`` mapping without first defining it, which triggered a
+    # ``NameError`` during quoting.  Initialise the container up-front and create a
+    # ``debug`` alias for any legacy references inside this function.
     debug_state: dict[str, Any] | None = None
     if (debug_lines is not None) or (debug_summary is not None):
         debug_state = {}
+    debug: dict[str, Any] | None = debug_state
 
     debug_list = debug_lines if debug_lines is not None else None
     if debug_summary is not None:
@@ -10954,7 +10954,8 @@ def estimate_drilling_hours(
                 if overhead_bits:
                     line_parts.append("overhead: " + ", ".join(overhead_bits) + "; ")
                 line_parts.append(f"total hr {total_hours:.2f}.")
-                debug_lines.append("".join(line_parts))
+                if debug_lines is not None:
+                    debug_lines.append("".join(line_parts))
                 if debug_summary is not None:
                     debug_summary[op_key] = _jsonify_debug_value(summary)
         if missing_row_messages and warnings is not None:
@@ -10968,12 +10969,12 @@ def estimate_drilling_hours(
                     warnings.append(warning_text)
         total_minutes_with_toolchange = total_min + total_toolchange_min
 
-        if debug_state is not None and total_holes > 0:
+        if debug is not None and total_holes > 0:
             try:
                 avg_dia_in = float(avg_dia_in)
             except Exception:
                 avg_dia_in = 0.0
-            debug_state.update(
+            debug.update(
                 {
                     "thickness_in": float(thickness_in or 0.0),
                     "avg_dia_in": float(avg_dia_in),
@@ -11035,9 +11036,9 @@ def estimate_drilling_hours(
         # aggregate counts and weighted diameter
         weighted_dia_in += (float(d) / 25.4) * qty_int
 
-    if debug_state is not None and holes_fallback > 0:
+    if debug is not None and holes_fallback > 0:
         avg_dia_in = weighted_dia_in / holes_fallback if holes_fallback else 0.0
-        debug_state.update(
+        debug.update(
             {
                 "thickness_in": float(thickness_in or 0.0),
                 "avg_dia_in": float(avg_dia_in),
@@ -11049,8 +11050,8 @@ def estimate_drilling_hours(
                 "hole_count": int(holes_fallback),
             }
         )
-    elif debug_state is not None:
-        debug_state.update(
+    elif debug is not None:
+        debug.update(
             {
                 "thickness_in": float(thickness_in or 0.0),
                 "avg_dia_in": 0.0,
@@ -11063,8 +11064,8 @@ def estimate_drilling_hours(
             }
         )
 
-    if debug_summary is not None and debug_state is not None:
-        debug_summary.setdefault("aggregate", {}).update(debug_state)
+    if debug_summary is not None and debug is not None:
+        debug_summary.setdefault("aggregate", {}).update(debug)
 
     hours = total_sec / 3600.0
     depth_for_bounds = None
