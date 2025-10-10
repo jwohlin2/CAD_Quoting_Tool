@@ -1,4 +1,3 @@
-﻿
 # -*- coding: utf-8 -*-
 # app_gui_occ_flow_v8_single_autollm.py
 """
@@ -400,36 +399,6 @@ def build_geo_from_dxf(path: str) -> dict:
         raise RuntimeError("DXF enrichment helper is unavailable")
     return loader(path)
 
-# Geometry helpers (re-exported for backward compatibility)
-load_model = geometry.load_model
-load_cad_any = geometry.load_cad_any
-read_cad_any = geometry.read_cad_any
-read_step_shape = geometry.read_step_shape
-read_step_or_iges_or_brep = geometry.read_step_or_iges_or_brep
-convert_dwg_to_dxf = geometry.convert_dwg_to_dxf
-enrich_geo_occ = geometry.enrich_geo_occ
-enrich_geo_stl = geometry.enrich_geo_stl
-safe_bbox = geometry.safe_bbox
-safe_bounding_box = geometry.safe_bounding_box
-iter_solids = geometry.iter_solids
-explode_compound = geometry.explode_compound
-parse_hole_table_lines = geometry.parse_hole_table_lines
-extract_text_lines_from_dxf = geometry.extract_text_lines_from_dxf
-contours_from_polylines = geometry.contours_from_polylines
-holes_from_circles = geometry.holes_from_circles
-text_harvest = geometry.text_harvest
-extract_entities = geometry.extract_entities
-read_dxf = geometry.read_dxf
-upsert_var_row = geometry.upsert_var_row
-require_ezdxf = geometry.require_ezdxf
-get_dwg_converter_path = geometry.get_dwg_converter_path
-have_dwg_support = geometry.have_dwg_support
-get_import_diagnostics_text = geometry.get_import_diagnostics_text
-_HAS_TRIMESH = geometry.HAS_TRIMESH
-_HAS_EZDXF = geometry.HAS_EZDXF
-_HAS_ODAFC = geometry.HAS_ODAFC
-_EZDXF_VER = geometry.EZDXF_VERSION
-
 SCRAP_DEFAULT_GUESS = 0.15
 
 
@@ -818,158 +787,6 @@ try:  # Optional dependency – ezdxf may be missing in some environments.
     import ezdxf  # type: ignore
 except Exception:  # pragma: no cover - import guard
     ezdxf = None  # type: ignore[assignment]
-
-
-def read_step(path: str) -> "TopoDS_Shape":
-    """Wrapper around :func:`read_step_shape` with extra validation."""
-
-    shape = read_step_shape(str(path))
-    if shape is None or shape.IsNull():
-        raise RuntimeError("STEP produced an empty shape")
-    return shape
-
-
-def compute_mass_props(shape) -> Dict[str, float | None]:
-    """Return volume/area mass properties for ``shape``."""
-
-    if shape is None or (hasattr(shape, "IsNull") and shape.IsNull()):
-        raise ValueError("shape must be a valid TopoDS_Shape")
-
-    surf_props = GProp_GProps()
-    BRepGProp.SurfaceProperties_s(shape, surf_props)
-    area = float(surf_props.Mass())
-
-    vol_props = GProp_GProps()
-    BRepGProp.VolumeProperties_s(shape, vol_props)
-    volume = float(vol_props.Mass())
-
-    return {"volume_mm3": volume, "area_mm2": area, "mass_kg": None}
-
-
-def find_cylindrical_faces(shape) -> List[Dict[str, Any]]:
-    """Return cylindrical faces with basic geometric descriptors."""
-
-    results: List[Dict[str, Any]] = []
-    if shape is None or (hasattr(shape, "IsNull") and shape.IsNull()):
-        return results
-
-    try:
-        from OCP.GeomAbs import GeomAbs_Cylinder  # type: ignore
-    except Exception:
-        from OCC.Core.GeomAbs import GeomAbs_Cylinder  # type: ignore
-
-    explorer = TopExp_Explorer(shape, TopAbs_FACE)
-    while explorer.More():
-        try:
-            face = ensure_face(explorer.Current())
-        except Exception:
-            explorer.Next()
-            continue
-
-        try:
-            surf_adaptor = _BAS(face)
-            st = surf_adaptor.GetType()
-        except Exception:
-            explorer.Next()
-            continue
-
-        if st != GeomAbs_Cylinder:
-            explorer.Next()
-            continue
-
-        try:
-            cylinder = surf_adaptor.Cylinder()
-            axis = cylinder.Axis()
-            loc = axis.Location()
-            direction = axis.Direction()
-            results.append(
-                {
-                    "face": face,
-                    "r_mm": float(cylinder.Radius()),
-                    "axis": [loc.X(), loc.Y(), loc.Z()],
-                    "dir": [direction.X(), direction.Y(), direction.Z()],
-                }
-            )
-        except Exception:
-            pass
-
-        explorer.Next()
-
-    return results
-
-
-def detect_through_holes(shape, cyl_faces: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Best-effort through-hole classification from cylindrical faces."""
-
-    holes: List[Dict[str, Any]] = []
-    if shape is None or (hasattr(shape, "IsNull") and shape.IsNull()):
-        return holes
-
-    for idx, entry in enumerate(cyl_faces):
-        radius = float(entry.get("r_mm", 0.0))
-        axis = entry.get("axis")
-        direction = entry.get("dir")
-        holes.append(
-            {
-                "dia_mm": radius * 2.0 if radius else None,
-                "depth_mm": None,
-                "thru": None,
-                "axis": {"origin": axis, "dir": direction},
-                "face_id": idx,
-                "source": "step_cyl",
-            }
-        )
-
-    return holes
-
-
-def find_planar_pockets(shape) -> List[Dict[str, Any]]:
-    """Return planar faces as pocket placeholders with area estimates."""
-
-    pockets: List[Dict[str, Any]] = []
-    if shape is None or (hasattr(shape, "IsNull") and shape.IsNull()):
-        return pockets
-
-    try:
-        from OCP.GeomAbs import GeomAbs_Plane  # type: ignore
-    except Exception:
-        from OCC.Core.GeomAbs import GeomAbs_Plane  # type: ignore
-
-    explorer = TopExp_Explorer(shape, TopAbs_FACE)
-    while explorer.More():
-        try:
-            face = ensure_face(explorer.Current())
-        except Exception:
-            explorer.Next()
-            continue
-
-        try:
-            surf_adaptor = _BAS(face)
-            st = surf_adaptor.GetType()
-        except Exception:
-            explorer.Next()
-            continue
-
-        if st != GeomAbs_Plane:
-            explorer.Next()
-            continue
-
-        try:
-            props = GProp_GProps()
-            BRepGProp.SurfaceProperties_s(face, props)
-            pockets.append(
-                {
-                    "depth_mm": None,
-                    "floor_area_mm2": float(props.Mass()),
-                    "source": "step_planar",
-                }
-            )
-        except Exception:
-            pass
-
-        explorer.Next()
-
-    return pockets
 
 from cad_quoter.domain import QuoteState
 
@@ -19782,22 +19599,22 @@ class GeometryLoader:
         return extract_2d_features_from_dxf_or_dwg(str(path))
 
     def extract_features_with_occ(self, path: str | Path):
-        return extract_features_with_occ(str(path))
+        return geometry.extract_features_with_occ(str(path))
 
     def enrich_geo_stl(self, path: str | Path):
-        return enrich_geo_stl(str(path))
+        return geometry.enrich_geo_stl(str(path))
 
     def read_step_shape(self, path: str | Path) -> TopoDS_Shape:
-        return read_step_shape(str(path))
+        return geometry.read_step_shape(str(path))
 
     def read_cad_any(self, path: str | Path) -> TopoDS_Shape:
-        return read_cad_any(str(path))
+        return geometry.read_cad_any(str(path))
 
     def safe_bbox(self, shape: TopoDS_Shape):
-        return safe_bbox(shape)
+        return geometry.safe_bbox(shape)
 
     def enrich_geo_occ(self, shape: TopoDS_Shape):
-        return enrich_geo_occ(shape)
+        return geometry.enrich_geo_occ(shape)
 
 
 @dataclass(slots=True)
