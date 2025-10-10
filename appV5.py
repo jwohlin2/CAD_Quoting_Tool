@@ -15678,11 +15678,11 @@ def compute_quote_from_df(
                 process_costs[key] = round(hr_val * rate_val + base_extra_val, 2)
         process_hours_final = _collect_process_hours()
 
-    meta_lookup = process_meta if isinstance(process_meta, dict) else {}
     for proc_key, final_hr in process_hours_final.items():
         if pricing_source == "planner" and proc_key not in process_costs:
             continue
-        meta = meta_lookup.get(proc_key) or {}
+        raw_meta = process_meta.get(proc_key) if isinstance(process_meta, Mapping) else None
+        meta = raw_meta if isinstance(raw_meta, Mapping) else {}
         try:
             rate = float(meta.get("rate", 0.0) or 0.0)
         except Exception:
