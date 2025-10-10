@@ -23,9 +23,7 @@ import re
 import time
 import typing
 from collections import Counter
-from collections.abc import Mapping as _CABCM
-
-Mapping = _CABCM
+from collections.abc import Mapping as _MappingABC
 from dataclasses import (
     asdict,
     dataclass,
@@ -137,6 +135,9 @@ from typing import (
     overload,
     TYPE_CHECKING,
 )
+
+
+Mapping: TypeAlias = _MappingABC
 
 
 T = TypeVar("T")
@@ -1020,8 +1021,6 @@ try:
 except Exception:
     build_geo_from_dxf_path = None  # type: ignore[assignment]
 
-
-_MappingABC = _CABCM
 
 _build_geo_from_dxf_hook: Optional[Callable[[str], Dict[str, Any]]] = None
 
