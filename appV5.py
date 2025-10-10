@@ -10317,6 +10317,7 @@ def estimate_drilling_hours(
     avg_dia_in = 0.0
     seen_debug: set[str] = set()
     chosen_material_label: str = ""
+    operation_debug_data: dict[str, dict[str, Any]] = {}
 
     def _log_debug(entry: str) -> None:
         if debug_list is None:
@@ -10761,6 +10762,37 @@ def estimate_drilling_hours(
                 continue
             if qty_int <= 0:
                 continue
+            op_key = str(op_name or "").strip().lower() or "drill"
+            op_entry = operation_debug_data.setdefault(
+                op_key,
+                {
+                    "qty": 0,
+                    "row": None,
+                    "precomputed": None,
+                    "material": None,
+                    "diameter_weight_sum": 0.0,
+                    "diameter_qty_sum": 0,
+                },
+            )
+            op_entry["qty"] += qty_int
+            if row and isinstance(row, _MappingABC):
+                op_entry["row"] = row
+            if precomputed_speeds:
+                op_entry["precomputed"] = dict(precomputed_speeds)
+            if chosen_material_label:
+                op_entry["material"] = chosen_material_label
+            else:
+                fallback_material = str(
+                    material_label or mat_key or material_lookup or ""
+                ).strip()
+                if fallback_material:
+                    op_entry.setdefault("material", fallback_material)
+            if (
+                diameter_float is not None
+                and math.isfinite(float(diameter_float))
+            ):
+                op_entry["diameter_weight_sum"] += float(diameter_float) * qty_int
+                op_entry["diameter_qty_sum"] += qty_int
             total_holes += qty_int
             total_min += minutes * qty_int
             toolchange_added = 0.0
@@ -12850,6 +12882,8 @@ def compute_quote_from_df(
     selected_op_name: str = "drill"  # default for debug display
     avg_dia_in = 0.0
     speeds_feeds_summary: Mapping[str, Any] | None = None
+    speeds_feeds_row: Mapping[str, Any] | None = None
+    selected_precomputed: dict[str, float] = {}
     material_display_for_debug: str = ""
 
     if not material_display_for_debug:
@@ -12917,7 +12951,9 @@ def compute_quote_from_df(
             ):
                 best_qty = qty_float
                 best_minutes = minutes_float
-                selected_op_name = str(op_key or selected_op_name).strip() or selected_op_name
+                selected_op_name = (
+                    str(op_key or selected_op_name).strip() or selected_op_name
+                )
                 speeds_feeds_summary = summary
         if speeds_feeds_summary:
             weight_sum = _coerce_float_or_none(
@@ -12943,15 +12979,88 @@ def compute_quote_from_df(
                             avg_dia_in = float(dia_val)
                             break
 
+    op_debug_map = locals().get("operation_debug_data")
+    if not isinstance(op_debug_map, dict):
+        op_debug_map = {}
+    selected_entry = op_debug_map.get(selected_op_name)
+    if (
+        (selected_entry is None or selected_entry.get("qty", 0) <= 0)
+        and op_debug_map
+    ):
+        best_key, best_entry = max(
+            op_debug_map.items(),
+            key=lambda item: item[1].get("qty", 0),
+        )
+        selected_op_name = best_key
+        selected_entry = best_entry
+    if selected_entry:
+        entry_row = selected_entry.get("row")
+        if isinstance(entry_row, _MappingABC):
+            speeds_feeds_row = entry_row
+        else:
+            speeds_feeds_row = entry_row if entry_row is not None else speeds_feeds_row
+        precomputed_candidate = selected_entry.get("precomputed")
+        if isinstance(precomputed_candidate, dict):
+            selected_precomputed = precomputed_candidate
+        material_candidate = selected_entry.get("material")
+        if material_candidate and not chosen_material_label:
+            chosen_material_label = str(material_candidate)
+        if avg_dia_in <= 0:
+            qty_sum = selected_entry.get("diameter_qty_sum") or 0
+            weight_sum = selected_entry.get("diameter_weight_sum") or 0.0
+            if qty_sum:
+                try:
+                    avg_dia_in = float(weight_sum) / float(qty_sum)
+                except (TypeError, ValueError, ZeroDivisionError):
+                    pass
+
     drill_debug_line: str | None = None
-    if speeds_feeds_summary and avg_dia_in > 0:
-        rpm_val = _coerce_float_or_none(speeds_feeds_summary.get("rpm"))
-        ipm_val = _coerce_float_or_none(speeds_feeds_summary.get("ipm"))
+    if (speeds_feeds_summary or speeds_feeds_row) and avg_dia_in > 0:
+        def _lookup_mapping_value(source: Any, key: str) -> Any:
+            if source is None:
+                return None
+            getter = getattr(source, "get", None)
+            if callable(getter):
+                try:
+                    return getter(key)
+                except Exception:
+                    pass
+            try:
+                return source[key]  # type: ignore[index]
+            except Exception:
+                return getattr(source, key, None)
+
+        source_mapping = speeds_feeds_summary or speeds_feeds_row
+        rpm_val = _coerce_float_or_none(_lookup_mapping_value(source_mapping, "rpm"))
+        if (rpm_val is None or rpm_val <= 0) and selected_precomputed:
+            rpm_val = _coerce_float_or_none(selected_precomputed.get("rpm"))
+        if rpm_val is None or rpm_val <= 0:
+            sfm_source = _coerce_float_or_none(
+                _lookup_mapping_value(source_mapping, "sfm")
+            )
+            if (sfm_source is None or sfm_source <= 0) and selected_precomputed:
+                sfm_source = _coerce_float_or_none(selected_precomputed.get("sfm"))
+            if sfm_source and avg_dia_in > 0:
+                try:
+                    rpm_candidate = (float(sfm_source) * 12.0) / (
+                        math.pi * float(avg_dia_in)
+                    )
+                except (TypeError, ValueError, ZeroDivisionError):
+                    rpm_candidate = None
+                if rpm_candidate is not None and math.isfinite(rpm_candidate):
+                    rpm_val = float(rpm_candidate)
+        ipm_val = _coerce_float_or_none(_lookup_mapping_value(source_mapping, "ipm"))
+        if (ipm_val is None or ipm_val <= 0) and selected_precomputed:
+            ipm_val = _coerce_float_or_none(selected_precomputed.get("ipm"))
 
         ipr_val: float | None = None
         if ipm_val is None or ipm_val <= 0:
-            ipr_sum = _coerce_float_or_none(speeds_feeds_summary.get("ipr_sum"))
-            ipr_count = _coerce_float_or_none(speeds_feeds_summary.get("ipr_count"))
+            ipr_sum = _coerce_float_or_none(
+                _lookup_mapping_value(source_mapping, "ipr_sum")
+            )
+            ipr_count = _coerce_float_or_none(
+                _lookup_mapping_value(source_mapping, "ipr_count")
+            )
             if (
                 ipr_sum is not None
                 and ipr_count is not None
@@ -12960,17 +13069,30 @@ def compute_quote_from_df(
                 ipr_val = float(ipr_sum) / float(ipr_count)
             if ipr_val is None or ipr_val <= 0:
                 ipr_min = _coerce_float_or_none(
-                    speeds_feeds_summary.get("ipr_effective_min")
-                    or speeds_feeds_summary.get("ipr_min")
+                    _lookup_mapping_value(source_mapping, "ipr_effective_min")
+                    or _lookup_mapping_value(source_mapping, "ipr_min")
                 )
                 ipr_max = _coerce_float_or_none(
-                    speeds_feeds_summary.get("ipr_effective_max")
-                    or speeds_feeds_summary.get("ipr_max")
+                    _lookup_mapping_value(source_mapping, "ipr_effective_max")
+                    or _lookup_mapping_value(source_mapping, "ipr_max")
                 )
                 if ipr_min is not None and ipr_min > 0:
                     ipr_val = float(ipr_min)
                 elif ipr_max is not None and ipr_max > 0:
                     ipr_val = float(ipr_max)
+        if (ipr_val is None or ipr_val <= 0) and selected_precomputed:
+            ipr_val = _coerce_float_or_none(selected_precomputed.get("ipr"))
+        if (
+            (ipr_val is None or ipr_val <= 0)
+            and rpm_val is not None
+            and rpm_val > 0
+            and ipm_val is not None
+            and ipm_val > 0
+        ):
+            try:
+                ipr_val = float(ipm_val) / float(rpm_val)
+            except (TypeError, ValueError, ZeroDivisionError):
+                ipr_val = None
 
         debug_bits: list[str] = []
         if rpm_val and rpm_val > 0:
