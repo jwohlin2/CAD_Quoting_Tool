@@ -17526,6 +17526,46 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
     return geo
 
 
+def _extract_entity_text(entity: Any) -> str:
+    """Return the textual content for TEXT/MTEXT entities.
+
+    ezdxf exposes ``plain_text`` on MTEXT entities only, so we guard the
+    attribute access at runtime and keep static type-checkers happy by using
+    ``getattr`` instead of attribute access directly on ``DXFEntity``.
+    """
+
+    if entity is None:
+        return ""
+
+    plain_callable = getattr(entity, "plain_text", None)
+    text_value: Any
+    if callable(plain_callable):
+        try:
+            text_value = plain_callable()
+        except Exception:
+            text_value = None
+    else:
+        text_value = None
+
+    if not text_value:
+        dxf_attr = getattr(entity, "dxf", None)
+        text_value = getattr(dxf_attr, "text", None) if dxf_attr is not None else None
+
+    return str(text_value).strip() if text_value else ""
+
+
+def _coerce_int_or_zero(value: Any) -> int:
+    """Coerce ``value`` to an integer, returning ``0`` on failure."""
+
+    coerced = _coerce_float_or_none(value)
+    if coerced is None:
+        return 0
+    try:
+        return int(coerced)
+    except Exception:
+        return 0
+
+
 def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     ezdxf_mod = require_ezdxf()
 
@@ -17700,18 +17740,31 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     if chart_summary:
         geo.setdefault("chart_summary", chart_summary)
         if chart_summary.get("tap_qty"):
-            geo["tap_qty"] = max(int(geo.get("tap_qty", 0) or 0), int(chart_summary.get("tap_qty") or 0))
+            geo["tap_qty"] = max(
+                _coerce_int_or_zero(geo.get("tap_qty")),
+                _coerce_int_or_zero(chart_summary.get("tap_qty")),
+            )
         if chart_summary.get("cbore_qty"):
-            geo["cbore_qty"] = max(int(geo.get("cbore_qty", 0) or 0), int(chart_summary.get("cbore_qty") or 0))
+            geo["cbore_qty"] = max(
+                _coerce_int_or_zero(geo.get("cbore_qty")),
+                _coerce_int_or_zero(chart_summary.get("cbore_qty")),
+            )
         if chart_summary.get("csk_qty"):
-            geo["csk_qty"] = max(int(geo.get("csk_qty", 0) or 0), int(chart_summary.get("csk_qty") or 0))
+            geo["csk_qty"] = max(
+                _coerce_int_or_zero(geo.get("csk_qty")),
+                _coerce_int_or_zero(chart_summary.get("csk_qty")),
+            )
         deepest_chart = _coerce_float_or_none(chart_summary.get("deepest_hole_in"))
-        if deepest_chart and (not geo.get("thickness_in_guess") or deepest_chart > float(geo.get("thickness_in_guess") or 0.0)):
+        existing_thickness = _coerce_float_or_none(geo.get("thickness_in_guess"))
+        if deepest_chart is not None and (
+            existing_thickness is None or deepest_chart > existing_thickness
+        ):
             geo["thickness_in_guess"] = deepest_chart
-            prov = geo.get("provenance") or {}
-            if isinstance(prov, dict):
-                prov["thickness"] = "HOLE TABLE depth max"
-                geo["provenance"] = prov
+            provenance_value = geo.get("provenance")
+            if isinstance(provenance_value, dict):
+                provenance_value["thickness"] = "HOLE TABLE depth max"
+            else:
+                geo["provenance"] = {"thickness": "HOLE TABLE depth max"}
         if chart_summary.get("from_back"):
             geo["from_back"] = True
             geo["needs_back_face"] = True
@@ -17720,8 +17773,16 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
                 notes.append("Hole chart references BACK operations.")
 
     # scrape text for thickness/material
-    txt = " ".join([t.dxf.text for t in sp.query("TEXT")] +
-                   [m.plain_text() for m in sp.query("MTEXT")]).lower()
+    text_fragments: list[str] = []
+    for text_entity in sp.query("TEXT"):
+        fragment = _extract_entity_text(text_entity)
+        if fragment:
+            text_fragments.append(fragment)
+    for mtext_entity in sp.query("MTEXT"):
+        fragment = _extract_entity_text(mtext_entity)
+        if fragment:
+            text_fragments.append(fragment)
+    txt = " ".join(text_fragments).lower()
     import re
     thickness_mm = None
     m = re.search(r"(thk|thickness)\s*[:=]?\s*([0-9.]+)\s*(mm|in|in\.|\")", txt)
@@ -17732,8 +17793,10 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     if mm:
         material = mm.group(2).strip()
 
-    if not thickness_mm and geo.get("thickness_in_guess"):
-        thickness_mm = float(geo["thickness_in_guess"]) * 25.4
+    if not thickness_mm:
+        thickness_guess_in = _coerce_float_or_none(geo.get("thickness_in_guess"))
+        if thickness_guess_in is not None:
+            thickness_mm = thickness_guess_in * 25.4
     if not material:
         material = geo.get("material_note")
 
@@ -17777,30 +17840,23 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     if geo_read_more:
         result["geo_read_more"] = geo_read_more
         if geo_read_more.get("ok"):
-            try:
-                edge_len_in = float(geo_read_more.get("edge_len_in"))
-            except Exception:
-                edge_len_in = None
-            if edge_len_in and edge_len_in > 0:
-                result["edge_length_in"] = edge_len_in
-                result["edge_len_in"] = edge_len_in
-                result["profile_length_mm"] = round(edge_len_in * 25.4, 2)
-            try:
-                outline_area_in2 = float(geo_read_more.get("outline_area_in2"))
-            except Exception:
-                outline_area_in2 = None
-            if outline_area_in2 and outline_area_in2 > 0:
-                result["outline_area_in2"] = outline_area_in2
-                result["outline_area_mm2"] = round(outline_area_in2 * (25.4 ** 2), 2)
+            edge_len_in_val = _coerce_float_or_none(geo_read_more.get("edge_len_in"))
+            if edge_len_in_val is not None and edge_len_in_val > 0:
+                result["edge_length_in"] = edge_len_in_val
+                result["edge_len_in"] = edge_len_in_val
+                result["profile_length_mm"] = round(edge_len_in_val * 25.4, 2)
+            outline_area_in2_val = _coerce_float_or_none(geo_read_more.get("outline_area_in2"))
+            if outline_area_in2_val is not None and outline_area_in2_val > 0:
+                result["outline_area_in2"] = outline_area_in2_val
+                result["outline_area_mm2"] = round(outline_area_in2_val * (25.4 ** 2), 2)
             if geo_read_more.get("hole_diam_families_in"):
                 result["hole_diam_families_in"] = dict(geo_read_more.get("hole_diam_families_in") or {})
             if geo_read_more.get("hole_table_families_in"):
                 result["hole_table_families_in"] = dict(geo_read_more.get("hole_table_families_in") or {})
-            try:
-                hole_count_geom = int(float(geo_read_more.get("hole_count_geom")))
-            except Exception:
-                hole_count_geom = None
-            if hole_count_geom and hole_count_geom > int(result.get("hole_count", 0) or 0):
+            hole_count_geom_val = _coerce_float_or_none(geo_read_more.get("hole_count_geom"))
+            hole_count_geom = int(hole_count_geom_val) if hole_count_geom_val is not None else None
+            current_hole_count = _coerce_int_or_zero(result.get("hole_count"))
+            if hole_count_geom is not None and hole_count_geom > current_hole_count:
                 result["hole_count"] = hole_count_geom
             if geo_read_more.get("holes_from_back"):
                 result["holes_from_back"] = True
@@ -17811,24 +17867,20 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
             if geo_read_more.get("chart_lines") and not result.get("chart_lines"):
                 result["chart_lines"] = list(geo_read_more.get("chart_lines") or [])
             if geo_read_more.get("tap_qty") or geo_read_more.get("cbore_qty") or geo_read_more.get("csk_qty"):
-                feature_counts = result.get("feature_counts") if isinstance(result.get("feature_counts"), dict) else {}
-                feature_counts = dict(feature_counts)
-                if geo_read_more.get("tap_qty"):
-                    feature_counts["tap_qty"] = max(int(feature_counts.get("tap_qty", 0) or 0), int(geo_read_more.get("tap_qty") or 0))
-                if geo_read_more.get("cbore_qty"):
-                    feature_counts["cbore_qty"] = max(int(feature_counts.get("cbore_qty", 0) or 0), int(geo_read_more.get("cbore_qty") or 0))
-                if geo_read_more.get("csk_qty"):
-                    feature_counts["csk_qty"] = max(int(feature_counts.get("csk_qty", 0) or 0), int(geo_read_more.get("csk_qty") or 0))
+                existing_feature_counts = result.get("feature_counts")
+                feature_counts = dict(existing_feature_counts) if isinstance(existing_feature_counts, dict) else {}
+                for key in ("tap_qty", "cbore_qty", "csk_qty"):
+                    candidate_val = _coerce_int_or_zero(geo_read_more.get(key))
+                    if candidate_val:
+                        feature_counts[key] = max(_coerce_int_or_zero(feature_counts.get(key)), candidate_val)
                 if feature_counts:
                     result["feature_counts"] = feature_counts
             for qty_key in ("tap_qty", "cbore_qty", "csk_qty"):
-                try:
-                    candidate = int(float(geo_read_more.get(qty_key, 0) or 0))
-                except Exception:
-                    candidate = 0
+                candidate = _coerce_int_or_zero(geo_read_more.get(qty_key, 0))
                 if candidate:
-                    current = int(float(result.get(qty_key, 0) or 0)) if result.get(qty_key) else 0
-                    result[qty_key] = max(current, candidate)
+                    current = _coerce_int_or_zero(result.get(qty_key))
+                    if candidate > current:
+                        result[qty_key] = candidate
     result["units"] = units
     return result
 def _extract_text_lines_from_ezdxf_doc(doc: Any) -> list[str]:
@@ -17849,10 +17901,7 @@ def _extract_text_lines_from_ezdxf_doc(doc: Any) -> list[str]:
         except Exception:
             continue
         if kind in ("TEXT", "MTEXT"):
-            try:
-                text = entity.plain_text() if hasattr(entity, "plain_text") else entity.dxf.text
-            except Exception:
-                text = ""
+            text = _extract_entity_text(entity)
             if text:
                 lines.append(text)
         elif kind == "INSERT":
@@ -17863,10 +17912,7 @@ def _extract_text_lines_from_ezdxf_doc(doc: Any) -> list[str]:
                     except Exception:
                         continue
                     if sub_kind in ("TEXT", "MTEXT"):
-                        try:
-                            text = sub.plain_text() if hasattr(sub, "plain_text") else sub.dxf.text
-                        except Exception:
-                            text = ""
+                        text = _extract_entity_text(sub)
                         if text:
                             lines.append(text)
             except Exception:
