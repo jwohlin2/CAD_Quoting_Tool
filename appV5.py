@@ -470,7 +470,7 @@ def _canonical_amortized_label(label: Any) -> tuple[str, bool]:
     return text, False
 
 import pandas as pd
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 if TYPE_CHECKING:
     try:
@@ -8233,13 +8233,15 @@ def alt(*terms: str) -> str:
     """Build a non-capturing (?:a|b|c) regex; terms are already escaped/regex-ready."""
     return r"(?:%s)" % "|".join(terms)
 
-def pct(value: Any, default: float = 0.0) -> float:
+def pct(value: Any, default: float | None = 0.0) -> float | None:
     """Accept 0-1 or 0-100 and return 0-1."""
     try:
         v = float(value)
-        return v / 100.0 if v > 1.0 else v
     except Exception:
         return default
+    if not math.isfinite(v):
+        return default
+    return v / 100.0 if v > 1.0 else v
 
 
 _DEFAULT_PRICING_ENGINE = SERVICE_CONTAINER.get_pricing_engine()
@@ -18410,6 +18412,10 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
                 except Exception:
                     geo_notes = []
 
+        class _TopProcessEntry(TypedDict):
+            name: str
+            usd: float
+
         top_processes_raw = data.get("top_processes") if isinstance(data.get("top_processes"), list) else []
         top_processes: list[dict[str, float | str]] = []
         for entry in top_processes_raw:
@@ -19253,16 +19259,16 @@ class GeometryLoader:
     def enrich_geo_stl(self, path: str | Path):
         return geometry.enrich_geo_stl(str(path))
 
-    def read_step_shape(self, path: str | Path) -> TopoDS_Shape:
+    def read_step_shape(self, path: str | Path) -> Any:
         return geometry.read_step_shape(str(path))
 
-    def read_cad_any(self, path: str | Path) -> TopoDS_Shape:
+    def read_cad_any(self, path: str | Path) -> Any:
         return geometry.read_cad_any(str(path))
 
-    def safe_bbox(self, shape: TopoDS_Shape):
+    def safe_bbox(self, shape: Any):
         return geometry.safe_bbox(shape)
 
-    def enrich_geo_occ(self, shape: TopoDS_Shape):
+    def enrich_geo_occ(self, shape: Any):
         return geometry.enrich_geo_occ(shape)
 
 
@@ -19588,9 +19594,14 @@ class CreateToolTip:
         if self._tip_window is not None or not self.text:
             return
 
+        bbox = None
         try:
-            x, y, width, height = self.widget.bbox("insert")
+            bbox = self.widget.bbox("insert")
         except Exception:
+            bbox = None
+        if bbox:
+            x, y, width, height = bbox
+        else:
             x = y = 0
             width = self.widget.winfo_width()
             height = self.widget.winfo_height()
