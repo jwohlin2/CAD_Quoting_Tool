@@ -67,6 +67,16 @@ LLM_MULTIPLIER_MAX = 4.0
 LLM_ADDER_MAX = 8.0
 
 
+LLM_BOUND_DEFAULTS: dict[str, Any] = {
+    "mult_min": LLM_MULTIPLIER_MIN,
+    "mult_max": LLM_MULTIPLIER_MAX,
+    "adder_max_hr": LLM_ADDER_MAX,
+    "adder_bucket_max": {},
+    "scrap_min": 0.0,
+    "scrap_max": 0.25,
+}
+
+
 def jdump(obj) -> str:
     return json.dumps(obj, indent=2, default=str)
 
@@ -9389,11 +9399,23 @@ def _drill_overhead_from_params(params: Mapping[str, Any] | None) -> _TimeOverhe
         "peck_penalty_min_per_in_depth": float(peck) if peck and peck >= 0 else 0.03,
         "dwell_min": float(dwell) if dwell and dwell >= 0 else None,
     }
+    index_kwarg = None
     if _TIME_OVERHEAD_SUPPORTS_INDEX_SEC:
-        overhead_kwargs["index_sec_per_hole"] = (
+        index_kwarg = (
             float(index_sec) if index_sec is not None and index_sec >= 0 else None
         )
-    return _TimeOverheadParams(**overhead_kwargs)
+        overhead_kwargs["index_sec_per_hole"] = index_kwarg
+    try:
+        overhead = _TimeOverheadParams(**overhead_kwargs)
+    except TypeError:
+        overhead_kwargs.pop("index_sec_per_hole", None)
+        overhead = _TimeOverheadParams(**overhead_kwargs)
+    if not hasattr(overhead, "index_sec_per_hole"):
+        try:
+            setattr(overhead, "index_sec_per_hole", index_kwarg)
+        except Exception:
+            pass
+    return overhead
 
 
 def _clean_hole_groups(raw: Any) -> list[dict[str, Any]] | None:
