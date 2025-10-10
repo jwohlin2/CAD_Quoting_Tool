@@ -9837,6 +9837,48 @@ def estimate_drilling_hours(
         debug_list.append(text)
         seen_debug.add(text)
 
+    def _jsonify_debug_value(value: Any, depth: int = 0, max_depth: int = 6) -> Any:
+        """Convert debug structures to JSON-friendly primitives."""
+
+        if depth >= max_depth:
+            return None
+        if value is None:
+            return None
+        if isinstance(value, (str, bool)):
+            return value
+        if isinstance(value, int) and not isinstance(value, bool):
+            return int(value)
+        if isinstance(value, float):
+            return float(value) if math.isfinite(value) else None
+        if isinstance(value, Mapping):
+            return {
+                str(key): _jsonify_debug_value(val, depth + 1, max_depth)
+                for key, val in value.items()
+            }
+        if isinstance(value, (list, tuple, set)):
+            return [
+                _jsonify_debug_value(item, depth + 1, max_depth)
+                for item in value
+            ]
+        if isinstance(value, bytes):
+            try:
+                return value.decode("utf-8", "ignore")
+            except Exception:
+                return repr(value)
+        if callable(value):
+            try:
+                return repr(value)
+            except Exception:
+                return "<callable>"
+        try:
+            coerced = float(value)
+        except Exception:
+            try:
+                return str(value)
+            except Exception:
+                return None
+        return coerced if math.isfinite(coerced) else None
+
     def _update_range(target: dict[str, Any], min_key: str, max_key: str, value: Any) -> None:
         try:
             val = float(value)
@@ -10647,7 +10689,7 @@ def estimate_drilling_hours(
                 line_parts.append(f"total hr {total_hours:.2f}.")
                 debug_lines.append("".join(line_parts))
                 if debug_summary is not None:
-                    debug_summary[op_key] = dict(summary)
+                    debug_summary[op_key] = _jsonify_debug_value(summary)
         if missing_row_messages and warnings is not None:
             for op_display, material_display, dia_val in sorted(missing_row_messages):
                 dia_text = f"{dia_val:.3f}".rstrip("0").rstrip(".")
@@ -12463,7 +12505,7 @@ def compute_quote_from_df(
         drilling_meta["speeds_feeds_debug"] = drill_debug_line
     if drill_debug_summary:
         drilling_meta["debug_summary"] = {
-            key: dict(value) for key, value in drill_debug_summary.items()
+            key: _jsonify_debug_value(value) for key, value in drill_debug_summary.items()
         }
         if not drill_material_display:
             for summary in drill_debug_summary.values():
