@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import functools
 import importlib
 import json
 import logging
@@ -294,7 +295,13 @@ from typing import (
     MutableMapping,
     overload,
     TYPE_CHECKING,
+    TypeAlias,
 )
+
+try:  # pragma: no cover - typing backport for older Python versions
+    from typing import TypeAlias
+except ImportError:  # pragma: no cover - python <3.10
+    from typing_extensions import TypeAlias  # type: ignore[import]
 
 
 T = TypeVar("T")
@@ -3570,7 +3577,8 @@ def _resolve_face_of():
 
 FACE_OF = _resolve_face_of()
 
-def as_face(obj: Any) -> TopoDS_Face:
+
+def as_face(obj: Any) -> Any:
     """
     Return a TopoDS_Face for the *current backend*.
     - If already a Face, return it (don't re-cast).
@@ -3587,7 +3595,7 @@ def as_face(obj: Any) -> TopoDS_Face:
     return ensure_face(obj)
 
 
-def iter_faces(shape: Any) -> Iterator[TopoDS_Face]:
+def iter_faces(shape: Any) -> Iterator[Any]:
     explorer_cls = cast(Callable[[Any, Any], Any], TopExp_Explorer)
     exp = explorer_cls(shape, cast(Any, TopAbs_FACE))
     while exp.More():
@@ -3776,7 +3784,7 @@ def linear_properties(edge, gprops):
 
 def map_shapes_and_ancestors(
     root_shape, sub_enum, anc_enum
-) -> TopTools_IndexedDataMapOfShapeListOfShape:
+) -> Any:
     """Return TopTools_IndexedDataMapOfShapeListOfShape for (sub → ancestors)."""
     # Ensure we pass a *Shape*, not a Face
     if root_shape is None:
@@ -3787,7 +3795,7 @@ def map_shapes_and_ancestors(
         pass
 
     amap = cast(
-        TopTools_IndexedDataMapOfShapeListOfShape,
+        Any,
         TopTools_IndexedDataMapOfShapeListOfShape(),  # type: ignore[call-overload]
     )
     # static/instance variants across wheels
@@ -3807,20 +3815,20 @@ def _is_instance(obj, qualnames):
         return False
     return name in qualnames  # e.g. ["TopoDS_Face", "Face"]
 
-def ensure_face(obj: Any) -> TopoDS_Face:
+def ensure_face(obj: Any) -> Any:
     if obj is None:
         raise TypeError("Expected a face, got None")
     face_type = cast(type, TopoDS_Face)
     try:
         if isinstance(obj, face_type):
-            return cast(TopoDS_Face, obj)
+            return cast(Any, obj)
     except TypeError:
         pass
     if type(obj).__name__ == "TopoDS_Face":
-        return cast(TopoDS_Face, obj)
+        return cast(Any, obj)
     st = obj.ShapeType() if hasattr(obj, "ShapeType") else None
     if st == TopAbs_FACE:
-        return cast(TopoDS_Face, FACE_OF(obj))
+        return cast(Any, FACE_OF(obj))
     raise TypeError(f"Not a face: {type(obj).__name__}")
 # ---------- end compat ----------
 
@@ -3921,7 +3929,7 @@ try:
     from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape  # type: ignore[import]
     BACKEND_OCC = "OCP"
 
-    def _ocp_uv_bounds(face: TopoDS_Face) -> Tuple[float, float, float, float]:
+    def _ocp_uv_bounds(face: Any) -> Tuple[float, float, float, float]:
         tools = cast(Any, BRepTools)
         return tools.UVBounds(face)
 
@@ -4007,7 +4015,7 @@ except Exception:
     import OCC.Core.BRepTools as _occ_breptools
     BRepTools = cast(Any, _occ_breptools).BRepTools
 
-    def _occ_uv_bounds(face: TopoDS_Face) -> Tuple[float, float, float, float]:
+    def _occ_uv_bounds(face: Any) -> Tuple[float, float, float, float]:
         tools = cast(Any, BRepTools)
         fn = getattr(tools, "UVBounds", None)
         if fn is None:
@@ -4233,7 +4241,7 @@ SMALL = 1e-7
 
 def iter_solids(shape: TopoDS_Shape):
     explorer = cast(Callable[[Any, Any], Any], TopExp_Explorer)
-    exp = explorer(shape, cast(TopAbs_ShapeEnum, TopAbs_SOLID))
+    exp = explorer(shape, cast(int, TopAbs_SOLID))
     while exp.More():
         yield geometry.to_solid(exp.Current())
         exp.Next()
@@ -4241,14 +4249,14 @@ def iter_solids(shape: TopoDS_Shape):
 def explode_compound(shape: TopoDS_Shape) -> list[TopoDS_Shape]:
     """If the file is a big COMPOUND, break it into shapes (parts/bodies)."""
     explorer = cast(Callable[[Any, Any], Any], TopExp_Explorer)
-    exp = explorer(shape, cast(TopAbs_ShapeEnum, TopAbs_COMPOUND))
+    exp = explorer(shape, cast(int, TopAbs_COMPOUND))
     if exp.More():
         # Itï¿½s a compound ï¿½ return its shells/solids/faces as needed
         solids = list(iter_solids(shape))
         if solids:
             return solids
         # fallback to shells
-        sh = explorer(shape, cast(TopAbs_ShapeEnum, TopAbs_SHELL))
+        sh = explorer(shape, cast(int, TopAbs_SHELL))
         shells = []
         while sh.More():
             shells.append(geometry.to_shell(sh.Current()))
@@ -4366,7 +4374,7 @@ def _section_perimeter_len(shape, z_values):
         sec = BRepAlgoAPI_Section(shape, plane, False); sec.Build()
         if not sec.IsDone(): continue
         w = sec.Shape()
-        it = explorer(w, cast(TopAbs_ShapeEnum, TopAbs_EDGE))
+        it = explorer(w, cast(int, TopAbs_EDGE))
         while it.More():
             e = geometry.to_edge(it.Current())
             total += _length_of_edge(e)
@@ -6090,6 +6098,7 @@ def _iter_ordered_process_entries(
         )
 
 
+# pyright: ignore[reportGeneralTypeIssues]
 def render_quote(
     result: dict,
     currency: str = "$",
@@ -16954,12 +16963,12 @@ def compute_quote_from_df(
                 expected_labor_total,
                 rel_tol=0.0,
                 abs_tol=_LABOR_SECTION_ABS_EPSILON,
-            ):
-                logger.warning(
-                    "Labor section totals drifted: %.2f vs %.2f",
-                    labor_display_total,
-                    expected_labor_total,
-                )
+            )
+            logger.warning(
+                "Labor section totals drifted: %.2f vs %.2f",
+                labor_display_total,
+                expected_labor_total,
+            )
 
         labor_cost = recomputed_labor_total
 
