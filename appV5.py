@@ -8036,6 +8036,99 @@ def render_quote(
     bucket_table_rows: list[tuple[str, float, float, float, float]] = []
     bucket_table_totals: dict[str, float] | None = None
 
+    planner_bucket_hour_cache: dict[str, float] = {}
+    try:
+        planner_bucket_view_ref = planner_bucket_view  # type: ignore[name-defined]
+    except NameError:  # pragma: no cover - defensive for legacy flows
+        planner_bucket_view_ref = None
+    try:
+        planner_bucket_rollup_ref = planner_bucket_rollup  # type: ignore[name-defined]
+    except NameError:  # pragma: no cover - defensive for legacy flows
+        planner_bucket_rollup_ref = None
+
+    def _planner_bucket_canon_for_hours(key: str | None) -> str:
+        canon = _canonical_bucket_key(key)
+        if not canon:
+            return ""
+        if canon in PLANNER_META or canon.startswith("planner_"):
+            return ""
+        if canon in {"deep_drill", "deepdrill", "deep_drilling"}:
+            return "drilling"
+        if canon == "drill":
+            return "drilling"
+        return canon
+
+    def _inject_planner_bucket_hours(canon_key: str, hours_val: float) -> None:
+        if not canon_key or hours_val <= 0:
+            return
+
+        minutes_val = max(0.0, float(hours_val) * 60.0)
+        minutes_rounded = round(minutes_val, 1)
+        hours_rounded = round(float(hours_val), 3)
+
+        simple_maps = [
+            planner_bucket_display_map,
+            bucket_rollup_map,
+            planner_bucket_from_plan,
+            planner_bucket_rollup_ref,
+        ]
+        for mapping in simple_maps:
+            if not isinstance(mapping, dict):
+                continue
+            entry = mapping.get(canon_key)
+            if isinstance(entry, dict):
+                entry["minutes"] = minutes_rounded
+                entry["hr"] = hours_rounded
+            else:
+                mapping[canon_key] = {"minutes": minutes_rounded, "hr": hours_rounded}
+
+        nested_views = []
+        if isinstance(planner_bucket_view_ref, dict):
+            nested_views.append(planner_bucket_view_ref)
+        if isinstance(bucket_view, dict):
+            nested_views.append(bucket_view)
+        for view in nested_views:
+            buckets_struct = view.get("buckets") if isinstance(view, dict) else None
+            if not isinstance(buckets_struct, dict):
+                continue
+            entry = buckets_struct.get(canon_key)
+            if isinstance(entry, dict):
+                entry["minutes"] = minutes_rounded
+                entry["hr"] = hours_rounded
+            else:
+                buckets_struct[canon_key] = {"minutes": minutes_rounded, "hr": hours_rounded}
+
+    def _planner_bucket_hour_override(key: str | None) -> float:
+        if pricing_source_lower != "planner":
+            return 0.0
+        canon_key = _planner_bucket_canon_for_hours(key)
+        if not canon_key:
+            return 0.0
+        cached = planner_bucket_hour_cache.get(canon_key)
+        if cached is not None:
+            return cached
+
+        total_hours = 0.0
+        if isinstance(process_meta, dict):
+            for proc_key, meta in process_meta.items():
+                if not isinstance(meta, _MappingABC):
+                    continue
+                proc_canon = _planner_bucket_canon_for_hours(proc_key)
+                if proc_canon != canon_key:
+                    continue
+                try:
+                    hr_val = float(meta.get("hr", 0.0) or 0.0)
+                except Exception:
+                    hr_val = 0.0
+                if hr_val > 0:
+                    total_hours += hr_val
+
+        if total_hours > 0:
+            _inject_planner_bucket_hours(canon_key, total_hours)
+
+        planner_bucket_hour_cache[canon_key] = total_hours
+        return total_hours
+
     process_plan_summary_local = locals().get("process_plan_summary")
     if not isinstance(process_plan_summary_local, _MappingABC):
         process_plan_summary_local = (
@@ -8060,6 +8153,13 @@ def render_quote(
                 except Exception:
                     minutes_val = 0.0
                 hours_val = minutes_val / 60.0
+                override_hours = _planner_bucket_hour_override(bucket_key)
+                if override_hours > 0:
+                    hours_val = override_hours
+                    minutes_val = override_hours * 60.0
+                    if isinstance(info, dict):
+                        info["minutes"] = round(minutes_val, 1)
+                        info["hr"] = round(override_hours, 3)
                 try:
                     labor_val = float(info.get("labor$", 0.0) or 0.0)
                 except Exception:
@@ -8670,6 +8770,9 @@ def render_quote(
                 return 0.0
 
         def _hours_for_bucket(canon_key: str) -> float:
+            override_hr = _planner_bucket_hour_override(canon_key)
+            if override_hr > 0:
+                return override_hr
             info: Mapping[str, Any] | None = None
             if isinstance(planner_bucket_display_map, _MappingABC):
                 info = planner_bucket_display_map.get(canon_key)
