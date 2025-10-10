@@ -5899,6 +5899,15 @@ def _iter_ordered_process_entries(
             meta = meta_lookup.get(canon_key, {})
 
         try:
+            meta_hr_value = float(meta.get("hr", 0.0) or 0.0)
+        except Exception:
+            meta_hr_value = 0.0
+        try:
+            meta_rate_value = float(meta.get("rate", 0.0) or 0.0)
+        except Exception:
+            meta_rate_value = 0.0
+
+        try:
             value_float = float(raw_value or 0.0)
         except Exception:
             value_float = 0.0
@@ -6080,6 +6089,7 @@ def render_quote(
         labor_cost_details_input[canonical_label] = merged
 
     labor_cost_details: dict[str, str] = dict(labor_cost_details_input)
+    labor_cost_details_seed: dict[str, str] = dict(labor_cost_details_input)
 
     labor_cost_totals_raw = breakdown.get("labor_costs", {}) or {}
     labor_cost_totals: dict[str, float] = {}
@@ -6120,6 +6130,7 @@ def render_quote(
     divider = "-" * int(page_width)
 
     red_flags: list[str] = []
+    hour_summary_entries: dict[str, tuple[float, bool]] = {}
     for source in (result, breakdown):
         flags_raw = source.get("red_flags") if isinstance(source, Mapping) else None
         if isinstance(flags_raw, (list, tuple, set)):
@@ -7694,7 +7705,12 @@ def render_quote(
         if merged_detail:
             labor_cost_details[storage_key] = merged_detail
         elif fallback_detail:
-            labor_cost_details.setdefault(storage_key, fallback_detail)
+            fallback_segments = [
+                seg for seg in re.split(r";\s*", str(fallback_detail)) if seg.strip()
+            ]
+            sanitized_fallback = _merge_detail(None, fallback_segments)
+            if sanitized_fallback:
+                labor_cost_details.setdefault(storage_key, sanitized_fallback)
 
         labor_costs_display[storage_key] = labor_costs_display.get(storage_key, 0.0) + amount_val
         proc_total += amount_val
@@ -7836,6 +7852,7 @@ def render_quote(
 
     aggregated_process_rows: dict[str, dict[str, Any]] = {}
     aggregated_order: list[str] = []
+    process_entries_for_display: list[ProcessDisplayEntry] = []
 
     for entry in _iter_ordered_process_entries(
         display_process_costs,
@@ -7846,6 +7863,7 @@ def render_quote(
         label_overrides=label_overrides,
         currency_formatter=_m,
     ):
+        process_entries_for_display.append(entry)
         canon_key = entry.canonical_key or _canonical_bucket_key(entry.process_key)
         if canon_key in {"planner_labor", "planner_machine", "planner_total"}:
             continue
@@ -15366,8 +15384,8 @@ def compute_quote_from_df(df: pd.DataFrame,
     if price < min_lot:
         price = min_lot
 
-    labor_cost_details_input: dict[str, str] = {}
-    labor_cost_details: dict[str, str] = {}
+    labor_cost_details_input: dict[str, str] = dict(labor_cost_details_seed)
+    labor_cost_details: dict[str, str] = dict(labor_cost_details_seed)
     labor_costs_display: dict[str, float] = {}
 
     # Local helper mirrors the renderer's filter so summary details stay clean
@@ -15384,50 +15402,41 @@ def compute_quote_from_df(df: pd.DataFrame,
             canonical_label = str(label)
         labor_costs_display[canonical_label] = float(amount)
         existing_detail = labor_cost_details_input.get(canonical_label)
-        if not detail_bits and not existing_detail:
-            return
-
         merged_bits: list[str] = []
         seen: set[str] = set()
-        for bit in detail_bits:
-            seg = str(bit).strip()
-            if not seg or re.match(r"^includes\b.*extras\b", seg, re.IGNORECASE):
-                continue
+
+        def _append_segment(segment: str) -> None:
+            seg = segment.strip()
+            if not seg or _is_extra_segment(seg):
+                return
             if seg not in seen:
                 merged_bits.append(seg)
                 seen.add(seg)
+
+        for bit in detail_bits:
+            _append_segment(str(bit))
+
         if existing_detail:
             for segment in re.split(r";\s*", existing_detail):
-                seg = segment.strip()
-                if not seg or re.match(r"^includes\b.*extras\b", seg, re.IGNORECASE):
-                    continue
-                if seg not in seen:
-                    merged_bits.append(seg)
-                    seen.add(seg)
+                _append_segment(segment)
+
         if merged_bits:
-            labor_cost_details[canonical_label] = "; ".join(merged_bits)
+            merged_text = "; ".join(merged_bits)
+            labor_cost_details_input[canonical_label] = merged_text
+            labor_cost_details[canonical_label] = merged_text
+        else:
+            labor_cost_details_input.pop(canonical_label, None)
+            labor_cost_details.pop(canonical_label, None)
 
-    # Use current process_costs for ordered iteration of labor detail lines
-    canonical_process_costs = dict(process_costs)
-    # Reuse the same planner bucket display mapping for the breakdown section.
-    # If no planner map exists in this scope, use an empty mapping.
-    try:
-        _tmp_map = planner_bucket_display_map  # may exist in other scopes
-    except Exception:
-        _tmp_map = {}
-    planner_bucket_display_map_breakdown = dict(_tmp_map) if isinstance(_tmp_map, Mapping) else {}
-
-    for entry in _iter_ordered_process_entries(
-        canonical_process_costs,
-        process_meta=process_meta,
-        applied_process=applied_process,
-        show_zeros=False,
-        planner_bucket_display_map=planner_bucket_display_map_breakdown,
-        label_overrides=PROCESS_LABEL_OVERRIDES,
-        currency_formatter=lambda val: f"${float(val):,.2f}",
-    ):
+    for entry in process_entries_for_display:
+        try:
+            amount_val = float(entry.amount or 0.0)
+        except Exception:
+            amount_val = 0.0
+        if amount_val <= 0.0:
+            continue
         label = entry.display_override or entry.label
-        _merge_labor_detail(label, entry.amount, list(entry.detail_bits))
+        _merge_labor_detail(label, amount_val, list(entry.detail_bits))
 
     show_programming_amortized = Qty > 1 and programming_per_part > 0
     if show_programming_amortized:
@@ -15473,7 +15482,20 @@ def compute_quote_from_df(df: pd.DataFrame,
         logger.exception("Labor section invariant calculation failed")
     else:
         expected_labor_total = float(labor_cost or 0.0)
-        if not math.isclose(
+        diff = abs(labor_display_total - expected_labor_total)
+        if diff > 0.5:
+            flag_message = (
+                f"Labor totals drifted by ${diff:,.2f}: "
+                f"rendered ${labor_display_total:,.2f} vs expected ${expected_labor_total:,.2f}"
+            )
+            if flag_message not in red_flags:
+                red_flags.append(flag_message)
+            logger.warning(
+                "Labor section totals drifted beyond threshold: %.2f vs %.2f",
+                labor_display_total,
+                expected_labor_total,
+            )
+        elif not math.isclose(
             labor_display_total,
             expected_labor_total,
             rel_tol=0.0,
