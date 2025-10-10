@@ -51,11 +51,25 @@ APP_ENV = AppEnvironment.from_env()
 EXTRA_DETAIL_RE = re.compile(r"^includes\b.*extras\b", re.IGNORECASE)
 
 
+def _coerce_bool(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"y", "yes", "true", "1", "on"}:
+            return True
+        if text in {"n", "no", "false", "0", "off"}:
+            return False
+    return None
+
+
 def _coerce_env_bool(value: str | None) -> bool:
     if value is None:
         return False
-    text = value.strip().lower()
-    return text in {"1", "true", "yes", "on"}
+    coerced = _coerce_bool(value)
+    return bool(coerced)
 
 
 FORCE_PLANNER = _coerce_env_bool(os.environ.get("FORCE_PLANNER"))
@@ -1692,19 +1706,6 @@ def sanitize_suggestions(s: dict, bounds: dict) -> dict:
         _store_meta(path, detail, num)
         return num
 
-    def _coerce_bool(value: Any) -> bool | None:
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, (int, float)):
-            return bool(value)
-        if isinstance(value, str):
-            lowered = value.strip().lower()
-            if lowered in {"y", "yes", "true", "1"}:
-                return True
-            if lowered in {"n", "no", "false", "0"}:
-                return False
-        return None
-
     def _extract_bool_field(raw: Any, path: tuple[str, ...]) -> bool | None:
         if raw is None:
             return None
@@ -2137,30 +2138,17 @@ def merge_effective(
             eff.pop(key, None)
         source_tags[key] = source
 
-    def _coerce_bool_value(raw: Any) -> bool | None:
-        if isinstance(raw, bool):
-            return raw
-        if isinstance(raw, (int, float)):
-            return bool(raw)
-        if isinstance(raw, str):
-            lowered = raw.strip().lower()
-            if lowered in {"y", "yes", "true", "1"}:
-                return True
-            if lowered in {"n", "no", "false", "0"}:
-                return False
-        return None
-
     def _merge_bool_field(key: str) -> None:
         base_val = baseline.get(key) if isinstance(baseline.get(key), bool) else None
         value = base_val
         source = "baseline"
         if key in overrides:
-            cand = _coerce_bool_value(overrides.get(key))
+            cand = _coerce_bool(overrides.get(key))
             if cand is not None:
                 value = cand
                 source = "user"
         elif key in suggestions:
-            cand = _coerce_bool_value(suggestions.get(key))
+            cand = _coerce_bool(suggestions.get(key))
             if cand is not None:
                 value = cand
                 source = "llm"
@@ -6468,12 +6456,6 @@ def render_quote(
     lines.append("")
     def _drill_debug_enabled() -> bool:
         """Return True when drill debug output should be rendered."""
-
-        def _coerce_bool(value: object) -> bool | None:
-            try:
-                return bool(value)
-            except Exception:
-                return None
 
         for source in (result, breakdown):
             if not isinstance(source, Mapping):
