@@ -794,8 +794,6 @@ def _missing_geom_fn(name: str):
 def _export(name: str):
     return getattr(geometry, name, _missing_geom_fn(name))
 
-load_model = _export("load_model")
-load_cad_any = _export("load_cad_any")
 read_cad_any = _export("read_cad_any")
 read_step_shape = _export("read_step_shape")
 read_step_or_iges_or_brep = _export("read_step_or_iges_or_brep")
@@ -808,15 +806,10 @@ iter_solids = _export("iter_solids")
 explode_compound = _export("explode_compound")
 parse_hole_table_lines = _export("parse_hole_table_lines")
 extract_text_lines_from_dxf = _export("extract_text_lines_from_dxf")
-contours_from_polylines = _export("contours_from_polylines")
-holes_from_circles = _export("holes_from_circles")
 text_harvest = _export("text_harvest")
-extract_entities = _export("extract_entities")
-read_dxf = _export("read_dxf")
 upsert_var_row = _export("upsert_var_row")
 require_ezdxf = _export("require_ezdxf")
 get_dwg_converter_path = _export("get_dwg_converter_path")
-have_dwg_support = _export("have_dwg_support")
 get_import_diagnostics_text = _export("get_import_diagnostics_text")
 extract_features_with_occ = _export("extract_features_with_occ")
 
@@ -882,7 +875,7 @@ def _iter_hole_diams_mm(geo_ctx: Mapping[str, Any] | None) -> list[float]:
     out: list[float] = []
 
     # DXF path: app already stores list of diameters as millimetres.
-    # See holes_from_circles → "hole_diams_mm".
+    # See the DXF circle harvesting helper → "hole_diams_mm".
     # (DXF radius→dia, full arcs treated as circles.)
     dxf_diams = derived.get("hole_diams_mm")
     if isinstance(dxf_diams, (list, tuple)):
