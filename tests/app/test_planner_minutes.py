@@ -149,3 +149,85 @@ def test_planner_drilling_bucket_uses_estimator(monkeypatch):
     assert drilling_bucket.get("labor_cost", 0.0) == pytest.approx(0.0, abs=1e-6)
     basis = drilling_meta_entry.get("basis") or []
     assert any("planner_drilling_override" in str(item) for item in basis)
+
+
+def test_planner_milling_bucket_backfills_from_estimator(monkeypatch):
+    import appV5
+    import planner_pricing
+
+    df = pd.DataFrame(
+        [
+            {
+                "Item": "Roughing Cycle Time (hr)",
+                "Example Values / Options": 1.65,
+                "Data Type / Input Method": "Number",
+            },
+            {
+                "Item": "Setup Time per Setup (hr)",
+                "Example Values / Options": 0.0,
+                "Data Type / Input Method": "Number",
+            },
+        ]
+    )
+
+    geo = {
+        "process_planner_family": "die_plate",
+        "material": "tool steel",
+        "thickness_mm": 25.4,
+    }
+
+    def fake_plan_job(family: str, inputs: dict[str, object]) -> dict[str, object]:
+        assert family == "die_plate"
+        assert isinstance(inputs, dict)
+        return {"ops": [{"op": "drill_ream_bore"}]}
+
+    def fake_price_with_planner(
+        family: str,
+        inputs: dict[str, object],
+        geom_payload: dict[str, object],
+        rates: dict[str, object],
+        *,
+        oee: float,
+    ) -> dict[str, object]:
+        assert family == "die_plate"
+        assert geom_payload, "expected non-empty geom payload"
+        assert isinstance(rates, dict)
+        assert oee > 0
+        return {
+            "line_items": [
+                {
+                    "op": "drill_ream_bore",
+                    "minutes": 30.0,
+                    "machine_cost": 150.0,
+                    "labor_cost": 0.0,
+                }
+            ],
+            "totals": {"minutes": 30.0, "machine_cost": 150.0, "labor_cost": 0.0},
+        }
+
+    monkeypatch.setattr(appV5, "_process_plan_job", fake_plan_job)
+    monkeypatch.setattr(planner_pricing, "price_with_planner", fake_price_with_planner)
+    monkeypatch.setattr(appV5, "FORCE_PLANNER", False)
+
+    result = appV5.compute_quote_from_df(
+        df,
+        params={"OEE_EfficiencyPct": 1.0},
+        rates={"MillingRate": 100.0, "DrillingRate": 75.0},
+        geo=geo,
+        ui_vars={},
+    )
+
+    breakdown = result["breakdown"]
+    bucket_view = breakdown["bucket_view"]
+    milling_bucket = bucket_view.get("milling")
+    assert milling_bucket is not None, "expected milling bucket backfill"
+    assert milling_bucket["minutes"] == pytest.approx(99.0, abs=0.1)
+    assert milling_bucket["machine_cost"] == pytest.approx(165.0, abs=0.1)
+    assert milling_bucket.get("labor_cost", 0.0) == pytest.approx(0.0, abs=1e-6)
+
+    process_meta = breakdown["process_meta"]
+    milling_meta = process_meta.get("milling")
+    assert milling_meta is not None, "expected milling meta entry"
+    assert milling_meta.get("hr") == pytest.approx(1.65, abs=0.01)
+    basis = milling_meta.get("basis") or []
+    assert any("planner_milling_backfill" in str(item) for item in basis)

@@ -130,6 +130,14 @@ def _resolve_bucket_for_op(op: str) -> str:
     ):
         return "Tapping"
 
+    if any(token in op_lower for token in ("mill", "pocket")) or (
+        "profile" in op_lower
+        and "grind" not in op_lower
+        and "edm" not in op_lower
+    ):
+        if "thread_mill" not in op_lower and "thread mill" not in op_lower:
+            return "Milling"
+
     machine = OP_TO_MACHINE.get(op, "").lower()
     if machine:
         if "grind" in machine:
