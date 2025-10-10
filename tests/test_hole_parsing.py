@@ -1,4 +1,3 @@
-import pytest
 
 from appV5 import _aggregate_hole_entries, _dedupe_hole_entries, _parse_hole_line
 
