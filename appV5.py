@@ -11427,6 +11427,8 @@ def estimate_drilling_hours(
                             "ipr_max": None,
                             "ipr_effective_min": None,
                             "ipr_effective_max": None,
+                            "depth_min": None,
+                            "depth_max": None,
                         },
                     )
                     bin_summary["qty"] += qty_for_debug
@@ -11467,6 +11469,7 @@ def estimate_drilling_hours(
                             summary["depth_min"] = float(depth_float)
                         if depth_max is None or float(depth_float) > depth_max:
                             summary["depth_max"] = float(depth_float)
+                        _update_range(bin_summary, "depth_min", "depth_max", depth_float)
                     overhead_local = per_hole_overhead
                     try:
                         overhead_local = overhead_for_calc
@@ -11531,6 +11534,39 @@ def estimate_drilling_hours(
 
         if debug_lines is not None and debug_summary_entries:
             for op_key, summary in sorted(debug_summary_entries.items()):
+                bins_map = summary.get("bins")
+                if isinstance(bins_map, _MappingABC):
+                    for bin_summary in bins_map.values():
+                        if not isinstance(bin_summary, _MappingABC):
+                            continue
+
+                        def _merge_range(base_key: str) -> None:
+                            min_key = f"{base_key}_min"
+                            max_key = f"{base_key}_max"
+                            min_val = _coerce_float_or_none(bin_summary.get(min_key))
+                            max_val = _coerce_float_or_none(bin_summary.get(max_key))
+                            if min_val is not None:
+                                _update_range(summary, min_key, max_key, min_val)
+                            if max_val is not None:
+                                _update_range(summary, min_key, max_key, max_val)
+
+                        _merge_range("sfm")
+                        _merge_range("rpm")
+                        _merge_range("ipm")
+                        _merge_range("ipr")
+                        _merge_range("ipr_effective")
+                        _merge_range("depth")
+
+                        dia_candidate = _coerce_float_or_none(
+                            bin_summary.get("diameter_in")
+                        )
+                        if dia_candidate is not None:
+                            current_min = summary.get("diam_min")
+                            current_max = summary.get("diam_max")
+                            if current_min is None or dia_candidate < current_min:
+                                summary["diam_min"] = dia_candidate
+                            if current_max is None or dia_candidate > current_max:
+                                summary["diam_max"] = dia_candidate
                 qty_total = summary.get("qty", 0)
                 if qty_total <= 0:
                     continue
