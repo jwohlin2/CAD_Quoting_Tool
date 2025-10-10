@@ -608,6 +608,52 @@ def _canonicalize_pass_through_map(data: Any) -> dict[str, float]:
     return result
 
 
+def canonicalize_pass_through_map(data: Any) -> dict[str, float]:
+    """Return a canonicalized pass-through map with defensive fallback."""
+
+    canonicalizer = globals().get("_canonicalize_pass_through_map")
+    if callable(canonicalizer):
+        try:
+            return canonicalizer(data)
+        except Exception:
+            logger.exception("Failed to canonicalize pass-through map; using fallback")
+
+    # Minimal fallback used when the primary helper is unavailable.
+    result: dict[str, float] = {}
+
+    def _add(label: Any, amount: Any) -> None:
+        key = _canonical_pass_label(label)
+        try:
+            val = float(amount)
+        except Exception:
+            return
+        if key and math.isfinite(val):
+            result[key] = result.get(key, 0.0) + float(val)
+
+    if isinstance(data, Mapping):
+        for k, v in data.items():
+            if isinstance(v, Mapping):
+                inner = v
+                amt = inner.get("amount") or inner.get("value") or inner.get("cost") or inner.get("price")
+                _add(k, amt)
+            else:
+                _add(k, v)
+    elif isinstance(data, (list, tuple)):
+        for entry in data:
+            if isinstance(entry, Mapping):
+                lbl = entry.get("label") or entry.get("name") or entry.get("key") or entry.get("type")
+                amt = entry.get("amount") or entry.get("value") or entry.get("cost") or entry.get("price")
+                if lbl is None and len(entry) == 1:
+                    k = next(iter(entry.keys()))
+                    _add(k, entry.get(k))
+                else:
+                    _add(lbl, amt)
+            elif isinstance(entry, (list, tuple)) and len(entry) == 2:
+                _add(entry[0], entry[1])
+
+    return result
+
+
 _AMORTIZED_LABEL_PATTERN = re.compile(r"\s*\((amortized|amortised)(?:\s+(?:per\s+(?:part|piece|pc|unit)|each|ea))?\)\s*$", re.IGNORECASE)
 
 
@@ -1407,7 +1453,7 @@ def build_suggest_payload(
             baseline_hours[str(proc)] = float(val)
 
     baseline_pass_raw = baseline.get("pass_through") if isinstance(baseline.get("pass_through"), dict) else {}
-    baseline_pass = _canonicalize_pass_through_map(baseline_pass_raw)
+    baseline_pass = canonicalize_pass_through_map(baseline_pass_raw)
 
     top_process_hours = sorted(baseline_hours.items(), key=lambda kv: (-kv[1], kv[0]))[:6]
     top_pass_through = sorted(baseline_pass.items(), key=lambda kv: (-kv[1], kv[0]))[:6]
@@ -2243,8 +2289,8 @@ def merge_effective(
     raw_sugg_pass = raw_sugg_pass_candidate if isinstance(raw_sugg_pass_candidate, dict) else {}
     raw_over_pass_candidate = overrides.get("add_pass_through")
     raw_over_pass = raw_over_pass_candidate if isinstance(raw_over_pass_candidate, dict) else {}
-    sugg_pass = _canonicalize_pass_through_map(raw_sugg_pass)
-    over_pass = _canonicalize_pass_through_map(raw_over_pass)
+    sugg_pass = canonicalize_pass_through_map(raw_sugg_pass)
+    over_pass = canonicalize_pass_through_map(raw_over_pass)
     pass_keys = sorted(set(sugg_pass) | set(over_pass))
     final_pass: dict[str, float] = {}
     pass_sources: dict[str, str] = {}
@@ -2419,7 +2465,7 @@ def merge_effective(
         if isinstance(guard_ctx.get("baseline_pass_through"), dict)
         else {}
     )
-    baseline_pass_ctx = _canonicalize_pass_through_map(baseline_pass_ctx_raw)
+    baseline_pass_ctx = canonicalize_pass_through_map(baseline_pass_ctx_raw)
     finish_pass_key = _canonical_pass_label(
         guard_ctx.get("finish_pass_key") or "Outsourced Vendors"
     )
@@ -2817,7 +2863,7 @@ def effective_to_overrides(effective: dict, baseline: dict | None = None) -> dic
         else {}
     )
     if passes:
-        canonical_passes = _canonicalize_pass_through_map(passes)
+        canonical_passes = canonicalize_pass_through_map(passes)
         cleaned_pass = {
             k: float(v)
             for k, v in canonical_passes.items()
@@ -2991,22 +3037,22 @@ def iter_suggestion_rows(state: QuoteState) -> list[dict]:
         )
 
     sugg_pass = (
-        _canonicalize_pass_through_map(suggestions.get("add_pass_through"))
+        canonicalize_pass_through_map(suggestions.get("add_pass_through"))
         if isinstance(suggestions.get("add_pass_through"), dict)
         else {}
     )
     over_pass = (
-        _canonicalize_pass_through_map(overrides.get("add_pass_through"))
+        canonicalize_pass_through_map(overrides.get("add_pass_through"))
         if isinstance(overrides.get("add_pass_through"), dict)
         else {}
     )
     base_pass = (
-        _canonicalize_pass_through_map(baseline.get("pass_through"))
+        canonicalize_pass_through_map(baseline.get("pass_through"))
         if isinstance(baseline.get("pass_through"), dict)
         else {}
     )
     eff_pass = (
-        _canonicalize_pass_through_map(effective.get("add_pass_through"))
+        canonicalize_pass_through_map(effective.get("add_pass_through"))
         if isinstance(effective.get("add_pass_through"), dict)
         else {}
     )
@@ -12614,7 +12660,7 @@ def compute_quote_from_df(
         if _on("packaging_flat") and float(packaging_flat_base) > 0:
             pass_through["Packaging Flat"] = float(packaging_flat_base)
 
-        pass_through = _canonicalize_pass_through_map(pass_through)
+        pass_through = canonicalize_pass_through_map(pass_through)
 
         credit = float(material_scrap_credit_applied or 0.0)
         if credit > 0:
@@ -14974,7 +15020,7 @@ def compute_quote_from_df(
                 if canon_key:
                     src_pass_map[canon_key] = value
     add_pass_raw = overrides.get("add_pass_through") if overrides else {}
-    add_pass = _canonicalize_pass_through_map(add_pass_raw)
+    add_pass = canonicalize_pass_through_map(add_pass_raw)
     for label, add_val in (add_pass or {}).items():
         if not isinstance(add_val, (int, float)):
             continue
