@@ -152,6 +152,32 @@ def _jsonify_debug_summary(summary: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _accumulate_drill_debug(dest: list[str], *sources: Any) -> None:
+    """Accumulate normalized drill debug entries from heterogeneous sources."""
+
+    for source in sources:
+        if source is None:
+            continue
+        if isinstance(source, _MappingABC):
+            _accumulate_drill_debug(dest, source.get("drill_debug"))
+            continue
+        if isinstance(source, str):
+            text = source.strip()
+            if text and text not in dest:
+                dest.append(text)
+            continue
+        if isinstance(source, (list, tuple, set)):
+            for entry in source:
+                _accumulate_drill_debug(dest, entry)
+            continue
+        try:
+            text = str(source).strip()
+        except Exception:
+            text = ""
+        if text and text not in dest:
+            dest.append(text)
+
+
 # Guardrails for LLM-generated process adjustments.
 
 def describe_runtime_environment() -> dict[str, str]:
@@ -6508,15 +6534,7 @@ def render_quote(
     if not isinstance(g, dict):
         g = {}
     drill_debug_entries: list[str] = []
-    for source in (result, breakdown):
-        if not isinstance(source, _MappingABC):
-            continue
-        entries = source.get("drill_debug")
-        if isinstance(entries, (list, tuple, set)):
-            for entry in entries:
-                text = str(entry).strip()
-                if text and text not in drill_debug_entries:
-                    drill_debug_entries.append(text)
+    _accumulate_drill_debug(drill_debug_entries, result, breakdown)
     # Canonical QUOTE SUMMARY header (legacy variants removed in favour of this
     # block so the Speeds/Feeds status + Drill Debug output stay consistent).
     lines.append(f"QUOTE SUMMARY - Qty {qty}")
@@ -14796,8 +14814,7 @@ def compute_quote_from_df(
 
     raw_drill_debug_lines = locals().get("drill_debug_lines")
     drill_debug_lines_payload: list[str] = []
-    if isinstance(raw_drill_debug_lines, (list, tuple, set)):
-        drill_debug_lines_payload = list(raw_drill_debug_lines)
+    _accumulate_drill_debug(drill_debug_lines_payload, raw_drill_debug_lines)
 
     if process_plan_summary:
         baseline_data["process_plan"] = copy.deepcopy(process_plan_summary)
