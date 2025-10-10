@@ -703,6 +703,7 @@ upsert_var_row = _export("upsert_var_row")
 get_dwg_converter_path = _export("get_dwg_converter_path")
 have_dwg_support = _export("have_dwg_support")
 get_import_diagnostics_text = _export("get_import_diagnostics_text")
+extract_features_with_occ = _export("extract_features_with_occ")
 
 _geometry_require_ezdxf = getattr(geometry, "require_ezdxf", None)
 _HAS_TRIMESH = getattr(geometry, "HAS_TRIMESH", False)
@@ -3439,7 +3440,7 @@ def require_ezdxf():
     if callable(_geometry_require_ezdxf):
         return _geometry_require_ezdxf()
 
-    if not geometry.HAS_EZDXF:
+    if not _HAS_EZDXF:
         raise RuntimeError("ezdxf not installed. Install with pip/conda (package name: 'ezdxf').")
 
     try:
@@ -3552,7 +3553,7 @@ def load_drawing(path: Path) -> Drawing:
             dxf_path = convert_dwg_to_dxf(str(path))
             return ezdxf_mod.readfile(dxf_path)
         # Fallback: odafc (requires ODAFileConverter on PATH)
-        if geometry.HAS_ODAFC and odafc is not None:
+        if _HAS_ODAFC and odafc is not None:
             odafc_mod = typing.cast(_OdafcModule, odafc)
             return odafc_mod.readfile(str(path))
         raise RuntimeError(
@@ -4293,7 +4294,7 @@ def enrich_geo_stl(path):
     import time
     start_time = time.time()
     logger.info("[%.2fs] Starting enrich_geo_stl for %s", time.time() - start_time, path)
-    if not geometry.HAS_TRIMESH:
+    if not _HAS_TRIMESH:
         raise RuntimeError("trimesh not available to process STL")
 
     logger.info("[%.2fs] Loading mesh...", time.time() - start_time)
@@ -4410,12 +4411,12 @@ def read_cad_any(path: str):
             raise RuntimeError("BREP read failed")
         return s
     if ext == ".dxf":
-        return geometry.read_dxf_as_occ_shape(path)
+        return read_dxf_as_occ_shape(path)
     if ext == ".dwg":
         conv = os.environ.get("ODA_CONVERTER_EXE") or os.environ.get("DWG2DXF_EXE")
         logger.info("Using DWG converter: %s", conv)
         dxf_path = convert_dwg_to_dxf(path)
-        return geometry.read_dxf_as_occ_shape(dxf_path)
+        return read_dxf_as_occ_shape(dxf_path)
     raise RuntimeError(f"Unsupported CAD format: {ext}")
 
 # ---- LLM hours inference ----
@@ -18145,7 +18146,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
         raise AttributeError("ezdxf module does not provide a callable 'readfile' function")
 
     if lower_path.endswith(".dwg"):
-        if geometry.HAS_ODAFC:
+        if _HAS_ODAFC:
             # uses ODAFileConverter through ezdxf, no env var needed
             from ezdxf.addons import odafc as _odafc  # type: ignore
 
@@ -18316,7 +18317,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     chart_source: str | None = None
     chart_summary: dict[str, Any] | None = None
 
-    extractor = _extract_text_lines_from_dxf or geometry.extract_text_lines_from_dxf
+    extractor = _extract_text_lines_from_dxf or extract_text_lines_from_dxf
     if extractor and dxf_text_path:
         try:
             chart_lines = extractor(dxf_text_path)
@@ -18327,7 +18328,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
 
     if chart_lines:
         chart_summary = summarize_hole_chart_lines(chart_lines)
-    parser = _parse_hole_table_lines or geometry.parse_hole_table_lines
+    parser = _parse_hole_table_lines or parse_hole_table_lines
     if chart_lines and parser:
         try:
             hole_rows = parser(chart_lines)
@@ -19681,22 +19682,22 @@ class GeometryLoader:
         return extract_2d_features_from_dxf_or_dwg(str(path))
 
     def extract_features_with_occ(self, path: str | Path):
-        return geometry.extract_features_with_occ(str(path))
+        return extract_features_with_occ(str(path))
 
     def enrich_geo_stl(self, path: str | Path):
-        return geometry.enrich_geo_stl(str(path))
+        return enrich_geo_stl(str(path))
 
     def read_step_shape(self, path: str | Path) -> Any:
-        return geometry.read_step_shape(str(path))
+        return read_step_shape(str(path))
 
     def read_cad_any(self, path: str | Path) -> Any:
-        return geometry.read_cad_any(str(path))
+        return read_cad_any(str(path))
 
     def safe_bbox(self, shape: Any):
-        return geometry.safe_bbox(shape)
+        return safe_bbox(shape)
 
     def enrich_geo_occ(self, shape: Any):
-        return geometry.enrich_geo_occ(shape)
+        return enrich_geo_occ(shape)
 
 
 @dataclass(slots=True)
