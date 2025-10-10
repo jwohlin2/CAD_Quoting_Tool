@@ -239,6 +239,7 @@ from cad_quoter.domain_models import (
 )
 from cad_quoter.coerce import to_float, to_int
 from cad_quoter.utils import compact_dict, sdict
+from cad_quoter.utils.geo_ctx import _should_include_outsourced_pass
 from cad_quoter.utils.text import _match_items_contains
 from cad_quoter.pricing import (
     LB_PER_KG,
@@ -308,7 +309,23 @@ try:
 except Exception:  # pragma: no cover - defensive against non-dataclass implementations
     _TIME_OVERHEAD_FIELD_NAMES = set()
 
-_TIME_OVERHEAD_SUPPORTS_INDEX_SEC = "index_sec_per_hole" in _TIME_OVERHEAD_FIELD_NAMES
+def _detect_index_support() -> bool:
+    """Return True when ``OverheadParams`` accepts ``index_sec_per_hole``."""
+
+    if "index_sec_per_hole" in _TIME_OVERHEAD_FIELD_NAMES:
+        return True
+    try:
+        _TimeOverheadParams(index_sec_per_hole=None)
+    except TypeError:
+        return False
+    except Exception:
+        # Unexpected constructor failure; assume unsupported to avoid breaking callers.
+        return False
+    else:
+        return True
+
+
+_TIME_OVERHEAD_SUPPORTS_INDEX_SEC = _detect_index_support()
 
 try:
     from process_planner import (
