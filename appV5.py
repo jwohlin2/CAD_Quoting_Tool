@@ -481,7 +481,6 @@ from cad_quoter.utils import compact_dict, jdump, json_safe_copy, sdict, _first_
 try:
     from cad_quoter.utils.geo_ctx import _should_include_outsourced_pass
 except Exception:  # pragma: no cover - fallback when optional import unavailable
-    from collections.abc import Mapping
     from typing import Any
 
     def _collection_has_text(value: Any) -> bool:
@@ -517,6 +516,7 @@ except Exception:  # pragma: no cover - fallback when optional import unavailabl
 try:
     from cad_quoter.utils.text import _match_items_contains as _imported_match_items_contains
 except Exception:  # pragma: no cover - defensive fallback for optional import paths
+    _imported_match_items_contains = None  # type: ignore[assignment]
     _match_items_contains = _fallback_match_items_contains  # type: ignore[assignment]
 else:
     if callable(_imported_match_items_contains):
@@ -932,8 +932,9 @@ def _canonicalize_pass_through_map(data: Any) -> dict[str, float]:
 def canonicalize_pass_through_map(data: Any) -> dict[str, float]:
     """Return a canonicalized pass-through map with defensive fallback."""
 
-    canonicalizer = globals().get("_canonicalize_pass_through_map")
-    if callable(canonicalizer):
+    canonicalizer_obj = globals().get("_canonicalize_pass_through_map")
+    if callable(canonicalizer_obj):
+        canonicalizer = cast(Callable[[Any], dict[str, float]], canonicalizer_obj)
         try:
             return canonicalizer(data)
         except Exception:
