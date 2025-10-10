@@ -44,7 +44,34 @@ def test_drill_time_includes_peck_and_breakthrough() -> None:
     )
 
     minutes = estimate_time_min(row, geom, tool, machine, overhead)
-    assert minutes == pytest.approx(0.8155, rel=1e-4)
+    assert minutes == pytest.approx(0.71549465, rel=1e-6)
+
+
+def test_drill_time_respects_index_seconds() -> None:
+    row = {
+        "operation": "drill",
+        "sfm_start": 90,
+        "fz_ipr_0_25in": 0.003,
+    }
+    geom = OperationGeometry(diameter_in=0.25, hole_depth_in=0.75)
+    tool = ToolParams(teeth_z=1)
+    machine = MachineParams(rapid_ipm=150)
+    base_overhead = OverheadParams(
+        toolchange_min=0.4,
+        approach_retract_in=0.2,
+        peck_penalty_min_per_in_depth=0.02,
+    )
+    indexed_overhead = OverheadParams(
+        toolchange_min=0.4,
+        approach_retract_in=0.2,
+        peck_penalty_min_per_in_depth=0.02,
+        index_sec_per_hole=24.0,
+    )
+
+    baseline = estimate_time_min(row, geom, tool, machine, base_overhead)
+    with_index = estimate_time_min(row, geom, tool, machine, indexed_overhead)
+
+    assert with_index == pytest.approx(baseline + 0.4, rel=1e-6)
 
 
 def test_endmill_profile_caps_by_machine_hp() -> None:
