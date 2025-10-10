@@ -1646,7 +1646,8 @@ def sanitize_suggestions(s: dict, bounds: dict) -> dict:
 
 def apply_suggestions(baseline: dict, s: dict) -> dict:
     eff = copy.deepcopy(baseline or {})
-    base_hours = eff.get("process_hours") if isinstance(eff.get("process_hours"), dict) else {}
+    raw_process_hours = eff.get("process_hours")
+    base_hours: dict[Any, Any] = raw_process_hours if isinstance(raw_process_hours, dict) else {}
     ph = {k: float(to_float(v) or 0.0) for k, v in base_hours.items()}
 
     for proc, mult in (s.get("process_hour_multipliers") or {}).items():
@@ -1889,12 +1890,18 @@ def merge_effective(
         value = base_val
         source = "baseline"
         override_val = overrides.get(key)
-        if isinstance(override_val, str) and override_val.strip():
-            value = override_val.strip()[:max_len]
-            source = "user"
-        elif isinstance(suggestions.get(key), str) and suggestions.get(key).strip():
-            value = suggestions.get(key).strip()[:max_len]
-            source = "llm"
+        if isinstance(override_val, str):
+            override_stripped = override_val.strip()
+            if override_stripped:
+                value = override_stripped[:max_len]
+                source = "user"
+        else:
+            suggestion_val = suggestions.get(key)
+            if isinstance(suggestion_val, str):
+                suggestion_stripped = suggestion_val.strip()
+                if suggestion_stripped:
+                    value = suggestion_stripped[:max_len]
+                    source = "llm"
         if value is not None:
             eff[key] = value
         elif key in eff:
@@ -1907,11 +1914,23 @@ def merge_effective(
         source = "baseline"
         override_val = overrides.get(key)
         if isinstance(override_val, list):
-            value = [str(item).strip()[:80] for item in override_val if str(item).strip()]
+            cleaned_override: list[str] = []
+            for item in override_val:
+                text = str(item).strip()
+                if text:
+                    cleaned_override.append(text[:80])
+            value = cleaned_override
             source = "user"
-        elif isinstance(suggestions.get(key), list):
-            value = [str(item).strip()[:80] for item in suggestions.get(key) if str(item).strip()]
-            source = "llm"
+        else:
+            suggestion_list = suggestions.get(key)
+            if isinstance(suggestion_list, list):
+                cleaned_suggestion: list[str] = []
+                for item in suggestion_list:
+                    text = str(item).strip()
+                    if text:
+                        cleaned_suggestion.append(text[:80])
+                value = cleaned_suggestion
+                source = "llm"
         if value:
             eff[key] = value
         elif key in eff:
@@ -1926,9 +1945,11 @@ def merge_effective(
         if isinstance(override_val, dict):
             value = copy.deepcopy(override_val)
             source = "user"
-        elif isinstance(suggestions.get(key), dict):
-            value = copy.deepcopy(suggestions.get(key))
-            source = "llm"
+        else:
+            suggestion_dict = suggestions.get(key)
+            if isinstance(suggestion_dict, dict):
+                value = copy.deepcopy(suggestion_dict)
+                source = "llm"
         if value is not None:
             eff[key] = value
         elif key in eff:
@@ -1940,15 +1961,18 @@ def merge_effective(
     clamp_notes: list[str] = []
     source_tags: dict[str, Any] = {}
 
-    baseline_hours_raw = baseline.get("process_hours") if isinstance(baseline.get("process_hours"), dict) else {}
+    raw_baseline_hours = baseline.get("process_hours")
+    baseline_hours_raw = raw_baseline_hours if isinstance(raw_baseline_hours, dict) else {}
     baseline_hours: dict[str, float] = {}
     for proc, hours in (baseline_hours_raw or {}).items():
         val = to_float(hours)
         if val is not None:
             baseline_hours[str(proc)] = float(val)
 
-    sugg_mult = suggestions.get("process_hour_multipliers") if isinstance(suggestions.get("process_hour_multipliers"), dict) else {}
-    over_mult = overrides.get("process_hour_multipliers") if isinstance(overrides.get("process_hour_multipliers"), dict) else {}
+    raw_sugg_mult = suggestions.get("process_hour_multipliers")
+    sugg_mult: dict[str, Any] = raw_sugg_mult if isinstance(raw_sugg_mult, dict) else {}
+    raw_over_mult = overrides.get("process_hour_multipliers")
+    over_mult: dict[str, Any] = raw_over_mult if isinstance(raw_over_mult, dict) else {}
     mult_keys = sorted(_collect_process_keys(baseline_hours, sugg_mult, over_mult))
     final_hours: dict[str, float] = dict(baseline_hours)
     final_mults: dict[str, float] = {}
@@ -1973,8 +1997,10 @@ def merge_effective(
         mult_sources[proc] = source
         final_hours[proc] = float(base_hr) * float(val)
 
-    sugg_add = suggestions.get("process_hour_adders") if isinstance(suggestions.get("process_hour_adders"), dict) else {}
-    over_add = overrides.get("process_hour_adders") if isinstance(overrides.get("process_hour_adders"), dict) else {}
+    raw_sugg_add = suggestions.get("process_hour_adders")
+    sugg_add: dict[str, Any] = raw_sugg_add if isinstance(raw_sugg_add, dict) else {}
+    raw_over_add = overrides.get("process_hour_adders")
+    over_add: dict[str, Any] = raw_over_add if isinstance(raw_over_add, dict) else {}
     add_keys = sorted(_collect_process_keys(sugg_add, over_add))
     final_adders: dict[str, float] = {}
     add_sources: dict[str, str] = {}
@@ -1998,16 +2024,10 @@ def merge_effective(
             final_hours[proc] = final_hours.get(proc, 0.0) + add_val
         add_sources[proc] = source
 
-    raw_sugg_pass = (
-        suggestions.get("add_pass_through")
-        if isinstance(suggestions.get("add_pass_through"), dict)
-        else {}
-    )
-    raw_over_pass = (
-        overrides.get("add_pass_through")
-        if isinstance(overrides.get("add_pass_through"), dict)
-        else {}
-    )
+    raw_sugg_pass_candidate = suggestions.get("add_pass_through")
+    raw_sugg_pass = raw_sugg_pass_candidate if isinstance(raw_sugg_pass_candidate, dict) else {}
+    raw_over_pass_candidate = overrides.get("add_pass_through")
+    raw_over_pass = raw_over_pass_candidate if isinstance(raw_over_pass_candidate, dict) else {}
     sugg_pass = _canonicalize_pass_through_map(raw_sugg_pass)
     over_pass = _canonicalize_pass_through_map(raw_over_pass)
     pass_keys = sorted(set(sugg_pass) | set(over_pass))
