@@ -464,6 +464,17 @@ def _canonical_amortized_label(label: Any) -> tuple[str, bool]:
 import pandas as pd
 from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    try:
+        from OCP.TopoDS import TopoDS_Shape as TopoDSShapeT  # type: ignore[import]
+    except ImportError:
+        try:
+            from OCC.Core.TopoDS import TopoDS_Shape as TopoDSShapeT  # type: ignore[import]
+        except ImportError:  # pragma: no cover - typing-only fallback
+            TopoDSShapeT = typing.Any
+else:
+    TopoDSShapeT = typing.Any
+
 try:  # Prefer pythonocc-core's OCP bindings when available
     from OCP.BRep import BRep_Tool  # type: ignore[import]
     from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE  # type: ignore[import]
@@ -3476,7 +3487,7 @@ def _shape_from_reader(reader):
 
     return healed
 
-def read_step_shape(path: str) -> TopoDS_Shape:
+def read_step_shape(path: str) -> TopoDSShapeT:
     rdr = STEPControl_Reader()
     if rdr.ReadFile(path) != IFSelect_RetDone:
         raise RuntimeError("STEP read failed (file unreadable or unsupported).")
@@ -3524,16 +3535,13 @@ def read_step_shape(path: str) -> TopoDS_Shape:
     fx.Perform()
     return fx.Shape()
 
-from OCP.TopoDS import TopoDS_Shape  # type: ignore[import]  # or OCC.Core.TopoDS on pythonocc
-
-
-def safe_bbox(shape: TopoDS_Shape):
+def safe_bbox(shape: TopoDSShapeT):
     if shape is None or shape.IsNull():
         raise ValueError("Cannot compute bounding box of a null shape.")
     box = Bnd_Box()
     bnd_add(shape, box, True)  # <- uses whichever binding is available
     return box
-def read_step_or_iges_or_brep(path: str) -> TopoDS_Shape:
+def read_step_or_iges_or_brep(path: str) -> TopoDSShapeT:
     p = Path(path)
     ext = p.suffix.lower()
     if ext in (".step", ".stp"):
@@ -3576,6 +3584,7 @@ def convert_dwg_to_dxf(dwg_path: str, *, out_ver="ACAD2018") -> str:
     out_dxf = out_dir / (dwg.stem + ".dxf")
 
     exe_lower = Path(exe).name.lower()
+    cmd: list[str] = []
     try:
         if exe_lower.endswith(".bat") or exe_lower.endswith(".cmd"):
             # ? run batch via cmd.exe so it actually executes
