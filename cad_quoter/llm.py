@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence
 
-from cad_quoter.utils import compact_dict, jdump
+from cad_quoter.utils import compact_dict, jdump, json_safe_copy
 
 
 def parse_llm_json(text: str) -> dict:
@@ -421,7 +421,10 @@ class LLMClient:
         try:
             self._debug_dir.mkdir(parents=True, exist_ok=True)
             path = self._debug_dir / f"llm_snapshot_{int(time.time())}.json"
-            path.write_text(jdump(snapshot, default=None), encoding="utf-8")
+            path.write_text(
+                jdump(json_safe_copy(snapshot), default=None),
+                encoding="utf-8",
+            )
         except Exception:
             pass
 
