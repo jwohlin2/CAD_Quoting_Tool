@@ -61,6 +61,12 @@ def _coerce_env_bool(value: str | None) -> bool:
 FORCE_PLANNER = _coerce_env_bool(os.environ.get("FORCE_PLANNER"))
 
 
+# Guardrails for LLM-generated process adjustments.
+LLM_MULTIPLIER_MIN = 0.25
+LLM_MULTIPLIER_MAX = 4.0
+LLM_ADDER_MAX = 8.0
+
+
 def jdump(obj) -> str:
     return json.dumps(obj, indent=2, default=str)
 
@@ -193,11 +199,6 @@ from cad_quoter.geo2d import (
     to_noncapturing as _to_noncapturing,
 )
 from bucketizer import bucketize
-
-# Guardrails for LLM-generated process adjustments.
-LLM_MULTIPLIER_MIN = 0.25
-LLM_MULTIPLIER_MAX = 4.0
-LLM_ADDER_MAX = 8.0
 
 # Tolerance for invariant checks that guard against silent drift when rendering
 # cost sections.
