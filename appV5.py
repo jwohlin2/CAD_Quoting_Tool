@@ -10333,7 +10333,9 @@ def estimate_drilling_hours(
     debug_state: dict[str, Any] | None = None
     if (debug_lines is not None) or (debug_summary is not None):
         debug_state = {}
-    debug: dict[str, Any] | None = debug_state
+    debug: dict[str, Any] | None = None
+    if debug_state is not None:
+        debug = debug_state
 
     debug_list = debug_lines if debug_lines is not None else None
     if debug_summary is not None:
