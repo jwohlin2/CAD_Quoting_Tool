@@ -2,7 +2,7 @@
 # Read more DWG/DXF detail into your GEO dict (ezdxf required for DXF).
 from __future__ import annotations
 import re, math
-from collections import Counter, defaultdict
+from collections import Counter
 
 try:
     import ezdxf

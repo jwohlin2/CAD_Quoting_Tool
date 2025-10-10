@@ -9,7 +9,7 @@ import re
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Optional
 
 
 # Optional trimesh for STL
@@ -34,7 +34,7 @@ except Exception:
 # odafc is optional; don't fail if it's not present
 try:
     if _HAS_EZDXF:
-        from ezdxf.addons import odafc  # type: ignore
+        from ezdxf.addons import odafc  # type: ignore  # noqa: F401
         _HAS_ODAFC = True
 except Exception:
     _HAS_ODAFC = False
@@ -174,14 +174,11 @@ try:
     from OCP.BRep import BRep_Tool
     from OCP.TopAbs import TopAbs_FACE
     from OCP.TopExp import TopExp_Explorer
-    from OCP.TopLoc import TopLoc_Location
     BACKEND = "ocp"
 except Exception:
     from OCC.Core.BRep import BRep_Tool
-    from OCC.Core.TopoDS import topods_Edge, topods_Shell, topods_Solid
     from OCC.Core.TopAbs import TopAbs_FACE
     from OCC.Core.TopExp import TopExp_Explorer
-    from OCC.Core.TopLoc import TopLoc_Location
     BACKEND = "pythonocc"
 
 def _typename(o):  # small helper
@@ -230,8 +227,6 @@ def face_surface(face_like):
 # ---------- Robust casters that work on OCP and pythonocc ----------
 # Lock topods casters to the active backend
 if STACK == "ocp":
-    from OCP.TopoDS import TopoDS_Edge, TopoDS_Solid, TopoDS_Shell
-
     def _TO_EDGE(s):
         if type(s).__name__ in ("TopoDS_Edge", "Edge"):
             return s
@@ -455,11 +450,11 @@ def have_dwg_support() -> bool:
     return _HAS_ODAFC or bool(get_dwg_converter_path())
 
 def get_import_diagnostics_text() -> str:
-    import sys, shutil, os
+    import sys, os
     lines = []
     lines.append(f"Python: {sys.executable}")
     try:
-        import fitz  # PyMuPDF
+        import fitz  # PyMuPDF  # noqa: F401
         lines.append("PyMuPDF: OK")
     except Exception as e:
         lines.append(f"PyMuPDF: MISSING ({e})")
@@ -468,7 +463,7 @@ def get_import_diagnostics_text() -> str:
         import ezdxf
         lines.append(f"ezdxf: {getattr(ezdxf, '__version__', 'unknown')}")
         try:
-            from ezdxf.addons import odafc
+            from ezdxf.addons import odafc  # noqa: F401
             lines.append("ezdxf.addons.odafc: OK")
         except Exception as e:
             lines.append(f"ezdxf.addons.odafc: not available ({e})")
@@ -487,7 +482,7 @@ def get_import_diagnostics_text() -> str:
     return "\n".join(lines)
 # Optional PDF stack
 try:
-    import fitz  # PyMuPDF
+    import fitz  # PyMuPDF  # noqa: F401
     _HAS_PYMUPDF = True
 except Exception:
     _HAS_PYMUPDF = False
@@ -664,26 +659,20 @@ try:
     # ---- OCP branch ----
     from OCP.IFSelect import IFSelect_RetDone
     from OCP.IGESControl import IGESControl_Reader
-    from OCP.ShapeFix import ShapeFix_Shape, ShapeFix_Solid
+    from OCP.ShapeFix import ShapeFix_Shape
     from OCP.BRepCheck import BRepCheck_Analyzer
     from OCP.BRep import BRep_Tool        # OCP version
     from OCP.BRepGProp import BRepGProp
     from OCP.GProp import GProp_GProps
     from OCP.Bnd import Bnd_Box
-    from OCP.BRepBndLib import BRepBndLib
     from OCP.BRep import BRep_Builder
-    from OCP.BRepBuilderAPI import (
-        BRepBuilderAPI_MakeFace, BRepBuilderAPI_MakePolygon,
-        BRepBuilderAPI_Sewing, BRepBuilderAPI_MakeSolid,
-    )
-    from OCP.BRepPrimAPI import BRepPrimAPI_MakePrism
     from OCP.BRepAlgoAPI import BRepAlgoAPI_Section
-    from OCP.BRepAdaptor import BRepAdaptor_Surface, BRepAdaptor_Curve
+    from OCP.BRepAdaptor import BRepAdaptor_Curve
     
     # ADD THESE TWO IMPORTS
     from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
     from OCP.TopoDS import (
-        TopoDS_Shape, TopoDS_Edge, TopoDS_Face, TopoDS_Shell, TopoDS_Solid, TopoDS_Compound
+        TopoDS_Shape, TopoDS_Face, TopoDS_Compound
     )
     from OCP.TopExp import TopExp_Explorer, TopExp
     from OCP.TopAbs import TopAbs_FACE, TopAbs_EDGE, TopAbs_SOLID, TopAbs_SHELL, TopAbs_COMPOUND
@@ -693,7 +682,7 @@ try:
         GeomAbs_BSplineSurface, GeomAbs_BezierSurface, GeomAbs_Circle,
     )
     from OCP.ShapeAnalysis import ShapeAnalysis_Surface
-    from OCP.gp import gp_Pnt, gp_Vec, gp_Dir, gp_Pln
+    from OCP.gp import gp_Pnt, gp_Dir, gp_Pln
     BACKEND_OCC = "OCP"
 
     def BRepTools_UVBounds(face):
@@ -718,24 +707,18 @@ except Exception:
     from OCC.Core.STEPControl import STEPControl_Reader
     from OCC.Core.IFSelect import IFSelect_RetDone
     from OCC.Core.IGESControl import IGESControl_Reader
-    from OCC.Core.ShapeFix import ShapeFix_Shape, ShapeFix_Solid
+    from OCC.Core.ShapeFix import ShapeFix_Shape
     from OCC.Core.BRepCheck import BRepCheck_Analyzer
     from OCC.Core.BRep import BRep_Tool          # ? OCC version
     from OCC.Core.GProp import GProp_GProps
     from OCC.Core.Bnd import Bnd_Box
     from OCC.Core.BRep import BRep_Builder
-    from OCC.Core.BRepBuilderAPI import (
-        BRepBuilderAPI_MakeFace, BRepBuilderAPI_MakePolygon,
-        BRepBuilderAPI_Sewing, BRepBuilderAPI_MakeSolid,
-    )
-    from OCC.Core.BRepPrimAPI import BRepPrimAPI_MakePrism
     from OCC.Core.BRepAlgoAPI import BRepAlgoAPI_Section
-    from OCC.Core.BRepAdaptor import BRepAdaptor_Surface, BRepAdaptor_Curve
+    from OCC.Core.BRepAdaptor import BRepAdaptor_Curve
     # ADD TopTools import and TopoDS_Face for the fix below
     from OCC.Core.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
     from OCC.Core.TopoDS import (
-        TopoDS_Shape, TopoDS_Edge, TopoDS_Face, TopoDS_Shell, TopoDS_Solid, TopoDS_Compound,
-        TopoDS_Face
+        TopoDS_Shape, TopoDS_Face, TopoDS_Compound,
     )
     from OCC.Core.TopExp import TopExp_Explorer
     from OCC.Core.TopAbs import TopAbs_FACE, TopAbs_EDGE, TopAbs_SOLID, TopAbs_SHELL, TopAbs_COMPOUND
@@ -745,7 +728,7 @@ except Exception:
         GeomAbs_BSplineSurface, GeomAbs_BezierSurface, GeomAbs_Circle,
     )
     from OCC.Core.ShapeAnalysis import ShapeAnalysis_Surface
-    from OCC.Core.gp import gp_Pnt, gp_Vec, gp_Dir, gp_Pln
+    from OCC.Core.gp import gp_Pnt, gp_Dir, gp_Pln
     BACKEND_OCC = "OCC.Core"
 
     # BRepGProp shim (pythonocc uses free functions)
@@ -1422,7 +1405,6 @@ def load_cad_any(path: str) -> TopoDS_Shape:
     raise RuntimeError(f"Unsupported file type for shape loading: {ext}")
 def read_cad_any(path: str):
     from OCP.IFSelect import IFSelect_RetDone
-    from OCP.ShapeFix import ShapeFix_Shape
     from OCP.IGESControl import IGESControl_Reader
     from OCP.TopoDS import TopoDS_Shape
 
@@ -1650,11 +1632,11 @@ def read_dxf_as_occ_shape(dxf_path: str):
 
 # ---- 2D: PDF (PyMuPDF) -------------------------------------------------------
 try:
-    import fitz  # old import name
+    import fitz  # old import name  # noqa: F401
     _HAS_PYMUPDF = True
 except Exception:
     try:
-        import pymupdf as fitz  # new import name
+        import pymupdf as fitz  # new import name  # noqa: F401
         _HAS_PYMUPDF = True
     except Exception:
         fitz = None  # allow the rest of the app to import
