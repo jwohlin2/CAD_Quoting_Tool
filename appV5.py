@@ -8053,6 +8053,62 @@ def render_quote(
                 else:
                     _record_bucket_summary(raw_key, {})
 
+    if isinstance(process_meta, _MappingABC):
+        for raw_key, raw_meta in process_meta.items():
+            if not isinstance(raw_meta, _MappingABC):
+                continue
+            canon_key = _canonical_bucket_key(raw_key)
+            if not canon_key or canon_key.startswith("planner_"):
+                continue
+            if canon_key != raw_key:
+                continue
+            minutes_val = _bucket_cost(raw_meta, "minutes")
+            hours_val = _bucket_cost(raw_meta, "hours", "hr")
+            if hours_val <= 0 and minutes_val > 0:
+                hours_val = minutes_val / 60.0
+            labor_val = _bucket_cost(raw_meta, "labor_cost", "labor$", "labor")
+            machine_val = _bucket_cost(raw_meta, "machine_cost", "machine$", "machine")
+            total_val = _bucket_cost(raw_meta, "total_cost", "total$", "cost")
+            if total_val <= 0 and (labor_val or machine_val):
+                total_val = labor_val + machine_val
+            if total_val <= 0:
+                rate_val = _bucket_cost(raw_meta, "rate")
+                base_extra_val = _bucket_cost(raw_meta, "base_extra")
+                if rate_val > 0 or base_extra_val:
+                    total_val = rate_val * hours_val + base_extra_val
+            if minutes_val <= 0 and hours_val > 0:
+                minutes_val = hours_val * 60.0
+            summary = canonical_bucket_summary.setdefault(
+                canon_key,
+                {"minutes": 0.0, "hours": 0.0, "labor": 0.0, "machine": 0.0, "total": 0.0},
+            )
+            if minutes_val > 0:
+                summary["minutes"] = float(minutes_val)
+            elif hours_val > 0:
+                summary["minutes"] = float(hours_val * 60.0)
+            if hours_val > 0:
+                summary["hours"] = float(hours_val)
+            labor_has_value = (
+                labor_val > 0
+                or "labor_cost" in raw_meta
+                or "labor$" in raw_meta
+                or "labor" in raw_meta
+            )
+            if labor_has_value:
+                summary["labor"] = float(labor_val)
+            machine_has_value = (
+                machine_val > 0
+                or "machine_cost" in raw_meta
+                or "machine$" in raw_meta
+                or "machine" in raw_meta
+            )
+            if machine_has_value:
+                summary["machine"] = float(machine_val)
+            if total_val > 0:
+                summary["total"] = float(total_val)
+            if canon_key not in canonical_bucket_order:
+                canonical_bucket_order.append(canon_key)
+
     lines.append("Process & Labor Costs")
     lines.append(divider)
     proc_total = 0.0
@@ -15321,6 +15377,12 @@ def compute_quote_from_df(
                     "rate": round(rate, 2),
                     "cost": round(cost, 2),
                 }
+                labor_cost = _bucket_cost(info, "labor_cost", "labor$", "labor")
+                machine_cost = _bucket_cost(info, "machine_cost", "machine$", "machine")
+                if labor_cost or "labor_cost" in info or "labor$" in info:
+                    update_payload["labor_cost"] = round(labor_cost, 2)
+                if machine_cost or "machine_cost" in info or "machine$" in info:
+                    update_payload["machine_cost"] = round(machine_cost, 2)
                 existing_meta = process_meta.get(b)
                 if isinstance(existing_meta, _MappingABC):
                     existing_meta.update(update_payload)
@@ -15454,6 +15516,12 @@ def compute_quote_from_df(
                     "rate": round(rate, 2),
                     "cost": round(cost, 2),
                 }
+                labor_cost = _bucket_cost(info, "labor_cost", "labor$", "labor")
+                machine_cost = _bucket_cost(info, "machine_cost", "machine$", "machine")
+                if labor_cost or "labor_cost" in info or "labor$" in info:
+                    update_payload["labor_cost"] = round(labor_cost, 2)
+                if machine_cost or "machine_cost" in info or "machine$" in info:
+                    update_payload["machine_cost"] = round(machine_cost, 2)
                 existing_meta = process_meta.get(b)
                 if isinstance(existing_meta, _MappingABC):
                     existing_meta.update(update_payload)
@@ -16937,6 +17005,116 @@ def compute_quote_from_df(
                 base_extra_val = float(meta.get("base_extra", 0.0) or 0.0)
                 process_costs[key] = round(hr_val * rate_val + base_extra_val, 2)
         process_hours_final = _collect_process_hours()
+
+    def _update_planner_bucket_minutes(canon_key: str, total_hr: float) -> None:
+        minutes_val = round(max(0.0, float(total_hr)) * 60.0, 2)
+        hours_val = round(max(0.0, float(total_hr)), 3)
+
+        def _apply_to_map(mapping: Mapping[str, Any] | None) -> None:
+            if not isinstance(mapping, dict):
+                return
+            for bucket_key, payload in mapping.items():
+                if _canonical_bucket_key(bucket_key) != canon_key:
+                    continue
+                if isinstance(payload, dict):
+                    if "minutes" in payload:
+                        payload["minutes"] = minutes_val
+                    if "hr" in payload:
+                        payload["hr"] = hours_val
+                elif isinstance(payload, (int, float)):
+                    mapping[bucket_key] = minutes_val
+
+        for candidate in (
+            bucket_view,
+            planner_bucket_view,
+            planner_bucket_rollup,
+            planner_bucket_display_map,
+            planner_bucket_display_map_payload,
+        ):
+            _apply_to_map(candidate)
+
+        for container in (process_plan_summary, getattr(quote_state, "process_plan", None)):
+            if isinstance(container, dict):
+                _apply_to_map(container.get("bucket_view"))
+
+    canonical_bucket_rollup: dict[str, float] = {}
+    canonical_bucket_contributors: dict[str, float] = {}
+    for proc_key, hr_val in list(process_hours_final.items()):
+        canon_key = _canonical_bucket_key(proc_key)
+        if not canon_key or canon_key.startswith("planner_"):
+            continue
+        try:
+            hr_clean = max(0.0, float(hr_val or 0.0))
+        except Exception:
+            hr_clean = 0.0
+        if proc_key == canon_key:
+            canonical_bucket_rollup.setdefault(canon_key, hr_clean)
+        else:
+            canonical_bucket_contributors[canon_key] = (
+                canonical_bucket_contributors.get(canon_key, 0.0) + hr_clean
+            )
+
+    for canon_key, contrib_total in canonical_bucket_contributors.items():
+        if contrib_total <= 0.0:
+            continue
+        canonical_bucket_rollup[canon_key] = contrib_total
+
+    for canon_key, total_hr in canonical_bucket_rollup.items():
+        if canon_key.startswith("planner_"):
+            continue
+        process_hours_final[canon_key] = total_hr
+        if isinstance(process_meta, dict):
+            meta_entry = process_meta.get(canon_key)
+            prev_minutes = 0.0
+            prev_labor_cost = 0.0
+            prev_machine_cost = 0.0
+            if isinstance(meta_entry, dict):
+                prev_minutes = _bucket_cost(meta_entry, "minutes")
+                if prev_minutes <= 0:
+                    try:
+                        prev_minutes = float(meta_entry.get("hr", 0.0) or 0.0) * 60.0
+                    except Exception:
+                        prev_minutes = 0.0
+                prev_labor_cost = _bucket_cost(meta_entry, "labor_cost", "labor$", "labor")
+                prev_machine_cost = _bucket_cost(meta_entry, "machine_cost", "machine$", "machine")
+            prev_hours = prev_minutes / 60.0 if prev_minutes > 0 else 0.0
+            labor_rate = (prev_labor_cost / prev_hours) if prev_hours > 0 and prev_labor_cost > 0 else None
+            machine_rate = (
+                prev_machine_cost / prev_hours if prev_hours > 0 and prev_machine_cost > 0 else None
+            )
+            if isinstance(meta_entry, dict):
+                meta_entry["hr"] = round(total_hr, 3)
+                meta_entry["minutes"] = round(total_hr * 60.0, 1)
+                if labor_rate is not None:
+                    meta_entry["labor_cost"] = round(total_hr * labor_rate, 2)
+                elif "labor_cost" in meta_entry:
+                    meta_entry["labor_cost"] = 0.0
+                if machine_rate is not None:
+                    meta_entry["machine_cost"] = round(total_hr * machine_rate, 2)
+                elif "machine_cost" in meta_entry:
+                    meta_entry["machine_cost"] = 0.0
+                try:
+                    rate_val = float(meta_entry.get("rate", 0.0) or 0.0)
+                except Exception:
+                    rate_val = 0.0
+                try:
+                    base_extra_val = float(meta_entry.get("base_extra", 0.0) or 0.0)
+                except Exception:
+                    base_extra_val = 0.0
+                if rate_val > 0 or base_extra_val != 0.0:
+                    meta_entry["cost"] = round(total_hr * rate_val + base_extra_val, 2)
+                elif labor_rate is not None or machine_rate is not None:
+                    meta_entry["cost"] = round(
+                        total_hr * (labor_rate or 0.0) + total_hr * (machine_rate or 0.0),
+                        2,
+                    )
+            else:
+                process_meta[canon_key] = {
+                    "hr": round(total_hr, 3),
+                    "minutes": round(total_hr * 60.0, 1),
+                }
+        if used_planner and canonical_bucket_contributors.get(canon_key, 0.0) > 0.0:
+            _update_planner_bucket_minutes(canon_key, total_hr)
 
     for proc_key, final_hr in process_hours_final.items():
         if pricing_source == "planner" and proc_key not in process_costs:
