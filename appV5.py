@@ -31,7 +31,11 @@ from fractions import Fraction
 from pathlib import Path
 
 from cad_quoter.app import runtime as _runtime
-from cad_quoter.app.container import ServiceContainer, create_default_container
+from cad_quoter.app.container import (
+    ServiceContainer,
+    SupportsPricingEngine,
+    create_default_container,
+)
 from cad_quoter.config import (
     AppEnvironment,
     ConfigError,
@@ -17851,9 +17855,14 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     if lower_path.endswith(".dwg"):
         if geometry.HAS_ODAFC:
             # uses ODAFileConverter through ezdxf, no env var needed
-            from ezdxf.addons import odafc  # type: ignore
+            from ezdxf.addons import odafc as _odafc  # type: ignore
 
-            doc = odafc.readfile(path)
+            readfile = getattr(_odafc, "readfile", None)
+            if not callable(readfile):  # pragma: no cover - defensive fallback
+                raise RuntimeError(
+                    "ezdxf.addons.odafc.readfile is unavailable; install ODAFileConverter support."
+                )
+            doc = readfile(path)
         else:
             dxf_path = convert_dwg_to_dxf(path, out_ver="ACAD2018")
             dxf_text_path = dxf_path
@@ -17958,8 +17967,12 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
                 geo["provenance"] = merged
 
             if geo_read_more.get("chart_lines"):
-                existing_lines = list(geo.get("chart_lines") or []) if isinstance(geo.get("chart_lines"), list) else []
-                for line in geo_read_more.get("chart_lines") or []:
+                existing_lines_raw = geo.get("chart_lines")
+                existing_lines = list(existing_lines_raw) if isinstance(existing_lines_raw, list) else []
+                new_lines = geo_read_more.get("chart_lines")
+                if not isinstance(new_lines, list):
+                    new_lines = []
+                for line in new_lines:
                     if line not in existing_lines:
                         existing_lines.append(line)
                 if existing_lines:
@@ -18145,9 +18158,11 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
                 result["outline_area_in2"] = outline_area_in2_val
                 result["outline_area_mm2"] = round(outline_area_in2_val * (25.4 ** 2), 2)
             if geo_read_more.get("hole_diam_families_in"):
-                result["hole_diam_families_in"] = dict(geo_read_more.get("hole_diam_families_in") or {})
+                hole_families = geo_read_more.get("hole_diam_families_in")
+                result["hole_diam_families_in"] = dict(hole_families) if isinstance(hole_families, dict) else {}
             if geo_read_more.get("hole_table_families_in"):
-                result["hole_table_families_in"] = dict(geo_read_more.get("hole_table_families_in") or {})
+                table_families = geo_read_more.get("hole_table_families_in")
+                result["hole_table_families_in"] = dict(table_families) if isinstance(table_families, dict) else {}
             hole_count_geom_val = _coerce_float_or_none(geo_read_more.get("hole_count_geom"))
             hole_count_geom = int(hole_count_geom_val) if hole_count_geom_val is not None else None
             current_hole_count = _coerce_int_or_zero(result.get("hole_count"))
@@ -18160,10 +18175,18 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
             if geo_read_more.get("material_note") and not result.get("material"):
                 result["material"] = geo_read_more.get("material_note")
             if geo_read_more.get("chart_lines") and not result.get("chart_lines"):
-                result["chart_lines"] = list(geo_read_more.get("chart_lines") or [])
+                chart_lines_extra = geo_read_more.get("chart_lines")
+                result["chart_lines"] = list(chart_lines_extra) if isinstance(chart_lines_extra, list) else []
             if geo_read_more.get("tap_qty") or geo_read_more.get("cbore_qty") or geo_read_more.get("csk_qty"):
-                feature_counts_raw = result.get("feature_counts") if isinstance(result.get("feature_counts"), dict) else {}
-                feature_counts: dict[str, Any] = {str(k): v for k, v in dict(feature_counts_raw).items()}
+                feature_counts_raw_any = result.get("feature_counts")
+                feature_counts_raw = (
+                    feature_counts_raw_any
+                    if isinstance(feature_counts_raw_any, dict)
+                    else {}
+                )
+                feature_counts: dict[str, Any] = {
+                    str(k): v for k, v in feature_counts_raw.items()
+                }
                 if geo_read_more.get("tap_qty"):
                     feature_counts["tap_qty"] = max(int(feature_counts.get("tap_qty", 0) or 0), int(geo_read_more.get("tap_qty") or 0))
                 if geo_read_more.get("cbore_qty"):
@@ -18457,58 +18480,80 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
             },
         ]
 
-        drivers_raw = data.get("drivers") if isinstance(data.get("drivers"), list) else []
-        drivers: list[dict[str, float | str]] = []
+        drivers_source = data.get("drivers")
+        drivers_raw = drivers_source if isinstance(drivers_source, list) else []
+
+        class _DriverEntry(TypedDict):
+            label: str
+            usd: float
+            pct_of_subtotal: float
+
+        drivers: list[_DriverEntry] = []
         for idx, default in enumerate(fallback_drivers):
-            entry = drivers_raw[idx] if idx < len(drivers_raw) and isinstance(drivers_raw[idx], dict) else {}
+            raw_entry = drivers_raw[idx] if idx < len(drivers_raw) else None
+            entry = raw_entry if isinstance(raw_entry, dict) else {}
             label = str(entry.get("label") or default["label"]).strip() or default["label"]
-            usd = _to_float(entry.get("usd"))
-            pct = _to_float(entry.get("pct_of_subtotal"))
+            usd_val = _to_float(entry.get("usd"))
+            pct_val = _to_float(entry.get("pct_of_subtotal"))
             drivers.append(
                 {
                     "label": label,
-                    "usd": usd if usd is not None else float(default["usd"]),
-                    "pct_of_subtotal": pct if pct is not None else float(default["pct_of_subtotal"]),
+                    "usd": float(usd_val) if usd_val is not None else float(default["usd"]),
+                    "pct_of_subtotal": float(pct_val) if pct_val is not None else float(default["pct_of_subtotal"]),
                 }
             )
+        default_driver: _DriverEntry = {"label": "Labor", "usd": 0.0, "pct_of_subtotal": 0.0}
         while len(drivers) < 2:
-            drivers.append({"label": f"Bucket {len(drivers) + 1}", "usd": 0.0, "pct_of_subtotal": 0.0})
+            drivers.append(
+                {
+                    "label": f"Bucket {len(drivers) + 1}",
+                    "usd": 0.0,
+                    "pct_of_subtotal": 0.0,
+                }
+            )
 
-        driver_primary = drivers[0] if drivers else {"label": "Labor", "usd": 0.0, "pct_of_subtotal": 0.0}
+        driver_primary = drivers[0] if drivers else default_driver
         driver_secondary = drivers[1] if len(drivers) > 1 else driver_primary
 
-        geo_notes_raw = data.get("geo_notes") if isinstance(data.get("geo_notes"), list) else []
+        geo_notes_source = data.get("geo_notes")
+        geo_notes_raw = geo_notes_source if isinstance(geo_notes_source, list) else []
         geo_notes = [str(note).strip() for note in geo_notes_raw if str(note).strip()]
         if not geo_notes:
-            default_notes = ctx.get("geo_notes") if isinstance(ctx.get("geo_notes"), list) else []
+            ctx_geo_notes = ctx.get("geo_notes")
+            default_notes = ctx_geo_notes if isinstance(ctx_geo_notes, list) else []
             if default_notes:
                 geo_notes = [str(note).strip() for note in default_notes if str(note).strip()]
         if not geo_notes:
-            hc = ctx.get("geo_summary", {}).get("hole_count")
-            thk = ctx.get("geo_summary", {}).get("thickness_in")
-            mat = ctx.get("geo_summary", {}).get("material")
+            geo_summary_ctx = ctx.get("geo_summary")
+            summary = geo_summary_ctx if isinstance(geo_summary_ctx, dict) else {}
+            hc = summary.get("hole_count")
+            thk = summary.get("thickness_in")
+            mat = summary.get("material")
             if hc and thk and mat:
                 try:
                     geo_notes = [f"{int(hc)} holes in {float(thk):.2f} in {mat}"]
                 except Exception:
                     geo_notes = []
 
+        top_processes_source = data.get("top_processes")
+        top_processes_raw = top_processes_source if isinstance(top_processes_source, list) else []
+
         class _TopProcessEntry(TypedDict):
             name: str
             usd: float
 
-        top_processes_raw = data.get("top_processes") if isinstance(data.get("top_processes"), list) else []
-        top_processes: list[dict[str, float | str]] = []
+        top_processes: list[_TopProcessEntry] = []
         for entry in top_processes_raw:
             if not isinstance(entry, dict):
                 continue
             name_val = str(entry.get("name") or "").strip()
             usd_val = _to_float(entry.get("usd"))
             if name_val and usd_val is not None:
-                top_processes.append({"name": name_val, "usd": usd_val})
+                top_processes.append({"name": name_val, "usd": float(usd_val)})
         if not top_processes:
-            rollup = ctx.get("rollup")
-            rollup_processes = rollup.get("top_processes") if isinstance(rollup, dict) else None
+            rollup_ctx = ctx.get("rollup")
+            rollup = rollup_ctx if isinstance(rollup_ctx, dict) else {}
+            rollup_processes = rollup.get("top_processes")
             if isinstance(rollup_processes, list):
                 for proc in rollup_processes:
                     if not isinstance(proc, dict):
@@ -18516,9 +18561,10 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
                     name_val = str(proc.get("name") or "").strip()
                     usd_val = _to_float(proc.get("usd"))
                     if name_val and usd_val is not None:
-                        top_processes.append({"name": name_val, "usd": usd_val})
+                        top_processes.append({"name": name_val, "usd": float(usd_val)})
 
-        material_section = data.get("material") if isinstance(data.get("material"), dict) else {}
+        material_section_obj = data.get("material")
+        material_section = material_section_obj if isinstance(material_section_obj, dict) else {}
         scrap_val = _to_float(material_section.get("scrap_pct"))
         if scrap_val is None:
             scrap_fallback = ctx.get("scrap_pct")
@@ -18532,8 +18578,8 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
             "scrap_pct": round(float(scrap_val), 1),
         }
 
-        explanation = data.get("explanation") if isinstance(data.get("explanation"), str) else ""
-        explanation = explanation.strip()
+        explanation_raw = data.get("explanation")
+        explanation = explanation_raw.strip() if isinstance(explanation_raw, str) else ""
 
         if not explanation:
             top_text = ""
@@ -18550,23 +18596,26 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
             if geo_notes:
                 geo_text = "Geometry: " + ", ".join(geo_notes) + ". "
 
-            scrap_display = material_struct.get("scrap_pct")
+            scrap_display = typing.cast(float | None, material_struct.get("scrap_pct"))
             if scrap_display is None:
-                scrap_display = ctx.get("scrap_pct")
+                scrap_display = _to_float(ctx.get("scrap_pct"))
+            if scrap_display is None:
+                scrap_display = 0.0
             try:
                 scrap_str = f"{float(scrap_display):.1f}"
             except Exception:
                 scrap_str = str(scrap_display)
 
             material_text = ""
-            if material_struct.get("source"):
-                material_text = f"Material via {material_struct['source']}; scrap {scrap_str}% applied."
+            source_val = material_struct.get("source")
+            if source_val:
+                material_text = f"Material via {source_val}; scrap {scrap_str}% applied."
             else:
                 material_text = f"Scrap {scrap_str}% applied."
 
             explanation = (
-                f"Labor ${labor_cost:.2f} ({float(driver_primary['pct_of_subtotal']):.1f}%) and directs "
-                f"${direct_costs:.2f} ({float(driver_secondary['pct_of_subtotal']):.1f}%) drive cost. "
+                f"Labor ${labor_cost:.2f} ({driver_primary['pct_of_subtotal']:.1f}%) and directs "
+                f"${direct_costs:.2f} ({driver_secondary['pct_of_subtotal']:.1f}%) drive cost. "
                 + top_text
                 + geo_text
                 + material_text
@@ -18707,7 +18756,8 @@ def get_llm_overrides(
         part_mass_est = density_feature * volume_feature
     density_for_stock = density_feature if density_feature > 0 else 7.85
 
-    bbox_feature = features.get("bbox_mm") if isinstance(features.get("bbox_mm"), dict) else {}
+    bbox_feature_raw = features.get("bbox_mm")
+    bbox_feature = bbox_feature_raw if isinstance(bbox_feature_raw, dict) else {}
     part_dims: list[float] = []
     for key in ("length_mm", "width_mm", "height_mm"):
         val = _as_float(bbox_feature.get(key))
@@ -18718,7 +18768,11 @@ def get_llm_overrides(
     part_dims_sorted = sorted([d for d in part_dims if d > 0], reverse=True)
 
     stock_catalog_raw = features.get("stock_catalog")
-    stock_catalog = stock_catalog_raw if isinstance(stock_catalog_raw, (list, tuple)) else []
+    stock_catalog = (
+        list(stock_catalog_raw)
+        if isinstance(stock_catalog_raw, (list, tuple))
+        else []
+    )
     catalog_dims_sorted: list[list[float]] = []
     for entry in stock_catalog:
         if not isinstance(entry, dict):
@@ -19676,10 +19730,12 @@ class CreateToolTip:
             return
 
         bbox = None
-        try:
-            bbox = self.widget.bbox("insert")
-        except Exception:
-            bbox = None
+        bbox_method = getattr(self.widget, "bbox", None)
+        if callable(bbox_method):
+            try:
+                bbox = bbox_method("insert")  # type: ignore[arg-type]
+            except Exception:
+                bbox = None
         if bbox:
             x, y, width, height = bbox
         else:
@@ -19775,7 +19831,7 @@ class ScrollableFrame(ttk.Frame):
 class App(tk.Tk):
     def __init__(
         self,
-        pricing: PricingEngine | None = None,
+        pricing: SupportsPricingEngine | None = None,
         *,
         configuration: UIConfiguration | None = None,
         geometry_loader: GeometryLoader | None = None,
@@ -19790,7 +19846,7 @@ class App(tk.Tk):
         self.geometry_loader = geometry_loader or GeometryLoader()
         self.pricing_registry = pricing_registry or PricingRegistry()
         self.llm_services = llm_services or LLMServices()
-        self.pricing: PricingEngine = pricing or _DEFAULT_PRICING_ENGINE
+        self.pricing: SupportsPricingEngine = pricing or _DEFAULT_PRICING_ENGINE
 
         default_material_display = getattr(
             self.configuration,
@@ -19809,9 +19865,9 @@ class App(tk.Tk):
 
         self.geometry_service = geometry_service or geometry.GeometryService()
 
-        self.vars_df = None
-        self.vars_df_full = None
-        self.geo = None
+        self.vars_df: pd.DataFrame | None = None
+        self.vars_df_full: pd.DataFrame | None = None
+        self.geo: dict[str, Any] | None = None
         self.geo_context: dict[str, Any] = {}
         if hasattr(self.configuration, "create_params"):
             try:
@@ -21241,7 +21297,8 @@ class App(tk.Tk):
         self.geo_context = dict(geo or {})
         self._log_geo(geo)
 
-        self._populate_editor_tab(self.vars_df)
+        vars_df_for_editor = typing.cast(pd.DataFrame, self.vars_df)
+        self._populate_editor_tab(vars_df_for_editor)
         self.nb.select(self.tab_editor)
         self.status_var.set("Variables loaded. Review the Quote Editor and click Generate Quote.")
         return
