@@ -67,10 +67,6 @@ LLM_MULTIPLIER_MAX = 4.0
 LLM_ADDER_MAX = 8.0
 
 
-def jdump(obj) -> str:
-    return json.dumps(obj, indent=2, default=str)
-
-
 def describe_runtime_environment() -> dict[str, str]:
     """Return a redacted snapshot of runtime configuration for auditors."""
 
@@ -350,7 +346,7 @@ from cad_quoter.domain_models import (
     normalize_material_key as _normalize_lookup_key,
 )
 from cad_quoter.coerce import to_float, to_int
-from cad_quoter.utils import compact_dict, sdict
+from cad_quoter.utils import compact_dict, jdump, sdict, _first_non_none
 from cad_quoter.utils.geo_ctx import _should_include_outsourced_pass
 try:
     from cad_quoter.utils.text import _match_items_contains
@@ -1298,15 +1294,17 @@ def build_suggest_payload(
         hole_bins_top = {k: int(v) for k, v in sorted_bins[:8] if v}
 
     raw_thickness = geo.get("thickness_mm")
-    thickness_mm = to_float(raw_thickness)
-    if thickness_mm is None and isinstance(raw_thickness, dict):
-        for key in ("value", "mm", "thickness_mm"):
-            candidate = to_float(raw_thickness.get(key))
-            if candidate is not None:
-                thickness_mm = candidate
-                break
-    if thickness_mm is None:
-        thickness_mm = to_float(geo.get("thickness"))
+    thickness_candidates: list[float | None] = []
+    if isinstance(raw_thickness, dict):
+        thickness_candidates.extend(
+            to_float(raw_thickness.get(key)) for key in ("value", "mm", "thickness_mm")
+        )
+    else:
+        thickness_candidates.append(to_float(raw_thickness))
+    thickness_mm = _first_non_none(
+        *thickness_candidates,
+        to_float(geo.get("thickness")),
+    )
 
     material_val = geo.get("material")
     if isinstance(material_val, dict):
@@ -1321,9 +1319,10 @@ def build_suggest_payload(
         str(material_name).strip() if material_name else DEFAULT_MATERIAL_DISPLAY
     )
 
-    hole_count_val = to_float(geo.get("hole_count"))
-    if hole_count_val is None:
-        hole_count_val = to_float(derived.get("hole_count"))
+    hole_count_val = _first_non_none(
+        to_float(geo.get("hole_count")),
+        to_float(derived.get("hole_count")),
+    )
     hole_count = int(hole_count_val or 0)
 
     tap_qty = to_int(derived.get("tap_qty")) or 0
@@ -19209,7 +19208,7 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
         "}"
     )
 
-    user_prompt = "```json\n" + json.dumps(ctx, indent=2, sort_keys=True, default=str) + "\n```"
+    user_prompt = "```json\n" + jdump(ctx, sort_keys=True) + "\n```"
 
     client: LLMClient | None = None
     try:
@@ -19418,9 +19417,9 @@ def get_llm_overrides(
         task_meta[name] = entry
         try:
             try:
-                prompt_body = json.dumps(payload, indent=2, default=str)
+                prompt_body = jdump(payload)
             except TypeError:
-                prompt_body = json.dumps(_jsonify(payload), indent=2)
+                prompt_body = jdump(_jsonify(payload), default=None)
             prompt = "```json\n" + prompt_body + "\n```"
             parsed, raw_text, usage = llm.ask_json(
                 system_prompt=system_prompt,
@@ -20740,7 +20739,7 @@ class App(tk.Tk):
         if not isinstance(path, Path):
             return
         try:
-            path.write_text(json.dumps(self.settings, indent=2), encoding="utf-8")
+            path.write_text(jdump(self.settings, default=None), encoding="utf-8")
         except Exception:
             pass
 
@@ -22246,7 +22245,7 @@ class App(tk.Tk):
         except Exception as e:
             logger.exception("LLM override inference failed")
             self.llm_txt.insert("end", f"LLM error: {e}\n"); return
-        self.llm_txt.insert("end", json.dumps(out, indent=2))
+        self.llm_txt.insert("end", jdump(out, default=None))
         if self.apply_llm_adj.get() and isinstance(out, dict):
             adj = out.get("LLM_Adjustments", {})
             try:
@@ -22279,7 +22278,7 @@ class App(tk.Tk):
             raw = latest.read_text(encoding="utf-8")
             try:
                 data = json.loads(raw)
-                shown = json.dumps(data, indent=2)
+                shown = jdump(data, default=None)
             except Exception:
                 shown = raw
         except Exception as e:
@@ -22298,7 +22297,7 @@ class App(tk.Tk):
     # ----- Flow + Output -----
     def _log_geo(self, d):
         self.geo_txt.delete("1.0","end")
-        self.geo_txt.insert("end", json.dumps(d, indent=2))
+        self.geo_txt.insert("end", jdump(d, default=None))
 
     def _log_out(self, d):
         widget = self.output_text_widgets.get("simplified") if hasattr(self, "output_text_widgets") else None
@@ -22556,7 +22555,7 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     if args.print_env:
-        logger.info("Runtime environment:\n%s", json.dumps(describe_runtime_environment(), indent=2))
+        logger.info("Runtime environment:\n%s", jdump(describe_runtime_environment(), default=None))
         return 0
 
     if args.no_gui:

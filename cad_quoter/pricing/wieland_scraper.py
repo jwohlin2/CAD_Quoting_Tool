@@ -38,6 +38,7 @@ from typing import Any, Dict, Iterable, Tuple, Optional, List
 import ssl
 
 from cad_quoter.config import configure_logging, logger
+from cad_quoter.utils import jdump
 
 try:  # pragma: no cover - optional dependency in production
     from bs4 import BeautifulSoup  # type: ignore
@@ -868,7 +869,7 @@ def _main(argv: List[str]) -> int:
         return 2
 
     if args.json:
-        logger.info("Wieland pricing JSON:\n%s", json.dumps(data, indent=2))
+        logger.info("Wieland pricing JSON:\n%s", jdump(data, default=None))
         return 0
 
     if args.material:

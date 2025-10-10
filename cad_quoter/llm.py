@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence
 
-from cad_quoter.utils import compact_dict
+from cad_quoter.utils import compact_dict, jdump
 
 
 def parse_llm_json(text: str) -> dict:
@@ -421,7 +421,7 @@ class LLMClient:
         try:
             self._debug_dir.mkdir(parents=True, exist_ok=True)
             path = self._debug_dir / f"llm_snapshot_{int(time.time())}.json"
-            path.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
+            path.write_text(jdump(snapshot, default=None), encoding="utf-8")
         except Exception:
             pass
 
@@ -560,7 +560,7 @@ def llm_sheet_and_param_overrides(geo: dict, df, params: dict, client: LLMClient
 def run_llm_suggestions(client: LLMClient, payload: dict) -> tuple[dict, str, dict]:
     parsed, raw, usage = client.ask_json(
         system_prompt=SYSTEM_SUGGEST,
-        user_prompt=json.dumps(payload, indent=2),
+        user_prompt=jdump(payload, default=None),
         temperature=0.3,
         max_tokens=512,
         context=payload,
@@ -652,7 +652,7 @@ def infer_hours_and_overrides_from_geo(
 
     prompt = f"""
 GEO (mm / mm2 / mm3):
-{json.dumps(geo, indent=2)}
+{jdump(geo, default=None)}
 
 Rules of thumb:
 - Small rectangular blocks with few features: Programming 0.2–1.0 hr, CAM 0.2–1.0 hr, Engineering 0 hr.
@@ -663,7 +663,7 @@ Rules of thumb:
 - Never return huge numbers for tiny parts (<80 mm max dim).
 
 Return JSON with this structure (numbers only, minutes only for CMM_RunTime_min):
-{json.dumps(schema, indent=2)}
+{jdump(schema, default=None)}
 """
 
     if client and client.available:
