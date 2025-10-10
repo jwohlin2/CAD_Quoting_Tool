@@ -10238,22 +10238,23 @@ def _drill_overhead_from_params(params: Mapping[str, Any] | None) -> OverheadLik
         if isinstance(params, _MappingABC)
         else None
     )
-    index_sec = (
-        _coerce_float_or_none(params.get("DrillIndexSecondsPerHole"))
-        if isinstance(params, _MappingABC)
-        else None
-    )
+    default_index_sec = 8.0
+    index_source: object | None = default_index_sec
+    if isinstance(params, _MappingABC):
+        if "DrillIndexSecPerHole" in params:
+            index_source = params.get("DrillIndexSecPerHole", default_index_sec)
+        elif "DrillIndexSecondsPerHole" in params:
+            index_source = params.get("DrillIndexSecondsPerHole")
+    index_sec = _coerce_float_or_none(index_source)
+    if index_sec is None:
+        index_sec = default_index_sec
     overhead_kwargs = {
         "toolchange_min": float(toolchange) if toolchange and toolchange >= 0 else 0.5,
         "approach_retract_in": float(approach) if approach and approach >= 0 else 0.25,
         "peck_penalty_min_per_in_depth": float(peck) if peck and peck >= 0 else 0.03,
         "dwell_min": float(dwell) if dwell and dwell >= 0 else None,
     }
-    index_kwarg = None
-    if _TIME_OVERHEAD_SUPPORTS_INDEX_SEC:
-        index_kwarg = (
-            float(index_sec) if index_sec is not None and index_sec >= 0 else None
-        )
+    index_kwarg = float(index_sec) if index_sec is not None and index_sec >= 0 else None
     try:
         overhead = _TimeOverheadParams(**overhead_kwargs)
     except TypeError:
@@ -11429,8 +11430,8 @@ def estimate_drilling_hours(
                 toolchange_text = f"{toolchange_total:.2f} min"
 
                 index_text = "-"
-                if minutes_avg and math.isfinite(minutes_avg) and minutes_avg > 0:
-                    index_text = f"{minutes_avg * 60.0:.1f} s/hole"
+                if index_avg and math.isfinite(index_avg) and index_avg > 0:
+                    index_text = f"{index_avg * 60.0:.1f} s/hole"
 
                 line_parts = [
                     "Drill calc → ",
