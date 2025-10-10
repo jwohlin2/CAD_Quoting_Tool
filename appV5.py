@@ -241,10 +241,6 @@ from typing import (
 )
 
 
-Mapping: TypeAlias = _MappingABC
-MutableMapping: TypeAlias = _MutableMappingABC
-
-
 T = TypeVar("T")
 
 
@@ -518,7 +514,27 @@ def _fallback_geo_mentions_outsourced(geo_context: Mapping[str, Any] | None) -> 
     if isinstance(geo_context, _MappingABC):
         if _fallback_collection_has_text(geo_context.get("finishes")):
             return True
-        return _geo_mentions_outsourced(geo_context)
+    return False
+
+
+try:  # pragma: no cover - optional dependency for backwards compatibility
+    from cad_quoter.utils.geo_ctx import (
+        _geo_mentions_outsourced as _imported_geo_mentions_outsourced,
+    )
+except Exception:
+    _imported_geo_mentions_outsourced: Callable[[Mapping[str, Any] | None], bool] | None = None
+else:
+    if not callable(_imported_geo_mentions_outsourced):
+        _imported_geo_mentions_outsourced = None
+
+
+def _geo_mentions_outsourced(geo_context: Mapping[str, Any] | None) -> bool:
+    if isinstance(geo_context, _MappingABC):
+        if _fallback_collection_has_text(geo_context.get("finishes")):
+            return True
+    if callable(_imported_geo_mentions_outsourced):
+        return _imported_geo_mentions_outsourced(geo_context)
+    return False
 _match_items_contains = _fallback_match_items_contains  # type: ignore[assignment]
 
 try:
