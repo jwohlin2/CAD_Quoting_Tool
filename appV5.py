@@ -9124,6 +9124,64 @@ def _compute_plate_mass_density(
     )
 
 
+def _plate_mass_properties(
+    plate_L_in: Any,
+    plate_W_in: Any,
+    t_in: Any,
+    density_g_cc: Any,
+    hole_d_mm: Any,
+) -> tuple[float | None, float | None]:
+    """Return net mass (kg) and removed mass (g) for a plate with optional holes."""
+
+    length_in = _coerce_float_or_none(plate_L_in)
+    width_in = _coerce_float_or_none(plate_W_in)
+    thickness_in = _coerce_float_or_none(t_in)
+    density = _coerce_float_or_none(density_g_cc)
+
+    if (
+        density is None
+        or density <= 0
+        or length_in is None
+        or width_in is None
+        or thickness_in is None
+        or length_in <= 0
+        or width_in <= 0
+        or thickness_in <= 0
+    ):
+        return (None, None)
+
+    volume_in3 = float(length_in) * float(width_in) * float(thickness_in)
+    plate_volume_cm3 = volume_in3 * 16.387064
+
+    thickness_mm = float(thickness_in) * 25.4
+    removed_volume_mm3 = 0.0
+
+    if thickness_mm > 0:
+        if isinstance(hole_d_mm, Mapping):
+            hole_iter = hole_d_mm.values()
+        elif isinstance(hole_d_mm, Sequence) and not isinstance(hole_d_mm, (str, bytes)):
+            hole_iter = hole_d_mm
+        elif hole_d_mm is None:
+            hole_iter = ()
+        else:
+            hole_iter = (hole_d_mm,)
+
+        for raw_d in hole_iter:
+            diameter_mm = _coerce_float_or_none(raw_d)
+            if diameter_mm is None or diameter_mm <= 0:
+                continue
+            radius_mm = float(diameter_mm) / 2.0
+            removed_volume_mm3 += math.pi * (radius_mm**2) * thickness_mm
+
+    removed_volume_cm3 = removed_volume_mm3 / 1000.0
+    removed_mass_g = removed_volume_cm3 * float(density)
+
+    net_volume_cm3 = max(plate_volume_cm3 - removed_volume_cm3, 0.0)
+    net_mass_g = net_volume_cm3 * float(density)
+
+    return (net_mass_g / 1000.0, removed_mass_g)
+
+
 @overload
 def net_mass_kg(
     plate_L_in,
@@ -9173,6 +9231,47 @@ def net_mass_kg(
             return (None, None)
         return net_mass, removed_mass
     return net_mass
+
+
+def _plate_mass_from_dims(
+    length_mm: Any,
+    width_mm: Any,
+    thickness_mm: Any,
+    density_g_cc: Any,
+    *,
+    dims_in: Sequence[Any] | None = None,
+    hole_d_mm: Any = (),
+) -> tuple[float | None, float | None]:
+    """Compute plate mass from dimensions in millimeters."""
+
+    length_mm_val = _coerce_float_or_none(length_mm)
+    width_mm_val = _coerce_float_or_none(width_mm)
+    thickness_mm_val = _coerce_float_or_none(thickness_mm)
+
+    dims_in_vals: list[float | None] = [None, None, None]
+    if isinstance(dims_in, Sequence) and not isinstance(dims_in, (str, bytes)):
+        dims_list = list(dims_in)
+        for idx in range(min(3, len(dims_list))):
+            dims_in_vals[idx] = _coerce_float_or_none(dims_list[idx])
+
+    length_in = dims_in_vals[0]
+    width_in = dims_in_vals[1]
+    thickness_in = dims_in_vals[2]
+
+    if length_in is None and length_mm_val:
+        length_in = float(length_mm_val) / 25.4
+    if width_in is None and width_mm_val:
+        width_in = float(width_mm_val) / 25.4
+    if thickness_in is None and thickness_mm_val:
+        thickness_in = float(thickness_mm_val) / 25.4
+
+    return _plate_mass_properties(
+        length_in,
+        width_in,
+        thickness_in,
+        density_g_cc,
+        hole_d_mm,
+    )
 
 
 def _normalize_speeds_feeds_df(df: pd.DataFrame) -> pd.DataFrame:
