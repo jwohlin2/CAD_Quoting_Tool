@@ -395,29 +395,6 @@ def build_geo_from_dxf(path: str) -> dict:
     return loader(path)
 
 # Geometry helpers (re-exported for backward compatibility)
-load_model = geometry.load_model
-load_cad_any = geometry.load_cad_any
-read_cad_any = geometry.read_cad_any
-read_step_shape = geometry.read_step_shape
-read_step_or_iges_or_brep = geometry.read_step_or_iges_or_brep
-convert_dwg_to_dxf = geometry.convert_dwg_to_dxf
-enrich_geo_occ = geometry.enrich_geo_occ
-enrich_geo_stl = geometry.enrich_geo_stl
-safe_bbox = geometry.safe_bbox
-safe_bounding_box = geometry.safe_bounding_box
-iter_solids = geometry.iter_solids
-explode_compound = geometry.explode_compound
-parse_hole_table_lines = geometry.parse_hole_table_lines
-extract_text_lines_from_dxf = geometry.extract_text_lines_from_dxf
-upsert_var_row = geometry.upsert_var_row
-require_ezdxf = geometry.require_ezdxf
-get_dwg_converter_path = geometry.get_dwg_converter_path
-have_dwg_support = geometry.have_dwg_support
-get_import_diagnostics_text = geometry.get_import_diagnostics_text
-_HAS_TRIMESH = geometry.HAS_TRIMESH
-_HAS_EZDXF = geometry.HAS_EZDXF
-_HAS_ODAFC = geometry.HAS_ODAFC
-_EZDXF_VER = geometry.EZDXF_VERSION
 
 SCRAP_DEFAULT_GUESS = 0.15
 
@@ -3366,14 +3343,14 @@ import subprocess, tempfile, shutil
 
 
 try:
-    from hole_table_parser import parse_hole_table_lines
+    from hole_table_parser import parse_hole_table_lines as _parse_hole_table_lines
 except Exception:
-    parse_hole_table_lines = None
+    _parse_hole_table_lines = None
 
 try:
-    from dxf_text_extract import extract_text_lines_from_dxf
+    from dxf_text_extract import extract_text_lines_from_dxf as _extract_text_lines_from_dxf
 except Exception:
-    extract_text_lines_from_dxf = None
+    _extract_text_lines_from_dxf = None
 
 # numpy is optional for a few small calcs; degrade gracefully if missing
 try:
@@ -3759,7 +3736,7 @@ def list_iter(lst):
 # ---- tiny helpers you can use elsewhere --------------------------------------
 def require_ezdxf():
     """Raise a clear error if ezdxf is missing."""
-    if not _HAS_EZDXF:
+    if not geometry.HAS_EZDXF:
         raise RuntimeError("ezdxf not installed. Install with pip/conda (package name: 'ezdxf').")
     return ezdxf
 
@@ -3774,7 +3751,7 @@ def get_dwg_converter_path() -> str:
 
 def have_dwg_support() -> bool:
     """True if we can open DWG (either odafc or an external converter is available)."""
-    return _HAS_ODAFC or bool(get_dwg_converter_path())
+    return geometry.HAS_ODAFC or bool(get_dwg_converter_path())
 def get_import_diagnostics_text() -> str:
     import sys, shutil, os
     lines = []
@@ -3869,7 +3846,7 @@ def load_drawing(path: Path) -> Drawing:
             dxf_path = convert_dwg_to_dxf(str(path))
             return ezdxf.readfile(dxf_path)
         # Fallback: odafc (requires ODAFileConverter on PATH)
-        if _HAS_ODAFC:
+        if geometry.HAS_ODAFC:
             return odafc.readfile(str(path))
         raise RuntimeError(
             "DWG import needs ODA File Converter. Set ODA_CONVERTER_EXE to the exe "
@@ -4642,7 +4619,7 @@ def enrich_geo_stl(path):
     import time
     start_time = time.time()
     logger.info("[%.2fs] Starting enrich_geo_stl for %s", time.time() - start_time, path)
-    if not _HAS_TRIMESH:
+    if not geometry.HAS_TRIMESH:
         raise RuntimeError("trimesh not available to process STL")
     
     logger.info("[%.2fs] Loading mesh...", time.time() - start_time)
@@ -17556,7 +17533,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
 
             doc = odafc.readfile(path)
         else:
-            dxf_path = geometry.convert_dwg_to_dxf(path, out_ver="ACAD2018")
+            dxf_path = convert_dwg_to_dxf(path, out_ver="ACAD2018")
             dxf_text_path = dxf_path
             doc = ezdxf.readfile(dxf_path)
     else:
@@ -17691,9 +17668,10 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     chart_source: str | None = None
     chart_summary: dict[str, Any] | None = None
 
-    if extract_text_lines_from_dxf and dxf_text_path:
+    extractor = _extract_text_lines_from_dxf or geometry.extract_text_lines_from_dxf
+    if extractor and dxf_text_path:
         try:
-            chart_lines = extract_text_lines_from_dxf(dxf_text_path)
+            chart_lines = extractor(dxf_text_path)
         except Exception:
             chart_lines = []
     if not chart_lines:
@@ -17701,9 +17679,10 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
 
     if chart_lines:
         chart_summary = summarize_hole_chart_lines(chart_lines)
-    if chart_lines and parse_hole_table_lines:
+    parser = _parse_hole_table_lines or geometry.parse_hole_table_lines
+    if chart_lines and parser:
         try:
-            hole_rows = parse_hole_table_lines(chart_lines)
+            hole_rows = parser(chart_lines)
         except Exception:
             hole_rows = []
         if hole_rows:
