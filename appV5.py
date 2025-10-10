@@ -10590,7 +10590,7 @@ def estimate_drilling_hours(
     toolchange_s = 15.0
 
     total_sec = 0.0
-    holes_fallback = 0
+    total_hole_qty = 0
     weighted_dia_in = 0.0
     for d, qty in fallback_counts.items():
         if qty is None:
@@ -10601,16 +10601,15 @@ def estimate_drilling_hours(
             continue
         if qty_int <= 0:
             continue
-        holes_fallback += qty_int
+        total_hole_qty += qty_int
         per = sec_per_hole(float(d)) * mfac * tfac
         total_sec += qty_int * per
         total_sec += toolchange_s
         # aggregate counts and weighted diameter
-        # total_qty was not previously initialized; use holes_fallback as the count
-        weighted_dia_in += (float(d) / 25.4) * int(qty)
+        weighted_dia_in += (float(d) / 25.4) * qty_int
 
-    if debug is not None and holes_fallback > 0:
-        avg_dia_in = weighted_dia_in / holes_fallback if holes_fallback else 0.0
+    if debug is not None and total_hole_qty > 0:
+        avg_dia_in = weighted_dia_in / total_hole_qty if total_hole_qty else 0.0
         debug.update(
             {
             "thickness_in": float(thickness_in or 0.0),
@@ -10619,8 +10618,8 @@ def estimate_drilling_hours(
             "ipr": None,
             "rpm": None,
             "ipm": None,
-            "min_per_hole": (total_sec / 60.0) / holes_fallback if holes_fallback else None,
-            "hole_count": int(holes_fallback),
+            "min_per_hole": (total_sec / 60.0) / total_hole_qty if total_hole_qty else None,
+            "hole_count": int(total_hole_qty),
             }
         )
     elif debug is not None:
@@ -10643,7 +10642,7 @@ def estimate_drilling_hours(
         depth_for_bounds = float(thickness_for_fallback_mm) / 25.4
     return _apply_drill_minutes_clamp(
         hours,
-        holes_fallback,
+        total_hole_qty,
         material_group=material_label,
         depth_in=depth_for_bounds,
     )
