@@ -1110,48 +1110,32 @@ from typing import TYPE_CHECKING, TypedDict
 
 if TYPE_CHECKING:
     try:
+        from OCP.TopAbs import TopAbs_ShapeEnum  # type: ignore[import]
         from OCP.TopoDS import (  # type: ignore[import]
-            TopoDS_Compound as _TopoDSCompound,
-            TopoDS_Shape as _TopoDSShape,
+            TopoDS_Compound,
+            TopoDS_Face,
+            TopoDS_Shape,
+        )
+        from OCP.TopTools import (  # type: ignore[import]
+            TopTools_IndexedDataMapOfShapeListOfShape,
         )
     except ImportError:
         try:
+            from OCC.Core.TopAbs import TopAbs_ShapeEnum  # type: ignore[import]
             from OCC.Core.TopoDS import (  # type: ignore[import]
-                TopoDS_Compound as _TopoDSCompound,
-                TopoDS_Shape as _TopoDSShape,
+                TopoDS_Compound,
+                TopoDS_Face,
+                TopoDS_Shape,
+            )
+            from OCC.Core.TopTools import (  # type: ignore[import]
+                TopTools_IndexedDataMapOfShapeListOfShape,
             )
         except ImportError:  # pragma: no cover - typing-only fallback
-            from typing import Any as _TopoDSCompound  # type: ignore[assignment]
-            from typing import Any as _TopoDSShape  # type: ignore[assignment]
-    _TopoDSShapeT = _TopoDSShape
-    _TopoDSCompoundT = _TopoDSCompound
-else:
-    _TopoDSShapeT = Any
-    _TopoDSCompoundT = Any
+            from typing import Any  # type: ignore[import]
 
-TopoDSShapeT: TypeAlias = _TopoDSShapeT
-TopoDSCompoundT: TypeAlias = _TopoDSCompoundT
-
-class _BRepToolProto(Protocol):
-    def Surface(self, face: Any) -> Any: ...
-
-    def Surface_s(self, face: Any) -> Any: ...
-
-    def Location(self, face: Any) -> Any: ...
-
-    def Location_s(self, face: Any) -> Any: ...
-
-
-class _TopoDSProto(Protocol):
-    def Edge_s(self, shape: Any) -> Any: ...
-
-    def Solid_s(self, shape: Any) -> Any: ...
-
-    def Shell_s(self, shape: Any) -> Any: ...
-
-
-TopoDSFaceT: TypeAlias = TopoDSShapeT
-TopToolsIndexedDataMap: TypeAlias = Any
+            TopAbs_ShapeEnum = Any  # type: ignore[assignment]
+            TopoDS_Compound = TopoDS_Face = TopoDS_Shape = Any  # type: ignore[assignment]
+            TopTools_IndexedDataMapOfShapeListOfShape = Any  # type: ignore[assignment]
 
 try:  # Prefer pythonocc-core's OCP bindings when available
     from OCP.BRep import BRep_Tool  # type: ignore[import]
@@ -1206,15 +1190,6 @@ except ImportError:
             TopoDS = TopoDS_Face = TopoDS_Shape = _MissingOCCTModule()
             TopTools_IndexedDataMapOfShapeListOfShape = _MissingOCCTModule()
 
-if TYPE_CHECKING:
-    _TopAbsShapeEnumT = TopAbs_ShapeEnum
-else:
-    _TopAbsShapeEnumT = Any
-
-TopAbsShapeEnumT: TypeAlias = _TopAbsShapeEnumT
-
-BRep_Tool = cast(_BRepToolProto, BRep_Tool)
-TopoDS = cast(_TopoDSProto, TopoDS)
 try:
     BRepTools = cast(Any, BRepTools)
 except NameError:
@@ -3942,7 +3917,7 @@ def _resolve_face_of():
 
 FACE_OF = _resolve_face_of()
 
-def as_face(obj: Any) -> TopoDSFaceT:
+def as_face(obj: Any) -> "TopoDS_Face":
     """
     Return a TopoDS_Face for the *current backend*.
     - If already a Face, return it (don't re-cast).
@@ -3959,7 +3934,7 @@ def as_face(obj: Any) -> TopoDSFaceT:
     return ensure_face(obj)
 
 
-def iter_faces(shape: Any) -> Iterator[TopoDSFaceT]:
+def iter_faces(shape: Any) -> Iterator["TopoDS_Face"]:
     explorer_cls = cast(Callable[[Any, Any], Any], TopExp_Explorer)
     exp = explorer_cls(shape, cast(Any, TopAbs_FACE))
     while exp.More():
@@ -4146,7 +4121,9 @@ def linear_properties(edge, gprops):
             raise
     return fn(edge, gprops)
 
-def map_shapes_and_ancestors(root_shape, sub_enum, anc_enum) -> TopToolsIndexedDataMap:
+def map_shapes_and_ancestors(
+    root_shape, sub_enum, anc_enum
+) -> "TopTools_IndexedDataMapOfShapeListOfShape":
     """Return TopTools_IndexedDataMapOfShapeListOfShape for (sub → ancestors)."""
     # Ensure we pass a *Shape*, not a Face
     if root_shape is None:
@@ -4157,7 +4134,7 @@ def map_shapes_and_ancestors(root_shape, sub_enum, anc_enum) -> TopToolsIndexedD
         pass
 
     amap = cast(
-        TopToolsIndexedDataMap,
+        TopTools_IndexedDataMapOfShapeListOfShape,
         TopTools_IndexedDataMapOfShapeListOfShape(),  # type: ignore[call-overload]
     )
     # static/instance variants across wheels
@@ -4177,15 +4154,20 @@ def _is_instance(obj, qualnames):
         return False
     return name in qualnames  # e.g. ["TopoDS_Face", "Face"]
 
-def ensure_face(obj: Any) -> TopoDSFaceT:
+def ensure_face(obj: Any) -> "TopoDS_Face":
     if obj is None:
         raise TypeError("Expected a face, got None")
-    face_type = cast(type, TopoDSFaceT)
-    if isinstance(obj, face_type) or type(obj).__name__ == "TopoDS_Face":
-        return obj
+    face_type = cast(type, TopoDS_Face)
+    try:
+        if isinstance(obj, face_type):
+            return cast(TopoDS_Face, obj)
+    except TypeError:
+        pass
+    if type(obj).__name__ == "TopoDS_Face":
+        return cast(TopoDS_Face, obj)
     st = obj.ShapeType() if hasattr(obj, "ShapeType") else None
     if st == TopAbs_FACE:
-        return FACE_OF(obj)
+        return cast(TopoDS_Face, FACE_OF(obj))
     raise TypeError(f"Not a face: {type(obj).__name__}")
 # ---------- end compat ----------
 
@@ -4289,12 +4271,12 @@ try:
     from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape  # type: ignore[import]
     BACKEND_OCC = "OCP"
 
-    def _ocp_uv_bounds(face: TopoDSFaceT) -> Tuple[float, float, float, float]:
+    def _ocp_uv_bounds(face: "TopoDS_Face") -> Tuple[float, float, float, float]:
         tools = cast(Any, BRepTools)
         return tools.UVBounds(face)
 
 
-    def _ocp_brep_read(path: str) -> TopoDSShapeT:
+    def _ocp_brep_read(path: str) -> "TopoDS_Shape":
         s = _new_topods_shape()
         builder = BRep_Builder()  # type: ignore[call-arg]
         read_s = getattr(BRepTools, "Read_s", None)
@@ -4375,7 +4357,7 @@ except Exception:
     import OCC.Core.BRepTools as _occ_breptools
     BRepTools = cast(Any, _occ_breptools).BRepTools
 
-    def _occ_uv_bounds(face: TopoDSFaceT) -> Tuple[float, float, float, float]:
+    def _occ_uv_bounds(face: "TopoDS_Face") -> Tuple[float, float, float, float]:
         tools = cast(Any, BRepTools)
         fn = getattr(tools, "UVBounds", None)
         if fn is None:
@@ -4386,7 +4368,7 @@ except Exception:
         return fn(face)
 
 
-    def _occ_brep_read(path: str) -> TopoDSShapeT:
+    def _occ_brep_read(path: str) -> "TopoDS_Shape":
         read_fn = getattr(_occ_breptools, "breptools_Read", None)
         if read_fn is None:
             raise RuntimeError("BREP read is unavailable")
@@ -4401,14 +4383,14 @@ except Exception:
     _brep_read = _occ_brep_read
 
 
-def _new_topods_shape() -> TopoDSShapeT:
+def _new_topods_shape() -> "TopoDS_Shape":
     ctor = cast(Any, TopoDS_Shape)
-    return cast(TopoDSShapeT, ctor())
+    return cast(TopoDS_Shape, ctor())
 
 
-def _new_topods_compound() -> TopoDSCompoundT:
+def _new_topods_compound() -> "TopoDS_Compound":
     ctor = cast(Any, TopoDS_Compound)
-    return cast(TopoDSCompoundT, ctor())
+    return cast(TopoDS_Compound, ctor())
 
 
 def _shape_from_reader(reader):
@@ -4462,7 +4444,7 @@ def _shape_from_reader(reader):
 
     return healed
 
-def read_step_shape(path: str) -> TopoDSShapeT:
+def read_step_shape(path: str) -> "TopoDS_Shape":
     rdr = STEPControl_Reader()
     if rdr.ReadFile(path) != IFSelect_RetDone:
         raise RuntimeError("STEP read failed (file unreadable or unsupported).")
@@ -4510,13 +4492,13 @@ def read_step_shape(path: str) -> TopoDSShapeT:
     fx.Perform()
     return fx.Shape()
 
-def safe_bbox(shape: TopoDSShapeT):
+def safe_bbox(shape: "TopoDS_Shape"):
     if _shape_is_null(shape):
         raise ValueError("Cannot compute bounding box of a null shape.")
     box = Bnd_Box()
     bnd_add(shape, box, True)  # <- uses whichever binding is available
     return box
-def read_step_or_iges_or_brep(path: str) -> TopoDSShapeT:
+def read_step_or_iges_or_brep(path: str) -> "TopoDS_Shape":
     p = Path(path)
     ext = p.suffix.lower()
     if ext in (".step", ".stp"):
@@ -4599,24 +4581,24 @@ SMALL = 1e-7
 
 
 
-def iter_solids(shape: TopoDSShapeT):
+def iter_solids(shape: "TopoDS_Shape"):
     explorer = cast(Callable[[Any, Any], Any], TopExp_Explorer)
-    exp = explorer(shape, cast(TopAbsShapeEnumT, TopAbs_SOLID))
+    exp = explorer(shape, cast(TopAbs_ShapeEnum, TopAbs_SOLID))
     while exp.More():
         yield geometry.to_solid(exp.Current())
         exp.Next()
 
-def explode_compound(shape: TopoDSShapeT) -> list[TopoDSShapeT]:
+def explode_compound(shape: "TopoDS_Shape") -> list["TopoDS_Shape"]:
     """If the file is a big COMPOUND, break it into shapes (parts/bodies)."""
     explorer = cast(Callable[[Any, Any], Any], TopExp_Explorer)
-    exp = explorer(shape, cast(TopAbsShapeEnumT, TopAbs_COMPOUND))
+    exp = explorer(shape, cast(TopAbs_ShapeEnum, TopAbs_COMPOUND))
     if exp.More():
         # Itï¿½s a compound ï¿½ return its shells/solids/faces as needed
         solids = list(iter_solids(shape))
         if solids:
             return solids
         # fallback to shells
-        sh = explorer(shape, cast(TopAbsShapeEnumT, TopAbs_SHELL))
+        sh = explorer(shape, cast(TopAbs_ShapeEnum, TopAbs_SHELL))
         shells = []
         while sh.More():
             shells.append(geometry.to_shell(sh.Current()))
@@ -4734,7 +4716,7 @@ def _section_perimeter_len(shape, z_values):
         sec = BRepAlgoAPI_Section(shape, plane, False); sec.Build()
         if not sec.IsDone(): continue
         w = sec.Shape()
-        it = explorer(w, cast(TopAbsShapeEnumT, TopAbs_EDGE))
+        it = explorer(w, cast(TopAbs_ShapeEnum, TopAbs_EDGE))
         while it.More():
             e = geometry.to_edge(it.Current())
             total += _length_of_edge(e)
