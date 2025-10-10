@@ -143,22 +143,10 @@ def _jsonify_debug_value(value: Any, depth: int = 0, max_depth: int = 6) -> Any:
 
 
 def _jsonify_debug_summary(summary: Mapping[str, Any]) -> dict[str, Any]:
-    """Safely serialize debugging metadata for JSON storage.
-
-    Older builds of :mod:`appV5` may be missing :func:`_jsonify_debug_value`.
-    That scenario produced a ``NameError`` when the drilling debug summaries
-    were materialised.  Instead of failing the whole quoting flow, fall back to
-    the raw values so the caller still receives a response (albeit with less
-    structured debug output).
-    """
-
-    serializer = globals().get("_jsonify_debug_value")
-    if not callable(serializer):
-        # Preserve backwards compatibility by returning the original mapping.
-        return {str(key): value for key, value in summary.items()}
+    """Safely serialize debugging metadata for JSON storage."""
 
     return {
-        str(key): serializer(value)  # type: ignore[misc]
+        str(key): _jsonify_debug_value(value)
         for key, value in summary.items()
     }
 
