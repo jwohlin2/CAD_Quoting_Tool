@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import sys
-import importlib.machinery
 import types
 from importlib.machinery import ModuleSpec
 from pathlib import Path

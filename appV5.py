@@ -79,8 +79,6 @@ import re
 import sys
 import textwrap
 import tkinter as tk
-import tkinter.font as tkfont
-import urllib.request
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 
@@ -204,16 +202,12 @@ from cad_quoter.domain_models import (
     normalize_material_key as _normalize_lookup_key,
 )
 from cad_quoter.pricing import (
-    BACKUP_CSV_NAME,
     LB_PER_KG,
     PricingEngine,
     create_default_registry,
-    ensure_material_backup_csv,
     get_mcmaster_unit_price as _get_mcmaster_unit_price,
-    load_backup_prices_csv,
     price_value_to_per_gram as _price_value_to_per_gram,
     resolve_material_unit_price as _resolve_material_unit_price,
-    usdkg_to_usdlb as _usdkg_to_usdlb,
 )
 from cad_quoter.vendors.mcmaster_stock import lookup_sku_and_price_for_mm
 from cad_quoter.pricing.time_estimator import (
@@ -234,7 +228,6 @@ from cad_quoter.pricing.wieland import lookup_price as lookup_wieland_price
 from cad_quoter.llm import (
     LLMClient,
     infer_hours_and_overrides_from_geo as _infer_hours_and_overrides_from_geo,
-    llm_sheet_and_param_overrides,
     parse_llm_json,
     run_llm_suggestions,
     # editor mapping + prompt constants used in overrides UI
@@ -3210,7 +3203,7 @@ if sys.platform == 'win32':
     if os.path.isdir(occ_bin):
         os.add_dll_directory(occ_bin)
 from tkinter import ttk, filedialog, messagebox
-import subprocess, tempfile, shutil
+import subprocess, tempfile
 
 
 try:
@@ -3346,14 +3339,11 @@ try:
     from OCP.BRep import BRep_Tool
     from OCP.TopAbs import TopAbs_FACE
     from OCP.TopExp import TopExp_Explorer
-    from OCP.TopLoc import TopLoc_Location
     BACKEND = "ocp"
 except Exception:
     from OCC.Core.BRep import BRep_Tool
-    from OCC.Core.TopoDS import topods_Edge, topods_Shell, topods_Solid
     from OCC.Core.TopAbs import TopAbs_FACE
     from OCC.Core.TopExp import TopExp_Explorer
-    from OCC.Core.TopLoc import TopLoc_Location
     BACKEND = "pythonocc"
 
 def _typename(o):  # small helper
@@ -3402,7 +3392,6 @@ def face_surface(face_like):
 # ---------- Robust casters that work on OCP and pythonocc ----------
 # Lock topods casters to the active backend
 if STACK == "ocp":
-    from OCP.TopoDS import TopoDS_Edge, TopoDS_Solid, TopoDS_Shell
 
     def _TO_EDGE(s):
         if type(s).__name__ in ("TopoDS_Edge", "Edge"):
@@ -3624,11 +3613,10 @@ def have_dwg_support() -> bool:
     """True if we can open DWG (either odafc or an external converter is available)."""
     return _HAS_ODAFC or bool(get_dwg_converter_path())
 def get_import_diagnostics_text() -> str:
-    import sys, shutil, os
+    import sys, os
     lines = []
     lines.append(f"Python: {sys.executable}")
     try:
-        import fitz  # PyMuPDF
         lines.append("PyMuPDF: OK")
     except Exception as e:
         lines.append(f"PyMuPDF: MISSING ({e})")
@@ -3637,7 +3625,6 @@ def get_import_diagnostics_text() -> str:
         import ezdxf
         lines.append(f"ezdxf: {getattr(ezdxf, '__version__', 'unknown')}")
         try:
-            from ezdxf.addons import odafc
             lines.append("ezdxf.addons.odafc: OK")
         except Exception as e:
             lines.append(f"ezdxf.addons.odafc: not available ({e})")
@@ -3832,26 +3819,20 @@ try:
     # ---- OCP branch ----
     from OCP.IFSelect import IFSelect_RetDone
     from OCP.IGESControl import IGESControl_Reader
-    from OCP.ShapeFix import ShapeFix_Shape, ShapeFix_Solid
+    from OCP.ShapeFix import ShapeFix_Shape
     from OCP.BRepCheck import BRepCheck_Analyzer
     from OCP.BRep import BRep_Tool        # OCP version
     from OCP.BRepGProp import BRepGProp
     from OCP.GProp import GProp_GProps
     from OCP.Bnd import Bnd_Box
-    from OCP.BRepBndLib import BRepBndLib
     from OCP.BRep import BRep_Builder
-    from OCP.BRepBuilderAPI import (
-        BRepBuilderAPI_MakeFace, BRepBuilderAPI_MakePolygon,
-        BRepBuilderAPI_Sewing, BRepBuilderAPI_MakeSolid,
-    )
-    from OCP.BRepPrimAPI import BRepPrimAPI_MakePrism
     from OCP.BRepAlgoAPI import BRepAlgoAPI_Section
-    from OCP.BRepAdaptor import BRepAdaptor_Surface, BRepAdaptor_Curve
+    from OCP.BRepAdaptor import BRepAdaptor_Curve
     
     # ADD THESE TWO IMPORTS
     from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
     from OCP.TopoDS import (
-        TopoDS_Shape, TopoDS_Edge, TopoDS_Face, TopoDS_Shell, TopoDS_Solid, TopoDS_Compound
+        TopoDS_Shape, TopoDS_Face, TopoDS_Compound
     )
     from OCP.TopExp import TopExp_Explorer, TopExp
     from OCP.TopAbs import TopAbs_FACE, TopAbs_EDGE, TopAbs_SOLID, TopAbs_SHELL, TopAbs_COMPOUND
@@ -3861,7 +3842,7 @@ try:
         GeomAbs_BSplineSurface, GeomAbs_BezierSurface, GeomAbs_Circle,
     )
     from OCP.ShapeAnalysis import ShapeAnalysis_Surface
-    from OCP.gp import gp_Pnt, gp_Vec, gp_Dir, gp_Pln
+    from OCP.gp import gp_Pnt, gp_Dir, gp_Pln
     BACKEND_OCC = "OCP"
 
     def BRepTools_UVBounds(face):
@@ -3886,23 +3867,18 @@ except Exception:
     from OCC.Core.STEPControl import STEPControl_Reader
     from OCC.Core.IFSelect import IFSelect_RetDone
     from OCC.Core.IGESControl import IGESControl_Reader
-    from OCC.Core.ShapeFix import ShapeFix_Shape, ShapeFix_Solid
+    from OCC.Core.ShapeFix import ShapeFix_Shape
     from OCC.Core.BRepCheck import BRepCheck_Analyzer
     from OCC.Core.BRep import BRep_Tool          # ? OCC version
     from OCC.Core.GProp import GProp_GProps
     from OCC.Core.Bnd import Bnd_Box
     from OCC.Core.BRep import BRep_Builder
-    from OCC.Core.BRepBuilderAPI import (
-        BRepBuilderAPI_MakeFace, BRepBuilderAPI_MakePolygon,
-        BRepBuilderAPI_Sewing, BRepBuilderAPI_MakeSolid,
-    )
-    from OCC.Core.BRepPrimAPI import BRepPrimAPI_MakePrism
     from OCC.Core.BRepAlgoAPI import BRepAlgoAPI_Section
-    from OCC.Core.BRepAdaptor import BRepAdaptor_Surface, BRepAdaptor_Curve
+    from OCC.Core.BRepAdaptor import BRepAdaptor_Curve
     # ADD TopTools import and TopoDS_Face for the fix below
     from OCC.Core.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
     from OCC.Core.TopoDS import (
-        TopoDS_Shape, TopoDS_Edge, TopoDS_Face, TopoDS_Shell, TopoDS_Solid, TopoDS_Compound,
+        TopoDS_Shape, TopoDS_Face, TopoDS_Compound,
         TopoDS_Face
     )
     from OCC.Core.TopExp import TopExp_Explorer
@@ -3913,7 +3889,7 @@ except Exception:
         GeomAbs_BSplineSurface, GeomAbs_BezierSurface, GeomAbs_Circle,
     )
     from OCC.Core.ShapeAnalysis import ShapeAnalysis_Surface
-    from OCC.Core.gp import gp_Pnt, gp_Vec, gp_Dir, gp_Pln
+    from OCC.Core.gp import gp_Pnt, gp_Dir, gp_Pln
     BACKEND_OCC = "OCC.Core"
 
     # BRepGProp shim (pythonocc uses free functions)
@@ -4599,7 +4575,6 @@ def load_cad_any(path: str) -> TopoDS_Shape:
     raise RuntimeError(f"Unsupported file type for shape loading: {ext}")
 def read_cad_any(path: str):
     from OCP.IFSelect import IFSelect_RetDone
-    from OCP.ShapeFix import ShapeFix_Shape
     from OCP.IGESControl import IGESControl_Reader
     from OCP.TopoDS import TopoDS_Shape
 
@@ -4774,7 +4749,7 @@ def apply_param_edits_to_overrides_ui(self, param_edits: dict):
     self.params.update(p)
 
 # ================== LLM DECISION LOG / AUDIT ==================
-import hashlib, json as _json_audit, time as _time_audit
+import json as _json_audit, time as _time_audit
 LOGS_DIR = Path(r"D:\\CAD_Quoting_Tool\\Logs")
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -11057,7 +11032,6 @@ def compute_quote_from_df(df: pd.DataFrame,
         return v if v == v else default  # NaN check
 
     def sheet_pct(pat, default=None):
-        from math import isnan
         v = first_num(pat, float('nan'))
         if v == v:  # not NaN
             return (v/100.0) if abs(v) > 1.0 else v
