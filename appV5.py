@@ -14003,7 +14003,8 @@ def compute_quote_from_df(
     if red_flag_messages:
         baseline_data["red_flags"] = list(red_flag_messages)
     baseline_data["speeds_feeds_path"] = speeds_feeds_path
-    baseline_data["pricing_source"] = pricing_source
+    pricing_source_value = str(locals().get("pricing_source", "legacy") or "legacy")
+    baseline_data["pricing_source"] = pricing_source_value
     if legacy_baseline_ignored:
         baseline_data["legacy_baseline_ignored"] = True
     if fixture_plan_desc:
