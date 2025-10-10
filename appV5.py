@@ -11929,6 +11929,8 @@ def compute_quote_from_df(
     # work instead of raising ``NameError`` when the branch executes.
     red_flags = red_flag_messages
     _red_flag_seen: set[str] = set()
+    # Legacy alias used by older code paths; keep synchronized for safety.
+    red_flags = red_flag_messages
 
     def _record_red_flag(message: str) -> None:
         text = str(message or "").strip()
