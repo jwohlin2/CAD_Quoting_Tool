@@ -5998,6 +5998,40 @@ class PlannerBucketOp(TypedDict):
     total: float
 
 
+def _build_process_meta_lookup(
+    process_meta: Mapping[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    """Create a case-insensitive lookup for process metadata.
+
+    Historically the quoting flow relied on a ``meta_lookup`` dictionary that
+    was populated in several different places.  Some recent refactors moved the
+    construction of that mapping behind conditional branches which meant the
+    lookup was no longer guaranteed to exist when downstream code attempted to
+    access it.  That manifested as ``NameError: meta_lookup is not defined`` in
+    the quoting UI.
+
+    Centralising the construction here lets us safely rebuild the mapping
+    whenever the underlying ``process_meta`` structure is available while still
+    returning an empty dictionary when it is not.
+    """
+
+    lookup: dict[str, dict[str, Any]] = {}
+    if not isinstance(process_meta, Mapping):
+        return lookup
+
+    for raw_key, raw_meta in process_meta.items():
+        if not isinstance(raw_meta, Mapping):
+            continue
+        key_lower = str(raw_key).lower()
+        meta_copy = dict(raw_meta)
+        lookup[key_lower] = meta_copy
+        canon = _canonical_bucket_key(raw_key)
+        if canon and canon not in lookup:
+            lookup[canon] = meta_copy.copy()
+
+    return lookup
+
+
 def _iter_ordered_process_entries(
     process_costs: Mapping[str, Any] | None,
     *,
@@ -6041,16 +6075,7 @@ def _iter_ordered_process_entries(
     remaining_items.sort(key=lambda kv: _normalize_bucket_key(kv[0]))
     ordered_items.extend(remaining_items)
 
-    meta_lookup: dict[str, Mapping[str, Any]] = {}
-    if isinstance(process_meta, Mapping):
-        for raw_key, raw_meta in process_meta.items():
-            if not isinstance(raw_meta, Mapping):
-                continue
-            key_lower = str(raw_key).lower()
-            meta_lookup[key_lower] = raw_meta
-            canon = _canonical_bucket_key(raw_key)
-            if canon and canon not in meta_lookup:
-                meta_lookup[canon] = raw_meta
+    meta_lookup = _build_process_meta_lookup(process_meta)
 
     applied_lookup: dict[str, Mapping[str, Any]] = {}
     if isinstance(applied_process, Mapping):
@@ -12998,9 +13023,7 @@ def compute_quote_from_df(
 
     planner_meta_keys: set[str] = set()
 
-    meta_lookup: dict[str, dict[str, Any]] = {
-        key: dict(value) for key, value in process_meta.items() if isinstance(value, Mapping)
-    }
+    meta_lookup = _build_process_meta_lookup(process_meta)
 
     planner_meta_keys: set[str] = set()
     if not used_planner:
@@ -14279,9 +14302,7 @@ def compute_quote_from_df(
                     process_meta[b] = update_payload
                 planner_meta_keys.add(b)
 
-        meta_lookup = {
-            key: dict(value) for key, value in process_meta.items() if isinstance(value, Mapping)
-        }
+        meta_lookup = _build_process_meta_lookup(process_meta)
         allowed_process_hour_keys = {
             key
             for key in planner_meta_keys
