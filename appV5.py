@@ -17290,12 +17290,14 @@ def compute_quote_from_df(
 
         _merge_labor_detail("Fixture Build (amortized)", fixture_labor_per_part, fixture_bits)
 
+    rendered_labor_total = float(proc_total)
+
     try:
         labor_display_total = sum(float(value or 0.0) for value in labor_costs_display.values())
     except Exception:  # pragma: no cover - defensive logging
         logger.exception("Labor section invariant calculation failed")
     else:
-        recomputed_labor_total = round(labor_display_total, 2)
+        recomputed_labor_total = round(rendered_labor_total, 2)
         expected_labor_total = float(labor_cost or 0.0)
         diff = abs(recomputed_labor_total - expected_labor_total)
         if diff > 0.5:
@@ -17335,6 +17337,14 @@ def compute_quote_from_df(
                     )
                 except Exception:
                     pass
+
+        if abs(rendered_labor_total - float(expected_labor_total)) > _LABOR_SECTION_ABS_EPSILON:
+            expected_display = float(expected_labor_total)
+            drift_amount = expected_display - rendered_labor_total
+            lines.append(
+                f"  ⚠️ Labor totals drifted by ${drift_amount:,.2f}: "
+                f"rendered ${rendered_labor_total:,.2f} vs expected ${expected_display:,.2f}"
+            )
 
         labor_cost = recomputed_labor_total
 
@@ -17525,6 +17535,8 @@ def compute_quote_from_df(
         "llm_notes": llm_notes,
         "llm_cost_log": llm_cost_log,
     }
+
+    breakdown["labor_cost_rendered"] = rendered_labor_total
 
     breakdown["pricing_source"] = pricing_source_value
     if red_flag_messages:
@@ -20742,7 +20754,15 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
     ui_vars = result.get("ui_vars") or {}
 
     final_price = float(result.get("price", totals.get("price", 0.0) or 0.0))
-    labor_cost = float(totals.get("labor_cost", 0.0) or 0.0)
+    declared_labor_cost = float(totals.get("labor_cost", 0.0) or 0.0)
+    try:
+        labor_cost_rendered_val = breakdown.get("labor_cost_rendered", declared_labor_cost)
+    except Exception:
+        labor_cost_rendered_val = declared_labor_cost
+    try:
+        labor_cost = float(labor_cost_rendered_val or 0.0)
+    except Exception:
+        labor_cost = declared_labor_cost
     direct_costs = float(totals.get("direct_costs", 0.0) or 0.0)
     subtotal = labor_cost + direct_costs
 
