@@ -10344,6 +10344,46 @@ def estimate_drilling_hours(
     seen_debug: set[str] = set()
     chosen_material_label: str = ""
 
+    def _update_debug_aggregate(
+        *,
+        hole_count: int,
+        avg_diameter: Any,
+        minutes_per_hole: float | None,
+    ) -> None:
+        if debug is None:
+            return
+
+        try:
+            avg_val = float(avg_diameter)
+        except Exception:
+            avg_val = 0.0
+        if not math.isfinite(avg_val):
+            avg_val = 0.0
+
+        min_per_hole_val: float | None
+        if minutes_per_hole is None:
+            min_per_hole_val = None
+        else:
+            try:
+                min_candidate = float(minutes_per_hole)
+            except Exception:
+                min_per_hole_val = None
+            else:
+                min_per_hole_val = min_candidate if math.isfinite(min_candidate) else None
+
+        debug.update(
+            {
+                "thickness_in": float(thickness_in or 0.0),
+                "avg_dia_in": avg_val,
+                "sfm": None,
+                "ipr": None,
+                "rpm": None,
+                "ipm": None,
+                "min_per_hole": min_per_hole_val,
+                "hole_count": int(hole_count),
+            }
+        )
+
     def _log_debug(entry: str) -> None:
         if debug_list is None:
             return
@@ -11203,23 +11243,14 @@ def estimate_drilling_hours(
                     warnings.append(warning_text)
         total_minutes_with_toolchange = total_min + total_toolchange_min
 
-        if debug is not None and total_holes > 0:
-            try:
-                avg_dia_in = float(avg_dia_in)
-            except Exception:
-                avg_dia_in = 0.0
-            debug.update(
-                {
-                    "thickness_in": float(thickness_in or 0.0),
-                    "avg_dia_in": float(avg_dia_in),
-                    "sfm": None,
-                    "ipr": None,
-                    "rpm": None,
-                    "ipm": None,
-                    "min_per_hole": (float(total_min) / float(total_holes)) if total_holes else 0.0,
-                    "hole_count": int(total_holes),
-                }
-            )
+        min_per_hole: float | None = None
+        if total_holes > 0:
+            min_per_hole = float(total_min) / float(total_holes)
+        _update_debug_aggregate(
+            hole_count=total_holes,
+            avg_diameter=avg_dia_in,
+            minutes_per_hole=min_per_hole,
+        )
         if total_minutes_with_toolchange > 0:
             return total_minutes_with_toolchange / 60.0
 
@@ -11274,30 +11305,17 @@ def estimate_drilling_hours(
 
     if debug_state is not None and holes_fallback > 0:
         avg_dia_in = weighted_dia_in / holes_fallback if holes_fallback else 0.0
-        debug.update(
-            {
-                "thickness_in": float(thickness_in or 0.0),
-                "avg_dia_in": float(avg_dia_in),
-                "sfm": None,
-                "ipr": None,
-                "rpm": None,
-                "ipm": None,
-                "min_per_hole": (total_sec / 60.0) / total_hole_qty if total_hole_qty else None,
-                "hole_count": int(total_hole_qty),
-            }
+        min_per_hole = (total_sec / 60.0) / total_hole_qty if total_hole_qty else None
+        _update_debug_aggregate(
+            hole_count=total_hole_qty,
+            avg_diameter=avg_dia_in,
+            minutes_per_hole=min_per_hole,
         )
-    elif debug is not None:
-        debug.update(
-            {
-                "thickness_in": float(thickness_in or 0.0),
-                "avg_dia_in": 0.0,
-                "sfm": None,
-                "ipr": None,
-                "rpm": None,
-                "ipm": None,
-                "min_per_hole": None,
-                "hole_count": 0,
-            }
+    else:
+        _update_debug_aggregate(
+            hole_count=total_hole_qty if holes_fallback > 0 else 0,
+            avg_diameter=weighted_dia_in / holes_fallback if holes_fallback else 0.0,
+            minutes_per_hole=None,
         )
 
     if debug_summary is not None and debug is not None:
