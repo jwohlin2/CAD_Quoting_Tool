@@ -427,11 +427,34 @@ def _canonical_amortized_label(label: Any) -> tuple[str, bool]:
     return text, False
 
 import pandas as pd
-from OCP.BRep import BRep_Tool
-from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE
-from OCP.TopExp import TopExp, TopExp_Explorer
-from OCP.TopoDS import TopoDS, TopoDS_Face, TopoDS_Shape
-from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
+
+try:
+    import ezdxf  # type: ignore[import-not-found]
+except Exception:  # pragma: no cover - optional dependency
+    ezdxf = None  # type: ignore[assignment]
+
+try:  # pragma: no cover - optional dependency
+    from ezdxf.addons import odafc  # type: ignore[import-not-found]
+except Exception:  # pragma: no cover - optional dependency
+    odafc = None  # type: ignore[assignment]
+
+try:  # pragma: no cover - optional dependency
+    from ezdxf.addons.drawing import Drawing  # type: ignore[import-not-found]
+except Exception:  # pragma: no cover - optional dependency
+    from typing import Any as Drawing  # type: ignore[assignment]
+
+try:
+    from OCP.BRep import BRep_Tool  # type: ignore[import-not-found]
+    from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE  # type: ignore[import-not-found]
+    from OCP.TopExp import TopExp, TopExp_Explorer  # type: ignore[import-not-found]
+    from OCP.TopoDS import TopoDS, TopoDS_Face, TopoDS_Shape  # type: ignore[import-not-found]
+    from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape  # type: ignore[import-not-found]
+except Exception:  # pragma: no cover - fallback for pythonocc-core
+    from OCC.Core.BRep import BRep_Tool  # type: ignore[import-not-found]
+    from OCC.Core.TopAbs import TopAbs_EDGE, TopAbs_FACE  # type: ignore[import-not-found]
+    from OCC.Core.TopExp import TopExp, TopExp_Explorer  # type: ignore[import-not-found]
+    from OCC.Core.TopoDS import TopoDS, TopoDS_Face, TopoDS_Shape  # type: ignore[import-not-found]
+    from OCC.Core.TopTools import TopTools_IndexedDataMapOfShapeListOfShape  # type: ignore[import-not-found]
 
 try:
     from geo_read_more import build_geo_from_dxf as build_geo_from_dxf_path
@@ -2709,6 +2732,59 @@ except Exception:
     from OCC.Core.TopAbs import TopAbs_FACE
     from OCC.Core.TopExp import TopExp_Explorer
     BACKEND = "pythonocc"
+
+
+def _resolve_face_of():
+    """Return a callable that casts a shape-like object to a TopoDS_Face."""
+
+    # Prefer helpers exposed by cad_quoter.geometry when available
+    fn = getattr(geometry, "FACE_OF", None)
+    if callable(fn):
+        return fn
+
+    # Try OCP's modern `topods.Face` helper first
+    try:  # pragma: no cover - depends on optional OCC bindings
+        from OCP.TopoDS import topods as _topods  # type: ignore[import-not-found]
+
+        if hasattr(_topods, "Face"):
+            return _topods.Face  # type: ignore[return-value]
+    except Exception:
+        pass
+
+    # pythonocc-core exposes either topods_Face or topods.Face
+    try:  # pragma: no cover - depends on optional OCC bindings
+        from OCC.Core.TopoDS import topods_Face  # type: ignore[import-not-found]
+
+        return topods_Face  # type: ignore[return-value]
+    except Exception:
+        pass
+    try:  # pragma: no cover - depends on optional OCC bindings
+        from OCC.Core.TopoDS import topods as _occ_topods  # type: ignore[import-not-found]
+
+        face_fn = getattr(_occ_topods, "Face", None)
+        if callable(face_fn):
+            return face_fn
+    except Exception:
+        pass
+
+    # Fall back to methods on the TopoDS namespace (OCP variants expose Face_s)
+    try:  # pragma: no cover - depends on optional OCC bindings
+        from OCP.TopoDS import TopoDS as _TopoDS  # type: ignore[import-not-found]
+
+        for attr in ("Face_s", "Face"):
+            face_fn = getattr(_TopoDS, attr, None)
+            if callable(face_fn):
+                return face_fn
+    except Exception:
+        pass
+
+    def _raise(obj):
+        raise TypeError(f"Cannot cast {type(obj).__name__} to TopoDS_Face")
+
+    return _raise
+
+
+FACE_OF = _resolve_face_of()
 
 def as_face(obj):
     """
