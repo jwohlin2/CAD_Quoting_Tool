@@ -9382,8 +9382,14 @@ def _density_for_material(
     return default
 
 
-def require_plate_inputs(geo: dict, ui_vars: dict[str, Any] | None) -> None:
-    ui_vars = ui_vars or {}
+def require_plate_inputs(
+    geo: MutableMapping[str, Any],
+    ui_vars: Mapping[str, Any] | None,
+) -> None:
+    if not isinstance(geo, _MutableMappingABC):
+        raise TypeError("geo must be a mutable mapping")
+
+    ui_vars = dict(ui_vars or {})
     thickness_val = ui_vars.get("Thickness (in)")
     thickness_in = _coerce_float_or_none(thickness_val)
     if thickness_in is None and thickness_val is not None:
