@@ -11813,6 +11813,7 @@ def compute_quote_from_df(
     planner_drill_minutes: float | None = None
     planner_drilling_override: dict[str, float] | None = None
     used_planner = False
+    planner_meta_keys: set[str] = set()
 
     red_flag_messages: list[str] = []
     _red_flag_seen: set[str] = set()
