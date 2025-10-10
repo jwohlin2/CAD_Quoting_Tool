@@ -15083,6 +15083,9 @@ def compute_quote_from_df(
                 minutes_val = float(entry.get("minutes") or 0.0)
                 machine_cost = float(entry.get("machine_cost") or 0.0)
                 labor_cost = float(entry.get("labor_cost") or 0.0)
+                if bucket == "drilling" and machine_cost > 0.0 and labor_cost <= 0.0:
+                    labor_cost = machine_cost
+                    machine_cost = 0.0
                 bucket_totals = bucket_view.setdefault(
                     bucket,
                     {
