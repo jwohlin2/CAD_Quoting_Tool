@@ -11608,6 +11608,10 @@ def compute_quote_from_df(
     pricing_engine = pricing or _DEFAULT_PRICING_ENGINE
     quote_state.ui_vars = dict(ui_vars)
     quote_state.rates = dict(rates)
+    # Track whether we recognized any planner line items even if planner pricing
+    # fails to populate line_items. Initialize this early to avoid scope issues
+    # when incrementing the counter in downstream logic.
+    recognized_line_items = 0
     geo_context = dict(geo or {})
     inner_geo_raw = geo_context.get("geo")
     inner_geo = dict(inner_geo_raw) if isinstance(inner_geo_raw, dict) else {}
@@ -14116,7 +14120,6 @@ def compute_quote_from_df(
             process_plan_summary["pricing_error"] = planner_pricing_error
 
     planner_line_items: list[dict[str, Any]] = []
-    recognized_line_items = 0
     planner_machine_cost_total = 0.0
     planner_labor_cost_total = 0.0
     planner_total_minutes = 0.0
