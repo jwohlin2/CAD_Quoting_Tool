@@ -12179,11 +12179,26 @@ def compute_quote_from_df(
     rate_from_sheet(r"Rate\s*-\s*Tool\s*&\s*Die", "ToolmakerSupportRate")
 
     # ---- knobs & qty ---------------------------------------------------------
-    OverheadPct    = num_pct(r"\b" + alt('Overhead','Shop Overhead') + r"\b", params["OverheadPct"])
-    MarginPct      = num_pct(r"\b" + alt('Margin','Profit Margin') + r"\b", params["MarginPct"])
-    GA_Pct         = num_pct(r"\b" + alt('G&A',r'General\s*&\s*Admin') + r"\b", params["GA_Pct"])
-    ContingencyPct = num_pct(r"\b" + alt('Contingency',r'Risk\s*Adder') + r"\b",  params["ContingencyPct"])
-    ExpeditePct    = num_pct(r"\b" + alt('Expedite',r'Rush\s*Fee') + r"\b",      params["ExpeditePct"])
+    OverheadPct    = num_pct(
+        r"\b" + alt('Overhead','Shop Overhead') + r"\b",
+        default=params["OverheadPct"],
+    )
+    MarginPct      = num_pct(
+        r"\b" + alt('Margin','Profit Margin') + r"\b",
+        default=params["MarginPct"],
+    )
+    GA_Pct         = num_pct(
+        r"\b" + alt('G&A',r'General\s*&\s*Admin') + r"\b",
+        default=params["GA_Pct"],
+    )
+    ContingencyPct = num_pct(
+        r"\b" + alt('Contingency',r'Risk\s*Adder') + r"\b",
+        default=params["ContingencyPct"],
+    )
+    ExpeditePct    = num_pct(
+        r"\b" + alt('Expedite',r'Rush\s*Fee') + r"\b",
+        default=params["ExpeditePct"],
+    )
 
     priority = strv(alt('PM-01_Quote_Priority',r'Quote\s*Priority'), "").strip().lower()
     if priority not in ("expedite", "critical"):
@@ -12905,8 +12920,14 @@ def compute_quote_from_df(
     grinding_hr  = surf_grind_hr + jig_grind_hr + odid_grind_hr + grind_hr_calc + dressing_hr
 
     # Apply multipliers
-    five_axis_mult = 1.0 + num_pct(r"(?:5[- ]?Axis|Five[- ]Axis|Multi[- ]Axis)", max(0.0, params["FiveAxisMultiplier"] - 1.0))
-    tight_tol_mult = 1.0 + num_pct(r"(?:Tight\s*Tolerance|Very\s*Tight)",        max(0.0, params["TightToleranceMultiplier"] - 1.0))
+    five_axis_mult = 1.0 + num_pct(
+        r"(?:5[- ]?Axis|Five[- ]Axis|Multi[- ]Axis)",
+        default=max(0.0, params["FiveAxisMultiplier"] - 1.0),
+    )
+    tight_tol_mult = 1.0 + num_pct(
+        r"(?:Tight\s*Tolerance|Very\s*Tight)",
+        default=max(0.0, params["TightToleranceMultiplier"] - 1.0),
+    )
 
     # Costs
     milling_cost = eff(milling_hr) * rates["MillingRate"] * five_axis_mult * tight_tol_mult
@@ -13005,7 +13026,10 @@ def compute_quote_from_df(
     shipping_pct_of_material = float(params.get("ShippingPctOfMaterial", 0.15) or 0.0)
     shipping_cost_default = round(material_direct_cost * shipping_pct_of_material, 2) if shipping_pct_of_material else 0.0
     shipping_cost     = float(shipping_cost_default)
-    insurance_pct     = num_pct(r"(?:Insurance|Liability\s*Adder)", params["InsurancePct"])
+    insurance_pct     = num_pct(
+        r"(?:Insurance|Liability\s*Adder)",
+        default=params["InsurancePct"],
+    )
     packaging_cost    = packaging_hr * rates["AssemblyRate"] + crate_nre_cost + packaging_mat
     packaging_flat_base = float((crate_nre_cost or 0.0) + (packaging_mat or 0.0))
     shipping_basis_desc = "Outbound freight & logistics"
