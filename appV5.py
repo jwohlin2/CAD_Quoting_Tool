@@ -10058,7 +10058,7 @@ def _clean_hole_groups(raw: Any) -> list[dict[str, Any]] | None:
     return cleaned if cleaned else None
 
 MIN_DRILL_MIN_PER_HOLE = 0.10
-DEFAULT_MAX_DRILL_MIN_PER_HOLE = 2.00
+DEFAULT_MAX_DRILL_MIN_PER_HOLE = 3.00
 
 DEEP_DRILL_SFM_FACTOR = 0.65
 DEEP_DRILL_IPR_FACTOR = 0.70
@@ -10095,40 +10095,47 @@ def _drill_minutes_per_hole_bounds(
     if depth_value is not None and depth_value <= 0:
         depth_value = None
 
+    caps = {"N": 2.0, "P": 5.0, "M": 5.0, "S": 6.0, "H": 6.0}
+    group_key: str | None = None
     if material_group:
         raw_key = str(material_group).strip()
-        key_lower = raw_key.lower()
         key_upper = raw_key.upper()
-
-        def _starts_with(prefixes: tuple[str, ...]) -> bool:
-            return any(key_upper.startswith(prefix) for prefix in prefixes)
-
-        if (
-            "inconel" in key_lower
-            or "titanium" in key_lower
-            or key_upper.startswith("TI")
-            or _starts_with(("S", "H"))
-        ):
-            max_minutes = 6.0
+        normalized_key = "".join(ch for ch in key_upper if ch.isalnum())
+        if normalized_key in caps:
+            group_key = normalized_key
         elif (
-            "steel" in key_lower
-            or "stainless" in key_lower
-            or _starts_with(("P", "M"))
+            normalized_key
+            and normalized_key[0] in caps
+            and normalized_key[1:].isdigit()
         ):
-            max_minutes = 5.0
-        elif (
-            "alum" in key_lower
-            or "copper" in key_lower
-            or "brass" in key_lower
-            or "bronze" in key_lower
-            or _starts_with(("N", "C"))
-        ):
-            max_minutes = 2.0
-        else:
-            max_minutes = DEFAULT_MAX_DRILL_MIN_PER_HOLE
+            group_key = normalized_key[0]
+        if group_key is None:
+            key_lower = raw_key.lower()
+            if (
+                "inconel" in key_lower
+                or "titanium" in key_lower
+                or key_upper.startswith("TI")
+            ):
+                group_key = "S"
+            elif "stainless" in key_lower:
+                group_key = "M"
+            elif "steel" in key_lower:
+                group_key = "P"
+            elif (
+                "alum" in key_lower
+                or "copper" in key_lower
+                or "brass" in key_lower
+                or "bronze" in key_lower
+                or key_upper.startswith("C")
+            ):
+                group_key = "N"
+            elif key_upper.startswith("H"):
+                group_key = "H"
+    if group_key:
+        max_minutes = caps.get(group_key, DEFAULT_MAX_DRILL_MIN_PER_HOLE)
 
-    if depth_value is not None and depth_value > 1.0:
-        max_minutes += 0.2 * (depth_value - 1.0)
+    if depth_value is not None:
+        max_minutes += 0.2 * max(0.0, depth_value - 1.0)
 
     max_minutes = max(max_minutes, min_minutes)
     return min_minutes, max_minutes
@@ -11211,34 +11218,31 @@ def estimate_drilling_hours(
 
     holes_fallback = total_hole_qty
 
-    if debug_state is not None and holes_fallback > 0:
-        avg_dia_in = weighted_dia_in / holes_fallback if holes_fallback else 0.0
-        min_per_hole = (total_sec / 60.0) / total_hole_qty if total_hole_qty else None
-        _update_debug_aggregate(
-            hole_count=total_hole_qty,
-            avg_diameter=avg_dia_in,
-            minutes_per_hole=min_per_hole,
-        )
-    else:
-        _update_debug_aggregate(
-            hole_count=total_hole_qty if holes_fallback > 0 else 0,
-            avg_diameter=weighted_dia_in / holes_fallback if holes_fallback else 0.0,
-            minutes_per_hole=None,
-        )
-
-    if debug_summary is not None and debug is not None:
-        debug_summary.setdefault("aggregate", {}).update(debug)
-
     hours = total_sec / 3600.0
     depth_for_bounds = None
     if thickness_for_fallback_mm and thickness_for_fallback_mm > 0:
         depth_for_bounds = float(thickness_for_fallback_mm) / 25.4
-    return _apply_drill_minutes_clamp(
+    clamped_hours = _apply_drill_minutes_clamp(
         hours,
         total_hole_qty,
         material_group=material_label,
         depth_in=depth_for_bounds,
     )
+
+    avg_dia_for_debug = weighted_dia_in / holes_fallback if holes_fallback else 0.0
+    min_per_hole_debug: float | None = None
+    if holes_fallback > 0:
+        min_per_hole_debug = (clamped_hours * 60.0) / holes_fallback
+    _update_debug_aggregate(
+        hole_count=total_hole_qty if holes_fallback > 0 else 0,
+        avg_diameter=avg_dia_for_debug,
+        minutes_per_hole=min_per_hole_debug,
+    )
+
+    if debug_summary is not None and debug is not None:
+        debug_summary.setdefault("aggregate", {}).update(debug)
+
+    return clamped_hours
 
 
 def _drilling_floor_hours(hole_count: int) -> float:
