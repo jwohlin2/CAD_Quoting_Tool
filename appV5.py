@@ -52,6 +52,7 @@ from cad_quoter.config import (
 from cad_quoter.config import (
     describe_runtime_environment as _describe_runtime_environment,
 )
+from cad_quoter.utils.geo_ctx import _should_include_outsourced_pass
 from cad_quoter.utils.scrap import _estimate_scrap_from_stock_plan
 
 APP_ENV = AppEnvironment.from_env()
