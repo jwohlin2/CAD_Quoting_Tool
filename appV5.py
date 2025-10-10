@@ -14,6 +14,7 @@ Single-file CAD Quoter (v8)
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import logging
 import math
@@ -248,6 +249,16 @@ from cad_quoter.pricing.time_estimator import (
 from cad_quoter.pricing.wieland import lookup_price as lookup_wieland_price
 from cad_quoter.rates import migrate_flat_to_two_bucket, two_bucket_to_flat
 from cad_quoter.vendors.mcmaster_stock import lookup_sku_and_price_for_mm
+from cad_quoter.llm import (
+    LLMClient,
+    infer_hours_and_overrides_from_geo as _infer_hours_and_overrides_from_geo,
+    explain_quote,
+)
+
+_DEFAULT_MATERIAL_DENSITY_G_CC = MATERIAL_DENSITY_G_CC_BY_KEY.get(
+    DEFAULT_MATERIAL_KEY,
+    7.85,
+)
 
 try:
     from process_planner import (
@@ -4017,12 +4028,12 @@ def read_cad_any(path: str):
             raise RuntimeError("BREP read failed")
         return s
     if ext == ".dxf":
-        return read_dxf_as_occ_shape(path)
+        return geometry.read_dxf_as_occ_shape(path)
     if ext == ".dwg":
         conv = os.environ.get("ODA_CONVERTER_EXE") or os.environ.get("DWG2DXF_EXE")
         logger.info("Using DWG converter: %s", conv)
         dxf_path = convert_dwg_to_dxf(path)
-        return read_dxf_as_occ_shape(dxf_path)
+        return geometry.read_dxf_as_occ_shape(dxf_path)
     raise RuntimeError(f"Unsupported CAD format: {ext}")
 
 # ---- LLM hours inference ----
@@ -5104,6 +5115,14 @@ def render_quote(
             material_block = dict(material_raw or {})
         except Exception:
             material_block = {}
+    material_selection_raw = breakdown.get("material_selected") or {}
+    if isinstance(material_selection_raw, Mapping):
+        material_selection = dict(material_selection_raw)
+    else:
+        try:
+            material_selection = dict(material_selection_raw or {})
+        except Exception:
+            material_selection = {}
     material = material_block
     drilling_meta = breakdown.get("drilling_meta", {}) or {}
     process_costs_raw = breakdown.get("process_costs", {}) or {}
@@ -6325,12 +6344,12 @@ def render_quote(
             lines.append("Material & Stock")
             lines.append(divider)
             material_name_display = ""
-            if isinstance(material_selected, Mapping):
+            if isinstance(material_selection, Mapping):
                 material_name_display = (
-                    material_selected.get("canonical_material")
-                    or material_selected.get("material_display")
-                    or material_selected.get("input_material")
-                    or material_selected.get("material")
+                    material_selection.get("canonical_material")
+                    or material_selection.get("material_display")
+                    or material_selection.get("input_material")
+                    or material_selection.get("material")
                     or ""
                 )
             if not material_name_display and isinstance(drilling_meta, Mapping):
@@ -7150,6 +7169,11 @@ def render_quote(
             )
 
     _emit_labor_cost_lines()
+
+    machine_in_labor_section = any(
+        _canonical_bucket_key(str(key)) == "machine"
+        for key in labor_costs_display.keys()
+    )
 
     displayed_process_total = sum(float(value or 0.0) for value in labor_costs_display.values())
     if not math.isclose(proc_total, displayed_process_total, rel_tol=1e-6, abs_tol=0.05):
