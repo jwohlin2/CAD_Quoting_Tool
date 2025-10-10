@@ -739,7 +739,17 @@ except ImportError:
 
 BRep_Tool = cast(_BRepToolProto, BRep_Tool)
 TopoDS = cast(_TopoDSProto, TopoDS)
-BRepTools = cast(Any, BRepTools)
+try:
+    BRepTools = cast(Any, BRepTools)
+except NameError:
+    class _MissingBRepTools:
+        def __getattr__(self, item):
+            raise ImportError(
+                "OCCT bindings are required for geometry operations. "
+                "Please install pythonocc-core or the OCP wheels."
+            )
+
+    BRepTools = cast(Any, _MissingBRepTools())
 
 try:
     from geo_read_more import build_geo_from_dxf as build_geo_from_dxf_path
