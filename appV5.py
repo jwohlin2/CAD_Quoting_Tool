@@ -1146,11 +1146,6 @@ def find_planar_pockets(shape) -> List[Dict[str, Any]]:
 
     return pockets
 
-
-def render_step_thumbs(shape, out_dir: str) -> Dict[str, str]:
-    raise RuntimeError("STEP thumbnail rendering is not supported in this environment")
-
-
 from cad_quoter.domain import QuoteState
 
 
