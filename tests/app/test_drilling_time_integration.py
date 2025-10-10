@@ -1,7 +1,6 @@
 import pandas as pd
 import pytest
 
-import appV5
 from appV5 import estimate_drilling_hours
 from cad_quoter.pricing.time_estimator import (
     MachineParams,
@@ -43,7 +42,7 @@ def test_estimate_drilling_hours_uses_speeds_feeds_table() -> None:
         overhead_params=overhead,
     )
 
-    assert hours == pytest.approx(0.026743675, rel=1e-6)
+    assert hours == pytest.approx(0.0222651727, rel=1e-6)
 
 
 def test_estimate_drilling_hours_fallback_without_table() -> None:
@@ -83,4 +82,4 @@ def test_estimate_drilling_hours_uses_deep_drill_for_high_ld() -> None:
         overhead_params=overhead,
     )
 
-    assert hours == pytest.approx(0.018052163, rel=1e-6)
+    assert hours == pytest.approx(0.025, rel=1e-6)

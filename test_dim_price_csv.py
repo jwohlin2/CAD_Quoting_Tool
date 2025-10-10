@@ -19,9 +19,9 @@
 #   setx MCMASTER_PFX_PATH "D:\Composidie.pfx"
 #   setx MCMASTER_PFX_PASS "YOURPFXPASSWORD"
 
-import os, csv, math, re
+import os, csv, re
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 # If your mcmaster_api.py lives alongside this file, this import will work.
 # Otherwise adjust sys.path or place this script next to mcmaster_api.py.
