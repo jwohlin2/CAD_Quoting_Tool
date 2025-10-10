@@ -25,7 +25,7 @@ import typing
 import tkinter as tk
 import re
 from collections import Counter
-from collections.abc import Mapping as _MappingABC
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
@@ -93,7 +93,19 @@ def roughly_equal(a: float | int | str | None, b: float | int | str | None, *, e
 import copy
 import sys
 import textwrap
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, TypeVar
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    TypeVar,
+    cast,
+)
 
 
 T = TypeVar("T")
@@ -505,6 +517,8 @@ try:
 except Exception:
     build_geo_from_dxf_path = None  # type: ignore[assignment]
 
+
+_MappingABC = Mapping
 
 _build_geo_from_dxf_hook: Optional[Callable[[str], Dict[str, Any]]] = None
 
@@ -3190,6 +3204,7 @@ try:
     import fitz  # PyMuPDF
     _HAS_PYMUPDF = True
 except Exception:
+    fitz = None  # type: ignore[assignment]
     _HAS_PYMUPDF = False
 def upsert_var_row(df, item, value, dtype="number"):
     """
@@ -4384,7 +4399,7 @@ _MASTER_VARIABLES_CACHE: dict[str, Any] = {
     "full": None,
 }
 
-_SPEEDS_FEEDS_CACHE: dict[str, "pd.DataFrame" | None] = {}
+_SPEEDS_FEEDS_CACHE: dict[str, pd.DataFrame | None] = {}
 
 def _coerce_core_types(df_core: "pd.DataFrame") -> "pd.DataFrame":
     """Light normalization for estimator expectations."""
@@ -8545,7 +8560,7 @@ def _material_label_from_table(
     return None
 
 
-def _load_speeds_feeds_table(path: str | None) -> "pd.DataFrame" | None:
+def _load_speeds_feeds_table(path: str | None) -> pd.DataFrame | None:
     if not path:
         return None
     try:
@@ -8570,7 +8585,7 @@ def _load_speeds_feeds_table(path: str | None) -> "pd.DataFrame" | None:
 
 
 def _select_speeds_feeds_row(
-    table: "pd.DataFrame" | None,
+    table: pd.DataFrame | None,
     operation: str,
     material_key: str | None = None,
 ) -> Mapping[str, Any] | None:
@@ -8922,7 +8937,7 @@ def estimate_drilling_hours(
     mat_key: str,
     *,
     hole_groups: list[Mapping[str, Any]] | None = None,
-    speeds_feeds_table: "pd.DataFrame" | None = None,
+    speeds_feeds_table: pd.DataFrame | None = None,
     machine_params: _TimeMachineParams | None = None,
     overhead_params: _TimeOverheadParams | None = None,
     warnings: list[str] | None = None,
@@ -9658,9 +9673,10 @@ def estimate_drilling_hours(
                     return float(total) / float(count)
 
                 def _format_avg(value: float | None, fmt: str) -> str:
-                    if value is None or not math.isfinite(float(value)):
+                    coerced = _coerce_float_or_none(value)
+                    if coerced is None or not math.isfinite(float(coerced)):
                         return "-"
-                    return fmt.format(float(value))
+                    return fmt.format(float(coerced))
 
                 def _format_range(
                     min_val: float | None,
@@ -9669,20 +9685,28 @@ def estimate_drilling_hours(
                     *,
                     tolerance: float = 0.0,
                 ) -> str:
-                    if min_val is None and max_val is None:
+                    min_f = _coerce_float_or_none(min_val)
+                    max_f = _coerce_float_or_none(max_val)
+                    if min_f is None and max_f is None:
+                        return "-"
+                    if min_f is None:
+                        min_f = max_f
+                    if max_f is None:
+                        max_f = min_f
+                    if min_f is None or max_f is None:
                         return "-"
                     try:
-                        min_f = float(min_val if min_val is not None else max_val)
-                        max_f = float(max_val if max_val is not None else min_val)
+                        min_float = float(min_f)
+                        max_float = float(max_f)
                     except (TypeError, ValueError):
                         return "-"
-                    if not math.isfinite(min_f) or not math.isfinite(max_f):
+                    if not math.isfinite(min_float) or not math.isfinite(max_float):
                         return "-"
-                    if tolerance and abs(max_f - min_f) <= tolerance:
-                        return fmt.format(max_f)
-                    if abs(max_f - min_f) <= 1e-12:
-                        return fmt.format(max_f)
-                    return f"{fmt.format(min_f)}–{fmt.format(max_f)}"
+                    if tolerance and abs(max_float - min_float) <= tolerance:
+                        return fmt.format(max_float)
+                    if abs(max_float - min_float) <= 1e-12:
+                        return fmt.format(max_float)
+                    return f"{fmt.format(min_float)}–{fmt.format(max_float)}"
 
                 sfm_avg = _avg_value("sfm_sum", "sfm_count")
                 rpm_avg = _avg_value("rpm_sum", "rpm_count")
@@ -10086,37 +10110,41 @@ def _estimate_programming_hours_auto(
 
 
 def validate_quote_before_pricing(
-    geo: dict,
+    geo: Mapping[str, Any] | None,
     process_costs: dict[str, float],
     pass_through: dict[str, Any],
     process_hours: dict[str, float] | None = None,
 ) -> None:
     issues: list[str] = []
+    geo_ctx: Mapping[str, Any] = geo if isinstance(geo, Mapping) else {}
     has_legacy_buckets = any(key in process_costs for key in ("drilling", "milling"))
     if has_legacy_buckets:
         hole_cost = sum(float(process_costs.get(k, 0.0)) for k in ("drilling", "milling"))
-        if geo.get("hole_diams_mm") and hole_cost < 50:
+        if geo_ctx.get("hole_diams_mm") and hole_cost < 50:
             issues.append("Unusually low machining time for number of holes.")
     material_cost = float(pass_through.get("Material", 0.0) or 0.0)
     if material_cost < 5.0:
-        inner_geo = geo.get("geo") if isinstance(geo.get("geo"), dict) else {}
+        inner_geo_candidate = geo_ctx.get("geo") if isinstance(geo_ctx, Mapping) else None
+        inner_geo: Mapping[str, Any] = (
+            inner_geo_candidate if isinstance(inner_geo_candidate, Mapping) else {}
+        )
 
         def _positive(value: Any) -> bool:
             num = _coerce_float_or_none(value)
             return bool(num and num > 0)
 
         thickness_candidates = [
-            geo.get("thickness_mm"),
-            geo.get("thickness_in"),
-            geo.get("GEO-03_Height_mm"),
-            geo.get("GEO__Stock_Thickness_mm"),
-            inner_geo.get("thickness_mm") if isinstance(inner_geo, dict) else None,
-            inner_geo.get("stock_thickness_mm") if isinstance(inner_geo, dict) else None,
+            geo_ctx.get("thickness_mm"),
+            geo_ctx.get("thickness_in"),
+            geo_ctx.get("GEO-03_Height_mm"),
+            geo_ctx.get("GEO__Stock_Thickness_mm"),
+            inner_geo.get("thickness_mm") if isinstance(inner_geo, Mapping) else None,
+            inner_geo.get("stock_thickness_mm") if isinstance(inner_geo, Mapping) else None,
         ]
         has_thickness_hint = any(_positive(val) for val in thickness_candidates)
 
-        def _mass_hint(ctx: dict[str, Any] | None) -> bool:
-            if not isinstance(ctx, dict):
+        def _mass_hint(ctx: Mapping[str, Any] | None) -> bool:
+            if not isinstance(ctx, Mapping):
                 return False
             for key in ("net_mass_kg", "net_mass_kg_est", "mass_kg", "net_mass_g"):
                 if key not in ctx:
@@ -10126,17 +10154,20 @@ def validate_quote_before_pricing(
                     return True
             return False
 
-        has_mass_hint = _mass_hint(geo) or _mass_hint(inner_geo)
-        has_material = bool(str(geo.get("material") or "").strip() or str(inner_geo.get("material") or "").strip())
+        has_mass_hint = _mass_hint(geo_ctx) or _mass_hint(inner_geo)
+        has_material = bool(
+            str(geo_ctx.get("material") or "").strip()
+            or str(inner_geo.get("material") or "").strip()
+        )
 
         if not (has_thickness_hint or has_mass_hint or has_material):
             issues.append("Material cost is near zero; check material & thickness.")
     try:
-        hole_count_val = int(float(geo.get("hole_count", 0)))
+        hole_count_val = int(float(geo_ctx.get("hole_count", 0)))
     except Exception:
-        hole_count_val = len(geo.get("hole_diams_mm") or [])
+        hole_count_val = len(geo_ctx.get("hole_diams_mm") or [])
     if hole_count_val <= 0:
-        hole_count_val = len(geo.get("hole_diams_mm") or [])
+        hole_count_val = len(geo_ctx.get("hole_diams_mm") or [])
     if issues:
         allow = str(os.getenv("QUOTE_ALLOW_LOW_MATERIAL", "")).strip().lower()
         if allow in {"1", "true", "yes", "on"}:
@@ -10145,6 +10176,7 @@ def validate_quote_before_pricing(
             raise ValueError("Quote blocked:\n- " + "\n- ".join(issues))
 
 
+# pyright: ignore[reportGeneralTypeIssues]
 def compute_quote_from_df(df: pd.DataFrame,
                           params: Dict[str, Any] | None = None,
                           rates: Dict[str, float] | None = None,
@@ -11347,7 +11379,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     drill_material_key = drill_material_lookup or drill_material_source
     speeds_feeds_raw = _resolve_speeds_feeds_path(params, ui_vars)
     speeds_feeds_path: str | None = None
-    speeds_feeds_table: "pd.DataFrame" | None = None
+    speeds_feeds_table: pd.DataFrame | None = None
     raw_path_text = str(speeds_feeds_raw).strip() if speeds_feeds_raw else ""
     if raw_path_text:
         try:
@@ -15097,9 +15129,12 @@ def extract_2d_features_from_pdf_vector(pdf_path: str) -> dict:
         raise RuntimeError("PyMuPDF (fitz) not installed. pip install pymupdf")
 
     import math
-    page = fitz.open(pdf_path)[0]
-    text = page.get_text("text").lower()
-    drawings = page.get_drawings()
+    assert fitz is not None
+    fitz_mod = cast(Any, fitz)
+    doc = fitz_mod.open(pdf_path)
+    page_any = cast(Any, doc[0])
+    text = str(page_any.get_text("text") or "").lower()
+    drawings = page_any.get_drawings()
 
     # perimeter from vector segments (points are in PostScript points; 1 pt = 0.352777ï¿½ mm)
     pt_to_mm = 0.352777778
@@ -15186,7 +15221,7 @@ def default_variables_template() -> pd.DataFrame:
             seen_items: set[str] = set()
             adjusted_rows: list[dict[str, Any]] = []
             for _, row in updated.iterrows():
-                row_dict = dict(row)
+                row_dict: dict[str, Any] = dict(row)
                 item_text = str(row_dict.get("Item", "") or "")
                 normalized = item_text.strip().lower()
                 seen_items.add(normalized)
@@ -15196,7 +15231,7 @@ def default_variables_template() -> pd.DataFrame:
                 adjusted_rows.append(row_dict)
             for normalized, display in normalized_targets.items():
                 if normalized not in seen_items:
-                    new_row = {col: "" for col in columns}
+                    new_row: dict[str, Any] = {col: "" for col in columns}
                     new_row.update(
                         {
                             "Item": display,
@@ -15282,20 +15317,23 @@ def extract_pdf_all(pdf_path: Path, dpi: int = 300) -> dict:
     if not _HAS_PYMUPDF:
         raise RuntimeError("PyMuPDF (fitz) not installed. pip install pymupdf")
     pdf_path = Path(pdf_path)
-    doc = fitz.open(pdf_path)
+    assert fitz is not None
+    fitz_mod = cast(Any, fitz)
+    doc = fitz_mod.open(pdf_path)
     pages = []
     for idx, page in enumerate(doc):
-        text = page.get_text("text") or ""
-        blocks = page.get_text("blocks")
+        page_any = cast(Any, page)
+        text = str(page_any.get_text("text") or "")
+        blocks = page_any.get_text("blocks")
         tables = []
         try:
-            found = page.find_tables()
+            found = page_any.find_tables()
             for table in getattr(found, "tables", []):
                 tables.append(table.extract())
         except Exception:
             pass
         zoom = dpi / 72.0
-        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+        pix = page_any.get_pixmap(matrix=fitz_mod.Matrix(zoom, zoom), alpha=False)
         png_path = pdf_path.with_suffix(f".p{idx}.png")
         pix.save(png_path)
         pages.append({
