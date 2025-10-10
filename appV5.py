@@ -488,6 +488,20 @@ if _cad_llm is not None:
             def __init__(self, *args, **kwargs) -> None:  # pragma: no cover - defensive
                 raise RuntimeError("LLM integration is not available in this environment.")
 
+            @property
+            def model_path(self) -> str:  # pragma: no cover - defensive
+                return ""
+
+            @property
+            def available(self) -> bool:  # pragma: no cover - defensive
+                return False
+
+            def ask_json(self, *args, **kwargs) -> tuple[dict, str, dict]:  # pragma: no cover - defensive
+                raise RuntimeError("LLM integration is not available in this environment.")
+
+            def close(self) -> None:  # pragma: no cover - defensive
+                return None
+
     else:
         LLMClient = _LLMClient
     _infer_hours_and_overrides_from_geo = getattr(
@@ -515,6 +529,20 @@ else:  # pragma: no cover - fallback definitions keep quoting functional without
 
         def __init__(self, *args, **kwargs) -> None:  # pragma: no cover - defensive
             raise RuntimeError("LLM integration is not available in this environment.")
+
+        @property
+        def model_path(self) -> str:  # pragma: no cover - defensive
+            return ""
+
+        @property
+        def available(self) -> bool:  # pragma: no cover - defensive
+            return False
+
+        def ask_json(self, *args, **kwargs) -> tuple[dict, str, dict]:  # pragma: no cover - defensive
+            raise RuntimeError("LLM integration is not available in this environment.")
+
+        def close(self) -> None:  # pragma: no cover - defensive
+            return None
 
     def _infer_hours_and_overrides_from_geo(*args, **kwargs):  # pragma: no cover - fallback
         return {}
