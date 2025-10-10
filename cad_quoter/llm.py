@@ -422,7 +422,7 @@ class LLMClient:
             self._debug_dir.mkdir(parents=True, exist_ok=True)
             path = self._debug_dir / f"llm_snapshot_{int(time.time())}.json"
             path.write_text(
-                jdump(json_safe_copy(snapshot), default=None),
+                jdump(json_safe_copy(snapshot)),
                 encoding="utf-8",
             )
         except Exception:
