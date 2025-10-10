@@ -15642,8 +15642,7 @@ def compute_quote_from_df(
                 f"Labor totals drifted by ${diff:,.2f}: "
                 f"rendered ${labor_display_total:,.2f} vs expected ${expected_labor_total:,.2f}"
             )
-            if flag_message not in red_flag_messages:
-                red_flag_messages.append(flag_message)
+            _record_red_flag(flag_message)
             logger.warning(
                 "Labor section totals drifted beyond threshold: %.2f vs %.2f",
                 labor_display_total,
