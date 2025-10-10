@@ -23,7 +23,7 @@ import re
 import time
 import typing
 from collections import Counter
-from collections.abc import Mapping as _MappingABC
+from collections.abc import Mapping as _MappingABC, MutableMapping as _MutableMappingABC
 from dataclasses import (
     asdict,
     dataclass,
@@ -213,12 +213,14 @@ from typing import (
     TypeVar,
     cast,
     Literal,
+    MutableMapping,
     overload,
     TYPE_CHECKING,
 )
 
 
 Mapping: TypeAlias = _MappingABC
+MutableMapping: TypeAlias = _MutableMappingABC
 
 
 T = TypeVar("T")
