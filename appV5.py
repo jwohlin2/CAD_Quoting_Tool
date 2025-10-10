@@ -6196,16 +6196,25 @@ def render_quote(
             for label, value in hs_entries.items()
         ):
             pricing_source_value = "planner"
-    if pricing_source_value:
-        lines.append(f"Pricing Source: {pricing_source_value}")
-    pricing_source_lower = (
-        str(pricing_source_value).strip().lower()
-        if pricing_source_value is not None
-        else ""
-    )
+    pricing_source_text = ""
+    for source in (result, breakdown):
+        if not isinstance(source, Mapping):
+            continue
+        text_val = source.get("pricing_source_text")
+        if text_val is None:
+            continue
+        candidate = str(text_val).strip()
+        if candidate:
+            pricing_source_text = candidate
+            break
     if pricing_source_text:
         lines.append(f"Pricing Source: {pricing_source_text}")
-    pricing_source_lower = pricing_source_text.lower()
+        pricing_source_lower = pricing_source_text.lower()
+    elif pricing_source_value:
+        lines.append(f"Pricing Source: {pricing_source_value}")
+        pricing_source_lower = str(pricing_source_value).strip().lower()
+    else:
+        pricing_source_lower = ""
     if red_flags:
         lines.append("")
         lines.append("Red Flags")
@@ -7613,9 +7622,13 @@ def render_quote(
             "Displayed process rows do not add up to the accumulated labor total."
         )
 
-    expected_labor_total = float(totals.get("labor_cost", 0.0) or 0.0)
-    if abs(displayed_process_total - expected_labor_total) >= 0.01:
-        raise AssertionError("bucket sum mismatch")
+    expected_labor_total_raw = None
+    if isinstance(totals, Mapping) and "labor_cost" in totals:
+        expected_labor_total_raw = totals.get("labor_cost")
+    if expected_labor_total_raw is not None:
+        expected_labor_total = float(expected_labor_total_raw or 0.0)
+        if abs(displayed_process_total - expected_labor_total) >= 0.01:
+            raise AssertionError("bucket sum mismatch")
 
     proc_total = displayed_process_total
     row("Total", proc_total, indent="  ")
@@ -9324,6 +9337,20 @@ def estimate_drilling_hours(
         missing_row_messages: set[tuple[str, str, float]] = set()
         debug_summary_entries: dict[str, dict[str, Any]] = {}
 
+        def _update_range(summary_map: dict[str, Any], min_key: str, max_key: str, value: float | None) -> None:
+            try:
+                val = float(value)
+            except (TypeError, ValueError):
+                return
+            if not math.isfinite(val):
+                return
+            current_min = summary_map.get(min_key)
+            current_max = summary_map.get(max_key)
+            if current_min is None or not math.isfinite(float(current_min)) or val < float(current_min):
+                summary_map[min_key] = float(val)
+            if current_max is None or not math.isfinite(float(current_max)) or val > float(current_max):
+                summary_map[max_key] = float(val)
+
         def _build_tool_params(row: Mapping[str, Any]) -> _TimeToolParams:
             key_map = {
                 str(k).strip().lower().replace("-", "_").replace(" ", "_"): k
@@ -9524,6 +9551,7 @@ def estimate_drilling_hours(
                     material_factor=material_cap_val,
                     debug=debug_payload,
                 )
+                overhead_for_calc = per_hole_overhead
             else:
                 peck_rate = _as_float_or_none(per_hole_overhead.peck_penalty_min_per_in_depth)
                 peck_min = None
@@ -9551,6 +9579,7 @@ def estimate_drilling_hours(
                 )
                 if minutes <= 0:
                     continue
+                overhead_for_calc = legacy_overhead
             if minutes <= 0:
                 continue
             try:
@@ -9640,18 +9669,22 @@ def estimate_drilling_hours(
                     if sfm_float is not None and math.isfinite(sfm_float):
                         summary["sfm_sum"] += sfm_float * qty_for_debug
                         summary["sfm_count"] += qty_for_debug
+                        _update_range(summary, "sfm_min", "sfm_max", sfm_float)
                     ipr_float = _as_float_or_none(ipr_val)
                     if ipr_float is not None and math.isfinite(ipr_float):
                         summary["ipr_sum"] += ipr_float * qty_for_debug
                         summary["ipr_count"] += qty_for_debug
+                        _update_range(summary, "ipr_min", "ipr_max", ipr_float)
                     rpm_float = _as_float_or_none(rpm_val)
                     if rpm_float is not None and math.isfinite(rpm_float):
                         summary["rpm_sum"] += rpm_float * qty_for_debug
                         summary["rpm_count"] += qty_for_debug
+                        _update_range(summary, "rpm_min", "rpm_max", rpm_float)
                     ipm_float = _as_float_or_none(ipm_val)
                     if ipm_float is not None and math.isfinite(ipm_float):
                         summary["ipm_sum"] += ipm_float * qty_for_debug
                         summary["ipm_count"] += qty_for_debug
+                        _update_range(summary, "ipm_min", "ipm_max", ipm_float)
                     summary["diameter_weight_sum"] += float(tool_dia_in) * qty_for_debug
                     summary["diameter_qty_sum"] += qty_for_debug
                     diam_min = summary.get("diam_min")
@@ -9712,6 +9745,33 @@ def estimate_drilling_hours(
                         return "-"
                     return fmt.format(float(value))
 
+                def _format_range(
+                    min_val: Any,
+                    max_val: Any,
+                    fmt: str,
+                    *,
+                    tolerance: float = 0.0,
+                ) -> str:
+                    def _coerce(value: Any) -> float | None:
+                        if isinstance(value, (int, float)):
+                            val = float(value)
+                            return val if math.isfinite(val) else None
+                        return None
+
+                    lo = _coerce(min_val)
+                    hi = _coerce(max_val)
+                    if lo is None and hi is None:
+                        return "-"
+                    if lo is None:
+                        lo = hi
+                    if hi is None:
+                        hi = lo
+                    if tolerance and abs(hi - lo) <= tolerance:
+                        hi = lo
+                    if hi == lo:
+                        return fmt.format(lo)
+                    return f"{fmt.format(lo)}–{fmt.format(hi)}"
+
                 sfm_avg = _avg_value("sfm_sum", "sfm_count")
                 ipr_avg = _avg_value("ipr_sum", "ipr_count")
                 rpm_avg = _avg_value("rpm_sum", "rpm_count")
@@ -9719,28 +9779,38 @@ def estimate_drilling_hours(
                 summary["rpm"] = rpm_avg
                 summary["ipm"] = ipm_avg
                 summary["minutes_per_hole"] = minutes_avg
-                sfm_text = _format_avg(sfm_avg, "{:.0f}")
-                ipr_text = _format_avg(ipr_avg, "{:.4f}")
-                rpm_text = _format_avg(rpm_avg, "{:.0f}")
-                ipm_text = _format_avg(ipm_avg, "{:.1f}")
+                sfm_range_text = _format_range(
+                    summary.get("sfm_min"), summary.get("sfm_max"), "{:.0f}", tolerance=0.5
+                )
+                if sfm_range_text == "-":
+                    sfm_range_text = _format_avg(sfm_avg, "{:.0f}")
+                ipr_range_text = _format_range(
+                    summary.get("ipr_min"), summary.get("ipr_max"), "{:.4f}", tolerance=5e-5
+                )
+                if ipr_range_text == "-":
+                    ipr_range_text = _format_avg(ipr_avg, "{:.4f}")
+                rpm_range_text = _format_range(
+                    summary.get("rpm_min"), summary.get("rpm_max"), "{:.0f}", tolerance=1.0
+                )
+                if rpm_range_text == "-":
+                    rpm_range_text = _format_avg(rpm_avg, "{:.0f}")
+                ipm_range_text = _format_range(
+                    summary.get("ipm_min"), summary.get("ipm_max"), "{:.2f}", tolerance=5e-3
+                )
+                if ipm_range_text == "-":
+                    ipm_range_text = _format_avg(ipm_avg, "{:.2f}")
 
                 diam_qty = summary.get("diameter_qty_sum", 0) or 0
-                dia_segment = "Ø-"
+                dia_segment = "Ø -"
                 if diam_qty > 0:
                     diam_sum = summary.get("diameter_weight_sum", 0.0) or 0.0
                     avg_dia = diam_sum / diam_qty if diam_qty else 0.0
                     diam_min = summary.get("diam_min")
                     diam_max = summary.get("diam_max")
-                    if (
-                        isinstance(diam_min, (int, float))
-                        and isinstance(diam_max, (int, float))
-                        and math.isfinite(diam_min)
-                        and math.isfinite(diam_max)
-                        and abs(float(diam_max) - float(diam_min)) > 5e-4
-                    ):
-                        dia_segment = f"Ø{float(diam_min):.3f}-{float(diam_max):.3f}\""
-                    else:
-                        dia_segment = f"Ø{float(avg_dia):.3f}\""
+                    dia_range_text = _format_range(diam_min, diam_max, "{:.3f}\"", tolerance=5e-4)
+                    if dia_range_text == "-":
+                        dia_range_text = f"{float(avg_dia):.3f}\""
+                    dia_segment = f"Ø {dia_range_text}"
 
                 depth_qty = summary.get("depth_qty_sum", 0) or 0
                 depth_text = "-"
@@ -9749,44 +9819,52 @@ def estimate_drilling_hours(
                     avg_depth = depth_sum / depth_qty if depth_qty else 0.0
                     depth_min = summary.get("depth_min")
                     depth_max = summary.get("depth_max")
-                    if (
-                        isinstance(depth_min, (int, float))
-                        and isinstance(depth_max, (int, float))
-                        and math.isfinite(depth_min)
-                        and math.isfinite(depth_max)
-                        and abs(float(depth_max) - float(depth_min)) > 5e-3
-                    ):
-                        depth_text = f"{float(depth_min):.2f}-{float(depth_max):.2f}"
-                    else:
-                        depth_text = f"{float(avg_depth):.2f}"
+                    depth_range_text = _format_range(
+                        depth_min, depth_max, "{:.2f}", tolerance=5e-3
+                    )
+                    if depth_range_text == "-":
+                        depth_range_text = f"{float(avg_depth):.2f}"
+                    depth_text = depth_range_text
 
                 peck_avg = _avg_value("peck_sum", "peck_count")
                 dwell_avg = _avg_value("dwell_sum", "dwell_count")
                 overhead_bits: list[str] = []
-                if peck_avg and math.isfinite(peck_avg) and peck_avg > 0:
-                    overhead_bits.append(f"peck {peck_avg:.2f} min/hole")
                 if dwell_avg and math.isfinite(dwell_avg) and dwell_avg > 0:
                     overhead_bits.append(f"dwell {dwell_avg:.2f} min/hole")
-                if toolchange_total and math.isfinite(toolchange_total) and toolchange_total > 0:
-                    overhead_bits.append(f"toolchange {toolchange_total:.2f} min")
 
                 op_display = str(summary.get("operation") or "drill").title()
                 mat_display = str(summary.get("material") or "material").strip()
                 if not mat_display:
                     mat_display = "material"
 
+                depth_segment = "depth/hole -"
+                if depth_text != "-":
+                    depth_segment = f"depth/hole {depth_text} in"
+
+                peck_text = "-"
+                if peck_avg and math.isfinite(peck_avg) and peck_avg > 0:
+                    peck_text = f"{peck_avg:.2f} min/hole"
+
+                toolchange_text = f"{toolchange_total:.2f} min"
+
+                index_text = "-"
+                if minutes_avg and math.isfinite(minutes_avg) and minutes_avg > 0:
+                    index_text = f"{minutes_avg * 60.0:.1f} s/hole"
+
                 line_parts = [
                     "Drill calc → ",
                     f"op={op_display}, mat={mat_display}, ",
-                    f"row=SFM:{sfm_text} IPR:{ipr_text}; ",
-                    f"RPM:{rpm_text} IPM:{ipm_text}; ",
-                    f"{dia_segment}; depth/hole: {depth_text} in; ",
-                    f"holes: {qty_total}; ",
-                    f"min/hole: {minutes_avg:.2f}; ",
+                    f"SFM={sfm_range_text}, IPR={ipr_range_text}; ",
+                    f"RPM {rpm_range_text} IPM {ipm_range_text}; ",
+                    f"{dia_segment}; {depth_segment}; ",
+                    f"holes {qty_total}; ",
+                    f"index {index_text}; ",
+                    f"peck {peck_text}; ",
+                    f"toolchange {toolchange_text}; ",
                 ]
                 if overhead_bits:
                     line_parts.append("overhead: " + ", ".join(overhead_bits) + "; ")
-                line_parts.append(f"total hr: {total_hours:.2f}.")
+                line_parts.append(f"total hr {total_hours:.2f}.")
                 debug_lines.append("".join(line_parts))
         if missing_row_messages and warnings is not None:
             for op_display, material_display, dia_val in sorted(missing_row_messages):
