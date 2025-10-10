@@ -22548,10 +22548,10 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
 
 if __name__ == "__main__":
     try:
-        runtime_info = describe_runtime_environment()
+        sys.exit(_main())
     except Exception as exc:  # pragma: no cover - smoke guard
-        print(jdump({"ok": False, "error": str(exc)}))
+        try:
+            print(jdump({"ok": False, "error": str(exc)}))
+        except Exception:
+            pass
         sys.exit(1)
-    else:
-        print(jdump({"ok": True, "env": runtime_info}))
-        sys.exit(0)
