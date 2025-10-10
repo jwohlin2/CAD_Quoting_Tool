@@ -1,6 +1,7 @@
 """Lightweight dictionary helpers used across the quoting tool."""
 from __future__ import annotations
 
+import inspect
 import json
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, is_dataclass
@@ -94,6 +95,14 @@ def json_safe_copy(
             return obj.isoformat()
         except Exception:
             return str(obj)
+
+    if (
+        inspect.ismethod(obj)
+        or inspect.isfunction(obj)
+        or inspect.isbuiltin(obj)
+        or inspect.ismethoddescriptor(obj)
+    ):
+        return _callable_label(obj)
 
     if callable(obj):
         return _callable_label(obj)
