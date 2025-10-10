@@ -202,6 +202,7 @@ from cad_quoter.domain_models import (
     normalize_material_key as _normalize_lookup_key,
 )
 from cad_quoter.coerce import to_float, to_int
+from cad_quoter.utils import sdict
 from cad_quoter.pricing import (
     LB_PER_KG,
     PricingEngine,
@@ -5522,7 +5523,7 @@ def _display_bucket_label(
     canon_key: str,
     label_overrides: Mapping[str, str] | None = None,
 ) -> str:
-    overrides = {str(k): str(v) for k, v in (label_overrides or {}).items()}
+    overrides = sdict(label_overrides)
     if canon_key in overrides:
         return overrides[canon_key]
     return _process_label(canon_key)

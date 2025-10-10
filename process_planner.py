@@ -9,6 +9,8 @@ supplied in the Composidie EDM and grinding reference playbook.
 
 from typing import Any, Dict, Optional
 
+from cad_quoter.utils import compact_dict
+
 Op = Dict[str, Any]
 Plan = Dict[str, Any]
 
@@ -61,7 +63,7 @@ def needs_wedm_for_windows(
 
 
 def add(plan: Plan, op: str, **params) -> None:
-    plan["ops"].append({"op": op, **({k: v for k, v in params.items() if v is not None})})
+    plan["ops"].append({"op": op, **compact_dict(params)})
 
 
 _DIRECT_KEYS = (
