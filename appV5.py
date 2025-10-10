@@ -26,7 +26,7 @@ import tkinter as tk
 import re
 from collections import Counter
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, replace, fields as dataclass_fields
 from fractions import Fraction
 from pathlib import Path
 
@@ -240,6 +240,7 @@ from cad_quoter.domain_models import (
 )
 from cad_quoter.coerce import to_float, to_int
 from cad_quoter.utils import compact_dict, sdict
+from cad_quoter.utils.text import _match_items_contains
 from cad_quoter.pricing import (
     LB_PER_KG,
     PricingEngine,
@@ -300,6 +301,15 @@ _DEFAULT_MATERIAL_DENSITY_G_CC = MATERIAL_DENSITY_G_CC_BY_KEY.get(
     DEFAULT_MATERIAL_KEY,
     7.85,
 )
+
+try:
+    _TIME_OVERHEAD_FIELD_NAMES = {
+        field.name for field in dataclass_fields(_TimeOverheadParams)
+    }
+except Exception:  # pragma: no cover - defensive against non-dataclass implementations
+    _TIME_OVERHEAD_FIELD_NAMES = set()
+
+_TIME_OVERHEAD_SUPPORTS_INDEX_SEC = "index_sec_per_hole" in _TIME_OVERHEAD_FIELD_NAMES
 
 try:
     from process_planner import (
@@ -9129,13 +9139,17 @@ def _drill_overhead_from_params(params: Mapping[str, Any] | None) -> _TimeOverhe
         if isinstance(params, Mapping)
         else None
     )
-    return _TimeOverheadParams(
-        toolchange_min=float(toolchange) if toolchange and toolchange >= 0 else 0.5,
-        approach_retract_in=float(approach) if approach and approach >= 0 else 0.25,
-        peck_penalty_min_per_in_depth=float(peck) if peck and peck >= 0 else 0.03,
-        dwell_min=float(dwell) if dwell and dwell >= 0 else None,
-        index_sec_per_hole=float(index_sec) if index_sec is not None and index_sec >= 0 else None,
-    )
+    overhead_kwargs = {
+        "toolchange_min": float(toolchange) if toolchange and toolchange >= 0 else 0.5,
+        "approach_retract_in": float(approach) if approach and approach >= 0 else 0.25,
+        "peck_penalty_min_per_in_depth": float(peck) if peck and peck >= 0 else 0.03,
+        "dwell_min": float(dwell) if dwell and dwell >= 0 else None,
+    }
+    if _TIME_OVERHEAD_SUPPORTS_INDEX_SEC:
+        overhead_kwargs["index_sec_per_hole"] = (
+            float(index_sec) if index_sec is not None and index_sec >= 0 else None
+        )
+    return _TimeOverheadParams(**overhead_kwargs)
 
 
 def _clean_hole_groups(raw: Any) -> list[dict[str, Any]] | None:
@@ -9678,25 +9692,34 @@ def estimate_drilling_hours(
                 if peck_rate and depth_in and depth_in > 0:
                     peck_min = float(peck_rate) * float(depth_in)
                 dwell_val = to_float(overhead_for_calc.dwell_min)
-                legacy_overhead = _TimeOverheadParams(
-                    toolchange_min=0.0,
-                    approach_retract_in=overhead_for_calc.approach_retract_in,
-                    peck_penalty_min_per_in_depth=None,
-                    dwell_min=dwell_val,
-                    peck_min=peck_min,
-                    index_sec_per_hole=overhead_for_calc.index_sec_per_hole,
-                )
+                legacy_kwargs = {
+                    "toolchange_min": 0.0,
+                    "approach_retract_in": overhead_for_calc.approach_retract_in,
+                    "peck_penalty_min_per_in_depth": None,
+                    "dwell_min": dwell_val,
+                    "peck_min": peck_min,
+                }
+                if _TIME_OVERHEAD_SUPPORTS_INDEX_SEC:
+                    legacy_kwargs["index_sec_per_hole"] = getattr(
+                        overhead_for_calc,
+                        "index_sec_per_hole",
+                        None,
+                    )
+                legacy_overhead = _TimeOverheadParams(**legacy_kwargs)
                 overhead_for_calc = legacy_overhead
                 tool_params = _TimeToolParams(teeth_z=1)
                 if debug_lines is not None:
                     debug_payload = {}
-                effective_index_sec = to_float(overhead_for_calc.index_sec_per_hole)
+                effective_index_sec = to_float(
+                    getattr(overhead_for_calc, "index_sec_per_hole", None)
+                )
                 if effective_index_sec is None or not math.isfinite(effective_index_sec):
                     effective_index_sec = _default_drill_index_seconds(op_name)
-                legacy_overhead = replace(
-                    legacy_overhead,
-                    index_sec_per_hole=effective_index_sec,
-                )
+                if _TIME_OVERHEAD_SUPPORTS_INDEX_SEC:
+                    legacy_overhead = replace(
+                        legacy_overhead,
+                        index_sec_per_hole=effective_index_sec,
+                    )
                 overhead_for_calc = legacy_overhead
                 minutes = _estimate_time_min(
                     geom=geom,
@@ -9934,7 +9957,7 @@ def estimate_drilling_hours(
                         )
                     if index_min_val is None:
                         index_sec_val = to_float(
-                            overhead_for_calc.index_sec_per_hole
+                            getattr(overhead_for_calc, "index_sec_per_hole", None)
                         )
                         if index_sec_val is not None and index_sec_val > 0:
                             index_min_val = float(index_sec_val) / 60.0
