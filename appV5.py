@@ -974,7 +974,6 @@ def find_planar_pockets(shape) -> List[Dict[str, Any]]:
 from cad_quoter.domain import QuoteState
 
 
-
 def _as_float_or_none(value: Any) -> float | None:
     try:
         if isinstance(value, (int, float)):
