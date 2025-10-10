@@ -6116,6 +6116,7 @@ def render_quote(
 
     # ---- header --------------------------------------------------------------
     lines: list[str] = []
+    hour_summary_entries: dict[str, tuple[float, bool]] = {}
     ui_vars = result.get("ui_vars") or {}
     if not isinstance(ui_vars, dict):
         ui_vars = {}
@@ -6175,6 +6176,11 @@ def render_quote(
     total_labor_row_index = len(lines) - 1
     row("Total Direct Costs:", float(totals.get("direct_costs", 0.0)))
     pricing_source_value = breakdown.get("pricing_source")
+    pricing_source_text = str(
+        result.get("pricing_source_text")
+        or breakdown.get("pricing_source_text")
+        or ""
+    )
     # If planner produced hours, treat source as planner for display consistency.
     if not pricing_source_value:
         hs_entries = dict(hour_summary_entries or {})
@@ -7620,7 +7626,7 @@ def render_quote(
     proc_total = displayed_process_total
     row("Total", proc_total, indent="  ")
 
-    hour_summary_entries: dict[str, tuple[float, bool]] = {}
+    hour_summary_entries.clear()
 
     def _record_hour_entry(label: str, value: float, *, include_in_total: bool = True) -> None:
         try:
