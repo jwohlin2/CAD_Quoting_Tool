@@ -635,7 +635,17 @@ except ImportError:
 
 BRep_Tool = cast(_BRepToolProto, BRep_Tool)
 TopoDS = cast(_TopoDSProto, TopoDS)
-BRepTools = cast(Any, BRepTools)
+try:
+    BRepTools = cast(Any, BRepTools)
+except NameError:
+    class _MissingBRepTools:
+        def __getattr__(self, item):
+            raise ImportError(
+                "OCCT bindings are required for geometry operations. "
+                "Please install pythonocc-core or the OCP wheels."
+            )
+
+    BRepTools = cast(Any, _MissingBRepTools())
 
 try:
     from geo_read_more import build_geo_from_dxf as build_geo_from_dxf_path
@@ -703,6 +713,30 @@ upsert_var_row = _export("upsert_var_row")
 get_dwg_converter_path = _export("get_dwg_converter_path")
 have_dwg_support = _export("have_dwg_support")
 get_import_diagnostics_text = _export("get_import_diagnostics_text")
+
+# Reuse shared OpenCascade compatibility helpers when available.
+linear_properties = _export("linear_properties")
+map_shapes_and_ancestors = _export("map_shapes_and_ancestors")
+ensure_face = _export("ensure_face")
+to_edge = _export("to_edge")
+to_shell = _export("to_shell")
+to_solid = _export("to_solid")
+map_size = _export("map_size")
+list_iter = _export("list_iter")
+
+
+def _shape_is_null(shape: Any) -> bool:
+    """Return True if the passed shape reports itself as null."""
+
+    if shape is None:
+        return True
+    is_null = getattr(shape, "IsNull", None)
+    if not callable(is_null):
+        raise AttributeError("Object does not expose a callable IsNull() method")
+    try:
+        return bool(is_null())
+    except Exception:
+        return True
 
 _geometry_require_ezdxf = getattr(geometry, "require_ezdxf", None)
 _HAS_TRIMESH = getattr(geometry, "HAS_TRIMESH", False)
@@ -3198,239 +3232,6 @@ def face_surface(face_like: Any) -> tuple[Any, Any | None]:
     if hasattr(s, "Surface"):
         s = cast(Any, s).Surface()  # unwrap handle
     return s, loc
-
-
-
-# ---------- OCCT compat (OCP or pythonocc-core) ----------
-# ---------- Robust casters that work on OCP and pythonocc ----------
-# Lock topods casters to the active backend
-if STACK == "ocp":
-
-    def _TO_EDGE(s):
-        if type(s).__name__ in ("TopoDS_Edge", "Edge"):
-            return s
-        if hasattr(TopoDS, "Edge_s"):
-            return TopoDS.Edge_s(s)
-        try:
-            from OCP.TopoDS import topods as _topods  # type: ignore[import]
-            return _topods.Edge(s)
-        except Exception as e:
-            raise TypeError(f"Cannot cast to Edge from {type(s).__name__}") from e
-
-    def _TO_SOLID(s):
-        if type(s).__name__ in ("TopoDS_Solid", "Solid"):
-            return s
-        if hasattr(TopoDS, "Solid_s"):
-            return TopoDS.Solid_s(s)
-        from OCP.TopoDS import topods as _topods  # type: ignore[import]
-        return _topods.Solid(s)
-
-    def _TO_SHELL(s):
-        if type(s).__name__ in ("TopoDS_Shell", "Shell"):
-            return s
-        if hasattr(TopoDS, "Shell_s"):
-            return TopoDS.Shell_s(s)
-        from OCP.TopoDS import topods as _topods  # type: ignore[import]
-        return _topods.Shell(s)
-else:
-    # Resolve within OCC.Core only
-    _occ_topods_module = _import_optional("OCC.Core.TopoDS")
-    if _occ_topods_module is None:
-        raise ImportError("OCC.Core.TopoDS is required for pythonocc backend")
-
-    def _resolve_topods_callable(*names: str):
-        for candidate in names:
-            attr = getattr(_occ_topods_module, candidate, None)
-            if attr:
-                return attr
-        nested = getattr(_occ_topods_module, "topods", None)
-        if nested is not None:
-            for candidate in names:
-                attr = getattr(nested, candidate, None)
-                if attr:
-                    return attr
-        raise AttributeError(
-            f"None of {names!r} are available on OCC.Core.TopoDS for casting"
-        )
-
-    _TO_EDGE = _resolve_topods_callable("topods_Edge", "Edge")
-    _TO_SOLID = _resolve_topods_callable("topods_Solid", "Solid")
-    _TO_SHELL = _resolve_topods_callable("topods_Shell", "Shell")
-
-# Type guards
-def _is_named(obj, names: tuple[str, ...]) -> bool:
-    try:
-        return type(obj).__name__ in names
-    except Exception:
-        return False
-
-def _unwrap_value(obj):
-    # Some containers return nodes with .Value()
-    return obj.Value() if hasattr(obj, "Value") and callable(obj.Value) else obj
-
-
-def _shape_is_null(shape: Any) -> bool:
-    """Return True if the passed shape reports itself as null."""
-
-    if shape is None:
-        return True
-    is_null = getattr(shape, "IsNull", None)
-    if not callable(is_null):
-        raise AttributeError("Object does not expose a callable IsNull() method")
-    try:
-        return bool(is_null())
-    except Exception:
-        return True
-
-
-def ensure_shape(obj):
-    obj = _unwrap_value(obj)
-    if obj is None:
-        raise TypeError("Expected TopoDS_Shape, got None")
-    is_null = getattr(obj, "IsNull", None)
-    if callable(is_null) and is_null():
-        raise TypeError("Expected non-null TopoDS_Shape")
-    return obj
-
-# Safe casters: no-ops if already cast; unwrap list nodes; check kind
-# Choose stack
-_BRepGProp_mod = None
-STACK_GPROP = "pythonocc"
-_ocp_brepgprop = _import_optional("OCP.BRepGProp")
-if _ocp_brepgprop is not None and hasattr(_ocp_brepgprop, "BRepGProp"):
-    _BRepGProp_mod = getattr(_ocp_brepgprop, "BRepGProp")
-    STACK_GPROP = "ocp"
-else:
-    _occ_brepgprop = _import_optional("OCC.Core.BRepGProp")
-    if _occ_brepgprop is None:
-        raise ImportError("OCC.Core.BRepGProp is required for pythonocc backend")
-    if hasattr(_occ_brepgprop, "BRepGProp"):
-        _BRepGProp_mod = getattr(_occ_brepgprop, "BRepGProp")
-    else:
-        from types import SimpleNamespace
-
-        from OCC.Core.BRepGProp import (
-            brepgprop_LinearProperties as _lp,  # type: ignore[attr-defined]
-        )
-        from OCC.Core.BRepGProp import (
-            brepgprop_SurfaceProperties as _sp,  # type: ignore[attr-defined]
-        )
-        from OCC.Core.BRepGProp import (
-            brepgprop_VolumeProperties as _vp,  # type: ignore[attr-defined]
-        )
-        _BRepGProp_mod = SimpleNamespace(
-            LinearProperties=getattr(_occ_brepgprop, "brepgprop_LinearProperties"),
-            SurfaceProperties=getattr(_occ_brepgprop, "brepgprop_SurfaceProperties"),
-            VolumeProperties=getattr(_occ_brepgprop, "brepgprop_VolumeProperties"),
-        )
-
-    def _to_edge_occ(s):
-        try:
-            from OCC.Core.TopoDS import topods_Edge as _fn  # type: ignore[attr-defined]
-        except Exception:
-            from OCC.Core.TopoDS import Edge as _fn  # type: ignore[attr-defined]
-        return _fn(s)
-
-    _TO_EDGE = _to_edge_occ
-
-# Resolve topods casters across bindings
-
-
-# ---- modern wrappers (no deprecation warnings)
-# ---- modern wrappers (no deprecation warnings)
-def linear_properties(edge, gprops):
-    """Linear properties across OCP/pythonocc names."""
-    fn = getattr(_BRepGProp_mod, "LinearProperties", None)
-    if fn is None:
-        fn = getattr(_BRepGProp_mod, "LinearProperties_s", None)
-    if fn is None:
-        try:
-            from OCC.Core.BRepGProp import brepgprop_LinearProperties as _old  # type: ignore
-            return _old(edge, gprops)
-        except Exception:
-            raise
-    return fn(edge, gprops)
-
-def map_shapes_and_ancestors(root_shape, sub_enum, anc_enum) -> TopToolsIndexedDataMap:
-    """Return TopTools_IndexedDataMapOfShapeListOfShape for (sub → ancestors)."""
-    # Ensure we pass a *Shape*, not a Face
-    if root_shape is None:
-        raise TypeError("root_shape is None")
-    if not hasattr(root_shape, "IsNull") or _shape_is_null(root_shape):
-        # If someone handed us a Face, try to grab its TShape parent; else fail.
-        # Safer: require a real TopoDS_Shape from STEP/IGES root.
-        pass
-
-    amap = cast(
-        TopToolsIndexedDataMap,
-        TopTools_IndexedDataMapOfShapeListOfShape(),  # type: ignore[call-overload]
-    )
-    # static/instance variants across wheels
-    fn = getattr(TopExp, "MapShapesAndAncestors", None) or getattr(TopExp, "MapShapesAndAncestors_s", None)
-    if fn is None:
-        raise RuntimeError("TopExp.MapShapesAndAncestors not available in this OCP wheel")
-    fn(root_shape, sub_enum, anc_enum, amap)
-    return amap
-
-# modern topods casters: topods.Edge(shape) / topods.Face(shape)
-# ---- Robust topods casters that are no-ops for already-cast objects ----
-def _is_instance(obj, qualnames):
-    """True if obj.__class__.__name__ matches any in qualnames across OCP/OCC."""
-    try:
-        name = type(obj).__name__
-    except Exception:
-        return False
-    return name in qualnames  # e.g. ["TopoDS_Face", "Face"]
-
-def ensure_face(obj: Any) -> TopoDSFaceT:
-    if obj is None:
-        raise TypeError("Expected a face, got None")
-    face_type = cast(type, TopoDSFaceT)
-    if isinstance(obj, face_type) or type(obj).__name__ == "TopoDS_Face":
-        return obj
-    st = obj.ShapeType() if hasattr(obj, "ShapeType") else None
-    if st == TopAbs_FACE:
-        return FACE_OF(obj)
-    raise TypeError(f"Not a face: {type(obj).__name__}")
-def to_edge(s):
-    if _is_instance(s, ["TopoDS_Edge", "Edge"]):
-        return s
-    return _TO_EDGE(s)
-
-def to_solid(s):
-    if _is_instance(s, ["TopoDS_Solid", "Solid"]):
-        return s
-    return _TO_SOLID(s)
-
-def to_shell(s):
-    if _is_instance(s, ["TopoDS_Shell", "Shell"]):
-        return s
-    return _TO_SHELL(s)
-
-# Generic size helpers so we never call Extent() on lists/maps again
-def map_size(m):
-    for name in ("Size", "Extent", "Length"):
-        if hasattr(m, name):
-            return getattr(m, name)()
-    raise AttributeError(f"No size method on {type(m)}")
-
-def list_iter(lst):
-    """
-    Iterate TopTools_ListOfShape across bindings.
-    Use cbegin()/More()/Value()/Next() if available; otherwise fall back to python list conversion.
-    """
-    # OCP + pythonocc expose cbegin iterator on TopTools_ListOfShape
-    if hasattr(lst, "cbegin"):
-        it = lst.cbegin()
-        while it.More():
-            yield it.Value()
-            it.Next()
-    else:
-        # last-resort: try Python iteration (some wheels support it)
-        for v in list(lst):
-            yield v
-# ---------- end compat ----------
-
 
 # ---- tiny helpers you can use elsewhere --------------------------------------
 def require_ezdxf():
