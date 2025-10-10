@@ -12476,7 +12476,18 @@ def compute_quote_from_df(
     planner_drilling_override: dict[str, float] | None = None
     drill_estimator_hours_for_planner: float = 0.0
     used_planner = False
-    planner_meta_keys: set[str] = set()
+    _planner_meta_tracker: dict[str, set[str]] = {"keys": set()}
+
+    def _get_planner_meta_keys() -> set[str]:
+        keys = _planner_meta_tracker.get("keys")
+        if isinstance(keys, set):
+            return keys
+        keys = set()
+        _planner_meta_tracker["keys"] = keys
+        return keys
+
+    def _reset_planner_meta_keys() -> None:
+        _planner_meta_tracker["keys"] = set()
 
     red_flag_messages: list[str] = []
     # Historically this function exposed a ``red_flags`` list.  Some call
@@ -12499,14 +12510,12 @@ def compute_quote_from_df(
     def _planner_meta_add(key: str) -> None:
         """Safely add planner-generated process keys to the tracking set."""
 
-        nonlocal planner_meta_keys
-
-        if not isinstance(planner_meta_keys, set):
-            planner_meta_keys = set()
-
         key_norm = str(key or "").strip()
-        if key_norm:
-            planner_meta_keys.add(key_norm)
+        if not key_norm:
+            return
+
+        planner_keys = _get_planner_meta_keys()
+        planner_keys.add(key_norm)
 
     force_legacy_pricing = False
 
@@ -13219,13 +13228,11 @@ def compute_quote_from_df(
         float(meta.get("hr", 0.0) or 0.0) > 0.0 for meta in legacy_process_meta.values()
     )
 
-    planner_meta_keys: set[str] = set()
-
     meta_lookup: dict[str, dict[str, Any]] = {
         key: dict(value) for key, value in process_meta.items() if isinstance(value, _MappingABC)
     }
 
-    planner_meta_keys: set[str] = set()
+    _reset_planner_meta_keys()
     if not used_planner:
         for key, value in legacy_process_costs.items():
             process_costs[key] = float(value)
@@ -13252,12 +13259,12 @@ def compute_quote_from_df(
         meta["base_extra"] = process_costs.get(key, 0.0) - hr_val * rate_val
 
     # Track process keys populated by the planner so we don't double-count
-    planner_meta_keys: set[str] = set()
     allowed_process_hour_keys: set[str] = set()
+    planner_keys_snapshot = _get_planner_meta_keys()
     for key, meta in process_meta.items():
         if not isinstance(meta, dict):
             continue
-        if used_planner and key in legacy_per_process_keys and key not in planner_meta_keys:
+        if used_planner and key in legacy_per_process_keys and key not in planner_keys_snapshot:
             continue
         allowed_process_hour_keys.add(key)
 
@@ -14511,13 +14518,14 @@ def compute_quote_from_df(
         meta_lookup = {
             key: dict(value) for key, value in process_meta.items() if isinstance(value, _MappingABC)
         }
+        planner_keys_snapshot = _get_planner_meta_keys()
         allowed_process_hour_keys = {
             key
-            for key in planner_meta_keys
+            for key in planner_keys_snapshot
             if key not in legacy_per_process_keys or key.startswith("planner_")
         }
         if not allowed_process_hour_keys:
-            allowed_process_hour_keys = set(planner_meta_keys)
+            allowed_process_hour_keys = set(planner_keys_snapshot)
         if "drilling" in legacy_process_meta:
             allowed_process_hour_keys.add("drilling")
         process_hours_baseline = {
