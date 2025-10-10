@@ -986,60 +986,6 @@ def _holes_scrap_fraction(geo_ctx: Mapping[str, Any] | None, *, cap: float = 0.2
     return min(cap, float(frac))
 
 
-def _holes_removed_mass_g(geo_ctx: Mapping[str, Any] | None) -> float | None:
-    """
-    Optional: estimate grams removed by (through) holes = Σ(πr^2 * thickness) * density.
-    Uses thickness_mm from geo_ctx and material density map; safe to skip if unknown.
-    """
-
-    if not isinstance(geo_ctx, Mapping):
-        return None
-    # thickness
-    thickness_mm = None
-    for key in ("thickness_mm", ("geo", "thickness_mm")):
-        raw: Any | None = None
-        try:
-            if isinstance(key, tuple):
-                nested = geo_ctx.get(key[0])
-                if isinstance(nested, Mapping):
-                    raw = nested.get(key[1])
-            else:
-                raw = geo_ctx.get(key)
-        except Exception:
-            raw = None
-        if raw in (None, ""):
-            continue
-        try:
-            thickness_mm = float(raw)
-        except (TypeError, ValueError):
-            thickness_mm = None
-        if thickness_mm and thickness_mm > 0:
-            break
-    if not thickness_mm or thickness_mm <= 0:
-        return None
-
-    diams = _iter_hole_diams_mm(geo_ctx)
-    if not diams:
-        return None
-    vol_mm3 = 0.0
-    for d in diams:
-        r = 0.5 * float(d)
-        vol_mm3 += math.pi * r * r * float(thickness_mm)
-
-    # material density lookup (g/cc)
-    name = str((geo_ctx.get("material") or "")).strip().lower()
-    key = _normalize_lookup_key(name) if name else None
-    dens = None
-    if key and key in MATERIAL_DENSITY_G_CC_BY_KEY:
-        dens = MATERIAL_DENSITY_G_CC_BY_KEY[key]
-    if not dens and name:
-        dens = MATERIAL_DENSITY_G_CC_BY_KEYWORD.get(name)
-    if not dens:
-        dens = 7.85  # steel-ish default
-    grams = (vol_mm3 / 1000.0) * float(dens)
-    return grams if grams > 0 else None
-
-
 def normalize_scrap_pct(val: Any, cap: float = 0.25) -> float:
     """Return a clamped scrap fraction within ``[0, cap]``.
 
