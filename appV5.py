@@ -23,9 +23,7 @@ import re
 import time
 import typing
 from collections import Counter
-from collections.abc import Mapping as _CABCM
-
-Mapping = _CABCM
+from collections.abc import Mapping
 from dataclasses import (
     asdict,
     dataclass,
@@ -1021,7 +1019,7 @@ except Exception:
     build_geo_from_dxf_path = None  # type: ignore[assignment]
 
 
-_MappingABC = _CABCM
+_MappingABC = Mapping
 
 _build_geo_from_dxf_hook: Optional[Callable[[str], Dict[str, Any]]] = None
 
@@ -1384,31 +1382,34 @@ def _as_float_or_none(value: Any) -> float | None:
     return None
 
 
-def coerce_bounds(bounds: Mapping | None) -> dict[str, Any]:
+def coerce_bounds(bounds: Mapping[str, Any] | None) -> dict[str, Any]:
     """Normalize LLM bounds into a canonical structure."""
 
-    bounds = bounds or {}
+    if bounds is None:
+        bounds_map: Mapping[str, Any] = {}
+    else:
+        bounds_map = bounds
 
-    mult_min = _as_float_or_none(bounds.get("mult_min"))
+    mult_min = _as_float_or_none(bounds_map.get("mult_min"))
     if mult_min is None:
         mult_min = LLM_MULTIPLIER_MIN
     else:
         mult_min = max(LLM_MULTIPLIER_MIN, float(mult_min))
 
-    mult_max = _as_float_or_none(bounds.get("mult_max"))
+    mult_max = _as_float_or_none(bounds_map.get("mult_max"))
     if mult_max is None:
         mult_max = LLM_MULTIPLIER_MAX
     else:
         mult_max = min(LLM_MULTIPLIER_MAX, float(mult_max))
     mult_max = max(mult_max, mult_min)
 
-    adder_min = _as_float_or_none(bounds.get("adder_min_hr"))
+    adder_min = _as_float_or_none(bounds_map.get("adder_min_hr"))
     if adder_min is None:
-        adder_min = _as_float_or_none(bounds.get("add_hr_min"))
+        adder_min = _as_float_or_none(bounds_map.get("add_hr_min"))
     adder_min = max(0.0, float(adder_min)) if adder_min is not None else 0.0
 
-    adder_max = _as_float_or_none(bounds.get("adder_max_hr"))
-    add_hr_cap = _as_float_or_none(bounds.get("add_hr_max"))
+    adder_max = _as_float_or_none(bounds_map.get("adder_max_hr"))
+    add_hr_cap = _as_float_or_none(bounds_map.get("add_hr_max"))
     if adder_max is None and add_hr_cap is not None:
         adder_max = float(add_hr_cap)
     elif adder_max is not None and add_hr_cap is not None:
@@ -1417,14 +1418,14 @@ def coerce_bounds(bounds: Mapping | None) -> dict[str, Any]:
         adder_max = LLM_ADDER_MAX
     adder_max = max(adder_min, min(LLM_ADDER_MAX, float(adder_max)))
 
-    scrap_min = _as_float_or_none(bounds.get("scrap_min"))
+    scrap_min = _as_float_or_none(bounds_map.get("scrap_min"))
     scrap_min = max(0.0, float(scrap_min)) if scrap_min is not None else 0.0
 
-    scrap_max = _as_float_or_none(bounds.get("scrap_max"))
+    scrap_max = _as_float_or_none(bounds_map.get("scrap_max"))
     scrap_max = float(scrap_max) if scrap_max is not None else 0.25
     scrap_max = max(scrap_max, scrap_min)
 
-    bucket_caps_raw = bounds.get("adder_bucket_max") or bounds.get("add_hr_bucket_max")
+    bucket_caps_raw = bounds_map.get("adder_bucket_max") or bounds_map.get("add_hr_bucket_max")
     bucket_caps: dict[str, float] = {}
     if isinstance(bucket_caps_raw, Mapping):
         for key, raw in bucket_caps_raw.items():
