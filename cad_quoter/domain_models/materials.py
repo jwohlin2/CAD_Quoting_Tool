@@ -47,7 +47,7 @@ MATERIAL_DROPDOWN_OPTIONS = [
     "Other (enter custom price)",
 ]
 
-DEFAULT_MATERIAL_DISPLAY = "Steel"
+DEFAULT_MATERIAL_DISPLAY = "Aluminum MIC6"
 DEFAULT_MATERIAL_KEY = normalize_material_key(DEFAULT_MATERIAL_DISPLAY)
 
 _MATERIAL_ADDITIONAL_KEYWORDS: Dict[str, Set[str]] = {
