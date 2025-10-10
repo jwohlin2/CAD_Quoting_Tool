@@ -279,6 +279,30 @@ def resolve_planner(
     return used_planner, planner_mode
 
 
+def _count_recognized_ops(plan_summary: Mapping[str, Any] | None) -> int:
+    """Return a conservative count of recognized planner operations."""
+
+    if not isinstance(plan_summary, Mapping):
+        return 0
+    try:
+        raw_ops = plan_summary.get("ops")
+    except Exception:
+        return 0
+    if not isinstance(raw_ops, list):
+        return 0
+    count = 0
+    for entry in raw_ops:
+        if isinstance(entry, Mapping):
+            count += 1
+        elif entry is not None:
+            try:
+                if bool(entry):
+                    count += 1
+            except Exception:
+                count += 1
+    return count
+
+
 def _normalize_item_text(value: Any) -> str:
     """Return a normalized key for matching variables rows."""
 
@@ -409,15 +433,16 @@ except Exception:  # pragma: no cover - fallback when optional import unavailabl
             return True
         return _geo_mentions_outsourced(geo_context)
 try:
-    from cad_quoter.utils.text import _match_items_contains
+    from cad_quoter.utils.text import (
+        _match_items_contains as _imported_match_items_contains,
+    )
 except Exception:  # pragma: no cover - defensive fallback for optional import paths
     _match_items_contains = _fallback_match_items_contains  # type: ignore[assignment]
 else:
-    _match_items_contains = (
-        _imported_match_items_contains
-        if callable(_imported_match_items_contains)
-        else _fallback_match_items_contains
-    )
+    if callable(_imported_match_items_contains):
+        _match_items_contains = _imported_match_items_contains
+    else:
+        _match_items_contains = _fallback_match_items_contains
 from cad_quoter.pricing import (
     LB_PER_KG,
     PricingEngine,
@@ -14091,48 +14116,54 @@ def compute_quote_from_df(
             float(val) > 0.0 for val in (planner_machine_cost_total, planner_labor_cost_total, planner_total_minutes)
         )
 
-        planner_signals = {
-            "line_items": planner_line_items,
-            "pricing_result": planner_pricing_result,
-            "recognized_line_items": recognized_line_items,
-            "totals_present": planner_totals_present,
-        }
+    if recognized_line_items <= 0:
+        plan_summary = process_plan_summary.get("plan") if isinstance(process_plan_summary, dict) else None
+        recognized_from_plan = _count_recognized_ops(plan_summary)
+        if recognized_from_plan > 0:
+            recognized_line_items = recognized_from_plan
 
-        used_planner, planner_mode = resolve_planner(
-            params=params if isinstance(params, _MappingABC) else None,
-            signals=planner_signals,
-        )
-        force_planner_for_recognized = recognized_line_items > 0
+    planner_signals = {
+        "line_items": planner_line_items,
+        "pricing_result": planner_pricing_result,
+        "recognized_line_items": recognized_line_items,
+        "totals_present": planner_totals_present,
+    }
 
-        if force_planner_for_recognized:
-            used_planner = True
+    used_planner, planner_mode = resolve_planner(
+        params=params if isinstance(params, _MappingABC) else None,
+        signals=planner_signals,
+    )
+    force_planner_for_recognized = recognized_line_items > 0
 
-        if recognized_line_items == 0:
-            if planner_totals_present and planner_total_minutes > 0.0:
-                if planner_machine_cost_total > 0.0 and planner_labor_cost_total <= 0.0:
-                    machine_minutes = planner_total_minutes
-                elif planner_labor_cost_total > 0.0 and planner_machine_cost_total <= 0.0:
-                    labor_minutes = planner_total_minutes
-            if FORCE_PLANNER:
-                raise ConfigError("FORCE_PLANNER enabled but planner pricing returned no line items")
-            if planner_pricing_error is None:
-                planner_pricing_error = "Planner pricing returned no line items"
+    if force_planner_for_recognized:
+        used_planner = True
 
-        if (not used_planner) and planner_drill_minutes and planner_drill_minutes > 0.0:
-            planner_drill_hr = planner_drill_minutes / 60.0
-            if planner_drill_hr > 0.0 and drill_hr > 10.0 * planner_drill_hr:
-                _record_red_flag("Legacy drilling estimate outlier — using planner drilling hours.")
-                drill_hr = planner_drill_hr
-                baseline_drill_hr = max(existing_drill_hr, float(drill_hr or 0.0))
-                baseline_drill_hr = round(baseline_drill_hr, 3)
-                drill_meta = legacy_process_meta.setdefault("drilling", {})
-                drill_meta["hr"] = baseline_drill_hr
-                drill_meta.setdefault("rate", drill_rate)
-                legacy_process_costs["drilling"] = baseline_drill_hr * drill_rate
-                process_costs["drilling"] = legacy_process_costs["drilling"]
-                process_costs_baseline["drilling"] = legacy_process_costs["drilling"]
-                process_hours_baseline["drilling"] = baseline_drill_hr
-                features["drilling_hr_baseline"] = baseline_drill_hr
+    if recognized_line_items == 0:
+        if planner_totals_present and planner_total_minutes > 0.0:
+            if planner_machine_cost_total > 0.0 and planner_labor_cost_total <= 0.0:
+                machine_minutes = planner_total_minutes
+            elif planner_labor_cost_total > 0.0 and planner_machine_cost_total <= 0.0:
+                labor_minutes = planner_total_minutes
+        if FORCE_PLANNER:
+            raise ConfigError("FORCE_PLANNER enabled but planner pricing returned no line items")
+        if planner_pricing_error is None:
+            planner_pricing_error = "Planner pricing returned no line items"
+
+    if (not used_planner) and planner_drill_minutes and planner_drill_minutes > 0.0:
+        planner_drill_hr = planner_drill_minutes / 60.0
+        if planner_drill_hr > 0.0 and drill_hr > 10.0 * planner_drill_hr:
+            _record_red_flag("Legacy drilling estimate outlier — using planner drilling hours.")
+            drill_hr = planner_drill_hr
+            baseline_drill_hr = max(existing_drill_hr, float(drill_hr or 0.0))
+            baseline_drill_hr = round(baseline_drill_hr, 3)
+            drill_meta = legacy_process_meta.setdefault("drilling", {})
+            drill_meta["hr"] = baseline_drill_hr
+            drill_meta.setdefault("rate", drill_rate)
+            legacy_process_costs["drilling"] = baseline_drill_hr * drill_rate
+            process_costs["drilling"] = legacy_process_costs["drilling"]
+            process_costs_baseline["drilling"] = legacy_process_costs["drilling"]
+            process_hours_baseline["drilling"] = baseline_drill_hr
+            features["drilling_hr_baseline"] = baseline_drill_hr
 
         if used_planner:
             pricing_source = "planner"
