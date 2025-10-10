@@ -1,6 +1,7 @@
 """Shared utility helpers for the CAD quoter application."""
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable, Mapping
 from typing import Any, TypeVar
 
@@ -33,4 +34,25 @@ def sdict(d: Mapping[Any, Any] | None) -> dict[str, str]:
     return {str(k): str(v) for k, v in (d or {}).items()}
 
 
-__all__ = ["compact_dict", "sdict"]
+T = TypeVar("T")
+
+
+def _first_non_none(*vals: T | None) -> T | None:
+    """Return the first value in *vals* that is not ``None``."""
+
+    for val in vals:
+        if val is not None:
+            return val
+    return None
+
+
+def jdump(obj: Any, *, indent: int = 2, default: Any | None = str, **kwargs: Any) -> str:
+    """Serialize *obj* to JSON using project-wide defaults."""
+
+    dumps_kwargs = {"indent": indent, **kwargs}
+    if default is not None:
+        dumps_kwargs["default"] = default
+    return json.dumps(obj, **dumps_kwargs)
+
+
+__all__ = ["compact_dict", "sdict", "_first_non_none", "jdump"]

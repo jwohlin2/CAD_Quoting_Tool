@@ -5,7 +5,6 @@
 import os
 import sys
 import time
-import json
 from typing import List, Dict, Any, Optional
 try:
     import truststore
@@ -15,6 +14,7 @@ except Exception:
     pass
 
 import requests
+from cad_quoter.utils import jdump
 
 API_BASE = "https://api.mcmaster.com"
 
@@ -105,7 +105,7 @@ class McMasterAPI:
         r.raise_for_status()
         data = r.json()
         if not isinstance(data, list):
-            raise SystemExit(f"Unexpected price payload: {json.dumps(data, indent=2)}")
+            raise SystemExit(f"Unexpected price payload: {jdump(data, default=None)}")
         # Normalize keys casing just in case.
         norm = []
         for t in data:
