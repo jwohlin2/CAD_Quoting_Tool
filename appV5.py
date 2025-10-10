@@ -409,6 +409,11 @@ iter_solids = geometry.iter_solids
 explode_compound = geometry.explode_compound
 parse_hole_table_lines = geometry.parse_hole_table_lines
 extract_text_lines_from_dxf = geometry.extract_text_lines_from_dxf
+contours_from_polylines = geometry.contours_from_polylines
+holes_from_circles = geometry.holes_from_circles
+text_harvest = geometry.text_harvest
+extract_entities = geometry.extract_entities
+read_dxf = geometry.read_dxf
 upsert_var_row = geometry.upsert_var_row
 require_ezdxf = geometry.require_ezdxf
 get_dwg_converter_path = geometry.get_dwg_converter_path
@@ -787,212 +792,8 @@ def bin_diams_mm(diams: Iterable[float | int | None], step: float = 0.1) -> Dict
 
 try:  # Optional dependency – ezdxf may be missing in some environments.
     import ezdxf  # type: ignore
-except Exception as _ezdxf_exc:  # pragma: no cover - import guard
-    ezdxf = None  # type: ignore
-    _EZDXF_IMPORT_ERROR: Exception | None = _ezdxf_exc
-else:  # pragma: no cover - exercised when ezdxf is installed
-    _EZDXF_IMPORT_ERROR = None
-
-
-_INSUNITS_TO_MM = {
-    0: 1.0,
-    1: 25.4,
-    2: 304.8,
-    3: 914.4,
-    4: 1.0,
-    5: 10.0,
-    6: 1000.0,
-    7: 1.0,
-    8: 0.0254,
-    9: 0.0000254,
-    10: 1_000_000.0,
-}
-
-
-def _require_ezdxf() -> None:
-    if ezdxf is None:  # pragma: no cover - defensive guard
-        raise RuntimeError(
-            "ezdxf is required for DXF parsing but is not installed"
-        ) from _EZDXF_IMPORT_ERROR
-
-
-def _unit_scale(doc) -> float:
-    insunits = int((doc.header.get("$INSUNITS", 4)) if doc else 4)
-    return float(_INSUNITS_TO_MM.get(insunits, 1.0))
-
-
-def read_dxf(path: str):
-    """Load ``path`` with :mod:`ezdxf` and return the document object."""
-
-    _require_ezdxf()
-    path = str(path)
-    if not Path(path).exists():
-        raise FileNotFoundError(path)
-    return ezdxf.readfile(path)
-
-
-def extract_entities(doc) -> Dict[str, Any]:
-    """Return a deterministic feature summary for ``doc``."""
-
-    scale = _unit_scale(doc)
-    bbox_info = contours_from_polylines(doc, _scale=scale)
-    holes = holes_from_circles(doc, _scale=scale)
-    lines = text_harvest(doc)
-
-    provenance: List[Dict[str, Any]] = []
-    if bbox_info.get("bbox_mm"):
-        provenance.append({"field": "bbox_mm", "source": "dxf_poly"})
-
-    return {
-        "bbox_mm": bbox_info.get("bbox_mm"),
-        "perimeter_mm": bbox_info.get("perimeter_mm"),
-        "hole_diams_mm": holes,
-        "lines": lines,
-        "provenance": provenance,
-    }
-
-
-def text_harvest(doc) -> List[str]:
-    """Collect text strings from TEXT/MTEXT entities (including blocks)."""
-
-    if doc is None:
-        return []
-
-    lines: List[str] = []
-    msp = doc.modelspace()
-
-    def _append_text(entity) -> None:
-        if entity is None:
-            return
-        try:
-            if entity.dxftype() == "MTEXT":
-                text = entity.plain_text()
-            else:
-                text = entity.dxf.text
-        except Exception:
-            text = None
-        if text:
-            for frag in str(text).splitlines():
-                frag = frag.strip()
-                if frag:
-                    lines.append(frag)
-
-    for entity in msp:
-        etype = entity.dxftype()
-        if etype in {"TEXT", "MTEXT"}:
-            _append_text(entity)
-        elif etype == "INSERT":
-            try:
-                for sub in entity.virtual_entities():
-                    if sub.dxftype() in {"TEXT", "MTEXT"}:
-                        _append_text(sub)
-            except Exception:
-                continue
-
-    return lines
-
-
-def contours_from_polylines(
-    doc,
-    *,
-    _scale: float | None = None,
-) -> Dict[str, Any]:
-    """Compute bounding box and perimeter from closed polylines."""
-
-    if doc is None:
-        return {"bbox_mm": None, "perimeter_mm": None}
-
-    scale = float(_scale or _unit_scale(doc))
-    msp = doc.modelspace()
-
-    def _iter_points(entity) -> Sequence[Tuple[float, float]]:
-        if entity.dxftype() == "LWPOLYLINE":
-            return [
-                (float(x) * scale, float(y) * scale)
-                for x, y, *_ in entity.get_points("xy")
-            ]
-        if entity.dxftype() == "POLYLINE":
-            return [
-                (float(v.dxf.location.x) * scale, float(v.dxf.location.y) * scale)
-                for v in entity.vertices()
-            ]
-        return []
-
-    def _polygon_area(pts: Sequence[Tuple[float, float]]) -> float:
-        if len(pts) < 3:
-            return 0.0
-        area = 0.0
-        for (x1, y1), (x2, y2) in zip(pts, pts[1:] + pts[:1]):
-            area += x1 * y2 - x2 * y1
-        return area / 2.0
-
-    def _perimeter(pts: Sequence[Tuple[float, float]]) -> float:
-        if len(pts) < 2:
-            return 0.0
-        per = 0.0
-        for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
-            per += math.hypot(x2 - x1, y2 - y1)
-        per += math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1])
-        return per
-
-    best_pts: Sequence[Tuple[float, float]] = []
-    best_area = 0.0
-    total_perimeter = 0.0
-
-    for entity in msp:
-        if entity.dxftype() not in {"LWPOLYLINE", "POLYLINE"}:
-            continue
-        closed = bool(getattr(entity, "closed", False))
-        if entity.dxftype() == "POLYLINE":
-            closed = bool(entity.is_closed)
-        if not closed:
-            continue
-        pts = list(_iter_points(entity))
-        if len(pts) < 3:
-            continue
-        area = abs(_polygon_area(pts))
-        total_perimeter += _perimeter(pts)
-        if area > best_area:
-            best_pts = pts
-            best_area = area
-
-    if not best_pts:
-        return {"bbox_mm": None, "perimeter_mm": None}
-
-    xs = [p[0] for p in best_pts]
-    ys = [p[1] for p in best_pts]
-    bbox_mm = [max(xs) - min(xs), max(ys) - min(ys)]
-
-    return {"bbox_mm": bbox_mm, "perimeter_mm": total_perimeter}
-
-
-def holes_from_circles(doc, *, _scale: float | None = None) -> List[float]:
-    """Return diameters (mm) for CIRCLE entities and full arcs."""
-
-    if doc is None:
-        return []
-
-    scale = float(_scale or _unit_scale(doc))
-    msp = doc.modelspace()
-    holes: List[float] = []
-
-    def _maybe_add(radius: float) -> None:
-        if radius <= 0:
-            return
-        holes.append(2.0 * float(radius) * scale)
-
-    for entity in msp:
-        etype = entity.dxftype()
-        if etype == "CIRCLE":
-            _maybe_add(float(entity.dxf.radius))
-        elif etype == "ARC":
-            start = float(entity.dxf.start_angle)
-            end = float(entity.dxf.end_angle)
-            sweep = (end - start) % 360.0
-            if math.isclose(sweep, 360.0, abs_tol=1e-3):
-                _maybe_add(float(entity.dxf.radius))
-
-    return holes
+except Exception:  # pragma: no cover - import guard
+    ezdxf = None  # type: ignore[assignment]
 
 
 def read_step(path: str) -> "TopoDS_Shape":
@@ -17542,7 +17343,7 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
 
 
 def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
-    _require_ezdxf()
+    require_ezdxf()
 
 
     # --- load doc ---
