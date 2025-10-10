@@ -14113,7 +14113,12 @@ def compute_quote_from_df(df: pd.DataFrame,
         or inner_geo.get("outline_area_in2")
     )
     plate_area_in2 = None
-    if plate_len_val and plate_wid_val:
+    plate_area_mm2 = _plate_bbox_mm2(geo_context)
+    if plate_area_mm2 <= 0 and inner_geo:
+        plate_area_mm2 = _plate_bbox_mm2(inner_geo)
+    if plate_area_mm2 and plate_area_mm2 > 0:
+        plate_area_in2 = float(plate_area_mm2) / (25.4 ** 2)
+    elif plate_len_val and plate_wid_val:
         try:
             plate_area_in2 = float(plate_len_val) * float(plate_wid_val)
         except Exception:
