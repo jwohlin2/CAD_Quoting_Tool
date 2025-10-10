@@ -14694,17 +14694,54 @@ def compute_quote_from_df(
         if recognized_from_plan > 0:
             recognized_line_items = recognized_from_plan
 
+    planner_pricing_payload: _MappingABC[str, Any] | None
+    if isinstance(planner_pricing_result, _MappingABC):
+        planner_pricing_payload = planner_pricing_result
+    else:
+        planner_pricing_payload = None
+
+    planner_line_items_signal: Any | None = None
+    planner_totals_signal = False
+    planner_recognized_signal = recognized_line_items
+
+    if planner_pricing_payload is not None:
+        try:
+            planner_line_items_signal = planner_pricing_payload.get("line_items")
+        except Exception:
+            planner_line_items_signal = None
+        try:
+            planner_totals_signal = bool(planner_pricing_payload.get("totals"))
+        except Exception:
+            planner_totals_signal = False
+
+    if planner_line_items_signal is None and planner_line_items:
+        planner_line_items_signal = planner_line_items
+
+    try:
+        planner_recognized_signal = max(
+            planner_recognized_signal,
+            len(planner_line_items_signal or []),
+        )
+    except Exception:
+        planner_recognized_signal = recognized_line_items
+
+    planner_pricing_signal = bool(
+        planner_pricing_payload if planner_pricing_payload is not None else planner_pricing_result
+    )
+
     planner_signals = {
-        "line_items": planner_line_items,
-        "pricing_result": planner_pricing_result,
-        "recognized_line_items": recognized_line_items,
-        "totals_present": planner_totals_present,
+        "line_items": planner_line_items_signal,
+        "pricing_result": planner_pricing_signal,
+        "recognized_line_items": planner_recognized_signal,
+        "totals_present": planner_totals_signal,
     }
 
     used_planner, planner_mode = resolve_planner(
         plan_params,
         planner_signals,
     )
+    if not used_planner and planner_line_items_signal:
+        used_planner = True
     force_planner_for_recognized = recognized_line_items > 0
 
     if force_planner_for_recognized:
