@@ -512,7 +512,7 @@ except ImportError:
                     )
 
             BRep_Tool = _MissingOCCTModule()
-            TopAbs_EDGE = TopAbs_FACE = _MissingOCCTModule()
+            TopAbs_EDGE = TopAbs_FACE = TopAbs_SHELL = TopAbs_SOLID = TopAbs_COMPOUND = _MissingOCCTModule()
             TopExp = TopExp_Explorer = _MissingOCCTModule()
             BRepTools = _MissingOCCTModule()
             TopoDS = TopoDS_Face = TopoDS_Shape = _MissingOCCTModule()
