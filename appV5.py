@@ -8474,18 +8474,19 @@ def render_quote(
 
     extra_labor_rows: list[tuple[str, float, list[str], str | None]] = []
 
-    _append_extra_labor_row(
-        "Programming (amortized)",
-        programming_per_part_cost,
-        programming_detail_bits,
-        labor_cost_details_input.get("Programming (amortized)") or None,
-    )
-    _append_extra_labor_row(
-        "Fixture Build (amortized)",
-        fixture_labor_per_part_cost,
-        fixture_detail_bits,
-        labor_cost_details_input.get("Fixture Build (amortized)") or None,
-    )
+    if show_amortized:
+        _append_extra_labor_row(
+            "Programming (amortized)",
+            programming_per_part_cost,
+            programming_detail_bits,
+            labor_cost_details_input.get("Programming (amortized)") or None,
+        )
+        _append_extra_labor_row(
+            "Fixture Build (amortized)",
+            fixture_labor_per_part_cost,
+            fixture_detail_bits,
+            labor_cost_details_input.get("Fixture Build (amortized)") or None,
+        )
 
     misc_label: str | None = None
     misc_amount_val: float = 0.0
@@ -8549,6 +8550,7 @@ def render_quote(
 
     display_machine = 0.0
     display_labor_for_ladder = 0.0
+    amortized_labor_components: dict[str, float] = {}
     for storage_key, amount in labor_costs_display.items():
         try:
             amount_val = float(amount or 0.0)
@@ -8563,6 +8565,10 @@ def render_quote(
             # and are hidden from the display. They should not contribute to the
             # visible labor subtotal for the pricing ladder.
             continue
+        if "amortized" in canon_key:
+            amortized_labor_components[canon_key] = (
+                amortized_labor_components.get(canon_key, 0.0) + amount_val
+            )
         display_labor_for_ladder += amount_val
 
     machine_in_labor_section = any(
@@ -9035,6 +9041,13 @@ def render_quote(
             declared_subtotal = None
     if declared_subtotal is None:
         declared_subtotal = float(computed_subtotal)
+    else:
+        try:
+            computed_subtotal_val = float(computed_subtotal)
+        except Exception:
+            computed_subtotal_val = 0.0
+        if abs(declared_subtotal) <= 0.01 and computed_subtotal_val > 0.01:
+            declared_subtotal = computed_subtotal_val
     if material_net_cost is None:
         try:
             material_key = next(
@@ -9051,23 +9064,38 @@ def render_quote(
                 material_net_cost = 0.0
         except Exception:
             material_net_cost = 0.0
-    directs = float(material_net_cost) + float(pass_through_total) + float(display_machine)
-    ladder_labor_total = float(display_labor_for_ladder)
-    ladder_subtotal = ladder_labor_total + directs
+    def _is_per_part_amortized(canon_key: str) -> bool:
+        if qty <= 1:
+            return False
+        if canon_key == "programming_amortized":
+            return bool(programming_is_amortized)
+        if canon_key == "fixture_build_amortized":
+            return bool(fixture_is_amortized)
+        return True
+
+    amortized_total_for_ladder = sum(
+        amount
+        for canon_key, amount in amortized_labor_components.items()
+        if _is_per_part_amortized(canon_key)
+    )
+
+    base_labor_for_ladder = float(display_labor_for_ladder) - float(amortized_total_for_ladder)
+    if base_labor_for_ladder < 0 and abs(base_labor_for_ladder) <= 0.005:
+        base_labor_for_ladder = 0.0
+    amortized_nre_for_ladder = float(amortized_total_for_ladder)
+    ladder_labor_total = base_labor_for_ladder + amortized_nre_for_ladder
+
+    # Machine dollars are treated as Directs so the ladder mirrors the
+    # Process & Labor breakdown.
+    machine_contribution = float(display_machine)
+    directs = float(material_net_cost) + float(pass_through_total) + machine_contribution
+    ladder_subtotal = round(ladder_labor_total + directs, 2)
     subtotal = float(declared_subtotal)
     printed_subtotal = subtotal
-    if not roughly_equal(ladder_subtotal, printed_subtotal, eps=0.01):
-        try:
-            logger.warning(
-                "Labor + Direct mismatch (labor=%s, directs=%s, subtotal=%s)",
-                f"{ladder_labor_total:.2f}",
-                f"{directs:.2f}",
-                f"{printed_subtotal:.2f}",
-            )
-        except Exception:
-            pass
-        directs = max(printed_subtotal - ladder_labor_total, 0.0)
-        ladder_subtotal = ladder_labor_total + directs
+    assert roughly_equal(ladder_subtotal, printed_subtotal, eps=0.01), (
+        "Labor + Direct mismatch (labor=%s, directs=%s, subtotal=%s)"
+        % (f"{ladder_labor_total:.2f}", f"{directs:.2f}", f"{printed_subtotal:.2f}")
+    )
     lines.append("")
 
     # ---- Pricing ladder ------------------------------------------------------
