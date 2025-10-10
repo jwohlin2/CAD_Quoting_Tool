@@ -14657,6 +14657,36 @@ def compute_quote_from_df(
                     )
             planner_bucket_rollup = copy.deepcopy(bucket_view)
             planner_bucket_view = _prepare_bucket_view(bucket_view)
+            if used_planner:
+                try:
+                    display_labor_total = 0.0
+                    display_machine_total = 0.0
+                    buckets_view = planner_bucket_view.get("buckets")
+                    if isinstance(buckets_view, _MappingABC):
+                        for metrics in buckets_view.values():
+                            if not isinstance(metrics, _MappingABC):
+                                continue
+                            display_labor_total += float(metrics.get("labor$", 0.0) or 0.0)
+                            display_machine_total += float(metrics.get("machine$", 0.0) or 0.0)
+                except Exception:  # pragma: no cover - defensive logging
+                    logger.exception("Planner display totals invariant check failed")
+                else:
+                    display_total_cost = display_labor_total + display_machine_total
+                    if not math.isclose(
+                        display_total_cost,
+                        planner_totals_cost,
+                        rel_tol=0.0,
+                        abs_tol=_PLANNER_BUCKET_ABS_EPSILON,
+                    ):
+                        logger.error(
+                            "Planner display totals drifted: labor %.2f + machine %.2f vs planner %.2f",
+                            display_labor_total,
+                            display_machine_total,
+                            planner_totals_cost,
+                        )
+                        raise AssertionError(
+                            "Planner bucket display totals do not reconcile with planner totals."
+                        )
             planner_bucket_display_map = _extract_bucket_map(planner_bucket_view)
             planner_bucket_view_copy = copy.deepcopy(planner_bucket_view)
             process_plan_summary["bucket_view"] = planner_bucket_view_copy
@@ -16789,7 +16819,14 @@ def compute_quote_from_df(
                 "Labor section totals drifted: %.2f vs %.2f",
                 recomputed_labor_total,
                 expected_labor_total,
-            )
+                rel_tol=0.0,
+                abs_tol=_LABOR_SECTION_ABS_EPSILON,
+            ):
+                logger.warning(
+                    "Labor section totals drifted: %.2f vs %.2f",
+                    labor_display_total,
+                    expected_labor_total,
+                )
 
         labor_cost = recomputed_labor_total
 
