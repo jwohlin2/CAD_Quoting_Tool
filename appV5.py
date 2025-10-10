@@ -11065,6 +11065,7 @@ def compute_quote_from_df(
     hole_scrap_frac_est: float = 0.0
     hole_scrap_clamped_val: float = 0.0
     material_selection: dict[str, Any] = {}
+    material_display_for_debug: str = ""
 
     def _has_rows(table: Any) -> bool:
         """Return True if the pandas-like table has any rows."""
