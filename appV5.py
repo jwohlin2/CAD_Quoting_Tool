@@ -17151,17 +17151,9 @@ def compute_quote_from_df(
                 rel_tol=0.0,
                 abs_tol=_LABOR_SECTION_ABS_EPSILON,
             ):
-                logger.debug(
-                    "Labor display components: %.2f vs expected %.2f",
-                    labor_display_total,
-                    expected_labor_total,
-                    rel_tol=0.0,
-                    abs_tol=_LABOR_SECTION_ABS_EPSILON,
-                )
-            except Exception:
                 try:
-                    logger.warning(
-                        "Labor section totals drifted: %.2f vs %.2f",
+                    logger.debug(
+                        "Labor display components: %.2f vs expected %.2f",
                         labor_display_total,
                         expected_labor_total,
                     )
