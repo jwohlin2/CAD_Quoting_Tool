@@ -85,6 +85,23 @@ def _coerce_env_bool(value: str | None) -> bool:
 FORCE_PLANNER = _coerce_env_bool(os.environ.get("FORCE_PLANNER"))
 
 
+def _compute_direct_costs(
+    material_total: float | int | str | None,
+    scrap_credit: float | int | str | None,
+    material_tax: float | int | str | None,
+    pass_through: _MappingABC[str, Any] | None,
+) -> float:
+    """Return the rounded direct-cost total shared by math and rendering."""
+
+    pt = dict(pass_through or {})
+    pt.pop("Material", None)
+    subtotal = float(material_total or 0.0)
+    subtotal += float(material_tax or 0.0)
+    subtotal -= float(scrap_credit or 0.0)
+    subtotal += sum(float(v or 0.0) for v in pt.values())
+    return round(subtotal, 2)
+
+
 # ---------------------------------------------------------------------------
 # Debug helpers
 # ---------------------------------------------------------------------------
@@ -6511,6 +6528,27 @@ def render_quote(
             or (shipping_total == 0 and bool(shipping_source) and show_zeros)
         )
 
+    material_total_for_directs_val = _coerce_float_or_none(
+        material_block.get("material_cost_before_credit")
+    )
+    if material_total_for_directs_val is None:
+        material_total_for_directs_val = _coerce_float_or_none(
+            material_block.get("material_cost")
+        )
+    if material_total_for_directs_val is None:
+        material_total_for_directs_val = _coerce_float_or_none(
+            material_block.get("material_direct_cost")
+        )
+    material_total_for_directs = float(material_total_for_directs_val or 0.0)
+
+    scrap_credit_for_directs_val = _coerce_float_or_none(
+        material_block.get("material_scrap_credit")
+    )
+    scrap_credit_for_directs = float(scrap_credit_for_directs_val or 0.0)
+
+    material_tax_for_directs_val = _coerce_float_or_none(material_block.get("material_tax"))
+    material_tax_for_directs = float(material_tax_for_directs_val or 0.0)
+
     def _merge_detail_text(existing: str | None, new_value: Any) -> str:
         segments: list[str] = []
         seen: set[str] = set()
@@ -8816,7 +8854,23 @@ def render_quote(
             canonical_pass_label = canonical_label
             if "labor" in canonical_pass_label.lower():
                 pass_through_labor_total += amount_val
-    row("Total", pass_total, indent="  ")
+    material_direct_contribution = round(
+        material_total_for_directs + material_tax_for_directs - scrap_credit_for_directs,
+        2,
+    )
+    if material_direct_contribution or show_zeros:
+        write_line(
+            "Material & Stock (printed above) contributes "
+            f"{_m(material_direct_contribution)} to Direct Costs",
+            "  ",
+        )
+    total_direct_costs_display = _compute_direct_costs(
+        material_total_for_directs,
+        scrap_credit_for_directs,
+        material_tax_for_directs,
+        pass_through,
+    )
+    row("Total", total_direct_costs_display, indent="  ")
     pass_through_total = float(pass_total)
 
     computed_total_labor_cost = proc_total + pass_through_labor_total
@@ -16528,11 +16582,22 @@ def compute_quote_from_df(
         vendor_marked_add = round(vendor_marked_add, 2)
         pass_through["Insurance"] = insurance_cost
         pass_through["Vendor Markup Added"] = vendor_marked_add
-        total_direct_costs = base_direct_costs + insurance_cost + vendor_marked_add
     else:
         insurance_cost = 0.0
         vendor_marked_add = 0.0
-        total_direct_costs = base_direct_costs
+    material_total_for_directs = float(
+        material_cost_before_credit if material_cost_before_credit is not None else material_direct_cost
+    )
+    scrap_credit_for_directs = float(material_scrap_credit_applied or 0.0)
+    material_tax_for_directs = float(
+        _coerce_float_or_none(material_detail_for_breakdown.get("material_tax")) or 0.0
+    )
+    total_direct_costs = _compute_direct_costs(
+        material_total_for_directs,
+        scrap_credit_for_directs,
+        material_tax_for_directs,
+        pass_through,
+    )
     direct_costs = total_direct_costs
 
     subtotal = labor_cost + direct_costs
