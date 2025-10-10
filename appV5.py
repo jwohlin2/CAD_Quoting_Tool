@@ -819,10 +819,18 @@ else:
     odafc = None  # type: ignore[assignment]
 
 if TYPE_CHECKING:
-    try:
-        from ezdxf.ezdxf import Drawing as _EzdxfDrawing
-    except Exception:  # pragma: no cover - optional dependency
-        _EzdxfDrawing = Any  # type: ignore[assignment]
+    class _EzdxfLayouts(Protocol):
+        def names_in_taborder(self) -> Iterable[str]: ...
+
+        def get(self, name: str) -> Any: ...
+
+    class _EzdxfDrawing(Protocol):
+        header: Mapping[str, Any]
+        layouts: _EzdxfLayouts
+
+        def modelspace(self) -> Any: ...
+
+        def close(self) -> None: ...
 else:
     _EzdxfDrawing = Any  # type: ignore[assignment]
 
@@ -3265,7 +3273,7 @@ def as_face(obj: Any) -> TopoDSFaceT:
 
 
 def iter_faces(shape: Any) -> Iterator[TopoDSFaceT]:
-    explorer_cls = cast(type[Any], TopExp_Explorer)
+    explorer_cls = cast(Callable[[Any, Any], Any], TopExp_Explorer)
     exp = explorer_cls(shape, cast(Any, TopAbs_FACE))
     while exp.More():
         yield ensure_face(exp.Current())
@@ -3899,7 +3907,7 @@ SMALL = 1e-7
 
 
 def iter_solids(shape: TopoDS_Shape):
-    explorer = cast(type[Any], TopExp_Explorer)
+    explorer = cast(Callable[[Any, Any], Any], TopExp_Explorer)
     exp = explorer(shape, cast(TopAbs_ShapeEnum, TopAbs_SOLID))
     while exp.More():
         yield geometry.to_solid(exp.Current())
@@ -3907,7 +3915,7 @@ def iter_solids(shape: TopoDS_Shape):
 
 def explode_compound(shape: TopoDS_Shape):
     """If the file is a big COMPOUND, break it into shapes (parts/bodies)."""
-    explorer = cast(type[Any], TopExp_Explorer)
+    explorer = cast(Callable[[Any, Any], Any], TopExp_Explorer)
     exp = explorer(shape, cast(TopAbs_ShapeEnum, TopAbs_COMPOUND))
     if exp.More():
         # Itï¿½s a compound ï¿½ return its shells/solids/faces as needed
@@ -4027,7 +4035,7 @@ def _surface_areas_by_type(shape):
 def _section_perimeter_len(shape, z_values):
     xmin, ymin, zmin, xmax, ymax, zmax = _bbox(shape)
     total = 0.0
-    explorer = cast(type[Any], TopExp_Explorer)
+    explorer = cast(Callable[[Any, Any], Any], TopExp_Explorer)
     for z in z_values:
         plane = gp_Pln(gp_Pnt(0,0,z), gp_Dir(0,0,1))
         sec = BRepAlgoAPI_Section(shape, plane, False); sec.Build()
@@ -4361,8 +4369,8 @@ def read_cad_any(path: str):
         ig.TransferRoots()
         return _shape_from_reader(ig)
     if ext == ".brep":
-        shape_cls = cast(type[Any], TopoDS_Shape)
-        s = shape_cls()
+        shape_ctor = cast(Callable[[], Any], TopoDS_Shape)
+        s = shape_ctor()
         if not cast(Any, BRepTools).Read(s, path, None):
             raise RuntimeError("BREP read failed")
         return s
@@ -10631,8 +10639,7 @@ def validate_quote_before_pricing(
             issues.clear()
         else:
             raise ValueError("Quote blocked:\n- " + "\n- ".join(issues))
-
-
+# pyright: ignore[reportGeneralTypeIssues]
 def compute_quote_from_df(df: pd.DataFrame,
                           params: Dict[str, Any] | None = None,
                           rates: Dict[str, float] | None = None,
@@ -10649,7 +10656,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                           quote_state: QuoteState | None = None,
                           reuse_suggestions: bool = False,
                           llm_suggest: Any | None = None,
-                          pricing: PricingEngine | None = None) -> Dict[str, Any]:  # pyright: ignore[reportGeneralTypeIssues]
+                          pricing: PricingEngine | None = None) -> Dict[str, Any]:
     """
     Estimator that consumes variables from the sheet (Item, Example Values / Options, Data Type / Input Method).
 
@@ -18090,9 +18097,9 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
 
     # --- load doc ---
     dxf_text_path: str | None = None
-    doc = None
+    doc: Drawing | None = None
     lower_path = path.lower()
-    readfile = getattr(ezdxf_mod, "readfile", None)
+    readfile: Callable[[str], Any] | None = getattr(ezdxf_mod, "readfile", None)
     if not callable(readfile):
         raise AttributeError("ezdxf module does not provide a callable 'readfile' function")
 
@@ -18106,14 +18113,17 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
                 raise RuntimeError(
                     "ezdxf.addons.odafc.readfile is unavailable; install ODAFileConverter support."
                 )
-            doc = readfile(path)
+            doc = cast(Drawing, readfile(path))
         else:
             dxf_path = convert_dwg_to_dxf(path, out_ver="ACAD2018")
             dxf_text_path = dxf_path
-            doc = readfile(dxf_path)
+            doc = cast(Drawing, readfile(dxf_path))
     else:
-        doc = readfile(path)
+        doc = cast(Drawing, readfile(path))
         dxf_text_path = path
+
+    if doc is None:
+        raise RuntimeError("Failed to load DXF/DWG document")
 
     sp = doc.modelspace()
     units = detect_units_scale(doc)
@@ -18212,7 +18222,11 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
 
             if geo_read_more.get("chart_lines"):
                 existing_lines_raw = geo.get("chart_lines")
-                existing_lines = list(existing_lines_raw) if isinstance(existing_lines_raw, list) else []
+                existing_lines = (
+                    existing_lines_raw.copy()
+                    if isinstance(existing_lines_raw, list)
+                    else []
+                )
                 new_lines = geo_read_more.get("chart_lines")
                 if not isinstance(new_lines, list):
                     new_lines = []
@@ -19974,11 +19988,18 @@ class CreateToolTip:
         if self._tip_window is not None or not self.text:
             return
 
-        bbox = None
+        bbox: tuple[int, int, int, int] | None = None
         bbox_method = getattr(self.widget, "bbox", None)
         if callable(bbox_method):
             try:
-                bbox = bbox_method("insert")  # type: ignore[arg-type]
+                raw_bbox = bbox_method("insert")  # type: ignore[arg-type]
+                if isinstance(raw_bbox, (tuple, list)) and len(raw_bbox) >= 4:
+                    bbox = (
+                        int(raw_bbox[0]),
+                        int(raw_bbox[1]),
+                        int(raw_bbox[2]),
+                        int(raw_bbox[3]),
+                    )
             except Exception:
                 bbox = None
         if bbox:
