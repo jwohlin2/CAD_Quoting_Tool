@@ -10033,10 +10033,11 @@ def estimate_drilling_hours(
     material_lookup = _normalize_lookup_key(mat_key) if mat_key else ""
     material_label = MATERIAL_DISPLAY_BY_KEY.get(material_lookup, mat_key)
 
+    thickness_mm = 0.0
     try:
         thickness_mm = float(thickness_in) * 25.4
     except (TypeError, ValueError):
-        thickness_mm = 0.0
+        pass
     if not math.isfinite(thickness_mm) or thickness_mm <= 0:
         thickness_mm = 0.0
     if (
@@ -11036,7 +11037,9 @@ def estimate_drilling_hours(
         # aggregate counts and weighted diameter
         weighted_dia_in += (float(d) / 25.4) * qty_int
 
-    if debug is not None and holes_fallback > 0:
+    holes_fallback = total_hole_qty
+
+    if debug_state is not None and holes_fallback > 0:
         avg_dia_in = weighted_dia_in / holes_fallback if holes_fallback else 0.0
         debug.update(
             {
