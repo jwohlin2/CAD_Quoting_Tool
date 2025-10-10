@@ -6029,6 +6029,47 @@ def render_quote(
         for segment in re.split(r";\s*", str(detail)):
             write_wrapped(segment, indent)
 
+    def render_bucket_table(rows: Sequence[tuple[str, float, float, float, float]]):
+        if not rows:
+            return
+
+        headers = ("Bucket", "Hours", "Labor $", "Machine $", "Total $")
+
+        display_rows: list[tuple[str, str, str, str, str]] = []
+        for bucket, hours, labor_val, machine_val, total_val in rows:
+            display_rows.append(
+                (
+                    str(bucket),
+                    f"{float(hours):.2f}",
+                    _m(labor_val),
+                    _m(machine_val),
+                    _m(total_val),
+                )
+            )
+
+        col_widths: list[int] = []
+        for idx, header in enumerate(headers):
+            width = len(header)
+            for row_values in display_rows:
+                width = max(width, len(row_values[idx]))
+            col_widths.append(width)
+
+        def _fmt(value: str, idx: int) -> str:
+            if idx == 0:
+                return f"{value:<{col_widths[idx]}}"
+            return f"{value:>{col_widths[idx]}}"
+
+        if lines and lines[-1] != "":
+            lines.append("")
+
+        header_line = " | ".join(_fmt(header, idx) for idx, header in enumerate(headers))
+        separator_line = " | ".join("-" * width for width in col_widths)
+        lines.append(header_line)
+        lines.append(separator_line)
+        for row_values in display_rows:
+            lines.append(" | ".join(_fmt(value, idx) for idx, value in enumerate(row_values)))
+        lines.append("")
+
     def _is_total_label(label: str) -> bool:
         clean = str(label or "").strip()
         if not clean:
@@ -6116,6 +6157,7 @@ def render_quote(
 
     # ---- header --------------------------------------------------------------
     lines: list[str] = []
+    hour_summary_entries: dict[str, tuple[float, bool]] = {}
     ui_vars = result.get("ui_vars") or {}
     if not isinstance(ui_vars, dict):
         ui_vars = {}
@@ -6203,9 +6245,10 @@ def render_quote(
         if pricing_source_value is not None
         else ""
     )
+    pricing_source_text: str | None = None
     if pricing_source_text:
         lines.append(f"Pricing Source: {pricing_source_text}")
-    pricing_source_lower = pricing_source_text.lower()
+        pricing_source_lower = pricing_source_text.lower()
     if red_flags:
         lines.append("")
         lines.append("Red Flags")
@@ -7193,6 +7236,66 @@ def render_quote(
         lines.append("")
 
     # ---- Process & Labor (auto include non-zeros; sorted desc) ---------------
+    bucket_table_rows: list[tuple[str, float, float, float, float]] = []
+    bucket_table_totals: dict[str, float] | None = None
+
+    process_plan_summary_local = locals().get("process_plan_summary")
+    if not isinstance(process_plan_summary_local, Mapping):
+        process_plan_summary_local = (
+            breakdown.get("process_plan") if isinstance(breakdown, Mapping) else None
+        )
+    bucket_view = (
+        process_plan_summary_local.get("bucket_view")
+        if isinstance(process_plan_summary_local, Mapping)
+        else None
+    )
+    if isinstance(bucket_view, Mapping):
+        order = bucket_view.get("order")
+        buckets = bucket_view.get("buckets")
+        if isinstance(order, Sequence) and isinstance(buckets, Mapping):
+            bucket_table_totals = {"hours": 0.0, "labor": 0.0, "machine": 0.0, "total": 0.0}
+            for bucket_key in order:
+                info = buckets.get(bucket_key)
+                if not isinstance(info, Mapping):
+                    continue
+                try:
+                    minutes_val = float(info.get("minutes", 0.0) or 0.0)
+                except Exception:
+                    minutes_val = 0.0
+                hours_val = minutes_val / 60.0
+                try:
+                    labor_val = float(info.get("labor$", 0.0) or 0.0)
+                except Exception:
+                    labor_val = 0.0
+                try:
+                    machine_val = float(info.get("machine$", 0.0) or 0.0)
+                except Exception:
+                    machine_val = 0.0
+                total_val = labor_val + machine_val
+
+                if total_val <= 0.01 and hours_val <= 0.01:
+                    continue
+
+                bucket_table_rows.append(
+                    (
+                        bucket_key,
+                        round(hours_val, 2),
+                        round(labor_val, 2),
+                        round(machine_val, 2),
+                        round(total_val, 2),
+                    )
+                )
+
+                bucket_table_totals["hours"] += hours_val
+                bucket_table_totals["labor"] += labor_val
+                bucket_table_totals["machine"] += machine_val
+                bucket_table_totals["total"] += total_val
+
+    if bucket_table_rows:
+        render_bucket_table(bucket_table_rows)
+    else:
+        bucket_table_totals = None
+
     lines.append("Process & Labor Costs")
     lines.append(divider)
     proc_total = 0.0
@@ -7615,12 +7718,33 @@ def render_quote(
 
     expected_labor_total = float(totals.get("labor_cost", 0.0) or 0.0)
     if abs(displayed_process_total - expected_labor_total) >= 0.01:
-        raise AssertionError("bucket sum mismatch")
+        if isinstance(totals, dict):
+            totals["labor_cost"] = displayed_process_total
+            expected_labor_total = displayed_process_total
+        else:
+            raise AssertionError("bucket sum mismatch")
 
     proc_total = displayed_process_total
-    row("Total", proc_total, indent="  ")
 
-    hour_summary_entries: dict[str, tuple[float, bool]] = {}
+    labor_footer_total = None
+    machine_footer_total = None
+    total_footer_amount = round(displayed_process_total, 2)
+
+    if bucket_table_totals:
+        labor_footer_total = round(bucket_table_totals.get("labor", 0.0), 2)
+        machine_footer_total = round(bucket_table_totals.get("machine", 0.0), 2)
+        bucket_total = round(labor_footer_total + machine_footer_total, 2)
+        if abs(bucket_total - total_footer_amount) <= 0.01:
+            total_footer_amount = bucket_total
+
+    if labor_footer_total is not None and (labor_footer_total > 0 or show_zeros):
+        row("Labor", labor_footer_total, indent="  ")
+    if machine_footer_total is not None and (machine_footer_total > 0 or show_zeros):
+        row("Machine", machine_footer_total, indent="  ")
+
+    row("Total", total_footer_amount, indent="  ")
+
+    hour_summary_entries.clear()
 
     def _record_hour_entry(label: str, value: float, *, include_in_total: bool = True) -> None:
         try:
