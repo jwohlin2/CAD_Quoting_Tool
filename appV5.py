@@ -5443,6 +5443,30 @@ CANON_MAP: dict[str, str] = {
 }
 
 PLANNER_META: frozenset[str] = frozenset({"planner_labor", "planner_machine", "planner_total"})
+_HIDE_IN_BUCKET_VIEW: frozenset[str] = frozenset({*PLANNER_META, "misc"})
+_PREFERRED_BUCKET_VIEW_ORDER: tuple[str, ...] = (
+    "programming",
+    "programming_amortized",
+    "fixture_build",
+    "fixture_build_amortized",
+    "milling",
+    "drilling",
+    "counterbore",
+    "countersink",
+    "tapping",
+    "grinding",
+    "finishing_deburr",
+    "saw_waterjet",
+    "wire_edm",
+    "sinker_edm",
+    "inspection",
+    "assembly",
+    "toolmaker_support",
+    "packaging",
+    "ehs_compliance",
+    "turning",
+    "lapping_honing",
+)
 
 
 def _normalize_bucket_key(name: str) -> str:
@@ -5464,6 +5488,110 @@ def _canonical_bucket_key(name: str) -> str:
         return "finishing_deburr"
 
     return normalized
+
+
+def _preferred_order_then_alpha(keys: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    remaining = {key for key in keys if key}
+    ordered: list[str] = []
+
+    for preferred in _PREFERRED_BUCKET_VIEW_ORDER:
+        if preferred in remaining:
+            ordered.append(preferred)
+            seen.add(preferred)
+    remaining -= seen
+
+    if remaining:
+        ordered.extend(sorted(remaining))
+
+    return ordered
+
+
+def _coerce_bucket_metric(data: Mapping[str, Any] | None, *candidates: str) -> float:
+    if not isinstance(data, Mapping):
+        return 0.0
+    for key in candidates:
+        if key in data:
+            try:
+                return float(data.get(key) or 0.0)
+            except Exception:
+                continue
+    return 0.0
+
+
+def _prepare_bucket_view(raw_view: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Return a canonicalized bucket view suitable for cost table rendering."""
+
+    prepared: dict[str, Any] = {}
+    if isinstance(raw_view, Mapping):
+        for key, value in raw_view.items():
+            if key == "buckets":
+                continue
+            prepared[key] = copy.deepcopy(value)
+
+    source = raw_view.get("buckets") if isinstance(raw_view, Mapping) else None
+    if not isinstance(source, Mapping):
+        source = raw_view if isinstance(raw_view, Mapping) else {}
+
+    folded: dict[str, dict[str, float]] = {}
+
+    for raw_key, raw_info in source.items():
+        canon = _canonical_bucket_key(raw_key)
+        if not canon:
+            continue
+        if canon in _HIDE_IN_BUCKET_VIEW or canon.startswith("planner_"):
+            continue
+        info_map = raw_info if isinstance(raw_info, Mapping) else {}
+        bucket = folded.setdefault(
+            canon,
+            {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0, "total$": 0.0},
+        )
+
+        minutes = _coerce_bucket_metric(info_map, "minutes")
+        labor = _coerce_bucket_metric(info_map, "labor$", "labor_cost", "labor")
+        machine = _coerce_bucket_metric(info_map, "machine$", "machine_cost", "machine")
+        total = _coerce_bucket_metric(info_map, "total$", "total_cost", "total")
+
+        if math.isclose(total, 0.0, abs_tol=1e-9):
+            total = labor + machine
+
+        bucket["minutes"] += minutes
+        bucket["labor$"] += labor
+        bucket["machine$"] += machine
+        bucket["total$"] += total
+
+    totals = {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0, "total$": 0.0}
+
+    for canon, metrics in list(folded.items()):
+        minutes = round(float(metrics.get("minutes", 0.0)), 2)
+        labor = round(float(metrics.get("labor$", 0.0)), 2)
+        machine = round(float(metrics.get("machine$", 0.0)), 2)
+        total = round(float(metrics.get("total$", labor + machine)), 2)
+
+        if (
+            math.isclose(minutes, 0.0, abs_tol=0.01)
+            and math.isclose(labor, 0.0, abs_tol=0.01)
+            and math.isclose(machine, 0.0, abs_tol=0.01)
+            and math.isclose(total, 0.0, abs_tol=0.01)
+        ):
+            folded.pop(canon, None)
+            continue
+
+        metrics["minutes"] = minutes
+        metrics["labor$"] = labor
+        metrics["machine$"] = machine
+        metrics["total$"] = total
+
+        totals["minutes"] += minutes
+        totals["labor$"] += labor
+        totals["machine$"] += machine
+        totals["total$"] += total
+
+    prepared["buckets"] = folded
+    prepared["order"] = _preferred_order_then_alpha(folded.keys())
+    prepared["totals"] = {key: round(value, 2) for key, value in totals.items()}
+
+    return prepared
 
 
 def canonicalize_costs(process_costs: Mapping[str, Any] | None) -> dict[str, float]:
@@ -12953,7 +13081,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     planner_machine_cost_total = 0.0
     planner_labor_cost_total = 0.0
     planner_total_minutes = 0.0
-    planner_bucket_view: dict[str, dict[str, float]] | None = None
+    planner_bucket_view: dict[str, Any] | None = None
     planner_bucket_rollup: dict[str, dict[str, float]] | None = None
 
     if planner_pricing_result is not None:
@@ -13063,9 +13191,9 @@ def compute_quote_from_df(df: pd.DataFrame,
                         planner_totals_expected,
                     )
             planner_bucket_rollup = copy.deepcopy(bucket_view)
-            planner_bucket_view = copy.deepcopy(bucket_view)
-            process_plan_summary["bucket_view"] = copy.deepcopy(bucket_view)
-            quote_state.process_plan.setdefault("bucket_view", copy.deepcopy(bucket_view))
+            planner_bucket_view = _prepare_bucket_view(bucket_view)
+            process_plan_summary["bucket_view"] = copy.deepcopy(planner_bucket_view)
+            quote_state.process_plan.setdefault("bucket_view", copy.deepcopy(planner_bucket_view))
             drill_bucket = bucket_view.get("drilling") if isinstance(bucket_view, _MappingABC) else None
             if drill_bucket:
                 try:
@@ -14731,7 +14859,7 @@ def compute_quote_from_df(df: pd.DataFrame,
             qty_for_bucket = 1
         qty_for_bucket = max(1, qty_for_bucket)
         try:
-            planner_bucket_view = bucketize(
+            raw_bucket_view = bucketize(
                 planner_pricing_result,
                 planner_two_bucket_rates,
                 nre_minutes,
@@ -14746,6 +14874,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                     "FORCE_PLANNER enabled but planner bucketization failed"
                 ) from bucketize_err
         else:
+            planner_bucket_view = _prepare_bucket_view(raw_bucket_view)
             process_plan_summary.setdefault("bucket_view", copy.deepcopy(planner_bucket_view))
             existing_plan = getattr(quote_state, "process_plan", None)
             if isinstance(existing_plan, dict):
