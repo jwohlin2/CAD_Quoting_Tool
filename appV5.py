@@ -15,11 +15,15 @@ from __future__ import annotations
 
 import argparse
 import copy
+import importlib
 import json
 import logging
 import math
 import os
 import re
+import subprocess
+import sys
+import tempfile
 import time
 import typing
 from collections import Counter
@@ -54,6 +58,11 @@ from cad_quoter.config import (
 )
 from cad_quoter.utils.geo_ctx import _should_include_outsourced_pass
 from cad_quoter.utils.scrap import _estimate_scrap_from_stock_plan
+
+if sys.platform == "win32":
+    occ_bin = os.path.join(sys.prefix, "Library", "bin")
+    if os.path.isdir(occ_bin):
+        os.add_dll_directory(occ_bin)
 
 APP_ENV = AppEnvironment.from_env()
 
@@ -213,8 +222,6 @@ def _fallback_match_items_contains(items: "pd.Series | typing.Iterable[object]",
     except TypeError:
         return []
 
-
-import sys
 
 import textwrap
 from typing import (
@@ -2926,14 +2933,6 @@ def iter_suggestion_rows(state: QuoteState) -> list[dict]:
     return rows
 
 
-if sys.platform == 'win32':
-    occ_bin = os.path.join(sys.prefix, 'Library', 'bin')
-    if os.path.isdir(occ_bin):
-        os.add_dll_directory(occ_bin)
-import importlib
-import subprocess
-import tempfile
-
 try:
     from hole_table_parser import parse_hole_table_lines as _parse_hole_table_lines
 except Exception:
@@ -3490,9 +3489,6 @@ def load_drawing(path: Path) -> Drawing:
 
 
 # ==== OpenCascade compat (works with OCP OR OCC.Core) ====
-import subprocess
-import tempfile
-from pathlib import Path
 from typing import Any, Callable, Protocol, Tuple, Type
 
 
