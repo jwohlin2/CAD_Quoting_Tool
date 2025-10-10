@@ -12151,12 +12151,17 @@ def compute_quote_from_df(
         vals,
         matcher=_match_items_contains,
     )
-    num = functools.partial(
-        sheet_helpers.num,
-        items,
-        vals,
-        matcher=_match_items_contains,
-    )
+
+    def num(pattern: str, default: float = 0.0) -> float:
+        """Wrapper for :func:`sheet_helpers.num` that accepts positional defaults."""
+
+        return sheet_helpers.num(
+            items,
+            vals,
+            pattern,
+            matcher=_match_items_contains,
+            default=default,
+        )
     strv = functools.partial(
         sheet_helpers.strv,
         items,
