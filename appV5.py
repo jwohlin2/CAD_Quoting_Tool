@@ -20557,4 +20557,22 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(_main())
+    exit_code = _main()
+    if exit_code == 0:
+        try:
+            from cad_quoter.pricing import (
+                PricingEngine,
+                create_default_registry,
+                ensure_material_backup_csv,
+            )
+
+            engine = PricingEngine(create_default_registry())
+            csv_path = ensure_material_backup_csv()
+            quote = engine.get_usd_per_kg(
+                "aluminum", "usd_per_kg", vendor_csv=csv_path, providers=("vendor_csv",)
+            )
+            print(f"[smoke] aluminum ${quote.usd_per_kg:.2f}/kg via {quote.source}")
+        except Exception as exc:  # pragma: no cover - smoke guard
+            print(f"[smoke] pricing run failed: {exc}", file=sys.stderr)
+            exit_code = 1
+    sys.exit(exit_code)
