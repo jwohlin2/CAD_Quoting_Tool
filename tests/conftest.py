@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import importlib
 import types
 from importlib.machinery import ModuleSpec
 from pathlib import Path
@@ -504,6 +505,77 @@ _install_ocp_stubs()
 _install_llama_stub()
 _install_pandas_stub()
 _install_runtime_dep_stubs()
+
+
+def _ensure_geometry_helpers() -> None:
+    """Guarantee optional geometry helpers exist for app imports."""
+
+    try:
+        geometry = importlib.import_module("cad_quoter.geometry")
+    except Exception:
+        geometry = types.ModuleType("cad_quoter.geometry")
+        geometry.__spec__ = ModuleSpec("cad_quoter.geometry", loader=None)
+        sys.modules["cad_quoter.geometry"] = geometry
+
+    def _return_none(*args, **kwargs):
+        return None
+
+    def _return_empty_list(*args, **kwargs):
+        return []
+
+    def _return_empty_dict(*args, **kwargs):
+        return {}
+
+    def _return_bbox(*args, **kwargs):
+        return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+    def _iter_empty(*args, **kwargs):
+        return iter(())
+
+    defaults: Dict[str, object] = {
+        "load_model": _return_none,
+        "load_cad_any": _return_none,
+        "read_cad_any": _return_none,
+        "read_step_shape": _return_none,
+        "read_step_or_iges_or_brep": _return_none,
+        "convert_dwg_to_dxf": lambda path, **kwargs: path,
+        "enrich_geo_occ": _return_empty_dict,
+        "enrich_geo_stl": _return_empty_dict,
+        "safe_bbox": _return_bbox,
+        "safe_bounding_box": _return_bbox,
+        "iter_solids": _iter_empty,
+        "explode_compound": _return_empty_list,
+        "parse_hole_table_lines": _return_empty_list,
+        "extract_text_lines_from_dxf": _return_empty_list,
+        "contours_from_polylines": _return_empty_list,
+        "holes_from_circles": _return_empty_list,
+        "text_harvest": _return_empty_list,
+        "extract_entities": _return_empty_list,
+        "read_dxf": _return_empty_dict,
+        "upsert_var_row": _return_none,
+        "require_ezdxf": _return_none,
+        "get_dwg_converter_path": lambda *args, **kwargs: "",
+        "have_dwg_support": lambda *args, **kwargs: False,
+        "get_import_diagnostics_text": lambda *args, **kwargs: "",
+        "HAS_TRIMESH": False,
+        "HAS_EZDXF": False,
+        "HAS_ODAFC": False,
+        "EZDXF_VERSION": "unknown",
+    }
+
+    if not hasattr(geometry, "GeometryService"):
+        class _GeometryService:
+            def __getattr__(self, item):
+                return _return_none
+
+        defaults["GeometryService"] = _GeometryService
+
+    for name, value in defaults.items():
+        if not hasattr(geometry, name):
+            setattr(geometry, name, value)
+
+
+_ensure_geometry_helpers()
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
