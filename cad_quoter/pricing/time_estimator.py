@@ -313,6 +313,7 @@ def time_drill(
         debug.setdefault("rpm", rpm)
         debug.setdefault("ipm", ipm)
         debug.setdefault("axial_depth_in", axial_depth)
+        debug.setdefault("peck_min_per_hole", peck)
         debug.setdefault("minutes_per_hole", total)
         debug.setdefault("index_min", index_min)
 
@@ -329,15 +330,78 @@ def time_deep_drill(
     debug: dict[str, Any] | None = None,
     precomputed: Mapping[str, Any] | None = None,
 ) -> float:
-    return time_drill(
+    base_sfm = _precomputed_value(precomputed, "sfm")
+    if base_sfm is None:
+        base_sfm = to_num(row.sfm_start, 0.0) or 0.0
+    deep_sfm = base_sfm * 0.65
+
+    base_ipr = _precomputed_value(precomputed, "ipr")
+    if base_ipr is None:
+        base_ipr = pick_feed_value(row, geom.diameter_in) or 0.0
+    deep_ipr = base_ipr * 0.70
+
+    rpm = rpm_from_sfm(deep_sfm, geom.diameter_in)
+    ipm = ipm_from_feed("ipr", deep_ipr, rpm, None)
+
+    precomputed_local: dict[str, Any] = {}
+    if precomputed:
+        try:
+            precomputed_local = dict(precomputed)
+        except Exception:  # pragma: no cover - defensive
+            precomputed_local = {}
+    precomputed_local.update({
+        "sfm": deep_sfm,
+        "ipr": deep_ipr,
+        "rpm": rpm,
+        "ipm": ipm,
+    })
+
+    minutes = time_drill(
         row,
         geom,
         tool,
         machine,
         overhead,
         debug=debug,
-        precomputed=precomputed,
+        precomputed=precomputed_local,
     )
+
+    hole_depth = max(to_num(geom.hole_depth_in, 0.0) or to_num(geom.depth_in, 0.0) or 0.0, 0.0)
+    axial_depth = hole_depth + approach_allowance_for_drill(
+        geom.diameter_in,
+        geom.point_angle_deg or 118.0,
+    )
+    axial_depth += 0.1 * (to_num(geom.diameter_in, 0.0) or 0.0)
+
+    diameter = to_num(geom.diameter_in, 0.0) or 0.0
+    ld_ratio = to_num(geom.ld_ratio, None)
+    if ld_ratio is None or ld_ratio <= 0.0:
+        if diameter > 0.0:
+            ld_ratio = axial_depth / diameter
+        else:
+            ld_ratio = 0.0
+    ld_ratio = max(ld_ratio, 0.0)
+
+    penalty_min = 0.05
+    penalty_span = 0.08 - penalty_min
+    if penalty_span < 0.0:
+        penalty_span = 0.0
+    scale = 0.0
+    if ld_ratio > 3.0 and penalty_span > 0.0:
+        scale = min(max((ld_ratio - 3.0) / 9.0, 0.0), 1.0)
+    penalty_rate = penalty_min + (penalty_span * scale)
+    peck_extra = penalty_rate * axial_depth
+
+    total_minutes = minutes + peck_extra
+
+    if debug is not None:
+        existing_peck = to_num(debug.get("peck_min_per_hole"), 0.0) or 0.0
+        debug["peck_min_per_hole"] = existing_peck + peck_extra
+        existing_minutes = to_num(debug.get("minutes_per_hole"), minutes) or minutes
+        debug["minutes_per_hole"] = existing_minutes + peck_extra
+        debug["deep_drill_peck_rate_min_per_in"] = penalty_rate
+
+    return total_minutes
 
 
 def time_ream(
