@@ -13142,23 +13142,6 @@ def compute_quote_from_df(
     # Expose drilling estimator hours to downstream planner override logic.
     drill_estimator_hours_for_planner = float(drill_hr)
 
-    if material_display_for_debug:
-        canonical_material_text = material_display_for_debug
-        updated_debug_lines: list[str] = []
-        for line in drill_debug_lines:
-            if line.startswith("Drill calc") and "mat=" in line:
-                updated_debug_lines.append(
-                    re.sub(
-                        r"(mat=)[^,]+",
-                        rf"\1{canonical_material_text}",
-                        line,
-                        count=1,
-                    )
-                )
-            else:
-                updated_debug_lines.append(line)
-        drill_debug_lines[:] = updated_debug_lines
-
     if drill_debug_summary:
         best_qty = -1.0
         best_minutes = -1.0
@@ -13179,6 +13162,10 @@ def compute_quote_from_df(
                     str(op_key or selected_op_name).strip() or selected_op_name
                 )
                 speeds_feeds_summary = summary
+                if not chosen_material_label:
+                    material_candidate = str(summary.get("material") or "").strip()
+                    if material_candidate:
+                        chosen_material_label = material_candidate
         if speeds_feeds_summary:
             weight_sum = _coerce_float_or_none(
                 speeds_feeds_summary.get("diameter_weight_sum")
@@ -13228,7 +13215,7 @@ def compute_quote_from_df(
             selected_precomputed = precomputed_candidate
         material_candidate = selected_entry.get("material")
         if material_candidate and not chosen_material_label:
-            chosen_material_label = str(material_candidate)
+            chosen_material_label = str(material_candidate).strip()
         if avg_dia_in <= 0:
             qty_sum = selected_entry.get("diameter_qty_sum") or 0
             weight_sum = selected_entry.get("diameter_weight_sum") or 0.0
@@ -13237,6 +13224,37 @@ def compute_quote_from_df(
                     avg_dia_in = float(weight_sum) / float(qty_sum)
                 except (TypeError, ValueError, ZeroDivisionError):
                     pass
+
+    if not chosen_material_label and drill_debug_summary:
+        for summary in drill_debug_summary.values():
+            if not isinstance(summary, _MappingABC):
+                continue
+            candidate = str(summary.get("material") or "").strip()
+            if candidate:
+                chosen_material_label = candidate
+                break
+
+    if not chosen_material_label:
+        chosen_material_label = str(material_display_for_debug or "").strip()
+
+    final_material_for_debug = chosen_material_label or material_display_for_debug
+    if final_material_for_debug:
+        updated_debug_lines: list[str] = []
+        for line in drill_debug_lines:
+            if line.startswith("Drill calc") and "mat=" in line:
+                updated_debug_lines.append(
+                    re.sub(
+                        r"(mat=)[^,]+",
+                        rf"\1{final_material_for_debug}",
+                        line,
+                        count=1,
+                    )
+                )
+            else:
+                updated_debug_lines.append(line)
+        drill_debug_lines[:] = updated_debug_lines
+        material_display_for_debug = final_material_for_debug
+        material_selection["canonical_material"] = final_material_for_debug
 
     drill_debug_line: str | None = None
     if (speeds_feeds_summary or speeds_feeds_row) and avg_dia_in > 0:
