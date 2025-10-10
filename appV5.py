@@ -6665,6 +6665,8 @@ def render_quote(
     def render_bucket_table(rows: Sequence[tuple[str, float, float, float, float]]):
         if not rows:
             return
+        if not APP_ENV.llm_debug_enabled:
+            return
 
         headers = ("Bucket", "Hours", "Labor $", "Machine $", "Total $")
 
@@ -6694,6 +6696,8 @@ def render_quote(
 
         if lines and lines[-1] != "":
             lines.append("")
+
+        lines.append("Planner diagnostics (not billed)")
 
         header_line = " | ".join(_fmt(header, idx) for idx, header in enumerate(headers))
         separator_line = " | ".join("-" * width for width in col_widths)
