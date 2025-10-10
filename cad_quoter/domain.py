@@ -7,7 +7,9 @@ from appV5 import (
     compute_effective_state as _compute_effective_state,
     effective_to_overrides as _effective_to_overrides,
     merge_effective as _merge_effective,
+    overrides_to_suggestions as _overrides_to_suggestions,
     reprice_with_effective as _reprice_with_effective,
+    suggestions_to_overrides as _suggestions_to_overrides,
 )
 
 __all__ = [
@@ -15,6 +17,8 @@ __all__ = [
     "merge_effective",
     "compute_effective_state",
     "effective_to_overrides",
+    "overrides_to_suggestions",
+    "suggestions_to_overrides",
     "reprice_with_effective",
 ]
 
@@ -41,4 +45,16 @@ def effective_to_overrides(*args, **kwargs):  # type: ignore[override]
     """Proxy to :func:`appV5.effective_to_overrides` for test visibility."""
 
     return _effective_to_overrides(*args, **kwargs)
+
+
+def overrides_to_suggestions(*args, **kwargs):  # type: ignore[override]
+    """Proxy to :func:`appV5.overrides_to_suggestions` for test visibility."""
+
+    return _overrides_to_suggestions(*args, **kwargs)
+
+
+def suggestions_to_overrides(*args, **kwargs):  # type: ignore[override]
+    """Proxy to :func:`appV5.suggestions_to_overrides` for test visibility."""
+
+    return _suggestions_to_overrides(*args, **kwargs)
 
