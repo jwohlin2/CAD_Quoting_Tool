@@ -3458,7 +3458,7 @@ try:
 
 
     def _ocp_brep_read(path: str) -> TopoDS_Shape:
-        s = TopoDS_Shape()
+        s = _new_topods_shape()
         builder = BRep_Builder()  # type: ignore[call-arg]
         if hasattr(BRepTools, "Read_s"):
             ok = BRepTools.Read_s(s, str(path), builder)
@@ -3533,20 +3533,25 @@ except Exception:
 
 
     # UV bounds and brep read are free functions
-    from OCC.Core.BRepTools import BRepTools
-    from OCC.Core.BRepTools import breptools_Read as _occ_breptools_read
+    import OCC.Core.BRepTools as _occ_breptools
+    BRepTools = _occ_breptools.BRepTools
 
     def _occ_uv_bounds(face: TopoDS_Face) -> Tuple[float, float, float, float]:
         fn = getattr(BRepTools, "UVBounds", None)
         if fn is None:
-            from OCC.Core.BRepTools import breptools_UVBounds as _legacy
-            return _legacy(face)
+            legacy = getattr(_occ_breptools, "breptools_UVBounds", None)
+            if legacy is None:
+                raise RuntimeError("UV bounds function is unavailable")
+            return legacy(face)
         return fn(face)
 
 
     def _occ_brep_read(path: str) -> TopoDS_Shape:
-        s = TopoDS_Shape()
-        ok = _occ_breptools_read(s, str(path), BRep_Builder())
+        read_fn = getattr(_occ_breptools, "breptools_Read", None)
+        if read_fn is None:
+            raise RuntimeError("BREP read is unavailable")
+        s = _new_topods_shape()
+        ok = read_fn(s, str(path), BRep_Builder())
         if not ok:
             raise RuntimeError("BREP read failed")
         return s
@@ -3554,6 +3559,15 @@ except Exception:
 
     BRepTools_UVBounds = _occ_uv_bounds
     _brep_read = _occ_brep_read
+
+
+def _new_topods_shape() -> TopoDS_Shape:
+    return typing.cast(TopoDS_Shape, typing.cast(Any, TopoDS_Shape)())
+
+
+def _new_topods_compound() -> TopoDS_Compound:
+    return typing.cast(TopoDS_Compound, typing.cast(Any, TopoDS_Compound)())
+
 
 def _shape_from_reader(reader):
     """Return a healed TopoDS_Shape from a STEP/IGES reader."""
@@ -3575,7 +3589,7 @@ def _shape_from_reader(reader):
         shape = reader.Shape(1)
     else:
         builder = BRep_Builder()
-        compound = TopoDS_Compound()
+        compound = _new_topods_compound()
         builder.MakeCompound(compound)
         added = 0
         for i in range(1, transfer_count + 1):
@@ -3619,7 +3633,7 @@ def read_step_shape(path: str) -> TopoDSShapeT:
         shape = rdr.Shape(1)
     else:
         builder = BRep_Builder()
-        comp = TopoDS_Compound()
+        comp = _new_topods_compound()
         builder.MakeCompound(comp)
         for i in range(1, n + 1):
             s = rdr.Shape(i)
@@ -4203,7 +4217,7 @@ def read_cad_any(path: str):
         ig.TransferRoots()
         return _shape_from_reader(ig)
     if ext == ".brep":
-        s = TopoDS_Shape()
+        s = _new_topods_shape()
         if not BRepTools.Read(s, path, None):
             raise RuntimeError("BREP read failed")
         return s
