@@ -537,11 +537,12 @@ except Exception:  # pragma: no cover - fallback when optional import unavailabl
         if abs(cost_val) > 1e-6:
             return True
         return _geo_mentions_outsourced(geo_context)
+_match_items_contains = _fallback_match_items_contains  # type: ignore[assignment]
+
 try:
     from cad_quoter.utils.text import _match_items_contains as _imported_match_items_contains
 except Exception:  # pragma: no cover - defensive fallback for optional import paths
     _imported_match_items_contains = None  # type: ignore[assignment]
-    _match_items_contains = _fallback_match_items_contains  # type: ignore[assignment]
 else:
     if callable(_imported_match_items_contains):
         _match_items_contains = _imported_match_items_contains
@@ -11956,7 +11957,17 @@ def compute_quote_from_df(
     dtt   = df["Data Type / Input Method"].astype(str).str.lower()
     # --- lookups --------------------------------------------------------------
     def contains(pattern: str):
-        return _match_items_contains(items, pattern)
+        result = _match_items_contains(items, pattern)
+        if hasattr(result, "any"):
+            return result
+        try:
+            return pd.Series(list(result), dtype="bool")
+        except Exception:
+            try:
+                length = len(items)
+            except Exception:
+                length = 0
+            return pd.Series([False] * length, dtype="bool")
 
     def first_num(pattern: str, default: float = 0.0) -> float:
         m = contains(pattern)
