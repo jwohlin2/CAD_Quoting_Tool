@@ -291,6 +291,7 @@ from typing import (
     MutableMapping,
     overload,
     TYPE_CHECKING,
+    TypeAlias,
 )
 
 
@@ -3554,7 +3555,8 @@ def _resolve_face_of():
 
 FACE_OF = _resolve_face_of()
 
-def as_face(obj: Any) -> "TopoDS_Face":
+
+def as_face(obj: Any) -> Any:
     """
     Return a TopoDS_Face for the *current backend*.
     - If already a Face, return it (don't re-cast).
@@ -3571,7 +3573,7 @@ def as_face(obj: Any) -> "TopoDS_Face":
     return ensure_face(obj)
 
 
-def iter_faces(shape: Any) -> Iterator["TopoDS_Face"]:
+def iter_faces(shape: Any) -> Iterator[Any]:
     explorer_cls = cast(Callable[[Any, Any], Any], TopExp_Explorer)
     exp = explorer_cls(shape, cast(Any, TopAbs_FACE))
     while exp.More():
@@ -3760,7 +3762,7 @@ def linear_properties(edge, gprops):
 
 def map_shapes_and_ancestors(
     root_shape, sub_enum, anc_enum
-) -> "TopTools_IndexedDataMapOfShapeListOfShape":
+) -> Any:
     """Return TopTools_IndexedDataMapOfShapeListOfShape for (sub → ancestors)."""
     # Ensure we pass a *Shape*, not a Face
     if root_shape is None:
@@ -3771,7 +3773,7 @@ def map_shapes_and_ancestors(
         pass
 
     amap = cast(
-        TopTools_IndexedDataMapOfShapeListOfShape,
+        Any,
         TopTools_IndexedDataMapOfShapeListOfShape(),  # type: ignore[call-overload]
     )
     # static/instance variants across wheels
@@ -3791,20 +3793,20 @@ def _is_instance(obj, qualnames):
         return False
     return name in qualnames  # e.g. ["TopoDS_Face", "Face"]
 
-def ensure_face(obj: Any) -> "TopoDS_Face":
+def ensure_face(obj: Any) -> Any:
     if obj is None:
         raise TypeError("Expected a face, got None")
     face_type = cast(type, TopoDS_Face)
     try:
         if isinstance(obj, face_type):
-            return cast(TopoDS_Face, obj)
+            return cast(Any, obj)
     except TypeError:
         pass
     if type(obj).__name__ == "TopoDS_Face":
-        return cast(TopoDS_Face, obj)
+        return cast(Any, obj)
     st = obj.ShapeType() if hasattr(obj, "ShapeType") else None
     if st == TopAbs_FACE:
-        return cast(TopoDS_Face, FACE_OF(obj))
+        return cast(Any, FACE_OF(obj))
     raise TypeError(f"Not a face: {type(obj).__name__}")
 # ---------- end compat ----------
 
@@ -3905,7 +3907,7 @@ try:
     from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape  # type: ignore[import]
     BACKEND_OCC = "OCP"
 
-    def _ocp_uv_bounds(face: "TopoDS_Face") -> Tuple[float, float, float, float]:
+    def _ocp_uv_bounds(face: Any) -> Tuple[float, float, float, float]:
         tools = cast(Any, BRepTools)
         return tools.UVBounds(face)
 
@@ -3991,7 +3993,7 @@ except Exception:
     import OCC.Core.BRepTools as _occ_breptools
     BRepTools = cast(Any, _occ_breptools).BRepTools
 
-    def _occ_uv_bounds(face: "TopoDS_Face") -> Tuple[float, float, float, float]:
+    def _occ_uv_bounds(face: Any) -> Tuple[float, float, float, float]:
         tools = cast(Any, BRepTools)
         fn = getattr(tools, "UVBounds", None)
         if fn is None:
