@@ -4935,7 +4935,10 @@ def _load_master_variables() -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
     cache["loaded"] = True
     cache["core"] = core_df
     cache["full"] = full_df
-    return (core_df.copy(), full_df.copy())
+
+    core_df_cast = cast(pd.DataFrame, core_df)
+    full_df_cast = cast(pd.DataFrame, full_df)
+    return (core_df_cast.copy(), full_df_cast.copy())
 
 
 def find_variables_near(cad_path: str):
@@ -9921,8 +9924,8 @@ def estimate_drilling_hours(
                     if source_min is None or source_max is None:
                         return "-"
                     try:
-                        min_f = float(source_min)
-                        max_f = float(source_max)
+                        min_float = float(source_min)
+                        max_float = float(source_max)
                     except (TypeError, ValueError):
                         return "-"
                     if not math.isfinite(min_float) or not math.isfinite(max_float):
@@ -10401,7 +10404,6 @@ def validate_quote_before_pricing(
             raise ValueError("Quote blocked:\n- " + "\n- ".join(issues))
 
 
-# pyright: ignore[reportGeneralTypeIssues]
 def compute_quote_from_df(df: pd.DataFrame,
                           params: Dict[str, Any] | None = None,
                           rates: Dict[str, float] | None = None,
@@ -10418,7 +10420,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                           quote_state: QuoteState | None = None,
                           reuse_suggestions: bool = False,
                           llm_suggest: Any | None = None,
-                          pricing: PricingEngine | None = None) -> Dict[str, Any]:
+                          pricing: PricingEngine | None = None) -> Dict[str, Any]:  # pyright: ignore[reportGeneralTypeIssues]
     """
     Estimator that consumes variables from the sheet (Item, Example Values / Options, Data Type / Input Method).
 
@@ -15868,13 +15870,20 @@ def harvest_outline_bbox(doc, to_in: float) -> dict[str, Any]:
                 biggest = (area, pl)
     if biggest:
         pl = biggest[1]
+        pts: list[tuple[float, float]] = []
         try:
             get_points = getattr(pl, "get_points", None)
-            raw_pts = list(get_points()) if callable(get_points) else []
-            pts = [
-                (float(x) * to_in, float(y) * to_in)
-                for x, y, *_ in raw_pts
-            ]
+            if callable(get_points):
+                raw_pts_iter = get_points()
+                raw_pts = cast(Iterable[Sequence[float]], raw_pts_iter)
+                for raw_pt in raw_pts:
+                    if len(raw_pt) < 2:
+                        continue
+                    x_val, y_val = raw_pt[0], raw_pt[1]
+                    try:
+                        pts.append((float(x_val) * to_in, float(y_val) * to_in))
+                    except (TypeError, ValueError):
+                        continue
         except Exception:
             pts = []
         vertices.extend(pts)
@@ -17423,9 +17432,20 @@ def detect_pockets_and_islands(doc, to_in: float) -> dict[str, Any]:
         except Exception:
             polylines = []
         for pl in polylines:
+            pts: list[tuple[float, float]] = []
             try:
                 get_points = getattr(pl, "get_points", None)
-                pts = list(get_points("xy")) if callable(get_points) else []
+                if callable(get_points):
+                    raw_pts_iter = get_points("xy")
+                    raw_pts = cast(Iterable[Sequence[float]], raw_pts_iter)
+                    for raw_pt in raw_pts:
+                        if len(raw_pt) < 2:
+                            continue
+                        x_val, y_val = raw_pt[0], raw_pt[1]
+                        try:
+                            pts.append((float(x_val), float(y_val)))
+                        except (TypeError, ValueError):
+                            continue
             except Exception:
                 continue
             if len(pts) < 3:
@@ -17848,6 +17868,10 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     dxf_text_path: str | None = None
     doc = None
     lower_path = path.lower()
+    readfile = getattr(ezdxf_mod, "readfile", None)
+    if not callable(readfile):
+        raise AttributeError("ezdxf module does not provide a callable 'readfile' function")
+
     if lower_path.endswith(".dwg"):
         if geometry.HAS_ODAFC:
             # uses ODAFileConverter through ezdxf, no env var needed
@@ -17857,9 +17881,9 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
         else:
             dxf_path = convert_dwg_to_dxf(path, out_ver="ACAD2018")
             dxf_text_path = dxf_path
-            doc = ezdxf_mod.readfile(dxf_path)
+            doc = readfile(dxf_path)
     else:
-        doc = ezdxf_mod.readfile(path)
+        doc = readfile(path)
         dxf_text_path = path
 
     sp = doc.modelspace()
