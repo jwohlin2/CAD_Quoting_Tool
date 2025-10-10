@@ -1,19 +1,11 @@
-[tool.black]
-line-length = 88
-target-version = ["py311"]
-
 [tool.ruff]
-line-length = 88
-target-version = "py311"
+line-length = 100
 fix = true
+target-version = "py311"
 
 [tool.ruff.lint]
-select = ["F"]
-extend-select = [
-    "C90",
-    "PLR0915",
-    "SIM",
-]
+select = ["F401", "F841", "E", "W", "I"]
+ignore = []
 
-[tool.ruff.lint.pylint]
-max-statements = 50
+[tool.black]
+line-length = 100
