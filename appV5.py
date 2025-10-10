@@ -195,7 +195,7 @@ from cad_quoter.domain_models import (
     normalize_material_key as _normalize_lookup_key,
 )
 from cad_quoter.coerce import to_float, to_int
-from cad_quoter.utils import sdict
+from cad_quoter.utils import compact_dict, sdict
 from cad_quoter.pricing import (
     LB_PER_KG,
     PricingEngine,
@@ -427,11 +427,43 @@ def _canonical_amortized_label(label: Any) -> tuple[str, bool]:
     return text, False
 
 import pandas as pd
-from OCP.BRep import BRep_Tool
-from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE
-from OCP.TopExp import TopExp, TopExp_Explorer
-from OCP.TopoDS import TopoDS, TopoDS_Face, TopoDS_Shape
-from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
+from typing import TYPE_CHECKING
+
+try:  # Prefer pythonocc-core's OCP bindings when available
+    from OCP.BRep import BRep_Tool  # type: ignore[import]
+    from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE  # type: ignore[import]
+    from OCP.TopExp import TopExp, TopExp_Explorer  # type: ignore[import]
+    from OCP.TopoDS import TopoDS, TopoDS_Face, TopoDS_Shape  # type: ignore[import]
+    from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape  # type: ignore[import]
+except ImportError:
+    try:  # Fallback to pythonocc-core
+        from OCC.Core.BRep import BRep_Tool  # type: ignore[import]
+        from OCC.Core.TopAbs import TopAbs_EDGE, TopAbs_FACE  # type: ignore[import]
+        from OCC.Core.TopExp import TopExp, TopExp_Explorer  # type: ignore[import]
+        from OCC.Core.TopoDS import TopoDS, TopoDS_Face, TopoDS_Shape  # type: ignore[import]
+        from OCC.Core.TopTools import (  # type: ignore[import]
+            TopTools_IndexedDataMapOfShapeListOfShape,
+        )
+    except ImportError:  # pragma: no cover - only hit in environments without OCCT
+        if TYPE_CHECKING:  # Keep type checkers happy without introducing runtime deps
+            from typing import Any
+
+            BRep_Tool = TopAbs_EDGE = TopAbs_FACE = TopExp = TopExp_Explorer = Any  # type: ignore[assignment]
+            TopoDS = TopoDS_Face = TopoDS_Shape = Any  # type: ignore[assignment]
+            TopTools_IndexedDataMapOfShapeListOfShape = Any  # type: ignore[assignment]
+        else:
+            class _MissingOCCTModule:
+                def __getattr__(self, item):
+                    raise ImportError(
+                        "OCCT bindings are required for geometry operations. "
+                        "Please install pythonocc-core or the OCP wheels."
+                    )
+
+            BRep_Tool = _MissingOCCTModule()
+            TopAbs_EDGE = TopAbs_FACE = _MissingOCCTModule()
+            TopExp = TopExp_Explorer = _MissingOCCTModule()
+            TopoDS = TopoDS_Face = TopoDS_Shape = _MissingOCCTModule()
+            TopTools_IndexedDataMapOfShapeListOfShape = _MissingOCCTModule()
 
 try:
     from geo_read_more import build_geo_from_dxf as build_geo_from_dxf_path
