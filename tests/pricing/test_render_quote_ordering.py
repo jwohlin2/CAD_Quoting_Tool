@@ -58,6 +58,87 @@ def test_render_quote_places_why_after_pricing_ladder_and_llm_adjustments() -> N
     assert rendered.endswith("\n")
 
 
+def test_render_quote_planner_why_section_uses_final_bucket_view() -> None:
+    breakdown = {
+        "qty": 1,
+        "totals": {
+            "labor_cost": 900.0,
+            "direct_costs": 175.0,
+            "subtotal": 1075.0,
+            "with_overhead": 1182.5,
+            "with_ga": 1241.625,
+            "with_contingency": 1241.625,
+            "with_expedite": 1241.625,
+        },
+        "nre_detail": {},
+        "nre": {},
+        "material": {"scrap_pct": 0.12},
+        "process_costs": {},
+        "process_meta": {},
+        "pass_through": {"Material": 150.0, "Shipping": 25.0},
+        "applied_pcts": {
+            "OverheadPct": 0.10,
+            "GA_Pct": 0.05,
+            "ContingencyPct": 0.0,
+            "MarginPct": 0.15,
+        },
+        "rates": {},
+        "params": {},
+        "labor_cost_details": {},
+        "direct_cost_details": {},
+        "pricing_source": "planner",
+        "bucket_view": {
+            "buckets": {
+                "milling": {
+                    "total$": 500.0,
+                    "machine$": 350.0,
+                    "labor$": 150.0,
+                    "minutes": 120.0,
+                },
+                "drilling": {
+                    "total$": 300.0,
+                    "machine$": 200.0,
+                    "labor$": 100.0,
+                    "minutes": 90.0,
+                },
+                "inspection": {
+                    "total$": 100.0,
+                    "labor$": 100.0,
+                    "minutes": 60.0,
+                },
+                "finishing": {
+                    "total$": 50.0,
+                    "labor$": 50.0,
+                    "minutes": 30.0,
+                },
+            }
+        },
+        "decision_state": {"effective": {"setups": 2, "part_count": 4}},
+    }
+
+    result = {"price": 1450.0, "breakdown": breakdown}
+
+    rendered = appV5.render_quote(result, currency="$")
+    lines = rendered.splitlines()
+
+    heading = "Planner operations (final bucket view):"
+    assert any(line.strip() == heading for line in lines)
+    heading_idx = next(i for i, line in enumerate(lines) if line.strip() == heading)
+    bucket_lines = lines[heading_idx + 1 : heading_idx + 4]
+
+    assert len(bucket_lines) == 3
+    assert bucket_lines[0].strip().startswith("Milling:")
+    assert "$500.00" in bucket_lines[0]
+    assert "hr" in bucket_lines[0]
+    assert all("overrides" not in line for line in bucket_lines)
+
+    trailing_block = [line.strip() for line in lines[heading_idx + 1 : heading_idx + 10]]
+    assert any(line.startswith("Parts: 4") for line in trailing_block)
+    assert any(line.startswith("Setups: 2") for line in trailing_block)
+    assert any("Scrap: 12.0%" in line for line in trailing_block)
+    assert any("Pass-Through: $175.00" in line for line in trailing_block)
+
+
 def test_render_quote_includes_hour_summary() -> None:
     result = {
         "price": 120.0,
