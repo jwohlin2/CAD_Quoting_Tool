@@ -10980,6 +10980,25 @@ def compute_quote_from_df(
     hole_scrap_clamped_val: float = 0.0
     material_selection: dict[str, Any] = {}
 
+    def _has_rows(table: Any) -> bool:
+        """Return True if the pandas-like table has any rows."""
+
+        if table is None:
+            return False
+        try:
+            empty_attr = getattr(table, "empty")
+        except Exception:
+            empty_attr = None
+        if empty_attr is not None:
+            try:
+                return bool(empty_attr) is False
+            except Exception:
+                pass
+        try:
+            return len(table) > 0  # type: ignore[arg-type]
+        except Exception:
+            return False
+
     def _int_from(value: Any) -> int:
         num = _coerce_float_or_none(value)
         if num is None:
@@ -12112,7 +12131,7 @@ def compute_quote_from_df(
             "Speeds/feeds CSV path not configured; using legacy drilling heuristics for this quote."
         )
         _record_red_flag("Speeds/feeds CSV not configured — using legacy drilling heuristics.")
-    speeds_feeds_loaded_flag = speeds_feeds_table is not None
+    speeds_feeds_loaded_flag = _has_rows(speeds_feeds_table)
 
     if speeds_feeds_table is not None and drill_material_lookup:
         table_group = _lookup_material_group_from_table(
@@ -12333,15 +12352,9 @@ def compute_quote_from_df(
             if speeds_feeds_path:
                 guard_ctx.setdefault("speeds_feeds_path", speeds_feeds_path)
             try:
-                loaded_flag = bool(
-                    (speeds_feeds_table is not None)
-                    and (getattr(speeds_feeds_table, "empty", False) is False)
-                )
+                loaded_flag = _has_rows(speeds_feeds_table)
             except Exception:
-                try:
-                    loaded_flag = speeds_feeds_table is not None and len(speeds_feeds_table) > 0
-                except Exception:
-                    loaded_flag = False
+                loaded_flag = False
             guard_ctx["speeds_feeds_loaded"] = loaded_flag
             if red_flag_messages:
                 ctx_flags = guard_ctx.setdefault("red_flags", [])
