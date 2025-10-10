@@ -7570,7 +7570,105 @@ def render_quote(
     bucket_keys.extend(extra_keys)
 
     planner_why_lines: list[str] = []
-    if bucket_keys:
+    final_bucket_map = _extract_bucket_map(breakdown.get("bucket_view"))
+    if pricing_source_lower == "planner":
+        final_entries: list[tuple[str, float, float, float, Mapping[str, Any]]] = []
+        for canon_key, info in final_bucket_map.items():
+            minutes_val = _bucket_cost(info, "minutes")
+            hours_val = minutes_val / 60.0 if minutes_val else 0.0
+            total_val = _bucket_cost(info, "total$", "total_cost", "total")
+            if total_val == 0.0:
+                total_val = _bucket_cost(info, "machine$", "machine_cost") + _bucket_cost(
+                    info, "labor$", "labor_cost"
+                )
+            metric_val = total_val if total_val > 0 else hours_val
+            if metric_val <= 0:
+                continue
+            final_entries.append((canon_key, metric_val, total_val, hours_val, info))
+
+        if final_entries:
+            def _sort_key(entry: tuple[str, float, float, float, Mapping[str, Any]]) -> tuple[float, str]:
+                canon_key, metric, *_ = entry
+                label = _display_bucket_label(canon_key, label_overrides)
+                return (-metric, label.lower())
+
+            final_entries.sort(key=_sort_key)
+            top_entries = final_entries[:3]
+            planner_why_lines.append("Planner operations (final bucket view):")
+            for canon_key, _, total_val, hours_val, info in top_entries:
+                label = _display_bucket_label(canon_key, label_overrides)
+                summary_bits: list[str] = []
+                if total_val > 0:
+                    summary_bits.append(f"{_m(total_val)} total")
+                machine_val = _bucket_cost(info, "machine$", "machine_cost")
+                labor_val = _bucket_cost(info, "labor$", "labor_cost")
+                cost_bits: list[str] = []
+                if machine_val > 0:
+                    cost_bits.append(f"{_m(machine_val)} machine")
+                if labor_val > 0:
+                    cost_bits.append(f"{_m(labor_val)} labor")
+                if cost_bits:
+                    summary_bits.append(" + ".join(cost_bits))
+                if hours_val > 0:
+                    summary_bits.append(f"{hours_val:.2f} hr")
+                if not summary_bits:
+                    summary_bits.append("0.00 hr")
+                planner_why_lines.append(f"{label}: {'; '.join(summary_bits)}")
+
+            decision_state = breakdown.get("decision_state")
+            effective_state: Mapping[str, Any] | None = None
+            if isinstance(decision_state, _MappingABC):
+                candidate = decision_state.get("effective")
+                if isinstance(candidate, _MappingABC):
+                    effective_state = candidate
+
+            def _coerce_positive_int(value: Any) -> int | None:
+                num = _coerce_float_or_none(value)
+                if num is None or not math.isfinite(num) or num <= 0:
+                    return None
+                return int(round(num))
+
+            extra_fact_lines: list[str] = []
+
+            part_count_val: int | None = None
+            for source in (effective_state, breakdown, g):
+                if not isinstance(source, _MappingABC):
+                    continue
+                for key in ("part_count", "partcount", "parts", "part_qty", "partcount_hint"):
+                    if key in source:
+                        part_count_val = _coerce_positive_int(source.get(key))
+                        if part_count_val:
+                            break
+                if part_count_val:
+                    break
+            if part_count_val:
+                extra_fact_lines.append(f"Parts: {part_count_val}")
+
+            setups_val: int | None = None
+            if effective_state:
+                for key in ("setups", "milling_setups"):
+                    setups_val = _coerce_positive_int(effective_state.get(key))
+                    if setups_val:
+                        break
+            if setups_val:
+                extra_fact_lines.append(f"Setups: {setups_val}")
+
+            scrap_pct_val = normalize_scrap_pct(material.get("scrap_pct")) if material else None
+            if scrap_pct_val:
+                extra_fact_lines.append(f"Scrap: {_pct(scrap_pct_val)}")
+
+            pass_total_display = 0.0
+            for value in pass_through.values():
+                coerced = _coerce_float_or_none(value)
+                if coerced:
+                    pass_total_display += float(coerced)
+            if pass_total_display > 0:
+                extra_fact_lines.append(f"Pass-Through: {_m(pass_total_display)}")
+
+            if extra_fact_lines:
+                planner_why_lines.extend(extra_fact_lines)
+
+    if not planner_why_lines and bucket_keys:
         planner_why_lines.append("Planner operations (hours & cost):")
         for bucket_key in bucket_keys:
             info = _planner_bucket_info(bucket_key)
