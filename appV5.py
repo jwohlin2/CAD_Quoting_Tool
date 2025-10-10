@@ -92,7 +92,22 @@ def roughly_equal(a: float | int | str | None, b: float | int | str | None, *, e
 import copy
 import sys
 import textwrap
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, TypeVar, cast
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Protocol,
+    Sequence,
+    Tuple,
+    TypeAlias,
+    TypeVar,
+    cast,
+)
 
 
 T = TypeVar("T")
@@ -483,6 +498,27 @@ if TYPE_CHECKING:
 else:
     TopoDSShapeT = typing.Any
 
+class _BRepToolProto(Protocol):
+    def Surface(self, face: Any) -> Any: ...
+
+    def Surface_s(self, face: Any) -> Any: ...
+
+    def Location(self, face: Any) -> Any: ...
+
+    def Location_s(self, face: Any) -> Any: ...
+
+
+class _TopoDSProto(Protocol):
+    def Edge_s(self, shape: Any) -> Any: ...
+
+    def Solid_s(self, shape: Any) -> Any: ...
+
+    def Shell_s(self, shape: Any) -> Any: ...
+
+
+TopoDSFaceT: TypeAlias = TopoDSShapeT
+TopToolsIndexedDataMap: TypeAlias = Any
+
 try:  # Prefer pythonocc-core's OCP bindings when available
     from OCP.BRep import BRep_Tool  # type: ignore[import]
     from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE  # type: ignore[import]
@@ -670,27 +706,41 @@ def _plate_bbox_mm2(geo_ctx: Mapping[str, Any] | None) -> float:
         return float(bbox_mm[0]) * float(bbox_mm[1])
 
     # Fallback: UI plate Length/Width (inches) already present in sheet/vars
+    L_in: float | None
+    W_in: float | None
     try:
-        L_in = float(geo_map.get("plate_length_mm") or 0.0) / 25.4  # if caller put mm there
+        raw_length_mm = geo_map.get("plate_length_mm")
+        L_in = float(raw_length_mm) / 25.4 if raw_length_mm not in (None, "") else None
     except Exception:
         L_in = None
     try:
-        W_in = float(geo_map.get("plate_width_mm") or 0.0) / 25.4
+        raw_width_mm = geo_map.get("plate_width_mm")
+        W_in = float(raw_width_mm) / 25.4 if raw_width_mm not in (None, "") else None
     except Exception:
         W_in = None
 
     # If the mm fields aren't set, check UI vars stuffed into geo_ctx
-    if not (L_in and W_in):
-        try:
-            L_in = L_in or float(geo_map.get("plate_length_in"))
-        except Exception:
-            pass
-        try:
-            W_in = W_in or float(geo_map.get("plate_width_in"))
-        except Exception:
-            pass
+    if L_in is None or L_in <= 0:
+        raw_length_in = geo_map.get("plate_length_in")
+        if raw_length_in is not None:
+            try:
+                candidate = float(raw_length_in)
+            except Exception:
+                candidate = None
+            if candidate is not None and candidate > 0:
+                L_in = candidate
 
-    if L_in and W_in and L_in > 0 and W_in > 0:
+    if W_in is None or W_in <= 0:
+        raw_width_in = geo_map.get("plate_width_in")
+        if raw_width_in is not None:
+            try:
+                candidate_w = float(raw_width_in)
+            except Exception:
+                candidate_w = None
+            if candidate_w is not None and candidate_w > 0:
+                W_in = candidate_w
+
+    if L_in is not None and W_in is not None and L_in > 0 and W_in > 0:
         return float(L_in * 25.4) * float(W_in * 25.4)
     return 0.0
 
@@ -3006,7 +3056,7 @@ def _resolve_face_of():
 
 FACE_OF = _resolve_face_of()
 
-def as_face(obj: Any) -> TopoDS_Face:
+def as_face(obj: Any) -> TopoDSFaceT:
     """
     Return a TopoDS_Face for the *current backend*.
     - If already a Face, return it (don't re-cast).
@@ -3023,7 +3073,7 @@ def as_face(obj: Any) -> TopoDS_Face:
     return ensure_face(obj)
 
 
-def iter_faces(shape: Any) -> Iterator[TopoDS_Face]:
+def iter_faces(shape: Any) -> Iterator[TopoDSFaceT]:
     explorer_cls = cast(type[Any], TopExp_Explorer)
     exp = explorer_cls(shape, cast(Any, TopAbs_FACE))
     while exp.More():
@@ -3049,7 +3099,7 @@ def face_surface(face_like: Any) -> tuple[Any, Any | None]:
         s, loc2 = s
         loc = loc or loc2
     if hasattr(s, "Surface"):
-        s = s.Surface()  # unwrap handle
+        s = cast(Any, s).Surface()  # unwrap handle
     return s, loc
 
 
@@ -3189,7 +3239,7 @@ def linear_properties(edge, gprops):
             raise
     return fn(edge, gprops)
 
-def map_shapes_and_ancestors(root_shape, sub_enum, anc_enum):
+def map_shapes_and_ancestors(root_shape, sub_enum, anc_enum) -> TopToolsIndexedDataMap:
     """Return TopTools_IndexedDataMapOfShapeListOfShape for (sub → ancestors)."""
     # Ensure we pass a *Shape*, not a Face
     if root_shape is None:
@@ -3200,7 +3250,7 @@ def map_shapes_and_ancestors(root_shape, sub_enum, anc_enum):
         pass
 
     amap = cast(
-        "TopTools_IndexedDataMapOfShapeListOfShape",
+        TopToolsIndexedDataMap,
         TopTools_IndexedDataMapOfShapeListOfShape(),  # type: ignore[call-overload]
     )
     # static/instance variants across wheels
@@ -3220,10 +3270,10 @@ def _is_instance(obj, qualnames):
         return False
     return name in qualnames  # e.g. ["TopoDS_Face", "Face"]
 
-def ensure_face(obj: Any) -> TopoDS_Face:
+def ensure_face(obj: Any) -> TopoDSFaceT:
     if obj is None:
         raise TypeError("Expected a face, got None")
-    face_type = cast(type, TopoDS_Face)
+    face_type = cast(type, TopoDSFaceT)
     if isinstance(obj, face_type) or type(obj).__name__ == "TopoDS_Face":
         return obj
     st = obj.ShapeType() if hasattr(obj, "ShapeType") else None
