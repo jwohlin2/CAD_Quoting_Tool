@@ -6196,16 +6196,10 @@ def render_quote(
             for label, value in hs_entries.items()
         ):
             pricing_source_value = "planner"
-    if pricing_source_value:
-        lines.append(f"Pricing Source: {pricing_source_value}")
-    pricing_source_lower = (
-        str(pricing_source_value).strip().lower()
-        if pricing_source_value is not None
-        else ""
-    )
+    pricing_source_text = str(pricing_source_value or "").strip()
+    pricing_source_lower = pricing_source_text.lower()
     if pricing_source_text:
         lines.append(f"Pricing Source: {pricing_source_text}")
-    pricing_source_lower = pricing_source_text.lower()
     if red_flags:
         lines.append("")
         lines.append("Red Flags")
@@ -7613,9 +7607,16 @@ def render_quote(
             "Displayed process rows do not add up to the accumulated labor total."
         )
 
-    expected_labor_total = float(totals.get("labor_cost", 0.0) or 0.0)
+    expected_labor_raw = totals.get("labor_cost") if isinstance(totals, Mapping) else None
+    if expected_labor_raw is None:
+        expected_labor_total = displayed_process_total
+    else:
+        expected_labor_total = float(expected_labor_raw or 0.0)
     if abs(displayed_process_total - expected_labor_total) >= 0.01:
-        raise AssertionError("bucket sum mismatch")
+        raise AssertionError(
+            "bucket sum mismatch"
+            f": displayed={displayed_process_total:.2f}, expected={expected_labor_total:.2f}"
+        )
 
     proc_total = displayed_process_total
     row("Total", proc_total, indent="  ")
@@ -9063,7 +9064,7 @@ def _drill_overhead_from_params(params: Mapping[str, Any] | None) -> _TimeOverhe
         approach_retract_in=float(approach) if approach and approach >= 0 else 0.25,
         peck_penalty_min_per_in_depth=float(peck) if peck and peck >= 0 else 0.03,
         dwell_min=float(dwell) if dwell and dwell >= 0 else None,
-        index_sec_per_hole=float(index_sec) if index_sec and index_sec >= 0 else 6.0,
+        index_sec_per_hole=float(index_sec) if index_sec is not None and index_sec >= 0 else None,
     )
 
 
@@ -9098,6 +9099,18 @@ MAX_DRILL_MIN_PER_HOLE = 2.00
 DEEP_DRILL_SFM_FACTOR = 0.65
 DEEP_DRILL_IPR_FACTOR = 0.70
 DEEP_DRILL_PECK_PENALTY_MIN_PER_IN = 0.07
+
+DEFAULT_DRILL_INDEX_SEC_PER_HOLE = 5.3746248
+DEFAULT_DEEP_DRILL_INDEX_SEC_PER_HOLE = 4.3038756
+
+
+def _default_drill_index_seconds(operation: str | None) -> float:
+    """Return the default indexing time (seconds) for a drill operation."""
+
+    op_name = (operation or "").strip().lower()
+    if op_name == "deep_drill":
+        return DEFAULT_DEEP_DRILL_INDEX_SEC_PER_HOLE
+    return DEFAULT_DRILL_INDEX_SEC_PER_HOLE
 
 
 def _drill_minutes_per_hole_bounds(
@@ -9186,6 +9199,7 @@ def estimate_drilling_hours(
     overhead_params: _TimeOverheadParams | None = None,
     warnings: list[str] | None = None,
     debug_lines: list[str] | None = None,
+    debug_meta: dict[str, Any] | None = None,
 ) -> float:
     """
     Conservative plate-drilling model with floors so 100+ holes don't collapse to minutes.
@@ -9207,6 +9221,13 @@ def estimate_drilling_hours(
             material_label = alt_label
     mat = str(material_label or mat_key or "").lower()
     material_factor = _unit_hp_cap(material_label)
+    debug: dict[str, Any] | None
+    if debug_meta is not None:
+        debug = debug_meta
+    elif debug_lines is not None:
+        debug = {}
+    else:
+        debug = None
     debug_list = debug_lines if debug_lines is not None else None
     speeds_feeds_row: Mapping[str, Any] | None = None
     selected_op_name = ""
@@ -9227,7 +9248,6 @@ def estimate_drilling_hours(
 
     group_specs: list[tuple[float, int, float]] = []
     # Optional aggregate debug dict for callers that want structured details
-    debug: dict[str, Any] | None = {} if debug_lines is not None else None
     fallback_counts: Counter[float] | None = None
 
     if hole_groups:
@@ -9323,6 +9343,7 @@ def estimate_drilling_hours(
         row_cache: dict[tuple[str, float], tuple[Mapping[str, Any], _TimeToolParams] | None] = {}
         missing_row_messages: set[tuple[str, str, float]] = set()
         debug_summary_entries: dict[str, dict[str, Any]] = {}
+        debug_operation_totals: dict[str, dict[str, Any]] = {}
 
         def _build_tool_params(row: Mapping[str, Any]) -> _TimeToolParams:
             key_map = {
@@ -9511,6 +9532,17 @@ def estimate_drilling_hours(
             debug_payload: dict[str, Any] | None = None
             tool_params: _TimeToolParams
             minutes: float
+            index_override = getattr(per_hole_overhead, "index_sec_per_hole", None)
+            if index_override is None:
+                effective_index_sec = _default_drill_index_seconds(op_name)
+            else:
+                effective_index_sec = _as_float_or_none(index_override) or 0.0
+                if effective_index_sec < 0.0:
+                    effective_index_sec = 0.0
+            overhead_for_calc = replace(
+                per_hole_overhead,
+                index_sec_per_hole=effective_index_sec,
+            )
             if cache_entry:
                 row, tool_params = cache_entry
                 if debug_lines is not None:
@@ -9520,7 +9552,7 @@ def estimate_drilling_hours(
                     geom,
                     tool_params,
                     machine_for_cut,
-                    per_hole_overhead,
+                    overhead_for_calc,
                     material_factor=material_cap_val,
                     debug=debug_payload,
                 )
@@ -9540,11 +9572,16 @@ def estimate_drilling_hours(
                 tool_params = _TimeToolParams(teeth_z=1)
                 if debug_lines is not None:
                     debug_payload = {}
+                legacy_overhead = replace(
+                    legacy_overhead,
+                    index_sec_per_hole=effective_index_sec,
+                )
+                overhead_for_calc = legacy_overhead
                 minutes = _estimate_time_min(
                     geom=geom,
                     tool=tool_params,
                     machine=machine_for_cut,
-                    overhead=legacy_overhead,
+                    overhead=overhead_for_calc,
                     material_factor=material_cap_val,
                     operation=op_name,
                     debug=debug_payload,
@@ -9788,6 +9825,16 @@ def estimate_drilling_hours(
                     line_parts.append("overhead: " + ", ".join(overhead_bits) + "; ")
                 line_parts.append(f"total hr: {total_hours:.2f}.")
                 debug_lines.append("".join(line_parts))
+
+                debug_operation_totals[op_key] = {
+                    "operation": summary.get("operation", op_key),
+                    "qty": int(qty_total),
+                    "runtime_minutes": float(minutes_total),
+                    "toolchange_minutes": float(toolchange_total),
+                    "total_minutes": float(minutes_total + toolchange_total),
+                    "total_hours": float(total_hours),
+                    "minutes_per_hole": float(minutes_avg),
+                }
         if missing_row_messages and warnings is not None:
             for op_display, material_display, dia_val in sorted(missing_row_messages):
                 dia_text = f"{dia_val:.3f}".rstrip("0").rstrip(".")
@@ -9797,6 +9844,25 @@ def estimate_drilling_hours(
                 )
                 if warning_text not in warnings:
                     warnings.append(warning_text)
+        if debug is not None and debug_operation_totals:
+            operations_struct: dict[str, dict[str, Any]] = {}
+            total_minutes_sum = 0.0
+            total_hours_sum = 0.0
+            for op_name, op_data in debug_operation_totals.items():
+                operations_struct[op_name] = {
+                    "operation": op_data.get("operation", op_name),
+                    "qty": op_data.get("qty", 0),
+                    "runtime_minutes": op_data.get("runtime_minutes", 0.0),
+                    "toolchange_minutes": op_data.get("toolchange_minutes", 0.0),
+                    "total_minutes": op_data.get("total_minutes", 0.0),
+                    "total_hours": op_data.get("total_hours", 0.0),
+                    "minutes_per_hole": op_data.get("minutes_per_hole", 0.0),
+                }
+                total_minutes_sum += float(op_data.get("total_minutes", 0.0) or 0.0)
+                total_hours_sum += float(op_data.get("total_hours", 0.0) or 0.0)
+            debug["operations"] = operations_struct
+            debug["total_minutes"] = total_minutes_sum
+            debug["total_hours"] = total_hours_sum
         if debug is not None and total_holes > 0:
             try:
                 avg_dia_in = float(avg_dia_in)
@@ -11083,6 +11149,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     planner_pricing_error: str | None = None
     planner_process_minutes: float | None = None
     planner_drill_minutes: float | None = None
+    planner_drilling_override: dict[str, float] | None = None
     used_planner = False
 
     red_flag_messages: list[str] = []
@@ -11390,6 +11457,7 @@ def compute_quote_from_df(df: pd.DataFrame,
             thickness_mm / 25.4 if thickness_mm else 0.0,
         )
     drill_debug_lines: list[str] = []
+    drill_debug_summary: dict[str, Any] = {}
     speeds_feeds_row: Mapping[str, Any] | None = None  # ensure defined in outer scope
     avg_dia_in = 0.0
 
@@ -11403,11 +11471,31 @@ def compute_quote_from_df(df: pd.DataFrame,
         overhead_params=drill_overhead_default,
         warnings=speeds_feeds_warnings,
         debug_lines=drill_debug_lines,
+        debug_meta=drill_debug_summary,
     )
     if not math.isfinite(drill_hr) or drill_hr < 0:
         drill_hr = 0.0
 
     drill_hr = min(drill_hr, 500.0)
+
+    drill_estimator_hours_for_planner = 0.0
+    if drill_debug_summary:
+        operations_summary = drill_debug_summary.get("operations")
+        if isinstance(operations_summary, Mapping):
+            for op_name, op_info in operations_summary.items():
+                op_key = str(op_name).lower()
+                if op_key in {"drill", "deep_drill"}:
+                    hours_val = _coerce_float_or_none(op_info.get("total_hours"))
+                    if hours_val is not None and hours_val > 0:
+                        drill_estimator_hours_for_planner += float(hours_val)
+        if drill_estimator_hours_for_planner <= 0:
+            total_hours_candidate = _coerce_float_or_none(
+                drill_debug_summary.get("total_hours")
+            )
+            if total_hours_candidate is not None and total_hours_candidate > 0:
+                drill_estimator_hours_for_planner = float(total_hours_candidate)
+    if drill_estimator_hours_for_planner <= 0:
+        drill_estimator_hours_for_planner = float(drill_hr or 0.0)
 
     drill_debug_line: str | None = None
     if speeds_feeds_row and avg_dia_in > 0:
@@ -11498,6 +11586,15 @@ def compute_quote_from_df(df: pd.DataFrame,
         drilling_meta["speeds_feeds_path"] = speeds_feeds_path
     if drill_debug_line:
         drilling_meta["speeds_feeds_debug"] = drill_debug_line
+    if drill_debug_summary:
+        drilling_meta["debug_summary"] = copy.deepcopy(drill_debug_summary)
+    if drill_estimator_hours_for_planner > 0:
+        drilling_meta["estimator_hours_for_planner"] = float(
+            drill_estimator_hours_for_planner
+        )
+        drilling_meta["estimator_minutes_for_planner"] = float(
+            drill_estimator_hours_for_planner * 60.0
+        )
 
     for warning_text in speeds_feeds_warnings:
         _record_red_flag(warning_text)
@@ -11526,6 +11623,17 @@ def compute_quote_from_df(df: pd.DataFrame,
                     if msg not in ctx_flags:
                         ctx_flags.append(msg)
     drill_rate = float(rates.get("DrillingRate") or rates.get("MillingRate", 0.0) or 0.0)
+    if drill_estimator_hours_for_planner > 0:
+        override_minutes = drill_estimator_hours_for_planner * 60.0
+        override_cost = drill_estimator_hours_for_planner * drill_rate
+        planner_drilling_override = {
+            "minutes": float(override_minutes),
+            "hours": float(drill_estimator_hours_for_planner),
+            "rate": float(drill_rate),
+            "machine_cost": float(override_cost),
+            "labor_cost": 0.0,
+            "total_cost": float(override_cost),
+        }
     hole_count_geo = _coerce_float_or_none(geo_context.get("hole_count"))
     hole_count_for_tripwire = 0
     if hole_count_geo and hole_count_geo > 0:
@@ -12821,6 +12929,53 @@ def compute_quote_from_df(df: pd.DataFrame,
                         "rate": round(rate_val, 2) if rate_val else 0.0,
                     }
                     planner_meta_keys.add(key_norm)
+
+            if planner_drilling_override:
+                override_minutes = float(planner_drilling_override.get("minutes") or 0.0)
+                override_hours = float(planner_drilling_override.get("hours") or 0.0)
+                override_machine_cost = float(planner_drilling_override.get("machine_cost") or 0.0)
+                override_labor_cost = float(planner_drilling_override.get("labor_cost") or 0.0)
+                override_total_cost = float(
+                    planner_drilling_override.get("total_cost")
+                    or (override_machine_cost + override_labor_cost)
+                )
+                override_rate = float(planner_drilling_override.get("rate") or 0.0)
+
+                def _apply_override_to_bucket_map(bucket_map: Mapping[str, Any] | None) -> None:
+                    if not isinstance(bucket_map, dict):
+                        return
+                    entry = bucket_map.get("drilling")
+                    if isinstance(entry, Mapping):
+                        entry = dict(entry)
+                    else:
+                        entry = {}
+                    entry.update(
+                        {
+                            "minutes": round(override_minutes, 2),
+                            "machine_cost": round(override_machine_cost, 2),
+                            "labor_cost": round(override_labor_cost, 2),
+                            "total_cost": round(override_total_cost, 2),
+                        }
+                    )
+                    bucket_map["drilling"] = entry
+
+                for mapping in (bucket_view, planner_bucket_view, planner_bucket_rollup):
+                    _apply_override_to_bucket_map(mapping)
+                plan_bucket_view = process_plan_summary.get("bucket_view")
+                _apply_override_to_bucket_map(plan_bucket_view)
+                existing_plan = getattr(quote_state, "process_plan", None)
+                if isinstance(existing_plan, dict):
+                    _apply_override_to_bucket_map(existing_plan.get("bucket_view"))
+                if override_minutes > 0:
+                    planner_drill_minutes = override_minutes
+                process_meta["drilling"] = {
+                    "hr": round(override_hours, 3),
+                    "minutes": round(override_minutes, 1),
+                    "rate": round(override_rate, 2) if override_rate else 0.0,
+                    "cost": round(override_total_cost, 2),
+                    "basis": ["planner_drilling_override"],
+                }
+                planner_meta_keys.add("drilling")
 
             if bucket_view:
                 for b, info in bucket_view.items():
