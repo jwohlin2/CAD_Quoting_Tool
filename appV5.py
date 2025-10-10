@@ -38,6 +38,11 @@ from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 
 from cad_quoter.app import runtime as _runtime
+from cad_quoter.app._value_utils import (
+    _coerce_user_value,
+    _format_entry_value,
+    _format_value,
+)
 from cad_quoter.app.container import (
     ServiceContainer,
     SupportsPricingEngine,
@@ -2417,57 +2422,6 @@ def apply_suggestions(baseline: dict, s: dict) -> dict:
         notes.append(f"no_change: {s['no_change_reason']}")
     eff["_llm_notes"] = notes
     return eff
-
-def _coerce_user_value(raw: Any, kind: str) -> Any:
-    if raw is None:
-        return None
-    if isinstance(raw, str):
-        raw = raw.strip()
-        if raw == "":
-            return None
-    try:
-        if kind in {"float", "currency", "percent", "multiplier", "hours"}:
-            return float(raw)
-        if kind == "int":
-            return int(round(float(raw)))
-    except Exception:
-        return None
-    if kind == "text":
-        return str(raw)
-    return raw
-
-
-def _format_value(value: Any, kind: str) -> str:
-    if value is None:
-        return "–"
-    try:
-        if kind == "percent":
-            return f"{float(value) * 100:.1f}%"
-        if kind in {"float", "hours", "multiplier"}:
-            return f"{float(value):.3f}"
-        if kind == "currency":
-            return f"${float(value):,.2f}"
-        if kind == "int":
-            return f"{int(round(float(value)))}"
-    except Exception:
-        return str(value)
-    return str(value)
-
-
-def _format_entry_value(value: Any, kind: str) -> str:
-    if value is None:
-        return ""
-    try:
-        if kind == "int":
-            return str(int(round(float(value))))
-        if kind == "currency":
-            return f"{float(value):.2f}"
-        if kind in {"percent", "multiplier", "hours", "float"}:
-            return f"{float(value):.3f}"
-    except Exception:
-        return str(value)
-    return str(value)
-
 
 def _collect_process_keys(*dicts: Mapping[str, Any] | None) -> set[str]:
     keys: set[str] = set()
