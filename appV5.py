@@ -267,6 +267,7 @@ from cad_quoter.domain_models import (
 )
 from cad_quoter.coerce import to_float, to_int
 from cad_quoter.utils import compact_dict, sdict
+from cad_quoter.utils.geo_ctx import _should_include_outsourced_pass
 from cad_quoter.utils.text import _match_items_contains
 from cad_quoter.pricing import (
     LB_PER_KG,
@@ -338,7 +339,23 @@ try:
 except Exception:  # pragma: no cover - defensive against non-dataclass implementations
     _TIME_OVERHEAD_FIELD_NAMES = set()
 
-_TIME_OVERHEAD_SUPPORTS_INDEX_SEC = "index_sec_per_hole" in _TIME_OVERHEAD_FIELD_NAMES
+def _detect_index_support() -> bool:
+    """Return True when ``OverheadParams`` accepts ``index_sec_per_hole``."""
+
+    if "index_sec_per_hole" in _TIME_OVERHEAD_FIELD_NAMES:
+        return True
+    try:
+        _TimeOverheadParams(index_sec_per_hole=None)
+    except TypeError:
+        return False
+    except Exception:
+        # Unexpected constructor failure; assume unsupported to avoid breaking callers.
+        return False
+    else:
+        return True
+
+
+_TIME_OVERHEAD_SUPPORTS_INDEX_SEC = _detect_index_support()
 
 try:
     from process_planner import (
@@ -561,6 +578,7 @@ class _TopoDSProto(Protocol):
 
 
 TopoDSFaceT: TypeAlias = TopoDSShapeT
+TopoDSCompoundT: TypeAlias = TopoDSShapeT
 TopToolsIndexedDataMap: TypeAlias = Any
 
 try:  # Prefer pythonocc-core's OCP bindings when available
@@ -615,11 +633,9 @@ except ImportError:
             TopoDS = TopoDS_Face = TopoDS_Shape = _MissingOCCTModule()
             TopTools_IndexedDataMapOfShapeListOfShape = _MissingOCCTModule()
 
-if TYPE_CHECKING:
-    from typing import cast
-
-    BRep_Tool = cast(_BRepToolProto, BRep_Tool)
-    TopoDS = cast(_TopoDSProto, TopoDS)
+BRep_Tool = cast(_BRepToolProto, BRep_Tool)
+TopoDS = cast(_TopoDSProto, TopoDS)
+BRepTools = cast(Any, BRepTools)
 
 try:
     from geo_read_more import build_geo_from_dxf as build_geo_from_dxf_path
@@ -3252,6 +3268,21 @@ def _unwrap_value(obj):
     # Some containers return nodes with .Value()
     return obj.Value() if hasattr(obj, "Value") and callable(obj.Value) else obj
 
+
+def _shape_is_null(shape: Any) -> bool:
+    """Return True if the passed shape reports itself as null."""
+
+    if shape is None:
+        return True
+    is_null = getattr(shape, "IsNull", None)
+    if not callable(is_null):
+        raise AttributeError("Object does not expose a callable IsNull() method")
+    try:
+        return bool(is_null())
+    except Exception:
+        return True
+
+
 def ensure_shape(obj):
     obj = _unwrap_value(obj)
     if obj is None:
@@ -3325,7 +3356,7 @@ def map_shapes_and_ancestors(root_shape, sub_enum, anc_enum) -> TopToolsIndexedD
     # Ensure we pass a *Shape*, not a Face
     if root_shape is None:
         raise TypeError("root_shape is None")
-    if not hasattr(root_shape, "IsNull") or root_shape.IsNull():
+    if not hasattr(root_shape, "IsNull") or _shape_is_null(root_shape):
         # If someone handed us a Face, try to grab its TShape parent; else fail.
         # Safer: require a real TopoDS_Shape from STEP/IGES root.
         pass
@@ -3600,19 +3631,20 @@ try:
     from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape  # type: ignore[import]
     BACKEND_OCC = "OCP"
 
-    _brep_tools_module = typing.cast(Any, BRepTools)
+    def _ocp_uv_bounds(face: TopoDSFaceT) -> Tuple[float, float, float, float]:
+        tools = cast(Any, BRepTools)
+        return tools.UVBounds(face)
 
-    def _ocp_uv_bounds(face: TopoDS_Face) -> Tuple[float, float, float, float]:
-        return _brep_tools_module.UVBounds(face)
 
-
-    def _ocp_brep_read(path: str) -> TopoDS_Shape:
+    def _ocp_brep_read(path: str) -> TopoDSShapeT:
         s = _new_topods_shape()
         builder = BRep_Builder()  # type: ignore[call-arg]
-        if hasattr(_brep_tools_module, "Read_s"):
-            ok = _brep_tools_module.Read_s(s, str(path), builder)
+        read_s = getattr(BRepTools, "Read_s", None)
+        if callable(read_s):
+            ok = read_s(s, str(path), builder)
         else:
-            ok = _brep_tools_module.Read(s, str(path), builder)
+            tools = cast(Any, BRepTools)
+            ok = tools.Read(s, str(path), builder)
         if ok is False:
             raise RuntimeError("BREP read failed")
         return s
@@ -3683,10 +3715,10 @@ except Exception:
 
     # UV bounds and brep read are free functions
     import OCC.Core.BRepTools as _occ_breptools
-    BRepTools = _occ_breptools.BRepTools
+    BRepTools = cast(Any, _occ_breptools).BRepTools
 
-    def _occ_uv_bounds(face: TopoDS_Face) -> Tuple[float, float, float, float]:
-        tools = typing.cast(Any, BRepTools)
+    def _occ_uv_bounds(face: TopoDSFaceT) -> Tuple[float, float, float, float]:
+        tools = cast(Any, BRepTools)
         fn = getattr(tools, "UVBounds", None)
         if fn is None:
             legacy = getattr(_occ_breptools, "breptools_UVBounds", None)
@@ -3696,7 +3728,7 @@ except Exception:
         return fn(face)
 
 
-    def _occ_brep_read(path: str) -> TopoDS_Shape:
+    def _occ_brep_read(path: str) -> TopoDSShapeT:
         read_fn = getattr(_occ_breptools, "breptools_Read", None)
         if read_fn is None:
             raise RuntimeError("BREP read is unavailable")
@@ -3711,12 +3743,14 @@ except Exception:
     _brep_read = _occ_brep_read
 
 
-def _new_topods_shape() -> TopoDS_Shape:
-    return typing.cast(TopoDS_Shape, typing.cast(Any, TopoDS_Shape)())
+def _new_topods_shape() -> TopoDSShapeT:
+    ctor = cast(Any, TopoDS_Shape)
+    return cast(TopoDSShapeT, ctor())
 
 
-def _new_topods_compound() -> TopoDS_Compound:
-    return typing.cast(TopoDS_Compound, typing.cast(Any, TopoDS_Compound)())
+def _new_topods_compound() -> TopoDSCompoundT:
+    ctor = cast(Any, TopoDS_Compound)
+    return cast(TopoDSCompoundT, ctor())
 
 
 def _shape_from_reader(reader):
@@ -3744,7 +3778,7 @@ def _shape_from_reader(reader):
         added = 0
         for i in range(1, transfer_count + 1):
             s = reader.Shape(i)
-            if s is None or s.IsNull():
+            if s is None or _shape_is_null(s):
                 continue
             builder.Add(compound, s)
             added += 1
@@ -3752,13 +3786,13 @@ def _shape_from_reader(reader):
             raise RuntimeError("Reader produced only null sub-shapes")
         shape = compound
 
-    if shape is None or shape.IsNull():
+    if shape is None or _shape_is_null(shape):
         raise RuntimeError("Reader produced a null TopoDS_Shape")
 
     fixer = cast(Any, ShapeFix_Shape)(shape)
     fixer.Perform()
     healed = fixer.Shape()
-    if healed is None or healed.IsNull():
+    if healed is None or _shape_is_null(healed):
         raise RuntimeError("Shape healing failed (null shape)")
 
     try:
@@ -3787,11 +3821,11 @@ def read_step_shape(path: str) -> TopoDSShapeT:
         builder.MakeCompound(comp)
         for i in range(1, n + 1):
             s = rdr.Shape(i)
-            if not s.IsNull():
+            if not _shape_is_null(s):
                 builder.Add(comp, s)
         shape = comp
 
-    if shape.IsNull():
+    if _shape_is_null(shape):
         raise RuntimeError("STEP produced a null TopoDS_Shape.")
     # Verify we truly pass a Shape to MapShapesAndAncestors
     logger.debug(
@@ -3819,7 +3853,7 @@ def read_step_shape(path: str) -> TopoDSShapeT:
     return fx.Shape()
 
 def safe_bbox(shape: TopoDSShapeT):
-    if shape is None or shape.IsNull():
+    if _shape_is_null(shape):
         raise ValueError("Cannot compute bounding box of a null shape.")
     box = Bnd_Box()
     bnd_add(shape, box, True)  # <- uses whichever binding is available
