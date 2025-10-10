@@ -10031,6 +10031,13 @@ def estimate_drilling_hours(
     """
     material_lookup = _normalize_lookup_key(mat_key) if mat_key else ""
     material_label = MATERIAL_DISPLAY_BY_KEY.get(material_lookup, mat_key)
+
+    try:
+        thickness_mm = float(thickness_in) * 25.4
+    except (TypeError, ValueError):
+        thickness_mm = 0.0
+    if not math.isfinite(thickness_mm) or thickness_mm <= 0:
+        thickness_mm = 0.0
     if (
         speeds_feeds_table is not None
         and (not material_label or material_label == mat_key)
@@ -10257,7 +10264,9 @@ def estimate_drilling_hours(
 
         # Use the function's input thickness (inches) for L/D heuristics
         try:
-            thickness_in_val = float(thickness_in) if thickness_in and float(thickness_in) > 0 else None
+            thickness_in_val = (
+                float(thickness_in) if thickness_in and float(thickness_in) > 0 else None
+            )
         except Exception:
             thickness_in_val = None
 
@@ -10966,7 +10975,7 @@ def estimate_drilling_hours(
         if total_minutes_with_toolchange > 0:
             return total_minutes_with_toolchange / 60.0
 
-    thickness_for_fallback_mm = float(thickness_in or 0.0) * 25.4
+    thickness_for_fallback_mm = thickness_mm
     if thickness_for_fallback_mm <= 0:
         depth_candidates = [depth for _, _, depth in group_specs if depth and depth > 0]
         if depth_candidates:
