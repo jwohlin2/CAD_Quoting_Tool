@@ -690,19 +690,30 @@ except Exception:  # pragma: no cover - defensive against non-dataclass implemen
     _TIME_OVERHEAD_FIELD_NAMES = set()
 
 def _detect_index_support() -> bool:
-    """Return True when ``OverheadParams`` accepts ``index_sec_per_hole``."""
+    """Return True when ``OverheadParams`` exposes ``index_sec_per_hole``."""
 
     if "index_sec_per_hole" in _TIME_OVERHEAD_FIELD_NAMES:
         return True
+
     try:
-        _TimeOverheadParams(index_sec_per_hole=None)
-    except TypeError:
-        return False
+        probe = _TimeOverheadParams()
     except Exception:
-        # Unexpected constructor failure; assume unsupported to avoid breaking callers.
+        # If the constructor requires additional parameters we conservatively
+        # assume the optional index field is unavailable.
         return False
-    else:
+
+    if hasattr(probe, "index_sec_per_hole"):
         return True
+
+    for setter in (setattr, object.__setattr__):
+        try:
+            setter(probe, "index_sec_per_hole", None)
+        except Exception:
+            continue
+        else:
+            return hasattr(probe, "index_sec_per_hole")
+
+    return False
 
 
 _TIME_OVERHEAD_SUPPORTS_INDEX_SEC = _detect_index_support()
@@ -711,12 +722,51 @@ _TIME_OVERHEAD_SUPPORTS_INDEX_SEC = _detect_index_support()
 OverheadLike: TypeAlias = _TimeOverheadParams | SimpleNamespace
 
 
-def _ensure_overhead_index_attr(
+def _assign_overhead_index_attr(
     overhead: _TimeOverheadParams, index_value: float | None
+) -> bool:
+    """Attempt to assign ``index_sec_per_hole`` on ``overhead``.
+
+    Returns ``True`` when the attribute exists (either pre-existing or after
+    assignment) and ``False`` when the underlying dataclass does not support
+    the field.
+    """
+
+    if overhead is None:
+        return False
+
+    if hasattr(overhead, "index_sec_per_hole"):
+        try:
+            setattr(overhead, "index_sec_per_hole", index_value)
+        except Exception:
+            try:
+                object.__setattr__(overhead, "index_sec_per_hole", index_value)
+            except Exception:
+                # Attribute exists but cannot be mutated (e.g. frozen
+                # dataclass). Treat as available so downstream callers rely on
+                # the existing value.
+                return True
+        return True
+
+    for setter in (setattr, object.__setattr__):
+        try:
+            setter(overhead, "index_sec_per_hole", index_value)
+        except Exception:
+            continue
+        else:
+            return True
+
+    return False
+
+
+def _ensure_overhead_index_attr(
+    overhead: _TimeOverheadParams, index_value: float | None, *, assigned: bool = False
 ) -> OverheadLike:
     """Return an overhead object that always exposes ``index_sec_per_hole``."""
 
     if hasattr(overhead, "index_sec_per_hole"):
+        if not assigned:
+            _assign_overhead_index_attr(overhead, index_value)
         return overhead
 
     payload: dict[str, Any] = {}
@@ -10098,13 +10148,19 @@ def _drill_overhead_from_params(params: Mapping[str, Any] | None) -> OverheadLik
         index_kwarg = (
             float(index_sec) if index_sec is not None and index_sec >= 0 else None
         )
-        overhead_kwargs["index_sec_per_hole"] = index_kwarg
     try:
         overhead = _TimeOverheadParams(**overhead_kwargs)
     except TypeError:
-        overhead_kwargs.pop("index_sec_per_hole", None)
-        overhead = _TimeOverheadParams(**overhead_kwargs)
-    return _ensure_overhead_index_attr(overhead, index_kwarg)
+        overhead = _TimeOverheadParams(
+            toolchange_min=overhead_kwargs.get("toolchange_min"),
+            approach_retract_in=overhead_kwargs.get("approach_retract_in"),
+            peck_penalty_min_per_in_depth=overhead_kwargs.get(
+                "peck_penalty_min_per_in_depth"
+            ),
+            dwell_min=overhead_kwargs.get("dwell_min"),
+        )
+    assigned = _assign_overhead_index_attr(overhead, index_kwarg)
+    return _ensure_overhead_index_attr(overhead, index_kwarg, assigned=assigned)
 
 
 def _make_time_overhead_params(
@@ -10125,17 +10181,25 @@ def _make_time_overhead_params(
         else:
             coerced = _coerce_float_or_none(index_val)
             index_kwarg = float(coerced) if coerced is not None and coerced >= 0 else None
-        kwargs["index_sec_per_hole"] = index_kwarg
+        kwargs.pop("index_sec_per_hole", None)
 
-    dropped_index = False
     try:
         overhead = _TimeOverheadParams(**kwargs)
     except TypeError:
-        index_kwarg = kwargs.pop("index_sec_per_hole", None)
-        dropped_index = index_kwarg is not None
-        overhead = _TimeOverheadParams(**kwargs)
+        overhead = _TimeOverheadParams(
+            toolchange_min=kwargs.get("toolchange_min"),
+            approach_retract_in=kwargs.get("approach_retract_in"),
+            peck_penalty_min_per_in_depth=kwargs.get(
+                "peck_penalty_min_per_in_depth"
+            ),
+            dwell_min=kwargs.get("dwell_min"),
+            peck_min=kwargs.get("peck_min"),
+        )
 
-    return _ensure_overhead_index_attr(overhead, index_kwarg), dropped_index
+    assigned = _assign_overhead_index_attr(overhead, index_kwarg)
+    dropped_index = index_kwarg is not None and not assigned
+
+    return _ensure_overhead_index_attr(overhead, index_kwarg, assigned=assigned), dropped_index
 
 
 def _coerce_overhead_dataclass(overhead: OverheadLike) -> _TimeOverheadParams:
@@ -10154,14 +10218,28 @@ def _coerce_overhead_dataclass(overhead: OverheadLike) -> _TimeOverheadParams:
     ):
         if hasattr(overhead, name):
             payload[name] = getattr(overhead, name)
+
+    index_value = None
     if _TIME_OVERHEAD_SUPPORTS_INDEX_SEC:
-        payload["index_sec_per_hole"] = getattr(overhead, "index_sec_per_hole", None)
+        index_value = getattr(overhead, "index_sec_per_hole", None)
 
     try:
-        return _TimeOverheadParams(**payload)
+        coerced = _TimeOverheadParams(**payload)
     except TypeError:
-        payload.pop("index_sec_per_hole", None)
-        return _TimeOverheadParams(**payload)
+        coerced = _TimeOverheadParams(
+            toolchange_min=payload.get("toolchange_min"),
+            approach_retract_in=payload.get("approach_retract_in"),
+            peck_penalty_min_per_in_depth=payload.get("peck_penalty_min_per_in_depth"),
+            dwell_min=payload.get("dwell_min"),
+            peck_min=payload.get("peck_min"),
+        )
+    assigned = _assign_overhead_index_attr(coerced, index_value)
+    if index_value is not None and not assigned:
+        try:
+            object.__setattr__(coerced, "index_sec_per_hole", index_value)
+        except Exception:
+            pass
+    return coerced
 
 
 def _clean_hole_groups(raw: Any) -> list[dict[str, Any]] | None:
