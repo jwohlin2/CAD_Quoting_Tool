@@ -110,6 +110,8 @@ from typing import (
     TypeAlias,
     TypeVar,
     cast,
+    Literal,
+    overload,
 )
 
 
@@ -186,7 +188,6 @@ def normalize_item(value: Any) -> str:
     return _normalize_item_text(value)
 
 import cad_quoter.geometry as geometry
-from cad_quoter.geometry import read_dxf_as_occ_shape
 from cad_quoter.geo2d import (
     apply_2d_features_to_variables,
     to_noncapturing as _to_noncapturing,
@@ -220,6 +221,33 @@ LEGACY_MM_PROJ = str(_runtime.LEGACY_MM_PROJ)
 PREFERRED_MODEL_DIRS: list[str | Path] = [str(p) for p in _runtime.PREFERRED_MODEL_DIRS]
 
 
+def discover_qwen_vl_assets(
+    *, model_path: str | None = None, mmproj_path: str | None = None
+) -> tuple[str, str]:
+    """Wrapper that respects :data:`PREFERRED_MODEL_DIRS` overrides."""
+
+    preferred: list[Path] = []
+    for value in PREFERRED_MODEL_DIRS:
+        try:
+            preferred.append(Path(value).expanduser())
+        except Exception:
+            continue
+
+    original_preferred = getattr(_runtime, "PREFERRED_MODEL_DIRS", ())
+    try:
+        if preferred:
+            _runtime.PREFERRED_MODEL_DIRS = tuple(preferred)
+        return _runtime.discover_qwen_vl_assets(
+            model_path=model_path,
+            mmproj_path=mmproj_path,
+        )
+    finally:
+        try:
+            _runtime.PREFERRED_MODEL_DIRS = original_preferred
+        except Exception:
+            pass
+
+
 from cad_quoter.domain_models import (
     DEFAULT_MATERIAL_DISPLAY,
     DEFAULT_MATERIAL_KEY,
@@ -246,6 +274,7 @@ from cad_quoter.pricing import (
     PricingEngine,
     create_default_registry,
 )
+from cad_quoter.pricing import BACKUP_CSV_NAME
 
 _DEFAULT_MATERIAL_DENSITY_G_CC = MATERIAL_DENSITY_G_CC_BY_KEY.get(
     DEFAULT_MATERIAL_KEY, 7.85
@@ -287,6 +316,7 @@ from cad_quoter.pricing.time_estimator import (
 from cad_quoter.pricing.wieland import lookup_price as lookup_wieland_price
 from cad_quoter.rates import migrate_flat_to_two_bucket, two_bucket_to_flat
 from cad_quoter.vendors.mcmaster_stock import lookup_sku_and_price_for_mm
+from cad_quoter.utils.geo_ctx import _should_include_outsourced_pass
 from cad_quoter.llm import (
     EDITOR_FROM_UI,
     EDITOR_TO_SUGG,
@@ -618,6 +648,28 @@ _MappingABC = Mapping
 _build_geo_from_dxf_hook: Optional[Callable[[str], Dict[str, Any]]] = None
 
 
+def set_build_geo_from_dxf_hook(hook: Optional[Callable[[str], Dict[str, Any]]]) -> None:
+    """Install or clear an override used when reading DXF metadata."""
+
+    global _build_geo_from_dxf_hook
+    _build_geo_from_dxf_hook = hook
+
+
+def build_geo_from_dxf(path: str) -> dict[str, Any]:
+    """Return auxiliary DXF metadata via the configured loader."""
+
+    loader: Optional[Callable[[str], Dict[str, Any]]]
+    loader = _build_geo_from_dxf_hook or build_geo_from_dxf_path
+    if loader is None:
+        raise RuntimeError(
+            "DXF metadata loader is unavailable; install geo_read_more or register a hook."
+        )
+    result = loader(path)
+    if not isinstance(result, dict):
+        raise TypeError("DXF metadata loader must return a dictionary")
+    return result
+
+
 # Geometry helpers (re-exported for backward compatibility)
 def _missing_geom_fn(name: str):
     def _fn(*_a, **_k):
@@ -632,6 +684,7 @@ load_cad_any = _export("load_cad_any")
 read_cad_any = _export("read_cad_any")
 read_step_shape = _export("read_step_shape")
 read_step_or_iges_or_brep = _export("read_step_or_iges_or_brep")
+read_dxf_as_occ_shape = _export("read_dxf_as_occ_shape")
 convert_dwg_to_dxf = _export("convert_dwg_to_dxf")
 enrich_geo_occ = _export("enrich_geo_occ")
 enrich_geo_stl = _export("enrich_geo_stl")
@@ -8467,6 +8520,35 @@ def _material_price_from_choice(choice: str, material_lookup: dict[str, float]) 
     return float(price)
 
 
+def _material_price_per_g_from_choice(
+    choice: str,
+    material_lookup: Mapping[str, float] | None,
+) -> tuple[float, str]:
+    """Return price-per-gram metadata for UI helpers and tests."""
+
+    lookup: dict[str, float] = {}
+    if isinstance(material_lookup, Mapping):
+        for key, value in material_lookup.items():
+            if value is None:
+                continue
+            try:
+                lookup[_normalize_lookup_key(key)] = float(value)
+            except Exception:
+                continue
+
+    norm_choice = _normalize_lookup_key(choice)
+    if norm_choice and norm_choice in lookup and norm_choice != MATERIAL_OTHER_KEY:
+        return float(lookup[norm_choice]), "override"
+
+    try:
+        unit_price, source = _resolve_material_unit_price(choice, unit="kg")
+    except Exception:
+        return 0.0, ""
+    if not unit_price:
+        return 0.0, source or ""
+    return float(unit_price) / 1000.0, source or ""
+
+
 def _update_material_price_field(
     material_choice_var: Any,
     material_price_var: Any,
@@ -8790,6 +8872,32 @@ def require_plate_inputs(geo: dict, ui_vars: dict[str, Any] | None) -> None:
         geo["thickness_mm"] = thickness_in * 25.4
     if material and not geo.get("material"):
         geo["material"] = material
+
+
+@overload
+def net_mass_kg(
+    plate_L_in,
+    plate_W_in,
+    t_in,
+    hole_d_mm,
+    density_g_cc: float = 7.85,
+    *,
+    return_removed_mass: Literal[True],
+) -> tuple[float, float] | tuple[None, None]:
+    ...
+
+
+@overload
+def net_mass_kg(
+    plate_L_in,
+    plate_W_in,
+    t_in,
+    hole_d_mm,
+    density_g_cc: float = 7.85,
+    *,
+    return_removed_mass: Literal[False] = False,
+) -> float | None:
+    ...
 
 
 def net_mass_kg(
