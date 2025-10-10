@@ -3485,43 +3485,6 @@ def ensure_face(obj: Any) -> TopoDSFaceT:
     if st == TopAbs_FACE:
         return FACE_OF(obj)
     raise TypeError(f"Not a face: {type(obj).__name__}")
-def to_edge(s):
-    if _is_instance(s, ["TopoDS_Edge", "Edge"]):
-        return s
-    return _TO_EDGE(s)
-
-def to_solid(s):
-    if _is_instance(s, ["TopoDS_Solid", "Solid"]):
-        return s
-    return _TO_SOLID(s)
-
-def to_shell(s):
-    if _is_instance(s, ["TopoDS_Shell", "Shell"]):
-        return s
-    return _TO_SHELL(s)
-
-# Generic size helpers so we never call Extent() on lists/maps again
-def map_size(m):
-    for name in ("Size", "Extent", "Length"):
-        if hasattr(m, name):
-            return getattr(m, name)()
-    raise AttributeError(f"No size method on {type(m)}")
-
-def list_iter(lst):
-    """
-    Iterate TopTools_ListOfShape across bindings.
-    Use cbegin()/More()/Value()/Next() if available; otherwise fall back to python list conversion.
-    """
-    # OCP + pythonocc expose cbegin iterator on TopTools_ListOfShape
-    if hasattr(lst, "cbegin"):
-        it = lst.cbegin()
-        while it.More():
-            yield it.Value()
-            it.Next()
-    else:
-        # last-resort: try Python iteration (some wheels support it)
-        for v in list(lst):
-            yield v
 # ---------- end compat ----------
 
 
@@ -3938,7 +3901,7 @@ def iter_solids(shape: TopoDS_Shape):
     explorer = cast(type[Any], TopExp_Explorer)
     exp = explorer(shape, cast(TopAbs_ShapeEnum, TopAbs_SOLID))
     while exp.More():
-        yield to_solid(exp.Current())
+        yield geometry.to_solid(exp.Current())
         exp.Next()
 
 def explode_compound(shape: TopoDS_Shape):
@@ -3954,7 +3917,7 @@ def explode_compound(shape: TopoDS_Shape):
         sh = explorer(shape, cast(TopAbs_ShapeEnum, TopAbs_SHELL))
         shells = []
         while sh.More():
-            shells.append(to_shell(sh.Current()))
+            shells.append(geometry.to_shell(sh.Current()))
             sh.Next()
         return shells
     return [shape]
@@ -4024,10 +3987,10 @@ def _sum_edge_length_sharp(shape, angle_thresh_deg=175.0) -> float:
     angle_thresh = math.radians(angle_thresh_deg)
     edge2faces = map_shapes_and_ancestors(shape, TopAbs_EDGE, TopAbs_FACE)
     total = 0.0
-    for i in range(1, map_size(edge2faces) + 1):
-        edge = to_edge(edge2faces.FindKey(i))
+    for i in range(1, geometry.map_size(edge2faces) + 1):
+        edge = geometry.to_edge(edge2faces.FindKey(i))
         face_list = edge2faces.FindFromIndex(i)
-        faces = [ensure_face(shp) for shp in list_iter(face_list)]
+        faces = [ensure_face(shp) for shp in geometry.list_iter(face_list)]
         if len(faces) < 2:
             continue
         f1, f2 = faces[0], faces[-1]
@@ -4071,7 +4034,7 @@ def _section_perimeter_len(shape, z_values):
         w = sec.Shape()
         it = explorer(w, cast(TopAbs_ShapeEnum, TopAbs_EDGE))
         while it.More():
-            e = to_edge(it.Current())
+            e = geometry.to_edge(it.Current())
             total += _length_of_edge(e)
             it.Next()
     return total
@@ -4116,7 +4079,7 @@ def _hole_face_identifier(face, cylinder, face_bbox):
         exp = None
     while exp and exp.More():
         try:
-            edge = to_edge(cast(Any, exp.Current()))
+            edge = geometry.to_edge(cast(Any, exp.Current()))
             curve = BRepAdaptor_Curve(edge)
             if curve.GetType() == GeomAbs_Circle:
                 circ = curve.Circle()
