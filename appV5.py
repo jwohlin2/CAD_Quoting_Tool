@@ -12602,9 +12602,9 @@ def compute_quote_from_df(
     drill_debug_lines: list[str] = []
     drill_debug_entries: list[str] = drill_debug_lines  # backwards compatibility alias
     drill_debug_summary: dict[str, dict[str, Any]] = {}
-    speeds_feeds_row: Mapping[str, Any] | None = None  # ensure defined in outer scope
     selected_op_name: str = "drill"  # default for debug display
     avg_dia_in = 0.0
+    speeds_feeds_summary: Mapping[str, Any] | None = None
     material_display_for_debug: str = ""
 
     if not material_display_for_debug:
@@ -12656,74 +12656,99 @@ def compute_quote_from_df(
                 updated_debug_lines.append(line)
         drill_debug_lines[:] = updated_debug_lines
 
+    if drill_debug_summary:
+        best_qty = -1.0
+        best_minutes = -1.0
+        for op_key, summary in drill_debug_summary.items():
+            if not isinstance(summary, Mapping):
+                continue
+            qty_val = _coerce_float_or_none(summary.get("qty"))
+            minutes_val = _coerce_float_or_none(summary.get("total_minutes"))
+            qty_float = float(qty_val) if qty_val is not None else 0.0
+            minutes_float = float(minutes_val) if minutes_val is not None else 0.0
+            if (
+                qty_float > best_qty
+                or (qty_float == best_qty and minutes_float > best_minutes)
+            ):
+                best_qty = qty_float
+                best_minutes = minutes_float
+                selected_op_name = str(op_key or selected_op_name).strip() or selected_op_name
+                speeds_feeds_summary = summary
+        if speeds_feeds_summary:
+            weight_sum = _coerce_float_or_none(
+                speeds_feeds_summary.get("diameter_weight_sum")
+            )
+            qty_sum = _coerce_float_or_none(
+                speeds_feeds_summary.get("diameter_qty_sum")
+            )
+            if (
+                weight_sum is not None
+                and qty_sum is not None
+                and qty_sum > 0
+            ):
+                avg_dia_in = float(weight_sum) / float(qty_sum)
+            if avg_dia_in <= 0:
+                bins = speeds_feeds_summary.get("bins")
+                if isinstance(bins, Mapping):
+                    for bin_summary in bins.values():
+                        if not isinstance(bin_summary, Mapping):
+                            continue
+                        dia_val = _coerce_float_or_none(bin_summary.get("diameter_in"))
+                        if dia_val and dia_val > 0:
+                            avg_dia_in = float(dia_val)
+                            break
+
     drill_debug_line: str | None = None
-    if speeds_feeds_row and avg_dia_in > 0:
-        key_map = {
-            str(k).strip().lower().replace("-", "_").replace(" ", "_"): k
-            for k in speeds_feeds_row.keys()
-        }
+    if speeds_feeds_summary and avg_dia_in > 0:
+        rpm_val = _coerce_float_or_none(speeds_feeds_summary.get("rpm"))
+        ipm_val = _coerce_float_or_none(speeds_feeds_summary.get("ipm"))
 
-        def _row_float(*names: str) -> float | None:
-            for name in names:
-                actual = key_map.get(name)
-                if actual is None:
-                    continue
-                val = _coerce_float_or_none(speeds_feeds_row.get(actual))
-                if val is not None:
-                    return float(val)
-            return None
-
-        sfm_val = _row_float(
-            "sfm_start",
-            "sfm",
-            "surface_ft_min",
-            "surface_feet_per_min",
-        )
         ipr_val: float | None = None
-        ipr_candidates: list[tuple[float, float]] = []
-        for norm_key, actual in key_map.items():
-            if not norm_key.startswith("fz_ipr_"):
-                continue
-            raw_val = _coerce_float_or_none(speeds_feeds_row.get(actual))
-            if raw_val is None:
-                continue
-            suffix = norm_key[len("fz_ipr_") :]
-            if suffix.endswith("in"):
-                suffix = suffix[:-2]
-            suffix = suffix.replace("__", "_")
-            try:
-                dia_val = float(suffix.replace("_", "."))
-            except Exception:
-                continue
-            ipr_candidates.append((dia_val, float(raw_val)))
-        if ipr_candidates:
-            ipr_val = min(ipr_candidates, key=lambda pair: abs(pair[0] - avg_dia_in))[1]
-        if ipr_val is None:
-            ipr_val = _row_float("ipr", "feed_per_rev", "feed_rev", "fz_ipr")
-
-        rpm_val: float | None = None
-        if sfm_val and avg_dia_in > 0:
-            rpm_val = (float(sfm_val) * 12.0) / (math.pi * avg_dia_in)
-
-        ipm_val = None
-        if rpm_val and ipr_val:
-            ipm_val = rpm_val * ipr_val
-        if ipm_val is None:
-            ipm_val = _row_float("linear_cut_rate_ipm", "feed_ipm", "feed_rate_ipm")
+        if ipm_val is None or ipm_val <= 0:
+            ipr_sum = _coerce_float_or_none(speeds_feeds_summary.get("ipr_sum"))
+            ipr_count = _coerce_float_or_none(speeds_feeds_summary.get("ipr_count"))
+            if (
+                ipr_sum is not None
+                and ipr_count is not None
+                and ipr_count > 0
+            ):
+                ipr_val = float(ipr_sum) / float(ipr_count)
+            if ipr_val is None or ipr_val <= 0:
+                ipr_min = _coerce_float_or_none(
+                    speeds_feeds_summary.get("ipr_effective_min")
+                    or speeds_feeds_summary.get("ipr_min")
+                )
+                ipr_max = _coerce_float_or_none(
+                    speeds_feeds_summary.get("ipr_effective_max")
+                    or speeds_feeds_summary.get("ipr_max")
+                )
+                if ipr_min is not None and ipr_min > 0:
+                    ipr_val = float(ipr_min)
+                elif ipr_max is not None and ipr_max > 0:
+                    ipr_val = float(ipr_max)
 
         debug_bits: list[str] = []
         if rpm_val and rpm_val > 0:
-            debug_bits.append(f"{rpm_val:.0f} RPM")
+            debug_bits.append(f"{float(rpm_val):.0f} RPM")
         if ipm_val and ipm_val > 0:
-            debug_bits.append(f"{ipm_val:.1f} IPM")
+            debug_bits.append(f"{float(ipm_val):.1f} IPM")
         elif ipr_val and ipr_val > 0:
-            debug_bits.append(f"{ipr_val:.4f} IPR")
+            debug_bits.append(f"{float(ipr_val):.4f} IPR")
 
         if debug_bits:
             avg_mm = avg_dia_in * 25.4
             op_display = selected_op_name.replace("_", " ")
+            group_display = str(
+                material_selection.get("material_group")
+                or drill_material_group
+                or ""
+            ).strip()
+            if group_display:
+                group_segment = f"{op_display} {group_display}"
+            else:
+                group_segment = op_display
             drill_debug_line = (
-                f"CSV drill feeds ({op_display} {material_group}): "
+                f"CSV drill feeds ({group_segment}): "
                 f"{', '.join(debug_bits)} @ Ø{avg_mm:.1f} mm"
             )
 
