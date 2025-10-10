@@ -12319,7 +12319,7 @@ def compute_quote_from_df(
     if isinstance(params, _MappingABC):
         qty_override_val = _coerce_float_or_none(params.get("Quantity"))
 
-    sheet_qty_raw = first_num(r"\b" + alt('Qty','Lot Size','Quantity') + r"\b", float("nan"))
+    sheet_qty_raw = first_num(r"\b" + alt('Qty','Lot Size','Quantity') + r"\b", default=float("nan"))
     sheet_qty_val = sheet_qty_raw if sheet_qty_raw == sheet_qty_raw else None
 
     if qty_override_val is not None:
@@ -12331,12 +12331,12 @@ def compute_quote_from_df(
     amortize_programming = True  # single switch if you want to expose later
 
     # ---- geometry (optional) -------------------------------------------------
-    GEO_wedm_len_mm = first_num(r"\bGEO__?(?:WEDM_PathLen_mm|EDM_Length_mm)\b", 0.0)
-    GEO_vol_mm3     = first_num(r"\bGEO__?(?:Volume|Volume_mm3|Net_Volume_mm3)\b", 0.0)
+    GEO_wedm_len_mm = first_num(r"\bGEO__?(?:WEDM_PathLen_mm|EDM_Length_mm)\b", default=0.0)
+    GEO_vol_mm3     = first_num(r"\bGEO__?(?:Volume|Volume_mm3|Net_Volume_mm3)\b", default=0.0)
 
     # ---- material ------------------------------------------------------------
-    vol_cm3       = first_num(r"\b(?:Net\s*Volume|Volume_net|Volume\s*\(cm\^?3\))\b", GEO_vol_mm3 / 1000.0)
-    density_g_cc  = first_num(r"\b(?:Density|Material\s*Density)\b", 0.0)
+    vol_cm3       = first_num(r"\b(?:Net\s*Volume|Volume_net|Volume\s*\(cm\^?3\))\b", default=GEO_vol_mm3 / 1000.0)
+    density_g_cc  = first_num(r"\b(?:Density|Material\s*Density)\b", default=0.0)
 
     scrap_pattern = r"\b(?:Scrap\s*%|Expected\s*Scrap)\b"
     scrap_sheet_fraction: float | None = None
@@ -12345,7 +12345,7 @@ def compute_quote_from_df(
     except Exception:
         sheet_has_scrap = pd.Series(dtype=bool)
     if hasattr(sheet_has_scrap, "any") and sheet_has_scrap.any():
-        scrap_candidate = first_num(scrap_pattern, float("nan"))
+        scrap_candidate = first_num(scrap_pattern, default=float("nan"))
         if scrap_candidate == scrap_candidate:  # not NaN
             scrap_sheet_fraction = normalize_scrap_pct(scrap_candidate)
 
@@ -12621,8 +12621,8 @@ def compute_quote_from_df(
     effective_mass_g = net_mass_g * (1.0 + scrap_pct)
     mass_kg = net_mass_g / 1000.0
 
-    unit_price_per_g  = first_num(r"\b(?:Material\s*Price.*(?:per\s*g|/g)|Unit\s*Price\s*/\s*g)\b", 0.0)
-    supplier_min_charge = first_num(r"\b(?:Supplier\s*Min\s*Charge|min\s*charge)\b", 0.0)
+    unit_price_per_g  = first_num(r"\b(?:Material\s*Price.*(?:per\s*g|/g)|Unit\s*Price\s*/\s*g)\b", default=0.0)
+    supplier_min_charge = first_num(r"\b(?:Supplier\s*Min\s*Charge|min\s*charge)\b", default=0.0)
     explicit_mat  = num(r"\b(?:Material\s*Cost|Raw\s*Material\s*Cost)\b", 0.0)
     scrap_credit_pattern = r"(?:Material\s*Scrap(?:\s*Credit)?|Remnant(?:\s*Credit)?)"
     scrap_credit_mask = contains(scrap_credit_pattern)
@@ -12851,8 +12851,8 @@ def compute_quote_from_df(
     rough_hr   = sum_time(r"(?:Roughing\s*Cycle\s*Time|Adaptive|HSM)")
     semi_hr    = sum_time(r"(?:Semi[- ]?Finish|Rest\s*Milling)")
     finish_hr  = sum_time(r"(?:Finishing\s*Cycle\s*Time)")
-    setups     = first_num(r"(?:Number\s*of\s*Milling\s*Setups|Milling\s*Setups)", 0.0)
-    setup_each = first_num(r"(?:Setup\s*Time\s*per\s*Setup|Setup\s*Hours\s*/\s*Setup)", 0.5)
+    setups     = first_num(r"(?:Number\s*of\s*Milling\s*Setups|Milling\s*Setups)", default=0.0)
+    setup_each = first_num(r"(?:Setup\s*Time\s*per\s*Setup|Setup\s*Hours\s*/\s*Setup)", default=0.5)
 
     setups = max(1, min(int(round(setups or 1)), 3))
     from_back_geo_flag = bool(geo_context.get("needs_back_face") or geo_context.get("from_back"))
@@ -12862,7 +12862,7 @@ def compute_quote_from_df(
     setup_hr  = setups * setup_each
     milling_hr = rough_hr + semi_hr + finish_hr + setup_hr
 
-    max_dim   = first_num(r"\bGEO__MaxDim_mm\b", 0.0)
+    max_dim   = first_num(r"\bGEO__MaxDim_mm\b", default=0.0)
     is_simple = (max_dim and max_dim <= params["ProgSimpleDim_mm"] and setups <= 2)
 
     # ---- fixture -------------------------------------------------------------
@@ -12990,28 +12990,28 @@ def compute_quote_from_df(
 
     # Wire EDM
     wedm_hr_dir  = sum_time(r"(?:WEDM\s*Hours|Wire\s*EDM\s*Hours|EDM\s*Burn\s*Time)")
-    wedm_len_mm  = first_num(r"(?:EDM\s*Length_mm|WEDM\s*Length_mm|EDM\s*Perimeter_mm)", GEO_wedm_len_mm)
-    wedm_thk_mm  = first_num(r"(?:EDM\s*Thickness_mm|Stock\s*Thickness_mm)", 0.0)
-    wedm_passes  = max(1, int(first_num(r"(?:EDM\s*Passes|WEDM\s*Passes)", 1)))
-    cut_rate     = max(0.0001, first_num(r"(?:EDM\s*Cut\s*Rate_mm\^?2/min|WEDM\s*Cut\s*Rate)", 2.0))
-    edge_factor  = max(1.0, first_num(r"(?:EDM\s*Edge\s*Factor)", 1.0))
+    wedm_len_mm  = first_num(r"(?:EDM\s*Length_mm|WEDM\s*Length_mm|EDM\s*Perimeter_mm)", default=GEO_wedm_len_mm)
+    wedm_thk_mm  = first_num(r"(?:EDM\s*Thickness_mm|Stock\s*Thickness_mm)", default=0.0)
+    wedm_passes  = max(1, int(first_num(r"(?:EDM\s*Passes|WEDM\s*Passes)", default=1)))
+    cut_rate     = max(0.0001, first_num(r"(?:EDM\s*Cut\s*Rate_mm\^?2/min|WEDM\s*Cut\s*Rate)", default=2.0))
+    edge_factor  = max(1.0, first_num(r"(?:EDM\s*Edge\s*Factor)", default=1.0))
     wedm_mm2     = wedm_len_mm * max(0.0, wedm_thk_mm) * wedm_passes
     wedm_hr_calc = (wedm_mm2 / cut_rate) / 60.0 * edge_factor if wedm_mm2 > 0 else 0.0
     wedm_hr      = eff(wedm_hr_dir if wedm_hr_dir > 0 else wedm_hr_calc)
 
-    wire_cost_m  = first_num(r"(?:WEDM\s*Wire\s*Cost\s*/\s*m|Wire\s*Cost\s*/m)", 0.0)
-    wire_per_mm2 = first_num(r"(?:Wire\s*Usage\s*m\s*/\s*mm\^?2)", 0.0)
+    wire_cost_m  = first_num(r"(?:WEDM\s*Wire\s*Cost\s*/\s*m|Wire\s*Cost\s*/m)", default=0.0)
+    wire_per_mm2 = first_num(r"(?:Wire\s*Usage\s*m\s*/\s*mm\^?2)", default=0.0)
     wire_cost    = (wedm_mm2 * wire_per_mm2 * wire_cost_m) if (wire_per_mm2 > 0 and wire_cost_m > 0) else 0.0
 
     # Sinker EDM
     sinker_dir   = sum_time(r"(?:Sinker\s*EDM\s*Hours|Ram\s*EDM\s*Hours|Burn\s*Time)")
-    sinker_vol   = first_num(r"(?:Sinker\s*Burn\s*Volume_mm3|EDM\s*Volume_mm3)", 0.0)
-    sinker_mrr   = max(0.0001, first_num(r"(?:Sinker\s*MRR_mm\^?3/min|EDM\s*MRR)", 8.0))
+    sinker_vol   = first_num(r"(?:Sinker\s*Burn\s*Volume_mm3|EDM\s*Volume_mm3)", default=0.0)
+    sinker_mrr   = max(0.0001, first_num(r"(?:Sinker\s*MRR_mm\^?3/min|EDM\s*MRR)", default=8.0))
     sinker_calc  = (sinker_vol / sinker_mrr) / 60.0 if sinker_vol > 0 else 0.0
     sinker_hr    = eff(sinker_dir if sinker_dir > 0 else sinker_calc)
 
-    electrodes_n = max(0, int(first_num(r"(?:Electrode\s*Count)", 0)))
-    electrode_each = first_num(r"(?:Electrode\s*(?:Cost|Material)\s*(?:/ea|per\s*ea)?)", 0.0)
+    electrodes_n = max(0, int(first_num(r"(?:Electrode\s*Count)", default=0)))
+    electrode_each = first_num(r"(?:Electrode\s*(?:Cost|Material)\s*(?:/ea|per\s*ea)?)", default=0.0)
     electrodes_cost = electrodes_n * electrode_each
 
     # Grinding
@@ -13019,11 +13019,11 @@ def compute_quote_from_df(
     jig_grind_hr  = eff(sum_time(r"(?:Jig\s*Grind)"))
     odid_grind_hr = eff(sum_time(r"(?:OD/ID\s*Grind|Cylindrical\s*Grind)"))
 
-    grind_vol   = first_num(r"(?:Grind\s*Volume_mm3|Grinding\s*Volume)", 0.0)
-    grind_mrr   = max(0.0001, first_num(r"(?:Grind\s*MRR_mm\^?3/min|Grinding\s*MRR)", 300.0))
-    grind_pass  = max(0, int(first_num(r"(?:Grinding\s*Passes)", 0)))
-    dress_freq  = max(1, int(first_num(r"(?:Dress\s*Frequency\s*passes)", 4)))
-    dress_min   = first_num(r"(?:Dress\s*Time\s*min(?:\s*/\s*pass)?)", 0.0)
+    grind_vol   = first_num(r"(?:Grind\s*Volume_mm3|Grinding\s*Volume)", default=0.0)
+    grind_mrr   = max(0.0001, first_num(r"(?:Grind\s*MRR_mm\^?3/min|Grinding\s*MRR)", default=300.0))
+    grind_pass  = max(0, int(first_num(r"(?:Grinding\s*Passes)", default=0)))
+    dress_freq  = max(1, int(first_num(r"(?:Dress\s*Frequency\s*passes)", default=4)))
+    dress_min   = first_num(r"(?:Dress\s*Time\s*min(?:\s*/\s*pass)?)", default=0.0)
     grind_calc  = (grind_vol / grind_mrr) / 60.0 if grind_vol > 0 else 0.0
     dresses     = math.floor(grind_pass / max(1, dress_freq))
     dressing_hr = (dress_min * dresses) / 60.0
@@ -13053,7 +13053,7 @@ def compute_quote_from_df(
         jig_grind_hr  * rates["JigGrindRate"]     +
         odid_grind_hr * rates["ODIDGrindRate"]    +
         (grind_hr_calc + dressing_hr) * rates["SurfaceGrindRate"] +
-        first_num(r"(?:Grinding\s*Wheel\s*Cost)", 0.0)
+        first_num(r"(?:Grinding\s*Wheel\s*Cost)", default=0.0)
     )
 
     # Lapping / Finishing
