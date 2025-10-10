@@ -66,6 +66,17 @@ LLM_MULTIPLIER_MIN = 0.25
 LLM_MULTIPLIER_MAX = 4.0
 LLM_ADDER_MAX = 8.0
 
+LLM_BOUND_DEFAULTS: Mapping[str, Any] = MappingProxyType(
+    {
+        "mult_min": LLM_MULTIPLIER_MIN,
+        "mult_max": LLM_MULTIPLIER_MAX,
+        "adder_max_hr": LLM_ADDER_MAX,
+        "scrap_min": 0.0,
+        "scrap_max": 0.25,
+        "adder_bucket_max": {},
+    }
+)
+
 
 def jdump(obj) -> str:
     return json.dumps(obj, indent=2, default=str)
@@ -737,6 +748,13 @@ except ImportError:
             BRepTools = _MissingOCCTModule()
             TopoDS = TopoDS_Face = TopoDS_Shape = _MissingOCCTModule()
             TopTools_IndexedDataMapOfShapeListOfShape = _MissingOCCTModule()
+
+if TYPE_CHECKING:
+    _TopAbsShapeEnumT = TopAbs_ShapeEnum
+else:
+    _TopAbsShapeEnumT = Any
+
+TopAbsShapeEnumT: TypeAlias = _TopAbsShapeEnumT
 
 BRep_Tool = cast(_BRepToolProto, BRep_Tool)
 TopoDS = cast(_TopoDSProto, TopoDS)
@@ -3770,13 +3788,13 @@ def _shape_from_reader(reader):
     else:
         builder = BRep_Builder()
         compound = _new_topods_compound()
-        builder.MakeCompound(compound)
+        cast(Any, builder).MakeCompound(compound)
         added = 0
         for i in range(1, transfer_count + 1):
             s = reader.Shape(i)
             if s is None or _shape_is_null(s):
                 continue
-            builder.Add(compound, s)
+            cast(Any, builder).Add(compound, s)
             added += 1
         if added == 0:
             raise RuntimeError("Reader produced only null sub-shapes")
@@ -3814,11 +3832,11 @@ def read_step_shape(path: str) -> TopoDSShapeT:
     else:
         builder = BRep_Builder()
         comp = _new_topods_compound()
-        builder.MakeCompound(comp)
+        cast(Any, builder).MakeCompound(comp)
         for i in range(1, n + 1):
             s = rdr.Shape(i)
             if not _shape_is_null(s):
-                builder.Add(comp, s)
+                cast(Any, builder).Add(comp, s)
         shape = comp
 
     if _shape_is_null(shape):
@@ -3937,9 +3955,9 @@ SMALL = 1e-7
 
 
 
-def iter_solids(shape: TopoDS_Shape):
+def iter_solids(shape: TopoDSShapeT):
     explorer = cast(Callable[[Any, Any], Any], TopExp_Explorer)
-    exp = explorer(shape, cast(TopAbs_ShapeEnum, TopAbs_SOLID))
+    exp = explorer(shape, cast(TopAbsShapeEnumT, TopAbs_SOLID))
     while exp.More():
         yield geometry.to_solid(exp.Current())
         exp.Next()
@@ -3947,14 +3965,14 @@ def iter_solids(shape: TopoDS_Shape):
 def explode_compound(shape: TopoDSShapeT) -> list[TopoDSShapeT]:
     """If the file is a big COMPOUND, break it into shapes (parts/bodies)."""
     explorer = cast(Callable[[Any, Any], Any], TopExp_Explorer)
-    exp = explorer(shape, cast(TopAbs_ShapeEnum, TopAbs_COMPOUND))
+    exp = explorer(shape, cast(TopAbsShapeEnumT, TopAbs_COMPOUND))
     if exp.More():
         # Itï¿½s a compound ï¿½ return its shells/solids/faces as needed
         solids = list(iter_solids(shape))
         if solids:
             return solids
         # fallback to shells
-        sh = explorer(shape, cast(TopAbs_ShapeEnum, TopAbs_SHELL))
+        sh = explorer(shape, cast(TopAbsShapeEnumT, TopAbs_SHELL))
         shells = []
         while sh.More():
             shells.append(geometry.to_shell(sh.Current()))
@@ -4072,7 +4090,7 @@ def _section_perimeter_len(shape, z_values):
         sec = BRepAlgoAPI_Section(shape, plane, False); sec.Build()
         if not sec.IsDone(): continue
         w = sec.Shape()
-        it = explorer(w, cast(TopAbs_ShapeEnum, TopAbs_EDGE))
+        it = explorer(w, cast(TopAbsShapeEnumT, TopAbs_EDGE))
         while it.More():
             e = geometry.to_edge(it.Current())
             total += _length_of_edge(e)
@@ -8781,8 +8799,8 @@ def compute_material_cost(
     return cost, detail
 
 
-def _material_family(material: str) -> str:
-    name = _normalize_lookup_key(material)
+def _material_family(material: object | None) -> str:
+    name = _normalize_lookup_key(str(material or ""))
     if not name:
         return "steel"
     if any(tag in name for tag in ("alum", "6061", "7075", "2024", "5052", "5083")):
@@ -8804,10 +8822,12 @@ def _material_family(material: str) -> str:
     return "steel"
 
 
-def _density_for_material(material: str, default: float = _DEFAULT_MATERIAL_DENSITY_G_CC) -> float:
+def _density_for_material(
+    material: object | None, default: float = _DEFAULT_MATERIAL_DENSITY_G_CC
+) -> float:
     """Return a rough density guess (g/cc) for the requested material."""
 
-    raw = (material or "").strip()
+    raw = str(material or "").strip()
     if not raw:
         return default
 
@@ -10758,24 +10778,25 @@ def validate_quote_before_pricing(
             issues.clear()
         else:
             raise ValueError("Quote blocked:\n- " + "\n- ".join(issues))
-# pyright: ignore[reportGeneralTypeIssues]
-def compute_quote_from_df(df: pd.DataFrame,
-                          params: Dict[str, Any] | None = None,
-                          rates: Dict[str, float] | None = None,
-                          *,
-                          default_params: Dict[str, Any] | None = None,
-                          default_rates: Dict[str, float] | None = None,
-                          default_material_display: str | None = None,
-                          material_vendor_csv: str | None = None,
-                          llm_enabled: bool = True,
-                          llm_model_path: str | None = None,
-                          llm_client: LLMClient | None = None,
-                          geo: dict[str, Any] | None = None,
-                          ui_vars: dict[str, Any] | None = None,
-                          quote_state: QuoteState | None = None,
-                          reuse_suggestions: bool = False,
-                          llm_suggest: Any | None = None,
-                          pricing: PricingEngine | None = None) -> Dict[str, Any]:
+def compute_quote_from_df(
+    df: pd.DataFrame,
+    params: Dict[str, Any] | None = None,
+    rates: Dict[str, float] | None = None,
+    *,
+    default_params: Dict[str, Any] | None = None,
+    default_rates: Dict[str, float] | None = None,
+    default_material_display: str | None = None,
+    material_vendor_csv: str | None = None,
+    llm_enabled: bool = True,
+    llm_model_path: str | None = None,
+    llm_client: LLMClient | None = None,
+    geo: dict[str, Any] | None = None,
+    ui_vars: dict[str, Any] | None = None,
+    quote_state: QuoteState | None = None,
+    reuse_suggestions: bool = False,
+    llm_suggest: Any | None = None,
+    pricing: PricingEngine | None = None,
+) -> Dict[str, Any]:  # pyright: ignore[reportGeneralTypeIssues]
     """
     Estimator that consumes variables from the sheet (Item, Example Values / Options, Data Type / Input Method).
 
@@ -18325,7 +18346,10 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
         pts: list[tuple[float, float, Any]] = []
         if callable(get_points):
             try:
-                pts = list(get_points("xyb"))
+                point_iter = cast(
+                    Iterable[tuple[float, float, Any]], get_points("xyb")
+                )
+                pts = list(point_iter)
             except Exception:
                 pts = []
         for i in range(len(pts)):
