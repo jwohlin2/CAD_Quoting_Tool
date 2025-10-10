@@ -8877,13 +8877,15 @@ def compute_material_cost(
                         or MATERIAL_DENSITY_G_CC_BY_KEY.get(symbol)
                         or MATERIAL_DENSITY_G_CC_BY_KEY.get(norm_key)
                     )
-                    dims_tuple = tuple(float(x) if x is not None else 0.0 for x in (dims_in or ()))
-                    if len(dims_tuple) != 3 or not all(val > 0 for val in dims_tuple):
-                        dims_tuple = (float(L_mm) / 25.4, float(W_mm) / 25.4, float(T_mm) / 25.4)
                     if density_g_cc and density_g_cc > 0:
-                        L_stock_mm, W_stock_mm, T_stock_mm = (val * 25.4 for val in dims_tuple)
-                        volume_cm3 = (L_stock_mm * W_stock_mm * T_stock_mm) / 1000.0
-                        stock_mass_kg = (volume_cm3 * float(density_g_cc)) / 1000.0
+                        stock_mass_kg, _ = _plate_mass_from_dims(
+                            L_mm,
+                            W_mm,
+                            T_mm,
+                            density_g_cc,
+                            dims_in=dims_in,
+                            hole_d_mm=(),
+                        )
                         if stock_mass_kg and stock_mass_kg > 0:
                             usd_per_kg = float(price_each) / float(stock_mass_kg)
                             source = f"mcmaster_stock:{sku}"
@@ -9223,50 +9225,19 @@ def net_mass_kg(
     *,
     return_removed_mass: bool = False,
 ):
-    """Estimate the net mass of a rectangular plate and optional removed material.
+    """Estimate the net mass of a rectangular plate and optional removed material."""
 
-    When ``return_removed_mass`` is true the function returns a tuple
-    ``(net_mass_kg, removed_mass_g)`` where ``removed_mass_g`` is the grams of
-    material evacuated by the provided circular holes.  Otherwise the previous
-    behaviour of returning only the net mass in kilograms is preserved.
-    """
-
-    if not (plate_L_in and plate_W_in and t_in):
-        return (None, None) if return_removed_mass else None
-
-    L_val = _coerce_float_or_none(plate_L_in)
-    W_val = _coerce_float_or_none(plate_W_in)
-    T_val = _coerce_float_or_none(t_in)
-    if L_val is None or W_val is None or T_val is None:
-        return (None, None) if return_removed_mass else None
-
-    L = float(L_val)
-    W = float(W_val)
-    T = float(T_val)
-    if L <= 0 or W <= 0 or T <= 0:
-        return (None, None) if return_removed_mass else None
-    vol_plate_in3 = L * W * T
-    try:
-        t_mm = T * 25.4
-    except Exception:
-        t_mm = None
-    if t_mm is None:
-        return None
-    holes_mm = []
-    for d in hole_d_mm or []:
-        val = _coerce_float_or_none(d)
-        if val and val > 0:
-            holes_mm.append(float(val))
-    vol_holes_mm3 = sum(math.pi * (d / 2.0) ** 2 * t_mm for d in holes_mm)
-    vol_holes_in3 = vol_holes_mm3 / 16387.064 if vol_holes_mm3 else 0.0
-    vol_net_in3 = max(0.0, vol_plate_in3 - vol_holes_in3)
-    vol_cc = vol_net_in3 * 16.387064
-    mass_g = vol_cc * float(density_g_cc or 0.0)
-    removed_mass_g = vol_holes_in3 * 16.387064 * float(density_g_cc or 0.0)
-
-    net_mass = mass_g / 1000.0 if mass_g else 0.0
+    net_mass, removed_mass = _plate_mass_properties(
+        plate_L_in,
+        plate_W_in,
+        t_in,
+        density_g_cc,
+        hole_d_mm,
+    )
     if return_removed_mass:
-        return net_mass, removed_mass_g
+        if net_mass is None:
+            return (None, None)
+        return net_mass, removed_mass
     return net_mass
 
 
@@ -18057,6 +18028,7 @@ def plan_stock_blank(
     stock_thk = pick_size(float(thickness_in) * 1.05, stock_thicknesses)
     volume_in3 = float(plate_len_in) * float(plate_wid_in) * float(thickness_in)
     hole_area = 0.0
+    holes_mm: list[float] = []
     if hole_families:
         for dia_in, qty in hole_families.items():
             try:
@@ -18065,11 +18037,37 @@ def plan_stock_blank(
             except Exception:
                 continue
             hole_area += math.pi * (d / 2.0) ** 2 * q
+            hole_count = int(round(q)) if q and q > 0 else 0
+            if hole_count > 0:
+                holes_mm.extend([d * 25.4] * hole_count)
     net_volume_in3 = max(volume_in3 - hole_area * float(thickness_in), 0.0)
-    density = float(density_g_cc or 0.0)
-    part_mass_lb = density * LB_PER_IN3_PER_GCC * net_volume_in3 if density > 0 else None
+
+    density_val = _coerce_float_or_none(density_g_cc)
+    if density_val and density_val > 0:
+        dims_in = (plate_len_in, plate_wid_in, thickness_in)
+        part_mass_kg, _ = _plate_mass_from_dims(
+            float(plate_len_in) * 25.4,
+            float(plate_wid_in) * 25.4,
+            float(thickness_in) * 25.4,
+            density_val,
+            dims_in=dims_in,
+            hole_d_mm=holes_mm,
+        )
+        stock_mass_kg, _ = _plate_mass_from_dims(
+            float(plate_len_in) * 25.4,
+            float(plate_wid_in) * 25.4,
+            float(thickness_in) * 25.4,
+            density_val,
+            dims_in=dims_in,
+            hole_d_mm=(),
+        )
+    else:
+        part_mass_kg = None
+        stock_mass_kg = None
+
+    part_mass_lb = (part_mass_kg * LB_PER_KG) if part_mass_kg is not None else None
     stock_volume_in3 = stock_len * stock_wid * stock_thk
-    stock_mass_lb = density * LB_PER_IN3_PER_GCC * stock_volume_in3 if density > 0 else None
+    stock_mass_lb = (stock_mass_kg * LB_PER_KG) if stock_mass_kg is not None else None
     return {
         "stock_len_in": round(stock_len, 3),
         "stock_wid_in": round(stock_wid, 3),
@@ -19775,9 +19773,15 @@ def get_llm_overrides(
         mass_ratio_ok = True
         stock_mass_g = None
         if length and width and thickness and density_for_stock > 0 and part_mass_est > 0:
-            stock_volume_cm3 = (length * width * thickness) / 1000.0
-            stock_mass_g = stock_volume_cm3 * density_for_stock
-            if stock_mass_g > 3.0 * part_mass_est + 1e-6:
+            stock_mass_kg, _ = _plate_mass_from_dims(
+                length,
+                width,
+                thickness,
+                density_for_stock,
+                hole_d_mm=(),
+            )
+            stock_mass_g = (stock_mass_kg * 1000.0) if stock_mass_kg is not None else None
+            if stock_mass_g and stock_mass_g > 3.0 * part_mass_est + 1e-6:
                 mass_ratio_ok = False
 
         if not fits_part:
