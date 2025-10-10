@@ -15273,6 +15273,7 @@ def compute_quote_from_df(
         plan_params,
         planner_signals,
     )
+    pricing_source_header = "planner" if used_planner else "legacy"
     if not used_planner and planner_line_items_signal:
         used_planner = True
     force_planner_for_recognized = recognized_line_items > 0
@@ -17526,7 +17527,7 @@ def compute_quote_from_df(
         "llm_cost_log": llm_cost_log,
     }
 
-    breakdown["pricing_source"] = pricing_source_value
+    breakdown["pricing_source"] = pricing_source_header
     if red_flag_messages:
         breakdown["red_flags"] = list(red_flag_messages)
     if suppress_planner_details_due_to_drift:
