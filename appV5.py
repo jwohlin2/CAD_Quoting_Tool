@@ -26,10 +26,17 @@ from collections import Counter
 from collections.abc import Mapping as _CABCM
 
 Mapping = _CABCM
-from dataclasses import dataclass, field, replace, fields as dataclass_fields
+from dataclasses import (
+    asdict,
+    dataclass,
+    field,
+    replace,
+    fields as dataclass_fields,
+    is_dataclass,
+)
 from fractions import Fraction
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 
 from cad_quoter.app import runtime as _runtime
 from cad_quoter.app.container import (
@@ -477,6 +484,39 @@ def _detect_index_support() -> bool:
 
 
 _TIME_OVERHEAD_SUPPORTS_INDEX_SEC = _detect_index_support()
+
+
+def _ensure_overhead_index_attr(
+    overhead: _TimeOverheadParams, index_value: float | None
+) -> _TimeOverheadParams | SimpleNamespace:
+    """Return an overhead object that always exposes ``index_sec_per_hole``."""
+
+    if hasattr(overhead, "index_sec_per_hole"):
+        return overhead
+
+    payload: dict[str, Any] = {}
+    if is_dataclass(overhead):
+        try:
+            payload = asdict(overhead)
+        except Exception:
+            payload = {}
+
+    if not payload:
+        for name in (
+            "toolchange_min",
+            "approach_retract_in",
+            "peck_penalty_min_per_in_depth",
+            "dwell_min",
+            "peck_min",
+        ):
+            if hasattr(overhead, name):
+                payload[name] = getattr(overhead, name)
+
+    payload.setdefault("index_sec_per_hole", index_value)
+    try:
+        return SimpleNamespace(**payload)
+    except Exception:
+        return overhead
 
 try:
     from process_planner import (
@@ -9535,12 +9575,7 @@ def _drill_overhead_from_params(params: Mapping[str, Any] | None) -> _TimeOverhe
     except TypeError:
         overhead_kwargs.pop("index_sec_per_hole", None)
         overhead = _TimeOverheadParams(**overhead_kwargs)
-    if not hasattr(overhead, "index_sec_per_hole"):
-        try:
-            setattr(overhead, "index_sec_per_hole", index_kwarg)
-        except Exception:
-            pass
-    return overhead
+    return _ensure_overhead_index_attr(overhead, index_kwarg)
 
 
 def _clean_hole_groups(raw: Any) -> list[dict[str, Any]] | None:
