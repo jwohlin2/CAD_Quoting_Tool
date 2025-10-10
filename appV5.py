@@ -6695,7 +6695,16 @@ def render_quote(
     total_labor_label = "Total Labor Cost:"
     row(total_labor_label, float(totals.get("labor_cost", 0.0)))
     total_labor_row_index = len(lines) - 1
-    row("Total Direct Costs:", float(totals.get("direct_costs", 0.0)))
+    direct_costs_total_display: Any = None
+    if isinstance(breakdown, _MappingABC):
+        direct_costs_total_display = breakdown.get("total_direct_costs")
+    if direct_costs_total_display is None and isinstance(totals, _MappingABC):
+        direct_costs_total_display = totals.get("direct_costs")
+    try:
+        direct_costs_total_value = float(direct_costs_total_display or 0.0)
+    except Exception:
+        direct_costs_total_value = 0.0
+    row("Total Direct Costs:", direct_costs_total_value)
     def _coerce_pricing_source(value: Any) -> str | None:
         if value is None:
             return None
@@ -9068,6 +9077,19 @@ def render_quote(
             pass
         directs = max(printed_subtotal - ladder_labor_total, 0.0)
         ladder_subtotal = ladder_labor_total + directs
+    breakdown_direct_cost_total: Any = None
+    if isinstance(breakdown, _MappingABC):
+        breakdown_direct_cost_total = breakdown.get("total_direct_costs")
+    if breakdown_direct_cost_total is None and isinstance(totals, _MappingABC):
+        breakdown_direct_cost_total = totals.get("direct_costs")
+    if breakdown_direct_cost_total is not None:
+        try:
+            directs = float(breakdown_direct_cost_total or 0.0)
+        except Exception:
+            directs = float(directs or 0.0)
+        ladder_subtotal = ladder_labor_total + directs
+        subtotal = ladder_subtotal
+        printed_subtotal = subtotal
     lines.append("")
 
     # ---- Pricing ladder ------------------------------------------------------
@@ -17118,6 +17140,20 @@ def compute_quote_from_df(
     material_tax_for_directs = float(
         _coerce_float_or_none(material_detail_for_breakdown.get("material_tax")) or 0.0
     )
+    def _update_direct_costs_summary(total_value: Any, labor_value: Any) -> None:
+        try:
+            total_float = float(total_value or 0.0)
+        except Exception:
+            total_float = 0.0
+        try:
+            labor_float = float(labor_value or 0.0)
+        except Exception:
+            labor_float = 0.0
+        if isinstance(breakdown, _MutableMappingABC):
+            breakdown["total_direct_costs"] = total_float
+        if isinstance(totals, _MutableMappingABC):
+            totals["direct_costs"] = total_float
+            totals["subtotal"] = labor_float + total_float
     total_direct_costs = _compute_direct_costs(
         material_total_for_directs,
         scrap_credit_for_directs,
@@ -17125,6 +17161,7 @@ def compute_quote_from_df(
         pass_through,
     )
     direct_costs = total_direct_costs
+    _update_direct_costs_summary(total_direct_costs, labor_cost)
 
     subtotal = labor_cost + direct_costs
 
@@ -17345,15 +17382,19 @@ def compute_quote_from_df(
             vendor_marked_add = round(vendor_marked_add, 2)
             pass_through["Insurance"] = insurance_cost
             pass_through["Vendor Markup Added"] = vendor_marked_add
-            total_direct_costs = base_direct_costs + insurance_cost + vendor_marked_add
         else:
             insurance_cost = 0.0
             vendor_marked_add = 0.0
-            total_direct_costs = base_direct_costs
             pass_through.pop("Insurance", None)
             pass_through.pop("Vendor Markup Added", None)
-
+        total_direct_costs = _compute_direct_costs(
+            material_total_for_directs,
+            scrap_credit_for_directs,
+            material_tax_for_directs,
+            pass_through,
+        )
         direct_costs = total_direct_costs
+        _update_direct_costs_summary(total_direct_costs, labor_cost)
         subtotal = labor_cost + direct_costs
         with_overhead = subtotal * (1.0 + OverheadPct)
         with_ga = with_overhead * (1.0 + GA_Pct)
