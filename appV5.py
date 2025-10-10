@@ -1,4 +1,3 @@
-﻿
 # -*- coding: utf-8 -*-
 # app_gui_occ_flow_v8_single_autollm.py
 r"""
@@ -17882,22 +17881,22 @@ class GeometryLoader:
         return extract_2d_features_from_dxf_or_dwg(str(path))
 
     def extract_features_with_occ(self, path: str | Path):
-        return extract_features_with_occ(str(path))
+        return geometry.extract_features_with_occ(str(path))
 
     def enrich_geo_stl(self, path: str | Path):
-        return enrich_geo_stl(str(path))
+        return geometry.enrich_geo_stl(str(path))
 
     def read_step_shape(self, path: str | Path) -> TopoDS_Shape:
-        return read_step_shape(str(path))
+        return geometry.read_step_shape(str(path))
 
     def read_cad_any(self, path: str | Path) -> TopoDS_Shape:
-        return read_cad_any(str(path))
+        return geometry.read_cad_any(str(path))
 
     def safe_bbox(self, shape: TopoDS_Shape):
-        return safe_bbox(shape)
+        return geometry.safe_bbox(shape)
 
     def enrich_geo_occ(self, shape: TopoDS_Shape):
-        return enrich_geo_occ(shape)
+        return geometry.enrich_geo_occ(shape)
 
 
 @dataclass(slots=True)
