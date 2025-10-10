@@ -553,6 +553,86 @@ INPROC_MENTION_PER = 0.10   # “tight tolerance” textual mentions
 INPROC_MENTION_MAX = 0.30
 
 
+def _estimate_inprocess_default_from_tolerance(
+    tolerance_inputs: Mapping[str, Any] | None,
+) -> float:
+    """Return a heuristic in-process inspection hour estimate for tolerances.
+
+    The estimator mirrors the behaviour of the Tkinter UI where a base number of
+    inspection hours is increased as default tolerances tighten and as multiple
+    tight callouts are present.  The curve parameters (``INPROC_*`` constants)
+    were reverse-engineered from the legacy spreadsheet that powers the quoting
+    tool, so we keep the same soft bounds here for consistency with the GUI.
+
+    ``tolerance_inputs`` accepts the loose dictionary that flows through the
+    application (strings, numbers, nested dicts/lists).  All tolerance magnitudes
+    are normalised to inches via :func:`_tolerance_values_from_any`.  We then
+    apply three adjustments:
+
+    #. Tightening the *minimum* tolerance raises the base curve following a
+       sub-linear power law so that going from ±0.002" to ±0.0002" increases the
+       estimate, but the premium flattens out.
+    #. Additional tight/sub-thou callouts add small capped bumps.  This guards
+       against a part with many near-identical tight tolerances doubling the
+       hours.
+    #. Optional textual mentions ("tight tolerance") get a minor adder to keep
+       parity with the legacy heuristics.
+    """
+
+    tol_values: list[float] = []
+    mention_tokens: list[str] = []
+
+    def _consume(entry: Any) -> None:
+        tol_values.extend(_tolerance_values_from_any(entry))
+        text = str(entry or "").strip()
+        if text:
+            mention_tokens.append(text)
+
+    if isinstance(tolerance_inputs, Mapping):
+        for key, value in tolerance_inputs.items():
+            if key is not None:
+                mention_tokens.append(str(key))
+            _consume(value)
+    elif tolerance_inputs is not None:
+        _consume(tolerance_inputs)
+
+    min_tol_in = min((val for val in tol_values if val > 0.0), default=None)
+
+    base_hr = float(INPROC_BASE_HR)
+    if min_tol_in is not None:
+        try:
+            norm = (INPROC_REF_TOL_IN - float(min_tol_in)) / INPROC_REF_TOL_IN
+        except Exception:
+            norm = 0.0
+        norm = max(0.0, min(1.0, norm))
+        if norm > 0.0:
+            base_hr += INPROC_SCALE_HR * (norm ** INPROC_EXP)
+
+    extra_hr = 0.0
+
+    tight_values = [val for val in tol_values if 0.0 < val <= 0.0015]
+    if tight_values:
+        extra_hr += min(
+            max(0, len(tight_values) - 1) * INPROC_TIGHT_PER,
+            INPROC_TIGHT_MAX,
+        )
+
+    subthou_values = [val for val in tol_values if 0.0 < val <= 0.0005]
+    if subthou_values:
+        extra_hr += min(
+            max(0, len(subthou_values) - 1) * INPROC_SUBTHOU_PER,
+            INPROC_SUBTHOU_MAX,
+        )
+
+    if mention_tokens:
+        mention_text = " ".join(mention_tokens).lower()
+        mentions = len(re.findall(r"tight\s*toler", mention_text))
+        if mentions:
+            extra_hr += min(mentions * INPROC_MENTION_PER, INPROC_MENTION_MAX)
+
+    return float(base_hr + extra_hr)
+
+
 def _canonical_pass_label(label: str | None) -> str:
     name = str(label or "").strip()
     if name.lower() in _HARDWARE_LABEL_ALIASES:
@@ -9696,13 +9776,16 @@ def estimate_drilling_hours(
             material_label = alt_label
     mat = str(material_label or mat_key or "").lower()
     material_factor = _unit_hp_cap(material_label)
-    debug: dict[str, Any] | None
-    # Create a local debug aggregate only when caller requested debug output.
-    # Previously referenced an undefined 'debug_meta'; use available signals instead.
+    # ``debug_state`` collects aggregate drilling metrics for callers that
+    # requested debugging information.  A previous refactor attempted to use a
+    # ``debug`` variable without guaranteeing it was defined, which manifested
+    # as a ``NameError`` during quoting.  Initialise the container up-front and
+    # only populate it when a caller has supplied either ``debug_lines`` or
+    # ``debug_summary``.
+    debug_state: dict[str, Any] | None = None
     if (debug_lines is not None) or (debug_summary is not None):
-        debug = {}
-    else:
-        debug = None
+        debug_state = {}
+
     debug_list = debug_lines if debug_lines is not None else None
     if debug_summary is not None:
         debug_summary.clear()
@@ -10541,12 +10624,12 @@ def estimate_drilling_hours(
                     warnings.append(warning_text)
         total_minutes_with_toolchange = total_min + total_toolchange_min
 
-        if debug is not None and total_holes > 0:
+        if debug_state is not None and total_holes > 0:
             try:
                 avg_dia_in = float(avg_dia_in)
             except Exception:
                 avg_dia_in = 0.0
-            debug.update(
+            debug_state.update(
                 {
                     "thickness_in": float(thickness_in or 0.0),
                     "avg_dia_in": float(avg_dia_in),
@@ -10608,22 +10691,22 @@ def estimate_drilling_hours(
         # aggregate counts and weighted diameter
         weighted_dia_in += (float(d) / 25.4) * qty_int
 
-    if debug is not None and total_hole_qty > 0:
-        avg_dia_in = weighted_dia_in / total_hole_qty if total_hole_qty else 0.0
-        debug.update(
+    if debug_state is not None and holes_fallback > 0:
+        avg_dia_in = weighted_dia_in / holes_fallback if holes_fallback else 0.0
+        debug_state.update(
             {
-            "thickness_in": float(thickness_in or 0.0),
-            "avg_dia_in": float(avg_dia_in),
-            "sfm": None,
-            "ipr": None,
-            "rpm": None,
-            "ipm": None,
-            "min_per_hole": (total_sec / 60.0) / total_hole_qty if total_hole_qty else None,
-            "hole_count": int(total_hole_qty),
+                "thickness_in": float(thickness_in or 0.0),
+                "avg_dia_in": float(avg_dia_in),
+                "sfm": None,
+                "ipr": None,
+                "rpm": None,
+                "ipm": None,
+                "min_per_hole": (total_sec / 60.0) / holes_fallback if holes_fallback else None,
+                "hole_count": int(holes_fallback),
             }
         )
-    elif debug is not None:
-        debug.update(
+    elif debug_state is not None:
+        debug_state.update(
             {
                 "thickness_in": float(thickness_in or 0.0),
                 "avg_dia_in": 0.0,
@@ -10635,6 +10718,9 @@ def estimate_drilling_hours(
                 "hole_count": 0,
             }
         )
+
+    if debug_summary is not None and debug_state is not None:
+        debug_summary.setdefault("aggregate", {}).update(debug_state)
 
     hours = total_sec / 3600.0
     depth_for_bounds = None
@@ -10937,6 +11023,7 @@ def compute_quote_from_df(
     # ---- merge configs (easy to edit) ---------------------------------------
     # Default pricing source; updated to 'planner' later if planner path is used
     pricing_source = "legacy"
+    legacy_baseline_had_values = False
 
     params_defaults = default_params if default_params is not None else QuoteConfiguration().default_params
     rates_defaults = default_rates if default_rates is not None else PricingRegistry().default_rates
@@ -11812,8 +11899,14 @@ def compute_quote_from_df(
     planner_drill_minutes: float | None = None
     planner_drilling_override: dict[str, float] | None = None
     used_planner = False
+    planner_meta_keys: set[str] = set()
 
     red_flag_messages: list[str] = []
+    # Historically this function exposed a ``red_flags`` list.  Some call
+    # sites—including legacy desktop builds—still expect that name when adding
+    # new messages.  Provide an alias so any lingering references continue to
+    # work instead of raising ``NameError`` when the branch executes.
+    red_flags = red_flag_messages
     _red_flag_seen: set[str] = set()
 
     def _record_red_flag(message: str) -> None:
@@ -13428,7 +13521,8 @@ def compute_quote_from_df(
             for entry in line_items_raw:
                 if isinstance(entry, _MappingABC):
                     planner_line_items.append({k: entry.get(k) for k in ("op", "minutes", "machine_cost", "labor_cost")})
-                    recognized_line_items += 1
+
+        recognized_line_items = len(planner_line_items)
 
         planner_machine_cost_total = float(totals.get("machine_cost", 0.0) or 0.0)
         planner_labor_cost_total = float(totals.get("labor_cost", 0.0) or 0.0)
