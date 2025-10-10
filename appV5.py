@@ -12069,24 +12069,66 @@ def compute_quote_from_df(
     )
 
     # Params overrides
-    params["OEE_EfficiencyPct"]        = sheet_pct(r"\b(OEE\s*Efficiency\s*%|OEE)\b", params.get("OEE_EfficiencyPct"))
-    params["VendorMarkupPct"]          = sheet_pct(r"\b(Vendor\s*Markup\s*%)\b", params.get("VendorMarkupPct"))
-    params["MinLotCharge"]             = sheet_num(r"\b(Min\s*Lot\s*Charge)\b", params.get("MinLotCharge"))
-    params["ProgCapHr"]                = sheet_num(r"\b(Programming\s*Cap\s*Hr)\b", params.get("ProgCapHr"))
-    params["ProgSimpleDim_mm"]         = sheet_num(r"\b(Prog\s*Simple\s*Dim_mm)\b", params.get("ProgSimpleDim_mm"))
-    params["ProgMaxToMillingRatio"]    = sheet_num(r"\b(Prog\s*Max\s*To\s*Milling\s*Ratio)\b", params.get("ProgMaxToMillingRatio"))
-    prog_hr_override = sheet_num(r"\b(Programming\s*(?:Override|Manual)(?:\s*H(?:ou)?rs?)?)\b", None)
-    params["MillingConsumablesPerHr"]  = sheet_num(r"(?i)Milling\s*Consumables\s*/\s*Hr", params.get("MillingConsumablesPerHr"))
-    params["TurningConsumablesPerHr"]  = sheet_num(r"(?i)Turning\s*Consumables\s*/\s*Hr", params.get("TurningConsumablesPerHr"))
-    params["EDMConsumablesPerHr"]      = sheet_num(r"(?i)EDM\s*Consumables\s*/\s*Hr", params.get("EDMConsumablesPerHr"))
-    params["GrindingConsumablesPerHr"] = sheet_num(r"(?i)Grinding\s*Consumables\s*/\s*Hr", params.get("GrindingConsumablesPerHr"))
-    params["InspectionConsumablesPerHr"]= sheet_num(r"(?i)Inspection\s*Consumables\s*/\s*Hr", params.get("InspectionConsumablesPerHr"))
-    params["UtilitiesPerSpindleHr"]    = sheet_num(r"(?i)Utilities\s*Per\s*Spindle\s*Hr", params.get("UtilitiesPerSpindleHr"))
-    params["ConsumablesFlat"]          = sheet_num(r"(?i)Consumables\s*Flat", params.get("ConsumablesFlat"))
+    params["OEE_EfficiencyPct"]        = sheet_pct(
+        r"\b(OEE\s*Efficiency\s*%|OEE)\b",
+        default=params.get("OEE_EfficiencyPct"),
+    )
+    params["VendorMarkupPct"]          = sheet_pct(
+        r"\b(Vendor\s*Markup\s*%)\b",
+        default=params.get("VendorMarkupPct"),
+    )
+    params["MinLotCharge"]             = sheet_num(
+        r"\b(Min\s*Lot\s*Charge)\b",
+        default=params.get("MinLotCharge"),
+    )
+    params["ProgCapHr"]                = sheet_num(
+        r"\b(Programming\s*Cap\s*Hr)\b",
+        default=params.get("ProgCapHr"),
+    )
+    params["ProgSimpleDim_mm"]         = sheet_num(
+        r"\b(Prog\s*Simple\s*Dim_mm)\b",
+        default=params.get("ProgSimpleDim_mm"),
+    )
+    params["ProgMaxToMillingRatio"]    = sheet_num(
+        r"\b(Prog\s*Max\s*To\s*Milling\s*Ratio)\b",
+        default=params.get("ProgMaxToMillingRatio"),
+    )
+    prog_hr_override = sheet_num(
+        r"\b(Programming\s*(?:Override|Manual)(?:\s*H(?:ou)?rs?)?)\b",
+        default=None,
+    )
+    params["MillingConsumablesPerHr"]  = sheet_num(
+        r"(?i)Milling\s*Consumables\s*/\s*Hr",
+        default=params.get("MillingConsumablesPerHr"),
+    )
+    params["TurningConsumablesPerHr"]  = sheet_num(
+        r"(?i)Turning\s*Consumables\s*/\s*Hr",
+        default=params.get("TurningConsumablesPerHr"),
+    )
+    params["EDMConsumablesPerHr"]      = sheet_num(
+        r"(?i)EDM\s*Consumables\s*/\s*Hr",
+        default=params.get("EDMConsumablesPerHr"),
+    )
+    params["GrindingConsumablesPerHr"] = sheet_num(
+        r"(?i)Grinding\s*Consumables\s*/\s*Hr",
+        default=params.get("GrindingConsumablesPerHr"),
+    )
+    params["InspectionConsumablesPerHr"] = sheet_num(
+        r"(?i)Inspection\s*Consumables\s*/\s*Hr",
+        default=params.get("InspectionConsumablesPerHr"),
+    )
+    params["UtilitiesPerSpindleHr"]    = sheet_num(
+        r"(?i)Utilities\s*Per\s*Spindle\s*Hr",
+        default=params.get("UtilitiesPerSpindleHr"),
+    )
+    params["ConsumablesFlat"]          = sheet_num(
+        r"(?i)Consumables\s*Flat",
+        default=params.get("ConsumablesFlat"),
+    )
 
     # Rates overrides
     def rate_from_sheet(label, key):
-        v = sheet_num(label, None)
+        v = sheet_num(label, default=None)
         if v is not None:
             rates[key] = v
 
@@ -12872,8 +12914,14 @@ def compute_quote_from_df(
     finishing_cost   = finishing_misc_hr * finishing_rate
 
     # Inspection & docs
-    inproc_default = sheet_num(r"\bIn-Process\s*Inspection\s*Hours\b", 1.0)
-    final_default  = sheet_num(r"\bFinal\s*Inspection\s*Hours\b", 0.0)
+    inproc_default = sheet_num(
+        r"\bIn-Process\s*Inspection\s*Hours\b",
+        default=1.0,
+    )
+    final_default  = sheet_num(
+        r"\bFinal\s*Inspection\s*Hours\b",
+        default=0.0,
+    )
     inproc_hr   = sum_time(r"(?:In[- ]?Process\s*Inspection)", default=inproc_default)
     final_hr    = sum_time(r"(?:Final\s*Inspection|Manual\s*Inspection)", default=final_default)
     cmm_prog_hr = sum_time(r"(?:CMM\s*Programming)")
