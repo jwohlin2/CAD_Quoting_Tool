@@ -7438,6 +7438,57 @@ def render_quote(
         "saw_waterjet": "Saw/Waterjet",
     }
 
+    if bucket_rollup_map:
+        for raw_key, info in bucket_rollup_map.items():
+            canon_key = _canonical_bucket_key(raw_key)
+            if canon_key in canonical_bucket_summary and canonical_bucket_summary[canon_key]["total"] > 0:
+                continue
+            if isinstance(info, _MappingABC):
+                _record_bucket_summary(raw_key, info)
+            else:
+                _record_bucket_summary(raw_key, {})
+
+    if canonical_bucket_order and canonical_bucket_summary:
+        bucket_table_totals = {"hours": 0.0, "labor": 0.0, "machine": 0.0, "total": 0.0}
+        for canon_key in list(canonical_bucket_order):
+            if canon_key in {"planner_total", "planner_machine", "planner_labor"}:
+                continue
+            if canon_key.startswith("planner_"):
+                continue
+            summary = canonical_bucket_summary.get(canon_key)
+            if not isinstance(summary, dict):
+                continue
+            hours_val = float(summary.get("hours", 0.0) or 0.0)
+            if hours_val <= 0 and summary.get("minutes", 0.0):
+                hours_val = float(summary.get("minutes", 0.0) or 0.0) / 60.0
+            labor_val = float(summary.get("labor", 0.0) or 0.0)
+            machine_val = float(summary.get("machine", 0.0) or 0.0)
+            total_val = float(summary.get("total", 0.0) or 0.0)
+            if total_val <= 0:
+                total_val = labor_val + machine_val
+            if total_val <= 0.01 and hours_val <= 0.01:
+                continue
+
+            bucket_table_rows.append(
+                (
+                    _display_bucket_label(canon_key, label_overrides),
+                    round(hours_val, 2),
+                    round(labor_val, 2),
+                    round(machine_val, 2),
+                    round(total_val, 2),
+                )
+            )
+
+            bucket_table_totals["hours"] += hours_val
+            bucket_table_totals["labor"] += labor_val
+            bucket_table_totals["machine"] += machine_val
+            bucket_table_totals["total"] += total_val
+
+    if bucket_table_rows:
+        render_bucket_table(bucket_table_rows)
+    else:
+        bucket_table_totals = None
+
     def _lookup_process_meta(key: str | None) -> Mapping[str, Any] | None:
         if not isinstance(process_meta, dict):
             return None
@@ -8036,6 +8087,46 @@ def render_quote(
     bucket_table_rows: list[tuple[str, float, float, float, float]] = []
     bucket_table_totals: dict[str, float] | None = None
 
+    canonical_bucket_summary: dict[str, dict[str, float]] = {}
+    canonical_bucket_order: list[str] = []
+
+    def _record_bucket_summary(raw_key: Any, info: Mapping[str, Any] | None) -> None:
+        canon_key = _canonical_bucket_key(raw_key)
+        if not canon_key:
+            return
+        if canon_key not in canonical_bucket_order:
+            canonical_bucket_order.append(canon_key)
+        summary = canonical_bucket_summary.setdefault(
+            canon_key,
+            {"minutes": 0.0, "hours": 0.0, "labor": 0.0, "machine": 0.0, "total": 0.0},
+        )
+        minutes_val = _bucket_cost(info, "minutes")
+        if minutes_val <= 0:
+            try:
+                minutes_val = float(info.get("minute", 0.0) or 0.0)  # type: ignore[arg-type]
+            except Exception:
+                minutes_val = 0.0
+        hours_val = minutes_val / 60.0 if minutes_val > 0 else 0.0
+        if hours_val <= 0:
+            try:
+                hours_val = float(
+                    info.get("hours", info.get("hr", 0.0))  # type: ignore[arg-type]
+                    or 0.0
+                )
+            except Exception:
+                hours_val = 0.0
+        labor_val = _bucket_cost(info, "labor$", "labor_cost")
+        machine_val = _bucket_cost(info, "machine$", "machine_cost")
+        total_val = _bucket_cost(info, "total$", "total_cost", "total")
+        if total_val <= 0:
+            total_val = labor_val + machine_val
+
+        summary["minutes"] += max(minutes_val, 0.0)
+        summary["hours"] += max(hours_val, 0.0)
+        summary["labor"] += max(labor_val, 0.0)
+        summary["machine"] += max(machine_val, 0.0)
+        summary["total"] += max(total_val, 0.0)
+
     process_plan_summary_local = locals().get("process_plan_summary")
     if not isinstance(process_plan_summary_local, _MappingABC):
         process_plan_summary_local = (
@@ -8047,51 +8138,23 @@ def render_quote(
         else None
     )
     if isinstance(bucket_view, _MappingABC):
-        order = bucket_view.get("order")
         buckets = bucket_view.get("buckets")
-        if isinstance(order, Sequence) and isinstance(buckets, _MappingABC):
-            bucket_table_totals = {"hours": 0.0, "labor": 0.0, "machine": 0.0, "total": 0.0}
-            for bucket_key in order:
-                info = buckets.get(bucket_key)
-                if not isinstance(info, _MappingABC):
-                    continue
-                try:
-                    minutes_val = float(info.get("minutes", 0.0) or 0.0)
-                except Exception:
-                    minutes_val = 0.0
-                hours_val = minutes_val / 60.0
-                try:
-                    labor_val = float(info.get("labor$", 0.0) or 0.0)
-                except Exception:
-                    labor_val = 0.0
-                try:
-                    machine_val = float(info.get("machine$", 0.0) or 0.0)
-                except Exception:
-                    machine_val = 0.0
-                total_val = labor_val + machine_val
-
-                if total_val <= 0.01 and hours_val <= 0.01:
-                    continue
-
-                bucket_table_rows.append(
-                    (
-                        bucket_key,
-                        round(hours_val, 2),
-                        round(labor_val, 2),
-                        round(machine_val, 2),
-                        round(total_val, 2),
-                    )
-                )
-
-                bucket_table_totals["hours"] += hours_val
-                bucket_table_totals["labor"] += labor_val
-                bucket_table_totals["machine"] += machine_val
-                bucket_table_totals["total"] += total_val
-
-    if bucket_table_rows:
-        render_bucket_table(bucket_table_rows)
-    else:
-        bucket_table_totals = None
+        if not isinstance(buckets, _MappingABC):
+            buckets = bucket_view
+        order = bucket_view.get("order") if isinstance(bucket_view, _MappingABC) else None
+        if isinstance(order, Sequence):
+            for raw_key in order:
+                info = buckets.get(raw_key) if isinstance(buckets, _MappingABC) else None
+                if isinstance(info, _MappingABC):
+                    _record_bucket_summary(raw_key, info)
+                elif info is not None:
+                    _record_bucket_summary(raw_key, {})
+        if isinstance(buckets, _MappingABC):
+            for raw_key, info in buckets.items():
+                if isinstance(info, _MappingABC):
+                    _record_bucket_summary(raw_key, info)
+                else:
+                    _record_bucket_summary(raw_key, {})
 
     lines.append("Process & Labor Costs")
     lines.append(divider)
@@ -8382,12 +8445,29 @@ def render_quote(
     hidden_canon_keys = {"planner_labor", "planner_machine", "planner_total"}
     remaining_costs = {canon: data["amount"] for canon, data in aggregated_process_rows.items()}
 
+    if canonical_bucket_order:
+        canonical_sequence = [
+            key for key in canonical_bucket_order if key in aggregated_process_rows
+        ]
+        remainder = [key for key in aggregated_order if key not in canonical_sequence]
+        aggregated_order = canonical_sequence + remainder
+
     for canon_key in aggregated_order:
         if canon_key in hidden_canon_keys or canon_key.startswith("planner_"):
             continue
 
         amount = remaining_costs.get(canon_key, 0.0)
         bucket = aggregated_process_rows[canon_key]
+        summary = canonical_bucket_summary.get(canon_key)
+        if isinstance(summary, dict):
+            summary_total = float(summary.get("total", 0.0) or 0.0)
+            if summary_total <= 0:
+                summary_total = float(summary.get("labor", 0.0) or 0.0) + float(
+                    summary.get("machine", 0.0) or 0.0
+                )
+            if summary_total > 0 or float(summary.get("hours", 0.0) or 0.0) > 0:
+                amount = summary_total
+                remaining_costs[canon_key] = amount
         process_keys = bucket.get("process_keys") or []
         representative_key = bucket.get("representative_key")
         if not process_keys and representative_key:
@@ -8670,6 +8750,14 @@ def render_quote(
                 return 0.0
 
         def _hours_for_bucket(canon_key: str) -> float:
+            summary = canonical_bucket_summary.get(canon_key)
+            if isinstance(summary, dict):
+                hours_val = float(summary.get("hours", 0.0) or 0.0)
+                if hours_val <= 0 and summary.get("minutes", 0.0):
+                    hours_val = float(summary.get("minutes", 0.0) or 0.0) / 60.0
+                if hours_val > 0:
+                    return hours_val
+
             info: Mapping[str, Any] | None = None
             if isinstance(planner_bucket_display_map, _MappingABC):
                 info = planner_bucket_display_map.get(canon_key)
@@ -8677,7 +8765,11 @@ def render_quote(
                 info = bucket_rollup_map.get(canon_key)
             minutes_val = _bucket_minutes(info)
             if minutes_val > 0:
+                if pricing_source_lower == "planner" and canon_key not in canonical_bucket_summary:
+                    return 0.0
                 return minutes_val / 60.0
+            if pricing_source_lower == "planner":
+                return 0.0
             meta = _lookup_process_meta(canon_key) or {}
             try:
                 hr_val = float(meta.get("hr", 0.0) or 0.0)
@@ -8704,7 +8796,20 @@ def render_quote(
             "fixture_build_amortized",
         }
 
-        for canon_key in aggregated_order:
+        def _ordered_hour_keys() -> Iterable[str]:
+            yielded: set[str] = set()
+            for key in canonical_bucket_order:
+                if not key or key in yielded:
+                    continue
+                yielded.add(key)
+                yield key
+            for key in aggregated_order:
+                if not key or key in yielded:
+                    continue
+                yielded.add(key)
+                yield key
+
+        for canon_key in _ordered_hour_keys():
             if not canon_key or canon_key in skip_hour_canon_keys:
                 continue
             if canon_key in {"planner_labor", "planner_machine", "planner_total"}:
@@ -13413,6 +13518,10 @@ def compute_quote_from_df(
         "material_lookup": drill_material_lookup_final or selected_lookup,
         "speeds_feeds_loaded": speeds_feeds_loaded_flag,
     }
+    if drill_estimator_hours_for_planner > 0:
+        drilling_meta["estimator_hours_for_planner"] = float(
+            drill_estimator_hours_for_planner
+        )
     final_group = material_selection.get("material_group") or drill_material_group
     if final_group:
         drilling_meta["material_group"] = final_group
@@ -14762,9 +14871,9 @@ def compute_quote_from_df(
         if planner_pricing_error is None:
             planner_pricing_error = "Planner pricing returned no line items"
 
-    if (not used_planner) and planner_drill_minutes and planner_drill_minutes > 0.0:
+    if planner_drill_minutes and planner_drill_minutes > 0.0:
         planner_drill_hr = planner_drill_minutes / 60.0
-        if planner_drill_hr > 0.0 and drill_hr > 10.0 * planner_drill_hr:
+        if (not used_planner) and planner_drill_hr > 0.0 and drill_hr > 10.0 * planner_drill_hr:
             _record_red_flag("Legacy drilling estimate outlier — using planner drilling hours.")
             drill_hr = planner_drill_hr
             baseline_drill_hr = max(existing_drill_hr, float(drill_hr or 0.0))
@@ -14778,132 +14887,8 @@ def compute_quote_from_df(
             process_hours_baseline["drilling"] = baseline_drill_hr
             features["drilling_hr_baseline"] = baseline_drill_hr
 
-        if used_planner:
-            pricing_source = "planner"
-            if legacy_baseline_had_values_flag:
-                legacy_baseline_ignored = True
-            planner_process_minutes = planner_total_minutes
-            process_costs = {
-                "Machine": round(planner_machine_cost_total, 2),
-                "Labor": round(planner_labor_cost_total, 2),
-            }
-
-            # Using planner pricing should mark the overall pricing source accordingly,
-            # even if drilling falls back to legacy heuristics due to CSV issues.
-            pricing_source = "planner"
-
-            existing_process_meta = {key: dict(value) for key, value in process_meta.items()}
-            process_meta = existing_process_meta
-            process_meta["planner_machine"] = {
-                "hr": round(machine_minutes / 60.0, 3),
-                "minutes": round(machine_minutes, 1),
-                "rate": 0.0,
-                "cost": round(planner_machine_cost_total, 2),
-            }
-            _planner_meta_add("planner_machine")
-            process_meta["planner_labor"] = {
-                "hr": round(labor_minutes / 60.0, 3),
-                "minutes": round(labor_minutes, 1),
-                "rate": 0.0,
-                "cost": round(planner_labor_cost_total, 2),
-            }
-            _planner_meta_add("planner_labor")
-            total_cost = planner_machine_cost_total + planner_labor_cost_total
-            process_meta["planner_total"] = {
-                "hr": round(planner_total_minutes / 60.0, 3),
-                "minutes": round(planner_total_minutes, 1),
-                "rate": 0.0,
-                "cost": round(total_cost, 2),
-            }
-            _planner_meta_add("planner_total")
-            if planner_line_items:
-                process_meta["planner_total"]["line_items"] = copy.deepcopy(planner_line_items)
-                for entry in planner_line_items:
-                    name = str(entry.get("op") or "").strip()
-                    if not name:
-                        continue
-                    minutes_val = float(entry.get("minutes", 0.0) or 0.0)
-                    hours_val = minutes_val / 60.0 if minutes_val else 0.0
-                    cost_val = float(entry.get("machine_cost") or entry.get("labor_cost") or 0.0)
-                    rate_val = (cost_val / hours_val) if hours_val > 0 else 0.0
-                    key_norm = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
-                    process_meta[key_norm] = {
-                        "minutes": round(minutes_val, 2),
-                        "hr": round(hours_val, 3),
-                        "cost": round(cost_val, 2),
-                        "rate": round(rate_val, 2) if rate_val else 0.0,
-                    }
-                    _planner_meta_add(key_norm)
-
-            if planner_drilling_override:
-                override_minutes = float(planner_drilling_override.get("minutes") or 0.0)
-                override_hours = float(planner_drilling_override.get("hours") or 0.0)
-                override_machine_cost = float(planner_drilling_override.get("machine_cost") or 0.0)
-                override_labor_cost = float(planner_drilling_override.get("labor_cost") or 0.0)
-                override_total_cost = float(
-                    planner_drilling_override.get("total_cost")
-                    or (override_machine_cost + override_labor_cost)
-                )
-                override_rate = float(planner_drilling_override.get("rate") or 0.0)
-
-                def _apply_override_to_bucket_map(bucket_map: Mapping[str, Any] | None) -> None:
-                    if not isinstance(bucket_map, dict):
-                        return
-                    entry = bucket_map.get("drilling")
-                    if isinstance(entry, _MappingABC):
-                        entry = dict(entry)
-                    else:
-                        entry = {}
-                    entry.update(
-                        {
-                            "minutes": round(override_minutes, 2),
-                            "machine_cost": round(override_machine_cost, 2),
-                            "labor_cost": round(override_labor_cost, 2),
-                            "total_cost": round(override_total_cost, 2),
-                        }
-                    )
-                    bucket_map["drilling"] = entry
-
-                for mapping in (
-                    bucket_view,
-                    planner_bucket_view,
-                    planner_bucket_rollup,
-                    planner_bucket_display_map,
-                ):
-                    _apply_override_to_bucket_map(mapping)
-                plan_bucket_view = process_plan_summary.get("bucket_view")
-                _apply_override_to_bucket_map(plan_bucket_view)
-                existing_plan = getattr(quote_state, "process_plan", None)
-                if isinstance(existing_plan, dict):
-                    _apply_override_to_bucket_map(existing_plan.get("bucket_view"))
-                if override_minutes > 0:
-                    planner_drill_minutes = override_minutes
-                process_meta["drilling"] = {
-                    "hr": round(override_hours, 3),
-                    "minutes": round(override_minutes, 1),
-                    "rate": round(override_rate, 2) if override_rate else 0.0,
-                    "cost": round(override_total_cost, 2),
-                    "basis": ["planner_drilling_override"],
-                }
-                _planner_meta_add("drilling")
-
-            if bucket_view:
-                for b, info in bucket_view.items():
-                    hr = info["minutes"] / 60.0 if info["minutes"] else 0.0
-                    cost = info["total_cost"]
-                    rate = (cost / hr) if hr > 0 else 0.0
-                    update_payload = {
-                        "minutes": round(info["minutes"], 1),
-                        "hr": round(hr, 3),
-                        "rate": round(rate, 2),
-                        "cost": round(cost, 2),
-                    }
-                    existing_meta = process_meta.get(b)
-                    if isinstance(existing_meta, _MappingABC):
-                        existing_meta.update(update_payload)
-                    else:
-                        process_meta[b] = update_payload
-                    _planner_meta_add(b)
+        # planner-specific updates are applied outside this block so they run even
+        # when no drilling minutes are present.
 
         if bucket_view:
             for b, info in bucket_view.items():
@@ -14923,21 +14908,154 @@ def compute_quote_from_df(
                     process_meta[b] = update_payload
                 _planner_meta_add(b)
 
-        meta_lookup = _build_process_meta_lookup(process_meta)
-        allowed_process_hour_keys = {
-            key
-            for key in planner_keys_snapshot
-            if key not in legacy_per_process_keys or key.startswith("planner_")
+    if used_planner:
+        pricing_source = "planner"
+        if legacy_baseline_had_values_flag:
+            legacy_baseline_ignored = True
+        planner_process_minutes = planner_total_minutes
+        process_costs = {
+            "Machine": round(planner_machine_cost_total, 2),
+            "Labor": round(planner_labor_cost_total, 2),
         }
-        if not allowed_process_hour_keys:
-            allowed_process_hour_keys = set(planner_keys_snapshot)
-        if "drilling" in legacy_process_meta:
-            allowed_process_hour_keys.add("drilling")
-        process_hours_baseline = {
-            key: float(process_meta.get(key, {}).get("hr", 0.0) or 0.0)
-            for key in allowed_process_hour_keys
+
+        # Using planner pricing should mark the overall pricing source accordingly,
+        # even if drilling falls back to legacy heuristics due to CSV issues.
+        pricing_source = "planner"
+
+        existing_process_meta = {key: dict(value) for key, value in process_meta.items()}
+        process_meta = existing_process_meta
+        process_meta["planner_machine"] = {
+            "hr": round(machine_minutes / 60.0, 3),
+            "minutes": round(machine_minutes, 1),
+            "rate": 0.0,
+            "cost": round(planner_machine_cost_total, 2),
         }
-        process_costs_baseline = {k: float(v) for k, v in process_costs.items()}
+        _planner_meta_add("planner_machine")
+        process_meta["planner_labor"] = {
+            "hr": round(labor_minutes / 60.0, 3),
+            "minutes": round(labor_minutes, 1),
+            "rate": 0.0,
+            "cost": round(planner_labor_cost_total, 2),
+        }
+        _planner_meta_add("planner_labor")
+        total_cost = planner_machine_cost_total + planner_labor_cost_total
+        process_meta["planner_total"] = {
+            "hr": round(planner_total_minutes / 60.0, 3),
+            "minutes": round(planner_total_minutes, 1),
+            "rate": 0.0,
+            "cost": round(total_cost, 2),
+        }
+        _planner_meta_add("planner_total")
+        if planner_line_items:
+            process_meta["planner_total"]["line_items"] = copy.deepcopy(planner_line_items)
+            for entry in planner_line_items:
+                name = str(entry.get("op") or "").strip()
+                if not name:
+                    continue
+                minutes_val = float(entry.get("minutes", 0.0) or 0.0)
+                hours_val = minutes_val / 60.0 if minutes_val else 0.0
+                cost_val = float(entry.get("machine_cost") or entry.get("labor_cost") or 0.0)
+                rate_val = (cost_val / hours_val) if hours_val > 0 else 0.0
+                key_norm = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+                process_meta[key_norm] = {
+                    "minutes": round(minutes_val, 2),
+                    "hr": round(hours_val, 3),
+                    "cost": round(cost_val, 2),
+                    "rate": round(rate_val, 2) if rate_val else 0.0,
+                }
+                _planner_meta_add(key_norm)
+
+        if planner_drilling_override:
+            override_minutes = float(planner_drilling_override.get("minutes") or 0.0)
+            override_hours = float(planner_drilling_override.get("hours") or 0.0)
+            override_machine_cost = float(planner_drilling_override.get("machine_cost") or 0.0)
+            override_labor_cost = float(planner_drilling_override.get("labor_cost") or 0.0)
+            override_total_cost = float(
+                planner_drilling_override.get("total_cost")
+                or (override_machine_cost + override_labor_cost)
+            )
+            override_rate = float(planner_drilling_override.get("rate") or 0.0)
+
+            def _apply_override_to_bucket_map(bucket_map: Mapping[str, Any] | None) -> None:
+                if not isinstance(bucket_map, dict):
+                    return
+                entry = bucket_map.get("drilling")
+                if isinstance(entry, _MappingABC):
+                    entry = dict(entry)
+                else:
+                    entry = {}
+                entry.update(
+                    {
+                        "minutes": round(override_minutes, 2),
+                        "machine_cost": round(override_machine_cost, 2),
+                        "labor_cost": round(override_labor_cost, 2),
+                        "total_cost": round(override_total_cost, 2),
+                    }
+                )
+                bucket_map["drilling"] = entry
+
+            if not isinstance(planner_bucket_display_map, dict):
+                if isinstance(planner_bucket_view, _MappingABC):
+                    planner_bucket_display_map = _extract_bucket_map(planner_bucket_view)
+                else:
+                    planner_bucket_display_map = {}
+
+            for mapping in (
+                bucket_view,
+                planner_bucket_view,
+                planner_bucket_rollup,
+                planner_bucket_display_map,
+            ):
+                _apply_override_to_bucket_map(mapping)
+            plan_bucket_view = process_plan_summary.get("bucket_view")
+            _apply_override_to_bucket_map(plan_bucket_view)
+            existing_plan = getattr(quote_state, "process_plan", None)
+            if isinstance(existing_plan, dict):
+                _apply_override_to_bucket_map(existing_plan.get("bucket_view"))
+            if override_minutes > 0:
+                planner_drill_minutes = override_minutes
+            process_meta["drilling"] = {
+                "hr": round(override_hours, 3),
+                "minutes": round(override_minutes, 1),
+                "rate": round(override_rate, 2) if override_rate else 0.0,
+                "cost": round(override_total_cost, 2),
+                "basis": ["planner_drilling_override"],
+            }
+            _planner_meta_add("drilling")
+
+        if bucket_view:
+            for b, info in bucket_view.items():
+                hr = info["minutes"] / 60.0 if info["minutes"] else 0.0
+                cost = info["total_cost"]
+                rate = (cost / hr) if hr > 0 else 0.0
+                update_payload = {
+                    "minutes": round(info["minutes"], 1),
+                    "hr": round(hr, 3),
+                    "rate": round(rate, 2),
+                    "cost": round(cost, 2),
+                }
+                existing_meta = process_meta.get(b)
+                if isinstance(existing_meta, _MappingABC):
+                    existing_meta.update(update_payload)
+                else:
+                    process_meta[b] = update_payload
+                _planner_meta_add(b)
+
+    meta_lookup = _build_process_meta_lookup(process_meta)
+    allowed_process_hour_keys = {
+        key
+        for key in planner_keys_snapshot
+        if key not in legacy_per_process_keys or key.startswith("planner_")
+    }
+    if not allowed_process_hour_keys:
+        allowed_process_hour_keys = set(planner_keys_snapshot)
+    if "drilling" in legacy_process_meta:
+        allowed_process_hour_keys.add("drilling")
+    process_hours_baseline = {
+        key: float(process_meta.get(key, {}).get("hr", 0.0) or 0.0)
+        for key in allowed_process_hour_keys
+    }
+    process_costs_baseline = {k: float(v) for k, v in process_costs.items()}
 
     if family_for_breakdown is None:
         family_hint_candidates = (
