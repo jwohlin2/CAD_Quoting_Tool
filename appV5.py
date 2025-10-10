@@ -93,7 +93,8 @@ def roughly_equal(a: float | int | str | None, b: float | int | str | None, *, e
 import copy
 import sys
 import textwrap
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, TypeVar
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, TypeVar, cast
+from types import ModuleType
 
 
 T = TypeVar("T")
@@ -2797,15 +2798,24 @@ else:
             )
         )
 
-    Bnd_Box = _occ_modules["Bnd"].Bnd_Box
-    BRep_Builder = _occ_modules["BRep"].BRep_Builder
-    _brep_add = _occ_modules["BRepBndLib"].brepbndlib_Add
-    BRepCheck_Analyzer = _occ_modules["BRepCheck"].BRepCheck_Analyzer
-    IFSelect_RetDone = _occ_modules["IFSelect"].IFSelect_RetDone
-    ShapeFix_Shape = _occ_modules["ShapeFix"].ShapeFix_Shape
-    STEPControl_Reader = _occ_modules["STEPControl"].STEPControl_Reader
-    TopoDS_Compound = _occ_modules["TopoDS"].TopoDS_Compound
-    TopoDS_Shape = _occ_modules["TopoDS"].TopoDS_Shape
+    bnd_module = cast(ModuleType, _occ_modules["Bnd"])
+    brep_module = cast(ModuleType, _occ_modules["BRep"])
+    brep_bnd_module = cast(ModuleType, _occ_modules["BRepBndLib"])
+    brep_check_module = cast(ModuleType, _occ_modules["BRepCheck"])
+    ifselect_module = cast(ModuleType, _occ_modules["IFSelect"])
+    shapefix_module = cast(ModuleType, _occ_modules["ShapeFix"])
+    stepcontrol_module = cast(ModuleType, _occ_modules["STEPControl"])
+    topos_module = cast(ModuleType, _occ_modules["TopoDS"])
+
+    Bnd_Box = bnd_module.Bnd_Box
+    BRep_Builder = brep_module.BRep_Builder
+    _brep_add = brep_bnd_module.brepbndlib_Add
+    BRepCheck_Analyzer = brep_check_module.BRepCheck_Analyzer
+    IFSelect_RetDone = ifselect_module.IFSelect_RetDone
+    ShapeFix_Shape = shapefix_module.ShapeFix_Shape
+    STEPControl_Reader = stepcontrol_module.STEPControl_Reader
+    TopoDS_Compound = topos_module.TopoDS_Compound
+    TopoDS_Shape = topos_module.TopoDS_Shape
 
     def bnd_add(shape, box, use_triangulation=True):
         _brep_add(shape, box, use_triangulation)
@@ -2820,9 +2830,13 @@ _backend_modules = {
 }
 
 if all(_backend_modules.values()):
-    BRep_Tool = _backend_modules["BRep"].BRep_Tool
-    TopAbs_FACE = _backend_modules["TopAbs"].TopAbs_FACE
-    TopExp_Explorer = _backend_modules["TopExp"].TopExp_Explorer
+    brep_backend = cast(ModuleType, _backend_modules["BRep"])
+    topabs_backend = cast(ModuleType, _backend_modules["TopAbs"])
+    topexp_backend = cast(ModuleType, _backend_modules["TopExp"])
+
+    BRep_Tool = brep_backend.BRep_Tool
+    TopAbs_FACE = topabs_backend.TopAbs_FACE
+    TopExp_Explorer = topexp_backend.TopExp_Explorer
     BACKEND = "ocp"
 else:
     _backend_modules = {
