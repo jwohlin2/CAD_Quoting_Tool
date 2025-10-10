@@ -2905,14 +2905,14 @@ _backend_modules = {
     "TopExp": _import_optional("OCP.TopExp"),
 }
 
-if all(_backend_modules.values()):
-    brep_backend = cast(ModuleType, _backend_modules["BRep"])
-    topabs_backend = cast(ModuleType, _backend_modules["TopAbs"])
-    topexp_backend = cast(ModuleType, _backend_modules["TopExp"])
+_brep_mod = _backend_modules["BRep"]
+_topabs_mod = _backend_modules["TopAbs"]
+_topexp_mod = _backend_modules["TopExp"]
 
-    BRep_Tool = brep_backend.BRep_Tool
-    TopAbs_FACE = topabs_backend.TopAbs_FACE
-    TopExp_Explorer = topexp_backend.TopExp_Explorer
+if _brep_mod and _topabs_mod and _topexp_mod:
+    BRep_Tool = cast(Any, _brep_mod).BRep_Tool
+    TopAbs_FACE = cast(Any, _topabs_mod).TopAbs_FACE
+    TopExp_Explorer = cast(Any, _topexp_mod).TopExp_Explorer
     BACKEND = "ocp"
 else:
     _backend_modules = {
@@ -2929,9 +2929,17 @@ else:
             )
         )
 
-    BRep_Tool = _backend_modules["BRep"].BRep_Tool
-    TopAbs_FACE = _backend_modules["TopAbs"].TopAbs_FACE
-    TopExp_Explorer = _backend_modules["TopExp"].TopExp_Explorer
+    _brep_mod = _backend_modules["BRep"]
+    _topabs_mod = _backend_modules["TopAbs"]
+    _topexp_mod = _backend_modules["TopExp"]
+
+    assert _brep_mod is not None
+    assert _topabs_mod is not None
+    assert _topexp_mod is not None
+
+    BRep_Tool = cast(Any, _brep_mod).BRep_Tool
+    TopAbs_FACE = cast(Any, _topabs_mod).TopAbs_FACE
+    TopExp_Explorer = cast(Any, _topexp_mod).TopExp_Explorer
     BACKEND = "pythonocc"
 
 
@@ -2987,7 +2995,7 @@ def _resolve_face_of():
 
 FACE_OF = _resolve_face_of()
 
-def as_face(obj):
+def as_face(obj: Any) -> TopoDS_Face:
     """
     Return a TopoDS_Face for the *current backend*.
     - If already a Face, return it (don't re-cast).
@@ -3003,20 +3011,29 @@ def as_face(obj):
         obj = obj[0]
     return ensure_face(obj)
 
-def iter_faces(shape):
-    exp = TopExp_Explorer(shape, TopAbs_FACE)
+
+def iter_faces(shape: Any) -> Iterator[TopoDS_Face]:
+    explorer_cls = cast(type[Any], TopExp_Explorer)
+    exp = explorer_cls(shape, cast(Any, TopAbs_FACE))
     while exp.More():
         yield ensure_face(exp.Current())
         exp.Next()
 
-def face_surface(face_like):
+
+def face_surface(face_like: Any) -> tuple[Any, Any | None]:
     f = ensure_face(face_like)
-    if hasattr(BRep_Tool, "Surface_s"):
-        s = BRep_Tool.Surface_s(f)
+    tool = cast(Any, BRep_Tool)
+    surface_s = getattr(tool, "Surface_s", None)
+    if callable(surface_s):
+        s = surface_s(f)
     else:
-        s = BRep_Tool.Surface(f)
-    loc = (BRep_Tool.Location(f) if hasattr(BRep_Tool, "Location")
-           else (f.Location() if hasattr(f, "Location") else None))
+        s = tool.Surface(f)
+    location_fn = getattr(tool, "Location", None)
+    if callable(location_fn):
+        loc = location_fn(f)
+    else:
+        face_location = getattr(f, "Location", None)
+        loc = face_location() if callable(face_location) else None
     if isinstance(s, tuple):
         s, loc2 = s
         loc = loc or loc2
@@ -3183,7 +3200,7 @@ def _is_instance(obj, qualnames):
         return False
     return name in qualnames  # e.g. ["TopoDS_Face", "Face"]
 
-def ensure_face(obj):
+def ensure_face(obj: Any) -> TopoDS_Face:
     if obj is None:
         raise TypeError("Expected a face, got None")
     face_type = cast(type, TopoDS_Face)
