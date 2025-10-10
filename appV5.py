@@ -13388,11 +13388,39 @@ def compute_quote_from_df(
         if debug_bits:
             avg_mm = avg_dia_in * 25.4
             op_display = selected_op_name.replace("_", " ")
-            group_display = str(
-                material_selection.get("material_group")
-                or drill_material_group
-                or ""
-            ).strip()
+
+            summary_material = ""
+            if isinstance(speeds_feeds_summary, _MappingABC):
+                for key in ("material", "material_group"):
+                    value = speeds_feeds_summary.get(key)
+                    if value:
+                        summary_material = str(value).strip()
+                        if summary_material:
+                            break
+
+            selected_entry_material = ""
+            if isinstance(selected_entry, _MappingABC):
+                candidate = selected_entry.get("material")
+                if candidate:
+                    selected_entry_material = str(candidate).strip()
+
+            material_candidates = [
+                summary_material,
+                selected_entry_material,
+                chosen_material_label,
+                material_selection.get("canonical_material"),
+                material_selection.get("material_group"),
+                drill_material_group,
+                drill_material_display,
+            ]
+
+            group_display = ""
+            for candidate in material_candidates:
+                text = str(candidate or "").strip()
+                if text:
+                    group_display = text
+                    break
+
             if group_display:
                 group_segment = f"{op_display} {group_display}"
             else:
