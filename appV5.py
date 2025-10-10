@@ -387,14 +387,27 @@ from cad_quoter.domain_models import (
 from cad_quoter.coerce import to_float, to_int
 from cad_quoter.utils import compact_dict, jdump, sdict, _first_non_none
 from cad_quoter.utils.geo_ctx import _should_include_outsourced_pass
-try:
-    from cad_quoter.utils.text import _match_items_contains
+def _fallback_match_items_contains(items, pattern):
+    """Fallback matcher when :mod:`cad_quoter.utils.text` is unavailable."""
+
+    try:
+        return items.str.contains(pattern, case=False, regex=True, na=False)
+    except Exception:
+        return items.str.contains(pattern, case=False, regex=False, na=False)
+
+
+try:  # pragma: no cover - optional dependency path
+    from cad_quoter.utils.text import (  # type: ignore[override]
+        _match_items_contains as _imported_match_items_contains,
+    )
 except Exception:  # pragma: no cover - defensive fallback for optional import paths
-    def _match_items_contains(items, pattern):  # type: ignore[override]
-        try:
-            return items.str.contains(pattern, case=False, regex=True, na=False)
-        except Exception:
-            return items.str.contains(pattern, case=False, regex=False, na=False)
+    _match_items_contains = _fallback_match_items_contains  # type: ignore[assignment]
+else:
+    _match_items_contains = (
+        _imported_match_items_contains
+        if callable(_imported_match_items_contains)
+        else _fallback_match_items_contains
+    )
 from cad_quoter.pricing import (
     LB_PER_KG,
     PricingEngine,
