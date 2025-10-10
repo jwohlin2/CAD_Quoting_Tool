@@ -214,6 +214,81 @@ def test_render_quote_skips_duplicate_programming_amortized_row() -> None:
     assert len(programming_lines) == 1
 
 
+def test_render_quote_includes_amortized_and_misc_rows() -> None:
+    result = {
+        "price": 420.0,
+        "breakdown": {
+            "qty": 5,
+            "totals": {
+                "labor_cost": 255.0,
+                "direct_costs": 40.0,
+                "subtotal": 295.0,
+                "with_overhead": 324.5,
+                "with_ga": 340.725,
+                "with_contingency": 347.5395,
+                "with_expedite": 347.5395,
+            },
+            "nre_detail": {
+                "programming": {
+                    "prog_hr": 2.0,
+                    "prog_rate": 60.0,
+                    "eng_hr": 1.0,
+                    "eng_rate": 55.0,
+                },
+                "fixture": {
+                    "build_hr": 1.5,
+                    "labor_cost": 90.0,
+                    "build_rate": 50.0,
+                },
+            },
+            "nre": {},
+            "material": {},
+            "process_costs": {"milling": 120.0, "deburr": 80.0},
+            "process_meta": {"milling": {"hr": 2.0}, "deburr": {"hr": 1.0}},
+            "pass_through": {"Material": 40.0},
+            "labor_costs": {
+                "Milling": 120.0,
+                "Finishing/Deburr": 80.0,
+                "Programming (amortized)": 30.0,
+                "Fixture Build (amortized)": 20.0,
+                "Misc (LLM deltas)": 5.0,
+            },
+            "applied_pcts": {
+                "OverheadPct": 0.10,
+                "GA_Pct": 0.05,
+                "ContingencyPct": 0.02,
+                "MarginPct": 0.15,
+            },
+            "rates": {"FixtureBuildRate": 50.0},
+            "params": {},
+            "labor_cost_details": {},
+            "direct_cost_details": {},
+        },
+    }
+
+    rendered = appV5.render_quote(result, currency="$")
+    lines = rendered.splitlines()
+
+    labor_idx = lines.index("Process & Labor Costs")
+    next_blank = next(i for i in range(labor_idx + 1, len(lines)) if lines[i] == "")
+    labor_section = lines[labor_idx:next_blank]
+
+    assert any("Programming (amortized)" in line for line in labor_section)
+    assert any("Fixture Build (amortized)" in line for line in labor_section)
+    assert any("Misc (LLM deltas)" in line for line in labor_section)
+
+    section_total_line = next(
+        line for line in labor_section if line.strip().startswith("Total") and "$" in line
+    )
+    section_total = float(section_total_line.split("$")[-1].replace(",", ""))
+
+    total_labor_line = next(line for line in lines if line.startswith("Total Labor Cost:"))
+    total_labor_amount = float(total_labor_line.split("$")[-1].replace(",", ""))
+
+    assert abs(section_total - 255.0) < 1e-6
+    assert abs(total_labor_amount - section_total) < 1e-6
+
+
 def test_render_quote_hour_summary_adds_programming_hours() -> None:
     result = {
         "price": 150.0,
@@ -245,10 +320,10 @@ def test_render_quote_hour_summary_adds_programming_hours() -> None:
             },
             "rates": {},
             "params": {},
-            "labor_cost_details": {},
-            "direct_cost_details": {},
-        },
-    }
+        "labor_cost_details": {},
+        "direct_cost_details": {},
+    },
+}
 
     rendered = appV5.render_quote(result, currency="$")
     lines = rendered.splitlines()

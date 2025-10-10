@@ -8457,9 +8457,9 @@ def render_quote(
     if eng_hr > 0:
         prog_bits.append(f"- Engineering (lot): {_hours_with_rate_text(eng_hr, eng_rate)}")
     programming_detail_bits = list(prog_bits)
-    if show_amortized and qty > 1 and programming_per_part_cost > 0:
+    if show_amortized and qty > 1 and programming_per_part_cost:
         programming_detail_bits.append(f"Amortized across {qty} pcs")
-    if show_amortized and programming_per_part_cost > 0:
+    if show_amortized and programming_per_part_cost:
         programming_detail_bits.append("amortized")
 
     fixture_detail = (nre_detail or {}).get("fixture") or {}
@@ -8494,36 +8494,98 @@ def render_quote(
     if soft_jaw_hr > 0:
         fixture_bits.append(f"Soft jaw prep {soft_jaw_hr:.2f} hr")
     fixture_detail_bits = list(fixture_bits)
-    if show_amortized and qty > 1 and fixture_labor_per_part_cost > 0:
+    if show_amortized and qty > 1 and fixture_labor_per_part_cost:
         fixture_detail_bits.append(f"Amortized across {qty} pcs")
-    if show_amortized and fixture_labor_per_part_cost > 0:
+    if show_amortized and fixture_labor_per_part_cost:
         fixture_detail_bits.append("amortized")
 
-    amortized_rows: list[tuple[str, float, list[str]]] = []
-    if show_amortized and programming_per_part_cost > 0:
-        amortized_rows.append(
-            (
-                "Programming (amortized)",
-                float(programming_per_part_cost),
-                programming_detail_bits,
-            )
-        )
-    if show_amortized and fixture_labor_per_part_cost > 0:
-        amortized_rows.append(
-            (
-                "Fixture Build (amortized)",
-                float(fixture_labor_per_part_cost),
-                fixture_detail_bits,
-            )
+    def _append_extra_labor_row(
+        label: str,
+        amount: Any,
+        detail_bits: Iterable[str] | None,
+        fallback_detail: str | None,
+    ) -> None:
+        try:
+            amount_val = float(amount or 0.0)
+        except Exception:
+            amount_val = 0.0
+        if not show_zeros and math.isclose(amount_val, 0.0, abs_tol=0.005):
+            return
+        details_list = list(detail_bits or [])
+        extra_labor_rows.append((label, amount_val, details_list, fallback_detail))
+
+    extra_labor_rows: list[tuple[str, float, list[str], str | None]] = []
+
+    _append_extra_labor_row(
+        "Programming (amortized)",
+        programming_per_part_cost,
+        programming_detail_bits,
+        labor_cost_details_input.get("Programming (amortized)") or None,
+    )
+    _append_extra_labor_row(
+        "Fixture Build (amortized)",
+        fixture_labor_per_part_cost,
+        fixture_detail_bits,
+        labor_cost_details_input.get("Fixture Build (amortized)") or None,
+    )
+
+    misc_label: str | None = None
+    misc_amount_val: float = 0.0
+    for key, value in labor_cost_totals.items():
+        key_lower = str(key).lower()
+        if "llm" in key_lower and "misc" in key_lower:
+            misc_label = str(key)
+            try:
+                misc_amount_val = float(value or 0.0)
+            except Exception:
+                misc_amount_val = 0.0
+            break
+
+    if misc_label is not None:
+        misc_detail_bits = ["LLM adjustments"]
+        _append_extra_labor_row(
+            misc_label,
+            misc_amount_val,
+            misc_detail_bits,
+            labor_cost_details_input.get(misc_label) or None,
         )
 
-    for label, amount, detail_bits in amortized_rows:
-        if label not in labor_costs_display:
+    for label, amount, detail_bits, fallback_detail in extra_labor_rows:
+        storage_key_candidates = [
+            key
+            for key in (
+                _labor_storage_key(label, None),
+                _labor_storage_key(label, label),
+            )
+            if key
+        ]
+
+        existing_key = next((key for key in storage_key_candidates if key in labor_row_data), None)
+        if existing_key:
+            existing_amount = float(labor_costs_display.get(existing_key, 0.0) or 0.0)
+            amount_delta = amount - existing_amount
             _add_labor_cost_line(
                 label,
-                amount,
+                amount_delta,
+                process_key=label,
                 detail_bits=detail_bits,
+                fallback_detail=fallback_detail,
+                force=True,
+                display_override=label,
             )
+            continue
+
+        if any(key in labor_costs_display for key in storage_key_candidates):
+            continue
+
+        _add_labor_cost_line(
+            label,
+            amount,
+            process_key=label,
+            detail_bits=detail_bits,
+            fallback_detail=fallback_detail,
+            force=True,
+        )
 
     _emit_labor_cost_lines()
 
