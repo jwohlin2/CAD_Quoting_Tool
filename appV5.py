@@ -4339,12 +4339,12 @@ def clamp_llm_hours(
 
 
 def apply_llm_hours_to_variables(
-    df: "pd.DataFrame",
+    df: pd.DataFrame | None,
     estimates: Mapping[str, Any] | None,
     *,
     allow_overwrite_nonzero: bool = False,
     log: dict | None = None,
-) -> "pd.DataFrame":
+) -> pd.DataFrame | None:
     """Apply sanitized LLM hour estimates to a variables dataframe."""
 
     if not _HAS_PANDAS or df is None:
@@ -4572,7 +4572,8 @@ _MASTER_VARIABLES_CACHE: dict[str, Any] = {
 
 _SPEEDS_FEEDS_CACHE: dict[str, pd.DataFrame | None] = {}
 
-def _coerce_core_types(df_core: "pd.DataFrame") -> "pd.DataFrame":
+
+def _coerce_core_types(df_core: pd.DataFrame) -> pd.DataFrame:
     """Light normalization for estimator expectations."""
     core = df_core.copy()
     core["Item"] = core["Item"].astype(str)
@@ -4779,7 +4780,7 @@ def derive_editor_control_spec(dtype_source: str, example_value: Any) -> EditorC
         options=tuple(options),
     )
 
-def sanitize_vars_df(df_full: "pd.DataFrame") -> "pd.DataFrame":
+def sanitize_vars_df(df_full: pd.DataFrame) -> pd.DataFrame:
     """
     Return a copy containing only the 3 core columns the estimator needs.
     - Does NOT mutate or overwrite the original file.
@@ -8569,11 +8570,13 @@ def require_plate_inputs(geo: dict, ui_vars: dict[str, Any] | None) -> None:
     ui_vars = ui_vars or {}
     thickness_val = ui_vars.get("Thickness (in)")
     thickness_in = _coerce_float_or_none(thickness_val)
-    if thickness_in is None:
+    if thickness_in is None and thickness_val is not None:
         try:
             thickness_in = float(thickness_val)
         except Exception:
             thickness_in = 0.0
+    elif thickness_in is None:
+        thickness_in = 0.0
     material = str(ui_vars.get("Material") or "").strip()
     geo_missing: list[str] = []
 
@@ -8652,7 +8655,7 @@ def net_mass_kg(
     return net_mass
 
 
-def _normalize_speeds_feeds_df(df: "pd.DataFrame") -> "pd.DataFrame":
+def _normalize_speeds_feeds_df(df: pd.DataFrame) -> pd.DataFrame:
     rename: dict[str, str] = {}
     for col in df.columns:
         normalized = re.sub(r"[^0-9a-z]+", "_", str(col).strip().lower())
@@ -8753,7 +8756,7 @@ def _material_label_from_table(
     return None
 
 
-def _load_speeds_feeds_table(path: str | None) -> "pd.DataFrame" | None:
+def _load_speeds_feeds_table(path: str | None) -> pd.DataFrame | None:
     if not path:
         return None
     try:
@@ -8778,7 +8781,7 @@ def _load_speeds_feeds_table(path: str | None) -> "pd.DataFrame" | None:
 
 
 def _select_speeds_feeds_row(
-    table: "pd.DataFrame" | None,
+    table: pd.DataFrame | None,
     operation: str,
     material_key: str | None = None,
 ) -> Mapping[str, Any] | None:
@@ -8876,7 +8879,7 @@ def _select_speeds_feeds_row(
             partial = [row for row in matches if mat_target in _normalize(row.get(mat_col))]
             if partial:
                 matches = partial
-    return matches[0] if matches else None
+    return cast(Mapping[str, Any], matches[0]) if matches else None
 
 
 def _clean_path_text(text: str) -> str:
@@ -9130,7 +9133,7 @@ def estimate_drilling_hours(
     mat_key: str,
     *,
     hole_groups: list[Mapping[str, Any]] | None = None,
-    speeds_feeds_table: "pd.DataFrame" | None = None,
+    speeds_feeds_table: pd.DataFrame | None = None,
     machine_params: _TimeMachineParams | None = None,
     overhead_params: _TimeOverheadParams | None = None,
     warnings: list[str] | None = None,
@@ -9169,6 +9172,7 @@ def estimate_drilling_hours(
         debug_summary.clear()
     avg_dia_in = 0.0
     seen_debug: set[str] = set()
+    chosen_material_label: str = ""
 
     def _log_debug(entry: str) -> None:
         if debug_list is None:
@@ -9295,20 +9299,6 @@ def estimate_drilling_hours(
         missing_row_messages: set[tuple[str, str, float]] = set()
         debug_summary_entries: dict[str, dict[str, Any]] = {}
 
-        def _update_range(summary_map: dict[str, Any], min_key: str, max_key: str, value: float | None) -> None:
-            try:
-                val = float(value)
-            except (TypeError, ValueError):
-                return
-            if not math.isfinite(val):
-                return
-            current_min = summary_map.get(min_key)
-            current_max = summary_map.get(max_key)
-            if current_min is None or not math.isfinite(float(current_min)) or val < float(current_min):
-                summary_map[min_key] = float(val)
-            if current_max is None or not math.isfinite(float(current_max)) or val > float(current_max):
-                summary_map[max_key] = float(val)
-
         def _build_tool_params(row: Mapping[str, Any]) -> _TimeToolParams:
             key_map = {
                 str(k).strip().lower().replace("-", "_").replace(" ", "_"): k
@@ -9391,7 +9381,6 @@ def estimate_drilling_hours(
                         table=speeds_feeds_table,
                     )
                 if row and isinstance(row, Mapping):
-                    chosen_material_label = ""
                     cache_entry = (row, _build_tool_params(row))
                     # Always use one material label for both Debug and Calc.
                     chosen_material_label = str(
@@ -9879,9 +9868,13 @@ def estimate_drilling_hours(
                 ) -> str:
                     if min_val is None and max_val is None:
                         return "-"
+                    source_min = min_val if min_val is not None else max_val
+                    source_max = max_val if max_val is not None else min_val
+                    if source_min is None or source_max is None:
+                        return "-"
                     try:
-                        min_f = float(min_val if min_val is not None else max_val)
-                        max_f = float(max_val if max_val is not None else min_val)
+                        min_f = float(source_min)
+                        max_f = float(source_max)
                     except (TypeError, ValueError):
                         return "-"
                     if not math.isfinite(min_f) or not math.isfinite(max_f):
@@ -11555,7 +11548,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     drill_material_key = drill_material_lookup or drill_material_source
     speeds_feeds_raw = _resolve_speeds_feeds_path(params, ui_vars)
     speeds_feeds_path: str | None = None
-    speeds_feeds_table: "pd.DataFrame" | None = None
+    speeds_feeds_table: pd.DataFrame | None = None
     raw_path_text = str(speeds_feeds_raw).strip() if speeds_feeds_raw else ""
     if raw_path_text:
         try:
