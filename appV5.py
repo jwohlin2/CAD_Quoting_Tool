@@ -26,6 +26,15 @@ from dataclasses import dataclass, field, replace
 
 from cad_quoter.app.container import ServiceContainer, create_default_container
 from cad_quoter.app import runtime as _runtime
+from cad_quoter.app.audit import (
+    LOGS_DIR,
+    coerce_num as _coerce_num,
+    diff_map as _diff_map,
+    now_iso as _now_iso,
+    render_llm_log_text,
+    save_llm_log_json,
+    used_item_values as _used_item_values,
+)
 from cad_quoter.config import (
     AppEnvironment,
     ConfigError,
@@ -4758,75 +4767,7 @@ def apply_param_edits_to_overrides_ui(self, param_edits: dict):
     self.params.update(p)
 
 # ================== LLM DECISION LOG / AUDIT ==================
-import json as _json_audit, time as _time_audit
-LOGS_DIR = Path(r"D:\\CAD_Quoting_Tool\\Logs")
-LOGS_DIR.mkdir(parents=True, exist_ok=True)
-
-def _now_iso():
-    return _time_audit.strftime("%Y-%m-%dT%H:%M:%S")
-
-def _coerce_num(x):
-    try:
-        return float(str(x).replace(",", "").strip())
-    except Exception:
-        return x
-
-def _used_item_values(df, used_items):
-    vals = {}
-    items = df["Item"].astype(str)
-    for name in used_items:
-        m = items.str.fullmatch(name, case=False, na=False)
-        if m.any():
-            v = df.loc[m, "Example Values / Options"].iloc[0]
-            vals[name] = _coerce_num(v)
-    return vals
-
-def _diff_map(before: dict, after: dict):
-    changes = []
-    keys = set(before.keys()) | set(after.keys())
-    for k in sorted(keys):
-        bv = before.get(k, None)
-        av = after.get(k, None)
-        if bv != av:
-            changes.append({"key": k, "before": bv, "after": av})
-    return changes
-
-def render_llm_log_text(log: dict) -> str:
-    m  = lambda v: f"${{float(v):,.2f}}" if isinstance(v, (int, float)) else str(v)
-    lines = []
-    lines.append(f"LLM DECISION LOG ï¿½ {log['timestamp']}")
-    lines.append(f"Model: {log.get('model','?')}  |  Prompt SHA256: {log.get('prompt_sha256','')[:12]}ï¿½")
-    if log.get('llm_error'):
-        lines.append(f"LLM error: {log['llm_error']}")
-    lines.append(f"Allowed items: {log.get('allowed_items_count',0)} | Sheet edits suggested/applied: {log.get('sheet_edits_suggested',0)}/{log.get('sheet_edits_applied',0)}")
-    lines.append("")
-    lines.append(f"Price before: {m(log['price_before'])}   ?   after: {m(log['price_after'])}   " 
-                 f"?: {m(log['price_after']-log['price_before'])} " 
-                 f"({(((log['price_after']-log['price_before'])/log['price_before']*100) if log['price_before'] else 0):.2f}%)")
-    lines.append("")
-    if log.get("sheet_changes"):
-        lines.append("Sheet changes:")
-        for ch in log["sheet_changes"]:
-            why = f"  ï¿½ why: {ch['why']}" if ch.get("why") else ""
-            lines.append(f"  ï¿½ {ch['key']}: {ch['before']} ? {ch['after']}{why}")
-        lines.append("")
-    if log.get("param_changes"):
-        lines.append("Param nudges:")
-        for ch in log["param_changes"]:
-            why = f"  ï¿½ why: {ch['why']}" if ch.get("why") else ""
-            lines.append(f"  ï¿½ {ch['key']}: {ch['before']} ? {ch['after']}{why}")
-        lines.append("")
-    if log.get("geo_summary"):
-        lines.append("GEO summary:")
-        for k, v in log["geo_summary"]:
-            lines.append(f"  - {k}: {v}")
-    return "\n".join(lines)
-def save_llm_log_json(log: dict) -> Path:
-    fname = f"llm_log_{_time_audit.strftime('%Y%m%d_%H%M%S')}.json"
-    path = LOGS_DIR / fname
-    with open(path, "w", encoding="utf-8") as f:
-        _json_audit.dump(log, f, indent=2)
-    return path
+# See ``cad_quoter.app.audit`` for the shared helper implementations.
 # =============================================================
 
 # ----------------- Variables & quote -----------------
