@@ -582,56 +582,74 @@ def _holes_removed_mass_g(geo_ctx: Mapping[str, Any] | None) -> float | None:
     return grams if grams > 0 else None
 
 
-def _ensure_scrap_pct(val, *, default: float = 0.0) -> float:
-    """
-    Coerce UI/LLM scrap into a sane fraction in [0, 0.25].
-    Accepts 15 (percent) or 0.15 (fraction).
+def normalize_scrap_pct(val: Any, cap: float = 0.25) -> float:
+    """Return a clamped scrap fraction within ``[0, cap]``.
+
+    The helper accepts common UI inputs such as ``15`` (percent) or ``0.15``
+    (fraction) and gracefully handles ``None`` or empty strings by falling
+    back to ``0``.
     """
 
     try:
-        x = float(val)
+        cap_val = float(cap)
     except Exception:
-        return float(default)
-    if x > 1.0:  # looks like %
-        x = x / 100.0
-    if not (x >= 0.0 and math.isfinite(x)):
-        return float(default)
-    return min(0.25, max(0.0, x))
-
-
-def _coerce_scrap_fraction(val: Any) -> float | None:
-    """Return a clamped scrap fraction or ``None`` when conversion fails."""
+        cap_val = 0.25
+    if not math.isfinite(cap_val):
+        cap_val = 0.25
+    cap_val = max(0.0, cap_val)
 
     if val is None:
-        return None
-    if isinstance(val, str):
+        raw = 0.0
+    elif isinstance(val, str):
         stripped = val.strip()
         if not stripped:
-            return None
-        if stripped.endswith("%"):
+            raw = 0.0
+        elif stripped.endswith("%"):
             try:
                 raw = float(stripped.rstrip("%")) / 100.0
             except Exception:
-                return None
-            if raw < 0.0:
                 raw = 0.0
-            return min(0.25, raw)
-        try:
-            raw = float(stripped)
-        except Exception:
-            return None
+        else:
+            try:
+                raw = float(stripped)
+            except Exception:
+                raw = 0.0
     else:
         try:
             raw = float(val)
         except Exception:
-            return None
+            raw = 0.0
+
     if not math.isfinite(raw):
-        return None
+        raw = 0.0
     if raw > 1.0:
         raw = raw / 100.0
     if raw < 0.0:
         raw = 0.0
-    return min(0.25, raw)
+    return min(cap_val, raw)
+
+
+def _scrap_value_provided(val: Any) -> bool:
+    """Return ``True`` when ``val`` looks like a real scrap entry."""
+
+    if val is None:
+        return False
+    if isinstance(val, str):
+        stripped = val.strip()
+        if not stripped:
+            return False
+        if stripped.endswith("%"):
+            stripped = stripped.rstrip("% ").strip()
+        try:
+            parsed = float(stripped)
+        except Exception:
+            return False
+        return math.isfinite(parsed)
+    try:
+        parsed = float(val)
+    except Exception:
+        return False
+    return math.isfinite(parsed)
 
 
 def _estimate_scrap_from_stock_plan(geo_ctx: Mapping[str, Any] | None) -> tuple[float | None, str | None]:
@@ -7099,8 +7117,8 @@ def render_quote(
                 removal_mass_val = _coerce_float_or_none(material.get(removal_key))
                 if removal_mass_val:
                     break
-            scrap_fraction_val = _coerce_scrap_fraction(scrap)
-            if scrap_fraction_val is not None and scrap_fraction_val <= 0:
+            scrap_fraction_val = normalize_scrap_pct(scrap)
+            if scrap_fraction_val <= 0:
                 scrap_fraction_val = None
             base_mass_for_scrap = None
             if net_mass_val and net_mass_val > 0:
@@ -8539,7 +8557,7 @@ def compute_mass_and_scrap_after_removal(
     """
 
     base_net = max(0.0, float(net_mass_g or 0.0))
-    base_scrap = _ensure_scrap_pct(scrap_frac)
+    base_scrap = normalize_scrap_pct(scrap_frac)
     removal = max(0.0, float(removal_mass_g or 0.0))
 
     if base_net <= 0 or removal <= 0:
@@ -11114,7 +11132,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     if hasattr(sheet_has_scrap, "any") and sheet_has_scrap.any():
         scrap_candidate = first_num(scrap_pattern, float("nan"))
         if scrap_candidate == scrap_candidate:  # not NaN
-            scrap_sheet_fraction = _coerce_scrap_fraction(scrap_candidate)
+            scrap_sheet_fraction = normalize_scrap_pct(scrap_candidate)
 
     scrap_auto: float | None = None
     scrap_source_label: str | None = None
@@ -11134,29 +11152,31 @@ def compute_quote_from_df(df: pd.DataFrame,
         ui_scrap_raw = ui_vars.get("Scrap Percent (%)") if "ui_vars" in locals() else None
     except Exception:
         ui_scrap_raw = None
-    ui_scrap_val = _coerce_scrap_fraction(ui_scrap_raw)
-    if ui_scrap_val is None:
+    ui_scrap_val = normalize_scrap_pct(ui_scrap_raw)
+    ui_has_scrap = _scrap_value_provided(ui_scrap_raw)
+    if not ui_has_scrap:
         try:
             mask = df["Item"].astype(str).str.fullmatch(r"Scrap Percent \(%\)", case=False, na=False)
             candidate = df.loc[mask, "Example Values / Options"].iloc[0]
-            ui_scrap_val = _coerce_scrap_fraction(candidate)
+            if _scrap_value_provided(candidate):
+                ui_scrap_val = normalize_scrap_pct(candidate)
+                ui_has_scrap = True
         except Exception:
-            ui_scrap_val = None
+            ui_has_scrap = False
 
-    if ui_scrap_val is not None:
-        scrap_pct = _ensure_scrap_pct(ui_scrap_val)
+    if ui_has_scrap:
+        scrap_pct = normalize_scrap_pct(ui_scrap_val)
         scrap_pct_baseline = scrap_pct
         scrap_source_label = "ui"
     else:
-        scrap_pct = _ensure_scrap_pct(scrap_auto, default=SCRAP_DEFAULT_GUESS)
+        fallback_scrap = SCRAP_DEFAULT_GUESS if scrap_auto is None else scrap_auto
+        scrap_pct = normalize_scrap_pct(fallback_scrap)
         scrap_pct_baseline = scrap_pct
 
     holes_scrap = _holes_scrap_fraction(geo_context)
     if holes_scrap and holes_scrap > 0:
         # Take the more conservative (larger) scrap figure so we don’t underquote.
-        scrap_pct = _ensure_scrap_pct(
-            max(scrap_pct_baseline, holes_scrap), default=SCRAP_DEFAULT_GUESS
-        )
+        scrap_pct = normalize_scrap_pct(max(scrap_pct_baseline, holes_scrap))
         scrap_pct_baseline = scrap_pct
         scrap_source_label = (scrap_source_label or "auto") + "+holes"
     else:
@@ -11556,7 +11576,7 @@ def compute_quote_from_df(df: pd.DataFrame,
             mat_usd_per_kg, mat_src = 0.0, ""
         mat_usd_per_kg = float(mat_usd_per_kg or 0.0)
         effective_scrap_source = scrap_pct if scrap_pct else scrap_pct_baseline
-        effective_scrap = _ensure_scrap_pct(effective_scrap_source)
+        effective_scrap = normalize_scrap_pct(effective_scrap_source)
         material_cost = mass_kg * (1.0 + effective_scrap) * mat_usd_per_kg
         material_direct_cost = round(material_cost, 2)
         material_detail_for_breakdown.update({
@@ -14131,7 +14151,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         effective_scrap_val = effective_struct.get("scrap_pct")
     elif isinstance(quote_state.suggestions, dict) and quote_state.suggestions.get("scrap_pct") is not None:
         effective_scrap_val = quote_state.suggestions.get("scrap_pct")
-    scrap_pct = _ensure_scrap_pct(effective_scrap_val)
+    scrap_pct = normalize_scrap_pct(effective_scrap_val)
 
     llm_notes: list[str] = []
     suggestion_notes = []
@@ -14548,7 +14568,7 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     material_direct_cost_base = material_direct_cost
 
-    old_scrap = _ensure_scrap_pct(features.get("scrap_pct", scrap_pct))
+    old_scrap = normalize_scrap_pct(features.get("scrap_pct", scrap_pct))
     base_net_mass_g = _coerce_float_or_none(material_detail_for_breakdown.get("net_mass_g")) or 0.0
 
     removal_mass_g: float | None = None
@@ -14592,7 +14612,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     scrap_override_raw = overrides.get("scrap_pct_override") if isinstance(overrides, dict) else None
     scrap_override_applied = False
     if scrap_override_raw is not None:
-        override_scrap = _ensure_scrap_pct(scrap_override_raw)
+        override_scrap = normalize_scrap_pct(scrap_override_raw)
         if not math.isclose(override_scrap, scrap_after, abs_tol=1e-6):
             scrap_override_applied = True
         scrap_after = override_scrap
@@ -18734,7 +18754,7 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
     effective_scrap = material_detail.get("scrap_pct")
     if effective_scrap is None:
         effective_scrap = breakdown.get("scrap_pct")
-    effective_scrap = _ensure_scrap_pct(effective_scrap)
+    effective_scrap = normalize_scrap_pct(effective_scrap)
     scrap_pct_percent = round(100.0 * effective_scrap, 1)
 
     ctx = {
