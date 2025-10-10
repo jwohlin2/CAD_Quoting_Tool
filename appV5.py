@@ -53,6 +53,10 @@ def _coerce_env_bool(value: str | None) -> bool:
 FORCE_PLANNER = _coerce_env_bool(os.environ.get("FORCE_PLANNER"))
 
 
+def jdump(obj) -> str:
+    return json.dumps(obj, indent=2, default=str)
+
+
 def describe_runtime_environment() -> dict[str, str]:
     """Return a redacted snapshot of runtime configuration for auditors."""
 
@@ -13094,7 +13098,7 @@ def compute_quote_from_df(df: pd.DataFrame,
             if llm_suggest is not None:
                 try:
                     # Prepare a safe JSON body for the LLM message; default=str guards non-serializable entries
-                    _payload_body = json.dumps(payload, indent=2, default=str)
+                    _payload_body = jdump(payload)
                     chat_out = llm_suggest.create_chat_completion(
                         messages=[
                             {"role": "system", "content": SYSTEM_SUGGEST},
@@ -13205,7 +13209,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                 "n_ctx": overrides_meta.get("n_ctx"),
                 "messages": [
                     {"role": "system", "content": SYSTEM_SUGGEST},
-                    {"role": "user", "content": json.dumps(payload, indent=2, default=str)},
+                    {"role": "user", "content": jdump(payload)},
                 ],
                 "params": {"temperature": 0.3, "top_p": 0.9, "max_tokens": 512},
                 "context_payload": payload,
@@ -13215,7 +13219,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                 "usage": s_usage,
             }
             snap_path = APP_ENV.llm_debug_dir / f"llm_snapshot_{int(time.time())}.json"
-            snap_path.write_text(json.dumps(snap, indent=2, default=str), encoding="utf-8")
+            snap_path.write_text(jdump(snap), encoding="utf-8")
 
     quote_state.llm_raw = dict(overrides_meta)
     quote_state.suggestions = sanitized_struct if isinstance(sanitized_struct, dict) else {}
@@ -14617,7 +14621,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                     "clamped": notes_from_clamps,
                     "pass_through": {k: v for k, v in applied_pass.items()},
                 }
-                latest.write_text(json.dumps(snap, indent=2, default=str), encoding="utf-8")
+                latest.write_text(jdump(snap), encoding="utf-8")
         except Exception:
             pass
 
@@ -14934,7 +14938,7 @@ def _truncate_text(text: str, max_chars: int = 5000) -> str:
 
 def build_llm_prompt(best_page: dict) -> dict:
     text = _truncate_text(best_page.get("text", ""))
-    schema = json.dumps(JSON_SCHEMA, indent=2)
+    schema = jdump(JSON_SCHEMA)
     system = (
         "You are a manufacturing estimator. Read the drawing text and image and return JSON only. "
         "Estimate hours conservatively and do not invent dimensions."
@@ -18791,7 +18795,7 @@ class App(tk.Tk):
         if not isinstance(path, Path):
             return
         try:
-            path.write_text(json.dumps(self.settings, indent=2), encoding="utf-8")
+            path.write_text(jdump(self.settings), encoding="utf-8")
         except Exception:
             pass
 
@@ -20284,7 +20288,7 @@ class App(tk.Tk):
             out = infer_shop_overrides_from_geo(self.geo)
         except Exception:
             self.llm_txt.insert("end", f"LLM error: {{e}}\n"); return
-        self.llm_txt.insert("end", json.dumps(out, indent=2))
+        self.llm_txt.insert("end", jdump(out))
         if self.apply_llm_adj.get() and isinstance(out, dict):
             adj = out.get("LLM_Adjustments", {})
             try:
@@ -20313,7 +20317,7 @@ class App(tk.Tk):
             raw = latest.read_text(encoding="utf-8")
             try:
                 data = json.loads(raw)
-                shown = json.dumps(data, indent=2)
+                shown = jdump(data)
             except Exception:
                 shown = raw
         except Exception as e:
@@ -20332,7 +20336,7 @@ class App(tk.Tk):
     # ----- Flow + Output -----
     def _log_geo(self, d):
         self.geo_txt.delete("1.0","end")
-        self.geo_txt.insert("end", json.dumps(d, indent=2))
+        self.geo_txt.insert("end", jdump(d))
 
     def _log_out(self, d):
         widget = self.output_text_widgets.get("simplified") if hasattr(self, "output_text_widgets") else None
