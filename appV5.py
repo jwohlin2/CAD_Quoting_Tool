@@ -513,11 +513,12 @@ except Exception:  # pragma: no cover - fallback when optional import unavailabl
         if abs(cost_val) > 1e-6:
             return True
         return _geo_mentions_outsourced(geo_context)
+_match_items_contains = _fallback_match_items_contains  # type: ignore[assignment]
+
 try:
     from cad_quoter.utils.text import _match_items_contains as _imported_match_items_contains
 except Exception:  # pragma: no cover - defensive fallback for optional import paths
     _imported_match_items_contains = None  # type: ignore[assignment]
-    _match_items_contains = _fallback_match_items_contains  # type: ignore[assignment]
 else:
     if callable(_imported_match_items_contains):
         _match_items_contains = _imported_match_items_contains
@@ -11608,6 +11609,22 @@ def compute_quote_from_df(
     pricing_engine = pricing or _DEFAULT_PRICING_ENGINE
     quote_state.ui_vars = dict(ui_vars)
     quote_state.rates = dict(rates)
+
+    red_flag_messages: list[str] = []
+    # Historically this function exposed a ``red_flags`` list.  Some call sites
+    # still reference that legacy name, so keep an alias synchronized with the
+    # canonical ``red_flag_messages`` collection.
+    red_flags = red_flag_messages
+    _red_flag_seen: set[str] = set()
+
+    def _record_red_flag(message: str) -> None:
+        text = str(message or "").strip()
+        if not text:
+            return
+        if text not in _red_flag_seen:
+            _red_flag_seen.add(text)
+            red_flag_messages.append(text)
+
     geo_context = dict(geo or {})
     inner_geo_raw = geo_context.get("geo")
     inner_geo = dict(inner_geo_raw) if isinstance(inner_geo_raw, dict) else {}
@@ -11786,7 +11803,17 @@ def compute_quote_from_df(
     dtt   = df["Data Type / Input Method"].astype(str).str.lower()
     # --- lookups --------------------------------------------------------------
     def contains(pattern: str):
-        return _match_items_contains(items, pattern)
+        result = _match_items_contains(items, pattern)
+        if hasattr(result, "any"):
+            return result
+        try:
+            return pd.Series(list(result), dtype="bool")
+        except Exception:
+            try:
+                length = len(items)
+            except Exception:
+                length = 0
+            return pd.Series([False] * length, dtype="bool")
 
     def first_num(pattern: str, default: float = 0.0) -> float:
         m = contains(pattern)
@@ -12477,24 +12504,6 @@ def compute_quote_from_df(
     drill_estimator_hours_for_planner: float = 0.0
     used_planner = False
     planner_meta_keys: set[str] = set()
-
-    red_flag_messages: list[str] = []
-    # Historically this function exposed a ``red_flags`` list.  Some call
-    # sites—including legacy desktop builds—still expect that name when adding
-    # new messages.  Provide an alias so any lingering references continue to
-    # work instead of raising ``NameError`` when the branch executes.
-    red_flags = red_flag_messages
-    _red_flag_seen: set[str] = set()
-    # Legacy alias used by older code paths; keep synchronized for safety.
-    red_flags = red_flag_messages
-
-    def _record_red_flag(message: str) -> None:
-        text = str(message or "").strip()
-        if not text:
-            return
-        if text not in _red_flag_seen:
-            _red_flag_seen.add(text)
-            red_flag_messages.append(text)
 
     def _planner_meta_add(key: str) -> None:
         """Safely add planner-generated process keys to the tracking set."""
