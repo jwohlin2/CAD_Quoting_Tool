@@ -241,8 +241,6 @@ from typing import (
 )
 
 
-Mapping: TypeAlias = _MappingABC
-MutableMapping: TypeAlias = _MutableMappingABC
 
 
 T = TypeVar("T")
