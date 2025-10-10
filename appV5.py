@@ -13098,6 +13098,28 @@ def compute_quote_from_df(df: pd.DataFrame,
         planner_machine_cost_total = float(totals.get("machine_cost", 0.0) or 0.0)
         planner_labor_cost_total = float(totals.get("labor_cost", 0.0) or 0.0)
         planner_total_minutes = float(totals.get("minutes", 0.0) or 0.0)
+        planner_totals_cost = planner_machine_cost_total + planner_labor_cost_total
+
+        if planner_line_items:
+            display_machine_cost = 0.0
+            display_labor_cost = 0.0
+            for entry in planner_line_items:
+                try:
+                    machine_val = float(entry.get("machine_cost", 0.0) or 0.0)
+                except Exception:
+                    machine_val = 0.0
+                try:
+                    labor_val = float(entry.get("labor_cost", 0.0) or 0.0)
+                except Exception:
+                    labor_val = 0.0
+                display_machine_cost += machine_val
+                display_labor_cost += labor_val
+
+            display_total_cost = display_machine_cost + display_labor_cost
+            if abs(display_total_cost - planner_totals_cost) >= _PLANNER_BUCKET_ABS_EPSILON:
+                raise AssertionError(
+                    "Planner line items do not reconcile with planner totals."
+                )
 
         def _planner_bucketize(entries: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
             def _resolve_bucket(name: str) -> str:
@@ -13166,6 +13188,35 @@ def compute_quote_from_df(df: pd.DataFrame,
             return bucket_view
 
         bucket_view = _planner_bucketize(planner_line_items)
+
+        if bucket_view:
+            display_machine_cost = 0.0
+            display_labor_cost = 0.0
+            for info in bucket_view.values():
+                if not isinstance(info, Mapping):
+                    continue
+                try:
+                    machine_val = float(
+                        info.get("machine_cost")
+                        or info.get("machine$")
+                        or 0.0
+                    )
+                except Exception:
+                    machine_val = 0.0
+                try:
+                    labor_val = float(
+                        info.get("labor_cost") or info.get("labor$") or 0.0
+                    )
+                except Exception:
+                    labor_val = 0.0
+                display_machine_cost += machine_val
+                display_labor_cost += labor_val
+
+            display_total_cost = display_machine_cost + display_labor_cost
+            if abs(display_total_cost - planner_totals_cost) >= _PLANNER_BUCKET_ABS_EPSILON:
+                raise AssertionError(
+                    "Planner bucket rows do not reconcile with planner totals."
+                )
 
         if bucket_view:
             try:
