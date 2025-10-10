@@ -11850,6 +11850,11 @@ def compute_quote_from_df(
     if not isinstance(default_material_display, str) or not default_material_display.strip():
         default_material_display = DEFAULT_MATERIAL_DISPLAY
     params = {**params_defaults, **(params or {})}
+    plan_params: Mapping[str, Any] | None
+    if isinstance(params, _MappingABC):
+        plan_params = params
+    else:
+        plan_params = None
     rates = {**rates_defaults, **(rates or {})}
     rates.setdefault("DrillingRate", rates.get("MillingRate", 0.0))
     rates.setdefault("ProjectManagementRate", rates.get("EngineerRate", 0.0))
@@ -14537,6 +14542,7 @@ def compute_quote_from_df(
     planner_total_minutes = 0.0
     planner_bucket_view: dict[str, Any] | None = None
     planner_bucket_rollup: dict[str, dict[str, float]] | None = None
+    planner_totals_present = False
 
     if planner_pricing_result is not None:
         # Canonical planner integration + bucketization path
@@ -14743,8 +14749,8 @@ def compute_quote_from_df(
     }
 
     used_planner, planner_mode = resolve_planner(
-        params=params if isinstance(params, _MappingABC) else None,
-        signals=planner_signals,
+        plan_params,
+        planner_signals,
     )
     force_planner_for_recognized = recognized_line_items > 0
 
@@ -16891,7 +16897,19 @@ def compute_quote_from_df(
         "llm_cost_log": llm_cost_log,
     }
 
-    breakdown["pricing_source"] = pricing_source
+    planner_header_signals = {
+        "line_items": bool(planner_line_items),
+        "pricing_result": bool(planner_pricing_result),
+        "totals_present": bool(planner_totals_present),
+        "recognized_line_items": int(recognized_line_items or 0),
+    }
+    breakdown_used_planner, _ = resolve_planner(
+        plan_params,
+        planner_header_signals,
+    )
+    breakdown["pricing_source"] = (
+        "planner" if breakdown_used_planner else "legacy"
+    )
     if red_flag_messages:
         breakdown["red_flags"] = list(red_flag_messages)
     planner_bucket_display_map_breakdown: dict[str, dict[str, Any]] | None = None
