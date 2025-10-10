@@ -22,7 +22,6 @@ import os
 import re
 import time
 import typing
-import tkinter as tk
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace, fields as dataclass_fields
@@ -60,6 +59,12 @@ def _coerce_env_bool(value: str | None) -> bool:
 
 
 FORCE_PLANNER = _coerce_env_bool(os.environ.get("FORCE_PLANNER"))
+
+
+# Guardrails for LLM-generated process adjustments.
+LLM_MULTIPLIER_MIN = 0.25
+LLM_MULTIPLIER_MAX = 4.0
+LLM_ADDER_MAX = 8.0
 
 
 def jdump(obj) -> str:
@@ -113,10 +118,93 @@ from typing import (
     cast,
     Literal,
     overload,
+    TYPE_CHECKING,
 )
 
 
 T = TypeVar("T")
+
+
+if TYPE_CHECKING:  # pragma: no cover - typing helpers only
+    import tkinter as tk  # type: ignore[import]
+    from tkinter import (  # type: ignore[import]
+        filedialog,
+        messagebox,
+        scrolledtext,
+        ttk,
+    )
+
+    def _ensure_tk(action: str = "Tkinter GUI") -> dict[str, Any]: ...
+else:
+    _TK_MODULE_CACHE: dict[str, Any] | None = None
+    _TK_IMPORT_ERROR: Exception | None = None
+
+    def _load_tkinter_modules() -> dict[str, Any] | None:
+        """Best-effort import of Tkinter modules, caching the result."""
+
+        global _TK_MODULE_CACHE, _TK_IMPORT_ERROR
+        if _TK_MODULE_CACHE is not None or _TK_IMPORT_ERROR is not None:
+            return _TK_MODULE_CACHE
+
+        try:
+            import tkinter as _tk_mod  # type: ignore[import]
+            from tkinter import (  # type: ignore[import]
+                filedialog as _filedialog_mod,
+                messagebox as _messagebox_mod,
+                scrolledtext as _scrolledtext_mod,
+                ttk as _ttk_mod,
+            )
+        except Exception as exc:  # pragma: no cover - headless environments
+            _TK_IMPORT_ERROR = exc
+            return None
+
+        _TK_MODULE_CACHE = {
+            "tk": _tk_mod,
+            "filedialog": _filedialog_mod,
+            "messagebox": _messagebox_mod,
+            "scrolledtext": _scrolledtext_mod,
+            "ttk": _ttk_mod,
+        }
+        return _TK_MODULE_CACHE
+
+    def _raise_tkinter_unavailable(action: str) -> None:
+        """Raise a helpful error when GUI functionality is requested headless."""
+
+        if _TK_IMPORT_ERROR is not None:
+            raise RuntimeError(
+                f"{action} requires Tkinter, which is unavailable: {_TK_IMPORT_ERROR}"
+            ) from _TK_IMPORT_ERROR
+        raise RuntimeError(f"{action} requires Tkinter, which is unavailable.")
+
+    def _ensure_tk(action: str = "Tkinter GUI") -> dict[str, Any]:
+        modules = _load_tkinter_modules()
+        if modules is None:
+            _raise_tkinter_unavailable(action)
+        return modules
+
+    class _TkModuleProxy:
+        def __init__(self, key: str, description: str) -> None:
+            self._key = key
+            self._description = description
+
+        def __getattr__(self, attr: str) -> Any:
+            modules = _load_tkinter_modules()
+            if modules is not None:
+                return getattr(modules[self._key], attr)
+            if self._key == "tk" and attr == "Tk":
+
+                class _TkUnavailable:
+                    def __init__(self, *args: Any, **kwargs: Any) -> None:
+                        _raise_tkinter_unavailable("Starting the CAD Quoting Tool GUI")
+
+                return _TkUnavailable
+            _raise_tkinter_unavailable(self._description)
+
+    tk = cast(Any, _TkModuleProxy("tk", "Tkinter GUI"))
+    filedialog = cast(Any, _TkModuleProxy("filedialog", "File dialogs"))
+    messagebox = cast(Any, _TkModuleProxy("messagebox", "Message boxes"))
+    scrolledtext = cast(Any, _TkModuleProxy("scrolledtext", "Scrolled text widgets"))
+    ttk = cast(Any, _TkModuleProxy("ttk", "Themed Tk widgets"))
 
 
 def resolve_planner(
@@ -195,18 +283,6 @@ from cad_quoter.geo2d import (
 )
 from bucketizer import bucketize
 
-# Guardrails for LLM-generated process adjustments.
-LLM_MULTIPLIER_MIN = 0.25
-LLM_MULTIPLIER_MAX = 4.0
-LLM_ADDER_MAX = 8.0
-LLM_BOUND_DEFAULTS: Mapping[str, float] = MappingProxyType(
-    {
-        "mult_min": LLM_MULTIPLIER_MIN,
-        "mult_max": LLM_MULTIPLIER_MAX,
-        "adder_max_hr": LLM_ADDER_MAX,
-    }
-)
-
 # Tolerance for invariant checks that guard against silent drift when rendering
 # cost sections.
 _LABOR_SECTION_ABS_EPSILON = 0.51
@@ -276,7 +352,14 @@ from cad_quoter.domain_models import (
 from cad_quoter.coerce import to_float, to_int
 from cad_quoter.utils import compact_dict, sdict
 from cad_quoter.utils.geo_ctx import _should_include_outsourced_pass
-from cad_quoter.utils.text import _match_items_contains
+try:
+    from cad_quoter.utils.text import _match_items_contains
+except Exception:  # pragma: no cover - defensive fallback for optional import paths
+    def _match_items_contains(items, pattern):  # type: ignore[override]
+        try:
+            return items.str.contains(pattern, case=False, regex=True, na=False)
+        except Exception:
+            return items.str.contains(pattern, case=False, regex=False, na=False)
 from cad_quoter.pricing import (
     LB_PER_KG,
     PricingEngine,
@@ -329,6 +412,7 @@ from cad_quoter.llm import (
     EDITOR_FROM_UI,
     EDITOR_TO_SUGG,
     LLMClient,
+    SYSTEM_SUGGEST,
     SUGG_TO_EDITOR,
     infer_hours_and_overrides_from_geo as _infer_hours_and_overrides_from_geo,
     parse_llm_json,
@@ -708,11 +792,11 @@ text_harvest = _export("text_harvest")
 extract_entities = _export("extract_entities")
 read_dxf = _export("read_dxf")
 upsert_var_row = _export("upsert_var_row")
+require_ezdxf = _export("require_ezdxf")
 get_dwg_converter_path = _export("get_dwg_converter_path")
 have_dwg_support = _export("have_dwg_support")
 get_import_diagnostics_text = _export("get_import_diagnostics_text")
 
-_geometry_require_ezdxf = getattr(geometry, "require_ezdxf", None)
 _HAS_TRIMESH = getattr(geometry, "HAS_TRIMESH", False)
 _HAS_EZDXF = getattr(geometry, "HAS_EZDXF", False)
 _HAS_ODAFC = getattr(geometry, "HAS_ODAFC", False)
@@ -1200,7 +1284,9 @@ def build_suggest_payload(
         )
     else:
         material_name = material_val
-    material_name = str(material_name).strip() if material_name else "Steel"
+    material_name = (
+        str(material_name).strip() if material_name else DEFAULT_MATERIAL_DISPLAY
+    )
 
     hole_count_val = to_float(geo.get("hole_count"))
     if hole_count_val is None:
@@ -2834,6 +2920,7 @@ def effective_to_overrides(effective: dict, baseline: dict | None = None) -> dic
     return out
 
 
+# SINGLE SOURCE
 def ensure_accept_flags(state: QuoteState) -> None:
     suggestions = state.suggestions or {}
     accept = state.accept_llm
@@ -2889,7 +2976,6 @@ if sys.platform == 'win32':
 import importlib
 import subprocess
 import tempfile
-from tkinter import filedialog, messagebox, ttk
 
 try:
     from hole_table_parser import parse_hole_table_lines as _parse_hole_table_lines
@@ -3441,61 +3527,6 @@ def list_iter(lst):
 
 
 # ---- tiny helpers you can use elsewhere --------------------------------------
-def require_ezdxf():
-    """Raise a clear error if ezdxf is missing and return the module."""
-
-    if callable(_geometry_require_ezdxf):
-        return _geometry_require_ezdxf()
-
-    if not geometry.HAS_EZDXF:
-        raise RuntimeError("ezdxf not installed. Install with pip/conda (package name: 'ezdxf').")
-
-    try:
-        import ezdxf as _ezdxf
-    except Exception as exc:  # pragma: no cover - defensive fallback
-        raise RuntimeError("Failed to import ezdxf even though HAS_EZDXF is true.") from exc
-
-    return _ezdxf
-
-def get_dwg_converter_path() -> str:
-    """Resolve a DWG?DXF converter path (.bat/.cmd/.exe)."""
-    exe = os.environ.get("ODA_CONVERTER_EXE") or os.environ.get("DWG2DXF_EXE")
-    # Fall back to a local wrapper next to this script if it exists.
-    local = str(Path(__file__).with_name("dwg2dxf_wrapper.bat"))
-    if not exe and Path(local).exists():
-        exe = local
-    return exe or ""
-
-def get_import_diagnostics_text() -> str:
-    import os
-    import sys
-    lines = []
-    lines.append(f"Python: {sys.executable}")
-    try:
-        lines.append("PyMuPDF: OK")
-    except Exception as e:
-        lines.append(f"PyMuPDF: MISSING ({e})")
-
-    try:
-        import ezdxf
-        lines.append(f"ezdxf: {getattr(ezdxf, '__version__', 'unknown')}")
-        try:
-            lines.append("ezdxf.addons.odafc: OK")
-        except Exception as e:
-            lines.append(f"ezdxf.addons.odafc: not available ({e})")
-    except Exception as e:
-        lines.append(f"ezdxf: MISSING ({e})")
-
-    oda = os.environ.get("ODA_CONVERTER_EXE") or "(not set)"
-    d2d = os.environ.get("DWG2DXF_EXE") or "(not set)"
-    lines.append(f"ODA_CONVERTER_EXE: {oda}")
-    lines.append(f"DWG2DXF_EXE: {d2d}")
-
-    # local wrapper presence
-    from pathlib import Path
-    wrapper = Path(__file__).with_name("dwg2dxf_wrapper.bat")
-    lines.append(f"Local wrapper present: {wrapper.exists()} ({wrapper})")
-    return "\n".join(lines)
 # Optional PDF stack
 try:
     import fitz  # PyMuPDF
@@ -3503,51 +3534,6 @@ try:
 except Exception:
     fitz = None  # type: ignore[assignment]
     _HAS_PYMUPDF = False
-
-def upsert_var_row(df, item, value, dtype="number"):
-    """
-    Upsert one row by Item name (case-insensitive).
-    - Forces `item` and `value` to scalars.
-    - Works on the sanitized 3-column df (Item, Example..., Data Type...).
-    """
-    import numpy as np
-
-    # force scalars
-    if isinstance(item, pd.Series):
-        item = item.iloc[0]
-    item = str(item)
-
-    if isinstance(value, pd.Series):
-        value = value.iloc[0]
-    # try to make numeric if it looks numeric; otherwise keep as-is
-    try:
-        if value is None or (isinstance(value, float) and np.isnan(value)):
-            pass
-        else:
-            value = float(value)
-    except Exception:
-        # leave non-numerics (e.g., text) as-is
-        pass
-
-    # build a row with the exact df schema
-    cols = list(df.columns)
-    row: Dict[str, Any] = {c: "" for c in cols}
-    if "Item" in row:
-        row["Item"] = item
-    if "Example Values / Options" in row:
-        row["Example Values / Options"] = value
-    if "Data Type / Input Method" in row:
-        row["Data Type / Input Method"] = dtype
-
-    # case-insensitive exact match on Item
-    m = df["Item"].astype(str).str.casefold() == item.casefold()
-    if m.any():
-        df.loc[m, cols] = [row[c] for c in cols]
-        return df
-
-    # append
-    new_row = pd.DataFrame([[row[c] for c in cols]], columns=cols)
-    return pd.concat([df, new_row], ignore_index=True)
 
 DIM_RE = re.compile(r"(?:ï¿½|DIAM|DIA)\s*([0-9.+-]+)|R\s*([0-9.+-]+)|([0-9.+-]+)\s*[xX]\s*([0-9.+-]+)")
 
@@ -11862,7 +11848,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         selected_material_name
         or geo_context.get("material")
         or material_name
-        or "Steel"
+        or DEFAULT_MATERIAL_DISPLAY
     )
     drill_material_source = str(drill_material_source).strip()
     drill_material_lookup = (
@@ -15778,8 +15764,8 @@ def default_variables_template() -> pd.DataFrame:
         ("FAIR Required", "False / True", "Checkbox"),
         ("Source Inspection Requirement", "False / True", "Checkbox"),
         ("Quantity", 1, "number"),
-        ("Material", "", "text"),
-        ("Thickness (in)", 0.0, "number"),
+        ("Material", "Aluminum MIC6", "text"),
+        ("Thickness (in)", 2.0, "number"),
     ]
     return pd.DataFrame(rows, columns=REQUIRED_COLS)
 
@@ -18709,7 +18695,7 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
     if isinstance(material_name, str):
         material_name = material_name.strip() or None
 
-    material_display = material_name or "Steel"
+    material_display = material_name or DEFAULT_MATERIAL_DISPLAY
 
     hole_count_val = hole_count if isinstance(hole_count, int) else None
     geo_notes_default: list[str] = []
@@ -20136,6 +20122,8 @@ class App(tk.Tk):
         geometry_service: geometry.GeometryService | None = None,
     ):
 
+        _ensure_tk()
+
         super().__init__()
 
         self.configuration = configuration or UIConfiguration()
@@ -20671,10 +20659,10 @@ class App(tk.Tk):
         df = _ensure_row(df, "Scrap Percent (%)", 15.0, dtype="number")
         df = _ensure_row(df, "Plate Length (in)", 12.0, dtype="number")
         df = _ensure_row(df, "Plate Width (in)", 14.0, dtype="number")
-        df = _ensure_row(df, "Thickness (in)", 0.0, dtype="number")
+        df = _ensure_row(df, "Thickness (in)", 2.0, dtype="number")
         df = _ensure_row(df, "Hole Count (override)", 0, dtype="number")
         df = _ensure_row(df, "Avg Hole Diameter (mm)", 0.0, dtype="number")
-        df = _ensure_row(df, "Material", "", dtype="text")
+        df = _ensure_row(df, "Material", "Aluminum MIC6", dtype="text")
         self.vars_df = df
         parent = self.editor_scroll.inner
         for child in parent.winfo_children():
@@ -21979,9 +21967,13 @@ class App(tk.Tk):
 
     def open_llm_inspector(self):
         import json
-        import tkinter as tk
         from pathlib import Path
-        from tkinter import messagebox, scrolledtext
+
+        try:
+            _ensure_tk("LLM Inspector")
+        except RuntimeError as exc:  # pragma: no cover - headless guard
+            logger.error("Cannot open LLM Inspector: %s", exc)
+            return
 
         debug_dir = Path(__file__).with_name("llm_debug")
         files = sorted(debug_dir.glob("llm_snapshot_*.json"))
@@ -22279,7 +22271,14 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
 
     pricing_registry = create_default_registry()
     pricing_engine = PricingEngine(pricing_registry)
-    App(pricing_engine).mainloop()
+
+    try:
+        app = App(pricing_engine)
+    except RuntimeError as exc:  # pragma: no cover - headless guard
+        logger.error("Unable to start the GUI: %s", exc)
+        return 1
+
+    app.mainloop()
 
     return 0
 
