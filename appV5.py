@@ -57,6 +57,7 @@ from cad_quoter.config import (
     describe_runtime_environment as _describe_runtime_environment,
 )
 from cad_quoter.utils.geo_ctx import _should_include_outsourced_pass
+from cad_quoter.utils import sheet_helpers
 from cad_quoter.utils.scrap import _estimate_scrap_from_stock_plan
 
 if sys.platform == "win32":
@@ -11415,70 +11416,68 @@ def compute_quote_from_df(
             feature_counts_geo["csk_qty"] = csk_qty_geo
     # ---- sheet views ---------------------------------------------------------
     items = df["Item"].astype(str)
-    vals  = df["Example Values / Options"]
-    dtt   = df["Data Type / Input Method"].astype(str).str.lower()
+    vals = df["Example Values / Options"]
+    dtt = df["Data Type / Input Method"].astype(str).str.lower()
     # --- lookups --------------------------------------------------------------
-    def contains(pattern: str):
-        result = _match_items_contains(items, pattern)
-        if hasattr(result, "any"):
-            return result
-        try:
-            return pd.Series(list(result), dtype="bool")
-        except Exception:
-            try:
-                length = len(items)
-            except Exception:
-                length = 0
-            return pd.Series([False] * length, dtype="bool")
-
-    def first_num(pattern: str, default: float = 0.0) -> float:
-        m = contains(pattern)
-        if not m.any():
-            return float(default)
-        s = pd.to_numeric(vals[m].iloc[0], errors="coerce")
-        return float(s) if pd.notna(s) else float(default)
-
-    def num(pattern: str, default: float = 0.0) -> float:
-        m = contains(pattern)
-        if not m.any():
-            return float(default)
-        return float(pd.to_numeric(vals[m], errors="coerce").fillna(0.0).sum())
-
-    def strv(pattern: str, default: str = "") -> str:
-        m = contains(pattern)
-        return (str(vals[m].iloc[0]) if m.any() else default)
-
-    def num_pct(pattern: str, default: float = 0.0) -> float:
-        return pct(first_num(pattern, default * 100.0), default)
-
-    def sum_time(pattern: str, default: float = 0.0, exclude_pattern: str | None = None) -> float:
-        """Sum only time-like rows; minutes are converted to hours."""
-
-        mask = contains(pattern)
-        exclude_mask = contains(exclude_pattern) if exclude_pattern else None
-        return _sum_time_from_series(
-            items,
-            vals,
-            dtt,
-            mask,
-            default=float(default),
-            exclude_mask=exclude_mask,
-        )
+    contains = functools.partial(
+        sheet_helpers.contains,
+        items,
+        matcher=_match_items_contains,
+    )
+    first_num = functools.partial(
+        sheet_helpers.first_num,
+        items,
+        vals,
+        matcher=_match_items_contains,
+    )
+    num = functools.partial(
+        sheet_helpers.num,
+        items,
+        vals,
+        matcher=_match_items_contains,
+    )
+    strv = functools.partial(
+        sheet_helpers.strv,
+        items,
+        vals,
+        matcher=_match_items_contains,
+    )
+    num_pct = functools.partial(
+        sheet_helpers.num_pct,
+        items,
+        vals,
+        matcher=_match_items_contains,
+        pct_func=pct,
+    )
+    sum_time = functools.partial(
+        sheet_helpers.sum_time,
+        items,
+        vals,
+        dtt,
+        matcher=_match_items_contains,
+        sum_time_func=_sum_time_from_series,
+    )
 
     # --- OPTIONAL: let sheet override params/rates if those rows exist ---
-    def sheet_num(pat, default=None):
-        v = first_num(pat, float('nan'))
-        return v if v == v else default  # NaN check
-
-    def sheet_pct(pat, default=None):
-        v = first_num(pat, float('nan'))
-        if v == v:  # not NaN
-            return (v/100.0) if abs(v) > 1.0 else v
-        return default
-
-    def sheet_text(pat, default=None):
-        t = strv(pat, "").strip()
-        return t if t else default
+    sheet_num = functools.partial(
+        sheet_helpers.sheet_num,
+        items,
+        vals,
+        matcher=_match_items_contains,
+    )
+    sheet_pct = functools.partial(
+        sheet_helpers.sheet_pct,
+        items,
+        vals,
+        matcher=_match_items_contains,
+        pct_func=pct,
+    )
+    sheet_text = functools.partial(
+        sheet_helpers.sheet_text,
+        items,
+        vals,
+        matcher=_match_items_contains,
+    )
 
     # Params overrides
     params["OEE_EfficiencyPct"]        = sheet_pct(r"\b(OEE\s*Efficiency\s*%|OEE)\b", params.get("OEE_EfficiencyPct"))
