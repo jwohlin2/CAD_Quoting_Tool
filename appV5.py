@@ -138,6 +138,9 @@ from typing import (
 )
 
 
+Mapping: TypeAlias = _MappingABC
+
+
 T = TypeVar("T")
 
 
@@ -370,7 +373,7 @@ from cad_quoter.domain_models import (
     normalize_material_key as _normalize_lookup_key,
 )
 from cad_quoter.coerce import to_float, to_int
-from cad_quoter.utils import compact_dict, jdump, sdict, _first_non_none
+from cad_quoter.utils import compact_dict, jdump, json_safe_copy, sdict, _first_non_none
 try:
     from cad_quoter.utils.geo_ctx import _should_include_outsourced_pass
 except Exception:  # pragma: no cover - fallback when optional import unavailable
@@ -487,6 +490,20 @@ if _cad_llm is not None:
             def __init__(self, *args, **kwargs) -> None:  # pragma: no cover - defensive
                 raise RuntimeError("LLM integration is not available in this environment.")
 
+            @property
+            def model_path(self) -> str:  # pragma: no cover - defensive
+                return ""
+
+            @property
+            def available(self) -> bool:  # pragma: no cover - defensive
+                return False
+
+            def ask_json(self, *args, **kwargs) -> tuple[dict, str, dict]:  # pragma: no cover - defensive
+                raise RuntimeError("LLM integration is not available in this environment.")
+
+            def close(self) -> None:  # pragma: no cover - defensive
+                return None
+
     else:
         LLMClient = _LLMClient
     _infer_hours_and_overrides_from_geo = getattr(
@@ -514,6 +531,20 @@ else:  # pragma: no cover - fallback definitions keep quoting functional without
 
         def __init__(self, *args, **kwargs) -> None:  # pragma: no cover - defensive
             raise RuntimeError("LLM integration is not available in this environment.")
+
+        @property
+        def model_path(self) -> str:  # pragma: no cover - defensive
+            return ""
+
+        @property
+        def available(self) -> bool:  # pragma: no cover - defensive
+            return False
+
+        def ask_json(self, *args, **kwargs) -> tuple[dict, str, dict]:  # pragma: no cover - defensive
+            raise RuntimeError("LLM integration is not available in this environment.")
+
+        def close(self) -> None:  # pragma: no cover - defensive
+            return None
 
     def _infer_hours_and_overrides_from_geo(*args, **kwargs):  # pragma: no cover - fallback
         return {}
@@ -1018,6 +1049,7 @@ try:
     from geo_read_more import build_geo_from_dxf as build_geo_from_dxf_path
 except Exception:
     build_geo_from_dxf_path = None  # type: ignore[assignment]
+
 
 _build_geo_from_dxf_hook: Optional[Callable[[str], Dict[str, Any]]] = None
 
@@ -10029,10 +10061,11 @@ def estimate_drilling_hours(
     material_lookup = _normalize_lookup_key(mat_key) if mat_key else ""
     material_label = MATERIAL_DISPLAY_BY_KEY.get(material_lookup, mat_key)
 
+    thickness_mm = 0.0
     try:
         thickness_mm = float(thickness_in) * 25.4
     except (TypeError, ValueError):
-        thickness_mm = 0.0
+        pass
     if not math.isfinite(thickness_mm) or thickness_mm <= 0:
         thickness_mm = 0.0
     if (
@@ -10049,14 +10082,14 @@ def estimate_drilling_hours(
     mat = str(material_label or mat_key or "").lower()
     material_factor = _unit_hp_cap(material_label)
     # ``debug_state`` collects aggregate drilling metrics for callers that
-    # requested debugging information.  A previous refactor attempted to use a
-    # ``debug`` variable without guaranteeing it was defined, which manifested
-    # as a ``NameError`` during quoting.  Initialise the container up-front and
-    # only populate it when a caller has supplied either ``debug_lines`` or
-    # ``debug_summary``.
+    # requested debugging information.  Older revisions attempted to update a
+    # ``debug`` mapping without first defining it, which triggered a
+    # ``NameError`` during quoting.  Initialise the container up-front and create a
+    # ``debug`` alias for any legacy references inside this function.
     debug_state: dict[str, Any] | None = None
     if (debug_lines is not None) or (debug_summary is not None):
         debug_state = {}
+    debug: dict[str, Any] | None = debug_state
 
     debug_list = debug_lines if debug_lines is not None else None
     if debug_summary is not None:
@@ -10950,7 +10983,8 @@ def estimate_drilling_hours(
                 if overhead_bits:
                     line_parts.append("overhead: " + ", ".join(overhead_bits) + "; ")
                 line_parts.append(f"total hr {total_hours:.2f}.")
-                debug_lines.append("".join(line_parts))
+                if debug_lines is not None:
+                    debug_lines.append("".join(line_parts))
                 if debug_summary is not None:
                     debug_summary[op_key] = _jsonify_debug_value(summary)
         if missing_row_messages and warnings is not None:
@@ -10964,12 +10998,12 @@ def estimate_drilling_hours(
                     warnings.append(warning_text)
         total_minutes_with_toolchange = total_min + total_toolchange_min
 
-        if debug_state is not None and total_holes > 0:
+        if debug is not None and total_holes > 0:
             try:
                 avg_dia_in = float(avg_dia_in)
             except Exception:
                 avg_dia_in = 0.0
-            debug_state.update(
+            debug.update(
                 {
                     "thickness_in": float(thickness_in or 0.0),
                     "avg_dia_in": float(avg_dia_in),
@@ -11031,9 +11065,11 @@ def estimate_drilling_hours(
         # aggregate counts and weighted diameter
         weighted_dia_in += (float(d) / 25.4) * qty_int
 
+    holes_fallback = total_hole_qty
+
     if debug_state is not None and holes_fallback > 0:
         avg_dia_in = weighted_dia_in / holes_fallback if holes_fallback else 0.0
-        debug_state.update(
+        debug.update(
             {
                 "thickness_in": float(thickness_in or 0.0),
                 "avg_dia_in": float(avg_dia_in),
@@ -11045,8 +11081,8 @@ def estimate_drilling_hours(
                 "hole_count": int(holes_fallback),
             }
         )
-    elif debug_state is not None:
-        debug_state.update(
+    elif debug is not None:
+        debug.update(
             {
                 "thickness_in": float(thickness_in or 0.0),
                 "avg_dia_in": 0.0,
@@ -11059,8 +11095,8 @@ def estimate_drilling_hours(
             }
         )
 
-    if debug_summary is not None and debug_state is not None:
-        debug_summary.setdefault("aggregate", {}).update(debug_state)
+    if debug_summary is not None and debug is not None:
+        debug_summary.setdefault("aggregate", {}).update(debug)
 
     hours = total_sec / 3600.0
     depth_for_bounds = None
@@ -11363,7 +11399,7 @@ def compute_quote_from_df(
     # ---- merge configs (easy to edit) ---------------------------------------
     # Default pricing source; updated to 'planner' later if planner path is used
     pricing_source = "legacy"
-    legacy_baseline_had_values = False
+    legacy_baseline_had_values_flag = False
 
     params_defaults = default_params if default_params is not None else QuoteConfiguration().default_params
     rates_defaults = default_rates if default_rates is not None else PricingRegistry().default_rates
@@ -12986,7 +13022,7 @@ def compute_quote_from_df(
     if deburr_holes_hr:
         legacy_process_meta["deburr"]["hole_touch_hr"] = deburr_holes_hr
 
-    legacy_baseline_had_values = any(
+    legacy_baseline_had_values_flag = any(
         float(value or 0.0) > 0.0 for value in legacy_process_costs.values()
     ) or any(
         float(meta.get("hr", 0.0) or 0.0) > 0.0 for meta in legacy_process_meta.values()
@@ -14132,7 +14168,7 @@ def compute_quote_from_df(
 
         if used_planner:
             pricing_source = "planner"
-            if legacy_baseline_had_values:
+            if legacy_baseline_had_values_flag:
                 legacy_baseline_ignored = True
             planner_process_minutes = planner_total_minutes
             process_costs = {
@@ -14805,7 +14841,10 @@ def compute_quote_from_df(
                 "usage": s_usage,
             }
             snap_path = APP_ENV.llm_debug_dir / f"llm_snapshot_{int(time.time())}.json"
-            snap_path.write_text(jdump(json_safe_copy(snap)), encoding="utf-8")
+            snap_path.write_text(
+                jdump(json_safe_copy(snap), default=None),
+                encoding="utf-8",
+            )
 
     quote_state.llm_raw = dict(overrides_meta)
     quote_state.suggestions = sanitized_struct if isinstance(sanitized_struct, dict) else {}
@@ -16274,7 +16313,10 @@ def compute_quote_from_df(
                     "clamped": notes_from_clamps,
                     "pass_through": {k: v for k, v in applied_pass.items()},
                 }
-                latest.write_text(jdump(snap), encoding="utf-8")
+                latest.write_text(
+                    jdump(json_safe_copy(snap), default=None),
+                    encoding="utf-8",
+                )
         except Exception:
             pass
 
