@@ -553,6 +553,86 @@ INPROC_MENTION_PER = 0.10   # “tight tolerance” textual mentions
 INPROC_MENTION_MAX = 0.30
 
 
+def _estimate_inprocess_default_from_tolerance(
+    tolerance_inputs: Mapping[str, Any] | None,
+) -> float:
+    """Return a heuristic in-process inspection hour estimate for tolerances.
+
+    The estimator mirrors the behaviour of the Tkinter UI where a base number of
+    inspection hours is increased as default tolerances tighten and as multiple
+    tight callouts are present.  The curve parameters (``INPROC_*`` constants)
+    were reverse-engineered from the legacy spreadsheet that powers the quoting
+    tool, so we keep the same soft bounds here for consistency with the GUI.
+
+    ``tolerance_inputs`` accepts the loose dictionary that flows through the
+    application (strings, numbers, nested dicts/lists).  All tolerance magnitudes
+    are normalised to inches via :func:`_tolerance_values_from_any`.  We then
+    apply three adjustments:
+
+    #. Tightening the *minimum* tolerance raises the base curve following a
+       sub-linear power law so that going from ±0.002" to ±0.0002" increases the
+       estimate, but the premium flattens out.
+    #. Additional tight/sub-thou callouts add small capped bumps.  This guards
+       against a part with many near-identical tight tolerances doubling the
+       hours.
+    #. Optional textual mentions ("tight tolerance") get a minor adder to keep
+       parity with the legacy heuristics.
+    """
+
+    tol_values: list[float] = []
+    mention_tokens: list[str] = []
+
+    def _consume(entry: Any) -> None:
+        tol_values.extend(_tolerance_values_from_any(entry))
+        text = str(entry or "").strip()
+        if text:
+            mention_tokens.append(text)
+
+    if isinstance(tolerance_inputs, Mapping):
+        for key, value in tolerance_inputs.items():
+            if key is not None:
+                mention_tokens.append(str(key))
+            _consume(value)
+    elif tolerance_inputs is not None:
+        _consume(tolerance_inputs)
+
+    min_tol_in = min((val for val in tol_values if val > 0.0), default=None)
+
+    base_hr = float(INPROC_BASE_HR)
+    if min_tol_in is not None:
+        try:
+            norm = (INPROC_REF_TOL_IN - float(min_tol_in)) / INPROC_REF_TOL_IN
+        except Exception:
+            norm = 0.0
+        norm = max(0.0, min(1.0, norm))
+        if norm > 0.0:
+            base_hr += INPROC_SCALE_HR * (norm ** INPROC_EXP)
+
+    extra_hr = 0.0
+
+    tight_values = [val for val in tol_values if 0.0 < val <= 0.0015]
+    if tight_values:
+        extra_hr += min(
+            max(0, len(tight_values) - 1) * INPROC_TIGHT_PER,
+            INPROC_TIGHT_MAX,
+        )
+
+    subthou_values = [val for val in tol_values if 0.0 < val <= 0.0005]
+    if subthou_values:
+        extra_hr += min(
+            max(0, len(subthou_values) - 1) * INPROC_SUBTHOU_PER,
+            INPROC_SUBTHOU_MAX,
+        )
+
+    if mention_tokens:
+        mention_text = " ".join(mention_tokens).lower()
+        mentions = len(re.findall(r"tight\s*toler", mention_text))
+        if mentions:
+            extra_hr += min(mentions * INPROC_MENTION_PER, INPROC_MENTION_MAX)
+
+    return float(base_hr + extra_hr)
+
+
 def _canonical_pass_label(label: str | None) -> str:
     name = str(label or "").strip()
     if name.lower() in _HARDWARE_LABEL_ALIASES:
