@@ -235,12 +235,14 @@ from typing import (
     TypeVar,
     cast,
     Literal,
+    MutableMapping,
     overload,
     TYPE_CHECKING,
 )
 
 
 Mapping: TypeAlias = _MappingABC
+MutableMapping: TypeAlias = _MutableMappingABC
 
 
 T = TypeVar("T")
