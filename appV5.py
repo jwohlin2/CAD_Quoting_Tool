@@ -420,11 +420,6 @@ from cad_quoter.llm import (
     explain_quote,
 )
 
-_DEFAULT_MATERIAL_DENSITY_G_CC = MATERIAL_DENSITY_G_CC_BY_KEY.get(
-    DEFAULT_MATERIAL_KEY,
-    7.85,
-)
-
 try:
     _TIME_OVERHEAD_FIELD_NAMES = {
         field.name for field in dataclass_fields(_TimeOverheadParams)
