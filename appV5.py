@@ -24,6 +24,7 @@ import time
 import typing
 from collections import Counter
 from collections.abc import Mapping as _MappingABC
+from collections.abc import MutableMapping as _MutableMappingABC
 from dataclasses import (
     asdict,
     dataclass,
@@ -131,6 +132,27 @@ def _jsonify_debug_value(value: Any, depth: int = 0, max_depth: int = 6) -> Any:
     return coerced if math.isfinite(coerced) else None
 
 
+def _jsonify_debug_summary(summary: Mapping[str, Any]) -> dict[str, Any]:
+    """Safely serialize debugging metadata for JSON storage.
+
+    Older builds of :mod:`appV5` may be missing :func:`_jsonify_debug_value`.
+    That scenario produced a ``NameError`` when the drilling debug summaries
+    were materialised.  Instead of failing the whole quoting flow, fall back to
+    the raw values so the caller still receives a response (albeit with less
+    structured debug output).
+    """
+
+    serializer = globals().get("_jsonify_debug_value")
+    if not callable(serializer):
+        # Preserve backwards compatibility by returning the original mapping.
+        return {str(key): value for key, value in summary.items()}
+
+    return {
+        str(key): serializer(value)  # type: ignore[misc]
+        for key, value in summary.items()
+    }
+
+
 # Guardrails for LLM-generated process adjustments.
 LLM_MULTIPLIER_MIN = 0.25
 LLM_MULTIPLIER_MAX = 4.0
@@ -213,12 +235,14 @@ from typing import (
     TypeVar,
     cast,
     Literal,
+    MutableMapping,
     overload,
     TYPE_CHECKING,
 )
 
 
 Mapping: TypeAlias = _MappingABC
+MutableMapping: TypeAlias = _MutableMappingABC
 
 
 T = TypeVar("T")
@@ -666,19 +690,30 @@ except Exception:  # pragma: no cover - defensive against non-dataclass implemen
     _TIME_OVERHEAD_FIELD_NAMES = set()
 
 def _detect_index_support() -> bool:
-    """Return True when ``OverheadParams`` accepts ``index_sec_per_hole``."""
+    """Return True when ``OverheadParams`` exposes ``index_sec_per_hole``."""
 
     if "index_sec_per_hole" in _TIME_OVERHEAD_FIELD_NAMES:
         return True
+
     try:
-        _TimeOverheadParams(index_sec_per_hole=None)
-    except TypeError:
-        return False
+        probe = _TimeOverheadParams()
     except Exception:
-        # Unexpected constructor failure; assume unsupported to avoid breaking callers.
+        # If the constructor requires additional parameters we conservatively
+        # assume the optional index field is unavailable.
         return False
-    else:
+
+    if hasattr(probe, "index_sec_per_hole"):
         return True
+
+    for setter in (setattr, object.__setattr__):
+        try:
+            setter(probe, "index_sec_per_hole", None)
+        except Exception:
+            continue
+        else:
+            return hasattr(probe, "index_sec_per_hole")
+
+    return False
 
 
 _TIME_OVERHEAD_SUPPORTS_INDEX_SEC = _detect_index_support()
@@ -687,12 +722,51 @@ _TIME_OVERHEAD_SUPPORTS_INDEX_SEC = _detect_index_support()
 OverheadLike: TypeAlias = _TimeOverheadParams | SimpleNamespace
 
 
-def _ensure_overhead_index_attr(
+def _assign_overhead_index_attr(
     overhead: _TimeOverheadParams, index_value: float | None
+) -> bool:
+    """Attempt to assign ``index_sec_per_hole`` on ``overhead``.
+
+    Returns ``True`` when the attribute exists (either pre-existing or after
+    assignment) and ``False`` when the underlying dataclass does not support
+    the field.
+    """
+
+    if overhead is None:
+        return False
+
+    if hasattr(overhead, "index_sec_per_hole"):
+        try:
+            setattr(overhead, "index_sec_per_hole", index_value)
+        except Exception:
+            try:
+                object.__setattr__(overhead, "index_sec_per_hole", index_value)
+            except Exception:
+                # Attribute exists but cannot be mutated (e.g. frozen
+                # dataclass). Treat as available so downstream callers rely on
+                # the existing value.
+                return True
+        return True
+
+    for setter in (setattr, object.__setattr__):
+        try:
+            setter(overhead, "index_sec_per_hole", index_value)
+        except Exception:
+            continue
+        else:
+            return True
+
+    return False
+
+
+def _ensure_overhead_index_attr(
+    overhead: _TimeOverheadParams, index_value: float | None, *, assigned: bool = False
 ) -> OverheadLike:
     """Return an overhead object that always exposes ``index_sec_per_hole``."""
 
     if hasattr(overhead, "index_sec_per_hole"):
+        if not assigned:
+            _assign_overhead_index_attr(overhead, index_value)
         return overhead
 
     payload: dict[str, Any] = {}
@@ -10074,13 +10148,19 @@ def _drill_overhead_from_params(params: Mapping[str, Any] | None) -> OverheadLik
         index_kwarg = (
             float(index_sec) if index_sec is not None and index_sec >= 0 else None
         )
-        overhead_kwargs["index_sec_per_hole"] = index_kwarg
     try:
         overhead = _TimeOverheadParams(**overhead_kwargs)
     except TypeError:
-        overhead_kwargs.pop("index_sec_per_hole", None)
-        overhead = _TimeOverheadParams(**overhead_kwargs)
-    return _ensure_overhead_index_attr(overhead, index_kwarg)
+        overhead = _TimeOverheadParams(
+            toolchange_min=overhead_kwargs.get("toolchange_min"),
+            approach_retract_in=overhead_kwargs.get("approach_retract_in"),
+            peck_penalty_min_per_in_depth=overhead_kwargs.get(
+                "peck_penalty_min_per_in_depth"
+            ),
+            dwell_min=overhead_kwargs.get("dwell_min"),
+        )
+    assigned = _assign_overhead_index_attr(overhead, index_kwarg)
+    return _ensure_overhead_index_attr(overhead, index_kwarg, assigned=assigned)
 
 
 def _make_time_overhead_params(
@@ -10101,17 +10181,25 @@ def _make_time_overhead_params(
         else:
             coerced = _coerce_float_or_none(index_val)
             index_kwarg = float(coerced) if coerced is not None and coerced >= 0 else None
-        kwargs["index_sec_per_hole"] = index_kwarg
+        kwargs.pop("index_sec_per_hole", None)
 
-    dropped_index = False
     try:
         overhead = _TimeOverheadParams(**kwargs)
     except TypeError:
-        index_kwarg = kwargs.pop("index_sec_per_hole", None)
-        dropped_index = index_kwarg is not None
-        overhead = _TimeOverheadParams(**kwargs)
+        overhead = _TimeOverheadParams(
+            toolchange_min=kwargs.get("toolchange_min"),
+            approach_retract_in=kwargs.get("approach_retract_in"),
+            peck_penalty_min_per_in_depth=kwargs.get(
+                "peck_penalty_min_per_in_depth"
+            ),
+            dwell_min=kwargs.get("dwell_min"),
+            peck_min=kwargs.get("peck_min"),
+        )
 
-    return _ensure_overhead_index_attr(overhead, index_kwarg), dropped_index
+    assigned = _assign_overhead_index_attr(overhead, index_kwarg)
+    dropped_index = index_kwarg is not None and not assigned
+
+    return _ensure_overhead_index_attr(overhead, index_kwarg, assigned=assigned), dropped_index
 
 
 def _coerce_overhead_dataclass(overhead: OverheadLike) -> _TimeOverheadParams:
@@ -10130,14 +10218,28 @@ def _coerce_overhead_dataclass(overhead: OverheadLike) -> _TimeOverheadParams:
     ):
         if hasattr(overhead, name):
             payload[name] = getattr(overhead, name)
+
+    index_value = None
     if _TIME_OVERHEAD_SUPPORTS_INDEX_SEC:
-        payload["index_sec_per_hole"] = getattr(overhead, "index_sec_per_hole", None)
+        index_value = getattr(overhead, "index_sec_per_hole", None)
 
     try:
-        return _TimeOverheadParams(**payload)
+        coerced = _TimeOverheadParams(**payload)
     except TypeError:
-        payload.pop("index_sec_per_hole", None)
-        return _TimeOverheadParams(**payload)
+        coerced = _TimeOverheadParams(
+            toolchange_min=payload.get("toolchange_min"),
+            approach_retract_in=payload.get("approach_retract_in"),
+            peck_penalty_min_per_in_depth=payload.get("peck_penalty_min_per_in_depth"),
+            dwell_min=payload.get("dwell_min"),
+            peck_min=payload.get("peck_min"),
+        )
+    assigned = _assign_overhead_index_attr(coerced, index_value)
+    if index_value is not None and not assigned:
+        try:
+            object.__setattr__(coerced, "index_sec_per_hole", index_value)
+        except Exception:
+            pass
+    return coerced
 
 
 def _clean_hole_groups(raw: Any) -> list[dict[str, Any]] | None:
@@ -10281,13 +10383,13 @@ def estimate_drilling_hours(
     material_lookup = _normalize_lookup_key(mat_key) if mat_key else ""
     material_label = MATERIAL_DISPLAY_BY_KEY.get(material_lookup, mat_key)
 
-    thickness_mm = 0.0
+    thickness_mm_val = 0.0
     try:
-        thickness_mm = float(thickness_in) * 25.4
+        thickness_mm_val = float(thickness_in) * 25.4
     except (TypeError, ValueError):
         pass
-    if not math.isfinite(thickness_mm) or thickness_mm <= 0:
-        thickness_mm = 0.0
+    if not math.isfinite(thickness_mm_val) or thickness_mm_val <= 0:
+        thickness_mm_val = 0.0
     if (
         speeds_feeds_table is not None
         and (not material_label or material_label == mat_key)
@@ -10309,12 +10411,9 @@ def estimate_drilling_hours(
     debug_state: dict[str, Any] | None = None
     if (debug_lines is not None) or (debug_summary is not None):
         debug_state = {}
-    debug: dict[str, Any] | None = debug_state
-    # ``debug_meta`` was the historical name for the structured debug mapping.
-    # Some older call sites—and a few legacy branches inside this function—may
-    # still try to access ``debug_meta``.  Provide an alias so those paths
-    # continue to work without raising ``NameError``.
-    debug_meta: dict[str, Any] | None = debug_state
+    debug: dict[str, Any] | None = None
+    if debug_state is not None:
+        debug = debug_state
 
     debug_list = debug_lines if debug_lines is not None else None
     if debug_summary is not None:
@@ -10322,6 +10421,47 @@ def estimate_drilling_hours(
     avg_dia_in = 0.0
     seen_debug: set[str] = set()
     chosen_material_label: str = ""
+    operation_debug_data: dict[str, dict[str, Any]] = {}
+
+    def _update_debug_aggregate(
+        *,
+        hole_count: int,
+        avg_diameter: Any,
+        minutes_per_hole: float | None,
+    ) -> None:
+        if debug is None:
+            return
+
+        try:
+            avg_val = float(avg_diameter)
+        except Exception:
+            avg_val = 0.0
+        if not math.isfinite(avg_val):
+            avg_val = 0.0
+
+        min_per_hole_val: float | None
+        if minutes_per_hole is None:
+            min_per_hole_val = None
+        else:
+            try:
+                min_candidate = float(minutes_per_hole)
+            except Exception:
+                min_per_hole_val = None
+            else:
+                min_per_hole_val = min_candidate if math.isfinite(min_candidate) else None
+
+        debug.update(
+            {
+                "thickness_in": float(thickness_in or 0.0),
+                "avg_dia_in": avg_val,
+                "sfm": None,
+                "ipr": None,
+                "rpm": None,
+                "ipm": None,
+                "min_per_hole": min_per_hole_val,
+                "hole_count": int(hole_count),
+            }
+        )
 
     def _log_debug(entry: str) -> None:
         if debug_list is None:
@@ -10691,10 +10831,11 @@ def estimate_drilling_hours(
                 )
                 overhead_for_calc = per_hole_overhead
             else:
+                overhead_local = per_hole_overhead
                 try:
                     overhead_local = overhead_for_calc
                 except (UnboundLocalError, NameError):  # pragma: no cover - safety net
-                    overhead_local = per_hole_overhead
+                    pass
                 peck_rate = to_float(
                     overhead_local.peck_penalty_min_per_in_depth
                 )
@@ -10766,6 +10907,37 @@ def estimate_drilling_hours(
                 continue
             if qty_int <= 0:
                 continue
+            op_key = str(op_name or "").strip().lower() or "drill"
+            op_entry = operation_debug_data.setdefault(
+                op_key,
+                {
+                    "qty": 0,
+                    "row": None,
+                    "precomputed": None,
+                    "material": None,
+                    "diameter_weight_sum": 0.0,
+                    "diameter_qty_sum": 0,
+                },
+            )
+            op_entry["qty"] += qty_int
+            if row and isinstance(row, _MappingABC):
+                op_entry["row"] = row
+            if precomputed_speeds:
+                op_entry["precomputed"] = dict(precomputed_speeds)
+            if chosen_material_label:
+                op_entry["material"] = chosen_material_label
+            else:
+                fallback_material = str(
+                    material_label or mat_key or material_lookup or ""
+                ).strip()
+                if fallback_material:
+                    op_entry.setdefault("material", fallback_material)
+            if (
+                diameter_float is not None
+                and math.isfinite(float(diameter_float))
+            ):
+                op_entry["diameter_weight_sum"] += float(diameter_float) * qty_int
+                op_entry["diameter_qty_sum"] += qty_int
             total_holes += qty_int
             total_min += minutes * qty_int
             toolchange_added = 0.0
@@ -10961,10 +11133,11 @@ def estimate_drilling_hours(
                             summary["depth_min"] = float(depth_float)
                         if depth_max is None or float(depth_float) > depth_max:
                             summary["depth_max"] = float(depth_float)
+                    overhead_local = per_hole_overhead
                     try:
                         overhead_local = overhead_for_calc
                     except (UnboundLocalError, NameError):  # pragma: no cover - safety net
-                        overhead_local = per_hole_overhead
+                        pass
                     peck_rate = to_float(
                         overhead_local.peck_penalty_min_per_in_depth
                     )
@@ -11182,27 +11355,18 @@ def estimate_drilling_hours(
                     warnings.append(warning_text)
         total_minutes_with_toolchange = total_min + total_toolchange_min
 
-        if debug is not None and total_holes > 0:
-            try:
-                avg_dia_in = float(avg_dia_in)
-            except Exception:
-                avg_dia_in = 0.0
-            debug.update(
-                {
-                    "thickness_in": float(thickness_in or 0.0),
-                    "avg_dia_in": float(avg_dia_in),
-                    "sfm": None,
-                    "ipr": None,
-                    "rpm": None,
-                    "ipm": None,
-                    "min_per_hole": (float(total_min) / float(total_holes)) if total_holes else 0.0,
-                    "hole_count": int(total_holes),
-                }
-            )
+        min_per_hole: float | None = None
+        if total_holes > 0:
+            min_per_hole = float(total_min) / float(total_holes)
+        _update_debug_aggregate(
+            hole_count=total_holes,
+            avg_diameter=avg_dia_in,
+            minutes_per_hole=min_per_hole,
+        )
         if total_minutes_with_toolchange > 0:
             return total_minutes_with_toolchange / 60.0
 
-    thickness_for_fallback_mm = thickness_mm
+    thickness_for_fallback_mm = thickness_mm_val
     if thickness_for_fallback_mm <= 0:
         depth_candidates = [depth for _, _, depth in group_specs if depth and depth > 0]
         if depth_candidates:
@@ -11253,30 +11417,17 @@ def estimate_drilling_hours(
 
     if debug_state is not None and holes_fallback > 0:
         avg_dia_in = weighted_dia_in / holes_fallback if holes_fallback else 0.0
-        debug.update(
-            {
-                "thickness_in": float(thickness_in or 0.0),
-                "avg_dia_in": float(avg_dia_in),
-                "sfm": None,
-                "ipr": None,
-                "rpm": None,
-                "ipm": None,
-                "min_per_hole": (total_sec / 60.0) / total_hole_qty if total_hole_qty else None,
-                "hole_count": int(total_hole_qty),
-            }
+        min_per_hole = (total_sec / 60.0) / total_hole_qty if total_hole_qty else None
+        _update_debug_aggregate(
+            hole_count=total_hole_qty,
+            avg_diameter=avg_dia_in,
+            minutes_per_hole=min_per_hole,
         )
-    elif debug is not None:
-        debug.update(
-            {
-                "thickness_in": float(thickness_in or 0.0),
-                "avg_dia_in": 0.0,
-                "sfm": None,
-                "ipr": None,
-                "rpm": None,
-                "ipm": None,
-                "min_per_hole": None,
-                "hole_count": 0,
-            }
+    else:
+        _update_debug_aggregate(
+            hole_count=total_hole_qty if holes_fallback > 0 else 0,
+            avg_diameter=weighted_dia_in / holes_fallback if holes_fallback else 0.0,
+            minutes_per_hole=None,
         )
 
     if debug_summary is not None and debug is not None:
@@ -11584,6 +11735,9 @@ def compute_quote_from_df(
     # Default pricing source; updated to 'planner' later if planner path is used
     pricing_source = "legacy"
     legacy_baseline_had_values_flag = False
+    # Maintain backward compatibility with older variable name used in
+    # downstream code paths.
+    legacy_baseline_had_values = legacy_baseline_had_values_flag
 
     params_defaults = default_params if default_params is not None else QuoteConfiguration().default_params
     rates_defaults = default_rates if default_rates is not None else PricingRegistry().default_rates
@@ -11613,6 +11767,10 @@ def compute_quote_from_df(
     pricing_engine = pricing or _DEFAULT_PRICING_ENGINE
     quote_state.ui_vars = dict(ui_vars)
     quote_state.rates = dict(rates)
+    # Track whether we recognized any planner line items even if planner pricing
+    # fails to populate line_items. Initialize this early to avoid scope issues
+    # when incrementing the counter in downstream logic.
+    recognized_line_items = 0
     geo_context = dict(geo or {})
     inner_geo_raw = geo_context.get("geo")
     inner_geo = dict(inner_geo_raw) if isinstance(inner_geo_raw, dict) else {}
@@ -11639,9 +11797,14 @@ def compute_quote_from_df(
             empty_attr = None
         if empty_attr is not None:
             try:
-                return bool(empty_attr) is False
+                empty_value = empty_attr() if callable(empty_attr) else empty_attr
             except Exception:
-                pass
+                empty_value = None
+            if empty_value is not None:
+                try:
+                    return not bool(empty_value)
+                except Exception:
+                    pass
         try:
             return len(table) > 0  # type: ignore[arg-type]
         except Exception:
@@ -12481,7 +12644,18 @@ def compute_quote_from_df(
     planner_drill_minutes: float | None = None
     planner_drilling_override: dict[str, float] | None = None
     used_planner = False
-    planner_meta_keys: set[str] = set()
+    _planner_meta_tracker: dict[str, set[str]] = {"keys": set()}
+
+    def _get_planner_meta_keys() -> set[str]:
+        keys = _planner_meta_tracker.get("keys")
+        if isinstance(keys, set):
+            return keys
+        keys = set()
+        _planner_meta_tracker["keys"] = keys
+        return keys
+
+    def _reset_planner_meta_keys() -> None:
+        _planner_meta_tracker["keys"] = set()
 
     red_flag_messages: list[str] = []
     # Historically this function exposed a ``red_flags`` list.  Some call
@@ -12504,14 +12678,12 @@ def compute_quote_from_df(
     def _planner_meta_add(key: str) -> None:
         """Safely add planner-generated process keys to the tracking set."""
 
-        nonlocal planner_meta_keys
-
-        if not isinstance(planner_meta_keys, set):
-            planner_meta_keys = set()
-
         key_norm = str(key or "").strip()
-        if key_norm:
-            planner_meta_keys.add(key_norm)
+        if not key_norm:
+            return
+
+        planner_keys = _get_planner_meta_keys()
+        planner_keys.add(key_norm)
 
     force_legacy_pricing = False
 
@@ -12855,17 +13027,21 @@ def compute_quote_from_df(
     selected_op_name: str = "drill"  # default for debug display
     avg_dia_in = 0.0
     speeds_feeds_summary: Mapping[str, Any] | None = None
+    speeds_feeds_row: Mapping[str, Any] | None = None
+    selected_precomputed: dict[str, float] = {}
     material_display_for_debug: str = ""
 
     if not material_display_for_debug:
-        candidate_display = (
-            material_selection.get("canonical_material")
-            or material_selection.get("material_display")
-            or material_selection.get("input_material")
-            or material_selection.get("material")
-        )
-        if candidate_display:
-            material_display_for_debug = str(candidate_display).strip()
+        for candidate_display in (
+            material_selection.get("canonical_material"),
+            material_selection.get("material_display"),
+            material_selection.get("input_material"),
+            material_selection.get("material"),
+        ):
+            text = str(candidate_display or "").strip()
+            if text:
+                material_display_for_debug = text
+                break
     if not material_display_for_debug:
         material_display_for_debug = str(drill_material_display or "").strip()
 
@@ -12922,7 +13098,9 @@ def compute_quote_from_df(
             ):
                 best_qty = qty_float
                 best_minutes = minutes_float
-                selected_op_name = str(op_key or selected_op_name).strip() or selected_op_name
+                selected_op_name = (
+                    str(op_key or selected_op_name).strip() or selected_op_name
+                )
                 speeds_feeds_summary = summary
         if speeds_feeds_summary:
             weight_sum = _coerce_float_or_none(
@@ -12948,15 +13126,88 @@ def compute_quote_from_df(
                             avg_dia_in = float(dia_val)
                             break
 
+    op_debug_map = locals().get("operation_debug_data")
+    if not isinstance(op_debug_map, dict):
+        op_debug_map = {}
+    selected_entry = op_debug_map.get(selected_op_name)
+    if (
+        (selected_entry is None or selected_entry.get("qty", 0) <= 0)
+        and op_debug_map
+    ):
+        best_key, best_entry = max(
+            op_debug_map.items(),
+            key=lambda item: item[1].get("qty", 0),
+        )
+        selected_op_name = best_key
+        selected_entry = best_entry
+    if selected_entry:
+        entry_row = selected_entry.get("row")
+        if isinstance(entry_row, _MappingABC):
+            speeds_feeds_row = entry_row
+        else:
+            speeds_feeds_row = entry_row if entry_row is not None else speeds_feeds_row
+        precomputed_candidate = selected_entry.get("precomputed")
+        if isinstance(precomputed_candidate, dict):
+            selected_precomputed = precomputed_candidate
+        material_candidate = selected_entry.get("material")
+        if material_candidate and not chosen_material_label:
+            chosen_material_label = str(material_candidate)
+        if avg_dia_in <= 0:
+            qty_sum = selected_entry.get("diameter_qty_sum") or 0
+            weight_sum = selected_entry.get("diameter_weight_sum") or 0.0
+            if qty_sum:
+                try:
+                    avg_dia_in = float(weight_sum) / float(qty_sum)
+                except (TypeError, ValueError, ZeroDivisionError):
+                    pass
+
     drill_debug_line: str | None = None
-    if speeds_feeds_summary and avg_dia_in > 0:
-        rpm_val = _coerce_float_or_none(speeds_feeds_summary.get("rpm"))
-        ipm_val = _coerce_float_or_none(speeds_feeds_summary.get("ipm"))
+    if (speeds_feeds_summary or speeds_feeds_row) and avg_dia_in > 0:
+        def _lookup_mapping_value(source: Any, key: str) -> Any:
+            if source is None:
+                return None
+            getter = getattr(source, "get", None)
+            if callable(getter):
+                try:
+                    return getter(key)
+                except Exception:
+                    pass
+            try:
+                return source[key]  # type: ignore[index]
+            except Exception:
+                return getattr(source, key, None)
+
+        source_mapping = speeds_feeds_summary or speeds_feeds_row
+        rpm_val = _coerce_float_or_none(_lookup_mapping_value(source_mapping, "rpm"))
+        if (rpm_val is None or rpm_val <= 0) and selected_precomputed:
+            rpm_val = _coerce_float_or_none(selected_precomputed.get("rpm"))
+        if rpm_val is None or rpm_val <= 0:
+            sfm_source = _coerce_float_or_none(
+                _lookup_mapping_value(source_mapping, "sfm")
+            )
+            if (sfm_source is None or sfm_source <= 0) and selected_precomputed:
+                sfm_source = _coerce_float_or_none(selected_precomputed.get("sfm"))
+            if sfm_source and avg_dia_in > 0:
+                try:
+                    rpm_candidate = (float(sfm_source) * 12.0) / (
+                        math.pi * float(avg_dia_in)
+                    )
+                except (TypeError, ValueError, ZeroDivisionError):
+                    rpm_candidate = None
+                if rpm_candidate is not None and math.isfinite(rpm_candidate):
+                    rpm_val = float(rpm_candidate)
+        ipm_val = _coerce_float_or_none(_lookup_mapping_value(source_mapping, "ipm"))
+        if (ipm_val is None or ipm_val <= 0) and selected_precomputed:
+            ipm_val = _coerce_float_or_none(selected_precomputed.get("ipm"))
 
         ipr_val: float | None = None
         if ipm_val is None or ipm_val <= 0:
-            ipr_sum = _coerce_float_or_none(speeds_feeds_summary.get("ipr_sum"))
-            ipr_count = _coerce_float_or_none(speeds_feeds_summary.get("ipr_count"))
+            ipr_sum = _coerce_float_or_none(
+                _lookup_mapping_value(source_mapping, "ipr_sum")
+            )
+            ipr_count = _coerce_float_or_none(
+                _lookup_mapping_value(source_mapping, "ipr_count")
+            )
             if (
                 ipr_sum is not None
                 and ipr_count is not None
@@ -12965,17 +13216,30 @@ def compute_quote_from_df(
                 ipr_val = float(ipr_sum) / float(ipr_count)
             if ipr_val is None or ipr_val <= 0:
                 ipr_min = _coerce_float_or_none(
-                    speeds_feeds_summary.get("ipr_effective_min")
-                    or speeds_feeds_summary.get("ipr_min")
+                    _lookup_mapping_value(source_mapping, "ipr_effective_min")
+                    or _lookup_mapping_value(source_mapping, "ipr_min")
                 )
                 ipr_max = _coerce_float_or_none(
-                    speeds_feeds_summary.get("ipr_effective_max")
-                    or speeds_feeds_summary.get("ipr_max")
+                    _lookup_mapping_value(source_mapping, "ipr_effective_max")
+                    or _lookup_mapping_value(source_mapping, "ipr_max")
                 )
                 if ipr_min is not None and ipr_min > 0:
                     ipr_val = float(ipr_min)
                 elif ipr_max is not None and ipr_max > 0:
                     ipr_val = float(ipr_max)
+        if (ipr_val is None or ipr_val <= 0) and selected_precomputed:
+            ipr_val = _coerce_float_or_none(selected_precomputed.get("ipr"))
+        if (
+            (ipr_val is None or ipr_val <= 0)
+            and rpm_val is not None
+            and rpm_val > 0
+            and ipm_val is not None
+            and ipm_val > 0
+        ):
+            try:
+                ipr_val = float(ipm_val) / float(rpm_val)
+            except (TypeError, ValueError, ZeroDivisionError):
+                ipr_val = None
 
         debug_bits: list[str] = []
         if rpm_val and rpm_val > 0:
@@ -13025,9 +13289,7 @@ def compute_quote_from_df(
     if drill_debug_line:
         drilling_meta["speeds_feeds_debug"] = drill_debug_line
     if drill_debug_summary:
-        drilling_meta["debug_summary"] = {
-            key: _jsonify_debug_value(value) for key, value in drill_debug_summary.items()
-        }
+        drilling_meta["debug_summary"] = _jsonify_debug_summary(drill_debug_summary)
         if not drill_material_display:
             for summary in drill_debug_summary.values():
                 mat_val = str(summary.get("material") or "").strip()
@@ -13223,14 +13485,13 @@ def compute_quote_from_df(
     ) or any(
         float(meta.get("hr", 0.0) or 0.0) > 0.0 for meta in legacy_process_meta.values()
     )
+    legacy_baseline_had_values = legacy_baseline_had_values_flag
 
     planner_meta_keys: set[str] = set()
 
-    meta_lookup: dict[str, dict[str, Any]] = {
-        key: dict(value) for key, value in process_meta.items() if isinstance(value, _MappingABC)
-    }
+    meta_lookup: dict[str, dict[str, Any]] = _build_process_meta_lookup(process_meta)
 
-    planner_meta_keys: set[str] = set()
+    _reset_planner_meta_keys()
     if not used_planner:
         for key, value in legacy_process_costs.items():
             process_costs[key] = float(value)
@@ -13257,12 +13518,12 @@ def compute_quote_from_df(
         meta["base_extra"] = process_costs.get(key, 0.0) - hr_val * rate_val
 
     # Track process keys populated by the planner so we don't double-count
-    planner_meta_keys: set[str] = set()
     allowed_process_hour_keys: set[str] = set()
+    planner_keys_snapshot = _get_planner_meta_keys()
     for key, meta in process_meta.items():
         if not isinstance(meta, dict):
             continue
-        if used_planner and key in legacy_per_process_keys and key not in planner_meta_keys:
+        if used_planner and key in legacy_per_process_keys and key not in planner_keys_snapshot:
             continue
         allowed_process_hour_keys.add(key)
 
@@ -14121,7 +14382,6 @@ def compute_quote_from_df(
             process_plan_summary["pricing_error"] = planner_pricing_error
 
     planner_line_items: list[dict[str, Any]] = []
-    recognized_line_items = 0
     planner_machine_cost_total = 0.0
     planner_labor_cost_total = 0.0
     planner_total_minutes = 0.0
@@ -14513,16 +14773,14 @@ def compute_quote_from_df(
                     process_meta[b] = update_payload
                 _planner_meta_add(b)
 
-        meta_lookup = {
-            key: dict(value) for key, value in process_meta.items() if isinstance(value, _MappingABC)
-        }
+        meta_lookup = _build_process_meta_lookup(process_meta)
         allowed_process_hour_keys = {
             key
-            for key in planner_meta_keys
+            for key in planner_keys_snapshot
             if key not in legacy_per_process_keys or key.startswith("planner_")
         }
         if not allowed_process_hour_keys:
-            allowed_process_hour_keys = set(planner_meta_keys)
+            allowed_process_hour_keys = set(planner_keys_snapshot)
         if "drilling" in legacy_process_meta:
             allowed_process_hour_keys.add("drilling")
         process_hours_baseline = {
@@ -14624,6 +14882,17 @@ def compute_quote_from_df(
         baseline_data["legacy_baseline_ignored"] = True
     if fixture_plan_desc:
         baseline_data["fixture"] = fixture_plan_desc
+
+    raw_planner_bucket_display_map = locals().get("planner_bucket_display_map")
+    planner_bucket_display_map_payload: Mapping[str, Any] | None = None
+    if isinstance(raw_planner_bucket_display_map, _MappingABC) and raw_planner_bucket_display_map:
+        planner_bucket_display_map_payload = raw_planner_bucket_display_map
+
+    raw_drill_debug_lines = locals().get("drill_debug_lines")
+    drill_debug_lines_payload: list[str] = []
+    if isinstance(raw_drill_debug_lines, (list, tuple, set)):
+        drill_debug_lines_payload = list(raw_drill_debug_lines)
+
     if process_plan_summary:
         baseline_data["process_plan"] = copy.deepcopy(process_plan_summary)
     if planner_process_minutes is not None:
@@ -14632,9 +14901,9 @@ def compute_quote_from_df(
         baseline_data["process_plan_pricing"] = copy.deepcopy(planner_pricing_result)
     if planner_bucket_view is not None:
         baseline_data["process_plan_bucket_view"] = copy.deepcopy(planner_bucket_view)
-    if planner_bucket_display_map:
+    if planner_bucket_display_map_payload:
         baseline_data["planner_bucket_display_map"] = copy.deepcopy(
-            planner_bucket_display_map
+            planner_bucket_display_map_payload
         )
     quote_state.baseline = baseline_data
     quote_state.process_plan = copy.deepcopy(process_plan_summary)
@@ -15044,7 +15313,7 @@ def compute_quote_from_df(
             }
             snap_path = APP_ENV.llm_debug_dir / f"llm_snapshot_{int(time.time())}.json"
             snap_path.write_text(
-                jdump(json_safe_copy(snap), default=None),
+                jdump(json_safe_copy(snap)),
                 encoding="utf-8",
             )
 
@@ -16386,13 +16655,19 @@ def compute_quote_from_df(
     if isinstance(quote_state.user_overrides, dict) and quote_state.user_overrides:
         llm_cost_log["user_overrides"] = quote_state.user_overrides
 
+    canonical_process_costs: dict[str, float] = {}
+
     if pricing_source == "planner":
         process_costs = {
             "Machine": round(planner_machine_cost_total, 2),
             "Labor": round(planner_labor_cost_total, 2),
         }
 
-    canonical_process_costs = canonicalize_costs(process_costs)
+    try:
+        canonical_process_costs = canonicalize_costs(process_costs)
+    except Exception:  # pragma: no cover - defensive guard
+        logger.exception("Failed to canonicalize process costs")
+        canonical_process_costs = canonicalize_costs(locals().get("process_costs", {}) or {})
 
     app_meta = {"llm_debug_enabled": bool(APP_ENV.llm_debug_enabled)}
 
@@ -16422,7 +16697,7 @@ def compute_quote_from_df(
         "direct_costs": direct_costs_display,
         "direct_cost_details": direct_cost_details,
         "speeds_feeds_path": speeds_feeds_path,
-        "drill_debug": list(drill_debug_lines),
+        "drill_debug": list(drill_debug_lines_payload),
         "drilling_meta": drilling_meta,
         "pass_meta": pass_meta,
         "totals": {
@@ -16462,9 +16737,9 @@ def compute_quote_from_df(
             )
     if planner_bucket_rollup is not None:
         breakdown["planner_bucket_rollup"] = copy.deepcopy(planner_bucket_rollup)
-    if planner_bucket_display_map:
+    if planner_bucket_display_map_payload:
         breakdown["planner_bucket_display_map"] = copy.deepcopy(
-            planner_bucket_display_map
+            planner_bucket_display_map_payload
         )
 
     if process_plan_summary:
@@ -16516,7 +16791,7 @@ def compute_quote_from_df(
                     "pass_through": {k: v for k, v in applied_pass.items()},
                 }
                 latest.write_text(
-                    jdump(json_safe_copy(snap), default=None),
+                    jdump(json_safe_copy(snap)),
                     encoding="utf-8",
                 )
         except Exception:
@@ -16548,7 +16823,7 @@ def compute_quote_from_df(
         "material_source": material_source_final,
         "speeds_feeds_path": speeds_feeds_path,
         "speeds_feeds_loaded": speeds_feeds_loaded_flag,
-        "drill_debug": list(drill_debug_lines),
+        "drill_debug": list(drill_debug_lines_payload),
         "drilling_meta": drilling_meta,
         "red_flags": list(red_flag_messages),
         "app": dict(app_meta),
