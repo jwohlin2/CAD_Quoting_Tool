@@ -21,6 +21,7 @@ import os
 import time
 import typing
 import tkinter as tk
+import re
 from collections import Counter
 from collections.abc import Mapping as _MappingABC
 from dataclasses import dataclass, field, replace
@@ -90,7 +91,10 @@ import copy
 import re
 import sys
 import textwrap
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, TypeVar
+
+
+T = TypeVar("T")
 
 
 def resolve_planner(
@@ -196,7 +200,7 @@ from cad_quoter.domain_models import (
     normalize_material_key as _normalize_lookup_key,
 )
 from cad_quoter.coerce import to_float, to_int
-from cad_quoter.utils import sdict
+from cad_quoter.utils import compact_dict, sdict
 from cad_quoter.pricing import (
     LB_PER_KG,
     PricingEngine,
@@ -428,11 +432,43 @@ def _canonical_amortized_label(label: Any) -> tuple[str, bool]:
     return text, False
 
 import pandas as pd
-from OCP.BRep import BRep_Tool  # type: ignore[import]
-from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE  # type: ignore[import]
-from OCP.TopExp import TopExp, TopExp_Explorer  # type: ignore[import]
-from OCP.TopoDS import TopoDS, TopoDS_Face, TopoDS_Shape  # type: ignore[import]
-from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape  # type: ignore[import]
+from typing import TYPE_CHECKING
+
+try:  # Prefer pythonocc-core's OCP bindings when available
+    from OCP.BRep import BRep_Tool  # type: ignore[import]
+    from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE  # type: ignore[import]
+    from OCP.TopExp import TopExp, TopExp_Explorer  # type: ignore[import]
+    from OCP.TopoDS import TopoDS, TopoDS_Face, TopoDS_Shape  # type: ignore[import]
+    from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape  # type: ignore[import]
+except ImportError:
+    try:  # Fallback to pythonocc-core
+        from OCC.Core.BRep import BRep_Tool  # type: ignore[import]
+        from OCC.Core.TopAbs import TopAbs_EDGE, TopAbs_FACE  # type: ignore[import]
+        from OCC.Core.TopExp import TopExp, TopExp_Explorer  # type: ignore[import]
+        from OCC.Core.TopoDS import TopoDS, TopoDS_Face, TopoDS_Shape  # type: ignore[import]
+        from OCC.Core.TopTools import (  # type: ignore[import]
+            TopTools_IndexedDataMapOfShapeListOfShape,
+        )
+    except ImportError:  # pragma: no cover - only hit in environments without OCCT
+        if TYPE_CHECKING:  # Keep type checkers happy without introducing runtime deps
+            from typing import Any
+
+            BRep_Tool = TopAbs_EDGE = TopAbs_FACE = TopExp = TopExp_Explorer = Any  # type: ignore[assignment]
+            TopoDS = TopoDS_Face = TopoDS_Shape = Any  # type: ignore[assignment]
+            TopTools_IndexedDataMapOfShapeListOfShape = Any  # type: ignore[assignment]
+        else:
+            class _MissingOCCTModule:
+                def __getattr__(self, item):
+                    raise ImportError(
+                        "OCCT bindings are required for geometry operations. "
+                        "Please install pythonocc-core or the OCP wheels."
+                    )
+
+            BRep_Tool = _MissingOCCTModule()
+            TopAbs_EDGE = TopAbs_FACE = _MissingOCCTModule()
+            TopExp = TopExp_Explorer = _MissingOCCTModule()
+            TopoDS = TopoDS_Face = TopoDS_Shape = _MissingOCCTModule()
+            TopTools_IndexedDataMapOfShapeListOfShape = _MissingOCCTModule()
 
 try:
     from geo_read_more import build_geo_from_dxf as build_geo_from_dxf_path
@@ -2572,6 +2608,7 @@ if sys.platform == 'win32':
     occ_bin = os.path.join(sys.prefix, 'Library', 'bin')
     if os.path.isdir(occ_bin):
         os.add_dll_directory(occ_bin)
+import importlib
 import subprocess
 import tempfile
 from tkinter import filedialog, messagebox, ttk
@@ -2589,41 +2626,39 @@ except Exception:
 # ---------- OCC / OCP compatibility ----------
 STACK = None
 
+
+def _import_optional(module_name: str):
+    """Safely import *module_name* and return ``None`` if it is unavailable."""
+
+    try:
+        return importlib.import_module(module_name)
+    except Exception:
+        return None
+
+
 def _make_bnd_add_ocp():
     # Try every known symbol name in OCP builds
     candidates = []
-    try:
-        # module-level function: Add(...)
-        from OCP.BRepBndLib import Add as _add1  # type: ignore[import]
-        candidates.append(_add1)
-    except Exception:
-        pass
-    try:
-        # module-level function: Add_s(...)
-        from OCP.BRepBndLib import Add_s as _add1s  # type: ignore[import]
-        candidates.append(_add1s)
-    except Exception:
-        pass
-    try:
-        # module-level function: BRepBndLib_Add(...)
-        from OCP.BRepBndLib import BRepBndLib_Add as _add2  # type: ignore[import]
-        candidates.append(_add2)
-    except Exception:
-        pass
-    try:
-        # module-level function: brepbndlib_Add(...)
-        from OCP.BRepBndLib import brepbndlib_Add as _add3  # type: ignore[import]
-        candidates.append(_add3)
-    except Exception:
-        pass
-    try:
-        from OCP.BRepBndLib import BRepBndLib as _klass  # type: ignore[import]
+    module = _import_optional("OCP.BRepBndLib")
+    if module is None:
+        raise ImportError("OCP.BRepBndLib is not available")
+
+    for attr in (
+        "Add",
+        "Add_s",
+        "BRepBndLib_Add",
+        "brepbndlib_Add",
+    ):
+        fn = getattr(module, attr, None)
+        if fn:
+            candidates.append(fn)
+
+    klass = getattr(module, "BRepBndLib", None)
+    if klass:
         for attr in ("Add", "Add_s", "AddClose_s", "AddOptimal_s", "AddOBB_s"):
-            fn = getattr(_klass, attr, None)
+            fn = getattr(klass, attr, None)
             if fn:
                 candidates.append(fn)
-    except Exception:
-        pass
 
     if not candidates:
         raise ImportError("No BRepBndLib.Add symbol found in OCP")
@@ -2649,15 +2684,26 @@ def _make_bnd_add_ocp():
 
     return _bnd_add
 
-try:
+_ocp_modules = {
+    "Bnd": _import_optional("OCP.Bnd"),
+    "BRep": _import_optional("OCP.BRep"),
+    "BRepCheck": _import_optional("OCP.BRepCheck"),
+    "IFSelect": _import_optional("OCP.IFSelect"),
+    "ShapeFix": _import_optional("OCP.ShapeFix"),
+    "STEPControl": _import_optional("OCP.STEPControl"),
+    "TopoDS": _import_optional("OCP.TopoDS"),
+}
+
+if all(_ocp_modules.values()):
     # Prefer OCP (CadQuery/ocp bindings)
-    from OCP.Bnd import Bnd_Box  # type: ignore[import]
-    from OCP.BRep import BRep_Builder  # type: ignore[import]
-    from OCP.BRepCheck import BRepCheck_Analyzer  # type: ignore[import]
-    from OCP.IFSelect import IFSelect_RetDone  # type: ignore[import]
-    from OCP.ShapeFix import ShapeFix_Shape  # type: ignore[import]
-    from OCP.STEPControl import STEPControl_Reader  # type: ignore[import]
-    from OCP.TopoDS import TopoDS_Compound, TopoDS_Shape  # type: ignore[import]
+    Bnd_Box = _ocp_modules["Bnd"].Bnd_Box
+    BRep_Builder = _ocp_modules["BRep"].BRep_Builder
+    BRepCheck_Analyzer = _ocp_modules["BRepCheck"].BRepCheck_Analyzer
+    IFSelect_RetDone = _ocp_modules["IFSelect"].IFSelect_RetDone
+    ShapeFix_Shape = _ocp_modules["ShapeFix"].ShapeFix_Shape
+    STEPControl_Reader = _ocp_modules["STEPControl"].STEPControl_Reader
+    TopoDS_Compound = _ocp_modules["TopoDS"].TopoDS_Compound
+    TopoDS_Shape = _ocp_modules["TopoDS"].TopoDS_Shape
 
     try:
         bnd_add = _make_bnd_add_ocp()
@@ -2676,23 +2722,41 @@ try:
                 ("OCC.Core.BRepBndLib", "brepbndlib_Add"),
             ]
             for mod_name, attr in candidates:
-                try:
-                    module = __import__(mod_name, fromlist=[attr])
-                    fn = getattr(module, attr)
-                    return fn(shape, box, use_triangulation)
-                except Exception:
-                    continue
+                module = _import_optional(mod_name)
+                if module and hasattr(module, attr):
+                    return getattr(module, attr)(shape, box, use_triangulation)
             raise RuntimeError("No BRepBndLib.Add available in this build")
-except Exception:
+        STACK = "ocp"
+else:
     # Fallback to pythonocc-core
-    from OCC.Core.Bnd import Bnd_Box
-    from OCC.Core.BRep import BRep_Builder
-    from OCC.Core.BRepBndLib import brepbndlib_Add as _brep_add
-    from OCC.Core.BRepCheck import BRepCheck_Analyzer
-    from OCC.Core.IFSelect import IFSelect_RetDone
-    from OCC.Core.ShapeFix import ShapeFix_Shape
-    from OCC.Core.STEPControl import STEPControl_Reader
-    from OCC.Core.TopoDS import TopoDS_Compound, TopoDS_Shape
+    _occ_modules = {
+        "Bnd": _import_optional("OCC.Core.Bnd"),
+        "BRep": _import_optional("OCC.Core.BRep"),
+        "BRepBndLib": _import_optional("OCC.Core.BRepBndLib"),
+        "BRepCheck": _import_optional("OCC.Core.BRepCheck"),
+        "IFSelect": _import_optional("OCC.Core.IFSelect"),
+        "ShapeFix": _import_optional("OCC.Core.ShapeFix"),
+        "STEPControl": _import_optional("OCC.Core.STEPControl"),
+        "TopoDS": _import_optional("OCC.Core.TopoDS"),
+    }
+
+    missing = [name for name, module in _occ_modules.items() if module is None]
+    if missing:
+        raise ImportError(
+            "Required OCC.Core modules are unavailable: {}".format(
+                ", ".join(sorted(missing))
+            )
+        )
+
+    Bnd_Box = _occ_modules["Bnd"].Bnd_Box
+    BRep_Builder = _occ_modules["BRep"].BRep_Builder
+    _brep_add = _occ_modules["BRepBndLib"].brepbndlib_Add
+    BRepCheck_Analyzer = _occ_modules["BRepCheck"].BRepCheck_Analyzer
+    IFSelect_RetDone = _occ_modules["IFSelect"].IFSelect_RetDone
+    ShapeFix_Shape = _occ_modules["ShapeFix"].ShapeFix_Shape
+    STEPControl_Reader = _occ_modules["STEPControl"].STEPControl_Reader
+    TopoDS_Compound = _occ_modules["TopoDS"].TopoDS_Compound
+    TopoDS_Shape = _occ_modules["TopoDS"].TopoDS_Shape
 
     def bnd_add(shape, box, use_triangulation=True):
         _brep_add(shape, box, use_triangulation)
@@ -2700,15 +2764,35 @@ except Exception:
     STACK = "pythonocc"
 # ---------- end shim ----------
 # ----- one-backend imports -----
-try:
-    from OCP.BRep import BRep_Tool  # type: ignore[import]
-    from OCP.TopAbs import TopAbs_FACE  # type: ignore[import]
-    from OCP.TopExp import TopExp_Explorer  # type: ignore[import]
+_backend_modules = {
+    "BRep": _import_optional("OCP.BRep"),
+    "TopAbs": _import_optional("OCP.TopAbs"),
+    "TopExp": _import_optional("OCP.TopExp"),
+}
+
+if all(_backend_modules.values()):
+    BRep_Tool = _backend_modules["BRep"].BRep_Tool
+    TopAbs_FACE = _backend_modules["TopAbs"].TopAbs_FACE
+    TopExp_Explorer = _backend_modules["TopExp"].TopExp_Explorer
     BACKEND = "ocp"
-except Exception:
-    from OCC.Core.BRep import BRep_Tool
-    from OCC.Core.TopAbs import TopAbs_FACE
-    from OCC.Core.TopExp import TopExp_Explorer
+else:
+    _backend_modules = {
+        "BRep": _import_optional("OCC.Core.BRep"),
+        "TopAbs": _import_optional("OCC.Core.TopAbs"),
+        "TopExp": _import_optional("OCC.Core.TopExp"),
+    }
+
+    missing = [name for name, module in _backend_modules.items() if module is None]
+    if missing:
+        raise ImportError(
+            "Required backend modules are unavailable: {}".format(
+                ", ".join(sorted(missing))
+            )
+        )
+
+    BRep_Tool = _backend_modules["BRep"].BRep_Tool
+    TopAbs_FACE = _backend_modules["TopAbs"].TopAbs_FACE
+    TopExp_Explorer = _backend_modules["TopExp"].TopExp_Explorer
     BACKEND = "pythonocc"
 
 def as_face(obj):
@@ -8961,6 +9045,9 @@ def estimate_drilling_hours(
                 tool_params = _TimeToolParams(teeth_z=1)
                 if debug_lines is not None:
                     debug_payload = {}
+                effective_index_sec = to_float(overhead_for_calc.index_sec_per_hole)
+                if effective_index_sec is None or not math.isfinite(effective_index_sec):
+                    effective_index_sec = _default_drill_index_seconds(op_name)
                 legacy_overhead = replace(
                     legacy_overhead,
                     index_sec_per_hole=effective_index_sec,
@@ -14675,7 +14762,10 @@ def trace_hours_from_df(df):
         if mm.any():
             sub=df.loc[mm, ["Item","Example Values / Options"]].copy()
             sub["Example Values / Options"]=pd.to_numeric(sub["Example Values / Options"], errors="coerce").fillna(0.0)
-            out[label]=[(str(rates["Item"]), float(rates["Example Values / Options"])) for _,r in sub.iterrows()]
+            out[label]=[
+                (str(r["Item"]), float(r["Example Values / Options"]))
+                for _, r in sub.iterrows()
+            ]
     grab(r"(Fixture\s*Design|Process\s*Sheet|Traveler|Documentation)","Engineering")
     grab(r"(CAM\s*Programming|CAM\s*Sim|Post\s*Processing)","CAM")
     grab(r"(Assembly|Precision\s*Fitting|Touch[- ]?up|Final\s*Fit)","Assembly")
@@ -14899,7 +14989,16 @@ def extract_pdf_all(pdf_path: Path, dpi: int = 300) -> dict:
             "char_count": len(text),
             "table_count": len(tables),
         })
-    best = max(pages, key=lambda p: (params["table_count"] > 0, params["char_count"])) if pages else {"text": "", "image_path": ""}
+    if pages:
+        best = max(
+            pages,
+            key=lambda page: (
+                (page.get("table_count", 0) or 0) > 0,
+                page.get("char_count", 0) or 0,
+            ),
+        )
+    else:
+        best = {"text": "", "image_path": ""}
     doc.close()
     return {"pages": pages, "best": best}
 
@@ -17110,7 +17209,7 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
 
 
 def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
-    require_ezdxf()
+    ezdxf_mod = require_ezdxf()
 
 
     # --- load doc ---
@@ -17126,9 +17225,9 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
         else:
             dxf_path = convert_dwg_to_dxf(path, out_ver="ACAD2018")
             dxf_text_path = dxf_path
-            doc = ezdxf.readfile(dxf_path)
+            doc = ezdxf_mod.readfile(dxf_path)
     else:
-        doc = ezdxf.readfile(path)
+        doc = ezdxf_mod.readfile(path)
         dxf_text_path = path
 
     sp = doc.modelspace()
