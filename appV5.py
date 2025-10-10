@@ -13676,6 +13676,33 @@ def compute_quote_from_df(
     speeds_feeds_row: Mapping[str, Any] | None = None
     selected_precomputed: dict[str, float] = {}
     chosen_material_label: str = ""
+
+    def _lookup_mapping_value(source: Any, key: str) -> Any:
+        if source is None:
+            return None
+        getter = getattr(source, "get", None)
+        if callable(getter):
+            try:
+                return getter(key)
+            except Exception:
+                pass
+        try:
+            return source[key]  # type: ignore[index]
+        except Exception:
+            return getattr(source, key, None)
+
+    def _extract_material_group(*sources: Any) -> str:
+        for candidate in sources:
+            if candidate is None:
+                continue
+            for key in ("material_group", "group", "iso_group"):
+                value = _lookup_mapping_value(candidate, key)
+                if value is None:
+                    continue
+                text = str(value).strip()
+                if text:
+                    return text
+        return ""
     material_display_for_debug: str = str(
         material_selection.get("canonical")
         or material_selection.get("canonical_material")
@@ -13799,6 +13826,19 @@ def compute_quote_from_df(
                 except (TypeError, ValueError, ZeroDivisionError):
                     pass
 
+    selected_material_group = _extract_material_group(
+        speeds_feeds_summary,
+        speeds_feeds_row,
+        selected_entry if isinstance(selected_entry, _MappingABC) else None,
+        selected_entry.get("row")
+        if isinstance(selected_entry, _MappingABC)
+        else None,
+    )
+    if selected_material_group:
+        drill_material_group = selected_material_group
+        material_selection["material_group"] = selected_material_group
+        material_selection["group"] = selected_material_group
+
     if not chosen_material_label and drill_debug_summary:
         for summary in drill_debug_summary.values():
             if not isinstance(summary, _MappingABC):
@@ -13835,20 +13875,6 @@ def compute_quote_from_df(
 
     drill_debug_line: str | None = None
     if (speeds_feeds_summary or speeds_feeds_row) and avg_dia_in > 0:
-        def _lookup_mapping_value(source: Any, key: str) -> Any:
-            if source is None:
-                return None
-            getter = getattr(source, "get", None)
-            if callable(getter):
-                try:
-                    return getter(key)
-                except Exception:
-                    pass
-            try:
-                return source[key]  # type: ignore[index]
-            except Exception:
-                return getattr(source, key, None)
-
         source_mapping = speeds_feeds_summary or speeds_feeds_row
         rpm_val = _coerce_float_or_none(_lookup_mapping_value(source_mapping, "rpm"))
         if (rpm_val is None or rpm_val <= 0) and selected_precomputed:
