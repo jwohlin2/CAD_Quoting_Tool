@@ -31,7 +31,11 @@ from fractions import Fraction
 from pathlib import Path
 
 from cad_quoter.app import runtime as _runtime
-from cad_quoter.app.container import ServiceContainer, create_default_container
+from cad_quoter.app.container import (
+    ServiceContainer,
+    SupportsPricingEngine,
+    create_default_container,
+)
 from cad_quoter.config import (
     AppEnvironment,
     ConfigError,
@@ -92,7 +96,22 @@ def roughly_equal(a: float | int | str | None, b: float | int | str | None, *, e
 import copy
 import sys
 import textwrap
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, TypeAlias, TypeVar, cast
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Protocol,
+    Sequence,
+    Tuple,
+    TypeAlias,
+    TypeVar,
+    cast,
+)
 
 
 T = TypeVar("T")
@@ -484,6 +503,27 @@ if TYPE_CHECKING:
 else:
     TopoDSShapeT: TypeAlias = Any
 
+class _BRepToolProto(Protocol):
+    def Surface(self, face: Any) -> Any: ...
+
+    def Surface_s(self, face: Any) -> Any: ...
+
+    def Location(self, face: Any) -> Any: ...
+
+    def Location_s(self, face: Any) -> Any: ...
+
+
+class _TopoDSProto(Protocol):
+    def Edge_s(self, shape: Any) -> Any: ...
+
+    def Solid_s(self, shape: Any) -> Any: ...
+
+    def Shell_s(self, shape: Any) -> Any: ...
+
+
+TopoDSFaceT: TypeAlias = TopoDSShapeT
+TopToolsIndexedDataMap: TypeAlias = Any
+
 try:  # Prefer pythonocc-core's OCP bindings when available
     from OCP.BRep import BRep_Tool  # type: ignore[import]
     from OCP.TopAbs import (  # type: ignore[import]
@@ -685,27 +725,41 @@ def _plate_bbox_mm2(geo_ctx: Mapping[str, Any] | None) -> float:
         return float(bbox_mm[0]) * float(bbox_mm[1])
 
     # Fallback: UI plate Length/Width (inches) already present in sheet/vars
+    L_in: float | None
+    W_in: float | None
     try:
-        L_in = float(geo_map.get("plate_length_mm") or 0.0) / 25.4  # if caller put mm there
+        raw_length_mm = geo_map.get("plate_length_mm")
+        L_in = float(raw_length_mm) / 25.4 if raw_length_mm not in (None, "") else None
     except Exception:
         L_in = None
     try:
-        W_in = float(geo_map.get("plate_width_mm") or 0.0) / 25.4
+        raw_width_mm = geo_map.get("plate_width_mm")
+        W_in = float(raw_width_mm) / 25.4 if raw_width_mm not in (None, "") else None
     except Exception:
         W_in = None
 
     # If the mm fields aren't set, check UI vars stuffed into geo_ctx
-    if not (L_in and W_in):
-        try:
-            L_in = L_in or float(geo_map.get("plate_length_in"))
-        except Exception:
-            pass
-        try:
-            W_in = W_in or float(geo_map.get("plate_width_in"))
-        except Exception:
-            pass
+    if L_in is None or L_in <= 0:
+        raw_length_in = geo_map.get("plate_length_in")
+        if raw_length_in is not None:
+            try:
+                candidate = float(raw_length_in)
+            except Exception:
+                candidate = None
+            if candidate is not None and candidate > 0:
+                L_in = candidate
 
-    if L_in and W_in and L_in > 0 and W_in > 0:
+    if W_in is None or W_in <= 0:
+        raw_width_in = geo_map.get("plate_width_in")
+        if raw_width_in is not None:
+            try:
+                candidate_w = float(raw_width_in)
+            except Exception:
+                candidate_w = None
+            if candidate_w is not None and candidate_w > 0:
+                W_in = candidate_w
+
+    if L_in is not None and W_in is not None and L_in > 0 and W_in > 0:
         return float(L_in * 25.4) * float(W_in * 25.4)
     return 0.0
 
@@ -3021,7 +3075,7 @@ def _resolve_face_of():
 
 FACE_OF = _resolve_face_of()
 
-def as_face(obj: Any) -> TopoDS_Face:
+def as_face(obj: Any) -> TopoDSFaceT:
     """
     Return a TopoDS_Face for the *current backend*.
     - If already a Face, return it (don't re-cast).
@@ -3038,7 +3092,7 @@ def as_face(obj: Any) -> TopoDS_Face:
     return ensure_face(obj)
 
 
-def iter_faces(shape: Any) -> Iterator[TopoDS_Face]:
+def iter_faces(shape: Any) -> Iterator[TopoDSFaceT]:
     explorer_cls = cast(type[Any], TopExp_Explorer)
     exp = explorer_cls(shape, cast(Any, TopAbs_FACE))
     while exp.More():
@@ -3064,7 +3118,7 @@ def face_surface(face_like: Any) -> tuple[Any, Any | None]:
         s, loc2 = s
         loc = loc or loc2
     if hasattr(s, "Surface"):
-        s = s.Surface()  # unwrap handle
+        s = cast(Any, s).Surface()  # unwrap handle
     return s, loc
 
 
@@ -3204,7 +3258,7 @@ def linear_properties(edge, gprops):
             raise
     return fn(edge, gprops)
 
-def map_shapes_and_ancestors(root_shape, sub_enum, anc_enum):
+def map_shapes_and_ancestors(root_shape, sub_enum, anc_enum) -> TopToolsIndexedDataMap:
     """Return TopTools_IndexedDataMapOfShapeListOfShape for (sub → ancestors)."""
     # Ensure we pass a *Shape*, not a Face
     if root_shape is None:
@@ -3215,7 +3269,7 @@ def map_shapes_and_ancestors(root_shape, sub_enum, anc_enum):
         pass
 
     amap = cast(
-        "TopTools_IndexedDataMapOfShapeListOfShape",
+        TopToolsIndexedDataMap,
         TopTools_IndexedDataMapOfShapeListOfShape(),  # type: ignore[call-overload]
     )
     # static/instance variants across wheels
@@ -3235,10 +3289,10 @@ def _is_instance(obj, qualnames):
         return False
     return name in qualnames  # e.g. ["TopoDS_Face", "Face"]
 
-def ensure_face(obj: Any) -> TopoDS_Face:
+def ensure_face(obj: Any) -> TopoDSFaceT:
     if obj is None:
         raise TypeError("Expected a face, got None")
-    face_type = cast(type, TopoDS_Face)
+    face_type = cast(type, TopoDSFaceT)
     if isinstance(obj, face_type) or type(obj).__name__ == "TopoDS_Face":
         return obj
     st = obj.ShapeType() if hasattr(obj, "ShapeType") else None
@@ -4956,7 +5010,10 @@ def _load_master_variables() -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
     cache["loaded"] = True
     cache["core"] = core_df
     cache["full"] = full_df
-    return (core_df.copy(), full_df.copy())
+
+    core_df_cast = cast(pd.DataFrame, core_df)
+    full_df_cast = cast(pd.DataFrame, full_df)
+    return (core_df_cast.copy(), full_df_cast.copy())
 
 
 def find_variables_near(cad_path: str):
@@ -9942,8 +9999,8 @@ def estimate_drilling_hours(
                     if source_min is None or source_max is None:
                         return "-"
                     try:
-                        min_f = float(source_min)
-                        max_f = float(source_max)
+                        min_float = float(source_min)
+                        max_float = float(source_max)
                     except (TypeError, ValueError):
                         return "-"
                     if not math.isfinite(min_float) or not math.isfinite(max_float):
@@ -10422,7 +10479,6 @@ def validate_quote_before_pricing(
             raise ValueError("Quote blocked:\n- " + "\n- ".join(issues))
 
 
-# pyright: ignore[reportGeneralTypeIssues]
 def compute_quote_from_df(df: pd.DataFrame,
                           params: Dict[str, Any] | None = None,
                           rates: Dict[str, float] | None = None,
@@ -10439,7 +10495,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                           quote_state: QuoteState | None = None,
                           reuse_suggestions: bool = False,
                           llm_suggest: Any | None = None,
-                          pricing: PricingEngine | None = None) -> Dict[str, Any]:
+                          pricing: PricingEngine | None = None) -> Dict[str, Any]:  # pyright: ignore[reportGeneralTypeIssues]
     """
     Estimator that consumes variables from the sheet (Item, Example Values / Options, Data Type / Input Method).
 
@@ -15889,13 +15945,20 @@ def harvest_outline_bbox(doc, to_in: float) -> dict[str, Any]:
                 biggest = (area, pl)
     if biggest:
         pl = biggest[1]
+        pts: list[tuple[float, float]] = []
         try:
             get_points = getattr(pl, "get_points", None)
-            raw_pts = list(get_points()) if callable(get_points) else []
-            pts = [
-                (float(x) * to_in, float(y) * to_in)
-                for x, y, *_ in raw_pts
-            ]
+            if callable(get_points):
+                raw_pts_iter = get_points()
+                raw_pts = cast(Iterable[Sequence[float]], raw_pts_iter)
+                for raw_pt in raw_pts:
+                    if len(raw_pt) < 2:
+                        continue
+                    x_val, y_val = raw_pt[0], raw_pt[1]
+                    try:
+                        pts.append((float(x_val) * to_in, float(y_val) * to_in))
+                    except (TypeError, ValueError):
+                        continue
         except Exception:
             pts = []
         vertices.extend(pts)
@@ -17444,9 +17507,20 @@ def detect_pockets_and_islands(doc, to_in: float) -> dict[str, Any]:
         except Exception:
             polylines = []
         for pl in polylines:
+            pts: list[tuple[float, float]] = []
             try:
                 get_points = getattr(pl, "get_points", None)
-                pts = list(get_points("xy")) if callable(get_points) else []
+                if callable(get_points):
+                    raw_pts_iter = get_points("xy")
+                    raw_pts = cast(Iterable[Sequence[float]], raw_pts_iter)
+                    for raw_pt in raw_pts:
+                        if len(raw_pt) < 2:
+                            continue
+                        x_val, y_val = raw_pt[0], raw_pt[1]
+                        try:
+                            pts.append((float(x_val), float(y_val)))
+                        except (TypeError, ValueError):
+                            continue
             except Exception:
                 continue
             if len(pts) < 3:
@@ -17869,18 +17943,27 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     dxf_text_path: str | None = None
     doc = None
     lower_path = path.lower()
+    readfile = getattr(ezdxf_mod, "readfile", None)
+    if not callable(readfile):
+        raise AttributeError("ezdxf module does not provide a callable 'readfile' function")
+
     if lower_path.endswith(".dwg"):
         if geometry.HAS_ODAFC:
             # uses ODAFileConverter through ezdxf, no env var needed
-            from ezdxf.addons import odafc  # type: ignore
+            from ezdxf.addons import odafc as _odafc  # type: ignore
 
-            doc = odafc.readfile(path)
+            readfile = getattr(_odafc, "readfile", None)
+            if not callable(readfile):  # pragma: no cover - defensive fallback
+                raise RuntimeError(
+                    "ezdxf.addons.odafc.readfile is unavailable; install ODAFileConverter support."
+                )
+            doc = readfile(path)
         else:
             dxf_path = convert_dwg_to_dxf(path, out_ver="ACAD2018")
             dxf_text_path = dxf_path
-            doc = ezdxf_mod.readfile(dxf_path)
+            doc = readfile(dxf_path)
     else:
-        doc = ezdxf_mod.readfile(path)
+        doc = readfile(path)
         dxf_text_path = path
 
     sp = doc.modelspace()
@@ -17979,8 +18062,12 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
                 geo["provenance"] = merged
 
             if geo_read_more.get("chart_lines"):
-                existing_lines = list(geo.get("chart_lines") or []) if isinstance(geo.get("chart_lines"), list) else []
-                for line in geo_read_more.get("chart_lines") or []:
+                existing_lines_raw = geo.get("chart_lines")
+                existing_lines = list(existing_lines_raw) if isinstance(existing_lines_raw, list) else []
+                new_lines = geo_read_more.get("chart_lines")
+                if not isinstance(new_lines, list):
+                    new_lines = []
+                for line in new_lines:
                     if line not in existing_lines:
                         existing_lines.append(line)
                 if existing_lines:
@@ -18166,9 +18253,11 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
                 result["outline_area_in2"] = outline_area_in2_val
                 result["outline_area_mm2"] = round(outline_area_in2_val * (25.4 ** 2), 2)
             if geo_read_more.get("hole_diam_families_in"):
-                result["hole_diam_families_in"] = dict(geo_read_more.get("hole_diam_families_in") or {})
+                hole_families = geo_read_more.get("hole_diam_families_in")
+                result["hole_diam_families_in"] = dict(hole_families) if isinstance(hole_families, dict) else {}
             if geo_read_more.get("hole_table_families_in"):
-                result["hole_table_families_in"] = dict(geo_read_more.get("hole_table_families_in") or {})
+                table_families = geo_read_more.get("hole_table_families_in")
+                result["hole_table_families_in"] = dict(table_families) if isinstance(table_families, dict) else {}
             hole_count_geom_val = _coerce_float_or_none(geo_read_more.get("hole_count_geom"))
             hole_count_geom = int(hole_count_geom_val) if hole_count_geom_val is not None else None
             current_hole_count = _coerce_int_or_zero(result.get("hole_count"))
@@ -18181,10 +18270,18 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
             if geo_read_more.get("material_note") and not result.get("material"):
                 result["material"] = geo_read_more.get("material_note")
             if geo_read_more.get("chart_lines") and not result.get("chart_lines"):
-                result["chart_lines"] = list(geo_read_more.get("chart_lines") or [])
+                chart_lines_extra = geo_read_more.get("chart_lines")
+                result["chart_lines"] = list(chart_lines_extra) if isinstance(chart_lines_extra, list) else []
             if geo_read_more.get("tap_qty") or geo_read_more.get("cbore_qty") or geo_read_more.get("csk_qty"):
-                feature_counts_raw = result.get("feature_counts") if isinstance(result.get("feature_counts"), dict) else {}
-                feature_counts: dict[str, Any] = {str(k): v for k, v in dict(feature_counts_raw).items()}
+                feature_counts_raw_any = result.get("feature_counts")
+                feature_counts_raw = (
+                    feature_counts_raw_any
+                    if isinstance(feature_counts_raw_any, dict)
+                    else {}
+                )
+                feature_counts: dict[str, Any] = {
+                    str(k): v for k, v in feature_counts_raw.items()
+                }
                 if geo_read_more.get("tap_qty"):
                     feature_counts["tap_qty"] = max(int(feature_counts.get("tap_qty", 0) or 0), int(geo_read_more.get("tap_qty") or 0))
                 if geo_read_more.get("cbore_qty"):
@@ -18478,58 +18575,80 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
             },
         ]
 
-        drivers_raw = data.get("drivers") if isinstance(data.get("drivers"), list) else []
-        drivers: list[dict[str, float | str]] = []
+        drivers_source = data.get("drivers")
+        drivers_raw = drivers_source if isinstance(drivers_source, list) else []
+
+        class _DriverEntry(TypedDict):
+            label: str
+            usd: float
+            pct_of_subtotal: float
+
+        drivers: list[_DriverEntry] = []
         for idx, default in enumerate(fallback_drivers):
-            entry = drivers_raw[idx] if idx < len(drivers_raw) and isinstance(drivers_raw[idx], dict) else {}
+            raw_entry = drivers_raw[idx] if idx < len(drivers_raw) else None
+            entry = raw_entry if isinstance(raw_entry, dict) else {}
             label = str(entry.get("label") or default["label"]).strip() or default["label"]
-            usd = _to_float(entry.get("usd"))
-            pct = _to_float(entry.get("pct_of_subtotal"))
+            usd_val = _to_float(entry.get("usd"))
+            pct_val = _to_float(entry.get("pct_of_subtotal"))
             drivers.append(
                 {
                     "label": label,
-                    "usd": usd if usd is not None else float(default["usd"]),
-                    "pct_of_subtotal": pct if pct is not None else float(default["pct_of_subtotal"]),
+                    "usd": float(usd_val) if usd_val is not None else float(default["usd"]),
+                    "pct_of_subtotal": float(pct_val) if pct_val is not None else float(default["pct_of_subtotal"]),
                 }
             )
+        default_driver: _DriverEntry = {"label": "Labor", "usd": 0.0, "pct_of_subtotal": 0.0}
         while len(drivers) < 2:
-            drivers.append({"label": f"Bucket {len(drivers) + 1}", "usd": 0.0, "pct_of_subtotal": 0.0})
+            drivers.append(
+                {
+                    "label": f"Bucket {len(drivers) + 1}",
+                    "usd": 0.0,
+                    "pct_of_subtotal": 0.0,
+                }
+            )
 
-        driver_primary = drivers[0] if drivers else {"label": "Labor", "usd": 0.0, "pct_of_subtotal": 0.0}
+        driver_primary = drivers[0] if drivers else default_driver
         driver_secondary = drivers[1] if len(drivers) > 1 else driver_primary
 
-        geo_notes_raw = data.get("geo_notes") if isinstance(data.get("geo_notes"), list) else []
+        geo_notes_source = data.get("geo_notes")
+        geo_notes_raw = geo_notes_source if isinstance(geo_notes_source, list) else []
         geo_notes = [str(note).strip() for note in geo_notes_raw if str(note).strip()]
         if not geo_notes:
-            default_notes = ctx.get("geo_notes") if isinstance(ctx.get("geo_notes"), list) else []
+            ctx_geo_notes = ctx.get("geo_notes")
+            default_notes = ctx_geo_notes if isinstance(ctx_geo_notes, list) else []
             if default_notes:
                 geo_notes = [str(note).strip() for note in default_notes if str(note).strip()]
         if not geo_notes:
-            hc = ctx.get("geo_summary", {}).get("hole_count")
-            thk = ctx.get("geo_summary", {}).get("thickness_in")
-            mat = ctx.get("geo_summary", {}).get("material")
+            geo_summary_ctx = ctx.get("geo_summary")
+            summary = geo_summary_ctx if isinstance(geo_summary_ctx, dict) else {}
+            hc = summary.get("hole_count")
+            thk = summary.get("thickness_in")
+            mat = summary.get("material")
             if hc and thk and mat:
                 try:
                     geo_notes = [f"{int(hc)} holes in {float(thk):.2f} in {mat}"]
                 except Exception:
                     geo_notes = []
 
+        top_processes_source = data.get("top_processes")
+        top_processes_raw = top_processes_source if isinstance(top_processes_source, list) else []
+
         class _TopProcessEntry(TypedDict):
             name: str
             usd: float
 
-        top_processes_raw = data.get("top_processes") if isinstance(data.get("top_processes"), list) else []
-        top_processes: list[dict[str, float | str]] = []
+        top_processes: list[_TopProcessEntry] = []
         for entry in top_processes_raw:
             if not isinstance(entry, dict):
                 continue
             name_val = str(entry.get("name") or "").strip()
             usd_val = _to_float(entry.get("usd"))
             if name_val and usd_val is not None:
-                top_processes.append({"name": name_val, "usd": usd_val})
+                top_processes.append({"name": name_val, "usd": float(usd_val)})
         if not top_processes:
-            rollup = ctx.get("rollup")
-            rollup_processes = rollup.get("top_processes") if isinstance(rollup, dict) else None
+            rollup_ctx = ctx.get("rollup")
+            rollup = rollup_ctx if isinstance(rollup_ctx, dict) else {}
+            rollup_processes = rollup.get("top_processes")
             if isinstance(rollup_processes, list):
                 for proc in rollup_processes:
                     if not isinstance(proc, dict):
@@ -18537,9 +18656,10 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
                     name_val = str(proc.get("name") or "").strip()
                     usd_val = _to_float(proc.get("usd"))
                     if name_val and usd_val is not None:
-                        top_processes.append({"name": name_val, "usd": usd_val})
+                        top_processes.append({"name": name_val, "usd": float(usd_val)})
 
-        material_section = data.get("material") if isinstance(data.get("material"), dict) else {}
+        material_section_obj = data.get("material")
+        material_section = material_section_obj if isinstance(material_section_obj, dict) else {}
         scrap_val = _to_float(material_section.get("scrap_pct"))
         if scrap_val is None:
             scrap_fallback = ctx.get("scrap_pct")
@@ -18553,8 +18673,8 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
             "scrap_pct": round(float(scrap_val), 1),
         }
 
-        explanation = data.get("explanation") if isinstance(data.get("explanation"), str) else ""
-        explanation = explanation.strip()
+        explanation_raw = data.get("explanation")
+        explanation = explanation_raw.strip() if isinstance(explanation_raw, str) else ""
 
         if not explanation:
             top_text = ""
@@ -18571,23 +18691,26 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
             if geo_notes:
                 geo_text = "Geometry: " + ", ".join(geo_notes) + ". "
 
-            scrap_display = material_struct.get("scrap_pct")
+            scrap_display = typing.cast(float | None, material_struct.get("scrap_pct"))
             if scrap_display is None:
-                scrap_display = ctx.get("scrap_pct")
+                scrap_display = _to_float(ctx.get("scrap_pct"))
+            if scrap_display is None:
+                scrap_display = 0.0
             try:
                 scrap_str = f"{float(scrap_display):.1f}"
             except Exception:
                 scrap_str = str(scrap_display)
 
             material_text = ""
-            if material_struct.get("source"):
-                material_text = f"Material via {material_struct['source']}; scrap {scrap_str}% applied."
+            source_val = material_struct.get("source")
+            if source_val:
+                material_text = f"Material via {source_val}; scrap {scrap_str}% applied."
             else:
                 material_text = f"Scrap {scrap_str}% applied."
 
             explanation = (
-                f"Labor ${labor_cost:.2f} ({float(driver_primary['pct_of_subtotal']):.1f}%) and directs "
-                f"${direct_costs:.2f} ({float(driver_secondary['pct_of_subtotal']):.1f}%) drive cost. "
+                f"Labor ${labor_cost:.2f} ({driver_primary['pct_of_subtotal']:.1f}%) and directs "
+                f"${direct_costs:.2f} ({driver_secondary['pct_of_subtotal']:.1f}%) drive cost. "
                 + top_text
                 + geo_text
                 + material_text
@@ -18728,7 +18851,8 @@ def get_llm_overrides(
         part_mass_est = density_feature * volume_feature
     density_for_stock = density_feature if density_feature > 0 else 7.85
 
-    bbox_feature = features.get("bbox_mm") if isinstance(features.get("bbox_mm"), dict) else {}
+    bbox_feature_raw = features.get("bbox_mm")
+    bbox_feature = bbox_feature_raw if isinstance(bbox_feature_raw, dict) else {}
     part_dims: list[float] = []
     for key in ("length_mm", "width_mm", "height_mm"):
         val = _as_float(bbox_feature.get(key))
@@ -18739,7 +18863,11 @@ def get_llm_overrides(
     part_dims_sorted = sorted([d for d in part_dims if d > 0], reverse=True)
 
     stock_catalog_raw = features.get("stock_catalog")
-    stock_catalog = stock_catalog_raw if isinstance(stock_catalog_raw, (list, tuple)) else []
+    stock_catalog = (
+        list(stock_catalog_raw)
+        if isinstance(stock_catalog_raw, (list, tuple))
+        else []
+    )
     catalog_dims_sorted: list[list[float]] = []
     for entry in stock_catalog:
         if not isinstance(entry, dict):
@@ -19697,10 +19825,12 @@ class CreateToolTip:
             return
 
         bbox = None
-        try:
-            bbox = self.widget.bbox("insert")
-        except Exception:
-            bbox = None
+        bbox_method = getattr(self.widget, "bbox", None)
+        if callable(bbox_method):
+            try:
+                bbox = bbox_method("insert")  # type: ignore[arg-type]
+            except Exception:
+                bbox = None
         if bbox:
             x, y, width, height = bbox
         else:
@@ -19796,7 +19926,7 @@ class ScrollableFrame(ttk.Frame):
 class App(tk.Tk):
     def __init__(
         self,
-        pricing: PricingEngine | None = None,
+        pricing: SupportsPricingEngine | None = None,
         *,
         configuration: UIConfiguration | None = None,
         geometry_loader: GeometryLoader | None = None,
@@ -19811,7 +19941,7 @@ class App(tk.Tk):
         self.geometry_loader = geometry_loader or GeometryLoader()
         self.pricing_registry = pricing_registry or PricingRegistry()
         self.llm_services = llm_services or LLMServices()
-        self.pricing: PricingEngine = pricing or _DEFAULT_PRICING_ENGINE
+        self.pricing: SupportsPricingEngine = pricing or _DEFAULT_PRICING_ENGINE
 
         default_material_display = getattr(
             self.configuration,
@@ -19830,9 +19960,9 @@ class App(tk.Tk):
 
         self.geometry_service = geometry_service or geometry.GeometryService()
 
-        self.vars_df = None
-        self.vars_df_full = None
-        self.geo = None
+        self.vars_df: pd.DataFrame | None = None
+        self.vars_df_full: pd.DataFrame | None = None
+        self.geo: dict[str, Any] | None = None
         self.geo_context: dict[str, Any] = {}
         if hasattr(self.configuration, "create_params"):
             try:
@@ -21262,7 +21392,8 @@ class App(tk.Tk):
         self.geo_context = dict(geo or {})
         self._log_geo(geo)
 
-        self._populate_editor_tab(self.vars_df)
+        vars_df_for_editor = typing.cast(pd.DataFrame, self.vars_df)
+        self._populate_editor_tab(vars_df_for_editor)
         self.nb.select(self.tab_editor)
         self.status_var.set("Variables loaded. Review the Quote Editor and click Generate Quote.")
         return
