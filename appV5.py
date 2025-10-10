@@ -93,7 +93,19 @@ def roughly_equal(a: float | int | str | None, b: float | int | str | None, *, e
 import copy
 import sys
 import textwrap
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, TypeVar
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    TypeVar,
+    TypedDict,
+)
 
 
 T = TypeVar("T")
@@ -4708,8 +4720,16 @@ def _load_master_variables() -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
     if cache.get("loaded"):
         core_cached = cache.get("core")
         full_cached = cache.get("full")
-        core_copy = core_cached.copy() if core_cached is not None else None
-        full_copy = full_cached.copy() if full_cached is not None else None
+        core_copy = (
+            core_cached.copy()
+            if _HAS_PANDAS and isinstance(core_cached, pd.DataFrame)
+            else None
+        )
+        full_copy = (
+            full_cached.copy()
+            if _HAS_PANDAS and isinstance(full_cached, pd.DataFrame)
+            else None
+        )
         return (core_copy, full_copy)
 
     master_path = Path(__file__).with_name("Master_Variables.csv")
@@ -4844,7 +4864,7 @@ _PREFERRED_BUCKET_VIEW_ORDER: tuple[str, ...] = (
 )
 
 
-def _normalize_bucket_key(name: str) -> str:
+def _normalize_bucket_key(name: str | None) -> str:
     text = re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_")
     aliases = {
         "finishing": "finishing_deburr",
@@ -4885,7 +4905,7 @@ def _rate_key_for_bucket(bucket: str | None) -> str | None:
     return mapping.get(canon)
 
 
-def _canonical_bucket_key(name: str) -> str:
+def _canonical_bucket_key(name: str | None) -> str:
     normalized = _normalize_bucket_key(name)
     if not normalized:
         return ""
@@ -5146,7 +5166,10 @@ def _extract_bucket_map(source: Mapping[str, Any] | None) -> dict[str, dict[str,
         canon = _canonical_bucket_key(raw_key)
         if not canon:
             continue
-        bucket_map[canon] = raw_value if isinstance(raw_value, Mapping) else {}
+        if isinstance(raw_value, Mapping):
+            bucket_map[canon] = {str(k): v for k, v in raw_value.items()}
+        else:
+            bucket_map[canon] = {}
     return bucket_map
 
 
@@ -5158,6 +5181,14 @@ class ProcessDisplayEntry:
     amount: float
     detail_bits: tuple[str, ...]
     display_override: str | None = None
+
+
+class PlannerBucketOp(TypedDict):
+    op: str
+    minutes: float
+    machine: float
+    labor: float
+    total: float
 
 
 def _iter_ordered_process_entries(
@@ -5871,10 +5902,17 @@ def render_quote(
                 base_value = value[0]
             else:
                 base_value = value
-            try:
-                return float(base_value or 0.0) > 0.0
-            except Exception:
-                return False
+            if isinstance(base_value, (int, float)):
+                return float(base_value) > 0.0
+            if isinstance(base_value, str):
+                text = base_value.strip()
+                if not text:
+                    return False
+                try:
+                    return float(text) > 0.0
+                except Exception:
+                    return False
+            return False
 
         if any(
             str(label).lower().startswith("planner")
@@ -6129,7 +6167,7 @@ def render_quote(
     process_meta, bucket_alias_map = _fold_process_meta(process_meta_raw)
     applied_process = _fold_applied_process(applied_process_raw, bucket_alias_map)
 
-    def _planner_bucket_for_op(name: str) -> str:
+    def _planner_bucket_for_op(name: str | None) -> str:
         text = str(name or "").lower()
         if not text:
             return "milling"
@@ -6263,7 +6301,10 @@ def render_quote(
         for key, value in raw_rollup.items():
             canon = _canonical_bucket_key(key)
             if canon:
-                bucket_rollup_map[canon] = value if isinstance(value, Mapping) else {}
+                if isinstance(value, Mapping):
+                    bucket_rollup_map[canon] = {str(k): v for k, v in value.items()}
+                else:
+                    bucket_rollup_map[canon] = {}
     if not bucket_rollup_map and planner_bucket_from_plan:
         bucket_rollup_map = dict(planner_bucket_from_plan)
     if not bucket_rollup_map:
@@ -6275,11 +6316,14 @@ def render_quote(
                 for key, value in bucket_struct.items():
                     canon = _canonical_bucket_key(key)
                     if canon:
-                        bucket_rollup_map[canon] = value if isinstance(value, Mapping) else {}
+                        if isinstance(value, Mapping):
+                            bucket_rollup_map[canon] = {str(k): v for k, v in value.items()}
+                        else:
+                            bucket_rollup_map[canon] = {}
 
     planner_total_meta = process_meta.get("planner_total", {}) if isinstance(process_meta, dict) else {}
     planner_line_items_meta = planner_total_meta.get("line_items") if isinstance(planner_total_meta, Mapping) else None
-    bucket_ops_map: dict[str, list[dict[str, float]]] = {}
+    bucket_ops_map: dict[str, list[PlannerBucketOp]] = {}
     if isinstance(planner_line_items_meta, list):
         for entry in planner_line_items_meta:
             if not isinstance(entry, Mapping):
@@ -6290,7 +6334,8 @@ def render_quote(
             machine_val = _bucket_cost(entry, "machine_cost", "machine$")
             labor_val = _bucket_cost(entry, "labor_cost", "labor$")
             total_val = machine_val + labor_val
-            bucket_ops_map.setdefault(bucket_key, []).append(
+            bucket_ops = bucket_ops_map.setdefault(bucket_key, [])
+            bucket_ops.append(
                 {
                     "op": str(op_name or "").strip(),
                     "minutes": minutes_val,
