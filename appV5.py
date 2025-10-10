@@ -11579,6 +11579,9 @@ def compute_quote_from_df(
     # Default pricing source; updated to 'planner' later if planner path is used
     pricing_source = "legacy"
     legacy_baseline_had_values_flag = False
+    # Maintain backward compatibility with older variable name used in
+    # downstream code paths.
+    legacy_baseline_had_values = legacy_baseline_had_values_flag
 
     params_defaults = default_params if default_params is not None else QuoteConfiguration().default_params
     rates_defaults = default_rates if default_rates is not None else PricingRegistry().default_rates
@@ -13218,6 +13221,7 @@ def compute_quote_from_df(
     ) or any(
         float(meta.get("hr", 0.0) or 0.0) > 0.0 for meta in legacy_process_meta.values()
     )
+    legacy_baseline_had_values = legacy_baseline_had_values_flag
 
     planner_meta_keys: set[str] = set()
 
