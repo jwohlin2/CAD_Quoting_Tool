@@ -23,7 +23,9 @@ import re
 import time
 import typing
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Mapping as _CABCM
+
+Mapping = _CABCM
 from dataclasses import dataclass, field, replace, fields as dataclass_fields
 from fractions import Fraction
 from pathlib import Path
@@ -98,7 +100,6 @@ def roughly_equal(a: float | int | str | None, b: float | int | str | None, *, e
     return math.isclose(a_val, b_val, rel_tol=0.0, abs_tol=abs(eps_val))
 
 
-import copy
 import sys
 import textwrap
 from typing import (
@@ -108,7 +109,6 @@ from typing import (
     Iterable,
     Iterator,
     List,
-    Mapping,
     Optional,
     Protocol,
     Sequence,
@@ -758,7 +758,7 @@ except Exception:
     build_geo_from_dxf_path = None  # type: ignore[assignment]
 
 
-_MappingABC = Mapping
+_MappingABC = _CABCM
 
 _build_geo_from_dxf_hook: Optional[Callable[[str], Dict[str, Any]]] = None
 
