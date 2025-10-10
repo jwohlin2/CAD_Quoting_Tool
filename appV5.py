@@ -478,6 +478,29 @@ def _detect_index_support() -> bool:
 
 _TIME_OVERHEAD_SUPPORTS_INDEX_SEC = _detect_index_support()
 
+
+def _make_time_overhead_params(
+    kwargs: Mapping[str, Any],
+) -> tuple[_TimeOverheadParams, bool]:
+    """Instantiate ``OverheadParams`` with graceful fallback.
+
+    Returns a tuple of ``(instance, dropped_index_kwarg)``. When the installed
+    ``cad_quoter`` package does not accept ``index_sec_per_hole`` we strip the
+    argument, flip the global capability flag to ``False`` so future calls avoid
+    reusing the unsupported kwarg, and return the constructed instance.
+    """
+
+    try:
+        return _TimeOverheadParams(**kwargs), False
+    except TypeError:
+        if "index_sec_per_hole" not in kwargs:
+            raise
+        cleaned_kwargs = dict(kwargs)
+        cleaned_kwargs.pop("index_sec_per_hole", None)
+        global _TIME_OVERHEAD_SUPPORTS_INDEX_SEC
+        _TIME_OVERHEAD_SUPPORTS_INDEX_SEC = False
+        return _TimeOverheadParams(**cleaned_kwargs), True
+
 try:
     from process_planner import (
         PLANNERS as _PROCESS_PLANNERS,
@@ -9530,12 +9553,8 @@ def _drill_overhead_from_params(params: Mapping[str, Any] | None) -> _TimeOverhe
             float(index_sec) if index_sec is not None and index_sec >= 0 else None
         )
         overhead_kwargs["index_sec_per_hole"] = index_kwarg
-    try:
-        overhead = _TimeOverheadParams(**overhead_kwargs)
-    except TypeError:
-        overhead_kwargs.pop("index_sec_per_hole", None)
-        overhead = _TimeOverheadParams(**overhead_kwargs)
-    if not hasattr(overhead, "index_sec_per_hole"):
+    overhead, dropped_index = _make_time_overhead_params(overhead_kwargs)
+    if index_kwarg is not None and (dropped_index or not hasattr(overhead, "index_sec_per_hole")):
         try:
             setattr(overhead, "index_sec_per_hole", index_kwarg)
         except Exception:
@@ -10090,13 +10109,25 @@ def estimate_drilling_hours(
                     "dwell_min": dwell_val,
                     "peck_min": peck_min,
                 }
+                legacy_index_kwarg = None
                 if _TIME_OVERHEAD_SUPPORTS_INDEX_SEC:
-                    legacy_kwargs["index_sec_per_hole"] = getattr(
+                    legacy_index_kwarg = getattr(
                         overhead_for_calc,
                         "index_sec_per_hole",
                         None,
                     )
-                legacy_overhead = _TimeOverheadParams(**legacy_kwargs)
+                    legacy_kwargs["index_sec_per_hole"] = legacy_index_kwarg
+                legacy_overhead, legacy_dropped_index = _make_time_overhead_params(
+                    legacy_kwargs
+                )
+                if legacy_index_kwarg is not None and (
+                    legacy_dropped_index
+                    or not hasattr(legacy_overhead, "index_sec_per_hole")
+                ):
+                    try:
+                        setattr(legacy_overhead, "index_sec_per_hole", legacy_index_kwarg)
+                    except Exception:
+                        pass
                 overhead_for_calc = legacy_overhead
                 tool_params = _TimeToolParams(teeth_z=1)
                 if debug_lines is not None:
