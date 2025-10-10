@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from cad_quoter.rates import migrate_flat_to_two_bucket
+from cad_quoter.coerce import to_float
 
 RESOURCE_DIR = Path(__file__).resolve().parent / "resources"
 DEFAULT_VERSION = 1
@@ -142,15 +143,6 @@ def load_named_config(name: str, version: int = DEFAULT_VERSION) -> dict[str, An
     raise ConfigError(
         f"No configuration resource found for '{name}' version {version} in {RESOURCE_DIR}"
     )
-
-
-def _coerce_float(value: Any) -> float | None:
-    try:
-        return float(value)
-    except Exception:
-        return None
-
-
 def _ensure_two_bucket_rates(raw: Mapping[str, Any]) -> dict[str, dict[str, float]]:
     labor_raw = raw.get("labor") if isinstance(raw, Mapping) else None
     machine_raw = raw.get("machine") if isinstance(raw, Mapping) else None
@@ -158,14 +150,14 @@ def _ensure_two_bucket_rates(raw: Mapping[str, Any]) -> dict[str, dict[str, floa
     if isinstance(labor_raw, Mapping) and isinstance(machine_raw, Mapping):
         labor: dict[str, float] = {}
         for key, value in labor_raw.items():
-            numeric = _coerce_float(value)
+            numeric = to_float(value)
             if numeric is None:
                 continue
             labor[str(key)] = numeric
 
         machine: dict[str, float] = {}
         for key, value in machine_raw.items():
-            numeric = _coerce_float(value)
+            numeric = to_float(value)
             if numeric is None:
                 continue
             machine[str(key)] = numeric
@@ -174,7 +166,7 @@ def _ensure_two_bucket_rates(raw: Mapping[str, Any]) -> dict[str, dict[str, floa
 
     flat: dict[str, float] = {}
     for key, value in raw.items():
-        numeric = _coerce_float(value)
+        numeric = to_float(value)
         if numeric is None:
             continue
         flat[str(key)] = numeric

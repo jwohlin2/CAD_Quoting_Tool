@@ -185,6 +185,7 @@ from cad_quoter.domain_models import (
     coerce_float_or_none as _coerce_float_or_none,
     normalize_material_key as _normalize_lookup_key,
 )
+from cad_quoter.coerce import to_float, to_int
 from cad_quoter.pricing import (
     BACKUP_CSV_NAME,
     LB_PER_KG,
@@ -1142,22 +1143,6 @@ def find_planar_pockets(shape) -> List[Dict[str, Any]]:
 
 from cad_quoter.domain import QuoteState
 
-
-
-def _as_float_or_none(value: Any) -> float | None:
-    try:
-        if isinstance(value, (int, float)):
-            return float(value)
-        if isinstance(value, str):
-            cleaned = value.strip()
-            if not cleaned:
-                return None
-            return float(cleaned)
-    except Exception:
-        return None
-    return None
-
-
 def _apply_deep_drill_speed_feed_adjustments(row: Any) -> Any:
     """Return a copy of ``row`` with deep-drill speed/feed factors applied."""
 
@@ -1170,7 +1155,7 @@ def _apply_deep_drill_speed_feed_adjustments(row: Any) -> Any:
         for key in keys:
             if key not in adjusted:
                 continue
-            value = _as_float_or_none(adjusted.get(key))
+            value = to_float(adjusted.get(key))
             if value is None or not math.isfinite(value):
                 continue
             adjusted[key] = float(value) * factor
@@ -1216,36 +1201,6 @@ def build_suggest_payload(
 
     derived = geo.get("derived") or {}
 
-    def _coerce_float(value: Any) -> float | None:
-        try:
-            if isinstance(value, bool):
-                return float(value)
-            if isinstance(value, (int, float)):
-                return float(value)
-            if isinstance(value, str):
-                text = value.strip()
-                if not text:
-                    return None
-                return float(text)
-        except Exception:
-            return None
-        return None
-
-    def _coerce_int(value: Any) -> int | None:
-        try:
-            if isinstance(value, bool):
-                return int(value)
-            if isinstance(value, (int, float)):
-                return int(round(float(value)))
-            if isinstance(value, str):
-                text = value.strip()
-                if not text:
-                    return None
-                return int(round(float(text)))
-        except Exception:
-            return None
-        return None
-
     def _clean_nested(value: Any, depth: int = 0, max_depth: int = 3, limit: int = 24):
         if depth >= max_depth:
             return None
@@ -1276,7 +1231,7 @@ def build_suggest_payload(
             return bool(value)
         if isinstance(value, str):
             return value.strip()
-        coerced = _coerce_float(value)
+        coerced = to_float(value)
         if coerced is not None:
             return coerced
         try:
@@ -1288,21 +1243,21 @@ def build_suggest_payload(
     hole_bins_top: dict[str, int] = {}
     if isinstance(hole_bins, dict):
         sorted_bins = sorted(
-            ((str(k), _coerce_int(v) or 0) for k, v in hole_bins.items()),
+            ((str(k), to_int(v) or 0) for k, v in hole_bins.items()),
             key=lambda kv: (-kv[1], kv[0]),
         )
         hole_bins_top = {k: int(v) for k, v in sorted_bins[:8] if v}
 
     raw_thickness = geo.get("thickness_mm")
-    thickness_mm = _coerce_float(raw_thickness)
+    thickness_mm = to_float(raw_thickness)
     if thickness_mm is None and isinstance(raw_thickness, dict):
         for key in ("value", "mm", "thickness_mm"):
-            candidate = _coerce_float(raw_thickness.get(key))
+            candidate = to_float(raw_thickness.get(key))
             if candidate is not None:
                 thickness_mm = candidate
                 break
     if thickness_mm is None:
-        thickness_mm = _coerce_float(geo.get("thickness"))
+        thickness_mm = to_float(geo.get("thickness"))
 
     material_val = geo.get("material")
     if isinstance(material_val, dict):
@@ -1315,14 +1270,14 @@ def build_suggest_payload(
         material_name = material_val
     material_name = str(material_name).strip() if material_name else "Steel"
 
-    hole_count_val = _coerce_float(geo.get("hole_count"))
+    hole_count_val = to_float(geo.get("hole_count"))
     if hole_count_val is None:
-        hole_count_val = _coerce_float(derived.get("hole_count"))
+        hole_count_val = to_float(derived.get("hole_count"))
     hole_count = int(hole_count_val or 0)
 
-    tap_qty = _coerce_int(derived.get("tap_qty")) or 0
-    cbore_qty = _coerce_int(derived.get("cbore_qty")) or 0
-    csk_qty = _coerce_int(derived.get("csk_qty")) or 0
+    tap_qty = to_int(derived.get("tap_qty")) or 0
+    cbore_qty = to_int(derived.get("cbore_qty")) or 0
+    csk_qty = to_int(derived.get("csk_qty")) or 0
 
     finish_flags: list[str] = []
     raw_finish = derived.get("finish_flags") or geo.get("finish_flags")
@@ -1365,9 +1320,9 @@ def build_suggest_payload(
         if value in (None, ""):
             continue
         if key in {"tap_minutes_hint", "cbore_minutes_hint", "csk_minutes_hint"}:
-            cleaned = _coerce_float(value)
+            cleaned = to_float(value)
         elif key in {"npt_qty", "slot_count"}:
-            cleaned = _coerce_int(value)
+            cleaned = to_int(value)
         elif key in {"has_ldr_notes"}:
             cleaned = bool(value)
         else:
@@ -1389,10 +1344,10 @@ def build_suggest_payload(
             if not isinstance(entry, dict):
                 continue
             cleaned_entry = {
-                "dia_mm": _coerce_float(entry.get("dia_mm")),
-                "depth_mm": _coerce_float(entry.get("depth_mm")),
+                "dia_mm": to_float(entry.get("dia_mm")),
+                "depth_mm": to_float(entry.get("depth_mm")),
                 "through": bool(entry.get("through")) if entry.get("through") is not None else None,
-                "count": _coerce_int(entry.get("count")),
+                "count": to_int(entry.get("count")),
             }
             hole_groups.append({k: v for k, v in cleaned_entry.items() if v not in (None, "")})
 
@@ -1405,21 +1360,21 @@ def build_suggest_payload(
     raw_gdt = geo.get("gdt")
     if isinstance(raw_gdt, dict):
         for key, value in raw_gdt.items():
-            val = _coerce_int(value)
+            val = to_int(value)
             if val:
                 gdt_counts[str(key)] = val
 
     baseline_hours_raw = baseline.get("process_hours") if isinstance(baseline.get("process_hours"), dict) else {}
     baseline_hours: dict[str, float] = {}
     for proc, hours in (baseline_hours_raw or {}).items():
-        val = _coerce_float(hours)
+        val = to_float(hours)
         if val is not None:
             baseline_hours[str(proc)] = float(val)
 
     baseline_pass_raw = baseline.get("pass_through") if isinstance(baseline.get("pass_through"), dict) else {}
     baseline_pass: dict[str, float] = {}
     for label, amount in (baseline_pass_raw or {}).items():
-        val = _coerce_float(amount)
+        val = to_float(amount)
         if val is not None:
             canon_label = _canonical_pass_label(label)
             baseline_pass[canon_label] = float(val)
@@ -1428,8 +1383,8 @@ def build_suggest_payload(
     top_pass_through = sorted(baseline_pass.items(), key=lambda kv: (-kv[1], kv[0]))[:6]
 
     baseline_summary = {
-        "scrap_pct": _coerce_float(baseline.get("scrap_pct")) or 0.0,
-        "setups": _coerce_int(baseline.get("setups")) or 1,
+        "scrap_pct": to_float(baseline.get("scrap_pct")) or 0.0,
+        "setups": to_int(baseline.get("setups")) or 1,
         "fixture": baseline.get("fixture"),
         "process_hours": baseline_hours,
         "pass_through": baseline_pass,
@@ -1438,7 +1393,7 @@ def build_suggest_payload(
     }
 
     rates_of_interest = {
-        key: _coerce_float(rates.get(key))
+        key: to_float(rates.get(key))
         for key in (
             "MillingRate",
             "TurningRate",
@@ -1452,7 +1407,7 @@ def build_suggest_payload(
             "DeburrRate",
             "DrillingRate",
         )
-        if rates.get(key) is not None and _coerce_float(rates.get(key)) is not None
+        if rates.get(key) is not None and to_float(rates.get(key)) is not None
     }
 
     signals: dict[str, Any] = {
@@ -1507,9 +1462,9 @@ def build_suggest_payload(
     if geo.get("provenance"):
         geo_summary["provenance"] = _clean_nested(geo.get("provenance"), limit=12)
 
-    mult_min_raw = _coerce_float(bounds.get("mult_min"))
-    mult_max_raw = _coerce_float(bounds.get("mult_max"))
-    adder_max_raw = _coerce_float(bounds.get("adder_max_hr"))
+    mult_min_raw = to_float(bounds.get("mult_min"))
+    mult_max_raw = to_float(bounds.get("mult_max"))
+    adder_max_raw = to_float(bounds.get("adder_max_hr"))
     bounds_summary = {
         "mult_min": max(LLM_MULTIPLIER_MIN, mult_min_raw if mult_min_raw is not None else LLM_MULTIPLIER_MIN),
         "mult_max": max(
@@ -1517,8 +1472,8 @@ def build_suggest_payload(
             min(LLM_MULTIPLIER_MAX, mult_max_raw if mult_max_raw is not None else LLM_MULTIPLIER_MAX),
         ),
         "adder_max_hr": min(LLM_ADDER_MAX, adder_max_raw if adder_max_raw is not None else LLM_ADDER_MAX),
-        "scrap_min": _coerce_float(bounds.get("scrap_min")) or 0.0,
-        "scrap_max": _coerce_float(bounds.get("scrap_max")) or 0.25,
+        "scrap_min": to_float(bounds.get("scrap_min")) or 0.0,
+        "scrap_max": to_float(bounds.get("scrap_max")) or 0.25,
     }
     if bounds_summary["mult_max"] < bounds_summary["mult_min"]:
         bounds_summary["mult_max"] = bounds_summary["mult_min"]
@@ -1527,18 +1482,18 @@ def build_suggest_payload(
     dfm_geo_summary = derived_summary.get("dfm_geo")
     if isinstance(dfm_geo_summary, dict) and dfm_geo_summary:
         dfm_bits: list[str] = []
-        min_wall = _coerce_float(dfm_geo_summary.get("min_wall_mm"))
+        min_wall = to_float(dfm_geo_summary.get("min_wall_mm"))
         if min_wall is not None:
             dfm_bits.append(f"min_wall≈{min_wall:.1f}mm")
         if dfm_geo_summary.get("thin_wall"):
             dfm_bits.append("thin_walls")
-        unique_normals = _coerce_int(dfm_geo_summary.get("unique_normals"))
+        unique_normals = to_int(dfm_geo_summary.get("unique_normals"))
         if unique_normals:
             dfm_bits.append(f"{unique_normals} normals")
-        deburr_edge = _coerce_float(dfm_geo_summary.get("deburr_edge_len_mm"))
+        deburr_edge = to_float(dfm_geo_summary.get("deburr_edge_len_mm"))
         if deburr_edge and deburr_edge > 0:
             dfm_bits.append(f"deburr_edge≈{deburr_edge:.0f}mm")
-        face_count = _coerce_int(dfm_geo_summary.get("face_count"))
+        face_count = to_int(dfm_geo_summary.get("face_count"))
         if face_count and face_count > 0:
             dfm_bits.append(f"{face_count} faces")
         if dfm_bits:
@@ -1614,9 +1569,9 @@ def build_suggest_payload(
 def sanitize_suggestions(s: dict, bounds: dict) -> dict:
     bounds = bounds or {}
 
-    mult_min = _as_float_or_none(bounds.get("mult_min"))
-    mult_max = _as_float_or_none(bounds.get("mult_max"))
-    adder_max_raw = _as_float_or_none(bounds.get("adder_max_hr"))
+    mult_min = to_float(bounds.get("mult_min"))
+    mult_max = to_float(bounds.get("mult_max"))
+    adder_max_raw = to_float(bounds.get("adder_max_hr"))
     if mult_min is None:
         mult_min = LLM_MULTIPLIER_MIN
     else:
@@ -1627,7 +1582,7 @@ def sanitize_suggestions(s: dict, bounds: dict) -> dict:
         mult_max = min(LLM_MULTIPLIER_MAX, float(mult_max))
     if mult_max < mult_min:
         mult_max = mult_min
-    add_hr_cap = _as_float_or_none(bounds.get("add_hr_max"))
+    add_hr_cap = to_float(bounds.get("add_hr_max"))
     if adder_max_raw is None and add_hr_cap is not None:
         adder_max_raw = float(add_hr_cap)
     elif adder_max_raw is not None and add_hr_cap is not None:
@@ -1636,14 +1591,14 @@ def sanitize_suggestions(s: dict, bounds: dict) -> dict:
         LLM_ADDER_MAX,
         adder_max_raw if adder_max_raw is not None else LLM_ADDER_MAX,
     )
-    scrap_min = max(0.0, _as_float_or_none(bounds.get("scrap_min")) or 0.0)
-    scrap_max = _as_float_or_none(bounds.get("scrap_max")) or 0.25
+    scrap_min = max(0.0, to_float(bounds.get("scrap_min")) or 0.0)
+    scrap_max = to_float(bounds.get("scrap_max")) or 0.25
 
     bucket_caps_raw = bounds.get("adder_bucket_max") or bounds.get("add_hr_bucket_max")
     bucket_caps: dict[str, float] = {}
     if isinstance(bucket_caps_raw, dict):
         for key, raw in bucket_caps_raw.items():
-            cap_val = _as_float_or_none(raw)
+            cap_val = to_float(raw)
             if cap_val is not None:
                 bucket_caps[str(key).lower()] = float(cap_val)
 
@@ -1665,7 +1620,7 @@ def sanitize_suggestions(s: dict, bounds: dict) -> dict:
             key = value.strip().lower()
             if key in mapping:
                 return mapping[key]
-        conf = _as_float_or_none(value)
+        conf = to_float(value)
         if conf is None:
             return None
         return max(0.0, min(1.0, float(conf)))
@@ -1713,7 +1668,7 @@ def sanitize_suggestions(s: dict, bounds: dict) -> dict:
         if raw is None:
             return None
         value, detail = _extract_detail(raw)
-        num = _as_float_or_none(value)
+        num = to_float(value)
         if num is None:
             return None
         if lo is not None:
@@ -1761,7 +1716,7 @@ def sanitize_suggestions(s: dict, bounds: dict) -> dict:
     mults: dict[str, float] = {}
     for proc, raw_val in (s.get("process_hour_multipliers") or {}).items():
         value, detail = _extract_detail(raw_val)
-        num = _as_float_or_none(value)
+        num = to_float(value)
         if num is None:
             continue
         num = max(mult_min, min(mult_max, num))
@@ -1772,7 +1727,7 @@ def sanitize_suggestions(s: dict, bounds: dict) -> dict:
     adders: dict[str, float] = {}
     for proc, raw_val in (s.get("process_hour_adders") or {}).items():
         value, detail = _extract_detail(raw_val)
-        num = _as_float_or_none(value)
+        num = to_float(value)
         if num is None:
             continue
         proc_key = str(proc)
@@ -1787,7 +1742,7 @@ def sanitize_suggestions(s: dict, bounds: dict) -> dict:
 
     raw_scrap = s.get("scrap_pct", 0.0)
     scrap_val, scrap_detail = _extract_detail(raw_scrap)
-    scrap_float = _as_float_or_none(scrap_val)
+    scrap_float = to_float(scrap_val)
     if scrap_float is None:
         scrap_float = 0.0
     scrap_float = max(scrap_min, min(scrap_max, scrap_float))
@@ -1879,7 +1834,7 @@ def sanitize_suggestions(s: dict, bounds: dict) -> dict:
     if isinstance(drilling_block, dict):
         drilling_clean: dict[str, Any] = {}
         mult_val, mult_detail = _extract_detail(drilling_block.get("multiplier"))
-        mult = _as_float_or_none(mult_val)
+        mult = to_float(mult_val)
         if mult is not None:
             mult = max(0.8, min(1.5, mult))
             drilling_clean["multiplier"] = mult
@@ -1887,7 +1842,7 @@ def sanitize_suggestions(s: dict, bounds: dict) -> dict:
         floor_val, floor_detail = _extract_detail(
             drilling_block.get("per_hole_floor_sec") or drilling_block.get("floor_sec_per_hole")
         )
-        floor = _as_float_or_none(floor_val)
+        floor = to_float(floor_val)
         if floor is not None:
             floor = max(0.0, floor)
             drilling_clean["per_hole_floor_sec"] = floor
@@ -1960,7 +1915,7 @@ def sanitize_suggestions(s: dict, bounds: dict) -> dict:
 def apply_suggestions(baseline: dict, s: dict) -> dict:
     eff = copy.deepcopy(baseline or {})
     base_hours = eff.get("process_hours") if isinstance(eff.get("process_hours"), dict) else {}
-    ph = {k: float(_as_float_or_none(v) or 0.0) for k, v in base_hours.items()}
+    ph = {k: float(to_float(v) or 0.0) for k, v in base_hours.items()}
 
     for proc, mult in (s.get("process_hour_multipliers") or {}).items():
         if proc in ph:
@@ -2201,8 +2156,8 @@ def merge_effective(
         changed = False
         source_norm = str(source).strip().lower()
         if kind == "multiplier":
-            mult_min_val = _as_float_or_none(bounds.get("mult_min"))
-            mult_max_val = _as_float_or_none(bounds.get("mult_max"))
+            mult_min_val = to_float(bounds.get("mult_min"))
+            mult_max_val = to_float(bounds.get("mult_max"))
             mult_min = max(
                 LLM_MULTIPLIER_MIN,
                 mult_min_val if mult_min_val is not None else LLM_MULTIPLIER_MIN,
@@ -2216,8 +2171,8 @@ def merge_effective(
             clamped = max(mult_min, min(mult_max, float(value)))
         elif kind == "adder":
             orig_val = float(value)
-            add_hr_max_raw = _as_float_or_none(bounds.get("add_hr_max"))
-            adder_max_raw = _as_float_or_none(bounds.get("adder_max_hr"))
+            add_hr_max_raw = to_float(bounds.get("add_hr_max"))
+            adder_max_raw = to_float(bounds.get("adder_max_hr"))
             adder_max_candidates = [
                 LLM_ADDER_MAX,
                 adder_max_raw if adder_max_raw is not None else None,
@@ -2227,12 +2182,12 @@ def merge_effective(
             bucket_caps: dict[str, float] = {}
             if isinstance(bucket_caps_raw, dict):
                 for key, raw in bucket_caps_raw.items():
-                    cap_val = _as_float_or_none(raw)
+                    cap_val = to_float(raw)
                     if cap_val is not None:
                         bucket_caps[str(key).lower()] = float(cap_val)
-            adder_min = _as_float_or_none(bounds.get("add_hr_min"))
+            adder_min = to_float(bounds.get("add_hr_min"))
             if adder_min is None:
-                adder_min = _as_float_or_none(bounds.get("adder_min_hr"))
+                adder_min = to_float(bounds.get("adder_min_hr"))
             raw_val = orig_val
             if source_norm == "llm" and raw_val > 240:
                 raw_val = raw_val / 60.0
@@ -2252,8 +2207,8 @@ def merge_effective(
                 adder_max_effective = lower_bound
             clamped = max(lower_bound, min(adder_max_effective, raw_val))
         elif kind == "scrap":
-            scrap_min = max(0.0, _as_float_or_none(bounds.get("scrap_min")) or 0.0)
-            scrap_max = _as_float_or_none(bounds.get("scrap_max")) or 0.25
+            scrap_min = max(0.0, to_float(bounds.get("scrap_min")) or 0.0)
+            scrap_max = to_float(bounds.get("scrap_max")) or 0.25
             clamped = max(scrap_min, min(scrap_max, float(value)))
         elif kind == "setups":
             clamped = int(max(1, min(4, round(float(value)))))
@@ -2278,16 +2233,16 @@ def merge_effective(
         return num, changed
 
     def _merge_numeric_field(key: str, lo: float | None, hi: float | None, label: str) -> None:
-        base_val = _as_float_or_none(baseline.get(key)) if baseline.get(key) is not None else None
+        base_val = to_float(baseline.get(key)) if baseline.get(key) is not None else None
         value = base_val
         source = "baseline"
         if overrides.get(key) is not None:
-            cand = _as_float_or_none(overrides.get(key))
+            cand = to_float(overrides.get(key))
             if cand is not None:
                 value, _ = _clamp_range(cand, lo, hi, label, "user override")
                 source = "user"
         elif suggestions.get(key) is not None:
-            cand = _as_float_or_none(suggestions.get(key))
+            cand = to_float(suggestions.get(key))
             if cand is not None:
                 value, _ = _clamp_range(cand, lo, hi, label, "LLM")
                 source = "llm"
@@ -2389,7 +2344,7 @@ def merge_effective(
     baseline_hours_raw = baseline.get("process_hours") if isinstance(baseline.get("process_hours"), dict) else {}
     baseline_hours: dict[str, float] = {}
     for proc, hours in (baseline_hours_raw or {}).items():
-        val = _as_float_or_none(hours)
+        val = to_float(hours)
         if val is not None:
             baseline_hours[str(proc)] = float(val)
 
@@ -2404,13 +2359,13 @@ def merge_effective(
         source = "baseline"
         val = 1.0
         if proc in over_mult and over_mult[proc] is not None:
-            cand = _as_float_or_none(over_mult.get(proc))
+            cand = to_float(over_mult.get(proc))
             if cand is not None:
                 val = float(cand)
                 val, _ = _clamp(val, "multiplier", f"multiplier[{proc}]", "user override")
                 source = "user"
         elif proc in sugg_mult and sugg_mult[proc] is not None:
-            cand = _as_float_or_none(sugg_mult.get(proc))
+            cand = to_float(sugg_mult.get(proc))
             if cand is not None:
                 val = float(cand)
                 val, _ = _clamp(val, "multiplier", f"multiplier[{proc}]", "LLM")
@@ -2428,13 +2383,13 @@ def merge_effective(
         source = "baseline"
         add_val = 0.0
         if proc in over_add and over_add[proc] is not None:
-            cand = _as_float_or_none(over_add.get(proc))
+            cand = to_float(over_add.get(proc))
             if cand is not None:
                 add_val = float(cand)
                 add_val, _ = _clamp(add_val, "adder", f"adder[{proc}]", "user override")
                 source = "user"
         elif proc in sugg_add and sugg_add[proc] is not None:
-            cand = _as_float_or_none(sugg_add.get(proc))
+            cand = to_float(sugg_add.get(proc))
             if cand is not None:
                 add_val = float(cand)
                 add_val, _ = _clamp(add_val, "adder", f"adder[{proc}]", "LLM")
@@ -2453,12 +2408,12 @@ def merge_effective(
         source = "baseline"
         val = 0.0
         if key in over_pass and over_pass[key] is not None:
-            cand = _as_float_or_none(over_pass.get(key))
+            cand = to_float(over_pass.get(key))
             if cand is not None:
                 val = float(cand)
                 source = "user"
         elif key in sugg_pass and sugg_pass[key] is not None:
-            cand = _as_float_or_none(sugg_pass.get(key))
+            cand = to_float(sugg_pass.get(key))
             if cand is not None:
                 val = float(cand)
                 source = "llm"
@@ -2471,10 +2426,10 @@ def merge_effective(
         hole_count_guard_int = int(round(float(hole_count_guard))) if hole_count_guard is not None else 0
     except Exception:
         hole_count_guard_int = 0
-    min_sec_per_hole = _as_float_or_none(guard_ctx.get("min_sec_per_hole"))
+    min_sec_per_hole = to_float(guard_ctx.get("min_sec_per_hole"))
     min_sec_per_hole = float(min_sec_per_hole) if min_sec_per_hole is not None else 9.0
     if hole_count_guard_int > 0 and "drilling" in final_hours:
-        current_drill = _as_float_or_none(final_hours.get("drilling"))
+        current_drill = to_float(final_hours.get("drilling"))
         if current_drill is not None:
             drill_floor_hr = (hole_count_guard_int * min_sec_per_hole) / 3600.0
             if current_drill < drill_floor_hr - 1e-6:
@@ -2488,10 +2443,10 @@ def merge_effective(
         tap_qty_guard_int = int(round(float(tap_qty_guard))) if tap_qty_guard is not None else 0
     except Exception:
         tap_qty_guard_int = 0
-    min_min_per_tap = _as_float_or_none(guard_ctx.get("min_min_per_tap"))
+    min_min_per_tap = to_float(guard_ctx.get("min_min_per_tap"))
     min_min_per_tap = float(min_min_per_tap) if min_min_per_tap is not None else 0.2
     if tap_qty_guard_int > 0 and "tapping" in final_hours:
-        current_tap = _as_float_or_none(final_hours.get("tapping"))
+        current_tap = to_float(final_hours.get("tapping"))
         if current_tap is not None:
             tap_floor_hr = (tap_qty_guard_int * min_min_per_tap) / 60.0
             if current_tap < tap_floor_hr - 1e-6:
@@ -2518,13 +2473,13 @@ def merge_effective(
     scrap_source = "baseline"
     scrap_val = scrap_base if scrap_base is not None else 0.0
     if scrap_user is not None:
-        cand = _as_float_or_none(scrap_user)
+        cand = to_float(scrap_user)
         if cand is not None:
             scrap_val = float(cand)
             scrap_val, _ = _clamp(scrap_val, "scrap", "scrap_pct", "user override")
             scrap_source = "user"
     elif scrap_sugg is not None:
-        cand = _as_float_or_none(scrap_sugg)
+        cand = to_float(scrap_sugg)
         if cand is not None:
             scrap_val = float(cand)
             scrap_val, _ = _clamp(scrap_val, "scrap", "scrap_pct", "LLM")
@@ -2538,13 +2493,13 @@ def merge_effective(
     contingency_source = "baseline"
     contingency_val = contingency_base if contingency_base is not None else None
     if contingency_user is not None:
-        cand = _as_float_or_none(contingency_user)
+        cand = to_float(contingency_user)
         if cand is not None:
             contingency_val = float(cand)
             contingency_val, _ = _clamp(contingency_val, "scrap", "contingency_pct", "user override")
             contingency_source = "user"
     elif contingency_sugg is not None:
-        cand = _as_float_or_none(contingency_sugg)
+        cand = to_float(contingency_sugg)
         if cand is not None:
             contingency_val = float(cand)
             contingency_val, _ = _clamp(contingency_val, "scrap", "contingency_pct", "LLM")
@@ -2559,12 +2514,12 @@ def merge_effective(
     setups_source = "baseline"
     setups_val = setups_base
     if setups_user is not None:
-        cand = _as_float_or_none(setups_user)
+        cand = to_float(setups_user)
         if cand is not None:
             setups_val, _ = _clamp(cand, "setups", "setups", "user override")
             setups_source = "user"
     elif setups_sugg is not None:
-        cand = _as_float_or_none(setups_sugg)
+        cand = to_float(setups_sugg)
         if cand is not None:
             setups_val, _ = _clamp(cand, "setups", "setups", "LLM")
             setups_source = "llm"
@@ -2612,7 +2567,7 @@ def merge_effective(
 
     if guard_ctx.get("needs_back_face"):
         current_setups = eff.get("setups")
-        setups_val = _as_float_or_none(current_setups)
+        setups_val = to_float(current_setups)
         try:
             setups_int = int(round(float(setups_val))) if setups_val is not None else int(current_setups)
         except Exception:
@@ -2628,16 +2583,16 @@ def merge_effective(
     finish_flags_ctx = guard_ctx.get("finish_flags")
     baseline_pass_ctx = guard_ctx.get("baseline_pass_through") if isinstance(guard_ctx.get("baseline_pass_through"), dict) else {}
     finish_pass_key = str(guard_ctx.get("finish_pass_key") or "Outsourced Vendors")
-    finish_floor = _as_float_or_none(guard_ctx.get("finish_cost_floor"))
+    finish_floor = to_float(guard_ctx.get("finish_cost_floor"))
     finish_floor = float(finish_floor) if finish_floor is not None else 50.0
     if finish_flags_ctx and finish_floor > 0:
         combined_pass: dict[str, float] = {}
         for key, value in baseline_pass_ctx.items():
-            val = _as_float_or_none(value)
+            val = to_float(value)
             if val is not None:
                 combined_pass[str(key)] = float(val)
         for key, value in (final_pass.items() if isinstance(final_pass, dict) else []):
-            val = _as_float_or_none(value)
+            val = to_float(value)
             if val is not None:
                 combined_pass[key] = combined_pass.get(key, 0.0) + float(val)
         current_finish_cost = combined_pass.get(finish_pass_key, 0.0)
@@ -2793,7 +2748,7 @@ def reprice_with_effective(state: QuoteState) -> QuoteState:
             if isinstance(holes, (list, tuple)):
                 hole_count = len(holes)
         if hole_count > 0 and "drilling" in eff_hours:
-            current = _as_float_or_none(eff_hours.get("drilling")) or 0.0
+            current = to_float(eff_hours.get("drilling")) or 0.0
             min_sec_per_hole = 9.0
             floor_hr = (hole_count * min_sec_per_hole) / 3600.0
             if current < floor_hr:
@@ -2835,13 +2790,13 @@ def get_why_text(
 
     def _hours_from_any(value: Any) -> float:
         if isinstance(value, Mapping):
-            hr_val = _as_float_or_none(value.get("hr"))
+            hr_val = to_float(value.get("hr"))
             if hr_val is None:
-                minutes_val = _as_float_or_none(value.get("minutes"))
+                minutes_val = to_float(value.get("minutes"))
                 if minutes_val is not None:
                     hr_val = float(minutes_val) / 60.0
             if hr_val is None and "value" in value:
-                hr_val = _as_float_or_none(value.get("value"))
+                hr_val = to_float(value.get("value"))
             if hr_val is not None:
                 try:
                     return float(hr_val)
@@ -2851,7 +2806,7 @@ def get_why_text(
                 return float(value)
             except Exception:
                 return 0.0
-        num = _as_float_or_none(value)
+        num = to_float(value)
         return float(num) if num is not None else 0.0
 
     holes = _as_int(g.get("hole_count"))
@@ -2862,16 +2817,16 @@ def get_why_text(
         if isinstance(diam_list, (list, tuple)):
             holes = len(diam_list)
 
-    thick_mm = _as_float_or_none(g.get("thickness_mm"))
+    thick_mm = to_float(g.get("thickness_mm"))
     if thick_mm is None:
-        thick_mm = _as_float_or_none(state.ui_vars.get("Thickness (in)"))
+        thick_mm = to_float(state.ui_vars.get("Thickness (in)"))
         if thick_mm is not None:
             thick_mm *= 25.4
     mat = g.get("material") or state.ui_vars.get("Material") or "material"
     mat = str(mat).title()
 
-    setups = int(_as_float_or_none(e.get("setups")) or _as_float_or_none(b.get("setups")) or 1)
-    scrap_pct = round(100.0 * float(_as_float_or_none(e.get("scrap_pct")) or 0.0), 1)
+    setups = int(to_float(e.get("setups")) or to_float(b.get("setups")) or 1)
+    scrap_pct = round(100.0 * float(to_float(e.get("scrap_pct")) or 0.0), 1)
 
     pricing_source_clean = str(pricing_source or "").strip().lower()
     meta_map: dict[str, Any] = {}
@@ -9638,7 +9593,7 @@ def estimate_drilling_hours(
         total_min = 0.0
         total_toolchange_min = 0.0
         total_holes = 0
-        material_cap_val = _as_float_or_none(material_factor)
+        material_cap_val = to_float(material_factor)
         if material_cap_val is not None and material_cap_val <= 0:
             material_cap_val = None
 
@@ -9660,7 +9615,7 @@ def estimate_drilling_hours(
             avg_dia_in = weighted_dia_sum / total_qty_for_avg
         depth_for_bounds = max(depth_candidates) if depth_candidates else None
 
-        hp_cap_val = _as_float_or_none(getattr(base_machine, "hp_to_mrr_factor", None))
+        hp_cap_val = to_float(getattr(base_machine, "hp_to_mrr_factor", None))
         combined_cap = None
         if material_cap_val is not None and hp_cap_val is not None:
             combined_cap = min(hp_cap_val, material_cap_val)
@@ -9706,7 +9661,7 @@ def estimate_drilling_hours(
                     actual = key_map.get(name)
                     if actual is None:
                         continue
-                    val = _as_float_or_none(row.get(actual))
+                    val = to_float(row.get(actual))
                     if val is not None:
                         return float(val)
                 return None
@@ -9801,8 +9756,8 @@ def estimate_drilling_hours(
                             depth_display = float(depth_in)
                         except Exception:
                             depth_display = depth_in
-                        sfm_val = _as_float_or_none(row.get("sfm_start") or row.get("sfm"))
-                        feed_val = _as_float_or_none(
+                        sfm_val = to_float(row.get("sfm_start") or row.get("sfm"))
+                        feed_val = to_float(
                             row.get("fz_ipr_0_25in")
                             or row.get("feed_ipr")
                             or row.get("fz")
@@ -9848,7 +9803,7 @@ def estimate_drilling_hours(
                 point_angle_deg=118.0,
                 ld_ratio=l_over_d,
             )
-            diameter_float = _as_float_or_none(diameter_in)
+            diameter_float = to_float(diameter_in)
             if diameter_float is None:
                 try:
                     diameter_float = float(diameter_in)
@@ -9906,7 +9861,7 @@ def estimate_drilling_hours(
             minutes: float
             overhead_for_calc = per_hole_overhead
             if is_deep_drill:
-                peck_rate_val = _as_float_or_none(
+                peck_rate_val = to_float(
                     per_hole_overhead.peck_penalty_min_per_in_depth
                 )
                 adjusted_peck = max(
@@ -9933,13 +9888,13 @@ def estimate_drilling_hours(
                 )
                 overhead_for_calc = per_hole_overhead
             else:
-                peck_rate = _as_float_or_none(
+                peck_rate = to_float(
                     overhead_for_calc.peck_penalty_min_per_in_depth
                 )
                 peck_min = None
                 if peck_rate and depth_in and depth_in > 0:
                     peck_min = float(peck_rate) * float(depth_in)
-                dwell_val = _as_float_or_none(overhead_for_calc.dwell_min)
+                dwell_val = to_float(overhead_for_calc.dwell_min)
                 legacy_overhead = _TimeOverheadParams(
                     toolchange_min=0.0,
                     approach_retract_in=overhead_for_calc.approach_retract_in,
@@ -10056,18 +10011,18 @@ def estimate_drilling_hours(
                         or summary.get("material") == "material"
                     ):
                         summary["material"] = mat_display
-                    minutes_val = _as_float_or_none(minutes_per)
+                    minutes_val = to_float(minutes_per)
                     minutes_per_hole = minutes_val if minutes_val is not None else float(minutes)
                     summary["qty"] += qty_for_debug
                     summary["total_minutes"] += minutes_per_hole * qty_for_debug
                     summary["toolchange_total"] += toolchange_added
-                    sfm_float = _as_float_or_none(sfm_val)
+                    sfm_float = to_float(sfm_val)
                     if sfm_float is not None and math.isfinite(sfm_float):
                         summary["sfm_sum"] += sfm_float * qty_for_debug
                         summary["sfm_count"] += qty_for_debug
-                    rpm_float = _as_float_or_none(rpm_val)
-                    ipr_float = _as_float_or_none(ipr_val)
-                    ipm_float = _as_float_or_none(ipm_val)
+                    rpm_float = to_float(rpm_val)
+                    ipr_float = to_float(ipr_val)
+                    ipm_float = to_float(ipm_val)
                     if (
                         (ipm_float is None or not math.isfinite(ipm_float))
                         and rpm_float is not None
@@ -10153,7 +10108,7 @@ def estimate_drilling_hours(
                         summary["diam_min"] = float(tool_dia_in)
                     if diam_max is None or float(tool_dia_in) > diam_max:
                         summary["diam_max"] = float(tool_dia_in)
-                    depth_float = _as_float_or_none(depth_val)
+                    depth_float = to_float(depth_val)
                     if depth_float is None:
                         try:
                             depth_float = float(depth_in)
@@ -10168,7 +10123,7 @@ def estimate_drilling_hours(
                             summary["depth_min"] = float(depth_float)
                         if depth_max is None or float(depth_float) > depth_max:
                             summary["depth_max"] = float(depth_float)
-                    peck_rate = _as_float_or_none(
+                    peck_rate = to_float(
                         overhead_for_calc.peck_penalty_min_per_in_depth
                     )
                     if depth_float is not None and peck_rate is not None and peck_rate > 0:
@@ -10176,17 +10131,17 @@ def estimate_drilling_hours(
                         if math.isfinite(peck_total) and peck_total > 0:
                             summary["peck_sum"] += peck_total * qty_for_debug
                             summary["peck_count"] += qty_for_debug
-                    dwell_val_float = _as_float_or_none(overhead_for_calc.dwell_min)
+                    dwell_val_float = to_float(overhead_for_calc.dwell_min)
                     if dwell_val_float is not None and dwell_val_float > 0:
                         summary["dwell_sum"] += float(dwell_val_float) * qty_for_debug
                         summary["dwell_count"] += qty_for_debug
                     index_min_val = None
                     if debug_payload is not None:
-                        index_min_val = _as_float_or_none(
+                        index_min_val = to_float(
                             debug_payload.get("index_min")
                         )
                     if index_min_val is None:
-                        index_sec_val = _as_float_or_none(
+                        index_sec_val = to_float(
                             overhead_for_calc.index_sec_per_hole
                         )
                         if index_sec_val is not None and index_sec_val > 0:
@@ -11914,6 +11869,8 @@ def compute_quote_from_df(df: pd.DataFrame,
             candidate = str(effective_material).strip()
             if candidate:
                 selected_material_name = candidate
+
+    selected_lookup = str(material_selection.get("material_lookup") or "").strip()
 
     drill_material_source = (
         selected_material_name
@@ -13732,7 +13689,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     quote_state.geo = dict(geo_payload)
 
 
-    baseline_setups = int(_as_float_or_none(setups) or _as_float_or_none(baseline_data.get("setups")) or 1)
+    baseline_setups = int(to_float(setups) or to_float(baseline_data.get("setups")) or 1)
     baseline_fixture = baseline_data.get("fixture")
 
     llm_baseline_payload = {
@@ -13755,7 +13712,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         if isinstance(bucket_caps_raw, dict):
             bucket_caps_clean: dict[str, float] = {}
             for key, raw in bucket_caps_raw.items():
-                cap_val = _as_float_or_none(raw)
+                cap_val = to_float(raw)
                 if cap_val is not None:
                     bucket_caps_clean[str(key)] = float(cap_val)
             if bucket_caps_clean:
