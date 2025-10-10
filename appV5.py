@@ -294,6 +294,11 @@ from typing import (
     TYPE_CHECKING,
 )
 
+try:  # pragma: no cover - typing backport for older Python versions
+    from typing import TypeAlias
+except ImportError:  # pragma: no cover - python <3.10
+    from typing_extensions import TypeAlias  # type: ignore[import]
+
 
 T = TypeVar("T")
 
@@ -4218,7 +4223,7 @@ SMALL = 1e-7
 
 def iter_solids(shape: "TopoDS_Shape"):
     explorer = cast(Callable[[Any, Any], Any], TopExp_Explorer)
-    exp = explorer(shape, cast(TopAbs_ShapeEnum, TopAbs_SOLID))
+    exp = explorer(shape, cast(int, TopAbs_SOLID))
     while exp.More():
         yield geometry.to_solid(exp.Current())
         exp.Next()
@@ -4226,14 +4231,14 @@ def iter_solids(shape: "TopoDS_Shape"):
 def explode_compound(shape: "TopoDS_Shape") -> list["TopoDS_Shape"]:
     """If the file is a big COMPOUND, break it into shapes (parts/bodies)."""
     explorer = cast(Callable[[Any, Any], Any], TopExp_Explorer)
-    exp = explorer(shape, cast(TopAbs_ShapeEnum, TopAbs_COMPOUND))
+    exp = explorer(shape, cast(int, TopAbs_COMPOUND))
     if exp.More():
         # Itï¿½s a compound ï¿½ return its shells/solids/faces as needed
         solids = list(iter_solids(shape))
         if solids:
             return solids
         # fallback to shells
-        sh = explorer(shape, cast(TopAbs_ShapeEnum, TopAbs_SHELL))
+        sh = explorer(shape, cast(int, TopAbs_SHELL))
         shells = []
         while sh.More():
             shells.append(geometry.to_shell(sh.Current()))
@@ -4351,7 +4356,7 @@ def _section_perimeter_len(shape, z_values):
         sec = BRepAlgoAPI_Section(shape, plane, False); sec.Build()
         if not sec.IsDone(): continue
         w = sec.Shape()
-        it = explorer(w, cast(TopAbs_ShapeEnum, TopAbs_EDGE))
+        it = explorer(w, cast(int, TopAbs_EDGE))
         while it.More():
             e = geometry.to_edge(it.Current())
             total += _length_of_edge(e)
@@ -6075,6 +6080,7 @@ def _iter_ordered_process_entries(
         )
 
 
+# pyright: ignore[reportGeneralTypeIssues]
 def render_quote(
     result: dict,
     currency: str = "$",
@@ -16939,12 +16945,12 @@ def compute_quote_from_df(
                 expected_labor_total,
                 rel_tol=0.0,
                 abs_tol=_LABOR_SECTION_ABS_EPSILON,
-            ):
-                logger.warning(
-                    "Labor section totals drifted: %.2f vs %.2f",
-                    labor_display_total,
-                    expected_labor_total,
-                )
+            )
+            logger.warning(
+                "Labor section totals drifted: %.2f vs %.2f",
+                labor_display_total,
+                expected_labor_total,
+            )
 
         labor_cost = recomputed_labor_total
 
