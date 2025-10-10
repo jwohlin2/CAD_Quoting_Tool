@@ -4880,7 +4880,7 @@ _PREFERRED_BUCKET_VIEW_ORDER: tuple[str, ...] = (
 )
 
 
-def _normalize_bucket_key(name: str) -> str:
+def _normalize_bucket_key(name: str | None) -> str:
     text = re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_")
     aliases = {
         "finishing": "finishing_deburr",
@@ -4921,7 +4921,7 @@ def _rate_key_for_bucket(bucket: str | None) -> str | None:
     return mapping.get(canon)
 
 
-def _canonical_bucket_key(name: str) -> str:
+def _canonical_bucket_key(name: str | None) -> str:
     normalized = _normalize_bucket_key(name)
     if not normalized:
         return ""
@@ -6533,9 +6533,11 @@ def render_quote(
                 if minutes <= 0 and op_entry.get("total", 0.0) <= 0:
                     continue
                 op_label = op_entry.get("op", "") or "Operation"
-                friendly = _process_label(_canonical_bucket_key(op_label))
-                if op_label:
-                    friendly = op_label.replace("_", " ").strip().title()
+                canonical_label = _canonical_bucket_key(str(op_label or ""))
+                friendly = _process_label(canonical_label)
+                raw_label = str(op_label or "").strip()
+                if raw_label:
+                    friendly = raw_label.replace("_", " ").strip().title()
                 op_line = f"  - {friendly}: {minutes:.1f} min"
                 detail_bits: list[str] = []
                 machine_cost = op_entry.get("machine", 0.0)
@@ -6909,7 +6911,9 @@ def render_quote(
                 "    ",
             )
         if not has_detail:
-            write_detail(nre_cost_details.get("Programming & Eng (per lot)"))
+            prog_detail = nre_cost_details.get("Programming & Eng (per lot)")
+            if prog_detail not in (None, ""):
+                write_detail(str(prog_detail))
 
     # Fixturing (with renamed subline)
     if (fix.get("per_lot", 0.0) > 0) or show_zeros or fix.get("build_hr"):
@@ -6922,7 +6926,9 @@ def render_quote(
                 "    ",
             )
         if not has_detail:
-            write_detail(nre_cost_details.get("Fixturing (per lot)"))
+            fix_detail = nre_cost_details.get("Fixturing (per lot)")
+            if fix_detail not in (None, ""):
+                write_detail(str(fix_detail))
 
     # Any other NRE numeric keys (auto include)
     other_nre_total = 0.0
@@ -7118,7 +7124,8 @@ def render_quote(
             merged_entry = merged_entries[canonical_label]
             row(merged_entry["label"], merged_entry["amount"], indent="  ")
             for detail_text in merged_entry["detail_texts"]:
-                write_detail(detail_text, indent="    ")
+                if detail_text not in (None, ""):
+                    write_detail(str(detail_text), indent="    ")
             if not merged_entry["detail_texts"] or merged_entry["process_keys_no_detail"]:
                 for proc_key in merged_entry["process_keys_no_detail"]:
                     add_process_notes(proc_key, indent="    ")
@@ -7189,7 +7196,7 @@ def render_quote(
         norm = _normalize_bucket_key(name)
         return norm.startswith("planner_")
 
-    ordered_process_items: list[tuple[str, float]] = []
+    sortable_process_items: list[tuple[int, int, str, float]] = []
     for original_index, (key, value) in enumerate(display_process_cost_items):
         norm = _normalize_bucket_key(key)
         if norm.startswith("planner_"):
@@ -7203,10 +7210,12 @@ def render_quote(
             # their original order to keep the output deterministic.
             sort_rank = len(bucket_sort_rank) + original_index
 
-        ordered_process_items.append(((sort_rank, original_index), (key, value)))
+        sortable_process_items.append((sort_rank, original_index, str(key), float(value or 0.0)))
 
-    ordered_process_items.sort(key=lambda item: item[0])
-    ordered_process_items = [item[1] for item in ordered_process_items]
+    sortable_process_items.sort(key=lambda item: (item[0], item[1]))
+    ordered_process_items: list[tuple[str, float]] = [
+        (key, value) for _, _, key, value in sortable_process_items
+    ]
 
     display_process_costs: dict[str, Any] = {}
     for key, value in (process_costs or {}).items():
@@ -7241,7 +7250,12 @@ def render_quote(
         if canon_key.startswith("planner_"):
             continue
         canonical_label, _ = _canonical_amortized_label(entry.label)
-        fallback_detail = labor_cost_details_input.get(canonical_label or entry.label)
+        fallback_detail_raw = labor_cost_details_input.get(canonical_label or entry.label)
+        fallback_detail = (
+            str(fallback_detail_raw).strip()
+            if fallback_detail_raw not in (None, "")
+            else None
+        )
 
         bucket = aggregated_process_rows.get(canon_key)
         if bucket is None:
@@ -7694,7 +7708,9 @@ def render_quote(
             label = key.replace("_", " ").replace("hr", "/hr").title()
             row(label, float(value), indent="  ")
             add_pass_basis(key, indent="    ")
-            write_detail(direct_cost_details.get(key), indent="    ")
+            detail_value = direct_cost_details.get(key)
+            if detail_value not in (None, ""):
+                write_detail(str(detail_value), indent="    ")
             amount_val = float(value or 0.0)
             pass_total += amount_val
             canonical_pass_label = canonical_label
@@ -8447,12 +8463,16 @@ def net_mass_kg(
 
     if not (plate_L_in and plate_W_in and t_in):
         return (None, None) if return_removed_mass else None
-    try:
-        L = float(plate_L_in)
-        W = float(plate_W_in)
-        T = float(t_in)
-    except Exception:
+
+    L_val = _coerce_float_or_none(plate_L_in)
+    W_val = _coerce_float_or_none(plate_W_in)
+    T_val = _coerce_float_or_none(t_in)
+    if L_val is None or W_val is None or T_val is None:
         return (None, None) if return_removed_mass else None
+
+    L = float(L_val)
+    W = float(W_val)
+    T = float(T_val)
     if L <= 0 or W <= 0 or T <= 0:
         return (None, None) if return_removed_mass else None
     vol_plate_in3 = L * W * T
