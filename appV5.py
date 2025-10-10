@@ -13005,7 +13005,9 @@ def compute_quote_from_df(
             if candidate:
                 selected_material_name = candidate
                 break
-    if selected_material_name is None and isinstance(getattr(quote_state, "effective", None), Mapping):
+    if selected_material_name is None and isinstance(
+        getattr(quote_state, "effective", None), _MappingABC
+    ):
         try:
             effective_material = quote_state.effective.get("material")  # type: ignore[union-attr]
         except Exception:
