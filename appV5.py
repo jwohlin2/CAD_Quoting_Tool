@@ -23,9 +23,7 @@ import re
 import time
 import typing
 from collections import Counter
-from collections.abc import Mapping as _CABCM
-
-Mapping = _CABCM
+from collections.abc import Mapping as _MappingABC
 from dataclasses import (
     asdict,
     dataclass,
@@ -137,6 +135,11 @@ from typing import (
     overload,
     TYPE_CHECKING,
 )
+
+
+_KT = TypeVar("_KT")
+_VT = TypeVar("_VT")
+Mapping: TypeAlias = _MappingABC[_KT, _VT]
 
 
 T = TypeVar("T")
@@ -372,29 +375,57 @@ from cad_quoter.domain_models import (
 )
 from cad_quoter.coerce import to_float, to_int
 from cad_quoter.utils import compact_dict, jdump, sdict, _first_non_none
+
+
+class _BoolMask(list[bool]):
+    """Boolean mask helper that emulates ``pandas.Series``'s ``any`` method."""
+
+    def any(self) -> bool:  # pragma: no cover - exercised indirectly via pandas paths
+        return any(self)
+
+
+def _fallback_match_items_contains(items: Iterable[Any], pattern: str) -> _BoolMask:
+    """Return a case-insensitive containment mask for *items* without pandas."""
+
+    mask = _BoolMask()
+    try:
+        regex = re.compile(pattern, re.IGNORECASE)
+    except re.error:
+        regex = None
+
+    if regex is not None:
+        mask.extend(bool(regex.search(str(item or ""))) for item in items)
+    else:
+        needle = str(pattern or "").strip().lower()
+        if not needle:
+            mask.extend(bool(str(item or "")) for item in items)
+        else:
+            mask.extend(needle in str(item or "").lower() for item in items)
+    return mask
+
+
 try:
     from cad_quoter.utils.geo_ctx import _should_include_outsourced_pass
 except Exception:  # pragma: no cover - fallback when optional import unavailable
-    from collections.abc import Mapping
     from typing import Any
 
     def _collection_has_text(value: Any) -> bool:
         if isinstance(value, str):
             return bool(value.strip())
-        if isinstance(value, Mapping):
+        if isinstance(value, _MappingABC):
             return any(_collection_has_text(candidate) for candidate in value.values())
         if isinstance(value, (list, tuple, set)):
             return any(_collection_has_text(candidate) for candidate in value)
         return False
 
     def _geo_mentions_outsourced(geo_context: Mapping[str, Any] | None) -> bool:
-        if isinstance(geo_context, Mapping):
+        if isinstance(geo_context, _MappingABC):
             if _collection_has_text(geo_context.get("finishes")):
                 return True
             if _collection_has_text(geo_context.get("finish_flags")):
                 return True
             inner = geo_context.get("geo")
-            if isinstance(inner, Mapping):
+            if isinstance(inner, _MappingABC):
                 return _geo_mentions_outsourced(inner)
         return False
 
@@ -409,8 +440,11 @@ except Exception:  # pragma: no cover - fallback when optional import unavailabl
             return True
         return _geo_mentions_outsourced(geo_context)
 try:
-    from cad_quoter.utils.text import _match_items_contains
+    from cad_quoter.utils.text import (
+        _match_items_contains as _imported_match_items_contains,
+    )
 except Exception:  # pragma: no cover - defensive fallback for optional import paths
+    _imported_match_items_contains = None  # type: ignore[assignment]
     _match_items_contains = _fallback_match_items_contains  # type: ignore[assignment]
 else:
     _match_items_contains = (
@@ -796,8 +830,9 @@ def _canonicalize_pass_through_map(data: Any) -> dict[str, float]:
 def canonicalize_pass_through_map(data: Any) -> dict[str, float]:
     """Return a canonicalized pass-through map with defensive fallback."""
 
-    canonicalizer = globals().get("_canonicalize_pass_through_map")
-    if callable(canonicalizer):
+    canonicalizer_obj = globals().get("_canonicalize_pass_through_map")
+    if callable(canonicalizer_obj):
+        canonicalizer = cast(Callable[[Any], dict[str, float]], canonicalizer_obj)
         try:
             return canonicalizer(data)
         except Exception:
@@ -1019,10 +1054,6 @@ try:
     from geo_read_more import build_geo_from_dxf as build_geo_from_dxf_path
 except Exception:
     build_geo_from_dxf_path = None  # type: ignore[assignment]
-
-
-_MappingABC = _CABCM
-
 _build_geo_from_dxf_hook: Optional[Callable[[str], Dict[str, Any]]] = None
 
 
