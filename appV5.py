@@ -2164,14 +2164,7 @@ def merge_effective(
 
     if guard_ctx.get("needs_back_face"):
         current_setups = eff.get("setups")
-        setups_val = to_float(current_setups)
-        try:
-            setups_int = int(round(float(setups_val))) if setups_val is not None else int(current_setups)
-        except Exception:
-            try:
-                setups_int = int(current_setups)
-            except Exception:
-                setups_int = 0
+        setups_int = to_int(current_setups) or 0
         if setups_int < 2:
             eff["setups"] = 2
             clamp_notes.append(f"setups {setups_int} → 2 (back-side guardrail)")
@@ -2298,7 +2291,8 @@ def reprice_with_effective(state: QuoteState) -> QuoteState:
     """Recompute effective values and enforce guardrails before pricing."""
 
     geo_ctx = state.geo or {}
-    inner_geo_ctx = geo_ctx.get("geo") if isinstance(geo_ctx.get("geo"), dict) else {}
+    inner_geo_raw = geo_ctx.get("geo")
+    inner_geo_ctx: dict[str, Any] = inner_geo_raw if isinstance(inner_geo_raw, dict) else {}
     hole_count_guard = _coerce_float_or_none(geo_ctx.get("hole_count"))
     if hole_count_guard is None:
         hole_count_guard = _coerce_float_or_none(inner_geo_ctx.get("hole_count"))
@@ -2402,10 +2396,7 @@ def get_why_text(
                     return float(hr_val)
                 except Exception:
                     return 0.0
-            try:
-                return float(value)
-            except Exception:
-                return 0.0
+            return 0.0
         num = to_float(value)
         return float(num) if num is not None else 0.0
 
