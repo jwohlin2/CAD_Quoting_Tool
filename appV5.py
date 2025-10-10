@@ -14537,6 +14537,7 @@ def compute_quote_from_df(
     planner_total_minutes = 0.0
     planner_bucket_view: dict[str, Any] | None = None
     planner_bucket_rollup: dict[str, dict[str, float]] | None = None
+    planner_totals_present = False
 
     if planner_pricing_result is not None:
         # Canonical planner integration + bucketization path
@@ -14726,7 +14727,12 @@ def compute_quote_from_df(
                         planner_drill_minutes = minutes_val
 
         planner_totals_present = any(
-            float(val) > 0.0 for val in (planner_machine_cost_total, planner_labor_cost_total, planner_total_minutes)
+            float(val) > 0.0
+            for val in (
+                planner_machine_cost_total,
+                planner_labor_cost_total,
+                planner_total_minutes,
+            )
         )
 
     if recognized_line_items <= 0:
@@ -15027,6 +15033,46 @@ def compute_quote_from_df(
         baseline_data["red_flags"] = list(red_flag_messages)
     baseline_data["speeds_feeds_path"] = speeds_feeds_path
     pricing_source_value = str(locals().get("pricing_source", "legacy") or "legacy")
+    if pricing_source_value != "planner":
+        planner_display_detected = False
+        if isinstance(process_meta, _MappingABC):
+            for key in process_meta.keys():
+                key_text = str(key or "").strip().lower()
+                if key_text.startswith("planner_"):
+                    planner_display_detected = True
+                    break
+            if not planner_display_detected:
+                planner_meta_total = process_meta.get("planner_total")
+                if isinstance(planner_meta_total, _MappingABC):
+                    raw_items = planner_meta_total.get("line_items")
+                    if isinstance(raw_items, (list, tuple)) and raw_items:
+                        planner_display_detected = True
+                    else:
+                        for field in (
+                            "total_cost",
+                            "cost",
+                            "minutes",
+                            "hr",
+                            "machine_cost",
+                            "labor_cost",
+                        ):
+                            try:
+                                value = planner_meta_total.get(field)
+                            except Exception:
+                                value = None
+                            try:
+                                if float(value or 0.0):
+                                    planner_display_detected = True
+                                    break
+                            except Exception:
+                                continue
+        if not planner_display_detected and planner_process_minutes is not None:
+            try:
+                planner_display_detected = float(planner_process_minutes) > 0.0
+            except Exception:
+                planner_display_detected = False
+        if planner_display_detected or bool(locals().get("used_planner")):
+            pricing_source_value = "planner"
     baseline_data["pricing_source"] = pricing_source_value
     if legacy_baseline_ignored:
         baseline_data["legacy_baseline_ignored"] = True
@@ -16891,7 +16937,7 @@ def compute_quote_from_df(
         "llm_cost_log": llm_cost_log,
     }
 
-    breakdown["pricing_source"] = pricing_source
+    breakdown["pricing_source"] = pricing_source_value
     if red_flag_messages:
         breakdown["red_flags"] = list(red_flag_messages)
     planner_bucket_display_map_breakdown: dict[str, dict[str, Any]] | None = None
@@ -16934,7 +16980,7 @@ def compute_quote_from_df(
 
     narrative_text = get_why_text(
         quote_state,
-        pricing_source=str(pricing_source),
+        pricing_source=str(pricing_source_value),
         process_meta=process_meta,
         final_hours=process_hours_final,
     )
@@ -16995,6 +17041,7 @@ def compute_quote_from_df(
         "red_flags": list(red_flag_messages),
         "app": dict(app_meta),
         "canonical_process_costs": canonical_process_costs,
+        "pricing_source": pricing_source_value,
     }
 
     if planner_bucket_display_map_breakdown:
