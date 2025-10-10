@@ -7826,51 +7826,84 @@ def render_quote(
             except Exception:
                 return 0.0
 
-        _record_hour_entry("Planner Total", planner_total_hr)
-        _record_hour_entry("Planner Labor", _planner_hours_for("planner_labor"), include_in_total=False)
-        _record_hour_entry(
-            "Planner Machine",
-            _planner_hours_for("planner_machine"),
-            include_in_total=False,
-        )
-        _record_hour_entry("Programming (lot)", programming_hours)
-        if programming_is_amortized and qty_for_hours > 0:
-            per_part_prog_hr = programming_hours / qty_for_hours
-            _record_hour_entry(
-                "Programming (amortized per part)",
-                per_part_prog_hr,
-                include_in_total=False,
-            )
-        _record_hour_entry("Fixture Build (lot)", fixture_hours)
-        if fixture_is_amortized and qty_for_hours > 0:
-            per_part_fixture_hr = fixture_hours / qty_for_hours
-            _record_hour_entry(
-                "Fixture Build (amortized per part)",
-                per_part_fixture_hr,
-                include_in_total=False,
-            )
-        for key, meta in sorted((process_meta or {}).items()):
-            key_lower = str(key).lower()
-            if key_lower.startswith("planner_") or key_lower == "planner total":
-                continue
-            meta = meta or {}
+        planner_labor_hr = _planner_hours_for("planner_labor")
+        planner_machine_hr = _planner_hours_for("planner_machine")
+
+        def _emit_hour_row(label: str, value: float, *, include_in_total: bool = True) -> None:
+            _record_hour_entry(label, value, include_in_total=include_in_total)
+
+        def _bucket_minutes(info: Mapping[str, Any] | None) -> float:
+            if not isinstance(info, Mapping):
+                return 0.0
+            try:
+                return float(info.get("minutes", 0.0) or 0.0)
+            except Exception:
+                return 0.0
+
+        def _hours_for_bucket(canon_key: str) -> float:
+            info: Mapping[str, Any] | None = None
+            if isinstance(planner_bucket_display_map, Mapping):
+                info = planner_bucket_display_map.get(canon_key)
+            if not isinstance(info, Mapping):
+                info = bucket_rollup_map.get(canon_key)
+            minutes_val = _bucket_minutes(info)
+            if minutes_val > 0:
+                return minutes_val / 60.0
+            meta = _lookup_process_meta(canon_key) or {}
             try:
                 hr_val = float(meta.get("hr", 0.0) or 0.0)
             except Exception:
                 hr_val = 0.0
-            if hr_val <= 0:
-                try:
-                    minutes_val = float(meta.get("minutes", 0.0) or 0.0)
-                except Exception:
-                    minutes_val = 0.0
-                if minutes_val > 0:
-                    hr_val = minutes_val / 60.0
-            canon_key = _canonical_bucket_key(key)
-            if canon_key:
-                display_label = _display_bucket_label(canon_key)
-            else:
-                display_label = _process_label(key)
-            _record_hour_entry(display_label, hr_val)
+            if hr_val > 0:
+                return hr_val
+            try:
+                minutes_meta = float(meta.get("minutes", 0.0) or 0.0)
+            except Exception:
+                minutes_meta = 0.0
+            if minutes_meta > 0:
+                return minutes_meta / 60.0
+            return 0.0
+
+        _emit_hour_row("Planner Total", round(planner_total_hr, 2))
+        _emit_hour_row("Planner Labor", round(planner_labor_hr, 2), include_in_total=False)
+        _emit_hour_row("Planner Machine", round(planner_machine_hr, 2), include_in_total=False)
+
+        skip_hour_canon_keys = {
+            "programming",
+            "fixture_build",
+            "programming_amortized",
+            "fixture_build_amortized",
+        }
+
+        for canon_key in aggregated_order:
+            if not canon_key or canon_key in skip_hour_canon_keys:
+                continue
+            if canon_key in {"planner_labor", "planner_machine", "planner_total"}:
+                continue
+            if canon_key.startswith("planner_"):
+                continue
+            hours_val = _hours_for_bucket(canon_key)
+            if hours_val <= 0.01:
+                continue
+            label = _display_bucket_label(canon_key, label_overrides)
+            _emit_hour_row(label, round(hours_val, 2))
+
+        _emit_hour_row("Programming (lot)", round(programming_hours, 2))
+        if programming_is_amortized and qty_for_hours > 0:
+            per_part_prog_hr = programming_hours / qty_for_hours
+            _emit_hour_row(
+                "Programming (amortized per part)",
+                round(per_part_prog_hr, 2),
+                include_in_total=False,
+            )
+        _emit_hour_row("Fixture Build (lot)", round(fixture_hours, 2))
+        if fixture_is_amortized and qty_for_hours > 0:
+            per_part_fixture_hr = fixture_hours / qty_for_hours
+            _emit_hour_row(
+                "Fixture Build (amortized per part)",
+                round(per_part_fixture_hr, 2),
+                include_in_total=False,
+            )
     else:
         for key, meta in sorted((process_meta or {}).items()):
             meta = meta or {}
