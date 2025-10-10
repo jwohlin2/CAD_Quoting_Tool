@@ -9697,11 +9697,16 @@ def estimate_drilling_hours(
     mat = str(material_label or mat_key or "").lower()
     material_factor = _unit_hp_cap(material_label)
     debug: dict[str, Any] | None
+    debug_meta: dict[str, Any] | None
     # Create a local debug aggregate only when caller requested debug output.
-    # Previously referenced an undefined 'debug_meta'; use available signals instead.
+    # Keep a "debug_meta" alias for backward compatibility with older call sites
+    # that expected the variable to exist (the original implementation raised a
+    # NameError when trying to reference it).
     if (debug_lines is not None) or (debug_summary is not None):
-        debug = {}
+        debug_meta = {}
+        debug = debug_meta
     else:
+        debug_meta = None
         debug = None
     debug_list = debug_lines if debug_lines is not None else None
     if debug_summary is not None:
