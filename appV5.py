@@ -18044,21 +18044,22 @@ def plan_stock_blank(
 
     density_val = _coerce_float_or_none(density_g_cc)
     if density_val and density_val > 0:
-        dims_in = (plate_len_in, plate_wid_in, thickness_in)
+        part_dims_in = (plate_len_in, plate_wid_in, thickness_in)
         part_mass_kg, _ = _plate_mass_from_dims(
             float(plate_len_in) * 25.4,
             float(plate_wid_in) * 25.4,
             float(thickness_in) * 25.4,
             density_val,
-            dims_in=dims_in,
+            dims_in=part_dims_in,
             hole_d_mm=holes_mm,
         )
+        stock_dims_in = (stock_len, stock_wid, stock_thk)
         stock_mass_kg, _ = _plate_mass_from_dims(
-            float(plate_len_in) * 25.4,
-            float(plate_wid_in) * 25.4,
-            float(thickness_in) * 25.4,
+            float(stock_len) * 25.4,
+            float(stock_wid) * 25.4,
+            float(stock_thk) * 25.4,
             density_val,
-            dims_in=dims_in,
+            dims_in=stock_dims_in,
             hole_d_mm=(),
         )
     else:
