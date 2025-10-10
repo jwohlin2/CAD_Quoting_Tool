@@ -557,13 +557,34 @@ def llm_sheet_and_param_overrides(geo: dict, df, params: dict, client: LLMClient
     return {"sheet_edits": sheet_edits, "params": param_edits, "param_whys": param_whys, "allowed_items": allowed, "meta": meta}
 
 
+def _jsonify_for_prompt(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(k): _jsonify_for_prompt(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_jsonify_for_prompt(v) for v in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    try:
+        return float(value)
+    except Exception:
+        try:
+            return value.item()  # numpy scalar
+        except Exception:
+            return str(value)
+
+
 def run_llm_suggestions(client: LLMClient, payload: dict) -> tuple[dict, str, dict]:
+    safe_payload = _jsonify_for_prompt(payload)
+    try:
+        prompt_body = json.dumps(safe_payload, indent=2)
+    except TypeError:
+        prompt_body = json.dumps(_jsonify_for_prompt(safe_payload), indent=2)
     parsed, raw, usage = client.ask_json(
         system_prompt=SYSTEM_SUGGEST,
-        user_prompt=json.dumps(payload, indent=2),
+        user_prompt=prompt_body,
         temperature=0.3,
         max_tokens=512,
-        context=payload,
+        context=safe_payload,
         params={"top_p": 0.9},
     )
     if not parsed:
