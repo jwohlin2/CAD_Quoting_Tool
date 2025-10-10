@@ -481,11 +481,23 @@ except ImportError:
         )
     except ImportError:  # pragma: no cover - only hit in environments without OCCT
         if TYPE_CHECKING:  # Keep type checkers happy without introducing runtime deps
-            from typing import Any
-
-            BRep_Tool = TopAbs_EDGE = TopAbs_FACE = TopExp = TopExp_Explorer = Any  # type: ignore[assignment]
-            TopoDS = TopoDS_Face = TopoDS_Shape = Any  # type: ignore[assignment]
-            TopTools_IndexedDataMapOfShapeListOfShape = Any  # type: ignore[assignment]
+            from OCP.BRep import BRep_Tool  # type: ignore[import-not-found]
+            from OCP.TopAbs import (  # type: ignore[import-not-found]
+                TopAbs_COMPOUND,
+                TopAbs_EDGE,
+                TopAbs_FACE,
+                TopAbs_SHELL,
+                TopAbs_SOLID,
+            )
+            from OCP.TopExp import TopExp, TopExp_Explorer  # type: ignore[import-not-found]
+            from OCP.TopoDS import (  # type: ignore[import-not-found]
+                TopoDS,
+                TopoDS_Face,
+                TopoDS_Shape,
+            )
+            from OCP.TopTools import (  # type: ignore[import-not-found]
+                TopTools_IndexedDataMapOfShapeListOfShape,
+            )
         else:
             class _MissingOCCTModule:
                 def __getattr__(self, item):
@@ -495,7 +507,7 @@ except ImportError:
                     )
 
             BRep_Tool = _MissingOCCTModule()
-            TopAbs_EDGE = TopAbs_FACE = _MissingOCCTModule()
+            TopAbs_EDGE = TopAbs_FACE = TopAbs_SHELL = TopAbs_SOLID = TopAbs_COMPOUND = _MissingOCCTModule()
             TopExp = TopExp_Explorer = _MissingOCCTModule()
             TopoDS = TopoDS_Face = TopoDS_Shape = _MissingOCCTModule()
             TopTools_IndexedDataMapOfShapeListOfShape = _MissingOCCTModule()
