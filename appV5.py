@@ -9411,7 +9411,7 @@ def _clean_hole_groups(raw: Any) -> list[dict[str, Any]] | None:
     return cleaned if cleaned else None
 
 MIN_DRILL_MIN_PER_HOLE = 0.10
-MAX_DRILL_MIN_PER_HOLE = 2.00
+DEFAULT_MAX_DRILL_MIN_PER_HOLE = 2.00
 
 DEEP_DRILL_SFM_FACTOR = 0.65
 DEEP_DRILL_IPR_FACTOR = 0.70
@@ -9426,7 +9426,7 @@ def _drill_minutes_per_hole_bounds(
     """Return the (min, max) minutes-per-hole bounds for drilling."""
 
     min_minutes = MIN_DRILL_MIN_PER_HOLE
-    max_minutes = MAX_DRILL_MIN_PER_HOLE
+    max_minutes = DEFAULT_MAX_DRILL_MIN_PER_HOLE
     depth_value = None
     if depth_in is not None:
         try:
@@ -9435,19 +9435,43 @@ def _drill_minutes_per_hole_bounds(
             depth_value = None
     if depth_value is not None and depth_value <= 0:
         depth_value = None
+
     if material_group:
-        key = str(material_group).strip().lower()
-        if any(token in key for token in {"steel", "inconel", "titanium"}):
-            dynamic_cap = None
-            if depth_value is not None:
-                dynamic_cap = 0.9 + 1.2 * depth_value
-            max_minutes = max(
-                max_minutes,
-                5.0,
-                dynamic_cap if dynamic_cap is not None else 0.0,
-            )
-        elif "alum" in key:
-            max_minutes = min(max_minutes, 1.5)
+        raw_key = str(material_group).strip()
+        key_lower = raw_key.lower()
+        key_upper = raw_key.upper()
+
+        def _starts_with(prefixes: tuple[str, ...]) -> bool:
+            return any(key_upper.startswith(prefix) for prefix in prefixes)
+
+        if (
+            "inconel" in key_lower
+            or "titanium" in key_lower
+            or key_upper.startswith("TI")
+            or _starts_with(("S", "H"))
+        ):
+            max_minutes = 6.0
+        elif (
+            "steel" in key_lower
+            or "stainless" in key_lower
+            or _starts_with(("P", "M"))
+        ):
+            max_minutes = 5.0
+        elif (
+            "alum" in key_lower
+            or "copper" in key_lower
+            or "brass" in key_lower
+            or "bronze" in key_lower
+            or _starts_with(("N", "C"))
+        ):
+            max_minutes = 2.0
+        else:
+            max_minutes = DEFAULT_MAX_DRILL_MIN_PER_HOLE
+
+    if depth_value is not None and depth_value > 1.0:
+        max_minutes += 0.2 * (depth_value - 1.0)
+
+    max_minutes = max(max_minutes, min_minutes)
     return min_minutes, max_minutes
 
 
@@ -9615,6 +9639,7 @@ def estimate_drilling_hours(
         overhead = overhead_params or _drill_overhead_from_params(None)
         per_hole_overhead = replace(overhead, toolchange_min=0.0)
         total_min = 0.0
+        total_toolchange_min = 0.0
         total_holes = 0
         material_cap_val = _as_float_or_none(material_factor)
         if material_cap_val is not None and material_cap_val <= 0:
@@ -9924,6 +9949,7 @@ def estimate_drilling_hours(
                     debug=debug_payload,
                     precomputed=precomputed_speeds,
                 )
+                overhead_for_calc = legacy_overhead
                 if minutes <= 0:
                     continue
             if minutes <= 0:
@@ -9939,7 +9965,7 @@ def estimate_drilling_hours(
             toolchange_added = 0.0
             if overhead.toolchange_min and qty_int > 0:
                 toolchange_added = float(overhead.toolchange_min)
-                total_min += toolchange_added
+                total_toolchange_min += toolchange_added
             if debug_payload is not None:
                 try:
                     operation_name = str(debug_payload.get("operation") or op_name).lower()
@@ -10158,6 +10184,30 @@ def estimate_drilling_hours(
                     if not summary.get("material"):
                         summary["material"] = "material"
                 qty_int = qty_for_debug
+        hole_count_for_clamp = total_holes
+        if hole_count_for_clamp <= 0 and fallback_counts:
+            hole_count_for_clamp = sum(
+                max(0, int(qty)) for qty in fallback_counts.values() if qty
+            )
+
+        clamp_ratio = 1.0
+        if total_min > 0 and hole_count_for_clamp > 0:
+            uncapped_minutes = total_min
+            clamped_hours = _apply_drill_minutes_clamp(
+                total_min / 60.0,
+                hole_count_for_clamp,
+                material_group=material_label,
+                depth_in=depth_for_bounds,
+            )
+            total_min = clamped_hours * 60.0
+            if uncapped_minutes > 1e-9:
+                clamp_ratio = total_min / uncapped_minutes
+
+        if clamp_ratio != 1.0 and debug_summary_entries:
+            for summary in debug_summary_entries.values():
+                minutes_total = summary.get("total_minutes", 0.0) or 0.0
+                summary["total_minutes"] = minutes_total * clamp_ratio
+
         if debug_lines is not None and debug_summary_entries:
             for op_key, summary in sorted(debug_summary_entries.items()):
                 qty_total = summary.get("qty", 0)
@@ -10299,6 +10349,8 @@ def estimate_drilling_hours(
                 )
                 if warning_text not in warnings:
                     warnings.append(warning_text)
+        total_minutes_with_toolchange = total_min + total_toolchange_min
+
         if debug is not None and total_holes > 0:
             try:
                 avg_dia_in = float(avg_dia_in)
@@ -10312,22 +10364,12 @@ def estimate_drilling_hours(
                     "ipr": None,
                     "rpm": None,
                     "ipm": None,
-                    "min_per_hole": (float(total_min)/float(total_holes)) if total_holes else 0.0,
+                    "min_per_hole": (float(total_min) / float(total_holes)) if total_holes else 0.0,
                     "hole_count": int(total_holes),
                 }
             )
-        if total_min > 0:
-            hole_count = total_holes
-            if hole_count <= 0 and fallback_counts:
-                hole_count = sum(
-                    max(0, int(qty)) for qty in fallback_counts.values() if qty
-                )
-            return _apply_drill_minutes_clamp(
-                total_min / 60.0,
-                hole_count,
-                material_group=material_label,
-                depth_in=depth_for_bounds,
-            )
+        if total_minutes_with_toolchange > 0:
+            return total_minutes_with_toolchange / 60.0
 
     thickness_for_fallback_mm = float(thickness_in or 0.0) * 25.4
     if thickness_for_fallback_mm <= 0:
