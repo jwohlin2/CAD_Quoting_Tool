@@ -163,6 +163,37 @@ def roughly_equal(a: float | int | str | None, b: float | int | str | None, *, e
     return math.isclose(a_val, b_val, rel_tol=0.0, abs_tol=abs(eps_val))
 
 
+def _fallback_match_items_contains(items: "pd.Series | typing.Iterable[object]", pattern: str):
+    """Best-effort case-insensitive containment check without pandas dependencies."""
+
+    try:
+        compiled = re.compile(pattern, flags=re.IGNORECASE)
+    except re.error:
+        compiled = re.compile(re.escape(pattern), flags=re.IGNORECASE)
+
+    def _matches(value: object) -> bool:
+        text = "" if value is None else str(value)
+        return bool(compiled.search(text))
+
+    try:  # Defer pandas import so the fallback works in minimal environments.
+        import pandas as pd  # type: ignore[import]
+    except Exception:  # pragma: no cover - pandas is an optional dependency here
+        pd = None  # type: ignore[assignment]
+
+    if pd is not None:
+        try:
+            series = items if isinstance(items, pd.Series) else pd.Series(list(items))
+        except Exception:
+            series = pd.Series([], dtype="object")
+        return series.astype(str).apply(_matches)
+
+    # When pandas is unavailable, return a basic list of booleans preserving order.
+    try:
+        return [_matches(value) for value in items]
+    except TypeError:
+        return []
+
+
 import sys
 import textwrap
 from typing import (
@@ -459,7 +490,7 @@ except Exception:  # pragma: no cover - fallback when optional import unavailabl
             return True
         return _geo_mentions_outsourced(geo_context)
 try:
-    from cad_quoter.utils.text import _match_items_contains
+    from cad_quoter.utils.text import _match_items_contains as _imported_match_items_contains
 except Exception:  # pragma: no cover - defensive fallback for optional import paths
     _match_items_contains = _fallback_match_items_contains  # type: ignore[assignment]
 else:
