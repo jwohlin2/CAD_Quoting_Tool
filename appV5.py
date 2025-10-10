@@ -11806,6 +11806,7 @@ def compute_quote_from_df(
     family_for_breakdown: str | None = None
     planner_pricing_result: dict[str, Any] | None = None
     planner_bucket_view: dict[str, Any] | None = None
+    planner_bucket_display_map: dict[str, dict[str, Any]] | None = None
     planner_two_bucket_rates: dict[str, Any] | None = None
     planner_geom_payload: dict[str, Any] | None = None
     planner_pricing_error: str | None = None
@@ -13579,6 +13580,7 @@ def compute_quote_from_df(
                     )
             planner_bucket_rollup = copy.deepcopy(bucket_view)
             planner_bucket_view = _prepare_bucket_view(bucket_view)
+            planner_bucket_display_map = _extract_bucket_map(planner_bucket_view)
             planner_bucket_view_copy = copy.deepcopy(planner_bucket_view)
             process_plan_summary["bucket_view"] = planner_bucket_view_copy
             quote_state.process_plan.setdefault("bucket_view", planner_bucket_view_copy)
@@ -13738,7 +13740,12 @@ def compute_quote_from_df(
                     )
                     bucket_map["drilling"] = entry
 
-                for mapping in (bucket_view, planner_bucket_view, planner_bucket_rollup):
+                for mapping in (
+                    bucket_view,
+                    planner_bucket_view,
+                    planner_bucket_rollup,
+                    planner_bucket_display_map,
+                ):
                     _apply_override_to_bucket_map(mapping)
                 plan_bucket_view = process_plan_summary.get("bucket_view")
                 _apply_override_to_bucket_map(plan_bucket_view)
@@ -13910,6 +13917,10 @@ def compute_quote_from_df(
         baseline_data["process_plan_pricing"] = copy.deepcopy(planner_pricing_result)
     if planner_bucket_view is not None:
         baseline_data["process_plan_bucket_view"] = copy.deepcopy(planner_bucket_view)
+    if planner_bucket_display_map:
+        baseline_data["planner_bucket_display_map"] = copy.deepcopy(
+            planner_bucket_display_map
+        )
     quote_state.baseline = baseline_data
     quote_state.process_plan = copy.deepcopy(process_plan_summary)
 
@@ -15329,6 +15340,7 @@ def compute_quote_from_df(
                 ) from bucketize_err
         else:
             planner_bucket_view = _prepare_bucket_view(raw_bucket_view)
+            planner_bucket_display_map = _extract_bucket_map(planner_bucket_view)
             process_plan_summary.setdefault("bucket_view", copy.deepcopy(planner_bucket_view))
             existing_plan = getattr(quote_state, "process_plan", None)
             if isinstance(existing_plan, dict):
@@ -15709,6 +15721,10 @@ def compute_quote_from_df(
         breakdown["bucket_view"] = copy.deepcopy(planner_bucket_view)
     if planner_bucket_rollup is not None:
         breakdown["planner_bucket_rollup"] = copy.deepcopy(planner_bucket_rollup)
+    if planner_bucket_display_map:
+        breakdown["planner_bucket_display_map"] = copy.deepcopy(
+            planner_bucket_display_map
+        )
 
     if process_plan_summary:
         breakdown["process_plan"] = copy.deepcopy(process_plan_summary)
