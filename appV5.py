@@ -150,18 +150,23 @@ def resolve_planner(
     return used_planner, planner_mode
 
 
-def _normalize_item_text(text: str | None) -> str:
+def _normalize_item_text(value: Any) -> str:
     """Return a normalized key for matching variables rows."""
 
-    if text is None:
-        return ""
-    cleaned = re.sub(r"\s+", " ", str(text)).strip().lower()
-    cleaned = cleaned.replace("\u00a0", " ")
-    cleaned = re.sub(r"[^a-z0-9]+", " ", cleaned)
-    return cleaned.strip()
+    if value is None:
+        text = ""
+    else:
+        text = str(value)
+    text = text.replace("\u00A0", " ")
+    text = re.sub(r"\s+", " ", text).strip().lower()
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
-normalize_item = _normalize_item_text
+def normalize_item(value: Any) -> str:
+    """Public wrapper for item normalization used across the editor."""
+
+    return _normalize_item_text(value)
 
 import cad_quoter.geometry as geometry
 from cad_quoter.geometry import read_dxf_as_occ_shape
@@ -368,7 +373,7 @@ def _canonicalize_pass_through_map(data: Any) -> dict[str, float]:
     def _add(label: Any, amount: Any) -> None:
         key = _canonical_pass_label(label)
         try:
-            val = float(to_float(amount)) if amount is not None else None
+            val = to_float(amount)
         except Exception:
             val = None
         if key and val is not None and math.isfinite(val):
@@ -599,7 +604,12 @@ def _iter_hole_diams_mm(geo_ctx: Mapping[str, Any] | None) -> list[float]:
 
     if not isinstance(geo_ctx, Mapping):
         return []
-    derived = geo_ctx.get("derived") if isinstance(geo_ctx.get("derived"), Mapping) else {}
+    geo_map = cast(Mapping[str, Any], geo_ctx)
+    derived_obj = geo_map.get("derived")
+    if isinstance(derived_obj, Mapping):
+        derived: Mapping[str, Any] = derived_obj
+    else:
+        derived = {}
     out: list[float] = []
 
     # DXF path: app already stores list of diameters as millimetres.
@@ -634,7 +644,12 @@ def _plate_bbox_mm2(geo_ctx: Mapping[str, Any] | None) -> float:
     if not isinstance(geo_ctx, Mapping):
         return 0.0
     # Preferred: derived bbox from DXF polylines
-    derived = geo_ctx.get("derived") if isinstance(geo_ctx.get("derived"), Mapping) else {}
+    geo_map = cast(Mapping[str, Any], geo_ctx)
+    derived_obj = geo_map.get("derived")
+    if isinstance(derived_obj, Mapping):
+        derived: Mapping[str, Any] = derived_obj
+    else:
+        derived = {}
     bbox_mm = derived.get("bbox_mm")
     if (
         isinstance(bbox_mm, (list, tuple))
@@ -645,22 +660,22 @@ def _plate_bbox_mm2(geo_ctx: Mapping[str, Any] | None) -> float:
 
     # Fallback: UI plate Length/Width (inches) already present in sheet/vars
     try:
-        L_in = float(geo_ctx.get("plate_length_mm") or 0.0) / 25.4  # if caller put mm there
+        L_in = float(geo_map.get("plate_length_mm") or 0.0) / 25.4  # if caller put mm there
     except Exception:
         L_in = None
     try:
-        W_in = float(geo_ctx.get("plate_width_mm") or 0.0) / 25.4
+        W_in = float(geo_map.get("plate_width_mm") or 0.0) / 25.4
     except Exception:
         W_in = None
 
     # If the mm fields aren't set, check UI vars stuffed into geo_ctx
     if not (L_in and W_in):
         try:
-            L_in = L_in or float(geo_ctx.get("plate_length_in"))
+            L_in = L_in or float(geo_map.get("plate_length_in"))
         except Exception:
             pass
         try:
-            W_in = W_in or float(geo_ctx.get("plate_width_in"))
+            W_in = W_in or float(geo_map.get("plate_width_in"))
         except Exception:
             pass
 
@@ -786,25 +801,6 @@ def normalize_scrap_pct(val: Any, cap: float = 0.25) -> float:
         raw = raw / 100.0
     raw = max(raw, 0.0)
     return min(cap_val, raw)
-
-
-def _normalize_item_text(value: Any) -> str:
-    """Return a normalized item label for loose string comparisons."""
-
-    if value is None:
-        text = ""
-    else:
-        text = str(value)
-    text = text.replace("\u00A0", " ")
-    text = re.sub(r"\s+", " ", text).strip().lower()
-    text = re.sub(r"[^a-z0-9]+", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def normalize_item(value: Any) -> str:
-    """Public wrapper for item normalization used across the editor."""
-
-    return _normalize_item_text(value)
 
 
 def _scrap_value_provided(val: Any) -> bool:
