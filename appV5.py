@@ -386,7 +386,40 @@ from cad_quoter.domain_models import (
 )
 from cad_quoter.coerce import to_float, to_int
 from cad_quoter.utils import compact_dict, jdump, sdict, _first_non_none
-from cad_quoter.utils.geo_ctx import _should_include_outsourced_pass
+try:
+    from cad_quoter.utils.geo_ctx import _should_include_outsourced_pass
+except Exception:  # pragma: no cover - fallback for standalone executions
+    def _collection_has_text(value: object) -> bool:
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, Mapping):
+            return any(_collection_has_text(candidate) for candidate in value.values())
+        if isinstance(value, (list, tuple, set)):
+            return any(_collection_has_text(candidate) for candidate in value)
+        return False
+
+    def _iter_geo_contexts(geo_context: Mapping[str, object] | None):
+        if isinstance(geo_context, Mapping):
+            yield geo_context
+            inner = geo_context.get("geo")
+            if isinstance(inner, Mapping):
+                yield inner
+
+    def _should_include_outsourced_pass(
+        outsourced_cost: float, geo_context: Mapping[str, object] | None
+    ) -> bool:
+        try:
+            cost_val = float(outsourced_cost)
+        except Exception:
+            cost_val = 0.0
+        if abs(cost_val) > 1e-6:
+            return True
+        for ctx in _iter_geo_contexts(geo_context):
+            if _collection_has_text(ctx.get("finishes")):
+                return True
+            if _collection_has_text(ctx.get("finish_flags")):
+                return True
+        return False
 try:
     from cad_quoter.utils.text import _match_items_contains
 except Exception:  # pragma: no cover - defensive fallback for optional import paths
