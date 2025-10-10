@@ -12667,6 +12667,16 @@ def compute_quote_from_df(
     _red_flag_seen: set[str] = set()
     # Legacy alias used by older code paths; keep synchronized for safety.
     red_flags = red_flag_messages
+    # A few external utilities imported this module expecting a module-level
+    # ``red_flags`` variable to exist.  Keep that alias in sync as well so these
+    # callers continue to work without raising ``NameError`` when only the
+    # compute function executes.
+    try:
+        globals()["red_flags"] = red_flag_messages
+    except Exception:
+        # ``globals()`` should always be writable here, but guard defensively to
+        # avoid surprising errors in constrained runtimes.
+        pass
 
     def _record_red_flag(message: str) -> None:
         text = str(message or "").strip()
@@ -16474,9 +16484,24 @@ def compute_quote_from_df(
     # Build a minimal process display list if not already available in this scope.
     # Earlier rendering helpers construct a richer list; here we only need
     # label/amount/detail_bits to merge labor detail text for the quote summary.
-    try:
-        entries_for_display = process_entries_for_display  # type: ignore[name-defined]
-    except NameError:
+    raw_entries_for_display: Any = None
+    if "process_entries_for_display" in locals():
+        raw_entries_for_display = locals().get("process_entries_for_display")
+    elif "process_entries_for_display" in globals():
+        raw_entries_for_display = globals().get("process_entries_for_display")
+
+    entries_for_display: list[ProcessDisplayEntry]
+    if isinstance(raw_entries_for_display, list):
+        entries_for_display = list(raw_entries_for_display)
+    elif raw_entries_for_display is not None:
+        try:
+            entries_for_display = list(raw_entries_for_display)
+        except Exception:
+            entries_for_display = []
+    else:
+        entries_for_display = []
+
+    if not entries_for_display:
         tmp_entries: list[ProcessDisplayEntry] = []
         for _key, _val in (process_costs or {}).items():
             try:
