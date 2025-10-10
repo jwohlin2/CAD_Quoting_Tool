@@ -82,28 +82,6 @@ LLM_MULTIPLIER_MIN = 0.25
 LLM_MULTIPLIER_MAX = 4.0
 LLM_ADDER_MAX = 8.0
 
-LLM_BOUND_DEFAULTS: Mapping[str, Any] = MappingProxyType(
-    {
-        "mult_min": LLM_MULTIPLIER_MIN,
-        "mult_max": LLM_MULTIPLIER_MAX,
-        "adder_max_hr": LLM_ADDER_MAX,
-        "scrap_min": 0.0,
-        "scrap_max": 0.25,
-        "adder_bucket_max": {},
-    }
-)
-
-
-LLM_BOUND_DEFAULTS: dict[str, Any] = {
-    "mult_min": LLM_MULTIPLIER_MIN,
-    "mult_max": LLM_MULTIPLIER_MAX,
-    "adder_max_hr": LLM_ADDER_MAX,
-    "adder_bucket_max": {},
-    "scrap_min": 0.0,
-    "scrap_max": 0.25,
-}
-
-
 def describe_runtime_environment() -> dict[str, str]:
     """Return a redacted snapshot of runtime configuration for auditors."""
 
@@ -1328,7 +1306,31 @@ def coerce_bounds(bounds: Mapping | None) -> dict[str, Any]:
     }
 
 
-LLM_BOUND_DEFAULTS: Mapping[str, Any] = MappingProxyType(coerce_bounds(None))
+def _default_llm_bounds_dict() -> dict[str, Any]:
+    """Return the sanitized default LLM guardrail bounds."""
+
+    return coerce_bounds({})
+
+
+def get_llm_bound_defaults() -> dict[str, Any]:
+    """Return a mutable copy of the default LLM guardrail bounds.
+
+    Older builds of this script may not have initialized ``LLM_BOUND_DEFAULTS``
+    when :func:`compute_quote_from_df` is imported.  To remain backwards
+    compatible we lazily rebuild the defaults if the module-level constant is
+    missing.
+    """
+
+    try:
+        base = LLM_BOUND_DEFAULTS  # type: ignore[name-defined]
+    except NameError:
+        base = MappingProxyType(_default_llm_bounds_dict())
+    if not isinstance(base, Mapping):
+        base = MappingProxyType(coerce_bounds(base))
+    return dict(base)
+
+
+LLM_BOUND_DEFAULTS: Mapping[str, Any] = MappingProxyType(_default_llm_bounds_dict())
 
 
 def build_suggest_payload(
@@ -14248,7 +14250,7 @@ def compute_quote_from_df(
         "setups": baseline_setups,
         "fixture": baseline_fixture,
     }
-    llm_bounds = dict(LLM_BOUND_DEFAULTS)
+    llm_bounds = get_llm_bound_defaults()
     llm_bounds.update({"scrap_min": 0.0, "scrap_max": 0.25})
     baseline_bounds = baseline_data.get("_bounds") if isinstance(baseline_data.get("_bounds"), dict) else None
     if baseline_bounds:
@@ -19639,7 +19641,7 @@ def get_llm_overrides(
     catalogs_ctx["stock"] = stock_catalog
     ctx["catalogs"] = catalogs_ctx
     bounds_ctx = dict(ctx.get("bounds") or {})
-    llm_bound_defaults = dict(LLM_BOUND_DEFAULTS)
+    llm_bound_defaults = get_llm_bound_defaults()
     bounds_ctx.update(
         {
             "mult_min": llm_bound_defaults["mult_min"],
