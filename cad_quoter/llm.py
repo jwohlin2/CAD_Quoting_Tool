@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
+from cad_quoter.utils import compact_dict
+
 
 def parse_llm_json(text: str) -> dict:
     """Best-effort JSON parser for model responses."""
@@ -200,18 +202,18 @@ class _LocalLLM:
 
     def _ensure(self) -> None:
         if self._llm is None:
-            kwargs = dict(
-                model_path=self._config.model_path,
-                n_ctx=self._config.n_ctx,
-                n_gpu_layers=self._config.n_gpu_layers,
-                n_threads=self._config.n_threads,
-                n_batch=self._config.n_batch,
-                logits_all=False,
-                verbose=False,
+            kwargs = compact_dict(
+                {
+                    "model_path": self._config.model_path,
+                    "n_ctx": self._config.n_ctx,
+                    "n_gpu_layers": self._config.n_gpu_layers,
+                    "n_threads": self._config.n_threads,
+                    "n_batch": self._config.n_batch,
+                    "logits_all": False,
+                    "verbose": False,
+                    "rope_freq_scale": self._config.rope_freq_scale,
+                }
             )
-            if self._config.rope_freq_scale is not None:
-                kwargs["rope_freq_scale"] = self._config.rope_freq_scale
-            kwargs = {k: v for k, v in kwargs.items() if v is not None}
             try:
                 self._llm = self._Llama(**kwargs)
             except Exception as exc:
@@ -764,7 +766,6 @@ Return JSON with this structure (numbers only, minutes only for CMM_RunTime_min)
 
 
 # Helpers imported from appV5 -------------------------------------------------
-import re
 
 
 def _parse_pct_like(x):

@@ -1,7 +1,8 @@
 
 from __future__ import annotations
 from typing import Dict, List, Optional, Any
-import pandas as pd, re
+import pandas as pd
+import re
 
 # ---------- Keyword buckets (extendable) ----------
 BUCKET_KEYWORDS = {
@@ -105,7 +106,7 @@ def _first_numeric(df: pd.DataFrame, patterns: List[str], default: float = 0.0) 
     return float(vals.iloc[0]) if not vals.empty else default
 
 def _bucket_hours(df_num: pd.DataFrame, keywords: Dict[str, List[str]]) -> Dict[str, float]:
-    out = {k:0.0 for k in keywords.keys()}
+    out = {k:0.0 for k in keywords}
     for key, pats in keywords.items():
         out[key] = _sum_if(df_num, pats)
     return out

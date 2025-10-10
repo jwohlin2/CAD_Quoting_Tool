@@ -347,7 +347,7 @@ def linear_properties(edge, gprops):
         try:
             from OCC.Core.BRepGProp import brepgprop_LinearProperties as _old  # type: ignore
             return _old(edge, gprops)
-        except Exception as e:
+        except Exception:
             raise
     return fn(edge, gprops)
 
@@ -450,7 +450,8 @@ def have_dwg_support() -> bool:
     return _HAS_ODAFC or bool(get_dwg_converter_path())
 
 def get_import_diagnostics_text() -> str:
-    import sys, os
+    import sys
+    import os
     lines = []
     lines.append(f"Python: {sys.executable}")
     try:
@@ -653,7 +654,6 @@ def build_llm_payload(structured: dict, page_image_path: str | None):
 
 # ==== OpenCascade compat (works with OCP OR OCC.Core) ====
 
-from pathlib import Path
 
 try:
     # ---- OCP branch ----
@@ -1543,7 +1543,8 @@ def update_variables_df_with_geo(df, geo: dict):
 
 def read_dxf_as_occ_shape(dxf_path: str):
     # minimal DXF?OCC triangulated shape (3DFACE/MESH/POLYFACE), fallback: extrude closed polyline
-    import ezdxf, numpy as np
+    import ezdxf
+    import numpy as np
     from OCP.BRepBuilderAPI import (BRepBuilderAPI_MakeFace, BRepBuilderAPI_MakePolygon,
                                     BRepBuilderAPI_Sewing, BRepBuilderAPI_MakeSolid)
     from OCP.gp import gp_Pnt, gp_Vec
