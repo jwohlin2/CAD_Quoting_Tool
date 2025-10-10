@@ -928,7 +928,7 @@ def build_suggest_payload(
                 "through": bool(entry.get("through")) if entry.get("through") is not None else None,
                 "count": to_int(entry.get("count")),
             }
-            hole_groups.append({k: v for k, v in cleaned_entry.items() if v not in (None, "")})
+            hole_groups.append(compact_dict(cleaned_entry, drop_values=(None, "")))
 
     geo_notes: list[str] = []
     raw_notes = geo.get("notes")
@@ -1195,7 +1195,7 @@ def sanitize_suggestions(s: dict, bounds: dict) -> dict:
         return value, detail
 
     def _store_meta(path: tuple[str, ...], detail: dict[str, Any], value: Any) -> None:
-        cleaned = {k: v for k, v in detail.items() if v not in (None, "", [], {})}
+        cleaned = compact_dict(detail)
         if not cleaned:
             return
         cleaned["value"] = value
@@ -11669,41 +11669,38 @@ def compute_quote_from_df(df: pd.DataFrame,
 
 
     if _process_plan_job is not None:
-        def _compact_dict(data: dict[str, Any]) -> dict[str, Any]:
-            cleaned: dict[str, Any] = {}
-            for key, value in data.items():
-                if value is None:
+        def _first_from_sources(
+            patterns: tuple[str, ...],
+            *sources: Mapping[str, Any],
+            transform: Callable[[Any], T | None],
+        ) -> T | None:
+            for source in sources:
+                if not isinstance(source, Mapping):
                     continue
-                if isinstance(value, (list, tuple)) and not value:
-                    continue
-                if isinstance(value, dict) and not value:
-                    continue
-                cleaned[key] = value
-            return cleaned
+                for label, raw_value in source.items():
+                    key = str(label)
+                    if any(re.search(pattern, key, re.IGNORECASE) for pattern in patterns):
+                        try:
+                            value = transform(raw_value)
+                        except Exception:
+                            value = None
+                        if value is not None:
+                            return value
+            return None
 
         def _first_numeric(patterns: tuple[str, ...], *sources: Mapping[str, Any]) -> float | None:
-            for source in sources:
-                if not isinstance(source, Mapping):
-                    continue
-                for label, raw_value in source.items():
-                    key = str(label)
-                    if any(re.search(pattern, key, re.IGNORECASE) for pattern in patterns):
-                        num = _coerce_float_or_none(raw_value)
-                        if num is not None:
-                            return float(num)
-            return None
+            return _first_from_sources(
+                patterns,
+                *sources,
+                transform=_coerce_float_or_none,
+            )
 
         def _first_text(patterns: tuple[str, ...], *sources: Mapping[str, Any]) -> str | None:
-            for source in sources:
-                if not isinstance(source, Mapping):
-                    continue
-                for label, raw_value in source.items():
-                    key = str(label)
-                    if any(re.search(pattern, key, re.IGNORECASE) for pattern in patterns):
-                        text = str(raw_value).strip()
-                        if text:
-                            return text
-            return None
+            return _first_from_sources(
+                patterns,
+                *sources,
+                transform=lambda raw: (str(raw).strip() or None),
+            )
 
         def _count_from_ui(patterns: tuple[str, ...]) -> int:
             val = _first_numeric(patterns, ui_vars)
@@ -11940,7 +11937,7 @@ def compute_quote_from_df(df: pd.DataFrame,
             if hole_sets:
                 inputs["hole_sets"] = hole_sets
 
-            return _compact_dict(inputs)
+            return compact_dict(inputs)
 
         def _bbox_inches() -> tuple[float | None, float | None, float | None]:
             length = _mm_to_in(_coerce_float_or_none(geo_context.get("plate_length_mm")) or bbox_info.get("max_dim_mm"))
@@ -11983,9 +11980,9 @@ def compute_quote_from_df(df: pd.DataFrame,
             bearing_width = _first_numeric((r"bearing\s*(land|width)",), ui_vars)
             bearing_ra = _first_numeric((r"bearing.*ra", r"surface\s*finish"), tolerance_inputs, ui_vars)
             if bearing_width or bearing_ra:
-                inputs["bearing_land_spec"] = _compact_dict({"width": bearing_width, "Ra": bearing_ra})
+                inputs["bearing_land_spec"] = compact_dict({"width": bearing_width, "Ra": bearing_ra})
 
-            return _compact_dict(inputs)
+            return compact_dict(inputs)
 
         def _build_bushing_inputs() -> dict[str, Any]:
             inputs: dict[str, Any] = {
@@ -11999,7 +11996,7 @@ def compute_quote_from_df(df: pd.DataFrame,
             if wire_text:
                 lowered = wire_text.lower()
                 inputs["create_id_by_wire_first"] = "wire" in lowered or "wedm" in lowered
-            return _compact_dict(inputs)
+            return compact_dict(inputs)
 
         def _build_cam_inputs() -> dict[str, Any]:
             inputs: dict[str, Any] = {
@@ -12012,10 +12009,10 @@ def compute_quote_from_df(df: pd.DataFrame,
                 sharp_text = _first_text((r"sharp", r"wedm"), tolerance_inputs, ui_vars)
                 if sharp_text and any(word in sharp_text.lower() for word in ("sharp", "wedm")):
                     inputs["windows_need_sharp"] = True
-            return _compact_dict(inputs)
+            return compact_dict(inputs)
 
         def _build_extrude_hone_inputs() -> dict[str, Any]:
-            return _compact_dict(
+            return compact_dict(
                 {
                     "target_Ra": _first_numeric((r"target\s*ra", r"surface\s*finish"), tolerance_inputs, ui_vars)
                     or _coerce_float_or_none(geo_context.get("target_Ra")),
@@ -12082,7 +12079,7 @@ def compute_quote_from_df(df: pd.DataFrame,
                     hints["recommended_wire_passes"] = f"R+{skims}S"
                     hints["recommended_wire_skims"] = skims
 
-            return _compact_dict(hints)
+            return compact_dict(hints)
 
         planner_family: str | None = None
         planner_inputs: dict[str, Any] | None = None
@@ -12130,7 +12127,9 @@ def compute_quote_from_df(df: pd.DataFrame,
             planner_inputs = _build_punch_inputs()
             if planner_inputs is None:
                 planner_inputs = {}
-            planner_inputs = _compact_dict({**planner_inputs, "runout_to_shank": planner_inputs.get("runout_to_shank", 0.0003)})
+            planner_inputs = compact_dict(
+                {**planner_inputs, "runout_to_shank": planner_inputs.get("runout_to_shank", 0.0003)}
+            )
         elif planner_family == "bushing_id_critical":
             planner_inputs = _build_bushing_inputs()
         elif planner_family == "cam_or_hemmer":
@@ -12390,8 +12389,9 @@ def compute_quote_from_df(df: pd.DataFrame,
                     )
             planner_bucket_rollup = copy.deepcopy(bucket_view)
             planner_bucket_view = _prepare_bucket_view(bucket_view)
-            process_plan_summary["bucket_view"] = copy.deepcopy(planner_bucket_view)
-            quote_state.process_plan.setdefault("bucket_view", copy.deepcopy(planner_bucket_view))
+            planner_bucket_view_copy = copy.deepcopy(planner_bucket_view)
+            process_plan_summary["bucket_view"] = planner_bucket_view_copy
+            quote_state.process_plan.setdefault("bucket_view", planner_bucket_view_copy)
             drill_bucket = bucket_view.get("drilling") if isinstance(bucket_view, _MappingABC) else None
             if drill_bucket:
                 try:
