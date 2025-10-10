@@ -6071,6 +6071,9 @@ def render_quote(
     params       = breakdown.get("params", {}) or {}
     nre_cost_details = breakdown.get("nre_cost_details", {}) or {}
     labor_cost_details_input_raw = breakdown.get("labor_cost_details", {}) or {}
+    suppress_planner_details_due_to_drift = bool(
+        breakdown.get("suppress_planner_details_due_to_drift")
+    )
 
     # Shipping is displayed in exactly one section of the quote to avoid
     # conflicting totals.  Prefer the pass-through value when available and
@@ -7273,7 +7276,7 @@ def render_quote(
                     op_line += " (" + ", ".join(detail_bits) + ")"
                 planner_why_lines.append(op_line)
 
-    if planner_why_lines:
+    if planner_why_lines and not suppress_planner_details_due_to_drift:
         why_parts.extend(planner_why_lines)
 
     material_display_for_debug: str = ""
@@ -12481,6 +12484,7 @@ def compute_quote_from_df(
         _planner_meta_tracker["keys"] = set()
 
     red_flag_messages: list[str] = []
+    suppress_planner_details_due_to_drift = False
     # Historically this function exposed a ``red_flags`` list.  Some call
     # sites—including legacy desktop builds—still expect that name when adding
     # new messages.  Provide an alias so any lingering references continue to
@@ -16488,30 +16492,59 @@ def compute_quote_from_df(
     except Exception:  # pragma: no cover - defensive logging
         logger.exception("Labor section invariant calculation failed")
     else:
+        recomputed_labor_total = round(labor_display_total, 2)
         expected_labor_total = float(labor_cost or 0.0)
-        diff = abs(labor_display_total - expected_labor_total)
+        diff = abs(recomputed_labor_total - expected_labor_total)
         if diff > 0.5:
             flag_message = (
                 f"Labor totals drifted by ${diff:,.2f}: "
-                f"rendered ${labor_display_total:,.2f} vs expected ${expected_labor_total:,.2f}"
+                f"rendered ${recomputed_labor_total:,.2f} vs expected ${expected_labor_total:,.2f}"
             )
             _record_red_flag(flag_message)
+            suppress_planner_details_due_to_drift = True
             logger.warning(
                 "Labor section totals drifted beyond threshold: %.2f vs %.2f",
-                labor_display_total,
+                recomputed_labor_total,
                 expected_labor_total,
             )
         elif not math.isclose(
-            labor_display_total,
+            recomputed_labor_total,
             expected_labor_total,
             rel_tol=0.0,
             abs_tol=_LABOR_SECTION_ABS_EPSILON,
         ):
             logger.warning(
                 "Labor section totals drifted: %.2f vs %.2f",
-                labor_display_total,
+                recomputed_labor_total,
                 expected_labor_total,
             )
+
+        labor_cost = recomputed_labor_total
+
+        insurance_cost = insurance_pct * (labor_cost + base_direct_costs)
+        vendor_marked_add = vendor_markup * (outsourced_costs + shipping_cost)
+        if base_directs_excluding_ship_mat > 0:
+            insurance_cost = round(insurance_cost, 2)
+            vendor_marked_add = round(vendor_marked_add, 2)
+            pass_through["Insurance"] = insurance_cost
+            pass_through["Vendor Markup Added"] = vendor_marked_add
+            total_direct_costs = base_direct_costs + insurance_cost + vendor_marked_add
+        else:
+            insurance_cost = 0.0
+            vendor_marked_add = 0.0
+            total_direct_costs = base_direct_costs
+            pass_through.pop("Insurance", None)
+            pass_through.pop("Vendor Markup Added", None)
+
+        direct_costs = total_direct_costs
+        subtotal = labor_cost + direct_costs
+        with_overhead = subtotal * (1.0 + OverheadPct)
+        with_ga = with_overhead * (1.0 + GA_Pct)
+        with_cont = with_ga * (1.0 + ContingencyPct)
+        with_expedite = with_cont * (1.0 + ExpeditePct)
+        price_before_margin = with_expedite
+        price = price_before_margin * (1.0 + MarginPct)
+        price = max(price, min_lot)
 
     direct_costs_display: dict[str, float] = {label: float(value) for label, value in pass_through.items()}
     direct_cost_details: dict[str, str] = {}
@@ -16678,6 +16711,8 @@ def compute_quote_from_df(
     breakdown["pricing_source"] = pricing_source_value
     if red_flag_messages:
         breakdown["red_flags"] = list(red_flag_messages)
+    if suppress_planner_details_due_to_drift:
+        breakdown["suppress_planner_details_due_to_drift"] = True
     planner_bucket_display_map_breakdown: dict[str, dict[str, Any]] | None = None
     if planner_bucket_view is not None:
         planner_bucket_display_map_breakdown = _extract_bucket_map(planner_bucket_view)
