@@ -19030,12 +19030,8 @@ class App(tk.Tk):
         self.editor_widgets_frame = parent
         self.editor_widgets_frame.grid_columnconfigure(0, weight=1)
 
-        def normalize_item(value: str) -> str:
-            cleaned = re.sub(r"[^0-9a-z&$]+", " ", str(value).strip().lower())
-            return re.sub(r"\s+", " ", cleaned).strip()
-
         items_series = df["Item"].astype(str)
-        normalized_items = items_series.apply(normalize_item)
+        normalized_items = items_series.apply(_normalize_item_text)
         qty_mask = normalized_items.isin({"quantity", "qty", "lot size"})
         if qty_mask.any():
             qty_raw = df.loc[qty_mask, "Example Values / Options"].iloc[0]
@@ -19064,7 +19060,7 @@ class App(tk.Tk):
             "Packaging $/hr",
             "Quantity", "Qty", "Lot Size",
         }
-        skip_items = {normalize_item(item) for item in raw_skip_items}
+        skip_items = {_normalize_item_text(item) for item in raw_skip_items}
 
 
         material_lookup: Dict[str, float] = {}
@@ -19964,10 +19960,7 @@ class App(tk.Tk):
                 self.param_vars["Quantity"].set(str(quantity_val))
 
         if self.vars_df is not None and raw_param_values:
-            def normalize_item(value: str) -> str:
-                cleaned = re.sub(r"[^0-9a-z&$]+", " ", str(value).strip().lower())
-                return re.sub(r"\s+", " ", cleaned).strip()
-            normalized_items = self.vars_df["Item"].astype(str).apply(normalize_item)
+            normalized_items = self.vars_df["Item"].astype(str).apply(_normalize_item_text)
             param_to_items = {
                 "OverheadPct": ["overhead %", "overhead"],
                 "GA_Pct": ["g&a %", "ga %"],
