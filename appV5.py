@@ -785,15 +785,6 @@ def bin_diams_mm(diams: Iterable[float | int | None], step: float = 0.1) -> Dict
     return dict(sorted(counter.items(), key=lambda item: (-item[1], item[0])))
 
 
-try:  # Optional dependency – ezdxf may be missing in some environments.
-    import ezdxf  # type: ignore
-except Exception as _ezdxf_exc:  # pragma: no cover - import guard
-    ezdxf = None  # type: ignore
-    _EZDXF_IMPORT_ERROR: Exception | None = _ezdxf_exc
-else:  # pragma: no cover - exercised when ezdxf is installed
-    _EZDXF_IMPORT_ERROR = None
-
-
 _INSUNITS_TO_MM = {
     0: 1.0,
     1: 25.4,
@@ -809,13 +800,6 @@ _INSUNITS_TO_MM = {
 }
 
 
-def _require_ezdxf() -> None:
-    if ezdxf is None:  # pragma: no cover - defensive guard
-        raise RuntimeError(
-            "ezdxf is required for DXF parsing but is not installed"
-        ) from _EZDXF_IMPORT_ERROR
-
-
 def _unit_scale(doc) -> float:
     insunits = int((doc.header.get("$INSUNITS", 4)) if doc else 4)
     return float(_INSUNITS_TO_MM.get(insunits, 1.0))
@@ -824,7 +808,7 @@ def _unit_scale(doc) -> float:
 def read_dxf(path: str):
     """Load ``path`` with :mod:`ezdxf` and return the document object."""
 
-    _require_ezdxf()
+    ezdxf = require_ezdxf()
     path = str(path)
     if not Path(path).exists():
         raise FileNotFoundError(path)
@@ -3757,12 +3741,6 @@ def list_iter(lst):
 
 
 # ---- tiny helpers you can use elsewhere --------------------------------------
-def require_ezdxf():
-    """Raise a clear error if ezdxf is missing."""
-    if not _HAS_EZDXF:
-        raise RuntimeError("ezdxf not installed. Install with pip/conda (package name: 'ezdxf').")
-    return ezdxf
-
 def get_dwg_converter_path() -> str:
     """Resolve a DWG?DXF converter path (.bat/.cmd/.exe)."""
     exe = os.environ.get("ODA_CONVERTER_EXE") or os.environ.get("DWG2DXF_EXE")
@@ -3861,7 +3839,7 @@ def upsert_var_row(df, item, value, dtype="number"):
 DIM_RE = re.compile(r"(?:ï¿½|DIAM|DIA)\s*([0-9.+-]+)|R\s*([0-9.+-]+)|([0-9.+-]+)\s*[xX]\s*([0-9.+-]+)")
 
 def load_drawing(path: Path) -> Drawing:
-    require_ezdxf()
+    ezdxf = require_ezdxf()
     if path.suffix.lower() == ".dwg":
         # Prefer explicit converter/wrapper if configured (works even if ODA isnï¿½t on PATH)
         exe = get_dwg_converter_path()
@@ -17542,7 +17520,7 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
 
 
 def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
-    _require_ezdxf()
+    ezdxf = require_ezdxf()
 
 
     # --- load doc ---
