@@ -10,7 +10,7 @@ def test_render_quote_places_why_after_pricing_ladder_and_llm_adjustments() -> N
             "qty": 3,
             "totals": {
                 "labor_cost": 25.0,
-                "direct_costs": 10.0,
+                "direct_costs": 15.0,
                 "subtotal": 40.0,
                 "with_overhead": 44.0,
                 "with_ga": 46.2,
@@ -22,7 +22,7 @@ def test_render_quote_places_why_after_pricing_ladder_and_llm_adjustments() -> N
             "material": {},
             "process_costs": {"machining": 25.0},
             "process_meta": {},
-            "pass_through": {"material": 5.0},
+            "pass_through": {"Material": 15.0},
             "applied_pcts": {
                 "OverheadPct": 0.10,
                 "GA_Pct": 0.05,
@@ -56,6 +56,87 @@ def test_render_quote_places_why_after_pricing_ladder_and_llm_adjustments() -> N
     assert pricing_idx < llm_idx < why_idx
     assert lines[why_idx - 1] == ""
     assert rendered.endswith("\n")
+
+
+def test_render_quote_planner_why_section_uses_final_bucket_view() -> None:
+    breakdown = {
+        "qty": 1,
+        "totals": {
+            "labor_cost": 900.0,
+            "direct_costs": 175.0,
+            "subtotal": 1075.0,
+            "with_overhead": 1182.5,
+            "with_ga": 1241.625,
+            "with_contingency": 1241.625,
+            "with_expedite": 1241.625,
+        },
+        "nre_detail": {},
+        "nre": {},
+        "material": {"scrap_pct": 0.12},
+        "process_costs": {},
+        "process_meta": {},
+        "pass_through": {"Material": 150.0, "Shipping": 25.0},
+        "applied_pcts": {
+            "OverheadPct": 0.10,
+            "GA_Pct": 0.05,
+            "ContingencyPct": 0.0,
+            "MarginPct": 0.15,
+        },
+        "rates": {},
+        "params": {},
+        "labor_cost_details": {},
+        "direct_cost_details": {},
+        "pricing_source": "planner",
+        "bucket_view": {
+            "buckets": {
+                "milling": {
+                    "total$": 500.0,
+                    "machine$": 350.0,
+                    "labor$": 150.0,
+                    "minutes": 120.0,
+                },
+                "drilling": {
+                    "total$": 300.0,
+                    "machine$": 200.0,
+                    "labor$": 100.0,
+                    "minutes": 90.0,
+                },
+                "inspection": {
+                    "total$": 100.0,
+                    "labor$": 100.0,
+                    "minutes": 60.0,
+                },
+                "finishing": {
+                    "total$": 50.0,
+                    "labor$": 50.0,
+                    "minutes": 30.0,
+                },
+            }
+        },
+        "decision_state": {"effective": {"setups": 2, "part_count": 4}},
+    }
+
+    result = {"price": 1450.0, "breakdown": breakdown}
+
+    rendered = appV5.render_quote(result, currency="$")
+    lines = rendered.splitlines()
+
+    heading = "Planner operations (final bucket view):"
+    assert any(line.strip() == heading for line in lines)
+    heading_idx = next(i for i, line in enumerate(lines) if line.strip() == heading)
+    bucket_lines = lines[heading_idx + 1 : heading_idx + 4]
+
+    assert len(bucket_lines) == 3
+    assert bucket_lines[0].strip().startswith("Milling:")
+    assert "$500.00" in bucket_lines[0]
+    assert "hr" in bucket_lines[0]
+    assert all("overrides" not in line for line in bucket_lines)
+
+    trailing_block = [line.strip() for line in lines[heading_idx + 1 : heading_idx + 10]]
+    assert any(line.startswith("Parts: 4") for line in trailing_block)
+    assert any(line.startswith("Setups: 2") for line in trailing_block)
+    assert any("Scrap: 12.0%" in line for line in trailing_block)
+    assert any("Pass-Through: $175.00" in line for line in trailing_block)
 
 
 def test_render_quote_includes_hour_summary() -> None:
@@ -102,14 +183,13 @@ def test_render_quote_includes_hour_summary() -> None:
     summary_idx = lines.index("Labor Hour Summary")
     divider_idx = summary_idx + 1
     assert lines[divider_idx].startswith("-")
-    summary_block = lines[summary_idx:summary_idx + 7]
+    summary_block = lines[summary_idx:summary_idx + 6]
     assert any("Milling" in line and "4.00 hr" in line for line in summary_block)
     assert any(
         "Finishing/Deburr" in line and "1.50 hr" in line for line in summary_block
         for line in summary_block
     )
-    assert any("Inspection" in line and "0.50 hr" in line for line in summary_block)
-    assert any("Total Hours" in line and "6.00 hr" in line for line in summary_block)
+    assert any("Total Hours" in line and "5.50 hr" in line for line in summary_block)
 
 
 def test_render_quote_merges_deburr_variants() -> None:
@@ -119,12 +199,12 @@ def test_render_quote_merges_deburr_variants() -> None:
             "qty": 2,
             "totals": {
                 "labor_cost": 55.0,
-                "direct_costs": 10.0,
+                "direct_costs": 15.0,
                 "subtotal": 70.0,
                 "with_overhead": 77.0,
                 "with_ga": 80.85,
-                "with_contingency": 82.4715,
-                "with_expedite": 82.4715,
+                "with_contingency": 82.467,
+                "with_expedite": 82.467,
             },
             "nre_detail": {},
             "nre": {},
@@ -139,7 +219,7 @@ def test_render_quote_merges_deburr_variants() -> None:
                 "deburr": {"hr": 1.0},
                 "Finishing/Deburr": {"hr": 0.5},
             },
-            "pass_through": {},
+            "pass_through": {"Material": 15.0},
             "applied_pcts": {
                 "OverheadPct": 0.10,
                 "GA_Pct": 0.05,
@@ -190,7 +270,7 @@ def test_render_quote_skips_duplicate_programming_amortized_row() -> None:
                 "milling": {"hr": 2.5},
                 "Programming (amortized)": {"hr": 0.75},
             },
-            "pass_through": {},
+            "pass_through": {"Material": 20.0},
             "applied_pcts": {
                 "OverheadPct": 0.10,
                 "GA_Pct": 0.05,
@@ -214,6 +294,81 @@ def test_render_quote_skips_duplicate_programming_amortized_row() -> None:
     assert len(programming_lines) == 1
 
 
+def test_render_quote_includes_amortized_and_misc_rows() -> None:
+    result = {
+        "price": 420.0,
+        "breakdown": {
+            "qty": 5,
+            "totals": {
+                "labor_cost": 255.0,
+                "direct_costs": 40.0,
+                "subtotal": 295.0,
+                "with_overhead": 324.5,
+                "with_ga": 340.725,
+                "with_contingency": 347.5395,
+                "with_expedite": 347.5395,
+            },
+            "nre_detail": {
+                "programming": {
+                    "prog_hr": 2.0,
+                    "prog_rate": 60.0,
+                    "eng_hr": 1.0,
+                    "eng_rate": 55.0,
+                },
+                "fixture": {
+                    "build_hr": 1.5,
+                    "labor_cost": 90.0,
+                    "build_rate": 50.0,
+                },
+            },
+            "nre": {},
+            "material": {},
+            "process_costs": {"milling": 120.0, "deburr": 80.0},
+            "process_meta": {"milling": {"hr": 2.0}, "deburr": {"hr": 1.0}},
+            "pass_through": {"Material": 40.0},
+            "labor_costs": {
+                "Milling": 120.0,
+                "Finishing/Deburr": 80.0,
+                "Programming (amortized)": 30.0,
+                "Fixture Build (amortized)": 20.0,
+                "Misc (LLM deltas)": 5.0,
+            },
+            "applied_pcts": {
+                "OverheadPct": 0.10,
+                "GA_Pct": 0.05,
+                "ContingencyPct": 0.02,
+                "MarginPct": 0.15,
+            },
+            "rates": {"FixtureBuildRate": 50.0},
+            "params": {},
+            "labor_cost_details": {},
+            "direct_cost_details": {},
+        },
+    }
+
+    rendered = appV5.render_quote(result, currency="$")
+    lines = rendered.splitlines()
+
+    labor_idx = lines.index("Process & Labor Costs")
+    next_blank = next(i for i in range(labor_idx + 1, len(lines)) if lines[i] == "")
+    labor_section = lines[labor_idx:next_blank]
+
+    assert any("Programming (amortized)" in line for line in labor_section)
+    assert any("Fixture Build (amortized)" in line for line in labor_section)
+    assert any("Misc (LLM deltas)" in line for line in labor_section)
+
+    section_total_line = next(
+        line for line in labor_section if line.strip().startswith("Total") and "$" in line
+    )
+    section_total = float(section_total_line.split("$")[-1].replace(",", ""))
+
+    total_labor_line = next(line for line in lines if line.startswith("Total Labor Cost:"))
+    total_labor_amount = float(total_labor_line.split("$")[-1].replace(",", ""))
+
+    assert abs(section_total - 255.0) < 1e-6
+    assert abs(total_labor_amount - section_total) < 1e-6
+
+
 def test_render_quote_hour_summary_adds_programming_hours() -> None:
     result = {
         "price": 150.0,
@@ -221,12 +376,12 @@ def test_render_quote_hour_summary_adds_programming_hours() -> None:
             "qty": 5,
             "totals": {
                 "labor_cost": 78.0,
-                "direct_costs": 30.0,
+                "direct_costs": 42.0,
                 "subtotal": 120.0,
                 "with_overhead": 132.0,
                 "with_ga": 138.6,
-                "with_contingency": 142.758,
-                "with_expedite": 142.758,
+                "with_contingency": 141.372,
+                "with_expedite": 141.372,
             },
             "nre_detail": {
                 "programming": {"prog_hr": 2.0, "amortized": True},
@@ -236,7 +391,7 @@ def test_render_quote_hour_summary_adds_programming_hours() -> None:
             "material": {},
             "process_costs": {"milling": 60.0},
             "process_meta": {"milling": {"hr": 3.0}},
-            "pass_through": {"material": 30.0},
+            "pass_through": {"Material": 30.0, "Shipping": 12.0},
             "applied_pcts": {
                 "OverheadPct": 0.10,
                 "GA_Pct": 0.05,
@@ -245,10 +400,10 @@ def test_render_quote_hour_summary_adds_programming_hours() -> None:
             },
             "rates": {},
             "params": {},
-            "labor_cost_details": {},
-            "direct_cost_details": {},
-        },
-    }
+        "labor_cost_details": {},
+        "direct_cost_details": {},
+    },
+}
 
     rendered = appV5.render_quote(result, currency="$")
     lines = rendered.splitlines()
@@ -278,19 +433,19 @@ def test_render_quote_hides_drill_debug_without_flag() -> None:
             "qty": 1,
             "totals": {
                 "labor_cost": 0.0,
-                "direct_costs": 0.0,
-                "subtotal": 0.0,
-                "with_overhead": 0.0,
-                "with_ga": 0.0,
-                "with_contingency": 0.0,
-                "with_expedite": 0.0,
+                "direct_costs": 30.0,
+                "subtotal": 30.0,
+                "with_overhead": 30.0,
+                "with_ga": 30.0,
+                "with_contingency": 30.0,
+                "with_expedite": 30.0,
             },
             "nre_detail": {},
             "nre": {},
             "material": {},
             "process_costs": {},
             "process_meta": {},
-            "pass_through": {},
+            "pass_through": {"Material": 30.0},
             "applied_pcts": {},
             "rates": {},
             "params": {},
@@ -324,7 +479,7 @@ def test_render_quote_clamps_single_piece_hours_and_warns() -> None:
             "material": {},
             "process_costs": {"milling": 150.0},
             "process_meta": {"milling": {"hr": 42.0}},
-            "pass_through": {},
+            "pass_through": {"Material": 30.0},
             "applied_pcts": {
                 "OverheadPct": 0.10,
                 "GA_Pct": 0.05,
@@ -358,12 +513,12 @@ def test_render_quote_dedupes_planner_rollup_cost_rows() -> None:
             "qty": 1,
             "totals": {
                 "labor_cost": 30.0,
-                "direct_costs": 30.0,
+                "direct_costs": 120.0,
                 "subtotal": 150.0,
                 "with_overhead": 165.0,
                 "with_ga": 173.25,
-                "with_contingency": 178.4475,
-                "with_expedite": 178.4475,
+                "with_contingency": 176.715,
+                "with_expedite": 176.715,
             },
             "nre_detail": {},
             "nre": {},
@@ -381,7 +536,7 @@ def test_render_quote_dedupes_planner_rollup_cost_rows() -> None:
                 "planner_labor": {"minutes": 120.0},
                 "milling": {"hr": 1.5},
             },
-            "pass_through": {},
+            "pass_through": {"Material": 120.0},
             "pricing_source": "planner",
             "applied_pcts": {
                 "OverheadPct": 0.10,
@@ -419,12 +574,12 @@ def test_total_labor_cost_matches_displayed_rows_and_pass_through_labor() -> Non
             "qty": 4,
             "totals": {
                 "labor_cost": 50.0,
-                "direct_costs": 22.0,
-                "subtotal": 72.0,
-                "with_overhead": 79.2,
-                "with_ga": 83.16,
-                "with_contingency": 84.8232,
-                "with_expedite": 84.8232,
+                "direct_costs": 34.0,
+                "subtotal": 84.0,
+                "with_overhead": 92.4,
+                "with_ga": 97.02,
+                "with_contingency": 98.9604,
+                "with_expedite": 98.9604,
             },
             "process_costs": {"milling": 40.0, "deburr": 10.0},
             "process_meta": {},
@@ -470,3 +625,60 @@ def test_total_labor_cost_matches_displayed_rows_and_pass_through_labor() -> Non
 
     assert sum(process_amounts) == table_total_amount
     assert total_labor_amount == table_total_amount + 15.0
+
+
+def test_render_quote_displays_single_shipping_entry_and_reconciles_ladder() -> None:
+    result = {
+        "price": 100.0,
+        "breakdown": {
+            "qty": 1,
+            "totals": {
+                "labor_cost": 50.0,
+                "direct_costs": 50.0,
+                "subtotal": 100.0,
+                "with_overhead": 100.0,
+                "with_ga": 100.0,
+                "with_contingency": 100.0,
+                "with_expedite": 100.0,
+            },
+            "material": {
+                "material": "Aluminum 6061",
+                "material_cost": 40.0,
+                "mass_g": 1200.0,
+                "net_mass_g": 1000.0,
+            },
+            "process_costs": {"milling": 50.0},
+            "process_meta": {"milling": {"hr": 1.0, "rate": 50.0}},
+            "pass_through": {"Material": 40.0, "Shipping": 10.0},
+            "applied_pcts": {
+                "OverheadPct": 0.0,
+                "GA_Pct": 0.0,
+                "ContingencyPct": 0.0,
+                "MarginPct": 0.0,
+            },
+            "rates": {},
+            "params": {},
+            "labor_cost_details": {},
+            "direct_cost_details": {},
+        },
+    }
+
+    rendered = appV5.render_quote(result, currency="$")
+    lines = rendered.splitlines()
+
+    material_idx = lines.index("Material & Stock")
+    material_end = next(idx for idx in range(material_idx, len(lines)) if lines[idx] == "")
+    material_section = lines[material_idx:material_end]
+    assert all("Shipping" not in line for line in material_section)
+
+    pass_idx = lines.index("Pass-Through & Direct Costs")
+    pass_end = next(idx for idx in range(pass_idx, len(lines)) if lines[idx] == "")
+    pass_section = lines[pass_idx:pass_end]
+    shipping_lines = [line for line in pass_section if "Shipping" in line]
+    assert len(shipping_lines) == 1
+
+    ladder_line = next(
+        line for line in lines if line.startswith("Subtotal (Labor + Directs):")
+    )
+    ladder_total = float(ladder_line.split("$")[-1].replace(",", ""))
+    assert ladder_total == 100.0
