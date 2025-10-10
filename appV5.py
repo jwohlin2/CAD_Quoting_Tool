@@ -11367,7 +11367,7 @@ def compute_quote_from_df(
     # ---- merge configs (easy to edit) ---------------------------------------
     # Default pricing source; updated to 'planner' later if planner path is used
     pricing_source = "legacy"
-    legacy_baseline_had_values = False
+    legacy_baseline_had_values_flag = False
 
     params_defaults = default_params if default_params is not None else QuoteConfiguration().default_params
     rates_defaults = default_rates if default_rates is not None else PricingRegistry().default_rates
@@ -12990,7 +12990,7 @@ def compute_quote_from_df(
     if deburr_holes_hr:
         legacy_process_meta["deburr"]["hole_touch_hr"] = deburr_holes_hr
 
-    legacy_baseline_had_values = any(
+    legacy_baseline_had_values_flag = any(
         float(value or 0.0) > 0.0 for value in legacy_process_costs.values()
     ) or any(
         float(meta.get("hr", 0.0) or 0.0) > 0.0 for meta in legacy_process_meta.values()
@@ -14136,7 +14136,7 @@ def compute_quote_from_df(
 
         if used_planner:
             pricing_source = "planner"
-            if legacy_baseline_had_values:
+            if legacy_baseline_had_values_flag:
                 legacy_baseline_ignored = True
             planner_process_minutes = planner_total_minutes
             process_costs = {
