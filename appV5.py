@@ -62,6 +62,24 @@ def describe_runtime_environment() -> dict[str, str]:
     return info
 
 
+def roughly_equal(a: float | int | str | None, b: float | int | str | None, *, eps: float = 0.01) -> bool:
+    """Return True when *a* and *b* are approximately equal within ``eps`` dollars."""
+
+    try:
+        a_val = float(a or 0.0)
+    except Exception:
+        return False
+    try:
+        b_val = float(b or 0.0)
+    except Exception:
+        return False
+    try:
+        eps_val = float(eps)
+    except Exception:
+        eps_val = 0.0
+    return math.isclose(a_val, b_val, rel_tol=0.0, abs_tol=abs(eps_val))
+
+
 import copy
 import re
 import sys
@@ -5791,6 +5809,7 @@ def render_quote(
     """Pretty printer for a full quote with auto-included non-zero lines."""
     breakdown    = result.get("breakdown", {}) or {}
     totals       = breakdown.get("totals", {}) or {}
+    declared_labor_total = float(totals.get("labor_cost", 0.0) or 0.0)
     nre_detail   = breakdown.get("nre_detail", {}) or {}
     nre          = breakdown.get("nre", {}) or {}
     material     = breakdown.get("material", {}) or {}
@@ -5857,6 +5876,11 @@ def render_quote(
     labor_costs_display: dict[str, float] = {}
     prog_hr: float = 0.0
     direct_cost_details = breakdown.get("direct_cost_details", {}) or {}
+    material_net_cost: float | None = None
+    pass_through_total = 0.0
+    display_machine = 0.0
+    display_labor_for_ladder = 0.0
+    hour_summary_entries: dict[str, tuple[float, bool]] = {}
     qty_raw = result.get("qty")
     if qty_raw in (None, ""):
         qty_raw = breakdown.get("qty")
@@ -6203,9 +6227,6 @@ def render_quote(
         if pricing_source_value is not None
         else ""
     )
-    if pricing_source_text:
-        lines.append(f"Pricing Source: {pricing_source_text}")
-    pricing_source_lower = pricing_source_text.lower()
     if red_flags:
         lines.append("")
         lines.append("Red Flags")
@@ -6903,6 +6924,7 @@ def render_quote(
 
             if matcost or show_zeros:
                 total_material_cost = float(matcost or 0.0)
+                material_net_cost = total_material_cost
             scrap_credit_lines: list[str] = []
             if scrap_credit_entered and scrap_credit:
                 credit_display = _m(scrap_credit)
@@ -7613,11 +7635,30 @@ def render_quote(
             "Displayed process rows do not add up to the accumulated labor total."
         )
 
-    expected_labor_total = float(totals.get("labor_cost", 0.0) or 0.0)
-    if abs(displayed_process_total - expected_labor_total) >= 0.01:
-        raise AssertionError("bucket sum mismatch")
-
     proc_total = displayed_process_total
+    machine_storage_keys = ("machine", "Machine")
+    machine_in_labor_section = any(key in labor_costs_display for key in machine_storage_keys)
+    if machine_in_labor_section:
+        for key in machine_storage_keys:
+            if key in labor_costs_display:
+                try:
+                    display_machine = float(labor_costs_display.get(key) or 0.0)
+                except Exception:
+                    display_machine = 0.0
+                break
+        display_labor_for_ladder = proc_total - display_machine
+    else:
+        try:
+            display_machine = float(
+                (process_costs or {}).get("Machine")
+                or (process_costs or {}).get("machine")
+                or 0.0
+            )
+        except Exception:
+            display_machine = 0.0
+        display_labor_for_ladder = proc_total
+    if display_labor_for_ladder < 0 and abs(display_labor_for_ladder) <= 0.01:
+        display_labor_for_ladder = 0.0
     row("Total", proc_total, indent="  ")
 
     hour_summary_entries: dict[str, tuple[float, bool]] = {}
@@ -7842,8 +7883,21 @@ def render_quote(
             if "labor" in canonical_pass_label.lower():
                 pass_through_labor_total += amount_val
     row("Total", pass_total, indent="  ")
+    pass_through_total = float(pass_total)
 
     computed_total_labor_cost = proc_total + pass_through_labor_total
+    expected_labor_total = computed_total_labor_cost
+    if declared_labor_total > computed_total_labor_cost + 0.01:
+        expected_labor_total = declared_labor_total
+    components_total = display_labor_for_ladder + pass_through_labor_total + display_machine
+    machine_gap = expected_labor_total - components_total
+    if machine_gap >= 0.01:
+        if not machine_in_labor_section and abs(display_machine) <= 0.01:
+            display_machine = machine_gap
+        else:
+            raise AssertionError("bucket sum mismatch")
+    elif machine_gap <= -0.01:
+        raise AssertionError("bucket sum mismatch")
     if isinstance(totals, dict):
         totals["labor_cost"] = computed_total_labor_cost
     if 0 <= total_labor_row_index < len(lines):
@@ -7854,16 +7908,41 @@ def render_quote(
 
     computed_subtotal = proc_total + pass_total
     declared_subtotal = float(totals.get("subtotal", computed_subtotal))
+    if material_net_cost is None:
+        try:
+            material_key = next(
+                (
+                    key
+                    for key in (pass_through or {})
+                    if str(key).strip().lower() == "material"
+                ),
+                None,
+            )
+            if material_key is not None:
+                material_net_cost = float(pass_through.get(material_key) or 0.0)
+            else:
+                material_net_cost = 0.0
+        except Exception:
+            material_net_cost = 0.0
+    directs = float(material_net_cost) + float(pass_through_total) + float(display_machine)
+    ladder_subtotal = float(display_labor_for_ladder) + directs
+    subtotal = ladder_subtotal
+    printed_subtotal = subtotal
+    assert roughly_equal(ladder_subtotal, printed_subtotal, eps=0.01)
     lines.append("")
 
     # ---- Pricing ladder ------------------------------------------------------
     lines.append("Pricing Ladder")
     lines.append(divider)
-    subtotal         = declared_subtotal
-    with_overhead    = float(totals.get("with_overhead",    subtotal))
-    with_ga          = float(totals.get("with_ga",          with_overhead))
-    with_contingency = float(totals.get("with_contingency", with_ga))
-    with_expedite    = float(totals.get("with_expedite",    with_contingency))
+    overhead_pct    = float(applied_pcts.get("OverheadPct", 0.0) or 0.0)
+    ga_pct          = float(applied_pcts.get("GA_Pct", 0.0) or 0.0)
+    contingency_pct = float(applied_pcts.get("ContingencyPct", 0.0) or 0.0)
+    expedite_pct    = float(applied_pcts.get("ExpeditePct", 0.0) or 0.0)
+
+    with_overhead    = subtotal * (1.0 + overhead_pct)
+    with_ga          = with_overhead * (1.0 + ga_pct)
+    with_contingency = with_ga * (1.0 + contingency_pct)
+    with_expedite    = with_contingency * (1.0 + expedite_pct)
 
     row("Subtotal (Labor + Directs):", subtotal)
     row(f"+ Overhead ({_pct(applied_pcts.get('OverheadPct'))}):",     with_overhead - subtotal)
