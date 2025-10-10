@@ -10831,10 +10831,11 @@ def estimate_drilling_hours(
                 )
                 overhead_for_calc = per_hole_overhead
             else:
+                overhead_local = per_hole_overhead
                 try:
                     overhead_local = overhead_for_calc
                 except (UnboundLocalError, NameError):  # pragma: no cover - safety net
-                    overhead_local = per_hole_overhead
+                    pass
                 peck_rate = to_float(
                     overhead_local.peck_penalty_min_per_in_depth
                 )
@@ -11132,10 +11133,11 @@ def estimate_drilling_hours(
                             summary["depth_min"] = float(depth_float)
                         if depth_max is None or float(depth_float) > depth_max:
                             summary["depth_max"] = float(depth_float)
+                    overhead_local = per_hole_overhead
                     try:
                         overhead_local = overhead_for_calc
                     except (UnboundLocalError, NameError):  # pragma: no cover - safety net
-                        overhead_local = per_hole_overhead
+                        pass
                     peck_rate = to_float(
                         overhead_local.peck_penalty_min_per_in_depth
                     )
@@ -13030,14 +13032,16 @@ def compute_quote_from_df(
     material_display_for_debug: str = ""
 
     if not material_display_for_debug:
-        candidate_display = (
-            material_selection.get("canonical_material")
-            or material_selection.get("material_display")
-            or material_selection.get("input_material")
-            or material_selection.get("material")
-        )
-        if candidate_display:
-            material_display_for_debug = str(candidate_display).strip()
+        for candidate_display in (
+            material_selection.get("canonical_material"),
+            material_selection.get("material_display"),
+            material_selection.get("input_material"),
+            material_selection.get("material"),
+        ):
+            text = str(candidate_display or "").strip()
+            if text:
+                material_display_for_debug = text
+                break
     if not material_display_for_debug:
         material_display_for_debug = str(drill_material_display or "").strip()
 
