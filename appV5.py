@@ -1169,6 +1169,60 @@ def _as_float_or_none(value: Any) -> float | None:
     return None
 
 
+def coerce_bounds(bounds: Mapping | None) -> dict[str, Any]:
+    """Normalize LLM bounds into a canonical structure."""
+
+    bounds = bounds or {}
+
+    mult_min = _as_float_or_none(bounds.get("mult_min"))
+    if mult_min is None:
+        mult_min = LLM_MULTIPLIER_MIN
+    else:
+        mult_min = max(LLM_MULTIPLIER_MIN, float(mult_min))
+
+    mult_max = _as_float_or_none(bounds.get("mult_max"))
+    if mult_max is None:
+        mult_max = LLM_MULTIPLIER_MAX
+    else:
+        mult_max = min(LLM_MULTIPLIER_MAX, float(mult_max))
+    if mult_max < mult_min:
+        mult_max = mult_min
+
+    adder_max = _as_float_or_none(bounds.get("adder_max_hr"))
+    add_hr_cap = _as_float_or_none(bounds.get("add_hr_max"))
+    if adder_max is None and add_hr_cap is not None:
+        adder_max = float(add_hr_cap)
+    elif adder_max is not None and add_hr_cap is not None:
+        adder_max = min(float(adder_max), float(add_hr_cap))
+    if adder_max is None:
+        adder_max = LLM_ADDER_MAX
+    adder_max = max(0.0, min(LLM_ADDER_MAX, float(adder_max)))
+
+    scrap_min = _as_float_or_none(bounds.get("scrap_min"))
+    scrap_min = max(0.0, float(scrap_min)) if scrap_min is not None else 0.0
+
+    scrap_max = _as_float_or_none(bounds.get("scrap_max"))
+    scrap_max = float(scrap_max) if scrap_max is not None else 0.25
+
+    bucket_caps_raw = bounds.get("adder_bucket_max") or bounds.get("add_hr_bucket_max")
+    bucket_caps: dict[str, float] = {}
+    if isinstance(bucket_caps_raw, Mapping):
+        for key, raw in bucket_caps_raw.items():
+            cap_val = _as_float_or_none(raw)
+            if cap_val is None:
+                continue
+            bucket_caps[str(key).lower()] = max(0.0, float(cap_val))
+
+    return {
+        "mult_min": mult_min,
+        "mult_max": mult_max,
+        "adder_max_hr": adder_max,
+        "scrap_min": scrap_min,
+        "scrap_max": scrap_max,
+        "adder_bucket_max": bucket_caps,
+    }
+
+
 def _apply_deep_drill_speed_feed_adjustments(row: Any) -> Any:
     """Return a copy of ``row`` with deep-drill speed/feed factors applied."""
 
@@ -1518,21 +1572,14 @@ def build_suggest_payload(
     if geo.get("provenance"):
         geo_summary["provenance"] = _clean_nested(geo.get("provenance"), limit=12)
 
-    mult_min_raw = _coerce_float(bounds.get("mult_min"))
-    mult_max_raw = _coerce_float(bounds.get("mult_max"))
-    adder_max_raw = _coerce_float(bounds.get("adder_max_hr"))
+    coerced_bounds = coerce_bounds(bounds)
     bounds_summary = {
-        "mult_min": max(LLM_MULTIPLIER_MIN, mult_min_raw if mult_min_raw is not None else LLM_MULTIPLIER_MIN),
-        "mult_max": max(
-            LLM_MULTIPLIER_MIN,
-            min(LLM_MULTIPLIER_MAX, mult_max_raw if mult_max_raw is not None else LLM_MULTIPLIER_MAX),
-        ),
-        "adder_max_hr": min(LLM_ADDER_MAX, adder_max_raw if adder_max_raw is not None else LLM_ADDER_MAX),
-        "scrap_min": _coerce_float(bounds.get("scrap_min")) or 0.0,
-        "scrap_max": _coerce_float(bounds.get("scrap_max")) or 0.25,
+        "mult_min": coerced_bounds["mult_min"],
+        "mult_max": coerced_bounds["mult_max"],
+        "adder_max_hr": coerced_bounds["adder_max_hr"],
+        "scrap_min": coerced_bounds["scrap_min"],
+        "scrap_max": coerced_bounds["scrap_max"],
     }
-    if bounds_summary["mult_max"] < bounds_summary["mult_min"]:
-        bounds_summary["mult_max"] = bounds_summary["mult_min"]
 
     seed_extra: dict[str, Any] = {}
     dfm_geo_summary = derived_summary.get("dfm_geo")
@@ -1623,40 +1670,15 @@ def build_suggest_payload(
 
 
 def sanitize_suggestions(s: dict, bounds: dict) -> dict:
-    bounds = bounds or {}
+    coerced_bounds = coerce_bounds(bounds)
 
-    mult_min = _as_float_or_none(bounds.get("mult_min"))
-    mult_max = _as_float_or_none(bounds.get("mult_max"))
-    adder_max_raw = _as_float_or_none(bounds.get("adder_max_hr"))
-    if mult_min is None:
-        mult_min = LLM_MULTIPLIER_MIN
-    else:
-        mult_min = max(LLM_MULTIPLIER_MIN, float(mult_min))
-    if mult_max is None:
-        mult_max = LLM_MULTIPLIER_MAX
-    else:
-        mult_max = min(LLM_MULTIPLIER_MAX, float(mult_max))
-    if mult_max < mult_min:
-        mult_max = mult_min
-    add_hr_cap = _as_float_or_none(bounds.get("add_hr_max"))
-    if adder_max_raw is None and add_hr_cap is not None:
-        adder_max_raw = float(add_hr_cap)
-    elif adder_max_raw is not None and add_hr_cap is not None:
-        adder_max_raw = min(float(adder_max_raw), float(add_hr_cap))
-    base_adder_max = min(
-        LLM_ADDER_MAX,
-        adder_max_raw if adder_max_raw is not None else LLM_ADDER_MAX,
-    )
-    scrap_min = max(0.0, _as_float_or_none(bounds.get("scrap_min")) or 0.0)
-    scrap_max = _as_float_or_none(bounds.get("scrap_max")) or 0.25
+    mult_min = coerced_bounds["mult_min"]
+    mult_max = coerced_bounds["mult_max"]
+    base_adder_max = coerced_bounds["adder_max_hr"]
+    scrap_min = coerced_bounds["scrap_min"]
+    scrap_max = coerced_bounds["scrap_max"]
 
-    bucket_caps_raw = bounds.get("adder_bucket_max") or bounds.get("add_hr_bucket_max")
-    bucket_caps: dict[str, float] = {}
-    if isinstance(bucket_caps_raw, dict):
-        for key, raw in bucket_caps_raw.items():
-            cap_val = _as_float_or_none(raw)
-            if cap_val is not None:
-                bucket_caps[str(key).lower()] = float(cap_val)
+    bucket_caps = coerced_bounds.get("adder_bucket_max", {})
 
     meta_info: dict[str, Any] = {}
 
