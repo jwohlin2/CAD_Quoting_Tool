@@ -12504,14 +12504,16 @@ def compute_quote_from_df(df: pd.DataFrame,
             float(val) > 0.0 for val in (planner_machine_cost_total, planner_labor_cost_total, planner_total_minutes)
         )
 
+        planner_signals = {
+            "line_items": planner_line_items,
+            "pricing_result": planner_pricing_result,
+            "recognized_line_items": recognized_line_items,
+            "totals_present": planner_totals_present,
+        }
+
         used_planner, planner_mode = resolve_planner(
             params=params if isinstance(params, _MappingABC) else None,
-            signals={
-                "line_items": planner_line_items,
-                "pricing_result": planner_pricing_result,
-                "recognized_line_items": recognized_line_items,
-                "totals_present": planner_totals_present,
-            },
+            signals=planner_signals,
         )
         force_planner_for_recognized = recognized_line_items > 0
 
