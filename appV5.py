@@ -3190,7 +3190,9 @@ try:
     import fitz  # PyMuPDF
     _HAS_PYMUPDF = True
 except Exception:
+    fitz = None  # type: ignore[assignment]
     _HAS_PYMUPDF = False
+
 def upsert_var_row(df, item, value, dtype="number"):
     """
     Upsert one row by Item name (case-insensitive).
@@ -15284,7 +15286,8 @@ def extract_pdf_all(pdf_path: Path, dpi: int = 300) -> dict:
     pdf_path = Path(pdf_path)
     doc = fitz.open(pdf_path)
     pages = []
-    for idx, page in enumerate(doc):
+    for idx in range(doc.page_count):
+        page = doc.load_page(idx)
         text = page.get_text("text") or ""
         blocks = page.get_text("blocks")
         tables = []
@@ -15589,7 +15592,7 @@ def harvest_ordinates(doc, to_in: float) -> dict[str, Any]:
 def harvest_outline_bbox(doc, to_in: float) -> dict[str, Any]:
     biggest: tuple[float, Any] | None = None
     vertices: list[tuple[float, float]] = []
-    for sp in _spaces(doc) or []:
+    for sp in _spaces(doc):
         try:
             polylines = list(sp.query("LWPOLYLINE"))
         except Exception:
@@ -15606,7 +15609,12 @@ def harvest_outline_bbox(doc, to_in: float) -> dict[str, Any]:
     if biggest:
         pl = biggest[1]
         try:
-            pts = [(float(x) * to_in, float(y) * to_in) for x, y, *_ in pl.get_points()]
+            get_points = getattr(pl, "get_points", None)
+            raw_pts = list(get_points()) if callable(get_points) else []
+            pts = [
+                (float(x) * to_in, float(y) * to_in)
+                for x, y, *_ in raw_pts
+            ]
         except Exception:
             pts = []
         vertices.extend(pts)
@@ -15645,7 +15653,7 @@ def harvest_outline_bbox(doc, to_in: float) -> dict[str, Any]:
 
 def harvest_coordinate_table(doc, to_in: float) -> dict[str, Any]:
     lines: list[str] = []
-    for sp in _spaces(doc) or []:
+    for sp in _spaces(doc):
         try:
             entities = sp.query("MTEXT,TEXT")
         except Exception:
@@ -15716,7 +15724,7 @@ def _circle_candidates(doc, to_in: float, plate_bbox: tuple[float, float, float,
         modelspace_id = None
 
     per_space: list[tuple[bool, list[tuple[float, float, float, float]]]] = []
-    for sp in _spaces(doc) or []:
+    for sp in _spaces(doc):
         is_model = modelspace_id is not None and id(sp) == modelspace_id
         local: list[tuple[float, float, float, float]] = []
         try:
@@ -15875,7 +15883,7 @@ def tap_classes_from_lines(lines: Sequence[str] | None) -> dict[str, int]:
 
 def harvest_gdt(doc) -> dict[str, Any]:
     texts: list[str] = []
-    for sp in _spaces(doc) or []:
+    for sp in _spaces(doc):
         try:
             entities = sp.query("MTEXT,TEXT")
         except Exception:
@@ -15939,9 +15947,10 @@ def quick_deburr_estimates(edge_len_in: float | None, hole_count: int | None) ->
     }
 
 
-def _spaces(doc):
+def _spaces(doc) -> list[Any]:
+    spaces: list[Any] = []
     if doc is None:
-        return
+        return spaces
     seen: set[int] = set()
     try:
         msp = doc.modelspace()
@@ -15949,7 +15958,7 @@ def _spaces(doc):
         msp = None
     if msp is not None and id(msp) not in seen:
         seen.add(id(msp))
-        yield msp
+        spaces.append(msp)
     try:
         layout_names = list(doc.layouts.names_in_taborder())
     except Exception:
@@ -15964,7 +15973,8 @@ def _spaces(doc):
         if es is None or id(es) in seen:
             continue
         seen.add(id(es))
-        yield es
+        spaces.append(es)
+    return spaces
 
 
 def _iter_table_text(doc):
@@ -16011,7 +16021,7 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
     if doc is None:
         return result
 
-    for sp in _spaces(doc) or []:
+    for sp in _spaces(doc):
         try:
             tables = sp.query("TABLE")
         except Exception:
@@ -16379,13 +16389,16 @@ def _aggregate_hole_entries(entries: Iterable[dict[str, Any]] | None) -> dict[st
             if not isinstance(entry, dict):
                 continue
             qty_val = entry.get("qty")
-            try:
-                qty = int(qty_val)
-            except Exception:
+            if qty_val is None:
+                qty = 0
+            else:
                 try:
-                    qty = int(round(float(qty_val)))
+                    qty = int(qty_val)
                 except Exception:
-                    qty = 0
+                    try:
+                        qty = int(round(float(qty_val)))
+                    except Exception:
+                        qty = 0
             qty = qty if qty > 0 else 1
             hole_count += qty
             if entry.get("tap"):
@@ -17144,14 +17157,15 @@ def detect_pockets_and_islands(doc, to_in: float) -> dict[str, Any]:
         return {}
     areas_in2: list[float] = []
     pocket_details: list[float] = []
-    for sp in _spaces(doc) or []:
+    for sp in _spaces(doc):
         try:
             polylines = list(sp.query("LWPOLYLINE"))
         except Exception:
             polylines = []
         for pl in polylines:
             try:
-                pts = pl.get_points("xy")
+                get_points = getattr(pl, "get_points", None)
+                pts = list(get_points("xy")) if callable(get_points) else []
             except Exception:
                 continue
             if len(pts) < 3:
@@ -17632,8 +17646,12 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
 
             more_prov = geo_read_more.get("provenance")
             if isinstance(more_prov, dict):
-                prov = geo.get("provenance") if isinstance(geo.get("provenance"), dict) else {}
-                merged = dict(prov)
+                existing_prov = geo.get("provenance")
+                merged: dict[str, Any]
+                if isinstance(existing_prov, dict):
+                    merged = existing_prov.copy()
+                else:
+                    merged = {}
                 for key, value in more_prov.items():
                     if key not in merged and value:
                         merged[key] = value
@@ -17653,15 +17671,32 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     import math
     per = 0.0
     for e in sp.query("LWPOLYLINE"):
-        pts = e.get_points("xyb")
+        get_points = getattr(e, "get_points", None)
+        pts: list[tuple[float, float, Any]] = []
+        if callable(get_points):
+            try:
+                pts = list(get_points("xyb"))
+            except Exception:
+                pts = []
         for i in range(len(pts)):
-            x1,y1,_ = pts[i]; x2,y2,_ = pts[(i+1) % len(pts)]
-            per += math.hypot(x2-x1, y2-y1)
+            x1, y1, _ = pts[i]
+            x2, y2, _ = pts[(i + 1) % len(pts)]
+            per += math.hypot(x2 - x1, y2 - y1)
     for e in sp.query("POLYLINE"):
-        vs = [(v.dxf.location.x, v.dxf.location.y) for v in e.vertices]
-        for i in range(len(vs)-1):
-            x1,y1 = vs[i]; x2,y2 = vs[i+1]
-            per += math.hypot(x2-x1, y2-y1)
+        raw_vertices = getattr(e, "vertices", None)
+        vs: list[tuple[float, float]] = []
+        if raw_vertices is not None:
+            try:
+                vs = [
+                    (float(v.dxf.location.x), float(v.dxf.location.y))
+                    for v in raw_vertices
+                ]
+            except Exception:
+                vs = []
+        for i in range(len(vs) - 1):
+            x1, y1 = vs[i]
+            x2, y2 = vs[i + 1]
+            per += math.hypot(x2 - x1, y2 - y1)
     for e in sp.query("ARC"):
         per += abs(e.dxf.end_angle - e.dxf.start_angle) * math.pi/180.0 * e.dxf.radius
 
