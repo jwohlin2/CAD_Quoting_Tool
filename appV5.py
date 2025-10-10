@@ -557,15 +557,27 @@ from typing import TYPE_CHECKING, TypedDict
 
 if TYPE_CHECKING:
     try:
-        from OCP.TopoDS import TopoDS_Shape as _TopoDSShape  # type: ignore[import]
+        from OCP.TopoDS import (  # type: ignore[import]
+            TopoDS_Compound as _TopoDSCompound,
+            TopoDS_Shape as _TopoDSShape,
+        )
     except ImportError:
         try:
-            from OCC.Core.TopoDS import TopoDS_Shape as _TopoDSShape  # type: ignore[import]
+            from OCC.Core.TopoDS import (  # type: ignore[import]
+                TopoDS_Compound as _TopoDSCompound,
+                TopoDS_Shape as _TopoDSShape,
+            )
         except ImportError:  # pragma: no cover - typing-only fallback
+            from typing import Any as _TopoDSCompound  # type: ignore[assignment]
             from typing import Any as _TopoDSShape  # type: ignore[assignment]
-    TopoDSShapeT: TypeAlias = _TopoDSShape
+    _TopoDSShapeT = _TopoDSShape
+    _TopoDSCompoundT = _TopoDSCompound
 else:
-    TopoDSShapeT: TypeAlias = Any
+    _TopoDSShapeT = Any
+    _TopoDSCompoundT = Any
+
+TopoDSShapeT: TypeAlias = _TopoDSShapeT
+TopoDSCompoundT: TypeAlias = _TopoDSCompoundT
 
 class _BRepToolProto(Protocol):
     def Surface(self, face: Any) -> Any: ...
@@ -586,7 +598,6 @@ class _TopoDSProto(Protocol):
 
 
 TopoDSFaceT: TypeAlias = TopoDSShapeT
-TopoDSCompoundT: TypeAlias = TopoDSShapeT
 TopToolsIndexedDataMap: TypeAlias = Any
 
 try:  # Prefer pythonocc-core's OCP bindings when available
@@ -619,6 +630,7 @@ except ImportError:
         from OCC.Core.TopTools import (  # type: ignore[import]
             TopTools_IndexedDataMapOfShapeListOfShape,
         )
+        from OCC.Core.BRepTools import BRepTools  # type: ignore[import]
     except ImportError:  # pragma: no cover - only hit in environments without OCCT
         if TYPE_CHECKING:  # Keep type checkers happy without introducing runtime deps
             from typing import Any
@@ -3219,8 +3231,10 @@ if STACK == "ocp":
     def _TO_EDGE(s):
         if type(s).__name__ in ("TopoDS_Edge", "Edge"):
             return s
-        if hasattr(TopoDS, "Edge_s"):
-            return TopoDS.Edge_s(s)
+        topods_any = cast(Any, TopoDS)
+        edge_s = getattr(topods_any, "Edge_s", None)
+        if callable(edge_s):
+            return edge_s(s)
         try:
             from OCP.TopoDS import topods as _topods  # type: ignore[import]
             return _topods.Edge(s)
@@ -3230,16 +3244,20 @@ if STACK == "ocp":
     def _TO_SOLID(s):
         if type(s).__name__ in ("TopoDS_Solid", "Solid"):
             return s
-        if hasattr(TopoDS, "Solid_s"):
-            return TopoDS.Solid_s(s)
+        topods_any = cast(Any, TopoDS)
+        solid_s = getattr(topods_any, "Solid_s", None)
+        if callable(solid_s):
+            return solid_s(s)
         from OCP.TopoDS import topods as _topods  # type: ignore[import]
         return _topods.Solid(s)
 
     def _TO_SHELL(s):
         if type(s).__name__ in ("TopoDS_Shell", "Shell"):
             return s
-        if hasattr(TopoDS, "Shell_s"):
-            return TopoDS.Shell_s(s)
+        topods_any = cast(Any, TopoDS)
+        shell_s = getattr(topods_any, "Shell_s", None)
+        if callable(shell_s):
+            return shell_s(s)
         from OCP.TopoDS import topods as _topods  # type: ignore[import]
         return _topods.Shell(s)
 else:
@@ -3951,14 +3969,14 @@ SMALL = 1e-7
 
 
 
-def iter_solids(shape: TopoDS_Shape):
+def iter_solids(shape: TopoDSShapeT) -> Iterator[TopoDSShapeT]:
     explorer = cast(type[Any], TopExp_Explorer)
     exp = explorer(shape, cast(TopAbs_ShapeEnum, TopAbs_SOLID))
     while exp.More():
-        yield to_solid(exp.Current())
+        yield cast(TopoDSShapeT, to_solid(exp.Current()))
         exp.Next()
 
-def explode_compound(shape: TopoDS_Shape):
+def explode_compound(shape: TopoDSShapeT) -> list[TopoDSShapeT]:
     """If the file is a big COMPOUND, break it into shapes (parts/bodies)."""
     explorer = cast(type[Any], TopExp_Explorer)
     exp = explorer(shape, cast(TopAbs_ShapeEnum, TopAbs_COMPOUND))
@@ -3971,7 +3989,7 @@ def explode_compound(shape: TopoDS_Shape):
         sh = explorer(shape, cast(TopAbs_ShapeEnum, TopAbs_SHELL))
         shells = []
         while sh.More():
-            shells.append(to_shell(sh.Current()))
+            shells.append(cast(TopoDSShapeT, to_shell(sh.Current())))
             sh.Next()
         return shells
     return [shape]
