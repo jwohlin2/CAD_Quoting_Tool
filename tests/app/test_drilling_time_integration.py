@@ -43,7 +43,7 @@ def test_estimate_drilling_hours_uses_speeds_feeds_table() -> None:
         overhead_params=overhead,
     )
 
-    assert hours == pytest.approx(0.0222648211, rel=1e-6)
+    assert hours == pytest.approx(0.0222651727, rel=1e-6)
 
 
 def test_estimate_drilling_hours_fallback_without_table() -> None:

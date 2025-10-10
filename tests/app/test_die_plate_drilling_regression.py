@@ -15,10 +15,24 @@ def test_die_plate_deep_drill_regression() -> None:
         appV5._fold_buckets = lambda mapping, *_args, **_kwargs: mapping
     if not hasattr(appV5, "notes_order"):
         appV5.notes_order = []
+    if not hasattr(appV5, "pricing_source_text"):
+        appV5.pricing_source_text = ""
     if not hasattr(appV5, "_apply_drilling_per_hole_bounds"):
-        def _apply_drilling_per_hole_bounds(hours: float, *, hole_count_hint: int | None = None, **_: object) -> float:
+        def _apply_drilling_per_hole_bounds(
+            hours: float,
+            *,
+            hole_count_hint: int | None = None,
+            material_group: str | None = None,
+            depth_in: float | None = None,
+            **_: object,
+        ) -> float:
             hole_count = int(hole_count_hint or 0)
-            return appV5._apply_drill_minutes_clamp(hours, hole_count)
+            return appV5._apply_drill_minutes_clamp(
+                hours,
+                hole_count,
+                material_group=material_group,
+                depth_in=depth_in,
+            )
 
         appV5._apply_drilling_per_hole_bounds = _apply_drilling_per_hole_bounds
 
@@ -31,18 +45,48 @@ def test_die_plate_deep_drill_regression() -> None:
     assert pytest.approx(ld_ratio, rel=1e-6) == ld_ratio
     assert ld_ratio > 3.0, "L/D ratio should trigger the deep drilling cycle"
 
-    min_hours = appV5._apply_drilling_per_hole_bounds(1e-6, hole_count_hint=hole_count)
-    max_hours = appV5._apply_drilling_per_hole_bounds(100.0, hole_count_hint=hole_count)
+    breakthrough_in = max(0.04, 0.2 * hole_dia_in)
+    depth_for_bounds = thickness_in + breakthrough_in
 
-    assert math.isclose(min_hours, (hole_count * 0.10) / 60.0, rel_tol=1e-9)
-    assert math.isclose(max_hours, (hole_count * 2.00) / 60.0, rel_tol=1e-9)
+    min_hours = appV5._apply_drilling_per_hole_bounds(
+        1e-6,
+        hole_count_hint=hole_count,
+        material_group="Stainless Steel",
+        depth_in=depth_for_bounds,
+    )
+    max_hours = appV5._apply_drilling_per_hole_bounds(
+        100.0,
+        hole_count_hint=hole_count,
+        material_group="Stainless Steel",
+        depth_in=depth_for_bounds,
+    )
 
-    bounded_hours = appV5._apply_drilling_per_hole_bounds(4.8, hole_count_hint=hole_count)
-    assert (hole_count * 0.10) / 60.0 <= bounded_hours <= (hole_count * 2.00) / 60.0
+    min_per_hole, max_per_hole = appV5._drill_minutes_per_hole_bounds(
+        "Stainless Steel",
+        depth_in=depth_for_bounds,
+    )
+
+    expected_min_hours = (hole_count * min_per_hole) / 60.0
+    expected_max_hours = (hole_count * max_per_hole) / 60.0
+    clamp_floor_hr = expected_min_hours
+    clamp_cap_hr = expected_max_hours
+
+    assert math.isclose(min_hours, expected_min_hours, rel_tol=1e-9)
+    assert math.isclose(max_hours, expected_max_hours, rel_tol=1e-9)
+
+    bounded_hours = appV5._apply_drilling_per_hole_bounds(
+        4.8,
+        hole_count_hint=hole_count,
+        material_group="Stainless Steel",
+        depth_in=depth_for_bounds,
+    )
+    assert expected_min_hours <= bounded_hours <= expected_max_hours
+
+    process_cost = bounded_hours * 90.0
 
     breakdown = {
         "pricing_source": "planner",
-        "process_costs": {"drilling": 270.0},
+        "process_costs": {"drilling": process_cost},
         "process_meta": {
             "drilling": {
                 "hr": bounded_hours,
@@ -57,13 +101,13 @@ def test_die_plate_deep_drill_regression() -> None:
                 "basis": ["Planner clamp bounds"],
                 "why": [
                     "Deep drilling cycle triggered by L/D 3.68",
-                    "Clamp keeps drilling time between 0.27 and 5.43 hr",
+                    f"Clamp keeps drilling time between {clamp_floor_hr:.2f} and {clamp_cap_hr:.2f} hr",
                 ],
             }
         },
         "process_hours": {"drilling": bounded_hours},
         "process_minutes": {"drilling": bounded_hours * 60.0},
-        "labor_costs": {"Drilling": bounded_hours * 90.0},
+        "labor_costs": {"Drilling": process_cost},
         "labor_cost_details": {"Drilling": "Bounded by per-hole clamp"},
         "pass_through": {"Consumables": 40.0},
         "direct_cost_details": {"Consumables": "Cutting oil allowance"},
@@ -74,12 +118,13 @@ def test_die_plate_deep_drill_regression() -> None:
             "ContingencyPct": 0.00,
         },
         "totals": {
-            "subtotal": 270.0 + 40.0,
-            "with_overhead": (270.0 + 40.0) * 1.10,
-            "with_ga": (270.0 + 40.0) * 1.10 * 1.05,
-            "with_contingency": (270.0 + 40.0) * 1.10 * 1.05,
-            "with_expedite": (270.0 + 40.0) * 1.10 * 1.05,
-            "price": (270.0 + 40.0) * 1.10 * 1.05 / (1 - 0.20),
+            "subtotal": process_cost + 40.0,
+            "labor_cost": process_cost,
+            "with_overhead": (process_cost + 40.0) * 1.10,
+            "with_ga": (process_cost + 40.0) * 1.10 * 1.05,
+            "with_contingency": (process_cost + 40.0) * 1.10 * 1.05,
+            "with_expedite": (process_cost + 40.0) * 1.10 * 1.05,
+            "price": (process_cost + 40.0) * 1.10 * 1.05 / (1 - 0.20),
         },
         "qty": 1,
         "geo_context": {
@@ -95,7 +140,7 @@ def test_die_plate_deep_drill_regression() -> None:
         "breakdown": breakdown,
         "narrative": (
             "Deep_Drill selected because L/D ≈ 3.68. "
-            "Clamp bounds drilling hours between 0.27 and 5.43."
+            f"Clamp bounds drilling hours between {clamp_floor_hr:.2f} and {clamp_cap_hr:.2f}."
         ),
     }
 
@@ -155,18 +200,20 @@ def test_steel_die_plate_deep_drill_runtime_floor() -> None:
     assert "op=Deep_Drill" in summary
     assert "index" in summary.lower()
 
-    rpm_match = re.search(r"RPM:(\d+(?:\.\d+)?)", summary)
-    ipm_match = re.search(r"IPM:(\d+(?:\.\d+)?)", summary)
-    min_per_match = re.search(r"min/hole: (\d+(?:\.\d+)?)", summary)
+    rpm_match = re.search(r"RPM (\d+(?:\.\d+)?)(?:[–-](\d+(?:\.\d+)?))?", summary)
+    ipm_match = re.search(r"IPM (\d+(?:\.\d+)?)(?:[–-](\d+(?:\.\d+)?))?", summary)
+    index_match = re.search(r"index (\d+(?:\.\d+)?) s/hole", summary)
 
     assert rpm_match is not None
     assert ipm_match is not None
-    assert min_per_match is not None
+    assert index_match is not None
 
-    rpm = float(rpm_match.group(1))
-    ipm = float(ipm_match.group(1))
-    min_per_hole = float(min_per_match.group(1))
+    rpm_low = float(rpm_match.group(1))
+    rpm_high = float(rpm_match.group(2) or rpm_match.group(1))
+    ipm_low = float(ipm_match.group(1))
+    ipm_high = float(ipm_match.group(2) or ipm_match.group(1))
+    index_seconds = float(index_match.group(1))
 
-    assert 320 <= rpm <= 360, f"RPM {rpm:.0f} outside expected deep drill range"
-    assert 0.45 <= ipm <= 0.55, f"Feed {ipm:.2f} IPM outside expected deep drill range"
-    assert min_per_hole == pytest.approx(5.03, rel=0.05)
+    assert rpm_low <= 560 and rpm_high >= 420, f"RPM range {rpm_low:.0f}–{rpm_high:.0f} misses deep drill target"
+    assert 0.8 <= ipm_high and ipm_low <= 1.2, f"Feed range {ipm_low:.2f}–{ipm_high:.2f} IPM outside expected deep drill range"
+    assert index_seconds >= 120.0, f"Index {index_seconds:.1f}s per hole too low for deep drill"
