@@ -15061,7 +15061,7 @@ def compute_quote_from_df(
             }
             snap_path = APP_ENV.llm_debug_dir / f"llm_snapshot_{int(time.time())}.json"
             snap_path.write_text(
-                jdump(json_safe_copy(snap), default=None),
+                jdump(json_safe_copy(snap)),
                 encoding="utf-8",
             )
 
@@ -16533,7 +16533,7 @@ def compute_quote_from_df(
                     "pass_through": {k: v for k, v in applied_pass.items()},
                 }
                 latest.write_text(
-                    jdump(json_safe_copy(snap), default=None),
+                    jdump(json_safe_copy(snap)),
                     encoding="utf-8",
                 )
         except Exception:
