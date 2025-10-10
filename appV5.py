@@ -56,13 +56,29 @@ def describe_runtime_environment() -> dict[str, str]:
     return info
 
 
+def roughly_equal(a: float | int | str | None, b: float | int | str | None, *, eps: float = 0.01) -> bool:
+    """Return True when *a* and *b* are approximately equal within ``eps`` dollars."""
+
+    try:
+        a_val = float(a or 0.0)
+    except Exception:
+        return False
+    try:
+        b_val = float(b or 0.0)
+    except Exception:
+        return False
+    try:
+        eps_val = float(eps)
+    except Exception:
+        eps_val = 0.0
+    return math.isclose(a_val, b_val, rel_tol=0.0, abs_tol=abs(eps_val))
+
+
 import copy
 import re
 import sys
 import textwrap
 import tkinter as tk
-import tkinter.font as tkfont
-import urllib.request
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 
@@ -187,16 +203,12 @@ from cad_quoter.domain_models import (
 )
 from cad_quoter.coerce import to_float, to_int
 from cad_quoter.pricing import (
-    BACKUP_CSV_NAME,
     LB_PER_KG,
     PricingEngine,
     create_default_registry,
-    ensure_material_backup_csv,
     get_mcmaster_unit_price as _get_mcmaster_unit_price,
-    load_backup_prices_csv,
     price_value_to_per_gram as _price_value_to_per_gram,
     resolve_material_unit_price as _resolve_material_unit_price,
-    usdkg_to_usdlb as _usdkg_to_usdlb,
 )
 from cad_quoter.vendors.mcmaster_stock import lookup_sku_and_price_for_mm
 from cad_quoter.pricing.time_estimator import (
@@ -217,7 +229,6 @@ from cad_quoter.pricing.wieland import lookup_price as lookup_wieland_price
 from cad_quoter.llm import (
     LLMClient,
     infer_hours_and_overrides_from_geo as _infer_hours_and_overrides_from_geo,
-    llm_sheet_and_param_overrides,
     parse_llm_json,
     run_llm_suggestions,
     # editor mapping + prompt constants used in overrides UI
@@ -404,6 +415,11 @@ iter_solids = geometry.iter_solids
 explode_compound = geometry.explode_compound
 parse_hole_table_lines = geometry.parse_hole_table_lines
 extract_text_lines_from_dxf = geometry.extract_text_lines_from_dxf
+contours_from_polylines = geometry.contours_from_polylines
+holes_from_circles = geometry.holes_from_circles
+text_harvest = geometry.text_harvest
+extract_entities = geometry.extract_entities
+read_dxf = geometry.read_dxf
 upsert_var_row = geometry.upsert_var_row
 require_ezdxf = geometry.require_ezdxf
 get_dwg_converter_path = geometry.get_dwg_converter_path
@@ -560,56 +576,74 @@ def _holes_removed_mass_g(geo_ctx: Mapping[str, Any] | None) -> float | None:
     return grams if grams > 0 else None
 
 
-def _ensure_scrap_pct(val, *, default: float = 0.0) -> float:
-    """
-    Coerce UI/LLM scrap into a sane fraction in [0, 0.25].
-    Accepts 15 (percent) or 0.15 (fraction).
+def normalize_scrap_pct(val: Any, cap: float = 0.25) -> float:
+    """Return a clamped scrap fraction within ``[0, cap]``.
+
+    The helper accepts common UI inputs such as ``15`` (percent) or ``0.15``
+    (fraction) and gracefully handles ``None`` or empty strings by falling
+    back to ``0``.
     """
 
     try:
-        x = float(val)
+        cap_val = float(cap)
     except Exception:
-        return float(default)
-    if x > 1.0:  # looks like %
-        x = x / 100.0
-    if not (x >= 0.0 and math.isfinite(x)):
-        return float(default)
-    return min(0.25, max(0.0, x))
-
-
-def _coerce_scrap_fraction(val: Any) -> float | None:
-    """Return a clamped scrap fraction or ``None`` when conversion fails."""
+        cap_val = 0.25
+    if not math.isfinite(cap_val):
+        cap_val = 0.25
+    cap_val = max(0.0, cap_val)
 
     if val is None:
-        return None
-    if isinstance(val, str):
+        raw = 0.0
+    elif isinstance(val, str):
         stripped = val.strip()
         if not stripped:
-            return None
-        if stripped.endswith("%"):
+            raw = 0.0
+        elif stripped.endswith("%"):
             try:
                 raw = float(stripped.rstrip("%")) / 100.0
             except Exception:
-                return None
-            if raw < 0.0:
                 raw = 0.0
-            return min(0.25, raw)
-        try:
-            raw = float(stripped)
-        except Exception:
-            return None
+        else:
+            try:
+                raw = float(stripped)
+            except Exception:
+                raw = 0.0
     else:
         try:
             raw = float(val)
         except Exception:
-            return None
+            raw = 0.0
+
     if not math.isfinite(raw):
-        return None
+        raw = 0.0
     if raw > 1.0:
         raw = raw / 100.0
     if raw < 0.0:
         raw = 0.0
-    return min(0.25, raw)
+    return min(cap_val, raw)
+
+
+def _scrap_value_provided(val: Any) -> bool:
+    """Return ``True`` when ``val`` looks like a real scrap entry."""
+
+    if val is None:
+        return False
+    if isinstance(val, str):
+        stripped = val.strip()
+        if not stripped:
+            return False
+        if stripped.endswith("%"):
+            stripped = stripped.rstrip("% ").strip()
+        try:
+            parsed = float(stripped)
+        except Exception:
+            return False
+        return math.isfinite(parsed)
+    try:
+        parsed = float(val)
+    except Exception:
+        return False
+    return math.isfinite(parsed)
 
 
 def _estimate_scrap_from_stock_plan(geo_ctx: Mapping[str, Any] | None) -> tuple[float | None, str | None]:
@@ -782,212 +816,8 @@ def bin_diams_mm(diams: Iterable[float | int | None], step: float = 0.1) -> Dict
 
 try:  # Optional dependency – ezdxf may be missing in some environments.
     import ezdxf  # type: ignore
-except Exception as _ezdxf_exc:  # pragma: no cover - import guard
-    ezdxf = None  # type: ignore
-    _EZDXF_IMPORT_ERROR: Exception | None = _ezdxf_exc
-else:  # pragma: no cover - exercised when ezdxf is installed
-    _EZDXF_IMPORT_ERROR = None
-
-
-_INSUNITS_TO_MM = {
-    0: 1.0,
-    1: 25.4,
-    2: 304.8,
-    3: 914.4,
-    4: 1.0,
-    5: 10.0,
-    6: 1000.0,
-    7: 1.0,
-    8: 0.0254,
-    9: 0.0000254,
-    10: 1_000_000.0,
-}
-
-
-def _require_ezdxf() -> None:
-    if ezdxf is None:  # pragma: no cover - defensive guard
-        raise RuntimeError(
-            "ezdxf is required for DXF parsing but is not installed"
-        ) from _EZDXF_IMPORT_ERROR
-
-
-def _unit_scale(doc) -> float:
-    insunits = int((doc.header.get("$INSUNITS", 4)) if doc else 4)
-    return float(_INSUNITS_TO_MM.get(insunits, 1.0))
-
-
-def read_dxf(path: str):
-    """Load ``path`` with :mod:`ezdxf` and return the document object."""
-
-    _require_ezdxf()
-    path = str(path)
-    if not Path(path).exists():
-        raise FileNotFoundError(path)
-    return ezdxf.readfile(path)
-
-
-def extract_entities(doc) -> Dict[str, Any]:
-    """Return a deterministic feature summary for ``doc``."""
-
-    scale = _unit_scale(doc)
-    bbox_info = contours_from_polylines(doc, _scale=scale)
-    holes = holes_from_circles(doc, _scale=scale)
-    lines = text_harvest(doc)
-
-    provenance: List[Dict[str, Any]] = []
-    if bbox_info.get("bbox_mm"):
-        provenance.append({"field": "bbox_mm", "source": "dxf_poly"})
-
-    return {
-        "bbox_mm": bbox_info.get("bbox_mm"),
-        "perimeter_mm": bbox_info.get("perimeter_mm"),
-        "hole_diams_mm": holes,
-        "lines": lines,
-        "provenance": provenance,
-    }
-
-
-def text_harvest(doc) -> List[str]:
-    """Collect text strings from TEXT/MTEXT entities (including blocks)."""
-
-    if doc is None:
-        return []
-
-    lines: List[str] = []
-    msp = doc.modelspace()
-
-    def _append_text(entity) -> None:
-        if entity is None:
-            return
-        try:
-            if entity.dxftype() == "MTEXT":
-                text = entity.plain_text()
-            else:
-                text = entity.dxf.text
-        except Exception:
-            text = None
-        if text:
-            for frag in str(text).splitlines():
-                frag = frag.strip()
-                if frag:
-                    lines.append(frag)
-
-    for entity in msp:
-        etype = entity.dxftype()
-        if etype in {"TEXT", "MTEXT"}:
-            _append_text(entity)
-        elif etype == "INSERT":
-            try:
-                for sub in entity.virtual_entities():
-                    if sub.dxftype() in {"TEXT", "MTEXT"}:
-                        _append_text(sub)
-            except Exception:
-                continue
-
-    return lines
-
-
-def contours_from_polylines(
-    doc,
-    *,
-    _scale: float | None = None,
-) -> Dict[str, Any]:
-    """Compute bounding box and perimeter from closed polylines."""
-
-    if doc is None:
-        return {"bbox_mm": None, "perimeter_mm": None}
-
-    scale = float(_scale or _unit_scale(doc))
-    msp = doc.modelspace()
-
-    def _iter_points(entity) -> Sequence[Tuple[float, float]]:
-        if entity.dxftype() == "LWPOLYLINE":
-            return [
-                (float(x) * scale, float(y) * scale)
-                for x, y, *_ in entity.get_points("xy")
-            ]
-        if entity.dxftype() == "POLYLINE":
-            return [
-                (float(v.dxf.location.x) * scale, float(v.dxf.location.y) * scale)
-                for v in entity.vertices()
-            ]
-        return []
-
-    def _polygon_area(pts: Sequence[Tuple[float, float]]) -> float:
-        if len(pts) < 3:
-            return 0.0
-        area = 0.0
-        for (x1, y1), (x2, y2) in zip(pts, pts[1:] + pts[:1]):
-            area += x1 * y2 - x2 * y1
-        return area / 2.0
-
-    def _perimeter(pts: Sequence[Tuple[float, float]]) -> float:
-        if len(pts) < 2:
-            return 0.0
-        per = 0.0
-        for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
-            per += math.hypot(x2 - x1, y2 - y1)
-        per += math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1])
-        return per
-
-    best_pts: Sequence[Tuple[float, float]] = []
-    best_area = 0.0
-    total_perimeter = 0.0
-
-    for entity in msp:
-        if entity.dxftype() not in {"LWPOLYLINE", "POLYLINE"}:
-            continue
-        closed = bool(getattr(entity, "closed", False))
-        if entity.dxftype() == "POLYLINE":
-            closed = bool(entity.is_closed)
-        if not closed:
-            continue
-        pts = list(_iter_points(entity))
-        if len(pts) < 3:
-            continue
-        area = abs(_polygon_area(pts))
-        total_perimeter += _perimeter(pts)
-        if area > best_area:
-            best_pts = pts
-            best_area = area
-
-    if not best_pts:
-        return {"bbox_mm": None, "perimeter_mm": None}
-
-    xs = [p[0] for p in best_pts]
-    ys = [p[1] for p in best_pts]
-    bbox_mm = [max(xs) - min(xs), max(ys) - min(ys)]
-
-    return {"bbox_mm": bbox_mm, "perimeter_mm": total_perimeter}
-
-
-def holes_from_circles(doc, *, _scale: float | None = None) -> List[float]:
-    """Return diameters (mm) for CIRCLE entities and full arcs."""
-
-    if doc is None:
-        return []
-
-    scale = float(_scale or _unit_scale(doc))
-    msp = doc.modelspace()
-    holes: List[float] = []
-
-    def _maybe_add(radius: float) -> None:
-        if radius <= 0:
-            return
-        holes.append(2.0 * float(radius) * scale)
-
-    for entity in msp:
-        etype = entity.dxftype()
-        if etype == "CIRCLE":
-            _maybe_add(float(entity.dxf.radius))
-        elif etype == "ARC":
-            start = float(entity.dxf.start_angle)
-            end = float(entity.dxf.end_angle)
-            sweep = (end - start) % 360.0
-            if math.isclose(sweep, 360.0, abs_tol=1e-3):
-                _maybe_add(float(entity.dxf.radius))
-
-    return holes
+except Exception:  # pragma: no cover - import guard
+    ezdxf = None  # type: ignore[assignment]
 
 
 def read_step(path: str) -> "TopoDS_Shape":
@@ -1142,6 +972,76 @@ def find_planar_pockets(shape) -> List[Dict[str, Any]]:
     return pockets
 
 from cad_quoter.domain import QuoteState
+
+
+
+def _as_float_or_none(value: Any) -> float | None:
+    try:
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if not cleaned:
+                return None
+            return float(cleaned)
+    except Exception:
+        return None
+    return None
+
+
+def coerce_bounds(bounds: Mapping | None) -> dict[str, Any]:
+    """Normalize LLM bounds into a canonical structure."""
+
+    bounds = bounds or {}
+
+    mult_min = _as_float_or_none(bounds.get("mult_min"))
+    if mult_min is None:
+        mult_min = LLM_MULTIPLIER_MIN
+    else:
+        mult_min = max(LLM_MULTIPLIER_MIN, float(mult_min))
+
+    mult_max = _as_float_or_none(bounds.get("mult_max"))
+    if mult_max is None:
+        mult_max = LLM_MULTIPLIER_MAX
+    else:
+        mult_max = min(LLM_MULTIPLIER_MAX, float(mult_max))
+    if mult_max < mult_min:
+        mult_max = mult_min
+
+    adder_max = _as_float_or_none(bounds.get("adder_max_hr"))
+    add_hr_cap = _as_float_or_none(bounds.get("add_hr_max"))
+    if adder_max is None and add_hr_cap is not None:
+        adder_max = float(add_hr_cap)
+    elif adder_max is not None and add_hr_cap is not None:
+        adder_max = min(float(adder_max), float(add_hr_cap))
+    if adder_max is None:
+        adder_max = LLM_ADDER_MAX
+    adder_max = max(0.0, min(LLM_ADDER_MAX, float(adder_max)))
+
+    scrap_min = _as_float_or_none(bounds.get("scrap_min"))
+    scrap_min = max(0.0, float(scrap_min)) if scrap_min is not None else 0.0
+
+    scrap_max = _as_float_or_none(bounds.get("scrap_max"))
+    scrap_max = float(scrap_max) if scrap_max is not None else 0.25
+
+    bucket_caps_raw = bounds.get("adder_bucket_max") or bounds.get("add_hr_bucket_max")
+    bucket_caps: dict[str, float] = {}
+    if isinstance(bucket_caps_raw, Mapping):
+        for key, raw in bucket_caps_raw.items():
+            cap_val = _as_float_or_none(raw)
+            if cap_val is None:
+                continue
+            bucket_caps[str(key).lower()] = max(0.0, float(cap_val))
+
+    return {
+        "mult_min": mult_min,
+        "mult_max": mult_max,
+        "adder_max_hr": adder_max,
+        "scrap_min": scrap_min,
+        "scrap_max": scrap_max,
+        "adder_bucket_max": bucket_caps,
+    }
+
 
 def _apply_deep_drill_speed_feed_adjustments(row: Any) -> Any:
     """Return a copy of ``row`` with deep-drill speed/feed factors applied."""
@@ -1372,12 +1272,7 @@ def build_suggest_payload(
             baseline_hours[str(proc)] = float(val)
 
     baseline_pass_raw = baseline.get("pass_through") if isinstance(baseline.get("pass_through"), dict) else {}
-    baseline_pass: dict[str, float] = {}
-    for label, amount in (baseline_pass_raw or {}).items():
-        val = to_float(amount)
-        if val is not None:
-            canon_label = _canonical_pass_label(label)
-            baseline_pass[canon_label] = float(val)
+    baseline_pass = _canonicalize_pass_through_map(baseline_pass_raw)
 
     top_process_hours = sorted(baseline_hours.items(), key=lambda kv: (-kv[1], kv[0]))[:6]
     top_pass_through = sorted(baseline_pass.items(), key=lambda kv: (-kv[1], kv[0]))[:6]
@@ -1462,21 +1357,14 @@ def build_suggest_payload(
     if geo.get("provenance"):
         geo_summary["provenance"] = _clean_nested(geo.get("provenance"), limit=12)
 
-    mult_min_raw = to_float(bounds.get("mult_min"))
-    mult_max_raw = to_float(bounds.get("mult_max"))
-    adder_max_raw = to_float(bounds.get("adder_max_hr"))
+    coerced_bounds = coerce_bounds(bounds)
     bounds_summary = {
-        "mult_min": max(LLM_MULTIPLIER_MIN, mult_min_raw if mult_min_raw is not None else LLM_MULTIPLIER_MIN),
-        "mult_max": max(
-            LLM_MULTIPLIER_MIN,
-            min(LLM_MULTIPLIER_MAX, mult_max_raw if mult_max_raw is not None else LLM_MULTIPLIER_MAX),
-        ),
-        "adder_max_hr": min(LLM_ADDER_MAX, adder_max_raw if adder_max_raw is not None else LLM_ADDER_MAX),
-        "scrap_min": to_float(bounds.get("scrap_min")) or 0.0,
-        "scrap_max": to_float(bounds.get("scrap_max")) or 0.25,
+        "mult_min": coerced_bounds["mult_min"],
+        "mult_max": coerced_bounds["mult_max"],
+        "adder_max_hr": coerced_bounds["adder_max_hr"],
+        "scrap_min": coerced_bounds["scrap_min"],
+        "scrap_max": coerced_bounds["scrap_max"],
     }
-    if bounds_summary["mult_max"] < bounds_summary["mult_min"]:
-        bounds_summary["mult_max"] = bounds_summary["mult_min"]
 
     seed_extra: dict[str, Any] = {}
     dfm_geo_summary = derived_summary.get("dfm_geo")
@@ -1567,40 +1455,15 @@ def build_suggest_payload(
 
 
 def sanitize_suggestions(s: dict, bounds: dict) -> dict:
-    bounds = bounds or {}
+    coerced_bounds = coerce_bounds(bounds)
 
-    mult_min = to_float(bounds.get("mult_min"))
-    mult_max = to_float(bounds.get("mult_max"))
-    adder_max_raw = to_float(bounds.get("adder_max_hr"))
-    if mult_min is None:
-        mult_min = LLM_MULTIPLIER_MIN
-    else:
-        mult_min = max(LLM_MULTIPLIER_MIN, float(mult_min))
-    if mult_max is None:
-        mult_max = LLM_MULTIPLIER_MAX
-    else:
-        mult_max = min(LLM_MULTIPLIER_MAX, float(mult_max))
-    if mult_max < mult_min:
-        mult_max = mult_min
-    add_hr_cap = to_float(bounds.get("add_hr_max"))
-    if adder_max_raw is None and add_hr_cap is not None:
-        adder_max_raw = float(add_hr_cap)
-    elif adder_max_raw is not None and add_hr_cap is not None:
-        adder_max_raw = min(float(adder_max_raw), float(add_hr_cap))
-    base_adder_max = min(
-        LLM_ADDER_MAX,
-        adder_max_raw if adder_max_raw is not None else LLM_ADDER_MAX,
-    )
-    scrap_min = max(0.0, to_float(bounds.get("scrap_min")) or 0.0)
-    scrap_max = to_float(bounds.get("scrap_max")) or 0.25
+    mult_min = coerced_bounds["mult_min"]
+    mult_max = coerced_bounds["mult_max"]
+    base_adder_max = coerced_bounds["adder_max_hr"]
+    scrap_min = coerced_bounds["scrap_min"]
+    scrap_max = coerced_bounds["scrap_max"]
 
-    bucket_caps_raw = bounds.get("adder_bucket_max") or bounds.get("add_hr_bucket_max")
-    bucket_caps: dict[str, float] = {}
-    if isinstance(bucket_caps_raw, dict):
-        for key, raw in bucket_caps_raw.items():
-            cap_val = to_float(raw)
-            if cap_val is not None:
-                bucket_caps[str(key).lower()] = float(cap_val)
+    bucket_caps = coerced_bounds.get("adder_bucket_max", {})
 
     meta_info: dict[str, Any] = {}
 
@@ -2399,24 +2262,30 @@ def merge_effective(
             final_hours[proc] = final_hours.get(proc, 0.0) + add_val
         add_sources[proc] = source
 
-    sugg_pass = suggestions.get("add_pass_through") if isinstance(suggestions.get("add_pass_through"), dict) else {}
-    over_pass = overrides.get("add_pass_through") if isinstance(overrides.get("add_pass_through"), dict) else {}
-    pass_keys = sorted(_collect_process_keys(sugg_pass, over_pass))
+    raw_sugg_pass = (
+        suggestions.get("add_pass_through")
+        if isinstance(suggestions.get("add_pass_through"), dict)
+        else {}
+    )
+    raw_over_pass = (
+        overrides.get("add_pass_through")
+        if isinstance(overrides.get("add_pass_through"), dict)
+        else {}
+    )
+    sugg_pass = _canonicalize_pass_through_map(raw_sugg_pass)
+    over_pass = _canonicalize_pass_through_map(raw_over_pass)
+    pass_keys = sorted(set(sugg_pass) | set(over_pass))
     final_pass: dict[str, float] = {}
     pass_sources: dict[str, str] = {}
     for key in pass_keys:
         source = "baseline"
         val = 0.0
-        if key in over_pass and over_pass[key] is not None:
-            cand = to_float(over_pass.get(key))
-            if cand is not None:
-                val = float(cand)
-                source = "user"
-        elif key in sugg_pass and sugg_pass[key] is not None:
-            cand = to_float(sugg_pass.get(key))
-            if cand is not None:
-                val = float(cand)
-                source = "llm"
+        if key in over_pass:
+            val = float(over_pass[key])
+            source = "user"
+        elif key in sugg_pass:
+            val = float(sugg_pass[key])
+            source = "llm"
         if not math.isclose(val, 0.0, abs_tol=1e-9):
             final_pass[key] = val
         pass_sources[key] = source
@@ -2581,16 +2450,19 @@ def merge_effective(
             source_tags["setups"] = "guardrail"
 
     finish_flags_ctx = guard_ctx.get("finish_flags")
-    baseline_pass_ctx = guard_ctx.get("baseline_pass_through") if isinstance(guard_ctx.get("baseline_pass_through"), dict) else {}
-    finish_pass_key = str(guard_ctx.get("finish_pass_key") or "Outsourced Vendors")
-    finish_floor = to_float(guard_ctx.get("finish_cost_floor"))
+    baseline_pass_ctx_raw = (
+        guard_ctx.get("baseline_pass_through")
+        if isinstance(guard_ctx.get("baseline_pass_through"), dict)
+        else {}
+    )
+    baseline_pass_ctx = _canonicalize_pass_through_map(baseline_pass_ctx_raw)
+    finish_pass_key = _canonical_pass_label(
+        guard_ctx.get("finish_pass_key") or "Outsourced Vendors"
+    )
+    finish_floor = _as_float_or_none(guard_ctx.get("finish_cost_floor"))
     finish_floor = float(finish_floor) if finish_floor is not None else 50.0
     if finish_flags_ctx and finish_floor > 0:
-        combined_pass: dict[str, float] = {}
-        for key, value in baseline_pass_ctx.items():
-            val = to_float(value)
-            if val is not None:
-                combined_pass[str(key)] = float(val)
+        combined_pass: dict[str, float] = dict(baseline_pass_ctx)
         for key, value in (final_pass.items() if isinstance(final_pass, dict) else []):
             val = to_float(value)
             if val is not None:
@@ -2999,9 +2871,18 @@ def effective_to_overrides(effective: dict, baseline: dict | None = None) -> dic
         cleaned_add = {k: float(v) for k, v in adders.items() if v is not None and not math.isclose(float(v), 0.0, abs_tol=1e-6)}
         if cleaned_add:
             out["process_hour_adders"] = cleaned_add
-    passes = effective.get("add_pass_through") if isinstance(effective.get("add_pass_through"), dict) else {}
+    passes = (
+        effective.get("add_pass_through")
+        if isinstance(effective.get("add_pass_through"), dict)
+        else {}
+    )
     if passes:
-        cleaned_pass = {k: float(v) for k, v in passes.items() if v is not None and not math.isclose(float(v), 0.0, abs_tol=1e-6)}
+        canonical_passes = _canonicalize_pass_through_map(passes)
+        cleaned_pass = {
+            k: float(v)
+            for k, v in canonical_passes.items()
+            if not math.isclose(float(v), 0.0, abs_tol=1e-6)
+        }
         if cleaned_pass:
             out["add_pass_through"] = cleaned_pass
     scrap_eff = effective.get("scrap_pct")
@@ -3163,12 +3044,37 @@ def iter_suggestion_rows(state: QuoteState) -> list[dict]:
             "source": src_add.get(key, "baseline"),
         })
 
-    sugg_pass = suggestions.get("add_pass_through") if isinstance(suggestions.get("add_pass_through"), dict) else {}
-    over_pass = overrides.get("add_pass_through") if isinstance(overrides.get("add_pass_through"), dict) else {}
-    base_pass = baseline.get("pass_through") if isinstance(baseline.get("pass_through"), dict) else {}
-    eff_pass = effective.get("add_pass_through") if isinstance(effective.get("add_pass_through"), dict) else {}
-    src_pass = sources.get("add_pass_through") if isinstance(sources.get("add_pass_through"), dict) else {}
-    keys_pass = sorted(_collect_process_keys(base_pass, sugg_pass, over_pass))
+    sugg_pass = (
+        _canonicalize_pass_through_map(suggestions.get("add_pass_through"))
+        if isinstance(suggestions.get("add_pass_through"), dict)
+        else {}
+    )
+    over_pass = (
+        _canonicalize_pass_through_map(overrides.get("add_pass_through"))
+        if isinstance(overrides.get("add_pass_through"), dict)
+        else {}
+    )
+    base_pass = (
+        _canonicalize_pass_through_map(baseline.get("pass_through"))
+        if isinstance(baseline.get("pass_through"), dict)
+        else {}
+    )
+    eff_pass = (
+        _canonicalize_pass_through_map(effective.get("add_pass_through"))
+        if isinstance(effective.get("add_pass_through"), dict)
+        else {}
+    )
+    src_pass_raw = (
+        sources.get("add_pass_through")
+        if isinstance(sources.get("add_pass_through"), dict)
+        else {}
+    )
+    src_pass: dict[str, Any] = {}
+    for key, value in src_pass_raw.items():
+        canon_key = _canonical_pass_label(key)
+        if canon_key:
+            src_pass[canon_key] = value
+    keys_pass = sorted(set(base_pass) | set(sugg_pass) | set(over_pass))
     for key in keys_pass:
         base_amount = base_pass.get(key)
         label = f"Pass-through Δ {key}"
@@ -3306,18 +3212,18 @@ if sys.platform == 'win32':
     if os.path.isdir(occ_bin):
         os.add_dll_directory(occ_bin)
 from tkinter import ttk, filedialog, messagebox
-import subprocess, tempfile, shutil
+import subprocess, tempfile
 
 
 try:
-    from hole_table_parser import parse_hole_table_lines
+    from hole_table_parser import parse_hole_table_lines as _parse_hole_table_lines
 except Exception:
-    parse_hole_table_lines = None
+    _parse_hole_table_lines = None
 
 try:
-    from dxf_text_extract import extract_text_lines_from_dxf
+    from dxf_text_extract import extract_text_lines_from_dxf as _extract_text_lines_from_dxf
 except Exception:
-    extract_text_lines_from_dxf = None
+    _extract_text_lines_from_dxf = None
 
 # numpy is optional for a few small calcs; degrade gracefully if missing
 try:
@@ -3442,14 +3348,11 @@ try:
     from OCP.BRep import BRep_Tool
     from OCP.TopAbs import TopAbs_FACE
     from OCP.TopExp import TopExp_Explorer
-    from OCP.TopLoc import TopLoc_Location
     BACKEND = "ocp"
 except Exception:
     from OCC.Core.BRep import BRep_Tool
-    from OCC.Core.TopoDS import topods_Edge, topods_Shell, topods_Solid
     from OCC.Core.TopAbs import TopAbs_FACE
     from OCC.Core.TopExp import TopExp_Explorer
-    from OCC.Core.TopLoc import TopLoc_Location
     BACKEND = "pythonocc"
 
 def _typename(o):  # small helper
@@ -3498,7 +3401,6 @@ def face_surface(face_like):
 # ---------- Robust casters that work on OCP and pythonocc ----------
 # Lock topods casters to the active backend
 if STACK == "ocp":
-    from OCP.TopoDS import TopoDS_Edge, TopoDS_Solid, TopoDS_Shell
 
     def _TO_EDGE(s):
         if type(s).__name__ in ("TopoDS_Edge", "Edge"):
@@ -3703,7 +3605,7 @@ def list_iter(lst):
 # ---- tiny helpers you can use elsewhere --------------------------------------
 def require_ezdxf():
     """Raise a clear error if ezdxf is missing."""
-    if not _HAS_EZDXF:
+    if not geometry.HAS_EZDXF:
         raise RuntimeError("ezdxf not installed. Install with pip/conda (package name: 'ezdxf').")
     return ezdxf
 
@@ -3718,13 +3620,12 @@ def get_dwg_converter_path() -> str:
 
 def have_dwg_support() -> bool:
     """True if we can open DWG (either odafc or an external converter is available)."""
-    return _HAS_ODAFC or bool(get_dwg_converter_path())
+    return geometry.HAS_ODAFC or bool(get_dwg_converter_path())
 def get_import_diagnostics_text() -> str:
-    import sys, shutil, os
+    import sys, os
     lines = []
     lines.append(f"Python: {sys.executable}")
     try:
-        import fitz  # PyMuPDF
         lines.append("PyMuPDF: OK")
     except Exception as e:
         lines.append(f"PyMuPDF: MISSING ({e})")
@@ -3733,7 +3634,6 @@ def get_import_diagnostics_text() -> str:
         import ezdxf
         lines.append(f"ezdxf: {getattr(ezdxf, '__version__', 'unknown')}")
         try:
-            from ezdxf.addons import odafc
             lines.append("ezdxf.addons.odafc: OK")
         except Exception as e:
             lines.append(f"ezdxf.addons.odafc: not available ({e})")
@@ -3805,7 +3705,7 @@ def upsert_var_row(df, item, value, dtype="number"):
 DIM_RE = re.compile(r"(?:ï¿½|DIAM|DIA)\s*([0-9.+-]+)|R\s*([0-9.+-]+)|([0-9.+-]+)\s*[xX]\s*([0-9.+-]+)")
 
 def load_drawing(path: Path) -> Drawing:
-    require_ezdxf()
+    ezdxf = require_ezdxf()
     if path.suffix.lower() == ".dwg":
         # Prefer explicit converter/wrapper if configured (works even if ODA isnï¿½t on PATH)
         exe = get_dwg_converter_path()
@@ -3813,7 +3713,7 @@ def load_drawing(path: Path) -> Drawing:
             dxf_path = convert_dwg_to_dxf(str(path))
             return ezdxf.readfile(dxf_path)
         # Fallback: odafc (requires ODAFileConverter on PATH)
-        if _HAS_ODAFC:
+        if geometry.HAS_ODAFC:
             return odafc.readfile(str(path))
         raise RuntimeError(
             "DWG import needs ODA File Converter. Set ODA_CONVERTER_EXE to the exe "
@@ -3928,26 +3828,20 @@ try:
     # ---- OCP branch ----
     from OCP.IFSelect import IFSelect_RetDone
     from OCP.IGESControl import IGESControl_Reader
-    from OCP.ShapeFix import ShapeFix_Shape, ShapeFix_Solid
+    from OCP.ShapeFix import ShapeFix_Shape
     from OCP.BRepCheck import BRepCheck_Analyzer
     from OCP.BRep import BRep_Tool        # OCP version
     from OCP.BRepGProp import BRepGProp
     from OCP.GProp import GProp_GProps
     from OCP.Bnd import Bnd_Box
-    from OCP.BRepBndLib import BRepBndLib
     from OCP.BRep import BRep_Builder
-    from OCP.BRepBuilderAPI import (
-        BRepBuilderAPI_MakeFace, BRepBuilderAPI_MakePolygon,
-        BRepBuilderAPI_Sewing, BRepBuilderAPI_MakeSolid,
-    )
-    from OCP.BRepPrimAPI import BRepPrimAPI_MakePrism
     from OCP.BRepAlgoAPI import BRepAlgoAPI_Section
-    from OCP.BRepAdaptor import BRepAdaptor_Surface, BRepAdaptor_Curve
+    from OCP.BRepAdaptor import BRepAdaptor_Curve
     
     # ADD THESE TWO IMPORTS
     from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
     from OCP.TopoDS import (
-        TopoDS_Shape, TopoDS_Edge, TopoDS_Face, TopoDS_Shell, TopoDS_Solid, TopoDS_Compound
+        TopoDS_Shape, TopoDS_Face, TopoDS_Compound
     )
     from OCP.TopExp import TopExp_Explorer, TopExp
     from OCP.TopAbs import TopAbs_FACE, TopAbs_EDGE, TopAbs_SOLID, TopAbs_SHELL, TopAbs_COMPOUND
@@ -3957,7 +3851,7 @@ try:
         GeomAbs_BSplineSurface, GeomAbs_BezierSurface, GeomAbs_Circle,
     )
     from OCP.ShapeAnalysis import ShapeAnalysis_Surface
-    from OCP.gp import gp_Pnt, gp_Vec, gp_Dir, gp_Pln
+    from OCP.gp import gp_Pnt, gp_Dir, gp_Pln
     BACKEND_OCC = "OCP"
 
     def BRepTools_UVBounds(face):
@@ -3982,23 +3876,18 @@ except Exception:
     from OCC.Core.STEPControl import STEPControl_Reader
     from OCC.Core.IFSelect import IFSelect_RetDone
     from OCC.Core.IGESControl import IGESControl_Reader
-    from OCC.Core.ShapeFix import ShapeFix_Shape, ShapeFix_Solid
+    from OCC.Core.ShapeFix import ShapeFix_Shape
     from OCC.Core.BRepCheck import BRepCheck_Analyzer
     from OCC.Core.BRep import BRep_Tool          # ? OCC version
     from OCC.Core.GProp import GProp_GProps
     from OCC.Core.Bnd import Bnd_Box
     from OCC.Core.BRep import BRep_Builder
-    from OCC.Core.BRepBuilderAPI import (
-        BRepBuilderAPI_MakeFace, BRepBuilderAPI_MakePolygon,
-        BRepBuilderAPI_Sewing, BRepBuilderAPI_MakeSolid,
-    )
-    from OCC.Core.BRepPrimAPI import BRepPrimAPI_MakePrism
     from OCC.Core.BRepAlgoAPI import BRepAlgoAPI_Section
-    from OCC.Core.BRepAdaptor import BRepAdaptor_Surface, BRepAdaptor_Curve
+    from OCC.Core.BRepAdaptor import BRepAdaptor_Curve
     # ADD TopTools import and TopoDS_Face for the fix below
     from OCC.Core.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
     from OCC.Core.TopoDS import (
-        TopoDS_Shape, TopoDS_Edge, TopoDS_Face, TopoDS_Shell, TopoDS_Solid, TopoDS_Compound,
+        TopoDS_Shape, TopoDS_Face, TopoDS_Compound,
         TopoDS_Face
     )
     from OCC.Core.TopExp import TopExp_Explorer
@@ -4009,7 +3898,7 @@ except Exception:
         GeomAbs_BSplineSurface, GeomAbs_BezierSurface, GeomAbs_Circle,
     )
     from OCC.Core.ShapeAnalysis import ShapeAnalysis_Surface
-    from OCC.Core.gp import gp_Pnt, gp_Vec, gp_Dir, gp_Pln
+    from OCC.Core.gp import gp_Pnt, gp_Dir, gp_Pln
     BACKEND_OCC = "OCC.Core"
 
     # BRepGProp shim (pythonocc uses free functions)
@@ -4586,7 +4475,7 @@ def enrich_geo_stl(path):
     import time
     start_time = time.time()
     logger.info("[%.2fs] Starting enrich_geo_stl for %s", time.time() - start_time, path)
-    if not _HAS_TRIMESH:
+    if not geometry.HAS_TRIMESH:
         raise RuntimeError("trimesh not available to process STL")
     
     logger.info("[%.2fs] Loading mesh...", time.time() - start_time)
@@ -4695,7 +4584,6 @@ def load_cad_any(path: str) -> TopoDS_Shape:
     raise RuntimeError(f"Unsupported file type for shape loading: {ext}")
 def read_cad_any(path: str):
     from OCP.IFSelect import IFSelect_RetDone
-    from OCP.ShapeFix import ShapeFix_Shape
     from OCP.IGESControl import IGESControl_Reader
     from OCP.TopoDS import TopoDS_Shape
 
@@ -4870,7 +4758,7 @@ def apply_param_edits_to_overrides_ui(self, param_edits: dict):
     self.params.update(p)
 
 # ================== LLM DECISION LOG / AUDIT ==================
-import hashlib, json as _json_audit, time as _time_audit
+import json as _json_audit, time as _time_audit
 LOGS_DIR = Path(r"D:\\CAD_Quoting_Tool\\Logs")
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -5364,6 +5252,9 @@ PREFERRED_PROCESS_BUCKET_ORDER: tuple[str, ...] = (
     "finishing_deburr",
     "saw_waterjet",
     "inspection",
+    "assembly",
+    "packaging",
+    "misc",
 )
 
 
@@ -5414,7 +5305,44 @@ _PREFERRED_BUCKET_VIEW_ORDER: tuple[str, ...] = (
 
 
 def _normalize_bucket_key(name: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_")
+    text = re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_")
+    aliases = {
+        "finishing": "finishing_deburr",
+        "deburring": "finishing_deburr",
+        "finish_deburr": "finishing_deburr",
+        "finishing_deburr": "finishing_deburr",
+        "deburr": "finishing_deburr",
+        "saw": "saw_waterjet",
+        "saw_waterjet": "saw_waterjet",
+        "waterjet": "saw_waterjet",
+        "counter_bore": "counterbore",
+        "counter_bores": "counterbore",
+        "counterbore": "counterbore",
+        "counter_sink": "countersink",
+        "counter_sinks": "countersink",
+        "countersink": "countersink",
+        "thread_mill": "tapping",
+    }
+    return aliases.get(text, text)
+
+
+def _rate_key_for_bucket(bucket: str | None) -> str | None:
+    canon = _normalize_bucket_key(bucket)
+    mapping = {
+        "milling": "MillingRate",
+        "drilling": "DrillingRate",
+        "counterbore": "DrillingRate",
+        "countersink": "DrillingRate",
+        "tapping": "TappingRate",
+        "grinding": "SurfaceGrindRate",
+        "inspection": "InspectionRate",
+        "finishing_deburr": "DeburrRate",
+        "assembly": "AssemblyRate",
+        "packaging": "PackagingRate",
+        "saw_waterjet": "SawWaterjetRate",
+        "misc": "MillingRate",
+    }
+    return mapping.get(canon)
 
 
 def _canonical_bucket_key(name: str) -> str:
@@ -5796,6 +5724,15 @@ def _iter_ordered_process_entries(
             meta = meta_lookup.get(canon_key, {})
 
         try:
+            meta_hr_value = float(meta.get("hr", 0.0) or 0.0)
+        except Exception:
+            meta_hr_value = 0.0
+        try:
+            meta_rate_value = float(meta.get("rate", 0.0) or 0.0)
+        except Exception:
+            meta_rate_value = 0.0
+
+        try:
             value_float = float(raw_value or 0.0)
         except Exception:
             value_float = 0.0
@@ -5804,6 +5741,14 @@ def _iter_ordered_process_entries(
             extra_val = float(meta.get("base_extra", 0.0) or 0.0)
         except Exception:
             extra_val = 0.0
+        try:
+            meta_hr = float(meta.get("hr", 0.0) or 0.0)
+        except Exception:
+            meta_hr = 0.0
+        try:
+            meta_rate = float(meta.get("rate", 0.0) or 0.0)
+        except Exception:
+            meta_rate = 0.0
 
         display_override, amount_override, display_hr, display_rate = _format_planner_bucket_line(
             canon_key,
@@ -5821,12 +5766,24 @@ def _iter_ordered_process_entries(
         )
 
         detail_bits: list[str] = []
-        if not use_display and display_hr > 0:
-            detail_bits.append(
-                f"{display_hr:.2f} hr @ {currency_formatter(display_rate)}/hr"
-            )
+        if not use_display:
+            if display_hr > 0:
+                rate_for_detail = display_rate if display_rate > 0 else meta_rate
+                if rate_for_detail > 0:
+                    detail_bits.append(
+                        f"{display_hr:.2f} hr @ {currency_formatter(rate_for_detail)}/hr"
+                    )
+                else:
+                    detail_bits.append(f"{display_hr:.2f} hr")
+            elif meta_hr > 0:
+                if meta_rate > 0:
+                    detail_bits.append(
+                        f"{meta_hr:.2f} hr @ {currency_formatter(meta_rate)}/hr"
+                    )
+                else:
+                    detail_bits.append(f"{meta_hr:.2f} hr")
 
-        rate_for_extra = display_rate
+        rate_for_extra = display_rate if display_rate > 0 else meta_rate
         if abs(extra_val) > 1e-6:
             if (not use_display and display_hr <= 1e-6 and rate_for_extra > 0) or (
                 use_display and display_hr <= 1e-6 and rate_for_extra > 0
@@ -5863,6 +5820,7 @@ def render_quote(
     """Pretty printer for a full quote with auto-included non-zero lines."""
     breakdown    = result.get("breakdown", {}) or {}
     totals       = breakdown.get("totals", {}) or {}
+    declared_labor_total = float(totals.get("labor_cost", 0.0) or 0.0)
     nre_detail   = breakdown.get("nre_detail", {}) or {}
     nre          = breakdown.get("nre", {}) or {}
     material_raw = breakdown.get("material", {}) or {}
@@ -5956,6 +5914,7 @@ def render_quote(
         labor_cost_details_input[canonical_label] = merged
 
     labor_cost_details: dict[str, str] = dict(labor_cost_details_input)
+    labor_cost_details_seed: dict[str, str] = dict(labor_cost_details_input)
 
     labor_cost_totals_raw = breakdown.get("labor_costs", {}) or {}
     labor_cost_totals: dict[str, float] = {}
@@ -5968,8 +5927,14 @@ def render_quote(
         except Exception:
             continue
     labor_costs_display: dict[str, float] = {}
+    hour_summary_entries: dict[str, tuple[float, bool]] = {}
     prog_hr: float = 0.0
     direct_cost_details = breakdown.get("direct_cost_details", {}) or {}
+    material_net_cost: float | None = None
+    pass_through_total = 0.0
+    display_machine = 0.0
+    display_labor_for_ladder = 0.0
+    hour_summary_entries: dict[str, tuple[float, bool]] = {}
     qty_raw = result.get("qty")
     if qty_raw in (None, ""):
         qty_raw = breakdown.get("qty")
@@ -5990,6 +5955,7 @@ def render_quote(
     divider = "-" * int(page_width)
 
     red_flags: list[str] = []
+    hour_summary_entries: dict[str, tuple[float, bool]] = {}
     for source in (result, breakdown):
         flags_raw = source.get("red_flags") if isinstance(source, Mapping) else None
         if isinstance(flags_raw, (list, tuple, set)):
@@ -6250,16 +6216,45 @@ def render_quote(
                     seen.add(seg)
         if segments:
             return "; ".join(segments)
-        return str(existing).strip() if existing else None
+        if existing:
+            filtered_existing: list[str] = []
+            for segment in re.split(r";\s*", str(existing)):
+                seg = segment.strip()
+                if not seg or _is_extra_segment(seg):
+                    continue
+                filtered_existing.append(seg)
+            if filtered_existing:
+                return "; ".join(filtered_existing)
+            return str(existing).strip()
+        return None
 
     def add_process_notes(key: str, indent: str = "    "):
-        k = str(key).lower()
-        meta = process_meta.get(k) or {}
-        # show hours/rate if available
-        hr  = meta.get("hr")
-        rate= meta.get("rate") or rates.get(k.title() + "Rate")
-        if hr:
-            write_line(_hours_with_rate_text(hr, rate), indent)
+        meta = _lookup_process_meta(key) or {}
+        try:
+            hr_val = float(meta.get("hr", 0.0) or 0.0)
+        except Exception:
+            hr_val = 0.0
+        if hr_val <= 0:
+            try:
+                minutes_val = float(meta.get("minutes", 0.0) or 0.0)
+            except Exception:
+                minutes_val = 0.0
+            if minutes_val > 0:
+                hr_val = minutes_val / 60.0
+        rate_val = meta.get("rate")
+        try:
+            rate_float = float(rate_val or 0.0)
+        except Exception:
+            rate_float = 0.0
+        if rate_float <= 0:
+            rate_key = _rate_key_for_bucket(str(key))
+            if rate_key:
+                try:
+                    rate_float = float(rates.get(rate_key, 0.0) or 0.0)
+                except Exception:
+                    rate_float = 0.0
+        if hr_val > 0:
+            write_line(_hours_with_rate_text(hr_val, rate_float), indent)
 
     def add_pass_basis(key: str, indent: str = "    "):
         basis_map = breakdown.get("pass_basis", {}) or {}
@@ -6318,7 +6313,27 @@ def render_quote(
         else:
             write_line("Speeds/Feeds CSV: (not set)")
     lines.append("")
-    if drill_debug_entries:
+    def _drill_debug_enabled() -> bool:
+        """Return True when drill debug output should be rendered."""
+
+        def _coerce_bool(value: object) -> bool | None:
+            try:
+                return bool(value)
+            except Exception:
+                return None
+
+        for source in (result, breakdown):
+            if not isinstance(source, Mapping):
+                continue
+            for key in ("app", "app_state", "app_meta"):
+                candidate = source.get(key)
+                if isinstance(candidate, Mapping) and "llm_debug_enabled" in candidate:
+                    coerced = _coerce_bool(candidate.get("llm_debug_enabled"))
+                    if coerced is not None:
+                        return coerced
+        return bool(APP_ENV.llm_debug_enabled)
+
+    if drill_debug_entries and _drill_debug_enabled():
         lines.append("Drill Debug")
         lines.append(divider)
         for entry in drill_debug_entries:
@@ -6337,7 +6352,10 @@ def render_quote(
     )
     # If planner produced hours, treat source as planner for display consistency.
     if not pricing_source_value:
-        hs_entries = dict(hour_summary_entries or {})
+        try:
+            hs_entries = dict(hour_summary_entries or {})
+        except UnboundLocalError:
+            hs_entries = {}
 
         def _has_positive_planner_hours(value: object) -> bool:
             base_value: object
@@ -6881,6 +6899,9 @@ def render_quote(
         "finishing_deburr",
         "saw_waterjet",
         "inspection",
+        "assembly",
+        "packaging",
+        "misc",
     ]
     def _planner_bucket_info(bucket_key: str) -> Mapping[str, Any]:
         rollup_info = bucket_rollup_map.get(bucket_key)
@@ -7072,6 +7093,7 @@ def render_quote(
 
             if matcost or show_zeros:
                 total_material_cost = float(matcost or 0.0)
+                material_net_cost = total_material_cost
             scrap_credit_lines: list[str] = []
             if scrap_credit_entered and scrap_credit:
                 credit_display = _m(scrap_credit)
@@ -7101,8 +7123,8 @@ def render_quote(
                 removal_mass_val = _coerce_float_or_none(material.get(removal_key))
                 if removal_mass_val:
                     break
-            scrap_fraction_val = _coerce_scrap_fraction(scrap)
-            if scrap_fraction_val is not None and scrap_fraction_val <= 0:
+            scrap_fraction_val = normalize_scrap_pct(scrap)
+            if scrap_fraction_val <= 0:
                 scrap_fraction_val = None
             base_mass_for_scrap = None
             if net_mass_val and net_mass_val > 0:
@@ -7508,7 +7530,12 @@ def render_quote(
         if merged_detail:
             labor_cost_details[storage_key] = merged_detail
         elif fallback_detail:
-            labor_cost_details.setdefault(storage_key, fallback_detail)
+            fallback_segments = [
+                seg for seg in re.split(r";\s*", str(fallback_detail)) if seg.strip()
+            ]
+            sanitized_fallback = _merge_detail(None, fallback_segments)
+            if sanitized_fallback:
+                labor_cost_details.setdefault(storage_key, sanitized_fallback)
 
         labor_costs_display[storage_key] = labor_costs_display.get(storage_key, 0.0) + amount_val
         proc_total += amount_val
@@ -7650,6 +7677,7 @@ def render_quote(
 
     aggregated_process_rows: dict[str, dict[str, Any]] = {}
     aggregated_order: list[str] = []
+    process_entries_for_display: list[ProcessDisplayEntry] = []
 
     for entry in _iter_ordered_process_entries(
         display_process_costs,
@@ -7660,14 +7688,12 @@ def render_quote(
         label_overrides=label_overrides,
         currency_formatter=_m,
     ):
+        process_entries_for_display.append(entry)
         canon_key = entry.canonical_key or _canonical_bucket_key(entry.process_key)
         if canon_key in {"planner_labor", "planner_machine", "planner_total"}:
             continue
         if canon_key.startswith("planner_"):
             continue
-        if canon_key == "misc" and (planner_bucket_display_map or entry.amount < 1.0):
-            continue
-
         canonical_label, _ = _canonical_amortized_label(entry.label)
         fallback_detail = labor_cost_details_input.get(canonical_label or entry.label)
 
@@ -7702,7 +7728,7 @@ def render_quote(
         for bit in entry.detail_bits:
             _append_unique(bucket["detail_bits"], bit)
 
-    hidden_canon_keys = {"planner_labor", "planner_machine", "planner_total", "misc"}
+    hidden_canon_keys = {"planner_labor", "planner_machine", "planner_total"}
     remaining_costs = {canon: data["amount"] for canon, data in aggregated_process_rows.items()}
 
     for canon_key in aggregated_order:
@@ -7721,11 +7747,15 @@ def render_quote(
         label = _display_bucket_label(canon_key, label_overrides)
         primary_process_key = process_keys[0] if process_keys else canon_key
 
+        detail_bits = list(bucket.get("detail_bits", []))
+        if canon_key == "misc":
+            _append_unique(detail_bits, "LLM adjustments")
+
         _add_labor_cost_line(
             label,
             amount,
             process_key=primary_process_key,
-            detail_bits=list(bucket.get("detail_bits", [])),
+            detail_bits=detail_bits,
             fallback_detail=bucket.get("fallback_detail"),
             display_override=bucket.get("display_override"),
         )
@@ -7742,23 +7772,13 @@ def render_quote(
         "show_amortized_nre_single_qty",
         "show_amortized_nre_for_single_qty",
         "show_single_qty_amortized_nre",
-        "show_amortized_nre",
     )
 
     try:
         amortized_qty = int(result.get("qty") or breakdown.get("qty") or qty or 1)
     except Exception:
         amortized_qty = qty if qty > 0 else 1
-    show_amortized = amortized_qty > 1
-
-    def _should_show_amortized_cost(amount: float) -> bool:
-        try:
-            amount_val = float(amount or 0.0)
-        except Exception:
-            amount_val = 0.0
-        if amount_val <= 0:
-            return False
-        return show_amortized
+    show_amortized = amortized_qty > 1 or (show_amortized_single_qty and amortized_qty > 0)
 
     programming_per_part_cost = labor_cost_totals.get("Programming (amortized)")
     if programming_per_part_cost is None:
@@ -7785,17 +7805,11 @@ def render_quote(
         eng_rate = 0.0
     if eng_hr > 0:
         prog_bits.append(f"- Engineering (lot): {_hours_with_rate_text(eng_hr, eng_rate)}")
-    show_programming_amortized = _should_show_amortized_cost(programming_per_part_cost)
+    programming_detail_bits = list(prog_bits)
+    if show_amortized and qty > 1 and programming_per_part_cost > 0:
+        programming_detail_bits.append(f"Amortized across {qty} pcs")
     if show_amortized and programming_per_part_cost > 0:
-        prog_bits.append(f"Amortized across {qty} pcs")
-
-    show_programming_amortized = show_amortized and programming_per_part_cost > 0
-    if show_programming_amortized and "Programming (amortized)" not in labor_costs_display:
-        _add_labor_cost_line(
-            "Programming (amortized)",
-            programming_per_part_cost,
-            detail_bits=prog_bits,
-        )
+        programming_detail_bits.append("amortized")
 
     fixture_detail = (nre_detail or {}).get("fixture") or {}
     fixture_labor_per_part_cost = labor_cost_totals.get("Fixture Build (amortized)")
@@ -7828,16 +7842,37 @@ def render_quote(
         soft_jaw_hr = 0.0
     if soft_jaw_hr > 0:
         fixture_bits.append(f"Soft jaw prep {soft_jaw_hr:.2f} hr")
-    show_fixture_amortized = _should_show_amortized_cost(fixture_labor_per_part_cost)
+    fixture_detail_bits = list(fixture_bits)
+    if show_amortized and qty > 1 and fixture_labor_per_part_cost > 0:
+        fixture_detail_bits.append(f"Amortized across {qty} pcs")
     if show_amortized and fixture_labor_per_part_cost > 0:
-        fixture_bits.append(f"Amortized across {qty} pcs")
+        fixture_detail_bits.append("amortized")
 
-    if show_fixture_amortized and "Fixture Build (amortized)" not in labor_costs_display:
-        _add_labor_cost_line(
-            "Fixture Build (amortized)",
-            fixture_labor_per_part_cost,
-            detail_bits=fixture_bits,
+    amortized_rows: list[tuple[str, float, list[str]]] = []
+    if show_amortized and programming_per_part_cost > 0:
+        amortized_rows.append(
+            (
+                "Programming (amortized)",
+                float(programming_per_part_cost),
+                programming_detail_bits,
+            )
         )
+    if show_amortized and fixture_labor_per_part_cost > 0:
+        amortized_rows.append(
+            (
+                "Fixture Build (amortized)",
+                float(fixture_labor_per_part_cost),
+                fixture_detail_bits,
+            )
+        )
+
+    for label, amount, detail_bits in amortized_rows:
+        if label not in labor_costs_display:
+            _add_labor_cost_line(
+                label,
+                amount,
+                detail_bits=detail_bits,
+            )
 
     _emit_labor_cost_lines()
 
@@ -7847,7 +7882,10 @@ def render_quote(
             "Displayed process rows do not add up to the accumulated labor total."
         )
 
-    expected_labor_total = float(totals.get("labor_cost", 0.0) or 0.0)
+    expected_labor_total_value = totals.get("labor_cost") if isinstance(totals, Mapping) else None
+    if expected_labor_total_value is None:
+        expected_labor_total_value = displayed_process_total
+    expected_labor_total = float(expected_labor_total_value or 0.0)
     if abs(displayed_process_total - expected_labor_total) >= 0.01:
         if isinstance(totals, dict):
             totals["labor_cost"] = displayed_process_total
@@ -8112,8 +8150,21 @@ def render_quote(
             if "labor" in canonical_pass_label.lower():
                 pass_through_labor_total += amount_val
     row("Total", pass_total, indent="  ")
+    pass_through_total = float(pass_total)
 
     computed_total_labor_cost = proc_total + pass_through_labor_total
+    expected_labor_total = computed_total_labor_cost
+    if declared_labor_total > computed_total_labor_cost + 0.01:
+        expected_labor_total = declared_labor_total
+    components_total = display_labor_for_ladder + pass_through_labor_total + display_machine
+    machine_gap = expected_labor_total - components_total
+    if machine_gap >= 0.01:
+        if not machine_in_labor_section and abs(display_machine) <= 0.01:
+            display_machine = machine_gap
+        else:
+            raise AssertionError("bucket sum mismatch")
+    elif machine_gap <= -0.01:
+        raise AssertionError("bucket sum mismatch")
     if isinstance(totals, dict):
         totals["labor_cost"] = computed_total_labor_cost
     if 0 <= total_labor_row_index < len(lines):
@@ -8124,16 +8175,41 @@ def render_quote(
 
     computed_subtotal = proc_total + pass_total
     declared_subtotal = float(totals.get("subtotal", computed_subtotal))
+    if material_net_cost is None:
+        try:
+            material_key = next(
+                (
+                    key
+                    for key in (pass_through or {})
+                    if str(key).strip().lower() == "material"
+                ),
+                None,
+            )
+            if material_key is not None:
+                material_net_cost = float(pass_through.get(material_key) or 0.0)
+            else:
+                material_net_cost = 0.0
+        except Exception:
+            material_net_cost = 0.0
+    directs = float(material_net_cost) + float(pass_through_total) + float(display_machine)
+    ladder_subtotal = float(display_labor_for_ladder) + directs
+    subtotal = ladder_subtotal
+    printed_subtotal = subtotal
+    assert roughly_equal(ladder_subtotal, printed_subtotal, eps=0.01)
     lines.append("")
 
     # ---- Pricing ladder ------------------------------------------------------
     lines.append("Pricing Ladder")
     lines.append(divider)
-    subtotal         = declared_subtotal
-    with_overhead    = float(totals.get("with_overhead",    subtotal))
-    with_ga          = float(totals.get("with_ga",          with_overhead))
-    with_contingency = float(totals.get("with_contingency", with_ga))
-    with_expedite    = float(totals.get("with_expedite",    with_contingency))
+    overhead_pct    = float(applied_pcts.get("OverheadPct", 0.0) or 0.0)
+    ga_pct          = float(applied_pcts.get("GA_Pct", 0.0) or 0.0)
+    contingency_pct = float(applied_pcts.get("ContingencyPct", 0.0) or 0.0)
+    expedite_pct    = float(applied_pcts.get("ExpeditePct", 0.0) or 0.0)
+
+    with_overhead    = subtotal * (1.0 + overhead_pct)
+    with_ga          = with_overhead * (1.0 + ga_pct)
+    with_contingency = with_ga * (1.0 + contingency_pct)
+    with_expedite    = with_contingency * (1.0 + expedite_pct)
 
     row("Subtotal (Labor + Directs):", subtotal)
     row(f"+ Overhead ({_pct(applied_pcts.get('OverheadPct'))}):",     with_overhead - subtotal)
@@ -8487,7 +8563,7 @@ def compute_mass_and_scrap_after_removal(
     """
 
     base_net = max(0.0, float(net_mass_g or 0.0))
-    base_scrap = _ensure_scrap_pct(scrap_frac)
+    base_scrap = normalize_scrap_pct(scrap_frac)
     removal = max(0.0, float(removal_mass_g or 0.0))
 
     if base_net <= 0 or removal <= 0:
@@ -9694,6 +9770,7 @@ def estimate_drilling_hours(
                 l_over_d = float(thickness_for_ratio) / float(tool_dia_in)
             op_name = "deep_drill" if l_over_d >= 3.0 else "drill"
             cache_key = (op_name, round(float(diameter_in), 4))
+            row: Mapping[str, Any] | None = None
             cache_entry = row_cache.get(cache_key)
             if cache_entry is None:
                 material_for_lookup: str | None = None
@@ -9731,6 +9808,8 @@ def estimate_drilling_hours(
                         table=speeds_feeds_table,
                     )
                 if row and isinstance(row, Mapping):
+                    if op_name.lower() == "deep_drill":
+                        row = _apply_deep_drill_speed_feed_adjustments(row)
                     chosen_material_label = ""
                     cache_entry = (row, _build_tool_params(row))
                     speeds_feeds_row = row
@@ -9797,6 +9876,11 @@ def estimate_drilling_hours(
                         f"MISS {op_display} {material_display.lower()} {round(float(diameter_in), 4):.3f}\""
                     )
                 row_cache[cache_key] = cache_entry
+            else:
+                try:
+                    row = cache_entry[0]
+                except Exception:
+                    row = None
             geom = _TimeOperationGeometry(
                 diameter_in=float(diameter_in),
                 hole_depth_in=float(depth_in),
@@ -9903,6 +9987,7 @@ def estimate_drilling_hours(
                     peck_min=peck_min,
                     index_sec_per_hole=overhead_for_calc.index_sec_per_hole,
                 )
+                overhead_for_calc = legacy_overhead
                 tool_params = _TimeToolParams(teeth_z=1)
                 if debug_lines is not None:
                     debug_payload = {}
@@ -9956,6 +10041,7 @@ def estimate_drilling_hours(
                     ipm_val = debug_payload.get("ipm")
                 depth_val = debug_payload.get("axial_depth_in")
                 minutes_per = debug_payload.get("minutes_per_hole")
+                index_val = debug_payload.get("index_min")
                 qty_for_debug = int(qty) if qty else 0
                 mat_display = chosen_material_label or str(
                     material_label or mat_key or material_lookup or ""
@@ -10955,7 +11041,6 @@ def compute_quote_from_df(df: pd.DataFrame,
         return v if v == v else default  # NaN check
 
     def sheet_pct(pat, default=None):
-        from math import isnan
         v = first_num(pat, float('nan'))
         if v == v:  # not NaN
             return (v/100.0) if abs(v) > 1.0 else v
@@ -11052,7 +11137,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     if hasattr(sheet_has_scrap, "any") and sheet_has_scrap.any():
         scrap_candidate = first_num(scrap_pattern, float("nan"))
         if scrap_candidate == scrap_candidate:  # not NaN
-            scrap_sheet_fraction = _coerce_scrap_fraction(scrap_candidate)
+            scrap_sheet_fraction = normalize_scrap_pct(scrap_candidate)
 
     scrap_auto: float | None = None
     scrap_source_label: str | None = None
@@ -11072,29 +11157,31 @@ def compute_quote_from_df(df: pd.DataFrame,
         ui_scrap_raw = ui_vars.get("Scrap Percent (%)") if "ui_vars" in locals() else None
     except Exception:
         ui_scrap_raw = None
-    ui_scrap_val = _coerce_scrap_fraction(ui_scrap_raw)
-    if ui_scrap_val is None:
+    ui_scrap_val = normalize_scrap_pct(ui_scrap_raw)
+    ui_has_scrap = _scrap_value_provided(ui_scrap_raw)
+    if not ui_has_scrap:
         try:
             mask = df["Item"].astype(str).str.fullmatch(r"Scrap Percent \(%\)", case=False, na=False)
             candidate = df.loc[mask, "Example Values / Options"].iloc[0]
-            ui_scrap_val = _coerce_scrap_fraction(candidate)
+            if _scrap_value_provided(candidate):
+                ui_scrap_val = normalize_scrap_pct(candidate)
+                ui_has_scrap = True
         except Exception:
-            ui_scrap_val = None
+            ui_has_scrap = False
 
-    if ui_scrap_val is not None:
-        scrap_pct = _ensure_scrap_pct(ui_scrap_val)
+    if ui_has_scrap:
+        scrap_pct = normalize_scrap_pct(ui_scrap_val)
         scrap_pct_baseline = scrap_pct
         scrap_source_label = "ui"
     else:
-        scrap_pct = _ensure_scrap_pct(scrap_auto, default=SCRAP_DEFAULT_GUESS)
+        fallback_scrap = SCRAP_DEFAULT_GUESS if scrap_auto is None else scrap_auto
+        scrap_pct = normalize_scrap_pct(fallback_scrap)
         scrap_pct_baseline = scrap_pct
 
     holes_scrap = _holes_scrap_fraction(geo_context)
     if holes_scrap and holes_scrap > 0:
         # Take the more conservative (larger) scrap figure so we don’t underquote.
-        scrap_pct = _ensure_scrap_pct(
-            max(scrap_pct_baseline, holes_scrap), default=SCRAP_DEFAULT_GUESS
-        )
+        scrap_pct = normalize_scrap_pct(max(scrap_pct_baseline, holes_scrap))
         scrap_pct_baseline = scrap_pct
         scrap_source_label = (scrap_source_label or "auto") + "+holes"
     else:
@@ -11494,7 +11581,7 @@ def compute_quote_from_df(df: pd.DataFrame,
             mat_usd_per_kg, mat_src = 0.0, ""
         mat_usd_per_kg = float(mat_usd_per_kg or 0.0)
         effective_scrap_source = scrap_pct if scrap_pct else scrap_pct_baseline
-        effective_scrap = _ensure_scrap_pct(effective_scrap_source)
+        effective_scrap = normalize_scrap_pct(effective_scrap_source)
         material_cost = mass_kg * (1.0 + effective_scrap) * mat_usd_per_kg
         material_direct_cost = round(material_cost, 2)
         material_detail_for_breakdown.update({
@@ -11810,7 +11897,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     insurance_pct     = num_pct(r"(?:Insurance|Liability\s*Adder)", params["InsurancePct"])
     packaging_cost    = packaging_hr * rates["AssemblyRate"] + crate_nre_cost + packaging_mat
     packaging_flat_base = float((crate_nre_cost or 0.0) + (packaging_mat or 0.0))
-    shipping_basis_desc = "Freight & logistics"
+    shipping_basis_desc = "Outbound freight & logistics"
     shipping_cost_base = float(shipping_cost)
 
     # EHS / compliance
@@ -12381,10 +12468,12 @@ def compute_quote_from_df(df: pd.DataFrame,
             return bool((planner_directs or {}).get(k))
 
         pass_through: dict[str, float] = {
-            "Shipping": float(shipping_cost),
+            _canonical_pass_label("Shipping"): float(shipping_cost),
         }
         if _on("hardware") and float(hardware_cost) > 0:
-            pass_through["Hardware / BOM"] = float(hardware_cost)
+            pass_through[_canonical_pass_label(LEGACY_HARDWARE_PASS_LABEL)] = float(
+                hardware_cost
+            )
         if (
             _on("outsourced")
             and include_outsourced_pass
@@ -12398,9 +12487,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         if _on("packaging_flat") and float(packaging_flat_base) > 0:
             pass_through["Packaging Flat"] = float(packaging_flat_base)
 
-        pass_through = {
-            _canonical_pass_label(k): v for k, v in pass_through.items()
-        }
+        pass_through = _canonicalize_pass_through_map(pass_through)
 
         credit = float(material_scrap_credit_applied or 0.0)
         if credit > 0:
@@ -14071,7 +14158,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         effective_scrap_val = effective_struct.get("scrap_pct")
     elif isinstance(quote_state.suggestions, dict) and quote_state.suggestions.get("scrap_pct") is not None:
         effective_scrap_val = quote_state.suggestions.get("scrap_pct")
-    scrap_pct = _ensure_scrap_pct(effective_scrap_val)
+    scrap_pct = normalize_scrap_pct(effective_scrap_val)
 
     llm_notes: list[str] = []
     suggestion_notes = []
@@ -14343,7 +14430,6 @@ def compute_quote_from_df(df: pd.DataFrame,
         _normalize_key(_canonical_pass_label(k)): _canonical_pass_label(k)
         for k in pass_through.keys()
     }
-    pass_key_map[_normalize_key(LEGACY_HARDWARE_PASS_LABEL)] = HARDWARE_PASS_LABEL
 
     def _friendly_process(name: str) -> str:
         return name.replace("_", " ").title()
@@ -14421,7 +14507,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         entry["new_value"] = float(shipping_override)
         pass_through["Shipping"] = float(shipping_override)
         pass_key_map[_normalize_key("Shipping")] = "Shipping"
-        pass_meta.setdefault("Shipping", {})["basis"] = "Freight & logistics (user override)"
+        pass_meta.setdefault("Shipping", {})["basis"] = "Outbound freight & logistics (user override)"
 
     cmm_minutes_override = _clamp_override((overrides or {}).get("cmm_minutes"), 0.0, 60.0)
     if cmm_minutes_override is not None:
@@ -14488,7 +14574,7 @@ def compute_quote_from_df(df: pd.DataFrame,
 
     material_direct_cost_base = material_direct_cost
 
-    old_scrap = _ensure_scrap_pct(features.get("scrap_pct", scrap_pct))
+    old_scrap = normalize_scrap_pct(features.get("scrap_pct", scrap_pct))
     base_net_mass_g = _coerce_float_or_none(material_detail_for_breakdown.get("net_mass_g")) or 0.0
 
     removal_mass_g: float | None = None
@@ -14532,7 +14618,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     scrap_override_raw = overrides.get("scrap_pct_override") if isinstance(overrides, dict) else None
     scrap_override_applied = False
     if scrap_override_raw is not None:
-        override_scrap = _ensure_scrap_pct(scrap_override_raw)
+        override_scrap = normalize_scrap_pct(scrap_override_raw)
         if not math.isclose(override_scrap, scrap_after, abs_tol=1e-6):
             scrap_override_applied = True
         scrap_after = override_scrap
@@ -14695,10 +14781,16 @@ def compute_quote_from_df(df: pd.DataFrame,
             suffix = " (LLM)"
         llm_notes.append(f"{_friendly_process(actual)} +{float(add_hr):.2f} hr{suffix}")
 
-    src_pass_map = {}
+    src_pass_map: dict[str, Any] = {}
     if isinstance(quote_state.effective_sources, dict):
-        src_pass_map = quote_state.effective_sources.get("add_pass_through") or {}
-    add_pass = overrides.get("add_pass_through") if overrides else {}
+        raw_src_pass = quote_state.effective_sources.get("add_pass_through") or {}
+        if isinstance(raw_src_pass, Mapping):
+            for key, value in raw_src_pass.items():
+                canon_key = _canonical_pass_label(key)
+                if canon_key:
+                    src_pass_map[canon_key] = value
+    add_pass_raw = overrides.get("add_pass_through") if overrides else {}
+    add_pass = _canonicalize_pass_through_map(add_pass_raw)
     for label, add_val in (add_pass or {}).items():
         if not isinstance(add_val, (int, float)):
             continue
@@ -14715,7 +14807,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         entry["new_value"] = new_val
         if actual_label not in pass_meta:
             pass_meta[actual_label] = {"basis": "LLM override"}
-        src_tag = src_pass_map.get(label)
+        src_tag = src_pass_map.get(actual_label)
         suffix = ""
         if src_tag == "user":
             suffix = " (user override)"
@@ -15058,13 +15150,10 @@ def compute_quote_from_df(df: pd.DataFrame,
             if isinstance(existing_plan, dict):
                 existing_plan.setdefault("bucket_view", copy.deepcopy(planner_bucket_view))
 
-    material_direct_cost = float(pass_through.get("Material", material_direct_cost_base))
-    hardware_cost = float(
-        pass_through.get(
-            HARDWARE_PASS_LABEL,
-            pass_through.get(LEGACY_HARDWARE_PASS_LABEL, hardware_cost),
-        )
+    material_direct_cost = float(
+        pass_through.get(_canonical_pass_label("Material"), material_direct_cost_base)
     )
+    hardware_cost = float(pass_through.get(HARDWARE_PASS_LABEL, hardware_cost))
     outsourced_costs = float(pass_through.get("Outsourced Vendors", outsourced_costs))
     shipping_cost = float(pass_through.get("Shipping", shipping_cost_base))
     consumables_hr_cost = float(pass_through.get("Consumables /Hr", consumables_hr_cost))
@@ -15099,6 +15188,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     if base_directs_excluding_ship_mat > 0:
         pass_meta.setdefault("Insurance", {"basis": "Applied at insurance pct"})
         pass_meta.setdefault("Vendor Markup Added", {"basis": "Vendor + freight markup"})
+        pass_meta.setdefault("Shipping", {"basis": "Outbound freight & logistics"})
         insurance_cost = round(insurance_cost, 2)
         vendor_marked_add = round(vendor_marked_add, 2)
         pass_through["Insurance"] = insurance_cost
@@ -15124,8 +15214,8 @@ def compute_quote_from_df(df: pd.DataFrame,
     if price < min_lot:
         price = min_lot
 
-    labor_cost_details_input: dict[str, str] = {}
-    labor_cost_details: dict[str, str] = {}
+    labor_cost_details_input: dict[str, str] = dict(labor_cost_details_seed)
+    labor_cost_details: dict[str, str] = dict(labor_cost_details_seed)
     labor_costs_display: dict[str, float] = {}
 
     # Local helper mirrors the renderer's filter so summary details stay clean
@@ -15142,50 +15232,41 @@ def compute_quote_from_df(df: pd.DataFrame,
             canonical_label = str(label)
         labor_costs_display[canonical_label] = float(amount)
         existing_detail = labor_cost_details_input.get(canonical_label)
-        if not detail_bits and not existing_detail:
-            return
-
         merged_bits: list[str] = []
         seen: set[str] = set()
-        for bit in detail_bits:
-            seg = str(bit).strip()
-            if not seg or re.match(r"^includes\b.*extras\b", seg, re.IGNORECASE):
-                continue
+
+        def _append_segment(segment: str) -> None:
+            seg = segment.strip()
+            if not seg or _is_extra_segment(seg):
+                return
             if seg not in seen:
                 merged_bits.append(seg)
                 seen.add(seg)
+
+        for bit in detail_bits:
+            _append_segment(str(bit))
+
         if existing_detail:
             for segment in re.split(r";\s*", existing_detail):
-                seg = segment.strip()
-                if not seg or re.match(r"^includes\b.*extras\b", seg, re.IGNORECASE):
-                    continue
-                if seg not in seen:
-                    merged_bits.append(seg)
-                    seen.add(seg)
+                _append_segment(segment)
+
         if merged_bits:
-            labor_cost_details[canonical_label] = "; ".join(merged_bits)
+            merged_text = "; ".join(merged_bits)
+            labor_cost_details_input[canonical_label] = merged_text
+            labor_cost_details[canonical_label] = merged_text
+        else:
+            labor_cost_details_input.pop(canonical_label, None)
+            labor_cost_details.pop(canonical_label, None)
 
-    # Use current process_costs for ordered iteration of labor detail lines
-    canonical_process_costs = dict(process_costs)
-    # Reuse the same planner bucket display mapping for the breakdown section.
-    # If no planner map exists in this scope, use an empty mapping.
-    try:
-        _tmp_map = planner_bucket_display_map  # may exist in other scopes
-    except Exception:
-        _tmp_map = {}
-    planner_bucket_display_map_breakdown = dict(_tmp_map) if isinstance(_tmp_map, Mapping) else {}
-
-    for entry in _iter_ordered_process_entries(
-        canonical_process_costs,
-        process_meta=process_meta,
-        applied_process=applied_process,
-        show_zeros=False,
-        planner_bucket_display_map=planner_bucket_display_map_breakdown,
-        label_overrides=PROCESS_LABEL_OVERRIDES,
-        currency_formatter=lambda val: f"${float(val):,.2f}",
-    ):
+    for entry in process_entries_for_display:
+        try:
+            amount_val = float(entry.amount or 0.0)
+        except Exception:
+            amount_val = 0.0
+        if amount_val <= 0.0:
+            continue
         label = entry.display_override or entry.label
-        _merge_labor_detail(label, entry.amount, list(entry.detail_bits))
+        _merge_labor_detail(label, amount_val, list(entry.detail_bits))
 
     show_programming_amortized = Qty > 1 and programming_per_part > 0
     if show_programming_amortized:
@@ -15231,7 +15312,20 @@ def compute_quote_from_df(df: pd.DataFrame,
         logger.exception("Labor section invariant calculation failed")
     else:
         expected_labor_total = float(labor_cost or 0.0)
-        if not math.isclose(
+        diff = abs(labor_display_total - expected_labor_total)
+        if diff > 0.5:
+            flag_message = (
+                f"Labor totals drifted by ${diff:,.2f}: "
+                f"rendered ${labor_display_total:,.2f} vs expected ${expected_labor_total:,.2f}"
+            )
+            if flag_message not in red_flags:
+                red_flags.append(flag_message)
+            logger.warning(
+                "Labor section totals drifted beyond threshold: %.2f vs %.2f",
+                labor_display_total,
+                expected_labor_total,
+            )
+        elif not math.isclose(
             labor_display_total,
             expected_labor_total,
             rel_tol=0.0,
@@ -15342,6 +15436,8 @@ def compute_quote_from_df(df: pd.DataFrame,
             "Labor": round(planner_labor_cost_total, 2),
         }
 
+    app_meta = {"llm_debug_enabled": bool(APP_ENV.llm_debug_enabled)}
+
     breakdown = {
         "qty": Qty,
         "setups": int(setups) if isinstance(setups, (int, float)) else setups,
@@ -15415,6 +15511,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         "user_overrides": copy.deepcopy(quote_state.user_overrides),
         "effective": copy.deepcopy(quote_state.effective),
         "effective_sources": copy.deepcopy(quote_state.effective_sources),
+        "app": dict(app_meta),
     }
     breakdown["decision_state"] = decision_state
 
@@ -15481,6 +15578,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         "drill_debug": list(drill_debug_lines),
         "drilling_meta": drilling_meta,
         "red_flags": list(red_flag_messages),
+        "app": dict(app_meta),
     }
 
     breakdown["speeds_feeds_path"] = speeds_feeds_path
@@ -17372,7 +17470,6 @@ def derive_inference_knobs(
             },
             "targets": [
                 f"add_pass_through.{HARDWARE_PASS_LABEL}",
-                f"add_pass_through.{LEGACY_HARDWARE_PASS_LABEL}",
                 "process_hour_adders.assembly",
             ],
         }
@@ -17988,7 +18085,7 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
 
 
 def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
-    _require_ezdxf()
+    require_ezdxf()
 
 
     # --- load doc ---
@@ -18002,7 +18099,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
 
             doc = odafc.readfile(path)
         else:
-            dxf_path = geometry.convert_dwg_to_dxf(path, out_ver="ACAD2018")
+            dxf_path = convert_dwg_to_dxf(path, out_ver="ACAD2018")
             dxf_text_path = dxf_path
             doc = ezdxf.readfile(dxf_path)
     else:
@@ -18137,9 +18234,10 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     chart_source: str | None = None
     chart_summary: dict[str, Any] | None = None
 
-    if extract_text_lines_from_dxf and dxf_text_path:
+    extractor = _extract_text_lines_from_dxf or geometry.extract_text_lines_from_dxf
+    if extractor and dxf_text_path:
         try:
-            chart_lines = extract_text_lines_from_dxf(dxf_text_path)
+            chart_lines = extractor(dxf_text_path)
         except Exception:
             chart_lines = []
     if not chart_lines:
@@ -18147,9 +18245,10 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
 
     if chart_lines:
         chart_summary = summarize_hole_chart_lines(chart_lines)
-    if chart_lines and parse_hole_table_lines:
+    parser = _parse_hole_table_lines or geometry.parse_hole_table_lines
+    if chart_lines and parser:
         try:
-            hole_rows = parse_hole_table_lines(chart_lines)
+            hole_rows = parser(chart_lines)
         except Exception:
             hole_rows = []
         if hole_rows:
@@ -18665,7 +18764,7 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
     effective_scrap = material_detail.get("scrap_pct")
     if effective_scrap is None:
         effective_scrap = breakdown.get("scrap_pct")
-    effective_scrap = _ensure_scrap_pct(effective_scrap)
+    effective_scrap = normalize_scrap_pct(effective_scrap)
     scrap_pct_percent = round(100.0 * effective_scrap, 1)
 
     ctx = {
@@ -19293,7 +19392,10 @@ def get_llm_overrides(
         if isinstance(v, (int, float)):
             orig = float(v)
             clamped_val = clamp(v, 0.0, 200.0, 0.0)
-            clean_pass[str(k)] = clamped_val
+            canon_key = _canonical_pass_label(k)
+            if not canon_key:
+                continue
+            clean_pass[canon_key] = clamped_val
             if not math.isclose(orig, clamped_val, abs_tol=1e-6):
                 clamp_notes.append(
                     f"add_pass_through[{k}] {orig:.2f} → {clamped_val:.2f}"

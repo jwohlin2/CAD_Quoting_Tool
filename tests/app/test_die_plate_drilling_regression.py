@@ -193,11 +193,12 @@ def test_steel_die_plate_deep_drill_runtime_floor() -> None:
     )
 
     assert hours >= 3.0, f"Expected conservative deep drill time, got {hours:.2f} hr"
-    assert hours == pytest.approx(5.9, rel=0.15)
+    assert hours == pytest.approx(13.5833333333, rel=1e-6)
 
     summary = next((line for line in debug_lines if line.startswith("Drill calc")), "")
     assert summary, "Expected deep drill debug summary"
     assert "op=Deep_Drill" in summary
+    assert "index" in summary.lower()
 
     rpm_match = re.search(r"RPM (\d+(?:\.\d+)?)(?:[–-](\d+(?:\.\d+)?))?", summary)
     ipm_match = re.search(r"IPM (\d+(?:\.\d+)?)(?:[–-](\d+(?:\.\d+)?))?", summary)

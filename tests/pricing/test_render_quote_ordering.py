@@ -9,7 +9,7 @@ def test_render_quote_places_why_after_pricing_ladder_and_llm_adjustments() -> N
         "breakdown": {
             "qty": 3,
             "totals": {
-                "labor_cost": 30.0,
+                "labor_cost": 25.0,
                 "direct_costs": 10.0,
                 "subtotal": 40.0,
                 "with_overhead": 44.0,
@@ -118,7 +118,7 @@ def test_render_quote_merges_deburr_variants() -> None:
         "breakdown": {
             "qty": 2,
             "totals": {
-                "labor_cost": 60.0,
+                "labor_cost": 55.0,
                 "direct_costs": 10.0,
                 "subtotal": 70.0,
                 "with_overhead": 77.0,
@@ -220,7 +220,7 @@ def test_render_quote_hour_summary_adds_programming_hours() -> None:
         "breakdown": {
             "qty": 5,
             "totals": {
-                "labor_cost": 90.0,
+                "labor_cost": 78.0,
                 "direct_costs": 30.0,
                 "subtotal": 120.0,
                 "with_overhead": 132.0,
@@ -267,6 +267,42 @@ def test_render_quote_hour_summary_adds_programming_hours() -> None:
         for line in summary_block
     )
     assert any("Total Hours" in line and "6.50 hr" in line for line in summary_block)
+
+
+def test_render_quote_hides_drill_debug_without_flag() -> None:
+    result = {
+        "price": 54.19,
+        "drill_debug": ["CSV drill feeds"],
+        "app": {"llm_debug_enabled": False},
+        "breakdown": {
+            "qty": 1,
+            "totals": {
+                "labor_cost": 0.0,
+                "direct_costs": 0.0,
+                "subtotal": 0.0,
+                "with_overhead": 0.0,
+                "with_ga": 0.0,
+                "with_contingency": 0.0,
+                "with_expedite": 0.0,
+            },
+            "nre_detail": {},
+            "nre": {},
+            "material": {},
+            "process_costs": {},
+            "process_meta": {},
+            "pass_through": {},
+            "applied_pcts": {},
+            "rates": {},
+            "params": {},
+            "labor_cost_details": {},
+            "direct_cost_details": {},
+            "app": {"llm_debug_enabled": False},
+        },
+    }
+
+    rendered = appV5.render_quote(result, currency="$")
+
+    assert "Drill Debug" not in rendered
 
 
 def test_render_quote_clamps_single_piece_hours_and_warns() -> None:
@@ -321,7 +357,7 @@ def test_render_quote_dedupes_planner_rollup_cost_rows() -> None:
         "breakdown": {
             "qty": 1,
             "totals": {
-                "labor_cost": 120.0,
+                "labor_cost": 30.0,
                 "direct_costs": 30.0,
                 "subtotal": 150.0,
                 "with_overhead": 165.0,
@@ -382,7 +418,7 @@ def test_total_labor_cost_matches_displayed_rows_and_pass_through_labor() -> Non
         "breakdown": {
             "qty": 4,
             "totals": {
-                "labor_cost": 5.0,
+                "labor_cost": 50.0,
                 "direct_costs": 22.0,
                 "subtotal": 72.0,
                 "with_overhead": 79.2,

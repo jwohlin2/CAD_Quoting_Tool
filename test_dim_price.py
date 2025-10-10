@@ -1,6 +1,6 @@
 # test_dim_price.py
 # Given L, W, T, material -> pick the smallest >= size (never smaller) and price it via the McMaster API.
-import os, math
+import math
 from typing import Dict, List, Tuple, Optional
 from mcmaster_api import McMasterAPI, load_env
 

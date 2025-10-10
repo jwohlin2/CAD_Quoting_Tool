@@ -7,8 +7,7 @@ fixturing, quality assurance, and warnings.  The logic is based on the rules
 supplied in the Composidie EDM and grinding reference playbook.
 """
 
-from math import isfinite
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 Op = Dict[str, Any]
 Plan = Dict[str, Any]
