@@ -11633,9 +11633,14 @@ def compute_quote_from_df(
             empty_attr = None
         if empty_attr is not None:
             try:
-                return bool(empty_attr) is False
+                empty_value = empty_attr() if callable(empty_attr) else empty_attr
             except Exception:
-                pass
+                empty_value = None
+            if empty_value is not None:
+                try:
+                    return not bool(empty_value)
+                except Exception:
+                    pass
         try:
             return len(table) > 0  # type: ignore[arg-type]
         except Exception:
