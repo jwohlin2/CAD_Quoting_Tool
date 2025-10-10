@@ -595,21 +595,26 @@ from cad_quoter.pricing.time_estimator import (
 from cad_quoter.pricing.wieland import lookup_price as lookup_wieland_price
 from cad_quoter.rates import migrate_flat_to_two_bucket, two_bucket_to_flat
 from cad_quoter.vendors.mcmaster_stock import lookup_sku_and_price_for_mm
+_DEFAULT_SYSTEM_SUGGEST = (
+    "You are a manufacturing estimator. Given GEO + baseline + bounds, "
+    "propose bounded adjustments that improve realism."
+)
+
 try:  # pragma: no cover - defensive guard when optional LLM helpers are absent
     from cad_quoter import llm as _cad_llm  # type: ignore
 except Exception:  # pragma: no cover - tolerate partial installs
     _cad_llm = None
 
+# Default to the fallback prompt so that ``SYSTEM_SUGGEST`` is always defined,
+# even when optional helpers fail to import (for example in "exec" based
+# runtimes that evaluate this module with a constrained globals() mapping).
+SYSTEM_SUGGEST = _DEFAULT_SYSTEM_SUGGEST
+
 if _cad_llm is not None:
     SUGG_TO_EDITOR = getattr(_cad_llm, "SUGG_TO_EDITOR", {})
     EDITOR_TO_SUGG = getattr(_cad_llm, "EDITOR_TO_SUGG", {})
     EDITOR_FROM_UI = getattr(_cad_llm, "EDITOR_FROM_UI", {})
-    SYSTEM_SUGGEST = getattr(
-        _cad_llm,
-        "SYSTEM_SUGGEST",
-        "You are a manufacturing estimator. Given GEO + baseline + bounds, "
-        "propose bounded adjustments that improve realism.",
-    )
+    SYSTEM_SUGGEST = getattr(_cad_llm, "SYSTEM_SUGGEST", _DEFAULT_SYSTEM_SUGGEST)
     _LLMClient = getattr(_cad_llm, "LLMClient", None)
     if _LLMClient is None:  # pragma: no cover - unexpected in older builds
         class LLMClient:  # type: ignore[override]
@@ -649,10 +654,7 @@ else:  # pragma: no cover - fallback definitions keep quoting functional without
     SUGG_TO_EDITOR: dict = {}
     EDITOR_TO_SUGG: dict = {}
     EDITOR_FROM_UI: dict = {}
-    SYSTEM_SUGGEST = (
-        "You are a manufacturing estimator. Given GEO + baseline + bounds, "
-        "propose bounded adjustments that improve realism."
-    )
+    SYSTEM_SUGGEST = _DEFAULT_SYSTEM_SUGGEST
 
     class LLMClient:  # type: ignore[override]
         """Placeholder used when the optional LLM helpers are unavailable."""
@@ -12675,6 +12677,13 @@ def compute_quote_from_df(
     # new messages.  Provide an alias so any lingering references continue to
     # work instead of raising ``NameError`` when the branch executes.
     red_flags = red_flag_messages
+    # Older desktop builds evaluate this file via ``exec`` with a custom globals
+    # dictionary.  In that environment a direct reference to ``red_flags`` can
+    # look up the module globals instead of the function locals, causing a
+    # ``NameError`` if the alias is not present.  Publishing the alias in the
+    # module namespace keeps those callers working while still returning an
+    # isolated list per invocation.
+    globals()["red_flags"] = red_flag_messages
     _red_flag_seen: set[str] = set()
     # Legacy alias used by older code paths; keep synchronized for safety.
     red_flags = red_flag_messages
@@ -15228,9 +15237,10 @@ def compute_quote_from_df(
                 try:
                     # Prepare a safe JSON body for the LLM message; default=str guards non-serializable entries
                     _payload_body = jdump(payload)
+                    system_prompt = globals().get("SYSTEM_SUGGEST", _DEFAULT_SYSTEM_SUGGEST)
                     chat_out = llm_suggest.create_chat_completion(
                         messages=[
-                            {"role": "system", "content": SYSTEM_SUGGEST},
+                            {"role": "system", "content": system_prompt},
                             {"role": "user", "content": _payload_body},
                         ],
                         temperature=0.3,
@@ -15333,11 +15343,12 @@ def compute_quote_from_df(
             "applied_effective": applied_effective,
         })
         if APP_ENV.llm_debug_enabled:
+            system_prompt = globals().get("SYSTEM_SUGGEST", _DEFAULT_SYSTEM_SUGGEST)
             snap = {
                 "model": overrides_meta.get("model"),
                 "n_ctx": overrides_meta.get("n_ctx"),
                 "messages": [
-                    {"role": "system", "content": SYSTEM_SUGGEST},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": jdump(payload)},
                 ],
                 "params": {"temperature": 0.3, "top_p": 0.9, "max_tokens": 512},
