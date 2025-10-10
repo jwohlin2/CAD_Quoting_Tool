@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import functools
 import importlib
 import json
 import logging
