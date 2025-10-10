@@ -103,18 +103,17 @@ def resolve_planner(
     default_mode = "auto"
     if FORCE_PLANNER:
         planner_mode = "planner"
-    else:
-        if isinstance(params, _MappingABC):
-            try:
-                raw_mode = params.get("PlannerMode", default_mode)
-            except Exception:
-                raw_mode = default_mode
-            try:
-                planner_mode = str(raw_mode).strip().lower() or default_mode
-            except Exception:
-                planner_mode = default_mode
-        else:
+    elif isinstance(params, _MappingABC):
+        try:
+            raw_mode = params.get("PlannerMode", default_mode)
+        except Exception:
+            raw_mode = default_mode
+        try:
+            planner_mode = str(raw_mode).strip().lower() or default_mode
+        except Exception:
             planner_mode = default_mode
+    else:
+        planner_mode = default_mode
 
     signals_map: Mapping[str, Any]
     if isinstance(signals, _MappingABC):
@@ -610,8 +609,7 @@ def normalize_scrap_pct(val: Any, cap: float = 0.25) -> float:
         raw = 0.0
     if raw > 1.0:
         raw = raw / 100.0
-    if raw < 0.0:
-        raw = 0.0
+    raw = max(raw, 0.0)
     return min(cap_val, raw)
 
 
@@ -811,8 +809,7 @@ def coerce_bounds(bounds: Mapping | None) -> dict[str, Any]:
         mult_max = LLM_MULTIPLIER_MAX
     else:
         mult_max = min(LLM_MULTIPLIER_MAX, float(mult_max))
-    if mult_max < mult_min:
-        mult_max = mult_min
+    mult_max = max(mult_max, mult_min)
 
     adder_max = _as_float_or_none(bounds.get("adder_max_hr"))
     add_hr_cap = _as_float_or_none(bounds.get("add_hr_max"))
@@ -1661,8 +1658,7 @@ def merge_effective(
                 LLM_MULTIPLIER_MAX,
                 mult_max_val if mult_max_val is not None else LLM_MULTIPLIER_MAX,
             )
-            if mult_max < mult_min:
-                mult_max = mult_min
+            mult_max = max(mult_max, mult_min)
             clamped = max(mult_min, min(mult_max, float(value)))
         elif kind == "adder":
             orig_val = float(value)
@@ -1698,8 +1694,7 @@ def merge_effective(
             else:
                 filtered = [cand for cand in adder_max_candidates if cand is not None]
                 adder_max_effective = min(filtered) if filtered else LLM_ADDER_MAX
-            if adder_max_effective < lower_bound:
-                adder_max_effective = lower_bound
+            adder_max_effective = max(adder_max_effective, lower_bound)
             clamped = max(lower_bound, min(adder_max_effective, raw_val))
         elif kind == "scrap":
             scrap_min = max(0.0, to_float(bounds.get("scrap_min")) or 0.0)
@@ -5449,11 +5444,10 @@ def render_quote(
         status_suffix = ""
     if path_text:
         write_wrapped(f"Speeds/Feeds CSV: {path_text}{status_suffix}")
+    elif status_suffix:
+        write_wrapped(f"Speeds/Feeds CSV: (not set){status_suffix}")
     else:
-        if status_suffix:
-            write_wrapped(f"Speeds/Feeds CSV: (not set){status_suffix}")
-        else:
-            write_line("Speeds/Feeds CSV: (not set)")
+        write_line("Speeds/Feeds CSV: (not set)")
     lines.append("")
     def _drill_debug_enabled() -> bool:
         """Return True when drill debug output should be rendered."""
@@ -6657,12 +6651,11 @@ def render_quote(
             }
             labor_row_data[storage_key] = entry
             labor_row_order.append(storage_key)
-        else:
-            if display_override:
-                entry["label"] = display_text
-                entry["has_override"] = True
-            elif not entry.get("has_override"):
-                entry["label"] = display_text
+        elif display_override:
+            entry["label"] = display_text
+            entry["has_override"] = True
+        elif not entry.get("has_override"):
+            entry["label"] = display_text
 
         entry["amount"] += amount_val
         if process_key is not None:
@@ -7555,9 +7548,8 @@ def _tolerance_values_from_any(value: Any) -> list[float]:
             magnitude /= 1000.0
         elif unit in {"in", "inch", "inches", '"'}:
             pass
-        else:
-            if magnitude > 0.25:
-                continue
+        elif magnitude > 0.25:
+            continue
         if magnitude <= 0.0:
             continue
         if magnitude <= 0.25:
@@ -8662,11 +8654,10 @@ def estimate_drilling_hours(
             total_depth_in = depth_in + breakthrough_in if depth_in > 0 else breakthrough_in
             group_specs.append((diameter_in, int(qty), total_depth_in))
         fallback_counts = counts
-    else:
-        if fallback_counts is None:
-            fallback_counts = Counter()
-            for dia_in, qty, _ in group_specs:
-                fallback_counts[round(dia_in * 25.4, 3)] += qty
+    elif fallback_counts is None:
+        fallback_counts = Counter()
+        for dia_in, qty, _ in group_specs:
+            fallback_counts[round(dia_in * 25.4, 3)] += qty
 
     if group_specs:
         base_machine = machine_params or _machine_params_from_params(None)
@@ -12225,9 +12216,7 @@ def compute_quote_from_df(df: pd.DataFrame,
             planner_inputs = _build_bushing_inputs()
         elif planner_family == "cam_or_hemmer":
             planner_inputs = _build_cam_inputs()
-        elif planner_family == "flat_die_chaser":
-            planner_inputs = {}
-        elif planner_family == "pm_compaction_die":
+        elif planner_family == "flat_die_chaser" or planner_family == "pm_compaction_die":
             planner_inputs = {}
         elif planner_family == "shear_blade":
             planner_inputs = {"material": material_name or default_material_display}
@@ -14285,8 +14274,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     price = price_before_margin * (1.0 + MarginPct)
 
     min_lot = float(params["MinLotCharge"] or 0.0)
-    if price < min_lot:
-        price = min_lot
+    price = max(price, min_lot)
 
     labor_cost_details_input: dict[str, str] = dict(labor_cost_details_seed)
     labor_cost_details: dict[str, str] = dict(labor_cost_details_seed)
@@ -16006,9 +15994,7 @@ def _aggregate_hole_entries(entries: Iterable[dict[str, Any]] | None) -> dict[st
             except Exception:
                 continue
             side = str(entry.get("side") or "").upper()
-            if side == "BACK" or (entry.get("raw") and "BACK" in str(entry.get("raw")).upper()):
-                back_ops = True
-            elif entry.get("double_sided") and (entry.get("cbore") or entry.get("csk")):
+            if side == "BACK" or (entry.get("raw") and "BACK" in str(entry.get("raw")).upper()) or entry.get("double_sided") and (entry.get("cbore") or entry.get("csk")):
                 back_ops = True
     tap_details_list = []
     for spec, detail in tap_details.items():
@@ -20010,7 +19996,7 @@ class App(tk.Tk):
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
-            messagebox.showinfo("Overrides", f"Saved to:\n{{path}}")
+            messagebox.showinfo("Overrides", "Saved to:\n{path}")
             self.status_var.set(f"Saved overrides to {path}")
         except Exception:
             messagebox.showerror("Overrides", f"Save failed:\n{{e}}")

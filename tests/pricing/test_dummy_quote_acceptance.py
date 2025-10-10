@@ -1,6 +1,5 @@
 import copy
 
-import appV5
 
 
 DUMMY_QUOTE_RESULT = {

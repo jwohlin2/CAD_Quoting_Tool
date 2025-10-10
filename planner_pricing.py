@@ -29,7 +29,7 @@ def _geom(geom: dict) -> dict:
                     return d[k1][k2]
                 if isinstance(derived.get(k1), dict) and k2 in derived[k1]:
                     return derived[k1][k2]
-            v = d.get(k, None)
+            v = d.get(k)
             if v is None and k in derived:
                 v = derived.get(k)
             if v is not None:
