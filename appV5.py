@@ -131,6 +131,33 @@ def _compute_direct_costs(
 
 
 # ---------------------------------------------------------------------------
+# Formatting helpers
+# ---------------------------------------------------------------------------
+
+
+def _format_hours_with_rate(
+    hours: Any,
+    rate: Any,
+    *,
+    currency_formatter: Callable[[float], str],
+) -> str:
+    """Render an hours/rate pair with a supplied currency formatter."""
+
+    try:
+        hours_val = float(hours or 0.0)
+    except Exception:
+        hours_val = 0.0
+    hours_text = f"{hours_val:.2f} hr"
+    try:
+        rate_val = float(rate or 0.0)
+    except Exception:
+        rate_val = 0.0
+    if rate_val > 0:
+        return f"{hours_text} @ {currency_formatter(rate_val)}/hr"
+    return hours_text
+
+
+# ---------------------------------------------------------------------------
 # Debug helpers
 # ---------------------------------------------------------------------------
 
@@ -302,6 +329,18 @@ try:  # pragma: no cover - typing backport for older Python versions
     from typing import TypeAlias
 except ImportError:  # pragma: no cover - python <3.10
     from typing_extensions import TypeAlias  # type: ignore[import]
+
+
+RunLLMSuggestions = Callable[
+    ["LLMClient", dict[str, Any]], tuple[dict[str, Any], str, dict[str, Any]]
+]
+
+try:
+    from cad_quoter.llm import run_llm_suggestions as _run_llm_suggestions
+except Exception:  # pragma: no cover - optional dependency
+    _run_llm_suggestions = None  # type: ignore[assignment]
+
+run_llm_suggestions: RunLLMSuggestions | None = _run_llm_suggestions
 
 
 T = TypeVar("T")
@@ -6308,18 +6347,7 @@ def render_quote(
         return f"{float(x):.2f} hr"
 
     def _hours_with_rate_text(hours: Any, rate: Any) -> str:
-        try:
-            hours_val = float(hours or 0.0)
-        except Exception:
-            hours_val = 0.0
-        hours_text = f"{hours_val:.2f} hr"
-        try:
-            rate_val = float(rate or 0.0)
-        except Exception:
-            rate_val = 0.0
-        if rate_val > 0:
-            return f"{hours_text} @ {_m(rate_val)}/hr"
-        return hours_text
+        return _format_hours_with_rate(hours, rate, currency_formatter=_m)
 
     def _pct(x) -> str:
         return f"{float(x or 0.0) * 100:.1f}%"
@@ -14215,7 +14243,7 @@ def compute_quote_from_df(
     if _process_plan_job is not None:
         def _first_from_sources(
             patterns: tuple[str, ...],
-            *sources: Mapping[str, Any],
+            *sources: Mapping[str, Any] | None,
             transform: Callable[[Any], T | None],
         ) -> T | None:
             for source in sources:
@@ -14232,14 +14260,18 @@ def compute_quote_from_df(
                             return value
             return None
 
-        def _first_numeric(patterns: tuple[str, ...], *sources: Mapping[str, Any]) -> float | None:
+        def _first_numeric(
+            patterns: tuple[str, ...], *sources: Mapping[str, Any] | None
+        ) -> float | None:
             return _first_from_sources(
                 patterns,
                 *sources,
                 transform=_coerce_float_or_none,
             )
 
-        def _first_text(patterns: tuple[str, ...], *sources: Mapping[str, Any]) -> str | None:
+        def _first_text(
+            patterns: tuple[str, ...], *sources: Mapping[str, Any] | None
+        ) -> str | None:
             return _first_from_sources(
                 patterns,
                 *sources,
@@ -14698,8 +14730,11 @@ def compute_quote_from_df(
             if planner_hints:
                 process_plan_summary["derived"] = planner_hints
 
+            process_plan_job = _process_plan_job
             try:
-                planner_result = _process_plan_job(planner_family, planner_inputs)
+                if process_plan_job is None:  # pragma: no cover - defensive guard
+                    raise RuntimeError("Process planner is unavailable")
+                planner_result = process_plan_job(planner_family, planner_inputs)
             except Exception as planner_err:  # pragma: no cover - defensive logging
                 logger.debug("Process planner failed for %s: %s", planner_family, planner_err)
                 process_plan_summary["error"] = str(planner_err)
@@ -15797,6 +15832,8 @@ def compute_quote_from_df(
                         )
                         created_client = True
                     llm_obj = client
+                    if run_llm_suggestions is None:
+                        raise RuntimeError("run_llm_suggestions is unavailable")
                     s_raw, s_text, s_usage = run_llm_suggestions(client, payload)
                     sanitized_struct = sanitize_suggestions(s_raw, llm_bounds)
                 except Exception as exc:
