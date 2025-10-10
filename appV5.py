@@ -24,6 +24,7 @@ import time
 import typing
 from collections import Counter
 from collections.abc import Mapping as _MappingABC
+from collections.abc import MutableMapping as _MutableMappingABC
 from dataclasses import (
     asdict,
     dataclass,
@@ -131,6 +132,27 @@ def _jsonify_debug_value(value: Any, depth: int = 0, max_depth: int = 6) -> Any:
     return coerced if math.isfinite(coerced) else None
 
 
+def _jsonify_debug_summary(summary: Mapping[str, Any]) -> dict[str, Any]:
+    """Safely serialize debugging metadata for JSON storage.
+
+    Older builds of :mod:`appV5` may be missing :func:`_jsonify_debug_value`.
+    That scenario produced a ``NameError`` when the drilling debug summaries
+    were materialised.  Instead of failing the whole quoting flow, fall back to
+    the raw values so the caller still receives a response (albeit with less
+    structured debug output).
+    """
+
+    serializer = globals().get("_jsonify_debug_value")
+    if not callable(serializer):
+        # Preserve backwards compatibility by returning the original mapping.
+        return {str(key): value for key, value in summary.items()}
+
+    return {
+        str(key): serializer(value)  # type: ignore[misc]
+        for key, value in summary.items()
+    }
+
+
 # Guardrails for LLM-generated process adjustments.
 LLM_MULTIPLIER_MIN = 0.25
 LLM_MULTIPLIER_MAX = 4.0
@@ -213,12 +235,14 @@ from typing import (
     TypeVar,
     cast,
     Literal,
+    MutableMapping,
     overload,
     TYPE_CHECKING,
 )
 
 
 Mapping: TypeAlias = _MappingABC
+MutableMapping: TypeAlias = _MutableMappingABC
 
 
 T = TypeVar("T")
@@ -11579,6 +11603,9 @@ def compute_quote_from_df(
     # Default pricing source; updated to 'planner' later if planner path is used
     pricing_source = "legacy"
     legacy_baseline_had_values_flag = False
+    # Maintain backward compatibility with older variable name used in
+    # downstream code paths.
+    legacy_baseline_had_values = legacy_baseline_had_values_flag
 
     params_defaults = default_params if default_params is not None else QuoteConfiguration().default_params
     rates_defaults = default_rates if default_rates is not None else PricingRegistry().default_rates
@@ -11608,6 +11635,10 @@ def compute_quote_from_df(
     pricing_engine = pricing or _DEFAULT_PRICING_ENGINE
     quote_state.ui_vars = dict(ui_vars)
     quote_state.rates = dict(rates)
+    # Track whether we recognized any planner line items even if planner pricing
+    # fails to populate line_items. Initialize this early to avoid scope issues
+    # when incrementing the counter in downstream logic.
+    recognized_line_items = 0
     geo_context = dict(geo or {})
     inner_geo_raw = geo_context.get("geo")
     inner_geo = dict(inner_geo_raw) if isinstance(inner_geo_raw, dict) else {}
@@ -13029,9 +13060,7 @@ def compute_quote_from_df(
     if drill_debug_line:
         drilling_meta["speeds_feeds_debug"] = drill_debug_line
     if drill_debug_summary:
-        drilling_meta["debug_summary"] = {
-            key: _jsonify_debug_value(value) for key, value in drill_debug_summary.items()
-        }
+        drilling_meta["debug_summary"] = _jsonify_debug_summary(drill_debug_summary)
         if not drill_material_display:
             for summary in drill_debug_summary.values():
                 mat_val = str(summary.get("material") or "").strip()
@@ -13227,10 +13256,11 @@ def compute_quote_from_df(
     ) or any(
         float(meta.get("hr", 0.0) or 0.0) > 0.0 for meta in legacy_process_meta.values()
     )
+    legacy_baseline_had_values = legacy_baseline_had_values_flag
 
-    meta_lookup: dict[str, dict[str, Any]] = {
-        key: dict(value) for key, value in process_meta.items() if isinstance(value, _MappingABC)
-    }
+    planner_meta_keys: set[str] = set()
+
+    meta_lookup: dict[str, dict[str, Any]] = _build_process_meta_lookup(process_meta)
 
     _reset_planner_meta_keys()
     if not used_planner:
@@ -14123,7 +14153,6 @@ def compute_quote_from_df(
             process_plan_summary["pricing_error"] = planner_pricing_error
 
     planner_line_items: list[dict[str, Any]] = []
-    recognized_line_items = 0
     planner_machine_cost_total = 0.0
     planner_labor_cost_total = 0.0
     planner_total_minutes = 0.0
@@ -14515,10 +14544,7 @@ def compute_quote_from_df(
                     process_meta[b] = update_payload
                 _planner_meta_add(b)
 
-        meta_lookup = {
-            key: dict(value) for key, value in process_meta.items() if isinstance(value, _MappingABC)
-        }
-        planner_keys_snapshot = _get_planner_meta_keys()
+        meta_lookup = _build_process_meta_lookup(process_meta)
         allowed_process_hour_keys = {
             key
             for key in planner_keys_snapshot
@@ -15047,7 +15073,7 @@ def compute_quote_from_df(
             }
             snap_path = APP_ENV.llm_debug_dir / f"llm_snapshot_{int(time.time())}.json"
             snap_path.write_text(
-                jdump(json_safe_copy(snap), default=None),
+                jdump(json_safe_copy(snap)),
                 encoding="utf-8",
             )
 
@@ -16519,7 +16545,7 @@ def compute_quote_from_df(
                     "pass_through": {k: v for k, v in applied_pass.items()},
                 }
                 latest.write_text(
-                    jdump(json_safe_copy(snap), default=None),
+                    jdump(json_safe_copy(snap)),
                     encoding="utf-8",
                 )
         except Exception:
