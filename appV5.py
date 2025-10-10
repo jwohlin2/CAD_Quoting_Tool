@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import functools
 import importlib
 import json
 import logging
@@ -285,13 +286,22 @@ from typing import (
     Protocol,
     Sequence,
     Tuple,
+    Type,
     TypeVar,
+    NoReturn,
+    TypeAlias,
     cast,
     Literal,
     MutableMapping,
     overload,
     TYPE_CHECKING,
+    TypeAlias,
 )
+
+try:  # pragma: no cover - typing backport for older Python versions
+    from typing import TypeAlias
+except ImportError:  # pragma: no cover - python <3.10
+    from typing_extensions import TypeAlias  # type: ignore[import]
 
 
 T = TypeVar("T")
@@ -1023,19 +1033,32 @@ except ImportError:
             TopoDS = TopoDS_Face = TopoDS_Shape = Any  # type: ignore[assignment]
             TopTools_IndexedDataMapOfShapeListOfShape = Any  # type: ignore[assignment]
         else:
-            class _MissingOCCTModule:
-                def __getattr__(self, item):
+            class _MissingOCCTSentinelMeta(type):
+                def __call__(cls, *args: Any, **kwargs: Any) -> NoReturn:
                     raise ImportError(
                         "OCCT bindings are required for geometry operations. "
                         "Please install pythonocc-core or the OCP wheels."
                     )
 
-            BRep_Tool = _MissingOCCTModule()
-            TopAbs_EDGE = TopAbs_FACE = TopAbs_SHELL = TopAbs_SOLID = TopAbs_COMPOUND = TopAbs_ShapeEnum = _MissingOCCTModule()
-            TopExp = TopExp_Explorer = _MissingOCCTModule()
-            BRepTools = _MissingOCCTModule()
-            TopoDS = TopoDS_Face = TopoDS_Shape = _MissingOCCTModule()
-            TopTools_IndexedDataMapOfShapeListOfShape = _MissingOCCTModule()
+            class _MissingOCCTSentinel(metaclass=_MissingOCCTSentinelMeta):
+                """Sentinel used when OCCT bindings are unavailable."""
+
+                @classmethod
+                def __getattr__(cls, item: str) -> NoReturn:
+                    raise ImportError(
+                        "OCCT bindings are required for geometry operations. "
+                        "Please install pythonocc-core or the OCP wheels."
+                    )
+
+            _missing_type = cast(Type[Any], _MissingOCCTSentinel)
+            _missing_any = cast(Any, _MissingOCCTSentinel)
+
+            BRep_Tool = _missing_any
+            TopAbs_EDGE = TopAbs_FACE = TopAbs_SHELL = TopAbs_SOLID = TopAbs_COMPOUND = TopAbs_ShapeEnum = _missing_any
+            TopExp = TopExp_Explorer = _missing_any
+            BRepTools = _missing_any
+            TopoDS = TopoDS_Face = TopoDS_Shape = _missing_type
+            TopTools_IndexedDataMapOfShapeListOfShape = _missing_type
 
 try:
     BRepTools = cast(Any, BRepTools)
@@ -3554,7 +3577,8 @@ def _resolve_face_of():
 
 FACE_OF = _resolve_face_of()
 
-def as_face(obj: Any) -> "TopoDS_Face":
+
+def as_face(obj: Any) -> Any:
     """
     Return a TopoDS_Face for the *current backend*.
     - If already a Face, return it (don't re-cast).
@@ -3571,7 +3595,7 @@ def as_face(obj: Any) -> "TopoDS_Face":
     return ensure_face(obj)
 
 
-def iter_faces(shape: Any) -> Iterator["TopoDS_Face"]:
+def iter_faces(shape: Any) -> Iterator[Any]:
     explorer_cls = cast(Callable[[Any, Any], Any], TopExp_Explorer)
     exp = explorer_cls(shape, cast(Any, TopAbs_FACE))
     while exp.More():
@@ -3760,7 +3784,7 @@ def linear_properties(edge, gprops):
 
 def map_shapes_and_ancestors(
     root_shape, sub_enum, anc_enum
-) -> "TopTools_IndexedDataMapOfShapeListOfShape":
+) -> Any:
     """Return TopTools_IndexedDataMapOfShapeListOfShape for (sub → ancestors)."""
     # Ensure we pass a *Shape*, not a Face
     if root_shape is None:
@@ -3771,7 +3795,7 @@ def map_shapes_and_ancestors(
         pass
 
     amap = cast(
-        TopTools_IndexedDataMapOfShapeListOfShape,
+        Any,
         TopTools_IndexedDataMapOfShapeListOfShape(),  # type: ignore[call-overload]
     )
     # static/instance variants across wheels
@@ -3791,20 +3815,20 @@ def _is_instance(obj, qualnames):
         return False
     return name in qualnames  # e.g. ["TopoDS_Face", "Face"]
 
-def ensure_face(obj: Any) -> "TopoDS_Face":
+def ensure_face(obj: Any) -> Any:
     if obj is None:
         raise TypeError("Expected a face, got None")
     face_type = cast(type, TopoDS_Face)
     try:
         if isinstance(obj, face_type):
-            return cast(TopoDS_Face, obj)
+            return cast(Any, obj)
     except TypeError:
         pass
     if type(obj).__name__ == "TopoDS_Face":
-        return cast(TopoDS_Face, obj)
+        return cast(Any, obj)
     st = obj.ShapeType() if hasattr(obj, "ShapeType") else None
     if st == TopAbs_FACE:
-        return cast(TopoDS_Face, FACE_OF(obj))
+        return cast(Any, FACE_OF(obj))
     raise TypeError(f"Not a face: {type(obj).__name__}")
 # ---------- end compat ----------
 
@@ -3905,12 +3929,12 @@ try:
     from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape  # type: ignore[import]
     BACKEND_OCC = "OCP"
 
-    def _ocp_uv_bounds(face: "TopoDS_Face") -> Tuple[float, float, float, float]:
+    def _ocp_uv_bounds(face: Any) -> Tuple[float, float, float, float]:
         tools = cast(Any, BRepTools)
         return tools.UVBounds(face)
 
 
-    def _ocp_brep_read(path: str) -> "TopoDS_Shape":
+    def _ocp_brep_read(path: str) -> TopoDS_Shape:
         s = _new_topods_shape()
         builder = BRep_Builder()  # type: ignore[call-arg]
         read_s = getattr(BRepTools, "Read_s", None)
@@ -3991,7 +4015,7 @@ except Exception:
     import OCC.Core.BRepTools as _occ_breptools
     BRepTools = cast(Any, _occ_breptools).BRepTools
 
-    def _occ_uv_bounds(face: "TopoDS_Face") -> Tuple[float, float, float, float]:
+    def _occ_uv_bounds(face: Any) -> Tuple[float, float, float, float]:
         tools = cast(Any, BRepTools)
         fn = getattr(tools, "UVBounds", None)
         if fn is None:
@@ -4002,7 +4026,7 @@ except Exception:
         return fn(face)
 
 
-    def _occ_brep_read(path: str) -> "TopoDS_Shape":
+    def _occ_brep_read(path: str) -> TopoDS_Shape:
         read_fn = getattr(_occ_breptools, "breptools_Read", None)
         if read_fn is None:
             raise RuntimeError("BREP read is unavailable")
@@ -4017,12 +4041,12 @@ except Exception:
     _brep_read = _occ_brep_read
 
 
-def _new_topods_shape() -> "TopoDS_Shape":
+def _new_topods_shape() -> TopoDS_Shape:
     ctor = cast(Any, TopoDS_Shape)
     return cast(TopoDS_Shape, ctor())
 
 
-def _new_topods_compound() -> "TopoDS_Compound":
+def _new_topods_compound() -> TopoDS_Compound:
     ctor = cast(Any, TopoDS_Compound)
     return cast(TopoDS_Compound, ctor())
 
@@ -4078,7 +4102,7 @@ def _shape_from_reader(reader):
 
     return healed
 
-def read_step_shape(path: str) -> "TopoDS_Shape":
+def read_step_shape(path: str) -> TopoDS_Shape:
     rdr = STEPControl_Reader()
     if rdr.ReadFile(path) != IFSelect_RetDone:
         raise RuntimeError("STEP read failed (file unreadable or unsupported).")
@@ -4126,13 +4150,13 @@ def read_step_shape(path: str) -> "TopoDS_Shape":
     fx.Perform()
     return fx.Shape()
 
-def safe_bbox(shape: "TopoDS_Shape"):
+def safe_bbox(shape: TopoDS_Shape):
     if _shape_is_null(shape):
         raise ValueError("Cannot compute bounding box of a null shape.")
     box = Bnd_Box()
     bnd_add(shape, box, True)  # <- uses whichever binding is available
     return box
-def read_step_or_iges_or_brep(path: str) -> "TopoDS_Shape":
+def read_step_or_iges_or_brep(path: str) -> TopoDS_Shape:
     p = Path(path)
     ext = p.suffix.lower()
     if ext in (".step", ".stp"):
@@ -4215,24 +4239,24 @@ SMALL = 1e-7
 
 
 
-def iter_solids(shape: "TopoDS_Shape"):
+def iter_solids(shape: TopoDS_Shape):
     explorer = cast(Callable[[Any, Any], Any], TopExp_Explorer)
-    exp = explorer(shape, cast(TopAbs_ShapeEnum, TopAbs_SOLID))
+    exp = explorer(shape, cast(int, TopAbs_SOLID))
     while exp.More():
         yield geometry.to_solid(exp.Current())
         exp.Next()
 
-def explode_compound(shape: "TopoDS_Shape") -> list["TopoDS_Shape"]:
+def explode_compound(shape: TopoDS_Shape) -> list[TopoDS_Shape]:
     """If the file is a big COMPOUND, break it into shapes (parts/bodies)."""
     explorer = cast(Callable[[Any, Any], Any], TopExp_Explorer)
-    exp = explorer(shape, cast(TopAbs_ShapeEnum, TopAbs_COMPOUND))
+    exp = explorer(shape, cast(int, TopAbs_COMPOUND))
     if exp.More():
         # Itï¿½s a compound ï¿½ return its shells/solids/faces as needed
         solids = list(iter_solids(shape))
         if solids:
             return solids
         # fallback to shells
-        sh = explorer(shape, cast(TopAbs_ShapeEnum, TopAbs_SHELL))
+        sh = explorer(shape, cast(int, TopAbs_SHELL))
         shells = []
         while sh.More():
             shells.append(geometry.to_shell(sh.Current()))
@@ -4350,7 +4374,7 @@ def _section_perimeter_len(shape, z_values):
         sec = BRepAlgoAPI_Section(shape, plane, False); sec.Build()
         if not sec.IsDone(): continue
         w = sec.Shape()
-        it = explorer(w, cast(TopAbs_ShapeEnum, TopAbs_EDGE))
+        it = explorer(w, cast(int, TopAbs_EDGE))
         while it.More():
             e = geometry.to_edge(it.Current())
             total += _length_of_edge(e)
@@ -6074,6 +6098,7 @@ def _iter_ordered_process_entries(
         )
 
 
+# pyright: ignore[reportGeneralTypeIssues]
 def render_quote(
     result: dict,
     currency: str = "$",
@@ -12068,24 +12093,66 @@ def compute_quote_from_df(
     )
 
     # Params overrides
-    params["OEE_EfficiencyPct"]        = sheet_pct(r"\b(OEE\s*Efficiency\s*%|OEE)\b", params.get("OEE_EfficiencyPct"))
-    params["VendorMarkupPct"]          = sheet_pct(r"\b(Vendor\s*Markup\s*%)\b", params.get("VendorMarkupPct"))
-    params["MinLotCharge"]             = sheet_num(r"\b(Min\s*Lot\s*Charge)\b", params.get("MinLotCharge"))
-    params["ProgCapHr"]                = sheet_num(r"\b(Programming\s*Cap\s*Hr)\b", params.get("ProgCapHr"))
-    params["ProgSimpleDim_mm"]         = sheet_num(r"\b(Prog\s*Simple\s*Dim_mm)\b", params.get("ProgSimpleDim_mm"))
-    params["ProgMaxToMillingRatio"]    = sheet_num(r"\b(Prog\s*Max\s*To\s*Milling\s*Ratio)\b", params.get("ProgMaxToMillingRatio"))
-    prog_hr_override = sheet_num(r"\b(Programming\s*(?:Override|Manual)(?:\s*H(?:ou)?rs?)?)\b", None)
-    params["MillingConsumablesPerHr"]  = sheet_num(r"(?i)Milling\s*Consumables\s*/\s*Hr", params.get("MillingConsumablesPerHr"))
-    params["TurningConsumablesPerHr"]  = sheet_num(r"(?i)Turning\s*Consumables\s*/\s*Hr", params.get("TurningConsumablesPerHr"))
-    params["EDMConsumablesPerHr"]      = sheet_num(r"(?i)EDM\s*Consumables\s*/\s*Hr", params.get("EDMConsumablesPerHr"))
-    params["GrindingConsumablesPerHr"] = sheet_num(r"(?i)Grinding\s*Consumables\s*/\s*Hr", params.get("GrindingConsumablesPerHr"))
-    params["InspectionConsumablesPerHr"]= sheet_num(r"(?i)Inspection\s*Consumables\s*/\s*Hr", params.get("InspectionConsumablesPerHr"))
-    params["UtilitiesPerSpindleHr"]    = sheet_num(r"(?i)Utilities\s*Per\s*Spindle\s*Hr", params.get("UtilitiesPerSpindleHr"))
-    params["ConsumablesFlat"]          = sheet_num(r"(?i)Consumables\s*Flat", params.get("ConsumablesFlat"))
+    params["OEE_EfficiencyPct"]        = sheet_pct(
+        r"\b(OEE\s*Efficiency\s*%|OEE)\b",
+        default=params.get("OEE_EfficiencyPct"),
+    )
+    params["VendorMarkupPct"]          = sheet_pct(
+        r"\b(Vendor\s*Markup\s*%)\b",
+        default=params.get("VendorMarkupPct"),
+    )
+    params["MinLotCharge"]             = sheet_num(
+        r"\b(Min\s*Lot\s*Charge)\b",
+        default=params.get("MinLotCharge"),
+    )
+    params["ProgCapHr"]                = sheet_num(
+        r"\b(Programming\s*Cap\s*Hr)\b",
+        default=params.get("ProgCapHr"),
+    )
+    params["ProgSimpleDim_mm"]         = sheet_num(
+        r"\b(Prog\s*Simple\s*Dim_mm)\b",
+        default=params.get("ProgSimpleDim_mm"),
+    )
+    params["ProgMaxToMillingRatio"]    = sheet_num(
+        r"\b(Prog\s*Max\s*To\s*Milling\s*Ratio)\b",
+        default=params.get("ProgMaxToMillingRatio"),
+    )
+    prog_hr_override = sheet_num(
+        r"\b(Programming\s*(?:Override|Manual)(?:\s*H(?:ou)?rs?)?)\b",
+        default=None,
+    )
+    params["MillingConsumablesPerHr"]  = sheet_num(
+        r"(?i)Milling\s*Consumables\s*/\s*Hr",
+        default=params.get("MillingConsumablesPerHr"),
+    )
+    params["TurningConsumablesPerHr"]  = sheet_num(
+        r"(?i)Turning\s*Consumables\s*/\s*Hr",
+        default=params.get("TurningConsumablesPerHr"),
+    )
+    params["EDMConsumablesPerHr"]      = sheet_num(
+        r"(?i)EDM\s*Consumables\s*/\s*Hr",
+        default=params.get("EDMConsumablesPerHr"),
+    )
+    params["GrindingConsumablesPerHr"] = sheet_num(
+        r"(?i)Grinding\s*Consumables\s*/\s*Hr",
+        default=params.get("GrindingConsumablesPerHr"),
+    )
+    params["InspectionConsumablesPerHr"] = sheet_num(
+        r"(?i)Inspection\s*Consumables\s*/\s*Hr",
+        default=params.get("InspectionConsumablesPerHr"),
+    )
+    params["UtilitiesPerSpindleHr"]    = sheet_num(
+        r"(?i)Utilities\s*Per\s*Spindle\s*Hr",
+        default=params.get("UtilitiesPerSpindleHr"),
+    )
+    params["ConsumablesFlat"]          = sheet_num(
+        r"(?i)Consumables\s*Flat",
+        default=params.get("ConsumablesFlat"),
+    )
 
     # Rates overrides
     def rate_from_sheet(label, key):
-        v = sheet_num(label, None)
+        v = sheet_num(label, default=None)
         if v is not None:
             rates[key] = v
 
@@ -12871,8 +12938,14 @@ def compute_quote_from_df(
     finishing_cost   = finishing_misc_hr * finishing_rate
 
     # Inspection & docs
-    inproc_default = sheet_num(r"\bIn-Process\s*Inspection\s*Hours\b", 1.0)
-    final_default  = sheet_num(r"\bFinal\s*Inspection\s*Hours\b", 0.0)
+    inproc_default = sheet_num(
+        r"\bIn-Process\s*Inspection\s*Hours\b",
+        default=1.0,
+    )
+    final_default  = sheet_num(
+        r"\bFinal\s*Inspection\s*Hours\b",
+        default=0.0,
+    )
     inproc_hr   = sum_time(r"(?:In[- ]?Process\s*Inspection)", default=inproc_default)
     final_hr    = sum_time(r"(?:Final\s*Inspection|Manual\s*Inspection)", default=final_default)
     cmm_prog_hr = sum_time(r"(?:CMM\s*Programming)")
@@ -16942,12 +17015,12 @@ def compute_quote_from_df(
                 expected_labor_total,
                 rel_tol=0.0,
                 abs_tol=_LABOR_SECTION_ABS_EPSILON,
-            ):
-                logger.warning(
-                    "Labor section totals drifted: %.2f vs %.2f",
-                    labor_display_total,
-                    expected_labor_total,
-                )
+            )
+            logger.warning(
+                "Labor section totals drifted: %.2f vs %.2f",
+                labor_display_total,
+                expected_labor_total,
+            )
 
         labor_cost = recomputed_labor_total
 

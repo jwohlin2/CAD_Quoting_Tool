@@ -1,94 +1,19 @@
 import copy
-import math
-
-import appV5
-
-
-_PLANNER_BUCKET_VIEW = {
-    "order": [
-        "milling",
-        "drilling",
-        "grinding",
-        "finishing_deburr",
-        "inspection",
-    ],
-    "buckets": {
-        "milling": {
-            "minutes": 360.0,
-            "labor$": 240.0,
-            "machine$": 360.0,
-            "total$": 600.0,
-        },
-        "drilling": {
-            "minutes": 90.0,
-            "labor$": 90.0,
-            "machine$": 120.0,
-            "total$": 210.0,
-        },
-        "grinding": {
-            "minutes": 120.0,
-            "labor$": 150.0,
-            "machine$": 180.0,
-            "total$": 330.0,
-        },
-        "finishing_deburr": {
-            "minutes": 60.0,
-            "labor$": 80.0,
-            "machine$": 0.0,
-            "total$": 80.0,
-        },
-        "inspection": {
-            "minutes": 45.0,
-            "labor$": 40.0,
-            "machine$": 0.0,
-            "total$": 40.0,
-        },
-    },
-    "totals": {
-        "minutes": 675.0,
-        "labor$": 600.0,
-        "machine$": 660.0,
-        "total$": 1260.0,
-    },
-}
-
-
-_PLANNER_LINE_ITEMS = [
-    {
-        "op": "Milling Rough",
-        "minutes": 240.0,
-        "machine_cost": 360.0,
-        "labor_cost": 240.0,
-    },
-    {
-        "op": "Drilling Ops",
-        "minutes": 90.0,
-        "machine_cost": 120.0,
-        "labor_cost": 90.0,
-    },
-    {
-        "op": "Surface Grind",
-        "minutes": 120.0,
-        "machine_cost": 180.0,
-        "labor_cost": 150.0,
-    },
-    {
-        "op": "Deburr & Finish",
-        "minutes": 60.0,
-        "labor_cost": 80.0,
-    },
-    {
-        "op": "Inspection",
-        "minutes": 45.0,
-        "labor_cost": 40.0,
-    },
-]
+import re
 
 
 DUMMY_QUOTE_RESULT = {
-    "price": 2511.94,
-    "qty": 6,
-    "app": {"used_planner": True},
+    "price": 1414.875,
+    "qty": 12,
+    "speeds_feeds_path": "/mnt/planner/feeds.csv",
+    "drill_debug": [
+        (
+            "Drill calc → op=Planner Drill, mat=Aluminum MIC6, "
+            "SFM=280–320, IPR=0.0030–0.0040; RPM 3400–3900 IPM 10.2–13.3; "
+            "Ø 0.500\"; depth/hole 1.50 in; holes 48; index 8.0 s/hole; "
+            "peck 0.08 min/hole; toolchange 0.50 min; total hr 1.50."
+        )
+    ],
     "ui_vars": {"Material": "Aluminum MIC6"},
     "decision_state": {
         "baseline": {
@@ -110,9 +35,15 @@ DUMMY_QUOTE_RESULT = {
         "effective_sources": {},
     },
     "breakdown": {
-        "qty": 6,
+        "qty": 12,
         "pricing_source": "planner",
-        "drilling_meta": {"material": "Aluminum MIC6"},
+        "pricing_source_text": "/mnt/planner/feeds.csv",
+        "drilling_meta": {
+            "material": "Aluminum MIC6",
+            "material_display": "Aluminum MIC6",
+            "speeds_feeds_path": "/mnt/planner/feeds.csv",
+            "speeds_feeds_loaded": True,
+        },
         "material": {
             "material": "Aluminum MIC6",
             "material_name": "Aluminum MIC6",
@@ -121,6 +52,7 @@ DUMMY_QUOTE_RESULT = {
             "net_mass_g": 91500.0,
             "scrap_pct": 0.07,
         },
+        "material_selected": {"canonical": "Aluminum MIC6"},
         "process_costs": {
             "Machine": 660.0,
             "Labor": 600.0,
@@ -150,9 +82,34 @@ DUMMY_QUOTE_RESULT = {
                 "cost": 600.0,
             },
         },
-        "process_plan": {"bucket_view": copy.deepcopy(_PLANNER_BUCKET_VIEW)},
-        "bucket_view": copy.deepcopy(_PLANNER_BUCKET_VIEW),
-        "planner_bucket_rollup": copy.deepcopy(_PLANNER_BUCKET_VIEW["buckets"]),
+        "bucket_view": {
+            "buckets": {
+                "milling": {
+                    "minutes": 360.0,
+                    "labor$": 600.0,
+                    "machine$": 0.0,
+                    "total$": 600.0,
+                },
+                "drilling": {
+                    "minutes": 90.0,
+                    "labor$": 120.0,
+                    "machine$": 0.0,
+                    "total$": 120.0,
+                },
+                "finishing": {
+                    "minutes": 90.0,
+                    "labor$": 90.0,
+                    "machine$": 0.0,
+                    "total$": 90.0,
+                },
+                "inspection": {
+                    "minutes": 60.0,
+                    "labor$": 95.0,
+                    "machine$": 0.0,
+                    "total$": 95.0,
+                },
+            }
+        },
         "labor_costs": {
             "Milling": 600.0,
             "Drilling": 210.0,
@@ -193,6 +150,7 @@ DUMMY_QUOTE_RESULT = {
             "with_expedite": 2093.28,
             "price": 2511.94,
         },
+        "red_flags": [],
         "applied_pcts": {
             "OverheadPct": 0.12,
             "GA_Pct": 0.05,
@@ -328,9 +286,80 @@ def test_dummy_quote_has_no_planner_red_flags() -> None:
     payload = _dummy_quote_payload()
     assert "red_flags" not in payload["breakdown"]
 
+    assert abs((labor + direct) - subtotal) <= 0.01
 
-def test_dummy_quote_drill_debug_material_matches_quote() -> None:
+
+def test_dummy_quote_pricing_source_header() -> None:
     payload = _dummy_quote_payload()
-    drill_debug = payload["breakdown"]["drill_debug"]
-    material = payload["breakdown"]["material"]["material_name"]
-    assert any(material in entry for entry in drill_debug)
+    breakdown = payload["breakdown"]
+    drill_meta = breakdown["drilling_meta"]
+
+    assert breakdown["pricing_source"] == "planner"
+
+    path = str(breakdown.get("pricing_source_text") or "").strip()
+    speeds_path = str(drill_meta.get("speeds_feeds_path") or "").strip()
+
+    assert path
+    assert speeds_path
+    assert path == speeds_path
+
+
+def test_dummy_quote_drill_debug_material_alignment() -> None:
+    payload = _dummy_quote_payload()
+    breakdown = payload["breakdown"]
+    debug_lines = payload.get("drill_debug", [])
+
+    assert debug_lines, "expected drill debug sample"
+
+    drill_line = next(line for line in debug_lines if line.startswith("Drill calc"))
+    material_block = breakdown["material"]["material"]
+
+    match = re.search(r"mat=([^,]+)", drill_line)
+    assert match is not None
+    debug_material = match.group(1).strip()
+
+    assert debug_material == material_block == breakdown["drilling_meta"]["material"]
+
+
+def test_dummy_quote_drill_debug_ranges_and_index() -> None:
+    payload = _dummy_quote_payload()
+    debug_line = next(line for line in payload.get("drill_debug", []) if line.startswith("Drill calc"))
+
+    index_match = re.search(r"index\s+([0-9]+(?:\.[0-9]+)?)\s*s/hole", debug_line)
+    assert index_match is not None
+    index_seconds = float(index_match.group(1))
+    assert 6.0 <= index_seconds <= 10.0
+
+    sfm_match = re.search(r"SFM=([0-9.]+)–([0-9.]+)", debug_line)
+    ipr_match = re.search(r"IPR=([0-9.]+)–([0-9.]+)", debug_line)
+
+    assert sfm_match is not None
+    assert ipr_match is not None
+
+    sfm_low, sfm_high = map(float, sfm_match.groups())
+    ipr_low, ipr_high = map(float, ipr_match.groups())
+
+    assert sfm_low < sfm_high
+    assert ipr_low < ipr_high
+
+
+def test_dummy_quote_drilling_bucket_matches_summary() -> None:
+    payload = _dummy_quote_payload()
+    breakdown = payload["breakdown"]
+
+    bucket_minutes = breakdown["bucket_view"]["buckets"]["drilling"]["minutes"]
+    summary_hr = breakdown["process_meta"]["drilling"]["hr"]
+
+    assert abs(bucket_minutes / 60.0 - summary_hr) <= 1e-6
+
+    red_flags = [flag.lower() for flag in breakdown.get("red_flags", [])]
+    assert all("drift" not in flag for flag in red_flags)
+
+
+def test_dummy_quote_has_no_csv_debug_duplicates() -> None:
+    payload = _dummy_quote_payload()
+
+    assert not any(
+        line.strip().startswith("CSV drill feeds (N1)")
+        for line in payload.get("drill_debug", [])
+    )
