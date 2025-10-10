@@ -93,7 +93,7 @@ def roughly_equal(a: float | int | str | None, b: float | int | str | None, *, e
 import copy
 import sys
 import textwrap
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, TypeVar
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, TypeVar, cast
 
 
 T = TypeVar("T")
@@ -2398,8 +2398,10 @@ def get_why_text(
         for key, value in final_hours.items():
             final_hours_map[str(key)] = max(0.0, _hours_from_any(value))
     else:
-        proc_hours = e.get("process_hours") if isinstance(e.get("process_hours"), Mapping) else {}
-        for key, value in proc_hours.items():
+        proc_hours_raw = e.get("process_hours") if isinstance(e, Mapping) else None
+        if not isinstance(proc_hours_raw, Mapping):
+            proc_hours_raw = {}
+        for key, value in proc_hours_raw.items():
             final_hours_map[str(key)] = max(0.0, _hours_from_any(value))
 
     top_text = ""
@@ -2448,8 +2450,10 @@ def get_why_text(
 
     if not top_text:
         if not final_hours_map:
-            proc_hours = e.get("process_hours") if isinstance(e.get("process_hours"), Mapping) else {}
-            for key, value in proc_hours.items():
+            proc_hours_raw = e.get("process_hours") if isinstance(e, Mapping) else None
+            if not isinstance(proc_hours_raw, Mapping):
+                proc_hours_raw = {}
+            for key, value in proc_hours_raw.items():
                 try:
                     final_hours_map[str(key)] = max(0.0, float(value or 0.0))
                 except Exception:
@@ -2743,23 +2747,34 @@ _ocp_modules = {
     "TopoDS": _import_optional("OCP.TopoDS"),
 }
 
-if all(_ocp_modules.values()):
+bnd_add: Callable[[Any, Any, bool], Any]
+
+if all(module is not None for module in _ocp_modules.values()):
     # Prefer OCP (CadQuery/ocp bindings)
-    Bnd_Box = _ocp_modules["Bnd"].Bnd_Box
-    BRep_Builder = _ocp_modules["BRep"].BRep_Builder
-    BRepCheck_Analyzer = _ocp_modules["BRepCheck"].BRepCheck_Analyzer
-    IFSelect_RetDone = _ocp_modules["IFSelect"].IFSelect_RetDone
-    ShapeFix_Shape = _ocp_modules["ShapeFix"].ShapeFix_Shape
-    STEPControl_Reader = _ocp_modules["STEPControl"].STEPControl_Reader
-    TopoDS_Compound = _ocp_modules["TopoDS"].TopoDS_Compound
-    TopoDS_Shape = _ocp_modules["TopoDS"].TopoDS_Shape
+    bnd_module = cast(Any, _ocp_modules["Bnd"])
+    brep_module = cast(Any, _ocp_modules["BRep"])
+    brepcheck_module = cast(Any, _ocp_modules["BRepCheck"])
+    ifselect_module = cast(Any, _ocp_modules["IFSelect"])
+    shapefix_module = cast(Any, _ocp_modules["ShapeFix"])
+    step_module = cast(Any, _ocp_modules["STEPControl"])
+    topods_module = cast(Any, _ocp_modules["TopoDS"])
+
+    Bnd_Box = bnd_module.Bnd_Box
+    BRep_Builder = brep_module.BRep_Builder
+    BRepCheck_Analyzer = brepcheck_module.BRepCheck_Analyzer
+    IFSelect_RetDone = ifselect_module.IFSelect_RetDone
+    ShapeFix_Shape = shapefix_module.ShapeFix_Shape
+    STEPControl_Reader = step_module.STEPControl_Reader
+    TopoDS_Compound = topods_module.TopoDS_Compound
+    TopoDS_Shape = topods_module.TopoDS_Shape
 
     try:
         bnd_add = _make_bnd_add_ocp()
         STACK = "ocp"
     except Exception:
         # Fallback: try dynamic dispatch at call time for OCP builds missing Add
-        def bnd_add(shape, box, use_triangulation=True):
+
+        def _bnd_add_ocp_fallback(shape, box, use_triangulation=True):
             candidates = [
                 ("OCP.BRepBndLib", "Add"),
                 ("OCP.BRepBndLib", "Add_s"),
@@ -2775,6 +2790,8 @@ if all(_ocp_modules.values()):
                 if module and hasattr(module, attr):
                     return getattr(module, attr)(shape, box, use_triangulation)
             raise RuntimeError("No BRepBndLib.Add available in this build")
+
+        bnd_add = _bnd_add_ocp_fallback
         STACK = "ocp"
 else:
     # Fallback to pythonocc-core
@@ -2797,19 +2814,29 @@ else:
             )
         )
 
-    Bnd_Box = _occ_modules["Bnd"].Bnd_Box
-    BRep_Builder = _occ_modules["BRep"].BRep_Builder
-    _brep_add = _occ_modules["BRepBndLib"].brepbndlib_Add
-    BRepCheck_Analyzer = _occ_modules["BRepCheck"].BRepCheck_Analyzer
-    IFSelect_RetDone = _occ_modules["IFSelect"].IFSelect_RetDone
-    ShapeFix_Shape = _occ_modules["ShapeFix"].ShapeFix_Shape
-    STEPControl_Reader = _occ_modules["STEPControl"].STEPControl_Reader
-    TopoDS_Compound = _occ_modules["TopoDS"].TopoDS_Compound
-    TopoDS_Shape = _occ_modules["TopoDS"].TopoDS_Shape
+    bnd_module = cast(Any, _occ_modules["Bnd"])
+    brep_module = cast(Any, _occ_modules["BRep"])
+    brepbndlib_module = cast(Any, _occ_modules["BRepBndLib"])
+    brepcheck_module = cast(Any, _occ_modules["BRepCheck"])
+    ifselect_module = cast(Any, _occ_modules["IFSelect"])
+    shapefix_module = cast(Any, _occ_modules["ShapeFix"])
+    step_module = cast(Any, _occ_modules["STEPControl"])
+    topods_module = cast(Any, _occ_modules["TopoDS"])
 
-    def bnd_add(shape, box, use_triangulation=True):
+    Bnd_Box = bnd_module.Bnd_Box
+    BRep_Builder = brep_module.BRep_Builder
+    _brep_add = brepbndlib_module.brepbndlib_Add
+    BRepCheck_Analyzer = brepcheck_module.BRepCheck_Analyzer
+    IFSelect_RetDone = ifselect_module.IFSelect_RetDone
+    ShapeFix_Shape = shapefix_module.ShapeFix_Shape
+    STEPControl_Reader = step_module.STEPControl_Reader
+    TopoDS_Compound = topods_module.TopoDS_Compound
+    TopoDS_Shape = topods_module.TopoDS_Shape
+
+    def _bnd_add_pythonocc(shape, box, use_triangulation=True):
         _brep_add(shape, box, use_triangulation)
 
+    bnd_add = _bnd_add_pythonocc
     STACK = "pythonocc"
 # ---------- end shim ----------
 # ----- one-backend imports -----
