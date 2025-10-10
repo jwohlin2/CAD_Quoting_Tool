@@ -16285,7 +16285,10 @@ def compute_quote_from_df(
                     "clamped": notes_from_clamps,
                     "pass_through": {k: v for k, v in applied_pass.items()},
                 }
-                latest.write_text(jdump(snap), encoding="utf-8")
+                latest.write_text(
+                    jdump(json_safe_copy(snap), default=None),
+                    encoding="utf-8",
+                )
         except Exception:
             pass
 
