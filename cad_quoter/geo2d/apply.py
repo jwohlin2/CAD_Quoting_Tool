@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from cad_quoter.coerce import coerce_float_or_none as _coerce_float_or_none
+from cad_quoter.domain_models import DEFAULT_MATERIAL_DISPLAY
 from cad_quoter.geometry import upsert_var_row
 
 __all__ = [
@@ -58,7 +59,11 @@ def apply_2d_features_to_variables(df, g2d: dict, *, params: dict, rates: dict):
     material_note = ""
     if isinstance(geo, dict) and geo.get("material_note"):
         material_note = str(geo.get("material_note") or "").strip()
-    material_value = material_note or (g2d.get("material") if isinstance(g2d, dict) else "") or "Steel"
+    material_value = (
+        material_note
+        or (g2d.get("material") if isinstance(g2d, dict) else "")
+        or DEFAULT_MATERIAL_DISPLAY
+    )
     df = upsert_var_row(df, "Material", material_value, dtype="text")
     if thickness_in:
         df = upsert_var_row(
