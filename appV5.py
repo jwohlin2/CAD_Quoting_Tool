@@ -2546,6 +2546,359 @@ def get_why_text(
     return " ".join(parts)
 
 
+def _clean_numeric_mapping(data: Any) -> dict[str, float]:
+    if not isinstance(data, _MappingABC):
+        return {}
+    cleaned: dict[str, float] = {}
+    for key, value in data.items():
+        num = to_float(value)
+        if num is None:
+            continue
+        try:
+            val = float(num)
+        except Exception:
+            continue
+        if not math.isfinite(val):
+            continue
+        cleaned[str(key)] = val
+    return cleaned
+
+
+def _clean_optional_float(value: Any) -> float | None:
+    num = to_float(value)
+    if num is None:
+        return None
+    try:
+        val = float(num)
+    except Exception:
+        return None
+    return val if math.isfinite(val) else None
+
+
+def _clean_optional_int(value: Any) -> int | None:
+    val = _clean_optional_float(value)
+    if val is None:
+        return None
+    try:
+        return int(round(val))
+    except Exception:
+        return None
+
+
+def _clean_bool_flag(value: Any) -> bool | None:
+    flag = _coerce_bool(value)
+    if flag is None:
+        return None
+    return bool(flag)
+
+
+def _clean_text(value: Any, *, limit: int | None = None) -> str | None:
+    if value is None:
+        return None
+    text = value if isinstance(value, str) else str(value)
+    text = text.strip()
+    if not text:
+        return None
+    if limit is not None:
+        text = text[:limit]
+    return text
+
+
+def _clean_text_list(
+    values: Any,
+    *,
+    limit: int | None = None,
+    item_limit: int | None = None,
+) -> list[str]:
+    if not isinstance(values, (list, tuple, set)):
+        return []
+    cleaned: list[str] = []
+    for value in values:
+        text = _clean_text(value, limit=limit)
+        if text:
+            cleaned.append(text)
+    if item_limit is not None:
+        cleaned = cleaned[:item_limit]
+    return cleaned
+
+
+def _clean_drilling_strategy(data: Any) -> dict[str, Any]:
+    if not isinstance(data, _MappingABC):
+        return {}
+    cleaned: dict[str, Any] = {}
+    mult = _clean_optional_float(data.get("multiplier"))
+    if mult is not None:
+        cleaned["multiplier"] = max(0.0, mult)
+    floor_val = data.get("per_hole_floor_sec") or data.get("floor_sec_per_hole")
+    floor = _clean_optional_float(floor_val)
+    if floor is not None:
+        cleaned["per_hole_floor_sec"] = max(0.0, floor)
+    note = (
+        _clean_text(data.get("note"), limit=160)
+        or _clean_text(data.get("reason"), limit=160)
+    )
+    if note:
+        cleaned["note"] = note
+    return cleaned
+
+
+def _clean_recommendation(data: Any) -> dict[str, Any]:
+    if not isinstance(data, _MappingABC):
+        return {}
+    cleaned: dict[str, Any] = {}
+    for key, value in data.items():
+        key_str = str(key)
+        if key_str in {"length_mm", "width_mm", "thickness_mm", "height_mm", "diameter_mm"}:
+            num = _clean_optional_float(value)
+            if num is not None:
+                cleaned[key_str] = num
+            continue
+        if key_str in {"cut_count", "setups"}:
+            num = _clean_optional_int(value)
+            if num is not None:
+                cleaned[key_str] = num
+            continue
+        if isinstance(value, (_MappingABC, list, tuple, set)):
+            cleaned[key_str] = json_safe_copy(value)
+            continue
+        text = _clean_text(value, limit=160)
+        if text is not None:
+            cleaned[key_str] = text
+        elif value is not None:
+            cleaned[key_str] = value
+    return cleaned
+
+
+def _clean_drilling_groups(data: Any) -> list[dict[str, Any]]:
+    if not isinstance(data, (list, tuple, set)):
+        return []
+    cleaned_groups: list[dict[str, Any]] = []
+    for entry in data:
+        if not isinstance(entry, _MappingABC):
+            continue
+        cleaned: dict[str, Any] = {}
+        qty = _clean_optional_int(entry.get("qty") or entry.get("quantity"))
+        if qty is not None:
+            cleaned["qty"] = qty
+        dia = _clean_optional_float(
+            entry.get("dia_mm")
+            or entry.get("diameter_mm")
+            or entry.get("diameter")
+        )
+        if dia is not None:
+            cleaned["dia_mm"] = dia
+        peck = _clean_text(entry.get("peck"), limit=24)
+        if peck:
+            cleaned["peck"] = peck
+        note = _clean_text(entry.get("note"), limit=160)
+        if note:
+            cleaned["note"] = note
+        if cleaned:
+            cleaned_groups.append(cleaned)
+    return cleaned_groups
+
+
+def overrides_to_suggestions(
+    overrides: Mapping[str, Any] | None,
+    *,
+    bounds: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    source = overrides if isinstance(overrides, _MappingABC) else {}
+    suggestions: dict[str, Any] = {}
+
+    mults = _clean_numeric_mapping(source.get("process_hour_multipliers"))
+    if mults:
+        suggestions["process_hour_multipliers"] = mults
+
+    adders = _clean_numeric_mapping(source.get("process_hour_adders"))
+    if adders:
+        suggestions["process_hour_adders"] = adders
+
+    pass_map = canonicalize_pass_through_map(source.get("add_pass_through"))
+    if pass_map:
+        suggestions["add_pass_through"] = pass_map
+
+    scrap_raw = source.get("scrap_pct", source.get("scrap_pct_override"))
+    scrap = _clean_optional_float(scrap_raw)
+    if scrap is not None:
+        suggestions["scrap_pct"] = scrap
+
+    cont_raw = source.get("contingency_pct", source.get("contingency_pct_override"))
+    cont = _clean_optional_float(cont_raw)
+    if cont is not None:
+        suggestions["contingency_pct"] = cont
+
+    setups = _clean_optional_int(source.get("setups"))
+    if setups is not None:
+        suggestions["setups"] = max(0, setups)
+
+    fixture = _clean_text(source.get("fixture"), limit=120)
+    if fixture:
+        suggestions["fixture"] = fixture
+
+    notes = _clean_text_list(source.get("notes"), limit=200, item_limit=12)
+    if notes:
+        suggestions["notes"] = notes
+
+    op_sequence = _clean_text_list(
+        source.get("operation_sequence"), limit=80, item_limit=12
+    )
+    if op_sequence:
+        suggestions["operation_sequence"] = op_sequence
+
+    dfm_risks = _clean_text_list(source.get("dfm_risks"), limit=120, item_limit=8)
+    if dfm_risks:
+        suggestions["dfm_risks"] = dfm_risks
+
+    drilling_strategy = _clean_drilling_strategy(source.get("drilling_strategy"))
+    if drilling_strategy:
+        suggestions["drilling_strategy"] = drilling_strategy
+
+    drilling_groups = _clean_drilling_groups(source.get("drilling_groups"))
+    if drilling_groups:
+        suggestions["drilling_groups"] = drilling_groups
+
+    stock_plan = _clean_recommendation(source.get("stock_recommendation"))
+    if stock_plan:
+        suggestions["stock_recommendation"] = stock_plan
+
+    setup_plan = _clean_recommendation(source.get("setup_recommendation"))
+    if setup_plan:
+        suggestions["setup_recommendation"] = setup_plan
+
+    tolerance_impacts = source.get("tolerance_impacts")
+    if isinstance(tolerance_impacts, _MappingABC):
+        suggestions["tolerance_impacts"] = json_safe_copy(tolerance_impacts)
+
+    for key in (
+        "fixture_build_hr",
+        "soft_jaw_hr",
+        "soft_jaw_material_cost",
+        "handling_adder_hr",
+        "cmm_minutes",
+        "in_process_inspection_hr",
+        "fai_prep_hr",
+        "packaging_hours",
+        "packaging_flat_cost",
+        "shipping_cost",
+        "premium_usd_per_kg",
+        "material_removed_lb",
+    ):
+        value = _clean_optional_float(source.get(key))
+        if value is not None:
+            suggestions[key] = value
+
+    fai_flag = _clean_bool_flag(source.get("fai_required"))
+    if fai_flag is not None:
+        suggestions["fai_required"] = fai_flag
+
+    shipping_hint = _clean_text(source.get("shipping_hint"), limit=80)
+    if shipping_hint:
+        suggestions["shipping_hint"] = shipping_hint
+
+    if bounds is not None:
+        try:
+            return sanitize_suggestions(dict(suggestions), dict(bounds))
+        except Exception:
+            return suggestions
+    return suggestions
+
+
+def suggestions_to_overrides(suggestions: Mapping[str, Any] | None) -> dict[str, Any]:
+    source = suggestions if isinstance(suggestions, _MappingABC) else {}
+    overrides: dict[str, Any] = {}
+
+    mults = _clean_numeric_mapping(source.get("process_hour_multipliers"))
+    if mults:
+        overrides["process_hour_multipliers"] = mults
+
+    adders = _clean_numeric_mapping(source.get("process_hour_adders"))
+    if adders:
+        overrides["process_hour_adders"] = adders
+
+    pass_map = canonicalize_pass_through_map(source.get("add_pass_through"))
+    if pass_map:
+        overrides["add_pass_through"] = pass_map
+
+    scrap = _clean_optional_float(source.get("scrap_pct"))
+    if scrap is not None:
+        overrides["scrap_pct"] = scrap
+
+    cont = _clean_optional_float(source.get("contingency_pct"))
+    if cont is not None:
+        overrides["contingency_pct"] = cont
+
+    setups = _clean_optional_int(source.get("setups"))
+    if setups is not None:
+        overrides["setups"] = max(0, setups)
+
+    fixture = _clean_text(source.get("fixture"), limit=120)
+    if fixture:
+        overrides["fixture"] = fixture
+
+    notes = _clean_text_list(source.get("notes"), limit=200, item_limit=12)
+    if notes:
+        overrides["notes"] = notes
+
+    op_sequence = _clean_text_list(
+        source.get("operation_sequence"), limit=80, item_limit=12
+    )
+    if op_sequence:
+        overrides["operation_sequence"] = op_sequence
+
+    dfm_risks = _clean_text_list(source.get("dfm_risks"), limit=120, item_limit=8)
+    if dfm_risks:
+        overrides["dfm_risks"] = dfm_risks
+
+    drilling_strategy = _clean_drilling_strategy(source.get("drilling_strategy"))
+    if drilling_strategy:
+        overrides["drilling_strategy"] = drilling_strategy
+
+    drilling_groups = _clean_drilling_groups(source.get("drilling_groups"))
+    if drilling_groups:
+        overrides["drilling_groups"] = drilling_groups
+
+    stock_plan = _clean_recommendation(source.get("stock_recommendation"))
+    if stock_plan:
+        overrides["stock_recommendation"] = stock_plan
+
+    setup_plan = _clean_recommendation(source.get("setup_recommendation"))
+    if setup_plan:
+        overrides["setup_recommendation"] = setup_plan
+
+    tolerance_impacts = source.get("tolerance_impacts")
+    if isinstance(tolerance_impacts, _MappingABC):
+        overrides["tolerance_impacts"] = json_safe_copy(tolerance_impacts)
+
+    for key in (
+        "fixture_build_hr",
+        "soft_jaw_hr",
+        "soft_jaw_material_cost",
+        "handling_adder_hr",
+        "cmm_minutes",
+        "in_process_inspection_hr",
+        "fai_prep_hr",
+        "packaging_hours",
+        "packaging_flat_cost",
+        "shipping_cost",
+        "premium_usd_per_kg",
+        "material_removed_lb",
+    ):
+        value = _clean_optional_float(source.get(key))
+        if value is not None:
+            overrides[key] = value
+
+    fai_flag = _clean_bool_flag(source.get("fai_required"))
+    if fai_flag is not None:
+        overrides["fai_required"] = fai_flag
+
+    shipping_hint = _clean_text(source.get("shipping_hint"), limit=80)
+    if shipping_hint:
+        overrides["shipping_hint"] = shipping_hint
+
+    return overrides
+
+
 def effective_to_overrides(effective: dict, baseline: dict | None = None) -> dict:
     baseline = baseline or {}
     out: dict[str, Any] = {}

@@ -27,6 +27,8 @@ __all__ = [
     "merge_effective",
     "compute_effective_state",
     "effective_to_overrides",
+    "overrides_to_suggestions",
+    "suggestions_to_overrides",
     "reprice_with_effective",
     "HARDWARE_PASS_LABEL",
     "LEGACY_HARDWARE_PASS_LABEL",
