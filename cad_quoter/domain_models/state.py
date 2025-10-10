@@ -55,6 +55,8 @@ class QuoteState:
     baseline: dict[str, Any] = field(default_factory=dict)
     llm_raw: dict[str, Any] = field(default_factory=dict)
     suggestions: dict[str, Any] = field(default_factory=dict)
+    llm_events: list[dict[str, Any]] = field(default_factory=list)
+    llm_errors: list[dict[str, Any]] = field(default_factory=list)
     user_overrides: dict[str, Any] = field(default_factory=dict)
     effective: dict[str, Any] = field(default_factory=dict)
     effective_sources: dict[str, Any] = field(default_factory=dict)
