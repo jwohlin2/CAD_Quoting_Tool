@@ -1667,34 +1667,18 @@ def sanitize_suggestions(s: dict, bounds: dict) -> dict:
 
 
 def apply_suggestions(baseline: dict, s: dict) -> dict:
-    eff = copy.deepcopy(baseline or {})
-    raw_process_hours = eff.get("process_hours")
-    base_hours: dict[Any, Any] = raw_process_hours if isinstance(raw_process_hours, dict) else {}
-    ph = {k: float(to_float(v) or 0.0) for k, v in base_hours.items()}
+    """Apply sanitized LLM suggestions onto a baseline quote snapshot."""
 
-    for proc, mult in (s.get("process_hour_multipliers") or {}).items():
-        if proc in ph:
-            try:
-                ph[proc] = ph[proc] * float(mult)
-            except Exception:
-                ph[proc] = ph[proc]
+    merged = merge_effective(baseline or {}, s or {}, {})
+    merged.pop("_source_tags", None)
+    merged.pop("_clamp_notes", None)
 
-    for proc, add in (s.get("process_hour_adders") or {}).items():
-        base = ph.get(proc, 0.0)
-        try:
-            ph[proc] = float(base) + float(add)
-        except Exception:
-            ph[proc] = float(base)
-
-    eff["process_hours"] = ph
-    eff["scrap_pct"] = s.get("scrap_pct", eff.get("scrap_pct"))
-    eff["setups"] = s.get("setups", eff.get("setups", 1))
-    eff["fixture"] = s.get("fixture", eff.get("fixture", "standard"))
     notes = list(s.get("notes") or [])
     if s.get("no_change_reason"):
         notes.append(f"no_change: {s['no_change_reason']}")
-    eff["_llm_notes"] = notes
-    return eff
+    merged["_llm_notes"] = notes
+
+    return merged
 
 def _coerce_user_value(raw: Any, kind: str) -> Any:
     if raw is None:
