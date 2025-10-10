@@ -41,7 +41,6 @@ from cad_quoter.config import (
 from cad_quoter.config import (
     describe_runtime_environment as _describe_runtime_environment,
 )
-from cad_quoter.llm import LLMClient, parse_llm_json
 
 APP_ENV = AppEnvironment.from_env()
 
@@ -269,8 +268,12 @@ from cad_quoter.pricing.wieland import lookup_price as lookup_wieland_price
 from cad_quoter.rates import migrate_flat_to_two_bucket, two_bucket_to_flat
 from cad_quoter.vendors.mcmaster_stock import lookup_sku_and_price_for_mm
 from cad_quoter.llm import (
+    EDITOR_FROM_UI,
+    EDITOR_TO_SUGG,
     LLMClient,
+    SUGG_TO_EDITOR,
     infer_hours_and_overrides_from_geo as _infer_hours_and_overrides_from_geo,
+    parse_llm_json,
     explain_quote,
 )
 
@@ -20097,6 +20100,7 @@ class App(tk.Tk):
         self._llm_load_attempted = True
         start = time.perf_counter()
 
+        limit: int | None = None
         try:
             limit = self._apply_llm_thread_limit_env(persist=False)
             status = "Loading Vision LLM (GPU)…"
@@ -20475,7 +20479,13 @@ class App(tk.Tk):
             if existing is None or abs(existing) < 1e-9:
                 update_material_price()
 
-        def create_global_entries(parent_frame: ttk.Labelframe, keys, data_source, var_dict, columns: int = 2) -> None:
+        def create_global_entries(
+            parent_frame: tk.Widget,
+            keys,
+            data_source,
+            var_dict,
+            columns: int = 2,
+        ) -> None:
             for i, key in enumerate(keys):
                 row, col = divmod(i, columns)
                 label_widget = ttk.Label(parent_frame, text=key)
@@ -20892,17 +20902,22 @@ class App(tk.Tk):
                 else:
                     g2d = self.geometry_loader.extract_2d_features_from_dxf_or_dwg(path)   # ezdxf / ODA
 
+                if not isinstance(g2d, dict):
+                    g2d = {}
+
 
                 if self.vars_df is None:
                     vp = find_variables_near(path)
                     if not vp:
-                        dialog_kwargs = {"title": "Select variables CSV/XLSX"}
+                        dialog_kwargs: dict[str, Any] = {"title": "Select variables CSV/XLSX"}
                         dialog_kwargs.update(self._variables_dialog_defaults())
                         vp = filedialog.askopenfilename(**dialog_kwargs)
                     if vp:
                         try:
                             core_df, full_df = read_variables_file(vp, return_full=True)
-                            self._refresh_variables_cache(core_df, full_df)
+                            core_df_t = typing.cast(pd.DataFrame, core_df)
+                            full_df_t = typing.cast(pd.DataFrame, full_df)
+                            self._refresh_variables_cache(core_df_t, full_df_t)
                             self._set_last_variables_path(vp)
                         except Exception as read_err:
                             messagebox.showerror("Variables", f"Failed to read variables file:\n{read_err}\n\nContinuing with defaults.")
@@ -21038,7 +21053,9 @@ class App(tk.Tk):
                 return
             try:
                 core_df, full_df = read_variables_file(vp, return_full=True)
-                self._refresh_variables_cache(core_df, full_df)
+                core_df_t = typing.cast(pd.DataFrame, core_df)
+                full_df_t = typing.cast(pd.DataFrame, full_df)
+                self._refresh_variables_cache(core_df_t, full_df_t)
                 self._set_last_variables_path(vp)
             except Exception as e:
                 import traceback
