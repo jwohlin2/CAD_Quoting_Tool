@@ -90,7 +90,10 @@ import copy
 import re
 import sys
 import textwrap
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, TypeVar
+
+
+T = TypeVar("T")
 
 
 def resolve_planner(
@@ -195,6 +198,7 @@ from cad_quoter.domain_models import (
     normalize_material_key as _normalize_lookup_key,
 )
 from cad_quoter.coerce import to_float, to_int
+from cad_quoter.llm import LLMClient, parse_llm_json
 from cad_quoter.utils import sdict
 from cad_quoter.pricing import (
     LB_PER_KG,
@@ -8960,6 +8964,9 @@ def estimate_drilling_hours(
                 tool_params = _TimeToolParams(teeth_z=1)
                 if debug_lines is not None:
                     debug_payload = {}
+                effective_index_sec = to_float(overhead_for_calc.index_sec_per_hole)
+                if effective_index_sec is None or not math.isfinite(effective_index_sec):
+                    effective_index_sec = _default_drill_index_seconds(op_name)
                 legacy_overhead = replace(
                     legacy_overhead,
                     index_sec_per_hole=effective_index_sec,
@@ -14674,7 +14681,10 @@ def trace_hours_from_df(df):
         if mm.any():
             sub=df.loc[mm, ["Item","Example Values / Options"]].copy()
             sub["Example Values / Options"]=pd.to_numeric(sub["Example Values / Options"], errors="coerce").fillna(0.0)
-            out[label]=[(str(rates["Item"]), float(rates["Example Values / Options"])) for _,r in sub.iterrows()]
+            out[label]=[
+                (str(r["Item"]), float(r["Example Values / Options"]))
+                for _, r in sub.iterrows()
+            ]
     grab(r"(Fixture\s*Design|Process\s*Sheet|Traveler|Documentation)","Engineering")
     grab(r"(CAM\s*Programming|CAM\s*Sim|Post\s*Processing)","CAM")
     grab(r"(Assembly|Precision\s*Fitting|Touch[- ]?up|Final\s*Fit)","Assembly")
@@ -14898,7 +14908,16 @@ def extract_pdf_all(pdf_path: Path, dpi: int = 300) -> dict:
             "char_count": len(text),
             "table_count": len(tables),
         })
-    best = max(pages, key=lambda p: (params["table_count"] > 0, params["char_count"])) if pages else {"text": "", "image_path": ""}
+    if pages:
+        best = max(
+            pages,
+            key=lambda page: (
+                (page.get("table_count", 0) or 0) > 0,
+                page.get("char_count", 0) or 0,
+            ),
+        )
+    else:
+        best = {"text": "", "image_path": ""}
     doc.close()
     return {"pages": pages, "best": best}
 
@@ -17109,7 +17128,7 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
 
 
 def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
-    require_ezdxf()
+    ezdxf_mod = require_ezdxf()
 
 
     # --- load doc ---
@@ -17125,9 +17144,9 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
         else:
             dxf_path = convert_dwg_to_dxf(path, out_ver="ACAD2018")
             dxf_text_path = dxf_path
-            doc = ezdxf.readfile(dxf_path)
+            doc = ezdxf_mod.readfile(dxf_path)
     else:
-        doc = ezdxf.readfile(path)
+        doc = ezdxf_mod.readfile(path)
         dxf_text_path = path
 
     sp = doc.modelspace()
