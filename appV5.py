@@ -414,6 +414,7 @@ from cad_quoter.llm import (
     LLMClient,
     SYSTEM_SUGGEST,
     SUGG_TO_EDITOR,
+    SYSTEM_SUGGEST,
     infer_hours_and_overrides_from_geo as _infer_hours_and_overrides_from_geo,
     parse_llm_json,
     explain_quote,
@@ -823,6 +824,8 @@ _HAS_TRIMESH = getattr(geometry, "HAS_TRIMESH", False)
 _HAS_EZDXF = getattr(geometry, "HAS_EZDXF", False)
 _HAS_ODAFC = getattr(geometry, "HAS_ODAFC", False)
 _EZDXF_VER = geometry.EZDXF_VERSION
+_HAS_PYMUPDF = getattr(geometry, "_HAS_PYMUPDF", getattr(geometry, "HAS_PYMUPDF", False))
+fitz = getattr(geometry, "fitz", None)
 
 if _HAS_EZDXF:
     try:
