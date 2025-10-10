@@ -13,6 +13,12 @@ K = TypeVar("K")
 V = TypeVar("V")
 
 
+def _dict(value: Mapping[Any, Any] | None) -> dict[Any, Any]:
+    """Return *value* if it is a ``dict``; otherwise return an empty dict."""
+
+    return value if isinstance(value, dict) else {}
+
+
 def compact_dict(
     d: Mapping[K, V | None],
     *,
