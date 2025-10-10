@@ -502,39 +502,21 @@ from cad_quoter.domain_models import (
 )
 from cad_quoter.coerce import to_float, to_int
 from cad_quoter.utils import compact_dict, jdump, json_safe_copy, sdict, _first_non_none
-try:
-    from cad_quoter.utils.geo_ctx import _should_include_outsourced_pass
-except Exception:  # pragma: no cover - fallback when optional import unavailable
-    from typing import Any
 
-    def _collection_has_text(value: Any) -> bool:
-        if isinstance(value, str):
-            return bool(value.strip())
-        if isinstance(value, _MappingABC):
-            return any(_collection_has_text(candidate) for candidate in value.values())
-        if isinstance(value, (list, tuple, set)):
-            return any(_collection_has_text(candidate) for candidate in value)
-        return False
 
-    def _geo_mentions_outsourced(geo_context: Mapping[str, Any] | None) -> bool:
-        if isinstance(geo_context, _MappingABC):
-            if _collection_has_text(geo_context.get("finishes")):
-                return True
-            if _collection_has_text(geo_context.get("finish_flags")):
-                return True
-            inner = geo_context.get("geo")
-            if isinstance(inner, _MappingABC):
-                return _geo_mentions_outsourced(inner)
-        return False
+def _fallback_collection_has_text(value: Any) -> bool:
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, _MappingABC):
+        return any(_fallback_collection_has_text(candidate) for candidate in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return any(_fallback_collection_has_text(candidate) for candidate in value)
+    return False
 
-    def _should_include_outsourced_pass(
-        outsourced_cost: float, geo_context: Mapping[str, Any] | None
-    ) -> bool:
-        try:
-            cost_val = float(outsourced_cost)
-        except Exception:
-            cost_val = 0.0
-        if abs(cost_val) > 1e-6:
+
+def _fallback_geo_mentions_outsourced(geo_context: Mapping[str, Any] | None) -> bool:
+    if isinstance(geo_context, _MappingABC):
+        if _fallback_collection_has_text(geo_context.get("finishes")):
             return True
         return _geo_mentions_outsourced(geo_context)
 _match_items_contains = _fallback_match_items_contains  # type: ignore[assignment]
