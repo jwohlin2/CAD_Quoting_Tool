@@ -9222,6 +9222,20 @@ def estimate_drilling_hours(
         debug_list.append(text)
         seen_debug.add(text)
 
+    def _update_range(target: dict[str, Any], min_key: str, max_key: str, value: Any) -> None:
+        try:
+            val = float(value)
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(val):
+            return
+        current_min = target.get(min_key)
+        if current_min is None or val < current_min:
+            target[min_key] = val
+        current_max = target.get(max_key)
+        if current_max is None or val > current_max:
+            target[max_key] = val
+
     if debug_list is not None and speeds_feeds_table is None:
         _log_debug("MISS table: using heuristic fallback")
 
@@ -9610,6 +9624,15 @@ def estimate_drilling_hours(
                             "rpm_count": 0,
                             "ipm_sum": 0.0,
                             "ipm_count": 0,
+                            "rpm_min": None,
+                            "rpm_max": None,
+                            "ipm_min": None,
+                            "ipm_max": None,
+                            "ipr_min": None,
+                            "ipr_max": None,
+                            "ipr_effective_min": None,
+                            "ipr_effective_max": None,
+                            "bins": {},
                             "diameter_weight_sum": 0.0,
                             "diameter_qty_sum": 0,
                             "diam_min": None,
@@ -9640,18 +9663,86 @@ def estimate_drilling_hours(
                     if sfm_float is not None and math.isfinite(sfm_float):
                         summary["sfm_sum"] += sfm_float * qty_for_debug
                         summary["sfm_count"] += qty_for_debug
-                    ipr_float = _as_float_or_none(ipr_val)
-                    if ipr_float is not None and math.isfinite(ipr_float):
-                        summary["ipr_sum"] += ipr_float * qty_for_debug
-                        summary["ipr_count"] += qty_for_debug
                     rpm_float = _as_float_or_none(rpm_val)
+                    ipr_float = _as_float_or_none(ipr_val)
+                    ipm_float = _as_float_or_none(ipm_val)
+                    if (
+                        (ipm_float is None or not math.isfinite(ipm_float))
+                        and rpm_float is not None
+                        and math.isfinite(rpm_float)
+                        and ipr_float is not None
+                        and math.isfinite(ipr_float)
+                    ):
+                        ipm_float = float(rpm_float) * float(ipr_float)
+                    ipr_effective_float: float | None = None
+                    if (
+                        rpm_float is not None
+                        and math.isfinite(rpm_float)
+                        and ipm_float is not None
+                        and math.isfinite(ipm_float)
+                        and abs(float(rpm_float)) > 1e-9
+                    ):
+                        ipr_effective_float = float(ipm_float) / float(rpm_float)
+                    elif ipr_float is not None and math.isfinite(ipr_float):
+                        ipr_effective_float = float(ipr_float)
+                    if debug_payload is not None:
+                        if rpm_float is not None and math.isfinite(rpm_float):
+                            debug_payload["rpm"] = float(rpm_float)
+                        if ipm_float is not None and math.isfinite(ipm_float):
+                            debug_payload["ipm"] = float(ipm_float)
+                        if ipr_effective_float is not None and math.isfinite(ipr_effective_float):
+                            debug_payload["ipr_effective"] = float(ipr_effective_float)
+                            debug_payload["ipr"] = float(ipr_effective_float)
+                        elif ipr_float is not None and math.isfinite(ipr_float):
+                            debug_payload["ipr"] = float(ipr_float)
                     if rpm_float is not None and math.isfinite(rpm_float):
                         summary["rpm_sum"] += rpm_float * qty_for_debug
                         summary["rpm_count"] += qty_for_debug
-                    ipm_float = _as_float_or_none(ipm_val)
+                        _update_range(summary, "rpm_min", "rpm_max", rpm_float)
                     if ipm_float is not None and math.isfinite(ipm_float):
                         summary["ipm_sum"] += ipm_float * qty_for_debug
                         summary["ipm_count"] += qty_for_debug
+                        _update_range(summary, "ipm_min", "ipm_max", ipm_float)
+                    if ipr_effective_float is not None and math.isfinite(ipr_effective_float):
+                        summary["ipr_sum"] += ipr_effective_float * qty_for_debug
+                        summary["ipr_count"] += qty_for_debug
+                        _update_range(summary, "ipr_min", "ipr_max", ipr_effective_float)
+                        _update_range(
+                            summary,
+                            "ipr_effective_min",
+                            "ipr_effective_max",
+                            ipr_effective_float,
+                        )
+                    bins = summary.setdefault("bins", {})
+                    bin_key = f"{float(tool_dia_in):.4f}"
+                    bin_summary = bins.setdefault(
+                        bin_key,
+                        {
+                            "diameter_in": float(tool_dia_in),
+                            "qty": 0,
+                            "rpm_min": None,
+                            "rpm_max": None,
+                            "ipm_min": None,
+                            "ipm_max": None,
+                            "ipr_min": None,
+                            "ipr_max": None,
+                            "ipr_effective_min": None,
+                            "ipr_effective_max": None,
+                        },
+                    )
+                    bin_summary["qty"] += qty_for_debug
+                    if rpm_float is not None and math.isfinite(rpm_float):
+                        _update_range(bin_summary, "rpm_min", "rpm_max", rpm_float)
+                    if ipm_float is not None and math.isfinite(ipm_float):
+                        _update_range(bin_summary, "ipm_min", "ipm_max", ipm_float)
+                    if ipr_effective_float is not None and math.isfinite(ipr_effective_float):
+                        _update_range(bin_summary, "ipr_min", "ipr_max", ipr_effective_float)
+                        _update_range(
+                            bin_summary,
+                            "ipr_effective_min",
+                            "ipr_effective_max",
+                            ipr_effective_float,
+                        )
                     summary["diameter_weight_sum"] += float(tool_dia_in) * qty_for_debug
                     summary["diameter_qty_sum"] += qty_for_debug
                     diam_min = summary.get("diam_min")
@@ -9712,17 +9803,45 @@ def estimate_drilling_hours(
                         return "-"
                     return fmt.format(float(value))
 
+                def _format_range(
+                    min_val: float | None,
+                    max_val: float | None,
+                    fmt: str,
+                    *,
+                    tolerance: float = 0.0,
+                ) -> str:
+                    if min_val is None and max_val is None:
+                        return "-"
+                    try:
+                        min_f = float(min_val if min_val is not None else max_val)
+                        max_f = float(max_val if max_val is not None else min_val)
+                    except (TypeError, ValueError):
+                        return "-"
+                    if not math.isfinite(min_f) or not math.isfinite(max_f):
+                        return "-"
+                    if tolerance and abs(max_f - min_f) <= tolerance:
+                        return fmt.format(max_f)
+                    if abs(max_f - min_f) <= 1e-12:
+                        return fmt.format(max_f)
+                    return f"{fmt.format(min_f)}–{fmt.format(max_f)}"
+
                 sfm_avg = _avg_value("sfm_sum", "sfm_count")
-                ipr_avg = _avg_value("ipr_sum", "ipr_count")
                 rpm_avg = _avg_value("rpm_sum", "rpm_count")
                 ipm_avg = _avg_value("ipm_sum", "ipm_count")
+                ipr_avg = _avg_value("ipr_sum", "ipr_count")
                 summary["rpm"] = rpm_avg
                 summary["ipm"] = ipm_avg
                 summary["minutes_per_hole"] = minutes_avg
                 sfm_text = _format_avg(sfm_avg, "{:.0f}")
-                ipr_text = _format_avg(ipr_avg, "{:.4f}")
-                rpm_text = _format_avg(rpm_avg, "{:.0f}")
-                ipm_text = _format_avg(ipm_avg, "{:.1f}")
+                ipr_min_val = summary.get("ipr_effective_min")
+                if ipr_min_val is None:
+                    ipr_min_val = summary.get("ipr_min")
+                ipr_max_val = summary.get("ipr_effective_max")
+                if ipr_max_val is None:
+                    ipr_max_val = summary.get("ipr_max")
+                ipr_text = _format_range(ipr_min_val, ipr_max_val, "{:.4f}", tolerance=5e-5)
+                rpm_text = _format_range(summary.get("rpm_min"), summary.get("rpm_max"), "{:.0f}", tolerance=0.5)
+                ipm_text = _format_range(summary.get("ipm_min"), summary.get("ipm_max"), "{:.1f}", tolerance=0.05)
 
                 diam_qty = summary.get("diameter_qty_sum", 0) or 0
                 dia_segment = "Ø-"
