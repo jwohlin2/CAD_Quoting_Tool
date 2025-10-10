@@ -17970,6 +17970,7 @@ def reconcile_holes(entity_holes_mm: Iterable[Any] | None, chart_ops: Iterable[d
     chart_bins: Counter[float] = Counter()
     tap_qty = 0
     cbore_qty = 0
+    csk_qty = 0
     if chart_ops:
         for op in chart_ops:
             if not isinstance(op, dict):
@@ -17984,8 +17985,11 @@ def reconcile_holes(entity_holes_mm: Iterable[Any] | None, chart_ops: Iterable[d
                 csk_qty += qty
             if op_type != "drill":
                 continue
+            dia_raw = op.get("dia_mm")
+            if dia_raw is None:
+                continue
             try:
-                dia_val = float(op.get("dia_mm"))
+                dia_val = float(dia_raw)
             except Exception:
                 continue
             if dia_val <= 0:
@@ -18104,7 +18108,7 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
     effective_scrap = normalize_scrap_pct(effective_scrap)
     scrap_pct_percent = round(100.0 * effective_scrap, 1)
 
-    ctx = {
+    ctx: dict[str, Any] = {
         "purpose": "quote_explanation",
         "rollup": {
             "final_price": final_price,
@@ -18147,7 +18151,7 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
         ]
 
         drivers_raw = data.get("drivers") if isinstance(data.get("drivers"), list) else []
-        drivers: list[dict[str, float]] = []
+        drivers: list[dict[str, float | str]] = []
         for idx, default in enumerate(fallback_drivers):
             entry = drivers_raw[idx] if idx < len(drivers_raw) and isinstance(drivers_raw[idx], dict) else {}
             label = str(entry.get("label") or default["label"]).strip() or default["label"]
@@ -18162,6 +18166,9 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
             )
         while len(drivers) < 2:
             drivers.append({"label": f"Bucket {len(drivers) + 1}", "usd": 0.0, "pct_of_subtotal": 0.0})
+
+        driver_primary = drivers[0] if drivers else {"label": "Labor", "usd": 0.0, "pct_of_subtotal": 0.0}
+        driver_secondary = drivers[1] if len(drivers) > 1 else driver_primary
 
         geo_notes_raw = data.get("geo_notes") if isinstance(data.get("geo_notes"), list) else []
         geo_notes = [str(note).strip() for note in geo_notes_raw if str(note).strip()]
@@ -18180,7 +18187,7 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
                     geo_notes = []
 
         top_processes_raw = data.get("top_processes") if isinstance(data.get("top_processes"), list) else []
-        top_processes: list[dict[str, float]] = []
+        top_processes: list[dict[str, float | str]] = []
         for entry in top_processes_raw:
             if not isinstance(entry, dict):
                 continue
@@ -18189,17 +18196,26 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
             if name_val and usd_val is not None:
                 top_processes.append({"name": name_val, "usd": usd_val})
         if not top_processes:
-            top_processes = []
-            for proc in ctx["rollup"].get("top_processes", []):
-                name_val = str(proc.get("name") or "").strip()
-                usd_val = _to_float(proc.get("usd"))
-                if name_val and usd_val is not None:
-                    top_processes.append({"name": name_val, "usd": usd_val})
+            rollup = ctx.get("rollup")
+            rollup_processes = rollup.get("top_processes") if isinstance(rollup, dict) else None
+            if isinstance(rollup_processes, list):
+                for proc in rollup_processes:
+                    if not isinstance(proc, dict):
+                        continue
+                    name_val = str(proc.get("name") or "").strip()
+                    usd_val = _to_float(proc.get("usd"))
+                    if name_val and usd_val is not None:
+                        top_processes.append({"name": name_val, "usd": usd_val})
 
         material_section = data.get("material") if isinstance(data.get("material"), dict) else {}
         scrap_val = _to_float(material_section.get("scrap_pct"))
         if scrap_val is None:
-            scrap_val = float(ctx["scrap_pct"])
+            scrap_fallback = ctx.get("scrap_pct")
+            scrap_val = _to_float(scrap_fallback)
+            if scrap_val is None and isinstance(scrap_fallback, (int, float)):
+                scrap_val = float(scrap_fallback)
+            if scrap_val is None:
+                scrap_val = 0.0
         material_struct = {
             "source": str(material_section.get("source") or material_source).strip() or material_source,
             "scrap_pct": round(float(scrap_val), 1),
@@ -18223,7 +18239,9 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
             if geo_notes:
                 geo_text = "Geometry: " + ", ".join(geo_notes) + ". "
 
-            scrap_display = material_struct.get("scrap_pct", ctx["scrap_pct"])
+            scrap_display = material_struct.get("scrap_pct")
+            if scrap_display is None:
+                scrap_display = ctx.get("scrap_pct")
             try:
                 scrap_str = f"{float(scrap_display):.1f}"
             except Exception:
@@ -18236,8 +18254,8 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
                 material_text = f"Scrap {scrap_str}% applied."
 
             explanation = (
-                f"Labor ${labor_cost:.2f} ({drivers[0]['pct_of_subtotal']:.1f}%) and directs "
-                f"${direct_costs:.2f} ({drivers[1]['pct_of_subtotal']:.1f}%) drive cost. "
+                f"Labor ${labor_cost:.2f} ({float(driver_primary['pct_of_subtotal']):.1f}%) and directs "
+                f"${direct_costs:.2f} ({float(driver_secondary['pct_of_subtotal']):.1f}%) drive cost. "
                 + top_text
                 + geo_text
                 + material_text
