@@ -682,3 +682,157 @@ def test_render_quote_displays_single_shipping_entry_and_reconciles_ladder() -> 
     )
     ladder_total = float(ladder_line.split("$")[-1].replace(",", ""))
     assert ladder_total == 100.0
+
+
+def test_render_quote_promotes_planner_pricing_source() -> None:
+    result = {
+        "price": 0.0,
+        "breakdown": {
+            "qty": 1,
+            "totals": {
+                "labor_cost": 0.0,
+                "direct_costs": 0.0,
+                "subtotal": 0.0,
+                "with_overhead": 0.0,
+                "with_ga": 0.0,
+                "with_contingency": 0.0,
+                "with_expedite": 0.0,
+            },
+            "nre_detail": {},
+            "nre": {},
+            "material": {},
+            "process_costs": {"milling": 0.0},
+            "process_meta": {
+                "planner_total": {"minutes": 120.0},
+                "milling": {"hr": 0.0},
+            },
+            "pass_through": {"Material": 0.0},
+            "pricing_source": "legacy",
+            "applied_pcts": {
+                "OverheadPct": 0.0,
+                "GA_Pct": 0.0,
+                "ContingencyPct": 0.0,
+                "MarginPct": 0.0,
+            },
+            "rates": {},
+            "params": {},
+            "labor_cost_details": {},
+            "direct_cost_details": {},
+        },
+    }
+
+    rendered = appV5.render_quote(result, currency="$")
+    lines = rendered.splitlines()
+
+    assert "Pricing Source: planner" in lines
+    assert all("Pricing Source: legacy" not in line for line in lines)
+
+
+def test_render_quote_hour_summary_uses_final_hours() -> None:
+    result = {
+        "price": 160.0,
+        "breakdown": {
+            "qty": 1,
+            "totals": {
+                "labor_cost": 160.0,
+                "direct_costs": 0.0,
+                "subtotal": 160.0,
+                "with_overhead": 160.0,
+                "with_ga": 160.0,
+                "with_contingency": 160.0,
+                "with_expedite": 160.0,
+            },
+            "nre_detail": {},
+            "nre": {},
+            "material": {},
+            "process_costs": {"milling": 100.0, "drilling": 60.0},
+            "process_meta": {
+                "milling": {"hr": 2.0, "rate": 50.0},
+                "drilling": {"hr": 1.5, "final_hr": 0.75, "rate": 80.0},
+            },
+            "labor_costs": {"Milling": 100.0, "Drilling": 60.0},
+            "labor_cost_details": {
+                "Milling": "2.00 hr @ $50.00/hr",
+                "Drilling": "0.75 hr @ $80.00/hr",
+            },
+            "pass_through": {"Material": 0.0},
+            "pricing_source": "legacy",
+            "applied_pcts": {
+                "OverheadPct": 0.0,
+                "GA_Pct": 0.0,
+                "ContingencyPct": 0.0,
+                "MarginPct": 0.0,
+            },
+            "rates": {"MillingRate": 50.0, "DrillingRate": 80.0},
+            "params": {},
+            "direct_cost_details": {},
+        },
+    }
+
+    rendered = appV5.render_quote(result, currency="$")
+    lines = rendered.splitlines()
+    summary_idx = lines.index("Labor Hour Summary")
+    summary_block = lines[summary_idx: summary_idx + 8]
+    drilling_line = next(line for line in summary_block if "Drilling" in line)
+
+    assert "0.75 hr" in drilling_line
+
+
+def test_render_quote_direct_costs_match_displayed_pass_through() -> None:
+    result = {
+        "price": 385.0,
+        "breakdown": {
+            "qty": 1,
+            "totals": {
+                "labor_cost": 160.0,
+                "direct_costs": 225.0,
+                "subtotal": 385.0,
+                "with_overhead": 385.0,
+                "with_ga": 385.0,
+                "with_contingency": 385.0,
+                "with_expedite": 385.0,
+            },
+            "nre_detail": {},
+            "nre": {},
+            "material": {
+                "material_cost_before_credit": 200.0,
+                "material_scrap_credit": 10.0,
+                "material_tax": 5.0,
+            },
+            "process_costs": {"milling": 100.0, "drilling": 60.0},
+            "process_meta": {
+                "milling": {"hr": 2.0, "rate": 50.0},
+                "drilling": {"hr": 0.75, "rate": 80.0},
+            },
+            "labor_costs": {"Milling": 100.0, "Drilling": 60.0},
+            "labor_cost_details": {
+                "Milling": "2.00 hr @ $50.00/hr",
+                "Drilling": "0.75 hr @ $80.00/hr",
+            },
+            "pass_through": {
+                "Material": 200.0,
+                "Consumables": 30.0,
+                "Hidden Fee": -10.0,
+            },
+            "pricing_source": "legacy",
+            "applied_pcts": {
+                "OverheadPct": 0.0,
+                "GA_Pct": 0.0,
+                "ContingencyPct": 0.0,
+                "MarginPct": 0.0,
+            },
+            "rates": {"MillingRate": 50.0, "DrillingRate": 80.0},
+            "params": {},
+            "direct_cost_details": {"Consumables": "Shop supplies"},
+        },
+    }
+
+    rendered = appV5.render_quote(result, currency="$")
+    lines = rendered.splitlines()
+    pass_idx = lines.index("Pass-Through & Direct Costs")
+    pass_end = next(idx for idx in range(pass_idx, len(lines)) if lines[idx] == "")
+    pass_section = lines[pass_idx:pass_end]
+
+    assert all("Hidden Fee" not in line for line in pass_section)
+    total_line = next(line for line in pass_section if line.strip().startswith("Total"))
+    assert total_line.endswith("$225.00")
