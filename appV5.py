@@ -11812,6 +11812,7 @@ def compute_quote_from_df(
     planner_process_minutes: float | None = None
     planner_drill_minutes: float | None = None
     planner_drilling_override: dict[str, float] | None = None
+    drill_estimator_hours_for_planner: float = 0.0
     used_planner = False
 
     red_flag_messages: list[str] = []
