@@ -19264,7 +19264,7 @@ class CreateToolTip:
         self.wraplength = wraplength
         self._after_id: str | None = None
         self._tip_window: tk.Toplevel | None = None
-        self._label: ttk.Label | None = None
+        self._label: tk.Label | ttk.Label | None = None
         self._pinned = False
 
         self.widget.bind("<Enter>", self._schedule_show, add="+")
@@ -19310,10 +19310,16 @@ class CreateToolTip:
         if self._tip_window is not None or not self.text:
             return
 
-        try:
-            x, y, width, height = self.widget.bbox("insert")
-        except Exception:
-            x = y = 0
+        x = y = width = height = 0
+        bbox = getattr(self.widget, "bbox", None)
+        if callable(bbox):
+            try:
+                x, y, width, height = bbox("insert")  # type: ignore[arg-type]
+            except Exception:
+                x = y = 0
+                width = self.widget.winfo_width()
+                height = self.widget.winfo_height()
+        else:
             width = self.widget.winfo_width()
             height = self.widget.winfo_height()
 
@@ -19343,7 +19349,7 @@ class CreateToolTip:
             background="#ffffe0",
             relief=tk.SOLID,
             borderwidth=1,
-            font=("tahoma", "8", "normal"),
+            font=("tahoma", 8, "normal"),
             wraplength=self.wraplength,
         )
         label.pack(ipadx=4, ipady=2)
@@ -19420,6 +19426,7 @@ class App(tk.Tk):
         self.geometry_loader = geometry_loader or GeometryLoader()
         self.pricing_registry = pricing_registry or PricingRegistry()
         self.llm_services = llm_services or LLMServices()
+        self.pricing: PricingEngine = pricing or _DEFAULT_PRICING_ENGINE
 
         default_material_display = getattr(
             self.configuration,
@@ -19524,7 +19531,14 @@ class App(tk.Tk):
                 except Exception:
                     logger.warning("Failed to preload variables from %s", saved_vars_path, exc_info=True)
                 else:
-                    self._refresh_variables_cache(core_df, full_df)
+                    if isinstance(core_df, pd.DataFrame) and isinstance(full_df, pd.DataFrame):
+                        self._refresh_variables_cache(core_df, full_df)
+                    else:
+                        logger.warning(
+                            "Variables preload returned unexpected types: %s, %s",
+                            type(core_df),
+                            type(full_df),
+                        )
 
         # LLM defaults: ON + auto model discovery
         default_model = (
@@ -20679,8 +20693,15 @@ class App(tk.Tk):
                     if vp:
                         try:
                             core_df, full_df = read_variables_file(vp, return_full=True)
-                            self._refresh_variables_cache(core_df, full_df)
-                            self._set_last_variables_path(vp)
+                            if isinstance(core_df, pd.DataFrame) and isinstance(full_df, pd.DataFrame):
+                                self._refresh_variables_cache(core_df, full_df)
+                                self._set_last_variables_path(vp)
+                            else:
+                                logger.warning(
+                                    "Variables load returned unexpected types: %s, %s",
+                                    type(core_df),
+                                    type(full_df),
+                                )
                         except Exception as read_err:
                             messagebox.showerror("Variables", f"Failed to read variables file:\n{read_err}\n\nContinuing with defaults.")
                             self.vars_df = None
@@ -20812,8 +20833,15 @@ class App(tk.Tk):
                 return
             try:
                 core_df, full_df = read_variables_file(vp, return_full=True)
-                self._refresh_variables_cache(core_df, full_df)
-                self._set_last_variables_path(vp)
+                if isinstance(core_df, pd.DataFrame) and isinstance(full_df, pd.DataFrame):
+                    self._refresh_variables_cache(core_df, full_df)
+                    self._set_last_variables_path(vp)
+                else:
+                    logger.warning(
+                        "Variables load returned unexpected types: %s, %s",
+                        type(core_df),
+                        type(full_df),
+                    )
             except Exception as e:
                 import traceback
                 tb = traceback.format_exc()
