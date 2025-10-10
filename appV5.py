@@ -5546,6 +5546,26 @@ def _rate_key_for_bucket(bucket: str | None) -> str | None:
     return mapping.get(canon)
 
 
+def _charged_hours_by_bucket(process_costs, process_meta, rates):
+    """Return the hours that correspond to what we actually charged."""
+    out = {}
+    for key, amount in (process_costs or {}).items():
+        norm = _normalize_bucket_key(key)
+        if norm.startswith("planner_"):
+            continue
+        # Prefer explicit final hours if meta provided them
+        meta = (process_meta or {}).get(key) or {}
+        hr = meta.get("final_hr") or meta.get("planner_hr") or meta.get("hr")
+        if hr is None:
+            # Derive from amount ÷ rate if needed
+            rate_key = _rate_key_for_bucket(norm)
+            rate = float(rates.get(rate_key, 0.0)) if rate_key else 0.0
+            hr = (float(amount) / rate) if rate > 0 else None
+        if hr is not None:
+            out[key] = float(hr)
+    return out
+
+
 def _canonical_bucket_key(name: str | None) -> str:
     normalized = _normalize_bucket_key(name)
     if not normalized:
@@ -8223,6 +8243,23 @@ def render_quote(
 
     hour_summary_entries.clear()
 
+    charged_hours = _charged_hours_by_bucket(process_costs, process_meta, rates)
+    charged_hour_entries = sorted(charged_hours.items(), key=lambda kv: kv[0])
+    charged_hours_by_canon: dict[str, float] = {}
+    for raw_key, hour_val in charged_hour_entries:
+        canon_key = _canonical_bucket_key(raw_key)
+        if not canon_key:
+            canon_key = _normalize_bucket_key(raw_key)
+        try:
+            numeric_hours = float(hour_val or 0.0)
+        except Exception:
+            numeric_hours = 0.0
+        if not canon_key:
+            continue
+        charged_hours_by_canon[canon_key] = (
+            charged_hours_by_canon.get(canon_key, 0.0) + numeric_hours
+        )
+
     def _record_hour_entry(label: str, value: float, *, include_in_total: bool = True) -> None:
         try:
             numeric_value = float(value or 0.0)
@@ -8397,11 +8434,38 @@ def render_quote(
                 continue
             if canon_key.startswith("planner_"):
                 continue
-            hours_val = _hours_for_bucket(canon_key)
-            if hours_val <= 0.01:
+            hours_val = charged_hours_by_canon.get(canon_key)
+            if hours_val is None:
+                hours_val = _hours_for_bucket(canon_key)
+            if hours_val is None:
+                continue
+            try:
+                hours_float = float(hours_val or 0.0)
+            except Exception:
+                hours_float = 0.0
+            if hours_float <= 0.01:
                 continue
             label = _display_bucket_label(canon_key, label_overrides)
-            _emit_hour_row(label, round(hours_val, 2))
+            _emit_hour_row(label, round(hours_float, 2))
+            seen_hour_canon_keys.add(canon_key)
+
+        for canon_key, hours_val in sorted(charged_hours_by_canon.items()):
+            if not canon_key or canon_key in skip_hour_canon_keys:
+                continue
+            if canon_key in seen_hour_canon_keys:
+                continue
+            if canon_key in {"planner_labor", "planner_machine", "planner_total"}:
+                continue
+            if str(canon_key).startswith("planner_"):
+                continue
+            try:
+                hours_float = float(hours_val or 0.0)
+            except Exception:
+                hours_float = 0.0
+            if hours_float <= 0.01:
+                continue
+            label = _display_bucket_label(canon_key, label_overrides)
+            _emit_hour_row(label, round(hours_float, 2))
 
         _emit_hour_row("Programming (lot)", round(programming_hours, 2))
         if programming_is_amortized and qty_for_hours > 0:
@@ -8420,18 +8484,52 @@ def render_quote(
                 include_in_total=False,
             )
     else:
-        for key, meta in sorted((process_meta or {}).items()):
-            meta = meta or {}
-            try:
-                hr_val = float(meta.get("hr", 0.0) or 0.0)
-            except Exception:
-                hr_val = 0.0
-            canon_key = _canonical_bucket_key(key)
-            if canon_key:
-                display_label = _display_bucket_label(canon_key)
-            else:
-                display_label = _process_label(key)
-            _record_hour_entry(display_label, hr_val)
+        if charged_hour_entries:
+            seen_hour_canon_keys: set[str] = set()
+            for canon_key in aggregated_order:
+                if not canon_key:
+                    continue
+                if canon_key in {"planner_labor", "planner_machine", "planner_total"}:
+                    continue
+                if canon_key.startswith("planner_"):
+                    continue
+                hours_val = charged_hours_by_canon.get(canon_key)
+                if hours_val is None:
+                    continue
+                try:
+                    hours_float = float(hours_val or 0.0)
+                except Exception:
+                    hours_float = 0.0
+                label = _display_bucket_label(canon_key)
+                _record_hour_entry(label, round(hours_float, 2))
+                seen_hour_canon_keys.add(canon_key)
+
+            for canon_key, hours_val in sorted(charged_hours_by_canon.items()):
+                if not canon_key or canon_key in seen_hour_canon_keys:
+                    continue
+                if canon_key in {"planner_labor", "planner_machine", "planner_total"}:
+                    continue
+                if str(canon_key).startswith("planner_"):
+                    continue
+                try:
+                    hours_float = float(hours_val or 0.0)
+                except Exception:
+                    hours_float = 0.0
+                label = _display_bucket_label(canon_key)
+                _record_hour_entry(label, round(hours_float, 2))
+        else:
+            for key, meta in sorted((process_meta or {}).items()):
+                meta = meta or {}
+                try:
+                    hr_val = float(meta.get("hr", 0.0) or 0.0)
+                except Exception:
+                    hr_val = 0.0
+                canon_key = _canonical_bucket_key(key)
+                if canon_key:
+                    display_label = _display_bucket_label(canon_key)
+                else:
+                    display_label = _process_label(key)
+                _record_hour_entry(display_label, hr_val)
 
         _record_hour_entry("Programming", programming_hours)
         if programming_is_amortized and qty_for_hours > 0:
