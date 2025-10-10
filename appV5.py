@@ -9186,6 +9186,7 @@ def estimate_drilling_hours(
     overhead_params: _TimeOverheadParams | None = None,
     warnings: list[str] | None = None,
     debug_lines: list[str] | None = None,
+    debug_summary: dict[str, dict[str, Any]] | None = None,
 ) -> float:
     """
     Conservative plate-drilling model with floors so 100+ holes don't collapse to minutes.
@@ -9208,6 +9209,8 @@ def estimate_drilling_hours(
     mat = str(material_label or mat_key or "").lower()
     material_factor = _unit_hp_cap(material_label)
     debug_list = debug_lines if debug_lines is not None else None
+    if debug_summary is not None:
+        debug_summary.clear()
     speeds_feeds_row: Mapping[str, Any] | None = None
     selected_op_name = ""
     avg_dia_in = 0.0
@@ -9508,9 +9511,44 @@ def estimate_drilling_hours(
                     precomputed_speeds["ipm"] = float(ipm_val)
                 else:
                     ipm_val = None
+            is_deep_drill = op_name.lower() == "deep_drill"
+            if is_deep_drill:
+                sfm_pre = precomputed_speeds.get("sfm")
+                if sfm_pre is not None and math.isfinite(sfm_pre):
+                    new_sfm = float(sfm_pre) * DEEP_DRILL_SFM_FACTOR
+                    precomputed_speeds["sfm"] = new_sfm
+                    if diameter_float and diameter_float > 0:
+                        rpm_val = (new_sfm * 12.0) / (math.pi * float(diameter_float))
+                        if math.isfinite(rpm_val):
+                            precomputed_speeds["rpm"] = float(rpm_val)
+                elif "rpm" in precomputed_speeds:
+                    rpm_only = precomputed_speeds.get("rpm")
+                    if rpm_only is not None and math.isfinite(rpm_only):
+                        precomputed_speeds["rpm"] = float(rpm_only) * DEEP_DRILL_SFM_FACTOR
+                ipr_pre = precomputed_speeds.get("ipr")
+                if ipr_pre is not None and math.isfinite(ipr_pre):
+                    precomputed_speeds["ipr"] = float(ipr_pre) * DEEP_DRILL_IPR_FACTOR
+                if "rpm" in precomputed_speeds and "ipr" in precomputed_speeds:
+                    rpm_calc = precomputed_speeds["rpm"]
+                    ipr_calc = precomputed_speeds["ipr"]
+                    if math.isfinite(rpm_calc) and math.isfinite(ipr_calc):
+                        precomputed_speeds["ipm"] = float(rpm_calc) * float(ipr_calc)
             debug_payload: dict[str, Any] | None = None
             tool_params: _TimeToolParams
             minutes: float
+            overhead_for_calc = per_hole_overhead
+            if is_deep_drill:
+                peck_rate_val = _as_float_or_none(
+                    per_hole_overhead.peck_penalty_min_per_in_depth
+                )
+                adjusted_peck = max(
+                    DEEP_DRILL_PECK_PENALTY_MIN_PER_IN,
+                    float(peck_rate_val) if peck_rate_val and peck_rate_val > 0 else 0.0,
+                )
+                overhead_for_calc = replace(
+                    per_hole_overhead,
+                    peck_penalty_min_per_in_depth=adjusted_peck,
+                )
             if cache_entry:
                 row, tool_params = cache_entry
                 if debug_lines is not None:
@@ -9520,22 +9558,26 @@ def estimate_drilling_hours(
                     geom,
                     tool_params,
                     machine_for_cut,
-                    per_hole_overhead,
+                    overhead_for_calc,
                     material_factor=material_cap_val,
                     debug=debug_payload,
+                    precomputed=precomputed_speeds,
                 )
             else:
-                peck_rate = _as_float_or_none(per_hole_overhead.peck_penalty_min_per_in_depth)
+                peck_rate = _as_float_or_none(
+                    overhead_for_calc.peck_penalty_min_per_in_depth
+                )
                 peck_min = None
                 if peck_rate and depth_in and depth_in > 0:
                     peck_min = float(peck_rate) * float(depth_in)
-                dwell_val = _as_float_or_none(per_hole_overhead.dwell_min)
+                dwell_val = _as_float_or_none(overhead_for_calc.dwell_min)
                 legacy_overhead = _TimeOverheadParams(
                     toolchange_min=0.0,
-                    approach_retract_in=per_hole_overhead.approach_retract_in,
+                    approach_retract_in=overhead_for_calc.approach_retract_in,
                     peck_penalty_min_per_in_depth=None,
                     dwell_min=dwell_val,
                     peck_min=peck_min,
+                    index_sec_per_hole=overhead_for_calc.index_sec_per_hole,
                 )
                 tool_params = _TimeToolParams(teeth_z=1)
                 if debug_lines is not None:
@@ -9548,6 +9590,7 @@ def estimate_drilling_hours(
                     material_factor=material_cap_val,
                     operation=op_name,
                     debug=debug_payload,
+                    precomputed=precomputed_speeds,
                 )
                 if minutes <= 0:
                     continue
@@ -9622,6 +9665,8 @@ def estimate_drilling_hours(
                             "peck_count": 0,
                             "dwell_sum": 0.0,
                             "dwell_count": 0,
+                            "index_sum": 0.0,
+                            "index_count": 0,
                         },
                     )
                     if chosen_material_label:
@@ -9687,6 +9732,20 @@ def estimate_drilling_hours(
                     if dwell_val_float is not None and dwell_val_float > 0:
                         summary["dwell_sum"] += float(dwell_val_float) * qty_for_debug
                         summary["dwell_count"] += qty_for_debug
+                    index_min_val = None
+                    if debug_payload is not None:
+                        index_min_val = _as_float_or_none(
+                            debug_payload.get("index_min")
+                        )
+                    if index_min_val is None:
+                        index_sec_val = _as_float_or_none(
+                            overhead_for_calc.index_sec_per_hole
+                        )
+                        if index_sec_val is not None and index_sec_val > 0:
+                            index_min_val = float(index_sec_val) / 60.0
+                    if index_min_val is not None and index_min_val > 0:
+                        summary["index_sum"] += float(index_min_val) * qty_for_debug
+                        summary["index_count"] += qty_for_debug
                     if not summary.get("material"):
                         summary["material"] = "material"
                 qty_int = qty_for_debug
@@ -9762,11 +9821,14 @@ def estimate_drilling_hours(
 
                 peck_avg = _avg_value("peck_sum", "peck_count")
                 dwell_avg = _avg_value("dwell_sum", "dwell_count")
+                index_avg = _avg_value("index_sum", "index_count")
                 overhead_bits: list[str] = []
                 if peck_avg and math.isfinite(peck_avg) and peck_avg > 0:
                     overhead_bits.append(f"peck {peck_avg:.2f} min/hole")
                 if dwell_avg and math.isfinite(dwell_avg) and dwell_avg > 0:
                     overhead_bits.append(f"dwell {dwell_avg:.2f} min/hole")
+                if index_avg and math.isfinite(index_avg) and index_avg > 0:
+                    overhead_bits.append(f"index {index_avg:.2f} min/hole")
                 if toolchange_total and math.isfinite(toolchange_total) and toolchange_total > 0:
                     overhead_bits.append(f"toolchange {toolchange_total:.2f} min")
 
@@ -9774,6 +9836,7 @@ def estimate_drilling_hours(
                 mat_display = str(summary.get("material") or "material").strip()
                 if not mat_display:
                     mat_display = "material"
+                summary["material"] = mat_display
 
                 line_parts = [
                     "Drill calc → ",
@@ -9788,6 +9851,8 @@ def estimate_drilling_hours(
                     line_parts.append("overhead: " + ", ".join(overhead_bits) + "; ")
                 line_parts.append(f"total hr: {total_hours:.2f}.")
                 debug_lines.append("".join(line_parts))
+                if debug_summary is not None:
+                    debug_summary[op_key] = dict(summary)
         if missing_row_messages and warnings is not None:
             for op_display, material_display, dia_val in sorted(missing_row_messages):
                 dia_text = f"{dia_val:.3f}".rstrip("0").rstrip(".")
@@ -11390,6 +11455,7 @@ def compute_quote_from_df(df: pd.DataFrame,
             thickness_mm / 25.4 if thickness_mm else 0.0,
         )
     drill_debug_lines: list[str] = []
+    drill_debug_summary: dict[str, dict[str, Any]] = {}
     speeds_feeds_row: Mapping[str, Any] | None = None  # ensure defined in outer scope
     avg_dia_in = 0.0
 
@@ -11403,6 +11469,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         overhead_params=drill_overhead_default,
         warnings=speeds_feeds_warnings,
         debug_lines=drill_debug_lines,
+        debug_summary=drill_debug_summary,
     )
     if not math.isfinite(drill_hr) or drill_hr < 0:
         drill_hr = 0.0
@@ -11498,6 +11565,17 @@ def compute_quote_from_df(df: pd.DataFrame,
         drilling_meta["speeds_feeds_path"] = speeds_feeds_path
     if drill_debug_line:
         drilling_meta["speeds_feeds_debug"] = drill_debug_line
+    if drill_debug_summary:
+        drilling_meta["debug_summary"] = {
+            key: dict(value) for key, value in drill_debug_summary.items()
+        }
+        if not drill_material_display:
+            for summary in drill_debug_summary.values():
+                mat_val = str(summary.get("material") or "").strip()
+                if mat_val:
+                    drilling_meta["material"] = mat_val
+                    drilling_meta["material_display"] = mat_val
+                    break
 
     for warning_text in speeds_feeds_warnings:
         _record_red_flag(warning_text)
