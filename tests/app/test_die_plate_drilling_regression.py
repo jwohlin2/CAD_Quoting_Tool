@@ -199,18 +199,20 @@ def test_steel_die_plate_deep_drill_runtime_floor() -> None:
     assert summary, "Expected deep drill debug summary"
     assert "op=Deep_Drill" in summary
 
-    rpm_match = re.search(r"RPM:(\d+(?:\.\d+)?)", summary)
-    ipm_match = re.search(r"IPM:(\d+(?:\.\d+)?)", summary)
-    min_per_match = re.search(r"min/hole: (\d+(?:\.\d+)?)", summary)
+    rpm_match = re.search(r"RPM (\d+(?:\.\d+)?)(?:[–-](\d+(?:\.\d+)?))?", summary)
+    ipm_match = re.search(r"IPM (\d+(?:\.\d+)?)(?:[–-](\d+(?:\.\d+)?))?", summary)
+    index_match = re.search(r"index (\d+(?:\.\d+)?) s/hole", summary)
 
     assert rpm_match is not None
     assert ipm_match is not None
-    assert min_per_match is not None
+    assert index_match is not None
 
-    rpm = float(rpm_match.group(1))
-    ipm = float(ipm_match.group(1))
-    min_per_hole = float(min_per_match.group(1))
+    rpm_low = float(rpm_match.group(1))
+    rpm_high = float(rpm_match.group(2) or rpm_match.group(1))
+    ipm_low = float(ipm_match.group(1))
+    ipm_high = float(ipm_match.group(2) or ipm_match.group(1))
+    index_seconds = float(index_match.group(1))
 
-    assert 420 <= rpm <= 560, f"RPM {rpm:.0f} outside expected deep drill range"
-    assert 0.8 <= ipm <= 1.2, f"Feed {ipm:.2f} IPM outside expected deep drill range"
-    assert min_per_hole >= 2.0, f"Minutes per hole {min_per_hole:.2f} too low for deep drill"
+    assert rpm_low <= 560 and rpm_high >= 420, f"RPM range {rpm_low:.0f}–{rpm_high:.0f} misses deep drill target"
+    assert 0.8 <= ipm_high and ipm_low <= 1.2, f"Feed range {ipm_low:.2f}–{ipm_high:.2f} IPM outside expected deep drill range"
+    assert index_seconds >= 120.0, f"Index {index_seconds:.1f}s per hole too low for deep drill"

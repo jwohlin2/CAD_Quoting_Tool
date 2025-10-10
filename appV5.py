@@ -9693,6 +9693,20 @@ def estimate_drilling_hours(
         missing_row_messages: set[tuple[str, str, float]] = set()
         debug_summary_entries: dict[str, dict[str, Any]] = {}
 
+        def _update_range(summary_map: dict[str, Any], min_key: str, max_key: str, value: float | None) -> None:
+            try:
+                val = float(value)
+            except (TypeError, ValueError):
+                return
+            if not math.isfinite(val):
+                return
+            current_min = summary_map.get(min_key)
+            current_max = summary_map.get(max_key)
+            if current_min is None or not math.isfinite(float(current_min)) or val < float(current_min):
+                summary_map[min_key] = float(val)
+            if current_max is None or not math.isfinite(float(current_max)) or val > float(current_max):
+                summary_map[max_key] = float(val)
+
         def _build_tool_params(row: Mapping[str, Any]) -> _TimeToolParams:
             key_map = {
                 str(k).strip().lower().replace("-", "_").replace(" ", "_"): k
@@ -9929,6 +9943,7 @@ def estimate_drilling_hours(
                     debug=debug_payload,
                     precomputed=precomputed_speeds,
                 )
+                overhead_for_calc = per_hole_overhead
             else:
                 peck_rate = _as_float_or_none(
                     overhead_for_calc.peck_penalty_min_per_in_depth
@@ -9961,6 +9976,7 @@ def estimate_drilling_hours(
                 overhead_for_calc = legacy_overhead
                 if minutes <= 0:
                     continue
+                overhead_for_calc = legacy_overhead
             if minutes <= 0:
                 continue
             try:
@@ -10280,22 +10296,16 @@ def estimate_drilling_hours(
                 ipm_text = _format_range(summary.get("ipm_min"), summary.get("ipm_max"), "{:.1f}", tolerance=0.05)
 
                 diam_qty = summary.get("diameter_qty_sum", 0) or 0
-                dia_segment = "Ø-"
+                dia_segment = "Ø -"
                 if diam_qty > 0:
                     diam_sum = summary.get("diameter_weight_sum", 0.0) or 0.0
                     avg_dia = diam_sum / diam_qty if diam_qty else 0.0
                     diam_min = summary.get("diam_min")
                     diam_max = summary.get("diam_max")
-                    if (
-                        isinstance(diam_min, (int, float))
-                        and isinstance(diam_max, (int, float))
-                        and math.isfinite(diam_min)
-                        and math.isfinite(diam_max)
-                        and abs(float(diam_max) - float(diam_min)) > 5e-4
-                    ):
-                        dia_segment = f"Ø{float(diam_min):.3f}-{float(diam_max):.3f}\""
-                    else:
-                        dia_segment = f"Ø{float(avg_dia):.3f}\""
+                    dia_range_text = _format_range(diam_min, diam_max, "{:.3f}\"", tolerance=5e-4)
+                    if dia_range_text == "-":
+                        dia_range_text = f"{float(avg_dia):.3f}\""
+                    dia_segment = f"Ø {dia_range_text}"
 
                 depth_qty = summary.get("depth_qty_sum", 0) or 0
                 depth_text = "-"
@@ -10304,23 +10314,17 @@ def estimate_drilling_hours(
                     avg_depth = depth_sum / depth_qty if depth_qty else 0.0
                     depth_min = summary.get("depth_min")
                     depth_max = summary.get("depth_max")
-                    if (
-                        isinstance(depth_min, (int, float))
-                        and isinstance(depth_max, (int, float))
-                        and math.isfinite(depth_min)
-                        and math.isfinite(depth_max)
-                        and abs(float(depth_max) - float(depth_min)) > 5e-3
-                    ):
-                        depth_text = f"{float(depth_min):.2f}-{float(depth_max):.2f}"
-                    else:
-                        depth_text = f"{float(avg_depth):.2f}"
+                    depth_range_text = _format_range(
+                        depth_min, depth_max, "{:.2f}", tolerance=5e-3
+                    )
+                    if depth_range_text == "-":
+                        depth_range_text = f"{float(avg_depth):.2f}"
+                    depth_text = depth_range_text
 
                 peck_avg = _avg_value("peck_sum", "peck_count")
                 dwell_avg = _avg_value("dwell_sum", "dwell_count")
                 index_avg = _avg_value("index_sum", "index_count")
                 overhead_bits: list[str] = []
-                if peck_avg and math.isfinite(peck_avg) and peck_avg > 0:
-                    overhead_bits.append(f"peck {peck_avg:.2f} min/hole")
                 if dwell_avg and math.isfinite(dwell_avg) and dwell_avg > 0:
                     overhead_bits.append(f"dwell {dwell_avg:.2f} min/hole")
                 if index_avg and math.isfinite(index_avg) and index_avg > 0:
@@ -10334,18 +10338,34 @@ def estimate_drilling_hours(
                     mat_display = "material"
                 summary["material"] = mat_display
 
+                depth_segment = "depth/hole -"
+                if depth_text != "-":
+                    depth_segment = f"depth/hole {depth_text} in"
+
+                peck_text = "-"
+                if peck_avg and math.isfinite(peck_avg) and peck_avg > 0:
+                    peck_text = f"{peck_avg:.2f} min/hole"
+
+                toolchange_text = f"{toolchange_total:.2f} min"
+
+                index_text = "-"
+                if minutes_avg and math.isfinite(minutes_avg) and minutes_avg > 0:
+                    index_text = f"{minutes_avg * 60.0:.1f} s/hole"
+
                 line_parts = [
                     "Drill calc → ",
                     f"op={op_display}, mat={mat_display}, ",
-                    f"row=SFM:{sfm_text} IPR:{ipr_text}; ",
-                    f"RPM:{rpm_text} IPM:{ipm_text}; ",
-                    f"{dia_segment}; depth/hole: {depth_text} in; ",
-                    f"holes: {qty_total}; ",
-                    f"min/hole: {minutes_avg:.2f}; ",
+                    f"SFM={sfm_range_text}, IPR={ipr_range_text}; ",
+                    f"RPM {rpm_range_text} IPM {ipm_range_text}; ",
+                    f"{dia_segment}; {depth_segment}; ",
+                    f"holes {qty_total}; ",
+                    f"index {index_text}; ",
+                    f"peck {peck_text}; ",
+                    f"toolchange {toolchange_text}; ",
                 ]
                 if overhead_bits:
                     line_parts.append("overhead: " + ", ".join(overhead_bits) + "; ")
-                line_parts.append(f"total hr: {total_hours:.2f}.")
+                line_parts.append(f"total hr {total_hours:.2f}.")
                 debug_lines.append("".join(line_parts))
                 if debug_summary is not None:
                     debug_summary[op_key] = dict(summary)
