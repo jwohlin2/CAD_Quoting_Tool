@@ -1,10 +1,94 @@
 import copy
+import math
 
+import appV5
+
+
+_PLANNER_BUCKET_VIEW = {
+    "order": [
+        "milling",
+        "drilling",
+        "grinding",
+        "finishing_deburr",
+        "inspection",
+    ],
+    "buckets": {
+        "milling": {
+            "minutes": 360.0,
+            "labor$": 240.0,
+            "machine$": 360.0,
+            "total$": 600.0,
+        },
+        "drilling": {
+            "minutes": 90.0,
+            "labor$": 90.0,
+            "machine$": 120.0,
+            "total$": 210.0,
+        },
+        "grinding": {
+            "minutes": 120.0,
+            "labor$": 150.0,
+            "machine$": 180.0,
+            "total$": 330.0,
+        },
+        "finishing_deburr": {
+            "minutes": 60.0,
+            "labor$": 80.0,
+            "machine$": 0.0,
+            "total$": 80.0,
+        },
+        "inspection": {
+            "minutes": 45.0,
+            "labor$": 40.0,
+            "machine$": 0.0,
+            "total$": 40.0,
+        },
+    },
+    "totals": {
+        "minutes": 675.0,
+        "labor$": 600.0,
+        "machine$": 660.0,
+        "total$": 1260.0,
+    },
+}
+
+
+_PLANNER_LINE_ITEMS = [
+    {
+        "op": "Milling Rough",
+        "minutes": 240.0,
+        "machine_cost": 360.0,
+        "labor_cost": 240.0,
+    },
+    {
+        "op": "Drilling Ops",
+        "minutes": 90.0,
+        "machine_cost": 120.0,
+        "labor_cost": 90.0,
+    },
+    {
+        "op": "Surface Grind",
+        "minutes": 120.0,
+        "machine_cost": 180.0,
+        "labor_cost": 150.0,
+    },
+    {
+        "op": "Deburr & Finish",
+        "minutes": 60.0,
+        "labor_cost": 80.0,
+    },
+    {
+        "op": "Inspection",
+        "minutes": 45.0,
+        "labor_cost": 40.0,
+    },
+]
 
 
 DUMMY_QUOTE_RESULT = {
-    "price": 1414.875,
-    "qty": 12,
+    "price": 2511.94,
+    "qty": 6,
+    "app": {"used_planner": True},
     "ui_vars": {"Material": "Aluminum MIC6"},
     "decision_state": {
         "baseline": {
@@ -13,9 +97,12 @@ DUMMY_QUOTE_RESULT = {
             "process_hours": {
                 "milling": 6.0,
                 "drilling": 1.5,
-                "finishing_deburr": 1.5,
-                "inspection": 1.0,
+                "grinding": 2.0,
+                "finishing_deburr": 1.0,
+                "inspection": 0.75,
             },
+            "used_planner": True,
+            "pricing_source": "planner",
         },
         "suggestions": {},
         "user_overrides": {},
@@ -23,79 +110,119 @@ DUMMY_QUOTE_RESULT = {
         "effective_sources": {},
     },
     "breakdown": {
-        "qty": 12,
-        "pricing_source": "legacy",
+        "qty": 6,
+        "pricing_source": "planner",
         "drilling_meta": {"material": "Aluminum MIC6"},
         "material": {
             "material": "Aluminum MIC6",
             "material_name": "Aluminum MIC6",
-            "material_cost": 400.0,
-            "mass_g": 125000.0,
-            "net_mass_g": 112500.0,
-            "scrap_pct": 0.1,
+            "material_cost": 420.0,
+            "mass_g": 98500.0,
+            "net_mass_g": 91500.0,
+            "scrap_pct": 0.07,
         },
         "process_costs": {
-            "milling": 600.0,
-            "drilling": 120.0,
-            "finishing_deburr": 90.0,
-            "inspection": 95.0,
+            "Machine": 660.0,
+            "Labor": 600.0,
         },
         "process_meta": {
-            "milling": {"hr": 6.0, "rate": 100.0},
-            "drilling": {"hr": 1.5, "rate": 80.0},
-            "finishing_deburr": {"hr": 1.5, "rate": 60.0},
-            "inspection": {"hr": 1.0, "rate": 95.0},
+            "milling": {"minutes": 360.0, "hr": 6.0, "rate": 100.0},
+            "drilling": {"minutes": 90.0, "hr": 1.5, "rate": 80.0},
+            "grinding": {"minutes": 120.0, "hr": 2.0, "rate": 90.0},
+            "finishing_deburr": {"minutes": 60.0, "hr": 1.0, "rate": 80.0},
+            "inspection": {"minutes": 45.0, "hr": 0.75, "rate": 95.0},
+            "planner_total": {
+                "minutes": 675.0,
+                "hr": 11.25,
+                "cost": 1260.0,
+                "labor_cost": 600.0,
+                "machine_cost": 660.0,
+                "line_items": copy.deepcopy(_PLANNER_LINE_ITEMS),
+            },
+            "planner_machine": {
+                "minutes": 420.0,
+                "hr": 7.0,
+                "cost": 660.0,
+            },
+            "planner_labor": {
+                "minutes": 675.0,
+                "hr": 11.25,
+                "cost": 600.0,
+            },
         },
+        "process_plan": {"bucket_view": copy.deepcopy(_PLANNER_BUCKET_VIEW)},
+        "bucket_view": copy.deepcopy(_PLANNER_BUCKET_VIEW),
+        "planner_bucket_rollup": copy.deepcopy(_PLANNER_BUCKET_VIEW["buckets"]),
         "labor_costs": {
             "Milling": 600.0,
-            "Drilling": 120.0,
-            "Finishing/Deburr": 90.0,
-            "Inspection": 95.0,
+            "Drilling": 210.0,
+            "Grinding": 330.0,
+            "Finishing/Deburr": 80.0,
+            "Inspection": 40.0,
         },
         "labor_cost_details": {
             "Milling": "6.00 hr @ $100.00/hr",
             "Drilling": "1.50 hr @ $80.00/hr",
-            "Finishing/Deburr": "1.50 hr @ $60.00/hr",
-            "Inspection": "1.00 hr @ $95.00/hr",
+            "Grinding": "2.00 hr @ $90.00/hr",
+            "Finishing/Deburr": "1.00 hr @ $80.00/hr",
+            "Inspection": "0.75 hr @ $95.00/hr",
         },
-        "direct_cost_details": {
-            "Consumables": "Shop supplies",
-            "Shipping": "Ground service",
+        "nre_detail": {
+            "programming": {"prog_hr": 4.0, "prog_rate": 95.0, "amortized": False},
+            "fixture": {"build_hr": 3.0, "build_rate": 85.0},
         },
+        "nre": {
+            "programming_per_part": 0.0,
+            "fixture_per_part": 0.0,
+            "extra_nre_cost": 0.0,
+        },
+        "nre_cost_details": {},
         "pass_through": {
-            "Consumables": 30.0,
-            "Shipping": 45.0,
-            "Material": 400.0,
+            "Material": 420.0,
+            "Shipping": 65.0,
+            "Consumables": 35.0,
+        },
+        "pass_meta": {},
+        "totals": {
+            "labor_cost": 1260.0,
+            "direct_costs": 520.0,
+            "subtotal": 1780.0,
+            "with_overhead": 1993.6,
+            "with_ga": 2093.28,
+            "with_contingency": 2093.28,
+            "with_expedite": 2093.28,
+            "price": 2511.94,
         },
         "applied_pcts": {
-            "OverheadPct": 0.10,
+            "OverheadPct": 0.12,
             "GA_Pct": 0.05,
-            "ContingencyPct": 0.00,
-            "MarginPct": 0.20,
+            "ContingencyPct": 0.0,
+            "MarginPct": 0.2,
         },
         "rates": {
             "MillingRate": 100.0,
             "DrillingRate": 80.0,
-            "DeburrRate": 60.0,
+            "SurfaceGrindRate": 90.0,
+            "DeburrRate": 80.0,
             "InspectionRate": 95.0,
         },
         "params": {},
-        "nre_detail": {},
-        "nre": {},
-        "nre_cost_details": {},
         "labor_cost_details_input": {},
-        "pass_meta": {},
-        "totals": {
-            "labor_cost": 905.0,
-            "direct_costs": 75.0,
-            "subtotal": 980.0,
-            "with_overhead": 1078.0,
-            "with_ga": 1131.9,
-            "with_contingency": 1131.9,
-            "with_expedite": 1131.9,
-            "price": 1414.875,
-        },
+        "drill_debug": [
+            "Planner drill analysis: material Aluminum MIC6 with matched feeds",
+        ],
+        "direct_cost_details": {},
+        "app_meta": {"used_planner": True},
     },
+}
+
+
+_EXPECTED_BUCKET_ROWS = {
+    "Milling": (6.0, 240.0, 360.0, 600.0),
+    "Drilling": (1.5, 90.0, 120.0, 210.0),
+    "Grinding": (2.0, 150.0, 180.0, 330.0),
+    "Finishing/Deburr": (1.0, 80.0, 0.0, 80.0),
+    "Inspection": (0.75, 40.0, 0.0, 40.0),
 }
 
 
@@ -103,58 +230,107 @@ def _dummy_quote_payload() -> dict:
     return copy.deepcopy(DUMMY_QUOTE_RESULT)
 
 
+def _render_lines(payload: dict, *, drop_planner_display: bool = False) -> list[str]:
+    if drop_planner_display:
+        payload = copy.deepcopy(payload)
+        breakdown = payload.get("breakdown", {})
+        if isinstance(breakdown, dict):
+            breakdown.pop("bucket_view", None)
+            breakdown.pop("planner_bucket_rollup", None)
+            breakdown.pop("planner_bucket_display_map", None)
+            breakdown.pop("process_plan", None)
+    rendered = appV5.render_quote(payload, currency="$")
+    return rendered.splitlines()
+
+
 def test_dummy_quote_material_consistency() -> None:
     payload = _dummy_quote_payload()
     baseline = payload["decision_state"]["baseline"]
     drilling_meta = payload["breakdown"]["drilling_meta"]
+    drill_debug = payload["breakdown"]["drill_debug"]
 
     normalized = baseline["normalized_quote_material"]
     drill_material = baseline["drill_params"]["material"]
     rendered_material = drilling_meta["material"]
 
     assert normalized == drill_material == rendered_material
+    assert any(normalized in entry for entry in drill_debug)
 
 
-def test_dummy_quote_has_no_planner_rows() -> None:
+def test_dummy_quote_pricing_source_reflects_planner_usage() -> None:
     payload = _dummy_quote_payload()
+    baseline = payload["decision_state"]["baseline"]
+    assert baseline["used_planner"] is True
+
     breakdown = payload["breakdown"]
-
-    for mapping in (breakdown["process_costs"], breakdown["process_meta"], breakdown["labor_costs"]):
-        for key in mapping:
-            assert not str(key).strip().lower().startswith("planner ")
+    assert breakdown["pricing_source"].lower() == "planner"
+    assert breakdown.get("pricing_source_text", "").lower() != "legacy"
 
 
-def test_dummy_quote_deburr_rows_are_merged() -> None:
+def test_dummy_quote_process_table_matches_planner_totals() -> None:
     payload = _dummy_quote_payload()
-    breakdown = payload["breakdown"]
+    bucket_view = payload["breakdown"]["bucket_view"]["buckets"]
+    table_rows: dict[str, tuple[float, float, float, float]] = {}
+    for key, metrics in bucket_view.items():
+        label = {
+            "milling": "Milling",
+            "drilling": "Drilling",
+            "grinding": "Grinding",
+            "finishing_deburr": "Finishing/Deburr",
+            "inspection": "Inspection",
+        }[key]
+        hours_val = float(metrics.get("minutes", 0.0)) / 60.0
+        labor_val = float(metrics.get("labor$", 0.0))
+        machine_val = float(metrics.get("machine$", 0.0))
+        total_val = float(metrics.get("total$", labor_val + machine_val))
+        table_rows[label] = (round(hours_val, 2), labor_val, machine_val, total_val)
 
-    process_keys = [key.lower() for key in breakdown["process_costs"].keys()]
-    labor_labels = [label.lower() for label in breakdown["labor_costs"].keys()]
+    assert table_rows == _EXPECTED_BUCKET_ROWS
 
-    assert process_keys.count("finishing_deburr") == 1
-    assert "deburr" not in {key for key in process_keys if key != "finishing_deburr"}
-    assert all("deburr" not in label or "finishing/deburr" in label for label in labor_labels)
+    total_hours = sum(row[0] for row in table_rows.values())
+    total_labor = sum(row[1] for row in table_rows.values())
+    total_machine = sum(row[2] for row in table_rows.values())
+    total_cost = sum(row[3] for row in table_rows.values())
+
+    process_meta = payload["breakdown"]["process_meta"]
+    planner_total = process_meta["planner_total"]
+    planner_machine = process_meta["planner_machine"]
+    planner_labor = process_meta["planner_labor"]
+
+    assert math.isclose(total_cost, planner_total["cost"], abs_tol=0.01)
+    assert math.isclose(total_machine, planner_machine["cost"], abs_tol=0.01)
+    assert math.isclose(total_labor, planner_labor["cost"], abs_tol=0.01)
+    assert math.isclose(total_hours, planner_total["minutes"] / 60.0, abs_tol=0.01)
 
 
-def test_dummy_quote_hour_buckets_align_with_costs() -> None:
+def test_dummy_quote_hour_summary_aligns_with_planner_buckets() -> None:
     payload = _dummy_quote_payload()
-    breakdown = payload["breakdown"]
-    process_costs = breakdown["process_costs"]
-    process_meta = breakdown["process_meta"]
+    bucket_view = payload["breakdown"]["bucket_view"]["buckets"]
+    baseline_hours = payload["decision_state"]["baseline"]["process_hours"]
 
-    for key, meta in process_meta.items():
-        hr = float(meta.get("hr", 0.0) or 0.0)
-        if hr <= 0:
-            continue
-        canon_key = str(key).lower()
-        assert canon_key in process_costs, f"Missing cost row for {key!r}"
+    for key, expected_label in (
+        ("milling", "milling"),
+        ("drilling", "drilling"),
+        ("grinding", "grinding"),
+        ("finishing_deburr", "finishing_deburr"),
+        ("inspection", "inspection"),
+    ):
+        bucket_hours = float(bucket_view[key]["minutes"]) / 60.0
+        assert math.isclose(bucket_hours, baseline_hours[expected_label], abs_tol=0.01)
+
+    programming_meta = payload["breakdown"]["nre_detail"]["programming"]
+    fixture_meta = payload["breakdown"]["nre_detail"]["fixture"]
+    assert programming_meta["prog_hr"] == 4.0
+    assert fixture_meta["build_hr"] == 3.0
 
 
-def test_dummy_quote_pricing_ladder_reconciles() -> None:
+def test_dummy_quote_has_no_planner_red_flags() -> None:
     payload = _dummy_quote_payload()
-    totals = payload["breakdown"]["totals"]
-    labor = float(totals["labor_cost"])
-    direct = float(totals["direct_costs"])
-    subtotal = float(totals["subtotal"])
+    assert "red_flags" not in payload["breakdown"]
 
-    assert abs((labor + direct) - subtotal) <= 0.01
+
+def test_dummy_quote_drill_debug_material_matches_quote() -> None:
+    payload = _dummy_quote_payload()
+    drill_debug = payload["breakdown"]["drill_debug"]
+    material = payload["breakdown"]["material"]["material_name"]
+    assert any(material in entry for entry in drill_debug)
