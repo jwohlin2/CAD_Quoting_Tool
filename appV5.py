@@ -4342,12 +4342,12 @@ def clamp_llm_hours(
 
 
 def apply_llm_hours_to_variables(
-    df: "pd.DataFrame",
+    df: pd.DataFrame | None,
     estimates: Mapping[str, Any] | None,
     *,
     allow_overwrite_nonzero: bool = False,
     log: dict | None = None,
-) -> "pd.DataFrame":
+) -> pd.DataFrame | None:
     """Apply sanitized LLM hour estimates to a variables dataframe."""
 
     if not _HAS_PANDAS or df is None:
@@ -4575,7 +4575,8 @@ _MASTER_VARIABLES_CACHE: dict[str, Any] = {
 
 _SPEEDS_FEEDS_CACHE: dict[str, pd.DataFrame | None] = {}
 
-def _coerce_core_types(df_core: "pd.DataFrame") -> "pd.DataFrame":
+
+def _coerce_core_types(df_core: pd.DataFrame) -> pd.DataFrame:
     """Light normalization for estimator expectations."""
     core = df_core.copy()
     core["Item"] = core["Item"].astype(str)
@@ -4782,7 +4783,7 @@ def derive_editor_control_spec(dtype_source: str, example_value: Any) -> EditorC
         options=tuple(options),
     )
 
-def sanitize_vars_df(df_full: "pd.DataFrame") -> "pd.DataFrame":
+def sanitize_vars_df(df_full: pd.DataFrame) -> pd.DataFrame:
     """
     Return a copy containing only the 3 core columns the estimator needs.
     - Does NOT mutate or overwrite the original file.
@@ -4899,8 +4900,16 @@ def _load_master_variables() -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
     if cache.get("loaded"):
         core_cached = cache.get("core")
         full_cached = cache.get("full")
-        core_copy = core_cached.copy() if core_cached is not None else None
-        full_copy = full_cached.copy() if full_cached is not None else None
+        core_copy = (
+            core_cached.copy()
+            if _HAS_PANDAS and isinstance(core_cached, pd.DataFrame)
+            else None
+        )
+        full_copy = (
+            full_cached.copy()
+            if _HAS_PANDAS and isinstance(full_cached, pd.DataFrame)
+            else None
+        )
         return (core_copy, full_copy)
 
     master_path = Path(__file__).with_name("Master_Variables.csv")
@@ -5337,7 +5346,10 @@ def _extract_bucket_map(source: Mapping[str, Any] | None) -> dict[str, dict[str,
         canon = _canonical_bucket_key(raw_key)
         if not canon:
             continue
-        bucket_map[canon] = raw_value if isinstance(raw_value, Mapping) else {}
+        if isinstance(raw_value, Mapping):
+            bucket_map[canon] = {str(k): v for k, v in raw_value.items()}
+        else:
+            bucket_map[canon] = {}
     return bucket_map
 
 
@@ -5349,6 +5361,14 @@ class ProcessDisplayEntry:
     amount: float
     detail_bits: tuple[str, ...]
     display_override: str | None = None
+
+
+class PlannerBucketOp(TypedDict):
+    op: str
+    minutes: float
+    machine: float
+    labor: float
+    total: float
 
 
 def _iter_ordered_process_entries(
@@ -6062,10 +6082,17 @@ def render_quote(
                 base_value = value[0]
             else:
                 base_value = value
-            try:
-                return float(base_value or 0.0) > 0.0
-            except Exception:
-                return False
+            if isinstance(base_value, (int, float)):
+                return float(base_value) > 0.0
+            if isinstance(base_value, str):
+                text = base_value.strip()
+                if not text:
+                    return False
+                try:
+                    return float(text) > 0.0
+                except Exception:
+                    return False
+            return False
 
         if any(
             str(label).lower().startswith("planner")
@@ -6320,7 +6347,7 @@ def render_quote(
     process_meta, bucket_alias_map = _fold_process_meta(process_meta_raw)
     applied_process = _fold_applied_process(applied_process_raw, bucket_alias_map)
 
-    def _planner_bucket_for_op(name: str) -> str:
+    def _planner_bucket_for_op(name: str | None) -> str:
         text = str(name or "").lower()
         if not text:
             return "milling"
@@ -6454,7 +6481,10 @@ def render_quote(
         for key, value in raw_rollup.items():
             canon = _canonical_bucket_key(key)
             if canon:
-                bucket_rollup_map[canon] = value if isinstance(value, Mapping) else {}
+                if isinstance(value, Mapping):
+                    bucket_rollup_map[canon] = {str(k): v for k, v in value.items()}
+                else:
+                    bucket_rollup_map[canon] = {}
     if not bucket_rollup_map and planner_bucket_from_plan:
         bucket_rollup_map = dict(planner_bucket_from_plan)
     if not bucket_rollup_map:
@@ -6466,11 +6496,14 @@ def render_quote(
                 for key, value in bucket_struct.items():
                     canon = _canonical_bucket_key(key)
                     if canon:
-                        bucket_rollup_map[canon] = value if isinstance(value, Mapping) else {}
+                        if isinstance(value, Mapping):
+                            bucket_rollup_map[canon] = {str(k): v for k, v in value.items()}
+                        else:
+                            bucket_rollup_map[canon] = {}
 
     planner_total_meta = process_meta.get("planner_total", {}) if isinstance(process_meta, dict) else {}
     planner_line_items_meta = planner_total_meta.get("line_items") if isinstance(planner_total_meta, Mapping) else None
-    bucket_ops_map: dict[str, list[dict[str, float]]] = {}
+    bucket_ops_map: dict[str, list[PlannerBucketOp]] = {}
     if isinstance(planner_line_items_meta, list):
         for entry in planner_line_items_meta:
             if not isinstance(entry, Mapping):
@@ -6481,7 +6514,8 @@ def render_quote(
             machine_val = _bucket_cost(entry, "machine_cost", "machine$")
             labor_val = _bucket_cost(entry, "labor_cost", "labor$")
             total_val = machine_val + labor_val
-            bucket_ops_map.setdefault(bucket_key, []).append(
+            bucket_ops = bucket_ops_map.setdefault(bucket_key, [])
+            bucket_ops.append(
                 {
                     "op": str(op_name or "").strip(),
                     "minutes": minutes_val,
@@ -8572,11 +8606,13 @@ def require_plate_inputs(geo: dict, ui_vars: dict[str, Any] | None) -> None:
     ui_vars = ui_vars or {}
     thickness_val = ui_vars.get("Thickness (in)")
     thickness_in = _coerce_float_or_none(thickness_val)
-    if thickness_in is None:
+    if thickness_in is None and thickness_val is not None:
         try:
             thickness_in = float(thickness_val)
         except Exception:
             thickness_in = 0.0
+    elif thickness_in is None:
+        thickness_in = 0.0
     material = str(ui_vars.get("Material") or "").strip()
     geo_missing: list[str] = []
 
@@ -8655,7 +8691,7 @@ def net_mass_kg(
     return net_mass
 
 
-def _normalize_speeds_feeds_df(df: "pd.DataFrame") -> "pd.DataFrame":
+def _normalize_speeds_feeds_df(df: pd.DataFrame) -> pd.DataFrame:
     rename: dict[str, str] = {}
     for col in df.columns:
         normalized = re.sub(r"[^0-9a-z]+", "_", str(col).strip().lower())
@@ -8879,7 +8915,7 @@ def _select_speeds_feeds_row(
             partial = [row for row in matches if mat_target in _normalize(row.get(mat_col))]
             if partial:
                 matches = partial
-    return matches[0] if matches else None
+    return cast(Mapping[str, Any], matches[0]) if matches else None
 
 
 def _clean_path_text(text: str) -> str:
@@ -9172,6 +9208,7 @@ def estimate_drilling_hours(
         debug_summary.clear()
     avg_dia_in = 0.0
     seen_debug: set[str] = set()
+    chosen_material_label: str = ""
 
     def _log_debug(entry: str) -> None:
         if debug_list is None:
@@ -9298,20 +9335,6 @@ def estimate_drilling_hours(
         missing_row_messages: set[tuple[str, str, float]] = set()
         debug_summary_entries: dict[str, dict[str, Any]] = {}
 
-        def _update_range(summary_map: dict[str, Any], min_key: str, max_key: str, value: float | None) -> None:
-            try:
-                val = float(value)
-            except (TypeError, ValueError):
-                return
-            if not math.isfinite(val):
-                return
-            current_min = summary_map.get(min_key)
-            current_max = summary_map.get(max_key)
-            if current_min is None or not math.isfinite(float(current_min)) or val < float(current_min):
-                summary_map[min_key] = float(val)
-            if current_max is None or not math.isfinite(float(current_max)) or val > float(current_max):
-                summary_map[max_key] = float(val)
-
         def _build_tool_params(row: Mapping[str, Any]) -> _TimeToolParams:
             key_map = {
                 str(k).strip().lower().replace("-", "_").replace(" ", "_"): k
@@ -9394,7 +9417,6 @@ def estimate_drilling_hours(
                         table=speeds_feeds_table,
                     )
                 if row and isinstance(row, Mapping):
-                    chosen_material_label = ""
                     cache_entry = (row, _build_tool_params(row))
                     # Always use one material label for both Debug and Calc.
                     chosen_material_label = str(
@@ -9891,9 +9913,13 @@ def estimate_drilling_hours(
                         max_f = min_f
                     if min_f is None or max_f is None:
                         return "-"
+                    source_min = min_val if min_val is not None else max_val
+                    source_max = max_val if max_val is not None else min_val
+                    if source_min is None or source_max is None:
+                        return "-"
                     try:
-                        min_float = float(min_f)
-                        max_float = float(max_f)
+                        min_f = float(source_min)
+                        max_f = float(source_max)
                     except (TypeError, ValueError):
                         return "-"
                     if not math.isfinite(min_float) or not math.isfinite(max_float):
