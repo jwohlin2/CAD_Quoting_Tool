@@ -9431,6 +9431,7 @@ def estimate_drilling_hours(
 
     total_sec = 0.0
     holes_fallback = 0
+    weighted_dia_in = 0.0
     for d, qty in fallback_counts.items():
         if qty is None:
             continue
