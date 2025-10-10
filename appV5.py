@@ -2826,6 +2826,7 @@ def effective_to_overrides(effective: dict, baseline: dict | None = None) -> dic
     return out
 
 
+# SINGLE SOURCE
 def ensure_accept_flags(state: QuoteState) -> None:
     suggestions = state.suggestions or {}
     accept = state.accept_llm
