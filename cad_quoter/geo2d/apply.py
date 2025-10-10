@@ -7,6 +7,7 @@ from typing import Any
 from cad_quoter.coerce import coerce_float_or_none as _coerce_float_or_none
 from cad_quoter.domain_models import DEFAULT_MATERIAL_DISPLAY
 from cad_quoter.geometry import upsert_var_row
+from cad_quoter.utils import _dict
 
 __all__ = [
     "apply_2d_features_to_variables",
@@ -42,11 +43,12 @@ _to_noncapturing = to_noncapturing
 def apply_2d_features_to_variables(df, g2d: dict, *, params: dict, rates: dict):
     """Write a few cycle-time rows based on 2D perimeter/holes so compute_quote_from_df() can price it."""
 
-    geo = g2d.get("geo") if isinstance(g2d, dict) else None
-    thickness_mm = _coerce_float_or_none(g2d.get("thickness_mm")) if isinstance(g2d, dict) else None
+    g2d_map = _dict(g2d)
+    geo = _dict(g2d_map.get("geo"))
+    thickness_mm = _coerce_float_or_none(g2d_map.get("thickness_mm"))
     thickness_in = (float(thickness_mm) / 25.4) if thickness_mm else None
     thickness_from_deepest = False
-    if (not thickness_in) and isinstance(geo, dict):
+    if (not thickness_in) and geo:
         guess = _coerce_float_or_none(geo.get("thickness_in_guess"))
         if guess:
             try:
@@ -57,11 +59,11 @@ def apply_2d_features_to_variables(df, g2d: dict, *, params: dict, rates: dict):
                 thickness_in = None
 
     material_note = ""
-    if isinstance(geo, dict) and geo.get("material_note"):
+    if geo.get("material_note"):
         material_note = str(geo.get("material_note") or "").strip()
     material_value = (
         material_note
-        or (g2d.get("material") if isinstance(g2d, dict) else "")
+        or (g2d_map.get("material") or "")
         or DEFAULT_MATERIAL_DISPLAY
     )
     df = upsert_var_row(df, "Material", material_value, dtype="text")
@@ -77,7 +79,7 @@ def apply_2d_features_to_variables(df, g2d: dict, *, params: dict, rates: dict):
 
     plate_len = None
     plate_wid = None
-    if isinstance(geo, dict):
+    if geo:
         plate_len = geo.get("plate_len_in")
         plate_wid = geo.get("plate_wid_in")
     df = upsert_var_row(
@@ -111,7 +113,7 @@ def apply_2d_features_to_variables(df, g2d: dict, *, params: dict, rates: dict):
 
     tap_qty_geo = None
     from_back_geo = False
-    if isinstance(geo, dict):
+    if geo:
         tap_qty_geo = _coerce_float_or_none(geo.get("tap_qty"))
         from_back_geo = bool(geo.get("needs_back_face") or geo.get("from_back"))
     if tap_qty_geo and tap_qty_geo > 0:
@@ -134,9 +136,9 @@ def apply_2d_features_to_variables(df, g2d: dict, *, params: dict, rates: dict):
         else:
             df.loc[len(df)] = [pattern, value, "number"]
 
-    L = float(g2d.get("profile_length_mm", 0.0))
-    t = float(g2d.get("thickness_mm") or 6.0)
-    holes = g2d.get("hole_diams_mm", [])
+    L = float(g2d_map.get("profile_length_mm", 0.0))
+    t = float(g2d_map.get("thickness_mm") or 6.0)
+    holes = g2d_map.get("hole_diams_mm", [])
     # crude process pick
     use_jet = (t <= 12.0 and (L >= 300.0 or len(holes) >= 2))
 
