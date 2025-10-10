@@ -1676,10 +1676,10 @@ def _format_entry_value(value: Any, kind: str) -> str:
     return str(value)
 
 
-def _collect_process_keys(*dicts: Iterable[dict]) -> set[str]:
+def _collect_process_keys(*dicts: Mapping[str, Any] | None) -> set[str]:
     keys: set[str] = set()
     for d in dicts:
-        if isinstance(d, dict):
+        if isinstance(d, Mapping):
             keys.update(str(k) for k in d.keys())
     return keys
 
@@ -1694,9 +1694,9 @@ def merge_effective(
     """Tri-state merge for baseline vs LLM suggestions vs user overrides."""
 
     baseline = copy.deepcopy(baseline or {})
-    suggestions = suggestions or {}
-    overrides = overrides or {}
-    guard_ctx = guard_ctx or {}
+    suggestions = dict(suggestions or {})
+    overrides = dict(overrides or {})
+    guard_ctx = dict(guard_ctx or {})
 
     bounds = baseline.get("_bounds") if isinstance(baseline, dict) else None
     if isinstance(bounds, dict):
@@ -2125,9 +2125,13 @@ def merge_effective(
     if guard_ctx.get("needs_back_face"):
         current_setups = eff.get("setups")
         setups_val = to_float(current_setups)
-        try:
-            setups_int = int(round(float(setups_val))) if setups_val is not None else int(current_setups)
-        except Exception:
+        setups_int = 0
+        if setups_val is not None:
+            try:
+                setups_int = int(round(float(setups_val)))
+            except Exception:
+                setups_int = 0
+        elif current_setups is not None:
             try:
                 setups_int = int(current_setups)
             except Exception:
