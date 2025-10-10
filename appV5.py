@@ -418,14 +418,12 @@ from cad_quoter.pricing.time_estimator import (
 from cad_quoter.pricing.wieland import lookup_price as lookup_wieland_price
 from cad_quoter.rates import migrate_flat_to_two_bucket, two_bucket_to_flat
 from cad_quoter.vendors.mcmaster_stock import lookup_sku_and_price_for_mm
-from cad_quoter.utils.geo_ctx import _should_include_outsourced_pass
 from cad_quoter.llm import (
     EDITOR_FROM_UI,
     EDITOR_TO_SUGG,
     LLMClient,
     SYSTEM_SUGGEST,
     SUGG_TO_EDITOR,
-    SYSTEM_SUGGEST,
     infer_hours_and_overrides_from_geo as _infer_hours_and_overrides_from_geo,
     parse_llm_json,
     explain_quote,
