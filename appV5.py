@@ -2819,6 +2819,59 @@ else:
     TopExp_Explorer = _backend_modules["TopExp"].TopExp_Explorer
     BACKEND = "pythonocc"
 
+
+def _resolve_face_of():
+    """Return a callable that casts a shape-like object to a TopoDS_Face."""
+
+    # Prefer helpers exposed by cad_quoter.geometry when available
+    fn = getattr(geometry, "FACE_OF", None)
+    if callable(fn):
+        return fn
+
+    # Try OCP's modern `topods.Face` helper first
+    try:  # pragma: no cover - depends on optional OCC bindings
+        from OCP.TopoDS import topods as _topods  # type: ignore[import-not-found]
+
+        if hasattr(_topods, "Face"):
+            return _topods.Face  # type: ignore[return-value]
+    except Exception:
+        pass
+
+    # pythonocc-core exposes either topods_Face or topods.Face
+    try:  # pragma: no cover - depends on optional OCC bindings
+        from OCC.Core.TopoDS import topods_Face  # type: ignore[import-not-found]
+
+        return topods_Face  # type: ignore[return-value]
+    except Exception:
+        pass
+    try:  # pragma: no cover - depends on optional OCC bindings
+        from OCC.Core.TopoDS import topods as _occ_topods  # type: ignore[import-not-found]
+
+        face_fn = getattr(_occ_topods, "Face", None)
+        if callable(face_fn):
+            return face_fn
+    except Exception:
+        pass
+
+    # Fall back to methods on the TopoDS namespace (OCP variants expose Face_s)
+    try:  # pragma: no cover - depends on optional OCC bindings
+        from OCP.TopoDS import TopoDS as _TopoDS  # type: ignore[import-not-found]
+
+        for attr in ("Face_s", "Face"):
+            face_fn = getattr(_TopoDS, attr, None)
+            if callable(face_fn):
+                return face_fn
+    except Exception:
+        pass
+
+    def _raise(obj):
+        raise TypeError(f"Cannot cast {type(obj).__name__} to TopoDS_Face")
+
+    return _raise
+
+
+FACE_OF = _resolve_face_of()
+
 def as_face(obj):
     """
     Return a TopoDS_Face for the *current backend*.
