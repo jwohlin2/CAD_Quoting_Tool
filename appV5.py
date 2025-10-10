@@ -11815,6 +11815,11 @@ def compute_quote_from_df(
     used_planner = False
 
     red_flag_messages: list[str] = []
+    # Historically this function exposed a ``red_flags`` list.  Some call
+    # sites—including legacy desktop builds—still expect that name when adding
+    # new messages.  Provide an alias so any lingering references continue to
+    # work instead of raising ``NameError`` when the branch executes.
+    red_flags = red_flag_messages
     _red_flag_seen: set[str] = set()
 
     def _record_red_flag(message: str) -> None:
