@@ -17039,12 +17039,12 @@ def compute_quote_from_df(
                 expected_labor_total,
                 rel_tol=0.0,
                 abs_tol=_LABOR_SECTION_ABS_EPSILON,
-            )
-            logger.warning(
-                "Labor section totals drifted: %.2f vs %.2f",
-                labor_display_total,
-                expected_labor_total,
-            )
+            ):
+                logger.debug(
+                    "Labor display components: %.2f vs expected %.2f",
+                    labor_display_total,
+                    expected_labor_total,
+                )
 
         labor_cost = recomputed_labor_total
 
