@@ -6671,26 +6671,16 @@ def render_quote(
     else:
         write_line("Speeds/Feeds CSV: (not set)")
     lines.append("")
-    def _drill_debug_enabled() -> bool:
-        """Return True when drill debug output should be rendered."""
 
-        for source in (result, breakdown):
-            if not isinstance(source, _MappingABC):
-                continue
-            for key in ("app", "app_state", "app_meta"):
-                candidate = source.get(key)
-                if isinstance(candidate, _MappingABC) and "llm_debug_enabled" in candidate:
-                    coerced = _coerce_bool(candidate.get("llm_debug_enabled"))
-                    if coerced is not None:
-                        return coerced
-        return bool(APP_ENV.llm_debug_enabled)
-
-    if drill_debug_entries and _drill_debug_enabled():
+    def render_drill_debug(entries: Sequence[str]) -> None:
         lines.append("Drill Debug")
         lines.append(divider)
-        for entry in drill_debug_entries:
+        for entry in entries:
             write_wrapped(entry, "  ")
         lines.append("")
+
+    if drill_debug_entries and APP_ENV.llm_debug_enabled:
+        render_drill_debug(drill_debug_entries)
     row("Final Price per Part:", price)
     total_labor_label = "Total Labor Cost:"
     row(total_labor_label, float(totals.get("labor_cost", 0.0)))
@@ -13504,20 +13494,29 @@ def compute_quote_from_df(
         )
 
     drill_params: dict[str, Any] = {}
+    result_material: Any | None = None
+    result_candidate = locals().get("result")
+    if isinstance(result_candidate, _MappingABC):
+        result_material = result_candidate.get("material")
     material_result = (
         material_detail_for_breakdown
         if isinstance(material_detail_for_breakdown, _MappingABC)
         else {}
     )
-    mat_key = _normalize_lookup_key(
-        str(
-            geo_context.get("material")
-            or material_result.get("material")
-            or DEFAULT_MATERIAL_KEY
-        )
+    material_name_for_drill = str(
+        geo_context.get("material")
+        or result_material
+        or material_result.get("material")
+        or DEFAULT_MATERIAL_KEY
     )
-    if mat_key:
-        drill_params["material"] = mat_key
+    normalized_material_key = _normalize_lookup_key(material_name_for_drill)
+    if normalized_material_key:
+        drill_params["material"] = normalized_material_key
+        material_selection["material_lookup"] = normalized_material_key
+        selected_lookup = normalized_material_key
+        drill_material_lookup = normalized_material_key
+        material_key_for_drill = normalized_material_key
+        drill_material_lookup_final = normalized_material_key
 
     drill_debug_lines: list[str] = []
     drill_debug_entries: list[str] = drill_debug_lines  # backwards compatibility alias
