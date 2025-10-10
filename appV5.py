@@ -21,6 +21,7 @@ import os
 import time
 import typing
 import tkinter as tk
+import re
 from collections import Counter
 from collections.abc import Mapping as _MappingABC
 from dataclasses import dataclass, field, replace
