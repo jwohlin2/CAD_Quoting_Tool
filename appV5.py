@@ -124,6 +124,7 @@ from typing import (
     Iterable,
     Iterator,
     List,
+    Mapping,
     Optional,
     Protocol,
     Sequence,
