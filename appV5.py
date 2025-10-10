@@ -66,52 +66,52 @@ import urllib.request
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 
-def _resolve_planner_mode(params: Mapping[str, Any] | None) -> str:
-    """Return the normalized planner mode string."""
-
-    if FORCE_PLANNER:
-        return "planner"
-    default_mode = "auto"
-    if not isinstance(params, _MappingABC):
-        return default_mode
-    try:
-        raw_mode = params.get("PlannerMode", default_mode)
-    except Exception:
-        raw_mode = default_mode
-    try:
-        mode = str(raw_mode).strip().lower()
-    except Exception:
-        mode = default_mode
-    return mode or default_mode
-
-
-def _resolve_planner_usage(
-    *,
+def resolve_planner(
     params: Mapping[str, Any] | None,
-    planner_pricing_result: Any,
-    planner_line_items: Any,
-    recognized_line_items: int,
-    planner_totals_present: bool,
+    signals: Mapping[str, Any] | None,
 ) -> tuple[bool, str]:
     """Determine whether planner pricing should be used and the mode."""
 
-    planner_mode = _resolve_planner_mode(params)
-    has_line_items = bool(planner_line_items)
-    has_recognized = recognized_line_items > 0
-    has_pricing = bool(planner_pricing_result)
-    has_totals = bool(planner_totals_present)
+    default_mode = "auto"
+    if FORCE_PLANNER:
+        planner_mode = "planner"
+    else:
+        if isinstance(params, _MappingABC):
+            try:
+                raw_mode = params.get("PlannerMode", default_mode)
+            except Exception:
+                raw_mode = default_mode
+            try:
+                planner_mode = str(raw_mode).strip().lower() or default_mode
+            except Exception:
+                planner_mode = default_mode
+        else:
+            planner_mode = default_mode
 
-    # Base signal prefers the planner when it returned structured data.
-    used_planner = has_line_items or has_pricing or has_totals or has_recognized
+    signals_map: Mapping[str, Any]
+    if isinstance(signals, _MappingABC):
+        signals_map = signals
+    else:
+        signals_map = {}
+
+    has_line_items = bool(signals_map.get("line_items"))
+    has_pricing = bool(signals_map.get("pricing_result"))
+    has_totals = bool(signals_map.get("totals_present"))
+    try:
+        recognized_raw = signals_map.get("recognized_line_items", 0)
+        recognized_count = int(recognized_raw)
+    except Exception:
+        recognized_count = 0
+    has_recognized = recognized_count > 0
+
+    base_signal = has_line_items or has_pricing or has_totals or has_recognized
 
     if planner_mode == "planner":
-        # Explicit planner mode honours any planner signal, even if minimal.
-        used_planner = used_planner or has_totals
+        used_planner = base_signal or has_totals
     elif planner_mode == "legacy":
-        # Legacy mode only wins if we truly have no planner outputs to trust.
         used_planner = has_line_items or has_recognized
     else:  # auto / default
-        used_planner = used_planner or has_recognized
+        used_planner = base_signal or has_recognized
 
     if has_line_items:
         used_planner = True
@@ -13440,12 +13440,14 @@ def compute_quote_from_df(df: pd.DataFrame,
             float(val) > 0.0 for val in (planner_machine_cost_total, planner_labor_cost_total, planner_total_minutes)
         )
 
-        used_planner, planner_mode = _resolve_planner_usage(
+        used_planner, planner_mode = resolve_planner(
             params=params if isinstance(params, _MappingABC) else None,
-            planner_pricing_result=planner_pricing_result,
-            planner_line_items=planner_line_items,
-            recognized_line_items=recognized_line_items,
-            planner_totals_present=planner_totals_present,
+            signals={
+                "line_items": planner_line_items,
+                "pricing_result": planner_pricing_result,
+                "recognized_line_items": recognized_line_items,
+                "totals_present": planner_totals_present,
+            },
         )
         force_planner_for_recognized = recognized_line_items > 0
 
