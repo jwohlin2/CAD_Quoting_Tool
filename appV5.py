@@ -26,10 +26,17 @@ from collections import Counter
 from collections.abc import Mapping as _CABCM
 
 Mapping = _CABCM
-from dataclasses import dataclass, field, replace, fields as dataclass_fields
+from dataclasses import (
+    asdict,
+    dataclass,
+    field,
+    replace,
+    fields as dataclass_fields,
+    is_dataclass,
+)
 from fractions import Fraction
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 
 from cad_quoter.app import runtime as _runtime
 from cad_quoter.app.container import (
@@ -81,28 +88,6 @@ FORCE_PLANNER = _coerce_env_bool(os.environ.get("FORCE_PLANNER"))
 LLM_MULTIPLIER_MIN = 0.25
 LLM_MULTIPLIER_MAX = 4.0
 LLM_ADDER_MAX = 8.0
-
-LLM_BOUND_DEFAULTS: Mapping[str, Any] = MappingProxyType(
-    {
-        "mult_min": LLM_MULTIPLIER_MIN,
-        "mult_max": LLM_MULTIPLIER_MAX,
-        "adder_max_hr": LLM_ADDER_MAX,
-        "scrap_min": 0.0,
-        "scrap_max": 0.25,
-        "adder_bucket_max": {},
-    }
-)
-
-
-LLM_BOUND_DEFAULTS: dict[str, Any] = {
-    "mult_min": LLM_MULTIPLIER_MIN,
-    "mult_max": LLM_MULTIPLIER_MAX,
-    "adder_max_hr": LLM_ADDER_MAX,
-    "adder_bucket_max": {},
-    "scrap_min": 0.0,
-    "scrap_max": 0.25,
-}
-
 
 def describe_runtime_environment() -> dict[str, str]:
     """Return a redacted snapshot of runtime configuration for auditors."""
@@ -386,15 +371,52 @@ from cad_quoter.domain_models import (
 )
 from cad_quoter.coerce import to_float, to_int
 from cad_quoter.utils import compact_dict, jdump, sdict, _first_non_none
-from cad_quoter.utils.geo_ctx import _should_include_outsourced_pass
+try:
+    from cad_quoter.utils.geo_ctx import _should_include_outsourced_pass
+except Exception:  # pragma: no cover - fallback when optional import unavailable
+    from collections.abc import Mapping
+    from typing import Any
+
+    def _collection_has_text(value: Any) -> bool:
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, Mapping):
+            return any(_collection_has_text(candidate) for candidate in value.values())
+        if isinstance(value, (list, tuple, set)):
+            return any(_collection_has_text(candidate) for candidate in value)
+        return False
+
+    def _geo_mentions_outsourced(geo_context: Mapping[str, Any] | None) -> bool:
+        if isinstance(geo_context, Mapping):
+            if _collection_has_text(geo_context.get("finishes")):
+                return True
+            if _collection_has_text(geo_context.get("finish_flags")):
+                return True
+            inner = geo_context.get("geo")
+            if isinstance(inner, Mapping):
+                return _geo_mentions_outsourced(inner)
+        return False
+
+    def _should_include_outsourced_pass(
+        outsourced_cost: float, geo_context: Mapping[str, Any] | None
+    ) -> bool:
+        try:
+            cost_val = float(outsourced_cost)
+        except Exception:
+            cost_val = 0.0
+        if abs(cost_val) > 1e-6:
+            return True
+        return _geo_mentions_outsourced(geo_context)
 try:
     from cad_quoter.utils.text import _match_items_contains
 except Exception:  # pragma: no cover - defensive fallback for optional import paths
-    def _match_items_contains(items, pattern):  # type: ignore[override]
-        try:
-            return items.str.contains(pattern, case=False, regex=True, na=False)
-        except Exception:
-            return items.str.contains(pattern, case=False, regex=False, na=False)
+    _match_items_contains = _fallback_match_items_contains  # type: ignore[assignment]
+else:
+    _match_items_contains = (
+        _imported_match_items_contains
+        if callable(_imported_match_items_contains)
+        else _fallback_match_items_contains
+    )
 from cad_quoter.pricing import (
     LB_PER_KG,
     PricingEngine,
@@ -442,16 +464,65 @@ from cad_quoter.pricing.time_estimator import (
 from cad_quoter.pricing.wieland import lookup_price as lookup_wieland_price
 from cad_quoter.rates import migrate_flat_to_two_bucket, two_bucket_to_flat
 from cad_quoter.vendors.mcmaster_stock import lookup_sku_and_price_for_mm
-from cad_quoter.llm import (
-    EDITOR_FROM_UI,
-    EDITOR_TO_SUGG,
-    LLMClient,
-    SYSTEM_SUGGEST,
-    SUGG_TO_EDITOR,
-    infer_hours_and_overrides_from_geo as _infer_hours_and_overrides_from_geo,
-    parse_llm_json,
-    explain_quote,
-)
+try:  # pragma: no cover - defensive guard when optional LLM helpers are absent
+    from cad_quoter import llm as _cad_llm  # type: ignore
+except Exception:  # pragma: no cover - tolerate partial installs
+    _cad_llm = None
+
+if _cad_llm is not None:
+    SUGG_TO_EDITOR = getattr(_cad_llm, "SUGG_TO_EDITOR", {})
+    EDITOR_TO_SUGG = getattr(_cad_llm, "EDITOR_TO_SUGG", {})
+    EDITOR_FROM_UI = getattr(_cad_llm, "EDITOR_FROM_UI", {})
+    SYSTEM_SUGGEST = getattr(
+        _cad_llm,
+        "SYSTEM_SUGGEST",
+        "You are a manufacturing estimator. Given GEO + baseline + bounds, "
+        "propose bounded adjustments that improve realism.",
+    )
+    _LLMClient = getattr(_cad_llm, "LLMClient", None)
+    if _LLMClient is None:  # pragma: no cover - unexpected in older builds
+        class LLMClient:  # type: ignore[override]
+            """Placeholder used when the optional LLM helpers are unavailable."""
+
+            def __init__(self, *args, **kwargs) -> None:  # pragma: no cover - defensive
+                raise RuntimeError("LLM integration is not available in this environment.")
+
+    else:
+        LLMClient = _LLMClient
+    _infer_hours_and_overrides_from_geo = getattr(
+        _cad_llm,
+        "infer_hours_and_overrides_from_geo",
+        lambda *args, **kwargs: {},
+    )
+    parse_llm_json = getattr(_cad_llm, "parse_llm_json", lambda _text: {})
+    explain_quote = getattr(
+        _cad_llm,
+        "explain_quote",
+        lambda *args, **kwargs: "LLM explanation unavailable.",
+    )
+else:  # pragma: no cover - fallback definitions keep quoting functional without LLM extras
+    SUGG_TO_EDITOR: dict = {}
+    EDITOR_TO_SUGG: dict = {}
+    EDITOR_FROM_UI: dict = {}
+    SYSTEM_SUGGEST = (
+        "You are a manufacturing estimator. Given GEO + baseline + bounds, "
+        "propose bounded adjustments that improve realism."
+    )
+
+    class LLMClient:  # type: ignore[override]
+        """Placeholder used when the optional LLM helpers are unavailable."""
+
+        def __init__(self, *args, **kwargs) -> None:  # pragma: no cover - defensive
+            raise RuntimeError("LLM integration is not available in this environment.")
+
+    def _infer_hours_and_overrides_from_geo(*args, **kwargs):  # pragma: no cover - fallback
+        return {}
+
+    def parse_llm_json(_text: str) -> dict:  # pragma: no cover - fallback
+        return {}
+
+    def explain_quote(*args, **kwargs) -> str:  # pragma: no cover - fallback
+        return "LLM explanation unavailable."
 
 try:
     _TIME_OVERHEAD_FIELD_NAMES = {
@@ -477,6 +548,39 @@ def _detect_index_support() -> bool:
 
 
 _TIME_OVERHEAD_SUPPORTS_INDEX_SEC = _detect_index_support()
+
+
+def _ensure_overhead_index_attr(
+    overhead: _TimeOverheadParams, index_value: float | None
+) -> _TimeOverheadParams | SimpleNamespace:
+    """Return an overhead object that always exposes ``index_sec_per_hole``."""
+
+    if hasattr(overhead, "index_sec_per_hole"):
+        return overhead
+
+    payload: dict[str, Any] = {}
+    if is_dataclass(overhead):
+        try:
+            payload = asdict(overhead)
+        except Exception:
+            payload = {}
+
+    if not payload:
+        for name in (
+            "toolchange_min",
+            "approach_retract_in",
+            "peck_penalty_min_per_in_depth",
+            "dwell_min",
+            "peck_min",
+        ):
+            if hasattr(overhead, name):
+                payload[name] = getattr(overhead, name)
+
+    payload.setdefault("index_sec_per_hole", index_value)
+    try:
+        return SimpleNamespace(**payload)
+    except Exception:
+        return overhead
 
 try:
     from process_planner import (
@@ -553,6 +657,86 @@ INPROC_MENTION_PER = 0.10   # “tight tolerance” textual mentions
 INPROC_MENTION_MAX = 0.30
 
 
+def _estimate_inprocess_default_from_tolerance(
+    tolerance_inputs: Mapping[str, Any] | None,
+) -> float:
+    """Return a heuristic in-process inspection hour estimate for tolerances.
+
+    The estimator mirrors the behaviour of the Tkinter UI where a base number of
+    inspection hours is increased as default tolerances tighten and as multiple
+    tight callouts are present.  The curve parameters (``INPROC_*`` constants)
+    were reverse-engineered from the legacy spreadsheet that powers the quoting
+    tool, so we keep the same soft bounds here for consistency with the GUI.
+
+    ``tolerance_inputs`` accepts the loose dictionary that flows through the
+    application (strings, numbers, nested dicts/lists).  All tolerance magnitudes
+    are normalised to inches via :func:`_tolerance_values_from_any`.  We then
+    apply three adjustments:
+
+    #. Tightening the *minimum* tolerance raises the base curve following a
+       sub-linear power law so that going from ±0.002" to ±0.0002" increases the
+       estimate, but the premium flattens out.
+    #. Additional tight/sub-thou callouts add small capped bumps.  This guards
+       against a part with many near-identical tight tolerances doubling the
+       hours.
+    #. Optional textual mentions ("tight tolerance") get a minor adder to keep
+       parity with the legacy heuristics.
+    """
+
+    tol_values: list[float] = []
+    mention_tokens: list[str] = []
+
+    def _consume(entry: Any) -> None:
+        tol_values.extend(_tolerance_values_from_any(entry))
+        text = str(entry or "").strip()
+        if text:
+            mention_tokens.append(text)
+
+    if isinstance(tolerance_inputs, Mapping):
+        for key, value in tolerance_inputs.items():
+            if key is not None:
+                mention_tokens.append(str(key))
+            _consume(value)
+    elif tolerance_inputs is not None:
+        _consume(tolerance_inputs)
+
+    min_tol_in = min((val for val in tol_values if val > 0.0), default=None)
+
+    base_hr = float(INPROC_BASE_HR)
+    if min_tol_in is not None:
+        try:
+            norm = (INPROC_REF_TOL_IN - float(min_tol_in)) / INPROC_REF_TOL_IN
+        except Exception:
+            norm = 0.0
+        norm = max(0.0, min(1.0, norm))
+        if norm > 0.0:
+            base_hr += INPROC_SCALE_HR * (norm ** INPROC_EXP)
+
+    extra_hr = 0.0
+
+    tight_values = [val for val in tol_values if 0.0 < val <= 0.0015]
+    if tight_values:
+        extra_hr += min(
+            max(0, len(tight_values) - 1) * INPROC_TIGHT_PER,
+            INPROC_TIGHT_MAX,
+        )
+
+    subthou_values = [val for val in tol_values if 0.0 < val <= 0.0005]
+    if subthou_values:
+        extra_hr += min(
+            max(0, len(subthou_values) - 1) * INPROC_SUBTHOU_PER,
+            INPROC_SUBTHOU_MAX,
+        )
+
+    if mention_tokens:
+        mention_text = " ".join(mention_tokens).lower()
+        mentions = len(re.findall(r"tight\s*toler", mention_text))
+        if mentions:
+            extra_hr += min(mentions * INPROC_MENTION_PER, INPROC_MENTION_MAX)
+
+    return float(base_hr + extra_hr)
+
+
 def _canonical_pass_label(label: str | None) -> str:
     name = str(label or "").strip()
     if name.lower() in _HARDWARE_LABEL_ALIASES:
@@ -605,6 +789,52 @@ def _canonicalize_pass_through_map(data: Any) -> dict[str, float]:
         return result
 
     # Fallback: nothing recognized
+    return result
+
+
+def canonicalize_pass_through_map(data: Any) -> dict[str, float]:
+    """Return a canonicalized pass-through map with defensive fallback."""
+
+    canonicalizer = globals().get("_canonicalize_pass_through_map")
+    if callable(canonicalizer):
+        try:
+            return canonicalizer(data)
+        except Exception:
+            logger.exception("Failed to canonicalize pass-through map; using fallback")
+
+    # Minimal fallback used when the primary helper is unavailable.
+    result: dict[str, float] = {}
+
+    def _add(label: Any, amount: Any) -> None:
+        key = _canonical_pass_label(label)
+        try:
+            val = float(amount)
+        except Exception:
+            return
+        if key and math.isfinite(val):
+            result[key] = result.get(key, 0.0) + float(val)
+
+    if isinstance(data, Mapping):
+        for k, v in data.items():
+            if isinstance(v, Mapping):
+                inner = v
+                amt = inner.get("amount") or inner.get("value") or inner.get("cost") or inner.get("price")
+                _add(k, amt)
+            else:
+                _add(k, v)
+    elif isinstance(data, (list, tuple)):
+        for entry in data:
+            if isinstance(entry, Mapping):
+                lbl = entry.get("label") or entry.get("name") or entry.get("key") or entry.get("type")
+                amt = entry.get("amount") or entry.get("value") or entry.get("cost") or entry.get("price")
+                if lbl is None and len(entry) == 1:
+                    k = next(iter(entry.keys()))
+                    _add(k, entry.get(k))
+                else:
+                    _add(lbl, amt)
+            elif isinstance(entry, (list, tuple)) and len(entry) == 2:
+                _add(entry[0], entry[1])
+
     return result
 
 
@@ -1213,7 +1443,31 @@ def coerce_bounds(bounds: Mapping | None) -> dict[str, Any]:
     }
 
 
-LLM_BOUND_DEFAULTS: Mapping[str, Any] = MappingProxyType(coerce_bounds(None))
+def _default_llm_bounds_dict() -> dict[str, Any]:
+    """Return the sanitized default LLM guardrail bounds."""
+
+    return coerce_bounds({})
+
+
+def get_llm_bound_defaults() -> dict[str, Any]:
+    """Return a mutable copy of the default LLM guardrail bounds.
+
+    Older builds of this script may not have initialized ``LLM_BOUND_DEFAULTS``
+    when :func:`compute_quote_from_df` is imported.  To remain backwards
+    compatible we lazily rebuild the defaults if the module-level constant is
+    missing.
+    """
+
+    try:
+        base = LLM_BOUND_DEFAULTS  # type: ignore[name-defined]
+    except NameError:
+        base = MappingProxyType(_default_llm_bounds_dict())
+    if not isinstance(base, Mapping):
+        base = MappingProxyType(coerce_bounds(base))
+    return dict(base)
+
+
+LLM_BOUND_DEFAULTS: Mapping[str, Any] = MappingProxyType(_default_llm_bounds_dict())
 
 
 def build_suggest_payload(
@@ -1407,7 +1661,7 @@ def build_suggest_payload(
             baseline_hours[str(proc)] = float(val)
 
     baseline_pass_raw = baseline.get("pass_through") if isinstance(baseline.get("pass_through"), dict) else {}
-    baseline_pass = _canonicalize_pass_through_map(baseline_pass_raw)
+    baseline_pass = canonicalize_pass_through_map(baseline_pass_raw)
 
     top_process_hours = sorted(baseline_hours.items(), key=lambda kv: (-kv[1], kv[0]))[:6]
     top_pass_through = sorted(baseline_pass.items(), key=lambda kv: (-kv[1], kv[0]))[:6]
@@ -2243,8 +2497,8 @@ def merge_effective(
     raw_sugg_pass = raw_sugg_pass_candidate if isinstance(raw_sugg_pass_candidate, dict) else {}
     raw_over_pass_candidate = overrides.get("add_pass_through")
     raw_over_pass = raw_over_pass_candidate if isinstance(raw_over_pass_candidate, dict) else {}
-    sugg_pass = _canonicalize_pass_through_map(raw_sugg_pass)
-    over_pass = _canonicalize_pass_through_map(raw_over_pass)
+    sugg_pass = canonicalize_pass_through_map(raw_sugg_pass)
+    over_pass = canonicalize_pass_through_map(raw_over_pass)
     pass_keys = sorted(set(sugg_pass) | set(over_pass))
     final_pass: dict[str, float] = {}
     pass_sources: dict[str, str] = {}
@@ -2419,7 +2673,7 @@ def merge_effective(
         if isinstance(guard_ctx.get("baseline_pass_through"), dict)
         else {}
     )
-    baseline_pass_ctx = _canonicalize_pass_through_map(baseline_pass_ctx_raw)
+    baseline_pass_ctx = canonicalize_pass_through_map(baseline_pass_ctx_raw)
     finish_pass_key = _canonical_pass_label(
         guard_ctx.get("finish_pass_key") or "Outsourced Vendors"
     )
@@ -2817,7 +3071,7 @@ def effective_to_overrides(effective: dict, baseline: dict | None = None) -> dic
         else {}
     )
     if passes:
-        canonical_passes = _canonicalize_pass_through_map(passes)
+        canonical_passes = canonicalize_pass_through_map(passes)
         cleaned_pass = {
             k: float(v)
             for k, v in canonical_passes.items()
@@ -2991,22 +3245,22 @@ def iter_suggestion_rows(state: QuoteState) -> list[dict]:
         )
 
     sugg_pass = (
-        _canonicalize_pass_through_map(suggestions.get("add_pass_through"))
+        canonicalize_pass_through_map(suggestions.get("add_pass_through"))
         if isinstance(suggestions.get("add_pass_through"), dict)
         else {}
     )
     over_pass = (
-        _canonicalize_pass_through_map(overrides.get("add_pass_through"))
+        canonicalize_pass_through_map(overrides.get("add_pass_through"))
         if isinstance(overrides.get("add_pass_through"), dict)
         else {}
     )
     base_pass = (
-        _canonicalize_pass_through_map(baseline.get("pass_through"))
+        canonicalize_pass_through_map(baseline.get("pass_through"))
         if isinstance(baseline.get("pass_through"), dict)
         else {}
     )
     eff_pass = (
-        _canonicalize_pass_through_map(effective.get("add_pass_through"))
+        canonicalize_pass_through_map(effective.get("add_pass_through"))
         if isinstance(effective.get("add_pass_through"), dict)
         else {}
     )
@@ -9124,6 +9378,64 @@ def _compute_plate_mass_density(
     )
 
 
+def _plate_mass_properties(
+    plate_L_in: Any,
+    plate_W_in: Any,
+    t_in: Any,
+    density_g_cc: Any,
+    hole_d_mm: Any,
+) -> tuple[float | None, float | None]:
+    """Return net mass (kg) and removed mass (g) for a plate with optional holes."""
+
+    length_in = _coerce_float_or_none(plate_L_in)
+    width_in = _coerce_float_or_none(plate_W_in)
+    thickness_in = _coerce_float_or_none(t_in)
+    density = _coerce_float_or_none(density_g_cc)
+
+    if (
+        density is None
+        or density <= 0
+        or length_in is None
+        or width_in is None
+        or thickness_in is None
+        or length_in <= 0
+        or width_in <= 0
+        or thickness_in <= 0
+    ):
+        return (None, None)
+
+    volume_in3 = float(length_in) * float(width_in) * float(thickness_in)
+    plate_volume_cm3 = volume_in3 * 16.387064
+
+    thickness_mm = float(thickness_in) * 25.4
+    removed_volume_mm3 = 0.0
+
+    if thickness_mm > 0:
+        if isinstance(hole_d_mm, Mapping):
+            hole_iter = hole_d_mm.values()
+        elif isinstance(hole_d_mm, Sequence) and not isinstance(hole_d_mm, (str, bytes)):
+            hole_iter = hole_d_mm
+        elif hole_d_mm is None:
+            hole_iter = ()
+        else:
+            hole_iter = (hole_d_mm,)
+
+        for raw_d in hole_iter:
+            diameter_mm = _coerce_float_or_none(raw_d)
+            if diameter_mm is None or diameter_mm <= 0:
+                continue
+            radius_mm = float(diameter_mm) / 2.0
+            removed_volume_mm3 += math.pi * (radius_mm**2) * thickness_mm
+
+    removed_volume_cm3 = removed_volume_mm3 / 1000.0
+    removed_mass_g = removed_volume_cm3 * float(density)
+
+    net_volume_cm3 = max(plate_volume_cm3 - removed_volume_cm3, 0.0)
+    net_mass_g = net_volume_cm3 * float(density)
+
+    return (net_mass_g / 1000.0, removed_mass_g)
+
+
 @overload
 def net_mass_kg(
     plate_L_in,
@@ -9173,6 +9485,47 @@ def net_mass_kg(
             return (None, None)
         return net_mass, removed_mass
     return net_mass
+
+
+def _plate_mass_from_dims(
+    length_mm: Any,
+    width_mm: Any,
+    thickness_mm: Any,
+    density_g_cc: Any,
+    *,
+    dims_in: Sequence[Any] | None = None,
+    hole_d_mm: Any = (),
+) -> tuple[float | None, float | None]:
+    """Compute plate mass from dimensions in millimeters."""
+
+    length_mm_val = _coerce_float_or_none(length_mm)
+    width_mm_val = _coerce_float_or_none(width_mm)
+    thickness_mm_val = _coerce_float_or_none(thickness_mm)
+
+    dims_in_vals: list[float | None] = [None, None, None]
+    if isinstance(dims_in, Sequence) and not isinstance(dims_in, (str, bytes)):
+        dims_list = list(dims_in)
+        for idx in range(min(3, len(dims_list))):
+            dims_in_vals[idx] = _coerce_float_or_none(dims_list[idx])
+
+    length_in = dims_in_vals[0]
+    width_in = dims_in_vals[1]
+    thickness_in = dims_in_vals[2]
+
+    if length_in is None and length_mm_val:
+        length_in = float(length_mm_val) / 25.4
+    if width_in is None and width_mm_val:
+        width_in = float(width_mm_val) / 25.4
+    if thickness_in is None and thickness_mm_val:
+        thickness_in = float(thickness_mm_val) / 25.4
+
+    return _plate_mass_properties(
+        length_in,
+        width_in,
+        thickness_in,
+        density_g_cc,
+        hole_d_mm,
+    )
 
 
 def _normalize_speeds_feeds_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -9535,12 +9888,7 @@ def _drill_overhead_from_params(params: Mapping[str, Any] | None) -> _TimeOverhe
     except TypeError:
         overhead_kwargs.pop("index_sec_per_hole", None)
         overhead = _TimeOverheadParams(**overhead_kwargs)
-    if not hasattr(overhead, "index_sec_per_hole"):
-        try:
-            setattr(overhead, "index_sec_per_hole", index_kwarg)
-        except Exception:
-            pass
-    return overhead
+    return _ensure_overhead_index_attr(overhead, index_kwarg)
 
 
 def _clean_hole_groups(raw: Any) -> list[dict[str, Any]] | None:
@@ -9683,6 +10031,13 @@ def estimate_drilling_hours(
     """
     material_lookup = _normalize_lookup_key(mat_key) if mat_key else ""
     material_label = MATERIAL_DISPLAY_BY_KEY.get(material_lookup, mat_key)
+
+    try:
+        thickness_mm = float(thickness_in) * 25.4
+    except (TypeError, ValueError):
+        thickness_mm = 0.0
+    if not math.isfinite(thickness_mm) or thickness_mm <= 0:
+        thickness_mm = 0.0
     if (
         speeds_feeds_table is not None
         and (not material_label or material_label == mat_key)
@@ -9696,13 +10051,16 @@ def estimate_drilling_hours(
             material_label = alt_label
     mat = str(material_label or mat_key or "").lower()
     material_factor = _unit_hp_cap(material_label)
-    debug: dict[str, Any] | None
-    # Create a local debug aggregate only when caller requested debug output.
-    # Previously referenced an undefined 'debug_meta'; use available signals instead.
+    # ``debug_state`` collects aggregate drilling metrics for callers that
+    # requested debugging information.  A previous refactor attempted to use a
+    # ``debug`` variable without guaranteeing it was defined, which manifested
+    # as a ``NameError`` during quoting.  Initialise the container up-front and
+    # only populate it when a caller has supplied either ``debug_lines`` or
+    # ``debug_summary``.
+    debug_state: dict[str, Any] | None = None
     if (debug_lines is not None) or (debug_summary is not None):
-        debug = {}
-    else:
-        debug = None
+        debug_state = {}
+
     debug_list = debug_lines if debug_lines is not None else None
     if debug_summary is not None:
         debug_summary.clear()
@@ -9718,6 +10076,48 @@ def estimate_drilling_hours(
             return
         debug_list.append(text)
         seen_debug.add(text)
+
+    def _jsonify_debug_value(value: Any, depth: int = 0, max_depth: int = 6) -> Any:
+        """Convert debug structures to JSON-friendly primitives."""
+
+        if depth >= max_depth:
+            return None
+        if value is None:
+            return None
+        if isinstance(value, (str, bool)):
+            return value
+        if isinstance(value, int) and not isinstance(value, bool):
+            return int(value)
+        if isinstance(value, float):
+            return float(value) if math.isfinite(value) else None
+        if isinstance(value, Mapping):
+            return {
+                str(key): _jsonify_debug_value(val, depth + 1, max_depth)
+                for key, val in value.items()
+            }
+        if isinstance(value, (list, tuple, set)):
+            return [
+                _jsonify_debug_value(item, depth + 1, max_depth)
+                for item in value
+            ]
+        if isinstance(value, bytes):
+            try:
+                return value.decode("utf-8", "ignore")
+            except Exception:
+                return repr(value)
+        if callable(value):
+            try:
+                return repr(value)
+            except Exception:
+                return "<callable>"
+        try:
+            coerced = float(value)
+        except Exception:
+            try:
+                return str(value)
+            except Exception:
+                return None
+        return coerced if math.isfinite(coerced) else None
 
     def _update_range(target: dict[str, Any], min_key: str, max_key: str, value: Any) -> None:
         try:
@@ -9864,7 +10264,9 @@ def estimate_drilling_hours(
 
         # Use the function's input thickness (inches) for L/D heuristics
         try:
-            thickness_in_val = float(thickness_in) if thickness_in and float(thickness_in) > 0 else None
+            thickness_in_val = (
+                float(thickness_in) if thickness_in and float(thickness_in) > 0 else None
+            )
         except Exception:
             thickness_in_val = None
 
@@ -10094,13 +10496,25 @@ def estimate_drilling_hours(
                     "dwell_min": dwell_val,
                     "peck_min": peck_min,
                 }
+                legacy_index_kwarg = None
                 if _TIME_OVERHEAD_SUPPORTS_INDEX_SEC:
-                    legacy_kwargs["index_sec_per_hole"] = getattr(
-                        overhead_local,
+                    legacy_index_kwarg = getattr(
+                        overhead_for_calc,
                         "index_sec_per_hole",
                         None,
                     )
-                legacy_overhead = _TimeOverheadParams(**legacy_kwargs)
+                    legacy_kwargs["index_sec_per_hole"] = legacy_index_kwarg
+                legacy_overhead, legacy_dropped_index = _make_time_overhead_params(
+                    legacy_kwargs
+                )
+                if legacy_index_kwarg is not None and (
+                    legacy_dropped_index
+                    or not hasattr(legacy_overhead, "index_sec_per_hole")
+                ):
+                    try:
+                        setattr(legacy_overhead, "index_sec_per_hole", legacy_index_kwarg)
+                    except Exception:
+                        pass
                 overhead_for_calc = legacy_overhead
                 tool_params = _TimeToolParams(teeth_z=1)
                 if debug_lines is not None:
@@ -10541,7 +10955,7 @@ def estimate_drilling_hours(
                 line_parts.append(f"total hr {total_hours:.2f}.")
                 debug_lines.append("".join(line_parts))
                 if debug_summary is not None:
-                    debug_summary[op_key] = dict(summary)
+                    debug_summary[op_key] = _jsonify_debug_value(summary)
         if missing_row_messages and warnings is not None:
             for op_display, material_display, dia_val in sorted(missing_row_messages):
                 dia_text = f"{dia_val:.3f}".rstrip("0").rstrip(".")
@@ -10553,12 +10967,12 @@ def estimate_drilling_hours(
                     warnings.append(warning_text)
         total_minutes_with_toolchange = total_min + total_toolchange_min
 
-        if debug is not None and total_holes > 0:
+        if debug_state is not None and total_holes > 0:
             try:
                 avg_dia_in = float(avg_dia_in)
             except Exception:
                 avg_dia_in = 0.0
-            debug.update(
+            debug_state.update(
                 {
                     "thickness_in": float(thickness_in or 0.0),
                     "avg_dia_in": float(avg_dia_in),
@@ -10573,7 +10987,7 @@ def estimate_drilling_hours(
         if total_minutes_with_toolchange > 0:
             return total_minutes_with_toolchange / 60.0
 
-    thickness_for_fallback_mm = float(thickness_in or 0.0) * 25.4
+    thickness_for_fallback_mm = thickness_mm
     if thickness_for_fallback_mm <= 0:
         depth_candidates = [depth for _, _, depth in group_specs if depth and depth > 0]
         if depth_candidates:
@@ -10602,7 +11016,7 @@ def estimate_drilling_hours(
     toolchange_s = 15.0
 
     total_sec = 0.0
-    holes_fallback = 0
+    total_hole_qty = 0
     weighted_dia_in = 0.0
     for d, qty in fallback_counts.items():
         if qty is None:
@@ -10613,30 +11027,29 @@ def estimate_drilling_hours(
             continue
         if qty_int <= 0:
             continue
-        holes_fallback += qty_int
+        total_hole_qty += qty_int
         per = sec_per_hole(float(d)) * mfac * tfac
         total_sec += qty_int * per
         total_sec += toolchange_s
         # aggregate counts and weighted diameter
-        # total_qty was not previously initialized; use holes_fallback as the count
-        weighted_dia_in += (float(d) / 25.4) * int(qty)
+        weighted_dia_in += (float(d) / 25.4) * qty_int
 
-    if debug is not None and holes_fallback > 0:
+    if debug_state is not None and holes_fallback > 0:
         avg_dia_in = weighted_dia_in / holes_fallback if holes_fallback else 0.0
-        debug.update(
+        debug_state.update(
             {
-            "thickness_in": float(thickness_in or 0.0),
-            "avg_dia_in": float(avg_dia_in),
-            "sfm": None,
-            "ipr": None,
-            "rpm": None,
-            "ipm": None,
-            "min_per_hole": (total_sec / 60.0) / holes_fallback if holes_fallback else None,
-            "hole_count": int(holes_fallback),
+                "thickness_in": float(thickness_in or 0.0),
+                "avg_dia_in": float(avg_dia_in),
+                "sfm": None,
+                "ipr": None,
+                "rpm": None,
+                "ipm": None,
+                "min_per_hole": (total_sec / 60.0) / holes_fallback if holes_fallback else None,
+                "hole_count": int(holes_fallback),
             }
         )
-    elif debug is not None:
-        debug.update(
+    elif debug_state is not None:
+        debug_state.update(
             {
                 "thickness_in": float(thickness_in or 0.0),
                 "avg_dia_in": 0.0,
@@ -10649,13 +11062,16 @@ def estimate_drilling_hours(
             }
         )
 
+    if debug_summary is not None and debug_state is not None:
+        debug_summary.setdefault("aggregate", {}).update(debug_state)
+
     hours = total_sec / 3600.0
     depth_for_bounds = None
     if thickness_for_fallback_mm and thickness_for_fallback_mm > 0:
         depth_for_bounds = float(thickness_for_fallback_mm) / 25.4
     return _apply_drill_minutes_clamp(
         hours,
-        holes_fallback,
+        total_hole_qty,
         material_group=material_label,
         depth_in=depth_for_bounds,
     )
@@ -10950,6 +11366,7 @@ def compute_quote_from_df(
     # ---- merge configs (easy to edit) ---------------------------------------
     # Default pricing source; updated to 'planner' later if planner path is used
     pricing_source = "legacy"
+    legacy_baseline_had_values = False
 
     params_defaults = default_params if default_params is not None else QuoteConfiguration().default_params
     rates_defaults = default_rates if default_rates is not None else PricingRegistry().default_rates
@@ -10991,6 +11408,26 @@ def compute_quote_from_df(
     hole_scrap_frac_est: float = 0.0
     hole_scrap_clamped_val: float = 0.0
     material_selection: dict[str, Any] = {}
+    material_display_for_debug: str = ""
+
+    def _has_rows(table: Any) -> bool:
+        """Return True if the pandas-like table has any rows."""
+
+        if table is None:
+            return False
+        try:
+            empty_attr = getattr(table, "empty")
+        except Exception:
+            empty_attr = None
+        if empty_attr is not None:
+            try:
+                return bool(empty_attr) is False
+            except Exception:
+                pass
+        try:
+            return len(table) > 0  # type: ignore[arg-type]
+        except Exception:
+            return False
 
     def _int_from(value: Any) -> int:
         num = _coerce_float_or_none(value)
@@ -11818,16 +12255,26 @@ def compute_quote_from_df(
     family_for_breakdown: str | None = None
     planner_pricing_result: dict[str, Any] | None = None
     planner_bucket_view: dict[str, Any] | None = None
+    planner_bucket_display_map: dict[str, dict[str, Any]] | None = None
     planner_two_bucket_rates: dict[str, Any] | None = None
     planner_geom_payload: dict[str, Any] | None = None
     planner_pricing_error: str | None = None
     planner_process_minutes: float | None = None
     planner_drill_minutes: float | None = None
     planner_drilling_override: dict[str, float] | None = None
+    drill_estimator_hours_for_planner: float = 0.0
     used_planner = False
+    planner_meta_keys: set[str] = set()
 
     red_flag_messages: list[str] = []
+    # Historically this function exposed a ``red_flags`` list.  Some call
+    # sites—including legacy desktop builds—still expect that name when adding
+    # new messages.  Provide an alias so any lingering references continue to
+    # work instead of raising ``NameError`` when the branch executes.
+    red_flags = red_flag_messages
     _red_flag_seen: set[str] = set()
+    # Legacy alias used by older code paths; keep synchronized for safety.
+    red_flags = red_flag_messages
 
     def _record_red_flag(message: str) -> None:
         text = str(message or "").strip()
@@ -12124,7 +12571,7 @@ def compute_quote_from_df(
             "Speeds/feeds CSV path not configured; using legacy drilling heuristics for this quote."
         )
         _record_red_flag("Speeds/feeds CSV not configured — using legacy drilling heuristics.")
-    speeds_feeds_loaded_flag = speeds_feeds_table is not None
+    speeds_feeds_loaded_flag = _has_rows(speeds_feeds_table)
 
     if speeds_feeds_table is not None and drill_material_lookup:
         table_group = _lookup_material_group_from_table(
@@ -12174,10 +12621,11 @@ def compute_quote_from_df(
             thickness_mm / 25.4 if thickness_mm else 0.0,
         )
     drill_debug_lines: list[str] = []
+    drill_debug_entries: list[str] = drill_debug_lines  # backwards compatibility alias
     drill_debug_summary: dict[str, dict[str, Any]] = {}
-    speeds_feeds_row: Mapping[str, Any] | None = None  # ensure defined in outer scope
     selected_op_name: str = "drill"  # default for debug display
     avg_dia_in = 0.0
+    speeds_feeds_summary: Mapping[str, Any] | None = None
     material_display_for_debug: str = ""
 
     if not material_display_for_debug:
@@ -12229,74 +12677,99 @@ def compute_quote_from_df(
                 updated_debug_lines.append(line)
         drill_debug_lines[:] = updated_debug_lines
 
+    if drill_debug_summary:
+        best_qty = -1.0
+        best_minutes = -1.0
+        for op_key, summary in drill_debug_summary.items():
+            if not isinstance(summary, Mapping):
+                continue
+            qty_val = _coerce_float_or_none(summary.get("qty"))
+            minutes_val = _coerce_float_or_none(summary.get("total_minutes"))
+            qty_float = float(qty_val) if qty_val is not None else 0.0
+            minutes_float = float(minutes_val) if minutes_val is not None else 0.0
+            if (
+                qty_float > best_qty
+                or (qty_float == best_qty and minutes_float > best_minutes)
+            ):
+                best_qty = qty_float
+                best_minutes = minutes_float
+                selected_op_name = str(op_key or selected_op_name).strip() or selected_op_name
+                speeds_feeds_summary = summary
+        if speeds_feeds_summary:
+            weight_sum = _coerce_float_or_none(
+                speeds_feeds_summary.get("diameter_weight_sum")
+            )
+            qty_sum = _coerce_float_or_none(
+                speeds_feeds_summary.get("diameter_qty_sum")
+            )
+            if (
+                weight_sum is not None
+                and qty_sum is not None
+                and qty_sum > 0
+            ):
+                avg_dia_in = float(weight_sum) / float(qty_sum)
+            if avg_dia_in <= 0:
+                bins = speeds_feeds_summary.get("bins")
+                if isinstance(bins, Mapping):
+                    for bin_summary in bins.values():
+                        if not isinstance(bin_summary, Mapping):
+                            continue
+                        dia_val = _coerce_float_or_none(bin_summary.get("diameter_in"))
+                        if dia_val and dia_val > 0:
+                            avg_dia_in = float(dia_val)
+                            break
+
     drill_debug_line: str | None = None
-    if speeds_feeds_row and avg_dia_in > 0:
-        key_map = {
-            str(k).strip().lower().replace("-", "_").replace(" ", "_"): k
-            for k in speeds_feeds_row.keys()
-        }
+    if speeds_feeds_summary and avg_dia_in > 0:
+        rpm_val = _coerce_float_or_none(speeds_feeds_summary.get("rpm"))
+        ipm_val = _coerce_float_or_none(speeds_feeds_summary.get("ipm"))
 
-        def _row_float(*names: str) -> float | None:
-            for name in names:
-                actual = key_map.get(name)
-                if actual is None:
-                    continue
-                val = _coerce_float_or_none(speeds_feeds_row.get(actual))
-                if val is not None:
-                    return float(val)
-            return None
-
-        sfm_val = _row_float(
-            "sfm_start",
-            "sfm",
-            "surface_ft_min",
-            "surface_feet_per_min",
-        )
         ipr_val: float | None = None
-        ipr_candidates: list[tuple[float, float]] = []
-        for norm_key, actual in key_map.items():
-            if not norm_key.startswith("fz_ipr_"):
-                continue
-            raw_val = _coerce_float_or_none(speeds_feeds_row.get(actual))
-            if raw_val is None:
-                continue
-            suffix = norm_key[len("fz_ipr_") :]
-            if suffix.endswith("in"):
-                suffix = suffix[:-2]
-            suffix = suffix.replace("__", "_")
-            try:
-                dia_val = float(suffix.replace("_", "."))
-            except Exception:
-                continue
-            ipr_candidates.append((dia_val, float(raw_val)))
-        if ipr_candidates:
-            ipr_val = min(ipr_candidates, key=lambda pair: abs(pair[0] - avg_dia_in))[1]
-        if ipr_val is None:
-            ipr_val = _row_float("ipr", "feed_per_rev", "feed_rev", "fz_ipr")
-
-        rpm_val: float | None = None
-        if sfm_val and avg_dia_in > 0:
-            rpm_val = (float(sfm_val) * 12.0) / (math.pi * avg_dia_in)
-
-        ipm_val = None
-        if rpm_val and ipr_val:
-            ipm_val = rpm_val * ipr_val
-        if ipm_val is None:
-            ipm_val = _row_float("linear_cut_rate_ipm", "feed_ipm", "feed_rate_ipm")
+        if ipm_val is None or ipm_val <= 0:
+            ipr_sum = _coerce_float_or_none(speeds_feeds_summary.get("ipr_sum"))
+            ipr_count = _coerce_float_or_none(speeds_feeds_summary.get("ipr_count"))
+            if (
+                ipr_sum is not None
+                and ipr_count is not None
+                and ipr_count > 0
+            ):
+                ipr_val = float(ipr_sum) / float(ipr_count)
+            if ipr_val is None or ipr_val <= 0:
+                ipr_min = _coerce_float_or_none(
+                    speeds_feeds_summary.get("ipr_effective_min")
+                    or speeds_feeds_summary.get("ipr_min")
+                )
+                ipr_max = _coerce_float_or_none(
+                    speeds_feeds_summary.get("ipr_effective_max")
+                    or speeds_feeds_summary.get("ipr_max")
+                )
+                if ipr_min is not None and ipr_min > 0:
+                    ipr_val = float(ipr_min)
+                elif ipr_max is not None and ipr_max > 0:
+                    ipr_val = float(ipr_max)
 
         debug_bits: list[str] = []
         if rpm_val and rpm_val > 0:
-            debug_bits.append(f"{rpm_val:.0f} RPM")
+            debug_bits.append(f"{float(rpm_val):.0f} RPM")
         if ipm_val and ipm_val > 0:
-            debug_bits.append(f"{ipm_val:.1f} IPM")
+            debug_bits.append(f"{float(ipm_val):.1f} IPM")
         elif ipr_val and ipr_val > 0:
-            debug_bits.append(f"{ipr_val:.4f} IPR")
+            debug_bits.append(f"{float(ipr_val):.4f} IPR")
 
         if debug_bits:
             avg_mm = avg_dia_in * 25.4
             op_display = selected_op_name.replace("_", " ")
+            group_display = str(
+                material_selection.get("material_group")
+                or drill_material_group
+                or ""
+            ).strip()
+            if group_display:
+                group_segment = f"{op_display} {group_display}"
+            else:
+                group_segment = op_display
             drill_debug_line = (
-                f"CSV drill feeds ({op_display} {material_group}): "
+                f"CSV drill feeds ({group_segment}): "
                 f"{', '.join(debug_bits)} @ Ø{avg_mm:.1f} mm"
             )
 
@@ -12324,7 +12797,7 @@ def compute_quote_from_df(
         drilling_meta["speeds_feeds_debug"] = drill_debug_line
     if drill_debug_summary:
         drilling_meta["debug_summary"] = {
-            key: dict(value) for key, value in drill_debug_summary.items()
+            key: _jsonify_debug_value(value) for key, value in drill_debug_summary.items()
         }
         if not drill_material_display:
             for summary in drill_debug_summary.values():
@@ -12345,15 +12818,9 @@ def compute_quote_from_df(
             if speeds_feeds_path:
                 guard_ctx.setdefault("speeds_feeds_path", speeds_feeds_path)
             try:
-                loaded_flag = bool(
-                    (speeds_feeds_table is not None)
-                    and (getattr(speeds_feeds_table, "empty", False) is False)
-                )
+                loaded_flag = _has_rows(speeds_feeds_table)
             except Exception:
-                try:
-                    loaded_flag = speeds_feeds_table is not None and len(speeds_feeds_table) > 0
-                except Exception:
-                    loaded_flag = False
+                loaded_flag = False
             guard_ctx["speeds_feeds_loaded"] = loaded_flag
             if red_flag_messages:
                 ctx_flags = guard_ctx.setdefault("red_flags", [])
@@ -12626,7 +13093,7 @@ def compute_quote_from_df(
         if _on("packaging_flat") and float(packaging_flat_base) > 0:
             pass_through["Packaging Flat"] = float(packaging_flat_base)
 
-        pass_through = _canonicalize_pass_through_map(pass_through)
+        pass_through = canonicalize_pass_through_map(pass_through)
 
         credit = float(material_scrap_credit_applied or 0.0)
         if credit > 0:
@@ -13441,7 +13908,8 @@ def compute_quote_from_df(
             for entry in line_items_raw:
                 if isinstance(entry, _MappingABC):
                     planner_line_items.append({k: entry.get(k) for k in ("op", "minutes", "machine_cost", "labor_cost")})
-                    recognized_line_items += 1
+
+        recognized_line_items = len(planner_line_items)
 
         planner_machine_cost_total = float(totals.get("machine_cost", 0.0) or 0.0)
         planner_labor_cost_total = float(totals.get("labor_cost", 0.0) or 0.0)
@@ -13591,6 +14059,7 @@ def compute_quote_from_df(
                     )
             planner_bucket_rollup = copy.deepcopy(bucket_view)
             planner_bucket_view = _prepare_bucket_view(bucket_view)
+            planner_bucket_display_map = _extract_bucket_map(planner_bucket_view)
             planner_bucket_view_copy = copy.deepcopy(planner_bucket_view)
             process_plan_summary["bucket_view"] = planner_bucket_view_copy
             quote_state.process_plan.setdefault("bucket_view", planner_bucket_view_copy)
@@ -13750,7 +14219,12 @@ def compute_quote_from_df(
                     )
                     bucket_map["drilling"] = entry
 
-                for mapping in (bucket_view, planner_bucket_view, planner_bucket_rollup):
+                for mapping in (
+                    bucket_view,
+                    planner_bucket_view,
+                    planner_bucket_rollup,
+                    planner_bucket_display_map,
+                ):
                     _apply_override_to_bucket_map(mapping)
                 plan_bucket_view = process_plan_summary.get("bucket_view")
                 _apply_override_to_bucket_map(plan_bucket_view)
@@ -13909,7 +14383,8 @@ def compute_quote_from_df(
     if red_flag_messages:
         baseline_data["red_flags"] = list(red_flag_messages)
     baseline_data["speeds_feeds_path"] = speeds_feeds_path
-    baseline_data["pricing_source"] = pricing_source
+    pricing_source_value = str(locals().get("pricing_source", "legacy") or "legacy")
+    baseline_data["pricing_source"] = pricing_source_value
     if legacy_baseline_ignored:
         baseline_data["legacy_baseline_ignored"] = True
     if fixture_plan_desc:
@@ -13922,6 +14397,10 @@ def compute_quote_from_df(
         baseline_data["process_plan_pricing"] = copy.deepcopy(planner_pricing_result)
     if planner_bucket_view is not None:
         baseline_data["process_plan_bucket_view"] = copy.deepcopy(planner_bucket_view)
+    if planner_bucket_display_map:
+        baseline_data["planner_bucket_display_map"] = copy.deepcopy(
+            planner_bucket_display_map
+        )
     quote_state.baseline = baseline_data
     quote_state.process_plan = copy.deepcopy(process_plan_summary)
 
@@ -13972,7 +14451,7 @@ def compute_quote_from_df(
         "setups": baseline_setups,
         "fixture": baseline_fixture,
     }
-    llm_bounds = dict(LLM_BOUND_DEFAULTS)
+    llm_bounds = get_llm_bound_defaults()
     llm_bounds.update({"scrap_min": 0.0, "scrap_max": 0.25})
     baseline_bounds = baseline_data.get("_bounds") if isinstance(baseline_data.get("_bounds"), dict) else None
     if baseline_bounds:
@@ -14329,7 +14808,7 @@ def compute_quote_from_df(
                 "usage": s_usage,
             }
             snap_path = APP_ENV.llm_debug_dir / f"llm_snapshot_{int(time.time())}.json"
-            snap_path.write_text(jdump(snap), encoding="utf-8")
+            snap_path.write_text(jdump(json_safe_copy(snap)), encoding="utf-8")
 
     quote_state.llm_raw = dict(overrides_meta)
     quote_state.suggestions = sanitized_struct if isinstance(sanitized_struct, dict) else {}
@@ -14986,7 +15465,7 @@ def compute_quote_from_df(
                 if canon_key:
                     src_pass_map[canon_key] = value
     add_pass_raw = overrides.get("add_pass_through") if overrides else {}
-    add_pass = _canonicalize_pass_through_map(add_pass_raw)
+    add_pass = canonicalize_pass_through_map(add_pass_raw)
     for label, add_val in (add_pass or {}).items():
         if not isinstance(add_val, (int, float)):
             continue
@@ -15220,11 +15699,11 @@ def compute_quote_from_df(
                 process_costs[key] = round(hr_val * rate_val + base_extra_val, 2)
         process_hours_final = _collect_process_hours()
 
-    meta_lookup = process_meta if isinstance(process_meta, dict) else {}
     for proc_key, final_hr in process_hours_final.items():
         if pricing_source == "planner" and proc_key not in process_costs:
             continue
-        meta = meta_lookup.get(proc_key) or {}
+        raw_meta = process_meta.get(proc_key) if isinstance(process_meta, Mapping) else None
+        meta = raw_meta if isinstance(raw_meta, Mapping) else {}
         try:
             rate = float(meta.get("rate", 0.0) or 0.0)
         except Exception:
@@ -15341,6 +15820,7 @@ def compute_quote_from_df(
                 ) from bucketize_err
         else:
             planner_bucket_view = _prepare_bucket_view(raw_bucket_view)
+            planner_bucket_display_map = _extract_bucket_map(planner_bucket_view)
             process_plan_summary.setdefault("bucket_view", copy.deepcopy(planner_bucket_view))
             existing_plan = getattr(quote_state, "process_plan", None)
             if isinstance(existing_plan, dict):
@@ -15411,8 +15891,23 @@ def compute_quote_from_df(
 
     # Initialize labor detail seed for display/summary merging in this scope.
     # In other processing paths we derive this from breakdown input; here we
-    # start with an empty seed so downstream merges are safe.
-    labor_cost_details_seed: dict[str, str] = {}
+    # start with whatever was previously prepared (if present) or an empty
+    # seed so downstream merges are safe even when bypassing earlier helpers.
+    seed_source = locals().get("labor_cost_details_seed")
+    if isinstance(seed_source, Mapping):
+        labor_cost_details_seed = dict(seed_source)
+    elif seed_source:
+        try:
+            labor_cost_details_seed = dict(seed_source)  # type: ignore[arg-type]
+        except Exception:
+            labor_cost_details_seed = {}
+    else:
+        labor_cost_details_seed = {}
+    labor_cost_details_seed = {
+        str(key): str(value)
+        for key, value in labor_cost_details_seed.items()
+        if key is not None and value is not None
+    }
     labor_cost_details_input: dict[str, str] = dict(labor_cost_details_seed)
     labor_cost_details: dict[str, str] = dict(labor_cost_details_seed)
     labor_costs_display: dict[str, float] = {}
@@ -15458,7 +15953,7 @@ def compute_quote_from_df(
     # Earlier rendering helpers construct a richer list; here we only need
     # label/amount/detail_bits to merge labor detail text for the quote summary.
     try:
-        _ = process_entries_for_display  # type: ignore[name-defined]
+        entries_for_display = process_entries_for_display  # type: ignore[name-defined]
     except NameError:
         tmp_entries: list[ProcessDisplayEntry] = []
         for _key, _val in (process_costs or {}).items():
@@ -15480,9 +15975,9 @@ def compute_quote_from_df(
                     display_override=None,
                 )
             )
-        process_entries_for_display = tmp_entries  # type: ignore[no-redef]
+        entries_for_display = tmp_entries
 
-    for entry in process_entries_for_display:
+    for entry in entries_for_display:
         try:
             amount_val = float(entry.amount or 0.0)
         except Exception:
@@ -15542,8 +16037,7 @@ def compute_quote_from_df(
                 f"Labor totals drifted by ${diff:,.2f}: "
                 f"rendered ${labor_display_total:,.2f} vs expected ${expected_labor_total:,.2f}"
             )
-            if flag_message not in red_flag_messages:
-                red_flag_messages.append(flag_message)
+            _record_red_flag(flag_message)
             logger.warning(
                 "Labor section totals drifted beyond threshold: %.2f vs %.2f",
                 labor_display_total,
@@ -15660,6 +16154,8 @@ def compute_quote_from_df(
             "Labor": round(planner_labor_cost_total, 2),
         }
 
+    canonical_process_costs = canonicalize_costs(process_costs)
+
     app_meta = {"llm_debug_enabled": bool(APP_ENV.llm_debug_enabled)}
 
     breakdown = {
@@ -15680,6 +16176,7 @@ def compute_quote_from_df(
         "nre_costs": nre_costs_display,
         "nre_cost_details": nre_cost_details,
         "process_costs": process_costs,
+        "canonical_process_costs": canonical_process_costs,
         "process_meta": process_meta,
         "labor_costs": labor_costs_display,
         "labor_cost_details": labor_cost_details,
@@ -15721,6 +16218,10 @@ def compute_quote_from_df(
         breakdown["bucket_view"] = copy.deepcopy(planner_bucket_view)
     if planner_bucket_rollup is not None:
         breakdown["planner_bucket_rollup"] = copy.deepcopy(planner_bucket_rollup)
+    if planner_bucket_display_map:
+        breakdown["planner_bucket_display_map"] = copy.deepcopy(
+            planner_bucket_display_map
+        )
 
     if process_plan_summary:
         breakdown["process_plan"] = copy.deepcopy(process_plan_summary)
@@ -15736,6 +16237,7 @@ def compute_quote_from_df(
         "effective": copy.deepcopy(quote_state.effective),
         "effective_sources": copy.deepcopy(quote_state.effective_sources),
         "app": dict(app_meta),
+        "canonical_process_costs": canonical_process_costs,
     }
     breakdown["decision_state"] = decision_state
 
@@ -15803,6 +16305,7 @@ def compute_quote_from_df(
         "drilling_meta": drilling_meta,
         "red_flags": list(red_flag_messages),
         "app": dict(app_meta),
+        "canonical_process_costs": canonical_process_costs,
     }
 
     breakdown["speeds_feeds_path"] = speeds_feeds_path
@@ -19359,7 +19862,7 @@ def get_llm_overrides(
     catalogs_ctx["stock"] = stock_catalog
     ctx["catalogs"] = catalogs_ctx
     bounds_ctx = dict(ctx.get("bounds") or {})
-    llm_bound_defaults = dict(LLM_BOUND_DEFAULTS)
+    llm_bound_defaults = get_llm_bound_defaults()
     bounds_ctx.update(
         {
             "mult_min": llm_bound_defaults["mult_min"],
