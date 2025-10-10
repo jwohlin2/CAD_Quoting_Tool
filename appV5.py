@@ -18,6 +18,7 @@ import json
 import logging
 import math
 import os
+import re
 import time
 import typing
 import tkinter as tk
@@ -38,6 +39,7 @@ from cad_quoter.config import (
 from cad_quoter.config import (
     describe_runtime_environment as _describe_runtime_environment,
 )
+from cad_quoter.llm import LLMClient, parse_llm_json
 
 APP_ENV = AppEnvironment.from_env()
 
@@ -87,7 +89,6 @@ def roughly_equal(a: float | int | str | None, b: float | int | str | None, *, e
 
 
 import copy
-import re
 import sys
 import textwrap
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -200,6 +201,10 @@ from cad_quoter.pricing import (
     LB_PER_KG,
     PricingEngine,
     create_default_registry,
+)
+
+_DEFAULT_MATERIAL_DENSITY_G_CC = MATERIAL_DENSITY_G_CC_BY_KEY.get(
+    DEFAULT_MATERIAL_KEY, 7.85
 )
 from cad_quoter.pricing import (
     get_mcmaster_unit_price as _get_mcmaster_unit_price,
@@ -670,6 +675,25 @@ def normalize_scrap_pct(val: Any, cap: float = 0.25) -> float:
         raw = raw / 100.0
     raw = max(raw, 0.0)
     return min(cap_val, raw)
+
+
+def _normalize_item_text(value: Any) -> str:
+    """Return a normalized item label for loose string comparisons."""
+
+    if value is None:
+        text = ""
+    else:
+        text = str(value)
+    text = text.replace("\u00A0", " ")
+    text = re.sub(r"\s+", " ", text).strip().lower()
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def normalize_item(value: Any) -> str:
+    """Public wrapper for item normalization used across the editor."""
+
+    return _normalize_item_text(value)
 
 
 def _scrap_value_provided(val: Any) -> bool:
