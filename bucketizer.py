@@ -216,7 +216,7 @@ def bucketize(
     if programming_min > 0:
         labor_cost = programmer_rate * (programming_min / 60.0)
         add("Programming", programming_min, 0.0, labor_cost)
-        if qty_int:
+        if qty_int > 1:
             per_min = programming_min / qty_int
             add(
                 "Programming (amortized)",
@@ -233,7 +233,7 @@ def bucketize(
     if fixture_min > 0:
         labor_cost = fixture_rate * (fixture_min / 60.0)
         add("Fixture Build", fixture_min, 0.0, labor_cost)
-        if qty_int:
+        if qty_int > 1:
             per_min = fixture_min / qty_int
             add(
                 "Fixture Build (amortized)",
