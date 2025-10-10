@@ -215,5 +215,5 @@ def test_steel_die_plate_deep_drill_runtime_floor() -> None:
     index_seconds = float(index_match.group(1))
 
     assert rpm_low <= 560 and rpm_high >= 420, f"RPM range {rpm_low:.0f}–{rpm_high:.0f} misses deep drill target"
-    assert 0.8 <= ipm_high and ipm_low <= 1.2, f"Feed range {ipm_low:.2f}–{ipm_high:.2f} IPM outside expected deep drill range"
+    assert ipm_high >= 0.8 and ipm_low <= 1.2, f"Feed range {ipm_low:.2f}–{ipm_high:.2f} IPM outside expected deep drill range"
     assert index_seconds >= 120.0, f"Index {index_seconds:.1f}s per hole too low for deep drill"

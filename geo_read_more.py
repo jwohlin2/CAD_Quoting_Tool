@@ -1,7 +1,8 @@
 # geo_read_more.py
 # Read more DWG/DXF detail into your GEO dict (ezdxf required for DXF).
 from __future__ import annotations
-import re, math
+import re
+import math
 from collections import Counter
 
 try:

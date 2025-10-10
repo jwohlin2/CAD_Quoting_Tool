@@ -16,7 +16,10 @@ from __future__ import annotations
 
 import argparse
 import logging
-import json, math, os, time
+import json
+import math
+import os
+import time
 import typing
 from collections import Counter
 from collections.abc import Mapping as _MappingABC
@@ -91,18 +94,17 @@ def resolve_planner(
     default_mode = "auto"
     if FORCE_PLANNER:
         planner_mode = "planner"
-    else:
-        if isinstance(params, _MappingABC):
-            try:
-                raw_mode = params.get("PlannerMode", default_mode)
-            except Exception:
-                raw_mode = default_mode
-            try:
-                planner_mode = str(raw_mode).strip().lower() or default_mode
-            except Exception:
-                planner_mode = default_mode
-        else:
+    elif isinstance(params, _MappingABC):
+        try:
+            raw_mode = params.get("PlannerMode", default_mode)
+        except Exception:
+            raw_mode = default_mode
+        try:
+            planner_mode = str(raw_mode).strip().lower() or default_mode
+        except Exception:
             planner_mode = default_mode
+    else:
+        planner_mode = default_mode
 
     signals_map: Mapping[str, Any]
     if isinstance(signals, _MappingABC):
@@ -618,8 +620,7 @@ def normalize_scrap_pct(val: Any, cap: float = 0.25) -> float:
         raw = 0.0
     if raw > 1.0:
         raw = raw / 100.0
-    if raw < 0.0:
-        raw = 0.0
+    raw = max(raw, 0.0)
     return min(cap_val, raw)
 
 
@@ -1005,8 +1006,7 @@ def coerce_bounds(bounds: Mapping | None) -> dict[str, Any]:
         mult_max = LLM_MULTIPLIER_MAX
     else:
         mult_max = min(LLM_MULTIPLIER_MAX, float(mult_max))
-    if mult_max < mult_min:
-        mult_max = mult_min
+    mult_max = max(mult_max, mult_min)
 
     adder_max = _as_float_or_none(bounds.get("adder_max_hr"))
     add_hr_cap = _as_float_or_none(bounds.get("add_hr_max"))
@@ -2029,8 +2029,7 @@ def merge_effective(
                 LLM_MULTIPLIER_MAX,
                 mult_max_val if mult_max_val is not None else LLM_MULTIPLIER_MAX,
             )
-            if mult_max < mult_min:
-                mult_max = mult_min
+            mult_max = max(mult_max, mult_min)
             clamped = max(mult_min, min(mult_max, float(value)))
         elif kind == "adder":
             orig_val = float(value)
@@ -2066,8 +2065,7 @@ def merge_effective(
             else:
                 filtered = [cand for cand in adder_max_candidates if cand is not None]
                 adder_max_effective = min(filtered) if filtered else LLM_ADDER_MAX
-            if adder_max_effective < lower_bound:
-                adder_max_effective = lower_bound
+            adder_max_effective = max(adder_max_effective, lower_bound)
             clamped = max(lower_bound, min(adder_max_effective, raw_val))
         elif kind == "scrap":
             scrap_min = max(0.0, to_float(bounds.get("scrap_min")) or 0.0)
@@ -3212,7 +3210,8 @@ if sys.platform == 'win32':
     if os.path.isdir(occ_bin):
         os.add_dll_directory(occ_bin)
 from tkinter import ttk, filedialog, messagebox
-import subprocess, tempfile
+import subprocess
+import tempfile
 
 
 try:
@@ -3521,7 +3520,7 @@ def linear_properties(edge, gprops):
         try:
             from OCC.Core.BRepGProp import brepgprop_LinearProperties as _old  # type: ignore
             return _old(edge, gprops)
-        except Exception as e:
+        except Exception:
             raise
     return fn(edge, gprops)
 
@@ -3622,7 +3621,8 @@ def have_dwg_support() -> bool:
     """True if we can open DWG (either odafc or an external converter is available)."""
     return geometry.HAS_ODAFC or bool(get_dwg_converter_path())
 def get_import_diagnostics_text() -> str:
-    import sys, os
+    import sys
+    import os
     lines = []
     lines.append(f"Python: {sys.executable}")
     try:
@@ -3821,8 +3821,6 @@ def build_llm_payload(structured: dict, page_image_path: str | None):
 
 
 # ==== OpenCascade compat (works with OCP OR OCC.Core) ====
-import tempfile, subprocess
-from pathlib import Path
 
 try:
     # ---- OCP branch ----
@@ -3887,7 +3885,7 @@ except Exception:
     # ADD TopTools import and TopoDS_Face for the fix below
     from OCC.Core.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
     from OCC.Core.TopoDS import (
-        TopoDS_Shape, TopoDS_Face, TopoDS_Compound,
+        TopoDS_Shape, TopoDS_Compound,
         TopoDS_Face
     )
     from OCC.Core.TopExp import TopExp_Explorer
@@ -4758,7 +4756,8 @@ def apply_param_edits_to_overrides_ui(self, param_edits: dict):
     self.params.update(p)
 
 # ================== LLM DECISION LOG / AUDIT ==================
-import json as _json_audit, time as _time_audit
+import json as _json_audit
+import time as _time_audit
 LOGS_DIR = Path(r"D:\\CAD_Quoting_Tool\\Logs")
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -4785,14 +4784,14 @@ def _diff_map(before: dict, after: dict):
     changes = []
     keys = set(before.keys()) | set(after.keys())
     for k in sorted(keys):
-        bv = before.get(k, None)
-        av = after.get(k, None)
+        bv = before.get(k)
+        av = after.get(k)
         if bv != av:
             changes.append({"key": k, "before": bv, "after": av})
     return changes
 
 def render_llm_log_text(log: dict) -> str:
-    m  = lambda v: f"${{float(v):,.2f}}" if isinstance(v, (int, float)) else str(v)
+    m  = lambda v: "${float(v):,.2f}" if isinstance(v, (int, float)) else str(v)
     lines = []
     lines.append(f"LLM DECISION LOG ï¿½ {log['timestamp']}")
     lines.append(f"Model: {log.get('model','?')}  |  Prompt SHA256: {log.get('prompt_sha256','')[:12]}ï¿½")
@@ -6307,11 +6306,10 @@ def render_quote(
         status_suffix = ""
     if path_text:
         write_wrapped(f"Speeds/Feeds CSV: {path_text}{status_suffix}")
+    elif status_suffix:
+        write_wrapped(f"Speeds/Feeds CSV: (not set){status_suffix}")
     else:
-        if status_suffix:
-            write_wrapped(f"Speeds/Feeds CSV: (not set){status_suffix}")
-        else:
-            write_line("Speeds/Feeds CSV: (not set)")
+        write_line("Speeds/Feeds CSV: (not set)")
     lines.append("")
     def _drill_debug_enabled() -> bool:
         """Return True when drill debug output should be rendered."""
@@ -7515,12 +7513,11 @@ def render_quote(
             }
             labor_row_data[storage_key] = entry
             labor_row_order.append(storage_key)
-        else:
-            if display_override:
-                entry["label"] = display_text
-                entry["has_override"] = True
-            elif not entry.get("has_override"):
-                entry["label"] = display_text
+        elif display_override:
+            entry["label"] = display_text
+            entry["has_override"] = True
+        elif not entry.get("has_override"):
+            entry["label"] = display_text
 
         entry["amount"] += amount_val
         if process_key is not None:
@@ -8413,9 +8410,8 @@ def _tolerance_values_from_any(value: Any) -> list[float]:
             magnitude /= 1000.0
         elif unit in {"in", "inch", "inches", '"'}:
             pass
-        else:
-            if magnitude > 0.25:
-                continue
+        elif magnitude > 0.25:
+            continue
         if magnitude <= 0.0:
             continue
         if magnitude <= 0.25:
@@ -9677,11 +9673,10 @@ def estimate_drilling_hours(
             total_depth_in = depth_in + breakthrough_in if depth_in > 0 else breakthrough_in
             group_specs.append((diameter_in, int(qty), total_depth_in))
         fallback_counts = counts
-    else:
-        if fallback_counts is None:
-            fallback_counts = Counter()
-            for dia_in, qty, _ in group_specs:
-                fallback_counts[round(dia_in * 25.4, 3)] += qty
+    elif fallback_counts is None:
+        fallback_counts = Counter()
+        for dia_in, qty, _ in group_specs:
+            fallback_counts[round(dia_in * 25.4, 3)] += qty
 
     if group_specs:
         base_machine = machine_params or _machine_params_from_params(None)
@@ -13266,9 +13261,7 @@ def compute_quote_from_df(df: pd.DataFrame,
             planner_inputs = _build_bushing_inputs()
         elif planner_family == "cam_or_hemmer":
             planner_inputs = _build_cam_inputs()
-        elif planner_family == "flat_die_chaser":
-            planner_inputs = {}
-        elif planner_family == "pm_compaction_die":
+        elif planner_family == "flat_die_chaser" or planner_family == "pm_compaction_die":
             planner_inputs = {}
         elif planner_family == "shear_blade":
             planner_inputs = {"material": material_name or default_material_display}
@@ -15326,8 +15319,7 @@ def compute_quote_from_df(df: pd.DataFrame,
     price = price_before_margin * (1.0 + MarginPct)
 
     min_lot = float(params["MinLotCharge"] or 0.0)
-    if price < min_lot:
-        price = min_lot
+    price = max(price, min_lot)
 
     labor_cost_details_input: dict[str, str] = dict(labor_cost_details_seed)
     labor_cost_details: dict[str, str] = dict(labor_cost_details_seed)
@@ -17097,9 +17089,7 @@ def _aggregate_hole_entries(entries: Iterable[dict[str, Any]] | None) -> dict[st
             except Exception:
                 continue
             side = str(entry.get("side") or "").upper()
-            if side == "BACK" or (entry.get("raw") and "BACK" in str(entry.get("raw")).upper()):
-                back_ops = True
-            elif entry.get("double_sided") and (entry.get("cbore") or entry.get("csk")):
+            if side == "BACK" or (entry.get("raw") and "BACK" in str(entry.get("raw")).upper()) or entry.get("double_sided") and (entry.get("cbore") or entry.get("csk")):
                 back_ops = True
     tap_details_list = []
     for spec, detail in tap_details.items():
@@ -19106,7 +19096,8 @@ def get_llm_overrides(
       }
     and meta captures the raw response, usage stats, and clamp notes.
     """
-    import json, os
+    import json
+    import os
 
     def _meta(raw=None, raw_text="", usage=None, clamp_notes=None):
         return {
@@ -21768,10 +21759,10 @@ class App(tk.Tk):
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
-            messagebox.showinfo("Overrides", f"Saved to:\n{{path}}")
+            messagebox.showinfo("Overrides", "Saved to:\n{path}")
             self.status_var.set(f"Saved overrides to {path}")
-        except Exception as e:
-            messagebox.showerror("Overrides", f"Save failed:\n{{e}}")
+        except Exception:
+            messagebox.showerror("Overrides", "Save failed:\n{e}")
             self.status_var.set("Failed to save overrides.")
 
     def _path_key(self, path: Tuple[str, ...]) -> str:
@@ -21798,8 +21789,8 @@ class App(tk.Tk):
                     v.set(self._format_rate_value(self.rates.get(k, "")))
             messagebox.showinfo("Overrides", "Overrides loaded.")
             self.status_var.set(f"Loaded overrides from {path}")
-        except Exception as e:
-            messagebox.showerror("Overrides", f"Load failed:\n{{e}}")
+        except Exception:
+            messagebox.showerror("Overrides", "Load failed:\n{e}")
             self.status_var.set("Failed to load overrides.")
 
     def _exportable_vars_records(self) -> list[dict[str, Any]]:
@@ -22032,8 +22023,8 @@ class App(tk.Tk):
         os.environ["QWEN_GGUF_PATH"]=mp
         try:
             out = infer_shop_overrides_from_geo(self.geo)
-        except Exception as e:
-            self.llm_txt.insert("end", f"LLM error: {{e}}\n"); return
+        except Exception:
+            self.llm_txt.insert("end", "LLM error: {e}\n"); return
         self.llm_txt.insert("end", json.dumps(out, indent=2))
         if self.apply_llm_adj.get() and isinstance(out, dict):
             adj = out.get("LLM_Adjustments", {})
@@ -22161,7 +22152,8 @@ class App(tk.Tk):
                 )
             except ValueError as err:
                 # Log full traceback for debugging ambiguous DataFrame truthiness, etc.
-                import traceback, datetime
+                import traceback
+                import datetime
                 try:
                     with open("debug.log", "a", encoding="utf-8") as f:
                         f.write(f"\n[{datetime.datetime.now().isoformat()}] Quote blocked (ValueError):\n")
@@ -22174,7 +22166,8 @@ class App(tk.Tk):
                 return
             except Exception as err:
                 # Catch-all so failures surface in the UI and logs
-                import traceback, datetime
+                import traceback
+                import datetime
                 tb = traceback.format_exc()
                 try:
                     with open("debug.log", "a", encoding="utf-8") as f:

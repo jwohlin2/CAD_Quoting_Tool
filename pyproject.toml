@@ -1,0 +1,19 @@
+[tool.black]
+line-length = 88
+target-version = ["py311"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+fix = true
+
+[tool.ruff.lint]
+select = ["F"]
+extend-select = [
+    "C90",
+    "PLR0915",
+    "SIM",
+]
+
+[tool.ruff.lint.pylint]
+max-statements = 50
