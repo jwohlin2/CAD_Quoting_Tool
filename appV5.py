@@ -3260,6 +3260,19 @@ def load_drawing(path: Path) -> Drawing:
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Any, Callable, Tuple
+
+
+def _missing_uv_bounds(_: Any) -> Tuple[float, float, float, float]:
+    raise RuntimeError("BRepTools_UVBounds is unavailable")
+
+
+def _missing_brep_read(_: str):
+    raise RuntimeError("BREP read is unavailable")
+
+
+BRepTools_UVBounds: Callable[[Any], Tuple[float, float, float, float]] = _missing_uv_bounds
+_brep_read = _missing_brep_read
 
 try:
     # ---- OCP branch ----
@@ -3293,16 +3306,17 @@ try:
     from OCP.TopoDS import TopoDS_Compound, TopoDS_Face, TopoDS_Shape  # type: ignore[import]
 
     # ADD THESE TWO IMPORTS
+    from OCP.BRepTools import BRepTools  # type: ignore[import]
     from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape  # type: ignore[import]
     BACKEND_OCC = "OCP"
 
-    def BRepTools_UVBounds(face):
+    def _ocp_uv_bounds(face: TopoDS_Face) -> Tuple[float, float, float, float]:
         return BRepTools.UVBounds(face)
 
 
-    def _brep_read(path: str) -> TopoDS_Shape:
+    def _ocp_brep_read(path: str) -> TopoDS_Shape:
         s = TopoDS_Shape()
-        builder = BRep_Builder()
+        builder = BRep_Builder()  # type: ignore[call-arg]
         if hasattr(BRepTools, "Read_s"):
             ok = BRepTools.Read_s(s, str(path), builder)
         else:
@@ -3310,6 +3324,10 @@ try:
         if ok is False:
             raise RuntimeError("BREP read failed")
         return s
+
+
+    BRepTools_UVBounds = _ocp_uv_bounds
+    _brep_read = _ocp_brep_read
 
 
 
@@ -3355,11 +3373,11 @@ except Exception:
     BACKEND_OCC = "OCC.Core"
 
     # BRepGProp shim (pythonocc uses free functions)
-    from OCC.Core.BRepGProp import (
-        brepgprop_LinearProperties,
-        brepgprop_SurfaceProperties,
-        brepgprop_VolumeProperties,
-    )
+    import OCC.Core.BRepGProp as _occ_brepgprop  # type: ignore[import]
+
+    brepgprop_LinearProperties = _occ_brepgprop.brepgprop_LinearProperties
+    brepgprop_SurfaceProperties = _occ_brepgprop.brepgprop_SurfaceProperties
+    brepgprop_VolumeProperties = _occ_brepgprop.brepgprop_VolumeProperties
     class _BRepGPropShim:
         @staticmethod
         def SurfaceProperties_s(shape_or_face, gprops): brepgprop_SurfaceProperties(shape_or_face, gprops)
@@ -3374,18 +3392,25 @@ except Exception:
     # UV bounds and brep read are free functions
     from OCC.Core.BRepTools import BRepTools
     from OCC.Core.BRepTools import breptools_Read as _occ_breptools_read
-    def BRepTools_UVBounds(face):
+
+    def _occ_uv_bounds(face: TopoDS_Face) -> Tuple[float, float, float, float]:
         fn = getattr(BRepTools, "UVBounds", None)
         if fn is None:
             from OCC.Core.BRepTools import breptools_UVBounds as _legacy
             return _legacy(face)
         return fn(face)
-    def _brep_read(path: str) -> TopoDS_Shape:
+
+
+    def _occ_brep_read(path: str) -> TopoDS_Shape:
         s = TopoDS_Shape()
         ok = _occ_breptools_read(s, str(path), BRep_Builder())
-        if ok is False:
+        if not ok:
             raise RuntimeError("BREP read failed")
         return s
+
+
+    BRepTools_UVBounds = _occ_uv_bounds
+    _brep_read = _occ_brep_read
 
 def _shape_from_reader(reader):
     """Return a healed TopoDS_Shape from a STEP/IGES reader."""
