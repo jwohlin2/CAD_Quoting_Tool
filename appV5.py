@@ -148,6 +148,7 @@ def resolve_planner(
     return used_planner, planner_mode
 
 import cad_quoter.geometry as geometry
+from cad_quoter.geometry import read_dxf_as_occ_shape
 from cad_quoter.geo2d import (
     apply_2d_features_to_variables,
     to_noncapturing as _to_noncapturing,
@@ -2844,7 +2845,7 @@ if STACK == "ocp":
         if hasattr(TopoDS, "Edge_s"):
             return TopoDS.Edge_s(s)
         try:
-            from OCP.TopoDS import topods as _topods
+            from OCP.TopoDS import topods as _topods  # type: ignore[import]
             return _topods.Edge(s)
         except Exception as e:
             raise TypeError(f"Cannot cast to Edge from {type(s).__name__}") from e
@@ -2854,7 +2855,7 @@ if STACK == "ocp":
             return s
         if hasattr(TopoDS, "Solid_s"):
             return TopoDS.Solid_s(s)
-        from OCP.TopoDS import topods as _topods
+        from OCP.TopoDS import topods as _topods  # type: ignore[import]
         return _topods.Solid(s)
 
     def _TO_SHELL(s):
@@ -2862,7 +2863,7 @@ if STACK == "ocp":
             return s
         if hasattr(TopoDS, "Shell_s"):
             return TopoDS.Shell_s(s)
-        from OCP.TopoDS import topods as _topods
+        from OCP.TopoDS import topods as _topods  # type: ignore[import]
         return _topods.Shell(s)
 else:
     # Resolve within OCC.Core only
@@ -2908,7 +2909,7 @@ def ensure_shape(obj):
 # Choose stack
 try:
     # OCP / CadQuery bindings
-    from OCP.BRepGProp import BRepGProp as _BRepGProp_mod
+    from OCP.BRepGProp import BRepGProp as _BRepGProp_mod  # type: ignore[import]
     STACK_GPROP = "ocp"
 except Exception:
     # pythonocc-core
@@ -3160,16 +3161,16 @@ from pathlib import Path
 
 try:
     # ---- OCP branch ----
-    from OCP.Bnd import Bnd_Box
-    from OCP.BRep import (
+    from OCP.Bnd import Bnd_Box  # type: ignore[import]
+    from OCP.BRep import (  # type: ignore[import]
         BRep_Builder,
         BRep_Tool,  # OCP version
-    )
-    from OCP.BRepAdaptor import BRepAdaptor_Curve
-    from OCP.BRepAlgoAPI import BRepAlgoAPI_Section
-    from OCP.BRepCheck import BRepCheck_Analyzer
-    from OCP.BRepGProp import BRepGProp
-    from OCP.GeomAbs import (
+    )  # type: ignore[import]
+    from OCP.BRepAdaptor import BRepAdaptor_Curve  # type: ignore[import]
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Section  # type: ignore[import]
+    from OCP.BRepCheck import BRepCheck_Analyzer  # type: ignore[import]
+    from OCP.BRepGProp import BRepGProp  # type: ignore[import]
+    from OCP.GeomAbs import (  # type: ignore[import]
         GeomAbs_BezierSurface,
         GeomAbs_BSplineSurface,
         GeomAbs_Circle,
@@ -3178,19 +3179,19 @@ try:
         GeomAbs_Plane,
         GeomAbs_Torus,
     )
-    from OCP.GeomAdaptor import GeomAdaptor_Surface
-    from OCP.gp import gp_Dir, gp_Pln, gp_Pnt
-    from OCP.GProp import GProp_GProps
-    from OCP.IFSelect import IFSelect_RetDone
-    from OCP.IGESControl import IGESControl_Reader
-    from OCP.ShapeAnalysis import ShapeAnalysis_Surface
-    from OCP.ShapeFix import ShapeFix_Shape
-    from OCP.TopAbs import TopAbs_COMPOUND, TopAbs_EDGE, TopAbs_FACE, TopAbs_SHELL, TopAbs_SOLID
-    from OCP.TopExp import TopExp, TopExp_Explorer
-    from OCP.TopoDS import TopoDS_Compound, TopoDS_Face, TopoDS_Shape
+    from OCP.GeomAdaptor import GeomAdaptor_Surface  # type: ignore[import]
+    from OCP.gp import gp_Dir, gp_Pln, gp_Pnt  # type: ignore[import]
+    from OCP.GProp import GProp_GProps  # type: ignore[import]
+    from OCP.IFSelect import IFSelect_RetDone  # type: ignore[import]
+    from OCP.IGESControl import IGESControl_Reader  # type: ignore[import]
+    from OCP.ShapeAnalysis import ShapeAnalysis_Surface  # type: ignore[import]
+    from OCP.ShapeFix import ShapeFix_Shape  # type: ignore[import]
+    from OCP.TopAbs import TopAbs_COMPOUND, TopAbs_EDGE, TopAbs_FACE, TopAbs_SHELL, TopAbs_SOLID  # type: ignore[import]
+    from OCP.TopExp import TopExp, TopExp_Explorer  # type: ignore[import]
+    from OCP.TopoDS import TopoDS_Compound, TopoDS_Face, TopoDS_Shape  # type: ignore[import]
 
     # ADD THESE TWO IMPORTS
-    from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
+    from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape  # type: ignore[import]
     BACKEND_OCC = "OCP"
 
     def BRepTools_UVBounds(face):
@@ -3383,7 +3384,7 @@ def read_step_shape(path: str) -> TopoDS_Shape:
     fx.Perform()
     return fx.Shape()
 
-from OCP.TopoDS import TopoDS_Shape  # or OCC.Core.TopoDS on pythonocc
+from OCP.TopoDS import TopoDS_Shape  # type: ignore[import]  # or OCC.Core.TopoDS on pythonocc
 
 
 def safe_bbox(shape: TopoDS_Shape):
@@ -3522,7 +3523,7 @@ def _face_midpoint_uv(face):
 def _face_normal(face):
     try:
         try:
-            from OCP.BRepLProp import BRepLProp_SLProps
+            from OCP.BRepLProp import BRepLProp_SLProps  # type: ignore[import]
         except ImportError:
             from OCC.Core.BRepLProp import BRepLProp_SLProps
         u, v = _face_midpoint_uv(face)
@@ -3920,9 +3921,9 @@ def enrich_geo_stl(path):
 
 
 def read_cad_any(path: str):
-    from OCP.IFSelect import IFSelect_RetDone
-    from OCP.IGESControl import IGESControl_Reader
-    from OCP.TopoDS import TopoDS_Shape
+    from OCP.IFSelect import IFSelect_RetDone  # type: ignore[import]
+    from OCP.IGESControl import IGESControl_Reader  # type: ignore[import]
+    from OCP.TopoDS import TopoDS_Shape  # type: ignore[import]
 
     ext = Path(path).suffix.lower()
     if ext in (".step", ".stp"):
