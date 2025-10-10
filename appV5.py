@@ -11785,6 +11785,7 @@ def compute_quote_from_df(
     hole_scrap_clamped_val: float = 0.0
     material_selection: dict[str, Any] = {}
     material_display_for_debug: str = ""
+    drill_estimator_hours_for_planner: float = 0.0
 
     def _has_rows(table: Any) -> bool:
         """Return True if the pandas-like table has any rows."""
@@ -12643,7 +12644,6 @@ def compute_quote_from_df(
     planner_process_minutes: float | None = None
     planner_drill_minutes: float | None = None
     planner_drilling_override: dict[str, float] | None = None
-    drill_estimator_hours_for_planner: float = 0.0
     used_planner = False
     _planner_meta_tracker: dict[str, set[str]] = {"keys": set()}
 
