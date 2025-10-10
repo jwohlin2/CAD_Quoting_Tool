@@ -3934,7 +3934,7 @@ try:
         return tools.UVBounds(face)
 
 
-    def _ocp_brep_read(path: str) -> TopoDS_Shape:
+    def _ocp_brep_read(path: str) -> Any:
         s = _new_topods_shape()
         builder = BRep_Builder()  # type: ignore[call-arg]
         read_s = getattr(BRepTools, "Read_s", None)
@@ -4026,7 +4026,7 @@ except Exception:
         return fn(face)
 
 
-    def _occ_brep_read(path: str) -> TopoDS_Shape:
+    def _occ_brep_read(path: str) -> Any:
         read_fn = getattr(_occ_breptools, "breptools_Read", None)
         if read_fn is None:
             raise RuntimeError("BREP read is unavailable")
@@ -4041,12 +4041,12 @@ except Exception:
     _brep_read = _occ_brep_read
 
 
-def _new_topods_shape() -> TopoDS_Shape:
+def _new_topods_shape() -> Any:
     ctor = cast(Any, TopoDS_Shape)
     return cast(TopoDS_Shape, ctor())
 
 
-def _new_topods_compound() -> TopoDS_Compound:
+def _new_topods_compound() -> Any:
     ctor = cast(Any, TopoDS_Compound)
     return cast(TopoDS_Compound, ctor())
 
@@ -4102,7 +4102,7 @@ def _shape_from_reader(reader):
 
     return healed
 
-def read_step_shape(path: str) -> TopoDS_Shape:
+def read_step_shape(path: str) -> Any:
     rdr = STEPControl_Reader()
     if rdr.ReadFile(path) != IFSelect_RetDone:
         raise RuntimeError("STEP read failed (file unreadable or unsupported).")
@@ -4150,13 +4150,13 @@ def read_step_shape(path: str) -> TopoDS_Shape:
     fx.Perform()
     return fx.Shape()
 
-def safe_bbox(shape: TopoDS_Shape):
+def safe_bbox(shape: Any):
     if _shape_is_null(shape):
         raise ValueError("Cannot compute bounding box of a null shape.")
     box = Bnd_Box()
     bnd_add(shape, box, True)  # <- uses whichever binding is available
     return box
-def read_step_or_iges_or_brep(path: str) -> TopoDS_Shape:
+def read_step_or_iges_or_brep(path: str) -> Any:
     p = Path(path)
     ext = p.suffix.lower()
     if ext in (".step", ".stp"):
@@ -4239,14 +4239,14 @@ SMALL = 1e-7
 
 
 
-def iter_solids(shape: TopoDS_Shape):
+def iter_solids(shape: Any):
     explorer = cast(Callable[[Any, Any], Any], TopExp_Explorer)
     exp = explorer(shape, cast(int, TopAbs_SOLID))
     while exp.More():
         yield geometry.to_solid(exp.Current())
         exp.Next()
 
-def explode_compound(shape: TopoDS_Shape) -> list[TopoDS_Shape]:
+def explode_compound(shape: Any) -> list[Any]:
     """If the file is a big COMPOUND, break it into shapes (parts/bodies)."""
     explorer = cast(Callable[[Any, Any], Any], TopExp_Explorer)
     exp = explorer(shape, cast(int, TopAbs_COMPOUND))
@@ -6098,14 +6098,13 @@ def _iter_ordered_process_entries(
         )
 
 
-# pyright: ignore[reportGeneralTypeIssues]
 def render_quote(
     result: dict,
     currency: str = "$",
     show_zeros: bool = False,
     llm_explanation: str = "",
     page_width: int = 74,
-) -> str:
+) -> str:  # pyright: ignore[reportGeneralTypeIssues]
     """Pretty printer for a full quote with auto-included non-zero lines."""
     breakdown    = result.get("breakdown", {}) or {}
     totals       = breakdown.get("totals", {}) or {}
