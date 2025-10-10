@@ -4809,7 +4809,9 @@ def sanitize_vars_df(df_full: "pd.DataFrame") -> "pd.DataFrame":
 
     return _coerce_core_types(core)
 
-def read_variables_file(path: str, return_full: bool = False):
+def read_variables_file(
+    path: str, return_full: bool = False
+) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
     """
     Read .xlsx/.csv, keep original data intact, and return a sanitized copy for the estimator.
     - If return_full=True, returns (core_df, full_df); otherwise returns core_df only.
@@ -20019,8 +20021,8 @@ class App(tk.Tk):
     def _on_llm_thread_limit_changed(self, *_: object) -> None:
         self._apply_llm_thread_limit_env(persist=True)
 
-    def _variables_dialog_defaults(self) -> dict[str, str]:
-        defaults: dict[str, str] = {}
+    def _variables_dialog_defaults(self) -> dict[str, Any]:
+        defaults: dict[str, Any] = {}
         saved = self._get_last_variables_path()
         if not saved:
             return defaults
@@ -20921,13 +20923,16 @@ class App(tk.Tk):
 
                 self.vars_df = apply_2d_features_to_variables(self.vars_df, g2d, params=self.params, rates=self.rates)
                 self.geo = g2d
-                self.geo_context = dict(g2d or {})
-                inner_geo = g2d.get("geo") if isinstance(g2d.get("geo"), dict) else {}
-                read_more_geo = g2d.get("geo_read_more") if isinstance(g2d.get("geo_read_more"), dict) else {}
+                geo_dict = g2d if isinstance(g2d, dict) else {}
+                self.geo_context = dict(geo_dict)
+                inner_geo_raw = geo_dict.get("geo")
+                inner_geo = inner_geo_raw if isinstance(inner_geo_raw, dict) else {}
+                read_more_geo_raw = geo_dict.get("geo_read_more")
+                read_more_geo = read_more_geo_raw if isinstance(read_more_geo_raw, dict) else {}
                 hole_count_val = (
                     _coerce_float_or_none(read_more_geo.get("hole_count_geom"))
                     or _coerce_float_or_none(inner_geo.get("hole_count"))
-                    or _coerce_float_or_none(g2d.get("hole_count"))
+                    or _coerce_float_or_none(geo_dict.get("hole_count"))
                     or 0
                 )
                 edge_len_in = (
@@ -20938,13 +20943,13 @@ class App(tk.Tk):
                 tap_qty_val = int(
                     _coerce_float_or_none(read_more_geo.get("tap_qty"))
                     or _coerce_float_or_none(inner_geo.get("tap_qty"))
-                    or _coerce_float_or_none(g2d.get("tap_qty"))
+                    or _coerce_float_or_none(geo_dict.get("tap_qty"))
                     or 0
                 )
                 cbore_qty_val = int(
                     _coerce_float_or_none(read_more_geo.get("cbore_qty"))
                     or _coerce_float_or_none(inner_geo.get("cbore_qty"))
-                    or _coerce_float_or_none(g2d.get("cbore_qty"))
+                    or _coerce_float_or_none(geo_dict.get("cbore_qty"))
                     or 0
                 )
                 self.geo_context.update(
@@ -21024,7 +21029,7 @@ class App(tk.Tk):
         if self.vars_df is None:
             vp = find_variables_near(path)
             if not vp:
-                dialog_kwargs = {"title": "Select variables CSV/XLSX"}
+                dialog_kwargs: dict[str, Any] = {"title": "Select variables CSV/XLSX"}
                 dialog_kwargs.update(self._variables_dialog_defaults())
                 vp = filedialog.askopenfilename(**dialog_kwargs)
             if not vp:
