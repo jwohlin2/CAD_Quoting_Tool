@@ -538,10 +538,11 @@ text_harvest = _export("text_harvest")
 extract_entities = _export("extract_entities")
 read_dxf = _export("read_dxf")
 upsert_var_row = _export("upsert_var_row")
-require_ezdxf = _export("require_ezdxf")
 get_dwg_converter_path = _export("get_dwg_converter_path")
 have_dwg_support = _export("have_dwg_support")
 get_import_diagnostics_text = _export("get_import_diagnostics_text")
+
+_geometry_require_ezdxf = getattr(geometry, "require_ezdxf", None)
 _HAS_TRIMESH = getattr(geometry, "HAS_TRIMESH", False)
 _HAS_EZDXF = getattr(geometry, "HAS_EZDXF", False)
 _HAS_ODAFC = getattr(geometry, "HAS_ODAFC", False)
@@ -3141,10 +3142,20 @@ def list_iter(lst):
 
 # ---- tiny helpers you can use elsewhere --------------------------------------
 def require_ezdxf():
-    """Raise a clear error if ezdxf is missing."""
+    """Raise a clear error if ezdxf is missing and return the module."""
+
+    if callable(_geometry_require_ezdxf):
+        return _geometry_require_ezdxf()
+
     if not geometry.HAS_EZDXF:
         raise RuntimeError("ezdxf not installed. Install with pip/conda (package name: 'ezdxf').")
-    return ezdxf
+
+    try:
+        import ezdxf as _ezdxf
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        raise RuntimeError("Failed to import ezdxf even though HAS_EZDXF is true.") from exc
+
+    return _ezdxf
 
 def get_dwg_converter_path() -> str:
     """Resolve a DWG?DXF converter path (.bat/.cmd/.exe)."""
