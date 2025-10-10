@@ -18,6 +18,7 @@ import argparse
 import logging
 import json, math, os, time
 import typing
+import tkinter as tk
 from collections import Counter
 from collections.abc import Mapping as _MappingABC
 from fractions import Fraction
@@ -78,7 +79,6 @@ import copy
 import re
 import sys
 import textwrap
-import tkinter as tk
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 
