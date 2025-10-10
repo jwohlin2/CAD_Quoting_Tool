@@ -14800,6 +14800,17 @@ def compute_quote_from_df(
         baseline_data["legacy_baseline_ignored"] = True
     if fixture_plan_desc:
         baseline_data["fixture"] = fixture_plan_desc
+
+    raw_planner_bucket_display_map = locals().get("planner_bucket_display_map")
+    planner_bucket_display_map_payload: Mapping[str, Any] | None = None
+    if isinstance(raw_planner_bucket_display_map, _MappingABC) and raw_planner_bucket_display_map:
+        planner_bucket_display_map_payload = raw_planner_bucket_display_map
+
+    raw_drill_debug_lines = locals().get("drill_debug_lines")
+    drill_debug_lines_payload: list[str] = []
+    if isinstance(raw_drill_debug_lines, (list, tuple, set)):
+        drill_debug_lines_payload = list(raw_drill_debug_lines)
+
     if process_plan_summary:
         baseline_data["process_plan"] = copy.deepcopy(process_plan_summary)
     if planner_process_minutes is not None:
@@ -14808,9 +14819,9 @@ def compute_quote_from_df(
         baseline_data["process_plan_pricing"] = copy.deepcopy(planner_pricing_result)
     if planner_bucket_view is not None:
         baseline_data["process_plan_bucket_view"] = copy.deepcopy(planner_bucket_view)
-    if planner_bucket_display_map:
+    if planner_bucket_display_map_payload:
         baseline_data["planner_bucket_display_map"] = copy.deepcopy(
-            planner_bucket_display_map
+            planner_bucket_display_map_payload
         )
     quote_state.baseline = baseline_data
     quote_state.process_plan = copy.deepcopy(process_plan_summary)
@@ -16604,7 +16615,7 @@ def compute_quote_from_df(
         "direct_costs": direct_costs_display,
         "direct_cost_details": direct_cost_details,
         "speeds_feeds_path": speeds_feeds_path,
-        "drill_debug": list(drill_debug_lines),
+        "drill_debug": list(drill_debug_lines_payload),
         "drilling_meta": drilling_meta,
         "pass_meta": pass_meta,
         "totals": {
@@ -16644,9 +16655,9 @@ def compute_quote_from_df(
             )
     if planner_bucket_rollup is not None:
         breakdown["planner_bucket_rollup"] = copy.deepcopy(planner_bucket_rollup)
-    if planner_bucket_display_map:
+    if planner_bucket_display_map_payload:
         breakdown["planner_bucket_display_map"] = copy.deepcopy(
-            planner_bucket_display_map
+            planner_bucket_display_map_payload
         )
 
     if process_plan_summary:
@@ -16730,7 +16741,7 @@ def compute_quote_from_df(
         "material_source": material_source_final,
         "speeds_feeds_path": speeds_feeds_path,
         "speeds_feeds_loaded": speeds_feeds_loaded_flag,
-        "drill_debug": list(drill_debug_lines),
+        "drill_debug": list(drill_debug_lines_payload),
         "drilling_meta": drilling_meta,
         "red_flags": list(red_flag_messages),
         "app": dict(app_meta),
