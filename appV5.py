@@ -15446,7 +15446,7 @@ def compute_quote_from_df(
     # Earlier rendering helpers construct a richer list; here we only need
     # label/amount/detail_bits to merge labor detail text for the quote summary.
     try:
-        _ = process_entries_for_display  # type: ignore[name-defined]
+        entries_for_display = process_entries_for_display  # type: ignore[name-defined]
     except NameError:
         tmp_entries: list[ProcessDisplayEntry] = []
         for _key, _val in (process_costs or {}).items():
@@ -15468,9 +15468,9 @@ def compute_quote_from_df(
                     display_override=None,
                 )
             )
-        process_entries_for_display = tmp_entries  # type: ignore[no-redef]
+        entries_for_display = tmp_entries
 
-    for entry in process_entries_for_display:
+    for entry in entries_for_display:
         try:
             amount_val = float(entry.amount or 0.0)
         except Exception:
