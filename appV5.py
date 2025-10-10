@@ -23,7 +23,6 @@ import re
 import time
 import typing
 import tkinter as tk
-import re
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
