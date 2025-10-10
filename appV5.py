@@ -484,6 +484,178 @@ def resolve_planner(
     return used_planner, planner_mode
 
 
+def _planner_total_has_values(planner_meta_total: Mapping[str, Any]) -> bool:
+    """Return True when planner total metadata includes tangible output."""
+
+    for candidate_key in (
+        "line_items",
+        "total_cost",
+        "cost",
+        "minutes",
+        "hr",
+        "machine_cost",
+        "labor_cost",
+    ):
+        try:
+            value = planner_meta_total.get(candidate_key)  # type: ignore[arg-type]
+        except Exception:
+            value = None
+        if isinstance(value, (list, tuple)) and value:
+            return True
+        try:
+            if float(value or 0.0):  # type: ignore[arg-type]
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _planner_meta_signals_present(meta_source: Mapping[str, Any]) -> bool:
+    """Return True when planner metadata keys indicate planner output."""
+
+    for raw_key, raw_meta in meta_source.items():
+        key_lower = str(raw_key or "").strip().lower()
+        if not key_lower:
+            continue
+        if key_lower.startswith("planner_"):
+            if key_lower == "planner_total" and isinstance(raw_meta, _MappingABC):
+                if _planner_total_has_values(raw_meta):
+                    return True
+                continue
+            return True
+    for alias in ("planner_total", "planner total"):
+        planner_meta_total = meta_source.get(alias)
+        if isinstance(planner_meta_total, _MappingABC) and _planner_total_has_values(planner_meta_total):
+            return True
+    return False
+
+
+def _planner_signals_present(
+    *,
+    process_meta: Mapping[str, Any] | None = None,
+    process_meta_raw: Mapping[str, Any] | None = None,
+    breakdown: Mapping[str, Any] | None = None,
+    planner_process_minutes: Any = None,
+    hour_summary_entries: Mapping[str, Any] | None = None,
+    additional_sources: Sequence[Any] | None = None,
+) -> bool:
+    """Return True when planner output is detectable in the provided data."""
+
+    meta_sources: list[Mapping[str, Any]] = []
+    for candidate in (process_meta, process_meta_raw):
+        if isinstance(candidate, _MappingABC) and candidate:
+            meta_sources.append(candidate)
+    for meta_source in meta_sources:
+        if _planner_meta_signals_present(meta_source):
+            return True
+
+    if isinstance(hour_summary_entries, _MappingABC) and hour_summary_entries:
+        for label, value in hour_summary_entries.items():
+            key_lower = str(label or "").strip().lower()
+            if not key_lower.startswith("planner"):
+                continue
+            base_value: Any
+            if isinstance(value, (list, tuple)) and value:
+                base_value = value[0]
+            else:
+                base_value = value
+            if isinstance(base_value, (int, float)):
+                if float(base_value) > 0.0:
+                    return True
+                continue
+            if isinstance(base_value, str):
+                text = base_value.strip()
+                if not text:
+                    continue
+                try:
+                    if float(text) > 0.0:
+                        return True
+                except Exception:
+                    continue
+
+    def _positive_minutes(value: Any) -> bool:
+        try:
+            if value is None:
+                return False
+            candidate = value
+            if isinstance(candidate, (list, tuple)) and candidate:
+                candidate = candidate[0]
+            if isinstance(candidate, str):
+                candidate = candidate.strip()
+                if not candidate:
+                    return False
+            return float(candidate) > 0.0
+        except Exception:
+            return False
+
+    if isinstance(breakdown, _MappingABC):
+        if _positive_minutes(breakdown.get("process_minutes")):
+            return True
+
+    if _positive_minutes(planner_process_minutes):
+        return True
+
+    breakdown_sources: list[Any] = []
+    if isinstance(breakdown, _MappingABC):
+        for key in (
+            "process_plan",
+            "planner_bucket_display_map",
+            "planner_bucket_rollup",
+            "process_plan_pricing",
+            "planner_bucket_view",
+            "process_plan_bucket_view",
+        ):
+            breakdown_sources.append(breakdown.get(key))
+    if additional_sources:
+        breakdown_sources.extend(additional_sources)
+
+    for candidate in breakdown_sources:
+        if isinstance(candidate, _MappingABC) and candidate:
+            return True
+        if isinstance(candidate, (list, tuple)) and candidate:
+            return True
+
+    return False
+
+
+def _resolve_pricing_source_value(
+    base_value: Any,
+    *,
+    used_planner: bool | None = None,
+    process_meta: Mapping[str, Any] | None = None,
+    process_meta_raw: Mapping[str, Any] | None = None,
+    breakdown: Mapping[str, Any] | None = None,
+    planner_process_minutes: Any = None,
+    hour_summary_entries: Mapping[str, Any] | None = None,
+    additional_sources: Sequence[Any] | None = None,
+) -> str | None:
+    """Return a normalized pricing source, forcing planner when signals exist."""
+
+    text = None
+    if base_value is not None:
+        text = str(base_value).strip()
+        if not text:
+            text = None
+
+    if text and text.lower() == "planner":
+        return "planner"
+
+    if used_planner:
+        return "planner"
+
+    if _planner_signals_present(
+        process_meta=process_meta,
+        process_meta_raw=process_meta_raw,
+        breakdown=breakdown,
+        planner_process_minutes=planner_process_minutes,
+        hour_summary_entries=hour_summary_entries,
+        additional_sources=additional_sources,
+    ):
+        return "planner"
+
+    return text
+
+
 def _count_recognized_ops(plan_summary: Mapping[str, Any] | None) -> int:
     """Return a conservative count of recognized planner operations."""
 
@@ -6702,98 +6874,37 @@ def render_quote(
         text = str(value).strip()
         return text or None
 
-    pricing_source_value = _coerce_pricing_source(breakdown.get("pricing_source"))
+    raw_pricing_source = _coerce_pricing_source(breakdown.get("pricing_source"))
     pricing_source_text = _coerce_pricing_source(
         result.get("pricing_source_text")
         or breakdown.get("pricing_source_text")
     )
 
-    def _planner_signals_present() -> bool:
-        meta_sources: list[Mapping[str, Any]] = []
-        if isinstance(process_meta, _MappingABC) and process_meta:
-            meta_sources.append(process_meta)
-        if isinstance(process_meta_raw, _MappingABC):
-            meta_sources.append(process_meta_raw)
-
-        for meta_source in meta_sources:
-            for raw_key, raw_meta in meta_source.items():
-                key_lower = str(raw_key or "").strip().lower()
-                if not key_lower:
-                    continue
-                if key_lower.startswith("planner_"):
-                    return True
-            planner_meta_total = meta_source.get("planner_total")
-            if isinstance(planner_meta_total, _MappingABC):
-                for candidate_key in (
-                    "line_items",
-                    "total_cost",
-                    "cost",
-                    "minutes",
-                    "hr",
-                    "machine_cost",
-                    "labor_cost",
-                ):
-                    value = planner_meta_total.get(candidate_key)  # type: ignore[arg-type]
-                    try:
-                        if isinstance(value, (list, tuple)) and value:
-                            return True
-                        if float(value or 0.0):  # type: ignore[arg-type]
-                            return True
-                    except Exception:
-                        continue
-        planner_minutes = breakdown.get("process_minutes")
-        try:
-            if planner_minutes is not None and float(planner_minutes or 0.0) > 0.0:  # type: ignore[arg-type]
-                return True
-        except Exception:
-            pass
-        for key in (
-            "process_plan",
-            "planner_bucket_display_map",
-            "planner_bucket_rollup",
-            "process_plan_pricing",
-        ):
-            candidate = breakdown.get(key)
-            if isinstance(candidate, _MappingABC) and candidate:
-                return True
-            if isinstance(candidate, (list, tuple)) and candidate:
-                return True
-        return False
-
-    # If planner produced hours, treat source as planner for display consistency.
-    if not pricing_source_value:
-        try:
-            hs_entries = dict(hour_summary_entries or {})
-        except UnboundLocalError:
-            hs_entries = {}
-
-        def _has_positive_planner_hours(value: object) -> bool:
-            base_value: object
-            if isinstance(value, (list, tuple)) and value:
-                base_value = value[0]
-            else:
-                base_value = value
-            if isinstance(base_value, (int, float)):
-                return float(base_value) > 0.0
-            if isinstance(base_value, str):
-                text = base_value.strip()
-                if not text:
-                    return False
+    used_planner_flag: bool | None = None
+    for source in (result, breakdown):
+        if not isinstance(source, _MappingABC):
+            continue
+        for meta_key in ("app_meta", "app"):
+            candidate = source.get(meta_key)
+            if not isinstance(candidate, _MappingABC):
+                continue
+            if "used_planner" in candidate:
                 try:
-                    return float(text) > 0.0
+                    used_planner_flag = bool(candidate.get("used_planner"))
                 except Exception:
-                    return False
-            return False
+                    used_planner_flag = True if candidate.get("used_planner") else False
+                break
+        if used_planner_flag is not None:
+            break
 
-        if any(
-            str(label).lower().startswith("planner")
-            and _has_positive_planner_hours(value)
-            for label, value in hs_entries.items()
-        ):
-            pricing_source_value = "planner"
-
-    if str(pricing_source_value or "").lower() != "planner" and _planner_signals_present():
-        pricing_source_value = "planner"
+    pricing_source_value = _resolve_pricing_source_value(
+        raw_pricing_source,
+        used_planner=used_planner_flag,
+        process_meta=process_meta if isinstance(process_meta, _MappingABC) else None,
+        process_meta_raw=process_meta_raw if isinstance(process_meta_raw, _MappingABC) else None,
+        breakdown=breakdown if isinstance(breakdown, _MappingABC) else None,
+        hour_summary_entries=hour_summary_entries,
+    )
 
     if (
         pricing_source_text
@@ -15565,47 +15676,19 @@ def compute_quote_from_df(
     if red_flag_messages:
         baseline_data["red_flags"] = list(red_flag_messages)
     baseline_data["speeds_feeds_path"] = speeds_feeds_path
-    pricing_source_value = str(locals().get("pricing_source", "legacy") or "legacy")
-    if pricing_source_value != "planner":
-        planner_display_detected = False
-        if isinstance(process_meta, _MappingABC):
-            for key in process_meta.keys():
-                key_text = str(key or "").strip().lower()
-                if key_text.startswith("planner_"):
-                    planner_display_detected = True
-                    break
-            if not planner_display_detected:
-                planner_meta_total = process_meta.get("planner_total")
-                if isinstance(planner_meta_total, _MappingABC):
-                    raw_items = planner_meta_total.get("line_items")
-                    if isinstance(raw_items, (list, tuple)) and raw_items:
-                        planner_display_detected = True
-                    else:
-                        for field in (
-                            "total_cost",
-                            "cost",
-                            "minutes",
-                            "hr",
-                            "machine_cost",
-                            "labor_cost",
-                        ):
-                            try:
-                                value = planner_meta_total.get(field)
-                            except Exception:
-                                value = None
-                            try:
-                                if float(value or 0.0):
-                                    planner_display_detected = True
-                                    break
-                            except Exception:
-                                continue
-        if not planner_display_detected and planner_process_minutes is not None:
-            try:
-                planner_display_detected = float(planner_process_minutes) > 0.0
-            except Exception:
-                planner_display_detected = False
-        if planner_display_detected or bool(locals().get("used_planner")):
-            pricing_source_value = "planner"
+    pricing_source_value = _resolve_pricing_source_value(
+        locals().get("pricing_source", "legacy"),
+        used_planner=bool(locals().get("used_planner")),
+        process_meta=process_meta if isinstance(process_meta, _MappingABC) else None,
+        planner_process_minutes=planner_process_minutes,
+        additional_sources=[
+            locals().get("planner_bucket_display_map_payload"),
+            locals().get("planner_bucket_view"),
+            locals().get("planner_bucket_rollup"),
+            locals().get("process_plan_summary"),
+            locals().get("planner_pricing_result"),
+        ],
+    ) or "legacy"
     baseline_data["pricing_source"] = pricing_source_value
     if legacy_baseline_ignored:
         baseline_data["legacy_baseline_ignored"] = True
