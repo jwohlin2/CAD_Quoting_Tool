@@ -518,6 +518,12 @@ except ImportError:
             TopoDS = TopoDS_Face = TopoDS_Shape = _MissingOCCTModule()
             TopTools_IndexedDataMapOfShapeListOfShape = _MissingOCCTModule()
 
+if TYPE_CHECKING:
+    from typing import cast
+
+    BRep_Tool = cast(_BRepToolProto, BRep_Tool)
+    TopoDS = cast(_TopoDSProto, TopoDS)
+
 try:
     from geo_read_more import build_geo_from_dxf as build_geo_from_dxf_path
 except Exception:
@@ -3076,24 +3082,28 @@ if STACK == "ocp":
         return _topods.Shell(s)
 else:
     # Resolve within OCC.Core only
-    try:
-        from OCC.Core.TopoDS import topods_Edge as _TO_EDGE
-    except Exception:
-        try:
-            from OCC.Core.TopoDS import Edge as _TO_EDGE
-        except Exception:
-            from OCC.Core.TopoDS import topods as _occ_topods
-            _TO_EDGE = getattr(_occ_topods, "Edge")
-    try:
-        from OCC.Core.TopoDS import topods_Solid as _TO_SOLID
-    except Exception:
-        from OCC.Core.TopoDS import topods as _occ_topods
-        _TO_SOLID = getattr(_occ_topods, "Solid")
-    try:
-        from OCC.Core.TopoDS import topods_Shell as _TO_SHELL
-    except Exception:
-        from OCC.Core.TopoDS import topods as _occ_topods
-        _TO_SHELL = getattr(_occ_topods, "Shell")
+    _occ_topods_module = _import_optional("OCC.Core.TopoDS")
+    if _occ_topods_module is None:
+        raise ImportError("OCC.Core.TopoDS is required for pythonocc backend")
+
+    def _resolve_topods_callable(*names: str):
+        for candidate in names:
+            attr = getattr(_occ_topods_module, candidate, None)
+            if attr:
+                return attr
+        nested = getattr(_occ_topods_module, "topods", None)
+        if nested is not None:
+            for candidate in names:
+                attr = getattr(nested, candidate, None)
+                if attr:
+                    return attr
+        raise AttributeError(
+            f"None of {names!r} are available on OCC.Core.TopoDS for casting"
+        )
+
+    _TO_EDGE = _resolve_topods_callable("topods_Edge", "Edge")
+    _TO_SOLID = _resolve_topods_callable("topods_Solid", "Solid")
+    _TO_SHELL = _resolve_topods_callable("topods_Shell", "Shell")
 
 # Type guards
 def _is_named(obj, names: tuple[str, ...]) -> bool:
@@ -3110,21 +3120,26 @@ def ensure_shape(obj):
     obj = _unwrap_value(obj)
     if obj is None:
         raise TypeError("Expected TopoDS_Shape, got None")
-    if hasattr(obj, "IsNull") and obj.IsNull():
+    is_null = getattr(obj, "IsNull", None)
+    if callable(is_null) and is_null():
         raise TypeError("Expected non-null TopoDS_Shape")
     return obj
 
 # Safe casters: no-ops if already cast; unwrap list nodes; check kind
 # Choose stack
-try:
-    # OCP / CadQuery bindings
-    from OCP.BRepGProp import BRepGProp as _BRepGProp_mod  # type: ignore[import]
+_BRepGProp_mod = None
+STACK_GPROP = "pythonocc"
+_ocp_brepgprop = _import_optional("OCP.BRepGProp")
+if _ocp_brepgprop is not None and hasattr(_ocp_brepgprop, "BRepGProp"):
+    _BRepGProp_mod = getattr(_ocp_brepgprop, "BRepGProp")
     STACK_GPROP = "ocp"
-except Exception:
-    # pythonocc-core
-    try:
-        from OCC.Core.BRepGProp import BRepGProp as _BRepGProp_mod
-    except Exception:
+else:
+    _occ_brepgprop = _import_optional("OCC.Core.BRepGProp")
+    if _occ_brepgprop is None:
+        raise ImportError("OCC.Core.BRepGProp is required for pythonocc backend")
+    if hasattr(_occ_brepgprop, "BRepGProp"):
+        _BRepGProp_mod = getattr(_occ_brepgprop, "BRepGProp")
+    else:
         from types import SimpleNamespace
 
         from OCC.Core.BRepGProp import (
@@ -3137,10 +3152,11 @@ except Exception:
             brepgprop_VolumeProperties as _vp,  # type: ignore[attr-defined]
         )
         _BRepGProp_mod = SimpleNamespace(
-            LinearProperties=_lp,
-            SurfaceProperties=_sp,
-            VolumeProperties=_vp,
+            LinearProperties=getattr(_occ_brepgprop, "brepgprop_LinearProperties"),
+            SurfaceProperties=getattr(_occ_brepgprop, "brepgprop_SurfaceProperties"),
+            VolumeProperties=getattr(_occ_brepgprop, "brepgprop_VolumeProperties"),
         )
+
     def _to_edge_occ(s):
         try:
             from OCC.Core.TopoDS import topods_Edge as _fn  # type: ignore[attr-defined]
@@ -3149,7 +3165,6 @@ except Exception:
         return _fn(s)
 
     _TO_EDGE = _to_edge_occ
-    STACK_GPROP = "pythonocc"
 
 # Resolve topods casters across bindings
 
