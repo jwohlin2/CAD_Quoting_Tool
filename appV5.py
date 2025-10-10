@@ -3588,51 +3588,6 @@ except Exception:
     fitz = None  # type: ignore[assignment]
     _HAS_PYMUPDF = False
 
-def upsert_var_row(df, item, value, dtype="number"):
-    """
-    Upsert one row by Item name (case-insensitive).
-    - Forces `item` and `value` to scalars.
-    - Works on the sanitized 3-column df (Item, Example..., Data Type...).
-    """
-    import numpy as np
-
-    # force scalars
-    if isinstance(item, pd.Series):
-        item = item.iloc[0]
-    item = str(item)
-
-    if isinstance(value, pd.Series):
-        value = value.iloc[0]
-    # try to make numeric if it looks numeric; otherwise keep as-is
-    try:
-        if value is None or (isinstance(value, float) and np.isnan(value)):
-            pass
-        else:
-            value = float(value)
-    except Exception:
-        # leave non-numerics (e.g., text) as-is
-        pass
-
-    # build a row with the exact df schema
-    cols = list(df.columns)
-    row: Dict[str, Any] = {c: "" for c in cols}
-    if "Item" in row:
-        row["Item"] = item
-    if "Example Values / Options" in row:
-        row["Example Values / Options"] = value
-    if "Data Type / Input Method" in row:
-        row["Data Type / Input Method"] = dtype
-
-    # case-insensitive exact match on Item
-    m = df["Item"].astype(str).str.casefold() == item.casefold()
-    if m.any():
-        df.loc[m, cols] = [row[c] for c in cols]
-        return df
-
-    # append
-    new_row = pd.DataFrame([[row[c] for c in cols]], columns=cols)
-    return pd.concat([df, new_row], ignore_index=True)
-
 DIM_RE = re.compile(r"(?:ï¿½|DIAM|DIA)\s*([0-9.+-]+)|R\s*([0-9.+-]+)|([0-9.+-]+)\s*[xX]\s*([0-9.+-]+)")
 
 def load_drawing(path: Path) -> Drawing:
