@@ -10979,6 +10979,7 @@ def compute_quote_from_df(
     hole_scrap_frac_est: float = 0.0
     hole_scrap_clamped_val: float = 0.0
     material_selection: dict[str, Any] = {}
+    material_display_for_debug: str = ""
 
     def _int_from(value: Any) -> int:
         num = _coerce_float_or_none(value)
