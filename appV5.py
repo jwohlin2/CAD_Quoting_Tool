@@ -11474,13 +11474,39 @@ def compute_quote_from_df(df: pd.DataFrame,
         if thickness_in_ui and thickness_in_ui > 0:
             thickness_for_drill = float(thickness_in_ui) * 25.4
 
-    drill_material_source = geo_context.get("material") or material_name
+    selected_material_name: str | None = None
+    if isinstance(material_detail_for_breakdown, Mapping):
+        for key in ("material_name", "material", "material_key"):
+            raw_value = material_detail_for_breakdown.get(key)
+            if raw_value is None:
+                continue
+            candidate = str(raw_value).strip()
+            if candidate:
+                selected_material_name = candidate
+                break
+    if selected_material_name is None and isinstance(getattr(quote_state, "effective", None), Mapping):
+        try:
+            effective_material = quote_state.effective.get("material")  # type: ignore[union-attr]
+        except Exception:
+            effective_material = None
+        if effective_material:
+            candidate = str(effective_material).strip()
+            if candidate:
+                selected_material_name = candidate
+
+    drill_material_source = (
+        selected_material_name
+        or geo_context.get("material")
+        or material_name
+        or "Steel"
+    )
+    drill_material_source = str(drill_material_source).strip()
     drill_material_lookup = (
         _normalize_lookup_key(drill_material_source)
         if drill_material_source
         else ""
     )
-    drill_material_key = drill_material_lookup or (drill_material_source or "")
+    drill_material_key = drill_material_lookup or drill_material_source
     speeds_feeds_raw = _resolve_speeds_feeds_path(params, ui_vars)
     speeds_feeds_path: str | None = None
     speeds_feeds_table: "pd.DataFrame" | None = None
@@ -12181,7 +12207,7 @@ def compute_quote_from_df(df: pd.DataFrame,
         "hole_groups": hole_groups_geo,
         "profile_length_mm": float(_coerce_float_or_none(geo_context.get("profile_length_mm")) or 0.0),
         "thickness_mm": float(_coerce_float_or_none(geo_context.get("thickness_mm")) or 0.0),
-        "material_key": geo_context.get("material") or material_name,
+        "material_key": drill_material_lookup or (drill_material_source or material_name),
         "drilling_hr_baseline": baseline_drill_hr,
     })
     # Normalize tolerance inputs (optional). Prefer explicit geo_context input; otherwise
