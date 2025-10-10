@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from cad_quoter.utils import _dict
+
 # ---- canonical names used by the planner ----
 MACHINES = [
     "WireEDM",
@@ -203,33 +205,32 @@ def two_bucket_to_flat(rates: dict[str, dict[str, Any]]) -> dict[str, float]:
 
     flat: dict[str, float] = {}
 
-    machine_rates = rates.get("machine", {}) if isinstance(rates, dict) else {}
-    if isinstance(machine_rates, dict):
-        for machine_name, value in machine_rates.items():
-            if value in (None, ""):
-                continue
-            try:
-                numeric = float(value)
-            except Exception:
-                continue
-            key = _MACHINE_TO_OLDKEY.get(machine_name, machine_name)
-            flat[key] = numeric
+    rates_map = _dict(rates)
+    machine_rates = _dict(rates_map.get("machine"))
+    for machine_name, value in machine_rates.items():
+        if value in (None, ""):
+            continue
+        try:
+            numeric = float(value)
+        except Exception:
+            continue
+        key = _MACHINE_TO_OLDKEY.get(machine_name, machine_name)
+        flat[key] = numeric
 
-    labor_rates = rates.get("labor", {}) if isinstance(rates, dict) else {}
-    if isinstance(labor_rates, dict):
-        for role, value in labor_rates.items():
-            if value in (None, ""):
-                continue
-            try:
-                numeric = float(value)
-            except Exception:
-                continue
-            aliases = PREFERRED_ROLE_FOR_DUPES.get(role)
-            if aliases:
-                for alias in aliases:
-                    flat[alias] = numeric
-            key = _ROLE_TO_OLDKEY.get(role, role)
-            flat[key] = numeric
+    labor_rates = _dict(rates_map.get("labor"))
+    for role, value in labor_rates.items():
+        if value in (None, ""):
+            continue
+        try:
+            numeric = float(value)
+        except Exception:
+            continue
+        aliases = PREFERRED_ROLE_FOR_DUPES.get(role)
+        if aliases:
+            for alias in aliases:
+                flat[alias] = numeric
+        key = _ROLE_TO_OLDKEY.get(role, role)
+        flat[key] = numeric
 
     return flat
 
