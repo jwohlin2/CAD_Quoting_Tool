@@ -17811,8 +17811,8 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
             if geo_read_more.get("chart_lines") and not result.get("chart_lines"):
                 result["chart_lines"] = list(geo_read_more.get("chart_lines") or [])
             if geo_read_more.get("tap_qty") or geo_read_more.get("cbore_qty") or geo_read_more.get("csk_qty"):
-                feature_counts = result.get("feature_counts") if isinstance(result.get("feature_counts"), dict) else {}
-                feature_counts = dict(feature_counts)
+                feature_counts_raw = result.get("feature_counts") if isinstance(result.get("feature_counts"), dict) else {}
+                feature_counts: dict[str, Any] = {str(k): v for k, v in dict(feature_counts_raw).items()}
                 if geo_read_more.get("tap_qty"):
                     feature_counts["tap_qty"] = max(int(feature_counts.get("tap_qty", 0) or 0), int(geo_read_more.get("tap_qty") or 0))
                 if geo_read_more.get("cbore_qty"):
@@ -17934,6 +17934,7 @@ def reconcile_holes(entity_holes_mm: Iterable[Any] | None, chart_ops: Iterable[d
     chart_bins: Counter[float] = Counter()
     tap_qty = 0
     cbore_qty = 0
+    csk_qty = 0
     if chart_ops:
         for op in chart_ops:
             if not isinstance(op, dict):
