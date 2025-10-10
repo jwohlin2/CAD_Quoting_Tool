@@ -13366,6 +13366,7 @@ def compute_quote_from_df(
     speeds_feeds_summary: Mapping[str, Any] | None = None
     speeds_feeds_row: Mapping[str, Any] | None = None
     selected_precomputed: dict[str, float] = {}
+    chosen_material_label: str = ""
     material_display_for_debug: str = str(
         material_selection.get("canonical")
         or material_selection.get("canonical_material")
