@@ -99,6 +99,7 @@ def roughly_equal(a: float | int | str | None, b: float | int | str | None, *, e
 
 
 import copy
+import importlib
 import sys
 import textwrap
 from typing import (
@@ -147,13 +148,17 @@ else:
             return _TK_MODULE_CACHE
 
         try:
-            import tkinter as _tk_mod  # type: ignore[import]
-            from tkinter import (  # type: ignore[import]
-                filedialog as _filedialog_mod,
-                messagebox as _messagebox_mod,
-                scrolledtext as _scrolledtext_mod,
-                ttk as _ttk_mod,
-            )
+            _tk_mod = importlib.import_module("tkinter")  # type: ignore[import]
+            _filedialog_mod = importlib.import_module(
+                "tkinter.filedialog"
+            )  # type: ignore[import]
+            _messagebox_mod = importlib.import_module(
+                "tkinter.messagebox"
+            )  # type: ignore[import]
+            _scrolledtext_mod = importlib.import_module(
+                "tkinter.scrolledtext"
+            )  # type: ignore[import]
+            _ttk_mod = importlib.import_module("tkinter.ttk")  # type: ignore[import]
         except Exception as exc:  # pragma: no cover - headless environments
             _TK_IMPORT_ERROR = exc
             return None
