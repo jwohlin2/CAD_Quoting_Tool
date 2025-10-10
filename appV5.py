@@ -3225,11 +3225,6 @@ try:
 except Exception:
     _extract_text_lines_from_dxf = None
 
-# numpy is optional for a few small calcs; degrade gracefully if missing
-try:
-    import numpy as np  # type: ignore
-except Exception:
-    np = None  # type: ignore
 # ---------- OCC / OCP compatibility ----------
 STACK = None
 
@@ -3663,7 +3658,6 @@ def upsert_var_row(df, item, value, dtype="number"):
     - Works on the sanitized 3-column df (Item, Example..., Data Type...).
     """
     import numpy as np
-    import pandas as pd
 
     # force scalars
     if isinstance(item, pd.Series):
@@ -4831,9 +4825,9 @@ def save_llm_log_json(log: dict) -> Path:
 
 # ----------------- Variables & quote -----------------
 try:
-    import pandas as pd
+    pd  # type: ignore[name-defined]
     _HAS_PANDAS = True
-except Exception:
+except NameError:
     _HAS_PANDAS = False
 
 CORE_COLS = ["Item", "Example Values / Options", "Data Type / Input Method"]
@@ -15706,7 +15700,6 @@ def compute_quote_from_df(df: pd.DataFrame,
 
 # ---------- Tracing ----------
 def trace_hours_from_df(df):
-    import pandas as pd
     out={}
     def grab(regex,label):
         items=df["Item"].astype(str)
