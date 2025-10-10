@@ -23,7 +23,9 @@ import re
 import time
 import typing
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Mapping as _CABCM
+
+Mapping = _CABCM
 from dataclasses import dataclass, field, replace, fields as dataclass_fields
 from fractions import Fraction
 from pathlib import Path
@@ -51,11 +53,25 @@ APP_ENV = AppEnvironment.from_env()
 EXTRA_DETAIL_RE = re.compile(r"^includes\b.*extras\b", re.IGNORECASE)
 
 
+def _coerce_bool(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"y", "yes", "true", "1", "on"}:
+            return True
+        if text in {"n", "no", "false", "0", "off"}:
+            return False
+    return None
+
+
 def _coerce_env_bool(value: str | None) -> bool:
     if value is None:
         return False
-    text = value.strip().lower()
-    return text in {"1", "true", "yes", "on"}
+    coerced = _coerce_bool(value)
+    return bool(coerced)
 
 
 FORCE_PLANNER = _coerce_env_bool(os.environ.get("FORCE_PLANNER"))
@@ -65,6 +81,17 @@ FORCE_PLANNER = _coerce_env_bool(os.environ.get("FORCE_PLANNER"))
 LLM_MULTIPLIER_MIN = 0.25
 LLM_MULTIPLIER_MAX = 4.0
 LLM_ADDER_MAX = 8.0
+
+LLM_BOUND_DEFAULTS: Mapping[str, Any] = MappingProxyType(
+    {
+        "mult_min": LLM_MULTIPLIER_MIN,
+        "mult_max": LLM_MULTIPLIER_MAX,
+        "adder_max_hr": LLM_ADDER_MAX,
+        "scrap_min": 0.0,
+        "scrap_max": 0.25,
+        "adder_bucket_max": {},
+    }
+)
 
 
 def jdump(obj) -> str:
@@ -98,8 +125,6 @@ def roughly_equal(a: float | int | str | None, b: float | int | str | None, *, e
     return math.isclose(a_val, b_val, rel_tol=0.0, abs_tol=abs(eps_val))
 
 
-import copy
-import importlib
 import sys
 import textwrap
 from typing import (
@@ -109,7 +134,6 @@ from typing import (
     Iterable,
     Iterator,
     List,
-    Mapping,
     Optional,
     Protocol,
     Sequence,
@@ -412,22 +436,15 @@ from cad_quoter.pricing.time_estimator import (
 from cad_quoter.pricing.wieland import lookup_price as lookup_wieland_price
 from cad_quoter.rates import migrate_flat_to_two_bucket, two_bucket_to_flat
 from cad_quoter.vendors.mcmaster_stock import lookup_sku_and_price_for_mm
-from cad_quoter.utils.geo_ctx import _should_include_outsourced_pass
 from cad_quoter.llm import (
     EDITOR_FROM_UI,
     EDITOR_TO_SUGG,
     LLMClient,
     SYSTEM_SUGGEST,
     SUGG_TO_EDITOR,
-    SYSTEM_SUGGEST,
     infer_hours_and_overrides_from_geo as _infer_hours_and_overrides_from_geo,
     parse_llm_json,
     explain_quote,
-)
-
-_DEFAULT_MATERIAL_DENSITY_G_CC = MATERIAL_DENSITY_G_CC_BY_KEY.get(
-    DEFAULT_MATERIAL_KEY,
-    7.85,
 )
 
 try:
@@ -743,6 +760,13 @@ except ImportError:
             TopoDS = TopoDS_Face = TopoDS_Shape = _MissingOCCTModule()
             TopTools_IndexedDataMapOfShapeListOfShape = _MissingOCCTModule()
 
+if TYPE_CHECKING:
+    _TopAbsShapeEnumT = TopAbs_ShapeEnum
+else:
+    _TopAbsShapeEnumT = Any
+
+TopAbsShapeEnumT: TypeAlias = _TopAbsShapeEnumT
+
 BRep_Tool = cast(_BRepToolProto, BRep_Tool)
 TopoDS = cast(_TopoDSProto, TopoDS)
 try:
@@ -763,7 +787,7 @@ except Exception:
     build_geo_from_dxf_path = None  # type: ignore[assignment]
 
 
-_MappingABC = Mapping
+_MappingABC = _CABCM
 
 _build_geo_from_dxf_hook: Optional[Callable[[str], Dict[str, Any]]] = None
 
@@ -989,60 +1013,6 @@ def _holes_scrap_fraction(geo_ctx: Mapping[str, Any] | None, *, cap: float = 0.2
     if not math.isfinite(frac) or frac < 0:
         return 0.0
     return min(cap, float(frac))
-
-
-def _holes_removed_mass_g(geo_ctx: Mapping[str, Any] | None) -> float | None:
-    """
-    Optional: estimate grams removed by (through) holes = Σ(πr^2 * thickness) * density.
-    Uses thickness_mm from geo_ctx and material density map; safe to skip if unknown.
-    """
-
-    if not isinstance(geo_ctx, Mapping):
-        return None
-    # thickness
-    thickness_mm = None
-    for key in ("thickness_mm", ("geo", "thickness_mm")):
-        raw: Any | None = None
-        try:
-            if isinstance(key, tuple):
-                nested = geo_ctx.get(key[0])
-                if isinstance(nested, Mapping):
-                    raw = nested.get(key[1])
-            else:
-                raw = geo_ctx.get(key)
-        except Exception:
-            raw = None
-        if raw in (None, ""):
-            continue
-        try:
-            thickness_mm = float(raw)
-        except (TypeError, ValueError):
-            thickness_mm = None
-        if thickness_mm and thickness_mm > 0:
-            break
-    if not thickness_mm or thickness_mm <= 0:
-        return None
-
-    diams = _iter_hole_diams_mm(geo_ctx)
-    if not diams:
-        return None
-    vol_mm3 = 0.0
-    for d in diams:
-        r = 0.5 * float(d)
-        vol_mm3 += math.pi * r * r * float(thickness_mm)
-
-    # material density lookup (g/cc)
-    name = str((geo_ctx.get("material") or "")).strip().lower()
-    key = _normalize_lookup_key(name) if name else None
-    dens = None
-    if key and key in MATERIAL_DENSITY_G_CC_BY_KEY:
-        dens = MATERIAL_DENSITY_G_CC_BY_KEY[key]
-    if not dens and name:
-        dens = MATERIAL_DENSITY_G_CC_BY_KEYWORD.get(name)
-    if not dens:
-        dens = 7.85  # steel-ish default
-    grams = (vol_mm3 / 1000.0) * float(dens)
-    return grams if grams > 0 else None
 
 
 def normalize_scrap_pct(val: Any, cap: float = 0.25) -> float:
@@ -1697,19 +1667,6 @@ def sanitize_suggestions(s: dict, bounds: dict) -> dict:
         _store_meta(path, detail, num)
         return num
 
-    def _coerce_bool(value: Any) -> bool | None:
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, (int, float)):
-            return bool(value)
-        if isinstance(value, str):
-            lowered = value.strip().lower()
-            if lowered in {"y", "yes", "true", "1"}:
-                return True
-            if lowered in {"n", "no", "false", "0"}:
-                return False
-        return None
-
     def _extract_bool_field(raw: Any, path: tuple[str, ...]) -> bool | None:
         if raw is None:
             return None
@@ -2142,30 +2099,17 @@ def merge_effective(
             eff.pop(key, None)
         source_tags[key] = source
 
-    def _coerce_bool_value(raw: Any) -> bool | None:
-        if isinstance(raw, bool):
-            return raw
-        if isinstance(raw, (int, float)):
-            return bool(raw)
-        if isinstance(raw, str):
-            lowered = raw.strip().lower()
-            if lowered in {"y", "yes", "true", "1"}:
-                return True
-            if lowered in {"n", "no", "false", "0"}:
-                return False
-        return None
-
     def _merge_bool_field(key: str) -> None:
         base_val = baseline.get(key) if isinstance(baseline.get(key), bool) else None
         value = base_val
         source = "baseline"
         if key in overrides:
-            cand = _coerce_bool_value(overrides.get(key))
+            cand = _coerce_bool(overrides.get(key))
             if cand is not None:
                 value = cand
                 source = "user"
         elif key in suggestions:
-            cand = _coerce_bool_value(suggestions.get(key))
+            cand = _coerce_bool(suggestions.get(key))
             if cand is not None:
                 value = cand
                 source = "llm"
@@ -4005,13 +3949,13 @@ def _shape_from_reader(reader):
     else:
         builder = BRep_Builder()
         compound = _new_topods_compound()
-        builder.MakeCompound(compound)
+        cast(Any, builder).MakeCompound(compound)
         added = 0
         for i in range(1, transfer_count + 1):
             s = reader.Shape(i)
             if s is None or _shape_is_null(s):
                 continue
-            builder.Add(compound, s)
+            cast(Any, builder).Add(compound, s)
             added += 1
         if added == 0:
             raise RuntimeError("Reader produced only null sub-shapes")
@@ -4049,11 +3993,11 @@ def read_step_shape(path: str) -> TopoDSShapeT:
     else:
         builder = BRep_Builder()
         comp = _new_topods_compound()
-        builder.MakeCompound(comp)
+        cast(Any, builder).MakeCompound(comp)
         for i in range(1, n + 1):
             s = rdr.Shape(i)
             if not _shape_is_null(s):
-                builder.Add(comp, s)
+                cast(Any, builder).Add(comp, s)
         shape = comp
 
     if _shape_is_null(shape):
@@ -4172,9 +4116,9 @@ SMALL = 1e-7
 
 
 
-def iter_solids(shape: TopoDS_Shape):
+def iter_solids(shape: TopoDSShapeT):
     explorer = cast(Callable[[Any, Any], Any], TopExp_Explorer)
-    exp = explorer(shape, cast(TopAbs_ShapeEnum, TopAbs_SOLID))
+    exp = explorer(shape, cast(TopAbsShapeEnumT, TopAbs_SOLID))
     while exp.More():
         yield geometry.to_solid(exp.Current())
         exp.Next()
@@ -4182,14 +4126,14 @@ def iter_solids(shape: TopoDS_Shape):
 def explode_compound(shape: TopoDSShapeT) -> list[TopoDSShapeT]:
     """If the file is a big COMPOUND, break it into shapes (parts/bodies)."""
     explorer = cast(Callable[[Any, Any], Any], TopExp_Explorer)
-    exp = explorer(shape, cast(TopAbs_ShapeEnum, TopAbs_COMPOUND))
+    exp = explorer(shape, cast(TopAbsShapeEnumT, TopAbs_COMPOUND))
     if exp.More():
         # Itï¿½s a compound ï¿½ return its shells/solids/faces as needed
         solids = list(iter_solids(shape))
         if solids:
             return solids
         # fallback to shells
-        sh = explorer(shape, cast(TopAbs_ShapeEnum, TopAbs_SHELL))
+        sh = explorer(shape, cast(TopAbsShapeEnumT, TopAbs_SHELL))
         shells = []
         while sh.More():
             shells.append(geometry.to_shell(sh.Current()))
@@ -4307,7 +4251,7 @@ def _section_perimeter_len(shape, z_values):
         sec = BRepAlgoAPI_Section(shape, plane, False); sec.Build()
         if not sec.IsDone(): continue
         w = sec.Shape()
-        it = explorer(w, cast(TopAbs_ShapeEnum, TopAbs_EDGE))
+        it = explorer(w, cast(TopAbsShapeEnumT, TopAbs_EDGE))
         while it.More():
             e = geometry.to_edge(it.Current())
             total += _length_of_edge(e)
@@ -6473,12 +6417,6 @@ def render_quote(
     lines.append("")
     def _drill_debug_enabled() -> bool:
         """Return True when drill debug output should be rendered."""
-
-        def _coerce_bool(value: object) -> bool | None:
-            try:
-                return bool(value)
-            except Exception:
-                return None
 
         for source in (result, breakdown):
             if not isinstance(source, Mapping):
@@ -8882,13 +8820,15 @@ def compute_material_cost(
                         or MATERIAL_DENSITY_G_CC_BY_KEY.get(symbol)
                         or MATERIAL_DENSITY_G_CC_BY_KEY.get(norm_key)
                     )
-                    dims_tuple = tuple(float(x) if x is not None else 0.0 for x in (dims_in or ()))
-                    if len(dims_tuple) != 3 or not all(val > 0 for val in dims_tuple):
-                        dims_tuple = (float(L_mm) / 25.4, float(W_mm) / 25.4, float(T_mm) / 25.4)
                     if density_g_cc and density_g_cc > 0:
-                        L_stock_mm, W_stock_mm, T_stock_mm = (val * 25.4 for val in dims_tuple)
-                        volume_cm3 = (L_stock_mm * W_stock_mm * T_stock_mm) / 1000.0
-                        stock_mass_kg = (volume_cm3 * float(density_g_cc)) / 1000.0
+                        stock_mass_kg, _ = _plate_mass_from_dims(
+                            L_mm,
+                            W_mm,
+                            T_mm,
+                            density_g_cc,
+                            dims_in=dims_in,
+                            hole_d_mm=(),
+                        )
                         if stock_mass_kg and stock_mass_kg > 0:
                             usd_per_kg = float(price_each) / float(stock_mass_kg)
                             source = f"mcmaster_stock:{sku}"
@@ -9016,8 +8956,8 @@ def compute_material_cost(
     return cost, detail
 
 
-def _material_family(material: str) -> str:
-    name = _normalize_lookup_key(material)
+def _material_family(material: object | None) -> str:
+    name = _normalize_lookup_key(str(material or ""))
     if not name:
         return "steel"
     if any(tag in name for tag in ("alum", "6061", "7075", "2024", "5052", "5083")):
@@ -9039,10 +8979,12 @@ def _material_family(material: str) -> str:
     return "steel"
 
 
-def _density_for_material(material: str, default: float = _DEFAULT_MATERIAL_DENSITY_G_CC) -> float:
+def _density_for_material(
+    material: object | None, default: float = _DEFAULT_MATERIAL_DENSITY_G_CC
+) -> float:
     """Return a rough density guess (g/cc) for the requested material."""
 
-    raw = (material or "").strip()
+    raw = str(material or "").strip()
     if not raw:
         return default
 
@@ -9228,50 +9170,19 @@ def net_mass_kg(
     *,
     return_removed_mass: bool = False,
 ):
-    """Estimate the net mass of a rectangular plate and optional removed material.
+    """Estimate the net mass of a rectangular plate and optional removed material."""
 
-    When ``return_removed_mass`` is true the function returns a tuple
-    ``(net_mass_kg, removed_mass_g)`` where ``removed_mass_g`` is the grams of
-    material evacuated by the provided circular holes.  Otherwise the previous
-    behaviour of returning only the net mass in kilograms is preserved.
-    """
-
-    if not (plate_L_in and plate_W_in and t_in):
-        return (None, None) if return_removed_mass else None
-
-    L_val = _coerce_float_or_none(plate_L_in)
-    W_val = _coerce_float_or_none(plate_W_in)
-    T_val = _coerce_float_or_none(t_in)
-    if L_val is None or W_val is None or T_val is None:
-        return (None, None) if return_removed_mass else None
-
-    L = float(L_val)
-    W = float(W_val)
-    T = float(T_val)
-    if L <= 0 or W <= 0 or T <= 0:
-        return (None, None) if return_removed_mass else None
-    vol_plate_in3 = L * W * T
-    try:
-        t_mm = T * 25.4
-    except Exception:
-        t_mm = None
-    if t_mm is None:
-        return None
-    holes_mm = []
-    for d in hole_d_mm or []:
-        val = _coerce_float_or_none(d)
-        if val and val > 0:
-            holes_mm.append(float(val))
-    vol_holes_mm3 = sum(math.pi * (d / 2.0) ** 2 * t_mm for d in holes_mm)
-    vol_holes_in3 = vol_holes_mm3 / 16387.064 if vol_holes_mm3 else 0.0
-    vol_net_in3 = max(0.0, vol_plate_in3 - vol_holes_in3)
-    vol_cc = vol_net_in3 * 16.387064
-    mass_g = vol_cc * float(density_g_cc or 0.0)
-    removed_mass_g = vol_holes_in3 * 16.387064 * float(density_g_cc or 0.0)
-
-    net_mass = mass_g / 1000.0 if mass_g else 0.0
+    net_mass, removed_mass = _plate_mass_properties(
+        plate_L_in,
+        plate_W_in,
+        t_in,
+        density_g_cc,
+        hole_d_mm,
+    )
     if return_removed_mass:
-        return net_mass, removed_mass_g
+        if net_mass is None:
+            return (None, None)
+        return net_mass, removed_mass
     return net_mass
 
 
@@ -10993,24 +10904,25 @@ def validate_quote_before_pricing(
             issues.clear()
         else:
             raise ValueError("Quote blocked:\n- " + "\n- ".join(issues))
-# pyright: ignore[reportGeneralTypeIssues]
-def compute_quote_from_df(df: pd.DataFrame,
-                          params: Dict[str, Any] | None = None,
-                          rates: Dict[str, float] | None = None,
-                          *,
-                          default_params: Dict[str, Any] | None = None,
-                          default_rates: Dict[str, float] | None = None,
-                          default_material_display: str | None = None,
-                          material_vendor_csv: str | None = None,
-                          llm_enabled: bool = True,
-                          llm_model_path: str | None = None,
-                          llm_client: LLMClient | None = None,
-                          geo: dict[str, Any] | None = None,
-                          ui_vars: dict[str, Any] | None = None,
-                          quote_state: QuoteState | None = None,
-                          reuse_suggestions: bool = False,
-                          llm_suggest: Any | None = None,
-                          pricing: PricingEngine | None = None) -> Dict[str, Any]:
+def compute_quote_from_df(
+    df: pd.DataFrame,
+    params: Dict[str, Any] | None = None,
+    rates: Dict[str, float] | None = None,
+    *,
+    default_params: Dict[str, Any] | None = None,
+    default_rates: Dict[str, float] | None = None,
+    default_material_display: str | None = None,
+    material_vendor_csv: str | None = None,
+    llm_enabled: bool = True,
+    llm_model_path: str | None = None,
+    llm_client: LLMClient | None = None,
+    geo: dict[str, Any] | None = None,
+    ui_vars: dict[str, Any] | None = None,
+    quote_state: QuoteState | None = None,
+    reuse_suggestions: bool = False,
+    llm_suggest: Any | None = None,
+    pricing: PricingEngine | None = None,
+) -> Dict[str, Any]:  # pyright: ignore[reportGeneralTypeIssues]
     """
     Estimator that consumes variables from the sheet (Item, Example Values / Options, Data Type / Input Method).
 
@@ -18062,6 +17974,7 @@ def plan_stock_blank(
     stock_thk = pick_size(float(thickness_in) * 1.05, stock_thicknesses)
     volume_in3 = float(plate_len_in) * float(plate_wid_in) * float(thickness_in)
     hole_area = 0.0
+    holes_mm: list[float] = []
     if hole_families:
         for dia_in, qty in hole_families.items():
             try:
@@ -18070,11 +17983,37 @@ def plan_stock_blank(
             except Exception:
                 continue
             hole_area += math.pi * (d / 2.0) ** 2 * q
+            hole_count = int(round(q)) if q and q > 0 else 0
+            if hole_count > 0:
+                holes_mm.extend([d * 25.4] * hole_count)
     net_volume_in3 = max(volume_in3 - hole_area * float(thickness_in), 0.0)
-    density = float(density_g_cc or 0.0)
-    part_mass_lb = density * LB_PER_IN3_PER_GCC * net_volume_in3 if density > 0 else None
+
+    density_val = _coerce_float_or_none(density_g_cc)
+    if density_val and density_val > 0:
+        dims_in = (plate_len_in, plate_wid_in, thickness_in)
+        part_mass_kg, _ = _plate_mass_from_dims(
+            float(plate_len_in) * 25.4,
+            float(plate_wid_in) * 25.4,
+            float(thickness_in) * 25.4,
+            density_val,
+            dims_in=dims_in,
+            hole_d_mm=holes_mm,
+        )
+        stock_mass_kg, _ = _plate_mass_from_dims(
+            float(plate_len_in) * 25.4,
+            float(plate_wid_in) * 25.4,
+            float(thickness_in) * 25.4,
+            density_val,
+            dims_in=dims_in,
+            hole_d_mm=(),
+        )
+    else:
+        part_mass_kg = None
+        stock_mass_kg = None
+
+    part_mass_lb = (part_mass_kg * LB_PER_KG) if part_mass_kg is not None else None
     stock_volume_in3 = stock_len * stock_wid * stock_thk
-    stock_mass_lb = density * LB_PER_IN3_PER_GCC * stock_volume_in3 if density > 0 else None
+    stock_mass_lb = (stock_mass_kg * LB_PER_KG) if stock_mass_kg is not None else None
     return {
         "stock_len_in": round(stock_len, 3),
         "stock_wid_in": round(stock_wid, 3),
@@ -18560,7 +18499,10 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
         pts: list[tuple[float, float, Any]] = []
         if callable(get_points):
             try:
-                pts = list(get_points("xyb"))
+                point_iter = cast(
+                    Iterable[tuple[float, float, Any]], get_points("xyb")
+                )
+                pts = list(point_iter)
             except Exception:
                 pts = []
         for i in range(len(pts)):
@@ -19780,9 +19722,15 @@ def get_llm_overrides(
         mass_ratio_ok = True
         stock_mass_g = None
         if length and width and thickness and density_for_stock > 0 and part_mass_est > 0:
-            stock_volume_cm3 = (length * width * thickness) / 1000.0
-            stock_mass_g = stock_volume_cm3 * density_for_stock
-            if stock_mass_g > 3.0 * part_mass_est + 1e-6:
+            stock_mass_kg, _ = _plate_mass_from_dims(
+                length,
+                width,
+                thickness,
+                density_for_stock,
+                hole_d_mm=(),
+            )
+            stock_mass_g = (stock_mass_kg * 1000.0) if stock_mass_kg is not None else None
+            if stock_mass_g and stock_mass_g > 3.0 * part_mass_est + 1e-6:
                 mass_ratio_ok = False
 
         if not fits_part:
@@ -22582,22 +22530,11 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
 
 
 if __name__ == "__main__":
-    exit_code = _main()
-    if exit_code == 0:
-        try:
-            from cad_quoter.pricing import (
-                PricingEngine,
-                create_default_registry,
-                ensure_material_backup_csv,
-            )
-
-            engine = PricingEngine(create_default_registry())
-            csv_path = ensure_material_backup_csv()
-            quote = engine.get_usd_per_kg(
-                "aluminum", "usd_per_kg", vendor_csv=csv_path, providers=("vendor_csv",)
-            )
-            print(f"[smoke] aluminum ${quote.usd_per_kg:.2f}/kg via {quote.source}")
-        except Exception as exc:  # pragma: no cover - smoke guard
-            print(f"[smoke] pricing run failed: {exc}", file=sys.stderr)
-            exit_code = 1
-    sys.exit(exit_code)
+    try:
+        runtime_info = describe_runtime_environment()
+    except Exception as exc:  # pragma: no cover - smoke guard
+        print(jdump({"ok": False, "error": str(exc)}))
+        sys.exit(1)
+    else:
+        print(jdump({"ok": True, "env": runtime_info}))
+        sys.exit(0)
