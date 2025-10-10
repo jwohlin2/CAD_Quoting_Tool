@@ -11547,6 +11547,11 @@ def compute_quote_from_df(
     if not isinstance(default_material_display, str) or not default_material_display.strip():
         default_material_display = DEFAULT_MATERIAL_DISPLAY
     params = {**params_defaults, **(params or {})}
+    plan_params: Mapping[str, Any] | None
+    if isinstance(params, _MappingABC):
+        plan_params = params
+    else:
+        plan_params = None
     rates = {**rates_defaults, **(rates or {})}
     rates.setdefault("DrillingRate", rates.get("MillingRate", 0.0))
     rates.setdefault("ProjectManagementRate", rates.get("EngineerRate", 0.0))
@@ -14483,8 +14488,8 @@ def compute_quote_from_df(
     }
 
     used_planner, planner_mode = resolve_planner(
-        params=params if isinstance(params, _MappingABC) else None,
-        signals=planner_signals,
+        plan_params,
+        planner_signals,
     )
     force_planner_for_recognized = recognized_line_items > 0
 
