@@ -10310,6 +10310,11 @@ def estimate_drilling_hours(
     if (debug_lines is not None) or (debug_summary is not None):
         debug_state = {}
     debug: dict[str, Any] | None = debug_state
+    # ``debug_meta`` was the historical name for the structured debug mapping.
+    # Some older call sites—and a few legacy branches inside this function—may
+    # still try to access ``debug_meta``.  Provide an alias so those paths
+    # continue to work without raising ``NameError``.
+    debug_meta: dict[str, Any] | None = debug_state
 
     debug_list = debug_lines if debug_lines is not None else None
     if debug_summary is not None:
@@ -11621,6 +11626,7 @@ def compute_quote_from_df(
     hole_scrap_clamped_val: float = 0.0
     material_selection: dict[str, Any] = {}
     material_display_for_debug: str = ""
+    drill_estimator_hours_for_planner: float = 0.0
 
     def _has_rows(table: Any) -> bool:
         """Return True if the pandas-like table has any rows."""
@@ -12474,7 +12480,6 @@ def compute_quote_from_df(
     planner_process_minutes: float | None = None
     planner_drill_minutes: float | None = None
     planner_drilling_override: dict[str, float] | None = None
-    drill_estimator_hours_for_planner: float = 0.0
     used_planner = False
     planner_meta_keys: set[str] = set()
 
