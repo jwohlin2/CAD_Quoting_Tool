@@ -12200,7 +12200,10 @@ def compute_quote_from_df(
         default=params["ExpeditePct"],
     )
 
-    priority = strv(alt('PM-01_Quote_Priority',r'Quote\s*Priority'), "").strip().lower()
+    priority = strv(
+        alt('PM-01_Quote_Priority', r'Quote\s*Priority'),
+        default="",
+    ).strip().lower()
     if priority not in ("expedite", "critical"):
         ExpeditePct = 0.0
 
@@ -12287,7 +12290,7 @@ def compute_quote_from_df(
         scrap_pct = scrap_pct_baseline
     material_name_raw = sheet_text(r"(?i)Material\s*(?:Name|Grade|Alloy|Type)")
     if not material_name_raw:
-        fallback_name = strv(r"(?i)^Material$", "")
+        fallback_name = strv(r"(?i)^Material$", default="")
         if fallback_name and not re.fullmatch(r"\s*[$0-9.,]+\s*", str(fallback_name)):
             material_name_raw = fallback_name
     material_name = str(material_name_raw or "").strip()
