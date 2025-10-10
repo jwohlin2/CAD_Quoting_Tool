@@ -22,7 +22,6 @@ import os
 import re
 import time
 import typing
-import tkinter as tk
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace, fields as dataclass_fields
@@ -112,10 +111,93 @@ from typing import (
     cast,
     Literal,
     overload,
+    TYPE_CHECKING,
 )
 
 
 T = TypeVar("T")
+
+
+if TYPE_CHECKING:  # pragma: no cover - typing helpers only
+    import tkinter as tk  # type: ignore[import]
+    from tkinter import (  # type: ignore[import]
+        filedialog,
+        messagebox,
+        scrolledtext,
+        ttk,
+    )
+
+    def _ensure_tk(action: str = "Tkinter GUI") -> dict[str, Any]: ...
+else:
+    _TK_MODULE_CACHE: dict[str, Any] | None = None
+    _TK_IMPORT_ERROR: Exception | None = None
+
+    def _load_tkinter_modules() -> dict[str, Any] | None:
+        """Best-effort import of Tkinter modules, caching the result."""
+
+        global _TK_MODULE_CACHE, _TK_IMPORT_ERROR
+        if _TK_MODULE_CACHE is not None or _TK_IMPORT_ERROR is not None:
+            return _TK_MODULE_CACHE
+
+        try:
+            import tkinter as _tk_mod  # type: ignore[import]
+            from tkinter import (  # type: ignore[import]
+                filedialog as _filedialog_mod,
+                messagebox as _messagebox_mod,
+                scrolledtext as _scrolledtext_mod,
+                ttk as _ttk_mod,
+            )
+        except Exception as exc:  # pragma: no cover - headless environments
+            _TK_IMPORT_ERROR = exc
+            return None
+
+        _TK_MODULE_CACHE = {
+            "tk": _tk_mod,
+            "filedialog": _filedialog_mod,
+            "messagebox": _messagebox_mod,
+            "scrolledtext": _scrolledtext_mod,
+            "ttk": _ttk_mod,
+        }
+        return _TK_MODULE_CACHE
+
+    def _raise_tkinter_unavailable(action: str) -> None:
+        """Raise a helpful error when GUI functionality is requested headless."""
+
+        if _TK_IMPORT_ERROR is not None:
+            raise RuntimeError(
+                f"{action} requires Tkinter, which is unavailable: {_TK_IMPORT_ERROR}"
+            ) from _TK_IMPORT_ERROR
+        raise RuntimeError(f"{action} requires Tkinter, which is unavailable.")
+
+    def _ensure_tk(action: str = "Tkinter GUI") -> dict[str, Any]:
+        modules = _load_tkinter_modules()
+        if modules is None:
+            _raise_tkinter_unavailable(action)
+        return modules
+
+    class _TkModuleProxy:
+        def __init__(self, key: str, description: str) -> None:
+            self._key = key
+            self._description = description
+
+        def __getattr__(self, attr: str) -> Any:
+            modules = _load_tkinter_modules()
+            if modules is not None:
+                return getattr(modules[self._key], attr)
+            if self._key == "tk" and attr == "Tk":
+
+                class _TkUnavailable:
+                    def __init__(self, *args: Any, **kwargs: Any) -> None:
+                        _raise_tkinter_unavailable("Starting the CAD Quoting Tool GUI")
+
+                return _TkUnavailable
+            _raise_tkinter_unavailable(self._description)
+
+    tk = cast(Any, _TkModuleProxy("tk", "Tkinter GUI"))
+    filedialog = cast(Any, _TkModuleProxy("filedialog", "File dialogs"))
+    messagebox = cast(Any, _TkModuleProxy("messagebox", "Message boxes"))
+    scrolledtext = cast(Any, _TkModuleProxy("scrolledtext", "Scrolled text widgets"))
+    ttk = cast(Any, _TkModuleProxy("ttk", "Themed Tk widgets"))
 
 
 def resolve_planner(
@@ -2881,7 +2963,6 @@ if sys.platform == 'win32':
 import importlib
 import subprocess
 import tempfile
-from tkinter import filedialog, messagebox, ttk
 
 try:
     from hole_table_parser import parse_hole_table_lines as _parse_hole_table_lines
@@ -20132,6 +20213,8 @@ class App(tk.Tk):
         geometry_service: geometry.GeometryService | None = None,
     ):
 
+        _ensure_tk()
+
         super().__init__()
 
         self.configuration = configuration or UIConfiguration()
@@ -21975,9 +22058,13 @@ class App(tk.Tk):
 
     def open_llm_inspector(self):
         import json
-        import tkinter as tk
         from pathlib import Path
-        from tkinter import messagebox, scrolledtext
+
+        try:
+            _ensure_tk("LLM Inspector")
+        except RuntimeError as exc:  # pragma: no cover - headless guard
+            logger.error("Cannot open LLM Inspector: %s", exc)
+            return
 
         debug_dir = Path(__file__).with_name("llm_debug")
         files = sorted(debug_dir.glob("llm_snapshot_*.json"))
@@ -22275,7 +22362,14 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
 
     pricing_registry = create_default_registry()
     pricing_engine = PricingEngine(pricing_registry)
-    App(pricing_engine).mainloop()
+
+    try:
+        app = App(pricing_engine)
+    except RuntimeError as exc:  # pragma: no cover - headless guard
+        logger.error("Unable to start the GUI: %s", exc)
+        return 1
+
+    app.mainloop()
 
     return 0
 
