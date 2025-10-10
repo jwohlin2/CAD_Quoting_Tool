@@ -38,6 +38,7 @@ from cad_quoter.config import (
 from cad_quoter.config import (
     describe_runtime_environment as _describe_runtime_environment,
 )
+from cad_quoter.llm import EDITOR_FROM_UI, EDITOR_TO_SUGG, SUGG_TO_EDITOR
 
 APP_ENV = AppEnvironment.from_env()
 
@@ -142,6 +143,20 @@ def resolve_planner(
     if has_line_items:
         used_planner = True
     return used_planner, planner_mode
+
+
+def _normalize_item_text(text: str | None) -> str:
+    """Return a normalized key for matching variables rows."""
+
+    if text is None:
+        return ""
+    cleaned = re.sub(r"\s+", " ", str(text)).strip().lower()
+    cleaned = cleaned.replace("\u00a0", " ")
+    cleaned = re.sub(r"[^a-z0-9]+", " ", cleaned)
+    return cleaned.strip()
+
+
+normalize_item = _normalize_item_text
 
 import cad_quoter.geometry as geometry
 from cad_quoter.geo2d import (
@@ -3879,6 +3894,208 @@ def infer_hours_and_overrides_from_geo(
         rates=rates,
         client=client,
     )
+
+
+_LLM_HOUR_ITEM_MAP: dict[str, str] = {
+    "Programming_Hours": "Programming Hours",
+    "CAM_Programming_Hours": "CAM Programming Hours",
+    "Engineering_Hours": "Engineering (Docs/Fixture Design) Hours",
+    "Fixture_Build_Hours": "Fixture Build Hours",
+    "Roughing_Cycle_Time_hr": "Roughing Cycle Time",
+    "Semi_Finish_Cycle_Time_hr": "Semi-Finish Cycle Time",
+    "Finishing_Cycle_Time_hr": "Finishing Cycle Time",
+    "InProcess_Inspection_Hours": "In-Process Inspection Hours",
+    "Final_Inspection_Hours": "Final Inspection Hours",
+    "CMM_Programming_Hours": "CMM Programming Hours",
+    "CMM_RunTime_min": "CMM Run Time min",
+    "Deburr_Hours": "Deburr Hours",
+    "Tumble_Hours": "Tumbling Hours",
+    "Blast_Hours": "Bead Blasting Hours",
+    "Laser_Mark_Hours": "Laser Mark Hours",
+    "Masking_Hours": "Masking Hours",
+    "Saw_Waterjet_Hours": "Sawing Hours",
+    "Assembly_Hours": "Assembly Hours",
+    "Packaging_Labor_Hours": "Packaging Labor Hours",
+}
+
+_LLM_SETUP_ITEM_MAP: dict[str, str] = {
+    "Milling_Setups": "Number of Milling Setups",
+    "Setup_Hours_per_Setup": "Setup Hours / Setup",
+}
+
+_LLM_INSPECTION_ITEM_MAP: dict[str, str] = {
+    "FAIR_Required": "FAIR Required",
+    "Source_Inspection_Required": "Source Inspection Requirement",
+}
+
+
+def clamp_llm_hours(
+    raw: Mapping[str, Any] | None,
+    geo: Mapping[str, Any] | None,
+    *,
+    params: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Sanitize LLM-derived hour estimates before applying them to the UI."""
+
+    cleaned: dict[str, Any] = {}
+    raw = raw or {}
+
+    hours_out: dict[str, float] = {}
+    hours_src = raw.get("hours") if isinstance(raw.get("hours"), Mapping) else {}
+    for key, value in hours_src.items():
+        val = _coerce_float_or_none(value)
+        if val is None:
+            continue
+        upper = 48.0
+        if str(key).endswith("_min"):
+            upper = 2400.0
+        hours_out[str(key)] = clamp(float(val), 0.0, upper, 0.0)
+    if hours_out:
+        cleaned["hours"] = hours_out
+
+    setups_out: dict[str, Any] = {}
+    setups_src = raw.get("setups") if isinstance(raw.get("setups"), Mapping) else {}
+    if setups_src:
+        count_raw = setups_src.get("Milling_Setups")
+        if count_raw is not None:
+            try:
+                setups_out["Milling_Setups"] = max(1, min(6, int(round(float(count_raw)))))
+            except Exception:
+                pass
+        setup_hours = _coerce_float_or_none(setups_src.get("Setup_Hours_per_Setup"))
+        if setup_hours is not None:
+            setups_out["Setup_Hours_per_Setup"] = clamp(float(setup_hours), 0.0, LLM_ADDER_MAX, 0.0)
+    if setups_out:
+        cleaned["setups"] = setups_out
+
+    inspection_out: dict[str, bool] = {}
+    inspection_src = raw.get("inspection") if isinstance(raw.get("inspection"), Mapping) else {}
+    for key in _LLM_INSPECTION_ITEM_MAP:
+        if key in inspection_src:
+            inspection_out[key] = bool(inspection_src.get(key))
+    if inspection_out:
+        cleaned["inspection"] = inspection_out
+
+    notes_raw = raw.get("notes")
+    if isinstance(notes_raw, list):
+        cleaned["notes"] = [str(n).strip() for n in notes_raw if str(n).strip()][:8]
+
+    meta_raw = raw.get("_meta")
+    if isinstance(meta_raw, Mapping):
+        cleaned["_meta"] = dict(meta_raw)
+
+    for key, value in raw.items():
+        if key in {"hours", "setups", "inspection", "notes", "_meta"}:
+            continue
+        cleaned.setdefault(str(key), value)
+
+    return cleaned
+
+
+def apply_llm_hours_to_variables(
+    df: "pd.DataFrame",
+    estimates: Mapping[str, Any] | None,
+    *,
+    allow_overwrite_nonzero: bool = False,
+    log: dict | None = None,
+) -> "pd.DataFrame":
+    """Apply sanitized LLM hour estimates to a variables dataframe."""
+
+    if not _HAS_PANDAS or df is None:
+        return df
+
+    estimates = estimates or {}
+    df_out = df.copy(deep=True)
+    normalized_items = df_out["Item"].astype(str).apply(_normalize_item_text)
+    index_lookup = {norm: idx for idx, norm in zip(df_out.index, normalized_items)}
+
+    def _write_value(label: str, value: Any, *, dtype: str = "number") -> None:
+        nonlocal df_out, normalized_items, index_lookup
+        if value is None:
+            return
+        normalized = _normalize_item_text(label)
+        idx = index_lookup.get(normalized)
+        new_value = value
+        if idx is None:
+            df_out = upsert_var_row(df_out, label, new_value, dtype=dtype)
+            normalized_items = df_out["Item"].astype(str).apply(_normalize_item_text)
+            index_lookup = {norm: idx for idx, norm in zip(df_out.index, normalized_items)}
+            idx = index_lookup.get(normalized)
+            previous = None
+        else:
+            previous = df_out.at[idx, "Example Values / Options"]
+            if not allow_overwrite_nonzero:
+                existing_val = _coerce_float_or_none(previous)
+                if existing_val is not None and abs(existing_val) > 1e-9:
+                    return
+            df_out.at[idx, "Example Values / Options"] = new_value
+            df_out.at[idx, "Data Type / Input Method"] = dtype
+        if idx is None:
+            return
+        df_out.at[idx, "Example Values / Options"] = new_value
+        df_out.at[idx, "Data Type / Input Method"] = dtype
+        if log is not None:
+            log.setdefault("llm_hours", []).append({
+                "item": label,
+                "value": new_value,
+                "previous": previous,
+            })
+
+    hours_src = estimates.get("hours") if isinstance(estimates.get("hours"), Mapping) else {}
+    for key, value in hours_src.items():
+        label = _LLM_HOUR_ITEM_MAP.get(str(key))
+        if not label:
+            continue
+        val = _coerce_float_or_none(value)
+        if val is None:
+            continue
+        _write_value(label, float(val), dtype="number")
+
+    setups_src = estimates.get("setups") if isinstance(estimates.get("setups"), Mapping) else {}
+    for key, value in setups_src.items():
+        label = _LLM_SETUP_ITEM_MAP.get(str(key))
+        if not label:
+            continue
+        if key == "Milling_Setups":
+            try:
+                numeric = max(1, min(6, int(round(float(value)))))
+            except Exception:
+                continue
+            _write_value(label, numeric, dtype="number")
+        else:
+            val = _coerce_float_or_none(value)
+            if val is None:
+                continue
+            _write_value(label, float(val), dtype="number")
+
+    inspection_src = estimates.get("inspection") if isinstance(estimates.get("inspection"), Mapping) else {}
+    for key, value in inspection_src.items():
+        label = _LLM_INSPECTION_ITEM_MAP.get(str(key))
+        if not label:
+            continue
+        _write_value(label, "True" if bool(value) else "False", dtype="Checkbox")
+
+    return df_out
+
+
+def infer_shop_overrides_from_geo(
+    geo: Mapping[str, Any] | None,
+    *,
+    params: Mapping[str, Any] | None = None,
+    rates: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return sanitized LLM output for the manual LLM tab."""
+
+    estimates_raw = infer_hours_and_overrides_from_geo(
+        dict(geo or {}),
+        params=dict(params or {}),
+        rates=dict(rates or {}),
+    )
+    cleaned = clamp_llm_hours(estimates_raw, geo or {}, params=params)
+    return {
+        "estimates": cleaned,
+        "LLM_Adjustments": {},
+    }
 
 # --- WHICH SHEET ROWS MATTER TO THE ESTIMATOR --------------------------------
 def _estimator_patterns():
@@ -20794,9 +21011,10 @@ class App(tk.Tk):
             return
         os.environ["QWEN_GGUF_PATH"]=mp
         try:
-            out = infer_shop_overrides_from_geo(self.geo)
-        except Exception:
-            self.llm_txt.insert("end", f"LLM error: {{e}}\n"); return
+            out = infer_shop_overrides_from_geo(self.geo, params=self.params, rates=self.rates)
+        except Exception as e:
+            logger.exception("LLM override inference failed")
+            self.llm_txt.insert("end", f"LLM error: {e}\n"); return
         self.llm_txt.insert("end", json.dumps(out, indent=2))
         if self.apply_llm_adj.get() and isinstance(out, dict):
             adj = out.get("LLM_Adjustments", {})
@@ -21074,9 +21292,9 @@ def _rule_based_overrides(geo: dict, params: dict, rates: dict):
     thk = float(geo.get("GEO__Stock_Thickness_mm", 0.0) or 0.0)
     wedm = float(geo.get("GEO__WEDM_PathLen_mm", 0.0) or 0.0)
     if thk > 50:
-        rparams["OverheadPct"] = params.get("OverheadPct", 0.15) + 0.02
+        rp["OverheadPct"] = params.get("OverheadPct", 0.15) + 0.02
     if wedm > 500:
-        rrates["WireEDMRate"] = rates.get("WireEDMRate", 140.0) * 1.05
+        rr["WireEDMRate"] = rates.get("WireEDMRate", 140.0) * 1.05
     return {"params": rp, "rates": rr}
 
 def _run_llm_json_stub(prompt: str, model_path: str):
