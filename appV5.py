@@ -17009,6 +17009,10 @@ def compute_quote_from_df(
                 "Labor section totals drifted: %.2f vs %.2f",
                 recomputed_labor_total,
                 expected_labor_total,
+            )
+            if not math.isclose(
+                labor_display_total,
+                expected_labor_total,
                 rel_tol=0.0,
                 abs_tol=_LABOR_SECTION_ABS_EPSILON,
             )
