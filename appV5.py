@@ -47,12 +47,6 @@ def _coerce_env_bool(value: str | None) -> bool:
 FORCE_PLANNER = _coerce_env_bool(os.environ.get("FORCE_PLANNER"))
 
 
-# Guardrails for LLM-generated process adjustments.
-LLM_MULT_MIN = 0.25
-LLM_MULT_MAX = 4.0
-LLM_ADD_MAX_HR = 8.0
-
-
 def describe_runtime_environment() -> dict[str, str]:
     """Return a redacted snapshot of runtime configuration for auditors."""
 
@@ -127,6 +121,7 @@ import cad_quoter.geometry as geometry
 from bucketizer import bucketize
 
 
+# Guardrails for LLM-generated process adjustments.
 LLM_MULTIPLIER_MIN = 0.25
 LLM_MULTIPLIER_MAX = 4.0
 LLM_ADDER_MAX = 8.0
@@ -21243,7 +21238,7 @@ class App(tk.Tk):
                     base_val = float(eff_hours[proc])
                 except Exception:
                     continue
-                clamped_mult = clamp(mult, LLM_MULT_MIN, LLM_MULT_MAX, 1.0)
+                clamped_mult = clamp(mult, LLM_MULTIPLIER_MIN, LLM_MULTIPLIER_MAX, 1.0)
                 try:
                     eff_hours[proc] = base_val * float(clamped_mult)
                 except Exception:
