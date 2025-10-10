@@ -16562,13 +16562,19 @@ def compute_quote_from_df(
     if isinstance(quote_state.user_overrides, dict) and quote_state.user_overrides:
         llm_cost_log["user_overrides"] = quote_state.user_overrides
 
+    canonical_process_costs: dict[str, float] = {}
+
     if pricing_source == "planner":
         process_costs = {
             "Machine": round(planner_machine_cost_total, 2),
             "Labor": round(planner_labor_cost_total, 2),
         }
 
-    canonical_process_costs = canonicalize_costs(process_costs)
+    try:
+        canonical_process_costs = canonicalize_costs(process_costs)
+    except Exception:  # pragma: no cover - defensive guard
+        logger.exception("Failed to canonicalize process costs")
+        canonical_process_costs = canonicalize_costs(locals().get("process_costs", {}) or {})
 
     app_meta = {"llm_debug_enabled": bool(APP_ENV.llm_debug_enabled)}
 
