@@ -8039,7 +8039,10 @@ def render_quote(
             "Displayed process rows do not add up to the accumulated labor total."
         )
 
-    expected_labor_total = float(totals.get("labor_cost", 0.0) or 0.0)
+    expected_labor_total_value = totals.get("labor_cost") if isinstance(totals, Mapping) else None
+    if expected_labor_total_value is None:
+        expected_labor_total_value = displayed_process_total
+    expected_labor_total = float(expected_labor_total_value or 0.0)
     if abs(displayed_process_total - expected_labor_total) >= 0.01:
         if isinstance(totals, dict):
             totals["labor_cost"] = displayed_process_total
@@ -9924,6 +9927,7 @@ def estimate_drilling_hours(
                 l_over_d = float(thickness_for_ratio) / float(tool_dia_in)
             op_name = "deep_drill" if l_over_d >= 3.0 else "drill"
             cache_key = (op_name, round(float(diameter_in), 4))
+            row: Mapping[str, Any] | None = None
             cache_entry = row_cache.get(cache_key)
             if cache_entry is None:
                 material_for_lookup: str | None = None
@@ -9961,6 +9965,8 @@ def estimate_drilling_hours(
                         table=speeds_feeds_table,
                     )
                 if row and isinstance(row, Mapping):
+                    if op_name.lower() == "deep_drill":
+                        row = _apply_deep_drill_speed_feed_adjustments(row)
                     chosen_material_label = ""
                     cache_entry = (row, _build_tool_params(row))
                     speeds_feeds_row = row
@@ -10027,6 +10033,11 @@ def estimate_drilling_hours(
                         f"MISS {op_display} {material_display.lower()} {round(float(diameter_in), 4):.3f}\""
                     )
                 row_cache[cache_key] = cache_entry
+            else:
+                try:
+                    row = cache_entry[0]
+                except Exception:
+                    row = None
             geom = _TimeOperationGeometry(
                 diameter_in=float(diameter_in),
                 hole_depth_in=float(depth_in),
@@ -10133,6 +10144,7 @@ def estimate_drilling_hours(
                     peck_min=peck_min,
                     index_sec_per_hole=overhead_for_calc.index_sec_per_hole,
                 )
+                overhead_for_calc = legacy_overhead
                 tool_params = _TimeToolParams(teeth_z=1)
                 if debug_lines is not None:
                     debug_payload = {}
@@ -10186,6 +10198,7 @@ def estimate_drilling_hours(
                     ipm_val = debug_payload.get("ipm")
                 depth_val = debug_payload.get("axial_depth_in")
                 minutes_per = debug_payload.get("minutes_per_hole")
+                index_val = debug_payload.get("index_min")
                 qty_for_debug = int(qty) if qty else 0
                 mat_display = chosen_material_label or str(
                     material_label or mat_key or material_lookup or ""
