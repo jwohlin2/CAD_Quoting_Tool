@@ -13157,6 +13157,23 @@ def compute_quote_from_df(
             thickness_mm,
             thickness_mm / 25.4 if thickness_mm else 0.0,
         )
+
+    drill_params: dict[str, Any] = {}
+    material_result = (
+        material_detail_for_breakdown
+        if isinstance(material_detail_for_breakdown, _MappingABC)
+        else {}
+    )
+    mat_key = _normalize_lookup_key(
+        str(
+            geo_context.get("material")
+            or material_result.get("material")
+            or DEFAULT_MATERIAL_KEY
+        )
+    )
+    if mat_key:
+        drill_params["material"] = mat_key
+
     drill_debug_lines: list[str] = []
     drill_debug_entries: list[str] = drill_debug_lines  # backwards compatibility alias
     drill_debug_summary: dict[str, dict[str, Any]] = {}
@@ -13406,7 +13423,7 @@ def compute_quote_from_df(
         drill_debug_lines.append(drill_debug_line)
 
     drilling_meta: dict[str, Any] = {
-        "material_key": drill_material_key or "",
+        "material_key": drill_params.get("material", drill_material_key or ""),
         "material_source": material_selection.get("input_material")
         or drill_material_source
         or "",
@@ -15022,6 +15039,7 @@ def compute_quote_from_df(
         "packaging_flat_cost": packaging_flat_base,
         "shipping_cost": shipping_cost_base,
         "shipping_hint": "",
+        "drill_params": dict(drill_params),
     }
     if red_flag_messages:
         baseline_data["red_flags"] = list(red_flag_messages)
@@ -16866,6 +16884,7 @@ def compute_quote_from_df(
         "speeds_feeds_path": speeds_feeds_path,
         "drill_debug": list(drill_debug_lines_payload),
         "drilling_meta": drilling_meta,
+        "drill_params": dict(drill_params),
         "pass_meta": pass_meta,
         "totals": {
             "labor_cost": labor_cost,
@@ -16992,6 +17011,7 @@ def compute_quote_from_df(
         "speeds_feeds_loaded": speeds_feeds_loaded_flag,
         "drill_debug": list(drill_debug_lines_payload),
         "drilling_meta": drilling_meta,
+        "drill_params": dict(drill_params),
         "red_flags": list(red_flag_messages),
         "app": dict(app_meta),
         "canonical_process_costs": canonical_process_costs,
