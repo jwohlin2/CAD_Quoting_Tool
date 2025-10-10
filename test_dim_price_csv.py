@@ -19,7 +19,9 @@
 #   setx MCMASTER_PFX_PATH "D:\Composidie.pfx"
 #   setx MCMASTER_PFX_PASS "YOURPFXPASSWORD"
 
-import os, csv, re
+import os
+import csv
+import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
