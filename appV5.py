@@ -23636,6 +23636,11 @@ class App(tk.Tk):
                     continue
                 widget.delete("1.0", "end")
                 widget.insert("end", report_text, "rcol")
+                try:
+                    widget.mark_set("insert", "1.0")
+                    widget.see("1.0")
+                except Exception:
+                    pass
 
             try:
                 self.output_nb.select(self.output_tab_simplified)
