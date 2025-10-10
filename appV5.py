@@ -6814,12 +6814,21 @@ def render_quote(
     if pricing_source_text:
         lines.append(f"Pricing Source: {pricing_source_text}")
         pricing_source_lower = pricing_source_text.lower()
+    display_red_flags: list[str] = []
     if red_flags:
-        lines.append("")
-        lines.append("Red Flags")
-        lines.append(divider)
-        for flag in red_flags:
-            write_wrapped(f"⚠️ {flag}", "  ")
+        display_red_flags = [str(flag).strip() for flag in red_flags if str(flag).strip()]
+        if pricing_source_lower == "planner":
+            display_red_flags = [
+                flag
+                for flag in display_red_flags
+                if not flag.lower().startswith("labor totals drifted by")
+            ]
+        if display_red_flags:
+            lines.append("")
+            lines.append("Red Flags")
+            lines.append(divider)
+            for flag in display_red_flags:
+                write_wrapped(f"⚠️ {flag}", "  ")
     lines.append("")
 
     narrative = result.get("narrative") or breakdown.get("narrative")
@@ -8474,18 +8483,29 @@ def render_quote(
 
     extra_labor_rows: list[tuple[str, float, list[str], str | None]] = []
 
-    _append_extra_labor_row(
-        "Programming (amortized)",
-        programming_per_part_cost,
-        programming_detail_bits,
-        labor_cost_details_input.get("Programming (amortized)") or None,
-    )
-    _append_extra_labor_row(
-        "Fixture Build (amortized)",
-        fixture_labor_per_part_cost,
-        fixture_detail_bits,
-        labor_cost_details_input.get("Fixture Build (amortized)") or None,
-    )
+    try:
+        programming_per_part_amount_for_rows = float(programming_per_part_cost or 0.0)
+    except Exception:
+        programming_per_part_amount_for_rows = 0.0
+    try:
+        fixture_per_part_amount_for_rows = float(fixture_labor_per_part_cost or 0.0)
+    except Exception:
+        fixture_per_part_amount_for_rows = 0.0
+
+    if amortized_qty > 1 and programming_per_part_amount_for_rows > 0:
+        _append_extra_labor_row(
+            "Programming (amortized)",
+            programming_per_part_cost,
+            programming_detail_bits,
+            labor_cost_details_input.get("Programming (amortized)") or None,
+        )
+    if amortized_qty > 1 and fixture_per_part_amount_for_rows > 0:
+        _append_extra_labor_row(
+            "Fixture Build (amortized)",
+            fixture_labor_per_part_cost,
+            fixture_detail_bits,
+            labor_cost_details_input.get("Fixture Build (amortized)") or None,
+        )
 
     misc_label: str | None = None
     misc_amount_val: float = 0.0
@@ -13504,18 +13524,9 @@ def compute_quote_from_df(
         )
 
     drill_params: dict[str, Any] = {}
-    material_result = (
-        material_detail_for_breakdown
-        if isinstance(material_detail_for_breakdown, _MappingABC)
-        else {}
-    )
-    mat_key = _normalize_lookup_key(
-        str(
-            geo_context.get("material")
-            or material_result.get("material")
-            or DEFAULT_MATERIAL_KEY
-        )
-    )
+    result_material = result.get("material") if isinstance(result, _MappingABC) else None
+    mat_source = geo_context.get("material") or result_material or DEFAULT_MATERIAL_KEY
+    mat_key = _normalize_lookup_key(str(mat_source))
     if mat_key:
         drill_params["material"] = mat_key
 
@@ -13786,6 +13797,9 @@ def compute_quote_from_df(
                 f"CSV drill feeds ({group_segment}): "
                 f"{', '.join(debug_bits)} @ Ø{avg_mm:.1f} mm"
             )
+
+    if not APP_ENV.llm_debug_enabled:
+        drill_debug_line = None
 
     if drill_debug_line:
         drill_debug_lines.append(drill_debug_line)
@@ -15619,7 +15633,8 @@ def compute_quote_from_df(
 
     raw_drill_debug_lines = locals().get("drill_debug_lines")
     drill_debug_lines_payload: list[str] = []
-    _accumulate_drill_debug(drill_debug_lines_payload, raw_drill_debug_lines)
+    if APP_ENV.llm_debug_enabled:
+        _accumulate_drill_debug(drill_debug_lines_payload, raw_drill_debug_lines)
 
     if process_plan_summary:
         baseline_data["process_plan"] = copy.deepcopy(process_plan_summary)
