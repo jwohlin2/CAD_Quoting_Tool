@@ -11018,6 +11018,7 @@ def compute_quote_from_df(
     # ---- merge configs (easy to edit) ---------------------------------------
     # Default pricing source; updated to 'planner' later if planner path is used
     pricing_source = "legacy"
+    legacy_baseline_had_values = False
 
     params_defaults = default_params if default_params is not None else QuoteConfiguration().default_params
     rates_defaults = default_rates if default_rates is not None else PricingRegistry().default_rates
