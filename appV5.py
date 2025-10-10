@@ -10496,6 +10496,7 @@ def estimate_drilling_hours(
         pass
     if not math.isfinite(thickness_mm_val) or thickness_mm_val <= 0:
         thickness_mm_val = 0.0
+    thickness_in_val = thickness_mm_val / 25.4 if thickness_mm_val else 0.0
     if (
         speeds_feeds_table is not None
         and (not material_label or material_label == mat_key)
@@ -10612,12 +10613,12 @@ def estimate_drilling_hours(
             qty = int(round(count)) if count is not None else 0
             if qty <= 0:
                 qty = int(max(1, round(count or 1)))
-            depth_in = 0.0
             diameter_in = float(dia_mm) / 25.4
+            depth_in = 0.0
             if depth_mm and depth_mm > 0:
                 depth_in = float(depth_mm) / 25.4
-            elif thickness_in and thickness_in > 0:
-                depth_in = float(thickness_in)
+            elif thickness_in_val and thickness_in_val > 0:
+                depth_in = float(thickness_in_val)
             breakthrough_in = max(0.04, 0.2 * diameter_in)
             if depth_in > 0:
                 depth_in += breakthrough_in
@@ -10628,14 +10629,18 @@ def estimate_drilling_hours(
     if not group_specs:
         if not hole_diams_mm or thickness_in <= 0:
             return 0.0
-        depth_in = float(thickness_in)
+        thickness_in_for_depth = float(thickness_in_val)
         counts = Counter(round(float(d), 3) for d in hole_diams_mm if d and math.isfinite(d))
         for dia_mm, qty in counts.items():
             if qty <= 0:
                 continue
             diameter_in = float(dia_mm) / 25.4
             breakthrough_in = max(0.04, 0.2 * diameter_in)
-            total_depth_in = depth_in + breakthrough_in if depth_in > 0 else breakthrough_in
+            total_depth_in = (
+                thickness_in_for_depth + breakthrough_in
+                if thickness_in_for_depth > 0
+                else breakthrough_in
+            )
             group_specs.append((diameter_in, int(qty), total_depth_in))
         fallback_counts = counts
     elif fallback_counts is None:
@@ -10721,27 +10726,19 @@ def estimate_drilling_hours(
                 teeth_int = 1
             return _TimeToolParams(teeth_z=teeth_int)
 
-        # Use the function's input thickness (inches) for L/D heuristics
-        try:
-            thickness_in_val = (
-                float(thickness_in) if thickness_in and float(thickness_in) > 0 else None
-            )
-        except Exception:
-            thickness_in_val = None
-
         for diameter_in, qty, depth_in in group_specs:
             qty_i = int(qty)
             if qty_i <= 0 or diameter_in <= 0 or depth_in <= 0:
                 continue
             tool_dia_in = float(diameter_in)
-            thickness_for_ratio = thickness_in_val if thickness_in_val and thickness_in_val > 0 else depth_in
             l_over_d = 0.0
-            if tool_dia_in > 0 and thickness_for_ratio and thickness_for_ratio > 0:
-                l_over_d = float(thickness_for_ratio) / float(tool_dia_in)
+            if tool_dia_in > 0 and depth_in and depth_in > 0:
+                l_over_d = float(depth_in) / max(float(tool_dia_in), 1e-6)
             op_name = "deep_drill" if l_over_d >= 3.0 else "drill"
             cache_key = (op_name, round(float(diameter_in), 4))
             row: Mapping[str, Any] | None = None
             cache_entry = row_cache.get(cache_key)
+            is_new_row_entry = False
             if cache_entry is None:
                 material_for_lookup: str | None = None
                 for candidate in (material_label, mat_key, material_lookup):
@@ -10788,42 +10785,6 @@ def estimate_drilling_hours(
                         or material_lookup
                         or ""
                     ).strip()
-                    if debug_list is not None:
-                        row_material = chosen_material_label
-                        qty_display = qty
-                        try:
-                            qty_display = int(qty)
-                        except Exception:
-                            pass
-                        depth_display = depth_in
-                        try:
-                            depth_display = float(depth_in)
-                        except Exception:
-                            depth_display = depth_in
-                        sfm_val = to_float(row.get("sfm_start") or row.get("sfm"))
-                        feed_val = to_float(
-                            row.get("fz_ipr_0_25in")
-                            or row.get("feed_ipr")
-                            or row.get("fz")
-                            or row.get("ipr")
-                        )
-                        info_bits: list[str] = [
-                            f"OK {op_name}",
-                            f"{float(diameter_in):.3f}\"",
-                        ]
-                        if depth_display:
-                            try:
-                                info_bits.append(f"depth {float(depth_display):.3f}\"")
-                            except Exception:
-                                info_bits.append(f"depth {depth_display}")
-                        info_bits.append(f"qty {qty_display}")
-                        if row_material:
-                            info_bits.append(row_material)
-                        if sfm_val is not None:
-                            info_bits.append(f"{sfm_val:g} sfm")
-                        if feed_val is not None:
-                            info_bits.append(f"{feed_val:g} ipr")
-                        _log_debug(" | ".join(info_bits))
                 else:
                     cache_entry = None
                     material_display = str(material_label or mat_key or material_lookup or "material").strip()
@@ -10840,7 +10801,8 @@ def estimate_drilling_hours(
                     _log_debug(
                         f"MISS {op_display} {material_display.lower()} {round(float(diameter_in), 4):.3f}\""
                     )
-                row_cache[cache_key] = cache_entry
+                    is_new_row_entry = True
+                    row_cache[cache_key] = cache_entry
             else:
                 try:
                     row = cache_entry[0]
@@ -10905,6 +10867,37 @@ def estimate_drilling_hours(
                     ipr_calc = precomputed_speeds["ipr"]
                     if math.isfinite(rpm_calc) and math.isfinite(ipr_calc):
                         precomputed_speeds["ipm"] = float(rpm_calc) * float(ipr_calc)
+            if (
+                is_new_row_entry
+                and debug_list is not None
+                and row is not None
+                and isinstance(row, _MappingABC)
+            ):
+                info_bits: list[str] = [f"OK {op_name}", f"{float(diameter_in):.3f}\""]
+                if depth_in and depth_in > 0:
+                    try:
+                        info_bits.append(f"depth {float(depth_in):.3f}\"")
+                    except (TypeError, ValueError):
+                        info_bits.append(f"depth {depth_in}")
+                info_bits.append(f"qty {qty_i}")
+                material_text = chosen_material_label or str(
+                    material_label or mat_key or material_lookup or ""
+                ).strip()
+                if material_text:
+                    info_bits.append(material_text)
+                sfm_used = precomputed_speeds.get("sfm")
+                if sfm_used is not None and math.isfinite(float(sfm_used)):
+                    info_bits.append(f"{float(sfm_used):g} sfm")
+                ipr_used = precomputed_speeds.get("ipr")
+                if ipr_used is not None and math.isfinite(float(ipr_used)):
+                    info_bits.append(f"{float(ipr_used):g} ipr")
+                rpm_used = precomputed_speeds.get("rpm")
+                if rpm_used is not None and math.isfinite(float(rpm_used)):
+                    info_bits.append(f"{float(rpm_used):g} rpm")
+                ipm_used = precomputed_speeds.get("ipm")
+                if ipm_used is not None and math.isfinite(float(ipm_used)):
+                    info_bits.append(f"{float(ipm_used):g} ipm")
+                _log_debug(" | ".join(info_bits))
             debug_payload: dict[str, Any] | None = None
             tool_params: _TimeToolParams
             minutes: float
@@ -11089,6 +11082,8 @@ def estimate_drilling_hours(
                             "toolchange_total": 0.0,
                             "sfm_sum": 0.0,
                             "sfm_count": 0,
+                            "sfm_min": None,
+                            "sfm_max": None,
                             "ipr_sum": 0.0,
                             "ipr_count": 0,
                             "rpm_sum": 0.0,
@@ -11103,6 +11098,8 @@ def estimate_drilling_hours(
                             "ipr_max": None,
                             "ipr_effective_min": None,
                             "ipr_effective_max": None,
+                            "sfm_min": None,
+                            "sfm_max": None,
                             "bins": {},
                             "diameter_weight_sum": 0.0,
                             "diameter_qty_sum": 0,
@@ -11136,6 +11133,7 @@ def estimate_drilling_hours(
                     if sfm_float is not None and math.isfinite(sfm_float):
                         summary["sfm_sum"] += sfm_float * qty_for_debug
                         summary["sfm_count"] += qty_for_debug
+                        _update_range(summary, "sfm_min", "sfm_max", sfm_float)
                     rpm_float = to_float(rpm_val)
                     ipr_float = to_float(ipr_val)
                     ipm_float = to_float(ipm_val)
@@ -11193,6 +11191,8 @@ def estimate_drilling_hours(
                         {
                             "diameter_in": float(tool_dia_in),
                             "qty": 0,
+                            "sfm_min": None,
+                            "sfm_max": None,
                             "rpm_min": None,
                             "rpm_max": None,
                             "ipm_min": None,
@@ -11204,6 +11204,8 @@ def estimate_drilling_hours(
                         },
                     )
                     bin_summary["qty"] += qty_for_debug
+                    if sfm_float is not None and math.isfinite(sfm_float):
+                        _update_range(bin_summary, "sfm_min", "sfm_max", sfm_float)
                     if rpm_float is not None and math.isfinite(rpm_float):
                         _update_range(bin_summary, "rpm_min", "rpm_max", rpm_float)
                     if ipm_float is not None and math.isfinite(ipm_float):
@@ -11364,7 +11366,11 @@ def estimate_drilling_hours(
                 summary["rpm"] = rpm_avg
                 summary["ipm"] = ipm_avg
                 summary["minutes_per_hole"] = minutes_avg
-                sfm_text = _format_avg(sfm_avg, "{:.0f}")
+                sfm_text = _format_range(
+                    summary.get("sfm_min"), summary.get("sfm_max"), "{:.0f}", tolerance=0.5
+                )
+                if sfm_text == "-":
+                    sfm_text = _format_avg(sfm_avg, "{:.0f}")
                 ipr_min_val = summary.get("ipr_effective_min")
                 if ipr_min_val is None:
                     ipr_min_val = summary.get("ipr_min")
