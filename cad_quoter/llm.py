@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence
 
-from cad_quoter.utils import compact_dict, jdump, json_safe_copy
+from cad_quoter.utils import _dict, compact_dict, jdump, json_safe_copy
 
 
 def parse_llm_json(text: str) -> dict:
@@ -505,7 +505,7 @@ def llm_sheet_and_param_overrides(geo: dict, df, params: dict, client: LLMClient
         )
         if not isinstance(parsed, dict):
             parsed = parse_llm_json(raw_text)
-        js = parsed if isinstance(parsed, dict) else {}
+        js = _dict(parsed)
         model_name = Path(client.model_path).name if client.model_path else "LLM-unavailable"
     except Exception as exc:
         js, model_name = {}, "LLM-unavailable"
@@ -535,8 +535,8 @@ def llm_sheet_and_param_overrides(geo: dict, df, params: dict, client: LLMClient
         "GrindingConsumablesPerHr","InspectionConsumablesPerHr",
         "UtilitiesPerSpindleHr","ConsumablesFlat"
     }
-    pmap = js.get("params", {}) if isinstance(js.get("params", {}), dict) else {}
-    param_whys = pmap.get("_why", {}) if isinstance(pmap.get("_why", {}), dict) else {}
+    pmap = _dict(js.get("params"))
+    param_whys = _dict(pmap.get("_why"))
     param_edits = {}
     for k, v in pmap.items():
         if k == "_why":
