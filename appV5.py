@@ -93,7 +93,7 @@ def roughly_equal(a: float | int | str | None, b: float | int | str | None, *, e
 import copy
 import sys
 import textwrap
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, TypeVar
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, TypeVar, cast
 
 
 T = TypeVar("T")
@@ -546,6 +546,32 @@ _HAS_TRIMESH = getattr(geometry, "HAS_TRIMESH", False)
 _HAS_EZDXF = getattr(geometry, "HAS_EZDXF", False)
 _HAS_ODAFC = getattr(geometry, "HAS_ODAFC", False)
 _EZDXF_VER = geometry.EZDXF_VERSION
+
+if _HAS_EZDXF:
+    try:
+        import ezdxf  # type: ignore[import]
+    except Exception:
+        ezdxf = None  # type: ignore[assignment]
+else:
+    ezdxf = None  # type: ignore[assignment]
+
+if _HAS_ODAFC:
+    try:
+        from ezdxf.addons import odafc  # type: ignore[import]
+    except Exception:
+        odafc = None  # type: ignore[assignment]
+else:
+    odafc = None  # type: ignore[assignment]
+
+if TYPE_CHECKING:
+    try:
+        from ezdxf.ezdxf import Drawing as _EzdxfDrawing
+    except Exception:  # pragma: no cover - optional dependency
+        _EzdxfDrawing = Any  # type: ignore[assignment]
+else:
+    _EzdxfDrawing = Any  # type: ignore[assignment]
+
+Drawing = _EzdxfDrawing
 
 SCRAP_DEFAULT_GUESS = 0.15
 
@@ -3021,13 +3047,13 @@ except Exception:
         from types import SimpleNamespace
 
         from OCC.Core.BRepGProp import (
-            brepgprop_LinearProperties as _lp,
+            brepgprop_LinearProperties as _lp,  # type: ignore[attr-defined]
         )
         from OCC.Core.BRepGProp import (
-            brepgprop_SurfaceProperties as _sp,
+            brepgprop_SurfaceProperties as _sp,  # type: ignore[attr-defined]
         )
         from OCC.Core.BRepGProp import (
-            brepgprop_VolumeProperties as _vp,
+            brepgprop_VolumeProperties as _vp,  # type: ignore[attr-defined]
         )
         _BRepGProp_mod = SimpleNamespace(
             LinearProperties=_lp,
@@ -3036,9 +3062,9 @@ except Exception:
         )
     def _to_edge_occ(s):
         try:
-            from OCC.Core.TopoDS import topods_Edge as _fn
+            from OCC.Core.TopoDS import topods_Edge as _fn  # type: ignore[attr-defined]
         except Exception:
-            from OCC.Core.TopoDS import Edge as _fn
+            from OCC.Core.TopoDS import Edge as _fn  # type: ignore[attr-defined]
         return _fn(s)
 
     _TO_EDGE = _to_edge_occ
@@ -3072,7 +3098,10 @@ def map_shapes_and_ancestors(root_shape, sub_enum, anc_enum):
         # Safer: require a real TopoDS_Shape from STEP/IGES root.
         pass
 
-    amap = TopTools_IndexedDataMapOfShapeListOfShape()
+    amap = cast(
+        "TopTools_IndexedDataMapOfShapeListOfShape",
+        TopTools_IndexedDataMapOfShapeListOfShape(),  # type: ignore[call-overload]
+    )
     # static/instance variants across wheels
     fn = getattr(TopExp, "MapShapesAndAncestors", None) or getattr(TopExp, "MapShapesAndAncestors_s", None)
     if fn is None:
@@ -3093,7 +3122,8 @@ def _is_instance(obj, qualnames):
 def ensure_face(obj):
     if obj is None:
         raise TypeError("Expected a face, got None")
-    if isinstance(obj, TopoDS_Face) or type(obj).__name__ == "TopoDS_Face":
+    face_type = cast(type, TopoDS_Face)
+    if isinstance(obj, face_type) or type(obj).__name__ == "TopoDS_Face":
         return obj
     st = obj.ShapeType() if hasattr(obj, "ShapeType") else None
     if st == TopAbs_FACE:
@@ -3218,7 +3248,7 @@ def upsert_var_row(df, item, value, dtype="number"):
 
     # build a row with the exact df schema
     cols = list(df.columns)
-    row = {c: "" for c in cols}
+    row: Dict[str, Any] = {c: "" for c in cols}
     if "Item" in row:
         row["Item"] = item
     if "Example Values / Options" in row:
