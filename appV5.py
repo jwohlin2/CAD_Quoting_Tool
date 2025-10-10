@@ -20999,15 +20999,16 @@ class App(tk.Tk):
         for _, row in df_snapshot.iterrows():
             record: dict[str, Any] = {}
             for column, value in row.items():
+                column_name = str(column)
                 if pd.isna(value):
-                    record[column] = None
+                    record[column_name] = None
                 elif hasattr(value, "item"):
                     try:
-                        record[column] = value.item()
+                        record[column_name] = value.item()
                     except Exception:
-                        record[column] = value
+                        record[column_name] = value
                 else:
-                    record[column] = value
+                    record[column_name] = value
             records.append(record)
         return records
 
