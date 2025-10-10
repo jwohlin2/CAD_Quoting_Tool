@@ -9,8 +9,16 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, TypeVar
 
+from . import sheet_helpers
+
 K = TypeVar("K")
 V = TypeVar("V")
+
+
+def _dict(value: Mapping[Any, Any] | None) -> dict[Any, Any]:
+    """Return *value* if it is a ``dict``; otherwise return an empty dict."""
+
+    return value if isinstance(value, dict) else {}
 
 
 def compact_dict(
@@ -154,4 +162,4 @@ def jdump(obj: Any, *, indent: int = 2, default: Any | None = str, **kwargs: Any
     return json.dumps(obj, **dumps_kwargs)
 
 
-__all__ = ["compact_dict", "sdict", "_first_non_none", "jdump", "json_safe_copy"]
+__all__ = ["_dict", "compact_dict", "sdict", "_first_non_none", "jdump", "json_safe_copy"]
