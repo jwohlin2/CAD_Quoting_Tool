@@ -14796,7 +14796,7 @@ def compute_quote_from_df(
                 "usage": s_usage,
             }
             snap_path = APP_ENV.llm_debug_dir / f"llm_snapshot_{int(time.time())}.json"
-            snap_path.write_text(jdump(snap), encoding="utf-8")
+            snap_path.write_text(jdump(json_safe_copy(snap)), encoding="utf-8")
 
     quote_state.llm_raw = dict(overrides_meta)
     quote_state.suggestions = sanitized_struct if isinstance(sanitized_struct, dict) else {}
