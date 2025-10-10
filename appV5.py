@@ -15738,8 +15738,23 @@ def compute_quote_from_df(
 
     # Initialize labor detail seed for display/summary merging in this scope.
     # In other processing paths we derive this from breakdown input; here we
-    # start with an empty seed so downstream merges are safe.
-    labor_cost_details_seed: dict[str, str] = {}
+    # start with whatever was previously prepared (if present) or an empty
+    # seed so downstream merges are safe even when bypassing earlier helpers.
+    seed_source = locals().get("labor_cost_details_seed")
+    if isinstance(seed_source, Mapping):
+        labor_cost_details_seed = dict(seed_source)
+    elif seed_source:
+        try:
+            labor_cost_details_seed = dict(seed_source)  # type: ignore[arg-type]
+        except Exception:
+            labor_cost_details_seed = {}
+    else:
+        labor_cost_details_seed = {}
+    labor_cost_details_seed = {
+        str(key): str(value)
+        for key, value in labor_cost_details_seed.items()
+        if key is not None and value is not None
+    }
     labor_cost_details_input: dict[str, str] = dict(labor_cost_details_seed)
     labor_cost_details: dict[str, str] = dict(labor_cost_details_seed)
     labor_costs_display: dict[str, float] = {}
