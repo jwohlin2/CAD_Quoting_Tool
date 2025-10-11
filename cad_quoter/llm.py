@@ -865,7 +865,11 @@ def explain_quote(
         else:
             lines.append(f"Quote total {price_text}.")
 
-    labor_text = _format_money(totals.get("labor_cost"))
+    labor_cost_rendered = _coerce_float(breakdown.get("labor_cost_rendered"))
+    if labor_cost_rendered is None:
+        labor_cost_rendered = _coerce_float(totals.get("labor_cost"))
+
+    labor_text = _format_money(labor_cost_rendered)
     material_text = _format_money(
         breakdown.get("material_direct_cost")
         or totals.get("material_cost")
