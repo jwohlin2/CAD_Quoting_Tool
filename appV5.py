@@ -17677,7 +17677,24 @@ def compute_quote_from_df(
 
         _merge_labor_detail("Fixture Build (amortized)", fixture_labor_per_part, fixture_bits)
 
-    rendered_labor_total = float(proc_total)
+    proc_total_val: float | None
+    if "proc_total" in locals():
+        try:
+            proc_total_val = float(locals().get("proc_total", 0.0) or 0.0)
+        except Exception:
+            proc_total_val = 0.0
+    else:
+        proc_total_val = None
+
+    if proc_total_val is None:
+        try:
+            proc_total_val = float(
+                sum(float(value or 0.0) for value in labor_costs_display.values())
+            )
+        except Exception:
+            proc_total_val = 0.0
+
+    rendered_labor_total = float(proc_total_val or 0.0)
 
     try:
         labor_display_total = sum(float(value or 0.0) for value in labor_costs_display.values())
