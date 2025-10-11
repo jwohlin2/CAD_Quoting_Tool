@@ -15462,6 +15462,7 @@ def compute_quote_from_df(
         plan_params,
         planner_signals,
     )
+    pricing_source_header = "planner" if used_planner else "legacy"
     if not used_planner and planner_line_items_signal:
         used_planner = True
     force_planner_for_recognized = recognized_line_items > 0
