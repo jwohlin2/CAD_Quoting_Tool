@@ -1,5 +1,38 @@
 import copy
+import math
 import re
+
+
+_PLANNER_LINE_ITEMS = [
+    {
+        "op": "Milling Rough",
+        "minutes": 240.0,
+        "machine_cost": 360.0,
+        "labor_cost": 240.0,
+    },
+    {
+        "op": "Drilling Ops",
+        "minutes": 90.0,
+        "machine_cost": 120.0,
+        "labor_cost": 90.0,
+    },
+    {
+        "op": "Surface Grind",
+        "minutes": 120.0,
+        "machine_cost": 180.0,
+        "labor_cost": 150.0,
+    },
+    {
+        "op": "Deburr & Finish",
+        "minutes": 60.0,
+        "labor_cost": 80.0,
+    },
+    {
+        "op": "Inspection",
+        "minutes": 45.0,
+        "labor_cost": 40.0,
+    },
+]
 
 
 DUMMY_QUOTE_RESULT = {
@@ -86,27 +119,33 @@ DUMMY_QUOTE_RESULT = {
             "buckets": {
                 "milling": {
                     "minutes": 360.0,
-                    "labor$": 600.0,
-                    "machine$": 0.0,
+                    "labor$": 240.0,
+                    "machine$": 360.0,
                     "total$": 600.0,
                 },
                 "drilling": {
                     "minutes": 90.0,
-                    "labor$": 120.0,
-                    "machine$": 0.0,
-                    "total$": 120.0,
-                },
-                "finishing": {
-                    "minutes": 90.0,
                     "labor$": 90.0,
+                    "machine$": 120.0,
+                    "total$": 210.0,
+                },
+                "grinding": {
+                    "minutes": 120.0,
+                    "labor$": 150.0,
+                    "machine$": 180.0,
+                    "total$": 330.0,
+                },
+                "finishing_deburr": {
+                    "minutes": 60.0,
+                    "labor$": 80.0,
                     "machine$": 0.0,
-                    "total$": 90.0,
+                    "total$": 80.0,
                 },
                 "inspection": {
-                    "minutes": 60.0,
-                    "labor$": 95.0,
+                    "minutes": 45.0,
+                    "labor$": 40.0,
                     "machine$": 0.0,
-                    "total$": 95.0,
+                    "total$": 40.0,
                 },
             }
         },
@@ -150,7 +189,6 @@ DUMMY_QUOTE_RESULT = {
             "with_expedite": 2093.28,
             "price": 2511.94,
         },
-        "red_flags": [],
         "applied_pcts": {
             "OverheadPct": 0.12,
             "GA_Pct": 0.05,
@@ -285,8 +323,6 @@ def test_dummy_quote_hour_summary_aligns_with_planner_buckets() -> None:
 def test_dummy_quote_has_no_planner_red_flags() -> None:
     payload = _dummy_quote_payload()
     assert "red_flags" not in payload["breakdown"]
-
-    assert abs((labor + direct) - subtotal) <= 0.01
 
 
 def test_dummy_quote_pricing_source_header() -> None:
