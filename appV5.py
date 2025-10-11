@@ -8382,17 +8382,11 @@ def render_quote(
                     entry["process_keys"].append(extra_key)
 
 
-    show_amortized_single_qty = _lookup_config_flag(
-        "show_amortized_nre_single_qty",
-        "show_amortized_nre_for_single_qty",
-        "show_single_qty_amortized_nre",
-    )
-
     try:
         amortized_qty = int(result.get("qty") or breakdown.get("qty") or qty or 1)
     except Exception:
         amortized_qty = qty if qty > 0 else 1
-    show_amortized = amortized_qty > 1 or (show_amortized_single_qty and amortized_qty > 0)
+    show_amortized = amortized_qty > 1
 
     programming_per_part_cost = labor_cost_totals.get("Programming (amortized)")
     if programming_per_part_cost is None:
@@ -8420,8 +8414,8 @@ def render_quote(
     if eng_hr > 0:
         prog_bits.append(f"- Engineering (lot): {_hours_with_rate_text(eng_hr, eng_rate)}")
     programming_detail_bits = list(prog_bits)
-    if show_amortized and qty > 1 and programming_per_part_cost:
-        programming_detail_bits.append(f"Amortized across {qty} pcs")
+    if show_amortized and amortized_qty > 1 and programming_per_part_cost:
+        programming_detail_bits.append(f"Amortized across {amortized_qty} pcs")
     if show_amortized and programming_per_part_cost:
         programming_detail_bits.append("amortized")
 
@@ -8457,8 +8451,8 @@ def render_quote(
     if soft_jaw_hr > 0:
         fixture_bits.append(f"Soft jaw prep {soft_jaw_hr:.2f} hr")
     fixture_detail_bits = list(fixture_bits)
-    if show_amortized and qty > 1 and fixture_labor_per_part_cost:
-        fixture_detail_bits.append(f"Amortized across {qty} pcs")
+    if show_amortized and amortized_qty > 1 and fixture_labor_per_part_cost:
+        fixture_detail_bits.append(f"Amortized across {amortized_qty} pcs")
     if show_amortized and fixture_labor_per_part_cost:
         fixture_detail_bits.append("amortized")
 
@@ -8681,15 +8675,18 @@ def render_quote(
         programming_per_part_amount = float(programming_per_part_cost or 0.0)
     except Exception:
         programming_per_part_amount = 0.0
-    programming_is_amortized = bool(programming_meta.get("amortized")) or (
-        qty_for_hours > 1 and programming_per_part_amount > 0
+    programming_is_amortized = show_amortized and (
+        bool(programming_meta.get("amortized"))
+        or (qty_for_hours > 1 and programming_per_part_amount > 0)
     )
 
     try:
         fixture_per_part_amount = float(fixture_labor_per_part_cost or 0.0)
     except Exception:
         fixture_per_part_amount = 0.0
-    fixture_is_amortized = qty_for_hours > 1 and fixture_per_part_amount > 0
+    fixture_is_amortized = show_amortized and (
+        qty_for_hours > 1 and fixture_per_part_amount > 0
+    )
 
     if str(pricing_source_value).lower() == "planner":
         planner_total_meta = process_meta.get("planner_total") or {}
