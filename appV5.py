@@ -17489,6 +17489,9 @@ def compute_quote_from_df(
     material_tax_for_directs = float(
         _coerce_float_or_none(material_detail_for_breakdown.get("material_tax")) or 0.0
     )
+    direct_costs_summary: dict[str, float] = {}
+    totals_summary: dict[str, float] = {}
+
     def _update_direct_costs_summary(total_value: Any, labor_value: Any) -> None:
         try:
             total_float = float(total_value or 0.0)
@@ -17498,11 +17501,9 @@ def compute_quote_from_df(
             labor_float = float(labor_value or 0.0)
         except Exception:
             labor_float = 0.0
-        if isinstance(breakdown, _MutableMappingABC):
-            breakdown["total_direct_costs"] = total_float
-        if isinstance(totals, _MutableMappingABC):
-            totals["direct_costs"] = total_float
-            totals["subtotal"] = labor_float + total_float
+        direct_costs_summary["total_direct_costs"] = total_float
+        totals_summary["direct_costs"] = total_float
+        totals_summary["subtotal"] = labor_float + total_float
     total_direct_costs = _compute_direct_costs(
         material_total_for_directs,
         scrap_credit_for_directs,
@@ -17935,6 +17936,27 @@ def compute_quote_from_df(
         "llm_notes": llm_notes,
         "llm_cost_log": llm_cost_log,
     }
+
+    if direct_costs_summary:
+        total_direct_costs_value = direct_costs_summary.get("total_direct_costs")
+        if total_direct_costs_value is not None:
+            try:
+                breakdown["total_direct_costs"] = round(float(total_direct_costs_value), 2)
+            except Exception:
+                breakdown["total_direct_costs"] = total_direct_costs_value
+
+    totals_map = breakdown.get("totals")
+    if isinstance(totals_map, _MutableMappingABC):
+        for key, value in totals_summary.items():
+            try:
+                totals_map[key] = float(value)
+            except Exception:
+                totals_map[key] = value
+    elif totals_summary:
+        breakdown["totals"] = {
+            key: float(value) if isinstance(value, (int, float)) else value
+            for key, value in totals_summary.items()
+        }
 
     breakdown["labor_cost_rendered"] = rendered_labor_total
 
