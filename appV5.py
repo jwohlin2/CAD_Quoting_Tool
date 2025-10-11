@@ -13652,8 +13652,24 @@ def compute_quote_from_df(
         )
 
     drill_params: dict[str, Any] = {}
-    result_material = result.get("material") if isinstance(result, _MappingABC) else None
-    mat_source = geo_context.get("material") or result_material or DEFAULT_MATERIAL_KEY
+    result_material: Any | None = None
+    if isinstance(material_detail_for_breakdown, _MappingABC):
+        try:
+            result_material = material_detail_for_breakdown.get("material")
+        except Exception:
+            result_material = None
+        if not result_material:
+            try:
+                result_material = material_detail_for_breakdown.get("material_name")
+            except Exception:
+                result_material = None
+    mat_source = (
+        geo_context.get("material")
+        or result_material
+        or selected_material_name
+        or drill_material_source
+        or DEFAULT_MATERIAL_KEY
+    )
     mat_key = _normalize_lookup_key(str(mat_source))
     if mat_key:
         drill_params["material"] = mat_key
