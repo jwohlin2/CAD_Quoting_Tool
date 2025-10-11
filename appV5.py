@@ -322,7 +322,6 @@ from typing import (
     MutableMapping,
     overload,
     TYPE_CHECKING,
-    TypeAlias,
     no_type_check,
 )
 
@@ -332,8 +331,32 @@ except ImportError:  # pragma: no cover - python <3.10
     from typing_extensions import TypeAlias  # type: ignore[import]
 
 
-RunLLMSuggestions = Callable[
-    ["LLMClient", dict[str, Any]], tuple[dict[str, Any], str, dict[str, Any]]
+
+class LLMClientLike(Protocol):
+    """Structural protocol describing the subset of the LLM client API we rely on."""
+
+    @property
+    def model_path(self) -> str: ...
+
+    @property
+    def available(self) -> bool: ...
+
+    def ask_json(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = ...,
+        max_tokens: int = ...,
+        context: Mapping[str, Any] | None = ...,
+        params: Mapping[str, Any] | None = ...,
+    ) -> tuple[dict[str, Any], str, dict[str, Any]]: ...
+
+    def close(self) -> None: ...
+
+
+RunLLMSuggestions: TypeAlias = Callable[
+    [LLMClientLike, dict[str, Any]], tuple[dict[str, Any], str, dict[str, Any]]
 ]
 
 try:
@@ -574,18 +597,22 @@ def _planner_signals_present(
                     continue
 
     def _positive_minutes(value: Any) -> bool:
-        try:
-            if value is None:
+        if value is None:
+            return False
+        candidate: Any = value
+        if isinstance(candidate, (list, tuple)):
+            if not candidate:
                 return False
-            candidate = value
-            if isinstance(candidate, (list, tuple)) and candidate:
-                candidate = candidate[0]
-            if isinstance(candidate, str):
-                candidate = candidate.strip()
-                if not candidate:
-                    return False
+            candidate = candidate[0]
+        if isinstance(candidate, (list, tuple, dict, set)):
+            return False
+        if isinstance(candidate, str):
+            candidate = candidate.strip()
+            if not candidate:
+                return False
+        try:
             return float(candidate) > 0.0
-        except Exception:
+        except (TypeError, ValueError):
             return False
 
     if isinstance(breakdown, _MappingABC):
@@ -6333,7 +6360,7 @@ def _iter_ordered_process_entries(
         )
 
 @no_type_check
-def render_quote(
+def render_quote(  # type: ignore[reportGeneralTypeIssues]
     result: dict,
     currency: str = "$",
     show_zeros: bool = False,
@@ -12240,7 +12267,7 @@ def validate_quote_before_pricing(
             raise ValueError("Quote blocked:\n- " + "\n- ".join(issues))
 
 @no_type_check
-def compute_quote_from_df(
+def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     df: pd.DataFrame,
     params: Dict[str, Any] | None = None,
     rates: Dict[str, float] | None = None,
