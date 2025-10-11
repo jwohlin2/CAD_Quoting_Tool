@@ -8549,6 +8549,7 @@ def render_quote(
 
     display_machine = 0.0
     display_labor_for_ladder = 0.0
+    amortized_labor_components: dict[str, float] = {}
     for storage_key, amount in labor_costs_display.items():
         try:
             amount_val = float(amount or 0.0)
@@ -8563,6 +8564,10 @@ def render_quote(
             # and are hidden from the display. They should not contribute to the
             # visible labor subtotal for the pricing ladder.
             continue
+        if "amortized" in canon_key:
+            amortized_labor_components[canon_key] = (
+                amortized_labor_components.get(canon_key, 0.0) + amount_val
+            )
         display_labor_for_ladder += amount_val
 
     machine_in_labor_section = any(
@@ -9038,6 +9043,13 @@ def render_quote(
             declared_subtotal = None
     if declared_subtotal is None:
         declared_subtotal = float(computed_subtotal)
+    else:
+        try:
+            computed_subtotal_val = float(computed_subtotal)
+        except Exception:
+            computed_subtotal_val = 0.0
+        if abs(declared_subtotal) <= 0.01 and computed_subtotal_val > 0.01:
+            declared_subtotal = computed_subtotal_val
     if material_net_cost is None:
         try:
             material_key = next(
