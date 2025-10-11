@@ -17759,8 +17759,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         if abs(rendered_labor_total - float(expected_labor_total)) > _LABOR_SECTION_ABS_EPSILON:
             expected_display = float(expected_labor_total)
             drift_amount = expected_display - rendered_labor_total
-            lines.append(
-                f"  ⚠️ Labor totals drifted by ${drift_amount:,.2f}: "
+            _record_red_flag(
+                f"⚠️ Labor totals drifted by ${drift_amount:,.2f}: "
                 f"rendered ${rendered_labor_total:,.2f} vs expected ${expected_display:,.2f}"
             )
 
