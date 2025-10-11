@@ -5848,6 +5848,20 @@ def _canonical_bucket_key(name: str | None) -> str:
     return normalized
 
 
+def _bucket_cost(info: Mapping[str, Any] | None, *keys: str) -> float:
+    """Safely extract a numeric cost value from a mapping."""
+
+    if not isinstance(info, _MappingABC):
+        return 0.0
+    for key in keys:
+        if key in info:
+            try:
+                return float(info.get(key) or 0.0)
+            except Exception:
+                continue
+    return 0.0
+
+
 def _preferred_order_then_alpha(keys: Iterable[str]) -> list[str]:
     seen: set[str] = set()
     remaining = {key for key in keys if key}
@@ -7241,17 +7255,6 @@ def render_quote(
         if "inspect" in text or "cmm" in text or "fai" in text:
             return "inspection"
         return "milling"
-
-    def _bucket_cost(info: Mapping[str, Any] | None, *keys: str) -> float:
-        if not isinstance(info, _MappingABC):
-            return 0.0
-        for key in keys:
-            if key in info:
-                try:
-                    return float(info.get(key) or 0.0)
-                except Exception:
-                    continue
-        return 0.0
 
     process_plan_breakdown_raw = breakdown.get("process_plan")
     process_plan_breakdown: Mapping[str, Any] | None
