@@ -212,6 +212,9 @@ def bucketize(
         machine_cost = _as_float(li.get("machine_cost"))
         labor_cost = _as_float(li.get("labor_cost"))
         bucket_name = _resolve_bucket_for_op(op_key)
+        if bucket_name.lower() == "drilling" and machine_cost > 0 and labor_cost <= 0:
+            labor_cost = machine_cost
+            machine_cost = 0.0
         add(bucket_name, minutes, machine_cost, labor_cost)
 
     programming_min = _as_float(nre.get("programming_min"))
