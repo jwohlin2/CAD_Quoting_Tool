@@ -198,13 +198,15 @@ def pick_speeds_row(
     *,
     table: Any | None = None,
     tool_description: str | None = None,
+    material_group: str | None = None,
 ) -> dict[str, Any] | None:
     """Select a speeds/feeds row based on material and operation."""
 
     records = _coerce_records(table)
     mm = normalize_material(material_label)
     canonical = (mm.get("canonical_material") if mm else None) or (material_label or "")
-    iso = (mm.get("iso_group") if mm else "") or ""
+    iso_override = str(material_group or "").strip().upper()
+    iso = iso_override or (mm.get("iso_group") if mm else "") or ""
 
     try:
         tool_dia = float(tool_diameter_in) if tool_diameter_in is not None else None
@@ -329,15 +331,16 @@ def pick_speeds_row(
                 restricted_material = True
 
     selected: dict[str, Any] | None = None
-    exact = _select_material_rows(records, operation, canonical)
-    if exact:
-        ordered = _order_by_diameter(exact)
-        if ordered:
-            selected = ordered[0]
-    else:
+    if iso:
         group_rows = _select_group_rows(records, operation, iso)
         if group_rows:
             ordered = _order_by_diameter(group_rows)
+            if ordered:
+                selected = ordered[0]
+    if selected is None:
+        exact = _select_material_rows(records, operation, canonical)
+        if exact:
+            ordered = _order_by_diameter(exact)
             if ordered:
                 selected = ordered[0]
     if selected is None:
