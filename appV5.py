@@ -9094,9 +9094,28 @@ def render_quote(
                 material_net_cost = 0.0
         except Exception:
             material_net_cost = 0.0
-    directs = float(material_net_cost) + float(pass_through_total) + float(display_machine)
+    fallback_directs = (
+        float(material_net_cost) + float(pass_through_total) + float(display_machine)
+    )
     ladder_labor_total = float(display_labor_for_ladder)
-    ladder_subtotal = ladder_labor_total + directs
+    labor_cost_val = computed_total_labor_cost
+    if isinstance(totals, dict):
+        labor_total_candidate = _coerce_float_or_none(totals.get("labor_cost"))
+        if labor_total_candidate is not None:
+            labor_cost_val = float(labor_total_candidate)
+    labor_cost = float(labor_cost_val)
+    total_direct_costs_candidate: float | None = None
+    if isinstance(totals, dict):
+        total_direct_costs_candidate = _coerce_float_or_none(totals.get("direct_costs"))
+    if total_direct_costs_candidate is None and isinstance(breakdown, dict):
+        total_direct_costs_candidate = _coerce_float_or_none(
+            breakdown.get("total_direct_costs")
+        )
+    if total_direct_costs_candidate is None:
+        total_direct_costs_candidate = float(fallback_directs)
+    total_direct_costs = float(total_direct_costs_candidate)
+    directs = total_direct_costs
+    ladder_subtotal = float(labor_cost) + float(total_direct_costs)
     subtotal = float(declared_subtotal)
     printed_subtotal = subtotal
     if not roughly_equal(ladder_subtotal, printed_subtotal, eps=0.01):
