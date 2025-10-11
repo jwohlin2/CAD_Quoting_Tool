@@ -5877,8 +5877,22 @@ def _coerce_bucket_metric(data: Mapping[str, Any] | None, *candidates: str) -> f
     return 0.0
 
 
+_FINAL_BUCKET_HIDE_KEYS = {"planner_total", "planner_labor", "planner_machine", "misc"}
+
+
+def _final_bucket_key(raw_key: Any) -> str:
+    text = re.sub(r"[^a-z0-9]+", "_", str(raw_key or "").lower()).strip("_")
+    if not text:
+        return ""
+    return {
+        "deburr": "finishing_deburr",
+        "finishing": "finishing_deburr",
+        "finishing_deburr": "finishing_deburr",
+    }.get(text, text)
+
+
 def _prepare_bucket_view(raw_view: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Return a canonicalized bucket view suitable for cost table rendering."""
+    """Return the canonical bucket view used for display and rollups."""
 
     prepared: dict[str, Any] = {}
     if isinstance(raw_view, _MappingABC):
@@ -5894,37 +5908,31 @@ def _prepare_bucket_view(raw_view: Mapping[str, Any] | None) -> dict[str, Any]:
     folded: dict[str, dict[str, float]] = {}
 
     for raw_key, raw_info in source.items():
-        canon = _canonical_bucket_key(raw_key)
-        if not canon:
-            continue
-        if canon in _HIDE_IN_BUCKET_VIEW or canon.startswith("planner_"):
+        canon = _final_bucket_key(raw_key)
+        if not canon or canon in _FINAL_BUCKET_HIDE_KEYS:
             continue
         info_map = raw_info if isinstance(raw_info, _MappingABC) else {}
         bucket = folded.setdefault(
             canon,
-            {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0, "total$": 0.0},
+            {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0},
         )
 
         minutes = _coerce_bucket_metric(info_map, "minutes")
         labor = _coerce_bucket_metric(info_map, "labor$", "labor_cost", "labor")
         machine = _coerce_bucket_metric(info_map, "machine$", "machine_cost", "machine")
-        total = _coerce_bucket_metric(info_map, "total$", "total_cost", "total")
-
-        if math.isclose(total, 0.0, abs_tol=1e-9):
-            total = labor + machine
 
         bucket["minutes"] += minutes
         bucket["labor$"] += labor
         bucket["machine$"] += machine
-        bucket["total$"] += total
 
+    cleaned: dict[str, dict[str, float]] = {}
     totals = {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0, "total$": 0.0}
 
-    for canon, metrics in list(folded.items()):
+    for canon, metrics in folded.items():
         minutes = round(float(metrics.get("minutes", 0.0)), 2)
         labor = round(float(metrics.get("labor$", 0.0)), 2)
         machine = round(float(metrics.get("machine$", 0.0)), 2)
-        total = round(float(metrics.get("total$", labor + machine)), 2)
+        total = round(labor + machine, 2)
 
         if (
             math.isclose(minutes, 0.0, abs_tol=0.01)
@@ -5932,21 +5940,22 @@ def _prepare_bucket_view(raw_view: Mapping[str, Any] | None) -> dict[str, Any]:
             and math.isclose(machine, 0.0, abs_tol=0.01)
             and math.isclose(total, 0.0, abs_tol=0.01)
         ):
-            folded.pop(canon, None)
             continue
 
-        metrics["minutes"] = minutes
-        metrics["labor$"] = labor
-        metrics["machine$"] = machine
-        metrics["total$"] = total
+        cleaned[canon] = {
+            "minutes": minutes,
+            "labor$": labor,
+            "machine$": machine,
+            "total$": total,
+        }
 
         totals["minutes"] += minutes
         totals["labor$"] += labor
         totals["machine$"] += machine
         totals["total$"] += total
 
-    prepared["buckets"] = folded
-    prepared["order"] = _preferred_order_then_alpha(folded.keys())
+    prepared["buckets"] = cleaned
+    prepared["order"] = _preferred_order_then_alpha(cleaned.keys())
     prepared["totals"] = {key: round(value, 2) for key, value in totals.items()}
 
     return prepared
@@ -7389,98 +7398,7 @@ def render_quote(
         "saw_waterjet": "Saw/Waterjet",
     }
 
-    canonical_bucket_summary: dict[str, dict[str, float]] = {}
-    canonical_bucket_order: list[str] = []
-    bucket_table_rows: list[tuple[str, float, float, float, float]] = []
-    bucket_table_totals: dict[str, float] | None = None
-
-    def _record_bucket_summary(raw_key: Any, info: Mapping[str, Any] | None) -> None:
-        canon_key = _canonical_bucket_key(raw_key)
-        if not canon_key:
-            return
-        if canon_key not in canonical_bucket_order:
-            canonical_bucket_order.append(canon_key)
-        summary = canonical_bucket_summary.setdefault(
-            canon_key,
-            {"minutes": 0.0, "hours": 0.0, "labor": 0.0, "machine": 0.0, "total": 0.0},
-        )
-        minutes_val = _bucket_cost(info, "minutes")
-        if minutes_val <= 0:
-            try:
-                minutes_val = float(info.get("minute", 0.0) or 0.0)  # type: ignore[arg-type]
-            except Exception:
-                minutes_val = 0.0
-        hours_val = minutes_val / 60.0 if minutes_val > 0 else 0.0
-        if hours_val <= 0:
-            try:
-                hours_val = float(
-                    info.get("hours", info.get("hr", 0.0))  # type: ignore[arg-type]
-                    or 0.0
-                )
-            except Exception:
-                hours_val = 0.0
-        labor_val = _bucket_cost(info, "labor$", "labor_cost")
-        machine_val = _bucket_cost(info, "machine$", "machine_cost")
-        total_val = _bucket_cost(info, "total$", "total_cost", "total")
-        if total_val <= 0:
-            total_val = labor_val + machine_val
-
-        summary["minutes"] += max(minutes_val, 0.0)
-        summary["hours"] += max(hours_val, 0.0)
-        summary["labor"] += max(labor_val, 0.0)
-        summary["machine"] += max(machine_val, 0.0)
-        summary["total"] += max(total_val, 0.0)
-
-    if bucket_rollup_map:
-        for raw_key, info in bucket_rollup_map.items():
-            canon_key = _canonical_bucket_key(raw_key)
-            if canon_key in canonical_bucket_summary and canonical_bucket_summary[canon_key]["total"] > 0:
-                continue
-            if isinstance(info, _MappingABC):
-                _record_bucket_summary(raw_key, info)
-            else:
-                _record_bucket_summary(raw_key, {})
-
-    if canonical_bucket_order and canonical_bucket_summary:
-        bucket_table_totals = {"hours": 0.0, "labor": 0.0, "machine": 0.0, "total": 0.0}
-        for canon_key in list(canonical_bucket_order):
-            if canon_key in {"planner_total", "planner_machine", "planner_labor"}:
-                continue
-            if canon_key.startswith("planner_"):
-                continue
-            summary = canonical_bucket_summary.get(canon_key)
-            if not isinstance(summary, dict):
-                continue
-            hours_val = float(summary.get("hours", 0.0) or 0.0)
-            if hours_val <= 0 and summary.get("minutes", 0.0):
-                hours_val = float(summary.get("minutes", 0.0) or 0.0) / 60.0
-            labor_val = float(summary.get("labor", 0.0) or 0.0)
-            machine_val = float(summary.get("machine", 0.0) or 0.0)
-            total_val = float(summary.get("total", 0.0) or 0.0)
-            if total_val <= 0:
-                total_val = labor_val + machine_val
-            if total_val <= 0.01 and hours_val <= 0.01:
-                continue
-
-            bucket_table_rows.append(
-                (
-                    _display_bucket_label(canon_key, label_overrides),
-                    round(hours_val, 2),
-                    round(labor_val, 2),
-                    round(machine_val, 2),
-                    round(total_val, 2),
-                )
-            )
-
-            bucket_table_totals["hours"] += hours_val
-            bucket_table_totals["labor"] += labor_val
-            bucket_table_totals["machine"] += machine_val
-            bucket_table_totals["total"] += total_val
-
-    if bucket_table_rows:
-        render_bucket_table(bucket_table_rows)
-    else:
-        bucket_table_totals = None
+    # Process & Labor table rendered later using the canonical planner bucket view
 
     def _lookup_process_meta(key: str | None) -> Mapping[str, Any] | None:
         if not isinstance(process_meta, dict):
@@ -7993,12 +7911,12 @@ def render_quote(
     if (prog or fix or other_nre_total > 0) and not lines[-1].strip() == "":
         lines.append("")
 
-    # ---- Process & Labor (auto include non-zeros; sorted desc) ---------------
-    bucket_table_rows = []
-    bucket_table_totals = None
-
-    canonical_bucket_summary = {}
-    canonical_bucket_order = []
+    lines.append("Process & Labor Costs")
+    lines.append(divider)
+    bucket_table_rows: list[tuple[str, float, float, float, float]] = []
+    bucket_table_totals: dict[str, float] | None = None
+    canonical_bucket_order: list[str] = []
+    canonical_bucket_summary: dict[str, dict[str, float]] = {}
 
     process_plan_summary_local = locals().get("process_plan_summary")
     if not isinstance(process_plan_summary_local, _MappingABC):
@@ -8011,23 +7929,78 @@ def render_quote(
         else None
     )
     if isinstance(bucket_view, _MappingABC):
-        buckets = bucket_view.get("buckets")
+        buckets = bucket_view.get("buckets") if isinstance(bucket_view, _MappingABC) else None
         if not isinstance(buckets, _MappingABC):
-            buckets = bucket_view
+            buckets = {}
         order = bucket_view.get("order") if isinstance(bucket_view, _MappingABC) else None
-        if isinstance(order, Sequence):
-            for raw_key in order:
-                info = buckets.get(raw_key) if isinstance(buckets, _MappingABC) else None
-                if isinstance(info, _MappingABC):
-                    _record_bucket_summary(raw_key, info)
-                elif info is not None:
-                    _record_bucket_summary(raw_key, {})
-        if isinstance(buckets, _MappingABC):
-            for raw_key, info in buckets.items():
-                if isinstance(info, _MappingABC):
-                    _record_bucket_summary(raw_key, info)
-                else:
-                    _record_bucket_summary(raw_key, {})
+        if not isinstance(order, Sequence):
+            order = _preferred_order_then_alpha(buckets.keys())
+
+        hours_sum = 0.0
+        labor_sum = 0.0
+        machine_sum = 0.0
+
+        for canon_key in order:
+            info = buckets.get(canon_key)
+            if not isinstance(info, _MappingABC):
+                continue
+            try:
+                minutes_val = float(info.get("minutes", 0.0) or 0.0)
+            except Exception:
+                minutes_val = 0.0
+            try:
+                labor_raw = float(info.get("labor$", 0.0) or 0.0)
+            except Exception:
+                labor_raw = 0.0
+            try:
+                machine_raw = float(info.get("machine$", 0.0) or 0.0)
+            except Exception:
+                machine_raw = 0.0
+
+            hours_raw = minutes_val / 60.0 if minutes_val else 0.0
+            hours_val = round(hours_raw, 2)
+            labor_val = round(labor_raw, 2)
+            machine_val = round(machine_raw, 2)
+            total_raw = labor_raw + machine_raw
+            total_val = round(total_raw, 2)
+
+            if total_val <= 0.01 and hours_val <= 0.01:
+                continue
+
+            canonical_bucket_order.append(canon_key)
+            canonical_bucket_summary[canon_key] = {
+                "minutes": minutes_val,
+                "hours": hours_raw,
+                "labor": labor_raw,
+                "machine": machine_raw,
+                "total": total_raw,
+            }
+
+            bucket_table_rows.append(
+                (
+                    _display_bucket_label(canon_key, label_overrides),
+                    hours_val,
+                    labor_val,
+                    machine_val,
+                    total_val,
+                )
+            )
+
+            hours_sum += hours_val
+            labor_sum += labor_val
+            machine_sum += machine_val
+
+        if bucket_table_rows:
+            render_bucket_table(bucket_table_rows)
+            bucket_table_totals = {
+                "hours": round(hours_sum, 2),
+                "labor": round(labor_sum, 2),
+                "machine": round(machine_sum, 2),
+                "total": round(labor_sum + machine_sum, 2),
+            }
+
+    if not bucket_table_rows:
+        bucket_table_totals = None
 
     if isinstance(process_meta, _MappingABC):
         for raw_key, raw_meta in process_meta.items():
