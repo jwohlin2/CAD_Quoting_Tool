@@ -7402,10 +7402,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         return text or None
 
     raw_pricing_source = _coerce_pricing_source(breakdown.get("pricing_source"))
-    pricing_source_text = _coerce_pricing_source(
-        result.get("pricing_source_text")
-        or breakdown.get("pricing_source_text")
-    )
 
     used_planner_flag: bool | None = None
     for source in (result, breakdown):
@@ -7433,25 +7429,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         hour_summary_entries=hour_summary_entries,
     )
 
-    if (
-        pricing_source_text
-        and pricing_source_value
-        and pricing_source_text.lower() == pricing_source_value.lower()
-    ):
-        pricing_source_text = None
-    if (
-        pricing_source_text
-        and pricing_source_value == "planner"
-        and "planner" not in pricing_source_text.lower()
-    ):
-        pricing_source_text = None
-
     if pricing_source_value:
         lines.append(f"Pricing Source: {pricing_source_value}")
     pricing_source_lower = pricing_source_value.lower() if pricing_source_value else ""
-    if pricing_source_text:
-        lines.append(f"Pricing Source: {pricing_source_text}")
-        pricing_source_lower = pricing_source_text.lower()
     display_red_flags: list[str] = []
     if red_flags:
         display_red_flags = [str(flag).strip() for flag in red_flags if str(flag).strip()]
