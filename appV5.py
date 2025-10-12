@@ -6775,6 +6775,44 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         breakdown.get("suppress_planner_details_due_to_drift")
     )
 
+    def _coerce_debug_bool(value: Any) -> bool | None:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"1", "true", "t", "yes", "y", "on"}:
+                return True
+            if lowered in {"0", "false", "f", "no", "n", "off"}:
+                return False
+            return None
+        return None
+
+    def _resolve_llm_debug_enabled() -> bool:
+        def _extract(container: Any) -> bool | None:
+            if not isinstance(container, _MappingABC):
+                return None
+            direct = _coerce_debug_bool(container.get("llm_debug_enabled"))
+            if direct is not None:
+                return direct
+            for meta_key in ("app", "app_meta", "ui_flags", "ui_vars"):
+                meta = container.get(meta_key)
+                if isinstance(meta, _MappingABC):
+                    flag = _coerce_debug_bool(meta.get("llm_debug_enabled"))
+                    if flag is not None:
+                        return flag
+            return None
+
+        for source in (result, breakdown):
+            flag = _extract(source if isinstance(source, _MappingABC) else None)
+            if flag is not None:
+                return flag
+
+        return bool(APP_ENV.llm_debug_enabled)
+
+    llm_debug_enabled = _resolve_llm_debug_enabled()
+
     # Shipping is displayed in exactly one section of the quote to avoid
     # conflicting totals.  Prefer the pass-through value when available and
     # otherwise fall back to a material-specific entry before rendering.
@@ -7055,7 +7093,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     def render_bucket_table(rows: Sequence[tuple[str, float, float, float, float]]):
         if not rows:
             return
-        if not APP_ENV.llm_debug_enabled:
+        if not llm_debug_enabled:
             return
 
         headers = ("Bucket", "Hours", "Labor $", "Machine $", "Total $")
@@ -7261,7 +7299,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             write_wrapped(entry, "  ")
         lines.append("")
 
-    if drill_debug_entries and APP_ENV.llm_debug_enabled:
+    if drill_debug_entries and llm_debug_enabled:
         render_drill_debug(drill_debug_entries)
     row("Final Price per Part:", price)
     total_labor_label = "Total Labor Cost:"
@@ -8288,6 +8326,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if isinstance(process_plan_summary_local, _MappingABC)
         else None
     )
+    if not isinstance(bucket_view, _MappingABC):
+        bucket_view = (
+            breakdown.get("bucket_view")
+            if isinstance(breakdown, _MappingABC)
+            else None
+        )
+
     if isinstance(bucket_view, _MappingABC):
         buckets = bucket_view.get("buckets") if isinstance(bucket_view, _MappingABC) else None
         if not isinstance(buckets, _MappingABC):
@@ -8748,8 +8793,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         amortized_qty = qty if qty > 0 else 1
     show_amortized = amortized_qty > 1
 
+    if not show_amortized:
+        labor_cost_totals.pop("Programming (amortized)", None)
+        labor_cost_totals.pop("Fixture Build (amortized)", None)
+
     programming_per_part_cost = labor_cost_totals.get("Programming (amortized)")
-    if programming_per_part_cost is None:
+    if not show_amortized:
+        programming_per_part_cost = 0.0
+    elif programming_per_part_cost is None:
         programming_per_part_cost = float(nre.get("programming_per_part", 0.0) or 0.0)
     programming_detail = (nre_detail or {}).get("programming") or {}
     prog_bits: list[str] = []
@@ -8774,14 +8825,16 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if eng_hr > 0:
         prog_bits.append(f"- Engineering (lot): {_hours_with_rate_text(eng_hr, eng_rate)}")
     programming_detail_bits = list(prog_bits)
-    if show_amortized and amortized_qty > 1 and programming_per_part_cost:
+    if show_amortized and programming_per_part_cost:
         programming_detail_bits.append(f"Amortized across {amortized_qty} pcs")
     if show_amortized and programming_per_part_cost:
         programming_detail_bits.append("amortized")
 
     fixture_detail = (nre_detail or {}).get("fixture") or {}
     fixture_labor_per_part_cost = labor_cost_totals.get("Fixture Build (amortized)")
-    if fixture_labor_per_part_cost is None:
+    if not show_amortized:
+        fixture_labor_per_part_cost = 0.0
+    elif fixture_labor_per_part_cost is None:
         try:
             fixture_labor_total = float(fixture_detail.get("labor_cost", 0.0) or 0.0)
         except Exception:
@@ -8811,7 +8864,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if soft_jaw_hr > 0:
         fixture_bits.append(f"Soft jaw prep {soft_jaw_hr:.2f} hr")
     fixture_detail_bits = list(fixture_bits)
-    if show_amortized and amortized_qty > 1 and fixture_labor_per_part_cost:
+    if show_amortized and fixture_labor_per_part_cost:
         fixture_detail_bits.append(f"Amortized across {amortized_qty} pcs")
     if show_amortized and fixture_labor_per_part_cost:
         fixture_detail_bits.append("amortized")
@@ -8842,14 +8895,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     except Exception:
         fixture_per_part_amount_for_rows = 0.0
 
-    if amortized_qty > 1 and programming_per_part_amount_for_rows > 0:
+    if show_amortized and programming_per_part_amount_for_rows > 0:
         _append_extra_labor_row(
             "Programming (amortized)",
             programming_per_part_cost,
             programming_detail_bits,
             labor_cost_details_input.get("Programming (amortized)") or None,
         )
-    if amortized_qty > 1 and fixture_per_part_amount_for_rows > 0:
+    if show_amortized and fixture_per_part_amount_for_rows > 0:
         _append_extra_labor_row(
             "Fixture Build (amortized)",
             fixture_labor_per_part_cost,
@@ -14423,7 +14476,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 f"{', '.join(debug_bits)} @ Ø{avg_mm:.1f} mm"
             )
 
-    if not APP_ENV.llm_debug_enabled:
+    if not llm_debug_enabled:
         drill_debug_line = None
 
     if drill_debug_line:
@@ -16250,7 +16303,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
 
     raw_drill_debug_lines = locals().get("drill_debug_lines")
     drill_debug_lines_payload: list[str] = []
-    if APP_ENV.llm_debug_enabled:
+    if llm_debug_enabled:
         _accumulate_drill_debug(drill_debug_lines_payload, raw_drill_debug_lines)
 
     if process_plan_summary:
@@ -16592,7 +16645,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                     if client is None or not client.available or client.model_path != llm_model_path:
                         client = LLMClient(
                             llm_model_path,
-                            debug_enabled=APP_ENV.llm_debug_enabled,
+                            debug_enabled=llm_debug_enabled,
                             debug_dir=APP_ENV.llm_debug_dir,
                         )
                         created_client = True
@@ -16659,7 +16712,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             "usage": s_usage,
             "applied_effective": applied_effective,
         })
-        if APP_ENV.llm_debug_enabled:
+        if llm_debug_enabled:
             system_prompt = globals().get("SYSTEM_SUGGEST", _DEFAULT_SYSTEM_SUGGEST)
             snap = {
                 "model": overrides_meta.get("model"),
@@ -18269,7 +18322,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         logger.exception("Failed to canonicalize process costs")
         canonical_process_costs = canonicalize_costs(locals().get("process_costs", {}) or {})
 
-    app_meta = {"llm_debug_enabled": bool(APP_ENV.llm_debug_enabled)}
+    app_meta = {"llm_debug_enabled": bool(llm_debug_enabled)}
 
     breakdown = {
         "qty": Qty,
@@ -18399,7 +18452,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     )
     breakdown["narrative"] = narrative_text
 
-    if APP_ENV.llm_debug_enabled and overrides_meta and (
+    if llm_debug_enabled and overrides_meta and (
         overrides_meta.get("raw") is not None or overrides_meta.get("raw_text")
     ):
         try:

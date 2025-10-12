@@ -92,7 +92,9 @@ def test_render_process_costs_orders_rows_and_rates(monkeypatch: pytest.MonkeyPa
     assert all(label in ORDER for label in canonicalize_costs(process_costs))
 
 
-def test_render_process_costs_shows_misc_when_significant(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_render_process_costs_hides_misc_even_when_significant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv("DEBUG_MISC", raising=False)
 
     table = TableCollector()
@@ -100,11 +102,13 @@ def test_render_process_costs_shows_misc_when_significant(monkeypatch: pytest.Mo
 
     total = render_process_costs(table, process_costs, rates={}, minutes_detail={})
 
-    assert [row["label"] for row in table.rows] == ["Misc"]
-    assert total == pytest.approx(75.0)
+    assert table.rows == []
+    assert total == pytest.approx(0.0)
 
 
-def test_render_process_costs_shows_misc_when_debug(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_render_process_costs_hides_misc_even_when_debug(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("DEBUG_MISC", "1")
 
     table = TableCollector()
@@ -112,7 +116,7 @@ def test_render_process_costs_shows_misc_when_debug(monkeypatch: pytest.MonkeyPa
 
     total = render_process_costs(table, process_costs, rates={}, minutes_detail={})
 
-    assert [row["label"] for row in table.rows] == ["Misc"]
-    assert total == pytest.approx(10.0)
+    assert table.rows == []
+    assert total == pytest.approx(0.0)
 
     monkeypatch.delenv("DEBUG_MISC", raising=False)

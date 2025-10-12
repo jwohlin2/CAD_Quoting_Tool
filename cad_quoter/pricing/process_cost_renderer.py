@@ -21,6 +21,15 @@ ORDER: tuple[str, ...] = (
     "misc",
 )
 
+HIDE_IN_COST: frozenset[str] = frozenset(
+    {
+        "planner_total",
+        "planner_labor",
+        "planner_machine",
+        "misc",
+    }
+)
+
 _LABEL_OVERRIDES: dict[str, str] = {
     "finishing_deburr": "Finishing/Deburr",
     "saw_waterjet": "Saw/Waterjet",
@@ -281,6 +290,10 @@ def render_process_costs(
     for key in ORDER:
         raw_amount = float(costs.get(key, 0.0))
         amount = round(raw_amount, 2)
+        if key in HIDE_IN_COST:
+            if not math.isclose(amount, 0.0, abs_tol=1e-9):
+                hidden_total += amount
+            continue
         if key == "misc" and not debug_misc and raw_amount < 50.0:
             hidden_total += amount
             continue
