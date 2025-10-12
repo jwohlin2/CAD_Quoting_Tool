@@ -1605,7 +1605,7 @@ def _scrap_value_provided(val: Any) -> bool:
     return math.isfinite(parsed)
 
 
-SUGGESTION_SCALAR_KEYS: tuple[str, ...] = (
+ACCEPT_SCALAR_KEYS: tuple[str, ...] = (
     "scrap_pct",
     "contingency_pct",
     "setups",
@@ -1622,6 +1622,9 @@ SUGGESTION_SCALAR_KEYS: tuple[str, ...] = (
     "packaging_flat_cost",
     "shipping_hint",
 )
+
+
+SUGGESTION_SCALAR_KEYS: tuple[str, ...] = ACCEPT_SCALAR_KEYS
 
 
 def _auto_accept_suggestions(suggestions: dict[str, Any] | None) -> dict[str, Any]:
@@ -1650,7 +1653,7 @@ def _auto_accept_suggestions(suggestions: dict[str, Any] | None) -> dict[str, An
                 conf = _confidence_for((bucket, str(subkey)))
                 bucket_accept[str(subkey)] = True if conf is None else conf >= 0.6
             accept[bucket] = bucket_accept
-    for scalar_key in SUGGESTION_SCALAR_KEYS:
+    for scalar_key in ACCEPT_SCALAR_KEYS:
         if scalar_key in suggestions:
             conf = _confidence_for((scalar_key,))
             accept[scalar_key] = True if conf is None else conf >= 0.6
@@ -3629,7 +3632,7 @@ def ensure_accept_flags(state: QuoteState) -> None:
             if stale not in sugg:
                 bucket.pop(stale, None)
 
-    for key in SUGGESTION_SCALAR_KEYS:
+    for key in ACCEPT_SCALAR_KEYS:
         if key in suggestions and not isinstance(accept.get(key), bool):
             accept[key] = False
         if key not in suggestions and key in accept and not isinstance(accept.get(key), dict):
