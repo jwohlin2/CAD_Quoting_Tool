@@ -7138,7 +7138,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if lines and lines[-1] != "":
             lines.append("")
 
-        lines.append("Planner diagnostics (not billed)")
+        diagnostic_banner = "=== Planner diagnostics (not billed) ==="
+        lines.append(diagnostic_banner)
+        lines.append("=" * min(page_width, len(diagnostic_banner)))
 
         header_line = " | ".join(_fmt(header, idx) for idx, header in enumerate(headers))
         separator_line = " | ".join("-" * width for width in col_widths)
@@ -7189,6 +7191,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             _ensure_total_separator(len(right))
         pad = max(1, page_width - len(left) - len(right))
         lines.append(f"{left}{' ' * pad}{right}")
+
+    def _canonical_hour_label(label: str) -> str:
+        text = str(label or "").strip()
+        if not text:
+            return ""
+        text = text.rstrip(":")
+        return re.sub(r"\s+", " ", text)
 
     def _is_extra_segment(segment: str) -> bool:
         try:
