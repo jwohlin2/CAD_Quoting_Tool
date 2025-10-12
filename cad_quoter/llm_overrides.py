@@ -221,11 +221,7 @@ def _default_llm_bounds_dict() -> dict[str, Any]:
 def get_llm_bound_defaults() -> dict[str, Any]:
     """Return a mutable copy of the default LLM guardrail bounds."""
 
-    base = globals().get("LLM_BOUND_DEFAULTS")
-    if not isinstance(base, _MappingABC):
-        base = MappingProxyType(_default_llm_bounds_dict())
-        globals()["LLM_BOUND_DEFAULTS"] = base
-    return dict(base)
+    return dict(coerce_bounds(LLM_BOUND_DEFAULTS))
 
 
 LLM_BOUND_DEFAULTS: Mapping[str, Any] = MappingProxyType(_default_llm_bounds_dict())
