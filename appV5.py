@@ -7298,16 +7298,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     total_labor_label = "Total Labor Cost:"
     row(total_labor_label, float(totals.get("labor_cost", 0.0)))
     total_labor_row_index = len(lines) - 1
-    direct_costs_total_display: Any = None
-    if isinstance(breakdown, _MappingABC):
-        direct_costs_total_display = breakdown.get("total_direct_costs")
-    if direct_costs_total_display is None and isinstance(totals, _MappingABC):
-        direct_costs_total_display = totals.get("direct_costs")
-    try:
-        direct_costs_total_value = float(direct_costs_total_display or 0.0)
-    except Exception:
-        direct_costs_total_value = 0.0
-    row("Total Direct Costs:", direct_costs_total_value)
+    total_direct_costs_label = "Total Direct Costs:"
+    row(total_direct_costs_label, 0.0)
+    total_direct_costs_row_index = len(lines) - 1
+    directs: float = 0.0
     def _coerce_pricing_source(value: Any) -> str | None:
         if value is None:
             return None
@@ -8824,14 +8818,21 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             f"{_m(material_direct_contribution)} to Direct Costs",
             "  ",
         )
-    total_direct_costs_display = _compute_direct_costs(
+    directs = _compute_direct_costs(
         material_total_for_directs,
         scrap_credit_for_directs,
         material_tax_for_directs,
         displayed_pass_through,
     )
-    row("Total", total_direct_costs_display, indent="  ")
+    row("Total", directs, indent="  ")
     pass_through_total = float(sum(displayed_pass_through.values()))
+    if isinstance(totals, dict):
+        totals["direct_costs"] = directs
+    if 0 <= total_direct_costs_row_index < len(lines):
+        lines[total_direct_costs_row_index] = _format_row(
+            total_direct_costs_label,
+            directs,
+        )
 
     computed_total_labor_cost = proc_total + pass_through_labor_total
     expected_labor_total = computed_total_labor_cost
@@ -8895,55 +8896,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 material_net_cost = 0.0
         except Exception:
             material_net_cost = 0.0
-    fallback_directs = (
-        float(material_net_cost) + float(pass_through_total) + float(display_machine)
-    )
-    ladder_labor_total = float(display_labor_for_ladder)
-    labor_cost_val = computed_total_labor_cost
-    if isinstance(totals, dict):
-        labor_total_candidate = _coerce_float_or_none(totals.get("labor_cost"))
-        if labor_total_candidate is not None:
-            labor_cost_val = float(labor_total_candidate)
-    labor_cost = float(labor_cost_val)
-    total_direct_costs_candidate: float | None = None
-    if isinstance(totals, dict):
-        total_direct_costs_candidate = _coerce_float_or_none(totals.get("direct_costs"))
-    if total_direct_costs_candidate is None and isinstance(breakdown, dict):
-        total_direct_costs_candidate = _coerce_float_or_none(
-            breakdown.get("total_direct_costs")
-        )
-    if total_direct_costs_candidate is None:
-        total_direct_costs_candidate = float(fallback_directs)
-    total_direct_costs = float(total_direct_costs_candidate)
-    directs = total_direct_costs
-    ladder_subtotal = float(labor_cost) + float(total_direct_costs)
-    subtotal = float(declared_subtotal)
-    printed_subtotal = subtotal
-    if not roughly_equal(ladder_subtotal, printed_subtotal, eps=0.01):
-        try:
-            logger.warning(
-                "Labor + Direct mismatch (labor=%s, directs=%s, subtotal=%s)",
-                f"{ladder_labor_total:.2f}",
-                f"{directs:.2f}",
-                f"{printed_subtotal:.2f}",
-            )
-        except Exception:
-            pass
-        directs = max(printed_subtotal - ladder_labor_total, 0.0)
-        ladder_subtotal = ladder_labor_total + directs
-    breakdown_direct_cost_total: Any = None
-    if isinstance(breakdown, _MappingABC):
-        breakdown_direct_cost_total = breakdown.get("total_direct_costs")
-    if breakdown_direct_cost_total is None and isinstance(totals, _MappingABC):
-        breakdown_direct_cost_total = totals.get("direct_costs")
-    if breakdown_direct_cost_total is not None:
-        try:
-            directs = float(breakdown_direct_cost_total or 0.0)
-        except Exception:
-            directs = float(directs or 0.0)
-        ladder_subtotal = ladder_labor_total + directs
-        subtotal = ladder_subtotal
-        printed_subtotal = subtotal
+
+    ladder_base_labor = max(computed_total_labor_cost - amortized_nre_total, 0.0)
+    ladder_directs = float(directs)
+    ladder_labor = ladder_base_labor + (amortized_nre_total if qty > 1 else 0.0)
+    ladder_subtotal = round(ladder_labor + ladder_directs, 2)
+
+    printed_subtotal = round(float(declared_subtotal or 0.0), 2)
+    assert roughly_equal(ladder_subtotal, printed_subtotal, eps=0.01)
+
+    subtotal = ladder_subtotal
+    printed_subtotal = ladder_subtotal
     lines.append("")
 
     # ---- Pricing ladder ------------------------------------------------------
