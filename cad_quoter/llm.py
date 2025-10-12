@@ -865,6 +865,17 @@ def explain_quote(
         else:
             lines.append(f"Quote total {price_text}.")
 
+    material_selected = breakdown.get("material_selected") or {}
+    material_canonical = ""
+    if isinstance(material_selected, Mapping):
+        material_canonical = str(material_selected.get("canonical") or "").strip()
+    else:
+        getter = getattr(material_selected, "get", None)
+        if callable(getter):
+            material_canonical = str(getter("canonical") or "").strip()
+    if material_canonical:
+        lines.append(f"Material: {material_canonical}.")
+
     labor_cost_rendered = _coerce_float(breakdown.get("labor_cost_rendered"))
     if labor_cost_rendered is None:
         labor_cost_rendered = _coerce_float(totals.get("labor_cost"))
