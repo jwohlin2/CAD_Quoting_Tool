@@ -7055,7 +7055,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     def render_bucket_table(rows: Sequence[tuple[str, float, float, float, float]]):
         if not rows:
             return
-        if not APP_ENV.llm_debug_enabled:
+        if not llm_debug_enabled_flag:
             return
 
         headers = ("Bucket", "Hours", "Labor $", "Machine $", "Total $")
@@ -7212,6 +7212,37 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if txt:
             write_line(str(txt), indent)
 
+    def _extract_llm_debug_override(container: Mapping[str, Any] | None) -> bool | None:
+        if not isinstance(container, _MappingABC):
+            return None
+        if "llm_debug_enabled" in container:
+            value = container.get("llm_debug_enabled")
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (int, float)):
+                return bool(value)
+            if isinstance(value, str):
+                lowered = value.strip().lower()
+                if lowered in {"1", "true", "t", "yes", "y", "on"}:
+                    return True
+                if lowered in {"0", "false", "f", "no", "n", "off", ""}:
+                    return False
+                return None
+            return bool(value)
+        for meta_key in ("app", "app_meta"):
+            meta = container.get(meta_key)
+            override = _extract_llm_debug_override(meta) if isinstance(meta, _MappingABC) else None
+            if override is not None:
+                return override
+        return None
+
+    llm_debug_enabled_flag = bool(APP_ENV.llm_debug_enabled)
+    for source in (result, breakdown):
+        override = _extract_llm_debug_override(source if isinstance(source, _MappingABC) else None)
+        if override is not None:
+            llm_debug_enabled_flag = override
+            break
+
     # ---- header --------------------------------------------------------------
     lines: list[str] = []
     hour_summary_entries: dict[str, tuple[float, bool]] = {}
@@ -7261,7 +7292,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             write_wrapped(entry, "  ")
         lines.append("")
 
-    if drill_debug_entries and APP_ENV.llm_debug_enabled:
+    if drill_debug_entries and llm_debug_enabled_flag:
         render_drill_debug(drill_debug_entries)
     row("Final Price per Part:", price)
     total_labor_label = "Total Labor Cost:"
@@ -8288,6 +8319,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if isinstance(process_plan_summary_local, _MappingABC)
         else None
     )
+    if not isinstance(bucket_view, _MappingABC):
+        raw_bucket_view = breakdown.get("bucket_view") if isinstance(breakdown, _MappingABC) else None
+        if isinstance(raw_bucket_view, _MappingABC):
+            bucket_view = raw_bucket_view
     if isinstance(bucket_view, _MappingABC):
         buckets = bucket_view.get("buckets") if isinstance(bucket_view, _MappingABC) else None
         if not isinstance(buckets, _MappingABC):
@@ -9094,130 +9129,75 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         def _emit_hour_row(label: str, value: float, *, include_in_total: bool = True) -> None:
             _record_hour_entry(label, value, include_in_total=include_in_total)
 
-        def _bucket_minutes(info: Mapping[str, Any] | None) -> float:
+        planner_bucket_view: Mapping[str, Any] | None = None
+        if isinstance(bucket_view, _MappingABC):
+            planner_bucket_view = bucket_view
+        elif isinstance(process_plan_summary_local, _MappingABC):
+            candidate_bucket_view = process_plan_summary_local.get("bucket_view")
+            if isinstance(candidate_bucket_view, _MappingABC):
+                planner_bucket_view = candidate_bucket_view
+
+        buckets_map: Mapping[str, Any] | None = None
+        order: Sequence[Any] | None = None
+        if isinstance(planner_bucket_view, _MappingABC):
+            buckets_map = planner_bucket_view.get("buckets")
+            order = planner_bucket_view.get("order")
+
+        if not isinstance(buckets_map, _MappingABC):
+            buckets_map = {}
+        if not isinstance(order, Sequence):
+            order = _preferred_order_then_alpha(buckets_map.keys())
+
+        seen_hour_canon_keys: set[str] = set()
+
+        def _bucket_minutes_from_view(canon_key: str) -> float:
+            info = buckets_map.get(canon_key)
             if not isinstance(info, _MappingABC):
                 return 0.0
+            return _safe_float(info.get("minutes"))
+
+        def _emit_bucket_from_view(canon_key: str) -> None:
+            minutes_val = _bucket_minutes_from_view(canon_key)
+            hours_val = minutes_val / 60.0 if minutes_val else 0.0
+            if hours_val <= 0.01 and not show_zeros:
+                return
+            label = _display_bucket_label(canon_key, label_overrides)
+            _emit_hour_row(label, round(hours_val, 2))
+            seen_hour_canon_keys.add(canon_key)
+
+        for canon_key in order:
+            if not canon_key:
+                continue
+            if canon_key in seen_hour_canon_keys:
+                continue
+            _emit_bucket_from_view(canon_key)
+
+        for canon_key in buckets_map.keys():
+            if not canon_key or canon_key in seen_hour_canon_keys:
+                continue
+            _emit_bucket_from_view(canon_key)
+
+        totals_map = (
+            planner_bucket_view.get("totals")
+            if isinstance(planner_bucket_view, _MappingABC)
+            else None
+        )
+        planner_total_minutes = _safe_float(
+            totals_map.get("minutes") if isinstance(totals_map, _MappingABC) else 0.0
+        )
+        if planner_total_minutes <= 0:
             try:
-                return float(info.get("minutes", 0.0) or 0.0)
+                planner_total_minutes = sum(
+                    _bucket_minutes_from_view(key) for key in buckets_map.keys()
+                )
             except Exception:
-                return 0.0
-
-        def _hours_for_bucket(canon_key: str) -> float:
-            meta = _lookup_process_meta(canon_key) or {}
-
-            for key_name in ("final_hr", "planner_hr", "hr"):
-                try:
-                    hr_val = _safe_float(meta.get(key_name))
-                except Exception:
-                    hr_val = 0.0
-                if hr_val > 0:
-                    return hr_val
-
-            for minute_key in ("final_minutes", "planner_minutes", "minutes"):
-                try:
-                    minute_val = _safe_float(meta.get(minute_key))
-                except Exception:
-                    minute_val = 0.0
-                if minute_val > 0:
-                    return minute_val / 60.0
-
-            summary = canonical_bucket_summary.get(canon_key)
-            if isinstance(summary, dict):
-                hours_val = _safe_float(summary.get("hours"))
-                if hours_val > 0:
-                    return hours_val
-                minutes_val = _safe_float(summary.get("minutes"))
-                if minutes_val > 0:
-                    return minutes_val / 60.0
-
-            info: Mapping[str, Any] | None = None
-            if isinstance(planner_bucket_display_map, _MappingABC):
-                info = planner_bucket_display_map.get(canon_key)
-            if not isinstance(info, _MappingABC):
-                info = bucket_rollup_map.get(canon_key)
-            minutes_val = _bucket_minutes(info)
-            if minutes_val > 0:
-                if pricing_source_lower == "planner" and canon_key not in canonical_bucket_summary:
-                    return 0.0
-                return minutes_val / 60.0
-
-            if pricing_source_lower == "planner":
-                return 0.0
-
-            if meta:
-                hr_val = _safe_float(meta.get("hr"))
-                if hr_val > 0:
-                    return hr_val
-                minutes_val = _safe_float(meta.get("minutes"))
-                if minutes_val > 0:
-                    return minutes_val / 60.0
-
-            return 0.0
+                planner_total_minutes = 0.0
+        if planner_total_minutes > 0:
+            planner_total_hr = planner_total_minutes / 60.0
 
         _emit_hour_row("Planner Total", round(planner_total_hr, 2))
         _emit_hour_row("Planner Labor", round(planner_labor_hr, 2), include_in_total=False)
         _emit_hour_row("Planner Machine", round(planner_machine_hr, 2), include_in_total=False)
-
-        skip_hour_canon_keys = {
-            "programming",
-            "fixture_build",
-            "programming_amortized",
-            "fixture_build_amortized",
-        }
-
-        def _ordered_hour_keys() -> Iterable[str]:
-            yielded: set[str] = set()
-            for key in canonical_bucket_order:
-                if not key or key in yielded:
-                    continue
-                yielded.add(key)
-                yield key
-            for key in aggregated_order:
-                if not key or key in yielded:
-                    continue
-                yielded.add(key)
-                yield key
-
-        seen_hour_canon_keys: set[str] = set()
-        for canon_key in _ordered_hour_keys():
-            if not canon_key or canon_key in skip_hour_canon_keys:
-                continue
-            if canon_key in {"planner_labor", "planner_machine", "planner_total"}:
-                continue
-            if canon_key.startswith("planner_"):
-                continue
-            hours_val = charged_hours_by_canon.get(canon_key)
-            if hours_val is None:
-                hours_val = _hours_for_bucket(canon_key)
-            if hours_val is None:
-                continue
-            try:
-                hours_float = float(hours_val or 0.0)
-            except Exception:
-                hours_float = 0.0
-            if hours_float <= 0.01:
-                continue
-            label = _display_bucket_label(canon_key, label_overrides)
-            _emit_hour_row(label, round(hours_float, 2))
-            seen_hour_canon_keys.add(canon_key)
-
-        for canon_key, hours_val in sorted(charged_hours_by_canon.items()):
-            if not canon_key or canon_key in skip_hour_canon_keys:
-                continue
-            if canon_key in seen_hour_canon_keys:
-                continue
-            if canon_key in {"planner_labor", "planner_machine", "planner_total"}:
-                continue
-            if str(canon_key).startswith("planner_"):
-                continue
-            try:
-                hours_float = float(hours_val or 0.0)
-            except Exception:
-                hours_float = 0.0
-            if hours_float <= 0.01:
-                continue
-            label = _display_bucket_label(canon_key, label_overrides)
-            _emit_hour_row(label, round(hours_float, 2))
 
         _emit_hour_row("Programming (lot)", round(programming_hours, 2))
         if programming_is_amortized and qty_for_hours > 0:
