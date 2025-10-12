@@ -199,12 +199,16 @@ def pick_speeds_row(
     table: Any | None = None,
     tool_description: str | None = None,
     material_group: str | None = None,
+    material_key: str | None = None,
 ) -> dict[str, Any] | None:
     """Select a speeds/feeds row based on material and operation."""
 
     records = _coerce_records(table)
-    mm = normalize_material(material_label)
-    canonical = (mm.get("canonical_material") if mm else None) or (material_label or "")
+    lookup_value = str(material_key or material_label or "").strip()
+    mm = normalize_material(lookup_value)
+    canonical = (mm.get("canonical_material") if mm else None) or (
+        lookup_value if lookup_value else (material_label or "")
+    )
     iso_override = str(material_group or "").strip().upper()
     iso = iso_override or (mm.get("iso_group") if mm else "") or ""
 
@@ -365,6 +369,7 @@ def pick_speeds_row(
         "op": operation,
         "material_input": material_label,
         "canonical": canonical,
+        "material_key": material_key,
         "iso_group": iso,
         "row_material": selected.get("material") if selected else None,
         "row_group": selected.get("material_group") if selected else None,
