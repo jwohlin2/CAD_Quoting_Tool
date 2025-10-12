@@ -224,8 +224,14 @@ _EXPECTED_BUCKET_ROWS = {
 }
 
 
-def _dummy_quote_payload() -> dict:
-    return copy.deepcopy(DUMMY_QUOTE_RESULT)
+def _dummy_quote_payload(*, debug_enabled: bool = False) -> dict:
+    payload = copy.deepcopy(DUMMY_QUOTE_RESULT)
+    if not debug_enabled:
+        payload.pop("drill_debug", None)
+        breakdown = payload.get("breakdown")
+        if isinstance(breakdown, dict):
+            breakdown.pop("drill_debug", None)
+    return payload
 
 
 def _render_lines(payload: dict, *, drop_planner_display: bool = False) -> list[str]:
@@ -248,7 +254,7 @@ def _extract_currency(line: str) -> float:
 
 
 def test_dummy_quote_material_consistency() -> None:
-    payload = _dummy_quote_payload()
+    payload = _dummy_quote_payload(debug_enabled=True)
     baseline = payload["decision_state"]["baseline"]
     drilling_meta = payload["breakdown"]["drilling_meta"]
     drill_debug = payload["breakdown"]["drill_debug"]
@@ -349,7 +355,7 @@ def test_dummy_quote_pricing_source_header() -> None:
 
 
 def test_dummy_quote_drill_debug_material_alignment() -> None:
-    payload = _dummy_quote_payload()
+    payload = _dummy_quote_payload(debug_enabled=True)
     breakdown = payload["breakdown"]
     debug_lines = payload.get("drill_debug", [])
 
@@ -366,7 +372,7 @@ def test_dummy_quote_drill_debug_material_alignment() -> None:
 
 
 def test_dummy_quote_drill_debug_ranges_and_index() -> None:
-    payload = _dummy_quote_payload()
+    payload = _dummy_quote_payload(debug_enabled=True)
     debug_line = next(line for line in payload.get("drill_debug", []) if line.startswith("Drill calc"))
 
     index_match = re.search(r"index\s+([0-9]+(?:\.[0-9]+)?)\s*s/hole", debug_line)
@@ -401,7 +407,7 @@ def test_dummy_quote_drilling_bucket_matches_summary() -> None:
 
 
 def test_dummy_quote_has_no_csv_debug_duplicates() -> None:
-    payload = _dummy_quote_payload()
+    payload = _dummy_quote_payload(debug_enabled=True)
 
     assert not any(
         line.strip().startswith("CSV drill feeds (N1)")

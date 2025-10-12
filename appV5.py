@@ -13540,25 +13540,19 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         )
 
     drill_params: dict[str, Any] = {}
-    result_material: Any | None = None
-    if isinstance(material_detail_for_breakdown, _MappingABC):
+    result_material_name: Any | None = None
+    result_context = locals().get("result")
+    if isinstance(result_context, _MappingABC):
         try:
-            result_material = material_detail_for_breakdown.get("material")
+            result_material_name = result_context.get("material")
         except Exception:
-            result_material = None
-        if not result_material:
-            try:
-                result_material = material_detail_for_breakdown.get("material_name")
-            except Exception:
-                result_material = None
-    mat_source = (
+            result_material_name = None
+    material_name = str(
         geo_context.get("material")
-        or result_material
-        or selected_material_name
-        or drill_material_source
+        or result_material_name
         or DEFAULT_MATERIAL_KEY
     )
-    mat_key = _normalize_lookup_key(str(mat_source))
+    mat_key = _normalize_lookup_key(material_name)
     if mat_key:
         drill_params["material"] = mat_key
 
@@ -13862,6 +13856,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             )
 
     if not APP_ENV.llm_debug_enabled:
+        # Don’t print drill debug in customer quotes
         drill_debug_line = None
 
     if drill_debug_line:
@@ -17738,7 +17733,6 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         "direct_costs": direct_costs_display,
         "direct_cost_details": direct_cost_details,
         "speeds_feeds_path": speeds_feeds_path,
-        "drill_debug": list(drill_debug_lines_payload),
         "drilling_meta": drilling_meta,
         "drill_params": dict(drill_params),
         "pass_meta": pass_meta,
@@ -17765,6 +17759,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         "llm_notes": llm_notes,
         "llm_cost_log": llm_cost_log,
     }
+
+    if APP_ENV.llm_debug_enabled:
+        breakdown["drill_debug"] = list(drill_debug_lines_payload)
 
     if direct_costs_summary:
         total_direct_costs_value = direct_costs_summary.get("total_direct_costs")
@@ -17890,7 +17887,6 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         "material_source": material_source_final,
         "speeds_feeds_path": speeds_feeds_path,
         "speeds_feeds_loaded": speeds_feeds_loaded_flag,
-        "drill_debug": list(drill_debug_lines_payload),
         "drilling_meta": drilling_meta,
         "drill_params": dict(drill_params),
         "red_flags": list(red_flag_messages),
@@ -17898,6 +17894,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         "canonical_process_costs": canonical_process_costs,
         "pricing_source": pricing_source_value,
     }
+
+    if APP_ENV.llm_debug_enabled:
+        result_payload["drill_debug"] = list(drill_debug_lines_payload)
 
     if planner_bucket_display_map_breakdown:
         result_payload["planner_bucket_display_map"] = copy.deepcopy(
