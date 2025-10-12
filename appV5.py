@@ -9082,6 +9082,19 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     # ---- Pass-Through & Direct (auto include non-zeros; sorted desc) --------
     lines.append("Pass-Through & Direct Costs")
     lines.append(divider)
+    material_direct_contribution = round(
+        float(material_total_for_directs or 0.0)
+        + float(material_tax_for_directs or 0.0)
+        - float(scrap_credit_for_directs or 0.0),
+        2,
+    )
+    material_net_cost = float(material_direct_contribution)
+    if material_direct_contribution or show_zeros:
+        write_line(
+            "Material & Stock (printed above) contributes "
+            f"{_m(material_direct_contribution)} to Direct Costs",
+            "  ",
+        )
     pass_total = 0.0
     pass_through_labor_total = 0.0
     displayed_pass_through: dict[str, float] = {}
