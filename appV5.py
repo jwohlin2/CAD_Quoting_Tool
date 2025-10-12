@@ -8377,6 +8377,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             fixture_labor_total / qty if qty > 0 else fixture_labor_total
         )
 
+    try:
+        amortized_nre_total = float(programming_per_part_cost or 0.0) + float(
+            fixture_labor_per_part_cost or 0.0
+        )
+    except Exception:
+        amortized_nre_total = 0.0
+
     lines.append("Process & Labor Costs")
     lines.append(divider)
 
@@ -8623,55 +8630,30 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             map_key = canon_key or str(key)
             if map_key not in aggregated:
                 if canon_key:
-                    display_label = _display_bucket_label(canon_key, label_overrides)
-                    process_key_value = canon_key
-                else:
-                    display_label = _process_label(key)
-                    process_key_value = str(key)
-                aggregated[map_key] = {
-                    "label": display_label,
-                    "amount": amount_val,
-                    "process_key": process_key_value,
-                }
-                aggregated_order.append(map_key)
-            else:
-                aggregated[map_key]["amount"] = float(aggregated[map_key]["amount"]) + amount_val
-            any_rows_rendered = True
-        for map_key in aggregated_order:
-            entry = aggregated[map_key]
-            label_text = str(entry["label"])
-            amount_value = float(entry["amount"])
-            labor_costs_display[label_text] = float(
-                labor_costs_display.get(label_text, 0.0)
-            ) + amount_value
-            display_labor_for_ladder += amount_value
-            _add_labor_cost_line(
-                label_text,
-                amount_value,
-                process_key=str(entry["process_key"]),
-            )
-        if not any_rows_rendered and show_zeros:
-            row("No process costs", 0.0, indent="  ")
-
-    try:
-        misc_amt = float(
-            labor_cost_totals.get("Misc (LLM deltas)")
-            or labor_cost_totals.get("Misc")
-            or process_costs.get("Misc")
-            or process_costs.get("misc")
-            or 0.0
-        )
-    except Exception:
-        misc_amt = 0.0
-    if misc_amt > 0:
-        misc_label = "Misc (LLM deltas)"
-        _add_labor_cost_line(misc_label, misc_amt, detail_bits=["LLM adjustments"])
-        labor_costs_display[misc_label] = float(
-            labor_costs_display.get(misc_label, 0.0)
-        ) + misc_amt
-        display_labor_for_ladder += misc_amt
+                    add_process_notes(canon_key, indent="    ")
+    elif labor_cost_totals:
+        for label, amount in labor_cost_totals.items():
+            try:
+                display_amount = float(amount or 0.0)
+            except Exception:
+                display_amount = 0.0
+            labor_costs_display[label] = display_amount
+            row(label, display_amount, indent="  ")
+    elif process_costs_canon:
+        for canon_key, amount in process_costs_canon.items():
+            label = _display_bucket_label(canon_key, label_overrides)
+            label = label.replace("(Amortized)", "(amortized)")
+            try:
+                display_amount = float(amount or 0.0)
+            except Exception:
+                display_amount = 0.0
+            labor_costs_display[label] = display_amount
+            row(label, display_amount, indent="  ")
+    elif show_zeros:
+        row("No process costs", 0.0, indent="  ")
 
     row("Total", proc_total, indent="  ")
+
 
     hour_summary_entries.clear()
 
@@ -9002,6 +8984,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             )
 
     if hour_summary_entries:
+        def _canonical_hour_label(value: Any) -> str:
+            text = str(value or "")
+            text = re.sub(r"\s+", " ", text).strip()
+            return text
+
         lines.append("")
         lines.append("Labor Hour Summary")
         lines.append(divider)
@@ -9073,14 +9060,27 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         material_tax_for_directs,
         displayed_pass_through,
     )
+    if isinstance(breakdown, dict):
+        try:
+            breakdown["total_direct_costs"] = float(directs)
+        except Exception:
+            pass
     row("Total", directs, indent="  ")
     pass_through_total = float(sum(displayed_pass_through.values()))
     if isinstance(totals, dict):
         totals["direct_costs"] = directs
+    header_directs = directs
+    if isinstance(breakdown, dict):
+        try:
+            header_directs = float(breakdown.get("total_direct_costs", directs))
+        except Exception:
+            fallback_header_directs = breakdown.get("total_direct_costs")
+            if isinstance(fallback_header_directs, (int, float)):
+                header_directs = float(fallback_header_directs)
     if 0 <= total_direct_costs_row_index < len(lines):
         lines[total_direct_costs_row_index] = _format_row(
             total_direct_costs_label,
-            directs,
+            header_directs,
         )
 
     computed_total_labor_cost = proc_total + pass_through_labor_total
@@ -9113,6 +9113,18 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             computed_total_labor_cost,
         )
 
+    if lines and lines[-1] != "":
+        lines.append("")
+    lines.append("Process & Labor Costs")
+    lines.append(divider)
+    row("Labor", expected_labor_total, indent="  ")
+    try:
+        direct_summary = float(breakdown.get("total_direct_costs", directs))
+    except Exception:
+        direct_summary = float(directs)
+    row("Directs", direct_summary, indent="  ")
+    row("Total", expected_labor_total + direct_summary, indent="  ")
+
     computed_subtotal = proc_total + pass_total
     declared_subtotal: float | None = None
     if isinstance(totals, dict) and "subtotal" in totals:
@@ -9129,6 +9141,18 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             computed_subtotal_val = 0.0
         if abs(declared_subtotal) <= 0.01 and computed_subtotal_val > 0.01:
             declared_subtotal = computed_subtotal_val
+    ladder_expected = float(expected_labor_total + direct_summary)
+    try:
+        ladder_subtotal_from_breakdown = (
+            breakdown.get("ladder_subtotal", ladder_expected)
+            if isinstance(breakdown, dict)
+            else ladder_expected
+        )
+        ladder_subtotal_from_breakdown = float(ladder_subtotal_from_breakdown)
+    except Exception:
+        ladder_subtotal_from_breakdown = ladder_expected
+    if not roughly_equal(declared_subtotal, ladder_subtotal_from_breakdown, eps=0.01):
+        declared_subtotal = ladder_subtotal_from_breakdown
     if material_net_cost is None:
         try:
             material_key = next(
@@ -9146,10 +9170,20 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         except Exception:
             material_net_cost = 0.0
 
-    ladder_base_labor = max(computed_total_labor_cost - amortized_nre_total, 0.0)
-    ladder_directs = float(directs)
+    ladder_base_labor = max(expected_labor_total - amortized_nre_total, 0.0)
+    ladder_directs = float(direct_summary)
     ladder_labor = ladder_base_labor + (amortized_nre_total if qty > 1 else 0.0)
-    ladder_subtotal = round(ladder_labor + ladder_directs, 2)
+    try:
+        ladder_subtotal_val = breakdown.get("ladder_subtotal") if isinstance(breakdown, dict) else None
+        ladder_subtotal = float(ladder_subtotal_val)
+    except Exception:
+        ladder_subtotal = ladder_labor + ladder_directs
+    ladder_subtotal = round(float(ladder_subtotal), 2)
+    if isinstance(breakdown, dict):
+        try:
+            breakdown["ladder_subtotal"] = float(ladder_subtotal)
+        except Exception:
+            pass
 
     printed_subtotal = round(float(declared_subtotal or 0.0), 2)
     if not roughly_equal(ladder_subtotal, printed_subtotal, eps=0.01):
@@ -17560,10 +17594,31 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         material_tax_for_directs,
         pass_through,
     )
-    direct_costs = total_direct_costs
-    _update_direct_costs_summary(total_direct_costs, labor_cost)
+    try:
+        total_direct_costs_float = float(total_direct_costs)
+    except Exception:
+        total_direct_costs_float = float(total_direct_costs or 0.0)
+    stored_total_directs = total_direct_costs_float
+    if isinstance(breakdown, dict):
+        try:
+            stored_total_directs = float(total_direct_costs_float)
+            breakdown["total_direct_costs"] = stored_total_directs
+        except Exception:
+            try:
+                stored_total_directs = float(total_direct_costs or 0.0)
+            except Exception:
+                stored_total_directs = total_direct_costs_float
+            breakdown["total_direct_costs"] = total_direct_costs
+    direct_costs = float(breakdown.get("total_direct_costs", stored_total_directs))
+    _update_direct_costs_summary(direct_costs, labor_cost)
 
-    subtotal = labor_cost + direct_costs
+    ladder_subtotal = float(labor_cost) + direct_costs
+    subtotal = ladder_subtotal
+    if isinstance(breakdown, dict):
+        try:
+            breakdown["ladder_subtotal"] = float(ladder_subtotal)
+        except Exception:
+            pass
 
     with_overhead = subtotal * (1.0 + OverheadPct)
     with_ga = with_overhead * (1.0 + GA_Pct)
@@ -17812,9 +17867,30 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             material_tax_for_directs,
             pass_through,
         )
-        direct_costs = total_direct_costs
-        _update_direct_costs_summary(total_direct_costs, labor_cost)
-        subtotal = labor_cost + direct_costs
+        try:
+            total_direct_costs_float = float(total_direct_costs)
+        except Exception:
+            total_direct_costs_float = float(total_direct_costs or 0.0)
+        stored_total_directs = total_direct_costs_float
+        if isinstance(breakdown, dict):
+            try:
+                stored_total_directs = float(total_direct_costs_float)
+                breakdown["total_direct_costs"] = stored_total_directs
+            except Exception:
+                try:
+                    stored_total_directs = float(total_direct_costs or 0.0)
+                except Exception:
+                    stored_total_directs = total_direct_costs_float
+                breakdown["total_direct_costs"] = total_direct_costs
+        direct_costs = float(breakdown.get("total_direct_costs", stored_total_directs))
+        _update_direct_costs_summary(direct_costs, labor_cost)
+        ladder_subtotal = float(labor_cost) + direct_costs
+        subtotal = ladder_subtotal
+        if isinstance(breakdown, dict):
+            try:
+                breakdown["ladder_subtotal"] = float(ladder_subtotal)
+            except Exception:
+                pass
         with_overhead = subtotal * (1.0 + OverheadPct)
         with_ga = with_overhead * (1.0 + GA_Pct)
         with_cont = with_ga * (1.0 + ContingencyPct)
@@ -17961,7 +18037,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         "family": family_for_breakdown,
         "scrap_pct": scrap_pct,
         "material_direct_cost": material_direct_cost,
-        "total_direct_costs": round(total_direct_costs, 2),
+        "total_direct_costs": total_direct_costs_float,
         "material": material_detail_for_breakdown,
         "material_selected": material_selected_for_breakdown,
         "nre": {
@@ -18008,6 +18084,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         "llm_cost_log": llm_cost_log,
     }
 
+    breakdown["ladder_subtotal"] = ladder_subtotal
+
     if APP_ENV.llm_debug_enabled:
         breakdown["drill_debug"] = list(drill_debug_lines_payload)
 
@@ -18015,9 +18093,17 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         total_direct_costs_value = direct_costs_summary.get("total_direct_costs")
         if total_direct_costs_value is not None:
             try:
-                breakdown["total_direct_costs"] = round(float(total_direct_costs_value), 2)
+                total_direct_costs_float = float(total_direct_costs_value)
+                breakdown["total_direct_costs"] = total_direct_costs_float
             except Exception:
                 breakdown["total_direct_costs"] = total_direct_costs_value
+
+    try:
+        breakdown["ladder_subtotal"] = float(labor_cost) + float(
+            breakdown.get("total_direct_costs", 0.0) or 0.0
+        )
+    except Exception:
+        pass
 
     totals_map = breakdown.get("totals")
     if isinstance(totals_map, _MutableMappingABC):
@@ -21265,8 +21351,16 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
         labor_cost = float(labor_cost_rendered_val or 0.0)
     except Exception:
         labor_cost = declared_labor_cost
-    direct_costs = float(totals.get("direct_costs", 0.0) or 0.0)
-    subtotal = labor_cost + direct_costs
+    try:
+        direct_costs_val = breakdown.get("total_direct_costs")
+        direct_costs = float(direct_costs_val)
+    except Exception:
+        direct_costs = float(totals.get("direct_costs", 0.0) or 0.0)
+    try:
+        subtotal_val = breakdown.get("ladder_subtotal")
+        subtotal = float(subtotal_val)
+    except Exception:
+        subtotal = labor_cost + direct_costs
 
     def _to_float(value):
         try:
