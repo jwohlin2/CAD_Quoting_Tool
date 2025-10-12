@@ -12570,6 +12570,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     pricing_engine = pricing or _DEFAULT_PRICING_ENGINE
     quote_state.ui_vars = dict(ui_vars)
     quote_state.rates = dict(rates)
+
     # Track whether we recognized any planner line items even if planner pricing
     # fails to populate line_items. Initialize this early to avoid scope issues
     # when incrementing the counter in downstream logic.
@@ -12578,6 +12579,40 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     inner_geo_raw = geo_context.get("geo")
     inner_geo = dict(inner_geo_raw) if isinstance(inner_geo_raw, dict) else {}
     geo_context["geo"] = inner_geo
+
+    def _coerce_llm_debug_flag(value: Any) -> bool | None:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"1", "true", "t", "yes", "y", "on"}:
+                return True
+            if lowered in {"0", "false", "f", "no", "n", "off", ""}:
+                return False
+            return None
+        if value is None:
+            return None
+        return bool(value)
+
+    def _resolve_llm_debug_enabled(*candidates: Mapping[str, Any] | None) -> bool:
+        flag = bool(APP_ENV.llm_debug_enabled)
+        for container in candidates:
+            if not isinstance(container, _MappingABC):
+                continue
+            direct = _coerce_llm_debug_flag(container.get("llm_debug_enabled"))
+            if direct is not None:
+                return direct
+            for key in ("app", "app_meta", "ui_flags", "ui_vars"):
+                meta = container.get(key)
+                if isinstance(meta, _MappingABC):
+                    nested = _coerce_llm_debug_flag(meta.get("llm_debug_enabled"))
+                    if nested is not None:
+                        return nested
+        return flag
+
+    llm_debug_enabled = _resolve_llm_debug_enabled(params, geo_context, ui_vars)
 
     plate_length_in_val: float | None = None
     plate_width_in_val: float | None = None
