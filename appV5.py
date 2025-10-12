@@ -6775,6 +6775,44 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         breakdown.get("suppress_planner_details_due_to_drift")
     )
 
+    def _coerce_debug_bool(value: Any) -> bool | None:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"1", "true", "t", "yes", "y", "on"}:
+                return True
+            if lowered in {"0", "false", "f", "no", "n", "off"}:
+                return False
+            return None
+        return None
+
+    def _resolve_llm_debug_enabled() -> bool:
+        def _extract(container: Any) -> bool | None:
+            if not isinstance(container, _MappingABC):
+                return None
+            direct = _coerce_debug_bool(container.get("llm_debug_enabled"))
+            if direct is not None:
+                return direct
+            for meta_key in ("app", "app_meta", "ui_flags", "ui_vars"):
+                meta = container.get(meta_key)
+                if isinstance(meta, _MappingABC):
+                    flag = _coerce_debug_bool(meta.get("llm_debug_enabled"))
+                    if flag is not None:
+                        return flag
+            return None
+
+        for source in (result, breakdown):
+            flag = _extract(source if isinstance(source, _MappingABC) else None)
+            if flag is not None:
+                return flag
+
+        return bool(APP_ENV.llm_debug_enabled)
+
+    llm_debug_enabled = _resolve_llm_debug_enabled()
+
     # Shipping is displayed in exactly one section of the quote to avoid
     # conflicting totals.  Prefer the pass-through value when available and
     # otherwise fall back to a material-specific entry before rendering.
@@ -15686,7 +15724,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
 
     raw_drill_debug_lines = locals().get("drill_debug_lines")
     drill_debug_lines_payload: list[str] = []
-    if APP_ENV.llm_debug_enabled:
+    if llm_debug_enabled:
         _accumulate_drill_debug(drill_debug_lines_payload, raw_drill_debug_lines)
 
     if process_plan_summary:
@@ -16028,7 +16066,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                     if client is None or not client.available or client.model_path != llm_model_path:
                         client = LLMClient(
                             llm_model_path,
-                            debug_enabled=APP_ENV.llm_debug_enabled,
+                            debug_enabled=llm_debug_enabled,
                             debug_dir=APP_ENV.llm_debug_dir,
                         )
                         created_client = True
@@ -16095,7 +16133,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             "usage": s_usage,
             "applied_effective": applied_effective,
         })
-        if APP_ENV.llm_debug_enabled:
+        if llm_debug_enabled:
             system_prompt = globals().get("SYSTEM_SUGGEST", _DEFAULT_SYSTEM_SUGGEST)
             snap = {
                 "model": overrides_meta.get("model"),
@@ -17705,7 +17743,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         logger.exception("Failed to canonicalize process costs")
         canonical_process_costs = canonicalize_costs(locals().get("process_costs", {}) or {})
 
-    app_meta = {"llm_debug_enabled": bool(APP_ENV.llm_debug_enabled)}
+    app_meta = {"llm_debug_enabled": bool(llm_debug_enabled)}
 
     breakdown = {
         "qty": Qty,
@@ -17837,7 +17875,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     )
     breakdown["narrative"] = narrative_text
 
-    if APP_ENV.llm_debug_enabled and overrides_meta and (
+    if llm_debug_enabled and overrides_meta and (
         overrides_meta.get("raw") is not None or overrides_meta.get("raw_text")
     ):
         try:
