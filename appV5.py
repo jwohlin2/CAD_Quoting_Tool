@@ -17911,6 +17911,18 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     direct_costs_summary: dict[str, float] = {}
     totals_summary: dict[str, float] = {}
 
+    try:
+        material_total_for_why = float(
+            (material_total_for_directs or 0.0)
+            + (material_tax_for_directs or 0.0)
+            - (scrap_credit_for_directs or 0.0)
+        )
+    except Exception:
+        try:
+            material_total_for_why = float(material_total_for_directs or 0.0)
+        except Exception:
+            material_total_for_why = 0.0
+
     def _update_direct_costs_summary(total_value: Any, labor_value: Any) -> None:
         try:
             total_float = float(total_value or 0.0)
