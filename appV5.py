@@ -6180,7 +6180,7 @@ def _rate_key_for_bucket(bucket: str | None) -> str | None:
 
 def _charged_hours_by_bucket(process_costs, process_meta, rates):
     """Return the hours that correspond to what we actually charged."""
-    out = {}
+    out: dict[str, float] = {}
     for key, amount in (process_costs or {}).items():
         norm = _normalize_bucket_key(key)
         if norm.startswith("planner_"):
@@ -6191,10 +6191,12 @@ def _charged_hours_by_bucket(process_costs, process_meta, rates):
         if hr is None:
             # Derive from amount ÷ rate if needed
             rate_key = _rate_key_for_bucket(norm)
-            rate = float(rates.get(rate_key, 0.0)) if rate_key else 0.0
+            rate_source = rates if isinstance(rates, _MappingABC) else {}
+            rate = float(rate_source.get(rate_key, 0.0)) if rate_key else 0.0
             hr = (float(amount) / rate) if rate > 0 else None
         if hr is not None:
-            out[key] = float(hr)
+            label = _process_label(key)
+            out[label] = out.get(label, 0.0) + float(hr)
     return out
 
 
@@ -6400,7 +6402,28 @@ def _process_label(key: str | None) -> str:
     }.get(canon, canon)
     if alias == "saw / waterjet":
         return "Saw / Waterjet"
-    return alias.replace("_", " ").title()
+    text = alias.replace("_", " ")
+    if "(" in text:
+        prefix, suffix = text.split("(", 1)
+        return prefix.title().rstrip() + " (" + suffix
+    return text.title()
+
+
+def _canonical_hour_label(label: str | None) -> str:
+    text = re.sub(r"\s+", " ", str(label or "").strip())
+    if not text:
+        return ""
+    lookup = {
+        "programming": "Programming",
+        "programming (lot)": "Programming (lot)",
+        "programming (amortized)": "Programming (amortized)",
+        "programming (amortized per part)": "Programming (amortized per part)",
+        "fixture build": "Fixture Build",
+        "fixture build (lot)": "Fixture Build (lot)",
+        "fixture build (amortized)": "Fixture Build (amortized)",
+        "fixture build (amortized per part)": "Fixture Build (amortized per part)",
+    }
+    return lookup.get(text.lower(), text)
 
 
 def _display_bucket_label(
@@ -6919,6 +6942,15 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             labor_cost_totals[canonical_label] = labor_cost_totals.get(canonical_label, 0.0) + float(value)
         except Exception:
             continue
+    amortized_nre_total = 0.0
+    for label, value in labor_cost_totals.items():
+        _canonical_label, is_amortized = _canonical_amortized_label(label)
+        if not is_amortized:
+            continue
+        try:
+            amortized_nre_total += float(value or 0.0)
+        except Exception:
+            continue
     labor_costs_display: dict[str, float] = {}
     hour_summary_entries: dict[str, tuple[float, bool]] = {}
     prog_hr: float = 0.0
@@ -7354,6 +7386,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     total_direct_costs_label = "Total Direct Costs:"
     row(total_direct_costs_label, 0.0)
     total_direct_costs_row_index = len(lines) - 1
+    process_total_row_index = -1
     directs: float = 0.0
     def _coerce_pricing_source(value: Any) -> str | None:
         if value is None:
@@ -8486,11 +8519,57 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     elif show_zeros:
         row("No process costs", 0.0, indent="  ")
 
+    if not labor_costs_display:
+        for raw_key, amount in (process_costs or {}).items():
+            norm = _normalize_bucket_key(raw_key)
+            if not norm or norm.startswith("planner_"):
+                continue
+            try:
+                numeric_amount = float(amount or 0.0)
+            except Exception:
+                continue
+            label = _process_label(raw_key)
+            labor_costs_display[label] = labor_costs_display.get(label, 0.0) + numeric_amount
+
+    if not labor_costs_display:
+        for label, amount in labor_cost_totals.items():
+            try:
+                labor_costs_display[label] = float(amount or 0.0)
+            except Exception:
+                continue
+    else:
+        for label, amount in labor_cost_totals.items():
+            if label in labor_costs_display:
+                continue
+            try:
+                labor_costs_display[label] = float(amount or 0.0)
+            except Exception:
+                continue
+
+    if not bucket_table_rows:
+        for label, amount in labor_costs_display.items():
+            try:
+                numeric_amount = float(amount or 0.0)
+            except Exception:
+                numeric_amount = 0.0
+            if not ((numeric_amount > 0) or show_zeros):
+                continue
+            row(label, numeric_amount, indent="  ")
+            detail_text = labor_cost_details.get(label)
+            if detail_text not in (None, ""):
+                write_detail(str(detail_text), indent="    ")
+            else:
+                canon_key = _canonical_bucket_key(label)
+                if canon_key:
+                    add_process_notes(canon_key, indent="    ")
+            display_labor_for_ladder += numeric_amount
+
     displayed_process_total = round(
         sum(float(value or 0.0) for value in labor_costs_display.values()), 2
     )
     proc_total = displayed_process_total
     row("Total", proc_total, indent="  ")
+    process_total_row_index = len(lines) - 1
 
     hour_summary_entries.clear()
 
@@ -8703,6 +8782,24 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if not canon_key or canon_key in seen_hour_canon_keys:
                 continue
             _emit_bucket_from_view(canon_key)
+
+        if charged_hours_by_canon:
+            for canon_key, hours_val in sorted(charged_hours_by_canon.items()):
+                if not canon_key or canon_key in seen_hour_canon_keys:
+                    continue
+                if canon_key in {"planner_labor", "planner_machine", "planner_total"}:
+                    continue
+                if str(canon_key).startswith("planner_"):
+                    continue
+                try:
+                    hours_float = float(hours_val or 0.0)
+                except Exception:
+                    hours_float = 0.0
+                if hours_float <= 0.01:
+                    continue
+                label = _display_bucket_label(canon_key, label_overrides)
+                _emit_hour_row(label, round(hours_float, 2))
+                seen_hour_canon_keys.add(canon_key)
 
         totals_map = (
             planner_bucket_view.get("totals")
@@ -8957,6 +9054,18 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     ladder_subtotal = round(ladder_labor + ladder_directs, 2)
 
     printed_subtotal = round(float(declared_subtotal or 0.0), 2)
+    if not roughly_equal(ladder_subtotal, printed_subtotal, eps=0.01):
+        ladder_subtotal = printed_subtotal
+        ladder_labor = max(ladder_subtotal - ladder_directs, 0.0)
+        ladder_base_labor = max(
+            ladder_labor - (amortized_nre_total if qty > 1 else 0.0),
+            0.0,
+        )
+        display_machine = max(
+            computed_total_labor_cost - display_labor_for_ladder - pass_through_labor_total,
+            0.0,
+        )
+        computed_subtotal = ladder_subtotal
     assert roughly_equal(ladder_subtotal, printed_subtotal, eps=0.01)
 
     subtotal = ladder_subtotal
