@@ -273,37 +273,10 @@ def _default_llm_bounds_dict() -> dict[str, Any]:
 def get_llm_bound_defaults() -> dict[str, Any]:
     """Return a mutable copy of the default LLM guardrail bounds."""
 
-    try:
-        base = LLM_BOUND_DEFAULTS  # type: ignore[name-defined]
-    except NameError:  # pragma: no cover - defensive
-        base = MappingProxyType(_default_llm_bounds_dict())
-    if not isinstance(base, _MappingABC):
-        base = MappingProxyType(coerce_bounds(base))
-    return dict(base)
+    return dict(coerce_bounds(LLM_BOUND_DEFAULTS))
 
 
 LLM_BOUND_DEFAULTS: Mapping[str, Any] = MappingProxyType(_default_llm_bounds_dict())
-
-
-def _ensure_llm_bound_defaults_initialized() -> Mapping[str, Any]:
-    """Return a mapping of LLM guardrail defaults, rebuilding when missing."""
-
-    base = globals().get("LLM_BOUND_DEFAULTS")
-    if isinstance(base, _MappingABC):
-        return base
-    if base is None:
-        rebuilt = _default_llm_bounds_dict()
-    else:
-        try:
-            rebuilt = coerce_bounds(base if isinstance(base, _MappingABC) else {})
-        except Exception:  # pragma: no cover - defensive
-            rebuilt = _default_llm_bounds_dict()
-    mapping = MappingProxyType(rebuilt)
-    globals()["LLM_BOUND_DEFAULTS"] = mapping
-    return mapping
-
-
-_ensure_llm_bound_defaults_initialized()
 
 
 def build_suggest_payload(*args, **kwargs):  # type: ignore[override]
