@@ -11457,37 +11457,53 @@ def estimate_drilling_hours(
                     ipr_calc = precomputed_speeds["ipr"]
                     if math.isfinite(rpm_calc) and math.isfinite(ipr_calc):
                         precomputed_speeds["ipm"] = float(rpm_calc) * float(ipr_calc)
-            if (
-                is_new_row_entry
-                and debug_list is not None
-                and row is not None
-                and isinstance(row, _MappingABC)
-            ):
-                info_bits: list[str] = [f"OK {op_name}", f"{float(diameter_in):.3f}\""]
-                if depth_in and depth_in > 0:
+            bin_speed_snapshot: dict[str, float | None] = {}
+            if precomputed_speeds:
+                sfm_for_bin = to_float(precomputed_speeds.get("sfm"))
+                ipr_for_bin = to_float(precomputed_speeds.get("ipr"))
+                rpm_for_bin = to_float(precomputed_speeds.get("rpm"))
+                ipm_for_bin = to_float(precomputed_speeds.get("ipm"))
+                if (
+                    (rpm_for_bin is None or not math.isfinite(rpm_for_bin) or rpm_for_bin <= 0.0)
+                    and sfm_for_bin is not None
+                    and math.isfinite(sfm_for_bin)
+                    and diameter_float is not None
+                    and diameter_float > 0
+                ):
                     try:
-                        info_bits.append(f"depth {float(depth_in):.3f}\"")
-                    except (TypeError, ValueError):
-                        info_bits.append(f"depth {depth_in}")
-                info_bits.append(f"qty {qty_i}")
-                material_text = chosen_material_label or str(
-                    material_label or mat_key or material_lookup or ""
-                ).strip()
-                if material_text:
-                    info_bits.append(material_text)
-                sfm_used = precomputed_speeds.get("sfm")
-                if sfm_used is not None and math.isfinite(float(sfm_used)):
-                    info_bits.append(f"{float(sfm_used):g} sfm")
-                ipr_used = precomputed_speeds.get("ipr")
-                if ipr_used is not None and math.isfinite(float(ipr_used)):
-                    info_bits.append(f"{float(ipr_used):g} ipr")
-                rpm_used = precomputed_speeds.get("rpm")
-                if rpm_used is not None and math.isfinite(float(rpm_used)):
-                    info_bits.append(f"{float(rpm_used):g} rpm")
-                ipm_used = precomputed_speeds.get("ipm")
-                if ipm_used is not None and math.isfinite(float(ipm_used)):
-                    info_bits.append(f"{float(ipm_used):g} ipm")
-                _log_debug(" | ".join(info_bits))
+                        rpm_candidate = (float(sfm_for_bin) * 12.0) / (
+                            math.pi * float(diameter_float)
+                        )
+                    except (TypeError, ValueError, ZeroDivisionError):
+                        rpm_candidate = None
+                    if rpm_candidate is not None and math.isfinite(rpm_candidate):
+                        rpm_for_bin = float(rpm_candidate)
+                        precomputed_speeds["rpm"] = rpm_for_bin
+                if (
+                    (ipm_for_bin is None or not math.isfinite(ipm_for_bin) or ipm_for_bin <= 0.0)
+                    and rpm_for_bin is not None
+                    and math.isfinite(rpm_for_bin)
+                    and ipr_for_bin is not None
+                    and math.isfinite(ipr_for_bin)
+                ):
+                    ipm_candidate = float(rpm_for_bin) * float(ipr_for_bin)
+                    if math.isfinite(ipm_candidate):
+                        ipm_for_bin = float(ipm_candidate)
+                        precomputed_speeds["ipm"] = ipm_for_bin
+                bin_speed_snapshot = {
+                    "sfm": float(sfm_for_bin)
+                    if sfm_for_bin is not None and math.isfinite(sfm_for_bin)
+                    else None,
+                    "ipr": float(ipr_for_bin)
+                    if ipr_for_bin is not None and math.isfinite(ipr_for_bin)
+                    else None,
+                    "rpm": float(rpm_for_bin)
+                    if rpm_for_bin is not None and math.isfinite(rpm_for_bin)
+                    else None,
+                    "ipm": float(ipm_for_bin)
+                    if ipm_for_bin is not None and math.isfinite(ipm_for_bin)
+                    else None,
+                }
             debug_payload: dict[str, Any] | None = None
             tool_params: _TimeToolParams
             minutes: float
@@ -11523,6 +11539,15 @@ def estimate_drilling_hours(
                 overhead_for_calc = per_hole_overhead
                 if debug_payload is not None and is_deep_drill:
                     debug_payload["operation"] = op_name
+                if debug_payload is not None:
+                    for key in ("sfm", "ipr", "rpm", "ipm"):
+                        snapshot_val = bin_speed_snapshot.get(key)
+                        if snapshot_val is not None and math.isfinite(snapshot_val):
+                            debug_payload[key] = float(snapshot_val)
+                        else:
+                            coerced = to_float(debug_payload.get(key))
+                            if coerced is not None and math.isfinite(coerced):
+                                bin_speed_snapshot[key] = float(coerced)
             else:
                 overhead_local = per_hole_overhead
                 try:
@@ -11815,6 +11840,21 @@ def estimate_drilling_hours(
                         },
                     )
                     bin_summary["qty"] += qty_for_debug
+                    speeds_for_bin = bin_summary.setdefault("speeds", {})
+                    for speed_key, fallback_value in (
+                        ("sfm", sfm_float),
+                        ("ipr", ipr_effective_float if ipr_effective_float is not None else ipr_float),
+                        ("rpm", rpm_float),
+                        ("ipm", ipm_float),
+                    ):
+                        if bin_speed_snapshot and bin_speed_snapshot.get(speed_key) is not None:
+                            fallback_value = bin_speed_snapshot.get(speed_key)
+                        try:
+                            numeric = float(fallback_value) if fallback_value is not None else None
+                        except (TypeError, ValueError):
+                            numeric = None
+                        if numeric is not None and math.isfinite(numeric):
+                            speeds_for_bin[speed_key] = numeric
                     if sfm_float is not None and math.isfinite(sfm_float):
                         _update_range(bin_summary, "sfm_min", "sfm_max", sfm_float)
                     if rpm_float is not None and math.isfinite(rpm_float):
@@ -14236,77 +14276,139 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
 
     drill_debug_line: str | None = None
     if (speeds_feeds_summary or speeds_feeds_row) and avg_dia_in > 0:
-        source_mapping = speeds_feeds_summary or speeds_feeds_row
-        rpm_val = _coerce_float_or_none(_lookup_mapping_value(source_mapping, "rpm"))
-        if (rpm_val is None or rpm_val <= 0) and selected_precomputed:
-            rpm_val = _coerce_float_or_none(selected_precomputed.get("rpm"))
-        if rpm_val is None or rpm_val <= 0:
-            sfm_source = _coerce_float_or_none(
-                _lookup_mapping_value(source_mapping, "sfm")
-            )
-            if (sfm_source is None or sfm_source <= 0) and selected_precomputed:
-                sfm_source = _coerce_float_or_none(selected_precomputed.get("sfm"))
-            if sfm_source and avg_dia_in > 0:
+        def _format_range_text(values: Sequence[float], fmt: str, *, tolerance: float = 0.0) -> str:
+            if not values:
+                return "-"
+            min_val = min(values)
+            max_val = max(values)
+            if tolerance and abs(max_val - min_val) <= tolerance:
+                return fmt.format(max_val)
+            if abs(max_val - min_val) <= 1e-12:
+                return fmt.format(max_val)
+            return f"{fmt.format(min_val)}–{fmt.format(max_val)}"
+
+        def _coerce_numeric(value: Any) -> float | None:
+            coerced = _coerce_float_or_none(value)
+            if coerced is None or not math.isfinite(float(coerced)):
+                return None
+            return float(coerced)
+
+        rpm_values: list[float] = []
+        ipm_values: list[float] = []
+        ipr_values: list[float] = []
+        sfm_values: list[float] = []
+
+        bins_mapping: Mapping[str, Any] | None = None
+        if isinstance(speeds_feeds_summary, _MappingABC):
+            bins_candidate = speeds_feeds_summary.get("bins")
+            if isinstance(bins_candidate, _MappingABC):
+                bins_mapping = bins_candidate
+        if bins_mapping:
+            for bin_summary in bins_mapping.values():
+                if not isinstance(bin_summary, _MappingABC):
+                    continue
+                dia_val = _coerce_float_or_none(bin_summary.get("diameter_in"))
+                if dia_val is None or dia_val <= 0:
+                    continue
+                speeds_map = bin_summary.get("speeds")
+                if not isinstance(speeds_map, _MappingABC):
+                    speeds_map = {}
+                sfm_val = _coerce_numeric(
+                    speeds_map.get("sfm")
+                    or bin_summary.get("sfm_min")
+                    or bin_summary.get("sfm_max")
+                )
+                if sfm_val is not None:
+                    sfm_values.append(sfm_val)
+                ipr_val = _coerce_numeric(
+                    speeds_map.get("ipr")
+                    or bin_summary.get("ipr_effective_min")
+                    or bin_summary.get("ipr_min")
+                    or bin_summary.get("ipr_effective_max")
+                    or bin_summary.get("ipr_max")
+                )
+                rpm_val = _coerce_numeric(
+                    speeds_map.get("rpm")
+                    or bin_summary.get("rpm_min")
+                    or bin_summary.get("rpm_max")
+                )
+                if rpm_val is None and sfm_val is not None:
+                    try:
+                        rpm_candidate = (float(sfm_val) * 12.0) / (
+                            math.pi * float(dia_val)
+                        )
+                    except (TypeError, ValueError, ZeroDivisionError):
+                        rpm_candidate = None
+                    if rpm_candidate is not None and math.isfinite(rpm_candidate):
+                        rpm_val = float(rpm_candidate)
+                ipm_val = _coerce_numeric(
+                    speeds_map.get("ipm")
+                    or bin_summary.get("ipm_min")
+                    or bin_summary.get("ipm_max")
+                )
+                if (
+                    (ipm_val is None or ipm_val <= 0)
+                    and rpm_val is not None
+                    and ipr_val is not None
+                ):
+                    ipm_candidate = float(rpm_val) * float(ipr_val)
+                    if math.isfinite(ipm_candidate):
+                        ipm_val = float(ipm_candidate)
+                if rpm_val is not None and math.isfinite(rpm_val):
+                    rpm_values.append(float(rpm_val))
+                if ipm_val is not None and math.isfinite(ipm_val):
+                    ipm_values.append(float(ipm_val))
+                if ipr_val is not None and math.isfinite(ipr_val):
+                    ipr_values.append(float(ipr_val))
+
+        def _collect_from_mapping(mapping: Mapping[str, Any] | None) -> None:
+            if mapping is None:
+                return
+            sfm_val = _coerce_numeric(_lookup_mapping_value(mapping, "sfm"))
+            ipr_val = _coerce_numeric(_lookup_mapping_value(mapping, "ipr"))
+            rpm_val = _coerce_numeric(_lookup_mapping_value(mapping, "rpm"))
+            ipm_val = _coerce_numeric(_lookup_mapping_value(mapping, "ipm"))
+            if not sfm_values and sfm_val is not None:
+                sfm_values.append(sfm_val)
+            if rpm_val is None and sfm_val is not None and avg_dia_in > 0:
                 try:
-                    rpm_candidate = (float(sfm_source) * 12.0) / (
-                        math.pi * float(avg_dia_in)
-                    )
+                    rpm_candidate = (float(sfm_val) * 12.0) / (math.pi * float(avg_dia_in))
                 except (TypeError, ValueError, ZeroDivisionError):
                     rpm_candidate = None
                 if rpm_candidate is not None and math.isfinite(rpm_candidate):
                     rpm_val = float(rpm_candidate)
-        ipm_val = _coerce_float_or_none(_lookup_mapping_value(source_mapping, "ipm"))
-        if (ipm_val is None or ipm_val <= 0) and selected_precomputed:
-            ipm_val = _coerce_float_or_none(selected_precomputed.get("ipm"))
+            if not rpm_values and rpm_val is not None:
+                rpm_values.append(float(rpm_val))
+            if (ipm_val is None or ipm_val <= 0) and rpm_val is not None and ipr_val is not None:
+                ipm_candidate = float(rpm_val) * float(ipr_val)
+                if math.isfinite(ipm_candidate):
+                    ipm_val = float(ipm_candidate)
+            if not ipm_values and ipm_val is not None:
+                ipm_values.append(float(ipm_val))
+            if not ipr_values and ipr_val is not None:
+                ipr_values.append(float(ipr_val))
 
-        ipr_val: float | None = None
-        if ipm_val is None or ipm_val <= 0:
-            ipr_sum = _coerce_float_or_none(
-                _lookup_mapping_value(source_mapping, "ipr_sum")
-            )
-            ipr_count = _coerce_float_or_none(
-                _lookup_mapping_value(source_mapping, "ipr_count")
-            )
-            if (
-                ipr_sum is not None
-                and ipr_count is not None
-                and ipr_count > 0
-            ):
-                ipr_val = float(ipr_sum) / float(ipr_count)
-            if ipr_val is None or ipr_val <= 0:
-                ipr_min = _coerce_float_or_none(
-                    _lookup_mapping_value(source_mapping, "ipr_effective_min")
-                    or _lookup_mapping_value(source_mapping, "ipr_min")
-                )
-                ipr_max = _coerce_float_or_none(
-                    _lookup_mapping_value(source_mapping, "ipr_effective_max")
-                    or _lookup_mapping_value(source_mapping, "ipr_max")
-                )
-                if ipr_min is not None and ipr_min > 0:
-                    ipr_val = float(ipr_min)
-                elif ipr_max is not None and ipr_max > 0:
-                    ipr_val = float(ipr_max)
-        if (ipr_val is None or ipr_val <= 0) and selected_precomputed:
-            ipr_val = _coerce_float_or_none(selected_precomputed.get("ipr"))
-        if (
-            (ipr_val is None or ipr_val <= 0)
-            and rpm_val is not None
-            and rpm_val > 0
-            and ipm_val is not None
-            and ipm_val > 0
-        ):
-            try:
-                ipr_val = float(ipm_val) / float(rpm_val)
-            except (TypeError, ValueError, ZeroDivisionError):
-                ipr_val = None
+        if not rpm_values or not ipm_values or not ipr_values:
+            mapping_candidate: Mapping[str, Any] | None = None
+            if isinstance(speeds_feeds_row, _MappingABC):
+                mapping_candidate = speeds_feeds_row
+            elif isinstance(speeds_feeds_summary, _MappingABC):
+                mapping_candidate = speeds_feeds_summary
+            _collect_from_mapping(mapping_candidate)
+        if selected_precomputed:
+            _collect_from_mapping(selected_precomputed)
+
+        rpm_text = _format_range_text(rpm_values, "{:.0f}", tolerance=0.5)
+        ipm_text = _format_range_text(ipm_values, "{:.1f}", tolerance=0.05)
+        ipr_text = _format_range_text(ipr_values, "{:.4f}", tolerance=5e-5)
 
         debug_bits: list[str] = []
-        if rpm_val and rpm_val > 0:
-            debug_bits.append(f"{float(rpm_val):.0f} RPM")
-        if ipm_val and ipm_val > 0:
-            debug_bits.append(f"{float(ipm_val):.1f} IPM")
-        elif ipr_val and ipr_val > 0:
-            debug_bits.append(f"{float(ipr_val):.4f} IPR")
+        if rpm_text != "-":
+            debug_bits.append(f"{rpm_text} RPM")
+        if ipm_text != "-":
+            debug_bits.append(f"{ipm_text} IPM")
+        elif ipr_text != "-":
+            debug_bits.append(f"{ipr_text} IPR")
 
         if debug_bits:
             avg_mm = avg_dia_in * 25.4
