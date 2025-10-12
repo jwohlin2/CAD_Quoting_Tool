@@ -15802,7 +15802,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                     )
             planner_bucket_rollup = copy.deepcopy(bucket_view)
             planner_bucket_view = _prepare_bucket_view(bucket_view)
-            if used_planner:
+            if pricing_source == "planner":
                 try:
                     labor_sum = 0.0
                     machine_sum = 0.0
@@ -15926,6 +15926,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
 
     if force_planner_for_recognized:
         used_planner = True
+
+    if used_planner:
+        pricing_source = "planner"
 
     if recognized_line_items == 0:
         if planner_totals_present and planner_total_minutes > 0.0:
@@ -18100,7 +18103,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 except Exception:
                     pass
 
-        if abs(rendered_labor_total - float(expected_labor_total)) > _LABOR_SECTION_ABS_EPSILON:
+        if pricing_source != "planner" and abs(rendered_labor_total - float(expected_labor_total)) > _LABOR_SECTION_ABS_EPSILON:
             expected_display = float(expected_labor_total)
             drift_amount = expected_display - rendered_labor_total
             _record_red_flag(
