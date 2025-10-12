@@ -6906,6 +6906,21 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         str(note).strip() for note in llm_notes if str(note).strip()
     ]
 
+    llm_debug_enabled_effective = bool(APP_ENV.llm_debug_enabled)
+    for source in (result, breakdown):
+        if not isinstance(source, _MappingABC):
+            continue
+        for key in ("app", "app_meta"):
+            app_info = source.get(key)
+            if not isinstance(app_info, _MappingABC):
+                continue
+            if "llm_debug_enabled" in app_info:
+                llm_debug_enabled_effective = bool(app_info.get("llm_debug_enabled"))
+                break
+        else:
+            continue
+        break
+
     # ---- helpers -------------------------------------------------------------
     divider = "-" * int(page_width)
 
@@ -7055,7 +7070,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     def render_bucket_table(rows: Sequence[tuple[str, float, float, float, float]]):
         if not rows:
             return
-        if not APP_ENV.llm_debug_enabled:
+        if not llm_debug_enabled_effective:
             return
 
         headers = ("Bucket", "Hours", "Labor $", "Machine $", "Total $")
@@ -7261,7 +7276,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             write_wrapped(entry, "  ")
         lines.append("")
 
-    if drill_debug_entries and APP_ENV.llm_debug_enabled:
+    if drill_debug_entries and llm_debug_enabled_effective:
         render_drill_debug(drill_debug_entries)
     row("Final Price per Part:", price)
     total_labor_label = "Total Labor Cost:"
@@ -7384,8 +7399,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             text = line.strip()
             if text:
                 explanation_lines.append(text)
-    if explanation_lines:
-        why_parts = explanation_lines + why_parts
+    # ``explanation_lines`` will be merged into ``why_parts`` after the process
+    # bucket rows are prepared so the cost makeup + contributor text can be
+    # derived from the exact rows rendered in the Process & Labor table.
 
     def _is_planner_meta(key: str) -> bool:
         canonical_key = _canonical_bucket_key(key)
@@ -8283,11 +8299,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         process_plan_summary_local = (
             breakdown.get("process_plan") if isinstance(breakdown, _MappingABC) else None
         )
-    bucket_view = (
-        process_plan_summary_local.get("bucket_view")
-        if isinstance(process_plan_summary_local, _MappingABC)
-        else None
-    )
+    bucket_view = None
+    if isinstance(process_plan_summary_local, _MappingABC):
+        bucket_view = process_plan_summary_local.get("bucket_view")
+    if not isinstance(bucket_view, _MappingABC) and isinstance(breakdown, _MappingABC):
+        candidate_bucket_view = breakdown.get("bucket_view")
+        if isinstance(candidate_bucket_view, _MappingABC):
+            bucket_view = candidate_bucket_view
     if isinstance(bucket_view, _MappingABC):
         buckets = bucket_view.get("buckets") if isinstance(bucket_view, _MappingABC) else None
         if not isinstance(buckets, _MappingABC):
@@ -8361,6 +8379,58 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     if not bucket_table_rows:
         bucket_table_totals = None
+
+    if bucket_table_rows:
+        # Use the rendered bucket rows when building the "Why this price" text so
+        # the narrative matches the Process & Labor table exactly.
+        sorted_rows = sorted(bucket_table_rows, key=lambda row: row[4], reverse=True)
+        top_rows = sorted_rows[:3]
+
+        labor_sum = round(sum(row[2] for row in bucket_table_rows), 2)
+        machine_sum = round(sum(row[3] for row in bucket_table_rows), 2)
+
+        new_explanation_lines: list[str] = []
+
+        cost_bits: list[str] = []
+        material_component: float | None = None
+        if total_material_cost is not None:
+            material_component = float(total_material_cost)
+        elif material_net_cost is not None:
+            material_component = float(material_net_cost)
+        if material_component is not None:
+            cost_bits.append(f"material {_m(material_component)}")
+        cost_bits.append(f"labor {_m(labor_sum)}")
+        cost_bits.append(f"machine {_m(machine_sum)}")
+        if cost_bits:
+            new_explanation_lines.append("Cost makeup: " + "; ".join(cost_bits) + ".")
+
+        if top_rows:
+            contributor_segments = [
+                f"{bucket} {_m(total)} ({hours:.2f} hr)"
+                for bucket, hours, _labor, _machine, total in top_rows
+            ]
+            new_explanation_lines.append("Top contributors: " + "; ".join(contributor_segments) + ".")
+
+        if new_explanation_lines:
+            filtered_explanation_lines = []
+            for line in explanation_lines:
+                lower = line.lower()
+                if lower.startswith("cost makeup"):
+                    continue
+                if "largest process costs" in lower:
+                    continue
+                if lower.startswith("top contributors"):
+                    continue
+                filtered_explanation_lines.append(line)
+
+            explanation_lines = filtered_explanation_lines
+
+            insertion_index = 1 if explanation_lines else 0
+            for offset, line in enumerate(new_explanation_lines):
+                explanation_lines.insert(insertion_index + offset, line)
+
+    if explanation_lines:
+        why_parts = explanation_lines + why_parts
 
     if isinstance(process_meta, _MappingABC):
         for raw_key, raw_meta in process_meta.items():
