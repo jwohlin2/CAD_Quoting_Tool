@@ -8673,7 +8673,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if map_key not in aggregated:
                 if canon_key:
                     add_process_notes(canon_key, indent="    ")
-    elif labor_cost_totals:
+    if labor_cost_totals:
         for label, amount in labor_cost_totals.items():
             try:
                 display_amount = float(amount or 0.0)
@@ -13962,8 +13962,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         geo_context.setdefault("material_group", drill_material_group)
         material_selection["material_group"] = drill_material_group
         material_selection["group"] = drill_material_group
+        material_group = str(drill_material_group or "").strip().upper() or material_group
         if drill_material_group:
-            material_selected_summary["group"] = drill_material_group
+            material_selected_summary["group"] = material_group
     drill_material_lookup_final = (
         drill_material_lookup
         or (_normalize_lookup_key(material_key_for_drill) if material_key_for_drill else "")
@@ -13995,8 +13996,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     if drill_material_display:
         material_selection["canonical_material"] = drill_material_display
         material_selection["canonical"] = drill_material_display
+        canonical_material = str(drill_material_display or "").strip() or canonical_material
         if drill_material_display:
-            material_selected_summary["canonical"] = drill_material_display
+            material_selected_summary["canonical"] = canonical_material
     machine_params_default = _machine_params_from_params(params)
     drill_overhead_default = _drill_overhead_from_params(params)
     speeds_feeds_warnings: list[str] = []
@@ -14236,6 +14238,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         drill_material_group = selected_material_group
         material_selection["material_group"] = selected_material_group
         material_selection["group"] = selected_material_group
+        material_group = (
+            str(selected_material_group or "").strip().upper() or material_group
+        )
 
     if not chosen_material_label and drill_debug_summary:
         for summary in drill_debug_summary.values():
@@ -14272,7 +14277,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         material_selection["canonical_material"] = final_material_for_debug
         material_selection["canonical"] = final_material_for_debug
         if final_material_for_debug:
-            material_selected_summary["canonical"] = str(final_material_for_debug)
+            canonical_material = str(final_material_for_debug).strip() or canonical_material
+            material_selected_summary["canonical"] = canonical_material
 
     drill_debug_line: str | None = None
     if (speeds_feeds_summary or speeds_feeds_row) and avg_dia_in > 0:
@@ -18301,7 +18307,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     canonical_process_costs: dict[str, float] = {}
 
     canonical_material_display = str(
-        material_selection.get("canonical")
+        canonical_material
+        or material_selection.get("canonical")
         or material_selection.get("canonical_material")
         or material_selected_summary.get("canonical")
         or ""
@@ -18309,7 +18316,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     if canonical_material_display:
         material_selected_summary["canonical"] = canonical_material_display
     group_display_value = str(
-        material_selection.get("group")
+        material_group
+        or material_selection.get("group")
         or material_selection.get("material_group")
         or material_selected_summary.get("group")
         or ""
@@ -18317,11 +18325,20 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     if group_display_value:
         material_selected_summary["group"] = group_display_value
 
+    canonical_material_for_breakdown = str(
+        canonical_material or canonical_material_display or ""
+    ).strip()
+    group_for_breakdown = str(
+        material_group or group_display_value or ""
+    ).strip().upper()
+
     material_selected_for_breakdown: dict[str, str] = {}
-    if canonical_material_display:
-        material_selected_for_breakdown["canonical"] = canonical_material_display
-    if group_display_value:
-        material_selected_for_breakdown["group"] = group_display_value
+    if canonical_material_for_breakdown:
+        material_selected_summary["canonical"] = canonical_material_for_breakdown
+        material_selected_for_breakdown["canonical"] = canonical_material_for_breakdown
+    if group_for_breakdown:
+        material_selected_summary["group"] = group_for_breakdown
+        material_selected_for_breakdown["group"] = group_for_breakdown
 
     if pricing_source == "planner":
         process_costs = {
