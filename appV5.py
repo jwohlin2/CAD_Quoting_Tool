@@ -17988,6 +17988,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     labor_cost_details_input: dict[str, str] = dict(labor_cost_details_seed)
     labor_cost_details: dict[str, str] = dict(labor_cost_details_seed)
     labor_costs_display: dict[str, float] = {}
+    narrative_notes: list[str] = []
 
     def _is_extra_segment(segment: str) -> bool:
         try:
@@ -18138,7 +18139,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     expected_labor_total = float(labor_cost or 0.0)
 
     if abs(rendered_labor_total - expected_labor_total) > _LABOR_SECTION_ABS_EPSILON:
-        lines.append(
+        narrative_notes.append(
             f"Note: labor total adjusted (expected ${expected_labor_total:,.2f})."
         )
 
@@ -18465,7 +18466,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         }
 
     breakdown["labor_cost_rendered"] = rendered_labor_total
-    why_lines.append(
+    narrative_notes.append(
         f"  Cost makeup: material ${material_total_for_why:,.2f}; labor & machine "
         f"${breakdown.get('labor_cost_rendered', labor_cost):,.2f}."
     )
@@ -18512,6 +18513,29 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         import pdb
 
         pdb.set_trace()
+
+    if narrative_notes:
+        guard_ctx = (
+            quote_state.guard_context
+            if isinstance(getattr(quote_state, "guard_context", None), dict)
+            else {}
+        )
+        if guard_ctx is not quote_state.guard_context:
+            quote_state.guard_context = guard_ctx
+        existing_extra = guard_ctx.get("narrative_extra")
+        merged_notes: list[str]
+        if isinstance(existing_extra, list):
+            merged_notes = list(existing_extra)
+        elif isinstance(existing_extra, str):
+            text = existing_extra.strip()
+            merged_notes = [text] if text else []
+        else:
+            merged_notes = []
+        for note in narrative_notes:
+            text = str(note).strip()
+            if text and text not in merged_notes:
+                merged_notes.append(text)
+        guard_ctx["narrative_extra"] = merged_notes
 
     narrative_text = get_why_text(
         quote_state,
