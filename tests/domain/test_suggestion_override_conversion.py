@@ -86,3 +86,26 @@ def test_suggestions_to_overrides_filters_metadata_and_normalises() -> None:
     assert overrides["drilling_strategy"]["note"] == "Peck"
     assert "_meta" not in overrides
     assert "no_change_reason" not in overrides
+
+
+def test_overrides_to_suggestions_honours_bounds_when_provided() -> None:
+    overrides = {
+        "process_hour_multipliers": {"milling": "9.5"},
+        "process_hour_adders": {"inspection": 12.0},
+        "scrap_pct": 0.6,
+    }
+
+    bounds = {
+        "mult_min": 0.8,
+        "mult_max": 1.2,
+        "adder_min_hr": 0.25,
+        "adder_max_hr": 4.0,
+        "scrap_min": 0.05,
+        "scrap_max": 0.2,
+    }
+
+    suggestions = overrides_to_suggestions(overrides, bounds=bounds)
+
+    assert suggestions["process_hour_multipliers"]["milling"] == pytest.approx(1.2)
+    assert suggestions["process_hour_adders"]["inspection"] == pytest.approx(4.0)
+    assert suggestions["scrap_pct"] == pytest.approx(0.2)
