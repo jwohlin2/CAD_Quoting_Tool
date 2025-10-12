@@ -17372,10 +17372,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 if _canonical_bucket_key(bucket_key) != canon_key:
                     continue
                 if isinstance(payload, dict):
-                    if "minutes" in payload:
+                    if "minutes" in payload or minutes_val:
                         payload["minutes"] = minutes_val
-                    if "hr" in payload:
-                        payload["hr"] = hours_val
+                    payload["hr"] = hours_val
                 elif isinstance(payload, (int, float)):
                     mapping[bucket_key] = minutes_val
 
@@ -17403,7 +17402,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         except Exception:
             hr_clean = 0.0
         if proc_key == canon_key:
-            canonical_bucket_rollup.setdefault(canon_key, hr_clean)
+            canonical_bucket_rollup[canon_key] = (
+                canonical_bucket_rollup.get(canon_key, 0.0) + hr_clean
+            )
         else:
             canonical_bucket_contributors[canon_key] = (
                 canonical_bucket_contributors.get(canon_key, 0.0) + hr_clean
@@ -17412,7 +17413,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     for canon_key, contrib_total in canonical_bucket_contributors.items():
         if contrib_total <= 0.0:
             continue
-        canonical_bucket_rollup[canon_key] = contrib_total
+        canonical_bucket_rollup[canon_key] = (
+            canonical_bucket_rollup.get(canon_key, 0.0) + contrib_total
+        )
 
     for canon_key, total_hr in canonical_bucket_rollup.items():
         if canon_key.startswith("planner_"):
