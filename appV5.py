@@ -1605,6 +1605,25 @@ def _scrap_value_provided(val: Any) -> bool:
     return math.isfinite(parsed)
 
 
+SUGGESTION_SCALAR_KEYS: tuple[str, ...] = (
+    "scrap_pct",
+    "contingency_pct",
+    "setups",
+    "fixture",
+    "fixture_build_hr",
+    "soft_jaw_hr",
+    "soft_jaw_material_cost",
+    "handling_adder_hr",
+    "cmm_minutes",
+    "in_process_inspection_hr",
+    "fai_required",
+    "fai_prep_hr",
+    "packaging_hours",
+    "packaging_flat_cost",
+    "shipping_hint",
+)
+
+
 def _auto_accept_suggestions(suggestions: dict[str, Any] | None) -> dict[str, Any]:
     accept: dict[str, Any] = {}
     if not isinstance(suggestions, dict):
@@ -1631,24 +1650,7 @@ def _auto_accept_suggestions(suggestions: dict[str, Any] | None) -> dict[str, An
                 conf = _confidence_for((bucket, str(subkey)))
                 bucket_accept[str(subkey)] = True if conf is None else conf >= 0.6
             accept[bucket] = bucket_accept
-    scalar_keys = (
-        "scrap_pct",
-        "contingency_pct",
-        "setups",
-        "fixture",
-        "fixture_build_hr",
-        "soft_jaw_hr",
-        "soft_jaw_material_cost",
-        "handling_adder_hr",
-        "cmm_minutes",
-        "in_process_inspection_hr",
-        "fai_required",
-        "fai_prep_hr",
-        "packaging_hours",
-        "packaging_flat_cost",
-        "shipping_hint",
-    )
-    for scalar_key in scalar_keys:
+    for scalar_key in SUGGESTION_SCALAR_KEYS:
         if scalar_key in suggestions:
             conf = _confidence_for((scalar_key,))
             accept[scalar_key] = True if conf is None else conf >= 0.6
@@ -2500,24 +2502,7 @@ def compute_effective_state(state: QuoteState) -> tuple[dict, dict]:
         if selected:
             applied[bucket] = selected
 
-    scalar_keys = (
-        "scrap_pct",
-        "contingency_pct",
-        "setups",
-        "fixture",
-        "fixture_build_hr",
-        "soft_jaw_hr",
-        "soft_jaw_material_cost",
-        "handling_adder_hr",
-        "cmm_minutes",
-        "in_process_inspection_hr",
-        "fai_required",
-        "fai_prep_hr",
-        "packaging_hours",
-        "packaging_flat_cost",
-        "shipping_hint",
-    )
-    for scalar_key in scalar_keys:
+    for scalar_key in SUGGESTION_SCALAR_KEYS:
         if scalar_key in suggestions and accept.get(scalar_key):
             applied[scalar_key] = suggestions.get(scalar_key)
 
@@ -3276,23 +3261,7 @@ def ensure_accept_flags(state: QuoteState) -> None:
             if stale not in sugg:
                 bucket.pop(stale, None)
 
-    for key in (
-        "scrap_pct",
-        "contingency_pct",
-        "setups",
-        "fixture",
-        "fixture_build_hr",
-        "soft_jaw_hr",
-        "soft_jaw_material_cost",
-        "handling_adder_hr",
-        "cmm_minutes",
-        "in_process_inspection_hr",
-        "fai_required",
-        "fai_prep_hr",
-        "packaging_hours",
-        "packaging_flat_cost",
-        "shipping_hint",
-    ):
+    for key in SUGGESTION_SCALAR_KEYS:
         if key in suggestions and not isinstance(accept.get(key), bool):
             accept[key] = False
         if key not in suggestions and key in accept and not isinstance(accept.get(key), dict):
