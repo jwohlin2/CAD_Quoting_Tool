@@ -59,6 +59,33 @@ def test_render_quote_places_why_after_pricing_ladder_and_llm_adjustments() -> N
 
 
 def test_render_quote_renders_bucket_table_without_planner_why_section() -> None:
+    bucket_view = {
+        "buckets": {
+            "milling": {
+                "total$": 500.0,
+                "machine$": 350.0,
+                "labor$": 150.0,
+                "minutes": 120.0,
+            },
+            "drilling": {
+                "total$": 300.0,
+                "machine$": 200.0,
+                "labor$": 100.0,
+                "minutes": 90.0,
+            },
+            "inspection": {
+                "total$": 100.0,
+                "labor$": 100.0,
+                "minutes": 60.0,
+            },
+            "finishing": {
+                "total$": 50.0,
+                "labor$": 50.0,
+                "minutes": 30.0,
+            },
+        }
+    }
+
     breakdown = {
         "qty": 1,
         "totals": {
@@ -87,32 +114,8 @@ def test_render_quote_renders_bucket_table_without_planner_why_section() -> None
         "labor_cost_details": {},
         "direct_cost_details": {},
         "pricing_source": "planner",
-        "bucket_view": {
-            "buckets": {
-                "milling": {
-                    "total$": 500.0,
-                    "machine$": 350.0,
-                    "labor$": 150.0,
-                    "minutes": 120.0,
-                },
-                "drilling": {
-                    "total$": 300.0,
-                    "machine$": 200.0,
-                    "labor$": 100.0,
-                    "minutes": 90.0,
-                },
-                "inspection": {
-                    "total$": 100.0,
-                    "labor$": 100.0,
-                    "minutes": 60.0,
-                },
-                "finishing": {
-                    "total$": 50.0,
-                    "labor$": 50.0,
-                    "minutes": 30.0,
-                },
-            }
-        },
+        "bucket_view": bucket_view,
+        "process_plan": {"bucket_view": bucket_view},
         "decision_state": {"effective": {"setups": 2, "part_count": 4}},
     }
 

@@ -2,6 +2,8 @@ import copy
 import math
 import re
 
+import appV5
+
 
 _PLANNER_LINE_ITEMS = [
     {
@@ -222,8 +224,14 @@ _EXPECTED_BUCKET_ROWS = {
 }
 
 
-def _dummy_quote_payload() -> dict:
-    return copy.deepcopy(DUMMY_QUOTE_RESULT)
+def _dummy_quote_payload(*, debug_enabled: bool = False) -> dict:
+    payload = copy.deepcopy(DUMMY_QUOTE_RESULT)
+    if not debug_enabled:
+        payload.pop("drill_debug", None)
+        breakdown = payload.get("breakdown")
+        if isinstance(breakdown, dict):
+            breakdown.pop("drill_debug", None)
+    return payload
 
 
 def _render_lines(payload: dict, *, drop_planner_display: bool = False) -> list[str]:
@@ -239,8 +247,14 @@ def _render_lines(payload: dict, *, drop_planner_display: bool = False) -> list[
     return rendered.splitlines()
 
 
+def _extract_currency(line: str) -> float:
+    match = re.search(r"\$([0-9,]+\.[0-9]{2})", line)
+    assert match, f"expected currency value in line: {line!r}"
+    return float(match.group(1).replace(",", ""))
+
+
 def test_dummy_quote_material_consistency() -> None:
-    payload = _dummy_quote_payload()
+    payload = _dummy_quote_payload(debug_enabled=True)
     baseline = payload["decision_state"]["baseline"]
     drilling_meta = payload["breakdown"]["drilling_meta"]
     drill_debug = payload["breakdown"]["drill_debug"]
@@ -341,7 +355,7 @@ def test_dummy_quote_pricing_source_header() -> None:
 
 
 def test_dummy_quote_drill_debug_material_alignment() -> None:
-    payload = _dummy_quote_payload()
+    payload = _dummy_quote_payload(debug_enabled=True)
     breakdown = payload["breakdown"]
     debug_lines = payload.get("drill_debug", [])
 
@@ -358,7 +372,7 @@ def test_dummy_quote_drill_debug_material_alignment() -> None:
 
 
 def test_dummy_quote_drill_debug_ranges_and_index() -> None:
-    payload = _dummy_quote_payload()
+    payload = _dummy_quote_payload(debug_enabled=True)
     debug_line = next(line for line in payload.get("drill_debug", []) if line.startswith("Drill calc"))
 
     index_match = re.search(r"index\s+([0-9]+(?:\.[0-9]+)?)\s*s/hole", debug_line)
@@ -393,9 +407,130 @@ def test_dummy_quote_drilling_bucket_matches_summary() -> None:
 
 
 def test_dummy_quote_has_no_csv_debug_duplicates() -> None:
-    payload = _dummy_quote_payload()
+    payload = _dummy_quote_payload(debug_enabled=True)
 
     assert not any(
         line.strip().startswith("CSV drill feeds (N1)")
         for line in payload.get("drill_debug", [])
     )
+
+
+def test_dummy_quote_render_avoids_duplicate_planner_tables() -> None:
+    lines = _render_lines(_dummy_quote_payload())
+    assert all("Planner diagnostics (not billed)" not in line for line in lines)
+
+
+def test_dummy_quote_render_has_no_planner_drift_note() -> None:
+    lines = [line.lower() for line in _render_lines(_dummy_quote_payload())]
+    assert all("drifted by" not in line for line in lines)
+
+
+def test_dummy_quote_bucket_hours_and_costs_align() -> None:
+    payload = _dummy_quote_payload()
+    bucket_view = payload["breakdown"]["bucket_view"]["buckets"]
+
+    bucket_label_map = {
+        "milling": "Milling",
+        "drilling": "Drilling",
+        "grinding": "Grinding",
+        "finishing_deburr": "Finishing/Deburr",
+        "inspection": "Inspection",
+    }
+
+    buckets_with_costs: set[str] = set()
+    for key, metrics in bucket_view.items():
+        label = bucket_label_map.get(
+            key,
+            key.replace("_", " ").replace(" deburr", "/Deburr").title(),
+        )
+        minutes = float(metrics.get("minutes", 0.0) or 0.0)
+        labor_cost = float(metrics.get("labor$", 0.0) or 0.0)
+        machine_cost = float(metrics.get("machine$", 0.0) or 0.0)
+        total_cost = float(metrics.get("total$", labor_cost + machine_cost))
+        if minutes <= 0 and total_cost <= 0:
+            continue
+        buckets_with_costs.add(label)
+
+    labor_costs = payload["breakdown"]["labor_costs"]
+    labor_rows = {
+        label
+        for label, amount in labor_costs.items()
+        if float(amount or 0.0) > 0.01
+    }
+
+    assert buckets_with_costs == labor_rows
+
+    baseline_hours = payload["decision_state"]["baseline"]["process_hours"]
+    summary_labels = {
+        bucket_label_map.get(
+            key,
+            key.replace("_", " ").replace(" deburr", "/Deburr").title(),
+        )
+        for key, hours in baseline_hours.items()
+        if float(hours or 0.0) > 0.0
+    }
+
+    assert summary_labels == buckets_with_costs
+
+
+def test_dummy_quote_direct_costs_match_across_sections() -> None:
+    payload = _dummy_quote_payload()
+    lines = _render_lines(payload)
+
+    material_block = payload["breakdown"].get("material", {})
+    material_total = (
+        material_block.get("material_cost_before_credit")
+        or material_block.get("material_cost")
+        or material_block.get("material_direct_cost")
+        or 0.0
+    )
+    direct_costs = appV5._compute_direct_costs(
+        material_total,
+        material_block.get("material_scrap_credit"),
+        material_block.get("material_tax"),
+        payload["breakdown"].get("pass_through"),
+    )
+
+    top_direct_line = next(line for line in lines if "Total Direct Costs:" in line)
+    top_direct = _extract_currency(top_direct_line)
+    assert math.isclose(top_direct, direct_costs, abs_tol=0.01)
+
+    pass_section_start = lines.index("Pass-Through & Direct Costs")
+    pass_section: list[str] = []
+    for line in lines[pass_section_start + 2 :]:
+        if not line.strip():
+            break
+        pass_section.append(line)
+    pass_total_line = next(line for line in pass_section if line.strip().startswith("Total"))
+    pass_total = _extract_currency(pass_total_line)
+    assert math.isclose(pass_total, direct_costs, abs_tol=0.01)
+
+    ladder_line = next(line for line in lines if "Subtotal (Labor + Directs):" in line)
+    ladder_subtotal = _extract_currency(ladder_line)
+
+    first_process_idx = lines.index("Process & Labor Costs")
+    second_process_idx = lines.index("Process & Labor Costs", first_process_idx + 1)
+    process_block = lines[second_process_idx + 2 :]
+    labor_line = next(line for line in process_block if line.strip().startswith("Labor"))
+    labor_amount = _extract_currency(labor_line)
+    ladder_direct = ladder_subtotal - labor_amount
+
+    assert math.isclose(ladder_direct, direct_costs, abs_tol=0.01)
+
+
+def test_render_omits_amortized_rows_for_single_quantity() -> None:
+    payload = _dummy_quote_payload()
+    payload["qty"] = 1
+    payload["breakdown"]["qty"] = 1
+    lines = _render_lines(payload)
+
+    assert all("(amortized" not in line.lower() for line in lines)
+
+    first_process_idx = lines.index("Process & Labor Costs")
+    second_process_idx = lines.index("Process & Labor Costs", first_process_idx + 1)
+    process_rows: list[str] = []
+    for line in lines[second_process_idx + 2 :]:
+        if not line.strip():
+            break
+        process_rows.append(line)
+    assert all("(lot" not in line.lower() for line in process_rows)

@@ -6944,6 +6944,21 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         str(note).strip() for note in llm_notes if str(note).strip()
     ]
 
+    llm_debug_enabled_effective = bool(APP_ENV.llm_debug_enabled)
+    for source in (result, breakdown):
+        if not isinstance(source, _MappingABC):
+            continue
+        for key in ("app", "app_meta"):
+            app_info = source.get(key)
+            if not isinstance(app_info, _MappingABC):
+                continue
+            if "llm_debug_enabled" in app_info:
+                llm_debug_enabled_effective = bool(app_info.get("llm_debug_enabled"))
+                break
+        else:
+            continue
+        break
+
     # ---- helpers -------------------------------------------------------------
     divider = "-" * int(page_width)
 
@@ -7093,7 +7108,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     def render_bucket_table(rows: Sequence[tuple[str, float, float, float, float]]):
         if not rows:
             return
-        if not llm_debug_enabled:
+        if not llm_debug_enabled_flag:
             return
 
         headers = ("Bucket", "Hours", "Labor $", "Machine $", "Total $")
@@ -7250,6 +7265,37 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if txt:
             write_line(str(txt), indent)
 
+    def _extract_llm_debug_override(container: Mapping[str, Any] | None) -> bool | None:
+        if not isinstance(container, _MappingABC):
+            return None
+        if "llm_debug_enabled" in container:
+            value = container.get("llm_debug_enabled")
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (int, float)):
+                return bool(value)
+            if isinstance(value, str):
+                lowered = value.strip().lower()
+                if lowered in {"1", "true", "t", "yes", "y", "on"}:
+                    return True
+                if lowered in {"0", "false", "f", "no", "n", "off", ""}:
+                    return False
+                return None
+            return bool(value)
+        for meta_key in ("app", "app_meta"):
+            meta = container.get(meta_key)
+            override = _extract_llm_debug_override(meta) if isinstance(meta, _MappingABC) else None
+            if override is not None:
+                return override
+        return None
+
+    llm_debug_enabled_flag = bool(APP_ENV.llm_debug_enabled)
+    for source in (result, breakdown):
+        override = _extract_llm_debug_override(source if isinstance(source, _MappingABC) else None)
+        if override is not None:
+            llm_debug_enabled_flag = override
+            break
+
     # ---- header --------------------------------------------------------------
     lines: list[str] = []
     hour_summary_entries: dict[str, tuple[float, bool]] = {}
@@ -7299,22 +7345,16 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             write_wrapped(entry, "  ")
         lines.append("")
 
-    if drill_debug_entries and llm_debug_enabled:
+    if drill_debug_entries and llm_debug_enabled_flag:
         render_drill_debug(drill_debug_entries)
     row("Final Price per Part:", price)
     total_labor_label = "Total Labor Cost:"
     row(total_labor_label, float(totals.get("labor_cost", 0.0)))
     total_labor_row_index = len(lines) - 1
-    direct_costs_total_display: Any = None
-    if isinstance(breakdown, _MappingABC):
-        direct_costs_total_display = breakdown.get("total_direct_costs")
-    if direct_costs_total_display is None and isinstance(totals, _MappingABC):
-        direct_costs_total_display = totals.get("direct_costs")
-    try:
-        direct_costs_total_value = float(direct_costs_total_display or 0.0)
-    except Exception:
-        direct_costs_total_value = 0.0
-    row("Total Direct Costs:", direct_costs_total_value)
+    total_direct_costs_label = "Total Direct Costs:"
+    row(total_direct_costs_label, 0.0)
+    total_direct_costs_row_index = len(lines) - 1
+    directs: float = 0.0
     def _coerce_pricing_source(value: Any) -> str | None:
         if value is None:
             return None
@@ -7422,8 +7462,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             text = line.strip()
             if text:
                 explanation_lines.append(text)
-    if explanation_lines:
-        why_parts = explanation_lines + why_parts
+    # ``explanation_lines`` will be merged into ``why_parts`` after the process
+    # bucket rows are prepared so the cost makeup + contributor text can be
+    # derived from the exact rows rendered in the Process & Labor table.
 
     def _is_planner_meta(key: str) -> bool:
         canonical_key = _canonical_bucket_key(key)
@@ -8309,30 +8350,63 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if (prog or fix or other_nre_total > 0) and not lines[-1].strip() == "":
         lines.append("")
 
+    try:
+        amortized_qty = int(result.get("qty") or breakdown.get("qty") or qty or 1)
+    except Exception:
+        amortized_qty = qty if qty > 0 else 1
+    show_amortized = amortized_qty > 1
+
+    programming_per_part_cost = labor_cost_totals.get("Programming (amortized)")
+    if programming_per_part_cost is None:
+        programming_meta_detail = (nre_detail or {}).get("programming") or {}
+        try:
+            programming_per_part_cost = float(
+                programming_meta_detail.get("per_part", 0.0) or 0.0
+            )
+        except Exception:
+            programming_per_part_cost = 0.0
+
+    fixture_meta_detail = (nre_detail or {}).get("fixture") or {}
+    fixture_labor_per_part_cost = labor_cost_totals.get("Fixture Build (amortized)")
+    if fixture_labor_per_part_cost is None:
+        try:
+            fixture_labor_total = float(fixture_meta_detail.get("labor_cost", 0.0) or 0.0)
+        except Exception:
+            fixture_labor_total = 0.0
+        fixture_labor_per_part_cost = (
+            fixture_labor_total / qty if qty > 0 else fixture_labor_total
+        )
+
     lines.append("Process & Labor Costs")
     lines.append(divider)
-    bucket_table_rows: list[tuple[str, float, float, float, float]] = []
-    bucket_table_totals: dict[str, float] | None = None
+
     canonical_bucket_order: list[str] = []
     canonical_bucket_summary: dict[str, dict[str, float]] = {}
+    bucket_table_rows: list[tuple[str, float, float, float, float]] = []
+    detail_lookup: dict[str, str] = {}
+    label_to_canon: dict[str, str] = {}
+
+    labor_costs_display.clear()
+    hour_summary_entries.clear()
+    display_labor_for_ladder = 0.0
+    display_machine = 0.0
 
     process_plan_summary_local = locals().get("process_plan_summary")
     if not isinstance(process_plan_summary_local, _MappingABC):
         process_plan_summary_local = (
             breakdown.get("process_plan") if isinstance(breakdown, _MappingABC) else None
         )
-    bucket_view = (
+    bucket_view_raw = (
         process_plan_summary_local.get("bucket_view")
         if isinstance(process_plan_summary_local, _MappingABC)
         else None
     )
-    if not isinstance(bucket_view, _MappingABC):
-        bucket_view = (
-            breakdown.get("bucket_view")
-            if isinstance(breakdown, _MappingABC)
-            else None
-        )
-
+    if isinstance(bucket_view_raw, _MappingABC):
+        bucket_view = _prepare_bucket_view(bucket_view_raw)
+        if isinstance(process_plan_summary_local, dict):
+            process_plan_summary_local["bucket_view"] = copy.deepcopy(bucket_view)
+    else:
+        bucket_view = None
     if isinstance(bucket_view, _MappingABC):
         buckets = bucket_view.get("buckets") if isinstance(bucket_view, _MappingABC) else None
         if not isinstance(buckets, _MappingABC):
@@ -8340,10 +8414,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         order = bucket_view.get("order") if isinstance(bucket_view, _MappingABC) else None
         if not isinstance(order, Sequence):
             order = _preferred_order_then_alpha(buckets.keys())
-
-        hours_sum = 0.0
-        labor_sum = 0.0
-        machine_sum = 0.0
 
         for canon_key in order:
             info = buckets.get(canon_key)
@@ -8363,13 +8433,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 machine_raw = 0.0
 
             hours_raw = minutes_val / 60.0 if minutes_val else 0.0
-            hours_val = round(hours_raw, 2)
-            labor_val = round(labor_raw, 2)
-            machine_val = round(machine_raw, 2)
             total_raw = labor_raw + machine_raw
-            total_val = round(total_raw, 2)
 
-            if total_val <= 0.01 and hours_val <= 0.01:
+            if total_raw <= 0.01 and hours_raw <= 0.01:
                 continue
 
             canonical_bucket_order.append(canon_key)
@@ -8381,648 +8447,48 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 "total": total_raw,
             }
 
-            bucket_table_rows.append(
-                (
-                    _display_bucket_label(canon_key, label_overrides),
-                    hours_val,
-                    labor_val,
-                    machine_val,
-                    total_val,
-                )
-            )
+            label = _display_bucket_label(canon_key, label_overrides)
+            hours_val = round(hours_raw, 2)
+            labor_val = round(labor_raw, 2)
+            machine_val = round(machine_raw, 2)
+            total_val = round(total_raw, 2)
 
-            hours_sum += hours_val
-            labor_sum += labor_val
-            machine_sum += machine_val
+            bucket_table_rows.append((label, hours_val, labor_val, machine_val, total_val))
+            label_to_canon[label] = canon_key
 
-        if bucket_table_rows:
-            render_bucket_table(bucket_table_rows)
-            bucket_table_totals = {
-                "hours": round(hours_sum, 2),
-                "labor": round(labor_sum, 2),
-                "machine": round(machine_sum, 2),
-                "total": round(labor_sum + machine_sum, 2),
-            }
+            labor_costs_display[label] = total_val
+            display_labor_for_ladder += labor_raw
+            display_machine += machine_raw
+            hour_summary_entries[label] = (hours_val, True)
 
-    if not bucket_table_rows:
-        bucket_table_totals = None
-
-    if isinstance(process_meta, _MappingABC):
-        for raw_key, raw_meta in process_meta.items():
-            if not isinstance(raw_meta, _MappingABC):
-                continue
-            canon_key = _canonical_bucket_key(raw_key)
-            if not canon_key or canon_key.startswith("planner_"):
-                continue
-            if canon_key != raw_key:
-                continue
-            minutes_val = _bucket_cost(raw_meta, "minutes")
-            hours_val = _bucket_cost(raw_meta, "hours", "hr")
-            if hours_val <= 0 and minutes_val > 0:
-                hours_val = minutes_val / 60.0
-            labor_val = _bucket_cost(raw_meta, "labor_cost", "labor$", "labor")
-            machine_val = _bucket_cost(raw_meta, "machine_cost", "machine$", "machine")
-            total_val = _bucket_cost(raw_meta, "total_cost", "total$", "cost")
-            if total_val <= 0 and (labor_val or machine_val):
-                total_val = labor_val + machine_val
-            if total_val <= 0:
-                rate_val = _bucket_cost(raw_meta, "rate")
-                base_extra_val = _bucket_cost(raw_meta, "base_extra")
-                if rate_val > 0 or base_extra_val:
-                    total_val = rate_val * hours_val + base_extra_val
-            if minutes_val <= 0 and hours_val > 0:
-                minutes_val = hours_val * 60.0
-            summary = canonical_bucket_summary.setdefault(
-                canon_key,
-                {"minutes": 0.0, "hours": 0.0, "labor": 0.0, "machine": 0.0, "total": 0.0},
-            )
-            if minutes_val > 0:
-                summary["minutes"] = float(minutes_val)
-            elif hours_val > 0:
-                summary["minutes"] = float(hours_val * 60.0)
-            if hours_val > 0:
-                summary["hours"] = float(hours_val)
-            labor_has_value = (
-                labor_val > 0
-                or "labor_cost" in raw_meta
-                or "labor$" in raw_meta
-                or "labor" in raw_meta
-            )
-            if labor_has_value:
-                summary["labor"] = float(labor_val)
-            machine_has_value = (
-                machine_val > 0
-                or "machine_cost" in raw_meta
-                or "machine$" in raw_meta
-                or "machine" in raw_meta
-            )
-            if machine_has_value:
-                summary["machine"] = float(machine_val)
-            if total_val > 0:
-                summary["total"] = float(total_val)
-            if canon_key not in canonical_bucket_order:
-                canonical_bucket_order.append(canon_key)
-
-    lines.append("Process & Labor Costs")
-    lines.append(divider)
-    proc_total = 0.0
-
-    labor_row_order: list[str] = []
-    labor_row_data: dict[str, dict[str, Any]] = {}
-
-    def _labor_storage_key(label: str, process_key: str | None) -> str:
-        canonical_label, _ = _canonical_amortized_label(label)
-        normalized_label = canonical_label or str(label)
-        label_lower = normalized_label.lower()
-        is_amortized_label = "amortized" in label_lower
-
-        if process_key is not None:
-            bucket_key = _canonical_bucket_key(process_key)
-            if bucket_key:
-                return bucket_key
-
-        if not is_amortized_label:
-            bucket_from_label = _canonical_bucket_key(normalized_label)
-            if bucket_from_label:
-                return bucket_from_label
-
-        return normalized_label
-
-    _HOUR_LABEL_CANON = {
-        "finishing deburr": "Finishing/Deburr",
-        "finishing/deburr": "Finishing/Deburr",
-        "deburr": "Finishing/Deburr",
-    }
-
-    def _canonical_hour_label(label: str) -> str:
-        key = str(label or "").strip().lower()
-        return _HOUR_LABEL_CANON.get(key, label)
-
-    def _add_labor_cost_line(
-        label: str,
-        amount: float,
-        *,
-        process_key: str | None = None,
-        detail_bits: list[str] | None = None,
-        fallback_detail: str | None = None,
-        force: bool = False,
-        display_override: str | None = None,
-    ) -> None:
-        nonlocal proc_total
-        amount_val = float(amount or 0.0)
-        if not force and not ((amount_val > 0) or show_zeros):
-            return
-
-        storage_key = _labor_storage_key(str(label), process_key)
-        display_text = _canonical_hour_label(display_override or str(label))
-
-        entry = labor_row_data.get(storage_key)
-        if entry is None:
-            entry = {
-                "label": display_text,
-                "amount": 0.0,
-                "process_keys": [],
-                "has_override": bool(display_override),
-            }
-            labor_row_data[storage_key] = entry
-            labor_row_order.append(storage_key)
-        elif display_override:
-            entry["label"] = display_text
-            entry["has_override"] = True
-        elif not entry.get("has_override"):
-            entry["label"] = display_text
-
-        entry["amount"] += amount_val
-        if process_key is not None:
-            proc_key_str = str(process_key)
-            if proc_key_str and proc_key_str not in entry["process_keys"]:
-                entry["process_keys"].append(proc_key_str)
-
-        existing_detail = labor_cost_details.get(storage_key)
-        merged_detail = _merge_detail(existing_detail, detail_bits or [])
-        if merged_detail:
-            labor_cost_details[storage_key] = merged_detail
-        elif fallback_detail:
-            fallback_segments = [
-                seg for seg in re.split(r";\s*", str(fallback_detail)) if seg.strip()
-            ]
-            sanitized_fallback = _merge_detail(None, fallback_segments)
-            if sanitized_fallback:
-                labor_cost_details.setdefault(storage_key, sanitized_fallback)
-
-        labor_costs_display[storage_key] = labor_costs_display.get(storage_key, 0.0) + amount_val
-        proc_total += amount_val
-
-    def _emit_labor_cost_lines() -> None:
-        merged_entries: dict[str, dict[str, Any]] = {}
-        merged_order: list[str] = []
-
-        for storage_key in labor_row_order:
-            entry = labor_row_data[storage_key]
-            canonical_label = _canonical_hour_label(entry["label"])
-            merged_entry = merged_entries.get(canonical_label)
-            if merged_entry is None:
-                merged_entry = {
-                    "label": canonical_label,
-                    "amount": 0.0,
-                    "detail_texts": [],
-                    "process_keys_no_detail": [],
-                }
-                merged_entries[canonical_label] = merged_entry
-                merged_order.append(canonical_label)
-
-            merged_entry["amount"] += entry["amount"]
-
-            detail_text = labor_cost_details.get(storage_key)
+            detail_text = None
+            for candidate in (canon_key, label):
+                if candidate in labor_cost_details and labor_cost_details[candidate]:
+                    detail_text = labor_cost_details[candidate]
+                    break
+                if candidate in labor_cost_details_input and labor_cost_details_input[candidate]:
+                    detail_text = labor_cost_details_input[candidate]
+                    break
             if detail_text:
-                merged_entry["detail_texts"].append(detail_text)
+                detail_lookup[label] = detail_text
+
+    if bucket_table_rows:
+        render_bucket_table(bucket_table_rows)
+        for label, _hours_val, _labor_val, _machine_val, total_val in bucket_table_rows:
+            row(label, total_val, indent="  ")
+            detail_text = detail_lookup.get(label)
+            if detail_text not in (None, ""):
+                write_detail(str(detail_text), indent="    ")
             else:
-                for proc_key in entry["process_keys"]:
-                    if proc_key not in merged_entry["process_keys_no_detail"]:
-                        merged_entry["process_keys_no_detail"].append(proc_key)
+                canon_key = label_to_canon.get(label)
+                if canon_key:
+                    add_process_notes(canon_key, indent="    ")
+    elif show_zeros:
+        row("No process costs", 0.0, indent="  ")
 
-        for canonical_label in merged_order:
-            merged_entry = merged_entries[canonical_label]
-            row(merged_entry["label"], merged_entry["amount"], indent="  ")
-            for detail_text in merged_entry["detail_texts"]:
-                if detail_text not in (None, ""):
-                    write_detail(str(detail_text), indent="    ")
-            if not merged_entry["detail_texts"] or merged_entry["process_keys_no_detail"]:
-                for proc_key in merged_entry["process_keys_no_detail"]:
-                    add_process_notes(proc_key, indent="    ")
-
-    def _fold_process_costs(values: Mapping[str, Any] | None) -> dict[str, float]:
-        if not values:
-            return {}
-        return canonicalize_costs(values)
-
-    process_costs = _fold_process_costs(process_costs)
-
-    process_cost_items_all = list((process_costs or {}).items())
-    display_process_cost_items = [
-        (key, value)
-        for key, value in process_cost_items_all
-        if not _is_planner_meta(key)
-    ]
-
-    # Maintain a stable ordering of process cost buckets that prioritizes the
-    # preferred buckets while appending any "extra" buckets after them.  The
-    # `bucket_keys` list already contains the preferred order followed by any
-    # additional keys sourced from the rollup/ops maps; we reuse that ordering
-    # here and extend it with any further keys that appear only in the display
-    # data so that everything receives a deterministic slot.
-    bucket_sort_order: list[str] = list(bucket_keys) if bucket_keys else list(bucket_order)
-
-    existing_bucket_keys = set(bucket_sort_order)
-    for key, _ in display_process_cost_items:
-        canon = _normalize_bucket_key(key)
-        if canon.startswith("planner_"):
-            continue
-        if canon and canon not in existing_bucket_keys:
-            bucket_sort_order.append(canon)
-            existing_bucket_keys.add(canon)
-
-    bucket_sort_rank = {canon: idx for idx, canon in enumerate(bucket_sort_order)}
-
-    def _is_planner_rollup_key(name: str | None) -> bool:
-        if pricing_source_lower != "planner":
-            return False
-        canon = _canonical_bucket_key(name or "")
-        if not canon:
-            return False
-        if canon in {"planner_total", "planner_machine", "planner_labor"}:
-            return True
-        norm = _normalize_bucket_key(name)
-        return norm.startswith("planner_")
-
-    sortable_process_items: list[tuple[int, int, str, float]] = []
-    for original_index, (key, value) in enumerate(display_process_cost_items):
-        norm = _normalize_bucket_key(key)
-        if norm.startswith("planner_"):
-            continue
-        if not ((value > 0) or show_zeros):
-            continue
-
-        sort_rank = bucket_sort_rank.get(norm)
-        if sort_rank is None:
-            # Fallback for any stray keys: place them after the known buckets in
-            # their original order to keep the output deterministic.
-            sort_rank = len(bucket_sort_rank) + original_index
-
-        sortable_process_items.append((sort_rank, original_index, str(key), float(value or 0.0)))
-
-    sortable_process_items.sort(key=lambda item: (item[0], item[1]))
-    ordered_process_items: list[tuple[str, float]] = [
-        (key, value) for _, _, key, value in sortable_process_items
-    ]
-
-    display_process_costs: dict[str, Any] = {}
-    for key, value in (process_costs or {}).items():
-        if _is_planner_meta(key):
-            continue
-        display_process_costs[key] = value
-
-    def _append_unique(bits: list[str], value: Any) -> None:
-        text = str(value).strip()
-        if not text:
-            return
-        if text not in bits:
-            bits.append(text)
-
-    aggregated_process_rows: dict[str, dict[str, Any]] = {}
-    aggregated_order: list[str] = []
-    process_entries_for_display: list[ProcessDisplayEntry] = []
-
-    for entry in _iter_ordered_process_entries(
-        display_process_costs,
-        process_meta=process_meta,
-        applied_process=applied_process,
-        show_zeros=show_zeros,
-        planner_bucket_display_map=planner_bucket_display_map,
-        label_overrides=label_overrides,
-        currency_formatter=_m,
-    ):
-        process_entries_for_display.append(entry)
-        canon_key = entry.canonical_key or _canonical_bucket_key(entry.process_key)
-        if canon_key in {"planner_labor", "planner_machine", "planner_total"}:
-            continue
-        if canon_key.startswith("planner_"):
-            continue
-        canonical_label, _ = _canonical_amortized_label(entry.label)
-        fallback_detail_raw = labor_cost_details_input.get(canonical_label or entry.label)
-        fallback_detail = (
-            str(fallback_detail_raw).strip()
-            if fallback_detail_raw not in (None, "")
-            else None
-        )
-
-        bucket = aggregated_process_rows.get(canon_key)
-        if bucket is None:
-            bucket = {
-                "amount": 0.0,
-                "detail_bits": [],
-                "process_keys": [],
-                "fallback_detail": fallback_detail,
-                "display_override": entry.display_override,
-                "representative_key": str(entry.process_key or canon_key),
-            }
-            aggregated_process_rows[canon_key] = bucket
-            aggregated_order.append(canon_key)
-        else:
-            if not bucket.get("fallback_detail") and fallback_detail:
-                bucket["fallback_detail"] = fallback_detail
-            if entry.display_override:
-                bucket["display_override"] = entry.display_override
-
-        try:
-            amount_val = float(entry.amount or 0.0)
-        except Exception:
-            amount_val = 0.0
-        bucket["amount"] += amount_val
-
-        proc_key_text = str(entry.process_key or "").strip()
-        if proc_key_text and proc_key_text not in bucket["process_keys"]:
-            bucket["process_keys"].append(proc_key_text)
-
-        for bit in entry.detail_bits:
-            _append_unique(bucket["detail_bits"], bit)
-
-    hidden_canon_keys = {"planner_labor", "planner_machine", "planner_total"}
-    remaining_costs = {canon: data["amount"] for canon, data in aggregated_process_rows.items()}
-
-    if canonical_bucket_order:
-        canonical_sequence = [
-            key for key in canonical_bucket_order if key in aggregated_process_rows
-        ]
-        remainder = [key for key in aggregated_order if key not in canonical_sequence]
-        aggregated_order = canonical_sequence + remainder
-
-    for canon_key in aggregated_order:
-        if canon_key in hidden_canon_keys or canon_key.startswith("planner_"):
-            continue
-
-        amount = float(remaining_costs.get(canon_key, 0.0) or 0.0)
-        bucket = aggregated_process_rows[canon_key]
-        summary = canonical_bucket_summary.get(canon_key)
-        if isinstance(summary, dict):
-            summary_total = float(summary.get("total", 0.0) or 0.0)
-            if summary_total <= 0:
-                summary_total = float(summary.get("labor", 0.0) or 0.0) + float(
-                    summary.get("machine", 0.0) or 0.0
-                )
-            summary_hours = float(summary.get("hours", 0.0) or 0.0)
-            if summary_hours <= 0 and summary.get("minutes", 0.0):
-                summary_hours = float(summary.get("minutes", 0.0) or 0.0) / 60.0
-            if (summary_total > 0 or summary_hours > 0) and abs(amount) <= 0.005:
-                amount = summary_total if summary_total > 0 else amount
-                remaining_costs[canon_key] = amount
-        process_keys = bucket.get("process_keys") or []
-        representative_key = bucket.get("representative_key")
-        if not process_keys and representative_key:
-            text_key = str(representative_key).strip()
-            if text_key:
-                process_keys = [text_key]
-
-        label = _display_bucket_label(canon_key, label_overrides)
-        primary_process_key = process_keys[0] if process_keys else canon_key
-
-        detail_bits = list(bucket.get("detail_bits", []))
-        if canon_key == "misc":
-            _append_unique(detail_bits, "LLM adjustments")
-
-        _add_labor_cost_line(
-            label,
-            amount,
-            process_key=primary_process_key,
-            detail_bits=detail_bits,
-            fallback_detail=bucket.get("fallback_detail"),
-            display_override=bucket.get("display_override"),
-        )
-
-        storage_key = _labor_storage_key(label, primary_process_key)
-        entry = labor_row_data.get(storage_key)
-        if entry and len(process_keys) > 1:
-            for extra_key in process_keys[1:]:
-                if extra_key not in entry["process_keys"]:
-                    entry["process_keys"].append(extra_key)
-
-
-    try:
-        amortized_qty = int(result.get("qty") or breakdown.get("qty") or qty or 1)
-    except Exception:
-        amortized_qty = qty if qty > 0 else 1
-    show_amortized = amortized_qty > 1
-
-    if not show_amortized:
-        labor_cost_totals.pop("Programming (amortized)", None)
-        labor_cost_totals.pop("Fixture Build (amortized)", None)
-
-    programming_per_part_cost = labor_cost_totals.get("Programming (amortized)")
-    if not show_amortized:
-        programming_per_part_cost = 0.0
-    elif programming_per_part_cost is None:
-        programming_per_part_cost = float(nre.get("programming_per_part", 0.0) or 0.0)
-    programming_detail = (nre_detail or {}).get("programming") or {}
-    prog_bits: list[str] = []
-    try:
-        prog_hr = float(programming_detail.get("prog_hr", 0.0) or 0.0)
-    except Exception:
-        prog_hr = 0.0
-    try:
-        prog_rate = float(programming_detail.get("prog_rate", 0.0) or 0.0)
-    except Exception:
-        prog_rate = 0.0
-    if prog_hr > 0:
-        prog_bits.append(f"- Programmer (lot): {_hours_with_rate_text(prog_hr, prog_rate)}")
-    try:
-        eng_hr = float(programming_detail.get("eng_hr", 0.0) or 0.0)
-    except Exception:
-        eng_hr = 0.0
-    try:
-        eng_rate = float(programming_detail.get("eng_rate", 0.0) or 0.0)
-    except Exception:
-        eng_rate = 0.0
-    if eng_hr > 0:
-        prog_bits.append(f"- Engineering (lot): {_hours_with_rate_text(eng_hr, eng_rate)}")
-    programming_detail_bits = list(prog_bits)
-    if show_amortized and programming_per_part_cost:
-        programming_detail_bits.append(f"Amortized across {amortized_qty} pcs")
-    if show_amortized and programming_per_part_cost:
-        programming_detail_bits.append("amortized")
-
-    fixture_detail = (nre_detail or {}).get("fixture") or {}
-    fixture_labor_per_part_cost = labor_cost_totals.get("Fixture Build (amortized)")
-    if not show_amortized:
-        fixture_labor_per_part_cost = 0.0
-    elif fixture_labor_per_part_cost is None:
-        try:
-            fixture_labor_total = float(fixture_detail.get("labor_cost", 0.0) or 0.0)
-        except Exception:
-            fixture_labor_total = 0.0
-        fixture_labor_per_part_cost = (
-            fixture_labor_total / qty if qty > 0 else fixture_labor_total
-        )
-    fixture_bits: list[str] = []
-    try:
-        fixture_hr = float(fixture_detail.get("build_hr", 0.0) or 0.0)
-    except Exception:
-        fixture_hr = 0.0
-    try:
-        fixture_rate = float(
-            fixture_detail.get("build_rate", rates.get("FixtureBuildRate", 0.0)) or 0.0
-        )
-    except Exception:
-        fixture_rate = 0.0
-    if fixture_hr > 0:
-        fixture_bits.append(
-            f"- Build labor (lot): {_hours_with_rate_text(fixture_hr, fixture_rate)}"
-        )
-    try:
-        soft_jaw_hr = float(fixture_detail.get("soft_jaw_hr", 0.0) or 0.0)
-    except Exception:
-        soft_jaw_hr = 0.0
-    if soft_jaw_hr > 0:
-        fixture_bits.append(f"Soft jaw prep {soft_jaw_hr:.2f} hr")
-    fixture_detail_bits = list(fixture_bits)
-    if show_amortized and fixture_labor_per_part_cost:
-        fixture_detail_bits.append(f"Amortized across {amortized_qty} pcs")
-    if show_amortized and fixture_labor_per_part_cost:
-        fixture_detail_bits.append("amortized")
-
-    def _append_extra_labor_row(
-        label: str,
-        amount: Any,
-        detail_bits: Iterable[str] | None,
-        fallback_detail: str | None,
-    ) -> None:
-        try:
-            amount_val = float(amount or 0.0)
-        except Exception:
-            amount_val = 0.0
-        if not show_zeros and math.isclose(amount_val, 0.0, abs_tol=0.005):
-            return
-        details_list = list(detail_bits or [])
-        extra_labor_rows.append((label, amount_val, details_list, fallback_detail))
-
-    extra_labor_rows: list[tuple[str, float, list[str], str | None]] = []
-
-    try:
-        programming_per_part_amount_for_rows = float(programming_per_part_cost or 0.0)
-    except Exception:
-        programming_per_part_amount_for_rows = 0.0
-    try:
-        fixture_per_part_amount_for_rows = float(fixture_labor_per_part_cost or 0.0)
-    except Exception:
-        fixture_per_part_amount_for_rows = 0.0
-
-    if show_amortized and programming_per_part_amount_for_rows > 0:
-        _append_extra_labor_row(
-            "Programming (amortized)",
-            programming_per_part_cost,
-            programming_detail_bits,
-            labor_cost_details_input.get("Programming (amortized)") or None,
-        )
-    if show_amortized and fixture_per_part_amount_for_rows > 0:
-        _append_extra_labor_row(
-            "Fixture Build (amortized)",
-            fixture_labor_per_part_cost,
-            fixture_detail_bits,
-            labor_cost_details_input.get("Fixture Build (amortized)") or None,
-        )
-
-    misc_label: str | None = None
-    misc_amount_val: float = 0.0
-    for key, value in labor_cost_totals.items():
-        key_lower = str(key).lower()
-        if "llm" in key_lower and "misc" in key_lower:
-            misc_label = str(key)
-            try:
-                misc_amount_val = float(value or 0.0)
-            except Exception:
-                misc_amount_val = 0.0
-            break
-
-    if misc_label is not None:
-        misc_detail_bits = ["LLM adjustments"]
-        _append_extra_labor_row(
-            misc_label,
-            misc_amount_val,
-            misc_detail_bits,
-            labor_cost_details_input.get(misc_label) or None,
-        )
-
-    for label, amount, detail_bits, fallback_detail in extra_labor_rows:
-        storage_key_candidates = [
-            key
-            for key in (
-                _labor_storage_key(label, None),
-                _labor_storage_key(label, label),
-            )
-            if key
-        ]
-
-        existing_key = next((key for key in storage_key_candidates if key in labor_row_data), None)
-        if existing_key:
-            existing_amount = float(labor_costs_display.get(existing_key, 0.0) or 0.0)
-            amount_delta = amount - existing_amount
-            _add_labor_cost_line(
-                label,
-                amount_delta,
-                process_key=label,
-                detail_bits=detail_bits,
-                fallback_detail=fallback_detail,
-                force=True,
-                display_override=label,
-            )
-            continue
-
-        if any(key in labor_costs_display for key in storage_key_candidates):
-            continue
-
-        _add_labor_cost_line(
-            label,
-            amount,
-            process_key=label,
-            detail_bits=detail_bits,
-            fallback_detail=fallback_detail,
-            force=True,
-        )
-
-    _emit_labor_cost_lines()
-
-    display_machine = 0.0
-    display_labor_for_ladder = 0.0
-    amortized_labor_components: dict[str, float] = {}
-    for storage_key, amount in labor_costs_display.items():
-        try:
-            amount_val = float(amount or 0.0)
-        except Exception:
-            continue
-        canon_key = _canonical_bucket_key(str(storage_key))
-        if canon_key == "machine":
-            display_machine += amount_val
-            continue
-        if canon_key.startswith("planner_"):
-            # Planner rollup buckets are used only for internal reconciliation
-            # and are hidden from the display. They should not contribute to the
-            # visible labor subtotal for the pricing ladder.
-            continue
-        if "amortized" in canon_key:
-            amortized_labor_components[canon_key] = (
-                amortized_labor_components.get(canon_key, 0.0) + amount_val
-            )
-        display_labor_for_ladder += amount_val
-
-    machine_in_labor_section = any(
-        _canonical_bucket_key(str(key)) == "machine"
-        for key in labor_costs_display.keys()
+    displayed_process_total = round(
+        sum(float(value or 0.0) for value in labor_costs_display.values()), 2
     )
-
-    displayed_process_total = sum(float(value or 0.0) for value in labor_costs_display.values())
-    if not math.isclose(proc_total, displayed_process_total, rel_tol=1e-6, abs_tol=0.05):
-        try:
-            logger.warning(
-                "Labor section drift: accumulated=%s vs displayed=%s",
-                f"{proc_total:.2f}", f"{displayed_process_total:.2f}",
-            )
-        except Exception:
-            pass
-        # Prefer what we actually render
-        proc_total = displayed_process_total
-
-    expected_labor_total = float(totals.get("labor_cost", 0.0) or 0.0)
-    if abs(displayed_process_total - expected_labor_total) >= 0.01:
-        # Be tolerant: different code paths may compute labor totals using
-        # alternate rounding or inclusion rules (e.g., Machine included vs
-        # displayed elsewhere). Log drift and continue; we reconcile below.
-        try:
-            logger.warning(
-                "Labor section totals drifted beyond threshold: %s vs %s",
-                f"{displayed_process_total:.2f}", f"{expected_labor_total:.2f}",
-            )
-        except Exception:
-            pass
-
     proc_total = displayed_process_total
     row("Total", proc_total, indent="  ")
 
@@ -9147,55 +8613,32 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         def _emit_hour_row(label: str, value: float, *, include_in_total: bool = True) -> None:
             _record_hour_entry(label, value, include_in_total=include_in_total)
 
-        def _bucket_minutes(info: Mapping[str, Any] | None) -> float:
+        planner_bucket_view: Mapping[str, Any] | None = None
+        if isinstance(bucket_view, _MappingABC):
+            planner_bucket_view = bucket_view
+        elif isinstance(process_plan_summary_local, _MappingABC):
+            candidate_bucket_view = process_plan_summary_local.get("bucket_view")
+            if isinstance(candidate_bucket_view, _MappingABC):
+                planner_bucket_view = candidate_bucket_view
+
+        buckets_map: Mapping[str, Any] | None = None
+        order: Sequence[Any] | None = None
+        if isinstance(planner_bucket_view, _MappingABC):
+            buckets_map = planner_bucket_view.get("buckets")
+            order = planner_bucket_view.get("order")
+
+        if not isinstance(buckets_map, _MappingABC):
+            buckets_map = {}
+        if not isinstance(order, Sequence):
+            order = _preferred_order_then_alpha(buckets_map.keys())
+
+        seen_hour_canon_keys: set[str] = set()
+
+        def _bucket_minutes_from_view(canon_key: str) -> float:
+            info = buckets_map.get(canon_key)
             if not isinstance(info, _MappingABC):
                 return 0.0
-            try:
-                return float(info.get("minutes", 0.0) or 0.0)
-            except Exception:
-                return 0.0
-
-        def _hours_for_bucket(canon_key: str) -> float:
-            meta = _lookup_process_meta(canon_key) or {}
-
-            for key_name in ("final_hr", "planner_hr", "hr"):
-                try:
-                    hr_val = _safe_float(meta.get(key_name))
-                except Exception:
-                    hr_val = 0.0
-                if hr_val > 0:
-                    return hr_val
-
-            for minute_key in ("final_minutes", "planner_minutes", "minutes"):
-                try:
-                    minute_val = _safe_float(meta.get(minute_key))
-                except Exception:
-                    minute_val = 0.0
-                if minute_val > 0:
-                    return minute_val / 60.0
-
-            summary = canonical_bucket_summary.get(canon_key)
-            if isinstance(summary, dict):
-                hours_val = _safe_float(summary.get("hours"))
-                if hours_val > 0:
-                    return hours_val
-                minutes_val = _safe_float(summary.get("minutes"))
-                if minutes_val > 0:
-                    return minutes_val / 60.0
-
-            info: Mapping[str, Any] | None = None
-            if isinstance(planner_bucket_display_map, _MappingABC):
-                info = planner_bucket_display_map.get(canon_key)
-            if not isinstance(info, _MappingABC):
-                info = bucket_rollup_map.get(canon_key)
-            minutes_val = _bucket_minutes(info)
-            if minutes_val > 0:
-                if pricing_source_lower == "planner" and canon_key not in canonical_bucket_summary:
-                    return 0.0
-                return minutes_val / 60.0
-
-            if pricing_source_lower == "planner":
-                return 0.0
+            return _safe_float(info.get("minutes"))
 
             if meta:
                 hr_val = _safe_float(meta.get("hr"))
@@ -9225,11 +8668,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     continue
                 yielded.add(key)
                 yield key
-            for key in aggregated_order:
-                if not key or key in yielded:
-                    continue
-                yielded.add(key)
-                yield key
 
         seen_hour_canon_keys: set[str] = set()
         for canon_key in _ordered_hour_keys():
@@ -9251,26 +8689,42 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if hours_float <= 0.01:
                 continue
             label = _display_bucket_label(canon_key, label_overrides)
-            _emit_hour_row(label, round(hours_float, 2))
+            _emit_hour_row(label, round(hours_val, 2))
             seen_hour_canon_keys.add(canon_key)
 
-        for canon_key, hours_val in sorted(charged_hours_by_canon.items()):
-            if not canon_key or canon_key in skip_hour_canon_keys:
+        for canon_key in order:
+            if not canon_key:
                 continue
             if canon_key in seen_hour_canon_keys:
                 continue
-            if canon_key in {"planner_labor", "planner_machine", "planner_total"}:
+            _emit_bucket_from_view(canon_key)
+
+        for canon_key in buckets_map.keys():
+            if not canon_key or canon_key in seen_hour_canon_keys:
                 continue
-            if str(canon_key).startswith("planner_"):
-                continue
+            _emit_bucket_from_view(canon_key)
+
+        totals_map = (
+            planner_bucket_view.get("totals")
+            if isinstance(planner_bucket_view, _MappingABC)
+            else None
+        )
+        planner_total_minutes = _safe_float(
+            totals_map.get("minutes") if isinstance(totals_map, _MappingABC) else 0.0
+        )
+        if planner_total_minutes <= 0:
             try:
-                hours_float = float(hours_val or 0.0)
+                planner_total_minutes = sum(
+                    _bucket_minutes_from_view(key) for key in buckets_map.keys()
+                )
             except Exception:
-                hours_float = 0.0
-            if hours_float <= 0.01:
-                continue
-            label = _display_bucket_label(canon_key, label_overrides)
-            _emit_hour_row(label, round(hours_float, 2))
+                planner_total_minutes = 0.0
+        if planner_total_minutes > 0:
+            planner_total_hr = planner_total_minutes / 60.0
+
+        _emit_hour_row("Planner Total", round(planner_total_hr, 2))
+        _emit_hour_row("Planner Labor", round(planner_labor_hr, 2), include_in_total=False)
+        _emit_hour_row("Planner Machine", round(planner_machine_hr, 2), include_in_total=False)
 
         _emit_hour_row("Programming (lot)", round(programming_hours, 2))
         if programming_is_amortized and qty_for_hours > 0:
@@ -9291,7 +8745,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     else:
         if charged_hour_entries:
             seen_hour_canon_keys: set[str] = set()
-            for canon_key in aggregated_order:
+            for canon_key in canonical_bucket_order:
                 if not canon_key:
                     continue
                 if canon_key in {"planner_labor", "planner_machine", "planner_total"}:
@@ -9418,14 +8872,21 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             f"{_m(material_direct_contribution)} to Direct Costs",
             "  ",
         )
-    total_direct_costs_display = _compute_direct_costs(
+    directs = _compute_direct_costs(
         material_total_for_directs,
         scrap_credit_for_directs,
         material_tax_for_directs,
         displayed_pass_through,
     )
-    row("Total", total_direct_costs_display, indent="  ")
+    row("Total", directs, indent="  ")
     pass_through_total = float(sum(displayed_pass_through.values()))
+    if isinstance(totals, dict):
+        totals["direct_costs"] = directs
+    if 0 <= total_direct_costs_row_index < len(lines):
+        lines[total_direct_costs_row_index] = _format_row(
+            total_direct_costs_label,
+            directs,
+        )
 
     computed_total_labor_cost = proc_total + pass_through_labor_total
     expected_labor_total = computed_total_labor_cost
@@ -9489,55 +8950,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 material_net_cost = 0.0
         except Exception:
             material_net_cost = 0.0
-    fallback_directs = (
-        float(material_net_cost) + float(pass_through_total) + float(display_machine)
-    )
-    ladder_labor_total = float(display_labor_for_ladder)
-    labor_cost_val = computed_total_labor_cost
-    if isinstance(totals, dict):
-        labor_total_candidate = _coerce_float_or_none(totals.get("labor_cost"))
-        if labor_total_candidate is not None:
-            labor_cost_val = float(labor_total_candidate)
-    labor_cost = float(labor_cost_val)
-    total_direct_costs_candidate: float | None = None
-    if isinstance(totals, dict):
-        total_direct_costs_candidate = _coerce_float_or_none(totals.get("direct_costs"))
-    if total_direct_costs_candidate is None and isinstance(breakdown, dict):
-        total_direct_costs_candidate = _coerce_float_or_none(
-            breakdown.get("total_direct_costs")
-        )
-    if total_direct_costs_candidate is None:
-        total_direct_costs_candidate = float(fallback_directs)
-    total_direct_costs = float(total_direct_costs_candidate)
-    directs = total_direct_costs
-    ladder_subtotal = float(labor_cost) + float(total_direct_costs)
-    subtotal = float(declared_subtotal)
-    printed_subtotal = subtotal
-    if not roughly_equal(ladder_subtotal, printed_subtotal, eps=0.01):
-        try:
-            logger.warning(
-                "Labor + Direct mismatch (labor=%s, directs=%s, subtotal=%s)",
-                f"{ladder_labor_total:.2f}",
-                f"{directs:.2f}",
-                f"{printed_subtotal:.2f}",
-            )
-        except Exception:
-            pass
-        directs = max(printed_subtotal - ladder_labor_total, 0.0)
-        ladder_subtotal = ladder_labor_total + directs
-    breakdown_direct_cost_total: Any = None
-    if isinstance(breakdown, _MappingABC):
-        breakdown_direct_cost_total = breakdown.get("total_direct_costs")
-    if breakdown_direct_cost_total is None and isinstance(totals, _MappingABC):
-        breakdown_direct_cost_total = totals.get("direct_costs")
-    if breakdown_direct_cost_total is not None:
-        try:
-            directs = float(breakdown_direct_cost_total or 0.0)
-        except Exception:
-            directs = float(directs or 0.0)
-        ladder_subtotal = ladder_labor_total + directs
-        subtotal = ladder_subtotal
-        printed_subtotal = subtotal
+
+    ladder_base_labor = max(computed_total_labor_cost - amortized_nre_total, 0.0)
+    ladder_directs = float(directs)
+    ladder_labor = ladder_base_labor + (amortized_nre_total if qty > 1 else 0.0)
+    ladder_subtotal = round(ladder_labor + ladder_directs, 2)
+
+    printed_subtotal = round(float(declared_subtotal or 0.0), 2)
+    assert roughly_equal(ladder_subtotal, printed_subtotal, eps=0.01)
+
+    subtotal = ladder_subtotal
+    printed_subtotal = ladder_subtotal
     lines.append("")
 
     # ---- Pricing ladder ------------------------------------------------------
@@ -14155,25 +13578,19 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         )
 
     drill_params: dict[str, Any] = {}
-    result_material: Any | None = None
-    if isinstance(material_detail_for_breakdown, _MappingABC):
+    result_material_name: Any | None = None
+    result_context = locals().get("result")
+    if isinstance(result_context, _MappingABC):
         try:
-            result_material = material_detail_for_breakdown.get("material")
+            result_material_name = result_context.get("material")
         except Exception:
-            result_material = None
-        if not result_material:
-            try:
-                result_material = material_detail_for_breakdown.get("material_name")
-            except Exception:
-                result_material = None
-    mat_source = (
+            result_material_name = None
+    material_name = str(
         geo_context.get("material")
-        or result_material
-        or selected_material_name
-        or drill_material_source
+        or result_material_name
         or DEFAULT_MATERIAL_KEY
     )
-    mat_key = _normalize_lookup_key(str(mat_source))
+    mat_key = _normalize_lookup_key(material_name)
     if mat_key:
         drill_params["material"] = mat_key
 
@@ -14476,7 +13893,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 f"{', '.join(debug_bits)} @ Ø{avg_mm:.1f} mm"
             )
 
-    if not llm_debug_enabled:
+    if not APP_ENV.llm_debug_enabled:
+        # Don’t print drill debug in customer quotes
         drill_debug_line = None
 
     if drill_debug_line:
@@ -15855,7 +15273,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                     )
             planner_bucket_rollup = copy.deepcopy(bucket_view)
             planner_bucket_view = _prepare_bucket_view(bucket_view)
-            if used_planner:
+            if pricing_source == "planner":
                 try:
                     labor_sum = 0.0
                     machine_sum = 0.0
@@ -15979,6 +15397,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
 
     if force_planner_for_recognized:
         used_planner = True
+
+    if used_planner:
+        pricing_source = "planner"
 
     if recognized_line_items == 0:
         if planner_totals_present and planner_total_minutes > 0.0:
@@ -18153,7 +17574,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 except Exception:
                     pass
 
-        if abs(rendered_labor_total - float(expected_labor_total)) > _LABOR_SECTION_ABS_EPSILON:
+        if pricing_source != "planner" and abs(rendered_labor_total - float(expected_labor_total)) > _LABOR_SECTION_ABS_EPSILON:
             expected_display = float(expected_labor_total)
             drift_amount = expected_display - rendered_labor_total
             _record_red_flag(
@@ -18350,7 +17771,6 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         "direct_costs": direct_costs_display,
         "direct_cost_details": direct_cost_details,
         "speeds_feeds_path": speeds_feeds_path,
-        "drill_debug": list(drill_debug_lines_payload),
         "drilling_meta": drilling_meta,
         "drill_params": dict(drill_params),
         "pass_meta": pass_meta,
@@ -18377,6 +17797,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         "llm_notes": llm_notes,
         "llm_cost_log": llm_cost_log,
     }
+
+    if APP_ENV.llm_debug_enabled:
+        breakdown["drill_debug"] = list(drill_debug_lines_payload)
 
     if direct_costs_summary:
         total_direct_costs_value = direct_costs_summary.get("total_direct_costs")
@@ -18502,7 +17925,6 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         "material_source": material_source_final,
         "speeds_feeds_path": speeds_feeds_path,
         "speeds_feeds_loaded": speeds_feeds_loaded_flag,
-        "drill_debug": list(drill_debug_lines_payload),
         "drilling_meta": drilling_meta,
         "drill_params": dict(drill_params),
         "red_flags": list(red_flag_messages),
@@ -18510,6 +17932,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         "canonical_process_costs": canonical_process_costs,
         "pricing_source": pricing_source_value,
     }
+
+    if APP_ENV.llm_debug_enabled:
+        result_payload["drill_debug"] = list(drill_debug_lines_payload)
 
     if planner_bucket_display_map_breakdown:
         result_payload["planner_bucket_display_map"] = copy.deepcopy(

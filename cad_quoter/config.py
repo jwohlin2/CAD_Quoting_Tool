@@ -49,7 +49,7 @@ class AppEnvironment:
 
     @classmethod
     def from_env(cls) -> "AppEnvironment":
-        debug_enabled = _env_flag("LLM_DEBUG", default=True)
+        debug_enabled = _env_flag("LLM_DEBUG", default=False)
         debug_dir_raw = os.getenv("LLM_DEBUG_DIR")
         if debug_dir_raw:
             debug_dir = Path(debug_dir_raw)

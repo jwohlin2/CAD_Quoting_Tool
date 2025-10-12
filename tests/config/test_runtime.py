@@ -11,7 +11,7 @@ def test_app_environment_from_env_uses_defaults(monkeypatch: pytest.MonkeyPatch)
 
     env = config.AppEnvironment.from_env()
 
-    assert env.llm_debug_enabled is True
+    assert env.llm_debug_enabled is False
     assert env.llm_debug_dir.name == "llm_debug"
     assert env.llm_debug_dir.exists()
 
