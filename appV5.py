@@ -15390,7 +15390,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         plan_params,
         planner_signals,
     )
-    pricing_source_header = "planner" if used_planner else "legacy"
+    pricing_source_decision = "planner" if used_planner else "legacy"
+    pricing_source = pricing_source_decision
     if not used_planner and planner_line_items_signal:
         used_planner = True
     force_planner_for_recognized = recognized_line_items > 0
@@ -15698,8 +15699,11 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     if red_flag_messages:
         baseline_data["red_flags"] = list(red_flag_messages)
     baseline_data["speeds_feeds_path"] = speeds_feeds_path
+    pricing_source_for_resolution = locals().get(
+        "pricing_source", pricing_source_decision
+    )
     pricing_source_value = _resolve_pricing_source_value(
-        locals().get("pricing_source", "legacy"),
+        pricing_source_for_resolution,
         used_planner=bool(locals().get("used_planner")),
         process_meta=process_meta if isinstance(process_meta, _MappingABC) else None,
         planner_process_minutes=planner_process_minutes,
@@ -15710,7 +15714,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             locals().get("process_plan_summary"),
             locals().get("planner_pricing_result"),
         ],
-    ) or "legacy"
+    ) or pricing_source_decision
     baseline_data["pricing_source"] = pricing_source_value
     if legacy_baseline_ignored:
         baseline_data["legacy_baseline_ignored"] = True
@@ -17824,7 +17828,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
 
     breakdown["labor_cost_rendered"] = rendered_labor_total
 
-    breakdown["pricing_source"] = pricing_source_value
+    breakdown["pricing_source"] = pricing_source_decision
     if red_flag_messages:
         breakdown["red_flags"] = list(red_flag_messages)
     if suppress_planner_details_due_to_drift:
