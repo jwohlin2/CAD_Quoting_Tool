@@ -11277,16 +11277,44 @@ def estimate_drilling_hours(
             op_name = "deep_drill" if l_over_d >= 3.0 else "drill"
             cache_key = (op_name, round(float(diameter_in), 4))
             row: Mapping[str, Any] | None = None
+            expected_group_value = material_group_override
             cache_entry = row_cache.get(cache_key)
             is_new_row_entry = False
             if cache_entry is None:
                 material_for_lookup: str | None = None
-                for candidate in (material_label, mat_key, material_lookup):
-                    if candidate:
-                        material_for_lookup = str(candidate)
-                        break
+                lookup_candidates = (
+                    material_group_override,
+                    material_label,
+                    mat_key,
+                    material_lookup,
+                )
+                for idx, candidate in enumerate(lookup_candidates):
+                    text = str(candidate or "").strip()
+                    if not text:
+                        continue
+                    material_for_lookup = text if idx else text.upper()
+                    break
 
-                row: Mapping[str, Any] | None = None
+                canonical_lookup = str(
+                    material_label or mat_key or material_lookup or ""
+                ).strip()
+
+                def _pick_with_key(
+                    operation_name: str,
+                    lookup_key: str | None,
+                ) -> Mapping[str, Any] | None:
+                    if not lookup_key or speeds_feeds_table is None:
+                        return None
+                    return _pick_speeds_row(
+                        material_label=material_label,
+                        operation=operation_name,
+                        tool_diameter_in=float(diameter_in),
+                        table=speeds_feeds_table,
+                        material_group=material_group_override or None,
+                        material_key=lookup_key,
+                    )
+
+                row = None
                 if speeds_feeds_table is not None:
                     row = _select_speeds_feeds_row(
                         speeds_feeds_table,
@@ -11303,6 +11331,10 @@ def estimate_drilling_hours(
                         )
 
                 if not row:
+                    row = _pick_with_key(op_name, material_group_override)
+                if not row and canonical_lookup:
+                    row = _pick_with_key(op_name, canonical_lookup)
+                if not row:
                     row = _pick_speeds_row(
                         material_label=material_label,
                         operation=op_name,
@@ -11310,6 +11342,10 @@ def estimate_drilling_hours(
                         table=speeds_feeds_table,
                         material_group=material_group_override or None,
                     )
+                if not row and op_name.lower() == "deep_drill":
+                    row = _pick_with_key("drill", material_group_override)
+                if not row and op_name.lower() == "deep_drill" and canonical_lookup:
+                    row = _pick_with_key("drill", canonical_lookup)
                 if not row and op_name.lower() == "deep_drill":
                     row = _pick_speeds_row(
                         material_label=material_label,
@@ -11354,6 +11390,14 @@ def estimate_drilling_hours(
                     row = cache_entry[0]
                 except Exception:
                     row = None
+            row_group_value = ""
+            if row and isinstance(row, _MappingABC):
+                row_group_value = str(
+                    row.get("material_group")
+                    or row.get("material_family")
+                    or row.get("iso_group")
+                    or ""
+                ).strip().upper()
             geom = _TimeOperationGeometry(
                 diameter_in=float(diameter_in),
                 hole_depth_in=float(depth_in),
@@ -11571,6 +11615,10 @@ def estimate_drilling_hours(
             op_entry["qty"] += qty_int
             if row and isinstance(row, _MappingABC):
                 op_entry["row"] = row
+            if expected_group_value:
+                op_entry.setdefault("expected_group", expected_group_value)
+            if row_group_value:
+                op_entry["row_group"] = row_group_value
             if precomputed_speeds:
                 op_entry["precomputed"] = dict(precomputed_speeds)
             if chosen_material_label:
@@ -11594,6 +11642,10 @@ def estimate_drilling_hours(
                 toolchange_added = float(overhead.toolchange_min)
                 total_toolchange_min += toolchange_added
             if debug_payload is not None:
+                if row_group_value:
+                    debug_payload.setdefault("row_group", row_group_value)
+                if expected_group_value:
+                    debug_payload.setdefault("expected_group", expected_group_value)
                 try:
                     operation_name = str(debug_payload.get("operation") or op_name).lower()
                 except Exception:
@@ -11674,6 +11726,13 @@ def estimate_drilling_hours(
                         or summary.get("material") == "material"
                     ):
                         summary["material"] = mat_display
+                    if expected_group_value:
+                        summary.setdefault(
+                            "expected_material_group",
+                            str(expected_group_value).strip().upper(),
+                        )
+                    if row_group_value:
+                        summary["material_group"] = row_group_value
                     minutes_val = to_float(minutes_per)
                     minutes_per_hole = minutes_val if minutes_val is not None else float(minutes)
                     summary["qty"] += qty_for_debug
@@ -12012,6 +12071,26 @@ def estimate_drilling_hours(
                     mat_display = "material"
                 summary["material"] = mat_display
 
+                expected_group_display = str(
+                    summary.get("expected_material_group")
+                    or material_group_override
+                    or ""
+                ).strip().upper()
+                row_group_display = str(
+                    summary.get("material_group")
+                    or summary.get("row_group")
+                    or ""
+                ).strip().upper()
+                group_bits: list[str] = []
+                if expected_group_display:
+                    group_bits.append(f"group {expected_group_display}")
+                if row_group_display:
+                    group_bits.append(f"row {row_group_display}")
+                if group_bits:
+                    mat_segment = f"mat={mat_display} ({', '.join(group_bits)})"
+                else:
+                    mat_segment = f"mat={mat_display}"
+
                 depth_segment = "depth/hole -"
                 if depth_text != "-":
                     depth_segment = f"depth/hole {depth_text} in"
@@ -12028,7 +12107,7 @@ def estimate_drilling_hours(
 
                 line_parts = [
                     "Drill calc → ",
-                    f"op={op_display}, mat={mat_display}, ",
+                    f"op={op_display}, {mat_segment}, ",
                     f"SFM={sfm_text}, IPR={ipr_text}; ",
                     f"RPM {rpm_text} IPM {ipm_text}; ",
                     f"{dia_segment}; {depth_segment}; ",
@@ -14066,6 +14145,43 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 except (TypeError, ValueError, ZeroDivisionError):
                     pass
 
+    expected_group_upper = str(
+        material_group_for_speeds
+        or material_selected_summary.get("group")
+        or material_selection.get("group")
+        or drill_material_group
+        or ""
+    ).strip().upper()
+    selected_row_group = ""
+    if isinstance(speeds_feeds_summary, _MappingABC):
+        selected_row_group = str(
+            speeds_feeds_summary.get("material_group")
+            or speeds_feeds_summary.get("row_group")
+            or ""
+        ).strip().upper()
+    if not selected_row_group and isinstance(selected_entry, _MappingABC):
+        selected_row_group = str(
+            selected_entry.get("row_group")
+            or selected_entry.get("material_group")
+            or ""
+        ).strip().upper()
+    if not selected_row_group and isinstance(speeds_feeds_row, _MappingABC):
+        selected_row_group = str(
+            speeds_feeds_row.get("material_group")
+            or speeds_feeds_row.get("material_family")
+            or speeds_feeds_row.get("iso_group")
+            or ""
+        ).strip().upper()
+    if (
+        expected_group_upper
+        and selected_row_group
+        and selected_row_group != expected_group_upper
+    ):
+        _record_red_flag(
+            "Speeds/feeds mismatch: selected row group "
+            f"{selected_row_group} != material group {expected_group_upper}."
+        )
+
     selected_material_group = _extract_material_group(
         speeds_feeds_summary,
         speeds_feeds_row,
@@ -14074,6 +14190,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         if isinstance(selected_entry, _MappingABC)
         else None,
     )
+    if not selected_material_group and selected_row_group:
+        selected_material_group = selected_row_group
     if selected_material_group:
         drill_material_group = selected_material_group
         material_selection["material_group"] = selected_material_group
@@ -14098,8 +14216,11 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             if line.startswith("Drill calc") and "mat=" in line:
                 updated_debug_lines.append(
                     re.sub(
-                        r"(mat=)[^,]+",
-                        rf"\1{final_material_for_debug}",
+                        r"(mat=)([^,(]+)(\s*\([^)]*\))?",
+                        lambda match: (
+                            f"{match.group(1)}{final_material_for_debug}"
+                            f"{match.group(3) or ''}"
+                        ),
                         line,
                         count=1,
                     )
@@ -14232,6 +14353,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     )
     if final_group:
         drilling_meta["material_group"] = final_group
+    if selected_row_group:
+        drilling_meta["row_material_group"] = selected_row_group
     final_material_display = (
         material_selected_summary.get("canonical")
         or material_selection.get("canonical")
