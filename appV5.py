@@ -11672,6 +11672,7 @@ def estimate_drilling_hours(
                 row, tool_params = cache_entry
                 if debug_lines is not None:
                     debug_payload = {}
+                operation_for_time = "drill" if is_deep_drill else op_name
                 minutes = _estimate_time_min(
                     row,
                     geom,
@@ -11681,8 +11682,11 @@ def estimate_drilling_hours(
                     material_factor=material_cap_val,
                     debug=debug_payload,
                     precomputed=precomputed_speeds,
+                    operation=operation_for_time,
                 )
                 overhead_for_calc = per_hole_overhead
+                if debug_payload is not None and is_deep_drill:
+                    debug_payload["operation"] = op_name
             else:
                 overhead_local = per_hole_overhead
                 try:
