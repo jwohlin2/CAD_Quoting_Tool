@@ -678,11 +678,13 @@ def build_suggest_payload(
 def ensure_accept_flags(*args, **kwargs):  # type: ignore[override]
     """Proxy to :func:`appV5.ensure_accept_flags` for test visibility."""
 
-    return _ensure_accept_flags(*args, **kwargs)
+    app = _app_module()
+    return app.ensure_accept_flags(*args, **kwargs)
 
 
 def iter_suggestion_rows(*args, **kwargs):  # type: ignore[override]
     """Proxy to :func:`appV5.iter_suggestion_rows` for test visibility."""
 
-    return _iter_suggestion_rows(*args, **kwargs)
+    app = _app_module()
+    return app.iter_suggestion_rows(*args, **kwargs)
 
