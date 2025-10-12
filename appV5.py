@@ -6906,6 +6906,21 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         str(note).strip() for note in llm_notes if str(note).strip()
     ]
 
+    llm_debug_enabled_effective = bool(APP_ENV.llm_debug_enabled)
+    for source in (result, breakdown):
+        if not isinstance(source, _MappingABC):
+            continue
+        for key in ("app", "app_meta"):
+            app_info = source.get(key)
+            if not isinstance(app_info, _MappingABC):
+                continue
+            if "llm_debug_enabled" in app_info:
+                llm_debug_enabled_effective = bool(app_info.get("llm_debug_enabled"))
+                break
+        else:
+            continue
+        break
+
     # ---- helpers -------------------------------------------------------------
     divider = "-" * int(page_width)
 
@@ -7409,8 +7424,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             text = line.strip()
             if text:
                 explanation_lines.append(text)
-    if explanation_lines:
-        why_parts = explanation_lines + why_parts
+    # ``explanation_lines`` will be merged into ``why_parts`` after the process
+    # bucket rows are prepared so the cost makeup + contributor text can be
+    # derived from the exact rows rendered in the Process & Labor table.
 
     def _is_planner_meta(key: str) -> bool:
         canonical_key = _canonical_bucket_key(key)
