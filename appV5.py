@@ -18539,7 +18539,11 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     drill_hr_total_final = 0.0
 
     def _normalize_display_label(name: str) -> str:
-        return _display_bucket_label(name, label_overrides)
+        try:
+            overrides_map = label_overrides
+        except NameError:
+            overrides_map = None
+        return _display_bucket_label(name, overrides_map)
 
     def _apply_final_drilling_hours(total_hr: float) -> None:
         minutes_val = round(max(0.0, float(total_hr)) * 60.0, 2)
