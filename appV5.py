@@ -7532,6 +7532,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 priority = 0
             elif normalized.startswith("OK deep_drill") or normalized.startswith("OK drill"):
                 priority = 1
+            elif normalized.lower().startswith("drill bin") or normalized.lower().startswith("bin "):
+                priority = 3
             else:
                 priority = 2
             prioritized_entries.append((priority, idx, text))
@@ -14761,6 +14763,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
 
     mismatch_message: str | None = None
     group_fallback_used = False
+    reselected_row: Mapping[str, Any] | None = None
     if (
         expected_group_normalized
         and selected_row_group_normalized
@@ -14774,7 +14777,6 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             f"{selected_row_group or selected_row_group_normalized} != material group "
             f"{expected_display_for_message}."
         )
-        group_fallback_used = True
         op_for_reselect = str(selected_op_name or "").strip()
         if not op_for_reselect:
             op_for_reselect = "drill"
@@ -14784,6 +14786,53 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 diameter_for_reselect = float(avg_dia_in)
         except Exception:
             diameter_for_reselect = None
+
+        fallback_group = (expected_group_display or expected_group_normalized or "").strip()
+        fallback_label = ""
+        for candidate_label in (
+            chosen_material_label,
+            material_selection.get("canonical") if isinstance(material_selection, _MappingABC) else None,
+            material_selection.get("material") if isinstance(material_selection, _MappingABC) else None,
+            material_display_for_debug,
+        ):
+            text = str(candidate_label or "").strip()
+            if text:
+                fallback_label = text
+                break
+
+        fallback_row: Mapping[str, Any] | None = None
+        if (
+            reselected_row is None
+            and speeds_feeds_table is not None
+            and op_for_reselect
+            and fallback_group
+        ):
+            fallback_row = _pick_speeds_row(
+                material_label=fallback_label or None,
+                operation=op_for_reselect,
+                tool_diameter_in=diameter_for_reselect,
+                table=speeds_feeds_table,
+                material_group=fallback_group,
+                material_key=None,
+            )
+            if (
+                fallback_row is None
+                and expected_group_normalized
+                and fallback_group.lower() != str(expected_group_normalized).lower()
+            ):
+                fallback_row = _pick_speeds_row(
+                    material_label=fallback_label or None,
+                    operation=op_for_reselect,
+                    tool_diameter_in=diameter_for_reselect,
+                    table=speeds_feeds_table,
+                    material_group=expected_group_normalized,
+                    material_key=None,
+                )
+
+        if fallback_row is not None:
+            reselected_row = fallback_row
+        else:
+            group_fallback_used = True
 
         def _extract_row_group(row_obj: Mapping[str, Any] | None) -> tuple[str, str]:
             if not isinstance(row_obj, _MappingABC):
@@ -14920,9 +14969,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 _push_label(source.get(label_name))
         _push_label(chosen_material_label)
 
-        reselected_row: Mapping[str, Any] | None = None
-
-        if speeds_feeds_table is not None and op_for_reselect:
+        if reselected_row is None and speeds_feeds_table is not None and op_for_reselect:
             for group_value in group_candidates:
                 success = False
                 for key_value in material_key_candidates or [None]:
@@ -14999,7 +15046,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     if mismatch_message:
         _record_red_flag(mismatch_message)
         if group_fallback_used:
-            _record_red_flag("Basis: group fallback.")
+            _record_red_flag("group fallback")
 
     selected_material_group = _extract_material_group(
         speeds_feeds_summary,
@@ -18728,6 +18775,10 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                     include_flag,
                 )
 
+    drill_hr_total_final = float(canonical_bucket_rollup.get("drilling", 0.0) or 0.0)
+    if used_planner and drill_hr_total_final > 0.0:
+        _apply_final_drilling_hours(drill_hr_total_final)
+
     for canon_key, total_hr in canonical_bucket_rollup.items():
         if canon_key.startswith("planner_"):
             continue
@@ -19545,7 +19596,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         logger.exception("Failed to canonicalize process costs")
         canonical_process_costs = canonicalize_costs(locals().get("process_costs", {}) or {})
 
-    app_meta = {"llm_debug_enabled": bool(llm_debug_enabled)}
+    app_meta = {"llm_debug_enabled": True}
 
     breakdown = {
         "qty": Qty,
