@@ -124,7 +124,12 @@ def test_render_quote_renders_bucket_table_without_planner_why_section() -> None
 
     result = {"price": 1450.0, "breakdown": breakdown}
 
-    rendered = appV5.render_quote(result, currency="$")
+    previous_override = appV5.SHOW_BUCKET_DIAGNOSTICS_OVERRIDE
+    appV5.SHOW_BUCKET_DIAGNOSTICS_OVERRIDE = True
+    try:
+        rendered = appV5.render_quote(result, currency="$")
+    finally:
+        appV5.SHOW_BUCKET_DIAGNOSTICS_OVERRIDE = previous_override
     lines = rendered.splitlines()
 
     assert all("Planner operations" not in line for line in lines)
