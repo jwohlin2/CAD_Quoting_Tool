@@ -9287,27 +9287,20 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         material_tax_for_directs,
         displayed_pass_through,
     )
+    directs = float(directs)
     if isinstance(breakdown, dict):
         try:
-            breakdown["total_direct_costs"] = float(directs)
+            breakdown["total_direct_costs"] = directs
         except Exception:
             pass
     row("Total", directs, indent="  ")
     pass_through_total = float(sum(displayed_pass_through.values()))
     if isinstance(totals, dict):
         totals["direct_costs"] = directs
-    header_directs = directs
-    if isinstance(breakdown, dict):
-        try:
-            header_directs = float(breakdown.get("total_direct_costs", directs))
-        except Exception:
-            fallback_header_directs = breakdown.get("total_direct_costs")
-            if isinstance(fallback_header_directs, (int, float)):
-                header_directs = float(fallback_header_directs)
     if 0 <= total_direct_costs_row_index < len(lines):
         lines[total_direct_costs_row_index] = _format_row(
             total_direct_costs_label,
-            header_directs,
+            directs,
         )
 
     computed_total_labor_cost = proc_total + pass_through_labor_total
@@ -9345,10 +9338,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     lines.append("Process & Labor Costs")
     lines.append(divider)
     row("Labor", expected_labor_total, indent="  ")
-    try:
-        direct_summary = float(breakdown.get("total_direct_costs", directs))
-    except Exception:
-        direct_summary = float(directs)
+    direct_summary = directs
     row("Directs", direct_summary, indent="  ")
     row("Total", expected_labor_total + direct_summary, indent="  ")
 
@@ -9368,18 +9358,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             computed_subtotal_val = 0.0
         if abs(declared_subtotal) <= 0.01 and computed_subtotal_val > 0.01:
             declared_subtotal = computed_subtotal_val
-    ladder_expected = float(expected_labor_total + direct_summary)
-    try:
-        ladder_subtotal_from_breakdown = (
-            breakdown.get("ladder_subtotal", ladder_expected)
-            if isinstance(breakdown, dict)
-            else ladder_expected
-        )
-        ladder_subtotal_from_breakdown = float(ladder_subtotal_from_breakdown)
-    except Exception:
-        ladder_subtotal_from_breakdown = ladder_expected
-    if not roughly_equal(declared_subtotal, ladder_subtotal_from_breakdown, eps=0.01):
-        declared_subtotal = ladder_subtotal_from_breakdown
     if material_net_cost is None:
         try:
             material_key = next(
@@ -9397,18 +9375,19 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         except Exception:
             material_net_cost = 0.0
 
-    ladder_base_labor = max(expected_labor_total - amortized_nre_total, 0.0)
-    ladder_directs = float(direct_summary)
-    ladder_labor = ladder_base_labor + (amortized_nre_total if qty > 1 else 0.0)
-    try:
-        ladder_subtotal_val = breakdown.get("ladder_subtotal") if isinstance(breakdown, dict) else None
-        ladder_subtotal = float(ladder_subtotal_val)
-    except Exception:
-        ladder_subtotal = ladder_labor + ladder_directs
-    ladder_subtotal = round(float(ladder_subtotal), 2)
+    base_bucket_labor = float(display_labor_for_ladder) - float(amortized_nre_total)
+    if base_bucket_labor < 0:
+        base_bucket_labor = 0.0
+    ladder_directs = directs
+    amortized_component = float(amortized_nre_total if qty > 1 else 0.0)
+    ladder_labor = round(base_bucket_labor + amortized_component, 2)
+    ladder_expected = ladder_labor + ladder_directs
+    ladder_subtotal = round(ladder_expected, 2)
+    if not roughly_equal(declared_subtotal, ladder_subtotal, eps=0.01):
+        declared_subtotal = ladder_subtotal
     if isinstance(breakdown, dict):
         try:
-            breakdown["ladder_subtotal"] = float(ladder_subtotal)
+            breakdown["ladder_subtotal"] = ladder_subtotal
         except Exception:
             pass
 
@@ -9418,7 +9397,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         declared_subtotal = ladder_subtotal
         if isinstance(totals, dict):
             totals["subtotal"] = ladder_subtotal
-    assert roughly_equal(ladder_subtotal, printed_subtotal, eps=0.01)
+    assert roughly_equal(ladder_labor + ladder_directs, printed_subtotal, eps=0.01)
 
     subtotal = ladder_subtotal
     printed_subtotal = ladder_subtotal
