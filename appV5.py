@@ -7538,8 +7538,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
         for _priority, _idx, text in sorted(prioritized_entries, key=lambda item: (item[0], item[1])):
             if "\n" in text:
+                normalized = text.lstrip()
+                block_indent = "" if normalized.startswith("Material Removal Debug") else "  "
                 for chunk in text.splitlines():
-                    write_line(chunk, "  ")
+                    write_line(chunk, block_indent)
                 if lines and lines[-1] != "":
                     lines.append("")
             else:
