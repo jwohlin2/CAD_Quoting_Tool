@@ -273,13 +273,41 @@ def _install_pandas_stub() -> None:
             return Series(("" if item is None else str(item).lower()) for item in self._series.data)
 
     class Series:
-        def __init__(self, data):
+        def __init__(self, data, dtype=None):
             self.data = list(data)
+            if dtype is not None:
+                caster = None
+                try:
+                    # ``dtype`` may be a callable (e.g. ``float``) or expose a
+                    # ``type`` attribute similar to NumPy dtypes.  Coerce when
+                    # possible while falling back gracefully when the stub
+                    # cannot interpret the request.
+                    if callable(dtype):
+                        caster = dtype
+                    else:
+                        caster = getattr(dtype, "type", None)
+                except Exception:
+                    caster = None
+
+                if callable(caster):
+                    converted = []
+                    for item in self.data:
+                        if item is None:
+                            converted.append(None)
+                            continue
+                        try:
+                            converted.append(caster(item))
+                        except Exception:
+                            converted.append(item)
+                    self.data = converted
 
         def astype(self, typ):
             if typ is str:
                 return Series(str(x) if x is not None else "" for x in self.data)
             raise TypeError("Stub Series only supports astype(str)")
+
+        def any(self):
+            return any(bool(item) for item in self.data)
 
         @property
         def str(self):

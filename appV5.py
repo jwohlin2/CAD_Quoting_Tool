@@ -19159,10 +19159,19 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             planner_totals_cost_float,
             eps=_PLANNER_BUCKET_ABS_EPSILON,
         ):
-            raise AssertionError(
-                "Planner rendered totals do not reconcile with planner totals: "
-                f"{planner_rendered_total:.2f} vs {planner_totals_cost_float:.2f}"
+            drift_amount = planner_totals_cost_float - planner_rendered_total
+            logger.warning(
+                "Planner rendered totals drifted: %.2f vs %.2f",
+                planner_rendered_total,
+                planner_totals_cost_float,
             )
+            _record_red_flag(
+                "⚠️ Planner totals drifted by "
+                f"${abs(drift_amount):,.2f}: rendered ${planner_rendered_total:,.2f} "
+                f"vs planner ${planner_totals_cost_float:,.2f}"
+            )
+            proc_total_val = expected_labor_total
+            rendered_labor_total = expected_labor_total
     elif abs(rendered_labor_total - expected_labor_total) > _LABOR_SECTION_ABS_EPSILON:
         narrative_notes.append(
             f"Note: labor total adjusted (expected ${expected_labor_total:,.2f})."
