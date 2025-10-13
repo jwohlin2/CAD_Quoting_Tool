@@ -3031,8 +3031,19 @@ def get_why_text(
         thick_mm = to_float(state.ui_vars.get("Thickness (in)"))
         if thick_mm is not None:
             thick_mm *= 25.4
-    mat = g.get("material") or state.ui_vars.get("Material") or "material"
-    mat = str(mat).title()
+    material_lookup = str(g.get("material_lookup") or "").strip()
+    mat_display = g.get("material_display")
+    if not mat_display and material_lookup:
+        fallback_display = MATERIAL_DISPLAY_BY_KEY.get(material_lookup, "")
+        if fallback_display:
+            mat_display = fallback_display
+    if not mat_display:
+        mat_candidate = g.get("material") or state.ui_vars.get("Material")
+        if mat_candidate:
+            mat_display = str(mat_candidate).strip()
+    mat = str(mat_display or DEFAULT_MATERIAL_DISPLAY or "material").strip()
+    if not mat:
+        mat = "material"
 
     setups = int(to_float(e.get("setups")) or to_float(b.get("setups")) or 1)
     scrap_pct = round(100.0 * float(to_float(e.get("scrap_pct")) or 0.0), 1)
@@ -6755,6 +6766,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             material_selection = dict(material_selection_raw or {})
         except Exception:
             material_selection = {}
+    normalized_material_key = str(
+        material_selection.get("material_lookup")
+        or material_selection.get("normalized_material_key")
+        or ""
+    ).strip()
     canonical_material_breakdown = str(
         material_selection.get("canonical")
         or material_selection.get("canonical_material")
@@ -6763,6 +6779,21 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if canonical_material_breakdown:
         material_selection.setdefault("canonical", canonical_material_breakdown)
         material_selection.setdefault("canonical_material", canonical_material_breakdown)
+    material_display_label = str(
+        material_selection.get("display")
+        or material_selection.get("material_display")
+        or canonical_material_breakdown
+        or ""
+    ).strip()
+    if not material_display_label and normalized_material_key:
+        fallback_display = MATERIAL_DISPLAY_BY_KEY.get(normalized_material_key, "")
+        if fallback_display:
+            material_display_label = str(fallback_display).strip()
+    if material_display_label:
+        material_selection.setdefault("material_display", material_display_label)
+    if normalized_material_key:
+        material_selection.setdefault("normalized_material_key", normalized_material_key)
+        material_selection.setdefault("material_lookup", normalized_material_key)
     group_material_breakdown = str(
         material_selection.get("group")
         or material_selection.get("material_group")
@@ -8043,10 +8074,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if have_any:
             lines.append("Material & Stock")
             lines.append(divider)
-            canonical_material_display = ""
-            if isinstance(material_selection, _MappingABC):
+            canonical_material_display = str(material_display_label or "").strip()
+            if not canonical_material_display and isinstance(material_selection, _MappingABC):
                 canonical_material_display = str(
-                    material_selection.get("canonical")
+                    material_selection.get("material_display")
+                    or material_selection.get("canonical")
                     or material_selection.get("canonical_material")
                     or ""
                 ).strip()
@@ -8082,6 +8114,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             else:
                 material_name_display = str(material_name_display).strip()
             if material_name_display:
+                material_display_label = str(material_name_display)
+                material_selection.setdefault("material_display", material_display_label)
                 material_display_for_debug = material_name_display
                 lines.append(f"  Material used:  {material_name_display}")
 
@@ -12776,6 +12810,103 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     material_selection: dict[str, Any] = {}
     material_selected_summary: dict[str, str] = {}
     material_display_for_debug: str = ""
+    normalized_material_key: str = ""
+    material_display_label: str = ""
+
+    def _update_material_identity(*display_candidates: Any) -> tuple[str, str]:
+        """Normalise material lookup + display once and propagate to shared state."""
+
+        nonlocal material_display_label, normalized_material_key, material_display_for_debug
+
+        candidate_strings: list[str] = []
+        for candidate in display_candidates:
+            if candidate is None:
+                continue
+            text = str(candidate).strip()
+            if text:
+                candidate_strings.append(text)
+
+        candidate_strings.extend(
+            [
+                str(material_selection.get("material_display") or "").strip(),
+                str(material_selection.get("canonical") or "").strip(),
+                str(material_selection.get("canonical_material") or "").strip(),
+                str(material_selected_summary.get("canonical") or "").strip(),
+                str(material_selection.get("input_material") or "").strip(),
+                str(geo_context.get("material_display") or "").strip(),
+                str(geo_context.get("material") or "").strip(),
+                str(material_name or "").strip(),
+                str(default_material_display or "").strip(),
+                str(DEFAULT_MATERIAL_DISPLAY or "").strip(),
+            ]
+        )
+
+        material_display_label = ""
+        for candidate in candidate_strings:
+            if candidate:
+                material_display_label = candidate
+                break
+
+        normalized_candidates: list[str] = []
+        for candidate in (
+            material_selection.get("normalized_material_key"),
+            material_selection.get("material_lookup"),
+            normalized_material_key,
+        ):
+            if candidate:
+                normalized_candidates.append(str(candidate).strip())
+
+        lookup_sources = [
+            material_display_label,
+            material_selected_summary.get("canonical"),
+            material_name,
+            default_material_display,
+            DEFAULT_MATERIAL_DISPLAY,
+        ]
+        for source in lookup_sources:
+            if not source:
+                continue
+            normalized_candidates.append(
+                _normalize_lookup_key(str(source))
+            )
+
+        try:
+            if material_lookup_key:
+                normalized_candidates.insert(0, str(material_lookup_key).strip())
+        except UnboundLocalError:  # pragma: no cover - defined later in outer scope
+            pass
+        except NameError:  # pragma: no cover - defensive guard
+            pass
+
+        normalized_material_key = ""
+        for candidate in normalized_candidates:
+            text = str(candidate or "").strip()
+            if text:
+                normalized_material_key = text
+                break
+
+        if not material_display_label and normalized_material_key:
+            fallback_display = MATERIAL_DISPLAY_BY_KEY.get(normalized_material_key, "")
+            if fallback_display:
+                material_display_label = str(fallback_display).strip()
+
+        if material_display_label:
+            material_selection["material_display"] = material_display_label
+            geo_context["material_display"] = material_display_label
+            material_display_for_debug = material_display_label
+        else:
+            material_selection.pop("material_display", None)
+            geo_context.pop("material_display", None)
+
+        if normalized_material_key:
+            material_selection["normalized_material_key"] = normalized_material_key
+            material_selection["material_lookup"] = normalized_material_key
+            geo_context["material_lookup"] = normalized_material_key
+        else:
+            material_selection.pop("normalized_material_key", None)
+            geo_context.pop("material_lookup", None)
+
+        return material_display_label, normalized_material_key
     drill_estimator_hours_for_planner: float = 0.0
     milling_estimator_hours_for_planner: float = 0.0
     milling_estimator_machine_cost_for_planner: float = 0.0
@@ -13254,6 +13385,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         geo_context.setdefault("material_group", material_group)
     elif material_selection.get("material_group"):
         geo_context.setdefault("material_group", material_selection["material_group"])
+
+    material_display_label, normalized_material_key = _update_material_identity()
 
     density_guess_from_material = _density_for_material(material_name, _DEFAULT_MATERIAL_DENSITY_G_CC)
     if not density_g_cc or density_g_cc <= 0:
@@ -14030,7 +14163,14 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             if candidate:
                 selected_material_name = candidate
 
-    selected_lookup = str(material_selection.get("material_lookup") or "").strip()
+    material_display_label, normalized_material_key = _update_material_identity()
+
+    selected_lookup = str(
+        material_selection.get("material_lookup")
+        or material_selection.get("normalized_material_key")
+        or normalized_material_key
+        or ""
+    ).strip()
 
     drill_material_source = (
         selected_material_name
@@ -14041,6 +14181,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     drill_material_source = str(drill_material_source).strip()
     drill_material_lookup = (
         selected_lookup
+        or normalized_material_key
         or (
             _normalize_lookup_key(drill_material_source)
             if drill_material_source
@@ -14139,7 +14280,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     if drill_material_lookup_final and not material_selection.get("material_lookup"):
         material_selection["material_lookup"] = drill_material_lookup_final
     drill_material_display = (
-        material_selection.get("canonical")
+        material_display_label
+        or material_selection.get("canonical")
         or material_selection.get("canonical_material")
         or MATERIAL_DISPLAY_BY_KEY.get(
             drill_material_lookup_final,
@@ -14166,6 +14308,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         canonical_material = str(drill_material_display or "").strip() or canonical_material
         if drill_material_display:
             material_selected_summary["canonical"] = canonical_material
+        material_display_label, normalized_material_key = _update_material_identity(
+            drill_material_display
+        )
     machine_params_default = _machine_params_from_params(params)
     drill_overhead_default = _drill_overhead_from_params(params)
     speeds_feeds_warnings: list[str] = []
@@ -14191,7 +14336,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         or result_material_name
         or DEFAULT_MATERIAL_KEY
     )
-    mat_key = _normalize_lookup_key(material_name)
+    mat_key = normalized_material_key or _normalize_lookup_key(material_name)
     if mat_key:
         drill_params["material"] = mat_key
 
@@ -14231,11 +14376,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 if text:
                     return text
         return ""
-    material_display_for_debug: str = str(
-        material_selection.get("canonical")
-        or material_selection.get("canonical_material")
-        or ""
-    ).strip()
+    material_display_for_debug: str = material_display_label
 
     if not material_display_for_debug:
         for candidate_display in (
@@ -16483,6 +16624,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     hole_diams_ctx = sorted([round(x, 3) for x in hole_diams_list])[:200] if hole_diams_list else []
     quote_inputs_ctx = {str(k): _jsonable(v) for k, v in ui_vars.items()}
 
+    material_display_label, normalized_material_key = _update_material_identity()
+
     geo_payload = _jsonable(dict(geo_context))
     if hole_diams_ctx:
         geo_payload["hole_diams_mm"] = hole_diams_ctx
@@ -18494,6 +18637,10 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
 
     canonical_process_costs: dict[str, float] = {}
 
+    material_display_label, normalized_material_key = _update_material_identity(
+        canonical_material
+    )
+
     canonical_material_display = str(
         canonical_material
         or material_selection.get("canonical")
@@ -18527,6 +18674,13 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     if group_for_breakdown:
         material_selected_summary["group"] = group_for_breakdown
         material_selected_for_breakdown["group"] = group_for_breakdown
+
+    if material_display_label:
+        material_selected_summary["display"] = material_display_label
+        material_selected_for_breakdown["display"] = material_display_label
+    if normalized_material_key:
+        material_selected_summary["material_lookup"] = normalized_material_key
+        material_selected_for_breakdown["material_lookup"] = normalized_material_key
 
     if pricing_source == "planner":
         process_costs = {
