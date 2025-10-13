@@ -18445,7 +18445,47 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     rendered_labor_total = float(proc_total_val or 0.0)
     expected_labor_total = float(labor_cost or 0.0)
 
-    if abs(rendered_labor_total - expected_labor_total) > _LABOR_SECTION_ABS_EPSILON:
+    if pricing_source == "planner":
+        planner_totals_cost_val = locals().get("planner_totals_cost")
+        if planner_totals_cost_val is None:
+            raise AssertionError("Planner totals missing for reconciliation check")
+        try:
+            planner_totals_cost_float = float(planner_totals_cost_val)
+        except Exception as exc:  # pragma: no cover - defensive guardrail
+            raise AssertionError("Planner totals missing for reconciliation check") from exc
+
+        display_labor_val = _safe_float(locals().get("display_labor_for_ladder"))
+        display_machine_val = _safe_float(locals().get("display_machine"))
+        amortized_total_val = _safe_float(locals().get("amortized_nre_total"))
+
+        qty_for_reconcile = locals().get("qty")
+        try:
+            qty_for_reconcile_int = int(qty_for_reconcile)
+        except Exception:
+            try:
+                qty_for_reconcile_int = int(float(qty_for_reconcile or 0.0))
+            except Exception:
+                qty_for_reconcile_int = 0
+
+        base_labor_val = display_labor_val - amortized_total_val
+        if base_labor_val < 0.0 and abs(base_labor_val) <= _PLANNER_BUCKET_ABS_EPSILON:
+            base_labor_val = 0.0
+        base_labor_val = max(base_labor_val, 0.0)
+
+        planner_rendered_total = base_labor_val + display_machine_val
+        if qty_for_reconcile_int > 1:
+            planner_rendered_total += amortized_total_val
+
+        if not roughly_equal(
+            planner_rendered_total,
+            planner_totals_cost_float,
+            eps=_PLANNER_BUCKET_ABS_EPSILON,
+        ):
+            raise AssertionError(
+                "Planner rendered totals do not reconcile with planner totals: "
+                f"{planner_rendered_total:.2f} vs {planner_totals_cost_float:.2f}"
+            )
+    elif abs(rendered_labor_total - expected_labor_total) > _LABOR_SECTION_ABS_EPSILON:
         narrative_notes.append(
             f"Note: labor total adjusted (expected ${expected_labor_total:,.2f})."
         )
