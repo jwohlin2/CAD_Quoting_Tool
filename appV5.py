@@ -18565,29 +18565,51 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         ):
             _apply_to_map(candidate)
 
-        summary_entry = canonical_bucket_summary.get("drilling")
-        if isinstance(summary_entry, dict):
-            summary_entry["hours"] = float(total_hr)
-            summary_entry["minutes"] = minutes_val
+        summary_map: Mapping[str, Any] | None = None
+        try:
+            summary_map = canonical_bucket_summary
+        except NameError:
+            summary_map = None
+        if isinstance(summary_map, dict):
+            summary_entry = summary_map.get("drilling")
+            if isinstance(summary_entry, dict):
+                summary_entry["hours"] = float(total_hr)
+                summary_entry["minutes"] = minutes_val
 
         display_label = _normalize_display_label("drilling")
-        for idx, (label, _hours_val, labor_val, machine_val, total_val) in enumerate(
-            bucket_table_rows
-        ):
-            if label != display_label:
-                continue
-            bucket_table_rows[idx] = (
-                label,
-                round(float(total_hr), 2),
-                labor_val,
-                machine_val,
-                total_val,
-            )
 
-        existing_hours = hour_summary_entries.get(display_label)
-        if existing_hours is not None:
-            include_flag = bool(existing_hours[1])
-            hour_summary_entries[display_label] = (round(float(total_hr), 2), include_flag)
+        bucket_rows: Sequence[tuple[str, float, float, float, float]] | None = None
+        try:
+            bucket_rows = bucket_table_rows
+        except NameError:
+            bucket_rows = None
+        if isinstance(bucket_rows, list):
+            for idx, (label, _hours_val, labor_val, machine_val, total_val) in enumerate(
+                bucket_rows
+            ):
+                if label != display_label:
+                    continue
+                bucket_rows[idx] = (
+                    label,
+                    round(float(total_hr), 2),
+                    labor_val,
+                    machine_val,
+                    total_val,
+                )
+
+        hour_entries: Mapping[str, Any] | None = None
+        try:
+            hour_entries = hour_summary_entries
+        except NameError:
+            hour_entries = None
+        if isinstance(hour_entries, dict):
+            existing_hours = hour_entries.get(display_label)
+            if existing_hours is not None:
+                include_flag = bool(existing_hours[1])
+                hour_entries[display_label] = (
+                    round(float(total_hr), 2),
+                    include_flag,
+                )
 
     for canon_key, total_hr in canonical_bucket_rollup.items():
         if canon_key.startswith("planner_"):
