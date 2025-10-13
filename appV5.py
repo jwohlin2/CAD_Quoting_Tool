@@ -18734,6 +18734,10 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         if canon_key == "drilling":
             drill_hr_total_final = float(total_hr)
         process_hours_final[canon_key] = total_hr
+        summary_entry = canonical_bucket_summary.get(canon_key)
+        if isinstance(summary_entry, dict):
+            summary_entry["hours"] = float(total_hr)
+            summary_entry["minutes"] = float(total_hr) * 60.0
         if isinstance(process_meta, dict):
             meta_entry = process_meta.get(canon_key)
             prev_minutes = 0.0
@@ -18784,7 +18788,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                     "hr": round(total_hr, 3),
                     "minutes": round(total_hr * 60.0, 1),
                 }
-        if used_planner and canonical_bucket_contributors.get(canon_key, 0.0) > 0.0:
+        if used_planner:
             _update_planner_bucket_minutes(canon_key, total_hr)
 
     if used_planner and drill_hr_total_final > 0.0:
