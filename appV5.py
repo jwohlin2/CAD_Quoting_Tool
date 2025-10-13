@@ -17954,9 +17954,64 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             canonical_bucket_rollup.get(canon_key, 0.0) + contrib_total
         )
 
+    drill_hr_total_final = 0.0
+
+    def _normalize_display_label(name: str) -> str:
+        return _display_bucket_label(name, label_overrides)
+
+    def _apply_final_drilling_hours(total_hr: float) -> None:
+        minutes_val = round(max(0.0, float(total_hr)) * 60.0, 2)
+
+        def _apply_to_map(mapping: Mapping[str, Any] | None) -> None:
+            if not isinstance(mapping, dict):
+                return
+            for bucket_key, payload in mapping.items():
+                if _canonical_bucket_key(bucket_key) != "drilling":
+                    continue
+                if isinstance(payload, dict):
+                    payload["hr"] = float(total_hr)
+                    payload["minutes"] = minutes_val
+                elif isinstance(payload, (int, float)):
+                    mapping[bucket_key] = minutes_val
+
+        for candidate in (
+            bucket_view,
+            planner_bucket_view,
+            planner_bucket_rollup,
+            planner_bucket_display_map,
+            planner_bucket_display_map_payload,
+        ):
+            _apply_to_map(candidate)
+
+        summary_entry = canonical_bucket_summary.get("drilling")
+        if isinstance(summary_entry, dict):
+            summary_entry["hours"] = float(total_hr)
+            summary_entry["minutes"] = minutes_val
+
+        display_label = _normalize_display_label("drilling")
+        for idx, (label, _hours_val, labor_val, machine_val, total_val) in enumerate(
+            bucket_table_rows
+        ):
+            if label != display_label:
+                continue
+            bucket_table_rows[idx] = (
+                label,
+                round(float(total_hr), 2),
+                labor_val,
+                machine_val,
+                total_val,
+            )
+
+        existing_hours = hour_summary_entries.get(display_label)
+        if existing_hours is not None:
+            include_flag = bool(existing_hours[1])
+            hour_summary_entries[display_label] = (round(float(total_hr), 2), include_flag)
+
     for canon_key, total_hr in canonical_bucket_rollup.items():
         if canon_key.startswith("planner_"):
             continue
+        if canon_key == "drilling":
+            drill_hr_total_final = float(total_hr)
         process_hours_final[canon_key] = total_hr
         if isinstance(process_meta, dict):
             meta_entry = process_meta.get(canon_key)
@@ -18010,6 +18065,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 }
         if used_planner and canonical_bucket_contributors.get(canon_key, 0.0) > 0.0:
             _update_planner_bucket_minutes(canon_key, total_hr)
+
+    if used_planner and drill_hr_total_final > 0.0:
+        _apply_final_drilling_hours(drill_hr_total_final)
 
     for proc_key, final_hr in process_hours_final.items():
         if pricing_source == "planner" and proc_key not in process_costs:
