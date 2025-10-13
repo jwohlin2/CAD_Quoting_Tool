@@ -276,6 +276,26 @@ def test_render_quote_hides_amortized_nre_for_single_qty() -> None:
     assert "Fixturing:" in rendered
 
 
+def test_render_quote_skips_amortized_labor_totals_for_single_qty() -> None:
+    breakdown = _amortized_breakdown(1)
+    breakdown["labor_costs"] = {
+        "Programming (amortized)": 150.0,
+        "Fixture Build (amortized)": 30.0,
+        "Grinding": 25.0,
+    }
+    breakdown["process_costs"] = {}
+    breakdown["process_meta"] = {}
+    breakdown["labor_cost_details"] = {}
+
+    result = {"price": 10.0, "breakdown": breakdown}
+
+    rendered = appV5.render_quote(result, currency="$", show_zeros=False)
+
+    assert "Programming (amortized)" not in rendered
+    assert "Fixture Build (amortized)" not in rendered
+    assert "Grinding" in rendered
+
+
 def test_render_quote_ignores_force_amortized_flag_for_single_qty() -> None:
     result = {
         "price": 10.0,

@@ -6946,6 +6946,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         except Exception:
             continue
     amortized_nre_total = 0.0
+    amortized_labels_added: set[str] = set()
     for label, value in labor_cost_totals.items():
         _canonical_label, is_amortized = _canonical_amortized_label(label)
         if not is_amortized:
@@ -8391,6 +8392,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         amortized_qty = qty if qty > 0 else 1
     show_amortized = amortized_qty > 1
 
+    def _should_hide_amortized(label: Any) -> bool:
+        """Return True when amortized rows should be omitted from labor output."""
+
+        _, is_amortized = _canonical_amortized_label(label)
+        return is_amortized and not show_amortized
+
     programming_per_part_cost = labor_cost_totals.get("Programming (amortized)")
     if programming_per_part_cost is None:
         programming_meta_detail = (nre_detail or {}).get("programming") or {}
@@ -8427,6 +8434,51 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     bucket_table_rows: list[tuple[str, float, float, float, float]] = []
     detail_lookup: dict[str, str] = {}
     label_to_canon: dict[str, str] = {}
+
+    _PLANNER_ROLLUP_ABS_TOLERANCE = 0.05
+
+    def _derive_planner_rollup_hours_from_summary(
+        expected_total: float,
+    ) -> tuple[float, float] | None:
+        if expected_total <= 0.0:
+            return None
+        if not canonical_bucket_summary:
+            return None
+
+        machine_total = 0.0
+        labor_total = 0.0
+
+        for metrics in canonical_bucket_summary.values():
+            if not isinstance(metrics, _MappingABC):
+                continue
+
+            total_hours = _safe_float(metrics.get("hours"))
+            total_cost = _safe_float(metrics.get("total"))
+            machine_cost = max(0.0, _safe_float(metrics.get("machine")))
+            labor_cost = max(0.0, _safe_float(metrics.get("labor")))
+
+            if total_hours <= 0.0 or total_cost <= 0.0:
+                continue
+
+            try:
+                rate_val = total_cost / total_hours
+            except Exception:
+                rate_val = 0.0
+            if rate_val <= 0.0:
+                return None
+
+            if machine_cost > 0.0:
+                machine_total += machine_cost / rate_val
+            if labor_cost > 0.0:
+                labor_total += labor_cost / rate_val
+
+        derived_total = machine_total + labor_total
+        if derived_total <= 0.0:
+            return None
+        if abs(derived_total - expected_total) > _PLANNER_ROLLUP_ABS_TOLERANCE:
+            return None
+
+        return (labor_total, machine_total)
 
     labor_costs_display.clear()
     hour_summary_entries.clear()
@@ -8596,6 +8648,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     def _render_amortized_rows() -> None:
         nonlocal amortized_nre_total, display_labor_for_ladder
+        if not show_amortized:
+            amortized_nre_total = 0.0
+            return
+
         try:
             prog_pp = float(programming_per_part_cost or 0.0)
         except Exception:
@@ -8611,13 +8667,18 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 prog_pp = 0.0
         if prog_pp > 0:
             label = "Programming (amortized)"
-            if label in labor_costs_display:
-                amortized_nre_total += _safe_float(labor_costs_display.get(label, 0.0))
+            existing_prog = process_costs_canon.get("programming_amortized")
+            if existing_prog is not None and abs(float(existing_prog or 0.0) - prog_pp) <= 0.01:
+                amortized_nre_total += prog_pp
+                labor_costs_display[label] = float(labor_costs_display.get(label, 0.0)) + prog_pp
+                display_labor_for_ladder += prog_pp
             else:
                 _add_labor_cost_line(label, prog_pp)
                 amortized_nre_total += prog_pp
                 labor_costs_display[label] = float(labor_costs_display.get(label, 0.0)) + prog_pp
                 display_labor_for_ladder += prog_pp
+                process_costs_canon.pop("programming_amortized", None)
+            amortized_labels_added.add(label)
 
         try:
             fix_pp = float(fixture_labor_per_part_cost or 0.0)
@@ -8634,13 +8695,18 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 fix_pp = 0.0
         if fix_pp > 0:
             label = "Fixture Build (amortized)"
-            if label in labor_costs_display:
-                amortized_nre_total += _safe_float(labor_costs_display.get(label, 0.0))
+            existing_fix = process_costs_canon.get("fixture_build_amortized")
+            if existing_fix is not None and abs(float(existing_fix or 0.0) - fix_pp) <= 0.01:
+                amortized_nre_total += fix_pp
+                labor_costs_display[label] = float(labor_costs_display.get(label, 0.0)) + fix_pp
+                display_labor_for_ladder += fix_pp
             else:
                 _add_labor_cost_line(label, fix_pp)
                 amortized_nre_total += fix_pp
                 labor_costs_display[label] = float(labor_costs_display.get(label, 0.0)) + fix_pp
                 display_labor_for_ladder += fix_pp
+                process_costs_canon.pop("fixture_build_amortized", None)
+            amortized_labels_added.add(label)
 
     process_items = list((process_costs or {}).items())
     ordered_process_items: list[tuple[str, Any]] = []
@@ -8712,9 +8778,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 display_amount = float(amount or 0.0)
             except Exception:
                 display_amount = 0.0
+            if _should_hide_amortized(label):
+                continue
+            if label in amortized_labels_added:
+                continue
             labor_costs_display[label] = display_amount
-            display_labor_for_ladder += display_amount
-            _add_labor_cost_line(label, display_amount)
+            row(label, display_amount, indent="  ")
+            proc_total += display_amount
     elif process_costs_canon:
         for canon_key, amount in process_costs_canon.items():
             label = _display_bucket_label(canon_key, label_overrides)
@@ -8725,9 +8795,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 display_amount = float(amount or 0.0)
             except Exception:
                 display_amount = 0.0
+            if _should_hide_amortized(label):
+                continue
+            if label in amortized_labels_added:
+                continue
             labor_costs_display[label] = display_amount
-            display_labor_for_ladder += display_amount
-            _add_labor_cost_line(label, display_amount, process_key=canon_key)
+            row(label, display_amount, indent="  ")
+            proc_total += display_amount
     elif show_zeros:
         row("No process costs", 0.0, indent="  ")
 
@@ -8865,6 +8939,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
         planner_labor_hr = _planner_hours_for("planner_labor")
         planner_machine_hr = _planner_hours_for("planner_machine")
+        planner_rollup_hours_ready = False
 
         def _emit_hour_row(label: str, value: float, *, include_in_total: bool = True) -> None:
             _record_hour_entry(label, value, include_in_total=include_in_total)
@@ -8927,10 +9002,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 if minutes_val > 0:
                     return minutes_val / 60.0
             return 0.0
-
-        _emit_hour_row("Planner Total", round(planner_total_hr, 2))
-        _emit_hour_row("Planner Labor", round(planner_labor_hr, 2), include_in_total=False)
-        _emit_hour_row("Planner Machine", round(planner_machine_hr, 2), include_in_total=False)
 
         skip_hour_canon_keys = {
             "programming",
@@ -9031,9 +9102,19 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if planner_total_minutes > 0:
             planner_total_hr = planner_total_minutes / 60.0
 
+        derived_rollup = _derive_planner_rollup_hours_from_summary(planner_total_hr)
+        if derived_rollup is not None:
+            derived_labor_hr, derived_machine_hr = derived_rollup
+            planner_labor_hr = derived_labor_hr
+            planner_machine_hr = derived_machine_hr
+            planner_rollup_hours_ready = True
+        else:
+            planner_rollup_hours_ready = False
+
         _emit_hour_row("Planner Total", round(planner_total_hr, 2))
-        _emit_hour_row("Planner Labor", round(planner_labor_hr, 2), include_in_total=False)
-        _emit_hour_row("Planner Machine", round(planner_machine_hr, 2), include_in_total=False)
+        if planner_rollup_hours_ready:
+            _emit_hour_row("Planner Labor", round(planner_labor_hr, 2), include_in_total=False)
+            _emit_hour_row("Planner Machine", round(planner_machine_hr, 2), include_in_total=False)
 
         _emit_hour_row("Programming (lot)", round(programming_hours, 2))
         if programming_is_amortized and qty_for_hours > 0:
