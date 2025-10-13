@@ -3142,16 +3142,46 @@ def get_why_text(
     if isinstance(process_meta, _MappingABC):
         meta_map = {str(k): v for k, v in process_meta.items()}
 
-    final_hours_map: dict[str, float] = {}
-    if isinstance(final_hours, _MappingABC):
-        for key, value in final_hours.items():
-            final_hours_map[str(key)] = max(0.0, _hours_from_any(value))
-    else:
-        proc_hours_raw = e.get("process_hours") if isinstance(e, _MappingABC) else None
-        if not isinstance(proc_hours_raw, _MappingABC):
-            proc_hours_raw = {}
-        for key, value in proc_hours_raw.items():
-            final_hours_map[str(key)] = max(0.0, _hours_from_any(value))
+    # Build hours map from the rendered process_meta so it matches the tables.
+    def _hours_from_process_meta(meta_map: Mapping[str, Any] | None) -> dict[str, float]:
+        out: dict[str, float] = {}
+        if not isinstance(meta_map, _MappingABC):
+            return out
+        for raw_key, raw_meta in meta_map.items():
+            # Skip planner-only rollups; we only show bucket entries rendered above
+            key_lower = str(raw_key or "").strip().lower()
+            if not key_lower or key_lower.startswith("planner_"):
+                continue
+            meta = raw_meta if isinstance(raw_meta, _MappingABC) else {}
+            # Prefer hr, else minutes/60
+            hr_val = _as_float(meta.get("hr"))
+            if hr_val <= 0.0:
+                minutes_val = _as_float(meta.get("minutes"))
+                if minutes_val > 0.0:
+                    hr_val = minutes_val / 60.0
+            if hr_val <= 0.0:
+                continue
+            # Normalize to friendly label (e.g., "drilling" → "Drilling")
+            canon = _canonical_bucket_key(raw_key)
+            label = _friendly_label(canon) if canon else _friendly_label(raw_key)
+            if not label:
+                continue
+            out[label] = out.get(label, 0.0) + float(hr_val)
+        return out
+
+    final_hours_map: dict[str, float] = _hours_from_process_meta(process_meta)
+    # Fallback only if meta missing; otherwise rely solely on process_meta so
+    # the narrative mirrors the tables exactly.
+    if not final_hours_map:
+        if isinstance(final_hours, _MappingABC):
+            for key, value in final_hours.items():
+                final_hours_map[_friendly_label(key) or str(key)] = max(0.0, _hours_from_any(value))
+        else:
+            proc_hours_raw = e.get("process_hours") if isinstance(e, _MappingABC) else None
+            if not isinstance(proc_hours_raw, _MappingABC):
+                proc_hours_raw = {}
+            for key, value in proc_hours_raw.items():
+                final_hours_map[_friendly_label(key) or str(key)] = max(0.0, _hours_from_any(value))
 
     top_text = ""
     if pricing_source_clean == "planner" and meta_map:
@@ -3198,15 +3228,6 @@ def get_why_text(
                 top_text = ", ".join(top_bits)
 
     if not top_text:
-        if not final_hours_map:
-            proc_hours_raw = e.get("process_hours") if isinstance(e, _MappingABC) else None
-            if not isinstance(proc_hours_raw, _MappingABC):
-                proc_hours_raw = {}
-            for key, value in proc_hours_raw.items():
-                try:
-                    final_hours_map[str(key)] = max(0.0, float(value or 0.0))
-                except Exception:
-                    continue
         top_candidates = sorted(final_hours_map.items(), key=lambda kv: kv[1], reverse=True)
         top_bits: list[str] = []
         for name, hours in top_candidates[:3]:
@@ -6263,7 +6284,9 @@ def _rate_key_for_bucket(bucket: str | None) -> str | None:
     canon = _normalize_bucket_key(bucket)
     mapping = {
         "milling": "MillingRate",
-        "drilling": "DrillingRate",
+        # Policy: price drilling as labor-only, using the shop's milling labor rate
+        # so that Process and Bucket sections reconcile consistently.
+        "drilling": "MillingRate",
         "counterbore": "DrillingRate",
         "countersink": "DrillingRate",
         "tapping": "TappingRate",
@@ -11337,20 +11360,8 @@ def estimate_drilling_hours(
     """
     material_lookup = _normalize_lookup_key(mat_key) if mat_key else ""
     material_label = MATERIAL_DISPLAY_BY_KEY.get(material_lookup, mat_key)
-    breakdown_group_override = ""
-    if isinstance(breakdown, _MappingABC):
-        try:
-            breakdown_material_selected_raw = breakdown.get("material_selected")
-        except Exception:
-            breakdown_material_selected_raw = None
-        if isinstance(breakdown_material_selected_raw, _MappingABC):
-            breakdown_group_override = str(
-                breakdown_material_selected_raw.get("group")
-                or breakdown_material_selected_raw.get("material_group")
-                or ""
-            ).strip().upper()
-
-    material_group_override = str(material_group or breakdown_group_override or "").strip().upper()
+    # Use any material group passed in; avoid external scope references.
+    material_group_override = str(material_group or "").strip().upper()
 
     thickness_mm_val = 0.0
     try:
@@ -11638,7 +11649,20 @@ def estimate_drilling_hours(
                     )
 
                 row = None
-                if speeds_feeds_table is not None:
+                # Prefer selection by material group first (normalized like N1/N2 -> N),
+                # then fall back to canonical material name. Keep existing fallbacks after.
+                if speeds_feeds_table is not None and material_group_override:
+                    row = _pick_speeds_row(
+                        material_label=material_label,
+                        operation=op_name,
+                        tool_diameter_in=float(diameter_in),
+                        table=speeds_feeds_table,
+                        material_group=material_group_override,
+                        material_key=None,
+                    )
+                if not row and canonical_lookup:
+                    row = _pick_with_key(op_name, canonical_lookup)
+                if not row and speeds_feeds_table is not None:
                     row = _select_speeds_feeds_row(
                         speeds_feeds_table,
                         operation=op_name,
@@ -11652,7 +11676,6 @@ def estimate_drilling_hours(
                             material_key=material_for_lookup,
                             material_group=material_group_override,
                         )
-
                 if not row:
                     row = _pick_with_key(op_name, material_group_override)
                 if not row and canonical_lookup:
@@ -15540,7 +15563,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 for msg in red_flag_messages:
                     if msg not in ctx_flags:
                         ctx_flags.append(msg)
-    drill_rate = float(rates.get("DrillingRate") or rates.get("MillingRate", 0.0) or 0.0)
+    # Policy: labor-only drilling. Use the shop labor rate (we use MillingRate as
+    # the canonical labor rate for drilling) so Bucket and Process sections reconcile.
+    drill_rate = float(rates.get("MillingRate") or rates.get("DrillingRate", 0.0) or 0.0)
     if drill_estimator_hours_for_planner > 0:
         override_minutes = drill_estimator_hours_for_planner * 60.0
         override_cost = drill_estimator_hours_for_planner * drill_rate
@@ -18789,12 +18814,20 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             continue
         if canon_key == "drilling":
             drill_hr_total_final = float(total_hr)
-        process_hours_final[canon_key] = total_hr
         summary_entry = (
             canonical_bucket_summary_local.get(canon_key)
             if isinstance(canonical_bucket_summary_local, dict)
             else None
         )
+        # When planner is used, prefer the bucket-view summary hours for drilling.
+        # This ensures Bucket, Process & Labor, and Hour Summary stay consistent.
+        if used_planner and canon_key == "drilling" and isinstance(summary_entry, dict):
+            try:
+                total_hr_from_summary = float(summary_entry.get("hours", total_hr) or total_hr)
+            except Exception:
+                total_hr_from_summary = total_hr
+            total_hr = total_hr_from_summary
+        process_hours_final[canon_key] = total_hr
         if isinstance(summary_entry, dict):
             summary_entry["hours"] = float(total_hr)
             summary_entry["minutes"] = float(total_hr) * 60.0
