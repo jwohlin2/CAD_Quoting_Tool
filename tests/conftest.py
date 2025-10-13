@@ -660,3 +660,18 @@ def state_builder(fresh_quote_state: QuoteState) -> Callable[[dict], QuoteState]
         return state
 
     return _builder
+
+
+@pytest.fixture(autouse=True)
+def _configure_speeds_feeds_csv(monkeypatch: pytest.MonkeyPatch) -> None:
+    resource_csv = (
+        Path(__file__).resolve().parent.parent
+        / "cad_quoter"
+        / "pricing"
+        / "resources"
+        / "speeds_feeds_merged.csv"
+    )
+    if resource_csv.is_file():
+        monkeypatch.setenv("CADQ_SF_CSV", str(resource_csv))
+    else:
+        monkeypatch.delenv("CADQ_SF_CSV", raising=False)
