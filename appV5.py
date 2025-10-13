@@ -18779,13 +18779,22 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     if used_planner and drill_hr_total_final > 0.0:
         _apply_final_drilling_hours(drill_hr_total_final)
 
+    try:
+        canonical_bucket_summary_local = canonical_bucket_summary
+    except NameError:
+        canonical_bucket_summary_local = None
+
     for canon_key, total_hr in canonical_bucket_rollup.items():
         if canon_key.startswith("planner_"):
             continue
         if canon_key == "drilling":
             drill_hr_total_final = float(total_hr)
         process_hours_final[canon_key] = total_hr
-        summary_entry = canonical_bucket_summary.get(canon_key)
+        summary_entry = (
+            canonical_bucket_summary_local.get(canon_key)
+            if isinstance(canonical_bucket_summary_local, dict)
+            else None
+        )
         if isinstance(summary_entry, dict):
             summary_entry["hours"] = float(total_hr)
             summary_entry["minutes"] = float(total_hr) * 60.0
