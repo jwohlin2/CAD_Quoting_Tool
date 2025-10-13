@@ -18,6 +18,8 @@ __all__ = [
     "unit_hp_cap",
 ]
 
+_STAINLESS_303_DEFAULT_GROUP = "M2"
+
 log = logging.getLogger(__name__)
 
 _RESOURCE_PACKAGES: Sequence[str] = (
@@ -211,6 +213,25 @@ def pick_speeds_row(
     )
     iso_override = str(material_group or "").strip().upper()
     iso = iso_override or (mm.get("iso_group") if mm else "") or ""
+    reselect_groups: list[str] = []
+    expected_group_prefix: str | None = None
+    expected_iso_label: str | None = None
+
+    canonical_lower = canonical.strip().lower()
+    lookup_lower = lookup_value.lower()
+    stainless_303_expected = any(
+        candidate and "stainless" in candidate and "303" in candidate
+        for candidate in (canonical_lower, lookup_lower)
+    )
+    if stainless_303_expected:
+        expected_group_prefix = "M"
+        preferred_iso = iso_override if iso_override.startswith("M") else _STAINLESS_303_DEFAULT_GROUP
+        iso = preferred_iso
+        expected_iso_label = preferred_iso
+        for candidate in (preferred_iso, _STAINLESS_303_DEFAULT_GROUP, "M2", "M1"):
+            candidate = str(candidate or "").strip().upper()
+            if candidate and candidate not in reselect_groups:
+                reselect_groups.append(candidate)
 
     try:
         tool_dia = float(tool_diameter_in) if tool_diameter_in is not None else None
@@ -327,8 +348,24 @@ def pick_speeds_row(
         scored.sort(key=lambda item: (-item[0], item[1]))
         return [row for _, _, row in scored]
 
+    def _row_group_value(row: Mapping[str, Any] | None) -> str:
+        if not isinstance(row, Mapping):
+            return ""
+        return str(row.get("material_group") or "").strip().upper()
+
+    def _reselect_group(groups: Sequence[str]) -> dict[str, Any] | None:
+        for group in groups:
+            group_key = str(group or "").strip().upper()
+            if not group_key:
+                continue
+            rows = _select_group_rows(records, operation, group_key)
+            if rows:
+                ordered = _order_by_diameter(rows)
+                if ordered:
+                    return ordered[0]
+        return None
+
     restricted_material = False
-    canonical_lower = canonical.strip().lower()
     if canonical_lower:
         if any(term in canonical_lower for term in ("carbide", "ceramic")):
             if tool_description is None or "diamond" not in tool_description.lower():
@@ -364,6 +401,41 @@ def pick_speeds_row(
             "Restricted material fallback for non-EDM operation",
             extra={"operation": operation, "material": canonical},
         )
+
+    if expected_group_prefix:
+        current_group = _row_group_value(selected)
+        if not current_group.startswith(expected_group_prefix):
+            fallback_groups: Sequence[str]
+            if reselect_groups:
+                fallback_groups = tuple(reselect_groups)
+            elif expected_iso_label:
+                fallback_groups = (expected_iso_label,)
+            else:
+                fallback_groups = (expected_group_prefix,)
+            replacement = _reselect_group(fallback_groups)
+            if replacement is not None:
+                if replacement is not selected:
+                    log.warning(
+                        "Speeds/feeds row did not match Stainless 303 group; re-selected",
+                        extra={
+                            "operation": operation,
+                            "material": canonical,
+                            "expected_group": expected_iso_label or expected_group_prefix,
+                            "row_group": current_group or None,
+                        },
+                    )
+                selected = replacement
+                iso = _row_group_value(selected) or iso or (expected_iso_label or "")
+            else:
+                log.warning(
+                    "Speeds/feeds row did not match Stainless 303 group",
+                    extra={
+                        "operation": operation,
+                        "material": canonical,
+                        "expected_group": expected_iso_label or expected_group_prefix,
+                        "row_group": current_group or None,
+                    },
+                )
 
     log_data = {
         "op": operation,
