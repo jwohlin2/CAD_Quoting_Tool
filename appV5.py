@@ -6835,6 +6835,19 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 ) -> str:
     """Pretty printer for a full quote with auto-included non-zero lines."""
     breakdown    = result.get("breakdown", {}) or {}
+
+    # Force drill debug output to render by enabling the LLM debug flag for this run.
+    app_meta_container = result.get("app_meta")
+    if isinstance(app_meta_container, dict):
+        target_app_meta = app_meta_container
+    elif isinstance(app_meta_container, _MappingABC):
+        target_app_meta = dict(app_meta_container)
+        result["app_meta"] = target_app_meta
+    else:
+        target_app_meta = {}
+        result["app_meta"] = target_app_meta
+    target_app_meta["llm_debug_enabled"] = True
+
     totals       = breakdown.get("totals", {}) or {}
     declared_labor_total = float(totals.get("labor_cost", 0.0) or 0.0)
     nre_detail   = breakdown.get("nre_detail", {}) or {}
@@ -7507,12 +7520,23 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     def render_drill_debug(entries: Sequence[str]) -> None:
         lines.append("Drill Debug")
         lines.append(divider)
-        for entry in entries:
+        prioritized_entries: list[tuple[int, int, str]] = []
+        for idx, entry in enumerate(entries):
             if entry is None:
                 continue
             text = str(entry).strip()
             if not text:
                 continue
+            normalized = text.lstrip()
+            if normalized.startswith("Material Removal Debug"):
+                priority = 0
+            elif normalized.startswith("OK deep_drill") or normalized.startswith("OK drill"):
+                priority = 1
+            else:
+                priority = 2
+            prioritized_entries.append((priority, idx, text))
+
+        for _priority, _idx, text in sorted(prioritized_entries, key=lambda item: (item[0], item[1])):
             if "\n" in text:
                 for chunk in text.splitlines():
                     write_line(chunk, "  ")
