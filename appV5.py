@@ -10610,6 +10610,18 @@ def _load_speeds_feeds_table(path: str | None) -> pd.DataFrame | None:
     return normalized
 
 
+def _normalize_material_group_code(value: Any) -> str:
+    """Return a canonical material group code (e.g., ``N1`` → ``N``)."""
+
+    text = "" if value is None else str(value).strip().upper()
+    if not text:
+        return ""
+    simplified = re.sub(r"[^A-Z0-9]+", "", text)
+    if re.fullmatch(r"[A-Z]\d+", simplified or ""):
+        return simplified[0]
+    return simplified or text
+
+
 def _select_speeds_feeds_row(
     table: pd.DataFrame | None,
     operation: str,
@@ -10684,8 +10696,9 @@ def _select_speeds_feeds_row(
         ]
     if not matches:
         return None
-    group_target = str(material_group or "").strip().upper()
-    if group_target and matches:
+    group_target_display = str(material_group or "").strip().upper()
+    group_target = _normalize_material_group_code(group_target_display)
+    if (group_target or group_target_display) and matches:
         group_columns = ("material_group", "material_family")
         candidate_group_columns: list[str] = []
         try:
@@ -10704,14 +10717,25 @@ def _select_speeds_feeds_row(
                             candidate_group_columns.append(col)
                             seen_cols.add(col)
         for col in candidate_group_columns:
-            exact_group = [
-                row
-                for row in matches
-                if str(row.get(col) or "").strip().upper() == group_target
-            ]
-            if exact_group:
-                matches = exact_group
-                break
+            if group_target_display:
+                direct_group = [
+                    row
+                    for row in matches
+                    if str(row.get(col) or "").strip().upper()
+                    == group_target_display
+                ]
+                if direct_group:
+                    matches = direct_group
+                    break
+            if group_target:
+                normalized_group = [
+                    row
+                    for row in matches
+                    if _normalize_material_group_code(row.get(col)) == group_target
+                ]
+                if normalized_group:
+                    matches = normalized_group
+                    break
     if material_key and matches:
         preferred_columns = ("material_group", "material_family", "material")
         candidate_columns: list[str] = []
@@ -14491,13 +14515,41 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 except (TypeError, ValueError, ZeroDivisionError):
                     pass
 
-    expected_group_upper = str(
+    material_group_for_speeds_normalized = _normalize_material_group_code(
+        material_group_for_speeds
+    )
+    breakdown_material_selected = (
+        breakdown.get("material_selected")
+        if isinstance(breakdown, _MappingABC)
+        else None
+    )
+    if not isinstance(breakdown_material_selected, _MappingABC):
+        breakdown_material_selected = {}
+
+    expected_group_display = str(
         material_group_for_speeds
         or material_selected_summary.get("group")
         or material_selection.get("group")
         or drill_material_group
         or ""
     ).strip().upper()
+    breakdown_group_display = str(
+        breakdown_material_selected.get("group")
+        or breakdown_material_selected.get("material_group")
+        or ""
+    ).strip().upper()
+    if not expected_group_display and breakdown_group_display:
+        expected_group_display = breakdown_group_display
+    expected_group_normalized = _normalize_material_group_code(expected_group_display)
+    breakdown_group_normalized = _normalize_material_group_code(
+        breakdown_group_display
+    )
+    if not expected_group_normalized:
+        if material_group_for_speeds_normalized:
+            expected_group_normalized = material_group_for_speeds_normalized
+        elif breakdown_group_normalized:
+            expected_group_normalized = breakdown_group_normalized
+
     selected_row_group = ""
     if isinstance(speeds_feeds_summary, _MappingABC):
         selected_row_group = str(
@@ -14518,15 +14570,244 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             or speeds_feeds_row.get("iso_group")
             or ""
         ).strip().upper()
+    selected_row_group_normalized = _normalize_material_group_code(selected_row_group)
+
+    mismatch_message: str | None = None
     if (
-        expected_group_upper
-        and selected_row_group
-        and selected_row_group != expected_group_upper
+        expected_group_normalized
+        and selected_row_group_normalized
+        and selected_row_group_normalized != expected_group_normalized
     ):
-        _record_red_flag(
-            "Speeds/feeds mismatch: selected row group "
-            f"{selected_row_group} != material group {expected_group_upper}."
+        expected_display_for_message = (
+            expected_group_display or breakdown_group_display or expected_group_normalized
         )
+        mismatch_message = (
+            "Speeds/feeds mismatch: selected row group "
+            f"{selected_row_group or selected_row_group_normalized} != material group "
+            f"{expected_display_for_message}."
+        )
+        op_for_reselect = str(selected_op_name or "").strip()
+        if not op_for_reselect:
+            op_for_reselect = "drill"
+        diameter_for_reselect: float | None = None
+        try:
+            if avg_dia_in and math.isfinite(float(avg_dia_in)) and float(avg_dia_in) > 0:
+                diameter_for_reselect = float(avg_dia_in)
+        except Exception:
+            diameter_for_reselect = None
+
+        def _extract_row_group(row_obj: Mapping[str, Any] | None) -> tuple[str, str]:
+            if not isinstance(row_obj, _MappingABC):
+                return "", ""
+            raw = str(
+                row_obj.get("material_group")
+                or row_obj.get("material_family")
+                or row_obj.get("iso_group")
+                or ""
+            ).strip().upper()
+            return raw, _normalize_material_group_code(raw)
+
+        def _recompute_precomputed_from_row(
+            row_obj: Mapping[str, Any] | None,
+        ) -> dict[str, float]:
+            if not isinstance(row_obj, _MappingABC):
+                return {}
+            try:
+                row_view = _time_estimator._RowView(row_obj)
+            except Exception:
+                return {}
+            recomputed: dict[str, float] = {}
+            sfm_candidate = getattr(row_view, "sfm_start", None)
+            if sfm_candidate is None:
+                sfm_candidate = getattr(row_view, "sfm", None)
+            sfm_val = _time_estimator.to_num(sfm_candidate)
+            if sfm_val is not None and math.isfinite(sfm_val):
+                recomputed["sfm"] = float(sfm_val)
+            dia_for_pick = None
+            if diameter_for_reselect is not None and math.isfinite(diameter_for_reselect):
+                dia_for_pick = float(diameter_for_reselect)
+            if dia_for_pick is not None:
+                ipr_val = _time_estimator.pick_feed_value(row_view, dia_for_pick)
+                if ipr_val is not None and math.isfinite(ipr_val):
+                    recomputed["ipr"] = float(ipr_val)
+            rpm_val: float | None = None
+            if dia_for_pick and "sfm" in recomputed and dia_for_pick > 0:
+                try:
+                    rpm_candidate = (float(recomputed["sfm"]) * 12.0) / (
+                        math.pi * float(dia_for_pick)
+                    )
+                except Exception:
+                    rpm_candidate = None
+                if rpm_candidate is not None and math.isfinite(rpm_candidate):
+                    rpm_val = float(rpm_candidate)
+                    recomputed["rpm"] = rpm_val
+            if rpm_val is not None and "ipr" in recomputed:
+                ipm_candidate = float(rpm_val) * float(recomputed["ipr"])
+                if math.isfinite(ipm_candidate):
+                    recomputed["ipm"] = float(ipm_candidate)
+            return recomputed
+
+        group_candidates: list[str] = []
+        seen_groups: set[str] = set()
+
+        def _push_group(value: Any) -> None:
+            text = str(value or "").strip().upper()
+            if not text:
+                return
+            if text in seen_groups:
+                return
+            seen_groups.add(text)
+            group_candidates.append(text)
+
+        for candidate in (
+            expected_group_display,
+            breakdown_group_display,
+            material_group_for_speeds,
+            drill_material_group,
+            expected_group_normalized,
+            breakdown_group_normalized,
+            material_group_for_speeds_normalized,
+        ):
+            _push_group(candidate)
+
+        material_key_candidates: list[str] = []
+        seen_keys: set[str] = set()
+
+        def _push_key(value: Any) -> None:
+            text = str(value or "").strip()
+            if not text:
+                return
+            if text in seen_keys:
+                return
+            seen_keys.add(text)
+            material_key_candidates.append(text)
+
+        for source in (
+            breakdown_material_selected,
+            material_selection,
+            material_selected_summary,
+        ):
+            if not isinstance(source, _MappingABC):
+                continue
+            for key_name in (
+                "material_lookup",
+                "normalized_material_key",
+                "canonical",
+                "canonical_material",
+                "display",
+                "material",
+                "group",
+                "material_group",
+            ):
+                _push_key(source.get(key_name))
+
+        for candidate in (
+            drill_material_lookup_final,
+            material_key_for_drill,
+            chosen_material_label,
+        ):
+            _push_key(candidate)
+
+        material_label_candidates: list[str] = []
+        seen_labels: set[str] = set()
+
+        def _push_label(value: Any) -> None:
+            text = str(value or "").strip()
+            if not text:
+                return
+            if text in seen_labels:
+                return
+            seen_labels.add(text)
+            material_label_candidates.append(text)
+
+        for source in (
+            material_selection,
+            material_selected_summary,
+            breakdown_material_selected,
+        ):
+            if not isinstance(source, _MappingABC):
+                continue
+            for label_name in ("canonical", "canonical_material", "display", "material"):
+                _push_label(source.get(label_name))
+        _push_label(chosen_material_label)
+
+        reselected_row: Mapping[str, Any] | None = None
+
+        if speeds_feeds_table is not None and op_for_reselect:
+            for group_value in group_candidates:
+                success = False
+                for key_value in material_key_candidates or [None]:
+                    candidate_row = _select_speeds_feeds_row(
+                        speeds_feeds_table,
+                        operation=op_for_reselect,
+                        material_key=key_value,
+                        material_group=group_value,
+                    )
+                    if candidate_row:
+                        _, norm_val = _extract_row_group(candidate_row)
+                        if norm_val == expected_group_normalized:
+                            reselected_row = candidate_row
+                            success = True
+                            break
+                if success:
+                    break
+
+        if reselected_row is None and speeds_feeds_table is not None and op_for_reselect:
+            label_for_pick = material_label_candidates[0] if material_label_candidates else None
+            for group_value in group_candidates:
+                key_values = list(material_key_candidates)
+                if group_value and group_value not in key_values:
+                    key_values.insert(0, group_value)
+                if expected_group_display and expected_group_display not in key_values:
+                    key_values.append(expected_group_display)
+                if expected_group_normalized and expected_group_normalized not in key_values:
+                    key_values.append(expected_group_normalized)
+                for key_value in key_values or [None]:
+                    candidate_row = _pick_speeds_row(
+                        material_label=label_for_pick,
+                        operation=op_for_reselect,
+                        tool_diameter_in=diameter_for_reselect,
+                        table=speeds_feeds_table,
+                        material_group=group_value or None,
+                        material_key=key_value,
+                    )
+                    if candidate_row:
+                        _, norm_val = _extract_row_group(candidate_row)
+                        if norm_val == expected_group_normalized:
+                            reselected_row = candidate_row
+                            break
+                if reselected_row is not None:
+                    break
+
+        if reselected_row is not None:
+            raw_group, norm_group = _extract_row_group(reselected_row)
+            if norm_group == expected_group_normalized:
+                speeds_feeds_row = reselected_row
+                selected_row_group = raw_group
+                selected_row_group_normalized = norm_group
+                if isinstance(selected_entry, _MappingABC):
+                    try:
+                        selected_entry["row"] = reselected_row
+                    except Exception:
+                        pass
+                    if raw_group:
+                        try:
+                            selected_entry["row_group"] = raw_group
+                        except Exception:
+                            pass
+                if isinstance(speeds_feeds_summary, _MappingABC) and raw_group:
+                    try:
+                        speeds_feeds_summary["row_group"] = raw_group
+                        speeds_feeds_summary.setdefault("material_group", raw_group)
+                    except Exception:
+                        pass
+                recomputed = _recompute_precomputed_from_row(reselected_row)
+                if recomputed:
+                    selected_precomputed = recomputed
+                mismatch_message = None
+
+    if mismatch_message:
+        _record_red_flag(mismatch_message)
 
     selected_material_group = _extract_material_group(
         speeds_feeds_summary,
