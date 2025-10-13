@@ -12864,6 +12864,14 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     quote_state.ui_vars = dict(ui_vars)
     quote_state.rates = dict(rates)
 
+    # Initialize the breakdown structure early so downstream cost calculations
+    # can safely reference it even before the full payload is assembled. This
+    # avoids UnboundLocalError scenarios when later branches expect
+    # ``breakdown`` to exist. The populated payload is constructed further
+    # below, but intermediate references (e.g. for direct cost updates)
+    # require a dict placeholder upfront.
+    breakdown: dict[str, Any] = {}
+
     # Track whether we recognized any planner line items even if planner pricing
     # fails to populate line_items. Initialize this early to avoid scope issues
     # when incrementing the counter in downstream logic.
@@ -18769,14 +18777,6 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             existing_plan = getattr(quote_state, "process_plan", None)
             if isinstance(existing_plan, dict):
                 existing_plan.setdefault("bucket_view", copy.deepcopy(planner_bucket_view))
-
-    # Initialize the breakdown structure early so downstream cost calculations
-    # can safely reference it even before the full payload is assembled. This
-    # avoids UnboundLocalError scenarios when later branches expect
-    # ``breakdown`` to exist.  The populated payload is constructed further
-    # below, but the intermediate references (e.g. for direct cost updates)
-    # require a dict placeholder upfront.
-    breakdown: dict[str, Any] = {}
 
     material_direct_cost = float(
         pass_through.get(_canonical_pass_label("Material"), material_direct_cost_base)
