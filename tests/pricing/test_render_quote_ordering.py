@@ -1,3 +1,6 @@
+import math
+import re
+
 import appV5
 
 
@@ -145,6 +148,101 @@ def test_render_quote_renders_bucket_table_without_planner_why_section() -> None
     assert any("Milling" in line and "$500.00" in line and "2.00" in line for line in bucket_rows)
     assert any("Drilling" in line and "$300.00" in line and "1.50" in line for line in bucket_rows)
     assert any("Inspection" in line and "$100.00" in line and "1.00" in line for line in bucket_rows)
+
+
+def test_planner_rollup_hours_reconcile_with_bucket_view() -> None:
+    bucket_view = {
+        "buckets": {
+            "milling": {
+                "total$": 500.0,
+                "machine$": 350.0,
+                "labor$": 150.0,
+                "minutes": 120.0,
+            },
+            "drilling": {
+                "total$": 300.0,
+                "machine$": 200.0,
+                "labor$": 100.0,
+                "minutes": 90.0,
+            },
+            "inspection": {
+                "total$": 100.0,
+                "labor$": 100.0,
+                "minutes": 60.0,
+            },
+        }
+    }
+
+    breakdown = {
+        "qty": 1,
+        "totals": {
+            "labor_cost": 900.0,
+            "direct_costs": 175.0,
+            "subtotal": 1075.0,
+            "with_overhead": 1182.5,
+            "with_ga": 1241.625,
+            "with_contingency": 1241.625,
+            "with_expedite": 1241.625,
+        },
+        "nre_detail": {},
+        "nre": {},
+        "material": {"scrap_pct": 0.12},
+        "process_costs": {},
+        "process_meta": {},
+        "pass_through": {"Material": 150.0, "Shipping": 25.0},
+        "applied_pcts": {
+            "OverheadPct": 0.10,
+            "GA_Pct": 0.05,
+            "ContingencyPct": 0.0,
+            "MarginPct": 0.15,
+        },
+        "rates": {},
+        "params": {},
+        "labor_cost_details": {},
+        "direct_cost_details": {},
+        "pricing_source": "planner",
+        "bucket_view": bucket_view,
+        "process_plan": {"bucket_view": bucket_view},
+        "decision_state": {"effective": {"setups": 2, "part_count": 4}},
+    }
+
+    result = {"price": 1450.0, "breakdown": breakdown}
+
+    rendered = appV5.render_quote(result, currency="$")
+    lines = rendered.splitlines()
+
+    def _extract_hour(label: str) -> float:
+        for line in lines:
+            if line.strip().startswith(label):
+                match = re.search(r"([0-9]+(?:\.[0-9]+)?) hr", line)
+                if match:
+                    return float(match.group(1))
+        raise AssertionError(f"Missing hour line for {label!r}")
+
+    planner_total = _extract_hour("Planner Total")
+    planner_labor = _extract_hour("Planner Labor")
+    planner_machine = _extract_hour("Planner Machine")
+
+    assert math.isclose(planner_labor + planner_machine, planner_total, abs_tol=0.05)
+
+    expected_machine = 0.0
+    expected_labor = 0.0
+    for info in bucket_view["buckets"].values():
+        total_cost = float(info.get("total$", 0.0) or 0.0)
+        minutes = float(info.get("minutes", 0.0) or 0.0)
+        machine_cost = float(info.get("machine$", 0.0) or 0.0)
+        labor_cost = float(info.get("labor$", 0.0) or 0.0)
+        hours = minutes / 60.0 if minutes else 0.0
+        if total_cost <= 0.0 or hours <= 0.0:
+            continue
+        rate = total_cost / hours
+        if machine_cost > 0.0:
+            expected_machine += machine_cost / rate
+        if labor_cost > 0.0:
+            expected_labor += labor_cost / rate
+
+    assert math.isclose(planner_machine, expected_machine, abs_tol=0.05)
+    assert math.isclose(planner_labor, expected_labor, abs_tol=0.05)
 
 
 def test_render_quote_includes_hour_summary() -> None:
@@ -515,6 +613,23 @@ def test_render_quote_clamps_single_piece_hours_and_warns() -> None:
 
 
 def test_render_quote_dedupes_planner_rollup_cost_rows() -> None:
+    bucket_view = {
+        "buckets": {
+            "milling": {
+                "total$": 120.0,
+                "machine$": 70.0,
+                "labor$": 50.0,
+                "minutes": 180.0,
+            },
+            "deburr": {
+                "total$": 60.0,
+                "machine$": 30.0,
+                "labor$": 30.0,
+                "minutes": 60.0,
+            },
+        }
+    }
+
     result = {
         "price": 200.0,
         "breakdown": {
@@ -544,6 +659,8 @@ def test_render_quote_dedupes_planner_rollup_cost_rows() -> None:
                 "planner_labor": {"minutes": 120.0},
                 "milling": {"hr": 1.5},
             },
+            "bucket_view": bucket_view,
+            "process_plan": {"bucket_view": bucket_view},
             "pass_through": {"Material": 120.0},
             "pricing_source": "planner",
             "applied_pcts": {
