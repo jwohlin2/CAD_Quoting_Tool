@@ -1,0 +1,68 @@
+name: Guard Large Deletions
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute diff vs base
+        id: diff
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.sha }}"
+          echo "Base: $BASE_SHA"
+          echo "Head: $HEAD_SHA"
+          # Show numstat for debugging
+          git diff --numstat "$BASE_SHA..$HEAD_SHA" > diff_numstat.txt || true
+          echo "numstat entries: $(wc -l < diff_numstat.txt)"
+          cat diff_numstat.txt | sed -n '1,200p'
+
+          # Check for extreme single-file deletions (e.g., > 10000)
+          TOO_BIG=$(awk '{d=$2; f=$3; if(d ~ /[0-9]+/ && d+0 > 10000){print f}}' diff_numstat.txt | paste -sd, -)
+          echo "too_big=$TOO_BIG" >> "$GITHUB_OUTPUT"
+
+          # Special guard for appV5.py truncation
+          APP_DEL=$(awk '$3=="appV5.py" {print $2+0}' diff_numstat.txt | tail -n1)
+          echo "app_del=${APP_DEL:-0}" >> "$GITHUB_OUTPUT"
+
+      - name: Fail on extreme deletions
+        if: steps.diff.outputs.too_big != ''
+        run: |
+          echo "Refusing PR: excessive deletions in files: ${{ steps.diff.outputs.too_big }}"
+          exit 1
+
+      - name: Check appV5.py size
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.sha }}"
+          # If appV5.py changed and deletions > 2000, require override label
+          APP_DEL="${{ steps.diff.outputs.app_del }}"
+          if [[ "${APP_DEL:-0}" -gt 2000 ]]; then
+            echo "Detected large deletions in appV5.py: $APP_DEL"
+            # Also verify line count at HEAD to catch truncation
+            if git show "$HEAD_SHA:appV5.py" >/dev/null 2>&1; then
+              LINES=$(git show "$HEAD_SHA:appV5.py" | wc -l)
+            else
+              LINES=0
+            fi
+            echo "appV5.py lines at HEAD: $LINES"
+            if [[ "$LINES" -lt 20000 ]]; then
+              echo "Refusing PR: appV5.py appears truncated (lines=$LINES)."
+              echo "If intentional, add label 'override-appv5-guard' and re-run."
+              exit 1
+            fi
+          fi
+
