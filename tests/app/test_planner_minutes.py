@@ -77,6 +77,88 @@ def test_compute_quote_uses_planner_minutes(monkeypatch):
     assert plan_pricing["totals"]["minutes"] == 45.0
 
 
+def test_planner_total_mismatch_records_red_flag(monkeypatch):
+    import appV5
+    import planner_pricing
+
+    df = pd.DataFrame(columns=["Item", "Example Values / Options", "Data Type / Input Method"])
+    geo = {
+        "process_planner_family": "die_plate",
+        "material": "tool steel",
+        "thickness_mm": 25.4,
+    }
+
+    def fake_plan_job(family: str, inputs: dict[str, object]) -> dict[str, object]:
+        assert family == "die_plate"
+        assert isinstance(inputs, dict)
+        return {"ops": [{"op": "Roughing"}]}
+
+    def fake_price_with_planner(
+        family: str,
+        inputs: dict[str, object],
+        geom_payload: dict[str, object],
+        rates: dict[str, object],
+        *,
+        oee: float,
+    ) -> dict[str, object]:
+        assert family == "die_plate"
+        assert geom_payload, "expected non-empty geom payload"
+        assert isinstance(rates, dict)
+        assert oee > 0
+        return {
+            "line_items": [
+                {
+                    "op": "Machine Time",
+                    "minutes": 30.0,
+                    "machine_cost": 90.0,
+                    "labor_cost": 0.0,
+                },
+                {
+                    "op": "Handwork",
+                    "minutes": 15.0,
+                    "machine_cost": 0.0,
+                    "labor_cost": 45.0,
+                },
+            ],
+            "totals": {"minutes": 45.0, "machine_cost": 90.0, "labor_cost": 45.0},
+        }
+
+    original_roughly_equal = appV5.roughly_equal
+
+    def fake_roughly_equal(a, b, *, eps=0.01):
+        if eps == appV5._PLANNER_BUCKET_ABS_EPSILON:
+            return False
+        return original_roughly_equal(a, b, eps=eps)
+
+    monkeypatch.setattr(appV5, "_process_plan_job", fake_plan_job)
+    monkeypatch.setattr(planner_pricing, "price_with_planner", fake_price_with_planner)
+    monkeypatch.setattr(appV5, "FORCE_PLANNER", False)
+    monkeypatch.setattr(appV5, "roughly_equal", fake_roughly_equal)
+
+    result = appV5.compute_quote_from_df(
+        df,
+        params={"OEE_EfficiencyPct": 0.9},
+        geo=geo,
+        ui_vars={},
+    )
+
+    breakdown = result["breakdown"]
+    red_flags = breakdown.get("red_flags") or []
+    assert any("Planner totals drifted" in flag for flag in red_flags)
+
+    plan_pricing = breakdown.get("process_plan_pricing") or {}
+    planner_totals = plan_pricing.get("totals", {})
+    planner_labor_cost = float(planner_totals.get("labor_cost", 0.0) or 0.0)
+
+    process_costs = breakdown["process_costs"]
+    assert "Labor" in process_costs
+
+    totals = breakdown["totals"]
+    labor_rendered = float(breakdown.get("labor_cost_rendered", 0.0) or 0.0)
+    assert totals["labor_cost"] == pytest.approx(labor_rendered)
+    assert labor_rendered > 0.0
+
+
 def test_planner_drilling_bucket_uses_estimator(monkeypatch):
     import appV5
     import planner_pricing
