@@ -14697,6 +14697,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     selected_row_group_normalized = _normalize_material_group_code(selected_row_group)
 
     mismatch_message: str | None = None
+    group_fallback_used = False
     if (
         expected_group_normalized
         and selected_row_group_normalized
@@ -14710,6 +14711,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             f"{selected_row_group or selected_row_group_normalized} != material group "
             f"{expected_display_for_message}."
         )
+        group_fallback_used = True
         op_for_reselect = str(selected_op_name or "").strip()
         if not op_for_reselect:
             op_for_reselect = "drill"
@@ -14785,12 +14787,12 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
 
         for candidate in (
             expected_group_display,
-            breakdown_group_display,
-            material_group_for_speeds,
-            drill_material_group,
             expected_group_normalized,
+            breakdown_group_display,
             breakdown_group_normalized,
+            material_group_for_speeds,
             material_group_for_speeds_normalized,
+            drill_material_group,
         ):
             _push_group(candidate)
 
@@ -14929,9 +14931,12 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 if recomputed:
                     selected_precomputed = recomputed
                 mismatch_message = None
+                group_fallback_used = False
 
     if mismatch_message:
         _record_red_flag(mismatch_message)
+        if group_fallback_used:
+            _record_red_flag("Basis: group fallback.")
 
     selected_material_group = _extract_material_group(
         speeds_feeds_summary,
@@ -15370,9 +15375,11 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             drill_estimator_hours_for_planner
         )
     final_group = (
-        material_group_for_speeds
-        or material_selection.get("material_group")
+        selected_material_group
+        or selected_row_group
         or drill_material_group
+        or material_selection.get("material_group")
+        or material_group_for_speeds
     )
     if final_group:
         drilling_meta["material_group"] = final_group
