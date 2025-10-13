@@ -19120,9 +19120,30 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         except Exception as exc:  # pragma: no cover - defensive guardrail
             raise AssertionError("Planner totals missing for reconciliation check") from exc
 
-        display_labor_val = _safe_float(locals().get("display_labor_for_ladder"))
-        display_machine_val = _safe_float(locals().get("display_machine"))
-        amortized_total_val = _safe_float(locals().get("amortized_nre_total"))
+        try:
+            display_labor_val = _safe_float(locals().get("display_labor_for_ladder"))
+            display_machine_val = _safe_float(locals().get("display_machine"))
+            amortized_total_val = _safe_float(locals().get("amortized_nre_total"))
+        except NameError:
+            # ``_safe_float`` is defined near the top of this module, but legacy
+            # builds of the desktop app occasionally execute this function in an
+            # environment where that helper is not injected into ``globals()``.
+            # Fall back to a minimal inline implementation so pricing continues
+            # to work instead of crashing with a ``NameError``.
+            def _fallback_safe_float(value: Any, default: float = 0.0) -> float:
+                try:
+                    coerced = float(value or 0.0)
+                except Exception:
+                    return default
+                if math.isnan(coerced) or math.isinf(coerced):
+                    return default
+                return coerced
+
+            display_labor_val = _fallback_safe_float(
+                locals().get("display_labor_for_ladder")
+            )
+            display_machine_val = _fallback_safe_float(locals().get("display_machine"))
+            amortized_total_val = _fallback_safe_float(locals().get("amortized_nre_total"))
 
         qty_for_reconcile = locals().get("qty")
         try:
