@@ -451,7 +451,9 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     _run_llm_suggestions = None  # type: ignore[assignment]
 
-run_llm_suggestions: RunLLMSuggestions | None = _run_llm_suggestions
+run_llm_suggestions: RunLLMSuggestions | None = typing.cast(
+    RunLLMSuggestions | None, _run_llm_suggestions
+)
 
 
 T = TypeVar("T")
@@ -7356,13 +7358,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         pad = max(1, page_width - len(left) - len(right))
         lines.append(f"{left}{' ' * pad}{right}")
 
-    def _canonical_hour_label(label: str) -> str:
-        text = str(label or "").strip()
-        if not text:
-            return ""
-        text = text.rstrip(":")
-        return re.sub(r"\s+", " ", text)
-
     def _is_extra_segment(segment: str) -> bool:
         try:
             return bool(EXTRA_DETAIL_RE.match(str(segment)))
@@ -8986,19 +8981,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
         hour_summary_entries[label] = (numeric_value, include_in_total)
 
-    def _canonical_hour_label(label: str) -> str:
-        text = str(label or "").strip()
-        if not text:
-            return ""
-        canon_key = _canonical_bucket_key(text)
-        if canon_key == "programming_amortized_per_part":
-            return "Programming (amortized per part)"
-        if canon_key == "fixture_build_amortized_per_part":
-            return "Fixture Build (amortized per part)"
-        if canon_key:
-            return _display_bucket_label(canon_key, label_overrides)
-        return text
-
     programming_meta = (nre_detail or {}).get("programming") or {}
     try:
         programming_hours = float(programming_meta.get("prog_hr", 0.0) or 0.0)
@@ -9085,15 +9067,24 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if isinstance(candidate_bucket_view, _MappingABC):
                 planner_bucket_view = candidate_bucket_view
 
-        buckets_map: Mapping[str, Any] | None = None
-        order: Sequence[Any] | None = None
+        planner_bucket_view_map: Mapping[str, Any] | None = None
         if isinstance(planner_bucket_view, _MappingABC):
-            buckets_map = planner_bucket_view.get("buckets")
-            order = planner_bucket_view.get("order")
+            planner_bucket_view_map = typing.cast(Mapping[str, Any], planner_bucket_view)
 
-        if not isinstance(buckets_map, _MappingABC):
+        buckets_candidate: Mapping[str, Any] | None = None
+        order_candidate: Sequence[Any] | None = None
+        if planner_bucket_view_map is not None:
+            buckets_candidate = planner_bucket_view_map.get("buckets")
+            order_candidate = planner_bucket_view_map.get("order")
+
+        if isinstance(buckets_candidate, _MappingABC):
+            buckets_map: Mapping[str, Any] = typing.cast(Mapping[str, Any], buckets_candidate)
+        else:
             buckets_map = {}
-        if not isinstance(order, Sequence):
+
+        if isinstance(order_candidate, Sequence):
+            order = order_candidate
+        else:
             order = _preferred_order_then_alpha(buckets_map.keys())
 
         def _bucket_minutes_from_view(canon_key: str) -> float:
@@ -22739,7 +22730,7 @@ def reconcile_holes(entity_holes_mm: Iterable[Any] | None, chart_ops: Iterable[d
     }
 
 
-def get_llm_quote_explanation(result: dict, model_path: str) -> str:
+def get_llm_quote_explanation(result: Mapping[str, Any], model_path: str) -> str:
     """
     Returns a single-paragraph, friendly explanation of the main cost drivers.
     Works with the local LLMClient.ask_json(), and has a safe fallback if no model.
@@ -22747,35 +22738,44 @@ def get_llm_quote_explanation(result: dict, model_path: str) -> str:
     import json
     import os
 
-    breakdown = result.get("breakdown", {}) or {}
-    totals = breakdown.get("totals", {}) or {}
-    process_costs = breakdown.get("process_costs", {}) or {}
-    material_detail = breakdown.get("material", {}) or {}
-    pass_meta = breakdown.get("pass_meta", {}) or {}
+    breakdown_raw = result.get("breakdown")
+    breakdown: Mapping[str, Any] = (
+        breakdown_raw if isinstance(breakdown_raw, Mapping) else {}
+    )
+    totals_raw = breakdown.get("totals")
+    totals: Mapping[str, Any] = (
+        totals_raw if isinstance(totals_raw, Mapping) else {}
+    )
+    process_costs_raw = breakdown.get("process_costs")
+    process_costs: Mapping[str, Any] = (
+        process_costs_raw if isinstance(process_costs_raw, Mapping) else {}
+    )
+    material_detail_raw = breakdown.get("material")
+    material_detail: Mapping[str, Any] = (
+        material_detail_raw if isinstance(material_detail_raw, Mapping) else {}
+    )
+    pass_meta_raw = breakdown.get("pass_meta")
+    pass_meta: Mapping[str, Any] = (
+        pass_meta_raw if isinstance(pass_meta_raw, Mapping) else {}
+    )
 
-    geo = result.get("geo") or {}
-    ui_vars = result.get("ui_vars") or {}
+    geo_raw = result.get("geo")
+    geo: Mapping[str, Any] = geo_raw if isinstance(geo_raw, Mapping) else {}
+    ui_vars_raw = result.get("ui_vars")
+    ui_vars: Mapping[str, Any] = (
+        ui_vars_raw if isinstance(ui_vars_raw, Mapping) else {}
+    )
 
-    final_price = float(result.get("price", totals.get("price", 0.0) or 0.0))
-    declared_labor_cost = float(totals.get("labor_cost", 0.0) or 0.0)
-    try:
-        labor_cost_rendered_val = breakdown.get("labor_cost_rendered", declared_labor_cost)
-    except Exception:
-        labor_cost_rendered_val = declared_labor_cost
-    try:
-        labor_cost = float(labor_cost_rendered_val or 0.0)
-    except Exception:
-        labor_cost = declared_labor_cost
-    try:
-        direct_costs_val = breakdown.get("total_direct_costs")
-        direct_costs = float(direct_costs_val)
-    except Exception:
-        direct_costs = float(totals.get("direct_costs", 0.0) or 0.0)
-    try:
-        subtotal_val = breakdown.get("ladder_subtotal")
-        subtotal = float(subtotal_val)
-    except Exception:
-        subtotal = labor_cost + direct_costs
+    final_price = _safe_float(result.get("price"), _safe_float(totals.get("price")))
+    declared_labor_cost = _safe_float(totals.get("labor_cost"))
+    labor_cost_rendered_val = breakdown.get(
+        "labor_cost_rendered", declared_labor_cost
+    )
+    labor_cost = _safe_float(labor_cost_rendered_val, declared_labor_cost)
+    direct_costs = _safe_float(
+        breakdown.get("total_direct_costs"), _safe_float(totals.get("direct_costs"))
+    )
+    subtotal = _safe_float(breakdown.get("ladder_subtotal"), labor_cost + direct_costs)
 
     def _to_float(value):
         try:
