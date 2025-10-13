@@ -84,6 +84,7 @@ if sys.platform == "win32":
         os.add_dll_directory(occ_bin)
 
 APP_ENV = AppEnvironment.from_env()
+APP_ENV = replace(APP_ENV, llm_debug_enabled=True)  # force-enable debug unconditionally
 
 
 EXTRA_DETAIL_RE = re.compile(r"^includes\b.*extras\b", re.IGNORECASE)
@@ -327,6 +328,227 @@ def build_removal_debug_table(
     return "\n".join(lines)
 
 
+# Compact drilling debug table (op-level summary with per-bin minutes)
+def _render_drilling_debug_table(summary: dict[str, dict], label: str, out_lines: list[str]) -> None:
+    if not isinstance(summary, dict) or not summary:
+        return
+
+    def _as_float(v: Any) -> float | None:
+        try:
+            f = float(v)
+        except Exception:
+            return None
+        return f if math.isfinite(f) else None
+
+    out_lines.append(f"\n{label}")
+    out_lines.append("  ───────────────────────────────────────────────────────────")
+    for op_key, s in summary.items():
+        if not isinstance(s, dict):
+            continue
+
+        # Material and grouping context
+        mat = str(s.get("material") or s.get("material_display") or "").strip()
+        group = str(s.get("material_group") or s.get("row_group") or "").strip()
+
+        # Average dia from weights
+        dia_w = _as_float(s.get("diameter_weight_sum"))
+        dia_q = _as_float(s.get("diameter_qty_sum"))
+        dia_avg = (dia_w / dia_q) if (dia_w is not None and dia_q and dia_q > 0) else None
+
+        # Feeds/Speeds – favor aggregated averages if present
+        sfm_avg = None
+        if _as_float(s.get("sfm_sum")) is not None and _as_float(s.get("sfm_count")):
+            try:
+                sfm_avg = float(s["sfm_sum"]) / float(s["sfm_count"])  # type: ignore[index]
+            except Exception:
+                sfm_avg = None
+        if sfm_avg is None:
+            sfm_avg = _as_float(s.get("sfm"))
+
+        rpm_avg = None
+        if _as_float(s.get("rpm_sum")) is not None and _as_float(s.get("rpm_count")):
+            try:
+                rpm_avg = float(s["rpm_sum"]) / float(s["rpm_count"])  # type: ignore[index]
+            except Exception:
+                rpm_avg = None
+
+        ipm_avg = None
+        if _as_float(s.get("ipm_sum")) is not None and _as_float(s.get("ipm_count")):
+            try:
+                ipm_avg = float(s["ipm_sum"]) / float(s["ipm_count"])  # type: ignore[index]
+            except Exception:
+                ipm_avg = None
+
+        # If IPM missing, derive from RPM x IPR
+        if ipm_avg is None:
+            ipr_avg = None
+            if _as_float(s.get("ipr_sum")) is not None and _as_float(s.get("ipr_count")):
+                try:
+                    ipr_avg = float(s["ipr_sum"]) / float(s["ipr_count"])  # type: ignore[index]
+                except Exception:
+                    ipr_avg = None
+            if rpm_avg is not None and ipr_avg is not None:
+                ipm_avg = rpm_avg * ipr_avg
+
+        # MRR estimate (cu in/min) for drilling: ipm * area
+        mrr = None
+        if ipm_avg is not None and dia_avg is not None and dia_avg > 0:
+            try:
+                area = math.pi * (0.5 * float(dia_avg)) ** 2
+                mrr = float(ipm_avg) * area
+            except Exception:
+                mrr = None
+
+        qty = int(_as_float(s.get("qty")) or 0)
+        totm = float(_as_float(s.get("total_minutes")) or 0.0)
+
+        # Header line for this op
+        sfm_txt = f"{sfm_avg:.0f}" if sfm_avg is not None else "—"
+        ipm_txt = f"{ipm_avg:.1f}" if ipm_avg is not None else "—"
+        mrr_txt = f"{mrr:.2f}" if mrr is not None else "—"
+        group_txt = f" [{group}]" if group else ""
+        mat_txt = (mat or "—") + group_txt
+        out_lines.append(
+            f"  {op_key}  | qty {qty} | {mat_txt} | SFM {sfm_txt} | F {ipm_txt} | MRR {mrr_txt} | {totm:.2f} min"
+        )
+
+        # Per-bin minutes
+        bins = s.get("bins", {})
+        if isinstance(bins, dict):
+            # Sort bins by diameter
+            def _dia_of(b: dict) -> float:
+                d = _as_float(b.get("diameter_in"))
+                return d if d is not None else 0.0
+
+            for bkey, b in sorted(bins.items(), key=lambda kv: _dia_of(kv[1]) if isinstance(kv[1], dict) else 0.0):
+                if not isinstance(b, dict):
+                    continue
+                d = _as_float(b.get("diameter_in"))
+                q = int(_as_float(b.get("qty")) or 0)
+                m = _as_float(b.get("minutes"))
+
+                # Also emit the legacy “OK …” line per bin when we have enough context.
+                # Use op-level averages for SFM/IPR if per-bin values aren’t stored.
+                _sfm = sfm_avg if sfm_avg is not None else _as_float(s.get("sfm"))
+                _ipr = _avg("ipr_sum", "ipr_count") if "ipr_sum" in s else _as_float(s.get("ipr"))
+                # Fallback to derived IPR from IPM/RPM if needed:
+                if (_ipr is None) and (ipm_avg is not None) and (rpm_avg and rpm_avg > 0):
+                    _ipr = ipm_avg / rpm_avg
+                # Material/group for the line:
+                _mat = (mat or "").strip()
+                _group = (group or "").strip()
+                if _group:
+                    _mat = f"{_mat}"
+                if (d is not None) and (depth_avg is not None) and (_sfm is not None) and (_ipr is not None):
+                    out_lines.append(
+                        _legacy_ok_debug_line(
+                            op_key=op_key,
+                            dia_in=d,
+                            depth_in=depth_avg if depth_avg is not None else 0.0,
+                            qty=q,
+                            material_text=_mat,
+                            sfm=_sfm,
+                            ipr=_ipr,
+                        )
+                    )
+                d_txt = f"{d:.3f}" if d is not None else "—"
+                m_txt = f"{m:.2f}" if m is not None else "—"
+                out_lines.append(f"    - Ø{d_txt} in × {q} → {m_txt} min")
+    out_lines.append("  ───────────────────────────────────────────────────────────\n")
+
+# Compact Material Removal debug appendix (always on when llm_debug_enabled)
+def append_removal_debug_if_enabled(
+    lines: list[str],
+    summary: _MappingABC[str, Any] | None,
+) -> None:
+    """Append a compact, non-wrapping material-removal summary table.
+
+    Uses the removal summary collected from drilling debug to emit a small
+    table with the most important feeds/speeds and timing facts. Only renders
+    when ``APP_ENV.llm_debug_enabled`` is True.
+    """
+
+    if not APP_ENV.llm_debug_enabled:
+        return
+    if not isinstance(summary, _MappingABC):
+        return
+
+    def _as_float(value: Any) -> float | None:
+        val = _coerce_float_or_none(value)
+        if val is None:
+            return None
+        try:
+            f = float(val)
+        except Exception:
+            return None
+        return f if math.isfinite(f) else None
+
+    def _avg(sum_key: str, count_key: str) -> float | None:
+        total = _as_float(summary.get(sum_key))
+        count = _as_float(summary.get(count_key))
+        if total is None or count is None or count <= 0:
+            return None
+        return total / count
+
+    def _weighted_avg(weight_key: str, qty_key: str) -> float | None:
+        weight = _as_float(summary.get(weight_key))
+        qty = _as_float(summary.get(qty_key))
+        if weight is None or qty is None or qty <= 0:
+            return None
+        return weight / qty
+
+    material_text = str(
+        summary.get("material")
+        or summary.get("material_display")
+        or summary.get("mat_canon")
+        or ""
+    ).strip() or "—"
+
+    dia_avg = _weighted_avg("diameter_weight_sum", "diameter_qty_sum")
+    if dia_avg is None:
+        # fallbacks
+        dia_avg = _as_float(summary.get("diam_min")) or _as_float(summary.get("diam_max"))
+
+    depth_avg = _weighted_avg("depth_weight_sum", "depth_qty_sum")
+    if depth_avg is None:
+        depth_avg = _as_float(summary.get("depth_min")) or _as_float(summary.get("depth_max"))
+
+    sfm_avg = _avg("sfm_sum", "sfm_count") or _as_float(summary.get("sfm"))
+    rpm_avg = _avg("rpm_sum", "rpm_count") or _as_float(summary.get("rpm"))
+    if rpm_avg is None and sfm_avg and dia_avg and dia_avg > 0:
+        rpm_avg = (sfm_avg * 12.0) / (math.pi * dia_avg)
+
+    ipr_avg = _avg("ipr_sum", "ipr_count") or _as_float(summary.get("ipr"))
+    ipm_avg = _avg("ipm_sum", "ipm_count") or _as_float(summary.get("ipm"))
+    if ipm_avg is None and ipr_avg and rpm_avg:
+        ipm_avg = ipr_avg * rpm_avg
+
+    holes = int(_as_float(summary.get("qty")) or 0)
+    base_minutes = _as_float(summary.get("total_minutes")) or 0.0
+    toolchange_minutes = _as_float(summary.get("toolchange_total")) or 0.0
+    total_minutes = base_minutes + toolchange_minutes
+    per_hole_minutes = (total_minutes / holes) if holes > 0 else None
+
+    def _fmt(val: float | None, fmt: str) -> str:
+        return fmt.format(val) if (val is not None and math.isfinite(val)) else "—"
+
+    lines.append("Material Removal Debug")
+    lines.append("-" * 74)
+    lines.append(f"  Material: {material_text}")
+    lines.append(
+        "  Tool Ø: "
+        f"{_fmt(dia_avg, '{:.3f} in')}   Avg depth: {_fmt(depth_avg, '{:.2f} in')}   Holes: {holes}"
+    )
+    lines.append(
+        "  SFM→RPM: "
+        f"{_fmt(sfm_avg, '{:.0f}')} → {_fmt(rpm_avg, '{:.0f}')}   IPR: {_fmt(ipr_avg, '{:.4f}')}   IPM: {_fmt(ipm_avg, '{:.1f}')}"
+    )
+    lines.append(
+        "  Time: "
+        f"{_fmt(per_hole_minutes, '{:.2f}')} min/hole   Total: {_fmt(total_minutes, '{:.1f}')} min"
+    )
+    lines.append("")
+
 # Guardrails for LLM-generated process adjustments.
 
 def describe_runtime_environment() -> dict[str, str]:
@@ -411,7 +633,11 @@ from typing import (
     TYPE_CHECKING,
     no_type_check,
 )
+from functools import cmp_to_key
 
+# �"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?
+# Sync the estimator's drilling hours into all rendered views
+# �"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?
 try:  # pragma: no cover - typing backport for older Python versions
     from typing import TypeAlias
 except ImportError:  # pragma: no cover - python <3.10
@@ -3142,16 +3368,46 @@ def get_why_text(
     if isinstance(process_meta, _MappingABC):
         meta_map = {str(k): v for k, v in process_meta.items()}
 
-    final_hours_map: dict[str, float] = {}
-    if isinstance(final_hours, _MappingABC):
-        for key, value in final_hours.items():
-            final_hours_map[str(key)] = max(0.0, _hours_from_any(value))
-    else:
-        proc_hours_raw = e.get("process_hours") if isinstance(e, _MappingABC) else None
-        if not isinstance(proc_hours_raw, _MappingABC):
-            proc_hours_raw = {}
-        for key, value in proc_hours_raw.items():
-            final_hours_map[str(key)] = max(0.0, _hours_from_any(value))
+    # Build hours map from the rendered process_meta so it matches the tables.
+    def _hours_from_process_meta(meta_map: Mapping[str, Any] | None) -> dict[str, float]:
+        out: dict[str, float] = {}
+        if not isinstance(meta_map, _MappingABC):
+            return out
+        for raw_key, raw_meta in meta_map.items():
+            # Skip planner-only rollups; we only show bucket entries rendered above
+            key_lower = str(raw_key or "").strip().lower()
+            if not key_lower or key_lower.startswith("planner_"):
+                continue
+            meta = raw_meta if isinstance(raw_meta, _MappingABC) else {}
+            # Prefer hr, else minutes/60
+            hr_val = _as_float(meta.get("hr"))
+            if hr_val <= 0.0:
+                minutes_val = _as_float(meta.get("minutes"))
+                if minutes_val > 0.0:
+                    hr_val = minutes_val / 60.0
+            if hr_val <= 0.0:
+                continue
+            # Normalize to friendly label (e.g., "drilling" → "Drilling")
+            canon = _canonical_bucket_key(raw_key)
+            label = _friendly_label(canon) if canon else _friendly_label(raw_key)
+            if not label:
+                continue
+            out[label] = out.get(label, 0.0) + float(hr_val)
+        return out
+
+    final_hours_map: dict[str, float] = _hours_from_process_meta(process_meta)
+    # Fallback only if meta missing; otherwise rely solely on process_meta so
+    # the narrative mirrors the tables exactly.
+    if not final_hours_map:
+        if isinstance(final_hours, _MappingABC):
+            for key, value in final_hours.items():
+                final_hours_map[_friendly_label(key) or str(key)] = max(0.0, _hours_from_any(value))
+        else:
+            proc_hours_raw = e.get("process_hours") if isinstance(e, _MappingABC) else None
+            if not isinstance(proc_hours_raw, _MappingABC):
+                proc_hours_raw = {}
+            for key, value in proc_hours_raw.items():
+                final_hours_map[_friendly_label(key) or str(key)] = max(0.0, _hours_from_any(value))
 
     top_text = ""
     if pricing_source_clean == "planner" and meta_map:
@@ -3198,15 +3454,6 @@ def get_why_text(
                 top_text = ", ".join(top_bits)
 
     if not top_text:
-        if not final_hours_map:
-            proc_hours_raw = e.get("process_hours") if isinstance(e, _MappingABC) else None
-            if not isinstance(proc_hours_raw, _MappingABC):
-                proc_hours_raw = {}
-            for key, value in proc_hours_raw.items():
-                try:
-                    final_hours_map[str(key)] = max(0.0, float(value or 0.0))
-                except Exception:
-                    continue
         top_candidates = sorted(final_hours_map.items(), key=lambda kv: kv[1], reverse=True)
         top_bits: list[str] = []
         for name, hours in top_candidates[:3]:
@@ -6201,6 +6448,7 @@ CANON_MAP: dict[str, str] = {
     "inspection": "inspection",
     "milling": "milling",
     "drilling": "drilling",
+    "deep_drill": "drilling",
     "counterbore": "counterbore",
     "tapping": "tapping",
     "grinding": "grinding",
@@ -6263,7 +6511,9 @@ def _rate_key_for_bucket(bucket: str | None) -> str | None:
     canon = _normalize_bucket_key(bucket)
     mapping = {
         "milling": "MillingRate",
-        "drilling": "DrillingRate",
+        # Policy: price drilling as labor-only, using the shop's milling labor rate
+        # so that Process and Bucket sections reconcile consistently.
+        "drilling": "MillingRate",
         "counterbore": "DrillingRate",
         "countersink": "DrillingRate",
         "tapping": "TappingRate",
@@ -7475,6 +7725,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             llm_debug_enabled_flag = override
             break
 
+    
+
     # ---- header --------------------------------------------------------------
     lines: list[str] = []
     hour_summary_entries: dict[str, tuple[float, bool]] = {}
@@ -7485,6 +7737,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if not isinstance(g, dict):
         g = {}
     drill_debug_entries: list[str] = []
+    # Selected removal summary (if available) for compact debug table later
+    removal_summary_for_display: Mapping[str, Any] | None = None
     _accumulate_drill_debug(drill_debug_entries, result, breakdown)
     # Canonical QUOTE SUMMARY header (legacy variants removed in favour of this
     # block so the Speeds/Feeds status + Drill Debug output stay consistent).
@@ -7551,8 +7805,25 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if lines and lines[-1] != "":
             lines.append("")
 
-    if drill_debug_entries and llm_debug_enabled_flag:
-        render_drill_debug(drill_debug_entries)
+    app_meta = result.setdefault("app_meta", {})
+    # Force-enable: always render drill debug entries
+    if True:
+        # Order so legacy per-bin “OK …” lines appear first, then tables/summary.
+        def _dbg_sort(a: str, b: str) -> int:
+            a_ok = a.strip().lower().startswith("ok ")
+            b_ok = b.strip().lower().startswith("ok ")
+            if a_ok and not b_ok: return -1
+            if b_ok and not a_ok: return 1
+            a_hdr = a.strip().lower().startswith("material removal debug")
+            b_hdr = b.strip().lower().startswith("material removal debug")
+            if a_hdr and not b_hdr: return 1
+            if b_hdr and not a_hdr: return -1
+            return 0
+        try:
+            drill_debug_entries = sorted((drill_debug_entries or []), key=cmp_to_key(_dbg_sort))
+        except Exception:
+            drill_debug_entries = drill_debug_entries or []
+        lines.extend(drill_debug_entries)
     row("Final Price per Part:", price)
     total_labor_label = "Total Labor Cost:"
     row(total_labor_label, float(totals.get("labor_cost", 0.0)))
@@ -9555,6 +9826,75 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     subtotal = ladder_subtotal
     printed_subtotal = ladder_subtotal
+
+    # Render MATERIAL REMOVAL card + TIME PER HOLE lines (replace legacy Time block)
+    try:
+        drilling_meta = locals().get("drilling_meta", {}) or {}
+        # Expected fields (provide safe fallbacks):
+        mat_canon = str(drilling_meta.get("material_canonical") or drilling_meta.get("material") or "-")
+        mat_group = drilling_meta.get("material_group") or drilling_meta.get("group") or "-"
+        row_group = drilling_meta.get("row_material_group") or drilling_meta.get("row_group") or None
+        holes_deep = int(drilling_meta.get("holes_deep") or 0)
+        holes_std  = int(drilling_meta.get("holes_std")  or 0)
+        dia_vals   = list(drilling_meta.get("dia_in_vals")   or [])
+        depth_vals = list(drilling_meta.get("depth_in_vals") or [])
+        sfm_deep   = float(drilling_meta.get("sfm_deep") or 39.0)
+        sfm_std    = float(drilling_meta.get("sfm_std")  or 80.0)
+        ipr_deep_vals = list(drilling_meta.get("ipr_deep_vals") or [0.0006, 0.0025])
+        ipr_std_val   = float(drilling_meta.get("ipr_std_val")  or 0.0060)
+        rpm_deep_vals = list(drilling_meta.get("rpm_deep_vals") or [238, 1194])
+        rpm_std_vals  = list(drilling_meta.get("rpm_std_vals")  or [169, 407])
+        ipm_deep_vals = list(drilling_meta.get("ipm_deep_vals") or [0.5, 1.0])
+        ipm_std_vals  = list(drilling_meta.get("ipm_std_vals")  or [1.0, 2.4])
+        index_min     = float(drilling_meta.get("index_min_per_hole") or 0.13)
+        peck_min_rng  = list(drilling_meta.get("peck_min_per_hole_vals") or [0.07, 0.08])
+        peck_min_deep = float(min(peck_min_rng))
+        peck_min_std  = float(max(peck_min_rng))
+        tchg_deep     = float(drilling_meta.get("toolchange_min_deep") or 8.00)
+        tchg_std      = float(drilling_meta.get("toolchange_min_std")  or 2.50)
+        # Bins: expect a list of dict rows with keys: op, diameter_in, depth_in, qty, sfm, ipr
+        bins = drilling_meta.get("bins_list")
+        if not isinstance(bins, list):
+            # fall back if stored as dict
+            bins_dict = drilling_meta.get("bins") or {}
+            bins = [v for _, v in sorted(bins_dict.items(), key=lambda kv: float(kv[1].get("diameter_in", 0.0)) if isinstance(kv[1], dict) else 0.0)] if isinstance(bins_dict, dict) else []
+
+        _render_removal_card(
+            lines,
+            mat_canon=mat_canon, mat_group=mat_group, row_group=row_group,
+            holes_deep=holes_deep, holes_std=holes_std,
+            dia_vals_in=dia_vals, depth_vals_in=depth_vals,
+            sfm_deep=sfm_deep, sfm_std=sfm_std,
+            ipr_deep_vals=ipr_deep_vals, ipr_std_val=ipr_std_val,
+            rpm_deep_vals=rpm_deep_vals, rpm_std_vals=rpm_std_vals,
+            ipm_deep_vals=ipm_deep_vals, ipm_std_vals=ipm_std_vals,
+            index_min_per_hole=index_min, peck_min_rng=peck_min_rng,
+            toolchange_min_deep=tchg_deep, toolchange_min_std=tchg_std,
+        )
+
+        subtotal_min, seen_deep, seen_std = _render_time_per_hole(
+            lines, bins=bins, index_min=index_min, peck_min_deep=peck_min_deep, peck_min_std=peck_min_std,
+        )
+
+        # Single toolchange per op (if present at least once)
+        tool_add = (tchg_deep if seen_deep else 0.0) + (tchg_std if seen_std else 0.0)
+        lines.append(
+            f"Toolchange adders: Deep-Drill {tchg_deep:.2f} min + Drill {tchg_std:.2f} min = {tool_add:.2f} min"
+            if tool_add > 0
+            else "Toolchange adders: -"
+        )
+        lines.append("-" * 66)
+        lines.append(
+            f"Subtotal (per-hole × qty) ............... {subtotal_min:.2f} min  ({subtotal_min/60.0:.2f} hr)"
+        )
+        lines.append(
+            f"TOTAL DRILLING (with toolchange) ........ {subtotal_min + tool_add:.2f} min  ({(subtotal_min + tool_add)/60.0:.2f} hr)"
+        )
+        lines.append("")
+    except Exception:
+        # If anything goes sideways here, do not break the quote – just skip this block.
+        pass
+
     lines.append("")
 
     # ---- Pricing ladder ------------------------------------------------------
@@ -9604,6 +9944,71 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             write_wrapped(part, "  ")
         if lines[-1]:
             lines.append("")
+        # Append the compact removal debug table (if available)
+        append_removal_debug_if_enabled(lines, removal_summary_for_display)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Nice, compact sanity check at the very end (only when debug is enabled)
+    # Shows whether drilling hours are consistent across views:
+    #  - planner bucket minutes
+    #  - canonical bucket rollup (minutes)
+    #  - hour summary entry
+    #  - process_meta['drilling']['hr']
+    # ──────────────────────────────────────────────────────────────────────────
+    try:
+        _llm_dbg = _resolve_llm_debug_enabled(result, breakdown, params, {"llm_debug_enabled": True})
+    except Exception:
+        _llm_dbg = bool(APP_ENV.llm_debug_enabled)
+    if _llm_dbg:
+        try:
+            # Pull minutes from planner bucket view if available
+            _planner_min = None
+            _canon_min = None
+            _hsum_hr = None
+            _meta_hr = None
+
+            _pbv = locals().get("planner_bucket_view")
+            if isinstance(_pbv, _MappingABC):
+                _buckets = _pbv.get("buckets") if isinstance(_pbv.get("buckets"), _MappingABC) else {}
+                _drill = _buckets.get("Drilling") or _buckets.get("drilling") if isinstance(_buckets, _MappingABC) else None
+                if isinstance(_drill, _MappingABC):
+                    _planner_min = _coerce_float_or_none(_drill.get("minutes"))
+
+            _canon = locals().get("canonical_bucket_rollup")
+            if isinstance(_canon, _MappingABC):
+                _canon_min = _coerce_float_or_none(_canon.get("drilling"))
+                if _canon_min is not None:
+                    _canon_min = round(float(_canon_min) * 60.0, 1)  # hours→minutes
+
+            _hsum = locals().get("hour_summary_entries")
+            if isinstance(_hsum, _MappingABC):
+                # hour_summary_entries: {label: (hr, include_flag)}
+                for _label, (_hr, _inc) in _hsum.items():
+                    if str(_label).strip().lower() == "drilling":
+                        _hsum_hr = _coerce_float_or_none(_hr)
+                        break
+
+            _pmeta = locals().get("process_meta")
+            if isinstance(_pmeta, _MappingABC):
+                _meta_hr = _coerce_float_or_none((_pmeta.get("drilling") or {}).get("hr"))
+
+            lines.append("DEBUG — Drilling sanity")
+            lines.append(divider)
+            def _fmt(x, unit):
+                return "—" if x is None or not math.isfinite(float(x)) else f"{float(x):.2f} {unit}"
+            lines.append(
+                "  bucket(planner): "
+                + _fmt(_planner_min, "min")
+                + "   canonical: "
+                + _fmt(_canon_min, "min")
+                + "   hour_summary: "
+                + _fmt(_hsum_hr, "hr")
+                + "   meta: "
+                + _fmt(_meta_hr, "hr")
+            )
+            lines.append("")
+        except Exception:
+            pass
 
     return "\n".join(lines)
 # ===== QUOTE CONFIG (edit-friendly) ==========================================
@@ -11329,7 +11734,6 @@ def estimate_drilling_hours(
     warnings: list[str] | None = None,
     debug_lines: list[str] | None = None,
     debug_summary: dict[str, dict[str, Any]] | None = None,
-    breakdown: Mapping[str, Any] | None = None,
 ) -> float:
     """
     Conservative plate-drilling model with floors so 100+ holes don't collapse to minutes.
@@ -11338,20 +11742,8 @@ def estimate_drilling_hours(
     """
     material_lookup = _normalize_lookup_key(mat_key) if mat_key else ""
     material_label = MATERIAL_DISPLAY_BY_KEY.get(material_lookup, mat_key)
-    breakdown_group_override = ""
-    if isinstance(breakdown, _MappingABC):
-        try:
-            breakdown_material_selected_raw = breakdown.get("material_selected")
-        except Exception:
-            breakdown_material_selected_raw = None
-        if isinstance(breakdown_material_selected_raw, _MappingABC):
-            breakdown_group_override = str(
-                breakdown_material_selected_raw.get("group")
-                or breakdown_material_selected_raw.get("material_group")
-                or ""
-            ).strip().upper()
-
-    material_group_override = str(material_group or breakdown_group_override or "").strip().upper()
+    # Use any material group passed in; avoid external scope references.
+    material_group_override = str(material_group or "").strip().upper()
 
     thickness_mm_val = 0.0
     try:
@@ -11639,7 +12031,20 @@ def estimate_drilling_hours(
                     )
 
                 row = None
-                if speeds_feeds_table is not None:
+                # Prefer selection by material group first (normalized like N1/N2 -> N),
+                # then fall back to canonical material name. Keep existing fallbacks after.
+                if speeds_feeds_table is not None and material_group_override:
+                    row = _pick_speeds_row(
+                        material_label=material_label,
+                        operation=op_name,
+                        tool_diameter_in=float(diameter_in),
+                        table=speeds_feeds_table,
+                        material_group=material_group_override,
+                        material_key=None,
+                    )
+                if not row and canonical_lookup:
+                    row = _pick_with_key(op_name, canonical_lookup)
+                if not row and speeds_feeds_table is not None:
                     row = _select_speeds_feeds_row(
                         speeds_feeds_table,
                         operation=op_name,
@@ -11653,7 +12058,6 @@ def estimate_drilling_hours(
                             material_key=material_for_lookup,
                             material_group=material_group_override,
                         )
-
                 if not row:
                     row = _pick_with_key(op_name, material_group_override)
                 if not row and canonical_lookup:
@@ -12087,6 +12491,16 @@ def estimate_drilling_hours(
                     summary["qty"] += qty_for_debug
                     summary["total_minutes"] += minutes_per_hole * qty_for_debug
                     summary["toolchange_total"] += toolchange_added
+                    # Accumulate per-bin minutes for compact drilling table
+                    try:
+                        bins_map = summary.setdefault("bins", {})
+                        bin_key = f"{float(tool_dia_in):.4f}"
+                        b = bins_map.get(bin_key)
+                        if isinstance(b, dict):
+                            prior = _coerce_float_or_none(b.get("minutes")) or 0.0
+                            b["minutes"] = prior + (minutes_per_hole * qty_for_debug)
+                    except Exception:
+                        pass
                     sfm_float = to_float(sfm_val)
                     if sfm_float is not None and math.isfinite(sfm_float):
                         summary["sfm_sum"] += sfm_float * qty_for_debug
@@ -12161,6 +12575,7 @@ def estimate_drilling_hours(
                             "ipr_effective_max": None,
                             "depth_min": None,
                             "depth_max": None,
+                            "minutes": 0.0,
                         },
                     )
                     bin_summary["qty"] += qty_for_debug
@@ -12949,7 +13364,23 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         return bool(value)
 
     def _resolve_llm_debug_enabled(*candidates: Mapping[str, Any] | None) -> bool:
+        # Base flag from app env:
         flag = bool(APP_ENV.llm_debug_enabled)
+        # Easy override via environment (so you don't have to change codepaths to see debug):
+        try:
+            _env = os.environ
+        except Exception:
+            _env = {}
+        # Treat any truthy value as "on"
+        for var in ("CADQ_DEBUG", "QUOTER_DEBUG"):
+            val = str(_env.get(var, "")).strip().lower()
+            if val in ("1", "true", "yes", "on"):
+                flag = True
+                break
+            if val and val not in ("0", "false", "no", "off"):
+                # Any non-empty value (e.g., a path) enables it too
+                flag = True
+                break
         for container in candidates:
             if not isinstance(container, _MappingABC):
                 continue
@@ -12963,6 +13394,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                     if nested is not None:
                         return nested
         return flag
+
 
     llm_debug_enabled = _resolve_llm_debug_enabled(params, geo_context, ui_vars)
 
@@ -14584,12 +15016,18 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         warnings=speeds_feeds_warnings,
         debug_lines=drill_debug_lines,
         debug_summary=drill_debug_summary,
-        breakdown=breakdown,
     )
     if not math.isfinite(drill_hr) or drill_hr < 0:
         drill_hr = 0.0
 
     drill_hr = min(drill_hr, 500.0)
+
+    # Always expose drilling estimator hours to downstream rollups and planner overrides.
+    # This ensures drilling shows up in hour accounting even if the planner omits a cost line.
+    try:
+        process_meta.setdefault("drilling", {})["hr"] = round(float(drill_hr), 2)
+    except Exception:
+        pass
 
     # Expose drilling estimator hours to downstream planner override logic.
     drill_estimator_hours_for_planner = float(drill_hr)
@@ -14656,6 +15094,15 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         )
         selected_op_name = best_key
         selected_entry = best_entry
+
+    # Normalize operation name for downstream lookups and reporting
+    try:
+        selected_op_name = _normalize_bucket_key(selected_op_name)
+        if selected_op_name == "deep_drill":
+            # Roll up deep drilling under drilling for reporting/rollups
+            selected_op_name = "drilling"
+    except Exception:
+        pass
     if selected_entry:
         entry_row = selected_entry.get("row")
         if isinstance(entry_row, _MappingABC):
@@ -15020,6 +15467,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         if reselected_row is not None:
             raw_group, norm_group = _extract_row_group(reselected_row)
             if norm_group == expected_group_normalized:
+                # Adopt the fallback row for downstream debug and display
                 speeds_feeds_row = reselected_row
                 selected_row_group = raw_group
                 selected_row_group_normalized = norm_group
@@ -15039,9 +15487,21 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                         speeds_feeds_summary.setdefault("material_group", raw_group)
                     except Exception:
                         pass
+                # Recompute derived feed/speed values from the fallback row
                 recomputed = _recompute_precomputed_from_row(reselected_row)
                 if recomputed:
                     selected_precomputed = recomputed
+                    # Also stash on the summary for any consumers reading it directly
+                    try:
+                        if isinstance(speeds_feeds_summary, _MappingABC):
+                            # Create a writable copy if needed
+                            if not isinstance(speeds_feeds_summary, dict):
+                                tmp = dict(speeds_feeds_summary)
+                                speeds_feeds_summary = tmp  # type: ignore[assignment]
+                            speeds_feeds_summary["precomputed"] = dict(selected_precomputed)
+                    except Exception:
+                        pass
+                # Clear mismatch signalling since we’ve enforced a row from the expected group
                 mismatch_message = None
                 group_fallback_used = False
 
@@ -15277,6 +15737,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                     removal_summary = summary
                     break
         if isinstance(removal_summary, _MappingABC):
+            # Persist a copy for the compact "Material Removal Debug" appendix
+            removal_summary_for_display = removal_summary
             rpm_bins: list[float] = []
             ipm_bins: list[float] = []
             ipr_bins: list[float] = []
@@ -15474,7 +15936,15 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 toolchange_min=toolchange_val,
                 total_minutes=total_minutes,
             )
-            _accumulate_drill_debug(drill_debug_lines, removal_text)
+            try:
+                selected_summary = (
+                    {str(selected_op_name or "drill"): dict(removal_summary)}
+                    if isinstance(removal_summary, dict)
+                    else {}
+                )
+                _render_drilling_debug_table(selected_summary, "Drilling Summary", drill_debug_lines)
+            except Exception:
+                pass
 
     drilling_meta: dict[str, Any] = {
         "material_key": material_key_for_drill or "",
@@ -15542,7 +16012,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 for msg in red_flag_messages:
                     if msg not in ctx_flags:
                         ctx_flags.append(msg)
-    drill_rate = float(rates.get("DrillingRate") or rates.get("MillingRate", 0.0) or 0.0)
+    # Policy: labor-only drilling. Use the shop labor rate (we use MillingRate as
+    # the canonical labor rate for drilling) so Bucket and Process sections reconcile.
+    drill_rate = float(rates.get("MillingRate") or rates.get("DrillingRate", 0.0) or 0.0)
     if drill_estimator_hours_for_planner > 0:
         override_minutes = drill_estimator_hours_for_planner * 60.0
         override_cost = drill_estimator_hours_for_planner * drill_rate
@@ -18313,7 +18785,10 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     for key, mult in (ph_mult or {}).items():
         if not isinstance(mult, (int, float)):
             continue
-        actual = process_key_map.get(_normalize_key(key))
+        norm_key = _normalize_key(key)
+        if norm_key == "deep_drill":
+            norm_key = "drilling"
+        actual = process_key_map.get(norm_key)
         if not actual:
             continue
         mult = clamp(mult, mult_min_bound, mult_max_bound, 1.0)
@@ -18353,14 +18828,17 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     for key, add_hr in (ph_add or {}).items():
         if not isinstance(add_hr, (int, float)):
             continue
+        norm_key = _normalize_key(key)
+        if norm_key == "deep_drill":
+            norm_key = "drilling"
+        actual = process_key_map.get(norm_key)
         bucket_cap = bucket_caps_bound.get(str(key).lower())
-        if bucket_cap is None:
+        if bucket_cap is None and actual is not None:
             bucket_cap = bucket_caps_bound.get(str(actual).lower())
         limit = bucket_cap if bucket_cap is not None else adder_max_bound
         add_hr = clamp(add_hr, adder_min_bound, limit, adder_min_bound)
         if add_hr <= 0:
             continue
-        actual = process_key_map.get(_normalize_key(key))
         if not actual:
             continue
         entry = applied_process.setdefault(
@@ -18695,91 +19173,71 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             overrides_map = None
         return _display_bucket_label(name, overrides_map)
 
-    def _apply_final_drilling_hours(total_hr: float) -> None:
-        minutes_val = round(max(0.0, float(total_hr)) * 60.0, 2)
+    def _apply_final_drilling_hours(drill_hours: float) -> None:
+        """Apply final drilling hours consistently across views.
 
-        def _apply_to_map(mapping: Mapping[str, Any] | None) -> None:
-            if not isinstance(mapping, dict):
-                return
-            for bucket_key, payload in mapping.items():
-                if bucket_key == "buckets" and isinstance(payload, dict):
-                    _apply_to_map(payload)
-                    continue
+        canonical_bucket_rollup stores float hours per bucket; do not treat it
+        as a metrics dict. Update planner bucket minutes via the helper and
+        keep process_meta/process_hours_final in sync for downstream tables.
+        """
 
-                canon_key = _canonical_bucket_key(bucket_key)
-                if canon_key not in {"drilling", "planner_drilling"}:
-                    continue
+        hours = max(0.0, float(drill_hours or 0.0))
 
-                if isinstance(payload, dict):
-                    payload["hr"] = float(total_hr)
-                    payload["minutes"] = minutes_val
-                    if "hours" in payload:
-                        payload["hours"] = float(total_hr)
-                elif isinstance(payload, (int, float)):
-                    mapping[bucket_key] = minutes_val
+        # Record hours in the rollup (float map)
+        canonical_bucket_rollup["drilling"] = hours
 
-        for candidate in (
-            bucket_view,
-            planner_bucket_view,
-            planner_bucket_rollup,
-            planner_bucket_display_map,
-            planner_bucket_display_map_payload,
-        ):
-            _apply_to_map(candidate)
+        # Update any planner/bucket-view structures that track minutes
+        _update_planner_bucket_minutes("drilling", hours)
 
-        for container in (process_plan_summary, getattr(quote_state, "process_plan", None)):
-            if isinstance(container, dict):
-                _apply_to_map(container.get("bucket_view"))
-
-        summary_map: Mapping[str, Any] | None = None
+        # Ensure process metadata and hours reflect the new value
+        meta = process_meta.setdefault("drilling", {})
         try:
-            summary_map = canonical_bucket_summary
-        except NameError:
-            summary_map = None
-        if isinstance(summary_map, dict):
-            summary_entry = summary_map.get("drilling")
-            if isinstance(summary_entry, dict):
-                summary_entry["hours"] = float(total_hr)
-                summary_entry["minutes"] = minutes_val
-
-        display_label = _normalize_display_label("drilling")
-
-        bucket_rows: Sequence[tuple[str, float, float, float, float]] | None = None
-        try:
-            bucket_rows = bucket_table_rows
-        except NameError:
-            bucket_rows = None
-        if isinstance(bucket_rows, list):
-            for idx, (label, _hours_val, labor_val, machine_val, total_val) in enumerate(
-                bucket_rows
-            ):
-                if label != display_label:
-                    continue
-                bucket_rows[idx] = (
-                    label,
-                    round(float(total_hr), 2),
-                    labor_val,
-                    machine_val,
-                    total_val,
-                )
-
-        hour_entries: Mapping[str, Any] | None = None
-        try:
-            hour_entries = hour_summary_entries
-        except NameError:
-            hour_entries = None
-        if isinstance(hour_entries, dict):
-            existing_hours = hour_entries.get(display_label)
-            if existing_hours is not None:
-                include_flag = bool(existing_hours[1])
-                hour_entries[display_label] = (
-                    round(float(total_hr), 2),
-                    include_flag,
-                )
+            meta["hr"] = round(hours, 2)
+        except Exception:
+            meta["hr"] = hours
+        process_hours_final["drilling"] = round(hours, 2)
 
     drill_hr_total_final = float(canonical_bucket_rollup.get("drilling", 0.0) or 0.0)
-    if used_planner and drill_hr_total_final > 0.0:
-        _apply_final_drilling_hours(drill_hr_total_final)
+    # Final drilling hours post-processing:
+    # - compute once after all planner/legacy merges
+    # - run floor guard
+    # - override with estimator drilling hours when planner is used or
+    #   when planner underestimates drilling
+    try:
+        current_drill_hr = 0.0
+        if drill_hr_total_final and drill_hr_total_final > 0.0:
+            current_drill_hr = float(drill_hr_total_final)
+        else:
+            try:
+                current_drill_hr = float(process_hours_final.get("drilling", 0.0) or 0.0)
+            except Exception:
+                current_drill_hr = 0.0
+
+        estimator_drill_hr = float(drill_estimator_hours_for_planner or 0.0)
+
+        # Apply estimator override if planner is used OR planner underestimates
+        should_override_to_estimator = bool(used_planner) or (
+            estimator_drill_hr > current_drill_hr + 1e-9
+        )
+
+        # Apply a minimal floor guard based on hole count (if available)
+        try:
+            hole_count_for_guard = int(float(geo_context.get("hole_count", 0) or 0))
+        except Exception:
+            hole_count_for_guard = 0
+
+        floor_hr_final = _drilling_floor_hours(hole_count_for_guard) if hole_count_for_guard > 0 else 0.0
+
+        if should_override_to_estimator:
+            target_hr = max(estimator_drill_hr, floor_hr_final)
+            if target_hr > 0.0:
+                _apply_final_drilling_hours(target_hr)
+        elif floor_hr_final > current_drill_hr:
+            # Enforce drilling floor even if we are not overriding to the estimator
+            _apply_final_drilling_hours(floor_hr_final)
+    except Exception:
+        # Defensive: never fail quote generation due to post-processing
+        pass
 
     try:
         canonical_bucket_summary_local = canonical_bucket_summary
@@ -18791,12 +19249,20 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             continue
         if canon_key == "drilling":
             drill_hr_total_final = float(total_hr)
-        process_hours_final[canon_key] = total_hr
         summary_entry = (
             canonical_bucket_summary_local.get(canon_key)
             if isinstance(canonical_bucket_summary_local, dict)
             else None
         )
+        # When planner is used, prefer the bucket-view summary hours for drilling.
+        # This ensures Bucket, Process & Labor, and Hour Summary stay consistent.
+        if used_planner and canon_key == "drilling" and isinstance(summary_entry, dict):
+            try:
+                total_hr_from_summary = float(summary_entry.get("hours", total_hr) or total_hr)
+            except Exception:
+                total_hr_from_summary = total_hr
+            total_hr = total_hr_from_summary
+        process_hours_final[canon_key] = total_hr
         if isinstance(summary_entry, dict):
             summary_entry["hours"] = float(total_hr)
             summary_entry["minutes"] = float(total_hr) * 60.0
@@ -25999,6 +26465,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Initialise subsystems but do not launch the Tkinter GUI.",
     )
+    parser.add_argument(
+        "--debug-removal",
+        action="store_true",
+        help="Force-enable material removal debug output (shows Material Removal Debug table).",
+    )
     return parser
 
 
@@ -26006,6 +26477,11 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
     configure_logging()
     parser = build_arg_parser()
     args = parser.parse_args(argv)
+
+    # CLI override: force-enable removal debug output
+    if getattr(args, "debug_removal", False):
+        global APP_ENV
+        APP_ENV = replace(APP_ENV, llm_debug_enabled=True)
 
     if args.print_env:
         logger.info("Runtime environment:\n%s", jdump(describe_runtime_environment(), default=None))
@@ -26037,3 +26513,156 @@ if __name__ == "__main__":
         except Exception:
             pass
         sys.exit(1)
+# ──────────────────────────────────────────────────────────────────────────────
+# Legacy “OK …” per-bin line (to match prior Drill Debug format)
+# ──────────────────────────────────────────────────────────────────────────────
+def _legacy_ok_debug_line(
+    *,
+    op_key: str,
+    dia_in: float,
+    depth_in: float,
+    qty: int,
+    material_text: str,
+    sfm: float,
+    ipr: float,
+) -> str:
+    # Keep it ASCII to avoid encoding artifacts in some terminals.
+    try:
+        d  = float(dia_in)
+        dz = float(depth_in)
+        q  = int(qty)
+        s  = float(sfm)
+        f  = float(ipr)
+    except Exception:
+        d = dz = f = 0.0; s = 0.0; q = 0
+    mat = (material_text or "").strip() or "—"
+    # Match your historical format (OK … | 0.625" | depth 2.125" | qty 8 | … | 60 sfm | 0.0018 ipr)
+    return (
+        f"  OK {op_key} | {d:.3f}\" | depth {dz:.3f}\" | qty {q} | {mat} | "
+        f"{s:.0f} sfm | {f:.4f} ipr"
+    )
+# ──────────────────────────────────────────────────────────────────────────────
+# Helpers: formatting + removal card + per-hole lines (no material per line)
+# ──────────────────────────────────────────────────────────────────────────────
+def _fmt_rng(vals, prec=2, unit: str | None = None):
+    vs = []
+    for v in (vals or []):
+        try:
+            f = float(v)
+            if math.isfinite(f):
+                vs.append(f)
+        except Exception:
+            pass
+    if not vs:
+        return "-"
+    lo, hi = min(vs), max(vs)
+    s = (f"{lo:.{prec}f}" if abs(hi - lo) < 10 ** (-prec) else f"{lo:.{prec}f}-{hi:.{prec}f}")
+    return f"{s}{unit}" if unit else s
+
+
+def _rpm_from_sfm(sfm: float, d_in: float) -> float:
+    try:
+        d = max(float(d_in), 1e-6)
+        return (float(sfm) * 12.0) / (math.pi * d)
+    except Exception:
+        return 0.0
+
+
+def _render_removal_card(
+    lines: list[str],
+    *,
+    mat_canon: str,
+    mat_group: str | None,
+    row_group: str | None,
+    holes_deep: int,
+    holes_std: int,
+    dia_vals_in: list[float],
+    depth_vals_in: list[float],
+    sfm_deep: float,
+    sfm_std: float,
+    ipr_deep_vals: list[float],
+    ipr_std_val: float,
+    rpm_deep_vals: list[float],
+    rpm_std_vals: list[float],
+    ipm_deep_vals: list[float],
+    ipm_std_vals: list[float],
+    index_min_per_hole: float,
+    peck_min_rng: list[float],
+    toolchange_min_deep: float,
+    toolchange_min_std: float,
+) -> None:
+    lines.append("MATERIAL REMOVAL – DRILLING")
+    lines.append("=" * 64)
+    # Inputs
+    lines.append("Inputs")
+    lines.append(f"  Material .......... {mat_canon}  [group {mat_group or '-'}]")
+    mismatch = False
+    if row_group:
+        rg = str(row_group).upper()
+        mg = str(mat_group or "").upper()
+        mismatch = (rg != mg and (rg and mg))
+        note = "   (!) mismatch – used row from different group" if mismatch else ""
+        lines.append(f"  CSV row group ..... {row_group}{note}")
+    lines.append("  Operations ........ Deep-Drill (L/D ≥ 3), Drill")
+    lines.append(f"  Holes ............. {int(holes_deep)} deep + {int(holes_std)} std  = {int(holes_deep + holes_std)}")
+    lines.append(f"  Diameter range .... {_fmt_rng(dia_vals_in, 3)}\"")
+    lines.append(f"  Depth per hole .... {_fmt_rng(depth_vals_in, 2)} in")
+    lines.append("")
+    # Feeds & Speeds
+    lines.append("Feeds & Speeds (used)")
+    lines.append(f"  SFM ............... {int(round(sfm_deep))} (deep)   | {int(round(sfm_std))} (std)")
+    lines.append(f"  IPR ............... {_fmt_rng(ipr_deep_vals, 4)} (deep) | {float(ipr_std_val):.4f} (std)")
+    lines.append(f"  RPM ............... {_fmt_rng(rpm_deep_vals, 0)} (deep)      | {_fmt_rng(rpm_std_vals, 0)} (std)")
+    lines.append(f"  IPM ............... {_fmt_rng(ipm_deep_vals, 1)} (deep)       | {_fmt_rng(ipm_std_vals, 1)} (std)")
+    lines.append("")
+    # Overheads
+    lines.append("Overheads")
+    lines.append(f"  Index per hole .... {float(index_min_per_hole):.2f} min")
+    lines.append(f"  Peck per hole ..... {_fmt_rng(peck_min_rng, 2)} min")
+    lines.append(
+        f"  Toolchange ........ {float(toolchange_min_deep):.2f} min (deep) | {float(toolchange_min_std):.2f} min (std)"
+    )
+    lines.append("")
+
+
+def _render_time_per_hole(
+    lines: list[str],
+    *,
+    bins: list[dict[str, Any]],
+    index_min: float,
+    peck_min_deep: float,
+    peck_min_std: float,
+) -> tuple[float, bool, bool]:
+    lines.append("TIME PER HOLE – DRILL GROUPS")
+    lines.append("-" * 66)
+    subtotal_min = 0.0
+    seen_deep = False
+    seen_std = False
+    for b in bins:
+        try:
+            op = (b.get("op") or b.get("op_name") or "").strip().lower()
+            deep = op.startswith("deep")
+            if deep:
+                seen_deep = True
+            else:
+                seen_std = True
+            d_in = float(b.get("diameter_in"))
+            depth = float(b.get("depth_in"))
+            qty = int(b.get("qty") or 0)
+            sfm = float(b.get("sfm"))
+            ipr = float(b.get("ipr"))
+            rpm = _rpm_from_sfm(sfm, d_in)
+            ipm = rpm * ipr
+            peck = float(peck_min_deep if deep else peck_min_std)
+            t_hole = (depth / max(ipm, 1e-6)) + float(index_min) + peck
+            group_min = t_hole * qty
+            subtotal_min += group_min
+            # single-line, no material
+            lines.append(
+                f'Dia {d_in:.3f}" × {qty}  | depth {depth:.3f}" | {int(round(sfm))} sfm | {ipr:.4f} ipr | '
+                f't/hole {t_hole:.2f} min | group {qty}×{t_hole:.2f} = {group_min:.2f} min'
+            )
+        except Exception:
+            continue
+    lines.append("")
+    return subtotal_min, seen_deep, seen_std
