@@ -128,3 +128,15 @@ git-auto-pull/
 # Large model binaries
 models/*.gguf
 models/**/*.gguf
+
+# Transient quote outputs and artifacts
+latest_quote_*.txt
+DummyQuote*.txt
+LLM_log.txt
+out.json
+material_price_backup.csv
+speeds_feeds_merged.csv
+temp_conflict_block.txt
+
+# PDFs (generated/reference exports)
+*.pdf
