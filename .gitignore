@@ -110,3 +110,21 @@ dmypy.json
 
 # Excel temporary files
 ~$*.xlsx
+
+# --- Local dev artifacts (added by Codex) ---
+# Browser profile and caches
+edge_profile/
+
+# Local logs and debug snapshots
+llm_debug/
+
+# Local helper scripts
+git-auto-pull/
+
+# Auth/session state (do not commit secrets)
+.mcmaster_auth.json
+.playwright_state.json
+
+# Large model binaries
+models/*.gguf
+models/**/*.gguf
