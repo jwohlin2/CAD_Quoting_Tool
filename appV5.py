@@ -6263,6 +6263,9 @@ def _coerce_bucket_metric(data: Mapping[str, Any] | None, *candidates: str) -> f
 _FINAL_BUCKET_HIDE_KEYS = {"planner_total", "planner_labor", "planner_machine", "misc"}
 
 
+SHOW_BUCKET_DIAGNOSTICS_OVERRIDE = False
+
+
 def _final_bucket_key(raw_key: Any) -> str:
     text = re.sub(r"[^a-z0-9]+", "_", str(raw_key or "").lower()).strip("_")
     if not text:
@@ -7137,8 +7140,18 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         for segment in re.split(r";\s*", str(detail)):
             write_wrapped(segment, indent)
 
+    global SHOW_BUCKET_DIAGNOSTICS_OVERRIDE
+
+    bucket_diag_env = os.getenv("SHOW_BUCKET_DIAGNOSTICS")
+    show_bucket_diagnostics_flag = _is_truthy_flag(bucket_diag_env) or bool(
+        SHOW_BUCKET_DIAGNOSTICS_OVERRIDE
+    )
+
     def render_bucket_table(rows: Sequence[tuple[str, float, float, float, float]]):
         if not rows:
+            return
+
+        if not show_bucket_diagnostics_flag:
             return
 
         headers = ("Bucket", "Hours", "Labor $", "Machine $", "Total $")
@@ -8425,22 +8438,54 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         process_plan_summary_local = (
             breakdown.get("process_plan") if isinstance(breakdown, _MappingABC) else None
         )
-    bucket_view_raw = (
-        process_plan_summary_local.get("bucket_view")
-        if isinstance(process_plan_summary_local, _MappingABC)
-        else None
-    )
-    if isinstance(bucket_view_raw, _MappingABC):
-        bucket_view = _prepare_bucket_view(bucket_view_raw)
-        if isinstance(process_plan_summary_local, dict):
-            process_plan_summary_local["bucket_view"] = copy.deepcopy(bucket_view)
-    else:
-        bucket_view = None
-    if isinstance(bucket_view, _MappingABC):
-        buckets = bucket_view.get("buckets") if isinstance(bucket_view, _MappingABC) else None
+
+    bucket_view_final: dict[str, Any] | None = None
+
+    def _prepare_bucket_view_candidate(
+        candidate: Mapping[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(candidate, _MappingABC):
+            return None
+        prepared = _prepare_bucket_view(candidate)
+        buckets_map = prepared.get("buckets")
+        if isinstance(buckets_map, _MappingABC) and buckets_map:
+            return prepared
+        return prepared
+
+    bucket_view_candidates: list[Mapping[str, Any] | None] = []
+    if isinstance(process_plan_summary_local, _MappingABC):
+        bucket_view_candidates.append(process_plan_summary_local.get("bucket_view"))
+    if isinstance(breakdown, _MappingABC):
+        bucket_view_candidates.append(breakdown.get("bucket_view"))
+    if bucket_rollup_map:
+        bucket_view_candidates.append({"buckets": bucket_rollup_map})
+
+    for candidate in bucket_view_candidates:
+        prepared = _prepare_bucket_view_candidate(candidate)
+        if prepared is None:
+            continue
+        bucket_view_final = prepared
+        buckets_map = prepared.get("buckets")
+        if isinstance(buckets_map, _MappingABC) and buckets_map:
+            break
+
+    if bucket_view_final is not None and isinstance(process_plan_summary_local, dict):
+        process_plan_summary_local["bucket_view"] = copy.deepcopy(bucket_view_final)
+
+    bucket_view = bucket_view_final
+    if isinstance(bucket_view_final, _MappingABC):
+        buckets = (
+            bucket_view_final.get("buckets")
+            if isinstance(bucket_view_final, _MappingABC)
+            else None
+        )
         if not isinstance(buckets, _MappingABC):
             buckets = {}
-        order = bucket_view.get("order") if isinstance(bucket_view, _MappingABC) else None
+        order = (
+            bucket_view_final.get("order")
+            if isinstance(bucket_view_final, _MappingABC)
+            else None
+        )
         if not isinstance(order, Sequence):
             order = _preferred_order_then_alpha(buckets.keys())
 
@@ -8566,10 +8611,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 prog_pp = 0.0
         if prog_pp > 0:
             label = "Programming (amortized)"
-            _add_labor_cost_line(label, prog_pp)
-            amortized_nre_total += prog_pp
-            labor_costs_display[label] = float(labor_costs_display.get(label, 0.0)) + prog_pp
-            display_labor_for_ladder += prog_pp
+            if label in labor_costs_display:
+                amortized_nre_total += _safe_float(labor_costs_display.get(label, 0.0))
+            else:
+                _add_labor_cost_line(label, prog_pp)
+                amortized_nre_total += prog_pp
+                labor_costs_display[label] = float(labor_costs_display.get(label, 0.0)) + prog_pp
+                display_labor_for_ladder += prog_pp
 
         try:
             fix_pp = float(fixture_labor_per_part_cost or 0.0)
@@ -8586,10 +8634,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 fix_pp = 0.0
         if fix_pp > 0:
             label = "Fixture Build (amortized)"
-            _add_labor_cost_line(label, fix_pp)
-            amortized_nre_total += fix_pp
-            labor_costs_display[label] = float(labor_costs_display.get(label, 0.0)) + fix_pp
-            display_labor_for_ladder += fix_pp
+            if label in labor_costs_display:
+                amortized_nre_total += _safe_float(labor_costs_display.get(label, 0.0))
+            else:
+                _add_labor_cost_line(label, fix_pp)
+                amortized_nre_total += fix_pp
+                labor_costs_display[label] = float(labor_costs_display.get(label, 0.0)) + fix_pp
+                display_labor_for_ladder += fix_pp
 
     process_items = list((process_costs or {}).items())
     ordered_process_items: list[tuple[str, Any]] = []
@@ -8655,22 +8706,28 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     add_process_notes(canon_key, indent="    ")
     if labor_cost_totals:
         for label, amount in labor_cost_totals.items():
+            if label in labor_costs_display:
+                continue
             try:
                 display_amount = float(amount or 0.0)
             except Exception:
                 display_amount = 0.0
             labor_costs_display[label] = display_amount
-            row(label, display_amount, indent="  ")
+            display_labor_for_ladder += display_amount
+            _add_labor_cost_line(label, display_amount)
     elif process_costs_canon:
         for canon_key, amount in process_costs_canon.items():
             label = _display_bucket_label(canon_key, label_overrides)
             label = label.replace("(Amortized)", "(amortized)")
+            if label in labor_costs_display:
+                continue
             try:
                 display_amount = float(amount or 0.0)
             except Exception:
                 display_amount = 0.0
             labor_costs_display[label] = display_amount
-            row(label, display_amount, indent="  ")
+            display_labor_for_ladder += display_amount
+            _add_labor_cost_line(label, display_amount, process_key=canon_key)
     elif show_zeros:
         row("No process costs", 0.0, indent="  ")
 
@@ -8813,8 +8870,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             _record_hour_entry(label, value, include_in_total=include_in_total)
 
         planner_bucket_view: Mapping[str, Any] | None = None
-        if isinstance(bucket_view, _MappingABC):
-            planner_bucket_view = bucket_view
+        if isinstance(bucket_view_final, _MappingABC):
+            planner_bucket_view = bucket_view_final
         elif isinstance(process_plan_summary_local, _MappingABC):
             candidate_bucket_view = process_plan_summary_local.get("bucket_view")
             if isinstance(candidate_bucket_view, _MappingABC):
@@ -8831,14 +8888,37 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if not isinstance(order, Sequence):
             order = _preferred_order_then_alpha(buckets_map.keys())
 
-        seen_hour_canon_keys: set[str] = set()
-
         def _bucket_minutes_from_view(canon_key: str) -> float:
             info = buckets_map.get(canon_key)
             if not isinstance(info, _MappingABC):
                 return 0.0
             return _safe_float(info.get("minutes"))
 
+        def _hours_from_view(canon_key: str) -> float:
+            summary = canonical_bucket_summary.get(canon_key)
+            if isinstance(summary, dict):
+                try:
+                    hours_val = float(summary.get("hours", 0.0) or 0.0)
+                except Exception:
+                    hours_val = 0.0
+                if hours_val > 0:
+                    return hours_val
+                try:
+                    minutes_val = float(summary.get("minutes", 0.0) or 0.0)
+                except Exception:
+                    minutes_val = 0.0
+                if minutes_val > 0:
+                    return minutes_val / 60.0
+            minutes_val = _bucket_minutes_from_view(canon_key)
+            if minutes_val > 0:
+                return minutes_val / 60.0
+            return 0.0
+
+        def _hours_for_bucket(canon_key: str) -> float:
+            view_hours = _hours_from_view(canon_key)
+            if view_hours > 0:
+                return view_hours
+            meta = _lookup_process_meta(canon_key)
             if meta:
                 hr_val = _safe_float(meta.get("hr"))
                 if hr_val > 0:
@@ -8846,7 +8926,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 minutes_val = _safe_float(meta.get("minutes"))
                 if minutes_val > 0:
                     return minutes_val / 60.0
-
             return 0.0
 
         _emit_hour_row("Planner Total", round(planner_total_hr, 2))
@@ -8869,6 +8948,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 yield key
 
         seen_hour_canon_keys: set[str] = set()
+
+        def _emit_bucket_from_view(canon_key: str) -> None:
+            if not canon_key or canon_key in seen_hour_canon_keys:
+                return
+            hours_val = _hours_from_view(canon_key)
+            if hours_val <= 0.01:
+                return
+            label = _display_bucket_label(canon_key, label_overrides)
+            _emit_hour_row(label, round(hours_val, 2))
+            seen_hour_canon_keys.add(canon_key)
+
         for canon_key in _ordered_hour_keys():
             if not canon_key or canon_key in skip_hour_canon_keys:
                 continue
@@ -8876,16 +8966,16 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 continue
             if canon_key.startswith("planner_"):
                 continue
-            hours_val = charged_hours_by_canon.get(canon_key)
-            if hours_val is None:
-                hours_val = _hours_for_bucket(canon_key)
-            if hours_val is None:
-                continue
-            try:
-                hours_float = float(hours_val or 0.0)
-            except Exception:
-                hours_float = 0.0
-            if hours_float <= 0.01:
+            hours_val = _hours_from_view(canon_key)
+            if hours_val <= 0.01:
+                fallback = charged_hours_by_canon.get(canon_key)
+                if fallback is None:
+                    fallback = _hours_for_bucket(canon_key)
+                try:
+                    hours_val = float(fallback or 0.0)
+                except Exception:
+                    hours_val = 0.0
+            if hours_val <= 0.01:
                 continue
             label = _display_bucket_label(canon_key, label_overrides)
             _emit_hour_row(label, round(hours_val, 2))
@@ -8894,12 +8984,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         for canon_key in order:
             if not canon_key:
                 continue
-            if canon_key in seen_hour_canon_keys:
-                continue
             _emit_bucket_from_view(canon_key)
 
         for canon_key in buckets_map.keys():
-            if not canon_key or canon_key in seen_hour_canon_keys:
+            if not canon_key:
                 continue
             _emit_bucket_from_view(canon_key)
 
@@ -8911,10 +8999,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     continue
                 if str(canon_key).startswith("planner_"):
                     continue
-                try:
-                    hours_float = float(hours_val or 0.0)
-                except Exception:
-                    hours_float = 0.0
+                view_hours = _hours_from_view(canon_key)
+                if view_hours > 0.01:
+                    hours_float = view_hours
+                else:
+                    try:
+                        hours_float = float(hours_val or 0.0)
+                    except Exception:
+                        hours_float = 0.0
                 if hours_float <= 0.01:
                     continue
                 label = _display_bucket_label(canon_key, label_overrides)
