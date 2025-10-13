@@ -9513,6 +9513,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             material_net_cost = 0.0
 
     labor_basis_for_ladder = float(display_labor_for_ladder or 0.0)
+    expected_labor_total_float = float(expected_labor_total or 0.0)
+    if (
+        expected_labor_total_float > 0.0
+        and abs(labor_basis_for_ladder - expected_labor_total_float) > _LABOR_SECTION_ABS_EPSILON
+    ):
+        labor_basis_for_ladder = expected_labor_total_float
     if labor_basis_for_ladder <= 0:
         fallback_basis = computed_total_labor_cost if computed_total_labor_cost > 0 else proc_total
         try:
@@ -11329,7 +11335,20 @@ def estimate_drilling_hours(
     """
     material_lookup = _normalize_lookup_key(mat_key) if mat_key else ""
     material_label = MATERIAL_DISPLAY_BY_KEY.get(material_lookup, mat_key)
-    material_group_override = str(material_group or "").strip().upper()
+    breakdown_group_override = ""
+    if isinstance(breakdown, _MappingABC):
+        try:
+            breakdown_material_selected_raw = breakdown.get("material_selected")
+        except Exception:
+            breakdown_material_selected_raw = None
+        if isinstance(breakdown_material_selected_raw, _MappingABC):
+            breakdown_group_override = str(
+                breakdown_material_selected_raw.get("group")
+                or breakdown_material_selected_raw.get("material_group")
+                or ""
+            ).strip().upper()
+
+    material_group_override = str(material_group or breakdown_group_override or "").strip().upper()
 
     thickness_mm_val = 0.0
     try:
@@ -14395,9 +14414,24 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         )
         if table_group:
             drill_material_group = str(table_group).strip()
+    breakdown_group_for_speeds = ""
+    if isinstance(breakdown, _MappingABC):
+        try:
+            breakdown_material_selected_for_speeds = breakdown.get("material_selected")
+        except Exception:
+            breakdown_material_selected_for_speeds = None
+        if isinstance(breakdown_material_selected_for_speeds, _MappingABC):
+            breakdown_group_for_speeds = str(
+                breakdown_material_selected_for_speeds.get("group")
+                or breakdown_material_selected_for_speeds.get("material_group")
+                or ""
+            ).strip()
+
     material_group_for_speeds = str(
         drill_material_group
         or material_selected_summary.get("group")
+        or material_selection.get("group")
+        or breakdown_group_for_speeds
         or ""
     ).strip().upper()
     if material_group_for_speeds and not drill_material_group:
@@ -14642,13 +14676,42 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     material_group_for_speeds_normalized = _normalize_material_group_code(
         material_group_for_speeds
     )
-    breakdown_material_selected = (
+    breakdown_material_selected_raw = (
         breakdown.get("material_selected")
         if isinstance(breakdown, _MappingABC)
         else None
     )
-    if not isinstance(breakdown_material_selected, _MappingABC):
+    if isinstance(breakdown_material_selected_raw, _MappingABC):
+        breakdown_material_selected = dict(breakdown_material_selected_raw)
+    else:
         breakdown_material_selected = {}
+
+    canonical_for_breakdown_meta = str(
+        material_selected_summary.get("canonical")
+        or material_selection.get("canonical")
+        or material_selection.get("canonical_material")
+        or breakdown_material_selected.get("canonical")
+        or breakdown_material_selected.get("canonical_material")
+        or ""
+    ).strip()
+    if canonical_for_breakdown_meta:
+        material_selected_summary.setdefault("canonical", canonical_for_breakdown_meta)
+        breakdown_material_selected.setdefault("canonical", canonical_for_breakdown_meta)
+        breakdown_material_selected.setdefault("canonical_material", canonical_for_breakdown_meta)
+
+    group_for_breakdown_meta = str(
+        material_selected_summary.get("group")
+        or material_selection.get("group")
+        or material_selection.get("material_group")
+        or breakdown_material_selected.get("group")
+        or breakdown_material_selected.get("material_group")
+        or breakdown_group_for_speeds
+        or ""
+    ).strip().upper()
+    if group_for_breakdown_meta:
+        material_selected_summary.setdefault("group", group_for_breakdown_meta)
+        breakdown_material_selected.setdefault("group", group_for_breakdown_meta)
+        breakdown_material_selected.setdefault("material_group", group_for_breakdown_meta)
 
     expected_group_display = str(
         material_group_for_speeds
@@ -15296,6 +15359,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 or removal_summary.get("material_group")
                 or drill_material_group
                 or material_group_for_speeds
+                or breakdown_material_selected.get("group")
+                or breakdown_material_selected.get("material_group")
                 or material_selection.get("group")
                 or ""
             ).strip().upper()
@@ -19433,10 +19498,20 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         material_selected_summary["group"] = group_display_value
 
     canonical_material_for_breakdown = str(
-        canonical_material or canonical_material_display or ""
+        canonical_material
+        or canonical_material_display
+        or material_selected_summary.get("canonical")
+        or material_selection.get("canonical")
+        or material_selection.get("canonical_material")
+        or ""
     ).strip()
     group_for_breakdown = str(
-        material_group or group_display_value or ""
+        material_group
+        or group_display_value
+        or material_selected_summary.get("group")
+        or material_selection.get("group")
+        or material_selection.get("material_group")
+        or ""
     ).strip().upper()
 
     material_selected_for_breakdown: dict[str, str] = {}
