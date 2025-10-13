@@ -18581,11 +18581,19 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             if not isinstance(mapping, dict):
                 return
             for bucket_key, payload in mapping.items():
-                if _canonical_bucket_key(bucket_key) != "drilling":
+                if bucket_key == "buckets" and isinstance(payload, dict):
+                    _apply_to_map(payload)
                     continue
+
+                canon_key = _canonical_bucket_key(bucket_key)
+                if canon_key not in {"drilling", "planner_drilling"}:
+                    continue
+
                 if isinstance(payload, dict):
                     payload["hr"] = float(total_hr)
                     payload["minutes"] = minutes_val
+                    if "hours" in payload:
+                        payload["hours"] = float(total_hr)
                 elif isinstance(payload, (int, float)):
                     mapping[bucket_key] = minutes_val
 
@@ -18597,6 +18605,10 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             planner_bucket_display_map_payload,
         ):
             _apply_to_map(candidate)
+
+        for container in (process_plan_summary, getattr(quote_state, "process_plan", None)):
+            if isinstance(container, dict):
+                _apply_to_map(container.get("bucket_view"))
 
         summary_map: Mapping[str, Any] | None = None
         try:
