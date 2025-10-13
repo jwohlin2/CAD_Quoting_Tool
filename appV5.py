@@ -9269,19 +9269,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     # ---- Pass-Through & Direct (auto include non-zeros; sorted desc) --------
     lines.append("Pass-Through & Direct Costs")
     lines.append(divider)
-    material_direct_contribution = round(
-        float(material_total_for_directs or 0.0)
-        + float(material_tax_for_directs or 0.0)
-        - float(scrap_credit_for_directs or 0.0),
-        2,
-    )
-    material_net_cost = float(material_direct_contribution)
-    if material_direct_contribution or show_zeros:
-        write_line(
-            "Material & Stock (printed above) contributes "
-            f"{_m(material_direct_contribution)} to Direct Costs",
-            "  ",
-        )
     pass_total = 0.0
     pass_through_labor_total = 0.0
     displayed_pass_through: dict[str, float] = {}
@@ -9409,7 +9396,16 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         except Exception:
             material_net_cost = 0.0
 
-    base_bucket_labor = float(display_labor_for_ladder) - float(amortized_nre_total)
+    labor_basis_for_ladder = float(display_labor_for_ladder or 0.0)
+    if labor_basis_for_ladder <= 0:
+        fallback_basis = computed_total_labor_cost if computed_total_labor_cost > 0 else proc_total
+        try:
+            fallback_val = float(fallback_basis or 0.0)
+        except Exception:
+            fallback_val = 0.0
+        if fallback_val > 0:
+            labor_basis_for_ladder = fallback_val
+    base_bucket_labor = labor_basis_for_ladder - float(amortized_nre_total)
     if base_bucket_labor < 0:
         base_bucket_labor = 0.0
     ladder_directs = directs
