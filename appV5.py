@@ -8378,6 +8378,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         amortized_qty = qty if qty > 0 else 1
     show_amortized = amortized_qty > 1
 
+    def _should_hide_amortized(label: Any) -> bool:
+        """Return True when amortized rows should be omitted from labor output."""
+
+        _, is_amortized = _canonical_amortized_label(label)
+        return is_amortized and not show_amortized
+
     programming_per_part_cost = labor_cost_totals.get("Programming (amortized)")
     if programming_per_part_cost is None:
         programming_meta_detail = (nre_detail or {}).get("programming") or {}
@@ -8551,6 +8557,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     def _render_amortized_rows() -> None:
         nonlocal amortized_nre_total, display_labor_for_ladder
+        if not show_amortized:
+            amortized_nre_total = 0.0
+            return
+
         try:
             prog_pp = float(programming_per_part_cost or 0.0)
         except Exception:
@@ -8659,6 +8669,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 display_amount = float(amount or 0.0)
             except Exception:
                 display_amount = 0.0
+            if _should_hide_amortized(label):
+                continue
             labor_costs_display[label] = display_amount
             row(label, display_amount, indent="  ")
     elif process_costs_canon:
@@ -8669,6 +8681,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 display_amount = float(amount or 0.0)
             except Exception:
                 display_amount = 0.0
+            if _should_hide_amortized(label):
+                continue
             labor_costs_display[label] = display_amount
             row(label, display_amount, indent="  ")
     elif show_zeros:
