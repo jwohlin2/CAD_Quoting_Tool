@@ -113,6 +113,18 @@ def _coerce_env_bool(value: str | None) -> bool:
 FORCE_PLANNER = _coerce_env_bool(os.environ.get("FORCE_PLANNER"))
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    """Best-effort float coercion used in multiple pricing paths."""
+
+    try:
+        coerced = float(value or 0.0)
+    except Exception:
+        return default
+    if math.isnan(coerced) or math.isinf(coerced):
+        return default
+    return coerced
+
+
 def _compute_direct_costs(
     material_total: float | int | str | None,
     scrap_credit: float | int | str | None,
