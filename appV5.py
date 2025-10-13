@@ -240,6 +240,81 @@ def _accumulate_drill_debug(dest: list[str], *sources: Any) -> None:
             dest.append(text)
 
 
+def _format_range(vals: Sequence[float | None]) -> str:
+    values = [float(v) for v in vals if v is not None and math.isfinite(float(v))]
+    if not values:
+        return "—"
+    vmin = min(values)
+    vmax = max(values)
+    if abs(vmax - vmin) < 1e-6:
+        return f"{vmin:.0f}"
+    return f"{vmin:.0f}–{vmax:.0f}"
+
+
+def _format_range_f(vals: Sequence[float | None], prec: int = 2) -> str:
+    values = [float(v) for v in vals if v is not None and math.isfinite(float(v))]
+    if not values:
+        return "—"
+    vmin = min(values)
+    vmax = max(values)
+    tol = 10 ** (-prec)
+    if abs(vmax - vmin) < tol:
+        return f"{vmin:.{prec}f}"
+    return f"{vmin:.{prec}f}–{vmax:.{prec}f}"
+
+
+def build_removal_debug_table(
+    *,
+    op_name: str,
+    mat_canon: str,
+    mat_group: str,
+    row_group: str,
+    sfm: float,
+    ipr_bins: Sequence[float | None],
+    rpm_bins: Sequence[float | None],
+    ipm_bins: Sequence[float | None],
+    dia_bins: Sequence[float | None],
+    depth_bins: Sequence[float | None],
+    holes: int,
+    index_sec_per_hole: float | None,
+    peck_min_per_hole: float | None,
+    toolchange_min: float | None,
+    total_minutes: float,
+) -> str:
+    lines: list[str] = []
+    lines.append("Material Removal Debug")
+    lines.append("-" * 74)
+    mat_group_display = mat_group or "—"
+    row_group_display = row_group or "—"
+    lines.append(
+        f"{op_name}  |  material: {mat_canon or '—'} (group {mat_group_display}, row {row_group_display})"
+    )
+    lines.append("")
+    lines.append(f"  SFM: {sfm:.0f}   IPR: {_format_range_f(ipr_bins, 3)}")
+    lines.append(f"  RPM: {_format_range(rpm_bins)}   IPM: {_format_range_f(ipm_bins, 1)}")
+    lines.append(
+        "  Ø:   "
+        f"{_format_range_f(dia_bins, 3)} in   depth/hole: {_format_range_f(depth_bins, 2)} in   holes: {int(holes)}"
+    )
+    ix_text = "—"
+    if index_sec_per_hole is not None and math.isfinite(index_sec_per_hole):
+        ix_text = f"{float(index_sec_per_hole):.1f} s/hole"
+    peck_text = "—"
+    if peck_min_per_hole is not None and math.isfinite(peck_min_per_hole):
+        peck_text = f"{float(peck_min_per_hole):.2f} min/hole"
+    toolchange_text = "—"
+    if toolchange_min is not None and math.isfinite(toolchange_min):
+        toolchange_text = f"{float(toolchange_min):.2f} min"
+    lines.append(
+        f"  overhead → index: {ix_text}   peck: {peck_text}   toolchange: {toolchange_text}"
+    )
+    lines.append("")
+    lines.append(
+        f"  subtotal time: {float(total_minutes):.1f} min  ({float(total_minutes) / 60.0:.2f} hr)"
+    )
+    return "\n".join(lines)
+
+
 # Guardrails for LLM-generated process adjustments.
 
 def describe_runtime_environment() -> dict[str, str]:
@@ -7426,8 +7501,20 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         lines.append("Drill Debug")
         lines.append(divider)
         for entry in entries:
-            write_wrapped(entry, "  ")
-        lines.append("")
+            if entry is None:
+                continue
+            text = str(entry).strip()
+            if not text:
+                continue
+            if "\n" in text:
+                for chunk in text.splitlines():
+                    write_line(chunk, "  ")
+                if lines and lines[-1] != "":
+                    lines.append("")
+            else:
+                write_wrapped(text, "  ")
+        if lines and lines[-1] != "":
+            lines.append("")
 
     if drill_debug_entries and llm_debug_enabled_flag:
         render_drill_debug(drill_debug_entries)
@@ -15026,6 +15113,212 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
 
     if drill_debug_line:
         drill_debug_lines.append(drill_debug_line)
+
+    if APP_ENV.llm_debug_enabled and isinstance(drill_debug_summary, _MappingABC):
+        op_key = str(selected_op_name or "").strip().lower()
+        removal_summary: Mapping[str, Any] | None = drill_debug_summary.get(op_key)
+        if removal_summary is None:
+            for summary in drill_debug_summary.values():
+                if isinstance(summary, _MappingABC):
+                    removal_summary = summary
+                    break
+        if isinstance(removal_summary, _MappingABC):
+            rpm_bins: list[float] = []
+            ipm_bins: list[float] = []
+            ipr_bins: list[float] = []
+            dia_bins: list[float] = []
+            depth_bins: list[float] = []
+
+            bins_map = removal_summary.get("bins")
+            if isinstance(bins_map, _MappingABC):
+                for bin_summary in bins_map.values():
+                    if not isinstance(bin_summary, _MappingABC):
+                        continue
+                    dia_val = _coerce_float_or_none(bin_summary.get("diameter_in"))
+                    if dia_val is not None and math.isfinite(dia_val):
+                        dia_bins.append(float(dia_val))
+                    depth_min_val = _coerce_float_or_none(bin_summary.get("depth_min"))
+                    depth_max_val = _coerce_float_or_none(bin_summary.get("depth_max"))
+                    for depth_val in (depth_min_val, depth_max_val):
+                        if depth_val is not None and math.isfinite(depth_val):
+                            depth_bins.append(float(depth_val))
+                    speeds_map = bin_summary.get("speeds")
+                    if not isinstance(speeds_map, _MappingABC):
+                        speeds_map = {}
+                    rpm_val = _coerce_float_or_none(
+                        speeds_map.get("rpm")
+                        or bin_summary.get("rpm_min")
+                        or bin_summary.get("rpm_max")
+                    )
+                    ipm_val = _coerce_float_or_none(
+                        speeds_map.get("ipm")
+                        or bin_summary.get("ipm_min")
+                        or bin_summary.get("ipm_max")
+                    )
+                    ipr_val = _coerce_float_or_none(
+                        speeds_map.get("ipr")
+                        or bin_summary.get("ipr_effective_min")
+                        or bin_summary.get("ipr_min")
+                        or bin_summary.get("ipr_effective_max")
+                        or bin_summary.get("ipr_max")
+                    )
+                    if rpm_val is not None and math.isfinite(rpm_val):
+                        rpm_bins.append(float(rpm_val))
+                    if ipm_val is not None and math.isfinite(ipm_val):
+                        ipm_bins.append(float(ipm_val))
+                    if ipr_val is not None and math.isfinite(ipr_val):
+                        ipr_bins.append(float(ipr_val))
+
+            def _extend_from_summary(
+                container: list[float], *keys: str, fallback: float | None = None
+            ) -> None:
+                for key in keys:
+                    val = _coerce_float_or_none(removal_summary.get(key))
+                    if val is not None and math.isfinite(val):
+                        container.append(float(val))
+                if not container and fallback is not None and math.isfinite(fallback):
+                    container.append(float(fallback))
+
+            rpm_avg = None
+            rpm_sum = _coerce_float_or_none(removal_summary.get("rpm_sum"))
+            rpm_count = _coerce_float_or_none(removal_summary.get("rpm_count"))
+            if rpm_sum is not None and rpm_count and rpm_count > 0:
+                rpm_avg = float(rpm_sum) / float(rpm_count)
+            ipm_avg = None
+            ipm_sum = _coerce_float_or_none(removal_summary.get("ipm_sum"))
+            ipm_count = _coerce_float_or_none(removal_summary.get("ipm_count"))
+            if ipm_sum is not None and ipm_count and ipm_count > 0:
+                ipm_avg = float(ipm_sum) / float(ipm_count)
+            ipr_avg = None
+            ipr_sum = _coerce_float_or_none(removal_summary.get("ipr_sum"))
+            ipr_count = _coerce_float_or_none(removal_summary.get("ipr_count"))
+            if ipr_sum is not None and ipr_count and ipr_count > 0:
+                ipr_avg = float(ipr_sum) / float(ipr_count)
+
+            _extend_from_summary(rpm_bins, "rpm_min", "rpm_max", fallback=rpm_avg)
+            _extend_from_summary(ipm_bins, "ipm_min", "ipm_max", fallback=ipm_avg)
+            _extend_from_summary(
+                ipr_bins,
+                "ipr_effective_min",
+                "ipr_effective_max",
+                "ipr_min",
+                "ipr_max",
+                fallback=ipr_avg,
+            )
+
+            diam_avg = None
+            diam_sum = _coerce_float_or_none(removal_summary.get("diameter_weight_sum"))
+            diam_qty = _coerce_float_or_none(removal_summary.get("diameter_qty_sum"))
+            if diam_sum is not None and diam_qty and diam_qty > 0:
+                diam_avg = float(diam_sum) / float(diam_qty)
+            _extend_from_summary(dia_bins, "diam_min", "diam_max", fallback=diam_avg)
+
+            depth_avg = None
+            depth_sum = _coerce_float_or_none(removal_summary.get("depth_weight_sum"))
+            depth_qty = _coerce_float_or_none(removal_summary.get("depth_qty_sum"))
+            if depth_sum is not None and depth_qty and depth_qty > 0:
+                depth_avg = float(depth_sum) / float(depth_qty)
+            _extend_from_summary(depth_bins, "depth_min", "depth_max", fallback=depth_avg)
+
+            sfm_avg = None
+            sfm_sum = _coerce_float_or_none(removal_summary.get("sfm_sum"))
+            sfm_count = _coerce_float_or_none(removal_summary.get("sfm_count"))
+            if sfm_sum is not None and sfm_count and sfm_count > 0:
+                sfm_avg = float(sfm_sum) / float(sfm_count)
+            if sfm_avg is None:
+                sfm_avg = _coerce_float_or_none(removal_summary.get("sfm"))
+            if sfm_avg is None and isinstance(speeds_feeds_summary, _MappingABC):
+                sfm_avg = _coerce_float_or_none(speeds_feeds_summary.get("sfm"))
+
+            holes_total = int(float(removal_summary.get("qty", 0)) or 0)
+            base_minutes = _coerce_float_or_none(removal_summary.get("total_minutes")) or 0.0
+            toolchange_total = _coerce_float_or_none(
+                removal_summary.get("toolchange_total")
+            ) or 0.0
+            total_minutes = float(base_minutes) + float(toolchange_total)
+
+            peck_avg = None
+            peck_sum = _coerce_float_or_none(removal_summary.get("peck_sum"))
+            peck_count = _coerce_float_or_none(removal_summary.get("peck_count"))
+            if peck_sum is not None and peck_count and peck_count > 0:
+                peck_avg = float(peck_sum) / float(peck_count)
+
+            index_avg_min = None
+            index_sum = _coerce_float_or_none(removal_summary.get("index_sum"))
+            index_count = _coerce_float_or_none(removal_summary.get("index_count"))
+            if index_sum is not None and index_count and index_count > 0:
+                index_avg_min = float(index_sum) / float(index_count)
+
+            mat_group_value = str(
+                removal_summary.get("expected_material_group")
+                or removal_summary.get("material_group")
+                or drill_material_group
+                or material_group_for_speeds
+                or material_selection.get("group")
+                or ""
+            ).strip().upper()
+            row_group_value = str(
+                removal_summary.get("material_group")
+                or selected_row_group
+                or ""
+            ).strip().upper()
+
+            overhead_source = drill_overhead_default
+            if _TIME_OVERHEAD_SUPPORTS_INDEX_SEC:
+                overhead_source = _ensure_overhead_index_attr(
+                    overhead_source,
+                    getattr(overhead_source, "index_sec_per_hole", None),
+                )
+            index_val = _coerce_float_or_none(
+                getattr(overhead_source, "index_sec_per_hole", None)
+            )
+            if (
+                (index_val is None or not math.isfinite(index_val))
+                and index_avg_min is not None
+                and math.isfinite(index_avg_min)
+            ):
+                index_val = float(index_avg_min) * 60.0
+
+            peck_val = peck_avg if peck_avg is not None and math.isfinite(peck_avg) else None
+            if peck_val is None:
+                peck_direct = _coerce_float_or_none(getattr(overhead_source, "peck_min", None))
+                if peck_direct is not None and math.isfinite(peck_direct):
+                    peck_val = float(peck_direct)
+            if peck_val is None:
+                penalty = _coerce_float_or_none(
+                    getattr(overhead_source, "peck_penalty_min_per_in_depth", None)
+                )
+                if (
+                    penalty is not None
+                    and depth_avg is not None
+                    and math.isfinite(penalty)
+                    and math.isfinite(depth_avg)
+                ):
+                    peck_val = float(penalty) * float(depth_avg)
+
+            toolchange_val = _coerce_float_or_none(toolchange_total)
+
+            removal_text = build_removal_debug_table(
+                op_name="Deep Drill"
+                if "deep" in str(selected_op_name or "").lower()
+                else "Drill",
+                mat_canon=str(final_material_for_debug or material_display_for_debug or "—").strip()
+                or "—",
+                mat_group=mat_group_value,
+                row_group=row_group_value,
+                sfm=float(sfm_avg or 0.0),
+                ipr_bins=ipr_bins,
+                rpm_bins=rpm_bins,
+                ipm_bins=ipm_bins,
+                dia_bins=dia_bins,
+                depth_bins=depth_bins,
+                holes=holes_total,
+                index_sec_per_hole=index_val,
+                peck_min_per_hole=peck_val,
+                toolchange_min=toolchange_val,
+                total_minutes=total_minutes,
+            )
+            _accumulate_drill_debug(drill_debug_lines, removal_text)
 
     drilling_meta: dict[str, Any] = {
         "material_key": material_key_for_drill or "",
