@@ -161,6 +161,11 @@ from appkit.llm_adapter import (
 )
 
 from appkit.planner_adapter import resolve_planner
+from appkit.planner_helpers import (
+    _PROCESS_PLANNERS,
+    _PROCESS_PLANNER_HELPERS,
+    _process_plan_job,
+)
 
 if sys.platform == "win32":
     occ_bin = os.path.join(sys.prefix, "Library", "bin")
@@ -757,44 +762,6 @@ def _ensure_overhead_index_attr(
         return SimpleNamespace(**payload)
     except Exception:
         return overhead
-
-try:
-    from process_planner import (
-        PLANNERS as _PROCESS_PLANNERS,
-    )
-    from process_planner import (
-        choose_skims as _planner_choose_skims,
-    )
-    from process_planner import (
-        choose_wire_size as _planner_choose_wire_size,
-    )
-    from process_planner import (
-        needs_wedm_for_windows as _planner_needs_wedm_for_windows,
-    )
-    from process_planner import (
-        plan_job as _process_plan_job,
-    )
-except Exception:  # pragma: no cover - planner is optional at runtime
-    _process_plan_job = None
-    _PROCESS_PLANNERS = {}
-    _planner_choose_wire_size = None
-    _planner_choose_skims = None
-    _planner_needs_wedm_for_windows = None
-else:  # pragma: no cover - defensive guard for unexpected exports
-    if not isinstance(_PROCESS_PLANNERS, dict):
-        _PROCESS_PLANNERS = {}
-
-
-_PROCESS_PLANNER_HELPERS: dict[str, Callable[..., Any]] = {}
-if "_planner_choose_wire_size" in globals() and callable(_planner_choose_wire_size):
-    _PROCESS_PLANNER_HELPERS["choose_wire_size"] = _planner_choose_wire_size  # type: ignore[index]
-if "_planner_choose_skims" in globals() and callable(_planner_choose_skims):
-    _PROCESS_PLANNER_HELPERS["choose_skims"] = _planner_choose_skims  # type: ignore[index]
-if "_planner_needs_wedm_for_windows" in globals() and callable(
-    _planner_needs_wedm_for_windows
-):
-    _PROCESS_PLANNER_HELPERS["needs_wedm_for_windows"] = _planner_needs_wedm_for_windows  # type: ignore[index]
-
 
 # Mapping of process keys to editor labels for propagating derived hours from
 # LLM suggestions. The scale term allows lightweight conversions if we need to
