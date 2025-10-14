@@ -119,6 +119,7 @@ from appkit.ui.tk_compat import (
     _ensure_tk,
 )
 
+from appkit.guardrails import build_guard_context, apply_drilling_floor_notes
 from appkit.merge_utils import (
     _coerce_bool,
     ACCEPT_SCALAR_KEYS,
@@ -813,6 +814,13 @@ def apply_suggestions(baseline: dict, s: dict) -> dict:
 
 
 def compute_effective_state(state: QuoteState) -> tuple[dict, dict]:
+    existing_guard_ctx = getattr(state, "guard_context", None)
+    if not isinstance(existing_guard_ctx, dict) or not existing_guard_ctx:
+        try:
+            state.guard_context = build_guard_context(state)
+        except Exception:
+            state.guard_context = dict(existing_guard_ctx or {})
+
     baseline = state.baseline or {}
     suggestions = state.suggestions or {}
     overrides = state.user_overrides or {}
@@ -878,38 +886,7 @@ def compute_effective_state(state: QuoteState) -> tuple[dict, dict]:
 def reprice_with_effective(state: QuoteState) -> QuoteState:
     """Recompute effective values and enforce guardrails before pricing."""
 
-    geo_ctx = state.geo or {}
-    inner_geo_raw = geo_ctx.get("geo")
-    inner_geo_ctx: dict[str, Any] = inner_geo_raw if isinstance(inner_geo_raw, dict) else {}
-    hole_count_guard = _coerce_float_or_none(geo_ctx.get("hole_count"))
-    if hole_count_guard is None:
-        hole_count_guard = _coerce_float_or_none(inner_geo_ctx.get("hole_count"))
-    tap_qty_guard = _coerce_float_or_none(geo_ctx.get("tap_qty"))
-    if tap_qty_guard is None:
-        tap_qty_guard = _coerce_float_or_none(inner_geo_ctx.get("tap_qty"))
-    finish_flags_guard: set[str] = set()
-    finishes_geo = geo_ctx.get("finishes") or inner_geo_ctx.get("finishes")
-    if isinstance(finishes_geo, (list, tuple, set)):
-        finish_flags_guard.update(str(flag).strip().upper() for flag in finishes_geo if isinstance(flag, str) and flag.strip())
-    explicit_finish_flags = geo_ctx.get("finish_flags") or inner_geo_ctx.get("finish_flags")
-    if isinstance(explicit_finish_flags, (list, tuple, set)):
-        finish_flags_guard.update(str(flag).strip().upper() for flag in explicit_finish_flags if isinstance(flag, str) and flag.strip())
-    guard_ctx: dict[str, Any] = {
-        "hole_count": hole_count_guard,
-        "tap_qty": tap_qty_guard,
-        "min_sec_per_hole": 9.0,
-        "min_min_per_tap": 0.2,
-        "needs_back_face": bool(
-            geo_ctx.get("needs_back_face")
-            or geo_ctx.get("from_back")
-            or inner_geo_ctx.get("needs_back_face")
-            or inner_geo_ctx.get("from_back")
-        ),
-        "baseline_pass_through": (state.baseline.get("pass_through") if isinstance(state.baseline.get("pass_through"), dict) else {}),
-    }
-    if finish_flags_guard:
-        guard_ctx["finish_flags"] = sorted(finish_flags_guard)
-        guard_ctx.setdefault("finish_cost_floor", 50.0)
+    guard_ctx = build_guard_context(state)
     state.guard_context = guard_ctx
 
     ensure_accept_flags(state)
@@ -917,29 +894,7 @@ def reprice_with_effective(state: QuoteState) -> QuoteState:
     state.effective = merged
     state.effective_sources = sources
 
-    # drilling floor guard
-    eff_hours = state.effective.get("process_hours") if isinstance(state.effective.get("process_hours"), dict) else {}
-    if eff_hours:
-        try:
-            hole_count_geo = int(float(state.geo.get("hole_count", 0) or 0))
-        except Exception:
-            hole_count_geo = 0
-        hole_count = hole_count_geo
-        if hole_count <= 0:
-            holes = state.geo.get("hole_diams_mm")
-            if isinstance(holes, (list, tuple)):
-                hole_count = len(holes)
-        if hole_count > 0 and "drilling" in eff_hours:
-            current = to_float(eff_hours.get("drilling")) or 0.0
-            min_sec_per_hole = 9.0
-            floor_hr = (hole_count * min_sec_per_hole) / 3600.0
-            if current < floor_hr:
-                eff_hours["drilling"] = floor_hr
-                state.effective["process_hours"] = eff_hours
-                note = f"Raised drilling to floor for {hole_count} holes"
-                notes = state.effective.setdefault("notes", [])
-                if note not in notes:
-                    notes.append(note)
+    apply_drilling_floor_notes(state, guard_ctx=guard_ctx)
     return state
 
 def effective_to_overrides(effective: dict, baseline: dict | None = None) -> dict:
