@@ -65,6 +65,24 @@ from cad_quoter.config import (
 from cad_quoter.utils.geo_ctx import _should_include_outsourced_pass
 from cad_quoter.utils import sheet_helpers
 from cad_quoter.utils.scrap import _estimate_scrap_from_stock_plan
+from cad_quoter.estimators import SpeedsFeedsUnavailableError
+_DRILLING_DATA_PATH = Path(__file__).resolve().parent / "data" / "drilling.json"
+_DRILLING_COEFFICIENTS: dict[str, Any] | None = None
+
+
+def _load_drilling_coefficients() -> dict[str, Any]:
+    """Return cached drilling estimator coefficients from ``data/drilling.json``."""
+
+    global _DRILLING_COEFFICIENTS
+    if _DRILLING_COEFFICIENTS is None:
+        try:
+            with _DRILLING_DATA_PATH.open("r", encoding="utf-8") as handle:
+                _DRILLING_COEFFICIENTS = json.load(handle)
+        except FileNotFoundError:
+            _DRILLING_COEFFICIENTS = {}
+    return _DRILLING_COEFFICIENTS
+
+
 from cad_quoter.llm_overrides import (
     HARDWARE_PASS_LABEL,
     LEGACY_HARDWARE_PASS_LABEL,
@@ -137,10 +155,6 @@ if sys.platform == "win32":
 
 APP_ENV = AppEnvironment.from_env()
 APP_ENV = replace(APP_ENV, llm_debug_enabled=True)  # force-enable debug unconditionally
-
-
-class SpeedsFeedsUnavailableError(RuntimeError):
-    """Raised when drilling estimates require a speeds/feeds table but none is available."""
 
 
 EXTRA_DETAIL_RE = re.compile(r"^includes\b.*extras\b", re.IGNORECASE)
@@ -10462,6 +10476,16 @@ def _machine_params_from_params(params: Mapping[str, Any] | None) -> _TimeMachin
 
 
 def _drill_overhead_from_params(params: Mapping[str, Any] | None) -> OverheadLike:
+    defaults = _DRILLING_COEFFS.get(
+        "overhead_defaults",
+        {
+            "toolchange_min": 0.5,
+            "approach_retract_in": 0.25,
+            "peck_penalty_min_per_in_depth": 0.03,
+            "dwell_min": None,
+            "index_sec_per_hole": 8.0,
+        },
+    )
     toolchange = (
         _coerce_float_or_none(params.get("DrillToolchangeMinutes"))
         if isinstance(params, _MappingABC)
@@ -10482,7 +10506,7 @@ def _drill_overhead_from_params(params: Mapping[str, Any] | None) -> OverheadLik
         if isinstance(params, _MappingABC)
         else None
     )
-    default_index_sec = 8.0
+    default_index_sec = _coerce_float_or_none(defaults.get("index_sec_per_hole")) or 8.0
     index_source: object | None = default_index_sec
     if isinstance(params, _MappingABC):
         if "DrillIndexSecPerHole" in params:
@@ -10493,10 +10517,18 @@ def _drill_overhead_from_params(params: Mapping[str, Any] | None) -> OverheadLik
     if index_sec is None:
         index_sec = default_index_sec
     overhead_kwargs = {
-        "toolchange_min": float(toolchange) if toolchange and toolchange >= 0 else 0.5,
-        "approach_retract_in": float(approach) if approach and approach >= 0 else 0.25,
-        "peck_penalty_min_per_in_depth": float(peck) if peck and peck >= 0 else 0.03,
-        "dwell_min": float(dwell) if dwell and dwell >= 0 else None,
+        "toolchange_min": float(toolchange)
+        if toolchange is not None and toolchange >= 0
+        else float(defaults.get("toolchange_min", 0.5)),
+        "approach_retract_in": float(approach)
+        if approach is not None and approach >= 0
+        else float(defaults.get("approach_retract_in", 0.25)),
+        "peck_penalty_min_per_in_depth": float(peck)
+        if peck is not None and peck >= 0
+        else float(defaults.get("peck_penalty_min_per_in_depth", 0.03)),
+        "dwell_min": float(dwell)
+        if dwell is not None and dwell >= 0
+        else defaults.get("dwell_min"),
     }
     index_kwarg = float(index_sec) if index_sec is not None and index_sec >= 0 else None
     try:
@@ -10695,15 +10727,26 @@ def _holes_removed_mass_g(geo_context: Mapping[str, Any] | None) -> float | None
     mass_g = volume_cm3 * float(density_g_cc)
     return mass_g if mass_g > 0 else None
 
-MIN_DRILL_MIN_PER_HOLE = 0.10
-DEFAULT_MAX_DRILL_MIN_PER_HOLE = 3.00
+_DRILLING_COEFFS = _load_drilling_coefficients()
+MIN_DRILL_MIN_PER_HOLE = float(_DRILLING_COEFFS.get("min_minutes_per_hole", 0.10))
+DEFAULT_MAX_DRILL_MIN_PER_HOLE = float(_DRILLING_COEFFS.get("max_minutes_per_hole", 3.00))
 
-DEEP_DRILL_SFM_FACTOR = 0.65
-DEEP_DRILL_IPR_FACTOR = 0.70
-DEEP_DRILL_PECK_PENALTY_MIN_PER_IN = 0.07
+DEEP_DRILL_SFM_FACTOR = float(
+    _DRILLING_COEFFS.get("deep_drill", {}).get("sfm_factor", 0.65)
+)
+DEEP_DRILL_IPR_FACTOR = float(
+    _DRILLING_COEFFS.get("deep_drill", {}).get("ipr_factor", 0.70)
+)
+DEEP_DRILL_PECK_PENALTY_MIN_PER_IN = float(
+    _DRILLING_COEFFS.get("deep_drill", {}).get("peck_penalty_min_per_in", 0.07)
+)
 
-DEFAULT_DRILL_INDEX_SEC_PER_HOLE = 5.3746248
-DEFAULT_DEEP_DRILL_INDEX_SEC_PER_HOLE = 4.3038756
+DEFAULT_DRILL_INDEX_SEC_PER_HOLE = float(
+    _DRILLING_COEFFS.get("standard_drill", {}).get("index_sec_per_hole", 5.3746248)
+)
+DEFAULT_DEEP_DRILL_INDEX_SEC_PER_HOLE = float(
+    _DRILLING_COEFFS.get("deep_drill", {}).get("index_sec_per_hole", 4.3038756)
+)
 
 
 def _default_drill_index_seconds(operation: str | None) -> float:
@@ -10733,7 +10776,12 @@ def _drill_minutes_per_hole_bounds(
     if depth_value is not None and depth_value <= 0:
         depth_value = None
 
-    caps = {"N": 2.0, "P": 5.0, "M": 5.0, "S": 6.0, "H": 6.0}
+    caps = {
+        str(k): float(v)
+        for k, v in _DRILLING_COEFFS.get(
+            "material_group_caps", {"N": 2.0, "P": 5.0, "M": 5.0, "S": 6.0, "H": 6.0}
+        ).items()
+    }
     group_key: str | None = None
     if material_group:
         raw_key = str(material_group).strip()
@@ -10772,8 +10820,9 @@ def _drill_minutes_per_hole_bounds(
     if group_key:
         max_minutes = caps.get(group_key, DEFAULT_MAX_DRILL_MIN_PER_HOLE)
 
+    depth_penalty = float(_DRILLING_COEFFS.get("depth_penalty_minutes_per_in", 0.2))
     if depth_value is not None:
-        max_minutes += 0.2 * max(0.0, depth_value - 1.0)
+        max_minutes += depth_penalty * max(0.0, depth_value - 1.0)
 
     max_minutes = max(max_minutes, min_minutes)
     return min_minutes, max_minutes
@@ -10797,7 +10846,7 @@ def _apply_drill_minutes_clamp(
     return max(min(hours, max_hr), min_hr)
 
 
-def estimate_drilling_hours(
+def _legacy_estimate_drilling_hours(
     hole_diams_mm: list[float],
     thickness_in: float,
     mat_key: str,
@@ -10955,7 +11004,10 @@ def estimate_drilling_hours(
                 depth_in = float(depth_mm) / 25.4
             elif thickness_in_val and thickness_in_val > 0:
                 depth_in = float(thickness_in_val)
-            breakthrough_in = max(0.04, 0.2 * diameter_in)
+            breakthrough_in = max(
+                float(_DRILLING_COEFFS.get("breakthrough_min_in", 0.04)),
+                float(_DRILLING_COEFFS.get("breakthrough_factor", 0.2)) * diameter_in,
+            )
             if depth_in > 0:
                 depth_in += breakthrough_in
             else:
@@ -10971,7 +11023,10 @@ def estimate_drilling_hours(
             if qty <= 0:
                 continue
             diameter_in = float(dia_mm) / 25.4
-            breakthrough_in = max(0.04, 0.2 * diameter_in)
+            breakthrough_in = max(
+                float(_DRILLING_COEFFS.get("breakthrough_min_in", 0.04)),
+                float(_DRILLING_COEFFS.get("breakthrough_factor", 0.2)) * diameter_in,
+            )
             total_depth_in = (
                 thickness_in_for_depth + breakthrough_in
                 if thickness_in_for_depth > 0
@@ -12079,6 +12134,52 @@ def estimate_drilling_hours(
 
     return clamped_hours
 
+
+
+
+def estimate_drilling_hours(
+    hole_diams_mm: list[float],
+    thickness_in: float,
+    mat_key: str,
+    *,
+    material_group: str | None = None,
+    hole_groups: list[Mapping[str, Any]] | None = None,
+    speeds_feeds_table: pd.DataFrame | None = None,
+    machine_params: _TimeMachineParams | None = None,
+    overhead_params: _TimeOverheadParams | None = None,
+    warnings: list[str] | None = None,
+    debug_lines: list[str] | None = None,
+    debug_summary: dict[str, dict[str, Any]] | None = None,
+) -> float:
+    """Adapter that invokes the drilling estimator plugin."""
+
+    from cad_quoter.estimators import EstimatorInput
+    from cad_quoter.estimators.drilling import estimate as _drilling_estimate
+
+    tables: dict[str, Any] = {}
+    if speeds_feeds_table is not None:
+        tables["speeds_feeds"] = speeds_feeds_table
+
+    geometry: dict[str, Any] = {
+        "hole_diams_mm": list(hole_diams_mm or []),
+        "thickness_in": thickness_in,
+    }
+    if hole_groups is not None:
+        geometry["hole_groups"] = hole_groups
+
+    input_data = EstimatorInput(
+        material_key=mat_key,
+        geometry=geometry,
+        material_group=material_group,
+        tables=tables,
+        machine_params=machine_params,
+        overhead_params=overhead_params,
+        warnings=warnings,
+        debug_lines=debug_lines,
+        debug_summary=debug_summary,
+    )
+
+    return _drilling_estimate(input_data)
 
 def _drilling_floor_hours(hole_count: int) -> float:
     min_sec_per_hole = 9.0
