@@ -24,7 +24,7 @@ import sys
 import time
 import typing
 from collections import Counter
-from collections.abc import Mapping as _MappingABC
+from collections.abc import Iterator, Mapping as _MappingABC
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
@@ -6991,6 +6991,294 @@ def _clean_hole_groups(raw: Any) -> list[dict[str, Any]] | None:
     return cleaned if cleaned else None
 
 
+def _iter_geo_dicts_for_context(geo_context: Mapping[str, Any] | None) -> Iterator[Mapping[str, Any]]:
+    seen: set[int] = set()
+    stack: list[Mapping[str, Any]] = []
+    if isinstance(geo_context, _MappingABC):
+        stack.append(typing.cast(Mapping[str, Any], geo_context))
+    while stack:
+        current = stack.pop()
+        ident = id(current)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        yield current
+        for key in ("geo", "geo_read_more", "derived"):
+            inner = current.get(key)
+            if isinstance(inner, _MappingABC):
+                stack.append(typing.cast(Mapping[str, Any], inner))
+
+
+def _coerce_positive_float(value: Any) -> float | None:
+    coerced = _coerce_float_or_none(value)
+    if coerced is None:
+        return None
+    try:
+        num = float(coerced)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(num) or num <= 0:
+        return None
+    return num
+
+
+def _parse_dim_to_mm(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        return _coerce_positive_float(value)
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    lowered = text.lower()
+    unit: str | None = None
+    if "mm" in lowered:
+        unit = "mm"
+    elif "in" in lowered or '"' in lowered or "inch" in lowered or "inches" in lowered:
+        unit = "in"
+    normalized = lowered
+    for token in (
+        "millimeters",
+        "millimetres",
+        "millimeter",
+        "millimetre",
+        "mill",
+        "mm",
+        "inches",
+        "inch",
+        "in",
+    ):
+        normalized = normalized.replace(token, "")
+    normalized = (
+        normalized.replace("\"", "")
+        .replace("'", "")
+        .replace("ø", "")
+        .replace("⌀", "")
+        .replace("dia", "")
+        .replace("diameter", "")
+    )
+    normalized = normalized.replace(" ", "")
+    if not normalized:
+        return None
+    try:
+        if "/" in normalized:
+            magnitude = float(Fraction(normalized))
+        else:
+            magnitude = float(normalized)
+    except Exception:
+        return None
+    if magnitude <= 0:
+        return None
+    if unit == "in":
+        return magnitude * 25.4
+    return magnitude
+
+
+def _derive_plate_bbox_area_mm2(
+    geo_context: Mapping[str, Any] | None,
+    value_map: Mapping[str, Any] | None,
+) -> float | None:
+    area_candidates: list[float] = []
+    lengths_mm: list[float] = []
+    widths_mm: list[float] = []
+
+    for ctx in _iter_geo_dicts_for_context(geo_context):
+        bbox_mm = ctx.get("bbox_mm")
+        if (
+            isinstance(bbox_mm, (list, tuple))
+            and len(bbox_mm) == 2
+        ):
+            L_mm = _coerce_positive_float(bbox_mm[0])
+            W_mm = _coerce_positive_float(bbox_mm[1])
+            if L_mm and W_mm:
+                area_candidates.append(L_mm * W_mm)
+                lengths_mm.append(L_mm)
+                widths_mm.append(W_mm)
+
+        for key in (
+            "plate_len_mm",
+            "plate_length_mm",
+            "length_mm",
+            "stock_length_mm",
+            "GEO-01_Length_mm",
+        ):
+            value = _coerce_positive_float(ctx.get(key))
+            if value:
+                lengths_mm.append(value)
+
+        for key in (
+            "plate_wid_mm",
+            "plate_width_mm",
+            "width_mm",
+            "stock_width_mm",
+            "GEO-02_Width_mm",
+        ):
+            value = _coerce_positive_float(ctx.get(key))
+            if value:
+                widths_mm.append(value)
+
+        for key in ("plate_len_in", "plate_length_in"):
+            inches = _coerce_positive_float(ctx.get(key))
+            if inches:
+                lengths_mm.append(inches * 25.4)
+
+        for key in ("plate_wid_in", "plate_width_in"):
+            inches = _coerce_positive_float(ctx.get(key))
+            if inches:
+                widths_mm.append(inches * 25.4)
+
+        for key in ("plate_area_in2", "outline_area_in2"):
+            area_in2 = _coerce_positive_float(ctx.get(key))
+            if area_in2:
+                area_candidates.append(area_in2 * 25.4 * 25.4)
+
+        area_mm2 = _coerce_positive_float(ctx.get("plate_area_mm2"))
+        if area_mm2:
+            area_candidates.append(area_mm2)
+
+    if isinstance(value_map, _MappingABC):
+        length_mm_val = _coerce_positive_float(value_map.get("Plate Length (mm)"))
+        width_mm_val = _coerce_positive_float(value_map.get("Plate Width (mm)"))
+        if length_mm_val and width_mm_val:
+            area_candidates.append(length_mm_val * width_mm_val)
+            lengths_mm.append(length_mm_val)
+            widths_mm.append(width_mm_val)
+
+        length_in_val = _coerce_positive_float(value_map.get("Plate Length (in)"))
+        width_in_val = _coerce_positive_float(value_map.get("Plate Width (in)"))
+        if length_in_val and width_in_val:
+            length_mm_val = length_in_val * 25.4
+            width_mm_val = width_in_val * 25.4
+            area_candidates.append(length_mm_val * width_mm_val)
+            lengths_mm.append(length_mm_val)
+            widths_mm.append(width_mm_val)
+
+    if lengths_mm and widths_mm:
+        area_candidates.append(max(lengths_mm) * max(widths_mm))
+
+    if not area_candidates:
+        return None
+
+    return max(area_candidates)
+
+
+def _collect_structured_hole_totals(
+    geo_context: Mapping[str, Any] | None,
+) -> dict[float, int]:
+    totals: dict[float, int] = {}
+    for ctx in _iter_geo_dicts_for_context(geo_context):
+        for key in ("hole_groups", "hole_sets"):
+            entries = ctx.get(key)
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, _MappingABC):
+                    continue
+                dia_mm = _coerce_positive_float(entry.get("dia_mm"))
+                if dia_mm is None:
+                    dia_in = _coerce_positive_float(entry.get("dia_in"))
+                    if dia_in:
+                        dia_mm = dia_in * 25.4
+                if dia_mm is None:
+                    dia_mm = _coerce_positive_float(entry.get("dia"))
+                qty = _coerce_positive_float(entry.get("qty"))
+                if qty is None:
+                    qty = _coerce_positive_float(entry.get("count"))
+                qty_int = int(round(qty)) if qty is not None else 0
+                if dia_mm is None or qty_int <= 0:
+                    continue
+                key_mm = round(float(dia_mm), 4)
+                totals[key_mm] = totals.get(key_mm, 0) + qty_int
+    return totals
+
+
+def _collect_fallback_hole_totals(
+    geo_context: Mapping[str, Any] | None,
+) -> dict[float, int]:
+    totals: dict[float, int] = {}
+    for ctx in _iter_geo_dicts_for_context(geo_context):
+        hole_diams = ctx.get("hole_diams_mm")
+        if isinstance(hole_diams, (list, tuple)):
+            counts = Counter()
+            for raw in hole_diams:
+                dia_mm = _coerce_positive_float(raw)
+                if dia_mm:
+                    counts[round(dia_mm, 4)] += 1
+            for dia_key, qty in counts.items():
+                totals[dia_key] = totals.get(dia_key, 0) + int(qty)
+
+        hole_bins = ctx.get("hole_bins")
+        if isinstance(hole_bins, _MappingABC):
+            for label, qty in hole_bins.items():
+                dia_mm = _parse_dim_to_mm(label)
+                qty_int = int(round(_coerce_positive_float(qty) or 0.0))
+                if dia_mm and qty_int > 0:
+                    dia_key = round(float(dia_mm), 4)
+                    totals[dia_key] = totals.get(dia_key, 0) + qty_int
+
+        families = ctx.get("hole_table_families_in") or ctx.get("hole_diam_families_in")
+        if isinstance(families, _MappingABC):
+            for label, qty in families.items():
+                dia_mm = _parse_dim_to_mm(label)
+                if dia_mm is None:
+                    dia_mm = _coerce_positive_float(label)
+                qty_int = int(round(_coerce_positive_float(qty) or 0.0))
+                if dia_mm and qty_int > 0:
+                    dia_key = round(float(dia_mm), 4)
+                    totals[dia_key] = totals.get(dia_key, 0) + qty_int
+    return totals
+
+
+def _normalize_hole_sets_for_geo(geo_context: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    structured = _collect_structured_hole_totals(geo_context)
+    totals = structured if structured else _collect_fallback_hole_totals(geo_context)
+    if not totals:
+        return []
+    normalized: list[dict[str, Any]] = []
+    for dia_key, qty in sorted(totals.items()):
+        normalized.append({"dia_mm": float(dia_key), "qty": int(qty)})
+    return normalized
+
+
+def _ensure_geo_context_fields(
+    geo_payload: Mapping[str, Any] | None,
+    value_map: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    if not isinstance(geo_payload, dict):
+        return {}
+
+    derived = geo_payload.get("derived")
+    if not isinstance(derived, dict):
+        derived = {}
+        geo_payload["derived"] = derived
+
+    thickness_mm = _coerce_positive_float(geo_payload.get("thickness_mm"))
+    if thickness_mm is None:
+        thickness_mm = _coerce_positive_float(geo_payload.get("plate_thickness_mm"))
+    if thickness_mm is None:
+        thickness_in = _coerce_positive_float(geo_payload.get("thickness_in"))
+        if thickness_in is None and isinstance(value_map, _MappingABC):
+            thickness_in = _coerce_positive_float(value_map.get("Thickness (in)"))
+        if thickness_in is None and isinstance(value_map, _MappingABC):
+            thickness_mm_direct = _coerce_positive_float(value_map.get("Thickness (mm)"))
+            if thickness_mm_direct:
+                thickness_mm = thickness_mm_direct
+        if thickness_mm is None and thickness_in is not None:
+            thickness_mm = thickness_in * 25.4
+    if thickness_mm:
+        geo_payload["thickness_mm"] = thickness_mm
+
+    plate_area_mm2 = _coerce_positive_float(geo_payload.get("plate_bbox_area_mm2"))
+    if plate_area_mm2 is None:
+        plate_area_mm2 = _derive_plate_bbox_area_mm2(geo_payload, value_map)
+    if plate_area_mm2:
+        geo_payload["plate_bbox_area_mm2"] = plate_area_mm2
+
+    geo_payload["hole_sets"] = _normalize_hole_sets_for_geo(geo_payload)
+
+    return geo_payload
+
+
 def _holes_removed_mass_g(geo_context: Mapping[str, Any] | None) -> float | None:
     """Approximate the mass removed by holes using available geometry context."""
 
@@ -8655,6 +8943,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         if length_in and width_in and thickness_in_val:
             volume_in3 = float(length_in) * float(width_in) * float(thickness_in_val)
             net_volume_cm3 = volume_in3 * 16.387064
+
+    _ensure_geo_context_fields(geo_payload, value_map)
     removal_mass_g = _holes_removed_mass_g(geo_payload)
     if net_volume_cm3 and density_g_cc and removal_mass_g:
         net_mass_g = float(net_volume_cm3) * float(density_g_cc)
@@ -8747,6 +9037,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         "red_flags": [],
         "totals": totals_block,
     }
+    breakdown["geo_context"] = dict(geo_payload)
 
     family = None
     if isinstance(geo_payload, _MappingABC):
@@ -8898,6 +9189,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             "effective_sources": state.effective_sources,
         },
         "breakdown": breakdown,
+        "geo": dict(geo_payload),
         "app_meta": {"llm_debug_enabled": APP_ENV.llm_debug_enabled},
     }
 
