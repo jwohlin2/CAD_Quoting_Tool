@@ -6367,6 +6367,53 @@ def compute_mass_and_scrap_after_removal(
     effective_mass = net_after * (1.0 + scrap_after)
     return net_after, scrap_after, effective_mass
 
+
+def _compute_scrap_mass_g(
+    *,
+    removal_mass_g_est: float | str | None,
+    scrap_pct_raw: float | str | None,
+    effective_mass_g: float | str | None,
+    net_mass_g: float | str | None,
+) -> float | None:
+    """Return the scrap mass for display/credit in grams.
+
+    Rendering pulls data from several sources (UI state, planner output,
+    persisted quotes) so the inputs might be strings, numbers or ``None``.  We
+    therefore coerce values defensively and pick the most reliable signal in
+    order: an explicit removal estimate, the scrap percentage applied to the
+    best mass reference, and finally the difference between effective and net
+    masses when all else fails.
+    """
+
+    removal_mass = _coerce_float_or_none(removal_mass_g_est)
+    if removal_mass is not None:
+        removal_mass = max(0.0, float(removal_mass))
+        if removal_mass > 0:
+            return removal_mass
+
+    scrap_frac = normalize_scrap_pct(scrap_pct_raw)
+    if scrap_frac is not None and scrap_frac > 0:
+        base_mass = _coerce_float_or_none(effective_mass_g)
+        if base_mass is None or base_mass <= 0:
+            base_mass = _coerce_float_or_none(net_mass_g)
+        if base_mass is not None and base_mass > 0:
+            return max(0.0, float(base_mass)) * float(scrap_frac)
+
+    effective_mass = _coerce_float_or_none(effective_mass_g)
+    net_mass = _coerce_float_or_none(net_mass_g)
+    if (
+        effective_mass is not None
+        and net_mass is not None
+        and float(effective_mass) > float(net_mass)
+    ):
+        return float(effective_mass) - float(net_mass)
+
+    if removal_mass is not None:
+        return removal_mass
+
+    return None
+
+
 def _material_price_from_choice(choice: str, material_lookup: dict[str, float]) -> float | None:
     """Resolve a material price per-gram for the editor helpers."""
 
