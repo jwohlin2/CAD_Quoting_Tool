@@ -179,30 +179,6 @@ APP_ENV = replace(APP_ENV, llm_debug_enabled=True)  # force-enable debug uncondi
 EXTRA_DETAIL_RE = re.compile(r"^includes\b.*extras\b", re.IGNORECASE)
 
 
-def _coerce_bool(value: object) -> bool | None:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    if isinstance(value, str):
-        text = value.strip().lower()
-        if text in {"y", "yes", "true", "1", "on"}:
-            return True
-        if text in {"n", "no", "false", "0", "off"}:
-            return False
-    return None
-
-
-def _coerce_env_bool(value: str | None) -> bool:
-    if value is None:
-        return False
-    coerced = _coerce_bool(value)
-    return bool(coerced)
-
-
-FORCE_PLANNER = _coerce_env_bool(os.environ.get("FORCE_PLANNER"))
-
-
 def _safe_float(value: Any, default: float = 0.0) -> float:
     """Best-effort float coercion used in multiple pricing paths."""
 
