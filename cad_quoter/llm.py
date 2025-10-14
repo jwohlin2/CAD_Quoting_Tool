@@ -1,9 +1,9 @@
 """Local LLM integration helpers for the CAD Quoter UI."""
 from __future__ import annotations
 
+import json
 import hashlib
 import math
-import json
 import os
 import re
 import time
@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence
 
+from appkit.data import load_text
 from cad_quoter.utils import _dict, compact_dict, jdump, json_safe_copy
 
 
@@ -35,24 +36,10 @@ def parse_llm_json(text: str) -> dict:
             return {}
 
 
-SYSTEM_SUGGEST = """You are a manufacturing estimator.
-Given GEO + baseline + bounds, propose bounded adjustments that improve realism.
-ALWAYS return a complete JSON object with THESE KEYS, even if values are unchanged:
-{
-  "process_hour_multipliers": {"drilling": <float>, "milling": <float>},
-  "process_hour_adders": {"inspection": <float>},
-  "scrap_pct": <float>,           // fraction 0.00–0.25
-  "setups": <int>,                // 1–4
-  "fixture": "<string>",          // short phrase
-  "notes": ["<short reason>"],
-  "no_change_reason": "<why you kept near baseline, if so>"
-}
-All outputs MUST respect bounds in `bounds`.
-Prefer small, explainable changes (±10–50%). Never leave fields out.
-`signals` exposes dfm/tolerance context such as `dfm_geo` (thin walls, unique normals, deburr edge length),
-`tolerance_inputs`, `default_tolerance_note`, `has_tight_tol`, `stock_catalog`, and `machine_limits`.
-Use these when suggesting scrap, inspection, fixture, setup, or stock strategies and cite them in your notes.
-You may use payload["seed"] heuristics (e.g., `dfm_summary`, `tolerance_focus`, `stock_focus`, `has_tight_tol`) to bias adjustments when helpful."""
+try:
+    SYSTEM_SUGGEST = load_text("system_suggest.txt").strip()
+except FileNotFoundError:  # pragma: no cover - defensive fallback
+    SYSTEM_SUGGEST = ""
 
 
 SUGG_TO_EDITOR = {
