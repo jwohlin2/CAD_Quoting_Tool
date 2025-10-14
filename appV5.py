@@ -347,6 +347,46 @@ def _count_recognized_ops(plan_summary: Mapping[str, Any] | None) -> int:
                 count += 1
     return count
 
+
+def _recognized_line_items_from_planner(pricing_result: Mapping[str, Any] | None) -> int:
+    """Best-effort extraction of recognized planner operations for fallback logic."""
+
+    if not isinstance(pricing_result, _MappingABC):
+        return 0
+
+    try:
+        raw_recognized = pricing_result.get("recognized_line_items")
+    except Exception:
+        raw_recognized = None
+    if raw_recognized is not None:
+        try:
+            value = int(float(raw_recognized))
+            if value > 0:
+                return value
+        except Exception:
+            pass
+
+    try:
+        line_items = pricing_result.get("line_items")
+    except Exception:
+        line_items = None
+    if isinstance(line_items, (list, tuple)):
+        count = sum(1 for entry in line_items if entry)
+        if count > 0:
+            return count
+
+    plan_summary: Mapping[str, Any] | None = None
+    try:
+        plan_summary = pricing_result.get("plan_summary")
+    except Exception:
+        plan_summary = None
+    if plan_summary is None:
+        plan_candidate = pricing_result.get("plan")
+        if isinstance(plan_candidate, _MappingABC):
+            plan_summary = plan_candidate
+
+    return _count_recognized_ops(plan_summary)
+
 def _normalize_item_text(value: Any) -> str:
     """Return a normalized key for matching variables rows."""
 
@@ -8754,6 +8794,12 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     family = str(family or "").strip().lower() or None
 
     planner_result: dict[str, Any] = {}
+    baseline["pricing_source"] = "legacy"
+    breakdown["pricing_source"] = "legacy"
+    use_planner = False
+    fallback_reason: str | None = None
+    planner_exception: Exception | None = None
+
     if family:
         if callable(_process_plan_job):
             try:
@@ -8770,11 +8816,37 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 dict(rates or {}),
                 oee=oee,
             )
-        except Exception:
+        except Exception as exc:
+            planner_exception = exc
             pricing = {}
 
         planner_result.update(pricing if isinstance(pricing, dict) else {})
-        totals = planner_result.get("totals", {}) if isinstance(planner_result.get("totals"), _MappingABC) else {}
+        recognized_line_items = _recognized_line_items_from_planner(planner_result)
+        if (
+            "recognized_line_items" not in planner_result
+            and recognized_line_items > 0
+        ):
+            planner_result["recognized_line_items"] = recognized_line_items
+
+        if planner_result:
+            breakdown["process_plan_pricing"] = planner_result
+            baseline["process_plan_pricing"] = planner_result
+
+        if planner_exception is None and recognized_line_items > 0:
+            use_planner = True
+        else:
+            fallback_reason = (
+                "Planner pricing failed; using legacy fallback"
+                if planner_exception is not None
+                else "Planner recognized no operations; using legacy fallback"
+            )
+
+    if use_planner:
+        totals = (
+            planner_result.get("totals", {})
+            if isinstance(planner_result.get("totals"), _MappingABC)
+            else {}
+        )
         machine_cost = float(_coerce_float_or_none(totals.get("machine_cost")) or 0.0)
         labor_cost = float(_coerce_float_or_none(totals.get("labor_cost")) or 0.0)
         total_minutes = float(_coerce_float_or_none(totals.get("minutes")) or 0.0)
@@ -8782,11 +8854,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         process_costs.update({"Machine": round(machine_cost, 2), "Labor": round(labor_cost, 2)})
         totals_block.update({"machine_cost": machine_cost, "labor_cost": labor_cost, "minutes": total_minutes})
         breakdown["labor_cost_rendered"] = labor_cost
-        breakdown["process_plan_pricing"] = planner_result
         breakdown["pricing_source"] = "planner"
         breakdown["process_minutes"] = total_minutes
         baseline["pricing_source"] = "planner"
-        baseline["process_plan_pricing"] = planner_result
 
         hr_total = total_minutes / 60.0 if total_minutes else 0.0
         process_meta["planner_total"] = {
@@ -8805,9 +8875,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         if not roughly_equal(labor_cost, process_costs.get("Labor", 0.0), eps=_PLANNER_BUCKET_ABS_EPSILON):
             breakdown["red_flags"].append("Planner totals drifted (labor cost)")
     else:
-        breakdown["pricing_source"] = "legacy"
-        baseline["pricing_source"] = "legacy"
         breakdown.setdefault("process_minutes", 0.0)
+        if fallback_reason:
+            breakdown["red_flags"].append(fallback_reason)
 
     hole_diams: list[float] = []
     if isinstance(geo_payload, _MappingABC):
@@ -8828,44 +8898,49 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
 
     drilling_rate = _lookup_rate("DrillingRate", rates, params, default_rates, fallback=75.0)
     breakdown.setdefault("drilling_meta", {})
-    if hole_diams and thickness_in and drilling_rate > 0:
-        try:
-            estimator_hours = estimate_drilling_hours(hole_diams, float(thickness_in), str(material_text or ""))
-        except Exception:
-            estimator_hours = 0.0
-        if not estimator_hours or estimator_hours <= 0:
-            hole_count = max(1, len(hole_diams))
-            avg_dia_in = sum(hole_diams) / hole_count / 25.4
-            estimator_hours = max(0.05, hole_count * max(avg_dia_in, 0.1) * float(thickness_in) / 600.0)
-        bucket_view["drilling"] = {
-            "minutes": estimator_hours * 60.0,
-            "machine_cost": estimator_hours * drilling_rate,
-            "labor_cost": 0.0,
-        }
-        breakdown["drilling_meta"].update({"estimator_hours_for_planner": estimator_hours})
-        process_meta["drilling"] = {
-            "hr": estimator_hours,
-            "minutes": estimator_hours * 60.0,
-            "rate": drilling_rate,
-            "basis": ["planner_drilling_override"],
-        }
+    if not use_planner:
+        if hole_diams and thickness_in and drilling_rate > 0:
+            try:
+                estimator_hours = estimate_drilling_hours(
+                    hole_diams, float(thickness_in), str(material_text or "")
+                )
+            except Exception:
+                estimator_hours = 0.0
+            if not estimator_hours or estimator_hours <= 0:
+                hole_count = max(1, len(hole_diams))
+                avg_dia_in = sum(hole_diams) / hole_count / 25.4
+                estimator_hours = max(
+                    0.05, hole_count * max(avg_dia_in, 0.1) * float(thickness_in) / 600.0
+                )
+            bucket_view["drilling"] = {
+                "minutes": estimator_hours * 60.0,
+                "machine_cost": estimator_hours * drilling_rate,
+                "labor_cost": 0.0,
+            }
+            breakdown["drilling_meta"].update({"estimator_hours_for_planner": estimator_hours})
+            process_meta["drilling"] = {
+                "hr": estimator_hours,
+                "minutes": estimator_hours * 60.0,
+                "rate": drilling_rate,
+                "basis": ["planner_drilling_override"],
+            }
 
-    roughing_hours = _coerce_float_or_none(value_map.get("Roughing Cycle Time"))
-    if roughing_hours is None:
-        roughing_hours = _coerce_float_or_none(value_map.get("Roughing Cycle Time (hr)"))
-    milling_rate = _lookup_rate("MillingRate", rates, params, default_rates, fallback=100.0)
-    if roughing_hours and roughing_hours > 0:
-        bucket_view["milling"] = {
-            "minutes": roughing_hours * 60.0,
-            "machine_cost": roughing_hours * milling_rate,
-            "labor_cost": 0.0,
-        }
-        process_meta["milling"] = {
-            "hr": roughing_hours,
-            "minutes": roughing_hours * 60.0,
-            "rate": milling_rate,
-            "basis": ["planner_milling_backfill"],
-        }
+        roughing_hours = _coerce_float_or_none(value_map.get("Roughing Cycle Time"))
+        if roughing_hours is None:
+            roughing_hours = _coerce_float_or_none(value_map.get("Roughing Cycle Time (hr)"))
+        milling_rate = _lookup_rate("MillingRate", rates, params, default_rates, fallback=100.0)
+        if roughing_hours and roughing_hours > 0:
+            bucket_view["milling"] = {
+                "minutes": roughing_hours * 60.0,
+                "machine_cost": roughing_hours * milling_rate,
+                "labor_cost": 0.0,
+            }
+            process_meta["milling"] = {
+                "hr": roughing_hours,
+                "minutes": roughing_hours * 60.0,
+                "rate": milling_rate,
+                "basis": ["planner_milling_backfill"],
+            }
 
     project_hours = _coerce_float_or_none(value_map.get("Project Management Hours")) or 0.0
     toolmaker_hours = _coerce_float_or_none(value_map.get("Tool & Die Maker Hours")) or 0.0
