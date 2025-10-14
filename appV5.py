@@ -2951,6 +2951,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         material_selection.setdefault("group", group_material_breakdown)
         material_selection.setdefault("material_group", group_material_breakdown)
     material = material_block
+    material_detail_for_breakdown = material
     drilling_meta = breakdown.get("drilling_meta", {}) or {}
     process_costs_raw = breakdown.get("process_costs", {}) or {}
     process_costs = (
@@ -3207,6 +3208,33 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     def _format_weight_lb_oz(mass_g: float | None) -> str:
         return format_weight_lb_oz(mass_g)
+
+    def _scrap_source_hint(material_info: Mapping[str, Any] | None) -> str | None:
+        if not isinstance(material_info, _MappingABC):
+            return None
+
+        scrap_from_holes_raw = material_info.get("scrap_pct_from_holes")
+        scrap_from_holes_val = _coerce_float_or_none(scrap_from_holes_raw)
+        scrap_from_holes = False
+        if scrap_from_holes_val is not None and scrap_from_holes_val > 1e-6:
+            scrap_from_holes = True
+        elif isinstance(scrap_from_holes_raw, bool):
+            scrap_from_holes = scrap_from_holes_raw
+        if scrap_from_holes:
+            return "holes"
+
+        label_raw = material_info.get("scrap_source_label")
+        if label_raw in (None, ""):
+            return None
+
+        label_text = str(label_raw).strip()
+        if not label_text:
+            return None
+
+        label_text = label_text.replace("+", " + ")
+        label_text = label_text.replace("_", " ")
+        label_text = re.sub(r"\s+", " ", label_text).strip()
+        return label_text or None
 
     def _is_truthy_flag(value) -> bool:
         """Return True only for explicit truthy values.
@@ -3595,8 +3623,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             append_line("")
 
     app_meta = result.setdefault("app_meta", {})
-    # Force-enable: always render drill debug entries
-    if True:
+    # Always show drill debug in the rendered quote; the nice sections depend on these signals
+    if drill_debug_entries:
         # Order so legacy per-bin “OK …” lines appear first, then tables/summary.
         def _dbg_sort(a: str, b: str) -> int:
             a_ok = a.strip().lower().startswith("ok ")
@@ -3608,12 +3636,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if a_hdr and not b_hdr: return 1
             if b_hdr and not a_hdr: return -1
             return 0
+
         try:
-            drill_debug_entries = sorted((drill_debug_entries or []), key=cmp_to_key(_dbg_sort))
+            sorted_drill_entries = sorted(drill_debug_entries, key=cmp_to_key(_dbg_sort))
         except Exception:
-            drill_debug_entries = drill_debug_entries or []
-        append_lines(drill_debug_entries)
-    final_price_row_index = -1
+            sorted_drill_entries = drill_debug_entries
+
+        render_drill_debug(sorted_drill_entries)
     row("Final Price per Part:", price)
     final_price_row_index = len(lines) - 1
     total_labor_label = "Total Labor Cost:"
@@ -4303,30 +4332,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if matcost or show_zeros:
                 total_material_cost = float(matcost or 0.0)
                 material_net_cost = total_material_cost
-            scrap_credit_lines: list[str] = []
-            if scrap_credit_entered and scrap_credit:
-                credit_display = _m(scrap_credit)
-                if credit_display.startswith(currency):
-                    credit_display = f"-{credit_display}"
-                else:
-                    credit_display = f"-{fmt_money(scrap_credit, currency)}"
-                scrap_credit_lines.append(f"  Scrap Credit: {credit_display}")
-                scrap_credit_mass_lb = _coerce_float_or_none(
-                    material.get("scrap_credit_mass_lb")
-                )
-                scrap_credit_unit_price_lb = _coerce_float_or_none(
-                    material.get("scrap_credit_unit_price_usd_per_lb")
-                )
-                if scrap_credit_mass_lb and scrap_credit_unit_price_lb:
-                    scrap_credit_mass_g = (
-                        float(scrap_credit_mass_lb) / LB_PER_KG * 1000.0
-                    )
-                    scrap_credit_lines.append(
-                        "    based on "
-                        f"{_format_weight_lb_oz(scrap_credit_mass_g)} × {fmt_money(scrap_credit_unit_price_lb, currency)} / lb"
-                    )
             net_mass_val = _coerce_float_or_none(net_mass_g)
-            effective_mass_val = _coerce_float_or_none(mass_g)
+            effective_mass_val = _coerce_float_or_none(
+                material.get("effective_mass_g")
+            )
+            if effective_mass_val is None:
+                effective_mass_val = _coerce_float_or_none(mass_g)
             removal_mass_val = None
             for removal_key in ("material_removed_mass_g", "material_removed_mass_g_est"):
                 removal_mass_val = _coerce_float_or_none(material.get(removal_key))
@@ -4398,31 +4409,21 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                         f"scrap-adjusted {_format_weight_lb_decimal(effective_mass_val)}"
                     )
 
-            scrap_mass_val: float | None = None
-            if (
-                starting_mass_val is not None
-                and net_mass_val is not None
-            ):
-                scrap_mass_val = max(0.0, float(starting_mass_val) - float(net_mass_val))
-            if scrap_mass_val is None and removal_mass_val is not None:
-                scrap_mass_val = max(0.0, float(removal_mass_val))
-            if (
-                scrap_mass_val is None
-                and scrap_fraction_val is not None
-                and starting_mass_val is not None
-            ):
-                scrap_mass_val = max(
-                    0.0, float(starting_mass_val) * float(scrap_fraction_val)
+            scrap_mass_val = _compute_scrap_mass_g(
+                removal_mass_g_est=material.get("material_removed_mass_g_est"),
+                scrap_pct_raw=scrap,
+                effective_mass_g=effective_mass_val,
+                net_mass_g=net_mass_val,
+            )
+
+            if scrap_mass_val is not None:
+                scrap_credit_mass_lb = float(scrap_mass_val) / 1000.0 * LB_PER_KG
+                material_detail_for_breakdown["scrap_credit_mass_lb"] = (
+                    scrap_credit_mass_lb
                 )
-            if (
-                scrap_mass_val is None
-                and scrap_adjusted_mass_val is not None
-                and net_mass_val is not None
-            ):
-                scrap_mass_val = max(
-                    0.0,
-                    abs(float(scrap_adjusted_mass_val) - float(net_mass_val)),
-                )
+            else:
+                scrap_credit_mass_lb = None
+                material_detail_for_breakdown.pop("scrap_credit_mass_lb", None)
 
             weight_lines: list[str] = []
             if (starting_mass_val and starting_mass_val > 0) or show_zeros:
@@ -4441,7 +4442,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             elif show_zeros:
                 weight_lines.append("  Scrap Weight: 0 oz")
             if scrap is not None:
-                weight_lines.append(f"  Scrap Percentage: {_pct(scrap)}")
+                scrap_hint_text = _scrap_source_hint(material)
+                scrap_line = f"  Scrap Percentage: {_pct(scrap)}"
+                if scrap_hint_text:
+                    scrap_line += f" ({scrap_hint_text})"
+                weight_lines.append(scrap_line)
             # Historically the renderer would emit an extra weight-only line here when
             # ``scrap_adjusted_mass`` was available.  The value was the computed "with
             # scrap" mass, but because it lacked a label it rendered as a stray line like
@@ -4451,6 +4456,25 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             # already convey the information a customer needs.
 
             detail_lines.extend(weight_lines)
+            scrap_credit_lines: list[str] = []
+            if scrap_credit_entered and scrap_credit:
+                credit_display = _m(scrap_credit)
+                if credit_display.startswith(currency):
+                    credit_display = f"-{credit_display}"
+                else:
+                    credit_display = f"-{fmt_money(scrap_credit, currency)}"
+                scrap_credit_lines.append(f"  Scrap Credit: {credit_display}")
+                scrap_credit_unit_price_lb = _coerce_float_or_none(
+                    material.get("scrap_credit_unit_price_usd_per_lb")
+                )
+                if (
+                    scrap_credit_mass_lb is not None
+                    and scrap_credit_unit_price_lb is not None
+                ):
+                    scrap_credit_lines.append(
+                        "    based on "
+                        f"{_format_weight_lb_oz(scrap_mass_val)} × {fmt_money(scrap_credit_unit_price_lb, currency)} / lb"
+                    )
             if scrap_credit_lines:
                 detail_lines.extend(scrap_credit_lines)
 
@@ -5729,9 +5753,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             f"TOTAL DRILLING (with toolchange) ........ {subtotal_min + tool_add:.2f} min  ({(subtotal_min + tool_add)/60.0:.2f} hr)"
         )
         append_line("")
-    except Exception:
-        # If anything goes sideways here, do not break the quote – just skip this block.
-        pass
+    except Exception as e:
+        # Don’t break the quote — but surface the reason, so we can see why it skipped.
+        append_line(f"[MATERIAL REMOVAL block skipped: {e}]")
+        append_line("")
 
     append_line("")
 
@@ -8813,6 +8838,11 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     family = str(family or "").strip().lower() or None
 
     planner_result: dict[str, Any] = {}
+    planner_used = False
+    planner_machine_cost_total = 0.0
+    planner_labor_cost_total = 0.0
+    amortized_programming = 0.0
+    amortized_fixture = 0.0
     if family:
         if callable(_process_plan_job):
             try:
@@ -8835,33 +8865,98 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         planner_result.update(pricing if isinstance(pricing, dict) else {})
         totals = planner_result.get("totals", {}) if isinstance(planner_result.get("totals"), _MappingABC) else {}
         machine_cost = float(_coerce_float_or_none(totals.get("machine_cost")) or 0.0)
-        labor_cost = float(_coerce_float_or_none(totals.get("labor_cost")) or 0.0)
+        labor_cost_total = float(_coerce_float_or_none(totals.get("labor_cost")) or 0.0)
         total_minutes = float(_coerce_float_or_none(totals.get("minutes")) or 0.0)
 
-        process_costs.update({"Machine": round(machine_cost, 2), "Labor": round(labor_cost, 2)})
-        totals_block.update({"machine_cost": machine_cost, "labor_cost": labor_cost, "minutes": total_minutes})
-        breakdown["labor_cost_rendered"] = labor_cost
+        line_items = planner_result.get("line_items")
+        if isinstance(line_items, Sequence):
+            for item in line_items:
+                if not isinstance(item, _MappingABC):
+                    continue
+                label = str(item.get("op") or item.get("name") or "").strip().lower()
+                if not label or "amortized" not in label:
+                    continue
+                labor_amount = _coerce_float_or_none(item.get("labor_cost"))
+                if labor_amount is None:
+                    continue
+                labor_value = float(labor_amount)
+                if "program" in label:
+                    amortized_programming += labor_value
+                elif "fixture" in label:
+                    amortized_fixture += labor_value
+
+        planner_machine_cost_total = machine_cost
+        planner_labor_cost_total = labor_cost_total - amortized_programming - amortized_fixture
+        if planner_labor_cost_total < 0:
+            planner_labor_cost_total = 0.0
+
+        process_costs.clear()
+        process_costs.update(
+            {
+                "Machine": round(planner_machine_cost_total, 2),
+                "Labor": round(planner_labor_cost_total, 2),
+            }
+        )
+        combined_labor_total = (
+            planner_machine_cost_total
+            + planner_labor_cost_total
+            + amortized_programming
+            + amortized_fixture
+        )
+        totals_block.update(
+            {
+                "machine_cost": planner_machine_cost_total,
+                "labor_cost": combined_labor_total,
+                "minutes": total_minutes,
+            }
+        )
+        breakdown["labor_cost_rendered"] = combined_labor_total
         breakdown["process_plan_pricing"] = planner_result
         breakdown["pricing_source"] = "planner"
         breakdown["process_minutes"] = total_minutes
         baseline["pricing_source"] = "planner"
         baseline["process_plan_pricing"] = planner_result
+        planner_used = True
 
         hr_total = total_minutes / 60.0 if total_minutes else 0.0
         process_meta["planner_total"] = {
             "minutes": total_minutes,
             "hr": hr_total,
-            "cost": machine_cost + labor_cost,
+            "cost": machine_cost + labor_cost_total,
             "machine_cost": machine_cost,
-            "labor_cost": labor_cost,
+            "labor_cost": labor_cost_total,
+            "labor_cost_excl_amortized": planner_labor_cost_total,
+            "amortized_programming": amortized_programming,
+            "amortized_fixture": amortized_fixture,
             "line_items": list(planner_result.get("line_items", []) or []),
         }
-        process_meta["planner_machine"] = {"minutes": total_minutes, "hr": hr_total, "cost": machine_cost}
-        process_meta["planner_labor"] = {"minutes": total_minutes, "hr": hr_total, "cost": labor_cost}
+        process_meta["planner_machine"] = {
+            "minutes": total_minutes,
+            "hr": hr_total,
+            "cost": machine_cost,
+        }
+        process_meta["planner_labor"] = {
+            "minutes": total_minutes,
+            "hr": hr_total,
+            "cost": labor_cost_total,
+            "cost_excl_amortized": planner_labor_cost_total,
+            "amortized_programming": amortized_programming,
+            "amortized_fixture": amortized_fixture,
+        }
 
-        if not roughly_equal(machine_cost, process_costs.get("Machine", 0.0), eps=_PLANNER_BUCKET_ABS_EPSILON):
+        machine_rendered = float(_coerce_float_or_none(process_costs.get("Machine")) or 0.0)
+        if not roughly_equal(
+            planner_machine_cost_total,
+            machine_rendered,
+            eps=_PLANNER_BUCKET_ABS_EPSILON,
+        ):
             breakdown["red_flags"].append("Planner totals drifted (machine cost)")
-        if not roughly_equal(labor_cost, process_costs.get("Labor", 0.0), eps=_PLANNER_BUCKET_ABS_EPSILON):
+        labor_rendered = float(_coerce_float_or_none(process_costs.get("Labor")) or 0.0)
+        if not roughly_equal(
+            planner_labor_cost_total,
+            labor_rendered,
+            eps=_PLANNER_BUCKET_ABS_EPSILON,
+        ):
             breakdown["red_flags"].append("Planner totals drifted (labor cost)")
     else:
         breakdown["pricing_source"] = "legacy"
@@ -8933,7 +9028,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         process_meta["project_management"] = {"hr": 0.0, "minutes": 0.0}
     if toolmaker_hours > 0:
         process_meta["toolmaker_support"] = {"hr": toolmaker_hours, "minutes": toolmaker_hours * 60.0}
-        process_costs["toolmaker_support"] = toolmaker_hours * toolmaker_rate
+        if not planner_used:
+            process_costs["toolmaker_support"] = toolmaker_hours * toolmaker_rate
 
     auto_prog_hr = 0.5 + 0.1 * len(hole_diams)
     if thickness_in:
@@ -8959,6 +9055,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         "breakdown": breakdown,
         "app_meta": {"llm_debug_enabled": APP_ENV.llm_debug_enabled},
     }
+
+    if planner_used:
+        result.setdefault("app_meta", {})["used_planner"] = True
 
     return result
 
