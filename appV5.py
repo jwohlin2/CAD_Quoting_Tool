@@ -79,6 +79,8 @@ from cad_quoter.domain import (
 
 from cad_quoter.vendors import ezdxf as _ezdxf_vendor
 
+from bucketizer import bucketize
+
 from appkit.geometry_shim import (
     read_cad_any,
     read_step_shape,
@@ -5859,6 +5861,26 @@ def _coerce_two_bucket_rates(value: Any) -> dict[str, dict[str, float]]:
 
     return {"labor": {}, "machine": {}}
 
+
+def _merge_two_bucket_rates(*sources: typing.Any) -> dict[str, dict[str, float]]:
+    """Merge multiple two-bucket or flat rate mappings into a single structure."""
+
+    merged: dict[str, dict[str, float]] = {"labor": {}, "machine": {}}
+
+    for source in sources:
+        if source is None:
+            continue
+        coerced = _coerce_two_bucket_rates(source)
+        for bucket_type in ("labor", "machine"):
+            bucket = merged.setdefault(bucket_type, {})
+            for role, value in coerced.get(bucket_type, {}).items():
+                try:
+                    bucket[str(role)] = float(value)
+                except Exception:
+                    continue
+
+    return merged
+
 try:
     _rates_raw = SERVICE_CONTAINER.load_rates()
 except ConfigError as exc:
@@ -8809,6 +8831,44 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         baseline["pricing_source"] = "legacy"
         breakdown.setdefault("process_minutes", 0.0)
 
+    using_planner = str(breakdown.get("pricing_source", "")).strip().lower() == "planner"
+
+    merged_two_bucket_rates = _merge_two_bucket_rates(
+        RATES_TWO_BUCKET_DEFAULT,
+        default_rates,
+        rates,
+    )
+    if not any(merged_two_bucket_rates.get(kind) for kind in ("labor", "machine")):
+        merged_two_bucket_rates = copy.deepcopy(RATES_TWO_BUCKET_DEFAULT)
+
+    bucketize_nre: dict[str, Any] = {}
+    if isinstance(planner_result, _MappingABC):
+        for key in ("nre", "nre_minutes", "nre_totals"):
+            candidate = planner_result.get(key)
+            if isinstance(candidate, _MappingABC) and candidate:
+                bucketize_nre = {str(k): v for k, v in candidate.items()}
+                break
+
+    geom_for_bucketize = geo_payload if isinstance(geo_payload, dict) else {}
+    try:
+        bucketized_raw = bucketize(
+            planner_result if isinstance(planner_result, dict) else {},
+            merged_two_bucket_rates,
+            bucketize_nre,
+            qty=qty,
+            geom=geom_for_bucketize,
+        )
+    except Exception:
+        bucketized_raw = {}
+
+    if not isinstance(bucketized_raw, _MappingABC):
+        bucketized_raw = {}
+
+    bucket_view_prepared = _prepare_bucket_view(bucketized_raw)
+    bucket_view.clear()
+    bucket_view.update(bucket_view_prepared)
+    bucket_view_buckets = bucket_view.setdefault("buckets", {})
+
     hole_diams: list[float] = []
     if isinstance(geo_payload, _MappingABC):
         raw_diams = geo_payload.get("hole_diams_mm")
@@ -8828,7 +8888,13 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
 
     drilling_rate = _lookup_rate("DrillingRate", rates, params, default_rates, fallback=75.0)
     breakdown.setdefault("drilling_meta", {})
-    if hole_diams and thickness_in and drilling_rate > 0:
+    if (
+        not using_planner
+        and hole_diams
+        and thickness_in
+        and drilling_rate > 0
+        and "drilling" not in bucket_view_buckets
+    ):
         try:
             estimator_hours = estimate_drilling_hours(hole_diams, float(thickness_in), str(material_text or ""))
         except Exception:
@@ -8837,35 +8903,147 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             hole_count = max(1, len(hole_diams))
             avg_dia_in = sum(hole_diams) / hole_count / 25.4
             estimator_hours = max(0.05, hole_count * max(avg_dia_in, 0.1) * float(thickness_in) / 600.0)
-        bucket_view["drilling"] = {
-            "minutes": estimator_hours * 60.0,
-            "machine_cost": estimator_hours * drilling_rate,
-            "labor_cost": 0.0,
+        minutes_val = estimator_hours * 60.0
+        machine_cost = estimator_hours * drilling_rate
+        bucket_view_buckets["drilling"] = {
+            "minutes": minutes_val,
+            "machine$": machine_cost,
+            "labor$": 0.0,
+            "total$": machine_cost,
         }
         breakdown["drilling_meta"].update({"estimator_hours_for_planner": estimator_hours})
-        process_meta["drilling"] = {
-            "hr": estimator_hours,
-            "minutes": estimator_hours * 60.0,
-            "rate": drilling_rate,
-            "basis": ["planner_drilling_override"],
-        }
+        drilling_meta_entry = process_meta.setdefault("drilling", {})
+        drilling_meta_entry.update(
+            {
+                "hr": estimator_hours,
+                "minutes": minutes_val,
+                "rate": drilling_rate,
+                "labor$": 0.0,
+                "machine$": machine_cost,
+                "$": round(machine_cost, 2),
+                "total$": round(machine_cost, 2),
+            }
+        )
+        basis_raw = drilling_meta_entry.get("basis")
+        if isinstance(basis_raw, list):
+            basis_list = list(basis_raw)
+        else:
+            basis_list = []
+        if "planner_drilling_override" not in basis_list:
+            basis_list.append("planner_drilling_override")
+        drilling_meta_entry["basis"] = basis_list
 
     roughing_hours = _coerce_float_or_none(value_map.get("Roughing Cycle Time"))
     if roughing_hours is None:
         roughing_hours = _coerce_float_or_none(value_map.get("Roughing Cycle Time (hr)"))
     milling_rate = _lookup_rate("MillingRate", rates, params, default_rates, fallback=100.0)
-    if roughing_hours and roughing_hours > 0:
-        bucket_view["milling"] = {
-            "minutes": roughing_hours * 60.0,
-            "machine_cost": roughing_hours * milling_rate,
-            "labor_cost": 0.0,
+    if (
+        not using_planner
+        and roughing_hours
+        and roughing_hours > 0
+        and "milling" not in bucket_view_buckets
+    ):
+        minutes_val = roughing_hours * 60.0
+        machine_cost = roughing_hours * milling_rate
+        bucket_view_buckets["milling"] = {
+            "minutes": minutes_val,
+            "machine$": machine_cost,
+            "labor$": 0.0,
+            "total$": machine_cost,
         }
-        process_meta["milling"] = {
-            "hr": roughing_hours,
-            "minutes": roughing_hours * 60.0,
-            "rate": milling_rate,
-            "basis": ["planner_milling_backfill"],
-        }
+        milling_meta_entry = process_meta.setdefault("milling", {})
+        milling_meta_entry.update(
+            {
+                "hr": roughing_hours,
+                "minutes": minutes_val,
+                "rate": milling_rate,
+                "labor$": 0.0,
+                "machine$": machine_cost,
+                "$": round(machine_cost, 2),
+                "total$": round(machine_cost, 2),
+            }
+        )
+        basis_raw = milling_meta_entry.get("basis")
+        if isinstance(basis_raw, list):
+            basis_list = list(basis_raw)
+        else:
+            basis_list = []
+        if "planner_milling_backfill" not in basis_list:
+            basis_list.append("planner_milling_backfill")
+        milling_meta_entry["basis"] = basis_list
+
+    bucket_view_refreshed = _prepare_bucket_view(bucket_view)
+    bucket_view.clear()
+    bucket_view.update(bucket_view_refreshed)
+    bucket_view_buckets_final = (
+        bucket_view.get("buckets") if isinstance(bucket_view.get("buckets"), _MappingABC) else {}
+    )
+
+    bucket_hour_summary: dict[str, dict[str, Any]] = {}
+    bucket_hour_total = 0.0
+    if isinstance(bucket_view_buckets_final, _MappingABC):
+        for canon_key, metrics in bucket_view_buckets_final.items():
+            minutes_val = max(0.0, _safe_float(metrics.get("minutes")))
+            labor_cost = max(0.0, _safe_float(metrics.get("labor$")))
+            machine_cost = max(0.0, _safe_float(metrics.get("machine$")))
+            total_cost = _safe_float(metrics.get("total$"))
+            if total_cost == 0.0:
+                total_cost = labor_cost + machine_cost
+            minutes_rounded = round(minutes_val, 2)
+            hours_val = round(minutes_val / 60.0, 2) if minutes_val else 0.0
+            total_cost = round(total_cost, 2)
+            labor_cost = round(labor_cost, 2)
+            machine_cost = round(machine_cost, 2)
+
+            meta_entry = process_meta.setdefault(canon_key, {})
+            meta_entry["minutes"] = minutes_rounded
+            meta_entry["hr"] = hours_val
+            meta_entry["labor$"] = labor_cost
+            meta_entry["machine$"] = machine_cost
+            meta_entry["$"] = total_cost
+            meta_entry["total$"] = total_cost
+
+            rate_existing = meta_entry.get("rate")
+            try:
+                rate_existing_float = float(rate_existing or 0.0)
+            except Exception:
+                rate_existing_float = 0.0
+            computed_rate = round(total_cost / hours_val, 2) if hours_val > 0 else 0.0
+            if computed_rate > 0:
+                meta_entry["rate"] = computed_rate
+            elif rate_existing_float > 0:
+                meta_entry["rate"] = rate_existing_float
+            else:
+                meta_entry["rate"] = 0.0
+            if "source" not in meta_entry:
+                meta_entry["source"] = "bucketize"
+
+            bucket_hour_summary[canon_key] = {
+                "label": _display_bucket_label(canon_key),
+                "hr": hours_val,
+                "rate": meta_entry.get("rate", 0.0),
+                "$": total_cost,
+                "labor$": labor_cost,
+                "machine$": machine_cost,
+            }
+            bucket_hour_total += hours_val
+
+    hour_summary_order = list(bucket_view.get("order") or [])
+    breakdown["hour_summary"] = {
+        "order": hour_summary_order,
+        "buckets": bucket_hour_summary,
+        "total_hours": round(bucket_hour_total, 2),
+    }
+
+    process_hours_baseline: dict[str, float] = {}
+    for canon_key in hour_summary_order:
+        entry = bucket_hour_summary.get(canon_key)
+        if entry is None:
+            continue
+        process_hours_baseline[canon_key] = entry.get("hr", 0.0)
+    for canon_key, entry in bucket_hour_summary.items():
+        process_hours_baseline.setdefault(canon_key, entry.get("hr", 0.0))
+    baseline["process_hours"] = process_hours_baseline
 
     project_hours = _coerce_float_or_none(value_map.get("Project Management Hours")) or 0.0
     toolmaker_hours = _coerce_float_or_none(value_map.get("Tool & Die Maker Hours")) or 0.0

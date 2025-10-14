@@ -93,11 +93,51 @@ DUMMY_QUOTE_RESULT = {
             "Labor": 600.0,
         },
         "process_meta": {
-            "milling": {"minutes": 360.0, "hr": 6.0, "rate": 100.0},
-            "drilling": {"minutes": 90.0, "hr": 1.5, "rate": 80.0},
-            "grinding": {"minutes": 120.0, "hr": 2.0, "rate": 90.0},
-            "finishing_deburr": {"minutes": 60.0, "hr": 1.0, "rate": 80.0},
-            "inspection": {"minutes": 45.0, "hr": 0.75, "rate": 95.0},
+            "milling": {
+                "minutes": 360.0,
+                "hr": 6.0,
+                "rate": 100.0,
+                "labor$": 240.0,
+                "machine$": 360.0,
+                "$": 600.0,
+                "total$": 600.0,
+            },
+            "drilling": {
+                "minutes": 90.0,
+                "hr": 1.5,
+                "rate": 140.0,
+                "labor$": 90.0,
+                "machine$": 120.0,
+                "$": 210.0,
+                "total$": 210.0,
+            },
+            "grinding": {
+                "minutes": 120.0,
+                "hr": 2.0,
+                "rate": 165.0,
+                "labor$": 150.0,
+                "machine$": 180.0,
+                "$": 330.0,
+                "total$": 330.0,
+            },
+            "finishing_deburr": {
+                "minutes": 60.0,
+                "hr": 1.0,
+                "rate": 80.0,
+                "labor$": 80.0,
+                "machine$": 0.0,
+                "$": 80.0,
+                "total$": 80.0,
+            },
+            "inspection": {
+                "minutes": 45.0,
+                "hr": 0.75,
+                "rate": 53.333333333333336,
+                "labor$": 40.0,
+                "machine$": 0.0,
+                "$": 40.0,
+                "total$": 40.0,
+            },
             "planner_total": {
                 "minutes": 675.0,
                 "hr": 11.25,
@@ -150,6 +190,58 @@ DUMMY_QUOTE_RESULT = {
                     "total$": 40.0,
                 },
             }
+        },
+        "hour_summary": {
+            "order": [
+                "milling",
+                "drilling",
+                "grinding",
+                "finishing_deburr",
+                "inspection",
+            ],
+            "buckets": {
+                "milling": {
+                    "label": "Milling",
+                    "hr": 6.0,
+                    "rate": 100.0,
+                    "$": 600.0,
+                    "labor$": 240.0,
+                    "machine$": 360.0,
+                },
+                "drilling": {
+                    "label": "Drilling",
+                    "hr": 1.5,
+                    "rate": 140.0,
+                    "$": 210.0,
+                    "labor$": 90.0,
+                    "machine$": 120.0,
+                },
+                "grinding": {
+                    "label": "Grinding",
+                    "hr": 2.0,
+                    "rate": 165.0,
+                    "$": 330.0,
+                    "labor$": 150.0,
+                    "machine$": 180.0,
+                },
+                "finishing_deburr": {
+                    "label": "Finishing/Deburr",
+                    "hr": 1.0,
+                    "rate": 80.0,
+                    "$": 80.0,
+                    "labor$": 80.0,
+                    "machine$": 0.0,
+                },
+                "inspection": {
+                    "label": "Inspection",
+                    "hr": 0.75,
+                    "rate": 53.333333333333336,
+                    "$": 40.0,
+                    "labor$": 40.0,
+                    "machine$": 0.0,
+                },
+            },
+            "total_hours": 11.25,
         },
         "labor_costs": {
             "Milling": 600.0,
@@ -317,6 +409,9 @@ def test_dummy_quote_hour_summary_aligns_with_planner_buckets() -> None:
     payload = _dummy_quote_payload()
     bucket_view = payload["breakdown"]["bucket_view"]["buckets"]
     baseline_hours = payload["decision_state"]["baseline"]["process_hours"]
+    process_meta = payload["breakdown"]["process_meta"]
+    hour_summary = payload["breakdown"]["hour_summary"]
+    summary_buckets = hour_summary["buckets"]
 
     for key, expected_label in (
         ("milling", "milling"),
@@ -325,8 +420,25 @@ def test_dummy_quote_hour_summary_aligns_with_planner_buckets() -> None:
         ("finishing_deburr", "finishing_deburr"),
         ("inspection", "inspection"),
     ):
-        bucket_hours = float(bucket_view[key]["minutes"]) / 60.0
+        metrics = bucket_view[key]
+        bucket_hours = float(metrics["minutes"]) / 60.0
+        total_cost = float(metrics.get("total$", 0.0))
+        if total_cost == 0.0:
+            total_cost = float(metrics.get("labor$", 0.0)) + float(metrics.get("machine$", 0.0))
         assert math.isclose(bucket_hours, baseline_hours[expected_label], abs_tol=0.01)
+
+        meta_entry = process_meta[key]
+        summary_entry = summary_buckets[key]
+
+        assert math.isclose(float(meta_entry["hr"]), bucket_hours, abs_tol=0.01)
+        assert math.isclose(float(meta_entry["$"]), total_cost, abs_tol=0.01)
+        assert math.isclose(float(summary_entry["hr"]), bucket_hours, abs_tol=0.01)
+        assert math.isclose(float(summary_entry["$"]), total_cost, abs_tol=0.01)
+
+        if bucket_hours > 0:
+            expected_rate = total_cost / bucket_hours
+            assert math.isclose(float(meta_entry["rate"]), expected_rate, abs_tol=0.01)
+            assert math.isclose(float(summary_entry["rate"]), expected_rate, abs_tol=0.01)
 
     programming_meta = payload["breakdown"]["nre_detail"]["programming"]
     fixture_meta = payload["breakdown"]["nre_detail"]["fixture"]
