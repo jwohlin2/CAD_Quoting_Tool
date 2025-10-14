@@ -66,11 +66,32 @@ def test_render_quote_shows_net_mass_when_scrap_present() -> None:
 
     rendered = appV5.render_quote(result, currency="$", show_zeros=False)
 
+    expected_scrap = _format_weight_lb_oz_for_test(24.0)
+
     assert "Mass:" not in rendered
     assert "Starting Weight: 4.2 oz" in rendered
-    assert "Scrap Weight: 0.71 oz" in rendered
+    assert f"Scrap Weight: {expected_scrap}" in rendered
     assert "Net Weight: 3.5 oz" in rendered
     assert "Scrap Percentage: 20.0%" in rendered
+
+
+def test_render_quote_prefers_removed_mass_estimate_for_scrap() -> None:
+    removal_mass_g = 125.0
+    material = {
+        "mass_g": 1000.0,
+        "effective_mass_g": 1000.0,
+        "net_mass_g": 900.0,
+        "material_removed_mass_g_est": removal_mass_g,
+        "scrap_pct": 0.4,
+    }
+
+    rendered = appV5.render_quote(
+        _base_material_quote(material), currency="$", show_zeros=False
+    )
+
+    expected_scrap = _format_weight_lb_oz_for_test(removal_mass_g)
+
+    assert f"Scrap Weight: {expected_scrap}" in rendered
 
 
 def test_render_quote_uses_net_mass_g_fallback() -> None:
@@ -87,8 +108,10 @@ def test_render_quote_uses_net_mass_g_fallback() -> None:
 
     rendered = appV5.render_quote(result, currency="$", show_zeros=False)
 
+    expected_scrap = _format_weight_lb_oz_for_test(start_g * material["scrap_pct"])
+
     assert "Starting Weight: 32 lb 12.4 oz" in rendered
-    assert "Scrap Weight: 8 lb 3.1 oz" in rendered
+    assert f"Scrap Weight: {expected_scrap}" in rendered
     assert "Net Weight: 24 lb 9.3 oz" in rendered
 
 
@@ -107,8 +130,12 @@ def test_render_quote_prefers_mass_g_for_starting_weight() -> None:
 
     rendered = appV5.render_quote(result, currency="$", show_zeros=False)
 
+    expected_scrap = _format_weight_lb_oz_for_test(
+        effective_g * material["scrap_pct"]
+    )
+
     assert "Starting Weight: 32 lb 12.4 oz" in rendered
-    assert "Scrap Weight: 8 lb 3.1 oz" in rendered
+    assert f"Scrap Weight: {expected_scrap}" in rendered
     assert "Net Weight: 24 lb 9.3 oz" in rendered
 
 

@@ -2915,6 +2915,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         material_selection.setdefault("group", group_material_breakdown)
         material_selection.setdefault("material_group", group_material_breakdown)
     material = material_block
+    material_detail_for_breakdown = material
     drilling_meta = breakdown.get("drilling_meta", {}) or {}
     process_costs_raw = breakdown.get("process_costs", {}) or {}
     process_costs = (
@@ -4294,30 +4295,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if matcost or show_zeros:
                 total_material_cost = float(matcost or 0.0)
                 material_net_cost = total_material_cost
-            scrap_credit_lines: list[str] = []
-            if scrap_credit_entered and scrap_credit:
-                credit_display = _m(scrap_credit)
-                if credit_display.startswith(currency):
-                    credit_display = f"-{credit_display}"
-                else:
-                    credit_display = f"-{fmt_money(scrap_credit, currency)}"
-                scrap_credit_lines.append(f"  Scrap Credit: {credit_display}")
-                scrap_credit_mass_lb = _coerce_float_or_none(
-                    material.get("scrap_credit_mass_lb")
-                )
-                scrap_credit_unit_price_lb = _coerce_float_or_none(
-                    material.get("scrap_credit_unit_price_usd_per_lb")
-                )
-                if scrap_credit_mass_lb and scrap_credit_unit_price_lb:
-                    scrap_credit_mass_g = (
-                        float(scrap_credit_mass_lb) / LB_PER_KG * 1000.0
-                    )
-                    scrap_credit_lines.append(
-                        "    based on "
-                        f"{_format_weight_lb_oz(scrap_credit_mass_g)} × {fmt_money(scrap_credit_unit_price_lb, currency)} / lb"
-                    )
             net_mass_val = _coerce_float_or_none(net_mass_g)
-            effective_mass_val = _coerce_float_or_none(mass_g)
+            effective_mass_val = _coerce_float_or_none(
+                material.get("effective_mass_g")
+            )
+            if effective_mass_val is None:
+                effective_mass_val = _coerce_float_or_none(mass_g)
             removal_mass_val = None
             for removal_key in ("material_removed_mass_g", "material_removed_mass_g_est"):
                 removal_mass_val = _coerce_float_or_none(material.get(removal_key))
@@ -4389,31 +4372,21 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                         f"scrap-adjusted {_format_weight_lb_decimal(effective_mass_val)}"
                     )
 
-            scrap_mass_val: float | None = None
-            if (
-                starting_mass_val is not None
-                and net_mass_val is not None
-            ):
-                scrap_mass_val = max(0.0, float(starting_mass_val) - float(net_mass_val))
-            if scrap_mass_val is None and removal_mass_val is not None:
-                scrap_mass_val = max(0.0, float(removal_mass_val))
-            if (
-                scrap_mass_val is None
-                and scrap_fraction_val is not None
-                and starting_mass_val is not None
-            ):
-                scrap_mass_val = max(
-                    0.0, float(starting_mass_val) * float(scrap_fraction_val)
+            scrap_mass_val = _compute_scrap_mass_g(
+                removal_mass_g_est=material.get("material_removed_mass_g_est"),
+                scrap_pct_raw=scrap,
+                effective_mass_g=effective_mass_val,
+                net_mass_g=net_mass_val,
+            )
+
+            if scrap_mass_val is not None:
+                scrap_credit_mass_lb = float(scrap_mass_val) / 1000.0 * LB_PER_KG
+                material_detail_for_breakdown["scrap_credit_mass_lb"] = (
+                    scrap_credit_mass_lb
                 )
-            if (
-                scrap_mass_val is None
-                and scrap_adjusted_mass_val is not None
-                and net_mass_val is not None
-            ):
-                scrap_mass_val = max(
-                    0.0,
-                    abs(float(scrap_adjusted_mass_val) - float(net_mass_val)),
-                )
+            else:
+                scrap_credit_mass_lb = None
+                material_detail_for_breakdown.pop("scrap_credit_mass_lb", None)
 
             weight_lines: list[str] = []
             if (starting_mass_val and starting_mass_val > 0) or show_zeros:
@@ -4446,6 +4419,25 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             # already convey the information a customer needs.
 
             detail_lines.extend(weight_lines)
+            scrap_credit_lines: list[str] = []
+            if scrap_credit_entered and scrap_credit:
+                credit_display = _m(scrap_credit)
+                if credit_display.startswith(currency):
+                    credit_display = f"-{credit_display}"
+                else:
+                    credit_display = f"-{fmt_money(scrap_credit, currency)}"
+                scrap_credit_lines.append(f"  Scrap Credit: {credit_display}")
+                scrap_credit_unit_price_lb = _coerce_float_or_none(
+                    material.get("scrap_credit_unit_price_usd_per_lb")
+                )
+                if (
+                    scrap_credit_mass_lb is not None
+                    and scrap_credit_unit_price_lb is not None
+                ):
+                    scrap_credit_lines.append(
+                        "    based on "
+                        f"{_format_weight_lb_oz(scrap_mass_val)} × {fmt_money(scrap_credit_unit_price_lb, currency)} / lb"
+                    )
             if scrap_credit_lines:
                 detail_lines.extend(scrap_credit_lines)
 
