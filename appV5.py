@@ -149,6 +149,8 @@ from appkit.time_overhead_compat import (
 from appkit.scrap_helpers import (
     normalize_scrap_pct,
     SCRAP_DEFAULT_GUESS,
+    _holes_scrap_fraction,
+    HOLE_SCRAP_CAP,
 )
 from appkit.planner_helpers import _process_plan_job
 
@@ -8626,6 +8628,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     normalized_scrap = normalize_scrap_pct(scrap_value)
     scrap_frac: float | None = normalized_scrap if normalized_scrap > 0 else None
     scrap_source = "ui" if scrap_frac is not None else "default_guess"
+    scrap_source_label = scrap_source
+    hole_reason_applied = False
     if scrap_frac is None:
         stock_plan = geo_payload.get("stock_plan_guess") if isinstance(geo_payload, dict) else None
         if isinstance(stock_plan, _MappingABC):
@@ -8634,12 +8638,24 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             if net and stock and net > 0 and stock >= net:
                 scrap_frac = max(0.0, min(0.25, (stock - net) / net))
                 scrap_source = "stock_plan_guess"
+                scrap_source_label = scrap_source
         if scrap_frac is None:
             scrap_frac = SCRAP_DEFAULT_GUESS
             scrap_source = "default_guess"
+            scrap_source_label = scrap_source
 
     assert scrap_frac is not None
     scrap_frac = float(scrap_frac)
+
+    hole_scrap_frac_est = _holes_scrap_fraction(geo_payload, cap=HOLE_SCRAP_CAP)
+    if hole_scrap_frac_est > 0:
+        hole_scrap_frac_clamped = max(0.0, min(HOLE_SCRAP_CAP, float(hole_scrap_frac_est)))
+        ui_scrap_frac = normalize_scrap_pct(scrap_value)
+        scrap_candidate = max(ui_scrap_frac, hole_scrap_frac_clamped)
+        if scrap_candidate > scrap_frac + 1e-9:
+            scrap_frac = scrap_candidate
+            scrap_source_label = f"{scrap_source}+holes"
+            hole_reason_applied = True
 
     density_g_cc = _coerce_float_or_none(value_map.get("Material Density"))
     if (density_g_cc in (None, 0.0)) and material_text:
@@ -8666,6 +8682,10 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         )
         scrap_frac = removal_result[1]
         scrap_source = "geometry"
+        if hole_reason_applied:
+            scrap_source_label = f"{scrap_source_label}+geometry"
+        else:
+            scrap_source_label = scrap_source
 
     fai_value = value_map.get("FAIR Required")
     fai_required = _coerce_bool(_coerce_checkbox_state(fai_value))
@@ -8674,6 +8694,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         "qty": qty,
         "material": material_text,
         "scrap_pct": scrap_frac,
+        "scrap_source_label": scrap_source_label,
         "fai_required": bool(fai_required),
     }
 
@@ -8740,6 +8761,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             "material": material_text,
             "scrap_pct": scrap_frac,
             "scrap_source": scrap_source,
+            "scrap_source_label": scrap_source_label,
         },
         "process_meta": process_meta,
         "bucket_view": bucket_view,
