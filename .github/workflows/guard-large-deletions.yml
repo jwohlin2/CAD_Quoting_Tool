@@ -8,9 +8,11 @@ jobs:
   guard:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout PR HEAD
         uses: actions/checkout@v4
         with:
+          # Always check out the PR head commit, not the synthetic merge
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
       - name: Compute diff vs base
@@ -19,11 +21,15 @@ jobs:
         run: |
           set -euo pipefail
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
-          HEAD_SHA="${{ github.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          git fetch --no-tags origin "$BASE_SHA" "$HEAD_SHA" || true
+          # Use merge-base to get the true comparison start point
+          MB=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
           echo "Base: $BASE_SHA"
           echo "Head: $HEAD_SHA"
+          echo "Merge-base: $MB"
           # Show numstat for debugging
-          git diff --numstat "$BASE_SHA..$HEAD_SHA" > diff_numstat.txt || true
+          git diff --numstat "$MB..$HEAD_SHA" > diff_numstat.txt || true
           echo "numstat entries: $(wc -l < diff_numstat.txt)"
           cat diff_numstat.txt | sed -n '1,200p'
 
@@ -47,7 +53,8 @@ jobs:
         run: |
           set -euo pipefail
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
-          HEAD_SHA="${{ github.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          MB=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
           # If appV5.py changed and deletions > 2000, require override label
           APP_DEL="${{ steps.diff.outputs.app_del }}"
           if [[ "${APP_DEL:-0}" -gt 2000 ]]; then
@@ -65,4 +72,3 @@ jobs:
               exit 1
             fi
           fi
-
