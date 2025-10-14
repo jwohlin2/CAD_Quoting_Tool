@@ -1,0 +1,238 @@
+ (cd "$(git rev-parse --show-toplevel)" && git apply --3way <<'EOF' 
+diff --git a/appV5.py b/appV5.py
+index 94e0d6adb6ef9d380ac925cada5dc4d6180263a9..c92599178a72df8869dfd35356e25c441765cd3b 100644
+--- a/appV5.py
++++ b/appV5.py
+@@ -791,59 +791,168 @@ def resolve_planner(
+             planner_mode = default_mode
+     else:
+         planner_mode = default_mode
+ 
+     signals_map: Mapping[str, Any]
+     if isinstance(signals, _MappingABC):
+         signals_map = signals
+     else:
+         signals_map = {}
+ 
+     has_line_items = bool(signals_map.get("line_items"))
+     has_pricing = bool(signals_map.get("pricing_result"))
+     has_totals = bool(signals_map.get("totals_present"))
+     try:
+         recognized_raw = signals_map.get("recognized_line_items", 0)
+         recognized_count = int(recognized_raw)
+     except Exception:
+         recognized_count = 0
+     has_recognized = recognized_count > 0
+ 
+     base_signal = has_line_items or has_pricing or has_totals or has_recognized
+ 
+     if planner_mode == "planner":
+         used_planner = base_signal or has_totals
+     elif planner_mode == "legacy":
+-        used_planner = has_line_items or has_recognized
++        # Force estimator path regardless of planner signals
++        used_planner = False
+     else:  # auto / default
+         used_planner = base_signal or has_recognized
+ 
+     if has_line_items:
+         used_planner = True
+     return used_planner, planner_mode
+ 
+ 
++def _ensure_drilling_override(
++    drill_hours: Any,
++    *,
++    planner_bucket_view: Mapping[str, Any] | None,
++    canonical_bucket_rollup: _MutableMappingABC[str, Any] | None,
++    process_meta: _MutableMappingABC[str, Any] | None,
++    hour_summary_entries: _MutableMappingABC[str, tuple[float, bool]] | None,
++    label_overrides: Mapping[str, str] | None = None,
++) -> None:
++    """Propagate estimator drilling hours into all planner-derived views."""
++
++    try:
++        hours = float(drill_hours or 0.0)
++    except Exception:
++        hours = 0.0
++    if not math.isfinite(hours):
++        hours = 0.0
++    hours = max(0.0, hours)
++
++    minutes_value = round(hours * 60.0, 2)
++    minutes_for_meta = round(hours * 60.0, 1)
++    hr_for_meta = round(hours, 2)
++    hr_precise = round(hours, 3)
++
++    if isinstance(canonical_bucket_rollup, _MutableMappingABC):
++        existing_rollup = canonical_bucket_rollup.get("drilling")
++        if isinstance(existing_rollup, _MutableMappingABC):
++            try:
++                existing_rollup["minutes"] = minutes_value
++            except Exception:
++                pass
++            try:
++                existing_rollup["hours"] = hr_precise
++            except Exception:
++                pass
++        canonical_bucket_rollup["drilling"] = hours
++
++    if isinstance(process_meta, _MutableMappingABC):
++        drilling_meta = process_meta.get("drilling")
++        if isinstance(drilling_meta, _MutableMappingABC):
++            drilling_meta["hr"] = hr_for_meta
++            drilling_meta["minutes"] = minutes_for_meta
++        elif isinstance(drilling_meta, _MappingABC):
++            new_meta = dict(drilling_meta)
++            new_meta["hr"] = hr_for_meta
++            new_meta["minutes"] = minutes_for_meta
++            process_meta["drilling"] = new_meta
++        else:
++            process_meta["drilling"] = {
++                "hr": hr_for_meta,
++                "minutes": minutes_for_meta,
++            }
++
++    if isinstance(hour_summary_entries, _MutableMappingABC):
++        label = _display_bucket_label("drilling", label_overrides) or "Drilling"
++        include_flag = True
++        existing = hour_summary_entries.get(label)
++        if isinstance(existing, (list, tuple)) and existing:
++            try:
++                include_flag = bool(existing[1])
++            except Exception:
++                include_flag = True
++        hour_summary_entries[label] = (hr_for_meta, include_flag)
++
++    def _update_bucket_map(bucket_map: Mapping[str, Any] | None) -> None:
++        if not isinstance(bucket_map, _MutableMappingABC):
++            return
++        target_key: str | None = None
++        for key in list(bucket_map.keys()):
++            if _canonical_bucket_key(key) == "drilling":
++                target_key = key
++                break
++        if target_key is None:
++            target_key = "Drilling"
++        entry_raw = bucket_map.get(target_key)
++        if isinstance(entry_raw, _MutableMappingABC):
++            entry = entry_raw
++        elif isinstance(entry_raw, _MappingABC):
++            entry = dict(entry_raw)
++        else:
++            entry = {}
++        entry["minutes"] = minutes_value
++        entry["hr"] = hr_precise
++        bucket_map[target_key] = entry
++
++    if isinstance(planner_bucket_view, _MutableMappingABC):
++        buckets_map = planner_bucket_view.get("buckets")
++        if isinstance(buckets_map, _MutableMappingABC):
++            _update_bucket_map(buckets_map)
++        else:
++            _update_bucket_map(planner_bucket_view)
++
++        order = planner_bucket_view.get("order")
++        if isinstance(order, list):
++            canonical_order = {
++                _canonical_bucket_key(item)
++                for item in order
++                if isinstance(item, str)
++            }
++            if "drilling" not in canonical_order:
++                candidate_key: str | None = None
++                if isinstance(buckets_map, _MutableMappingABC):
++                    for key in buckets_map.keys():
++                        if _canonical_bucket_key(key) == "drilling":
++                            candidate_key = key
++                            break
++                order.append(candidate_key or "Drilling")
++
+ def _planner_total_has_values(planner_meta_total: Mapping[str, Any]) -> bool:
+     """Return True when planner total metadata includes tangible output."""
+ 
+     for candidate_key in (
+         "line_items",
+         "total_cost",
+         "cost",
+         "minutes",
+         "hr",
+         "machine_cost",
+         "labor_cost",
+     ):
+         try:
+             value = planner_meta_total.get(candidate_key)  # type: ignore[arg-type]
+         except Exception:
+             value = None
+         if isinstance(value, (list, tuple)) and value:
+             return True
+         try:
+             if float(value or 0.0):  # type: ignore[arg-type]
+                 return True
+         except Exception:
+             continue
+     return False
+ 
+@@ -19300,50 +19409,59 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
+                     rate_val = float(meta_entry.get("rate", 0.0) or 0.0)
+                 except Exception:
+                     rate_val = 0.0
+                 try:
+                     base_extra_val = float(meta_entry.get("base_extra", 0.0) or 0.0)
+                 except Exception:
+                     base_extra_val = 0.0
+                 if rate_val > 0 or base_extra_val != 0.0:
+                     meta_entry["cost"] = round(total_hr * rate_val + base_extra_val, 2)
+                 elif labor_rate is not None or machine_rate is not None:
+                     meta_entry["cost"] = round(
+                         total_hr * (labor_rate or 0.0) + total_hr * (machine_rate or 0.0),
+                         2,
+                     )
+             else:
+                 process_meta[canon_key] = {
+                     "hr": round(total_hr, 3),
+                     "minutes": round(total_hr * 60.0, 1),
+                 }
+         if used_planner:
+             _update_planner_bucket_minutes(canon_key, total_hr)
+ 
+     if used_planner and drill_hr_total_final > 0.0:
+         _apply_final_drilling_hours(drill_hr_total_final)
+ 
++    _ensure_drilling_override(
++        drill_hr_total_final,
++        planner_bucket_view=planner_bucket_view,
++        canonical_bucket_rollup=canonical_bucket_rollup,
++        process_meta=process_meta,
++        hour_summary_entries=locals().get("hour_summary_entries"),
++        label_overrides=label_overrides,
++    )
++
+     for proc_key, final_hr in process_hours_final.items():
+         if pricing_source == "planner" and proc_key not in process_costs:
+             continue
+         raw_meta = process_meta.get(proc_key) if isinstance(process_meta, _MappingABC) else None
+         meta = raw_meta if isinstance(raw_meta, _MappingABC) else {}
+         try:
+             rate = float(meta.get("rate", 0.0) or 0.0)
+         except Exception:
+             rate = 0.0
+         try:
+             base_extra = float(meta.get("base_extra", 0.0) or 0.0)
+         except Exception:
+             base_extra = 0.0
+         hr_clean = max(0.0, float(final_hr or 0.0))
+         if rate > 0 or base_extra != 0.0:
+             new_cost = hr_clean * rate + base_extra
+             process_costs[proc_key] = round(new_cost, 2)
+         elif "cost" in meta:
+             try:
+                 process_costs[proc_key] = round(float(meta.get("cost", 0.0) or 0.0), 2)
+             except Exception:
+                 pass
+ 
+     for key, entry in applied_process.items():
+         final_hr = process_hours_final.get(key)
+ 
+EOF
+)
