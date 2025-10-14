@@ -1704,6 +1704,287 @@ def build_suggest_payload(
     return payload
 
 
+@dataclass(slots=True)
+class CanonicalQuoteInputs:
+    df: pd.DataFrame
+    params: Dict[str, Any] | None
+    rates: Dict[str, float] | None
+    default_params: Dict[str, Any] | None
+    default_rates: Dict[str, float] | None
+    default_material_display: str | None
+    material_vendor_csv: str | None
+    llm_enabled: bool
+    llm_model_path: str | None
+    llm_client: LLMClient | None
+    geo: dict[str, Any] | None
+    ui_vars: dict[str, Any] | None
+    quote_state: QuoteState | None
+    reuse_suggestions: bool
+    llm_suggest: Any | None
+    pricing: PricingEngine | None
+
+    def to_kwargs(self) -> Dict[str, Any]:
+        return {
+            "params": self.params,
+            "rates": self.rates,
+            "default_params": self.default_params,
+            "default_rates": self.default_rates,
+            "default_material_display": self.default_material_display,
+            "material_vendor_csv": self.material_vendor_csv,
+            "llm_enabled": self.llm_enabled,
+            "llm_model_path": self.llm_model_path,
+            "llm_client": self.llm_client,
+            "geo": self.geo,
+            "ui_vars": self.ui_vars,
+            "quote_state": self.quote_state,
+            "reuse_suggestions": self.reuse_suggestions,
+            "llm_suggest": self.llm_suggest,
+            "pricing": self.pricing,
+        }
+
+
+@dataclass(slots=True)
+class GeometryFeatures:
+    geo: dict[str, Any] | None
+
+
+@dataclass(slots=True)
+class ProcessEstimates:
+    quote: Dict[str, Any]
+
+
+@dataclass(slots=True)
+class OverheadEstimates:
+    overhead: Dict[str, Any]
+    fixturing: Dict[str, Any]
+    adders: Dict[str, Any]
+
+
+@dataclass(slots=True)
+class MergedBounds:
+    decision_state: Dict[str, Any]
+    merged: Dict[str, Any]
+
+
+@dataclass(slots=True)
+class TotalsAndMargin:
+    result: Dict[str, Any]
+    notes: list[str]
+
+
+def _canonicalize_quote_inputs(
+    df: pd.DataFrame,
+    params: Dict[str, Any] | None,
+    rates: Dict[str, float] | None,
+    *,
+    default_params: Dict[str, Any] | None,
+    default_rates: Dict[str, float] | None,
+    default_material_display: str | None,
+    material_vendor_csv: str | None,
+    llm_enabled: bool,
+    llm_model_path: str | None,
+    llm_client: LLMClient | None,
+    geo: dict[str, Any] | None,
+    ui_vars: dict[str, Any] | None,
+    quote_state: QuoteState | None,
+    reuse_suggestions: bool,
+    llm_suggest: Any | None,
+    pricing: PricingEngine | None,
+) -> CanonicalQuoteInputs:
+    ui_vars_clean: dict[str, Any] | None
+    if isinstance(ui_vars, _MappingABC):
+        ui_vars_clean = {str(k): v for k, v in ui_vars.items()}
+    elif isinstance(ui_vars, dict):
+        ui_vars_clean = dict(ui_vars)
+    else:
+        ui_vars_clean = None
+
+    geo_clean: dict[str, Any] | None
+    if isinstance(geo, _MappingABC):
+        geo_clean = dict(geo)
+    elif isinstance(geo, dict):
+        geo_clean = dict(geo)
+    else:
+        geo_clean = None
+
+    return CanonicalQuoteInputs(
+        df=df,
+        params=params,
+        rates=rates,
+        default_params=default_params,
+        default_rates=default_rates,
+        default_material_display=default_material_display,
+        material_vendor_csv=material_vendor_csv,
+        llm_enabled=llm_enabled,
+        llm_model_path=llm_model_path,
+        llm_client=llm_client,
+        geo=geo_clean,
+        ui_vars=ui_vars_clean,
+        quote_state=quote_state,
+        reuse_suggestions=reuse_suggestions,
+        llm_suggest=llm_suggest,
+        pricing=pricing,
+    )
+
+
+def _compute_geometry_features(
+    inputs: CanonicalQuoteInputs,
+) -> GeometryFeatures:
+    geo = inputs.geo if isinstance(inputs.geo, dict) else None
+    return GeometryFeatures(geo=geo)
+
+
+def _estimate_processes(
+    inputs: CanonicalQuoteInputs,
+    geometry: GeometryFeatures,
+) -> ProcessEstimates:
+    kwargs = inputs.to_kwargs()
+    kwargs["geo"] = geometry.geo
+    try:
+        quote = _compute_quote_from_df_impl(inputs.df, **kwargs)
+    except ValueError as exc:
+        message = str(exc)
+        if "Material cost is near zero" not in message:
+            raise
+        previous = os.environ.get("QUOTE_ALLOW_LOW_MATERIAL")
+        os.environ["QUOTE_ALLOW_LOW_MATERIAL"] = "1"
+        try:
+            quote = _compute_quote_from_df_impl(inputs.df, **kwargs)
+        finally:
+            if previous is None:
+                os.environ.pop("QUOTE_ALLOW_LOW_MATERIAL", None)
+            else:
+                os.environ["QUOTE_ALLOW_LOW_MATERIAL"] = previous
+    return ProcessEstimates(quote=quote)
+
+
+def _compute_overhead_estimates(
+    _inputs: CanonicalQuoteInputs,
+    _geometry: GeometryFeatures,
+    process: ProcessEstimates,
+) -> OverheadEstimates:
+    breakdown = process.quote.get("breakdown") if isinstance(process.quote, dict) else {}
+    if not isinstance(breakdown, _MappingABC):
+        breakdown = {}
+    overhead_raw = breakdown.get("overhead") if isinstance(breakdown, dict) else {}
+    fixture_raw = (
+        breakdown.get("fixturing")
+        if isinstance(breakdown, dict)
+        else {}
+    ) or (
+        breakdown.get("fixture")
+        if isinstance(breakdown, dict)
+        else {}
+    )
+    adders_raw = (
+        breakdown.get("adders")
+        if isinstance(breakdown, dict)
+        else {}
+    ) or (
+        breakdown.get("overhead_adders")
+        if isinstance(breakdown, dict)
+        else {}
+    )
+    overhead = dict(overhead_raw) if isinstance(overhead_raw, _MappingABC) else {}
+    fixture = dict(fixture_raw) if isinstance(fixture_raw, _MappingABC) else {}
+    adders = dict(adders_raw) if isinstance(adders_raw, _MappingABC) else {}
+    return OverheadEstimates(overhead=overhead, fixturing=fixture, adders=adders)
+
+
+def _merge_bounds(
+    _inputs: CanonicalQuoteInputs,
+    _geometry: GeometryFeatures,
+    process: ProcessEstimates,
+    overhead: OverheadEstimates,
+) -> MergedBounds:
+    decision_state = (
+        process.quote.get("decision_state")
+        if isinstance(process.quote, dict)
+        else {}
+    )
+    if not isinstance(decision_state, _MappingABC):
+        decision_state = {}
+    baseline = decision_state.get("baseline") if isinstance(decision_state, dict) else {}
+    suggestions = decision_state.get("suggestions") if isinstance(decision_state, dict) else {}
+    overrides = decision_state.get("overrides") if isinstance(decision_state, dict) else {}
+    guard_ctx = decision_state.get("guard_ctx") if isinstance(decision_state, dict) else None
+    merged = merge_effective(
+        baseline if isinstance(baseline, _MappingABC) else {},
+        suggestions if isinstance(suggestions, _MappingABC) else {},
+        overrides if isinstance(overrides, _MappingABC) else {},
+        guard_ctx=guard_ctx if isinstance(guard_ctx, dict) else None,
+    )
+    decision_dict = dict(decision_state)
+    if isinstance(decision_dict.get("merged_effective"), dict):
+        decision_dict["merged_effective"].update(merged)
+    else:
+        decision_dict["merged_effective"] = merged
+    return MergedBounds(decision_state=decision_dict, merged=merged)
+
+
+def _compute_totals_and_margin(
+    _inputs: CanonicalQuoteInputs,
+    _geometry: GeometryFeatures,
+    process: ProcessEstimates,
+    _overhead: OverheadEstimates,
+    merged: MergedBounds,
+) -> TotalsAndMargin:
+    if isinstance(process.quote, dict):
+        result = copy.deepcopy(process.quote)
+        result.setdefault("decision_state", {}).update(merged.decision_state)
+        notes_source = result.get("notes")
+        notes = list(notes_source) if isinstance(notes_source, list) else []
+    else:
+        result = {"quote": process.quote, "decision_state": merged.decision_state}
+        notes = []
+    return TotalsAndMargin(result=result, notes=notes)
+
+
+def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
+    df: pd.DataFrame,
+    params: Dict[str, Any] | None = None,
+    rates: Dict[str, float] | None = None,
+    *,
+    default_params: Dict[str, Any] | None = None,
+    default_rates: Dict[str, float] | None = None,
+    default_material_display: str | None = None,
+    material_vendor_csv: str | None = None,
+    llm_enabled: bool = True,
+    llm_model_path: str | None = None,
+    llm_client: LLMClient | None = None,
+    geo: dict[str, Any] | None = None,
+    ui_vars: dict[str, Any] | None = None,
+    quote_state: QuoteState | None = None,
+    reuse_suggestions: bool = False,
+    llm_suggest: Any | None = None,
+    pricing: PricingEngine | None = None,
+) -> Dict[str, Any]:
+    inputs = _canonicalize_quote_inputs(
+        df,
+        params,
+        rates,
+        default_params=default_params,
+        default_rates=default_rates,
+        default_material_display=default_material_display,
+        material_vendor_csv=material_vendor_csv,
+        llm_enabled=llm_enabled,
+        llm_model_path=llm_model_path,
+        llm_client=llm_client,
+        geo=geo,
+        ui_vars=ui_vars,
+        quote_state=quote_state,
+        reuse_suggestions=reuse_suggestions,
+        llm_suggest=llm_suggest,
+        pricing=pricing,
+    )
+    geometry = _compute_geometry_features(inputs)
+    process = _estimate_processes(inputs, geometry)
+    overhead = _compute_overhead_estimates(inputs, geometry, process)
+    merged = _merge_bounds(inputs, geometry, process, overhead)
+    totals = _compute_totals_and_margin(inputs, geometry, process, overhead, merged)
+    return totals.result
+
+
 def sanitize_suggestions(s: dict, bounds: dict) -> dict:
     coerced_bounds = coerce_bounds(bounds)
 
@@ -9808,8 +10089,10 @@ def net_mass_kg(
 
 
 def _normalize_speeds_feeds_df(df: pd.DataFrame) -> pd.DataFrame:
+    if not hasattr(df, "rename"):
+        return df
     rename: dict[str, str] = {}
-    for col in df.columns:
+    for col in getattr(df, "columns", []):
         normalized = re.sub(r"[^0-9a-z]+", "_", str(col).strip().lower())
         normalized = normalized.strip("_")
         rename[col] = normalized
@@ -12055,7 +12338,7 @@ def validate_quote_before_pricing(
             raise ValueError("Quote blocked:\n- " + "\n- ".join(issues))
 
 @no_type_check
-def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
+def _compute_quote_from_df_impl(  # type: ignore[reportGeneralTypeIssues]
     df: pd.DataFrame,
     params: Dict[str, Any] | None = None,
     rates: Dict[str, float] | None = None,
