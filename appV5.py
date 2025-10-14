@@ -266,36 +266,6 @@ def roughly_equal(a: float | int | str | None, b: float | int | str | None, *, e
         eps_val = 0.0
     return math.isclose(a_val, b_val, rel_tol=0.0, abs_tol=abs(eps_val))
 
-def _fallback_match_items_contains(items: "pd.Series | typing.Iterable[object]", pattern: str):
-    """Best-effort case-insensitive containment check without pandas dependencies."""
-
-    try:
-        compiled = re.compile(pattern, flags=re.IGNORECASE)
-    except re.error:
-        compiled = re.compile(re.escape(pattern), flags=re.IGNORECASE)
-
-    def _matches(value: object) -> bool:
-        text = "" if value is None else str(value)
-        return bool(compiled.search(text))
-
-    try:  # Defer pandas import so the fallback works in minimal environments.
-        import pandas as pd  # type: ignore[import]
-    except Exception:  # pragma: no cover - pandas is an optional dependency here
-        pd = None  # type: ignore[assignment]
-
-    if pd is not None:
-        try:
-            series = items if isinstance(items, pd.Series) else pd.Series(list(items))
-        except Exception:
-            series = pd.Series([], dtype="object")
-        return series.astype(str).apply(_matches)
-
-    # When pandas is unavailable, return a basic list of booleans preserving order.
-    try:
-        return [_matches(value) for value in items]
-    except TypeError:
-        return []
-
 import textwrap
 from typing import (
     Any,
@@ -450,39 +420,12 @@ from cad_quoter.domain_models import (
 )
 from cad_quoter.coerce import to_float, to_int
 from cad_quoter.utils import compact_dict, jdump, json_safe_copy, sdict
+from cad_quoter.utils.text import _match_items_contains
 from cad_quoter.llm_suggest import (
     build_suggest_payload,
     sanitize_suggestions,
     get_llm_quote_explanation,
 )
-
-def _fallback_collection_has_text(value: Any) -> bool:
-    if isinstance(value, str):
-        return bool(value.strip())
-    if isinstance(value, _MappingABC):
-        return any(_fallback_collection_has_text(candidate) for candidate in value.values())
-    if isinstance(value, (list, tuple, set)):
-        return any(_fallback_collection_has_text(candidate) for candidate in value)
-    return False
-
-def _geo_mentions_outsourced(geo_context: Mapping[str, Any] | None) -> bool:
-    if isinstance(geo_context, _MappingABC):
-        if _fallback_collection_has_text(geo_context.get("finishes")):
-            return True
-    if callable(_imported_geo_mentions_outsourced):
-        return _imported_geo_mentions_outsourced(geo_context)
-    return False
-_match_items_contains = _fallback_match_items_contains  # type: ignore[assignment]
-
-try:
-    from cad_quoter.utils.text import _match_items_contains as _imported_match_items_contains
-except Exception:  # pragma: no cover - defensive fallback for optional import paths
-    _imported_match_items_contains = None  # type: ignore[assignment]
-else:
-    if callable(_imported_match_items_contains):
-        _match_items_contains = _imported_match_items_contains
-    else:
-        _match_items_contains = _fallback_match_items_contains
 from cad_quoter.pricing import (
     LB_PER_KG,
     PricingEngine,
