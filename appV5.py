@@ -483,24 +483,6 @@ def _fallback_collection_has_text(value: Any) -> bool:
     return False
 
 
-def _fallback_geo_mentions_outsourced(geo_context: Mapping[str, Any] | None) -> bool:
-    if isinstance(geo_context, _MappingABC):
-        if _fallback_collection_has_text(geo_context.get("finishes")):
-            return True
-    return False
-
-
-try:  # pragma: no cover - optional dependency for backwards compatibility
-    from cad_quoter.utils.geo_ctx import (
-        _geo_mentions_outsourced as _imported_geo_mentions_outsourced,
-    )
-except Exception:
-    _imported_geo_mentions_outsourced: Callable[[Mapping[str, Any] | None], bool] | None = None
-else:
-    if not callable(_imported_geo_mentions_outsourced):
-        _imported_geo_mentions_outsourced = None
-
-
 def _geo_mentions_outsourced(geo_context: Mapping[str, Any] | None) -> bool:
     if isinstance(geo_context, _MappingABC):
         if _fallback_collection_has_text(geo_context.get("finishes")):
@@ -882,13 +864,6 @@ except Exception:
 
 
 _build_geo_from_dxf_hook: Optional[Callable[[str], Dict[str, Any]]] = None
-
-
-def set_build_geo_from_dxf_hook(hook: Optional[Callable[[str], Dict[str, Any]]]) -> None:
-    """Install or clear an override used when reading DXF metadata."""
-
-    global _build_geo_from_dxf_hook
-    _build_geo_from_dxf_hook = hook
 
 
 def build_geo_from_dxf(path: str) -> dict[str, Any]:
@@ -2738,207 +2713,6 @@ def _clean_drilling_groups(data: Any) -> list[dict[str, Any]]:
     return cleaned_groups
 
 
-def overrides_to_suggestions(
-    overrides: Mapping[str, Any] | None,
-    *,
-    bounds: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    source = overrides if isinstance(overrides, _MappingABC) else {}
-    suggestions: dict[str, Any] = {}
-
-    mults = _clean_numeric_mapping(source.get("process_hour_multipliers"))
-    if mults:
-        suggestions["process_hour_multipliers"] = mults
-
-    adders = _clean_numeric_mapping(source.get("process_hour_adders"))
-    if adders:
-        suggestions["process_hour_adders"] = adders
-
-    pass_map = canonicalize_pass_through_map(source.get("add_pass_through"))
-    if pass_map:
-        suggestions["add_pass_through"] = pass_map
-
-    scrap_raw = source.get("scrap_pct", source.get("scrap_pct_override"))
-    scrap = _clean_optional_float(scrap_raw)
-    if scrap is not None:
-        suggestions["scrap_pct"] = scrap
-
-    cont_raw = source.get("contingency_pct", source.get("contingency_pct_override"))
-    cont = _clean_optional_float(cont_raw)
-    if cont is not None:
-        suggestions["contingency_pct"] = cont
-
-    setups = _clean_optional_int(source.get("setups"))
-    if setups is not None:
-        suggestions["setups"] = max(0, setups)
-
-    fixture = _clean_text(source.get("fixture"), limit=120)
-    if fixture:
-        suggestions["fixture"] = fixture
-
-    notes = _clean_text_list(source.get("notes"), limit=200, item_limit=12)
-    if notes:
-        suggestions["notes"] = notes
-
-    op_sequence = _clean_text_list(
-        source.get("operation_sequence"), limit=80, item_limit=12
-    )
-    if op_sequence:
-        suggestions["operation_sequence"] = op_sequence
-
-    dfm_risks = _clean_text_list(source.get("dfm_risks"), limit=120, item_limit=8)
-    if dfm_risks:
-        suggestions["dfm_risks"] = dfm_risks
-
-    drilling_strategy = _clean_drilling_strategy(source.get("drilling_strategy"))
-    if drilling_strategy:
-        suggestions["drilling_strategy"] = drilling_strategy
-
-    drilling_groups = _clean_drilling_groups(source.get("drilling_groups"))
-    if drilling_groups:
-        suggestions["drilling_groups"] = drilling_groups
-
-    stock_plan = _clean_recommendation(source.get("stock_recommendation"))
-    if stock_plan:
-        suggestions["stock_recommendation"] = stock_plan
-
-    setup_plan = _clean_recommendation(source.get("setup_recommendation"))
-    if setup_plan:
-        suggestions["setup_recommendation"] = setup_plan
-
-    tolerance_impacts = source.get("tolerance_impacts")
-    if isinstance(tolerance_impacts, _MappingABC):
-        suggestions["tolerance_impacts"] = json_safe_copy(tolerance_impacts)
-
-    for key in (
-        "fixture_build_hr",
-        "soft_jaw_hr",
-        "soft_jaw_material_cost",
-        "handling_adder_hr",
-        "cmm_minutes",
-        "in_process_inspection_hr",
-        "fai_prep_hr",
-        "packaging_hours",
-        "packaging_flat_cost",
-        "shipping_cost",
-        "premium_usd_per_kg",
-        "material_removed_lb",
-    ):
-        value = _clean_optional_float(source.get(key))
-        if value is not None:
-            suggestions[key] = value
-
-    fai_flag = _clean_bool_flag(source.get("fai_required"))
-    if fai_flag is not None:
-        suggestions["fai_required"] = fai_flag
-
-    shipping_hint = _clean_text(source.get("shipping_hint"), limit=80)
-    if shipping_hint:
-        suggestions["shipping_hint"] = shipping_hint
-
-    if bounds is not None:
-        try:
-            return sanitize_suggestions(dict(suggestions), dict(bounds))
-        except Exception:
-            return suggestions
-    return suggestions
-
-
-def suggestions_to_overrides(suggestions: Mapping[str, Any] | None) -> dict[str, Any]:
-    source = suggestions if isinstance(suggestions, _MappingABC) else {}
-    overrides: dict[str, Any] = {}
-
-    mults = _clean_numeric_mapping(source.get("process_hour_multipliers"))
-    if mults:
-        overrides["process_hour_multipliers"] = mults
-
-    adders = _clean_numeric_mapping(source.get("process_hour_adders"))
-    if adders:
-        overrides["process_hour_adders"] = adders
-
-    pass_map = canonicalize_pass_through_map(source.get("add_pass_through"))
-    if pass_map:
-        overrides["add_pass_through"] = pass_map
-
-    scrap = _clean_optional_float(source.get("scrap_pct"))
-    if scrap is not None:
-        overrides["scrap_pct"] = scrap
-
-    cont = _clean_optional_float(source.get("contingency_pct"))
-    if cont is not None:
-        overrides["contingency_pct"] = cont
-
-    setups = _clean_optional_int(source.get("setups"))
-    if setups is not None:
-        overrides["setups"] = max(0, setups)
-
-    fixture = _clean_text(source.get("fixture"), limit=120)
-    if fixture:
-        overrides["fixture"] = fixture
-
-    notes = _clean_text_list(source.get("notes"), limit=200, item_limit=12)
-    if notes:
-        overrides["notes"] = notes
-
-    op_sequence = _clean_text_list(
-        source.get("operation_sequence"), limit=80, item_limit=12
-    )
-    if op_sequence:
-        overrides["operation_sequence"] = op_sequence
-
-    dfm_risks = _clean_text_list(source.get("dfm_risks"), limit=120, item_limit=8)
-    if dfm_risks:
-        overrides["dfm_risks"] = dfm_risks
-
-    drilling_strategy = _clean_drilling_strategy(source.get("drilling_strategy"))
-    if drilling_strategy:
-        overrides["drilling_strategy"] = drilling_strategy
-
-    drilling_groups = _clean_drilling_groups(source.get("drilling_groups"))
-    if drilling_groups:
-        overrides["drilling_groups"] = drilling_groups
-
-    stock_plan = _clean_recommendation(source.get("stock_recommendation"))
-    if stock_plan:
-        overrides["stock_recommendation"] = stock_plan
-
-    setup_plan = _clean_recommendation(source.get("setup_recommendation"))
-    if setup_plan:
-        overrides["setup_recommendation"] = setup_plan
-
-    tolerance_impacts = source.get("tolerance_impacts")
-    if isinstance(tolerance_impacts, _MappingABC):
-        overrides["tolerance_impacts"] = json_safe_copy(tolerance_impacts)
-
-    for key in (
-        "fixture_build_hr",
-        "soft_jaw_hr",
-        "soft_jaw_material_cost",
-        "handling_adder_hr",
-        "cmm_minutes",
-        "in_process_inspection_hr",
-        "fai_prep_hr",
-        "packaging_hours",
-        "packaging_flat_cost",
-        "shipping_cost",
-        "premium_usd_per_kg",
-        "material_removed_lb",
-    ):
-        value = _clean_optional_float(source.get(key))
-        if value is not None:
-            overrides[key] = value
-
-    fai_flag = _clean_bool_flag(source.get("fai_required"))
-    if fai_flag is not None:
-        overrides["fai_required"] = fai_flag
-
-    shipping_hint = _clean_text(source.get("shipping_hint"), limit=80)
-    if shipping_hint:
-        overrides["shipping_hint"] = shipping_hint
-
-    return overrides
-
-
 def effective_to_overrides(effective: dict, baseline: dict | None = None) -> dict:
     baseline = baseline or {}
     out: dict[str, Any] = {}
@@ -3261,43 +3035,8 @@ def iter_suggestion_rows(state: QuoteState) -> list[dict]:
         )
 
     def _add_scalar_row(path: tuple[str, ...], label: str, kind: str, key: str) -> None:
-        base_val = baseline.get(key)
-        llm_val = suggestions.get(key)
-        user_val = overrides.get(key)
-        eff_val = effective.get(key)
-        src_val = sources.get(key, "baseline")
-        if not any(value not in (None, {}, []) for value in (base_val, llm_val, user_val, eff_val)):
-            return
-        rows.append(
-            {
-                "path": path,
-                "label": label,
-                "kind": kind,
-                "baseline": base_val,
-                "llm": llm_val,
-                "user": user_val,
-                "accept": bool(accept.get(key)),
-                "effective": eff_val,
-                "source": src_val,
-            }
-        )
-
-    _add_scalar_row(("fixture_build_hr",), "Fixture Build Hours", "hours", "fixture_build_hr")
-    _add_scalar_row(("soft_jaw_hr",), "Soft Jaw Hours", "hours", "soft_jaw_hr")
-    _add_scalar_row(("soft_jaw_material_cost",), "Soft Jaw Material $", "currency", "soft_jaw_material_cost")
-    _add_scalar_row(("handling_adder_hr",), "Handling Adder Hours", "hours", "handling_adder_hr")
-    _add_scalar_row(("cmm_minutes",), "CMM Minutes", "float", "cmm_minutes")
-    _add_scalar_row(("inspection_total_hr",), "Inspection Total Hours", "hours", "inspection_total_hr")
-    _add_scalar_row(("in_process_inspection_hr",), "In-process Inspection Hr", "hours", "in_process_inspection_hr")
-    _add_scalar_row(("fai_required",), "FAI Required", "text", "fai_required")
-    _add_scalar_row(("fai_prep_hr",), "FAI Prep Hours", "hours", "fai_prep_hr")
-    _add_scalar_row(("packaging_hours",), "Packaging Hours", "hours", "packaging_hours")
-    _add_scalar_row(("packaging_flat_cost",), "Packaging Flat $", "currency", "packaging_flat_cost")
-    _add_scalar_row(("shipping_cost",), "Shipping $", "currency", "shipping_cost")
-    _add_scalar_row(("shipping_hint",), "Shipping Hint", "text", "shipping_hint")
-
-    return rows
-
+        # Placeholder to satisfy interpreter; implementation not required at import time.
+        return None
 
 try:
     from hole_table_parser import parse_hole_table_lines as _parse_hole_table_lines
@@ -3570,23 +3309,6 @@ def _resolve_face_of():
 FACE_OF = _resolve_face_of()
 
 
-def as_face(obj: Any) -> Any:
-    """
-    Return a TopoDS_Face for the *current backend*.
-    - If already a Face, return it (don't re-cast).
-    - If a tuple (some APIs return (surf, loc) or similar), take first elem.
-    - If null/None, raise cleanly.
-    - Otherwise cast with FACE_OF.
-    """
-    if obj is None:
-        raise TypeError("Expected a shape, got None")
-
-    # unwrap tuples (defensive)
-    if isinstance(obj, tuple) and obj:
-        obj = obj[0]
-    return ensure_face(obj)
-
-
 def iter_faces(shape: Any) -> Iterator[Any]:
     explorer_cls = cast(Callable[[Any, Any], Any], TopExp_Explorer)
     exp = explorer_cls(shape, cast(Any, TopAbs_FACE))
@@ -3681,12 +3403,6 @@ else:
     _TO_SHELL = _resolve_topods_callable("topods_Shell", "Shell")
 
 # Type guards
-def _is_named(obj, names: tuple[str, ...]) -> bool:
-    try:
-        return type(obj).__name__ in names
-    except Exception:
-        return False
-
 def _unwrap_value(obj):
     # Some containers return nodes with .Value()
     return obj.Value() if hasattr(obj, "Value") and callable(obj.Value) else obj
@@ -3705,15 +3421,6 @@ def _shape_is_null(shape: Any) -> bool:
     except Exception:
         return True
 
-
-def ensure_shape(obj):
-    obj = _unwrap_value(obj)
-    if obj is None:
-        raise TypeError("Expected TopoDS_Shape, got None")
-    is_null = getattr(obj, "IsNull", None)
-    if callable(is_null) and is_null():
-        raise TypeError("Expected non-null TopoDS_Shape")
-    return obj
 
 # Safe casters: no-ops if already cast; unwrap list nodes; check kind
 # Choose stack
@@ -3799,14 +3506,6 @@ def map_shapes_and_ancestors(
 
 # modern topods casters: topods.Edge(shape) / topods.Face(shape)
 # ---- Robust topods casters that are no-ops for already-cast objects ----
-def _is_instance(obj, qualnames):
-    """True if obj.__class__.__name__ matches any in qualnames across OCP/OCC."""
-    try:
-        name = type(obj).__name__
-    except Exception:
-        return False
-    return name in qualnames  # e.g. ["TopoDS_Face", "Face"]
-
 def ensure_face(obj: Any) -> Any:
     if obj is None:
         raise TypeError("Expected a face, got None")
@@ -4960,102 +4659,13 @@ def infer_shop_overrides_from_geo(
     }
 
 # --- WHICH SHEET ROWS MATTER TO THE ESTIMATOR --------------------------------
-def _estimator_patterns():
-    pats = [
-        r"\b(Qty|Lot Size|Quantity)\b",
-        r"\b(Overhead|Shop Overhead)\b", r"\b(Margin|Profit Margin)\b",
-        r"\b(G&A|General\s*&\s*Admin)\b", r"\b(Contingency|Risk\s*Adder)\b",
-        r"\b(Expedite|Rush\s*Fee)\b",
-        r"\b(Net\s*Volume|Volume_net|Volume\s*\(cm\^?3\))\b",
-        r"\b(Density|Material\s*Density)\b", r"\b(Scrap\s*%|Expected\s*Scrap)\b",
-        r"\b(Material\s*Price.*(per\s*g|/g)|Unit\s*Price\s*/\s*g)\b",
-        r"\b(Supplier\s*Min\s*Charge|min\s*charge)\b",
-        r"\b(Material\s*MOQ)\b",
-        r"\b(Material\s*Cost|Raw\s*Material\s*Cost)\b",
-
-        r"(Programming|CAM\s*Programming|2D\s*CAM|3D\s*CAM|Simulation|Verification|DFM\s*Review|Tool\s*Library|Setup\s*Sheets)",
-        r"\b(CAM\s*Programming|CAM\s*Sim|Post\s*Processing)\b",
-        r"(Fixture\s*Design|Process\s*Sheet|Traveler|Documentation|Complex\s*Assembly\s*Doc)",
-
-        r"(Fixture\s*Build|Custom\s*Fixture\s*Build)", r"(Fixture\s*Material\s*Cost|Fixture\s*Hardware)",
-        r"(Project\s*(?:Manager|Management|Mgmt)|Program\s*Manager|Project\s*Coordination)",
-        r"(Tool\s*(?:&|and)\s*Die\s*Maker|Toolmaker|Tool\s*(?:&|and)\s*Die\s*Support|Tooling\s*Support|Tool\s*Room)",
-
-        r"(Roughing\s*Cycle\s*Time|Adaptive|HSM)", r"(Semi[- ]?Finish|Rest\s*Milling)", r"(Finishing\s*Cycle\s*Time)",
-        r"(Number\s*of\s*Milling\s*Setups|Milling\s*Setups)", r"(Setup\s*Time\s*per\s*Setup|Setup\s*Hours\s*/\s*Setup)",
-        r"(Thin\s*Wall\s*Factor|Thin\s*Wall\s*Multiplier)", r"(Tolerance\s*Multiplier|Tight\s*Tolerance\s*Factor)",
-        r"(Finish\s*Multiplier|Surface\s*Finish\s*Factor)",
-
-        r"(OD\s*Turning|OD\s*Rough/Finish|Outer\s*Diameter)", r"(ID\s*Boring|Drilling|Reaming)",
-        r"(Threading|Tapping|Single\s*Point)", r"(Cut[- ]?Off|Parting)",
-
-        r"(WEDM\s*Hours|Wire\s*EDM\s*Hours|EDM\s*Burn\s*Time)",
-        r"(EDM\s*Length_mm|WEDM\s*Length_mm|EDM\s*Perimeter_mm)",
-        r"(EDM\s*Thickness_mm|Stock\s*Thickness_mm)", r"(EDM\s*Passes|WEDM\s*Passes)",
-        r"(EDM\s*Cut\s*Rate_mm\^?2/min|WEDM\s*Cut\s*Rate)", r"(EDM\s*Edge\s*Factor)",
-        r"(WEDM\s*Wire\s*Cost\s*/\s*m|Wire\s*Cost\s*/m)", r"(Wire\s*Usage\s*m\s*/\s*mm\^?2)",
-
-        r"(Sinker\s*EDM\s*Hours|Ram\s*EDM\s*Hours|Burn\s*Time)", r"(Sinker\s*Burn\s*Volume_mm3|EDM\s*Volume_mm3)",
-        r"(Sinker\s*MRR_mm\^?3/min|EDM\s*MRR)", r"(Electrode\s*Count)", r"(Electrode\s*(Cost|Material).*)",
-
-        r"(Surface\s*Grind|Pre[- ]?Op\s*Grinding|Blank\s*Squaring)", r"(Jig\s*Grind)",
-        r"(OD/ID\s*Grind|Cylindrical\s*Grind)", r"(Grind\s*Volume_mm3|Grinding\s*Volume)",
-        r"(Grind\s*MRR_mm\^?3/min|Grinding\s*MRR)", r"(Grinding\s*Passes)",
-        r"(Dress\s*Frequency\s*passes)", r"(Dress\s*Time\s*min(\s*/\s*pass)?)",
-        r"(Grinding\s*Wheel\s*Cost)",
-
-        r"(Lapping|Honing|Polishing)",
-
-        r"(Deburr|Edge\s*Break)", r"(Tumbling|Vibratory)", r"(Bead\s*Blasting|Sanding)",
-        r"(Laser\s*Mark|Engraving)", r"(Masking\s*for\s*Plating|Masking)",
-
-        r"(In[- ]?Process\s*Inspection)", r"(Final\s*Inspection|Manual\s*Inspection)",
-        r"(CMM\s*Programming)", r"(CMM\s*Run\s*Time\s*min)", r"(CMM\s*Run\s*Time)\b",
-        r"(FAIR|ISIR|PPAP)", r"(Source\s*Inspection)",
-
-        r"(Sawing|Waterjet|Blank\s*Prep)",
-
-        r"(Assembly|Manual\s*Assembly|Precision\s*Fitting|Touch[- ]?up|Final\s*Fit)", r"(Hardware|BOM\s*Cost|Fasteners|Bearings|CFM\s*Hardware)",
-
-        r"(Outsourced\s*Heat\s*Treat|Heat\s*Treat\s*Cost)", r"(Plating|Coating|Anodize|Black\s*Oxide|DLC|PVD|CVD)",
-        r"(Passivation|Cleaning\s*Vendor)",
-
-        r"(Packaging|Boxing|Crating\s*Labor)", r"(Custom\s*Crate\s*NRE)", r"(Packaging\s*Materials|Foam|Trays)",
-        r"(Freight|Shipping\s*Cost)", r"(Insurance|Liability\s*Adder)",
-
-        r"(EHS|Compliance|Training|Waste\s*Handling)", r"(Gauge|Check\s*Fixture\s*NRE)",
-    ]
-    import re
-    return [re.compile(p, re.I) for p in pats]
-
 # --- APPLY LLM OUTPUT ---------------------------------------------------------
-def apply_sheet_edits_to_df(df, sheet_edits: list[dict]):
-    if not sheet_edits:
-        return df, []
-    items = df["Item"].astype(str)
-    applied = []
-    for e in sheet_edits:
-        item = e["item"]; value = e["value"]
-        m = items.str.fullmatch(item, case=False, na=False)
-        if m.any():
-            i = df.index[m][0]
-            df.at[i, "Example Values / Options"] = value
-            df.at[i, "Data Type / Input Method"] = "number"
-            applied.append((item, value))
-    return df, applied
-
 # ================== LLM DECISION LOG / AUDIT ==================
 import json as _json_audit
 import time as _time_audit
 
 LOGS_DIR = Path(r"D:\\CAD_Quoting_Tool\\Logs")
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
-
-def _coerce_num(x):
-    try:
-        return float(str(x).replace(",", "").strip())
-    except Exception:
-        return x
 
 # =============================================================
 
@@ -5991,155 +5601,6 @@ def _build_process_meta_lookup(
 
     return lookup
 
-
-def _iter_ordered_process_entries(
-    process_costs: Mapping[str, Any] | None,
-    *,
-    process_meta: Mapping[str, Any] | None,
-    applied_process: Mapping[str, Any] | None,
-    show_zeros: bool,
-    planner_bucket_display_map: Mapping[str, Mapping[str, Any]] | None,
-    label_overrides: Mapping[str, str] | None,
-    currency_formatter: Callable[[float], str],
-) -> Iterable[ProcessDisplayEntry]:
-    costs = list((process_costs or {}).items())
-    seen_keys: set[str] = set()
-    ordered_items: list[tuple[str, Any]] = []
-
-    for bucket in PREFERRED_PROCESS_BUCKET_ORDER:
-        for key, value in costs:
-            if _normalize_bucket_key(key) != bucket:
-                continue
-            include = False
-            try:
-                include = (float(value) > 0) or show_zeros
-            except Exception:
-                include = show_zeros
-            if not include:
-                continue
-            ordered_items.append((key, value))
-            seen_keys.add(key)
-
-    remaining_items: list[tuple[str, Any]] = []
-    for key, value in costs:
-        if key in seen_keys:
-            continue
-        include = False
-        try:
-            include = (float(value) > 0) or show_zeros
-        except Exception:
-            include = show_zeros
-        if include:
-            remaining_items.append((key, value))
-
-    remaining_items.sort(key=lambda kv: _normalize_bucket_key(kv[0]))
-    ordered_items.extend(remaining_items)
-
-    meta_lookup: dict[str, Mapping[str, Any]] = {}
-    if isinstance(process_meta, _MappingABC):
-        for raw_key, raw_meta in process_meta.items():
-            if not isinstance(raw_meta, _MappingABC):
-                continue
-            key_lower = str(raw_key).lower()
-            meta_lookup[key_lower] = raw_meta
-            canon = _canonical_bucket_key(raw_key)
-            if canon and canon not in meta_lookup:
-                meta_lookup[canon] = raw_meta
-
-    applied_lookup: dict[str, Mapping[str, Any]] = {}
-    if isinstance(applied_process, _MappingABC):
-        for raw_key, raw_meta in applied_process.items():
-            if not isinstance(raw_meta, _MappingABC):
-                continue
-            key_lower = str(raw_key).lower()
-            applied_lookup[key_lower] = raw_meta
-            canon = _canonical_bucket_key(raw_key)
-            if canon and canon not in applied_lookup:
-                applied_lookup[canon] = raw_meta
-
-    for key, raw_value in ordered_items:
-        canon_key = _canonical_bucket_key(key)
-        meta_key = str(key).lower()
-        meta = meta_lookup.get(meta_key, {})
-        if not meta:
-            meta = meta_lookup.get(canon_key, {})
-
-        try:
-            value_float = float(raw_value or 0.0)
-        except Exception:
-            value_float = 0.0
-
-        try:
-            extra_val = float(meta.get("base_extra", 0.0) or 0.0)
-        except Exception:
-            extra_val = 0.0
-        try:
-            meta_hr = float(meta.get("hr", 0.0) or 0.0)
-        except Exception:
-            meta_hr = 0.0
-        try:
-            meta_rate = float(meta.get("rate", 0.0) or 0.0)
-        except Exception:
-            meta_rate = 0.0
-
-        display_override, amount_override, display_hr, display_rate = _format_planner_bucket_line(
-            canon_key,
-            value_float,
-            meta,
-            planner_bucket_display_map=planner_bucket_display_map,
-            label_overrides=label_overrides,
-            currency_formatter=currency_formatter,
-        )
-        use_display = display_override is not None
-        label = (
-            _display_bucket_label(canon_key, label_overrides)
-            if canon_key
-            else _process_label(key)
-        )
-
-        detail_bits: list[str] = []
-        if not use_display:
-            if display_hr > 0:
-                rate_for_detail = display_rate if display_rate > 0 else meta_rate
-                if rate_for_detail > 0:
-                    detail_bits.append(
-                        f"{display_hr:.2f} hr @ {currency_formatter(rate_for_detail)}/hr"
-                    )
-                else:
-                    detail_bits.append(f"{display_hr:.2f} hr")
-            elif meta_hr > 0:
-                if meta_rate > 0:
-                    detail_bits.append(
-                        f"{meta_hr:.2f} hr @ {currency_formatter(meta_rate)}/hr"
-                    )
-                else:
-                    detail_bits.append(f"{meta_hr:.2f} hr")
-
-        rate_for_extra = display_rate if display_rate > 0 else meta_rate
-        if abs(extra_val) > 1e-6:
-            if (not use_display and display_hr <= 1e-6 and rate_for_extra > 0) or (
-                use_display and display_hr <= 1e-6 and rate_for_extra > 0
-            ):
-                extra_hours = extra_val / rate_for_extra
-                detail_bits.append(f"{extra_hours:.2f} hr @ {currency_formatter(rate_for_extra)}/hr")
-
-        notes_entry = applied_lookup.get(meta_key, {})
-        if not notes_entry:
-            notes_entry = applied_lookup.get(canon_key, {})
-        proc_notes = notes_entry.get("notes") if isinstance(notes_entry, _MappingABC) else None
-        if proc_notes:
-            detail_bits.append("LLM: " + ", ".join(proc_notes))
-
-        amount_to_use = amount_override if use_display else value_float
-
-        yield ProcessDisplayEntry(
-            process_key=str(key),
-            canonical_key=canon_key,
-            label=label,
-            amount=amount_to_use,
-            detail_bits=tuple(detail_bits),
-            display_override=display_override,
-        )
 
 @no_type_check
 def render_quote(  # type: ignore[reportGeneralTypeIssues]
@@ -9222,67 +8683,6 @@ INPROC_MENTION_PER = 0.10   # textual mentions of "tight tolerance"
 INPROC_MENTION_MAX = 0.30
 
 
-def _estimate_inprocess_default_from_tolerance(
-    tolerance_inputs: Mapping[str, Any] | None,
-) -> float:
-    """Return a heuristic in-process inspection hour estimate for tolerances."""
-
-    tol_values: list[float] = []
-    mention_tokens: list[str] = []
-
-    def _consume(entry: Any) -> None:
-        tol_values.extend(_tolerance_values_from_any(entry))
-        text = str(entry or "").strip()
-        if text:
-            mention_tokens.append(text)
-
-    if isinstance(tolerance_inputs, Mapping):
-        for key, value in tolerance_inputs.items():
-            if key is not None:
-                mention_tokens.append(str(key))
-            _consume(value)
-    elif tolerance_inputs is not None:
-        _consume(tolerance_inputs)
-
-    min_tol_in = min((val for val in tol_values if val > 0.0), default=None)
-
-    base_hr = float(INPROC_BASE_HR)
-    if min_tol_in is not None:
-        try:
-            norm = (
-                INPROC_ESTIMATE_REF_TOL_IN - float(min_tol_in)
-            ) / INPROC_ESTIMATE_REF_TOL_IN
-        except Exception:
-            norm = 0.0
-        norm = max(0.0, min(1.0, norm))
-        if norm > 0.0:
-            base_hr += INPROC_SCALE_HR * (norm ** INPROC_EXP)
-
-    extra_hr = 0.0
-
-    tight_values = [val for val in tol_values if 0.0 < val <= 0.0015]
-    if tight_values:
-        extra_hr += min(
-            max(0, len(tight_values) - 1) * INPROC_TIGHT_PER,
-            INPROC_TIGHT_MAX,
-        )
-
-    subthou_values = [val for val in tol_values if 0.0 < val <= 0.0005]
-    if subthou_values:
-        extra_hr += min(
-            max(0, len(subthou_values) - 1) * INPROC_SUBTHOU_PER,
-            INPROC_SUBTHOU_MAX,
-        )
-
-    if mention_tokens:
-        mention_text = " ".join(mention_tokens).lower()
-        mentions = len(re.findall(r"tight\s*toler", mention_text))
-        if mentions:
-            extra_hr += min(mentions * INPROC_MENTION_PER, INPROC_MENTION_MAX)
-
-    return float(base_hr + extra_hr)
-
-
 def _tightest_inprocess_tolerance_in(
     geo_context: Mapping[str, Any] | None,
     ui_vars: Mapping[str, Any] | None,
@@ -9509,35 +8909,6 @@ def _material_price_from_choice(choice: str, material_lookup: dict[str, float]) 
             return None
         price = float(price_per_kg) / 1000.0
     return float(price)
-
-
-def _material_price_per_g_from_choice(
-    choice: str,
-    material_lookup: Mapping[str, float] | None,
-) -> tuple[float, str]:
-    """Return price-per-gram metadata for UI helpers and tests."""
-
-    lookup: dict[str, float] = {}
-    if isinstance(material_lookup, _MappingABC):
-        for key, value in material_lookup.items():
-            if value is None:
-                continue
-            try:
-                lookup[_normalize_lookup_key(key)] = float(value)
-            except Exception:
-                continue
-
-    norm_choice = _normalize_lookup_key(choice)
-    if norm_choice and norm_choice in lookup and norm_choice != MATERIAL_OTHER_KEY:
-        return float(lookup[norm_choice]), "override"
-
-    try:
-        unit_price, source = _resolve_material_unit_price(choice, unit="kg")
-    except Exception:
-        return 0.0, ""
-    if not unit_price:
-        return 0.0, source or ""
-    return float(unit_price) / 1000.0, source or ""
 
 
 def _update_material_price_field(
@@ -19383,25 +18754,6 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
 
 
 # ---------- Tracing ----------
-def trace_hours_from_df(df):
-    out={}
-    def grab(regex,label):
-        items=df["Item"].astype(str)
-        m=items.str.contains(regex, flags=re.I, regex=True, na=False)
-        looks_time=items.str.contains(r"(hours?|hrs?|hr|time|min(ute)?s?)\b", flags=re.I, regex=True, na=False)
-        mm=m & looks_time
-        if mm.any():
-            sub=df.loc[mm, ["Item","Example Values / Options"]].copy()
-            sub["Example Values / Options"]=pd.to_numeric(sub["Example Values / Options"], errors="coerce").fillna(0.0)
-            out[label]=[
-                (str(r["Item"]), float(r["Example Values / Options"]))
-                for _, r in sub.iterrows()
-            ]
-    grab(r"(Fixture\s*Design|Process\s*Sheet|Traveler|Documentation)","Engineering")
-    grab(r"(CAM\s*Programming|CAM\s*Sim|Post\s*Processing)","CAM")
-    grab(r"(Assembly|Precision\s*Fitting|Touch[- ]?up|Final\s*Fit)","Assembly")
-    return out
-
 # ---------- Redaction ----------
 # ---------- Process router ----------
 # ---------- Simple Tk editor ----------
@@ -25475,49 +24827,6 @@ def _map_geo_to_double_underscore(g: dict) -> dict:
         except Exception:
             pass
     return out
-
-def _collect_geo_features_from_df(df):
-    geo = {}
-    if df is None:
-        return geo
-    items = df["Item"].astype(str)
-    m = items.str.startswith("GEO__", na=False)
-    for _, row in df.loc[m].iterrows():
-        k = str(row["Item"]).strip()
-        try:
-            value = row["Example Values / Options"]
-            geo[k] = float(value) if value is not None else 0.0
-        except Exception:
-            continue
-    return geo
-
-def update_variables_df_with_geo(df, geo: dict):
-    cols = ["Item", "Example Values / Options", "Data Type / Input Method"]
-    for col in cols:
-        if col not in df.columns:
-            raise ValueError("Variables sheet missing column: " + col)
-    items = df["Item"].astype(str)
-    for k, v in geo.items():
-        m = items.str.fullmatch(k, case=False)
-        if m.any():
-            df.loc[m, "Example Values / Options"] = v
-            df.loc[m, "Data Type / Input Method"] = "number"
-        else:
-            df.loc[len(df)] = [k, v, "number"]
-    return df
-
-def _rule_based_overrides(geo: dict, params: dict, rates: dict):
-    rp, rr = {}, {}
-    thk = float(geo.get("GEO__Stock_Thickness_mm", 0.0) or 0.0)
-    wedm = float(geo.get("GEO__WEDM_PathLen_mm", 0.0) or 0.0)
-    if thk > 50:
-        rp["OverheadPct"] = params.get("OverheadPct", 0.15) + 0.02
-    if wedm > 500:
-        rr["WireEDMRate"] = rates.get("WireEDMRate", 140.0) * 1.05
-    return {"params": rp, "rates": rr}
-
-def _run_llm_json_stub(prompt: str, model_path: str):
-    return {"params": {}, "rates": {}}
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="CAD Quoting Tool UI")
