@@ -9,7 +9,7 @@ import re
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 
 # Optional trimesh for STL
@@ -20,54 +20,150 @@ except Exception:
     _HAS_TRIMESH = False
 
 from cad_quoter.vendors import ezdxf as _ezdxf_vendor
-from cad_quoter.vendors.occt import (
-    BACKEND,
-    STACK,
-    STACK_GPROP,
-    BRepAdaptor_Curve,
-    BRepAlgoAPI_Section,
-    BRep_Builder,
-    BRep_Tool,
-    BRepCheck_Analyzer,
-    BRepGProp,
-    BRepTools,
-    GProp_GProps,
-    GeomAbs_BSplineSurface,
-    GeomAbs_BezierSurface,
-    GeomAbs_Circle,
-    GeomAbs_Cone,
-    GeomAbs_Cylinder,
-    GeomAbs_Plane,
-    GeomAbs_Torus,
-    GeomAdaptor_Surface,
-    IFSelect_RetDone,
-    IGESControl_Reader,
-    STEPControl_Reader,
-    ShapeAnalysis_Surface,
-    ShapeFix_Shape,
-    TopAbs_COMPOUND,
-    TopAbs_EDGE,
-    TopAbs_FACE,
-    TopAbs_SHELL,
-    TopAbs_SOLID,
-    TopAbs_ShapeEnum,
-    TopExp,
-    TopExp_Explorer,
-    TopTools_IndexedDataMapOfShapeListOfShape,
-    TopoDS,
-    TopoDS_Compound,
-    TopoDS_Face,
-    TopoDS_Shape,
-    Bnd_Box,
-    bnd_add,
-    brep_read,
-    gp_Dir,
-    gp_Pln,
-    gp_Pnt,
-    gp_Vec,
-    uv_bounds,
+_MISSING_HELP = (
+    "OCCT bindings are required for geometry operations. "
+    "Install pythonocc-core or the OCP wheels."
 )
+
+try:
+    from cad_quoter.vendors.occt import (
+        BACKEND,
+        STACK,
+        STACK_GPROP,
+        BRepAdaptor_Curve,
+        BRepAlgoAPI_Section,
+        BRep_Builder,
+        BRep_Tool,
+        BRepCheck_Analyzer,
+        BRepGProp,
+        BRepTools,
+        GProp_GProps,
+        GeomAbs_BSplineSurface,
+        GeomAbs_BezierSurface,
+        GeomAbs_Circle,
+        GeomAbs_Cone,
+        GeomAbs_Cylinder,
+        GeomAbs_Plane,
+        GeomAbs_Torus,
+        GeomAdaptor_Surface,
+        IFSelect_RetDone,
+        IGESControl_Reader,
+        STEPControl_Reader,
+        ShapeAnalysis_Surface,
+        ShapeFix_Shape,
+        TopAbs_COMPOUND,
+        TopAbs_EDGE,
+        TopAbs_FACE,
+        TopAbs_SHELL,
+        TopAbs_SOLID,
+        TopAbs_ShapeEnum,
+        TopExp,
+        TopExp_Explorer,
+        TopTools_IndexedDataMapOfShapeListOfShape,
+        TopoDS,
+        TopoDS_Compound,
+        TopoDS_Face,
+        TopoDS_Shape,
+        Bnd_Box,
+        bnd_add,
+        brep_read,
+        gp_Dir,
+        gp_Pln,
+        gp_Pnt,
+        gp_Vec,
+        uv_bounds,
+    )
+except Exception as _OCC_IMPORT_ERROR:  # pragma: no cover - optional OCC bindings missing
+
+    class _MissingProxy:
+        def __init__(self, name: str) -> None:
+            self._name = name
+
+        def __call__(self, *args: Any, **kwargs: Any) -> Any:
+            raise ImportError(f"{self._name} requires OCCT bindings. {_MISSING_HELP}") from _OCC_IMPORT_ERROR
+
+        def __getattr__(self, attr: str) -> Any:
+            raise ImportError(
+                f"{self._name}.{attr} requires OCCT bindings. {_MISSING_HELP}"
+            ) from _OCC_IMPORT_ERROR
+
+        def __iter__(self):
+            raise ImportError(f"{self._name} requires OCCT bindings. {_MISSING_HELP}") from _OCC_IMPORT_ERROR
+
+        def __bool__(self) -> bool:  # pragma: no cover - sentinel helper
+            return False
+
+    def _missing_func(name: str) -> Callable[..., Any]:
+        def _impl(*_: Any, **__: Any) -> Any:
+            raise ImportError(f"{name} requires OCCT bindings. {_MISSING_HELP}") from _OCC_IMPORT_ERROR
+
+        return _impl
+
+    BACKEND = STACK = STACK_GPROP = "missing"  # type: ignore[assignment]
+    for _name in [
+        "BRepAdaptor_Curve",
+        "BRepAlgoAPI_Section",
+        "BRep_Builder",
+        "BRep_Tool",
+        "BRepCheck_Analyzer",
+        "BRepGProp",
+        "BRepTools",
+        "GProp_GProps",
+        "GeomAbs_BSplineSurface",
+        "GeomAbs_BezierSurface",
+        "GeomAbs_Circle",
+        "GeomAbs_Cone",
+        "GeomAbs_Cylinder",
+        "GeomAbs_Plane",
+        "GeomAbs_Torus",
+        "GeomAdaptor_Surface",
+        "IFSelect_RetDone",
+        "IGESControl_Reader",
+        "STEPControl_Reader",
+        "ShapeAnalysis_Surface",
+        "ShapeFix_Shape",
+        "TopAbs_COMPOUND",
+        "TopAbs_EDGE",
+        "TopAbs_FACE",
+        "TopAbs_SHELL",
+        "TopAbs_SOLID",
+        "TopAbs_ShapeEnum",
+        "TopExp",
+        "TopExp_Explorer",
+        "TopTools_IndexedDataMapOfShapeListOfShape",
+        "TopoDS",
+        "TopoDS_Compound",
+        "TopoDS_Face",
+        "TopoDS_Shape",
+        "Bnd_Box",
+        "gp_Dir",
+        "gp_Pln",
+        "gp_Pnt",
+        "gp_Vec",
+    ]:
+        globals()[_name] = _MissingProxy(_name)
+
+    bnd_add = _missing_func("bnd_add")
+    brep_read = _missing_func("brep_read")
+    uv_bounds = _missing_func("uv_bounds")
 from cad_quoter.vendors._occt_base import PREFIX as _OCCT_PREFIX, load_module as _occt_load_module
+
+from appkit.occ_compat import (
+    FACE_OF,
+    as_face,
+    ensure_face,
+    ensure_shape,
+    face_surface,
+    iter_faces,
+    linear_properties,
+    list_iter,
+    map_size,
+    map_shapes_and_ancestors,
+    to_edge,
+    to_edge_safe,
+    to_shell,
+    to_solid,
+)
 
 _HAS_EZDXF = _ezdxf_vendor.HAS_EZDXF
 _HAS_ODAFC = _ezdxf_vendor.HAS_ODAFC
@@ -90,252 +186,6 @@ try:
     import numpy as np  # type: ignore
 except Exception:
     np = None  # type: ignore
-# ---------- OCCT helper wrappers ----------
-
-def _typename(o):  # small helper
-    return getattr(o, "__class__", type(o)).__name__
-
-def as_face(obj):
-    """
-    Return a TopoDS_Face for the *current backend*.
-    - If already a Face, return it (don't re-cast).
-    - If a tuple (some APIs return (surf, loc) or similar), take first elem.
-    - If null/None, raise cleanly.
-    - Otherwise cast with FACE_OF.
-    """
-    if obj is None:
-        raise TypeError("Expected a shape, got None")
-
-    # unwrap tuples (defensive)
-    if isinstance(obj, tuple) and obj:
-        obj = obj[0]
-    return ensure_face(obj)
-
-def iter_faces(shape):
-    exp = TopExp_Explorer(shape, TopAbs_FACE)
-    while exp.More():
-        yield ensure_face(exp.Current())
-        exp.Next()
-
-def face_surface(face_like):
-    f = ensure_face(face_like)
-    if hasattr(BRep_Tool, "Surface_s"):
-        s = BRep_Tool.Surface_s(f)
-    else:
-        s = BRep_Tool.Surface(f)
-    loc = (BRep_Tool.Location(f) if hasattr(BRep_Tool, "Location")
-           else (f.Location() if hasattr(f, "Location") else None))
-    if isinstance(s, tuple):
-        s, loc2 = s
-        loc = loc or loc2
-    if hasattr(s, "Surface"):
-        s = s.Surface()  # unwrap handle
-    return s, loc
- 
- 
-    
-# ---------- OCCT compat (OCP or pythonocc-core) ----------
-# ---------- Robust casters that work on OCP and pythonocc ----------
-# Lock topods casters to the active backend
-if STACK == "ocp":
-    def _TO_EDGE(s):
-        if type(s).__name__ in ("TopoDS_Edge", "Edge"):
-            return s
-        if hasattr(TopoDS, "Edge_s"):
-            return TopoDS.Edge_s(s)
-        try:
-            from OCP.TopoDS import topods as _topods
-            return _topods.Edge(s)
-        except Exception as e:
-            raise TypeError(f"Cannot cast to Edge from {type(s).__name__}") from e
-
-    def _TO_SOLID(s):
-        if type(s).__name__ in ("TopoDS_Solid", "Solid"):
-            return s
-        if hasattr(TopoDS, "Solid_s"):
-            return TopoDS.Solid_s(s)
-        from OCP.TopoDS import topods as _topods
-        return _topods.Solid(s)
-
-    def _TO_SHELL(s):
-        if type(s).__name__ in ("TopoDS_Shell", "Shell"):
-            return s
-        if hasattr(TopoDS, "Shell_s"):
-            return TopoDS.Shell_s(s)
-        from OCP.TopoDS import topods as _topods
-        return _topods.Shell(s)
-else:
-    # Resolve within OCC.Core only
-    try:
-        from OCC.Core.TopoDS import topods_Edge as _TO_EDGE
-    except Exception:
-        try:
-            from OCC.Core.TopoDS import Edge as _TO_EDGE
-        except Exception:
-            from OCC.Core.TopoDS import topods as _occ_topods
-            _TO_EDGE = getattr(_occ_topods, "Edge")
-    try:
-        from OCC.Core.TopoDS import topods_Solid as _TO_SOLID
-    except Exception:
-        from OCC.Core.TopoDS import topods as _occ_topods
-        _TO_SOLID = getattr(_occ_topods, "Solid")
-    try:
-        from OCC.Core.TopoDS import topods_Shell as _TO_SHELL
-    except Exception:
-        from OCC.Core.TopoDS import topods as _occ_topods
-        _TO_SHELL = getattr(_occ_topods, "Shell")
-
-# Type guards
-def _is_named(obj, names: tuple[str, ...]) -> bool:
-    try:
-        return type(obj).__name__ in names
-    except Exception:
-        return False
-
-def _unwrap_value(obj):
-    # Some containers return nodes with .Value()
-    return obj.Value() if hasattr(obj, "Value") and callable(obj.Value) else obj
-
-def ensure_shape(obj):
-    obj = _unwrap_value(obj)
-    if obj is None:
-        raise TypeError("Expected TopoDS_Shape, got None")
-    if hasattr(obj, "IsNull") and obj.IsNull():
-        raise TypeError("Expected non-null TopoDS_Shape")
-    return obj
-
-
-# Safe casters: no-ops if already cast; unwrap list nodes; check kind
-def to_edge_safe(obj):
-    obj = _unwrap_value(obj)
-    if _is_named(obj, ("TopoDS_Edge", "Edge")):
-        return obj
-    obj = ensure_shape(obj)
-    return _TO_EDGE(obj)
-
-# Choose stack
-try:
-    # OCP / CadQuery bindings
-    from OCP.BRepGProp import BRepGProp as _BRepGProp_mod
-    STACK_GPROP = "ocp"
-except Exception:
-    # pythonocc-core
-    try:
-        from OCC.Core.BRepGProp import BRepGProp as _BRepGProp_mod
-    except Exception:
-        from types import SimpleNamespace
-        from OCC.Core.BRepGProp import (
-            brepgprop_LinearProperties as _lp,
-            brepgprop_SurfaceProperties as _sp,
-            brepgprop_VolumeProperties as _vp,
-        )
-        _BRepGProp_mod = SimpleNamespace(
-            LinearProperties=_lp,
-            SurfaceProperties=_sp,
-            VolumeProperties=_vp,
-        )
-    def _to_edge_occ(s):
-        try:
-            from OCC.Core.TopoDS import topods_Edge as _fn
-        except Exception:
-            from OCC.Core.TopoDS import Edge as _fn
-        return _fn(s)
-
-    _TO_EDGE = _to_edge_occ
-    STACK_GPROP = "pythonocc"
-
-# Resolve topods casters across bindings
-
-
-# ---- modern wrappers (no deprecation warnings)
-# ---- modern wrappers (no deprecation warnings)
-def linear_properties(edge, gprops):
-    """Linear properties across OCP/pythonocc names."""
-    fn = getattr(_BRepGProp_mod, "LinearProperties", None)
-    if fn is None:
-        fn = getattr(_BRepGProp_mod, "LinearProperties_s", None)
-    if fn is None:
-        try:
-            from OCC.Core.BRepGProp import brepgprop_LinearProperties as _old  # type: ignore
-            return _old(edge, gprops)
-        except Exception:
-            raise
-    return fn(edge, gprops)
-
-def map_shapes_and_ancestors(root_shape, sub_enum, anc_enum):
-    """Return TopTools_IndexedDataMapOfShapeListOfShape for (sub → ancestors)."""
-    # Ensure we pass a *Shape*, not a Face
-    if root_shape is None:
-        raise TypeError("root_shape is None")
-    if not hasattr(root_shape, "IsNull") or root_shape.IsNull():
-        # If someone handed us a Face, try to grab its TShape parent; else fail.
-        # Safer: require a real TopoDS_Shape from STEP/IGES root.
-        pass
-
-    amap = TopTools_IndexedDataMapOfShapeListOfShape()
-    # static/instance variants across wheels
-    fn = getattr(TopExp, "MapShapesAndAncestors", None) or getattr(TopExp, "MapShapesAndAncestors_s", None)
-    if fn is None:
-        raise RuntimeError("TopExp.MapShapesAndAncestors not available in this OCP wheel")
-    fn(root_shape, sub_enum, anc_enum, amap)
-    return amap
-
-# modern topods casters: topods.Edge(shape) / topods.Face(shape)
-# ---- Robust topods casters that are no-ops for already-cast objects ----
-def _is_instance(obj, qualnames):
-    """True if obj.__class__.__name__ matches any in qualnames across OCP/OCC."""
-    try:
-        name = type(obj).__name__
-    except Exception:
-        return False
-    return name in qualnames  # e.g. ["TopoDS_Face", "Face"]
-
-def ensure_face(obj):
-    if obj is None:
-        raise TypeError("Expected a face, got None")
-    if isinstance(obj, TopoDS_Face) or type(obj).__name__ == "TopoDS_Face":
-        return obj
-    st = obj.ShapeType() if hasattr(obj, "ShapeType") else None
-    if st == TopAbs_FACE:
-        return FACE_OF(obj)
-    raise TypeError(f"Not a face: {type(obj).__name__}")
-def to_edge(s):
-    if _is_instance(s, ["TopoDS_Edge", "Edge"]):
-        return s
-    return _TO_EDGE(s)
-
-def to_solid(s):
-    if _is_instance(s, ["TopoDS_Solid", "Solid"]):
-        return s
-    return _TO_SOLID(s)
-
-def to_shell(s):
-    if _is_instance(s, ["TopoDS_Shell", "Shell"]):
-        return s
-    return _TO_SHELL(s)
-
-# Generic size helpers so we never call Extent() on lists/maps again
-def map_size(m):
-    for name in ("Size", "Extent", "Length"):
-        if hasattr(m, name):
-            return getattr(m, name)()
-    raise AttributeError(f"No size method on {type(m)}")
-
-def list_iter(lst):
-    """
-    Iterate TopTools_ListOfShape across bindings.
-    Use cbegin()/More()/Value()/Next() if available; otherwise fall back to python list conversion.
-    """
-    # OCP + pythonocc expose cbegin iterator on TopTools_ListOfShape
-    if hasattr(lst, "cbegin"):
-        it = lst.cbegin()
-        while it.More():
-            yield it.Value()
-            it.Next()
-    else:
-        # last-resort: try Python iteration (some wheels support it)
-        for v in list(lst):
-            yield v
 # ---------- end compat ----------
 
 
