@@ -324,6 +324,116 @@ def _resolve_pricing_source_value(
 
     return text
 
+
+
+def _wrap_header_text(text: Any, page_width: int, indent: str = "") -> list[str]:
+    """Helper mirroring :func:`write_wrapped` for header content."""
+
+    if text is None:
+        return []
+    txt = str(text).strip()
+    if not txt:
+        return []
+    wrapper = textwrap.TextWrapper(width=max(10, page_width - len(indent)))
+    return [f"{indent}{chunk}" for chunk in wrapper.wrap(txt)]
+
+
+def _build_quote_header_lines(
+    *,
+    qty: int,
+    result: Mapping[str, Any] | None,
+    breakdown: Mapping[str, Any] | None,
+    page_width: int,
+    divider: str,
+    process_meta: Mapping[str, Any] | None,
+    process_meta_raw: Mapping[str, Any] | None,
+    hour_summary_entries: Mapping[str, Any] | None,
+) -> tuple[list[str], str | None]:
+    """Construct the canonical QUOTE SUMMARY header lines."""
+
+    header_lines: list[str] = [f"QUOTE SUMMARY - Qty {qty}", divider]
+
+    speeds_feeds_value = None
+    if isinstance(result, _MappingABC):
+        speeds_feeds_value = result.get("speeds_feeds_path")
+    if speeds_feeds_value in (None, "") and isinstance(breakdown, _MappingABC):
+        speeds_feeds_value = breakdown.get("speeds_feeds_path")
+    path_text = str(speeds_feeds_value).strip() if speeds_feeds_value else ""
+
+    speeds_feeds_loaded_display: bool | None = None
+    for source in (result, breakdown):
+        if not isinstance(source, _MappingABC):
+            continue
+        if "speeds_feeds_loaded" in source:
+            raw_flag = source.get("speeds_feeds_loaded")
+            speeds_feeds_loaded_display = None if raw_flag is None else bool(raw_flag)
+            break
+
+    if speeds_feeds_loaded_display is True:
+        status_suffix = " (loaded)"
+    elif speeds_feeds_loaded_display is False:
+        status_suffix = " (not loaded)"
+    else:
+        status_suffix = ""
+
+    if path_text:
+        header_lines.extend(
+            _wrap_header_text(
+                f"Speeds/Feeds CSV: {path_text}{status_suffix}",
+                page_width,
+            )
+        )
+    elif status_suffix:
+        header_lines.extend(
+            _wrap_header_text(
+                f"Speeds/Feeds CSV: (not set){status_suffix}",
+                page_width,
+            )
+        )
+    else:
+        header_lines.append("Speeds/Feeds CSV: (not set)")
+
+    def _coerce_pricing_source(value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    raw_pricing_source = None
+    if isinstance(breakdown, _MappingABC):
+        raw_pricing_source = _coerce_pricing_source(breakdown.get("pricing_source"))
+
+    used_planner_flag: bool | None = None
+    for source in (result, breakdown):
+        if not isinstance(source, _MappingABC):
+            continue
+        for meta_key in ("app_meta", "app"):
+            candidate = source.get(meta_key)
+            if not isinstance(candidate, _MappingABC):
+                continue
+            if "used_planner" in candidate:
+                try:
+                    used_planner_flag = bool(candidate.get("used_planner"))
+                except Exception:
+                    used_planner_flag = True if candidate.get("used_planner") else False
+                break
+        if used_planner_flag is not None:
+            break
+
+    pricing_source_value = _resolve_pricing_source_value(
+        raw_pricing_source,
+        used_planner=used_planner_flag,
+        process_meta=process_meta if isinstance(process_meta, _MappingABC) else None,
+        process_meta_raw=process_meta_raw if isinstance(process_meta_raw, _MappingABC) else None,
+        breakdown=breakdown if isinstance(breakdown, _MappingABC) else None,
+        hour_summary_entries=hour_summary_entries,
+    )
+
+    if pricing_source_value:
+        header_lines.append(f"Pricing Source: {pricing_source_value}")
+
+    return header_lines, pricing_source_value
+
 def _count_recognized_ops(plan_summary: Mapping[str, Any] | None) -> int:
     """Return a conservative count of recognized planner operations."""
 
@@ -3495,33 +3605,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     _accumulate_drill_debug(drill_debug_entries, result, breakdown)
     # Canonical QUOTE SUMMARY header (legacy variants removed in favour of this
     # block so the Speeds/Feeds status + Drill Debug output stay consistent).
-    append_line(f"QUOTE SUMMARY - Qty {qty}")
-    append_line(divider)
-    speeds_feeds_display = (
-        result.get("speeds_feeds_path")
-        or breakdown.get("speeds_feeds_path")
+    header_lines, pricing_source_value = _build_quote_header_lines(
+        qty=qty,
+        result=result if isinstance(result, _MappingABC) else None,
+        breakdown=breakdown if isinstance(breakdown, _MappingABC) else None,
+        page_width=page_width,
+        divider=divider,
+        process_meta=process_meta,
+        process_meta_raw=process_meta_raw,
+        hour_summary_entries=hour_summary_entries,
     )
-    path_text = str(speeds_feeds_display).strip() if speeds_feeds_display else ""
-    speeds_feeds_loaded_display: bool | None = None
-    for source in (result, breakdown):
-        if not isinstance(source, _MappingABC):
-            continue
-        if "speeds_feeds_loaded" in source:
-            raw_flag = source.get("speeds_feeds_loaded")
-            speeds_feeds_loaded_display = None if raw_flag is None else bool(raw_flag)
-            break
-    if speeds_feeds_loaded_display is True:
-        status_suffix = " (loaded)"
-    elif speeds_feeds_loaded_display is False:
-        status_suffix = " (not loaded)"
-    else:
-        status_suffix = ""
-    if path_text:
-        write_wrapped(f"Speeds/Feeds CSV: {path_text}{status_suffix}")
-    elif status_suffix:
-        write_wrapped(f"Speeds/Feeds CSV: (not set){status_suffix}")
-    else:
-        write_line("Speeds/Feeds CSV: (not set)")
+    append_lines(header_lines)
     append_line("")
 
     def render_drill_debug(entries: Sequence[str]) -> None:
@@ -3586,42 +3680,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     total_direct_costs_row_index = len(lines) - 1
     process_total_row_index = -1
     directs: float = 0.0
-    def _coerce_pricing_source(value: Any) -> str | None:
-        if value is None:
-            return None
-        text = str(value).strip()
-        return text or None
-
-    raw_pricing_source = _coerce_pricing_source(breakdown.get("pricing_source"))
-
-    used_planner_flag: bool | None = None
-    for source in (result, breakdown):
-        if not isinstance(source, _MappingABC):
-            continue
-        for meta_key in ("app_meta", "app"):
-            candidate = source.get(meta_key)
-            if not isinstance(candidate, _MappingABC):
-                continue
-            if "used_planner" in candidate:
-                try:
-                    used_planner_flag = bool(candidate.get("used_planner"))
-                except Exception:
-                    used_planner_flag = True if candidate.get("used_planner") else False
-                break
-        if used_planner_flag is not None:
-            break
-
-    pricing_source_value = _resolve_pricing_source_value(
-        raw_pricing_source,
-        used_planner=used_planner_flag,
-        process_meta=process_meta if isinstance(process_meta, _MappingABC) else None,
-        process_meta_raw=process_meta_raw if isinstance(process_meta_raw, _MappingABC) else None,
-        breakdown=breakdown if isinstance(breakdown, _MappingABC) else None,
-        hour_summary_entries=hour_summary_entries,
-    )
-
-    if pricing_source_value:
-        append_line(f"Pricing Source: {pricing_source_value}")
     pricing_source_lower = pricing_source_value.lower() if pricing_source_value else ""
     display_red_flags: list[str] = []
     if red_flags:
