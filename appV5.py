@@ -104,6 +104,7 @@ from appkit.ui.tk_compat import (
     _ensure_tk,
 )
 
+from appkit.guardrails import build_guard_context, apply_drilling_floor_notes
 from appkit.merge_utils import (
     ACCEPT_SCALAR_KEYS,
     SUGGESTION_SCALAR_KEYS,
@@ -136,6 +137,10 @@ from appkit.scrap_helpers import (
 )
 
 from appkit.data import load_json, load_text
+from appkit.utils.text_rules import (
+    PROC_MULT_TARGETS,
+    canonicalize_amortized_label as _canonical_amortized_label,
+)
 from appkit.debug.debug_tables import (
     _jsonify_debug_value,
     _accumulate_drill_debug,
@@ -213,36 +218,6 @@ def roughly_equal(a: float | int | str | None, b: float | int | str | None, *, e
     except Exception:
         eps_val = 0.0
     return math.isclose(a_val, b_val, rel_tol=0.0, abs_tol=abs(eps_val))
-
-def _fallback_match_items_contains(items: "pd.Series | typing.Iterable[object]", pattern: str):
-    """Best-effort case-insensitive containment check without pandas dependencies."""
-
-    try:
-        compiled = re.compile(pattern, flags=re.IGNORECASE)
-    except re.error:
-        compiled = re.compile(re.escape(pattern), flags=re.IGNORECASE)
-
-    def _matches(value: object) -> bool:
-        text = "" if value is None else str(value)
-        return bool(compiled.search(text))
-
-    try:  # Defer pandas import so the fallback works in minimal environments.
-        import pandas as pd  # type: ignore[import]
-    except Exception:  # pragma: no cover - pandas is an optional dependency here
-        pd = None  # type: ignore[assignment]
-
-    if pd is not None:
-        try:
-            series = items if isinstance(items, pd.Series) else pd.Series(list(items))
-        except Exception:
-            series = pd.Series([], dtype="object")
-        return series.astype(str).apply(_matches)
-
-    # When pandas is unavailable, return a basic list of booleans preserving order.
-    try:
-        return [_matches(value) for value in items]
-    except TypeError:
-        return []
 
 import textwrap
 from typing import (
@@ -390,39 +365,12 @@ from cad_quoter.domain_models import (
 from cad_quoter.domain_models import (
     normalize_material_key as _normalize_lookup_key,
 )
-from cad_quoter.coerce import to_float
-from cad_quoter.utils import jdump, sdict
+from cad_quoter.coerce import to_float, to_int
+from cad_quoter.utils import compact_dict, jdump, json_safe_copy, sdict
+from cad_quoter.utils.text import _match_items_contains
 from cad_quoter.llm_suggest import (
     get_llm_quote_explanation,
 )
-
-def _fallback_collection_has_text(value: Any) -> bool:
-    if isinstance(value, str):
-        return bool(value.strip())
-    if isinstance(value, _MappingABC):
-        return any(_fallback_collection_has_text(candidate) for candidate in value.values())
-    if isinstance(value, (list, tuple, set)):
-        return any(_fallback_collection_has_text(candidate) for candidate in value)
-    return False
-
-def _geo_mentions_outsourced(geo_context: Mapping[str, Any] | None) -> bool:
-    if isinstance(geo_context, _MappingABC):
-        if _fallback_collection_has_text(geo_context.get("finishes")):
-            return True
-    if callable(_imported_geo_mentions_outsourced):
-        return _imported_geo_mentions_outsourced(geo_context)
-    return False
-_match_items_contains = _fallback_match_items_contains  # type: ignore[assignment]
-
-try:
-    from cad_quoter.utils.text import _match_items_contains as _imported_match_items_contains
-except Exception:  # pragma: no cover - defensive fallback for optional import paths
-    _imported_match_items_contains = None  # type: ignore[assignment]
-else:
-    if callable(_imported_match_items_contains):
-        _match_items_contains = _imported_match_items_contains
-    else:
-        _match_items_contains = _fallback_match_items_contains
 from cad_quoter.pricing import (
     LB_PER_KG,
     PricingEngine,
@@ -557,72 +505,6 @@ else:  # pragma: no cover - fallback definitions keep quoting functional without
         return "LLM explanation unavailable."
 
 
-# Mapping of process keys to editor labels for propagating derived hours from
-# LLM suggestions. The scale term allows lightweight conversions if we need to
-# express the hour totals in another unit for a given field.
-PROC_MULT_TARGETS: dict[str, tuple[str, float]] = {
-    # Processes that have direct counterparts in the default variables sheet.
-    "inspection": ("In-Process Inspection Hours", 1.0),
-    "finishing_deburr": ("Deburr Hours", 1.0),
-    "deburr": ("Deburr Hours", 1.0),
-    "saw_waterjet": ("Sawing Hours", 1.0),
-    "assembly": ("Assembly Hours", 1.0),
-    "packaging": ("Packaging Labor Hours", 1.0),
-}
-
-_AMORTIZED_LABEL_PATTERN = re.compile(r"\s*\((amortized|amortised)(?:\s+(?:per\s+(?:part|piece|pc|unit)|each|ea))?\)\s*$", re.IGNORECASE)
-
-def _canonical_amortized_label(label: Any) -> tuple[str, bool]:
-    """Return a canonical label and flag for amortized cost rows."""
-
-    text = str(label or "").strip()
-    if not text:
-        return "", False
-
-    normalized = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
-    normalized = normalized.replace("perpart", "per part")
-    normalized = normalized.replace("perpiece", "per piece")
-    tokens = normalized.split()
-    token_set = set(tokens)
-
-    def _has(*want: str) -> bool:
-        return all(token in token_set for token in want)
-
-    amortized_tokens = {"amortized", "amortised"}
-    has_amortized = any(token in token_set for token in amortized_tokens)
-
-    if has_amortized:
-        per_part = (
-            _has("per", "part")
-            or _has("per", "pc")
-            or _has("per", "piece")
-            or "per piece" in normalized
-            or "per unit" in normalized
-        )
-        if "programming" in token_set:
-            canonical = (
-                "Programming (amortized per part)"
-                if per_part
-                else "Programming (amortized)"
-            )
-            return canonical, True
-        if "fixture" in token_set or "fixturing" in token_set:
-            canonical = (
-                "Fixture Build (amortized per part)"
-                if per_part
-                else "Fixture Build (amortized)"
-            )
-            return canonical, True
-        return text, True
-
-    match = _AMORTIZED_LABEL_PATTERN.search(text)
-    if match:
-        prefix = text[: match.start()].rstrip()
-        canonical = f"{prefix} (amortized)" if prefix else match.group(1).lower()
-        return canonical, True
-
-    return text, False
-
 import pandas as pd
 from typing import TypedDict
 
@@ -737,6 +619,13 @@ def apply_suggestions(baseline: dict, s: dict) -> dict:
 
 
 def compute_effective_state(state: QuoteState) -> tuple[dict, dict]:
+    existing_guard_ctx = getattr(state, "guard_context", None)
+    if not isinstance(existing_guard_ctx, dict) or not existing_guard_ctx:
+        try:
+            state.guard_context = build_guard_context(state)
+        except Exception:
+            state.guard_context = dict(existing_guard_ctx or {})
+
     baseline = state.baseline or {}
     suggestions = state.suggestions or {}
     overrides = state.user_overrides or {}
@@ -802,38 +691,7 @@ def compute_effective_state(state: QuoteState) -> tuple[dict, dict]:
 def reprice_with_effective(state: QuoteState) -> QuoteState:
     """Recompute effective values and enforce guardrails before pricing."""
 
-    geo_ctx = state.geo or {}
-    inner_geo_raw = geo_ctx.get("geo")
-    inner_geo_ctx: dict[str, Any] = inner_geo_raw if isinstance(inner_geo_raw, dict) else {}
-    hole_count_guard = _coerce_float_or_none(geo_ctx.get("hole_count"))
-    if hole_count_guard is None:
-        hole_count_guard = _coerce_float_or_none(inner_geo_ctx.get("hole_count"))
-    tap_qty_guard = _coerce_float_or_none(geo_ctx.get("tap_qty"))
-    if tap_qty_guard is None:
-        tap_qty_guard = _coerce_float_or_none(inner_geo_ctx.get("tap_qty"))
-    finish_flags_guard: set[str] = set()
-    finishes_geo = geo_ctx.get("finishes") or inner_geo_ctx.get("finishes")
-    if isinstance(finishes_geo, (list, tuple, set)):
-        finish_flags_guard.update(str(flag).strip().upper() for flag in finishes_geo if isinstance(flag, str) and flag.strip())
-    explicit_finish_flags = geo_ctx.get("finish_flags") or inner_geo_ctx.get("finish_flags")
-    if isinstance(explicit_finish_flags, (list, tuple, set)):
-        finish_flags_guard.update(str(flag).strip().upper() for flag in explicit_finish_flags if isinstance(flag, str) and flag.strip())
-    guard_ctx: dict[str, Any] = {
-        "hole_count": hole_count_guard,
-        "tap_qty": tap_qty_guard,
-        "min_sec_per_hole": 9.0,
-        "min_min_per_tap": 0.2,
-        "needs_back_face": bool(
-            geo_ctx.get("needs_back_face")
-            or geo_ctx.get("from_back")
-            or inner_geo_ctx.get("needs_back_face")
-            or inner_geo_ctx.get("from_back")
-        ),
-        "baseline_pass_through": (state.baseline.get("pass_through") if isinstance(state.baseline.get("pass_through"), dict) else {}),
-    }
-    if finish_flags_guard:
-        guard_ctx["finish_flags"] = sorted(finish_flags_guard)
-        guard_ctx.setdefault("finish_cost_floor", 50.0)
+    guard_ctx = build_guard_context(state)
     state.guard_context = guard_ctx
 
     ensure_accept_flags(state)
@@ -841,29 +699,7 @@ def reprice_with_effective(state: QuoteState) -> QuoteState:
     state.effective = merged
     state.effective_sources = sources
 
-    # drilling floor guard
-    eff_hours = state.effective.get("process_hours") if isinstance(state.effective.get("process_hours"), dict) else {}
-    if eff_hours:
-        try:
-            hole_count_geo = int(float(state.geo.get("hole_count", 0) or 0))
-        except Exception:
-            hole_count_geo = 0
-        hole_count = hole_count_geo
-        if hole_count <= 0:
-            holes = state.geo.get("hole_diams_mm")
-            if isinstance(holes, (list, tuple)):
-                hole_count = len(holes)
-        if hole_count > 0 and "drilling" in eff_hours:
-            current = to_float(eff_hours.get("drilling")) or 0.0
-            min_sec_per_hole = 9.0
-            floor_hr = (hole_count * min_sec_per_hole) / 3600.0
-            if current < floor_hr:
-                eff_hours["drilling"] = floor_hr
-                state.effective["process_hours"] = eff_hours
-                note = f"Raised drilling to floor for {hole_count} holes"
-                notes = state.effective.setdefault("notes", [])
-                if note not in notes:
-                    notes.append(note)
+    apply_drilling_floor_notes(state, guard_ctx=guard_ctx)
     return state
 
 def effective_to_overrides(effective: dict, baseline: dict | None = None) -> dict:
@@ -992,66 +828,84 @@ def iter_suggestion_rows(state: QuoteState) -> list[dict]:
     accept_raw = state.accept_llm
     accept = accept_raw if isinstance(accept_raw, dict) else {}
 
-    baseline_hours_raw = baseline.get("process_hours") if isinstance(baseline.get("process_hours"), dict) else {}
+    def _coerce_dict(container: dict[str, Any], key: str) -> dict[str, Any]:
+        value = container.get(key)
+        return value if isinstance(value, dict) else {}
+
+    def _append_row(
+        path: tuple[str, ...],
+        label: str,
+        kind: str,
+        *,
+        baseline_value: Any,
+        llm_value: Any,
+        user_value: Any,
+        accept_value: bool,
+        effective_value: Any,
+        source_value: Any,
+    ) -> None:
+        rows.append(
+            {
+                "path": path,
+                "label": label,
+                "kind": kind,
+                "baseline": baseline_value,
+                "llm": llm_value,
+                "user": user_value,
+                "accept": accept_value,
+                "effective": effective_value,
+                "source": source_value,
+            }
+        )
+
+    baseline_hours_raw = _coerce_dict(baseline, "process_hours")
     baseline_hours: dict[str, float] = {}
-    for key, value in (baseline_hours_raw or {}).items():
+    for key, value in baseline_hours_raw.items():
         try:
-            if abs(float(value)) > 1e-6:
-                baseline_hours[key] = float(value)
+            as_float = float(value)
         except Exception:
             continue
+        if abs(as_float) > 1e-6:
+            baseline_hours[key] = as_float
 
-    sugg_mult_raw = suggestions.get("process_hour_multipliers")
-    sugg_mult = sugg_mult_raw if isinstance(sugg_mult_raw, dict) else {}
-    over_mult_raw = overrides.get("process_hour_multipliers")
-    over_mult = over_mult_raw if isinstance(over_mult_raw, dict) else {}
-    eff_mult_raw = effective.get("process_hour_multipliers")
-    eff_mult = eff_mult_raw if isinstance(eff_mult_raw, dict) else {}
-    src_mult_raw = sources.get("process_hour_multipliers")
-    src_mult = src_mult_raw if isinstance(src_mult_raw, dict) else {}
-    accept_mult_raw = accept.get("process_hour_multipliers")
-    accept_mult = accept_mult_raw if isinstance(accept_mult_raw, dict) else {}
-    keys_mult = sorted(_collect_process_keys(baseline_hours, sugg_mult, over_mult))
-    for key in keys_mult:
-        rows.append(
-            {
-                "path": ("process_hour_multipliers", key),
-                "label": f"Process × {key}",
-                "kind": "multiplier",
-                "baseline": 1.0,
-                "llm": sugg_mult.get(key),
-                "user": over_mult.get(key),
-                "accept": bool(accept_mult.get(key)),
-                "effective": eff_mult.get(key, 1.0),
-                "source": src_mult.get(key, "baseline"),
-            }
-        )
+    map_specs = [
+        {
+            "path": "process_hour_multipliers",
+            "label": "Process × {key}",
+            "kind": "multiplier",
+            "baseline": 1.0,
+        },
+        {
+            "path": "process_hour_adders",
+            "label": "Process +hr {key}",
+            "kind": "hours",
+            "baseline": 0.0,
+        },
+    ]
 
-    sugg_add_raw = suggestions.get("process_hour_adders")
-    sugg_add = sugg_add_raw if isinstance(sugg_add_raw, dict) else {}
-    over_add_raw = overrides.get("process_hour_adders")
-    over_add = over_add_raw if isinstance(over_add_raw, dict) else {}
-    eff_add_raw = effective.get("process_hour_adders")
-    eff_add = eff_add_raw if isinstance(eff_add_raw, dict) else {}
-    src_add_raw = sources.get("process_hour_adders")
-    src_add = src_add_raw if isinstance(src_add_raw, dict) else {}
-    accept_add_raw = accept.get("process_hour_adders")
-    accept_add = accept_add_raw if isinstance(accept_add_raw, dict) else {}
-    keys_add = sorted(_collect_process_keys(baseline_hours, sugg_add, over_add))
-    for key in keys_add:
-        rows.append(
-            {
-                "path": ("process_hour_adders", key),
-                "label": f"Process +hr {key}",
-                "kind": "hours",
-                "baseline": 0.0,
-                "llm": sugg_add.get(key),
-                "user": over_add.get(key),
-                "accept": bool(accept_add.get(key)),
-                "effective": eff_add.get(key, 0.0),
-                "source": src_add.get(key, "baseline"),
-            }
-        )
+    for spec in map_specs:
+        path_key = spec["path"]
+        label_template = spec["label"]
+        kind = spec["kind"]
+        baseline_default = spec["baseline"]
+        sugg_map = _coerce_dict(suggestions, path_key)
+        user_map = _coerce_dict(overrides, path_key)
+        eff_map = _coerce_dict(effective, path_key)
+        src_map = _coerce_dict(sources, path_key)
+        accept_map = _coerce_dict(accept, path_key)
+        keys = sorted(_collect_process_keys(baseline_hours, sugg_map, user_map))
+        for key in keys:
+            _append_row(
+                (path_key, key),
+                label_template.format(key=key),
+                kind,
+                baseline_value=baseline_default,
+                llm_value=sugg_map.get(key),
+                user_value=user_map.get(key),
+                accept_value=bool(accept_map.get(key)),
+                effective_value=eff_map.get(key, baseline_default),
+                source_value=src_map.get(key, "baseline"),
+            )
 
     sugg_pass = (
         canonicalize_pass_through_map(suggestions.get("add_pass_through"))
@@ -1091,103 +945,55 @@ def iter_suggestion_rows(state: QuoteState) -> list[dict]:
                 label = f"{label} (base {_format_value(base_amount, 'currency')})"
             except Exception:
                 pass
-        rows.append(
-            {
-                "path": ("add_pass_through", key),
-                "label": label,
-                "kind": "currency",
-                "baseline": 0.0,
-                "llm": sugg_pass.get(key),
-                "user": over_pass.get(key),
-                "accept": bool(accept_pass.get(key)),
-                "effective": eff_pass.get(key, 0.0),
-                "source": src_pass.get(key, "baseline"),
-            }
+        _append_row(
+            ("add_pass_through", key),
+            label,
+            "currency",
+            baseline_value=0.0,
+            llm_value=sugg_pass.get(key),
+            user_value=over_pass.get(key),
+            accept_value=bool(accept_pass.get(key)),
+            effective_value=eff_pass.get(key, 0.0),
+            source_value=src_pass.get(key, "baseline"),
         )
 
-    scrap_base = baseline.get("scrap_pct")
-    scrap_llm = suggestions.get("scrap_pct")
-    scrap_user = overrides.get("scrap_pct")
-    scrap_eff = effective.get("scrap_pct")
-    scrap_src = sources.get("scrap_pct", "baseline")
-    if any(v is not None for v in (scrap_base, scrap_llm, scrap_user)):
-        rows.append(
-            {
-                "path": ("scrap_pct",),
-                "label": "Scrap %",
-                "kind": "percent",
-                "baseline": scrap_base,
-                "llm": scrap_llm,
-                "user": scrap_user,
-                "accept": bool(accept.get("scrap_pct")),
-                "effective": scrap_eff,
-                "source": scrap_src,
-            }
-        )
+    scalar_specs = [
+        {"path": ("scrap_pct",), "label": "Scrap %", "kind": "percent"},
+        {"path": ("contingency_pct",), "label": "Contingency %", "kind": "percent"},
+        {"path": ("setups",), "label": "Setups", "kind": "int"},
+        {
+            "path": ("fixture",),
+            "label": "Fixture plan",
+            "kind": "text",
+            "presence": ("baseline", "llm", "user", "effective"),
+        },
+    ]
 
-    cont_base = baseline.get("contingency_pct")
-    cont_llm = suggestions.get("contingency_pct")
-    cont_user = overrides.get("contingency_pct")
-    cont_eff = effective.get("contingency_pct")
-    cont_src = sources.get("contingency_pct", "baseline")
-    if any(v is not None for v in (cont_base, cont_llm, cont_user)):
-        rows.append(
-            {
-                "path": ("contingency_pct",),
-                "label": "Contingency %",
-                "kind": "percent",
-                "baseline": cont_base,
-                "llm": cont_llm,
-                "user": cont_user,
-                "accept": bool(accept.get("contingency_pct")),
-                "effective": cont_eff,
-                "source": cont_src,
-            }
-        )
+    for spec in scalar_specs:
+        key = spec["path"][0]
+        values = {
+            "baseline": baseline.get(key),
+            "llm": suggestions.get(key),
+            "user": overrides.get(key),
+            "effective": effective.get(key),
+            "source": sources.get(key, "baseline"),
+            "accept": bool(accept.get(key)),
+        }
+        presence_fields = spec.get("presence", ("baseline", "llm", "user"))
+        if any(values[field] is not None for field in presence_fields):
+            _append_row(
+                spec["path"],
+                spec["label"],
+                spec["kind"],
+                baseline_value=values["baseline"],
+                llm_value=values["llm"],
+                user_value=values["user"],
+                accept_value=values["accept"],
+                effective_value=values["effective"],
+                source_value=values["source"],
+            )
 
-    setups_base = baseline.get("setups")
-    setups_llm = suggestions.get("setups")
-    setups_user = overrides.get("setups")
-    setups_eff = effective.get("setups")
-    setups_src = sources.get("setups", "baseline")
-    if any(v is not None for v in (setups_base, setups_llm, setups_user)):
-        rows.append(
-            {
-                "path": ("setups",),
-                "label": "Setups",
-                "kind": "int",
-                "baseline": setups_base,
-                "llm": setups_llm,
-                "user": setups_user,
-                "accept": bool(accept.get("setups")),
-                "effective": setups_eff,
-                "source": setups_src,
-            }
-        )
-
-    fixture_base = baseline.get("fixture")
-    fixture_llm = suggestions.get("fixture")
-    fixture_user = overrides.get("fixture")
-    fixture_eff = effective.get("fixture")
-    fixture_src = sources.get("fixture", "baseline")
-    if any(v is not None for v in (fixture_base, fixture_llm, fixture_user, fixture_eff)):
-        rows.append(
-            {
-                "path": ("fixture",),
-                "label": "Fixture plan",
-                "kind": "text",
-                "baseline": fixture_base,
-                "llm": fixture_llm,
-                "user": fixture_user,
-                "accept": bool(accept.get("fixture")),
-                "effective": fixture_eff,
-                "source": fixture_src,
-            }
-        )
-
-    def _add_scalar_row(path: tuple[str, ...], label: str, kind: str, key: str) -> None:
-        # Placeholder to satisfy interpreter; implementation not required at import time.
-        return None
+    return rows
 
 try:
     from hole_table_parser import parse_hole_table_lines as _parse_hole_table_lines
@@ -1200,7 +1006,8 @@ except Exception:
     _extract_text_lines_from_dxf = None
 
 # ---------- OCC / OCP compatibility ----------
-STACK = None
+STACK = getattr(geometry, "STACK", "pythonocc")
+bnd_add = geometry.bnd_add
 
 def _import_optional(module_name: str):
     """Safely import *module_name* and return ``None`` if it is unavailable."""
@@ -1209,200 +1016,6 @@ def _import_optional(module_name: str):
         return importlib.import_module(module_name)
     except Exception:
         return None
-
-def _make_bnd_add_ocp():
-    # Try every known symbol name in OCP builds
-    candidates = []
-    module = _import_optional("OCP.BRepBndLib")
-    if module is None:
-        raise ImportError("OCP.BRepBndLib is not available")
-
-    for attr in (
-        "Add",
-        "Add_s",
-        "BRepBndLib_Add",
-        "brepbndlib_Add",
-    ):
-        fn = getattr(module, attr, None)
-        if fn:
-            candidates.append(fn)
-
-    klass = getattr(module, "BRepBndLib", None)
-    if klass:
-        for attr in ("Add", "Add_s", "AddClose_s", "AddOptimal_s", "AddOBB_s"):
-            fn = getattr(klass, attr, None)
-            if fn:
-                candidates.append(fn)
-
-    if not candidates:
-        raise ImportError("No BRepBndLib.Add symbol found in OCP")
-
-    # return a dispatcher that tries different call signatures
-    def _bnd_add(shape, box, use_triangulation=True):
-        last_err = None
-        for fn in candidates:
-            # Try 3-arg form
-            try:
-                return fn(shape, box, use_triangulation)
-            except TypeError as e:
-                last_err = e
-            # Try 2-arg form
-            try:
-                return fn(shape, box)
-            except TypeError as e:
-                last_err = e
-            except Exception as e:
-                last_err = e
-        # If we get here, none of the variants worked
-        raise last_err or RuntimeError("No callable BRepBndLib.Add variant succeeded")
-
-    return _bnd_add
-
-_ocp_modules = {
-    "Bnd": _import_optional("OCP.Bnd"),
-    "BRep": _import_optional("OCP.BRep"),
-    "BRepCheck": _import_optional("OCP.BRepCheck"),
-    "IFSelect": _import_optional("OCP.IFSelect"),
-    "ShapeFix": _import_optional("OCP.ShapeFix"),
-    "STEPControl": _import_optional("OCP.STEPControl"),
-    "TopoDS": _import_optional("OCP.TopoDS"),
-}
-
-bnd_add: Callable[[Any, Any, bool], Any]
-
-if all(module is not None for module in _ocp_modules.values()):
-    # Prefer OCP (CadQuery/ocp bindings)
-    bnd_module = cast(Any, _ocp_modules["Bnd"])
-    brep_module = cast(Any, _ocp_modules["BRep"])
-    brepcheck_module = cast(Any, _ocp_modules["BRepCheck"])
-    ifselect_module = cast(Any, _ocp_modules["IFSelect"])
-    shapefix_module = cast(Any, _ocp_modules["ShapeFix"])
-    step_module = cast(Any, _ocp_modules["STEPControl"])
-    topods_module = cast(Any, _ocp_modules["TopoDS"])
-
-    Bnd_Box = bnd_module.Bnd_Box
-    BRep_Builder = brep_module.BRep_Builder
-    BRepCheck_Analyzer = brepcheck_module.BRepCheck_Analyzer
-    IFSelect_RetDone = ifselect_module.IFSelect_RetDone
-    ShapeFix_Shape = shapefix_module.ShapeFix_Shape
-    STEPControl_Reader = step_module.STEPControl_Reader
-    TopoDS_Compound = topods_module.TopoDS_Compound
-    TopoDS_Shape = topods_module.TopoDS_Shape
-
-    try:
-        bnd_add = _make_bnd_add_ocp()
-        STACK = "ocp"
-    except Exception:
-        # Fallback: try dynamic dispatch at call time for OCP builds missing Add
-
-        def _bnd_add_ocp_fallback(shape, box, use_triangulation=True):
-            candidates = [
-                ("OCP.BRepBndLib", "Add"),
-                ("OCP.BRepBndLib", "Add_s"),
-                ("OCP.BRepBndLib", "BRepBndLib_Add"),
-                ("OCP.BRepBndLib", "brepbndlib_Add"),
-                ("OCC.Core.BRepBndLib", "Add"),
-                ("OCC.Core.BRepBndLib", "Add_s"),
-                ("OCC.Core.BRepBndLib", "BRepBndLib_Add"),
-                ("OCC.Core.BRepBndLib", "brepbndlib_Add"),
-            ]
-            for mod_name, attr in candidates:
-                module = _import_optional(mod_name)
-                if module and hasattr(module, attr):
-                    return getattr(module, attr)(shape, box, use_triangulation)
-            raise RuntimeError("No BRepBndLib.Add available in this build")
-
-        bnd_add = _bnd_add_ocp_fallback
-        STACK = "ocp"
-else:
-    # Fallback to pythonocc-core
-    _occ_modules = {
-        "Bnd": _import_optional("OCC.Core.Bnd"),
-        "BRep": _import_optional("OCC.Core.BRep"),
-        "BRepBndLib": _import_optional("OCC.Core.BRepBndLib"),
-        "BRepCheck": _import_optional("OCC.Core.BRepCheck"),
-        "IFSelect": _import_optional("OCC.Core.IFSelect"),
-        "ShapeFix": _import_optional("OCC.Core.ShapeFix"),
-        "STEPControl": _import_optional("OCC.Core.STEPControl"),
-        "TopoDS": _import_optional("OCC.Core.TopoDS"),
-    }
-
-    missing = [name for name, module in _occ_modules.items() if module is None]
-    if missing:
-        raise ImportError(
-            "Required OCC.Core modules are unavailable: {}".format(
-                ", ".join(sorted(missing))
-            )
-        )
-
-    bnd_module = cast(Any, _occ_modules["Bnd"])
-    brep_module = cast(Any, _occ_modules["BRep"])
-    brepbndlib_module = cast(Any, _occ_modules["BRepBndLib"])
-    brepcheck_module = cast(Any, _occ_modules["BRepCheck"])
-    ifselect_module = cast(Any, _occ_modules["IFSelect"])
-    shapefix_module = cast(Any, _occ_modules["ShapeFix"])
-    step_module = cast(Any, _occ_modules["STEPControl"])
-    topods_module = cast(Any, _occ_modules["TopoDS"])
-
-    Bnd_Box = bnd_module.Bnd_Box
-    BRep_Builder = brep_module.BRep_Builder
-    _brep_add = brepbndlib_module.brepbndlib_Add
-    BRepCheck_Analyzer = brepcheck_module.BRepCheck_Analyzer
-    IFSelect_RetDone = ifselect_module.IFSelect_RetDone
-    ShapeFix_Shape = shapefix_module.ShapeFix_Shape
-    STEPControl_Reader = step_module.STEPControl_Reader
-    TopoDS_Compound = topods_module.TopoDS_Compound
-    TopoDS_Shape = topods_module.TopoDS_Shape
-
-    def _bnd_add_pythonocc(shape, box, use_triangulation=True):
-        _brep_add(shape, box, use_triangulation)
-
-    bnd_add = _bnd_add_pythonocc
-    STACK = "pythonocc"
-# ---------- end shim ----------
-# ----- one-backend imports -----
-_backend_modules = {
-    "BRep": _import_optional("OCP.BRep"),
-    "TopAbs": _import_optional("OCP.TopAbs"),
-    "TopExp": _import_optional("OCP.TopExp"),
-}
-
-_brep_mod = _backend_modules["BRep"]
-_topabs_mod = _backend_modules["TopAbs"]
-_topexp_mod = _backend_modules["TopExp"]
-
-if _brep_mod and _topabs_mod and _topexp_mod:
-    BRep_Tool = cast(Any, _brep_mod).BRep_Tool
-    TopAbs_FACE = cast(Any, _topabs_mod).TopAbs_FACE
-    TopExp_Explorer = cast(Any, _topexp_mod).TopExp_Explorer
-    BACKEND = "ocp"
-else:
-    _backend_modules = {
-        "BRep": _import_optional("OCC.Core.BRep"),
-        "TopAbs": _import_optional("OCC.Core.TopAbs"),
-        "TopExp": _import_optional("OCC.Core.TopExp"),
-    }
-
-    missing = [name for name, module in _backend_modules.items() if module is None]
-    if missing:
-        raise ImportError(
-            "Required backend modules are unavailable: {}".format(
-                ", ".join(sorted(missing))
-            )
-        )
-
-    _brep_mod = _backend_modules["BRep"]
-    _topabs_mod = _backend_modules["TopAbs"]
-    _topexp_mod = _backend_modules["TopExp"]
-
-    assert _brep_mod is not None
-    assert _topabs_mod is not None
-    assert _topexp_mod is not None
-
-    BRep_Tool = cast(Any, _brep_mod).BRep_Tool
-    TopAbs_FACE = cast(Any, _topabs_mod).TopAbs_FACE
-    TopExp_Explorer = cast(Any, _topexp_mod).TopExp_Explorer
-    BACKEND = "pythonocc"
 
 def _resolve_face_of():
     """Return a callable that casts a shape-like object to a TopoDS_Face."""

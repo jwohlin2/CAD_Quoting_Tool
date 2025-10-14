@@ -6,14 +6,18 @@ from collections.abc import Mapping as _MappingABC
 from typing import Any
 
 from appkit.planner_adapter import _coerce_bool
-from cad_quoter.coerce import to_float, to_int
+from cad_quoter.coerce import to_float
 from cad_quoter.domain import (
-    _canonical_pass_label,
-    _as_float_or_none,
+    HARDWARE_PASS_LABEL,
+    LEGACY_HARDWARE_PASS_LABEL,
     canonicalize_pass_through_map,
     coerce_bounds,
 )
-from cad_quoter.domain_models import coerce_float_or_none as _coerce_float_or_none
+from appkit.guardrails import (
+    enforce_finish_pass_guardrail,
+    enforce_process_floor_guardrails,
+    enforce_setups_guardrail,
+)
 
 
 ACCEPT_SCALAR_KEYS: tuple[str, ...] = (
@@ -362,39 +366,7 @@ def merge_effective(
             final_pass[key] = val
         pass_sources[key] = source
 
-    hole_count_guard = _coerce_float_or_none(guard_ctx.get("hole_count"))
-    try:
-        hole_count_guard_int = int(round(float(hole_count_guard))) if hole_count_guard is not None else 0
-    except Exception:
-        hole_count_guard_int = 0
-    min_sec_per_hole = to_float(guard_ctx.get("min_sec_per_hole"))
-    min_sec_per_hole = float(min_sec_per_hole) if min_sec_per_hole is not None else 9.0
-    if hole_count_guard_int > 0 and "drilling" in final_hours:
-        current_drill = to_float(final_hours.get("drilling"))
-        if current_drill is not None:
-            drill_floor_hr = (hole_count_guard_int * min_sec_per_hole) / 3600.0
-            if current_drill < drill_floor_hr - 1e-6:
-                clamp_notes.append(
-                    f"process_hours[drilling] {current_drill:.3f} → {drill_floor_hr:.3f} (guardrail)"
-                )
-                final_hours["drilling"] = drill_floor_hr
-
-    tap_qty_guard = _coerce_float_or_none(guard_ctx.get("tap_qty"))
-    try:
-        tap_qty_guard_int = int(round(float(tap_qty_guard))) if tap_qty_guard is not None else 0
-    except Exception:
-        tap_qty_guard_int = 0
-    min_min_per_tap = to_float(guard_ctx.get("min_min_per_tap"))
-    min_min_per_tap = float(min_min_per_tap) if min_min_per_tap is not None else 0.2
-    if tap_qty_guard_int > 0 and "tapping" in final_hours:
-        current_tap = to_float(final_hours.get("tapping"))
-        if current_tap is not None:
-            tap_floor_hr = (tap_qty_guard_int * min_min_per_tap) / 60.0
-            if current_tap < tap_floor_hr - 1e-6:
-                clamp_notes.append(
-                    f"process_hours[tapping] {current_tap:.3f} → {tap_floor_hr:.3f} (guardrail)"
-                )
-                final_hours["tapping"] = tap_floor_hr
+    enforce_process_floor_guardrails(final_hours, guard_ctx, clamp_notes)
 
     eff["process_hour_multipliers"] = final_mults
     if mult_sources:
@@ -510,46 +482,18 @@ def merge_effective(
     for key in DICT_EFFECTIVE_FIELDS:
         _merge_dict_field(key)
 
-    if guard_ctx.get("needs_back_face"):
-        current_setups = eff.get("setups")
-        setups_int = to_int(current_setups) or 0
-        if setups_int < 2:
-            eff["setups"] = 2
-            clamp_notes.append(f"setups {setups_int} → 2 (back-side guardrail)")
-            source_tags["setups"] = "guardrail"
-
-    finish_flags_ctx = guard_ctx.get("finish_flags")
-    baseline_pass_ctx_raw = (
-        guard_ctx.get("baseline_pass_through")
-        if isinstance(guard_ctx.get("baseline_pass_through"), dict)
-        else {}
+    enforce_setups_guardrail(eff, guard_ctx, clamp_notes, source_tags)
+    final_pass = enforce_finish_pass_guardrail(
+        eff,
+        guard_ctx,
+        final_pass,
+        pass_sources,
+        clamp_notes,
     )
-    baseline_pass_ctx = canonicalize_pass_through_map(baseline_pass_ctx_raw)
-    finish_pass_key = _canonical_pass_label(
-        guard_ctx.get("finish_pass_key") or "Outsourced Vendors"
-    )
-    finish_floor = _as_float_or_none(guard_ctx.get("finish_cost_floor"))
-    finish_floor = float(finish_floor) if finish_floor is not None else 50.0
-    if finish_flags_ctx and finish_floor > 0:
-        combined_pass: dict[str, float] = dict(baseline_pass_ctx)
-        for key, value in (final_pass.items() if isinstance(final_pass, dict) else []):
-            val = to_float(value)
-            if val is not None:
-                combined_pass[key] = combined_pass.get(key, 0.0) + float(val)
-        current_finish_cost = combined_pass.get(finish_pass_key, 0.0)
-        if current_finish_cost < finish_floor - 1e-6:
-            needed = finish_floor - current_finish_cost
-            if needed > 0:
-                if not isinstance(final_pass, dict):
-                    final_pass = {}
-                final_pass[finish_pass_key] = float(final_pass.get(finish_pass_key, 0.0) or 0.0) + needed
-                clamp_notes.append(
-                    f"add_pass_through[{finish_pass_key}] {current_finish_cost:.2f} → {finish_floor:.2f} (finish guardrail)"
-                )
-                pass_sources[finish_pass_key] = "guardrail"
-                eff["add_pass_through"] = final_pass
-                source_tags["add_pass_through"] = pass_sources
-
+    if isinstance(final_pass, dict) and final_pass:
+        eff["add_pass_through"] = final_pass
+    if pass_sources:
+        source_tags["add_pass_through"] = pass_sources
     if clamp_notes:
         eff["_clamp_notes"] = clamp_notes
     eff["_source_tags"] = source_tags
