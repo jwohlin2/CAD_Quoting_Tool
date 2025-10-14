@@ -3559,6 +3559,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             append_line("")
 
     app_meta = result.setdefault("app_meta", {})
+    # Always show drill debug in the rendered quote; the nice sections depend on these signals
     if drill_debug_entries:
         # Order so legacy per-bin “OK …” lines appear first, then tables/summary.
         def _dbg_sort(a: str, b: str) -> int:
@@ -3573,10 +3574,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             return 0
 
         try:
-            drill_debug_entries = sorted((drill_debug_entries or []), key=cmp_to_key(_dbg_sort))
+            sorted_drill_entries = sorted(drill_debug_entries, key=cmp_to_key(_dbg_sort))
         except Exception:
-            drill_debug_entries = drill_debug_entries or []
-        render_drill_debug(drill_debug_entries)
+            sorted_drill_entries = drill_debug_entries
+
+        render_drill_debug(sorted_drill_entries)
     row("Final Price per Part:", price)
     total_labor_label = "Total Labor Cost:"
     row(total_labor_label, float(totals.get("labor_cost", 0.0)))
@@ -5692,6 +5694,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         )
         append_line("")
     except Exception as e:
+        # Don’t break the quote — but surface the reason, so we can see why it skipped.
         append_line(f"[MATERIAL REMOVAL block skipped: {e}]")
         append_line("")
 
