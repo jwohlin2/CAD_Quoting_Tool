@@ -232,28 +232,6 @@ def _compute_direct_costs(
 # ---------------------------------------------------------------------------
 
 
-def _format_hours_with_rate(
-    hours: Any,
-    rate: Any,
-    *,
-    currency_formatter: Callable[[float], str],
-) -> str:
-    """Render an hours/rate pair with a supplied currency formatter."""
-
-    try:
-        hours_val = float(hours or 0.0)
-    except Exception:
-        hours_val = 0.0
-    lines.append(
-        "  SFM→RPM: "
-        f"{_fmt(sfm_avg, '{:.0f}')} → {_fmt(rpm_avg, '{:.0f}')}   IPR: {_fmt(ipr_avg, '{:.4f}')}   IPM: {_fmt(ipm_avg, '{:.1f}')}"
-    )
-    lines.append(
-        "  Time: "
-        f"{_fmt(per_hole_minutes, '{:.2f}')} min/hole   Total: {_fmt(total_minutes, '{:.1f}')} min"
-    )
-    lines.append("")
-
 # Guardrails for LLM-generated process adjustments.
 
 def describe_runtime_environment() -> dict[str, str]:
