@@ -1,0 +1,28 @@
+{
+  "part_name": "str|null",
+  "material": {
+    "name": "str|null",
+    "thickness_in": "float|null"
+  },
+  "quantity": "int|null",
+  "estimates": {
+    "Programming Hours": "float|null",
+    "CAM Programming Hours": "float|null",
+    "Engineering (Docs/Fixture Design) Hours": "float|null",
+    "Fixture Build Hours": "float|null",
+    "Roughing Cycle Time": "float|null",
+    "Semi-Finish Cycle Time": "float|null",
+    "Finishing Cycle Time": "float|null",
+    "In-Process Inspection Hours": "float|null",
+    "Final Inspection Hours": "float|null",
+    "Deburr Hours": "float|null",
+    "Sawing Hours": "float|null",
+    "Assembly Hours": "float|null",
+    "Packaging Labor Hours": "float|null"
+  },
+  "flags": {
+    "FAIR Required": "0|1",
+    "Source Inspection Requirement": "0|1"
+  },
+  "reasoning_brief": "str"
+}
