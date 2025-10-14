@@ -168,6 +168,10 @@ from appkit.scrap_helpers import (
 )
 
 from appkit.data import load_json, load_text
+from appkit.utils.text_rules import (
+    PROC_MULT_TARGETS,
+    canonicalize_amortized_label as _canonical_amortized_label,
+)
 from appkit.debug.debug_tables import (
     _jsonify_debug_value,
     _jsonify_debug_summary,
@@ -620,72 +624,6 @@ else:  # pragma: no cover - fallback definitions keep quoting functional without
     def explain_quote(*args, **kwargs) -> str:  # pragma: no cover - fallback
         return "LLM explanation unavailable."
 
-
-# Mapping of process keys to editor labels for propagating derived hours from
-# LLM suggestions. The scale term allows lightweight conversions if we need to
-# express the hour totals in another unit for a given field.
-PROC_MULT_TARGETS: dict[str, tuple[str, float]] = {
-    # Processes that have direct counterparts in the default variables sheet.
-    "inspection": ("In-Process Inspection Hours", 1.0),
-    "finishing_deburr": ("Deburr Hours", 1.0),
-    "deburr": ("Deburr Hours", 1.0),
-    "saw_waterjet": ("Sawing Hours", 1.0),
-    "assembly": ("Assembly Hours", 1.0),
-    "packaging": ("Packaging Labor Hours", 1.0),
-}
-
-_AMORTIZED_LABEL_PATTERN = re.compile(r"\s*\((amortized|amortised)(?:\s+(?:per\s+(?:part|piece|pc|unit)|each|ea))?\)\s*$", re.IGNORECASE)
-
-def _canonical_amortized_label(label: Any) -> tuple[str, bool]:
-    """Return a canonical label and flag for amortized cost rows."""
-
-    text = str(label or "").strip()
-    if not text:
-        return "", False
-
-    normalized = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
-    normalized = normalized.replace("perpart", "per part")
-    normalized = normalized.replace("perpiece", "per piece")
-    tokens = normalized.split()
-    token_set = set(tokens)
-
-    def _has(*want: str) -> bool:
-        return all(token in token_set for token in want)
-
-    amortized_tokens = {"amortized", "amortised"}
-    has_amortized = any(token in token_set for token in amortized_tokens)
-
-    if has_amortized:
-        per_part = (
-            _has("per", "part")
-            or _has("per", "pc")
-            or _has("per", "piece")
-            or "per piece" in normalized
-            or "per unit" in normalized
-        )
-        if "programming" in token_set:
-            canonical = (
-                "Programming (amortized per part)"
-                if per_part
-                else "Programming (amortized)"
-            )
-            return canonical, True
-        if "fixture" in token_set or "fixturing" in token_set:
-            canonical = (
-                "Fixture Build (amortized per part)"
-                if per_part
-                else "Fixture Build (amortized)"
-            )
-            return canonical, True
-        return text, True
-
-    match = _AMORTIZED_LABEL_PATTERN.search(text)
-    if match:
-        prefix = text[: match.start()].rstrip()
-        canonical = f"{prefix} (amortized)" if prefix else match.group(1).lower()
-        return canonical, True
-
-    return text, False
 
 import pandas as pd
 from typing import TypedDict
