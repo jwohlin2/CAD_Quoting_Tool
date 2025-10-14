@@ -139,6 +139,10 @@ APP_ENV = AppEnvironment.from_env()
 APP_ENV = replace(APP_ENV, llm_debug_enabled=True)  # force-enable debug unconditionally
 
 
+class SpeedsFeedsUnavailableError(RuntimeError):
+    """Raised when drilling estimates require a speeds/feeds table but none is available."""
+
+
 EXTRA_DETAIL_RE = re.compile(r"^includes\b.*extras\b", re.IGNORECASE)
 
 
@@ -1034,6 +1038,303 @@ from cad_quoter.domain import (
 )
 
 
+def _clean_string(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
+def _clean_str_list(value: Any) -> list[str]:
+    if isinstance(value, (list, tuple, set)):
+        cleaned = []
+        for entry in value:
+            item = _clean_string(entry)
+            if item:
+                cleaned.append(item)
+        return cleaned
+    item = _clean_string(value)
+    return [item] if item else []
+
+
+def _coerce_int(value: Any) -> int | None:
+    num = _coerce_float_or_none(value)
+    if num is None or not math.isfinite(num):
+        return None
+    rounded = int(round(float(num)))
+    return rounded if rounded > 0 else None
+
+
+def overrides_to_suggestions(
+    overrides: Mapping[str, Any] | None,
+    *,
+    bounds: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Convert override inputs into the sanitized suggestion structure used by tests."""
+
+    if not isinstance(overrides, _MappingABC):
+        return {}
+
+    guardrails = coerce_bounds(bounds or {})
+    suggestions: dict[str, Any] = {}
+
+    def _clamp_multiplier(value: Any) -> float | None:
+        num = _coerce_float_or_none(value)
+        if num is None:
+            return None
+        return clamp(float(num), guardrails["mult_min"], guardrails["mult_max"])
+
+    def _clamp_adder(key: str, value: Any) -> float | None:
+        num = _coerce_float_or_none(value)
+        if num is None:
+            return None
+        lower = guardrails["adder_min_hr"]
+        upper = guardrails["adder_max_hr"]
+        bucket_caps = guardrails.get("adder_bucket_max") or {}
+        if isinstance(bucket_caps, dict):
+            bucket_cap = bucket_caps.get(str(key).lower())
+            if isinstance(bucket_cap, (int, float)):
+                upper = min(upper, float(bucket_cap))
+        return clamp(float(num), lower, upper)
+
+    mults_raw = overrides.get("process_hour_multipliers") or overrides.get("process_hour_mults")
+    if isinstance(mults_raw, _MappingABC):
+        mults: dict[str, float] = {}
+        for key, value in mults_raw.items():
+            cleaned = _clamp_multiplier(value)
+            if cleaned is None:
+                continue
+            label = _clean_string(key)
+            if not label:
+                continue
+            mults[label] = cleaned
+        if mults:
+            suggestions["process_hour_multipliers"] = mults
+
+    adders_raw = overrides.get("process_hour_adders") or overrides.get("process_hour_adds")
+    if isinstance(adders_raw, _MappingABC):
+        adders: dict[str, float] = {}
+        for key, value in adders_raw.items():
+            cleaned = _clamp_adder(str(key), value)
+            if cleaned is None:
+                continue
+            label = _clean_string(key)
+            if not label:
+                continue
+            adders[label] = cleaned
+        if adders:
+            suggestions["process_hour_adders"] = adders
+
+    add_pass_raw = overrides.get("add_pass_through") or overrides.get("pass_through")
+    add_pass = canonicalize_pass_through_map(add_pass_raw)
+    if add_pass:
+        suggestions["add_pass_through"] = add_pass
+
+    scrap_val = overrides.get("scrap_pct")
+    if scrap_val is None:
+        scrap_val = overrides.get("scrap_pct_override")
+    scrap = _coerce_float_or_none(scrap_val)
+    if scrap is not None:
+        scrap = clamp(float(scrap), guardrails["scrap_min"], guardrails["scrap_max"])
+        suggestions["scrap_pct"] = scrap
+
+    contingency = _coerce_float_or_none(overrides.get("contingency_pct"))
+    if contingency is not None:
+        suggestions["contingency_pct"] = max(0.0, float(contingency))
+
+    setups_val = _coerce_int(overrides.get("setups"))
+    if setups_val is not None:
+        suggestions["setups"] = setups_val
+
+    fixture = _clean_string(overrides.get("fixture"))
+    if fixture:
+        suggestions["fixture"] = fixture
+
+    notes = _clean_str_list(overrides.get("notes"))
+    if notes:
+        suggestions["notes"] = notes
+
+    op_seq = _clean_str_list(overrides.get("operation_sequence"))
+    if op_seq:
+        suggestions["operation_sequence"] = op_seq
+
+    risks = _clean_str_list(overrides.get("dfm_risks"))
+    if risks:
+        suggestions["dfm_risks"] = risks
+
+    drilling_strategy = overrides.get("drilling_strategy")
+    if isinstance(drilling_strategy, _MappingABC):
+        cleaned: dict[str, Any] = {}
+        multiplier = _clamp_multiplier(drilling_strategy.get("multiplier"))
+        if multiplier is not None:
+            cleaned["multiplier"] = multiplier
+        per_hole = _coerce_float_or_none(drilling_strategy.get("per_hole_floor_sec"))
+        if per_hole is not None:
+            cleaned["per_hole_floor_sec"] = max(0.0, float(per_hole))
+        note = _clean_string(drilling_strategy.get("note") or drilling_strategy.get("reason"))
+        if note:
+            cleaned["note"] = note
+        if cleaned:
+            suggestions["drilling_strategy"] = cleaned
+
+    drilling_groups_raw = overrides.get("drilling_groups")
+    if isinstance(drilling_groups_raw, (list, tuple)):
+        cleaned_groups: list[dict[str, Any]] = []
+        for entry in drilling_groups_raw:
+            if not isinstance(entry, _MappingABC):
+                continue
+            qty = _coerce_int(entry.get("qty") or entry.get("count"))
+            dia = _coerce_float_or_none(entry.get("dia_mm") or entry.get("diameter_mm"))
+            if qty is None or dia is None:
+                continue
+            cleaned_groups.append({"qty": qty, "dia_mm": float(dia)})
+        if cleaned_groups:
+            suggestions["drilling_groups"] = cleaned_groups
+
+    stock_rec = overrides.get("stock_recommendation")
+    if isinstance(stock_rec, _MappingABC):
+        stock_clean: dict[str, Any] = {}
+        stock_item = _clean_string(stock_rec.get("stock_item"))
+        if stock_item:
+            stock_clean["stock_item"] = stock_item
+        length = _coerce_float_or_none(stock_rec.get("length_mm"))
+        if length is not None:
+            stock_clean["length_mm"] = float(length)
+        if stock_clean:
+            suggestions["stock_recommendation"] = stock_clean
+
+    setup_rec = overrides.get("setup_recommendation")
+    if isinstance(setup_rec, _MappingABC):
+        setup_clean: dict[str, Any] = {}
+        setup_count = _coerce_int(setup_rec.get("setups"))
+        if setup_count is not None:
+            setup_clean["setups"] = setup_count
+        if setup_clean:
+            suggestions["setup_recommendation"] = setup_clean
+
+    packaging = _coerce_float_or_none(overrides.get("packaging_flat_cost"))
+    if packaging is not None:
+        suggestions["packaging_flat_cost"] = float(packaging)
+
+    fai_required = _coerce_bool(overrides.get("fai_required"))
+    if fai_required is not None:
+        suggestions["fai_required"] = bool(fai_required)
+
+    shipping_hint = _clean_string(overrides.get("shipping_hint"))
+    if shipping_hint:
+        suggestions["shipping_hint"] = shipping_hint
+
+    return suggestions
+
+
+def suggestions_to_overrides(suggestions: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Normalize LLM suggestions into a deterministic overrides payload."""
+
+    if not isinstance(suggestions, _MappingABC):
+        return {}
+
+    overrides: dict[str, Any] = {}
+
+    def _coerce_multiplier_map(raw: Any) -> dict[str, float]:
+        result: dict[str, float] = {}
+        if isinstance(raw, _MappingABC):
+            for key, value in raw.items():
+                label = _clean_string(key)
+                if not label:
+                    continue
+                num = _coerce_float_or_none(value)
+                if num is None:
+                    continue
+                result[label] = float(num)
+        return result
+
+    mults = _coerce_multiplier_map(suggestions.get("process_hour_multipliers"))
+    if mults:
+        overrides["process_hour_multipliers"] = mults
+
+    adders = _coerce_multiplier_map(suggestions.get("process_hour_adders"))
+    if adders:
+        overrides["process_hour_adders"] = adders
+
+    add_pass = canonicalize_pass_through_map(suggestions.get("add_pass_through"))
+    if add_pass:
+        overrides["add_pass_through"] = add_pass
+
+    scrap = _coerce_float_or_none(suggestions.get("scrap_pct"))
+    if scrap is not None:
+        overrides["scrap_pct"] = max(0.0, float(scrap))
+
+    contingency = _coerce_float_or_none(suggestions.get("contingency_pct"))
+    if contingency is not None:
+        overrides["contingency_pct"] = max(0.0, float(contingency))
+
+    setups_val = _coerce_int(suggestions.get("setups"))
+    if setups_val is not None:
+        overrides["setups"] = setups_val
+
+    fixture = _clean_string(suggestions.get("fixture"))
+    if fixture:
+        overrides["fixture"] = fixture
+
+    notes = _clean_str_list(suggestions.get("notes"))
+    if notes:
+        overrides["notes"] = notes
+
+    risks = _clean_str_list(suggestions.get("dfm_risks"))
+    if risks:
+        overrides["dfm_risks"] = risks
+
+    op_seq = _clean_str_list(suggestions.get("operation_sequence"))
+    if op_seq:
+        overrides["operation_sequence"] = op_seq
+
+    drilling_strategy = suggestions.get("drilling_strategy")
+    if isinstance(drilling_strategy, _MappingABC):
+        cleaned: dict[str, Any] = {}
+        multiplier = _coerce_float_or_none(drilling_strategy.get("multiplier"))
+        if multiplier is not None:
+            cleaned["multiplier"] = float(multiplier)
+        per_hole = _coerce_float_or_none(drilling_strategy.get("per_hole_floor_sec"))
+        if per_hole is not None:
+            cleaned["per_hole_floor_sec"] = max(0.0, float(per_hole))
+        note = _clean_string(drilling_strategy.get("note"))
+        if note:
+            cleaned["note"] = note
+        if cleaned:
+            overrides["drilling_strategy"] = cleaned
+
+    packaging = _coerce_float_or_none(suggestions.get("packaging_flat_cost"))
+    if packaging is not None:
+        overrides["packaging_flat_cost"] = float(packaging)
+
+    fai = _coerce_bool(suggestions.get("fai_required"))
+    if fai is not None:
+        overrides["fai_required"] = bool(fai)
+
+    shipping = _clean_string(suggestions.get("shipping_hint"))
+    if shipping:
+        overrides["shipping_hint"] = shipping
+
+    stock_rec = suggestions.get("stock_recommendation")
+    if isinstance(stock_rec, _MappingABC):
+        stock_clean: dict[str, Any] = {}
+        stock_item = _clean_string(stock_rec.get("stock_item"))
+        if stock_item:
+            stock_clean["stock_item"] = stock_item
+        length = _coerce_float_or_none(stock_rec.get("length_mm"))
+        if length is not None:
+            stock_clean["length_mm"] = float(length)
+        if stock_clean:
+            overrides["stock_recommendation"] = stock_clean
+
+    setup_rec = suggestions.get("setup_recommendation")
+    if isinstance(setup_rec, _MappingABC):
+        setup_clean: dict[str, Any] = {}
+        setup_count = _coerce_int(setup_rec.get("setups"))
+        if setup_count is not None:
+            setup_clean["setups"] = setup_count
+        if setup_clean:
+            overrides["setup_recommendation"] = setup_clean
+
+    return overrides
 def build_suggest_payload(
     geo: dict | None,
     baseline: dict | None,
@@ -8683,6 +8984,61 @@ INPROC_MENTION_PER = 0.10   # textual mentions of "tight tolerance"
 INPROC_MENTION_MAX = 0.30
 
 
+def _estimate_inprocess_default_from_tolerance(
+    tolerance_map: Mapping[str, Any] | None,
+) -> float:
+    """Return a conservative in-process inspection estimate for a set of callouts.
+
+    The calculation mirrors the heuristics historically embedded in the UI: the
+    tightest tolerance establishes the base hours using a smooth, sub-linear
+    curve.  Additional tight or sub-thousandth callouts apply capped adders so
+    stacked tolerances remain reasonable.  Textual mentions of "tight tolerance"
+    provide a small nudge for lightly specified drawings.
+    """
+
+    if not isinstance(tolerance_map, _MappingABC) or not tolerance_map:
+        return INPROC_BASE_HR
+
+    values: list[float] = []
+    mention_score = 0.0
+    for key, raw in tolerance_map.items():
+        values.extend(_tolerance_values_from_any(raw))
+        text = f"{key} {raw}" if raw is not None else str(key)
+        if text and _TIGHT_TOL_TRIGGER_RE.search(str(text)):
+            mention_score += INPROC_MENTION_PER
+
+    values = [val for val in values if val > 0]
+    if not values:
+        return min(INPROC_BASE_HR + min(mention_score, INPROC_MENTION_MAX), INPROC_BASE_HR + INPROC_MENTION_MAX)
+
+    tightest = min(values)
+
+    if tightest <= 0:
+        base = INPROC_BASE_HR
+    else:
+        # ``tightness`` is zero when looser than the reference tolerance and
+        # smoothly increases as the tolerance tightens.  ``log10`` keeps the
+        # growth sub-linear while still rewarding dramatically tight callouts.
+        tightness = max(0.0, math.log10(INPROC_ESTIMATE_REF_TOL_IN / tightest))
+        base = INPROC_BASE_HR + INPROC_SCALE_HR * (tightness**INPROC_EXP)
+
+    tight_callouts = sum(1 for value in values if value <= 0.0015)
+    subthou_callouts = sum(1 for value in values if value <= 0.0005)
+
+    tight_bonus = max(0, tight_callouts - 1) * INPROC_TIGHT_PER
+    subthou_bonus = max(0, subthou_callouts - (1 if tightest <= 0.0005 else 0)) * INPROC_SUBTHOU_PER
+
+    total = base
+    if tight_bonus:
+        total += min(tight_bonus, INPROC_TIGHT_MAX)
+    if subthou_bonus:
+        total += min(subthou_bonus, INPROC_SUBTHOU_MAX)
+    if mention_score:
+        total += min(mention_score, INPROC_MENTION_MAX)
+
+    return max(total, INPROC_BASE_HR)
+
+
 def _tightest_inprocess_tolerance_in(
     geo_context: Mapping[str, Any] | None,
     ui_vars: Mapping[str, Any] | None,
@@ -10179,6 +10535,10 @@ def estimate_drilling_hours(
     """
     material_lookup = _normalize_lookup_key(mat_key) if mat_key else ""
     material_label = MATERIAL_DISPLAY_BY_KEY.get(material_lookup, mat_key)
+    if speeds_feeds_table is None and warnings is None:
+        raise SpeedsFeedsUnavailableError(
+            "Speeds/feeds table required when estimating drilling hours without a warnings sink."
+        )
     # Use any material group passed in; avoid external scope references.
     material_group_override = str(material_group or "").strip().upper()
 
