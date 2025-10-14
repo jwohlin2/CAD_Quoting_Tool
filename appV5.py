@@ -30,14 +30,7 @@ import typing
 from collections import Counter
 from collections.abc import Mapping as _MappingABC
 from collections.abc import MutableMapping as _MutableMappingABC
-from dataclasses import (
-    asdict,
-    dataclass,
-    field,
-    replace,
-    fields as dataclass_fields,
-    is_dataclass,
-)
+from dataclasses import asdict, dataclass, field, replace, is_dataclass
 from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
@@ -77,21 +70,6 @@ from cad_quoter.utils.render_utils import (
     format_percent,
 )
 from cad_quoter.estimators import SpeedsFeedsUnavailableError
-_DRILLING_DATA_PATH = Path(__file__).resolve().parent / "data" / "drilling.json"
-_DRILLING_COEFFICIENTS: dict[str, Any] | None = None
-
-def _load_drilling_coefficients() -> dict[str, Any]:
-    """Return cached drilling estimator coefficients from ``data/drilling.json``."""
-
-    global _DRILLING_COEFFICIENTS
-    if _DRILLING_COEFFICIENTS is None:
-        try:
-            with _DRILLING_DATA_PATH.open("r", encoding="utf-8") as handle:
-                _DRILLING_COEFFICIENTS = json.load(handle)
-        except FileNotFoundError:
-            _DRILLING_COEFFICIENTS = {}
-    return _DRILLING_COEFFICIENTS
-
 from cad_quoter.llm_overrides import (
     HARDWARE_PASS_LABEL,
     LEGACY_HARDWARE_PASS_LABEL,
@@ -105,6 +83,33 @@ from cad_quoter.llm_overrides import (
 
 from cad_quoter.vendors import ezdxf as _ezdxf_vendor
 
+from appkit.geometry_shim import (
+    read_cad_any,
+    read_step_shape,
+    read_dxf_as_occ_shape,
+    convert_dwg_to_dxf,
+    enrich_geo_occ,
+    enrich_geo_stl,
+    safe_bbox,
+    iter_solids,
+    parse_hole_table_lines,
+    extract_text_lines_from_dxf,
+    text_harvest,
+    upsert_var_row,
+    require_ezdxf,
+    get_dwg_converter_path,
+    get_import_diagnostics_text,
+    extract_features_with_occ,
+    _HAS_TRIMESH,
+    _HAS_EZDXF,
+    _HAS_ODAFC,
+    _EZDXF_VER,
+    _HAS_PYMUPDF,
+    fitz,
+    ezdxf,
+    odafc,
+)
+
 from appkit.ui.tk_compat import (
     tk,
     filedialog,
@@ -112,6 +117,21 @@ from appkit.ui.tk_compat import (
     scrolledtext,
     ttk,
     _ensure_tk,
+)
+
+from appkit.merge_utils import (
+    _coerce_bool,
+    ACCEPT_SCALAR_KEYS,
+    SUGGESTION_SCALAR_KEYS,
+    merge_effective,
+    _collect_process_keys,
+    LOCKED_EFFECTIVE_FIELDS,
+    SUGGESTIBLE_EFFECTIVE_FIELDS,
+    NUMERIC_EFFECTIVE_FIELDS,
+    BOOL_EFFECTIVE_FIELDS,
+    TEXT_EFFECTIVE_FIELDS,
+    LIST_EFFECTIVE_FIELDS,
+    DICT_EFFECTIVE_FIELDS,
 )
 
 from appkit.occ_compat import (
@@ -131,6 +151,13 @@ from appkit.occ_compat import (
     BRepTools,
 )
 
+from appkit.time_overhead_compat import (
+    _TIME_OVERHEAD_SUPPORTS_INDEX_SEC,
+    OverheadLike,
+    _assign_overhead_index_attr,
+    _ensure_overhead_index_attr,
+)
+
 from appkit.scrap_helpers import (
     SCRAP_DEFAULT_GUESS,
     HOLE_SCRAP_MULT,
@@ -140,7 +167,7 @@ from appkit.scrap_helpers import (
     normalize_scrap_pct,
 )
 
-from appkit.data import load_text
+from appkit.data import load_json, load_text
 from appkit.debug.debug_tables import (
     _jsonify_debug_value,
     _jsonify_debug_summary,
@@ -157,8 +184,17 @@ from appkit.llm_adapter import (
     get_llm_overrides,
     get_llm_bound_defaults,
 )
+from appkit.llm_converters import (
+    overrides_to_suggestions,
+    suggestions_to_overrides,
+)
 
 from appkit.planner_adapter import resolve_planner
+from appkit.planner_helpers import (
+    _PROCESS_PLANNERS,
+    _PROCESS_PLANNER_HELPERS,
+    _process_plan_job,
+)
 
 if sys.platform == "win32":
     occ_bin = os.path.join(sys.prefix, "Library", "bin")
@@ -170,26 +206,6 @@ APP_ENV = replace(APP_ENV, llm_debug_enabled=True)  # force-enable debug uncondi
 
 EXTRA_DETAIL_RE = re.compile(r"^includes\b.*extras\b", re.IGNORECASE)
 
-def _coerce_bool(value: object) -> bool | None:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    if isinstance(value, str):
-        text = value.strip().lower()
-        if text in {"y", "yes", "true", "1", "on"}:
-            return True
-        if text in {"n", "no", "false", "0", "off"}:
-            return False
-    return None
-
-def _coerce_env_bool(value: str | None) -> bool:
-    if value is None:
-        return False
-    coerced = _coerce_bool(value)
-    return bool(coerced)
-
-FORCE_PLANNER = _coerce_env_bool(os.environ.get("FORCE_PLANNER"))
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
     """Best-effort float coercion used in multiple pricing paths."""
@@ -221,6 +237,7 @@ def _compute_direct_costs(
 # ---------------------------------------------------------------------------
 # Formatting helpers
 # ---------------------------------------------------------------------------
+
 
 # Guardrails for LLM-generated process adjustments.
 
@@ -295,12 +312,10 @@ from typing import (
     Type,
     TypeVar,
     NoReturn,
-    TypeAlias,
     cast,
     Literal,
     MutableMapping,
     overload,
-    TYPE_CHECKING,
     no_type_check,
 )
 from functools import cmp_to_key
@@ -605,148 +620,6 @@ else:  # pragma: no cover - fallback definitions keep quoting functional without
     def explain_quote(*args, **kwargs) -> str:  # pragma: no cover - fallback
         return "LLM explanation unavailable."
 
-try:
-    _TIME_OVERHEAD_FIELD_NAMES = {
-        field.name for field in dataclass_fields(_TimeOverheadParams)
-    }
-except Exception:  # pragma: no cover - defensive against non-dataclass implementations
-    _TIME_OVERHEAD_FIELD_NAMES = set()
-
-def _detect_index_support() -> bool:
-    """Return True when ``OverheadParams`` exposes ``index_sec_per_hole``."""
-
-    if "index_sec_per_hole" in _TIME_OVERHEAD_FIELD_NAMES:
-        return True
-
-    try:
-        probe = _TimeOverheadParams()
-    except Exception:
-        # If the constructor requires additional parameters we conservatively
-        # assume the optional index field is unavailable.
-        return False
-
-    if hasattr(probe, "index_sec_per_hole"):
-        return True
-
-    for setter in (setattr, object.__setattr__):
-        try:
-            setter(probe, "index_sec_per_hole", None)
-        except Exception:
-            continue
-        else:
-            return hasattr(probe, "index_sec_per_hole")
-
-    return False
-
-_TIME_OVERHEAD_SUPPORTS_INDEX_SEC = _detect_index_support()
-
-OverheadLike: TypeAlias = _TimeOverheadParams | SimpleNamespace
-
-def _assign_overhead_index_attr(
-    overhead: _TimeOverheadParams, index_value: float | None
-) -> bool:
-    """Attempt to assign ``index_sec_per_hole`` on ``overhead``.
-
-    Returns ``True`` when the attribute exists (either pre-existing or after
-    assignment) and ``False`` when the underlying dataclass does not support
-    the field.
-    """
-
-    if overhead is None:
-        return False
-
-    if hasattr(overhead, "index_sec_per_hole"):
-        try:
-            setattr(overhead, "index_sec_per_hole", index_value)
-        except Exception:
-            try:
-                object.__setattr__(overhead, "index_sec_per_hole", index_value)
-            except Exception:
-                # Attribute exists but cannot be mutated (e.g. frozen
-                # dataclass). Treat as available so downstream callers rely on
-                # the existing value.
-                return True
-        return True
-
-    for setter in (setattr, object.__setattr__):
-        try:
-            setter(overhead, "index_sec_per_hole", index_value)
-        except Exception:
-            continue
-        else:
-            return True
-
-    return False
-
-def _ensure_overhead_index_attr(
-    overhead: _TimeOverheadParams, index_value: float | None, *, assigned: bool = False
-) -> OverheadLike:
-    """Return an overhead object that always exposes ``index_sec_per_hole``."""
-
-    if hasattr(overhead, "index_sec_per_hole"):
-        if not assigned:
-            _assign_overhead_index_attr(overhead, index_value)
-        return overhead
-
-    payload: dict[str, Any] = {}
-    if is_dataclass(overhead):
-        try:
-            payload = asdict(overhead)
-        except Exception:
-            payload = {}
-
-    if not payload:
-        for name in (
-            "toolchange_min",
-            "approach_retract_in",
-            "peck_penalty_min_per_in_depth",
-            "dwell_min",
-            "peck_min",
-        ):
-            if hasattr(overhead, name):
-                payload[name] = getattr(overhead, name)
-
-    payload.setdefault("index_sec_per_hole", index_value)
-    try:
-        return SimpleNamespace(**payload)
-    except Exception:
-        return overhead
-
-try:
-    from process_planner import (
-        PLANNERS as _PROCESS_PLANNERS,
-    )
-    from process_planner import (
-        choose_skims as _planner_choose_skims,
-    )
-    from process_planner import (
-        choose_wire_size as _planner_choose_wire_size,
-    )
-    from process_planner import (
-        needs_wedm_for_windows as _planner_needs_wedm_for_windows,
-    )
-    from process_planner import (
-        plan_job as _process_plan_job,
-    )
-except Exception:  # pragma: no cover - planner is optional at runtime
-    _process_plan_job = None
-    _PROCESS_PLANNERS = {}
-    _planner_choose_wire_size = None
-    _planner_choose_skims = None
-    _planner_needs_wedm_for_windows = None
-else:  # pragma: no cover - defensive guard for unexpected exports
-    if not isinstance(_PROCESS_PLANNERS, dict):
-        _PROCESS_PLANNERS = {}
-
-_PROCESS_PLANNER_HELPERS: dict[str, Callable[..., Any]] = {}
-if "_planner_choose_wire_size" in globals() and callable(_planner_choose_wire_size):
-    _PROCESS_PLANNER_HELPERS["choose_wire_size"] = _planner_choose_wire_size  # type: ignore[index]
-if "_planner_choose_skims" in globals() and callable(_planner_choose_skims):
-    _PROCESS_PLANNER_HELPERS["choose_skims"] = _planner_choose_skims  # type: ignore[index]
-if "_planner_needs_wedm_for_windows" in globals() and callable(
-    _planner_needs_wedm_for_windows
-):
-    _PROCESS_PLANNER_HELPERS["needs_wedm_for_windows"] = _planner_needs_wedm_for_windows  # type: ignore[index]
 
 # Mapping of process keys to editor labels for propagating derived hours from
 # LLM suggestions. The scale term allows lightweight conversions if we need to
@@ -815,7 +688,7 @@ def _canonical_amortized_label(label: Any) -> tuple[str, bool]:
     return text, False
 
 import pandas as pd
-from typing import TYPE_CHECKING, TypedDict
+from typing import TypedDict
 
 try:
     from geo_read_more import build_geo_from_dxf as build_geo_from_dxf_path
@@ -849,121 +722,69 @@ def set_build_geo_from_dxf_hook(
     global _build_geo_from_dxf_hook
     _build_geo_from_dxf_hook = loader
 
-# Geometry helpers (re-exported for backward compatibility)
-def _missing_geom_fn(name: str):
-    def _fn(*_a, **_k):
-        raise RuntimeError(f"geometry helper '{name}' is unavailable in this build")
-    return _fn
 
-def _export(name: str):
-    return getattr(geometry, name, _missing_geom_fn(name))
+def _scrap_value_provided(val: Any) -> bool:
+    """Return ``True`` when ``val`` looks like a real scrap entry."""
 
-read_cad_any = _export("read_cad_any")
-read_step_shape = _export("read_step_shape")
-read_dxf_as_occ_shape = _export("read_dxf_as_occ_shape")
-convert_dwg_to_dxf = _export("convert_dwg_to_dxf")
-enrich_geo_occ = _export("enrich_geo_occ")
-enrich_geo_stl = _export("enrich_geo_stl")
-safe_bbox = _export("safe_bbox")
-iter_solids = _export("iter_solids")
-parse_hole_table_lines = _export("parse_hole_table_lines")
-extract_text_lines_from_dxf = _export("extract_text_lines_from_dxf")
-text_harvest = _export("text_harvest")
-upsert_var_row = _export("upsert_var_row")
-require_ezdxf = _export("require_ezdxf")
-get_dwg_converter_path = _export("get_dwg_converter_path")
-get_import_diagnostics_text = _export("get_import_diagnostics_text")
-extract_features_with_occ = _export("extract_features_with_occ")
-
-_HAS_TRIMESH = getattr(geometry, "HAS_TRIMESH", False)
-_HAS_EZDXF = getattr(geometry, "HAS_EZDXF", False)
-_HAS_ODAFC = getattr(geometry, "HAS_ODAFC", False)
-_EZDXF_VER = geometry.EZDXF_VERSION
-_HAS_PYMUPDF = getattr(geometry, "_HAS_PYMUPDF", getattr(geometry, "HAS_PYMUPDF", False))
-fitz = getattr(geometry, "fitz", None)
-
-if _HAS_EZDXF:
+    if val is None:
+        return False
+    if isinstance(val, str):
+        stripped = val.strip()
+        if not stripped:
+            return False
+        if stripped.endswith("%"):
+            stripped = stripped.rstrip("% ").strip()
+        try:
+            parsed = float(stripped)
+        except Exception:
+            return False
+        return math.isfinite(parsed)
     try:
-        ezdxf = _ezdxf_vendor.require_ezdxf()
+        parsed = float(val)
     except Exception:
-        ezdxf = None  # type: ignore[assignment]
-else:
-    ezdxf = None  # type: ignore[assignment]
+        return False
+    return math.isfinite(parsed)
 
-if _HAS_ODAFC:
-    try:
-        odafc = _ezdxf_vendor.require_odafc()
-    except Exception:
-        odafc = None  # type: ignore[assignment]
-else:
-    odafc = None  # type: ignore[assignment]
 
-if TYPE_CHECKING:
-    class _EzdxfLayouts(Protocol):
-        def names_in_taborder(self) -> Iterable[str]: ...
+def _auto_accept_suggestions(suggestions: dict[str, Any] | None) -> dict[str, Any]:
+    accept: dict[str, Any] = {}
+    if not isinstance(suggestions, dict):
+        return accept
+    meta = suggestions.get("_meta") if isinstance(suggestions.get("_meta"), dict) else {}
 
-ACCEPT_SCALAR_KEYS: tuple[str, ...] = (
-    "scrap_pct",
-    "contingency_pct",
-    "setups",
-    "fixture",
-    "fixture_build_hr",
-    "soft_jaw_hr",
-    "soft_jaw_material_cost",
-    "handling_adder_hr",
-    "cmm_minutes",
-    "in_process_inspection_hr",
-    "fai_required",
-    "fai_prep_hr",
-    "packaging_hours",
-    "packaging_flat_cost",
-    "shipping_hint",
-)
+    def _confidence_for(path: tuple[str, ...]) -> float | None:
+        node: Any = meta
+        for key in path:
+            if not isinstance(node, dict):
+                return None
+            node = node.get(key)
+        if isinstance(node, dict):
+            conf_val = node.get("confidence")
+            if isinstance(conf_val, (int, float)):
+                return float(conf_val)
+        return None
 
-SUGGESTION_SCALAR_KEYS: tuple[str, ...] = ACCEPT_SCALAR_KEYS
-
-# ``merge_effective`` owns all merge behavior. These tables allow other helpers to
-# share the same rules without duplicating the merge logic across the code base.
-LOCKED_EFFECTIVE_FIELDS: frozenset[str] = frozenset(
-    {
-        "totals",
-        "process_plan_pricing",
-        "pricing_result",
-        "process_hours",  # computed below from multipliers + adders
-    }
-)
-
-SUGGESTIBLE_EFFECTIVE_FIELDS: frozenset[str] = frozenset(
-    {
-        "notes",
-        "operation_sequence",
-        "drilling_strategy",
-        *SUGGESTION_SCALAR_KEYS,
-    }
-)
-
-NUMERIC_EFFECTIVE_FIELDS: dict[str, tuple[float | None, float | None]] = {
-    "fixture_build_hr": (0.0, 2.0),
-    "soft_jaw_hr": (0.0, 1.0),
-    "soft_jaw_material_cost": (0.0, 60.0),
-    "handling_adder_hr": (0.0, 0.2),
-    "cmm_minutes": (0.0, 60.0),
-    "in_process_inspection_hr": (0.0, 0.5),
-    "inspection_total_hr": (0.0, 12.0),
-    "fai_prep_hr": (0.0, 1.0),
-    "packaging_hours": (0.0, 0.5),
-    "packaging_flat_cost": (0.0, 25.0),
-    "shipping_cost": (0.0, None),
-}
-
-BOOL_EFFECTIVE_FIELDS: frozenset[str] = frozenset({"fai_required"})
-
-TEXT_EFFECTIVE_FIELDS: dict[str, int] = {"shipping_hint": 80}
-
-LIST_EFFECTIVE_FIELDS: frozenset[str] = frozenset({"operation_sequence"})
-
-DICT_EFFECTIVE_FIELDS: frozenset[str] = frozenset({"drilling_strategy"})
-
+    for bucket in ("process_hour_multipliers", "process_hour_adders", "add_pass_through"):
+        data = suggestions.get(bucket)
+        if isinstance(data, dict) and data:
+            bucket_accept: dict[str, bool] = {}
+            for subkey in data.keys():
+                conf = _confidence_for((bucket, str(subkey)))
+                bucket_accept[str(subkey)] = True if conf is None else conf >= 0.6
+            accept[bucket] = bucket_accept
+    for scalar_key in ACCEPT_SCALAR_KEYS:
+        if scalar_key in suggestions:
+            conf = _confidence_for((scalar_key,))
+            accept[scalar_key] = True if conf is None else conf >= 0.6
+    if suggestions.get("notes"):
+        accept["notes"] = True
+    if isinstance(suggestions.get("operation_sequence"), list):
+        conf = _confidence_for(("operation_sequence",))
+        accept["operation_sequence"] = True if conf is None else conf >= 0.6
+    if isinstance(suggestions.get("drilling_strategy"), dict):
+        conf = _confidence_for(("drilling_strategy",))
+        accept["drilling_strategy"] = True if conf is None else conf >= 0.6
+    return accept
 from cad_quoter.domain import (
     QuoteState,
     HARDWARE_PASS_LABEL,
@@ -975,299 +796,7 @@ from cad_quoter.domain import (
     get_llm_bound_defaults,
 )
 
-def _clean_string(value: Any) -> str | None:
-    text = str(value or "").strip()
-    return text or None
 
-def _clean_str_list(value: Any) -> list[str]:
-    if isinstance(value, (list, tuple, set)):
-        cleaned = []
-        for entry in value:
-            item = _clean_string(entry)
-            if item:
-                cleaned.append(item)
-        return cleaned
-    item = _clean_string(value)
-    return [item] if item else []
-
-def _coerce_int(value: Any) -> int | None:
-    num = _coerce_float_or_none(value)
-    if num is None or not math.isfinite(num):
-        return None
-    rounded = int(round(float(num)))
-    return rounded if rounded > 0 else None
-
-def overrides_to_suggestions(
-    overrides: Mapping[str, Any] | None,
-    *,
-    bounds: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Convert override inputs into the sanitized suggestion structure used by tests."""
-
-    if not isinstance(overrides, _MappingABC):
-        return {}
-
-    guardrails = coerce_bounds(bounds or {})
-    suggestions: dict[str, Any] = {}
-
-    def _clamp_multiplier(value: Any) -> float | None:
-        num = _coerce_float_or_none(value)
-        if num is None:
-            return None
-        return clamp(float(num), guardrails["mult_min"], guardrails["mult_max"])
-
-    def _clamp_adder(key: str, value: Any) -> float | None:
-        num = _coerce_float_or_none(value)
-        if num is None:
-            return None
-        lower = guardrails["adder_min_hr"]
-        upper = guardrails["adder_max_hr"]
-        bucket_caps = guardrails.get("adder_bucket_max") or {}
-        if isinstance(bucket_caps, dict):
-            bucket_cap = bucket_caps.get(str(key).lower())
-            if isinstance(bucket_cap, (int, float)):
-                upper = min(upper, float(bucket_cap))
-        return clamp(float(num), lower, upper)
-
-    mults_raw = overrides.get("process_hour_multipliers") or overrides.get("process_hour_mults")
-    if isinstance(mults_raw, _MappingABC):
-        mults: dict[str, float] = {}
-        for key, value in mults_raw.items():
-            cleaned = _clamp_multiplier(value)
-            if cleaned is None:
-                continue
-            label = _clean_string(key)
-            if not label:
-                continue
-            mults[label] = cleaned
-        if mults:
-            suggestions["process_hour_multipliers"] = mults
-
-    adders_raw = overrides.get("process_hour_adders") or overrides.get("process_hour_adds")
-    if isinstance(adders_raw, _MappingABC):
-        adders: dict[str, float] = {}
-        for key, value in adders_raw.items():
-            cleaned = _clamp_adder(str(key), value)
-            if cleaned is None:
-                continue
-            label = _clean_string(key)
-            if not label:
-                continue
-            adders[label] = cleaned
-        if adders:
-            suggestions["process_hour_adders"] = adders
-
-    add_pass_raw = overrides.get("add_pass_through") or overrides.get("pass_through")
-    add_pass = canonicalize_pass_through_map(add_pass_raw)
-    if add_pass:
-        suggestions["add_pass_through"] = add_pass
-
-    scrap_val = overrides.get("scrap_pct")
-    if scrap_val is None:
-        scrap_val = overrides.get("scrap_pct_override")
-    scrap = _coerce_float_or_none(scrap_val)
-    if scrap is not None:
-        scrap = clamp(float(scrap), guardrails["scrap_min"], guardrails["scrap_max"])
-        suggestions["scrap_pct"] = scrap
-
-    contingency = _coerce_float_or_none(overrides.get("contingency_pct"))
-    if contingency is not None:
-        suggestions["contingency_pct"] = max(0.0, float(contingency))
-
-    setups_val = _coerce_int(overrides.get("setups"))
-    if setups_val is not None:
-        suggestions["setups"] = setups_val
-
-    fixture = _clean_string(overrides.get("fixture"))
-    if fixture:
-        suggestions["fixture"] = fixture
-
-    notes = _clean_str_list(overrides.get("notes"))
-    if notes:
-        suggestions["notes"] = notes
-
-    op_seq = _clean_str_list(overrides.get("operation_sequence"))
-    if op_seq:
-        suggestions["operation_sequence"] = op_seq
-
-    risks = _clean_str_list(overrides.get("dfm_risks"))
-    if risks:
-        suggestions["dfm_risks"] = risks
-
-    drilling_strategy = overrides.get("drilling_strategy")
-    if isinstance(drilling_strategy, _MappingABC):
-        cleaned: dict[str, Any] = {}
-        multiplier = _clamp_multiplier(drilling_strategy.get("multiplier"))
-        if multiplier is not None:
-            cleaned["multiplier"] = multiplier
-        per_hole = _coerce_float_or_none(drilling_strategy.get("per_hole_floor_sec"))
-        if per_hole is not None:
-            cleaned["per_hole_floor_sec"] = max(0.0, float(per_hole))
-        note = _clean_string(drilling_strategy.get("note") or drilling_strategy.get("reason"))
-        if note:
-            cleaned["note"] = note
-        if cleaned:
-            suggestions["drilling_strategy"] = cleaned
-
-    drilling_groups_raw = overrides.get("drilling_groups")
-    if isinstance(drilling_groups_raw, (list, tuple)):
-        cleaned_groups: list[dict[str, Any]] = []
-        for entry in drilling_groups_raw:
-            if not isinstance(entry, _MappingABC):
-                continue
-            qty = _coerce_int(entry.get("qty") or entry.get("count"))
-            dia = _coerce_float_or_none(entry.get("dia_mm") or entry.get("diameter_mm"))
-            if qty is None or dia is None:
-                continue
-            cleaned_groups.append({"qty": qty, "dia_mm": float(dia)})
-        if cleaned_groups:
-            suggestions["drilling_groups"] = cleaned_groups
-
-    stock_rec = overrides.get("stock_recommendation")
-    if isinstance(stock_rec, _MappingABC):
-        stock_clean: dict[str, Any] = {}
-        stock_item = _clean_string(stock_rec.get("stock_item"))
-        if stock_item:
-            stock_clean["stock_item"] = stock_item
-        length = _coerce_float_or_none(stock_rec.get("length_mm"))
-        if length is not None:
-            stock_clean["length_mm"] = float(length)
-        if stock_clean:
-            suggestions["stock_recommendation"] = stock_clean
-
-    setup_rec = overrides.get("setup_recommendation")
-    if isinstance(setup_rec, _MappingABC):
-        setup_clean: dict[str, Any] = {}
-        setup_count = _coerce_int(setup_rec.get("setups"))
-        if setup_count is not None:
-            setup_clean["setups"] = setup_count
-        if setup_clean:
-            suggestions["setup_recommendation"] = setup_clean
-
-    packaging = _coerce_float_or_none(overrides.get("packaging_flat_cost"))
-    if packaging is not None:
-        suggestions["packaging_flat_cost"] = float(packaging)
-
-    fai_required = _coerce_bool(overrides.get("fai_required"))
-    if fai_required is not None:
-        suggestions["fai_required"] = bool(fai_required)
-
-    shipping_hint = _clean_string(overrides.get("shipping_hint"))
-    if shipping_hint:
-        suggestions["shipping_hint"] = shipping_hint
-
-    return suggestions
-
-def suggestions_to_overrides(suggestions: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Normalize LLM suggestions into a deterministic overrides payload."""
-
-    if not isinstance(suggestions, _MappingABC):
-        return {}
-
-    overrides: dict[str, Any] = {}
-
-    def _coerce_multiplier_map(raw: Any) -> dict[str, float]:
-        result: dict[str, float] = {}
-        if isinstance(raw, _MappingABC):
-            for key, value in raw.items():
-                label = _clean_string(key)
-                if not label:
-                    continue
-                num = _coerce_float_or_none(value)
-                if num is None:
-                    continue
-                result[label] = float(num)
-        return result
-
-    mults = _coerce_multiplier_map(suggestions.get("process_hour_multipliers"))
-    if mults:
-        overrides["process_hour_multipliers"] = mults
-
-    adders = _coerce_multiplier_map(suggestions.get("process_hour_adders"))
-    if adders:
-        overrides["process_hour_adders"] = adders
-
-    add_pass = canonicalize_pass_through_map(suggestions.get("add_pass_through"))
-    if add_pass:
-        overrides["add_pass_through"] = add_pass
-
-    scrap = _coerce_float_or_none(suggestions.get("scrap_pct"))
-    if scrap is not None:
-        overrides["scrap_pct"] = max(0.0, float(scrap))
-
-    contingency = _coerce_float_or_none(suggestions.get("contingency_pct"))
-    if contingency is not None:
-        overrides["contingency_pct"] = max(0.0, float(contingency))
-
-    setups_val = _coerce_int(suggestions.get("setups"))
-    if setups_val is not None:
-        overrides["setups"] = setups_val
-
-    fixture = _clean_string(suggestions.get("fixture"))
-    if fixture:
-        overrides["fixture"] = fixture
-
-    notes = _clean_str_list(suggestions.get("notes"))
-    if notes:
-        overrides["notes"] = notes
-
-    risks = _clean_str_list(suggestions.get("dfm_risks"))
-    if risks:
-        overrides["dfm_risks"] = risks
-
-    op_seq = _clean_str_list(suggestions.get("operation_sequence"))
-    if op_seq:
-        overrides["operation_sequence"] = op_seq
-
-    drilling_strategy = suggestions.get("drilling_strategy")
-    if isinstance(drilling_strategy, _MappingABC):
-        cleaned: dict[str, Any] = {}
-        multiplier = _coerce_float_or_none(drilling_strategy.get("multiplier"))
-        if multiplier is not None:
-            cleaned["multiplier"] = float(multiplier)
-        per_hole = _coerce_float_or_none(drilling_strategy.get("per_hole_floor_sec"))
-        if per_hole is not None:
-            cleaned["per_hole_floor_sec"] = max(0.0, float(per_hole))
-        note = _clean_string(drilling_strategy.get("note"))
-        if note:
-            cleaned["note"] = note
-        if cleaned:
-            overrides["drilling_strategy"] = cleaned
-
-    packaging = _coerce_float_or_none(suggestions.get("packaging_flat_cost"))
-    if packaging is not None:
-        overrides["packaging_flat_cost"] = float(packaging)
-
-    fai = _coerce_bool(suggestions.get("fai_required"))
-    if fai is not None:
-        overrides["fai_required"] = bool(fai)
-
-    shipping = _clean_string(suggestions.get("shipping_hint"))
-    if shipping:
-        overrides["shipping_hint"] = shipping
-
-    stock_rec = suggestions.get("stock_recommendation")
-    if isinstance(stock_rec, _MappingABC):
-        stock_clean: dict[str, Any] = {}
-        stock_item = _clean_string(stock_rec.get("stock_item"))
-        if stock_item:
-            stock_clean["stock_item"] = stock_item
-        length = _coerce_float_or_none(stock_rec.get("length_mm"))
-        if length is not None:
-            stock_clean["length_mm"] = float(length)
-        if stock_clean:
-            overrides["stock_recommendation"] = stock_clean
-
-    setup_rec = suggestions.get("setup_recommendation")
-    if isinstance(setup_rec, _MappingABC):
-        setup_clean: dict[str, Any] = {}
-        setup_count = _coerce_int(setup_rec.get("setups"))
-        if setup_count is not None:
-            setup_clean["setups"] = setup_count
-        if setup_clean:
-            overrides["setup_recommendation"] = setup_clean
-
-    return overrides
 def apply_suggestions(baseline: dict, s: dict) -> dict:
     """Apply sanitized LLM suggestions onto a baseline quote snapshot."""
 
@@ -1282,478 +811,6 @@ def apply_suggestions(baseline: dict, s: dict) -> dict:
 
     return merged
 
-def _collect_process_keys(*dicts: Mapping[str, Any] | None) -> set[str]:
-    keys: set[str] = set()
-    for d in dicts:
-        if isinstance(d, _MappingABC):
-            keys.update(str(k) for k in d.keys())
-    return keys
-
-def merge_effective(
-    baseline: dict | None,
-    suggestions: dict | None,
-    overrides: dict | None,
-    *,
-    guard_ctx: dict | None = None,
-) -> dict:
-    """Tri-state merge for baseline vs LLM suggestions vs user overrides."""
-
-    baseline = copy.deepcopy(baseline or {})
-    suggestions = {k: v for k, v in dict(suggestions or {}).items() if k not in LOCKED_EFFECTIVE_FIELDS}
-    overrides = {k: v for k, v in dict(overrides or {}).items() if k not in LOCKED_EFFECTIVE_FIELDS}
-    guard_ctx = dict(guard_ctx or {})
-
-    bounds = baseline.get("_bounds") if isinstance(baseline, dict) else None
-    if isinstance(bounds, dict):
-        bounds = {str(k): v for k, v in bounds.items()}
-    else:
-        bounds = {}
-    coerced_bounds = coerce_bounds(bounds)
-    mult_min_bound = coerced_bounds["mult_min"]
-    mult_max_bound = coerced_bounds["mult_max"]
-    adder_min_bound = coerced_bounds["adder_min_hr"]
-    adder_max_bound = coerced_bounds["adder_max_hr"]
-    scrap_min_bound = coerced_bounds["scrap_min"]
-    scrap_max_bound = coerced_bounds["scrap_max"]
-    bucket_caps_bound = coerced_bounds.get("adder_bucket_max", {})
-
-    def _clamp(value: float, kind: str, label: str, source: str) -> tuple[float, bool]:
-        clamped = value
-        changed = False
-        source_norm = str(source).strip().lower()
-        if kind == "multiplier":
-            clamped = max(mult_min_bound, min(mult_max_bound, float(value)))
-        elif kind == "adder":
-            orig_val = float(value)
-            raw_val = orig_val
-            if source_norm == "llm" and raw_val > 240:
-                raw_val = raw_val / 60.0
-            bucket_name = None
-            if "[" in label and "]" in label:
-                bucket_name = label.split("[", 1)[-1].split("]", 1)[0].strip().lower()
-            bucket_max = bucket_caps_bound.get(bucket_name) if bucket_name else None
-            if bucket_max is None and bucket_name:
-                bucket_max = bucket_caps_bound.get(bucket_name.lower())
-            adder_cap = bucket_max if bucket_max is not None else adder_max_bound
-            adder_cap = max(adder_min_bound, float(adder_cap))
-            clamped = max(adder_min_bound, min(adder_cap, raw_val))
-        elif kind == "scrap":
-            clamped = max(scrap_min_bound, min(scrap_max_bound, float(value)))
-        elif kind == "setups":
-            clamped = int(max(1, min(4, round(float(value)))))
-        if not math.isclose(float(clamped), float(value), rel_tol=1e-6, abs_tol=1e-6):
-            note = f"{label} {float(value):.3f} → {float(clamped):.3f} ({source})"
-            clamp_notes.append(note)
-            changed = True
-        return clamped, changed
-
-    def _clamp_range(value: float, lo: float | None, hi: float | None, label: str, source: str) -> tuple[float, bool]:
-        num = float(value)
-        changed = False
-        orig = num
-        if lo is not None and num < lo:
-            num = lo
-            changed = True
-        if hi is not None and num > hi:
-            num = hi
-            changed = True
-        if changed:
-            clamp_notes.append(f"{label} {orig:.3f} → {num:.3f} ({source})")
-        return num, changed
-
-    def _merge_numeric_field(key: str, lo: float | None, hi: float | None, label: str) -> None:
-        base_val = to_float(baseline.get(key)) if baseline.get(key) is not None else None
-        value = base_val
-        source = "baseline"
-        if overrides.get(key) is not None:
-            cand = to_float(overrides.get(key))
-            if cand is not None:
-                value, _ = _clamp_range(cand, lo, hi, label, "user override")
-                source = "user"
-        elif suggestions.get(key) is not None:
-            cand = to_float(suggestions.get(key))
-            if cand is not None:
-                value, _ = _clamp_range(cand, lo, hi, label, "LLM")
-                source = "llm"
-        if value is not None:
-            eff[key] = float(value)
-        elif key in eff:
-            eff.pop(key, None)
-        source_tags[key] = source
-
-    def _merge_bool_field(key: str) -> None:
-        base_val = baseline.get(key) if isinstance(baseline.get(key), bool) else None
-        value = base_val
-        source = "baseline"
-        if key in overrides:
-            cand = _coerce_bool(overrides.get(key))
-            if cand is not None:
-                value = cand
-                source = "user"
-        elif key in suggestions:
-            cand = _coerce_bool(suggestions.get(key))
-            if cand is not None:
-                value = cand
-                source = "llm"
-        if value is not None:
-            eff[key] = bool(value)
-        elif key in eff:
-            eff.pop(key, None)
-        source_tags[key] = source
-
-    def _merge_text_field(key: str, *, max_len: int = 160) -> None:
-        base_val = baseline.get(key) if isinstance(baseline.get(key), str) else None
-        value = base_val
-        source = "baseline"
-        override_val = overrides.get(key)
-        if isinstance(override_val, str):
-            override_stripped = override_val.strip()
-            if override_stripped:
-                value = override_stripped[:max_len]
-                source = "user"
-        else:
-            suggestion_val = suggestions.get(key)
-            if isinstance(suggestion_val, str):
-                suggestion_stripped = suggestion_val.strip()
-                if suggestion_stripped:
-                    value = suggestion_stripped[:max_len]
-                    source = "llm"
-        if value is not None:
-            eff[key] = value
-        elif key in eff:
-            eff.pop(key, None)
-        source_tags[key] = source
-
-    def _merge_list_field(key: str) -> None:
-        base_val = baseline.get(key) if isinstance(baseline.get(key), list) else None
-        value = base_val
-        source = "baseline"
-        override_val = overrides.get(key)
-        if isinstance(override_val, list):
-            cleaned_override: list[str] = []
-            for item in override_val:
-                text = str(item).strip()
-                if text:
-                    cleaned_override.append(text[:80])
-            value = cleaned_override
-            source = "user"
-        else:
-            suggestion_list = suggestions.get(key)
-            if isinstance(suggestion_list, list):
-                cleaned_suggestion: list[str] = []
-                for item in suggestion_list:
-                    text = str(item).strip()
-                    if text:
-                        cleaned_suggestion.append(text[:80])
-                value = cleaned_suggestion
-                source = "llm"
-        if value:
-            eff[key] = value
-        elif key in eff:
-            eff.pop(key, None)
-        source_tags[key] = source
-
-    def _merge_dict_field(key: str) -> None:
-        base_val = baseline.get(key) if isinstance(baseline.get(key), dict) else None
-        value = base_val
-        source = "baseline"
-        override_val = overrides.get(key)
-        if isinstance(override_val, dict):
-            value = copy.deepcopy(override_val)
-            source = "user"
-        else:
-            suggestion_dict = suggestions.get(key)
-            if isinstance(suggestion_dict, dict):
-                value = copy.deepcopy(suggestion_dict)
-                source = "llm"
-        if value is not None:
-            eff[key] = value
-        elif key in eff:
-            eff.pop(key, None)
-        source_tags[key] = source
-
-    eff = copy.deepcopy(baseline)
-    eff.pop("_bounds", None)
-    clamp_notes: list[str] = []
-    source_tags: dict[str, Any] = {}
-
-    raw_baseline_hours = baseline.get("process_hours")
-    baseline_hours_raw = raw_baseline_hours if isinstance(raw_baseline_hours, dict) else {}
-    baseline_hours: dict[str, float] = {}
-    for proc, hours in (baseline_hours_raw or {}).items():
-        val = to_float(hours)
-        if val is not None:
-            baseline_hours[str(proc)] = float(val)
-
-    raw_sugg_mult = suggestions.get("process_hour_multipliers")
-    sugg_mult: dict[str, Any] = raw_sugg_mult if isinstance(raw_sugg_mult, dict) else {}
-    raw_over_mult = overrides.get("process_hour_multipliers")
-    over_mult: dict[str, Any] = raw_over_mult if isinstance(raw_over_mult, dict) else {}
-    mult_keys = sorted(_collect_process_keys(baseline_hours, sugg_mult, over_mult))
-    final_hours: dict[str, float] = dict(baseline_hours)
-    final_mults: dict[str, float] = {}
-    mult_sources: dict[str, str] = {}
-    for proc in mult_keys:
-        base_hr = baseline_hours.get(proc, 0.0)
-        source = "baseline"
-        val = 1.0
-        if proc in over_mult and over_mult[proc] is not None:
-            cand = to_float(over_mult.get(proc))
-            if cand is not None:
-                val = float(cand)
-                val, _ = _clamp(val, "multiplier", f"multiplier[{proc}]", "user override")
-                source = "user"
-        elif proc in sugg_mult and sugg_mult[proc] is not None:
-            cand = to_float(sugg_mult.get(proc))
-            if cand is not None:
-                val = float(cand)
-                val, _ = _clamp(val, "multiplier", f"multiplier[{proc}]", "LLM")
-                source = "llm"
-        final_mults[proc] = float(val)
-        mult_sources[proc] = source
-        final_hours[proc] = float(base_hr) * float(val)
-
-    raw_sugg_add = suggestions.get("process_hour_adders")
-    sugg_add: dict[str, Any] = raw_sugg_add if isinstance(raw_sugg_add, dict) else {}
-    raw_over_add = overrides.get("process_hour_adders")
-    over_add: dict[str, Any] = raw_over_add if isinstance(raw_over_add, dict) else {}
-    add_keys = sorted(_collect_process_keys(sugg_add, over_add))
-    final_adders: dict[str, float] = {}
-    add_sources: dict[str, str] = {}
-    for proc in add_keys:
-        source = "baseline"
-        add_val = 0.0
-        if proc in over_add and over_add[proc] is not None:
-            cand = to_float(over_add.get(proc))
-            if cand is not None:
-                add_val = float(cand)
-                add_val, _ = _clamp(add_val, "adder", f"adder[{proc}]", "user override")
-                source = "user"
-        elif proc in sugg_add and sugg_add[proc] is not None:
-            cand = to_float(sugg_add.get(proc))
-            if cand is not None:
-                add_val = float(cand)
-                add_val, _ = _clamp(add_val, "adder", f"adder[{proc}]", "LLM")
-                source = "llm"
-        if not math.isclose(add_val, 0.0, abs_tol=1e-9):
-            final_adders[proc] = add_val
-            final_hours[proc] = final_hours.get(proc, 0.0) + add_val
-        add_sources[proc] = source
-
-    raw_sugg_pass_candidate = suggestions.get("add_pass_through")
-    raw_sugg_pass = raw_sugg_pass_candidate if isinstance(raw_sugg_pass_candidate, dict) else {}
-    raw_over_pass_candidate = overrides.get("add_pass_through")
-    raw_over_pass = raw_over_pass_candidate if isinstance(raw_over_pass_candidate, dict) else {}
-    sugg_pass = canonicalize_pass_through_map(raw_sugg_pass)
-    over_pass = canonicalize_pass_through_map(raw_over_pass)
-    pass_keys = sorted(set(sugg_pass) | set(over_pass))
-    final_pass: dict[str, float] = {}
-    pass_sources: dict[str, str] = {}
-    for key in pass_keys:
-        source = "baseline"
-        val = 0.0
-        if key in over_pass:
-            val = float(over_pass[key])
-            source = "user"
-        elif key in sugg_pass:
-            val = float(sugg_pass[key])
-            source = "llm"
-        if not math.isclose(val, 0.0, abs_tol=1e-9):
-            final_pass[key] = val
-        pass_sources[key] = source
-
-    hole_count_guard = _coerce_float_or_none(guard_ctx.get("hole_count"))
-    try:
-        hole_count_guard_int = int(round(float(hole_count_guard))) if hole_count_guard is not None else 0
-    except Exception:
-        hole_count_guard_int = 0
-    min_sec_per_hole = to_float(guard_ctx.get("min_sec_per_hole"))
-    min_sec_per_hole = float(min_sec_per_hole) if min_sec_per_hole is not None else 9.0
-    if hole_count_guard_int > 0 and "drilling" in final_hours:
-        current_drill = to_float(final_hours.get("drilling"))
-        if current_drill is not None:
-            drill_floor_hr = (hole_count_guard_int * min_sec_per_hole) / 3600.0
-            if current_drill < drill_floor_hr - 1e-6:
-                clamp_notes.append(
-                    f"process_hours[drilling] {current_drill:.3f} → {drill_floor_hr:.3f} (guardrail)"
-                )
-                final_hours["drilling"] = drill_floor_hr
-
-    tap_qty_guard = _coerce_float_or_none(guard_ctx.get("tap_qty"))
-    try:
-        tap_qty_guard_int = int(round(float(tap_qty_guard))) if tap_qty_guard is not None else 0
-    except Exception:
-        tap_qty_guard_int = 0
-    min_min_per_tap = to_float(guard_ctx.get("min_min_per_tap"))
-    min_min_per_tap = float(min_min_per_tap) if min_min_per_tap is not None else 0.2
-    if tap_qty_guard_int > 0 and "tapping" in final_hours:
-        current_tap = to_float(final_hours.get("tapping"))
-        if current_tap is not None:
-            tap_floor_hr = (tap_qty_guard_int * min_min_per_tap) / 60.0
-            if current_tap < tap_floor_hr - 1e-6:
-                clamp_notes.append(
-                    f"process_hours[tapping] {current_tap:.3f} → {tap_floor_hr:.3f} (guardrail)"
-                )
-                final_hours["tapping"] = tap_floor_hr
-
-    eff["process_hour_multipliers"] = final_mults
-    if mult_sources:
-        source_tags["process_hour_multipliers"] = mult_sources
-    eff["process_hour_adders"] = final_adders
-    if add_sources:
-        source_tags["process_hour_adders"] = add_sources
-    if final_pass:
-        eff["add_pass_through"] = final_pass
-    if pass_sources:
-        source_tags["add_pass_through"] = pass_sources
-    eff["process_hours"] = {k: float(v) for k, v in final_hours.items() if abs(float(v)) > 1e-9}
-
-    scrap_base = baseline.get("scrap_pct")
-    scrap_user = overrides.get("scrap_pct") or overrides.get("scrap_pct_override")
-    scrap_sugg = suggestions.get("scrap_pct")
-    scrap_source = "baseline"
-    scrap_val = scrap_base if scrap_base is not None else 0.0
-    if scrap_user is not None:
-        cand = to_float(scrap_user)
-        if cand is not None:
-            scrap_val = float(cand)
-            scrap_val, _ = _clamp(scrap_val, "scrap", "scrap_pct", "user override")
-            scrap_source = "user"
-    elif scrap_sugg is not None:
-        cand = to_float(scrap_sugg)
-        if cand is not None:
-            scrap_val = float(cand)
-            scrap_val, _ = _clamp(scrap_val, "scrap", "scrap_pct", "LLM")
-            scrap_source = "llm"
-    eff["scrap_pct"] = float(scrap_val)
-    source_tags["scrap_pct"] = scrap_source
-
-    contingency_base = baseline.get("contingency_pct")
-    contingency_user = overrides.get("contingency_pct") or overrides.get("contingency_pct_override")
-    contingency_sugg = suggestions.get("contingency_pct")
-    contingency_source = "baseline"
-    contingency_val = contingency_base if contingency_base is not None else None
-    if contingency_user is not None:
-        cand = to_float(contingency_user)
-        if cand is not None:
-            contingency_val = float(cand)
-            contingency_val, _ = _clamp(contingency_val, "scrap", "contingency_pct", "user override")
-            contingency_source = "user"
-    elif contingency_sugg is not None:
-        cand = to_float(contingency_sugg)
-        if cand is not None:
-            contingency_val = float(cand)
-            contingency_val, _ = _clamp(contingency_val, "scrap", "contingency_pct", "LLM")
-            contingency_source = "llm"
-    if contingency_val is not None:
-        eff["contingency_pct"] = float(contingency_val)
-        source_tags["contingency_pct"] = contingency_source
-
-    setups_base = baseline.get("setups") or 1
-    setups_user = overrides.get("setups")
-    setups_sugg = suggestions.get("setups")
-    setups_source = "baseline"
-    setups_val = setups_base
-    if setups_user is not None:
-        cand = to_float(setups_user)
-        if cand is not None:
-            setups_val, _ = _clamp(cand, "setups", "setups", "user override")
-            setups_source = "user"
-    elif setups_sugg is not None:
-        cand = to_float(setups_sugg)
-        if cand is not None:
-            setups_val, _ = _clamp(cand, "setups", "setups", "LLM")
-            setups_source = "llm"
-    eff["setups"] = int(setups_val)
-    source_tags["setups"] = setups_source
-
-    fixture_base = baseline.get("fixture")
-    fixture_user = overrides.get("fixture")
-    fixture_sugg = suggestions.get("fixture")
-    fixture_source = "baseline"
-    fixture_val = fixture_base
-    if isinstance(fixture_user, str) and fixture_user.strip():
-        fixture_val = fixture_user.strip()
-        fixture_source = "user"
-    elif isinstance(fixture_sugg, str) and fixture_sugg.strip():
-        fixture_val = fixture_sugg.strip()
-        fixture_source = "llm"
-    if fixture_val is not None:
-        eff["fixture"] = fixture_val
-    source_tags["fixture"] = fixture_source
-
-    if "notes" in SUGGESTIBLE_EFFECTIVE_FIELDS:
-        notes_val: list[str] = []
-        if isinstance(suggestions.get("notes"), list):
-            notes_val.extend(
-                [str(n).strip() for n in suggestions["notes"] if isinstance(n, str) and n.strip()]
-            )
-        if isinstance(overrides.get("notes"), list):
-            notes_val.extend(
-                [str(n).strip() for n in overrides["notes"] if isinstance(n, str) and n.strip()]
-            )
-        if notes_val:
-            eff["notes"] = notes_val
-
-    for key, (lo, hi) in NUMERIC_EFFECTIVE_FIELDS.items():
-        _merge_numeric_field(key, lo, hi, key)
-
-    for key in BOOL_EFFECTIVE_FIELDS:
-        _merge_bool_field(key)
-
-    for key, max_len in TEXT_EFFECTIVE_FIELDS.items():
-        _merge_text_field(key, max_len=max_len)
-
-    for key in LIST_EFFECTIVE_FIELDS:
-        _merge_list_field(key)
-
-    for key in DICT_EFFECTIVE_FIELDS:
-        _merge_dict_field(key)
-
-    if guard_ctx.get("needs_back_face"):
-        current_setups = eff.get("setups")
-        setups_int = to_int(current_setups) or 0
-        if setups_int < 2:
-            eff["setups"] = 2
-            clamp_notes.append(f"setups {setups_int} → 2 (back-side guardrail)")
-            source_tags["setups"] = "guardrail"
-
-    finish_flags_ctx = guard_ctx.get("finish_flags")
-    baseline_pass_ctx_raw = (
-        guard_ctx.get("baseline_pass_through")
-        if isinstance(guard_ctx.get("baseline_pass_through"), dict)
-        else {}
-    )
-    baseline_pass_ctx = canonicalize_pass_through_map(baseline_pass_ctx_raw)
-    finish_pass_key = _canonical_pass_label(
-        guard_ctx.get("finish_pass_key") or "Outsourced Vendors"
-    )
-    finish_floor = _as_float_or_none(guard_ctx.get("finish_cost_floor"))
-    finish_floor = float(finish_floor) if finish_floor is not None else 50.0
-    if finish_flags_ctx and finish_floor > 0:
-        combined_pass: dict[str, float] = dict(baseline_pass_ctx)
-        for key, value in (final_pass.items() if isinstance(final_pass, dict) else []):
-            val = to_float(value)
-            if val is not None:
-                combined_pass[key] = combined_pass.get(key, 0.0) + float(val)
-        current_finish_cost = combined_pass.get(finish_pass_key, 0.0)
-        if current_finish_cost < finish_floor - 1e-6:
-            needed = finish_floor - current_finish_cost
-            if needed > 0:
-                if not isinstance(final_pass, dict):
-                    final_pass = {}
-                final_pass[finish_pass_key] = float(final_pass.get(finish_pass_key, 0.0) or 0.0) + needed
-                clamp_notes.append(
-                    f"add_pass_through[{finish_pass_key}] {current_finish_cost:.2f} → {finish_floor:.2f} (finish guardrail)"
-                )
-                pass_sources[finish_pass_key] = "guardrail"
-                eff["add_pass_through"] = final_pass
-                source_tags["add_pass_through"] = pass_sources
-
-    if clamp_notes:
-        eff["_clamp_notes"] = clamp_notes
-    eff["_source_tags"] = source_tags
-    return eff
 
 def compute_effective_state(state: QuoteState) -> tuple[dict, dict]:
     baseline = state.baseline or {}
@@ -8776,7 +7833,113 @@ def _coerce_overhead_dataclass(overhead: OverheadLike) -> _TimeOverheadParams:
             pass
     return coerced
 
-_DRILLING_COEFFS = _load_drilling_coefficients()
+
+def _clean_hole_groups(raw: Any) -> list[dict[str, Any]] | None:
+    if not isinstance(raw, list):
+        return None
+    cleaned: list[dict[str, Any]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        dia = _coerce_float_or_none(entry.get("dia_mm"))
+        depth = _coerce_float_or_none(entry.get("depth_mm"))
+        count = _coerce_float_or_none(entry.get("count"))
+        if dia is None or dia <= 0:
+            continue
+        qty = int(round(count)) if count is not None else 0
+        if qty <= 0:
+            qty = 1
+        cleaned.append(
+            {
+                "dia_mm": float(dia),
+                "depth_mm": float(depth) if depth is not None else None,
+                "count": qty,
+                "through": bool(entry.get("through")),
+            }
+        )
+    return cleaned if cleaned else None
+
+
+def _holes_removed_mass_g(geo_context: Mapping[str, Any] | None) -> float | None:
+    """Approximate the mass removed by holes using available geometry context."""
+
+    if not isinstance(geo_context, _MappingABC):
+        return None
+
+    thickness_mm = _coerce_float_or_none(geo_context.get("thickness_mm"))
+    if thickness_mm is None or thickness_mm <= 0:
+        thickness_mm = _coerce_float_or_none(geo_context.get("plate_thickness_mm"))
+
+    density_g_cc = _coerce_float_or_none(geo_context.get("density_g_cc"))
+    if density_g_cc is None or density_g_cc <= 0:
+        material_guess = (
+            geo_context.get("material")
+            or geo_context.get("material_name")
+            or geo_context.get("material_key")
+        )
+        density_g_cc = _density_for_material(material_guess)
+
+    total_volume_mm3 = 0.0
+
+    raw_groups = geo_context.get("GEO_Hole_Groups")
+    hole_groups = _clean_hole_groups(raw_groups) if raw_groups is not None else None
+    if not hole_groups and isinstance(raw_groups, list):
+        # The groups might already be sanitized; reuse after coercing types.
+        coerced_groups: list[dict[str, Any]] = []
+        for entry in raw_groups:
+            if not isinstance(entry, dict):
+                continue
+            dia = _coerce_float_or_none(entry.get("dia_mm"))
+            depth = _coerce_float_or_none(entry.get("depth_mm"))
+            count = int(_coerce_float_or_none(entry.get("count")) or 0)
+            if not dia or dia <= 0:
+                continue
+            coerced_groups.append(
+                {
+                    "dia_mm": float(dia),
+                    "depth_mm": float(depth) if depth is not None else None,
+                    "count": count if count > 0 else 1,
+                    "through": bool(entry.get("through")),
+                }
+            )
+        hole_groups = coerced_groups if coerced_groups else None
+
+    if hole_groups:
+        for group in hole_groups:
+            dia_mm = _coerce_float_or_none(group.get("dia_mm"))
+            if dia_mm is None or dia_mm <= 0:
+                continue
+            depth_mm = _coerce_float_or_none(group.get("depth_mm"))
+            if (depth_mm is None or depth_mm <= 0) and bool(group.get("through")) and thickness_mm:
+                depth_mm = thickness_mm
+            if depth_mm is None or depth_mm <= 0:
+                continue
+            count = int(_coerce_float_or_none(group.get("count")) or 0)
+            count = count if count > 0 else 1
+            radius_mm = dia_mm / 2.0
+            volume_mm3 = math.pi * (radius_mm**2) * depth_mm * count
+            total_volume_mm3 += max(volume_mm3, 0.0)
+
+    if total_volume_mm3 <= 0 and thickness_mm and thickness_mm > 0:
+        hole_diams = geo_context.get("hole_diams_mm") or []
+        for raw_dia in hole_diams:
+            dia_val = _coerce_float_or_none(raw_dia)
+            if dia_val is None or dia_val <= 0:
+                continue
+            radius_mm = dia_val / 2.0
+            total_volume_mm3 += math.pi * (radius_mm**2) * thickness_mm
+
+    if total_volume_mm3 <= 0:
+        return None
+
+    volume_cm3 = total_volume_mm3 / 1000.0
+    mass_g = volume_cm3 * float(density_g_cc)
+    return mass_g if mass_g > 0 else None
+
+try:
+    _DRILLING_COEFFS = load_json("drilling.json")
+except FileNotFoundError:
+    _DRILLING_COEFFS = {}
 MIN_DRILL_MIN_PER_HOLE = float(_DRILLING_COEFFS.get("min_minutes_per_hole", 0.10))
 DEFAULT_MAX_DRILL_MIN_PER_HOLE = float(_DRILLING_COEFFS.get("max_minutes_per_hole", 3.00))
 
@@ -10529,28 +9692,9 @@ def extract_pdf_all(pdf_path: Path, dpi: int = 300) -> dict:
     doc.close()
     return {"pages": pages, "best": best}
 
-JSON_SCHEMA = {
-    "part_name": "str|null",
-    "material": {"name": "str|null", "thickness_in": "float|null"},
-    "quantity": "int|null",
-    "estimates": {
-        "Programming Hours": "float|null",
-        "CAM Programming Hours": "float|null",
-        "Engineering (Docs/Fixture Design) Hours": "float|null",
-        "Fixture Build Hours": "float|null",
-        "Roughing Cycle Time": "float|null",
-        "Semi-Finish Cycle Time": "float|null",
-        "Finishing Cycle Time": "float|null",
-        "In-Process Inspection Hours": "float|null",
-        "Final Inspection Hours": "float|null",
-        "Deburr Hours": "float|null",
-        "Sawing Hours": "float|null",
-        "Assembly Hours": "float|null",
-        "Packaging Labor Hours": "float|null"
-    },
-    "flags": {"FAIR Required": "0|1", "Source Inspection Requirement": "0|1"},
-    "reasoning_brief": "str"
-}
+JSON_SCHEMA = load_json("vl_pdf_schema.json")
+MAP_KEYS = load_json("vl_pdf_map_keys.json")
+PDF_SYSTEM_PROMPT = load_text("vl_pdf_system_prompt.txt").strip()
 
 def _truncate_text(text: str, max_chars: int = 5000) -> str:
     text = text or ""
@@ -10563,10 +9707,7 @@ def _truncate_text(text: str, max_chars: int = 5000) -> str:
 def build_llm_prompt(best_page: dict) -> dict:
     text = _truncate_text(best_page.get("text", ""))
     schema = jdump(JSON_SCHEMA)
-    system = (
-        "You are a manufacturing estimator. Read the drawing text and image and return JSON only. "
-        "Estimate hours conservatively and do not invent dimensions."
-    )
+    system = PDF_SYSTEM_PROMPT
     user = (
         f"TEXT FROM PDF PAGE:\n{text}\n\n"
         f"REQUIRED JSON SHAPE:\n{schema}\n\n"
@@ -10589,26 +9730,6 @@ def infer_pdf_estimate(structured: dict) -> dict:
     prompt = build_llm_prompt(best_page)
     return run_llm_json(prompt["system"], prompt["user"], prompt["image_path"])
 
-MAP_KEYS = {
-    "Quantity": "quantity",
-    "Material": ("material", "name"),
-    "Thickness (in)": ("material", "thickness_in"),
-    "Programming Hours": ("estimates", "Programming Hours"),
-    "CAM Programming Hours": ("estimates", "CAM Programming Hours"),
-    "Engineering (Docs/Fixture Design) Hours": ("estimates", "Engineering (Docs/Fixture Design) Hours"),
-    "Fixture Build Hours": ("estimates", "Fixture Build Hours"),
-    "Roughing Cycle Time": ("estimates", "Roughing Cycle Time"),
-    "Semi-Finish Cycle Time": ("estimates", "Semi-Finish Cycle Time"),
-    "Finishing Cycle Time": ("estimates", "Finishing Cycle Time"),
-    "In-Process Inspection Hours": ("estimates", "In-Process Inspection Hours"),
-    "Final Inspection Hours": ("estimates", "Final Inspection Hours"),
-    "Deburr Hours": ("estimates", "Deburr Hours"),
-    "Sawing Hours": ("estimates", "Sawing Hours"),
-    "Assembly Hours": ("estimates", "Assembly Hours"),
-    "Packaging Labor Hours": ("estimates", "Packaging Labor Hours"),
-    "FAIR Required": ("flags", "FAIR Required"),
-    "Source Inspection Requirement": ("flags", "Source Inspection Requirement"),
-}
 
 def _deep_get(d: dict, path):
     if isinstance(path, str):
