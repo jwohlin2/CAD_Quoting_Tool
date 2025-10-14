@@ -8757,6 +8757,11 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     family = str(family or "").strip().lower() or None
 
     planner_result: dict[str, Any] = {}
+    planner_used = False
+    planner_machine_cost_total = 0.0
+    planner_labor_cost_total = 0.0
+    amortized_programming = 0.0
+    amortized_fixture = 0.0
     if family:
         if callable(_process_plan_job):
             try:
@@ -8779,33 +8784,98 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         planner_result.update(pricing if isinstance(pricing, dict) else {})
         totals = planner_result.get("totals", {}) if isinstance(planner_result.get("totals"), _MappingABC) else {}
         machine_cost = float(_coerce_float_or_none(totals.get("machine_cost")) or 0.0)
-        labor_cost = float(_coerce_float_or_none(totals.get("labor_cost")) or 0.0)
+        labor_cost_total = float(_coerce_float_or_none(totals.get("labor_cost")) or 0.0)
         total_minutes = float(_coerce_float_or_none(totals.get("minutes")) or 0.0)
 
-        process_costs.update({"Machine": round(machine_cost, 2), "Labor": round(labor_cost, 2)})
-        totals_block.update({"machine_cost": machine_cost, "labor_cost": labor_cost, "minutes": total_minutes})
-        breakdown["labor_cost_rendered"] = labor_cost
+        line_items = planner_result.get("line_items")
+        if isinstance(line_items, Sequence):
+            for item in line_items:
+                if not isinstance(item, _MappingABC):
+                    continue
+                label = str(item.get("op") or item.get("name") or "").strip().lower()
+                if not label or "amortized" not in label:
+                    continue
+                labor_amount = _coerce_float_or_none(item.get("labor_cost"))
+                if labor_amount is None:
+                    continue
+                labor_value = float(labor_amount)
+                if "program" in label:
+                    amortized_programming += labor_value
+                elif "fixture" in label:
+                    amortized_fixture += labor_value
+
+        planner_machine_cost_total = machine_cost
+        planner_labor_cost_total = labor_cost_total - amortized_programming - amortized_fixture
+        if planner_labor_cost_total < 0:
+            planner_labor_cost_total = 0.0
+
+        process_costs.clear()
+        process_costs.update(
+            {
+                "Machine": round(planner_machine_cost_total, 2),
+                "Labor": round(planner_labor_cost_total, 2),
+            }
+        )
+        combined_labor_total = (
+            planner_machine_cost_total
+            + planner_labor_cost_total
+            + amortized_programming
+            + amortized_fixture
+        )
+        totals_block.update(
+            {
+                "machine_cost": planner_machine_cost_total,
+                "labor_cost": combined_labor_total,
+                "minutes": total_minutes,
+            }
+        )
+        breakdown["labor_cost_rendered"] = combined_labor_total
         breakdown["process_plan_pricing"] = planner_result
         breakdown["pricing_source"] = "planner"
         breakdown["process_minutes"] = total_minutes
         baseline["pricing_source"] = "planner"
         baseline["process_plan_pricing"] = planner_result
+        planner_used = True
 
         hr_total = total_minutes / 60.0 if total_minutes else 0.0
         process_meta["planner_total"] = {
             "minutes": total_minutes,
             "hr": hr_total,
-            "cost": machine_cost + labor_cost,
+            "cost": machine_cost + labor_cost_total,
             "machine_cost": machine_cost,
-            "labor_cost": labor_cost,
+            "labor_cost": labor_cost_total,
+            "labor_cost_excl_amortized": planner_labor_cost_total,
+            "amortized_programming": amortized_programming,
+            "amortized_fixture": amortized_fixture,
             "line_items": list(planner_result.get("line_items", []) or []),
         }
-        process_meta["planner_machine"] = {"minutes": total_minutes, "hr": hr_total, "cost": machine_cost}
-        process_meta["planner_labor"] = {"minutes": total_minutes, "hr": hr_total, "cost": labor_cost}
+        process_meta["planner_machine"] = {
+            "minutes": total_minutes,
+            "hr": hr_total,
+            "cost": machine_cost,
+        }
+        process_meta["planner_labor"] = {
+            "minutes": total_minutes,
+            "hr": hr_total,
+            "cost": labor_cost_total,
+            "cost_excl_amortized": planner_labor_cost_total,
+            "amortized_programming": amortized_programming,
+            "amortized_fixture": amortized_fixture,
+        }
 
-        if not roughly_equal(machine_cost, process_costs.get("Machine", 0.0), eps=_PLANNER_BUCKET_ABS_EPSILON):
+        machine_rendered = float(_coerce_float_or_none(process_costs.get("Machine")) or 0.0)
+        if not roughly_equal(
+            planner_machine_cost_total,
+            machine_rendered,
+            eps=_PLANNER_BUCKET_ABS_EPSILON,
+        ):
             breakdown["red_flags"].append("Planner totals drifted (machine cost)")
-        if not roughly_equal(labor_cost, process_costs.get("Labor", 0.0), eps=_PLANNER_BUCKET_ABS_EPSILON):
+        labor_rendered = float(_coerce_float_or_none(process_costs.get("Labor")) or 0.0)
+        if not roughly_equal(
+            planner_labor_cost_total,
+            labor_rendered,
+            eps=_PLANNER_BUCKET_ABS_EPSILON,
+        ):
             breakdown["red_flags"].append("Planner totals drifted (labor cost)")
     else:
         breakdown["pricing_source"] = "legacy"
@@ -8877,7 +8947,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         process_meta["project_management"] = {"hr": 0.0, "minutes": 0.0}
     if toolmaker_hours > 0:
         process_meta["toolmaker_support"] = {"hr": toolmaker_hours, "minutes": toolmaker_hours * 60.0}
-        process_costs["toolmaker_support"] = toolmaker_hours * toolmaker_rate
+        if not planner_used:
+            process_costs["toolmaker_support"] = toolmaker_hours * toolmaker_rate
 
     auto_prog_hr = 0.5 + 0.1 * len(hole_diams)
     if thickness_in:
@@ -8903,6 +8974,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         "breakdown": breakdown,
         "app_meta": {"llm_debug_enabled": APP_ENV.llm_debug_enabled},
     }
+
+    if planner_used:
+        result.setdefault("app_meta", {})["used_planner"] = True
 
     return result
 
