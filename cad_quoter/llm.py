@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence
 
 from cad_quoter.utils import _dict, compact_dict, jdump, json_safe_copy
+from appkit.data import load_text
 
 
 def parse_llm_json(text: str) -> dict:
@@ -54,6 +55,11 @@ Prefer small, explainable changes (±10–50%). Never leave fields out.
 Use these when suggesting scrap, inspection, fixture, setup, or stock strategies and cite them in your notes.
 You may use payload["seed"] heuristics (e.g., `dfm_summary`, `tolerance_focus`, `stock_focus`, `has_tight_tol`) to bias adjustments when helpful."""
 
+
+try:
+    SYSTEM_SUGGEST = load_text("system_suggest.txt").strip()
+except FileNotFoundError:  # pragma: no cover - defensive fallback
+    pass
 
 SUGG_TO_EDITOR = {
     "scrap_pct": (

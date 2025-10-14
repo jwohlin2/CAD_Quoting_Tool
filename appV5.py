@@ -94,6 +94,8 @@ from cad_quoter.llm_overrides import (
     coerce_bounds,
 )
 
+from cad_quoter.vendors import ezdxf as _ezdxf_vendor
+
 from appkit.ui.tk_compat import (
     tk,
     filedialog,
@@ -129,6 +131,7 @@ from appkit.scrap_helpers import (
     normalize_scrap_pct,
 )
 
+from appkit.data import load_text
 from appkit.debug.debug_tables import (
     _jsonify_debug_value,
     _jsonify_debug_summary,
@@ -571,10 +574,10 @@ from cad_quoter.pricing.time_estimator import (
 from cad_quoter.pricing.wieland import lookup_price as lookup_wieland_price
 from cad_quoter.rates import migrate_flat_to_two_bucket, two_bucket_to_flat
 from cad_quoter.vendors.mcmaster_stock import lookup_sku_and_price_for_mm
-_DEFAULT_SYSTEM_SUGGEST = (
-    "You are a manufacturing estimator. Given GEO + baseline + bounds, "
-    "propose bounded adjustments that improve realism."
-)
+try:
+    _DEFAULT_SYSTEM_SUGGEST = load_text("system_suggest.txt").strip()
+except FileNotFoundError:  # pragma: no cover - defensive fallback
+    _DEFAULT_SYSTEM_SUGGEST = ""
 
 try:  # pragma: no cover - defensive guard when optional LLM helpers are absent
     from cad_quoter import llm as _cad_llm  # type: ignore
@@ -941,7 +944,7 @@ fitz = getattr(geometry, "fitz", None)
 
 if _HAS_EZDXF:
     try:
-        import ezdxf  # type: ignore[import]
+        ezdxf = _ezdxf_vendor.require_ezdxf()
     except Exception:
         ezdxf = None  # type: ignore[assignment]
 else:
@@ -949,7 +952,7 @@ else:
 
 if _HAS_ODAFC:
     try:
-        from ezdxf.addons import odafc  # type: ignore[import]
+        odafc = _ezdxf_vendor.require_odafc()
     except Exception:
         odafc = None  # type: ignore[assignment]
 else:
@@ -1004,6 +1007,49 @@ ACCEPT_SCALAR_KEYS: tuple[str, ...] = (
 
 
 SUGGESTION_SCALAR_KEYS: tuple[str, ...] = ACCEPT_SCALAR_KEYS
+
+
+# ``merge_effective`` owns all merge behavior. These tables allow other helpers to
+# share the same rules without duplicating the merge logic across the code base.
+LOCKED_EFFECTIVE_FIELDS: frozenset[str] = frozenset(
+    {
+        "totals",
+        "process_plan_pricing",
+        "pricing_result",
+        "process_hours",  # computed below from multipliers + adders
+    }
+)
+
+SUGGESTIBLE_EFFECTIVE_FIELDS: frozenset[str] = frozenset(
+    {
+        "notes",
+        "operation_sequence",
+        "drilling_strategy",
+        *SUGGESTION_SCALAR_KEYS,
+    }
+)
+
+NUMERIC_EFFECTIVE_FIELDS: dict[str, tuple[float | None, float | None]] = {
+    "fixture_build_hr": (0.0, 2.0),
+    "soft_jaw_hr": (0.0, 1.0),
+    "soft_jaw_material_cost": (0.0, 60.0),
+    "handling_adder_hr": (0.0, 0.2),
+    "cmm_minutes": (0.0, 60.0),
+    "in_process_inspection_hr": (0.0, 0.5),
+    "inspection_total_hr": (0.0, 12.0),
+    "fai_prep_hr": (0.0, 1.0),
+    "packaging_hours": (0.0, 0.5),
+    "packaging_flat_cost": (0.0, 25.0),
+    "shipping_cost": (0.0, None),
+}
+
+BOOL_EFFECTIVE_FIELDS: frozenset[str] = frozenset({"fai_required"})
+
+TEXT_EFFECTIVE_FIELDS: dict[str, int] = {"shipping_hint": 80}
+
+LIST_EFFECTIVE_FIELDS: frozenset[str] = frozenset({"operation_sequence"})
+
+DICT_EFFECTIVE_FIELDS: frozenset[str] = frozenset({"drilling_strategy"})
 
 
 def _auto_accept_suggestions(suggestions: dict[str, Any] | None) -> dict[str, Any]:
@@ -1386,8 +1432,8 @@ def merge_effective(
     """Tri-state merge for baseline vs LLM suggestions vs user overrides."""
 
     baseline = copy.deepcopy(baseline or {})
-    suggestions = dict(suggestions or {})
-    overrides = dict(overrides or {})
+    suggestions = {k: v for k, v in dict(suggestions or {}).items() if k not in LOCKED_EFFECTIVE_FIELDS}
+    overrides = {k: v for k, v in dict(overrides or {}).items() if k not in LOCKED_EFFECTIVE_FIELDS}
     guard_ctx = dict(guard_ctx or {})
 
     bounds = baseline.get("_bounds") if isinstance(baseline, dict) else None
@@ -1769,29 +1815,33 @@ def merge_effective(
         eff["fixture"] = fixture_val
     source_tags["fixture"] = fixture_source
 
-    notes_val = []
-    if isinstance(suggestions.get("notes"), list):
-        notes_val.extend([str(n).strip() for n in suggestions["notes"] if isinstance(n, str) and n.strip()])
-    if isinstance(overrides.get("notes"), list):
-        notes_val.extend([str(n).strip() for n in overrides["notes"] if isinstance(n, str) and n.strip()])
-    if notes_val:
-        eff["notes"] = notes_val
+    if "notes" in SUGGESTIBLE_EFFECTIVE_FIELDS:
+        notes_val: list[str] = []
+        if isinstance(suggestions.get("notes"), list):
+            notes_val.extend(
+                [str(n).strip() for n in suggestions["notes"] if isinstance(n, str) and n.strip()]
+            )
+        if isinstance(overrides.get("notes"), list):
+            notes_val.extend(
+                [str(n).strip() for n in overrides["notes"] if isinstance(n, str) and n.strip()]
+            )
+        if notes_val:
+            eff["notes"] = notes_val
 
-    _merge_numeric_field("fixture_build_hr", 0.0, 2.0, "fixture_build_hr")
-    _merge_numeric_field("soft_jaw_hr", 0.0, 1.0, "soft_jaw_hr")
-    _merge_numeric_field("soft_jaw_material_cost", 0.0, 60.0, "soft_jaw_material_cost")
-    _merge_numeric_field("handling_adder_hr", 0.0, 0.2, "handling_adder_hr")
-    _merge_numeric_field("cmm_minutes", 0.0, 60.0, "cmm_minutes")
-    _merge_numeric_field("in_process_inspection_hr", 0.0, 0.5, "in_process_inspection_hr")
-    _merge_numeric_field("inspection_total_hr", 0.0, 12.0, "inspection_total_hr")
-    _merge_bool_field("fai_required")
-    _merge_numeric_field("fai_prep_hr", 0.0, 1.0, "fai_prep_hr")
-    _merge_numeric_field("packaging_hours", 0.0, 0.5, "packaging_hours")
-    _merge_numeric_field("packaging_flat_cost", 0.0, 25.0, "packaging_flat_cost")
-    _merge_numeric_field("shipping_cost", 0.0, None, "shipping_cost")
-    _merge_text_field("shipping_hint", max_len=80)
-    _merge_list_field("operation_sequence")
-    _merge_dict_field("drilling_strategy")
+    for key, (lo, hi) in NUMERIC_EFFECTIVE_FIELDS.items():
+        _merge_numeric_field(key, lo, hi, key)
+
+    for key in BOOL_EFFECTIVE_FIELDS:
+        _merge_bool_field(key)
+
+    for key, max_len in TEXT_EFFECTIVE_FIELDS.items():
+        _merge_text_field(key, max_len=max_len)
+
+    for key in LIST_EFFECTIVE_FIELDS:
+        _merge_list_field(key)
+
+    for key in DICT_EFFECTIVE_FIELDS:
+        _merge_dict_field(key)
 
     if guard_ctx.get("needs_back_face"):
         current_setups = eff.get("setups")
@@ -21150,9 +21200,9 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     if lower_path.endswith(".dwg"):
         if _HAS_ODAFC:
             # uses ODAFileConverter through ezdxf, no env var needed
-            from ezdxf.addons import odafc as _odafc  # type: ignore
+            odafc_mod = _ezdxf_vendor.require_odafc()
 
-            readfile = getattr(_odafc, "readfile", None)
+            readfile = getattr(odafc_mod, "readfile", None)
             if not callable(readfile):  # pragma: no cover - defensive fallback
                 raise RuntimeError(
                     "ezdxf.addons.odafc.readfile is unavailable; install ODAFileConverter support."
