@@ -9503,6 +9503,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         qty_for_bucketize = 1
 
     try:
+        qty_for_bucketize = int(qty) if qty and qty > 0 else 1
         bucketized_raw = bucketize(
             planner_result if isinstance(planner_result, dict) else {},
             merged_two_bucket_rates,
