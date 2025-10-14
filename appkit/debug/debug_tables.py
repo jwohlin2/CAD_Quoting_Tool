@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 from typing import Any, Mapping as _MappingABC, Sequence
 
+from cad_quoter.utils.render_utils import fmt_hours, fmt_range
+
 from cad_quoter.domain_models import coerce_float_or_none as _coerce_float_or_none
 
 
@@ -92,7 +94,11 @@ def _format_range(vals: Sequence[float | None]) -> str:
     vmax = max(values)
     if abs(vmax - vmin) < 1e-6:
         return f"{vmin:.0f}"
-    return f"{vmin:.0f}–{vmax:.0f}"
+    return fmt_range(
+        vmin,
+        vmax,
+        formatter=lambda value: f"{float(value):.0f}",
+    )
 
 
 def _format_range_f(vals: Sequence[float | None], prec: int = 2) -> str:
@@ -104,7 +110,11 @@ def _format_range_f(vals: Sequence[float | None], prec: int = 2) -> str:
     tol = 10 ** (-prec)
     if abs(vmax - vmin) < tol:
         return f"{vmin:.{prec}f}"
-    return f"{vmin:.{prec}f}–{vmax:.{prec}f}"
+    return fmt_range(
+        vmin,
+        vmax,
+        formatter=lambda value: f"{float(value):.{prec}f}",
+    )
 
 
 def build_removal_debug_table(
@@ -154,7 +164,7 @@ def build_removal_debug_table(
     )
     lines.append("")
     lines.append(
-        f"  subtotal time: {float(total_minutes):.1f} min  ({float(total_minutes) / 60.0:.2f} hr)"
+        f"  subtotal time: {float(total_minutes):.1f} min  ({fmt_hours(float(total_minutes) / 60.0)})"
     )
     return "\n".join(lines)
 

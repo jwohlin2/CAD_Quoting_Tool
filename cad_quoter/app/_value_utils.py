@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from cad_quoter.utils.render_utils import fmt_hours, fmt_money, fmt_percent
+
 
 def _coerce_user_value(raw: Any, kind: str) -> Any:
     """Best-effort coercion of user supplied override values."""
@@ -33,11 +35,13 @@ def _format_value(value: Any, kind: str) -> str:
         return "–"
     try:
         if kind == "percent":
-            return f"{float(value) * 100:.1f}%"
-        if kind in {"float", "hours", "multiplier"}:
+            return fmt_percent(float(value))
+        if kind == "hours":
+            return fmt_hours(float(value), include_unit=False, decimals=3)
+        if kind in {"float", "multiplier"}:
             return f"{float(value):.3f}"
         if kind == "currency":
-            return f"${float(value):,.2f}"
+            return fmt_money(float(value), "$")
         if kind == "int":
             return f"{int(round(float(value)))}"
     except Exception:

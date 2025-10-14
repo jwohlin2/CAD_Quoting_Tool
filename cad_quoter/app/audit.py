@@ -6,6 +6,8 @@ import time
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from cad_quoter.utils.render_utils import fmt_money, fmt_percent
+
 
 LOGS_DIR = Path(r"D:\CAD_Quoting_Tool\Logs")
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -70,7 +72,7 @@ def render_llm_log_text(log: Mapping[str, Any]) -> str:
 
     def _format_money(value: Any) -> str:
         if isinstance(value, (int, float)):
-            return f"${float(value):,.2f}"
+            return fmt_money(value, "$")
         return str(value)
 
     lines: list[str] = []
@@ -97,17 +99,17 @@ def render_llm_log_text(log: Mapping[str, Any]) -> str:
     price_after = log.get("price_after", 0)
     delta = (price_after or 0) - (price_before or 0)
     try:
-        pct_delta = (delta / price_before * 100) if price_before else 0.0
+        pct_delta = (delta / price_before) if price_before else 0.0
     except Exception:
         pct_delta = 0.0
     lines.append("")
     lines.append(
         "Price before: {before}   →   after: {after}   Δ: {delta} "
-        "({pct:.2f}%)".format(
+        "({pct})".format(
             before=_format_money(price_before),
             after=_format_money(price_after),
             delta=_format_money(delta),
-            pct=pct_delta,
+            pct=fmt_percent(pct_delta),
         )
     )
     lines.append("")

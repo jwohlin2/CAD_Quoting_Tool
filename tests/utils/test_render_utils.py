@@ -4,6 +4,10 @@ import pytest
 
 from cad_quoter.utils.render_utils import (
     QuoteDocRecorder,
+    fmt_hours,
+    fmt_money,
+    fmt_percent,
+    fmt_range,
     format_currency,
     format_dimension,
     format_hours,
@@ -28,6 +32,18 @@ def test_format_currency(value, currency, expected):
 
 
 @pytest.mark.parametrize(
+    "value,currency,expected",
+    [
+        (1234.567, "$", "$1,234.57"),
+        ("99.9", "€", "€99.90"),
+        (None, "£", "£0.00"),
+    ],
+)
+def test_fmt_money(value, currency, expected):
+    assert fmt_money(value, currency) == expected
+
+
+@pytest.mark.parametrize(
     "value,expected",
     [
         (2, "2.00 hr"),
@@ -37,6 +53,18 @@ def test_format_currency(value, currency, expected):
 )
 def test_format_hours(value, expected):
     assert format_hours(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (2, "2.00"),
+        ("1.5", "1.50"),
+        (None, "0.00"),
+    ],
+)
+def test_fmt_hours_without_unit(value, expected):
+    assert fmt_hours(value, include_unit=False) == expected
 
 
 @pytest.mark.parametrize(
@@ -60,6 +88,30 @@ def test_format_hours_with_rate(hours, rate, currency, expected):
 )
 def test_format_percent(value, expected):
     assert format_percent(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value,decimals,expected",
+    [
+        (0.125, 1, "12.5%"),
+        (0.125, 2, "12.50%"),
+        (None, 0, "0%"),
+    ],
+)
+def test_fmt_percent(value, decimals, expected):
+    assert fmt_percent(value, decimals=decimals) == expected
+
+
+@pytest.mark.parametrize(
+    "lower,upper,unit,expected",
+    [
+        (1.0, 2.5, "hr", "1.0–2.5 hr"),
+        ("A", "C", None, "A–C"),
+    ],
+)
+def test_fmt_range(lower, upper, unit, expected):
+    result = fmt_range(lower, upper, formatter=str, unit=unit)
+    assert result == expected
 
 
 @pytest.mark.parametrize(

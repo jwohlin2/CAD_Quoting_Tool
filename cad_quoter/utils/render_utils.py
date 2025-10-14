@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 
 # ---------------------------------------------------------------------------
@@ -11,7 +11,7 @@ from typing import Any
 # ---------------------------------------------------------------------------
 
 
-def format_currency(value: Any, currency: str) -> str:
+def fmt_money(value: Any, currency: str) -> str:
     """Return *value* formatted as a currency string."""
 
     try:
@@ -21,14 +21,63 @@ def format_currency(value: Any, currency: str) -> str:
     return f"{currency}{amount:,.2f}"
 
 
-def format_hours(value: Any) -> str:
-    """Format an hour value with a ``hr`` suffix."""
+def fmt_hours(
+    value: Any,
+    *,
+    unit: str = "hr",
+    include_unit: bool = True,
+    decimals: int = 2,
+) -> str:
+    """Format an hour value with an optional unit suffix."""
 
     try:
         hours = float(value or 0.0)
     except Exception:
         hours = 0.0
-    return f"{hours:.2f} hr"
+    hours_text = f"{max(hours, 0.0):.{decimals}f}"
+    if include_unit and unit:
+        return f"{hours_text} {unit}"
+    return hours_text
+
+
+def fmt_percent(value: Any, *, decimals: int = 1) -> str:
+    """Return ``value`` as a percentage with a configurable precision."""
+
+    try:
+        pct = float(value or 0.0)
+    except Exception:
+        pct = 0.0
+    return f"{pct * 100:.{decimals}f}%"
+
+
+def fmt_range(
+    lower: Any,
+    upper: Any,
+    *,
+    formatter: Callable[[Any], str] | None = None,
+    separator: str = "–",
+    unit: str | None = None,
+) -> str:
+    """Render a range where both ends share the same formatting."""
+
+    format_value = formatter or (lambda value: str(value))
+    lower_text = format_value(lower)
+    upper_text = format_value(upper)
+    if unit:
+        return f"{lower_text}{separator}{upper_text} {unit}".rstrip()
+    return f"{lower_text}{separator}{upper_text}"
+
+
+def format_currency(value: Any, currency: str) -> str:
+    """Return *value* formatted as a currency string."""
+
+    return fmt_money(value, currency)
+
+
+def format_hours(value: Any) -> str:
+    """Format an hour value with a ``hr`` suffix."""
+
+    return fmt_hours(value)
 
 
 def format_hours_with_rate(hours: Any, rate: Any, currency: str) -> str:
@@ -42,21 +91,17 @@ def format_hours_with_rate(hours: Any, rate: Any, currency: str) -> str:
         rate_val = float(rate or 0.0)
     except Exception:
         rate_val = 0.0
-    hours_text = format_hours(hours_val)
+    hours_text = fmt_hours(hours_val)
     if rate_val <= 0:
         return f"{hours_text} @ —/hr"
-    rate_text = format_currency(rate_val, currency)
+    rate_text = fmt_money(rate_val, currency)
     return f"{hours_text} @ {rate_text}/hr"
 
 
 def format_percent(value: Any) -> str:
     """Return ``value`` as a percentage with a single decimal place."""
 
-    try:
-        pct = float(value or 0.0)
-    except Exception:
-        pct = 0.0
-    return f"{pct * 100:.1f}%"
+    return fmt_percent(value)
 
 
 def format_dimension(value: Any) -> str:

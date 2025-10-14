@@ -834,7 +834,7 @@ def explain_quote(
             return None
         if pct > 1.5:
             pct = pct / 100.0
-        return f"{pct * 100:.1f}%"
+        return fmt_percent(pct)
 
     totals = breakdown.get("totals") or {}
 
@@ -858,7 +858,7 @@ def explain_quote(
         num = _coerce_float(value)
         if num is None:
             return None
-        return f"{currency_prefix}{num:,.2f}"
+        return fmt_money(num, currency_prefix)
 
     lines: list[str] = []
 

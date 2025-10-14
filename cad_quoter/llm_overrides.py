@@ -14,6 +14,7 @@ from typing import Any, Mapping
 from cad_quoter.domain_models import coerce_float_or_none as _coerce_float_or_none
 from cad_quoter.llm import LLMClient, parse_llm_json
 from cad_quoter.utils import jdump
+from cad_quoter.utils.render_utils import fmt_hours
 
 HARDWARE_PASS_LABEL = "Hardware"
 LEGACY_HARDWARE_PASS_LABEL = "Hardware / BOM"
@@ -639,7 +640,7 @@ def get_llm_overrides(
         new_val = clamp(prev + clamped, adder_min_bound, limit, adder_min_bound)
         if not math.isclose(prev + clamped, new_val, abs_tol=1e-6):
             clamp_notes.append(
-                f"{source} {prev + clamped:.2f} hr clipped to {limit:.1f} for {norm}"
+                f"{source} {fmt_hours(prev + clamped)} clipped to {fmt_hours(limit, decimals=1)} for {norm}"
             )
         container[norm] = new_val
 
