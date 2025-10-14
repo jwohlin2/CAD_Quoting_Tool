@@ -269,31 +269,13 @@ else:  # pragma: no cover - fallback when ezdxf is unavailable at runtime
 if typing.TYPE_CHECKING:
     import pandas as pd
     from cad_quoter.domain import QuoteState as _QuoteState
-
-    def compute_quote_from_df(
-        df: pd.DataFrame,
-        *,
-        params: Mapping[str, Any] | None = ...,
-        rates: Mapping[str, Any] | None = ...,
-        default_params: Mapping[str, Any] | None = ...,
-        default_rates: Mapping[str, Any] | None = ...,
-        default_material_display: Mapping[str, Any] | None = ...,
-        material_vendor_csv: str | None = ...,
-        llm_enabled: bool = ...,
-        llm_model_path: str | None = ...,
-        llm_client: Any | None = ...,
-        geo: Mapping[str, Any] | None = ...,
-        ui_vars: Mapping[str, Any] | None = ...,
-        quote_state: _QuoteState | None = ...,
-        reuse_suggestions: Mapping[str, Any] | None = ...,
-        llm_suggest: Any | None = ...,
-    ) -> dict[str, Any]: ...
 else:
-    try:
-        from cad_quoter_legacy import compute_quote_from_df as compute_quote_from_df  # type: ignore[import]
-    except Exception:
-        def compute_quote_from_df(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
-            raise RuntimeError("compute_quote_from_df is unavailable in this build; ensure the quoting engine is bundled.")
+    _QuoteState = QuoteState
+
+try:
+    from cad_quoter_legacy import compute_quote_from_df as _legacy_compute_quote_from_df  # type: ignore[import]
+except Exception:
+    _legacy_compute_quote_from_df = None
 
 # �"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?
 # Sync the estimator's drilling hours into all rendered views
@@ -8617,7 +8599,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     rates: Mapping[str, Any] | None = None,
     default_params: Mapping[str, Any] | None = None,
     default_rates: Mapping[str, Any] | None = None,
-    default_material_display: Mapping[str, Any] | None = None,
+    default_material_display: Mapping[str, Any] | str | None = None,
     material_vendor_csv: str | None = None,
     llm_enabled: bool = True,
     llm_model_path: str | None = None,
@@ -8639,10 +8621,10 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     material_text = str(material_choice or "").strip()
 
     scrap_value = value_map.get("Scrap Percent (%)")
-    scrap_frac = normalize_scrap_pct(scrap_value)
-    scrap_source = "ui" if scrap_frac > 0 else "default_guess"
-    if scrap_frac <= 0:
-        scrap_frac = None
+    normalized_scrap = normalize_scrap_pct(scrap_value)
+    scrap_frac: float | None = normalized_scrap if normalized_scrap > 0 else None
+    scrap_source = "ui" if scrap_frac is not None else "default_guess"
+    if scrap_frac is None:
         stock_plan = geo_payload.get("stock_plan_guess") if isinstance(geo_payload, dict) else None
         if isinstance(stock_plan, _MappingABC):
             net = _coerce_float_or_none(stock_plan.get("net_volume_in3"))
@@ -8653,6 +8635,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         if scrap_frac is None:
             scrap_frac = SCRAP_DEFAULT_GUESS
             scrap_source = "default_guess"
+
+    assert scrap_frac is not None
+    scrap_frac = float(scrap_frac)
 
     density_g_cc = _coerce_float_or_none(value_map.get("Material Density"))
     if (density_g_cc in (None, 0.0)) and material_text:
@@ -8671,8 +8656,13 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     removal_mass_g = _holes_removed_mass_g(geo_payload)
     if net_volume_cm3 and density_g_cc and removal_mass_g:
         net_mass_g = float(net_volume_cm3) * float(density_g_cc)
-        base_for_removal = scrap_frac if scrap_source != "default_guess" else 0.0
-        _, scrap_frac, _ = compute_mass_and_scrap_after_removal(net_mass_g, base_for_removal, removal_mass_g)
+        base_for_removal = float(scrap_frac or 0.0) if scrap_source != "default_guess" else 0.0
+        removal_result = compute_mass_and_scrap_after_removal(
+            net_mass_g,
+            base_for_removal,
+            removal_mass_g,
+        )
+        scrap_frac = removal_result[1]
         scrap_source = "geometry"
 
     fai_value = value_map.get("FAIR Required")
