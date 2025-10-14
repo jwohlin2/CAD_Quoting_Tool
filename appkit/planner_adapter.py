@@ -1,32 +1,9 @@
 from __future__ import annotations
 
-import os
 from typing import Any, Mapping
 from collections.abc import Mapping as _MappingABC
 
-
-def _coerce_bool(value: object) -> bool | None:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    if isinstance(value, str):
-        text = value.strip().lower()
-        if text in {"y", "yes", "true", "1", "on"}:
-            return True
-        if text in {"n", "no", "false", "0", "off"}:
-            return False
-    return None
-
-
-def _coerce_env_bool(value: str | None) -> bool:
-    if value is None:
-        return False
-    coerced = _coerce_bool(value)
-    return bool(coerced)
-
-
-FORCE_PLANNER = _coerce_env_bool(os.environ.get("FORCE_PLANNER"))
+from appkit.env_utils import _coerce_bool, _coerce_env_bool, FORCE_PLANNER
 
 
 def resolve_planner(

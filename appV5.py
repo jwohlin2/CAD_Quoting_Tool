@@ -30,14 +30,7 @@ import typing
 from collections import Counter
 from collections.abc import Mapping as _MappingABC
 from collections.abc import MutableMapping as _MutableMappingABC
-from dataclasses import (
-    asdict,
-    dataclass,
-    field,
-    replace,
-    fields as dataclass_fields,
-    is_dataclass,
-)
+from dataclasses import asdict, dataclass, field, replace, is_dataclass
 from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
@@ -77,27 +70,6 @@ from cad_quoter.utils.render_utils import (
     format_percent,
 )
 from cad_quoter.estimators import SpeedsFeedsUnavailableError
-from cad_quoter.domain import (
-    QuoteState,
-    canonicalize_pass_through_map,
-)
-_DRILLING_DATA_PATH = Path(__file__).resolve().parent / "data" / "drilling.json"
-_DRILLING_COEFFICIENTS: dict[str, Any] | None = None
-
-
-def _load_drilling_coefficients() -> dict[str, Any]:
-    """Return cached drilling estimator coefficients from ``data/drilling.json``."""
-
-    global _DRILLING_COEFFICIENTS
-    if _DRILLING_COEFFICIENTS is None:
-        try:
-            with _DRILLING_DATA_PATH.open("r", encoding="utf-8") as handle:
-                _DRILLING_COEFFICIENTS = json.load(handle)
-        except FileNotFoundError:
-            _DRILLING_COEFFICIENTS = {}
-    return _DRILLING_COEFFICIENTS
-
-
 from cad_quoter.llm_overrides import (
     HARDWARE_PASS_LABEL,
     LEGACY_HARDWARE_PASS_LABEL,
@@ -110,6 +82,33 @@ from cad_quoter.llm_overrides import (
 )
 
 from cad_quoter.vendors import ezdxf as _ezdxf_vendor
+
+from appkit.geometry_shim import (
+    read_cad_any,
+    read_step_shape,
+    read_dxf_as_occ_shape,
+    convert_dwg_to_dxf,
+    enrich_geo_occ,
+    enrich_geo_stl,
+    safe_bbox,
+    iter_solids,
+    parse_hole_table_lines,
+    extract_text_lines_from_dxf,
+    text_harvest,
+    upsert_var_row,
+    require_ezdxf,
+    get_dwg_converter_path,
+    get_import_diagnostics_text,
+    extract_features_with_occ,
+    _HAS_TRIMESH,
+    _HAS_EZDXF,
+    _HAS_ODAFC,
+    _EZDXF_VER,
+    _HAS_PYMUPDF,
+    fitz,
+    ezdxf,
+    odafc,
+)
 
 from appkit.ui.tk_compat import (
     tk,
@@ -152,6 +151,13 @@ from appkit.occ_compat import (
     BRepTools,
 )
 
+from appkit.time_overhead_compat import (
+    _TIME_OVERHEAD_SUPPORTS_INDEX_SEC,
+    OverheadLike,
+    _assign_overhead_index_attr,
+    _ensure_overhead_index_attr,
+)
+
 from appkit.scrap_helpers import (
     SCRAP_DEFAULT_GUESS,
     HOLE_SCRAP_MULT,
@@ -161,7 +167,7 @@ from appkit.scrap_helpers import (
     normalize_scrap_pct,
 )
 
-from appkit.data import load_text
+from appkit.data import load_json, load_text
 from appkit.debug.debug_tables import (
     _jsonify_debug_value,
     _jsonify_debug_summary,
@@ -178,8 +184,17 @@ from appkit.llm_adapter import (
     get_llm_overrides,
     get_llm_bound_defaults,
 )
+from appkit.llm_converters import (
+    overrides_to_suggestions,
+    suggestions_to_overrides,
+)
 
 from appkit.planner_adapter import resolve_planner
+from appkit.planner_helpers import (
+    _PROCESS_PLANNERS,
+    _PROCESS_PLANNER_HELPERS,
+    _process_plan_job,
+)
 
 if sys.platform == "win32":
     occ_bin = os.path.join(sys.prefix, "Library", "bin")
@@ -191,16 +206,6 @@ APP_ENV = replace(APP_ENV, llm_debug_enabled=True)  # force-enable debug uncondi
 
 
 EXTRA_DETAIL_RE = re.compile(r"^includes\b.*extras\b", re.IGNORECASE)
-
-
-def _coerce_env_bool(value: str | None) -> bool:
-    if value is None:
-        return False
-    coerced = _coerce_bool(value)
-    return bool(coerced)
-
-
-FORCE_PLANNER = _coerce_env_bool(os.environ.get("FORCE_PLANNER"))
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -236,28 +241,6 @@ def _compute_direct_costs(
 # Formatting helpers
 # ---------------------------------------------------------------------------
 
-
-def _format_hours_with_rate(
-    hours: Any,
-    rate: Any,
-    *,
-    currency_formatter: Callable[[float], str],
-) -> str:
-    """Render an hours/rate pair with a supplied currency formatter."""
-
-    try:
-        hours_val = float(hours or 0.0)
-    except Exception:
-        hours_val = 0.0
-    lines.append(
-        "  SFM→RPM: "
-        f"{_fmt(sfm_avg, '{:.0f}')} → {_fmt(rpm_avg, '{:.0f}')}   IPR: {_fmt(ipr_avg, '{:.4f}')}   IPM: {_fmt(ipm_avg, '{:.1f}')}"
-    )
-    lines.append(
-        "  Time: "
-        f"{_fmt(per_hole_minutes, '{:.2f}')} min/hole   Total: {_fmt(total_minutes, '{:.1f}')} min"
-    )
-    lines.append("")
 
 # Guardrails for LLM-generated process adjustments.
 
@@ -335,12 +318,10 @@ from typing import (
     Type,
     TypeVar,
     NoReturn,
-    TypeAlias,
     cast,
     Literal,
     MutableMapping,
     overload,
-    TYPE_CHECKING,
     no_type_check,
 )
 from functools import cmp_to_key
@@ -652,154 +633,6 @@ else:  # pragma: no cover - fallback definitions keep quoting functional without
     def explain_quote(*args, **kwargs) -> str:  # pragma: no cover - fallback
         return "LLM explanation unavailable."
 
-try:
-    _TIME_OVERHEAD_FIELD_NAMES = {
-        field.name for field in dataclass_fields(_TimeOverheadParams)
-    }
-except Exception:  # pragma: no cover - defensive against non-dataclass implementations
-    _TIME_OVERHEAD_FIELD_NAMES = set()
-
-def _detect_index_support() -> bool:
-    """Return True when ``OverheadParams`` exposes ``index_sec_per_hole``."""
-
-    if "index_sec_per_hole" in _TIME_OVERHEAD_FIELD_NAMES:
-        return True
-
-    try:
-        probe = _TimeOverheadParams()
-    except Exception:
-        # If the constructor requires additional parameters we conservatively
-        # assume the optional index field is unavailable.
-        return False
-
-    if hasattr(probe, "index_sec_per_hole"):
-        return True
-
-    for setter in (setattr, object.__setattr__):
-        try:
-            setter(probe, "index_sec_per_hole", None)
-        except Exception:
-            continue
-        else:
-            return hasattr(probe, "index_sec_per_hole")
-
-    return False
-
-
-_TIME_OVERHEAD_SUPPORTS_INDEX_SEC = _detect_index_support()
-
-
-OverheadLike: TypeAlias = _TimeOverheadParams | SimpleNamespace
-
-
-def _assign_overhead_index_attr(
-    overhead: _TimeOverheadParams, index_value: float | None
-) -> bool:
-    """Attempt to assign ``index_sec_per_hole`` on ``overhead``.
-
-    Returns ``True`` when the attribute exists (either pre-existing or after
-    assignment) and ``False`` when the underlying dataclass does not support
-    the field.
-    """
-
-    if overhead is None:
-        return False
-
-    if hasattr(overhead, "index_sec_per_hole"):
-        try:
-            setattr(overhead, "index_sec_per_hole", index_value)
-        except Exception:
-            try:
-                object.__setattr__(overhead, "index_sec_per_hole", index_value)
-            except Exception:
-                # Attribute exists but cannot be mutated (e.g. frozen
-                # dataclass). Treat as available so downstream callers rely on
-                # the existing value.
-                return True
-        return True
-
-    for setter in (setattr, object.__setattr__):
-        try:
-            setter(overhead, "index_sec_per_hole", index_value)
-        except Exception:
-            continue
-        else:
-            return True
-
-    return False
-
-
-def _ensure_overhead_index_attr(
-    overhead: _TimeOverheadParams, index_value: float | None, *, assigned: bool = False
-) -> OverheadLike:
-    """Return an overhead object that always exposes ``index_sec_per_hole``."""
-
-    if hasattr(overhead, "index_sec_per_hole"):
-        if not assigned:
-            _assign_overhead_index_attr(overhead, index_value)
-        return overhead
-
-    payload: dict[str, Any] = {}
-    if is_dataclass(overhead):
-        try:
-            payload = asdict(overhead)
-        except Exception:
-            payload = {}
-
-    if not payload:
-        for name in (
-            "toolchange_min",
-            "approach_retract_in",
-            "peck_penalty_min_per_in_depth",
-            "dwell_min",
-            "peck_min",
-        ):
-            if hasattr(overhead, name):
-                payload[name] = getattr(overhead, name)
-
-    payload.setdefault("index_sec_per_hole", index_value)
-    try:
-        return SimpleNamespace(**payload)
-    except Exception:
-        return overhead
-
-try:
-    from process_planner import (
-        PLANNERS as _PROCESS_PLANNERS,
-    )
-    from process_planner import (
-        choose_skims as _planner_choose_skims,
-    )
-    from process_planner import (
-        choose_wire_size as _planner_choose_wire_size,
-    )
-    from process_planner import (
-        needs_wedm_for_windows as _planner_needs_wedm_for_windows,
-    )
-    from process_planner import (
-        plan_job as _process_plan_job,
-    )
-except Exception:  # pragma: no cover - planner is optional at runtime
-    _process_plan_job = None
-    _PROCESS_PLANNERS = {}
-    _planner_choose_wire_size = None
-    _planner_choose_skims = None
-    _planner_needs_wedm_for_windows = None
-else:  # pragma: no cover - defensive guard for unexpected exports
-    if not isinstance(_PROCESS_PLANNERS, dict):
-        _PROCESS_PLANNERS = {}
-
-
-_PROCESS_PLANNER_HELPERS: dict[str, Callable[..., Any]] = {}
-if "_planner_choose_wire_size" in globals() and callable(_planner_choose_wire_size):
-    _PROCESS_PLANNER_HELPERS["choose_wire_size"] = _planner_choose_wire_size  # type: ignore[index]
-if "_planner_choose_skims" in globals() and callable(_planner_choose_skims):
-    _PROCESS_PLANNER_HELPERS["choose_skims"] = _planner_choose_skims  # type: ignore[index]
-if "_planner_needs_wedm_for_windows" in globals() and callable(
-    _planner_needs_wedm_for_windows
-):
-    _PROCESS_PLANNER_HELPERS["needs_wedm_for_windows"] = _planner_needs_wedm_for_windows  # type: ignore[index]
-
 
 # Mapping of process keys to editor labels for propagating derived hours from
 # LLM suggestions. The scale term allows lightweight conversions if we need to
@@ -869,7 +702,7 @@ def _canonical_amortized_label(label: Any) -> tuple[str, bool]:
     return text, False
 
 import pandas as pd
-from typing import TYPE_CHECKING, TypedDict
+from typing import TypedDict
 
 try:
     from geo_read_more import build_geo_from_dxf as build_geo_from_dxf_path
@@ -905,61 +738,6 @@ def set_build_geo_from_dxf_hook(
 
     global _build_geo_from_dxf_hook
     _build_geo_from_dxf_hook = loader
-
-
-# Geometry helpers (re-exported for backward compatibility)
-def _missing_geom_fn(name: str):
-    def _fn(*_a, **_k):
-        raise RuntimeError(f"geometry helper '{name}' is unavailable in this build")
-    return _fn
-
-def _export(name: str):
-    return getattr(geometry, name, _missing_geom_fn(name))
-
-read_cad_any = _export("read_cad_any")
-read_step_shape = _export("read_step_shape")
-read_dxf_as_occ_shape = _export("read_dxf_as_occ_shape")
-convert_dwg_to_dxf = _export("convert_dwg_to_dxf")
-enrich_geo_occ = _export("enrich_geo_occ")
-enrich_geo_stl = _export("enrich_geo_stl")
-safe_bbox = _export("safe_bbox")
-iter_solids = _export("iter_solids")
-parse_hole_table_lines = _export("parse_hole_table_lines")
-extract_text_lines_from_dxf = _export("extract_text_lines_from_dxf")
-text_harvest = _export("text_harvest")
-upsert_var_row = _export("upsert_var_row")
-require_ezdxf = _export("require_ezdxf")
-get_dwg_converter_path = _export("get_dwg_converter_path")
-get_import_diagnostics_text = _export("get_import_diagnostics_text")
-extract_features_with_occ = _export("extract_features_with_occ")
-
-_HAS_TRIMESH = getattr(geometry, "HAS_TRIMESH", False)
-_HAS_EZDXF = getattr(geometry, "HAS_EZDXF", False)
-_HAS_ODAFC = getattr(geometry, "HAS_ODAFC", False)
-_EZDXF_VER = geometry.EZDXF_VERSION
-_HAS_PYMUPDF = getattr(geometry, "_HAS_PYMUPDF", getattr(geometry, "HAS_PYMUPDF", False))
-fitz = getattr(geometry, "fitz", None)
-
-if _HAS_EZDXF:
-    try:
-        ezdxf = _ezdxf_vendor.require_ezdxf()
-    except Exception:
-        ezdxf = None  # type: ignore[assignment]
-else:
-    ezdxf = None  # type: ignore[assignment]
-
-if _HAS_ODAFC:
-    try:
-        odafc = _ezdxf_vendor.require_odafc()
-    except Exception:
-        odafc = None  # type: ignore[assignment]
-else:
-    odafc = None  # type: ignore[assignment]
-
-if TYPE_CHECKING:
-    class _EzdxfLayouts(Protocol):
-        def names_in_taborder(self) -> Iterable[str]: ...
-
 
 
 def _scrap_value_provided(val: Any) -> bool:
@@ -1036,303 +814,6 @@ from cad_quoter.domain import (
 )
 
 
-def _clean_string(value: Any) -> str | None:
-    text = str(value or "").strip()
-    return text or None
-
-
-def _clean_str_list(value: Any) -> list[str]:
-    if isinstance(value, (list, tuple, set)):
-        cleaned = []
-        for entry in value:
-            item = _clean_string(entry)
-            if item:
-                cleaned.append(item)
-        return cleaned
-    item = _clean_string(value)
-    return [item] if item else []
-
-
-def _coerce_int(value: Any) -> int | None:
-    num = _coerce_float_or_none(value)
-    if num is None or not math.isfinite(num):
-        return None
-    rounded = int(round(float(num)))
-    return rounded if rounded > 0 else None
-
-
-def overrides_to_suggestions(
-    overrides: Mapping[str, Any] | None,
-    *,
-    bounds: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Convert override inputs into the sanitized suggestion structure used by tests."""
-
-    if not isinstance(overrides, _MappingABC):
-        return {}
-
-    guardrails = coerce_bounds(bounds or {})
-    suggestions: dict[str, Any] = {}
-
-    def _clamp_multiplier(value: Any) -> float | None:
-        num = _coerce_float_or_none(value)
-        if num is None:
-            return None
-        return clamp(float(num), guardrails["mult_min"], guardrails["mult_max"])
-
-    def _clamp_adder(key: str, value: Any) -> float | None:
-        num = _coerce_float_or_none(value)
-        if num is None:
-            return None
-        lower = guardrails["adder_min_hr"]
-        upper = guardrails["adder_max_hr"]
-        bucket_caps = guardrails.get("adder_bucket_max") or {}
-        if isinstance(bucket_caps, dict):
-            bucket_cap = bucket_caps.get(str(key).lower())
-            if isinstance(bucket_cap, (int, float)):
-                upper = min(upper, float(bucket_cap))
-        return clamp(float(num), lower, upper)
-
-    mults_raw = overrides.get("process_hour_multipliers") or overrides.get("process_hour_mults")
-    if isinstance(mults_raw, _MappingABC):
-        mults: dict[str, float] = {}
-        for key, value in mults_raw.items():
-            cleaned = _clamp_multiplier(value)
-            if cleaned is None:
-                continue
-            label = _clean_string(key)
-            if not label:
-                continue
-            mults[label] = cleaned
-        if mults:
-            suggestions["process_hour_multipliers"] = mults
-
-    adders_raw = overrides.get("process_hour_adders") or overrides.get("process_hour_adds")
-    if isinstance(adders_raw, _MappingABC):
-        adders: dict[str, float] = {}
-        for key, value in adders_raw.items():
-            cleaned = _clamp_adder(str(key), value)
-            if cleaned is None:
-                continue
-            label = _clean_string(key)
-            if not label:
-                continue
-            adders[label] = cleaned
-        if adders:
-            suggestions["process_hour_adders"] = adders
-
-    add_pass_raw = overrides.get("add_pass_through") or overrides.get("pass_through")
-    add_pass = canonicalize_pass_through_map(add_pass_raw)
-    if add_pass:
-        suggestions["add_pass_through"] = add_pass
-
-    scrap_val = overrides.get("scrap_pct")
-    if scrap_val is None:
-        scrap_val = overrides.get("scrap_pct_override")
-    scrap = _coerce_float_or_none(scrap_val)
-    if scrap is not None:
-        scrap = clamp(float(scrap), guardrails["scrap_min"], guardrails["scrap_max"])
-        suggestions["scrap_pct"] = scrap
-
-    contingency = _coerce_float_or_none(overrides.get("contingency_pct"))
-    if contingency is not None:
-        suggestions["contingency_pct"] = max(0.0, float(contingency))
-
-    setups_val = _coerce_int(overrides.get("setups"))
-    if setups_val is not None:
-        suggestions["setups"] = setups_val
-
-    fixture = _clean_string(overrides.get("fixture"))
-    if fixture:
-        suggestions["fixture"] = fixture
-
-    notes = _clean_str_list(overrides.get("notes"))
-    if notes:
-        suggestions["notes"] = notes
-
-    op_seq = _clean_str_list(overrides.get("operation_sequence"))
-    if op_seq:
-        suggestions["operation_sequence"] = op_seq
-
-    risks = _clean_str_list(overrides.get("dfm_risks"))
-    if risks:
-        suggestions["dfm_risks"] = risks
-
-    drilling_strategy = overrides.get("drilling_strategy")
-    if isinstance(drilling_strategy, _MappingABC):
-        cleaned: dict[str, Any] = {}
-        multiplier = _clamp_multiplier(drilling_strategy.get("multiplier"))
-        if multiplier is not None:
-            cleaned["multiplier"] = multiplier
-        per_hole = _coerce_float_or_none(drilling_strategy.get("per_hole_floor_sec"))
-        if per_hole is not None:
-            cleaned["per_hole_floor_sec"] = max(0.0, float(per_hole))
-        note = _clean_string(drilling_strategy.get("note") or drilling_strategy.get("reason"))
-        if note:
-            cleaned["note"] = note
-        if cleaned:
-            suggestions["drilling_strategy"] = cleaned
-
-    drilling_groups_raw = overrides.get("drilling_groups")
-    if isinstance(drilling_groups_raw, (list, tuple)):
-        cleaned_groups: list[dict[str, Any]] = []
-        for entry in drilling_groups_raw:
-            if not isinstance(entry, _MappingABC):
-                continue
-            qty = _coerce_int(entry.get("qty") or entry.get("count"))
-            dia = _coerce_float_or_none(entry.get("dia_mm") or entry.get("diameter_mm"))
-            if qty is None or dia is None:
-                continue
-            cleaned_groups.append({"qty": qty, "dia_mm": float(dia)})
-        if cleaned_groups:
-            suggestions["drilling_groups"] = cleaned_groups
-
-    stock_rec = overrides.get("stock_recommendation")
-    if isinstance(stock_rec, _MappingABC):
-        stock_clean: dict[str, Any] = {}
-        stock_item = _clean_string(stock_rec.get("stock_item"))
-        if stock_item:
-            stock_clean["stock_item"] = stock_item
-        length = _coerce_float_or_none(stock_rec.get("length_mm"))
-        if length is not None:
-            stock_clean["length_mm"] = float(length)
-        if stock_clean:
-            suggestions["stock_recommendation"] = stock_clean
-
-    setup_rec = overrides.get("setup_recommendation")
-    if isinstance(setup_rec, _MappingABC):
-        setup_clean: dict[str, Any] = {}
-        setup_count = _coerce_int(setup_rec.get("setups"))
-        if setup_count is not None:
-            setup_clean["setups"] = setup_count
-        if setup_clean:
-            suggestions["setup_recommendation"] = setup_clean
-
-    packaging = _coerce_float_or_none(overrides.get("packaging_flat_cost"))
-    if packaging is not None:
-        suggestions["packaging_flat_cost"] = float(packaging)
-
-    fai_required = _coerce_bool(overrides.get("fai_required"))
-    if fai_required is not None:
-        suggestions["fai_required"] = bool(fai_required)
-
-    shipping_hint = _clean_string(overrides.get("shipping_hint"))
-    if shipping_hint:
-        suggestions["shipping_hint"] = shipping_hint
-
-    return suggestions
-
-
-def suggestions_to_overrides(suggestions: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Normalize LLM suggestions into a deterministic overrides payload."""
-
-    if not isinstance(suggestions, _MappingABC):
-        return {}
-
-    overrides: dict[str, Any] = {}
-
-    def _coerce_multiplier_map(raw: Any) -> dict[str, float]:
-        result: dict[str, float] = {}
-        if isinstance(raw, _MappingABC):
-            for key, value in raw.items():
-                label = _clean_string(key)
-                if not label:
-                    continue
-                num = _coerce_float_or_none(value)
-                if num is None:
-                    continue
-                result[label] = float(num)
-        return result
-
-    mults = _coerce_multiplier_map(suggestions.get("process_hour_multipliers"))
-    if mults:
-        overrides["process_hour_multipliers"] = mults
-
-    adders = _coerce_multiplier_map(suggestions.get("process_hour_adders"))
-    if adders:
-        overrides["process_hour_adders"] = adders
-
-    add_pass = canonicalize_pass_through_map(suggestions.get("add_pass_through"))
-    if add_pass:
-        overrides["add_pass_through"] = add_pass
-
-    scrap = _coerce_float_or_none(suggestions.get("scrap_pct"))
-    if scrap is not None:
-        overrides["scrap_pct"] = max(0.0, float(scrap))
-
-    contingency = _coerce_float_or_none(suggestions.get("contingency_pct"))
-    if contingency is not None:
-        overrides["contingency_pct"] = max(0.0, float(contingency))
-
-    setups_val = _coerce_int(suggestions.get("setups"))
-    if setups_val is not None:
-        overrides["setups"] = setups_val
-
-    fixture = _clean_string(suggestions.get("fixture"))
-    if fixture:
-        overrides["fixture"] = fixture
-
-    notes = _clean_str_list(suggestions.get("notes"))
-    if notes:
-        overrides["notes"] = notes
-
-    risks = _clean_str_list(suggestions.get("dfm_risks"))
-    if risks:
-        overrides["dfm_risks"] = risks
-
-    op_seq = _clean_str_list(suggestions.get("operation_sequence"))
-    if op_seq:
-        overrides["operation_sequence"] = op_seq
-
-    drilling_strategy = suggestions.get("drilling_strategy")
-    if isinstance(drilling_strategy, _MappingABC):
-        cleaned: dict[str, Any] = {}
-        multiplier = _coerce_float_or_none(drilling_strategy.get("multiplier"))
-        if multiplier is not None:
-            cleaned["multiplier"] = float(multiplier)
-        per_hole = _coerce_float_or_none(drilling_strategy.get("per_hole_floor_sec"))
-        if per_hole is not None:
-            cleaned["per_hole_floor_sec"] = max(0.0, float(per_hole))
-        note = _clean_string(drilling_strategy.get("note"))
-        if note:
-            cleaned["note"] = note
-        if cleaned:
-            overrides["drilling_strategy"] = cleaned
-
-    packaging = _coerce_float_or_none(suggestions.get("packaging_flat_cost"))
-    if packaging is not None:
-        overrides["packaging_flat_cost"] = float(packaging)
-
-    fai = _coerce_bool(suggestions.get("fai_required"))
-    if fai is not None:
-        overrides["fai_required"] = bool(fai)
-
-    shipping = _clean_string(suggestions.get("shipping_hint"))
-    if shipping:
-        overrides["shipping_hint"] = shipping
-
-    stock_rec = suggestions.get("stock_recommendation")
-    if isinstance(stock_rec, _MappingABC):
-        stock_clean: dict[str, Any] = {}
-        stock_item = _clean_string(stock_rec.get("stock_item"))
-        if stock_item:
-            stock_clean["stock_item"] = stock_item
-        length = _coerce_float_or_none(stock_rec.get("length_mm"))
-        if length is not None:
-            stock_clean["length_mm"] = float(length)
-        if stock_clean:
-            overrides["stock_recommendation"] = stock_clean
-
-    setup_rec = suggestions.get("setup_recommendation")
-    if isinstance(setup_rec, _MappingABC):
-        setup_clean: dict[str, Any] = {}
-        setup_count = _coerce_int(setup_rec.get("setups"))
-        if setup_count is not None:
-            setup_clean["setups"] = setup_count
-        if setup_clean:
-            overrides["setup_recommendation"] = setup_clean
-
-    return overrides
 def apply_suggestions(baseline: dict, s: dict) -> dict:
     """Apply sanitized LLM suggestions onto a baseline quote snapshot."""
 
@@ -9311,7 +8792,10 @@ def _holes_removed_mass_g(geo_context: Mapping[str, Any] | None) -> float | None
     mass_g = volume_cm3 * float(density_g_cc)
     return mass_g if mass_g > 0 else None
 
-_DRILLING_COEFFS = _load_drilling_coefficients()
+try:
+    _DRILLING_COEFFS = load_json("drilling.json")
+except FileNotFoundError:
+    _DRILLING_COEFFS = {}
 MIN_DRILL_MIN_PER_HOLE = float(_DRILLING_COEFFS.get("min_minutes_per_hole", 0.10))
 DEFAULT_MAX_DRILL_MIN_PER_HOLE = float(_DRILLING_COEFFS.get("max_minutes_per_hole", 3.00))
 
@@ -18325,28 +17809,9 @@ def extract_pdf_all(pdf_path: Path, dpi: int = 300) -> dict:
     doc.close()
     return {"pages": pages, "best": best}
 
-JSON_SCHEMA = {
-    "part_name": "str|null",
-    "material": {"name": "str|null", "thickness_in": "float|null"},
-    "quantity": "int|null",
-    "estimates": {
-        "Programming Hours": "float|null",
-        "CAM Programming Hours": "float|null",
-        "Engineering (Docs/Fixture Design) Hours": "float|null",
-        "Fixture Build Hours": "float|null",
-        "Roughing Cycle Time": "float|null",
-        "Semi-Finish Cycle Time": "float|null",
-        "Finishing Cycle Time": "float|null",
-        "In-Process Inspection Hours": "float|null",
-        "Final Inspection Hours": "float|null",
-        "Deburr Hours": "float|null",
-        "Sawing Hours": "float|null",
-        "Assembly Hours": "float|null",
-        "Packaging Labor Hours": "float|null"
-    },
-    "flags": {"FAIR Required": "0|1", "Source Inspection Requirement": "0|1"},
-    "reasoning_brief": "str"
-}
+JSON_SCHEMA = load_json("vl_pdf_schema.json")
+MAP_KEYS = load_json("vl_pdf_map_keys.json")
+PDF_SYSTEM_PROMPT = load_text("vl_pdf_system_prompt.txt").strip()
 
 def _truncate_text(text: str, max_chars: int = 5000) -> str:
     text = text or ""
@@ -18359,10 +17824,7 @@ def _truncate_text(text: str, max_chars: int = 5000) -> str:
 def build_llm_prompt(best_page: dict) -> dict:
     text = _truncate_text(best_page.get("text", ""))
     schema = jdump(JSON_SCHEMA)
-    system = (
-        "You are a manufacturing estimator. Read the drawing text and image and return JSON only. "
-        "Estimate hours conservatively and do not invent dimensions."
-    )
+    system = PDF_SYSTEM_PROMPT
     user = (
         f"TEXT FROM PDF PAGE:\n{text}\n\n"
         f"REQUIRED JSON SHAPE:\n{schema}\n\n"
@@ -18385,26 +17847,6 @@ def infer_pdf_estimate(structured: dict) -> dict:
     prompt = build_llm_prompt(best_page)
     return run_llm_json(prompt["system"], prompt["user"], prompt["image_path"])
 
-MAP_KEYS = {
-    "Quantity": "quantity",
-    "Material": ("material", "name"),
-    "Thickness (in)": ("material", "thickness_in"),
-    "Programming Hours": ("estimates", "Programming Hours"),
-    "CAM Programming Hours": ("estimates", "CAM Programming Hours"),
-    "Engineering (Docs/Fixture Design) Hours": ("estimates", "Engineering (Docs/Fixture Design) Hours"),
-    "Fixture Build Hours": ("estimates", "Fixture Build Hours"),
-    "Roughing Cycle Time": ("estimates", "Roughing Cycle Time"),
-    "Semi-Finish Cycle Time": ("estimates", "Semi-Finish Cycle Time"),
-    "Finishing Cycle Time": ("estimates", "Finishing Cycle Time"),
-    "In-Process Inspection Hours": ("estimates", "In-Process Inspection Hours"),
-    "Final Inspection Hours": ("estimates", "Final Inspection Hours"),
-    "Deburr Hours": ("estimates", "Deburr Hours"),
-    "Sawing Hours": ("estimates", "Sawing Hours"),
-    "Assembly Hours": ("estimates", "Assembly Hours"),
-    "Packaging Labor Hours": ("estimates", "Packaging Labor Hours"),
-    "FAIR Required": ("flags", "FAIR Required"),
-    "Source Inspection Requirement": ("flags", "Source Inspection Requirement"),
-}
 
 def _deep_get(d: dict, path):
     if isinstance(path, str):
