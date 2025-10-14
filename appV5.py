@@ -74,15 +74,6 @@ from cad_quoter.domain import (
 
 from cad_quoter.vendors import ezdxf as _ezdxf_vendor
 
-# ``typing.cast`` calls further down reference ``Drawing`` at runtime.  If
-# ``ezdxf`` is unavailable (common on fresh installs) those casts would raise a
-# ``NameError`` instead of surfacing the real import/conversion issue.  Guard the
-# alias so the UI shows the intended error message instead.
-try:  # pragma: no cover - exercised indirectly through GUI flows
-    from ezdxf.ezdxf import Drawing  # type: ignore[attr-defined]
-except Exception:  # pragma: no cover - missing optional dependency
-    Drawing = typing.Any  # type: ignore[assignment]
-
 from appkit.geometry_shim import (
     read_cad_any,
     read_step_shape,
@@ -256,6 +247,46 @@ from typing import (
     no_type_check,
 )
 from functools import cmp_to_key
+
+if typing.TYPE_CHECKING:  # pragma: no cover - import is for type checking only
+    from ezdxf.document import Drawing  # type: ignore[attr-defined]
+else:  # pragma: no cover - fallback when ezdxf is unavailable at runtime
+    try:
+        from ezdxf.ezdxf import Drawing  # type: ignore[attr-defined]
+    except Exception:
+        class Drawing(Protocol):
+            """Minimal protocol used for ezdxf drawing type hints."""
+
+            def modelspace(self) -> Any: ...
+
+if typing.TYPE_CHECKING:
+    import pandas as pd
+    from cad_quoter.domain import QuoteState as _QuoteState
+
+    def compute_quote_from_df(
+        df: pd.DataFrame,
+        *,
+        params: Mapping[str, Any] | None = ...,
+        rates: Mapping[str, Any] | None = ...,
+        default_params: Mapping[str, Any] | None = ...,
+        default_rates: Mapping[str, Any] | None = ...,
+        default_material_display: Mapping[str, Any] | None = ...,
+        material_vendor_csv: str | None = ...,
+        llm_enabled: bool = ...,
+        llm_model_path: str | None = ...,
+        llm_client: Any | None = ...,
+        geo: Mapping[str, Any] | None = ...,
+        ui_vars: Mapping[str, Any] | None = ...,
+        quote_state: _QuoteState | None = ...,
+        reuse_suggestions: Mapping[str, Any] | None = ...,
+        llm_suggest: Any | None = ...,
+    ) -> dict[str, Any]: ...
+else:
+    try:
+        from cad_quoter_legacy import compute_quote_from_df as compute_quote_from_df  # type: ignore[import]
+    except Exception:
+        def compute_quote_from_df(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            raise RuntimeError("compute_quote_from_df is unavailable in this build; ensure the quoting engine is bundled.")
 
 # �"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?�"?
 # Sync the estimator's drilling hours into all rendered views
@@ -1202,15 +1233,6 @@ except Exception:
     _HAS_PYMUPDF = False
 
 DIM_RE = re.compile(r"(?:ï¿½|DIAM|DIA)\s*([0-9.+-]+)|R\s*([0-9.+-]+)|([0-9.+-]+)\s*[xX]\s*([0-9.+-]+)")
-
-if typing.TYPE_CHECKING:  # pragma: no cover - import is for type checking only
-    from ezdxf.document import Drawing  # type: ignore
-else:  # pragma: no cover - fallback when ezdxf is unavailable at runtime
-    class Drawing(Protocol):
-        """Minimal protocol used for ezdxf drawing type hints."""
-
-        def modelspace(self) -> Any: ...
-
 
 def load_drawing(path: Path) -> Drawing:
     ezdxf_mod = typing.cast(_EzdxfModule, require_ezdxf())
