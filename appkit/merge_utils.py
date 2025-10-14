@@ -8,8 +8,6 @@ from typing import Any
 from appkit.planner_adapter import _coerce_bool
 from cad_quoter.coerce import to_float, to_int
 from cad_quoter.domain import (
-    HARDWARE_PASS_LABEL,
-    LEGACY_HARDWARE_PASS_LABEL,
     _canonical_pass_label,
     _as_float_or_none,
     canonicalize_pass_through_map,

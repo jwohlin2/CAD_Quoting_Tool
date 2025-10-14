@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-import json
 import math
 import os
 from collections.abc import Mapping as _MappingABC, Sequence
