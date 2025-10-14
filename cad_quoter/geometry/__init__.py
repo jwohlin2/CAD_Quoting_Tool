@@ -20,9 +20,49 @@ except Exception:
     _HAS_TRIMESH = False
 
 from cad_quoter.vendors import ezdxf as _ezdxf_vendor
-_MISSING_HELP = (
-    "OCCT bindings are required for geometry operations. "
-    "Install pythonocc-core or the OCP wheels."
+from cad_quoter.vendors.occt import (
+    STACK,
+    STACK_GPROP,
+    BRepAdaptor_Curve,
+    BRepAlgoAPI_Section,
+    BRep_Builder,
+    BRep_Tool,
+    BRepCheck_Analyzer,
+    BRepGProp,
+    GProp_GProps,
+    GeomAbs_BSplineSurface,
+    GeomAbs_BezierSurface,
+    GeomAbs_Circle,
+    GeomAbs_Cone,
+    GeomAbs_Cylinder,
+    GeomAbs_Plane,
+    GeomAbs_Torus,
+    GeomAdaptor_Surface,
+    IFSelect_RetDone,
+    IGESControl_Reader,
+    STEPControl_Reader,
+    ShapeAnalysis_Surface,
+    ShapeFix_Shape,
+    TopAbs_COMPOUND,
+    TopAbs_EDGE,
+    TopAbs_FACE,
+    TopAbs_SHELL,
+    TopAbs_SOLID,
+    TopExp,
+    TopExp_Explorer,
+    TopTools_IndexedDataMapOfShapeListOfShape,
+    TopoDS,
+    TopoDS_Compound,
+    TopoDS_Face,
+    TopoDS_Shape,
+    Bnd_Box,
+    bnd_add,
+    brep_read,
+    gp_Dir,
+    gp_Pln,
+    gp_Pnt,
+    gp_Vec,
+    uv_bounds,
 )
 
 try:

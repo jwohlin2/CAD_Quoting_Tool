@@ -1,0 +1,23 @@
+{
+  "amortized_tokens": ["amortized", "amortised"],
+  "per_part_token_sets": [
+    ["per", "part"],
+    ["per", "pc"],
+    ["per", "piece"]
+  ],
+  "per_part_phrases": ["per piece", "per unit"],
+  "pattern": "\\s*\\((amortized|amortised)(?:\\s+(?:per\\s+(?:part|piece|pc|unit)|each|ea))?\\)\\s*$",
+  "pattern_flags": ["IGNORECASE"],
+  "canonical_labels": [
+    {
+      "tokens_any": ["programming"],
+      "per_part": "Programming (amortized per part)",
+      "default": "Programming (amortized)"
+    },
+    {
+      "tokens_any": ["fixture", "fixturing"],
+      "per_part": "Fixture Build (amortized per part)",
+      "default": "Fixture Build (amortized)"
+    }
+  ]
+}

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 from collections.abc import Mapping as _MappingABC
 
-from appkit.env_utils import _coerce_bool, _coerce_env_bool, FORCE_PLANNER
+from appkit.env_utils import FORCE_PLANNER, _coerce_bool, _coerce_env_bool
 
 
 def resolve_planner(
@@ -200,5 +200,8 @@ __all__ = [
     "_planner_total_has_values",
     "_planner_meta_signals_present",
     "_planner_signals_present",
+    "_coerce_bool",
+    "_coerce_env_bool",
+    "FORCE_PLANNER",
 ]
 

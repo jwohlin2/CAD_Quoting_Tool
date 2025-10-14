@@ -15,30 +15,23 @@ from __future__ import annotations
 
 import argparse
 import copy
-import functools
 import importlib
 import json
-import logging
 import math
 import os
 import re
-import subprocess
 import sys
-import tempfile
 import time
 import typing
 from collections import Counter
 from collections.abc import Mapping as _MappingABC
-from collections.abc import MutableMapping as _MutableMappingABC
-from dataclasses import asdict, dataclass, field, replace, is_dataclass
+from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
 
 from cad_quoter.app import runtime as _runtime
 from cad_quoter.app._value_utils import (
-    _coerce_user_value,
-    _format_entry_value,
     _format_value,
 )
 from cad_quoter.app.container import (
@@ -55,14 +48,9 @@ from cad_quoter.config import (
 from cad_quoter.config import (
     describe_runtime_environment as _describe_runtime_environment,
 )
-from cad_quoter.utils.geo_ctx import _should_include_outsourced_pass
-from cad_quoter.utils import sheet_helpers
-from cad_quoter.utils.scrap import _estimate_scrap_from_stock_plan
 from cad_quoter.utils.render_utils import (
     fmt_hours,
     fmt_money,
-    fmt_percent,
-    fmt_range,
     format_currency,
     format_dimension,
     format_hours,
@@ -71,13 +59,16 @@ from cad_quoter.utils.render_utils import (
 )
 from cad_quoter.estimators import SpeedsFeedsUnavailableError
 from cad_quoter.llm_overrides import (
-    HARDWARE_PASS_LABEL,
-    LEGACY_HARDWARE_PASS_LABEL,
-    _as_float_or_none,
-    _canonical_pass_label,
     _plate_mass_properties,
     _plate_mass_from_dims,
     clamp,
+)
+
+from cad_quoter.domain import (
+    QuoteState,
+    HARDWARE_PASS_LABEL,
+    _canonical_pass_label,
+    canonicalize_pass_through_map,
     coerce_bounds,
 )
 
@@ -86,12 +77,10 @@ from cad_quoter.vendors import ezdxf as _ezdxf_vendor
 from appkit.geometry_shim import (
     read_cad_any,
     read_step_shape,
-    read_dxf_as_occ_shape,
     convert_dwg_to_dxf,
     enrich_geo_occ,
     enrich_geo_stl,
     safe_bbox,
-    iter_solids,
     parse_hole_table_lines,
     extract_text_lines_from_dxf,
     text_harvest,
@@ -100,13 +89,9 @@ from appkit.geometry_shim import (
     get_dwg_converter_path,
     get_import_diagnostics_text,
     extract_features_with_occ,
-    _HAS_TRIMESH,
-    _HAS_EZDXF,
     _HAS_ODAFC,
-    _EZDXF_VER,
     _HAS_PYMUPDF,
     fitz,
-    ezdxf,
     odafc,
 )
 
@@ -119,29 +104,26 @@ from appkit.ui.tk_compat import (
     _ensure_tk,
 )
 
+from appkit.guardrails import build_guard_context, apply_drilling_floor_notes
 from appkit.merge_utils import (
-    _coerce_bool,
     ACCEPT_SCALAR_KEYS,
-    SUGGESTION_SCALAR_KEYS,
     merge_effective,
     _collect_process_keys,
-    LOCKED_EFFECTIVE_FIELDS,
-    SUGGESTIBLE_EFFECTIVE_FIELDS,
-    NUMERIC_EFFECTIVE_FIELDS,
-    BOOL_EFFECTIVE_FIELDS,
-    TEXT_EFFECTIVE_FIELDS,
-    LIST_EFFECTIVE_FIELDS,
-    DICT_EFFECTIVE_FIELDS,
 )
+
+from appkit.effective import (
+    compute_effective_state,
+    effective_to_overrides,
+    ensure_accept_flags,
+    reprice_with_effective,
+)
+
+from appkit.ui.suggestions import iter_suggestion_rows
 
 from appkit.occ_compat import (
     BRep_Tool,
-    TopAbs_COMPOUND,
     TopAbs_EDGE,
     TopAbs_FACE,
-    TopAbs_SHELL,
-    TopAbs_SOLID,
-    TopAbs_ShapeEnum,
     TopExp,
     TopExp_Explorer,
     TopoDS,
@@ -159,42 +141,21 @@ from appkit.time_overhead_compat import (
 )
 
 from appkit.scrap_helpers import (
-    SCRAP_DEFAULT_GUESS,
-    HOLE_SCRAP_MULT,
-    _iter_hole_diams_mm,
-    _plate_bbox_mm2,
-    _holes_scrap_fraction,
     normalize_scrap_pct,
 )
 
 from appkit.data import load_json, load_text
+from appkit.utils.text_rules import (
+    PROC_MULT_TARGETS,
+    canonicalize_amortized_label as _canonical_amortized_label,
+)
 from appkit.debug.debug_tables import (
     _jsonify_debug_value,
-    _jsonify_debug_summary,
     _accumulate_drill_debug,
-    _format_range,
-    build_removal_debug_table,
-    _render_drilling_debug_table,
     append_removal_debug_if_enabled,
 )
 
-from appkit.llm_adapter import (
-    LLMClientLike,
-    run_llm_suggestions,
-    get_llm_overrides,
-    get_llm_bound_defaults,
-)
-from appkit.llm_converters import (
-    overrides_to_suggestions,
-    suggestions_to_overrides,
-)
 
-from appkit.planner_adapter import resolve_planner
-from appkit.planner_helpers import (
-    _PROCESS_PLANNERS,
-    _PROCESS_PLANNER_HELPERS,
-    _process_plan_job,
-)
 
 if sys.platform == "win32":
     occ_bin = os.path.join(sys.prefix, "Library", "bin")
@@ -266,36 +227,6 @@ def roughly_equal(a: float | int | str | None, b: float | int | str | None, *, e
         eps_val = 0.0
     return math.isclose(a_val, b_val, rel_tol=0.0, abs_tol=abs(eps_val))
 
-def _fallback_match_items_contains(items: "pd.Series | typing.Iterable[object]", pattern: str):
-    """Best-effort case-insensitive containment check without pandas dependencies."""
-
-    try:
-        compiled = re.compile(pattern, flags=re.IGNORECASE)
-    except re.error:
-        compiled = re.compile(re.escape(pattern), flags=re.IGNORECASE)
-
-    def _matches(value: object) -> bool:
-        text = "" if value is None else str(value)
-        return bool(compiled.search(text))
-
-    try:  # Defer pandas import so the fallback works in minimal environments.
-        import pandas as pd  # type: ignore[import]
-    except Exception:  # pragma: no cover - pandas is an optional dependency here
-        pd = None  # type: ignore[assignment]
-
-    if pd is not None:
-        try:
-            series = items if isinstance(items, pd.Series) else pd.Series(list(items))
-        except Exception:
-            series = pd.Series([], dtype="object")
-        return series.astype(str).apply(_matches)
-
-    # When pandas is unavailable, return a basic list of booleans preserving order.
-    try:
-        return [_matches(value) for value in items]
-    except TypeError:
-        return []
-
 import textwrap
 from typing import (
     Any,
@@ -303,18 +234,14 @@ from typing import (
     Dict,
     Iterable,
     Iterator,
-    List,
     Mapping,
     Optional,
     Protocol,
     Sequence,
     Tuple,
-    Type,
     TypeVar,
-    NoReturn,
     cast,
     Literal,
-    MutableMapping,
     overload,
     no_type_check,
 )
@@ -416,9 +343,7 @@ from appkit.occ_compat import (
 )
 from cad_quoter.geo2d import (
     apply_2d_features_to_variables,
-    to_noncapturing as _to_noncapturing,
 )
-from bucketizer import bucketize, _resolve_bucket_for_op
 
 # Tolerance for invariant checks that guard against silent drift when rendering
 # cost sections.
@@ -458,45 +383,15 @@ from cad_quoter.domain_models import (
 )
 from cad_quoter.coerce import to_float, to_int
 from cad_quoter.utils import compact_dict, jdump, json_safe_copy, sdict
+from cad_quoter.utils.text import _match_items_contains
 from cad_quoter.llm_suggest import (
-    build_suggest_payload,
-    sanitize_suggestions,
     get_llm_quote_explanation,
 )
-
-def _fallback_collection_has_text(value: Any) -> bool:
-    if isinstance(value, str):
-        return bool(value.strip())
-    if isinstance(value, _MappingABC):
-        return any(_fallback_collection_has_text(candidate) for candidate in value.values())
-    if isinstance(value, (list, tuple, set)):
-        return any(_fallback_collection_has_text(candidate) for candidate in value)
-    return False
-
-def _geo_mentions_outsourced(geo_context: Mapping[str, Any] | None) -> bool:
-    if isinstance(geo_context, _MappingABC):
-        if _fallback_collection_has_text(geo_context.get("finishes")):
-            return True
-    if callable(_imported_geo_mentions_outsourced):
-        return _imported_geo_mentions_outsourced(geo_context)
-    return False
-_match_items_contains = _fallback_match_items_contains  # type: ignore[assignment]
-
-try:
-    from cad_quoter.utils.text import _match_items_contains as _imported_match_items_contains
-except Exception:  # pragma: no cover - defensive fallback for optional import paths
-    _imported_match_items_contains = None  # type: ignore[assignment]
-else:
-    if callable(_imported_match_items_contains):
-        _match_items_contains = _imported_match_items_contains
-    else:
-        _match_items_contains = _fallback_match_items_contains
 from cad_quoter.pricing import (
     LB_PER_KG,
     PricingEngine,
     create_default_registry,
 )
-from cad_quoter.pricing import BACKUP_CSV_NAME
 
 _DEFAULT_MATERIAL_DENSITY_G_CC = MATERIAL_DENSITY_G_CC_BY_KEY.get(
     DEFAULT_MATERIAL_KEY, 7.85
@@ -511,9 +406,6 @@ from cad_quoter.pricing import (
     resolve_material_unit_price as _resolve_material_unit_price,
 )
 from cad_quoter.pricing import time_estimator as _time_estimator
-from cad_quoter.pricing.speeds_feeds_selector import (
-    normalize_material as _normalize_material,
-)
 from cad_quoter.pricing.speeds_feeds_selector import (
     pick_speeds_row as _pick_speeds_row,
 )
@@ -629,72 +521,6 @@ else:  # pragma: no cover - fallback definitions keep quoting functional without
         return "LLM explanation unavailable."
 
 
-# Mapping of process keys to editor labels for propagating derived hours from
-# LLM suggestions. The scale term allows lightweight conversions if we need to
-# express the hour totals in another unit for a given field.
-PROC_MULT_TARGETS: dict[str, tuple[str, float]] = {
-    # Processes that have direct counterparts in the default variables sheet.
-    "inspection": ("In-Process Inspection Hours", 1.0),
-    "finishing_deburr": ("Deburr Hours", 1.0),
-    "deburr": ("Deburr Hours", 1.0),
-    "saw_waterjet": ("Sawing Hours", 1.0),
-    "assembly": ("Assembly Hours", 1.0),
-    "packaging": ("Packaging Labor Hours", 1.0),
-}
-
-_AMORTIZED_LABEL_PATTERN = re.compile(r"\s*\((amortized|amortised)(?:\s+(?:per\s+(?:part|piece|pc|unit)|each|ea))?\)\s*$", re.IGNORECASE)
-
-def _canonical_amortized_label(label: Any) -> tuple[str, bool]:
-    """Return a canonical label and flag for amortized cost rows."""
-
-    text = str(label or "").strip()
-    if not text:
-        return "", False
-
-    normalized = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
-    normalized = normalized.replace("perpart", "per part")
-    normalized = normalized.replace("perpiece", "per piece")
-    tokens = normalized.split()
-    token_set = set(tokens)
-
-    def _has(*want: str) -> bool:
-        return all(token in token_set for token in want)
-
-    amortized_tokens = {"amortized", "amortised"}
-    has_amortized = any(token in token_set for token in amortized_tokens)
-
-    if has_amortized:
-        per_part = (
-            _has("per", "part")
-            or _has("per", "pc")
-            or _has("per", "piece")
-            or "per piece" in normalized
-            or "per unit" in normalized
-        )
-        if "programming" in token_set:
-            canonical = (
-                "Programming (amortized per part)"
-                if per_part
-                else "Programming (amortized)"
-            )
-            return canonical, True
-        if "fixture" in token_set or "fixturing" in token_set:
-            canonical = (
-                "Fixture Build (amortized per part)"
-                if per_part
-                else "Fixture Build (amortized)"
-            )
-            return canonical, True
-        return text, True
-
-    match = _AMORTIZED_LABEL_PATTERN.search(text)
-    if match:
-        prefix = text[: match.start()].rstrip()
-        canonical = f"{prefix} (amortized)" if prefix else match.group(1).lower()
-        return canonical, True
-
-    return text, False
-
 import pandas as pd
 from typing import TypedDict
 
@@ -793,18 +619,6 @@ def _auto_accept_suggestions(suggestions: dict[str, Any] | None) -> dict[str, An
         conf = _confidence_for(("drilling_strategy",))
         accept["drilling_strategy"] = True if conf is None else conf >= 0.6
     return accept
-from cad_quoter.domain import (
-    QuoteState,
-    HARDWARE_PASS_LABEL,
-    LEGACY_HARDWARE_PASS_LABEL,
-    _canonical_pass_label,
-    _as_float_or_none,
-    canonicalize_pass_through_map,
-    coerce_bounds,
-    get_llm_bound_defaults,
-)
-
-
 def apply_suggestions(baseline: dict, s: dict) -> dict:
     """Apply sanitized LLM suggestions onto a baseline quote snapshot."""
 
@@ -821,6 +635,13 @@ def apply_suggestions(baseline: dict, s: dict) -> dict:
 
 
 def compute_effective_state(state: QuoteState) -> tuple[dict, dict]:
+    existing_guard_ctx = getattr(state, "guard_context", None)
+    if not isinstance(existing_guard_ctx, dict) or not existing_guard_ctx:
+        try:
+            state.guard_context = build_guard_context(state)
+        except Exception:
+            state.guard_context = dict(existing_guard_ctx or {})
+
     baseline = state.baseline or {}
     suggestions = state.suggestions or {}
     overrides = state.user_overrides or {}
@@ -886,38 +707,7 @@ def compute_effective_state(state: QuoteState) -> tuple[dict, dict]:
 def reprice_with_effective(state: QuoteState) -> QuoteState:
     """Recompute effective values and enforce guardrails before pricing."""
 
-    geo_ctx = state.geo or {}
-    inner_geo_raw = geo_ctx.get("geo")
-    inner_geo_ctx: dict[str, Any] = inner_geo_raw if isinstance(inner_geo_raw, dict) else {}
-    hole_count_guard = _coerce_float_or_none(geo_ctx.get("hole_count"))
-    if hole_count_guard is None:
-        hole_count_guard = _coerce_float_or_none(inner_geo_ctx.get("hole_count"))
-    tap_qty_guard = _coerce_float_or_none(geo_ctx.get("tap_qty"))
-    if tap_qty_guard is None:
-        tap_qty_guard = _coerce_float_or_none(inner_geo_ctx.get("tap_qty"))
-    finish_flags_guard: set[str] = set()
-    finishes_geo = geo_ctx.get("finishes") or inner_geo_ctx.get("finishes")
-    if isinstance(finishes_geo, (list, tuple, set)):
-        finish_flags_guard.update(str(flag).strip().upper() for flag in finishes_geo if isinstance(flag, str) and flag.strip())
-    explicit_finish_flags = geo_ctx.get("finish_flags") or inner_geo_ctx.get("finish_flags")
-    if isinstance(explicit_finish_flags, (list, tuple, set)):
-        finish_flags_guard.update(str(flag).strip().upper() for flag in explicit_finish_flags if isinstance(flag, str) and flag.strip())
-    guard_ctx: dict[str, Any] = {
-        "hole_count": hole_count_guard,
-        "tap_qty": tap_qty_guard,
-        "min_sec_per_hole": 9.0,
-        "min_min_per_tap": 0.2,
-        "needs_back_face": bool(
-            geo_ctx.get("needs_back_face")
-            or geo_ctx.get("from_back")
-            or inner_geo_ctx.get("needs_back_face")
-            or inner_geo_ctx.get("from_back")
-        ),
-        "baseline_pass_through": (state.baseline.get("pass_through") if isinstance(state.baseline.get("pass_through"), dict) else {}),
-    }
-    if finish_flags_guard:
-        guard_ctx["finish_flags"] = sorted(finish_flags_guard)
-        guard_ctx.setdefault("finish_cost_floor", 50.0)
+    guard_ctx = build_guard_context(state)
     state.guard_context = guard_ctx
 
     ensure_accept_flags(state)
@@ -925,29 +715,7 @@ def reprice_with_effective(state: QuoteState) -> QuoteState:
     state.effective = merged
     state.effective_sources = sources
 
-    # drilling floor guard
-    eff_hours = state.effective.get("process_hours") if isinstance(state.effective.get("process_hours"), dict) else {}
-    if eff_hours:
-        try:
-            hole_count_geo = int(float(state.geo.get("hole_count", 0) or 0))
-        except Exception:
-            hole_count_geo = 0
-        hole_count = hole_count_geo
-        if hole_count <= 0:
-            holes = state.geo.get("hole_diams_mm")
-            if isinstance(holes, (list, tuple)):
-                hole_count = len(holes)
-        if hole_count > 0 and "drilling" in eff_hours:
-            current = to_float(eff_hours.get("drilling")) or 0.0
-            min_sec_per_hole = 9.0
-            floor_hr = (hole_count * min_sec_per_hole) / 3600.0
-            if current < floor_hr:
-                eff_hours["drilling"] = floor_hr
-                state.effective["process_hours"] = eff_hours
-                note = f"Raised drilling to floor for {hole_count} holes"
-                notes = state.effective.setdefault("notes", [])
-                if note not in notes:
-                    notes.append(note)
+    apply_drilling_floor_notes(state, guard_ctx=guard_ctx)
     return state
 
 def effective_to_overrides(effective: dict, baseline: dict | None = None) -> dict:
@@ -1076,66 +844,84 @@ def iter_suggestion_rows(state: QuoteState) -> list[dict]:
     accept_raw = state.accept_llm
     accept = accept_raw if isinstance(accept_raw, dict) else {}
 
-    baseline_hours_raw = baseline.get("process_hours") if isinstance(baseline.get("process_hours"), dict) else {}
+    def _coerce_dict(container: dict[str, Any], key: str) -> dict[str, Any]:
+        value = container.get(key)
+        return value if isinstance(value, dict) else {}
+
+    def _append_row(
+        path: tuple[str, ...],
+        label: str,
+        kind: str,
+        *,
+        baseline_value: Any,
+        llm_value: Any,
+        user_value: Any,
+        accept_value: bool,
+        effective_value: Any,
+        source_value: Any,
+    ) -> None:
+        rows.append(
+            {
+                "path": path,
+                "label": label,
+                "kind": kind,
+                "baseline": baseline_value,
+                "llm": llm_value,
+                "user": user_value,
+                "accept": accept_value,
+                "effective": effective_value,
+                "source": source_value,
+            }
+        )
+
+    baseline_hours_raw = _coerce_dict(baseline, "process_hours")
     baseline_hours: dict[str, float] = {}
-    for key, value in (baseline_hours_raw or {}).items():
+    for key, value in baseline_hours_raw.items():
         try:
-            if abs(float(value)) > 1e-6:
-                baseline_hours[key] = float(value)
+            as_float = float(value)
         except Exception:
             continue
+        if abs(as_float) > 1e-6:
+            baseline_hours[key] = as_float
 
-    sugg_mult_raw = suggestions.get("process_hour_multipliers")
-    sugg_mult = sugg_mult_raw if isinstance(sugg_mult_raw, dict) else {}
-    over_mult_raw = overrides.get("process_hour_multipliers")
-    over_mult = over_mult_raw if isinstance(over_mult_raw, dict) else {}
-    eff_mult_raw = effective.get("process_hour_multipliers")
-    eff_mult = eff_mult_raw if isinstance(eff_mult_raw, dict) else {}
-    src_mult_raw = sources.get("process_hour_multipliers")
-    src_mult = src_mult_raw if isinstance(src_mult_raw, dict) else {}
-    accept_mult_raw = accept.get("process_hour_multipliers")
-    accept_mult = accept_mult_raw if isinstance(accept_mult_raw, dict) else {}
-    keys_mult = sorted(_collect_process_keys(baseline_hours, sugg_mult, over_mult))
-    for key in keys_mult:
-        rows.append(
-            {
-                "path": ("process_hour_multipliers", key),
-                "label": f"Process × {key}",
-                "kind": "multiplier",
-                "baseline": 1.0,
-                "llm": sugg_mult.get(key),
-                "user": over_mult.get(key),
-                "accept": bool(accept_mult.get(key)),
-                "effective": eff_mult.get(key, 1.0),
-                "source": src_mult.get(key, "baseline"),
-            }
-        )
+    map_specs = [
+        {
+            "path": "process_hour_multipliers",
+            "label": "Process × {key}",
+            "kind": "multiplier",
+            "baseline": 1.0,
+        },
+        {
+            "path": "process_hour_adders",
+            "label": "Process +hr {key}",
+            "kind": "hours",
+            "baseline": 0.0,
+        },
+    ]
 
-    sugg_add_raw = suggestions.get("process_hour_adders")
-    sugg_add = sugg_add_raw if isinstance(sugg_add_raw, dict) else {}
-    over_add_raw = overrides.get("process_hour_adders")
-    over_add = over_add_raw if isinstance(over_add_raw, dict) else {}
-    eff_add_raw = effective.get("process_hour_adders")
-    eff_add = eff_add_raw if isinstance(eff_add_raw, dict) else {}
-    src_add_raw = sources.get("process_hour_adders")
-    src_add = src_add_raw if isinstance(src_add_raw, dict) else {}
-    accept_add_raw = accept.get("process_hour_adders")
-    accept_add = accept_add_raw if isinstance(accept_add_raw, dict) else {}
-    keys_add = sorted(_collect_process_keys(baseline_hours, sugg_add, over_add))
-    for key in keys_add:
-        rows.append(
-            {
-                "path": ("process_hour_adders", key),
-                "label": f"Process +hr {key}",
-                "kind": "hours",
-                "baseline": 0.0,
-                "llm": sugg_add.get(key),
-                "user": over_add.get(key),
-                "accept": bool(accept_add.get(key)),
-                "effective": eff_add.get(key, 0.0),
-                "source": src_add.get(key, "baseline"),
-            }
-        )
+    for spec in map_specs:
+        path_key = spec["path"]
+        label_template = spec["label"]
+        kind = spec["kind"]
+        baseline_default = spec["baseline"]
+        sugg_map = _coerce_dict(suggestions, path_key)
+        user_map = _coerce_dict(overrides, path_key)
+        eff_map = _coerce_dict(effective, path_key)
+        src_map = _coerce_dict(sources, path_key)
+        accept_map = _coerce_dict(accept, path_key)
+        keys = sorted(_collect_process_keys(baseline_hours, sugg_map, user_map))
+        for key in keys:
+            _append_row(
+                (path_key, key),
+                label_template.format(key=key),
+                kind,
+                baseline_value=baseline_default,
+                llm_value=sugg_map.get(key),
+                user_value=user_map.get(key),
+                accept_value=bool(accept_map.get(key)),
+                effective_value=eff_map.get(key, baseline_default),
+                source_value=src_map.get(key, "baseline"),
+            )
 
     sugg_pass = (
         canonicalize_pass_through_map(suggestions.get("add_pass_through"))
@@ -1175,103 +961,55 @@ def iter_suggestion_rows(state: QuoteState) -> list[dict]:
                 label = f"{label} (base {_format_value(base_amount, 'currency')})"
             except Exception:
                 pass
-        rows.append(
-            {
-                "path": ("add_pass_through", key),
-                "label": label,
-                "kind": "currency",
-                "baseline": 0.0,
-                "llm": sugg_pass.get(key),
-                "user": over_pass.get(key),
-                "accept": bool(accept_pass.get(key)),
-                "effective": eff_pass.get(key, 0.0),
-                "source": src_pass.get(key, "baseline"),
-            }
+        _append_row(
+            ("add_pass_through", key),
+            label,
+            "currency",
+            baseline_value=0.0,
+            llm_value=sugg_pass.get(key),
+            user_value=over_pass.get(key),
+            accept_value=bool(accept_pass.get(key)),
+            effective_value=eff_pass.get(key, 0.0),
+            source_value=src_pass.get(key, "baseline"),
         )
 
-    scrap_base = baseline.get("scrap_pct")
-    scrap_llm = suggestions.get("scrap_pct")
-    scrap_user = overrides.get("scrap_pct")
-    scrap_eff = effective.get("scrap_pct")
-    scrap_src = sources.get("scrap_pct", "baseline")
-    if any(v is not None for v in (scrap_base, scrap_llm, scrap_user)):
-        rows.append(
-            {
-                "path": ("scrap_pct",),
-                "label": "Scrap %",
-                "kind": "percent",
-                "baseline": scrap_base,
-                "llm": scrap_llm,
-                "user": scrap_user,
-                "accept": bool(accept.get("scrap_pct")),
-                "effective": scrap_eff,
-                "source": scrap_src,
-            }
-        )
+    scalar_specs = [
+        {"path": ("scrap_pct",), "label": "Scrap %", "kind": "percent"},
+        {"path": ("contingency_pct",), "label": "Contingency %", "kind": "percent"},
+        {"path": ("setups",), "label": "Setups", "kind": "int"},
+        {
+            "path": ("fixture",),
+            "label": "Fixture plan",
+            "kind": "text",
+            "presence": ("baseline", "llm", "user", "effective"),
+        },
+    ]
 
-    cont_base = baseline.get("contingency_pct")
-    cont_llm = suggestions.get("contingency_pct")
-    cont_user = overrides.get("contingency_pct")
-    cont_eff = effective.get("contingency_pct")
-    cont_src = sources.get("contingency_pct", "baseline")
-    if any(v is not None for v in (cont_base, cont_llm, cont_user)):
-        rows.append(
-            {
-                "path": ("contingency_pct",),
-                "label": "Contingency %",
-                "kind": "percent",
-                "baseline": cont_base,
-                "llm": cont_llm,
-                "user": cont_user,
-                "accept": bool(accept.get("contingency_pct")),
-                "effective": cont_eff,
-                "source": cont_src,
-            }
-        )
+    for spec in scalar_specs:
+        key = spec["path"][0]
+        values = {
+            "baseline": baseline.get(key),
+            "llm": suggestions.get(key),
+            "user": overrides.get(key),
+            "effective": effective.get(key),
+            "source": sources.get(key, "baseline"),
+            "accept": bool(accept.get(key)),
+        }
+        presence_fields = spec.get("presence", ("baseline", "llm", "user"))
+        if any(values[field] is not None for field in presence_fields):
+            _append_row(
+                spec["path"],
+                spec["label"],
+                spec["kind"],
+                baseline_value=values["baseline"],
+                llm_value=values["llm"],
+                user_value=values["user"],
+                accept_value=values["accept"],
+                effective_value=values["effective"],
+                source_value=values["source"],
+            )
 
-    setups_base = baseline.get("setups")
-    setups_llm = suggestions.get("setups")
-    setups_user = overrides.get("setups")
-    setups_eff = effective.get("setups")
-    setups_src = sources.get("setups", "baseline")
-    if any(v is not None for v in (setups_base, setups_llm, setups_user)):
-        rows.append(
-            {
-                "path": ("setups",),
-                "label": "Setups",
-                "kind": "int",
-                "baseline": setups_base,
-                "llm": setups_llm,
-                "user": setups_user,
-                "accept": bool(accept.get("setups")),
-                "effective": setups_eff,
-                "source": setups_src,
-            }
-        )
-
-    fixture_base = baseline.get("fixture")
-    fixture_llm = suggestions.get("fixture")
-    fixture_user = overrides.get("fixture")
-    fixture_eff = effective.get("fixture")
-    fixture_src = sources.get("fixture", "baseline")
-    if any(v is not None for v in (fixture_base, fixture_llm, fixture_user, fixture_eff)):
-        rows.append(
-            {
-                "path": ("fixture",),
-                "label": "Fixture plan",
-                "kind": "text",
-                "baseline": fixture_base,
-                "llm": fixture_llm,
-                "user": fixture_user,
-                "accept": bool(accept.get("fixture")),
-                "effective": fixture_eff,
-                "source": fixture_src,
-            }
-        )
-
-    def _add_scalar_row(path: tuple[str, ...], label: str, kind: str, key: str) -> None:
-        # Placeholder to satisfy interpreter; implementation not required at import time.
-        return None
+    return rows
 
 try:
     from hole_table_parser import parse_hole_table_lines as _parse_hole_table_lines
@@ -1284,7 +1022,8 @@ except Exception:
     _extract_text_lines_from_dxf = None
 
 # ---------- OCC / OCP compatibility ----------
-STACK = None
+STACK = getattr(geometry, "STACK", "pythonocc")
+bnd_add = geometry.bnd_add
 
 def _import_optional(module_name: str):
     """Safely import *module_name* and return ``None`` if it is unavailable."""
@@ -1294,158 +1033,49 @@ def _import_optional(module_name: str):
     except Exception:
         return None
 
-def _make_bnd_add_ocp():
-    # Try every known symbol name in OCP builds
-    candidates = []
-    module = _import_optional("OCP.BRepBndLib")
-    if module is None:
-        raise ImportError("OCP.BRepBndLib is not available")
+def _resolve_face_of():
+    """Return a callable that casts a shape-like object to a TopoDS_Face."""
 
-    for attr in (
-        "Add",
-        "Add_s",
-        "BRepBndLib_Add",
-        "brepbndlib_Add",
-    ):
-        fn = getattr(module, attr, None)
-        if fn:
-            candidates.append(fn)
+    # Prefer helpers exposed by cad_quoter.geometry when available
+    fn = getattr(geometry, "FACE_OF", None)
+    if callable(fn):
+        return fn
 
-    klass = getattr(module, "BRepBndLib", None)
-    if klass:
-        for attr in ("Add", "Add_s", "AddClose_s", "AddOptimal_s", "AddOBB_s"):
-            fn = getattr(klass, attr, None)
-            if fn:
-                candidates.append(fn)
+    # Try OCP's modern `topods.Face` helper first
+    try:  # pragma: no cover - depends on optional OCC bindings
+        from OCP.TopoDS import topods as _topods  # type: ignore[import-not-found]
 
-    if not candidates:
-        raise ImportError("No BRepBndLib.Add symbol found in OCP")
-
-    # return a dispatcher that tries different call signatures
-    def _bnd_add(shape, box, use_triangulation=True):
-        last_err = None
-        for fn in candidates:
-            # Try 3-arg form
-            try:
-                return fn(shape, box, use_triangulation)
-            except TypeError as e:
-                last_err = e
-            # Try 2-arg form
-            try:
-                return fn(shape, box)
-            except TypeError as e:
-                last_err = e
-            except Exception as e:
-                last_err = e
-        # If we get here, none of the variants worked
-        raise last_err or RuntimeError("No callable BRepBndLib.Add variant succeeded")
-
-    return _bnd_add
-
-_ocp_modules = {
-    "Bnd": _import_optional("OCP.Bnd"),
-    "BRep": _import_optional("OCP.BRep"),
-    "BRepCheck": _import_optional("OCP.BRepCheck"),
-    "IFSelect": _import_optional("OCP.IFSelect"),
-    "ShapeFix": _import_optional("OCP.ShapeFix"),
-    "STEPControl": _import_optional("OCP.STEPControl"),
-    "TopoDS": _import_optional("OCP.TopoDS"),
-}
-
-bnd_add: Callable[[Any, Any, bool], Any]
-
-if all(module is not None for module in _ocp_modules.values()):
-    # Prefer OCP (CadQuery/ocp bindings)
-    bnd_module = cast(Any, _ocp_modules["Bnd"])
-    brep_module = cast(Any, _ocp_modules["BRep"])
-    brepcheck_module = cast(Any, _ocp_modules["BRepCheck"])
-    ifselect_module = cast(Any, _ocp_modules["IFSelect"])
-    shapefix_module = cast(Any, _ocp_modules["ShapeFix"])
-    step_module = cast(Any, _ocp_modules["STEPControl"])
-    topods_module = cast(Any, _ocp_modules["TopoDS"])
-
-    Bnd_Box = bnd_module.Bnd_Box
-    BRep_Builder = brep_module.BRep_Builder
-    BRepCheck_Analyzer = brepcheck_module.BRepCheck_Analyzer
-    IFSelect_RetDone = ifselect_module.IFSelect_RetDone
-    ShapeFix_Shape = shapefix_module.ShapeFix_Shape
-    STEPControl_Reader = step_module.STEPControl_Reader
-    TopoDS_Compound = topods_module.TopoDS_Compound
-    TopoDS_Shape = topods_module.TopoDS_Shape
-
-    try:
-        bnd_add = _make_bnd_add_ocp()
-        STACK = "ocp"
+        if hasattr(_topods, "Face"):
+            return _topods.Face  # type: ignore[return-value]
     except Exception:
-        # Fallback: try dynamic dispatch at call time for OCP builds missing Add
+        pass
 
-        def _bnd_add_ocp_fallback(shape, box, use_triangulation=True):
-            candidates = [
-                ("OCP.BRepBndLib", "Add"),
-                ("OCP.BRepBndLib", "Add_s"),
-                ("OCP.BRepBndLib", "BRepBndLib_Add"),
-                ("OCP.BRepBndLib", "brepbndlib_Add"),
-                ("OCC.Core.BRepBndLib", "Add"),
-                ("OCC.Core.BRepBndLib", "Add_s"),
-                ("OCC.Core.BRepBndLib", "BRepBndLib_Add"),
-                ("OCC.Core.BRepBndLib", "brepbndlib_Add"),
-            ]
-            for mod_name, attr in candidates:
-                module = _import_optional(mod_name)
-                if module and hasattr(module, attr):
-                    return getattr(module, attr)(shape, box, use_triangulation)
-            raise RuntimeError("No BRepBndLib.Add available in this build")
+    # pythonocc-core exposes either topods_Face or topods.Face
+    try:  # pragma: no cover - depends on optional OCC bindings
+        from OCC.Core.TopoDS import topods_Face  # type: ignore[import-not-found]
 
-        bnd_add = _bnd_add_ocp_fallback
-        STACK = "ocp"
-else:
-    # Fallback to pythonocc-core
-    _occ_modules = {
-        "Bnd": _import_optional("OCC.Core.Bnd"),
-        "BRep": _import_optional("OCC.Core.BRep"),
-        "BRepBndLib": _import_optional("OCC.Core.BRepBndLib"),
-        "BRepCheck": _import_optional("OCC.Core.BRepCheck"),
-        "IFSelect": _import_optional("OCC.Core.IFSelect"),
-        "ShapeFix": _import_optional("OCC.Core.ShapeFix"),
-        "STEPControl": _import_optional("OCC.Core.STEPControl"),
-        "TopoDS": _import_optional("OCC.Core.TopoDS"),
-    }
+        return topods_Face  # type: ignore[return-value]
+    except Exception:
+        pass
+    try:  # pragma: no cover - depends on optional OCC bindings
+        from OCC.Core.TopoDS import topods as _occ_topods  # type: ignore[import-not-found]
 
-    missing = [name for name, module in _occ_modules.items() if module is None]
-    if missing:
-        raise ImportError(
-            "Required OCC.Core modules are unavailable: {}".format(
-                ", ".join(sorted(missing))
-            )
-        )
+        face_fn = getattr(_occ_topods, "Face", None)
+        if callable(face_fn):
+            return face_fn
+    except Exception:
+        pass
 
-    bnd_module = cast(Any, _occ_modules["Bnd"])
-    brep_module = cast(Any, _occ_modules["BRep"])
-    brepbndlib_module = cast(Any, _occ_modules["BRepBndLib"])
-    brepcheck_module = cast(Any, _occ_modules["BRepCheck"])
-    ifselect_module = cast(Any, _occ_modules["IFSelect"])
-    shapefix_module = cast(Any, _occ_modules["ShapeFix"])
-    step_module = cast(Any, _occ_modules["STEPControl"])
-    topods_module = cast(Any, _occ_modules["TopoDS"])
+    # Fall back to methods on the TopoDS namespace (OCP variants expose Face_s)
+    try:  # pragma: no cover - depends on optional OCC bindings
+        from OCP.TopoDS import TopoDS as _TopoDS  # type: ignore[import-not-found]
 
-    Bnd_Box = bnd_module.Bnd_Box
-    BRep_Builder = brep_module.BRep_Builder
-    _brep_add = brepbndlib_module.brepbndlib_Add
-    BRepCheck_Analyzer = brepcheck_module.BRepCheck_Analyzer
-    IFSelect_RetDone = ifselect_module.IFSelect_RetDone
-    ShapeFix_Shape = shapefix_module.ShapeFix_Shape
-    STEPControl_Reader = step_module.STEPControl_Reader
-    TopoDS_Compound = topods_module.TopoDS_Compound
-    TopoDS_Shape = topods_module.TopoDS_Shape
-
-    def _bnd_add_pythonocc(shape, box, use_triangulation=True):
-        _brep_add(shape, box, use_triangulation)
-
-    bnd_add = _bnd_add_pythonocc
-    STACK = "pythonocc"
-# ---------- end shim ----------
-# ----- one-backend imports -----
-# Compatibility helpers now provided by ``appkit.occ_compat``.
+        for attr in ("Face_s", "Face"):
+            face_fn = getattr(_TopoDS, attr, None)
+            if callable(face_fn):
+                return face_fn
+    except Exception:
+        pass
 
 
 def _shape_is_null(shape: Any) -> bool:
@@ -1461,6 +1091,95 @@ def _shape_is_null(shape: Any) -> bool:
     except Exception:
         return True
 
+# Safe casters: no-ops if already cast; unwrap list nodes; check kind
+# Choose stack
+_BRepGProp_mod = None
+STACK_GPROP = "pythonocc"
+_ocp_brepgprop = _import_optional("OCP.BRepGProp")
+if _ocp_brepgprop is not None and hasattr(_ocp_brepgprop, "BRepGProp"):
+    _BRepGProp_mod = getattr(_ocp_brepgprop, "BRepGProp")
+    STACK_GPROP = "ocp"
+else:
+    _occ_brepgprop = _import_optional("OCC.Core.BRepGProp")
+    if _occ_brepgprop is None:
+        raise ImportError("OCC.Core.BRepGProp is required for pythonocc backend")
+    if hasattr(_occ_brepgprop, "BRepGProp"):
+        _BRepGProp_mod = getattr(_occ_brepgprop, "BRepGProp")
+    else:
+        from types import SimpleNamespace
+
+        _BRepGProp_mod = SimpleNamespace(
+            LinearProperties=getattr(_occ_brepgprop, "brepgprop_LinearProperties"),
+            SurfaceProperties=getattr(_occ_brepgprop, "brepgprop_SurfaceProperties"),
+            VolumeProperties=getattr(_occ_brepgprop, "brepgprop_VolumeProperties"),
+        )
+
+    def _to_edge_occ(s):
+        try:
+            from OCC.Core.TopoDS import topods_Edge as _fn  # type: ignore[attr-defined]
+        except Exception:
+            from OCC.Core.TopoDS import Edge as _fn  # type: ignore[attr-defined]
+        return _fn(s)
+
+    _TO_EDGE = _to_edge_occ
+
+# Resolve topods casters across bindings
+
+# ---- modern wrappers (no deprecation warnings)
+# ---- modern wrappers (no deprecation warnings)
+def linear_properties(edge, gprops):
+    """Linear properties across OCP/pythonocc names."""
+    fn = getattr(_BRepGProp_mod, "LinearProperties", None)
+    if fn is None:
+        fn = getattr(_BRepGProp_mod, "LinearProperties_s", None)
+    if fn is None:
+        try:
+            from OCC.Core.BRepGProp import brepgprop_LinearProperties as _old  # type: ignore
+            return _old(edge, gprops)
+        except Exception:
+            raise
+    return fn(edge, gprops)
+
+def map_shapes_and_ancestors(
+    root_shape, sub_enum, anc_enum
+) -> Any:
+    """Return TopTools_IndexedDataMapOfShapeListOfShape for (sub → ancestors)."""
+    # Ensure we pass a *Shape*, not a Face
+    if root_shape is None:
+        raise TypeError("root_shape is None")
+    if not hasattr(root_shape, "IsNull") or _shape_is_null(root_shape):
+        # If someone handed us a Face, try to grab its TShape parent; else fail.
+        # Safer: require a real TopoDS_Shape from STEP/IGES root.
+        pass
+
+    amap = cast(
+        Any,
+        TopTools_IndexedDataMapOfShapeListOfShape(),  # type: ignore[call-overload]
+    )
+    # static/instance variants across wheels
+    fn = getattr(TopExp, "MapShapesAndAncestors", None) or getattr(TopExp, "MapShapesAndAncestors_s", None)
+    if fn is None:
+        raise RuntimeError("TopExp.MapShapesAndAncestors not available in this OCP wheel")
+    fn(root_shape, sub_enum, anc_enum, amap)
+    return amap
+
+# modern topods casters: topods.Edge(shape) / topods.Face(shape)
+# ---- Robust topods casters that are no-ops for already-cast objects ----
+def ensure_face(obj: Any) -> Any:
+    if obj is None:
+        raise TypeError("Expected a face, got None")
+    face_type = cast(type, TopoDS_Face)
+    try:
+        if isinstance(obj, face_type):
+            return cast(Any, obj)
+    except TypeError:
+        pass
+    if type(obj).__name__ == "TopoDS_Face":
+        return cast(Any, obj)
+    st = obj.ShapeType() if hasattr(obj, "ShapeType") else None
+    if st == TopAbs_FACE:
+        return cast(Any, FACE_OF(obj))
+    raise TypeError(f"Not a face: {type(obj).__name__}")
 # ---------- end compat ----------
 
 # ---- tiny helpers you can use elsewhere --------------------------------------
@@ -1493,7 +1212,7 @@ def load_drawing(path: Path) -> Drawing:
     return ezdxf_mod.readfile(str(path))  # DXF directly
 
 # ==== OpenCascade compat (works with OCP OR OCC.Core) ====
-from typing import Any, Callable, Protocol, Tuple, Type
+from typing import Any
 
 def _missing_uv_bounds(_: Any) -> Tuple[float, float, float, float]:
     raise RuntimeError("BRepTools_UVBounds is unavailable")
@@ -1519,7 +1238,6 @@ _brep_read = _missing_brep_read
 
 try:
     # ---- OCP branch ----
-    from OCP.Bnd import Bnd_Box  # type: ignore[import]
     from OCP.BRep import (  # type: ignore[import]
         BRep_Builder,
         BRep_Tool,  # OCP version
@@ -1540,11 +1258,9 @@ try:
     from OCP.GeomAdaptor import GeomAdaptor_Surface  # type: ignore[import]
     from OCP.gp import gp_Dir, gp_Pln, gp_Pnt  # type: ignore[import]
     from OCP.GProp import GProp_GProps  # type: ignore[import]
-    from OCP.IFSelect import IFSelect_RetDone  # type: ignore[import]
-    from OCP.IGESControl import IGESControl_Reader  # type: ignore[import]
     from OCP.ShapeAnalysis import ShapeAnalysis_Surface  # type: ignore[import]
     from OCP.ShapeFix import ShapeFix_Shape  # type: ignore[import]
-    from OCP.TopAbs import TopAbs_COMPOUND, TopAbs_EDGE, TopAbs_FACE, TopAbs_SHELL, TopAbs_SOLID  # type: ignore[import]
+    from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE  # type: ignore[import]
     from OCP.TopExp import TopExp, TopExp_Explorer  # type: ignore[import]
     from OCP.TopoDS import TopoDS_Compound, TopoDS_Face, TopoDS_Shape  # type: ignore[import]
 
@@ -1575,7 +1291,6 @@ try:
 
 except Exception:
     # ---- OCC.Core branch ----
-    from OCC.Core.Bnd import Bnd_Box
     from OCC.Core.BRep import (
         BRep_Builder,
         BRep_Tool,  # ? OCC version
@@ -1595,17 +1310,11 @@ except Exception:
     from OCC.Core.GeomAdaptor import GeomAdaptor_Surface
     from OCC.Core.gp import gp_Dir, gp_Pln, gp_Pnt
     from OCC.Core.GProp import GProp_GProps
-    from OCC.Core.IFSelect import IFSelect_RetDone
-    from OCC.Core.IGESControl import IGESControl_Reader
     from OCC.Core.ShapeAnalysis import ShapeAnalysis_Surface
     from OCC.Core.ShapeFix import ShapeFix_Shape
-    from OCC.Core.STEPControl import STEPControl_Reader
     from OCC.Core.TopAbs import (
-        TopAbs_COMPOUND,
         TopAbs_EDGE,
         TopAbs_FACE,
-        TopAbs_SHELL,
-        TopAbs_SOLID,
     )
     from OCC.Core.TopExp import TopExp_Explorer
     from OCC.Core.TopoDS import TopoDS_Compound, TopoDS_Face, TopoDS_Shape
@@ -1715,151 +1424,13 @@ def _shape_from_reader(reader):
 
     return healed
 
-def read_step_shape(path: str) -> Any:
-    rdr = STEPControl_Reader()
-    if rdr.ReadFile(path) != IFSelect_RetDone:
-        raise RuntimeError("STEP read failed (file unreadable or unsupported).")
-    rdr.TransferRoots()
-    n = rdr.NbShapes()
-    if n == 0:
-        raise RuntimeError("STEP read produced zero shapes (no transferable roots).")
-
-    if n == 1:
-        shape = rdr.Shape(1)
-    else:
-        builder = BRep_Builder()
-        comp = _new_topods_compound()
-        cast(Any, builder).MakeCompound(comp)
-        for i in range(1, n + 1):
-            s = rdr.Shape(i)
-            if not _shape_is_null(s):
-                cast(Any, builder).Add(comp, s)
-        shape = comp
-
-    if _shape_is_null(shape):
-        raise RuntimeError("STEP produced a null TopoDS_Shape.")
-    # Verify we truly pass a Shape to MapShapesAndAncestors
-    logger.debug(
-        "Shape type: %s IsNull: %s",
-        type(shape).__name__,
-        getattr(shape, "IsNull", lambda: True)(),
-    )
-    amap = map_shapes_and_ancestors(shape, TopAbs_EDGE, TopAbs_FACE)
-    logger.debug("Shape ancestor map size: %d", amap.Size())
-    # DEBUG: sanity probe for STEP faces
-    if os.environ.get("STEP_PROBE", "0") == "1":
-        cnt = 0
-        try:
-            for f in iter_faces(shape):
-                _surf, _loc = face_surface(f)
-                cnt += 1
-        except Exception:
-            # Keep debug non-fatal; report and continue
-            logger.exception("STEP_PROBE face probe failed")
-        else:
-            logger.debug("STEP_PROBE faces=%d", cnt)
-
-    fx = cast(Any, ShapeFix_Shape)(shape)
-    fx.Perform()
-    return fx.Shape()
-
-def safe_bbox(shape: Any):
-    if _shape_is_null(shape):
-        raise ValueError("Cannot compute bounding box of a null shape.")
-    box = Bnd_Box()
-    bnd_add(shape, box, True)  # <- uses whichever binding is available
-    return box
 def read_step_or_iges_or_brep(path: str) -> Any:
     raise RuntimeError("read_step_or_iges_or_brep is no longer exposed via appV5; use cad_quoter.geometry.read_step_or_iges_or_brep")
 
-def convert_dwg_to_dxf(dwg_path: str, *, out_ver="ACAD2018") -> str:
-    """
-    Robust DWG?DXF wrapper.
-    Works with:
-      - A .bat/.cmd wrapper that accepts:  <input.dwg> <output.dxf>
-      - A custom exe that accepts:         <input.dwg> <output.dxf>
-      - ODAFileConverter.exe (7-arg form): <in_dir> <out_dir> <ver> DXF 0 0 <filter>
-    Looks for the converter via env var or common local paths and prints
-    the exact command used on failure.
-    """
-    # 1) find converter
-    exe = (os.environ.get("ODA_CONVERTER_EXE")
-           or os.environ.get("DWG2DXF_EXE")
-           or str(Path(__file__).with_name("dwg2dxf_wrapper.bat"))
-           or r"D:\CAD_Quoting_Tool\dwg2dxf_wrapper.bat")
-
-    if not exe or not Path(exe).exists():
-        raise RuntimeError(
-            "DWG import needs a DWG?DXF converter.\n"
-            "Set ODA_CONVERTER_EXE (recommended) or DWG2DXF_EXE to a .bat/.cmd/.exe.\n"
-            "Expected .bat signature:  <input.dwg> <output.dxf>"
-        )
-
-    dwg = Path(dwg_path)
-    out_dir = Path(tempfile.mkdtemp(prefix="dwg2dxf_"))
-    out_dxf = out_dir / (dwg.stem + ".dxf")
-
-    exe_lower = Path(exe).name.lower()
-    cmd: list[str] = []
-    try:
-        if exe_lower.endswith(".bat") or exe_lower.endswith(".cmd"):
-            # ? run batch via cmd.exe so it actually executes
-            cmd = ["cmd", "/c", exe, str(dwg), str(out_dxf)]
-            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        elif "odafileconverter" in exe_lower:
-            # ? official ODAFileConverter CLI
-            cmd = [exe, str(dwg.parent), str(out_dir), out_ver, "DXF", "0", "0", dwg.name]
-            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        else:
-            # ? generic exe that accepts <in> <out>
-            cmd = [exe, str(dwg), str(out_dxf)]
-            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(
-            "DWG?DXF conversion failed.\n"
-            f"cmd: {' '.join(cmd)}\n"
-            f"stdout:\n{e.stdout}\n"
-            f"stderr:\n{e.stderr}"
-        ) from e
-
-    # 2) resolve the produced DXF
-    produced = out_dxf if out_dxf.exists() else (out_dir / (dwg.stem + ".dxf"))
-    if not produced.exists():
-        raise RuntimeError(
-            "Converter returned success but DXF not found.\n"
-            f"cmd: {' '.join(cmd)}\n"
-            f"checked: {out_dxf} | {produced}"
-        )
-    return str(produced)
 
 ANG_TOL = math.radians(5.0)
 DOT_TOL = math.cos(ANG_TOL)
 SMALL = 1e-7
-
-def iter_solids(shape: Any):
-    explorer = cast(Callable[[Any, Any], Any], TopExp_Explorer)
-    exp = explorer(shape, cast(int, TopAbs_SOLID))
-    while exp.More():
-        yield geometry.to_solid(exp.Current())
-        exp.Next()
-
-def explode_compound(shape: Any) -> list[Any]:
-    """If the file is a big COMPOUND, break it into shapes (parts/bodies)."""
-    explorer = cast(Callable[[Any, Any], Any], TopExp_Explorer)
-    exp = explorer(shape, cast(int, TopAbs_COMPOUND))
-    if exp.More():
-        # Itï¿½s a compound ï¿½ return its shells/solids/faces as needed
-        solids = list(iter_solids(shape))
-        if solids:
-            return solids
-        # fallback to shells
-        sh = explorer(shape, cast(int, TopAbs_SHELL))
-        shells = []
-        while sh.More():
-            shells.append(geometry.to_shell(sh.Current()))
-            sh.Next()
-        return shells
-    return [shape]
 
 def _bbox(shape):
     box = safe_bbox(shape)
@@ -2107,204 +1678,6 @@ def _turning_score(shape, areas_by_type):
     length = max(Lx, Ly, Lz)
     maxod = sorted([Lx, Ly, Lz])[-2]
     return {"GEO_Turning_Score_0to1": round(score,3), "GEO_MaxOD_mm": round(maxod,3), "GEO_Length_mm": round(length,3)}
-
-def enrich_geo_occ(shape):
-    xmin,ymin,zmin,xmax,ymax,zmax = _bbox(shape)
-    L,W,H = xmax-xmin, ymax-ymin, zmax-zmin
-
-    props = GProp_GProps()
-    try:
-        BRepGProp.VolumeProperties_s(shape, props); volume = float(props.Mass())
-        com = props.CentreOfMass(); center = [com.X(), com.Y(), com.Z()]
-    except Exception:
-        volume, center = 0.0, [0.0,0.0,0.0]
-    try:
-        BRepGProp.SurfaceProperties_s(shape, props); area_total = float(props.Mass())
-    except Exception:
-        area_total = 0.0
-
-    faces = 0
-    for _ in iter_faces(shape): faces += 1
-
-    areas_by_type = _surface_areas_by_type(shape)
-    largest_planar, normal_clusters = _largest_planar_faces_and_normals(shape)
-    unique_normals = len(normal_clusters)
-
-    min_wall = _min_wall_between_parallel_planes(shape)
-    thinwall_present = (min_wall is not None) and (min_wall < 1.0)
-
-    z_vals = [zmin + 0.25*(zmax-zmin), zmin + 0.50*(zmax-zmin), zmin + 0.75*(zmax-zmin)]
-    wedm_len = _section_perimeter_len(shape, z_vals)
-
-    deburr_len = _sum_edge_length_sharp(shape, angle_thresh_deg=175.0)
-
-    holes = _hole_groups_from_cylinders(shape, (xmin,ymin,zmin,xmax,ymax,zmax))
-
-    bbox_vol = max(L*W*H, 1e-9)
-    free_ratio = areas_by_type.get("freeform", 0.0)/max(area_total, 1e-9)
-    complexity = (faces / (volume if volume>0 else bbox_vol))*100.0 + 30.0*free_ratio
-
-    axis_dirs = [gp_Dir(1,0,0), gp_Dir(-1,0,0), gp_Dir(0,1,0), gp_Dir(0,-1,0), gp_Dir(0,0,1), gp_Dir(0,0,-1)]
-    hit=0; tot=0
-    for f in iter_faces(shape):
-        n = _face_normal(f)
-        if n:
-            tot += 1
-            if any(abs(n.Dot(a))>DOT_TOL for a in axis_dirs): hit += 1
-    access = (hit/tot) if tot else 0.0
-
-    geo = {
-        "GEO-01_Length_mm": round(L,3),
-        "GEO-02_Width_mm": round(W,3),
-        "GEO-03_Height_mm": round(H,3),
-        "GEO-Volume_mm3": round(volume,2),
-        "GEO-SurfaceArea_mm2": round(area_total,2),
-        "Feature_Face_Count": int(faces),
-        "GEO_Area_Planar_mm2": round(areas_by_type.get("planar",0.0),2),
-        "GEO_Area_Cyl_mm2": round(areas_by_type.get("cylindrical",0.0),2),
-        "GEO_Area_Freeform_mm2": round(areas_by_type.get("freeform",0.0),2),
-        "GEO_LargestPlane_Area_mm2": round(largest_planar,2),
-        "GEO_Setup_UniqueNormals": int(unique_normals),
-        "GEO_MinWall_mm": round(min_wall,3) if min_wall is not None else None,
-        "GEO_ThinWall_Present": bool(thinwall_present),
-        "GEO_WEDM_PathLen_mm": round(wedm_len,2),
-        "GEO_Deburr_EdgeLen_mm": round(deburr_len,2),
-        "GEO_Hole_Groups": holes,
-        "GEO_Complexity_0to100": round(complexity,2),
-        "GEO_3Axis_Accessible_Pct": round(access,3),
-        "GEO_CenterOfMass": center,
-        "OCC_Backend": "OCC"
-    }
-    geo.update(_turning_score(shape, areas_by_type))
-    return geo
-
-def enrich_geo_stl(path):
-    import time
-    start_time = time.time()
-    logger.info("[%.2fs] Starting enrich_geo_stl for %s", time.time() - start_time, path)
-    if not _HAS_TRIMESH:
-        raise RuntimeError("trimesh not available to process STL")
-
-    logger.info("[%.2fs] Loading mesh...", time.time() - start_time)
-    trimesh_mod = getattr(geometry, "trimesh", None)
-    if trimesh_mod is None:
-        raise RuntimeError("trimesh is unavailable despite HAS_TRIMESH flag")
-    mesh = trimesh_mod.load(path, force="mesh")
-    logger.info(
-        "[%.2fs] Mesh loaded. Faces: %d",
-        time.time() - start_time,
-        len(mesh.faces),
-    )
-
-    if mesh.is_empty:
-        raise RuntimeError("Empty STL mesh")
-
-    (xmin, ymin, zmin), (xmax, ymax, zmax) = mesh.bounds
-    L, W, H = float(xmax-xmin), float(ymax-ymin), float(zmax-zmin)
-    area_total = float(mesh.area)
-    volume = float(mesh.volume) if mesh.is_volume else 0.0
-    faces = int(len(mesh.faces))
-
-    logger.info("[%.2fs] Calculating WEDM length...", time.time() - start_time)
-    z_vals = [zmin + 0.25*(zmax-zmin), zmin + 0.50*(zmax-zmin), zmin + 0.75*(zmax-zmin)]
-    wedm_len = 0.0
-    for z in z_vals:
-        sec = mesh.section(plane_origin=[0,0,z], plane_normal=[0,0,1])
-        if sec is None:
-            continue
-        planar = sec.to_2D() # Changed to_planar() to to_2D()
-        try:
-            wedm_len += float(planar.length)
-        except Exception:
-            pass
-    logger.info("[%.2fs] WEDM length calculated.", time.time() - start_time)
-
-    logger.info("[%.2fs] Calculating deburr length...", time.time() - start_time)
-    try:
-        import numpy as np
-        angles = mesh.face_adjacency_angles
-        edges = mesh.face_adjacency_edges
-        if len(angles) and len(edges):
-            sharp = angles > math.radians(15.0)
-            vec = mesh.vertices[edges[:,0]] - mesh.vertices[edges[:,1]]
-            lengths = np.linalg.norm(vec, axis=1)
-            deburr_len = float(lengths[sharp].sum())
-        else:
-            deburr_len = 0.0
-    except Exception:
-        deburr_len = 0.0
-    logger.info("[%.2fs] Deburr length calculated.", time.time() - start_time)
-
-    bbox_vol = max(L*W*H, 1e-9)
-    complexity = (faces / max(volume, bbox_vol)) * 100.0
-
-    logger.info("[%.2fs] Calculating 3-axis accessibility...", time.time() - start_time)
-    try:
-        n = mesh.face_normals
-        area_faces = mesh.area_faces.reshape(-1,1)
-        import numpy as np
-        axes = np.array([[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]], dtype=float).T
-        dots = np.abs(n @ axes)  # (F,6)
-        close = (dots > DOT_TOL).any(axis=1)
-        access = float((area_faces[close].sum() / area_faces.sum())) if area_faces.sum() > 0 else 0.0
-    except Exception:
-        access = 0.0
-    logger.info("[%.2fs] 3-axis accessibility calculated.", time.time() - start_time)
-
-    try:
-        center = list(map(float, mesh.center_mass))
-    except Exception:
-        center = [0.0,0.0,0.0]
-
-    logger.info("[%.2fs] Finished enrich_geo_stl.", time.time() - start_time)
-    return {
-        "GEO-01_Length_mm": round(L,3),
-        "GEO-02_Width_mm": round(W,3),
-        "GEO-03_Height_mm": round(H,3),
-        "GEO-Volume_mm3": round(volume,2),
-        "GEO-SurfaceArea_mm2": round(area_total,2),
-        "Feature_Face_Count": faces,
-        "GEO_LargestPlane_Area_mm2": None,
-        "GEO_Setup_UniqueNormals": None,
-        "GEO_MinWall_mm": None,
-        "GEO_ThinWall_Present": False,
-        "GEO_WEDM_PathLen_mm": round(wedm_len,2),
-        "GEO_Deburr_EdgeLen_mm": round(deburr_len,2),
-        "GEO_Hole_Groups": [],
-        "GEO_Complexity_0to100": round(complexity,2),
-        "GEO_3Axis_Accessible_Pct": round(access,3),
-        "GEO_CenterOfMass": center,
-        "OCC_Backend": "trimesh (STL)"
-    }
-
-def read_cad_any(path: str):
-    from OCP.IFSelect import IFSelect_RetDone  # type: ignore[import]
-    from OCP.IGESControl import IGESControl_Reader  # type: ignore[import]
-    from OCP.TopoDS import TopoDS_Shape  # type: ignore[import]
-
-    ext = Path(path).suffix.lower()
-    if ext in (".step", ".stp"):
-        return read_step_shape(path)
-    if ext in (".iges", ".igs"):
-        ig = IGESControl_Reader()
-        if ig.ReadFile(path) != IFSelect_RetDone:
-            raise RuntimeError("IGES read failed")
-        ig.TransferRoots()
-        return _shape_from_reader(ig)
-    if ext == ".brep":
-        shape_ctor = cast(Callable[[], Any], TopoDS_Shape)
-        s = shape_ctor()
-        if not cast(Any, BRepTools).Read(s, path, None):
-            raise RuntimeError("BREP read failed")
-        return s
-    if ext == ".dxf":
-        return read_dxf_as_occ_shape(path)
-    if ext == ".dwg":
-        conv = os.environ.get("ODA_CONVERTER_EXE") or os.environ.get("DWG2DXF_EXE")
-        logger.info("Using DWG converter: %s", conv)
-        dxf_path = convert_dwg_to_dxf(path)
-        return read_dxf_as_occ_shape(dxf_path)
-    raise RuntimeError(f"Unsupported CAD format: {ext}")
 
 # ---- LLM hours inference ----
 def infer_hours_and_overrides_from_geo(
@@ -2556,8 +1929,6 @@ def infer_shop_overrides_from_geo(
 # --- WHICH SHEET ROWS MATTER TO THE ESTIMATOR --------------------------------
 # --- APPLY LLM OUTPUT ---------------------------------------------------------
 # ================== LLM DECISION LOG / AUDIT ==================
-import json as _json_audit
-import time as _time_audit
 
 LOGS_DIR = Path(r"D:\\CAD_Quoting_Tool\\Logs")
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
