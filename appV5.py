@@ -1068,66 +1068,84 @@ def iter_suggestion_rows(state: QuoteState) -> list[dict]:
     accept_raw = state.accept_llm
     accept = accept_raw if isinstance(accept_raw, dict) else {}
 
-    baseline_hours_raw = baseline.get("process_hours") if isinstance(baseline.get("process_hours"), dict) else {}
+    def _coerce_dict(container: dict[str, Any], key: str) -> dict[str, Any]:
+        value = container.get(key)
+        return value if isinstance(value, dict) else {}
+
+    def _append_row(
+        path: tuple[str, ...],
+        label: str,
+        kind: str,
+        *,
+        baseline_value: Any,
+        llm_value: Any,
+        user_value: Any,
+        accept_value: bool,
+        effective_value: Any,
+        source_value: Any,
+    ) -> None:
+        rows.append(
+            {
+                "path": path,
+                "label": label,
+                "kind": kind,
+                "baseline": baseline_value,
+                "llm": llm_value,
+                "user": user_value,
+                "accept": accept_value,
+                "effective": effective_value,
+                "source": source_value,
+            }
+        )
+
+    baseline_hours_raw = _coerce_dict(baseline, "process_hours")
     baseline_hours: dict[str, float] = {}
-    for key, value in (baseline_hours_raw or {}).items():
+    for key, value in baseline_hours_raw.items():
         try:
-            if abs(float(value)) > 1e-6:
-                baseline_hours[key] = float(value)
+            as_float = float(value)
         except Exception:
             continue
+        if abs(as_float) > 1e-6:
+            baseline_hours[key] = as_float
 
-    sugg_mult_raw = suggestions.get("process_hour_multipliers")
-    sugg_mult = sugg_mult_raw if isinstance(sugg_mult_raw, dict) else {}
-    over_mult_raw = overrides.get("process_hour_multipliers")
-    over_mult = over_mult_raw if isinstance(over_mult_raw, dict) else {}
-    eff_mult_raw = effective.get("process_hour_multipliers")
-    eff_mult = eff_mult_raw if isinstance(eff_mult_raw, dict) else {}
-    src_mult_raw = sources.get("process_hour_multipliers")
-    src_mult = src_mult_raw if isinstance(src_mult_raw, dict) else {}
-    accept_mult_raw = accept.get("process_hour_multipliers")
-    accept_mult = accept_mult_raw if isinstance(accept_mult_raw, dict) else {}
-    keys_mult = sorted(_collect_process_keys(baseline_hours, sugg_mult, over_mult))
-    for key in keys_mult:
-        rows.append(
-            {
-                "path": ("process_hour_multipliers", key),
-                "label": f"Process × {key}",
-                "kind": "multiplier",
-                "baseline": 1.0,
-                "llm": sugg_mult.get(key),
-                "user": over_mult.get(key),
-                "accept": bool(accept_mult.get(key)),
-                "effective": eff_mult.get(key, 1.0),
-                "source": src_mult.get(key, "baseline"),
-            }
-        )
+    map_specs = [
+        {
+            "path": "process_hour_multipliers",
+            "label": "Process × {key}",
+            "kind": "multiplier",
+            "baseline": 1.0,
+        },
+        {
+            "path": "process_hour_adders",
+            "label": "Process +hr {key}",
+            "kind": "hours",
+            "baseline": 0.0,
+        },
+    ]
 
-    sugg_add_raw = suggestions.get("process_hour_adders")
-    sugg_add = sugg_add_raw if isinstance(sugg_add_raw, dict) else {}
-    over_add_raw = overrides.get("process_hour_adders")
-    over_add = over_add_raw if isinstance(over_add_raw, dict) else {}
-    eff_add_raw = effective.get("process_hour_adders")
-    eff_add = eff_add_raw if isinstance(eff_add_raw, dict) else {}
-    src_add_raw = sources.get("process_hour_adders")
-    src_add = src_add_raw if isinstance(src_add_raw, dict) else {}
-    accept_add_raw = accept.get("process_hour_adders")
-    accept_add = accept_add_raw if isinstance(accept_add_raw, dict) else {}
-    keys_add = sorted(_collect_process_keys(baseline_hours, sugg_add, over_add))
-    for key in keys_add:
-        rows.append(
-            {
-                "path": ("process_hour_adders", key),
-                "label": f"Process +hr {key}",
-                "kind": "hours",
-                "baseline": 0.0,
-                "llm": sugg_add.get(key),
-                "user": over_add.get(key),
-                "accept": bool(accept_add.get(key)),
-                "effective": eff_add.get(key, 0.0),
-                "source": src_add.get(key, "baseline"),
-            }
-        )
+    for spec in map_specs:
+        path_key = spec["path"]
+        label_template = spec["label"]
+        kind = spec["kind"]
+        baseline_default = spec["baseline"]
+        sugg_map = _coerce_dict(suggestions, path_key)
+        user_map = _coerce_dict(overrides, path_key)
+        eff_map = _coerce_dict(effective, path_key)
+        src_map = _coerce_dict(sources, path_key)
+        accept_map = _coerce_dict(accept, path_key)
+        keys = sorted(_collect_process_keys(baseline_hours, sugg_map, user_map))
+        for key in keys:
+            _append_row(
+                (path_key, key),
+                label_template.format(key=key),
+                kind,
+                baseline_value=baseline_default,
+                llm_value=sugg_map.get(key),
+                user_value=user_map.get(key),
+                accept_value=bool(accept_map.get(key)),
+                effective_value=eff_map.get(key, baseline_default),
+                source_value=src_map.get(key, "baseline"),
+            )
 
     sugg_pass = (
         canonicalize_pass_through_map(suggestions.get("add_pass_through"))
@@ -1167,103 +1185,55 @@ def iter_suggestion_rows(state: QuoteState) -> list[dict]:
                 label = f"{label} (base {_format_value(base_amount, 'currency')})"
             except Exception:
                 pass
-        rows.append(
-            {
-                "path": ("add_pass_through", key),
-                "label": label,
-                "kind": "currency",
-                "baseline": 0.0,
-                "llm": sugg_pass.get(key),
-                "user": over_pass.get(key),
-                "accept": bool(accept_pass.get(key)),
-                "effective": eff_pass.get(key, 0.0),
-                "source": src_pass.get(key, "baseline"),
-            }
+        _append_row(
+            ("add_pass_through", key),
+            label,
+            "currency",
+            baseline_value=0.0,
+            llm_value=sugg_pass.get(key),
+            user_value=over_pass.get(key),
+            accept_value=bool(accept_pass.get(key)),
+            effective_value=eff_pass.get(key, 0.0),
+            source_value=src_pass.get(key, "baseline"),
         )
 
-    scrap_base = baseline.get("scrap_pct")
-    scrap_llm = suggestions.get("scrap_pct")
-    scrap_user = overrides.get("scrap_pct")
-    scrap_eff = effective.get("scrap_pct")
-    scrap_src = sources.get("scrap_pct", "baseline")
-    if any(v is not None for v in (scrap_base, scrap_llm, scrap_user)):
-        rows.append(
-            {
-                "path": ("scrap_pct",),
-                "label": "Scrap %",
-                "kind": "percent",
-                "baseline": scrap_base,
-                "llm": scrap_llm,
-                "user": scrap_user,
-                "accept": bool(accept.get("scrap_pct")),
-                "effective": scrap_eff,
-                "source": scrap_src,
-            }
-        )
+    scalar_specs = [
+        {"path": ("scrap_pct",), "label": "Scrap %", "kind": "percent"},
+        {"path": ("contingency_pct",), "label": "Contingency %", "kind": "percent"},
+        {"path": ("setups",), "label": "Setups", "kind": "int"},
+        {
+            "path": ("fixture",),
+            "label": "Fixture plan",
+            "kind": "text",
+            "presence": ("baseline", "llm", "user", "effective"),
+        },
+    ]
 
-    cont_base = baseline.get("contingency_pct")
-    cont_llm = suggestions.get("contingency_pct")
-    cont_user = overrides.get("contingency_pct")
-    cont_eff = effective.get("contingency_pct")
-    cont_src = sources.get("contingency_pct", "baseline")
-    if any(v is not None for v in (cont_base, cont_llm, cont_user)):
-        rows.append(
-            {
-                "path": ("contingency_pct",),
-                "label": "Contingency %",
-                "kind": "percent",
-                "baseline": cont_base,
-                "llm": cont_llm,
-                "user": cont_user,
-                "accept": bool(accept.get("contingency_pct")),
-                "effective": cont_eff,
-                "source": cont_src,
-            }
-        )
+    for spec in scalar_specs:
+        key = spec["path"][0]
+        values = {
+            "baseline": baseline.get(key),
+            "llm": suggestions.get(key),
+            "user": overrides.get(key),
+            "effective": effective.get(key),
+            "source": sources.get(key, "baseline"),
+            "accept": bool(accept.get(key)),
+        }
+        presence_fields = spec.get("presence", ("baseline", "llm", "user"))
+        if any(values[field] is not None for field in presence_fields):
+            _append_row(
+                spec["path"],
+                spec["label"],
+                spec["kind"],
+                baseline_value=values["baseline"],
+                llm_value=values["llm"],
+                user_value=values["user"],
+                accept_value=values["accept"],
+                effective_value=values["effective"],
+                source_value=values["source"],
+            )
 
-    setups_base = baseline.get("setups")
-    setups_llm = suggestions.get("setups")
-    setups_user = overrides.get("setups")
-    setups_eff = effective.get("setups")
-    setups_src = sources.get("setups", "baseline")
-    if any(v is not None for v in (setups_base, setups_llm, setups_user)):
-        rows.append(
-            {
-                "path": ("setups",),
-                "label": "Setups",
-                "kind": "int",
-                "baseline": setups_base,
-                "llm": setups_llm,
-                "user": setups_user,
-                "accept": bool(accept.get("setups")),
-                "effective": setups_eff,
-                "source": setups_src,
-            }
-        )
-
-    fixture_base = baseline.get("fixture")
-    fixture_llm = suggestions.get("fixture")
-    fixture_user = overrides.get("fixture")
-    fixture_eff = effective.get("fixture")
-    fixture_src = sources.get("fixture", "baseline")
-    if any(v is not None for v in (fixture_base, fixture_llm, fixture_user, fixture_eff)):
-        rows.append(
-            {
-                "path": ("fixture",),
-                "label": "Fixture plan",
-                "kind": "text",
-                "baseline": fixture_base,
-                "llm": fixture_llm,
-                "user": fixture_user,
-                "accept": bool(accept.get("fixture")),
-                "effective": fixture_eff,
-                "source": fixture_src,
-            }
-        )
-
-    def _add_scalar_row(path: tuple[str, ...], label: str, kind: str, key: str) -> None:
-        # Placeholder to satisfy interpreter; implementation not required at import time.
-        return None
+    return rows
 
 try:
     from hole_table_parser import parse_hole_table_lines as _parse_hole_table_lines
