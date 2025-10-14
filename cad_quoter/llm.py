@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence
 
 from cad_quoter.utils import _dict, compact_dict, jdump, json_safe_copy
+from cad_quoter.utils.render_utils import fmt_money, fmt_percent
 
 
 def parse_llm_json(text: str) -> dict:
@@ -828,7 +829,7 @@ def explain_quote(
             return None
         if pct > 1.5:
             pct = pct / 100.0
-        return f"{pct * 100:.1f}%"
+        return fmt_percent(pct)
 
     totals = breakdown.get("totals") or {}
 
@@ -852,7 +853,7 @@ def explain_quote(
         num = _coerce_float(value)
         if num is None:
             return None
-        return f"{currency_prefix}{num:,.2f}"
+        return fmt_money(num, currency_prefix)
 
     lines: list[str] = []
 
