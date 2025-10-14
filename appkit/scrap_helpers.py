@@ -5,6 +5,7 @@ import math
 
 SCRAP_DEFAULT_GUESS = 0.15
 HOLE_SCRAP_MULT = 1.0  # tune 0.5–1.5 if you want holes to “count” more/less
+HOLE_SCRAP_CAP = 0.25
 
 def _iter_hole_diams_mm(geo_ctx: Mapping[str, Any] | None) -> list[float]:
     if not isinstance(geo_ctx, Mapping):
@@ -65,7 +66,11 @@ def _plate_bbox_mm2(geo_ctx: Mapping[str, Any] | None) -> float:
         return float(L_in * 25.4) * float(W_in * 25.4)
     return 0.0
 
-def _holes_scrap_fraction(geo_ctx: Mapping[str, Any] | None, *, cap: float = 0.25) -> float:
+def _holes_scrap_fraction(
+    geo_ctx: Mapping[str, Any] | None,
+    *,
+    cap: float = HOLE_SCRAP_CAP,
+) -> float:
     diams = _iter_hole_diams_mm(geo_ctx)
     if not diams:
         return 0.0
@@ -105,6 +110,7 @@ def normalize_scrap_pct(val: Any, cap: float = 0.25) -> float:
 __all__ = [
     "SCRAP_DEFAULT_GGUESS" if False else "SCRAP_DEFAULT_GUESS",
     "HOLE_SCRAP_MULT",
+    "HOLE_SCRAP_CAP",
     "_iter_hole_diams_mm",
     "_plate_bbox_mm2",
     "_holes_scrap_fraction",

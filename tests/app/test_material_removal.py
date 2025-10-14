@@ -82,3 +82,46 @@ def test_plate_scrap_pct_tracks_hole_volume() -> None:
 
     expected_scrap = min(0.25, removed_mass / net_mass)
     assert scrap_pct == pytest.approx(expected_scrap, rel=1e-6)
+
+
+def test_geo_context_includes_plate_geometry_fields() -> None:
+    pd = pytest.importorskip("pandas")
+
+    df = pd.DataFrame(
+        [
+            {"Item": "Qty", "Example Values / Options": 1, "Data Type / Input Method": "number"},
+            {"Item": "Material", "Example Values / Options": "A2 Tool Steel", "Data Type / Input Method": "text"},
+            {"Item": "Material Name", "Example Values / Options": "A2 Tool Steel", "Data Type / Input Method": "text"},
+            {"Item": "Thickness (in)", "Example Values / Options": 0.5, "Data Type / Input Method": "number"},
+            {"Item": "Plate Length (in)", "Example Values / Options": 6.0, "Data Type / Input Method": "number"},
+            {"Item": "Plate Width (in)", "Example Values / Options": 4.0, "Data Type / Input Method": "number"},
+        ]
+    )
+
+    geo = {
+        "kind": "2d",
+        "plate_len_in": 6.0,
+        "plate_wid_in": 4.0,
+        "thickness_in": 0.5,
+        "hole_groups": [
+            {"dia_mm": 6.35, "count": 2},
+            {"dia_mm": 12.7, "count": 1},
+        ],
+        "hole_diams_mm": [6.35, 6.35, 12.7],
+    }
+
+    result = appV5.compute_quote_from_df(df, llm_enabled=False, geo=geo)
+    geo_context = result["breakdown"]["geo_context"]
+
+    assert geo_context["thickness_mm"] == pytest.approx(0.5 * 25.4, rel=1e-6)
+
+    expected_area = (6.0 * 25.4) * (4.0 * 25.4)
+    assert geo_context["plate_bbox_area_mm2"] == pytest.approx(expected_area, rel=1e-6)
+
+    hole_sets = geo_context.get("hole_sets")
+    assert isinstance(hole_sets, list)
+    assert len(hole_sets) == 2
+    assert hole_sets[0]["qty"] == 2
+    assert hole_sets[0]["dia_mm"] == pytest.approx(6.35, rel=1e-6)
+    assert hole_sets[1]["qty"] == 1
+    assert hole_sets[1]["dia_mm"] == pytest.approx(12.7, rel=1e-6)
