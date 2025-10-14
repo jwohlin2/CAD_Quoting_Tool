@@ -116,6 +116,7 @@ from appkit.ui.tk_compat import (
 from appkit.guardrails import build_guard_context, apply_drilling_floor_notes
 from appkit.merge_utils import (
     ACCEPT_SCALAR_KEYS,
+    SUGGESTION_SCALAR_KEYS,
     merge_effective,
     _collect_process_keys,
 )
@@ -1201,6 +1202,15 @@ except Exception:
     _HAS_PYMUPDF = False
 
 DIM_RE = re.compile(r"(?:ï¿½|DIAM|DIA)\s*([0-9.+-]+)|R\s*([0-9.+-]+)|([0-9.+-]+)\s*[xX]\s*([0-9.+-]+)")
+
+if typing.TYPE_CHECKING:  # pragma: no cover - import is for type checking only
+    from ezdxf.document import Drawing  # type: ignore
+else:  # pragma: no cover - fallback when ezdxf is unavailable at runtime
+    class Drawing(Protocol):
+        """Minimal protocol used for ezdxf drawing type hints."""
+
+        def modelspace(self) -> Any: ...
+
 
 def load_drawing(path: Path) -> Drawing:
     ezdxf_mod = typing.cast(_EzdxfModule, require_ezdxf())
@@ -14346,11 +14356,11 @@ def _render_time_per_hole(
                 seen_deep = True
             else:
                 seen_std = True
-            d_in = float(b.get("diameter_in"))
-            depth = float(b.get("depth_in"))
+            d_in = _safe_float(b.get("diameter_in"))
+            depth = _safe_float(b.get("depth_in"))
             qty = int(b.get("qty") or 0)
-            sfm = float(b.get("sfm"))
-            ipr = float(b.get("ipr"))
+            sfm = _safe_float(b.get("sfm"))
+            ipr = _safe_float(b.get("ipr"))
             rpm = _rpm_from_sfm(sfm, d_in)
             ipm = rpm * ipr
             peck = float(peck_min_deep if deep else peck_min_std)
