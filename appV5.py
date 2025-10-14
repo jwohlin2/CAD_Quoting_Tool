@@ -107,10 +107,18 @@ from appkit.ui.tk_compat import (
 from appkit.guardrails import build_guard_context, apply_drilling_floor_notes
 from appkit.merge_utils import (
     ACCEPT_SCALAR_KEYS,
-    SUGGESTION_SCALAR_KEYS,
     merge_effective,
     _collect_process_keys,
 )
+
+from appkit.effective import (
+    compute_effective_state,
+    effective_to_overrides,
+    ensure_accept_flags,
+    reprice_with_effective,
+)
+
+from appkit.ui.suggestions import iter_suggestion_rows
 
 from appkit.occ_compat import (
     BRep_Tool,
