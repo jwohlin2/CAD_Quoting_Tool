@@ -56,6 +56,8 @@ from cad_quoter.utils.render_utils import (
     format_hours,
     format_hours_with_rate,
     format_percent,
+    QuoteDocRecorder,
+    render_quote_doc,
 )
 from cad_quoter.estimators import SpeedsFeedsUnavailableError
 from cad_quoter.llm_overrides import (
@@ -70,6 +72,7 @@ from cad_quoter.domain import (
     _canonical_pass_label,
     canonicalize_pass_through_map,
     coerce_bounds,
+    build_suggest_payload,
 )
 
 from cad_quoter.vendors import ezdxf as _ezdxf_vendor
@@ -152,7 +155,9 @@ from appkit.time_overhead_compat import (
 
 from appkit.scrap_helpers import (
     normalize_scrap_pct,
+    SCRAP_DEFAULT_GUESS,
 )
+from appkit.planner_helpers import _process_plan_job
 
 from appkit.data import load_json, load_text
 from appkit.utils.text_rules import (
@@ -174,6 +179,8 @@ if sys.platform == "win32":
 
 APP_ENV = AppEnvironment.from_env()
 APP_ENV = replace(APP_ENV, llm_debug_enabled=True)  # force-enable debug unconditionally
+
+FORCE_PLANNER = False
 
 EXTRA_DETAIL_RE = re.compile(r"^includes\b.*extras\b", re.IGNORECASE)
 
@@ -1033,7 +1040,11 @@ except Exception:
 
 # ---------- OCC / OCP compatibility ----------
 STACK = getattr(geometry, "STACK", "pythonocc")
-bnd_add = geometry.bnd_add
+try:
+    bnd_add = geometry.bnd_add
+except AttributeError:  # pragma: no cover - optional geometry helpers
+    def bnd_add(*_args: Any, **_kwargs: Any) -> None:
+        return None
 
 def _import_optional(module_name: str):
     """Safely import *module_name* and return ``None`` if it is unavailable."""
@@ -8499,6 +8510,385 @@ def estimate_drilling_hours(
     )
 
     return _drilling_estimate(input_data)
+
+
+def _df_to_value_map(df: Any) -> dict[str, Any]:
+    """Coerce a worksheet-like structure into ``{item: value}`` form."""
+
+    value_map: dict[str, Any] = {}
+
+    try:
+        df_obj = coerce_or_make_vars_df(df)
+    except Exception:
+        df_obj = df
+
+    if _HAS_PANDAS and "pd" in globals():
+        import pandas as pd  # type: ignore
+
+        if isinstance(df_obj, pd.DataFrame):
+            for _, row in df_obj.iterrows():
+                try:
+                    item = str(row.get("Item", "") or "").strip()
+                except Exception:
+                    item = ""
+                if not item:
+                    continue
+                value_map[item] = row.get("Example Values / Options")
+            return value_map
+
+    if isinstance(df_obj, list):
+        iterable = df_obj
+    else:
+        try:
+            iterable = list(df_obj)
+        except Exception:
+            iterable = []
+
+    for row in iterable:
+        if not isinstance(row, dict):
+            continue
+        item = str(row.get("Item", "") or "").strip()
+        if not item:
+            continue
+        value_map[item] = row.get("Example Values / Options")
+
+    return value_map
+
+
+def _lookup_rate(name: str, *sources: Mapping[str, Any] | None, fallback: float = 0.0) -> float:
+    for source in sources:
+        if not isinstance(source, _MappingABC):
+            continue
+        if name in source:
+            try:
+                candidate = source[name]
+            except Exception:
+                continue
+            coerced = _coerce_float_or_none(candidate)
+            if coerced is not None:
+                return float(coerced)
+    return float(fallback)
+
+
+def _coerce_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "t", "yes", "y", "on"}:
+            return True
+        if lowered in {"0", "false", "f", "no", "n", "off"}:
+            return False
+    return bool(value)
+
+
+def _ensure_quote_state(state: QuoteState | None) -> QuoteState:
+    return state if isinstance(state, QuoteState) else QuoteState()
+
+
+def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
+    df: Any,
+    *,
+    params: Mapping[str, Any] | None = None,
+    rates: Mapping[str, Any] | None = None,
+    default_params: Mapping[str, Any] | None = None,
+    default_rates: Mapping[str, Any] | None = None,
+    default_material_display: Mapping[str, Any] | None = None,
+    material_vendor_csv: str | None = None,
+    llm_enabled: bool = True,
+    llm_model_path: str | None = None,
+    llm_client: Any | None = None,
+    geo: Mapping[str, Any] | None = None,
+    ui_vars: Mapping[str, Any] | None = None,
+    quote_state: QuoteState | None = None,
+    reuse_suggestions: Any | None = None,
+    llm_suggest: Any | None = None,
+    **_: Any,
+) -> dict[str, Any]:
+    value_map = _df_to_value_map(df)
+    planner_inputs = dict(ui_vars or {})
+    geo_payload: dict[str, Any] = dict(geo or {})
+    state = _ensure_quote_state(quote_state)
+
+    qty = _coerce_float_or_none(value_map.get("Qty")) or 1.0
+    material_choice = value_map.get("Material Name") or value_map.get("Material") or ""
+    material_text = str(material_choice or "").strip()
+
+    scrap_value = value_map.get("Scrap Percent (%)")
+    scrap_frac = normalize_scrap_pct(scrap_value)
+    scrap_source = "ui" if scrap_frac > 0 else "default_guess"
+    if scrap_frac <= 0:
+        scrap_frac = None
+        stock_plan = geo_payload.get("stock_plan_guess") if isinstance(geo_payload, dict) else None
+        if isinstance(stock_plan, _MappingABC):
+            net = _coerce_float_or_none(stock_plan.get("net_volume_in3"))
+            stock = _coerce_float_or_none(stock_plan.get("stock_volume_in3"))
+            if net and stock and net > 0 and stock >= net:
+                scrap_frac = max(0.0, min(0.25, (stock - net) / net))
+                scrap_source = "stock_plan_guess"
+        if scrap_frac is None:
+            scrap_frac = SCRAP_DEFAULT_GUESS
+            scrap_source = "default_guess"
+
+    density_g_cc = _coerce_float_or_none(value_map.get("Material Density"))
+    if (density_g_cc in (None, 0.0)) and material_text:
+        density_hint = _density_for_material(material_text)
+        if density_hint:
+            density_g_cc = density_hint
+
+    net_volume_cm3 = _coerce_float_or_none(value_map.get("Net Volume (cm^3)"))
+    if net_volume_cm3 is None:
+        length_in = _coerce_float_or_none(value_map.get("Plate Length (in)"))
+        width_in = _coerce_float_or_none(value_map.get("Plate Width (in)"))
+        thickness_in_val = _coerce_float_or_none(value_map.get("Thickness (in)"))
+        if length_in and width_in and thickness_in_val:
+            volume_in3 = float(length_in) * float(width_in) * float(thickness_in_val)
+            net_volume_cm3 = volume_in3 * 16.387064
+    removal_mass_g = _holes_removed_mass_g(geo_payload)
+    if net_volume_cm3 and density_g_cc and removal_mass_g:
+        net_mass_g = float(net_volume_cm3) * float(density_g_cc)
+        base_for_removal = scrap_frac if scrap_source != "default_guess" else 0.0
+        _, scrap_frac, _ = compute_mass_and_scrap_after_removal(net_mass_g, base_for_removal, removal_mass_g)
+        scrap_source = "geometry"
+
+    fai_value = value_map.get("FAIR Required")
+    fai_required = _coerce_bool(_coerce_checkbox_state(fai_value))
+
+    baseline: dict[str, Any] = {
+        "qty": qty,
+        "material": material_text,
+        "scrap_pct": scrap_frac,
+        "fai_required": bool(fai_required),
+    }
+
+    geo_derived = dict(geo_payload.get("derived", {})) if isinstance(geo_payload, dict) else {}
+    geo_derived.setdefault("fai_required", bool(fai_required))
+    if isinstance(geo_payload, dict):
+        geo_payload = dict(geo_payload)
+    else:
+        geo_payload = {}
+    geo_payload["derived"] = geo_derived
+
+    try:
+        build_suggest_payload(geo_payload, baseline, dict(rates or {}), coerce_bounds(state.bounds))
+    except Exception:
+        pass
+
+    state.geo = dict(geo_payload)
+    state.baseline = dict(baseline)
+    state.user_overrides = dict(getattr(state, "user_overrides", {}))
+    state.suggestions = dict(getattr(state, "suggestions", {}))
+    state.effective = dict(getattr(state, "effective", {}))
+    state.effective_sources = dict(getattr(state, "effective_sources", {}))
+
+    inspection_components = {
+        "in_process": 0.5,
+        "final": 0.25,
+        "cmm_programming": 0.1,
+        "cmm_run": 0.1,
+        "fair": 0.0,
+        "source": 0.0,
+    }
+    inspection_baseline_hr = sum(float(v) for v in inspection_components.values())
+    inspection_adjustments: dict[str, float] = {}
+    inspection_total_hr = inspection_baseline_hr
+    overrides = state.user_overrides
+    if isinstance(overrides, _MappingABC):
+        cmm_minutes = _coerce_float_or_none(overrides.get("cmm_minutes"))
+        if cmm_minutes and cmm_minutes > 0:
+            cmm_hours = max(0.0, float(cmm_minutes) / 60.0)
+            inspection_adjustments["cmm_run"] = cmm_hours
+            inspection_total_hr += cmm_hours
+        if "inspection_total_hr" in overrides:
+            target_hr = max(0.0, _coerce_float_or_none(overrides.get("inspection_total_hr")) or 0.0)
+            inspection_total_hr = target_hr
+            state.effective_sources["inspection_total_hr"] = "user"
+            state.effective["inspection_total_hr"] = target_hr
+
+    inspection_meta = {
+        "components": inspection_components,
+        "baseline_hr": inspection_baseline_hr,
+        "hr": inspection_total_hr,
+        "adjustments": inspection_adjustments,
+    }
+
+    from planner_pricing import price_with_planner
+
+    process_costs: dict[str, float] = {}
+    process_meta: dict[str, Any] = {"inspection": inspection_meta}
+    bucket_view: dict[str, dict[str, float]] = {}
+    totals_block: dict[str, float] = {}
+    breakdown: dict[str, Any] = {
+        "qty": qty,
+        "material": {
+            "material": material_text,
+            "scrap_pct": scrap_frac,
+            "scrap_source": scrap_source,
+        },
+        "process_meta": process_meta,
+        "bucket_view": bucket_view,
+        "process_costs": process_costs,
+        "red_flags": [],
+        "totals": totals_block,
+    }
+
+    family = None
+    if isinstance(geo_payload, _MappingABC):
+        family = geo_payload.get("process_planner_family")
+    family = str(family or "").strip().lower() or None
+
+    planner_result: dict[str, Any] = {}
+    if family:
+        if callable(_process_plan_job):
+            try:
+                planner_result["plan"] = _process_plan_job(family, planner_inputs)
+            except Exception:
+                planner_result["plan"] = {}
+
+        oee = _coerce_float_or_none((params or {}).get("OEE_EfficiencyPct")) or 0.85
+        try:
+            pricing = price_with_planner(
+                family,
+                planner_inputs,
+                geo_payload,
+                dict(rates or {}),
+                oee=oee,
+            )
+        except Exception:
+            pricing = {}
+
+        planner_result.update(pricing if isinstance(pricing, dict) else {})
+        totals = planner_result.get("totals", {}) if isinstance(planner_result.get("totals"), _MappingABC) else {}
+        machine_cost = float(_coerce_float_or_none(totals.get("machine_cost")) or 0.0)
+        labor_cost = float(_coerce_float_or_none(totals.get("labor_cost")) or 0.0)
+        total_minutes = float(_coerce_float_or_none(totals.get("minutes")) or 0.0)
+
+        process_costs.update({"Machine": round(machine_cost, 2), "Labor": round(labor_cost, 2)})
+        totals_block.update({"machine_cost": machine_cost, "labor_cost": labor_cost, "minutes": total_minutes})
+        breakdown["labor_cost_rendered"] = labor_cost
+        breakdown["process_plan_pricing"] = planner_result
+        breakdown["pricing_source"] = "planner"
+        breakdown["process_minutes"] = total_minutes
+        baseline["pricing_source"] = "planner"
+        baseline["process_plan_pricing"] = planner_result
+
+        hr_total = total_minutes / 60.0 if total_minutes else 0.0
+        process_meta["planner_total"] = {
+            "minutes": total_minutes,
+            "hr": hr_total,
+            "cost": machine_cost + labor_cost,
+            "machine_cost": machine_cost,
+            "labor_cost": labor_cost,
+            "line_items": list(planner_result.get("line_items", []) or []),
+        }
+        process_meta["planner_machine"] = {"minutes": total_minutes, "hr": hr_total, "cost": machine_cost}
+        process_meta["planner_labor"] = {"minutes": total_minutes, "hr": hr_total, "cost": labor_cost}
+
+        if not roughly_equal(machine_cost, process_costs.get("Machine", 0.0), eps=_PLANNER_BUCKET_ABS_EPSILON):
+            breakdown["red_flags"].append("Planner totals drifted (machine cost)")
+        if not roughly_equal(labor_cost, process_costs.get("Labor", 0.0), eps=_PLANNER_BUCKET_ABS_EPSILON):
+            breakdown["red_flags"].append("Planner totals drifted (labor cost)")
+    else:
+        breakdown["pricing_source"] = "legacy"
+        baseline["pricing_source"] = "legacy"
+        breakdown.setdefault("process_minutes", 0.0)
+
+    hole_diams: list[float] = []
+    if isinstance(geo_payload, _MappingABC):
+        raw_diams = geo_payload.get("hole_diams_mm")
+        if isinstance(raw_diams, (list, tuple)):
+            for entry in raw_diams:
+                coerced = _coerce_float_or_none(entry)
+                if coerced:
+                    hole_diams.append(float(coerced))
+
+    thickness_in = _coerce_float_or_none(value_map.get("Thickness (in)"))
+    if thickness_in is None and isinstance(geo_payload, _MappingABC):
+        thickness_in = _coerce_float_or_none(geo_payload.get("thickness_in"))
+        if thickness_in is None:
+            thickness_mm = _coerce_float_or_none(geo_payload.get("thickness_mm"))
+            if thickness_mm:
+                thickness_in = float(thickness_mm) / 25.4
+
+    drilling_rate = _lookup_rate("DrillingRate", rates, params, default_rates, fallback=75.0)
+    breakdown.setdefault("drilling_meta", {})
+    if hole_diams and thickness_in and drilling_rate > 0:
+        try:
+            estimator_hours = estimate_drilling_hours(hole_diams, float(thickness_in), str(material_text or ""))
+        except Exception:
+            estimator_hours = 0.0
+        if not estimator_hours or estimator_hours <= 0:
+            hole_count = max(1, len(hole_diams))
+            avg_dia_in = sum(hole_diams) / hole_count / 25.4
+            estimator_hours = max(0.05, hole_count * max(avg_dia_in, 0.1) * float(thickness_in) / 600.0)
+        bucket_view["drilling"] = {
+            "minutes": estimator_hours * 60.0,
+            "machine_cost": estimator_hours * drilling_rate,
+            "labor_cost": 0.0,
+        }
+        breakdown["drilling_meta"].update({"estimator_hours_for_planner": estimator_hours})
+        process_meta["drilling"] = {
+            "hr": estimator_hours,
+            "minutes": estimator_hours * 60.0,
+            "rate": drilling_rate,
+            "basis": ["planner_drilling_override"],
+        }
+
+    roughing_hours = _coerce_float_or_none(value_map.get("Roughing Cycle Time"))
+    if roughing_hours is None:
+        roughing_hours = _coerce_float_or_none(value_map.get("Roughing Cycle Time (hr)"))
+    milling_rate = _lookup_rate("MillingRate", rates, params, default_rates, fallback=100.0)
+    if roughing_hours and roughing_hours > 0:
+        bucket_view["milling"] = {
+            "minutes": roughing_hours * 60.0,
+            "machine_cost": roughing_hours * milling_rate,
+            "labor_cost": 0.0,
+        }
+        process_meta["milling"] = {
+            "hr": roughing_hours,
+            "minutes": roughing_hours * 60.0,
+            "rate": milling_rate,
+            "basis": ["planner_milling_backfill"],
+        }
+
+    project_hours = _coerce_float_or_none(value_map.get("Project Management Hours")) or 0.0
+    toolmaker_hours = _coerce_float_or_none(value_map.get("Tool & Die Maker Hours")) or 0.0
+    toolmaker_rate = _lookup_rate("ToolmakerRate", rates, params, default_rates, fallback=85.0)
+    if project_hours > 0:
+        process_meta["project_management"] = {"hr": 0.0, "minutes": 0.0}
+    if toolmaker_hours > 0:
+        process_meta["toolmaker_support"] = {"hr": toolmaker_hours, "minutes": toolmaker_hours * 60.0}
+        process_costs["toolmaker_support"] = toolmaker_hours * toolmaker_rate
+
+    auto_prog_hr = 0.5 + 0.1 * len(hole_diams)
+    if thickness_in:
+        auto_prog_hr += min(2.0, max(0.0, float(thickness_in) * 0.2))
+    override_prog = _coerce_float_or_none(value_map.get("Programming Override Hr"))
+    programming_detail: dict[str, Any] = {
+        "auto_prog_hr": auto_prog_hr,
+        "prog_hr": auto_prog_hr,
+    }
+    if override_prog is not None and override_prog >= 0:
+        programming_detail["prog_hr"] = float(override_prog)
+        programming_detail["override_applied"] = True
+    breakdown["nre_detail"] = {"programming": programming_detail}
+
+    result = {
+        "decision_state": {
+            "baseline": baseline,
+            "suggestions": state.suggestions,
+            "user_overrides": state.user_overrides,
+            "effective": state.effective,
+            "effective_sources": state.effective_sources,
+        },
+        "breakdown": breakdown,
+        "app_meta": {"llm_debug_enabled": APP_ENV.llm_debug_enabled},
+    }
+
+    return result
+
 
 def validate_quote_before_pricing(
     geo: Mapping[str, Any] | None,
