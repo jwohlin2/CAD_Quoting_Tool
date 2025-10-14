@@ -260,3 +260,55 @@
 
     if drill_bins_list:
         drilling_meta["bins_list"] = drill_bins_list
+    drilling_meta = locals().get("drilling_meta") or {}
+    bins_list = drilling_meta.get("bins_list") or []
+    if bins_list:
+        try:
+            _render_removal_card(
+                lines,
+                mat_canon=drilling_meta["material_canonical"],
+                mat_group=drilling_meta.get("material_group"),
+                row_group=drilling_meta.get("row_material_group"),
+                holes_deep=drilling_meta.get("holes_deep", 0),
+                holes_std=drilling_meta.get("holes_std", 0),
+                dia_vals_in=drilling_meta.get("dia_in_vals", []),
+                depth_vals_in=drilling_meta.get("depth_in_vals", []),
+                sfm_deep=drilling_meta.get("sfm_deep", 0),
+                sfm_std=drilling_meta.get("sfm_std", 0),
+                ipr_deep_vals=drilling_meta.get("ipr_deep_vals", []),
+                ipr_std_val=drilling_meta.get("ipr_std_val", 0.0),
+                rpm_deep_vals=drilling_meta.get("rpm_deep_vals", []),
+                rpm_std_vals=drilling_meta.get("rpm_std_vals", []),
+                ipm_deep_vals=drilling_meta.get("ipm_deep_vals", []),
+                ipm_std_vals=drilling_meta.get("ipm_std_vals", []),
+                index_min_per_hole=drilling_meta.get("index_min_per_hole", 0.13),
+                peck_min_rng=drilling_meta.get("peck_min_per_hole_vals", [0.07, 0.08]),
+                toolchange_min_deep=drilling_meta.get("toolchange_min_deep", 8.0),
+                toolchange_min_std=drilling_meta.get("toolchange_min_std", 2.5),
+            )
+            subtotal_min, seen_deep, seen_std = _render_time_per_hole(
+                lines,
+                bins=bins_list,
+                index_min=drilling_meta.get("index_min_per_hole", 0.13),
+                peck_min_deep=min(drilling_meta.get("peck_min_per_hole_vals", [0.07, 0.08])),
+                peck_min_std=max(drilling_meta.get("peck_min_per_hole_vals", [0.07, 0.08])),
+            )
+            tool_add = (
+                (drilling_meta.get("toolchange_min_deep", 8.0) if seen_deep else 0.0)
+                + (drilling_meta.get("toolchange_min_std", 2.5) if seen_std else 0.0)
+            )
+            lines.append(
+                f"Toolchange adders: Deep-Drill {drilling_meta.get('toolchange_min_deep', 8.0):.2f} min + "
+                f"Drill {drilling_meta.get('toolchange_min_std', 2.5):.2f} min = {tool_add:.2f} min"
+            )
+            lines.append("-" * 66)
+            lines.append(
+                f"Subtotal (per-hole × qty) ............... {subtotal_min:.2f} min  ({subtotal_min/60:.2f} hr)"
+            )
+            lines.append(
+                f"TOTAL DRILLING (with toolchange) ........ {subtotal_min + tool_add:.2f} min  ({(subtotal_min + tool_add)/60:.2f} hr)"
+            )
+            lines.append("")
+        except Exception:
+            # If anything goes sideways here, do not break the quote – just skip this block.
+            pass
