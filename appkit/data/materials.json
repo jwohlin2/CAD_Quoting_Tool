@@ -1,0 +1,128 @@
+{
+  "default_display": "Aluminum MIC6",
+  "dropdown_options": [
+    "Aluminum",
+    "Aluminum 5083",
+    "Aluminum MIC6",
+    "Berylium Copper",
+    "Bismuth",
+    "Brass",
+    "Carbide",
+    "Ceramic",
+    "Cobalt",
+    "Copper",
+    "Gold",
+    "Inconel",
+    "Indium",
+    "Lead",
+    "Nickel",
+    "Nickel Silver",
+    "Palladium",
+    "Phosphor Bronze",
+    "Phosphorus",
+    "Silver",
+    "Stainless Steel",
+    "Stainless Steel 303",
+    "Steel",
+    "Steel Low-Carbon",
+    "Steel Mild",
+    "Tin",
+    "Titanium",
+    "Tool Steel",
+    "Tool Steel A2",
+    "Tungsten",
+    "Other (enter custom price)"
+  ],
+  "additional_keywords": {
+    "Aluminum": ["aluminium"],
+    "Aluminum 5083": ["5083", "al 5083"],
+    "Aluminum MIC6": ["mic6", "mic-6"],
+    "Berylium Copper": ["beryllium copper", "c172", "cube"],
+    "Brass": ["c360", "c260"],
+    "Copper": ["cu"],
+    "Inconel": ["in718", "in625"],
+    "Nickel": ["ni"],
+    "Nickel Silver": ["german silver"],
+    "Phosphor Bronze": ["phosphorbronze"],
+    "Stainless Steel": ["stainless"],
+    "Stainless Steel 303": ["ss303", "303"],
+    "Steel": ["carbon steel"],
+    "Steel Low-Carbon": ["low carbon", "low carbon steel"],
+    "Steel Mild": ["mild steel"],
+    "Titanium": ["ti", "ti6al4v"],
+    "Tool Steel": ["h13", "o1", "d2"],
+    "Tool Steel A2": ["a2", "a2 tool steel"]
+  },
+  "density_g_cc_by_display": {
+    "Aluminum": 2.7,
+    "Aluminum 5083": 2.66,
+    "Aluminum MIC6": 2.7,
+    "Berylium Copper": 8.25,
+    "Bismuth": 9.78,
+    "Brass": 8.4,
+    "Carbide": 15.6,
+    "Ceramic": 3.9,
+    "Cobalt": 8.9,
+    "Copper": 8.96,
+    "Gold": 19.32,
+    "Inconel": 8.44,
+    "Indium": 7.31,
+    "Lead": 11.34,
+    "Nickel": 8.9,
+    "Nickel Silver": 8.7,
+    "Palladium": 12.02,
+    "Phosphor Bronze": 8.8,
+    "Phosphorus": 1.82,
+    "Silver": 10.49,
+    "Stainless Steel": 7.9,
+    "Stainless Steel 303": 8.0,
+    "Steel": 7.85,
+    "Steel Low-Carbon": 7.85,
+    "Steel Mild": 7.87,
+    "Tin": 7.31,
+    "Titanium": 4.43,
+    "Tool Steel": 7.8,
+    "Tool Steel A2": 7.86,
+    "Tungsten": 19.3,
+    "Other (enter custom price)": null
+  },
+  "material_map": {
+    "6061": {
+      "symbol": "XAL",
+      "basis": "index_usd_per_tonne",
+      "loss_factor": 0.0,
+      "wieland_key": "6061"
+    },
+    "6061-T6": {
+      "symbol": "XAL",
+      "basis": "index_usd_per_tonne",
+      "wieland_key": "6061-T6"
+    },
+    "7075": {
+      "symbol": "XAL",
+      "basis": "index_usd_per_tonne",
+      "wieland_key": "7075"
+    },
+    "304": {
+      "symbol": "XNI",
+      "basis": "index_usd_per_tonne",
+      "premium_usd_per_kg": 1.2,
+      "wieland_key": "304"
+    },
+    "316": {
+      "symbol": "XNI",
+      "basis": "index_usd_per_tonne",
+      "premium_usd_per_kg": 1.8,
+      "wieland_key": "316"
+    },
+    "C110": {
+      "symbol": "XCU",
+      "basis": "index_usd_per_tonne",
+      "wieland_key": "C110"
+    },
+    "AU-9999": {
+      "symbol": "XAU",
+      "basis": "usd_per_troy_oz"
+    }
+  }
+}

@@ -65,6 +65,17 @@ from cad_quoter.config import (
 from cad_quoter.utils.geo_ctx import _should_include_outsourced_pass
 from cad_quoter.utils import sheet_helpers
 from cad_quoter.utils.scrap import _estimate_scrap_from_stock_plan
+from cad_quoter.utils.render_utils import (
+    fmt_hours,
+    fmt_money,
+    fmt_percent,
+    fmt_range,
+    format_currency,
+    format_dimension,
+    format_hours,
+    format_hours_with_rate,
+    format_percent,
+)
 from cad_quoter.estimators import SpeedsFeedsUnavailableError
 _DRILLING_DATA_PATH = Path(__file__).resolve().parent / "data" / "drilling.json"
 _DRILLING_COEFFICIENTS: dict[str, Any] | None = None
@@ -443,34 +454,6 @@ VL_MODEL = str(_runtime.LEGACY_VL_MODEL)
 MM_PROJ = str(_runtime.LEGACY_MM_PROJ)
 LEGACY_VL_MODEL = str(_runtime.LEGACY_VL_MODEL)
 LEGACY_MM_PROJ = str(_runtime.LEGACY_MM_PROJ)
-PREFERRED_MODEL_DIRS: list[str | Path] = [str(p) for p in _runtime.PREFERRED_MODEL_DIRS]
-
-
-def discover_qwen_vl_assets(
-    *, model_path: str | None = None, mmproj_path: str | None = None
-) -> tuple[str, str]:
-    """Wrapper that respects :data:`PREFERRED_MODEL_DIRS` overrides."""
-
-    preferred: list[Path] = []
-    for value in PREFERRED_MODEL_DIRS:
-        try:
-            preferred.append(Path(value).expanduser())
-        except Exception:
-            continue
-
-    original_preferred = getattr(_runtime, "PREFERRED_MODEL_DIRS", ())
-    try:
-        if preferred:
-            _runtime.PREFERRED_MODEL_DIRS = tuple(preferred)
-        return _runtime.discover_qwen_vl_assets(
-            model_path=model_path,
-            mmproj_path=mmproj_path,
-        )
-    finally:
-        try:
-            _runtime.PREFERRED_MODEL_DIRS = original_preferred
-        except Exception:
-            pass
 
 
 from cad_quoter.domain_models import (
@@ -907,6 +890,18 @@ def build_geo_from_dxf(path: str) -> dict[str, Any]:
     return result
 
 
+def set_build_geo_from_dxf_hook(
+    loader: Optional[Callable[[str], Dict[str, Any]]]
+) -> None:
+    """Register a callable used by :func:`build_geo_from_dxf`."""
+
+    if loader is not None and not callable(loader):
+        raise TypeError("DXF metadata hook must be callable or ``None``")
+
+    global _build_geo_from_dxf_hook
+    _build_geo_from_dxf_hook = loader
+
+
 # Geometry helpers (re-exported for backward compatibility)
 def _missing_geom_fn(name: str):
     def _fn(*_a, **_k):
@@ -918,14 +913,12 @@ def _export(name: str):
 
 read_cad_any = _export("read_cad_any")
 read_step_shape = _export("read_step_shape")
-read_step_or_iges_or_brep = _export("read_step_or_iges_or_brep")
 read_dxf_as_occ_shape = _export("read_dxf_as_occ_shape")
 convert_dwg_to_dxf = _export("convert_dwg_to_dxf")
 enrich_geo_occ = _export("enrich_geo_occ")
 enrich_geo_stl = _export("enrich_geo_stl")
 safe_bbox = _export("safe_bbox")
 iter_solids = _export("iter_solids")
-explode_compound = _export("explode_compound")
 parse_hole_table_lines = _export("parse_hole_table_lines")
 extract_text_lines_from_dxf = _export("extract_text_lines_from_dxf")
 text_harvest = _export("text_harvest")
@@ -3539,19 +3532,7 @@ def safe_bbox(shape: Any):
     bnd_add(shape, box, True)  # <- uses whichever binding is available
     return box
 def read_step_or_iges_or_brep(path: str) -> Any:
-    p = Path(path)
-    ext = p.suffix.lower()
-    if ext in (".step", ".stp"):
-        return read_step_shape(str(p))
-    if ext in (".iges", ".igs"):
-        ig = IGESControl_Reader()
-        if ig.ReadFile(str(p)) != IFSelect_RetDone:
-            raise RuntimeError("IGES read failed")
-        ig.TransferRoots()
-        return _shape_from_reader(ig)
-    if ext == ".brep":
-        return _brep_read(str(p))
-    raise RuntimeError(f"Unsupported OCC format: {ext}")
+    raise RuntimeError("read_step_or_iges_or_brep is no longer exposed via appV5; use cad_quoter.geometry.read_step_or_iges_or_brep")
 
 def convert_dwg_to_dxf(dwg_path: str, *, out_ver="ACAD2018") -> str:
     """
@@ -5206,11 +5187,9 @@ def _format_planner_bucket_line(
         rate_val = total_cost / hr_val
 
     if currency_formatter is None:
-        currency_formatter = lambda x: f"${float(x):,.2f}"  # pragma: no cover
+        currency_formatter = lambda x: fmt_money(x, "$")  # pragma: no cover
 
-    hours_text = f"{max(hr_val, 0.0):.2f} hr"
-    if hr_val <= 0:
-        hours_text = "0.00 hr"
+    hours_text = fmt_hours(hr_val) # pragma: no cover
     if rate_val > 0:
         rate_text = f"{currency_formatter(rate_val)}/hr"
     else:
@@ -6577,9 +6556,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 rate_val = 0.0
         if rate_val <= 0 and hr_val > 0 and total_cost > 0:
             rate_val = total_cost / hr_val
-        hours_text = f"{max(hr_val, 0.0):.2f} hr"
-        if hr_val <= 0:
-            hours_text = "0.00 hr"
+        hours_text = fmt_hours(hr_val)
         if rate_val > 0:
             rate_text = f"{_m(rate_val)}/hr"
         else:
@@ -6732,7 +6709,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 if credit_display.startswith(currency):
                     credit_display = f"-{credit_display}"
                 else:
-                    credit_display = f"-{currency}{float(scrap_credit):,.2f}"
+                    credit_display = f"-{fmt_money(scrap_credit, currency)}"
                 scrap_credit_lines.append(f"  Scrap Credit: {credit_display}")
                 scrap_credit_mass_lb = _coerce_float_or_none(
                     material.get("scrap_credit_mass_lb")
@@ -6746,7 +6723,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     )
                     scrap_credit_lines.append(
                         "    based on "
-                        f"{_format_weight_lb_oz(scrap_credit_mass_g)} × {currency}{float(scrap_credit_unit_price_lb):,.2f} / lb"
+                        f"{_format_weight_lb_oz(scrap_credit_mass_g)} × {fmt_money(scrap_credit_unit_price_lb, currency)} / lb"
                     )
             net_mass_val = _coerce_float_or_none(net_mass_g)
             effective_mass_val = _coerce_float_or_none(mass_g)
@@ -7375,7 +7352,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     )
                 soft_jaw_hr = float(fixture_detail.get("soft_jaw_hr", 0.0) or 0.0)
                 if soft_jaw_hr > 0:
-                    detail_args.append(f"Soft jaw prep {soft_jaw_hr:.2f} hr")
+                    detail_args.append(f"Soft jaw prep {fmt_hours(soft_jaw_hr)}")
                 if qty > 1:
                     detail_args.append(f"Amortized across {qty} pcs")
                 if detail_args:
@@ -7528,7 +7505,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
         if single_piece_qty and numeric_value > 24.0:
             warning = (
-                f"{label} hours capped at 24 hr for single-piece quote (was {numeric_value:.2f} hr)."
+                f"{label} hours capped at {fmt_hours(24.0, decimals=0)} for single-piece quote (was {fmt_hours(numeric_value)})."
             )
             if warning not in red_flags:
                 red_flags.append(warning)
@@ -8147,7 +8124,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         )
         append_line("-" * 66)
         append_line(
-            f"Subtotal (per-hole × qty) ............... {subtotal_min:.2f} min  ({subtotal_min/60.0:.2f} hr)"
+            f"Subtotal (per-hole × qty) ............... {subtotal_min:.2f} min  ({fmt_hours(subtotal_min/60.0)})"
         )
         append_line(
             f"TOTAL DRILLING (with toolchange) ........ {subtotal_min + tool_add:.2f} min  ({(subtotal_min + tool_add)/60.0:.2f} hr)"
