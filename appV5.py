@@ -77,23 +77,6 @@ from cad_quoter.utils.render_utils import (
     format_percent,
 )
 from cad_quoter.estimators import SpeedsFeedsUnavailableError
-_DRILLING_DATA_PATH = Path(__file__).resolve().parent / "data" / "drilling.json"
-_DRILLING_COEFFICIENTS: dict[str, Any] | None = None
-
-
-def _load_drilling_coefficients() -> dict[str, Any]:
-    """Return cached drilling estimator coefficients from ``data/drilling.json``."""
-
-    global _DRILLING_COEFFICIENTS
-    if _DRILLING_COEFFICIENTS is None:
-        try:
-            with _DRILLING_DATA_PATH.open("r", encoding="utf-8") as handle:
-                _DRILLING_COEFFICIENTS = json.load(handle)
-        except FileNotFoundError:
-            _DRILLING_COEFFICIENTS = {}
-    return _DRILLING_COEFFICIENTS
-
-
 from cad_quoter.llm_overrides import (
     HARDWARE_PASS_LABEL,
     LEGACY_HARDWARE_PASS_LABEL,
@@ -142,7 +125,7 @@ from appkit.scrap_helpers import (
     normalize_scrap_pct,
 )
 
-from appkit.data import load_text
+from appkit.data import load_json, load_text
 from appkit.debug.debug_tables import (
     _jsonify_debug_value,
     _jsonify_debug_summary,
@@ -9844,7 +9827,10 @@ def _holes_removed_mass_g(geo_context: Mapping[str, Any] | None) -> float | None
     mass_g = volume_cm3 * float(density_g_cc)
     return mass_g if mass_g > 0 else None
 
-_DRILLING_COEFFS = _load_drilling_coefficients()
+try:
+    _DRILLING_COEFFS = load_json("drilling.json")
+except FileNotFoundError:
+    _DRILLING_COEFFS = {}
 MIN_DRILL_MIN_PER_HOLE = float(_DRILLING_COEFFS.get("min_minutes_per_hole", 0.10))
 DEFAULT_MAX_DRILL_MIN_PER_HOLE = float(_DRILLING_COEFFS.get("max_minutes_per_hole", 3.00))
 
@@ -18858,28 +18844,9 @@ def extract_pdf_all(pdf_path: Path, dpi: int = 300) -> dict:
     doc.close()
     return {"pages": pages, "best": best}
 
-JSON_SCHEMA = {
-    "part_name": "str|null",
-    "material": {"name": "str|null", "thickness_in": "float|null"},
-    "quantity": "int|null",
-    "estimates": {
-        "Programming Hours": "float|null",
-        "CAM Programming Hours": "float|null",
-        "Engineering (Docs/Fixture Design) Hours": "float|null",
-        "Fixture Build Hours": "float|null",
-        "Roughing Cycle Time": "float|null",
-        "Semi-Finish Cycle Time": "float|null",
-        "Finishing Cycle Time": "float|null",
-        "In-Process Inspection Hours": "float|null",
-        "Final Inspection Hours": "float|null",
-        "Deburr Hours": "float|null",
-        "Sawing Hours": "float|null",
-        "Assembly Hours": "float|null",
-        "Packaging Labor Hours": "float|null"
-    },
-    "flags": {"FAIR Required": "0|1", "Source Inspection Requirement": "0|1"},
-    "reasoning_brief": "str"
-}
+JSON_SCHEMA = load_json("vl_pdf_schema.json")
+MAP_KEYS = load_json("vl_pdf_map_keys.json")
+PDF_SYSTEM_PROMPT = load_text("vl_pdf_system_prompt.txt").strip()
 
 def _truncate_text(text: str, max_chars: int = 5000) -> str:
     text = text or ""
@@ -18892,10 +18859,7 @@ def _truncate_text(text: str, max_chars: int = 5000) -> str:
 def build_llm_prompt(best_page: dict) -> dict:
     text = _truncate_text(best_page.get("text", ""))
     schema = jdump(JSON_SCHEMA)
-    system = (
-        "You are a manufacturing estimator. Read the drawing text and image and return JSON only. "
-        "Estimate hours conservatively and do not invent dimensions."
-    )
+    system = PDF_SYSTEM_PROMPT
     user = (
         f"TEXT FROM PDF PAGE:\n{text}\n\n"
         f"REQUIRED JSON SHAPE:\n{schema}\n\n"
@@ -18918,26 +18882,6 @@ def infer_pdf_estimate(structured: dict) -> dict:
     prompt = build_llm_prompt(best_page)
     return run_llm_json(prompt["system"], prompt["user"], prompt["image_path"])
 
-MAP_KEYS = {
-    "Quantity": "quantity",
-    "Material": ("material", "name"),
-    "Thickness (in)": ("material", "thickness_in"),
-    "Programming Hours": ("estimates", "Programming Hours"),
-    "CAM Programming Hours": ("estimates", "CAM Programming Hours"),
-    "Engineering (Docs/Fixture Design) Hours": ("estimates", "Engineering (Docs/Fixture Design) Hours"),
-    "Fixture Build Hours": ("estimates", "Fixture Build Hours"),
-    "Roughing Cycle Time": ("estimates", "Roughing Cycle Time"),
-    "Semi-Finish Cycle Time": ("estimates", "Semi-Finish Cycle Time"),
-    "Finishing Cycle Time": ("estimates", "Finishing Cycle Time"),
-    "In-Process Inspection Hours": ("estimates", "In-Process Inspection Hours"),
-    "Final Inspection Hours": ("estimates", "Final Inspection Hours"),
-    "Deburr Hours": ("estimates", "Deburr Hours"),
-    "Sawing Hours": ("estimates", "Sawing Hours"),
-    "Assembly Hours": ("estimates", "Assembly Hours"),
-    "Packaging Labor Hours": ("estimates", "Packaging Labor Hours"),
-    "FAIR Required": ("flags", "FAIR Required"),
-    "Source Inspection Requirement": ("flags", "Source Inspection Requirement"),
-}
 
 def _deep_get(d: dict, path):
     if isinstance(path, str):

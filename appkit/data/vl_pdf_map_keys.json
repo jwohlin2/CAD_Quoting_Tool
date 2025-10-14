@@ -1,0 +1,20 @@
+{
+  "Quantity": "quantity",
+  "Material": ["material", "name"],
+  "Thickness (in)": ["material", "thickness_in"],
+  "Programming Hours": ["estimates", "Programming Hours"],
+  "CAM Programming Hours": ["estimates", "CAM Programming Hours"],
+  "Engineering (Docs/Fixture Design) Hours": ["estimates", "Engineering (Docs/Fixture Design) Hours"],
+  "Fixture Build Hours": ["estimates", "Fixture Build Hours"],
+  "Roughing Cycle Time": ["estimates", "Roughing Cycle Time"],
+  "Semi-Finish Cycle Time": ["estimates", "Semi-Finish Cycle Time"],
+  "Finishing Cycle Time": ["estimates", "Finishing Cycle Time"],
+  "In-Process Inspection Hours": ["estimates", "In-Process Inspection Hours"],
+  "Final Inspection Hours": ["estimates", "Final Inspection Hours"],
+  "Deburr Hours": ["estimates", "Deburr Hours"],
+  "Sawing Hours": ["estimates", "Sawing Hours"],
+  "Assembly Hours": ["estimates", "Assembly Hours"],
+  "Packaging Labor Hours": ["estimates", "Packaging Labor Hours"],
+  "FAIR Required": ["flags", "FAIR Required"],
+  "Source Inspection Requirement": ["flags", "Source Inspection Requirement"]
+}
