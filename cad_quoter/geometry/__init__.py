@@ -19,25 +19,59 @@ try:
 except Exception:
     _HAS_TRIMESH = False
 
-_HAS_EZDXF  = False
-_HAS_ODAFC  = False      # ezdxf.addons.odafc (uses ODA File Converter)
-_EZDXF_VER  = "unknown"
+from cad_quoter.vendors import ezdxf as _ezdxf_vendor
+from cad_quoter.vendors.occt import (
+    BACKEND,
+    STACK,
+    STACK_GPROP,
+    BRepAdaptor_Curve,
+    BRepAlgoAPI_Section,
+    BRep_Builder,
+    BRep_Tool,
+    BRepCheck_Analyzer,
+    BRepGProp,
+    BRepTools,
+    GProp_GProps,
+    GeomAbs_BSplineSurface,
+    GeomAbs_BezierSurface,
+    GeomAbs_Circle,
+    GeomAbs_Cone,
+    GeomAbs_Cylinder,
+    GeomAbs_Plane,
+    GeomAbs_Torus,
+    GeomAdaptor_Surface,
+    IFSelect_RetDone,
+    IGESControl_Reader,
+    STEPControl_Reader,
+    ShapeAnalysis_Surface,
+    ShapeFix_Shape,
+    TopAbs_COMPOUND,
+    TopAbs_EDGE,
+    TopAbs_FACE,
+    TopAbs_SHELL,
+    TopAbs_SOLID,
+    TopAbs_ShapeEnum,
+    TopExp,
+    TopExp_Explorer,
+    TopTools_IndexedDataMapOfShapeListOfShape,
+    TopoDS,
+    TopoDS_Compound,
+    TopoDS_Face,
+    TopoDS_Shape,
+    Bnd_Box,
+    bnd_add,
+    brep_read,
+    gp_Dir,
+    gp_Pln,
+    gp_Pnt,
+    gp_Vec,
+    uv_bounds,
+)
+from cad_quoter.vendors._occt_base import PREFIX as _OCCT_PREFIX, load_module as _occt_load_module
 
-try:
-    import ezdxf
-    _EZDXF_VER = getattr(ezdxf, "__version__", "unknown")
-    _HAS_EZDXF = True
-
-except Exception:
-    ezdxf = None  # keep name defined
-
-# odafc is optional; don't fail if it's not present
-try:
-    if _HAS_EZDXF:
-        from ezdxf.addons import odafc  # type: ignore  # noqa: F401
-        _HAS_ODAFC = True
-except Exception:
-    _HAS_ODAFC = False
+_HAS_EZDXF = _ezdxf_vendor.HAS_EZDXF
+_HAS_ODAFC = _ezdxf_vendor.HAS_ODAFC
+_EZDXF_VER = _ezdxf_vendor.EZDXF_VERSION
 
 # Hole chart helpers (optional)
 try:
@@ -56,130 +90,7 @@ try:
     import numpy as np  # type: ignore
 except Exception:
     np = None  # type: ignore
-# ---------- OCC / OCP compatibility ----------
-STACK = None
-
-def _make_bnd_add_ocp():
-    # Try every known symbol name in OCP builds
-    candidates = []
-    try:
-        # module-level function: Add(...)
-        from OCP.BRepBndLib import Add as _add1
-        candidates.append(_add1)
-    except Exception:
-        pass
-    try:
-        # module-level function: Add_s(...)
-        from OCP.BRepBndLib import Add_s as _add1s
-        candidates.append(_add1s)
-    except Exception:
-        pass
-    try:
-        # module-level function: BRepBndLib_Add(...)
-        from OCP.BRepBndLib import BRepBndLib_Add as _add2
-        candidates.append(_add2)
-    except Exception:
-        pass
-    try:
-        # module-level function: brepbndlib_Add(...)
-        from OCP.BRepBndLib import brepbndlib_Add as _add3
-        candidates.append(_add3)
-    except Exception:
-        pass
-    try:
-        from OCP.BRepBndLib import BRepBndLib as _klass
-        for attr in ("Add", "Add_s", "AddClose_s", "AddOptimal_s", "AddOBB_s"):
-            fn = getattr(_klass, attr, None)
-            if fn:
-                candidates.append(fn)
-    except Exception:
-        pass
-
-    if not candidates:
-        raise ImportError("No BRepBndLib.Add symbol found in OCP")
-
-    # return a dispatcher that tries different call signatures
-    def _bnd_add(shape, box, use_triangulation=True):
-        last_err = None
-        for fn in candidates:
-            # Try 3-arg form
-            try:
-                return fn(shape, box, use_triangulation)
-            except TypeError as e:
-                last_err = e
-            # Try 2-arg form
-            try:
-                return fn(shape, box)
-            except TypeError as e:
-                last_err = e
-            except Exception as e:
-                last_err = e
-        # If we get here, none of the variants worked
-        raise last_err or RuntimeError("No callable BRepBndLib.Add variant succeeded")
-
-    return _bnd_add
-
-try:
-    # Prefer OCP (CadQuery/ocp bindings)
-    from OCP.STEPControl import STEPControl_Reader
-    from OCP.IFSelect import IFSelect_RetDone
-    from OCP.TopoDS import TopoDS_Compound, TopoDS_Shape
-    from OCP.BRep import BRep_Builder
-    from OCP.ShapeFix import ShapeFix_Shape
-    from OCP.BRepCheck import BRepCheck_Analyzer
-    from OCP.Bnd import Bnd_Box
-
-    try:
-        bnd_add = _make_bnd_add_ocp()
-        STACK = "ocp"
-    except Exception:
-        # Fallback: try dynamic dispatch at call time for OCP builds missing Add
-        def bnd_add(shape, box, use_triangulation=True):
-            candidates = [
-                ("OCP.BRepBndLib", "Add"),
-                ("OCP.BRepBndLib", "Add_s"),
-                ("OCP.BRepBndLib", "BRepBndLib_Add"),
-                ("OCP.BRepBndLib", "brepbndlib_Add"),
-                ("OCC.Core.BRepBndLib", "Add"),
-                ("OCC.Core.BRepBndLib", "Add_s"),
-                ("OCC.Core.BRepBndLib", "BRepBndLib_Add"),
-                ("OCC.Core.BRepBndLib", "brepbndlib_Add"),
-            ]
-            for mod_name, attr in candidates:
-                try:
-                    module = __import__(mod_name, fromlist=[attr])
-                    fn = getattr(module, attr)
-                    return fn(shape, box, use_triangulation)
-                except Exception:
-                    continue
-            raise RuntimeError("No BRepBndLib.Add available in this build")
-except Exception:
-    # Fallback to pythonocc-core
-    from OCC.Core.STEPControl import STEPControl_Reader
-    from OCC.Core.IFSelect import IFSelect_RetDone
-    from OCC.Core.TopoDS import TopoDS_Compound, TopoDS_Shape
-    from OCC.Core.BRep import BRep_Builder
-    from OCC.Core.ShapeFix import ShapeFix_Shape
-    from OCC.Core.BRepCheck import BRepCheck_Analyzer
-    from OCC.Core.Bnd import Bnd_Box
-    from OCC.Core.BRepBndLib import brepbndlib_Add as _brep_add
-
-    def bnd_add(shape, box, use_triangulation=True):
-        _brep_add(shape, box, use_triangulation)
-
-    STACK = "pythonocc"
-# ---------- end shim ----------
-# ----- one-backend imports -----
-try:
-    from OCP.BRep import BRep_Tool
-    from OCP.TopAbs import TopAbs_FACE
-    from OCP.TopExp import TopExp_Explorer
-    BACKEND = "ocp"
-except Exception:
-    from OCC.Core.BRep import BRep_Tool
-    from OCC.Core.TopAbs import TopAbs_FACE
-    from OCC.Core.TopExp import TopExp_Explorer
-    BACKEND = "pythonocc"
+# ---------- OCCT helper wrappers ----------
 
 def _typename(o):  # small helper
     return getattr(o, "__class__", type(o)).__name__
@@ -431,10 +342,7 @@ def list_iter(lst):
 # ---- tiny helpers you can use elsewhere --------------------------------------
 def require_ezdxf():
     """Raise a clear error if ezdxf is missing."""
-    if not _HAS_EZDXF:
-
-        raise RuntimeError("ezdxf not installed. Install with pip/conda (package name: 'ezdxf').")
-    return ezdxf
+    return _ezdxf_vendor.require_ezdxf()
 
 def get_dwg_converter_path() -> str:
     """Resolve a DWG?DXF converter path (.bat/.cmd/.exe)."""
@@ -461,15 +369,17 @@ def get_import_diagnostics_text() -> str:
         lines.append(f"PyMuPDF: MISSING ({e})")
 
     try:
-        import ezdxf
-        lines.append(f"ezdxf: {getattr(ezdxf, '__version__', 'unknown')}")
+        ezdxf_mod = require_ezdxf()
+    except Exception as e:  # pragma: no cover - diagnostic helper
+        lines.append(f"ezdxf: MISSING ({e})")
+    else:
+        lines.append(f"ezdxf: {getattr(ezdxf_mod, '__version__', 'unknown')}")
         try:
-            from ezdxf.addons import odafc  # noqa: F401
-            lines.append("ezdxf.addons.odafc: OK")
+            _ezdxf_vendor.require_odafc()
         except Exception as e:
             lines.append(f"ezdxf.addons.odafc: not available ({e})")
-    except Exception as e:
-        lines.append(f"ezdxf: MISSING ({e})")
+        else:
+            lines.append("ezdxf.addons.odafc: OK")
 
     oda = os.environ.get("ODA_CONVERTER_EXE") or "(not set)"
     d2d = os.environ.get("DWG2DXF_EXE") or "(not set)"
@@ -536,22 +446,23 @@ def upsert_var_row(df, item, value, dtype="number"):
 DIM_RE = re.compile(r"(?:ï¿½|DIAM|DIA)\s*([0-9.+-]+)|R\s*([0-9.+-]+)|([0-9.+-]+)\s*[xX]\s*([0-9.+-]+)")
 
 def load_drawing(path: Path) -> Drawing:
-    require_ezdxf()
+    ezdxf_mod = require_ezdxf()
     if path.suffix.lower() == ".dwg":
         # Prefer explicit converter/wrapper if configured (works even if ODA isnï¿½t on PATH)
         exe = get_dwg_converter_path()
         if exe:
             dxf_path = convert_dwg_to_dxf(str(path))
-            return ezdxf.readfile(dxf_path)
+            return ezdxf_mod.readfile(dxf_path)
         # Fallback: odafc (requires ODAFileConverter on PATH)
         if _HAS_ODAFC:
 
-            return odafc.readfile(str(path))
+            odafc_mod = _ezdxf_vendor.require_odafc()
+            return odafc_mod.readfile(str(path))
         raise RuntimeError(
             "DWG import needs ODA File Converter. Set ODA_CONVERTER_EXE to the exe "
             "or place dwg2dxf_wrapper.bat next to the script."
         )
-    return ezdxf.readfile(str(path))  # DXF directly
+    return ezdxf_mod.readfile(str(path))  # DXF directly
 
 
 def dxf_to_structured(doc: Drawing) -> dict:
@@ -652,116 +563,15 @@ def build_llm_payload(structured: dict, page_image_path: str | None):
 
 
 
-# ==== OpenCascade compat (works with OCP OR OCC.Core) ====
+# ==== OCCT compat delegated to cad_quoter.vendors.occt ====
 
 
-try:
-    # ---- OCP branch ----
-    from OCP.IFSelect import IFSelect_RetDone
-    from OCP.IGESControl import IGESControl_Reader
-    from OCP.ShapeFix import ShapeFix_Shape
-    from OCP.BRepCheck import BRepCheck_Analyzer
-    from OCP.BRep import BRep_Tool        # OCP version
-    from OCP.BRepGProp import BRepGProp
-    from OCP.GProp import GProp_GProps
-    from OCP.Bnd import Bnd_Box
-    from OCP.BRep import BRep_Builder
-    from OCP.BRepAlgoAPI import BRepAlgoAPI_Section
-    from OCP.BRepAdaptor import BRepAdaptor_Curve
-    
-    # ADD THESE TWO IMPORTS
-    from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
-    from OCP.TopoDS import (
-        TopoDS_Shape, TopoDS_Face, TopoDS_Compound
-    )
-    from OCP.TopExp import TopExp_Explorer, TopExp
-    from OCP.TopAbs import TopAbs_FACE, TopAbs_EDGE, TopAbs_SOLID, TopAbs_SHELL, TopAbs_COMPOUND
-    from OCP.GeomAdaptor import GeomAdaptor_Surface
-    from OCP.GeomAbs import (
-        GeomAbs_Plane, GeomAbs_Cylinder, GeomAbs_Torus, GeomAbs_Cone,
-        GeomAbs_BSplineSurface, GeomAbs_BezierSurface, GeomAbs_Circle,
-    )
-    from OCP.ShapeAnalysis import ShapeAnalysis_Surface
-    from OCP.gp import gp_Pnt, gp_Dir, gp_Pln
-    BACKEND_OCC = "OCP"
-
-    def BRepTools_UVBounds(face):
-        return BRepTools.UVBounds(face)
+def BRepTools_UVBounds(face):
+    return uv_bounds(face)
 
 
-    def _brep_read(path: str) -> TopoDS_Shape:
-        s = TopoDS_Shape()
-        builder = BRep_Builder()
-        if hasattr(BRepTools, "Read_s"):
-            ok = BRepTools.Read_s(s, str(path), builder)
-        else:
-            ok = BRepTools.Read(s, str(path), builder)
-        if ok is False:
-            raise RuntimeError("BREP read failed")
-        return s
-
-
-
-except Exception:
-    # ---- OCC.Core branch ----
-    from OCC.Core.STEPControl import STEPControl_Reader
-    from OCC.Core.IFSelect import IFSelect_RetDone
-    from OCC.Core.IGESControl import IGESControl_Reader
-    from OCC.Core.ShapeFix import ShapeFix_Shape
-    from OCC.Core.BRepCheck import BRepCheck_Analyzer
-    from OCC.Core.BRep import BRep_Tool          # ? OCC version
-    from OCC.Core.GProp import GProp_GProps
-    from OCC.Core.Bnd import Bnd_Box
-    from OCC.Core.BRep import BRep_Builder
-    from OCC.Core.BRepAlgoAPI import BRepAlgoAPI_Section
-    from OCC.Core.BRepAdaptor import BRepAdaptor_Curve
-    # ADD TopTools import and TopoDS_Face for the fix below
-    from OCC.Core.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
-    from OCC.Core.TopoDS import (
-        TopoDS_Shape, TopoDS_Face, TopoDS_Compound,
-    )
-    from OCC.Core.TopExp import TopExp_Explorer
-    from OCC.Core.TopAbs import TopAbs_FACE, TopAbs_EDGE, TopAbs_SOLID, TopAbs_SHELL, TopAbs_COMPOUND
-    from OCC.Core.GeomAdaptor import GeomAdaptor_Surface
-    from OCC.Core.GeomAbs import (
-        GeomAbs_Plane, GeomAbs_Cylinder, GeomAbs_Torus, GeomAbs_Cone,
-        GeomAbs_BSplineSurface, GeomAbs_BezierSurface, GeomAbs_Circle,
-    )
-    from OCC.Core.ShapeAnalysis import ShapeAnalysis_Surface
-    from OCC.Core.gp import gp_Pnt, gp_Dir, gp_Pln
-    BACKEND_OCC = "OCC.Core"
-
-    # BRepGProp shim (pythonocc uses free functions)
-    from OCC.Core.BRepGProp import (
-        brepgprop_SurfaceProperties,
-        brepgprop_LinearProperties,
-        brepgprop_VolumeProperties,
-    )
-    class _BRepGPropShim:
-        @staticmethod
-        def SurfaceProperties_s(shape_or_face, gprops): brepgprop_SurfaceProperties(shape_or_face, gprops)
-        @staticmethod
-        def LinearProperties_s(edge, gprops):          brepgprop_LinearProperties(edge, gprops)
-        @staticmethod
-        def VolumeProperties_s(shape, gprops):         brepgprop_VolumeProperties(shape, gprops)
-    BRepGProp = _BRepGPropShim
-
-
-
-    # UV bounds and brep read are free functions
-    from OCC.Core.BRepTools import BRepTools, breptools_Read as _occ_breptools_read
-    def BRepTools_UVBounds(face):
-        fn = getattr(BRepTools, "UVBounds", None)
-        if fn is None:
-            from OCC.Core.BRepTools import breptools_UVBounds as _legacy
-            return _legacy(face)
-        return fn(face)
-    def _brep_read(path: str) -> TopoDS_Shape:
-        s = TopoDS_Shape()
-        ok = _occ_breptools_read(s, str(path), BRep_Builder())
-        if ok is False:
-            raise RuntimeError("BREP read failed")
-        return s
+def _brep_read(path: str) -> TopoDS_Shape:
+    return brep_read(path)
 
 def _shape_from_reader(reader):
     """Return a healed TopoDS_Shape from a STEP/IGES reader."""
@@ -858,8 +668,6 @@ def read_step_shape(path: str) -> TopoDS_Shape:
     fx = ShapeFix_Shape(shape)
     fx.Perform()
     return fx.Shape()
-
-from OCP.TopoDS import TopoDS_Shape  # or OCC.Core.TopoDS on pythonocc
 
 def safe_bbox(shape: TopoDS_Shape):
     if shape is None or shape.IsNull():
@@ -1400,10 +1208,6 @@ def load_cad_any(path: str) -> TopoDS_Shape:
 
     raise RuntimeError(f"Unsupported file type for shape loading: {ext}")
 def read_cad_any(path: str):
-    from OCP.IFSelect import IFSelect_RetDone
-    from OCP.IGESControl import IGESControl_Reader
-    from OCP.TopoDS import TopoDS_Shape
-
     ext = Path(path).suffix.lower()
     if ext in (".step", ".stp"):
         return read_step_shape(path)
@@ -1414,10 +1218,7 @@ def read_cad_any(path: str):
         ig.TransferRoots()
         return _shape_from_reader(ig)
     if ext == ".brep":
-        s = TopoDS_Shape()
-        if not BRepTools.Read(s, path, None):
-            raise RuntimeError("BREP read failed")
-        return s
+        return brep_read(path)
     if ext == ".dxf":
         return read_dxf_as_occ_shape(path)
     if ext == ".dwg":
@@ -1538,29 +1339,28 @@ def update_variables_df_with_geo(df, geo: dict):
 
 def read_dxf_as_occ_shape(dxf_path: str):
     # minimal DXF?OCC triangulated shape (3DFACE/MESH/POLYFACE), fallback: extrude closed polyline
-    import ezdxf
     import numpy as np
-    from OCP.BRepBuilderAPI import (BRepBuilderAPI_MakeFace, BRepBuilderAPI_MakePolygon,
-                                    BRepBuilderAPI_Sewing, BRepBuilderAPI_MakeSolid)
-    from OCP.gp import gp_Pnt, gp_Vec
-    from OCP.BRepPrimAPI import BRepPrimAPI_MakePrism
-    from OCP.ShapeFix import ShapeFix_Solid
-    from OCP.TopExp import TopExp_Explorer
-    from OCP.TopAbs import TopAbs_FACE
+    if _OCCT_PREFIX is None:
+        raise RuntimeError("OCCT bindings are required for DXF conversion")
+
+    builder_api = _occt_load_module("BRepBuilderAPI")
+    prim_api = _occt_load_module("BRepPrimAPI")
+    shape_fix_mod = _occt_load_module("ShapeFix")
 
     def tri_face(p0,p1,p2):
-        poly = BRepBuilderAPI_MakePolygon()
+        poly = builder_api.BRepBuilderAPI_MakePolygon()
         for p in (p0,p1,p2,p0):
             poly.Add(gp_Pnt(*p))
-        return BRepBuilderAPI_MakeFace(poly.Wire(), True).Face()
+        return builder_api.BRepBuilderAPI_MakeFace(poly.Wire(), True).Face()
 
     def sew(faces):
-        sew = BRepBuilderAPI_Sewing(1.0e-6, True, True, True, True)
+        sew = builder_api.BRepBuilderAPI_Sewing(1.0e-6, True, True, True, True)
         for f in faces: sew.Add(f)
         sew.Perform()
         return sew.SewedShape()
 
-    doc = ezdxf.readfile(dxf_path)
+    ezdxf_mod = require_ezdxf()
+    doc = ezdxf_mod.readfile(dxf_path)
     msp = doc.modelspace()
     INSUNITS = doc.header.get("$INSUNITS", 1)  # 1=in, 4=mm, 2=ft, 6=m
     u2mm = {1:25.4, 4:1.0, 2:304.8, 6:1000.0}.get(INSUNITS, 1.0)
@@ -1600,11 +1400,11 @@ def read_dxf_as_occ_shape(dxf_path: str):
     if faces:
         sewed = sew(faces)
         try:
-            solid = BRepBuilderAPI_MakeSolid()
+            solid = builder_api.BRepBuilderAPI_MakeSolid()
             exp = TopExp_Explorer(sewed, TopAbs_FACE)
             while exp.More():
                 solid.Add(exp.Current()); exp.Next()
-            fix = ShapeFix_Solid(solid.Solid()); fix.Perform()
+            fix = shape_fix_mod.ShapeFix_Solid(solid.Solid()); fix.Perform()
             shape = fix.Solid()
         except Exception:
             shape = sewed
@@ -1614,12 +1414,12 @@ def read_dxf_as_occ_shape(dxf_path: str):
         for pl in msp.query("LWPOLYLINE"):
             if pl.closed:
                 pts2d = [(x*u2mm, y*u2mm, 0.0) for x,y,_ in pl.get_points("xyb")]
-                poly = BRepBuilderAPI_MakePolygon()
+                poly = builder_api.BRepBuilderAPI_MakePolygon()
                 for q in pts2d: poly.Add(gp_Pnt(*q))
                 poly.Close()
-                face = BRepBuilderAPI_MakeFace(poly.Wire(), True).Face()
+                face = builder_api.BRepBuilderAPI_MakeFace(poly.Wire(), True).Face()
                 thk_mm = float(os.environ.get("DXF_EXTRUDE_THK_MM", "5.0"))
-                shape = BRepPrimAPI_MakePrism(face, gp_Vec(0,0,thk_mm)).Shape()
+                shape = prim_api.BRepPrimAPI_MakePrism(face, gp_Vec(0,0,thk_mm)).Shape()
                 break
 
     if (shape is None) or shape.IsNull():

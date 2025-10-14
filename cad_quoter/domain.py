@@ -12,6 +12,7 @@ from typing import Any, Callable, Mapping, TYPE_CHECKING, cast
 from cad_quoter.coerce import to_float
 from cad_quoter.config import logger
 from cad_quoter.domain_models import DEFAULT_MATERIAL_DISPLAY, QuoteState
+from cad_quoter.llm_suggest import build_suggest_payload as _build_suggest_payload
 
 if TYPE_CHECKING:  # pragma: no cover - for static type checkers only
     from appV5 import (  # pylint: disable=unused-import
@@ -280,10 +281,9 @@ LLM_BOUND_DEFAULTS: Mapping[str, Any] = MappingProxyType(_default_llm_bounds_dic
 
 
 def build_suggest_payload(*args, **kwargs):  # type: ignore[override]
-    """Proxy to :func:`appV5.build_suggest_payload` for test visibility."""
+    """Expose :func:`cad_quoter.llm_suggest.build_suggest_payload` for tests."""
 
-    app = _app_module()
-    return app.build_suggest_payload(*args, **kwargs)
+    return _build_suggest_payload(*args, **kwargs)
 
 def ensure_accept_flags(*args, **kwargs):  # type: ignore[override]
     """Proxy to :func:`appV5.ensure_accept_flags` for test visibility."""
