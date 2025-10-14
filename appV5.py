@@ -444,6 +444,9 @@ from cad_quoter.pricing.speeds_feeds_selector import (
 from cad_quoter.pricing.speeds_feeds_selector import (
     unit_hp_cap as _unit_hp_cap,
 )
+from cad_quoter.pricing.speeds_feeds_selector import (
+    load_csv_as_records as _load_speeds_feeds_records,
+)
 from cad_quoter.pricing.time_estimator import (
     MachineParams as _TimeMachineParams,
 )
@@ -5907,6 +5910,23 @@ except Exception as exc:
     PARAMS_DEFAULT = {}
     CONFIG_INIT_ERRORS.append(f"Unexpected parameter configuration error: {exc}")
 
+DEFAULT_SPEEDS_FEEDS_CSV_BASENAME = "speeds_feeds_merged.csv"
+
+
+def _default_speeds_feeds_csv_path() -> str:
+    """Return the packaged Speeds/Feeds CSV path if available."""
+
+    root = Path(__file__).resolve().parent
+    candidate = root / "cad_quoter" / "pricing" / "resources" / DEFAULT_SPEEDS_FEEDS_CSV_BASENAME
+    if candidate.is_file():
+        return str(candidate)
+    return DEFAULT_SPEEDS_FEEDS_CSV_BASENAME
+
+
+DEFAULT_SPEEDS_FEEDS_CSV_PATH = _default_speeds_feeds_csv_path()
+if not str(PARAMS_DEFAULT.get("SpeedsFeedsCSVPath", "")).strip():
+    PARAMS_DEFAULT["SpeedsFeedsCSVPath"] = DEFAULT_SPEEDS_FEEDS_CSV_PATH
+
 # ---- Service containers -----------------------------------------------------
 
 @dataclass
@@ -8590,6 +8610,68 @@ def _coerce_bool(value: Any) -> bool:
     return bool(value)
 
 
+def _coerce_speeds_feeds_csv_path(*sources: Mapping[str, Any] | None) -> str | None:
+    """Return the first non-empty Speeds/Feeds CSV path from ``sources``."""
+
+    keys = (
+        "SpeedsFeedsCSVPath",
+        "SpeedsFeedsCsvPath",
+        "speeds_feeds_path",
+        "speeds_feeds_csv_path",
+        "Speeds/Feeds CSV",
+    )
+    for source in sources:
+        if not isinstance(source, _MappingABC):
+            continue
+        for key in keys:
+            if key not in source:
+                continue
+            try:
+                raw = source.get(key)
+            except Exception:
+                continue
+            text = str(raw or "").strip()
+            if text:
+                return text
+    return None
+
+
+def _load_speeds_feeds_table_from_path(path: str | None) -> tuple[pd.DataFrame | None, bool]:
+    """Load the Speeds/Feeds CSV at ``path`` into a DataFrame."""
+
+    if not path:
+        return None, False
+    text = str(path).strip()
+    if not text:
+        return None, False
+
+    table: pd.DataFrame | None = None
+    try:
+        candidate = Path(text)
+    except Exception:
+        candidate = None
+    if candidate is not None and candidate.is_file():
+        try:
+            table = pd.read_csv(candidate)
+        except Exception:
+            table = None
+
+    if table is None:
+        try:
+            records = _load_speeds_feeds_records(text)
+        except Exception:
+            records = []
+        if records:
+            try:
+                table = pd.DataFrame(records)
+            except Exception:
+                table = None
+
+    if table is not None and not table.empty:
+        return table, True
+    return table, False
+
+
 def _ensure_quote_state(state: QuoteState | None) -> QuoteState:
     return state if isinstance(state, QuoteState) else QuoteState()
 
@@ -8617,6 +8699,26 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     planner_inputs = dict(ui_vars or {})
     geo_payload: dict[str, Any] = dict(geo or {})
     state = _ensure_quote_state(quote_state)
+
+    speeds_feeds_csv_path = _coerce_speeds_feeds_csv_path(
+        planner_inputs,
+        params,
+        state.ui_vars,
+    )
+    if not speeds_feeds_csv_path:
+        speeds_feeds_csv_path = DEFAULT_SPEEDS_FEEDS_CSV_PATH
+
+    speeds_feeds_table, speeds_feeds_loaded = _load_speeds_feeds_table_from_path(
+        speeds_feeds_csv_path
+    )
+    if speeds_feeds_csv_path:
+        planner_inputs.setdefault("SpeedsFeedsCSVPath", speeds_feeds_csv_path)
+        planner_inputs.setdefault("speeds_feeds_path", speeds_feeds_csv_path)
+        planner_inputs.setdefault("Speeds/Feeds CSV", speeds_feeds_csv_path)
+    if speeds_feeds_csv_path:
+        planner_inputs.setdefault("speeds_feeds_loaded", bool(speeds_feeds_loaded))
+
+    state.ui_vars = dict(planner_inputs)
 
     qty = _coerce_float_or_none(value_map.get("Qty")) or 1.0
     material_choice = value_map.get("Material Name") or value_map.get("Material") or ""
@@ -8830,7 +8932,12 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     breakdown.setdefault("drilling_meta", {})
     if hole_diams and thickness_in and drilling_rate > 0:
         try:
-            estimator_hours = estimate_drilling_hours(hole_diams, float(thickness_in), str(material_text or ""))
+            estimator_hours = estimate_drilling_hours(
+                hole_diams,
+                float(thickness_in),
+                str(material_text or ""),
+                speeds_feeds_table=speeds_feeds_table,
+            )
         except Exception:
             estimator_hours = 0.0
         if not estimator_hours or estimator_hours <= 0:
@@ -8889,6 +8996,10 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         programming_detail["override_applied"] = True
     breakdown["nre_detail"] = {"programming": programming_detail}
 
+    if speeds_feeds_csv_path:
+        breakdown["speeds_feeds_path"] = speeds_feeds_csv_path
+        breakdown["speeds_feeds_loaded"] = bool(speeds_feeds_loaded)
+
     result = {
         "decision_state": {
             "baseline": baseline,
@@ -8900,6 +9011,10 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         "breakdown": breakdown,
         "app_meta": {"llm_debug_enabled": APP_ENV.llm_debug_enabled},
     }
+
+    if speeds_feeds_csv_path:
+        result["speeds_feeds_path"] = speeds_feeds_csv_path
+        result["speeds_feeds_loaded"] = bool(speeds_feeds_loaded)
 
     return result
 
@@ -12475,6 +12590,11 @@ class App(tk.Tk):
             self.default_params_template = copy.deepcopy(template_params)
             self.params = copy.deepcopy(self.default_params_template)
 
+        if not str(self.params.get("SpeedsFeedsCSVPath", "")).strip():
+            self.params["SpeedsFeedsCSVPath"] = DEFAULT_SPEEDS_FEEDS_CSV_PATH
+        if not str(self.default_params_template.get("SpeedsFeedsCSVPath", "")).strip():
+            self.default_params_template["SpeedsFeedsCSVPath"] = DEFAULT_SPEEDS_FEEDS_CSV_PATH
+
         if hasattr(self.pricing_registry, "create_rates"):
             try:
                 rates = self.pricing_registry.create_rates()
@@ -14387,6 +14507,12 @@ class App(tk.Tk):
                 }
             except Exception:
                 ui_vars = {}
+
+            speeds_csv = str(self.params.get("SpeedsFeedsCSVPath", "") or "").strip()
+            if speeds_csv:
+                ui_vars.setdefault("SpeedsFeedsCSVPath", speeds_csv)
+                ui_vars.setdefault("speeds_feeds_path", speeds_csv)
+                ui_vars.setdefault("Speeds/Feeds CSV", speeds_csv)
 
             llm_suggest = self.LLM_SUGGEST
             if self.llm_enabled.get() and llm_suggest is None:
