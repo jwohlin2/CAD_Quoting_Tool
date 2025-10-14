@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 import appV5
+from cad_quoter.app import runtime as app_runtime
 
 
 class _DummyVar:
@@ -196,7 +197,7 @@ def test_discover_qwen_vl_assets_prefers_env(monkeypatch: pytest.MonkeyPatch, tm
     monkeypatch.setenv("QWEN_GGUF_PATH", "")
     monkeypatch.setenv("QWEN_MMPROJ_PATH", "")
 
-    found_model, found_mmproj = appV5.discover_qwen_vl_assets()
+    found_model, found_mmproj = app_runtime.discover_qwen_vl_assets()
     assert Path(found_model) == model
     assert Path(found_mmproj) == mmproj
 
@@ -207,14 +208,14 @@ def test_discover_qwen_vl_assets_scans_known_dirs(monkeypatch: pytest.MonkeyPatc
     monkeypatch.delenv("QWEN_GGUF_PATH", raising=False)
     monkeypatch.delenv("QWEN_MMPROJ_PATH", raising=False)
 
-    monkeypatch.setattr(appV5, "PREFERRED_MODEL_DIRS", [str(tmp_path)], raising=False)
+    monkeypatch.setattr(app_runtime, "PREFERRED_MODEL_DIRS", (tmp_path,), raising=False)
 
-    model = tmp_path / appV5._DEFAULT_VL_MODEL_NAMES[0]
-    mmproj = tmp_path / appV5._DEFAULT_MM_PROJ_NAMES[0]
+    model = tmp_path / app_runtime.DEFAULT_VL_MODEL_NAMES[0]
+    mmproj = tmp_path / app_runtime.DEFAULT_MM_PROJ_NAMES[0]
     model.write_text("model", encoding="utf-8")
     mmproj.write_text("proj", encoding="utf-8")
 
-    found_model, found_mmproj = appV5.discover_qwen_vl_assets()
+    found_model, found_mmproj = app_runtime.discover_qwen_vl_assets()
     assert Path(found_model) == model
     assert Path(found_mmproj) == mmproj
 
@@ -224,10 +225,10 @@ def test_discover_qwen_vl_assets_errors_when_missing(monkeypatch: pytest.MonkeyP
     monkeypatch.delenv("QWEN_VL_MMPROJ_PATH", raising=False)
     monkeypatch.delenv("QWEN_GGUF_PATH", raising=False)
     monkeypatch.delenv("QWEN_MMPROJ_PATH", raising=False)
-    monkeypatch.setattr(appV5, "PREFERRED_MODEL_DIRS", [str(tmp_path)], raising=False)
+    monkeypatch.setattr(app_runtime, "PREFERRED_MODEL_DIRS", (tmp_path,), raising=False)
 
     with pytest.raises(RuntimeError) as exc:
-        appV5.discover_qwen_vl_assets()
+        app_runtime.discover_qwen_vl_assets()
 
     message = str(exc.value)
     assert "QWEN_VL_GGUF_PATH" in message
