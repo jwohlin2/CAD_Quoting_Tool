@@ -205,6 +205,42 @@ def _compute_direct_costs(
     subtotal += sum(float(v or 0.0) for v in pt.values())
     return round(subtotal, 2)
 
+
+def _compute_pricing_ladder(
+    subtotal: float | int | str | None,
+    *,
+    overhead_pct: float | int | str | None = 0.0,
+    ga_pct: float | int | str | None = 0.0,
+    contingency_pct: float | int | str | None = 0.0,
+    expedite_pct: float | int | str | None = 0.0,
+    margin_pct: float | int | str | None = 0.0,
+) -> dict[str, float]:
+    """Return cumulative totals for each step of the pricing ladder."""
+
+    def _pct(value: float | int | str | None) -> float:
+        return _safe_float(value, 0.0)
+
+    subtotal_val = round(_safe_float(subtotal, 0.0), 2)
+
+    def _apply(amount: float, pct_value: float | int | str | None) -> float:
+        pct_val = _pct(pct_value)
+        return round(amount * (1.0 + pct_val), 2)
+
+    with_overhead = _apply(subtotal_val, overhead_pct)
+    with_ga = _apply(with_overhead, ga_pct)
+    with_contingency = _apply(with_ga, contingency_pct)
+    with_expedite = _apply(with_contingency, expedite_pct)
+    with_margin = _apply(with_expedite, margin_pct)
+
+    return {
+        "subtotal": subtotal_val,
+        "with_overhead": with_overhead,
+        "with_ga": with_ga,
+        "with_contingency": with_contingency,
+        "with_expedite": with_expedite,
+        "with_margin": with_margin,
+    }
+
 # ---------------------------------------------------------------------------
 # Formatting helpers
 # ---------------------------------------------------------------------------
@@ -3608,6 +3644,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
         render_drill_debug(sorted_drill_entries)
     row("Final Price per Part:", price)
+    final_price_row_index = len(lines) - 1
     total_labor_label = "Total Labor Cost:"
     row(total_labor_label, float(totals.get("labor_cost", 0.0)))
     total_labor_row_index = len(lines) - 1
@@ -5726,15 +5763,36 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     # ---- Pricing ladder ------------------------------------------------------
     append_line("Pricing Ladder")
     append_line(divider)
-    overhead_pct    = float(applied_pcts.get("OverheadPct", 0.0) or 0.0)
-    ga_pct          = float(applied_pcts.get("GA_Pct", 0.0) or 0.0)
-    contingency_pct = float(applied_pcts.get("ContingencyPct", 0.0) or 0.0)
-    expedite_pct    = float(applied_pcts.get("ExpeditePct", 0.0) or 0.0)
+    def _ladder_pct(key: str) -> float:
+        return _safe_float(applied_pcts.get(key), 0.0)
 
-    with_overhead    = subtotal * (1.0 + overhead_pct)
-    with_ga          = with_overhead * (1.0 + ga_pct)
-    with_contingency = with_ga * (1.0 + contingency_pct)
-    with_expedite    = with_contingency * (1.0 + expedite_pct)
+    ladder_totals = _compute_pricing_ladder(
+        subtotal,
+        overhead_pct=_ladder_pct("OverheadPct"),
+        ga_pct=_ladder_pct("GA_Pct"),
+        contingency_pct=_ladder_pct("ContingencyPct"),
+        expedite_pct=_ladder_pct("ExpeditePct"),
+        margin_pct=_ladder_pct("MarginPct"),
+    )
+
+    with_overhead = ladder_totals["with_overhead"]
+    with_ga = ladder_totals["with_ga"]
+    with_contingency = ladder_totals["with_contingency"]
+    with_expedite = ladder_totals["with_expedite"]
+    final_price = ladder_totals["with_margin"]
+
+    if isinstance(totals, dict):
+        totals["with_overhead"] = with_overhead
+        totals["with_ga"] = with_ga
+        totals["with_contingency"] = with_contingency
+        totals["with_expedite"] = with_expedite
+        totals["with_margin"] = final_price
+        totals["price"] = final_price
+
+    price = final_price
+    if isinstance(result, dict):
+        result["price"] = price
+    replace_line(final_price_row_index, _format_row("Final Price per Part:", price))
 
     row("Subtotal (Labor + Directs):", subtotal)
     row(f"+ Overhead ({_pct(applied_pcts.get('OverheadPct'))}):",     with_overhead - subtotal)
