@@ -74,6 +74,15 @@ from cad_quoter.domain import (
 
 from cad_quoter.vendors import ezdxf as _ezdxf_vendor
 
+# ``typing.cast`` calls further down reference ``Drawing`` at runtime.  If
+# ``ezdxf`` is unavailable (common on fresh installs) those casts would raise a
+# ``NameError`` instead of surfacing the real import/conversion issue.  Guard the
+# alias so the UI shows the intended error message instead.
+try:  # pragma: no cover - exercised indirectly through GUI flows
+    from ezdxf.ezdxf import Drawing  # type: ignore[attr-defined]
+except Exception:  # pragma: no cover - missing optional dependency
+    Drawing = typing.Any  # type: ignore[assignment]
+
 from appkit.geometry_shim import (
     read_cad_any,
     read_step_shape,
