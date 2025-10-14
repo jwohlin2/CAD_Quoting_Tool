@@ -1,0 +1,26 @@
+{
+  "inspection": {
+    "label": "In-Process Inspection Hours",
+    "scale": 1.0
+  },
+  "finishing_deburr": {
+    "label": "Deburr Hours",
+    "scale": 1.0
+  },
+  "deburr": {
+    "label": "Deburr Hours",
+    "scale": 1.0
+  },
+  "saw_waterjet": {
+    "label": "Sawing Hours",
+    "scale": 1.0
+  },
+  "assembly": {
+    "label": "Assembly Hours",
+    "scale": 1.0
+  },
+  "packaging": {
+    "label": "Packaging Labor Hours",
+    "scale": 1.0
+  }
+}
