@@ -65,6 +65,17 @@ from cad_quoter.config import (
 from cad_quoter.utils.geo_ctx import _should_include_outsourced_pass
 from cad_quoter.utils import sheet_helpers
 from cad_quoter.utils.scrap import _estimate_scrap_from_stock_plan
+from cad_quoter.utils.render_utils import (
+    QuoteDocRecorder,
+    format_currency,
+    format_dimension,
+    format_hours,
+    format_hours_with_rate,
+    format_percent,
+    format_weight_lb_decimal,
+    format_weight_lb_oz,
+    render_quote_doc,
+)
 from cad_quoter.llm_overrides import (
     HARDWARE_PASS_LABEL,
     LEGACY_HARDWARE_PASS_LABEL,
@@ -6220,57 +6231,25 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     red_flags.append(text)
 
     def _m(x) -> str:
-        return f"{currency}{float(x):,.2f}"
+        return format_currency(x, currency)
 
     def _h(x) -> str:
-        return f"{float(x):.2f} hr"
+        return format_hours(x)
 
     def _hours_with_rate_text(hours: Any, rate: Any) -> str:
-        return _format_hours_with_rate(hours, rate, currency_formatter=_m)
+        return format_hours_with_rate(hours, rate, currency)
 
     def _pct(x) -> str:
-        return f"{float(x or 0.0) * 100:.1f}%"
+        return format_percent(x)
 
     def _fmt_dim(val) -> str:
-        if isinstance(val, (int, float)):
-            return f"{float(val):.3f}".rstrip("0").rstrip(".")
-        if val is None:
-            return "—"
-        text = str(val).strip()
-        return text if text else "—"
+        return format_dimension(val)
 
     def _format_weight_lb_decimal(mass_g: float | None) -> str:
-        grams = max(0.0, float(mass_g or 0.0))
-        pounds = grams / 1000.0 * LB_PER_KG
-        if pounds <= 0:
-            return "0.00 lb"
-        text = f"{pounds:.2f}"
-        if "." in text:
-            text = text.rstrip("0").rstrip(".")
-        return f"{text} lb"
+        return format_weight_lb_decimal(mass_g)
 
     def _format_weight_lb_oz(mass_g: float | None) -> str:
-        grams = max(0.0, float(mass_g or 0.0))
-        if grams <= 0:
-            return "0 oz"
-        pounds_total = grams / 1000.0 * LB_PER_KG
-        total_ounces = pounds_total * 16.0
-        pounds = int(total_ounces // 16)
-        ounces = total_ounces - pounds * 16
-        precision = 1 if pounds > 0 or ounces >= 1.0 else 2
-        ounces = round(ounces, precision)
-        if ounces >= 16.0:
-            pounds += 1
-            ounces = 0.0
-        parts: list[str] = []
-        if pounds > 0:
-            parts.append(f"{pounds} lb" if pounds != 1 else "1 lb")
-        if ounces > 0 or pounds == 0:
-            ounce_text = f"{ounces:.{precision}f}".rstrip("0").rstrip(".")
-            if not ounce_text:
-                ounce_text = "0"
-            parts.append(f"{ounce_text} oz")
-        return " ".join(parts) if parts else "0 oz"
+        return format_weight_lb_oz(mass_g)
 
     def _is_truthy_flag(value) -> bool:
         """Return True only for explicit truthy values.
@@ -6334,7 +6313,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         return False
 
     def write_line(s: str, indent: str = ""):
-        lines.append(f"{indent}{s}")
+        append_line(f"{indent}{s}")
 
     def write_wrapped(text: str, indent: str = ""):
         if text is None:
@@ -6393,19 +6372,19 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             return f"{value:>{col_widths[idx]}}"
 
         if lines and lines[-1] != "":
-            lines.append("")
+            append_line("")
 
         diagnostic_banner = "=== Planner diagnostics (not billed) ==="
-        lines.append(diagnostic_banner)
-        lines.append("=" * min(page_width, len(diagnostic_banner)))
+        append_line(diagnostic_banner)
+        append_line("=" * min(page_width, len(diagnostic_banner)))
 
         header_line = " | ".join(_fmt(header, idx) for idx, header in enumerate(headers))
         separator_line = " | ".join("-" * width for width in col_widths)
-        lines.append(header_line)
-        lines.append(separator_line)
+        append_line(header_line)
+        append_line(separator_line)
         for row_values in display_rows:
-            lines.append(" | ".join(_fmt(value, idx) for idx, value in enumerate(row_values)))
-        lines.append("")
+            append_line(" | ".join(_fmt(value, idx) for idx, value in enumerate(row_values)))
+        append_line("")
 
     def _is_total_label(label: str) -> bool:
         clean = str(label or "").strip()
@@ -6427,7 +6406,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         short_divider = " " * pad + "-" * width
         if lines[-1] == short_divider:
             return
-        lines.append(short_divider)
+        append_line(short_divider)
 
     def _format_row(label: str, val: float, indent: str = "") -> str:
         left = f"{indent}{label}"
@@ -6439,7 +6418,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         # left-label, right-amount aligned to page_width
         if _is_total_label(label):
             _ensure_total_separator(len(_m(val)))
-        lines.append(_format_row(label, val, indent))
+        append_line(_format_row(label, val, indent))
 
     def hours_row(label: str, val: float, indent: str = ""):
         left = f"{indent}{label}"
@@ -6447,7 +6426,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if _is_total_label(label):
             _ensure_total_separator(len(right))
         pad = max(1, page_width - len(left) - len(right))
-        lines.append(f"{left}{' ' * pad}{right}")
+        append_line(f"{left}{' ' * pad}{right}")
 
     def _is_extra_segment(segment: str) -> bool:
         try:
@@ -6512,8 +6491,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     rate_float = float(rates.get(rate_key, 0.0) or 0.0)
                 except Exception:
                     rate_float = 0.0
+        try:
+            base_extra_val = float(meta.get("base_extra", 0.0) or 0.0)
+        except Exception:
+            base_extra_val = 0.0
+
         if hr_val > 0:
             write_line(_hours_with_rate_text(hr_val, rate_float), indent)
+        elif base_extra_val > 0 and rate_float > 0:
+            inferred_hours = base_extra_val / rate_float
+            if inferred_hours > 0:
+                write_line(_hours_with_rate_text(inferred_hours, rate_float), indent)
 
     def add_pass_basis(key: str, indent: str = "    "):
         basis_map = breakdown.get("pass_basis", {}) or {}
@@ -6557,6 +6545,22 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     # ---- header --------------------------------------------------------------
     lines: list[str] = []
+    doc_builder = QuoteDocRecorder(divider)
+
+    def append_line(text: str) -> None:
+        previous = lines[-1] if lines else None
+        lines.append(text)
+        doc_builder.observe_line(len(lines) - 1, text, previous)
+
+    def append_lines(values: Iterable[str]) -> None:
+        for value in values:
+            append_line(value)
+
+    def replace_line(index: int, text: str) -> None:
+        if 0 <= index < len(lines):
+            lines[index] = text
+        doc_builder.replace_line(index, text)
+
     hour_summary_entries: dict[str, tuple[float, bool]] = {}
     ui_vars = result.get("ui_vars") or {}
     if not isinstance(ui_vars, dict):
@@ -6570,8 +6574,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     _accumulate_drill_debug(drill_debug_entries, result, breakdown)
     # Canonical QUOTE SUMMARY header (legacy variants removed in favour of this
     # block so the Speeds/Feeds status + Drill Debug output stay consistent).
-    lines.append(f"QUOTE SUMMARY - Qty {qty}")
-    lines.append(divider)
+    append_line(f"QUOTE SUMMARY - Qty {qty}")
+    append_line(divider)
     speeds_feeds_display = (
         result.get("speeds_feeds_path")
         or breakdown.get("speeds_feeds_path")
@@ -6597,11 +6601,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         write_wrapped(f"Speeds/Feeds CSV: (not set){status_suffix}")
     else:
         write_line("Speeds/Feeds CSV: (not set)")
-    lines.append("")
+    append_line("")
 
     def render_drill_debug(entries: Sequence[str]) -> None:
-        lines.append("Drill Debug")
-        lines.append(divider)
+        append_line("Drill Debug")
+        append_line(divider)
         prioritized_entries: list[tuple[int, int, str]] = []
         for idx, entry in enumerate(entries):
             if entry is None:
@@ -6627,11 +6631,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 for chunk in text.splitlines():
                     write_line(chunk, block_indent)
                 if lines and lines[-1] != "":
-                    lines.append("")
+                    append_line("")
             else:
                 write_wrapped(text, "  ")
         if lines and lines[-1] != "":
-            lines.append("")
+            append_line("")
 
     app_meta = result.setdefault("app_meta", {})
     # Force-enable: always render drill debug entries
@@ -6651,7 +6655,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             drill_debug_entries = sorted((drill_debug_entries or []), key=cmp_to_key(_dbg_sort))
         except Exception:
             drill_debug_entries = drill_debug_entries or []
-        lines.extend(drill_debug_entries)
+        append_lines(drill_debug_entries)
     row("Final Price per Part:", price)
     total_labor_label = "Total Labor Cost:"
     row(total_labor_label, float(totals.get("labor_cost", 0.0)))
@@ -6696,7 +6700,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     )
 
     if pricing_source_value:
-        lines.append(f"Pricing Source: {pricing_source_value}")
+        append_line(f"Pricing Source: {pricing_source_value}")
     pricing_source_lower = pricing_source_value.lower() if pricing_source_value else ""
     display_red_flags: list[str] = []
     if red_flags:
@@ -6708,12 +6712,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 if not flag.lower().startswith("labor totals drifted by")
             ]
         if display_red_flags:
-            lines.append("")
-            lines.append("Red Flags")
-            lines.append(divider)
+            append_line("")
+            append_line("Red Flags")
+            append_line(divider)
             for flag in display_red_flags:
                 write_wrapped(f"⚠️ {flag}", "  ")
-    lines.append("")
+    append_line("")
 
     narrative = result.get("narrative") or breakdown.get("narrative")
     why_parts: list[str] = []
@@ -7293,8 +7297,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         total_material_cost: float | None = None
 
         if have_any:
-            lines.append("Material & Stock")
-            lines.append(divider)
+            append_line("Material & Stock")
+            append_line(divider)
             canonical_material_display = str(material_display_label or "").strip()
             if not canonical_material_display and isinstance(material_selection, _MappingABC):
                 canonical_material_display = str(
@@ -7338,7 +7342,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 material_display_label = str(material_name_display)
                 material_selection.setdefault("material_display", material_display_label)
                 material_display_for_debug = material_name_display
-                lines.append(f"  Material used:  {material_name_display}")
+                append_line(f"  Material used:  {material_name_display}")
 
             if matcost or show_zeros:
                 total_material_cost = float(matcost or 0.0)
@@ -7581,16 +7585,16 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if not th_in:
                 th_in = 1.0
             stock_T = _fmt_dim(th_in)
-            lines.append(f"  Stock used: {stock_L} × {stock_W} × {stock_T} in")
+            append_line(f"  Stock used: {stock_L} × {stock_W} × {stock_T} in")
             if detail_lines:
-                lines.extend(detail_lines)
+                append_lines(detail_lines)
             if total_material_cost is not None:
                 row("Total Material Cost :", total_material_cost, indent="  ")
-            lines.append("")
+            append_line("")
 
     # ---- NRE / Setup costs ---------------------------------------------------
-    lines.append("NRE / Setup Costs (per lot)")
-    lines.append(divider)
+    append_line("NRE / Setup Costs (per lot)")
+    append_line(divider)
     prog = nre_detail.get("programming") or {}
     fix  = nre_detail.get("fixture") or {}
 
@@ -7639,7 +7643,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             row(k.replace("_", " ").title() + ":", float(v))
             other_nre_total += float(v)
     if (prog or fix or other_nre_total > 0) and not lines[-1].strip() == "":
-        lines.append("")
+        append_line("")
 
     try:
         amortized_qty = int(result.get("qty") or breakdown.get("qty") or qty or 1)
@@ -7681,8 +7685,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     except Exception:
         amortized_nre_total = 0.0
 
-    lines.append("Process & Labor Costs")
-    lines.append(divider)
+    append_line("Process & Labor Costs")
+    append_line(divider)
 
     canonical_bucket_order: list[str] = []
     canonical_bucket_summary: dict[str, dict[str, float]] = {}
@@ -7928,7 +7932,31 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 labor_costs_display[label] = float(labor_costs_display.get(label, 0.0)) + prog_pp
                 display_labor_for_ladder += prog_pp
             else:
-                _add_labor_cost_line(label, prog_pp)
+                detail_args: list[str] = []
+                programming_detail_local = (
+                    nre_detail.get("programming", {}) if isinstance(nre_detail, dict) else {}
+                )
+                prog_hr_detail = float(programming_detail_local.get("prog_hr", 0.0) or 0.0)
+                prog_rate_detail = float(programming_detail_local.get("prog_rate", 0.0) or 0.0)
+                if prog_hr_detail > 0:
+                    detail_args.append(
+                        f"- Programmer (lot): {_hours_with_rate_text(prog_hr_detail, prog_rate_detail)}"
+                    )
+                eng_hr_detail = float(programming_detail_local.get("eng_hr", 0.0) or 0.0)
+                eng_rate_detail = float(programming_detail_local.get("eng_rate", 0.0) or 0.0)
+                if eng_hr_detail > 0:
+                    detail_args.append(
+                        f"- Engineering (lot): {_hours_with_rate_text(eng_hr_detail, eng_rate_detail)}"
+                    )
+                if qty > 1:
+                    detail_args.append(f"Amortized across {qty} pcs")
+                if detail_args:
+                    detail_lookup["Programming (amortized)"] = "; ".join(detail_args)
+                _add_labor_cost_line(
+                    label,
+                    prog_pp,
+                    detail_bits=detail_args or None,
+                )
                 amortized_nre_total += prog_pp
                 labor_costs_display[label] = float(labor_costs_display.get(label, 0.0)) + prog_pp
                 display_labor_for_ladder += prog_pp
@@ -7956,7 +7984,28 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 labor_costs_display[label] = float(labor_costs_display.get(label, 0.0)) + fix_pp
                 display_labor_for_ladder += fix_pp
             else:
-                _add_labor_cost_line(label, fix_pp)
+                detail_args: list[str] = []
+                fixture_detail = nre_detail.get("fixture", {}) if isinstance(nre_detail, dict) else {}
+                fixture_build_hr_detail = float(fixture_detail.get("build_hr", 0.0) or 0.0)
+                fixture_rate_detail = float(
+                    fixture_detail.get("build_rate", rates.get("FixtureBuildRate", 0.0))
+                )
+                if fixture_build_hr_detail > 0:
+                    detail_args.append(
+                        f"- Build labor (lot): {_hours_with_rate_text(fixture_build_hr_detail, fixture_rate_detail)}"
+                    )
+                soft_jaw_hr = float(fixture_detail.get("soft_jaw_hr", 0.0) or 0.0)
+                if soft_jaw_hr > 0:
+                    detail_args.append(f"Soft jaw prep {soft_jaw_hr:.2f} hr")
+                if qty > 1:
+                    detail_args.append(f"Amortized across {qty} pcs")
+                if detail_args:
+                    detail_lookup["Fixture Build (amortized)"] = "; ".join(detail_args)
+                _add_labor_cost_line(
+                    label,
+                    fix_pp,
+                    detail_bits=detail_args or None,
+                )
                 amortized_nre_total += fix_pp
                 labor_costs_display[label] = float(labor_costs_display.get(label, 0.0)) + fix_pp
                 display_labor_for_ladder += fix_pp
@@ -8454,9 +8503,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             text = re.sub(r"\s+", " ", text).strip()
             return text
 
-        lines.append("")
-        lines.append("Labor Hour Summary")
-        lines.append(divider)
+        append_line("")
+        append_line("Labor Hour Summary")
+        append_line(divider)
         if str(pricing_source_value).lower() == "planner":
             entries_iter = list(hour_summary_entries.items())
         else:
@@ -8481,11 +8530,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if include_in_total and hr_val:
                 total_hours += hr_val
         hours_row("Total Hours", total_hours, indent="  ")
-    lines.append("")
+    append_line("")
 
     # ---- Pass-Through & Direct (auto include non-zeros; sorted desc) --------
-    lines.append("Pass-Through & Direct Costs")
-    lines.append(divider)
+    append_line("Pass-Through & Direct Costs")
+    append_line(divider)
     pass_total = 0.0
     pass_through_labor_total = 0.0
     displayed_pass_through: dict[str, float] = {}
@@ -8536,9 +8585,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if isinstance(totals, dict):
         totals["direct_costs"] = directs
     if 0 <= total_direct_costs_row_index < len(lines):
-        lines[total_direct_costs_row_index] = _format_row(
-            total_direct_costs_label,
-            directs,
+        replace_line(
+            total_direct_costs_row_index,
+            _format_row(
+                total_direct_costs_label,
+                directs,
+            ),
         )
 
     computed_total_labor_cost = proc_total + pass_through_labor_total
@@ -8566,15 +8618,18 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if isinstance(totals, dict):
         totals["labor_cost"] = computed_total_labor_cost
     if 0 <= total_labor_row_index < len(lines):
-        lines[total_labor_row_index] = _format_row(
-            total_labor_label,
-            computed_total_labor_cost,
+        replace_line(
+            total_labor_row_index,
+            _format_row(
+                total_labor_label,
+                computed_total_labor_cost,
+            ),
         )
 
     if lines and lines[-1] != "":
-        lines.append("")
-    lines.append("Process & Labor Costs")
-    lines.append(divider)
+        append_line("")
+    append_line("Process & Labor Costs")
+    append_line(divider)
     row("Labor", expected_labor_total, indent="  ")
     direct_summary = directs
     row("Directs", direct_summary, indent="  ")
@@ -8706,28 +8761,28 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
         # Single toolchange per op (if present at least once)
         tool_add = (tchg_deep if seen_deep else 0.0) + (tchg_std if seen_std else 0.0)
-        lines.append(
+        append_line(
             f"Toolchange adders: Deep-Drill {tchg_deep:.2f} min + Drill {tchg_std:.2f} min = {tool_add:.2f} min"
             if tool_add > 0
             else "Toolchange adders: -"
         )
-        lines.append("-" * 66)
-        lines.append(
+        append_line("-" * 66)
+        append_line(
             f"Subtotal (per-hole × qty) ............... {subtotal_min:.2f} min  ({subtotal_min/60.0:.2f} hr)"
         )
-        lines.append(
+        append_line(
             f"TOTAL DRILLING (with toolchange) ........ {subtotal_min + tool_add:.2f} min  ({(subtotal_min + tool_add)/60.0:.2f} hr)"
         )
-        lines.append("")
+        append_line("")
     except Exception:
         # If anything goes sideways here, do not break the quote – just skip this block.
         pass
 
-    lines.append("")
+    append_line("")
 
     # ---- Pricing ladder ------------------------------------------------------
-    lines.append("Pricing Ladder")
-    lines.append(divider)
+    append_line("Pricing Ladder")
+    append_line(divider)
     overhead_pct    = float(applied_pcts.get("OverheadPct", 0.0) or 0.0)
     ga_pct          = float(applied_pcts.get("GA_Pct", 0.0) or 0.0)
     contingency_pct = float(applied_pcts.get("ContingencyPct", 0.0) or 0.0)
@@ -8746,17 +8801,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         row(f"+ Expedite ({_pct(applied_pcts.get('ExpeditePct'))}):", with_expedite - with_contingency)
     row("= Subtotal before Margin:", with_expedite)
     row(f"Final Price with Margin ({_pct(applied_pcts.get('MarginPct'))}):", price)
-    lines.append("")
+    append_line("")
 
     # ---- LLM adjustments bullets (optional) ---------------------------------
     if llm_notes:
-        lines.append("LLM Adjustments")
-        lines.append(divider)
+        append_line("LLM Adjustments")
+        append_line(divider)
         import textwrap as _tw
         for n in llm_notes:
             for w in _tw.wrap(str(n), width=page_width):
-                lines.append(f"- {w}")
-        lines.append("")
+                append_line(f"- {w}")
+        append_line("")
 
     if explanation_lines:
         why_lines.extend(explanation_lines)
@@ -8765,13 +8820,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     if why_parts:
         if lines and lines[-1]:
-            lines.append("")
-        lines.append("Why this price")
-        lines.append(divider)
+            append_line("")
+        append_line("Why this price")
+        append_line(divider)
         for part in why_parts:
             write_wrapped(part, "  ")
         if lines[-1]:
-            lines.append("")
+            append_line("")
         # Append the compact removal debug table (if available)
         append_removal_debug_if_enabled(lines, removal_summary_for_display)
 
@@ -8820,11 +8875,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if isinstance(_pmeta, _MappingABC):
                 _meta_hr = _coerce_float_or_none((_pmeta.get("drilling") or {}).get("hr"))
 
-            lines.append("DEBUG — Drilling sanity")
-            lines.append(divider)
+            append_line("DEBUG — Drilling sanity")
+            append_line(divider)
             def _fmt(x, unit):
                 return "—" if x is None or not math.isfinite(float(x)) else f"{float(x):.2f} {unit}"
-            lines.append(
+            append_line(
                 "  bucket(planner): "
                 + _fmt(_planner_min, "min")
                 + "   canonical: "
@@ -8834,11 +8889,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 + "   meta: "
                 + _fmt(_meta_hr, "hr")
             )
-            lines.append("")
+            append_line("")
         except Exception:
             pass
 
-    return "\n".join(lines)
+    doc = doc_builder.build_doc()
+    return render_quote_doc(doc, divider=divider)
 # ===== QUOTE CONFIG (edit-friendly) ==========================================
 CONFIG_INIT_ERRORS: list[str] = []
 
@@ -18484,8 +18540,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         _merge_labor_detail(label, amount_val, list(entry.detail_bits))
 
     show_programming_amortized = Qty > 1 and programming_per_part > 0
+    programming_bits: list[str] | None = None
     if show_programming_amortized:
-        programming_bits: list[str] = []
+        programming_bits = []
         prog_hr_detail = float(programming_detail.get("prog_hr", 0.0) or 0.0)
         prog_rate_detail = float(programming_detail.get("prog_rate", 0.0) or 0.0)
         if prog_hr_detail > 0:
@@ -18501,10 +18558,13 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         programming_bits.append(f"Amortized across {Qty} pcs")
 
         _merge_labor_detail("Programming (amortized)", programming_per_part, programming_bits)
+        if programming_bits:
+            detail_lookup["Programming (amortized)"] = "; ".join(programming_bits)
 
     show_fixture_amortized = Qty > 1 and fixture_labor_per_part > 0
+    fixture_bits: list[str] | None = None
     if show_fixture_amortized:
-        fixture_bits: list[str] = []
+        fixture_bits = []
         fixture_detail = nre_detail.get("fixture", {}) if isinstance(nre_detail, dict) else {}
         fixture_build_hr_detail = float(fixture_detail.get("build_hr", 0.0) or 0.0)
         fixture_rate_detail = float(
@@ -18520,6 +18580,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         fixture_bits.append(f"Amortized across {Qty} pcs")
 
         _merge_labor_detail("Fixture Build (amortized)", fixture_labor_per_part, fixture_bits)
+        if fixture_bits:
+            detail_lookup["Fixture Build (amortized)"] = "; ".join(fixture_bits)
 
     proc_total_val: float | None
     if "proc_total" in locals():
