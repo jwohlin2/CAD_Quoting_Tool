@@ -3559,8 +3559,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             append_line("")
 
     app_meta = result.setdefault("app_meta", {})
-    # Force-enable: always render drill debug entries
-    if True:
+    if drill_debug_entries:
         # Order so legacy per-bin “OK …” lines appear first, then tables/summary.
         def _dbg_sort(a: str, b: str) -> int:
             a_ok = a.strip().lower().startswith("ok ")
@@ -3572,11 +3571,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if a_hdr and not b_hdr: return 1
             if b_hdr and not a_hdr: return -1
             return 0
+
         try:
             drill_debug_entries = sorted((drill_debug_entries or []), key=cmp_to_key(_dbg_sort))
         except Exception:
             drill_debug_entries = drill_debug_entries or []
-        append_lines(drill_debug_entries)
+        render_drill_debug(drill_debug_entries)
     row("Final Price per Part:", price)
     total_labor_label = "Total Labor Cost:"
     row(total_labor_label, float(totals.get("labor_cost", 0.0)))
@@ -5691,9 +5691,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             f"TOTAL DRILLING (with toolchange) ........ {subtotal_min + tool_add:.2f} min  ({(subtotal_min + tool_add)/60.0:.2f} hr)"
         )
         append_line("")
-    except Exception:
-        # If anything goes sideways here, do not break the quote – just skip this block.
-        pass
+    except Exception as e:
+        append_line(f"[MATERIAL REMOVAL block skipped: {e}]")
+        append_line("")
 
     append_line("")
 
