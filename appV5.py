@@ -75,6 +75,8 @@ from cad_quoter.domain import (
     canonicalize_pass_through_map,
     coerce_bounds,
     build_suggest_payload,
+    overrides_to_suggestions,
+    suggestions_to_overrides,
 )
 
 from cad_quoter.vendors import ezdxf as _ezdxf_vendor

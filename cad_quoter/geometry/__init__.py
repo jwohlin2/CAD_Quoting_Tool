@@ -189,6 +189,7 @@ except Exception as _OCC_IMPORT_ERROR:  # pragma: no cover - optional OCC bindin
 from cad_quoter.vendors._occt_base import PREFIX as _OCCT_PREFIX, load_module as _occt_load_module
 
 from appkit.occ_compat import (
+    _MISSING_HELP,
     FACE_OF,
     as_face,
     ensure_face,

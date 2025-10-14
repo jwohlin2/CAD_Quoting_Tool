@@ -37,13 +37,14 @@ __all__ = [
     "GProp_GProps",
 ]
 
+def _sentinel(name: str) -> Any:
+    def _raise(*_: Any, **__: Any) -> Any:
+        return missing(name)
+
+    return _raise
+
+
 if PREFIX is None:  # pragma: no cover - bindings missing entirely
-    def _sentinel(name: str) -> Any:
-        def _raise(*_: Any, **__: Any) -> Any:
-            return missing(name)
-
-        return _raise
-
     STEPControl_Reader = _sentinel("STEPControl_Reader")  # type: ignore
     IGESControl_Reader = _sentinel("IGESControl_Reader")  # type: ignore
     IFSelect_RetDone = _sentinel("IFSelect_RetDone")  # type: ignore
@@ -99,6 +100,11 @@ else:
         "GProp": ("GProp_GProps",),
     }
     for module, names in _map.items():
-        mod = load_module(module)
+        try:
+            mod = load_module(module)
+        except ImportError:
+            for name in names:
+                globals()[name] = _sentinel(name)
+            continue
         for name in names:
-            globals()[name] = getattr(mod, name)
+            globals()[name] = getattr(mod, name, _sentinel(name))

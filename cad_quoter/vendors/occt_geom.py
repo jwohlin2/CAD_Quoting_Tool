@@ -20,13 +20,14 @@ __all__ = [
     "gp_Vec",
 ]
 
+def _sentinel(name: str) -> Any:
+    def _raise(*_: Any, **__: Any) -> Any:
+        return missing(name)
+
+    return _raise
+
+
 if PREFIX is None:  # pragma: no cover - bindings missing entirely
-    def _sentinel(name: str) -> Any:
-        def _raise(*_: Any, **__: Any) -> Any:
-            return missing(name)
-
-        return _raise
-
     GeomAbs_Plane = _sentinel("GeomAbs_Plane")  # type: ignore
     GeomAbs_Cylinder = _sentinel("GeomAbs_Cylinder")  # type: ignore
     GeomAbs_Torus = _sentinel("GeomAbs_Torus")  # type: ignore
@@ -39,19 +40,39 @@ if PREFIX is None:  # pragma: no cover - bindings missing entirely
     gp_Pln = _sentinel("gp_Pln")  # type: ignore
     gp_Vec = _sentinel("gp_Vec")  # type: ignore
 else:
-    geomabs = load_module("GeomAbs")
-    for name in (
-        "GeomAbs_Plane",
-        "GeomAbs_Cylinder",
-        "GeomAbs_Torus",
-        "GeomAbs_Cone",
-        "GeomAbs_BSplineSurface",
-        "GeomAbs_BezierSurface",
-        "GeomAbs_Circle",
-    ):
-        globals()[name] = getattr(geomabs, name)
+    try:
+        geomabs = load_module("GeomAbs")
+    except ImportError:
+        for name in (
+            "GeomAbs_Plane",
+            "GeomAbs_Cylinder",
+            "GeomAbs_Torus",
+            "GeomAbs_Cone",
+            "GeomAbs_BSplineSurface",
+            "GeomAbs_BezierSurface",
+            "GeomAbs_Circle",
+        ):
+            globals()[name] = _sentinel(name)
+    else:
+        for name in (
+            "GeomAbs_Plane",
+            "GeomAbs_Cylinder",
+            "GeomAbs_Torus",
+            "GeomAbs_Cone",
+            "GeomAbs_BSplineSurface",
+            "GeomAbs_BezierSurface",
+            "GeomAbs_Circle",
+        ):
+            globals()[name] = getattr(geomabs, name, _sentinel(name))
 
-    gp_mod = load_module("gp")
-    for name in ("gp_Pnt", "gp_Dir", "gp_Pln", "gp_Vec"):
-        if hasattr(gp_mod, name):
-            globals()[name] = getattr(gp_mod, name)
+    try:
+        gp_mod = load_module("gp")
+    except ImportError:
+        for name in ("gp_Pnt", "gp_Dir", "gp_Pln", "gp_Vec"):
+            globals()[name] = _sentinel(name)
+    else:
+        for name in ("gp_Pnt", "gp_Dir", "gp_Pln", "gp_Vec"):
+            if hasattr(gp_mod, name):
+                globals()[name] = getattr(gp_mod, name)
+            else:
+                globals()[name] = _sentinel(name)
