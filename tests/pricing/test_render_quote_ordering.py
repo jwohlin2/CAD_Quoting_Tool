@@ -907,6 +907,51 @@ def test_render_quote_promotes_planner_pricing_source() -> None:
     assert all("Pricing Source: legacy" not in line for line in lines)
 
 
+def test_render_quote_header_is_canonical() -> None:
+    result = {
+        "price": 0.0,
+        "app_meta": {"used_planner": True},
+        "speeds_feeds_path": "/mnt/speeds_feeds.csv",
+        "speeds_feeds_loaded": True,
+        "breakdown": {
+            "qty": 2,
+            "totals": {
+                "labor_cost": 0.0,
+                "direct_costs": 0.0,
+                "subtotal": 0.0,
+                "with_overhead": 0.0,
+                "with_ga": 0.0,
+                "with_contingency": 0.0,
+                "with_expedite": 0.0,
+            },
+            "nre_detail": {},
+            "nre": {},
+            "material": {},
+            "process_costs": {},
+            "process_meta": {},
+            "pass_through": {},
+            "pricing_source": "legacy",
+            "applied_pcts": {},
+            "rates": {},
+            "params": {},
+            "labor_cost_details": {},
+            "direct_cost_details": {},
+            "red_flags": [],
+        },
+    }
+
+    rendered = appV5.render_quote(result, currency="$")
+    lines = rendered.splitlines()
+
+    speeds_lines = [line for line in lines if line.startswith("Speeds/Feeds CSV:")]
+    pricing_lines = [line for line in lines if line.startswith("Pricing Source:")]
+
+    assert len(speeds_lines) == 1
+    assert speeds_lines[0].endswith("(loaded)")
+    assert len(pricing_lines) == 1
+    assert pricing_lines[0] == "Pricing Source: planner"
+
+
 def test_render_quote_hour_summary_uses_final_hours() -> None:
     result = {
         "price": 160.0,
