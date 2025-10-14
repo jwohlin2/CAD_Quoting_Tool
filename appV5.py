@@ -9276,6 +9276,10 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     planner_labor_cost_total = 0.0
     amortized_programming = 0.0
     amortized_fixture = 0.0
+    planner_exception: Exception | None = None
+    recognized_line_items = 0
+    use_planner = False
+    fallback_reason = ""
     if family:
         if callable(_process_plan_job):
             try:
