@@ -1,143 +1,81 @@
 QUOTE SUMMARY - Qty 1
 --------------------------------------------------------------------------
-Speeds/Feeds CSV: D:\CAD_Quoting_Tool\speeds_feeds_merged.csv (not loaded)
+Speeds/Feeds CSV: (not set)
 
-MISS table: using heuristic fallback
-Drill calc → op=Deep_Drill, mat=Aluminum 6061-T6(group N1, row N1), SFM=195, IPR=0.0017–0.0035; RPM 1191–5968 IPM 4.2–10.4; Ø 0.125"–0.625"; depth/hole 2.09–2.38 in; holes 133; index 8.0 s/hole; peck 0.07 min/hole; toolchange 8.00 min; overhead: index 0.13 min/hole, toolchange 8.00 min; total hr 1.63.
-Drill calc → op=Drill, mat=Aluminum 6061-T6(group N1, row N1), SFM=350, IPR=0.0060; RPM 739–1783 IPM 4.4–10.7; Ø 0.750"–1.810"; depth/hole 2.45–3.09 in; holes 30; index 8.0 s/hole; peck 0.08 min/hole; toolchange 2.50 min; overhead: index 0.13 min/hole, toolchange 2.50 min; total hr 0.38.
-CSV drill feeds (drilling N1): 1191–5968 RPM, 4.2–10.4 IPM @ Ø9.5 mm
-Drilling Summary
-───────────────────────────────────────────────────────────
-drilling  | qty 133 | Aluminum 6061-T6 [N1] | SFM 195 | F 6.1 | MRR 0.67 | 89.63 min
-Final Price per Part:                                            $1,752.64
-                                                                   -------
-Total Labor Cost:                                                  $404.17
+Final Price per Part:                                                $0.00
                                                                      -----
-Total Direct Costs:                                                $508.28
-Pricing Source: planner
-
-Red Flags
---------------------------------------------------------------------------
-  ⚠️ Speeds/feeds CSV not found at
-  D:\CAD_Quoting_Tool\speeds_feeds_merged.csv — using legacy drilling
-  heuristics.
-  ⚠️ ⚠️ Planner totals drifted by $245.41: rendered $0.00 vs planner
-  $245.41
+Total Labor Cost:                                                   $26.60
+                                                                     -----
+Total Direct Costs:                                                  $0.00
+Pricing Source: legacy
 
 Material & Stock
 --------------------------------------------------------------------------
-  Material used:  Aluminum 6061-T6
-  Stock used: 12 × 14 × 2 in
-  Starting Weight: 40 lb 15.5 oz
-  Net Weight: 32 lb 12.4 oz
-  Scrap Weight: 8 lb 3.1 oz
-  Scrap Percentage: 25.0%
-  Scrap Credit: -$141.19
-    based on 8 lb 3.1 oz × $17.23 / lb
-  Material Tax: $45.89
+  Material used:  Aluminum
+  Stock used: — × — × 1 in
+  Starting Weight: 0 oz
+  Net Weight: 0 oz
+  Scrap Weight: 0 oz
+  Scrap Percentage: 15.0%
+  Material Tax: $0.00
 
-  Material Price: $17.23 / lb
-  Source: mcmaster_api:2729N111
+  Material Price: $0.00 / lb
   Supplier Min Charge: $0.00
-                                                                   -------
-  Total Material Cost :                                            $564.76
+                                                                     -----
+  Total Material Cost :                                              $0.00
 
 NRE / Setup Costs (per lot)
 --------------------------------------------------------------------------
-Programming & Eng:                                                 $202.50
-    - Programmer: 2.25 hr @ $90.00/hr
-Fixturing:                                                          $89.10
-    - Build Labor: 0.99 hr @ $90.00/hr
-Extra Nre Cost:                                                      $0.00
+Programming & Eng:                                                   $0.00
+    - Programmer: 17.20 hr @ —/hr
+Fixturing:                                                           $0.00
 
 Process & Labor Costs
 --------------------------------------------------------------------------
-  Drilling                                                          $67.80
-    0.75 hr @ $90.04/hr
-  Grinding                                                          $12.00
-    0.13 hr @ $90.23/hr
-  Finishing/Deburr                                                  $17.49
-    0.19 hr @ $90.15/hr
-  Inspection                                                        $61.47
-    0.68 hr @ $90.00/hr
-  Machine                                                           $79.80
-  Labor                                                            $165.61
-                                                                   -------
-  Total                                                            $404.17
+  Drilling                                                          $26.60
+    0.30 hr @ $90.00/hr
+  No process costs                                                   $0.00
+                                                                    ------
+  Total                                                             $26.60
 
 Labor Hour Summary
 --------------------------------------------------------------------------
-  Drilling                                                         0.75 hr
-  Grinding                                                         0.13 hr
-  Finishing/Deburr                                                 0.19 hr
-  Inspection                                                       0.68 hr
-  Planner Total                                                    1.76 hr
-  Planner Labor                                                    1.63 hr
-  Planner Machine                                                  0.13 hr
-  Programming (lot)                                                2.25 hr
-  Fixture Build (lot)                                              0.99 hr
-                                                                   -------
-  Total Hours                                                      6.75 hr
+  Programming                                                     17.20 hr
+  Inspection                                                       0.95 hr
+  Drilling                                                         0.30 hr
+  Fixture Build                                                    0.00 hr
+                                                                  --------
+  Total Hours                                                     18.45 hr
 
 Pass-Through & Direct Costs
 --------------------------------------------------------------------------
-  Shipping                                                          $84.71
-    Basis: Outbound freight & logistics
-  Material Scrap Credit                                           $-141.19
-    Basis: Scrap / remnant credit
-  Material & Stock (printed above) contributes $564.76 to Direct Costs
-                                                                   -------
-  Total                                                            $508.28
+  Shipping                                                           $0.00
+  Material & Stock (printed above) contributes $0.00 to Direct Costs
+                                                                     -----
+  Total                                                              $0.00
 
 Process & Labor Costs
 --------------------------------------------------------------------------
-  Labor                                                            $404.17
-  Directs                                                          $508.28
-                                                                   -------
-  Total                                                            $912.45
+  Labor                                                             $26.60
+  Directs                                                            $0.00
+                                                                    ------
+  Total                                                             $26.60
 
 Pricing Ladder
 --------------------------------------------------------------------------
-Subtotal (Labor + Directs):                                        $912.45
-+ Overhead (15.0%):                                                $136.87
-+ G&A (8.0%):                                                       $83.95
+Subtotal (Labor + Directs):                                         $26.60
++ Overhead (0.0%):                                                   $0.00
++ G&A (0.0%):                                                        $0.00
 + Contingency (0.0%):                                                $0.00
-= Subtotal before Margin:                                        $1,133.26
-Final Price with Margin (35.0%):                                 $1,752.64
-
-LLM Adjustments
---------------------------------------------------------------------------
-- LLM model missing
-- Legacy baseline ignored (planner active)
-- Setups: 3 (0.99 hr build) (LLM)
+= Subtotal before Margin:                                           $26.60
+Final Price with Margin (0.0%):                                      $0.00
 
 Why this price
 --------------------------------------------------------------------------
-  Plate in Aluminum 6061-T6, thickness 2.00 in with 163 holes.
-  Estimated 3 setups; fixture: 0.99 hr build.
-  Major labor: Drilling 0.75 h, Inspection 0.68 h, Fixture Build
-  (amortized) 0.61 h.
-  Adjustments vs baseline:   - Counterbore: ↑0.01 h   - Drilling: ↑2.01 h
-  - Finishing Deburr: ↑0.58 h   - Fixture Build Amortized: ↑0.61 h   -
-  Grinding: ↑0.13 h   - Inspection: ↑0.68 h   - Milling: ↑1.50 h   - Misc:
-  ↑0.96 h   - Programming Amortized: ↑0.35 h   - Saw Waterjet: ↑0.15 h   -
-  Tapping: ↑0.01 h   - Deburr: ↓0.19 h   - Drilling: ↓2.01 h   - Fixture
-  Build Amortized: ↓0.61 h   - Misc: ↓0.96 h   - Planner Labor: ↓1.84 h
-  - Planner Machine: ↓0.89 h   - Planner Total: ↓2.73 h   - Programming
-  Amortized: ↓0.35 h Material priced via XAL via mcmaster_api:2729N111;
-  scrap 25.0% applied.
-  Cost makeup: material $564.76; labor & machine $537.01.
-  Labor $537.01 (51.4%) and directs $508.28 (48.6%) drive cost. Top
-  processes: Labor $166, Machine $80. Geometry: 163 holes in 2.00 in
-  Aluminum. Material via XAL via mcmaster_api:2729N111; scrap 25.0%
-  applied.
-  Quote total $1,752.64 for 1 piece.
-  Material: Aluminum 6061-T6.
-  Cost makeup: material $564.76; labor & machine $537.01.
-  Includes a 25.0% scrap allowance.
-  Largest process costs → Labor: $165.61; Machine: $79.80.
-  Pass-through items → Shipping: $84.71; Material Scrap Credit: $-141.19.
+  This quote is for a manufacturing project that involves drilling
+  operations. The project does not specify the number of holes, material
+  type, or thickness in the provided fields.
 
 DEBUG — Drilling sanity
 --------------------------------------------------------------------------
-  bucket(planner): 45.20 min   canonical: —   hour_summary: 0.75 hr   meta: 0.75 hr
+  bucket(planner): —   canonical: —   hour_summary: 0.30 hr   meta: 0.30 hr

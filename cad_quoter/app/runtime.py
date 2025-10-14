@@ -7,7 +7,9 @@ import os
 from pathlib import Path
 from typing import Iterable, Sequence
 
-from llama_cpp import Llama  # type: ignore
+# Note: Avoid importing llama_cpp at module import time so the desktop UI can
+# launch in environments without the optional LLM runtime installed. We import
+# it lazily inside load_qwen_vl().
 
 # Runtime dependencies required when the desktop UI launches.  These are kept
 # here so they can be reused in tests without importing the enormous Tk UI
@@ -204,6 +206,16 @@ def load_qwen_vl(
     mmproj_path: str | None = None,
 ):
     """Load Qwen2.5-VL with vision projector configured for llama.cpp."""
+
+    # Lazy import so environments without llama-cpp-python can still launch the UI
+    try:
+        from llama_cpp import Llama  # type: ignore
+    except Exception as exc:  # pragma: no cover - environment dependent
+        raise ImportError(
+            "Vision LLM support requires llama-cpp-python. Install it via "
+            "`pip install -r requirements.txt` (or `pip install llama-cpp-python`) "
+            "before enabling LLM features."
+        ) from exc
 
     if n_threads is None:
         cpu_count = os.cpu_count() or 8
