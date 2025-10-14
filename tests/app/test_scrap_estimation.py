@@ -75,3 +75,25 @@ def test_scrap_respects_ui_override(monkeypatch: pytest.MonkeyPatch) -> None:
     material = result["breakdown"]["material"]
     assert material["scrap_pct"] == pytest.approx(expected_scrap)
     assert material.get("scrap_source") == "ui"
+
+
+def test_scrap_hole_estimate_increases_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(appV5, "build_suggest_payload", _stub_payload)
+    df = pd.DataFrame(_base_rows())
+    geo = {
+        "derived": {
+            "hole_diams_mm": [100.0, 100.0, 100.0, 100.0, 100.0],
+            "bbox_mm": (100.0, 100.0),
+        }
+    }
+
+    result = appV5.compute_quote_from_df(df, llm_enabled=False, geo=geo)
+
+    baseline = result["decision_state"]["baseline"]
+    assert baseline["scrap_pct"] == pytest.approx(0.25)
+    assert baseline.get("scrap_source_label") == "default_guess+holes"
+
+    material = result["breakdown"]["material"]
+    assert material["scrap_pct"] == pytest.approx(0.25)
+    assert material.get("scrap_source") == "default_guess"
+    assert material.get("scrap_source_label") == "default_guess+holes"
