@@ -79,6 +79,8 @@ from cad_quoter.domain import (
 
 from cad_quoter.vendors import ezdxf as _ezdxf_vendor
 
+from bucketizer import bucketize
+
 from appkit.geometry_shim import (
     read_cad_any,
     read_step_shape,
@@ -5985,6 +5987,26 @@ def _coerce_two_bucket_rates(value: Any) -> dict[str, dict[str, float]]:
 
     return {"labor": {}, "machine": {}}
 
+
+def _merge_two_bucket_rates(*sources: typing.Any) -> dict[str, dict[str, float]]:
+    """Merge multiple two-bucket or flat rate mappings into a single structure."""
+
+    merged: dict[str, dict[str, float]] = {"labor": {}, "machine": {}}
+
+    for source in sources:
+        if source is None:
+            continue
+        coerced = _coerce_two_bucket_rates(source)
+        for bucket_type in ("labor", "machine"):
+            bucket = merged.setdefault(bucket_type, {})
+            for role, value in coerced.get(bucket_type, {}).items():
+                try:
+                    bucket[str(role)] = float(value)
+                except Exception:
+                    continue
+
+    return merged
+
 try:
     _rates_raw = SERVICE_CONTAINER.load_rates()
 except ConfigError as exc:
@@ -9341,6 +9363,44 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         breakdown.setdefault("process_minutes", 0.0)
         if fallback_reason:
             breakdown["red_flags"].append(fallback_reason)
+
+    using_planner = str(breakdown.get("pricing_source", "")).strip().lower() == "planner"
+
+    merged_two_bucket_rates = _merge_two_bucket_rates(
+        RATES_TWO_BUCKET_DEFAULT,
+        default_rates,
+        rates,
+    )
+    if not any(merged_two_bucket_rates.get(kind) for kind in ("labor", "machine")):
+        merged_two_bucket_rates = copy.deepcopy(RATES_TWO_BUCKET_DEFAULT)
+
+    bucketize_nre: dict[str, Any] = {}
+    if isinstance(planner_result, _MappingABC):
+        for key in ("nre", "nre_minutes", "nre_totals"):
+            candidate = planner_result.get(key)
+            if isinstance(candidate, _MappingABC) and candidate:
+                bucketize_nre = {str(k): v for k, v in candidate.items()}
+                break
+
+    geom_for_bucketize = geo_payload if isinstance(geo_payload, dict) else {}
+    try:
+        bucketized_raw = bucketize(
+            planner_result if isinstance(planner_result, dict) else {},
+            merged_two_bucket_rates,
+            bucketize_nre,
+            qty=qty,
+            geom=geom_for_bucketize,
+        )
+    except Exception:
+        bucketized_raw = {}
+
+    if not isinstance(bucketized_raw, _MappingABC):
+        bucketized_raw = {}
+
+    bucket_view_prepared = _prepare_bucket_view(bucketized_raw)
+    bucket_view.clear()
+    bucket_view.update(bucket_view_prepared)
+    bucket_view_buckets = bucket_view.setdefault("buckets", {})
 
     hole_diams: list[float] = []
     if isinstance(geo_payload, _MappingABC):
