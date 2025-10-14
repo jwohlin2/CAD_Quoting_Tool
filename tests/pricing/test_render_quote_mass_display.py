@@ -132,6 +132,38 @@ def test_render_quote_omits_unlabeled_scrap_adjusted_mass() -> None:
     assert unexpected_line not in rendered.splitlines()
 
 
+def test_render_quote_mentions_scrap_source_from_holes() -> None:
+    material = {
+        "mass_g": 120.0,
+        "effective_mass_g": 120.0,
+        "net_mass_g": 100.0,
+        "scrap_pct": 0.25,
+        "scrap_pct_from_holes": 0.05,
+    }
+
+    rendered = appV5.render_quote(
+        _base_material_quote(material), currency="$", show_zeros=False
+    )
+
+    assert "Scrap Percentage: 25.0% (holes)" in rendered
+
+
+def test_render_quote_mentions_scrap_source_label() -> None:
+    material = {
+        "mass_g": 120.0,
+        "effective_mass_g": 120.0,
+        "net_mass_g": 100.0,
+        "scrap_pct": 0.18,
+        "scrap_source_label": "entered+holes",
+    }
+
+    rendered = appV5.render_quote(
+        _base_material_quote(material), currency="$", show_zeros=False
+    )
+
+    assert "Scrap Percentage: 18.0% (entered + holes)" in rendered
+
+
 def _base_material_quote(material: dict) -> dict:
     return {
         "price": 10.0,

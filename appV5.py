@@ -3172,6 +3172,33 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     def _format_weight_lb_oz(mass_g: float | None) -> str:
         return format_weight_lb_oz(mass_g)
 
+    def _scrap_source_hint(material_info: Mapping[str, Any] | None) -> str | None:
+        if not isinstance(material_info, _MappingABC):
+            return None
+
+        scrap_from_holes_raw = material_info.get("scrap_pct_from_holes")
+        scrap_from_holes_val = _coerce_float_or_none(scrap_from_holes_raw)
+        scrap_from_holes = False
+        if scrap_from_holes_val is not None and scrap_from_holes_val > 1e-6:
+            scrap_from_holes = True
+        elif isinstance(scrap_from_holes_raw, bool):
+            scrap_from_holes = scrap_from_holes_raw
+        if scrap_from_holes:
+            return "holes"
+
+        label_raw = material_info.get("scrap_source_label")
+        if label_raw in (None, ""):
+            return None
+
+        label_text = str(label_raw).strip()
+        if not label_text:
+            return None
+
+        label_text = label_text.replace("+", " + ")
+        label_text = label_text.replace("_", " ")
+        label_text = re.sub(r"\s+", " ", label_text).strip()
+        return label_text or None
+
     def _is_truthy_flag(value) -> bool:
         """Return True only for explicit truthy values.
 
@@ -4403,7 +4430,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             elif show_zeros:
                 weight_lines.append("  Scrap Weight: 0 oz")
             if scrap is not None:
-                weight_lines.append(f"  Scrap Percentage: {_pct(scrap)}")
+                scrap_hint_text = _scrap_source_hint(material)
+                scrap_line = f"  Scrap Percentage: {_pct(scrap)}"
+                if scrap_hint_text:
+                    scrap_line += f" ({scrap_hint_text})"
+                weight_lines.append(scrap_line)
             # Historically the renderer would emit an extra weight-only line here when
             # ``scrap_adjusted_mass`` was available.  The value was the computed "with
             # scrap" mass, but because it lacked a label it rendered as a stray line like
