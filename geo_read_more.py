@@ -5,8 +5,10 @@ import re
 import math
 from collections import Counter
 
+from cad_quoter.vendors import ezdxf as _ezdxf_vendor
+
 try:
-    import ezdxf
+    ezdxf = _ezdxf_vendor.require_ezdxf()
 except Exception:
     ezdxf = None
 

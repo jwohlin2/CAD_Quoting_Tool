@@ -1,8 +1,8 @@
-import ezdxf
+from cad_quoter.vendors import ezdxf as _ezdxf_vendor
 
 
 def extract_text_lines_from_dxf(path: str) -> list[str]:
-    doc = ezdxf.readfile(path)
+    doc = _ezdxf_vendor.read_document(path)
     msp = doc.modelspace()
     lines: list[str] = []
     for e in msp:
