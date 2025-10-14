@@ -15,30 +15,23 @@ from __future__ import annotations
 
 import argparse
 import copy
-import functools
 import importlib
 import json
-import logging
 import math
 import os
 import re
-import subprocess
 import sys
-import tempfile
 import time
 import typing
 from collections import Counter
 from collections.abc import Mapping as _MappingABC
-from collections.abc import MutableMapping as _MutableMappingABC
-from dataclasses import asdict, dataclass, field, replace, is_dataclass
+from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
 
 from cad_quoter.app import runtime as _runtime
 from cad_quoter.app._value_utils import (
-    _coerce_user_value,
-    _format_entry_value,
     _format_value,
 )
 from cad_quoter.app.container import (
@@ -55,14 +48,9 @@ from cad_quoter.config import (
 from cad_quoter.config import (
     describe_runtime_environment as _describe_runtime_environment,
 )
-from cad_quoter.utils.geo_ctx import _should_include_outsourced_pass
-from cad_quoter.utils import sheet_helpers
-from cad_quoter.utils.scrap import _estimate_scrap_from_stock_plan
 from cad_quoter.utils.render_utils import (
     fmt_hours,
     fmt_money,
-    fmt_percent,
-    fmt_range,
     format_currency,
     format_dimension,
     format_hours,
@@ -71,13 +59,16 @@ from cad_quoter.utils.render_utils import (
 )
 from cad_quoter.estimators import SpeedsFeedsUnavailableError
 from cad_quoter.llm_overrides import (
-    HARDWARE_PASS_LABEL,
-    LEGACY_HARDWARE_PASS_LABEL,
-    _as_float_or_none,
-    _canonical_pass_label,
     _plate_mass_properties,
     _plate_mass_from_dims,
     clamp,
+)
+
+from cad_quoter.domain import (
+    QuoteState,
+    HARDWARE_PASS_LABEL,
+    _canonical_pass_label,
+    canonicalize_pass_through_map,
     coerce_bounds,
 )
 
@@ -86,12 +77,10 @@ from cad_quoter.vendors import ezdxf as _ezdxf_vendor
 from appkit.geometry_shim import (
     read_cad_any,
     read_step_shape,
-    read_dxf_as_occ_shape,
     convert_dwg_to_dxf,
     enrich_geo_occ,
     enrich_geo_stl,
     safe_bbox,
-    iter_solids,
     parse_hole_table_lines,
     extract_text_lines_from_dxf,
     text_harvest,
@@ -100,13 +89,9 @@ from appkit.geometry_shim import (
     get_dwg_converter_path,
     get_import_diagnostics_text,
     extract_features_with_occ,
-    _HAS_TRIMESH,
-    _HAS_EZDXF,
     _HAS_ODAFC,
-    _EZDXF_VER,
     _HAS_PYMUPDF,
     fitz,
-    ezdxf,
     odafc,
 )
 
@@ -121,28 +106,16 @@ from appkit.ui.tk_compat import (
 
 from appkit.guardrails import build_guard_context, apply_drilling_floor_notes
 from appkit.merge_utils import (
-    _coerce_bool,
     ACCEPT_SCALAR_KEYS,
     SUGGESTION_SCALAR_KEYS,
     merge_effective,
     _collect_process_keys,
-    LOCKED_EFFECTIVE_FIELDS,
-    SUGGESTIBLE_EFFECTIVE_FIELDS,
-    NUMERIC_EFFECTIVE_FIELDS,
-    BOOL_EFFECTIVE_FIELDS,
-    TEXT_EFFECTIVE_FIELDS,
-    LIST_EFFECTIVE_FIELDS,
-    DICT_EFFECTIVE_FIELDS,
 )
 
 from appkit.occ_compat import (
     BRep_Tool,
-    TopAbs_COMPOUND,
     TopAbs_EDGE,
     TopAbs_FACE,
-    TopAbs_SHELL,
-    TopAbs_SOLID,
-    TopAbs_ShapeEnum,
     TopExp,
     TopExp_Explorer,
     TopoDS,
@@ -160,11 +133,6 @@ from appkit.time_overhead_compat import (
 )
 
 from appkit.scrap_helpers import (
-    SCRAP_DEFAULT_GUESS,
-    HOLE_SCRAP_MULT,
-    _iter_hole_diams_mm,
-    _plate_bbox_mm2,
-    _holes_scrap_fraction,
     normalize_scrap_pct,
 )
 
@@ -175,31 +143,11 @@ from appkit.utils.text_rules import (
 )
 from appkit.debug.debug_tables import (
     _jsonify_debug_value,
-    _jsonify_debug_summary,
     _accumulate_drill_debug,
-    _format_range,
-    build_removal_debug_table,
-    _render_drilling_debug_table,
     append_removal_debug_if_enabled,
 )
 
-from appkit.llm_adapter import (
-    LLMClientLike,
-    run_llm_suggestions,
-    get_llm_overrides,
-    get_llm_bound_defaults,
-)
-from appkit.llm_converters import (
-    overrides_to_suggestions,
-    suggestions_to_overrides,
-)
 
-from appkit.planner_adapter import resolve_planner
-from appkit.planner_helpers import (
-    _PROCESS_PLANNERS,
-    _PROCESS_PLANNER_HELPERS,
-    _process_plan_job,
-)
 
 if sys.platform == "win32":
     occ_bin = os.path.join(sys.prefix, "Library", "bin")
@@ -278,18 +226,14 @@ from typing import (
     Dict,
     Iterable,
     Iterator,
-    List,
     Mapping,
     Optional,
     Protocol,
     Sequence,
     Tuple,
-    Type,
     TypeVar,
-    NoReturn,
     cast,
     Literal,
-    MutableMapping,
     overload,
     no_type_check,
 )
@@ -383,9 +327,7 @@ def normalize_item(value: Any) -> str:
 import cad_quoter.geometry as geometry
 from cad_quoter.geo2d import (
     apply_2d_features_to_variables,
-    to_noncapturing as _to_noncapturing,
 )
-from bucketizer import bucketize, _resolve_bucket_for_op
 
 # Tolerance for invariant checks that guard against silent drift when rendering
 # cost sections.
@@ -427,8 +369,6 @@ from cad_quoter.coerce import to_float, to_int
 from cad_quoter.utils import compact_dict, jdump, json_safe_copy, sdict
 from cad_quoter.utils.text import _match_items_contains
 from cad_quoter.llm_suggest import (
-    build_suggest_payload,
-    sanitize_suggestions,
     get_llm_quote_explanation,
 )
 from cad_quoter.pricing import (
@@ -436,7 +376,6 @@ from cad_quoter.pricing import (
     PricingEngine,
     create_default_registry,
 )
-from cad_quoter.pricing import BACKUP_CSV_NAME
 
 _DEFAULT_MATERIAL_DENSITY_G_CC = MATERIAL_DENSITY_G_CC_BY_KEY.get(
     DEFAULT_MATERIAL_KEY, 7.85
@@ -451,9 +390,6 @@ from cad_quoter.pricing import (
     resolve_material_unit_price as _resolve_material_unit_price,
 )
 from cad_quoter.pricing import time_estimator as _time_estimator
-from cad_quoter.pricing.speeds_feeds_selector import (
-    normalize_material as _normalize_material,
-)
 from cad_quoter.pricing.speeds_feeds_selector import (
     pick_speeds_row as _pick_speeds_row,
 )
@@ -667,18 +603,6 @@ def _auto_accept_suggestions(suggestions: dict[str, Any] | None) -> dict[str, An
         conf = _confidence_for(("drilling_strategy",))
         accept["drilling_strategy"] = True if conf is None else conf >= 0.6
     return accept
-from cad_quoter.domain import (
-    QuoteState,
-    HARDWARE_PASS_LABEL,
-    LEGACY_HARDWARE_PASS_LABEL,
-    _canonical_pass_label,
-    _as_float_or_none,
-    canonicalize_pass_through_map,
-    coerce_bounds,
-    get_llm_bound_defaults,
-)
-
-
 def apply_suggestions(baseline: dict, s: dict) -> dict:
     """Apply sanitized LLM suggestions onto a baseline quote snapshot."""
 
@@ -1269,15 +1193,6 @@ else:
     else:
         from types import SimpleNamespace
 
-        from OCC.Core.BRepGProp import (
-            brepgprop_LinearProperties as _lp,  # type: ignore[attr-defined]
-        )
-        from OCC.Core.BRepGProp import (
-            brepgprop_SurfaceProperties as _sp,  # type: ignore[attr-defined]
-        )
-        from OCC.Core.BRepGProp import (
-            brepgprop_VolumeProperties as _vp,  # type: ignore[attr-defined]
-        )
         _BRepGProp_mod = SimpleNamespace(
             LinearProperties=getattr(_occ_brepgprop, "brepgprop_LinearProperties"),
             SurfaceProperties=getattr(_occ_brepgprop, "brepgprop_SurfaceProperties"),
@@ -1382,7 +1297,7 @@ def load_drawing(path: Path) -> Drawing:
     return ezdxf_mod.readfile(str(path))  # DXF directly
 
 # ==== OpenCascade compat (works with OCP OR OCC.Core) ====
-from typing import Any, Callable, Protocol, Tuple, Type
+from typing import Any
 
 def _missing_uv_bounds(_: Any) -> Tuple[float, float, float, float]:
     raise RuntimeError("BRepTools_UVBounds is unavailable")
@@ -1408,7 +1323,6 @@ _brep_read = _missing_brep_read
 
 try:
     # ---- OCP branch ----
-    from OCP.Bnd import Bnd_Box  # type: ignore[import]
     from OCP.BRep import (  # type: ignore[import]
         BRep_Builder,
         BRep_Tool,  # OCP version
@@ -1429,11 +1343,9 @@ try:
     from OCP.GeomAdaptor import GeomAdaptor_Surface  # type: ignore[import]
     from OCP.gp import gp_Dir, gp_Pln, gp_Pnt  # type: ignore[import]
     from OCP.GProp import GProp_GProps  # type: ignore[import]
-    from OCP.IFSelect import IFSelect_RetDone  # type: ignore[import]
-    from OCP.IGESControl import IGESControl_Reader  # type: ignore[import]
     from OCP.ShapeAnalysis import ShapeAnalysis_Surface  # type: ignore[import]
     from OCP.ShapeFix import ShapeFix_Shape  # type: ignore[import]
-    from OCP.TopAbs import TopAbs_COMPOUND, TopAbs_EDGE, TopAbs_FACE, TopAbs_SHELL, TopAbs_SOLID  # type: ignore[import]
+    from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE  # type: ignore[import]
     from OCP.TopExp import TopExp, TopExp_Explorer  # type: ignore[import]
     from OCP.TopoDS import TopoDS_Compound, TopoDS_Face, TopoDS_Shape  # type: ignore[import]
 
@@ -1464,7 +1376,6 @@ try:
 
 except Exception:
     # ---- OCC.Core branch ----
-    from OCC.Core.Bnd import Bnd_Box
     from OCC.Core.BRep import (
         BRep_Builder,
         BRep_Tool,  # ? OCC version
@@ -1484,17 +1395,11 @@ except Exception:
     from OCC.Core.GeomAdaptor import GeomAdaptor_Surface
     from OCC.Core.gp import gp_Dir, gp_Pln, gp_Pnt
     from OCC.Core.GProp import GProp_GProps
-    from OCC.Core.IFSelect import IFSelect_RetDone
-    from OCC.Core.IGESControl import IGESControl_Reader
     from OCC.Core.ShapeAnalysis import ShapeAnalysis_Surface
     from OCC.Core.ShapeFix import ShapeFix_Shape
-    from OCC.Core.STEPControl import STEPControl_Reader
     from OCC.Core.TopAbs import (
-        TopAbs_COMPOUND,
         TopAbs_EDGE,
         TopAbs_FACE,
-        TopAbs_SHELL,
-        TopAbs_SOLID,
     )
     from OCC.Core.TopExp import TopExp_Explorer
     from OCC.Core.TopoDS import TopoDS_Compound, TopoDS_Face, TopoDS_Shape
@@ -1604,151 +1509,13 @@ def _shape_from_reader(reader):
 
     return healed
 
-def read_step_shape(path: str) -> Any:
-    rdr = STEPControl_Reader()
-    if rdr.ReadFile(path) != IFSelect_RetDone:
-        raise RuntimeError("STEP read failed (file unreadable or unsupported).")
-    rdr.TransferRoots()
-    n = rdr.NbShapes()
-    if n == 0:
-        raise RuntimeError("STEP read produced zero shapes (no transferable roots).")
-
-    if n == 1:
-        shape = rdr.Shape(1)
-    else:
-        builder = BRep_Builder()
-        comp = _new_topods_compound()
-        cast(Any, builder).MakeCompound(comp)
-        for i in range(1, n + 1):
-            s = rdr.Shape(i)
-            if not _shape_is_null(s):
-                cast(Any, builder).Add(comp, s)
-        shape = comp
-
-    if _shape_is_null(shape):
-        raise RuntimeError("STEP produced a null TopoDS_Shape.")
-    # Verify we truly pass a Shape to MapShapesAndAncestors
-    logger.debug(
-        "Shape type: %s IsNull: %s",
-        type(shape).__name__,
-        getattr(shape, "IsNull", lambda: True)(),
-    )
-    amap = map_shapes_and_ancestors(shape, TopAbs_EDGE, TopAbs_FACE)
-    logger.debug("Shape ancestor map size: %d", amap.Size())
-    # DEBUG: sanity probe for STEP faces
-    if os.environ.get("STEP_PROBE", "0") == "1":
-        cnt = 0
-        try:
-            for f in iter_faces(shape):
-                _surf, _loc = face_surface(f)
-                cnt += 1
-        except Exception:
-            # Keep debug non-fatal; report and continue
-            logger.exception("STEP_PROBE face probe failed")
-        else:
-            logger.debug("STEP_PROBE faces=%d", cnt)
-
-    fx = cast(Any, ShapeFix_Shape)(shape)
-    fx.Perform()
-    return fx.Shape()
-
-def safe_bbox(shape: Any):
-    if _shape_is_null(shape):
-        raise ValueError("Cannot compute bounding box of a null shape.")
-    box = Bnd_Box()
-    bnd_add(shape, box, True)  # <- uses whichever binding is available
-    return box
 def read_step_or_iges_or_brep(path: str) -> Any:
     raise RuntimeError("read_step_or_iges_or_brep is no longer exposed via appV5; use cad_quoter.geometry.read_step_or_iges_or_brep")
 
-def convert_dwg_to_dxf(dwg_path: str, *, out_ver="ACAD2018") -> str:
-    """
-    Robust DWG?DXF wrapper.
-    Works with:
-      - A .bat/.cmd wrapper that accepts:  <input.dwg> <output.dxf>
-      - A custom exe that accepts:         <input.dwg> <output.dxf>
-      - ODAFileConverter.exe (7-arg form): <in_dir> <out_dir> <ver> DXF 0 0 <filter>
-    Looks for the converter via env var or common local paths and prints
-    the exact command used on failure.
-    """
-    # 1) find converter
-    exe = (os.environ.get("ODA_CONVERTER_EXE")
-           or os.environ.get("DWG2DXF_EXE")
-           or str(Path(__file__).with_name("dwg2dxf_wrapper.bat"))
-           or r"D:\CAD_Quoting_Tool\dwg2dxf_wrapper.bat")
-
-    if not exe or not Path(exe).exists():
-        raise RuntimeError(
-            "DWG import needs a DWG?DXF converter.\n"
-            "Set ODA_CONVERTER_EXE (recommended) or DWG2DXF_EXE to a .bat/.cmd/.exe.\n"
-            "Expected .bat signature:  <input.dwg> <output.dxf>"
-        )
-
-    dwg = Path(dwg_path)
-    out_dir = Path(tempfile.mkdtemp(prefix="dwg2dxf_"))
-    out_dxf = out_dir / (dwg.stem + ".dxf")
-
-    exe_lower = Path(exe).name.lower()
-    cmd: list[str] = []
-    try:
-        if exe_lower.endswith(".bat") or exe_lower.endswith(".cmd"):
-            # ? run batch via cmd.exe so it actually executes
-            cmd = ["cmd", "/c", exe, str(dwg), str(out_dxf)]
-            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        elif "odafileconverter" in exe_lower:
-            # ? official ODAFileConverter CLI
-            cmd = [exe, str(dwg.parent), str(out_dir), out_ver, "DXF", "0", "0", dwg.name]
-            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        else:
-            # ? generic exe that accepts <in> <out>
-            cmd = [exe, str(dwg), str(out_dxf)]
-            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(
-            "DWG?DXF conversion failed.\n"
-            f"cmd: {' '.join(cmd)}\n"
-            f"stdout:\n{e.stdout}\n"
-            f"stderr:\n{e.stderr}"
-        ) from e
-
-    # 2) resolve the produced DXF
-    produced = out_dxf if out_dxf.exists() else (out_dir / (dwg.stem + ".dxf"))
-    if not produced.exists():
-        raise RuntimeError(
-            "Converter returned success but DXF not found.\n"
-            f"cmd: {' '.join(cmd)}\n"
-            f"checked: {out_dxf} | {produced}"
-        )
-    return str(produced)
 
 ANG_TOL = math.radians(5.0)
 DOT_TOL = math.cos(ANG_TOL)
 SMALL = 1e-7
-
-def iter_solids(shape: Any):
-    explorer = cast(Callable[[Any, Any], Any], TopExp_Explorer)
-    exp = explorer(shape, cast(int, TopAbs_SOLID))
-    while exp.More():
-        yield geometry.to_solid(exp.Current())
-        exp.Next()
-
-def explode_compound(shape: Any) -> list[Any]:
-    """If the file is a big COMPOUND, break it into shapes (parts/bodies)."""
-    explorer = cast(Callable[[Any, Any], Any], TopExp_Explorer)
-    exp = explorer(shape, cast(int, TopAbs_COMPOUND))
-    if exp.More():
-        # Itï¿½s a compound ï¿½ return its shells/solids/faces as needed
-        solids = list(iter_solids(shape))
-        if solids:
-            return solids
-        # fallback to shells
-        sh = explorer(shape, cast(int, TopAbs_SHELL))
-        shells = []
-        while sh.More():
-            shells.append(geometry.to_shell(sh.Current()))
-            sh.Next()
-        return shells
-    return [shape]
 
 def _bbox(shape):
     box = safe_bbox(shape)
@@ -1996,204 +1763,6 @@ def _turning_score(shape, areas_by_type):
     length = max(Lx, Ly, Lz)
     maxod = sorted([Lx, Ly, Lz])[-2]
     return {"GEO_Turning_Score_0to1": round(score,3), "GEO_MaxOD_mm": round(maxod,3), "GEO_Length_mm": round(length,3)}
-
-def enrich_geo_occ(shape):
-    xmin,ymin,zmin,xmax,ymax,zmax = _bbox(shape)
-    L,W,H = xmax-xmin, ymax-ymin, zmax-zmin
-
-    props = GProp_GProps()
-    try:
-        BRepGProp.VolumeProperties_s(shape, props); volume = float(props.Mass())
-        com = props.CentreOfMass(); center = [com.X(), com.Y(), com.Z()]
-    except Exception:
-        volume, center = 0.0, [0.0,0.0,0.0]
-    try:
-        BRepGProp.SurfaceProperties_s(shape, props); area_total = float(props.Mass())
-    except Exception:
-        area_total = 0.0
-
-    faces = 0
-    for _ in iter_faces(shape): faces += 1
-
-    areas_by_type = _surface_areas_by_type(shape)
-    largest_planar, normal_clusters = _largest_planar_faces_and_normals(shape)
-    unique_normals = len(normal_clusters)
-
-    min_wall = _min_wall_between_parallel_planes(shape)
-    thinwall_present = (min_wall is not None) and (min_wall < 1.0)
-
-    z_vals = [zmin + 0.25*(zmax-zmin), zmin + 0.50*(zmax-zmin), zmin + 0.75*(zmax-zmin)]
-    wedm_len = _section_perimeter_len(shape, z_vals)
-
-    deburr_len = _sum_edge_length_sharp(shape, angle_thresh_deg=175.0)
-
-    holes = _hole_groups_from_cylinders(shape, (xmin,ymin,zmin,xmax,ymax,zmax))
-
-    bbox_vol = max(L*W*H, 1e-9)
-    free_ratio = areas_by_type.get("freeform", 0.0)/max(area_total, 1e-9)
-    complexity = (faces / (volume if volume>0 else bbox_vol))*100.0 + 30.0*free_ratio
-
-    axis_dirs = [gp_Dir(1,0,0), gp_Dir(-1,0,0), gp_Dir(0,1,0), gp_Dir(0,-1,0), gp_Dir(0,0,1), gp_Dir(0,0,-1)]
-    hit=0; tot=0
-    for f in iter_faces(shape):
-        n = _face_normal(f)
-        if n:
-            tot += 1
-            if any(abs(n.Dot(a))>DOT_TOL for a in axis_dirs): hit += 1
-    access = (hit/tot) if tot else 0.0
-
-    geo = {
-        "GEO-01_Length_mm": round(L,3),
-        "GEO-02_Width_mm": round(W,3),
-        "GEO-03_Height_mm": round(H,3),
-        "GEO-Volume_mm3": round(volume,2),
-        "GEO-SurfaceArea_mm2": round(area_total,2),
-        "Feature_Face_Count": int(faces),
-        "GEO_Area_Planar_mm2": round(areas_by_type.get("planar",0.0),2),
-        "GEO_Area_Cyl_mm2": round(areas_by_type.get("cylindrical",0.0),2),
-        "GEO_Area_Freeform_mm2": round(areas_by_type.get("freeform",0.0),2),
-        "GEO_LargestPlane_Area_mm2": round(largest_planar,2),
-        "GEO_Setup_UniqueNormals": int(unique_normals),
-        "GEO_MinWall_mm": round(min_wall,3) if min_wall is not None else None,
-        "GEO_ThinWall_Present": bool(thinwall_present),
-        "GEO_WEDM_PathLen_mm": round(wedm_len,2),
-        "GEO_Deburr_EdgeLen_mm": round(deburr_len,2),
-        "GEO_Hole_Groups": holes,
-        "GEO_Complexity_0to100": round(complexity,2),
-        "GEO_3Axis_Accessible_Pct": round(access,3),
-        "GEO_CenterOfMass": center,
-        "OCC_Backend": "OCC"
-    }
-    geo.update(_turning_score(shape, areas_by_type))
-    return geo
-
-def enrich_geo_stl(path):
-    import time
-    start_time = time.time()
-    logger.info("[%.2fs] Starting enrich_geo_stl for %s", time.time() - start_time, path)
-    if not _HAS_TRIMESH:
-        raise RuntimeError("trimesh not available to process STL")
-
-    logger.info("[%.2fs] Loading mesh...", time.time() - start_time)
-    trimesh_mod = getattr(geometry, "trimesh", None)
-    if trimesh_mod is None:
-        raise RuntimeError("trimesh is unavailable despite HAS_TRIMESH flag")
-    mesh = trimesh_mod.load(path, force="mesh")
-    logger.info(
-        "[%.2fs] Mesh loaded. Faces: %d",
-        time.time() - start_time,
-        len(mesh.faces),
-    )
-
-    if mesh.is_empty:
-        raise RuntimeError("Empty STL mesh")
-
-    (xmin, ymin, zmin), (xmax, ymax, zmax) = mesh.bounds
-    L, W, H = float(xmax-xmin), float(ymax-ymin), float(zmax-zmin)
-    area_total = float(mesh.area)
-    volume = float(mesh.volume) if mesh.is_volume else 0.0
-    faces = int(len(mesh.faces))
-
-    logger.info("[%.2fs] Calculating WEDM length...", time.time() - start_time)
-    z_vals = [zmin + 0.25*(zmax-zmin), zmin + 0.50*(zmax-zmin), zmin + 0.75*(zmax-zmin)]
-    wedm_len = 0.0
-    for z in z_vals:
-        sec = mesh.section(plane_origin=[0,0,z], plane_normal=[0,0,1])
-        if sec is None:
-            continue
-        planar = sec.to_2D() # Changed to_planar() to to_2D()
-        try:
-            wedm_len += float(planar.length)
-        except Exception:
-            pass
-    logger.info("[%.2fs] WEDM length calculated.", time.time() - start_time)
-
-    logger.info("[%.2fs] Calculating deburr length...", time.time() - start_time)
-    try:
-        import numpy as np
-        angles = mesh.face_adjacency_angles
-        edges = mesh.face_adjacency_edges
-        if len(angles) and len(edges):
-            sharp = angles > math.radians(15.0)
-            vec = mesh.vertices[edges[:,0]] - mesh.vertices[edges[:,1]]
-            lengths = np.linalg.norm(vec, axis=1)
-            deburr_len = float(lengths[sharp].sum())
-        else:
-            deburr_len = 0.0
-    except Exception:
-        deburr_len = 0.0
-    logger.info("[%.2fs] Deburr length calculated.", time.time() - start_time)
-
-    bbox_vol = max(L*W*H, 1e-9)
-    complexity = (faces / max(volume, bbox_vol)) * 100.0
-
-    logger.info("[%.2fs] Calculating 3-axis accessibility...", time.time() - start_time)
-    try:
-        n = mesh.face_normals
-        area_faces = mesh.area_faces.reshape(-1,1)
-        import numpy as np
-        axes = np.array([[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]], dtype=float).T
-        dots = np.abs(n @ axes)  # (F,6)
-        close = (dots > DOT_TOL).any(axis=1)
-        access = float((area_faces[close].sum() / area_faces.sum())) if area_faces.sum() > 0 else 0.0
-    except Exception:
-        access = 0.0
-    logger.info("[%.2fs] 3-axis accessibility calculated.", time.time() - start_time)
-
-    try:
-        center = list(map(float, mesh.center_mass))
-    except Exception:
-        center = [0.0,0.0,0.0]
-
-    logger.info("[%.2fs] Finished enrich_geo_stl.", time.time() - start_time)
-    return {
-        "GEO-01_Length_mm": round(L,3),
-        "GEO-02_Width_mm": round(W,3),
-        "GEO-03_Height_mm": round(H,3),
-        "GEO-Volume_mm3": round(volume,2),
-        "GEO-SurfaceArea_mm2": round(area_total,2),
-        "Feature_Face_Count": faces,
-        "GEO_LargestPlane_Area_mm2": None,
-        "GEO_Setup_UniqueNormals": None,
-        "GEO_MinWall_mm": None,
-        "GEO_ThinWall_Present": False,
-        "GEO_WEDM_PathLen_mm": round(wedm_len,2),
-        "GEO_Deburr_EdgeLen_mm": round(deburr_len,2),
-        "GEO_Hole_Groups": [],
-        "GEO_Complexity_0to100": round(complexity,2),
-        "GEO_3Axis_Accessible_Pct": round(access,3),
-        "GEO_CenterOfMass": center,
-        "OCC_Backend": "trimesh (STL)"
-    }
-
-def read_cad_any(path: str):
-    from OCP.IFSelect import IFSelect_RetDone  # type: ignore[import]
-    from OCP.IGESControl import IGESControl_Reader  # type: ignore[import]
-    from OCP.TopoDS import TopoDS_Shape  # type: ignore[import]
-
-    ext = Path(path).suffix.lower()
-    if ext in (".step", ".stp"):
-        return read_step_shape(path)
-    if ext in (".iges", ".igs"):
-        ig = IGESControl_Reader()
-        if ig.ReadFile(path) != IFSelect_RetDone:
-            raise RuntimeError("IGES read failed")
-        ig.TransferRoots()
-        return _shape_from_reader(ig)
-    if ext == ".brep":
-        shape_ctor = cast(Callable[[], Any], TopoDS_Shape)
-        s = shape_ctor()
-        if not cast(Any, BRepTools).Read(s, path, None):
-            raise RuntimeError("BREP read failed")
-        return s
-    if ext == ".dxf":
-        return read_dxf_as_occ_shape(path)
-    if ext == ".dwg":
-        conv = os.environ.get("ODA_CONVERTER_EXE") or os.environ.get("DWG2DXF_EXE")
-        logger.info("Using DWG converter: %s", conv)
-        dxf_path = convert_dwg_to_dxf(path)
-        return read_dxf_as_occ_shape(dxf_path)
-    raise RuntimeError(f"Unsupported CAD format: {ext}")
 
 # ---- LLM hours inference ----
 def infer_hours_and_overrides_from_geo(
@@ -2445,8 +2014,6 @@ def infer_shop_overrides_from_geo(
 # --- WHICH SHEET ROWS MATTER TO THE ESTIMATOR --------------------------------
 # --- APPLY LLM OUTPUT ---------------------------------------------------------
 # ================== LLM DECISION LOG / AUDIT ==================
-import json as _json_audit
-import time as _time_audit
 
 LOGS_DIR = Path(r"D:\\CAD_Quoting_Tool\\Logs")
 LOGS_DIR.mkdir(parents=True, exist_ok=True)

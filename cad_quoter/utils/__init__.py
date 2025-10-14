@@ -9,8 +9,6 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, TypeVar
 
-from . import sheet_helpers
-
 K = TypeVar("K")
 V = TypeVar("V")
 

@@ -21,7 +21,6 @@ except Exception:
 
 from cad_quoter.vendors import ezdxf as _ezdxf_vendor
 from cad_quoter.vendors.occt import (
-    BACKEND,
     STACK,
     STACK_GPROP,
     BRepAdaptor_Curve,
@@ -30,7 +29,6 @@ from cad_quoter.vendors.occt import (
     BRep_Tool,
     BRepCheck_Analyzer,
     BRepGProp,
-    BRepTools,
     GProp_GProps,
     GeomAbs_BSplineSurface,
     GeomAbs_BezierSurface,
@@ -50,7 +48,6 @@ from cad_quoter.vendors.occt import (
     TopAbs_FACE,
     TopAbs_SHELL,
     TopAbs_SOLID,
-    TopAbs_ShapeEnum,
     TopExp,
     TopExp_Explorer,
     TopTools_IndexedDataMapOfShapeListOfShape,

@@ -11,16 +11,11 @@ from typing import Any, Callable, Mapping, TYPE_CHECKING, cast
 
 from cad_quoter.coerce import to_float
 from cad_quoter.config import logger
-from cad_quoter.domain_models import DEFAULT_MATERIAL_DISPLAY, QuoteState
+from cad_quoter.domain_models import QuoteState
 from cad_quoter.llm_suggest import build_suggest_payload as _build_suggest_payload
 
 if TYPE_CHECKING:  # pragma: no cover - for static type checkers only
-    from appV5 import (  # pylint: disable=unused-import
-        compute_effective_state as _compute_effective_state,
-        effective_to_overrides as _effective_to_overrides,
-        merge_effective as _merge_effective,
-        reprice_with_effective as _reprice_with_effective,
-    )
+    pass
 
 __all__ = [
     "QuoteState",
@@ -77,6 +72,22 @@ def effective_to_overrides(*args, **kwargs):  # type: ignore[override]
 
     app = _app_module()
     return app.effective_to_overrides(*args, **kwargs)
+
+
+def overrides_to_suggestions(*args, **kwargs):  # type: ignore[override]
+    """Proxy to :func:`appkit.llm_converters.overrides_to_suggestions`."""
+
+    from appkit import llm_converters as _llm_converters
+
+    return _llm_converters.overrides_to_suggestions(*args, **kwargs)
+
+
+def suggestions_to_overrides(*args, **kwargs):  # type: ignore[override]
+    """Proxy to :func:`appkit.llm_converters.suggestions_to_overrides`."""
+
+    from appkit import llm_converters as _llm_converters
+
+    return _llm_converters.suggestions_to_overrides(*args, **kwargs)
 
 
 HARDWARE_PASS_LABEL = "Hardware"
