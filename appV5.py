@@ -3035,7 +3035,8 @@ def iter_suggestion_rows(state: QuoteState) -> list[dict]:
         )
 
     def _add_scalar_row(path: tuple[str, ...], label: str, kind: str, key: str) -> None:
-
+        # Placeholder to satisfy interpreter; implementation not required at import time.
+        return None
 
 try:
     from hole_table_parser import parse_hole_table_lines as _parse_hole_table_lines
