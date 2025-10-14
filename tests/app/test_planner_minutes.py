@@ -159,7 +159,7 @@ def test_planner_total_mismatch_records_red_flag(monkeypatch):
     assert labor_rendered > 0.0
 
 
-def test_planner_drilling_bucket_uses_estimator(monkeypatch):
+def test_planner_does_not_emit_legacy_buckets_when_line_items_present(monkeypatch):
     import appV5
     import planner_pricing
 
@@ -210,14 +210,67 @@ def test_planner_drilling_bucket_uses_estimator(monkeypatch):
     breakdown = result["breakdown"]
     assert breakdown["pricing_source"] == "planner"
 
-    drill_meta = breakdown["drilling_meta"]
-    estimator_hours = drill_meta.get("estimator_hours_for_planner", 0.0)
-    assert estimator_hours > 0
-
     bucket_view = breakdown["bucket_view"]
-    drilling_bucket = bucket_view.get("drilling")
-    assert drilling_bucket is not None, "expected drilling bucket from planner override"
+    assert "drilling" not in bucket_view
+    assert "milling" not in bucket_view
 
+    drill_meta = breakdown.get("drilling_meta") or {}
+    assert "estimator_hours_for_planner" not in drill_meta
+
+
+def test_planner_fallback_when_no_line_items(monkeypatch):
+    import appV5
+    import planner_pricing
+
+    df = pd.DataFrame(columns=["Item", "Example Values / Options", "Data Type / Input Method"])
+    geo = {
+        "process_planner_family": "die_plate",
+        "material": "steel",
+        "thickness_mm": 25.4,
+        "hole_diams_mm": [6.0, 8.0],
+    }
+
+    def fake_plan_job(family: str, inputs: dict[str, object]) -> dict[str, object]:
+        assert family == "die_plate"
+        assert isinstance(inputs, dict)
+        return {"ops": []}
+
+    def fake_price_with_planner(
+        family: str,
+        inputs: dict[str, object],
+        geom_payload: dict[str, object],
+        rates: dict[str, object],
+        *,
+        oee: float,
+    ) -> dict[str, object]:
+        assert family == "die_plate"
+        assert geom_payload, "expected non-empty geom payload"
+        assert isinstance(rates, dict)
+        assert oee > 0
+        return {"line_items": [], "totals": {}}
+
+    monkeypatch.setattr(appV5, "_process_plan_job", fake_plan_job)
+    monkeypatch.setattr(planner_pricing, "price_with_planner", fake_price_with_planner)
+    monkeypatch.setattr(appV5, "FORCE_PLANNER", False)
+
+    result = appV5.compute_quote_from_df(
+        df,
+        params={"OEE_EfficiencyPct": 0.9, "DrillingRate": 75.0},
+        geo=geo,
+        ui_vars={},
+    )
+
+    breakdown = result["breakdown"]
+    assert breakdown["pricing_source"] == "legacy"
+    red_flags = breakdown.get("red_flags") or []
+    assert any("Planner recognized no operations" in flag for flag in red_flags)
+
+    bucket_view = breakdown.get("bucket_view") or {}
+    drilling_bucket = bucket_view.get("drilling")
+    assert drilling_bucket is not None, "expected drilling bucket for fallback"
+
+    estimator_hours = drilling_bucket["minutes"] / 60.0
+    assert estimator_hours > 0
     expected_minutes = estimator_hours * 60.0
     assert drilling_bucket["minutes"] == pytest.approx(expected_minutes, abs=0.05)
 
@@ -233,7 +286,7 @@ def test_planner_drilling_bucket_uses_estimator(monkeypatch):
     assert any("planner_drilling_override" in str(item) for item in basis)
 
 
-def test_planner_milling_bucket_backfills_from_estimator(monkeypatch):
+def test_planner_milling_bucket_backfills_from_estimator_when_planner_falls_back(monkeypatch):
     import appV5
     import planner_pricing
 
@@ -261,7 +314,7 @@ def test_planner_milling_bucket_backfills_from_estimator(monkeypatch):
     def fake_plan_job(family: str, inputs: dict[str, object]) -> dict[str, object]:
         assert family == "die_plate"
         assert isinstance(inputs, dict)
-        return {"ops": [{"op": "drill_ream_bore"}]}
+        return {"ops": []}
 
     def fake_price_with_planner(
         family: str,
@@ -275,17 +328,7 @@ def test_planner_milling_bucket_backfills_from_estimator(monkeypatch):
         assert geom_payload, "expected non-empty geom payload"
         assert isinstance(rates, dict)
         assert oee > 0
-        return {
-            "line_items": [
-                {
-                    "op": "drill_ream_bore",
-                    "minutes": 30.0,
-                    "machine_cost": 150.0,
-                    "labor_cost": 0.0,
-                }
-            ],
-            "totals": {"minutes": 30.0, "machine_cost": 150.0, "labor_cost": 0.0},
-        }
+        return {"line_items": [], "totals": {}}
 
     monkeypatch.setattr(appV5, "_process_plan_job", fake_plan_job)
     monkeypatch.setattr(planner_pricing, "price_with_planner", fake_price_with_planner)
@@ -300,6 +343,9 @@ def test_planner_milling_bucket_backfills_from_estimator(monkeypatch):
     )
 
     breakdown = result["breakdown"]
+    assert breakdown["pricing_source"] == "legacy"
+    red_flags = breakdown.get("red_flags") or []
+    assert any("Planner recognized no operations" in flag for flag in red_flags)
     bucket_view = breakdown["bucket_view"]
     milling_bucket = bucket_view.get("milling")
     assert milling_bucket is not None, "expected milling bucket backfill"
