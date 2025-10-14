@@ -11,6 +11,16 @@ from .occt_core import BRep_Builder, TopoDS_Shape
 
 __all__ = ["STACK_GPROP", "BRepTools", "bnd_add", "brep_read", "uv_bounds", "BRepGProp"]
 
+
+def _missing_gprop_namespace() -> SimpleNamespace:
+    """Return a ``SimpleNamespace`` with all ``BRepGProp`` accessors missing."""
+
+    return SimpleNamespace(  # type: ignore[return-value]
+        LinearProperties_s=lambda *_a, **_k: missing("BRepGProp.LinearProperties"),
+        SurfaceProperties_s=lambda *_a, **_k: missing("BRepGProp.SurfaceProperties"),
+        VolumeProperties_s=lambda *_a, **_k: missing("BRepGProp.VolumeProperties"),
+    )
+
 if PREFIX is None:  # pragma: no cover - bindings missing entirely
     STACK_GPROP = "missing"
     BRepTools = SimpleNamespace()
@@ -24,11 +34,7 @@ if PREFIX is None:  # pragma: no cover - bindings missing entirely
     def uv_bounds(_: Any) -> tuple[float, float, float, float]:
         return missing("BRepTools.UVBounds")
 
-    BRepGProp = SimpleNamespace(  # type: ignore
-        LinearProperties_s=lambda *_a, **_k: missing("BRepGProp.LinearProperties"),
-        SurfaceProperties_s=lambda *_a, **_k: missing("BRepGProp.SurfaceProperties"),
-        VolumeProperties_s=lambda *_a, **_k: missing("BRepGProp.VolumeProperties"),
-    )
+    BRepGProp = _missing_gprop_namespace()
 else:
     try:
         breptools = load_module("BRepTools")
@@ -45,11 +51,7 @@ else:
         def bnd_add(shape: Any, box: Any, use_triangulation: bool = True) -> Any:  # type: ignore[override]
             return missing("BRepBndLib.Add")
 
-        BRepGProp = SimpleNamespace(  # type: ignore
-            LinearProperties_s=lambda *_a, **_k: missing("BRepGProp.LinearProperties"),
-            SurfaceProperties_s=lambda *_a, **_k: missing("BRepGProp.SurfaceProperties"),
-            VolumeProperties_s=lambda *_a, **_k: missing("BRepGProp.VolumeProperties"),
-        )
+        BRepGProp = _missing_gprop_namespace()
     else:
         BRepTools = getattr(breptools, "BRepTools", breptools)
 
@@ -112,11 +114,7 @@ else:
             try:
                 module = load_module("BRepGProp")
             except ImportError:
-                BRepGProp = SimpleNamespace(  # type: ignore
-                    LinearProperties_s=lambda *_a, **_k: missing("BRepGProp.LinearProperties"),
-                    SurfaceProperties_s=lambda *_a, **_k: missing("BRepGProp.SurfaceProperties"),
-                    VolumeProperties_s=lambda *_a, **_k: missing("BRepGProp.VolumeProperties"),
-                )
+                BRepGProp = _missing_gprop_namespace()
                 STACK_GPROP = "missing"
             else:
                 BRepGProp = SimpleNamespace(  # type: ignore
