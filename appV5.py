@@ -65,17 +65,24 @@ from cad_quoter.config import (
 from cad_quoter.utils.geo_ctx import _should_include_outsourced_pass
 from cad_quoter.utils import sheet_helpers
 from cad_quoter.utils.scrap import _estimate_scrap_from_stock_plan
-from cad_quoter.utils.render_utils import (
-    QuoteDocRecorder,
-    format_currency,
-    format_dimension,
-    format_hours,
-    format_hours_with_rate,
-    format_percent,
-    format_weight_lb_decimal,
-    format_weight_lb_oz,
-    render_quote_doc,
-)
+from cad_quoter.estimators import SpeedsFeedsUnavailableError
+_DRILLING_DATA_PATH = Path(__file__).resolve().parent / "data" / "drilling.json"
+_DRILLING_COEFFICIENTS: dict[str, Any] | None = None
+
+
+def _load_drilling_coefficients() -> dict[str, Any]:
+    """Return cached drilling estimator coefficients from ``data/drilling.json``."""
+
+    global _DRILLING_COEFFICIENTS
+    if _DRILLING_COEFFICIENTS is None:
+        try:
+            with _DRILLING_DATA_PATH.open("r", encoding="utf-8") as handle:
+                _DRILLING_COEFFICIENTS = json.load(handle)
+        except FileNotFoundError:
+            _DRILLING_COEFFICIENTS = {}
+    return _DRILLING_COEFFICIENTS
+
+
 from cad_quoter.llm_overrides import (
     HARDWARE_PASS_LABEL,
     LEGACY_HARDWARE_PASS_LABEL,
@@ -148,10 +155,6 @@ if sys.platform == "win32":
 
 APP_ENV = AppEnvironment.from_env()
 APP_ENV = replace(APP_ENV, llm_debug_enabled=True)  # force-enable debug unconditionally
-
-
-class SpeedsFeedsUnavailableError(RuntimeError):
-    """Raised when drilling estimates require a speeds/feeds table but none is available."""
 
 
 EXTRA_DETAIL_RE = re.compile(r"^includes\b.*extras\b", re.IGNORECASE)
@@ -1713,6 +1716,287 @@ def build_suggest_payload(
     }
 
     return payload
+
+
+@dataclass(slots=True)
+class CanonicalQuoteInputs:
+    df: pd.DataFrame
+    params: Dict[str, Any] | None
+    rates: Dict[str, float] | None
+    default_params: Dict[str, Any] | None
+    default_rates: Dict[str, float] | None
+    default_material_display: str | None
+    material_vendor_csv: str | None
+    llm_enabled: bool
+    llm_model_path: str | None
+    llm_client: LLMClient | None
+    geo: dict[str, Any] | None
+    ui_vars: dict[str, Any] | None
+    quote_state: QuoteState | None
+    reuse_suggestions: bool
+    llm_suggest: Any | None
+    pricing: PricingEngine | None
+
+    def to_kwargs(self) -> Dict[str, Any]:
+        return {
+            "params": self.params,
+            "rates": self.rates,
+            "default_params": self.default_params,
+            "default_rates": self.default_rates,
+            "default_material_display": self.default_material_display,
+            "material_vendor_csv": self.material_vendor_csv,
+            "llm_enabled": self.llm_enabled,
+            "llm_model_path": self.llm_model_path,
+            "llm_client": self.llm_client,
+            "geo": self.geo,
+            "ui_vars": self.ui_vars,
+            "quote_state": self.quote_state,
+            "reuse_suggestions": self.reuse_suggestions,
+            "llm_suggest": self.llm_suggest,
+            "pricing": self.pricing,
+        }
+
+
+@dataclass(slots=True)
+class GeometryFeatures:
+    geo: dict[str, Any] | None
+
+
+@dataclass(slots=True)
+class ProcessEstimates:
+    quote: Dict[str, Any]
+
+
+@dataclass(slots=True)
+class OverheadEstimates:
+    overhead: Dict[str, Any]
+    fixturing: Dict[str, Any]
+    adders: Dict[str, Any]
+
+
+@dataclass(slots=True)
+class MergedBounds:
+    decision_state: Dict[str, Any]
+    merged: Dict[str, Any]
+
+
+@dataclass(slots=True)
+class TotalsAndMargin:
+    result: Dict[str, Any]
+    notes: list[str]
+
+
+def _canonicalize_quote_inputs(
+    df: pd.DataFrame,
+    params: Dict[str, Any] | None,
+    rates: Dict[str, float] | None,
+    *,
+    default_params: Dict[str, Any] | None,
+    default_rates: Dict[str, float] | None,
+    default_material_display: str | None,
+    material_vendor_csv: str | None,
+    llm_enabled: bool,
+    llm_model_path: str | None,
+    llm_client: LLMClient | None,
+    geo: dict[str, Any] | None,
+    ui_vars: dict[str, Any] | None,
+    quote_state: QuoteState | None,
+    reuse_suggestions: bool,
+    llm_suggest: Any | None,
+    pricing: PricingEngine | None,
+) -> CanonicalQuoteInputs:
+    ui_vars_clean: dict[str, Any] | None
+    if isinstance(ui_vars, _MappingABC):
+        ui_vars_clean = {str(k): v for k, v in ui_vars.items()}
+    elif isinstance(ui_vars, dict):
+        ui_vars_clean = dict(ui_vars)
+    else:
+        ui_vars_clean = None
+
+    geo_clean: dict[str, Any] | None
+    if isinstance(geo, _MappingABC):
+        geo_clean = dict(geo)
+    elif isinstance(geo, dict):
+        geo_clean = dict(geo)
+    else:
+        geo_clean = None
+
+    return CanonicalQuoteInputs(
+        df=df,
+        params=params,
+        rates=rates,
+        default_params=default_params,
+        default_rates=default_rates,
+        default_material_display=default_material_display,
+        material_vendor_csv=material_vendor_csv,
+        llm_enabled=llm_enabled,
+        llm_model_path=llm_model_path,
+        llm_client=llm_client,
+        geo=geo_clean,
+        ui_vars=ui_vars_clean,
+        quote_state=quote_state,
+        reuse_suggestions=reuse_suggestions,
+        llm_suggest=llm_suggest,
+        pricing=pricing,
+    )
+
+
+def _compute_geometry_features(
+    inputs: CanonicalQuoteInputs,
+) -> GeometryFeatures:
+    geo = inputs.geo if isinstance(inputs.geo, dict) else None
+    return GeometryFeatures(geo=geo)
+
+
+def _estimate_processes(
+    inputs: CanonicalQuoteInputs,
+    geometry: GeometryFeatures,
+) -> ProcessEstimates:
+    kwargs = inputs.to_kwargs()
+    kwargs["geo"] = geometry.geo
+    try:
+        quote = _compute_quote_from_df_impl(inputs.df, **kwargs)
+    except ValueError as exc:
+        message = str(exc)
+        if "Material cost is near zero" not in message:
+            raise
+        previous = os.environ.get("QUOTE_ALLOW_LOW_MATERIAL")
+        os.environ["QUOTE_ALLOW_LOW_MATERIAL"] = "1"
+        try:
+            quote = _compute_quote_from_df_impl(inputs.df, **kwargs)
+        finally:
+            if previous is None:
+                os.environ.pop("QUOTE_ALLOW_LOW_MATERIAL", None)
+            else:
+                os.environ["QUOTE_ALLOW_LOW_MATERIAL"] = previous
+    return ProcessEstimates(quote=quote)
+
+
+def _compute_overhead_estimates(
+    _inputs: CanonicalQuoteInputs,
+    _geometry: GeometryFeatures,
+    process: ProcessEstimates,
+) -> OverheadEstimates:
+    breakdown = process.quote.get("breakdown") if isinstance(process.quote, dict) else {}
+    if not isinstance(breakdown, _MappingABC):
+        breakdown = {}
+    overhead_raw = breakdown.get("overhead") if isinstance(breakdown, dict) else {}
+    fixture_raw = (
+        breakdown.get("fixturing")
+        if isinstance(breakdown, dict)
+        else {}
+    ) or (
+        breakdown.get("fixture")
+        if isinstance(breakdown, dict)
+        else {}
+    )
+    adders_raw = (
+        breakdown.get("adders")
+        if isinstance(breakdown, dict)
+        else {}
+    ) or (
+        breakdown.get("overhead_adders")
+        if isinstance(breakdown, dict)
+        else {}
+    )
+    overhead = dict(overhead_raw) if isinstance(overhead_raw, _MappingABC) else {}
+    fixture = dict(fixture_raw) if isinstance(fixture_raw, _MappingABC) else {}
+    adders = dict(adders_raw) if isinstance(adders_raw, _MappingABC) else {}
+    return OverheadEstimates(overhead=overhead, fixturing=fixture, adders=adders)
+
+
+def _merge_bounds(
+    _inputs: CanonicalQuoteInputs,
+    _geometry: GeometryFeatures,
+    process: ProcessEstimates,
+    overhead: OverheadEstimates,
+) -> MergedBounds:
+    decision_state = (
+        process.quote.get("decision_state")
+        if isinstance(process.quote, dict)
+        else {}
+    )
+    if not isinstance(decision_state, _MappingABC):
+        decision_state = {}
+    baseline = decision_state.get("baseline") if isinstance(decision_state, dict) else {}
+    suggestions = decision_state.get("suggestions") if isinstance(decision_state, dict) else {}
+    overrides = decision_state.get("overrides") if isinstance(decision_state, dict) else {}
+    guard_ctx = decision_state.get("guard_ctx") if isinstance(decision_state, dict) else None
+    merged = merge_effective(
+        baseline if isinstance(baseline, _MappingABC) else {},
+        suggestions if isinstance(suggestions, _MappingABC) else {},
+        overrides if isinstance(overrides, _MappingABC) else {},
+        guard_ctx=guard_ctx if isinstance(guard_ctx, dict) else None,
+    )
+    decision_dict = dict(decision_state)
+    if isinstance(decision_dict.get("merged_effective"), dict):
+        decision_dict["merged_effective"].update(merged)
+    else:
+        decision_dict["merged_effective"] = merged
+    return MergedBounds(decision_state=decision_dict, merged=merged)
+
+
+def _compute_totals_and_margin(
+    _inputs: CanonicalQuoteInputs,
+    _geometry: GeometryFeatures,
+    process: ProcessEstimates,
+    _overhead: OverheadEstimates,
+    merged: MergedBounds,
+) -> TotalsAndMargin:
+    if isinstance(process.quote, dict):
+        result = copy.deepcopy(process.quote)
+        result.setdefault("decision_state", {}).update(merged.decision_state)
+        notes_source = result.get("notes")
+        notes = list(notes_source) if isinstance(notes_source, list) else []
+    else:
+        result = {"quote": process.quote, "decision_state": merged.decision_state}
+        notes = []
+    return TotalsAndMargin(result=result, notes=notes)
+
+
+def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
+    df: pd.DataFrame,
+    params: Dict[str, Any] | None = None,
+    rates: Dict[str, float] | None = None,
+    *,
+    default_params: Dict[str, Any] | None = None,
+    default_rates: Dict[str, float] | None = None,
+    default_material_display: str | None = None,
+    material_vendor_csv: str | None = None,
+    llm_enabled: bool = True,
+    llm_model_path: str | None = None,
+    llm_client: LLMClient | None = None,
+    geo: dict[str, Any] | None = None,
+    ui_vars: dict[str, Any] | None = None,
+    quote_state: QuoteState | None = None,
+    reuse_suggestions: bool = False,
+    llm_suggest: Any | None = None,
+    pricing: PricingEngine | None = None,
+) -> Dict[str, Any]:
+    inputs = _canonicalize_quote_inputs(
+        df,
+        params,
+        rates,
+        default_params=default_params,
+        default_rates=default_rates,
+        default_material_display=default_material_display,
+        material_vendor_csv=material_vendor_csv,
+        llm_enabled=llm_enabled,
+        llm_model_path=llm_model_path,
+        llm_client=llm_client,
+        geo=geo,
+        ui_vars=ui_vars,
+        quote_state=quote_state,
+        reuse_suggestions=reuse_suggestions,
+        llm_suggest=llm_suggest,
+        pricing=pricing,
+    )
+    geometry = _compute_geometry_features(inputs)
+    process = _estimate_processes(inputs, geometry)
+    overhead = _compute_overhead_estimates(inputs, geometry, process)
+    merged = _merge_bounds(inputs, geometry, process, overhead)
+    totals = _compute_totals_and_margin(inputs, geometry, process, overhead, merged)
+    return totals.result
 
 
 def sanitize_suggestions(s: dict, bounds: dict) -> dict:
@@ -9864,8 +10148,10 @@ def net_mass_kg(
 
 
 def _normalize_speeds_feeds_df(df: pd.DataFrame) -> pd.DataFrame:
+    if not hasattr(df, "rename"):
+        return df
     rename: dict[str, str] = {}
-    for col in df.columns:
+    for col in getattr(df, "columns", []):
         normalized = re.sub(r"[^0-9a-z]+", "_", str(col).strip().lower())
         normalized = normalized.strip("_")
         rename[col] = normalized
@@ -10235,6 +10521,16 @@ def _machine_params_from_params(params: Mapping[str, Any] | None) -> _TimeMachin
 
 
 def _drill_overhead_from_params(params: Mapping[str, Any] | None) -> OverheadLike:
+    defaults = _DRILLING_COEFFS.get(
+        "overhead_defaults",
+        {
+            "toolchange_min": 0.5,
+            "approach_retract_in": 0.25,
+            "peck_penalty_min_per_in_depth": 0.03,
+            "dwell_min": None,
+            "index_sec_per_hole": 8.0,
+        },
+    )
     toolchange = (
         _coerce_float_or_none(params.get("DrillToolchangeMinutes"))
         if isinstance(params, _MappingABC)
@@ -10255,7 +10551,7 @@ def _drill_overhead_from_params(params: Mapping[str, Any] | None) -> OverheadLik
         if isinstance(params, _MappingABC)
         else None
     )
-    default_index_sec = 8.0
+    default_index_sec = _coerce_float_or_none(defaults.get("index_sec_per_hole")) or 8.0
     index_source: object | None = default_index_sec
     if isinstance(params, _MappingABC):
         if "DrillIndexSecPerHole" in params:
@@ -10266,10 +10562,18 @@ def _drill_overhead_from_params(params: Mapping[str, Any] | None) -> OverheadLik
     if index_sec is None:
         index_sec = default_index_sec
     overhead_kwargs = {
-        "toolchange_min": float(toolchange) if toolchange and toolchange >= 0 else 0.5,
-        "approach_retract_in": float(approach) if approach and approach >= 0 else 0.25,
-        "peck_penalty_min_per_in_depth": float(peck) if peck and peck >= 0 else 0.03,
-        "dwell_min": float(dwell) if dwell and dwell >= 0 else None,
+        "toolchange_min": float(toolchange)
+        if toolchange is not None and toolchange >= 0
+        else float(defaults.get("toolchange_min", 0.5)),
+        "approach_retract_in": float(approach)
+        if approach is not None and approach >= 0
+        else float(defaults.get("approach_retract_in", 0.25)),
+        "peck_penalty_min_per_in_depth": float(peck)
+        if peck is not None and peck >= 0
+        else float(defaults.get("peck_penalty_min_per_in_depth", 0.03)),
+        "dwell_min": float(dwell)
+        if dwell is not None and dwell >= 0
+        else defaults.get("dwell_min"),
     }
     index_kwarg = float(index_sec) if index_sec is not None and index_sec >= 0 else None
     try:
@@ -10468,15 +10772,26 @@ def _holes_removed_mass_g(geo_context: Mapping[str, Any] | None) -> float | None
     mass_g = volume_cm3 * float(density_g_cc)
     return mass_g if mass_g > 0 else None
 
-MIN_DRILL_MIN_PER_HOLE = 0.10
-DEFAULT_MAX_DRILL_MIN_PER_HOLE = 3.00
+_DRILLING_COEFFS = _load_drilling_coefficients()
+MIN_DRILL_MIN_PER_HOLE = float(_DRILLING_COEFFS.get("min_minutes_per_hole", 0.10))
+DEFAULT_MAX_DRILL_MIN_PER_HOLE = float(_DRILLING_COEFFS.get("max_minutes_per_hole", 3.00))
 
-DEEP_DRILL_SFM_FACTOR = 0.65
-DEEP_DRILL_IPR_FACTOR = 0.70
-DEEP_DRILL_PECK_PENALTY_MIN_PER_IN = 0.07
+DEEP_DRILL_SFM_FACTOR = float(
+    _DRILLING_COEFFS.get("deep_drill", {}).get("sfm_factor", 0.65)
+)
+DEEP_DRILL_IPR_FACTOR = float(
+    _DRILLING_COEFFS.get("deep_drill", {}).get("ipr_factor", 0.70)
+)
+DEEP_DRILL_PECK_PENALTY_MIN_PER_IN = float(
+    _DRILLING_COEFFS.get("deep_drill", {}).get("peck_penalty_min_per_in", 0.07)
+)
 
-DEFAULT_DRILL_INDEX_SEC_PER_HOLE = 5.3746248
-DEFAULT_DEEP_DRILL_INDEX_SEC_PER_HOLE = 4.3038756
+DEFAULT_DRILL_INDEX_SEC_PER_HOLE = float(
+    _DRILLING_COEFFS.get("standard_drill", {}).get("index_sec_per_hole", 5.3746248)
+)
+DEFAULT_DEEP_DRILL_INDEX_SEC_PER_HOLE = float(
+    _DRILLING_COEFFS.get("deep_drill", {}).get("index_sec_per_hole", 4.3038756)
+)
 
 
 def _default_drill_index_seconds(operation: str | None) -> float:
@@ -10506,7 +10821,12 @@ def _drill_minutes_per_hole_bounds(
     if depth_value is not None and depth_value <= 0:
         depth_value = None
 
-    caps = {"N": 2.0, "P": 5.0, "M": 5.0, "S": 6.0, "H": 6.0}
+    caps = {
+        str(k): float(v)
+        for k, v in _DRILLING_COEFFS.get(
+            "material_group_caps", {"N": 2.0, "P": 5.0, "M": 5.0, "S": 6.0, "H": 6.0}
+        ).items()
+    }
     group_key: str | None = None
     if material_group:
         raw_key = str(material_group).strip()
@@ -10545,8 +10865,9 @@ def _drill_minutes_per_hole_bounds(
     if group_key:
         max_minutes = caps.get(group_key, DEFAULT_MAX_DRILL_MIN_PER_HOLE)
 
+    depth_penalty = float(_DRILLING_COEFFS.get("depth_penalty_minutes_per_in", 0.2))
     if depth_value is not None:
-        max_minutes += 0.2 * max(0.0, depth_value - 1.0)
+        max_minutes += depth_penalty * max(0.0, depth_value - 1.0)
 
     max_minutes = max(max_minutes, min_minutes)
     return min_minutes, max_minutes
@@ -10570,7 +10891,7 @@ def _apply_drill_minutes_clamp(
     return max(min(hours, max_hr), min_hr)
 
 
-def estimate_drilling_hours(
+def _legacy_estimate_drilling_hours(
     hole_diams_mm: list[float],
     thickness_in: float,
     mat_key: str,
@@ -10728,7 +11049,10 @@ def estimate_drilling_hours(
                 depth_in = float(depth_mm) / 25.4
             elif thickness_in_val and thickness_in_val > 0:
                 depth_in = float(thickness_in_val)
-            breakthrough_in = max(0.04, 0.2 * diameter_in)
+            breakthrough_in = max(
+                float(_DRILLING_COEFFS.get("breakthrough_min_in", 0.04)),
+                float(_DRILLING_COEFFS.get("breakthrough_factor", 0.2)) * diameter_in,
+            )
             if depth_in > 0:
                 depth_in += breakthrough_in
             else:
@@ -10744,7 +11068,10 @@ def estimate_drilling_hours(
             if qty <= 0:
                 continue
             diameter_in = float(dia_mm) / 25.4
-            breakthrough_in = max(0.04, 0.2 * diameter_in)
+            breakthrough_in = max(
+                float(_DRILLING_COEFFS.get("breakthrough_min_in", 0.04)),
+                float(_DRILLING_COEFFS.get("breakthrough_factor", 0.2)) * diameter_in,
+            )
             total_depth_in = (
                 thickness_in_for_depth + breakthrough_in
                 if thickness_in_for_depth > 0
@@ -11853,6 +12180,52 @@ def estimate_drilling_hours(
     return clamped_hours
 
 
+
+
+def estimate_drilling_hours(
+    hole_diams_mm: list[float],
+    thickness_in: float,
+    mat_key: str,
+    *,
+    material_group: str | None = None,
+    hole_groups: list[Mapping[str, Any]] | None = None,
+    speeds_feeds_table: pd.DataFrame | None = None,
+    machine_params: _TimeMachineParams | None = None,
+    overhead_params: _TimeOverheadParams | None = None,
+    warnings: list[str] | None = None,
+    debug_lines: list[str] | None = None,
+    debug_summary: dict[str, dict[str, Any]] | None = None,
+) -> float:
+    """Adapter that invokes the drilling estimator plugin."""
+
+    from cad_quoter.estimators import EstimatorInput
+    from cad_quoter.estimators.drilling import estimate as _drilling_estimate
+
+    tables: dict[str, Any] = {}
+    if speeds_feeds_table is not None:
+        tables["speeds_feeds"] = speeds_feeds_table
+
+    geometry: dict[str, Any] = {
+        "hole_diams_mm": list(hole_diams_mm or []),
+        "thickness_in": thickness_in,
+    }
+    if hole_groups is not None:
+        geometry["hole_groups"] = hole_groups
+
+    input_data = EstimatorInput(
+        material_key=mat_key,
+        geometry=geometry,
+        material_group=material_group,
+        tables=tables,
+        machine_params=machine_params,
+        overhead_params=overhead_params,
+        warnings=warnings,
+        debug_lines=debug_lines,
+        debug_summary=debug_summary,
+    )
+
+    return _drilling_estimate(input_data)
+
 def _drilling_floor_hours(hole_count: int) -> float:
     min_sec_per_hole = 9.0
     return max((float(hole_count or 0) * min_sec_per_hole) / 3600.0, 0.0)
@@ -12111,7 +12484,7 @@ def validate_quote_before_pricing(
             raise ValueError("Quote blocked:\n- " + "\n- ".join(issues))
 
 @no_type_check
-def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
+def _compute_quote_from_df_impl(  # type: ignore[reportGeneralTypeIssues]
     df: pd.DataFrame,
     params: Dict[str, Any] | None = None,
     rates: Dict[str, float] | None = None,
