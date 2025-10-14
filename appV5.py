@@ -333,6 +333,14 @@ def normalize_item(value: Any) -> str:
     return _normalize_item_text(value)
 
 import cad_quoter.geometry as geometry
+from appkit.occ_compat import (
+    FACE_OF,
+    ensure_face,
+    face_surface,
+    iter_faces,
+    linear_properties,
+    map_shapes_and_ancestors,
+)
 from cad_quoter.geo2d import (
     apply_2d_features_to_variables,
 )
@@ -1069,107 +1077,6 @@ def _resolve_face_of():
     except Exception:
         pass
 
-    def _raise(obj):
-        raise TypeError(f"Cannot cast {type(obj).__name__} to TopoDS_Face")
-
-    return _raise
-
-FACE_OF = _resolve_face_of()
-
-def iter_faces(shape: Any) -> Iterator[Any]:
-    explorer_cls = cast(Callable[[Any, Any], Any], TopExp_Explorer)
-    exp = explorer_cls(shape, cast(Any, TopAbs_FACE))
-    while exp.More():
-        yield ensure_face(exp.Current())
-        exp.Next()
-
-def face_surface(face_like: Any) -> tuple[Any, Any | None]:
-    f = ensure_face(face_like)
-    tool = cast(Any, BRep_Tool)
-    surface_s = getattr(tool, "Surface_s", None)
-    if callable(surface_s):
-        s = surface_s(f)
-    else:
-        s = tool.Surface(f)
-    location_fn = getattr(tool, "Location", None)
-    if callable(location_fn):
-        loc = location_fn(f)
-    else:
-        face_location = getattr(f, "Location", None)
-        loc = face_location() if callable(face_location) else None
-    if isinstance(s, tuple):
-        s, loc2 = s
-        loc = loc or loc2
-    if hasattr(s, "Surface"):
-        s = cast(Any, s).Surface()  # unwrap handle
-    return s, loc
-
-# ---------- OCCT compat (OCP or pythonocc-core) ----------
-# ---------- Robust casters that work on OCP and pythonocc ----------
-# Lock topods casters to the active backend
-if STACK == "ocp":
-
-    def _TO_EDGE(s):
-        if type(s).__name__ in ("TopoDS_Edge", "Edge"):
-            return s
-        topods_any = cast(Any, TopoDS)
-        edge_s = getattr(topods_any, "Edge_s", None)
-        if callable(edge_s):
-            return edge_s(s)
-        try:
-            from OCP.TopoDS import topods as _topods  # type: ignore[import]
-            return _topods.Edge(s)
-        except Exception as e:
-            raise TypeError(f"Cannot cast to Edge from {type(s).__name__}") from e
-
-    def _TO_SOLID(s):
-        if type(s).__name__ in ("TopoDS_Solid", "Solid"):
-            return s
-        topods_any = cast(Any, TopoDS)
-        solid_s = getattr(topods_any, "Solid_s", None)
-        if callable(solid_s):
-            return solid_s(s)
-        from OCP.TopoDS import topods as _topods  # type: ignore[import]
-        return _topods.Solid(s)
-
-    def _TO_SHELL(s):
-        if type(s).__name__ in ("TopoDS_Shell", "Shell"):
-            return s
-        topods_any = cast(Any, TopoDS)
-        shell_s = getattr(topods_any, "Shell_s", None)
-        if callable(shell_s):
-            return shell_s(s)
-        from OCP.TopoDS import topods as _topods  # type: ignore[import]
-        return _topods.Shell(s)
-else:
-    # Resolve within OCC.Core only
-    _occ_topods_module = _import_optional("OCC.Core.TopoDS")
-    if _occ_topods_module is None:
-        raise ImportError("OCC.Core.TopoDS is required for pythonocc backend")
-
-    def _resolve_topods_callable(*names: str):
-        for candidate in names:
-            attr = getattr(_occ_topods_module, candidate, None)
-            if attr:
-                return attr
-        nested = getattr(_occ_topods_module, "topods", None)
-        if nested is not None:
-            for candidate in names:
-                attr = getattr(nested, candidate, None)
-                if attr:
-                    return attr
-        raise AttributeError(
-            f"None of {names!r} are available on OCC.Core.TopoDS for casting"
-        )
-
-    _TO_EDGE = _resolve_topods_callable("topods_Edge", "Edge")
-    _TO_SOLID = _resolve_topods_callable("topods_Solid", "Solid")
-    _TO_SHELL = _resolve_topods_callable("topods_Shell", "Shell")
-
-# Type guards
-def _unwrap_value(obj):
-    # Some containers return nodes with .Value()
-    return obj.Value() if hasattr(obj, "Value") and callable(obj.Value) else obj
 
 def _shape_is_null(shape: Any) -> bool:
     """Return True if the passed shape reports itself as null."""
