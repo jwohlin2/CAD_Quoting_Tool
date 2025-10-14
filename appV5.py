@@ -205,6 +205,42 @@ def _compute_direct_costs(
     subtotal += sum(float(v or 0.0) for v in pt.values())
     return round(subtotal, 2)
 
+
+def _compute_pricing_ladder(
+    subtotal: float | int | str | None,
+    *,
+    overhead_pct: float | int | str | None = 0.0,
+    ga_pct: float | int | str | None = 0.0,
+    contingency_pct: float | int | str | None = 0.0,
+    expedite_pct: float | int | str | None = 0.0,
+    margin_pct: float | int | str | None = 0.0,
+) -> dict[str, float]:
+    """Return cumulative totals for each step of the pricing ladder."""
+
+    def _pct(value: float | int | str | None) -> float:
+        return _safe_float(value, 0.0)
+
+    subtotal_val = round(_safe_float(subtotal, 0.0), 2)
+
+    def _apply(amount: float, pct_value: float | int | str | None) -> float:
+        pct_val = _pct(pct_value)
+        return round(amount * (1.0 + pct_val), 2)
+
+    with_overhead = _apply(subtotal_val, overhead_pct)
+    with_ga = _apply(with_overhead, ga_pct)
+    with_contingency = _apply(with_ga, contingency_pct)
+    with_expedite = _apply(with_contingency, expedite_pct)
+    with_margin = _apply(with_expedite, margin_pct)
+
+    return {
+        "subtotal": subtotal_val,
+        "with_overhead": with_overhead,
+        "with_ga": with_ga,
+        "with_contingency": with_contingency,
+        "with_expedite": with_expedite,
+        "with_margin": with_margin,
+    }
+
 # ---------------------------------------------------------------------------
 # Formatting helpers
 # ---------------------------------------------------------------------------
@@ -346,6 +382,46 @@ def _count_recognized_ops(plan_summary: Mapping[str, Any] | None) -> int:
             except Exception:
                 count += 1
     return count
+
+
+def _recognized_line_items_from_planner(pricing_result: Mapping[str, Any] | None) -> int:
+    """Best-effort extraction of recognized planner operations for fallback logic."""
+
+    if not isinstance(pricing_result, _MappingABC):
+        return 0
+
+    try:
+        raw_recognized = pricing_result.get("recognized_line_items")
+    except Exception:
+        raw_recognized = None
+    if raw_recognized is not None:
+        try:
+            value = int(float(raw_recognized))
+            if value > 0:
+                return value
+        except Exception:
+            pass
+
+    try:
+        line_items = pricing_result.get("line_items")
+    except Exception:
+        line_items = None
+    if isinstance(line_items, (list, tuple)):
+        count = sum(1 for entry in line_items if entry)
+        if count > 0:
+            return count
+
+    plan_summary: Mapping[str, Any] | None = None
+    try:
+        plan_summary = pricing_result.get("plan_summary")
+    except Exception:
+        plan_summary = None
+    if plan_summary is None:
+        plan_candidate = pricing_result.get("plan")
+        if isinstance(plan_candidate, _MappingABC):
+            plan_summary = plan_candidate
+
+    return _count_recognized_ops(plan_summary)
 
 def _normalize_item_text(value: Any) -> str:
     """Return a normalized key for matching variables rows."""
@@ -2918,6 +2994,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         material_selection.setdefault("group", group_material_breakdown)
         material_selection.setdefault("material_group", group_material_breakdown)
     material = material_block
+    material_detail_for_breakdown = material
     drilling_meta = breakdown.get("drilling_meta", {}) or {}
     process_costs_raw = breakdown.get("process_costs", {}) or {}
     process_costs = (
@@ -3174,6 +3251,33 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     def _format_weight_lb_oz(mass_g: float | None) -> str:
         return format_weight_lb_oz(mass_g)
+
+    def _scrap_source_hint(material_info: Mapping[str, Any] | None) -> str | None:
+        if not isinstance(material_info, _MappingABC):
+            return None
+
+        scrap_from_holes_raw = material_info.get("scrap_pct_from_holes")
+        scrap_from_holes_val = _coerce_float_or_none(scrap_from_holes_raw)
+        scrap_from_holes = False
+        if scrap_from_holes_val is not None and scrap_from_holes_val > 1e-6:
+            scrap_from_holes = True
+        elif isinstance(scrap_from_holes_raw, bool):
+            scrap_from_holes = scrap_from_holes_raw
+        if scrap_from_holes:
+            return "holes"
+
+        label_raw = material_info.get("scrap_source_label")
+        if label_raw in (None, ""):
+            return None
+
+        label_text = str(label_raw).strip()
+        if not label_text:
+            return None
+
+        label_text = label_text.replace("+", " + ")
+        label_text = label_text.replace("_", " ")
+        label_text = re.sub(r"\s+", " ", label_text).strip()
+        return label_text or None
 
     def _is_truthy_flag(value) -> bool:
         """Return True only for explicit truthy values.
@@ -3562,8 +3666,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             append_line("")
 
     app_meta = result.setdefault("app_meta", {})
-    # Force-enable: always render drill debug entries
-    if True:
+    # Always show drill debug in the rendered quote; the nice sections depend on these signals
+    if drill_debug_entries:
         # Order so legacy per-bin “OK …” lines appear first, then tables/summary.
         def _dbg_sort(a: str, b: str) -> int:
             a_ok = a.strip().lower().startswith("ok ")
@@ -3575,12 +3679,15 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if a_hdr and not b_hdr: return 1
             if b_hdr and not a_hdr: return -1
             return 0
+
         try:
-            drill_debug_entries = sorted((drill_debug_entries or []), key=cmp_to_key(_dbg_sort))
+            sorted_drill_entries = sorted(drill_debug_entries, key=cmp_to_key(_dbg_sort))
         except Exception:
-            drill_debug_entries = drill_debug_entries or []
-        append_lines(drill_debug_entries)
+            sorted_drill_entries = drill_debug_entries
+
+        render_drill_debug(sorted_drill_entries)
     row("Final Price per Part:", price)
+    final_price_row_index = len(lines) - 1
     total_labor_label = "Total Labor Cost:"
     row(total_labor_label, float(totals.get("labor_cost", 0.0)))
     total_labor_row_index = len(lines) - 1
@@ -4268,30 +4375,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if matcost or show_zeros:
                 total_material_cost = float(matcost or 0.0)
                 material_net_cost = total_material_cost
-            scrap_credit_lines: list[str] = []
-            if scrap_credit_entered and scrap_credit:
-                credit_display = _m(scrap_credit)
-                if credit_display.startswith(currency):
-                    credit_display = f"-{credit_display}"
-                else:
-                    credit_display = f"-{fmt_money(scrap_credit, currency)}"
-                scrap_credit_lines.append(f"  Scrap Credit: {credit_display}")
-                scrap_credit_mass_lb = _coerce_float_or_none(
-                    material.get("scrap_credit_mass_lb")
-                )
-                scrap_credit_unit_price_lb = _coerce_float_or_none(
-                    material.get("scrap_credit_unit_price_usd_per_lb")
-                )
-                if scrap_credit_mass_lb and scrap_credit_unit_price_lb:
-                    scrap_credit_mass_g = (
-                        float(scrap_credit_mass_lb) / LB_PER_KG * 1000.0
-                    )
-                    scrap_credit_lines.append(
-                        "    based on "
-                        f"{_format_weight_lb_oz(scrap_credit_mass_g)} × {fmt_money(scrap_credit_unit_price_lb, currency)} / lb"
-                    )
             net_mass_val = _coerce_float_or_none(net_mass_g)
-            effective_mass_val = _coerce_float_or_none(mass_g)
+            effective_mass_val = _coerce_float_or_none(
+                material.get("effective_mass_g")
+            )
+            if effective_mass_val is None:
+                effective_mass_val = _coerce_float_or_none(mass_g)
             removal_mass_val = None
             for removal_key in ("material_removed_mass_g", "material_removed_mass_g_est"):
                 removal_mass_val = _coerce_float_or_none(material.get(removal_key))
@@ -4363,31 +4452,21 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                         f"scrap-adjusted {_format_weight_lb_decimal(effective_mass_val)}"
                     )
 
-            scrap_mass_val: float | None = None
-            if (
-                starting_mass_val is not None
-                and net_mass_val is not None
-            ):
-                scrap_mass_val = max(0.0, float(starting_mass_val) - float(net_mass_val))
-            if scrap_mass_val is None and removal_mass_val is not None:
-                scrap_mass_val = max(0.0, float(removal_mass_val))
-            if (
-                scrap_mass_val is None
-                and scrap_fraction_val is not None
-                and starting_mass_val is not None
-            ):
-                scrap_mass_val = max(
-                    0.0, float(starting_mass_val) * float(scrap_fraction_val)
+            scrap_mass_val = _compute_scrap_mass_g(
+                removal_mass_g_est=material.get("material_removed_mass_g_est"),
+                scrap_pct_raw=scrap,
+                effective_mass_g=effective_mass_val,
+                net_mass_g=net_mass_val,
+            )
+
+            if scrap_mass_val is not None:
+                scrap_credit_mass_lb = float(scrap_mass_val) / 1000.0 * LB_PER_KG
+                material_detail_for_breakdown["scrap_credit_mass_lb"] = (
+                    scrap_credit_mass_lb
                 )
-            if (
-                scrap_mass_val is None
-                and scrap_adjusted_mass_val is not None
-                and net_mass_val is not None
-            ):
-                scrap_mass_val = max(
-                    0.0,
-                    abs(float(scrap_adjusted_mass_val) - float(net_mass_val)),
-                )
+            else:
+                scrap_credit_mass_lb = None
+                material_detail_for_breakdown.pop("scrap_credit_mass_lb", None)
 
             weight_lines: list[str] = []
             if (starting_mass_val and starting_mass_val > 0) or show_zeros:
@@ -4406,7 +4485,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             elif show_zeros:
                 weight_lines.append("  Scrap Weight: 0 oz")
             if scrap is not None:
-                weight_lines.append(f"  Scrap Percentage: {_pct(scrap)}")
+                scrap_hint_text = _scrap_source_hint(material)
+                scrap_line = f"  Scrap Percentage: {_pct(scrap)}"
+                if scrap_hint_text:
+                    scrap_line += f" ({scrap_hint_text})"
+                weight_lines.append(scrap_line)
             # Historically the renderer would emit an extra weight-only line here when
             # ``scrap_adjusted_mass`` was available.  The value was the computed "with
             # scrap" mass, but because it lacked a label it rendered as a stray line like
@@ -4416,6 +4499,25 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             # already convey the information a customer needs.
 
             detail_lines.extend(weight_lines)
+            scrap_credit_lines: list[str] = []
+            if scrap_credit_entered and scrap_credit:
+                credit_display = _m(scrap_credit)
+                if credit_display.startswith(currency):
+                    credit_display = f"-{credit_display}"
+                else:
+                    credit_display = f"-{fmt_money(scrap_credit, currency)}"
+                scrap_credit_lines.append(f"  Scrap Credit: {credit_display}")
+                scrap_credit_unit_price_lb = _coerce_float_or_none(
+                    material.get("scrap_credit_unit_price_usd_per_lb")
+                )
+                if (
+                    scrap_credit_mass_lb is not None
+                    and scrap_credit_unit_price_lb is not None
+                ):
+                    scrap_credit_lines.append(
+                        "    based on "
+                        f"{_format_weight_lb_oz(scrap_mass_val)} × {fmt_money(scrap_credit_unit_price_lb, currency)} / lb"
+                    )
             if scrap_credit_lines:
                 detail_lines.extend(scrap_credit_lines)
 
@@ -5694,24 +5796,46 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             f"TOTAL DRILLING (with toolchange) ........ {subtotal_min + tool_add:.2f} min  ({(subtotal_min + tool_add)/60.0:.2f} hr)"
         )
         append_line("")
-    except Exception:
-        # If anything goes sideways here, do not break the quote – just skip this block.
-        pass
+    except Exception as e:
+        # Don’t break the quote — but surface the reason, so we can see why it skipped.
+        append_line(f"[MATERIAL REMOVAL block skipped: {e}]")
+        append_line("")
 
     append_line("")
 
     # ---- Pricing ladder ------------------------------------------------------
     append_line("Pricing Ladder")
     append_line(divider)
-    overhead_pct    = float(applied_pcts.get("OverheadPct", 0.0) or 0.0)
-    ga_pct          = float(applied_pcts.get("GA_Pct", 0.0) or 0.0)
-    contingency_pct = float(applied_pcts.get("ContingencyPct", 0.0) or 0.0)
-    expedite_pct    = float(applied_pcts.get("ExpeditePct", 0.0) or 0.0)
+    def _ladder_pct(key: str) -> float:
+        return _safe_float(applied_pcts.get(key), 0.0)
 
-    with_overhead    = subtotal * (1.0 + overhead_pct)
-    with_ga          = with_overhead * (1.0 + ga_pct)
-    with_contingency = with_ga * (1.0 + contingency_pct)
-    with_expedite    = with_contingency * (1.0 + expedite_pct)
+    ladder_totals = _compute_pricing_ladder(
+        subtotal,
+        overhead_pct=_ladder_pct("OverheadPct"),
+        ga_pct=_ladder_pct("GA_Pct"),
+        contingency_pct=_ladder_pct("ContingencyPct"),
+        expedite_pct=_ladder_pct("ExpeditePct"),
+        margin_pct=_ladder_pct("MarginPct"),
+    )
+
+    with_overhead = ladder_totals["with_overhead"]
+    with_ga = ladder_totals["with_ga"]
+    with_contingency = ladder_totals["with_contingency"]
+    with_expedite = ladder_totals["with_expedite"]
+    final_price = ladder_totals["with_margin"]
+
+    if isinstance(totals, dict):
+        totals["with_overhead"] = with_overhead
+        totals["with_ga"] = with_ga
+        totals["with_contingency"] = with_contingency
+        totals["with_expedite"] = with_expedite
+        totals["with_margin"] = final_price
+        totals["price"] = final_price
+
+    price = final_price
+    if isinstance(result, dict):
+        result["price"] = price
+    replace_line(final_price_row_index, _format_row("Final Price per Part:", price))
 
     row("Subtotal (Labor + Directs):", subtotal)
     row(f"+ Overhead ({_pct(applied_pcts.get('OverheadPct'))}):",     with_overhead - subtotal)
@@ -8856,6 +8980,11 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     family = str(family or "").strip().lower() or None
 
     planner_result: dict[str, Any] = {}
+    planner_used = False
+    planner_machine_cost_total = 0.0
+    planner_labor_cost_total = 0.0
+    amortized_programming = 0.0
+    amortized_fixture = 0.0
     if family:
         if callable(_process_plan_job):
             try:
@@ -8872,44 +9001,135 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 dict(rates or {}),
                 oee=oee,
             )
-        except Exception:
+        except Exception as exc:
+            planner_exception = exc
             pricing = {}
 
         planner_result.update(pricing if isinstance(pricing, dict) else {})
-        totals = planner_result.get("totals", {}) if isinstance(planner_result.get("totals"), _MappingABC) else {}
+        recognized_line_items = _recognized_line_items_from_planner(planner_result)
+        if (
+            "recognized_line_items" not in planner_result
+            and recognized_line_items > 0
+        ):
+            planner_result["recognized_line_items"] = recognized_line_items
+
+        if planner_result:
+            breakdown["process_plan_pricing"] = planner_result
+            baseline["process_plan_pricing"] = planner_result
+
+        if planner_exception is None and recognized_line_items > 0:
+            use_planner = True
+        else:
+            fallback_reason = (
+                "Planner pricing failed; using legacy fallback"
+                if planner_exception is not None
+                else "Planner recognized no operations; using legacy fallback"
+            )
+
+    if use_planner:
+        totals = (
+            planner_result.get("totals", {})
+            if isinstance(planner_result.get("totals"), _MappingABC)
+            else {}
+        )
         machine_cost = float(_coerce_float_or_none(totals.get("machine_cost")) or 0.0)
-        labor_cost = float(_coerce_float_or_none(totals.get("labor_cost")) or 0.0)
+        labor_cost_total = float(_coerce_float_or_none(totals.get("labor_cost")) or 0.0)
         total_minutes = float(_coerce_float_or_none(totals.get("minutes")) or 0.0)
 
-        process_costs.update({"Machine": round(machine_cost, 2), "Labor": round(labor_cost, 2)})
-        totals_block.update({"machine_cost": machine_cost, "labor_cost": labor_cost, "minutes": total_minutes})
-        breakdown["labor_cost_rendered"] = labor_cost
+        line_items = planner_result.get("line_items")
+        if isinstance(line_items, Sequence):
+            for item in line_items:
+                if not isinstance(item, _MappingABC):
+                    continue
+                label = str(item.get("op") or item.get("name") or "").strip().lower()
+                if not label or "amortized" not in label:
+                    continue
+                labor_amount = _coerce_float_or_none(item.get("labor_cost"))
+                if labor_amount is None:
+                    continue
+                labor_value = float(labor_amount)
+                if "program" in label:
+                    amortized_programming += labor_value
+                elif "fixture" in label:
+                    amortized_fixture += labor_value
+
+        planner_machine_cost_total = machine_cost
+        planner_labor_cost_total = labor_cost_total - amortized_programming - amortized_fixture
+        if planner_labor_cost_total < 0:
+            planner_labor_cost_total = 0.0
+
+        process_costs.clear()
+        process_costs.update(
+            {
+                "Machine": round(planner_machine_cost_total, 2),
+                "Labor": round(planner_labor_cost_total, 2),
+            }
+        )
+        combined_labor_total = (
+            planner_machine_cost_total
+            + planner_labor_cost_total
+            + amortized_programming
+            + amortized_fixture
+        )
+        totals_block.update(
+            {
+                "machine_cost": planner_machine_cost_total,
+                "labor_cost": combined_labor_total,
+                "minutes": total_minutes,
+            }
+        )
+        breakdown["labor_cost_rendered"] = combined_labor_total
         breakdown["process_plan_pricing"] = planner_result
         breakdown["pricing_source"] = "planner"
         breakdown["process_minutes"] = total_minutes
         baseline["pricing_source"] = "planner"
         baseline["process_plan_pricing"] = planner_result
+        planner_used = True
 
         hr_total = total_minutes / 60.0 if total_minutes else 0.0
         process_meta["planner_total"] = {
             "minutes": total_minutes,
             "hr": hr_total,
-            "cost": machine_cost + labor_cost,
+            "cost": machine_cost + labor_cost_total,
             "machine_cost": machine_cost,
-            "labor_cost": labor_cost,
+            "labor_cost": labor_cost_total,
+            "labor_cost_excl_amortized": planner_labor_cost_total,
+            "amortized_programming": amortized_programming,
+            "amortized_fixture": amortized_fixture,
             "line_items": list(planner_result.get("line_items", []) or []),
         }
-        process_meta["planner_machine"] = {"minutes": total_minutes, "hr": hr_total, "cost": machine_cost}
-        process_meta["planner_labor"] = {"minutes": total_minutes, "hr": hr_total, "cost": labor_cost}
+        process_meta["planner_machine"] = {
+            "minutes": total_minutes,
+            "hr": hr_total,
+            "cost": machine_cost,
+        }
+        process_meta["planner_labor"] = {
+            "minutes": total_minutes,
+            "hr": hr_total,
+            "cost": labor_cost_total,
+            "cost_excl_amortized": planner_labor_cost_total,
+            "amortized_programming": amortized_programming,
+            "amortized_fixture": amortized_fixture,
+        }
 
-        if not roughly_equal(machine_cost, process_costs.get("Machine", 0.0), eps=_PLANNER_BUCKET_ABS_EPSILON):
+        machine_rendered = float(_coerce_float_or_none(process_costs.get("Machine")) or 0.0)
+        if not roughly_equal(
+            planner_machine_cost_total,
+            machine_rendered,
+            eps=_PLANNER_BUCKET_ABS_EPSILON,
+        ):
             breakdown["red_flags"].append("Planner totals drifted (machine cost)")
-        if not roughly_equal(labor_cost, process_costs.get("Labor", 0.0), eps=_PLANNER_BUCKET_ABS_EPSILON):
+        labor_rendered = float(_coerce_float_or_none(process_costs.get("Labor")) or 0.0)
+        if not roughly_equal(
+            planner_labor_cost_total,
+            labor_rendered,
+            eps=_PLANNER_BUCKET_ABS_EPSILON,
+        ):
             breakdown["red_flags"].append("Planner totals drifted (labor cost)")
     else:
-        breakdown["pricing_source"] = "legacy"
-        baseline["pricing_source"] = "legacy"
         breakdown.setdefault("process_minutes", 0.0)
+        if fallback_reason:
+            breakdown["red_flags"].append(fallback_reason)
 
     hole_diams: list[float] = []
     if isinstance(geo_payload, _MappingABC):
@@ -8930,49 +9150,49 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
 
     drilling_rate = _lookup_rate("DrillingRate", rates, params, default_rates, fallback=75.0)
     breakdown.setdefault("drilling_meta", {})
-    if hole_diams and thickness_in and drilling_rate > 0:
-        try:
-            estimator_hours = estimate_drilling_hours(
-                hole_diams,
-                float(thickness_in),
-                str(material_text or ""),
-                speeds_feeds_table=speeds_feeds_table,
-            )
-        except Exception:
-            estimator_hours = 0.0
-        if not estimator_hours or estimator_hours <= 0:
-            hole_count = max(1, len(hole_diams))
-            avg_dia_in = sum(hole_diams) / hole_count / 25.4
-            estimator_hours = max(0.05, hole_count * max(avg_dia_in, 0.1) * float(thickness_in) / 600.0)
-        bucket_view["drilling"] = {
-            "minutes": estimator_hours * 60.0,
-            "machine_cost": estimator_hours * drilling_rate,
-            "labor_cost": 0.0,
-        }
-        breakdown["drilling_meta"].update({"estimator_hours_for_planner": estimator_hours})
-        process_meta["drilling"] = {
-            "hr": estimator_hours,
-            "minutes": estimator_hours * 60.0,
-            "rate": drilling_rate,
-            "basis": ["planner_drilling_override"],
-        }
+    if not use_planner:
+        if hole_diams and thickness_in and drilling_rate > 0:
+            try:
+                estimator_hours = estimate_drilling_hours(
+                    hole_diams, float(thickness_in), str(material_text or "")
+                )
+            except Exception:
+                estimator_hours = 0.0
+            if not estimator_hours or estimator_hours <= 0:
+                hole_count = max(1, len(hole_diams))
+                avg_dia_in = sum(hole_diams) / hole_count / 25.4
+                estimator_hours = max(
+                    0.05, hole_count * max(avg_dia_in, 0.1) * float(thickness_in) / 600.0
+                )
+            bucket_view["drilling"] = {
+                "minutes": estimator_hours * 60.0,
+                "machine_cost": estimator_hours * drilling_rate,
+                "labor_cost": 0.0,
+            }
+            breakdown["drilling_meta"].update({"estimator_hours_for_planner": estimator_hours})
+            process_meta["drilling"] = {
+                "hr": estimator_hours,
+                "minutes": estimator_hours * 60.0,
+                "rate": drilling_rate,
+                "basis": ["planner_drilling_override"],
+            }
 
-    roughing_hours = _coerce_float_or_none(value_map.get("Roughing Cycle Time"))
-    if roughing_hours is None:
-        roughing_hours = _coerce_float_or_none(value_map.get("Roughing Cycle Time (hr)"))
-    milling_rate = _lookup_rate("MillingRate", rates, params, default_rates, fallback=100.0)
-    if roughing_hours and roughing_hours > 0:
-        bucket_view["milling"] = {
-            "minutes": roughing_hours * 60.0,
-            "machine_cost": roughing_hours * milling_rate,
-            "labor_cost": 0.0,
-        }
-        process_meta["milling"] = {
-            "hr": roughing_hours,
-            "minutes": roughing_hours * 60.0,
-            "rate": milling_rate,
-            "basis": ["planner_milling_backfill"],
-        }
+        roughing_hours = _coerce_float_or_none(value_map.get("Roughing Cycle Time"))
+        if roughing_hours is None:
+            roughing_hours = _coerce_float_or_none(value_map.get("Roughing Cycle Time (hr)"))
+        milling_rate = _lookup_rate("MillingRate", rates, params, default_rates, fallback=100.0)
+        if roughing_hours and roughing_hours > 0:
+            bucket_view["milling"] = {
+                "minutes": roughing_hours * 60.0,
+                "machine_cost": roughing_hours * milling_rate,
+                "labor_cost": 0.0,
+            }
+            process_meta["milling"] = {
+                "hr": roughing_hours,
+                "minutes": roughing_hours * 60.0,
+                "rate": milling_rate,
+                "basis": ["planner_milling_backfill"],
+            }
 
     project_hours = _coerce_float_or_none(value_map.get("Project Management Hours")) or 0.0
     toolmaker_hours = _coerce_float_or_none(value_map.get("Tool & Die Maker Hours")) or 0.0
@@ -8981,7 +9201,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         process_meta["project_management"] = {"hr": 0.0, "minutes": 0.0}
     if toolmaker_hours > 0:
         process_meta["toolmaker_support"] = {"hr": toolmaker_hours, "minutes": toolmaker_hours * 60.0}
-        process_costs["toolmaker_support"] = toolmaker_hours * toolmaker_rate
+        if not planner_used:
+            process_costs["toolmaker_support"] = toolmaker_hours * toolmaker_rate
 
     auto_prog_hr = 0.5 + 0.1 * len(hole_diams)
     if thickness_in:
@@ -9012,9 +9233,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         "app_meta": {"llm_debug_enabled": APP_ENV.llm_debug_enabled},
     }
 
-    if speeds_feeds_csv_path:
-        result["speeds_feeds_path"] = speeds_feeds_csv_path
-        result["speeds_feeds_loaded"] = bool(speeds_feeds_loaded)
+    if planner_used:
+        result.setdefault("app_meta", {})["used_planner"] = True
 
     return result
 

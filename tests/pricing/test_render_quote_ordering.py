@@ -814,6 +814,55 @@ def test_render_quote_displays_single_shipping_entry_and_reconciles_ladder() -> 
     assert ladder_total == 100.0
 
 
+def test_render_quote_final_price_tracks_pricing_ladder_math() -> None:
+    result = {
+        "price": 0.0,
+        "breakdown": {
+            "qty": 1,
+            "totals": {
+                "labor_cost": 40.0,
+                "direct_costs": 60.0,
+                "subtotal": 100.0,
+            },
+            "material": {},
+            "process_costs": {"milling": 40.0},
+            "process_meta": {"milling": {"hr": 1.0, "rate": 40.0}},
+            "pass_through": {"Material": 60.0},
+            "applied_pcts": {
+                "OverheadPct": 0.10,
+                "GA_Pct": 0.05,
+                "ContingencyPct": 0.02,
+                "ExpeditePct": 0.03,
+                "MarginPct": 0.15,
+            },
+            "rates": {},
+            "params": {},
+            "labor_cost_details": {},
+            "direct_cost_details": {},
+        },
+    }
+
+    rendered = appV5.render_quote(result, currency="$")
+    lines = rendered.splitlines()
+
+    def _extract_amount(prefix: str) -> float:
+        line = next(line for line in lines if line.startswith(prefix))
+        return float(line.split("$")[-1].replace(",", ""))
+
+    subtotal = _extract_amount("Subtotal (Labor + Directs):")
+    final_price_display = _extract_amount("Final Price with Margin")
+
+    expected = round(subtotal, 2)
+    for pct in (0.10, 0.05, 0.02, 0.03, 0.15):
+        expected = round(expected * (1.0 + pct), 2)
+
+    assert math.isclose(final_price_display, expected, abs_tol=0.01)
+    assert math.isclose(result["price"], expected, abs_tol=0.01)
+
+    totals = result["breakdown"]["totals"]
+    assert math.isclose(totals["with_margin"], expected, abs_tol=0.01)
+    assert math.isclose(totals["price"], expected, abs_tol=0.01)
+
 def test_render_quote_promotes_planner_pricing_source() -> None:
     result = {
         "price": 0.0,
