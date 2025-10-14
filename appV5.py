@@ -56,6 +56,8 @@ from cad_quoter.utils.render_utils import (
     format_hours,
     format_hours_with_rate,
     format_percent,
+    format_weight_lb_decimal,
+    format_weight_lb_oz,
     QuoteDocRecorder,
     render_quote_doc,
 )
