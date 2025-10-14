@@ -9445,12 +9445,20 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 break
 
     geom_for_bucketize = geo_payload if isinstance(geo_payload, dict) else {}
+    qty_for_bucketize: int
+    if isinstance(qty, (int, float)):
+        qty_for_bucketize = int(qty)
+        if qty_for_bucketize <= 0:
+            qty_for_bucketize = 1
+    else:
+        qty_for_bucketize = 1
+
     try:
         bucketized_raw = bucketize(
             planner_result if isinstance(planner_result, dict) else {},
             merged_two_bucket_rates,
             bucketize_nre,
-            qty=qty,
+            qty=qty_for_bucketize,
             geom=geom_for_bucketize,
         )
     except Exception:
