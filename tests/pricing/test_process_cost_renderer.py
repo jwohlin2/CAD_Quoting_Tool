@@ -21,6 +21,8 @@ def test_canonicalize_costs_groups_aliases_and_skips_planner_total() -> None:
         "Planner Machine": 300.0,
         "Planner Labor": 200.0,
         "Wire EDM": 7.0,
+        "Wire EDM Windows": 11.0,
+        "Sinker EDM Finish Burn": 13.0,
     }
 
     canon = canonicalize_costs(costs)
@@ -28,7 +30,8 @@ def test_canonicalize_costs_groups_aliases_and_skips_planner_total() -> None:
     assert canon["milling"] == pytest.approx(120.0)
     assert canon["finishing_deburr"] == pytest.approx(15.0)
     assert canon["misc"] == pytest.approx(500.0)
-    assert canon["wire_edm"] == pytest.approx(7.0)
+    assert canon["wire_edm"] == pytest.approx(18.0)
+    assert canon["sinker_edm"] == pytest.approx(13.0)
     assert "planner_total" not in canon
 
 
@@ -87,6 +90,24 @@ def test_render_process_costs_orders_rows_and_rates(monkeypatch: pytest.MonkeyPa
         assert row["cost"] == pytest.approx(expected_costs[label])
 
     assert all(label in ORDER for label in canonicalize_costs(process_costs))
+
+
+def test_render_process_costs_backfills_rate_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DEBUG_MISC", raising=False)
+
+    table = TableCollector()
+    process_costs = {"Wire EDM": 120.0}
+    minutes_detail = {"Wire EDM": 240.0}
+
+    total = render_process_costs(table, process_costs, rates={}, minutes_detail=minutes_detail)
+
+    assert total == pytest.approx(120.0)
+    assert len(table.rows) == 1
+    row = table.rows[0]
+    assert row["label"] == "Wire Edm"
+    assert row["hours"] == pytest.approx(4.0)
+    assert row["rate"] == pytest.approx(30.0)
+    assert row["cost"] == pytest.approx(120.0)
 
 
 def test_render_process_costs_hides_misc_even_when_significant(
