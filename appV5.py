@@ -6199,7 +6199,54 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         else:
             order = _preferred_order_then_alpha(buckets_map.keys())
 
+        def _collect_planner_bucket_entries() -> list[tuple[str, str, Mapping[str, Any]]]:
+            entries: list[tuple[str, str, Mapping[str, Any]]] = []
+            if isinstance(planner_bucket_view_map, _MappingABC):
+                buckets_struct = planner_bucket_view_map.get("buckets")
+                if isinstance(buckets_struct, _MappingABC):
+                    for raw_key, raw_info in buckets_struct.items():
+                        if not isinstance(raw_info, _MappingABC):
+                            continue
+                        key_text = str(raw_key)
+                        entries.append(
+                            (key_text, _canonical_bucket_key(key_text), raw_info)
+                        )
+                elif isinstance(buckets_struct, Sequence):
+                    for idx, raw_info in enumerate(buckets_struct):
+                        if not isinstance(raw_info, _MappingABC):
+                            continue
+                        key_candidate = (
+                            raw_info.get("key")
+                            or raw_info.get("label")
+                            or raw_info.get("name")
+                            or idx
+                        )
+                        key_text = str(key_candidate)
+                        entries.append(
+                            (key_text, _canonical_bucket_key(key_text), raw_info)
+                        )
+            if not entries:
+                for raw_key, raw_info in buckets_map.items():
+                    if not isinstance(raw_info, _MappingABC):
+                        continue
+                    key_text = str(raw_key)
+                    entries.append(
+                        (key_text, _canonical_bucket_key(key_text), raw_info)
+                    )
+            return entries
+
+        planner_bucket_entries = _collect_planner_bucket_entries()
+
         def _bucket_minutes_from_view(canon_key: str) -> float:
+            if not canon_key:
+                return 0.0
+            minutes_total = 0.0
+            for _, entry_canon, entry_info in planner_bucket_entries:
+                if entry_canon != canon_key:
+                    continue
+                minutes_total += _safe_float(entry_info.get("minutes"))
+            if minutes_total > 0.0:
+                return minutes_total
             info = buckets_map.get(canon_key)
             if not isinstance(info, _MappingABC):
                 return 0.0
@@ -6208,25 +6255,66 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         def _planner_rollup_hours_from_buckets() -> (
             tuple[float, float, float] | None
         ):
-            if not buckets_map:
+            if not planner_bucket_entries:
                 return None
 
             pl_machine_hr = 0.0
             pl_labor_hr = 0.0
             has_minutes = False
 
-            for key, info in buckets_map.items():
-                if not isinstance(info, _MappingABC):
-                    continue
+            for raw_key, canon_key, info in planner_bucket_entries:
                 minutes_val = _safe_float(info.get("minutes"))
                 if minutes_val <= 0.0:
                     continue
                 has_minutes = True
                 hr_val = minutes_val / 60.0
-                if _norm(key) in LABORISH:
-                    pl_labor_hr += hr_val
-                else:
-                    pl_machine_hr += hr_val
+
+                total_cost = _bucket_cost(info, "total$", "total_cost", "total")
+                machine_cost = max(0.0, _bucket_cost(info, "machine$", "machine_cost"))
+                labor_cost = max(0.0, _bucket_cost(info, "labor$", "labor_cost"))
+
+                machine_hours = 0.0
+                labor_hours = 0.0
+                allocated = False
+
+                if hr_val > 0.0 and total_cost > 0.0:
+                    try:
+                        rate_val = total_cost / hr_val
+                    except Exception:
+                        rate_val = 0.0
+                    if rate_val > 0.0:
+                        if machine_cost > 0.0:
+                            machine_hours = machine_cost / rate_val
+                        if labor_cost > 0.0:
+                            labor_hours = labor_cost / rate_val
+                        if machine_hours > 0.0 or labor_hours > 0.0:
+                            allocated = True
+                            total_allocated = machine_hours + labor_hours
+                            remainder = hr_val - total_allocated
+                            if remainder > 1e-6:
+                                if machine_hours > 0.0 and labor_hours > 0.0:
+                                    total_positive = machine_hours + labor_hours
+                                    if total_positive > 0.0:
+                                        machine_hours += remainder * (
+                                            machine_hours / total_positive
+                                        )
+                                        labor_hours += remainder * (
+                                            labor_hours / total_positive
+                                        )
+                                elif machine_hours > 0.0:
+                                    machine_hours += remainder
+                                elif labor_hours > 0.0:
+                                    labor_hours += remainder
+
+                if not allocated:
+                    laborish_key = _norm(canon_key or raw_key)
+                    if laborish_key in LABORISH:
+                        labor_hours = hr_val
+                    else:
+                        machine_hours = hr_val
+
+                pl_machine_hr += machine_hours
+                pl_labor_hr += labor_hours
 
             if not has_minutes:
                 return None
@@ -6367,59 +6455,32 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if isinstance(planner_bucket_view, _MappingABC)
             else None
         )
-        planner_total_minutes = _safe_float(
-            totals_map.get("minutes") if isinstance(totals_map, _MappingABC) else 0.0
-        )
+        planner_total_minutes = 0.0
+        if planner_bucket_entries:
+            planner_total_minutes = sum(
+                _safe_float(entry_info.get("minutes"))
+                for _, _, entry_info in planner_bucket_entries
+            )
         if planner_total_minutes <= 0:
-            try:
-                planner_total_minutes = sum(
-                    _bucket_minutes_from_view(key) for key in buckets_map.keys()
-                )
-            except Exception:
-                planner_total_minutes = 0.0
+            planner_total_minutes = _safe_float(
+                totals_map.get("minutes") if isinstance(totals_map, _MappingABC) else 0.0
+            )
         if planner_total_minutes > 0 and not planner_rollup_hours_ready:
             planner_total_hr = planner_total_minutes / 60.0
 
-        if not planner_rollup_hours_ready and isinstance(planner_bucket_view_map, _MappingABC):
-            try:
-                bview = planner_bucket_view_map
-                buckets_data = bview.get("buckets") if isinstance(bview, _MappingABC) else None
-                if isinstance(buckets_data, _MappingABC):
-                    def _n(s: Any) -> str:
-                        import re as _re
-
-                        return _re.sub(r"[^a-z0-9]+", "_", str(s).lower()).strip("_")
-
-                    LABORISH = {
-                        "finishing_deburr",
-                        "inspection",
-                        "assembly",
-                        "toolmaker_support",
-                        "ehs_compliance",
-                        "fixture_build_amortized",
-                        "programming_amortized",
-                    }
-
-                    pl_machine_hr = 0.0
-                    pl_labor_hr = 0.0
-                    for key, info in buckets_data.items():
-                        if not isinstance(info, _MappingABC):
-                            continue
-                        try:
-                            hr = float(info.get("minutes", 0.0) or 0.0) / 60.0
-                        except Exception:
-                            continue
-                        if _n(key) in LABORISH:
-                            pl_labor_hr += hr
-                        else:
-                            pl_machine_hr += hr
-
-                    planner_labor_hr = pl_labor_hr
-                    planner_machine_hr = pl_machine_hr
-                    planner_total_hr = round(pl_labor_hr + pl_machine_hr, 2)
-                    planner_rollup_hours_ready = True
-            except Exception:
-                pass
+        if not planner_rollup_hours_ready and planner_bucket_entries:
+            fallback_rollup = _planner_rollup_hours_from_buckets()
+            if fallback_rollup is not None:
+                (
+                    fallback_total_hr,
+                    fallback_labor_hr,
+                    fallback_machine_hr,
+                ) = fallback_rollup
+                if fallback_total_hr > 0.0:
+                    planner_total_hr = fallback_total_hr
+                planner_labor_hr = fallback_labor_hr
+                planner_machine_hr = fallback_machine_hr
+                planner_rollup_hours_ready = True
 
         if not planner_rollup_hours_ready:
             derived_rollup = _derive_planner_rollup_hours_from_summary(planner_total_hr)
