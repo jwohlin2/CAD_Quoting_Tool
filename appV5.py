@@ -6137,6 +6137,48 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 return 0.0
             return _safe_float(info.get("minutes"))
 
+        def _planner_rollup_hours_from_buckets() -> (
+            tuple[float, float, float] | None
+        ):
+            if not buckets_map:
+                return None
+
+            pl_machine_hr = 0.0
+            pl_labor_hr = 0.0
+            has_minutes = False
+
+            for key, info in buckets_map.items():
+                if not isinstance(info, _MappingABC):
+                    continue
+                minutes_val = _safe_float(info.get("minutes"))
+                if minutes_val <= 0.0:
+                    continue
+                has_minutes = True
+                hr_val = minutes_val / 60.0
+                if _norm(key) in LABORISH:
+                    pl_labor_hr += hr_val
+                else:
+                    pl_machine_hr += hr_val
+
+            if not has_minutes:
+                return None
+
+            planner_total_hr = pl_labor_hr + pl_machine_hr
+            return planner_total_hr, pl_labor_hr, pl_machine_hr
+
+        bucket_rollup = _planner_rollup_hours_from_buckets()
+        if bucket_rollup is not None:
+            (
+                bucket_total_hr,
+                bucket_labor_hr,
+                bucket_machine_hr,
+            ) = bucket_rollup
+            if bucket_total_hr > 0.0:
+                planner_total_hr = bucket_total_hr
+            planner_labor_hr = bucket_labor_hr
+            planner_machine_hr = bucket_machine_hr
+            planner_rollup_hours_ready = True
+
         def _hours_from_view(canon_key: str) -> float:
             summary = canonical_bucket_summary.get(canon_key)
             if isinstance(summary, dict):
@@ -6267,17 +6309,16 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 )
             except Exception:
                 planner_total_minutes = 0.0
-        if planner_total_minutes > 0:
+        if planner_total_minutes > 0 and not planner_rollup_hours_ready:
             planner_total_hr = planner_total_minutes / 60.0
 
-        derived_rollup = _derive_planner_rollup_hours_from_summary(planner_total_hr)
-        if derived_rollup is not None:
-            derived_labor_hr, derived_machine_hr = derived_rollup
-            planner_labor_hr = derived_labor_hr
-            planner_machine_hr = derived_machine_hr
-            planner_rollup_hours_ready = True
-        else:
-            planner_rollup_hours_ready = False
+        if not planner_rollup_hours_ready:
+            derived_rollup = _derive_planner_rollup_hours_from_summary(planner_total_hr)
+            if derived_rollup is not None:
+                derived_labor_hr, derived_machine_hr = derived_rollup
+                planner_labor_hr = derived_labor_hr
+                planner_machine_hr = derived_machine_hr
+                planner_rollup_hours_ready = True
 
         _emit_hour_row("Planner Total", round(planner_total_hr, 2))
         if planner_rollup_hours_ready:
