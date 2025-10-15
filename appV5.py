@@ -25,7 +25,11 @@ import time
 import typing
 from typing import Any
 from collections import Counter
-from collections.abc import Iterator, Mapping as _MappingABC, MutableMapping as _MutableMappingABC
+from collections.abc import (
+    Iterator,
+    Mapping as _MappingABC,
+    MutableMapping as _MutableMappingABC,
+)
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
@@ -8225,6 +8229,204 @@ def _collect_fallback_hole_totals(
     return totals
 
 
+def bin_diams_mm(values: Iterable[Any], *, precision: int = 3) -> list[tuple[float, int]]:
+    """Group hole diameters (mm) into rounded bins with counts."""
+
+    counts: Counter[float] = Counter()
+    if not values:
+        return []
+    for raw in values:
+        try:
+            numeric = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(numeric) or numeric <= 0:
+            continue
+        key = round(numeric, precision)
+        counts[key] += 1
+    return [(float(key), int(count)) for key, count in sorted(counts.items())]
+
+
+def _fallback_drilling_groups_from_geometry(
+    hole_diams_mm: Iterable[Any],
+    *,
+    thickness_in: float | None,
+    ld_threshold: float = 3.0,
+) -> list[dict[str, Any]]:
+    """Build simple drilling groups when planner metadata is missing."""
+
+    bins = bin_diams_mm(hole_diams_mm)
+    if not bins:
+        return []
+
+    thickness_val: float | None = None
+    if thickness_in is not None:
+        try:
+            candidate = float(thickness_in)
+        except (TypeError, ValueError):
+            candidate = None
+        if candidate is not None and math.isfinite(candidate) and candidate > 0:
+            thickness_val = candidate
+
+    groups: list[dict[str, Any]] = []
+    for dia_mm, qty in bins:
+        if qty <= 0:
+            continue
+        try:
+            dia_in = float(dia_mm) / 25.4
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(dia_in) or dia_in <= 0:
+            continue
+        breakthrough_in = max(0.04, 0.2 * dia_in)
+        depth_in = max(dia_in + breakthrough_in, 0.1)
+        ld_ratio = depth_in / max(dia_in, 1e-6)
+        is_deep = False
+        if thickness_val is not None:
+            ld_ratio = thickness_val / max(dia_in, 1e-6)
+            is_deep = ld_ratio >= ld_threshold
+            depth_in = thickness_val + breakthrough_in
+
+        op_name = "deep_drill" if is_deep else "drill"
+        sfm = 39.0 if is_deep else 80.0
+        ipr = 0.0020 if is_deep else 0.0060
+        rpm = (sfm * 12.0) / (math.pi * dia_in) if dia_in > 0 else 0.0
+        ipm = rpm * ipr if rpm > 0 and ipr > 0 else 0.0
+        groups.append(
+            {
+                "op": op_name,
+                "op_name": op_name,
+                "qty": int(qty),
+                "diameter_mm": float(dia_mm),
+                "diameter_in": float(round(dia_in, 6)),
+                "depth_in": float(round(depth_in, 6)),
+                "sfm": float(sfm),
+                "ipr": float(ipr),
+                "rpm": float(round(rpm, 2)) if rpm > 0 else None,
+                "ipm": float(round(ipm, 3)) if ipm > 0 else None,
+                "ld_ratio": float(round(ld_ratio, 3)) if math.isfinite(ld_ratio) else None,
+            }
+        )
+
+    groups.sort(
+        key=lambda item: (
+            0
+            if str(item.get("op") or "").strip().lower().startswith("deep")
+            else 1,
+            _safe_float(item.get("diameter_in")),
+        )
+    )
+    return groups
+
+
+def _apply_drilling_meta_fallback(
+    drilling_meta: _MutableMappingABC[str, Any],
+    groups: Sequence[Mapping[str, Any]],
+) -> tuple[int, int]:
+    """Populate ``drilling_meta`` bins from fallback groups."""
+
+    bins_list: list[dict[str, Any]] = []
+    dia_vals_in: list[float] = []
+    depth_vals_in: list[float] = []
+    rpm_deep_vals: list[float] = []
+    rpm_std_vals: list[float] = []
+    ipm_deep_vals: list[float] = []
+    ipm_std_vals: list[float] = []
+    ipr_deep_vals: list[float] = []
+    holes_deep = 0
+    holes_std = 0
+
+    for group in groups:
+        op = str(group.get("op") or group.get("op_name") or "drill").strip()
+        qty = int(group.get("qty") or 0)
+        diameter_in = _safe_float(group.get("diameter_in"))
+        depth_in = _safe_float(group.get("depth_in"))
+        sfm_val = _safe_float(group.get("sfm"))
+        ipr_val = _safe_float(group.get("ipr"))
+        rpm_val = _safe_float(group.get("rpm"))
+        ipm_val = _safe_float(group.get("ipm"))
+
+        entry = {
+            "op": op or "drill",
+            "op_name": group.get("op_name") or op or "drill",
+            "diameter_in": diameter_in if diameter_in > 0 else None,
+            "depth_in": depth_in if depth_in > 0 else None,
+            "qty": qty,
+            "sfm": sfm_val if sfm_val > 0 else None,
+            "ipr": ipr_val if ipr_val > 0 else None,
+            "rpm": rpm_val if rpm_val > 0 else None,
+            "ipm": ipm_val if ipm_val > 0 else None,
+        }
+        bins_list.append(entry)
+
+        if diameter_in > 0:
+            dia_vals_in.append(diameter_in)
+        if depth_in > 0:
+            depth_vals_in.append(depth_in)
+
+        if op.lower().startswith("deep"):
+            holes_deep += qty
+            if ipr_val > 0:
+                ipr_deep_vals.append(ipr_val)
+            if rpm_val > 0:
+                rpm_deep_vals.append(rpm_val)
+            if ipm_val > 0:
+                ipm_deep_vals.append(ipm_val)
+        else:
+            holes_std += qty
+            if rpm_val > 0:
+                rpm_std_vals.append(rpm_val)
+            if ipm_val > 0:
+                ipm_std_vals.append(ipm_val)
+
+    bins_list.sort(
+        key=lambda item: (
+            0
+            if str(item.get("op") or "").strip().lower().startswith("deep")
+            else 1,
+            _safe_float(item.get("diameter_in")),
+        )
+    )
+
+    drilling_meta["bins_list"] = bins_list
+    drilling_meta["holes_deep"] = holes_deep
+    drilling_meta["holes_std"] = holes_std
+    if dia_vals_in:
+        drilling_meta["dia_in_vals"] = dia_vals_in
+    if depth_vals_in:
+        drilling_meta["depth_in_vals"] = depth_vals_in
+
+    drilling_meta.setdefault("sfm_deep", 39.0)
+    drilling_meta.setdefault("sfm_std", 80.0)
+    drilling_meta.setdefault(
+        "ipr_deep_vals",
+        ipr_deep_vals if ipr_deep_vals else [0.0006, 0.0025],
+    )
+    drilling_meta.setdefault("ipr_std_val", 0.0060)
+    drilling_meta.setdefault(
+        "rpm_deep_vals",
+        rpm_deep_vals if rpm_deep_vals else [238.0, 1194.0],
+    )
+    drilling_meta.setdefault(
+        "rpm_std_vals",
+        rpm_std_vals if rpm_std_vals else [169.0, 407.0],
+    )
+    drilling_meta.setdefault(
+        "ipm_deep_vals",
+        ipm_deep_vals if ipm_deep_vals else [0.5, 1.0],
+    )
+    drilling_meta.setdefault(
+        "ipm_std_vals",
+        ipm_std_vals if ipm_std_vals else [1.0, 2.4],
+    )
+    drilling_meta.setdefault("index_min_per_hole", 0.13)
+    drilling_meta.setdefault("peck_min_per_hole_vals", [0.07, 0.08])
+    drilling_meta.setdefault("toolchange_min_deep", 8.00)
+    drilling_meta.setdefault("toolchange_min_std", 2.50)
+
+    return holes_deep, holes_std
+
+
 def _normalize_hole_sets_for_geo(geo_context: Mapping[str, Any] | None) -> list[dict[str, Any]]:
     structured = _collect_structured_hole_totals(geo_context)
     totals = structured if structured else _collect_fallback_hole_totals(geo_context)
@@ -10772,22 +10974,47 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                             if entry.get("depth_in") is not None
                         ]
 
-        roughing_hours = _coerce_float_or_none(value_map.get("Roughing Cycle Time"))
-        if roughing_hours is None:
-            roughing_hours = _coerce_float_or_none(value_map.get("Roughing Cycle Time (hr)"))
-        milling_rate = _lookup_rate("MillingRate", rates, params, default_rates, fallback=100.0)
-        if roughing_hours and roughing_hours > 0:
-            bucket_view["milling"] = {
-                "minutes": roughing_hours * 60.0,
-                "machine_cost": roughing_hours * milling_rate,
-                "labor_cost": 0.0,
-            }
-            process_meta["milling"] = {
-                "hr": roughing_hours,
-                "minutes": roughing_hours * 60.0,
-                "rate": milling_rate,
-                "basis": ["planner_milling_backfill"],
-            }
+    if planner_used:
+        drilling_summary_raw = process_plan_summary.get("drilling")
+        if isinstance(drilling_summary_raw, dict):
+            drilling_summary = drilling_summary_raw
+        else:
+            drilling_summary = process_plan_summary.setdefault("drilling", {})
+
+        groups_existing = drilling_summary.get("groups")
+        has_groups = False
+        if isinstance(groups_existing, Sequence) and not isinstance(groups_existing, (str, bytes)):
+            has_groups = bool(groups_existing)
+        if not has_groups:
+            fallback_groups = _fallback_drilling_groups_from_geometry(
+                hole_diams,
+                thickness_in=thickness_in,
+            )
+            if fallback_groups:
+                drilling_summary["groups"] = fallback_groups
+                holes_deep, holes_std = _apply_drilling_meta_fallback(
+                    drilling_meta_container,
+                    fallback_groups,
+                )
+                drilling_summary["holes_deep"] = holes_deep
+                drilling_summary["holes_std"] = holes_std
+
+    roughing_hours = _coerce_float_or_none(value_map.get("Roughing Cycle Time"))
+    if roughing_hours is None:
+        roughing_hours = _coerce_float_or_none(value_map.get("Roughing Cycle Time (hr)"))
+    milling_rate = _lookup_rate("MillingRate", rates, params, default_rates, fallback=100.0)
+    if roughing_hours and roughing_hours > 0:
+        bucket_view["milling"] = {
+            "minutes": roughing_hours * 60.0,
+            "machine_cost": roughing_hours * milling_rate,
+            "labor_cost": 0.0,
+        }
+        process_meta["milling"] = {
+            "hr": roughing_hours,
+            "minutes": roughing_hours * 60.0,
+            "rate": milling_rate,
+            "basis": ["planner_milling_backfill"],
+        }
 
     if planner_used:
         process_costs.clear()
