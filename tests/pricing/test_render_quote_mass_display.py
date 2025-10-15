@@ -348,6 +348,21 @@ def test_render_quote_hides_amortized_nre_for_single_qty() -> None:
     assert "Fixturing:" in rendered
 
 
+def test_render_quote_uses_programming_per_part_for_single_qty() -> None:
+    breakdown = _amortized_breakdown(1)
+    breakdown["nre_detail"]["programming"]["per_lot"] = 0.0
+    breakdown["nre"]["programming_per_part"] = 1462.0
+
+    result = {"price": 10.0, "breakdown": breakdown}
+
+    rendered = appV5.render_quote(result, currency="$", show_zeros=False)
+
+    programming_line = next(
+        line for line in rendered.splitlines() if "Programming & Eng:" in line
+    )
+    assert "$1,462.00" in programming_line
+
+
 def test_render_quote_skips_amortized_labor_totals_for_single_qty() -> None:
     breakdown = _amortized_breakdown(1)
     breakdown["labor_costs"] = {
