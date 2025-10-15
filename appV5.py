@@ -361,6 +361,29 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
     return coerced
 
+
+def _ensure_list(value: Any, fallback: Iterable[Any] | None = None) -> list[Any]:
+    """Return ``value`` coerced to a list with an optional fallback."""
+
+    if isinstance(value, list):
+        return value
+    if value is None:
+        return list(fallback) if fallback is not None else []
+    if isinstance(value, (tuple, set)):
+        return list(value)
+    if isinstance(value, dict):
+        return list(value.values())
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped:
+            return [stripped]
+        return list(fallback) if fallback is not None else []
+    try:
+        return list(value)
+    except Exception:
+        return list(fallback) if fallback is not None else []
+
+
 def _compute_direct_costs(
     material_total: float | int | str | None,
     scrap_credit: float | int | str | None,
