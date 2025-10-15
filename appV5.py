@@ -5328,6 +5328,16 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 row("Total Material Cost :", total_material_cost, indent="  ")
             append_line("")
 
+    rates.setdefault("LaborRate", 85.0)
+    rates.setdefault(
+        "ProgrammingRate", float(rates.get("ProgrammerRate") or rates["LaborRate"])
+    )
+
+    nre = breakdown.setdefault("nre", {})
+    prog_hr = float(nre.get("programming_hr") or 0.0)
+    if prog_hr > 0 and float(nre.get("programming_cost") or 0.0) == 0.0:
+        nre["programming_cost"] = round(prog_hr * rates["ProgrammingRate"], 2)
+
     # ---- NRE / Setup costs ---------------------------------------------------
     append_line("NRE / Setup Costs (per lot)")
     append_line(divider)
