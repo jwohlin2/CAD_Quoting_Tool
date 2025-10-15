@@ -3033,9 +3033,10 @@ def _build_planner_bucket_render_state(
 ) -> PlannerBucketRenderState:
     state = PlannerBucketRenderState()
 
-    state.process_costs_for_render = (
-        dict(process_costs_canon) if isinstance(process_costs_canon, _MappingABC) else {}
-    )
+    # The canonical bucket view is the single source of truth for the Process & Labor table.
+    # Start with an empty structure and allow the canonical buckets to populate it below,
+    # preventing any stale entries from ``process_costs`` from sneaking into the render.
+    state.process_costs_for_render = {}
 
     if not isinstance(bucket_view, _MappingABC):
         return state
@@ -5327,6 +5328,16 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 row("Total Material Cost :", total_material_cost, indent="  ")
             append_line("")
 
+    rates.setdefault("LaborRate", 85.0)
+    rates.setdefault(
+        "ProgrammingRate", float(rates.get("ProgrammerRate") or rates["LaborRate"])
+    )
+
+    nre = breakdown.setdefault("nre", {})
+    prog_hr = float(nre.get("programming_hr") or 0.0)
+    if prog_hr > 0 and float(nre.get("programming_cost") or 0.0) == 0.0:
+        nre["programming_cost"] = round(prog_hr * rates["ProgrammingRate"], 2)
+
     # ---- NRE / Setup costs ---------------------------------------------------
     append_line("NRE / Setup Costs (per lot)")
     append_line(divider)
@@ -5541,7 +5552,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         bucket_view_candidates.append(breakdown.get("bucket_view"))
     if bucket_rollup_map:
         bucket_view_candidates.append({"buckets": bucket_rollup_map})
-
     for candidate in bucket_view_candidates:
         prepared = _prepare_bucket_view_candidate(candidate)
         if prepared is None:
@@ -5611,11 +5621,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         )
 
         assert (
-            abs(display_labor_from_rows - planner_labor_total) < 0.51
-        ), "Labor $ mismatch with planner totals"
-        assert (
             abs(display_machine_from_rows - planner_machine_total) < 0.51
-        ), "Machine $ mismatch with planner totals"
+        ), "Machine $ mismatch (check drilling minutes merge)"
+        assert (
+            abs(display_labor_from_rows - planner_labor_total) < 0.51
+        ), "Labor $ mismatch"
     detail_lookup.update(bucket_state.detail_lookup)
     label_to_canon.update(bucket_state.label_to_canon)
     canon_to_display_label.update(bucket_state.canon_to_display_label)
@@ -5628,6 +5638,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         display_machine = bucket_state.display_machine_total
     hour_summary_entries.update(bucket_state.hour_entries)
     bucket_minutes_detail = dict(bucket_state.bucket_minutes_detail)
+    extra_bucket_minutes_detail = breakdown.get("bucket_minutes_detail")
+    if isinstance(extra_bucket_minutes_detail, _MappingABC):
+        for key, minutes in extra_bucket_minutes_detail.items():
+            bucket_minutes_detail[key] = _safe_float(minutes)
     process_costs_for_render = dict(bucket_state.process_costs_for_render)
 
     proc_total = 0.0
@@ -5836,23 +5850,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         label = _display_bucket_label(canon_key, label_overrides)
         label_to_canon.setdefault(label, canon_key)
         canon_to_display_label.setdefault(canon_key, label)
-
-    for label, amount in labor_cost_totals.items():
-        if _should_hide_amortized(label):
-            continue
-        try:
-            amount_val = float(amount or 0.0)
-        except Exception:
-            amount_val = 0.0
-        if not ((amount_val > 0.0) or show_zeros):
-            continue
-        canon_key = _canonical_bucket_key(label)
-        if not canon_key:
-            continue
-        process_costs_for_render[canon_key] = amount_val
-        display_label = str(label)
-        canon_to_display_label[canon_key] = display_label
-        label_to_canon[display_label] = canon_key
 
     for canon_key in process_costs_for_render:
         label = _display_bucket_label(canon_key, label_overrides)
@@ -6137,6 +6134,48 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 return 0.0
             return _safe_float(info.get("minutes"))
 
+        def _planner_rollup_hours_from_buckets() -> (
+            tuple[float, float, float] | None
+        ):
+            if not buckets_map:
+                return None
+
+            pl_machine_hr = 0.0
+            pl_labor_hr = 0.0
+            has_minutes = False
+
+            for key, info in buckets_map.items():
+                if not isinstance(info, _MappingABC):
+                    continue
+                minutes_val = _safe_float(info.get("minutes"))
+                if minutes_val <= 0.0:
+                    continue
+                has_minutes = True
+                hr_val = minutes_val / 60.0
+                if _norm(key) in LABORISH:
+                    pl_labor_hr += hr_val
+                else:
+                    pl_machine_hr += hr_val
+
+            if not has_minutes:
+                return None
+
+            planner_total_hr = pl_labor_hr + pl_machine_hr
+            return planner_total_hr, pl_labor_hr, pl_machine_hr
+
+        bucket_rollup = _planner_rollup_hours_from_buckets()
+        if bucket_rollup is not None:
+            (
+                bucket_total_hr,
+                bucket_labor_hr,
+                bucket_machine_hr,
+            ) = bucket_rollup
+            if bucket_total_hr > 0.0:
+                planner_total_hr = bucket_total_hr
+            planner_labor_hr = bucket_labor_hr
+            planner_machine_hr = bucket_machine_hr
+            planner_rollup_hours_ready = True
+
         def _hours_from_view(canon_key: str) -> float:
             summary = canonical_bucket_summary.get(canon_key)
             if isinstance(summary, dict):
@@ -6267,17 +6306,57 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 )
             except Exception:
                 planner_total_minutes = 0.0
-        if planner_total_minutes > 0:
+        if planner_total_minutes > 0 and not planner_rollup_hours_ready:
             planner_total_hr = planner_total_minutes / 60.0
 
-        derived_rollup = _derive_planner_rollup_hours_from_summary(planner_total_hr)
-        if derived_rollup is not None:
-            derived_labor_hr, derived_machine_hr = derived_rollup
-            planner_labor_hr = derived_labor_hr
-            planner_machine_hr = derived_machine_hr
-            planner_rollup_hours_ready = True
-        else:
-            planner_rollup_hours_ready = False
+        if not planner_rollup_hours_ready and isinstance(planner_bucket_view_map, _MappingABC):
+            try:
+                bview = planner_bucket_view_map
+                buckets_data = bview.get("buckets") if isinstance(bview, _MappingABC) else None
+                if isinstance(buckets_data, _MappingABC):
+                    def _n(s: Any) -> str:
+                        import re as _re
+
+                        return _re.sub(r"[^a-z0-9]+", "_", str(s).lower()).strip("_")
+
+                    LABORISH = {
+                        "finishing_deburr",
+                        "inspection",
+                        "assembly",
+                        "toolmaker_support",
+                        "ehs_compliance",
+                        "fixture_build_amortized",
+                        "programming_amortized",
+                    }
+
+                    pl_machine_hr = 0.0
+                    pl_labor_hr = 0.0
+                    for key, info in buckets_data.items():
+                        if not isinstance(info, _MappingABC):
+                            continue
+                        try:
+                            hr = float(info.get("minutes", 0.0) or 0.0) / 60.0
+                        except Exception:
+                            continue
+                        if _n(key) in LABORISH:
+                            pl_labor_hr += hr
+                        else:
+                            pl_machine_hr += hr
+
+                    planner_labor_hr = pl_labor_hr
+                    planner_machine_hr = pl_machine_hr
+                    planner_total_hr = round(pl_labor_hr + pl_machine_hr, 2)
+                    planner_rollup_hours_ready = True
+            except Exception:
+                pass
+
+        if not planner_rollup_hours_ready:
+            derived_rollup = _derive_planner_rollup_hours_from_summary(planner_total_hr)
+            if derived_rollup is not None:
+                derived_labor_hr, derived_machine_hr = derived_rollup
+                planner_labor_hr = derived_labor_hr
+                planner_machine_hr = derived_machine_hr
+                planner_rollup_hours_ready = True
 
         _emit_hour_row("Planner Total", round(planner_total_hr, 2))
         if planner_rollup_hours_ready:
@@ -10547,6 +10626,36 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     geo_payload: dict[str, Any] = geo_context
     state = _ensure_quote_state(quote_state)
 
+    default_material_display = DEFAULT_MATERIAL_DISPLAY
+    raw_material_display = str(
+        geo_context.get("material")
+        or value_map.get("Material Name")
+        or value_map.get("Material")
+        or ""
+    ).strip()
+    material_key_source = raw_material_display or default_material_display
+    material_key = normalize_material_key(material_key_source)
+    fallback_display = MATERIAL_DISPLAY_BY_KEY.get(material_key, "")
+    material_display = raw_material_display or fallback_display or default_material_display
+    geo_context["material"] = material_display
+    geo_context.setdefault("material_display", material_display)
+    geo_context.setdefault("material_name", geo_context.get("material_name") or material_display)
+    geo_context["material_key"] = material_key
+    geo_context["material_lookup"] = material_key
+    raw_material_group = str(
+        geo_context.get("material_group")
+        or geo_context.get("material_family")
+        or value_map.get("Material Group")
+        or ""
+    ).strip()
+    material_group_display: str | None = raw_material_group or None
+    if material_group_display:
+        geo_context.setdefault("material_group", material_group_display)
+    planner_inputs["material"] = material_display
+    planner_inputs.setdefault("material_key", material_key)
+    if material_group_display:
+        planner_inputs.setdefault("material_group", material_group_display)
+
     speeds_feeds_csv_path = _coerce_speeds_feeds_csv_path(
         planner_inputs,
         params,
@@ -10566,36 +10675,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         planner_inputs.setdefault("speeds_feeds_loaded", bool(speeds_feeds_loaded))
 
     qty = _coerce_float_or_none(value_map.get("Qty")) or 1.0
-
-    material_candidates = (
-        geo_context.get("material"),
-        geo_context.get("material_name"),
-        value_map.get("Material Name"),
-        value_map.get("Material"),
-    )
-    material_text_clean: str | None = None
-    for candidate in material_candidates:
-        cleaned = _material_text_or_none(candidate)
-        if cleaned:
-            material_text_clean = cleaned
-            break
-
-    if material_text_clean:
-        geo_context["material"] = material_text_clean
-        geo_context.setdefault("material_name", material_text_clean)
-    else:
-        geo_context.pop("material", None)
-        geo_context.pop("material_name", None)
-
-    material_text = material_text_clean or ""
-    material_key = normalize_material_key(material_text or "Aluminum 6061-T6")
-    geo_context["material_key"] = material_key
-
-    planner_material = geo_context.get("material") or "Aluminum 6061-T6"
-    planner_inputs["material"] = planner_material
-    planner_inputs.setdefault("material_key", material_key)
-
-    state.ui_vars = dict(planner_inputs)
+    material_text = material_display
 
     scrap_value = value_map.get("Scrap Percent (%)")
     normalized_scrap = normalize_scrap_pct(scrap_value)
@@ -10724,6 +10804,11 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
 
     drill_params: dict[str, Any] = baseline.setdefault("drill_params", {})
     drill_params["material"] = material_key
+    drill_params.setdefault("material_key", material_key)
+    if material_display:
+        drill_params.setdefault("material_display", material_display)
+    if material_group_display:
+        drill_params.setdefault("material_group", material_group_display)
 
     geo_derived = dict(geo_payload.get("derived", {})) if isinstance(geo_payload, dict) else {}
     geo_derived.setdefault("fai_required", bool(fai_required))
@@ -10797,6 +10882,11 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         "totals": totals_block,
     }
     breakdown["geo_context"] = geo_context if isinstance(geo_context, dict) else {}
+
+    bucket_minutes_detail_for_render = breakdown.setdefault("bucket_minutes_detail", {})
+    if not isinstance(bucket_minutes_detail_for_render, dict):
+        bucket_minutes_detail_for_render = {}
+        breakdown["bucket_minutes_detail"] = bucket_minutes_detail_for_render
 
     family = None
     if isinstance(geo_payload, _MappingABC):
@@ -11145,11 +11235,13 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     drill_total_minutes: float | None = None
     drilling_meta_container = breakdown.setdefault("drilling_meta", {})
     if isinstance(drilling_meta_container, dict):
-        display_material = material_text or planner_material
-        if display_material:
-            drilling_meta_container.setdefault("material_display", display_material)
-        drilling_meta_container["material"] = planner_material
-        drilling_meta_container.setdefault("material_key", material_key)
+        if material_display:
+            drilling_meta_container["material_display"] = material_display
+            drilling_meta_container["material"] = material_display
+        drilling_meta_container["material_key"] = material_key
+        drilling_meta_container["material_lookup"] = material_key
+        if material_group_display:
+            drilling_meta_container["material_group"] = material_group_display
     if not use_planner:
         if hole_diams and thickness_in and drilling_rate > 0:
             drill_debug_lines: list[str] = []
@@ -11167,9 +11259,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 estimator_hours = estimate_drilling_hours(
                     hole_diams,
                     float(thickness_in),
-                    str(material_text or ""),
+                    material_key,
                     hole_groups=hole_groups_for_estimate,
-                    material_group=group_material_breakdown or None,
+                    material_group=material_group_display,
                     speeds_feeds_table=speeds_feeds_table,
                     debug_lines=drill_debug_lines,
                     debug_summary=drill_debug_summary,
@@ -11325,6 +11417,46 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         drilling_meta_container["bins_list"] = fallback_groups
         drilling_meta_container["hole_count"] = fallback_hole_count
 
+    if drill_total_minutes and drill_total_minutes > 0.0:
+        bucket_view_summary = process_plan_summary.get("bucket_view")
+        if not isinstance(bucket_view_summary, dict):
+            bucket_view_summary = {"buckets": {}, "order": []}
+            process_plan_summary["bucket_view"] = bucket_view_summary
+        buckets_map = bucket_view_summary.get("buckets")
+        if not isinstance(buckets_map, dict):
+            buckets_map = {}
+            bucket_view_summary["buckets"] = buckets_map
+        bucket_entry = buckets_map.get("drilling")
+        if not isinstance(bucket_entry, dict):
+            bucket_entry = {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0}
+            buckets_map["drilling"] = bucket_entry
+        bucket_entry["minutes"] = float(drill_total_minutes)
+        rates_map = rates if isinstance(rates, _MappingABC) else {}
+        drill_rate_val = _safe_float(rates_map.get("DrillingRate"))
+        if drill_rate_val <= 0.0:
+            drill_rate_val = _safe_float(rates_map.get("drillingrate"))
+        if drill_rate_val <= 0.0:
+            drill_rate_val = _safe_float(rates_map.get("MachineRate"))
+        if drill_rate_val <= 0.0:
+            drill_rate_val = _safe_float(rates_map.get("machinerate"))
+        if drill_rate_val <= 0.0:
+            drill_rate_val = float(drilling_rate)
+        bucket_entry.setdefault("labor$", 0.0)
+        machine_cost_val = 0.0
+        if drill_rate_val > 0.0:
+            machine_cost_val = (bucket_entry["minutes"] / 60.0) * drill_rate_val
+        bucket_entry["machine$"] = round(machine_cost_val, 2)
+        bucket_entry["total$"] = round(
+            _safe_float(bucket_entry.get("labor$")) + bucket_entry["machine$"], 2
+        )
+        order_list = bucket_view_summary.get("order")
+        if not isinstance(order_list, list):
+            order_list = []
+            bucket_view_summary["order"] = order_list
+        if "drilling" not in order_list:
+            order_list.append("drilling")
+        bucket_minutes_detail_for_render["drilling"] = bucket_entry["minutes"]
+
     drilling_minutes_for_bucket: float | None = None
     if drill_total_minutes is not None and drill_total_minutes > 0.0:
         drilling_minutes_for_bucket = float(drill_total_minutes)
@@ -11361,6 +11493,14 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             metrics["labor$"] = _safe_float(metrics.get("labor$"))
 
     if aggregated_bucket_minutes:
+        legacy_bucket_entries: dict[str, dict[str, Any]] = {}
+        if not using_planner:
+            legacy_bucket_entries = {
+                key: dict(value)
+                for key, value in bucket_view.items()
+                if isinstance(value, _MappingABC)
+                and key not in {"buckets", "order", "totals"}
+            }
         buckets_raw = bucket_view_prepared.get("buckets")
         if isinstance(buckets_raw, _MappingABC):
             buckets = {str(k): dict(v) for k, v in buckets_raw.items()}
@@ -11419,6 +11559,11 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         bucket_view_prepared["buckets"] = buckets
         bucket_view_prepared["order"] = ordered
         bucket_view_prepared["totals"] = {key: round(val, 2) for key, val in totals.items()}
+        if not using_planner:
+            for canon_key, entry in buckets.items():
+                bucket_view_prepared.setdefault(canon_key, entry)
+            for legacy_key, legacy_value in legacy_bucket_entries.items():
+                bucket_view_prepared[legacy_key] = legacy_value
 
         if isinstance(process_meta, dict) and using_planner:
             total_minutes = 0.0

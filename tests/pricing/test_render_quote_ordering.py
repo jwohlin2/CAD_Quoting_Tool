@@ -304,6 +304,26 @@ def test_render_quote_includes_hour_summary() -> None:
 
 
 def test_render_quote_merges_deburr_variants() -> None:
+    bucket_view = {
+        "buckets": {
+            "milling": {
+                "minutes": 180.0,
+                "labor$": 40.0,
+                "machine$": 0.0,
+            },
+            "Deburr": {
+                "minutes": 30.0,
+                "labor$": 10.0,
+                "machine$": 0.0,
+            },
+            "Finishing/Deburr": {
+                "minutes": 15.0,
+                "labor$": 5.0,
+                "machine$": 0.0,
+            },
+        }
+    }
+
     result = {
         "price": 150.0,
         "breakdown": {
@@ -341,6 +361,9 @@ def test_render_quote_merges_deburr_variants() -> None:
             "params": {},
             "labor_cost_details": {},
             "direct_cost_details": {},
+            "bucket_view": bucket_view,
+            "process_plan": {"bucket_view": bucket_view},
+            "process_plan_summary": {"bucket_view": bucket_view},
         },
     }
 
@@ -357,6 +380,26 @@ def test_render_quote_merges_deburr_variants() -> None:
 
 
 def test_render_quote_skips_duplicate_programming_amortized_row() -> None:
+    bucket_view = {
+        "buckets": {
+            "milling": {
+                "minutes": 180.0,
+                "labor$": 40.0,
+                "machine$": 0.0,
+            },
+            "Deburr": {
+                "minutes": 30.0,
+                "labor$": 10.0,
+                "machine$": 0.0,
+            },
+            "Finishing/Deburr": {
+                "minutes": 15.0,
+                "labor$": 5.0,
+                "machine$": 0.0,
+            },
+        }
+    }
+
     result = {
         "price": 180.0,
         "breakdown": {
@@ -392,6 +435,9 @@ def test_render_quote_skips_duplicate_programming_amortized_row() -> None:
             "params": {},
             "labor_cost_details": {},
             "direct_cost_details": {},
+            "bucket_view": bucket_view,
+            "process_plan": {"bucket_view": bucket_view},
+            "process_plan_summary": {"bucket_view": bucket_view},
         },
     }
 
@@ -406,6 +452,21 @@ def test_render_quote_skips_duplicate_programming_amortized_row() -> None:
 
 
 def test_render_quote_includes_amortized_and_misc_rows() -> None:
+    bucket_view = {
+        "buckets": {
+            "milling": {
+                "minutes": 120.0,
+                "labor$": 120.0,
+                "machine$": 0.0,
+            },
+            "deburr": {
+                "minutes": 60.0,
+                "labor$": 80.0,
+                "machine$": 0.0,
+            },
+        }
+    }
+
     result = {
         "price": 420.0,
         "breakdown": {
@@ -454,6 +515,9 @@ def test_render_quote_includes_amortized_and_misc_rows() -> None:
             "params": {},
             "labor_cost_details": {},
             "direct_cost_details": {},
+            "bucket_view": bucket_view,
+            "process_plan": {"bucket_view": bucket_view},
+            "process_plan_summary": {"bucket_view": bucket_view},
         },
     }
 

@@ -221,6 +221,16 @@ def _amortized_breakdown(qty: int, *, config_flags: dict | None = None) -> dict:
             "Fixture Build (amortized)": 30.0,
         }
 
+    bucket_view = {
+        "buckets": {
+            "grinding": {
+                "minutes": 90.0,
+                "labor$": 300.0,
+                "machine$": 0.0,
+            },
+        }
+    }
+
     breakdown = {
         "qty": qty,
         "totals": _base_totals(),
@@ -260,6 +270,9 @@ def _amortized_breakdown(qty: int, *, config_flags: dict | None = None) -> dict:
             "programming_per_part": 150.0,
             "fixture_per_part": 30.0,
         },
+        "bucket_view": bucket_view,
+        "process_plan": {"bucket_view": bucket_view},
+        "process_plan_summary": {"bucket_view": bucket_view},
     }
     if config_flags is not None:
         breakdown["config_flags"] = dict(config_flags)
@@ -373,6 +386,16 @@ def test_render_quote_ignores_force_amortized_flag_for_single_qty() -> None:
 
 
 def test_render_quote_shows_flat_extras_when_no_hours() -> None:
+    bucket_view = {
+        "buckets": {
+            "grinding": {
+                "minutes": 133.2,
+                "labor$": 200.0,
+                "machine$": 0.0,
+            },
+        }
+    }
+
     result = {
         "price": 10.0,
         "breakdown": {
@@ -392,6 +415,9 @@ def test_render_quote_shows_flat_extras_when_no_hours() -> None:
             "rates": {},
             "params": {},
             "direct_cost_details": {},
+            "bucket_view": bucket_view,
+            "process_plan": {"bucket_view": bucket_view},
+            "process_plan_summary": {"bucket_view": bucket_view},
         },
     }
 
