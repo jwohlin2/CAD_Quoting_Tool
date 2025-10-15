@@ -33,10 +33,76 @@ __all__ = [
 ]
 
 
-def map_geo_to_double_underscore(geo: dict) -> dict:
-    """Expose :func:`appV5._map_geo_to_double_underscore`."""
+def _map_geo_to_double_underscore_fallback(geo: Mapping[str, Any] | None) -> dict[str, float]:
+    data: dict[str, Any] = dict(geo or {})
 
-    return _map_geo_to_double_underscore(geo)
+    def _as_float(key: str) -> float | None:
+        try:
+            value = data[key]
+        except Exception:
+            return None
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    mapped: dict[str, float] = {}
+
+    length = _as_float("GEO-01_Length_mm")
+    width = _as_float("GEO-02_Width_mm")
+    height = _as_float("GEO-03_Height_mm")
+
+    if length is not None:
+        mapped["GEO__BBox_X_mm"] = length
+    if width is not None:
+        mapped["GEO__BBox_Y_mm"] = width
+    if height is not None:
+        mapped["GEO__BBox_Z_mm"] = height
+
+    dims = [value for value in (length, width, height) if value is not None]
+    if dims:
+        max_dim = max(dims)
+        min_dim = min(dims)
+        mapped["GEO__MaxDim_mm"] = max_dim
+        mapped["GEO__MinDim_mm"] = min_dim
+        mapped["GEO__Stock_Thickness_mm"] = min_dim
+
+    volume = _as_float("GEO-Volume_mm3")
+    if volume is None:
+        volume = _as_float("GEO_Volume_mm3")
+    if volume is not None:
+        mapped["GEO__Volume_mm3"] = volume
+
+    surface_area = _as_float("GEO-SurfaceArea_mm2")
+    if surface_area is not None:
+        mapped["GEO__SurfaceArea_mm2"] = surface_area
+
+    face_count = _as_float("Feature_Face_Count")
+    if face_count is None:
+        face_count = _as_float("GEO_Face_Count")
+    if face_count is not None:
+        mapped["GEO__Face_Count"] = face_count
+
+    wedm_path = _as_float("GEO_WEDM_PathLen_mm")
+    if wedm_path is not None:
+        mapped["GEO__WEDM_PathLen_mm"] = wedm_path
+
+    if surface_area is not None and volume not in (None, 0.0):
+        try:
+            mapped["GEO__Area_to_Volume"] = surface_area / float(volume)
+        except Exception:
+            pass
+
+    return mapped
+
+
+def map_geo_to_double_underscore(geo: dict) -> dict[str, float]:
+    """Expose :func:`appV5._map_geo_to_double_underscore` with a fallback."""
+
+    mapper = _map_geo_to_double_underscore
+    if not callable(mapper):
+        mapper = _map_geo_to_double_underscore_fallback
+    return mapper(geo)
 
 
 def collect_geo_features_from_df(df):

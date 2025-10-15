@@ -23,6 +23,7 @@ import re
 import sys
 import time
 import typing
+from typing import Any
 from collections import Counter
 from collections.abc import Iterator, Mapping as _MappingABC, MutableMapping as _MutableMappingABC
 from dataclasses import dataclass, field, replace
@@ -52,6 +53,7 @@ from cad_quoter.config import (
 from cad_quoter.config import (
     describe_runtime_environment as _describe_runtime_environment,
 )
+from cad_quoter.utils.geo_ctx import _should_include_outsourced_pass
 from cad_quoter.utils.render_utils import (
     fmt_hours,
     fmt_money,
@@ -65,6 +67,7 @@ from cad_quoter.utils.render_utils import (
     QuoteDocRecorder,
     render_quote_doc,
 )
+from cad_quoter.pricing import load_backup_prices_csv
 from cad_quoter.estimators import SpeedsFeedsUnavailableError
 from cad_quoter.llm_overrides import (
     _plate_mass_properties,
@@ -170,7 +173,8 @@ from appkit.utils.text_rules import (
     canonicalize_amortized_label as _canonical_amortized_label,
 )
 from appkit.debug.debug_tables import (
-    _jsonify_debug_value,
+    _jsonify_debug_value as _debug_jsonify_value,
+    _jsonify_debug_summary as _debug_jsonify_summary,
     _accumulate_drill_debug,
     append_removal_debug_if_enabled,
 )
@@ -179,6 +183,18 @@ from appkit.debug.debug_tables import (
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers: formatting + removal card + per-hole lines (no material per line)
 # ──────────────────────────────────────────────────────────────────────────────
+
+
+def _jsonify_debug_value(value: Any, depth: int = 0, max_depth: int = 6) -> Any:
+    """Proxy to :func:`appkit.debug.debug_tables._jsonify_debug_value`."""
+
+    return _debug_jsonify_value(value, depth=depth, max_depth=max_depth)
+
+
+def _jsonify_debug_summary(summary: Mapping[str, Any]) -> dict[str, Any]:
+    """Proxy to :func:`appkit.debug.debug_tables._jsonify_debug_summary`."""
+
+    return _debug_jsonify_summary(summary)
 def _fmt_rng(vals, prec=2, unit: str | None = None):
     vs = []
     for v in (vals or []):
@@ -1658,8 +1674,6 @@ def load_drawing(path: Path) -> Drawing:
     return ezdxf_mod.readfile(str(path))  # DXF directly
 
 # ==== OpenCascade compat (works with OCP OR OCC.Core) ====
-from typing import Any
-
 def _missing_uv_bounds(_: Any) -> Tuple[float, float, float, float]:
     raise RuntimeError("BRepTools_UVBounds is unavailable")
 
@@ -3565,6 +3579,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 seg = segment.strip()
                 if not seg:
                     continue
+                if EXTRA_DETAIL_RE.match(seg):
+                    continue
                 if seg not in seen:
                     segments.append(seg)
                     seen.add(seg)
@@ -3919,7 +3935,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if existing:
             for segment in re.split(r";\s*", str(existing)):
                 seg = segment.strip()
-                if not seg or _is_extra_segment(seg):
+                if not seg or EXTRA_DETAIL_RE.match(seg):
                     continue
                 if seg not in seen:
                     segments.append(seg)
@@ -3930,7 +3946,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             filtered_existing: list[str] = []
             for segment in re.split(r";\s*", str(existing)):
                 seg = segment.strip()
-                if not seg or _is_extra_segment(seg):
+                if not seg or EXTRA_DETAIL_RE.match(seg):
                     continue
                 filtered_existing.append(seg)
             if filtered_existing:
@@ -4748,9 +4764,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 total_material_cost = float(matcost or 0.0)
                 material_net_cost = total_material_cost
             net_mass_val = _coerce_float_or_none(net_mass_g)
-            effective_mass_val = _coerce_float_or_none(
-                material.get("effective_mass_g")
-            )
+            effective_mass_source = material.get("effective_mass_g")
+            effective_mass_val = _coerce_float_or_none(effective_mass_source)
+            prefer_pct_for_scrap = effective_mass_val is not None
             if effective_mass_val is None:
                 effective_mass_val = _coerce_float_or_none(mass_g)
             removal_mass_val = None
@@ -4829,6 +4845,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 scrap_pct_raw=scrap,
                 effective_mass_g=effective_mass_val,
                 net_mass_g=net_mass_val,
+                prefer_pct=prefer_pct_for_scrap,
             )
 
             if scrap_mass_val is not None:
@@ -6918,6 +6935,7 @@ def _compute_scrap_mass_g(
     scrap_pct_raw: float | str | None,
     effective_mass_g: float | str | None,
     net_mass_g: float | str | None,
+    prefer_pct: bool = False,
 ) -> float | None:
     """Return the scrap mass for display/credit in grams.
 
@@ -6935,6 +6953,17 @@ def _compute_scrap_mass_g(
         if removal_mass > 0:
             return removal_mass
 
+    effective_mass = _coerce_float_or_none(effective_mass_g)
+    net_mass = _coerce_float_or_none(net_mass_g)
+
+    if (
+        not prefer_pct
+        and effective_mass is not None
+        and net_mass is not None
+        and float(effective_mass) > float(net_mass)
+    ):
+        return float(effective_mass) - float(net_mass)
+
     scrap_frac = normalize_scrap_pct(scrap_pct_raw)
     if scrap_frac is not None and scrap_frac > 0:
         base_mass = _coerce_float_or_none(effective_mass_g)
@@ -6943,8 +6972,6 @@ def _compute_scrap_mass_g(
         if base_mass is not None and base_mass > 0:
             return max(0.0, float(base_mass)) * float(scrap_frac)
 
-    effective_mass = _coerce_float_or_none(effective_mass_g)
-    net_mass = _coerce_float_or_none(net_mass_g)
     if (
         effective_mass is not None
         and net_mass is not None

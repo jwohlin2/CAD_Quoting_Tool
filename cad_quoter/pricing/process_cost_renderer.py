@@ -127,6 +127,8 @@ def _canonical_process_key(name: Any) -> str | None:
         return None
     if norm in _ALIAS_MAP:
         norm = _ALIAS_MAP[norm]
+    if norm in {"wire_edm", "sinker_edm"}:
+        return "misc"
     if norm in ORDER:
         return norm
     if norm.startswith("planner_"):
