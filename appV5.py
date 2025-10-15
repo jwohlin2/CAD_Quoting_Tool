@@ -5831,7 +5831,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             )] if isinstance(bins_dict, dict) else []
 
         _render_removal_card(
-            lines,
+            append_line,
             mat_canon=mat_canon, mat_group=mat_group, row_group=row_group,
             holes_deep=holes_deep, holes_std=holes_std,
             dia_vals_in=dia_vals, depth_vals_in=depth_vals,
@@ -5844,8 +5844,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         )
 
         subtotal_min, seen_deep, seen_std = _render_time_per_hole(
-            lines, bins=bins, index_min=index_min,
-            peck_min_deep=peck_min_deep, peck_min_std=peck_min_std,
+            append_line,
+            bins=bins, index_min=index_min, peck_min_deep=peck_min_deep, peck_min_std=peck_min_std,
         )
 
         tool_add = (tchg_deep if seen_deep else 0.0) + (tchg_std if seen_std else 0.0)
@@ -15517,7 +15517,7 @@ def _rpm_from_sfm(sfm: float, d_in: float) -> float:
         return 0.0
 
 def _render_removal_card(
-    lines: list[str],
+    append_line: Callable[[str], None],
     *,
     mat_canon: str,
     mat_group: str | None,
@@ -15539,49 +15539,49 @@ def _render_removal_card(
     toolchange_min_deep: float,
     toolchange_min_std: float,
 ) -> None:
-    lines.append("MATERIAL REMOVAL – DRILLING")
-    lines.append("=" * 64)
+    append_line("MATERIAL REMOVAL – DRILLING")
+    append_line("=" * 64)
     # Inputs
-    lines.append("Inputs")
-    lines.append(f"  Material .......... {mat_canon}  [group {mat_group or '-'}]")
+    append_line("Inputs")
+    append_line(f"  Material .......... {mat_canon}  [group {mat_group or '-'}]")
     mismatch = False
     if row_group:
         rg = str(row_group).upper()
         mg = str(mat_group or "").upper()
         mismatch = (rg != mg and (rg and mg))
         note = "   (!) mismatch – used row from different group" if mismatch else ""
-        lines.append(f"  CSV row group ..... {row_group}{note}")
-    lines.append("  Operations ........ Deep-Drill (L/D ≥ 3), Drill")
-    lines.append(f"  Holes ............. {int(holes_deep)} deep + {int(holes_std)} std  = {int(holes_deep + holes_std)}")
-    lines.append(f"  Diameter range .... {_fmt_rng(dia_vals_in, 3)}\"")
-    lines.append(f"  Depth per hole .... {_fmt_rng(depth_vals_in, 2)} in")
-    lines.append("")
+        append_line(f"  CSV row group ..... {row_group}{note}")
+    append_line("  Operations ........ Deep-Drill (L/D ≥ 3), Drill")
+    append_line(f"  Holes ............. {int(holes_deep)} deep + {int(holes_std)} std  = {int(holes_deep + holes_std)}")
+    append_line(f"  Diameter range .... {_fmt_rng(dia_vals_in, 3)}\"")
+    append_line(f"  Depth per hole .... {_fmt_rng(depth_vals_in, 2)} in")
+    append_line("")
     # Feeds & Speeds
-    lines.append("Feeds & Speeds (used)")
-    lines.append(f"  SFM ............... {int(round(sfm_deep))} (deep)   | {int(round(sfm_std))} (std)")
-    lines.append(f"  IPR ............... {_fmt_rng(ipr_deep_vals, 4)} (deep) | {float(ipr_std_val):.4f} (std)")
-    lines.append(f"  RPM ............... {_fmt_rng(rpm_deep_vals, 0)} (deep)      | {_fmt_rng(rpm_std_vals, 0)} (std)")
-    lines.append(f"  IPM ............... {_fmt_rng(ipm_deep_vals, 1)} (deep)       | {_fmt_rng(ipm_std_vals, 1)} (std)")
-    lines.append("")
+    append_line("Feeds & Speeds (used)")
+    append_line(f"  SFM ............... {int(round(sfm_deep))} (deep)   | {int(round(sfm_std))} (std)")
+    append_line(f"  IPR ............... {_fmt_rng(ipr_deep_vals, 4)} (deep) | {float(ipr_std_val):.4f} (std)")
+    append_line(f"  RPM ............... {_fmt_rng(rpm_deep_vals, 0)} (deep)      | {_fmt_rng(rpm_std_vals, 0)} (std)")
+    append_line(f"  IPM ............... {_fmt_rng(ipm_deep_vals, 1)} (deep)       | {_fmt_rng(ipm_std_vals, 1)} (std)")
+    append_line("")
     # Overheads
-    lines.append("Overheads")
-    lines.append(f"  Index per hole .... {float(index_min_per_hole):.2f} min")
-    lines.append(f"  Peck per hole ..... {_fmt_rng(peck_min_rng, 2)} min")
-    lines.append(
+    append_line("Overheads")
+    append_line(f"  Index per hole .... {float(index_min_per_hole):.2f} min")
+    append_line(f"  Peck per hole ..... {_fmt_rng(peck_min_rng, 2)} min")
+    append_line(
         f"  Toolchange ........ {float(toolchange_min_deep):.2f} min (deep) | {float(toolchange_min_std):.2f} min (std)"
     )
-    lines.append("")
+    append_line("")
 
 def _render_time_per_hole(
-    lines: list[str],
+    append_line: Callable[[str], None],
     *,
     bins: list[dict[str, Any]],
     index_min: float,
     peck_min_deep: float,
     peck_min_std: float,
 ) -> tuple[float, bool, bool]:
-    lines.append("TIME PER HOLE – DRILL GROUPS")
-    lines.append("-" * 66)
+    append_line("TIME PER HOLE – DRILL GROUPS")
+    append_line("-" * 66)
     subtotal_min = 0.0
     seen_deep = False
     seen_std = False
@@ -15605,11 +15605,11 @@ def _render_time_per_hole(
             group_min = t_hole * qty
             subtotal_min += group_min
             # single-line, no material
-            lines.append(
+            append_line(
                 f'Dia {d_in:.3f}" × {qty}  | depth {depth:.3f}" | {int(round(sfm))} sfm | {ipr:.4f} ipr | '
                 f't/hole {t_hole:.2f} min | group {qty}×{t_hole:.2f} = {group_min:.2f} min'
             )
         except Exception:
             continue
-    lines.append("")
+    append_line("")
     return subtotal_min, seen_deep, seen_std
