@@ -5356,6 +5356,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         prog.get("eng_rate"), "EngineerRate", "ShopRate"
     )
 
+    programming_per_lot_val = _safe_float(prog.get("per_lot"))
+    nre_programming_per_part = _safe_float(nre.get("programming_per_part"))
+    if programming_per_lot_val <= 0 and qty == 1 and nre_programming_per_part > 0:
+        programming_per_lot_val = nre_programming_per_part * max(qty, 1)
+
     prog_hr_total = float((nre.get("programming_hr") or 0.0) or 0.0)
     programming_cost_total = float((nre.get("programming_cost") or 0.0) or 0.0)
     if prog_hr_total > 0 and programming_cost_total == 0.0:
@@ -5374,11 +5379,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if _safe_float(labor_cost_totals.get("Programming (amortized)")) <= 0:
             labor_cost_totals["Programming (amortized)"] = computed_programming_per_part
 
-    # Programming & Eng (auto-hide if zero unless show_zeros)
-    if (prog.get("per_lot", 0.0) > 0) or show_zeros or any(
-        _safe_float(prog.get(k)) > 0 for k in ("prog_hr", "eng_hr")
-    ):
-        row("Programming & Eng:", float(prog.get("per_lot", 0.0)))
+    show_programming_row = (
+        programming_per_lot_val > 0
+        or show_zeros
+        or any(_safe_float(prog.get(k)) > 0 for k in ("prog_hr", "eng_hr"))
+    )
+    if show_programming_row:
+        row("Programming & Eng:", programming_per_lot_val)
         has_detail = False
         if programmer_hours > 0:
             has_detail = True
