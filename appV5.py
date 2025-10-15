@@ -7082,21 +7082,25 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         tool_add = (tchg_deep if seen_deep else 0.0) + (tchg_std if seen_std else 0.0)
         total_drill_minutes_with_toolchange = subtotal_min + tool_add
 
-        # === DRILLING: choose one billing source of truth ===
         drill_meta = breakdown.setdefault("drilling_meta", {})
+        if isinstance(drill_meta, dict):
+            drill_meta["toolchange_minutes"] = float(tool_add)
+            drill_meta["total_minutes_with_toolchange"] = float(total_drill_minutes_with_toolchange)
+
+        # === Choose billing truth ===
         bill_min = float(
             drill_meta.get("total_minutes_billed")
             or drill_meta.get("total_minutes_with_toolchange")
             or drill_meta.get("total_minutes")
             or 0.0
         )
-        drill_meta["total_minutes_billed"] = bill_min  # <-- canonical minutes for billing
+        drill_meta["total_minutes_billed"] = bill_min  # canonical for pricing
 
-        # Overwrite any legacy estimator/planner override:
+        # Overwrite any legacy planner seed:
         pm = breakdown.setdefault("process_meta", {}).setdefault("drilling", {})
-        pm["hr"] = round(bill_min / 60.0, 6)
         pm["minutes"] = bill_min
-        pm["basis"] = ["minutes_engine"]  # replace ["planner_drilling_override"]
+        pm["hr"] = round(bill_min / 60.0, 6)
+        pm["basis"] = ["minutes_engine"]  # replace any 'planner_drilling_override'
 
         process_plan_summary_card: dict[str, Any] | None = None
         if isinstance(process_plan_summary_local, dict):
@@ -7117,15 +7121,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     drill_meta_summary["total_minutes"] = float(subtotal_min)
             drill_meta_summary["toolchange_minutes"] = float(tool_add)
             drill_meta_summary["total_minutes_with_toolchange"] = float(total_drill_minutes_with_toolchange)
-            drill_total_minutes_billed = float(
-                drill_meta_summary.get("total_minutes_with_toolchange")
-                or drill_meta_summary.get("total_minutes")
-                or 0.0
-            )
-            drill_meta_summary["total_minutes_billed"] = drill_total_minutes_billed
-        if isinstance(drilling_meta, dict):
-            drilling_meta["toolchange_minutes"] = float(tool_add)
-            drilling_meta["total_minutes_with_toolchange"] = float(total_drill_minutes_with_toolchange)
+            drill_meta_summary["total_minutes_billed"] = float(bill_min)
 
         append_line(f"Toolchange adders: Deep-Drill {tchg_deep:.2f} min + Drill {tchg_std:.2f} min = {tool_add:.2f} min" if tool_add > 0 else "Toolchange adders: -")
         append_line("-" * 66)
@@ -11635,8 +11631,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             drilling_meta_container.update({"estimator_hours_for_planner": estimator_hours})
             process_meta["drilling"] = {
                 "minutes": drill_total_minutes,
+                "hr": round(drill_total_minutes / 60.0, 6),
                 "rate": drilling_rate,
-                "basis": ["planner_drilling_override"],
+                "basis": ["minutes_engine"],
             }
 
             if drill_debug_summary:
