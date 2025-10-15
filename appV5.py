@@ -6299,6 +6299,47 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if planner_total_minutes > 0 and not planner_rollup_hours_ready:
             planner_total_hr = planner_total_minutes / 60.0
 
+        if not planner_rollup_hours_ready and isinstance(planner_bucket_view_map, _MappingABC):
+            try:
+                bview = planner_bucket_view_map
+                buckets_data = bview.get("buckets") if isinstance(bview, _MappingABC) else None
+                if isinstance(buckets_data, _MappingABC):
+                    def _n(s: Any) -> str:
+                        import re as _re
+
+                        return _re.sub(r"[^a-z0-9]+", "_", str(s).lower()).strip("_")
+
+                    LABORISH = {
+                        "finishing_deburr",
+                        "inspection",
+                        "assembly",
+                        "toolmaker_support",
+                        "ehs_compliance",
+                        "fixture_build_amortized",
+                        "programming_amortized",
+                    }
+
+                    pl_machine_hr = 0.0
+                    pl_labor_hr = 0.0
+                    for key, info in buckets_data.items():
+                        if not isinstance(info, _MappingABC):
+                            continue
+                        try:
+                            hr = float(info.get("minutes", 0.0) or 0.0) / 60.0
+                        except Exception:
+                            continue
+                        if _n(key) in LABORISH:
+                            pl_labor_hr += hr
+                        else:
+                            pl_machine_hr += hr
+
+                    planner_labor_hr = pl_labor_hr
+                    planner_machine_hr = pl_machine_hr
+                    planner_total_hr = round(pl_labor_hr + pl_machine_hr, 2)
+                    planner_rollup_hours_ready = True
+            except Exception:
+                pass
+
         if not planner_rollup_hours_ready:
             derived_rollup = _derive_planner_rollup_hours_from_summary(planner_total_hr)
             if derived_rollup is not None:
