@@ -6980,25 +6980,30 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         tool_add = (tchg_deep if seen_deep else 0.0) + (tchg_std if seen_std else 0.0)
         total_drill_minutes_with_toolchange = subtotal_min + tool_add
 
-        # === Choose billing truth ===
+        # === DRILLING BILLING TRUTH ===
         drill_meta = breakdown.setdefault("drilling_meta", {})
-        if isinstance(drill_meta, dict):
-            drill_meta["toolchange_minutes"] = float(tool_add)
-            drill_meta["total_minutes_with_toolchange"] = float(total_drill_minutes_with_toolchange)
+        if not isinstance(drill_meta, dict):
+            try:
+                drill_meta = dict(drill_meta or {})
+            except Exception:
+                drill_meta = {}
+            breakdown["drilling_meta"] = drill_meta
+        drill_meta["toolchange_minutes"] = float(tool_add)
+        drill_meta["total_minutes_with_toolchange"] = float(total_drill_minutes_with_toolchange)
 
-        # === Choose billing truth ===
         bill_min = float(
             drill_meta.get("total_minutes_billed")
             or drill_meta.get("total_minutes_with_toolchange")
             or drill_meta.get("total_minutes")
             or 0.0
         )
-        drill_meta["total_minutes_billed"] = bill_min  # canonical for pricing
+        drill_meta["total_minutes_billed"] = bill_min
 
-        # Overwrite any legacy planner seed:
+        # Overwrite legacy planner meta
         pm = breakdown.setdefault("process_meta", {}).setdefault("drilling", {})
         pm["minutes"] = bill_min
         pm["hr"] = round(bill_min / 60.0, 6)
+        pm["rate"] = float(rates.get("DrillingRate") or rates.get("MachineRate") or 0.0)
         pm["basis"] = ["minutes_engine"]  # replace any 'planner_drilling_override'
 
         process_plan_summary_card: dict[str, Any] | None = None
