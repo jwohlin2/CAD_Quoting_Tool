@@ -1,10 +1,6 @@
 import pytest
 
-from cad_quoter.pricing.process_cost_renderer import (
-    ORDER,
-    canonicalize_costs,
-    render_process_costs,
-)
+from cad_quoter.pricing import ORDER, canonicalize_costs, render_process_costs
 
 
 class TableCollector:
@@ -31,7 +27,8 @@ def test_canonicalize_costs_groups_aliases_and_skips_planner_total() -> None:
 
     assert canon["milling"] == pytest.approx(120.0)
     assert canon["finishing_deburr"] == pytest.approx(15.0)
-    assert canon["misc"] == pytest.approx(507.0)
+    assert canon["misc"] == pytest.approx(500.0)
+    assert canon["wire_edm"] == pytest.approx(7.0)
     assert "planner_total" not in canon
 
 
