@@ -296,6 +296,86 @@ def _finalize_two_bucket(
     if _as_positive(machine_output.get("CNC_Mill")) <= 0.0:
         machine_output["CNC_Mill"] = _as_positive(machine_output.get("MillingRate")) or machine_default
 
+    # Provide generic fallbacks expected by downstream renderers
+    labor_rate_value = _as_positive(labor_output.get("LaborRate")) or labor_default
+    if labor_rate_value > 0.0:
+        labor_output["LaborRate"] = labor_rate_value
+        labor_output.setdefault("DefaultLaborRate", labor_rate_value)
+
+    programmer_value = _as_positive(labor_output.get("ProgrammingRate"))
+    if programmer_value <= 0.0 and _as_positive(labor_output.get("Programmer")) > 0.0:
+        programmer_value = float(labor_output["Programmer"])
+        labor_output["ProgrammingRate"] = programmer_value
+    if programmer_value > 0.0:
+        for alias in LEGACY_PROGRAMMER_RATE_KEYS:
+            labor_output.setdefault(alias, programmer_value)
+
+    inspection_value = _as_positive(labor_output.get("InspectionRate"))
+    if inspection_value <= 0.0 and _as_positive(labor_output.get("Inspector")) > 0.0:
+        inspection_value = float(labor_output["Inspector"])
+        labor_output["InspectionRate"] = inspection_value
+
+    machine_rate_value = _as_positive(machine_output.get("MachineRate")) or machine_default
+    if machine_rate_value > 0.0:
+        machine_output["MachineRate"] = machine_rate_value
+        machine_output.setdefault("DefaultMachineRate", machine_rate_value)
+
+    drilling_value = _as_positive(machine_output.get("DrillingRate"))
+    if drilling_value <= 0.0:
+        drilling_value = _as_positive(machine_output.get("DrillPress"))
+    if drilling_value <= 0.0:
+        drilling_value = machine_rate_value
+    if drilling_value > 0.0:
+        machine_output.setdefault("DrillingRate", drilling_value)
+        for alias in ("TappingRate", "CounterboreRate"):
+            if _as_positive(machine_output.get(alias)) <= 0.0:
+                machine_output[alias] = drilling_value
+
+    saw_value = _as_positive(machine_output.get("SawWaterjetRate"))
+    if saw_value <= 0.0:
+        for candidate in ("Waterjet", "SawWaterjet", "Saw", "WaterjetRate"):
+            saw_value = _as_positive(machine_output.get(candidate))
+            if saw_value > 0.0:
+                break
+    if saw_value <= 0.0:
+        saw_value = machine_rate_value
+    if saw_value > 0.0:
+        machine_output.setdefault("SawWaterjetRate", saw_value)
+        machine_output.setdefault("WaterjetRate", saw_value)
+        machine_output.setdefault("SawRate", saw_value)
+
+    grinding_value = _as_positive(machine_output.get("GrindingRate"))
+    if grinding_value <= 0.0:
+        for candidate in (
+            "SurfaceGrindRate",
+            "SurfaceGrind",
+            "ODIDGrindRate",
+            "ODIDGrind",
+            "JigGrindRate",
+            "JigGrind",
+        ):
+            grinding_value = _as_positive(machine_output.get(candidate))
+            if grinding_value > 0.0:
+                break
+    if grinding_value <= 0.0:
+        grinding_value = machine_rate_value
+    if grinding_value > 0.0:
+        machine_output.setdefault("GrindingRate", grinding_value)
+
+    wire_value = _as_positive(machine_output.get("WireEDMRate"))
+    if wire_value <= 0.0:
+        wire_value = _as_positive(machine_output.get("WireEDM"))
+    if wire_value > 0.0:
+        machine_output["WireEDMRate"] = wire_value
+        machine_output.setdefault("WireEDM", wire_value)
+
+    sinker_value = _as_positive(machine_output.get("SinkerEDMRate"))
+    if sinker_value <= 0.0:
+        sinker_value = _as_positive(machine_output.get("SinkerEDM"))
+    if sinker_value > 0.0:
+        machine_output["SinkerEDMRate"] = sinker_value
+        machine_output.setdefault("SinkerEDM", sinker_value)
+
     # Final cleanup: ensure strictly positive numeric values
     labor_clean = {
         key: float(value)
