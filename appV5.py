@@ -11556,43 +11556,46 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     drilling_summary["total_minutes_billed"] = drill_total_minutes_billed
 
     if drill_total_minutes and drill_total_minutes > 0.0:
-        bucket_view_summary = process_plan_summary.get("bucket_view")
-        if not isinstance(bucket_view_summary, dict):
-            bucket_view_summary = {"buckets": {}, "order": []}
-            process_plan_summary["bucket_view"] = bucket_view_summary
-        buckets_map = bucket_view_summary.get("buckets")
-        if not isinstance(buckets_map, dict):
-            buckets_map = {}
-            bucket_view_summary["buckets"] = buckets_map
-        bucket_entry = buckets_map.get("drilling")
-        if not isinstance(bucket_entry, dict):
-            bucket_entry = {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0}
-            buckets_map["drilling"] = bucket_entry
-        bucket_entry["minutes"] = float(drill_total_minutes)
-        rates_map = rates if isinstance(rates, _MappingABC) else {}
-        drill_rate_val = _safe_float(rates_map.get("DrillingRate"))
-        if drill_rate_val <= 0.0:
-            drill_rate_val = _safe_float(rates_map.get("drillingrate"))
-        if drill_rate_val <= 0.0:
-            drill_rate_val = _safe_float(rates_map.get("MachineRate"))
-        if drill_rate_val <= 0.0:
-            drill_rate_val = _safe_float(rates_map.get("machinerate"))
-        if drill_rate_val <= 0.0:
-            drill_rate_val = float(drilling_rate)
-        bucket_entry.setdefault("labor$", 0.0)
-        machine_cost_val = 0.0
-        if drill_rate_val > 0.0:
-            machine_cost_val = (bucket_entry["minutes"] / 60.0) * drill_rate_val
-        bucket_entry["machine$"] = round(machine_cost_val, 2)
-        bucket_entry["total$"] = round(
-            _safe_float(bucket_entry.get("labor$")) + bucket_entry["machine$"], 2
+        drill_meta: _MappingABC[str, Any] | None = None
+        if isinstance(drilling_meta_container, _MappingABC):
+            drill_meta = drilling_meta_container
+
+        bview = process_plan_summary.setdefault("bucket_view", {"buckets": {}, "order": []})
+        buckets_map = bview.setdefault("buckets", {})
+        bucket_entry = buckets_map.setdefault(
+            "drilling", {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0}
         )
-        order_list = bucket_view_summary.get("order")
-        if not isinstance(order_list, list):
-            order_list = []
-            bucket_view_summary["order"] = order_list
+
+        authoritative_minutes = float(drill_total_minutes)
+        if isinstance(drill_meta, _MappingABC):
+            billed_minutes = _safe_float(drill_meta.get("total_minutes_billed"))
+            if billed_minutes > 0.0:
+                authoritative_minutes = billed_minutes
+
+        bucket_entry["minutes"] = authoritative_minutes
+
+        rates_map = rates if isinstance(rates, _MappingABC) else {}
+        drill_rate = float(
+            rates_map.get("DrillingRate")
+            or rates_map.get("drillingrate")
+            or rates_map.get("MachineRate")
+            or rates_map.get("machinerate")
+            or 0.0
+        )
+        if drill_rate <= 0.0:
+            drill_rate = float(drilling_rate)
+
+        bucket_entry["machine$"] = round((bucket_entry["minutes"] / 60.0) * drill_rate, 2)
+        bucket_entry["labor$"] = _safe_float(bucket_entry.get("labor$"))
+        bucket_entry["total$"] = round(bucket_entry["labor$"] + bucket_entry["machine$"], 2)
+
+        order_list = bview.setdefault("order", [])
         if "drilling" not in order_list:
             order_list.append("drilling")
+
+        bucket_minutes_detail_local = locals().get("bucket_minutes_detail")
+        if isinstance(bucket_minutes_detail_local, dict):
+            bucket_minutes_detail_local["drilling"] = bucket_entry["minutes"]
         bucket_minutes_detail_for_render["drilling"] = bucket_entry["minutes"]
 
     drilling_minutes_for_bucket: float | None = None
