@@ -807,6 +807,7 @@ from cad_quoter.pricing import (
     LB_PER_KG,
     PricingEngine,
     create_default_registry,
+    render_process_costs,
 )
 
 _DEFAULT_MATERIAL_DENSITY_G_CC = MATERIAL_DENSITY_G_CC_BY_KEY.get(
@@ -3597,7 +3598,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         except Exception:
             continue
     amortized_nre_total = 0.0
-    amortized_labels_added: set[str] = set()
     for label, value in labor_cost_totals.items():
         _canonical_label, is_amortized = _canonical_amortized_label(label)
         if not is_amortized:
@@ -5126,6 +5126,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     bucket_table_rows: list[tuple[str, float, float, float, float]] = []
     detail_lookup: dict[str, str] = {}
     label_to_canon: dict[str, str] = {}
+    canon_to_display_label: dict[str, str] = {}
 
     _PLANNER_ROLLUP_ABS_TOLERANCE = 0.05
 
@@ -5273,6 +5274,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
             bucket_table_rows.append((label, hours_val, labor_val, machine_val, total_val))
             label_to_canon[label] = canon_key
+            canon_to_display_label.setdefault(canon_key, label)
 
             labor_costs_display[label] = total_val
             display_labor_for_ladder += labor_raw
@@ -5338,12 +5340,42 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
         proc_total += numeric_amount
 
-    def _render_amortized_rows() -> None:
-        nonlocal amortized_nre_total, display_labor_for_ladder
-        if not show_amortized:
-            amortized_nre_total = 0.0
-            return
+    class _ProcessCostTableRecorder:
+        def __init__(self) -> None:
+            self.had_rows = False
 
+        def add_row(
+            self,
+            label: str,
+            hours: float,
+            rate: float,
+            cost: float,
+        ) -> None:
+            self.had_rows = True
+            label_str = str(label or "").strip()
+            canon_key = label_to_canon.get(label_str)
+            if canon_key is None:
+                canon_key = _canonical_bucket_key(label_str)
+            display_label = label_str
+            if canon_key:
+                override_label = canon_to_display_label.get(canon_key)
+                if override_label:
+                    display_label = override_label
+                    label_to_canon.setdefault(display_label, canon_key)
+            _add_labor_cost_line(display_label, cost, process_key=canon_key)
+            try:
+                labor_costs_display[display_label] = float(cost or 0.0)
+            except Exception:
+                labor_costs_display[display_label] = 0.0
+
+    def _prepare_amortized_details() -> dict[str, tuple[float, float]]:
+        nonlocal amortized_nre_total, display_labor_for_ladder
+        amortized_nre_total = 0.0
+        additions: dict[str, tuple[float, float]] = {}
+        if not show_amortized:
+            return additions
+
+        programming_minutes = 0.0
         try:
             prog_pp = float(programming_per_part_cost or 0.0)
         except Exception:
@@ -5358,52 +5390,42 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             except Exception:
                 prog_pp = 0.0
         if prog_pp > 0:
-            label = "Programming (amortized)"
-            existing_prog = process_costs_canon.get("programming_amortized")
-            if existing_prog is not None and abs(float(existing_prog or 0.0) - prog_pp) <= 0.01:
-                amortized_nre_total += prog_pp
-                labor_costs_display[label] = float(labor_costs_display.get(label, 0.0)) + prog_pp
-                display_labor_for_ladder += prog_pp
-            else:
-                detail_args: list[str] = []
-                programming_detail_local = (
-                    nre_detail.get("programming", {}) if isinstance(nre_detail, dict) else {}
+            detail_args: list[str] = []
+            programming_detail_local = (
+                nre_detail.get("programming", {}) if isinstance(nre_detail, dict) else {}
+            )
+            prog_hr_detail = _safe_float(programming_detail_local.get("prog_hr"))
+            if prog_hr_detail > 0:
+                programming_minutes += prog_hr_detail * 60.0
+                prog_rate_detail = _resolve_rate_with_fallback(
+                    programming_detail_local.get("prog_rate"),
+                    "ProgrammerRate",
+                    "ShopRate",
                 )
-                prog_hr_detail = _safe_float(programming_detail_local.get("prog_hr"))
-                if prog_hr_detail > 0:
-                    prog_rate_detail = _resolve_rate_with_fallback(
-                        programming_detail_local.get("prog_rate"),
-                        "ProgrammerRate",
-                        "ShopRate",
-                    )
-                    detail_args.append(
-                        f"- Programmer (lot): {_hours_with_rate_text(prog_hr_detail, prog_rate_detail)}"
-                    )
-                eng_hr_detail = _safe_float(programming_detail_local.get("eng_hr"))
-                if eng_hr_detail > 0:
-                    eng_rate_detail = _resolve_rate_with_fallback(
-                        programming_detail_local.get("eng_rate"),
-                        "EngineerRate",
-                        "ShopRate",
-                    )
-                    detail_args.append(
-                        f"- Engineering (lot): {_hours_with_rate_text(eng_hr_detail, eng_rate_detail)}"
-                    )
-                if qty > 1:
-                    detail_args.append(f"Amortized across {qty} pcs")
-                if detail_args:
-                    detail_lookup["Programming (amortized)"] = "; ".join(detail_args)
-                _add_labor_cost_line(
-                    label,
-                    prog_pp,
-                    detail_bits=detail_args or None,
+                detail_args.append(
+                    f"- Programmer (lot): {_hours_with_rate_text(prog_hr_detail, prog_rate_detail)}"
                 )
-                amortized_nre_total += prog_pp
-                labor_costs_display[label] = float(labor_costs_display.get(label, 0.0)) + prog_pp
+            eng_hr_detail = _safe_float(programming_detail_local.get("eng_hr"))
+            if eng_hr_detail > 0:
+                programming_minutes += eng_hr_detail * 60.0
+                eng_rate_detail = _resolve_rate_with_fallback(
+                    programming_detail_local.get("eng_rate"),
+                    "EngineerRate",
+                    "ShopRate",
+                )
+                detail_args.append(
+                    f"- Engineering (lot): {_hours_with_rate_text(eng_hr_detail, eng_rate_detail)}"
+                )
+            if qty > 1:
+                detail_args.append(f"Amortized across {qty} pcs")
+            if detail_args:
+                detail_lookup["Programming (amortized)"] = "; ".join(detail_args)
+            additions["programming_amortized"] = (prog_pp, programming_minutes)
+            amortized_nre_total += prog_pp
+            if "programming_amortized" not in canonical_bucket_summary:
                 display_labor_for_ladder += prog_pp
-                process_costs_canon.pop("programming_amortized", None)
-            amortized_labels_added.add(label)
 
+        fixture_minutes = 0.0
         try:
             fix_pp = float(fixture_labor_per_part_cost or 0.0)
         except Exception:
@@ -5418,138 +5440,128 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             except Exception:
                 fix_pp = 0.0
         if fix_pp > 0:
-            label = "Fixture Build (amortized)"
-            existing_fix = process_costs_canon.get("fixture_build_amortized")
-            if existing_fix is not None and abs(float(existing_fix or 0.0) - fix_pp) <= 0.01:
-                amortized_nre_total += fix_pp
-                labor_costs_display[label] = float(labor_costs_display.get(label, 0.0)) + fix_pp
-                display_labor_for_ladder += fix_pp
-            else:
-                detail_args: list[str] = []
-                fixture_detail = nre_detail.get("fixture", {}) if isinstance(nre_detail, dict) else {}
-                fixture_build_hr_detail = _safe_float(fixture_detail.get("build_hr"))
-                if fixture_build_hr_detail > 0:
-                    fixture_rate_detail = _resolve_rate_with_fallback(
-                        fixture_detail.get("build_rate"),
-                        "FixtureBuildRate",
-                        "ShopRate",
-                    )
-                    detail_args.append(
-                        f"- Build labor (lot): {_hours_with_rate_text(fixture_build_hr_detail, fixture_rate_detail)}"
-                    )
-                soft_jaw_hr = float(fixture_detail.get("soft_jaw_hr", 0.0) or 0.0)
-                if soft_jaw_hr > 0:
-                    detail_args.append(f"Soft jaw prep {fmt_hours(soft_jaw_hr)}")
-                if qty > 1:
-                    detail_args.append(f"Amortized across {qty} pcs")
-                if detail_args:
-                    detail_lookup["Fixture Build (amortized)"] = "; ".join(detail_args)
-                _add_labor_cost_line(
-                    label,
-                    fix_pp,
-                    detail_bits=detail_args or None,
+            detail_args = []
+            fixture_detail = nre_detail.get("fixture", {}) if isinstance(nre_detail, dict) else {}
+            fixture_build_hr_detail = _safe_float(fixture_detail.get("build_hr"))
+            if fixture_build_hr_detail > 0:
+                fixture_minutes += fixture_build_hr_detail * 60.0
+                fixture_rate_detail = _resolve_rate_with_fallback(
+                    fixture_detail.get("build_rate"),
+                    "FixtureBuildRate",
+                    "ShopRate",
                 )
-                amortized_nre_total += fix_pp
-                labor_costs_display[label] = float(labor_costs_display.get(label, 0.0)) + fix_pp
+                detail_args.append(
+                    f"- Build labor (lot): {_hours_with_rate_text(fixture_build_hr_detail, fixture_rate_detail)}"
+                )
+            soft_jaw_hr = _safe_float(fixture_detail.get("soft_jaw_hr"))
+            if soft_jaw_hr and soft_jaw_hr > 0:
+                fixture_minutes += soft_jaw_hr * 60.0
+                detail_args.append(f"Soft jaw prep {fmt_hours(soft_jaw_hr)}")
+            if qty > 1:
+                detail_args.append(f"Amortized across {qty} pcs")
+            if detail_args:
+                detail_lookup["Fixture Build (amortized)"] = "; ".join(detail_args)
+            additions["fixture_build_amortized"] = (fix_pp, fixture_minutes)
+            amortized_nre_total += fix_pp
+            if "fixture_build_amortized" not in canonical_bucket_summary:
                 display_labor_for_ladder += fix_pp
-                process_costs_canon.pop("fixture_build_amortized", None)
-            amortized_labels_added.add(label)
 
-    process_items = list((process_costs or {}).items())
-    ordered_process_items: list[tuple[str, Any]] = []
-    remaining_process_items: list[tuple[str, Any]] = []
-    seen_process_keys: set[str] = set()
-
-    for bucket in PREFERRED_PROCESS_BUCKET_ORDER:
-        for key, value in process_items:
-            if _normalize_bucket_key(key) != bucket:
-                continue
-            try:
-                include = (float(value) > 0.0) or show_zeros
-            except Exception:
-                include = show_zeros
-            if not include:
-                continue
-            ordered_process_items.append((key, value))
-            seen_process_keys.add(key)
-
-    for key, value in process_items:
-        if key in seen_process_keys:
-            continue
-        try:
-            include = (float(value) > 0.0) or show_zeros
-        except Exception:
-            include = show_zeros
-        if not include:
-            continue
-        remaining_process_items.append((key, value))
-
-    remaining_process_items.sort(key=lambda kv: _normalize_bucket_key(kv[0]))
+        return additions
 
     if bucket_table_rows:
         render_bucket_table(bucket_table_rows)
 
-    _render_amortized_rows()
+    amortized_overrides = _prepare_amortized_details()
 
-    if bucket_table_rows:
-        for label, _hours_val, _labor_val, _machine_val, total_val in bucket_table_rows:
-            canon_key = label_to_canon.get(label)
-            normalized_key = _normalize_bucket_key(canon_key or label)
-            if normalized_key.startswith("planner_") or normalized_key == "misc":
-                continue
-            _add_labor_cost_line(label, total_val, process_key=canon_key)
-    else:
-        any_rows_rendered = False
-        aggregated: dict[str, dict[str, Any]] = {}
-        aggregated_order: list[str] = []
-        for key, raw_amount in ordered_process_items + remaining_process_items:
-            normalized_key = _normalize_bucket_key(key)
-            if normalized_key.startswith("planner_") or normalized_key == "misc":
-                continue
-            try:
-                amount_val = float(raw_amount or 0.0)
-            except Exception:
-                amount_val = 0.0
-            if not ((amount_val > 0.0) or show_zeros):
-                continue
-            canon_key = _canonical_bucket_key(key)
-            map_key = canon_key or str(key)
-            if map_key not in aggregated:
-                if canon_key:
-                    add_process_notes(canon_key, indent="    ")
-    if labor_cost_totals:
+    bucket_minutes_detail: dict[str, float] = {}
+    bucket_cost_totals: dict[str, float] = {}
+    for canon_key, metrics in canonical_bucket_summary.items():
+        bucket_minutes_detail[canon_key] = float(metrics.get("minutes", 0.0) or 0.0)
+        bucket_cost_totals[canon_key] = float(metrics.get("total", 0.0) or 0.0)
+        label = _display_bucket_label(canon_key, label_overrides)
+        label_to_canon.setdefault(label, canon_key)
+        canon_to_display_label.setdefault(canon_key, label)
+
+    process_costs_for_render = dict(process_costs_canon)
+    process_costs_for_render.update(bucket_cost_totals)
+
+    for canon_key, (amount, minutes) in amortized_overrides.items():
+        process_costs_for_render[canon_key] = amount
+        if minutes > 0:
+            bucket_minutes_detail[canon_key] = minutes
+        label = _display_bucket_label(canon_key, label_overrides)
+        label_to_canon.setdefault(label, canon_key)
+        canon_to_display_label.setdefault(canon_key, label)
+
+    for label, amount in labor_cost_totals.items():
+        if _should_hide_amortized(label):
+            continue
+        try:
+            amount_val = float(amount or 0.0)
+        except Exception:
+            amount_val = 0.0
+        if not ((amount_val > 0.0) or show_zeros):
+            continue
+        canon_key = _canonical_bucket_key(label)
+        if not canon_key:
+            continue
+        process_costs_for_render[canon_key] = amount_val
+        display_label = str(label)
+        canon_to_display_label[canon_key] = display_label
+        label_to_canon[display_label] = canon_key
+
+    for canon_key in process_costs_for_render:
+        label = _display_bucket_label(canon_key, label_overrides)
+        label_to_canon.setdefault(label, canon_key)
+        canon_to_display_label.setdefault(canon_key, label)
+
+    if not canonical_bucket_summary:
+        display_labor_for_ladder = 0.0
         for label, amount in labor_cost_totals.items():
-            if label in labor_costs_display:
-                continue
-            try:
-                display_amount = float(amount or 0.0)
-            except Exception:
-                display_amount = 0.0
             if _should_hide_amortized(label):
                 continue
-            if label in amortized_labels_added:
-                continue
-            labor_costs_display[label] = display_amount
-            row(label, display_amount, indent="  ")
-            proc_total += display_amount
-    elif process_costs_canon:
-        for canon_key, amount in process_costs_canon.items():
-            label = _display_bucket_label(canon_key, label_overrides)
-            label = label.replace("(Amortized)", "(amortized)")
-            if label in labor_costs_display:
-                continue
             try:
-                display_amount = float(amount or 0.0)
+                display_labor_for_ladder += float(amount or 0.0)
             except Exception:
-                display_amount = 0.0
-            if _should_hide_amortized(label):
                 continue
-            if label in amortized_labels_added:
+
+    process_table = _ProcessCostTableRecorder()
+    section_total = render_process_costs(
+        tbl=process_table,
+        process_costs=process_costs_for_render,
+        rates=rates,
+        minutes_detail=bucket_minutes_detail,
+    )
+
+    proc_total = section_total
+
+    misc_total = 0.0
+    for label, amount in labor_cost_totals.items():
+        if _should_hide_amortized(label):
+            continue
+        try:
+            amount_val = float(amount or 0.0)
+        except Exception:
+            amount_val = 0.0
+        if not ((amount_val > 0.0) or show_zeros):
+            continue
+        normalized_label = _normalize_bucket_key(label)
+        canon_key = _canonical_bucket_key(label)
+        normalized_canon = _normalize_bucket_key(canon_key)
+        if normalized_label != "misc" and not normalized_label.startswith("misc"):
+            if normalized_canon != "misc" and not normalized_canon.startswith("misc"):
                 continue
-            labor_costs_display[label] = display_amount
-            row(label, display_amount, indent="  ")
-            proc_total += display_amount
-    elif show_zeros:
+        display_label = str(label)
+        canon_to_display_label[canon_key] = display_label
+        label_to_canon[display_label] = canon_key
+        _add_labor_cost_line(display_label, amount_val, process_key=canon_key)
+        labor_costs_display[display_label] = amount_val
+        misc_total += amount_val
+
+    if misc_total > 0:
+        process_table.had_rows = True
+
+    if not process_table.had_rows and show_zeros:
         row("No process costs", 0.0, indent="  ")
 
     row("Total", proc_total, indent="  ")
