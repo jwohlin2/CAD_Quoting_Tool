@@ -48,7 +48,17 @@ _ALIAS_MAP: dict[str, str] = {
     "turning": "misc",
     "cnc_turning": "misc",
     "wire_edm": "wire_edm",
+    "wire edm": "wire_edm",
+    "wire_edm_windows": "wire_edm",
+    "wire_edm_outline": "wire_edm",
+    "wire_edm_open_id": "wire_edm",
+    "wire_edm_cam_slot_or_profile": "wire_edm",
+    "wire_edm_id_leave": "wire_edm",
+    "wedm": "wire_edm",
+    "edm": "wire_edm",
     "sinker_edm": "sinker_edm",
+    "sinker edm": "sinker_edm",
+    "sinker_edm_finish_burn": "sinker_edm",
     "lap": "grinding",
     "lapping": "grinding",
     "lapping_honing": "grinding",
@@ -127,8 +137,6 @@ def _canonical_process_key(name: Any) -> str | None:
         return None
     if norm in _ALIAS_MAP:
         norm = _ALIAS_MAP[norm]
-    if norm in {"wire_edm", "sinker_edm"}:
-        return "misc"
     if norm in ORDER:
         return norm
     if norm.startswith("planner_"):
