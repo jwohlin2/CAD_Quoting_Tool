@@ -5712,6 +5712,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             self.had_rows = False
             self.rows: list[_ProcessRowRecord] = []
             self._rows: list[dict[str, Any]] = []
+            self._index: dict[str, int] = {}
 
         def add_row(
             self,
@@ -5756,6 +5757,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 canon_key=record_canon,
             )
             self.rows.append(record)
+            if record_canon:
+                self._index[record_canon] = len(self.rows) - 1
             self._rows.append(
                 {
                     "label": display_label,
@@ -5770,6 +5773,42 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 labor_costs_display[display_label] = float(cost or 0.0)
             except Exception:
                 labor_costs_display[display_label] = 0.0
+
+        def update_row(
+            self,
+            canon_key: str,
+            *,
+            hours: float | None = None,
+            rate: float | None = None,
+            cost: float | None = None,
+        ) -> None:
+            index = self._index.get(canon_key)
+            if index is None or index < 0 or index >= len(self.rows):
+                return
+            record = self.rows[index]
+            row_dict = self._rows[index]
+
+            if hours is not None:
+                try:
+                    hours_val = float(hours)
+                except Exception:
+                    hours_val = 0.0
+                record.hours = hours_val
+                row_dict["hours"] = hours_val
+            if rate is not None:
+                try:
+                    rate_val = float(rate)
+                except Exception:
+                    rate_val = 0.0
+                record.rate = rate_val
+                row_dict["rate"] = rate_val
+            if cost is not None:
+                try:
+                    cost_val = float(cost)
+                except Exception:
+                    cost_val = 0.0
+                record.total = cost_val
+                row_dict["cost"] = cost_val
 
     def _prepare_amortized_details() -> dict[str, tuple[float, float]]:
         nonlocal amortized_nre_total, display_labor_for_ladder
@@ -6005,14 +6044,37 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             card_minutes_billed = _safe_float(
                 drilling_summary.get("total_minutes_billed"), default=0.0
             )
-            card_hr = round(card_minutes_billed / 60.0, 2)
             row_hr = round(float(drilling_row.hours or 0.0), 2)
+            row_rate = float(drilling_row.rate or 0.0)
+            row_cost = float(drilling_row.total or 0.0)
+
+            if card_minutes_billed > 0.0:
+                billed_hr = round(card_minutes_billed / 60.0, 2)
+                drill_rate = _rate_for_bucket("drilling", rates or {})
+                if drill_rate <= 0.0:
+                    drill_rate = row_rate
+                if drill_rate <= 0.0:
+                    drill_rate = 0.0
+                billed_cost = round(billed_hr * drill_rate, 2)
+
+                process_table.update_row(
+                    "drilling", hours=billed_hr, rate=drill_rate, cost=billed_cost
+                )
+                drilling_row.hours = billed_hr
+                drilling_row.rate = drill_rate
+                drilling_row.total = billed_cost
+                row_hr = billed_hr
+                row_rate = drill_rate
+                row_cost = billed_cost
+                process_cost_row_details["drilling"] = (billed_hr, drill_rate, billed_cost)
+                labor_costs_display[drilling_row.name] = billed_cost
+                process_costs_for_render["drilling"] = billed_cost
+
+            card_hr = round(card_minutes_billed / 60.0, 2)
             assert abs(card_hr - row_hr) < 0.05, (
                 f"Drilling hours mismatch: card {card_hr} vs row {row_hr}"
             )
 
-            row_cost = float(drilling_row.total or 0.0)
-            row_rate = float(drilling_row.rate or 0.0)
             assert (
                 abs(row_cost - row_hr * row_rate) < 0.51
             ), "Drilling $ ≠ hr × rate"
