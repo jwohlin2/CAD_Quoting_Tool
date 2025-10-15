@@ -620,11 +620,14 @@ def test_dummy_quote_direct_costs_match_across_sections() -> None:
     ladder_line = next(line for line in lines if "Subtotal (Labor + Directs):" in line)
     ladder_subtotal = _extract_currency(ladder_line)
 
-    first_process_idx = lines.index("Process & Labor Costs")
-    second_process_idx = lines.index("Process & Labor Costs", first_process_idx + 1)
-    process_block = lines[second_process_idx + 2 :]
-    labor_line = next(line for line in process_block if line.strip().startswith("Labor"))
-    labor_amount = _extract_currency(labor_line)
+    assert lines.count("Process & Labor Costs") == 1
+    process_idx = lines.index("Process & Labor Costs")
+    process_end = next(
+        (i for i in range(process_idx, len(lines)) if lines[i] == ""), len(lines)
+    )
+    process_block = lines[process_idx + 2 : process_end]
+    total_line = next(line for line in process_block if line.strip().startswith("Total"))
+    labor_amount = _extract_currency(total_line)
     ladder_direct = ladder_subtotal - labor_amount
 
     planner_machine_cost = float(
@@ -648,11 +651,10 @@ def test_render_omits_amortized_rows_for_single_quantity() -> None:
 
     assert all("(amortized" not in line.lower() for line in lines)
 
-    first_process_idx = lines.index("Process & Labor Costs")
-    second_process_idx = lines.index("Process & Labor Costs", first_process_idx + 1)
-    process_rows: list[str] = []
-    for line in lines[second_process_idx + 2 :]:
-        if not line.strip():
-            break
-        process_rows.append(line)
+    assert lines.count("Process & Labor Costs") == 1
+    process_idx = lines.index("Process & Labor Costs")
+    process_end = next(
+        (i for i in range(process_idx, len(lines)) if lines[i] == ""), len(lines)
+    )
+    process_rows = lines[process_idx + 2 : process_end]
     assert all("(lot" not in line.lower() for line in process_rows)
