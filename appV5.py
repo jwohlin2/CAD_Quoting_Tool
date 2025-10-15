@@ -3321,7 +3321,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     totals       = breakdown.get("totals", {}) or {}
     declared_labor_total = float(totals.get("labor_cost", 0.0) or 0.0)
     nre_detail   = breakdown.get("nre_detail", {}) or {}
-    nre          = breakdown.get("nre", {}) or {}
+    nre_raw      = breakdown.get("nre", {}) or {}
+    if isinstance(nre_raw, _MappingABC):
+        nre = dict(nre_raw)
+    else:
+        try:
+            nre = dict(nre_raw or {})
+        except Exception:
+            nre = {}
     material_raw = breakdown.get("material", {}) or {}
     if isinstance(material_raw, _MappingABC):
         material_block = dict(material_raw)
@@ -3397,7 +3404,40 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     process_meta: dict[str, Any] = {}
     bucket_alias_map: dict[str, str] = {}
     applied_process: dict[str, Any] = {}
-    rates        = breakdown.get("rates", {}) or {}
+    rates_raw    = breakdown.get("rates", {}) or {}
+    if isinstance(rates_raw, _MappingABC):
+        rates = dict(rates_raw)
+    else:
+        try:
+            rates = dict(rates_raw or {})
+        except Exception:
+            rates = {}
+
+    def _coerce_rate_value(value: Any) -> float:
+        try:
+            return float(value or 0.0)
+        except Exception:
+            return 0.0
+
+    if "ShopRate" not in rates:
+        fallback_shop = _coerce_rate_value(rates.get("MillingRate"))
+        rates.setdefault("ShopRate", fallback_shop)
+    shop_rate_val = _coerce_rate_value(rates.get("ShopRate"))
+
+    if "EngineerRate" not in rates:
+        engineer_fallback = _coerce_rate_value(rates.get("MillingRate"))
+        if engineer_fallback <= 0 and shop_rate_val > 0:
+            engineer_fallback = shop_rate_val
+        rates.setdefault("EngineerRate", engineer_fallback)
+    engineer_rate_val = _coerce_rate_value(rates.get("EngineerRate"))
+
+    if "ProgrammerRate" not in rates:
+        programmer_fallback = (
+            engineer_rate_val if engineer_rate_val > 0 else _coerce_rate_value(rates.get("MillingRate"))
+        )
+        if programmer_fallback <= 0 and shop_rate_val > 0:
+            programmer_fallback = shop_rate_val
+        rates.setdefault("ProgrammerRate", programmer_fallback)
     params       = breakdown.get("params", {}) or {}
     nre_cost_details = breakdown.get("nre_cost_details", {}) or {}
     labor_cost_details_input_raw = breakdown.get("labor_cost_details", {}) or {}
@@ -3620,6 +3660,22 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     def _hours_with_rate_text(hours: Any, rate: Any) -> str:
         return format_hours_with_rate(hours, rate, currency)
+
+    def _resolve_rate_with_fallback(raw_rate: Any, *fallback_keys: str) -> float:
+        rate_val = _safe_float(raw_rate)
+        if rate_val > 0:
+            return rate_val
+        for key in fallback_keys:
+            if not key:
+                continue
+            try:
+                fallback_val = rates.get(key)
+            except Exception:
+                fallback_val = None
+            resolved = _safe_float(fallback_val)
+            if resolved > 0:
+                return resolved
+        return 0.0
 
     def _pct(x) -> str:
         return format_percent(x)
@@ -4950,20 +5006,43 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     prog = nre_detail.get("programming") or {}
     fix  = nre_detail.get("fixture") or {}
 
+    programmer_hours = _safe_float(prog.get("prog_hr"))
+    engineer_hours = _safe_float(prog.get("eng_hr"))
+    programmer_rate = _resolve_rate_with_fallback(
+        prog.get("prog_rate"), "ProgrammerRate", "ShopRate"
+    )
+    engineer_rate = _resolve_rate_with_fallback(
+        prog.get("eng_rate"), "EngineerRate", "ShopRate"
+    )
+
+    computed_programming_per_part = 0.0
+    if programmer_hours > 0 and programmer_rate > 0:
+        computed_programming_per_part += programmer_hours * programmer_rate
+    if engineer_hours > 0 and engineer_rate > 0:
+        computed_programming_per_part += engineer_hours * engineer_rate
+
+    existing_programming_per_part = _safe_float(nre.get("programming_per_part"))
+    if existing_programming_per_part <= 0 and computed_programming_per_part > 0:
+        nre["programming_per_part"] = computed_programming_per_part
+        if _safe_float(labor_cost_totals.get("Programming (amortized)")) <= 0:
+            labor_cost_totals["Programming (amortized)"] = computed_programming_per_part
+
     # Programming & Eng (auto-hide if zero unless show_zeros)
-    if (prog.get("per_lot", 0.0) > 0) or show_zeros or any(prog.get(k) for k in ("prog_hr", "eng_hr")):
+    if (prog.get("per_lot", 0.0) > 0) or show_zeros or any(
+        _safe_float(prog.get(k)) > 0 for k in ("prog_hr", "eng_hr")
+    ):
         row("Programming & Eng:", float(prog.get("per_lot", 0.0)))
         has_detail = False
-        if prog.get("prog_hr"):
+        if programmer_hours > 0:
             has_detail = True
             write_line(
-                f"- Programmer: {_hours_with_rate_text(prog.get('prog_hr'), prog.get('prog_rate'))}",
+                f"- Programmer: {_hours_with_rate_text(programmer_hours, programmer_rate)}",
                 "    ",
             )
-        if prog.get("eng_hr"):
+        if engineer_hours > 0:
             has_detail = True
             write_line(
-                f"- Engineering: {_hours_with_rate_text(prog.get('eng_hr'), prog.get('eng_rate'))}",
+                f"- Engineering: {_hours_with_rate_text(engineer_hours, engineer_rate)}",
                 "    ",
             )
         if not has_detail:
@@ -4972,13 +5051,18 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 write_detail(str(prog_detail))
 
     # Fixturing (with renamed subline)
-    if (fix.get("per_lot", 0.0) > 0) or show_zeros or fix.get("build_hr"):
+    fixture_build_hours = _safe_float(fix.get("build_hr"))
+    fixture_build_rate = _resolve_rate_with_fallback(
+        fix.get("build_rate"), "FixtureBuildRate", "ShopRate"
+    )
+
+    if (fix.get("per_lot", 0.0) > 0) or show_zeros or fixture_build_hours > 0:
         row("Fixturing:", float(fix.get("per_lot", 0.0)))
         has_detail = False
-        if fix.get("build_hr"):
+        if fixture_build_hours > 0:
             has_detail = True
             write_line(
-                f"- Build Labor: {_hours_with_rate_text(fix.get('build_hr'), fix.get('build_rate'))}",
+                f"- Build Labor: {_hours_with_rate_text(fixture_build_hours, fixture_build_rate)}",
                 "    ",
             )
         if not has_detail:
@@ -5288,15 +5372,23 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 programming_detail_local = (
                     nre_detail.get("programming", {}) if isinstance(nre_detail, dict) else {}
                 )
-                prog_hr_detail = float(programming_detail_local.get("prog_hr", 0.0) or 0.0)
-                prog_rate_detail = float(programming_detail_local.get("prog_rate", 0.0) or 0.0)
+                prog_hr_detail = _safe_float(programming_detail_local.get("prog_hr"))
                 if prog_hr_detail > 0:
+                    prog_rate_detail = _resolve_rate_with_fallback(
+                        programming_detail_local.get("prog_rate"),
+                        "ProgrammerRate",
+                        "ShopRate",
+                    )
                     detail_args.append(
                         f"- Programmer (lot): {_hours_with_rate_text(prog_hr_detail, prog_rate_detail)}"
                     )
-                eng_hr_detail = float(programming_detail_local.get("eng_hr", 0.0) or 0.0)
-                eng_rate_detail = float(programming_detail_local.get("eng_rate", 0.0) or 0.0)
+                eng_hr_detail = _safe_float(programming_detail_local.get("eng_hr"))
                 if eng_hr_detail > 0:
+                    eng_rate_detail = _resolve_rate_with_fallback(
+                        programming_detail_local.get("eng_rate"),
+                        "EngineerRate",
+                        "ShopRate",
+                    )
                     detail_args.append(
                         f"- Engineering (lot): {_hours_with_rate_text(eng_hr_detail, eng_rate_detail)}"
                     )
@@ -5338,11 +5430,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             else:
                 detail_args: list[str] = []
                 fixture_detail = nre_detail.get("fixture", {}) if isinstance(nre_detail, dict) else {}
-                fixture_build_hr_detail = float(fixture_detail.get("build_hr", 0.0) or 0.0)
-                fixture_rate_detail = float(
-                    fixture_detail.get("build_rate", rates.get("FixtureBuildRate", 0.0))
-                )
+                fixture_build_hr_detail = _safe_float(fixture_detail.get("build_hr"))
                 if fixture_build_hr_detail > 0:
+                    fixture_rate_detail = _resolve_rate_with_fallback(
+                        fixture_detail.get("build_rate"),
+                        "FixtureBuildRate",
+                        "ShopRate",
+                    )
                     detail_args.append(
                         f"- Build labor (lot): {_hours_with_rate_text(fixture_build_hr_detail, fixture_rate_detail)}"
                     )
