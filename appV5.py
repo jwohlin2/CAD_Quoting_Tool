@@ -5924,7 +5924,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 bucket_minutes_detail[k] = minutes
 
     # 1b) minutes→$ for the drilling minutes engine (if planner didn’t emit a drilling bucket)
-    drill_min = float((process_plan_summary.get("drilling") or {}).get("total_minutes") or 0.0)
+    drill_summary_source: Mapping[str, Any] | None = None
+    if isinstance(process_plan_summary_local, _MappingABC):
+        candidate = process_plan_summary_local.get("drilling")
+        if isinstance(candidate, _MappingABC):
+            drill_summary_source = candidate
+    if drill_summary_source is None:
+        drill_summary_source = {}
+    drill_min = float(drill_summary_source.get("total_minutes") or 0.0)
     if drill_min > 0:
         process_costs_for_render["drilling"] = round(
             (drill_min / 60.0) * (_rate_for_bucket("drilling", rates) or 0.0), 2
