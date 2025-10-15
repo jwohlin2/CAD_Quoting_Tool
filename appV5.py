@@ -5367,8 +5367,25 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     programming_per_lot_val = _safe_float(prog.get("per_lot"))
     nre_programming_per_part = _safe_float(nre.get("programming_per_part"))
-    if programming_per_lot_val <= 0 and qty == 1 and nre_programming_per_part > 0:
-        programming_per_lot_val = nre_programming_per_part * max(qty, 1)
+    if programming_per_lot_val <= 0 and nre_programming_per_part > 0:
+        qty_for_programming = breakdown.get("qty")
+        if qty_for_programming in (None, ""):
+            decision_state = result.get("decision_state")
+            if isinstance(decision_state, _MappingABC):
+                baseline_state = decision_state.get("baseline")
+                if isinstance(baseline_state, _MappingABC):
+                    qty_for_programming = baseline_state.get("qty")
+        if qty_for_programming in (None, ""):
+            qty_for_programming = qty
+        try:
+            qty_for_programming_float = float(qty_for_programming or 1)
+        except Exception:
+            qty_for_programming_float = float(qty or 1)
+        if qty_for_programming_float <= 0:
+            qty_for_programming_float = 1.0
+        programming_per_lot_val = round(
+            nre_programming_per_part * qty_for_programming_float, 2
+        )
 
     prog_hr_total = float((nre.get("programming_hr") or 0.0) or 0.0)
     programming_cost_total = float((nre.get("programming_cost") or 0.0) or 0.0)
