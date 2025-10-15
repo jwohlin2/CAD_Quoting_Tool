@@ -9953,6 +9953,17 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 "basis": ["planner_milling_backfill"],
             }
 
+    if planner_used:
+        process_costs.clear()
+        process_costs.update(
+            {
+                "Machine": round(planner_machine_cost_total, 2),
+                "Labor": round(planner_labor_cost_total, 2),
+            }
+        )
+        breakdown["pricing_source"] = "planner"
+        baseline["pricing_source"] = "planner"
+
     project_hours = _coerce_float_or_none(value_map.get("Project Management Hours")) or 0.0
     toolmaker_hours = _coerce_float_or_none(value_map.get("Tool & Die Maker Hours")) or 0.0
     toolmaker_rate = _lookup_rate("ToolmakerRate", rates, params, default_rates, fallback=85.0)
