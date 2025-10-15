@@ -4926,13 +4926,22 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 ):
                     detail_lines.append("")
                 detail_lines.extend(price_lines)
-            stock_L = _fmt_dim(ui_vars.get("Plate Length (in)"))
-            stock_W = _fmt_dim(ui_vars.get("Plate Width (in)"))
-            th_in = ui_vars.get("Thickness (in)")
-            if th_in in (None, ""):
-                th_in = g.get("thickness_in_guess")
-            if not th_in:
-                th_in = 1.0
+            L_in = ui_vars.get("Plate Length (in)") or g.get("plate_length_in")
+            W_in = ui_vars.get("Plate Width (in)") or g.get("plate_width_in")
+            if not L_in or not W_in:
+                L_mm = g.get("plate_length_mm")
+                W_mm = g.get("plate_width_mm")
+                if (L_mm is None or W_mm is None) and isinstance(g.get("derived", {}), dict):
+                    bbox = g["derived"].get("bbox_mm")
+                    if bbox and len(bbox) >= 2:
+                        L_mm, W_mm = float(bbox[0]), float(bbox[1])
+                if L_in is None and L_mm is not None:
+                    L_in = L_mm / 25.4
+                if W_in is None and W_mm is not None:
+                    W_in = W_mm / 25.4
+            stock_L = _fmt_dim(L_in)
+            stock_W = _fmt_dim(W_in)
+            th_in = ui_vars.get("Thickness (in)") or g.get("thickness_in_guess") or 1.0
             stock_T = _fmt_dim(th_in)
             append_line(f"  Stock used: {stock_L} × {stock_W} × {stock_T} in")
             if detail_lines:
