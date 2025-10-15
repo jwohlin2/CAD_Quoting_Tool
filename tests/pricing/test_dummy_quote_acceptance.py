@@ -3,6 +3,7 @@ import math
 import re
 
 import appV5
+from cad_quoter.domain_models import normalize_material_key
 
 
 _PLANNER_LINE_ITEMS = [
@@ -52,8 +53,8 @@ DUMMY_QUOTE_RESULT = {
     "ui_vars": {"Material": "Aluminum MIC6"},
     "decision_state": {
         "baseline": {
-            "normalized_quote_material": "Aluminum MIC6",
-            "drill_params": {"material": "Aluminum MIC6"},
+            "normalized_quote_material": "aluminum mic6",
+            "drill_params": {"material": "aluminum mic6"},
             "process_hours": {
                 "milling": 6.0,
                 "drilling": 1.5,
@@ -74,7 +75,7 @@ DUMMY_QUOTE_RESULT = {
         "pricing_source": "planner",
         "pricing_source_text": "/mnt/planner/feeds.csv",
         "drilling_meta": {
-            "material": "Aluminum MIC6",
+            "material": "aluminum mic6",
             "material_display": "Aluminum MIC6",
             "speeds_feeds_path": "/mnt/planner/feeds.csv",
             "speeds_feeds_loaded": True,
@@ -355,8 +356,12 @@ def test_dummy_quote_material_consistency() -> None:
     drill_material = baseline["drill_params"]["material"]
     rendered_material = drilling_meta["material"]
 
-    assert normalized == drill_material == rendered_material
-    assert any(normalized in entry for entry in drill_debug)
+    normalized_key = normalize_material_key(normalized)
+    drill_key = normalize_material_key(drill_material)
+    rendered_key = normalize_material_key(rendered_material)
+
+    assert normalized_key == drill_key == rendered_key
+    assert any(normalized_key in entry.lower() for entry in drill_debug)
 
 
 def test_dummy_quote_pricing_source_reflects_planner_usage() -> None:
@@ -480,7 +485,12 @@ def test_dummy_quote_drill_debug_material_alignment() -> None:
     assert match is not None
     debug_material = match.group(1).strip()
 
-    assert debug_material == material_block == breakdown["drilling_meta"]["material"]
+    debug_key = normalize_material_key(debug_material)
+    breakdown_key = normalize_material_key(material_block)
+    drilling_meta_key = normalize_material_key(breakdown["drilling_meta"]["material"])
+
+    assert debug_key == breakdown_key == drilling_meta_key
+    assert breakdown["drilling_meta"].get("material_display") == material_block
 
 
 def test_dummy_quote_drill_debug_ranges_and_index() -> None:

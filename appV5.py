@@ -814,7 +814,7 @@ from cad_quoter.domain_models import (
     coerce_float_or_none as _coerce_float_or_none,
 )
 from cad_quoter.domain_models import (
-    normalize_material_key as _normalize_lookup_key,
+    normalize_material_key,
 )
 from cad_quoter.coerce import to_float, to_int
 from cad_quoter.utils import compact_dict, jdump, json_safe_copy, sdict
@@ -874,6 +874,8 @@ from cad_quoter.rates import (
     two_bucket_to_flat,
 )
 from cad_quoter.vendors.mcmaster_stock import lookup_sku_and_price_for_mm
+
+_normalize_lookup_key = normalize_material_key
 
 _CANONICAL_MIC6_DISPLAY = "Aluminum MIC6"
 _MIC6_NORMALIZED_KEY = _normalize_lookup_key(_CANONICAL_MIC6_DISPLAY)
@@ -3871,7 +3873,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     qty = int(qty_raw or 1)
     price        = float(result.get("price", totals.get("price", 0.0)))
 
-    g = breakdown.get("geo_context") or breakdown.get("geo") or result.get("geo") or {}
+    g = (
+        breakdown.get("geo_context")
+        or breakdown.get("geo")
+        or result.get("geom")
+        or result.get("geo")
+        or {}
+    )
     if not isinstance(g, dict):
         g = {}
 
@@ -4311,7 +4319,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     ui_vars = result.get("ui_vars") or {}
     if not isinstance(ui_vars, dict):
         ui_vars = {}
-    g = result.get("geo") or {}
+    g = result.get("geom") or result.get("geo") or {}
     if not isinstance(g, dict):
         g = {}
     drill_debug_entries: list[str] = []
@@ -10210,6 +10218,63 @@ def _df_to_value_map(df: Any) -> dict[str, Any]:
     return value_map
 
 
+def build_geometry_context(
+    quote_source: Any,
+    *,
+    base_geometry: Mapping[str, Any] | None = None,
+    value_map: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return a canonical geometry context derived from quote inputs."""
+
+    if isinstance(base_geometry, dict):
+        geom: dict[str, Any] = dict(base_geometry)
+    elif isinstance(base_geometry, _MappingABC):
+        geom = {str(key): value for key, value in base_geometry.items()}
+    else:
+        geom = {}
+
+    resolved_map: Mapping[str, Any] | None
+    if isinstance(value_map, _MappingABC):
+        resolved_map = value_map
+    elif isinstance(quote_source, _MappingABC):
+        resolved_map = typing.cast(Mapping[str, Any], quote_source)
+    else:
+        try:
+            resolved_map = _df_to_value_map(quote_source)
+        except Exception:
+            resolved_map = None
+
+    material_text: str | None = None
+    if isinstance(resolved_map, _MappingABC):
+        for field in ("Material Name", "Material"):
+            raw_value = resolved_map.get(field)
+            text = str(raw_value or "").strip()
+            if text:
+                material_text = text
+                break
+        if material_text:
+            geom.setdefault("material", material_text)
+            geom.setdefault("material_name", material_text)
+
+        thickness_mm_ui = _coerce_positive_float(resolved_map.get("Thickness (mm)"))
+        if thickness_mm_ui is not None:
+            geom.setdefault("thickness_mm", thickness_mm_ui)
+
+        thickness_in_ui = _coerce_positive_float(resolved_map.get("Thickness (in)"))
+        if thickness_in_ui is not None:
+            geom.setdefault("thickness_in", thickness_in_ui)
+
+        hole_count_ui = _coerce_float_or_none(resolved_map.get("Hole Count"))
+        if hole_count_ui is not None and hole_count_ui > 0:
+            try:
+                geom.setdefault("hole_count", int(round(float(hole_count_ui))))
+            except Exception:
+                pass
+
+    _ensure_geo_context_fields(geom, resolved_map)
+    return geom
+
+
 def _lookup_rate(name: str, *sources: Mapping[str, Any] | None, fallback: float = 0.0) -> float:
     for source in sources:
         if not isinstance(source, _MappingABC):
@@ -10325,8 +10390,23 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     **_: Any,
 ) -> dict[str, Any]:
     value_map = _df_to_value_map(df)
+    quote_df_canonical: Any = None
+    if _HAS_PANDAS and "pd" in globals():
+        import pandas as pd  # type: ignore
+
+        if isinstance(df, pd.DataFrame):
+            try:
+                quote_df_canonical = coerce_or_make_vars_df(df.copy())
+            except Exception:
+                quote_df_canonical = None
+
+    geom = build_geometry_context(
+        quote_df_canonical if quote_df_canonical is not None else value_map,
+        base_geometry=geo,
+        value_map=value_map,
+    )
     planner_inputs = dict(ui_vars or {})
-    geo_payload: dict[str, Any] = dict(geo or {})
+    geo_payload: dict[str, Any] = geom
     state = _ensure_quote_state(quote_state)
 
     speeds_feeds_csv_path = _coerce_speeds_feeds_csv_path(
@@ -10350,8 +10430,12 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     state.ui_vars = dict(planner_inputs)
 
     qty = _coerce_float_or_none(value_map.get("Qty")) or 1.0
-    material_choice = value_map.get("Material Name") or value_map.get("Material") or ""
-    material_text = str(material_choice or "").strip()
+    material_text = str(
+        geom.get("material")
+        or value_map.get("Material Name")
+        or value_map.get("Material")
+        or ""
+    ).strip()
 
     scrap_value = value_map.get("Scrap Percent (%)")
     normalized_scrap = normalize_scrap_pct(scrap_value)
@@ -10451,7 +10535,6 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             volume_in3 = float(length_in) * float(width_in) * float(thickness_in_val)
             net_volume_cm3 = volume_in3 * 16.387064
 
-    _ensure_geo_context_fields(geo_payload, value_map)
     removal_mass_g = _holes_removed_mass_g(geo_payload)
     if net_volume_cm3 and density_g_cc and removal_mass_g:
         net_mass_g = float(net_volume_cm3) * float(density_g_cc)
@@ -10479,20 +10562,26 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         "fai_required": bool(fai_required),
     }
 
+    drill_params: dict[str, Any] = baseline.setdefault("drill_params", {})
+    normalized_drill_material = normalize_material_key(str(geom.get("material") or material_text))
+    if normalized_drill_material:
+        drill_params["material"] = normalized_drill_material
+    else:
+        drill_params.pop("material", None)
+
     geo_derived = dict(geo_payload.get("derived", {})) if isinstance(geo_payload, dict) else {}
     geo_derived.setdefault("fai_required", bool(fai_required))
     if isinstance(geo_payload, dict):
-        geo_payload = dict(geo_payload)
+        geo_payload["derived"] = geo_derived
     else:
-        geo_payload = {}
-    geo_payload["derived"] = geo_derived
+        geo_payload = {"derived": geo_derived}
 
     try:
         build_suggest_payload(geo_payload, baseline, dict(rates or {}), coerce_bounds(state.bounds))
     except Exception:
         pass
 
-    state.geo = dict(geo_payload)
+    state.geo = geo_payload if isinstance(geo_payload, dict) else {}
     state.baseline = dict(baseline)
     state.user_overrides = dict(getattr(state, "user_overrides", {}))
     state.suggestions = dict(getattr(state, "suggestions", {}))
@@ -10551,7 +10640,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         "red_flags": [],
         "totals": totals_block,
     }
-    breakdown["geo_context"] = dict(geo_payload)
+    breakdown["geo_context"] = geo_payload if isinstance(geo_payload, dict) else {}
 
     family = None
     if isinstance(geo_payload, _MappingABC):
@@ -10999,6 +11088,14 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
 
     drilling_rate = _lookup_rate("DrillingRate", rates, params, default_rates, fallback=75.0)
     drilling_meta_container = breakdown.setdefault("drilling_meta", {})
+    if isinstance(drilling_meta_container, dict):
+        if material_text:
+            drilling_meta_container.setdefault("material_display", material_text)
+        if normalized_drill_material:
+            drilling_meta_container["material"] = normalized_drill_material
+            drilling_meta_container.setdefault("material_key", normalized_drill_material)
+        elif material_text:
+            drilling_meta_container.setdefault("material", material_text)
     if not use_planner:
         if hole_diams and thickness_in and drilling_rate > 0:
             drill_debug_lines: list[str] = []
@@ -11212,6 +11309,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         breakdown["speeds_feeds_path"] = speeds_feeds_csv_path
         breakdown["speeds_feeds_loaded"] = bool(speeds_feeds_loaded)
 
+    geo_ref = geo_payload if isinstance(geo_payload, dict) else {}
+
     result = {
         "decision_state": {
             "baseline": baseline,
@@ -11221,7 +11320,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             "effective_sources": state.effective_sources,
         },
         "breakdown": breakdown,
-        "geo": dict(geo_payload),
+        "geo": geo_ref,
+        "geom": geo_ref,
         "app_meta": {"llm_debug_enabled": APP_ENV.llm_debug_enabled},
     }
 
