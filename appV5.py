@@ -5586,6 +5586,77 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 continue
 
     process_table = _ProcessCostTableRecorder()
+
+    def _norm(s: str) -> str:
+        import re
+
+        return re.sub(r"[^a-z0-9]+", "_", str(s or "").lower()).strip("_")
+
+    def _bucket_mode(key: str) -> str:
+        # buckets that should price as labor
+        laborish = {
+            "finishing_deburr",
+            "inspection",
+            "assembly",
+            "toolmaker_support",
+            "ehs_compliance",
+            "fixture_build_amortized",
+            "programming_amortized",
+        }
+        if _norm(key) in laborish:
+            return "labor"
+        return "machine"
+
+    def _rate_for_bucket(key: str, rates: dict) -> float:
+        # Try specific, then fallbacks that match process_cost_renderer’s lookup
+        # (Programming/Drilling/etc), then generic LaborRate/MachineRate.
+        candidates = {
+            "milling": ["MillingRate"],
+            "drilling": ["DrillingRate"],
+            "counterbore": ["CounterboreRate", "DrillingRate"],
+            "tapping": ["TappingRate", "DrillingRate"],
+            "grinding": [
+                "GrindingRate",
+                "SurfaceGrindRate",
+                "ODIDGrindRate",
+                "JigGrindRate",
+            ],
+            "finishing_deburr": ["FinishingRate", "DeburrRate"],
+            "saw_waterjet": ["SawWaterjetRate", "SawRate", "WaterjetRate"],
+            "inspection": ["InspectionRate"],
+            "wire_edm": ["WireEDMRate", "EDMRate"],
+            "sinker_edm": ["SinkerEDMRate", "EDMRate"],
+        }
+        norm = _norm(key)
+        for k in candidates.get(norm, []):
+            v = rates.get(k) or rates.get(_norm(k))
+            if isinstance(v, (int, float)) and v > 0:
+                return float(v)
+        # final fallbacks
+        fallback = "LaborRate" if _bucket_mode(norm) == "labor" else "MachineRate"
+        v = rates.get(fallback) or rates.get(_norm(fallback))
+        return float(v) if isinstance(v, (int, float)) else 0.0
+
+    # Build dollars from minutes if missing
+    for canon_key, meta in (canonical_bucket_summary or {}).items():
+        minutes = float(meta.get("minutes") or 0.0)
+        has_money = (
+            (meta.get("labor", 0.0) or 0.0)
+            + (meta.get("machine", 0.0) or 0.0)
+            + (meta.get("total", 0.0) or 0.0)
+        )
+        if minutes > 0 and has_money <= 0.0:
+            rate = _rate_for_bucket(canon_key, rates or {})
+            dollars = (minutes / 60.0) * rate if rate > 0 else 0.0
+            if dollars > 0:
+                process_costs_for_render[canon_key] = (
+                    process_costs_for_render.get(canon_key, 0.0) + round(dollars, 2)
+                )
+                # also stash minutes so the renderer shows hours & rate nicely
+                bucket_minutes_detail[canon_key] = (
+                    bucket_minutes_detail.get(canon_key, 0.0) + minutes
+                )
+
     section_total = render_process_costs(
         tbl=process_table,
         process_costs=process_costs_for_render,
