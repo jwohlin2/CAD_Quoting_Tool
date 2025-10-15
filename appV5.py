@@ -9813,6 +9813,56 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         length_in = _coerce_float_or_none(value_map.get("Plate Length (in)"))
         width_in = _coerce_float_or_none(value_map.get("Plate Width (in)"))
         thickness_in_val = _coerce_float_or_none(value_map.get("Thickness (in)"))
+
+        if isinstance(geo_payload, _MappingABC):
+            if length_in is None:
+                length_in = _coerce_float_or_none(
+                    geo_payload.get("plate_len_in")
+                    or geo_payload.get("plate_length_in")
+                )
+            if width_in is None:
+                width_in = _coerce_float_or_none(
+                    geo_payload.get("plate_wid_in")
+                    or geo_payload.get("plate_width_in")
+                )
+
+            if length_in is None:
+                length_mm = _coerce_positive_float(
+                    geo_payload.get("plate_len_mm")
+                    or geo_payload.get("plate_length_mm")
+                )
+                if length_mm:
+                    length_in = float(length_mm) / 25.4
+            if width_in is None:
+                width_mm = _coerce_positive_float(
+                    geo_payload.get("plate_wid_mm")
+                    or geo_payload.get("plate_width_mm")
+                )
+                if width_mm:
+                    width_in = float(width_mm) / 25.4
+
+            if thickness_in_val is None:
+                thickness_in_val = _coerce_float_or_none(geo_payload.get("thickness_in"))
+                if thickness_in_val is None:
+                    thickness_mm_geo = _coerce_positive_float(geo_payload.get("thickness_mm"))
+                    if thickness_mm_geo:
+                        thickness_in_val = float(thickness_mm_geo) / 25.4
+
+            if length_in is None or width_in is None:
+                derived_ctx = geo_payload.get("derived")
+                if isinstance(derived_ctx, _MappingABC):
+                    bbox_mm = derived_ctx.get("bbox_mm")
+                    if (
+                        isinstance(bbox_mm, (list, tuple))
+                        and len(bbox_mm) == 2
+                    ):
+                        bbox_L_mm = _coerce_positive_float(bbox_mm[0])
+                        bbox_W_mm = _coerce_positive_float(bbox_mm[1])
+                        if length_in is None and bbox_L_mm:
+                            length_in = float(bbox_L_mm) / 25.4
+                        if width_in is None and bbox_W_mm:
+                            width_in = float(bbox_W_mm) / 25.4
+
         if length_in and width_in and thickness_in_val:
             volume_in3 = float(length_in) * float(width_in) * float(thickness_in_val)
             net_volume_cm3 = volume_in3 * 16.387064
