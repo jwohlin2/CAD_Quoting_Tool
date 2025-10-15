@@ -816,6 +816,7 @@ from cad_quoter.llm_suggest import (
     get_llm_quote_explanation,
 )
 from cad_quoter.pricing import (
+    BACKUP_CSV_NAME,
     LB_PER_KG,
     PricingEngine,
     create_default_registry,
@@ -861,6 +862,24 @@ from cad_quoter.pricing.time_estimator import (
 from cad_quoter.pricing.wieland import lookup_price as lookup_wieland_price
 from cad_quoter.rates import migrate_flat_to_two_bucket, two_bucket_to_flat
 from cad_quoter.vendors.mcmaster_stock import lookup_sku_and_price_for_mm
+
+_CANONICAL_MIC6_DISPLAY = "Aluminum MIC6"
+_MIC6_NORMALIZED_KEY = _normalize_lookup_key(_CANONICAL_MIC6_DISPLAY)
+_MATERIAL_META_KEY_BY_NORMALIZED: dict[str, str] = {}
+for _raw_meta_key in MATERIAL_MAP:
+    _normalized_meta_key = _normalize_lookup_key(_raw_meta_key)
+    if _normalized_meta_key and _normalized_meta_key not in _MATERIAL_META_KEY_BY_NORMALIZED:
+        _MATERIAL_META_KEY_BY_NORMALIZED[_normalized_meta_key] = _raw_meta_key
+_CANONICAL_MIC6_PRICING_KEY = next(
+    (key for key in ("6061", "6061-T6") if key in MATERIAL_MAP),
+    None,
+)
+if _MIC6_NORMALIZED_KEY and _CANONICAL_MIC6_PRICING_KEY:
+    _MATERIAL_META_KEY_BY_NORMALIZED.setdefault(
+        _MIC6_NORMALIZED_KEY,
+        _CANONICAL_MIC6_PRICING_KEY,
+    )
+
 try:
     _DEFAULT_SYSTEM_SUGGEST = load_text("system_suggest.txt").strip()
 except FileNotFoundError:  # pragma: no cover - defensive fallback
@@ -3342,18 +3361,25 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if canonical_material_breakdown:
         material_selection.setdefault("canonical", canonical_material_breakdown)
         material_selection.setdefault("canonical_material", canonical_material_breakdown)
+    canonical_display_lookup = ""
+    if normalized_material_key:
+        canonical_display_lookup = str(
+            MATERIAL_DISPLAY_BY_KEY.get(normalized_material_key, "")
+        ).strip()
     material_display_label = str(
-        material_selection.get("display")
-        or material_selection.get("material_display")
+        material_selection.get("material_display")
+        or material_selection.get("display")
         or canonical_material_breakdown
         or ""
     ).strip()
-    if not material_display_label and normalized_material_key:
+    if canonical_display_lookup:
+        material_display_label = canonical_display_lookup
+    elif not material_display_label and normalized_material_key:
         fallback_display = MATERIAL_DISPLAY_BY_KEY.get(normalized_material_key, "")
         if fallback_display:
             material_display_label = str(fallback_display).strip()
     if material_display_label:
-        material_selection.setdefault("material_display", material_display_label)
+        material_selection["material_display"] = material_display_label
     if normalized_material_key:
         material_selection.setdefault("normalized_material_key", normalized_material_key)
         material_selection.setdefault("material_lookup", normalized_material_key)
@@ -6682,6 +6708,90 @@ def pct(value: Any, default: float | None = 0.0) -> float | None:
 
 _DEFAULT_PRICING_ENGINE = SERVICE_CONTAINER.get_pricing_engine()
 
+
+def _text_contains_plate_signal(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    lowered = value.strip().lower()
+    if not lowered:
+        return False
+    if "mic6" in lowered or "mic-6" in lowered or "mic 6" in lowered:
+        return True
+    if "flat stock" in lowered:
+        return True
+    if "2d" in lowered and "plate" in lowered:
+        return True
+    return bool(re.search(r"\bplate\b", lowered))
+
+
+def _overrides_indicate_plate(overrides: Any, *, depth: int = 2) -> bool:
+    if depth < 0 or overrides is None:
+        return False
+    if isinstance(overrides, str):
+        return _text_contains_plate_signal(overrides)
+    if isinstance(overrides, _MappingABC):
+        for key, value in overrides.items():
+            if _text_contains_plate_signal(str(key)) or _text_contains_plate_signal(value):
+                return True
+            if depth > 0:
+                if isinstance(value, _MappingABC):
+                    if _overrides_indicate_plate(value, depth=depth - 1):
+                        return True
+                elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+                    for item in value:
+                        if _overrides_indicate_plate(item, depth=depth - 1):
+                            return True
+        for nested_key in (
+            "stock_recommendation",
+            "geo_context",
+            "derived",
+            "stock",
+            "geometry",
+            "dimensions",
+        ):
+            nested = overrides.get(nested_key)
+            if _overrides_indicate_plate(nested, depth=depth - 1):
+                return True
+        for dim_key in (
+            "plate_length_mm",
+            "plate_width_mm",
+            "plate_length_in",
+            "plate_width_in",
+            "plate_len_mm",
+            "plate_wid_mm",
+            "plate_len_in",
+            "plate_wid_in",
+        ):
+            if overrides.get(dim_key):
+                return True
+        planner_family = overrides.get("process_planner_family")
+        if _text_contains_plate_signal(planner_family):
+            return True
+        geometry_kind = overrides.get("geometry_kind") or overrides.get("geometry_type")
+        if _text_contains_plate_signal(geometry_kind):
+            return True
+        return False
+    if isinstance(overrides, Sequence) and not isinstance(overrides, (str, bytes)):
+        for item in overrides:
+            if _overrides_indicate_plate(item, depth=depth - 1):
+                return True
+    return False
+
+
+def _pricing_meta_key_for_normalized(normalized_key: str | None) -> str | None:
+    if not normalized_key:
+        return None
+    meta_key = _MATERIAL_META_KEY_BY_NORMALIZED.get(normalized_key)
+    if meta_key:
+        return meta_key
+    for display_key, keywords in MATERIAL_KEYWORDS.items():
+        if normalized_key in keywords:
+            meta_key = _MATERIAL_META_KEY_BY_NORMALIZED.get(display_key)
+            if meta_key:
+                return meta_key
+    return None
+
+
 def compute_mass_and_scrap_after_removal(
     net_mass_g: float | None,
     scrap_frac: float | None,
@@ -6770,27 +6880,37 @@ def _compute_scrap_mass_g(
     return None
 
 
-def _material_price_from_choice(choice: str, material_lookup: dict[str, float]) -> float | None:
-    """Resolve a material price per-gram for the editor helpers."""
+def _material_price_per_g_from_choice(
+    choice: str, material_lookup: dict[str, float]
+) -> tuple[float | None, str]:
+    """Resolve a material price per-gram along with its source label."""
 
     choice = str(choice or "").strip()
     if not choice:
-        return None
+        return None, ""
 
     norm_choice = _normalize_lookup_key(choice)
     if norm_choice == MATERIAL_OTHER_KEY:
-        return None
+        return None, ""
 
     price = material_lookup.get(norm_choice)
-    if price is None:
-        try:
-            price_per_kg, _src = _resolve_material_unit_price(choice, unit="kg")
-        except Exception:
-            return None
-        if not price_per_kg:
-            return None
-        price = float(price_per_kg) / 1000.0
-    return float(price)
+    if price is not None:
+        return float(price), "material_lookup"
+
+    try:
+        price_per_kg, source_label = _resolve_material_unit_price(choice, unit="kg")
+    except Exception:
+        return None, ""
+    if not price_per_kg:
+        return None, source_label or ""
+    return float(price_per_kg) / 1000.0, source_label or ""
+
+
+def _material_price_from_choice(choice: str, material_lookup: dict[str, float]) -> float | None:
+    """Resolve a material price per-gram for the editor helpers."""
+
+    price_per_g, _source = _material_price_per_g_from_choice(choice, material_lookup)
+    return price_per_g
 
 def _update_material_price_field(
     material_choice_var: Any,
@@ -6827,26 +6947,71 @@ def compute_material_cost(
     overrides = overrides or {}
     pricing_engine = pricing or _DEFAULT_PRICING_ENGINE
 
-    key = (material_name or "").strip().upper()
-    meta = MATERIAL_MAP.get(key)
+    requested_material_name = str(material_name or "").strip()
+    normalized_requested_key = _normalize_lookup_key(requested_material_name)
+    plate_hint = _text_contains_plate_signal(requested_material_name) or _overrides_indicate_plate(overrides)
+    is_aluminum = bool(normalized_requested_key and "alum" in normalized_requested_key)
+
+    canonical_display = MATERIAL_DISPLAY_BY_KEY.get(normalized_requested_key, "")
+    normalized_material_key = normalized_requested_key
+    if is_aluminum and plate_hint:
+        canonical_display = _CANONICAL_MIC6_DISPLAY
+        normalized_material_key = _MIC6_NORMALIZED_KEY or normalized_requested_key
+    if not canonical_display and normalized_material_key:
+        canonical_display = MATERIAL_DISPLAY_BY_KEY.get(normalized_material_key, "")
+
+    resolved_display = canonical_display or requested_material_name
+    normalized_material_key = _normalize_lookup_key(resolved_display)
+    key = resolved_display.strip().upper()
+
+    meta_lookup_key = _pricing_meta_key_for_normalized(normalized_material_key)
+    if meta_lookup_key is None and normalized_requested_key != normalized_material_key:
+        meta_lookup_key = _pricing_meta_key_for_normalized(normalized_requested_key)
+
+    meta = MATERIAL_MAP.get(meta_lookup_key) if meta_lookup_key else None
+    if meta is None and key in MATERIAL_MAP:
+        meta_lookup_key = key
+        meta = MATERIAL_MAP[key]
+    if meta is None and requested_material_name:
+        original_upper = requested_material_name.strip().upper()
+        if original_upper in MATERIAL_MAP:
+            meta_lookup_key = original_upper
+            meta = MATERIAL_MAP[original_upper]
+    if meta is None and is_aluminum and _CANONICAL_MIC6_PRICING_KEY:
+        meta_lookup_key = _CANONICAL_MIC6_PRICING_KEY
+        meta = MATERIAL_MAP.get(meta_lookup_key)
+
     if meta is None:
-        if "AL" in key or "6061" in key:
-            meta = MATERIAL_MAP["6061"].copy()
-        elif "C110" in key or "COPPER" in key:
-            meta = MATERIAL_MAP["C110"].copy()
-        else:
-            meta = {"symbol": key or "XAL", "basis": "usd_per_kg"}
+        fallback_symbol = "XAL" if is_aluminum else (key or "XAL")
+        fallback_basis = "index_usd_per_tonne" if fallback_symbol == "XAL" else "usd_per_kg"
+        meta = {"symbol": fallback_symbol, "basis": fallback_basis}
+        if not meta_lookup_key:
+            meta_lookup_key = key or fallback_symbol
     else:
         meta = meta.copy()
 
-    symbol = str(meta.get("symbol", key or "XAL"))
-    basis = str(meta.get("basis", "index_usd_per_tonne"))
+    symbol = str(meta.get("symbol", "XAL" if is_aluminum else key or "XAL"))
+    basis_default = "index_usd_per_tonne" if symbol == "XAL" else "usd_per_kg"
+    basis = str(meta.get("basis", basis_default))
+
+    material_name = resolved_display
 
     vendor_csv = vendor_csv or ""
     usd_per_kg: float | None = None
     source = ""
     basis_used = basis
     price_candidates: list[str] = []
+
+    def _remember_candidate(label: Any) -> None:
+        text = str(label or "").strip()
+        if text and text not in price_candidates:
+            price_candidates.append(text)
+
+    _remember_candidate(canonical_display)
+    if requested_material_name and requested_material_name != canonical_display:
+        _remember_candidate(requested_material_name)
+    _remember_candidate(meta_lookup_key)
+    _remember_candidate(symbol)
 
     if vendor_csv:
         try:
@@ -6920,15 +7085,13 @@ def compute_material_cost(
                 basis_used = "usd_per_kg"
 
     if usd_per_kg is None:
-        wieland_key = meta.get("wieland_key")
+        wieland_key = meta.get("wieland_key") if isinstance(meta, _MappingABC) else None
         if wieland_key:
-            price_candidates.append(str(wieland_key))
-        if material_name:
-            price_candidates.append(str(material_name))
-        if key:
-            price_candidates.append(str(key))
-        if symbol:
-            price_candidates.append(str(symbol))
+            _remember_candidate(wieland_key)
+        _remember_candidate(material_name)
+        _remember_candidate(key)
+        _remember_candidate(meta_lookup_key)
+        _remember_candidate(symbol)
 
         usd_wieland, source_wieland = lookup_wieland_price(price_candidates)
         if usd_wieland is not None:
@@ -7002,6 +7165,11 @@ def compute_material_cost(
 
     detail = {
         "material_name": material_name,
+        "material_display": canonical_display or material_name,
+        "canonical_material": canonical_display or material_name,
+        "requested_material_name": requested_material_name,
+        "normalized_material_key": normalized_material_key,
+        "material_lookup_key": meta_lookup_key or key,
         "symbol": symbol,
         "basis": basis_used,
         "source": source,
