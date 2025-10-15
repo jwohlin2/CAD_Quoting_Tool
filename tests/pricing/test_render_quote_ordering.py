@@ -524,12 +524,12 @@ def test_render_quote_hour_summary_adds_programming_hours() -> None:
     summary_block = lines[summary_idx:summary_idx + 10]
     assert any("Programming" in line and "2.00 hr" in line for line in summary_block)
     assert any(
-        "Programming (amortized per part)" in line and "0.40 hr" in line
+        "Programming (amortized)" in line and "0.40 hr" in line
         for line in summary_block
     )
     assert any("Fixture Build" in line and "1.50 hr" in line for line in summary_block)
     assert any(
-        "Fixture Build (amortized per part)" in line and "0.30 hr" in line
+        "Fixture Build (amortized)" in line and "0.30 hr" in line
         for line in summary_block
     )
     assert any("Total Hours" in line and "6.50 hr" in line for line in summary_block)

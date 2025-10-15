@@ -3179,13 +3179,13 @@ def _canonical_hour_label(label: str | None) -> str:
         return ""
     lookup = {
         "programming": "Programming",
-        "programming (lot)": "Programming (lot)",
+        "programming (lot)": "Programming",
         "programming (amortized)": "Programming (amortized)",
-        "programming (amortized per part)": "Programming (amortized per part)",
+        "programming (amortized per part)": "Programming (amortized)",
         "fixture build": "Fixture Build",
-        "fixture build (lot)": "Fixture Build (lot)",
+        "fixture build (lot)": "Fixture Build",
         "fixture build (amortized)": "Fixture Build (amortized)",
-        "fixture build (amortized per part)": "Fixture Build (amortized per part)",
+        "fixture build (amortized per part)": "Fixture Build (amortized)",
     }
     return lookup.get(text.lower(), text)
 
@@ -4031,8 +4031,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             append_line("")
 
     app_meta = result.setdefault("app_meta", {})
-    # Always show drill debug in the rendered quote; the nice sections depend on these signals
-    if drill_debug_entries:
+    # Only surface drill debug when LLM debug is enabled for this quote.
+    if drill_debug_entries and llm_debug_enabled_flag:
         # Order so legacy per-bin “OK …” lines appear first, then tables/summary.
         def _dbg_sort(a: str, b: str) -> int:
             a_ok = a.strip().lower().startswith("ok ")
@@ -5767,19 +5767,19 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             _emit_hour_row("Planner Labor", round(planner_labor_hr, 2), include_in_total=False)
             _emit_hour_row("Planner Machine", round(planner_machine_hr, 2), include_in_total=False)
 
-        _emit_hour_row("Programming (lot)", round(programming_hours, 2))
+        _emit_hour_row("Programming", round(programming_hours, 2))
         if programming_is_amortized and qty_for_hours > 0:
             per_part_prog_hr = programming_hours / qty_for_hours
             _emit_hour_row(
-                "Programming (amortized per part)",
+                "Programming (amortized)",
                 round(per_part_prog_hr, 2),
                 include_in_total=False,
             )
-        _emit_hour_row("Fixture Build (lot)", round(fixture_hours, 2))
+        _emit_hour_row("Fixture Build", round(fixture_hours, 2))
         if fixture_is_amortized and qty_for_hours > 0:
             per_part_fixture_hr = fixture_hours / qty_for_hours
             _emit_hour_row(
-                "Fixture Build (amortized per part)",
+                "Fixture Build (amortized)",
                 round(per_part_fixture_hr, 2),
                 include_in_total=False,
             )
@@ -5835,7 +5835,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if programming_is_amortized and qty_for_hours > 0:
             per_part_prog_hr = programming_hours / qty_for_hours
             _record_hour_entry(
-                "Programming (amortized per part)",
+                "Programming (amortized)",
                 per_part_prog_hr,
                 include_in_total=False,
             )
@@ -5843,7 +5843,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if fixture_is_amortized and qty_for_hours > 0:
             per_part_fixture_hr = fixture_hours / qty_for_hours
             _record_hour_entry(
-                "Fixture Build (amortized per part)",
+                "Fixture Build (amortized)",
                 per_part_fixture_hr,
                 include_in_total=False,
             )
