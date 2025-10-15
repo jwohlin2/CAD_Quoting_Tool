@@ -6166,25 +6166,28 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 key=lambda kv: float(kv[1].get("diameter_in", 0.0)) if isinstance(kv[1], dict) else 0.0
             )] if isinstance(bins_dict, dict) else []
 
-        render_removal_card = globals().get("_render_removal_card")
-        if callable(render_removal_card):
-            render_removal_card(
-                append_line,
-                mat_canon=mat_canon, mat_group=mat_group, row_group=row_group,
-                holes_deep=holes_deep, holes_std=holes_std,
-                dia_vals_in=dia_vals, depth_vals_in=depth_vals,
-                sfm_deep=sfm_deep, sfm_std=sfm_std,
-                ipr_deep_vals=ipr_deep_vals, ipr_std_val=ipr_std_val,
-                rpm_deep_vals=rpm_deep_vals, rpm_std_vals=rpm_std_vals,
-                ipm_deep_vals=ipm_deep_vals, ipm_std_vals=ipm_std_vals,
-                index_min_per_hole=index_min, peck_min_rng=peck_min_rng,
-                toolchange_min_deep=tchg_deep, toolchange_min_std=tchg_std,
-            )
-        else:
-            append_line("MATERIAL REMOVAL – DRILLING")
-            append_line("=" * 64)
-            append_line("[removal card renderer unavailable]")
-            append_line("")
+        _render_removal_card(
+            append_line,
+            mat_canon=mat_canon,
+            mat_group=mat_group,
+            row_group=row_group,
+            holes_deep=holes_deep,
+            holes_std=holes_std,
+            dia_vals_in=dia_vals,
+            depth_vals_in=depth_vals,
+            sfm_deep=sfm_deep,
+            sfm_std=sfm_std,
+            ipr_deep_vals=ipr_deep_vals,
+            ipr_std_val=ipr_std_val,
+            rpm_deep_vals=rpm_deep_vals,
+            rpm_std_vals=rpm_std_vals,
+            ipm_deep_vals=ipm_deep_vals,
+            ipm_std_vals=ipm_std_vals,
+            index_min_per_hole=index_min,
+            peck_min_rng=peck_min_rng,
+            toolchange_min_deep=tchg_deep,
+            toolchange_min_std=tchg_std,
+        )
 
         subtotal_min, seen_deep, seen_std = _render_time_per_hole(
             append_line,
@@ -10388,12 +10391,30 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 thickness_in = float(thickness_mm) / 25.4
 
     drilling_rate = _lookup_rate("DrillingRate", rates, params, default_rates, fallback=75.0)
-    breakdown.setdefault("drilling_meta", {})
+    drilling_meta_container = breakdown.setdefault("drilling_meta", {})
     if not use_planner:
         if hole_diams and thickness_in and drilling_rate > 0:
+            drill_debug_lines: list[str] = []
+            drill_debug_summary: dict[str, dict[str, Any]] = {}
+            hole_groups_for_estimate: list[dict[str, Any]] | None = None
+            if isinstance(geo_payload, _MappingABC):
+                raw_groups = (
+                    geo_payload.get("GEO_Hole_Groups")
+                    or geo_payload.get("hole_groups")
+                    or geo_payload.get("hole_sets")
+                )
+                if raw_groups is not None:
+                    hole_groups_for_estimate = _clean_hole_groups(raw_groups)
             try:
                 estimator_hours = estimate_drilling_hours(
-                    hole_diams, float(thickness_in), str(material_text or "")
+                    hole_diams,
+                    float(thickness_in),
+                    str(material_text or ""),
+                    hole_groups=hole_groups_for_estimate,
+                    material_group=group_material_breakdown or None,
+                    speeds_feeds_table=speeds_feeds_table,
+                    debug_lines=drill_debug_lines,
+                    debug_summary=drill_debug_summary,
                 )
             except Exception:
                 estimator_hours = 0.0
@@ -10408,13 +10429,106 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 "machine_cost": estimator_hours * drilling_rate,
                 "labor_cost": 0.0,
             }
-            breakdown["drilling_meta"].update({"estimator_hours_for_planner": estimator_hours})
+            drilling_meta_container.update({"estimator_hours_for_planner": estimator_hours})
             process_meta["drilling"] = {
                 "hr": estimator_hours,
                 "minutes": estimator_hours * 60.0,
                 "rate": drilling_rate,
                 "basis": ["planner_drilling_override"],
             }
+
+            if drill_debug_summary:
+                bins_list: list[dict[str, Any]] = []
+                for op_key, summary in drill_debug_summary.items():
+                    if not isinstance(summary, _MappingABC):
+                        continue
+                    bins_map = summary.get("bins")
+                    if not isinstance(bins_map, _MappingABC):
+                        continue
+                    op_display = str(summary.get("operation") or op_key or "").strip()
+                    sortable_bins: list[tuple[float, Mapping[str, Any]]] = []
+                    for bin_payload in bins_map.values():
+                        if not isinstance(bin_payload, _MappingABC):
+                            continue
+                        sortable_bins.append((
+                            _safe_float(bin_payload.get("diameter_in"), 0.0),
+                            bin_payload,
+                        ))
+                    for _, bin_payload in sorted(sortable_bins, key=lambda item: item[0]):
+                        entry = dict(bin_payload)
+                        speeds = entry.get("speeds")
+                        if isinstance(speeds, _MappingABC):
+                            for speed_key in ("sfm", "ipr", "rpm", "ipm"):
+                                if speed_key not in entry and speeds.get(speed_key) is not None:
+                                    entry[speed_key] = _safe_float(speeds.get(speed_key), 0.0)
+                        depth_in = None
+                        for candidate in (
+                            entry.get("depth_in"),
+                            entry.get("depth_max"),
+                            entry.get("depth_min"),
+                        ):
+                            try:
+                                if candidate is None:
+                                    continue
+                                depth_val = float(candidate)
+                            except (TypeError, ValueError):
+                                continue
+                            if math.isfinite(depth_val):
+                                depth_in = depth_val
+                                break
+                        if depth_in is not None:
+                            entry["depth_in"] = depth_in
+                        dia_val = entry.get("diameter_in")
+                        try:
+                            entry["diameter_in"] = float(dia_val) if dia_val is not None else None
+                        except (TypeError, ValueError):
+                            entry.pop("diameter_in", None)
+                        qty_val = entry.get("qty")
+                        try:
+                            entry["qty"] = int(qty_val)
+                        except Exception:
+                            entry["qty"] = int(round(_safe_float(qty_val, 0.0)))
+                        op_resolved = op_display or op_key or "drill"
+                        entry["op"] = op_resolved
+                        entry.setdefault("op_name", op_resolved)
+                        bins_list.append(entry)
+
+                if bins_list:
+                    bins_list.sort(
+                        key=lambda item: (
+                            0
+                            if str(item.get("op") or "").strip().lower().startswith("deep")
+                            else 1,
+                            _safe_float(item.get("diameter_in"), 0.0),
+                        )
+                    )
+                    drilling_meta_container["bins_list"] = bins_list
+
+                    deep_qty = sum(
+                        int(entry.get("qty") or 0)
+                        for entry in bins_list
+                        if str(entry.get("op") or "").strip().lower().startswith("deep")
+                    )
+                    std_qty = sum(
+                        int(entry.get("qty") or 0)
+                        for entry in bins_list
+                        if not str(entry.get("op") or "").strip().lower().startswith("deep")
+                    )
+                    drilling_meta_container["holes_deep"] = deep_qty
+                    drilling_meta_container["holes_std"] = std_qty
+
+                    if bins_list and not drilling_meta_container.get("dia_in_vals"):
+                        drilling_meta_container["dia_in_vals"] = [
+                            entry.get("diameter_in")
+                            for entry in bins_list
+                            if entry.get("diameter_in") is not None
+                        ]
+                    if bins_list and not drilling_meta_container.get("depth_in_vals"):
+                        drilling_meta_container["depth_in_vals"] = [
+                            entry.get("depth_in")
+                            for entry in bins_list
+                            if entry.get("depth_in") is not None
+                        ]
 
         roughing_hours = _coerce_float_or_none(value_map.get("Roughing Cycle Time"))
         if roughing_hours is None:
