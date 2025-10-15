@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import pandas as pd
 import pytest
 
+pd = pytest.importorskip("pandas")
 
 @pytest.fixture(autouse=True)
 def _disable_speeds_feeds_loader(monkeypatch):
@@ -164,6 +164,74 @@ def test_planner_total_mismatch_records_red_flag(monkeypatch):
     labor_rendered = float(breakdown.get("labor_cost_rendered", 0.0) or 0.0)
     assert totals["labor_cost"] == pytest.approx(labor_rendered)
     assert labor_rendered > 0.0
+
+
+def test_planner_bucket_minutes_from_line_items_when_bucketize_empty(monkeypatch):
+    import appV5
+    import planner_pricing
+
+    df = pd.DataFrame(columns=["Item", "Example Values / Options", "Data Type / Input Method"])
+    geo = {
+        "process_planner_family": "die_plate",
+        "material": "steel",
+        "thickness_mm": 25.4,
+    }
+
+    def fake_plan_job(family: str, inputs: dict[str, object]) -> dict[str, object]:
+        assert family == "die_plate"
+        assert isinstance(inputs, dict)
+        return {"ops": [{"op": "drill_ream_bore"}, {"op": "cnc_rough_mill"}, {"op": "deburr"}]}
+
+    def fake_price_with_planner(
+        family: str,
+        inputs: dict[str, object],
+        geom_payload: dict[str, object],
+        rates: dict[str, object],
+        *,
+        oee: float,
+    ) -> dict[str, object]:
+        assert family == "die_plate"
+        assert geom_payload, "expected non-empty geom payload"
+        assert isinstance(rates, dict)
+        assert oee > 0
+        return {
+            "line_items": [
+                {"op": "drill_ream_bore", "minutes": 30.0, "machine_cost": 300.0, "labor_cost": 0.0},
+                {"op": "cnc_rough_mill", "minutes": 20.0, "machine_cost": 200.0, "labor_cost": 0.0},
+                {"op": "deburr", "minutes": 10.0, "machine_cost": 0.0, "labor_cost": 100.0},
+            ],
+            "totals": {"minutes": 60.0, "machine_cost": 500.0, "labor_cost": 100.0},
+        }
+
+    def fake_bucketize(*_args, **_kwargs):
+        return {"buckets": {}, "totals": {"minutes": 0.0, "machine$": 0.0, "labor$": 0.0, "total$": 0.0}}
+
+    monkeypatch.setattr(appV5, "_process_plan_job", fake_plan_job)
+    monkeypatch.setattr(planner_pricing, "price_with_planner", fake_price_with_planner)
+    monkeypatch.setattr(appV5, "bucketize", fake_bucketize)
+    monkeypatch.setattr(appV5, "FORCE_PLANNER", False)
+
+    result = appV5.compute_quote_from_df(
+        df,
+        params={"OEE_EfficiencyPct": 0.95},
+        geo=geo,
+        ui_vars={},
+    )
+
+    breakdown = result["breakdown"]
+    assert breakdown["pricing_source"] == "planner"
+
+    bucket_view = breakdown.get("bucket_view") or {}
+    buckets = bucket_view.get("buckets") or {}
+    assert buckets, "expected bucket minutes derived from planner line items"
+    assert buckets["drilling"]["minutes"] == pytest.approx(30.0, abs=0.01)
+    assert buckets["milling"]["minutes"] == pytest.approx(20.0, abs=0.01)
+    assert buckets["finishing_deburr"]["minutes"] == pytest.approx(10.0, abs=0.01)
+
+    planner_meta = breakdown["process_meta"]
+    assert planner_meta["planner_total"]["minutes"] == pytest.approx(60.0, abs=0.01)
+    assert planner_meta["planner_machine"]["minutes"] == pytest.approx(50.0, abs=0.01)
+    assert planner_meta["planner_labor"]["minutes"] == pytest.approx(10.0, abs=0.01)
 
 
 def test_planner_does_not_emit_legacy_buckets_when_line_items_present(monkeypatch):

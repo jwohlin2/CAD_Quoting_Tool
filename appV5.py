@@ -2887,6 +2887,51 @@ def _charged_hours_by_bucket(process_costs, process_meta, rates):
             out[label] = out.get(label, 0.0) + float(hr)
     return out
 
+def _planner_bucket_key_for_name(name: Any) -> str:
+    text = str(name or "").lower()
+    if not text:
+        return "milling"
+    if any(token in text for token in ("c'bore", "counterbore")):
+        return "counterbore"
+    if any(token in text for token in ("csk", "countersink")):
+        return "countersink"
+    if any(
+        token in text
+        for token in (
+            "tap",
+            "thread mill",
+            "thread_mill",
+            "rigid tap",
+            "rigid_tap",
+        )
+    ):
+        return "tapping"
+    if any(token in text for token in ("drill", "ream", "bore")):
+        return "drilling"
+    if any(
+        token in text
+        for token in (
+            "grind",
+            "od grind",
+            "id grind",
+            "surface grind",
+            "jig grind",
+        )
+    ):
+        return "grinding"
+    if "wire" in text or "wedm" in text:
+        return "wire_edm"
+    if "edm" in text:
+        return "sinker_edm"
+    if any(token in text for token in ("saw", "waterjet")):
+        return "saw_waterjet"
+    if any(token in text for token in ("deburr", "finish")):
+        return "finishing_deburr"
+    if "inspect" in text or "cmm" in text or "fai" in text:
+        return "inspection"
+    return "milling"
+
+
 def _canonical_bucket_key(name: str | None) -> str:
     normalized = _normalize_bucket_key(name)
     if not normalized:
@@ -4304,48 +4349,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     applied_process = _fold_applied_process(applied_process_raw, bucket_alias_map)
 
     def _planner_bucket_for_op(name: str | None) -> str:
-        text = str(name or "").lower()
-        if not text:
-            return "milling"
-        if any(token in text for token in ("c'bore", "counterbore")):
-            return "counterbore"
-        if any(token in text for token in ("csk", "countersink")):
-            return "countersink"
-        if any(
-            token in text
-            for token in (
-                "tap",
-                "thread mill",
-                "thread_mill",
-                "rigid tap",
-                "rigid_tap",
-            )
-        ):
-            return "tapping"
-        if any(token in text for token in ("drill", "ream", "bore")):
-            return "drilling"
-        if any(
-            token in text
-            for token in (
-                "grind",
-                "od grind",
-                "id grind",
-                "surface grind",
-                "jig grind",
-            )
-        ):
-            return "grinding"
-        if "wire" in text or "wedm" in text:
-            return "wire_edm"
-        if "edm" in text:
-            return "sinker_edm"
-        if any(token in text for token in ("saw", "waterjet")):
-            return "saw_waterjet"
-        if any(token in text for token in ("deburr", "finish")):
-            return "finishing_deburr"
-        if "inspect" in text or "cmm" in text or "fai" in text:
-            return "inspection"
-        return "milling"
+        return _planner_bucket_key_for_name(name)
 
     process_plan_breakdown_raw = breakdown.get("process_plan")
     process_plan_breakdown: Mapping[str, Any] | None
@@ -9888,6 +9892,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         baseline.setdefault("pricing_source", "legacy")
         if fallback_reason:
             breakdown["red_flags"].append(fallback_reason)
+        breakdown.setdefault("pricing_source", "legacy")
+        baseline.setdefault("pricing_source", "legacy")
 
     using_planner = str(breakdown.get("pricing_source", "")).strip().lower() == "planner"
 
@@ -9935,6 +9941,140 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         bucketized_raw = {}
 
     bucket_view_prepared = _prepare_bucket_view(bucketized_raw)
+
+    aggregated_bucket_minutes: dict[str, dict[str, float]] = {}
+    line_items: Sequence[Mapping[str, Any]] | None = None
+    if isinstance(planner_result, _MappingABC):
+        raw_items = planner_result.get("line_items")
+        if isinstance(raw_items, Sequence):
+            # A shallow copy is sufficient for iteration and avoids surprising
+            # behaviour if the planner mutates the list during aggregation.
+            line_items = list(raw_items)
+
+    if line_items:
+        for entry in line_items:
+            if not isinstance(entry, _MappingABC):
+                continue
+            bucket_key = _planner_bucket_key_for_name(entry.get("op"))
+            if not bucket_key:
+                continue
+            canon_key = _canonical_bucket_key(bucket_key) or bucket_key
+            if not canon_key or canon_key in _FINAL_BUCKET_HIDE_KEYS:
+                continue
+            minutes_val = _safe_float(entry.get("minutes"))
+            machine_val = _bucket_cost(entry, "machine_cost", "machine$")
+            labor_val = _bucket_cost(entry, "labor_cost", "labor$")
+            if (
+                minutes_val <= 0.0
+                and machine_val <= 0.0
+                and labor_val <= 0.0
+            ):
+                continue
+            metrics = aggregated_bucket_minutes.setdefault(
+                canon_key,
+                {"minutes": 0.0, "machine$": 0.0, "labor$": 0.0},
+            )
+            metrics["minutes"] += minutes_val
+            metrics["machine$"] += machine_val
+            metrics["labor$"] += labor_val
+
+    if aggregated_bucket_minutes:
+        buckets_raw = bucket_view_prepared.get("buckets")
+        if isinstance(buckets_raw, _MappingABC):
+            buckets = {str(k): dict(v) for k, v in buckets_raw.items()}
+        else:
+            buckets = {}
+
+        for canon_key, metrics in aggregated_bucket_minutes.items():
+            if canon_key in _FINAL_BUCKET_HIDE_KEYS:
+                continue
+            entry = dict(buckets.get(canon_key, {}))
+            minutes_val = round(_safe_float(metrics.get("minutes")), 2)
+            machine_val = round(_safe_float(metrics.get("machine$")), 2)
+            labor_val = round(_safe_float(metrics.get("labor$")), 2)
+            total_val = round(machine_val + labor_val, 2)
+            entry.update(
+                {
+                    "minutes": minutes_val,
+                    "machine$": machine_val,
+                    "labor$": labor_val,
+                    "total$": total_val,
+                }
+            )
+            buckets[canon_key] = entry
+
+        order_raw = bucket_view_prepared.get("order")
+        if isinstance(order_raw, Sequence):
+            order = [str(item) for item in order_raw if isinstance(item, str)]
+        else:
+            order = []
+
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for key in order:
+            canon = _canonical_bucket_key(key) or key
+            if canon in buckets and canon not in seen:
+                ordered.append(canon)
+                seen.add(canon)
+        for key in _preferred_order_then_alpha(buckets.keys()):
+            if key not in seen:
+                ordered.append(key)
+                seen.add(key)
+
+        totals = {"minutes": 0.0, "machine$": 0.0, "labor$": 0.0, "total$": 0.0}
+        for entry in buckets.values():
+            minutes_val = _safe_float(entry.get("minutes"))
+            machine_val = _safe_float(entry.get("machine$"))
+            labor_val = _safe_float(entry.get("labor$"))
+            total_val = _safe_float(entry.get("total$"))
+            if total_val <= 0.0:
+                total_val = machine_val + labor_val
+            totals["minutes"] += minutes_val
+            totals["machine$"] += machine_val
+            totals["labor$"] += labor_val
+            totals["total$"] += total_val
+
+        bucket_view_prepared["buckets"] = buckets
+        bucket_view_prepared["order"] = ordered
+        bucket_view_prepared["totals"] = {key: round(val, 2) for key, val in totals.items()}
+
+        if isinstance(process_meta, dict):
+            total_minutes = 0.0
+            machine_minutes = 0.0
+            labor_minutes = 0.0
+            for metrics in aggregated_bucket_minutes.values():
+                minutes_val = _safe_float(metrics.get("minutes"))
+                machine_val = _safe_float(metrics.get("machine$"))
+                labor_val = _safe_float(metrics.get("labor$"))
+                if minutes_val <= 0.0:
+                    continue
+                hours_val = minutes_val / 60.0
+                total_cost = machine_val + labor_val
+                total_minutes += minutes_val
+                if hours_val > 0.0 and total_cost > 0.0:
+                    rate_val = total_cost / hours_val
+                    if rate_val > 0.0:
+                        if machine_val > 0.0:
+                            machine_minutes += (machine_val / rate_val) * 60.0
+                        if labor_val > 0.0:
+                            labor_minutes += (labor_val / rate_val) * 60.0
+
+            def _apply_minutes(key: str, minutes_val: float) -> None:
+                if minutes_val <= 0.0:
+                    return
+                existing = process_meta.get(key)
+                updated = dict(existing) if isinstance(existing, _MappingABC) else {}
+                updated["minutes"] = round(minutes_val, 2)
+                updated["hr"] = round(minutes_val / 60.0, 3)
+                process_meta[key] = updated
+
+            if total_minutes > 0.0:
+                _apply_minutes("planner_total", total_minutes)
+            if machine_minutes > 0.0:
+                _apply_minutes("planner_machine", machine_minutes)
+            if labor_minutes > 0.0:
+                _apply_minutes("planner_labor", labor_minutes)
+
     bucket_view.clear()
     bucket_view.update(bucket_view_prepared)
     bucket_view_buckets = bucket_view.setdefault("buckets", {})
