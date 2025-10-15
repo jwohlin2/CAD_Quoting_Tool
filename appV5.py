@@ -26,6 +26,7 @@ import typing
 from typing import Any
 from collections import Counter
 from collections.abc import (
+    Callable,
     Iterator,
     Mapping as _MappingABC,
     MutableMapping as _MutableMappingABC,
@@ -3483,12 +3484,15 @@ def _format_planner_bucket_line(
     if rate_val <= 0 and hr_val > 0 and total_cost > 0:
         rate_val = total_cost / hr_val
 
+    formatter: Callable[[float], str]
     if currency_formatter is None:
-        currency_formatter = lambda x: fmt_money(x, "$")  # pragma: no cover
+        formatter = lambda x: fmt_money(x, "$")  # pragma: no cover
+    else:
+        formatter = currency_formatter
 
     hours_text = fmt_hours(hr_val) # pragma: no cover
     if rate_val > 0:
-        rate_text = f"{currency_formatter(rate_val)}/hr"
+        rate_text = f"{formatter(rate_val)}/hr"
     else:
         rate_text = "—"
 
@@ -3530,6 +3534,11 @@ class PlannerBucketOp(TypedDict):
     machine: float
     labor: float
     total: float
+
+
+class PlannerBucketCost(TypedDict):
+    name: str
+    cost: float
 
 @no_type_check
 def render_quote(  # type: ignore[reportGeneralTypeIssues]
@@ -9382,7 +9391,7 @@ def _legacy_estimate_drilling_hours(
     mat_key: str,
     *,
     material_group: str | None = None,
-    hole_groups: list[Mapping[str, Any]] | None = None,
+    hole_groups: Sequence[Mapping[str, Any]] | None = None,
     speeds_feeds_table: pd.DataFrame | None = None,
     machine_params: _TimeMachineParams | None = None,
     overhead_params: _TimeOverheadParams | None = None,
@@ -10670,7 +10679,7 @@ def estimate_drilling_hours(
     mat_key: str,
     *,
     material_group: str | None = None,
-    hole_groups: list[Mapping[str, Any]] | None = None,
+    hole_groups: Sequence[Mapping[str, Any]] | None = None,
     speeds_feeds_table: pd.DataFrame | None = None,
     machine_params: _TimeMachineParams | None = None,
     overhead_params: _TimeOverheadParams | None = None,
@@ -11363,7 +11372,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                     hour_summary[str(key)] = round(minutes_val / 60.0, 2)
                 process_plan_summary["hour_summary"] = hour_summary
             if cost_by_bucket:
-                bucket_costs: list[dict[str, float]] = []
+                bucket_costs: list[PlannerBucketCost] = []
                 planner_cost_map: dict[str, float] = {}
                 for key, value in cost_by_bucket.items():
                     try:
@@ -11496,16 +11505,16 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 break
 
     geom_for_bucketize = geo_payload if isinstance(geo_payload, dict) else {}
-    qty_for_bucketize: int
+    qty_for_bucketize = 1
     if isinstance(qty, (int, float)):
-        qty_for_bucketize = int(qty)
+        try:
+            qty_for_bucketize = int(qty)
+        except (TypeError, ValueError):
+            qty_for_bucketize = 1
         if qty_for_bucketize <= 0:
             qty_for_bucketize = 1
-    else:
-        qty_for_bucketize = 1
 
     try:
-        qty_for_bucketize = int(qty) if qty and qty > 0 else 1
         bucketized_raw = bucketize(
             planner_result if isinstance(planner_result, dict) else {},
             merged_two_bucket_rates,
@@ -11639,15 +11648,15 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                     if not isinstance(bins_map, _MappingABC):
                         continue
                     op_display = str(summary.get("operation") or op_key or "").strip()
-                    sortable_bins: list[tuple[float, Mapping[str, Any]]] = []
+                    sortable_bins: list[Mapping[str, Any]] = []
                     for bin_payload in bins_map.values():
                         if not isinstance(bin_payload, _MappingABC):
                             continue
-                        sortable_bins.append((
-                            _safe_float(bin_payload.get("diameter_in"), 0.0),
-                            bin_payload,
-                        ))
-                    for _, bin_payload in sorted(sortable_bins, key=lambda item: item[0]):
+                        sortable_bins.append(cast(Mapping[str, Any], bin_payload))
+                    for bin_payload in sorted(
+                        sortable_bins,
+                        key=lambda item: _safe_float(item.get("diameter_in"), 0.0),
+                    ):
                         entry = dict(bin_payload)
                         speeds = entry.get("speeds")
                         if isinstance(speeds, _MappingABC):
@@ -11677,10 +11686,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                         except (TypeError, ValueError):
                             entry.pop("diameter_in", None)
                         qty_val = entry.get("qty")
-                        try:
-                            entry["qty"] = int(qty_val)
-                        except Exception:
-                            entry["qty"] = int(round(_safe_float(qty_val, 0.0)))
+                        qty_numeric = _safe_float(qty_val, 0.0)
+                        entry["qty"] = int(round(qty_numeric))
                         op_resolved = op_display or op_key or "drill"
                         entry["op"] = op_resolved
                         entry.setdefault("op_name", op_resolved)
