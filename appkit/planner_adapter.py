@@ -37,6 +37,9 @@ def _resolve_planner_usage(
 ) -> bool:
     """Return True when planner pricing should be used."""
 
+    if FORCE_PLANNER:
+        return True
+
     signals_map: Mapping[str, Any]
     if isinstance(signals, _MappingABC):
         signals_map = signals

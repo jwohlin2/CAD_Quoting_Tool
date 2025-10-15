@@ -76,7 +76,7 @@ def test_resolve_planner_force_flag_overrides_mode(monkeypatch, reload_appv5):
     monkeypatch.setattr(module, "FORCE_PLANNER", True)
     monkeypatch.setattr(planner_adapter, "FORCE_PLANNER", True)
     used, mode = module.resolve_planner({"PlannerMode": "legacy"}, None)
-    assert used is False
+    assert used is True
     assert mode == "planner"
 
 
