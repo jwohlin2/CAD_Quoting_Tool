@@ -22,7 +22,11 @@ def test_canonicalize_costs_groups_aliases_and_skips_planner_total() -> None:
         "Planner Labor": 200.0,
         "Wire EDM": 7.0,
         "Wire EDM Windows": 11.0,
+        "Wire-EDM": 3.0,
+        "WireEDM": 2.0,
         "Sinker EDM Finish Burn": 13.0,
+        "Ram EDM": 5.0,
+        "RamEDM": 4.0,
     }
 
     canon = canonicalize_costs(costs)
@@ -30,8 +34,8 @@ def test_canonicalize_costs_groups_aliases_and_skips_planner_total() -> None:
     assert canon["milling"] == pytest.approx(120.0)
     assert canon["finishing_deburr"] == pytest.approx(15.0)
     assert canon["misc"] == pytest.approx(500.0)
-    assert canon["wire_edm"] == pytest.approx(18.0)
-    assert canon["sinker_edm"] == pytest.approx(13.0)
+    assert canon["wire_edm"] == pytest.approx(23.0)
+    assert canon["sinker_edm"] == pytest.approx(22.0)
     assert "planner_total" not in canon
 
 
@@ -104,7 +108,7 @@ def test_render_process_costs_backfills_rate_when_missing(monkeypatch: pytest.Mo
     assert total == pytest.approx(120.0)
     assert len(table.rows) == 1
     row = table.rows[0]
-    assert row["label"] == "Wire Edm"
+    assert row["label"] == "Wire EDM"
     assert row["hours"] == pytest.approx(4.0)
     assert row["rate"] == pytest.approx(30.0)
     assert row["cost"] == pytest.approx(120.0)
