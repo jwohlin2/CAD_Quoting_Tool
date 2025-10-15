@@ -194,16 +194,16 @@ def _fmt_rng(vals, prec=2, unit: str | None = None):
     return f"{s}{unit}" if unit else s
 
 
-def _rpm_from_sfm(dia_in: float, sfm: float) -> float:
+def _rpm_from_sfm(sfm: float, d_in: float) -> float:
     try:
-        d = max(float(dia_in), 1e-6)
+        d = max(float(d_in), 1e-6)
         return (float(sfm) * 12.0) / (math.pi * d)
     except Exception:
         return 0.0
 
 
 def _render_removal_card(
-    lines: list[str],
+    append_line: Callable[[str], None],
     *,
     mat_canon: str,
     mat_group: str | None,
@@ -225,58 +225,58 @@ def _render_removal_card(
     toolchange_min_deep: float,
     toolchange_min_std: float,
 ) -> None:
-    lines.append("MATERIAL REMOVAL – DRILLING")
-    lines.append("=" * 64)
+    append_line("MATERIAL REMOVAL – DRILLING")
+    append_line("=" * 64)
     # Inputs
-    lines.append("Inputs")
-    lines.append(f"  Material .......... {mat_canon}  [group {mat_group or '-'}]")
+    append_line("Inputs")
+    append_line(f"  Material .......... {mat_canon}  [group {mat_group or '-'}]")
     mismatch = False
     if row_group:
         rg = str(row_group).upper()
         mg = str(mat_group or "").upper()
         mismatch = (rg != mg and (rg and mg))
         note = "   (!) mismatch – used row from different group" if mismatch else ""
-        lines.append(f"  CSV row group ..... {row_group}{note}")
-    lines.append("  Operations ........ Deep-Drill (L/D ≥ 3), Drill")
-    lines.append(
+        append_line(f"  CSV row group ..... {row_group}{note}")
+    append_line("  Operations ........ Deep-Drill (L/D ≥ 3), Drill")
+    append_line(
         f"  Holes ............. {int(holes_deep)} deep + {int(holes_std)} std  = {int(holes_deep + holes_std)}"
     )
-    lines.append(f"  Diameter range .... {_fmt_rng(dia_vals_in, 3)}\"")
-    lines.append(f"  Depth per hole .... {_fmt_rng(depth_vals_in, 2)} in")
-    lines.append("")
+    append_line(f'  Diameter range .... {_fmt_rng(dia_vals_in, 3)}"')
+    append_line(f"  Depth per hole .... {_fmt_rng(depth_vals_in, 2)} in")
+    append_line("")
     # Feeds & Speeds
-    lines.append("Feeds & Speeds (used)")
-    lines.append(f"  SFM ............... {int(round(sfm_deep))} (deep)   | {int(round(sfm_std))} (std)")
-    lines.append(
+    append_line("Feeds & Speeds (used)")
+    append_line(f"  SFM ............... {int(round(sfm_deep))} (deep)   | {int(round(sfm_std))} (std)")
+    append_line(
         f"  IPR ............... {_fmt_rng(ipr_deep_vals, 4)} (deep) | {float(ipr_std_val):.4f} (std)"
     )
-    lines.append(
+    append_line(
         f"  RPM ............... {_fmt_rng(rpm_deep_vals, 0)} (deep)      | {_fmt_rng(rpm_std_vals, 0)} (std)"
     )
-    lines.append(
+    append_line(
         f"  IPM ............... {_fmt_rng(ipm_deep_vals, 1)} (deep)       | {_fmt_rng(ipm_std_vals, 1)} (std)"
     )
-    lines.append("")
+    append_line("")
     # Overheads
-    lines.append("Overheads")
-    lines.append(f"  Index per hole .... {float(index_min_per_hole):.2f} min")
-    lines.append(f"  Peck per hole ..... {_fmt_rng(peck_min_rng, 2)} min")
-    lines.append(
+    append_line("Overheads")
+    append_line(f"  Index per hole .... {float(index_min_per_hole):.2f} min")
+    append_line(f"  Peck per hole ..... {_fmt_rng(peck_min_rng, 2)} min")
+    append_line(
         f"  Toolchange ........ {float(toolchange_min_deep):.2f} min (deep) | {float(toolchange_min_std):.2f} min (std)"
     )
-    lines.append("")
+    append_line("")
 
 
 def _render_time_per_hole(
-    lines: list[str],
+    append_line: Callable[[str], None],
     *,
-    bins: list[dict[str, typing.Any]],
+    bins: list[dict[str, Any]],
     index_min: float,
     peck_min_deep: float,
     peck_min_std: float,
 ) -> tuple[float, bool, bool]:
-    lines.append("TIME PER HOLE – DRILL GROUPS")
-    lines.append("-" * 66)
+    append_line("TIME PER HOLE – DRILL GROUPS")
+    append_line("-" * 66)
     subtotal_min = 0.0
     seen_deep = False
     seen_std = False
@@ -293,20 +293,20 @@ def _render_time_per_hole(
             qty = int(b.get("qty") or 0)
             sfm = _safe_float(b.get("sfm"))
             ipr = _safe_float(b.get("ipr"))
-            rpm = _rpm_from_sfm(d_in, sfm)
+            rpm = _rpm_from_sfm(sfm, d_in)
             ipm = rpm * ipr
             peck = float(peck_min_deep if deep else peck_min_std)
             t_hole = (depth / max(ipm, 1e-6)) + float(index_min) + peck
             group_min = t_hole * qty
             subtotal_min += group_min
             # single-line, no material
-            lines.append(
+            append_line(
                 f'Dia {d_in:.3f}" × {qty}  | depth {depth:.3f}" | {int(round(sfm))} sfm | {ipr:.4f} ipr | '
                 f't/hole {t_hole:.2f} min | group {qty}×{t_hole:.2f} = {group_min:.2f} min'
             )
         except Exception:
             continue
-    lines.append("")
+    append_line("")
     return subtotal_min, seen_deep, seen_std
 
 
@@ -349,129 +349,6 @@ EXTRA_DETAIL_RE = re.compile(r"^includes\b.*extras\b", re.IGNORECASE)
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers: formatting + removal card + per-hole lines (no material per line)
 # ──────────────────────────────────────────────────────────────────────────────
-def _fmt_rng(vals, prec=2, unit: str | None = None):
-    vs = []
-    for v in (vals or []):
-        try:
-            f = float(v)
-            if math.isfinite(f):
-                vs.append(f)
-        except Exception:
-            pass
-    if not vs:
-        return "-"
-    lo, hi = min(vs), max(vs)
-    s = (f"{lo:.{prec}f}" if abs(hi - lo) < 10 ** (-prec) else f"{lo:.{prec}f}-{hi:.{prec}f}")
-    return f"{s}{unit}" if unit else s
-
-
-def _rpm_from_sfm(sfm: float, d_in: float) -> float:
-    try:
-        d = max(float(d_in), 1e-6)
-        return (float(sfm) * 12.0) / (math.pi * d)
-    except Exception:
-        return 0.0
-
-
-def _render_removal_card(
-    lines: list[str],
-    *,
-    mat_canon: str,
-    mat_group: str | None,
-    row_group: str | None,
-    holes_deep: int,
-    holes_std: int,
-    dia_vals_in: list[float],
-    depth_vals_in: list[float],
-    sfm_deep: float,
-    sfm_std: float,
-    ipr_deep_vals: list[float],
-    ipr_std_val: float,
-    rpm_deep_vals: list[float],
-    rpm_std_vals: list[float],
-    ipm_deep_vals: list[float],
-    ipm_std_vals: list[float],
-    index_min_per_hole: float,
-    peck_min_rng: list[float],
-    toolchange_min_deep: float,
-    toolchange_min_std: float,
-) -> None:
-    lines.append("MATERIAL REMOVAL – DRILLING")
-    lines.append("=" * 64)
-    # Inputs
-    lines.append("Inputs")
-    lines.append(f"  Material .......... {mat_canon}  [group {mat_group or '-'}]")
-    mismatch = False
-    if row_group:
-        rg = str(row_group).upper()
-        mg = str(mat_group or "").upper()
-        mismatch = (rg != mg and (rg and mg))
-        note = "   (!) mismatch – used row from different group" if mismatch else ""
-        lines.append(f"  CSV row group ..... {row_group}{note}")
-    lines.append("  Operations ........ Deep-Drill (L/D ≥ 3), Drill")
-    lines.append(f"  Holes ............. {int(holes_deep)} deep + {int(holes_std)} std  = {int(holes_deep + holes_std)}")
-    lines.append(f"  Diameter range .... {_fmt_rng(dia_vals_in, 3)}\"")
-    lines.append(f"  Depth per hole .... {_fmt_rng(depth_vals_in, 2)} in")
-    lines.append("")
-    # Feeds & Speeds
-    lines.append("Feeds & Speeds (used)")
-    lines.append(f"  SFM ............... {int(round(sfm_deep))} (deep)   | {int(round(sfm_std))} (std)")
-    lines.append(f"  IPR ............... {_fmt_rng(ipr_deep_vals, 4)} (deep) | {float(ipr_std_val):.4f} (std)")
-    lines.append(f"  RPM ............... {_fmt_rng(rpm_deep_vals, 0)} (deep)      | {_fmt_rng(rpm_std_vals, 0)} (std)")
-    lines.append(f"  IPM ............... {_fmt_rng(ipm_deep_vals, 1)} (deep)       | {_fmt_rng(ipm_std_vals, 1)} (std)")
-    lines.append("")
-    # Overheads
-    lines.append("Overheads")
-    lines.append(f"  Index per hole .... {float(index_min_per_hole):.2f} min")
-    lines.append(f"  Peck per hole ..... {_fmt_rng(peck_min_rng, 2)} min")
-    lines.append(
-        f"  Toolchange ........ {float(toolchange_min_deep):.2f} min (deep) | {float(toolchange_min_std):.2f} min (std)"
-    )
-    lines.append("")
-
-
-def _render_time_per_hole(
-    lines: list[str],
-    *,
-    bins: list[dict[str, Any]],
-    index_min: float,
-    peck_min_deep: float,
-    peck_min_std: float,
-) -> tuple[float, bool, bool]:
-    lines.append("TIME PER HOLE – DRILL GROUPS")
-    lines.append("-" * 66)
-    subtotal_min = 0.0
-    seen_deep = False
-    seen_std = False
-    for b in bins:
-        try:
-            op = (b.get("op") or b.get("op_name") or "").strip().lower()
-            deep = op.startswith("deep")
-            if deep:
-                seen_deep = True
-            else:
-                seen_std = True
-            d_in = _safe_float(b.get("diameter_in"))
-            depth = _safe_float(b.get("depth_in"))
-            qty = int(b.get("qty") or 0)
-            sfm = _safe_float(b.get("sfm"))
-            ipr = _safe_float(b.get("ipr"))
-            rpm = _rpm_from_sfm(sfm, d_in)
-            ipm = rpm * ipr
-            peck = float(peck_min_deep if deep else peck_min_std)
-            t_hole = (depth / max(ipm, 1e-6)) + float(index_min) + peck
-            group_min = t_hole * qty
-            subtotal_min += group_min
-            # single-line, no material
-            lines.append(
-                f'Dia {d_in:.3f}" × {qty}  | depth {depth:.3f}" | {int(round(sfm))} sfm | {ipr:.4f} ipr | '
-                f't/hole {t_hole:.2f} min | group {qty}×{t_hole:.2f} = {group_min:.2f} min'
-            )
-        except Exception:
-            continue
-    lines.append("")
-    return subtotal_min, seen_deep, seen_std
-
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
     """Best-effort float coercion used in multiple pricing paths."""
@@ -571,7 +448,6 @@ def roughly_equal(a: float | int | str | None, b: float | int | str | None, *, e
 import textwrap
 from typing import (
     Any,
-    Callable,
     Dict,
     Iterable,
     Iterator,
@@ -6142,29 +6018,30 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 key=lambda kv: float(kv[1].get("diameter_in", 0.0)) if isinstance(kv[1], dict) else 0.0
             )] if isinstance(bins_dict, dict) else []
 
-        removal_lines: list[str] = []
-        _render_removal_card(
-            append_line,
-            mat_canon=mat_canon, mat_group=mat_group, row_group=row_group,
-            holes_deep=holes_deep, holes_std=holes_std,
-            dia_vals_in=dia_vals, depth_vals_in=depth_vals,
-            sfm_deep=sfm_deep, sfm_std=sfm_std,
-            ipr_deep_vals=ipr_deep_vals, ipr_std_val=ipr_std_val,
-            rpm_deep_vals=rpm_deep_vals, rpm_std_vals=rpm_std_vals,
-            ipm_deep_vals=ipm_deep_vals, ipm_std_vals=ipm_std_vals,
-            index_min_per_hole=index_min, peck_min_rng=peck_min_rng,
-            toolchange_min_deep=tchg_deep, toolchange_min_std=tchg_std,
-        )
-        for line in removal_lines:
-            append_line(line)
+        render_removal_card = globals().get("_render_removal_card")
+        if callable(render_removal_card):
+            render_removal_card(
+                append_line,
+                mat_canon=mat_canon, mat_group=mat_group, row_group=row_group,
+                holes_deep=holes_deep, holes_std=holes_std,
+                dia_vals_in=dia_vals, depth_vals_in=depth_vals,
+                sfm_deep=sfm_deep, sfm_std=sfm_std,
+                ipr_deep_vals=ipr_deep_vals, ipr_std_val=ipr_std_val,
+                rpm_deep_vals=rpm_deep_vals, rpm_std_vals=rpm_std_vals,
+                ipm_deep_vals=ipm_deep_vals, ipm_std_vals=ipm_std_vals,
+                index_min_per_hole=index_min, peck_min_rng=peck_min_rng,
+                toolchange_min_deep=tchg_deep, toolchange_min_std=tchg_std,
+            )
+        else:
+            append_line("MATERIAL REMOVAL – DRILLING")
+            append_line("=" * 64)
+            append_line("[removal card renderer unavailable]")
+            append_line("")
 
-        time_lines: list[str] = []
         subtotal_min, seen_deep, seen_std = _render_time_per_hole(
             append_line,
             bins=bins, index_min=index_min, peck_min_deep=peck_min_deep, peck_min_std=peck_min_std,
         )
-        for line in time_lines:
-            append_line(line)
 
         tool_add = (tchg_deep if seen_deep else 0.0) + (tchg_std if seen_std else 0.0)
         append_line(f"Toolchange adders: Deep-Drill {tchg_deep:.2f} min + Drill {tchg_std:.2f} min = {tool_add:.2f} min" if tool_add > 0 else "Toolchange adders: -")
@@ -15778,131 +15655,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     return parser
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Helpers: formatting + removal card + per-hole lines (no material per line)
-# ──────────────────────────────────────────────────────────────────────────────
-def _fmt_rng(vals, prec=2, unit: str | None = None):
-    vs = []
-    for v in (vals or []):
-        try:
-            f = float(v)
-            if math.isfinite(f):
-                vs.append(f)
-        except Exception:
-            pass
-    if not vs:
-        return "-"
-    lo, hi = min(vs), max(vs)
-    s = (f"{lo:.{prec}f}" if abs(hi - lo) < 10 ** (-prec) else f"{lo:.{prec}f}-{hi:.{prec}f}")
-    return f"{s}{unit}" if unit else s
-
-
-def _rpm_from_sfm(sfm: float, d_in: float) -> float:
-    try:
-        d = max(float(d_in), 1e-6)
-        return (float(sfm) * 12.0) / (math.pi * d)
-    except Exception:
-        return 0.0
-
-
-def _render_removal_card(
-    append_line: Callable[[str], None],
-    *,
-    mat_canon: str,
-    mat_group: str | None,
-    row_group: str | None,
-    holes_deep: int,
-    holes_std: int,
-    dia_vals_in: list[float],
-    depth_vals_in: list[float],
-    sfm_deep: float,
-    sfm_std: float,
-    ipr_deep_vals: list[float],
-    ipr_std_val: float,
-    rpm_deep_vals: list[float],
-    rpm_std_vals: list[float],
-    ipm_deep_vals: list[float],
-    ipm_std_vals: list[float],
-    index_min_per_hole: float,
-    peck_min_rng: list[float],
-    toolchange_min_deep: float,
-    toolchange_min_std: float,
-) -> None:
-    append_line("MATERIAL REMOVAL – DRILLING")
-    append_line("=" * 64)
-    # Inputs
-    append_line("Inputs")
-    append_line(f"  Material .......... {mat_canon}  [group {mat_group or '-'}]")
-    mismatch = False
-    if row_group:
-        rg = str(row_group).upper()
-        mg = str(mat_group or "").upper()
-        mismatch = rg != mg and (rg and mg)
-        note = "   (!) mismatch – used row from different group" if mismatch else ""
-        append_line(f"  CSV row group ..... {row_group}{note}")
-    append_line("  Operations ........ Deep-Drill (L/D ≥ 3), Drill")
-    append_line(f"  Holes ............. {int(holes_deep)} deep + {int(holes_std)} std  = {int(holes_deep + holes_std)}")
-    append_line(f"  Diameter range .... {_fmt_rng(dia_vals_in, 3)}\"")
-    append_line(f"  Depth per hole .... {_fmt_rng(depth_vals_in, 2)} in")
-    append_line("")
-    # Feeds & Speeds
-    append_line("Feeds & Speeds (used)")
-    append_line(f"  SFM ............... {int(round(sfm_deep))} (deep)   | {int(round(sfm_std))} (std)")
-    append_line(f"  IPR ............... {_fmt_rng(ipr_deep_vals, 4)} (deep) | {float(ipr_std_val):.4f} (std)")
-    append_line(f"  RPM ............... {_fmt_rng(rpm_deep_vals, 0)} (deep)      | {_fmt_rng(rpm_std_vals, 0)} (std)")
-    append_line(f"  IPM ............... {_fmt_rng(ipm_deep_vals, 1)} (deep)       | {_fmt_rng(ipm_std_vals, 1)} (std)")
-    append_line("")
-    # Overheads
-    append_line("Overheads")
-    append_line(f"  Index per hole .... {float(index_min_per_hole):.2f} min")
-    append_line(f"  Peck per hole ..... {_fmt_rng(peck_min_rng, 2)} min")
-    append_line(
-        f"  Toolchange ........ {float(toolchange_min_deep):.2f} min (deep) | {float(toolchange_min_std):.2f} min (std)"
-    )
-    append_line("")
-
-
-def _render_time_per_hole(
-    append_line: Callable[[str], None],
-    *,
-    bins: list[dict[str, Any]],
-    index_min: float,
-    peck_min_deep: float,
-    peck_min_std: float,
-) -> tuple[float, bool, bool]:
-    append_line("TIME PER HOLE – DRILL GROUPS")
-    append_line("-" * 66)
-    subtotal_min = 0.0
-    seen_deep = False
-    seen_std = False
-    for b in bins:
-        try:
-            op = (b.get("op") or b.get("op_name") or "").strip().lower()
-            deep = op.startswith("deep")
-            if deep:
-                seen_deep = True
-            else:
-                seen_std = True
-            d_in = _safe_float(b.get("diameter_in"))
-            depth = _safe_float(b.get("depth_in"))
-            qty = int(b.get("qty") or 0)
-            sfm = _safe_float(b.get("sfm"))
-            ipr = _safe_float(b.get("ipr"))
-            rpm = _rpm_from_sfm(sfm, d_in)
-            ipm = rpm * ipr
-            peck = float(peck_min_deep if deep else peck_min_std)
-            t_hole = (depth / max(ipm, 1e-6)) + float(index_min) + peck
-            group_min = t_hole * qty
-            subtotal_min += group_min
-            # single-line, no material
-            append_line(
-                f'Dia {d_in:.3f}" × {qty}  | depth {depth:.3f}" | {int(round(sfm))} sfm | {ipr:.4f} ipr | '
-                f't/hole {t_hole:.2f} min | group {qty}×{t_hole:.2f} = {group_min:.2f} min'
-            )
-        except Exception:
-            continue
-    append_line("")
-    return subtotal_min, seen_deep, seen_std
 
 
 def _main(argv: Optional[Sequence[str]] = None) -> int:
@@ -15944,6 +15696,3 @@ if __name__ == "__main__":
         except Exception:
             pass
         sys.exit(1)
-# ──────────────────────────────────────────────────────────────────────────────
-# Legacy “OK …” per-bin line (to match prior Drill Debug format)
-# ──────────────────────────────────────────────────────────────────────────────
