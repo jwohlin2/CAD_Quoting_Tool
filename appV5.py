@@ -5962,13 +5962,59 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if drill_summary_source is None:
         drill_summary_source = {}
     drill_min = float(drill_summary_source.get("total_minutes") or 0.0)
-    if drill_min > 0:
-        process_costs_for_render["drilling"] = round(
-            (drill_min / 60.0) * (_rate_for_bucket("drilling", rates) or 0.0), 2
-        )
-        bucket_minutes_detail["drilling"] = drill_min
+    bill_min = float(drill_summary_source.get("total_minutes_billed") or drill_min or 0.0)
+    rates_map = rates if isinstance(rates, dict) else {}
+    drill_rate = float(
+        rates_map.get("DrillingRate")
+        or rates_map.get("drillingrate")
+        or rates_map.get("MachineRate")
+        or rates_map.get("machinerate")
+        or 0.0
+    )
+    if drill_rate <= 0.0:
+        try:
+            drill_rate = float(_rate_for_bucket("drilling", rates or {}))
+        except Exception:
+            drill_rate = 0.0
+    drill_cost = round((bill_min / 60.0) * drill_rate, 2) if bill_min > 0 else 0.0
+    if bill_min > 0:
+        process_costs_for_render["drilling"] = drill_cost
+        bucket_minutes_detail["drilling"] = bill_min
         canonical_bucket_summary.setdefault("drilling", {}).setdefault("minutes", 0.0)
-        canonical_bucket_summary["drilling"]["minutes"] += drill_min
+        canonical_bucket_summary["drilling"]["minutes"] += bill_min
+
+        if isinstance(breakdown, dict):
+            bview = breakdown.setdefault(
+                "bucket_view", {"buckets": {}, "order": [], "totals": {}}
+            )
+            buckets = bview.setdefault("buckets", {})
+            bk = buckets.setdefault(
+                "drilling",
+                {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0, "total$": 0.0},
+            )
+
+            bk["minutes"] = bill_min
+            bk["machine$"] = drill_cost
+            bk["labor$"] = 0.0
+            bk["total$"] = bk["machine$"]
+
+            if "drilling" not in bview.setdefault("order", []):
+                bview["order"].append("drilling")
+
+            bucket_minutes_detail["drilling"] = bill_min
+
+            def _recalc_bview_totals(bv: dict[str, Any]) -> None:
+                mins = sum((v.get("minutes") or 0.0) for v in bv.get("buckets", {}).values())
+                lab = sum((v.get("labor$") or 0.0) for v in bv.get("buckets", {}).values())
+                mac = sum((v.get("machine$") or 0.0) for v in bv.get("buckets", {}).values())
+                bv["totals"] = {
+                    "minutes": round(mins, 2),
+                    "labor$": round(lab, 2),
+                    "machine$": round(mac, 2),
+                    "total$": round(lab + mac, 2),
+                }
+
+            _recalc_bview_totals(bview)
 
     section_total = render_process_costs(
         tbl=process_table,
