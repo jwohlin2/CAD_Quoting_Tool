@@ -5475,6 +5475,40 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     canonical_bucket_order = list(bucket_state.canonical_order)
     canonical_bucket_summary = dict(bucket_state.canonical_summary)
     bucket_table_rows = list(bucket_state.table_rows)
+
+    planner_totals_map: typing.Mapping[str, Any] | None = None
+    if bucket_table_rows:
+        planner_totals_candidates: list[typing.Mapping[str, Any] | None] = []
+        if isinstance(process_plan_summary_local, _MappingABC):
+            pricing_info = process_plan_summary_local.get("pricing")
+            if isinstance(pricing_info, _MappingABC):
+                planner_totals_candidates.append(pricing_info.get("totals"))
+        if isinstance(breakdown, _MappingABC):
+            planner_pricing = breakdown.get("process_plan_pricing")
+            if isinstance(planner_pricing, _MappingABC):
+                planner_totals_candidates.append(planner_pricing.get("totals"))
+
+        for candidate in planner_totals_candidates:
+            if isinstance(candidate, _MappingABC):
+                planner_totals_map = candidate
+                break
+
+    if bucket_table_rows and isinstance(planner_totals_map, _MappingABC):
+        display_labor_total = sum(float(row[2]) for row in bucket_table_rows)
+        display_machine_total = sum(float(row[3]) for row in bucket_table_rows)
+        planner_labor_total = float(
+            _coerce_float_or_none(planner_totals_map.get("labor_cost")) or 0.0
+        )
+        planner_machine_total = float(
+            _coerce_float_or_none(planner_totals_map.get("machine_cost")) or 0.0
+        )
+
+        assert (
+            abs(display_labor_total - planner_labor_total) < 0.51
+        ), "Labor $ mismatch with planner totals"
+        assert (
+            abs(display_machine_total - planner_machine_total) < 0.51
+        ), "Machine $ mismatch with planner totals"
     detail_lookup.update(bucket_state.detail_lookup)
     label_to_canon.update(bucket_state.label_to_canon)
     canon_to_display_label.update(bucket_state.canon_to_display_label)
