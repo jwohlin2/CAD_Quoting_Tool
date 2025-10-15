@@ -11525,18 +11525,6 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                     0.05, hole_count * max(avg_dia_in, 0.1) * float(thickness_in) / 600.0
                 )
             drill_total_minutes = max(0.0, float(estimator_hours or 0.0)) * 60.0
-            bucket_view["drilling"] = {
-                "minutes": drill_total_minutes,
-                "machine_cost": (drill_total_minutes / 60.0) * drilling_rate,
-                "labor_cost": 0.0,
-            }
-            drilling_meta_container.update({"estimator_hours_for_planner": estimator_hours})
-            process_meta["drilling"] = {
-                "minutes": drill_total_minutes,
-                "hr": round(drill_total_minutes / 60.0, 6),
-                "rate": drilling_rate,
-                "basis": ["minutes_engine"],
-            }
 
             if drill_debug_summary:
                 bins_list: list[dict[str, Any]] = []
@@ -11787,37 +11775,13 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         billed_minutes = float(drill_total_minutes)
 
     if billed_minutes > 0.0:
-        bview = process_plan_summary.setdefault("bucket_view", {"buckets": {}, "order": []})
-        buckets_map = bview.setdefault("buckets", {})
-        bucket_entry = buckets_map.setdefault(
-            "drilling", {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0}
-        )
-
-        bucket_entry["minutes"] = billed_minutes
-
-        rates_map = rates if isinstance(rates, _MappingABC) else {}
-        drill_rate = float(
-            rates_map.get("DrillingRate")
-            or rates_map.get("drillingrate")
-            or rates_map.get("MachineRate")
-            or rates_map.get("machinerate")
-            or 0.0
-        )
-        if drill_rate <= 0.0:
-            drill_rate = float(drilling_rate)
-
-        bucket_entry["machine$"] = round((bucket_entry["minutes"] / 60.0) * drill_rate, 2)
-        bucket_entry["labor$"] = _safe_float(bucket_entry.get("labor$"))
-        bucket_entry["total$"] = round(bucket_entry["labor$"] + bucket_entry["machine$"], 2)
-
-        order_list = bview.setdefault("order", [])
-        if "drilling" not in order_list:
-            order_list.append("drilling")
-
+        # Legacy bucket view population for process_plan is disabled to avoid
+        # overriding minutes-engine drilling totals. Preserve the billed minutes
+        # detail without mutating planner structures.
         bucket_minutes_detail_local = locals().get("bucket_minutes_detail")
         if isinstance(bucket_minutes_detail_local, dict):
-            bucket_minutes_detail_local["drilling"] = bucket_entry["minutes"]
-        bucket_minutes_detail_for_render["drilling"] = bucket_entry["minutes"]
+            bucket_minutes_detail_local["drilling"] = billed_minutes
+        bucket_minutes_detail_for_render["drilling"] = billed_minutes
 
     drilling_minutes_for_bucket: float | None = None
     if billed_minutes > 0.0:
