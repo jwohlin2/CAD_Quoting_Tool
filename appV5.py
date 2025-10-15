@@ -5799,7 +5799,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     # Render MATERIAL REMOVAL card + TIME PER HOLE lines (replace legacy Time block)
     try:
         drilling_meta = locals().get("drilling_meta", {}) or {}
-        # Expected fields (provide safe fallbacks):
+        # pull safe fallbacks
         mat_canon = str(drilling_meta.get("material_canonical") or drilling_meta.get("material") or "-")
         mat_group = drilling_meta.get("material_group") or drilling_meta.get("group") or "-"
         row_group = drilling_meta.get("row_material_group") or drilling_meta.get("row_group") or None
@@ -5821,12 +5821,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         peck_min_std  = float(max(peck_min_rng))
         tchg_deep     = float(drilling_meta.get("toolchange_min_deep") or 8.00)
         tchg_std      = float(drilling_meta.get("toolchange_min_std")  or 2.50)
-        # Bins: expect a list of dict rows with keys: op, diameter_in, depth_in, qty, sfm, ipr
+
         bins = drilling_meta.get("bins_list")
         if not isinstance(bins, list):
-            # fall back if stored as dict
             bins_dict = drilling_meta.get("bins") or {}
-            bins = [v for _, v in sorted(bins_dict.items(), key=lambda kv: float(kv[1].get("diameter_in", 0.0)) if isinstance(kv[1], dict) else 0.0)] if isinstance(bins_dict, dict) else []
+            bins = [v for _, v in sorted(
+                bins_dict.items(),
+                key=lambda kv: float(kv[1].get("diameter_in", 0.0)) if isinstance(kv[1], dict) else 0.0
+            )] if isinstance(bins_dict, dict) else []
 
         _render_removal_card(
             append_line,
@@ -5846,23 +5848,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             bins=bins, index_min=index_min, peck_min_deep=peck_min_deep, peck_min_std=peck_min_std,
         )
 
-        # Single toolchange per op (if present at least once)
         tool_add = (tchg_deep if seen_deep else 0.0) + (tchg_std if seen_std else 0.0)
-        append_line(
-            f"Toolchange adders: Deep-Drill {tchg_deep:.2f} min + Drill {tchg_std:.2f} min = {tool_add:.2f} min"
-            if tool_add > 0
-            else "Toolchange adders: -"
-        )
+        append_line(f"Toolchange adders: Deep-Drill {tchg_deep:.2f} min + Drill {tchg_std:.2f} min = {tool_add:.2f} min" if tool_add > 0 else "Toolchange adders: -")
         append_line("-" * 66)
-        append_line(
-            f"Subtotal (per-hole × qty) ............... {subtotal_min:.2f} min  ({fmt_hours(subtotal_min/60.0)})"
-        )
-        append_line(
-            f"TOTAL DRILLING (with toolchange) ........ {subtotal_min + tool_add:.2f} min  ({(subtotal_min + tool_add)/60.0:.2f} hr)"
-        )
+        append_line(f"Subtotal (per-hole × qty) . {subtotal_min:.2f} min  ({fmt_hours(subtotal_min/60.0)})")
+        append_line(f"TOTAL DRILLING (with toolchange) . {subtotal_min + tool_add:.2f} min  ({(subtotal_min + tool_add)/60.0:.2f} hr)")
         append_line("")
     except Exception as e:
-        # Don’t break the quote — but surface the reason, so we can see why it skipped.
         append_line(f"[MATERIAL REMOVAL block skipped: {e}]")
         append_line("")
 
