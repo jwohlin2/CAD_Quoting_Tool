@@ -6980,26 +6980,52 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         tool_add = (tchg_deep if seen_deep else 0.0) + (tchg_std if seen_std else 0.0)
         total_drill_minutes_with_toolchange = subtotal_min + tool_add
 
-        # === Choose billing truth ===
-        drill_meta = breakdown.setdefault("drilling_meta", {})
-        if isinstance(drill_meta, dict):
-            drill_meta["toolchange_minutes"] = float(tool_add)
-            drill_meta["total_minutes_with_toolchange"] = float(total_drill_minutes_with_toolchange)
+        drilling_meta_container = breakdown.setdefault("drilling_meta", {})
+        if isinstance(drilling_meta_container, _MutableMappingABC):
+            drilling_meta = drilling_meta_container
+        elif isinstance(drilling_meta_container, _MappingABC):
+            drilling_meta = dict(drilling_meta_container)
+            breakdown["drilling_meta"] = drilling_meta
+        else:
+            drilling_meta = {}
+            breakdown["drilling_meta"] = drilling_meta
+        drilling_meta["toolchange_minutes"] = float(tool_add)
+        drilling_meta["total_minutes_with_toolchange"] = float(total_drill_minutes_with_toolchange)
 
-        # === Choose billing truth ===
+        # === DRILLING BILLING TRUTH ===
         bill_min = float(
-            drill_meta.get("total_minutes_billed")
-            or drill_meta.get("total_minutes_with_toolchange")
-            or drill_meta.get("total_minutes")
+            drilling_meta.get("total_minutes_billed")
+            or drilling_meta.get("total_minutes_with_toolchange")
+            or drilling_meta.get("total_minutes")
             or 0.0
         )
-        drill_meta["total_minutes_billed"] = bill_min  # canonical for pricing
+        drilling_meta["total_minutes_billed"] = bill_min
 
-        # Overwrite any legacy planner seed:
-        pm = breakdown.setdefault("process_meta", {}).setdefault("drilling", {})
+        # Overwrite legacy planner meta
+        process_meta_container = breakdown.setdefault("process_meta", {})
+        if not isinstance(process_meta_container, _MutableMappingABC):
+            if isinstance(process_meta_container, _MappingABC):
+                process_meta_container = dict(process_meta_container)
+            else:
+                process_meta_container = {}
+            breakdown["process_meta"] = process_meta_container
+        drilling_process_meta = process_meta_container.setdefault("drilling", {})
+        if not isinstance(drilling_process_meta, _MutableMappingABC):
+            if isinstance(drilling_process_meta, _MappingABC):
+                drilling_process_meta = dict(drilling_process_meta)
+            else:
+                drilling_process_meta = {}
+            process_meta_container["drilling"] = drilling_process_meta
+        pm = drilling_process_meta
         pm["minutes"] = bill_min
         pm["hr"] = round(bill_min / 60.0, 6)
-        pm["basis"] = ["minutes_engine"]  # replace any 'planner_drilling_override'
+        rates_map = rates if isinstance(rates, _MappingABC) else {}
+        pm["rate"] = float(
+            rates_map.get("DrillingRate")
+            or rates_map.get("MachineRate")
+            or 0.0
+        )
+        pm["basis"] = ["minutes_engine"]
 
         process_plan_summary_card: dict[str, Any] | None = None
         if isinstance(process_plan_summary_local, dict):
@@ -7021,10 +7047,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             drill_meta_summary["toolchange_minutes"] = float(tool_add)
             drill_meta_summary["total_minutes_with_toolchange"] = float(total_drill_minutes_with_toolchange)
             drill_meta_summary["total_minutes_billed"] = bill_min
-        if isinstance(drilling_meta, dict):
-            drilling_meta["toolchange_minutes"] = float(tool_add)
-            drilling_meta["total_minutes_with_toolchange"] = float(total_drill_minutes_with_toolchange)
-
         append_line(f"Toolchange adders: Deep-Drill {tchg_deep:.2f} min + Drill {tchg_std:.2f} min = {tool_add:.2f} min" if tool_add > 0 else "Toolchange adders: -")
         append_line("-" * 66)
         append_line(f"Subtotal (per-hole × qty) . {subtotal_min:.2f} min  ({fmt_hours(subtotal_min/60.0)})")
