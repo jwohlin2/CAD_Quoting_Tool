@@ -3928,8 +3928,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     display_labor_for_ladder = 0.0
     hour_summary_entries: dict[str, tuple[float, bool]] = {}
     qty_raw = result.get("qty")
-    if qty_raw in (None, ""):
+    if qty_raw in (None, "", 0):
         qty_raw = breakdown.get("qty")
+    if qty_raw in (None, "", 0):
+        decision_state = result.get("decision_state")
+        if isinstance(decision_state, _MappingABC):
+            baseline_state = decision_state.get("baseline")
+            if isinstance(baseline_state, _MappingABC):
+                qty_raw = baseline_state.get("qty")
     qty = int(qty_raw or 1)
     price        = float(result.get("price", totals.get("price", 0.0)))
 
