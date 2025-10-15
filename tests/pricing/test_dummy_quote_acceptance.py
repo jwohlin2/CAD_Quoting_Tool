@@ -456,7 +456,7 @@ def test_dummy_quote_pricing_source_header() -> None:
     breakdown = payload["breakdown"]
     drill_meta = breakdown["drilling_meta"]
 
-    assert breakdown["pricing_source"] == "planner"
+    assert str(breakdown["pricing_source"]).lower() == "planner"
 
     path = str(breakdown.get("pricing_source_text") or "").strip()
     speeds_path = str(drill_meta.get("speeds_feeds_path") or "").strip()

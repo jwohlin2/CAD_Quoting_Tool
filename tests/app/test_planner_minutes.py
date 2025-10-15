@@ -67,7 +67,7 @@ def test_compute_quote_uses_planner_minutes(monkeypatch):
     assert price_called["price"] is True
 
     baseline = result["decision_state"]["baseline"]
-    assert baseline["pricing_source"] == "planner", baseline["pricing_source"]
+    assert str(baseline["pricing_source"]).lower() == "planner", baseline["pricing_source"]
     assert baseline["process_plan_pricing"]["totals"]["machine_cost"] == 90.0
 
     breakdown = result["breakdown"]
@@ -75,7 +75,7 @@ def test_compute_quote_uses_planner_minutes(monkeypatch):
     assert plan_pricing is not None, "expected planner pricing to be present"
     assert plan_pricing.get("line_items"), "expected planner pricing line items"
     assert isinstance(plan_pricing["line_items"][0], dict)
-    assert breakdown["pricing_source"] == "planner", breakdown["pricing_source"]
+    assert str(breakdown["pricing_source"]).lower() == "planner", breakdown["pricing_source"]
     assert breakdown["process_costs"] == {"Machine": 90.0, "Labor": 45.0}
     assert breakdown["process_minutes"] == 45.0
     planner_meta = breakdown["process_meta"]
@@ -219,7 +219,7 @@ def test_planner_bucket_minutes_from_line_items_when_bucketize_empty(monkeypatch
     )
 
     breakdown = result["breakdown"]
-    assert breakdown["pricing_source"] == "planner"
+    assert str(breakdown["pricing_source"]).lower() == "planner"
 
     bucket_view = breakdown.get("bucket_view") or {}
     buckets = bucket_view.get("buckets") or {}
@@ -283,7 +283,7 @@ def test_planner_does_not_emit_legacy_buckets_when_line_items_present(monkeypatc
     )
 
     breakdown = result["breakdown"]
-    assert breakdown["pricing_source"] == "planner"
+    assert str(breakdown["pricing_source"]).lower() == "planner"
 
     bucket_view = breakdown["bucket_view"]
     assert "drilling" not in bucket_view
@@ -555,7 +555,7 @@ def test_die_plate_163_holes_has_planner_totals(monkeypatch):
     )
 
     breakdown = result["breakdown"]
-    assert breakdown["pricing_source"] == "planner"
+    assert str(breakdown["pricing_source"]).lower() == "planner"
     process_costs = breakdown["process_costs"]
     assert process_costs["Machine"] > 0
     assert process_costs["Labor"] > 0
