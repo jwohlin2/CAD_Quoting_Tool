@@ -5812,18 +5812,67 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     process_table = _ProcessCostTableRecorder()
 
-    # Build dollars from minutes if missing
-    for canon_key, meta in (canonical_bucket_summary or {}).items():
+    def _norm(s):
+        import re
+
+        return re.sub(r"[^a-z0-9]+", "_", str(s or "").lower()).strip("_")
+
+    LABORISH = {
+        "finishing_deburr",
+        "inspection",
+        "assembly",
+        "toolmaker_support",
+        "ehs_compliance",
+        "fixture_build_amortized",
+        "programming_amortized",
+    }
+
+    RATE_KEYS = {
+        "milling": ["MillingRate"],
+        "drilling": ["DrillingRate"],
+        "counterbore": ["CounterboreRate", "DrillingRate"],
+        "tapping": ["TappingRate", "DrillingRate"],
+        "grinding": [
+            "GrindingRate",
+            "SurfaceGrindRate",
+            "ODIDGrindRate",
+            "JigGrindRate",
+        ],
+        "finishing_deburr": ["FinishingRate", "DeburrRate"],
+        "saw_waterjet": ["SawWaterjetRate", "SawRate", "WaterjetRate"],
+        "inspection": ["InspectionRate"],
+        "wire_edm": ["WireEDMRate", "EDMRate"],
+        "sinker_edm": ["SinkerEDMRate", "EDMRate"],
+    }
+
+    def _rate_for_bucket(key: str, rates: dict) -> float:
+        k = _norm(key)
+        for rk in RATE_KEYS.get(k, []):
+            v = rates.get(rk) or rates.get(_norm(rk))
+            if isinstance(v, (int, float)) and v > 0:
+                return float(v)
+        # fallbacks
+        return float(rates.get("LaborRate" if k in LABORISH else "MachineRate") or 0.0)
+
+    # 1a) minutes→$ for planner buckets that have minutes but no dollars
+    for k, meta in (canonical_bucket_summary or {}).items():
         minutes = float(meta.get("minutes") or 0.0)
-        amount = float(process_costs_for_render.get(canon_key) or 0.0)
-        if minutes > 0 and amount <= 0.0:
-            rate = _lookup_bucket_rate(canon_key, rates)
-            if rate > 0:
-                process_costs_for_render[canon_key] = round(
-                    (minutes / 60.0) * rate, 2
-                )
-                # also stash minutes so the renderer shows hours & rate nicely
-                bucket_minutes_detail[canon_key] = minutes
+        have_amount = float(process_costs_for_render.get(k) or 0.0)
+        if minutes > 0 and have_amount <= 0.0:
+            r = _rate_for_bucket(k, rates or {})
+            if r > 0:
+                process_costs_for_render[k] = round((minutes / 60.0) * r, 2)
+                bucket_minutes_detail[k] = minutes
+
+    # 1b) minutes→$ for the drilling minutes engine (if planner didn’t emit a drilling bucket)
+    drill_min = float((process_plan_summary.get("drilling") or {}).get("total_minutes") or 0.0)
+    if drill_min > 0:
+        process_costs_for_render["drilling"] = round(
+            (drill_min / 60.0) * (_rate_for_bucket("drilling", rates) or 0.0), 2
+        )
+        bucket_minutes_detail["drilling"] = drill_min
+        canonical_bucket_summary.setdefault("drilling", {}).setdefault("minutes", 0.0)
+        canonical_bucket_summary["drilling"]["minutes"] += drill_min
 
     section_total = render_process_costs(
         tbl=process_table,
