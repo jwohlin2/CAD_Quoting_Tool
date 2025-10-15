@@ -34,6 +34,14 @@ before export.
    * Legacy installs under `D:\CAD_Quoting_Tool\models` continue to be
      auto-discovered.
 
+### Packaged resources
+
+The default variables sheet, McMaster-Carr catalog export and UI configuration
+template now live under `cad_quoter/resources/`.  At runtime the application
+uses the packaged copies automatically, but you can still override them by
+pointing the relevant environment variables (for example
+`CATALOG_CSV_PATH`) to your own files.
+
 ## Running the application
 
 Launch the Tkinter UI after activating the virtual environment:

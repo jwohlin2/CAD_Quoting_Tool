@@ -39,6 +39,10 @@ from cad_quoter.app.container import (
     SupportsPricingEngine,
     create_default_container,
 )
+from cad_quoter.resources import (
+    default_app_settings_json,
+    default_master_variables_csv,
+)
 from cad_quoter.config import (
     AppEnvironment,
     ConfigError,
@@ -2720,7 +2724,7 @@ def _load_master_variables() -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
         )
         return (core_copy, full_copy)
 
-    master_path = Path(__file__).with_name("Master_Variables.csv")
+    master_path = default_master_variables_csv()
     fallback = Path(r"D:\CAD_Quoting_Tool\Master_Variables.csv")
     if not master_path.exists() and fallback.exists():
         master_path = fallback
@@ -13743,9 +13747,7 @@ class UIConfiguration:
     window_geometry: str = "1260x900"
     llm_enabled_default: bool = True
     apply_llm_adjustments_default: bool = True
-    settings_path: Path = field(
-        default_factory=lambda: Path(__file__).with_name("app_settings.json")
-    )
+    settings_path: Path = field(default_factory=default_app_settings_json)
     default_llm_model_path: str | None = None
     default_params: dict[str, Any] = field(default_factory=lambda: copy.deepcopy(PARAMS_DEFAULT))
     default_material_display: str = DEFAULT_MATERIAL_DISPLAY
@@ -14285,7 +14287,7 @@ class App(tk.Tk):
         self.llm_events: list[dict[str, Any]] = []
         self.llm_errors: list[dict[str, Any]] = []
         self._llm_client_cache: LLMClient | None = None
-        self.settings_path = Path(__file__).with_name("app_settings.json")
+        self.settings_path = default_app_settings_json()
 
         self.settings = self._load_settings()
         if not isinstance(self.settings, dict):

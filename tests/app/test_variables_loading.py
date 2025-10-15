@@ -1,15 +1,11 @@
-from pathlib import Path
-
 import pandas as pd
 
 from appV5 import CORE_COLS, read_variables_file
+from cad_quoter.resources import default_master_variables_csv
 
 
 def test_master_variables_core_columns_populated():
-    repo_root = Path(__file__).resolve().parents[2]
-    csv_path = repo_root / "Master_Variables.csv"
-
-    core_df = read_variables_file(str(csv_path))
+    core_df = read_variables_file(str(default_master_variables_csv()))
 
     assert core_df is not None
 

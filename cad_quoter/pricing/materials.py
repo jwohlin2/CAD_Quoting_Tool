@@ -77,10 +77,13 @@ def _maybe_get_mcmaster_price(display_name: str, normalized_key: str) -> Dict[st
         return None
 
     try:
-        from mcmaster_stock import lookup_sku_and_price_for_mm
+        from cad_quoter.vendors.mcmaster_stock import lookup_sku_and_price_for_mm
     except Exception:
-        _MCM_DISABLED = True
-        return None
+        try:
+            from mcmaster_stock import lookup_sku_and_price_for_mm
+        except Exception:
+            _MCM_DISABLED = True
+            return None
 
     try:
         material_key, length_in, width_in, thickness_in = request

@@ -3,13 +3,28 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from functools import lru_cache
 from typing import Any
 
-import appV5 as _appV5
 
-_map_geo_to_double_underscore = getattr(_appV5, "_map_geo_to_double_underscore")
-_collect_geo_features_from_df = getattr(_appV5, "_collect_geo_features_from_df", None)
-_update_variables_df_with_geo = getattr(_appV5, "update_variables_df_with_geo", None)
+@lru_cache(maxsize=1)
+def _load_app_module():  # pragma: no cover - thin wrapper around import machinery
+    import importlib
+
+    return importlib.import_module("appV5")
+
+
+def _get_app_attr(name: str):
+    try:
+        module = _load_app_module()
+    except Exception:
+        return None
+    return getattr(module, name, None)
+
+
+_map_geo_to_double_underscore = _get_app_attr("_map_geo_to_double_underscore")
+_collect_geo_features_from_df = _get_app_attr("_collect_geo_features_from_df")
+_update_variables_df_with_geo = _get_app_attr("update_variables_df_with_geo")
 
 __all__ = [
     "map_geo_to_double_underscore",
