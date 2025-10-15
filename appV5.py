@@ -24,7 +24,7 @@ import sys
 import time
 import typing
 from collections import Counter
-from collections.abc import Iterator, Mapping as _MappingABC
+from collections.abc import Iterator, Mapping as _MappingABC, MutableMapping as _MutableMappingABC
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
@@ -707,8 +707,11 @@ def _build_quote_header_lines(
         return text or None
 
     raw_pricing_source = None
+    pricing_source_display = None
     if isinstance(breakdown, _MappingABC):
         raw_pricing_source = _coerce_pricing_source(breakdown.get("pricing_source"))
+        if raw_pricing_source:
+            pricing_source_display = str(raw_pricing_source).title()
 
     used_planner_flag: bool | None = None
     for source in (result, breakdown):
@@ -736,8 +739,21 @@ def _build_quote_header_lines(
         hour_summary_entries=hour_summary_entries,
     )
 
-    if pricing_source_value:
-        header_lines.append(f"Pricing Source: {pricing_source_value}")
+    if (
+        isinstance(breakdown, _MutableMappingABC)
+        and pricing_source_value
+        and raw_pricing_source
+        and raw_pricing_source.lower() != str(pricing_source_value).strip().lower()
+    ):
+        breakdown["pricing_source"] = pricing_source_value
+        pricing_source_display = str(pricing_source_value).strip().title()
+
+    if not pricing_source_display and pricing_source_value:
+        pricing_source_display = str(pricing_source_value).strip().title()
+
+    if pricing_source_display:
+        display_value = pricing_source_display
+        header_lines.append(f"Pricing Source: {display_value}")
 
     return header_lines, pricing_source_value
 

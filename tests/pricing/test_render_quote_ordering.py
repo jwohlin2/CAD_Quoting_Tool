@@ -903,8 +903,8 @@ def test_render_quote_promotes_planner_pricing_source() -> None:
     rendered = appV5.render_quote(result, currency="$")
     lines = rendered.splitlines()
 
-    assert "Pricing Source: planner" in lines
-    assert all("Pricing Source: legacy" not in line for line in lines)
+    assert "Pricing Source: Planner" in lines
+    assert all("Pricing Source: Legacy" not in line for line in lines)
 
 
 def test_render_quote_header_is_canonical() -> None:
@@ -949,7 +949,7 @@ def test_render_quote_header_is_canonical() -> None:
     assert len(speeds_lines) == 1
     assert speeds_lines[0].endswith("(loaded)")
     assert len(pricing_lines) == 1
-    assert pricing_lines[0] == "Pricing Source: planner"
+    assert pricing_lines[0] == "Pricing Source: Planner"
 
 
 def test_render_quote_hour_summary_uses_final_hours() -> None:
