@@ -34,9 +34,19 @@ def test_migrate_flat_to_two_bucket_fills_shop_rate_defaults() -> None:
 
     migrated = rates.migrate_flat_to_two_bucket(flat)
 
-    assert migrated["labor"]["ProgrammingRate"] == pytest.approx(82.5)
-    assert migrated["machine"]["MillingRate"] == pytest.approx(82.5)
-    assert migrated["machine"]["WireEDMRate"] == pytest.approx(82.5)
+    assert migrated["labor"]["ProgrammingRate"] == pytest.approx(80.0)
+    assert migrated["machine"]["MillingRate"] == pytest.approx(110.0)
+    assert migrated["machine"]["WireEDMRate"] == pytest.approx(130.0)
+
+
+def test_migrate_flat_to_two_bucket_uses_hard_fallbacks_when_missing() -> None:
+    migrated = rates.migrate_flat_to_two_bucket({})
+
+    assert migrated["labor"]["Programmer"] == pytest.approx(80.0)
+    assert migrated["labor"]["InspectionRate"] == pytest.approx(75.0)
+    assert migrated["machine"]["MillingRate"] == pytest.approx(110.0)
+    assert migrated["machine"]["DrillingRate"] == pytest.approx(95.0)
+    assert migrated["machine"]["WireEDMRate"] == pytest.approx(130.0)
 
 
 def test_migrate_flat_to_two_bucket_populates_deburr_alias() -> None:
@@ -72,3 +82,17 @@ def test_op_cost_combines_machine_and_labor_minutes() -> None:
     cost = op_cost(op, two_bucket, minutes=30.0)
 
     assert cost == 60.0
+
+
+def test_ensure_two_bucket_defaults_preserves_and_backfills() -> None:
+    two_bucket = {
+        "labor": {"Toolmaker": 70.0},
+        "machine": {"CNC_Mill": 105.0},
+    }
+
+    ensured = rates.ensure_two_bucket_defaults(two_bucket)
+
+    assert ensured["labor"]["Programmer"] == pytest.approx(80.0)
+    assert ensured["labor"]["Toolmaker"] == pytest.approx(70.0)
+    assert ensured["machine"]["CNC_Mill"] == pytest.approx(105.0)
+    assert ensured["machine"]["DrillingRate"] == pytest.approx(95.0)

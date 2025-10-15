@@ -835,7 +835,11 @@ from cad_quoter.pricing.time_estimator import (
     estimate_time_min as _estimate_time_min,
 )
 from cad_quoter.pricing.wieland import lookup_price as lookup_wieland_price
-from cad_quoter.rates import migrate_flat_to_two_bucket, two_bucket_to_flat
+from cad_quoter.rates import (
+    ensure_two_bucket_defaults,
+    migrate_flat_to_two_bucket,
+    two_bucket_to_flat,
+)
 from cad_quoter.vendors.mcmaster_stock import lookup_sku_and_price_for_mm
 
 _CANONICAL_MIC6_DISPLAY = "Aluminum MIC6"
@@ -3423,6 +3427,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if programmer_fallback <= 0 and shop_rate_val > 0:
             programmer_fallback = shop_rate_val
         rates.setdefault("ProgrammerRate", programmer_fallback)
+
+    fallback_two_bucket_rates = _coerce_two_bucket_rates(rates)
+    fallback_flat_rates = two_bucket_to_flat(fallback_two_bucket_rates)
+    for key, fallback_value in fallback_flat_rates.items():
+        if _coerce_rate_value(rates.get(key)) <= 0.0:
+            rates[key] = float(fallback_value)
     params       = breakdown.get("params", {}) or {}
     nre_cost_details = breakdown.get("nre_cost_details", {}) or {}
     labor_cost_details_input_raw = breakdown.get("labor_cost_details", {}) or {}
@@ -6376,7 +6386,7 @@ def _coerce_two_bucket_rates(value: Any) -> dict[str, dict[str, float]]:
                     machine[str(key)] = float(raw)
                 except Exception:
                     continue
-            return {"labor": labor, "machine": machine}
+            return ensure_two_bucket_defaults({"labor": labor, "machine": machine})
 
         flat: dict[str, float] = {}
         for key, raw in value.items():
@@ -6385,7 +6395,7 @@ def _coerce_two_bucket_rates(value: Any) -> dict[str, dict[str, float]]:
             except Exception:
                 continue
         if flat:
-            return migrate_flat_to_two_bucket(flat)
+            return ensure_two_bucket_defaults(migrate_flat_to_two_bucket(flat))
 
     return {"labor": {}, "machine": {}}
 

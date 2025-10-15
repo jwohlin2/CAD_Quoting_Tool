@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, Mapping
 
 from cad_quoter.utils import _dict
 
@@ -63,6 +63,25 @@ LEGACY_PROGRAMMER_RATE_KEYS = (
     "ProgrammingRate",
     "CAMRate",
 )
+
+
+HARD_LABOR_FALLBACKS: Mapping[str, float] = {
+    "Programmer": 80.0,
+    "ProgrammingRate": 80.0,
+    "Inspector": 75.0,
+    "InspectionRate": 75.0,
+}
+
+
+HARD_MACHINE_FALLBACKS: Mapping[str, tuple[float, tuple[str, ...]]] = {
+    "CNC_Mill": (110.0, ("MillingRate",)),
+    "DrillPress": (95.0, ("DrillingRate",)),
+    "SurfaceGrind": (95.0, ("SurfaceGrindRate", "GrindingRate")),
+    "ODIDGrind": (95.0, ("ODIDGrindRate",)),
+    "JigGrind": (95.0, ("JigGrindRate",)),
+    "WireEDM": (130.0, ("WireEDMRate",)),
+    "SinkerEDM": (130.0, ("SinkerEDMRate",)),
+}
 
 
 OLDKEY_TO_LABOR = {
@@ -168,58 +187,114 @@ def migrate_flat_to_two_bucket(old: dict[str, float]) -> dict[str, dict[str, flo
             if alias_value is not None:
                 machine_output.setdefault(machine_name, alias_value)
 
+    return _finalize_two_bucket(labor_output, machine_output, numeric)
+
+
+def _finalize_two_bucket(
+    labor_output: dict[str, Any],
+    machine_output: dict[str, Any],
+    numeric: Mapping[str, Any],
+) -> dict[str, dict[str, float]]:
+    labor_output = dict(labor_output)
+    machine_output = dict(machine_output)
+
     # Provide helpful logical aliases
     if "Finisher" in labor_output and "DeburrRate" not in labor_output:
         labor_output["DeburrRate"] = labor_output["Finisher"]
 
-    # Collect candidate values for defaults
     def _mean(values: list[float]) -> float | None:
         filtered = [v for v in values if isinstance(v, (int, float)) and math.isfinite(v)]
         if not filtered:
             return None
         return float(sum(filtered) / len(filtered))
 
-    labor_candidates: list[float] = list({v for v in labor_output.values()})
-    machine_candidates: list[float] = list({v for v in machine_output.values()})
+    labor_candidates: list[float] = []
+    for value in labor_output.values():
+        if isinstance(value, (int, float)):
+            labor_candidates.append(float(value))
+    machine_candidates: list[float] = []
+    for value in machine_output.values():
+        if isinstance(value, (int, float)):
+            machine_candidates.append(float(value))
 
     for fallback_key in ("ShopRate", "LaborRate"):
-        if fallback_key in numeric:
-            labor_candidates.append(numeric[fallback_key])
+        try:
+            labor_candidates.append(float(numeric[fallback_key]))
+        except Exception:
+            continue
     for fallback_key in ("ShopRate", "MachineRate", "MachineShopRate"):
-        if fallback_key in numeric:
-            machine_candidates.append(numeric[fallback_key])
+        try:
+            machine_candidates.append(float(numeric[fallback_key]))
+        except Exception:
+            continue
 
-    labor_default = _mean(labor_candidates) or _mean(list(numeric.values())) or 90.0
+    numeric_values: list[float] = []
+    for value in numeric.values():
+        try:
+            numeric_values.append(float(value))
+        except Exception:
+            continue
+
+    labor_default = _mean(labor_candidates) or _mean(numeric_values) or 90.0
     machine_default = _mean(machine_candidates) or labor_default or 90.0
 
     expected_labor_keys = {
-        "ProgrammingRate",
-        "InspectionRate",
         "FixtureBuildRate",
         "DeburrRate",
         "FinishingRate",
     }
-    expected_machine_keys = set(OLDKEY_TO_MACHINE.keys()) | {
-        "AbrasiveFlowRate",
+    hard_machine_aliases = {
+        alias for _, alias_list in HARD_MACHINE_FALLBACKS.values() for alias in alias_list
     }
+    expected_machine_keys = set(OLDKEY_TO_MACHINE.keys()) | {"AbrasiveFlowRate"}
+
+    def _as_positive(value: Any) -> float:
+        try:
+            numeric_value = float(value or 0.0)
+        except Exception:
+            return 0.0
+        if not math.isfinite(numeric_value) or numeric_value <= 0.0:
+            return 0.0
+        return numeric_value
 
     for key in expected_labor_keys:
-        if float(labor_output.get(key, 0.0) or 0.0) <= 0.0:
+        if _as_positive(labor_output.get(key)) <= 0.0:
             labor_output[key] = labor_default
-    if "Programmer" not in labor_output or labor_output["Programmer"] <= 0.0:
-        labor_output["Programmer"] = labor_default
-        labor_output.setdefault("ProgrammingRate", labor_default)
+
+    for canonical, fallback in HARD_LABOR_FALLBACKS.items():
+        if _as_positive(labor_output.get(canonical)) <= 0.0:
+            labor_output[canonical] = fallback
+        if canonical == "Programmer":
+            for alias in LEGACY_PROGRAMMER_RATE_KEYS:
+                if _as_positive(labor_output.get(alias)) <= 0.0:
+                    labor_output[alias] = labor_output[canonical]
+        elif canonical == "Inspector":
+            if _as_positive(labor_output.get("InspectionRate")) <= 0.0:
+                labor_output["InspectionRate"] = labor_output[canonical]
 
     for key in expected_machine_keys:
-        if float(machine_output.get(key, 0.0) or 0.0) <= 0.0:
-            machine_output[key] = machine_default
-            alias = OLDKEY_TO_MACHINE.get(key)
-            if alias:
-                machine_output.setdefault(alias, machine_default)
+        if key in hard_machine_aliases:
+            continue
+        existing = _as_positive(machine_output.get(key))
+        if existing > 0.0:
+            continue
+        machine_output[key] = machine_default
+        alias = OLDKEY_TO_MACHINE.get(key)
+        if alias and _as_positive(machine_output.get(alias)) <= 0.0:
+            machine_output[alias] = machine_default
 
-    if float(machine_output.get("CNC_Mill", 0.0) or 0.0) <= 0.0:
-        machine_output["CNC_Mill"] = machine_default
-        machine_output.setdefault("MillingRate", machine_default)
+    for canonical, (fallback_value, aliases) in HARD_MACHINE_FALLBACKS.items():
+        if _as_positive(machine_output.get(canonical)) <= 0.0:
+            machine_output[canonical] = fallback_value
+        canonical_value = _as_positive(machine_output.get(canonical)) or fallback_value
+        for alias in aliases:
+            if _as_positive(machine_output.get(alias)) <= 0.0:
+                machine_output[alias] = canonical_value
+
+    if _as_positive(machine_output.get("MillingRate")) <= 0.0:
+        machine_output["MillingRate"] = machine_output.get("CNC_Mill", machine_default)
+    if _as_positive(machine_output.get("CNC_Mill")) <= 0.0:
+        machine_output["CNC_Mill"] = _as_positive(machine_output.get("MillingRate")) or machine_default
 
     # Final cleanup: ensure strictly positive numeric values
     labor_clean = {
@@ -234,11 +309,45 @@ def migrate_flat_to_two_bucket(old: dict[str, float]) -> dict[str, dict[str, flo
     }
 
     if not labor_clean:
-        labor_clean = {"ProgrammingRate": labor_default, "Programmer": labor_default}
+        fallback = HARD_LABOR_FALLBACKS.get("Programmer", labor_default)
+        labor_clean = {"ProgrammingRate": fallback, "Programmer": fallback}
     if not machine_clean:
-        machine_clean = {"MillingRate": machine_default, "CNC_Mill": machine_default}
+        fallback = HARD_MACHINE_FALLBACKS.get("CNC_Mill", (machine_default, ()))
+        default_machine = fallback[0]
+        machine_clean = {"MillingRate": default_machine, "CNC_Mill": default_machine}
 
     return {"labor": labor_clean, "machine": machine_clean}
+
+
+def ensure_two_bucket_defaults(
+    rates: Mapping[str, Mapping[str, Any]] | Mapping[str, Any]
+) -> dict[str, dict[str, float]]:
+    """Ensure two-bucket rate mappings include deterministic fallbacks."""
+
+    labor_raw = _dict(rates.get("labor")) if isinstance(rates, Mapping) else {}
+    machine_raw = _dict(rates.get("machine")) if isinstance(rates, Mapping) else {}
+
+    labor: dict[str, Any] = {}
+    machine: dict[str, Any] = {}
+    numeric: dict[str, Any] = {}
+
+    for key, value in labor_raw.items():
+        try:
+            numeric_value = float(value)
+        except Exception:
+            continue
+        labor[str(key)] = numeric_value
+        numeric[str(key)] = numeric_value
+
+    for key, value in machine_raw.items():
+        try:
+            numeric_value = float(value)
+        except Exception:
+            continue
+        machine[str(key)] = numeric_value
+        numeric[str(key)] = numeric_value
+
+    return _finalize_two_bucket(labor, machine, numeric)
 
 
 # ---- helpers for costing layers ----
@@ -364,6 +473,7 @@ __all__ = [
     "OP_TO_MACHINE",
     "OP_TO_LABOR",
     "migrate_flat_to_two_bucket",
+    "ensure_two_bucket_defaults",
     "rate_for_machine",
     "rate_for_role",
     "two_bucket_to_flat",
