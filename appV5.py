@@ -5841,11 +5841,33 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         canon_key = _canonical_bucket_key(key)
         if canon_key in canonical_bucket_summary:
             continue
-        bucket_minutes_detail.setdefault(key, _safe_float(minutes))
+        bucket_minutes_detail.setdefault(canon_key or key, _safe_float(minutes))
     extra_bucket_minutes_detail = breakdown.get("bucket_minutes_detail")
     if isinstance(extra_bucket_minutes_detail, _MappingABC):
         for key, minutes in extra_bucket_minutes_detail.items():
             bucket_minutes_detail[key] = _safe_float(minutes)
+    process_minutes_map = breakdown.get("process_minutes")
+    if isinstance(process_minutes_map, _MappingABC):
+        for key, minutes in process_minutes_map.items():
+            canon_key = _canonical_bucket_key(key)
+            if canon_key and canon_key not in bucket_minutes_detail:
+                bucket_minutes_detail[canon_key] = _safe_float(minutes)
+    if isinstance(process_meta, _MappingABC):
+        for raw_key, meta in process_meta.items():
+            if not isinstance(meta, _MappingABC):
+                continue
+            canon_key = _canonical_bucket_key(raw_key)
+            if not canon_key or canon_key in bucket_minutes_detail:
+                continue
+            minutes_val = _safe_float(meta.get("minutes"))
+            if minutes_val <= 0.0:
+                minutes_val = _safe_float(meta.get("planner_minutes"))
+            if minutes_val <= 0.0:
+                hr_val = _safe_float(meta.get("hr"))
+                if hr_val > 0.0:
+                    minutes_val = hr_val * 60.0
+            if minutes_val > 0.0:
+                bucket_minutes_detail[canon_key] = minutes_val
     process_costs_for_render: dict[str, float] = {}
     for canon_key, metrics in canonical_bucket_summary.items():
         process_costs_for_render[canon_key] = _safe_float(
@@ -5856,6 +5878,15 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if canon_key in canonical_bucket_summary:
             continue
         process_costs_for_render.setdefault(key, _safe_float(amount))
+    if isinstance(process_costs_canon, _MappingABC):
+        canon_items = process_costs_canon.items()
+    else:
+        canon_items = getattr(process_costs_canon, "items", lambda: [])()
+    for canon_key, amount in canon_items:
+        key = str(canon_key or "").strip()
+        if not key or key in process_costs_for_render:
+            continue
+        process_costs_for_render[key] = _safe_float(amount)
 
     proc_total = 0.0
     amortized_nre_total = 0.0
@@ -6437,7 +6468,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         qty_for_hours > 1 and fixture_per_part_amount > 0
     )
 
-    if str(pricing_source_value).lower() == "planner":
+    planner_mode = str(pricing_source_value).lower() == "planner"
+    planner_entry_baseline = len(hour_summary_entries)
+    if planner_mode:
         seen_hour_labels: set[str] = set()
         for canon_key in canonical_bucket_order:
             if not canon_key:
@@ -6546,7 +6579,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 round(per_part_fixture_hr, 2),
                 include_in_total=False,
             )
-    else:
+    if (not planner_mode) or len(hour_summary_entries) == planner_entry_baseline:
         if charged_hour_entries:
             seen_hour_canon_keys: set[str] = set()
             for canon_key in canonical_bucket_order:
