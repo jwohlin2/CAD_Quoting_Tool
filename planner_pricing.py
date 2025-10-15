@@ -40,28 +40,124 @@ def _geom(geom: dict) -> dict:
         return default
 
     out = {}
-    out["hole_count"] = int(_as_float(g("hole_count", "derived.hole_count"), 0) or 0)
-    out["tap_qty"] = int(_as_float(g("tap_qty"), 0) or 0)
-    out["cbore_qty"] = int(_as_float(g("cbore_qty"), 0) or 0)
-    out["slot_count"] = int(_as_float(g("slot_count"), 0) or 0)
-    out["edge_len_in"] = _as_float(g("edge_len_in"), 0.0) or 0.0
-    if out["edge_len_in"] <= 0:
+
+    def _first_int(*keys: str) -> int:
+        for key in keys:
+            val = _as_float(g(key), None)
+            if val is not None and val > 0:
+                return int(val)
+        return 0
+
+    out["hole_count"] = _first_int(
+        "hole_count",
+        "derived.hole_count",
+        "hole_count_geom",
+        "derived.hole_count_geom",
+    )
+    if out["hole_count"] <= 0:
+        holes = g("hole_diams_mm", "derived.hole_diams_mm", default=())
+        if isinstance(holes, (list, tuple)):
+            out["hole_count"] = sum(1 for h in holes if _as_float(h) is not None)
+
+    feature_counts = _dict(g("feature_counts", "derived.feature_counts"))
+
+    def _feature_count(key: str, *extra_keys: str) -> int:
+        candidates = [key, f"derived.{key}"]
+        candidates.extend(extra_keys)
+        count = _first_int(*candidates)
+        if count <= 0 and feature_counts:
+            count = int(_as_float(feature_counts.get(key), 0) or 0)
+        return count
+
+    out["tap_qty"] = _feature_count("tap_qty")
+    out["cbore_qty"] = _feature_count("cbore_qty", "cbore_pairs_geom", "derived.cbore_pairs_geom")
+    out["slot_count"] = _feature_count("slot_count", "slot_qty", "derived.slot_qty")
+
+    edge_len = _as_float(
+        g(
+            "edge_len_in",
+            "derived.edge_len_in",
+            "edge_length_in",
+            "derived.edge_length_in",
+        ),
+        0.0,
+    ) or 0.0
+    if edge_len <= 0:
+        edge_mm = _as_float(
+            g(
+                "edge_len_mm",
+                "derived.edge_len_mm",
+                "edge_length_mm",
+                "profile_length_mm",
+                "derived.profile_length_mm",
+            ),
+            0.0,
+        ) or 0.0
+        if edge_mm > 0:
+            edge_len = edge_mm / 25.4
+    if edge_len <= 0:
         wedm = _dict(d.get("wedm"))
         if wedm:
-            out["edge_len_in"] = _as_float(wedm.get("perimeter_in"), out["edge_len_in"]) or out["edge_len_in"]
-    out["pocket_area_in2"] = _as_float(g("pocket_area_total_in2"), 0.0) or 0.0
+            edge_len = _as_float(wedm.get("perimeter_in"), edge_len) or edge_len
+    out["edge_len_in"] = edge_len
+
+    out["pocket_area_in2"] = _as_float(
+        g("pocket_area_in2", "pocket_area_total_in2", "derived.pocket_area_in2"), 0.0
+    ) or 0.0
     if out["pocket_area_in2"] <= 0:
         milling = _dict(d.get("milling"))
         area = _as_float(milling.get("area_in2"))
         if area is not None:
             out["pocket_area_in2"] = area
-    out["plate_area_in2"] = _as_float(g("plate_area_in2"), 0.0) or 0.0
-    if out["plate_area_in2"] <= 0:
+
+    plate_area = _as_float(
+        g(
+            "plate_area_in2",
+            "derived.plate_area_in2",
+            "outline_area_in2",
+            "derived.outline_area_in2",
+        ),
+        0.0,
+    ) or 0.0
+    if plate_area <= 0:
+        plate_area_mm2 = _as_float(
+            g(
+                "plate_bbox_area_mm2",
+                "derived.plate_bbox_area_mm2",
+            ),
+            0.0,
+        ) or 0.0
+        if plate_area_mm2 > 0:
+            plate_area = plate_area_mm2 / (25.4 ** 2)
+    if plate_area <= 0:
         sg = _dict(d.get("sg"))
         if sg:
-            out["plate_area_in2"] = _as_float(sg.get("area_sq_in"), out["plate_area_in2"]) or out["plate_area_in2"]
-    thk_mm = _as_float(g("thickness_mm"), None)
-    out["thickness_in"] = _as_float(g("thickness_in"), thk_mm / 25.4 if thk_mm else 0.0) or 0.0
+            plate_area = _as_float(sg.get("area_sq_in"), plate_area) or plate_area
+    out["plate_area_in2"] = plate_area
+
+    thk_in = _as_float(
+        g(
+            "thickness_in",
+            "derived.thickness_in",
+            "plate_thickness_in",
+            "stock_thickness_in",
+        ),
+        None,
+    )
+    thk_mm = _as_float(
+        g(
+            "thickness_mm",
+            "derived.thickness_mm",
+            "plate_thickness_mm",
+            "stock_thickness_mm",
+        ),
+        None,
+    )
+    if thk_in is None and thk_mm is not None:
+        thk_in = thk_mm / 25.4
+    if thk_in is None:
+        thk_in = 0.0
+    out["thickness_in"] = thk_in
     return out
 
 def _material_factor(material: str | None) -> Tuple[float, float]:
