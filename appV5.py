@@ -5799,37 +5799,66 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     # Render MATERIAL REMOVAL card + TIME PER HOLE lines (replace legacy Time block)
     try:
         drilling_meta = locals().get("drilling_meta", {}) or {}
+
+        def _ensure_list(raw: Any, fallback: Any = None) -> list[Any]:
+            source = raw
+            if source is None or (isinstance(source, str) and not source.strip()):
+                source = fallback
+            if source is None:
+                return []
+            if isinstance(source, list):
+                return list(source)
+            if isinstance(source, tuple):
+                return list(source)
+            if isinstance(source, set):
+                return list(source)
+            if isinstance(source, Iterator):
+                return list(source)
+            if isinstance(source, _MappingABC):
+                return [v for v in source.values()]
+            if isinstance(source, str):
+                stripped = source.strip()
+                if not stripped:
+                    return []
+                return [stripped]
+            if source is fallback and isinstance(fallback, (list, tuple, set)):
+                return list(fallback)
+            return [source]
+
         # Expected fields (provide safe fallbacks):
         mat_canon = str(drilling_meta.get("material_canonical") or drilling_meta.get("material") or "-")
         mat_group = drilling_meta.get("material_group") or drilling_meta.get("group") or "-"
         row_group = drilling_meta.get("row_material_group") or drilling_meta.get("row_group") or None
         holes_deep = int(drilling_meta.get("holes_deep") or 0)
         holes_std  = int(drilling_meta.get("holes_std")  or 0)
-        dia_vals   = list(drilling_meta.get("dia_in_vals")   or [])
-        depth_vals = list(drilling_meta.get("depth_in_vals") or [])
+        dia_vals   = _ensure_list(drilling_meta.get("dia_in_vals"))
+        depth_vals = _ensure_list(drilling_meta.get("depth_in_vals"))
         sfm_deep   = float(drilling_meta.get("sfm_deep") or 39.0)
         sfm_std    = float(drilling_meta.get("sfm_std")  or 80.0)
-        ipr_deep_vals = list(drilling_meta.get("ipr_deep_vals") or [0.0006, 0.0025])
+        ipr_deep_vals = _ensure_list(drilling_meta.get("ipr_deep_vals"), [0.0006, 0.0025]) or [0.0006, 0.0025]
         ipr_std_val   = float(drilling_meta.get("ipr_std_val")  or 0.0060)
-        rpm_deep_vals = list(drilling_meta.get("rpm_deep_vals") or [238, 1194])
-        rpm_std_vals  = list(drilling_meta.get("rpm_std_vals")  or [169, 407])
-        ipm_deep_vals = list(drilling_meta.get("ipm_deep_vals") or [0.5, 1.0])
-        ipm_std_vals  = list(drilling_meta.get("ipm_std_vals")  or [1.0, 2.4])
+        rpm_deep_vals = _ensure_list(drilling_meta.get("rpm_deep_vals"), [238, 1194]) or [238, 1194]
+        rpm_std_vals  = _ensure_list(drilling_meta.get("rpm_std_vals"), [169, 407]) or [169, 407]
+        ipm_deep_vals = _ensure_list(drilling_meta.get("ipm_deep_vals"), [0.5, 1.0]) or [0.5, 1.0]
+        ipm_std_vals  = _ensure_list(drilling_meta.get("ipm_std_vals"), [1.0, 2.4]) or [1.0, 2.4]
         index_min     = float(drilling_meta.get("index_min_per_hole") or 0.13)
-        peck_min_rng  = list(drilling_meta.get("peck_min_per_hole_vals") or [0.07, 0.08])
+        peck_min_rng  = _ensure_list(drilling_meta.get("peck_min_per_hole_vals"), [0.07, 0.08]) or [0.07, 0.08]
         peck_min_deep = float(min(peck_min_rng))
         peck_min_std  = float(max(peck_min_rng))
         tchg_deep     = float(drilling_meta.get("toolchange_min_deep") or 8.00)
         tchg_std      = float(drilling_meta.get("toolchange_min_std")  or 2.50)
         # Bins: expect a list of dict rows with keys: op, diameter_in, depth_in, qty, sfm, ipr
         bins = drilling_meta.get("bins_list")
+        if isinstance(bins, tuple):
+            bins = list(bins)
         if not isinstance(bins, list):
             # fall back if stored as dict
             bins_dict = drilling_meta.get("bins") or {}
             bins = [v for _, v in sorted(bins_dict.items(), key=lambda kv: float(kv[1].get("diameter_in", 0.0)) if isinstance(kv[1], dict) else 0.0)] if isinstance(bins_dict, dict) else []
 
+        removal_lines: list[str] = []
         _render_removal_card(
-            lines,
+            removal_lines,
             mat_canon=mat_canon, mat_group=mat_group, row_group=row_group,
             holes_deep=holes_deep, holes_std=holes_std,
             dia_vals_in=dia_vals, depth_vals_in=depth_vals,
@@ -5840,10 +5869,15 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             index_min_per_hole=index_min, peck_min_rng=peck_min_rng,
             toolchange_min_deep=tchg_deep, toolchange_min_std=tchg_std,
         )
+        for line in removal_lines:
+            append_line(line)
 
+        time_lines: list[str] = []
         subtotal_min, seen_deep, seen_std = _render_time_per_hole(
-            lines, bins=bins, index_min=index_min, peck_min_deep=peck_min_deep, peck_min_std=peck_min_std,
+            time_lines, bins=bins, index_min=index_min, peck_min_deep=peck_min_deep, peck_min_std=peck_min_std,
         )
+        for line in time_lines:
+            append_line(line)
 
         # Single toolchange per op (if present at least once)
         tool_add = (tchg_deep if seen_deep else 0.0) + (tchg_std if seen_std else 0.0)
