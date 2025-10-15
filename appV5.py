@@ -5737,14 +5737,15 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if minutes > 0 and has_money <= 0.0:
             rate = _lookup_bucket_rate(canon_key, rates)
             dollars = (minutes / 60.0) * rate if rate > 0 else 0.0
-            if dollars > 0:
-                process_costs_for_render[canon_key] = (
-                    process_costs_for_render.get(canon_key, 0.0) + round(dollars, 2)
-                )
-                # also stash minutes so the renderer shows hours & rate nicely
-                bucket_minutes_detail[canon_key] = (
-                    bucket_minutes_detail.get(canon_key, 0.0) + minutes
-                )
+            existing_amount = _safe_float(
+                process_costs_for_render.get(canon_key),
+                default=0.0,
+            )
+            process_costs_for_render[canon_key] = round(existing_amount + dollars, 2)
+            # also stash minutes so the renderer shows hours & rate nicely
+            bucket_minutes_detail[canon_key] = (
+                bucket_minutes_detail.get(canon_key, 0.0) + minutes
+            )
 
     section_total = render_process_costs(
         tbl=process_table,
@@ -11100,17 +11101,6 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             "rate": milling_rate,
             "basis": ["planner_milling_backfill"],
         }
-
-    if planner_used:
-        process_costs.clear()
-        process_costs.update(
-            {
-                "Machine": round(planner_machine_cost_total, 2),
-                "Labor": round(planner_labor_cost_total, 2),
-            }
-        )
-        breakdown["pricing_source"] = "planner"
-        baseline["pricing_source"] = "planner"
 
     project_hours = _coerce_float_or_none(value_map.get("Project Management Hours")) or 0.0
     toolmaker_hours = _coerce_float_or_none(value_map.get("Tool & Die Maker Hours")) or 0.0
