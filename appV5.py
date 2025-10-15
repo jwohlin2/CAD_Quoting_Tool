@@ -10412,6 +10412,21 @@ def _df_to_value_map(df: Any) -> dict[str, Any]:
     return value_map
 
 
+_MATERIAL_EMPTY_TOKENS = {"", "none", "na", "null", "tbd", "unknown"}
+
+
+def _material_text_or_none(value: Any) -> str | None:
+    """Return a cleaned material string or ``None`` if it's effectively empty."""
+
+    text = str(value or "").strip()
+    if not text:
+        return None
+    normalized = re.sub(r"[^0-9a-z]+", "", text.lower())
+    if normalized in _MATERIAL_EMPTY_TOKENS or normalized == "group":
+        return None
+    return text
+
+
 def build_geometry_context(
     quote_source: Any,
     *,
@@ -10426,6 +10441,13 @@ def build_geometry_context(
         geom = {str(key): value for key, value in base_geometry.items()}
     else:
         geom = {}
+
+    existing_material = _material_text_or_none(geom.get("material"))
+    if existing_material:
+        geom["material"] = existing_material
+        geom.setdefault("material_name", existing_material)
+    else:
+        geom.pop("material", None)
 
     resolved_map: Mapping[str, Any] | None
     if isinstance(value_map, _MappingABC):
@@ -10442,7 +10464,7 @@ def build_geometry_context(
     if isinstance(resolved_map, _MappingABC):
         for field in ("Material Name", "Material"):
             raw_value = resolved_map.get(field)
-            text = str(raw_value or "").strip()
+            text = _material_text_or_none(raw_value)
             if text:
                 material_text = text
                 break
@@ -10652,8 +10674,6 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     if speeds_feeds_csv_path:
         planner_inputs.setdefault("speeds_feeds_loaded", bool(speeds_feeds_loaded))
 
-    state.ui_vars = dict(planner_inputs)
-
     qty = _coerce_float_or_none(value_map.get("Qty")) or 1.0
     material_text = material_display
 
@@ -10802,7 +10822,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     except Exception:
         pass
 
-    state.geo = geo_payload if isinstance(geo_payload, dict) else {}
+    state.geo = geo_context if isinstance(geo_context, dict) else {}
     state.baseline = dict(baseline)
     state.user_overrides = dict(getattr(state, "user_overrides", {}))
     state.suggestions = dict(getattr(state, "suggestions", {}))
@@ -10861,7 +10881,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         "red_flags": [],
         "totals": totals_block,
     }
-    breakdown["geo_context"] = geo_payload if isinstance(geo_payload, dict) else {}
+    breakdown["geo_context"] = geo_context if isinstance(geo_context, dict) else {}
 
     bucket_minutes_detail_for_render = breakdown.setdefault("bucket_minutes_detail", {})
     if not isinstance(bucket_minutes_detail_for_render, dict):
@@ -11585,6 +11605,33 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     bucket_view.clear()
     bucket_view.update(bucket_view_prepared)
     bucket_view_buckets = bucket_view.setdefault("buckets", {})
+
+    if not use_planner:
+        drilling_bucket_prepared = (
+            bucket_view_buckets.get("drilling")
+            if isinstance(bucket_view_buckets, _MappingABC)
+            else None
+        )
+        if isinstance(drilling_bucket_prepared, _MappingABC):
+            bucket_view["drilling"] = {
+                "minutes": _safe_float(drilling_bucket_prepared.get("minutes")),
+                "machine_cost": _safe_float(
+                    drilling_bucket_prepared.get("machine$")
+                    if "machine$" in drilling_bucket_prepared
+                    else drilling_bucket_prepared.get("machine_cost")
+                ),
+                "labor_cost": _safe_float(
+                    drilling_bucket_prepared.get("labor$")
+                    if "labor$" in drilling_bucket_prepared
+                    else drilling_bucket_prepared.get("labor_cost")
+                ),
+            }
+        elif drill_total_minutes is not None and drill_total_minutes > 0.0:
+            bucket_view["drilling"] = {
+                "minutes": drill_total_minutes,
+                "machine_cost": (drill_total_minutes / 60.0) * drilling_rate,
+                "labor_cost": 0.0,
+            }
 
     roughing_hours = _coerce_float_or_none(value_map.get("Roughing Cycle Time"))
     if roughing_hours is None:
