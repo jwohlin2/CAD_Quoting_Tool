@@ -6727,10 +6727,41 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         )
 
         tool_add = (tchg_deep if seen_deep else 0.0) + (tchg_std if seen_std else 0.0)
+        total_drill_minutes_with_toolchange = subtotal_min + tool_add
+
+        process_plan_summary_card: dict[str, Any] | None = None
+        if isinstance(process_plan_summary_local, dict):
+            process_plan_summary_card = process_plan_summary_local
+        else:
+            candidate_summary = breakdown.get("process_plan") if isinstance(breakdown, _MappingABC) else None
+            if isinstance(candidate_summary, dict):
+                process_plan_summary_card = candidate_summary
+                process_plan_summary_local = candidate_summary
+            else:
+                process_plan_summary_card = breakdown.setdefault("process_plan", {})
+                process_plan_summary_local = process_plan_summary_card
+        if process_plan_summary_card is not None:
+            drill_meta_summary = process_plan_summary_card.setdefault("drilling", {})
+            if subtotal_min > 0.0:
+                prior_total = _coerce_float_or_none(drill_meta_summary.get("total_minutes"))
+                if prior_total is None or prior_total <= 0.0:
+                    drill_meta_summary["total_minutes"] = float(subtotal_min)
+            drill_meta_summary["toolchange_minutes"] = float(tool_add)
+            drill_meta_summary["total_minutes_with_toolchange"] = float(total_drill_minutes_with_toolchange)
+            drill_total_minutes_billed = float(
+                drill_meta_summary.get("total_minutes_with_toolchange")
+                or drill_meta_summary.get("total_minutes")
+                or 0.0
+            )
+            drill_meta_summary["total_minutes_billed"] = drill_total_minutes_billed
+        if isinstance(drilling_meta, dict):
+            drilling_meta["toolchange_minutes"] = float(tool_add)
+            drilling_meta["total_minutes_with_toolchange"] = float(total_drill_minutes_with_toolchange)
+
         append_line(f"Toolchange adders: Deep-Drill {tchg_deep:.2f} min + Drill {tchg_std:.2f} min = {tool_add:.2f} min" if tool_add > 0 else "Toolchange adders: -")
         append_line("-" * 66)
         append_line(f"Subtotal (per-hole × qty) . {subtotal_min:.2f} min  ({fmt_hours(subtotal_min/60.0)})")
-        append_line(f"TOTAL DRILLING (with toolchange) . {subtotal_min + tool_add:.2f} min  ({(subtotal_min + tool_add)/60.0:.2f} hr)")
+        append_line(f"TOTAL DRILLING (with toolchange) . {total_drill_minutes_with_toolchange:.2f} min  ({(total_drill_minutes_with_toolchange)/60.0:.2f} hr)")
         append_line("")
     except Exception as e:
         append_line(f"[MATERIAL REMOVAL block skipped: {e}]")
@@ -11345,6 +11376,113 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         drilling_summary["hole_count"] = fallback_hole_count
         drilling_meta_container["bins_list"] = fallback_groups
         drilling_meta_container["hole_count"] = fallback_hole_count
+
+    # Establish authoritative drilling-minute totals before the buckets are
+    # rendered so downstream consumers have a single source of truth.
+    drill_minutes_with_toolchange = _coerce_float_or_none(
+        drilling_summary.get("total_minutes_with_toolchange")
+    )
+    if drill_minutes_with_toolchange is None or drill_minutes_with_toolchange <= 0.0:
+        drill_minutes_with_toolchange = None
+        if drill_total_minutes is not None and drill_total_minutes > 0.0:
+            drill_minutes_with_toolchange = float(drill_total_minutes)
+        else:
+            group_minutes_total = 0.0
+            groups_payload = drilling_summary.get("groups")
+            if isinstance(groups_payload, Sequence) and not isinstance(groups_payload, (str, bytes)):
+                for group_entry in groups_payload:
+                    minutes_val: float | None = None
+                    qty_val: float | None = None
+                    per_hole_val: float | None = None
+                    if isinstance(group_entry, _MappingABC):
+                        minutes_val = (
+                            _coerce_float_or_none(group_entry.get("minutes_total"))
+                            or _coerce_float_or_none(group_entry.get("total_minutes"))
+                            or _coerce_float_or_none(group_entry.get("minutes"))
+                        )
+                        qty_val = _coerce_float_or_none(group_entry.get("qty"))
+                        per_hole_val = (
+                            _coerce_float_or_none(group_entry.get("t_per_hole_min"))
+                            or _coerce_float_or_none(group_entry.get("minutes_per_hole"))
+                            or _coerce_float_or_none(group_entry.get("t_per_hole"))
+                        )
+                    else:
+                        minutes_val = (
+                            _coerce_float_or_none(getattr(group_entry, "minutes_total", None))
+                            or _coerce_float_or_none(getattr(group_entry, "total_minutes", None))
+                            or _coerce_float_or_none(getattr(group_entry, "minutes", None))
+                        )
+                        qty_val = _coerce_float_or_none(getattr(group_entry, "qty", None))
+                        per_hole_val = (
+                            _coerce_float_or_none(getattr(group_entry, "t_per_hole_min", None))
+                            or _coerce_float_or_none(getattr(group_entry, "minutes_per_hole", None))
+                            or _coerce_float_or_none(getattr(group_entry, "t_per_hole", None))
+                        )
+                    if (minutes_val is None or minutes_val <= 0.0) and (
+                        qty_val is not None
+                        and qty_val > 0.0
+                        and per_hole_val is not None
+                        and per_hole_val > 0.0
+                    ):
+                        minutes_val = float(qty_val) * float(per_hole_val)
+                    if minutes_val is None or minutes_val <= 0.0:
+                        continue
+                    group_minutes_total += float(minutes_val)
+            if group_minutes_total > 0.0:
+                drill_minutes_with_toolchange = float(group_minutes_total)
+                toolchange_minutes_val = None
+                toolchange_candidates: Sequence[Any] = (
+                    drilling_summary.get("toolchange_minutes"),
+                    drilling_summary.get("toolchange_total"),
+                )
+                for candidate in toolchange_candidates:
+                    candidate_val = _coerce_float_or_none(candidate)
+                    if candidate_val is not None and candidate_val > 0.0:
+                        toolchange_minutes_val = float(candidate_val)
+                        break
+                if (
+                    toolchange_minutes_val is None
+                    and isinstance(drilling_meta_container, _MappingABC)
+                ):
+                    for candidate in (
+                        drilling_meta_container.get("toolchange_total"),
+                        drilling_meta_container.get("toolchange_minutes"),
+                    ):
+                        candidate_val = _coerce_float_or_none(candidate)
+                        if candidate_val is not None and candidate_val > 0.0:
+                            toolchange_minutes_val = float(candidate_val)
+                            break
+                if toolchange_minutes_val is None and isinstance(drilling_meta_container, _MappingABC):
+                    toolchange_minutes_val = 0.0
+                    try:
+                        holes_deep_val = int(drilling_summary.get("holes_deep") or 0)
+                    except Exception:
+                        holes_deep_val = 0
+                    try:
+                        holes_std_val = int(drilling_summary.get("holes_std") or 0)
+                    except Exception:
+                        holes_std_val = 0
+                    if holes_deep_val > 0:
+                        toolchange_minutes_val += _safe_float(
+                            drilling_meta_container.get("toolchange_min_deep"), 0.0
+                        )
+                    if holes_std_val > 0:
+                        toolchange_minutes_val += _safe_float(
+                            drilling_meta_container.get("toolchange_min_std"), 0.0
+                        )
+                if toolchange_minutes_val and toolchange_minutes_val > 0.0:
+                    drill_minutes_with_toolchange += float(toolchange_minutes_val)
+                    drilling_summary.setdefault("toolchange_minutes", float(toolchange_minutes_val))
+
+    if drill_minutes_with_toolchange is not None and drill_minutes_with_toolchange > 0.0:
+        drilling_summary["total_minutes_with_toolchange"] = float(drill_minutes_with_toolchange)
+
+    drill_total_minutes_billed = float(
+        drilling_summary.get("total_minutes_with_toolchange")
+        or drilling_summary.get("total_minutes")
+        or 0.0
+    )
+    drilling_summary["total_minutes_billed"] = drill_total_minutes_billed
 
     if drill_total_minutes and drill_total_minutes > 0.0:
         bucket_view_summary = process_plan_summary.get("bucket_view")
