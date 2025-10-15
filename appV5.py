@@ -5797,73 +5797,76 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     printed_subtotal = ladder_subtotal
 
     # Render MATERIAL REMOVAL card + TIME PER HOLE lines (replace legacy Time block)
-    try:
-        drilling_meta = locals().get("drilling_meta", {}) or {}
-        # Expected fields (provide safe fallbacks):
-        mat_canon = str(drilling_meta.get("material_canonical") or drilling_meta.get("material") or "-")
-        mat_group = drilling_meta.get("material_group") or drilling_meta.get("group") or "-"
-        row_group = drilling_meta.get("row_material_group") or drilling_meta.get("row_group") or None
-        holes_deep = int(drilling_meta.get("holes_deep") or 0)
-        holes_std  = int(drilling_meta.get("holes_std")  or 0)
-        dia_vals   = list(drilling_meta.get("dia_in_vals")   or [])
-        depth_vals = list(drilling_meta.get("depth_in_vals") or [])
-        sfm_deep   = float(drilling_meta.get("sfm_deep") or 39.0)
-        sfm_std    = float(drilling_meta.get("sfm_std")  or 80.0)
-        ipr_deep_vals = list(drilling_meta.get("ipr_deep_vals") or [0.0006, 0.0025])
-        ipr_std_val   = float(drilling_meta.get("ipr_std_val")  or 0.0060)
-        rpm_deep_vals = list(drilling_meta.get("rpm_deep_vals") or [238, 1194])
-        rpm_std_vals  = list(drilling_meta.get("rpm_std_vals")  or [169, 407])
-        ipm_deep_vals = list(drilling_meta.get("ipm_deep_vals") or [0.5, 1.0])
-        ipm_std_vals  = list(drilling_meta.get("ipm_std_vals")  or [1.0, 2.4])
-        index_min     = float(drilling_meta.get("index_min_per_hole") or 0.13)
-        peck_min_rng  = list(drilling_meta.get("peck_min_per_hole_vals") or [0.07, 0.08])
-        peck_min_deep = float(min(peck_min_rng))
-        peck_min_std  = float(max(peck_min_rng))
-        tchg_deep     = float(drilling_meta.get("toolchange_min_deep") or 8.00)
-        tchg_std      = float(drilling_meta.get("toolchange_min_std")  or 2.50)
-        # Bins: expect a list of dict rows with keys: op, diameter_in, depth_in, qty, sfm, ipr
-        bins = drilling_meta.get("bins_list")
-        if not isinstance(bins, list):
-            # fall back if stored as dict
-            bins_dict = drilling_meta.get("bins") or {}
-            bins = [v for _, v in sorted(bins_dict.items(), key=lambda kv: float(kv[1].get("diameter_in", 0.0)) if isinstance(kv[1], dict) else 0.0)] if isinstance(bins_dict, dict) else []
+    drilling_meta = locals().get("drilling_meta", {}) or {}
+    # Expected fields (provide safe fallbacks):
+    mat_canon = str(drilling_meta.get("material_canonical") or drilling_meta.get("material") or "-")
+    mat_group = drilling_meta.get("material_group") or drilling_meta.get("group") or "-"
+    row_group = drilling_meta.get("row_material_group") or drilling_meta.get("row_group") or None
+    holes_deep = int(drilling_meta.get("holes_deep") or 0)
+    holes_std  = int(drilling_meta.get("holes_std")  or 0)
+    dia_vals   = list(drilling_meta.get("dia_in_vals")   or [])
+    depth_vals = list(drilling_meta.get("depth_in_vals") or [])
+    sfm_deep   = float(drilling_meta.get("sfm_deep") or 39.0)
+    sfm_std    = float(drilling_meta.get("sfm_std")  or 80.0)
+    ipr_deep_vals = list(drilling_meta.get("ipr_deep_vals") or [0.0006, 0.0025])
+    ipr_std_val   = float(drilling_meta.get("ipr_std_val")  or 0.0060)
+    rpm_deep_vals = list(drilling_meta.get("rpm_deep_vals") or [238, 1194])
+    rpm_std_vals  = list(drilling_meta.get("rpm_std_vals")  or [169, 407])
+    ipm_deep_vals = list(drilling_meta.get("ipm_deep_vals") or [0.5, 1.0])
+    ipm_std_vals  = list(drilling_meta.get("ipm_std_vals")  or [1.0, 2.4])
+    index_min     = float(drilling_meta.get("index_min_per_hole") or 0.13)
+    peck_min_rng  = list(drilling_meta.get("peck_min_per_hole_vals") or [0.07, 0.08])
+    peck_min_deep = float(min(peck_min_rng))
+    peck_min_std  = float(max(peck_min_rng))
+    tchg_deep     = float(drilling_meta.get("toolchange_min_deep") or 8.00)
+    tchg_std      = float(drilling_meta.get("toolchange_min_std")  or 2.50)
+    # Bins: expect a list of dict rows with keys: op, diameter_in, depth_in, qty, sfm, ipr
+    bins = drilling_meta.get("bins_list")
+    if not isinstance(bins, list):
+        # fall back if stored as dict
+        bins = []
+        bins_dict = drilling_meta.get("bins") or {}
+        if isinstance(bins_dict, dict):
+            bins = [
+                v
+                for _, v in sorted(
+                    bins_dict.items(),
+                    key=lambda kv: float(kv[1].get("diameter_in", 0.0)) if isinstance(kv[1], dict) else 0.0,
+                )
+            ]
 
-        _render_removal_card(
-            lines,
-            mat_canon=mat_canon, mat_group=mat_group, row_group=row_group,
-            holes_deep=holes_deep, holes_std=holes_std,
-            dia_vals_in=dia_vals, depth_vals_in=depth_vals,
-            sfm_deep=sfm_deep, sfm_std=sfm_std,
-            ipr_deep_vals=ipr_deep_vals, ipr_std_val=ipr_std_val,
-            rpm_deep_vals=rpm_deep_vals, rpm_std_vals=rpm_std_vals,
-            ipm_deep_vals=ipm_deep_vals, ipm_std_vals=ipm_std_vals,
-            index_min_per_hole=index_min, peck_min_rng=peck_min_rng,
-            toolchange_min_deep=tchg_deep, toolchange_min_std=tchg_std,
-        )
+    _render_removal_card(
+        lines,
+        mat_canon=mat_canon, mat_group=mat_group, row_group=row_group,
+        holes_deep=holes_deep, holes_std=holes_std,
+        dia_vals_in=dia_vals, depth_vals_in=depth_vals,
+        sfm_deep=sfm_deep, sfm_std=sfm_std,
+        ipr_deep_vals=ipr_deep_vals, ipr_std_val=ipr_std_val,
+        rpm_deep_vals=rpm_deep_vals, rpm_std_vals=rpm_std_vals,
+        ipm_deep_vals=ipm_deep_vals, ipm_std_vals=ipm_std_vals,
+        index_min_per_hole=index_min, peck_min_rng=peck_min_rng,
+        toolchange_min_deep=tchg_deep, toolchange_min_std=tchg_std,
+    )
 
-        subtotal_min, seen_deep, seen_std = _render_time_per_hole(
-            lines, bins=bins, index_min=index_min, peck_min_deep=peck_min_deep, peck_min_std=peck_min_std,
-        )
+    subtotal_min, seen_deep, seen_std = _render_time_per_hole(
+        lines, bins=bins, index_min=index_min, peck_min_deep=peck_min_deep, peck_min_std=peck_min_std,
+    )
 
-        # Single toolchange per op (if present at least once)
-        tool_add = (tchg_deep if seen_deep else 0.0) + (tchg_std if seen_std else 0.0)
-        append_line(
-            f"Toolchange adders: Deep-Drill {tchg_deep:.2f} min + Drill {tchg_std:.2f} min = {tool_add:.2f} min"
-            if tool_add > 0
-            else "Toolchange adders: -"
-        )
-        append_line("-" * 66)
-        append_line(
-            f"Subtotal (per-hole × qty) ............... {subtotal_min:.2f} min  ({fmt_hours(subtotal_min/60.0)})"
-        )
-        append_line(
-            f"TOTAL DRILLING (with toolchange) ........ {subtotal_min + tool_add:.2f} min  ({(subtotal_min + tool_add)/60.0:.2f} hr)"
-        )
-        append_line("")
-    except Exception as e:
-        # Don’t break the quote — but surface the reason, so we can see why it skipped.
-        append_line(f"[MATERIAL REMOVAL block skipped: {e}]")
-        append_line("")
+    # Single toolchange per op (if present at least once)
+    tool_add = (tchg_deep if seen_deep else 0.0) + (tchg_std if seen_std else 0.0)
+    append_line(
+        f"Toolchange adders: Deep-Drill {tchg_deep:.2f} min + Drill {tchg_std:.2f} min = {tool_add:.2f} min"
+        if tool_add > 0
+        else "Toolchange adders: -"
+    )
+    append_line("-" * 66)
+    append_line(
+        f"Subtotal (per-hole × qty) ............... {subtotal_min:.2f} min  ({fmt_hours(subtotal_min/60.0)})"
+    )
+    append_line(
+        f"TOTAL DRILLING (with toolchange) ........ {subtotal_min + tool_add:.2f} min  ({(subtotal_min + tool_add)/60.0:.2f} hr)"
+    )
+    append_line("")
 
     append_line("")
 
