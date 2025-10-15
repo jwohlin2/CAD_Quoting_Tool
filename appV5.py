@@ -15456,48 +15456,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     return parser
 
-def _main(argv: Optional[Sequence[str]] = None) -> int:
-    configure_logging()
-    parser = build_arg_parser()
-    args = parser.parse_args(argv)
-
-    # CLI override: force-enable removal debug output
-    if getattr(args, "debug_removal", False):
-        global APP_ENV
-        APP_ENV = replace(APP_ENV, llm_debug_enabled=True)
-
-    if args.print_env:
-        logger.info("Runtime environment:\n%s", jdump(describe_runtime_environment(), default=None))
-        return 0
-
-    if args.no_gui:
-        return 0
-
-    pricing_registry = create_default_registry()
-    pricing_engine = PricingEngine(pricing_registry)
-
-    try:
-        app = App(pricing_engine)
-    except RuntimeError as exc:  # pragma: no cover - headless guard
-        logger.error("Unable to start the GUI: %s", exc)
-        return 1
-
-    app.mainloop()
-
-    return 0
-
-if __name__ == "__main__":
-    try:
-        sys.exit(_main())
-    except Exception as exc:  # pragma: no cover - smoke guard
-        try:
-            print(jdump({"ok": False, "error": str(exc)}))
-        except Exception:
-            pass
-        sys.exit(1)
-# ──────────────────────────────────────────────────────────────────────────────
-# Legacy “OK …” per-bin line (to match prior Drill Debug format)
-# ──────────────────────────────────────────────────────────────────────────────
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers: formatting + removal card + per-hole lines (no material per line)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -15516,12 +15474,14 @@ def _fmt_rng(vals, prec=2, unit: str | None = None):
     s = (f"{lo:.{prec}f}" if abs(hi - lo) < 10 ** (-prec) else f"{lo:.{prec}f}-{hi:.{prec}f}")
     return f"{s}{unit}" if unit else s
 
+
 def _rpm_from_sfm(sfm: float, d_in: float) -> float:
     try:
         d = max(float(d_in), 1e-6)
         return (float(sfm) * 12.0) / (math.pi * d)
     except Exception:
         return 0.0
+
 
 def _render_removal_card(
     lines: list[str],
@@ -15555,7 +15515,7 @@ def _render_removal_card(
     if row_group:
         rg = str(row_group).upper()
         mg = str(mat_group or "").upper()
-        mismatch = (rg != mg and (rg and mg))
+        mismatch = rg != mg and (rg and mg)
         note = "   (!) mismatch – used row from different group" if mismatch else ""
         lines.append(f"  CSV row group ..... {row_group}{note}")
     lines.append("  Operations ........ Deep-Drill (L/D ≥ 3), Drill")
@@ -15578,6 +15538,7 @@ def _render_removal_card(
         f"  Toolchange ........ {float(toolchange_min_deep):.2f} min (deep) | {float(toolchange_min_std):.2f} min (std)"
     )
     lines.append("")
+
 
 def _render_time_per_hole(
     lines: list[str],
@@ -15620,3 +15581,47 @@ def _render_time_per_hole(
             continue
     lines.append("")
     return subtotal_min, seen_deep, seen_std
+
+
+def _main(argv: Optional[Sequence[str]] = None) -> int:
+    configure_logging()
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
+
+    # CLI override: force-enable removal debug output
+    if getattr(args, "debug_removal", False):
+        global APP_ENV
+        APP_ENV = replace(APP_ENV, llm_debug_enabled=True)
+
+    if args.print_env:
+        logger.info("Runtime environment:\n%s", jdump(describe_runtime_environment(), default=None))
+        return 0
+
+    if args.no_gui:
+        return 0
+
+    pricing_registry = create_default_registry()
+    pricing_engine = PricingEngine(pricing_registry)
+
+    try:
+        app = App(pricing_engine)
+    except RuntimeError as exc:  # pragma: no cover - headless guard
+        logger.error("Unable to start the GUI: %s", exc)
+        return 1
+
+    app.mainloop()
+
+    return 0
+
+if __name__ == "__main__":
+    try:
+        sys.exit(_main())
+    except Exception as exc:  # pragma: no cover - smoke guard
+        try:
+            print(jdump({"ok": False, "error": str(exc)}))
+        except Exception:
+            pass
+        sys.exit(1)
+# ──────────────────────────────────────────────────────────────────────────────
+# Legacy “OK …” per-bin line (to match prior Drill Debug format)
+# ──────────────────────────────────────────────────────────────────────────────
