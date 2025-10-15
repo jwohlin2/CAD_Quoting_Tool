@@ -6160,6 +6160,48 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 labor_costs_display[drilling_row.name] = row_cost
                 drilling_row.total = row_cost
 
+            drilling_meta_for_guard = None
+            if isinstance(breakdown, _MappingABC):
+                drilling_meta_for_guard = breakdown.get("drilling_meta")
+            bucket_view_for_guard = None
+            if isinstance(breakdown, _MappingABC):
+                bucket_view_for_guard = breakdown.get("bucket_view")
+            if (
+                isinstance(drilling_meta_for_guard, _MappingABC)
+                and isinstance(bucket_view_for_guard, _MappingABC)
+            ):
+                buckets_guard = bucket_view_for_guard.get("buckets")
+                if isinstance(buckets_guard, _MappingABC):
+                    drilling_bucket_guard = buckets_guard.get("drilling")
+                else:
+                    drilling_bucket_guard = None
+                if isinstance(drilling_bucket_guard, _MappingABC):
+                    try:
+                        card_hr_guard = round(
+                            float(
+                                drilling_meta_for_guard.get("total_minutes_billed")
+                                or 0.0
+                            )
+                            / 60.0,
+                            2,
+                        )
+                        row_hr_guard = round(
+                            float(drilling_bucket_guard.get("minutes") or 0.0) / 60.0,
+                            2,
+                        )
+                    except (TypeError, ValueError):
+                        card_hr_guard = row_hr_guard = None
+                    if (
+                        card_hr_guard is not None
+                        and row_hr_guard is not None
+                        and abs(card_hr_guard - row_hr_guard) > 0.01
+                    ):
+                        raise RuntimeError(
+                            "Drilling hours mismatch AFTER BUILD: "
+                            f"card {card_hr_guard} vs row {row_hr_guard}. "
+                            "Check for late bucket_view rebuilds or planner overrides."
+                        )
+
             assert (
                 abs(row_cost - row_hr_for_cost * row_rate) < 0.51
             ), "Drilling $ ≠ hr × rate"
