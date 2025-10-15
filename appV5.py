@@ -6874,6 +6874,22 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         tool_add = (tchg_deep if seen_deep else 0.0) + (tchg_std if seen_std else 0.0)
         total_drill_minutes_with_toolchange = subtotal_min + tool_add
 
+        # === DRILLING: choose one billing source of truth ===
+        drill_meta = breakdown.setdefault("drilling_meta", {})
+        bill_min = float(
+            drill_meta.get("total_minutes_billed")
+            or drill_meta.get("total_minutes_with_toolchange")
+            or drill_meta.get("total_minutes")
+            or 0.0
+        )
+        drill_meta["total_minutes_billed"] = bill_min  # <-- canonical minutes for billing
+
+        # Overwrite any legacy estimator/planner override:
+        pm = breakdown.setdefault("process_meta", {}).setdefault("drilling", {})
+        pm["hr"] = round(bill_min / 60.0, 6)
+        pm["minutes"] = bill_min
+        pm["basis"] = ["minutes_engine"]  # replace ["planner_drilling_override"]
+
         process_plan_summary_card: dict[str, Any] | None = None
         if isinstance(process_plan_summary_local, dict):
             process_plan_summary_card = process_plan_summary_local
