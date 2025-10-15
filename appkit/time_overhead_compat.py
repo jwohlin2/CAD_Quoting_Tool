@@ -3,11 +3,11 @@ from __future__ import annotations
 
 from dataclasses import asdict, fields as dataclass_fields, is_dataclass
 from types import SimpleNamespace
+from dataclasses import asdict, fields as dataclass_fields, is_dataclass
+from types import SimpleNamespace
 from typing import Any, TypeAlias
 
-from cad_quoter.pricing.time_estimator import (
-    OverheadParams as _TimeOverheadParams,
-)
+from cad_quoter.pricing.time_estimator import OverheadParams as _TimeOverheadParams
 
 __all__ = [
     "_TIME_OVERHEAD_SUPPORTS_INDEX_SEC",
@@ -72,15 +72,20 @@ def _assign_overhead_index_attr(
         return False
 
     if hasattr(overhead, "index_sec_per_hole"):
+        if index_value is None:
+            return True
         try:
-            setattr(overhead, "index_sec_per_hole", index_value)
+            current = getattr(overhead, "index_sec_per_hole")
         except Exception:
+            current = None
+        if current is not None:
+            return True
+        for setter in (setattr, object.__setattr__):
             try:
-                object.__setattr__(overhead, "index_sec_per_hole", index_value)
+                setter(overhead, "index_sec_per_hole", index_value)
             except Exception:
-                # Attribute exists but cannot be mutated (e.g. frozen
-                # dataclass). Treat as available so downstream callers rely on
-                # the existing value.
+                continue
+            else:
                 return True
         return True
 
