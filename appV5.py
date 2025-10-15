@@ -637,17 +637,25 @@ def _build_quote_header_lines(
         hour_summary_entries=hour_summary_entries,
     )
 
-    if (
-        isinstance(breakdown, _MutableMappingABC)
-        and pricing_source_value
-        and raw_pricing_source
-        and raw_pricing_source.lower() != str(pricing_source_value).strip().lower()
-    ):
-        breakdown["pricing_source"] = pricing_source_value
-        pricing_source_display = str(pricing_source_value).strip().title()
+    normalized_pricing_source: str | None = None
+    if pricing_source_value is not None:
+        normalized_pricing_source = str(pricing_source_value).strip()
+        if not normalized_pricing_source:
+            normalized_pricing_source = None
 
-    if not pricing_source_display and pricing_source_value:
-        pricing_source_display = str(pricing_source_value).strip().title()
+    if normalized_pricing_source:
+        normalized_pricing_source_lower = normalized_pricing_source.lower()
+        raw_pricing_source_lower = (
+            str(raw_pricing_source).strip().lower() if raw_pricing_source is not None else None
+        )
+
+        if (
+            isinstance(breakdown, _MutableMappingABC)
+            and raw_pricing_source_lower != normalized_pricing_source_lower
+        ):
+            breakdown["pricing_source"] = pricing_source_value
+
+        pricing_source_display = normalized_pricing_source.title()
 
     if pricing_source_display:
         display_value = pricing_source_display
