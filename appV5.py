@@ -6028,6 +6028,65 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if declared_labor_total > computed_total_labor_cost + 0.01:
         expected_labor_total = declared_labor_total
     components_total = display_labor_for_ladder + pass_through_labor_total + display_machine
+    using_planner_for_ladder = str(pricing_source_value or "").strip().lower() == "planner"
+    planner_machine_for_directs = 0.0
+    planner_labor_override: float | None = None
+    if using_planner_for_ladder:
+        planner_summary: Mapping[str, Any] | None = None
+        for candidate in (
+            process_plan_summary_local,
+            breakdown.get("process_plan") if isinstance(breakdown, _MappingABC) else None,
+        ):
+            if isinstance(candidate, _MappingABC):
+                planner_summary = typing.cast(Mapping[str, Any], candidate)
+                break
+
+        process_meta_map = process_meta if isinstance(process_meta, _MappingABC) else {}
+        planner_total_meta = process_meta_map.get("planner_total") if isinstance(process_meta_map, _MappingABC) else None
+        if not isinstance(planner_total_meta, _MappingABC):
+            planner_total_meta = {}
+        planner_labor_meta = process_meta_map.get("planner_labor") if isinstance(process_meta_map, _MappingABC) else None
+        if not isinstance(planner_labor_meta, _MappingABC):
+            planner_labor_meta = {}
+        planner_machine_meta = process_meta_map.get("planner_machine") if isinstance(process_meta_map, _MappingABC) else None
+        if not isinstance(planner_machine_meta, _MappingABC):
+            planner_machine_meta = {}
+
+        def _first_numeric(*values: Any) -> float | None:
+            for value in values:
+                numeric = _coerce_float_or_none(value)
+                if numeric is not None:
+                    return float(numeric)
+            return None
+
+        planner_machine_candidate = _first_numeric(
+            (planner_summary or {}).get("planner_machine_cost_total"),
+            (planner_summary or {}).get("computed_total_machine_cost"),
+            planner_total_meta.get("machine_cost"),
+            planner_machine_meta.get("cost"),
+        )
+        if planner_machine_candidate is not None and planner_machine_candidate > 0:
+            planner_machine_for_directs = planner_machine_candidate
+
+        planner_labor_candidate = None
+        planner_labor_includes_amortized = False
+        for value, includes_amortized in (
+            ((planner_summary or {}).get("planner_labor_cost_total"), False),
+            (planner_labor_meta.get("cost_excl_amortized"), False),
+            (planner_total_meta.get("labor_cost_excl_amortized"), False),
+            ((planner_summary or {}).get("computed_total_labor_cost"), True),
+        ):
+            numeric = _coerce_float_or_none(value)
+            if numeric is not None:
+                planner_labor_candidate = float(numeric)
+                planner_labor_includes_amortized = includes_amortized
+                break
+
+        if planner_labor_candidate is not None and planner_labor_candidate > 0:
+            if planner_labor_includes_amortized:
+                planner_labor_override = planner_labor_candidate
+            else:
+                planner_labor_override = planner_labor_candidate + float(amortized_nre_total or 0.0)
     machine_gap = expected_labor_total - components_total
     # Be tolerant: reconcile any residual mismatch into the Machine bucket so the
     # ladder math stays consistent across platforms/pricing modes.
@@ -6099,10 +6158,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             material_net_cost = 0.0
 
     labor_basis_for_ladder = float(display_labor_for_ladder or 0.0)
+    if planner_labor_override is not None and planner_labor_override > 0:
+        labor_basis_for_ladder = planner_labor_override
     expected_labor_total_float = float(expected_labor_total or 0.0)
     if (
         expected_labor_total_float > 0.0
         and abs(labor_basis_for_ladder - expected_labor_total_float) > _LABOR_SECTION_ABS_EPSILON
+        and planner_labor_override is None
     ):
         labor_basis_for_ladder = expected_labor_total_float
     if labor_basis_for_ladder <= 0:
@@ -6116,7 +6178,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     base_bucket_labor = labor_basis_for_ladder - float(amortized_nre_total)
     if base_bucket_labor < 0:
         base_bucket_labor = 0.0
-    ladder_directs = directs
+    ladder_directs = float(directs)
+    if planner_machine_for_directs > 0:
+        ladder_directs += planner_machine_for_directs
+    ladder_directs = round(ladder_directs, 2)
     amortized_component = float(amortized_nre_total if qty > 1 else 0.0)
     ladder_labor = round(base_bucket_labor + amortized_component, 2)
     ladder_expected = ladder_labor + ladder_directs
@@ -10111,6 +10176,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             process_plan_summary["computed_total_machine_cost"] = float(
                 planner_totals_map.get("machine_cost", 0.0) or 0.0
             )
+            process_plan_summary["planner_labor_cost_total"] = planner_labor_cost_total
+            process_plan_summary["planner_machine_cost_total"] = planner_machine_cost_total
             process_plan_summary["pricing_source"] = "Planner"
             planner_subtotal = (
                 process_plan_summary["display_labor_for_ladder"]
