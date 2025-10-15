@@ -627,7 +627,17 @@ def test_dummy_quote_direct_costs_match_across_sections() -> None:
     labor_amount = _extract_currency(labor_line)
     ladder_direct = ladder_subtotal - labor_amount
 
-    assert math.isclose(ladder_direct, direct_costs, abs_tol=0.01)
+    planner_machine_cost = float(
+        payload["breakdown"].get("process_costs", {}).get("Machine", 0.0)
+        if isinstance(payload.get("breakdown"), dict)
+        else 0.0
+    )
+    pricing_source = str(payload["breakdown"].get("pricing_source", "")).lower()
+    expected_ladder_direct = direct_costs
+    if pricing_source == "planner" and planner_machine_cost > 0:
+        expected_ladder_direct += planner_machine_cost
+
+    assert math.isclose(ladder_direct, expected_ladder_direct, abs_tol=0.01)
 
 
 def test_render_omits_amortized_rows_for_single_quantity() -> None:
