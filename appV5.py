@@ -6230,6 +6230,40 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
         return additions
 
+    if bucket_table_rows and isinstance(breakdown, _MappingABC):
+        drilling_meta_guard = breakdown.get("drilling_meta")
+        bucket_view_guard = breakdown.get("bucket_view")
+        buckets_guard = (
+            bucket_view_guard.get("buckets")
+            if isinstance(bucket_view_guard, _MappingABC)
+            else None
+        )
+        drilling_bucket_guard = (
+            buckets_guard.get("drilling")
+            if isinstance(buckets_guard, _MappingABC)
+            else None
+        )
+        if isinstance(drilling_meta_guard, _MappingABC) and isinstance(
+            drilling_bucket_guard, _MappingABC
+        ):
+            try:
+                card_hr = round(
+                    float(drilling_meta_guard["total_minutes_billed"]) / 60.0,
+                    2,
+                )
+                row_hr = round(
+                    float(drilling_bucket_guard["minutes"]) / 60.0,
+                    2,
+                )
+            except (KeyError, TypeError, ValueError):
+                card_hr = row_hr = None
+            if card_hr is not None and row_hr is not None and abs(card_hr - row_hr) > 0.01:
+                raise RuntimeError(
+                    "[FATAL] Drilling hours mismatch: "
+                    f"card {card_hr} vs row {row_hr}. "
+                    "A late writer is overwriting bucket_view. Remove any rebuilds or planner overrides."
+                )
+
     if bucket_table_rows:
         render_bucket_table(bucket_table_rows)
 
