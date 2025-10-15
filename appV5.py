@@ -7101,6 +7101,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
         # === Choose billing truth ===
         drill_meta = breakdown.setdefault("drilling_meta", {})
+        if isinstance(drill_meta, dict):
+            drill_meta["toolchange_minutes"] = float(tool_add)
+            drill_meta["total_minutes_with_toolchange"] = float(total_drill_minutes_with_toolchange)
+
+        # === Choose billing truth ===
         bill_min = float(
             drill_meta.get("total_minutes_billed")
             or drill_meta.get("total_minutes_with_toolchange")
@@ -11647,8 +11652,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             drilling_meta_container.update({"estimator_hours_for_planner": estimator_hours})
             process_meta["drilling"] = {
                 "minutes": drill_total_minutes,
+                "hr": round(drill_total_minutes / 60.0, 6),
                 "rate": drilling_rate,
-                "basis": ["planner_drilling_override"],
+                "basis": ["minutes_engine"],
             }
 
             if drill_debug_summary:
