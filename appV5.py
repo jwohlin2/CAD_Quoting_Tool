@@ -3939,11 +3939,22 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         return None
 
     def add_process_notes(key: str, indent: str = "    "):
+        canon_key = _canonical_bucket_key(key)
+        stored_hours = 0.0
+        stored_rate = 0.0
+        stored_cost = 0.0
+        if canon_key:
+            stored_entry = process_cost_row_details.get(canon_key)
+            if stored_entry is not None:
+                stored_hours, stored_rate, stored_cost = stored_entry
+
         meta = _lookup_process_meta(key) or {}
-        try:
-            hr_val = float(meta.get("hr", 0.0) or 0.0)
-        except Exception:
-            hr_val = 0.0
+        hr_val = stored_hours
+        if hr_val <= 0:
+            try:
+                hr_val = float(meta.get("hr", 0.0) or 0.0)
+            except Exception:
+                hr_val = 0.0
         if hr_val <= 0:
             try:
                 minutes_val = float(meta.get("minutes", 0.0) or 0.0)
@@ -3951,11 +3962,24 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 minutes_val = 0.0
             if minutes_val > 0:
                 hr_val = minutes_val / 60.0
-        rate_val = meta.get("rate")
-        try:
-            rate_float = float(rate_val or 0.0)
-        except Exception:
-            rate_float = 0.0
+        meta_rate = 0.0
+        if meta:
+            try:
+                meta_rate = float(meta.get("rate", 0.0) or 0.0)
+            except Exception:
+                meta_rate = 0.0
+        if meta_rate > 0:
+            rate_float = meta_rate
+        else:
+            rate_float = stored_rate
+            if rate_float <= 0:
+                rate_val = meta.get("rate") if meta else None
+                try:
+                    rate_float = float(rate_val or 0.0)
+                except Exception:
+                    rate_float = 0.0
+        if rate_float <= 0 and stored_cost > 0 and hr_val > 0:
+            rate_float = stored_cost / hr_val
         if rate_float <= 0:
             rate_key = _rate_key_for_bucket(str(key))
             if rate_key:
@@ -5127,6 +5151,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     detail_lookup: dict[str, str] = {}
     label_to_canon: dict[str, str] = {}
     canon_to_display_label: dict[str, str] = {}
+    process_cost_row_details: dict[str, tuple[float, float, float]] = {}
 
     _PLANNER_ROLLUP_ABS_TOLERANCE = 0.05
 
@@ -5329,6 +5354,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if not details_rendered:
             extra_detail = labor_cost_details.get(label)
             if extra_detail not in (None, ""):
+                canon_key = label_to_canon.get(label)
+                if canon_key and canon_key in process_cost_row_details:
+                    extra_detail = None
+            if extra_detail not in (None, ""):
                 write_detail(str(extra_detail), indent="    ")
                 details_rendered = True
 
@@ -5362,6 +5391,20 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 if override_label:
                     display_label = override_label
                     label_to_canon.setdefault(display_label, canon_key)
+            if canon_key:
+                try:
+                    hours_val = float(hours or 0.0)
+                except Exception:
+                    hours_val = 0.0
+                try:
+                    rate_val = float(rate or 0.0)
+                except Exception:
+                    rate_val = 0.0
+                try:
+                    cost_val = float(cost or 0.0)
+                except Exception:
+                    cost_val = 0.0
+                process_cost_row_details[canon_key] = (hours_val, rate_val, cost_val)
             _add_labor_cost_line(display_label, cost, process_key=canon_key)
             try:
                 labor_costs_display[display_label] = float(cost or 0.0)
