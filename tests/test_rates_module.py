@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from cad_quoter.costing_glue import op_cost
 from cad_quoter import rates
 
@@ -25,6 +27,25 @@ def test_migrate_flat_to_two_bucket_handles_cam_rate_only() -> None:
     migrated = rates.migrate_flat_to_two_bucket(flat)
 
     assert migrated["labor"]["Programmer"] == 110.0
+
+
+def test_migrate_flat_to_two_bucket_fills_shop_rate_defaults() -> None:
+    flat = {"ShopRate": 82.5}
+
+    migrated = rates.migrate_flat_to_two_bucket(flat)
+
+    assert migrated["labor"]["ProgrammingRate"] == pytest.approx(82.5)
+    assert migrated["machine"]["MillingRate"] == pytest.approx(82.5)
+    assert migrated["machine"]["WireEDMRate"] == pytest.approx(82.5)
+
+
+def test_migrate_flat_to_two_bucket_populates_deburr_alias() -> None:
+    flat = {"FinishingRate": 47.0}
+
+    migrated = rates.migrate_flat_to_two_bucket(flat)
+
+    assert migrated["labor"]["Finisher"] == pytest.approx(47.0)
+    assert migrated["labor"]["DeburrRate"] == pytest.approx(47.0)
 
 
 def test_two_bucket_to_flat_prefers_known_keys() -> None:
