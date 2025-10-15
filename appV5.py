@@ -5696,9 +5696,19 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
         proc_total += numeric_amount
 
+    @dataclass
+    class _ProcessRowRecord:
+        name: str
+        hours: float
+        rate: float
+        total: float
+        canon_key: str | None = None
+
     class _ProcessCostTableRecorder:
         def __init__(self) -> None:
             self.had_rows = False
+            self.rows: list[_ProcessRowRecord] = []
+            self._rows: list[dict[str, Any]] = []
 
         def add_row(
             self,
@@ -5718,20 +5728,40 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 if override_label:
                     display_label = override_label
                     label_to_canon.setdefault(display_label, canon_key)
+            try:
+                hours_val = float(hours or 0.0)
+            except Exception:
+                hours_val = 0.0
+            try:
+                rate_val = float(rate or 0.0)
+            except Exception:
+                rate_val = 0.0
+            try:
+                cost_val = float(cost or 0.0)
+            except Exception:
+                cost_val = 0.0
             if canon_key:
-                try:
-                    hours_val = float(hours or 0.0)
-                except Exception:
-                    hours_val = 0.0
-                try:
-                    rate_val = float(rate or 0.0)
-                except Exception:
-                    rate_val = 0.0
-                try:
-                    cost_val = float(cost or 0.0)
-                except Exception:
-                    cost_val = 0.0
                 process_cost_row_details[canon_key] = (hours_val, rate_val, cost_val)
+            record_canon = canon_key or _canonical_bucket_key(display_label)
+            if not record_canon:
+                record_canon = None
+            record = _ProcessRowRecord(
+                name=display_label,
+                hours=hours_val,
+                rate=rate_val,
+                total=cost_val,
+                canon_key=record_canon,
+            )
+            self.rows.append(record)
+            self._rows.append(
+                {
+                    "label": display_label,
+                    "hours": hours_val,
+                    "rate": rate_val,
+                    "cost": cost_val,
+                    "canon_key": record_canon,
+                }
+            )
             _add_labor_cost_line(display_label, cost, process_key=canon_key)
             try:
                 labor_costs_display[display_label] = float(cost or 0.0)
@@ -5945,6 +5975,44 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     )
 
     proc_total = section_total
+
+    rows: tuple[_ProcessRowRecord, ...] = tuple(getattr(process_table, "rows", ()))
+
+    def _process_row_canon(record: _ProcessRowRecord) -> str:
+        if record.canon_key:
+            return record.canon_key
+        return _canonical_bucket_key(record.name)
+
+    def _find_process_row(target_canon: str) -> _ProcessRowRecord | None:
+        if not target_canon:
+            return None
+        for record in rows:
+            if _process_row_canon(record) == target_canon:
+                return record
+        return None
+
+    process_plan_summary_map: Mapping[str, Any] | None = None
+    if isinstance(process_plan_summary_local, _MappingABC):
+        process_plan_summary_map = process_plan_summary_local
+
+    if rows and isinstance(process_plan_summary_map, _MappingABC):
+        drilling_row = _find_process_row("drilling")
+        drilling_summary = process_plan_summary_map.get("drilling")
+        if drilling_row and isinstance(drilling_summary, _MappingABC):
+            card_minutes_billed = _safe_float(
+                drilling_summary.get("total_minutes_billed"), default=0.0
+            )
+            card_hr = round(card_minutes_billed / 60.0, 2)
+            row_hr = round(float(drilling_row.hours or 0.0), 2)
+            assert abs(card_hr - row_hr) < 0.05, (
+                f"Drilling hours mismatch: card {card_hr} vs row {row_hr}"
+            )
+
+            row_cost = float(drilling_row.total or 0.0)
+            row_rate = float(drilling_row.rate or 0.0)
+            assert (
+                abs(row_cost - row_hr * row_rate) < 0.51
+            ), "Drilling $ ≠ hr × rate"
 
     misc_total = 0.0
     for label, amount in labor_cost_totals.items():
@@ -6357,6 +6425,29 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 planner_labor_hr = derived_labor_hr
                 planner_machine_hr = derived_machine_hr
                 planner_rollup_hours_ready = True
+
+        planner_bucket_view_for_assert: Mapping[str, Any] | None = None
+        if isinstance(planner_bucket_view_map, _MappingABC):
+            planner_bucket_view_for_assert = planner_bucket_view_map
+        elif isinstance(process_plan_summary_map, _MappingABC):
+            candidate_view = process_plan_summary_map.get("bucket_view")
+            if isinstance(candidate_view, _MappingABC):
+                planner_bucket_view_for_assert = typing.cast(Mapping[str, Any], candidate_view)
+
+        if isinstance(planner_bucket_view_for_assert, _MappingABC):
+            buckets_for_assert = planner_bucket_view_for_assert.get("buckets")
+            if isinstance(buckets_for_assert, _MappingABC) and buckets_for_assert:
+                pl_hr = round(
+                    sum(
+                        (_safe_float(info.get("minutes"), default=0.0) / 60.0)
+                        for info in buckets_for_assert.values()
+                    ),
+                    2,
+                )
+                planner_total_hr_rounded = round(float(planner_total_hr or 0.0), 2)
+                assert (
+                    abs(planner_total_hr_rounded - pl_hr) < 0.05
+                ), "Planner Total hr not from bucket minutes"
 
         _emit_hour_row("Planner Total", round(planner_total_hr, 2))
         if planner_rollup_hours_ready:
