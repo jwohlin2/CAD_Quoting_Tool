@@ -208,6 +208,9 @@ def _planner_signals_present(
             "process_plan_pricing",
             "planner_bucket_view",
             "process_plan_bucket_view",
+            "bucket_view",
+            "hour_summary",
+            "process_plan_summary",
         ):
             breakdown_sources.append(breakdown.get(key))
     if additional_sources:
