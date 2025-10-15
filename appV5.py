@@ -5528,6 +5528,22 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     canonical_bucket_summary = dict(bucket_state.canonical_summary)
     bucket_table_rows = list(bucket_state.table_rows)
 
+    def _row_component(value: Any) -> float:
+        try:
+            return float(value or 0.0)
+        except Exception:
+            return 0.0
+
+    display_labor_from_rows = 0.0
+    display_machine_from_rows = 0.0
+    if bucket_table_rows:
+        display_labor_from_rows = sum(
+            _row_component(row[2]) for row in bucket_table_rows
+        )
+        display_machine_from_rows = sum(
+            _row_component(row[3]) for row in bucket_table_rows
+        )
+
     planner_totals_map: typing.Mapping[str, Any] | None = None
     if bucket_table_rows:
         planner_totals_candidates: list[typing.Mapping[str, Any] | None] = []
@@ -5546,8 +5562,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 break
 
     if bucket_table_rows and isinstance(planner_totals_map, _MappingABC):
-        display_labor_total = sum(float(row[2]) for row in bucket_table_rows)
-        display_machine_total = sum(float(row[3]) for row in bucket_table_rows)
         planner_labor_total = float(
             _coerce_float_or_none(planner_totals_map.get("labor_cost")) or 0.0
         )
@@ -5556,17 +5570,21 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         )
 
         assert (
-            abs(display_labor_total - planner_labor_total) < 0.51
+            abs(display_labor_from_rows - planner_labor_total) < 0.51
         ), "Labor $ mismatch with planner totals"
         assert (
-            abs(display_machine_total - planner_machine_total) < 0.51
+            abs(display_machine_from_rows - planner_machine_total) < 0.51
         ), "Machine $ mismatch with planner totals"
     detail_lookup.update(bucket_state.detail_lookup)
     label_to_canon.update(bucket_state.label_to_canon)
     canon_to_display_label.update(bucket_state.canon_to_display_label)
     labor_costs_display.update(bucket_state.labor_costs_display)
-    display_labor_for_ladder = bucket_state.display_labor_total
-    display_machine = bucket_state.display_machine_total
+    if bucket_table_rows:
+        display_labor_for_ladder = display_labor_from_rows
+        display_machine = display_machine_from_rows
+    else:
+        display_labor_for_ladder = bucket_state.display_labor_total
+        display_machine = bucket_state.display_machine_total
     hour_summary_entries.update(bucket_state.hour_entries)
     bucket_minutes_detail = dict(bucket_state.bucket_minutes_detail)
     process_costs_for_render = dict(bucket_state.process_costs_for_render)
