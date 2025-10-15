@@ -5763,23 +5763,15 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     # Build dollars from minutes if missing
     for canon_key, meta in (canonical_bucket_summary or {}).items():
         minutes = float(meta.get("minutes") or 0.0)
-        has_money = (
-            (meta.get("labor", 0.0) or 0.0)
-            + (meta.get("machine", 0.0) or 0.0)
-            + (meta.get("total", 0.0) or 0.0)
-        )
-        if minutes > 0 and has_money <= 0.0:
+        amount = float(process_costs_for_render.get(canon_key) or 0.0)
+        if minutes > 0 and amount <= 0.0:
             rate = _lookup_bucket_rate(canon_key, rates)
-            dollars = (minutes / 60.0) * rate if rate > 0 else 0.0
-            existing_amount = _safe_float(
-                process_costs_for_render.get(canon_key),
-                default=0.0,
-            )
-            process_costs_for_render[canon_key] = round(existing_amount + dollars, 2)
-            # also stash minutes so the renderer shows hours & rate nicely
-            bucket_minutes_detail[canon_key] = (
-                bucket_minutes_detail.get(canon_key, 0.0) + minutes
-            )
+            if rate > 0:
+                process_costs_for_render[canon_key] = round(
+                    (minutes / 60.0) * rate, 2
+                )
+                # also stash minutes so the renderer shows hours & rate nicely
+                bucket_minutes_detail[canon_key] = minutes
 
     section_total = render_process_costs(
         tbl=process_table,
