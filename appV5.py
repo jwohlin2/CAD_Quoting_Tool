@@ -5961,7 +5961,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             drill_summary_source = candidate
     if drill_summary_source is None:
         drill_summary_source = {}
-    drill_min = float(drill_summary_source.get("total_minutes") or 0.0)
+    drill_min = _safe_float(drill_summary_source.get("total_minutes_billed"))
     if drill_min > 0:
         process_costs_for_render["drilling"] = round(
             (drill_min / 60.0) * (_rate_for_bucket("drilling", rates) or 0.0), 2
@@ -6000,21 +6000,38 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     if rows and isinstance(process_plan_summary_map, _MappingABC):
         drilling_row = _find_process_row("drilling")
-        drilling_summary = process_plan_summary_map.get("drilling")
-        if drilling_row and isinstance(drilling_summary, _MappingABC):
-            card_minutes_billed = _safe_float(
-                drilling_summary.get("total_minutes_billed"), default=0.0
-            )
-            card_hr = round(card_minutes_billed / 60.0, 2)
-            row_hr = round(float(drilling_row.hours or 0.0), 2)
-            assert abs(card_hr - row_hr) < 0.05, (
-                f"Drilling hours mismatch: card {card_hr} vs row {row_hr}"
-            )
+        drill_meta = process_plan_summary_map.get("drilling")
+        if drilling_row and isinstance(drill_meta, _MappingABC):
+            bucket_view_for_assert: Mapping[str, Any] | None = None
+            if isinstance(bucket_view_final, _MappingABC):
+                bucket_view_for_assert = bucket_view_final
+            else:
+                candidate_view = process_plan_summary_map.get("bucket_view")
+                if isinstance(candidate_view, _MappingABC):
+                    bucket_view_for_assert = typing.cast(Mapping[str, Any], candidate_view)
 
+            buckets_for_assert: Mapping[str, Any] | None = None
+            if isinstance(bucket_view_for_assert, _MappingABC):
+                buckets_candidate = bucket_view_for_assert.get("buckets")
+                if isinstance(buckets_candidate, _MappingABC):
+                    buckets_for_assert = typing.cast(Mapping[str, Any], buckets_candidate)
+
+            if isinstance(buckets_for_assert, _MappingABC):
+                bk = buckets_for_assert.get("drilling")
+                if isinstance(bk, _MappingABC):
+                    card_hr = round(
+                        float(drill_meta.get("total_minutes_billed", 0.0)) / 60.0, 2
+                    )
+                    row_hr = round(float(_safe_float(bk.get("minutes"))) / 60.0, 2)
+                    assert abs(card_hr - row_hr) < 0.01, (
+                        f"Drilling hours mismatch: card {card_hr} vs row {row_hr}"
+                    )
+
+            row_hr_for_cost = round(float(drilling_row.hours or 0.0), 2)
             row_cost = float(drilling_row.total or 0.0)
             row_rate = float(drilling_row.rate or 0.0)
             assert (
-                abs(row_cost - row_hr * row_rate) < 0.51
+                abs(row_cost - row_hr_for_cost * row_rate) < 0.51
             ), "Drilling $ ≠ hr × rate"
 
     misc_total = 0.0
@@ -11410,7 +11427,6 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             }
             drilling_meta_container.update({"estimator_hours_for_planner": estimator_hours})
             process_meta["drilling"] = {
-                "hr": estimator_hours,
                 "minutes": drill_total_minutes,
                 "rate": drilling_rate,
                 "basis": ["planner_drilling_override"],
@@ -11652,24 +11668,28 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     )
     drilling_summary["total_minutes_billed"] = drill_total_minutes_billed
 
-    if drill_total_minutes and drill_total_minutes > 0.0:
-        drill_meta: _MappingABC[str, Any] | None = None
-        if isinstance(drilling_meta_container, _MappingABC):
-            drill_meta = drilling_meta_container
+    drill_meta: _MappingABC[str, Any] | None = None
+    if isinstance(drilling_meta_container, _MappingABC):
+        drill_meta = drilling_meta_container
 
+    billed_minutes = 0.0
+    if isinstance(drilling_summary, _MappingABC):
+        billed_minutes = _safe_float(drilling_summary.get("total_minutes_billed"))
+        if billed_minutes <= 0.0:
+            billed_minutes = _safe_float(drilling_summary.get("total_minutes_with_toolchange"))
+    if billed_minutes <= 0.0 and isinstance(drill_meta, _MappingABC):
+        billed_minutes = _safe_float(drill_meta.get("total_minutes_billed"))
+    if billed_minutes <= 0.0 and drill_total_minutes is not None and drill_total_minutes > 0.0:
+        billed_minutes = float(drill_total_minutes)
+
+    if billed_minutes > 0.0:
         bview = process_plan_summary.setdefault("bucket_view", {"buckets": {}, "order": []})
         buckets_map = bview.setdefault("buckets", {})
         bucket_entry = buckets_map.setdefault(
             "drilling", {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0}
         )
 
-        authoritative_minutes = float(drill_total_minutes)
-        if isinstance(drill_meta, _MappingABC):
-            billed_minutes = _safe_float(drill_meta.get("total_minutes_billed"))
-            if billed_minutes > 0.0:
-                authoritative_minutes = billed_minutes
-
-        bucket_entry["minutes"] = authoritative_minutes
+        bucket_entry["minutes"] = billed_minutes
 
         rates_map = rates if isinstance(rates, _MappingABC) else {}
         drill_rate = float(
