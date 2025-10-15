@@ -6360,15 +6360,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             ),
         )
 
-    if lines and lines[-1] != "":
-        append_line("")
-    append_line("Process & Labor Costs")
-    append_line(divider)
-    row("Labor", expected_labor_total, indent="  ")
-    direct_summary = directs
-    row("Directs", direct_summary, indent="  ")
-    row("Total", expected_labor_total + direct_summary, indent="  ")
-
     computed_subtotal = proc_total + pass_total
     declared_subtotal: float | None = None
     if isinstance(totals, dict) and "subtotal" in totals:
