@@ -122,7 +122,7 @@ _RATE_ALIAS_KEYS: dict[str, tuple[str, ...]] = {
     "saw_waterjet": ("SawWaterjetRate", "SawRate", "WaterjetRate"),
     "inspection": ("InspectionRate",),
     "fixture_build_amortized": ("FixtureBuildRate",),
-    "programming_amortized": ("ProgrammingRate", "EngineerRate"),
+    "programming_amortized": ("ProgrammingRate", "EngineerRate", "ProgrammerRate"),
     "misc": (
         "LaborRate",
         "MachineRate",
