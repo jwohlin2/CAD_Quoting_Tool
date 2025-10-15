@@ -8405,6 +8405,22 @@ def _fallback_drilling_groups_from_geometry(
     return groups
 
 
+def build_drill_groups_from_geometry(
+    hole_diams_mm: Iterable[Any],
+    thickness_in: float | None,
+) -> list[dict[str, Any]]:
+    """Public helper for constructing drilling groups from geometric data."""
+
+    thickness_val = _coerce_float_or_none(thickness_in)
+    if thickness_val is not None and thickness_val <= 0:
+        thickness_val = None
+
+    return _fallback_drilling_groups_from_geometry(
+        hole_diams_mm,
+        thickness_in=thickness_val,
+    )
+
+
 def _apply_drilling_meta_fallback(
     drilling_meta: _MutableMappingABC[str, Any],
     groups: Sequence[Mapping[str, Any]],
@@ -11060,30 +11076,36 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                             if entry.get("depth_in") is not None
                         ]
 
-    if planner_used:
-        drilling_summary_raw = process_plan_summary.get("drilling")
-        if isinstance(drilling_summary_raw, dict):
-            drilling_summary = drilling_summary_raw
-        else:
-            drilling_summary = process_plan_summary.setdefault("drilling", {})
+    drilling_summary_raw = process_plan_summary.get("drilling")
+    if isinstance(drilling_summary_raw, dict):
+        drilling_summary = drilling_summary_raw
+    else:
+        drilling_summary = process_plan_summary.setdefault("drilling", {})
 
-        groups_existing = drilling_summary.get("groups")
-        has_groups = False
-        if isinstance(groups_existing, Sequence) and not isinstance(groups_existing, (str, bytes)):
-            has_groups = bool(groups_existing)
-        if not has_groups:
-            fallback_groups = _fallback_drilling_groups_from_geometry(
-                hole_diams,
-                thickness_in=thickness_in,
-            )
-            if fallback_groups:
-                drilling_summary["groups"] = fallback_groups
-                holes_deep, holes_std = _apply_drilling_meta_fallback(
-                    drilling_meta_container,
-                    fallback_groups,
-                )
-                drilling_summary["holes_deep"] = holes_deep
-                drilling_summary["holes_std"] = holes_std
+    groups_existing = drilling_summary.get("groups")
+    has_groups = False
+    if isinstance(groups_existing, Sequence) and not isinstance(groups_existing, (str, bytes)):
+        has_groups = bool(groups_existing)
+
+    fallback_groups: list[dict[str, Any]] = []
+    if not has_groups and hole_diams:
+        fallback_groups = build_drill_groups_from_geometry(
+            hole_diams,
+            thickness_in,
+        )
+
+    if fallback_groups:
+        drilling_summary["groups"] = fallback_groups
+        holes_deep, holes_std = _apply_drilling_meta_fallback(
+            drilling_meta_container,
+            fallback_groups,
+        )
+        drilling_summary["holes_deep"] = holes_deep
+        drilling_summary["holes_std"] = holes_std
+        fallback_hole_count = sum(int(_coerce_float_or_none(group.get("qty")) or 0) for group in fallback_groups)
+        drilling_summary["hole_count"] = fallback_hole_count
+        drilling_meta_container["bins_list"] = fallback_groups
+        drilling_meta_container["hole_count"] = fallback_hole_count
 
     roughing_hours = _coerce_float_or_none(value_map.get("Roughing Cycle Time"))
     if roughing_hours is None:
