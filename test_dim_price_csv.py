@@ -10,7 +10,7 @@
 #
 # Usage:
 #   python test_dim_price_csv.py
-#   -> enter path to your catalog.csv (e.g., D:\CAD_Quoting_Tool\catalog.csv)
+#   -> enter path to your catalog.csv (defaults to the packaged resource)
 #   -> enter L/W/T/material and get price @ qty=1
 #
 # Environment (recommended):
@@ -25,6 +25,8 @@ import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
+from cad_quoter.resources import default_catalog_csv
+
 # If your mcmaster_api.py lives alongside this file, this import will work.
 # Otherwise adjust sys.path or place this script next to mcmaster_api.py.
 from mcmaster_api import McMasterAPI, load_env
@@ -33,7 +35,7 @@ from mcmaster_api import McMasterAPI, load_env
 ALLOW_NEXT_THICKER = False  # set True to allow selecting the next thicker plate if exact T not found
 # Hard-coded catalog CSV path (user requested no prompt). You can still override
 # with the CATALOG_CSV_PATH environment variable if needed.
-CATALOG_CSV_PATH = os.getenv("CATALOG_CSV_PATH", r"D:\\CAD_Quoting_Tool\\catalog.csv")
+CATALOG_CSV_PATH = os.getenv("CATALOG_CSV_PATH", str(default_catalog_csv()))
 
 # Optional: load .env if present
 try:
