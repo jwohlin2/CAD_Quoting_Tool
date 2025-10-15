@@ -12,7 +12,7 @@ def resolve_planner(
 ) -> tuple[bool, str]:
     """Determine whether planner pricing should be used and the mode."""
 
-    default_mode = "auto"
+    default_mode = "planner"
     if FORCE_PLANNER:
         planner_mode = "planner"
     elif isinstance(params, _MappingABC):
@@ -49,7 +49,7 @@ def resolve_planner(
         used_planner = base_signal or has_totals
     elif planner_mode == "legacy":
         used_planner = has_line_items or has_recognized
-    else:  # auto / default
+    else:  # auto / fallback
         used_planner = base_signal or has_recognized
 
     if has_line_items:
