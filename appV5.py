@@ -7141,9 +7141,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         drill_meta["total_minutes_with_toolchange"] = float(total_drill_minutes_with_toolchange)
 
         bill_min = float(
-            drill_meta.get("total_minutes_billed")
-            or drill_meta.get("total_minutes_with_toolchange")
-            or drill_meta.get("total_minutes")
+            drilling_meta.get("total_minutes_billed")
+            or drilling_meta.get("total_minutes_with_toolchange")
+            or drilling_meta.get("total_minutes")
             or 0.0
         )
         drill_meta["total_minutes_billed"] = bill_min
@@ -7175,10 +7175,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             drill_meta_summary["toolchange_minutes"] = float(tool_add)
             drill_meta_summary["total_minutes_with_toolchange"] = float(total_drill_minutes_with_toolchange)
             drill_meta_summary["total_minutes_billed"] = bill_min
-        if isinstance(drilling_meta, dict):
-            drilling_meta["toolchange_minutes"] = float(tool_add)
-            drilling_meta["total_minutes_with_toolchange"] = float(total_drill_minutes_with_toolchange)
-
         append_line(f"Toolchange adders: Deep-Drill {tchg_deep:.2f} min + Drill {tchg_std:.2f} min = {tool_add:.2f} min" if tool_add > 0 else "Toolchange adders: -")
         append_line("-" * 66)
         append_line(f"Subtotal (per-hole × qty) . {subtotal_min:.2f} min  ({fmt_hours(subtotal_min/60.0)})")
