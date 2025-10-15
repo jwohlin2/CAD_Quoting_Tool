@@ -47,3 +47,38 @@ def test_price_with_planner_uses_geometry_minutes() -> None:
     wire_items = [item for item in result["line_items"] if item["op"] == "Wire EDM"]
     assert wire_items, "expected Wire EDM bucket in planner pricing"
     assert wire_items[0]["minutes"] > 1.0
+
+
+def test_price_with_planner_reads_geom_fallbacks() -> None:
+    rates = {
+        "machine": {
+            "MillingRate": 95.0,
+            "DrillingRate": 80.0,
+        },
+        "labor": {
+            "InspectionRate": 55.0,
+            "DeburrRate": 40.0,
+        },
+    }
+
+    params = {"material": "aluminum"}
+
+    geom = {
+        "derived": {
+            "hole_count_geom": 24,
+            "edge_length_mm": 760.0,
+            "plate_bbox_area_mm2": 25000.0,
+            "thickness_mm": 25.4,
+        },
+        "feature_counts": {"tap_qty": 6, "cbore_qty": 2},
+        "hole_diams_mm": [6.0] * 24,
+    }
+
+    result = price_with_planner("die_plate", params, geom, rates, oee=0.9)
+
+    totals = result["totals"]
+    assert totals["minutes"] > 0.0
+    assert totals["machine_cost"] > 0.0
+    drilling = [item for item in result["line_items"] if item["op"] == "Drilling"]
+    assert drilling, "expected drilling minutes from derived geometry"
+    assert drilling[0]["minutes"] > 0.0
