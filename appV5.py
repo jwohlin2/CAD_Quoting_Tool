@@ -11787,7 +11787,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         bucket_minutes_detail_for_render["drilling"] = bucket_entry["minutes"]
 
     drilling_minutes_for_bucket: float | None = None
-    if drill_total_minutes is not None and drill_total_minutes > 0.0:
+    if billed_minutes > 0.0:
+        drilling_minutes_for_bucket = float(billed_minutes)
+    elif drill_total_minutes is not None and drill_total_minutes > 0.0:
         drilling_minutes_for_bucket = float(drill_total_minutes)
     else:
         drilling_summary_map = process_plan_summary.get("drilling")
@@ -11801,25 +11803,27 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             "drilling",
             {"minutes": 0.0, "machine$": 0.0, "labor$": 0.0},
         )
-        if _safe_float(metrics.get("minutes")) <= 0.0:
-            drill_rate_value = 0.0
-            drilling_meta_entry = (
-                process_meta.get("drilling") if isinstance(process_meta, _MappingABC) else None
-            )
-            if isinstance(drilling_meta_entry, _MappingABC):
-                drill_rate_value = _safe_float(drilling_meta_entry.get("rate"))
-            if drill_rate_value <= 0.0:
-                drilling_summary_map = process_plan_summary.get("drilling")
-                if isinstance(drilling_summary_map, _MappingABC):
-                    drill_rate_value = _safe_float(drilling_summary_map.get("rate"))
-            if drill_rate_value <= 0.0:
-                drill_rate_value = float(drilling_rate)
-            metrics["minutes"] = drilling_minutes_for_bucket
-            machine_cost_val = 0.0
-            if drill_rate_value > 0.0:
-                machine_cost_val = (drilling_minutes_for_bucket / 60.0) * drill_rate_value
-            metrics["machine$"] = machine_cost_val
-            metrics["labor$"] = _safe_float(metrics.get("labor$"))
+        drill_rate_value = 0.0
+        drilling_meta_entry = (
+            process_meta.get("drilling") if isinstance(process_meta, _MappingABC) else None
+        )
+        if isinstance(drilling_meta_entry, _MappingABC):
+            drill_rate_value = _safe_float(drilling_meta_entry.get("rate"))
+        if drill_rate_value <= 0.0:
+            drilling_summary_map = process_plan_summary.get("drilling")
+            if isinstance(drilling_summary_map, _MappingABC):
+                drill_rate_value = _safe_float(drilling_summary_map.get("rate"))
+        if drill_rate_value <= 0.0:
+            drill_rate_value = float(drilling_rate)
+
+        metrics["minutes"] = drilling_minutes_for_bucket
+        machine_cost_val = _safe_float(metrics.get("machine$"))
+        if drill_rate_value > 0.0:
+            machine_cost_val = (drilling_minutes_for_bucket / 60.0) * drill_rate_value
+        metrics["machine$"] = round(machine_cost_val, 2)
+
+        labor_cost_val = _safe_float(metrics.get("labor$"))
+        metrics["labor$"] = round(labor_cost_val, 2) if labor_cost_val > 0.0 else 0.0
 
     if aggregated_bucket_minutes:
         legacy_bucket_entries: dict[str, dict[str, Any]] = {}
