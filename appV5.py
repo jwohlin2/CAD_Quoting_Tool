@@ -847,6 +847,9 @@ from cad_quoter.pricing.speeds_feeds_selector import (
     pick_speeds_row as _pick_speeds_row,
 )
 from cad_quoter.pricing.speeds_feeds_selector import (
+    material_group_for_speeds_feeds as _material_group_for_speeds_feeds,
+)
+from cad_quoter.pricing.speeds_feeds_selector import (
     unit_hp_cap as _unit_hp_cap,
 )
 from cad_quoter.pricing.speeds_feeds_selector import (
@@ -10927,6 +10930,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     drill_params: dict[str, Any] = baseline.setdefault("drill_params", {})
     drill_params["material"] = material_key
     drill_params.setdefault("material_key", material_key)
+    drill_group = _material_group_for_speeds_feeds(material_key)
+    if drill_group:
+        drill_params["group"] = drill_group
     if material_display:
         drill_params.setdefault("material_display", material_display)
     if material_group_display:

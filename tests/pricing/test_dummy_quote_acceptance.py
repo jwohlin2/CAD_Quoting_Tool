@@ -4,6 +4,7 @@ import re
 
 import appV5
 from cad_quoter.domain_models import normalize_material_key
+from cad_quoter.pricing.speeds_feeds_selector import material_group_for_speeds_feeds
 
 
 _PLANNER_LINE_ITEMS = [
@@ -54,7 +55,7 @@ DUMMY_QUOTE_RESULT = {
     "decision_state": {
         "baseline": {
             "normalized_quote_material": "aluminum mic6",
-            "drill_params": {"material": "aluminum mic6"},
+            "drill_params": {"material": "aluminum mic6", "group": "N1"},
             "process_hours": {
                 "milling": 6.0,
                 "drilling": 1.5,
@@ -354,13 +355,17 @@ def test_dummy_quote_material_consistency() -> None:
 
     normalized = baseline["normalized_quote_material"]
     drill_material = baseline["drill_params"]["material"]
+    drill_group = baseline["drill_params"].get("group")
     rendered_material = drilling_meta["material"]
 
     normalized_key = normalize_material_key(normalized)
     drill_key = normalize_material_key(drill_material)
     rendered_key = normalize_material_key(rendered_material)
+    expected_group = material_group_for_speeds_feeds(normalized_key)
 
     assert normalized_key == drill_key == rendered_key
+    assert drill_group == expected_group
+    assert drill_group
     assert any(normalized_key in entry.lower() for entry in drill_debug)
 
 

@@ -11,8 +11,11 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
+from cad_quoter.domain_models import MATERIAL_DISPLAY_BY_KEY
+
 __all__ = [
     "load_csv_as_records",
+    "material_group_for_speeds_feeds",
     "normalize_material",
     "pick_speeds_row",
     "unit_hp_cap",
@@ -152,6 +155,37 @@ def normalize_material(user_str: str | None) -> dict[str, Any] | None:
             best_row = row
             best_score = score
     return best_row
+
+
+def material_group_for_speeds_feeds(material_key: str | None) -> str | None:
+    """Return the ISO material group for a normalized material key."""
+
+    lookup = str(material_key or "").strip()
+    if not lookup:
+        return None
+
+    def _resolve_group(candidate: str | None) -> str | None:
+        if not candidate:
+            return None
+        row = normalize_material(candidate)
+        if not row:
+            return None
+        group = str(row.get("iso_group") or "").strip().upper()
+        return group or None
+
+    # Try mapping the normalized key back to the display label first so that
+    # keys generated via ``normalize_material_key`` (which removes punctuation)
+    # can still resolve to CSV entries that contain hyphenated names.
+    for candidate in (
+        MATERIAL_DISPLAY_BY_KEY.get(lookup),
+        lookup,
+        lookup.replace(" ", "-"),
+    ):
+        group = _resolve_group(candidate)
+        if group:
+            return group
+
+    return None
 
 
 def _norm_operation(operation: str | None) -> str:
