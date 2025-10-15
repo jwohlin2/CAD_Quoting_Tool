@@ -377,6 +377,10 @@ def _install_pandas_stub() -> None:
         def __len__(self):
             return len(self._rows)
 
+        @property
+        def empty(self):
+            return not self._rows
+
         def __getitem__(self, key):
             return Series(row.get(key) for row in self._rows)
 
