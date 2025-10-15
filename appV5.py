@@ -6122,7 +6122,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             )
 
             assert (
-                abs(row_cost - row_hr * row_rate) < 0.51
+                abs(row_cost - row_hr_for_cost * row_rate) < 0.51
             ), "Drilling $ ≠ hr × rate"
 
     misc_total = 0.0
@@ -11595,7 +11595,6 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             }
             drilling_meta_container.update({"estimator_hours_for_planner": estimator_hours})
             process_meta["drilling"] = {
-                "hr": estimator_hours,
                 "minutes": drill_total_minutes,
                 "rate": drilling_rate,
                 "basis": ["planner_drilling_override"],
@@ -11837,24 +11836,28 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     )
     drilling_summary["total_minutes_billed"] = drill_total_minutes_billed
 
-    if drill_total_minutes and drill_total_minutes > 0.0:
-        drill_meta: _MappingABC[str, Any] | None = None
-        if isinstance(drilling_meta_container, _MappingABC):
-            drill_meta = drilling_meta_container
+    drill_meta: _MappingABC[str, Any] | None = None
+    if isinstance(drilling_meta_container, _MappingABC):
+        drill_meta = drilling_meta_container
 
+    billed_minutes = 0.0
+    if isinstance(drilling_summary, _MappingABC):
+        billed_minutes = _safe_float(drilling_summary.get("total_minutes_billed"))
+        if billed_minutes <= 0.0:
+            billed_minutes = _safe_float(drilling_summary.get("total_minutes_with_toolchange"))
+    if billed_minutes <= 0.0 and isinstance(drill_meta, _MappingABC):
+        billed_minutes = _safe_float(drill_meta.get("total_minutes_billed"))
+    if billed_minutes <= 0.0 and drill_total_minutes is not None and drill_total_minutes > 0.0:
+        billed_minutes = float(drill_total_minutes)
+
+    if billed_minutes > 0.0:
         bview = process_plan_summary.setdefault("bucket_view", {"buckets": {}, "order": []})
         buckets_map = bview.setdefault("buckets", {})
         bucket_entry = buckets_map.setdefault(
             "drilling", {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0}
         )
 
-        authoritative_minutes = float(drill_total_minutes)
-        if isinstance(drill_meta, _MappingABC):
-            billed_minutes = _safe_float(drill_meta.get("total_minutes_billed"))
-            if billed_minutes > 0.0:
-                authoritative_minutes = billed_minutes
-
-        bucket_entry["minutes"] = authoritative_minutes
+        bucket_entry["minutes"] = billed_minutes
 
         rates_map = rates if isinstance(rates, _MappingABC) else {}
         drill_rate = float(
