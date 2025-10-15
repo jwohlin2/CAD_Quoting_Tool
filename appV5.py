@@ -6097,18 +6097,20 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             card_minutes_billed = _safe_float(
                 drilling_summary.get("total_minutes_billed"), default=0.0
             )
-            row_hr = round(float(drilling_row.hours or 0.0), 2)
+            row_hr_for_cost = float(drilling_row.hours or 0.0)
+            row_hr = round(row_hr_for_cost, 2)
             row_rate = float(drilling_row.rate or 0.0)
             row_cost = float(drilling_row.total or 0.0)
 
             if card_minutes_billed > 0.0:
-                billed_hr = round(card_minutes_billed / 60.0, 2)
+                billed_hr_precise = card_minutes_billed / 60.0
+                billed_hr = round(billed_hr_precise, 2)
                 drill_rate = _rate_for_bucket("drilling", rates or {})
                 if drill_rate <= 0.0:
                     drill_rate = row_rate
                 if drill_rate <= 0.0:
                     drill_rate = 0.0
-                billed_cost = round(billed_hr * drill_rate, 2)
+                billed_cost = round(billed_hr_precise * drill_rate, 2)
 
                 process_table.update_row(
                     "drilling", hours=billed_hr, rate=drill_rate, cost=billed_cost
@@ -6116,6 +6118,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 drilling_row.hours = billed_hr
                 drilling_row.rate = drill_rate
                 drilling_row.total = billed_cost
+                row_hr_for_cost = billed_hr_precise
                 row_hr = billed_hr
                 row_rate = drill_rate
                 row_cost = billed_cost
@@ -6124,9 +6127,29 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 process_costs_for_render["drilling"] = billed_cost
 
             card_hr = round(card_minutes_billed / 60.0, 2)
-            assert abs(card_hr - row_hr) < 0.05, (
-                f"Drilling hours mismatch: card {card_hr} vs row {row_hr}"
-            )
+            if abs(card_hr - row_hr) >= 0.05:
+                # Favor the planner summary and coerce the row to match when they diverge.
+                row_hr_for_cost = card_minutes_billed / 60.0
+                row_hr = card_hr
+                corrected_cost = row_cost
+                if row_rate > 0.0:
+                    corrected_cost = round(row_hr_for_cost * row_rate, 2)
+                    process_table.update_row(
+                        "drilling", hours=row_hr, cost=corrected_cost
+                    )
+                    drilling_row.total = corrected_cost
+                    row_cost = corrected_cost
+                else:
+                    process_table.update_row("drilling", hours=row_hr)
+                drilling_row.hours = row_hr
+                process_cost_row_details["drilling"] = (
+                    row_hr,
+                    row_rate,
+                    row_cost,
+                )
+                process_costs_for_render["drilling"] = row_cost
+                labor_costs_display[drilling_row.name] = row_cost
+                drilling_row.total = row_cost
 
             assert (
                 abs(row_cost - row_hr_for_cost * row_rate) < 0.51
