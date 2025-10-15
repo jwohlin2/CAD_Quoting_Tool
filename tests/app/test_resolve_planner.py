@@ -20,11 +20,11 @@ def reload_appv5(monkeypatch):
     importlib.reload(module)
 
 
-def test_resolve_planner_defaults_to_auto(reload_appv5):
+def test_resolve_planner_defaults_to_planner(reload_appv5):
     module = reload_appv5
     used, mode = module.resolve_planner(None, None)
     assert used is False
-    assert mode == "auto"
+    assert mode == "planner"
 
 
 def test_resolve_planner_handles_planner_mode_signal(reload_appv5, monkeypatch):
@@ -65,7 +65,7 @@ def test_resolve_planner_invalid_mode_falls_back(reload_appv5):
         {"pricing_result": {"totals": {}}},
     )
     assert used is True
-    assert mode == "auto"
+    assert mode == "planner"
 
 
 def test_resolve_planner_force_flag_overrides_mode(monkeypatch, reload_appv5):
