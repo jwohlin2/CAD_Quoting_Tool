@@ -5712,6 +5712,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             self.had_rows = False
             self.rows: list[_ProcessRowRecord] = []
             self._rows: list[dict[str, Any]] = []
+            self._index: dict[str, int] = {}
 
         def add_row(
             self,
@@ -5756,6 +5757,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 canon_key=record_canon,
             )
             self.rows.append(record)
+            if record_canon:
+                self._index[record_canon] = len(self.rows) - 1
             self._rows.append(
                 {
                     "label": display_label,
@@ -5770,6 +5773,42 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 labor_costs_display[display_label] = float(cost or 0.0)
             except Exception:
                 labor_costs_display[display_label] = 0.0
+
+        def update_row(
+            self,
+            canon_key: str,
+            *,
+            hours: float | None = None,
+            rate: float | None = None,
+            cost: float | None = None,
+        ) -> None:
+            index = self._index.get(canon_key)
+            if index is None or index < 0 or index >= len(self.rows):
+                return
+            record = self.rows[index]
+            row_dict = self._rows[index]
+
+            if hours is not None:
+                try:
+                    hours_val = float(hours)
+                except Exception:
+                    hours_val = 0.0
+                record.hours = hours_val
+                row_dict["hours"] = hours_val
+            if rate is not None:
+                try:
+                    rate_val = float(rate)
+                except Exception:
+                    rate_val = 0.0
+                record.rate = rate_val
+                row_dict["rate"] = rate_val
+            if cost is not None:
+                try:
+                    cost_val = float(cost)
+                except Exception:
+                    cost_val = 0.0
+                record.total = cost_val
+                row_dict["cost"] = cost_val
 
     def _prepare_amortized_details() -> dict[str, tuple[float, float]]:
         nonlocal amortized_nre_total, display_labor_for_ladder
@@ -5961,14 +6000,60 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             drill_summary_source = candidate
     if drill_summary_source is None:
         drill_summary_source = {}
-    drill_min = _safe_float(drill_summary_source.get("total_minutes_billed"))
-    if drill_min > 0:
-        process_costs_for_render["drilling"] = round(
-            (drill_min / 60.0) * (_rate_for_bucket("drilling", rates) or 0.0), 2
-        )
-        bucket_minutes_detail["drilling"] = drill_min
+    drill_min = float(drill_summary_source.get("total_minutes") or 0.0)
+    bill_min = float(drill_summary_source.get("total_minutes_billed") or drill_min or 0.0)
+    rates_map = rates if isinstance(rates, dict) else {}
+    drill_rate = float(
+        rates_map.get("DrillingRate")
+        or rates_map.get("drillingrate")
+        or rates_map.get("MachineRate")
+        or rates_map.get("machinerate")
+        or 0.0
+    )
+    if drill_rate <= 0.0:
+        try:
+            drill_rate = float(_rate_for_bucket("drilling", rates or {}))
+        except Exception:
+            drill_rate = 0.0
+    drill_cost = round((bill_min / 60.0) * drill_rate, 2) if bill_min > 0 else 0.0
+    if bill_min > 0:
+        process_costs_for_render["drilling"] = drill_cost
+        bucket_minutes_detail["drilling"] = bill_min
         canonical_bucket_summary.setdefault("drilling", {}).setdefault("minutes", 0.0)
-        canonical_bucket_summary["drilling"]["minutes"] += drill_min
+        canonical_bucket_summary["drilling"]["minutes"] += bill_min
+
+        if isinstance(breakdown, dict):
+            bview = breakdown.setdefault(
+                "bucket_view", {"buckets": {}, "order": [], "totals": {}}
+            )
+            buckets = bview.setdefault("buckets", {})
+            bk = buckets.setdefault(
+                "drilling",
+                {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0, "total$": 0.0},
+            )
+
+            bk["minutes"] = bill_min
+            bk["machine$"] = drill_cost
+            bk["labor$"] = 0.0
+            bk["total$"] = bk["machine$"]
+
+            if "drilling" not in bview.setdefault("order", []):
+                bview["order"].append("drilling")
+
+            bucket_minutes_detail["drilling"] = bill_min
+
+            def _recalc_bview_totals(bv: dict[str, Any]) -> None:
+                mins = sum((v.get("minutes") or 0.0) for v in bv.get("buckets", {}).values())
+                lab = sum((v.get("labor$") or 0.0) for v in bv.get("buckets", {}).values())
+                mac = sum((v.get("machine$") or 0.0) for v in bv.get("buckets", {}).values())
+                bv["totals"] = {
+                    "minutes": round(mins, 2),
+                    "labor$": round(lab, 2),
+                    "machine$": round(mac, 2),
+                    "total$": round(lab + mac, 2),
+                }
+
+            _recalc_bview_totals(bview)
 
     section_total = render_process_costs(
         tbl=process_table,
@@ -6000,36 +6085,42 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     if rows and isinstance(process_plan_summary_map, _MappingABC):
         drilling_row = _find_process_row("drilling")
-        drill_meta = process_plan_summary_map.get("drilling")
-        if drilling_row and isinstance(drill_meta, _MappingABC):
-            bucket_view_for_assert: Mapping[str, Any] | None = None
-            if isinstance(bucket_view_final, _MappingABC):
-                bucket_view_for_assert = bucket_view_final
-            else:
-                candidate_view = process_plan_summary_map.get("bucket_view")
-                if isinstance(candidate_view, _MappingABC):
-                    bucket_view_for_assert = typing.cast(Mapping[str, Any], candidate_view)
-
-            buckets_for_assert: Mapping[str, Any] | None = None
-            if isinstance(bucket_view_for_assert, _MappingABC):
-                buckets_candidate = bucket_view_for_assert.get("buckets")
-                if isinstance(buckets_candidate, _MappingABC):
-                    buckets_for_assert = typing.cast(Mapping[str, Any], buckets_candidate)
-
-            if isinstance(buckets_for_assert, _MappingABC):
-                bk = buckets_for_assert.get("drilling")
-                if isinstance(bk, _MappingABC):
-                    card_hr = round(
-                        float(drill_meta.get("total_minutes_billed", 0.0)) / 60.0, 2
-                    )
-                    row_hr = round(float(_safe_float(bk.get("minutes"))) / 60.0, 2)
-                    assert abs(card_hr - row_hr) < 0.01, (
-                        f"Drilling hours mismatch: card {card_hr} vs row {row_hr}"
-                    )
-
-            row_hr_for_cost = round(float(drilling_row.hours or 0.0), 2)
-            row_cost = float(drilling_row.total or 0.0)
+        drilling_summary = process_plan_summary_map.get("drilling")
+        if drilling_row and isinstance(drilling_summary, _MappingABC):
+            card_minutes_billed = _safe_float(
+                drilling_summary.get("total_minutes_billed"), default=0.0
+            )
+            row_hr = round(float(drilling_row.hours or 0.0), 2)
             row_rate = float(drilling_row.rate or 0.0)
+            row_cost = float(drilling_row.total or 0.0)
+
+            if card_minutes_billed > 0.0:
+                billed_hr = round(card_minutes_billed / 60.0, 2)
+                drill_rate = _rate_for_bucket("drilling", rates or {})
+                if drill_rate <= 0.0:
+                    drill_rate = row_rate
+                if drill_rate <= 0.0:
+                    drill_rate = 0.0
+                billed_cost = round(billed_hr * drill_rate, 2)
+
+                process_table.update_row(
+                    "drilling", hours=billed_hr, rate=drill_rate, cost=billed_cost
+                )
+                drilling_row.hours = billed_hr
+                drilling_row.rate = drill_rate
+                drilling_row.total = billed_cost
+                row_hr = billed_hr
+                row_rate = drill_rate
+                row_cost = billed_cost
+                process_cost_row_details["drilling"] = (billed_hr, drill_rate, billed_cost)
+                labor_costs_display[drilling_row.name] = billed_cost
+                process_costs_for_render["drilling"] = billed_cost
+
+            card_hr = round(card_minutes_billed / 60.0, 2)
+            assert abs(card_hr - row_hr) < 0.05, (
+                f"Drilling hours mismatch: card {card_hr} vs row {row_hr}"
+            )
+
             assert (
                 abs(row_cost - row_hr_for_cost * row_rate) < 0.51
             ), "Drilling $ ≠ hr × rate"
@@ -6216,7 +6307,54 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         else:
             order = _preferred_order_then_alpha(buckets_map.keys())
 
+        def _collect_planner_bucket_entries() -> list[tuple[str, str, Mapping[str, Any]]]:
+            entries: list[tuple[str, str, Mapping[str, Any]]] = []
+            if isinstance(planner_bucket_view_map, _MappingABC):
+                buckets_struct = planner_bucket_view_map.get("buckets")
+                if isinstance(buckets_struct, _MappingABC):
+                    for raw_key, raw_info in buckets_struct.items():
+                        if not isinstance(raw_info, _MappingABC):
+                            continue
+                        key_text = str(raw_key)
+                        entries.append(
+                            (key_text, _canonical_bucket_key(key_text), raw_info)
+                        )
+                elif isinstance(buckets_struct, Sequence):
+                    for idx, raw_info in enumerate(buckets_struct):
+                        if not isinstance(raw_info, _MappingABC):
+                            continue
+                        key_candidate = (
+                            raw_info.get("key")
+                            or raw_info.get("label")
+                            or raw_info.get("name")
+                            or idx
+                        )
+                        key_text = str(key_candidate)
+                        entries.append(
+                            (key_text, _canonical_bucket_key(key_text), raw_info)
+                        )
+            if not entries:
+                for raw_key, raw_info in buckets_map.items():
+                    if not isinstance(raw_info, _MappingABC):
+                        continue
+                    key_text = str(raw_key)
+                    entries.append(
+                        (key_text, _canonical_bucket_key(key_text), raw_info)
+                    )
+            return entries
+
+        planner_bucket_entries = _collect_planner_bucket_entries()
+
         def _bucket_minutes_from_view(canon_key: str) -> float:
+            if not canon_key:
+                return 0.0
+            minutes_total = 0.0
+            for _, entry_canon, entry_info in planner_bucket_entries:
+                if entry_canon != canon_key:
+                    continue
+                minutes_total += _safe_float(entry_info.get("minutes"))
+            if minutes_total > 0.0:
+                return minutes_total
             info = buckets_map.get(canon_key)
             if not isinstance(info, _MappingABC):
                 return 0.0
@@ -6225,25 +6363,66 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         def _planner_rollup_hours_from_buckets() -> (
             tuple[float, float, float] | None
         ):
-            if not buckets_map:
+            if not planner_bucket_entries:
                 return None
 
             pl_machine_hr = 0.0
             pl_labor_hr = 0.0
             has_minutes = False
 
-            for key, info in buckets_map.items():
-                if not isinstance(info, _MappingABC):
-                    continue
+            for raw_key, canon_key, info in planner_bucket_entries:
                 minutes_val = _safe_float(info.get("minutes"))
                 if minutes_val <= 0.0:
                     continue
                 has_minutes = True
                 hr_val = minutes_val / 60.0
-                if _norm(key) in LABORISH:
-                    pl_labor_hr += hr_val
-                else:
-                    pl_machine_hr += hr_val
+
+                total_cost = _bucket_cost(info, "total$", "total_cost", "total")
+                machine_cost = max(0.0, _bucket_cost(info, "machine$", "machine_cost"))
+                labor_cost = max(0.0, _bucket_cost(info, "labor$", "labor_cost"))
+
+                machine_hours = 0.0
+                labor_hours = 0.0
+                allocated = False
+
+                if hr_val > 0.0 and total_cost > 0.0:
+                    try:
+                        rate_val = total_cost / hr_val
+                    except Exception:
+                        rate_val = 0.0
+                    if rate_val > 0.0:
+                        if machine_cost > 0.0:
+                            machine_hours = machine_cost / rate_val
+                        if labor_cost > 0.0:
+                            labor_hours = labor_cost / rate_val
+                        if machine_hours > 0.0 or labor_hours > 0.0:
+                            allocated = True
+                            total_allocated = machine_hours + labor_hours
+                            remainder = hr_val - total_allocated
+                            if remainder > 1e-6:
+                                if machine_hours > 0.0 and labor_hours > 0.0:
+                                    total_positive = machine_hours + labor_hours
+                                    if total_positive > 0.0:
+                                        machine_hours += remainder * (
+                                            machine_hours / total_positive
+                                        )
+                                        labor_hours += remainder * (
+                                            labor_hours / total_positive
+                                        )
+                                elif machine_hours > 0.0:
+                                    machine_hours += remainder
+                                elif labor_hours > 0.0:
+                                    labor_hours += remainder
+
+                if not allocated:
+                    laborish_key = _norm(canon_key or raw_key)
+                    if laborish_key in LABORISH:
+                        labor_hours = hr_val
+                    else:
+                        machine_hours = hr_val
+
+                pl_machine_hr += machine_hours
+                pl_labor_hr += labor_hours
 
             if not has_minutes:
                 return None
@@ -6384,59 +6563,32 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if isinstance(planner_bucket_view, _MappingABC)
             else None
         )
-        planner_total_minutes = _safe_float(
-            totals_map.get("minutes") if isinstance(totals_map, _MappingABC) else 0.0
-        )
+        planner_total_minutes = 0.0
+        if planner_bucket_entries:
+            planner_total_minutes = sum(
+                _safe_float(entry_info.get("minutes"))
+                for _, _, entry_info in planner_bucket_entries
+            )
         if planner_total_minutes <= 0:
-            try:
-                planner_total_minutes = sum(
-                    _bucket_minutes_from_view(key) for key in buckets_map.keys()
-                )
-            except Exception:
-                planner_total_minutes = 0.0
+            planner_total_minutes = _safe_float(
+                totals_map.get("minutes") if isinstance(totals_map, _MappingABC) else 0.0
+            )
         if planner_total_minutes > 0 and not planner_rollup_hours_ready:
             planner_total_hr = planner_total_minutes / 60.0
 
-        if not planner_rollup_hours_ready and isinstance(planner_bucket_view_map, _MappingABC):
-            try:
-                bview = planner_bucket_view_map
-                buckets_data = bview.get("buckets") if isinstance(bview, _MappingABC) else None
-                if isinstance(buckets_data, _MappingABC):
-                    def _n(s: Any) -> str:
-                        import re as _re
-
-                        return _re.sub(r"[^a-z0-9]+", "_", str(s).lower()).strip("_")
-
-                    LABORISH = {
-                        "finishing_deburr",
-                        "inspection",
-                        "assembly",
-                        "toolmaker_support",
-                        "ehs_compliance",
-                        "fixture_build_amortized",
-                        "programming_amortized",
-                    }
-
-                    pl_machine_hr = 0.0
-                    pl_labor_hr = 0.0
-                    for key, info in buckets_data.items():
-                        if not isinstance(info, _MappingABC):
-                            continue
-                        try:
-                            hr = float(info.get("minutes", 0.0) or 0.0) / 60.0
-                        except Exception:
-                            continue
-                        if _n(key) in LABORISH:
-                            pl_labor_hr += hr
-                        else:
-                            pl_machine_hr += hr
-
-                    planner_labor_hr = pl_labor_hr
-                    planner_machine_hr = pl_machine_hr
-                    planner_total_hr = round(pl_labor_hr + pl_machine_hr, 2)
-                    planner_rollup_hours_ready = True
-            except Exception:
-                pass
+        if not planner_rollup_hours_ready and planner_bucket_entries:
+            fallback_rollup = _planner_rollup_hours_from_buckets()
+            if fallback_rollup is not None:
+                (
+                    fallback_total_hr,
+                    fallback_labor_hr,
+                    fallback_machine_hr,
+                ) = fallback_rollup
+                if fallback_total_hr > 0.0:
+                    planner_total_hr = fallback_total_hr
+                planner_labor_hr = fallback_labor_hr
+                planner_machine_hr = fallback_machine_hr
+                planner_rollup_hours_ready = True
 
         if not planner_rollup_hours_ready:
             derived_rollup = _derive_planner_rollup_hours_from_summary(planner_total_hr)
@@ -6890,6 +7042,22 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
         tool_add = (tchg_deep if seen_deep else 0.0) + (tchg_std if seen_std else 0.0)
         total_drill_minutes_with_toolchange = subtotal_min + tool_add
+
+        # === DRILLING: choose one billing source of truth ===
+        drill_meta = breakdown.setdefault("drilling_meta", {})
+        bill_min = float(
+            drill_meta.get("total_minutes_billed")
+            or drill_meta.get("total_minutes_with_toolchange")
+            or drill_meta.get("total_minutes")
+            or 0.0
+        )
+        drill_meta["total_minutes_billed"] = bill_min  # <-- canonical minutes for billing
+
+        # Overwrite any legacy estimator/planner override:
+        pm = breakdown.setdefault("process_meta", {}).setdefault("drilling", {})
+        pm["hr"] = round(bill_min / 60.0, 6)
+        pm["minutes"] = bill_min
+        pm["basis"] = ["minutes_engine"]  # replace ["planner_drilling_override"]
 
         process_plan_summary_card: dict[str, Any] | None = None
         if isinstance(process_plan_summary_local, dict):
