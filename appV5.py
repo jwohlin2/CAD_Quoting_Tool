@@ -10405,8 +10405,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         base_geometry=geo,
         value_map=value_map,
     )
+    geo_context = geom
     planner_inputs = dict(ui_vars or {})
-    geo_payload: dict[str, Any] = geom
+    geo_payload: dict[str, Any] = geo_context
     state = _ensure_quote_state(quote_state)
 
     speeds_feeds_csv_path = _coerce_speeds_feeds_csv_path(
@@ -10563,7 +10564,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     }
 
     drill_params: dict[str, Any] = baseline.setdefault("drill_params", {})
-    normalized_drill_material = normalize_material_key(str(geom.get("material") or material_text))
+    normalized_drill_material = normalize_material_key(geom.get("material"))
+    if not normalized_drill_material and material_text:
+        normalized_drill_material = normalize_material_key(material_text)
     if normalized_drill_material:
         drill_params["material"] = normalized_drill_material
     else:
@@ -10968,107 +10971,6 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             metrics["machine$"] += machine_val
             metrics["labor$"] += labor_val
 
-    if aggregated_bucket_minutes:
-        buckets_raw = bucket_view_prepared.get("buckets")
-        if isinstance(buckets_raw, _MappingABC):
-            buckets = {str(k): dict(v) for k, v in buckets_raw.items()}
-        else:
-            buckets = {}
-
-        for canon_key, metrics in aggregated_bucket_minutes.items():
-            if canon_key in _FINAL_BUCKET_HIDE_KEYS:
-                continue
-            entry = dict(buckets.get(canon_key, {}))
-            minutes_val = round(_safe_float(metrics.get("minutes")), 2)
-            machine_val = round(_safe_float(metrics.get("machine$")), 2)
-            labor_val = round(_safe_float(metrics.get("labor$")), 2)
-            total_val = round(machine_val + labor_val, 2)
-            entry.update(
-                {
-                    "minutes": minutes_val,
-                    "machine$": machine_val,
-                    "labor$": labor_val,
-                    "total$": total_val,
-                }
-            )
-            buckets[canon_key] = entry
-
-        order_raw = bucket_view_prepared.get("order")
-        if isinstance(order_raw, Sequence):
-            order = [str(item) for item in order_raw if isinstance(item, str)]
-        else:
-            order = []
-
-        seen: set[str] = set()
-        ordered: list[str] = []
-        for key in order:
-            canon = _canonical_bucket_key(key) or key
-            if canon in buckets and canon not in seen:
-                ordered.append(canon)
-                seen.add(canon)
-        for key in _preferred_order_then_alpha(buckets.keys()):
-            if key not in seen:
-                ordered.append(key)
-                seen.add(key)
-
-        totals = {"minutes": 0.0, "machine$": 0.0, "labor$": 0.0, "total$": 0.0}
-        for entry in buckets.values():
-            minutes_val = _safe_float(entry.get("minutes"))
-            machine_val = _safe_float(entry.get("machine$"))
-            labor_val = _safe_float(entry.get("labor$"))
-            total_val = _safe_float(entry.get("total$"))
-            if total_val <= 0.0:
-                total_val = machine_val + labor_val
-            totals["minutes"] += minutes_val
-            totals["machine$"] += machine_val
-            totals["labor$"] += labor_val
-            totals["total$"] += total_val
-
-        bucket_view_prepared["buckets"] = buckets
-        bucket_view_prepared["order"] = ordered
-        bucket_view_prepared["totals"] = {key: round(val, 2) for key, val in totals.items()}
-
-        if isinstance(process_meta, dict):
-            total_minutes = 0.0
-            machine_minutes = 0.0
-            labor_minutes = 0.0
-            for metrics in aggregated_bucket_minutes.values():
-                minutes_val = _safe_float(metrics.get("minutes"))
-                machine_val = _safe_float(metrics.get("machine$"))
-                labor_val = _safe_float(metrics.get("labor$"))
-                if minutes_val <= 0.0:
-                    continue
-                hours_val = minutes_val / 60.0
-                total_cost = machine_val + labor_val
-                total_minutes += minutes_val
-                if hours_val > 0.0 and total_cost > 0.0:
-                    rate_val = total_cost / hours_val
-                    if rate_val > 0.0:
-                        if machine_val > 0.0:
-                            machine_minutes += (machine_val / rate_val) * 60.0
-                        if labor_val > 0.0:
-                            labor_minutes += (labor_val / rate_val) * 60.0
-
-            def _apply_minutes(key: str, minutes_val: float) -> None:
-                if minutes_val <= 0.0:
-                    return
-                existing = process_meta.get(key)
-                updated = dict(existing) if isinstance(existing, _MappingABC) else {}
-                updated["minutes"] = round(minutes_val, 2)
-                updated["hr"] = round(minutes_val / 60.0, 3)
-                process_meta[key] = updated
-
-            if total_minutes > 0.0:
-                _apply_minutes("planner_total", total_minutes)
-            if machine_minutes > 0.0:
-                _apply_minutes("planner_machine", machine_minutes)
-            if labor_minutes > 0.0:
-                _apply_minutes("planner_labor", labor_minutes)
-
-    bucket_view.clear()
-    bucket_view.update(bucket_view_prepared)
-    bucket_view_buckets = bucket_view.setdefault("buckets", {})
-
     hole_diams: list[float] = []
     if isinstance(geo_payload, _MappingABC):
         raw_diams = geo_payload.get("hole_diams_mm")
@@ -11087,6 +10989,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 thickness_in = float(thickness_mm) / 25.4
 
     drilling_rate = _lookup_rate("DrillingRate", rates, params, default_rates, fallback=75.0)
+    drill_total_minutes: float | None = None
     drilling_meta_container = breakdown.setdefault("drilling_meta", {})
     if isinstance(drilling_meta_container, dict):
         if material_text:
@@ -11128,15 +11031,16 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 estimator_hours = max(
                     0.05, hole_count * max(avg_dia_in, 0.1) * float(thickness_in) / 600.0
                 )
+            drill_total_minutes = max(0.0, float(estimator_hours or 0.0)) * 60.0
             bucket_view["drilling"] = {
-                "minutes": estimator_hours * 60.0,
-                "machine_cost": estimator_hours * drilling_rate,
+                "minutes": drill_total_minutes,
+                "machine_cost": (drill_total_minutes / 60.0) * drilling_rate,
                 "labor_cost": 0.0,
             }
             drilling_meta_container.update({"estimator_hours_for_planner": estimator_hours})
             process_meta["drilling"] = {
                 "hr": estimator_hours,
-                "minutes": estimator_hours * 60.0,
+                "minutes": drill_total_minutes,
                 "rate": drilling_rate,
                 "basis": ["planner_drilling_override"],
             }
@@ -11240,6 +11144,11 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     else:
         drilling_summary = process_plan_summary.setdefault("drilling", {})
 
+    if drill_total_minutes is not None and drill_total_minutes > 0.0:
+        drilling_summary["total_minutes"] = float(drill_total_minutes)
+        if "rate" not in drilling_summary:
+            drilling_summary["rate"] = float(drilling_rate)
+
     groups_existing = drilling_summary.get("groups")
     has_groups = False
     if isinstance(groups_existing, Sequence) and not isinstance(groups_existing, (str, bytes)):
@@ -11264,6 +11173,142 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         drilling_summary["hole_count"] = fallback_hole_count
         drilling_meta_container["bins_list"] = fallback_groups
         drilling_meta_container["hole_count"] = fallback_hole_count
+
+    drilling_minutes_for_bucket: float | None = None
+    if drill_total_minutes is not None and drill_total_minutes > 0.0:
+        drilling_minutes_for_bucket = float(drill_total_minutes)
+    else:
+        drilling_summary_map = process_plan_summary.get("drilling")
+        if isinstance(drilling_summary_map, _MappingABC):
+            candidate_minutes = _safe_float(drilling_summary_map.get("total_minutes"))
+            if candidate_minutes > 0.0:
+                drilling_minutes_for_bucket = candidate_minutes
+
+    if drilling_minutes_for_bucket and drilling_minutes_for_bucket > 0.0:
+        metrics = aggregated_bucket_minutes.setdefault(
+            "drilling",
+            {"minutes": 0.0, "machine$": 0.0, "labor$": 0.0},
+        )
+        if _safe_float(metrics.get("minutes")) <= 0.0:
+            drill_rate_value = 0.0
+            drilling_meta_entry = (
+                process_meta.get("drilling") if isinstance(process_meta, _MappingABC) else None
+            )
+            if isinstance(drilling_meta_entry, _MappingABC):
+                drill_rate_value = _safe_float(drilling_meta_entry.get("rate"))
+            if drill_rate_value <= 0.0:
+                drilling_summary_map = process_plan_summary.get("drilling")
+                if isinstance(drilling_summary_map, _MappingABC):
+                    drill_rate_value = _safe_float(drilling_summary_map.get("rate"))
+            if drill_rate_value <= 0.0:
+                drill_rate_value = float(drilling_rate)
+            metrics["minutes"] = drilling_minutes_for_bucket
+            machine_cost_val = 0.0
+            if drill_rate_value > 0.0:
+                machine_cost_val = (drilling_minutes_for_bucket / 60.0) * drill_rate_value
+            metrics["machine$"] = machine_cost_val
+            metrics["labor$"] = _safe_float(metrics.get("labor$"))
+
+    if aggregated_bucket_minutes:
+        buckets_raw = bucket_view_prepared.get("buckets")
+        if isinstance(buckets_raw, _MappingABC):
+            buckets = {str(k): dict(v) for k, v in buckets_raw.items()}
+        else:
+            buckets = {}
+
+        for canon_key, metrics in aggregated_bucket_minutes.items():
+            if canon_key in _FINAL_BUCKET_HIDE_KEYS:
+                continue
+            entry = dict(buckets.get(canon_key, {}))
+            minutes_val = round(_safe_float(metrics.get("minutes")), 2)
+            machine_val = round(_safe_float(metrics.get("machine$")), 2)
+            labor_val = round(_safe_float(metrics.get("labor$")), 2)
+            total_val = round(machine_val + labor_val, 2)
+            entry.update(
+                {
+                    "minutes": minutes_val,
+                    "machine$": machine_val,
+                    "labor$": labor_val,
+                    "total$": total_val,
+                }
+            )
+            buckets[canon_key] = entry
+
+        order_raw = bucket_view_prepared.get("order")
+        if isinstance(order_raw, Sequence):
+            order = [str(item) for item in order_raw if isinstance(item, str)]
+        else:
+            order = []
+
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for key in order:
+            canon = _canonical_bucket_key(key) or key
+            if canon in buckets and canon not in seen:
+                ordered.append(canon)
+                seen.add(canon)
+        for key in _preferred_order_then_alpha(buckets.keys()):
+            if key not in seen:
+                ordered.append(key)
+                seen.add(key)
+
+        totals = {"minutes": 0.0, "machine$": 0.0, "labor$": 0.0, "total$": 0.0}
+        for entry in buckets.values():
+            minutes_val = _safe_float(entry.get("minutes"))
+            machine_val = _safe_float(entry.get("machine$"))
+            labor_val = _safe_float(entry.get("labor$"))
+            total_val = _safe_float(entry.get("total$"))
+            if total_val <= 0.0:
+                total_val = machine_val + labor_val
+            totals["minutes"] += minutes_val
+            totals["machine$"] += machine_val
+            totals["labor$"] += labor_val
+            totals["total$"] += total_val
+
+        bucket_view_prepared["buckets"] = buckets
+        bucket_view_prepared["order"] = ordered
+        bucket_view_prepared["totals"] = {key: round(val, 2) for key, val in totals.items()}
+
+        if isinstance(process_meta, dict) and using_planner:
+            total_minutes = 0.0
+            machine_minutes = 0.0
+            labor_minutes = 0.0
+            for metrics in aggregated_bucket_minutes.values():
+                minutes_val = _safe_float(metrics.get("minutes"))
+                machine_val = _safe_float(metrics.get("machine$"))
+                labor_val = _safe_float(metrics.get("labor$"))
+                if minutes_val <= 0.0:
+                    continue
+                hours_val = minutes_val / 60.0
+                total_cost = machine_val + labor_val
+                total_minutes += minutes_val
+                if hours_val > 0.0 and total_cost > 0.0:
+                    rate_val = total_cost / hours_val
+                    if rate_val > 0.0:
+                        if machine_val > 0.0:
+                            machine_minutes += (machine_val / rate_val) * 60.0
+                        if labor_val > 0.0:
+                            labor_minutes += (labor_val / rate_val) * 60.0
+
+            def _apply_minutes(key: str, minutes_val: float) -> None:
+                if minutes_val <= 0.0:
+                    return
+                existing = process_meta.get(key)
+                updated = dict(existing) if isinstance(existing, _MappingABC) else {}
+                updated["minutes"] = round(minutes_val, 2)
+                updated["hr"] = round(minutes_val / 60.0, 3)
+                process_meta[key] = updated
+
+            if total_minutes > 0.0:
+                _apply_minutes("planner_total", total_minutes)
+            if machine_minutes > 0.0:
+                _apply_minutes("planner_machine", machine_minutes)
+            if labor_minutes > 0.0:
+                _apply_minutes("planner_labor", labor_minutes)
+
+    bucket_view.clear()
+    bucket_view.update(bucket_view_prepared)
+    bucket_view_buckets = bucket_view.setdefault("buckets", {})
 
     roughing_hours = _coerce_float_or_none(value_map.get("Roughing Cycle Time"))
     if roughing_hours is None:
