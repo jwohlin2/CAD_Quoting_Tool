@@ -4955,8 +4955,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if not L_in or not W_in:
                 L_mm = g.get("plate_length_mm")
                 W_mm = g.get("plate_width_mm")
-                if (L_mm is None or W_mm is None) and isinstance(g.get("derived", {}), dict):
-                    bbox = g["derived"].get("bbox_mm")
+                derived_ctx = g.get("derived") if isinstance(g, dict) else None
+                if (L_mm is None or W_mm is None) and isinstance(derived_ctx, dict):
+                    bbox = derived_ctx.get("bbox_mm")
                     if bbox and len(bbox) >= 2:
                         L_mm, W_mm = float(bbox[0]), float(bbox[1])
                 if L_in is None and L_mm is not None:
@@ -9924,6 +9925,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     from planner_pricing import price_with_planner
 
     process_costs: dict[str, float] = {}
+    process_plan_summary: dict[str, Any] = {}
     process_meta: dict[str, Any] = {"inspection": inspection_meta}
     bucket_view: dict[str, dict[str, float]] = {}
     totals_block: dict[str, float] = {}
@@ -9989,6 +9991,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         if planner_result:
             breakdown["process_plan_pricing"] = planner_result
             baseline["process_plan_pricing"] = planner_result
+            process_plan_summary["pricing"] = planner_result
 
         if planner_exception is None and recognized_line_items > 0:
             use_planner = True
@@ -10049,6 +10052,59 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                     "Labor": round(planner_labor_cost_total, 2),
                 }
             )
+            planner_totals_map = (
+                planner_result.get("totals", {})
+                if isinstance(planner_result.get("totals"), _MappingABC)
+                else {}
+            )
+            minutes_by_bucket = (
+                planner_totals_map.get("minutes_by_bucket", {})
+                if isinstance(planner_totals_map, _MappingABC)
+                else {}
+            )
+            cost_by_bucket = (
+                planner_totals_map.get("cost_by_bucket", {})
+                if isinstance(planner_totals_map, _MappingABC)
+                else {}
+            )
+            if minutes_by_bucket:
+                hour_summary = {}
+                for key, value in minutes_by_bucket.items():
+                    try:
+                        minutes_val = float(value or 0.0)
+                    except Exception:
+                        minutes_val = 0.0
+                    hour_summary[str(key)] = round(minutes_val / 60.0, 2)
+                process_plan_summary["hour_summary"] = hour_summary
+            if cost_by_bucket:
+                bucket_costs: list[dict[str, float]] = []
+                planner_cost_map: dict[str, float] = {}
+                for key, value in cost_by_bucket.items():
+                    try:
+                        numeric_cost = round(float(value or 0.0), 2)
+                    except Exception:
+                        numeric_cost = 0.0
+                    name = str(key)
+                    bucket_costs.append({"name": name, "cost": numeric_cost})
+                    planner_cost_map[name] = numeric_cost
+                process_plan_summary["process_costs"] = bucket_costs
+                process_plan_summary["process_costs_map"] = planner_cost_map
+            process_plan_summary["computed_total_labor_cost"] = float(
+                planner_totals_map.get("labor_cost", 0.0) or 0.0
+            )
+            process_plan_summary["display_labor_for_ladder"] = process_plan_summary[
+                "computed_total_labor_cost"
+            ]
+            process_plan_summary["computed_total_machine_cost"] = float(
+                planner_totals_map.get("machine_cost", 0.0) or 0.0
+            )
+            process_plan_summary["pricing_source"] = "Planner"
+            planner_subtotal = (
+                process_plan_summary["display_labor_for_ladder"]
+                + process_plan_summary["computed_total_machine_cost"]
+            )
+            planner_subtotal_rounded = round(planner_subtotal, 2)
+            process_plan_summary["computed_subtotal"] = planner_subtotal_rounded
             combined_labor_total = (
                 planner_machine_cost_total
                 + planner_labor_cost_total
@@ -10060,14 +10116,16 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                     "machine_cost": planner_machine_cost_total,
                     "labor_cost": combined_labor_total,
                     "minutes": total_minutes,
+                    "subtotal": planner_subtotal_rounded,
                 }
             )
             breakdown["labor_cost_rendered"] = combined_labor_total
             breakdown["process_plan_pricing"] = planner_result
-            breakdown["pricing_source"] = "planner"
+            breakdown["pricing_source"] = "Planner"
             breakdown["process_minutes"] = total_minutes
-            baseline["pricing_source"] = "planner"
+            baseline["pricing_source"] = "Planner"
             baseline["process_plan_pricing"] = planner_result
+            process_plan_summary["used_planner"] = True
             planner_used = True
 
             hr_total = total_minutes / 60.0 if total_minutes else 0.0
@@ -10120,10 +10178,18 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         breakdown.setdefault("pricing_source", "legacy")
         baseline.setdefault("pricing_source", "legacy")
 
+    if process_plan_summary:
+        if isinstance(breakdown, dict):
+            existing_summary = breakdown.get("process_plan")
+            if isinstance(existing_summary, dict):
+                existing_summary.update(process_plan_summary)
+            else:
+                breakdown["process_plan"] = dict(process_plan_summary)
+
     using_planner = str(breakdown.get("pricing_source", "")).strip().lower() == "planner"
 
     if os.environ.get("ASSERT_PLANNER"):
-        assert breakdown.get("pricing_source") == "planner", "Planner not engaged"
+        assert str(breakdown.get("pricing_source", "")).strip().lower() == "planner", "Planner not engaged"
 
     merged_two_bucket_rates = _merge_two_bucket_rates(
         RATES_TWO_BUCKET_DEFAULT,
