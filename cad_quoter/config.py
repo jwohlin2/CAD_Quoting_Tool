@@ -8,7 +8,7 @@ import logging
 from pathlib import Path
 from typing import Any, Mapping
 
-from cad_quoter.rates import migrate_flat_to_two_bucket
+from cad_quoter.rates import ensure_two_bucket_defaults, migrate_flat_to_two_bucket
 from cad_quoter.coerce import to_float
 
 RESOURCE_DIR = Path(__file__).resolve().parent / "resources"
@@ -162,7 +162,7 @@ def _ensure_two_bucket_rates(raw: Mapping[str, Any]) -> dict[str, dict[str, floa
                 continue
             machine[str(key)] = numeric
 
-        return {"labor": labor, "machine": machine}
+        return ensure_two_bucket_defaults({"labor": labor, "machine": machine})
 
     flat: dict[str, float] = {}
     for key, value in raw.items():
@@ -171,7 +171,7 @@ def _ensure_two_bucket_rates(raw: Mapping[str, Any]) -> dict[str, dict[str, floa
             continue
         flat[str(key)] = numeric
 
-    return migrate_flat_to_two_bucket(flat)
+    return ensure_two_bucket_defaults(migrate_flat_to_two_bucket(flat))
 
 
 def load_default_rates() -> dict[str, dict[str, float]]:
