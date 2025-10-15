@@ -3033,9 +3033,10 @@ def _build_planner_bucket_render_state(
 ) -> PlannerBucketRenderState:
     state = PlannerBucketRenderState()
 
-    state.process_costs_for_render = (
-        dict(process_costs_canon) if isinstance(process_costs_canon, _MappingABC) else {}
-    )
+    # The canonical bucket view is the single source of truth for the Process & Labor table.
+    # Start with an empty structure and allow the canonical buckets to populate it below,
+    # preventing any stale entries from ``process_costs`` from sneaking into the render.
+    state.process_costs_for_render = {}
 
     if not isinstance(bucket_view, _MappingABC):
         return state
@@ -5541,7 +5542,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         bucket_view_candidates.append(breakdown.get("bucket_view"))
     if bucket_rollup_map:
         bucket_view_candidates.append({"buckets": bucket_rollup_map})
-
     for candidate in bucket_view_candidates:
         prepared = _prepare_bucket_view_candidate(candidate)
         if prepared is None:
@@ -5840,23 +5840,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         label = _display_bucket_label(canon_key, label_overrides)
         label_to_canon.setdefault(label, canon_key)
         canon_to_display_label.setdefault(canon_key, label)
-
-    for label, amount in labor_cost_totals.items():
-        if _should_hide_amortized(label):
-            continue
-        try:
-            amount_val = float(amount or 0.0)
-        except Exception:
-            amount_val = 0.0
-        if not ((amount_val > 0.0) or show_zeros):
-            continue
-        canon_key = _canonical_bucket_key(label)
-        if not canon_key:
-            continue
-        process_costs_for_render[canon_key] = amount_val
-        display_label = str(label)
-        canon_to_display_label[canon_key] = display_label
-        label_to_canon[display_label] = canon_key
 
     for canon_key in process_costs_for_render:
         label = _display_bucket_label(canon_key, label_overrides)
