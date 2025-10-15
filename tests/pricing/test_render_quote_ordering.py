@@ -1060,3 +1060,57 @@ def test_render_quote_direct_costs_match_displayed_pass_through() -> None:
     assert all("Hidden Fee" not in line for line in pass_section)
     total_line = next(line for line in pass_section if line.strip().startswith("Total"))
     assert total_line.endswith("$225.00")
+
+
+def test_render_quote_backfills_programming_and_inspection_rates() -> None:
+    result = {
+        "price": 0.0,
+        "breakdown": {
+            "qty": 5,
+            "totals": {
+                "labor_cost": 0.0,
+                "direct_costs": 0.0,
+                "subtotal": 0.0,
+                "with_overhead": 0.0,
+                "with_ga": 0.0,
+                "with_contingency": 0.0,
+                "with_expedite": 0.0,
+            },
+            "nre_detail": {"programming": {"prog_hr": 2.0}},
+            "nre": {"programming_hr": 3.0},
+            "material": {},
+            "process_costs": {},
+            "process_meta": {},
+            "pass_through": {},
+            "applied_pcts": {},
+            "rates": {},
+            "params": {},
+            "labor_cost_details": {},
+            "direct_cost_details": {},
+            "bucket_view": {
+                "buckets": {
+                    "inspection": {
+                        "minutes": 60.0,
+                        "labor$": 0.0,
+                        "machine$": 0.0,
+                    }
+                },
+                "order": ["inspection"],
+            },
+        },
+    }
+
+    rendered = appV5.render_quote(result, currency="$", show_zeros=False)
+    lines = rendered.splitlines()
+
+    assert any("Programming Cost:" in line and "$255" in line for line in lines)
+    assert any("Programmer:" in line and "$85.00/hr" in line for line in lines)
+
+    inspection_idx = next(
+        (idx for idx, line in enumerate(lines) if line.strip().startswith("Inspection")),
+        None,
+    )
+    assert inspection_idx is not None
+    assert "hr @" in lines[inspection_idx + 1]
+    assert "/hr" in lines[inspection_idx + 1]
+    assert "—/hr" not in lines[inspection_idx + 1]
