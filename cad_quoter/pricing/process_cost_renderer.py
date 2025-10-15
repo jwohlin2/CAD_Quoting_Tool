@@ -18,6 +18,7 @@ ORDER: tuple[str, ...] = (
     "finishing_deburr",
     "saw_waterjet",
     "inspection",
+    "toolmaker_support",
     "fixture_build_amortized",
     "programming_amortized",
     "misc",
@@ -40,6 +41,7 @@ _LABEL_OVERRIDES: dict[str, str] = {
     "wire_edm": "Wire EDM",
     "sinker_edm": "Sinker EDM",
     "misc": "Misc",
+    "toolmaker_support": "Toolmaker Support",
 }
 
 _ALIAS_MAP: dict[str, str] = {
@@ -96,7 +98,6 @@ _ALIAS_MAP: dict[str, str] = {
     "drilling": "drilling",
     "assembly": "misc",
     "packaging": "misc",
-    "toolmaker_support": "misc",
     "ehs_compliance": "misc",
     "machine": "misc",
     "labor": "misc",
@@ -121,6 +122,11 @@ _RATE_ALIAS_KEYS: dict[str, tuple[str, ...]] = {
     "finishing_deburr": ("FinishingRate", "DeburrRate"),
     "saw_waterjet": ("SawWaterjetRate", "SawRate", "WaterjetRate"),
     "inspection": ("InspectionRate",),
+    "toolmaker_support": (
+        "ToolmakerRate",
+        "ToolAndDieMakerRate",
+        "LaborRate",
+    ),
     "fixture_build_amortized": ("FixtureBuildRate",),
     "programming_amortized": ("ProgrammingRate", "EngineerRate", "ProgrammerRate"),
     "misc": (
