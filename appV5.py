@@ -10525,6 +10525,36 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     geo_payload: dict[str, Any] = geo_context
     state = _ensure_quote_state(quote_state)
 
+    default_material_display = DEFAULT_MATERIAL_DISPLAY
+    raw_material_display = str(
+        geo_context.get("material")
+        or value_map.get("Material Name")
+        or value_map.get("Material")
+        or ""
+    ).strip()
+    material_key_source = raw_material_display or default_material_display
+    material_key = normalize_material_key(material_key_source)
+    fallback_display = MATERIAL_DISPLAY_BY_KEY.get(material_key, "")
+    material_display = raw_material_display or fallback_display or default_material_display
+    geo_context["material"] = material_display
+    geo_context.setdefault("material_display", material_display)
+    geo_context.setdefault("material_name", geo_context.get("material_name") or material_display)
+    geo_context["material_key"] = material_key
+    geo_context["material_lookup"] = material_key
+    raw_material_group = str(
+        geo_context.get("material_group")
+        or geo_context.get("material_family")
+        or value_map.get("Material Group")
+        or ""
+    ).strip()
+    material_group_display: str | None = raw_material_group or None
+    if material_group_display:
+        geo_context.setdefault("material_group", material_group_display)
+    planner_inputs["material"] = material_display
+    planner_inputs.setdefault("material_key", material_key)
+    if material_group_display:
+        planner_inputs.setdefault("material_group", material_group_display)
+
     speeds_feeds_csv_path = _coerce_speeds_feeds_csv_path(
         planner_inputs,
         params,
@@ -10546,12 +10576,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     state.ui_vars = dict(planner_inputs)
 
     qty = _coerce_float_or_none(value_map.get("Qty")) or 1.0
-    material_text = str(
-        geom.get("material")
-        or value_map.get("Material Name")
-        or value_map.get("Material")
-        or ""
-    ).strip()
+    material_text = material_display
 
     scrap_value = value_map.get("Scrap Percent (%)")
     normalized_scrap = normalize_scrap_pct(scrap_value)
@@ -10679,13 +10704,12 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     }
 
     drill_params: dict[str, Any] = baseline.setdefault("drill_params", {})
-    normalized_drill_material = normalize_material_key(geom.get("material"))
-    if not normalized_drill_material and material_text:
-        normalized_drill_material = normalize_material_key(material_text)
-    if normalized_drill_material:
-        drill_params["material"] = normalized_drill_material
-    else:
-        drill_params.pop("material", None)
+    drill_params["material"] = material_key
+    drill_params.setdefault("material_key", material_key)
+    if material_display:
+        drill_params.setdefault("material_display", material_display)
+    if material_group_display:
+        drill_params.setdefault("material_group", material_group_display)
 
     geo_derived = dict(geo_payload.get("derived", {})) if isinstance(geo_payload, dict) else {}
     geo_derived.setdefault("fai_required", bool(fai_required))
@@ -11107,13 +11131,13 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     drill_total_minutes: float | None = None
     drilling_meta_container = breakdown.setdefault("drilling_meta", {})
     if isinstance(drilling_meta_container, dict):
-        if material_text:
-            drilling_meta_container.setdefault("material_display", material_text)
-        if normalized_drill_material:
-            drilling_meta_container["material"] = normalized_drill_material
-            drilling_meta_container.setdefault("material_key", normalized_drill_material)
-        elif material_text:
-            drilling_meta_container.setdefault("material", material_text)
+        if material_display:
+            drilling_meta_container["material_display"] = material_display
+            drilling_meta_container["material"] = material_display
+        drilling_meta_container["material_key"] = material_key
+        drilling_meta_container["material_lookup"] = material_key
+        if material_group_display:
+            drilling_meta_container["material_group"] = material_group_display
     if not use_planner:
         if hole_diams and thickness_in and drilling_rate > 0:
             drill_debug_lines: list[str] = []
@@ -11131,9 +11155,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 estimator_hours = estimate_drilling_hours(
                     hole_diams,
                     float(thickness_in),
-                    str(material_text or ""),
+                    material_key,
                     hole_groups=hole_groups_for_estimate,
-                    material_group=group_material_breakdown or None,
+                    material_group=material_group_display,
                     speeds_feeds_table=speeds_feeds_table,
                     debug_lines=drill_debug_lines,
                     debug_summary=drill_debug_summary,
@@ -11325,6 +11349,14 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             metrics["labor$"] = _safe_float(metrics.get("labor$"))
 
     if aggregated_bucket_minutes:
+        legacy_bucket_entries: dict[str, dict[str, Any]] = {}
+        if not using_planner:
+            legacy_bucket_entries = {
+                key: dict(value)
+                for key, value in bucket_view.items()
+                if isinstance(value, _MappingABC)
+                and key not in {"buckets", "order", "totals"}
+            }
         buckets_raw = bucket_view_prepared.get("buckets")
         if isinstance(buckets_raw, _MappingABC):
             buckets = {str(k): dict(v) for k, v in buckets_raw.items()}
@@ -11383,6 +11415,11 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         bucket_view_prepared["buckets"] = buckets
         bucket_view_prepared["order"] = ordered
         bucket_view_prepared["totals"] = {key: round(val, 2) for key, val in totals.items()}
+        if not using_planner:
+            for canon_key, entry in buckets.items():
+                bucket_view_prepared.setdefault(canon_key, entry)
+            for legacy_key, legacy_value in legacy_bucket_entries.items():
+                bucket_view_prepared[legacy_key] = legacy_value
 
         if isinstance(process_meta, dict) and using_planner:
             total_minutes = 0.0
@@ -11469,7 +11506,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         breakdown["speeds_feeds_path"] = speeds_feeds_csv_path
         breakdown["speeds_feeds_loaded"] = bool(speeds_feeds_loaded)
 
-    geo_ref = geo_payload if isinstance(geo_payload, dict) else {}
+    geo_ref = geo_context if isinstance(geo_context, dict) else {}
 
     result = {
         "decision_state": {
