@@ -2914,6 +2914,204 @@ def _rate_key_for_bucket(bucket: str | None) -> str | None:
     }
     return mapping.get(canon)
 
+
+_LABORISH_BUCKET_KEYS: frozenset[str] = frozenset(
+    {
+        "finishing_deburr",
+        "inspection",
+        "assembly",
+        "toolmaker_support",
+        "ehs_compliance",
+        "fixture_build_amortized",
+        "programming_amortized",
+    }
+)
+
+_BUCKET_RATE_CANDIDATES: dict[str, tuple[str, ...]] = {
+    "milling": ("MillingRate",),
+    "drilling": ("DrillingRate", "MillingRate"),
+    "counterbore": ("CounterboreRate", "DrillingRate"),
+    "countersink": ("CountersinkRate", "DrillingRate"),
+    "tapping": ("TappingRate", "DrillingRate"),
+    "grinding": (
+        "GrindingRate",
+        "SurfaceGrindRate",
+        "ODIDGrindRate",
+        "JigGrindRate",
+    ),
+    "finishing_deburr": ("FinishingRate", "DeburrRate"),
+    "saw_waterjet": ("SawWaterjetRate", "SawRate", "WaterjetRate"),
+    "inspection": ("InspectionRate",),
+    "wire_edm": ("WireEDMRate", "EDMRate"),
+    "sinker_edm": ("SinkerEDMRate", "EDMRate"),
+    "lapping_honing": ("LappingRate", "HoningRate"),
+}
+
+
+def _bucket_cost_mode(key: str | None) -> str:
+    norm = _normalize_bucket_key(key)
+    if norm in _LABORISH_BUCKET_KEYS:
+        return "labor"
+    return "machine"
+
+
+def _lookup_bucket_rate(
+    bucket_key: str | None, rates: Mapping[str, Any] | None
+) -> float:
+    if not isinstance(rates, _MappingABC):
+        rates_map: Mapping[str, Any] = {}
+    else:
+        rates_map = rates
+
+    norm = _normalize_bucket_key(bucket_key)
+    candidates = _BUCKET_RATE_CANDIDATES.get(norm, ())
+    for candidate in candidates:
+        rate_val = rates_map.get(candidate)
+        if rate_val is None:
+            rate_val = rates_map.get(_normalize_bucket_key(candidate))
+        coerced = _safe_float(rate_val, default=0.0)
+        if coerced > 0:
+            return coerced
+
+    fallback_key = "LaborRate" if _bucket_cost_mode(norm) == "labor" else "MachineRate"
+    fallback_val = rates_map.get(fallback_key)
+    if fallback_val is None:
+        fallback_val = rates_map.get(_normalize_bucket_key(fallback_key))
+    coerced_fallback = _safe_float(fallback_val, default=0.0)
+    return coerced_fallback if coerced_fallback > 0 else 0.0
+
+
+@dataclass
+class PlannerBucketRenderState:
+    canonical_order: list[str] = field(default_factory=list)
+    canonical_summary: dict[str, dict[str, float]] = field(default_factory=dict)
+    table_rows: list[tuple[str, float, float, float, float]] = field(default_factory=list)
+    label_to_canon: dict[str, str] = field(default_factory=dict)
+    canon_to_display_label: dict[str, str] = field(default_factory=dict)
+    detail_lookup: dict[str, str] = field(default_factory=dict)
+    labor_costs_display: dict[str, float] = field(default_factory=dict)
+    hour_entries: dict[str, tuple[float, bool]] = field(default_factory=dict)
+    display_labor_total: float = 0.0
+    display_machine_total: float = 0.0
+    bucket_minutes_detail: dict[str, float] = field(default_factory=dict)
+    process_costs_for_render: dict[str, float] = field(default_factory=dict)
+
+
+def _build_planner_bucket_render_state(
+    bucket_view: Mapping[str, Any] | None,
+    *,
+    label_overrides: Mapping[str, str] | None = None,
+    labor_cost_details: Mapping[str, Any] | None = None,
+    labor_cost_details_input: Mapping[str, Any] | None = None,
+    process_costs_canon: Mapping[str, float] | None = None,
+    rates: Mapping[str, Any] | None = None,
+) -> PlannerBucketRenderState:
+    state = PlannerBucketRenderState()
+
+    state.process_costs_for_render = (
+        dict(process_costs_canon) if isinstance(process_costs_canon, _MappingABC) else {}
+    )
+
+    if not isinstance(bucket_view, _MappingABC):
+        return state
+
+    buckets = bucket_view.get("buckets") if isinstance(bucket_view, _MappingABC) else None
+    if not isinstance(buckets, _MappingABC):
+        buckets = {}
+
+    order = bucket_view.get("order") if isinstance(bucket_view, _MappingABC) else None
+    if not isinstance(order, Sequence):
+        order = _preferred_order_then_alpha(buckets.keys())
+
+    details_map = (
+        dict(labor_cost_details)
+        if isinstance(labor_cost_details, _MappingABC)
+        else {}
+    )
+    detail_inputs_map = (
+        dict(labor_cost_details_input)
+        if isinstance(labor_cost_details_input, _MappingABC)
+        else {}
+    )
+
+    for canon_key in order:
+        info = buckets.get(canon_key)
+        if not isinstance(info, _MappingABC):
+            continue
+
+        minutes_val = _safe_float(info.get("minutes"), default=0.0)
+        labor_raw = _safe_float(info.get("labor$"), default=0.0)
+        machine_raw = _safe_float(info.get("machine$"), default=0.0)
+
+        hours_raw = minutes_val / 60.0 if minutes_val else 0.0
+        total_raw = labor_raw + machine_raw
+
+        if total_raw <= 0.01 and minutes_val > 0:
+            inferred_rate = _lookup_bucket_rate(canon_key, rates)
+            if inferred_rate > 0:
+                injected_total = (minutes_val / 60.0) * inferred_rate
+                if _bucket_cost_mode(canon_key) == "labor":
+                    labor_raw = injected_total
+                    machine_raw = 0.0
+                else:
+                    machine_raw = injected_total
+                    labor_raw = 0.0
+                total_raw = labor_raw + machine_raw
+
+        if total_raw <= 0.01 and hours_raw <= 0.01:
+            continue
+
+        state.canonical_order.append(canon_key)
+        state.canonical_summary[canon_key] = {
+            "minutes": minutes_val,
+            "hours": hours_raw,
+            "labor": labor_raw,
+            "machine": machine_raw,
+            "total": total_raw,
+        }
+
+        label = _display_bucket_label(canon_key, label_overrides)
+        hours_val = round(hours_raw, 2)
+        labor_val = round(labor_raw, 2)
+        machine_val = round(machine_raw, 2)
+        total_val = round(total_raw, 2)
+
+        state.table_rows.append((label, hours_val, labor_val, machine_val, total_val))
+        state.label_to_canon[label] = canon_key
+        state.canon_to_display_label.setdefault(canon_key, label)
+        state.labor_costs_display[label] = total_val
+        state.display_labor_total += labor_raw
+        state.display_machine_total += machine_raw
+        state.hour_entries[label] = (hours_val, True)
+
+        detail_text: str | None = None
+        for candidate in (canon_key, label):
+            candidate_key = str(candidate)
+            if candidate_key in details_map and details_map[candidate_key]:
+                detail_text = details_map[candidate_key]
+                break
+            if (
+                candidate_key in detail_inputs_map
+                and detail_inputs_map[candidate_key]
+            ):
+                detail_text = detail_inputs_map[candidate_key]
+                break
+        if detail_text not in (None, ""):
+            state.detail_lookup[label] = str(detail_text)
+
+    for canon_key, metrics in state.canonical_summary.items():
+        state.bucket_minutes_detail[canon_key] = _safe_float(
+            metrics.get("minutes"), default=0.0
+        )
+        state.process_costs_for_render[canon_key] = _safe_float(
+            metrics.get("total"), default=0.0
+        )
+        label = _display_bucket_label(canon_key, label_overrides)
+        state.label_to_canon.setdefault(label, canon_key)
+        state.canon_to_display_label.setdefault(canon_key, label)
+
+    return state
+
 def _charged_hours_by_bucket(process_costs, process_meta, rates):
     """Return the hours that correspond to what we actually charged."""
     out: dict[str, float] = {}
@@ -5260,79 +5458,28 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         process_plan_summary_local["bucket_view"] = copy.deepcopy(bucket_view_final)
 
     bucket_view = bucket_view_final
-    if isinstance(bucket_view_final, _MappingABC):
-        buckets = (
-            bucket_view_final.get("buckets")
-            if isinstance(bucket_view_final, _MappingABC)
-            else None
-        )
-        if not isinstance(buckets, _MappingABC):
-            buckets = {}
-        order = (
-            bucket_view_final.get("order")
-            if isinstance(bucket_view_final, _MappingABC)
-            else None
-        )
-        if not isinstance(order, Sequence):
-            order = _preferred_order_then_alpha(buckets.keys())
 
-        for canon_key in order:
-            info = buckets.get(canon_key)
-            if not isinstance(info, _MappingABC):
-                continue
-            try:
-                minutes_val = float(info.get("minutes", 0.0) or 0.0)
-            except Exception:
-                minutes_val = 0.0
-            try:
-                labor_raw = float(info.get("labor$", 0.0) or 0.0)
-            except Exception:
-                labor_raw = 0.0
-            try:
-                machine_raw = float(info.get("machine$", 0.0) or 0.0)
-            except Exception:
-                machine_raw = 0.0
+    bucket_state = _build_planner_bucket_render_state(
+        bucket_view,
+        label_overrides=label_overrides,
+        labor_cost_details=labor_cost_details,
+        labor_cost_details_input=labor_cost_details_input,
+        process_costs_canon=process_costs_canon,
+        rates=rates,
+    )
 
-            hours_raw = minutes_val / 60.0 if minutes_val else 0.0
-            total_raw = labor_raw + machine_raw
-
-            if total_raw <= 0.01 and hours_raw <= 0.01:
-                continue
-
-            canonical_bucket_order.append(canon_key)
-            canonical_bucket_summary[canon_key] = {
-                "minutes": minutes_val,
-                "hours": hours_raw,
-                "labor": labor_raw,
-                "machine": machine_raw,
-                "total": total_raw,
-            }
-
-            label = _display_bucket_label(canon_key, label_overrides)
-            hours_val = round(hours_raw, 2)
-            labor_val = round(labor_raw, 2)
-            machine_val = round(machine_raw, 2)
-            total_val = round(total_raw, 2)
-
-            bucket_table_rows.append((label, hours_val, labor_val, machine_val, total_val))
-            label_to_canon[label] = canon_key
-            canon_to_display_label.setdefault(canon_key, label)
-
-            labor_costs_display[label] = total_val
-            display_labor_for_ladder += labor_raw
-            display_machine += machine_raw
-            hour_summary_entries[label] = (hours_val, True)
-
-            detail_text = None
-            for candidate in (canon_key, label):
-                if candidate in labor_cost_details and labor_cost_details[candidate]:
-                    detail_text = labor_cost_details[candidate]
-                    break
-                if candidate in labor_cost_details_input and labor_cost_details_input[candidate]:
-                    detail_text = labor_cost_details_input[candidate]
-                    break
-            if detail_text:
-                detail_lookup[label] = detail_text
+    canonical_bucket_order = list(bucket_state.canonical_order)
+    canonical_bucket_summary = dict(bucket_state.canonical_summary)
+    bucket_table_rows = list(bucket_state.table_rows)
+    detail_lookup.update(bucket_state.detail_lookup)
+    label_to_canon.update(bucket_state.label_to_canon)
+    canon_to_display_label.update(bucket_state.canon_to_display_label)
+    labor_costs_display.update(bucket_state.labor_costs_display)
+    display_labor_for_ladder = bucket_state.display_labor_total
+    display_machine = bucket_state.display_machine_total
+    hour_summary_entries.update(bucket_state.hour_entries)
+    bucket_minutes_detail = dict(bucket_state.bucket_minutes_detail)
+    process_costs_for_render = dict(bucket_state.process_costs_for_render)
 
     proc_total = 0.0
     amortized_nre_total = 0.0
@@ -5533,18 +5680,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     amortized_overrides = _prepare_amortized_details()
 
-    bucket_minutes_detail: dict[str, float] = {}
-    bucket_cost_totals: dict[str, float] = {}
-    for canon_key, metrics in canonical_bucket_summary.items():
-        bucket_minutes_detail[canon_key] = float(metrics.get("minutes", 0.0) or 0.0)
-        bucket_cost_totals[canon_key] = float(metrics.get("total", 0.0) or 0.0)
-        label = _display_bucket_label(canon_key, label_overrides)
-        label_to_canon.setdefault(label, canon_key)
-        canon_to_display_label.setdefault(canon_key, label)
-
-    process_costs_for_render = dict(process_costs_canon)
-    process_costs_for_render.update(bucket_cost_totals)
-
     for canon_key, (amount, minutes) in amortized_overrides.items():
         process_costs_for_render[canon_key] = amount
         if minutes > 0:
@@ -5587,56 +5722,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     process_table = _ProcessCostTableRecorder()
 
-    def _norm(s: str) -> str:
-        import re
-
-        return re.sub(r"[^a-z0-9]+", "_", str(s or "").lower()).strip("_")
-
-    def _bucket_mode(key: str) -> str:
-        # buckets that should price as labor
-        laborish = {
-            "finishing_deburr",
-            "inspection",
-            "assembly",
-            "toolmaker_support",
-            "ehs_compliance",
-            "fixture_build_amortized",
-            "programming_amortized",
-        }
-        if _norm(key) in laborish:
-            return "labor"
-        return "machine"
-
-    def _rate_for_bucket(key: str, rates: dict) -> float:
-        # Try specific, then fallbacks that match process_cost_renderer’s lookup
-        # (Programming/Drilling/etc), then generic LaborRate/MachineRate.
-        candidates = {
-            "milling": ["MillingRate"],
-            "drilling": ["DrillingRate"],
-            "counterbore": ["CounterboreRate", "DrillingRate"],
-            "tapping": ["TappingRate", "DrillingRate"],
-            "grinding": [
-                "GrindingRate",
-                "SurfaceGrindRate",
-                "ODIDGrindRate",
-                "JigGrindRate",
-            ],
-            "finishing_deburr": ["FinishingRate", "DeburrRate"],
-            "saw_waterjet": ["SawWaterjetRate", "SawRate", "WaterjetRate"],
-            "inspection": ["InspectionRate"],
-            "wire_edm": ["WireEDMRate", "EDMRate"],
-            "sinker_edm": ["SinkerEDMRate", "EDMRate"],
-        }
-        norm = _norm(key)
-        for k in candidates.get(norm, []):
-            v = rates.get(k) or rates.get(_norm(k))
-            if isinstance(v, (int, float)) and v > 0:
-                return float(v)
-        # final fallbacks
-        fallback = "LaborRate" if _bucket_mode(norm) == "labor" else "MachineRate"
-        v = rates.get(fallback) or rates.get(_norm(fallback))
-        return float(v) if isinstance(v, (int, float)) else 0.0
-
     # Build dollars from minutes if missing
     for canon_key, meta in (canonical_bucket_summary or {}).items():
         minutes = float(meta.get("minutes") or 0.0)
@@ -5646,7 +5731,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             + (meta.get("total", 0.0) or 0.0)
         )
         if minutes > 0 and has_money <= 0.0:
-            rate = _rate_for_bucket(canon_key, rates or {})
+            rate = _lookup_bucket_rate(canon_key, rates)
             dollars = (minutes / 60.0) * rate if rate > 0 else 0.0
             if dollars > 0:
                 process_costs_for_render[canon_key] = (
