@@ -4,6 +4,13 @@ import pandas as pd
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _disable_speeds_feeds_loader(monkeypatch):
+    import appV5
+
+    monkeypatch.setattr(appV5, "_load_speeds_feeds_table_from_path", lambda _path: (None, False))
+
+
 def test_compute_quote_uses_planner_minutes(monkeypatch):
     import appV5
     import planner_pricing
@@ -286,6 +293,65 @@ def test_planner_fallback_when_no_line_items(monkeypatch):
     assert any("planner_drilling_override" in str(item) for item in basis)
 
 
+def test_planner_zero_totals_logs_flag_and_falls_back(monkeypatch):
+    import appV5
+    import planner_pricing
+
+    df = pd.DataFrame(columns=["Item", "Example Values / Options", "Data Type / Input Method"])
+    geo = {
+        "process_planner_family": "die_plate",
+        "material": "steel",
+        "thickness_mm": 25.4,
+        "hole_diams_mm": [8.0] * 4,
+    }
+
+    def fake_plan_job(family: str, inputs: dict[str, object]) -> dict[str, object]:
+        assert family == "die_plate"
+        assert isinstance(inputs, dict)
+        return {"ops": [{"op": "drill"}]}
+
+    def fake_price_with_planner(
+        family: str,
+        inputs: dict[str, object],
+        geom_payload: dict[str, object],
+        rates: dict[str, object],
+        *,
+        oee: float,
+    ) -> dict[str, object]:
+        assert family == "die_plate"
+        assert geom_payload, "expected non-empty geom payload"
+        assert isinstance(rates, dict)
+        assert oee > 0
+        return {
+            "recognized_line_items": 1,
+            "line_items": [
+                {"op": "Machine Time", "minutes": 30.0, "machine_cost": 0.0, "labor_cost": 0.0}
+            ],
+            "totals": {"minutes": 30.0, "machine_cost": 0.0, "labor_cost": 0.0},
+        }
+
+    monkeypatch.setattr(appV5, "_process_plan_job", fake_plan_job)
+    monkeypatch.setattr(planner_pricing, "price_with_planner", fake_price_with_planner)
+    monkeypatch.setattr(appV5, "FORCE_PLANNER", False)
+
+    result = appV5.compute_quote_from_df(
+        df,
+        params={"OEE_EfficiencyPct": 0.9, "DrillingRate": 75.0},
+        geo=geo,
+        ui_vars={},
+    )
+
+    breakdown = result["breakdown"]
+    assert breakdown["pricing_source"] == "legacy"
+    red_flags = breakdown.get("red_flags") or []
+    assert any("Planner produced zero machine/labor cost" in flag for flag in red_flags)
+    quote_log = breakdown.get("quote_log") or []
+    assert any("Planner produced zero machine/labor cost" in entry for entry in quote_log)
+
+    app_meta = result.get("app_meta") or {}
+    assert not app_meta.get("used_planner", False)
+
+
 def test_planner_milling_bucket_backfills_from_estimator_when_planner_falls_back(monkeypatch):
     import appV5
     import planner_pricing
@@ -359,3 +425,82 @@ def test_planner_milling_bucket_backfills_from_estimator_when_planner_falls_back
     assert milling_meta.get("hr") == pytest.approx(1.65, abs=0.01)
     basis = milling_meta.get("basis") or []
     assert any("planner_milling_backfill" in str(item) for item in basis)
+
+
+def test_die_plate_163_holes_has_planner_totals(monkeypatch):
+    import appV5
+    import planner_pricing
+
+    df = pd.DataFrame(columns=["Item", "Example Values / Options", "Data Type / Input Method"])
+    geo = {
+        "process_planner_family": "die_plate",
+        "material": "tool steel",
+        "thickness_mm": 50.8,
+        "hole_diams_mm": [13.8] * 163,
+    }
+
+    def fake_plan_job(family: str, inputs: dict[str, object]) -> dict[str, object]:
+        assert family == "die_plate"
+        assert isinstance(inputs, dict)
+        return {"ops": [{"op": "Deep_Drill"}]}
+
+    def fake_price_with_planner(
+        family: str,
+        inputs: dict[str, object],
+        geom_payload: dict[str, object],
+        rates: dict[str, object],
+        *,
+        oee: float,
+    ) -> dict[str, object]:
+        assert family == "die_plate"
+        assert geom_payload, "expected non-empty geom payload"
+        assert isinstance(rates, dict)
+        assert oee > 0
+        return {
+            "recognized_line_items": 2,
+            "line_items": [
+                {
+                    "op": "Planner Machine",
+                    "minutes": 420.0,
+                    "machine_cost": 2400.0,
+                    "labor_cost": 600.0,
+                },
+                {
+                    "op": "Programming (amortized)",
+                    "minutes": 0.0,
+                    "machine_cost": 0.0,
+                    "labor_cost": 320.0,
+                },
+            ],
+            "totals": {"minutes": 420.0, "machine_cost": 2400.0, "labor_cost": 920.0},
+        }
+
+    monkeypatch.setattr(appV5, "_process_plan_job", fake_plan_job)
+    monkeypatch.setattr(planner_pricing, "price_with_planner", fake_price_with_planner)
+    monkeypatch.setattr(appV5, "FORCE_PLANNER", False)
+
+    result = appV5.compute_quote_from_df(
+        df,
+        params={"OEE_EfficiencyPct": 0.9, "DrillingRate": 90.0},
+        geo=geo,
+        ui_vars={},
+    )
+
+    breakdown = result["breakdown"]
+    assert breakdown["pricing_source"] == "planner"
+    process_costs = breakdown["process_costs"]
+    assert process_costs["Machine"] > 0
+    assert process_costs["Labor"] > 0
+
+    planner_meta = breakdown["process_meta"]
+    planner_total = planner_meta.get("planner_total") or {}
+    assert planner_total.get("machine_cost", 0.0) > 0
+    assert planner_total.get("labor_cost", 0.0) > 0
+    assert planner_total.get("amortized_programming", 0.0) > 0
+
+    planner_machine = planner_meta.get("planner_machine") or {}
+    assert planner_machine.get("cost", 0.0) > 0
+
+    planner_labor = planner_meta.get("planner_labor") or {}
+    assert planner_labor.get("cost", 0.0) > 0
+    assert planner_labor.get("amortized_programming", 0.0) > 0

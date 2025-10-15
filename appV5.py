@@ -9786,80 +9786,97 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         if planner_labor_cost_total < 0:
             planner_labor_cost_total = 0.0
 
-        process_costs.clear()
-        process_costs.update(
-            {
-                "Machine": round(planner_machine_cost_total, 2),
-                "Labor": round(planner_labor_cost_total, 2),
-            }
-        )
-        combined_labor_total = (
-            planner_machine_cost_total
-            + planner_labor_cost_total
-            + amortized_programming
-            + amortized_fixture
-        )
-        totals_block.update(
-            {
-                "machine_cost": planner_machine_cost_total,
-                "labor_cost": combined_labor_total,
+        planner_direct_cost_total = planner_machine_cost_total + planner_labor_cost_total
+        if planner_direct_cost_total <= 0.0:
+            zero_cost_message = "Planner produced zero machine/labor cost; using legacy fallback"
+            quote_log = breakdown.setdefault("quote_log", [])
+            if isinstance(quote_log, list):
+                quote_log.append(zero_cost_message)
+            else:
+                breakdown["quote_log"] = [zero_cost_message]
+            fallback_reason = zero_cost_message
+            use_planner = False
+        else:
+            process_costs.clear()
+            process_costs.update(
+                {
+                    "Machine": round(planner_machine_cost_total, 2),
+                    "Labor": round(planner_labor_cost_total, 2),
+                }
+            )
+            combined_labor_total = (
+                planner_machine_cost_total
+                + planner_labor_cost_total
+                + amortized_programming
+                + amortized_fixture
+            )
+            totals_block.update(
+                {
+                    "machine_cost": planner_machine_cost_total,
+                    "labor_cost": combined_labor_total,
+                    "minutes": total_minutes,
+                }
+            )
+            breakdown["labor_cost_rendered"] = combined_labor_total
+            breakdown["process_plan_pricing"] = planner_result
+            breakdown["pricing_source"] = "planner"
+            breakdown["process_minutes"] = total_minutes
+            baseline["pricing_source"] = "planner"
+            baseline["process_plan_pricing"] = planner_result
+            planner_used = True
+
+            hr_total = total_minutes / 60.0 if total_minutes else 0.0
+            process_meta["planner_total"] = {
                 "minutes": total_minutes,
+                "hr": hr_total,
+                "cost": machine_cost + labor_cost_total,
+                "machine_cost": machine_cost,
+                "labor_cost": labor_cost_total,
+                "labor_cost_excl_amortized": planner_labor_cost_total,
+                "amortized_programming": amortized_programming,
+                "amortized_fixture": amortized_fixture,
+                "line_items": list(planner_result.get("line_items", []) or []),
             }
-        )
-        breakdown["labor_cost_rendered"] = combined_labor_total
-        breakdown["process_plan_pricing"] = planner_result
-        breakdown["pricing_source"] = "planner"
-        breakdown["process_minutes"] = total_minutes
-        baseline["pricing_source"] = "planner"
-        baseline["process_plan_pricing"] = planner_result
-        planner_used = True
+            process_meta["planner_machine"] = {
+                "minutes": total_minutes,
+                "hr": hr_total,
+                "cost": machine_cost,
+            }
+            process_meta["planner_labor"] = {
+                "minutes": total_minutes,
+                "hr": hr_total,
+                "cost": labor_cost_total,
+                "cost_excl_amortized": planner_labor_cost_total,
+                "amortized_programming": amortized_programming,
+                "amortized_fixture": amortized_fixture,
+            }
 
-        hr_total = total_minutes / 60.0 if total_minutes else 0.0
-        process_meta["planner_total"] = {
-            "minutes": total_minutes,
-            "hr": hr_total,
-            "cost": machine_cost + labor_cost_total,
-            "machine_cost": machine_cost,
-            "labor_cost": labor_cost_total,
-            "labor_cost_excl_amortized": planner_labor_cost_total,
-            "amortized_programming": amortized_programming,
-            "amortized_fixture": amortized_fixture,
-            "line_items": list(planner_result.get("line_items", []) or []),
-        }
-        process_meta["planner_machine"] = {
-            "minutes": total_minutes,
-            "hr": hr_total,
-            "cost": machine_cost,
-        }
-        process_meta["planner_labor"] = {
-            "minutes": total_minutes,
-            "hr": hr_total,
-            "cost": labor_cost_total,
-            "cost_excl_amortized": planner_labor_cost_total,
-            "amortized_programming": amortized_programming,
-            "amortized_fixture": amortized_fixture,
-        }
+            machine_rendered = float(_coerce_float_or_none(process_costs.get("Machine")) or 0.0)
+            if not roughly_equal(
+                planner_machine_cost_total,
+                machine_rendered,
+                eps=_PLANNER_BUCKET_ABS_EPSILON,
+            ):
+                breakdown["red_flags"].append("Planner totals drifted (machine cost)")
+            labor_rendered = float(_coerce_float_or_none(process_costs.get("Labor")) or 0.0)
+            if not roughly_equal(
+                planner_labor_cost_total,
+                labor_rendered,
+                eps=_PLANNER_BUCKET_ABS_EPSILON,
+            ):
+                breakdown["red_flags"].append("Planner totals drifted (labor cost)")
 
-        machine_rendered = float(_coerce_float_or_none(process_costs.get("Machine")) or 0.0)
-        if not roughly_equal(
-            planner_machine_cost_total,
-            machine_rendered,
-            eps=_PLANNER_BUCKET_ABS_EPSILON,
-        ):
-            breakdown["red_flags"].append("Planner totals drifted (machine cost)")
-        labor_rendered = float(_coerce_float_or_none(process_costs.get("Labor")) or 0.0)
-        if not roughly_equal(
-            planner_labor_cost_total,
-            labor_rendered,
-            eps=_PLANNER_BUCKET_ABS_EPSILON,
-        ):
-            breakdown["red_flags"].append("Planner totals drifted (labor cost)")
-    else:
+    if not use_planner:
         breakdown.setdefault("process_minutes", 0.0)
+        breakdown["pricing_source"] = "legacy"
+        baseline.setdefault("pricing_source", "legacy")
         if fallback_reason:
             breakdown["red_flags"].append(fallback_reason)
 
     using_planner = str(breakdown.get("pricing_source", "")).strip().lower() == "planner"
+
+    if os.environ.get("ASSERT_PLANNER"):
+        assert breakdown.get("pricing_source") == "planner", "Planner not engaged"
 
     merged_two_bucket_rates = _merge_two_bucket_rates(
         RATES_TWO_BUCKET_DEFAULT,
