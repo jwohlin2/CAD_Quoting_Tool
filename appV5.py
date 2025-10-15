@@ -5611,11 +5611,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         )
 
         assert (
-            abs(display_labor_from_rows - planner_labor_total) < 0.51
-        ), "Labor $ mismatch with planner totals"
-        assert (
             abs(display_machine_from_rows - planner_machine_total) < 0.51
-        ), "Machine $ mismatch with planner totals"
+        ), "Machine $ mismatch (check drilling minutes merge)"
+        assert (
+            abs(display_labor_from_rows - planner_labor_total) < 0.51
+        ), "Labor $ mismatch"
     detail_lookup.update(bucket_state.detail_lookup)
     label_to_canon.update(bucket_state.label_to_canon)
     canon_to_display_label.update(bucket_state.canon_to_display_label)
