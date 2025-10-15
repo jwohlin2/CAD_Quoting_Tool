@@ -157,7 +157,8 @@ from appkit.scrap_helpers import (
     HOLE_SCRAP_CAP,
 )
 from appkit.planner_helpers import _process_plan_job
-from appkit.planner_adapter import resolve_planner as _resolve_planner_core
+from appkit.env_utils import FORCE_PLANNER
+from appkit.planner_adapter import resolve_planner
 
 from appkit.data import load_json, load_text
 from appkit.utils.text_rules import (
@@ -316,32 +317,6 @@ if sys.platform == "win32":
         os.add_dll_directory(occ_bin)
 
 APP_ENV = AppEnvironment.from_env()
-APP_ENV = replace(APP_ENV, llm_debug_enabled=True)  # force-enable debug unconditionally
-
-FORCE_PLANNER = False
-
-
-def resolve_planner(
-    params: Mapping[str, Any] | None,
-    signals: Mapping[str, Any] | None,
-) -> tuple[bool, str]:
-    """Proxy resolve_planner that honours the module-level FORCE flag."""
-
-    if FORCE_PLANNER:
-        params_map: dict[str, Any]
-        if isinstance(params, _MappingABC):
-            params_map = dict(params)
-        else:
-            params_map = {}
-        params_map["PlannerMode"] = "planner"
-        params = params_map
-
-    used_planner, planner_mode = _resolve_planner_core(params, signals)
-
-    if FORCE_PLANNER:
-        planner_mode = "planner"
-
-    return used_planner, planner_mode
 
 EXTRA_DETAIL_RE = re.compile(r"^includes\b.*extras\b", re.IGNORECASE)
 

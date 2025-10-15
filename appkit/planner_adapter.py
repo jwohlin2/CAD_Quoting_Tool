@@ -5,27 +5,37 @@ from collections.abc import Mapping as _MappingABC
 
 from appkit.env_utils import FORCE_PLANNER, _coerce_bool, _coerce_env_bool
 
+DEFAULT_PLANNER_MODE = "planner"
 
-def resolve_planner(
+
+def _resolve_planner_mode(
     params: Mapping[str, Any] | None,
-    signals: Mapping[str, Any] | None,
-) -> tuple[bool, str]:
-    """Determine whether planner pricing should be used and the mode."""
+    default_mode: str = DEFAULT_PLANNER_MODE,
+) -> str:
+    """Return the planner mode based on params and the FORCE flag."""
 
-    default_mode = "planner"
     if FORCE_PLANNER:
-        planner_mode = "planner"
-    elif isinstance(params, _MappingABC):
+        return DEFAULT_PLANNER_MODE
+
+    if isinstance(params, _MappingABC):
         try:
             raw_mode = params.get("PlannerMode", default_mode)
         except Exception:
             raw_mode = default_mode
         try:
-            planner_mode = str(raw_mode).strip().lower() or default_mode
+            planner_mode = str(raw_mode).strip().lower()
         except Exception:
-            planner_mode = default_mode
-    else:
-        planner_mode = default_mode
+            planner_mode = ""
+        return planner_mode or default_mode
+
+    return default_mode
+
+
+def _resolve_planner_usage(
+    planner_mode: str,
+    signals: Mapping[str, Any] | None,
+) -> bool:
+    """Return True when planner pricing should be used."""
 
     signals_map: Mapping[str, Any]
     if isinstance(signals, _MappingABC):
@@ -36,6 +46,7 @@ def resolve_planner(
     has_line_items = bool(signals_map.get("line_items"))
     has_pricing = bool(signals_map.get("pricing_result"))
     has_totals = bool(signals_map.get("totals_present"))
+
     try:
         recognized_raw = signals_map.get("recognized_line_items", 0)
         recognized_count = int(recognized_raw)
@@ -54,6 +65,19 @@ def resolve_planner(
 
     if has_line_items:
         used_planner = True
+
+    return used_planner
+
+
+def resolve_planner(
+    params: Mapping[str, Any] | None,
+    signals: Mapping[str, Any] | None,
+) -> tuple[bool, str]:
+    """Determine whether planner pricing should be used and the mode."""
+
+    planner_mode = _resolve_planner_mode(params)
+    used_planner = _resolve_planner_usage(planner_mode, signals)
+
     return used_planner, planner_mode
 
 
