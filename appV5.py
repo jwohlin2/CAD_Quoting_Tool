@@ -1000,6 +1000,7 @@ if __package__:
         _compute_scrap_mass_g as _compute_scrap_mass_g,
         _density_for_material as _density_for_material,
         _material_family as _material_family,
+        _material_cost_components as _material_cost_components,
         _material_price_from_choice as _material_price_from_choice,
         _material_price_per_g_from_choice as _material_price_per_g_from_choice,
         _nearest_std_side as _nearest_std_side,
@@ -1015,6 +1016,7 @@ else:
         _compute_scrap_mass_g as _compute_scrap_mass_g,
         _density_for_material as _density_for_material,
         _material_family as _material_family,
+        _material_cost_components as _material_cost_components,
         _material_price_from_choice as _material_price_from_choice,
         _material_price_per_g_from_choice as _material_price_per_g_from_choice,
         _nearest_std_side as _nearest_std_side,
@@ -12739,6 +12741,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             for key in (
                 "scrap_credit_unit_price_usd_per_lb",
                 "scrap_price_usd_per_lb",
+                "scrap_usd_per_lb",
                 "Scrap Price ($/lb)",
                 "Scrap Credit ($/lb)",
                 "Scrap Unit Price ($/lb)",
@@ -12783,6 +12786,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             if unit_price_override is not None:
                 scrap_price_used = max(0.0, float(unit_price_override))
                 scrap_credit_source = "override_unit_price"
+                mat_block["scrap_price_usd_per_lb"] = float(scrap_price_used)
             else:
                 family_hint = None
                 if isinstance(geo_context, dict):
@@ -12796,9 +12800,11 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                     wieland_scrap_price = float(price_candidate)
                     scrap_price_used = float(price_candidate)
                     scrap_credit_source = "wieland"
+                    mat_block["scrap_price_usd_per_lb"] = float(scrap_price_used)
                 else:
                     scrap_price_used = SCRAP_CREDIT_FALLBACK_USD_PER_LB
                     scrap_credit_source = "default"
+                    mat_block["scrap_price_usd_per_lb"] = float(scrap_price_used)
             scrap_credit_amount = float(scrap_mass_lb) * float(scrap_price_used or 0.0) * float(scrap_recovery_used or 0.0)
 
         if wieland_scrap_price is not None:
@@ -12820,6 +12826,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             if scrap_price_used is not None:
                 material_entry["scrap_credit_unit_price_usd_per_lb"] = float(scrap_price_used)
                 mat_block["scrap_credit_unit_price_usd_per_lb"] = float(scrap_price_used)
+                mat_block.setdefault("scrap_price_usd_per_lb", float(scrap_price_used))
             if scrap_recovery_used is not None:
                 material_entry["scrap_credit_recovery_pct"] = float(scrap_recovery_used)
                 mat_block["scrap_credit_recovery_pct"] = float(scrap_recovery_used)
@@ -12850,6 +12857,19 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         supplier_min = _coerce_float_or_none(mat_block.get("supplier_min"))
         if supplier_min is not None and supplier_min > 0:
             material_entry.setdefault("supplier_min_charge", float(supplier_min))
+
+        overrides_for_cost = overrides if isinstance(overrides, _MappingABC) else {}
+        try:
+            cost_components = _material_cost_components(
+                mat_block,
+                overrides=overrides_for_cost,
+                cfg=getattr(state, "config", None),
+            )
+        except Exception:
+            cost_components = None
+        if isinstance(cost_components, dict):
+            material_entry["material_cost_components"] = cost_components
+            mat_block["material_cost_components"] = cost_components
 
     material_total_direct_cost = _first_numeric_or_none(
         (material_entry or {}).get("total_cost") if isinstance(material_entry, _MappingABC) else None,

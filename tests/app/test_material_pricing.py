@@ -141,3 +141,65 @@ def test_compute_material_block_applies_supplier_min(monkeypatch):
     assert block["supplier_min$"] == pytest.approx(75.0)
     assert block["price_per_lb"] == pytest.approx(2.0)
     assert block["total_material_cost"] == pytest.approx(75.0)
+
+
+def test_material_cost_components_prefers_stock_piece():
+    block = {
+        "starting_mass_g": 1000.0,
+        "scrap_mass_g": 200.0,
+        "unit_price_per_lb_usd": 5.0,
+        "unit_price_per_lb_source": "resolver",
+        "stock_piece_price_usd": 20.0,
+        "stock_piece_source": "McMaster API (qty=1, part=4936K451)",
+        "material_tax_usd": 1.5,
+        "scrap_price_usd_per_lb": 0.8,
+    }
+    overrides = {"scrap_recovery_pct": 0.9}
+
+    components = appV5._material_cost_components(block, overrides=overrides, cfg=None)
+
+    assert components["base_usd"] == pytest.approx(20.0)
+    assert components["base_source"] == "McMaster API (qty=1, part=4936K451)"
+    assert components["stock_piece_usd"] == pytest.approx(20.0)
+    assert components["stock_source"] == "McMaster API (qty=1, part=4936K451)"
+    assert components["tax_usd"] == pytest.approx(1.5)
+    assert components["scrap_credit_usd"] == pytest.approx(0.32)
+    assert components["scrap_rate_text"] == "$0.80/lb × 90%"
+    assert components["total_usd"] == pytest.approx(21.18)
+
+
+def test_material_cost_components_handles_per_lb_pricing():
+    block = {
+        "start_mass_g": 500.0,
+        "unit_price_per_lb_usd": 6.0,
+        "unit_price_source": "resolver",
+        "material_tax": 0.75,
+    }
+
+    components = appV5._material_cost_components(block, overrides={}, cfg=None)
+
+    start_lb = 500.0 * 0.00220462262
+    expected_base = round(start_lb * 6.0, 2)
+    expected_total = round(expected_base + 0.75, 2)
+
+    assert components["base_usd"] == pytest.approx(expected_base)
+    assert components["base_source"] == "resolver @ $6.00/lb"
+    assert components["tax_usd"] == pytest.approx(0.75)
+    assert components["scrap_credit_usd"] == 0.0
+    assert components["scrap_rate_text"] is None
+    assert components["total_usd"] == pytest.approx(expected_total)
+
+
+def test_material_cost_components_respects_explicit_credit():
+    block = {
+        "starting_mass_g": 1000.0,
+        "material_tax_usd": 0.0,
+        "stock_piece_price_usd": 50.0,
+        "stock_piece_source": "Stock piece",
+        "material_scrap_credit": 12.34,
+    }
+
+    components = appV5._material_cost_components(block, overrides={}, cfg=None)
+
+    assert components["scrap_credit_usd"] == pytest.approx(12.34)
+    assert components["total_usd"] == pytest.approx(37.66)
