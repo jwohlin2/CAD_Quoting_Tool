@@ -513,6 +513,199 @@ def _compute_direct_costs(
     return round(subtotal, 2)
 
 
+def _material_cost_components(
+    material_block: Mapping[str, Any] | None,
+    *,
+    overrides: Mapping[str, Any] | None = None,
+    cfg: Any | None = None,
+) -> dict[str, Any]:
+    """Return a normalized breakdown of material pricing inputs."""
+
+    block = material_block if isinstance(material_block, _MappingABC) else {}
+    data = dict(block)
+
+    def _pick_text(*values: Any) -> str:
+        for value in values:
+            if not value:
+                continue
+            text = str(value).strip()
+            if text:
+                return text
+        return ""
+
+    def _normalize_source(text: str) -> str:
+        raw = text.strip()
+        if not raw:
+            return ""
+        lowered = raw.lower()
+        if lowered in {"override", "override_amount", "override_unit_price"}:
+            return "Override"
+        if lowered == "wieland":
+            return "Wieland"
+        if lowered in {"mcmaster", "mcmaster api", "mcmaster_api"}:
+            return "McMaster API"
+        if "_" in raw and raw.upper() == raw:
+            # Preserve case for codes like "API" while replacing underscores
+            parts = raw.split("_")
+            return " ".join(part.capitalize() if len(part) > 1 else part for part in parts)
+        if "_" in raw:
+            raw = raw.replace("_", " ")
+        return raw
+
+    overrides_map = overrides if isinstance(overrides, _MappingABC) else {}
+
+    base_pre_credit = _first_numeric_or_none(
+        data.get("material_cost_before_credit"),
+        data.get("material_cost_pre_credit"),
+        data.get("material_cost_pre_scrap"),
+        data.get("material_cost_before_scrap"),
+        data.get("material_base_cost"),
+    )
+
+    scrap_credit_val = _coerce_float_or_none(data.get("material_scrap_credit"))
+    scrap_credit = max(0.0, float(scrap_credit_val)) if scrap_credit_val is not None else 0.0
+
+    tax_val = _coerce_float_or_none(data.get("material_tax"))
+    material_tax = max(0.0, float(tax_val)) if tax_val is not None else 0.0
+
+    net_candidate = _first_numeric_or_none(
+        data.get("total_material_cost"),
+        data.get("material_cost"),
+        data.get("material_direct_cost"),
+        data.get("material_total_cost"),
+        data.get("total_cost"),
+    )
+
+    if base_pre_credit is None:
+        if net_candidate is not None:
+            base_pre_credit = float(net_candidate) + float(scrap_credit)
+        else:
+            base_pre_credit = _first_numeric_or_none(
+                data.get("unit_price_each$"),
+                data.get("unit_price$"),
+                data.get("stock_price$"),
+                data.get("stock_price"),
+                data.get("supplier_min$"),
+                data.get("supplier_min"),
+                data.get("supplier_min_charge$"),
+                data.get("supplier_min_charge"),
+            )
+
+    base_value = float(base_pre_credit or 0.0)
+    scrap_value = max(0.0, float(scrap_credit))
+    tax_value = max(0.0, float(material_tax))
+    net_value = max(0.0, base_value - scrap_value)
+    total_value = max(0.0, base_value + tax_value - scrap_value)
+
+    supplier_min = _first_numeric_or_none(
+        data.get("supplier_min$"),
+        data.get("supplier_min"),
+        data.get("supplier_min_charge$"),
+        data.get("supplier_min_charge"),
+    )
+
+    stock_price_candidate = _first_numeric_or_none(
+        data.get("unit_price_each$"),
+        data.get("unit_price$"),
+        data.get("stock_price$"),
+        data.get("stock_price"),
+    )
+
+    tolerance = 0.51
+    stock_piece_usd: float | None = None
+    if stock_price_candidate is not None and stock_price_candidate > 0:
+        if base_value <= 0 or abs(stock_price_candidate - base_value) <= tolerance:
+            stock_piece_usd = float(base_value if base_value > 0 else stock_price_candidate)
+
+    stock_source = _pick_text(
+        data.get("stock_price_source"),
+        data.get("stock_vendor"),
+        data.get("stock_source"),
+        data.get("unit_price_source"),
+        data.get("source"),
+    )
+    base_source = _pick_text(
+        data.get("unit_price_source"),
+        data.get("source"),
+        data.get("stock_vendor"),
+    )
+
+    if not stock_source and cfg is not None:
+        source_hint = getattr(cfg, "stock_price_source", None)
+        if source_hint:
+            stock_source = str(source_hint)
+    if not base_source and stock_source:
+        base_source = stock_source
+
+    if supplier_min is not None and base_value > 0 and abs(float(supplier_min) - base_value) <= tolerance:
+        supplier_label = "Supplier Min"
+        if base_source:
+            supplier_label = f"{base_source} (supplier min)"
+        base_source = supplier_label
+
+    scrap_source = _pick_text(
+        data.get("scrap_credit_source"),
+        data.get("scrap_source"),
+        data.get("scrap_price_source"),
+    )
+    if not scrap_source and isinstance(overrides_map, _MappingABC):
+        for key in (
+            "Material Scrap / Remnant Value",
+            "material_scrap_credit",
+            "material_scrap_credit_usd",
+            "scrap_credit_usd",
+            "scrap_credit_unit_price_usd_per_lb",
+            "scrap_price_usd_per_lb",
+            "Scrap Price ($/lb)",
+            "Scrap Credit ($/lb)",
+        ):
+            if overrides_map.get(key) not in (None, ""):
+                scrap_source = "Override"
+                break
+    if not scrap_source and cfg is not None:
+        scrap_hint = getattr(cfg, "scrap_price_source", None)
+        if scrap_hint:
+            scrap_source = str(scrap_hint)
+
+    scrap_price = _first_numeric_or_none(
+        data.get("scrap_credit_unit_price_usd_per_lb"),
+        data.get("scrap_price_usd_per_lb"),
+    )
+    scrap_recovery = _coerce_float_or_none(data.get("scrap_credit_recovery_pct"))
+    if scrap_recovery is None:
+        scrap_recovery = _coerce_float_or_none(data.get("scrap_recovery_pct"))
+
+    scrap_rate_segments: list[str] = []
+    if scrap_price is not None and scrap_price > 0:
+        scrap_rate_segments.append(f"{fmt_money(scrap_price, '$')}/lb")
+    if scrap_recovery is not None and scrap_recovery > 0:
+        recovery_val = float(scrap_recovery)
+        if recovery_val <= 1.0 + 1e-6:
+            recovery_pct = recovery_val * 100.0
+        else:
+            recovery_pct = recovery_val
+        scrap_rate_segments.append(f"{recovery_pct:.0f}%")
+
+    scrap_rate_text = ""
+    if scrap_rate_segments:
+        scrap_rate_text = " × ".join(scrap_rate_segments)
+    scrap_source_label = _normalize_source(scrap_source) if scrap_source else ""
+    if scrap_source_label:
+        scrap_rate_text = f"{scrap_source_label} {scrap_rate_text}".strip()
+
+    return {
+        "stock_piece_usd": round(stock_piece_usd, 2) if stock_piece_usd is not None else None,
+        "stock_source": _normalize_source(stock_source) if stock_source else "",
+        "base_usd": round(base_value, 2),
+        "base_source": _normalize_source(base_source) if base_source else "",
+        "tax_usd": round(tax_value, 2),
+        "scrap_credit_usd": round(scrap_value, 2),
+        "scrap_rate_text": scrap_rate_text,
+        "net_usd": round(net_value, 2),
+        "total_usd": round(total_value, 2),
+    }
+
+
 def _compute_pricing_ladder(
     subtotal: float | int | str | None,
     *,
@@ -3965,6 +4158,21 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         except Exception:
             material_selection = {}
 
+    def _resolve_overrides_source(container: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+        if not isinstance(container, _MappingABC):
+            return None
+        candidate = container.get("overrides")
+        return candidate if isinstance(candidate, _MappingABC) else None
+
+    material_overrides: Mapping[str, Any] | None = None
+    material_overrides = _resolve_overrides_source(result) or _resolve_overrides_source(breakdown)
+    if material_overrides is None and isinstance(result, _MappingABC):
+        for key in ("user_overrides", "overrides"):
+            candidate = result.get(key)
+            if isinstance(candidate, _MappingABC):
+                material_overrides = candidate
+                break
+
     baseline: Mapping[str, Any] = {}
     decision_state = result.get("decision_state") if isinstance(result, _MappingABC) else None
     if isinstance(decision_state, _MappingABC):
@@ -5496,6 +5704,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
         detail_lines: list[str] = []
         total_material_cost: float | None = None
+        material_cost_components: Mapping[str, Any] | None = None
 
         if have_any:
             append_line("Material & Stock")
@@ -5545,9 +5754,18 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 material_display_for_debug = material_name_display
                 append_line(f"  Material used:  {material_name_display}")
 
-            if matcost or show_zeros:
-                total_material_cost = float(matcost or 0.0)
-                material_net_cost = total_material_cost
+            material_cost_map: dict[str, Any] = {}
+            if isinstance(material_stock_block, _MappingABC):
+                material_cost_map.update(material_stock_block)
+            if isinstance(material, _MappingABC):
+                material_cost_map.update(material)
+            material_cost_components = _material_cost_components(
+                material_cost_map,
+                overrides=material_overrides,
+                cfg=cfg,
+            )
+            total_material_cost = material_cost_components["total_usd"]
+            material_net_cost = material_cost_components["net_usd"]
             if total_material_cost is not None:
                 try:
                     material_block["total_material_cost"] = total_material_cost
@@ -5889,7 +6107,32 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             append_line(f"  Stock used: {stock_line}")
             if detail_lines:
                 append_lines(detail_lines)
-            if total_material_cost is not None:
+            if material_cost_components:
+                mc = material_cost_components
+                stock_piece_val = mc.get("stock_piece_usd")
+                if stock_piece_val is not None:
+                    stock_src = mc.get("stock_source") or ""
+                    src_suffix = f" ({stock_src})" if stock_src else ""
+                    row(f"Stock Piece{src_suffix}", float(stock_piece_val), indent="  ")
+                else:
+                    base_source = mc.get("base_source") or ""
+                    base_label = "Base Material"
+                    if base_source:
+                        base_label = f"Base Material @ {base_source}"
+                    row(base_label, float(mc.get("base_usd", 0.0)), indent="  ")
+                tax_val = mc.get("tax_usd") or 0.0
+                if tax_val:
+                    row("Material Tax:", float(tax_val), indent="  ")
+                scrap_val = mc.get("scrap_credit_usd") or 0.0
+                if scrap_val:
+                    scrap_suffix = ""
+                    scrap_text = mc.get("scrap_rate_text") or ""
+                    if scrap_text:
+                        scrap_suffix = f" @ {scrap_text}"
+                    row(f"Scrap Credit{scrap_suffix}", -float(scrap_val), indent="  ")
+                total_material_cost = mc.get("total_usd", total_material_cost)
+                row("Total Material Cost :", float(total_material_cost or 0.0), indent="  ")
+            elif total_material_cost is not None:
                 row("Total Material Cost :", total_material_cost, indent="  ")
             append_line("")
 
