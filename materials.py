@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import math
+import sys
 from collections.abc import Mapping as _MappingABC, Sequence
 from typing import Any, Literal, Mapping, overload
 
@@ -17,16 +19,25 @@ from cad_quoter.domain_models import (
 )
 from cad_quoter.llm_overrides import _plate_mass_properties, _plate_mass_from_dims
 from cad_quoter.pricing import LB_PER_KG
-from cad_quoter.pricing import resolve_material_unit_price as _resolve_material_unit_price
+from cad_quoter.pricing import resolve_material_unit_price as _resolve_material_unit_price_raw
 from cad_quoter.pricing.vendor_csv import (
     pick_from_stdgrid as _pick_from_stdgrid,
     pick_plate_from_mcmaster as _pick_plate_from_mcmaster,
 )
 
+try:  # Optional dependency: McMaster mutual-TLS API client
+    from mcmaster_api import McMasterAPI, load_env as _mcm_load_env  # type: ignore
+except Exception:  # pragma: no cover - optional dependency / environment specific
+    McMasterAPI = None  # type: ignore[assignment]
+    _mcm_load_env = None  # type: ignore[assignment]
+
 _DEFAULT_MATERIAL_DENSITY_G_CC = MATERIAL_DENSITY_G_CC_BY_KEY.get(
     DEFAULT_MATERIAL_KEY, 7.85
 )
 _normalize_lookup_key = normalize_material_key
+
+
+_log = logging.getLogger(__name__)
 
 
 STANDARD_PLATE_SIDES_IN = [3, 6, 12, 18, 24, 36, 48, 60]
@@ -114,6 +125,70 @@ def _resolve_price_per_lb(material_key: str, display_name: str | None = None) ->
     return max(0.0, float(price)), source
 
 
+def _resolve_material_unit_price(
+    material_name: str,
+    *,
+    unit: str = "kg",
+) -> tuple[float, str]:
+    """Proxy that respects runtime monkeypatching in the app module."""
+
+    resolver = _resolve_material_unit_price_raw
+    try:
+        app_module = sys.modules.get("appV5")
+        patched = getattr(app_module, "_resolve_material_unit_price", None) if app_module else None
+        if callable(patched):
+            resolver = patched  # type: ignore[assignment]
+    except Exception:
+        pass
+    return resolver(material_name, unit=unit)
+
+
+def _mcm_price_for_part(part_number: str) -> float | None:
+    """Return the qty=1 unit price for a McMaster part via the mutual-TLS API."""
+
+    part = str(part_number or "").strip()
+    if not part:
+        return None
+    if McMasterAPI is None or _mcm_load_env is None:  # pragma: no cover - optional dependency
+        return None
+    try:  # pragma: no cover - network call
+        env = _mcm_load_env()
+        username = env.get("MCMASTER_USER")
+        password = env.get("MCMASTER_PASS")
+        pfx_path = env.get("MCMASTER_PFX_PATH")
+        pfx_password = env.get("MCMASTER_PFX_PASS")
+        if not all([username, password, pfx_path]):
+            return None
+        api = McMasterAPI(
+            username=username,
+            password=password,
+            pfx_path=pfx_path,
+            pfx_password=pfx_password or "",
+        )
+        api.login()
+        tiers = api.get_price_tiers(part)
+        if not tiers:
+            return None
+        tier = next(
+            (
+                t
+                for t in tiers
+                if (t.get("MinimumQuantity") or 0) <= 1
+            ),
+            tiers[0],
+        )
+        amount = tier.get("Amount")
+        if isinstance(amount, (int, float)):
+            return float(amount)
+        try:
+            return float(amount)
+        except Exception:
+            return None
+    except Exception as exc:  # pragma: no cover - logging side-effect only
+        _log.warning("[mcmaster] price lookup failed for %s: %s", part, exc)
+        return None
+
+
 def _compute_material_block(
     geo_ctx: dict,
     material_key: str,
@@ -181,17 +256,39 @@ def _compute_material_block(
     scrap_lb = max(scrap_lb_geom, min_scrap_lb)
     net_after_scrap = max(0.0, start_lb - scrap_lb)
 
-    price_per_lb, price_source = _resolve_price_per_lb(material_key, material_label)
-    unit_price_each = stock_price if stock_price and stock_price > 0 else None
-    if unit_price_each is not None and unit_price_each > 0 and price_per_lb <= 0 and start_lb > 0:
-        price_per_lb = float(unit_price_each) / float(start_lb)
-        price_source = price_source or vendor_label or "stock"
+    provenance: list[str] = []
+    price_source = ""
+    price_per_lb = 0.0
 
-    if unit_price_each is None or unit_price_each <= 0:
+    unit_price_each = stock_price if stock_price and stock_price > 0 else None
+
+    api_price = None
+    if part_no:
+        api_price = _mcm_price_for_part(str(part_no))
+    if api_price and api_price > 0:
+        unit_price_each = float(api_price)
+        stock_price = float(api_price)
+        if start_lb > 0:
+            price_per_lb = float(unit_price_each) / float(start_lb)
+        price_source = f"McMaster API (qty=1, part={part_no})"
+        provenance.append(price_source)
+
+    if price_per_lb <= 0:
+        resolved_per_lb, resolved_source = _resolve_price_per_lb(material_key, material_label)
+        try:
+            price_per_lb = float(resolved_per_lb)
+        except (TypeError, ValueError):
+            price_per_lb = 0.0
+        if not price_source:
+            price_source = resolved_source or ""
+
+    if (unit_price_each is None or unit_price_each <= 0) and price_per_lb > 0:
         unit_price_each = float(net_after_scrap) * float(price_per_lb)
 
     if unit_price_each is not None and unit_price_each > 0:
         stock_price = float(unit_price_each)
+        if not price_source:
+            price_source = vendor_label or "stock"
 
     supplier_min_candidates = (
         geo_ctx.get("supplier_min$"),
@@ -211,8 +308,10 @@ def _compute_material_block(
     total_mat_cost = max(float(unit_price_each or 0.0), float(supplier_min))
 
     source_note = vendor_label or "stock"
+    if price_source:
+        source_note = price_source
 
-    return {
+    result = {
         "material": geo_ctx.get("material_display") or material_key,
         "stock_L_in": float(stock_L_in),
         "stock_W_in": float(stock_W_in),
@@ -239,6 +338,15 @@ def _compute_material_block(
         "supplier_min_charge$": float(supplier_min),
         "total_material_cost": float(total_mat_cost),
     }
+
+    if price_source:
+        result["unit_price_source"] = price_source
+        if price_source.startswith("McMaster API"):
+            result["unit_price_confidence"] = "high"
+    if provenance:
+        result["provenance"] = provenance
+
+    return result
 
 
 def _compute_scrap_mass_g(
