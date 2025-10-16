@@ -261,6 +261,52 @@ def _snap_to_stock_plate(
     return (max(L, W), min(L, W), "StdGrid")
 
 
+def _resolve_price_per_lb(material_key: str, display_name: str | None = None) -> tuple[float, str]:
+    """Return a USD/lb price using metals API or McMaster fallback."""
+
+    key = str(material_key or "").strip()
+    display = str(display_name or "").strip() or key or "aluminum"
+
+    price = 0.0
+    source = ""
+
+    try:  # pragma: no cover - optional dependency / network access
+        from metals_api import price_per_lb_for_material  # type: ignore
+
+        candidate = price_per_lb_for_material(key or display)
+        if candidate:
+            price = float(candidate)
+            if price > 0:
+                source = "metals_api"
+    except Exception:
+        pass
+
+    if price <= 0:
+        try:
+            from cad_quoter.pricing.materials import get_mcmaster_unit_price
+        except Exception:  # pragma: no cover - optional dependency
+            get_mcmaster_unit_price = None  # type: ignore[assignment]
+        if get_mcmaster_unit_price is not None:
+            try:
+                mcm_price, mcm_source = get_mcmaster_unit_price(display, unit="lb")
+            except Exception:
+                mcm_price, mcm_source = None, ""
+            if mcm_price and float(mcm_price) > 0:
+                price = float(mcm_price)
+                source = mcm_source or "mcmaster"
+
+    if price <= 0:
+        try:
+            resolved_price, resolved_source = _resolve_material_unit_price(display, unit="lb")
+        except Exception:
+            resolved_price, resolved_source = None, ""
+        if resolved_price and float(resolved_price) > 0:
+            price = float(resolved_price)
+            source = resolved_source or source
+
+    return max(0.0, float(price)), source
+
+
 def _compute_material_block(
     geo_ctx: dict,
     material_key: str,
@@ -304,14 +350,10 @@ def _compute_material_block(
     min_scrap_lb = start_lb * float(scrap_pct)
     scrap_lb = max(scrap_lb, min_scrap_lb)
 
-    price_per_lb = 0.0
-    try:
-        from metals_api import price_per_lb_for_material  # type: ignore
-
-        price_per_lb = float(price_per_lb_for_material(material_key) or 0.0)
-    except Exception:
-        pass
-    total_mat_cost = round(start_lb * price_per_lb, 2)
+    price_per_lb, price_source = _resolve_price_per_lb(
+        material_key, geo_ctx.get("material_display")
+    )
+    total_mat_cost = round(max(0.0, net_lb) * price_per_lb, 2)
 
     return {
         "material": geo_ctx.get("material_display") or material_key,
@@ -323,6 +365,7 @@ def _compute_material_block(
         "scrap_lb": float(scrap_lb),
         "scrap_pct": float(scrap_pct),
         "price_per_lb": float(price_per_lb),
+        "price_per_lb_source": price_source,
         "source": source_note,
         "total_material_cost": float(total_mat_cost),
     }
@@ -12048,22 +12091,69 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     )
     breakdown["material_block"] = mat_block
     grams_per_lb = 1000.0 / LB_PER_KG
-    material_entry = breakdown.get("material")
+    material_entry = breakdown.setdefault("material", {})
     if isinstance(material_entry, dict):
-        start_lb = _coerce_float_or_none(mat_block.get("start_lb"))
-        net_lb = _coerce_float_or_none(mat_block.get("net_lb"))
-        scrap_lb = _coerce_float_or_none(mat_block.get("scrap_lb"))
-        price_per_lb = _coerce_float_or_none(mat_block.get("price_per_lb"))
-        if start_lb is not None and start_lb > 0:
+        start_lb = _coerce_float_or_none(material_entry.get("starting_weight_lb"))
+        if start_lb is None:
+            start_lb = _coerce_float_or_none(mat_block.get("start_lb"))
+        start_lb = max(0.0, float(start_lb or 0.0))
+        material_entry["starting_weight_lb"] = start_lb
+        mat_block["start_lb"] = start_lb
+
+        scrap_pct_val = _coerce_float_or_none(material_entry.get("scrap_pct"))
+        if scrap_pct_val is None:
+            scrap_pct_val = _coerce_float_or_none(mat_block.get("scrap_pct"))
+        scrap_pct_val = max(0.0, float(scrap_pct_val or 0.0))
+        material_entry["scrap_pct"] = scrap_pct_val
+        mat_block["scrap_pct"] = scrap_pct_val
+
+        scrap_lb = max(0.0, start_lb * scrap_pct_val)
+        net_lb = max(0.0, start_lb - scrap_lb)
+
+        material_entry["scrap_weight_lb"] = scrap_lb
+        material_entry["net_weight_lb"] = net_lb
+        mat_block["scrap_lb"] = scrap_lb
+        mat_block["net_lb"] = net_lb
+
+        if start_lb > 0:
             start_g = float(start_lb) * grams_per_lb
             material_entry["mass_g"] = start_g
             material_entry["starting_mass_g_est"] = start_g
-        if net_lb is not None and net_lb > 0:
+        if net_lb > 0:
             material_entry["net_mass_g"] = float(net_lb) * grams_per_lb
-        if scrap_lb is not None and scrap_lb > 0:
+        if scrap_lb > 0:
             material_entry["scrap_mass_g"] = float(scrap_lb) * grams_per_lb
-        if price_per_lb is not None and price_per_lb > 0:
-            material_entry["unit_price_usd_per_lb"] = float(price_per_lb)
+
+        price_per_lb = _coerce_float_or_none(material_entry.get("price_per_lb$"))
+        if price_per_lb is None or price_per_lb <= 0:
+            price_per_lb = _coerce_float_or_none(mat_block.get("price_per_lb"))
+        price_source = str(mat_block.get("price_per_lb_source") or "")
+        if price_per_lb is None or price_per_lb <= 0:
+            price_per_lb, price_source = _resolve_price_per_lb(material_key, material_text)
+        price_per_lb = max(0.0, float(price_per_lb or 0.0))
+        material_entry["price_per_lb$"] = price_per_lb
+        material_entry["price_per_lb"] = price_per_lb
+        if price_source:
+            material_entry.setdefault("price_per_lb_source", price_source)
+        if price_per_lb > 0:
+            material_entry["unit_price_usd_per_lb"] = price_per_lb
+            material_entry["unit_price_usd_per_kg"] = price_per_lb * LB_PER_KG
+        mat_block["price_per_lb"] = price_per_lb
+        if price_source:
+            mat_block["price_per_lb_source"] = price_source
+
+        supplier_min = _coerce_float_or_none(material_entry.get("supplier_min$"))
+        if supplier_min is None:
+            supplier_min = _coerce_float_or_none(material_entry.get("supplier_min_charge"))
+        if supplier_min is None:
+            supplier_min = _coerce_float_or_none(mat_block.get("supplier_min$"))
+        if supplier_min is None:
+            supplier_min = _coerce_float_or_none(mat_block.get("supplier_min_charge"))
+        supplier_min = max(float(supplier_min or 0.0), 0.0)
+        material_entry["supplier_min$"] = supplier_min
+        if supplier_min > 0:
+            material_entry.setdefault("supplier_min_charge", supplier_min)
+
         stock_L = _coerce_float_or_none(mat_block.get("stock_L_in"))
         stock_W = _coerce_float_or_none(mat_block.get("stock_W_in"))
         stock_T = _coerce_float_or_none(mat_block.get("stock_T_in"))
@@ -12075,11 +12165,14 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             material_entry["thickness_in"] = float(stock_T)
         if mat_block.get("source"):
             material_entry["source"] = mat_block.get("source")
-        total_cost = _coerce_float_or_none(mat_block.get("total_material_cost"))
-        if total_cost is not None and total_cost > 0:
-            material_entry["material_cost"] = float(total_cost)
-            material_entry["material_direct_cost"] = float(total_cost)
-            material_entry["material_cost_before_credit"] = float(total_cost)
+
+        total_material_cost = round(max(net_lb * price_per_lb, supplier_min), 2)
+        mat_block["total_material_cost"] = float(total_material_cost)
+        if total_material_cost > 0:
+            material_entry["total_material_cost"] = float(total_material_cost)
+            material_entry["material_cost"] = float(total_material_cost)
+            material_entry["material_direct_cost"] = float(total_material_cost)
+            material_entry["material_cost_before_credit"] = float(total_material_cost)
 
     breakdown.setdefault("pass_through_total", 0.0)
     breakdown["total_direct_costs"] = float(
