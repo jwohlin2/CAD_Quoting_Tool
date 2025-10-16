@@ -5537,13 +5537,22 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     except Exception:
         amortized_nre_total = 0.0
 
-    card_hr = round(
-        float(breakdown["drilling_meta"]["total_minutes_billed"]) / 60.0, 2
-    )
+    drilling_meta_map = breakdown.get("drilling_meta") if isinstance(breakdown, _MappingABC) else None
+    card_minutes_val = None
+    have_card_minutes = False
+    if isinstance(drilling_meta_map, _MappingABC):
+        for key in ("total_minutes_billed", "total_minutes_with_toolchange", "total_minutes"):
+            card_minutes_val = _coerce_float_or_none(drilling_meta_map.get(key))
+            if card_minutes_val is not None:
+                have_card_minutes = True
+                break
+    if card_minutes_val is None:
+        card_minutes_val = 0.0
+    card_hr = round(float(card_minutes_val) / 60.0, 2)
     row_hr = round(
         float(breakdown["bucket_view"]["buckets"]["drilling"]["minutes"]) / 60.0, 2
     )
-    if abs(card_hr - row_hr) > 0.01:
+    if have_card_minutes and abs(card_hr - row_hr) > 0.01:
         raise RuntimeError(
             f"[FATAL] Drilling hours mismatch: card {card_hr} vs row {row_hr}. "
             "A late write is overwriting bucket_view. Remove any planner/bucket rebuilds after minutes engine."
@@ -6987,10 +6996,37 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     base_bucket_labor = labor_basis_for_ladder - float(amortized_nre_total)
     if base_bucket_labor < 0:
         base_bucket_labor = 0.0
-    ladder_directs = float(directs)
+    planner_machine_component = 0.0
     if planner_machine_for_directs > 0:
-        ladder_directs += planner_machine_for_directs
-    ladder_directs = round(ladder_directs, 2)
+        planner_machine_component = float(planner_machine_for_directs)
+
+    def _pricing_total_direct_costs_from(*candidates: Any) -> float | None:
+        for candidate in candidates:
+            if not isinstance(candidate, _MappingABC):
+                continue
+            direct_value = _coerce_float_or_none(candidate.get("total_direct_costs"))
+            if direct_value is not None:
+                return float(direct_value)
+            totals_candidate = candidate.get("totals")
+            if isinstance(totals_candidate, _MappingABC):
+                for key in ("total_direct_costs", "direct_costs"):
+                    nested_value = _coerce_float_or_none(totals_candidate.get(key))
+                    if nested_value is not None:
+                        return float(nested_value)
+        return None
+
+    pricing_total_direct_costs = _pricing_total_direct_costs_from(
+        result.get("pricing") if isinstance(result, _MappingABC) else None,
+        breakdown.get("pricing") if isinstance(breakdown, _MappingABC) else None,
+        process_plan_summary_local.get("pricing")
+        if isinstance(process_plan_summary_local, _MappingABC)
+        else None,
+    )
+
+    if pricing_total_direct_costs is not None:
+        ladder_directs = round(float(pricing_total_direct_costs), 2)
+    else:
+        ladder_directs = round(float(directs) + planner_machine_component, 2)
     amortized_component = float(amortized_nre_total if qty > 1 else 0.0)
     ladder_labor = round(base_bucket_labor + amortized_component, 2)
     ladder_expected = ladder_labor + ladder_directs
