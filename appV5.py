@@ -5302,6 +5302,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if matcost or show_zeros:
                 total_material_cost = float(matcost or 0.0)
                 material_net_cost = total_material_cost
+            if total_material_cost is not None:
+                try:
+                    material_block["total_material_cost"] = total_material_cost
+                except Exception:
+                    pass
             net_mass_val = _coerce_float_or_none(net_mass_g)
             effective_mass_source = material.get("effective_mass_g")
             effective_mass_val = _coerce_float_or_none(effective_mass_source)
@@ -7121,14 +7126,23 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         material_total_for_directs + material_tax_for_directs - scrap_credit_for_directs,
         2,
     )
-    material_total_for_why = float(material_direct_contribution)
-    material_net_cost = float(material_direct_contribution)
-    if material_direct_contribution or show_zeros:
-        write_line(
-            "Material & Stock (printed above) contributes "
-            f"{_m(material_direct_contribution)} to Direct Costs",
-            "  ",
-        )
+    material_display_amount_candidate = _coerce_float_or_none(
+        material_block.get("total_material_cost")
+    )
+    if material_display_amount_candidate is not None:
+        try:
+            material_direct_contribution = round(
+                float(material_display_amount_candidate),
+                2,
+            )
+        except Exception:
+            material_direct_contribution = round(
+                float(material_display_amount_candidate or 0.0),
+                2,
+            )
+    material_display_amount = round(float(material_direct_contribution), 2)
+    material_total_for_why = float(material_display_amount)
+    material_net_cost = float(material_display_amount)
     direct_costs_map: dict[Any, Any]
     if isinstance(pricing, dict):
         direct_costs_map = pricing.setdefault("direct_costs", {})
@@ -7198,9 +7212,64 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         2,
     )
 
-    directs = float(total_direct_costs)
+    stored_total_directs = None
+    if isinstance(breakdown, dict):
+        stored_total_directs = _coerce_float_or_none(breakdown.get("total_direct_costs"))
 
-    for display_label, amount_val, raw_key in direct_entries:
+    if stored_total_directs is not None:
+        try:
+            total_direct_costs_value = round(float(stored_total_directs), 2)
+        except Exception:
+            total_direct_costs_value = float(total_direct_costs)
+    else:
+        total_direct_costs_value = float(total_direct_costs)
+
+    directs = float(total_direct_costs_value)
+
+    material_entry = None
+    display_entries: list[tuple[str, float, Any]] = []
+    for entry in direct_entries:
+        raw_key = entry[2]
+        if str(raw_key).strip().lower() == "material":
+            material_entry = entry
+            continue
+        display_entries.append(entry)
+
+    if (material_display_amount > 0) or show_zeros:
+        row("Material & Stock", material_display_amount, indent="  ")
+        material_basis_key = None
+        if isinstance(pass_through, dict):
+            for candidate_key in pass_through.keys():
+                if str(candidate_key).strip().lower() == "material":
+                    material_basis_key = candidate_key
+                    break
+        if material_basis_key is None:
+            material_basis_key = "Material"
+        add_pass_basis(str(material_basis_key), indent="    ")
+        material_detail_value: Any = None
+        if material_entry is not None:
+            raw_material_key = material_entry[2]
+            material_detail_value = direct_cost_details.get(raw_material_key)
+            if material_detail_value in (None, ""):
+                material_detail_value = direct_cost_details.get(str(raw_material_key))
+        if material_detail_value in (None, ""):
+            for key_candidate in (
+                material_basis_key,
+                str(material_basis_key).strip(),
+                "Material",
+                "material",
+                "Material & Stock",
+            ):
+                if key_candidate in (None, ""):
+                    continue
+                detail_candidate = direct_cost_details.get(key_candidate)
+                if detail_candidate not in (None, ""):
+                    material_detail_value = detail_candidate
+                    break
+        if material_detail_value not in (None, ""):
+            write_detail(str(material_detail_value), indent="    ")
+
+    for display_label, amount_val, raw_key in display_entries:
         if (amount_val > 0) or show_zeros:
             row(display_label, amount_val, indent="  ")
             raw_key_str = str(raw_key)
@@ -7214,24 +7283,24 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 if detail_value not in (None, ""):
                     write_detail(str(detail_value), indent="    ")
 
-    row("Total", total_direct_costs, indent="  ")
+    row("Total", total_direct_costs_value, indent="  ")
     pass_through_total = float(sum(displayed_pass_through.values()))
 
     if isinstance(pricing, dict):
-        pricing["total_direct_costs"] = total_direct_costs
+        pricing["total_direct_costs"] = total_direct_costs_value
     if isinstance(breakdown, dict):
         try:
-            breakdown["total_direct_costs"] = total_direct_costs
+            breakdown["total_direct_costs"] = total_direct_costs_value
         except Exception:
             pass
     if isinstance(totals, dict):
-        totals["direct_costs"] = total_direct_costs
+        totals["direct_costs"] = total_direct_costs_value
     if 0 <= total_direct_costs_row_index < len(lines):
         replace_line(
             total_direct_costs_row_index,
             _format_row(
                 total_direct_costs_label,
-                total_direct_costs,
+                total_direct_costs_value,
             ),
         )
 
@@ -7383,10 +7452,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     base_bucket_labor = labor_basis_for_ladder - float(amortized_nre_total)
     if base_bucket_labor < 0:
         base_bucket_labor = 0.0
-    planner_machine_component = 0.0
-    if planner_machine_for_directs > 0:
-        planner_machine_component = float(planner_machine_for_directs)
-
     def _pricing_total_direct_costs_from(*candidates: Any) -> float | None:
         for candidate in candidates:
             if not isinstance(candidate, _MappingABC):
@@ -7414,8 +7479,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if directs_from_pricing is None and pricing_total_direct_costs is not None:
         directs_from_pricing = float(pricing_total_direct_costs)
     if directs_from_pricing is None:
-        directs_from_pricing = float(directs) + planner_machine_component
-    ladder_directs = round(float(directs_from_pricing or 0.0), 2)
+        directs_from_pricing = float(directs)
+    ladder_directs_override = round(float(directs_from_pricing or 0.0), 2)
 
     bucket_view_for_ladder: Mapping[str, Any] | None = None
     if isinstance(breakdown, _MappingABC):
@@ -7440,8 +7505,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if ladder_labor <= 0.0:
         ladder_labor = fallback_ladder_labor
 
-    ladder_expected = ladder_labor + ladder_directs
-    ladder_subtotal = round(ladder_expected, 2)
+    nre_per_part = round(float(amortized_nre_total or 0.0), 2)
+    machine_labor_total = round(max(0.0, float(ladder_labor) - nre_per_part), 2)
+    ladder_subtotal = round(float(directs) + nre_per_part + machine_labor_total, 2)
+    ladder_directs = round(ladder_subtotal - ladder_labor, 2)
+
+    if math.isclose(ladder_directs, ladder_directs_override, abs_tol=0.01):
+        ladder_directs = ladder_directs_override
+
     computed_total_labor_cost = ladder_labor
     if isinstance(totals, dict):
         totals["labor_cost"] = ladder_labor
@@ -7457,6 +7528,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if isinstance(breakdown, dict):
         try:
             breakdown["ladder_subtotal"] = ladder_subtotal
+            if math.isclose(_safe_float(applied_pcts.get("MarginPct"), 0.0), 0.0, abs_tol=1e-6):
+                breakdown["price"] = ladder_subtotal
         except Exception:
             pass
 
