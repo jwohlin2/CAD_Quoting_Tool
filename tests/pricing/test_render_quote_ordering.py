@@ -1,5 +1,4 @@
 import math
-import math
 import re
 
 import appV5
@@ -1167,3 +1166,83 @@ def test_render_quote_backfills_programming_and_inspection_rates() -> None:
     assert "hr @" in lines[inspection_idx + 1]
     assert "/hr" in lines[inspection_idx + 1]
     assert "—/hr" not in lines[inspection_idx + 1]
+
+
+def test_why_this_price_mentions_planner_drilling() -> None:
+    result = {
+        "price": 55.0,
+        "breakdown": {
+            "qty": 1,
+            "totals": {
+                "labor_cost": 10.0,
+                "direct_costs": 0.0,
+                "subtotal": 55.0,
+                "with_expedite": 55.0,
+                "with_margin": 55.0,
+                "price": 55.0,
+            },
+            "nre_detail": {},
+            "nre": {},
+            "material": {},
+            "process_costs": {"Machine": 45.0, "Labor": 10.0},
+            "process_meta": {},
+            "pass_through": {},
+            "applied_pcts": {"MarginPct": 0.0},
+            "rates": {},
+            "params": {},
+            "labor_cost_details": {},
+            "direct_cost_details": {},
+            "bucket_view": {
+                "buckets": {
+                    "drilling": {"minutes": 30.0, "machine$": 45.0, "labor$": 0.0},
+                    "milling": {"minutes": 20.0, "machine$": 30.0, "labor$": 10.0},
+                },
+                "order": ["milling", "drilling"],
+            },
+            "bucket_minutes_detail": {"drilling": 30.0},
+            "process_plan": {
+                "bucket_view": {
+                    "buckets": {
+                        "drilling": {"minutes": 30.0, "machine$": 45.0, "labor$": 0.0},
+                        "milling": {"minutes": 20.0, "machine$": 30.0, "labor$": 10.0},
+                    },
+                    "order": ["milling", "drilling"],
+                }
+            },
+            "process_plan_pricing": {
+                "recognized_line_items": 2,
+                "line_items": [
+                    {
+                        "op": "Deep_Drilling",
+                        "minutes": 30.0,
+                        "machine_cost": 45.0,
+                        "labor_cost": 0.0,
+                    },
+                    {
+                        "op": "Milling",
+                        "minutes": 20.0,
+                        "machine_cost": 30.0,
+                        "labor_cost": 10.0,
+                    },
+                ],
+                "plan_summary": {
+                    "ops": [
+                        {"name": "Deep_Drilling"},
+                        {"name": "Milling"},
+                    ]
+                },
+                "totals": {
+                    "machine_cost": 75.0,
+                    "labor_cost": 10.0,
+                    "minutes": 50.0,
+                },
+            },
+            "pricing_source": "Planner",
+        },
+    }
+
+    rendered = appV5.render_quote(result, currency="$")
+
+    assert "Why this price" in rendered
+    tail = rendered.split("Why this price", 1)[1]
+    assert "planner operations include Deep_Drilling" in tail
