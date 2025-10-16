@@ -73,7 +73,7 @@ from cad_quoter.utils.render_utils import (
     render_quote_doc,
 )
 from cad_quoter.pricing import load_backup_prices_csv
-from cad_quoter.pricing import render_process_costs
+from cad_quoter.pricing.process_cost_renderer import render_process_costs
 from cad_quoter.estimators import SpeedsFeedsUnavailableError
 from cad_quoter.llm_overrides import (
     _plate_mass_properties,
@@ -4835,67 +4835,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         process_plan_breakdown.get("bucket_view") if isinstance(process_plan_breakdown, _MappingABC) else None
     )
 
-    use_planner_bucket_display = bool(planner_bucket_from_plan) and pricing_source_lower == "planner"
-    if use_planner_bucket_display and set(planner_bucket_from_plan.keys()) == {"misc"}:
-        use_planner_bucket_display = False
-    planner_bucket_display_map: dict[str, dict[str, Any]] = (
-        dict(planner_bucket_from_plan) if use_planner_bucket_display else {}
-    )
-
-    if use_planner_bucket_display:
-        existing_canon_keys = {_canonical_bucket_key(key) for key in list(process_costs.keys())}
-        bucket_canon_keys = set(planner_bucket_from_plan.keys())
-        has_only_machine_labor = existing_canon_keys and existing_canon_keys <= {"machine", "labor"}
-        replace_machine_labor = has_only_machine_labor or not bucket_canon_keys.issubset(existing_canon_keys)
-        if has_only_machine_labor and bucket_canon_keys == {"misc"}:
-            replace_machine_labor = False
-        if replace_machine_labor:
-            for key in list(process_costs.keys()):
-                if _canonical_bucket_key(key) in {"machine", "labor"}:
-                    process_costs.pop(key, None)
-            for canon_key, info in planner_bucket_from_plan.items():
-                total_cost = 0.0
-                for key_option in ("total_cost", "total$", "total"):
-                    if key_option in info:
-                        try:
-                            total_cost = float(info.get(key_option) or 0.0)
-                        except Exception:
-                            continue
-                        if total_cost:
-                            break
-                if total_cost <= 0:
-                    try:
-                        total_cost = float(process_costs.get(canon_key, 0.0) or 0.0)
-                    except Exception:
-                        total_cost = 0.0
-                process_costs[canon_key] = float(total_cost)
-                existing_meta = process_meta.get(canon_key) if isinstance(process_meta, dict) else None
-                meta_update = dict(existing_meta) if isinstance(existing_meta, _MappingABC) else {}
-                try:
-                    minutes_val = float(info.get("minutes", meta_update.get("minutes", 0.0)) or 0.0)
-                except Exception:
-                    minutes_val = float(meta_update.get("minutes", 0.0) or 0.0)
-                if minutes_val > 0:
-                    meta_update["minutes"] = round(minutes_val, 1)
-                    meta_update["hr"] = round(minutes_val / 60.0, 3)
-                elif "hr" not in meta_update:
-                    try:
-                        meta_update["hr"] = float(meta_update.get("hr", 0.0) or 0.0)
-                    except Exception:
-                        meta_update["hr"] = 0.0
-                try:
-                    hr_for_rate = float(meta_update.get("hr", 0.0) or 0.0)
-                except Exception:
-                    hr_for_rate = 0.0
-                if hr_for_rate > 0 and total_cost > 0:
-                    meta_update["rate"] = round(total_cost / hr_for_rate, 2)
-                else:
-                    try:
-                        meta_update["rate"] = float(meta_update.get("rate", 0.0) or 0.0)
-                    except Exception:
-                        meta_update["rate"] = 0.0
-                meta_update["cost"] = round(total_cost, 2)
-                process_meta[canon_key] = meta_update
+    # Minutes engine owns the canonical bucket display. Planner output is still captured
+    # for summaries, but it must not overwrite the breakdown used for pricing.
+    planner_bucket_display_map: dict[str, dict[str, Any]] = {}
 
     bucket_rollup_map: dict[str, dict[str, Any]] = {}
     raw_rollup = breakdown.get("planner_bucket_rollup")
@@ -5444,7 +5386,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     programmer_hours = _safe_float(prog.get("prog_hr"))
     engineer_hours = _safe_float(prog.get("eng_hr"))
     programmer_rate = _resolve_rate_with_fallback(
-        prog.get("prog_rate"), "ProgrammerRate", "ShopRate"
+        prog.get("prog_rate"), "ProgrammingRate", "ProgrammerRate", "ShopRate"
     )
     engineer_rate = _resolve_rate_with_fallback(
         prog.get("eng_rate"), "EngineerRate", "ShopRate"
@@ -5452,8 +5394,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     programming_per_lot_val = _safe_float(prog.get("per_lot"))
     nre_programming_per_part = _safe_float(nre.get("programming_per_part"))
-    if programming_per_lot_val <= 0 and nre_programming_per_part > 0:
-        qty_for_programming = breakdown.get("qty")
+    qty_for_programming_float: float | None = None
+    if nre_programming_per_part > 0:
+        qty_for_programming: Any = breakdown.get("qty")
         if qty_for_programming in (None, ""):
             decision_state = result.get("decision_state")
             if isinstance(decision_state, _MappingABC):
@@ -5465,9 +5408,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         try:
             qty_for_programming_float = float(qty_for_programming or 1)
         except Exception:
-            qty_for_programming_float = float(qty or 1)
-        if qty_for_programming_float <= 0:
+            try:
+                qty_for_programming_float = float(qty or 1)
+            except Exception:
+                qty_for_programming_float = 1.0
+        if not math.isfinite(qty_for_programming_float) or qty_for_programming_float <= 0:
             qty_for_programming_float = 1.0
+    if (
+        programming_per_lot_val <= 0
+        and nre_programming_per_part > 0
+        and qty_for_programming_float is not None
+    ):
         programming_per_lot_val = round(
             nre_programming_per_part * qty_for_programming_float, 2
         )
@@ -5585,6 +5536,18 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         )
     except Exception:
         amortized_nre_total = 0.0
+
+    card_hr = round(
+        float(breakdown["drilling_meta"]["total_minutes_billed"]) / 60.0, 2
+    )
+    row_hr = round(
+        float(breakdown["bucket_view"]["buckets"]["drilling"]["minutes"]) / 60.0, 2
+    )
+    if abs(card_hr - row_hr) > 0.01:
+        raise RuntimeError(
+            f"[FATAL] Drilling hours mismatch: card {card_hr} vs row {row_hr}. "
+            "A late write is overwriting bucket_view. Remove any planner/bucket rebuilds after minutes engine."
+        )
 
     append_line("Process & Labor Costs")
     append_line(divider)
@@ -11891,6 +11854,29 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
 
     if drill_minutes_with_toolchange is not None and drill_minutes_with_toolchange > 0.0:
         drilling_summary["total_minutes_with_toolchange"] = float(drill_minutes_with_toolchange)
+        drill_meta_for_totals = breakdown.setdefault("drilling_meta", {})
+        try:
+            drill_meta_for_totals["total_minutes_with_toolchange"] = float(
+                drill_minutes_with_toolchange
+            )
+        except Exception:
+            pass
+
+    # === DRILLING BILLING TRUTH ===
+    drill_meta = breakdown.setdefault("drilling_meta", {})
+    bill_min = float(
+        drill_meta.get("total_minutes_with_toolchange")
+        or drill_meta.get("total_minutes")
+        or 0.0
+    )
+    drill_meta["total_minutes_billed"] = bill_min
+
+    # overwrite any legacy/planner meta for drilling
+    pm = breakdown.setdefault("process_meta", {}).setdefault("drilling", {})
+    pm["minutes"] = bill_min
+    pm["hr"] = round(bill_min / 60.0, 6)
+    pm["rate"] = float(rates.get("DrillingRate") or rates.get("MachineRate") or 0.0)
+    pm["basis"] = ["minutes_engine"]
 
     drill_total_minutes_billed = float(
         drilling_summary.get("total_minutes_with_toolchange")
@@ -12073,7 +12059,6 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
 
     bucket_view.clear()
     bucket_view.update(bucket_view_prepared)
-    bucket_view_buckets = bucket_view.setdefault("buckets", {})
 
     if not use_planner:
         drilling_bucket_prepared = (
@@ -12094,12 +12079,6 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                     if "labor$" in drilling_bucket_prepared
                     else drilling_bucket_prepared.get("labor_cost")
                 ),
-            }
-        elif drill_total_minutes is not None and drill_total_minutes > 0.0:
-            bucket_view["drilling"] = {
-                "minutes": drill_total_minutes,
-                "machine_cost": (drill_total_minutes / 60.0) * drilling_rate,
-                "labor_cost": 0.0,
             }
 
     roughing_hours = _coerce_float_or_none(value_map.get("Roughing Cycle Time"))
