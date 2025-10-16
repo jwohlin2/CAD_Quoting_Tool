@@ -72,7 +72,8 @@ def test_render_quote_shows_net_mass_when_scrap_present() -> None:
     assert "Starting Weight: 4.2 oz" in rendered
     assert f"Scrap Weight: {expected_scrap}" in rendered
     assert "Net Weight: 3.5 oz" in rendered
-    assert "Scrap Percentage: 20.0%" in rendered
+    assert "Scrap Percentage: 20.0% (computed)" in rendered
+    assert "Scrap % (geometry hint): 20.0%" in rendered
 
 
 def test_render_quote_prefers_removed_mass_estimate_for_scrap() -> None:
@@ -172,7 +173,8 @@ def test_render_quote_mentions_scrap_source_from_holes() -> None:
         _base_material_quote(material), currency="$", show_zeros=False
     )
 
-    assert "Scrap Percentage: 25.0% (holes)" in rendered
+    assert "Scrap Percentage: 25.0% (computed)" in rendered
+    assert "Scrap % (geometry hint): 25.0% (holes)" in rendered
 
 
 def test_render_quote_mentions_scrap_source_label() -> None:
@@ -188,7 +190,8 @@ def test_render_quote_mentions_scrap_source_label() -> None:
         _base_material_quote(material), currency="$", show_zeros=False
     )
 
-    assert "Scrap Percentage: 18.0% (entered + holes)" in rendered
+    assert "Scrap Percentage: 18.0% (computed)" in rendered
+    assert "Scrap % (geometry hint): 18.0% (entered + holes)" in rendered
 
 
 def _base_material_quote(material: dict) -> dict:
