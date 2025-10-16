@@ -828,7 +828,6 @@ from cad_quoter.pricing import (
     LB_PER_KG,
     PricingEngine,
     create_default_registry,
-    render_process_costs,
 )
 
 _DEFAULT_MATERIAL_DENSITY_G_CC = MATERIAL_DENSITY_G_CC_BY_KEY.get(
@@ -5596,6 +5595,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     label_to_canon: dict[str, str] = {}
     canon_to_display_label: dict[str, str] = {}
     process_cost_row_details: dict[str, tuple[float, float, float]] = {}
+    class _BucketRowSpec(typing.NamedTuple):
+        label: str
+        hours: float
+        rate: float
+        total: float
+        labor: float
+        machine: float
+        canon_key: str
+        minutes: float
+
+    bucket_row_specs: list[_BucketRowSpec] = []
 
     _PLANNER_ROLLUP_ABS_TOLERANCE = 0.05
 
@@ -5733,12 +5743,21 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         else:
             ordered_keys = list(_preferred_order_then_alpha(buckets_obj.keys()))
 
-        rates_map_local = rates if isinstance(rates, dict) else {}
+        if isinstance(rates, dict):
+            rates_map_local: Mapping[str, Any] = rates
+        elif isinstance(rates, _MappingABC):
+            rates_map_local = dict(rates)
+        else:
+            rates_map_local = {}
+
+        drill_rate_local = _rate_for_bucket("drilling", rates_map_local)
 
         canonical_order_local: list[str] = []
         canonical_summary_local: dict[str, dict[str, float]] = {}
         label_map_local: dict[str, str] = {}
         canon_label_map_local: dict[str, str] = {}
+        rows_local: list[tuple[str, float, float, float, float]] = []
+        raw_key_by_canon: dict[str, str] = {}
 
         for raw_key in ordered_keys:
             lookup_candidates: Sequence[Any]
@@ -5775,6 +5794,24 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if not canon_key:
                 canon_key = key_text
 
+            norm_key = _norm(key_text)
+            rate_val = drill_rate_local if norm_key == "drilling" else _rate_for_bucket(
+                key_text, rates_map_local
+            )
+            if rate_val <= 0.0 and hours_val > 0.0:
+                try:
+                    rate_val = total_val / hours_val if total_val > 0.0 else 0.0
+                except Exception:
+                    rate_val = 0.0
+            if total_val <= 0.0 and hours_val > 0.0 and rate_val > 0.0:
+                total_val = round(hours_val * rate_val, 2)
+                if norm_key in LABORISH:
+                    labor_val = total_val
+                    machine_val = 0.0
+                else:
+                    machine_val = total_val
+                    labor_val = 0.0
+
             summary_entry = canonical_summary_local.setdefault(
                 canon_key,
                 {
@@ -5793,7 +5830,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
             if canon_key not in canonical_order_local:
                 canonical_order_local.append(canon_key)
-        rows_local: list[tuple[str, float, float, float, float]] = []
+            raw_key_by_canon.setdefault(canon_key, key_text)
+
         for canon_key in canonical_order_local:
             metrics = canonical_summary_local.get(canon_key) or {}
             minutes_total = _safe_float(metrics.get("minutes"), default=0.0)
@@ -5804,21 +5842,43 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             machine_total = _safe_float(metrics.get("machine"), default=0.0)
             total_cost = _safe_float(metrics.get("total"), default=0.0)
 
-            if total_cost <= 0.0 and hours_total > 0.0:
-                rate_val = _rate_for_bucket(canon_key, rates_map_local)
-                if rate_val > 0.0:
-                    total_cost = hours_total * rate_val
-                    if _norm(canon_key) in LABORISH:
-                        labor_total = total_cost
-                        machine_total = 0.0
-                    else:
-                        machine_total = total_cost
-                        labor_total = 0.0
+            source_key = raw_key_by_canon.get(canon_key, canon_key)
+            norm_key = _norm(source_key)
+            rate_val = (
+                drill_rate_local
+                if norm_key == "drilling"
+                else _rate_for_bucket(source_key, rates_map_local)
+            )
+            if rate_val <= 0.0 and hours_total > 0.0:
+                try:
+                    rate_val = total_cost / hours_total if total_cost > 0.0 else 0.0
+                except Exception:
+                    rate_val = 0.0
+            if total_cost <= 0.0 and hours_total > 0.0 and rate_val > 0.0:
+                total_cost = round(hours_total * rate_val, 2)
+                if norm_key in LABORISH:
+                    labor_total = total_cost
+                    machine_total = 0.0
+                else:
+                    machine_total = total_cost
+                    labor_total = 0.0
 
             if total_cost <= 0.0 and hours_total <= 0.0:
                 continue
 
             display_label = _display_bucket_label(canon_key, label_overrides)
+            bucket_row_specs.append(
+                _BucketRowSpec(
+                    label=display_label,
+                    hours=hours_total,
+                    rate=rate_val,
+                    total=total_cost,
+                    labor=labor_total,
+                    machine=machine_total,
+                    canon_key=canon_key,
+                    minutes=minutes_total,
+                )
+            )
             rows_local.append(
                 (
                     display_label,
@@ -5931,28 +5991,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if isinstance(extra_bucket_minutes_detail, _MappingABC):
         for key, minutes in extra_bucket_minutes_detail.items():
             bucket_minutes_detail[key] = _safe_float(minutes)
-    process_minutes_map = breakdown.get("process_minutes")
-    if isinstance(process_minutes_map, _MappingABC):
-        for key, minutes in process_minutes_map.items():
-            canon_key = _canonical_bucket_key(key)
-            if canon_key and canon_key not in bucket_minutes_detail:
-                bucket_minutes_detail[canon_key] = _safe_float(minutes)
-    if isinstance(process_meta, _MappingABC):
-        for raw_key, meta in process_meta.items():
-            if not isinstance(meta, _MappingABC):
-                continue
-            canon_key = _canonical_bucket_key(raw_key)
-            if not canon_key or canon_key in bucket_minutes_detail:
-                continue
-            minutes_val = _safe_float(meta.get("minutes"))
-            if minutes_val <= 0.0:
-                minutes_val = _safe_float(meta.get("planner_minutes"))
-            if minutes_val <= 0.0:
-                hr_val = _safe_float(meta.get("hr"))
-                if hr_val > 0.0:
-                    minutes_val = hr_val * 60.0
-            if minutes_val > 0.0:
-                bucket_minutes_detail[canon_key] = minutes_val
     process_costs_for_render: dict[str, float] = {}
     for canon_key, metrics in canonical_bucket_summary.items():
         process_costs_for_render[canon_key] = _safe_float(
@@ -6276,12 +6314,68 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     amortized_overrides = _prepare_amortized_details()
 
     for canon_key, (amount, minutes) in amortized_overrides.items():
-        process_costs_for_render[canon_key] = amount
-        if minutes > 0:
-            bucket_minutes_detail[canon_key] = minutes
+        amount_val = _safe_float(amount)
+        minutes_val = _safe_float(minutes)
+        process_costs_for_render[canon_key] = amount_val
+        if minutes_val > 0:
+            bucket_minutes_detail[canon_key] = minutes_val
         label = _display_bucket_label(canon_key, label_overrides)
         label_to_canon.setdefault(label, canon_key)
         canon_to_display_label.setdefault(canon_key, label)
+        if not any(spec.canon_key == canon_key for spec in bucket_row_specs):
+            hours_val = minutes_val / 60.0 if minutes_val else 0.0
+            labor_val = amount_val if _norm(canon_key) in LABORISH else 0.0
+            machine_val = amount_val if labor_val <= 0.0 else 0.0
+            rate_val = _rate_for_bucket(canon_key, rates or {})
+            if rate_val <= 0.0 and hours_val > 0.0 and amount_val > 0.0:
+                rate_val = amount_val / hours_val
+            bucket_row_specs.append(
+                _BucketRowSpec(
+                    label=label,
+                    hours=hours_val,
+                    rate=rate_val,
+                    total=amount_val,
+                    labor=labor_val,
+                    machine=machine_val,
+                    canon_key=canon_key,
+                    minutes=minutes_val,
+                )
+            )
+            bucket_table_rows.append(
+                (
+                    label,
+                    round(hours_val, 2),
+                    round(labor_val, 2),
+                    round(machine_val, 2),
+                    round(amount_val, 2),
+                )
+            )
+            if canon_key not in canonical_bucket_summary:
+                canonical_bucket_summary[canon_key] = {
+                    "minutes": minutes_val,
+                    "hours": hours_val,
+                    "labor": labor_val,
+                    "machine": machine_val,
+                    "total": amount_val,
+                }
+                canonical_bucket_order.append(canon_key)
+            else:
+                summary_entry = canonical_bucket_summary[canon_key]
+                summary_entry["minutes"] = (
+                    _safe_float(summary_entry.get("minutes")) + minutes_val
+                )
+                summary_entry["hours"] = (
+                    _safe_float(summary_entry.get("hours")) + hours_val
+                )
+                summary_entry["labor"] = (
+                    _safe_float(summary_entry.get("labor")) + labor_val
+                )
+                summary_entry["machine"] = (
+                    _safe_float(summary_entry.get("machine")) + machine_val
+                )
+                summary_entry["total"] = (
+                    _safe_float(summary_entry.get("total")) + amount_val
+                )
 
     for canon_key in process_costs_for_render:
         label = _display_bucket_label(canon_key, label_overrides)
@@ -6661,40 +6755,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if minutes_val <= 0.0:
                 continue
             hours_val = minutes_val / 60.0
-            labor_cost = _safe_float(info.get("labor$"), default=0.0)
-            machine_cost = _safe_float(info.get("machine$"), default=0.0)
-            total_cost = labor_cost + machine_cost
-            labor_hours = 0.0
-            machine_hours = 0.0
-            if total_cost > 0.0 and hours_val > 0.0:
-                try:
-                    rate_val = total_cost / hours_val
-                except Exception:
-                    rate_val = 0.0
-                if rate_val > 0.0:
-                    if machine_cost > 0.0:
-                        machine_hours = machine_cost / rate_val
-                    if labor_cost > 0.0:
-                        labor_hours = labor_cost / rate_val
-                    allocated = labor_hours + machine_hours
-                    remainder = hours_val - allocated
-                    if remainder > 1e-6:
-                        if labor_hours > 0.0 and machine_hours > 0.0:
-                            total_positive = labor_hours + machine_hours
-                            if total_positive > 0.0:
-                                labor_hours += remainder * (labor_hours / total_positive)
-                                machine_hours += remainder * (machine_hours / total_positive)
-                        elif labor_hours > 0.0:
-                            labor_hours += remainder
-                        elif machine_hours > 0.0:
-                            machine_hours += remainder
-            if labor_hours <= 0.0 and machine_hours <= 0.0:
-                if _norm(raw_key) in LABORISH:
-                    labor_hours = hours_val
-                else:
-                    machine_hours = hours_val
-            pl_lab += labor_hours
-            pl_mac += machine_hours
+            canon_key = _canonical_bucket_key(raw_key)
+            norm_key = canon_key or _norm(raw_key)
+            if norm_key in LABORISH:
+                pl_lab += hours_val
+            else:
+                pl_mac += hours_val
 
         planner_total_hr = round(pl_lab + pl_mac, 2)
         if planner_total_hr > 0.0:

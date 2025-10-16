@@ -228,8 +228,23 @@ def _amortized_breakdown(qty: int, *, config_flags: dict | None = None) -> dict:
                 "labor$": 300.0,
                 "machine$": 0.0,
             },
-        }
+        },
+        "order": ["grinding"],
     }
+    if qty > 1:
+        bucket_view["buckets"]["programming_amortized"] = {
+            "minutes": 60.0,
+            "labor$": 150.0,
+            "machine$": 0.0,
+        }
+        bucket_view["buckets"]["fixture_build_amortized"] = {
+            "minutes": 30.0,
+            "labor$": 30.0,
+            "machine$": 0.0,
+        }
+        bucket_view.setdefault("order", []).extend(
+            ["programming_amortized", "fixture_build_amortized"]
+        )
 
     breakdown = {
         "qty": qty,

@@ -230,21 +230,30 @@ def test_planner_rollup_hours_reconcile_with_bucket_view() -> None:
 
     assert math.isclose(planner_labor + planner_machine, planner_total, abs_tol=0.05)
 
+    def _norm(text: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "_", str(text or "").lower()).strip("_")
+
+    laborish = {
+        "finishing_deburr",
+        "inspection",
+        "assembly",
+        "toolmaker_support",
+        "ehs_compliance",
+        "fixture_build_amortized",
+        "programming_amortized",
+    }
+
     expected_machine = 0.0
     expected_labor = 0.0
-    for info in bucket_view["buckets"].values():
-        total_cost = float(info.get("total$", 0.0) or 0.0)
+    for key, info in bucket_view["buckets"].items():
         minutes = float(info.get("minutes", 0.0) or 0.0)
-        machine_cost = float(info.get("machine$", 0.0) or 0.0)
-        labor_cost = float(info.get("labor$", 0.0) or 0.0)
         hours = minutes / 60.0 if minutes else 0.0
-        if total_cost <= 0.0 or hours <= 0.0:
+        if hours <= 0.0:
             continue
-        rate = total_cost / hours
-        if machine_cost > 0.0:
-            expected_machine += machine_cost / rate
-        if labor_cost > 0.0:
-            expected_labor += labor_cost / rate
+        if _norm(key) in laborish:
+            expected_labor += hours
+        else:
+            expected_machine += hours
 
     assert math.isclose(planner_machine, expected_machine, abs_tol=0.05)
     assert math.isclose(planner_labor, expected_labor, abs_tol=0.05)
@@ -323,6 +332,13 @@ def test_render_quote_merges_deburr_variants() -> None:
             },
         }
     }
+    bucket_view.setdefault("order", ["milling", "Deburr", "Finishing/Deburr"])
+    bucket_view["buckets"]["programming_amortized"] = {
+        "minutes": 45.0,
+        "labor$": 15.0,
+        "machine$": 0.0,
+    }
+    bucket_view["order"].append("programming_amortized")
 
     result = {
         "price": 150.0,
@@ -464,8 +480,20 @@ def test_render_quote_includes_amortized_and_misc_rows() -> None:
                 "labor$": 80.0,
                 "machine$": 0.0,
             },
-        }
+        },
+        "order": ["milling", "deburr"],
     }
+    bucket_view["buckets"]["programming_amortized"] = {
+        "minutes": 120.0,
+        "labor$": 30.0,
+        "machine$": 0.0,
+    }
+    bucket_view["buckets"]["fixture_build_amortized"] = {
+        "minutes": 90.0,
+        "labor$": 20.0,
+        "machine$": 0.0,
+    }
+    bucket_view["order"].extend(["programming_amortized", "fixture_build_amortized"])
 
     result = {
         "price": 420.0,
