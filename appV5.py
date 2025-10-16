@@ -8977,15 +8977,29 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             bins=bins, index_min=index_min, peck_min_deep=peck_min_deep, peck_min_std=peck_min_std,
         )
 
+        subtotal_min = float(max(subtotal_min, 0.0))
+        removal_drilling_minutes = float(subtotal_min)
+        if removal_drilling_minutes > 0.0:
+            removal_drilling_hours_precise = removal_drilling_minutes / 60.0
+
         tool_add = (tchg_deep if seen_deep else 0.0) + (tchg_std if seen_std else 0.0)
         total_drill_minutes_with_toolchange = subtotal_min + tool_add
 
         if isinstance(bucket_state, PlannerBucketRenderState):
             extra = getattr(bucket_state, "extra", None)
             if isinstance(extra, dict):
-                extra["drill_machine_minutes"] = float(subtotal_min)
-                extra["drill_labor_minutes"] = float(tool_add)
-                extra["drill_total_minutes"] = float(total_drill_minutes_with_toolchange)
+                target_extra = extra
+            elif isinstance(extra, _MutableMappingABC):
+                target_extra = extra
+            else:
+                target_extra = None
+            if target_extra is not None:
+                target_extra["drill_machine_minutes"] = float(subtotal_min)
+                target_extra["drill_labor_minutes"] = float(tool_add)
+                target_extra["drill_total_minutes"] = float(total_drill_minutes_with_toolchange)
+                target_extra["removal_drilling_minutes"] = float(removal_drilling_minutes)
+                if removal_drilling_minutes > 0.0:
+                    target_extra["removal_drilling_hours"] = float(removal_drilling_hours_precise)
 
         # === DRILLING BILLING TRUTH ===
         drill_meta = breakdown.setdefault("drilling_meta", {})
@@ -8995,6 +9009,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             except Exception:
                 drill_meta = {}
             breakdown["drilling_meta"] = drill_meta
+        drill_meta["total_minutes"] = float(removal_drilling_minutes)
         drill_meta["toolchange_minutes"] = float(tool_add)
         drill_meta["total_minutes_with_toolchange"] = float(total_drill_minutes_with_toolchange)
 
@@ -9144,10 +9159,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 process_plan_summary_local = process_plan_summary_card
         if process_plan_summary_card is not None:
             drill_meta_summary = process_plan_summary_card.setdefault("drilling", {})
-            if subtotal_min > 0.0:
-                prior_total = _coerce_float_or_none(drill_meta_summary.get("total_minutes"))
-                if prior_total is None or prior_total <= 0.0:
-                    drill_meta_summary["total_minutes"] = float(subtotal_min)
+            drill_meta_summary["total_minutes"] = float(removal_drilling_minutes)
             drill_meta_summary["toolchange_minutes"] = float(tool_add)
             drill_meta_summary["total_minutes_with_toolchange"] = float(total_drill_minutes_with_toolchange)
             drill_meta_summary["total_minutes_billed"] = bill_min
