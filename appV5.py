@@ -3198,6 +3198,103 @@ CANON_MAP: dict[str, str] = {
 }
 
 PLANNER_META: frozenset[str] = frozenset({"planner_labor", "planner_machine", "planner_total"})
+
+# ---------- Bucket & Operation Roles ----------
+BUCKET_ROLE: dict[str, str] = {
+    "programming": "labor_only",
+    "inspection": "labor_only",
+    "deburr": "labor_only",
+    "deburring": "labor_only",
+    "finishing_deburr": "labor_only",
+    "finishing": "labor_only",
+    "finishing/deburr": "labor_only",
+
+    "drilling": "split",
+    "milling": "split",
+    "grinding": "split",
+    "sinker_edm": "split",
+
+    "wedm": "machine_only",
+    "wire_edm": "machine_only",
+    "waterjet": "machine_only",
+    "saw": "machine_only",
+    "saw_waterjet": "machine_only",
+
+    "_default": "machine_only",
+}
+
+OP_ROLE: dict[str, str] = {
+    "assemble_pair_on_fixture": "labor_only",
+    "prep_carrier_or_tab": "labor_only",
+    "indicate_hardened_blank": "labor_only",
+    "indicate_on_shank": "labor_only",
+    "stability_check_after_ops": "labor_only",
+    "mark_id": "labor_only",
+    "saw_blank": "machine_only",
+    "saw_or_mill_rough_blocks": "machine_only",
+    "waterjet_or_saw_blanks": "machine_only",
+    "face_mill_pre": "split",
+    "cnc_rough_mill": "split",
+    "cnc_mill_rough": "split",
+    "finish_mill_windows": "split",
+    "finish_mill_cam_slot_or_profile": "split",
+    "spot_drill_all": "split",
+    "drill_patterns": "split",
+    "interpolate_critical_bores": "split",
+    "drill_ream_bore": "split",
+    "drill_ream_dowel_press": "split",
+    "ream_slip_in_assembly": "split",
+    "rigid_tap": "split",
+    "thread_mill": "split",
+    "drill_or_trepan_id": "split",
+    "wire_edm_windows": "machine_only",
+    "wire_edm_outline": "machine_only",
+    "wire_edm_open_id": "machine_only",
+    "wire_edm_cam_slot_or_profile": "machine_only",
+    "wire_edm_id_leave": "machine_only",
+    "machine_electrode": "labor_only",
+    "sinker_edm_finish_burn": "split",
+    "blanchard_grind_pre": "split",
+    "surface_grind_faces": "split",
+    "surface_grind_datums": "split",
+    "surface_or_profile_grind_bearing": "split",
+    "surface_or_profile_grind_od_cleanup": "split",
+    "profile_or_surface_grind_wear_faces": "split",
+    "profile_grind_pilot_od_to_tir": "split",
+    "profile_grind_flanks_and_reliefs_to_spec": "split",
+    "jig_bore_or_jig_grind_coaxial_bores": "split",
+    "jig_grind_id_to_size_and_roundness": "split",
+    "jig_grind_id_to_tenths_and_straightness": "split",
+    "light_grind_cleanup": "split",
+    "match_grind_set_for_gap_and_parallelism": "split",
+    "turn_or_mill_od": "split",
+    "purchase_od_ground_blank": "outsourced",
+    "lap_bearing_land": "labor_only",
+    "lap_id": "labor_only",
+    "lap_edges": "labor_only",
+    "hone_edge": "labor_only",
+    "edge_break": "labor_only",
+    "edge_prep": "labor_only",
+    "heat_treat": "outsourced",
+    "heat_treat_to_spec": "outsourced",
+    "heat_treat_if_wear_part": "outsourced",
+    "apply_coating": "outsourced",
+    "clean_degas_for_coating": "labor_only",
+    "start_ground_carbide_blank": "outsourced",
+    "start_ground_carbide_ring": "outsourced",
+    "verify_connected_passage_and_masking": "labor_only",
+    "abrasive_flow_polish": "outsourced",
+    "clean_and_flush_media": "labor_only",
+}
+
+
+def _bucket_role_for_key(key: str) -> str:
+    canon = _canonical_bucket_key(key) or _normalize_bucket_key(key) or ""
+    return BUCKET_ROLE.get(canon, BUCKET_ROLE["_default"])
+
+
+def _op_role_for_name(name: str) -> str:
+    return OP_ROLE.get((name or "").strip(), "machine_only")
 _HIDE_IN_BUCKET_VIEW: frozenset[str] = frozenset({*PLANNER_META, "misc"})
 _PREFERRED_BUCKET_VIEW_ORDER: tuple[str, ...] = (
     "programming",
@@ -3361,6 +3458,78 @@ class PlannerBucketRenderState:
     extra: dict[str, Any] = field(default_factory=dict)
 
 
+def _split_hours_for_bucket(
+    label: str,
+    hours: float,
+    render_state: "PlannerBucketRenderState" | None,
+    cfg: "QuoteConfiguration" | None,
+) -> tuple[float, float]:
+    total_h = max(0.0, float(hours or 0.0))
+    if not cfg or not getattr(cfg, "separate_machine_labor", False):
+        return (0.0, total_h)
+
+    key = _canonical_bucket_key(label)
+    if not key:
+        key = _normalize_bucket_key(label)
+
+    extra: Mapping[str, Any] | None = None
+    if render_state is not None:
+        extra_candidate = getattr(render_state, "extra", None)
+        if isinstance(extra_candidate, _MappingABC):
+            extra = extra_candidate
+    if extra is None:
+        extra = {}
+
+    if key == "drilling":
+        m_min = _coerce_float_or_none(extra.get("drill_machine_minutes"))
+        l_min = _coerce_float_or_none(extra.get("drill_labor_minutes"))
+        if (
+            m_min is not None
+            and l_min is not None
+            and (float(m_min) + float(l_min)) > 0.0
+        ):
+            return (float(m_min) / 60.0, float(l_min) / 60.0)
+
+    bucket_ops: Mapping[str, Any] | None = None
+    if isinstance(extra, _MappingABC):
+        bucket_ops_candidate = extra.get("bucket_ops")
+        if isinstance(bucket_ops_candidate, _MappingABC):
+            bucket_ops = bucket_ops_candidate
+
+    if bucket_ops is not None:
+        ops_list = bucket_ops.get(key)
+        if isinstance(ops_list, Sequence):
+            machine_minutes = 0.0
+            labor_minutes = 0.0
+            for entry in ops_list:
+                if not isinstance(entry, _MappingABC):
+                    continue
+                role = _op_role_for_name(entry.get("name"))
+                minutes_val = _coerce_float_or_none(entry.get("minutes"))
+                if minutes_val is None or minutes_val <= 0:
+                    continue
+                if role == "labor_only":
+                    labor_minutes += minutes_val
+                elif role == "machine_only":
+                    machine_minutes += minutes_val
+                elif role == "split":
+                    machine_minutes += minutes_val
+                else:
+                    # outsourced / unknown → skip from internal hours
+                    continue
+            if (machine_minutes + labor_minutes) > 0.0:
+                return (machine_minutes / 60.0, labor_minutes / 60.0)
+
+    role = _bucket_role_for_key(key)
+    if role == "labor_only":
+        return (0.0, total_h)
+    if role == "machine_only":
+        return (total_h, 0.0)
+    if total_h > 0.0:
+        return (total_h, 0.0)
+    return (0.0, 0.0)
+
+
 def _build_planner_bucket_render_state(
     bucket_view: Mapping[str, Any] | None,
     *,
@@ -3371,6 +3540,8 @@ def _build_planner_bucket_render_state(
     rates: Mapping[str, Any] | None = None,
     removal_drilling_hours: float | None = None,
     prefer_removal_drilling_hours: bool = True,
+    cfg: "QuoteConfiguration" | None = None,
+    bucket_ops: Mapping[str, typing.Sequence[Mapping[str, Any]]] | None = None,
 ) -> PlannerBucketRenderState:
     state = PlannerBucketRenderState()
 
@@ -3378,6 +3549,42 @@ def _build_planner_bucket_render_state(
     # Start with an empty structure and allow the canonical buckets to populate it below,
     # preventing any stale entries from ``process_costs`` from sneaking into the render.
     state.process_costs_for_render = {}
+
+    bucket_ops_map: dict[str, list[dict[str, float]]] = {}
+
+    def _ingest_bucket_ops(source: Any) -> None:
+        if isinstance(source, _MappingABC):
+            items = source.items()
+        else:
+            return
+        for raw_key, raw_list in items:
+            canon_key = _canonical_bucket_key(raw_key) or _normalize_bucket_key(raw_key)
+            if not canon_key:
+                continue
+            entries: list[dict[str, float]] = bucket_ops_map.setdefault(canon_key, [])
+            if isinstance(raw_list, Sequence):
+                for item in raw_list:
+                    if not isinstance(item, _MappingABC):
+                        continue
+                    op_name = (item.get("name") or item.get("op") or "").strip()
+                    if not op_name:
+                        continue
+                    minutes_val = _coerce_float_or_none(item.get("minutes"))
+                    if minutes_val is None or minutes_val <= 0:
+                        minutes_val = _coerce_float_or_none(item.get("mins"))
+                    if minutes_val is None or minutes_val <= 0:
+                        continue
+                    entries.append({"name": op_name, "minutes": float(minutes_val)})
+
+    if isinstance(bucket_view, _MappingABC):
+        _ingest_bucket_ops(bucket_view.get("bucket_ops"))
+    if isinstance(bucket_ops, _MappingABC):
+        _ingest_bucket_ops(bucket_ops)
+
+    if bucket_ops_map:
+        for ops in bucket_ops_map.values():
+            ops.sort(key=lambda entry: (-float(entry.get("minutes", 0.0) or 0.0), entry.get("name", "")))
+        state.extra["bucket_ops"] = bucket_ops_map
 
     if not isinstance(bucket_view, _MappingABC):
         return state
@@ -3416,6 +3623,9 @@ def _build_planner_bucket_render_state(
         else {}
     )
 
+    machine_hours_total = 0.0
+    labor_hours_total = 0.0
+
     for canon_key in order:
         info = buckets.get(canon_key)
         if not isinstance(info, _MappingABC):
@@ -3445,6 +3655,20 @@ def _build_planner_bucket_render_state(
                     float(original_hours),
                     float(removal_hr),
                 )
+
+        split_machine_hours = 0.0
+        split_labor_hours = 0.0
+        used_split = False
+        if cfg and getattr(cfg, "separate_machine_labor", False):
+            split_machine_hours, split_labor_hours = _split_hours_for_bucket(
+                canon_key, hours_raw, state, cfg
+            )
+            total_split_hours = (split_machine_hours or 0.0) + (split_labor_hours or 0.0)
+            if total_split_hours > 0.0:
+                hours_raw = total_split_hours
+                machine_raw = float(split_machine_hours) * float(cfg.machine_rate_per_hr)
+                labor_raw = float(split_labor_hours) * float(cfg.labor_rate_per_hr)
+                used_split = True
 
         total_raw = labor_raw + machine_raw
 
@@ -3486,6 +3710,20 @@ def _build_planner_bucket_render_state(
         state.display_machine_total += machine_raw
         state.hour_entries[label] = (hours_val, True)
 
+        split_detail_line: str | None = None
+        if cfg and getattr(cfg, "separate_machine_labor", False):
+            state.extra.setdefault("bucket_hour_split", {})[canon_key] = {
+                "machine_hours": round(split_machine_hours, 4),
+                "labor_hours": round(split_labor_hours, 4),
+            }
+            machine_hours_total += split_machine_hours
+            labor_hours_total += split_labor_hours
+            if used_split or (split_machine_hours > 0.0 or split_labor_hours > 0.0):
+                split_detail_line = (
+                    f"machine {split_machine_hours:.2f} hr @ ${cfg.machine_rate_per_hr:.0f}/hr, "
+                    f"labor {split_labor_hours:.2f} hr @ ${cfg.labor_rate_per_hr:.0f}/hr"
+                )
+
         detail_text: str | None = None
         for candidate in (canon_key, label):
             candidate_key = str(candidate)
@@ -3498,6 +3736,11 @@ def _build_planner_bucket_render_state(
             ):
                 detail_text = detail_inputs_map[candidate_key]
                 break
+        if split_detail_line:
+            if detail_text not in (None, ""):
+                detail_text = f"{detail_text}; {split_detail_line}"
+            else:
+                detail_text = split_detail_line
         if detail_text not in (None, ""):
             state.detail_lookup[label] = str(detail_text)
 
@@ -3511,6 +3754,10 @@ def _build_planner_bucket_render_state(
         label = _display_bucket_label(canon_key, label_overrides)
         state.label_to_canon.setdefault(label, canon_key)
         state.canon_to_display_label.setdefault(canon_key, label)
+
+    if cfg and getattr(cfg, "separate_machine_labor", False):
+        state.extra["_machine_total_hours"] = round(machine_hours_total, 2)
+        state.extra["_labor_total_hours"] = round(labor_hours_total, 2)
 
     return state
 
@@ -3791,6 +4038,32 @@ def _prepare_bucket_view(raw_view: Mapping[str, Any] | None) -> dict[str, Any]:
             if key == "buckets":
                 continue
             prepared[key] = copy.deepcopy(value)
+
+    bucket_ops: dict[str, list[dict[str, float]]] = {}
+    if isinstance(raw_view, _MappingABC):
+        operations = raw_view.get("operations")
+        if isinstance(operations, Sequence):
+            for entry in operations:
+                if not isinstance(entry, _MappingABC):
+                    continue
+                bucket_key = entry.get("bucket") or entry.get("name") or ""
+                canon_bucket = _canonical_bucket_key(str(bucket_key))
+                if not canon_bucket:
+                    canon_bucket = _normalize_bucket_key(bucket_key)
+                if not canon_bucket:
+                    continue
+                minutes_val = _coerce_float_or_none(entry.get("minutes"))
+                if minutes_val is None or minutes_val <= 0:
+                    minutes_val = _coerce_float_or_none(entry.get("mins"))
+                if minutes_val is None or minutes_val <= 0:
+                    continue
+                op_name = (entry.get("name") or "").strip()
+                if not op_name:
+                    continue
+                bucket_list = bucket_ops.setdefault(canon_bucket, [])
+                bucket_list.append({"name": op_name, "minutes": float(minutes_val)})
+    if bucket_ops:
+        prepared.setdefault("bucket_ops", bucket_ops)
 
     source = raw_view.get("buckets") if isinstance(raw_view, _MappingABC) else None
     if not isinstance(source, _MappingABC):
@@ -6642,6 +6915,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         rates=rates,
         removal_drilling_hours=removal_drilling_hours_precise,
         prefer_removal_drilling_hours=prefer_removal_drilling_hours,
+        cfg=cfg,
+        bucket_ops=bucket_ops_map,
     )
 
     geometry_for_explainer: Mapping[str, Any] | None = None
@@ -8704,6 +8979,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         tool_add = (tchg_deep if seen_deep else 0.0) + (tchg_std if seen_std else 0.0)
         total_drill_minutes_with_toolchange = subtotal_min + tool_add
 
+        if isinstance(bucket_state, PlannerBucketRenderState):
+            extra = getattr(bucket_state, "extra", None)
+            if isinstance(extra, dict):
+                extra["drill_machine_minutes"] = float(subtotal_min)
+                extra["drill_labor_minutes"] = float(tool_add)
+                extra["drill_total_minutes"] = float(total_drill_minutes_with_toolchange)
+
         # === DRILLING BILLING TRUTH ===
         drill_meta = breakdown.setdefault("drilling_meta", {})
         if not isinstance(drill_meta, dict):
@@ -9339,6 +9621,9 @@ class QuoteConfiguration:
     allow_thickness_upsize: bool = False
     round_tol_in: float = 0.05
     stock_rounding_mode: str = "per_axis_min_area"
+    separate_machine_labor: bool = True
+    machine_rate_per_hr: float = 45.0
+    labor_rate_per_hr: float = 45.0
 
     def copy_default_params(self) -> Dict[str, Any]:
         """Return a deep copy of the default parameter set."""
