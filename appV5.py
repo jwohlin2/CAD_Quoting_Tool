@@ -5196,7 +5196,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 directs = {}
             pricing["direct_costs"] = directs
         directs["material"] = float(mat_total)
-        pricing["total_direct_costs"] = float(sum(directs.values()))
+        existing_total_directs = _coerce_float_or_none(pricing.get("total_direct_costs"))
+        if existing_total_directs is None or existing_total_directs <= 0.0:
+            pricing["total_direct_costs"] = float(sum(directs.values()))
 
     # ---- material & stock (compact; shown only if we actually have data) -----
     if material:
@@ -5778,7 +5780,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if have_card_minutes and abs(card_hr - row_hr) > 0.01:
         raise RuntimeError(
             f"[FATAL] Drilling hours mismatch: card {card_hr} vs row {row_hr}. "
-            "A late write is overwriting bucket_view. Remove any planner/bucket rebuilds after minutes engine."
+            "Late writer is overwriting bucket_view."
         )
 
     append_line("Process & Labor Costs")
@@ -6488,7 +6490,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 raise RuntimeError(
                     "[FATAL] Drilling hours mismatch: "
                     f"card {card_hr} vs row {row_hr}. "
-                    "A late writer is overwriting bucket_view. Remove any rebuilds or planner overrides."
+                    "Late writer is overwriting bucket_view."
                 )
 
     if bucket_table_rows:
@@ -6749,7 +6751,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                             raise RuntimeError(
                                 "Drilling hours mismatch AFTER BUILD: "
                                 f"card {card_hr_guard} vs row {row_hr_guard}. "
-                                "Check for late bucket_view rebuilds or planner overrides."
+                                "Late writer is overwriting bucket_view."
                             )
 
             assert (
@@ -7013,6 +7015,23 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 per_part_fixture_hr,
                 include_in_total=False,
             )
+
+    if canonical_bucket_order and canonical_bucket_summary:
+        summary_hours: dict[str, float] = {}
+        for canon_key in canonical_bucket_order:
+            metrics = canonical_bucket_summary.get(canon_key) or {}
+            minutes_val = _safe_float(metrics.get("minutes"), default=0.0)
+            if minutes_val <= 0.0:
+                continue
+            label = _display_bucket_label(canon_key, label_overrides)
+            summary_hours[label] = summary_hours.get(label, 0.0) + (minutes_val / 60.0)
+
+        for label, hours_val in summary_hours.items():
+            include_flag = True
+            existing = hour_summary_entries.get(label)
+            if isinstance(existing, tuple) and len(existing) == 2:
+                include_flag = bool(existing[1])
+            hour_summary_entries[label] = (round(hours_val, 2), include_flag)
 
     if hour_summary_entries:
         def _canonical_hour_label(value: Any) -> str:
@@ -7283,10 +7302,15 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         else None,
     )
 
+    computed_directs = round(float(directs) + planner_machine_component, 2)
     if pricing_total_direct_costs is not None:
-        ladder_directs = round(float(pricing_total_direct_costs), 2)
+        candidate_directs = round(float(pricing_total_direct_costs), 2)
+        if candidate_directs > 0.0:
+            ladder_directs = candidate_directs
+        else:
+            ladder_directs = computed_directs
     else:
-        ladder_directs = round(float(directs) + planner_machine_component, 2)
+        ladder_directs = computed_directs
     amortized_component = float(amortized_nre_total if qty > 1 else 0.0)
     ladder_labor = round(base_bucket_labor + amortized_component, 2)
     ladder_expected = ladder_labor + ladder_directs
@@ -7400,8 +7424,87 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         pm = breakdown.setdefault("process_meta", {}).setdefault("drilling", {})
         pm["minutes"] = bill_min
         pm["hr"] = round(bill_min / 60.0, 6)
-        pm["rate"] = float(rates.get("DrillingRate") or rates.get("MachineRate") or 0.0)
+        pm["rate"] = float(rates.get("DrillingRate") or 0.0)
         pm["basis"] = ["minutes_engine"]  # replace any 'planner_drilling_override'
+
+        bucket_view_obj = breakdown.get("bucket_view")
+        if not isinstance(bucket_view_obj, dict):
+            if isinstance(bucket_view_obj, _MappingABC):
+                try:
+                    bucket_view_obj = dict(bucket_view_obj)
+                except Exception:
+                    bucket_view_obj = {}
+            else:
+                bucket_view_obj = {}
+            breakdown["bucket_view"] = bucket_view_obj
+
+        buckets_obj = bucket_view_obj.setdefault("buckets", {})
+        if not isinstance(buckets_obj, dict):
+            try:
+                buckets_obj = dict(buckets_obj)
+            except Exception:
+                buckets_obj = {}
+            bucket_view_obj["buckets"] = buckets_obj
+
+        old_entry = buckets_obj.pop("drilling", {}) if isinstance(buckets_obj, dict) else {}
+
+        new_minutes = round(bill_min, 2)
+        machine_rate = float(pm.get("rate") or 0.0)
+        billed_total = round((bill_min / 60.0) * machine_rate, 2) if machine_rate > 0.0 else 0.0
+        if billed_total <= 0.0:
+            billed_total = round(_safe_float((old_entry or {}).get("total$"), default=0.0), 2)
+        cost_mode = _bucket_cost_mode("drilling")
+        if cost_mode == "labor":
+            labor_cost = billed_total
+            machine_cost = 0.0
+        else:
+            machine_cost = billed_total
+            labor_cost = 0.0
+        new_total = round(machine_cost + labor_cost, 2)
+
+        drilling_entry = buckets_obj.setdefault(
+            "drilling",
+            {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0, "total$": 0.0},
+        )
+        drilling_entry["minutes"] = new_minutes
+        drilling_entry["machine$"] = machine_cost
+        drilling_entry["labor$"] = labor_cost
+        drilling_entry["total$"] = new_total
+
+        order_list = bucket_view_obj.setdefault("order", [])
+        if not isinstance(order_list, list):
+            try:
+                order_list = list(order_list or [])
+            except Exception:
+                order_list = []
+            bucket_view_obj["order"] = order_list
+        if "drilling" not in order_list:
+            order_list.append("drilling")
+
+        totals_map = bucket_view_obj.setdefault("totals", {})
+        if not isinstance(totals_map, dict):
+            try:
+                totals_map = dict(totals_map or {})
+            except Exception:
+                totals_map = {}
+            bucket_view_obj["totals"] = totals_map
+
+        minutes_sum = 0.0
+        machine_sum = 0.0
+        labor_sum = 0.0
+        total_sum = 0.0
+        for info in buckets_obj.values():
+            if not isinstance(info, _MappingABC):
+                continue
+            minutes_sum += _safe_float(info.get("minutes"), default=0.0)
+            machine_sum += _safe_float(info.get("machine$"), default=0.0)
+            labor_sum += _safe_float(info.get("labor$"), default=0.0)
+            total_sum += _safe_float(info.get("total$"), default=0.0)
+
+        totals_map["minutes"] = round(minutes_sum, 2)
+        totals_map["machine$"] = round(machine_sum, 2)
+        totals_map["labor$"] = round(labor_sum, 2)
+        totals_map["total$"] = round(total_sum, 2)
 
         process_plan_summary_card: dict[str, Any] | None = None
         if isinstance(process_plan_summary_local, dict):
