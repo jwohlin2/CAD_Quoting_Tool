@@ -7871,6 +7871,67 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 include_flag = bool(existing[1])
             hour_summary_entries[label] = (round(hours_val, 2), include_flag)
 
+    if prefer_removal_drilling_hours:
+        extra_map = getattr(bucket_state, "extra", {})
+        if not isinstance(extra_map, _MappingABC):
+            extra_map = {}
+        removal_card_hr = _coerce_float_or_none(extra_map.get("removal_drilling_hours"))
+
+        charged_snapshot: Mapping[str, Any]
+        if isinstance(charged_hours, _MappingABC):
+            charged_snapshot = charged_hours
+        else:
+            charged_snapshot = dict(charged_hours or {})  # type: ignore[arg-type]
+        bucket_hr = None
+        for raw_key in charged_snapshot.keys():
+            if _canonical_bucket_key(raw_key) in {"drilling", "drill"}:
+                bucket_hr = _coerce_float_or_none(charged_snapshot.get(raw_key))
+                break
+
+        row_hr_debug = None
+        process_rows_debug = getattr(process_table, "_rows", None)
+        if isinstance(process_rows_debug, Sequence):
+            for row_entry in process_rows_debug:
+                if not isinstance(row_entry, _MappingABC):
+                    continue
+                if _canonical_bucket_key(row_entry.get("label")) in {"drilling", "drill"}:
+                    row_hr_debug = _coerce_float_or_none(row_entry.get("hours"))
+                    break
+
+        hour_summary_map: dict[str, float] = {}
+        if isinstance(hour_summary_entries, _MappingABC):
+            for label, value in hour_summary_entries.items():
+                base_value: Any
+                if isinstance(value, (list, tuple)) and value:
+                    base_value = value[0]
+                else:
+                    base_value = value
+                coerced = _coerce_float_or_none(base_value)
+                if coerced is None:
+                    continue
+                hour_summary_map[str(label)] = float(coerced)
+        summary_hr = None
+        for key in ("Drilling", "drilling"):
+            if key in hour_summary_map:
+                summary_hr = hour_summary_map[key]
+                break
+
+        def _fmt_drill_debug(value: float | None) -> str:
+            if value is None:
+                return "-"
+            try:
+                return f"{float(value):.2f}"
+            except Exception:
+                return "-"
+
+        logger.info(
+            "[drill-sync] card=%s  bucket=%s  row=%s  summary=%s",
+            _fmt_drill_debug(removal_card_hr),
+            _fmt_drill_debug(bucket_hr),
+            _fmt_drill_debug(row_hr_debug),
+            _fmt_drill_debug(summary_hr),
+        )
+
     if hour_summary_entries:
         def _canonical_hour_label(value: Any) -> str:
             text = str(value or "")
