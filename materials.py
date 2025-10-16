@@ -476,7 +476,64 @@ def _material_cost_components(
     if scrap_unit_price > 0 and scrap_lb > 0:
         scrap_rate_text = f"${scrap_unit_price:.2f}/lb × {recovery_val:.0%}"
 
-    total = round(base_usd + tax_usd - scrap_credit, 2)
+    explicit_base_pre_credit = None
+    for key in (
+        "material_cost_before_credit",
+        "material_cost_pre_credit",
+        "material_cost_pre_scrap",
+        "material_cost_before_scrap",
+        "material_base_cost",
+    ):
+        explicit_base_pre_credit = _coerce_float_or_none(block.get(key))
+        if explicit_base_pre_credit is not None:
+            break
+
+    net_candidate = None
+    if explicit_base_pre_credit is None:
+        for key in (
+            "total_material_cost",
+            "material_cost",
+            "material_direct_cost",
+            "material_total_cost",
+            "total_cost",
+        ):
+            net_candidate = _coerce_float_or_none(block.get(key))
+            if net_candidate is not None:
+                break
+        if net_candidate is not None:
+            explicit_base_pre_credit = float(net_candidate) + float(scrap_credit)
+
+    if explicit_base_pre_credit is not None:
+        try:
+            base_usd = float(explicit_base_pre_credit)
+        except Exception:
+            base_usd = float(base_usd)
+        base_src_candidates = (
+            block.get("material_cost_source"),
+            block.get("material_cost_basis"),
+            block.get("material_cost_label"),
+            block.get("material_source"),
+        )
+        for candidate in base_src_candidates:
+            if candidate in (None, ""):
+                continue
+            try:
+                text = str(candidate).strip()
+            except Exception:
+                text = ""
+            if text:
+                base_src = text
+                break
+
+    net_usd = float(base_usd) - float(scrap_credit)
+    if net_usd < 0:
+        net_usd = 0.0
+    net_usd = round(net_usd, 2)
+
+    total = float(base_usd) + float(tax_usd) - float(scrap_credit)
+    if total < 0:
+        total = 0.0
+    total = round(total, 2)
 
     return {
         "base_usd": round(base_usd, 2),
@@ -486,6 +543,7 @@ def _material_cost_components(
         "scrap_rate_text": scrap_rate_text,
         "stock_piece_usd": round(stock_piece_usd, 2) if stock_piece_usd else None,
         "stock_source": stock_source,
+        "net_usd": net_usd,
         "total_usd": total,
     }
 
