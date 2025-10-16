@@ -658,6 +658,32 @@ def test_dummy_quote_direct_costs_match_across_sections() -> None:
     assert math.isclose(ladder_direct, expected_ladder_direct, abs_tol=0.01)
 
 
+def test_dummy_quote_ladder_uses_pricing_direct_costs_when_available() -> None:
+    payload = _dummy_quote_payload()
+    breakdown = payload["breakdown"]
+    direct_costs = float(breakdown["totals"].get("direct_costs", 0.0))
+    machine_cost = float(breakdown.get("process_costs", {}).get("Machine", 0.0))
+    pricing_directs = direct_costs + machine_cost + 12.34
+    payload["pricing"] = {"total_direct_costs": pricing_directs}
+
+    lines = _render_lines(payload)
+
+    process_idx = lines.index("Process & Labor Costs")
+    process_end = next(
+        (i for i in range(process_idx, len(lines)) if lines[i] == ""), len(lines)
+    )
+    process_block = lines[process_idx + 2 : process_end]
+    total_line = next(line for line in process_block if line.strip().startswith("Total"))
+    ladder_labor = _extract_currency(total_line)
+
+    ladder_line = next(line for line in lines if "Subtotal (Labor + Directs):" in line)
+    ladder_subtotal = _extract_currency(ladder_line)
+    ladder_direct = ladder_subtotal - ladder_labor
+
+    assert math.isclose(ladder_direct, pricing_directs, abs_tol=0.01)
+    assert math.isclose(ladder_subtotal, ladder_labor + pricing_directs, abs_tol=0.01)
+
+
 def test_render_omits_amortized_rows_for_single_quantity() -> None:
     payload = _dummy_quote_payload()
     payload["qty"] = 1
