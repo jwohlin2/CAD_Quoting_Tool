@@ -3141,6 +3141,85 @@ def _build_planner_bucket_render_state(
 
     return state
 
+
+def _sync_drilling_bucket_view(
+    bucket_view: Mapping[str, Any] | None,
+    *,
+    billed_minutes: float,
+    billed_cost: float | None = None,
+) -> bool:
+    """Ensure the drilling bucket mirrors the authoritative planner minutes."""
+
+    if not isinstance(bucket_view, _MutableMappingABC):
+        return False
+
+    if billed_minutes <= 0.0:
+        return False
+
+    buckets_obj = bucket_view.get("buckets")
+    if not isinstance(buckets_obj, _MutableMappingABC):
+        if isinstance(bucket_view, dict):
+            buckets_obj = bucket_view.setdefault("buckets", {})
+        else:
+            return False
+
+    entry = buckets_obj.get("drilling")
+    if not isinstance(entry, _MutableMappingABC):
+        if isinstance(buckets_obj, dict):
+            entry = buckets_obj.setdefault("drilling", {})
+        else:
+            return False
+
+    old_minutes = _safe_float(entry.get("minutes"))
+    old_machine = _safe_float(entry.get("machine$"))
+    old_labor = _safe_float(entry.get("labor$"))
+    old_total = _safe_float(entry.get("total$"))
+
+    new_minutes = round(float(billed_minutes), 2)
+    entry["minutes"] = new_minutes
+
+    new_machine = old_machine
+    new_labor = old_labor
+
+    if billed_cost is not None and billed_cost > 0.0:
+        billed_cost_val = round(float(billed_cost), 2)
+        if _bucket_cost_mode("drilling") == "labor":
+            new_labor = billed_cost_val
+            if new_machine <= 0.0:
+                new_machine = 0.0
+        else:
+            new_machine = billed_cost_val
+            if new_labor <= 0.0:
+                new_labor = 0.0
+
+    entry["machine$"] = round(new_machine, 2)
+    entry["labor$"] = round(new_labor, 2)
+    entry["total$"] = round(entry["machine$"] + entry["labor$"], 2)
+
+    totals_map = bucket_view.get("totals")
+    if isinstance(totals_map, _MutableMappingABC):
+        totals_map["minutes"] = round(
+            _safe_float(totals_map.get("minutes")) - old_minutes + new_minutes,
+            2,
+        )
+        totals_map["machine$"] = round(
+            _safe_float(totals_map.get("machine$"))
+            - old_machine
+            + entry["machine$"],
+            2,
+        )
+        totals_map["labor$"] = round(
+            _safe_float(totals_map.get("labor$")) - old_labor + entry["labor$"],
+            2,
+        )
+        totals_map["total$"] = round(
+            _safe_float(totals_map.get("total$")) - old_total + entry["total$"],
+            2,
+        )
+
+    return True
+
+
 def _charged_hours_by_bucket(process_costs, process_meta, rates):
     """Return the hours that correspond to what we actually charged."""
     out: dict[str, float] = {}
@@ -3927,8 +4006,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     display_labor_for_ladder = 0.0
     hour_summary_entries: dict[str, tuple[float, bool]] = {}
     qty_raw = result.get("qty")
-    if qty_raw in (None, ""):
+    if qty_raw in (None, "", 0):
         qty_raw = breakdown.get("qty")
+    if qty_raw in (None, "", 0):
+        decision_state = result.get("decision_state")
+        if isinstance(decision_state, _MappingABC):
+            baseline_state = decision_state.get("baseline")
+            if isinstance(baseline_state, _MappingABC):
+                qty_raw = baseline_state.get("qty")
     qty = int(qty_raw or 1)
     price        = float(result.get("price", totals.get("price", 0.0)))
 
@@ -6189,6 +6274,40 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
         return additions
 
+    if bucket_table_rows and isinstance(breakdown, _MappingABC):
+        drilling_meta_guard = breakdown.get("drilling_meta")
+        bucket_view_guard = breakdown.get("bucket_view")
+        buckets_guard = (
+            bucket_view_guard.get("buckets")
+            if isinstance(bucket_view_guard, _MappingABC)
+            else None
+        )
+        drilling_bucket_guard = (
+            buckets_guard.get("drilling")
+            if isinstance(buckets_guard, _MappingABC)
+            else None
+        )
+        if isinstance(drilling_meta_guard, _MappingABC) and isinstance(
+            drilling_bucket_guard, _MappingABC
+        ):
+            try:
+                card_hr = round(
+                    float(drilling_meta_guard["total_minutes_billed"]) / 60.0,
+                    2,
+                )
+                row_hr = round(
+                    float(drilling_bucket_guard["minutes"]) / 60.0,
+                    2,
+                )
+            except (KeyError, TypeError, ValueError):
+                card_hr = row_hr = None
+            if card_hr is not None and row_hr is not None and abs(card_hr - row_hr) > 0.01:
+                raise RuntimeError(
+                    "[FATAL] Drilling hours mismatch: "
+                    f"card {card_hr} vs row {row_hr}. "
+                    "A late writer is overwriting bucket_view. Remove any rebuilds or planner overrides."
+                )
+
     if bucket_table_rows:
         render_bucket_table(bucket_table_rows)
 
@@ -6275,21 +6394,210 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     process_table = _ProcessCostTableRecorder()
 
-    proc_total = 0.0
-    for row_spec in bucket_row_specs:
-        label_to_canon.setdefault(row_spec.label, row_spec.canon_key)
-        canon_to_display_label.setdefault(row_spec.canon_key, row_spec.label)
-        process_costs_for_render[row_spec.canon_key] = round(row_spec.total, 2)
-        bucket_minutes_detail[row_spec.canon_key] = row_spec.minutes
-        if row_spec.total <= 0.0 and row_spec.hours <= 0.0:
-            continue
-        process_table.add_row(
-            row_spec.label,
-            row_spec.hours,
-            row_spec.rate,
-            row_spec.total,
-        )
-    proc_total = round(proc_total, 2)
+    # 1a) minutes→$ for planner buckets that have minutes but no dollars
+    for k, meta in (canonical_bucket_summary or {}).items():
+        minutes = float(meta.get("minutes") or 0.0)
+        have_amount = float(process_costs_for_render.get(k) or 0.0)
+        if minutes > 0 and have_amount <= 0.0:
+            r = _rate_for_bucket(k, rates or {})
+            if r > 0:
+                process_costs_for_render[k] = round((minutes / 60.0) * r, 2)
+                bucket_minutes_detail[k] = minutes
+
+    # 1b) minutes→$ for the drilling minutes engine (if planner didn’t emit a drilling bucket)
+    drill_summary_source: Mapping[str, Any] | None = None
+    if isinstance(process_plan_summary_local, _MappingABC):
+        candidate = process_plan_summary_local.get("drilling")
+        if isinstance(candidate, _MappingABC):
+            drill_summary_source = candidate
+    if drill_summary_source is None:
+        drill_summary_source = {}
+    drill_min = float(drill_summary_source.get("total_minutes") or 0.0)
+    bill_min = float(drill_summary_source.get("total_minutes_billed") or drill_min or 0.0)
+    rates_map = rates if isinstance(rates, dict) else {}
+    drill_rate = float(
+        rates_map.get("DrillingRate")
+        or rates_map.get("drillingrate")
+        or rates_map.get("MachineRate")
+        or rates_map.get("machinerate")
+        or 0.0
+    )
+    if drill_rate <= 0.0:
+        try:
+            drill_rate = float(_rate_for_bucket("drilling", rates or {}))
+        except Exception:
+            drill_rate = 0.0
+    drill_cost = round((bill_min / 60.0) * drill_rate, 2) if bill_min > 0 else 0.0
+    if bill_min > 0:
+        process_costs_for_render["drilling"] = drill_cost
+        bucket_minutes_detail["drilling"] = bill_min
+        canonical_bucket_summary.setdefault("drilling", {}).setdefault("minutes", 0.0)
+        canonical_bucket_summary["drilling"]["minutes"] += bill_min
+
+    section_total = render_process_costs(
+        tbl=process_table,
+        process_costs=process_costs_for_render,
+        rates=rates,
+        minutes_detail=bucket_minutes_detail,
+    )
+
+    proc_total = section_total
+
+    rows: tuple[_ProcessRowRecord, ...] = tuple(getattr(process_table, "rows", ()))
+
+    def _process_row_canon(record: _ProcessRowRecord) -> str:
+        if record.canon_key:
+            return record.canon_key
+        return _canonical_bucket_key(record.name)
+
+    def _find_process_row(target_canon: str) -> _ProcessRowRecord | None:
+        if not target_canon:
+            return None
+        for record in rows:
+            if _process_row_canon(record) == target_canon:
+                return record
+        return None
+
+    process_plan_summary_map: Mapping[str, Any] | None = None
+    if isinstance(process_plan_summary_local, _MappingABC):
+        process_plan_summary_map = process_plan_summary_local
+
+    if rows and isinstance(process_plan_summary_map, _MappingABC):
+        drilling_row = _find_process_row("drilling")
+        drilling_summary = process_plan_summary_map.get("drilling")
+        if drilling_row and isinstance(drilling_summary, _MappingABC):
+            card_minutes_billed = _safe_float(
+                drilling_summary.get("total_minutes_billed"), default=0.0
+            )
+            row_hr_for_cost = float(drilling_row.hours or 0.0)
+            row_hr = round(row_hr_for_cost, 2)
+            row_rate = float(drilling_row.rate or 0.0)
+            row_cost = float(drilling_row.total or 0.0)
+
+            if card_minutes_billed > 0.0:
+                billed_hr_precise = card_minutes_billed / 60.0
+                billed_hr = round(billed_hr_precise, 2)
+                drill_rate = _rate_for_bucket("drilling", rates or {})
+                if drill_rate <= 0.0:
+                    drill_rate = row_rate
+                if drill_rate <= 0.0:
+                    drill_rate = 0.0
+                billed_cost = round(billed_hr_precise * drill_rate, 2)
+
+                process_table.update_row(
+                    "drilling", hours=billed_hr, rate=drill_rate, cost=billed_cost
+                )
+                drilling_row.hours = billed_hr
+                drilling_row.rate = drill_rate
+                drilling_row.total = billed_cost
+                row_hr_for_cost = billed_hr_precise
+                row_hr = billed_hr
+                row_rate = drill_rate
+                row_cost = billed_cost
+                process_cost_row_details["drilling"] = (billed_hr, drill_rate, billed_cost)
+                labor_costs_display[drilling_row.name] = billed_cost
+                process_costs_for_render["drilling"] = billed_cost
+
+            card_hr = round(card_minutes_billed / 60.0, 2)
+            if abs(card_hr - row_hr) >= 0.05:
+                # Favor the planner summary and coerce the row to match when they diverge.
+                row_hr_for_cost = card_minutes_billed / 60.0
+                row_hr = card_hr
+                corrected_cost = row_cost
+                if row_rate > 0.0:
+                    corrected_cost = round(row_hr_for_cost * row_rate, 2)
+                    process_table.update_row(
+                        "drilling", hours=row_hr, cost=corrected_cost
+                    )
+                    drilling_row.total = corrected_cost
+                    row_cost = corrected_cost
+                else:
+                    process_table.update_row("drilling", hours=row_hr)
+                drilling_row.hours = row_hr
+                process_cost_row_details["drilling"] = (
+                    row_hr,
+                    row_rate,
+                    row_cost,
+                )
+                process_costs_for_render["drilling"] = row_cost
+                labor_costs_display[drilling_row.name] = row_cost
+                drilling_row.total = row_cost
+
+            drilling_meta_for_guard = None
+            if isinstance(breakdown, _MappingABC):
+                drilling_meta_for_guard = breakdown.get("drilling_meta")
+            bucket_view_for_guard = None
+            if isinstance(breakdown, _MappingABC):
+                bucket_view_for_guard = breakdown.get("bucket_view")
+            if (
+                isinstance(drilling_meta_for_guard, _MappingABC)
+                and isinstance(bucket_view_for_guard, _MappingABC)
+            ):
+                buckets_guard = bucket_view_for_guard.get("buckets")
+                if isinstance(buckets_guard, _MappingABC):
+                    drilling_bucket_guard = buckets_guard.get("drilling")
+                else:
+                    drilling_bucket_guard = None
+                if isinstance(drilling_bucket_guard, _MappingABC):
+                    try:
+                        card_hr_guard = round(
+                            float(
+                                drilling_meta_for_guard.get("total_minutes_billed")
+                                or 0.0
+                            )
+                            / 60.0,
+                            2,
+                        )
+                        row_hr_guard = round(
+                            float(drilling_bucket_guard.get("minutes") or 0.0) / 60.0,
+                            2,
+                        )
+                    except (TypeError, ValueError):
+                        card_hr_guard = row_hr_guard = None
+                    if (
+                        card_hr_guard is not None
+                        and row_hr_guard is not None
+                        and abs(card_hr_guard - row_hr_guard) > 0.01
+                    ):
+                        billed_minutes_guard = _safe_float(
+                            drilling_meta_for_guard.get("total_minutes_billed"),
+                            default=0.0,
+                        )
+                        corrected = _sync_drilling_bucket_view(
+                            bucket_view_for_guard,
+                            billed_minutes=billed_minutes_guard,
+                            billed_cost=row_cost,
+                        )
+                        if corrected:
+                            buckets_guard_ref = bucket_view_for_guard.get("buckets")
+                            if isinstance(buckets_guard_ref, _MappingABC):
+                                drilling_bucket_guard_ref = buckets_guard_ref.get("drilling")
+                            else:
+                                drilling_bucket_guard_ref = None
+                            if isinstance(drilling_bucket_guard_ref, _MappingABC):
+                                row_hr_guard = round(
+                                    _safe_float(
+                                        drilling_bucket_guard_ref.get("minutes"),
+                                        default=0.0,
+                                    )
+                                    / 60.0,
+                                    2,
+                                )
+                                card_hr_guard = round(billed_minutes_guard / 60.0, 2)
+                        if (
+                            card_hr_guard is None
+                            or row_hr_guard is None
+                            or abs(card_hr_guard - row_hr_guard) > 0.01
+                        ):
+                            raise RuntimeError(
+                                "Drilling hours mismatch AFTER BUILD: "
+                                f"card {card_hr_guard} vs row {row_hr_guard}. "
+                                "Check for late bucket_view rebuilds or planner overrides."
+                            )
+
+            assert (
+                abs(row_cost - row_hr_for_cost * row_rate) < 0.51
+            ), "Drilling $ ≠ hr × rate"
 
     misc_total = 0.0
     for label, amount in labor_cost_totals.items():
@@ -6887,25 +7195,30 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         tool_add = (tchg_deep if seen_deep else 0.0) + (tchg_std if seen_std else 0.0)
         total_drill_minutes_with_toolchange = subtotal_min + tool_add
 
-        # === Choose billing truth ===
+        # === DRILLING BILLING TRUTH ===
         drill_meta = breakdown.setdefault("drilling_meta", {})
-        if isinstance(drill_meta, dict):
-            drill_meta["toolchange_minutes"] = float(tool_add)
-            drill_meta["total_minutes_with_toolchange"] = float(total_drill_minutes_with_toolchange)
+        if not isinstance(drill_meta, dict):
+            try:
+                drill_meta = dict(drill_meta or {})
+            except Exception:
+                drill_meta = {}
+            breakdown["drilling_meta"] = drill_meta
+        drill_meta["toolchange_minutes"] = float(tool_add)
+        drill_meta["total_minutes_with_toolchange"] = float(total_drill_minutes_with_toolchange)
 
-        # === Choose billing truth ===
         bill_min = float(
-            drill_meta.get("total_minutes_billed")
-            or drill_meta.get("total_minutes_with_toolchange")
-            or drill_meta.get("total_minutes")
+            drilling_meta.get("total_minutes_billed")
+            or drilling_meta.get("total_minutes_with_toolchange")
+            or drilling_meta.get("total_minutes")
             or 0.0
         )
-        drill_meta["total_minutes_billed"] = bill_min  # canonical for pricing
+        drill_meta["total_minutes_billed"] = bill_min
 
-        # Overwrite any legacy planner seed:
+        # Overwrite legacy planner meta
         pm = breakdown.setdefault("process_meta", {}).setdefault("drilling", {})
         pm["minutes"] = bill_min
         pm["hr"] = round(bill_min / 60.0, 6)
+        pm["rate"] = float(rates.get("DrillingRate") or rates.get("MachineRate") or 0.0)
         pm["basis"] = ["minutes_engine"]  # replace any 'planner_drilling_override'
 
         process_plan_summary_card: dict[str, Any] | None = None
@@ -6928,10 +7241,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             drill_meta_summary["toolchange_minutes"] = float(tool_add)
             drill_meta_summary["total_minutes_with_toolchange"] = float(total_drill_minutes_with_toolchange)
             drill_meta_summary["total_minutes_billed"] = bill_min
-        if isinstance(drilling_meta, dict):
-            drilling_meta["toolchange_minutes"] = float(tool_add)
-            drilling_meta["total_minutes_with_toolchange"] = float(total_drill_minutes_with_toolchange)
-
         append_line(f"Toolchange adders: Deep-Drill {tchg_deep:.2f} min + Drill {tchg_std:.2f} min = {tool_add:.2f} min" if tool_add > 0 else "Toolchange adders: -")
         append_line("-" * 66)
         append_line(f"Subtotal (per-hole × qty) . {subtotal_min:.2f} min  ({fmt_hours(subtotal_min/60.0)})")
@@ -11432,18 +11741,6 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                     0.05, hole_count * max(avg_dia_in, 0.1) * float(thickness_in) / 600.0
                 )
             drill_total_minutes = max(0.0, float(estimator_hours or 0.0)) * 60.0
-            bucket_view["drilling"] = {
-                "minutes": drill_total_minutes,
-                "machine_cost": (drill_total_minutes / 60.0) * drilling_rate,
-                "labor_cost": 0.0,
-            }
-            drilling_meta_container.update({"estimator_hours_for_planner": estimator_hours})
-            process_meta["drilling"] = {
-                "minutes": drill_total_minutes,
-                "hr": round(drill_total_minutes / 60.0, 6),
-                "rate": drilling_rate,
-                "basis": ["minutes_engine"],
-            }
 
             if drill_debug_summary:
                 bins_list: list[dict[str, Any]] = []
@@ -11694,37 +11991,13 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         billed_minutes = float(drill_total_minutes)
 
     if billed_minutes > 0.0:
-        bview = process_plan_summary.setdefault("bucket_view", {"buckets": {}, "order": []})
-        buckets_map = bview.setdefault("buckets", {})
-        bucket_entry = buckets_map.setdefault(
-            "drilling", {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0}
-        )
-
-        bucket_entry["minutes"] = billed_minutes
-
-        rates_map = rates if isinstance(rates, _MappingABC) else {}
-        drill_rate = float(
-            rates_map.get("DrillingRate")
-            or rates_map.get("drillingrate")
-            or rates_map.get("MachineRate")
-            or rates_map.get("machinerate")
-            or 0.0
-        )
-        if drill_rate <= 0.0:
-            drill_rate = float(drilling_rate)
-
-        bucket_entry["machine$"] = round((bucket_entry["minutes"] / 60.0) * drill_rate, 2)
-        bucket_entry["labor$"] = _safe_float(bucket_entry.get("labor$"))
-        bucket_entry["total$"] = round(bucket_entry["labor$"] + bucket_entry["machine$"], 2)
-
-        order_list = bview.setdefault("order", [])
-        if "drilling" not in order_list:
-            order_list.append("drilling")
-
+        # Legacy bucket view population for process_plan is disabled to avoid
+        # overriding minutes-engine drilling totals. Preserve the billed minutes
+        # detail without mutating planner structures.
         bucket_minutes_detail_local = locals().get("bucket_minutes_detail")
         if isinstance(bucket_minutes_detail_local, dict):
-            bucket_minutes_detail_local["drilling"] = bucket_entry["minutes"]
-        bucket_minutes_detail_for_render["drilling"] = bucket_entry["minutes"]
+            bucket_minutes_detail_local["drilling"] = billed_minutes
+        bucket_minutes_detail_for_render["drilling"] = billed_minutes
 
     drilling_minutes_for_bucket: float | None = None
     if billed_minutes > 0.0:

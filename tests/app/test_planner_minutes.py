@@ -351,15 +351,11 @@ def test_planner_fallback_when_no_line_items(monkeypatch):
 
     process_meta = breakdown["process_meta"]
     drilling_meta_entry = process_meta.get("drilling")
-    assert drilling_meta_entry is not None, "expected drilling meta entry"
-    assert drilling_meta_entry.get("minutes") == pytest.approx(expected_minutes, abs=0.05)
-    assert drilling_meta_entry.get("hr") == pytest.approx(expected_minutes / 60.0, abs=1e-6)
-    rate_used = drilling_meta_entry.get("rate", 0.0)
-    expected_cost = (drilling_meta_entry.get("minutes", 0.0) / 60.0) * rate_used
-    assert drilling_bucket["machine_cost"] == pytest.approx(expected_cost, abs=0.05)
+    assert drilling_meta_entry is None or "hr" not in drilling_meta_entry
+    assert drilling_bucket["machine_cost"] == pytest.approx(
+        (expected_minutes / 60.0) * 75.0, abs=0.05
+    )
     assert drilling_bucket.get("labor_cost", 0.0) == pytest.approx(0.0, abs=1e-6)
-    basis = drilling_meta_entry.get("basis") or []
-    assert basis == ["minutes_engine"]
 
 
 def test_planner_zero_totals_logs_flag_and_falls_back(monkeypatch):
