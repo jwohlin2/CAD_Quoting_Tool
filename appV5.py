@@ -139,6 +139,8 @@ from appkit.merge_utils import (
     _collect_process_keys,
 )
 
+_log = logger
+
 from appkit.effective import (
     compute_effective_state,
     effective_to_overrides,
@@ -7990,37 +7992,61 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         removal_drilling_hours=removal_drilling_hours_precise,
         prefer_removal_drilling_hours=prefer_removal_drilling_hours,
     )
-    removal_hours_debug = None
+    def _format_drill_value(value: float | None) -> str:
+        if value is None:
+            return "nan"
+        if not math.isfinite(value):
+            return "nan"
+        return f"{value:.2f}"
+
+    extra_map: Mapping[str, Any] | None = None
     if isinstance(getattr(bucket_state, "extra", None), _MappingABC):
-        removal_hours_debug = _coerce_float_or_none(
-            bucket_state.extra.get("removal_drilling_hours")
-        )
-    drill_bucket_key: str | None = None
-    for raw_key in charged_hours:
-        canon = _canonical_bucket_key(raw_key)
-        if canon in {"drilling", "drill"}:
-            drill_bucket_key = raw_key
-            break
-    bucket_hours_debug = (
-        _coerce_float_or_none(charged_hours.get(drill_bucket_key))
-        if drill_bucket_key
+        extra_map = bucket_state.extra
+
+    drill_machine_minutes = (
+        _coerce_float_or_none(extra_map.get("drill_machine_minutes"))
+        if extra_map is not None
         else None
     )
-    if removal_hours_debug is not None or bucket_hours_debug is not None:
-        def _fmt_debug(value: float | None) -> str:
-            if value is None:
-                return "nan"
-            try:
-                numeric = float(value)
-            except Exception:
-                return "nan"
-            if not math.isfinite(numeric):
-                return "nan"
-            return f"{numeric:.2f}"
+    drill_labor_minutes = (
+        _coerce_float_or_none(extra_map.get("drill_labor_minutes"))
+        if extra_map is not None
+        else None
+    )
+    drill_bucket_key = next(
+        (
+            raw_key
+            for raw_key in charged_hours
+            if _canonical_bucket_key(raw_key) in {"drilling", "drill"}
+        ),
+        None,
+    )
+    charged_drilling_hours = _coerce_float_or_none(
+        charged_hours.get(drill_bucket_key) if drill_bucket_key is not None else None
+    )
 
+    if (
+        drill_machine_minutes is not None
+        or drill_labor_minutes is not None
+        or charged_drilling_hours is not None
+    ):
+        _log.info(
+            "[drill-sync] card_m=%s card_l=%s charged_hr=%s",
+            _format_drill_value(drill_machine_minutes),
+            _format_drill_value(drill_labor_minutes),
+            _format_drill_value(charged_drilling_hours),
+        )
+
+    removal_hours_debug = (
+        _coerce_float_or_none(extra_map.get("removal_drilling_hours"))
+        if extra_map is not None
+        else None
+    )
+    bucket_hours_debug = charged_drilling_hours
+    if removal_hours_debug is not None or bucket_hours_debug is not None:
         print(
             "[DEBUG] drilling_hours removal_card="
-            f"{_fmt_debug(removal_hours_debug)}  bucket={_fmt_debug(bucket_hours_debug)}"
+            f"{_format_drill_value(removal_hours_debug)}  bucket={_format_drill_value(bucket_hours_debug)}"
         )
     charged_hour_entries = sorted(charged_hours.items(), key=lambda kv: kv[0])
     charged_hours_by_canon: dict[str, float] = {}
