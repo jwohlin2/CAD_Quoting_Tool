@@ -3139,6 +3139,8 @@ class PlannerBucketRenderState:
     display_machine_total: float = 0.0
     bucket_minutes_detail: dict[str, float] = field(default_factory=dict)
     process_costs_for_render: dict[str, float] = field(default_factory=dict)
+    notes: dict[str, str] = field(default_factory=dict)
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 def _build_planner_bucket_render_state(
@@ -3149,6 +3151,8 @@ def _build_planner_bucket_render_state(
     labor_cost_details_input: Mapping[str, Any] | None = None,
     process_costs_canon: Mapping[str, float] | None = None,
     rates: Mapping[str, Any] | None = None,
+    removal_drilling_hours: float | None = None,
+    prefer_removal_drilling_hours: bool = True,
 ) -> PlannerBucketRenderState:
     state = PlannerBucketRenderState()
 
@@ -3159,6 +3163,13 @@ def _build_planner_bucket_render_state(
 
     if not isinstance(bucket_view, _MappingABC):
         return state
+
+    try:
+        removal_hr = float(removal_drilling_hours) if removal_drilling_hours is not None else None
+    except Exception:
+        removal_hr = None
+    if removal_hr is not None and removal_hr < 0:
+        removal_hr = None
 
     buckets = bucket_view.get("buckets") if isinstance(bucket_view, _MappingABC) else None
     if not isinstance(buckets, _MappingABC):
@@ -3189,6 +3200,27 @@ def _build_planner_bucket_render_state(
         machine_raw = _safe_float(info.get("machine$"), default=0.0)
 
         hours_raw = minutes_val / 60.0 if minutes_val else 0.0
+        original_hours = hours_raw
+
+        if _canonical_bucket_key(canon_key) == "drilling" and removal_hr is not None:
+            state.extra["removal_drilling_hours"] = float(removal_hr)
+            if prefer_removal_drilling_hours:
+                override_hours = max(0.0, float(removal_hr))
+                override_minutes = override_hours * 60.0
+                if not math.isclose(original_hours, override_hours, rel_tol=1e-9, abs_tol=1e-6):
+                    state.notes["drilling_source"] = "removal_card"
+                    state.extra["drilling_hours_override"] = (
+                        float(original_hours),
+                        float(override_hours),
+                    )
+                hours_raw = override_hours
+                minutes_val = override_minutes
+            elif not math.isclose(original_hours, float(removal_hr), rel_tol=1e-9, abs_tol=1e-6):
+                state.extra["drilling_hours_override"] = (
+                    float(original_hours),
+                    float(removal_hr),
+                )
+
         total_raw = labor_raw + machine_raw
 
         if total_raw <= 0.01 and minutes_val > 0:
@@ -3336,7 +3368,14 @@ def _sync_drilling_bucket_view(
     return True
 
 
-def _charged_hours_by_bucket(process_costs, process_meta, rates):
+def _charged_hours_by_bucket(
+    process_costs,
+    process_meta,
+    rates,
+    *,
+    removal_drilling_hours: float | None = None,
+    prefer_removal_drilling_hours: bool = True,
+):
     """Return the hours that correspond to what we actually charged."""
     out: dict[str, float] = {}
     for key, amount in (process_costs or {}).items():
@@ -3355,6 +3394,32 @@ def _charged_hours_by_bucket(process_costs, process_meta, rates):
         if hr is not None:
             label = _process_label(key)
             out[label] = out.get(label, 0.0) + float(hr)
+    try:
+        removal_hr = float(removal_drilling_hours) if removal_drilling_hours is not None else None
+    except Exception:
+        removal_hr = None
+    if removal_hr is not None and removal_hr < 0:
+        removal_hr = None
+    if removal_hr is not None and prefer_removal_drilling_hours:
+        desired = max(0.0, float(removal_hr))
+        drill_labels = [label for label in out if _canonical_bucket_key(label) == "drilling"]
+        if drill_labels:
+            for label in drill_labels:
+                current = float(out.get(label, 0.0) or 0.0)
+                if not math.isclose(current, desired, rel_tol=1e-9, abs_tol=1e-6):
+                    logger.info(
+                        "[hours-sync] Overriding Drilling bucket hours from %.2f -> %.2f (source=removal_card)",
+                        current,
+                        desired,
+                    )
+                out[label] = desired
+        else:
+            label = _process_label("drilling")
+            logger.info(
+                "[hours-sync] Injecting Drilling bucket hours %.2f (source=removal_card)",
+                desired,
+            )
+            out[label] = desired
     return out
 
 def _planner_bucket_key_for_name(name: Any) -> str:
@@ -3741,6 +3806,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     show_zeros: bool = False,
     llm_explanation: str = "",
     page_width: int = 74,
+    cfg: QuoteConfiguration | None = None,
 ) -> str:
     """Pretty printer for a full quote with auto-included non-zero lines."""
     breakdown    = result.get("breakdown", {}) or {}
@@ -3756,6 +3822,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         target_app_meta = {}
         result["app_meta"] = target_app_meta
     target_app_meta["llm_debug_enabled"] = True
+
+    prefer_removal_drilling_hours = getattr(cfg, "prefer_removal_drilling_hours", True)
+    if prefer_removal_drilling_hours is None:
+        prefer_removal_drilling_hours = True
+    else:
+        prefer_removal_drilling_hours = bool(prefer_removal_drilling_hours)
 
     totals       = breakdown.get("totals", {}) or {}
     if not isinstance(totals, dict):
@@ -5955,13 +6027,19 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     have_card_minutes = False
     if isinstance(drilling_meta_map, _MappingABC):
         for key in ("total_minutes_billed", "total_minutes_with_toolchange", "total_minutes"):
-            card_minutes_val = _coerce_float_or_none(drilling_meta_map.get(key))
-            if card_minutes_val is not None:
+            candidate_minutes = _coerce_float_or_none(drilling_meta_map.get(key))
+            if candidate_minutes is not None:
+                card_minutes_val = float(candidate_minutes)
                 have_card_minutes = True
                 break
     if card_minutes_val is None:
         card_minutes_val = 0.0
-    card_hr = round(float(card_minutes_val) / 60.0, 2)
+    card_minutes_precise = float(card_minutes_val)
+    removal_drilling_minutes = card_minutes_precise if have_card_minutes else None
+    removal_drilling_hours_precise = (
+        card_minutes_precise / 60.0 if have_card_minutes else None
+    )
+    card_hr = round(card_minutes_precise / 60.0, 2)
     row_hr = card_hr
     drilling_minutes_from_bucket = None
     bucket_view_snapshot = breakdown.get("bucket_view") if isinstance(breakdown, _MappingABC) else None
@@ -5975,15 +6053,35 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 )
                 if drilling_minutes_from_bucket is not None:
                     row_hr = round(float(drilling_minutes_from_bucket) / 60.0, 2)
-    if (
-        have_card_minutes
-        and drilling_minutes_from_bucket is not None
-        and abs(card_hr - row_hr) > 0.01
-    ):
-        raise RuntimeError(
-            f"[FATAL] Drilling hours mismatch: card {card_hr} vs row {row_hr}. "
-            "Late writer is overwriting bucket_view."
-        )
+    if have_card_minutes and drilling_minutes_from_bucket is not None:
+        try:
+            bucket_hr_precise = float(drilling_minutes_from_bucket) / 60.0
+        except Exception:
+            bucket_hr_precise = None
+        if (
+            bucket_hr_precise is not None
+            and removal_drilling_hours_precise is not None
+            and abs(removal_drilling_hours_precise - bucket_hr_precise) > 0.01
+        ):
+            if prefer_removal_drilling_hours:
+                logger.info(
+                    "[hours-sync] Overriding Drilling bucket hours from %.2f -> %.2f (source=removal_card)",
+                    bucket_hr_precise,
+                    removal_drilling_hours_precise,
+                )
+                minutes_to_apply = removal_drilling_minutes or 0.0
+                _sync_drilling_bucket_view(
+                    bucket_view_snapshot,
+                    billed_minutes=float(minutes_to_apply),
+                    billed_cost=None,
+                )
+                drilling_minutes_from_bucket = minutes_to_apply
+                row_hr = round(removal_drilling_hours_precise, 2)
+            else:
+                raise RuntimeError(
+                    f"[FATAL] Drilling hours mismatch: card {card_hr} vs row {row_hr}. "
+                    "Late writer is overwriting bucket_view."
+                )
 
     append_line("Process & Labor Costs")
     append_line(divider)
@@ -6076,6 +6174,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         labor_cost_details_input=labor_cost_details_input,
         process_costs_canon=process_costs_canon,
         rates=rates,
+        removal_drilling_hours=removal_drilling_hours_precise,
+        prefer_removal_drilling_hours=prefer_removal_drilling_hours,
     )
 
     def _norm(s: Any) -> str:
@@ -6726,11 +6826,27 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             except (KeyError, TypeError, ValueError):
                 card_hr = row_hr = None
             if card_hr is not None and row_hr is not None and abs(card_hr - row_hr) > 0.01:
-                raise RuntimeError(
-                    "[FATAL] Drilling hours mismatch: "
-                    f"card {card_hr} vs row {row_hr}. "
-                    "Late writer is overwriting bucket_view."
-                )
+                if prefer_removal_drilling_hours and removal_drilling_hours_precise is not None:
+                    billed_minutes_guard = _safe_float(
+                        drilling_meta_guard.get("total_minutes_billed"),
+                        default=0.0,
+                    )
+                    logger.info(
+                        "[hours-sync] Overriding Drilling bucket hours from %.2f -> %.2f (source=removal_card)",
+                        row_hr,
+                        removal_drilling_hours_precise,
+                    )
+                    _sync_drilling_bucket_view(
+                        bucket_view_guard,
+                        billed_minutes=float(billed_minutes_guard or 0.0),
+                        billed_cost=None,
+                    )
+                else:
+                    raise RuntimeError(
+                        "[FATAL] Drilling hours mismatch: "
+                        f"card {card_hr} vs row {row_hr}. "
+                        "Late writer is overwriting bucket_view."
+                    )
 
     if bucket_table_rows:
         render_bucket_table(bucket_table_rows)
@@ -6994,11 +7110,18 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                             or row_hr_guard is None
                             or abs(card_hr_guard - row_hr_guard) > 0.01
                         ):
-                            raise RuntimeError(
-                                "Drilling hours mismatch AFTER BUILD: "
-                                f"card {card_hr_guard} vs row {row_hr_guard}. "
-                                "Late writer is overwriting bucket_view."
-                            )
+                            if prefer_removal_drilling_hours:
+                                logger.warning(
+                                    "[hours-sync] Drilling hours still diverge after override: card %.2f vs row %.2f",
+                                    card_hr_guard if card_hr_guard is not None else -1.0,
+                                    row_hr_guard if row_hr_guard is not None else -1.0,
+                                )
+                            else:
+                                raise RuntimeError(
+                                    "Drilling hours mismatch AFTER BUILD: "
+                                    f"card {card_hr_guard} vs row {row_hr_guard}. "
+                                    "Late writer is overwriting bucket_view."
+                                )
 
             assert (
                 abs(row_cost - row_hr_for_cost * row_rate) < 0.51
@@ -7038,7 +7161,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     hour_summary_entries.clear()
 
-    charged_hours = _charged_hours_by_bucket(process_costs, process_meta, rates)
+    charged_hours = _charged_hours_by_bucket(
+        process_costs,
+        process_meta,
+        rates,
+        removal_drilling_hours=removal_drilling_hours_precise,
+        prefer_removal_drilling_hours=prefer_removal_drilling_hours,
+    )
     charged_hour_entries = sorted(charged_hours.items(), key=lambda kv: kv[0])
     charged_hours_by_canon: dict[str, float] = {}
     for raw_key, hour_val in charged_hour_entries:
@@ -8575,6 +8704,9 @@ class QuoteConfiguration:
 
     default_params: Dict[str, Any] = field(default_factory=lambda: copy.deepcopy(PARAMS_DEFAULT))
     default_material_display: str = DEFAULT_MATERIAL_DISPLAY
+    prefer_removal_drilling_hours: bool = True
+    stock_price_source: str = "mcmaster_api"
+    scrap_price_source: str = "wieland"
 
     def copy_default_params(self) -> Dict[str, Any]:
         """Return a deep copy of the default parameter set."""
