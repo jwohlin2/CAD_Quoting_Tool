@@ -408,6 +408,23 @@ SCRAP_CREDIT_FALLBACK_USD_PER_LB = 0.35
 SCRAP_RECOVERY_DEFAULT = 0.85
 
 
+def _usd_per_lb(value: Any, unit_hint: Any | None = None) -> float | None:
+    """Normalize assorted unit hints down to USD/lb."""
+
+    if value in (None, ""):
+        return None
+    try:
+        v = float(value)
+    except Exception:
+        return None
+    unit = str(unit_hint or "").lower()
+    if "kg" in unit:
+        return v / LB_PER_KG
+    if "mt" in unit or "tonne" in unit or "/t" in unit:
+        return v / 1000.0 / LB_PER_KG
+    return v
+
+
 def _wieland_scrap_usd_per_lb(material_family: str | None) -> float | None:
     """Return the USD/lb scrap price from the Wieland scraper if available."""
 
@@ -554,49 +571,36 @@ def _material_cost_components(
         return raw
 
     overrides_map = overrides if isinstance(overrides, _MappingABC) else {}
+    core = _materials_material_cost_components(block, overrides=overrides_map, cfg=cfg)
 
-    base_pre_credit = _first_numeric_or_none(
-        data.get("material_cost_before_credit"),
-        data.get("material_cost_pre_credit"),
-        data.get("material_cost_pre_scrap"),
-        data.get("material_cost_before_scrap"),
-        data.get("material_base_cost"),
+    tolerance = 0.51
+    base_value = float(core.get("base_usd", 0.0))
+    stock_piece_usd = core.get("stock_piece_usd")
+    if stock_piece_usd is not None:
+        try:
+            stock_piece_usd = float(stock_piece_usd)
+        except Exception:
+            stock_piece_usd = None
+
+    stock_source = core.get("stock_source") or _pick_text(
+        data.get("stock_price_source"),
+        data.get("stock_vendor"),
+        data.get("stock_source"),
+        data.get("unit_price_source"),
+        data.get("source"),
     )
+    if not stock_source and cfg is not None:
+        source_hint = getattr(cfg, "stock_price_source", None)
+        if source_hint:
+            stock_source = str(source_hint)
 
-    scrap_credit_val = _coerce_float_or_none(data.get("material_scrap_credit"))
-    scrap_credit = max(0.0, float(scrap_credit_val)) if scrap_credit_val is not None else 0.0
-
-    tax_val = _coerce_float_or_none(data.get("material_tax"))
-    material_tax = max(0.0, float(tax_val)) if tax_val is not None else 0.0
-
-    net_candidate = _first_numeric_or_none(
-        data.get("total_material_cost"),
-        data.get("material_cost"),
-        data.get("material_direct_cost"),
-        data.get("material_total_cost"),
-        data.get("total_cost"),
+    base_source = core.get("base_source") or _pick_text(
+        data.get("unit_price_source"),
+        data.get("source"),
+        data.get("stock_vendor"),
     )
-
-    if base_pre_credit is None:
-        if net_candidate is not None:
-            base_pre_credit = float(net_candidate) + float(scrap_credit)
-        else:
-            base_pre_credit = _first_numeric_or_none(
-                data.get("unit_price_each$"),
-                data.get("unit_price$"),
-                data.get("stock_price$"),
-                data.get("stock_price"),
-                data.get("supplier_min$"),
-                data.get("supplier_min"),
-                data.get("supplier_min_charge$"),
-                data.get("supplier_min_charge"),
-            )
-
-    base_value = float(base_pre_credit or 0.0)
-    scrap_value = max(0.0, float(scrap_credit))
-    tax_value = max(0.0, float(material_tax))
-    net_value = max(0.0, base_value - scrap_value)
-    total_value = max(0.0, base_value + tax_value - scrap_value)
+    if not base_source and stock_source:
+        base_source = stock_source
 
     supplier_min = _first_numeric_or_none(
         data.get("supplier_min$"),
@@ -604,50 +608,16 @@ def _material_cost_components(
         data.get("supplier_min_charge$"),
         data.get("supplier_min_charge"),
     )
-
-    stock_price_candidate = _first_numeric_or_none(
-        data.get("unit_price_each$"),
-        data.get("unit_price$"),
-        data.get("stock_price$"),
-        data.get("stock_price"),
-    )
-
-    tolerance = 0.51
-    stock_piece_usd: float | None = None
-    if stock_price_candidate is not None and stock_price_candidate > 0:
-        if base_value <= 0 or abs(stock_price_candidate - base_value) <= tolerance:
-            stock_piece_usd = float(base_value if base_value > 0 else stock_price_candidate)
-
-    stock_source = _pick_text(
-        data.get("stock_price_source"),
-        data.get("stock_vendor"),
-        data.get("stock_source"),
-        data.get("unit_price_source"),
-        data.get("source"),
-    )
-    base_source = _pick_text(
-        data.get("unit_price_source"),
-        data.get("source"),
-        data.get("stock_vendor"),
-    )
-
-    if not stock_source and cfg is not None:
-        source_hint = getattr(cfg, "stock_price_source", None)
-        if source_hint:
-            stock_source = str(source_hint)
-    if not base_source and stock_source:
-        base_source = stock_source
-
-    if supplier_min is not None and base_value > 0 and abs(float(supplier_min) - base_value) <= tolerance:
+    if (
+        supplier_min is not None
+        and base_value > 0
+        and abs(float(supplier_min) - base_value) <= tolerance
+    ):
         supplier_label = "Supplier Min"
         if base_source:
             supplier_label = f"{base_source} (supplier min)"
         base_source = supplier_label
 
-    scrap_price_source_raw = _pick_text(
-        data.get("scrap_price_source"),
-        data.get("scrap_source"),
-    )
     scrap_source = _pick_text(
         data.get("scrap_credit_source"),
         data.get("scrap_source"),
@@ -672,54 +642,9 @@ def _material_cost_components(
         if scrap_hint:
             scrap_source = str(scrap_hint)
 
-    scrap_price = _first_numeric_or_none(
-        data.get("scrap_credit_unit_price_usd_per_lb"),
-        data.get("scrap_price_usd_per_lb"),
-    )
-    scrap_recovery = _coerce_float_or_none(data.get("scrap_credit_recovery_pct"))
-    if scrap_recovery is None:
-        scrap_recovery = _coerce_float_or_none(data.get("scrap_recovery_pct"))
-
-    scrap_price_source_lower = str(scrap_price_source_raw or "").strip().lower()
-    if scrap_credit <= 0 and scrap_price_source_lower == "wieland":
-        auto_credit_val = _coerce_float_or_none(data.get("computed_scrap_credit_usd"))
-        if auto_credit_val is not None and auto_credit_val > 0:
-            scrap_credit = float(auto_credit_val)
-        else:
-            scrap_mass = _coerce_float_or_none(
-                data.get("scrap_credit_mass_lb")
-                or data.get("scrap_weight_lb")
-                or data.get("scrap_lb")
-            )
-            mass_lb = float(scrap_mass) if scrap_mass is not None and scrap_mass > 0 else 0.0
-            price_val = _coerce_float_or_none(scrap_price)
-            if price_val is None or price_val <= 0:
-                price_val = 0.0
-            recovery_val = _coerce_float_or_none(scrap_recovery)
-            if recovery_val is None or recovery_val <= 0:
-                recovery_val = SCRAP_RECOVERY_DEFAULT
-            elif recovery_val > 1.0 + 1e-6:
-                recovery_val = recovery_val / 100.0
-            recovery_val = max(0.0, min(1.0, float(recovery_val)))
-            if mass_lb > 0 and price_val > 0 and recovery_val > 0:
-                scrap_credit = mass_lb * float(price_val) * float(recovery_val)
-
-    scrap_rate_segments: list[str] = []
-    if scrap_price is not None and scrap_price > 0:
-        scrap_rate_segments.append(f"{fmt_money(scrap_price, '$')}/lb")
-    if scrap_recovery is not None and scrap_recovery > 0:
-        recovery_val = float(scrap_recovery)
-        if recovery_val <= 1.0 + 1e-6:
-            recovery_pct = recovery_val * 100.0
-        else:
-            recovery_pct = recovery_val
-        scrap_rate_segments.append(f"{recovery_pct:.0f}%")
-
-    scrap_rate_text = ""
-    if scrap_rate_segments:
-        scrap_rate_text = " × ".join(scrap_rate_segments)
+    scrap_rate_text = core.get("scrap_rate_text")
     scrap_source_label = _normalize_source(scrap_source) if scrap_source else ""
-    if scrap_source_label:
+    if scrap_rate_text and scrap_source_label:
         scrap_rate_text = f"{scrap_source_label} {scrap_rate_text}".strip()
 
     return {
@@ -727,11 +652,11 @@ def _material_cost_components(
         "stock_source": _normalize_source(stock_source) if stock_source else "",
         "base_usd": round(base_value, 2),
         "base_source": _normalize_source(base_source) if base_source else "",
-        "tax_usd": round(tax_value, 2),
-        "scrap_credit_usd": round(scrap_value, 2),
+        "tax_usd": round(float(core.get("tax_usd", 0.0)), 2),
+        "scrap_credit_usd": round(float(core.get("scrap_credit_usd", 0.0)), 2),
         "scrap_rate_text": scrap_rate_text,
-        "net_usd": round(net_value, 2),
-        "total_usd": round(total_value, 2),
+        "net_usd": round(float(core.get("net_usd", 0.0)), 2),
+        "total_usd": round(float(core.get("total_usd", 0.0)), 2),
     }
 
 
@@ -1207,7 +1132,7 @@ if __package__:
         _compute_scrap_mass_g as _compute_scrap_mass_g,
         _density_for_material as _density_for_material,
         _material_family as _material_family,
-        _material_cost_components as _material_cost_components,
+        _material_cost_components as _materials_material_cost_components,
         _material_price_from_choice as _material_price_from_choice,
         _material_price_per_g_from_choice as _material_price_per_g_from_choice,
         _nearest_std_side as _nearest_std_side,
@@ -1223,7 +1148,7 @@ else:
         _compute_scrap_mass_g as _compute_scrap_mass_g,
         _density_for_material as _density_for_material,
         _material_family as _material_family,
-        _material_cost_components as _material_cost_components,
+        _material_cost_components as _materials_material_cost_components,
         _material_price_from_choice as _material_price_from_choice,
         _material_price_per_g_from_choice as _material_price_per_g_from_choice,
         _nearest_std_side as _nearest_std_side,
@@ -6529,28 +6454,41 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     mc = None
             if mc:
                 stock_piece_val = mc.get("stock_piece_usd")
+                base_usd_val = float(mc.get("base_usd", 0.0))
+                base_source = mc.get("base_source") or ""
                 if stock_piece_val is not None:
-                    stock_src = mc.get("stock_source") or ""
-                    src_suffix = f" ({stock_src})" if stock_src else ""
-                    row(f"Stock Piece{src_suffix}", float(stock_piece_val), indent="  ")
+                    label_src = base_source or mc.get("stock_source") or "Stock piece"
+                    row(
+                        f"Stock Piece ({label_src})",
+                        round(base_usd_val, 2),
+                        indent="  ",
+                    )
                 else:
-                    base_source = mc.get("base_source") or ""
-                    base_label = "Base Material"
-                    if base_source:
-                        base_label = f"Base Material @ {base_source}"
-                    row(base_label, float(mc.get("base_usd", 0.0)), indent="  ")
-                tax_val = mc.get("tax_usd") or 0.0
+                    label_src = base_source or "per-lb"
+                    row(
+                        f"Base Material @ {label_src}",
+                        round(base_usd_val, 2),
+                        indent="  ",
+                    )
+                tax_val = float(mc.get("tax_usd") or 0.0)
                 if tax_val:
-                    row("Material Tax:", float(tax_val), indent="  ")
-                scrap_val = mc.get("scrap_credit_usd") or 0.0
-                if scrap_val:
-                    scrap_suffix = ""
-                    scrap_text = mc.get("scrap_rate_text") or ""
-                    if scrap_text:
-                        scrap_suffix = f" @ {scrap_text}"
-                    row(f"Scrap Credit{scrap_suffix}", -float(scrap_val), indent="  ")
+                    row("Material Tax:", round(tax_val, 2), indent="  ")
+                scrap_val = float(mc.get("scrap_credit_usd") or 0.0)
+                scrap_text = mc.get("scrap_rate_text") or ""
+                if scrap_val and scrap_text:
+                    row(
+                        f"Scrap Credit @ {scrap_text}",
+                        -round(scrap_val, 2),
+                        indent="  ",
+                    )
+                elif scrap_val:
+                    row("Scrap Credit", -round(scrap_val, 2), indent="  ")
                 total_material_cost = mc.get("total_usd", total_material_cost)
-                row("Total Material Cost :", float(total_material_cost or 0.0), indent="  ")
+                row(
+                    "Total Material Cost :",
+                    round(float(total_material_cost or 0.0), 2),
+                    indent="  ",
+                )
             elif total_material_cost is not None:
                 row("Total Material Cost :", total_material_cost, indent="  ")
             append_line("")
