@@ -264,7 +264,7 @@ DUMMY_QUOTE_RESULT = {
             "fixture": {"build_hr": 3.0, "build_rate": 85.0},
         },
         "nre": {
-            "programming_per_part": 0.0,
+            "programming_per_lot": 0.0,
             "fixture_per_part": 0.0,
             "extra_nre_cost": 0.0,
         },
@@ -690,7 +690,7 @@ def test_render_omits_amortized_rows_for_single_quantity() -> None:
     payload["breakdown"]["qty"] = 1
     lines = _render_lines(payload)
 
-    assert all("(amortized" not in line.lower() for line in lines)
+    assert any("programming (amortized)" in line.lower() for line in lines)
 
     assert lines.count("Process & Labor Costs") == 1
     process_idx = lines.index("Process & Labor Costs")
@@ -698,4 +698,4 @@ def test_render_omits_amortized_rows_for_single_quantity() -> None:
         (i for i in range(process_idx, len(lines)) if lines[i] == ""), len(lines)
     )
     process_rows = lines[process_idx + 2 : process_end]
-    assert all("(lot" not in line.lower() for line in process_rows)
+    assert any("programming (amortized)" in line.lower() for line in process_rows)

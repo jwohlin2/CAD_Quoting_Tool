@@ -5571,53 +5571,81 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     )
 
     programming_per_lot_val = _safe_float(prog.get("per_lot"))
-    nre_programming_per_part = _safe_float(nre.get("programming_per_part"))
-    qty_for_programming_float: float | None = None
-    if nre_programming_per_part > 0:
-        qty_for_programming: Any = breakdown.get("qty")
-        if qty_for_programming in (None, ""):
-            decision_state = result.get("decision_state")
-            if isinstance(decision_state, _MappingABC):
-                baseline_state = decision_state.get("baseline")
-                if isinstance(baseline_state, _MappingABC):
-                    qty_for_programming = baseline_state.get("qty")
-        if qty_for_programming in (None, ""):
-            qty_for_programming = qty
-        try:
-            qty_for_programming_float = float(qty_for_programming or 1)
-        except Exception:
+    nre_programming_per_lot = _safe_float(nre.get("programming_per_lot"))
+    if nre_programming_per_lot <= 0:
+        legacy_per_part = _safe_float(nre.get("programming_per_part"))
+        if legacy_per_part > 0:
+            nre_programming_per_lot = legacy_per_part
             try:
-                qty_for_programming_float = float(qty or 1)
+                nre["programming_per_lot"] = legacy_per_part
             except Exception:
-                qty_for_programming_float = 1.0
-        if not math.isfinite(qty_for_programming_float) or qty_for_programming_float <= 0:
+                pass
+        try:
+            nre.pop("programming_per_part", None)
+        except Exception:
+            pass
+    qty_for_programming: Any = breakdown.get("qty")
+    if qty_for_programming in (None, ""):
+        decision_state = result.get("decision_state")
+        if isinstance(decision_state, _MappingABC):
+            baseline_state = decision_state.get("baseline")
+            if isinstance(baseline_state, _MappingABC):
+                qty_for_programming = baseline_state.get("qty")
+    if qty_for_programming in (None, ""):
+        qty_for_programming = qty
+    try:
+        qty_for_programming_float = float(qty_for_programming or 1)
+    except Exception:
+        try:
+            qty_for_programming_float = float(qty or 1)
+        except Exception:
             qty_for_programming_float = 1.0
-    if (
-        programming_per_lot_val <= 0
-        and nre_programming_per_part > 0
-        and qty_for_programming_float is not None
-    ):
-        programming_per_lot_val = round(
-            nre_programming_per_part * qty_for_programming_float, 2
-        )
-
+    if not math.isfinite(qty_for_programming_float) or qty_for_programming_float <= 0:
+        qty_for_programming_float = 1.0
+    qty_for_programming_float = max(qty_for_programming_float, 1.0)
     prog_hr_total = float((nre.get("programming_hr") or 0.0) or 0.0)
+    aggregated_programming_hours = 0.0
+    if programmer_hours > 0:
+        aggregated_programming_hours += programmer_hours
+    if engineer_hours > 0:
+        aggregated_programming_hours += engineer_hours
+    if prog_hr_total <= 0 and aggregated_programming_hours > 0:
+        try:
+            nre["programming_hr"] = aggregated_programming_hours
+        except Exception:
+            pass
+        prog_hr_total = aggregated_programming_hours
     programming_cost_total = float((nre.get("programming_cost") or 0.0) or 0.0)
     if prog_hr_total > 0 and programming_cost_total == 0.0:
         programming_rate_total = _coerce_rate_value(rates.get("ProgrammingRate"))
         nre["programming_cost"] = round(prog_hr_total * programming_rate_total, 2)
 
-    computed_programming_per_part = 0.0
+    computed_programming_per_lot = 0.0
     if programmer_hours > 0 and programmer_rate > 0:
-        computed_programming_per_part += programmer_hours * programmer_rate
+        computed_programming_per_lot += programmer_hours * programmer_rate
     if engineer_hours > 0 and engineer_rate > 0:
-        computed_programming_per_part += engineer_hours * engineer_rate
+        computed_programming_per_lot += engineer_hours * engineer_rate
 
-    existing_programming_per_part = _safe_float(nre.get("programming_per_part"))
-    if existing_programming_per_part <= 0 and computed_programming_per_part > 0:
-        nre["programming_per_part"] = computed_programming_per_part
-        if _safe_float(labor_cost_totals.get("Programming (amortized)")) <= 0:
-            labor_cost_totals["Programming (amortized)"] = computed_programming_per_part
+    if programming_per_lot_val <= 0 and nre_programming_per_lot > 0:
+        programming_per_lot_val = round(nre_programming_per_lot, 2)
+    if programming_per_lot_val <= 0 and computed_programming_per_lot > 0:
+        programming_per_lot_val = round(computed_programming_per_lot, 2)
+
+    existing_programming_per_lot = _safe_float(nre.get("programming_per_lot"))
+    if existing_programming_per_lot <= 0 and computed_programming_per_lot > 0:
+        nre["programming_per_lot"] = computed_programming_per_lot
+    if _safe_float(labor_cost_totals.get("Programming (amortized)")) <= 0:
+        per_lot_source = computed_programming_per_lot
+        if per_lot_source <= 0 and nre_programming_per_lot > 0:
+            per_lot_source = nre_programming_per_lot
+        if per_lot_source <= 0 and programming_per_lot_val > 0:
+            per_lot_source = programming_per_lot_val
+        try:
+            labor_cost_totals["Programming (amortized)"] = round(
+                per_lot_source / qty_for_programming_float, 2
+            )
+        except Exception:
+            labor_cost_totals["Programming (amortized)"] = 0.0
 
     show_programming_row = (
         programming_per_lot_val > 0
@@ -5667,7 +5695,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     # Any other NRE numeric keys (auto include)
     other_nre_total = 0.0
     for k, v in (nre or {}).items():
-        if k in ("programming_per_part", "fixture_per_part"):  # these are per-part rollups
+        if k in ("programming_per_lot", "fixture_per_part", "programming_per_part"):
             continue
         if isinstance(v, (int, float)) and (v > 0 or show_zeros):
             row(k.replace("_", " ").title() + ":", float(v))
@@ -5679,7 +5707,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         amortized_qty = int(result.get("qty") or breakdown.get("qty") or qty or 1)
     except Exception:
         amortized_qty = qty if qty > 0 else 1
-    show_amortized = amortized_qty > 1
+    show_amortized = True
 
     def _should_hide_amortized(label: Any) -> bool:
         """Return True when amortized rows should be omitted from labor output."""
@@ -5687,15 +5715,27 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         _, is_amortized = _canonical_amortized_label(label)
         return is_amortized and not show_amortized
 
+    programming_meta_detail = (nre_detail or {}).get("programming") or {}
     programming_per_part_cost = labor_cost_totals.get("Programming (amortized)")
-    if programming_per_part_cost is None:
-        programming_meta_detail = (nre_detail or {}).get("programming") or {}
+    try:
+        programming_per_part_cost = float(programming_per_part_cost or 0.0)
+    except Exception:
+        programming_per_part_cost = 0.0
+    if programming_per_part_cost <= 0:
         try:
             programming_per_part_cost = float(
                 programming_meta_detail.get("per_part", 0.0) or 0.0
             )
         except Exception:
             programming_per_part_cost = 0.0
+    if programming_per_part_cost <= 0:
+        per_lot_detail_val = _safe_float(programming_meta_detail.get("per_lot"))
+        if per_lot_detail_val > 0:
+            programming_per_part_cost = per_lot_detail_val / max(qty_for_programming_float, 1.0)
+    if programming_per_part_cost <= 0:
+        per_lot_from_nre = _safe_float(nre.get("programming_per_lot"))
+        if per_lot_from_nre > 0:
+            programming_per_part_cost = per_lot_from_nre / max(qty_for_programming_float, 1.0)
 
     fixture_meta_detail = (nre_detail or {}).get("fixture") or {}
     fixture_labor_per_part_cost = labor_cost_totals.get("Fixture Build (amortized)")
@@ -5704,9 +5744,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             fixture_labor_total = float(fixture_meta_detail.get("labor_cost", 0.0) or 0.0)
         except Exception:
             fixture_labor_total = 0.0
-        fixture_labor_per_part_cost = (
-            fixture_labor_total / qty if qty > 0 else fixture_labor_total
-        )
+        divisor_qty = 1 if qty in (None, "") else qty
+        try:
+            divisor_qty_val = float(divisor_qty)
+        except Exception:
+            divisor_qty_val = 1.0
+        if not math.isfinite(divisor_qty_val) or divisor_qty_val <= 0:
+            divisor_qty_val = 1.0
+        fixture_labor_per_part_cost = fixture_labor_total / divisor_qty_val
 
     try:
         amortized_nre_total = float(programming_per_part_cost or 0.0) + float(
@@ -6135,6 +6180,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         process_costs_for_render[canon_key] = _safe_float(
             metrics.get("total"), default=0.0
         )
+    for canon_key, amount in process_costs_canon.items():
+        if canon_key not in process_costs_for_render:
+            process_costs_for_render[canon_key] = _safe_float(amount, default=0.0)
 
     proc_total = 0.0
     amortized_nre_total = 0.0
@@ -6303,9 +6351,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         nonlocal amortized_nre_total, display_labor_for_ladder
         amortized_nre_total = 0.0
         additions: dict[str, tuple[float, float]] = {}
-        if not show_amortized:
-            return additions
 
+        qty_divisor = max(qty_for_programming_float, 1.0)
         programming_minutes = 0.0
         try:
             prog_pp = float(programming_per_part_cost or 0.0)
@@ -6313,21 +6360,29 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             prog_pp = 0.0
         if prog_pp <= 0:
             try:
-                prog_pp = float(
-                    labor_cost_totals.get("Programming (amortized)")
-                    or nre.get("programming_per_part")
-                    or 0.0
-                )
+                prog_pp = float(labor_cost_totals.get("Programming (amortized)") or 0.0)
             except Exception:
                 prog_pp = 0.0
+        if prog_pp <= 0:
+            per_lot_candidate = _safe_float(nre.get("programming_per_lot"))
+            if per_lot_candidate <= 0:
+                per_lot_candidate = _safe_float(nre.get("programming_per_part"))
+            if per_lot_candidate > 0:
+                prog_pp = per_lot_candidate / qty_divisor
         if prog_pp > 0:
             detail_args: list[str] = []
             programming_detail_local = (
                 nre_detail.get("programming", {}) if isinstance(nre_detail, dict) else {}
             )
+            total_programming_hours = _safe_float(nre.get("programming_hr"))
+            accumulate_from_detail = False
+            if total_programming_hours <= 0:
+                total_programming_hours = 0.0
+                accumulate_from_detail = True
             prog_hr_detail = _safe_float(programming_detail_local.get("prog_hr"))
             if prog_hr_detail > 0:
-                programming_minutes += prog_hr_detail * 60.0
+                if accumulate_from_detail:
+                    total_programming_hours += prog_hr_detail
                 prog_rate_detail = _resolve_rate_with_fallback(
                     programming_detail_local.get("prog_rate"),
                     "ProgrammerRate",
@@ -6338,7 +6393,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 )
             eng_hr_detail = _safe_float(programming_detail_local.get("eng_hr"))
             if eng_hr_detail > 0:
-                programming_minutes += eng_hr_detail * 60.0
+                if accumulate_from_detail:
+                    total_programming_hours += eng_hr_detail
                 eng_rate_detail = _resolve_rate_with_fallback(
                     programming_detail_local.get("eng_rate"),
                     "EngineerRate",
@@ -6347,6 +6403,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 detail_args.append(
                     f"- Engineering (lot): {_hours_with_rate_text(eng_hr_detail, eng_rate_detail)}"
                 )
+            if total_programming_hours > 0:
+                programming_minutes = (total_programming_hours / qty_divisor) * 60.0
             if qty > 1:
                 detail_args.append(f"Amortized across {qty} pcs")
             if detail_args:
@@ -6375,7 +6433,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             fixture_detail = nre_detail.get("fixture", {}) if isinstance(nre_detail, dict) else {}
             fixture_build_hr_detail = _safe_float(fixture_detail.get("build_hr"))
             if fixture_build_hr_detail > 0:
-                fixture_minutes += fixture_build_hr_detail * 60.0
+                fixture_minutes += (fixture_build_hr_detail / qty_divisor) * 60.0
                 fixture_rate_detail = _resolve_rate_with_fallback(
                     fixture_detail.get("build_rate"),
                     "FixtureBuildRate",
@@ -6386,7 +6444,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 )
             soft_jaw_hr = _safe_float(fixture_detail.get("soft_jaw_hr"))
             if soft_jaw_hr and soft_jaw_hr > 0:
-                fixture_minutes += soft_jaw_hr * 60.0
+                fixture_minutes += (soft_jaw_hr / qty_divisor) * 60.0
                 detail_args.append(f"Soft jaw prep {fmt_hours(soft_jaw_hr)}")
             if qty > 1:
                 detail_args.append(f"Amortized across {qty} pcs")
@@ -6439,16 +6497,42 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     amortized_overrides = _prepare_amortized_details()
 
     for canon_key, (amount, minutes) in amortized_overrides.items():
-        amount_val = _safe_float(amount)
-        minutes_val = _safe_float(minutes)
-        if canon_key not in canonical_bucket_summary:
-            continue
+        amount_val = max(0.0, _safe_float(amount))
+        minutes_val = max(0.0, _safe_float(minutes))
+        summary_entry = canonical_bucket_summary.setdefault(
+            canon_key,
+            {"total": 0.0, "labor": 0.0, "machine": 0.0, "minutes": 0.0},
+        )
+        summary_entry["total"] = amount_val
+        summary_entry["labor"] = amount_val
+        summary_entry["machine"] = 0.0
+        if minutes_val > 0:
+            summary_entry["minutes"] = minutes_val
         process_costs_for_render[canon_key] = amount_val
         if minutes_val > 0:
             bucket_minutes_detail[canon_key] = minutes_val
         label = _display_bucket_label(canon_key, label_overrides)
         label_to_canon.setdefault(label, canon_key)
         canon_to_display_label.setdefault(canon_key, label)
+        if canon_key not in canonical_bucket_order:
+            canonical_bucket_order.insert(0, canon_key)
+        if isinstance(breakdown, dict):
+            try:
+                bucket_view_obj = breakdown.setdefault("bucket_view", {})
+            except Exception:
+                bucket_view_obj = None
+            if isinstance(bucket_view_obj, dict):
+                buckets_map = bucket_view_obj.setdefault("buckets", {})
+                if isinstance(buckets_map, dict):
+                    buckets_map[canon_key] = {
+                        "minutes": round(minutes_val, 2),
+                        "labor$": round(amount_val, 2),
+                        "machine$": 0.0,
+                        "total$": round(amount_val, 2),
+                    }
+                order_list = bucket_view_obj.setdefault("order", [])
+                if isinstance(order_list, list) and canon_key not in order_list:
+                    order_list.insert(0, canon_key)
 
     for canon_key in process_costs_for_render:
         label = _display_bucket_label(canon_key, label_overrides)
@@ -6773,16 +6857,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         programming_per_part_amount = 0.0
     programming_is_amortized = show_amortized and (
         bool(programming_meta.get("amortized"))
-        or (qty_for_hours > 1 and programming_per_part_amount > 0)
+        or programming_per_part_amount > 0
     )
 
     try:
         fixture_per_part_amount = float(fixture_labor_per_part_cost or 0.0)
     except Exception:
         fixture_per_part_amount = 0.0
-    fixture_is_amortized = show_amortized and (
-        qty_for_hours > 1 and fixture_per_part_amount > 0
-    )
+    fixture_is_amortized = show_amortized and (fixture_per_part_amount > 0)
 
     planner_mode = str(pricing_source_value).lower() == "planner"
     planner_entry_baseline = len(hour_summary_entries)
@@ -11186,6 +11268,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     )
     geo_context = geom
     planner_inputs = dict(ui_vars or {})
+    rates = dict(rates or {})
     geo_payload: dict[str, Any] = geo_context
     state = _ensure_quote_state(quote_state)
 

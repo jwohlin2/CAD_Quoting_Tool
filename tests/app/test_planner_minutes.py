@@ -350,8 +350,10 @@ def test_planner_fallback_when_no_line_items(monkeypatch):
     assert drilling_bucket["minutes"] == pytest.approx(expected_minutes, abs=0.05)
 
     process_meta = breakdown["process_meta"]
-    drilling_meta_entry = process_meta.get("drilling")
-    assert drilling_meta_entry is None or "hr" not in drilling_meta_entry
+    drilling_meta_entry = process_meta.get("drilling") or {}
+    assert drilling_meta_entry.get("hr") == pytest.approx(
+        expected_minutes / 60.0, abs=1e-6
+    )
     assert drilling_bucket["machine_cost"] == pytest.approx(
         (expected_minutes / 60.0) * 75.0, abs=0.05
     )
