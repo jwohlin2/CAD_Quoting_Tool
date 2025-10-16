@@ -473,7 +473,7 @@ def _compute_material_block(
     net_after_scrap = max(0.0, start_lb - scrap_lb)
 
     material_label = str(geo_ctx.get("material_display") or material_key or "")
-    price_per_lb, price_source = _resolve_price_per_lb(material_label, material_key)
+    price_per_lb, price_source = _resolve_price_per_lb(material_key, material_label)
 
     supplier_min_candidates = (
         geo_ctx.get("supplier_min$"),
@@ -3316,6 +3316,16 @@ def _lookup_bucket_rate(
         coerced = _safe_float(rate_val, default=0.0)
         if coerced > 0:
             return coerced
+    canon_key = _canonical_bucket_key(bucket_key)
+    canon_norm = _normalize_bucket_key(canon_key)
+    if canon_key and canon_norm and canon_norm != norm:
+        for candidate in _BUCKET_RATE_CANDIDATES.get(canon_norm, ()): 
+            rate_val = rates_map.get(candidate)
+            if rate_val is None:
+                rate_val = rates_map.get(_normalize_bucket_key(candidate))
+            coerced = _safe_float(rate_val, default=0.0)
+            if coerced > 0:
+                return coerced
 
     fallback_key = "LaborRate" if _bucket_cost_mode(norm) == "labor" else "MachineRate"
     fallback_val = rates_map.get(fallback_key)
@@ -6736,10 +6746,77 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
         qty_divisor = max(qty_for_programming_float, 1.0)
         programming_minutes = 0.0
+        programming_detail_local = (
+            nre_detail.get("programming", {}) if isinstance(nre_detail, dict) else {}
+        )
+        total_programming_hours = _safe_float(nre.get("programming_hr"))
+        accumulate_from_detail = False
+        if total_programming_hours <= 0:
+            total_programming_hours = 0.0
+            accumulate_from_detail = True
+
+        detail_args: list[str] = []
+        detail_hours = 0.0
+        per_lot_cost = 0.0
+
+        prog_hr_detail = _safe_float(programming_detail_local.get("prog_hr"))
+        if prog_hr_detail > 0:
+            if accumulate_from_detail:
+                total_programming_hours += prog_hr_detail
+            prog_rate_detail = _resolve_rate_with_fallback(
+                programming_detail_local.get("prog_rate"),
+                "ProgrammerRate",
+                "ProgrammingRate",
+                "ShopRate",
+            )
+            per_lot_cost += prog_hr_detail * max(prog_rate_detail, 0.0)
+            detail_hours += prog_hr_detail
+            detail_args.append(
+                f"- Programmer (lot): {_hours_with_rate_text(prog_hr_detail, prog_rate_detail)}"
+            )
+
+        eng_hr_detail = _safe_float(programming_detail_local.get("eng_hr"))
+        if eng_hr_detail > 0:
+            if accumulate_from_detail:
+                total_programming_hours += eng_hr_detail
+            eng_rate_detail = _resolve_rate_with_fallback(
+                programming_detail_local.get("eng_rate"),
+                "EngineerRate",
+                "ProgrammingRate",
+                "ShopRate",
+            )
+            per_lot_cost += eng_hr_detail * max(eng_rate_detail, 0.0)
+            detail_hours += eng_hr_detail
+            detail_args.append(
+                f"- Engineering (lot): {_hours_with_rate_text(eng_hr_detail, eng_rate_detail)}"
+            )
+
+        remaining_hours = max(total_programming_hours - detail_hours, 0.0)
+        if remaining_hours > 0:
+            remainder_rate = _resolve_rate_with_fallback(
+                programming_detail_local.get("prog_rate"),
+                "ProgrammingRate",
+                "ProgrammerRate",
+                "ShopRate",
+            )
+            if remainder_rate <= 0.0:
+                remainder_rate = _resolve_rate_with_fallback(
+                    programming_detail_local.get("eng_rate"),
+                    "EngineerRate",
+                    "ProgrammingRate",
+                    "ShopRate",
+                )
+            per_lot_cost += remaining_hours * max(remainder_rate, 0.0)
+
+        if total_programming_hours > 0:
+            programming_minutes = (total_programming_hours / qty_divisor) * 60.0
+
         try:
             prog_pp = float(programming_per_part_cost or 0.0)
         except Exception:
             prog_pp = 0.0
+        if per_lot_cost > 0:
+            prog_pp = per_lot_cost / qty_divisor
         if prog_pp <= 0:
             try:
                 prog_pp = float(labor_cost_totals.get("Programming (amortized)") or 0.0)
@@ -6752,41 +6829,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if per_lot_candidate > 0:
                 prog_pp = per_lot_candidate / qty_divisor
         if prog_pp > 0:
-            detail_args: list[str] = []
-            programming_detail_local = (
-                nre_detail.get("programming", {}) if isinstance(nre_detail, dict) else {}
-            )
-            total_programming_hours = _safe_float(nre.get("programming_hr"))
-            accumulate_from_detail = False
-            if total_programming_hours <= 0:
-                total_programming_hours = 0.0
-                accumulate_from_detail = True
-            prog_hr_detail = _safe_float(programming_detail_local.get("prog_hr"))
-            if prog_hr_detail > 0:
-                if accumulate_from_detail:
-                    total_programming_hours += prog_hr_detail
-                prog_rate_detail = _resolve_rate_with_fallback(
-                    programming_detail_local.get("prog_rate"),
-                    "ProgrammerRate",
-                    "ShopRate",
-                )
-                detail_args.append(
-                    f"- Programmer (lot): {_hours_with_rate_text(prog_hr_detail, prog_rate_detail)}"
-                )
-            eng_hr_detail = _safe_float(programming_detail_local.get("eng_hr"))
-            if eng_hr_detail > 0:
-                if accumulate_from_detail:
-                    total_programming_hours += eng_hr_detail
-                eng_rate_detail = _resolve_rate_with_fallback(
-                    programming_detail_local.get("eng_rate"),
-                    "EngineerRate",
-                    "ShopRate",
-                )
-                detail_args.append(
-                    f"- Engineering (lot): {_hours_with_rate_text(eng_hr_detail, eng_rate_detail)}"
-                )
-            if total_programming_hours > 0:
-                programming_minutes = (total_programming_hours / qty_divisor) * 60.0
+            prog_pp = round(float(prog_pp), 2)
+            try:
+                labor_cost_totals["Programming (amortized)"] = prog_pp
+            except Exception:
+                pass
             if qty > 1:
                 detail_args.append(f"Amortized across {qty} pcs")
             if detail_args:
