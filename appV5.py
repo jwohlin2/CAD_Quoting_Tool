@@ -6924,8 +6924,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             drill_summary_source = candidate
     if drill_summary_source is None:
         drill_summary_source = {}
-    drill_min = float(drill_summary_source.get("total_minutes") or 0.0)
-    bill_min = float(drill_summary_source.get("total_minutes_billed") or drill_min or 0.0)
+    drill_min = _safe_float(
+        drill_summary_source.get("total_minutes_with_toolchange"), default=0.0
+    )
+    if drill_min <= 0.0:
+        drill_min = _safe_float(drill_summary_source.get("total_minutes"), default=0.0)
+    bill_min = _safe_float(drill_summary_source.get("total_minutes_billed"), default=0.0)
+    if bill_min <= 0.0:
+        bill_min = drill_min
     rates_map = rates if isinstance(rates, dict) else {}
     drill_rate = float(
         rates_map.get("DrillingRate")
@@ -7962,12 +7968,34 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             or drilling_meta.get("total_minutes")
             or 0.0
         )
-        drill_meta["total_minutes_billed"] = bill_min
+
+        plan_drill_min: float | None = None
+        plan_candidates = [
+            locals().get("process_plan_summary_local"),
+            breakdown.get("process_plan") if isinstance(breakdown, _MappingABC) else None,
+        ]
+        for candidate in plan_candidates:
+            if not isinstance(candidate, _MappingABC):
+                continue
+            plan_drilling = candidate.get("drilling")
+            if not isinstance(plan_drilling, _MappingABC):
+                continue
+            plan_minutes = _coerce_float_or_none(
+                plan_drilling.get("total_minutes_with_toolchange")
+            )
+            if plan_minutes is not None and plan_minutes > 0.0:
+                plan_drill_min = float(plan_minutes)
+                break
+
+        drill_min = plan_drill_min if plan_drill_min and plan_drill_min > 0.0 else bill_min
+        bill_min = drill_min
+        drill_hr = drill_min / 60.0 if drill_min else 0.0
+        drill_meta["total_minutes_billed"] = drill_min
 
         # Overwrite legacy planner meta
         pm = breakdown.setdefault("process_meta", {}).setdefault("drilling", {})
-        pm["minutes"] = bill_min
-        pm["hr"] = round(bill_min / 60.0, 6)
+        pm["minutes"] = drill_min
+        pm["hr"] = drill_hr
         pm["rate"] = float(rates.get("DrillingRate") or 0.0)
         pm["basis"] = ["minutes_engine"]  # replace any 'planner_drilling_override'
 
@@ -7992,9 +8020,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
         old_entry = buckets_obj.pop("drilling", {}) if isinstance(buckets_obj, dict) else {}
 
-        new_minutes = round(bill_min, 2)
+        new_minutes = round(drill_min, 2)
         machine_rate = float(pm.get("rate") or 0.0)
-        billed_total = round((bill_min / 60.0) * machine_rate, 2) if machine_rate > 0.0 else 0.0
+        billed_total = (
+            round((drill_min / 60.0) * machine_rate, 2)
+            if machine_rate > 0.0 and drill_min > 0.0
+            else 0.0
+        )
         if billed_total <= 0.0:
             billed_total = round(_safe_float((old_entry or {}).get("total$"), default=0.0), 2)
         if new_minutes <= 0.0 and isinstance(old_entry, _MappingABC):
@@ -13022,21 +13054,39 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         or drill_meta_map.get("total_minutes")
         or 0.0
     )
-    drill_meta_map["total_minutes_billed"] = bill_min
+
+    plan_drill_min: float | None = None
+    plan_candidates = [
+        locals().get("process_plan_summary"),
+        locals().get("process_plan_summary_local"),
+        breakdown.get("process_plan") if isinstance(breakdown, _MappingABC) else None,
+    ]
+    for candidate in plan_candidates:
+        if not isinstance(candidate, _MappingABC):
+            continue
+        plan_drilling = candidate.get("drilling")
+        if not isinstance(plan_drilling, _MappingABC):
+            continue
+        plan_minutes = _coerce_float_or_none(
+            plan_drilling.get("total_minutes_with_toolchange")
+        )
+        if plan_minutes is not None and plan_minutes > 0.0:
+            plan_drill_min = float(plan_minutes)
+            break
+
+    drill_min = plan_drill_min if plan_drill_min and plan_drill_min > 0.0 else bill_min
+    bill_min = drill_min
+    drill_hr = drill_min / 60.0 if drill_min else 0.0
+    drill_meta_map["total_minutes_billed"] = drill_min
 
     # overwrite any legacy/planner meta for drilling
     pm = breakdown.setdefault("process_meta", {}).setdefault("drilling", {})
-    pm["minutes"] = bill_min
-    pm["hr"] = round(bill_min / 60.0, 6)
+    pm["minutes"] = drill_min
+    pm["hr"] = drill_hr
     pm["rate"] = float(rates.get("DrillingRate") or rates.get("MachineRate") or 0.0)
     pm["basis"] = ["minutes_engine"]
 
-    drill_total_minutes_billed = float(
-        drilling_summary.get("total_minutes_with_toolchange")
-        or drilling_summary.get("total_minutes")
-        or 0.0
-    )
-    drilling_summary["total_minutes_billed"] = drill_total_minutes_billed
+    drilling_summary["total_minutes_billed"] = float(drill_min)
 
     drilling_meta_source: _MappingABC[str, Any] | None = None
     if isinstance(drilling_meta_container, _MappingABC):
