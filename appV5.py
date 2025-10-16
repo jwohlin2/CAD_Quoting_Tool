@@ -73,6 +73,10 @@ from cad_quoter.utils.render_utils import (
     render_quote_doc,
 )
 from cad_quoter.pricing import load_backup_prices_csv
+from cad_quoter.pricing.vendor_csv import (
+    pick_from_stdgrid as _pick_from_stdgrid,
+    pick_plate_from_mcmaster as _pick_plate_from_mcmaster,
+)
 from cad_quoter.pricing.process_cost_renderer import render_process_costs
 from cad_quoter.estimators import SpeedsFeedsUnavailableError
 from cad_quoter.llm_overrides import (
@@ -244,83 +248,6 @@ def infer_plate_lw_in(geo: Mapping[str, Any] | None) -> tuple[float, float] | No
     return None
 
 
-def pick_stock_from_mcmaster(
-    material_key: str,
-    thickness_in: float,
-    need_L: float,
-    need_W: float,
-) -> dict[str, float | str | None]:
-    """Select a McMaster plate that covers the requested footprint."""
-
-    result: dict[str, float | str | None]
-    stock_len = max(float(need_L), float(need_W))
-    stock_wid = min(float(need_L), float(need_W))
-    result = {
-        "len_in": stock_len,
-        "wid_in": stock_wid,
-        "thk_in": float(thickness_in),
-        "price$": None,
-        "supplier_min$": 0.0,
-        "source": "geometry-fallback",
-    }
-
-    try:
-        from cad_quoter.vendors import mcmaster_stock as _mc
-
-        catalog_loader = getattr(_mc, "_get_catalog", None)
-        if callable(catalog_loader):
-            catalog = catalog_loader()
-        else:
-            catalog = None
-        if not catalog:
-            from cad_quoter.resources import default_catalog_csv
-
-            csv_path = os.getenv("CATALOG_CSV_PATH") or str(default_catalog_csv())
-            catalog = _mc.load_catalog(csv_path)
-
-        material_lookup = MATERIAL_DISPLAY_BY_KEY.get(material_key, material_key)
-        if catalog:
-            item = _mc.choose_item(
-                catalog,
-                material_lookup,
-                float(need_L),
-                float(need_W),
-                float(thickness_in),
-            )
-            if item:
-                stock_len = float(item.length)
-                stock_wid = float(item.width)
-                if stock_len < stock_wid:
-                    stock_len, stock_wid = stock_wid, stock_len
-                result.update(
-                    {
-                        "len_in": stock_len,
-                        "wid_in": stock_wid,
-                        "thk_in": float(item.thickness),
-                        "source": "mcmaster-catalog",
-                    }
-                )
-                try:
-                    _, price_each, _, _ = _mc.lookup_sku_and_price_for_mm(
-                        material_lookup,
-                        stock_len * 25.4,
-                        stock_wid * 25.4,
-                        float(item.thickness) * 25.4,
-                        qty=1,
-                    )
-                    if price_each:
-                        result["price$"] = float(price_each)
-                except Exception:
-                    pass
-    except Exception:
-        pass
-
-    if not result.get("len_in") or not result.get("wid_in"):
-        result["len_in"] = max(float(need_L), float(need_W))
-        result["wid_in"] = min(float(need_L), float(need_W))
-    return result
-
-
 def _resolve_price_per_lb(material_label: str, material_key: str) -> tuple[float, str]:
     """Return a USD/lb material price using available providers."""
 
@@ -444,22 +371,28 @@ def _compute_material_block(
         }
 
     L_in, W_in = dims
-    stock_info = pick_stock_from_mcmaster(
-        material_key,
-        float(t_in),
-        float(L_in),
-        float(W_in),
-    )
+    material_label = str(geo_ctx.get("material_display") or material_key or "")
+    try:
+        stock_info = _pick_plate_from_mcmaster(
+            material_label,
+            float(L_in),
+            float(W_in),
+            float(t_in),
+        )
+    except Exception:
+        stock_info = None
+    if not isinstance(stock_info, dict) or not stock_info:
+        stock_info = _pick_from_stdgrid(float(L_in), float(W_in), float(t_in))
+
     stock_L_in = float(stock_info.get("len_in") or L_in)
     stock_W_in = float(stock_info.get("wid_in") or W_in)
     stock_T_in = float(stock_info.get("thk_in") or t_in)
-    source_note = str(stock_info.get("source") or "geometry-fallback")
-
-    stock_price_val = _coerce_float_or_none(stock_info.get("price$"))
-    if stock_price_val is not None and math.isfinite(stock_price_val):
-        stock_price = float(stock_price_val)
-    else:
-        stock_price = None
+    vendor_label = str(stock_info.get("vendor") or "StdGrid")
+    part_no = stock_info.get("part_no")
+    stock_price_val = _coerce_float_or_none(stock_info.get("price_usd"))
+    stock_price = float(stock_price_val) if stock_price_val and stock_price_val > 0 else None
+    stock_supplier_min_val = _coerce_float_or_none(stock_info.get("min_charge_usd"))
+    stock_supplier_min = float(stock_supplier_min_val) if stock_supplier_min_val else 0.0
 
     rho = float(density_g_cc or 2.70)
     vol_net_in3 = float(L_in) * float(W_in) * float(t_in)
@@ -472,8 +405,17 @@ def _compute_material_block(
     scrap_lb = max(scrap_lb_geom, min_scrap_lb)
     net_after_scrap = max(0.0, start_lb - scrap_lb)
 
-    material_label = str(geo_ctx.get("material_display") or material_key or "")
-    price_per_lb, price_source = _resolve_price_per_lb(material_label, material_key)
+    price_per_lb, price_source = _resolve_price_per_lb(material_key, material_label)
+    unit_price_each = stock_price if stock_price and stock_price > 0 else None
+    if unit_price_each is not None and unit_price_each > 0 and price_per_lb <= 0 and start_lb > 0:
+        price_per_lb = float(unit_price_each) / float(start_lb)
+        price_source = price_source or vendor_label or "stock"
+
+    if unit_price_each is None or unit_price_each <= 0:
+        unit_price_each = float(net_after_scrap) * float(price_per_lb)
+
+    if unit_price_each is not None and unit_price_each > 0:
+        stock_price = float(unit_price_each)
 
     supplier_min_candidates = (
         geo_ctx.get("supplier_min$"),
@@ -488,9 +430,11 @@ def _compute_material_block(
         val = _coerce_float_or_none(candidate)
         if val is not None and math.isfinite(val):
             supplier_min = max(supplier_min, float(val))
-    supplier_min = max(0.0, supplier_min)
+    supplier_min = max(0.0, max(supplier_min, stock_supplier_min))
 
-    total_mat_cost = max(net_after_scrap * price_per_lb, supplier_min)
+    total_mat_cost = max(float(unit_price_each or 0.0), float(supplier_min))
+
+    source_note = vendor_label or "stock"
 
     return {
         "material": geo_ctx.get("material_display") or material_key,
@@ -511,8 +455,12 @@ def _compute_material_block(
         "supplier_min": float(supplier_min),
         "supplier_min$": float(supplier_min),
         "source": source_note,
-        "supplier_min$": float(supplier_min),
-        "stock_price$": stock_price,
+        "stock_vendor": vendor_label,
+        "part_no": part_no,
+        "stock_price$": float(stock_price) if stock_price is not None else None,
+        "unit_price_each$": float(stock_price) if stock_price is not None else None,
+        "unit_price$": float(stock_price) if stock_price is not None else None,
+        "supplier_min_charge$": float(supplier_min),
         "total_material_cost": float(total_mat_cost),
     }
 
@@ -12725,13 +12673,27 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 material_entry["stock_dims_in"] = stock_dims_tuple
             except Exception:
                 pass
+        vendor_label = mat_block.get("stock_vendor")
+        if vendor_label:
+            material_entry["stock_vendor"] = vendor_label
+            material_entry.setdefault("source", vendor_label)
+        part_no = mat_block.get("part_no")
+        if part_no:
+            material_entry["part_no"] = part_no
         supplier_min_val = _coerce_float_or_none(mat_block.get("supplier_min$"))
         if supplier_min_val is not None:
             material_entry["supplier_min$"] = float(supplier_min_val)
             if _coerce_float_or_none(material_entry.get("supplier_min_charge")) is None:
                 material_entry["supplier_min_charge"] = float(supplier_min_val)
+            material_entry.setdefault("supplier_min_charge$", float(supplier_min_val))
         stock_price_val = _coerce_float_or_none(mat_block.get("stock_price$"))
-        if stock_price_val is not None and stock_price_val > 0:
+        unit_price_each_val = _coerce_float_or_none(
+            mat_block.get("unit_price_each$") or mat_block.get("unit_price$")
+        )
+        if unit_price_each_val is not None and unit_price_each_val > 0:
+            material_entry["unit_price"] = float(unit_price_each_val)
+            material_entry.setdefault("stock_price$", float(unit_price_each_val))
+        elif stock_price_val is not None and stock_price_val > 0:
             material_entry.setdefault("stock_price$", float(stock_price_val))
         start_lb = _coerce_float_or_none(mat_block.get("start_lb"))
         net_lb = _coerce_float_or_none(mat_block.get("net_lb"))
