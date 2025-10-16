@@ -51,7 +51,6 @@ DEFAULT_PARAMS = {
     "ConsumablesFlat": 35.0,
     "NRE_FixturesEtc": 0.0,
     "MaterialOther": 50.0,
-    "OverheadPct": 0.15,
     "MarginPct": 0.35,
     # heuristics to convert "Number of X" into hours/cost
     "HoursPerMillingSetup": 0.50,
@@ -351,9 +350,9 @@ def compute_full_quote(xlsx_path: str,
     milling_hours     += calc_hours["milling"]
     turning_hours     += calc_hours["turning"]
 
-    # ---------- Lookup Percentage rows as extra overhead adders ----------
-    overhead_add_pct = 0.0
-    overhead_details = []
+    # ---------- Lookup Percentage rows as extra markup adders ----------
+    markup_add_pct = 0.0
+    markup_details = []
     for _, row in df_lookup_pct.iterrows():
         txt = str(row["Example Values / Options"])
         pct = None
@@ -365,8 +364,8 @@ def compute_full_quote(xlsx_path: str,
             pct = None
         if pct is None:
             pct = _extract_pct_from_formula(txt) or 0.0
-        overhead_add_pct += pct
-        overhead_details.append((row["Item"], pct))
+        markup_add_pct += pct
+        markup_details.append((row["Item"], pct))
 
     # ---------- Dropdown rules ----------
     choices = user_choices.get("dropdown", {}) if user_choices else {}
@@ -547,16 +546,19 @@ def compute_full_quote(xlsx_path: str,
     material_post_scrap = material_base * scrap_mult
     material_subtotal = material_post_scrap + material_credit
 
-    # Base subtotal + consumables + NRE + overhead (base OverheadPct + lookup adders + payment terms)
+    # Base subtotal + consumables + NRE
     base_subtotal = labor_post_scrap + material_subtotal + params["ConsumablesFlat"] + params["NRE_FixturesEtc"] + direct_costs
-
-    # Overhead percent
-    overhead_pct_total = params["OverheadPct"] + overhead_add_pct + payment_pct
-    with_overhead = base_subtotal * (1.0 + overhead_pct_total)
+    markup_pct_total = markup_add_pct + payment_pct
+    subtotal_before_margin = base_subtotal * (1.0 + markup_pct_total)
 
     # Margin (base + relationship adj + expedite dropdown + expedite checkbox)
-    margin_pct_total = params["MarginPct"] + margin_adj + expedite_pct_dropdown + expedite_pct_checkbox
-    price = with_overhead * (1.0 + margin_pct_total)
+    margin_pct_total = (
+        params["MarginPct"]
+        + margin_adj
+        + expedite_pct_dropdown
+        + expedite_pct_checkbox
+    )
+    price = subtotal_before_margin * (1.0 + margin_pct_total)
 
     # Diagnostics: which numeric rows were not used at all
     def used_row(row) -> bool:
@@ -588,14 +590,14 @@ def compute_full_quote(xlsx_path: str,
             "other_direct_costs": generic_contrib["other_direct_cost"],
             "direct_costs": direct_costs,
             "base_subtotal": base_subtotal,
-            "overhead_pct_total": overhead_pct_total,
-            "with_overhead": with_overhead,
+            "markup_pct_total": markup_pct_total,
+            "subtotal_before_margin": subtotal_before_margin,
             "margin_pct_total": margin_pct_total
         },
         "hours_buckets": buckets | {"milling": milling_hours, "turning": turning_hours},
         "cost_buckets": costs,
         "role_hours": extra_role_hours,
-        "overhead_adders": overhead_details,
+        "markup_adders": markup_details,
         "unused_numeric_rows": numeric_unused.to_dict(orient="records"),
         "missing_calculated_inputs": missing_calc,
     }

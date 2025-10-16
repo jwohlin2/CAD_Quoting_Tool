@@ -122,10 +122,6 @@ def overrides_to_suggestions(
         scrap = clamp(float(scrap), guardrails["scrap_min"], guardrails["scrap_max"])
         suggestions["scrap_pct"] = scrap
 
-    contingency = _coerce_float_or_none(overrides.get("contingency_pct"))
-    if contingency is not None:
-        suggestions["contingency_pct"] = max(0.0, float(contingency))
-
     setups_val = _coerce_int(overrides.get("setups"))
     if setups_val is not None:
         suggestions["setups"] = setups_val
@@ -247,10 +243,6 @@ def suggestions_to_overrides(suggestions: Mapping[str, Any] | None) -> dict[str,
     scrap = _coerce_float_or_none(suggestions.get("scrap_pct"))
     if scrap is not None:
         overrides["scrap_pct"] = max(0.0, float(scrap))
-
-    contingency = _coerce_float_or_none(suggestions.get("contingency_pct"))
-    if contingency is not None:
-        overrides["contingency_pct"] = max(0.0, float(contingency))
 
     setups_val = _coerce_int(suggestions.get("setups"))
     if setups_val is not None:

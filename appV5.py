@@ -709,9 +709,6 @@ def _material_cost_components(
 def _compute_pricing_ladder(
     subtotal: float | int | str | None,
     *,
-    overhead_pct: float | int | str | None = 0.0,
-    ga_pct: float | int | str | None = 0.0,
-    contingency_pct: float | int | str | None = 0.0,
     expedite_pct: float | int | str | None = 0.0,
     margin_pct: float | int | str | None = 0.0,
 ) -> dict[str, float]:
@@ -722,34 +719,19 @@ def _compute_pricing_ladder(
 
     subtotal_val = round(_safe_float(subtotal, 0.0), 2)
 
-    overhead_pct_val = _pct(overhead_pct)
-    ga_pct_val = _pct(ga_pct)
-    contingency_pct_val = _pct(contingency_pct)
     expedite_pct_val = _pct(expedite_pct)
     margin_pct_val = _pct(margin_pct)
 
-    overhead_cost = round(subtotal_val * overhead_pct_val, 2)
-    ga_cost = round(subtotal_val * ga_pct_val, 2)
-    contingency_cost = round(subtotal_val * contingency_pct_val, 2)
     expedite_cost = round(subtotal_val * expedite_pct_val, 2)
 
-    with_overhead = round(subtotal_val + overhead_cost, 2)
-    with_ga = round(with_overhead + ga_cost, 2)
-    with_contingency = round(with_ga + contingency_cost, 2)
-    with_expedite = round(with_contingency + expedite_cost, 2)
+    with_expedite = round(subtotal_val + expedite_cost, 2)
     subtotal_before_margin = with_expedite
     with_margin = round(subtotal_before_margin * (1.0 + margin_pct_val), 2)
 
     return {
         "subtotal": subtotal_val,
-        "with_overhead": with_overhead,
-        "with_ga": with_ga,
-        "with_contingency": with_contingency,
         "with_expedite": with_expedite,
         "with_margin": with_margin,
-        "overhead_cost": overhead_cost,
-        "ga_cost": ga_cost,
-        "contingency_cost": contingency_cost,
         "expedite_cost": expedite_cost,
         "subtotal_before_margin": subtotal_before_margin,
     }
@@ -1563,10 +1545,6 @@ def effective_to_overrides(effective: dict, baseline: dict | None = None) -> dic
     scrap_base = baseline.get("scrap_pct")
     if scrap_eff is not None and (scrap_base is None or not math.isclose(float(scrap_eff), float(scrap_base or 0.0), abs_tol=1e-6)):
         out["scrap_pct_override"] = float(scrap_eff)
-    contingency_eff = effective.get("contingency_pct")
-    contingency_base = baseline.get("contingency_pct")
-    if contingency_eff is not None and (contingency_base is None or not math.isclose(float(contingency_eff), float(contingency_base or 0.0), abs_tol=1e-6)):
-        out["contingency_pct_override"] = float(contingency_eff)
     setups_eff = effective.get("setups")
     fixture_eff = effective.get("fixture")
     if setups_eff is not None or fixture_eff is not None:
@@ -1789,7 +1767,6 @@ def iter_suggestion_rows(state: QuoteState) -> list[dict]:
 
     scalar_specs = [
         {"path": ("scrap_pct",), "label": "Scrap %", "kind": "percent"},
-        {"path": ("contingency_pct",), "label": "Contingency %", "kind": "percent"},
         {"path": ("setups",), "label": "Setups", "kind": "int"},
         {
             "path": ("fixture",),
@@ -8861,43 +8838,25 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 return _safe_float(value, default)
         return default
 
-    overhead_pct_value = _resolve_ladder_pct(("OverheadPct", "overhead_pct"), 0.18)
-    ga_pct_value = _resolve_ladder_pct(("GA_Pct", "ga_pct", "gna_pct"), 0.10)
-    contingency_pct_value = _resolve_ladder_pct(("ContingencyPct", "contingency_pct"), 0.05)
     expedite_pct_value = _resolve_ladder_pct(("ExpeditePct", "expedite_pct"), 0.0)
     margin_pct_value = _resolve_ladder_pct(("MarginPct", "margin_pct"), 0.15)
 
-    applied_pcts.setdefault("OverheadPct", overhead_pct_value)
-    applied_pcts.setdefault("GA_Pct", ga_pct_value)
-    applied_pcts.setdefault("ContingencyPct", contingency_pct_value)
     applied_pcts.setdefault("MarginPct", margin_pct_value)
     if "ExpeditePct" not in applied_pcts and expedite_pct_value:
         applied_pcts["ExpeditePct"] = expedite_pct_value
 
     ladder_totals = _compute_pricing_ladder(
         subtotal,
-        overhead_pct=overhead_pct_value,
-        ga_pct=ga_pct_value,
-        contingency_pct=contingency_pct_value,
         expedite_pct=expedite_pct_value,
         margin_pct=margin_pct_value,
     )
 
-    with_overhead = ladder_totals["with_overhead"]
-    with_ga = ladder_totals["with_ga"]
-    with_contingency = ladder_totals["with_contingency"]
     with_expedite = ladder_totals["with_expedite"]
     subtotal_before_margin = ladder_totals.get("subtotal_before_margin", with_expedite)
-    overhead_cost = ladder_totals.get("overhead_cost", 0.0)
-    ga_cost = ladder_totals.get("ga_cost", 0.0)
-    contingency_cost = ladder_totals.get("contingency_cost", 0.0)
     expedite_cost = ladder_totals.get("expedite_cost", 0.0)
     final_price = ladder_totals["with_margin"]
 
     if isinstance(totals, dict):
-        totals["with_overhead"] = with_overhead
-        totals["with_ga"] = with_ga
-        totals["with_contingency"] = with_contingency
         totals["with_expedite"] = with_expedite
         totals["with_margin"] = final_price
         totals["price"] = final_price
@@ -8910,9 +8869,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     replace_line(final_price_row_index, _format_row("Final Price per Part:", price))
 
     row("Subtotal (Labor + Directs):", subtotal)
-    row(f"+ Overhead ({_pct(applied_pcts.get('OverheadPct'))}):", overhead_cost)
-    row(f"+ G&A ({_pct(applied_pcts.get('GA_Pct'))}):", ga_cost)
-    row(f"+ Contingency ({_pct(applied_pcts.get('ContingencyPct'))}):", contingency_cost)
     if applied_pcts.get("ExpeditePct"):
         row(f"+ Expedite ({_pct(applied_pcts.get('ExpeditePct'))}):", expedite_cost)
     row("= Subtotal before Margin:", subtotal_before_margin)
@@ -14595,9 +14551,6 @@ def default_variables_template() -> pd.DataFrame:
                     adjusted_rows.append(new_row)
             return pd.DataFrame(adjusted_rows, columns=columns)
     rows = [
-        ("Overhead %", 0.15, "number"),
-        ("G&A %", 0.08, "number"),
-        ("Contingency %", 0.0, "number"),
         ("Profit Margin %", 0.0, "number"),
         ("Programmer $/hr", 90.0, "number"),
         ("CAM Programmer $/hr", 90.0, "number"),
@@ -16276,30 +16229,6 @@ def derive_inference_knobs(
                 },
                 "targets": ["material.stock"],
             }
-
-    # --- Risk / contingency --------------------------------------------------
-    risk_signals: list[str] = []
-    tolerance_mentions = re.findall(r"±\s*0\.00\d", tokens_upper)
-    gd_t_mentions = re.findall(r"\b(MMC|LMC|TP|POSITION|PROFILE|FLATNESS)\b", tokens_upper)
-    if len(tolerance_mentions) >= 3:
-        risk_signals.append(f"Multiple tight tolerances ({len(tolerance_mentions)})")
-    if len(gd_t_mentions) >= 2:
-        risk_signals.append(f"GD&T callouts ({len(gd_t_mentions)})")
-    if "CRITICAL" in tokens_upper:
-        risk_signals.append("CRITICAL note present")
-    if isinstance(material_info, dict) and material_info.get("material_family") in {"tool steel", "copper", "brass"}:
-        risk_signals.append(f"Material family {material_info.get('material_family')}")
-    if risk_signals:
-        contingency = 0.03 + 0.01 * max(len(risk_signals) - 1, 0)
-        contingency = min(contingency, 0.05)
-        knobs["risk_contingency"] = {
-            "confidence": "medium",
-            "signals": risk_signals,
-            "recommended": {
-                "contingency_pct": round(contingency, 3),
-            },
-            "targets": ["contingency_pct"],
-        }
 
     # --- Packaging / shipping ------------------------------------------------
     packaging_signals: list[str] = []
@@ -18455,9 +18384,6 @@ class App(tk.Tk):
             self.params["Quantity"] = max(1, int(round(qty_value)))
 
         raw_skip_items = {
-            "Overhead %", "Overhead",
-            "G&A %", "G&A", "GA %", "GA",
-            "Contingency %", "Contingency",
             "Profit Margin %", "Profit Margin", "Margin %", "Margin",
             "Expedite %", "Expedite",
             "Insurance %", "Insurance",
@@ -18750,8 +18676,12 @@ class App(tk.Tk):
         comm_frame.grid(row=current_row, column=0, sticky="ew", padx=10, pady=5)
         current_row += 1
         comm_keys = [
-            "OverheadPct", "GA_Pct", "MarginPct", "ContingencyPct",
-            "ExpeditePct", "VendorMarkupPct", "InsurancePct", "MinLotCharge", "Quantity",
+            "MarginPct",
+            "ExpeditePct",
+            "VendorMarkupPct",
+            "InsurancePct",
+            "MinLotCharge",
+            "Quantity",
         ]
         create_global_entries(comm_frame, comm_keys, self.params, self.param_vars)
 
@@ -19393,9 +19323,6 @@ class App(tk.Tk):
         if self.vars_df is not None and raw_param_values:
             normalized_items = self.vars_df["Item"].astype(str).apply(_normalize_item_text)
             param_to_items = {
-                "OverheadPct": ["overhead %", "overhead"],
-                "GA_Pct": ["g&a %", "ga %"],
-                "ContingencyPct": ["contingency %"],
                 "MarginPct": ["profit margin %", "margin %"],
                 "ExpeditePct": ["expedite %"],
                 "InsurancePct": ["insurance %"],
@@ -19775,7 +19702,6 @@ class App(tk.Tk):
         if self.apply_llm_adj.get() and isinstance(out, dict):
             adj = out.get("LLM_Adjustments", {})
             try:
-                self.params["OverheadPct"] += float(adj.get("OverheadPct_add", 0.0) or 0.0)
                 self.params["MarginPct"] += float(adj.get("MarginPct_add", 0.0) or 0.0)
                 self.params["ConsumablesFlat"] += float(adj.get("ConsumablesFlat_add", 0.0) or 0.0)
                 for k,v in self.param_vars.items(): v.set(str(self.params.get(k, "")))

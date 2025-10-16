@@ -253,15 +253,6 @@ def effective_to_overrides(effective: dict, baseline: dict | None = None) -> dic
         or not math.isclose(float(scrap_eff), float(scrap_base or 0.0), abs_tol=1e-6)
     ):
         out["scrap_pct_override"] = float(scrap_eff)
-    contingency_eff = effective.get("contingency_pct")
-    contingency_base = baseline.get("contingency_pct")
-    if contingency_eff is not None and (
-        contingency_base is None
-        or not math.isclose(
-            float(contingency_eff), float(contingency_base or 0.0), abs_tol=1e-6
-        )
-    ):
-        out["contingency_pct_override"] = float(contingency_eff)
     setups_eff = effective.get("setups")
     fixture_eff = effective.get("fixture")
     if setups_eff is not None or fixture_eff is not None:

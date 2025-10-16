@@ -154,26 +154,6 @@ def iter_suggestion_rows(state: QuoteState) -> list[dict]:
             }
         )
 
-    cont_base = baseline.get("contingency_pct")
-    cont_llm = suggestions.get("contingency_pct")
-    cont_user = overrides.get("contingency_pct")
-    cont_eff = effective.get("contingency_pct")
-    cont_src = sources.get("contingency_pct", "baseline")
-    if any(v is not None for v in (cont_base, cont_llm, cont_user)):
-        rows.append(
-            {
-                "path": ("contingency_pct",),
-                "label": "Contingency %",
-                "kind": "percent",
-                "baseline": cont_base,
-                "llm": cont_llm,
-                "user": cont_user,
-                "accept": bool(accept.get("contingency_pct")),
-                "effective": cont_eff,
-                "source": cont_src,
-            }
-        )
-
     setups_base = baseline.get("setups")
     setups_llm = suggestions.get("setups")
     setups_user = overrides.get("setups")
