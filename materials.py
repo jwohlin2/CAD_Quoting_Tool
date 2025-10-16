@@ -383,41 +383,54 @@ def pick_stock_from_mcmaster(
                         pass
             if item:
                 fallback_used = False
-                length = float(max(item.length, item.width))
-                width = float(min(item.length, item.width))
-                chosen_thk = float(item.thickness)
-                thickness_diff = abs(chosen_thk - thk_val)
-                if thickness_diff > thickness_tol and not allow_thickness_upsize:
-                    _log.warning(
-                        "[stock] Thickness upsize blocked: need %.2f in, got %.2f in; "
-                        "falling back to exact-thickness CSV lookup",
-                        thk_val,
-                        chosen_thk,
-                    )
-                    csv_hint = os.getenv("CATALOG_CSV_PATH") or catalog_path or ""
-                    fallback = _fallback_catalog_lookup(
-                        csv_hint, material_label, L_need, W_need, thk_val
-                    )
-                    if fallback:
-                        fallback_used = True
-                        part_number = str(fallback.get("part") or "").strip()
-                        updates = {
-                            "vendor": "McMaster",
-                            "len_in": float(fallback["len_in"]),
-                            "wid_in": float(fallback["wid_in"]),
-                            "thk_in": float(fallback["thk_in"]),
-                            "source": "mcmaster-catalog-csv",
-                        }
-                        if part_number:
-                            updates["mcmaster_part"] = part_number
-                            updates["part_no"] = part_number
-                        result.update(updates)
-                    else:
-                        result["thickness_upsize_reason"] = (
-                            "catalog exact thickness not found; "
-                            f"used {chosen_thk:.2f} in"
+                need_thk = float(thk_val)
+                got_thk = float(item.thickness)
+                if abs(got_thk - need_thk) > thickness_tol:
+                    forced = None
+                    try:
+                        forced = _mc.choose_item(
+                            catalog, material_label, L_need, W_need, need_thk
                         )
+                    except Exception:
+                        forced = None
+                    if forced and abs(float(forced.thickness) - need_thk) <= thickness_tol:
+                        item = forced
+                        got_thk = float(item.thickness)
+                    else:
+                        fb = _fallback_catalog_lookup(
+                            os.getenv("CATALOG_CSV_PATH") or catalog_path or "",
+                            material_label,
+                            L_need,
+                            W_need,
+                            need_thk,
+                        )
+                        if fb:
+                            fallback_used = True
+                            got_thk = float(fb["thk_in"])
+                            part_str = str(fb.get("part") or "").strip()
+                            updates = {
+                                "vendor": "McMaster",
+                                "len_in": float(fb["len_in"]),
+                                "wid_in": float(fb["wid_in"]),
+                                "thk_in": got_thk,
+                                "source": "mcmaster-catalog-csv",
+                                "stock_source_tag": "mcmaster-catalog-csv",
+                                "thickness_diff_in": abs(got_thk - need_thk),
+                            }
+                            if part_str:
+                                updates["mcmaster_part"] = part_str
+                                updates["part_no"] = part_str
+                            result.update(updates)
+                            got_thk = float(result.get("thk_in") or got_thk)
+                        else:
+                            result["thickness_upsize_reason"] = (
+                                "no exact thickness available "
+                                f"(need {need_thk:.2f}, got {got_thk:.2f})"
+                            )
+                thickness_diff = abs(got_thk - need_thk)
                 if not fallback_used:
+                    length = float(max(item.length, item.width))
+                    width = float(min(item.length, item.width))
                     result.update(
                         {
                             "vendor": "McMaster",
@@ -491,7 +504,7 @@ def pick_stock_from_mcmaster(
             if sku:
                 part_str = str(sku)
                 if part_str:
-                    result.setdefault("mcmaster_part", part_str)
+                    result["mcmaster_part"] = part_str
                     result.setdefault("part_no", part_str)
             result.setdefault("stock_source_tag", result.get("source") or "mcmaster-catalog")
             if price_each:
@@ -584,9 +597,10 @@ def _material_cost_components(
     scrap_usd_lb_val = float(scrap_usd_lb or 0.0)
     scrap_credit = float(scrap_lb) * scrap_usd_lb_val * recovery_val
 
-    scrap_price_source = str(
+    scrap_price_source_raw = str(
         (block.get("scrap_price_source") or block.get("scrap_credit_source") or "")
-    ).strip().lower()
+    ).strip()
+    scrap_price_source = scrap_price_source_raw.lower()
     explicit_credit = (
         block.get("material_scrap_credit")
         or block.get("scrap_credit_usd")
@@ -676,10 +690,17 @@ def _material_cost_components(
 
     scrap_rate_text = None
     if scrap_usd_lb_val > 0 and scrap_lb > 0:
-        scrap_rate_text = f"${scrap_usd_lb_val:.2f}/lb × {recovery_val:.0%}"
+        prefix = ""
+        if scrap_price_source == "wieland":
+            prefix = "Wieland "
+        elif scrap_price_source_raw:
+            prefix = f"{scrap_price_source_raw} "
+        scrap_rate_text = f"{prefix}${scrap_usd_lb_val:.2f}/lb × {recovery_val:.0%}"
 
     net_usd = max(0.0, base_usd - scrap_credit)
-    total = max(0.0, base_usd + tax_usd - scrap_credit)
+    total = round(base_usd + tax_usd - scrap_credit, 2)
+    if total < 0:
+        total = 0.0
 
     return {
         "base_usd": round(base_usd, 2),

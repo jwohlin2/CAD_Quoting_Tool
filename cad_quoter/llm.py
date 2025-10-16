@@ -1176,12 +1176,38 @@ def explain_quote(
         if label_text:
             top_procs.append(label_text)
 
-    if has_drilling and "drilling" not in [p.lower() for p in top_procs]:
+    render_state_extra: Mapping[str, Any] | None = None
+    if isinstance(render_state, Mapping):
+        extra_candidate = render_state.get("extra")
+        if isinstance(extra_candidate, Mapping):
+            render_state_extra = extra_candidate
+    else:
+        try:
+            extra_candidate = getattr(render_state, "extra", None)
+        except Exception:
+            extra_candidate = None
+        if isinstance(extra_candidate, Mapping):
+            render_state_extra = extra_candidate
+
+    raw_minutes = None
+    if isinstance(render_state_extra, Mapping):
+        raw_minutes = render_state_extra.get("drill_total_minutes")
+
+    minutes_val = _coerce_float(raw_minutes) if raw_minutes is not None else None
+    has_card_minutes = raw_minutes is not None
+    drilling_hours = None
+    if minutes_val is not None and minutes_val > 0:
+        drilling_hours = minutes_val / 60.0
+
+    if drilling_hours is not None and "drilling" not in [p.lower() for p in top_procs]:
         top_procs.append("Drilling")
 
-    if has_drilling:
-        hours_text = fmt_hours(drill_card_minutes / 60.0)
-        _add_reason(f"planner buckets allocate {hours_text} to drilling")
+    if has_card_minutes:
+        if drilling_hours is not None:
+            hours_text = fmt_hours(drilling_hours)
+            _add_reason(f"planner buckets allocate {hours_text} to drilling")
+        else:
+            _add_reason("planner buckets include drilling")
 
     if process_entries:
         _describe_top(process_entries, prefix="Largest process costs")
