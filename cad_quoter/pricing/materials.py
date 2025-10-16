@@ -88,7 +88,7 @@ def _maybe_get_mcmaster_price(display_name: str, normalized_key: str) -> Dict[st
     try:
         material_key, length_in, width_in, thickness_in = request
         dims_mm = tuple(val * MM_PER_INCH for val in (length_in, width_in, thickness_in))
-        part, price_each, uom, dims_in = lookup_sku_and_price_for_mm(
+        sku, price_each, uom, dims_in = lookup_sku_and_price_for_mm(
             material_key,
             dims_mm[0],
             dims_mm[1],
@@ -99,7 +99,7 @@ def _maybe_get_mcmaster_price(display_name: str, normalized_key: str) -> Dict[st
         _MCM_DISABLED = True
         return None
 
-    if not part or not price_each or not dims_in:
+    if not sku or not price_each or not dims_in:
         return None
 
     try:
@@ -125,11 +125,16 @@ def _maybe_get_mcmaster_price(display_name: str, normalized_key: str) -> Dict[st
     record: Dict[str, float | str] = {
         "usd_per_kg": float(usd_per_kg),
         "usd_per_lb": float(usd_per_lb),
-        "source": f"mcmaster_api:{part}",
-        "part_number": part,
+        "source": f"mcmaster_api:{sku}",
+        "part_number": sku,
         "unit_price": float(price_each),
         "unit_uom": str(uom or "Each"),
     }
+
+    if sku:
+        record["mcmaster_part"] = str(sku)
+    if price_each not in (None, ""):
+        record["price$"] = float(price_each)
 
     _MCM_CACHE[family] = record
     return record
