@@ -118,3 +118,32 @@ def test_get_live_material_price_steel_prefers_wieland(monkeypatch: pytest.Monke
     assert math.isfinite(price)
     assert price == pytest.approx(6.5)
     assert "Wieland Direct USD" in src
+
+
+def test_get_scrap_price_per_lb_prefers_scrap_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+    sample_data = {
+        "wieland_usd_per_lb": {
+            "Aluminium Scrap": 0.82,
+            "Titanium Scrap": 1.55,
+        },
+        "england_usd_per_lb": {
+            "Steel Scrap": 0.48,
+            "Stainless Scrap": 0.72,
+            "Copper Scrap": 1.1,
+            "Brass Scrap": 0.93,
+        },
+        "lme_usd_per_lb": {
+            "AL": 1.6,
+            "CU": 3.8,
+            "NI": 5.1,
+        },
+    }
+
+    monkeypatch.setattr(wieland_scraper, "scrape_wieland_prices", lambda force=False: sample_data)
+
+    assert wieland_scraper.get_scrap_price_per_lb("Aluminum") == pytest.approx(0.82)
+    assert wieland_scraper.get_scrap_price_per_lb("steel") == pytest.approx(0.48)
+    assert wieland_scraper.get_scrap_price_per_lb("Stainless Steel") == pytest.approx(0.72)
+    assert wieland_scraper.get_scrap_price_per_lb("Copper") == pytest.approx(1.1)
+    assert wieland_scraper.get_scrap_price_per_lb("Brass") == pytest.approx(0.93)
+    assert wieland_scraper.get_scrap_price_per_lb("Titanium") == pytest.approx(1.55)
