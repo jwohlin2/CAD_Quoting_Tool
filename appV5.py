@@ -3432,7 +3432,13 @@ def _charged_hours_by_bucket(
         if norm.startswith("planner_"):
             continue
         # Prefer explicit final hours if meta provided them
-        meta = (process_meta or {}).get(key) or {}
+        meta_source = process_meta or {}
+        meta = (
+            meta_source.get(key)
+            or meta_source.get(_normalize_bucket_key(key))
+            or meta_source.get(_final_bucket_key(key))
+            or {}
+        )
         hr = meta.get("final_hr") or meta.get("planner_hr") or meta.get("hr")
         if hr is None:
             # Derive from amount ÷ rate if needed
