@@ -7949,12 +7949,61 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         prefer_removal_drilling_hours=prefer_removal_drilling_hours,
         cfg=cfg,
     )
+
     def _format_drill_value(value: float | None) -> str:
         if value is None:
             return "nan"
         if not math.isfinite(value):
             return "nan"
         return f"{value:.2f}"
+
+    # === DEBUG: DRILL SYNC CHECK ===
+    extra_for_debug: Mapping[str, Any] | None = None
+    extra_candidate = getattr(bucket_state, "extra", None)
+    if isinstance(extra_candidate, _MappingABC):
+        extra_for_debug = extra_candidate
+
+    charged_for_debug: Mapping[str, Any] | None = None
+    if isinstance(charged_hours, _MappingABC):
+        charged_for_debug = charged_hours
+    else:
+        try:
+            charged_for_debug = dict(charged_hours or {})  # type: ignore[arg-type]
+        except Exception:
+            charged_for_debug = None
+
+    drill_machine_minutes_debug = (
+        _coerce_float_or_none(extra_for_debug.get("drill_machine_minutes"))
+        if extra_for_debug is not None
+        else None
+    )
+    drill_labor_minutes_debug = (
+        _coerce_float_or_none(extra_for_debug.get("drill_labor_minutes"))
+        if extra_for_debug is not None
+        else None
+    )
+    drill_bucket_debug = None
+    if charged_for_debug is not None:
+        drill_bucket_debug = next(
+            (
+                key
+                for key in charged_for_debug
+                if _canonical_bucket_key(key) in {"drilling", "drill"}
+            ),
+            None,
+        )
+    charged_drill_hours_debug = _coerce_float_or_none(
+        charged_for_debug.get(drill_bucket_debug)
+        if charged_for_debug is not None and drill_bucket_debug is not None
+        else None
+    )
+
+    _log.info(
+        "[drill-sync] card_m=%s card_l=%s bucket_hr=%s",
+        _format_drill_value(drill_machine_minutes_debug),
+        _format_drill_value(drill_labor_minutes_debug),
+        _format_drill_value(charged_drill_hours_debug),
+    )
 
     extra_map: Mapping[str, Any] | None = None
     if isinstance(getattr(bucket_state, "extra", None), _MappingABC):
