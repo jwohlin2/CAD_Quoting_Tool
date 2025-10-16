@@ -4093,6 +4093,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     llm_explanation: str = "",
     page_width: int = 74,
     cfg: QuoteConfiguration | None = None,
+    geometry: Mapping[str, Any] | None = None,
 ) -> str:
     """Pretty printer for a full quote with auto-included non-zero lines."""
     breakdown    = result.get("breakdown", {}) or {}
@@ -5036,8 +5037,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     ui_vars = result.get("ui_vars") or {}
     if not isinstance(ui_vars, dict):
         ui_vars = {}
-    g = result.get("geom") or result.get("geo") or {}
-    if not isinstance(g, dict):
+    g_source = geometry if isinstance(geometry, _MappingABC) else result.get("geom") or result.get("geo")
+    if isinstance(g_source, _MappingABC):
+        g = dict(g_source) if not isinstance(g_source, dict) else dict(g_source)
+    else:
         g = {}
     drill_debug_entries: list[str] = []
     # Selected removal summary (if available) for compact debug table later
@@ -6566,7 +6569,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     )
 
     geometry_for_explainer: Mapping[str, Any] | None = None
-    if isinstance(g, dict) and g:
+    if isinstance(geometry, _MappingABC) and geometry:
+        geometry_for_explainer = typing.cast(Mapping[str, Any], geometry)
+    elif isinstance(g, dict) and g:
         geometry_for_explainer = typing.cast(Mapping[str, Any], g)
     elif isinstance(breakdown, _MappingABC):
         for key in ("geometry", "geo_context", "geometry_context", "geo"):
@@ -7617,6 +7622,38 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         removal_drilling_hours=removal_drilling_hours_precise,
         prefer_removal_drilling_hours=prefer_removal_drilling_hours,
     )
+    removal_hours_debug = None
+    if isinstance(getattr(bucket_state, "extra", None), _MappingABC):
+        removal_hours_debug = _coerce_float_or_none(
+            bucket_state.extra.get("removal_drilling_hours")
+        )
+    drill_bucket_key: str | None = None
+    for raw_key in charged_hours:
+        canon = _canonical_bucket_key(raw_key)
+        if canon in {"drilling", "drill"}:
+            drill_bucket_key = raw_key
+            break
+    bucket_hours_debug = (
+        _coerce_float_or_none(charged_hours.get(drill_bucket_key))
+        if drill_bucket_key
+        else None
+    )
+    if removal_hours_debug is not None or bucket_hours_debug is not None:
+        def _fmt_debug(value: float | None) -> str:
+            if value is None:
+                return "nan"
+            try:
+                numeric = float(value)
+            except Exception:
+                return "nan"
+            if not math.isfinite(numeric):
+                return "nan"
+            return f"{numeric:.2f}"
+
+        print(
+            "[DEBUG] drilling_hours removal_card="
+            f"{_fmt_debug(removal_hours_debug)}  bucket={_fmt_debug(bucket_hours_debug)}"
+        )
     charged_hour_entries = sorted(charged_hours.items(), key=lambda kv: kv[0])
     charged_hours_by_canon: dict[str, float] = {}
     for raw_key, hour_val in charged_hour_entries:
@@ -17880,6 +17917,14 @@ class App(tk.Tk):
             template_rates = base_rates if isinstance(base_rates, dict) else RATES_DEFAULT
             self.default_rates_template = copy.deepcopy(template_rates)
             self.rates = copy.deepcopy(self.default_rates_template)
+        self.quote_config = QuoteConfiguration(
+            default_params=copy.deepcopy(self.default_params_template),
+            default_material_display=self.default_material_display,
+            prefer_removal_drilling_hours=True,
+            stock_price_source="mcmaster_api",
+            scrap_price_source="wieland",
+        )
+
         self.config_errors = list(CONFIG_INIT_ERRORS)
 
         self.quote_state = QuoteState()
@@ -19920,18 +19965,29 @@ class App(tk.Tk):
             )
             if not isinstance(res, dict):
                 res = {}
+            cfg = getattr(self, "quote_config", None)
+            geometry_ctx: Mapping[str, Any] | None = None
+            if isinstance(self.geo_context, dict) and self.geo_context:
+                geometry_ctx = self.geo_context
+            elif isinstance(self.geo, dict) and self.geo:
+                geometry_ctx = self.geo
+
             try:
                 simplified_report = render_quote(
                     res,
                     currency="$",
                     show_zeros=False,
                     llm_explanation=llm_explanation,
+                    cfg=cfg,
+                    geometry=geometry_ctx,
                 )
                 full_report = render_quote(
                     res,
                     currency="$",
                     show_zeros=True,
                     llm_explanation=llm_explanation,
+                    cfg=cfg,
+                    geometry=geometry_ctx,
                 )
             except AssertionError as e:
                 # Be resilient to strict invariants inside render_quote; surface
@@ -20069,7 +20125,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--geo-json",
         type=str,
-        help="Load geometry data from a JSON file at startup to bypass CAD parsing.",
+        default=None,
+        help="Bypass CAD and load a prebuilt geometry JSON for debugging.",
     )
     return parser
 
@@ -20092,22 +20149,26 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
     geo_json_payload: Mapping[str, Any] | None = None
     geo_json_path = getattr(args, "geo_json", None)
     if geo_json_path:
+        path_obj = Path(str(geo_json_path))
         try:
-            with open(geo_json_path, "r", encoding="utf-8") as handle:
+            with path_obj.open("r", encoding="utf-8") as handle:
                 raw_payload = json.load(handle)
         except FileNotFoundError:
-            logger.error("Geometry JSON not found: %s", geo_json_path)
+            logger.error("Geometry JSON not found: %s", path_obj)
             return 1
         except json.JSONDecodeError as exc:
-            logger.error("Geometry JSON is invalid (%s): %s", geo_json_path, exc)
+            logger.error("Geometry JSON is invalid (%s): %s", path_obj, exc)
             return 1
         except Exception as exc:  # pragma: no cover - defensive guard
-            logger.error("Failed to read geometry JSON %s: %s", geo_json_path, exc)
+            logger.error("Failed to read geometry JSON %s: %s", path_obj, exc)
             return 1
         if isinstance(raw_payload, _MappingABC):
             geo_json_payload = typing.cast(Mapping[str, Any], raw_payload)
         else:
-            logger.error("Geometry JSON must contain an object at the top level: %s", geo_json_path)
+            logger.error(
+                "Geometry JSON must contain an object at the top level: %s",
+                path_obj,
+            )
             return 1
 
     if args.no_gui:
