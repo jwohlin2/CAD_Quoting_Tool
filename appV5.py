@@ -73,6 +73,7 @@ from cad_quoter.utils.render_utils import (
     render_quote_doc,
 )
 from cad_quoter.pricing import load_backup_prices_csv
+from cad_quoter.pricing.process_cost_renderer import render_process_costs
 from cad_quoter.estimators import SpeedsFeedsUnavailableError
 from cad_quoter.llm_overrides import (
     _plate_mass_properties,
@@ -5584,6 +5585,18 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         )
     except Exception:
         amortized_nre_total = 0.0
+
+    card_hr = round(
+        float(breakdown["drilling_meta"]["total_minutes_billed"]) / 60.0, 2
+    )
+    row_hr = round(
+        float(breakdown["bucket_view"]["buckets"]["drilling"]["minutes"]) / 60.0, 2
+    )
+    if abs(card_hr - row_hr) > 0.01:
+        raise RuntimeError(
+            f"[FATAL] Drilling hours mismatch: card {card_hr} vs row {row_hr}. "
+            "A late write is overwriting bucket_view. Remove any planner/bucket rebuilds after minutes engine."
+        )
 
     append_line("Process & Labor Costs")
     append_line(divider)
@@ -12151,57 +12164,26 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     bucket_view.clear()
     bucket_view.update(bucket_view_prepared)
 
-    bview = breakdown.setdefault("bucket_view", {"buckets": {}, "order": [], "totals": {}})
-    # Clear any earlier drilling bucket before writing the authoritative one:
-    buckets_map = bview.setdefault("buckets", {})
-    buckets_map.pop("drilling", None)
-    bk = buckets_map.setdefault(
-        "drilling",
-        {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0, "total$": 0.0},
-    )
-
-    bk["minutes"] = bill_min
-    rates_map = rates if isinstance(rates, _MappingABC) else {}
-    drill_rate = float(
-        rates_map.get("DrillingRate")
-        or rates_map.get("drillingrate")
-        or rates_map.get("MachineRate")
-        or rates_map.get("machinerate")
-        or 0.0
-    )
-    bk["machine$"] = round((bill_min / 60.0) * drill_rate, 2)
-    bk["labor$"] = 0.0
-    bk["total$"] = bk["machine$"]
-
-    order_list = bview.setdefault("order", [])
-    if "drilling" not in order_list:
-        order_list.append("drilling")
-
-    totals_obj = bview.setdefault("totals", {})
-
-    def _bucket_value(entry: _MappingABC, *keys: str) -> float:
-        for key in keys:
-            if key in entry:
-                return _safe_float(entry.get(key), 0.0)
-        return 0.0
-
-    mins = 0.0
-    lab = 0.0
-    mac = 0.0
-    for entry in buckets_map.values():
-        if not isinstance(entry, _MappingABC):
-            continue
-        mins += _safe_float(entry.get("minutes"), 0.0)
-        lab += _bucket_value(entry, "labor$", "labor_cost")
-        mac += _bucket_value(entry, "machine$", "machine_cost")
-    totals_obj.update(
-        {
-            "minutes": round(mins, 2),
-            "labor$": round(lab, 2),
-            "machine$": round(mac, 2),
-            "total$": round(lab + mac, 2),
-        }
-    )
+    if not use_planner:
+        drilling_bucket_prepared = (
+            bucket_view_buckets.get("drilling")
+            if isinstance(bucket_view_buckets, _MappingABC)
+            else None
+        )
+        if isinstance(drilling_bucket_prepared, _MappingABC):
+            bucket_view["drilling"] = {
+                "minutes": _safe_float(drilling_bucket_prepared.get("minutes")),
+                "machine_cost": _safe_float(
+                    drilling_bucket_prepared.get("machine$")
+                    if "machine$" in drilling_bucket_prepared
+                    else drilling_bucket_prepared.get("machine_cost")
+                ),
+                "labor_cost": _safe_float(
+                    drilling_bucket_prepared.get("labor$")
+                    if "labor$" in drilling_bucket_prepared
+                    else drilling_bucket_prepared.get("labor_cost")
+                ),
+            }
 
     roughing_hours = _coerce_float_or_none(value_map.get("Roughing Cycle Time"))
     if roughing_hours is None:
