@@ -5141,9 +5141,24 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             removed_g = _coerce_float_or_none(material.get("material_removed_mass_g"))
         if removed_g is None and isinstance(material, _MappingABC):
             removed_g = _coerce_float_or_none(material.get("material_removed_mass_g_est"))
-        removed_g = float(removed_g or 0.0)
-        net_g = max(0.0, float(starting_g) - removed_g)
-        scrap_g = max(0.0, float(starting_g) - net_g)
+
+        if removed_g is not None:
+            removed_val = max(0.0, float(removed_g))
+            net_g = max(0.0, float(starting_g) - removed_val)
+            scrap_g = max(0.0, float(starting_g) - net_g)
+        else:
+            scrap_frac = 0.0
+            for source in (mat_info, material, baseline):
+                if not isinstance(source, _MappingABC):
+                    continue
+                scrap_candidate = _coerce_float_or_none(source.get("scrap_pct"))
+                if scrap_candidate is None:
+                    continue
+                scrap_frac = normalize_scrap_pct(scrap_candidate)
+                if scrap_frac > 0:
+                    break
+            scrap_g = float(starting_g) * float(scrap_frac or 0.0)
+            net_g = max(0.0, float(starting_g) - scrap_g)
 
         mat_info["starting_mass_g_est"] = float(starting_g)
         mat_info["net_mass_g"] = float(net_g)
@@ -5196,8 +5211,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 directs = {}
             pricing["direct_costs"] = directs
         directs["material"] = float(mat_total)
-        existing_total_directs = _coerce_float_or_none(pricing.get("total_direct_costs"))
-        if existing_total_directs is None or existing_total_directs <= 0.0:
+        if _coerce_float_or_none(pricing.get("total_direct_costs")) is None:
             pricing["total_direct_costs"] = float(sum(directs.values()))
 
     # ---- material & stock (compact; shown only if we actually have data) -----
@@ -7302,19 +7316,48 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         else None,
     )
 
-    computed_directs = round(float(directs) + planner_machine_component, 2)
-    if pricing_total_direct_costs is not None:
-        candidate_directs = round(float(pricing_total_direct_costs), 2)
-        if candidate_directs > 0.0:
-            ladder_directs = candidate_directs
-        else:
-            ladder_directs = computed_directs
-    else:
-        ladder_directs = computed_directs
+    directs_from_pricing = _coerce_float_or_none(pricing.get("total_direct_costs"))
+    if directs_from_pricing is None and pricing_total_direct_costs is not None:
+        directs_from_pricing = float(pricing_total_direct_costs)
+    if directs_from_pricing is None:
+        directs_from_pricing = float(directs) + planner_machine_component
+    ladder_directs = round(float(directs_from_pricing or 0.0), 2)
+
+    bucket_view_for_ladder: Mapping[str, Any] | None = None
+    if isinstance(breakdown, _MappingABC):
+        bucket_view_candidate = breakdown.get("bucket_view")
+        if isinstance(bucket_view_candidate, _MappingABC):
+            bucket_view_for_ladder = typing.cast(Mapping[str, Any], bucket_view_candidate)
+
+    ladder_labor_total = 0.0
+    if isinstance(bucket_view_for_ladder, _MappingABC):
+        buckets_for_ladder = bucket_view_for_ladder.get("buckets")
+        if isinstance(buckets_for_ladder, _MappingABC):
+            for metrics in buckets_for_ladder.values():
+                if not isinstance(metrics, _MappingABC):
+                    continue
+                labor_component = _safe_float(metrics.get("labor$"), 0.0)
+                machine_component = _safe_float(metrics.get("machine$"), 0.0)
+                ladder_labor_total += labor_component + machine_component
+
     amortized_component = float(amortized_nre_total if qty > 1 else 0.0)
-    ladder_labor = round(base_bucket_labor + amortized_component, 2)
+    fallback_ladder_labor = round(base_bucket_labor + amortized_component, 2)
+    ladder_labor = round(ladder_labor_total, 2)
+    if ladder_labor <= 0.0:
+        ladder_labor = fallback_ladder_labor
+
     ladder_expected = ladder_labor + ladder_directs
     ladder_subtotal = round(ladder_expected, 2)
+    computed_total_labor_cost = ladder_labor
+    if isinstance(totals, dict):
+        totals["labor_cost"] = ladder_labor
+    if 0 <= total_labor_row_index < len(lines):
+        replace_line(
+            total_labor_row_index,
+            _format_row(total_labor_label, ladder_labor),
+        )
+    if isinstance(pricing, dict):
+        pricing["ladder_subtotal"] = ladder_subtotal
     if not roughly_equal(declared_subtotal, ladder_subtotal, eps=0.01):
         declared_subtotal = ladder_subtotal
     if isinstance(breakdown, dict):
@@ -12263,13 +12306,22 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             pass
 
     # === DRILLING BILLING TRUTH ===
-    drill_meta = breakdown.setdefault("drilling_meta", {})
+    drill_meta_candidate = breakdown.setdefault("drilling_meta", {})
+    if isinstance(drill_meta_candidate, _MutableMappingABC):
+        drill_meta_map = drill_meta_candidate
+    elif isinstance(drill_meta_candidate, _MappingABC):
+        drill_meta_map = dict(drill_meta_candidate)
+        breakdown["drilling_meta"] = drill_meta_map
+    else:
+        drill_meta_map = {}
+        breakdown["drilling_meta"] = drill_meta_map
+
     bill_min = float(
-        drill_meta.get("total_minutes_with_toolchange")
-        or drill_meta.get("total_minutes")
+        drill_meta_map.get("total_minutes_with_toolchange")
+        or drill_meta_map.get("total_minutes")
         or 0.0
     )
-    drill_meta["total_minutes_billed"] = bill_min
+    drill_meta_map["total_minutes_billed"] = bill_min
 
     # overwrite any legacy/planner meta for drilling
     pm = breakdown.setdefault("process_meta", {}).setdefault("drilling", {})
@@ -12285,17 +12337,17 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     )
     drilling_summary["total_minutes_billed"] = drill_total_minutes_billed
 
-    drill_meta: _MappingABC[str, Any] | None = None
+    drilling_meta_source: _MappingABC[str, Any] | None = None
     if isinstance(drilling_meta_container, _MappingABC):
-        drill_meta = drilling_meta_container
+        drilling_meta_source = drilling_meta_container
 
     billed_minutes = 0.0
     if isinstance(drilling_summary, _MappingABC):
         billed_minutes = _safe_float(drilling_summary.get("total_minutes_billed"))
         if billed_minutes <= 0.0:
             billed_minutes = _safe_float(drilling_summary.get("total_minutes_with_toolchange"))
-    if billed_minutes <= 0.0 and isinstance(drill_meta, _MappingABC):
-        billed_minutes = _safe_float(drill_meta.get("total_minutes_billed"))
+    if billed_minutes <= 0.0 and isinstance(drilling_meta_source, _MappingABC):
+        billed_minutes = _safe_float(drilling_meta_source.get("total_minutes_billed"))
     if billed_minutes <= 0.0 and drill_total_minutes is not None and drill_total_minutes > 0.0:
         billed_minutes = float(drill_total_minutes)
 
