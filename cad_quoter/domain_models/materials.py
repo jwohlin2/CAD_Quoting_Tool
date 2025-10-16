@@ -56,6 +56,20 @@ for display in MATERIAL_DROPDOWN_OPTIONS:
     if key:
         MATERIAL_DISPLAY_BY_KEY[key] = display
 
+_MATERIAL_DISPLAY_OVERRIDES = {
+    "aluminum": "Aluminum MIC6",
+    "tool_steel_a2": "Tool Steel A2",
+    "ss_303": "303 Stainless Steel",
+    "mild_steel": "Mild Steel / Low-Carbon Steel",
+}
+
+for lookup, display in _MATERIAL_DISPLAY_OVERRIDES.items():
+    key = normalize_material_key(lookup)
+    if not key:
+        continue
+    target = MATERIAL_DISPLAY_BY_KEY.get(normalize_material_key(display), display)
+    MATERIAL_DISPLAY_BY_KEY[key] = target
+
 MATERIAL_OTHER_KEY = normalize_material_key(MATERIAL_DROPDOWN_OPTIONS[-1])
 
 _MATERIAL_DENSITY_G_CC_BY_DISPLAY: Dict[str, float | None] = {}

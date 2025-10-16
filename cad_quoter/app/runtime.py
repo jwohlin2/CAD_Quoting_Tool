@@ -7,6 +7,13 @@ import os
 from pathlib import Path
 from typing import Iterable, Sequence
 
+from cad_quoter.resources import default_catalog_csv
+
+# Ensure the McMaster stock selector uses the bundled catalog unless callers
+# explicitly override it via the environment.  This matches the historical
+# Windows installer behaviour where ``catalog.csv`` lived alongside the app.
+os.environ.setdefault("CATALOG_CSV_PATH", str(default_catalog_csv()))
+
 # Placeholder for llama-cpp bindings so tests can monkeypatch the loader without
 # importing the optional dependency at module import time.
 Llama = None  # type: ignore[assignment]
