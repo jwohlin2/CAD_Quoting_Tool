@@ -733,15 +733,23 @@ def _compute_pricing_ladder(
 
     subtotal_val = round(_safe_float(subtotal, 0.0), 2)
 
-    def _apply(amount: float, pct_value: float | int | str | None) -> float:
-        pct_val = _pct(pct_value)
-        return round(amount * (1.0 + pct_val), 2)
+    overhead_pct_val = _pct(overhead_pct)
+    ga_pct_val = _pct(ga_pct)
+    contingency_pct_val = _pct(contingency_pct)
+    expedite_pct_val = _pct(expedite_pct)
+    margin_pct_val = _pct(margin_pct)
 
-    with_overhead = _apply(subtotal_val, overhead_pct)
-    with_ga = _apply(with_overhead, ga_pct)
-    with_contingency = _apply(with_ga, contingency_pct)
-    with_expedite = _apply(with_contingency, expedite_pct)
-    with_margin = _apply(with_expedite, margin_pct)
+    overhead_cost = round(subtotal_val * overhead_pct_val, 2)
+    ga_cost = round(subtotal_val * ga_pct_val, 2)
+    contingency_cost = round(subtotal_val * contingency_pct_val, 2)
+    expedite_cost = round(subtotal_val * expedite_pct_val, 2)
+
+    with_overhead = round(subtotal_val + overhead_cost, 2)
+    with_ga = round(with_overhead + ga_cost, 2)
+    with_contingency = round(with_ga + contingency_cost, 2)
+    with_expedite = round(with_contingency + expedite_cost, 2)
+    subtotal_before_margin = with_expedite
+    with_margin = round(subtotal_before_margin * (1.0 + margin_pct_val), 2)
 
     return {
         "subtotal": subtotal_val,
@@ -750,6 +758,11 @@ def _compute_pricing_ladder(
         "with_contingency": with_contingency,
         "with_expedite": with_expedite,
         "with_margin": with_margin,
+        "overhead_cost": overhead_cost,
+        "ga_cost": ga_cost,
+        "contingency_cost": contingency_cost,
+        "expedite_cost": expedite_cost,
+        "subtotal_before_margin": subtotal_before_margin,
     }
 
 # ---------------------------------------------------------------------------
@@ -4098,7 +4111,15 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             pass_through = dict(pass_through_raw or {})
         except Exception:
             pass_through = {}
-    applied_pcts = breakdown.get("applied_pcts", {}) or {}
+    applied_pcts_raw = breakdown.get("applied_pcts", {}) or {}
+    if isinstance(applied_pcts_raw, dict):
+        applied_pcts = applied_pcts_raw
+    else:
+        try:
+            applied_pcts = dict(applied_pcts_raw or {})
+        except Exception:
+            applied_pcts = {}
+    breakdown["applied_pcts"] = applied_pcts
     process_meta_raw = breakdown.get("process_meta", {}) or {}
     applied_process_raw = breakdown.get("applied_process", {}) or {}
     process_meta: dict[str, Any] = {}
@@ -8205,22 +8226,91 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     # ---- Pricing ladder ------------------------------------------------------
     append_line("Pricing Ladder")
     append_line(divider)
-    def _ladder_pct(key: str) -> float:
-        return _safe_float(applied_pcts.get(key), 0.0)
+
+    override_sources: list[Mapping[str, Any]] = []
+
+    def _coerce_mapping(source: Any) -> dict[str, Any] | None:
+        if isinstance(source, dict):
+            return source
+        if isinstance(source, _MappingABC):
+            try:
+                return dict(source)
+            except Exception:
+                return None
+        return None
+
+    def _collect_override_source(candidate: Any) -> None:
+        mapping = _coerce_mapping(candidate)
+        if mapping:
+            override_sources.append(mapping)
+
+    _collect_override_source(applied_pcts)
+    _collect_override_source(breakdown.get("config"))
+    _collect_override_source(result.get("config"))
+    _collect_override_source(breakdown.get("overrides"))
+    _collect_override_source(result.get("overrides"))
+    _collect_override_source(breakdown.get("params"))
+    _collect_override_source(result.get("params"))
+    if isinstance(params, _MappingABC):
+        _collect_override_source(params)
+    quote_state_payload = result.get("quote_state") if isinstance(result, _MappingABC) else None
+    if isinstance(quote_state_payload, _MappingABC):
+        for nested_key in ("user_overrides", "overrides", "effective", "config", "params"):
+            _collect_override_source(quote_state_payload.get(nested_key))
+
+    def _resolve_ladder_pct(keys: Sequence[str], default: float) -> float:
+        sentinel = object()
+        for source in override_sources:
+            for key in keys:
+                value = sentinel
+                try:
+                    value = source.get(key, sentinel)  # type: ignore[arg-type]
+                except Exception:
+                    try:
+                        value = source[key]  # type: ignore[index]
+                    except Exception:
+                        value = sentinel
+                if value is sentinel or value is None:
+                    continue
+                if isinstance(value, str):
+                    stripped = value.strip()
+                    if not stripped:
+                        continue
+                    return _safe_float(stripped, default)
+                return _safe_float(value, default)
+        return default
+
+    overhead_pct_value = _resolve_ladder_pct(("OverheadPct", "overhead_pct"), 0.18)
+    ga_pct_value = _resolve_ladder_pct(("GA_Pct", "ga_pct", "gna_pct"), 0.10)
+    contingency_pct_value = _resolve_ladder_pct(("ContingencyPct", "contingency_pct"), 0.05)
+    expedite_pct_value = _resolve_ladder_pct(("ExpeditePct", "expedite_pct"), 0.0)
+    margin_pct_value = _resolve_ladder_pct(("MarginPct", "margin_pct"), 0.15)
+
+    applied_pcts.setdefault("OverheadPct", overhead_pct_value)
+    applied_pcts.setdefault("GA_Pct", ga_pct_value)
+    applied_pcts.setdefault("ContingencyPct", contingency_pct_value)
+    applied_pcts.setdefault("MarginPct", margin_pct_value)
+    if "ExpeditePct" not in applied_pcts and expedite_pct_value:
+        applied_pcts["ExpeditePct"] = expedite_pct_value
 
     ladder_totals = _compute_pricing_ladder(
         subtotal,
-        overhead_pct=_ladder_pct("OverheadPct"),
-        ga_pct=_ladder_pct("GA_Pct"),
-        contingency_pct=_ladder_pct("ContingencyPct"),
-        expedite_pct=_ladder_pct("ExpeditePct"),
-        margin_pct=_ladder_pct("MarginPct"),
+        overhead_pct=overhead_pct_value,
+        ga_pct=ga_pct_value,
+        contingency_pct=contingency_pct_value,
+        expedite_pct=expedite_pct_value,
+        margin_pct=margin_pct_value,
     )
 
     with_overhead = ladder_totals["with_overhead"]
     with_ga = ladder_totals["with_ga"]
     with_contingency = ladder_totals["with_contingency"]
     with_expedite = ladder_totals["with_expedite"]
+    subtotal_before_margin = ladder_totals.get("subtotal_before_margin", with_expedite)
+    overhead_cost = ladder_totals.get("overhead_cost", 0.0)
+    ga_cost = ladder_totals.get("ga_cost", 0.0)
+    contingency_cost = ladder_totals.get("contingency_cost", 0.0)
+    expedite_cost = ladder_totals.get("expedite_cost", 0.0)
     final_price = ladder_totals["with_margin"]
 
     if isinstance(totals, dict):
@@ -8239,12 +8329,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     replace_line(final_price_row_index, _format_row("Final Price per Part:", price))
 
     row("Subtotal (Labor + Directs):", subtotal)
-    row(f"+ Overhead ({_pct(applied_pcts.get('OverheadPct'))}):",     with_overhead - subtotal)
-    row(f"+ G&A ({_pct(applied_pcts.get('GA_Pct'))}):",               with_ga - with_overhead)
-    row(f"+ Contingency ({_pct(applied_pcts.get('ContingencyPct'))}):", with_contingency - with_ga)
+    row(f"+ Overhead ({_pct(applied_pcts.get('OverheadPct'))}):", overhead_cost)
+    row(f"+ G&A ({_pct(applied_pcts.get('GA_Pct'))}):", ga_cost)
+    row(f"+ Contingency ({_pct(applied_pcts.get('ContingencyPct'))}):", contingency_cost)
     if applied_pcts.get("ExpeditePct"):
-        row(f"+ Expedite ({_pct(applied_pcts.get('ExpeditePct'))}):", with_expedite - with_contingency)
-    row("= Subtotal before Margin:", with_expedite)
+        row(f"+ Expedite ({_pct(applied_pcts.get('ExpeditePct'))}):", expedite_cost)
+    row("= Subtotal before Margin:", subtotal_before_margin)
     row(f"Final Price with Margin ({_pct(applied_pcts.get('MarginPct'))}):", price)
     append_line("")
 
