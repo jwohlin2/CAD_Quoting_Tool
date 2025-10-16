@@ -3651,19 +3651,10 @@ def _charged_hours_by_bucket(
         except Exception:
             extra = {}
         if isinstance(extra, _MappingABC):
-            try:
-                removal_hr = float(extra.get("removal_drilling_hours"))
-            except Exception:
-                removal_hr = None
+            removal_candidate = extra.get("removal_drilling_hours")
+            removal_hr = _coerce_float_or_none(removal_candidate)
     if removal_hr is None:
-        try:
-            removal_hr = (
-                float(removal_drilling_hours)
-                if removal_drilling_hours is not None
-                else None
-            )
-        except Exception:
-            removal_hr = None
+        removal_hr = _coerce_float_or_none(removal_drilling_hours)
     if removal_hr is not None and removal_hr < 0:
         removal_hr = None
     if removal_hr is not None and prefer_removal_drilling_hours:
@@ -6945,11 +6936,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if not record_canon:
                 record_canon = None
             record = _ProcessRowRecord(
-                name=display_label,
-                hours=hours_val,
-                rate=rate_val,
-                total=cost_val,
-                canon_key=record_canon,
+                display_label,
+                hours_val,
+                rate_val,
+                cost_val,
+                record_canon,
             )
             self.rows.append(record)
             if record_canon:
@@ -12925,9 +12916,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             start_g = float(start_lb) * grams_per_lb
             material_entry["mass_g"] = start_g
             material_entry["starting_mass_g_est"] = start_g
-        if net_lb > 0:
+        if net_lb is not None and net_lb > 0:
             material_entry["net_mass_g"] = float(net_lb) * grams_per_lb
-        if scrap_lb > 0:
+        if scrap_lb is not None and scrap_lb > 0:
             material_entry["scrap_mass_g"] = float(scrap_lb) * grams_per_lb
         if price_per_lb is not None and price_per_lb > 0:
             material_entry["unit_price_usd_per_lb"] = float(price_per_lb)

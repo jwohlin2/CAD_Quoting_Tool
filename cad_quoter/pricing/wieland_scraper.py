@@ -33,7 +33,7 @@ import tempfile
 import urllib.request
 from dataclasses import dataclass
 from html import unescape as html_unescape
-from typing import Any, Dict, Iterable, Tuple, Optional, List
+from typing import Any, Dict, Iterable, Mapping, Tuple, Optional, List
 
 import ssl
 
@@ -755,6 +755,74 @@ STEEL_KEYWORDS = (
 )
 
 
+_STEEL_SCRAP_TOKENS: Tuple[str, ...] = tuple(
+    sorted({token.lower() for token in STEEL_KEYWORDS} | {"steel"})
+)
+
+
+_SCRAP_FAMILY_KEYWORDS: Dict[str, Tuple[str, ...]] = {
+    "aluminum": ("alum", "6061", "7075", "2024"),
+    "stainless": ("stainless", "304", "316", "17-4", "17 4", "17-7", "17 7"),
+    "steel": _STEEL_SCRAP_TOKENS,
+    "copper": ("copper", "cu", "c110"),
+    "brass": ("brass", "ms 58", "ms58", "bronze"),
+    "titanium": ("titanium", "ti"),
+}
+
+
+_SCRAP_LOOKUP_PRIORITY: Dict[
+    str, Tuple[Tuple[str, Tuple[str, ...], bool], ...]
+] = {
+    "aluminum": (
+        ("wieland_usd_per_lb", ("Aluminium Scrap", "Aluminum Scrap"), True),
+        ("england_usd_per_lb", ("Aluminium Scrap", "Aluminum Scrap"), True),
+        ("england_usd_per_lb", (), True),
+        ("wieland_usd_per_lb", (), True),
+        ("england_usd_per_lb", ("Aluminium", "Aluminum"), False),
+        ("wieland_usd_per_lb", ("Aluminium", "Aluminum"), False),
+        ("lme_usd_per_lb", ("AL",), False),
+    ),
+    "stainless": (
+        ("england_usd_per_lb", ("Stainless Scrap", "Stainless Steel Scrap"), True),
+        ("wieland_usd_per_lb", ("Stainless Scrap",), True),
+        ("england_usd_per_lb", (), True),
+        ("wieland_usd_per_lb", (), True),
+        ("england_usd_per_lb", ("Stainless", "304", "316", "SS"), False),
+        ("wieland_usd_per_lb", ("Stainless", "304", "316", "SS"), False),
+        ("lme_usd_per_lb", ("NI",), False),
+    ),
+    "steel": (
+        ("england_usd_per_lb", ("Steel Scrap",), True),
+        ("wieland_usd_per_lb", ("Steel Scrap",), True),
+        ("england_usd_per_lb", ("Steel", "Carbon", "Mild"), True),
+        ("wieland_usd_per_lb", ("Steel", "Carbon", "Mild"), True),
+        ("england_usd_per_lb", ("Steel", "Carbon", "Mild"), False),
+        ("lme_usd_per_lb", ("NI",), False),
+    ),
+    "copper": (
+        ("wieland_usd_per_lb", ("Copper Scrap",), True),
+        ("england_usd_per_lb", ("Copper Scrap",), True),
+        ("england_usd_per_lb", (), True),
+        ("wieland_usd_per_lb", (), True),
+        ("england_usd_per_lb", ("Copper", "Kupfer"), False),
+        ("wieland_usd_per_lb", ("Copper", "Kupfer"), False),
+        ("lme_usd_per_lb", ("CU",), False),
+    ),
+    "brass": (
+        ("england_usd_per_lb", ("Brass Scrap", "MS", "Bronze Scrap"), True),
+        ("wieland_usd_per_lb", ("Brass Scrap",), True),
+        ("england_usd_per_lb", ("Brass", "MS 58"), False),
+        ("wieland_usd_per_lb", ("Brass", "MS 58"), False),
+    ),
+    "titanium": (
+        ("wieland_usd_per_lb", ("Titanium Scrap",), True),
+        ("england_usd_per_lb", ("Titanium Scrap",), True),
+        ("england_usd_per_lb", ("Titanium",), False),
+        ("wieland_usd_per_lb", ("Titanium",), False),
+    ),
+}
+
+
 def _lookup_steel_price(data: Dict[str, Any]) -> Optional[Tuple[float, str, str]]:
     """Return (price, bucket, key) for the best available steel proxy."""
 
@@ -843,6 +911,91 @@ def get_live_material_price(material_key: str, unit: str = "kg", fallback_usd_pe
     if unit.lower() == "lb":
         return _usdkg_to_usdlb(price_kg), src.replace("USD/kg", "USD/lb") if "USD/kg" in src else src
     return price_kg, src
+
+
+def _canonical_scrap_family(material_family: Optional[str]) -> str:
+    if not material_family:
+        return "aluminum"
+    family = material_family.strip().lower()
+    if not family:
+        return "aluminum"
+    for canonical, tokens in _SCRAP_FAMILY_KEYWORDS.items():
+        if canonical in family:
+            return canonical
+        if any(token in family for token in tokens):
+            return canonical
+    return "aluminum"
+
+
+def _coerce_positive_float(value: Any) -> Optional[float]:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number <= 0:
+        return None
+    return number
+
+
+def _case_insensitive_lookup(mapping: Mapping[str, Any], key: str) -> Any:
+    if key in mapping:
+        return mapping[key]
+    lowered = key.lower()
+    for candidate_key, candidate_value in mapping.items():
+        if isinstance(candidate_key, str) and candidate_key.lower() == lowered:
+            return candidate_value
+    return None
+
+
+def _lookup_scrap_price(
+    data: Mapping[str, Any],
+    bucket: str,
+    keys: Tuple[str, ...],
+    keywords: Iterable[str],
+    require_scrap: bool,
+) -> Optional[float]:
+    bucket_map = data.get(bucket)
+    if not isinstance(bucket_map, Mapping):
+        return None
+
+    normalized_keywords = tuple(token.lower() for token in keywords)
+
+    if keys:
+        for key in keys:
+            candidate = _case_insensitive_lookup(bucket_map, key)
+            price = _coerce_positive_float(candidate)
+            if price is not None:
+                return price
+
+    for label, value in bucket_map.items():
+        if not isinstance(label, str):
+            continue
+        normalized = label.lower()
+        if require_scrap and "scrap" not in normalized:
+            continue
+        if normalized_keywords and not any(token in normalized for token in normalized_keywords):
+            continue
+        price = _coerce_positive_float(value)
+        if price is not None:
+            return price
+
+    return None
+
+
+def get_scrap_price_per_lb(material_family: Optional[str], *, fallback: Optional[float] = None) -> Optional[float]:
+    """Return the USD/lb scrap price for a material family using Wieland data."""
+
+    data = scrape_wieland_prices(force=False)
+    family = _canonical_scrap_family(material_family)
+    lookup_plan = _SCRAP_LOOKUP_PRIORITY.get(family) or _SCRAP_LOOKUP_PRIORITY.get("aluminum", ())
+    keywords = _SCRAP_FAMILY_KEYWORDS.get(family, ())
+
+    for bucket, keys, require_scrap in lookup_plan:
+        price = _lookup_scrap_price(data, bucket, keys, keywords, require_scrap)
+        if price is not None:
+            return price
+
+    return fallback
 
 
 # ----------------------------------- CLI -------------------------------------
