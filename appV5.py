@@ -12596,6 +12596,24 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         or baseline.get("scrap_pct")
         or 0.25
     )
+    default_cfg = QuoteConfiguration()
+    stock_price_source = str(
+        (value_map.get("Stock Price Source") if isinstance(value_map, _MappingABC) else None)
+        or (state.user_overrides.get("stock_price_source") if isinstance(state.user_overrides, _MappingABC) else None)
+        or getattr(default_cfg, "stock_price_source", "")
+        or ""
+    ).strip()
+    if not stock_price_source:
+        stock_price_source = None
+    scrap_price_source = str(
+        (value_map.get("Scrap Price Source") if isinstance(value_map, _MappingABC) else None)
+        or (state.user_overrides.get("scrap_price_source") if isinstance(state.user_overrides, _MappingABC) else None)
+        or getattr(default_cfg, "scrap_price_source", "")
+        or ""
+    ).strip()
+    if not scrap_price_source:
+        scrap_price_source = None
+
     mat_block = _compute_material_block(
         geo_context if isinstance(geo_context, dict) else {},
         mat_key,
@@ -12754,6 +12772,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         scrap_price_used: float | None = None
         scrap_recovery_used: float | None = None
         scrap_credit_source: str | None = None
+        wieland_scrap_price: float | None = None
 
         if credit_override_amount is not None:
             scrap_credit_amount = max(0.0, float(credit_override_amount))
@@ -12774,12 +12793,16 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 family_hint = family_hint or material_group_display or material_display
                 price_candidate = _wieland_scrap_usd_per_lb(family_hint)
                 if price_candidate is not None:
+                    wieland_scrap_price = float(price_candidate)
                     scrap_price_used = float(price_candidate)
                     scrap_credit_source = "wieland"
                 else:
                     scrap_price_used = SCRAP_CREDIT_FALLBACK_USD_PER_LB
                     scrap_credit_source = "default"
             scrap_credit_amount = float(scrap_mass_lb) * float(scrap_price_used or 0.0) * float(scrap_recovery_used or 0.0)
+
+        if wieland_scrap_price is not None:
+            mat_block["scrap_price_usd_per_lb"] = float(wieland_scrap_price)
 
         net_material_cost = float(base_material_cost)
         if scrap_credit_amount is not None:
