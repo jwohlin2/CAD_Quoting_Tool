@@ -8244,6 +8244,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
         # Overwrite legacy planner meta
         pm = breakdown.setdefault("process_meta", {}).setdefault("drilling", {})
+        # ensure meta is reachable under both 'drilling' and 'Drilling'
+        try:
+            breakdown["process_meta"]["Drilling"] = pm
+        except Exception:
+            pass
         pm["minutes"] = drill_min
         pm["hr"] = drill_hr
         pm["rate"] = float(rates.get("DrillingRate") or 0.0)
