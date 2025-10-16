@@ -15187,7 +15187,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         detail_map.pop("planner_prog_hr", None)
     detail_map["auto_prog_hr_model"] = float(auto_prog_hr_model)
     detail_map["auto_prog_hr"] = float(auto_prog_hr)
-    detail_map["prog_hr"] = float(final_prog_hr)
+    programming_hours = float(final_prog_hr)
+    detail_map["prog_hr"] = programming_hours
     if override_applied:
         detail_map["override_applied"] = True
         if override_source:
@@ -15202,27 +15203,36 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         else {}
     )
     programmer_rate = 0.0
-    if isinstance(labor_bucket, _MappingABC):
-        for key in ("programmer", "Programmer", "PROGRAMMER"):
-            rate_value = labor_bucket.get(key)
-            if rate_value is None:
-                continue
-            try:
-                programmer_rate = float(rate_value)
-            except Exception:
-                continue
-            if programmer_rate > 0:
-                break
-    if programmer_rate <= 0:
-        programmer_rate = _lookup_rate(
-            "ProgrammingRate",
-            rates,
-            params,
-            default_rates,
-            fallback=85.0,
-        )
-    if programmer_rate <= 0:
-        programmer_rate = 85.0
+    if cfg and getattr(cfg, "separate_machine_labor", False):
+        programmer_rate = float(getattr(cfg, "labor_rate_per_hr", 45.0) or 45.0)
+    else:
+        if isinstance(labor_bucket, _MappingABC):
+            for key in ("programmer", "Programmer", "PROGRAMMER"):
+                rate_value = labor_bucket.get(key)
+                if rate_value is None:
+                    continue
+                try:
+                    programmer_rate = float(rate_value)
+                except Exception:
+                    continue
+                if programmer_rate > 0:
+                    break
+        if programmer_rate <= 0:
+            programmer_rate = _lookup_rate(
+                "programming",
+                rates,
+                fallback=0.0,
+            )
+        if programmer_rate <= 0:
+            programmer_rate = _lookup_rate(
+                "ProgrammingRate",
+                rates,
+                params,
+                default_rates,
+                fallback=90.0,
+            )
+        if programmer_rate <= 0:
+            programmer_rate = 90.0
 
     if programmer_rate > 0:
         if isinstance(merged_two_bucket_rates, dict):
@@ -15257,9 +15267,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     if not math.isfinite(qty_for_programming) or qty_for_programming <= 0:
         qty_for_programming = 1.0
 
-    programming_total = round(final_prog_hr * programmer_rate, 2)
-    programming_per_part = programming_total / max(1.0, qty_for_programming)
-    detail_map["per_lot"] = programming_total
+    programming_cost = round(programming_hours * programmer_rate, 2)
+    programming_per_part = programming_cost / max(1.0, qty_for_programming)
+    detail_map["per_lot"] = programming_cost
     detail_map["per_part"] = programming_per_part
 
     is_amortized = bool(amortized_programming and amortized_programming > 0)
@@ -15276,8 +15286,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         nre_block["programming_per_lot"] = 0.0
         nre_block["programming_per_part"] = 0.0
     else:
-        nre_block["programming_cost"] = programming_total
-        nre_block["programming_per_lot"] = programming_total
+        nre_block["programming_cost"] = programming_cost
+        nre_block["programming_per_lot"] = programming_cost
         nre_block["programming_per_part"] = programming_per_part
 
     if speeds_feeds_csv_path:
