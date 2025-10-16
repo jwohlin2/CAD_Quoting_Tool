@@ -11528,7 +11528,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     if not isinstance(bucketized_raw, _MappingABC):
         bucketized_raw = {}
 
-    bucket_view_prepared = _prepare_bucket_view(bucketized_raw)
+    bucket_view_prepared: dict[str, Any] = _prepare_bucket_view(bucketized_raw)
 
     aggregated_bucket_minutes: dict[str, dict[str, float]] = {}
     line_items: Sequence[Mapping[str, Any]] | None = None
@@ -12059,6 +12059,10 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
 
     bucket_view.clear()
     bucket_view.update(bucket_view_prepared)
+
+    bucket_view_buckets = bucket_view_prepared.get("buckets")
+    if not isinstance(bucket_view_buckets, _MappingABC):
+        bucket_view_buckets = None
 
     if not use_planner:
         drilling_bucket_prepared = (
