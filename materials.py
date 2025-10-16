@@ -194,6 +194,8 @@ def _compute_material_block(
     material_key: str,
     density_g_cc: float | None,
     scrap_pct: float,
+    *,
+    stock_price_source: str | None = None,
 ):
     """Produce a normalized material record including weights and cost."""
 
@@ -262,12 +264,14 @@ def _compute_material_block(
 
     unit_price_each = stock_price if stock_price and stock_price > 0 else None
 
+    unit_price_usd: float | None = None
     api_price = None
-    if part_no:
+    if part_no and str(stock_price_source or "").strip().lower() == "mcmaster_api":
         api_price = _mcm_price_for_part(str(part_no))
     if api_price and api_price > 0:
         unit_price_each = float(api_price)
         stock_price = float(api_price)
+        unit_price_usd = float(api_price)
         if start_lb > 0:
             price_per_lb = float(unit_price_each) / float(start_lb)
         price_source = f"McMaster API (qty=1, part={part_no})"
@@ -343,6 +347,8 @@ def _compute_material_block(
         result["unit_price_source"] = price_source
         if price_source.startswith("McMaster API"):
             result["unit_price_confidence"] = "high"
+    if unit_price_usd is not None:
+        result["unit_price_usd"] = float(unit_price_usd)
     if provenance:
         result["provenance"] = provenance
 

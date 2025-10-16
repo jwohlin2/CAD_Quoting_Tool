@@ -712,6 +712,26 @@ def test_dummy_quote_direct_costs_match_across_sections() -> None:
     assert math.isclose(ladder_subtotal, labor_amount + expected_ladder_direct, abs_tol=0.01)
 
 
+def test_compute_direct_costs_adds_wieland_scrap_credit() -> None:
+    material_detail = {
+        "scrap_credit_mass_lb": 5.0,
+        "scrap_credit_unit_price_usd_per_lb": 2.5,
+    }
+
+    total = appV5._compute_direct_costs(
+        100.0,
+        0.0,
+        0.0,
+        {},
+        material_detail=material_detail,
+        scrap_price_source="wieland",
+    )
+
+    expected_credit = 5.0 * 2.5 * appV5.SCRAP_RECOVERY_DEFAULT
+    expected_total = round(100.0 - expected_credit, 2)
+    assert math.isclose(total, expected_total, abs_tol=1e-6)
+
+
 def test_dummy_quote_ladder_uses_pricing_direct_costs_when_available() -> None:
     payload = _dummy_quote_payload()
     breakdown = payload["breakdown"]

@@ -455,6 +455,9 @@ def _compute_direct_costs(
     scrap_credit: float | int | str | None,
     material_tax: float | int | str | None,
     pass_through: _MappingABC[str, Any] | None,
+    *,
+    material_detail: Mapping[str, Any] | None = None,
+    scrap_price_source: str | None = None,
 ) -> float:
     """Return the rounded direct-cost total shared by math and rendering."""
 
@@ -462,7 +465,50 @@ def _compute_direct_costs(
     pt.pop("Material", None)
     subtotal = float(material_total or 0.0)
     subtotal += float(material_tax or 0.0)
-    subtotal -= float(scrap_credit or 0.0)
+    base_scrap_credit = float(scrap_credit or 0.0)
+    subtotal -= base_scrap_credit
+
+    computed_scrap_credit = 0.0
+    if str(scrap_price_source or "").strip().lower() == "wieland":
+        detail_map: Mapping[str, Any] | None
+        detail_map = material_detail if isinstance(material_detail, _MappingABC) else None
+        scrap_mass_lb = None
+        if detail_map is not None:
+            for key in (
+                "scrap_credit_mass_lb",
+                "scrap_weight_lb",
+                "scrap_lb",
+            ):
+                val = _coerce_float_or_none(detail_map.get(key))
+                if val is not None and val > 0:
+                    scrap_mass_lb = float(val)
+                    break
+        if scrap_mass_lb and scrap_mass_lb > 0 and base_scrap_credit <= 0.0:
+            price_val = None
+            if detail_map is not None:
+                price_val = _coerce_float_or_none(
+                    detail_map.get("scrap_credit_unit_price_usd_per_lb")
+                )
+            if price_val is None or price_val <= 0:
+                family_hint = None
+                if detail_map is not None and isinstance(detail_map, _MappingABC):
+                    family_hint = detail_map.get("material_family") or detail_map.get(
+                        "material_group"
+                    )
+                price_val = _wieland_scrap_usd_per_lb(family_hint)
+            recovery_val = None
+            if detail_map is not None:
+                recovery_val = _coerce_float_or_none(
+                    detail_map.get("scrap_credit_recovery_pct")
+                )
+            if recovery_val is None or recovery_val <= 0:
+                recovery_val = SCRAP_RECOVERY_DEFAULT
+            if price_val is not None and price_val > 0 and recovery_val and recovery_val > 0:
+                computed_scrap_credit = float(scrap_mass_lb) * float(price_val) * float(
+                    recovery_val
+                )
+    if computed_scrap_credit > 0:
+        subtotal -= float(computed_scrap_credit)
     subtotal += sum(float(v or 0.0) for v in pt.values())
     return round(subtotal, 2)
 
@@ -3325,6 +3371,8 @@ def _sync_drilling_bucket_view(
 
     new_minutes = round(float(billed_minutes), 2)
     entry["minutes"] = new_minutes
+    entry["synced_minutes"] = new_minutes
+    entry["synced_hours"] = round(new_minutes / 60.0, 4)
 
     new_machine = old_machine
     new_labor = old_labor
@@ -3373,6 +3421,7 @@ def _charged_hours_by_bucket(
     process_meta,
     rates,
     *,
+    render_state: PlannerBucketRenderState | None = None,
     removal_drilling_hours: float | None = None,
     prefer_removal_drilling_hours: bool = True,
 ):
@@ -3394,10 +3443,26 @@ def _charged_hours_by_bucket(
         if hr is not None:
             label = _process_label(key)
             out[label] = out.get(label, 0.0) + float(hr)
-    try:
-        removal_hr = float(removal_drilling_hours) if removal_drilling_hours is not None else None
-    except Exception:
-        removal_hr = None
+    removal_hr = None
+    if render_state is not None:
+        try:
+            extra = getattr(render_state, "extra", {})
+        except Exception:
+            extra = {}
+        if isinstance(extra, _MappingABC):
+            try:
+                removal_hr = float(extra.get("removal_drilling_hours"))
+            except Exception:
+                removal_hr = None
+    if removal_hr is None:
+        try:
+            removal_hr = (
+                float(removal_drilling_hours)
+                if removal_drilling_hours is not None
+                else None
+            )
+        except Exception:
+            removal_hr = None
     if removal_hr is not None and removal_hr < 0:
         removal_hr = None
     if removal_hr is not None and prefer_removal_drilling_hours:
@@ -3715,6 +3780,24 @@ def _format_planner_bucket_line(
         minutes_val = 0.0
 
     hr_val = 0.0
+    if _canonical_bucket_key(canon_key) == "drilling":
+        synced_hr_val: float | None = None
+        synced_source = info.get("synced_hours")
+        if synced_source is not None:
+            try:
+                synced_hr_val = float(synced_source)
+            except Exception:
+                synced_hr_val = None
+        if synced_hr_val is None:
+            synced_minutes = info.get("synced_minutes")
+            if synced_minutes is not None:
+                try:
+                    synced_hr_val = float(synced_minutes) / 60.0
+                except Exception:
+                    synced_hr_val = None
+        if synced_hr_val is not None and synced_hr_val > 0:
+            hr_val = float(synced_hr_val)
+            minutes_val = hr_val * 60.0
     if isinstance(meta, _MappingABC):
         try:
             hr_val = float(meta.get("hr", 0.0) or 0.0)
@@ -3828,6 +3911,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         prefer_removal_drilling_hours = True
     else:
         prefer_removal_drilling_hours = bool(prefer_removal_drilling_hours)
+    stock_price_source = getattr(cfg, "stock_price_source", None)
+    scrap_price_source = getattr(cfg, "scrap_price_source", None)
 
     totals       = breakdown.get("totals", {}) or {}
     if not isinstance(totals, dict):
@@ -5213,6 +5298,24 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         except Exception:
             minutes_val = 0.0
         hr_val = 0.0
+        if _canonical_bucket_key(canon_key) == "drilling":
+            synced_hr_val: float | None = None
+            synced_source = info.get("synced_hours")
+            if synced_source is not None:
+                try:
+                    synced_hr_val = float(synced_source)
+                except Exception:
+                    synced_hr_val = None
+            if synced_hr_val is None:
+                synced_minutes = info.get("synced_minutes")
+                if synced_minutes is not None:
+                    try:
+                        synced_hr_val = float(synced_minutes) / 60.0
+                    except Exception:
+                        synced_hr_val = None
+            if synced_hr_val is not None and synced_hr_val > 0:
+                hr_val = float(synced_hr_val)
+                minutes_val = hr_val * 60.0
         if isinstance(meta, _MappingABC):
             try:
                 hr_val = float(meta.get("hr", 0.0) or 0.0)
@@ -7161,10 +7264,46 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     hour_summary_entries.clear()
 
+    if (
+        prefer_removal_drilling_hours
+        and isinstance(bucket_state.extra, dict)
+        and bucket_state.extra.get("removal_drilling_hours") is not None
+    ):
+        billed_minutes_sync = None
+        try:
+            billed_minutes_sync = (
+                float(bucket_state.extra.get("removal_drilling_hours", 0.0)) * 60.0
+            )
+        except Exception:
+            billed_minutes_sync = None
+        if billed_minutes_sync is not None and billed_minutes_sync > 0:
+            bucket_view_target: Mapping[str, Any] | None = None
+            if isinstance(breakdown, _MutableMappingABC):
+                candidate_view = breakdown.get("bucket_view")
+                if isinstance(candidate_view, _MutableMappingABC):
+                    bucket_view_target = candidate_view
+            if bucket_view_target is None and isinstance(bucket_view_struct, _MutableMappingABC):
+                bucket_view_target = bucket_view_struct
+            if isinstance(bucket_view_target, _MutableMappingABC):
+                billed_cost_sync: float | None = None
+                if isinstance(process_costs, _MappingABC):
+                    try:
+                        billed_cost_candidate = float(process_costs.get("drilling") or 0.0)
+                    except Exception:
+                        billed_cost_candidate = 0.0
+                    if billed_cost_candidate > 0.0:
+                        billed_cost_sync = billed_cost_candidate
+                _sync_drilling_bucket_view(
+                    bucket_view_target,
+                    billed_minutes=billed_minutes_sync,
+                    billed_cost=billed_cost_sync,
+                )
+
     charged_hours = _charged_hours_by_bucket(
         process_costs,
         process_meta,
         rates,
+        render_state=bucket_state,
         removal_drilling_hours=removal_drilling_hours_precise,
         prefer_removal_drilling_hours=prefer_removal_drilling_hours,
     )
@@ -12451,11 +12590,26 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         mat_key,
         _coerce_float_or_none(density),
         scrap_pct_effective,
+        stock_price_source=stock_price_source,
     )
     breakdown["material_block"] = mat_block
     grams_per_lb = 1000.0 / LB_PER_KG
     material_entry = breakdown.setdefault("material", {})
     if isinstance(material_entry, dict):
+        if stock_price_source:
+            material_entry.setdefault("stock_price_source", stock_price_source)
+            if isinstance(mat_block, _MappingABC):
+                try:
+                    mat_block.setdefault("stock_price_source", stock_price_source)  # type: ignore[attr-defined]
+                except AttributeError:
+                    pass
+        if scrap_price_source:
+            material_entry.setdefault("scrap_price_source", scrap_price_source)
+        if isinstance(mat_block, _MappingABC) and scrap_price_source:
+            try:
+                mat_block.setdefault("scrap_price_source", scrap_price_source)  # type: ignore[attr-defined]
+            except AttributeError:
+                pass
         stock_dims_raw = mat_block.get("stock_dims_in")
         if isinstance(stock_dims_raw, (list, tuple)) and len(stock_dims_raw) >= 3:
             try:
