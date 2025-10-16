@@ -4834,67 +4834,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         process_plan_breakdown.get("bucket_view") if isinstance(process_plan_breakdown, _MappingABC) else None
     )
 
-    use_planner_bucket_display = bool(planner_bucket_from_plan) and pricing_source_lower == "planner"
-    if use_planner_bucket_display and set(planner_bucket_from_plan.keys()) == {"misc"}:
-        use_planner_bucket_display = False
-    planner_bucket_display_map: dict[str, dict[str, Any]] = (
-        dict(planner_bucket_from_plan) if use_planner_bucket_display else {}
-    )
-
-    if use_planner_bucket_display:
-        existing_canon_keys = {_canonical_bucket_key(key) for key in list(process_costs.keys())}
-        bucket_canon_keys = set(planner_bucket_from_plan.keys())
-        has_only_machine_labor = existing_canon_keys and existing_canon_keys <= {"machine", "labor"}
-        replace_machine_labor = has_only_machine_labor or not bucket_canon_keys.issubset(existing_canon_keys)
-        if has_only_machine_labor and bucket_canon_keys == {"misc"}:
-            replace_machine_labor = False
-        if replace_machine_labor:
-            for key in list(process_costs.keys()):
-                if _canonical_bucket_key(key) in {"machine", "labor"}:
-                    process_costs.pop(key, None)
-            for canon_key, info in planner_bucket_from_plan.items():
-                total_cost = 0.0
-                for key_option in ("total_cost", "total$", "total"):
-                    if key_option in info:
-                        try:
-                            total_cost = float(info.get(key_option) or 0.0)
-                        except Exception:
-                            continue
-                        if total_cost:
-                            break
-                if total_cost <= 0:
-                    try:
-                        total_cost = float(process_costs.get(canon_key, 0.0) or 0.0)
-                    except Exception:
-                        total_cost = 0.0
-                process_costs[canon_key] = float(total_cost)
-                existing_meta = process_meta.get(canon_key) if isinstance(process_meta, dict) else None
-                meta_update = dict(existing_meta) if isinstance(existing_meta, _MappingABC) else {}
-                try:
-                    minutes_val = float(info.get("minutes", meta_update.get("minutes", 0.0)) or 0.0)
-                except Exception:
-                    minutes_val = float(meta_update.get("minutes", 0.0) or 0.0)
-                if minutes_val > 0:
-                    meta_update["minutes"] = round(minutes_val, 1)
-                    meta_update["hr"] = round(minutes_val / 60.0, 3)
-                elif "hr" not in meta_update:
-                    try:
-                        meta_update["hr"] = float(meta_update.get("hr", 0.0) or 0.0)
-                    except Exception:
-                        meta_update["hr"] = 0.0
-                try:
-                    hr_for_rate = float(meta_update.get("hr", 0.0) or 0.0)
-                except Exception:
-                    hr_for_rate = 0.0
-                if hr_for_rate > 0 and total_cost > 0:
-                    meta_update["rate"] = round(total_cost / hr_for_rate, 2)
-                else:
-                    try:
-                        meta_update["rate"] = float(meta_update.get("rate", 0.0) or 0.0)
-                    except Exception:
-                        meta_update["rate"] = 0.0
-                meta_update["cost"] = round(total_cost, 2)
-                process_meta[canon_key] = meta_update
+    # Minutes engine owns the canonical bucket display. Planner output is still captured
+    # for summaries, but it must not overwrite the breakdown used for pricing.
+    planner_bucket_display_map: dict[str, dict[str, Any]] = {}
 
     bucket_rollup_map: dict[str, dict[str, Any]] = {}
     raw_rollup = breakdown.get("planner_bucket_rollup")
