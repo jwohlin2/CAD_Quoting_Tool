@@ -5698,8 +5698,23 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if k in ("programming_per_lot", "fixture_per_part", "programming_per_part"):
             continue
         if isinstance(v, (int, float)) and (v > 0 or show_zeros):
-            row(k.replace("_", " ").title() + ":", float(v))
-            other_nre_total += float(v)
+            label = k.replace("_", " ").title()
+            amount_val = float(v)
+            key_lower = str(k).lower()
+            if key_lower.endswith(("_hr", "_hrs", "_hours")):
+                hours_label = label
+                if hours_label.endswith(" Hours"):
+                    hours_label = hours_label[:-6] + " Hrs"
+                elif hours_label.endswith(" Hour"):
+                    hours_label = hours_label[:-5] + " Hrs"
+                elif hours_label.endswith(" Hr"):
+                    hours_label = hours_label[:-3] + " Hrs"
+                else:
+                    hours_label = f"{hours_label} Hrs"
+                hours_row(f"{hours_label}:", amount_val)
+            else:
+                row(f"{label}:", amount_val)
+            other_nre_total += amount_val
     if (prog or fix or other_nre_total > 0) and not lines[-1].strip() == "":
         append_line("")
 
@@ -7085,13 +7100,25 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             f"{_m(material_direct_contribution)} to Direct Costs",
             "  ",
         )
-    directs = _compute_direct_costs(
-        material_total_for_directs,
-        scrap_credit_for_directs,
-        material_tax_for_directs,
-        displayed_pass_through,
-    )
-    directs = float(directs)
+    direct_costs_total: float | None = None
+    if isinstance(pricing, _MappingABC):
+        direct_costs_candidate = pricing.get("direct_costs")
+        if isinstance(direct_costs_candidate, _MappingABC):
+            total = 0.0
+            for value in direct_costs_candidate.values():
+                total += _safe_float(value, default=0.0)
+            direct_costs_total = round(total, 2)
+
+    if direct_costs_total is None:
+        directs = _compute_direct_costs(
+            material_total_for_directs,
+            scrap_credit_for_directs,
+            material_tax_for_directs,
+            displayed_pass_through,
+        )
+        directs = float(directs)
+    else:
+        directs = float(direct_costs_total)
     if isinstance(breakdown, dict):
         try:
             breakdown["total_direct_costs"] = directs
@@ -7110,11 +7137,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             ),
         )
 
-    computed_total_labor_cost = proc_total + pass_through_labor_total
+    pass_total = float(directs)
+
+    computed_total_labor_cost = proc_total
     expected_labor_total = computed_total_labor_cost
     if declared_labor_total > computed_total_labor_cost + 0.01:
         expected_labor_total = declared_labor_total
-    components_total = display_labor_for_ladder + pass_through_labor_total + display_machine
+    components_total = display_labor_for_ladder + display_machine
     using_planner_for_ladder = str(pricing_source_value or "").strip().lower() == "planner"
     planner_machine_for_directs = 0.0
     planner_labor_override: float | None = None
