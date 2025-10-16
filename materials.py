@@ -22,6 +22,25 @@ from cad_quoter.domain_models import (
 )
 from cad_quoter.llm_overrides import _plate_mass_properties, _plate_mass_from_dims
 from cad_quoter.pricing import LB_PER_KG
+
+
+def _usd_per_lb(value: Any, unit_hint: Any | None = None) -> float | None:
+    """Return a USD/lb value normalized from assorted unit hints."""
+
+    if value in (None, ""):
+        return None
+    try:
+        v = float(value)
+    except Exception:
+        return None
+    u = str(unit_hint or "").lower()
+    if "kg" in u:
+        return v / LB_PER_KG
+    if "mt" in u or "tonne" in u or "/t" in u:
+        return v / 1000.0 / LB_PER_KG
+    return v
+
+
 from cad_quoter.pricing import resolve_material_unit_price as _resolve_material_unit_price_raw
 from cad_quoter.pricing.vendor_csv import (
     pick_from_stdgrid as _pick_from_stdgrid,
@@ -502,71 +521,69 @@ def _material_cost_components(
     block = material_block or {}
     overrides = overrides or {}
 
-    start_g = (
+    def _grams_to_lb(value: Any) -> float:
+        mass = _coerce_float_or_none(value)
+        if mass is None:
+            return 0.0
+        return float(mass) / 1000.0 * LB_PER_KG
+
+    start_lb = _grams_to_lb(
         block.get("starting_mass_g")
         or block.get("start_mass_g")
         or block.get("start_g")
         or 0.0
     )
-    scrap_g = block.get("scrap_mass_g") or 0.0
-    try:
-        start_lb = float(start_g) * 0.00220462262
-    except Exception:
-        start_lb = 0.0
-    try:
-        scrap_lb = float(scrap_g) * 0.00220462262
-    except Exception:
-        scrap_lb = 0.0
+    scrap_lb = _grams_to_lb(block.get("scrap_mass_g") or block.get("scrap_g") or 0.0)
 
-    per_lb = block.get("unit_price_per_lb_usd")
+    per_lb_unit = block.get("unit_price_unit") or block.get("unit_price_basis")
+    per_lb = _usd_per_lb(block.get("unit_price_per_lb_usd"), per_lb_unit)
+    if per_lb is None:
+        per_lb = _coerce_float_or_none(block.get("unit_price_usd_per_lb"))
+    per_lb_val = float(per_lb or 0.0)
     per_lb_src = block.get("unit_price_per_lb_source") or block.get("unit_price_source")
 
-    stock_piece_usd_raw = block.get("stock_piece_price_usd")
+    scrap_unit = block.get("scrap_price_unit")
+    scrap_usd_lb = _usd_per_lb(block.get("scrap_price_usd_per_lb"), scrap_unit)
+    if scrap_usd_lb is None:
+        scrap_usd_lb = _usd_per_lb(overrides.get("scrap_usd_per_lb"), scrap_unit)
+    if scrap_usd_lb is None:
+        scrap_usd_lb = _coerce_float_or_none(overrides.get("scrap_usd_per_lb"))
+
+    stock_piece_usd = _coerce_float_or_none(block.get("stock_piece_price_usd"))
+    stock_piece_usd = float(stock_piece_usd) if stock_piece_usd and stock_piece_usd > 0 else None
     stock_source = block.get("stock_piece_source")
-    stock_piece_usd = None
-    try:
-        if isinstance(stock_piece_usd_raw, (int, float)) and float(stock_piece_usd_raw) > 0:
-            stock_piece_usd = float(stock_piece_usd_raw)
-    except Exception:
-        stock_piece_usd = None
 
     if stock_piece_usd is not None:
         base_usd = float(stock_piece_usd)
         base_src = stock_source or "Stock piece"
     else:
-        try:
-            price_per_lb = float(per_lb or 0.0)
-        except Exception:
-            price_per_lb = 0.0
-        base_usd = float(start_lb) * price_per_lb
-        base_src = f"{per_lb_src or 'per-lb'} @ ${price_per_lb:.2f}/lb"
+        base_usd = float(start_lb) * float(per_lb_val)
+        base_src = f"{per_lb_src or 'per-lb'} @ ${per_lb_val:.2f}/lb"
 
-    try:
-        tax_usd = float(block.get("material_tax_usd") or block.get("material_tax") or 0.0)
-    except Exception:
-        tax_usd = 0.0
+    tax_usd = _coerce_float_or_none(
+        block.get("material_tax_usd") or block.get("material_tax") or 0.0
+    )
+    tax_usd = float(tax_usd or 0.0)
 
-    scrap_usd_lb = block.get("scrap_price_usd_per_lb")
-    if scrap_usd_lb is None:
-        try:
-            scrap_usd_lb = float(overrides.get("scrap_usd_per_lb"))
-        except Exception:
-            scrap_usd_lb = None
-    recovery = overrides.get("scrap_recovery_pct", overrides.get("scrap_recovery_fraction"))
-    try:
-        recovery_val = float(recovery) if recovery is not None else 0.85
-    except Exception:
+    recovery_hint = overrides.get("scrap_recovery_pct")
+    if recovery_hint is None:
+        recovery_hint = overrides.get("scrap_recovery_fraction")
+    if recovery_hint is None:
+        recovery_hint = (
+            block.get("scrap_credit_recovery_pct")
+            or block.get("scrap_recovery_pct")
+            or block.get("scrap_recovery_fraction")
+        )
+    recovery_val = _coerce_float_or_none(recovery_hint)
+    if recovery_val is None:
         recovery_val = 0.85
     if recovery_val > 1.0 + 1e-6:
         recovery_val = recovery_val / 100.0
-    recovery_val = max(0.0, min(1.0, recovery_val))
+    recovery_val = max(0.0, min(1.0, float(recovery_val)))
 
-    try:
-        scrap_unit_price = float(scrap_usd_lb or 0.0)
-    except Exception:
-        scrap_unit_price = 0.0
+    scrap_usd_lb_val = float(scrap_usd_lb or 0.0)
+    scrap_credit = float(scrap_lb) * scrap_usd_lb_val * recovery_val
 
-    scrap_credit = float(scrap_lb) * scrap_unit_price * recovery_val
     scrap_price_source = str(
         (block.get("scrap_price_source") or block.get("scrap_credit_source") or "")
     ).strip().lower()
@@ -578,35 +595,30 @@ def _material_cost_components(
     if scrap_price_source == "wieland" and explicit_credit in (None, ""):
         explicit_credit = block.get("computed_scrap_credit_usd")
         if explicit_credit in (None, ""):
-            mass_lb_val = block.get("scrap_credit_mass_lb") or block.get("scrap_weight_lb")
-            if mass_lb_val in (None, ""):
-                mass_lb_val = block.get("scrap_lb")
-            try:
-                mass_lb = float(mass_lb_val or 0.0)
-            except Exception:
-                mass_lb = 0.0
-            price_val = block.get("scrap_credit_unit_price_usd_per_lb")
-            try:
-                price_lb = float(price_val or scrap_unit_price)
-            except Exception:
-                price_lb = float(scrap_unit_price)
-            recovery_hint = block.get("scrap_credit_recovery_pct") or recovery
-            try:
-                recovery_calc = float(recovery_hint or recovery_val)
-            except Exception:
-                recovery_calc = float(recovery_val)
+            mass_lb_val = (
+                block.get("scrap_credit_mass_lb")
+                or block.get("scrap_weight_lb")
+                or block.get("scrap_lb")
+            )
+            mass_lb = _coerce_float_or_none(mass_lb_val) or 0.0
+            price_val = _usd_per_lb(
+                block.get("scrap_credit_unit_price_usd_per_lb"), scrap_unit
+            )
+            if price_val is None:
+                price_val = scrap_usd_lb_val
+            recovery_hint = block.get("scrap_credit_recovery_pct") or recovery_hint
+            recovery_calc = _coerce_float_or_none(recovery_hint)
+            if recovery_calc is None:
+                recovery_calc = recovery_val
             if recovery_calc > 1.0 + 1e-6:
                 recovery_calc = recovery_calc / 100.0
-            recovery_calc = max(0.0, min(1.0, recovery_calc))
-            explicit_credit = mass_lb * price_lb * recovery_calc
+            recovery_calc = max(0.0, min(1.0, float(recovery_calc)))
+            explicit_credit = float(mass_lb) * float(price_val) * float(recovery_calc)
     if explicit_credit not in (None, ""):
         try:
             scrap_credit = max(0.0, float(explicit_credit))
         except Exception:
             pass
-    scrap_rate_text = None
-    if scrap_unit_price > 0 and scrap_lb > 0:
-        scrap_rate_text = f"${scrap_unit_price:.2f}/lb × {recovery_val:.0%}"
 
     explicit_base_pre_credit = None
     for key in (
@@ -657,15 +669,17 @@ def _material_cost_components(
                 base_src = text
                 break
 
-    net_usd = float(base_usd) - float(scrap_credit)
-    if net_usd < 0:
-        net_usd = 0.0
-    net_usd = round(net_usd, 2)
+    base_usd = float(base_usd)
+    tax_usd = float(tax_usd)
+    scrap_credit = max(0.0, float(scrap_credit))
+    scrap_credit = min(scrap_credit, base_usd + tax_usd)
 
-    total = float(base_usd) + float(tax_usd) - float(scrap_credit)
-    if total < 0:
-        total = 0.0
-    total = round(total, 2)
+    scrap_rate_text = None
+    if scrap_usd_lb_val > 0 and scrap_lb > 0:
+        scrap_rate_text = f"${scrap_usd_lb_val:.2f}/lb × {recovery_val:.0%}"
+
+    net_usd = max(0.0, base_usd - scrap_credit)
+    total = max(0.0, base_usd + tax_usd - scrap_credit)
 
     return {
         "base_usd": round(base_usd, 2),
@@ -675,8 +689,8 @@ def _material_cost_components(
         "scrap_rate_text": scrap_rate_text,
         "stock_piece_usd": round(stock_piece_usd, 2) if stock_piece_usd else None,
         "stock_source": stock_source,
-        "net_usd": net_usd,
-        "total_usd": total,
+        "net_usd": round(net_usd, 2),
+        "total_usd": round(total, 2),
     }
 
 
