@@ -6100,8 +6100,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             append_line(f"  Stock used: {stock_line}")
             if detail_lines:
                 append_lines(detail_lines)
-            if material_cost_components:
-                mc = material_cost_components
+            mc: Mapping[str, Any] | None = material_cost_components
+            if not mc:
+                try:
+                    mc = _material_cost_components(
+                        material_block,
+                        overrides=material_overrides,
+                        cfg=cfg,
+                    )
+                except Exception:
+                    mc = None
+            if mc:
                 stock_piece_val = mc.get("stock_piece_usd")
                 if stock_piece_val is not None:
                     stock_src = mc.get("stock_source") or ""
