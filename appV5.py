@@ -5188,15 +5188,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if hour_trace_data is None and isinstance(breakdown, _MappingABC):
         hour_trace_data = breakdown.get("hour_trace")
     explanation_lines: list[str] = []
-    try:
-        explanation_text = explain_quote(breakdown, hour_trace=hour_trace_data)
-    except Exception:
-        explanation_text = ""
-    if explanation_text:
-        for line in str(explanation_text).splitlines():
-            text = line.strip()
-            if text:
-                explanation_lines.append(text)
     # ``explanation_lines`` will be merged into ``why_parts`` after the process
     # bucket rows are prepared so the cost makeup + contributor text can be
     # derived from the exact rows rendered in the Process & Labor table.
@@ -6573,6 +6564,31 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         removal_drilling_hours=removal_drilling_hours_precise,
         prefer_removal_drilling_hours=prefer_removal_drilling_hours,
     )
+
+    geometry_for_explainer: Mapping[str, Any] | None = None
+    if isinstance(g, dict) and g:
+        geometry_for_explainer = typing.cast(Mapping[str, Any], g)
+    elif isinstance(breakdown, _MappingABC):
+        for key in ("geometry", "geo_context", "geometry_context", "geo"):
+            candidate = breakdown.get(key)
+            if isinstance(candidate, _MappingABC) and candidate:
+                geometry_for_explainer = typing.cast(Mapping[str, Any], candidate)
+                break
+
+    try:
+        explanation_text = explain_quote(
+            breakdown,
+            hour_trace=hour_trace_data,
+            geometry=geometry_for_explainer,
+            render_state=bucket_state,
+        )
+    except Exception:
+        explanation_text = ""
+    if explanation_text:
+        for line in str(explanation_text).splitlines():
+            text = line.strip()
+            if text:
+                explanation_lines.append(text)
 
     def _norm(s: Any) -> str:
         import re

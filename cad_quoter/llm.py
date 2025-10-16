@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence
 
 from cad_quoter.utils import _dict, compact_dict, jdump, json_safe_copy
+from cad_quoter.utils.render_utils import fmt_hours, fmt_money, fmt_percent
 from appkit.data import load_text
 
 
@@ -804,6 +805,8 @@ def explain_quote(
     breakdown: Mapping[str, Any] | None,
     *,
     hour_trace: Mapping[str, Any] | Sequence[tuple[str, Any]] | None = None,
+    geometry: Mapping[str, Any] | None = None,
+    render_state: Any | None = None,
 ) -> str:
     """Return a short natural-language explanation for a rendered quote."""
 
@@ -861,6 +864,66 @@ def explain_quote(
         return fmt_money(num, currency_prefix)
 
     lines: list[str] = []
+
+    geometry_map: Mapping[str, Any] | None = geometry if isinstance(geometry, Mapping) else None
+    if geometry_map is None:
+        geometry_candidates: list[Any] = []
+        if isinstance(breakdown, Mapping):
+            geometry_candidates.extend(
+                breakdown.get(key)
+                for key in ("geometry", "geo_context", "geometry_context", "geo")
+            )
+        for candidate in geometry_candidates:
+            if isinstance(candidate, Mapping):
+                geometry_map = candidate
+                break
+
+    def _hole_groups_present(source: Mapping[str, Any] | None) -> bool:
+        if not isinstance(source, Mapping):
+            return False
+        for key in ("hole_groups", "hole_sets"):
+            groups = source.get(key)
+            if isinstance(groups, Sequence) and any(groups):
+                return True
+        return False
+
+    hole_groups_flag = _hole_groups_present(geometry_map)
+    if not hole_groups_flag and isinstance(breakdown, Mapping):
+        hole_groups_flag = _hole_groups_present(breakdown.get("geometry"))
+        if not hole_groups_flag:
+            hole_groups_flag = _hole_groups_present(breakdown.get("geo_context"))
+
+    def _extract_removal_hours(source: Any) -> float | None:
+        if source is None:
+            return None
+        if isinstance(source, Mapping):
+            direct = _coerce_float(source.get("removal_drilling_hours"))
+            if direct is not None:
+                return direct
+            extra = source.get("extra")
+            if isinstance(extra, Mapping):
+                from_extra = _coerce_float(extra.get("removal_drilling_hours"))
+                if from_extra is not None:
+                    return from_extra
+        try:
+            extra_attr = getattr(source, "extra", None)
+        except Exception:
+            extra_attr = None
+        if isinstance(extra_attr, Mapping):
+            from_attr = _coerce_float(extra_attr.get("removal_drilling_hours"))
+            if from_attr is not None:
+                return from_attr
+        return None
+
+    removal_hr = _extract_removal_hours(render_state)
+    if removal_hr is None and isinstance(breakdown, Mapping):
+        removal_hr = _extract_removal_hours(breakdown.get("planner_render_state"))
+    if removal_hr is None and isinstance(breakdown, Mapping):
+        removal_hr = _extract_removal_hours(breakdown.get("bucket_render_state"))
+    if removal_hr is None and isinstance(breakdown, Mapping):
+        removal_hr = _extract_removal_hours(breakdown.get("removal_summary"))
+
+    should_note_drilling = hole_groups_flag or (removal_hr is not None and removal_hr > 0)
 
     price_text = _format_money(totals.get("price") or breakdown.get("price"))
     qty_val = _coerce_int(totals.get("qty") or breakdown.get("qty") or breakdown.get("quantity"))
@@ -938,6 +1001,18 @@ def explain_quote(
     ]
     if process_entries:
         _describe_top(process_entries, prefix="Largest process costs")
+
+    if should_note_drilling:
+        drill_line_present = any("drill" in line.lower() for line in lines)
+        if not drill_line_present:
+            reasons: list[str] = []
+            if hole_groups_flag:
+                reasons.append("geometry shows drilled holes")
+            if removal_hr is not None and removal_hr > 0:
+                hours_text = fmt_hours(removal_hr)
+                reasons.append(f"removal card tracks {hours_text} of drilling")
+            reason_text = " and ".join(reasons) if reasons else "process data includes drilling"
+            lines.append(f"Drilling is included because {reason_text}.")
 
     pass_through_entries = [
         (label, amount)
