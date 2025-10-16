@@ -12172,12 +12172,6 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                     else drilling_bucket_prepared.get("labor_cost")
                 ),
             }
-        elif drill_total_minutes is not None and drill_total_minutes > 0.0:
-            bucket_view["drilling"] = {
-                "minutes": drill_total_minutes,
-                "machine_cost": (drill_total_minutes / 60.0) * drilling_rate,
-                "labor_cost": 0.0,
-            }
 
     roughing_hours = _coerce_float_or_none(value_map.get("Roughing Cycle Time"))
     if roughing_hours is None:
