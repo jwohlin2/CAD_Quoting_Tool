@@ -341,19 +341,74 @@ def pick_stock_from_mcmaster(
             except Exception:
                 item = None
             if item:
+                fallback_used = False
                 length = float(max(item.length, item.width))
                 width = float(min(item.length, item.width))
-                result.update(
-                    {
-                        "vendor": "McMaster",
-                        "len_in": length,
-                        "wid_in": width,
-                        "thk_in": float(item.thickness),
-                        "mcmaster_part": item.part,
-                        "part_no": item.part,
-                        "source": "mcmaster-catalog",
-                    }
-                )
+                chosen_thk = float(item.thickness)
+                if abs(chosen_thk - thk_val) > 0.05:
+                    forced_item = None
+                    original_allow = getattr(_mc, "ALLOW_NEXT_THICKER", None)
+                    try:
+                        if original_allow is not None:
+                            setattr(_mc, "ALLOW_NEXT_THICKER", False)
+                        forced_item = _mc.choose_item(
+                            catalog, material_label, L_need, W_need, thk_val
+                        )
+                    except Exception:
+                        forced_item = None
+                    finally:
+                        if original_allow is not None:
+                            try:
+                                setattr(_mc, "ALLOW_NEXT_THICKER", original_allow)
+                            except Exception:
+                                pass
+                    if forced_item and abs(float(forced_item.thickness) - thk_val) <= 0.05:
+                        item = forced_item
+                        length = float(max(item.length, item.width))
+                        width = float(min(item.length, item.width))
+                        chosen_thk = float(item.thickness)
+                    else:
+                        _log.warning(
+                            "[stock] Thickness upsize blocked: need %.2f in, got %.2f in; "
+                            "falling back to exact-thickness CSV lookup",
+                            thk_val,
+                            chosen_thk,
+                        )
+                        csv_hint = os.getenv("CATALOG_CSV_PATH") or catalog_path or ""
+                        fallback = _fallback_catalog_lookup(
+                            csv_hint, material_label, L_need, W_need, thk_val
+                        )
+                        if fallback:
+                            fallback_used = True
+                            part_number = str(fallback.get("part") or "").strip()
+                            updates = {
+                                "vendor": "McMaster",
+                                "len_in": float(fallback["len_in"]),
+                                "wid_in": float(fallback["wid_in"]),
+                                "thk_in": float(fallback["thk_in"]),
+                                "source": "mcmaster-catalog-csv",
+                            }
+                            if part_number:
+                                updates["mcmaster_part"] = part_number
+                                updates["part_no"] = part_number
+                            result.update(updates)
+                        else:
+                            result["thickness_upsize_reason"] = (
+                                "catalog exact thickness not found; "
+                                f"used {chosen_thk:.2f} in"
+                            )
+                if not fallback_used:
+                    result.update(
+                        {
+                            "vendor": "McMaster",
+                            "len_in": length,
+                            "wid_in": width,
+                            "thk_in": float(item.thickness),
+                            "mcmaster_part": item.part,
+                            "part_no": item.part,
+                            "source": "mcmaster-catalog",
+                        }
+                    )
 
     if not result.get("mcmaster_part"):
         csv_path = catalog_path or ""
@@ -382,6 +437,45 @@ def pick_stock_from_mcmaster(
                         price = None
                 if price:
                     price_val = float(price)
+                    result["price$"] = price_val
+                    result["price_usd"] = price_val
+                    result["stock_piece_api_price"] = price_val
+                    result["stock_piece_api_source"] = "mcmaster_api"
+
+    if (
+        result
+        and result.get("vendor") == "McMaster"
+        and _mc is not None
+        and not result.get("stock_piece_api_price")
+    ):
+        try:
+            length_in = float(result.get("len_in") or 0.0)
+            width_in = float(result.get("wid_in") or 0.0)
+            thk_in = float(result.get("thk_in") or 0.0)
+        except Exception:
+            length_in = width_in = thk_in = 0.0
+        if length_in > 0 and width_in > 0 and thk_in > 0:
+            try:
+                sku, price_each, _, _ = _mc.lookup_sku_and_price_for_mm(
+                    material_label,
+                    length_in * 25.4,
+                    width_in * 25.4,
+                    thk_in * 25.4,
+                    qty=1,
+                )
+            except Exception:
+                sku, price_each = None, None
+            if sku:
+                part_str = str(sku)
+                if part_str:
+                    result.setdefault("mcmaster_part", part_str)
+                    result.setdefault("part_no", part_str)
+            if price_each:
+                try:
+                    price_val = float(price_each)
+                except Exception:
+                    price_val = None
+                if price_val and price_val > 0:
                     result["price$"] = price_val
                     result["price_usd"] = price_val
                     result["stock_piece_api_price"] = price_val
