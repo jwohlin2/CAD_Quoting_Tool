@@ -73,6 +73,7 @@ from cad_quoter.utils.render_utils import (
     render_quote_doc,
 )
 from cad_quoter.pricing import load_backup_prices_csv
+from cad_quoter.pricing import render_process_costs
 from cad_quoter.estimators import SpeedsFeedsUnavailableError
 from cad_quoter.llm_overrides import (
     _plate_mass_properties,
@@ -5907,13 +5908,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         bucket_canon_label_map,
     ) = _rows_from_bucket_view(bucket_view_struct)
 
-    if not bucket_table_rows:
-        canonical_bucket_order = list(bucket_state.canonical_order)
-        canonical_bucket_summary = dict(bucket_state.canonical_summary)
-        bucket_table_rows = list(bucket_state.table_rows)
-        bucket_label_map = dict(bucket_state.label_to_canon)
-        bucket_canon_label_map = dict(bucket_state.canon_to_display_label)
-
     def _row_component(value: Any) -> float:
         try:
             return float(value or 0.0)
@@ -5982,11 +5976,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         bucket_minutes_detail[canon_key] = _safe_float(
             metrics.get("minutes"), default=0.0
         )
-    for key, minutes in bucket_state.bucket_minutes_detail.items():
-        canon_key = _canonical_bucket_key(key)
-        if canon_key in canonical_bucket_summary:
-            continue
-        bucket_minutes_detail.setdefault(canon_key or key, _safe_float(minutes))
     extra_bucket_minutes_detail = breakdown.get("bucket_minutes_detail")
     if isinstance(extra_bucket_minutes_detail, _MappingABC):
         for key, minutes in extra_bucket_minutes_detail.items():
@@ -5996,20 +5985,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         process_costs_for_render[canon_key] = _safe_float(
             metrics.get("total"), default=0.0
         )
-    for key, amount in bucket_state.process_costs_for_render.items():
-        canon_key = _canonical_bucket_key(key)
-        if canon_key in canonical_bucket_summary:
-            continue
-        process_costs_for_render.setdefault(key, _safe_float(amount))
-    if isinstance(process_costs_canon, _MappingABC):
-        canon_items = process_costs_canon.items()
-    else:
-        canon_items = getattr(process_costs_canon, "items", lambda: [])()
-    for canon_key, amount in canon_items:
-        key = str(canon_key or "").strip()
-        if not key or key in process_costs_for_render:
-            continue
-        process_costs_for_render[key] = _safe_float(amount)
 
     proc_total = 0.0
     amortized_nre_total = 0.0
@@ -6316,66 +6291,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     for canon_key, (amount, minutes) in amortized_overrides.items():
         amount_val = _safe_float(amount)
         minutes_val = _safe_float(minutes)
+        if canon_key not in canonical_bucket_summary:
+            continue
         process_costs_for_render[canon_key] = amount_val
         if minutes_val > 0:
             bucket_minutes_detail[canon_key] = minutes_val
         label = _display_bucket_label(canon_key, label_overrides)
         label_to_canon.setdefault(label, canon_key)
         canon_to_display_label.setdefault(canon_key, label)
-        if not any(spec.canon_key == canon_key for spec in bucket_row_specs):
-            hours_val = minutes_val / 60.0 if minutes_val else 0.0
-            labor_val = amount_val if _norm(canon_key) in LABORISH else 0.0
-            machine_val = amount_val if labor_val <= 0.0 else 0.0
-            rate_val = _rate_for_bucket(canon_key, rates or {})
-            if rate_val <= 0.0 and hours_val > 0.0 and amount_val > 0.0:
-                rate_val = amount_val / hours_val
-            bucket_row_specs.append(
-                _BucketRowSpec(
-                    label=label,
-                    hours=hours_val,
-                    rate=rate_val,
-                    total=amount_val,
-                    labor=labor_val,
-                    machine=machine_val,
-                    canon_key=canon_key,
-                    minutes=minutes_val,
-                )
-            )
-            bucket_table_rows.append(
-                (
-                    label,
-                    round(hours_val, 2),
-                    round(labor_val, 2),
-                    round(machine_val, 2),
-                    round(amount_val, 2),
-                )
-            )
-            if canon_key not in canonical_bucket_summary:
-                canonical_bucket_summary[canon_key] = {
-                    "minutes": minutes_val,
-                    "hours": hours_val,
-                    "labor": labor_val,
-                    "machine": machine_val,
-                    "total": amount_val,
-                }
-                canonical_bucket_order.append(canon_key)
-            else:
-                summary_entry = canonical_bucket_summary[canon_key]
-                summary_entry["minutes"] = (
-                    _safe_float(summary_entry.get("minutes")) + minutes_val
-                )
-                summary_entry["hours"] = (
-                    _safe_float(summary_entry.get("hours")) + hours_val
-                )
-                summary_entry["labor"] = (
-                    _safe_float(summary_entry.get("labor")) + labor_val
-                )
-                summary_entry["machine"] = (
-                    _safe_float(summary_entry.get("machine")) + machine_val
-                )
-                summary_entry["total"] = (
-                    _safe_float(summary_entry.get("total")) + amount_val
-                )
 
     for canon_key in process_costs_for_render:
         label = _display_bucket_label(canon_key, label_overrides)
