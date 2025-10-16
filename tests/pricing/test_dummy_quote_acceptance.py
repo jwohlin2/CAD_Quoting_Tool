@@ -39,6 +39,20 @@ _PLANNER_LINE_ITEMS = [
 ]
 
 
+_QUICK_CHECK_BREAKDOWN = {
+    "material_block": {
+        "stock_L_in": 12.0,
+        "total_material_cost": 120.0,
+    },
+    "total_direct_costs": 150.0,
+    "bucket_view": {"totals": {"total$": 200.0}},
+    "nre": {"programming_per_part": 50.0},
+    "price": 400.0,
+    "process_plan": {"drilling": {}, "inspection": {}},
+    "nre_detail": {"programming": {"auto_prog_hr": 1.2}},
+}
+
+
 DUMMY_QUOTE_RESULT = {
     "price": 1414.875,
     "qty": 12,
@@ -377,6 +391,29 @@ def test_dummy_quote_pricing_source_reflects_planner_usage() -> None:
     breakdown = payload["breakdown"]
     assert breakdown["pricing_source"].lower() == "planner"
     assert breakdown.get("pricing_source_text", "").lower() != "legacy"
+
+
+def test_quick_breakdown_sanity_checks() -> None:
+    breakdown = copy.deepcopy(_QUICK_CHECK_BREAKDOWN)
+
+    material_block = breakdown.get("material_block", {})
+    assert material_block.get("stock_L_in") is not None
+
+    total_material_cost = float(material_block.get("total_material_cost", 0.0))
+    assert breakdown["total_direct_costs"] >= total_material_cost >= 0.0
+
+    ops = set((breakdown.get("process_plan") or {}).keys())
+    programming_detail = breakdown["nre_detail"]["programming"]
+    if ops.issubset({"drilling", "inspection"}):
+        auto_prog_hr = float(programming_detail["auto_prog_hr"])
+        assert 0.4 <= auto_prog_hr <= 3.0
+
+    calc = (
+        float(breakdown["bucket_view"]["totals"]["total$"])
+        + float(breakdown["nre"]["programming_per_part"])
+        + float(breakdown["total_direct_costs"])
+    )
+    assert math.isclose(float(breakdown["price"]), calc, abs_tol=0.01)
 
 
 def test_dummy_quote_process_table_matches_planner_totals() -> None:
