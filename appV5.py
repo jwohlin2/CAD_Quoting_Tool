@@ -8136,7 +8136,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     # Render MATERIAL REMOVAL card + TIME PER HOLE lines (replace legacy Time block)
     try:
-        drilling_meta = locals().get("drilling_meta", {}) or {}
+        drilling_meta = breakdown.get("drilling_meta", {}) or {}
         # pull safe fallbacks
         mat_canon = str(drilling_meta.get("material_canonical") or drilling_meta.get("material") or "-")
         mat_group = drilling_meta.get("material_group") or drilling_meta.get("group") or "-"
