@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import csv
 import logging
 import math
+import os
+import re
 import sys
 from collections.abc import Mapping as _MappingABC, Sequence
 from typing import Any, Literal, Mapping, overload
@@ -24,12 +27,21 @@ from cad_quoter.pricing.vendor_csv import (
     pick_from_stdgrid as _pick_from_stdgrid,
     pick_plate_from_mcmaster as _pick_plate_from_mcmaster,
 )
+from cad_quoter.resources import default_catalog_csv as _default_catalog_csv
 
 try:  # Optional dependency: McMaster mutual-TLS API client
     from mcmaster_api import McMasterAPI, load_env as _mcm_load_env  # type: ignore
 except Exception:  # pragma: no cover - optional dependency / environment specific
     McMasterAPI = None  # type: ignore[assignment]
     _mcm_load_env = None  # type: ignore[assignment]
+
+try:  # Optional dependency: McMaster catalog helpers
+    import cad_quoter.vendors.mcmaster_stock as _mc  # type: ignore
+except Exception:  # pragma: no cover - optional dependency / environment specific
+    try:  # pragma: no cover - optional dependency / environment specific
+        import mcmaster_stock as _mc  # type: ignore
+    except Exception:  # pragma: no cover - optional dependency / environment specific
+        _mc = None  # type: ignore[assignment]
 
 _DEFAULT_MATERIAL_DENSITY_G_CC = MATERIAL_DENSITY_G_CC_BY_KEY.get(
     DEFAULT_MATERIAL_KEY, 7.85
@@ -41,6 +53,8 @@ _log = logging.getLogger(__name__)
 
 
 STANDARD_PLATE_SIDES_IN = [3, 6, 12, 18, 24, 36, 48, 60]
+_MC_CATALOG_CACHE: dict[str, Any] = {}
+_STOCK_SCRAP_FRACTION = 0.05
 
 
 def _nearest_std_side(x_in: float) -> float:
@@ -189,6 +203,193 @@ def _mcm_price_for_part(part_number: str) -> float | None:
         return None
 
 
+def _catalog_path_from_env() -> str | None:
+    """Return the catalog CSV path from env or the packaged default."""
+
+    path = os.getenv("CATALOG_CSV_PATH")
+    if path:
+        return path
+    try:
+        return str(_default_catalog_csv())
+    except Exception:
+        return None
+
+
+def _load_mcmaster_catalog(csv_path: str) -> Any:
+    """Load and cache the McMaster catalog when helpers are available."""
+
+    if _mc is None:
+        return None
+    try:
+        key = os.path.abspath(csv_path)
+    except Exception:
+        key = csv_path
+    cached = _MC_CATALOG_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        catalog = _mc.load_catalog(csv_path)
+    except Exception:
+        return None
+    _MC_CATALOG_CACHE[key] = catalog
+    return catalog
+
+
+def _fallback_catalog_lookup(
+    csv_path: str,
+    material_display: str,
+    need_L: float,
+    need_W: float,
+    thk_in: float,
+) -> dict[str, Any] | None:
+    """Scan the catalog CSV for the smallest plate covering the requirement."""
+
+    def inch_to_float(s: str | None) -> float | None:
+        text = (s or "").strip().lower()
+        text = (
+            text.replace("in.", "")
+            .replace("in", "")
+            .replace('"', "")
+            .replace("″", "")
+        )
+        match = re.match(r"^(\d+)\s+(\d+)/(\d+)$", text) or re.match(
+            r"^(\d+)/(\d+)$",
+            text,
+        )
+        if match and len(match.groups()) == 3:
+            return float(match.group(1)) + float(match.group(2)) / float(match.group(3))
+        if match and len(match.groups()) == 2:
+            return float(match.group(1)) / float(match.group(2))
+        try:
+            return float(text)
+        except Exception:
+            return None
+
+    try:
+        L_need = max(float(need_L), float(need_W))
+        W_need = min(float(need_L), float(need_W))
+        thk_val = float(thk_in)
+        material_norm = str(material_display or "").strip().lower()
+    except Exception:
+        return None
+
+    best: dict[str, Any] | None = None
+    try:
+        with open(csv_path, newline="", encoding="utf-8-sig") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                mat = (row.get("material") or "").strip().lower()
+                if material_norm and material_norm not in mat:
+                    continue
+                t_val = inch_to_float(row.get("thickness_in"))
+                L_val = inch_to_float(row.get("length_in"))
+                W_val = inch_to_float(row.get("width_in"))
+                if None in (t_val, L_val, W_val):
+                    continue
+                if abs(float(t_val) - thk_val) > 0.02:
+                    continue
+                covers = (L_val >= L_need and W_val >= W_need) or (
+                    L_val >= W_need and W_val >= L_need
+                )
+                if not covers:
+                    continue
+                area = float(L_val) * float(W_val)
+                if not best or area < best["area"]:
+                    best = {
+                        "len_in": float(max(L_val, W_val)),
+                        "wid_in": float(min(L_val, W_val)),
+                        "thk_in": float(t_val),
+                        "part": row.get("part"),
+                        "area": area,
+                    }
+    except Exception:
+        return None
+    return best
+
+
+def pick_stock_from_mcmaster(
+    material_display: str,
+    need_L: float,
+    need_W: float,
+    thickness_in: float,
+    *,
+    scrap_fraction: float = _STOCK_SCRAP_FRACTION,
+) -> dict[str, Any] | None:
+    """Return McMaster stock details with CSV fallback if helpers are missing."""
+
+    try:
+        L_val = float(need_L)
+        W_val = float(need_W)
+        thk_val = float(thickness_in)
+    except Exception:
+        return None
+    if L_val <= 0 or W_val <= 0 or thk_val <= 0:
+        return None
+
+    scrap = max(0.0, float(scrap_fraction))
+    L_need = max(L_val, W_val) * (1.0 + scrap)
+    W_need = min(L_val, W_val) * (1.0 + scrap)
+    material_label = str(material_display or "")
+    catalog_path = _catalog_path_from_env()
+
+    result: dict[str, Any] = {}
+    if _mc is not None and catalog_path:
+        catalog = _load_mcmaster_catalog(catalog_path)
+        if catalog:
+            try:
+                item = _mc.choose_item(catalog, material_label, L_need, W_need, thk_val)
+            except Exception:
+                item = None
+            if item:
+                length = float(max(item.length, item.width))
+                width = float(min(item.length, item.width))
+                result.update(
+                    {
+                        "vendor": "McMaster",
+                        "len_in": length,
+                        "wid_in": width,
+                        "thk_in": float(item.thickness),
+                        "mcmaster_part": item.part,
+                        "part_no": item.part,
+                        "source": "mcmaster-catalog",
+                    }
+                )
+
+    if not result.get("mcmaster_part"):
+        csv_path = catalog_path or ""
+        if csv_path and os.path.exists(csv_path):
+            fallback = _fallback_catalog_lookup(
+                csv_path, material_label, L_need, W_need, thk_val
+            )
+            if fallback:
+                part_number = str(fallback.get("part") or "").strip()
+                updates = {
+                    "len_in": float(fallback["len_in"]),
+                    "wid_in": float(fallback["wid_in"]),
+                    "thk_in": float(fallback["thk_in"]),
+                    "vendor": "McMaster",
+                    "source": "mcmaster-catalog-csv",
+                }
+                if part_number:
+                    updates["mcmaster_part"] = part_number
+                    updates["part_no"] = part_number
+                result.update(updates)
+                price = None
+                if part_number:
+                    try:
+                        price = _mcm_price_for_part(part_number)
+                    except Exception:
+                        price = None
+                if price:
+                    price_val = float(price)
+                    result["price$"] = price_val
+                    result["price_usd"] = price_val
+                    result["stock_piece_api_price"] = price_val
+                    result["stock_piece_api_source"] = "mcmaster_api"
+
+    return result or None
+
+
 def _material_cost_components(
     material_block: Mapping[str, Any] | None,
     *,
@@ -326,7 +527,7 @@ def _compute_material_block(
     L_in, W_in = dims
     material_label = str(geo_ctx.get("material_display") or material_key or "")
     try:
-        stock_info = _pick_plate_from_mcmaster(
+        stock_info = pick_stock_from_mcmaster(
             material_label,
             float(L_in),
             float(W_in),
@@ -334,6 +535,16 @@ def _compute_material_block(
         )
     except Exception:
         stock_info = None
+    if not isinstance(stock_info, dict) or not stock_info:
+        try:
+            stock_info = _pick_plate_from_mcmaster(
+                material_label,
+                float(L_in),
+                float(W_in),
+                float(t_in),
+            )
+        except Exception:
+            stock_info = None
     if not isinstance(stock_info, dict) or not stock_info:
         stock_info = _pick_from_stdgrid(float(L_in), float(W_in), float(t_in))
 
