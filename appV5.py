@@ -854,7 +854,7 @@ def _resolve_pricing_source_value(
     hour_summary_entries: Mapping[str, Any] | None = None,
     additional_sources: Sequence[Any] | None = None,
     ) -> str | None:
-        """Return a normalized pricing source, honoring explicit selections."""
+    """Return a normalized pricing source, honoring explicit selections."""
 
     text = None
     if base_value is not None:
