@@ -66,15 +66,15 @@ LEGACY_PROGRAMMER_RATE_KEYS = (
 
 
 HARD_LABOR_FALLBACKS: Mapping[str, float] = {
-    "Programmer": 80.0,
-    "ProgrammingRate": 80.0,
-    "Inspector": 75.0,
-    "InspectionRate": 75.0,
+    "Programmer": 90.0,
+    "ProgrammingRate": 90.0,
+    "Inspector": 85.0,
+    "InspectionRate": 85.0,
 }
 
 
 HARD_MACHINE_FALLBACKS: Mapping[str, tuple[float, tuple[str, ...]]] = {
-    "CNC_Mill": (110.0, ("MillingRate",)),
+    "CNC_Mill": (90.0, ("MillingRate", "CNC_Vertical", "cnc_vertical")),
     "DrillPress": (95.0, ("DrillingRate",)),
     "SurfaceGrind": (95.0, ("SurfaceGrindRate", "GrindingRate")),
     "ODIDGrind": (95.0, ("ODIDGrindRate",)),
@@ -309,16 +309,24 @@ def _finalize_two_bucket(
     if programmer_value > 0.0:
         for alias in LEGACY_PROGRAMMER_RATE_KEYS:
             labor_output.setdefault(alias, programmer_value)
+        labor_output.setdefault("programmer", programmer_value)
 
     inspection_value = _as_positive(labor_output.get("InspectionRate"))
     if inspection_value <= 0.0 and _as_positive(labor_output.get("Inspector")) > 0.0:
         inspection_value = float(labor_output["Inspector"])
         labor_output["InspectionRate"] = inspection_value
+    if inspection_value > 0.0:
+        labor_output.setdefault("inspection", inspection_value)
 
     machine_rate_value = _as_positive(machine_output.get("MachineRate")) or machine_default
     if machine_rate_value > 0.0:
         machine_output["MachineRate"] = machine_rate_value
         machine_output.setdefault("DefaultMachineRate", machine_rate_value)
+
+    cnc_vertical_value = _as_positive(machine_output.get("CNC_Mill"))
+    if cnc_vertical_value > 0.0:
+        machine_output.setdefault("CNC_Vertical", cnc_vertical_value)
+        machine_output.setdefault("cnc_vertical", cnc_vertical_value)
 
     drilling_value = _as_positive(machine_output.get("DrillingRate"))
     if drilling_value <= 0.0:
