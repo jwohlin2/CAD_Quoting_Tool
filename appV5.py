@@ -215,7 +215,9 @@ def _nearest_std_side(x_in: float) -> float:
     return float(STANDARD_PLATE_SIDES_IN[-1])
 
 
-def _estimate_plate_dims_from_area(area_mm2: float) -> tuple[float, float]:
+def _estimate_plate_dims_from_area(
+    area_mm2: float,
+) -> tuple[float | None, float | None]:
     """Fallback: infer L×W if only area is known. Assume square then round up to sane aspect."""
 
     if not area_mm2 or area_mm2 <= 0:
