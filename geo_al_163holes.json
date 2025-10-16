@@ -1,0 +1,178 @@
+{
+  "schema": "compos-geo.v1",
+  "material_text": "Aluminum MIC6",
+  "material_family": "Aluminum",
+  "density_kg_m3": 2680,
+  "plate": {
+    "length_in": 12.96,
+    "width_in": 12.96,
+    "thickness_in": 2.0,
+    "length_mm": 329.184,
+    "width_mm": 329.184,
+    "thickness_mm": 50.8
+  },
+  "bbox_mm": [
+    0,
+    0,
+    0,
+    329.184,
+    329.184,
+    50.8
+  ],
+  "drilling_overheads": {
+    "index_per_hole_min": 0.13,
+    "peck_per_hole_min": 0.07,
+    "toolchange_min_deep": 8.0,
+    "toolchange_min_std": 2.5,
+    "deep_ld_ratio_min": 3.0
+  },
+  "speeds_feeds_hint": {
+    "deep": {
+      "sfm": 39,
+      "ipr": 0.002
+    },
+    "std": {
+      "sfm": 80,
+      "ipr": 0.006
+    }
+  },
+  "hole_groups": [
+    {
+      "diam_in": 0.125,
+      "depth_in": 2.04,
+      "qty": 6,
+      "mode": "deep"
+    },
+    {
+      "diam_in": 0.159,
+      "depth_in": 2.04,
+      "qty": 3,
+      "mode": "deep"
+    },
+    {
+      "diam_in": 0.187,
+      "depth_in": 2.04,
+      "qty": 3,
+      "mode": "deep"
+    },
+    {
+      "diam_in": 0.19,
+      "depth_in": 2.04,
+      "qty": 3,
+      "mode": "deep"
+    },
+    {
+      "diam_in": 0.261,
+      "depth_in": 2.052,
+      "qty": 8,
+      "mode": "deep"
+    },
+    {
+      "diam_in": 0.272,
+      "depth_in": 2.054,
+      "qty": 4,
+      "mode": "deep"
+    },
+    {
+      "diam_in": 0.281,
+      "depth_in": 2.056,
+      "qty": 20,
+      "mode": "deep"
+    },
+    {
+      "diam_in": 0.313,
+      "depth_in": 2.063,
+      "qty": 12,
+      "mode": "deep"
+    },
+    {
+      "diam_in": 0.332,
+      "depth_in": 2.066,
+      "qty": 1,
+      "mode": "deep"
+    },
+    {
+      "diam_in": 0.344,
+      "depth_in": 2.069,
+      "qty": 12,
+      "mode": "deep"
+    },
+    {
+      "diam_in": 0.375,
+      "depth_in": 2.075,
+      "qty": 1,
+      "mode": "deep"
+    },
+    {
+      "diam_in": 0.406,
+      "depth_in": 2.081,
+      "qty": 24,
+      "mode": "deep"
+    },
+    {
+      "diam_in": 0.531,
+      "depth_in": 2.106,
+      "qty": 22,
+      "mode": "deep"
+    },
+    {
+      "diam_in": 0.565,
+      "depth_in": 2.113,
+      "qty": 2,
+      "mode": "deep"
+    },
+    {
+      "diam_in": 0.623,
+      "depth_in": 2.125,
+      "qty": 4,
+      "mode": "deep"
+    },
+    {
+      "diam_in": 0.625,
+      "depth_in": 2.125,
+      "qty": 8,
+      "mode": "deep"
+    },
+    {
+      "diam_in": 0.75,
+      "depth_in": 2.15,
+      "qty": 2,
+      "mode": "std"
+    },
+    {
+      "diam_in": 1.0,
+      "depth_in": 2.2,
+      "qty": 16,
+      "mode": "std"
+    },
+    {
+      "diam_in": 1.75,
+      "depth_in": 2.35,
+      "qty": 4,
+      "mode": "std"
+    },
+    {
+      "diam_in": 1.78,
+      "depth_in": 2.356,
+      "qty": 4,
+      "mode": "std"
+    },
+    {
+      "diam_in": 1.81,
+      "depth_in": 2.362,
+      "qty": 4,
+      "mode": "std"
+    }
+  ],
+  "stock_hint": {
+    "prefer_vendor": "mcmaster",
+    "catalog_material_label": "aluminum MIC6",
+    "min_length_in": 12.96,
+    "min_width_in": 12.96,
+    "thickness_in": 2.0
+  },
+  "pricing_hints": {
+    "scrap_usd_per_lb": 0.62,
+    "scrap_recovery_pct": 0.85
+  }
+}
