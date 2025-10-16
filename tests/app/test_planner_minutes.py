@@ -9,6 +9,7 @@ def _disable_speeds_feeds_loader(monkeypatch):
     import appV5
 
     monkeypatch.setattr(appV5, "_load_speeds_feeds_table_from_path", lambda _path: (None, False))
+    monkeypatch.setattr(appV5, "FORCE_ESTIMATOR", False, raising=False)
 
 
 def test_compute_quote_uses_planner_minutes(monkeypatch):
