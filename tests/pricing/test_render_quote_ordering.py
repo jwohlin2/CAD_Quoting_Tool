@@ -415,6 +415,17 @@ def test_render_quote_skips_duplicate_programming_amortized_row() -> None:
             },
         }
     }
+    bucket_view["buckets"]["programming_amortized"] = {
+        "minutes": 45.0,
+        "labor$": 15.0,
+        "machine$": 0.0,
+    }
+    bucket_view["order"] = [
+        "milling",
+        "Deburr",
+        "Finishing/Deburr",
+        "programming_amortized",
+    ]
 
     result = {
         "price": 180.0,
