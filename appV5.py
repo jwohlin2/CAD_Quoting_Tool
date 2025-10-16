@@ -5211,7 +5211,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 directs = {}
             pricing["direct_costs"] = directs
         directs["material"] = float(mat_total)
-        pricing["total_direct_costs"] = float(sum(directs.values()))
+        if _coerce_float_or_none(pricing.get("total_direct_costs")) is None:
+            pricing["total_direct_costs"] = float(sum(directs.values()))
 
     # ---- material & stock (compact; shown only if we actually have data) -----
     if material:
@@ -7298,14 +7299,48 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         else None,
     )
 
-    if pricing_total_direct_costs is not None:
-        ladder_directs = round(float(pricing_total_direct_costs), 2)
-    else:
-        ladder_directs = round(float(directs) + planner_machine_component, 2)
+    directs_from_pricing = _coerce_float_or_none(pricing.get("total_direct_costs"))
+    if directs_from_pricing is None and pricing_total_direct_costs is not None:
+        directs_from_pricing = float(pricing_total_direct_costs)
+    if directs_from_pricing is None:
+        directs_from_pricing = float(directs) + planner_machine_component
+    ladder_directs = round(float(directs_from_pricing or 0.0), 2)
+
+    bucket_view_for_ladder: Mapping[str, Any] | None = None
+    if isinstance(breakdown, _MappingABC):
+        bucket_view_candidate = breakdown.get("bucket_view")
+        if isinstance(bucket_view_candidate, _MappingABC):
+            bucket_view_for_ladder = typing.cast(Mapping[str, Any], bucket_view_candidate)
+
+    ladder_labor_total = 0.0
+    if isinstance(bucket_view_for_ladder, _MappingABC):
+        buckets_for_ladder = bucket_view_for_ladder.get("buckets")
+        if isinstance(buckets_for_ladder, _MappingABC):
+            for metrics in buckets_for_ladder.values():
+                if not isinstance(metrics, _MappingABC):
+                    continue
+                labor_component = _safe_float(metrics.get("labor$"), 0.0)
+                machine_component = _safe_float(metrics.get("machine$"), 0.0)
+                ladder_labor_total += labor_component + machine_component
+
     amortized_component = float(amortized_nre_total if qty > 1 else 0.0)
-    ladder_labor = round(base_bucket_labor + amortized_component, 2)
+    fallback_ladder_labor = round(base_bucket_labor + amortized_component, 2)
+    ladder_labor = round(ladder_labor_total, 2)
+    if ladder_labor <= 0.0:
+        ladder_labor = fallback_ladder_labor
+
     ladder_expected = ladder_labor + ladder_directs
     ladder_subtotal = round(ladder_expected, 2)
+    computed_total_labor_cost = ladder_labor
+    if isinstance(totals, dict):
+        totals["labor_cost"] = ladder_labor
+    if 0 <= total_labor_row_index < len(lines):
+        replace_line(
+            total_labor_row_index,
+            _format_row(total_labor_label, ladder_labor),
+        )
+    if isinstance(pricing, dict):
+        pricing["ladder_subtotal"] = ladder_subtotal
     if not roughly_equal(declared_subtotal, ladder_subtotal, eps=0.01):
         declared_subtotal = ladder_subtotal
     if isinstance(breakdown, dict):
