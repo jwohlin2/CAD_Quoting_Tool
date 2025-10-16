@@ -825,17 +825,20 @@ def _resolve_pricing_source_value(
     planner_process_minutes: Any = None,
     hour_summary_entries: Mapping[str, Any] | None = None,
     additional_sources: Sequence[Any] | None = None,
-) -> str | None:
-    """Return a normalized pricing source, forcing planner when signals exist."""
+    ) -> str | None:
+        """Return a normalized pricing source, honoring explicit selections."""
 
     text = None
     if base_value is not None:
-        text = str(base_value).strip()
-        if not text:
-            text = None
+        candidate_text = str(base_value).strip()
+        if candidate_text:
+            text = candidate_text
 
     if text and text.lower() == "planner":
         return "planner"
+
+    if text:
+        return text
 
     if used_planner:
         return "planner"
