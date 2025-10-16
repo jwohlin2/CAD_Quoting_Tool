@@ -14,6 +14,7 @@ for _module_name in ("requests", "bs4", "lxml"):
         sys.modules[_module_name] = stub
 
 import appV5
+import materials
 
 
 class _FailingPricingEngine:
@@ -203,3 +204,23 @@ def test_material_cost_components_respects_explicit_credit():
 
     assert components["scrap_credit_usd"] == pytest.approx(12.34)
     assert components["total_usd"] == pytest.approx(37.66)
+
+
+def test_plan_stock_blank_respects_rounding_tolerance():
+    plan = materials.plan_stock_blank(12.0, 6.0, 2.03, None, None)
+
+    assert plan["need_len_in"] == pytest.approx(12.05)
+    assert plan["need_wid_in"] == pytest.approx(6.05)
+    assert plan["stock_len_in"] == pytest.approx(12.0)
+    assert plan["stock_wid_in"] == pytest.approx(6.0)
+    assert plan["stock_thk_in"] == pytest.approx(2.0)
+
+
+def test_plan_stock_blank_uses_configured_tolerance():
+    cfg = types.SimpleNamespace(round_tol_in=0.1)
+
+    plan = materials.plan_stock_blank(18.0, 8.0, 2.0, None, None, cfg=cfg)
+
+    assert plan["round_tol_in"] == pytest.approx(0.1)
+    assert plan["need_len_in"] == pytest.approx(18.1)
+    assert plan["stock_len_in"] == pytest.approx(18.0)

@@ -314,6 +314,7 @@ def pick_stock_from_mcmaster(
     thickness_in: float,
     *,
     scrap_fraction: float = _STOCK_SCRAP_FRACTION,
+    cfg: Any | None = None,
 ) -> dict[str, Any] | None:
     """Return McMaster stock details with CSV fallback if helpers are missing."""
 
@@ -332,71 +333,71 @@ def pick_stock_from_mcmaster(
     material_label = str(material_display or "")
     catalog_path = _catalog_path_from_env()
 
-    result: dict[str, Any] = {}
+    result: dict[str, Any] = {
+        "required_blank_len_in": float(L_need),
+        "required_blank_wid_in": float(W_need),
+        "required_blank_thk_in": float(thk_val),
+    }
+    enforce_exact = getattr(cfg, "enforce_exact_thickness", True)
+    allow_thickness_upsize = bool(getattr(cfg, "allow_thickness_upsize", False))
+    thickness_target = 2.0
+    thickness_tol = 0.02
+
+    if enforce_exact and abs(thk_val - thickness_target) > thickness_tol:
+        return None
+
     if _mc is not None and catalog_path:
         catalog = _load_mcmaster_catalog(catalog_path)
         if catalog:
             try:
+                original_allow = getattr(_mc, "ALLOW_NEXT_THICKER", None)
+                if original_allow is not None and not allow_thickness_upsize:
+                    setattr(_mc, "ALLOW_NEXT_THICKER", False)
                 item = _mc.choose_item(catalog, material_label, L_need, W_need, thk_val)
             except Exception:
                 item = None
+            finally:
+                if original_allow is not None:
+                    try:
+                        setattr(_mc, "ALLOW_NEXT_THICKER", original_allow)
+                    except Exception:
+                        pass
             if item:
                 fallback_used = False
                 length = float(max(item.length, item.width))
                 width = float(min(item.length, item.width))
                 chosen_thk = float(item.thickness)
-                if abs(chosen_thk - thk_val) > 0.05:
-                    forced_item = None
-                    original_allow = getattr(_mc, "ALLOW_NEXT_THICKER", None)
-                    try:
-                        if original_allow is not None:
-                            setattr(_mc, "ALLOW_NEXT_THICKER", False)
-                        forced_item = _mc.choose_item(
-                            catalog, material_label, L_need, W_need, thk_val
-                        )
-                    except Exception:
-                        forced_item = None
-                    finally:
-                        if original_allow is not None:
-                            try:
-                                setattr(_mc, "ALLOW_NEXT_THICKER", original_allow)
-                            except Exception:
-                                pass
-                    if forced_item and abs(float(forced_item.thickness) - thk_val) <= 0.05:
-                        item = forced_item
-                        length = float(max(item.length, item.width))
-                        width = float(min(item.length, item.width))
-                        chosen_thk = float(item.thickness)
+                thickness_diff = abs(chosen_thk - thk_val)
+                if thickness_diff > thickness_tol and not allow_thickness_upsize:
+                    _log.warning(
+                        "[stock] Thickness upsize blocked: need %.2f in, got %.2f in; "
+                        "falling back to exact-thickness CSV lookup",
+                        thk_val,
+                        chosen_thk,
+                    )
+                    csv_hint = os.getenv("CATALOG_CSV_PATH") or catalog_path or ""
+                    fallback = _fallback_catalog_lookup(
+                        csv_hint, material_label, L_need, W_need, thk_val
+                    )
+                    if fallback:
+                        fallback_used = True
+                        part_number = str(fallback.get("part") or "").strip()
+                        updates = {
+                            "vendor": "McMaster",
+                            "len_in": float(fallback["len_in"]),
+                            "wid_in": float(fallback["wid_in"]),
+                            "thk_in": float(fallback["thk_in"]),
+                            "source": "mcmaster-catalog-csv",
+                        }
+                        if part_number:
+                            updates["mcmaster_part"] = part_number
+                            updates["part_no"] = part_number
+                        result.update(updates)
                     else:
-                        _log.warning(
-                            "[stock] Thickness upsize blocked: need %.2f in, got %.2f in; "
-                            "falling back to exact-thickness CSV lookup",
-                            thk_val,
-                            chosen_thk,
+                        result["thickness_upsize_reason"] = (
+                            "catalog exact thickness not found; "
+                            f"used {chosen_thk:.2f} in"
                         )
-                        csv_hint = os.getenv("CATALOG_CSV_PATH") or catalog_path or ""
-                        fallback = _fallback_catalog_lookup(
-                            csv_hint, material_label, L_need, W_need, thk_val
-                        )
-                        if fallback:
-                            fallback_used = True
-                            part_number = str(fallback.get("part") or "").strip()
-                            updates = {
-                                "vendor": "McMaster",
-                                "len_in": float(fallback["len_in"]),
-                                "wid_in": float(fallback["wid_in"]),
-                                "thk_in": float(fallback["thk_in"]),
-                                "source": "mcmaster-catalog-csv",
-                            }
-                            if part_number:
-                                updates["mcmaster_part"] = part_number
-                                updates["part_no"] = part_number
-                            result.update(updates)
-                        else:
-                            result["thickness_upsize_reason"] = (
-                                "catalog exact thickness not found; "
-                                f"used {chosen_thk:.2f} in"
-                            )
                 if not fallback_used:
                     result.update(
                         {
@@ -407,6 +408,8 @@ def pick_stock_from_mcmaster(
                             "mcmaster_part": item.part,
                             "part_no": item.part,
                             "source": "mcmaster-catalog",
+                            "stock_source_tag": "mcmaster-catalog",
+                            "thickness_diff_in": thickness_diff,
                         }
                     )
 
@@ -429,6 +432,7 @@ def pick_stock_from_mcmaster(
                     updates["mcmaster_part"] = part_number
                     updates["part_no"] = part_number
                 result.update(updates)
+                result.setdefault("stock_source_tag", "mcmaster-catalog-csv")
                 price = None
                 if part_number:
                     try:
@@ -470,6 +474,7 @@ def pick_stock_from_mcmaster(
                 if part_str:
                     result.setdefault("mcmaster_part", part_str)
                     result.setdefault("part_no", part_str)
+            result.setdefault("stock_source_tag", result.get("source") or "mcmaster-catalog")
             if price_each:
                 try:
                     price_val = float(price_each)
@@ -481,7 +486,9 @@ def pick_stock_from_mcmaster(
                     result["stock_piece_api_price"] = price_val
                     result["stock_piece_api_source"] = "mcmaster_api"
 
-    return result or None
+    if result.get("vendor"):
+        return result
+    return None
 
 
 def _material_cost_components(
@@ -649,6 +656,7 @@ def _compute_material_block(
     scrap_pct: float,
     *,
     stock_price_source: str | None = None,
+    cfg: Any | None = None,
 ):
     """Produce a normalized material record including weights and cost."""
 
@@ -684,6 +692,7 @@ def _compute_material_block(
             float(L_in),
             float(W_in),
             float(t_in),
+            cfg=cfg,
         )
     except Exception:
         stock_info = None
@@ -703,6 +712,55 @@ def _compute_material_block(
     stock_L_in = float(stock_info.get("len_in") or L_in)
     stock_W_in = float(stock_info.get("wid_in") or W_in)
     stock_T_in = float(stock_info.get("thk_in") or t_in)
+
+    need_L_in = _coerce_float_or_none(
+        stock_info.get("required_blank_len_in") or stock_info.get("need_len_in")
+    )
+    need_W_in = _coerce_float_or_none(
+        stock_info.get("required_blank_wid_in") or stock_info.get("need_wid_in")
+    )
+    need_T_in = _coerce_float_or_none(
+        stock_info.get("required_blank_thk_in") or stock_info.get("need_thk_in")
+    )
+
+    if need_L_in is None or need_W_in is None or need_T_in is None:
+        try:
+            plan_hint = plan_stock_blank(
+                float(L_in),
+                float(W_in),
+                float(t_in),
+                density_g_cc,
+                None,
+                cfg=cfg,
+            )
+        except Exception:
+            plan_hint = {}
+        if need_L_in is None:
+            need_L_in = _coerce_float_or_none(plan_hint.get("need_len_in"))
+        if need_W_in is None:
+            need_W_in = _coerce_float_or_none(plan_hint.get("need_wid_in"))
+        if need_T_in is None:
+            need_T_in = _coerce_float_or_none(plan_hint.get("need_thk_in"))
+
+    if need_L_in is None:
+        need_L_in = float(L_in) * (1.0 + _STOCK_SCRAP_FRACTION)
+    if need_W_in is None:
+        need_W_in = float(W_in) * (1.0 + _STOCK_SCRAP_FRACTION)
+    if need_T_in is None:
+        need_T_in = float(t_in)
+
+    thickness_diff_in = abs(float(stock_T_in) - float(need_T_in))
+    stock_source_tag = str(
+        stock_info.get("stock_source_tag")
+        or stock_info.get("source")
+        or stock_info.get("vendor")
+        or "stock"
+    ).strip()
+    round_tol_used = _coerce_float_or_none(stock_info.get("round_tol_in"))
+    if round_tol_used is None and cfg is not None:
+        round_tol_used = _coerce_float_or_none(getattr(cfg, "round_tol_in", None))
+    if round_tol_used is None:
+        round_tol_used = 0.05
     vendor_label = str(stock_info.get("vendor") or "StdGrid")
     part_no = stock_info.get("part_no")
     stock_price_val = _coerce_float_or_none(stock_info.get("price_usd"))
@@ -786,6 +844,10 @@ def _compute_material_block(
 
     result = {
         "material": geo_ctx.get("material_display") or material_key,
+        "required_blank_len_in": float(need_L_in),
+        "required_blank_wid_in": float(need_W_in),
+        "required_blank_thk_in": float(need_T_in),
+        "round_tol_in": float(round_tol_used),
         "stock_L_in": float(stock_L_in),
         "stock_W_in": float(stock_W_in),
         "stock_T_in": float(stock_T_in),
@@ -805,6 +867,8 @@ def _compute_material_block(
         "source": source_note,
         "stock_vendor": vendor_label,
         "part_no": part_no,
+        "stock_source_tag": stock_source_tag,
+        "thickness_diff_in": float(thickness_diff_in),
         "stock_price$": float(stock_price) if stock_price is not None else None,
         "unit_price_each$": float(stock_price) if stock_price is not None else None,
         "unit_price$": float(stock_price) if stock_price is not None else None,
@@ -1083,22 +1147,74 @@ def plan_stock_blank(
     thickness_in: float | None,
     density_g_cc: float | None,
     hole_families: dict | None,
+    *,
+    cfg: Any | None = None,
 ) -> dict[str, Any]:
     if not plate_len_in or not plate_wid_in or not thickness_in:
         return {}
-    stock_lengths = [6, 8, 10, 12, 18, 24, 36, 48]
-    stock_widths = [6, 8, 10, 12, 18, 24, 36]
-    stock_thicknesses = [0.125, 0.1875, 0.25, 0.375, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0]
 
-    def pick_size(value: float, options: Sequence[float]) -> float:
-        for opt in options:
-            if value <= opt:
-                return opt
-        return math.ceil(value)
+    round_tol_in = _coerce_float_or_none(getattr(cfg, "round_tol_in", None))
+    if round_tol_in is None or round_tol_in <= 0:
+        round_tol_in = 0.05
+    std_sides = getattr(cfg, "std_stock_sides_in", None)
+    if not isinstance(std_sides, Sequence) or not std_sides:
+        std_sides = [6, 8, 10, 12, 18, 24, 36, 48, 72]
+    std_sides = [float(side) for side in std_sides]
+    stock_thicknesses = [
+        0.125,
+        0.1875,
+        0.25,
+        0.375,
+        0.5,
+        0.75,
+        1.0,
+        1.5,
+        2.0,
+        3.0,
+    ]
 
-    stock_len = pick_size(float(plate_len_in) * 1.05, stock_lengths)
-    stock_wid = pick_size(float(plate_wid_in) * 1.05, stock_widths)
-    stock_thk = pick_size(float(thickness_in) * 1.05, stock_thicknesses)
+    def _round_axis(value: float) -> float:
+        for opt in std_sides:
+            if value <= opt + round_tol_in:
+                return float(opt)
+        return float(math.ceil(value))
+
+    def _round_thickness(value: float) -> float:
+        for opt in stock_thicknesses:
+            if value <= opt + round_tol_in:
+                return float(opt)
+        return float(math.ceil(value))
+
+    margin = float(round_tol_in)
+
+    def _evaluate_orientation(
+        length_in: float, width_in: float
+    ) -> tuple[float, float, float, float, float]:
+        need_L = float(length_in) + margin
+        need_W = float(width_in) + margin
+        stock_L = _round_axis(need_L)
+        stock_W = _round_axis(need_W)
+        area = stock_L * stock_W
+        return need_L, need_W, stock_L, stock_W, area
+
+    orient_one = _evaluate_orientation(float(plate_len_in), float(plate_wid_in))
+    orient_two = _evaluate_orientation(float(plate_wid_in), float(plate_len_in))
+
+    if orient_two[4] < orient_one[4] - 1e-6:
+        need_L, need_W, stock_len, stock_wid, _ = orient_two
+    elif orient_one[4] < orient_two[4] - 1e-6:
+        need_L, need_W, stock_len, stock_wid, _ = orient_one
+    else:
+        # Tie-breaker: pick the orientation with the smaller max dimension
+        max_one = max(orient_one[2], orient_one[3])
+        max_two = max(orient_two[2], orient_two[3])
+        if max_two < max_one - 1e-6:
+            need_L, need_W, stock_len, stock_wid, _ = orient_two
+        else:
+            need_L, need_W, stock_len, stock_wid, _ = orient_one
+
+    need_thk = float(thickness_in)
+    stock_thk = _round_thickness(need_thk)
     volume_in3 = float(plate_len_in) * float(plate_wid_in) * float(thickness_in)
     hole_area = 0.0
     holes_mm: list[float] = []
@@ -1143,6 +1259,10 @@ def plan_stock_blank(
     stock_volume_in3 = stock_len * stock_wid * stock_thk
     stock_mass_lb = (stock_mass_kg * LB_PER_KG) if stock_mass_kg is not None else None
     return {
+        "need_len_in": round(need_L, 3),
+        "need_wid_in": round(need_W, 3),
+        "need_thk_in": round(need_thk, 3),
+        "round_tol_in": round(round_tol_in, 3),
         "stock_len_in": round(stock_len, 3),
         "stock_wid_in": round(stock_wid, 3),
         "stock_thk_in": round(stock_thk, 3),

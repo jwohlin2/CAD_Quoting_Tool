@@ -5752,6 +5752,105 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 material_display_for_debug = material_name_display
                 append_line(f"  Material used:  {material_name_display}")
 
+            blank_lines: list[str] = []
+            need_len = _coerce_float_or_none(
+                material_stock_block.get("required_blank_len_in")
+                if isinstance(material_stock_block, _MappingABC)
+                else None
+            )
+            need_wid = _coerce_float_or_none(
+                material_stock_block.get("required_blank_wid_in")
+                if isinstance(material_stock_block, _MappingABC)
+                else None
+            )
+            need_thk = _coerce_float_or_none(
+                material_stock_block.get("required_blank_thk_in")
+                if isinstance(material_stock_block, _MappingABC)
+                else None
+            )
+
+            stock_len_val = _coerce_float_or_none(
+                material_stock_block.get("stock_L_in")
+                if isinstance(material_stock_block, _MappingABC)
+                else None
+            )
+            stock_wid_val = _coerce_float_or_none(
+                material_stock_block.get("stock_W_in")
+                if isinstance(material_stock_block, _MappingABC)
+                else None
+            )
+            stock_thk_val = _coerce_float_or_none(
+                material_stock_block.get("stock_T_in")
+                if isinstance(material_stock_block, _MappingABC)
+                else None
+            )
+
+            if (need_len is None or need_wid is None or need_thk is None) and isinstance(g, dict):
+                plan_guess = g.get("stock_plan_guess")
+                if isinstance(plan_guess, _MappingABC):
+                    if need_len is None:
+                        need_len = _coerce_float_or_none(
+                            plan_guess.get("need_len_in")
+                            or plan_guess.get("required_len_in")
+                        )
+                    if need_wid is None:
+                        need_wid = _coerce_float_or_none(
+                            plan_guess.get("need_wid_in")
+                            or plan_guess.get("required_wid_in")
+                        )
+                    if need_thk is None:
+                        need_thk = _coerce_float_or_none(
+                            plan_guess.get("need_thk_in")
+                            or plan_guess.get("stock_thk_in")
+                        )
+
+            if need_len and need_wid and need_thk:
+                blank_lines.append(
+                    f"  Required blank (w/ margins): {need_len:.2f} × {need_wid:.2f} × {need_thk:.2f} in"
+                )
+
+            source_tag = None
+            if isinstance(material_stock_block, _MappingABC):
+                source_tag = material_stock_block.get("stock_source_tag") or material_stock_block.get("source")
+            if not source_tag and isinstance(material, _MappingABC):
+                source_tag = material.get("stock_source_tag") or material.get("source")
+            if isinstance(source_tag, str):
+                source_tag = source_tag.strip()
+                if not source_tag:
+                    source_tag = None
+
+            if stock_len_val and stock_wid_val and stock_thk_val:
+                stock_line = (
+                    "  Rounded to catalog: "
+                    f"{stock_len_val:.2f} × {stock_wid_val:.2f} × {stock_thk_val:.3f} in"
+                )
+                if source_tag:
+                    stock_line += f" ({source_tag})"
+                thickness_diff = None
+                diff_candidate = None
+                if isinstance(material_stock_block, _MappingABC):
+                    diff_candidate = _coerce_float_or_none(
+                        material_stock_block.get("thickness_diff_in")
+                    )
+                if diff_candidate is None and need_thk and stock_thk_val:
+                    thickness_diff = abs(float(stock_thk_val) - float(need_thk))
+                elif diff_candidate is not None:
+                    thickness_diff = float(diff_candidate)
+                if (
+                    thickness_diff is not None
+                    and thickness_diff > 0.02
+                ):
+                    warning_mode = (
+                        "allowed"
+                        if bool(getattr(cfg, "allow_thickness_upsize", False))
+                        else "blocked"
+                    )
+                    stock_line += f" (WARNING: thickness upsize {warning_mode})"
+                blank_lines.append(stock_line)
+
+            if blank_lines:
+                detail_lines.extend(blank_lines)
+
             material_cost_map: dict[str, Any] = {}
             if isinstance(material_stock_block, _MappingABC):
                 material_cost_map.update(material_stock_block)
@@ -9280,6 +9379,10 @@ class QuoteConfiguration:
     prefer_removal_drilling_hours: bool = True
     stock_price_source: str = "mcmaster_api"
     scrap_price_source: str = "wieland"
+    enforce_exact_thickness: bool = True
+    allow_thickness_upsize: bool = False
+    round_tol_in: float = 0.05
+    stock_rounding_mode: str = "per_axis_min_area"
 
     def copy_default_params(self) -> Dict[str, Any]:
         """Return a deep copy of the default parameter set."""
@@ -13043,6 +13146,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         _coerce_float_or_none(density),
         scrap_pct_effective,
         stock_price_source=stock_price_source,
+        cfg=cfg,
     )
     breakdown["material_block"] = mat_block
     grams_per_lb = 1000.0 / LB_PER_KG
