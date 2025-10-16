@@ -7129,17 +7129,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             f"{_m(material_direct_contribution)} to Direct Costs",
             "  ",
         )
-    directs_map: dict[Any, Any]
+    direct_costs_map: dict[Any, Any]
     if isinstance(pricing, dict):
-        directs_map = pricing.setdefault("direct_costs", {})
-        if not isinstance(directs_map, dict):
+        direct_costs_map = pricing.setdefault("direct_costs", {})
+        if not isinstance(direct_costs_map, dict):
             try:
-                directs_map = dict(directs_map or {})
+                direct_costs_map = dict(direct_costs_map or {})
             except Exception:
-                directs_map = {}
-            pricing["direct_costs"] = directs_map
+                direct_costs_map = {}
+            pricing["direct_costs"] = direct_costs_map
     else:
-        directs_map = {}
+        direct_costs_map = {}
 
     def _assign_direct_value(raw_key: Any, amount: Any) -> None:
         try:
@@ -7152,7 +7152,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         except Exception:
             canonical_target = str(raw_key or "").strip().lower()
         if canonical_target:
-            for existing_key in list(directs_map.keys()):
+            for existing_key in list(direct_costs_map.keys()):
                 try:
                     existing_canonical = _canonical_pass_label(str(existing_key)).strip().lower()
                 except Exception:
@@ -7160,7 +7160,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 if existing_canonical == canonical_target:
                     target_key = existing_key
                     break
-        directs_map[target_key] = amount_float
+        direct_costs_map[target_key] = amount_float
 
     _assign_direct_value("material", material_direct_contribution)
 
@@ -7181,7 +7181,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         return label.title()
 
     direct_entries: list[tuple[str, float, Any]] = []
-    for raw_key, raw_value in directs_map.items():
+    for raw_key, raw_value in direct_costs_map.items():
         amount_val = _coerce_float_or_none(raw_value)
         if amount_val is None:
             continue
@@ -7197,6 +7197,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         sum(amount for _, amount, _ in direct_entries if (amount > 0) or show_zeros),
         2,
     )
+
+    directs = float(total_direct_costs)
 
     for display_label, amount_val, raw_key in direct_entries:
         if (amount_val > 0) or show_zeros:
@@ -12603,6 +12605,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
 
     bucket_view.clear()
     bucket_view.update(bucket_view_prepared)
+
+    bucket_view_buckets: Mapping[str, Any] | None = None
 
     if not use_planner:
         drilling_bucket_prepared = None
