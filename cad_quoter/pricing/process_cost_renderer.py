@@ -108,7 +108,7 @@ _ALIAS_MAP: dict[str, str] = {
 
 _RATE_ALIAS_KEYS: dict[str, tuple[str, ...]] = {
     "milling": ("MillingRate",),
-    "drilling": ("DrillingRate",),
+    "drilling": ("DrillingRate", "CncVertical", "CncVerticalRate", "cnc_vertical"),
     "counterbore": ("CounterboreRate", "DrillingRate"),
     "tapping": ("TappingRate", "DrillingRate"),
     "grinding": (
@@ -305,6 +305,8 @@ def render_process_costs(
     process_costs: Mapping[str, Any] | Iterable[Any] | None,
     rates: Mapping[str, Any] | None,
     minutes_detail: Mapping[str, Any] | Iterable[Any] | None,
+    *,
+    process_plan: Mapping[str, Any] | None = None,
 ) -> float:
     """Render process costs into *tbl* using a fixed bucket order."""
 
@@ -316,6 +318,14 @@ def render_process_costs(
 
     shown_total = 0.0
     hidden_total = 0.0
+    planner_drilling_minutes: float | None = None
+    if isinstance(process_plan, Mapping):
+        drilling_plan = process_plan.get("drilling")
+        if isinstance(drilling_plan, Mapping):
+            billed = _to_float(drilling_plan.get("total_minutes_billed"))
+            if billed is not None:
+                planner_drilling_minutes = max(0.0, billed)
+
     for key in ORDER:
         raw_amount = float(costs.get(key, 0.0))
         hours = max(0.0, float(minutes.get(key, 0.0)) / 60.0)
@@ -336,8 +346,20 @@ def render_process_costs(
             continue
         if math.isclose(amount, 0.0, abs_tol=1e-9):
             continue
+        hours = max(0.0, float(minutes.get(key, 0.0)) / 60.0)
+        if key == "drilling" and planner_drilling_minutes is not None:
+            drill_hr_precise = max(0.0, planner_drilling_minutes / 60.0)
+            card_hr = drill_hr_precise
+            row_hr = hours if hours > 0.0 else drill_hr_precise
+            if abs(row_hr - card_hr) > 1e-2:
+                row_hr = card_hr
+            hours = row_hr
+        rate = _lookup_rate(key, flat_rates, normalized_rates)
         if rate <= 0 and hours > 0:
             rate = amount / hours
+        if key == "drilling" and planner_drilling_minutes is not None and rate > 0:
+            amount = round(hours * rate, 2)
+            costs[key] = amount
         _emit_cost_row(
             tbl,
             label=_label_for(key),

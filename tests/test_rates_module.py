@@ -34,17 +34,17 @@ def test_migrate_flat_to_two_bucket_fills_shop_rate_defaults() -> None:
 
     migrated = rates.migrate_flat_to_two_bucket(flat)
 
-    assert migrated["labor"]["ProgrammingRate"] == pytest.approx(80.0)
-    assert migrated["machine"]["MillingRate"] == pytest.approx(110.0)
+    assert migrated["labor"]["ProgrammingRate"] == pytest.approx(90.0)
+    assert migrated["machine"]["MillingRate"] == pytest.approx(90.0)
     assert migrated["machine"]["WireEDMRate"] == pytest.approx(130.0)
 
 
 def test_migrate_flat_to_two_bucket_uses_hard_fallbacks_when_missing() -> None:
     migrated = rates.migrate_flat_to_two_bucket({})
 
-    assert migrated["labor"]["Programmer"] == pytest.approx(80.0)
-    assert migrated["labor"]["InspectionRate"] == pytest.approx(75.0)
-    assert migrated["machine"]["MillingRate"] == pytest.approx(110.0)
+    assert migrated["labor"]["Programmer"] == pytest.approx(90.0)
+    assert migrated["labor"]["InspectionRate"] == pytest.approx(85.0)
+    assert migrated["machine"]["MillingRate"] == pytest.approx(90.0)
     assert migrated["machine"]["DrillingRate"] == pytest.approx(95.0)
     assert migrated["machine"]["WireEDMRate"] == pytest.approx(130.0)
 
@@ -92,7 +92,7 @@ def test_ensure_two_bucket_defaults_preserves_and_backfills() -> None:
 
     ensured = rates.ensure_two_bucket_defaults(two_bucket)
 
-    assert ensured["labor"]["Programmer"] == pytest.approx(80.0)
+    assert ensured["labor"]["Programmer"] == pytest.approx(90.0)
     assert ensured["labor"]["Toolmaker"] == pytest.approx(70.0)
     assert ensured["machine"]["CNC_Mill"] == pytest.approx(105.0)
     assert ensured["machine"]["DrillingRate"] == pytest.approx(95.0)

@@ -142,3 +142,34 @@ def test_render_process_costs_hides_misc_even_when_debug(
     assert total == pytest.approx(0.0)
 
     monkeypatch.delenv("DEBUG_MISC", raising=False)
+
+
+def test_render_process_costs_prefers_planner_drilling_minutes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DEBUG_MISC", raising=False)
+
+    table = TableCollector()
+    process_costs = {"Drilling": 12.5}
+    minutes_detail = {"Drilling": 24.0}
+    rates = {"machine": {"cnc_vertical": 75.0}}
+    process_plan = {"drilling": {"total_minutes_billed": 440.0}}
+
+    total = render_process_costs(
+        table,
+        process_costs,
+        rates=rates,
+        minutes_detail=minutes_detail,
+        process_plan=process_plan,
+    )
+
+    assert len(table.rows) == 1
+    row = table.rows[0]
+    expected_hours = 440.0 / 60.0
+    expected_cost = round(expected_hours * 75.0, 2)
+
+    assert row["label"] == "Drilling"
+    assert row["hours"] == pytest.approx(expected_hours)
+    assert row["rate"] == pytest.approx(75.0)
+    assert row["cost"] == pytest.approx(expected_cost)
+    assert total == pytest.approx(expected_cost)
