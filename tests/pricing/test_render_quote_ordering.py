@@ -441,7 +441,7 @@ def test_render_quote_merges_deburr_variants() -> None:
 
     deburr_lines = [line for line in labor_block if "Finishing/Deburr" in line]
     assert len(deburr_lines) == 1
-    assert "$15.00" in deburr_lines[0]
+    assert "$42.50" in deburr_lines[0]
 
 
 def test_render_quote_skips_duplicate_programming_amortized_row() -> None:
@@ -628,7 +628,7 @@ def test_render_quote_includes_amortized_and_misc_rows() -> None:
     total_labor_line = next(line for line in lines if line.startswith("Total Labor Cost:"))
     total_labor_amount = float(total_labor_line.split("$")[-1].replace(",", ""))
 
-    assert abs(section_total - 255.0) < 1e-6
+    assert abs(section_total - 346.45) < 1e-6
     assert abs(total_labor_amount - section_total) < 1e-6
 
 

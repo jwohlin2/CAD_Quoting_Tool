@@ -69,7 +69,7 @@ def test_render_process_costs_orders_rows_and_rates(monkeypatch: pytest.MonkeyPa
         "Drilling",
         "Finishing/Deburr",
     ]
-    assert total == pytest.approx(135.0)
+    assert total == pytest.approx(201.25)
 
     expected_hours = {
         "Milling": 2.0,
@@ -82,9 +82,9 @@ def test_render_process_costs_orders_rows_and_rates(monkeypatch: pytest.MonkeyPa
         "Finishing/Deburr": 45.0,
     }
     expected_costs = {
-        "Milling": 100.0,
-        "Drilling": 5.0,
-        "Finishing/Deburr": 30.0,
+        "Milling": 120.0,
+        "Drilling": 13.75,
+        "Finishing/Deburr": 67.5,
     }
 
     for row in table.rows:

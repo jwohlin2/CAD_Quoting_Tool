@@ -328,7 +328,15 @@ def render_process_costs(
 
     for key in ORDER:
         raw_amount = float(costs.get(key, 0.0))
+        hours = max(0.0, float(minutes.get(key, 0.0)) / 60.0)
+        rate = _lookup_rate(key, flat_rates, normalized_rates)
+        inferred_amount: float | None = None
+        if hours > 0 and rate > 0:
+            inferred_amount = round(hours * rate, 2)
         amount = round(raw_amount, 2)
+        if inferred_amount is not None:
+            amount = inferred_amount
+        costs[key] = amount
         if key in HIDE_IN_COST:
             if not math.isclose(amount, 0.0, abs_tol=1e-9):
                 hidden_total += amount
