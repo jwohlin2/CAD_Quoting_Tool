@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 from collections.abc import Mapping as _MappingABC
 
-from appkit.env_utils import FORCE_PLANNER, _coerce_bool, _coerce_env_bool
+from appkit.env_utils import FORCE_ESTIMATOR, FORCE_PLANNER, _coerce_bool, _coerce_env_bool
 
 DEFAULT_PLANNER_MODE = "planner"
 
@@ -13,6 +13,9 @@ def _resolve_planner_mode(
     default_mode: str = DEFAULT_PLANNER_MODE,
 ) -> str:
     """Return the planner mode based on params and the FORCE flag."""
+
+    if FORCE_ESTIMATOR:
+        return "estimator"
 
     if FORCE_PLANNER:
         return DEFAULT_PLANNER_MODE
@@ -36,6 +39,9 @@ def _resolve_planner_usage(
     signals: Mapping[str, Any] | None,
 ) -> bool:
     """Return True when planner pricing should be used."""
+
+    if FORCE_ESTIMATOR:
+        return False
 
     if FORCE_PLANNER:
         return True
@@ -63,6 +69,8 @@ def _resolve_planner_usage(
         used_planner = base_signal or has_totals
     elif planner_mode == "legacy":
         used_planner = has_line_items or has_recognized
+    elif planner_mode == "estimator":
+        used_planner = False
     else:  # auto / fallback
         used_planner = base_signal or has_recognized
 

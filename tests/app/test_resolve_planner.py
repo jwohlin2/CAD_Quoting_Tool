@@ -18,6 +18,8 @@ def reload_appv5(monkeypatch):
     planner_adapter = importlib.import_module("appkit.planner_adapter")
     monkeypatch.setattr(module, "FORCE_PLANNER", False)
     monkeypatch.setattr(planner_adapter, "FORCE_PLANNER", False)
+    monkeypatch.setattr(module, "FORCE_ESTIMATOR", False, raising=False)
+    monkeypatch.setattr(planner_adapter, "FORCE_ESTIMATOR", False, raising=False)
     yield module
     importlib.reload(module)
 
@@ -78,6 +80,20 @@ def test_resolve_planner_force_flag_overrides_mode(monkeypatch, reload_appv5):
     used, mode = module.resolve_planner({"PlannerMode": "legacy"}, None)
     assert used is True
     assert mode == "planner"
+
+
+def test_resolve_planner_force_estimator(monkeypatch, reload_appv5):
+    module = reload_appv5
+    planner_adapter = importlib.import_module("appkit.planner_adapter")
+    monkeypatch.setattr(module, "FORCE_PLANNER", False)
+    monkeypatch.setattr(planner_adapter, "FORCE_PLANNER", False)
+    monkeypatch.setattr(module, "FORCE_ESTIMATOR", True, raising=False)
+    monkeypatch.setattr(planner_adapter, "FORCE_ESTIMATOR", True, raising=False)
+
+    used, mode = module.resolve_planner({"PlannerMode": "planner"}, {"line_items": [1]})
+
+    assert used is False
+    assert mode == "estimator"
 
 
 def test_no_internal_resolve_helpers_exposed(reload_appv5):

@@ -23,3 +23,8 @@ def _coerce_env_bool(value: str | None) -> bool:
 
 
 FORCE_PLANNER = _coerce_env_bool(os.environ.get("FORCE_PLANNER"))
+FORCE_ESTIMATOR = _coerce_env_bool(os.environ.get("FORCE_ESTIMATOR"))
+
+# When the estimator is explicitly requested we should never force planner usage.
+if FORCE_ESTIMATOR:
+    FORCE_PLANNER = False

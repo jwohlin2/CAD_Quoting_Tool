@@ -175,7 +175,7 @@ from appkit.scrap_helpers import (
     HOLE_SCRAP_CAP,
 )
 from appkit.planner_helpers import _process_plan_job
-from appkit.env_utils import FORCE_PLANNER
+from appkit.env_utils import FORCE_ESTIMATOR, FORCE_PLANNER
 from appkit.planner_adapter import resolve_planner
 
 from appkit.data import load_json, load_text
