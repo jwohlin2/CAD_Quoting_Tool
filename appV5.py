@@ -3670,6 +3670,43 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             material_selection = dict(material_selection_raw or {})
         except Exception:
             material_selection = {}
+
+    baseline: Mapping[str, Any] = {}
+    decision_state = result.get("decision_state") if isinstance(result, _MappingABC) else None
+    if isinstance(decision_state, _MappingABC):
+        baseline_candidate = decision_state.get("baseline")
+        if isinstance(baseline_candidate, _MappingABC):
+            baseline = baseline_candidate
+    if not baseline and isinstance(result, _MappingABC):
+        baseline_candidate = result.get("baseline")
+        if isinstance(baseline_candidate, _MappingABC):
+            baseline = baseline_candidate
+    if not baseline and isinstance(breakdown, _MappingABC):
+        baseline_candidate = breakdown.get("baseline")
+        if isinstance(baseline_candidate, _MappingABC):
+            baseline = baseline_candidate
+
+    pricing: dict[str, Any]
+    pricing_obj: Mapping[str, Any] | None = None
+    for container in (breakdown, result):
+        if not isinstance(container, _MutableMappingABC):
+            continue
+        candidate = container.get("pricing")
+        if isinstance(candidate, _MutableMappingABC):
+            pricing_obj = candidate
+            break
+        if isinstance(candidate, _MappingABC):
+            pricing_obj = dict(candidate)
+            container["pricing"] = pricing_obj
+            break
+    if pricing_obj is None:
+        pricing = {}
+    else:
+        pricing = dict(pricing_obj) if not isinstance(pricing_obj, dict) else pricing_obj
+    if isinstance(breakdown, _MutableMappingABC):
+        breakdown["pricing"] = pricing
+    if isinstance(result, _MutableMappingABC):
+        result["pricing"] = pricing
     normalized_material_key = str(
         material_selection.get("material_lookup")
         or material_selection.get("normalized_material_key")
@@ -5028,6 +5065,139 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     material_display_for_debug: str = ""
 
+    # Prep material pricing/mass estimates so the renderer and downstream
+    # consumers see consistent values even when geometry inputs are sparse.
+    mat_info = pricing.setdefault("material", {}) if isinstance(pricing, dict) else {}
+    if not isinstance(mat_info, dict):
+        try:
+            mat_info = dict(mat_info or {})
+        except Exception:
+            mat_info = {}
+        if isinstance(pricing, dict):
+            pricing["material"] = mat_info
+    pricing_geom = pricing.get("geom") if isinstance(pricing, dict) else None
+    if not isinstance(pricing_geom, _MappingABC):
+        pricing_geom = pricing.get("geo") if isinstance(pricing, dict) else None
+    if not isinstance(pricing_geom, _MappingABC):
+        pricing_geom = g if isinstance(g, _MappingABC) else {}
+    ml = str((pricing_geom or {}).get("material_lookup") or "").lower()
+
+    DENSITY_G_CC = {"aluminum": 2.70, "tool_steel": 7.85, "stainless": 7.90, "titanium": 4.5}
+    rho = _coerce_float_or_none(mat_info.get("density_g_cc"))
+    if rho is None and ml:
+        rho = DENSITY_G_CC.get(ml)
+    if rho is None:
+        rho = 2.70
+    if isinstance(mat_info, dict) and "density_g_cc" not in mat_info:
+        mat_info["density_g_cc"] = float(rho)
+
+    def _first_mm(*keys: str) -> float | None:
+        for key in keys:
+            if key is None:
+                continue
+            val = _coerce_float_or_none(mat_info.get(key) if isinstance(mat_info, dict) else None)
+            if val is None and isinstance(pricing_geom, _MappingABC):
+                val = _coerce_float_or_none(pricing_geom.get(key))
+            if val is None and isinstance(g, _MappingABC):
+                val = _coerce_float_or_none(g.get(key))
+            if val is not None:
+                return float(val)
+        return None
+
+    Lmm = _first_mm("plate_length_mm")
+    Wmm = _first_mm("plate_width_mm")
+    area_mm2 = _coerce_float_or_none(
+        mat_info.get("plate_bbox_area_mm2") if isinstance(mat_info, dict) else None
+    )
+    if area_mm2 is None and isinstance(pricing_geom, _MappingABC):
+        area_mm2 = _coerce_float_or_none(pricing_geom.get("plate_bbox_area_mm2"))
+    if area_mm2 is None and isinstance(g, _MappingABC):
+        area_mm2 = _coerce_float_or_none(g.get("plate_bbox_area_mm2"))
+    if area_mm2 is None and Lmm is not None and Wmm is not None:
+        area_mm2 = float(Lmm) * float(Wmm)
+
+    th_in = _coerce_float_or_none(mat_info.get("thickness_in")) if isinstance(mat_info, dict) else None
+    if th_in is None and isinstance(pricing_geom, _MappingABC):
+        th_in = _coerce_float_or_none(pricing_geom.get("thickness_in"))
+    if th_in is None and isinstance(g, _MappingABC):
+        th_in = _coerce_float_or_none(g.get("thickness_in"))
+    if th_in is None and isinstance(g, _MappingABC):
+        th_in = _coerce_float_or_none(g.get("thickness_in_guess"))
+    if th_in is None and isinstance(baseline, _MappingABC):
+        th_in = _coerce_float_or_none(baseline.get("thickness_in"))
+    if th_in is None or th_in <= 0:
+        th_in = 1.0
+    if isinstance(mat_info, dict) and "thickness_in" not in mat_info:
+        mat_info["thickness_in"] = float(th_in)
+    th_mm = float(th_in) * 25.4
+
+    if area_mm2 and th_mm and rho:
+        vol_cc = float(area_mm2) * float(th_mm) / 1000.0
+        starting_g = vol_cc * float(rho)
+        removed_g = _coerce_float_or_none((mat_info or {}).get("material_removed_mass_g"))
+        if removed_g is None and isinstance(mat_info, dict):
+            removed_g = _coerce_float_or_none(mat_info.get("material_removed_mass_g_est"))
+        if removed_g is None and isinstance(material, _MappingABC):
+            removed_g = _coerce_float_or_none(material.get("material_removed_mass_g"))
+        if removed_g is None and isinstance(material, _MappingABC):
+            removed_g = _coerce_float_or_none(material.get("material_removed_mass_g_est"))
+        removed_g = float(removed_g or 0.0)
+        net_g = max(0.0, float(starting_g) - removed_g)
+        scrap_g = max(0.0, float(starting_g) - net_g)
+
+        mat_info["starting_mass_g_est"] = float(starting_g)
+        mat_info["net_mass_g"] = float(net_g)
+        mat_info["scrap_mass_g"] = float(scrap_g)
+        if isinstance(material, dict):
+            if _coerce_float_or_none(material.get("mass_g")) in (None, 0.0):
+                material["mass_g"] = float(starting_g)
+            if _coerce_float_or_none(material.get("starting_mass_g_est")) in (None, 0.0):
+                material["starting_mass_g_est"] = float(starting_g)
+            if _coerce_float_or_none(material.get("net_mass_g")) in (None, 0.0):
+                material["net_mass_g"] = float(net_g)
+            if _coerce_float_or_none(material.get("scrap_mass_g")) in (None, 0.0):
+                material["scrap_mass_g"] = float(scrap_g)
+
+    if isinstance(mat_info, dict) and "material_price_per_lb" not in mat_info:
+        mat_info["material_price_per_lb"] = None
+    price_per_lb = None
+    if isinstance(mat_info, dict):
+        price_per_lb = _coerce_float_or_none(mat_info.get("material_price_per_lb"))
+    if price_per_lb is None:
+        DEFAULT_PRICE_PER_LB = {
+            "aluminum": 5.0,
+            "tool_steel": 8.0,
+            "stainless": 12.0,
+            "titanium": 25.0,
+        }
+        price_per_lb = DEFAULT_PRICE_PER_LB.get(ml, 5.0)
+        if isinstance(mat_info, dict):
+            mat_info["material_price_per_lb"] = float(price_per_lb)
+
+    starting_mass = _coerce_float_or_none(mat_info.get("starting_mass_g_est"))
+    if starting_mass is None:
+        starting_mass = _coerce_float_or_none(mat_info.get("mass_g"))
+    lb = float(starting_mass or 0.0) / 453.59237
+    raw_material_cost = float(lb) * float(price_per_lb or 0.0)
+    supplier_min = _coerce_float_or_none((mat_info or {}).get("supplier_min_charge")) or 0.0
+    tax = _coerce_float_or_none((mat_info or {}).get("material_tax")) or 0.0
+    mat_total = max(raw_material_cost, float(supplier_min)) + float(tax)
+    if isinstance(mat_info, dict):
+        mat_info.setdefault("material_cost", float(mat_total))
+    if isinstance(material, dict):
+        material.setdefault("material_cost", float(mat_total))
+
+    if isinstance(pricing, dict):
+        directs = pricing.setdefault("direct_costs", {})
+        if not isinstance(directs, dict):
+            try:
+                directs = dict(directs or {})
+            except Exception:
+                directs = {}
+            pricing["direct_costs"] = directs
+        directs["material"] = float(mat_total)
+        pricing["total_direct_costs"] = float(sum(directs.values()))
+
     # ---- material & stock (compact; shown only if we actually have data) -----
     if material:
         mass_g = material.get("mass_g")
@@ -5358,8 +5528,16 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     W_in = W_mm / 25.4
             stock_L = _fmt_dim(L_in)
             stock_W = _fmt_dim(W_in)
-            th_in = ui_vars.get("Thickness (in)") or g.get("thickness_in_guess") or 1.0
+            th_in = (
+                ui_vars.get("Thickness (in)")
+                or g.get("thickness_in")
+                or g.get("thickness_in_guess")
+                or (baseline.get("thickness_in") if isinstance(baseline, _MappingABC) else None)
+                or 1.0
+            )
             stock_T = _fmt_dim(th_in)
+            if isinstance(mat_info, dict):
+                mat_info["stock_size_display"] = f"{stock_L} × {stock_W} × {stock_T} in"
             append_line(f"  Stock used: {stock_L} × {stock_W} × {stock_T} in")
             if detail_lines:
                 append_lines(detail_lines)
