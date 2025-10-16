@@ -73,6 +73,7 @@ from cad_quoter.utils.render_utils import (
     render_quote_doc,
 )
 from cad_quoter.pricing import load_backup_prices_csv
+from cad_quoter.pricing.process_cost_renderer import render_process_costs
 from cad_quoter.estimators import SpeedsFeedsUnavailableError
 from cad_quoter.llm_overrides import (
     _plate_mass_properties,
