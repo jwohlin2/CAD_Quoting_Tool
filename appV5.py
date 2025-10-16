@@ -19473,6 +19473,61 @@ class App(tk.Tk):
         if has_records and self.vars_df is not None and not self.vars_df.empty:
             self.gen_quote(reuse_suggestions=True)
 
+    def apply_geometry_payload(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        source: str | None = None,
+    ) -> None:
+        """Populate the GEO tab from a pre-parsed geometry payload."""
+
+        if not isinstance(payload, _MappingABC):
+            raise TypeError("Geometry payload must be a mapping.")
+
+        def _clone(mapping: Mapping[Any, Any]) -> dict[str, Any]:
+            return {str(key): value for key, value in mapping.items()}
+
+        geo_payload: dict[str, Any] | None = None
+        if isinstance(payload.get("geo"), _MappingABC):
+            geo_payload = _clone(typing.cast(Mapping[Any, Any], payload.get("geo", {})))
+        elif isinstance(payload.get("geom"), _MappingABC):
+            geo_payload = _clone(typing.cast(Mapping[Any, Any], payload.get("geom", {})))
+        else:
+            geo_payload = _clone(payload)
+
+        geo_context: dict[str, Any] | None = None
+        if isinstance(payload.get("geo_context"), _MappingABC):
+            geo_context = _clone(typing.cast(Mapping[Any, Any], payload.get("geo_context", {})))
+        elif isinstance(payload.get("geo"), _MappingABC):
+            inner_geo = typing.cast(Mapping[Any, Any], payload.get("geo", {}))
+            if isinstance(inner_geo.get("geo_context"), _MappingABC):
+                geo_context = _clone(typing.cast(Mapping[Any, Any], inner_geo.get("geo_context", {})))
+
+        if geo_context is None:
+            geo_context = dict(geo_payload)
+            if isinstance(payload.get("geo_read_more"), _MappingABC):
+                geo_context["geo_read_more"] = _clone(
+                    typing.cast(Mapping[Any, Any], payload.get("geo_read_more", {}))
+                )
+
+        self.geo = dict(geo_payload)
+        self.geo_context = dict(geo_context)
+        try:
+            self.quote_state.geo = dict(self.geo)
+        except Exception:
+            pass
+
+        display_payload = json_safe_copy(payload)
+        try:
+            self._log_geo(display_payload)
+        except Exception:
+            self._log_geo(self.geo_context)
+
+        self.nb.select(self.tab_geo)
+        status_text = "Geometry payload loaded." if not source else f"Geometry loaded from {source}"
+        self.status_var.set(status_text)
+        logger.info(status_text)
+
     # ----- LLM tab -----
     def _build_llm(self, parent):
         row=0
@@ -19861,6 +19916,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Force-enable material removal debug output (shows Material Removal Debug table).",
     )
+    parser.add_argument(
+        "--geo-json",
+        type=str,
+        help="Load geometry data from a JSON file at startup to bypass CAD parsing.",
+    )
     return parser
 
 
@@ -19879,7 +19939,30 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
         logger.info("Runtime environment:\n%s", jdump(describe_runtime_environment(), default=None))
         return 0
 
+    geo_json_payload: Mapping[str, Any] | None = None
+    geo_json_path = getattr(args, "geo_json", None)
+    if geo_json_path:
+        try:
+            with open(geo_json_path, "r", encoding="utf-8") as handle:
+                raw_payload = json.load(handle)
+        except FileNotFoundError:
+            logger.error("Geometry JSON not found: %s", geo_json_path)
+            return 1
+        except json.JSONDecodeError as exc:
+            logger.error("Geometry JSON is invalid (%s): %s", geo_json_path, exc)
+            return 1
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.error("Failed to read geometry JSON %s: %s", geo_json_path, exc)
+            return 1
+        if isinstance(raw_payload, _MappingABC):
+            geo_json_payload = typing.cast(Mapping[str, Any], raw_payload)
+        else:
+            logger.error("Geometry JSON must contain an object at the top level: %s", geo_json_path)
+            return 1
+
     if args.no_gui:
+        if geo_json_payload is not None:
+            logger.warning("--geo-json is ignored when --no-gui is supplied.")
         return 0
 
     pricing_registry = create_default_registry()
@@ -19890,6 +19973,13 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
     except RuntimeError as exc:  # pragma: no cover - headless guard
         logger.error("Unable to start the GUI: %s", exc)
         return 1
+
+    if geo_json_payload is not None:
+        try:
+            app.apply_geometry_payload(geo_json_payload, source=geo_json_path)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.error("Failed to apply geometry JSON %s: %s", geo_json_path, exc)
+            return 1
 
     app.mainloop()
 
