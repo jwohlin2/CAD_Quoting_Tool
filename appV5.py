@@ -5585,6 +5585,18 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     except Exception:
         amortized_nre_total = 0.0
 
+    card_hr = round(
+        float(breakdown["drilling_meta"]["total_minutes_billed"]) / 60.0, 2
+    )
+    row_hr = round(
+        float(breakdown["bucket_view"]["buckets"]["drilling"]["minutes"]) / 60.0, 2
+    )
+    if abs(card_hr - row_hr) > 0.01:
+        raise RuntimeError(
+            f"[FATAL] Drilling hours mismatch: card {card_hr} vs row {row_hr}. "
+            "A late write is overwriting bucket_view. Remove any planner/bucket rebuilds after minutes engine."
+        )
+
     append_line("Process & Labor Costs")
     append_line(divider)
 
