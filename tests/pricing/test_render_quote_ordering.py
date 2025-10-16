@@ -61,6 +61,53 @@ def test_render_quote_places_why_after_pricing_ladder_and_llm_adjustments() -> N
     assert rendered.endswith("\n")
 
 
+def test_total_direct_costs_uses_pricing_breakdown() -> None:
+    result = {
+        "price": 42.0,
+        "breakdown": {
+            "qty": 2,
+            "totals": {
+                "labor_cost": 10.0,
+                "direct_costs": 99.0,
+                "subtotal": 25.0,
+                "with_overhead": 25.0,
+                "with_ga": 25.0,
+                "with_contingency": 25.0,
+                "with_expedite": 25.0,
+            },
+            "nre_detail": {},
+            "nre": {},
+            "material": {},
+            "process_costs": {"milling": 10.0},
+            "process_meta": {},
+            "pass_through": {"Material": 12.5, "Shipping": 5.0},
+            "applied_pcts": {},
+            "rates": {},
+            "params": {},
+            "labor_cost_details": {},
+            "direct_cost_details": {},
+            "pricing": {
+                "direct_costs": {"material": 12.5, "shipping": 5.0},
+            },
+        },
+    }
+
+    rendered = appV5.render_quote(result, currency="$")
+    lines = rendered.splitlines()
+
+    direct_line = next(line for line in lines if line.startswith("Total Direct Costs:"))
+    assert direct_line.endswith("$17.50")
+
+    pass_section_start = lines.index("Pass-Through & Direct Costs")
+    pass_section_end = next(
+        idx
+        for idx in range(pass_section_start, len(lines))
+        if lines[idx] == ""
+    )
+    pass_section = lines[pass_section_start:pass_section_end]
+    assert any(line.strip().startswith("Total") and line.strip().endswith("$17.50") for line in pass_section)
+
+
 def test_render_quote_renders_bucket_table_without_planner_why_section() -> None:
     bucket_view = {
         "buckets": {
@@ -800,7 +847,7 @@ def test_render_quote_dedupes_planner_rollup_cost_rows() -> None:
     assert not any("Planner" in line for line in labor_section)
 
 
-def test_total_labor_cost_matches_displayed_rows_and_pass_through_labor() -> None:
+def test_total_labor_cost_matches_process_rows() -> None:
     result = {
         "price": 110.0,
         "breakdown": {
@@ -857,7 +904,7 @@ def test_total_labor_cost_matches_displayed_rows_and_pass_through_labor() -> Non
             process_amounts.append(amount)
 
     assert sum(process_amounts) == table_total_amount
-    assert total_labor_amount == table_total_amount + 15.0
+    assert total_labor_amount == table_total_amount
 
 
 def test_render_quote_displays_single_shipping_entry_and_reconciles_ladder() -> None:
@@ -1208,6 +1255,7 @@ def test_render_quote_backfills_programming_and_inspection_rates() -> None:
 
     assert any("Programming Cost:" in line and "$255" in line for line in lines)
     assert any("Programmer:" in line and "$85.00/hr" in line for line in lines)
+    assert any("Programming Hrs:" in line and "3.00 hr" in line for line in lines)
 
     inspection_idx = next(
         (idx for idx, line in enumerate(lines) if line.strip().startswith("Inspection")),
