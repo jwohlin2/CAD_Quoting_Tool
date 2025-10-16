@@ -11981,6 +11981,29 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
 
     if drill_minutes_with_toolchange is not None and drill_minutes_with_toolchange > 0.0:
         drilling_summary["total_minutes_with_toolchange"] = float(drill_minutes_with_toolchange)
+        drill_meta_for_totals = breakdown.setdefault("drilling_meta", {})
+        try:
+            drill_meta_for_totals["total_minutes_with_toolchange"] = float(
+                drill_minutes_with_toolchange
+            )
+        except Exception:
+            pass
+
+    # === DRILLING BILLING TRUTH ===
+    drill_meta = breakdown.setdefault("drilling_meta", {})
+    bill_min = float(
+        drill_meta.get("total_minutes_with_toolchange")
+        or drill_meta.get("total_minutes")
+        or 0.0
+    )
+    drill_meta["total_minutes_billed"] = bill_min
+
+    # overwrite any legacy/planner meta for drilling
+    pm = breakdown.setdefault("process_meta", {}).setdefault("drilling", {})
+    pm["minutes"] = bill_min
+    pm["hr"] = round(bill_min / 60.0, 6)
+    pm["rate"] = float(rates.get("DrillingRate") or rates.get("MachineRate") or 0.0)
+    pm["basis"] = ["minutes_engine"]
 
     drill_total_minutes_billed = float(
         drilling_summary.get("total_minutes_with_toolchange")
