@@ -3406,11 +3406,19 @@ def _build_planner_bucket_render_state(
         return state
 
     try:
-        removal_hr = float(removal_drilling_hours) if removal_drilling_hours is not None else None
+        removal_hr = (
+            float(removal_drilling_hours) if removal_drilling_hours is not None else None
+        )
     except Exception:
         removal_hr = None
     if removal_hr is not None and removal_hr < 0:
         removal_hr = None
+
+    if removal_hr is not None:
+        try:
+            state.extra["removal_drilling_hours"] = float(removal_hr)
+        except Exception:
+            state.extra["removal_drilling_hours"] = removal_hr
 
     buckets = bucket_view.get("buckets") if isinstance(bucket_view, _MappingABC) else None
     if not isinstance(buckets, _MappingABC):
@@ -3444,7 +3452,6 @@ def _build_planner_bucket_render_state(
         original_hours = hours_raw
 
         if _canonical_bucket_key(canon_key) == "drilling" and removal_hr is not None:
-            state.extra["removal_drilling_hours"] = float(removal_hr)
             if prefer_removal_drilling_hours:
                 override_hours = max(0.0, float(removal_hr))
                 override_minutes = override_hours * 60.0
@@ -3659,7 +3666,11 @@ def _charged_hours_by_bucket(
         removal_hr = None
     if removal_hr is not None and prefer_removal_drilling_hours:
         desired = max(0.0, float(removal_hr))
-        drill_labels = [label for label in out if _canonical_bucket_key(label) == "drilling"]
+        drill_labels = [
+            label
+            for label in out
+            if _canonical_bucket_key(label) in {"drilling", "drill"}
+        ]
         if drill_labels:
             for label in drill_labels:
                 current = float(out.get(label, 0.0) or 0.0)
@@ -7296,8 +7307,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if bill_min > 0:
         process_costs_for_render["drilling"] = drill_cost
         bucket_minutes_detail["drilling"] = bill_min
-        canonical_bucket_summary.setdefault("drilling", {}).setdefault("minutes", 0.0)
-        canonical_bucket_summary["drilling"]["minutes"] += bill_min
+        drill_summary_entry = canonical_bucket_summary.setdefault("drilling", {})
+        drill_summary_entry["minutes"] = float(bill_min)
+        drill_summary_entry["hours"] = float(bill_min / 60.0)
 
     process_plan_summary_map: Mapping[str, Any] | None = None
     if isinstance(process_plan_summary_local, _MappingABC):
@@ -7789,6 +7801,25 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 continue
             label = _display_bucket_label(canon_key, label_overrides)
             summary_hours[label] = summary_hours.get(label, 0.0) + (minutes_val / 60.0)
+
+        override_hours: float | None = None
+        if prefer_removal_drilling_hours:
+            extra_map = getattr(bucket_state, "extra", {})
+            if isinstance(extra_map, _MappingABC):
+                candidate = extra_map.get("removal_drilling_hours")
+                if candidate is not None:
+                    try:
+                        override_hours = float(candidate)
+                    except Exception:
+                        override_hours = None
+            if override_hours is None and removal_drilling_hours_precise is not None:
+                try:
+                    override_hours = float(removal_drilling_hours_precise)
+                except Exception:
+                    override_hours = None
+        if override_hours is not None and override_hours >= 0:
+            display_label = _display_bucket_label("drilling", label_overrides)
+            summary_hours[display_label] = round(max(0.0, float(override_hours)), 2)
 
         planner_labels = {"Planner Machine", "Planner Labor", "Planner Total"}
         for label, hours_val in summary_hours.items():
@@ -8483,6 +8514,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         bill_min = drill_min
         drill_hr = drill_min / 60.0 if drill_min else 0.0
         drill_meta["total_minutes_billed"] = drill_min
+        drill_meta["bill_hours"] = float(drill_hr)
 
         # Overwrite legacy planner meta
         pm = breakdown.setdefault("process_meta", {}).setdefault("drilling", {})
@@ -8606,6 +8638,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             drill_meta_summary["toolchange_minutes"] = float(tool_add)
             drill_meta_summary["total_minutes_with_toolchange"] = float(total_drill_minutes_with_toolchange)
             drill_meta_summary["total_minutes_billed"] = bill_min
+            drill_meta_summary["bill_hours"] = float(drill_hr)
         append_line(f"Toolchange adders: Deep-Drill {tchg_deep:.2f} min + Drill {tchg_std:.2f} min = {tool_add:.2f} min" if tool_add > 0 else "Toolchange adders: -")
         append_line("-" * 66)
         append_line(f"Subtotal (per-hole × qty) . {subtotal_min:.2f} min  ({fmt_hours(subtotal_min/60.0)})")
