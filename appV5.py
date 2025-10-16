@@ -5141,9 +5141,24 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             removed_g = _coerce_float_or_none(material.get("material_removed_mass_g"))
         if removed_g is None and isinstance(material, _MappingABC):
             removed_g = _coerce_float_or_none(material.get("material_removed_mass_g_est"))
-        removed_g = float(removed_g or 0.0)
-        net_g = max(0.0, float(starting_g) - removed_g)
-        scrap_g = max(0.0, float(starting_g) - net_g)
+
+        if removed_g is not None:
+            removed_val = max(0.0, float(removed_g))
+            net_g = max(0.0, float(starting_g) - removed_val)
+            scrap_g = max(0.0, float(starting_g) - net_g)
+        else:
+            scrap_frac = 0.0
+            for source in (mat_info, material, baseline):
+                if not isinstance(source, _MappingABC):
+                    continue
+                scrap_candidate = _coerce_float_or_none(source.get("scrap_pct"))
+                if scrap_candidate is None:
+                    continue
+                scrap_frac = normalize_scrap_pct(scrap_candidate)
+                if scrap_frac > 0:
+                    break
+            scrap_g = float(starting_g) * float(scrap_frac or 0.0)
+            net_g = max(0.0, float(starting_g) - scrap_g)
 
         mat_info["starting_mass_g_est"] = float(starting_g)
         mat_info["net_mass_g"] = float(net_g)
@@ -5196,7 +5211,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 directs = {}
             pricing["direct_costs"] = directs
         directs["material"] = float(mat_total)
-        pricing["total_direct_costs"] = float(sum(directs.values()))
+        if _coerce_float_or_none(pricing.get("total_direct_costs")) is None:
+            pricing["total_direct_costs"] = float(sum(directs.values()))
 
     # ---- material & stock (compact; shown only if we actually have data) -----
     if material:
@@ -5793,7 +5809,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if have_card_minutes and abs(card_hr - row_hr) > 0.01:
         raise RuntimeError(
             f"[FATAL] Drilling hours mismatch: card {card_hr} vs row {row_hr}. "
-            "A late write is overwriting bucket_view. Remove any planner/bucket rebuilds after minutes engine."
+            "Late writer is overwriting bucket_view."
         )
 
     append_line("Process & Labor Costs")
@@ -6503,7 +6519,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 raise RuntimeError(
                     "[FATAL] Drilling hours mismatch: "
                     f"card {card_hr} vs row {row_hr}. "
-                    "A late writer is overwriting bucket_view. Remove any rebuilds or planner overrides."
+                    "Late writer is overwriting bucket_view."
                 )
 
     if bucket_table_rows:
@@ -6764,7 +6780,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                             raise RuntimeError(
                                 "Drilling hours mismatch AFTER BUILD: "
                                 f"card {card_hr_guard} vs row {row_hr_guard}. "
-                                "Check for late bucket_view rebuilds or planner overrides."
+                                "Late writer is overwriting bucket_view."
                             )
 
             assert (
@@ -7029,6 +7045,23 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 include_in_total=False,
             )
 
+    if canonical_bucket_order and canonical_bucket_summary:
+        summary_hours: dict[str, float] = {}
+        for canon_key in canonical_bucket_order:
+            metrics = canonical_bucket_summary.get(canon_key) or {}
+            minutes_val = _safe_float(metrics.get("minutes"), default=0.0)
+            if minutes_val <= 0.0:
+                continue
+            label = _display_bucket_label(canon_key, label_overrides)
+            summary_hours[label] = summary_hours.get(label, 0.0) + (minutes_val / 60.0)
+
+        for label, hours_val in summary_hours.items():
+            include_flag = True
+            existing = hour_summary_entries.get(label)
+            if isinstance(existing, tuple) and len(existing) == 2:
+                include_flag = bool(existing[1])
+            hour_summary_entries[label] = (round(hours_val, 2), include_flag)
+
     if hour_summary_entries:
         def _canonical_hour_label(value: Any) -> str:
             text = str(value or "")
@@ -7074,15 +7107,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         canonical_label = _canonical_pass_label(key)
         if canonical_label.lower() == "material":
             continue
-        if (value > 0) or show_zeros:
-            # cosmetic: "consumables_hr_cost" → "Consumables /Hr Cost"
-            label = key.replace("_", " ").replace("hr", "/hr").title()
-            row(label, float(value), indent="  ")
-            add_pass_basis(key, indent="    ")
-            detail_value = direct_cost_details.get(key)
-            if detail_value not in (None, ""):
-                write_detail(str(detail_value), indent="    ")
+        try:
             amount_val = float(value or 0.0)
+        except Exception:
+            continue
+        if (amount_val > 0) or show_zeros:
             displayed_pass_through[key] = amount_val
             pass_total += amount_val
             canonical_pass_label = canonical_label
@@ -7100,40 +7129,107 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             f"{_m(material_direct_contribution)} to Direct Costs",
             "  ",
         )
-    direct_costs_total: float | None = None
-    if isinstance(pricing, _MappingABC):
-        direct_costs_candidate = pricing.get("direct_costs")
-        if isinstance(direct_costs_candidate, _MappingABC):
-            total = 0.0
-            for value in direct_costs_candidate.values():
-                total += _safe_float(value, default=0.0)
-            direct_costs_total = round(total, 2)
-
-    if direct_costs_total is None:
-        directs = _compute_direct_costs(
-            material_total_for_directs,
-            scrap_credit_for_directs,
-            material_tax_for_directs,
-            displayed_pass_through,
-        )
-        directs = float(directs)
+    directs_map: dict[Any, Any]
+    if isinstance(pricing, dict):
+        directs_map = pricing.setdefault("direct_costs", {})
+        if not isinstance(directs_map, dict):
+            try:
+                directs_map = dict(directs_map or {})
+            except Exception:
+                directs_map = {}
+            pricing["direct_costs"] = directs_map
     else:
-        directs = float(direct_costs_total)
+        directs_map = {}
+
+    def _assign_direct_value(raw_key: Any, amount: Any) -> None:
+        try:
+            amount_float = round(float(amount), 2)
+        except Exception:
+            return
+        target_key = raw_key
+        try:
+            canonical_target = _canonical_pass_label(str(raw_key)).strip().lower()
+        except Exception:
+            canonical_target = str(raw_key or "").strip().lower()
+        if canonical_target:
+            for existing_key in list(directs_map.keys()):
+                try:
+                    existing_canonical = _canonical_pass_label(str(existing_key)).strip().lower()
+                except Exception:
+                    existing_canonical = str(existing_key or "").strip().lower()
+                if existing_canonical == canonical_target:
+                    target_key = existing_key
+                    break
+        directs_map[target_key] = amount_float
+
+    _assign_direct_value("material", material_direct_contribution)
+
+    for key, amount_val in displayed_pass_through.items():
+        _assign_direct_value(key, amount_val)
+
+    def _direct_label(raw_key: Any) -> str:
+        text = str(raw_key)
+        canonical = _canonical_pass_label(text)
+        if canonical:
+            canonical_stripped = canonical.strip()
+            if canonical_stripped and canonical_stripped.lower() == canonical_stripped:
+                return canonical_stripped.title()
+            return canonical_stripped or canonical
+        label = text.replace("_", " ").replace("hr", "/hr").strip()
+        if not label:
+            return text
+        return label.title()
+
+    direct_entries: list[tuple[str, float, Any]] = []
+    for raw_key, raw_value in directs_map.items():
+        amount_val = _coerce_float_or_none(raw_value)
+        if amount_val is None:
+            continue
+        direct_entries.append((
+            _direct_label(raw_key),
+            round(float(amount_val), 2),
+            raw_key,
+        ))
+
+    direct_entries.sort(key=lambda item: item[1], reverse=True)
+
+    total_direct_costs = round(
+        sum(amount for _, amount, _ in direct_entries if (amount > 0) or show_zeros),
+        2,
+    )
+
+    for display_label, amount_val, raw_key in direct_entries:
+        if (amount_val > 0) or show_zeros:
+            row(display_label, amount_val, indent="  ")
+            raw_key_str = str(raw_key)
+            if raw_key_str in displayed_pass_through:
+                add_pass_basis(raw_key_str, indent="    ")
+                detail_value = direct_cost_details.get(raw_key_str)
+                if detail_value not in (None, ""):
+                    write_detail(str(detail_value), indent="    ")
+            else:
+                detail_value = direct_cost_details.get(raw_key)
+                if detail_value not in (None, ""):
+                    write_detail(str(detail_value), indent="    ")
+
+    row("Total", total_direct_costs, indent="  ")
+    pass_through_total = float(sum(displayed_pass_through.values()))
+
+    if isinstance(pricing, dict):
+        pricing["total_direct_costs"] = total_direct_costs
     if isinstance(breakdown, dict):
         try:
-            breakdown["total_direct_costs"] = directs
+            breakdown["total_direct_costs"] = total_direct_costs
         except Exception:
             pass
-    row("Total", directs, indent="  ")
-    pass_through_total = float(sum(displayed_pass_through.values()))
     if isinstance(totals, dict):
-        totals["direct_costs"] = directs
+        totals["direct_costs"] = total_direct_costs
     if 0 <= total_direct_costs_row_index < len(lines):
         replace_line(
             total_direct_costs_row_index,
             _format_row(
                 total_direct_costs_label,
-                directs,
+                total_direct_costs,
             ),
         )
 
@@ -7312,14 +7408,48 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         else None,
     )
 
-    if pricing_total_direct_costs is not None:
-        ladder_directs = round(float(pricing_total_direct_costs), 2)
-    else:
-        ladder_directs = round(float(directs) + planner_machine_component, 2)
+    directs_from_pricing = _coerce_float_or_none(pricing.get("total_direct_costs"))
+    if directs_from_pricing is None and pricing_total_direct_costs is not None:
+        directs_from_pricing = float(pricing_total_direct_costs)
+    if directs_from_pricing is None:
+        directs_from_pricing = float(directs) + planner_machine_component
+    ladder_directs = round(float(directs_from_pricing or 0.0), 2)
+
+    bucket_view_for_ladder: Mapping[str, Any] | None = None
+    if isinstance(breakdown, _MappingABC):
+        bucket_view_candidate = breakdown.get("bucket_view")
+        if isinstance(bucket_view_candidate, _MappingABC):
+            bucket_view_for_ladder = typing.cast(Mapping[str, Any], bucket_view_candidate)
+
+    ladder_labor_total = 0.0
+    if isinstance(bucket_view_for_ladder, _MappingABC):
+        buckets_for_ladder = bucket_view_for_ladder.get("buckets")
+        if isinstance(buckets_for_ladder, _MappingABC):
+            for metrics in buckets_for_ladder.values():
+                if not isinstance(metrics, _MappingABC):
+                    continue
+                labor_component = _safe_float(metrics.get("labor$"), 0.0)
+                machine_component = _safe_float(metrics.get("machine$"), 0.0)
+                ladder_labor_total += labor_component + machine_component
+
     amortized_component = float(amortized_nre_total if qty > 1 else 0.0)
-    ladder_labor = round(base_bucket_labor + amortized_component, 2)
+    fallback_ladder_labor = round(base_bucket_labor + amortized_component, 2)
+    ladder_labor = round(ladder_labor_total, 2)
+    if ladder_labor <= 0.0:
+        ladder_labor = fallback_ladder_labor
+
     ladder_expected = ladder_labor + ladder_directs
     ladder_subtotal = round(ladder_expected, 2)
+    computed_total_labor_cost = ladder_labor
+    if isinstance(totals, dict):
+        totals["labor_cost"] = ladder_labor
+    if 0 <= total_labor_row_index < len(lines):
+        replace_line(
+            total_labor_row_index,
+            _format_row(total_labor_label, ladder_labor),
+        )
+    if isinstance(pricing, dict):
+        pricing["ladder_subtotal"] = ladder_subtotal
     if not roughly_equal(declared_subtotal, ladder_subtotal, eps=0.01):
         declared_subtotal = ladder_subtotal
     if isinstance(breakdown, dict):
@@ -7429,8 +7559,87 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         pm = breakdown.setdefault("process_meta", {}).setdefault("drilling", {})
         pm["minutes"] = bill_min
         pm["hr"] = round(bill_min / 60.0, 6)
-        pm["rate"] = float(rates.get("DrillingRate") or rates.get("MachineRate") or 0.0)
+        pm["rate"] = float(rates.get("DrillingRate") or 0.0)
         pm["basis"] = ["minutes_engine"]  # replace any 'planner_drilling_override'
+
+        bucket_view_obj = breakdown.get("bucket_view")
+        if not isinstance(bucket_view_obj, dict):
+            if isinstance(bucket_view_obj, _MappingABC):
+                try:
+                    bucket_view_obj = dict(bucket_view_obj)
+                except Exception:
+                    bucket_view_obj = {}
+            else:
+                bucket_view_obj = {}
+            breakdown["bucket_view"] = bucket_view_obj
+
+        buckets_obj = bucket_view_obj.setdefault("buckets", {})
+        if not isinstance(buckets_obj, dict):
+            try:
+                buckets_obj = dict(buckets_obj)
+            except Exception:
+                buckets_obj = {}
+            bucket_view_obj["buckets"] = buckets_obj
+
+        old_entry = buckets_obj.pop("drilling", {}) if isinstance(buckets_obj, dict) else {}
+
+        new_minutes = round(bill_min, 2)
+        machine_rate = float(pm.get("rate") or 0.0)
+        billed_total = round((bill_min / 60.0) * machine_rate, 2) if machine_rate > 0.0 else 0.0
+        if billed_total <= 0.0:
+            billed_total = round(_safe_float((old_entry or {}).get("total$"), default=0.0), 2)
+        cost_mode = _bucket_cost_mode("drilling")
+        if cost_mode == "labor":
+            labor_cost = billed_total
+            machine_cost = 0.0
+        else:
+            machine_cost = billed_total
+            labor_cost = 0.0
+        new_total = round(machine_cost + labor_cost, 2)
+
+        drilling_entry = buckets_obj.setdefault(
+            "drilling",
+            {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0, "total$": 0.0},
+        )
+        drilling_entry["minutes"] = new_minutes
+        drilling_entry["machine$"] = machine_cost
+        drilling_entry["labor$"] = labor_cost
+        drilling_entry["total$"] = new_total
+
+        order_list = bucket_view_obj.setdefault("order", [])
+        if not isinstance(order_list, list):
+            try:
+                order_list = list(order_list or [])
+            except Exception:
+                order_list = []
+            bucket_view_obj["order"] = order_list
+        if "drilling" not in order_list:
+            order_list.append("drilling")
+
+        totals_map = bucket_view_obj.setdefault("totals", {})
+        if not isinstance(totals_map, dict):
+            try:
+                totals_map = dict(totals_map or {})
+            except Exception:
+                totals_map = {}
+            bucket_view_obj["totals"] = totals_map
+
+        minutes_sum = 0.0
+        machine_sum = 0.0
+        labor_sum = 0.0
+        total_sum = 0.0
+        for info in buckets_obj.values():
+            if not isinstance(info, _MappingABC):
+                continue
+            minutes_sum += _safe_float(info.get("minutes"), default=0.0)
+            machine_sum += _safe_float(info.get("machine$"), default=0.0)
+            labor_sum += _safe_float(info.get("labor$"), default=0.0)
+            total_sum += _safe_float(info.get("total$"), default=0.0)
+
+        totals_map["minutes"] = round(minutes_sum, 2)
+        totals_map["machine$"] = round(machine_sum, 2)
+        totals_map["labor$"] = round(labor_sum, 2)
+        totals_map["total$"] = round(total_sum, 2)
 
         process_plan_summary_card: dict[str, Any] | None = None
         if isinstance(process_plan_summary_local, dict):
@@ -12189,13 +12398,22 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             pass
 
     # === DRILLING BILLING TRUTH ===
-    drill_meta = breakdown.setdefault("drilling_meta", {})
+    drill_meta_candidate = breakdown.setdefault("drilling_meta", {})
+    if isinstance(drill_meta_candidate, _MutableMappingABC):
+        drill_meta_map = drill_meta_candidate
+    elif isinstance(drill_meta_candidate, _MappingABC):
+        drill_meta_map = dict(drill_meta_candidate)
+        breakdown["drilling_meta"] = drill_meta_map
+    else:
+        drill_meta_map = {}
+        breakdown["drilling_meta"] = drill_meta_map
+
     bill_min = float(
-        drill_meta.get("total_minutes_with_toolchange")
-        or drill_meta.get("total_minutes")
+        drill_meta_map.get("total_minutes_with_toolchange")
+        or drill_meta_map.get("total_minutes")
         or 0.0
     )
-    drill_meta["total_minutes_billed"] = bill_min
+    drill_meta_map["total_minutes_billed"] = bill_min
 
     # overwrite any legacy/planner meta for drilling
     pm = breakdown.setdefault("process_meta", {}).setdefault("drilling", {})
@@ -12211,17 +12429,17 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     )
     drilling_summary["total_minutes_billed"] = drill_total_minutes_billed
 
-    drill_meta: _MappingABC[str, Any] | None = None
+    drilling_meta_source: _MappingABC[str, Any] | None = None
     if isinstance(drilling_meta_container, _MappingABC):
-        drill_meta = drilling_meta_container
+        drilling_meta_source = drilling_meta_container
 
     billed_minutes = 0.0
     if isinstance(drilling_summary, _MappingABC):
         billed_minutes = _safe_float(drilling_summary.get("total_minutes_billed"))
         if billed_minutes <= 0.0:
             billed_minutes = _safe_float(drilling_summary.get("total_minutes_with_toolchange"))
-    if billed_minutes <= 0.0 and isinstance(drill_meta, _MappingABC):
-        billed_minutes = _safe_float(drill_meta.get("total_minutes_billed"))
+    if billed_minutes <= 0.0 and isinstance(drilling_meta_source, _MappingABC):
+        billed_minutes = _safe_float(drilling_meta_source.get("total_minutes_billed"))
     if billed_minutes <= 0.0 and drill_total_minutes is not None and drill_total_minutes > 0.0:
         billed_minutes = float(drill_total_minutes)
 
