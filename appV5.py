@@ -261,6 +261,50 @@ def _snap_to_stock_plate(
     return (max(L, W), min(L, W), "StdGrid")
 
 
+def _resolve_price_per_lb(material_label: str, material_key: str) -> tuple[float, str]:
+    """Return a USD/lb material price using available providers."""
+
+    price_per_lb = 0.0
+    source = ""
+
+    try:
+        from metals_api import price_per_lb_for_material  # type: ignore
+    except Exception:
+        price_per_lb_for_material = None  # type: ignore[assignment]
+    if price_per_lb_for_material is not None:
+        for candidate in (material_key, material_label):
+            if not candidate:
+                continue
+            try:
+                quote = price_per_lb_for_material(candidate)
+            except Exception:
+                continue
+            try:
+                value = float(quote or 0.0)
+            except Exception:
+                value = 0.0
+            if value > 0 and math.isfinite(value):
+                price_per_lb = value
+                source = "metals_api"
+                break
+
+    if price_per_lb <= 0:
+        lookup_label = material_label or material_key
+        if lookup_label:
+            try:
+                resolved_price, resolved_source = _resolve_material_unit_price(
+                    lookup_label,
+                    unit="lb",
+                )
+            except Exception:
+                resolved_price, resolved_source = None, ""
+            if resolved_price and math.isfinite(float(resolved_price)) and float(resolved_price) > 0:
+                price_per_lb = float(resolved_price)
+                source = resolved_source or source or "material_price_resolver"
+
+    return price_per_lb, source
+
+
 def _compute_material_block(
     geo_ctx: dict,
     material_key: str,
@@ -300,18 +344,30 @@ def _compute_material_block(
     g_cc_to_lb_in3 = 0.0361273
     net_lb = vol_net_in3 * rho * g_cc_to_lb_in3
     start_lb = vol_start_in3 * rho * g_cc_to_lb_in3
-    scrap_lb = max(0.0, start_lb - net_lb)
-    min_scrap_lb = start_lb * float(scrap_pct)
-    scrap_lb = max(scrap_lb, min_scrap_lb)
+    scrap_lb_geom = max(0.0, start_lb - net_lb)
+    min_scrap_lb = max(0.0, start_lb * float(scrap_pct))
+    scrap_lb = max(scrap_lb_geom, min_scrap_lb)
+    net_after_scrap = max(0.0, start_lb - scrap_lb)
 
-    price_per_lb = 0.0
-    try:
-        from metals_api import price_per_lb_for_material  # type: ignore
+    material_label = str(geo_ctx.get("material_display") or material_key or "")
+    price_per_lb, price_source = _resolve_price_per_lb(material_label, material_key)
 
-        price_per_lb = float(price_per_lb_for_material(material_key) or 0.0)
-    except Exception:
-        pass
-    total_mat_cost = round(start_lb * price_per_lb, 2)
+    supplier_min_candidates = (
+        geo_ctx.get("supplier_min$"),
+        geo_ctx.get("supplier_min"),
+        geo_ctx.get("supplier_min_charge"),
+        geo_ctx.get("supplier_minimum_charge"),
+        geo_ctx.get("minimum_order$"),
+        geo_ctx.get("minimum_order"),
+    )
+    supplier_min = 0.0
+    for candidate in supplier_min_candidates:
+        val = _coerce_float_or_none(candidate)
+        if val is not None and math.isfinite(val):
+            supplier_min = max(supplier_min, float(val))
+    supplier_min = max(0.0, supplier_min)
+
+    total_mat_cost = max(net_after_scrap * price_per_lb, supplier_min)
 
     return {
         "material": geo_ctx.get("material_display") or material_key,
@@ -319,10 +375,17 @@ def _compute_material_block(
         "stock_W_in": float(stock_W_in),
         "stock_T_in": float(t_in),
         "start_lb": float(start_lb),
-        "net_lb": float(net_lb),
+        "starting_weight_lb": float(start_lb),
+        "net_lb": float(net_after_scrap),
+        "net_weight_lb": float(net_after_scrap),
         "scrap_lb": float(scrap_lb),
+        "scrap_weight_lb": float(scrap_lb),
         "scrap_pct": float(scrap_pct),
         "price_per_lb": float(price_per_lb),
+        "price_per_lb$": float(price_per_lb),
+        "price_source": price_source,
+        "supplier_min": float(supplier_min),
+        "supplier_min$": float(supplier_min),
         "source": source_note,
         "total_material_cost": float(total_mat_cost),
     }
@@ -12064,6 +12127,10 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             material_entry["scrap_mass_g"] = float(scrap_lb) * grams_per_lb
         if price_per_lb is not None and price_per_lb > 0:
             material_entry["unit_price_usd_per_lb"] = float(price_per_lb)
+        price_source = mat_block.get("price_source")
+        if price_source:
+            material_entry.setdefault("unit_price_source", price_source)
+            material_entry.setdefault("source", price_source)
         stock_L = _coerce_float_or_none(mat_block.get("stock_L_in"))
         stock_W = _coerce_float_or_none(mat_block.get("stock_W_in"))
         stock_T = _coerce_float_or_none(mat_block.get("stock_T_in"))
@@ -12080,6 +12147,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             material_entry["material_cost"] = float(total_cost)
             material_entry["material_direct_cost"] = float(total_cost)
             material_entry["material_cost_before_credit"] = float(total_cost)
+        supplier_min = _coerce_float_or_none(mat_block.get("supplier_min"))
+        if supplier_min is not None and supplier_min > 0:
+            material_entry.setdefault("supplier_min_charge", float(supplier_min))
 
     breakdown.setdefault("pass_through_total", 0.0)
     breakdown["total_direct_costs"] = float(
