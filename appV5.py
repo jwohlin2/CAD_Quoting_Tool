@@ -6984,6 +6984,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         process_costs=process_costs_for_render,
         rates=rates,
         minutes_detail=bucket_minutes_detail,
+        process_plan=process_plan_summary_map,
     )
 
     proc_total = section_total
