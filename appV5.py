@@ -11391,6 +11391,79 @@ def _lookup_rate(name: str, *sources: Mapping[str, Any] | None, fallback: float 
     return float(fallback)
 
 
+def _estimate_programming_hours_auto(
+    hole_diams_mm: Sequence[float] | None,
+    thickness_in: float | None,
+) -> float:
+    """Return a simple programming-hour estimate when no planner data exists."""
+
+    hole_count = len(hole_diams_mm) if hole_diams_mm else 0
+    base = 0.5 + 0.1 * hole_count
+
+    if thickness_in is not None:
+        try:
+            base += min(2.0, max(0.0, float(thickness_in) * 0.2))
+        except Exception:
+            pass
+
+    return max(base, 0.0)
+
+
+def _estimate_programming_hours_from_plan(
+    plan: Mapping[str, Any] | None,
+    geo: Mapping[str, Any] | None,
+) -> float:
+    """Return a plan-aware programming estimate based on planner operations."""
+
+    geo_ctx = geo if isinstance(geo, _MappingABC) else {}
+    plan_ctx = plan if isinstance(plan, _MappingABC) else {}
+
+    unique_normals = geo_ctx.get("unique_normals")
+    if isinstance(unique_normals, (int, float)):
+        setups_raw = unique_normals
+    else:
+        setups_raw = 2
+
+    try:
+        setups = int(round(float(setups_raw)))
+    except Exception:
+        setups = 2
+    setups = max(1, setups)
+
+    hole_count_raw = geo_ctx.get("hole_count", 0) if geo_ctx else 0
+    try:
+        hole_count = int(hole_count_raw or 0)
+    except Exception:
+        hole_count = 0
+
+    pocket_area_raw = geo_ctx.get("pocket_area_total_in2", 0.0) if geo_ctx else 0.0
+    try:
+        pocket_area_in2 = float(pocket_area_raw or 0.0)
+    except Exception:
+        pocket_area_in2 = 0.0
+
+    ops: set[str] = set()
+    for key in plan_ctx.keys():
+        try:
+            ops.add(str(key).strip().lower())
+        except Exception:
+            continue
+
+    drill_only = bool(ops) and ops.issubset({"drilling", "inspection"})
+
+    if drill_only:
+        return max(0.5, 0.20 * setups + 0.008 * hole_count)
+
+    if "milling" in ops:
+        base = 1.0 + 0.35 * setups + 0.003 * hole_count + 0.002 * pocket_area_in2
+        return min(max(base, 1.5), 8.0)
+
+    if {"wire_edm", "sinker_edm"}.intersection(ops):
+        return min(12.0, 2.0 + 0.4 * setups + 0.005 * hole_count)
+
+    return 2.0 + 0.2 * setups
+
+
 def _coerce_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -12656,24 +12729,98 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         if not planner_used:
             process_costs["toolmaker_support"] = toolmaker_hours * toolmaker_rate
 
-    auto_prog_hr = 0.5 + 0.1 * len(hole_diams)
-    if thickness_in:
-        auto_prog_hr += min(2.0, max(0.0, float(thickness_in) * 0.2))
+    app_meta: dict[str, Any] = {"used_planner": True} if planner_used else {}
+
+    prog_hr: float | None = None
+    if app_meta.get("used_planner"):
+        try:
+            prog_hr = _estimate_programming_hours_from_plan(
+                breakdown.get("process_plan", {}),
+                breakdown.get("geo_context", {}),
+            )
+        except Exception:
+            prog_hr = None
+
+    if prog_hr is None:
+        prog_hr = _estimate_programming_hours_auto(hole_diams, thickness_in)
+
+    auto_prog_hr = float(prog_hr or 0.0)
     override_prog = _coerce_float_or_none(value_map.get("Programming Override Hr"))
-    programming_detail: dict[str, Any] = {
-        "auto_prog_hr": auto_prog_hr,
-        "prog_hr": auto_prog_hr,
-    }
+    final_prog_hr = auto_prog_hr
+    programming_detail_container = breakdown.setdefault("nre_detail", {})
+    if isinstance(programming_detail_container, dict):
+        programming_detail = programming_detail_container.get("programming")
+    else:
+        programming_detail_container = {}
+        breakdown["nre_detail"] = programming_detail_container
+        programming_detail = None
+
+    if isinstance(programming_detail, dict):
+        detail_map = programming_detail
+    else:
+        detail_map = {}
+
+    detail_map["auto_prog_hr"] = auto_prog_hr
+
     if override_prog is not None and override_prog >= 0:
-        programming_detail["prog_hr"] = float(override_prog)
-        programming_detail["override_applied"] = True
-    breakdown["nre_detail"] = {"programming": programming_detail}
+        final_prog_hr = float(override_prog)
+        detail_map["prog_hr"] = final_prog_hr
+        detail_map["override_applied"] = True
+    else:
+        final_prog_hr = auto_prog_hr
+        detail_map["prog_hr"] = final_prog_hr
+        detail_map.pop("override_applied", None)
+
+    labor_bucket = (
+        merged_two_bucket_rates.get("labor")
+        if isinstance(merged_two_bucket_rates, _MappingABC)
+        else {}
+    )
+    programmer_rate = 0.0
+    if isinstance(labor_bucket, _MappingABC):
+        for key in ("programmer", "Programmer", "PROGRAMMER"):
+            rate_value = labor_bucket.get(key)
+            if rate_value is None:
+                continue
+            try:
+                programmer_rate = float(rate_value)
+            except Exception:
+                continue
+            if programmer_rate > 0:
+                break
+    if programmer_rate <= 0:
+        programmer_rate = _lookup_rate(
+            "ProgrammingRate",
+            rates,
+            params,
+            default_rates,
+            fallback=85.0,
+        )
+    if programmer_rate <= 0:
+        programmer_rate = 85.0
+
+    detail_map["prog_rate"] = programmer_rate
+    programming_detail_container["programming"] = detail_map
+
+    qty_for_programming = 1.0
+    try:
+        qty_for_programming = float(qty)
+    except Exception:
+        qty_for_programming = 1.0
+    if not math.isfinite(qty_for_programming) or qty_for_programming <= 0:
+        qty_for_programming = 1.0
+
+    programming_total = round(final_prog_hr * programmer_rate, 2)
+    programming_per_part = programming_total / max(1.0, qty_for_programming)
+    breakdown.setdefault("nre", {})["programming_per_part"] = programming_per_part
 
     if speeds_feeds_csv_path:
         breakdown["speeds_feeds_path"] = speeds_feeds_csv_path
         breakdown["speeds_feeds_loaded"] = bool(speeds_feeds_loaded)
 
     geo_ref = geo_context if isinstance(geo_context, dict) else {}
+
+    app_meta["llm_debug_enabled"] = APP_ENV.llm_debug_enabled
 
     result = {
         "decision_state": {
@@ -12686,11 +12833,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         "breakdown": breakdown,
         "geo": geo_ref,
         "geom": geo_ref,
-        "app_meta": {"llm_debug_enabled": APP_ENV.llm_debug_enabled},
+        "app_meta": dict(app_meta),
     }
-
-    if planner_used:
-        result.setdefault("app_meta", {})["used_planner"] = True
 
     return result
 
