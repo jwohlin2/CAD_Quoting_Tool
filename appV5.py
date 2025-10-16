@@ -644,6 +644,10 @@ def _material_cost_components(
             supplier_label = f"{base_source} (supplier min)"
         base_source = supplier_label
 
+    scrap_price_source_raw = _pick_text(
+        data.get("scrap_price_source"),
+        data.get("scrap_source"),
+    )
     scrap_source = _pick_text(
         data.get("scrap_credit_source"),
         data.get("scrap_source"),
@@ -675,6 +679,30 @@ def _material_cost_components(
     scrap_recovery = _coerce_float_or_none(data.get("scrap_credit_recovery_pct"))
     if scrap_recovery is None:
         scrap_recovery = _coerce_float_or_none(data.get("scrap_recovery_pct"))
+
+    scrap_price_source_lower = str(scrap_price_source_raw or "").strip().lower()
+    if scrap_credit <= 0 and scrap_price_source_lower == "wieland":
+        auto_credit_val = _coerce_float_or_none(data.get("computed_scrap_credit_usd"))
+        if auto_credit_val is not None and auto_credit_val > 0:
+            scrap_credit = float(auto_credit_val)
+        else:
+            scrap_mass = _coerce_float_or_none(
+                data.get("scrap_credit_mass_lb")
+                or data.get("scrap_weight_lb")
+                or data.get("scrap_lb")
+            )
+            mass_lb = float(scrap_mass) if scrap_mass is not None and scrap_mass > 0 else 0.0
+            price_val = _coerce_float_or_none(scrap_price)
+            if price_val is None or price_val <= 0:
+                price_val = 0.0
+            recovery_val = _coerce_float_or_none(scrap_recovery)
+            if recovery_val is None or recovery_val <= 0:
+                recovery_val = SCRAP_RECOVERY_DEFAULT
+            elif recovery_val > 1.0 + 1e-6:
+                recovery_val = recovery_val / 100.0
+            recovery_val = max(0.0, min(1.0, float(recovery_val)))
+            if mass_lb > 0 and price_val > 0 and recovery_val > 0:
+                scrap_credit = mass_lb * float(price_val) * float(recovery_val)
 
     scrap_rate_segments: list[str] = []
     if scrap_price is not None and scrap_price > 0:
@@ -14055,6 +14083,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         scrap_recovery_used: float | None = None
         scrap_credit_source: str | None = None
         wieland_scrap_price: float | None = None
+        wieland_computed_credit: float | None = None
 
         if credit_override_amount is not None:
             scrap_credit_amount = max(0.0, float(credit_override_amount))
@@ -14098,10 +14127,13 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             scrap_credit_amount = credit_value
             net_material_cost = max(0.0, float(base_material_cost) - credit_value)
 
-            material_entry["material_scrap_credit"] = float(scrap_credit_amount)
-            material_entry["material_scrap_credit_entered"] = bool(scrap_credit_amount > 0)
-            mat_block["material_scrap_credit"] = float(scrap_credit_amount)
-            mat_block["material_scrap_credit_entered"] = bool(scrap_credit_amount > 0)
+            if scrap_credit_source == "wieland":
+                wieland_computed_credit = float(scrap_credit_amount)
+            else:
+                material_entry["material_scrap_credit"] = float(scrap_credit_amount)
+                material_entry["material_scrap_credit_entered"] = bool(scrap_credit_amount > 0)
+                mat_block["material_scrap_credit"] = float(scrap_credit_amount)
+                mat_block["material_scrap_credit_entered"] = bool(scrap_credit_amount > 0)
             if scrap_price_used is not None:
                 material_entry["scrap_credit_unit_price_usd_per_lb"] = float(scrap_price_used)
                 mat_block["scrap_credit_unit_price_usd_per_lb"] = float(scrap_price_used)
@@ -14113,6 +14145,16 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 material_entry["scrap_credit_source"] = scrap_credit_source
                 mat_block["scrap_credit_source"] = scrap_credit_source
         else:
+            material_entry.pop("material_scrap_credit", None)
+            material_entry.pop("material_scrap_credit_entered", None)
+            mat_block.pop("material_scrap_credit", None)
+            mat_block.pop("material_scrap_credit_entered", None)
+
+        if wieland_computed_credit is not None:
+            material_entry["computed_scrap_credit_usd"] = float(wieland_computed_credit)
+            mat_block["computed_scrap_credit_usd"] = float(wieland_computed_credit)
+            material_entry["scrap_price_source"] = "wieland"
+            mat_block["scrap_price_source"] = "wieland"
             material_entry.pop("material_scrap_credit", None)
             material_entry.pop("material_scrap_credit_entered", None)
             mat_block.pop("material_scrap_credit", None)

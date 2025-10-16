@@ -567,7 +567,38 @@ def _material_cost_components(
         scrap_unit_price = 0.0
 
     scrap_credit = float(scrap_lb) * scrap_unit_price * recovery_val
-    explicit_credit = block.get("material_scrap_credit") or block.get("scrap_credit_usd")
+    scrap_price_source = str(
+        (block.get("scrap_price_source") or block.get("scrap_credit_source") or "")
+    ).strip().lower()
+    explicit_credit = (
+        block.get("material_scrap_credit")
+        or block.get("scrap_credit_usd")
+        or block.get("computed_scrap_credit_usd")
+    )
+    if scrap_price_source == "wieland" and explicit_credit in (None, ""):
+        explicit_credit = block.get("computed_scrap_credit_usd")
+        if explicit_credit in (None, ""):
+            mass_lb_val = block.get("scrap_credit_mass_lb") or block.get("scrap_weight_lb")
+            if mass_lb_val in (None, ""):
+                mass_lb_val = block.get("scrap_lb")
+            try:
+                mass_lb = float(mass_lb_val or 0.0)
+            except Exception:
+                mass_lb = 0.0
+            price_val = block.get("scrap_credit_unit_price_usd_per_lb")
+            try:
+                price_lb = float(price_val or scrap_unit_price)
+            except Exception:
+                price_lb = float(scrap_unit_price)
+            recovery_hint = block.get("scrap_credit_recovery_pct") or recovery
+            try:
+                recovery_calc = float(recovery_hint or recovery_val)
+            except Exception:
+                recovery_calc = float(recovery_val)
+            if recovery_calc > 1.0 + 1e-6:
+                recovery_calc = recovery_calc / 100.0
+            recovery_calc = max(0.0, min(1.0, recovery_calc))
+            explicit_credit = mass_lb * price_lb * recovery_calc
     if explicit_credit not in (None, ""):
         try:
             scrap_credit = max(0.0, float(explicit_credit))

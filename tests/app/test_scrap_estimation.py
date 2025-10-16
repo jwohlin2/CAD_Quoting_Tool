@@ -112,8 +112,10 @@ def test_scrap_credit_uses_wieland_price(monkeypatch: pytest.MonkeyPatch) -> Non
     result = appV5.compute_quote_from_df(df, llm_enabled=False)
 
     material = result["breakdown"]["material"]
-    scrap_credit = material.get("material_scrap_credit")
+    scrap_credit = material.get("computed_scrap_credit_usd")
     assert scrap_credit is not None and scrap_credit > 0
+    assert not material.get("material_scrap_credit")
+    assert material.get("scrap_price_source") == "wieland"
 
     scrap_mass_g = material.get("scrap_mass_g")
     assert scrap_mass_g is not None and scrap_mass_g > 0
