@@ -266,6 +266,7 @@ def _compute_material_block(
 
     unit_price_usd: float | None = None
     api_price = None
+    api_price_source: str | None = None
     if part_no and str(stock_price_source or "").strip().lower() == "mcmaster_api":
         api_price = _mcm_price_for_part(str(part_no))
     if api_price and api_price > 0:
@@ -274,7 +275,8 @@ def _compute_material_block(
         unit_price_usd = float(api_price)
         if start_lb > 0:
             price_per_lb = float(unit_price_each) / float(start_lb)
-        price_source = f"McMaster API (qty=1, part={part_no})"
+        api_price_source = f"McMaster API (qty=1, part={part_no})"
+        price_source = api_price_source
         provenance.append(price_source)
 
     if price_per_lb <= 0:
@@ -342,6 +344,10 @@ def _compute_material_block(
         "supplier_min_charge$": float(supplier_min),
         "total_material_cost": float(total_mat_cost),
     }
+
+    if api_price and api_price > 0 and api_price_source:
+        result["stock_piece_price_usd"] = float(api_price)
+        result["stock_piece_source"] = api_price_source
 
     if price_source:
         result["unit_price_source"] = price_source
