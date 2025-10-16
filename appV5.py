@@ -18820,6 +18820,9 @@ class App(tk.Tk):
             default_params=copy.deepcopy(self.default_params_template),
             default_material_display=self.default_material_display,
             prefer_removal_drilling_hours=True,
+            separate_machine_labor=True,
+            machine_rate_per_hr=45.0,
+            labor_rate_per_hr=45.0,
             stock_price_source="mcmaster_api",
             scrap_price_source="wieland",
         )
