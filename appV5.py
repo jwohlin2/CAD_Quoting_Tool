@@ -30,6 +30,7 @@ from collections.abc import (
     Iterator,
     Mapping as _MappingABC,
     MutableMapping as _MutableMappingABC,
+    Sequence,
 )
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
@@ -9280,6 +9281,9 @@ class QuoteConfiguration:
     prefer_removal_drilling_hours: bool = True
     stock_price_source: str = "mcmaster_api"
     scrap_price_source: str = "wieland"
+    hole_source_preference: str = "table"
+    hole_merge_tol_diam_in: float = 0.001
+    hole_merge_tol_depth_in: float = 0.01
 
     def copy_default_params(self) -> Dict[str, Any]:
         """Return a deep copy of the default parameter set."""
@@ -10749,20 +10753,477 @@ def _apply_drilling_meta_fallback(
     return holes_deep, holes_std
 
 
-def _normalize_hole_sets_for_geo(geo_context: Mapping[str, Any] | None) -> list[dict[str, Any]]:
-    structured = _collect_structured_hole_totals(geo_context)
-    totals = structured if structured else _collect_fallback_hole_totals(geo_context)
-    if not totals:
+def _parse_dim_to_in(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(num) or num <= 0:
+            return None
+        return num
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    lowered = text.lower()
+    unit: str | None = None
+    for suffix in ("millimeters", "millimetres", "millimeter", "millimetre", "mm"):
+        if lowered.endswith(suffix):
+            unit = "mm"
+            lowered = lowered[: -len(suffix)]
+            break
+    if unit is None:
+        for suffix in ("inches", "inch", "in", "\""):
+            if lowered.endswith(suffix):
+                unit = "in"
+                lowered = lowered[: -len(suffix)]
+                break
+    cleaned = (
+        lowered.replace("ø", "")
+        .replace("⌀", "")
+        .replace("dia", "")
+        .replace("diameter", "")
+        .replace(" ", "")
+    )
+    cleaned = re.sub(r"[^0-9./-]", "", cleaned)
+    if not cleaned:
+        return None
+    try:
+        magnitude = float(Fraction(cleaned)) if "/" in cleaned else float(cleaned)
+    except Exception:
+        return None
+    if magnitude <= 0:
+        return None
+    if unit == "mm":
+        return magnitude / 25.4
+    return magnitude
+
+
+def _table_rows_from_context(geo_context: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for ctx in _iter_geo_dicts_for_context(geo_context):
+        chart_ops = ctx.get("chart_ops")
+        if not isinstance(chart_ops, Sequence):
+            continue
+        for op in chart_ops:
+            if not isinstance(op, _MappingABC):
+                continue
+            op_type = str(op.get("type") or "").strip().lower()
+            if op_type and op_type not in {"drill", "hole"}:
+                continue
+            qty = _coerce_int_or_zero(op.get("qty"))
+            if qty <= 0:
+                qty = 1
+            diam_in = _coerce_positive_float(op.get("diam_in") or op.get("dia_in"))
+            if diam_in is None:
+                dia_mm = _coerce_positive_float(op.get("dia_mm") or op.get("diam_mm"))
+                if dia_mm is not None:
+                    diam_in = dia_mm / 25.4
+            if diam_in is None:
+                diam_in = _parse_dim_to_in(op.get("dia") or op.get("diameter") or op.get("size"))
+            if diam_in is None:
+                continue
+            depth_in = _coerce_positive_float(op.get("depth_in") or op.get("depth"))
+            if depth_in is None:
+                depth_mm = _coerce_positive_float(op.get("depth_mm"))
+                if depth_mm is not None:
+                    depth_in = depth_mm / 25.4
+            depth_text: str | None = None
+            raw_depth_candidate = op.get("depth") or op.get("depth_text")
+            if isinstance(raw_depth_candidate, str):
+                depth_text = raw_depth_candidate.strip() or None
+            elif isinstance(op.get("depth_in"), str):
+                depth_text = str(op.get("depth_in")).strip() or None
+            row: dict[str, Any] = {
+                "qty": int(qty),
+                "diam_in": float(diam_in),
+                "depth_in": float(depth_in) if depth_in is not None else None,
+            }
+            if depth_text:
+                row["depth_text"] = depth_text
+            if op.get("thru"):
+                row["thru"] = True
+            rows.append(row)
+    return rows
+
+
+def _geometry_rows_from_context(geo_context: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen_diams: set[float] = set()
+
+    def _append_row(entry: Mapping[str, Any], *, mark_structured: bool = False) -> None:
+        diam_in = _coerce_positive_float(entry.get("diam_in") or entry.get("diameter_in"))
+        if diam_in is None:
+            dia_mm = _coerce_positive_float(entry.get("dia_mm") or entry.get("diam_mm"))
+            if dia_mm is not None:
+                diam_in = dia_mm / 25.4
+        if diam_in is None:
+            return
+        key = round(float(diam_in), 4)
+        if not mark_structured and key in seen_diams:
+            return
+        depth_in = _coerce_positive_float(entry.get("depth_in"))
+        if depth_in is None:
+            depth_mm = _coerce_positive_float(entry.get("depth_mm"))
+            if depth_mm is not None:
+                depth_in = depth_mm / 25.4
+        qty = _coerce_int_or_zero(entry.get("qty"))
+        if qty <= 0:
+            qty = _coerce_int_or_zero(entry.get("count"))
+        if qty <= 0:
+            qty = 1
+        rows.append(
+            {
+                "diam_in": float(diam_in),
+                "depth_in": float(depth_in) if depth_in is not None else None,
+                "qty": int(qty),
+            }
+        )
+        seen_diams.add(key)
+
+    for ctx in _iter_geo_dicts_for_context(geo_context):
+        hole_groups = ctx.get("hole_groups")
+        if isinstance(hole_groups, Sequence):
+            for entry in hole_groups:
+                if isinstance(entry, _MappingABC):
+                    _append_row(entry, mark_structured=True)
+
+        hole_sets = ctx.get("hole_sets")
+        if isinstance(hole_sets, Sequence):
+            for entry in hole_sets:
+                if isinstance(entry, _MappingABC):
+                    _append_row(entry, mark_structured=True)
+
+        precise = ctx.get("hole_diams_mm_precise")
+        if isinstance(precise, Sequence):
+            counts = Counter()
+            for raw in precise:
+                dia_mm = _coerce_positive_float(raw)
+                if dia_mm is not None:
+                    counts[round(dia_mm, 4)] += 1
+            for dia_mm, qty in counts.items():
+                entry = {"dia_mm": dia_mm, "qty": int(qty)}
+                _append_row(entry, mark_structured=False)
+
+        fallbacks = ctx.get("hole_diams_mm")
+        if isinstance(fallbacks, Sequence):
+            counts = Counter()
+            for raw in fallbacks:
+                dia_mm = _coerce_positive_float(raw)
+                if dia_mm is not None:
+                    counts[round(dia_mm, 4)] += 1
+            for dia_mm, qty in counts.items():
+                entry = {"dia_mm": dia_mm, "qty": int(qty)}
+                _append_row(entry, mark_structured=False)
+
+    return rows
+
+
+def _plate_thickness_in_from_context(geo_context: Mapping[str, Any] | None) -> float | None:
+    candidates: list[float] = []
+
+    def _collect(ctx: Mapping[str, Any]) -> None:
+        for key in (
+            "thickness_in",
+            "plate_thickness_in",
+            "stock_thickness_in",
+            "thickness_in_guess",
+            "deepest_hole_in",
+        ):
+            val = _coerce_positive_float(ctx.get(key))
+            if val is not None:
+                candidates.append(float(val))
+        for key in (
+            "thickness_mm",
+            "plate_thickness_mm",
+            "stock_thickness_mm",
+            "thickness_mm_guess",
+        ):
+            val_mm = _coerce_positive_float(ctx.get(key))
+            if val_mm is not None:
+                candidates.append(float(val_mm) / 25.4)
+
+    for ctx in _iter_geo_dicts_for_context(geo_context):
+        _collect(ctx)
+
+    if isinstance(geo_context, _MappingABC):
+        plate_ctx = geo_context.get("plate")
+        if isinstance(plate_ctx, _MappingABC):
+            _collect(plate_ctx)
+
+    if not candidates:
+        return None
+    return max(val for val in candidates if math.isfinite(val))
+
+
+def _group_geo_by_diam(
+    geo_rows: Sequence[Mapping[str, Any]] | None,
+    tol_diam_in: float,
+) -> list[dict[str, float | None]]:
+    if not geo_rows:
         return []
+    tol = max(float(tol_diam_in or 0.0), 0.0005)
+    buckets: dict[int, dict[str, list[float]]] = {}
+    for entry in geo_rows:
+        diam_in = _coerce_positive_float(entry.get("diam_in") or entry.get("diameter_in"))
+        if diam_in is None:
+            dia_mm = _coerce_positive_float(entry.get("dia_mm") or entry.get("diam_mm"))
+            if dia_mm is not None:
+                diam_in = dia_mm / 25.4
+        if diam_in is None:
+            continue
+        key = int(round(float(diam_in) / tol))
+        bucket = buckets.setdefault(key, {"diam": [], "depth": []})
+        bucket["diam"].append(float(diam_in))
+        depth_in = _coerce_positive_float(entry.get("depth_in"))
+        if depth_in is None:
+            depth_mm = _coerce_positive_float(entry.get("depth_mm"))
+            if depth_mm is not None:
+                depth_in = depth_mm / 25.4
+        if depth_in is not None and depth_in > 0:
+            bucket["depth"].append(float(depth_in))
+    grouped: list[dict[str, float | None]] = []
+    for bucket in buckets.values():
+        diam_vals = bucket.get("diam") or []
+        if not diam_vals:
+            continue
+        diam_avg = sum(diam_vals) / len(diam_vals)
+        depth_vals = bucket.get("depth") or []
+        depth_avg = sum(depth_vals) / len(depth_vals) if depth_vals else None
+        grouped.append({"diam_in": float(diam_avg), "avg_depth_in": float(depth_avg) if depth_avg else None})
+    grouped.sort(key=lambda item: item.get("diam_in", 0.0))
+    return grouped
+
+
+def _nearest_geo_group(
+    geo_groups: Sequence[Mapping[str, Any]] | None,
+    target_diam_in: float | None,
+    tol_diam_in: float,
+) -> Mapping[str, Any] | None:
+    if target_diam_in is None or not geo_groups:
+        return None
+    tol = max(float(tol_diam_in or 0.0), 0.0005)
+    best: Mapping[str, Any] | None = None
+    best_diff: float | None = None
+    for entry in geo_groups:
+        diam = _coerce_positive_float(entry.get("diam_in"))
+        if diam is None:
+            continue
+        diff = abs(diam - float(target_diam_in))
+        if diff <= tol and (best is None or best_diff is None or diff < best_diff):
+            best = entry
+            best_diff = diff
+    return best
+
+
+def _fill_table_depths_from_geo(
+    table_rows: Sequence[Mapping[str, Any]] | None,
+    geo_rows: Sequence[Mapping[str, Any]] | None,
+    cfg: QuoteConfiguration,
+    *,
+    plate_thickness_in: float | None = None,
+) -> list[dict[str, Any]]:
+    if not table_rows:
+        return []
+    tol_d = max(float(getattr(cfg, "hole_merge_tol_diam_in", 0.001) or 0.001), 0.0005)
+    tol_z = max(float(getattr(cfg, "hole_merge_tol_depth_in", 0.01) or 0.0), 0.0)
+    thickness = _coerce_positive_float(plate_thickness_in)
+    geo_groups = _group_geo_by_diam(geo_rows, tol_d)
+    out: list[dict[str, Any]] = []
+    for row in table_rows:
+        qty = _coerce_int_or_zero(row.get("qty"))
+        if qty <= 0:
+            qty = 1
+        diam_in = _coerce_positive_float(row.get("diam_in"))
+        if diam_in is None:
+            diam_in = _parse_dim_to_in(row.get("diam") or row.get("size"))
+        if diam_in is None:
+            continue
+        depth_in = _coerce_positive_float(row.get("depth_in"))
+        depth_text = row.get("depth_text")
+        if isinstance(depth_text, str) and depth_text.strip():
+            parsed = _parse_dim_to_in(depth_text)
+            if parsed is not None:
+                depth_in = parsed
+            if depth_in is None and depth_text.strip().upper().startswith("THRU"):
+                depth_in = thickness
+        if bool(row.get("thru")) and (depth_in is None or depth_in <= 0):
+            depth_in = thickness
+        if depth_in is None or depth_in <= 0:
+            candidate_group = _nearest_geo_group(geo_groups, diam_in, tol_d)
+            candidate_depth = _coerce_positive_float((candidate_group or {}).get("avg_depth_in"))
+            if candidate_depth is not None:
+                if thickness is None or thickness <= 0:
+                    depth_in = candidate_depth
+                elif abs(candidate_depth - thickness) <= max(tol_z, 0.02):
+                    depth_in = candidate_depth
+        if (depth_in is None or depth_in <= 0) and thickness is not None and thickness > 0:
+            depth_in = thickness
+        entry = {
+            "diam_in": float(round(diam_in, 6)),
+            "qty": int(qty),
+        }
+        if depth_in is not None and depth_in > 0:
+            entry["depth_in"] = float(round(depth_in, 3))
+        out.append(entry)
+    return out
+
+
+def _dedupe_geo_rows(
+    geo_rows: Sequence[Mapping[str, Any]] | None,
+    cfg: QuoteConfiguration,
+    *,
+    plate_thickness_in: float | None = None,
+) -> list[dict[str, Any]]:
+    if not geo_rows:
+        return []
+    thickness = _coerce_positive_float(plate_thickness_in)
+    buckets: dict[tuple[float, float], int] = {}
+    for entry in geo_rows:
+        qty = _coerce_int_or_zero(entry.get("qty"))
+        if qty <= 0:
+            qty = _coerce_int_or_zero(entry.get("count"))
+        if qty <= 0:
+            qty = 1
+        diam_in = _coerce_positive_float(entry.get("diam_in") or entry.get("diameter_in"))
+        if diam_in is None:
+            dia_mm = _coerce_positive_float(entry.get("dia_mm") or entry.get("diam_mm"))
+            if dia_mm is not None:
+                diam_in = dia_mm / 25.4
+        if diam_in is None:
+            continue
+        depth_in = _coerce_positive_float(entry.get("depth_in"))
+        if depth_in is None:
+            depth_mm = _coerce_positive_float(entry.get("depth_mm"))
+            if depth_mm is not None:
+                depth_in = depth_mm / 25.4
+        if depth_in is None or depth_in <= 0:
+            depth_in = thickness
+        depth_key = float(round(depth_in, 2)) if depth_in is not None and depth_in > 0 else 0.0
+        key = (float(round(float(diam_in), 3)), depth_key)
+        buckets[key] = buckets.get(key, 0) + int(qty)
+    out: list[dict[str, Any]] = []
+    for (diam_key, depth_key), qty in buckets.items():
+        entry: dict[str, Any] = {"diam_in": diam_key, "qty": int(qty)}
+        if depth_key > 0:
+            entry["depth_in"] = depth_key
+        elif thickness is not None and thickness > 0:
+            entry["depth_in"] = float(round(thickness, 3))
+        out.append(entry)
+    out.sort(key=lambda item: (item.get("diam_in", 0.0), item.get("depth_in", 0.0)))
+    return out
+
+
+def reconcile_holes(
+    table_rows: Sequence[Mapping[str, Any]] | None,
+    geo_rows: Sequence[Mapping[str, Any]] | None,
+    *,
+    cfg: QuoteConfiguration,
+    plate_thickness_in: float | None = None,
+) -> tuple[list[dict[str, Any]], str, dict[str, int]]:
+    table_list = list(table_rows or [])
+    geo_list = list(geo_rows or [])
+    preference = str(getattr(cfg, "hole_source_preference", "table") or "table").strip().lower()
+    thickness = _coerce_positive_float(plate_thickness_in)
+    table_count = sum(max(1, _coerce_int_or_zero(row.get("qty"))) for row in table_list)
+    geo_count = sum(max(1, _coerce_int_or_zero(row.get("qty") or row.get("count"))) for row in geo_list)
+
+    source_used = "geometry"
+    if preference == "table" and table_list:
+        final_rows = _fill_table_depths_from_geo(table_list, geo_list, cfg, plate_thickness_in=thickness)
+        source_used = "table"
+    elif preference == "geometry" or not table_list:
+        final_rows = _dedupe_geo_rows(geo_list, cfg, plate_thickness_in=thickness)
+        source_used = "geometry"
+    else:
+        rel = abs(table_count - geo_count) / max(table_count, 1)
+        if table_list and rel <= 0.15:
+            final_rows = _fill_table_depths_from_geo(table_list, geo_list, cfg, plate_thickness_in=thickness)
+            source_used = "table"
+        else:
+            final_rows = _dedupe_geo_rows(geo_list, cfg, plate_thickness_in=thickness)
+            source_used = "geometry"
+
+    cleaned: list[dict[str, Any]] = []
+    for row in final_rows:
+        diam_in = _coerce_positive_float(row.get("diam_in"))
+        qty = _coerce_int_or_zero(row.get("qty"))
+        if diam_in is None or qty <= 0:
+            continue
+        entry: dict[str, Any] = {"diam_in": float(round(diam_in, 6)), "qty": int(qty)}
+        depth_in = _coerce_positive_float(row.get("depth_in"))
+        if depth_in is not None and depth_in > 0:
+            entry["depth_in"] = float(round(depth_in, 3))
+        cleaned.append(entry)
+
+    final_count = sum(row.get("qty", 0) for row in cleaned)
+    audit = {
+        "table_count": int(table_count),
+        "geometry_count": int(geo_count),
+        "final_count": int(final_count),
+    }
+    if preference == "table" and table_list:
+        logger.info("[holes] table=%s  geometry=%s  final=%s", table_count, geo_count, final_count)
+
+    return cleaned, source_used, audit
+
+
+def _normalize_hole_sets_for_geo(
+    geo_context: Mapping[str, Any] | None,
+    *,
+    cfg: QuoteConfiguration | None = None,
+) -> list[dict[str, Any]]:
+    cfg_obj = cfg or QuoteConfiguration()
+    if not isinstance(geo_context, _MappingABC):
+        return []
+
+    table_rows = _table_rows_from_context(geo_context)
+    geo_rows = _geometry_rows_from_context(geo_context)
+    thickness_in = _plate_thickness_in_from_context(geo_context)
+    final_rows, source_used, audit = reconcile_holes(
+        table_rows,
+        geo_rows,
+        cfg=cfg_obj,
+        plate_thickness_in=thickness_in,
+    )
+
     normalized: list[dict[str, Any]] = []
-    for dia_key, qty in sorted(totals.items()):
-        normalized.append({"dia_mm": float(dia_key), "qty": int(qty)})
+    for row in final_rows:
+        diam_in = _coerce_positive_float(row.get("diam_in"))
+        if diam_in is None:
+            continue
+        qty = _coerce_int_or_zero(row.get("qty"))
+        if qty <= 0:
+            qty = 1
+        depth_in = _coerce_positive_float(row.get("depth_in"))
+        entry: dict[str, Any] = {
+            "dia_mm": float(round(diam_in * 25.4, 3)),
+            "diam_in": float(round(diam_in, 6)),
+            "qty": int(qty),
+        }
+        if depth_in is not None and depth_in > 0:
+            entry["depth_in"] = float(round(depth_in, 3))
+            entry["depth_mm"] = float(round(depth_in * 25.4, 3))
+        normalized.append(entry)
+
+    normalized.sort(key=lambda item: item.get("dia_mm", 0.0))
+
+    try:
+        geo_context["hole_sets_source"] = source_used
+        geo_context["hole_merge_audit"] = {**audit, "source": source_used}
+    except Exception:
+        pass
+
     return normalized
 
 
 def _ensure_geo_context_fields(
     geo_payload: Mapping[str, Any] | None,
     value_map: Mapping[str, Any] | None,
+    *,
+    cfg: QuoteConfiguration | None = None,
 ) -> dict[str, Any]:
     if not isinstance(geo_payload, dict):
         return {}
@@ -10794,7 +11255,7 @@ def _ensure_geo_context_fields(
     if plate_area_mm2:
         geo_payload["plate_bbox_area_mm2"] = plate_area_mm2
 
-    geo_payload["hole_sets"] = _normalize_hole_sets_for_geo(geo_payload)
+    geo_payload["hole_sets"] = _normalize_hole_sets_for_geo(geo_payload, cfg=cfg)
 
     return geo_payload
 
@@ -12389,6 +12850,7 @@ def build_geometry_context(
     *,
     base_geometry: Mapping[str, Any] | None = None,
     value_map: Mapping[str, Any] | None = None,
+    cfg: QuoteConfiguration | None = None,
 ) -> dict[str, Any]:
     """Return a canonical geometry context derived from quote inputs."""
 
@@ -12444,7 +12906,7 @@ def build_geometry_context(
             except Exception:
                 pass
 
-    _ensure_geo_context_fields(geom, resolved_map)
+    _ensure_geo_context_fields(geom, resolved_map, cfg=cfg)
     return geom
 
 
@@ -12723,8 +13185,10 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     quote_state: QuoteState | None = None,
     reuse_suggestions: Any | None = None,
     llm_suggest: Any | None = None,
+    cfg: QuoteConfiguration | None = None,
     **_: Any,
 ) -> dict[str, Any]:
+    cfg = cfg or QuoteConfiguration()
     value_map = _df_to_value_map(df)
     quote_df_canonical: Any = None
     if _HAS_PANDAS and "pd" in globals():
@@ -12740,6 +13204,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         quote_df_canonical if quote_df_canonical is not None else value_map,
         base_geometry=geo,
         value_map=value_map,
+        cfg=cfg,
     )
     geo_context = geom
     planner_inputs = dict(ui_vars or {})
@@ -13019,7 +13484,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         or baseline.get("scrap_pct")
         or 0.25
     )
-    default_cfg = QuoteConfiguration()
+    default_cfg = cfg
     stock_price_source = str(
         (value_map.get("Stock Price Source") if isinstance(value_map, _MappingABC) else None)
         or (state.user_overrides.get("stock_price_source") if isinstance(state.user_overrides, _MappingABC) else None)
@@ -17073,7 +17538,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
         if hole_rows:
             chart_ops = hole_rows_to_ops(hole_rows)
             chart_source = "dxf_text_regex"
-            chart_reconcile = reconcile_holes(entity_holes_mm, chart_ops)
+            chart_reconcile = summarize_hole_chart_agreement(entity_holes_mm, chart_ops)
     if chart_summary:
         geo.setdefault("chart_summary", chart_summary)
         if chart_summary.get("tap_qty"):
@@ -17302,7 +17767,7 @@ def hole_rows_to_ops(rows: Iterable[Any] | None) -> list[dict[str, Any]]:
             ops.append(op)
     return ops
 
-def reconcile_holes(entity_holes_mm: Iterable[Any] | None, chart_ops: Iterable[dict] | None) -> dict[str, Any]:
+def summarize_hole_chart_agreement(entity_holes_mm: Iterable[Any] | None, chart_ops: Iterable[dict] | None) -> dict[str, Any]:
     """Compare entity-detected hole sizes with chart-derived operations."""
 
     def _as_qty(value: Any) -> int:
