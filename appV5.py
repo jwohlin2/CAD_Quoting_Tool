@@ -783,17 +783,16 @@ def _resolve_pricing_source_value(
     ) -> str | None:
     """Return a normalized pricing source, honoring explicit selections."""
 
-    text = None
+    fallback_text = None
     if base_value is not None:
         candidate_text = str(base_value).strip()
         if candidate_text:
-            text = candidate_text
-
-    if text and text.lower() == "planner":
-        return "planner"
-
-    if text:
-        return text
+            lowered = candidate_text.lower()
+            if lowered == "planner":
+                return "planner"
+            if lowered not in {"legacy", "auto", "default", "fallback"}:
+                return candidate_text
+            fallback_text = candidate_text
 
     if used_planner:
         return "planner"
@@ -811,7 +810,10 @@ def _resolve_pricing_source_value(
     ):
         return "planner"
 
-    return text
+    if fallback_text:
+        return fallback_text
+
+    return None
 
 
 
@@ -6503,12 +6505,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     )
                 elif scrap_val:
                     row("Scrap Credit", -round(scrap_val, 2), indent="  ")
-                total_material_cost = mc.get("total_usd", total_material_cost)
-                row(
-                    "Total Material Cost :",
-                    round(float(total_material_cost or 0.0), 2),
-                    indent="  ",
-                )
+                base_for_total = float(base_usd_val)
+                tax_for_total = float(tax_val)
+                scrap_for_total = min(float(scrap_val), base_for_total + tax_for_total)
+                total_material_cost = round(base_for_total + tax_for_total - scrap_for_total, 2)
+                row("Total Material Cost :", total_material_cost, indent="  ")
             elif total_material_cost is not None:
                 row("Total Material Cost :", total_material_cost, indent="  ")
             append_line("")
