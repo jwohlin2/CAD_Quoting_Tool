@@ -3439,9 +3439,10 @@ def _split_hours_for_bucket(
     if not cfg or not getattr(cfg, "separate_machine_labor", False):
         return (0.0, total_h)
 
-    key = _canonical_bucket_key(label)
+    canon_label = _canonical_bucket_key(label)
+    key = canon_label or _normalize_bucket_key(label)
     if not key:
-        key = _normalize_bucket_key(label)
+        key = str(label or "")
 
     extra: Mapping[str, Any] | None = None
     if render_state is not None:
@@ -3451,7 +3452,7 @@ def _split_hours_for_bucket(
     if extra is None:
         extra = {}
 
-    if key == "drilling":
+    if canon_label == "drilling" or key == "drilling":
         m_min = _coerce_float_or_none(extra.get("drill_machine_minutes"))
         l_min = _coerce_float_or_none(extra.get("drill_labor_minutes"))
         if (
@@ -3824,7 +3825,7 @@ def _charged_hours_by_bucket(
     cfg: "QuoteConfiguration" | None = None,
 ):
     """Return the hours that correspond to what we actually charged."""
-    out: dict[str, float] = {}
+    charged: dict[str, float] = {}
     for key, amount in (process_costs or {}).items():
         norm = _normalize_bucket_key(key)
         if norm.startswith("planner_"):
@@ -3846,7 +3847,7 @@ def _charged_hours_by_bucket(
             hr = (float(amount) / rate) if rate > 0 else None
         if hr is not None:
             label = _process_label(key)
-            out[label] = out.get(label, 0.0) + float(hr)
+            charged[label] = charged.get(label, 0.0) + float(hr)
     removal_hr = None
     render_extra: Mapping[str, Any] | None = None
     if render_state is not None:
@@ -3871,37 +3872,40 @@ def _charged_hours_by_bucket(
         desired = max(0.0, float(removal_hr))
         drill_labels = [
             label
-            for label in out
+            for label in charged
             if _canonical_bucket_key(label) in {"drilling", "drill"}
         ]
         if drill_labels:
             for label in drill_labels:
-                current = float(out.get(label, 0.0) or 0.0)
+                current = float(charged.get(label, 0.0) or 0.0)
                 if not math.isclose(current, desired, rel_tol=1e-9, abs_tol=1e-6):
                     logger.info(
                         "[hours-sync] Overriding Drilling bucket hours from %.2f -> %.2f (source=removal_card)",
                         current,
                         desired,
                     )
-                out[label] = desired
+                charged[label] = desired
         else:
             label = _process_label("drilling")
             logger.info(
                 "[hours-sync] Injecting Drilling bucket hours %.2f (source=removal_card)",
                 desired,
             )
-            out[label] = desired
+            charged[label] = desired
 
-    if prefer_drill_hours and isinstance(render_extra, _MappingABC):
+    prefer_card_minutes = prefer_drill_hours and bool(
+        getattr(cfg, "prefer_removal_drilling_hours", True)
+    )
+    if prefer_card_minutes and isinstance(render_extra, _MappingABC):
         machine_minutes = render_extra.get("drill_machine_minutes")
         labor_minutes = render_extra.get("drill_labor_minutes")
         if isinstance(machine_minutes, (int, float)) and isinstance(labor_minutes, (int, float)):
-            drill_total_hr = (float(machine_minutes) + float(labor_minutes)) / 60.0
-            for key in list(out.keys()):
+            drill_hr = (float(machine_minutes) + float(labor_minutes)) / 60.0
+            for key in list(charged.keys()):
                 if _canonical_bucket_key(key) in {"drilling", "drill"}:
-                    out[key] = drill_total_hr
+                    charged[key] = drill_hr
 
-    return out
+    return charged
 
 def _planner_bucket_key_for_name(name: Any) -> str:
     text = str(name or "").lower()
@@ -6941,6 +6945,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         cfg=cfg,
         bucket_ops=bucket_ops_map,
     )
+    render_state = bucket_state
 
     geometry_for_explainer: Mapping[str, Any] | None = None
     if isinstance(geometry, _MappingABC) and geometry:
@@ -8328,8 +8333,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             label = _display_bucket_label(canon_key, label_overrides)
             summary_hours[label] = summary_hours.get(label, 0.0) + (minutes_val / 60.0)
 
+        prefer_card_minutes = getattr(
+            cfg, "prefer_removal_drilling_hours", prefer_removal_drilling_hours
+        )
         override_hours: float | None = None
-        if prefer_removal_drilling_hours:
+        if prefer_card_minutes:
             extra_map = getattr(bucket_state, "extra", {})
             if isinstance(extra_map, _MappingABC):
                 candidate = extra_map.get("removal_drilling_hours")
@@ -8338,7 +8346,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                         override_hours = float(candidate)
                     except Exception:
                         override_hours = None
-            if override_hours is None and removal_drilling_hours_precise is not None:
+            if (
+                override_hours is None
+                and removal_drilling_hours_precise is not None
+                and prefer_card_minutes
+            ):
                 try:
                     override_hours = float(removal_drilling_hours_precise)
                 except Exception:
@@ -8347,7 +8359,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             display_label = _display_bucket_label("drilling", label_overrides)
             summary_hours[display_label] = round(max(0.0, float(override_hours)), 2)
 
-        if prefer_removal_drilling_hours:
+        if prefer_card_minutes:
             extra_map = getattr(bucket_state, "extra", {})
             if isinstance(extra_map, _MappingABC):
                 drill_total_minutes = extra_map.get("drill_total_minutes")

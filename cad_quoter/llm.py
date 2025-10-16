@@ -1153,22 +1153,22 @@ def explain_quote(
         if isinstance(extra_candidate, Mapping):
             render_state_extra = extra_candidate
 
-    has_drilling = bool(
-        render_state_extra.get("drill_total_minutes")
-        if isinstance(render_state_extra, Mapping)
-        else 0
-    )
-    if has_drilling and "drilling" not in [p.lower() for p in top_procs]:
+    raw_minutes = None
+    if isinstance(render_state_extra, Mapping):
+        raw_minutes = render_state_extra.get("drill_total_minutes")
+
+    minutes_val = _coerce_float(raw_minutes) if raw_minutes is not None else None
+    has_card_minutes = raw_minutes is not None
+    drilling_hours = None
+    if minutes_val is not None and minutes_val > 0:
+        drilling_hours = minutes_val / 60.0
+
+    if drilling_hours is not None and "drilling" not in [p.lower() for p in top_procs]:
         top_procs.append("Drilling")
 
-    if has_drilling:
-        minutes_val = (
-            _coerce_float(render_state_extra.get("drill_total_minutes"))
-            if isinstance(render_state_extra, Mapping)
-            else None
-        )
-        if minutes_val is not None and minutes_val > 0:
-            hours_text = fmt_hours(minutes_val / 60.0)
+    if has_card_minutes:
+        if drilling_hours is not None:
+            hours_text = fmt_hours(drilling_hours)
             _add_reason(f"planner buckets allocate {hours_text} to drilling")
         else:
             _add_reason("planner buckets include drilling")
