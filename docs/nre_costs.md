@@ -3,16 +3,12 @@
 The quote rendering code builds the **Programming & Engineering** and **Fixturing** rows in the
 NRE section directly from the structured data returned by `compute_quote_from_df`.
 
-* Programming hours are now derived by the `_estimate_programming_hours_auto(...)` helper instead
-  of summing the spreadsheet. The heuristic looks at:
-  * inferred setup count (sheet hint if present, otherwise face/normal counts from the geometry),
-  * part complexity metrics (`GEO_Complexity_0to100`, thin wall flags, max dimension),
-  * available process hours (milling, turning, EDM, drilling, finishing, inspection) to gauge the
-    machining load, and
-  * feature counts such as total faces, hole count, pockets, and slots.
-  The contributions are summed, clamped by the simple-part cap (`ProgCapHr`) and the
-  milling-ratio guard (`ProgMaxToMillingRatio`), and floored at 0.35 hr by default.  Entering a
-  **Programming Override / Manual Hours** value on the sheet still forces a custom total.
+* Programming hours are derived by the `estimate_programming_hours_from_geo(...)` helper instead
+  of summing the spreadsheet. The geometry-driven heuristic starts at 0.75 hr and adds increments
+  for hole families, individual holes, taps, counterbores, and countersinks, clamping the result
+  between 0.6 and 6.0 hr. When a planner route is available we still prefer the
+  `_estimate_programming_hours_from_plan(...)` value, and a user-entered Programming Override keeps
+  taking precedence over the auto estimate.
 * Engineering time is still read from rows such as *Fixture Design*, *Process Sheet*, *Traveler*,
   and *Documentation* because those activities are typically managed manually.
 * Fixturing hours continue to come from rows labeled *Fixture Build* or *Custom Fixture Build*.
