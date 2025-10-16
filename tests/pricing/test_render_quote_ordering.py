@@ -441,7 +441,7 @@ def test_render_quote_skips_duplicate_programming_amortized_row() -> None:
                 "with_expedite": 129.591,
             },
             "nre_detail": {"programming": {"prog_hr": 2.0, "prog_rate": 60.0}},
-            "nre": {"programming_per_part": 15.0},
+            "nre": {"programming_per_lot": 15.0},
             "material": {},
             "process_costs": {
                 "milling": 60.0,
