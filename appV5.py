@@ -23,7 +23,7 @@ import re
 import sys
 import time
 import typing
-from typing import Any
+from typing import Any, Mapping
 from collections import Counter
 from collections.abc import (
     Callable,
@@ -215,50 +215,110 @@ def _nearest_std_side(x_in: float) -> float:
     return float(STANDARD_PLATE_SIDES_IN[-1])
 
 
-def _estimate_plate_dims_from_area(
-    area_mm2: float,
-) -> tuple[float | None, float | None]:
-    """Fallback: infer L×W if only area is known. Assume square then round up to sane aspect."""
+def infer_plate_lw_in(geo: Mapping[str, Any] | None) -> tuple[float, float] | None:
+    """Infer plate length/width in inches from geometry hints."""
 
-    if not area_mm2 or area_mm2 <= 0:
-        return (None, None)
-    area_in2 = area_mm2 / 645.16
-    side = max(1.0, area_in2 ** 0.5)
-    cand = [(side, side), (side * 0.82, side * 1.22), (side * 0.67, side * 1.49)]
-    cand = [(math.ceil(a * 4) / 4.0, math.ceil(b * 4) / 4.0) for (a, b) in cand]
-    cand.sort(key=lambda ab: abs(ab[0] - ab[1]))
-    return cand[0]
+    if not isinstance(geo, _MappingABC):
+        return None
+
+    outline = geo.get("outline_bbox")
+    if isinstance(outline, _MappingABC):
+        L = outline.get("plate_len_in")
+        W = outline.get("plate_wid_in")
+        if L and W:
+            try:
+                return float(L), float(W)
+            except Exception:
+                pass
+
+    area_mm2 = geo.get("plate_bbox_area_mm2")
+    if area_mm2:
+        try:
+            area_in2 = float(area_mm2) / 645.16
+            if area_in2 > 0:
+                side = math.sqrt(area_in2)
+                return (float(side), float(side))
+        except Exception:
+            return None
+
+    return None
 
 
-def _snap_to_stock_plate(
+def pick_stock_from_mcmaster(
     material_key: str,
-    t_in: float,
-    need_len_in: float,
-    need_wid_in: float,
-):
-    """Resolve a purchasable stock plate using McMaster when available."""
+    thickness_in: float,
+    need_L: float,
+    need_W: float,
+) -> dict[str, float | str | None]:
+    """Select a McMaster plate that covers the requested footprint."""
+
+    result: dict[str, float | str | None]
+    stock_len = max(float(need_L), float(need_W))
+    stock_wid = min(float(need_L), float(need_W))
+    result = {
+        "len_in": stock_len,
+        "wid_in": stock_wid,
+        "thk_in": float(thickness_in),
+        "price$": None,
+        "supplier_min$": 0.0,
+        "source": "geometry-fallback",
+    }
 
     try:
-        from mcmaster_api import find_plate_stock  # type: ignore
+        from cad_quoter.vendors import mcmaster_stock as _mc
 
-        item = find_plate_stock(
-            material_key=material_key,
-            thickness_in=t_in,
-            min_len_in=need_len_in,
-            min_wid_in=need_wid_in,
-        )
-        if item and item.get("length_in") and item.get("width_in"):
-            return (
-                float(item["length_in"]),
-                float(item["width_in"]),
-                "McMaster",
+        catalog_loader = getattr(_mc, "_get_catalog", None)
+        if callable(catalog_loader):
+            catalog = catalog_loader()
+        else:
+            catalog = None
+        if not catalog:
+            from cad_quoter.resources import default_catalog_csv
+
+            csv_path = os.getenv("CATALOG_CSV_PATH") or str(default_catalog_csv())
+            catalog = _mc.load_catalog(csv_path)
+
+        material_lookup = MATERIAL_DISPLAY_BY_KEY.get(material_key, material_key)
+        if catalog:
+            item = _mc.choose_item(
+                catalog,
+                material_lookup,
+                float(need_L),
+                float(need_W),
+                float(thickness_in),
             )
+            if item:
+                stock_len = float(item.length)
+                stock_wid = float(item.width)
+                if stock_len < stock_wid:
+                    stock_len, stock_wid = stock_wid, stock_len
+                result.update(
+                    {
+                        "len_in": stock_len,
+                        "wid_in": stock_wid,
+                        "thk_in": float(item.thickness),
+                        "source": "mcmaster-catalog",
+                    }
+                )
+                try:
+                    _, price_each, _, _ = _mc.lookup_sku_and_price_for_mm(
+                        material_lookup,
+                        stock_len * 25.4,
+                        stock_wid * 25.4,
+                        float(item.thickness) * 25.4,
+                        qty=1,
+                    )
+                    if price_each:
+                        result["price$"] = float(price_each)
+                except Exception:
+                    pass
     except Exception:
         pass
 
-    L = _nearest_std_side(need_len_in)
-    W = _nearest_std_side(need_wid_in)
-    return (max(L, W), min(L, W), "StdGrid")
+    if not result.get("len_in") or not result.get("wid_in"):
+        result["len_in"] = max(float(need_L), float(need_W))
+        result["wid_in"] = min(float(need_L), float(need_W))
+    return result
 
 
 def _resolve_price_per_lb(material_label: str, material_key: str) -> tuple[float, str]:
@@ -313,14 +373,14 @@ def _compute_material_block(
 ):
     """Produce a normalized material record including weights and cost."""
 
-    t_in = float(geo_ctx.get("thickness_in") or 0.0) or float(
-        geo_ctx.get("thickness_mm", 0) / 25.4 or 0.0
-    )
-    L_in = geo_ctx.get("outline_bbox", {}).get("plate_len_in") or None
-    W_in = geo_ctx.get("outline_bbox", {}).get("plate_wid_in") or None
-    if not L_in or not W_in:
-        L_in, W_in = _estimate_plate_dims_from_area(geo_ctx.get("plate_bbox_area_mm2", 0.0))
-    if not L_in or not W_in or not t_in:
+    t_in = float(geo_ctx.get("thickness_in") or 0.0)
+    if not t_in:
+        t_in = float(geo_ctx.get("thickness_mm", 0) / 25.4 or 0.0)
+    if not t_in:
+        t_in = float(geo_ctx.get("thickness_in_guess") or 0.0)
+
+    dims = infer_plate_lw_in(geo_ctx)
+    if not dims or not t_in:
         return {
             "material": geo_ctx.get("material_display") or material_key,
             "stock_L_in": None,
@@ -331,16 +391,27 @@ def _compute_material_block(
             "scrap_lb": 0.0,
             "scrap_pct": scrap_pct,
             "source": "insufficient-geometry",
+            "stock_dims_in": None,
+            "supplier_min$": 0.0,
+            "stock_price$": None,
             "total_material_cost": 0.0,
         }
 
-    stock_L_in, stock_W_in, source_note = _snap_to_stock_plate(
-        material_key, float(t_in), float(L_in), float(W_in)
+    L_in, W_in = dims
+    stock_info = pick_stock_from_mcmaster(
+        material_key,
+        float(t_in),
+        float(L_in),
+        float(W_in),
     )
+    stock_L_in = float(stock_info.get("len_in") or L_in)
+    stock_W_in = float(stock_info.get("wid_in") or W_in)
+    stock_T_in = float(stock_info.get("thk_in") or t_in)
+    source_note = str(stock_info.get("source") or "geometry-fallback")
 
     rho = float(density_g_cc or 2.70)
     vol_net_in3 = float(L_in) * float(W_in) * float(t_in)
-    vol_start_in3 = float(stock_L_in) * float(stock_W_in) * float(t_in)
+    vol_start_in3 = float(stock_L_in) * float(stock_W_in) * float(stock_T_in)
     g_cc_to_lb_in3 = 0.0361273
     net_lb = vol_net_in3 * rho * g_cc_to_lb_in3
     start_lb = vol_start_in3 * rho * g_cc_to_lb_in3
@@ -373,7 +444,8 @@ def _compute_material_block(
         "material": geo_ctx.get("material_display") or material_key,
         "stock_L_in": float(stock_L_in),
         "stock_W_in": float(stock_W_in),
-        "stock_T_in": float(t_in),
+        "stock_T_in": float(stock_T_in),
+        "stock_dims_in": (float(stock_L_in), float(stock_W_in), float(stock_T_in)),
         "start_lb": float(start_lb),
         "starting_weight_lb": float(start_lb),
         "net_lb": float(net_after_scrap),
@@ -387,6 +459,8 @@ def _compute_material_block(
         "supplier_min": float(supplier_min),
         "supplier_min$": float(supplier_min),
         "source": source_note,
+        "supplier_min$": float(supplier_min),
+        "stock_price$": stock_price,
         "total_material_cost": float(total_mat_cost),
     }
 
@@ -5642,9 +5716,32 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 ):
                     detail_lines.append("")
                 detail_lines.extend(price_lines)
-            stock_L_val = _coerce_float_or_none(material_stock_block.get("stock_L_in"))
-            stock_W_val = _coerce_float_or_none(material_stock_block.get("stock_W_in"))
-            stock_T_val = _coerce_float_or_none(material_stock_block.get("stock_T_in"))
+            def _coerce_dims(candidate: Any) -> tuple[float, float, float] | None:
+                if isinstance(candidate, (list, tuple)) and len(candidate) >= 3:
+                    try:
+                        Lc = float(candidate[0])
+                        Wc = float(candidate[1])
+                        Tc = float(candidate[2])
+                    except Exception:
+                        return None
+                    return (Lc, Wc, Tc)
+                return None
+
+            stock_dims_candidate = _coerce_dims(material.get("stock_dims_in"))
+            if stock_dims_candidate is None:
+                stock_dims_candidate = _coerce_dims(
+                    material_stock_block.get("stock_dims_in")
+                )
+
+            stock_L_val: float | None
+            stock_W_val: float | None
+            stock_T_val: float | None
+            if stock_dims_candidate:
+                stock_L_val, stock_W_val, stock_T_val = stock_dims_candidate
+            else:
+                stock_L_val = _coerce_float_or_none(material_stock_block.get("stock_L_in"))
+                stock_W_val = _coerce_float_or_none(material_stock_block.get("stock_W_in"))
+                stock_T_val = _coerce_float_or_none(material_stock_block.get("stock_T_in"))
             if stock_T_val is None:
                 stock_T_val = _coerce_float_or_none(material.get("thickness_in"))
                 if stock_T_val is None:
@@ -5679,13 +5776,38 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     stock_L_val = float(fallback_L)
                 if stock_W_val is None and fallback_W is not None:
                     stock_W_val = float(fallback_W)
+            if (stock_L_val is None or stock_W_val is None) and isinstance(g, dict):
+                inferred_dims = infer_plate_lw_in(g)
+                if inferred_dims:
+                    if stock_L_val is None:
+                        stock_L_val = float(inferred_dims[0])
+                    if stock_W_val is None:
+                        stock_W_val = float(inferred_dims[1])
+            if stock_L_val and stock_W_val and stock_T_val:
+                stock_dims_candidate = (float(stock_L_val), float(stock_W_val), float(stock_T_val))
             if stock_L_val and stock_W_val and stock_T_val:
                 stock_line = f"{float(stock_L_val):.2f} × {float(stock_W_val):.2f} × {float(stock_T_val):.3f} in"
             else:
-                T_disp = "—"
-                if stock_T_val is not None:
-                    T_disp = f"{float(stock_T_val):.3f}"
-                stock_line = f"— × — × {T_disp} in"
+                inferred_dims = infer_plate_lw_in(g)
+                L_disp = stock_L_val
+                W_disp = stock_W_val
+                if (L_disp is None or W_disp is None) and inferred_dims:
+                    if L_disp is None:
+                        L_disp = inferred_dims[0]
+                    if W_disp is None:
+                        W_disp = inferred_dims[1]
+                T_disp_val = stock_T_val
+                if T_disp_val is None and isinstance(g, dict):
+                    T_disp_val = _coerce_float_or_none(g.get("thickness_in"))
+                if T_disp_val is None and isinstance(g, dict):
+                    T_disp_val = _coerce_float_or_none(g.get("thickness_in_guess"))
+                if L_disp and W_disp and T_disp_val:
+                    stock_line = f"{float(L_disp):.2f} × {float(W_disp):.2f} × {float(T_disp_val):.3f} in"
+                else:
+                    T_disp = "—"
+                    if T_disp_val is not None:
+                        T_disp = f"{float(T_disp_val):.3f}"
+                    stock_line = f"— × — × {T_disp} in"
             if isinstance(mat_info, dict):
                 mat_info["stock_size_display"] = stock_line
             append_line(f"  Stock used: {stock_line}")
@@ -12113,6 +12235,25 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     grams_per_lb = 1000.0 / LB_PER_KG
     material_entry = breakdown.get("material")
     if isinstance(material_entry, dict):
+        stock_dims_raw = mat_block.get("stock_dims_in")
+        if isinstance(stock_dims_raw, (list, tuple)) and len(stock_dims_raw) >= 3:
+            try:
+                stock_dims_tuple = (
+                    float(stock_dims_raw[0]),
+                    float(stock_dims_raw[1]),
+                    float(stock_dims_raw[2]),
+                )
+                material_entry["stock_dims_in"] = stock_dims_tuple
+            except Exception:
+                pass
+        supplier_min_val = _coerce_float_or_none(mat_block.get("supplier_min$"))
+        if supplier_min_val is not None:
+            material_entry["supplier_min$"] = float(supplier_min_val)
+            if _coerce_float_or_none(material_entry.get("supplier_min_charge")) is None:
+                material_entry["supplier_min_charge"] = float(supplier_min_val)
+        stock_price_val = _coerce_float_or_none(mat_block.get("stock_price$"))
+        if stock_price_val is not None and stock_price_val > 0:
+            material_entry.setdefault("stock_price$", float(stock_price_val))
         start_lb = _coerce_float_or_none(mat_block.get("start_lb"))
         net_lb = _coerce_float_or_none(mat_block.get("net_lb"))
         scrap_lb = _coerce_float_or_none(mat_block.get("scrap_lb"))
