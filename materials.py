@@ -346,6 +346,10 @@ def _compute_material_block(
     stock_price = float(stock_price_val) if stock_price_val and stock_price_val > 0 else None
     stock_supplier_min_val = _coerce_float_or_none(stock_info.get("min_charge_usd"))
     stock_supplier_min = float(stock_supplier_min_val) if stock_supplier_min_val else 0.0
+    stock_piece_api_price = _coerce_float_or_none(stock_info.get("stock_piece_api_price"))
+    if stock_piece_api_price is not None and stock_piece_api_price <= 0:
+        stock_piece_api_price = None
+    stock_piece_api_source = stock_info.get("stock_piece_api_source")
 
     rho = float(density_g_cc or 2.70)
     vol_net_in3 = float(L_in) * float(W_in) * float(t_in)
