@@ -5195,8 +5195,15 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             except Exception:
                 directs = {}
             pricing["direct_costs"] = directs
-        directs["material"] = float(mat_total)
-        pricing["total_direct_costs"] = float(sum(directs.values()))
+        try:
+            directs["material"] = round(float(mat_total), 2)
+        except Exception:
+            directs["material"] = 0.0
+        total_direct_costs = round(
+            sum(_safe_float(value, 0.0) for value in directs.values()),
+            2,
+        )
+        pricing["total_direct_costs"] = total_direct_costs
 
     # ---- material & stock (compact; shown only if we actually have data) -----
     if material:
@@ -7059,15 +7066,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         canonical_label = _canonical_pass_label(key)
         if canonical_label.lower() == "material":
             continue
-        if (value > 0) or show_zeros:
-            # cosmetic: "consumables_hr_cost" → "Consumables /Hr Cost"
-            label = key.replace("_", " ").replace("hr", "/hr").title()
-            row(label, float(value), indent="  ")
-            add_pass_basis(key, indent="    ")
-            detail_value = direct_cost_details.get(key)
-            if detail_value not in (None, ""):
-                write_detail(str(detail_value), indent="    ")
+        try:
             amount_val = float(value or 0.0)
+        except Exception:
+            continue
+        if (amount_val > 0) or show_zeros:
             displayed_pass_through[key] = amount_val
             pass_total += amount_val
             canonical_pass_label = canonical_label
@@ -7085,28 +7088,107 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             f"{_m(material_direct_contribution)} to Direct Costs",
             "  ",
         )
-    directs = _compute_direct_costs(
-        material_total_for_directs,
-        scrap_credit_for_directs,
-        material_tax_for_directs,
-        displayed_pass_through,
+    directs_map: dict[Any, Any]
+    if isinstance(pricing, dict):
+        directs_map = pricing.setdefault("direct_costs", {})
+        if not isinstance(directs_map, dict):
+            try:
+                directs_map = dict(directs_map or {})
+            except Exception:
+                directs_map = {}
+            pricing["direct_costs"] = directs_map
+    else:
+        directs_map = {}
+
+    def _assign_direct_value(raw_key: Any, amount: Any) -> None:
+        try:
+            amount_float = round(float(amount), 2)
+        except Exception:
+            return
+        target_key = raw_key
+        try:
+            canonical_target = _canonical_pass_label(str(raw_key)).strip().lower()
+        except Exception:
+            canonical_target = str(raw_key or "").strip().lower()
+        if canonical_target:
+            for existing_key in list(directs_map.keys()):
+                try:
+                    existing_canonical = _canonical_pass_label(str(existing_key)).strip().lower()
+                except Exception:
+                    existing_canonical = str(existing_key or "").strip().lower()
+                if existing_canonical == canonical_target:
+                    target_key = existing_key
+                    break
+        directs_map[target_key] = amount_float
+
+    _assign_direct_value("material", material_direct_contribution)
+
+    for key, amount_val in displayed_pass_through.items():
+        _assign_direct_value(key, amount_val)
+
+    def _direct_label(raw_key: Any) -> str:
+        text = str(raw_key)
+        canonical = _canonical_pass_label(text)
+        if canonical:
+            canonical_stripped = canonical.strip()
+            if canonical_stripped and canonical_stripped.lower() == canonical_stripped:
+                return canonical_stripped.title()
+            return canonical_stripped or canonical
+        label = text.replace("_", " ").replace("hr", "/hr").strip()
+        if not label:
+            return text
+        return label.title()
+
+    direct_entries: list[tuple[str, float, Any]] = []
+    for raw_key, raw_value in directs_map.items():
+        amount_val = _coerce_float_or_none(raw_value)
+        if amount_val is None:
+            continue
+        direct_entries.append((
+            _direct_label(raw_key),
+            round(float(amount_val), 2),
+            raw_key,
+        ))
+
+    direct_entries.sort(key=lambda item: item[1], reverse=True)
+
+    total_direct_costs = round(
+        sum(amount for _, amount, _ in direct_entries if (amount > 0) or show_zeros),
+        2,
     )
-    directs = float(directs)
+
+    for display_label, amount_val, raw_key in direct_entries:
+        if (amount_val > 0) or show_zeros:
+            row(display_label, amount_val, indent="  ")
+            raw_key_str = str(raw_key)
+            if raw_key_str in displayed_pass_through:
+                add_pass_basis(raw_key_str, indent="    ")
+                detail_value = direct_cost_details.get(raw_key_str)
+                if detail_value not in (None, ""):
+                    write_detail(str(detail_value), indent="    ")
+            else:
+                detail_value = direct_cost_details.get(raw_key)
+                if detail_value not in (None, ""):
+                    write_detail(str(detail_value), indent="    ")
+
+    row("Total", total_direct_costs, indent="  ")
+    pass_through_total = float(sum(displayed_pass_through.values()))
+
+    if isinstance(pricing, dict):
+        pricing["total_direct_costs"] = total_direct_costs
     if isinstance(breakdown, dict):
         try:
-            breakdown["total_direct_costs"] = directs
+            breakdown["total_direct_costs"] = total_direct_costs
         except Exception:
             pass
-    row("Total", directs, indent="  ")
-    pass_through_total = float(sum(displayed_pass_through.values()))
     if isinstance(totals, dict):
-        totals["direct_costs"] = directs
+        totals["direct_costs"] = total_direct_costs
     if 0 <= total_direct_costs_row_index < len(lines):
         replace_line(
             total_direct_costs_row_index,
             _format_row(
                 total_direct_costs_label,
-                directs,
+                total_direct_costs,
             ),
         )
 
