@@ -365,6 +365,52 @@ def _resolve_price_per_lb(material_label: str, material_key: str) -> tuple[float
     return price_per_lb, source
 
 
+def _resolve_price_per_lb(material_key: str, display_name: str | None = None) -> tuple[float, str]:
+    """Return a USD/lb price using metals API or McMaster fallback."""
+
+    key = str(material_key or "").strip()
+    display = str(display_name or "").strip() or key or "aluminum"
+
+    price = 0.0
+    source = ""
+
+    try:  # pragma: no cover - optional dependency / network access
+        from metals_api import price_per_lb_for_material  # type: ignore
+
+        candidate = price_per_lb_for_material(key or display)
+        if candidate:
+            price = float(candidate)
+            if price > 0:
+                source = "metals_api"
+    except Exception:
+        pass
+
+    if price <= 0:
+        try:
+            from cad_quoter.pricing.materials import get_mcmaster_unit_price
+        except Exception:  # pragma: no cover - optional dependency
+            get_mcmaster_unit_price = None  # type: ignore[assignment]
+        if get_mcmaster_unit_price is not None:
+            try:
+                mcm_price, mcm_source = get_mcmaster_unit_price(display, unit="lb")
+            except Exception:
+                mcm_price, mcm_source = None, ""
+            if mcm_price and float(mcm_price) > 0:
+                price = float(mcm_price)
+                source = mcm_source or "mcmaster"
+
+    if price <= 0:
+        try:
+            resolved_price, resolved_source = _resolve_material_unit_price(display, unit="lb")
+        except Exception:
+            resolved_price, resolved_source = None, ""
+        if resolved_price and float(resolved_price) > 0:
+            price = float(resolved_price)
+            source = resolved_source or source
+
+    return max(0.0, float(price)), source
+
+
 def _compute_material_block(
     geo_ctx: dict,
     material_key: str,
@@ -12269,7 +12315,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     )
     breakdown["material_block"] = mat_block
     grams_per_lb = 1000.0 / LB_PER_KG
-    material_entry = breakdown.get("material")
+    material_entry = breakdown.setdefault("material", {})
     if isinstance(material_entry, dict):
         stock_dims_raw = mat_block.get("stock_dims_in")
         if isinstance(stock_dims_raw, (list, tuple)) and len(stock_dims_raw) >= 3:
@@ -12298,9 +12344,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             start_g = float(start_lb) * grams_per_lb
             material_entry["mass_g"] = start_g
             material_entry["starting_mass_g_est"] = start_g
-        if net_lb is not None and net_lb > 0:
+        if net_lb > 0:
             material_entry["net_mass_g"] = float(net_lb) * grams_per_lb
-        if scrap_lb is not None and scrap_lb > 0:
+        if scrap_lb > 0:
             material_entry["scrap_mass_g"] = float(scrap_lb) * grams_per_lb
         if price_per_lb is not None and price_per_lb > 0:
             material_entry["unit_price_usd_per_lb"] = float(price_per_lb)
