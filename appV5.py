@@ -11759,24 +11759,6 @@ def _lookup_rate(name: str, *sources: Mapping[str, Any] | None, fallback: float 
     return float(fallback)
 
 
-def _estimate_programming_hours_auto(
-    hole_diams_mm: Sequence[float] | None,
-    thickness_in: float | None,
-) -> float:
-    """Return a simple programming-hour estimate when no planner data exists."""
-
-    hole_count = len(hole_diams_mm) if hole_diams_mm else 0
-    base = 0.5 + 0.1 * hole_count
-
-    if thickness_in is not None:
-        try:
-            base += min(2.0, max(0.0, float(thickness_in) * 0.2))
-        except Exception:
-            pass
-
-    return max(base, 0.0)
-
-
 def _estimate_programming_hours_from_plan(
     plan: Mapping[str, Any] | None,
     geo: Mapping[str, Any] | None,
@@ -11830,6 +11812,60 @@ def _estimate_programming_hours_from_plan(
         return min(12.0, 2.0 + 0.4 * setups + 0.005 * hole_count)
 
     return 2.0 + 0.2 * setups
+
+
+def estimate_programming_hours_from_geo(geo: Mapping[str, Any] | None) -> float:
+    """Return a geometry-driven programming-hour estimate.
+
+    The heuristic scales with the number of hole families and overall hole counts,
+    while adding smaller adjustments for taps, counterbores, and countersinks.
+    """
+
+    ctx = geo if isinstance(geo, _MappingABC) else {}
+
+    hole_sets_raw = ctx.get("hole_sets") if isinstance(ctx, _MappingABC) else None
+    families = 0
+    if isinstance(hole_sets_raw, _MappingABC):
+        families = len(hole_sets_raw)
+    elif isinstance(hole_sets_raw, Sequence) and not isinstance(hole_sets_raw, (str, bytes, bytearray)):
+        families = len(hole_sets_raw)
+
+    hole_count_raw = ctx.get("hole_count", 0) if isinstance(ctx, _MappingABC) else 0
+    holes = 0
+    try:
+        holes = int(float(hole_count_raw or 0))
+    except Exception:
+        holes = 0
+    if holes <= 0 and isinstance(ctx, _MappingABC):
+        hole_diams = ctx.get("hole_diams_mm")
+        if isinstance(hole_diams, Sequence) and not isinstance(hole_diams, (str, bytes, bytearray)):
+            holes = len(hole_diams)
+
+    feature_counts = ctx.get("feature_counts") if isinstance(ctx, _MappingABC) else {}
+    if not isinstance(feature_counts, _MappingABC):
+        feature_counts = {}
+
+    def _count_from_feature(key: str) -> int:
+        value = feature_counts.get(key, 0)
+        try:
+            return int(float(value or 0))
+        except Exception:
+            return 0
+
+    taps = _count_from_feature("tap_qty")
+    cbores = _count_from_feature("cbore_qty")
+    csks = _count_from_feature("csk_qty")
+
+    base = 0.75
+    h_families = 0.05 * families
+    h_holes = 0.01 * holes
+    h_tap = 0.03 * taps
+    h_cbore = 0.08 * cbores
+    h_csk = 0.05 * csks
+
+    hr = base + h_families + h_holes + h_tap + h_cbore + h_csk
+
+    return float(max(0.6, min(hr, 6.0)))
 
 
 def _coerce_bool(value: Any) -> bool:
@@ -13183,22 +13219,43 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
 
     app_meta: dict[str, Any] = {"used_planner": True} if planner_used else {}
 
-    prog_hr: float | None = None
+    planner_prog_hr: float | None = None
     if app_meta.get("used_planner"):
         try:
-            prog_hr = _estimate_programming_hours_from_plan(
+            planner_prog_hr = _estimate_programming_hours_from_plan(
                 breakdown.get("process_plan", {}),
                 breakdown.get("geo_context", {}),
             )
         except Exception:
-            prog_hr = None
+            planner_prog_hr = None
 
-    if prog_hr is None:
-        prog_hr = _estimate_programming_hours_auto(hole_diams, thickness_in)
+    geo_prog_hr = estimate_programming_hours_from_geo(breakdown.get("geo_context"))
+    auto_prog_hr = float(geo_prog_hr)
+    if planner_prog_hr is not None and planner_prog_hr > 0:
+        try:
+            auto_prog_hr = float(planner_prog_hr)
+        except Exception:
+            auto_prog_hr = float(geo_prog_hr)
 
-    auto_prog_hr = float(prog_hr or 0.0)
+    overrides_map = state.user_overrides if isinstance(state.user_overrides, _MappingABC) else {}
+    user_override_prog = (
+        _coerce_float_or_none(overrides_map.get("programming_hr"))
+        if isinstance(overrides_map, _MappingABC)
+        else None
+    )
     override_prog = _coerce_float_or_none(value_map.get("Programming Override Hr"))
+
     final_prog_hr = auto_prog_hr
+    override_applied = False
+    override_source: str | None = None
+    if override_prog is not None and override_prog >= 0:
+        final_prog_hr = float(override_prog)
+        override_applied = True
+        override_source = "sheet"
+    elif user_override_prog is not None and user_override_prog >= 0:
+        final_prog_hr = float(user_override_prog)
+        override_applied = True
+        override_source = "user"
     programming_detail_container = breakdown.setdefault("nre_detail", {})
     if isinstance(programming_detail_container, dict):
         programming_detail = programming_detail_container.get("programming")
@@ -13212,16 +13269,23 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     else:
         detail_map = {}
 
-    detail_map["auto_prog_hr"] = auto_prog_hr
-
-    if override_prog is not None and override_prog >= 0:
-        final_prog_hr = float(override_prog)
-        detail_map["prog_hr"] = final_prog_hr
-        detail_map["override_applied"] = True
+    detail_map["geo_prog_hr"] = float(geo_prog_hr)
+    if planner_prog_hr is not None and planner_prog_hr > 0:
+        try:
+            detail_map["planner_prog_hr"] = float(planner_prog_hr)
+        except Exception:
+            detail_map.pop("planner_prog_hr", None)
     else:
-        final_prog_hr = auto_prog_hr
-        detail_map["prog_hr"] = final_prog_hr
+        detail_map.pop("planner_prog_hr", None)
+    detail_map["auto_prog_hr"] = float(auto_prog_hr)
+    detail_map["prog_hr"] = float(final_prog_hr)
+    if override_applied:
+        detail_map["override_applied"] = True
+        if override_source:
+            detail_map["override_source"] = override_source
+    else:
         detail_map.pop("override_applied", None)
+        detail_map.pop("override_source", None)
 
     labor_bucket = (
         merged_two_bucket_rates.get("labor")
@@ -13264,7 +13328,26 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
 
     programming_total = round(final_prog_hr * programmer_rate, 2)
     programming_per_part = programming_total / max(1.0, qty_for_programming)
-    breakdown.setdefault("nre", {})["programming_per_part"] = programming_per_part
+    detail_map["per_lot"] = programming_total
+    detail_map["per_part"] = programming_per_part
+
+    is_amortized = bool(amortized_programming and amortized_programming > 0)
+    detail_map["amortized"] = is_amortized
+    if is_amortized:
+        detail_map["amortized_cost"] = float(amortized_programming)
+    else:
+        detail_map.pop("amortized_cost", None)
+
+    nre_block = breakdown.setdefault("nre", {})
+    nre_block["programming_hr"] = float(final_prog_hr)
+    if is_amortized:
+        nre_block["programming_cost"] = 0.0
+        nre_block["programming_per_lot"] = 0.0
+        nre_block["programming_per_part"] = 0.0
+    else:
+        nre_block["programming_cost"] = programming_total
+        nre_block["programming_per_lot"] = programming_total
+        nre_block["programming_per_part"] = programming_per_part
 
     if speeds_feeds_csv_path:
         breakdown["speeds_feeds_path"] = speeds_feeds_csv_path
