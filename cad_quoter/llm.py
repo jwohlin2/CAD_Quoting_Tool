@@ -1053,6 +1053,24 @@ def explain_quote(
         # Recognized operations present but no explicit drilling signal; treat as informational only.
         plan_drilling_reasons = []
 
+    render_state_extra: Mapping[str, Any] | None = None
+    if isinstance(render_state, Mapping):
+        extra_candidate = render_state.get("extra")
+        if isinstance(extra_candidate, Mapping):
+            render_state_extra = extra_candidate
+    else:
+        try:
+            extra_candidate = getattr(render_state, "extra", None)
+        except Exception:
+            extra_candidate = None
+        if isinstance(extra_candidate, Mapping):
+            render_state_extra = extra_candidate
+
+    drill_card_minutes = 0.0
+    if isinstance(render_state_extra, Mapping):
+        drill_card_minutes = _coerce_float(render_state_extra.get("drill_total_minutes")) or 0.0
+    has_drilling = drill_card_minutes > 0.0
+
     should_note_drilling = hole_groups_flag or (removal_hr is not None and removal_hr > 0)
     if not should_note_drilling and plan_drilling_reasons:
         should_note_drilling = True
@@ -1100,6 +1118,24 @@ def explain_quote(
     scrap_text = _format_pct(breakdown.get("scrap_pct"))
     if scrap_text and _coerce_float(breakdown.get("scrap_pct")):
         lines.append(f"Includes a {scrap_text} scrap allowance.")
+
+    # === WHY: CONSISTENT DRILLING TEXT ===
+    drill_detail_line: str | None = None
+    if has_drilling and drill_card_minutes > 0.0:
+        drill_detail_line = (
+            f"Drilling time comes from removal-card math ({drill_card_minutes / 60.0:.2f} hr total)."
+        )
+    elif not should_note_drilling:
+        drill_detail_line = "No drilling accounted."
+    if drill_detail_line:
+        if has_drilling:
+            lowered_conflicts = ("no drilling", "does not involve drilling")
+            lines[:] = [
+                line
+                for line in lines
+                if not any(conflict in line.lower() for conflict in lowered_conflicts)
+            ]
+        lines.append(drill_detail_line)
 
     def _iter_named_values(values: Any) -> Iterable[tuple[str, float]]:
         items: Iterable[tuple[Any, Any]]

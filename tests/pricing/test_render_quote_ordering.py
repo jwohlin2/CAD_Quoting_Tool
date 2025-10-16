@@ -3,6 +3,8 @@ import re
 
 import appV5
 
+from cad_quoter.llm import explain_quote
+
 
 def test_render_quote_places_why_after_pricing_ladder_and_llm_adjustments() -> None:
     result = {
@@ -1246,3 +1248,25 @@ def test_why_this_price_mentions_planner_drilling() -> None:
     assert "Why this price" in rendered
     tail = rendered.split("Why this price", 1)[1]
     assert "planner operations include Deep_Drilling" in tail
+
+
+def test_explain_quote_reports_drilling_minutes_from_removal_card() -> None:
+    breakdown = {
+        "totals": {"price": 120.0, "qty": 1, "labor_cost": 40.0},
+        "material_direct_cost": 30.0,
+    }
+    render_state = {"extra": {"drill_total_minutes": 30.0}}
+
+    explanation = explain_quote(breakdown, render_state=render_state)
+
+    assert "Drilling time comes from removal-card math (0.50 hr total)." in explanation
+    assert "No drilling accounted." not in explanation
+
+
+def test_explain_quote_reports_no_drilling_when_minutes_absent() -> None:
+    breakdown = {"totals": {"price": 75.0, "qty": 2, "labor_cost": 0.0}}
+
+    explanation = explain_quote(breakdown, render_state={"extra": {}})
+
+    assert "No drilling accounted." in explanation
+    assert "Drilling time comes from removal-card math" not in explanation
