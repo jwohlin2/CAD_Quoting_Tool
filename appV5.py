@@ -12186,7 +12186,6 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
 
     bucket_view.clear()
     bucket_view.update(bucket_view_prepared)
-    bucket_view_buckets = bucket_view.setdefault("buckets", {})
 
     if not use_planner:
         drilling_bucket_prepared = (
