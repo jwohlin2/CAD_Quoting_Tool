@@ -12067,6 +12067,60 @@ def _estimate_programming_hours_from_plan(
     return 2.0 + 0.2 * setups
 
 
+def _estimate_programming_hours_auto(
+    geo: Mapping[str, Any] | None,
+    process_plan: Mapping[str, Any] | None,
+) -> float:
+    """Return a plate-oriented programming estimate tied to geometry hints."""
+
+    hole_qty_raw: Any = getattr(geo, "hole_count", 0)
+    if (not hole_qty_raw) and isinstance(geo, _MappingABC):
+        hole_qty_raw = geo.get("hole_count", 0)
+    hole_qty_val = _coerce_float_or_none(hole_qty_raw) or 0.0
+
+    pocket_count_raw: Any = getattr(geo, "pocket_count", None)
+    pocket_count_val = _coerce_float_or_none(pocket_count_raw)
+    geo_ctx = geo if isinstance(geo, _MappingABC) else {}
+    if pocket_count_val is None and isinstance(geo_ctx, _MappingABC):
+        pocket_count_val = _coerce_float_or_none(geo_ctx.get("pocket_count"))
+    if (pocket_count_val is None or pocket_count_val <= 0) and isinstance(geo_ctx, _MappingABC):
+        pocket_metrics = geo_ctx.get("pocket_metrics")
+        if isinstance(pocket_metrics, _MappingABC):
+            pocket_count_val = _coerce_float_or_none(pocket_metrics.get("pocket_count"))
+    pocket_count = float(pocket_count_val or 0.0)
+
+    plan_ctx = process_plan if isinstance(process_plan, _MappingABC) else {}
+    drilling_ctx = plan_ctx.get("drilling") if isinstance(plan_ctx, _MappingABC) else {}
+    bins_list: Sequence[Any]
+    if isinstance(drilling_ctx, _MappingABC):
+        bins_candidate = drilling_ctx.get("bins_list")
+        bins_list = bins_candidate if isinstance(bins_candidate, Sequence) else []
+    else:
+        bins_list = []
+
+    has_deep = False
+    for entry in bins_list:
+        op_name: str | None = None
+        if isinstance(entry, _MappingABC):
+            raw = entry.get("op_name")
+            if raw not in (None, ""):
+                op_name = str(raw)
+        else:
+            op_name = getattr(entry, "op_name", None)
+        if op_name and str(op_name).strip().lower() == "deep_drill":
+            has_deep = True
+            break
+
+    base = 0.5
+    hole_term = 0.015 * float(hole_qty_val)
+    pocket_term = 0.25 * pocket_count
+    deep_term = 0.75 if has_deep else 0.0
+
+    hr = base + hole_term + pocket_term + deep_term
+
+    return float(max(1.0, min(hr, 6.0)))
+
+
 def estimate_programming_hours_from_geo(geo: Mapping[str, Any] | None) -> float:
     """Return a geometry-driven programming-hour estimate.
 
@@ -13500,8 +13554,18 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         except Exception:
             planner_prog_hr = None
 
-    geo_prog_hr = estimate_programming_hours_from_geo(breakdown.get("geo_context"))
-    auto_prog_hr = float(geo_prog_hr)
+    geo_context_for_prog = breakdown.get("geo_context")
+    process_plan_for_prog = (
+        breakdown.get("process_plan") if isinstance(breakdown, _MappingABC) else None
+    )
+    geo_prog_hr = estimate_programming_hours_from_geo(geo_context_for_prog)
+    auto_prog_hr_model = _estimate_programming_hours_auto(
+        geo_context_for_prog,
+        process_plan_for_prog if isinstance(process_plan_for_prog, _MappingABC) else {},
+    )
+    if not math.isfinite(auto_prog_hr_model) or auto_prog_hr_model <= 0:
+        auto_prog_hr_model = float(geo_prog_hr)
+    auto_prog_hr = float(auto_prog_hr_model)
     if planner_prog_hr is not None and planner_prog_hr > 0:
         try:
             auto_prog_hr = float(planner_prog_hr)
@@ -13548,6 +13612,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             detail_map.pop("planner_prog_hr", None)
     else:
         detail_map.pop("planner_prog_hr", None)
+    detail_map["auto_prog_hr_model"] = float(auto_prog_hr_model)
     detail_map["auto_prog_hr"] = float(auto_prog_hr)
     detail_map["prog_hr"] = float(final_prog_hr)
     if override_applied:
@@ -13585,6 +13650,28 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         )
     if programmer_rate <= 0:
         programmer_rate = 85.0
+
+    if programmer_rate > 0:
+        if isinstance(merged_two_bucket_rates, dict):
+            labor_target = merged_two_bucket_rates.setdefault("labor", {})
+            if isinstance(labor_target, dict):
+                labor_target["Programmer"] = programmer_rate
+                labor_target.setdefault("programmer", programmer_rate)
+        if isinstance(rates, dict):
+            labor_rates_block = rates.get("labor")
+            if isinstance(labor_rates_block, _MappingABC) and not isinstance(
+                labor_rates_block, dict
+            ):
+                labor_rates_block = dict(labor_rates_block)
+                rates["labor"] = labor_rates_block
+            elif not isinstance(labor_rates_block, dict):
+                labor_rates_block = {}
+                rates["labor"] = labor_rates_block
+            labor_rates_block["Programmer"] = programmer_rate
+            labor_rates_block["programmer"] = programmer_rate
+            labor_rates_block["PROGRAMMER"] = programmer_rate
+            rates["ProgrammerRate"] = programmer_rate
+            rates["ProgrammingRate"] = programmer_rate
 
     detail_map["prog_rate"] = programmer_rate
     programming_detail_container["programming"] = detail_map
