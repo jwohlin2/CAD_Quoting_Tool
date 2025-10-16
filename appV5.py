@@ -203,6 +203,16 @@ def _jsonify_debug_summary(summary: Mapping[str, Any]) -> dict[str, Any]:
     return _debug_jsonify_summary(summary)
 
 
+def _first_numeric_or_none(*values: Any) -> float | None:
+    """Return the first value that can be coerced to a float, or ``None``."""
+
+    for value in values:
+        numeric = _coerce_float_or_none(value)
+        if numeric is not None:
+            return float(numeric)
+    return None
+
+
 # --- STOCK & MATERIAL HELPERS ------------------------------------------------
 
 STANDARD_PLATE_SIDES_IN = [3, 6, 12, 18, 24, 36, 48, 60]
@@ -4279,6 +4289,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     )
     if material_total_for_directs_val is None:
         material_total_for_directs_val = _coerce_float_or_none(
+            material_block.get("total_cost")
+        )
+    if material_total_for_directs_val is None:
+        material_total_for_directs_val = _coerce_float_or_none(
             material_block.get("material_cost")
         )
     if material_total_for_directs_val is None:
@@ -7486,6 +7500,20 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             canonical_pass_label = canonical_label
             if "labor" in canonical_pass_label.lower():
                 pass_through_labor_total += amount_val
+    vendor_items_total = 0.0
+    vendor_item_sources: list[_MappingABC] = []
+    for vendor_source in (
+        breakdown.get("vendor_items") if isinstance(breakdown, _MappingABC) else None,
+        pass_through.get("vendor_items") if isinstance(pass_through, _MappingABC) else None,
+    ):
+        if isinstance(vendor_source, _MappingABC):
+            vendor_item_sources.append(vendor_source)
+    for vendor_map in vendor_item_sources:
+        for amount in vendor_map.values():
+            numeric = _coerce_float_or_none(amount)
+            if numeric is not None:
+                vendor_items_total += float(numeric)
+
     material_direct_contribution = round(
         material_total_for_directs + material_tax_for_directs - scrap_credit_for_directs,
         2,
@@ -7541,6 +7569,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         direct_costs_map[target_key] = amount_float
 
     _assign_direct_value("material", material_direct_contribution)
+    if vendor_items_total > 0 or show_zeros:
+        _assign_direct_value("vendor items", vendor_items_total)
 
     for key, amount_val in displayed_pass_through.items():
         _assign_direct_value(key, amount_val)
@@ -7663,24 +7693,46 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     try:
         material_breakdown_entry = breakdown.get("material") if isinstance(breakdown, _MappingABC) else None
         if isinstance(material_breakdown_entry, _MappingABC):
-            material_for_totals = _safe_float(
+            total_candidate = _first_numeric_or_none(
+                material_breakdown_entry.get("total_cost"),
                 material_breakdown_entry.get("total_material_cost"),
-                default=material_for_totals,
+                material_breakdown_entry.get("material_total_cost"),
+                material_breakdown_entry.get("material_cost"),
+                material_breakdown_entry.get("material_cost_before_credit"),
+                material_breakdown_entry.get("material_direct_cost"),
             )
+            if total_candidate is not None:
+                material_for_totals = float(total_candidate)
     except Exception:
         pass
 
-    directs_total_value = float(pass_through_total) + float(material_for_totals)
+    computed_direct_total = round(
+        float(pass_through_total) + float(material_for_totals) + float(vendor_items_total),
+        2,
+    )
+    directs_total_value = float(computed_direct_total)
+    total_direct_costs_value = computed_direct_total
     labor_summary_total = _safe_float(proc_total, 0.0)
     machine_summary_total = _safe_float(display_machine, 0.0)
     ladder_labor_component = labor_summary_total
+
+    if isinstance(breakdown, dict):
+        breakdown["pass_through_total"] = pass_through_total
+        breakdown["total_direct_costs"] = total_direct_costs_value
+        breakdown["total_labor_cost"] = round(ladder_labor_component, 2)
+        if vendor_items_total:
+            breakdown["vendor_items_total"] = float(round(vendor_items_total, 2))
 
     if isinstance(totals, dict):
         totals["labor$"] = round(labor_summary_total, 2)
         totals["machine$"] = round(machine_summary_total, 2)
         totals["directs$"] = round(directs_total_value, 2)
 
-    ladder_subtotal = round(ladder_labor_component + directs_total_value, 2)
+    ladder_subtotal = round(
+        _safe_float((breakdown or {}).get("total_labor_cost"), ladder_labor_component)
+        + _safe_float((breakdown or {}).get("total_direct_costs"), directs_total_value),
+        2,
+    )
     if isinstance(breakdown, _MutableMappingABC):
         breakdown["ladder_subtotal"] = ladder_subtotal
 
@@ -7933,6 +7985,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         ladder_directs = ladder_directs_override
 
     computed_total_labor_cost = ladder_labor
+    if isinstance(breakdown, dict):
+        breakdown["total_labor_cost"] = round(ladder_labor, 2)
     if isinstance(totals, dict):
         totals["labor_cost"] = ladder_labor
 
@@ -12490,10 +12544,26 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         if supplier_min is not None and supplier_min > 0:
             material_entry.setdefault("supplier_min_charge", float(supplier_min))
 
+    material_total_direct_cost = _first_numeric_or_none(
+        (material_entry or {}).get("total_cost") if isinstance(material_entry, _MappingABC) else None,
+        (material_entry or {}).get("total_material_cost") if isinstance(material_entry, _MappingABC) else None,
+        (material_entry or {}).get("material_total_cost") if isinstance(material_entry, _MappingABC) else None,
+        (material_entry or {}).get("material_cost_before_credit") if isinstance(material_entry, _MappingABC) else None,
+        (material_entry or {}).get("material_cost") if isinstance(material_entry, _MappingABC) else None,
+        (material_entry or {}).get("material_direct_cost") if isinstance(material_entry, _MappingABC) else None,
+        mat_block.get("total_cost"),
+        mat_block.get("total_material_cost"),
+        mat_block.get("material_cost"),
+        mat_block.get("material_cost_before_credit"),
+    )
+    if material_total_direct_cost is not None:
+        material_direct_contribution = round(material_total_direct_cost, 2)
+        material_display_amount = round(material_total_direct_cost, 2)
+        material_total_for_directs = float(material_total_direct_cost)
+        material_total_for_why = float(material_display_amount)
+        material_net_cost = float(material_total_direct_cost)
+
     breakdown.setdefault("pass_through_total", 0.0)
-    breakdown["total_direct_costs"] = float(
-        mat_block.get("total_material_cost", 0.0) or 0.0
-    ) + float(breakdown.get("pass_through_total", 0.0) or 0.0)
 
     bucket_minutes_detail_for_render = breakdown.setdefault("bucket_minutes_detail", {})
     if not isinstance(bucket_minutes_detail_for_render, dict):
