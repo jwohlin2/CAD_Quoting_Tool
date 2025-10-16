@@ -3952,6 +3952,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     target_app_meta["llm_debug_enabled"] = True
 
     totals       = breakdown.get("totals", {}) or {}
+    if not isinstance(totals, dict):
+        try:
+            totals = dict(totals or {})
+        except Exception:
+            totals = {}
+        breakdown["totals"] = totals
+    else:
+        breakdown["totals"] = totals
     declared_labor_total = float(totals.get("labor_cost", 0.0) or 0.0)
     nre_detail   = breakdown.get("nre_detail", {}) or {}
     nre_raw      = breakdown.get("nre", {}) or {}
@@ -5534,6 +5542,19 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if total_material_cost is not None:
                 try:
                     material_block["total_material_cost"] = total_material_cost
+                except Exception:
+                    pass
+                try:
+                    material_record = breakdown.get("material") if isinstance(breakdown, _MappingABC) else None
+                    if isinstance(material_record, _MutableMappingABC):
+                        material_record["total_material_cost"] = float(total_material_cost)
+                    elif isinstance(material_record, _MappingABC):
+                        updated_material = dict(material_record)
+                        updated_material["total_material_cost"] = float(total_material_cost)
+                        if isinstance(breakdown, _MutableMappingABC):
+                            breakdown["material"] = updated_material
+                    elif isinstance(breakdown, _MutableMappingABC):
+                        breakdown["material"] = {"total_material_cost": float(total_material_cost)}
                 except Exception:
                     pass
             net_mass_val = _coerce_float_or_none(net_mass_g)
@@ -7440,6 +7461,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     # ---- Pass-Through & Direct (auto include non-zeros; sorted desc) --------
     append_line("Pass-Through & Direct Costs")
+    pass_through_header_index = len(lines) - 1
     append_line(divider)
     pass_total = 0.0
     pass_through_labor_total = 0.0
@@ -7602,8 +7624,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 if detail_candidate not in (None, ""):
                     material_detail_value = detail_candidate
                     break
+        material_amount_text = fmt_money(material_display_amount, currency)
         if material_detail_value not in (None, ""):
-            write_detail(str(material_detail_value), indent="    ")
+            detail_text = str(material_detail_value)
+            if "$0.00" in detail_text:
+                detail_text = detail_text.replace("$0.00", material_amount_text)
+            write_detail(detail_text, indent="    ")
+        else:
+            write_detail(
+                f"Material & Stock (printed above) contributes {material_amount_text} to Direct Costs",
+                indent="    ",
+            )
 
     for display_label, amount_val, raw_key in display_entries:
         if (amount_val > 0) or show_zeros:
@@ -7622,6 +7653,43 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     row("Total", total_direct_costs_value, indent="  ")
     pass_through_total = float(sum(displayed_pass_through.values()))
 
+    material_for_totals = material_display_amount
+    try:
+        material_breakdown_entry = breakdown.get("material") if isinstance(breakdown, _MappingABC) else None
+        if isinstance(material_breakdown_entry, _MappingABC):
+            material_for_totals = _safe_float(
+                material_breakdown_entry.get("total_material_cost"),
+                default=material_for_totals,
+            )
+    except Exception:
+        pass
+
+    directs_total_value = float(pass_through_total) + float(material_for_totals)
+    labor_summary_total = _safe_float(proc_total, 0.0)
+    machine_summary_total = _safe_float(display_machine, 0.0)
+    ladder_labor_component = labor_summary_total
+
+    if isinstance(totals, dict):
+        totals["labor$"] = round(labor_summary_total, 2)
+        totals["machine$"] = round(machine_summary_total, 2)
+        totals["directs$"] = round(directs_total_value, 2)
+
+    ladder_subtotal = round(ladder_labor_component + directs_total_value, 2)
+    if isinstance(breakdown, _MutableMappingABC):
+        breakdown["ladder_subtotal"] = ladder_subtotal
+
+    if 0 <= pass_through_header_index < len(lines):
+        header_text = f"Pass-Through & Direct Costs (Total: {fmt_money(directs_total_value, currency)})"
+        lines[pass_through_header_index] = header_text
+        try:
+            sections = getattr(doc_builder, "_sections", [])
+            for section in reversed(sections):
+                if getattr(section, "title", None) == "Pass-Through & Direct Costs":
+                    section.title = header_text
+                    break
+        except Exception:
+            pass
+
     if isinstance(pricing, dict):
         pricing["total_direct_costs"] = total_direct_costs_value
     if isinstance(breakdown, dict):
@@ -7630,6 +7698,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             breakdown["total_direct_costs"] = total_direct_costs_value
         except Exception:
             breakdown["total_direct_costs"] = total_direct_costs
+    directs = float(round(directs_total_value, 2))
     if isinstance(totals, dict):
         totals["direct_costs"] = total_direct_costs_value
     if 0 <= total_direct_costs_row_index < len(lines):
@@ -7835,6 +7904,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 labor_component = _safe_float(metrics.get("labor$"), 0.0)
                 machine_component = _safe_float(metrics.get("machine$"), 0.0)
                 ladder_labor_total += labor_component + machine_component
+
+    if labor_summary_total > 0 and not math.isclose(
+        ladder_labor_total,
+        labor_summary_total,
+        abs_tol=0.01,
+    ):
+        ladder_labor_total = labor_summary_total
 
     amortized_component = float(amortized_nre_total if qty > 1 else 0.0)
     fallback_ladder_labor = round(base_bucket_labor + amortized_component, 2)
@@ -8152,6 +8228,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     price = final_price
     if isinstance(result, dict):
         result["price"] = price
+    if isinstance(breakdown, dict):
+        breakdown["final_price"] = final_price
     replace_line(final_price_row_index, _format_row("Final Price per Part:", price))
 
     row("Subtotal (Labor + Directs):", subtotal)

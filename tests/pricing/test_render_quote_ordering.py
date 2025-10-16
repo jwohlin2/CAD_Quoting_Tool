@@ -98,7 +98,9 @@ def test_total_direct_costs_uses_pricing_breakdown() -> None:
     direct_line = next(line for line in lines if line.startswith("Total Direct Costs:"))
     assert direct_line.endswith("$17.50")
 
-    pass_section_start = lines.index("Pass-Through & Direct Costs")
+    pass_section_start = next(
+        idx for idx, line in enumerate(lines) if line.startswith("Pass-Through & Direct Costs")
+    )
     pass_section_end = next(
         idx
         for idx in range(pass_section_start, len(lines))
@@ -951,7 +953,9 @@ def test_render_quote_displays_single_shipping_entry_and_reconciles_ladder() -> 
     material_section = lines[material_idx:material_end]
     assert all("Shipping" not in line for line in material_section)
 
-    pass_idx = lines.index("Pass-Through & Direct Costs")
+    pass_idx = next(
+        idx for idx, line in enumerate(lines) if line.startswith("Pass-Through & Direct Costs")
+    )
     pass_end = next(idx for idx in range(pass_idx, len(lines)) if lines[idx] == "")
     pass_section = lines[pass_idx:pass_end]
     shipping_lines = [line for line in pass_section if "Shipping" in line]
@@ -1203,7 +1207,9 @@ def test_render_quote_direct_costs_match_displayed_pass_through() -> None:
 
     rendered = appV5.render_quote(result, currency="$")
     lines = rendered.splitlines()
-    pass_idx = lines.index("Pass-Through & Direct Costs")
+    pass_idx = next(
+        idx for idx, line in enumerate(lines) if line.startswith("Pass-Through & Direct Costs")
+    )
     pass_end = next(idx for idx in range(pass_idx, len(lines)) if lines[idx] == "")
     pass_section = lines[pass_idx:pass_end]
 

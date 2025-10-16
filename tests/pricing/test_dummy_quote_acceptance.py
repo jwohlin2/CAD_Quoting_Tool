@@ -659,14 +659,22 @@ def test_dummy_quote_direct_costs_match_across_sections() -> None:
     top_direct = _extract_currency(top_direct_line)
     assert math.isclose(top_direct, direct_costs, abs_tol=0.01)
 
-    pass_section_start = lines.index("Pass-Through & Direct Costs")
+    pass_section_start = next(
+        idx for idx, line in enumerate(lines) if line.startswith("Pass-Through & Direct Costs")
+    )
     pass_section: list[str] = []
     for line in lines[pass_section_start + 2 :]:
         if not line.strip():
             break
         pass_section.append(line)
+    pass_header_line = lines[pass_section_start]
+    assert math.isclose(_extract_currency(pass_header_line), direct_costs, abs_tol=0.01)
     material_line = next(line for line in pass_section if "Material & Stock" in line)
     assert math.isclose(_extract_currency(material_line), material_total, abs_tol=0.01)
+    material_detail_line = next(
+        line for line in pass_section if "contributes" in line and "Material & Stock" in line
+    )
+    assert math.isclose(_extract_currency(material_detail_line), material_total, abs_tol=0.01)
 
     pass_through_block = payload["breakdown"].get("pass_through", {}) or {}
     shipping_amount = float(pass_through_block.get("Shipping", 0.0))
