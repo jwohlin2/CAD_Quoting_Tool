@@ -5141,9 +5141,24 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             removed_g = _coerce_float_or_none(material.get("material_removed_mass_g"))
         if removed_g is None and isinstance(material, _MappingABC):
             removed_g = _coerce_float_or_none(material.get("material_removed_mass_g_est"))
-        removed_g = float(removed_g or 0.0)
-        net_g = max(0.0, float(starting_g) - removed_g)
-        scrap_g = max(0.0, float(starting_g) - net_g)
+
+        if removed_g is not None:
+            removed_val = max(0.0, float(removed_g))
+            net_g = max(0.0, float(starting_g) - removed_val)
+            scrap_g = max(0.0, float(starting_g) - net_g)
+        else:
+            scrap_frac = 0.0
+            for source in (mat_info, material, baseline):
+                if not isinstance(source, _MappingABC):
+                    continue
+                scrap_candidate = _coerce_float_or_none(source.get("scrap_pct"))
+                if scrap_candidate is None:
+                    continue
+                scrap_frac = normalize_scrap_pct(scrap_candidate)
+                if scrap_frac > 0:
+                    break
+            scrap_g = float(starting_g) * float(scrap_frac or 0.0)
+            net_g = max(0.0, float(starting_g) - scrap_g)
 
         mat_info["starting_mass_g_est"] = float(starting_g)
         mat_info["net_mass_g"] = float(net_g)
