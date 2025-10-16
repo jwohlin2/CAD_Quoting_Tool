@@ -189,6 +189,106 @@ def _mcm_price_for_part(part_number: str) -> float | None:
         return None
 
 
+def _material_cost_components(
+    material_block: Mapping[str, Any] | None,
+    *,
+    overrides: Mapping[str, Any] | None = None,
+    cfg: Any | None = None,
+) -> dict[str, Any]:
+    """Return normalized material cost components for UI breakdowns."""
+
+    block = material_block or {}
+    overrides = overrides or {}
+
+    start_g = (
+        block.get("starting_mass_g")
+        or block.get("start_mass_g")
+        or block.get("start_g")
+        or 0.0
+    )
+    scrap_g = block.get("scrap_mass_g") or 0.0
+    try:
+        start_lb = float(start_g) * 0.00220462262
+    except Exception:
+        start_lb = 0.0
+    try:
+        scrap_lb = float(scrap_g) * 0.00220462262
+    except Exception:
+        scrap_lb = 0.0
+
+    per_lb = block.get("unit_price_per_lb_usd")
+    per_lb_src = block.get("unit_price_per_lb_source") or block.get("unit_price_source")
+
+    stock_piece_usd_raw = block.get("stock_piece_price_usd")
+    stock_source = block.get("stock_piece_source")
+    stock_piece_usd = None
+    try:
+        if isinstance(stock_piece_usd_raw, (int, float)) and float(stock_piece_usd_raw) > 0:
+            stock_piece_usd = float(stock_piece_usd_raw)
+    except Exception:
+        stock_piece_usd = None
+
+    if stock_piece_usd is not None:
+        base_usd = float(stock_piece_usd)
+        base_src = stock_source or "Stock piece"
+    else:
+        try:
+            price_per_lb = float(per_lb or 0.0)
+        except Exception:
+            price_per_lb = 0.0
+        base_usd = float(start_lb) * price_per_lb
+        base_src = f"{per_lb_src or 'per-lb'} @ ${price_per_lb:.2f}/lb"
+
+    try:
+        tax_usd = float(block.get("material_tax_usd") or block.get("material_tax") or 0.0)
+    except Exception:
+        tax_usd = 0.0
+
+    scrap_usd_lb = block.get("scrap_price_usd_per_lb")
+    if scrap_usd_lb is None:
+        try:
+            scrap_usd_lb = float(overrides.get("scrap_usd_per_lb"))
+        except Exception:
+            scrap_usd_lb = None
+    recovery = overrides.get("scrap_recovery_pct", overrides.get("scrap_recovery_fraction"))
+    try:
+        recovery_val = float(recovery) if recovery is not None else 0.85
+    except Exception:
+        recovery_val = 0.85
+    if recovery_val > 1.0 + 1e-6:
+        recovery_val = recovery_val / 100.0
+    recovery_val = max(0.0, min(1.0, recovery_val))
+
+    try:
+        scrap_unit_price = float(scrap_usd_lb or 0.0)
+    except Exception:
+        scrap_unit_price = 0.0
+
+    scrap_credit = float(scrap_lb) * scrap_unit_price * recovery_val
+    explicit_credit = block.get("material_scrap_credit") or block.get("scrap_credit_usd")
+    if explicit_credit not in (None, ""):
+        try:
+            scrap_credit = max(0.0, float(explicit_credit))
+        except Exception:
+            pass
+    scrap_rate_text = None
+    if scrap_unit_price > 0 and scrap_lb > 0:
+        scrap_rate_text = f"${scrap_unit_price:.2f}/lb × {recovery_val:.0%}"
+
+    total = round(base_usd + tax_usd - scrap_credit, 2)
+
+    return {
+        "base_usd": round(base_usd, 2),
+        "base_source": base_src,
+        "tax_usd": round(tax_usd, 2),
+        "scrap_credit_usd": round(scrap_credit, 2) if scrap_credit else 0.0,
+        "scrap_rate_text": scrap_rate_text,
+        "stock_piece_usd": round(stock_piece_usd, 2) if stock_piece_usd else None,
+        "stock_source": stock_source,
+        "total_usd": total,
+    }
+
+
 def _compute_material_block(
     geo_ctx: dict,
     material_key: str,
@@ -266,6 +366,8 @@ def _compute_material_block(
 
     unit_price_usd: float | None = None
     api_price = None
+    stock_piece_api_price: float | None = None
+    stock_piece_api_source: str | None = None
     if part_no and str(stock_price_source or "").strip().lower() == "mcmaster_api":
         api_price = _mcm_price_for_part(str(part_no))
     if api_price and api_price > 0:
@@ -275,6 +377,8 @@ def _compute_material_block(
         if start_lb > 0:
             price_per_lb = float(unit_price_each) / float(start_lb)
         price_source = f"McMaster API (qty=1, part={part_no})"
+        stock_piece_api_price = float(api_price)
+        stock_piece_api_source = price_source
         provenance.append(price_source)
 
     if price_per_lb <= 0:
@@ -351,6 +455,9 @@ def _compute_material_block(
         result["unit_price_usd"] = float(unit_price_usd)
     if provenance:
         result["provenance"] = provenance
+    if stock_piece_api_price is not None and stock_piece_api_price > 0:
+        result["stock_piece_price_usd"] = float(stock_piece_api_price)
+        result["stock_piece_source"] = stock_piece_api_source or price_source
 
     return result
 
