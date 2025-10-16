@@ -802,6 +802,7 @@ def explain_quote(
     hour_trace: Mapping[str, Any] | Sequence[tuple[str, Any]] | None = None,
     geometry: Mapping[str, Any] | None = None,
     render_state: Any | None = None,
+    plan_info: Mapping[str, Any] | None = None,
 ) -> str:
     """Return a short natural-language explanation for a rendered quote."""
 
@@ -918,7 +919,143 @@ def explain_quote(
     if removal_hr is None and isinstance(breakdown, Mapping):
         removal_hr = _extract_removal_hours(breakdown.get("removal_summary"))
 
+    def _count_recognized_ops(plan_summary: Mapping[str, Any] | None) -> int:
+        if not isinstance(plan_summary, Mapping):
+            return 0
+        ops = plan_summary.get("ops")
+        if not isinstance(ops, Sequence):
+            return 0
+        count = 0
+        for entry in ops:
+            if isinstance(entry, Mapping):
+                count += 1
+            elif entry is not None:
+                try:
+                    if bool(entry):
+                        count += 1
+                except Exception:
+                    count += 1
+        return count
+
+    plan_drilling_reasons: list[str] = []
+
+    def _add_reason(text: str | None) -> None:
+        if not text:
+            return
+        normalized = text.strip()
+        if not normalized:
+            return
+        if normalized not in plan_drilling_reasons:
+            plan_drilling_reasons.append(normalized)
+
+    def _iter_plan_mappings(root: Mapping[str, Any] | None) -> Iterable[Mapping[str, Any]]:
+        if not isinstance(root, Mapping):
+            return []
+        stack: list[Mapping[str, Any]] = [root]
+        seen: set[int] = set()
+        while stack:
+            current = stack.pop()
+            ident = id(current)
+            if ident in seen:
+                continue
+            seen.add(ident)
+            yield current
+            for key in (
+                "planner_pricing",
+                "process_plan_summary",
+                "process_plan",
+                "pricing",
+                "plan_summary",
+                "plan",
+                "bucket_state_extra",
+            ):
+                candidate = current.get(key) if isinstance(current, Mapping) else None
+                if isinstance(candidate, Mapping):
+                    stack.append(candidate)
+
+    def _line_items_from(mapping: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
+        items = mapping.get("line_items")
+        if isinstance(items, Sequence):
+            for entry in items:
+                if isinstance(entry, Mapping):
+                    yield entry
+
+    def _check_bucket_map(mapping: Mapping[str, Any] | None) -> None:
+        if not isinstance(mapping, Mapping):
+            return
+        for raw_key, raw_value in mapping.items():
+            key_text = str(raw_key or "").strip().lower()
+            if "drill" not in key_text:
+                continue
+            minutes_val = _coerce_float(raw_value)
+            if minutes_val is None and isinstance(raw_value, Mapping):
+                minutes_val = _coerce_float(raw_value.get("minutes"))
+            if minutes_val is not None and minutes_val > 0:
+                hours_text = fmt_hours(minutes_val / 60.0)
+                _add_reason(f"planner buckets allocate {hours_text} to drilling")
+            else:
+                _add_reason("planner buckets include drilling")
+
+    plan_info_mappings: list[Mapping[str, Any]] = []
+    if isinstance(plan_info, Mapping) and plan_info:
+        plan_info_mappings.extend(_iter_plan_mappings(plan_info))
+
+    recognized_ops_from_plan = 0
+    for mapping in plan_info_mappings:
+        raw_recognized = mapping.get("recognized_line_items")
+        recognized_val = _coerce_int(raw_recognized)
+        if recognized_val is not None and recognized_val > 0:
+            recognized_ops_from_plan = max(recognized_ops_from_plan, recognized_val)
+
+        for item in _line_items_from(mapping):
+            name = str(item.get("op") or item.get("name") or "").strip()
+            if name and "drill" in name.lower():
+                _add_reason(f"planner operations include {name}")
+
+        for summary_key in ("plan_summary", "plan"):
+            summary = mapping.get(summary_key)
+            if isinstance(summary, Mapping):
+                recognized_ops_from_plan = max(
+                    recognized_ops_from_plan,
+                    _count_recognized_ops(summary),
+                )
+                ops = summary.get("ops")
+                if isinstance(ops, Sequence):
+                    for entry in ops:
+                        if isinstance(entry, Mapping):
+                            label = (
+                                entry.get("name")
+                                or entry.get("op")
+                                or entry.get("type")
+                                or entry.get("bucket")
+                            )
+                        else:
+                            label = entry
+                        label_text = str(label or "").strip()
+                        if label_text and "drill" in label_text.lower():
+                            _add_reason(f"planner operations include {label_text}")
+
+        for bucket_key in (
+            "bucket_minutes_detail",
+            "bucket_minutes_detail_for_render",
+        ):
+            _check_bucket_map(mapping.get(bucket_key) if isinstance(mapping, Mapping) else None)
+
+        bucket_view = mapping.get("bucket_view") if isinstance(mapping, Mapping) else None
+        if isinstance(bucket_view, Mapping):
+            buckets = bucket_view.get("buckets")
+            if isinstance(buckets, Mapping):
+                _check_bucket_map(buckets)
+            else:
+                _check_bucket_map(bucket_view)
+
+    if not plan_drilling_reasons and recognized_ops_from_plan > 0:
+        # Recognized operations present but no explicit drilling signal; treat as informational only.
+        plan_drilling_reasons = []
+
     should_note_drilling = hole_groups_flag or (removal_hr is not None and removal_hr > 0)
+    if not should_note_drilling and plan_drilling_reasons:
+        should_note_drilling = True
 
     price_text = _format_money(totals.get("price") or breakdown.get("price"))
     qty_val = _coerce_int(totals.get("qty") or breakdown.get("qty") or breakdown.get("quantity"))
@@ -1006,6 +1143,10 @@ def explain_quote(
             if removal_hr is not None and removal_hr > 0:
                 hours_text = fmt_hours(removal_hr)
                 reasons.append(f"removal card tracks {hours_text} of drilling")
+            if plan_drilling_reasons:
+                for reason in plan_drilling_reasons:
+                    if reason not in reasons:
+                        reasons.append(reason)
             reason_text = " and ".join(reasons) if reasons else "process data includes drilling"
             lines.append(f"Drilling is included because {reason_text}.")
 

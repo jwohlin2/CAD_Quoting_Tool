@@ -6935,21 +6935,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 geometry_for_explainer = typing.cast(Mapping[str, Any], candidate)
                 break
 
-    try:
-        explanation_text = explain_quote(
-            breakdown,
-            hour_trace=hour_trace_data,
-            geometry=geometry_for_explainer,
-            render_state=bucket_state,
-        )
-    except Exception:
-        explanation_text = ""
-    if explanation_text:
-        for line in str(explanation_text).splitlines():
-            text = line.strip()
-            if text:
-                explanation_lines.append(text)
-
     def _norm(s: Any) -> str:
         import re
 
@@ -9281,6 +9266,57 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             for w in _tw.wrap(str(n), width=page_width):
                 append_line(f"- {w}")
         append_line("")
+
+    plan_info_for_explainer: dict[str, Any] = {}
+    if isinstance(process_plan_summary_local, _MappingABC) and process_plan_summary_local:
+        plan_info_for_explainer["process_plan_summary"] = process_plan_summary_local
+
+    if isinstance(breakdown, _MappingABC):
+        planner_pricing_for_explainer = breakdown.get("process_plan_pricing")
+        if isinstance(planner_pricing_for_explainer, _MappingABC) and planner_pricing_for_explainer:
+            plan_info_for_explainer.setdefault(
+                "planner_pricing",
+                planner_pricing_for_explainer,
+            )
+            for key in ("line_items", "plan_summary", "plan", "recognized_line_items"):
+                if key in planner_pricing_for_explainer:
+                    plan_info_for_explainer.setdefault(key, planner_pricing_for_explainer.get(key))
+
+        process_plan_card = breakdown.get("process_plan")
+        if isinstance(process_plan_card, _MappingABC) and process_plan_card:
+            plan_info_for_explainer.setdefault("process_plan", process_plan_card)
+
+        bucket_minutes_detail_for_render = breakdown.get("bucket_minutes_detail")
+        if isinstance(bucket_minutes_detail_for_render, _MappingABC) and bucket_minutes_detail_for_render:
+            plan_info_for_explainer.setdefault(
+                "bucket_minutes_detail",
+                bucket_minutes_detail_for_render,
+            )
+
+        bucket_view_for_plan = breakdown.get("bucket_view")
+        if isinstance(bucket_view_for_plan, _MappingABC) and bucket_view_for_plan:
+            plan_info_for_explainer.setdefault("bucket_view", bucket_view_for_plan)
+
+    if isinstance(bucket_state, PlannerBucketRenderState):
+        extra_for_plan = getattr(bucket_state, "extra", None)
+        if isinstance(extra_for_plan, _MappingABC) and extra_for_plan:
+            plan_info_for_explainer.setdefault("bucket_state_extra", extra_for_plan)
+
+    try:
+        explanation_text = explain_quote(
+            breakdown,
+            hour_trace=hour_trace_data,
+            geometry=geometry_for_explainer,
+            render_state=bucket_state,
+            plan_info=plan_info_for_explainer or None,
+        )
+    except Exception:
+        explanation_text = ""
+    if explanation_text:
+        for line in str(explanation_text).splitlines():
+            text = line.strip()
+            if text:
+                explanation_lines.append(text)
 
     if explanation_lines:
         why_lines.extend(explanation_lines)
