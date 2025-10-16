@@ -20745,6 +20745,55 @@ class App(tk.Tk):
             )
             if not isinstance(res, dict):
                 res = {}
+            reprice_with_effective(self.quote_state)
+
+            effective_payload = (
+                self.quote_state.effective
+                if isinstance(self.quote_state.effective, _MappingABC)
+                else {}
+            )
+            effective_sources_payload = (
+                self.quote_state.effective_sources
+                if isinstance(self.quote_state.effective_sources, _MappingABC)
+                else {}
+            )
+            effective_snapshot = dict(effective_payload)
+            effective_sources_snapshot = dict(effective_sources_payload)
+
+            decision_state_payload = res.get("decision_state") if isinstance(res, dict) else None
+            if isinstance(decision_state_payload, _MutableMappingABC):
+                decision_state_payload["effective"] = effective_snapshot
+                decision_state_payload["effective_sources"] = effective_sources_snapshot
+            elif isinstance(decision_state_payload, _MappingABC):
+                refreshed_state = dict(decision_state_payload)
+                refreshed_state["effective"] = effective_snapshot
+                refreshed_state["effective_sources"] = effective_sources_snapshot
+                res["decision_state"] = refreshed_state
+            else:
+                baseline_payload = (
+                    self.quote_state.baseline
+                    if isinstance(self.quote_state.baseline, _MappingABC)
+                    else {}
+                )
+                suggestions_payload = (
+                    self.quote_state.suggestions
+                    if isinstance(self.quote_state.suggestions, _MappingABC)
+                    else {}
+                )
+                overrides_payload = (
+                    self.quote_state.user_overrides
+                    if isinstance(self.quote_state.user_overrides, _MappingABC)
+                    else {}
+                )
+                res["decision_state"] = {
+                    "baseline": dict(baseline_payload),
+                    "suggestions": dict(suggestions_payload),
+                    "user_overrides": dict(overrides_payload),
+                    "effective": effective_snapshot,
+                    "effective_sources": effective_sources_snapshot,
+                }
+
+            res.setdefault("quote_state", self.quote_state.to_dict())
             cfg = getattr(self, "quote_config", None)
             geometry_ctx: Mapping[str, Any] | None = None
             if isinstance(self.geo_context, dict) and self.geo_context:
