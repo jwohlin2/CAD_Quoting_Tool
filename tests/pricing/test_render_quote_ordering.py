@@ -1259,8 +1259,8 @@ def test_render_quote_backfills_programming_and_inspection_rates() -> None:
     rendered = appV5.render_quote(result, currency="$", show_zeros=False)
     lines = rendered.splitlines()
 
-    assert any("Programming Cost:" in line and "$255" in line for line in lines)
-    assert any("Programmer:" in line and "$85.00/hr" in line for line in lines)
+    assert any("Programming Cost:" in line and "$270" in line for line in lines)
+    assert any("Programmer:" in line and "$90.00/hr" in line for line in lines)
     assert any("Programming Hrs:" in line and "3.00 hr" in line for line in lines)
 
     inspection_idx = next(

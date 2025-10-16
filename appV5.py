@@ -4163,7 +4163,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if machine_rate_value <= 0:
         machine_rate_value = _coerce_rate_value(rates.get("ShopMachineRate"))
     if machine_rate_value <= 0:
-        machine_rate_value = 110.0
+        machine_rate_value = 90.0
     rates["MachineRate"] = machine_rate_value
 
     if "ProgrammerRate" not in rates:
@@ -4175,7 +4175,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if programmer_fallback <= 0:
             programmer_fallback = _coerce_rate_value(rates.get("LaborRate"))
         if programmer_fallback <= 0:
-            programmer_fallback = 85.0
+            programmer_fallback = 90.0
+        if programmer_fallback > 0:
+            programmer_fallback = max(programmer_fallback, 90.0)
         rates.setdefault("ProgrammerRate", programmer_fallback)
 
     programmer_rate_value = _coerce_rate_value(rates.get("ProgrammerRate"))
@@ -4186,7 +4188,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if programmer_rate_value <= 0:
         programmer_rate_value = labor_rate_value
     if programmer_rate_value <= 0:
-        programmer_rate_value = 85.0
+        programmer_rate_value = 90.0
+    if programmer_rate_value > 0:
+        programmer_rate_value = max(programmer_rate_value, 90.0)
     rates["ProgrammerRate"] = programmer_rate_value
 
     programming_rate_value = _coerce_rate_value(rates.get("ProgrammingRate"))
@@ -4195,7 +4199,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if programming_rate_value <= 0:
         programming_rate_value = labor_rate_value
     if programming_rate_value <= 0:
-        programming_rate_value = 85.0
+        programming_rate_value = 90.0
+    if programming_rate_value > 0:
+        programming_rate_value = max(programming_rate_value, 90.0)
     rates["ProgrammingRate"] = programming_rate_value
 
     inspector_rate_value = _coerce_rate_value(rates.get("InspectorRate"))
@@ -4203,6 +4209,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         inspector_rate_value = labor_rate_value
     if inspector_rate_value <= 0:
         inspector_rate_value = 85.0
+    if inspector_rate_value > 0:
+        inspector_rate_value = max(inspector_rate_value, 85.0)
     rates["InspectorRate"] = inspector_rate_value
 
     inspection_rate_value = _coerce_rate_value(rates.get("InspectionRate"))
@@ -4212,10 +4220,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         inspection_rate_value = labor_rate_value
     if inspection_rate_value <= 0:
         inspection_rate_value = 85.0
+    if inspection_rate_value > 0:
+        inspection_rate_value = max(inspection_rate_value, 85.0)
     rates["InspectionRate"] = inspection_rate_value
 
     rates.setdefault("LaborRate", 85.0)
-    rates.setdefault("MachineRate", 110.0)
+    rates.setdefault("MachineRate", 90.0)
     rates.setdefault("ProgrammingRate", rates.get("ProgrammerRate", rates["LaborRate"]))
     rates.setdefault("InspectionRate", rates.get("InspectorRate", rates["LaborRate"]))
 
@@ -13926,10 +13936,10 @@ def default_variables_template() -> pd.DataFrame:
         ("G&A %", 0.08, "number"),
         ("Contingency %", 0.0, "number"),
         ("Profit Margin %", 0.0, "number"),
-        ("Programmer $/hr", 120.0, "number"),
-        ("CAM Programmer $/hr", 125.0, "number"),
-        ("Milling $/hr", 100.0, "number"),
-        ("Inspection $/hr", 95.0, "number"),
+        ("Programmer $/hr", 90.0, "number"),
+        ("CAM Programmer $/hr", 90.0, "number"),
+        ("Milling $/hr", 90.0, "number"),
+        ("Inspection $/hr", 85.0, "number"),
         ("Deburr $/hr", 60.0, "number"),
         ("Packaging $/hr", 55.0, "number"),
         ("Programming Hours", 0.0, "number"),
