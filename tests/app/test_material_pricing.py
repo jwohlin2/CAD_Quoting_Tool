@@ -85,3 +85,59 @@ def test_material_price_helper_returns_fallback_price(monkeypatch):
 
     assert price_per_g == pytest.approx(0.4)
     assert source == "backup_csv"
+
+
+def test_compute_material_block_uses_price_resolver(monkeypatch):
+    module = types.ModuleType("metals_api")
+
+    def _raise(_material_key: str) -> float:
+        raise RuntimeError("metals api offline")
+
+    module.price_per_lb_for_material = _raise  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "metals_api", module)
+
+    calls: list[tuple[str, str]] = []
+
+    def _fake_resolver(name: str, *, unit: str = "kg") -> tuple[float, str]:
+        calls.append((name, unit))
+        assert unit == "lb"
+        return 10.0, "resolver"
+
+    monkeypatch.setattr(appV5, "_resolve_material_unit_price", _fake_resolver)
+
+    geo_ctx = {
+        "material_display": "Aluminum 6061",
+        "thickness_in": 1.0,
+        "outline_bbox": {"plate_len_in": 2.0, "plate_wid_in": 3.0},
+    }
+
+    block = appV5._compute_material_block(geo_ctx, "aluminum", 2.70, 0.1)
+
+    assert calls == [("Aluminum 6061", "lb")]
+    assert block["price_per_lb"] == pytest.approx(10.0)
+    assert block["price_source"] == "resolver"
+
+    start_lb = block["start_lb"]
+    scrap_lb = block["scrap_lb"]
+    assert scrap_lb >= start_lb * 0.1 - 1e-6
+    assert block["net_lb"] == pytest.approx(start_lb - scrap_lb)
+    assert block["total_material_cost"] == pytest.approx((start_lb - scrap_lb) * 10.0)
+
+
+def test_compute_material_block_applies_supplier_min(monkeypatch):
+    module = types.ModuleType("metals_api")
+    module.price_per_lb_for_material = lambda _material_key: 2.0  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "metals_api", module)
+
+    geo_ctx = {
+        "material_display": "Steel",
+        "thickness_in": 0.5,
+        "outline_bbox": {"plate_len_in": 1.0, "plate_wid_in": 1.0},
+        "supplier_min$": 75.0,
+    }
+
+    block = appV5._compute_material_block(geo_ctx, "steel", 7.85, 0.2)
+
+    assert block["supplier_min$"] == pytest.approx(75.0)
+    assert block["price_per_lb"] == pytest.approx(2.0)
+    assert block["total_material_cost"] == pytest.approx(75.0)
