@@ -5443,7 +5443,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     programmer_hours = _safe_float(prog.get("prog_hr"))
     engineer_hours = _safe_float(prog.get("eng_hr"))
     programmer_rate = _resolve_rate_with_fallback(
-        prog.get("prog_rate"), "ProgrammerRate", "ShopRate"
+        prog.get("prog_rate"), "ProgrammingRate", "ProgrammerRate", "ShopRate"
     )
     engineer_rate = _resolve_rate_with_fallback(
         prog.get("eng_rate"), "EngineerRate", "ShopRate"
@@ -5451,8 +5451,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     programming_per_lot_val = _safe_float(prog.get("per_lot"))
     nre_programming_per_part = _safe_float(nre.get("programming_per_part"))
-    if programming_per_lot_val <= 0 and nre_programming_per_part > 0:
-        qty_for_programming = breakdown.get("qty")
+    qty_for_programming_float: float | None = None
+    if nre_programming_per_part > 0:
+        qty_for_programming: Any = breakdown.get("qty")
         if qty_for_programming in (None, ""):
             decision_state = result.get("decision_state")
             if isinstance(decision_state, _MappingABC):
@@ -5464,9 +5465,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         try:
             qty_for_programming_float = float(qty_for_programming or 1)
         except Exception:
-            qty_for_programming_float = float(qty or 1)
-        if qty_for_programming_float <= 0:
+            try:
+                qty_for_programming_float = float(qty or 1)
+            except Exception:
+                qty_for_programming_float = 1.0
+        if not math.isfinite(qty_for_programming_float) or qty_for_programming_float <= 0:
             qty_for_programming_float = 1.0
+    if (
+        programming_per_lot_val <= 0
+        and nre_programming_per_part > 0
+        and qty_for_programming_float is not None
+    ):
         programming_per_lot_val = round(
             nre_programming_per_part * qty_for_programming_float, 2
         )
