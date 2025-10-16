@@ -23,7 +23,7 @@ import re
 import sys
 import time
 import typing
-from typing import Any
+from typing import Any, Mapping
 from collections import Counter
 from collections.abc import (
     Callable,
@@ -215,50 +215,154 @@ def _nearest_std_side(x_in: float) -> float:
     return float(STANDARD_PLATE_SIDES_IN[-1])
 
 
-def _estimate_plate_dims_from_area(
-    area_mm2: float,
-) -> tuple[float | None, float | None]:
-    """Fallback: infer L×W if only area is known. Assume square then round up to sane aspect."""
+def infer_plate_lw_in(geo: Mapping[str, Any] | None) -> tuple[float, float] | None:
+    """Infer plate length/width in inches from geometry hints."""
 
-    if not area_mm2 or area_mm2 <= 0:
-        return (None, None)
-    area_in2 = area_mm2 / 645.16
-    side = max(1.0, area_in2 ** 0.5)
-    cand = [(side, side), (side * 0.82, side * 1.22), (side * 0.67, side * 1.49)]
-    cand = [(math.ceil(a * 4) / 4.0, math.ceil(b * 4) / 4.0) for (a, b) in cand]
-    cand.sort(key=lambda ab: abs(ab[0] - ab[1]))
-    return cand[0]
+    if not isinstance(geo, _MappingABC):
+        return None
+
+    outline = geo.get("outline_bbox")
+    if isinstance(outline, _MappingABC):
+        L = outline.get("plate_len_in")
+        W = outline.get("plate_wid_in")
+        if L and W:
+            try:
+                return float(L), float(W)
+            except Exception:
+                pass
+
+    area_mm2 = geo.get("plate_bbox_area_mm2")
+    if area_mm2:
+        try:
+            area_in2 = float(area_mm2) / 645.16
+            if area_in2 > 0:
+                side = math.sqrt(area_in2)
+                return (float(side), float(side))
+        except Exception:
+            return None
+
+    return None
 
 
-def _snap_to_stock_plate(
+def pick_stock_from_mcmaster(
     material_key: str,
-    t_in: float,
-    need_len_in: float,
-    need_wid_in: float,
-):
-    """Resolve a purchasable stock plate using McMaster when available."""
+    thickness_in: float,
+    need_L: float,
+    need_W: float,
+) -> dict[str, float | str | None]:
+    """Select a McMaster plate that covers the requested footprint."""
+
+    result: dict[str, float | str | None]
+    stock_len = max(float(need_L), float(need_W))
+    stock_wid = min(float(need_L), float(need_W))
+    result = {
+        "len_in": stock_len,
+        "wid_in": stock_wid,
+        "thk_in": float(thickness_in),
+        "price$": None,
+        "supplier_min$": 0.0,
+        "source": "geometry-fallback",
+    }
 
     try:
-        from mcmaster_api import find_plate_stock  # type: ignore
+        from cad_quoter.vendors import mcmaster_stock as _mc
 
-        item = find_plate_stock(
-            material_key=material_key,
-            thickness_in=t_in,
-            min_len_in=need_len_in,
-            min_wid_in=need_wid_in,
-        )
-        if item and item.get("length_in") and item.get("width_in"):
-            return (
-                float(item["length_in"]),
-                float(item["width_in"]),
-                "McMaster",
+        catalog_loader = getattr(_mc, "_get_catalog", None)
+        if callable(catalog_loader):
+            catalog = catalog_loader()
+        else:
+            catalog = None
+        if not catalog:
+            from cad_quoter.resources import default_catalog_csv
+
+            csv_path = os.getenv("CATALOG_CSV_PATH") or str(default_catalog_csv())
+            catalog = _mc.load_catalog(csv_path)
+
+        material_lookup = MATERIAL_DISPLAY_BY_KEY.get(material_key, material_key)
+        if catalog:
+            item = _mc.choose_item(
+                catalog,
+                material_lookup,
+                float(need_L),
+                float(need_W),
+                float(thickness_in),
             )
+            if item:
+                stock_len = float(item.length)
+                stock_wid = float(item.width)
+                if stock_len < stock_wid:
+                    stock_len, stock_wid = stock_wid, stock_len
+                result.update(
+                    {
+                        "len_in": stock_len,
+                        "wid_in": stock_wid,
+                        "thk_in": float(item.thickness),
+                        "source": "mcmaster-catalog",
+                    }
+                )
+                try:
+                    _, price_each, _, _ = _mc.lookup_sku_and_price_for_mm(
+                        material_lookup,
+                        stock_len * 25.4,
+                        stock_wid * 25.4,
+                        float(item.thickness) * 25.4,
+                        qty=1,
+                    )
+                    if price_each:
+                        result["price$"] = float(price_each)
+                except Exception:
+                    pass
     except Exception:
         pass
 
-    L = _nearest_std_side(need_len_in)
-    W = _nearest_std_side(need_wid_in)
-    return (max(L, W), min(L, W), "StdGrid")
+    if not result.get("len_in") or not result.get("wid_in"):
+        result["len_in"] = max(float(need_L), float(need_W))
+        result["wid_in"] = min(float(need_L), float(need_W))
+    return result
+
+
+def _resolve_price_per_lb(material_label: str, material_key: str) -> tuple[float, str]:
+    """Return a USD/lb material price using available providers."""
+
+    price_per_lb = 0.0
+    source = ""
+
+    try:
+        from metals_api import price_per_lb_for_material  # type: ignore
+    except Exception:
+        price_per_lb_for_material = None  # type: ignore[assignment]
+    if price_per_lb_for_material is not None:
+        for candidate in (material_key, material_label):
+            if not candidate:
+                continue
+            try:
+                quote = price_per_lb_for_material(candidate)
+            except Exception:
+                continue
+            try:
+                value = float(quote or 0.0)
+            except Exception:
+                value = 0.0
+            if value > 0 and math.isfinite(value):
+                price_per_lb = value
+                source = "metals_api"
+                break
+
+    if price_per_lb <= 0:
+        lookup_label = material_label or material_key
+        if lookup_label:
+            try:
+                resolved_price, resolved_source = _resolve_material_unit_price(
+                    lookup_label,
+                    unit="lb",
+                )
+            except Exception:
+                resolved_price, resolved_source = None, ""
+            if resolved_price and math.isfinite(float(resolved_price)) and float(resolved_price) > 0:
+                price_per_lb = float(resolved_price)
+                source = resolved_source or source or "material_price_resolver"
+
+    return price_per_lb, source
 
 
 def _resolve_price_per_lb(material_key: str, display_name: str | None = None) -> tuple[float, str]:
@@ -315,14 +419,14 @@ def _compute_material_block(
 ):
     """Produce a normalized material record including weights and cost."""
 
-    t_in = float(geo_ctx.get("thickness_in") or 0.0) or float(
-        geo_ctx.get("thickness_mm", 0) / 25.4 or 0.0
-    )
-    L_in = geo_ctx.get("outline_bbox", {}).get("plate_len_in") or None
-    W_in = geo_ctx.get("outline_bbox", {}).get("plate_wid_in") or None
-    if not L_in or not W_in:
-        L_in, W_in = _estimate_plate_dims_from_area(geo_ctx.get("plate_bbox_area_mm2", 0.0))
-    if not L_in or not W_in or not t_in:
+    t_in = float(geo_ctx.get("thickness_in") or 0.0)
+    if not t_in:
+        t_in = float(geo_ctx.get("thickness_mm", 0) / 25.4 or 0.0)
+    if not t_in:
+        t_in = float(geo_ctx.get("thickness_in_guess") or 0.0)
+
+    dims = infer_plate_lw_in(geo_ctx)
+    if not dims or not t_in:
         return {
             "material": geo_ctx.get("material_display") or material_key,
             "stock_L_in": None,
@@ -333,40 +437,76 @@ def _compute_material_block(
             "scrap_lb": 0.0,
             "scrap_pct": scrap_pct,
             "source": "insufficient-geometry",
+            "stock_dims_in": None,
+            "supplier_min$": 0.0,
+            "stock_price$": None,
             "total_material_cost": 0.0,
         }
 
-    stock_L_in, stock_W_in, source_note = _snap_to_stock_plate(
-        material_key, float(t_in), float(L_in), float(W_in)
+    L_in, W_in = dims
+    stock_info = pick_stock_from_mcmaster(
+        material_key,
+        float(t_in),
+        float(L_in),
+        float(W_in),
     )
+    stock_L_in = float(stock_info.get("len_in") or L_in)
+    stock_W_in = float(stock_info.get("wid_in") or W_in)
+    stock_T_in = float(stock_info.get("thk_in") or t_in)
+    source_note = str(stock_info.get("source") or "geometry-fallback")
 
     rho = float(density_g_cc or 2.70)
     vol_net_in3 = float(L_in) * float(W_in) * float(t_in)
-    vol_start_in3 = float(stock_L_in) * float(stock_W_in) * float(t_in)
+    vol_start_in3 = float(stock_L_in) * float(stock_W_in) * float(stock_T_in)
     g_cc_to_lb_in3 = 0.0361273
     net_lb = vol_net_in3 * rho * g_cc_to_lb_in3
     start_lb = vol_start_in3 * rho * g_cc_to_lb_in3
-    scrap_lb = max(0.0, start_lb - net_lb)
-    min_scrap_lb = start_lb * float(scrap_pct)
-    scrap_lb = max(scrap_lb, min_scrap_lb)
+    scrap_lb_geom = max(0.0, start_lb - net_lb)
+    min_scrap_lb = max(0.0, start_lb * float(scrap_pct))
+    scrap_lb = max(scrap_lb_geom, min_scrap_lb)
+    net_after_scrap = max(0.0, start_lb - scrap_lb)
 
-    price_per_lb, price_source = _resolve_price_per_lb(
-        material_key, geo_ctx.get("material_display")
+    material_label = str(geo_ctx.get("material_display") or material_key or "")
+    price_per_lb, price_source = _resolve_price_per_lb(material_label, material_key)
+
+    supplier_min_candidates = (
+        geo_ctx.get("supplier_min$"),
+        geo_ctx.get("supplier_min"),
+        geo_ctx.get("supplier_min_charge"),
+        geo_ctx.get("supplier_minimum_charge"),
+        geo_ctx.get("minimum_order$"),
+        geo_ctx.get("minimum_order"),
     )
-    total_mat_cost = round(max(0.0, net_lb) * price_per_lb, 2)
+    supplier_min = 0.0
+    for candidate in supplier_min_candidates:
+        val = _coerce_float_or_none(candidate)
+        if val is not None and math.isfinite(val):
+            supplier_min = max(supplier_min, float(val))
+    supplier_min = max(0.0, supplier_min)
+
+    total_mat_cost = max(net_after_scrap * price_per_lb, supplier_min)
 
     return {
         "material": geo_ctx.get("material_display") or material_key,
         "stock_L_in": float(stock_L_in),
         "stock_W_in": float(stock_W_in),
-        "stock_T_in": float(t_in),
+        "stock_T_in": float(stock_T_in),
+        "stock_dims_in": (float(stock_L_in), float(stock_W_in), float(stock_T_in)),
         "start_lb": float(start_lb),
-        "net_lb": float(net_lb),
+        "starting_weight_lb": float(start_lb),
+        "net_lb": float(net_after_scrap),
+        "net_weight_lb": float(net_after_scrap),
         "scrap_lb": float(scrap_lb),
+        "scrap_weight_lb": float(scrap_lb),
         "scrap_pct": float(scrap_pct),
         "price_per_lb": float(price_per_lb),
-        "price_per_lb_source": price_source,
+        "price_per_lb$": float(price_per_lb),
+        "price_source": price_source,
+        "supplier_min": float(supplier_min),
+        "supplier_min$": float(supplier_min),
         "source": source_note,
+        "supplier_min$": float(supplier_min),
+        "stock_price$": stock_price,
         "total_material_cost": float(total_mat_cost),
     }
 
@@ -5622,9 +5762,32 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 ):
                     detail_lines.append("")
                 detail_lines.extend(price_lines)
-            stock_L_val = _coerce_float_or_none(material_stock_block.get("stock_L_in"))
-            stock_W_val = _coerce_float_or_none(material_stock_block.get("stock_W_in"))
-            stock_T_val = _coerce_float_or_none(material_stock_block.get("stock_T_in"))
+            def _coerce_dims(candidate: Any) -> tuple[float, float, float] | None:
+                if isinstance(candidate, (list, tuple)) and len(candidate) >= 3:
+                    try:
+                        Lc = float(candidate[0])
+                        Wc = float(candidate[1])
+                        Tc = float(candidate[2])
+                    except Exception:
+                        return None
+                    return (Lc, Wc, Tc)
+                return None
+
+            stock_dims_candidate = _coerce_dims(material.get("stock_dims_in"))
+            if stock_dims_candidate is None:
+                stock_dims_candidate = _coerce_dims(
+                    material_stock_block.get("stock_dims_in")
+                )
+
+            stock_L_val: float | None
+            stock_W_val: float | None
+            stock_T_val: float | None
+            if stock_dims_candidate:
+                stock_L_val, stock_W_val, stock_T_val = stock_dims_candidate
+            else:
+                stock_L_val = _coerce_float_or_none(material_stock_block.get("stock_L_in"))
+                stock_W_val = _coerce_float_or_none(material_stock_block.get("stock_W_in"))
+                stock_T_val = _coerce_float_or_none(material_stock_block.get("stock_T_in"))
             if stock_T_val is None:
                 stock_T_val = _coerce_float_or_none(material.get("thickness_in"))
                 if stock_T_val is None:
@@ -5659,13 +5822,38 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     stock_L_val = float(fallback_L)
                 if stock_W_val is None and fallback_W is not None:
                     stock_W_val = float(fallback_W)
+            if (stock_L_val is None or stock_W_val is None) and isinstance(g, dict):
+                inferred_dims = infer_plate_lw_in(g)
+                if inferred_dims:
+                    if stock_L_val is None:
+                        stock_L_val = float(inferred_dims[0])
+                    if stock_W_val is None:
+                        stock_W_val = float(inferred_dims[1])
+            if stock_L_val and stock_W_val and stock_T_val:
+                stock_dims_candidate = (float(stock_L_val), float(stock_W_val), float(stock_T_val))
             if stock_L_val and stock_W_val and stock_T_val:
                 stock_line = f"{float(stock_L_val):.2f} × {float(stock_W_val):.2f} × {float(stock_T_val):.3f} in"
             else:
-                T_disp = "—"
-                if stock_T_val is not None:
-                    T_disp = f"{float(stock_T_val):.3f}"
-                stock_line = f"— × — × {T_disp} in"
+                inferred_dims = infer_plate_lw_in(g)
+                L_disp = stock_L_val
+                W_disp = stock_W_val
+                if (L_disp is None or W_disp is None) and inferred_dims:
+                    if L_disp is None:
+                        L_disp = inferred_dims[0]
+                    if W_disp is None:
+                        W_disp = inferred_dims[1]
+                T_disp_val = stock_T_val
+                if T_disp_val is None and isinstance(g, dict):
+                    T_disp_val = _coerce_float_or_none(g.get("thickness_in"))
+                if T_disp_val is None and isinstance(g, dict):
+                    T_disp_val = _coerce_float_or_none(g.get("thickness_in_guess"))
+                if L_disp and W_disp and T_disp_val:
+                    stock_line = f"{float(L_disp):.2f} × {float(W_disp):.2f} × {float(T_disp_val):.3f} in"
+                else:
+                    T_disp = "—"
+                    if T_disp_val is not None:
+                        T_disp = f"{float(T_disp_val):.3f}"
+                    stock_line = f"— × — × {T_disp} in"
             if isinstance(mat_info, dict):
                 mat_info["stock_size_display"] = stock_line
             append_line(f"  Stock used: {stock_line}")
@@ -11617,24 +11805,6 @@ def _lookup_rate(name: str, *sources: Mapping[str, Any] | None, fallback: float 
     return float(fallback)
 
 
-def _estimate_programming_hours_auto(
-    hole_diams_mm: Sequence[float] | None,
-    thickness_in: float | None,
-) -> float:
-    """Return a simple programming-hour estimate when no planner data exists."""
-
-    hole_count = len(hole_diams_mm) if hole_diams_mm else 0
-    base = 0.5 + 0.1 * hole_count
-
-    if thickness_in is not None:
-        try:
-            base += min(2.0, max(0.0, float(thickness_in) * 0.2))
-        except Exception:
-            pass
-
-    return max(base, 0.0)
-
-
 def _estimate_programming_hours_from_plan(
     plan: Mapping[str, Any] | None,
     geo: Mapping[str, Any] | None,
@@ -11688,6 +11858,60 @@ def _estimate_programming_hours_from_plan(
         return min(12.0, 2.0 + 0.4 * setups + 0.005 * hole_count)
 
     return 2.0 + 0.2 * setups
+
+
+def estimate_programming_hours_from_geo(geo: Mapping[str, Any] | None) -> float:
+    """Return a geometry-driven programming-hour estimate.
+
+    The heuristic scales with the number of hole families and overall hole counts,
+    while adding smaller adjustments for taps, counterbores, and countersinks.
+    """
+
+    ctx = geo if isinstance(geo, _MappingABC) else {}
+
+    hole_sets_raw = ctx.get("hole_sets") if isinstance(ctx, _MappingABC) else None
+    families = 0
+    if isinstance(hole_sets_raw, _MappingABC):
+        families = len(hole_sets_raw)
+    elif isinstance(hole_sets_raw, Sequence) and not isinstance(hole_sets_raw, (str, bytes, bytearray)):
+        families = len(hole_sets_raw)
+
+    hole_count_raw = ctx.get("hole_count", 0) if isinstance(ctx, _MappingABC) else 0
+    holes = 0
+    try:
+        holes = int(float(hole_count_raw or 0))
+    except Exception:
+        holes = 0
+    if holes <= 0 and isinstance(ctx, _MappingABC):
+        hole_diams = ctx.get("hole_diams_mm")
+        if isinstance(hole_diams, Sequence) and not isinstance(hole_diams, (str, bytes, bytearray)):
+            holes = len(hole_diams)
+
+    feature_counts = ctx.get("feature_counts") if isinstance(ctx, _MappingABC) else {}
+    if not isinstance(feature_counts, _MappingABC):
+        feature_counts = {}
+
+    def _count_from_feature(key: str) -> int:
+        value = feature_counts.get(key, 0)
+        try:
+            return int(float(value or 0))
+        except Exception:
+            return 0
+
+    taps = _count_from_feature("tap_qty")
+    cbores = _count_from_feature("cbore_qty")
+    csks = _count_from_feature("csk_qty")
+
+    base = 0.75
+    h_families = 0.05 * families
+    h_holes = 0.01 * holes
+    h_tap = 0.03 * taps
+    h_cbore = 0.08 * cbores
+    h_csk = 0.05 * csks
+
+    hr = base + h_families + h_holes + h_tap + h_cbore + h_csk
+
+    return float(max(0.6, min(hr, 6.0)))
 
 
 def _coerce_bool(value: Any) -> bool:
@@ -12093,29 +12317,30 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     grams_per_lb = 1000.0 / LB_PER_KG
     material_entry = breakdown.setdefault("material", {})
     if isinstance(material_entry, dict):
-        start_lb = _coerce_float_or_none(material_entry.get("starting_weight_lb"))
-        if start_lb is None:
-            start_lb = _coerce_float_or_none(mat_block.get("start_lb"))
-        start_lb = max(0.0, float(start_lb or 0.0))
-        material_entry["starting_weight_lb"] = start_lb
-        mat_block["start_lb"] = start_lb
-
-        scrap_pct_val = _coerce_float_or_none(material_entry.get("scrap_pct"))
-        if scrap_pct_val is None:
-            scrap_pct_val = _coerce_float_or_none(mat_block.get("scrap_pct"))
-        scrap_pct_val = max(0.0, float(scrap_pct_val or 0.0))
-        material_entry["scrap_pct"] = scrap_pct_val
-        mat_block["scrap_pct"] = scrap_pct_val
-
-        scrap_lb = max(0.0, start_lb * scrap_pct_val)
-        net_lb = max(0.0, start_lb - scrap_lb)
-
-        material_entry["scrap_weight_lb"] = scrap_lb
-        material_entry["net_weight_lb"] = net_lb
-        mat_block["scrap_lb"] = scrap_lb
-        mat_block["net_lb"] = net_lb
-
-        if start_lb > 0:
+        stock_dims_raw = mat_block.get("stock_dims_in")
+        if isinstance(stock_dims_raw, (list, tuple)) and len(stock_dims_raw) >= 3:
+            try:
+                stock_dims_tuple = (
+                    float(stock_dims_raw[0]),
+                    float(stock_dims_raw[1]),
+                    float(stock_dims_raw[2]),
+                )
+                material_entry["stock_dims_in"] = stock_dims_tuple
+            except Exception:
+                pass
+        supplier_min_val = _coerce_float_or_none(mat_block.get("supplier_min$"))
+        if supplier_min_val is not None:
+            material_entry["supplier_min$"] = float(supplier_min_val)
+            if _coerce_float_or_none(material_entry.get("supplier_min_charge")) is None:
+                material_entry["supplier_min_charge"] = float(supplier_min_val)
+        stock_price_val = _coerce_float_or_none(mat_block.get("stock_price$"))
+        if stock_price_val is not None and stock_price_val > 0:
+            material_entry.setdefault("stock_price$", float(stock_price_val))
+        start_lb = _coerce_float_or_none(mat_block.get("start_lb"))
+        net_lb = _coerce_float_or_none(mat_block.get("net_lb"))
+        scrap_lb = _coerce_float_or_none(mat_block.get("scrap_lb"))
+        price_per_lb = _coerce_float_or_none(mat_block.get("price_per_lb"))
+        if start_lb is not None and start_lb > 0:
             start_g = float(start_lb) * grams_per_lb
             material_entry["mass_g"] = start_g
             material_entry["starting_mass_g_est"] = start_g
@@ -12123,37 +12348,12 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             material_entry["net_mass_g"] = float(net_lb) * grams_per_lb
         if scrap_lb > 0:
             material_entry["scrap_mass_g"] = float(scrap_lb) * grams_per_lb
-
-        price_per_lb = _coerce_float_or_none(material_entry.get("price_per_lb$"))
-        if price_per_lb is None or price_per_lb <= 0:
-            price_per_lb = _coerce_float_or_none(mat_block.get("price_per_lb"))
-        price_source = str(mat_block.get("price_per_lb_source") or "")
-        if price_per_lb is None or price_per_lb <= 0:
-            price_per_lb, price_source = _resolve_price_per_lb(material_key, material_text)
-        price_per_lb = max(0.0, float(price_per_lb or 0.0))
-        material_entry["price_per_lb$"] = price_per_lb
-        material_entry["price_per_lb"] = price_per_lb
+        if price_per_lb is not None and price_per_lb > 0:
+            material_entry["unit_price_usd_per_lb"] = float(price_per_lb)
+        price_source = mat_block.get("price_source")
         if price_source:
-            material_entry.setdefault("price_per_lb_source", price_source)
-        if price_per_lb > 0:
-            material_entry["unit_price_usd_per_lb"] = price_per_lb
-            material_entry["unit_price_usd_per_kg"] = price_per_lb * LB_PER_KG
-        mat_block["price_per_lb"] = price_per_lb
-        if price_source:
-            mat_block["price_per_lb_source"] = price_source
-
-        supplier_min = _coerce_float_or_none(material_entry.get("supplier_min$"))
-        if supplier_min is None:
-            supplier_min = _coerce_float_or_none(material_entry.get("supplier_min_charge"))
-        if supplier_min is None:
-            supplier_min = _coerce_float_or_none(mat_block.get("supplier_min$"))
-        if supplier_min is None:
-            supplier_min = _coerce_float_or_none(mat_block.get("supplier_min_charge"))
-        supplier_min = max(float(supplier_min or 0.0), 0.0)
-        material_entry["supplier_min$"] = supplier_min
-        if supplier_min > 0:
-            material_entry.setdefault("supplier_min_charge", supplier_min)
-
+            material_entry.setdefault("unit_price_source", price_source)
+            material_entry.setdefault("source", price_source)
         stock_L = _coerce_float_or_none(mat_block.get("stock_L_in"))
         stock_W = _coerce_float_or_none(mat_block.get("stock_W_in"))
         stock_T = _coerce_float_or_none(mat_block.get("stock_T_in"))
@@ -12165,14 +12365,14 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             material_entry["thickness_in"] = float(stock_T)
         if mat_block.get("source"):
             material_entry["source"] = mat_block.get("source")
-
-        total_material_cost = round(max(net_lb * price_per_lb, supplier_min), 2)
-        mat_block["total_material_cost"] = float(total_material_cost)
-        if total_material_cost > 0:
-            material_entry["total_material_cost"] = float(total_material_cost)
-            material_entry["material_cost"] = float(total_material_cost)
-            material_entry["material_direct_cost"] = float(total_material_cost)
-            material_entry["material_cost_before_credit"] = float(total_material_cost)
+        total_cost = _coerce_float_or_none(mat_block.get("total_material_cost"))
+        if total_cost is not None and total_cost > 0:
+            material_entry["material_cost"] = float(total_cost)
+            material_entry["material_direct_cost"] = float(total_cost)
+            material_entry["material_cost_before_credit"] = float(total_cost)
+        supplier_min = _coerce_float_or_none(mat_block.get("supplier_min"))
+        if supplier_min is not None and supplier_min > 0:
+            material_entry.setdefault("supplier_min_charge", float(supplier_min))
 
     breakdown.setdefault("pass_through_total", 0.0)
     breakdown["total_direct_costs"] = float(
@@ -13065,22 +13265,43 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
 
     app_meta: dict[str, Any] = {"used_planner": True} if planner_used else {}
 
-    prog_hr: float | None = None
+    planner_prog_hr: float | None = None
     if app_meta.get("used_planner"):
         try:
-            prog_hr = _estimate_programming_hours_from_plan(
+            planner_prog_hr = _estimate_programming_hours_from_plan(
                 breakdown.get("process_plan", {}),
                 breakdown.get("geo_context", {}),
             )
         except Exception:
-            prog_hr = None
+            planner_prog_hr = None
 
-    if prog_hr is None:
-        prog_hr = _estimate_programming_hours_auto(hole_diams, thickness_in)
+    geo_prog_hr = estimate_programming_hours_from_geo(breakdown.get("geo_context"))
+    auto_prog_hr = float(geo_prog_hr)
+    if planner_prog_hr is not None and planner_prog_hr > 0:
+        try:
+            auto_prog_hr = float(planner_prog_hr)
+        except Exception:
+            auto_prog_hr = float(geo_prog_hr)
 
-    auto_prog_hr = float(prog_hr or 0.0)
+    overrides_map = state.user_overrides if isinstance(state.user_overrides, _MappingABC) else {}
+    user_override_prog = (
+        _coerce_float_or_none(overrides_map.get("programming_hr"))
+        if isinstance(overrides_map, _MappingABC)
+        else None
+    )
     override_prog = _coerce_float_or_none(value_map.get("Programming Override Hr"))
+
     final_prog_hr = auto_prog_hr
+    override_applied = False
+    override_source: str | None = None
+    if override_prog is not None and override_prog >= 0:
+        final_prog_hr = float(override_prog)
+        override_applied = True
+        override_source = "sheet"
+    elif user_override_prog is not None and user_override_prog >= 0:
+        final_prog_hr = float(user_override_prog)
+        override_applied = True
+        override_source = "user"
     programming_detail_container = breakdown.setdefault("nre_detail", {})
     if isinstance(programming_detail_container, dict):
         programming_detail = programming_detail_container.get("programming")
@@ -13094,16 +13315,23 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     else:
         detail_map = {}
 
-    detail_map["auto_prog_hr"] = auto_prog_hr
-
-    if override_prog is not None and override_prog >= 0:
-        final_prog_hr = float(override_prog)
-        detail_map["prog_hr"] = final_prog_hr
-        detail_map["override_applied"] = True
+    detail_map["geo_prog_hr"] = float(geo_prog_hr)
+    if planner_prog_hr is not None and planner_prog_hr > 0:
+        try:
+            detail_map["planner_prog_hr"] = float(planner_prog_hr)
+        except Exception:
+            detail_map.pop("planner_prog_hr", None)
     else:
-        final_prog_hr = auto_prog_hr
-        detail_map["prog_hr"] = final_prog_hr
+        detail_map.pop("planner_prog_hr", None)
+    detail_map["auto_prog_hr"] = float(auto_prog_hr)
+    detail_map["prog_hr"] = float(final_prog_hr)
+    if override_applied:
+        detail_map["override_applied"] = True
+        if override_source:
+            detail_map["override_source"] = override_source
+    else:
         detail_map.pop("override_applied", None)
+        detail_map.pop("override_source", None)
 
     labor_bucket = (
         merged_two_bucket_rates.get("labor")
@@ -13146,7 +13374,26 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
 
     programming_total = round(final_prog_hr * programmer_rate, 2)
     programming_per_part = programming_total / max(1.0, qty_for_programming)
-    breakdown.setdefault("nre", {})["programming_per_part"] = programming_per_part
+    detail_map["per_lot"] = programming_total
+    detail_map["per_part"] = programming_per_part
+
+    is_amortized = bool(amortized_programming and amortized_programming > 0)
+    detail_map["amortized"] = is_amortized
+    if is_amortized:
+        detail_map["amortized_cost"] = float(amortized_programming)
+    else:
+        detail_map.pop("amortized_cost", None)
+
+    nre_block = breakdown.setdefault("nre", {})
+    nre_block["programming_hr"] = float(final_prog_hr)
+    if is_amortized:
+        nre_block["programming_cost"] = 0.0
+        nre_block["programming_per_lot"] = 0.0
+        nre_block["programming_per_part"] = 0.0
+    else:
+        nre_block["programming_cost"] = programming_total
+        nre_block["programming_per_lot"] = programming_total
+        nre_block["programming_per_part"] = programming_per_part
 
     if speeds_feeds_csv_path:
         breakdown["speeds_feeds_path"] = speeds_feeds_csv_path

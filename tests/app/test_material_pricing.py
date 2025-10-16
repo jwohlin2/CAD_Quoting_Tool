@@ -87,44 +87,57 @@ def test_material_price_helper_returns_fallback_price(monkeypatch):
     assert source == "backup_csv"
 
 
-def test_material_breakdown_uses_supplier_min_and_price(monkeypatch):
-    def _fake_material_block(_geo, _material_key, _density, scrap_pct):
-        return {
-            "material": _geo.get("material_display") or _material_key,
-            "stock_L_in": 10.0,
-            "stock_W_in": 5.0,
-            "stock_T_in": 1.0,
-            "start_lb": 10.0,
-            "net_lb": 8.0,
-            "scrap_lb": 2.0,
-            "scrap_pct": float(scrap_pct),
-            "price_per_lb": 0.0,
-            "source": "test-stock",
-            "total_material_cost": 0.0,
-            "supplier_min$": 75.0,
-        }
+def test_compute_material_block_uses_price_resolver(monkeypatch):
+    module = types.ModuleType("metals_api")
 
-    monkeypatch.setattr(appV5, "_compute_material_block", _fake_material_block)
-    monkeypatch.setattr(appV5, "_resolve_price_per_lb", lambda _key, _display=None: (4.0, "spot"))
+    def _raise(_material_key: str) -> float:
+        raise RuntimeError("metals api offline")
 
-    df_rows = [
-        {"Item": "Material Name", "Example Values / Options": "Tool Steel"},
-        {"Item": "Scrap Percent (%)", "Example Values / Options": 0.2},
-    ]
+    module.price_per_lb_for_material = _raise  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "metals_api", module)
 
-    result = appV5.compute_quote_from_df(
-        df_rows,
-        params={},
-        rates={},
-        geo={},
-        ui_vars={},
-    )
+    calls: list[tuple[str, str]] = []
 
-    material = result["breakdown"]["material"]
-    assert material["starting_weight_lb"] == pytest.approx(10.0)
-    assert material["scrap_pct"] == pytest.approx(0.2)
-    assert material["price_per_lb$"] == pytest.approx(4.0)
-    assert material["supplier_min$"] == pytest.approx(75.0)
-    assert material["total_material_cost"] == pytest.approx(75.0)
+    def _fake_resolver(name: str, *, unit: str = "kg") -> tuple[float, str]:
+        calls.append((name, unit))
+        assert unit == "lb"
+        return 10.0, "resolver"
 
-    assert result["breakdown"]["total_direct_costs"] == pytest.approx(75.0)
+    monkeypatch.setattr(appV5, "_resolve_material_unit_price", _fake_resolver)
+
+    geo_ctx = {
+        "material_display": "Aluminum 6061",
+        "thickness_in": 1.0,
+        "outline_bbox": {"plate_len_in": 2.0, "plate_wid_in": 3.0},
+    }
+
+    block = appV5._compute_material_block(geo_ctx, "aluminum", 2.70, 0.1)
+
+    assert calls == [("Aluminum 6061", "lb")]
+    assert block["price_per_lb"] == pytest.approx(10.0)
+    assert block["price_source"] == "resolver"
+
+    start_lb = block["start_lb"]
+    scrap_lb = block["scrap_lb"]
+    assert scrap_lb >= start_lb * 0.1 - 1e-6
+    assert block["net_lb"] == pytest.approx(start_lb - scrap_lb)
+    assert block["total_material_cost"] == pytest.approx((start_lb - scrap_lb) * 10.0)
+
+
+def test_compute_material_block_applies_supplier_min(monkeypatch):
+    module = types.ModuleType("metals_api")
+    module.price_per_lb_for_material = lambda _material_key: 2.0  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "metals_api", module)
+
+    geo_ctx = {
+        "material_display": "Steel",
+        "thickness_in": 0.5,
+        "outline_bbox": {"plate_len_in": 1.0, "plate_wid_in": 1.0},
+        "supplier_min$": 75.0,
+    }
+
+    block = appV5._compute_material_block(geo_ctx, "steel", 7.85, 0.2)
+
+    assert block["supplier_min$"] == pytest.approx(75.0)
+    assert block["price_per_lb"] == pytest.approx(2.0)
+    assert block["total_material_cost"] == pytest.approx(75.0)
