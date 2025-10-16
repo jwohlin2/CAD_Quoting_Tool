@@ -3882,6 +3882,7 @@ def _charged_hours_by_bucket(
     render_state: PlannerBucketRenderState | None = None,
     removal_drilling_hours: float | None = None,
     prefer_removal_drilling_hours: bool = True,
+    cfg: "QuoteConfiguration" | None = None,
 ):
     """Return the hours that correspond to what we actually charged."""
     out: dict[str, float] = {}
@@ -3908,19 +3909,26 @@ def _charged_hours_by_bucket(
             label = _process_label(key)
             out[label] = out.get(label, 0.0) + float(hr)
     removal_hr = None
+    render_extra: Mapping[str, Any] | None = None
     if render_state is not None:
         try:
             extra = getattr(render_state, "extra", {})
         except Exception:
             extra = {}
         if isinstance(extra, _MappingABC):
+            render_extra = extra
             removal_candidate = extra.get("removal_drilling_hours")
             removal_hr = _coerce_float_or_none(removal_candidate)
     if removal_hr is None:
         removal_hr = _coerce_float_or_none(removal_drilling_hours)
     if removal_hr is not None and removal_hr < 0:
         removal_hr = None
-    if removal_hr is not None and prefer_removal_drilling_hours:
+    prefer_drill_hours = prefer_removal_drilling_hours
+    if cfg is not None:
+        prefer_from_cfg = getattr(cfg, "prefer_removal_drilling_hours", None)
+        if prefer_from_cfg is not None:
+            prefer_drill_hours = bool(prefer_from_cfg)
+    if removal_hr is not None and prefer_drill_hours:
         desired = max(0.0, float(removal_hr))
         drill_labels = [
             label
@@ -3944,6 +3952,16 @@ def _charged_hours_by_bucket(
                 desired,
             )
             out[label] = desired
+
+    if prefer_drill_hours and isinstance(render_extra, _MappingABC):
+        machine_minutes = render_extra.get("drill_machine_minutes")
+        labor_minutes = render_extra.get("drill_labor_minutes")
+        if isinstance(machine_minutes, (int, float)) and isinstance(labor_minutes, (int, float)):
+            drill_total_hr = (float(machine_minutes) + float(labor_minutes)) / 60.0
+            for key in list(out.keys()):
+                if _canonical_bucket_key(key) in {"drilling", "drill"}:
+                    out[key] = drill_total_hr
+
     return out
 
 def _planner_bucket_key_for_name(name: Any) -> str:
@@ -7989,6 +8007,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         render_state=bucket_state,
         removal_drilling_hours=removal_drilling_hours_precise,
         prefer_removal_drilling_hours=prefer_removal_drilling_hours,
+        cfg=cfg,
     )
     removal_hours_debug = None
     if isinstance(getattr(bucket_state, "extra", None), _MappingABC):
@@ -8281,6 +8300,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if override_hours is not None and override_hours >= 0:
             display_label = _display_bucket_label("drilling", label_overrides)
             summary_hours[display_label] = round(max(0.0, float(override_hours)), 2)
+
+        if prefer_removal_drilling_hours:
+            extra_map = getattr(bucket_state, "extra", {})
+            if isinstance(extra_map, _MappingABC):
+                drill_total_minutes = extra_map.get("drill_total_minutes")
+                if isinstance(drill_total_minutes, (int, float)):
+                    drill_label = _display_bucket_label("drilling", label_overrides)
+                    summary_hours[drill_label] = round(float(drill_total_minutes) / 60.0, 2)
 
         planner_labels = {"Planner Machine", "Planner Labor", "Planner Total"}
         for label, hours_val in summary_hours.items():
@@ -9001,6 +9028,35 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         tool_add = (tchg_deep if seen_deep else 0.0) + (tchg_std if seen_std else 0.0)
         total_drill_minutes_with_toolchange = subtotal_min + tool_add
 
+        def _stash_drill_minutes(owner: Any) -> _MutableMappingABC[str, Any] | None:
+            if owner is None:
+                return None
+            try:
+                extra_candidate = getattr(owner, "extra", None)
+            except Exception:
+                extra_candidate = None
+            extra_map: _MutableMappingABC[str, Any] | None
+            if isinstance(extra_candidate, _MutableMappingABC):
+                extra_map = extra_candidate
+            elif isinstance(owner, PlannerBucketRenderState):
+                extra_map = owner.extra
+            elif isinstance(owner, dict):
+                extra_map = owner.setdefault("extra", {})  # type: ignore[assignment]
+            else:
+                extra_map = None
+            if isinstance(extra_map, _MutableMappingABC):
+                extra_map["drill_machine_minutes"] = float(subtotal_min)
+                extra_map["drill_labor_minutes"] = float(tool_add)
+                extra_map["drill_total_minutes"] = float(total_drill_minutes_with_toolchange)
+                return extra_map
+            return None
+
+        extra_targets: list[_MutableMappingABC[str, Any]] = []
+        for candidate_owner in (locals().get("render_state"), bucket_state):
+            extra_map = _stash_drill_minutes(candidate_owner)
+            if extra_map is not None:
+                extra_targets.append(extra_map)
+
         if isinstance(bucket_state, PlannerBucketRenderState):
             extra = getattr(bucket_state, "extra", None)
             if isinstance(extra, dict):
@@ -9010,9 +9066,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             else:
                 target_extra = None
             if target_extra is not None:
-                target_extra["drill_machine_minutes"] = float(subtotal_min)
-                target_extra["drill_labor_minutes"] = float(tool_add)
-                target_extra["drill_total_minutes"] = float(total_drill_minutes_with_toolchange)
+                if target_extra not in extra_targets:
+                    target_extra["drill_machine_minutes"] = float(subtotal_min)
+                    target_extra["drill_labor_minutes"] = float(tool_add)
+                    target_extra["drill_total_minutes"] = float(total_drill_minutes_with_toolchange)
                 target_extra["removal_drilling_minutes"] = float(removal_drilling_minutes)
                 if removal_drilling_minutes > 0.0:
                     target_extra["removal_drilling_hours"] = float(removal_drilling_hours_precise)
