@@ -127,11 +127,6 @@ SUGG_TO_EDITOR = {
         float,
         float,
     ),
-    "contingency_pct": (
-        "ContingencyPct",
-        float,
-        float,
-    ),
 }
 
 EDITOR_TO_SUGG = {spec[0]: key for key, spec in SUGG_TO_EDITOR.items()}
@@ -1054,8 +1049,7 @@ def _items_used_by_estimator(df):
 def _estimator_patterns():
     pats = [
         r"\b(Qty|Lot Size|Quantity)\b",
-        r"\b(Overhead|Shop Overhead)\b", r"\b(Margin|Profit Margin)\b",
-        r"\b(G&A|General\s*&\s*Admin)\b", r"\b(Contingency|Risk\s*Adder)\b",
+        r"\b(Margin|Profit Margin)\b",
         r"\b(Expedite|Rush\s*Fee)\b",
         r"\b(Net\s*Volume|Volume_net|Volume\s*\(cm\^?3\))\b",
         r"\b(Density|Material\s*Density)\b", r"\b(Scrap\s*%|Expected\s*Scrap)\b",

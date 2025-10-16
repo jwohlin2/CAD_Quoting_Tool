@@ -1,9 +1,6 @@
 {
   "version": 1,
   "data": {
-    "OverheadPct": 0.15,
-    "GA_Pct": 0.08,
-    "ContingencyPct": 0.0,
     "ExpeditePct": 0.0,
     "MarginPct": 0.35,
     "InsurancePct": 0.0,

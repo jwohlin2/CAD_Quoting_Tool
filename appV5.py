@@ -710,9 +710,6 @@ def _material_cost_components(
 def _compute_pricing_ladder(
     subtotal: float | int | str | None,
     *,
-    overhead_pct: float | int | str | None = 0.0,
-    ga_pct: float | int | str | None = 0.0,
-    contingency_pct: float | int | str | None = 0.0,
     expedite_pct: float | int | str | None = 0.0,
     margin_pct: float | int | str | None = 0.0,
 ) -> dict[str, float]:
@@ -723,34 +720,19 @@ def _compute_pricing_ladder(
 
     subtotal_val = round(_safe_float(subtotal, 0.0), 2)
 
-    overhead_pct_val = _pct(overhead_pct)
-    ga_pct_val = _pct(ga_pct)
-    contingency_pct_val = _pct(contingency_pct)
     expedite_pct_val = _pct(expedite_pct)
     margin_pct_val = _pct(margin_pct)
 
-    overhead_cost = round(subtotal_val * overhead_pct_val, 2)
-    ga_cost = round(subtotal_val * ga_pct_val, 2)
-    contingency_cost = round(subtotal_val * contingency_pct_val, 2)
     expedite_cost = round(subtotal_val * expedite_pct_val, 2)
 
-    with_overhead = round(subtotal_val + overhead_cost, 2)
-    with_ga = round(with_overhead + ga_cost, 2)
-    with_contingency = round(with_ga + contingency_cost, 2)
-    with_expedite = round(with_contingency + expedite_cost, 2)
+    with_expedite = round(subtotal_val + expedite_cost, 2)
     subtotal_before_margin = with_expedite
     with_margin = round(subtotal_before_margin * (1.0 + margin_pct_val), 2)
 
     return {
         "subtotal": subtotal_val,
-        "with_overhead": with_overhead,
-        "with_ga": with_ga,
-        "with_contingency": with_contingency,
         "with_expedite": with_expedite,
         "with_margin": with_margin,
-        "overhead_cost": overhead_cost,
-        "ga_cost": ga_cost,
-        "contingency_cost": contingency_cost,
         "expedite_cost": expedite_cost,
         "subtotal_before_margin": subtotal_before_margin,
     }
@@ -1564,10 +1546,6 @@ def effective_to_overrides(effective: dict, baseline: dict | None = None) -> dic
     scrap_base = baseline.get("scrap_pct")
     if scrap_eff is not None and (scrap_base is None or not math.isclose(float(scrap_eff), float(scrap_base or 0.0), abs_tol=1e-6)):
         out["scrap_pct_override"] = float(scrap_eff)
-    contingency_eff = effective.get("contingency_pct")
-    contingency_base = baseline.get("contingency_pct")
-    if contingency_eff is not None and (contingency_base is None or not math.isclose(float(contingency_eff), float(contingency_base or 0.0), abs_tol=1e-6)):
-        out["contingency_pct_override"] = float(contingency_eff)
     setups_eff = effective.get("setups")
     fixture_eff = effective.get("fixture")
     if setups_eff is not None or fixture_eff is not None:
@@ -1790,7 +1768,6 @@ def iter_suggestion_rows(state: QuoteState) -> list[dict]:
 
     scalar_specs = [
         {"path": ("scrap_pct",), "label": "Scrap %", "kind": "percent"},
-        {"path": ("contingency_pct",), "label": "Contingency %", "kind": "percent"},
         {"path": ("setups",), "label": "Setups", "kind": "int"},
         {
             "path": ("fixture",),
@@ -5753,6 +5730,105 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 material_display_for_debug = material_name_display
                 append_line(f"  Material used:  {material_name_display}")
 
+            blank_lines: list[str] = []
+            need_len = _coerce_float_or_none(
+                material_stock_block.get("required_blank_len_in")
+                if isinstance(material_stock_block, _MappingABC)
+                else None
+            )
+            need_wid = _coerce_float_or_none(
+                material_stock_block.get("required_blank_wid_in")
+                if isinstance(material_stock_block, _MappingABC)
+                else None
+            )
+            need_thk = _coerce_float_or_none(
+                material_stock_block.get("required_blank_thk_in")
+                if isinstance(material_stock_block, _MappingABC)
+                else None
+            )
+
+            stock_len_val = _coerce_float_or_none(
+                material_stock_block.get("stock_L_in")
+                if isinstance(material_stock_block, _MappingABC)
+                else None
+            )
+            stock_wid_val = _coerce_float_or_none(
+                material_stock_block.get("stock_W_in")
+                if isinstance(material_stock_block, _MappingABC)
+                else None
+            )
+            stock_thk_val = _coerce_float_or_none(
+                material_stock_block.get("stock_T_in")
+                if isinstance(material_stock_block, _MappingABC)
+                else None
+            )
+
+            if (need_len is None or need_wid is None or need_thk is None) and isinstance(g, dict):
+                plan_guess = g.get("stock_plan_guess")
+                if isinstance(plan_guess, _MappingABC):
+                    if need_len is None:
+                        need_len = _coerce_float_or_none(
+                            plan_guess.get("need_len_in")
+                            or plan_guess.get("required_len_in")
+                        )
+                    if need_wid is None:
+                        need_wid = _coerce_float_or_none(
+                            plan_guess.get("need_wid_in")
+                            or plan_guess.get("required_wid_in")
+                        )
+                    if need_thk is None:
+                        need_thk = _coerce_float_or_none(
+                            plan_guess.get("need_thk_in")
+                            or plan_guess.get("stock_thk_in")
+                        )
+
+            if need_len and need_wid and need_thk:
+                blank_lines.append(
+                    f"  Required blank (w/ margins): {need_len:.2f} × {need_wid:.2f} × {need_thk:.2f} in"
+                )
+
+            source_tag = None
+            if isinstance(material_stock_block, _MappingABC):
+                source_tag = material_stock_block.get("stock_source_tag") or material_stock_block.get("source")
+            if not source_tag and isinstance(material, _MappingABC):
+                source_tag = material.get("stock_source_tag") or material.get("source")
+            if isinstance(source_tag, str):
+                source_tag = source_tag.strip()
+                if not source_tag:
+                    source_tag = None
+
+            if stock_len_val and stock_wid_val and stock_thk_val:
+                stock_line = (
+                    "  Rounded to catalog: "
+                    f"{stock_len_val:.2f} × {stock_wid_val:.2f} × {stock_thk_val:.3f} in"
+                )
+                if source_tag:
+                    stock_line += f" ({source_tag})"
+                thickness_diff = None
+                diff_candidate = None
+                if isinstance(material_stock_block, _MappingABC):
+                    diff_candidate = _coerce_float_or_none(
+                        material_stock_block.get("thickness_diff_in")
+                    )
+                if diff_candidate is None and need_thk and stock_thk_val:
+                    thickness_diff = abs(float(stock_thk_val) - float(need_thk))
+                elif diff_candidate is not None:
+                    thickness_diff = float(diff_candidate)
+                if (
+                    thickness_diff is not None
+                    and thickness_diff > 0.02
+                ):
+                    warning_mode = (
+                        "allowed"
+                        if bool(getattr(cfg, "allow_thickness_upsize", False))
+                        else "blocked"
+                    )
+                    stock_line += f" (WARNING: thickness upsize {warning_mode})"
+                blank_lines.append(stock_line)
+
+            if blank_lines:
+                detail_lines.extend(blank_lines)
+
             material_cost_map: dict[str, Any] = {}
             if isinstance(material_stock_block, _MappingABC):
                 material_cost_map.update(material_stock_block)
@@ -8862,43 +8938,25 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 return _safe_float(value, default)
         return default
 
-    overhead_pct_value = _resolve_ladder_pct(("OverheadPct", "overhead_pct"), 0.18)
-    ga_pct_value = _resolve_ladder_pct(("GA_Pct", "ga_pct", "gna_pct"), 0.10)
-    contingency_pct_value = _resolve_ladder_pct(("ContingencyPct", "contingency_pct"), 0.05)
     expedite_pct_value = _resolve_ladder_pct(("ExpeditePct", "expedite_pct"), 0.0)
     margin_pct_value = _resolve_ladder_pct(("MarginPct", "margin_pct"), 0.15)
 
-    applied_pcts.setdefault("OverheadPct", overhead_pct_value)
-    applied_pcts.setdefault("GA_Pct", ga_pct_value)
-    applied_pcts.setdefault("ContingencyPct", contingency_pct_value)
     applied_pcts.setdefault("MarginPct", margin_pct_value)
     if "ExpeditePct" not in applied_pcts and expedite_pct_value:
         applied_pcts["ExpeditePct"] = expedite_pct_value
 
     ladder_totals = _compute_pricing_ladder(
         subtotal,
-        overhead_pct=overhead_pct_value,
-        ga_pct=ga_pct_value,
-        contingency_pct=contingency_pct_value,
         expedite_pct=expedite_pct_value,
         margin_pct=margin_pct_value,
     )
 
-    with_overhead = ladder_totals["with_overhead"]
-    with_ga = ladder_totals["with_ga"]
-    with_contingency = ladder_totals["with_contingency"]
     with_expedite = ladder_totals["with_expedite"]
     subtotal_before_margin = ladder_totals.get("subtotal_before_margin", with_expedite)
-    overhead_cost = ladder_totals.get("overhead_cost", 0.0)
-    ga_cost = ladder_totals.get("ga_cost", 0.0)
-    contingency_cost = ladder_totals.get("contingency_cost", 0.0)
     expedite_cost = ladder_totals.get("expedite_cost", 0.0)
     final_price = ladder_totals["with_margin"]
 
     if isinstance(totals, dict):
-        totals["with_overhead"] = with_overhead
-        totals["with_ga"] = with_ga
-        totals["with_contingency"] = with_contingency
         totals["with_expedite"] = with_expedite
         totals["with_margin"] = final_price
         totals["price"] = final_price
@@ -8911,9 +8969,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     replace_line(final_price_row_index, _format_row("Final Price per Part:", price))
 
     row("Subtotal (Labor + Directs):", subtotal)
-    row(f"+ Overhead ({_pct(applied_pcts.get('OverheadPct'))}):", overhead_cost)
-    row(f"+ G&A ({_pct(applied_pcts.get('GA_Pct'))}):", ga_cost)
-    row(f"+ Contingency ({_pct(applied_pcts.get('ContingencyPct'))}):", contingency_cost)
     if applied_pcts.get("ExpeditePct"):
         row(f"+ Expedite ({_pct(applied_pcts.get('ExpeditePct'))}):", expedite_cost)
     row("= Subtotal before Margin:", subtotal_before_margin)
@@ -9281,9 +9336,10 @@ class QuoteConfiguration:
     prefer_removal_drilling_hours: bool = True
     stock_price_source: str = "mcmaster_api"
     scrap_price_source: str = "wieland"
-    hole_source_preference: str = "table"
-    hole_merge_tol_diam_in: float = 0.001
-    hole_merge_tol_depth_in: float = 0.01
+    enforce_exact_thickness: bool = True
+    allow_thickness_upsize: bool = False
+    round_tol_in: float = 0.05
+    stock_rounding_mode: str = "per_axis_min_area"
 
     def copy_default_params(self) -> Dict[str, Any]:
         """Return a deep copy of the default parameter set."""
@@ -13508,6 +13564,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         _coerce_float_or_none(density),
         scrap_pct_effective,
         stock_price_source=stock_price_source,
+        cfg=cfg,
     )
     breakdown["material_block"] = mat_block
     grams_per_lb = 1000.0 / LB_PER_KG
@@ -15060,9 +15117,6 @@ def default_variables_template() -> pd.DataFrame:
                     adjusted_rows.append(new_row)
             return pd.DataFrame(adjusted_rows, columns=columns)
     rows = [
-        ("Overhead %", 0.15, "number"),
-        ("G&A %", 0.08, "number"),
-        ("Contingency %", 0.0, "number"),
         ("Profit Margin %", 0.0, "number"),
         ("Programmer $/hr", 90.0, "number"),
         ("CAM Programmer $/hr", 90.0, "number"),
@@ -16741,30 +16795,6 @@ def derive_inference_knobs(
                 },
                 "targets": ["material.stock"],
             }
-
-    # --- Risk / contingency --------------------------------------------------
-    risk_signals: list[str] = []
-    tolerance_mentions = re.findall(r"±\s*0\.00\d", tokens_upper)
-    gd_t_mentions = re.findall(r"\b(MMC|LMC|TP|POSITION|PROFILE|FLATNESS)\b", tokens_upper)
-    if len(tolerance_mentions) >= 3:
-        risk_signals.append(f"Multiple tight tolerances ({len(tolerance_mentions)})")
-    if len(gd_t_mentions) >= 2:
-        risk_signals.append(f"GD&T callouts ({len(gd_t_mentions)})")
-    if "CRITICAL" in tokens_upper:
-        risk_signals.append("CRITICAL note present")
-    if isinstance(material_info, dict) and material_info.get("material_family") in {"tool steel", "copper", "brass"}:
-        risk_signals.append(f"Material family {material_info.get('material_family')}")
-    if risk_signals:
-        contingency = 0.03 + 0.01 * max(len(risk_signals) - 1, 0)
-        contingency = min(contingency, 0.05)
-        knobs["risk_contingency"] = {
-            "confidence": "medium",
-            "signals": risk_signals,
-            "recommended": {
-                "contingency_pct": round(contingency, 3),
-            },
-            "targets": ["contingency_pct"],
-        }
 
     # --- Packaging / shipping ------------------------------------------------
     packaging_signals: list[str] = []
@@ -18920,9 +18950,6 @@ class App(tk.Tk):
             self.params["Quantity"] = max(1, int(round(qty_value)))
 
         raw_skip_items = {
-            "Overhead %", "Overhead",
-            "G&A %", "G&A", "GA %", "GA",
-            "Contingency %", "Contingency",
             "Profit Margin %", "Profit Margin", "Margin %", "Margin",
             "Expedite %", "Expedite",
             "Insurance %", "Insurance",
@@ -19215,8 +19242,12 @@ class App(tk.Tk):
         comm_frame.grid(row=current_row, column=0, sticky="ew", padx=10, pady=5)
         current_row += 1
         comm_keys = [
-            "OverheadPct", "GA_Pct", "MarginPct", "ContingencyPct",
-            "ExpeditePct", "VendorMarkupPct", "InsurancePct", "MinLotCharge", "Quantity",
+            "MarginPct",
+            "ExpeditePct",
+            "VendorMarkupPct",
+            "InsurancePct",
+            "MinLotCharge",
+            "Quantity",
         ]
         create_global_entries(comm_frame, comm_keys, self.params, self.param_vars)
 
@@ -19858,9 +19889,6 @@ class App(tk.Tk):
         if self.vars_df is not None and raw_param_values:
             normalized_items = self.vars_df["Item"].astype(str).apply(_normalize_item_text)
             param_to_items = {
-                "OverheadPct": ["overhead %", "overhead"],
-                "GA_Pct": ["g&a %", "ga %"],
-                "ContingencyPct": ["contingency %"],
                 "MarginPct": ["profit margin %", "margin %"],
                 "ExpeditePct": ["expedite %"],
                 "InsurancePct": ["insurance %"],
@@ -20240,7 +20268,6 @@ class App(tk.Tk):
         if self.apply_llm_adj.get() and isinstance(out, dict):
             adj = out.get("LLM_Adjustments", {})
             try:
-                self.params["OverheadPct"] += float(adj.get("OverheadPct_add", 0.0) or 0.0)
                 self.params["MarginPct"] += float(adj.get("MarginPct_add", 0.0) or 0.0)
                 self.params["ConsumablesFlat"] += float(adj.get("ConsumablesFlat_add", 0.0) or 0.0)
                 for k,v in self.param_vars.items(): v.set(str(self.params.get(k, "")))

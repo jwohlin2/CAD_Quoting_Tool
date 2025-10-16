@@ -113,18 +113,13 @@ def test_die_plate_deep_drill_regression() -> None:
         "direct_cost_details": {"Consumables": "Cutting oil allowance"},
         "applied_pcts": {
             "MarginPct": 0.20,
-            "OverheadPct": 0.10,
-            "GA_Pct": 0.05,
-            "ContingencyPct": 0.00,
         },
         "totals": {
             "subtotal": process_cost + 40.0,
             "labor_cost": process_cost,
-            "with_overhead": (process_cost + 40.0) * 1.10,
-            "with_ga": (process_cost + 40.0) * 1.10 * 1.05,
-            "with_contingency": (process_cost + 40.0) * 1.10 * 1.05,
-            "with_expedite": (process_cost + 40.0) * 1.10 * 1.05,
-            "price": (process_cost + 40.0) * 1.10 * 1.05 / (1 - 0.20),
+            "with_expedite": process_cost + 40.0,
+            "with_margin": (process_cost + 40.0) * 1.20,
+            "price": (process_cost + 40.0) * 1.20,
         },
         "qty": 1,
         "geo_context": {
