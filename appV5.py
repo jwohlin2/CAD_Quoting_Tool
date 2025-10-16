@@ -12060,18 +12060,12 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     bucket_view.clear()
     bucket_view.update(bucket_view_prepared)
 
-    bucket_view_buckets = (
-        bucket_view_prepared.get("buckets")
-        if isinstance(bucket_view_prepared, _MappingABC)
-        else None
-    )
-
     if not use_planner:
-        drilling_bucket_prepared = (
-            bucket_view_buckets.get("drilling")
-            if isinstance(bucket_view_buckets, _MappingABC)
-            else None
-        )
+        drilling_bucket_prepared = None
+        if isinstance(bucket_view_prepared, _MappingABC):
+            bucket_view_buckets = bucket_view_prepared.get("buckets")
+            if isinstance(bucket_view_buckets, _MappingABC):
+                drilling_bucket_prepared = bucket_view_buckets.get("drilling")
         if isinstance(drilling_bucket_prepared, _MappingABC):
             bucket_view["drilling"] = {
                 "minutes": _safe_float(drilling_bucket_prepared.get("minutes")),
