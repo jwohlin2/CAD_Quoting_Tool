@@ -5887,12 +5887,43 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     )
             elif show_zeros:
                 weight_lines.append("  Scrap Weight: 0 oz")
-            if scrap is not None:
+            computed_scrap_fraction: float | None = None
+            if (
+                starting_mass_val is not None
+                and starting_mass_val > 0
+                and scrap_mass_val is not None
+            ):
+                try:
+                    start_mass = float(starting_mass_val)
+                    scrap_mass = max(0.0, float(scrap_mass_val))
+                except Exception:
+                    start_mass = 0.0
+                    scrap_mass = 0.0
+                if start_mass > 0:
+                    computed_scrap_fraction = scrap_mass / start_mass
+
+            if scrap is not None or computed_scrap_fraction is not None:
                 scrap_hint_text = _scrap_source_hint(material)
-                scrap_line = f"  Scrap Percentage: {_pct(scrap)}"
-                if scrap_hint_text:
-                    scrap_line += f" ({scrap_hint_text})"
-                weight_lines.append(scrap_line)
+                if computed_scrap_fraction is not None:
+                    scrap_line = (
+                        f"  Scrap Percentage: {_pct(computed_scrap_fraction)} (computed)"
+                    )
+                    if scrap_hint_text and scrap_fraction_val is None:
+                        scrap_line += f" ({scrap_hint_text})"
+                    weight_lines.append(scrap_line)
+                elif scrap is not None:
+                    scrap_line = f"  Scrap Percentage: {_pct(scrap)}"
+                    if scrap_hint_text:
+                        scrap_line += f" ({scrap_hint_text})"
+                    weight_lines.append(scrap_line)
+
+                if scrap_fraction_val is not None:
+                    geometry_line = (
+                        f"  Scrap % (geometry hint): {_pct(scrap_fraction_val)}"
+                    )
+                    if scrap_hint_text:
+                        geometry_line += f" ({scrap_hint_text})"
+                    weight_lines.append(geometry_line)
             # Historically the renderer would emit an extra weight-only line here when
             # ``scrap_adjusted_mass`` was available.  The value was the computed "with
             # scrap" mass, but because it lacked a label it rendered as a stray line like
