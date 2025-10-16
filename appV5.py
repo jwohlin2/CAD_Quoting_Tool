@@ -7615,7 +7615,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if isinstance(totals, dict):
         totals["labor_cost"] = ladder_labor
 
-    final_per_part = round(machine_labor_total_cost + nre_per_part + ladder_directs, 2)
+    final_per_part = round(machine_labor_total + nre_per_part + ladder_directs, 2)
     ladder_subtotal = final_per_part
     if 0 <= total_labor_row_index < len(lines):
         replace_line(
