@@ -293,16 +293,10 @@ DUMMY_QUOTE_RESULT = {
             "labor_cost": 1260.0,
             "direct_costs": 520.0,
             "subtotal": 1780.0,
-            "with_overhead": 1993.6,
-            "with_ga": 2093.28,
-            "with_contingency": 2093.28,
             "with_expedite": 2093.28,
             "price": 2511.94,
         },
         "applied_pcts": {
-            "OverheadPct": 0.12,
-            "GA_Pct": 0.05,
-            "ContingencyPct": 0.0,
             "MarginPct": 0.2,
         },
         "rates": {

@@ -53,7 +53,6 @@ ENG-05,Fixture Design Hours,Engineering time to design custom workholding.,2–2
 ENG-09,Solid Model Quality,Poor quality models require repair time.,1–5 hours of programming time (+$100–$500).,Dropdown,"Clean, Minor Heal, Major Heal, STL Mesh Only, 2D Drawing Only",,
 PM-03,RFQ Completeness,Incomplete RFQs add significant time for clarification.,0.5–2.0 hours of engineering time (+$50–$200).,Dropdown,"Complete, Missing Drawing, Missing Tolerances, Missing Material, Missing Finish/Coating, Other Missing Info",,
 PM-04,Revision Control Complexity,History of frequent revisions suggests a higher risk of mid-production changes.,5–10% contingency on labor and management costs.,Dropdown,"Low, Medium, High, Strict Traceability, Uncontrolled (no rev)",,
-COM-05,Shop Supplies Overhead,"A percentage to cover coolants, oils, cleaning supplies, etc.",3–5% of machining cost.,Lookup – Percentage,MachiningCost * 0.04,%,COM_05
 PM-06,Payment Terms,Net 60/90 terms affect cash flow and may require adding a financing cost.,1–3% of total price for terms beyond Net 30.,Dropdown,"Prepay, COD, Net 30, Net 45, Net 60, Net 90, Milestone / Progress",,
 PM-02,Customer Relationship,New customers may require more vetting and have higher perceived risk.,~+/- 5% on margin depending on trust and history.,Dropdown,"New, Existing, Key Account, Strategic, Dormant, At‑Risk",,
 FIN-07,Outsourced Plating / Coating Cost,"Vendor price for anodizing, black oxide, nickel plating, etc.",$200–$1000 per batch.,Dropdown,"None, Anodize Type II, Anodize Type III (Hard), Black Oxide, Zinc, Nickel Plate, Tin, Gold, Passivation, Powder Coat",$,
@@ -65,7 +64,6 @@ MIL-08,4th/5th Axis Utilization,Adds complexity and cost but can reduce setups.,
 COM-01,Standard Packaging & Boxing Labor,Time to wrap and box parts for safe transit.,$2–$10 per part/package.,Dropdown,"Standard Box, Custom Crate, ESD Bagging, Vacuum Seal, Returnable Container",,
 MAT-12,Material Handling (Weight/Size),Very large or heavy stock requires cranes and multiple people to handle.,$100–$1000+ for rigging/handling on large parts.,Dropdown,"Standard, Heavy (>50 lb), Oversize (>24 in), Requires Forklift",,
 PM-01,Quoting Lead Time,"Rush quotes require immediate attention, pulling estimators off other work.",$50–$250 flat fee for while-you-wait quotes.,Dropdown,"Standard, Rush (48 h), Expedite (Same Day)",,
-COM-06,G&A (General & Admin) Overhead,"A percentage to cover rent, utilities, office staff, and other business costs.",15–25% of total cost.,Lookup – Percentage,Subtotal * 0.20,%,COM_06
 MAT-04,Material Cost per Unit (kg/lb/ft),The direct purchase price from the supplier.,Direct cost input.,Lookup – Amount,The formula fetches this cost from a MaterialData table based on the Material Selection input.,$,MAT_04
 TRN-01,Primary Lathe / Turning Center Rate,Hourly cost for the specific turning machine.,$80/hr (Standard) vs. $140/hr (Mill-Turn).,Lookup – Rate,The formula fetches this hourly rate from a MachineRates table.,$/hr,TRN_01
 COM-04,Insurance / Liability Adder,A factor to cover the risk of damage or loss during production.,1–3% of total cost.,Lookup – Percentage,TotalCost * 0.02,%,COM_04

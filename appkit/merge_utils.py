@@ -22,7 +22,6 @@ from appkit.guardrails import (
 
 ACCEPT_SCALAR_KEYS: tuple[str, ...] = (
     "scrap_pct",
-    "contingency_pct",
     "setups",
     "fixture",
     "fixture_build_hr",
@@ -399,27 +398,6 @@ def merge_effective(
             scrap_source = "llm"
     eff["scrap_pct"] = float(scrap_val)
     source_tags["scrap_pct"] = scrap_source
-
-    contingency_base = baseline.get("contingency_pct")
-    contingency_user = overrides.get("contingency_pct") or overrides.get("contingency_pct_override")
-    contingency_sugg = suggestions.get("contingency_pct")
-    contingency_source = "baseline"
-    contingency_val = contingency_base if contingency_base is not None else None
-    if contingency_user is not None:
-        cand = to_float(contingency_user)
-        if cand is not None:
-            contingency_val = float(cand)
-            contingency_val, _ = _clamp(contingency_val, "scrap", "contingency_pct", "user override")
-            contingency_source = "user"
-    elif contingency_sugg is not None:
-        cand = to_float(contingency_sugg)
-        if cand is not None:
-            contingency_val = float(cand)
-            contingency_val, _ = _clamp(contingency_val, "scrap", "contingency_pct", "LLM")
-            contingency_source = "llm"
-    if contingency_val is not None:
-        eff["contingency_pct"] = float(contingency_val)
-        source_tags["contingency_pct"] = contingency_source
 
     setups_base = baseline.get("setups") or 1
     setups_user = overrides.get("setups")

@@ -718,22 +718,6 @@ def get_llm_overrides(
     if clean_pass:
         out["add_pass_through"] = clean_pass
 
-    cont = parsed.get("contingency_pct_override", None)
-    if cont is not None:
-        try:
-            orig = float(cont)
-        except Exception:
-            orig = None
-        clamped_val = clamp(cont, 0.0, 0.25, None)
-        if clamped_val is not None:
-            out["contingency_pct_override"] = clamped_val
-            if orig is None:
-                clamp_notes.append("contingency_pct_override non-numeric → default applied")
-            elif not math.isclose(orig, clamped_val, abs_tol=1e-6):
-                clamp_notes.append(
-                    f"contingency_pct_override {orig:.3f} → {clamped_val:.3f}"
-                )
-
     drill_groups_raw = _safe_get(parsed, "drilling_groups", list, [])
     if drill_groups_raw:
         if hole_count_feature < 5:

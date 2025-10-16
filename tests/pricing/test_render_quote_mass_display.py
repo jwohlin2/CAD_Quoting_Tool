@@ -31,10 +31,8 @@ def _base_totals() -> dict:
         "labor_cost": 0.0,
         "direct_costs": 0.0,
         "subtotal": 0.0,
-        "with_overhead": 0.0,
-        "with_ga": 0.0,
-        "with_contingency": 0.0,
         "with_expedite": 0.0,
+        "with_margin": 0.0,
     }
 
 

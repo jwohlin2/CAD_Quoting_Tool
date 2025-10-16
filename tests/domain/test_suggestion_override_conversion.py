@@ -13,7 +13,6 @@ def test_overrides_to_suggestions_cleans_and_canonicalises() -> None:
             {"label": "Hardware", "value": None},
         ],
         "scrap_pct_override": "0.15",
-        "contingency_pct": 0.25,
         "setups": "3",
         "fixture": "  Soft jaws  ",
         "notes": [" Use custom fixture ", ""],
@@ -37,7 +36,6 @@ def test_overrides_to_suggestions_cleans_and_canonicalises() -> None:
     assert suggestions["process_hour_adders"] == {"inspection": 1.5}
     assert suggestions["add_pass_through"] == {"Hardware": 12.5, "Finish": 7.2}
     assert suggestions["scrap_pct"] == pytest.approx(0.15)
-    assert suggestions["contingency_pct"] == pytest.approx(0.25)
     assert suggestions["setups"] == 3
     assert suggestions["fixture"] == "Soft jaws"
     assert suggestions["notes"] == ["Use custom fixture"]
@@ -61,7 +59,6 @@ def test_suggestions_to_overrides_filters_metadata_and_normalises() -> None:
         "process_hour_adders": {"inspection": "0.5"},
         "add_pass_through": [{"label": "Hardware", "amount": "18"}],
         "scrap_pct": 0.12,
-        "contingency_pct": "0.05",
         "setups": 2.7,
         "fixture": " Vise ",
         "notes": ["Keep tabs", ""],
@@ -77,7 +74,6 @@ def test_suggestions_to_overrides_filters_metadata_and_normalises() -> None:
     assert overrides["process_hour_adders"] == {"inspection": 0.5}
     assert overrides["add_pass_through"] == {"Hardware": 18.0}
     assert overrides["scrap_pct"] == pytest.approx(0.12)
-    assert overrides["contingency_pct"] == pytest.approx(0.05)
     assert overrides["setups"] == 3
     assert overrides["fixture"] == "Vise"
     assert overrides["notes"] == ["Keep tabs"]

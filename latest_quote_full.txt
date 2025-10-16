@@ -64,9 +64,6 @@ Process & Labor Costs
 Pricing Ladder
 --------------------------------------------------------------------------
 Subtotal (Labor + Directs):                                         $26.60
-+ Overhead (0.0%):                                                   $0.00
-+ G&A (0.0%):                                                        $0.00
-+ Contingency (0.0%):                                                $0.00
 = Subtotal before Margin:                                           $26.60
 Final Price with Margin (0.0%):                                      $0.00
 
