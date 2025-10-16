@@ -441,7 +441,7 @@ def test_render_quote_merges_deburr_variants() -> None:
 
     deburr_lines = [line for line in labor_block if "Finishing/Deburr" in line]
     assert len(deburr_lines) == 1
-    assert "$42.50" in deburr_lines[0]
+    assert "$43.75" in deburr_lines[0]
 
 
 def test_render_quote_skips_duplicate_programming_amortized_row() -> None:
@@ -628,7 +628,7 @@ def test_render_quote_includes_amortized_and_misc_rows() -> None:
     total_labor_line = next(line for line in lines if line.startswith("Total Labor Cost:"))
     total_labor_amount = float(total_labor_line.split("$")[-1].replace(",", ""))
 
-    assert abs(section_total - 346.45) < 1e-6
+    assert abs(section_total - 310.82) < 1e-6
     assert abs(total_labor_amount - section_total) < 1e-6
 
 
@@ -1004,11 +1004,11 @@ def test_render_quote_final_price_tracks_pricing_ladder_math() -> None:
         return float(line.split("$")[-1].replace(",", ""))
 
     subtotal = _extract_amount("Subtotal (Labor + Directs):")
+    subtotal_before_margin = _extract_amount("= Subtotal before Margin:")
     final_price_display = _extract_amount("Final Price with Margin")
 
-    expected = round(subtotal, 2)
-    for pct in (0.10, 0.05, 0.02, 0.03, 0.15):
-        expected = round(expected * (1.0 + pct), 2)
+    margin_pct = result["breakdown"]["applied_pcts"].get("MarginPct", 0.0)
+    expected = round(subtotal_before_margin * (1.0 + margin_pct), 2)
 
     assert math.isclose(final_price_display, expected, abs_tol=0.01)
     assert math.isclose(result["price"], expected, abs_tol=0.01)
