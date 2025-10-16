@@ -1056,6 +1056,8 @@ def explain_quote(
     should_note_drilling = hole_groups_flag or (removal_hr is not None and removal_hr > 0)
     if not should_note_drilling and plan_drilling_reasons:
         should_note_drilling = True
+    if not should_note_drilling and has_drilling:
+        should_note_drilling = True
 
     price_text = _format_money(totals.get("price") or breakdown.get("price"))
     qty_val = _coerce_int(totals.get("qty") or breakdown.get("qty") or breakdown.get("quantity"))
@@ -1131,6 +1133,46 @@ def explain_quote(
         for label, amount in _iter_named_values(breakdown.get("process_costs"))
         if not str(label).lower().startswith("planner_")
     ]
+    ranked_process_entries = sorted(process_entries, key=lambda item: item[1], reverse=True)
+    top_procs: list[str] = []
+    for label, _ in ranked_process_entries[:3]:
+        label_text = str(label).strip()
+        if label_text:
+            top_procs.append(label_text)
+
+    render_state_extra: Mapping[str, Any] | None = None
+    if isinstance(render_state, Mapping):
+        extra_candidate = render_state.get("extra")
+        if isinstance(extra_candidate, Mapping):
+            render_state_extra = extra_candidate
+    else:
+        try:
+            extra_candidate = getattr(render_state, "extra", None)
+        except Exception:
+            extra_candidate = None
+        if isinstance(extra_candidate, Mapping):
+            render_state_extra = extra_candidate
+
+    has_drilling = bool(
+        render_state_extra.get("drill_total_minutes")
+        if isinstance(render_state_extra, Mapping)
+        else 0
+    )
+    if has_drilling and "drilling" not in [p.lower() for p in top_procs]:
+        top_procs.append("Drilling")
+
+    if has_drilling:
+        minutes_val = (
+            _coerce_float(render_state_extra.get("drill_total_minutes"))
+            if isinstance(render_state_extra, Mapping)
+            else None
+        )
+        if minutes_val is not None and minutes_val > 0:
+            hours_text = fmt_hours(minutes_val / 60.0)
+            _add_reason(f"planner buckets allocate {hours_text} to drilling")
+        else:
+            _add_reason("planner buckets include drilling")
+
     if process_entries:
         _describe_top(process_entries, prefix="Largest process costs")
 
