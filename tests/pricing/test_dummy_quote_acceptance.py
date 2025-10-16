@@ -628,6 +628,23 @@ def test_dummy_quote_direct_costs_match_across_sections() -> None:
         if not line.strip():
             break
         pass_section.append(line)
+    material_line = next(line for line in pass_section if "Material & Stock" in line)
+    assert math.isclose(_extract_currency(material_line), material_total, abs_tol=0.01)
+
+    pass_through_block = payload["breakdown"].get("pass_through", {}) or {}
+    shipping_amount = float(pass_through_block.get("Shipping", 0.0))
+    shipping_line = next(line for line in pass_section if "Shipping" in line)
+    assert math.isclose(_extract_currency(shipping_line), shipping_amount, abs_tol=0.01)
+
+    for label, amount in pass_through_block.items():
+        if label in {"Material", "Shipping"}:
+            continue
+        amount_val = float(amount or 0.0)
+        if amount_val <= 0 and all(label not in entry for entry in pass_section):
+            continue
+        detail_line = next(line for line in pass_section if label in line)
+        assert math.isclose(_extract_currency(detail_line), amount_val, abs_tol=0.01)
+
     pass_total_line = next(line for line in pass_section if line.strip().startswith("Total"))
     pass_total = _extract_currency(pass_total_line)
     assert math.isclose(pass_total, direct_costs, abs_tol=0.01)
@@ -645,17 +662,9 @@ def test_dummy_quote_direct_costs_match_across_sections() -> None:
     labor_amount = _extract_currency(total_line)
     ladder_direct = ladder_subtotal - labor_amount
 
-    planner_machine_cost = float(
-        payload["breakdown"].get("process_costs", {}).get("Machine", 0.0)
-        if isinstance(payload.get("breakdown"), dict)
-        else 0.0
-    )
-    pricing_source = str(payload["breakdown"].get("pricing_source", "")).lower()
     expected_ladder_direct = direct_costs
-    if pricing_source == "planner" and planner_machine_cost > 0:
-        expected_ladder_direct += planner_machine_cost
-
     assert math.isclose(ladder_direct, expected_ladder_direct, abs_tol=0.01)
+    assert math.isclose(ladder_subtotal, labor_amount + expected_ladder_direct, abs_tol=0.01)
 
 
 def test_dummy_quote_ladder_uses_pricing_direct_costs_when_available() -> None:
@@ -680,8 +689,10 @@ def test_dummy_quote_ladder_uses_pricing_direct_costs_when_available() -> None:
     ladder_subtotal = _extract_currency(ladder_line)
     ladder_direct = ladder_subtotal - ladder_labor
 
-    assert math.isclose(ladder_direct, pricing_directs, abs_tol=0.01)
-    assert math.isclose(ladder_subtotal, ladder_labor + pricing_directs, abs_tol=0.01)
+    direct_costs_total = float(breakdown["totals"].get("direct_costs", 0.0))
+
+    assert math.isclose(ladder_direct, direct_costs_total, abs_tol=0.01)
+    assert math.isclose(ladder_subtotal, ladder_labor + direct_costs_total, abs_tol=0.01)
 
 
 def test_render_omits_amortized_rows_for_single_quantity() -> None:
