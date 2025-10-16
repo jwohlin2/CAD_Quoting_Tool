@@ -12160,13 +12160,22 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             pass
 
     # === DRILLING BILLING TRUTH ===
-    drill_meta = breakdown.setdefault("drilling_meta", {})
+    drill_meta_candidate = breakdown.setdefault("drilling_meta", {})
+    if isinstance(drill_meta_candidate, _MutableMappingABC):
+        drill_meta_map = drill_meta_candidate
+    elif isinstance(drill_meta_candidate, _MappingABC):
+        drill_meta_map = dict(drill_meta_candidate)
+        breakdown["drilling_meta"] = drill_meta_map
+    else:
+        drill_meta_map = {}
+        breakdown["drilling_meta"] = drill_meta_map
+
     bill_min = float(
-        drill_meta.get("total_minutes_with_toolchange")
-        or drill_meta.get("total_minutes")
+        drill_meta_map.get("total_minutes_with_toolchange")
+        or drill_meta_map.get("total_minutes")
         or 0.0
     )
-    drill_meta["total_minutes_billed"] = bill_min
+    drill_meta_map["total_minutes_billed"] = bill_min
 
     # overwrite any legacy/planner meta for drilling
     pm = breakdown.setdefault("process_meta", {}).setdefault("drilling", {})
@@ -12182,17 +12191,17 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     )
     drilling_summary["total_minutes_billed"] = drill_total_minutes_billed
 
-    drill_meta: _MappingABC[str, Any] | None = None
+    drilling_meta_source: _MappingABC[str, Any] | None = None
     if isinstance(drilling_meta_container, _MappingABC):
-        drill_meta = drilling_meta_container
+        drilling_meta_source = drilling_meta_container
 
     billed_minutes = 0.0
     if isinstance(drilling_summary, _MappingABC):
         billed_minutes = _safe_float(drilling_summary.get("total_minutes_billed"))
         if billed_minutes <= 0.0:
             billed_minutes = _safe_float(drilling_summary.get("total_minutes_with_toolchange"))
-    if billed_minutes <= 0.0 and isinstance(drill_meta, _MappingABC):
-        billed_minutes = _safe_float(drill_meta.get("total_minutes_billed"))
+    if billed_minutes <= 0.0 and isinstance(drilling_meta_source, _MappingABC):
+        billed_minutes = _safe_float(drilling_meta_source.get("total_minutes_billed"))
     if billed_minutes <= 0.0 and drill_total_minutes is not None and drill_total_minutes > 0.0:
         billed_minutes = float(drill_total_minutes)
 
