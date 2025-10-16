@@ -455,6 +455,12 @@ def _compute_material_block(
     stock_T_in = float(stock_info.get("thk_in") or t_in)
     source_note = str(stock_info.get("source") or "geometry-fallback")
 
+    stock_price_val = _coerce_float_or_none(stock_info.get("price$"))
+    if stock_price_val is not None and math.isfinite(stock_price_val):
+        stock_price = float(stock_price_val)
+    else:
+        stock_price = None
+
     rho = float(density_g_cc or 2.70)
     vol_net_in3 = float(L_in) * float(W_in) * float(t_in)
     vol_start_in3 = float(stock_L_in) * float(stock_W_in) * float(stock_T_in)
