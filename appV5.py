@@ -4257,11 +4257,20 @@ def _charged_hours_by_bucket(
     if prefer_card_minutes and isinstance(render_extra, _MappingABC):
         machine_minutes = render_extra.get("drill_machine_minutes")
         labor_minutes = render_extra.get("drill_labor_minutes")
+        card_total_hr = None
         if isinstance(machine_minutes, (int, float)) and isinstance(labor_minutes, (int, float)):
-            drill_hr = (float(machine_minutes) + float(labor_minutes)) / 60.0
+            card_total_hr = (float(machine_minutes) + float(labor_minutes)) / 60.0
+        _log.info(
+            "[drill-sync] card_m=%smin card_l=%smin → card_total_hr=%s  | charged_drilling_hr=%s",
+            machine_minutes,
+            labor_minutes,
+            card_total_hr,
+            charged.get("Drilling") or charged.get("drilling"),
+        )
+        if card_total_hr is not None:
             for key in list(charged.keys()):
                 if _canonical_bucket_key(key) in {"drilling", "drill"}:
-                    charged[key] = drill_hr
+                    charged[key] = card_total_hr
 
     return charged
 
