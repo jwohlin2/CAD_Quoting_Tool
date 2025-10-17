@@ -11,22 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from text_tables import (
-    ColumnSpec,
-    DEFAULT_WIDTH,
-    draw_boxed_table,
-    draw_kv_table,
-    ellipsize,
-    money,
-    pct,
-)
-
-
-def _fmt_cell(value: object, align: str = "left", width: int = 12) -> str:
-    text = f"{value}"
-    if align == "right":
-        return text.rjust(width)
-    return text.ljust(width)
+from text_tables import ascii_table, money, pct
 
 
 def _currency_from(data: Mapping[str, Any]) -> str:
@@ -81,42 +66,51 @@ def _render_summary(data: Mapping[str, Any]) -> str:
 
     lead_time = summary.get("lead_time") or data.get("lead_time")
 
-    pairs: list[tuple[str, str]] = []
-    pairs.append(("Quantity", f"{int(qty)}"))
+    headers = ["Quantity", f"{qty:,.0f}"]
+    rows: list[list[str]] = []
     if unit_price is not None:
-        pairs.append(("Unit Price", money(unit_price, currency)))
+        rows.append(["Unit Price", money(unit_price, currency)])
     if subtotal_before_margin is not None:
-        pairs.append(("Subtotal (pre-margin)", money(subtotal_before_margin, currency)))
+        rows.append(["Subtotal (pre-margin)", money(subtotal_before_margin, currency)])
     if subtotal is not None and subtotal_before_margin != subtotal:
-        pairs.append(("Subtotal (with adjustments)", money(subtotal, currency)))
+        rows.append(["Subtotal (with adjustments)", money(subtotal, currency)])
     if margin_pct is not None:
-        pairs.append(("Margin", pct(margin_pct)))
+        rows.append(["Margin", pct(margin_pct)])
     if final_price is not None:
-        pairs.append(("Final Price", money(final_price, currency)))
+        rows.append(["Final Price", money(final_price, currency)])
     if lead_time:
-        pairs.append(("Lead Time", str(lead_time)))
+        rows.append(["Lead Time", str(lead_time)])
 
-    width_left = 46
-    width_right = DEFAULT_WIDTH - width_left - 3
-    return draw_kv_table(pairs, width_left, width_right)
+    return ascii_table(
+        headers=headers,
+        rows=rows,
+        col_widths=[46, 25],
+        col_aligns=["left", "right"],
+        header_aligns=["left", "right"],
+    )
 
 
 def _render_price_drivers(data: Mapping[str, Any]) -> str | None:
     drivers = data.get("price_drivers")
     if not drivers:
         return None
-    rows: list[tuple[str, str]] = []
+    rows: list[list[str]] = []
     for entry in drivers:
         if isinstance(entry, Mapping):
-            label = ellipsize(str(entry.get("label") or entry.get("name") or ""), 80)
+            label = str(entry.get("label") or entry.get("name") or "")
             detail = entry.get("detail") or entry.get("value") or entry.get("reason") or ""
         else:
-            label = ellipsize(str(entry[0]), 80)
+            label = str(entry[0])
             detail = entry[1] if len(entry) > 1 else ""
-        rows.append((label, str(detail)))
-    left = 68
-    right = DEFAULT_WIDTH - left - 3
-    return draw_kv_table(rows, left, right, left_align="L", right_align="L")
+        rows.append([label, str(detail)])
+
+    return ascii_table(
+        headers=["Driver", "Detail"],
+        rows=rows,
+        col_widths=[40, 51],
+        col_aligns=["left", "left"],
+        header_aligns=["left", "left"],
+    )
 
 
 def _render_cost_breakdown(data: Mapping[str, Any]) -> str | None:
@@ -142,20 +136,20 @@ def _render_cost_breakdown(data: Mapping[str, Any]) -> str | None:
 
     rows: list[list[str]] = []
     for raw_label, raw_amount in items:
-        label = ellipsize(str(raw_label), 60)
+        label = str(raw_label)
         amount = _coerce_float(raw_amount) or 0.0
         percent = 0.0
         if subtotal_before_margin:
             percent = amount / subtotal_before_margin
         rows.append([label, money(amount, currency), pct(percent)])
 
-    specs = (
-        ColumnSpec(62, "L"),
-        ColumnSpec(28, "R"),
-        ColumnSpec(DEFAULT_WIDTH - 62 - 28 - 4, "R"),
+    return ascii_table(
+        headers=["Cost Element", "Amount", "% of Subtotal"],
+        rows=rows,
+        col_widths=[48, 18, 15],
+        col_aligns=["left", "right", "right"],
+        header_aligns=["left", "right", "right"],
     )
-    headers = ("Cost Element", "Amount", "% of Subtotal")
-    return draw_boxed_table(headers, rows, specs)
 
 
 def _render_quick_what_ifs(data: Mapping[str, Any]) -> str | None:
@@ -193,9 +187,13 @@ def _render_quick_what_ifs(data: Mapping[str, Any]) -> str | None:
     if not scenarios:
         return None
 
-    left = 50
-    right = DEFAULT_WIDTH - left - 3
-    return draw_kv_table(scenarios, left, right, left_align="L", right_align="R")
+    return ascii_table(
+        headers=["Scenario", "Price"],
+        rows=scenarios,
+        col_widths=[48, 20],
+        col_aligns=["left", "right"],
+        header_aligns=["left", "right"],
+    )
 
 
 def _render_nre(data: Mapping[str, Any]) -> str | None:
@@ -213,20 +211,19 @@ def _render_nre(data: Mapping[str, Any]) -> str | None:
             label = entry[0] if entry else ""
             detail = entry[1] if len(entry) > 1 else ""
             amount = _coerce_float(entry[2]) if len(entry) > 2 else None
-        rows.append(
-            [
-                ellipsize(str(label), 44),
-                ellipsize(str(detail), 38) if detail else "",
-                money(amount, currency),
-            ]
-        )
-    specs = (
-        ColumnSpec(44, "L"),
-        ColumnSpec(40, "L"),
-        ColumnSpec(DEFAULT_WIDTH - 44 - 40 - 5, "R"),
+        rows.append([
+            str(label),
+            str(detail) if detail else "",
+            money(amount, currency),
+        ])
+
+    return ascii_table(
+        headers=["Activity", "Detail", "Amount (per lot)"],
+        rows=rows,
+        col_widths=[38, 43, 16],
+        col_aligns=["left", "left", "right"],
+        header_aligns=["left", "left", "right"],
     )
-    headers = ("Activity", "Detail", "Amount (per lot)")
-    return draw_boxed_table(headers, rows, specs)
 
 
 def _render_materials(data: Mapping[str, Any]) -> str | None:
@@ -244,20 +241,19 @@ def _render_materials(data: Mapping[str, Any]) -> str | None:
             label = entry[0] if entry else ""
             detail = entry[1] if len(entry) > 1 else ""
             amount = _coerce_float(entry[2]) if len(entry) > 2 else None
-        rows.append(
-            [
-                ellipsize(str(label), 40),
-                ellipsize(str(detail), 44) if detail else "",
-                money(amount, currency),
-            ]
-        )
-    specs = (
-        ColumnSpec(40, "L"),
-        ColumnSpec(46, "L"),
-        ColumnSpec(DEFAULT_WIDTH - 40 - 46 - 5, "R"),
+        rows.append([
+            str(label),
+            str(detail) if detail else "",
+            money(amount, currency),
+        ])
+
+    return ascii_table(
+        headers=["Material", "Detail", "Amount (per part)"],
+        rows=rows,
+        col_widths=[36, 45, 16],
+        col_aligns=["left", "left", "right"],
+        header_aligns=["left", "left", "right"],
     )
-    headers = ("Material", "Detail", "Amount (per part)")
-    return draw_boxed_table(headers, rows, specs)
 
 
 def _render_processes(data: Mapping[str, Any]) -> str | None:
@@ -279,31 +275,23 @@ def _render_processes(data: Mapping[str, Any]) -> str | None:
             rate = _coerce_float(entry[2]) if len(entry) > 2 else None
             amount = _coerce_float(entry[3]) if len(entry) > 3 else None
             rate_display = None
-        label_text = _fmt_cell(ellipsize(str(label), 28), "left", 28)
-        hours_text = _fmt_cell(f"{hours:.2f} hr" if hours is not None else "—", "right", 10)
+        hours_text = f"{hours:.2f} hr" if hours is not None else "—"
         if rate_display:
-            rate_text = _fmt_cell(str(rate_display), "right", 16)
+            rate_text = str(rate_display)
         else:
-            rate_text = _fmt_cell(
-                money(rate, currency) + "/hr" if rate is not None else "—",
-                "right",
-                16,
+            rate_text = (
+                money(rate, currency) + "/hr" if rate is not None else "—"
             )
-        amount_text = _fmt_cell(money(amount, currency), "right", 18)
-        rows.append([label_text, hours_text, rate_text, amount_text])
-    specs = (
-        ColumnSpec(28, "L"),
-        ColumnSpec(10, "R"),
-        ColumnSpec(16, "R"),
-        ColumnSpec(18, "R"),
+        amount_text = money(amount, currency)
+        rows.append([str(label), hours_text, rate_text, amount_text])
+
+    return ascii_table(
+        headers=["Process", "Hours", "Rate", "Amount (per part)"],
+        rows=rows,
+        col_widths=[28, 10, 22, 16],
+        col_aligns=["left", "right", "right", "right"],
+        header_aligns=["left", "right", "right", "right"],
     )
-    headers = (
-        _fmt_cell("Process", "left", 28),
-        _fmt_cell("Hours", "right", 10),
-        _fmt_cell("Rate", "right", 16),
-        _fmt_cell("Amount (per part)", "right", 18),
-    )
-    return draw_boxed_table(headers, rows, specs)
 
 
 def _render_cycle_reference(data: Mapping[str, Any]) -> str | None:
@@ -320,20 +308,19 @@ def _render_cycle_reference(data: Mapping[str, Any]) -> str | None:
             label = entry[0] if entry else ""
             time_val = _coerce_float(entry[1]) if len(entry) > 1 else None
             notes = entry[2] if len(entry) > 2 else ""
-        rows.append(
-            [
-                ellipsize(str(label), 44),
-                f"{time_val:.2f} hr" if time_val is not None else "—",
-                ellipsize(str(notes), 40) if notes else "",
-            ]
-        )
-    specs = (
-        ColumnSpec(44, "L"),
-        ColumnSpec(18, "R"),
-        ColumnSpec(DEFAULT_WIDTH - 44 - 18 - 4, "L"),
+        rows.append([
+            str(label),
+            f"{time_val:.2f} hr" if time_val is not None else "—",
+            str(notes) if notes else "",
+        ])
+
+    return ascii_table(
+        headers=["Activity", "Cycle Time", "Notes"],
+        rows=rows,
+        col_widths=[38, 12, 36],
+        col_aligns=["left", "right", "left"],
+        header_aligns=["left", "right", "left"],
     )
-    headers = ("Activity", "Cycle Time", "Notes")
-    return draw_boxed_table(headers, rows, specs)
 
 
 def _render_top_cycle_contributors(data: Mapping[str, Any]) -> str | None:
@@ -348,10 +335,15 @@ def _render_top_cycle_contributors(data: Mapping[str, Any]) -> str | None:
         else:
             label = entry[0] if entry else ""
             hours = _coerce_float(entry[1]) if len(entry) > 1 else None
-        rows.append([ellipsize(str(label), 76), f"{hours:.2f} hr" if hours is not None else "—"])
-    left = 76
-    right = DEFAULT_WIDTH - left - 3
-    return draw_kv_table(rows, left, right, left_align="L", right_align="R")
+        rows.append([str(label), f"{hours:.2f} hr" if hours is not None else "—"])
+
+    return ascii_table(
+        headers=["Activity", "Hours"],
+        rows=rows,
+        col_widths=[64, 12],
+        col_aligns=["left", "right"],
+        header_aligns=["left", "right"],
+    )
 
 
 def _render_traceability(data: Mapping[str, Any]) -> str | None:
@@ -362,8 +354,14 @@ def _render_traceability(data: Mapping[str, Any]) -> str | None:
         pairs = _to_pairs(entries)
     else:
         pairs = [(str(item[0]), item[1]) if isinstance(item, Sequence) and len(item) >= 2 else (str(item), "") for item in entries]
-    formatted = [(ellipsize(str(k), 46), ellipsize(str(v), 60)) for k, v in pairs]
-    return draw_kv_table(formatted, 46, DEFAULT_WIDTH - 46 - 3, left_align="L", right_align="L")
+    formatted = [[str(k), str(v)] for k, v in pairs]
+    return ascii_table(
+        headers=["Item", "Detail"],
+        rows=formatted,
+        col_widths=[38, 50],
+        col_aligns=["left", "left"],
+        header_aligns=["left", "left"],
+    )
 
 
 def render_quote(data: Mapping[str, Any]) -> str:
