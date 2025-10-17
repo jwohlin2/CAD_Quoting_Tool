@@ -53,6 +53,7 @@ from cad_quoter.resources import (
     default_master_variables_csv,
     default_catalog_csv,
 )
+from cad_quoter.vendors.mcmaster_stock import parse_inches as _parse_inches
 from cad_quoter.config import (
     AppEnvironment,
     ConfigError,
@@ -1251,7 +1252,35 @@ def _load_mcmaster_catalog_csv(path: str | None = None) -> list[dict[str, Any]]:
         return []
 
 
-def _pick_mcmaster_plate_sku(
+def _coerce_inches_value(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    text = str(value).strip().replace("\u00a0", " ")
+    if not text:
+        return None
+
+    try:
+        parsed = float(_parse_inches(text))
+    except Exception:
+        parsed = None
+    if parsed is not None and parsed > 0:
+        return parsed
+
+    try:
+        return float(text)
+    except Exception:
+        pass
+
+    try:
+        return float(Fraction(text))
+    except Exception:
+        return None
+
+
+def _pick_mcmaster_plate_sku_impl(
     need_L_in: float,
     need_W_in: float,
     need_T_in: float,
@@ -1292,27 +1321,25 @@ def _pick_mcmaster_plate_sku(
         normalised_material = material_text.replace("_", " ")
         if not any(variant and variant in normalised_material for variant in variants):
             continue
-        try:
-            length = float(
-                row.get("length_in")
-                or row.get("L_in")
-                or row.get("len_in")
-                or row.get("length")
-            )
-            width = float(
-                row.get("width_in")
-                or row.get("W_in")
-                or row.get("wid_in")
-                or row.get("width")
-            )
-            thickness = float(
-                row.get("thickness_in")
-                or row.get("T_in")
-                or row.get("thk_in")
-                or row.get("thickness")
-            )
-        except Exception:
-            continue
+
+        length = _coerce_inches_value(
+            row.get("length_in")
+            or row.get("L_in")
+            or row.get("len_in")
+            or row.get("length")
+        )
+        width = _coerce_inches_value(
+            row.get("width_in")
+            or row.get("W_in")
+            or row.get("wid_in")
+            or row.get("width")
+        )
+        thickness = _coerce_inches_value(
+            row.get("thickness_in")
+            or row.get("T_in")
+            or row.get("thk_in")
+            or row.get("thickness")
+        )
         if not all(val and val > 0 for val in (length, width, thickness)):
             continue
         if abs(thickness - need_T_in) > tolerance:
@@ -1396,112 +1423,13 @@ def _pick_mcmaster_plate_sku(
 ) -> dict[str, Any] | None:
     """Return the smallest-area McMaster plate covering the requested envelope."""
 
-    import math as _math
-
-    if not all(val and val > 0 for val in (need_L_in, need_W_in, need_T_in)):
-        return None
-
-    rows = list(catalog_rows) if catalog_rows is not None else _load_mcmaster_catalog_csv()
-    if not rows:
-        return None
-
-    target_key = str(material_key or "").strip().lower()
-    if not target_key:
-        return None
-
-    tolerance = 0.02
-    candidates: list[dict[str, Any]] = []
-    for row in rows:
-        if not isinstance(row, Mapping):
-            continue
-        material_text = str(
-            (row.get("material") or row.get("Material") or "")
-        ).strip().lower()
-        if not material_text:
-            continue
-        variants = {target_key}
-        if "_" in target_key:
-            variants.add(target_key.replace("_", " "))
-        if " " in target_key:
-            variants.add(target_key.replace(" ", ""))
-        normalised_material = material_text.replace("_", " ")
-        if not any(variant and variant in normalised_material for variant in variants):
-            continue
-        try:
-            length = float(
-                row.get("length_in")
-                or row.get("L_in")
-                or row.get("len_in")
-                or row.get("length")
-            )
-            width = float(
-                row.get("width_in")
-                or row.get("W_in")
-                or row.get("wid_in")
-                or row.get("width")
-            )
-            thickness = float(
-                row.get("thickness_in")
-                or row.get("T_in")
-                or row.get("thk_in")
-                or row.get("thickness")
-            )
-        except Exception:
-            continue
-        if not all(val and val > 0 for val in (length, width, thickness)):
-            continue
-        if abs(thickness - need_T_in) > tolerance:
-            continue
-        part_no = str(
-            row.get("mcmaster_part")
-            or row.get("part")
-            or row.get("sku")
-            or ""
-        ).strip()
-        if not part_no:
-            continue
-
-        def _covers(a: float, b: float, A: float, B: float) -> bool:
-            return (A >= a) and (B >= b)
-
-        ok1 = _covers(need_L_in, need_W_in, length, width)
-        ok2 = _covers(need_L_in, need_W_in, width, length)
-        if not (ok1 or ok2):
-            continue
-
-        area = length * width
-        overL1 = (length - need_L_in) if ok1 else _math.inf
-        overW1 = (width - need_W_in) if ok1 else _math.inf
-        overL2 = (width - need_L_in) if ok2 else _math.inf
-        overW2 = (length - need_W_in) if ok2 else _math.inf
-        over_L = min(overL1, overL2)
-        over_W = min(overW1, overW2)
-
-        candidates.append(
-            {
-                "len_in": float(length),
-                "wid_in": float(width),
-                "thk_in": float(thickness),
-                "mcmaster_part": part_no,
-                "area": float(area),
-                "overL": float(over_L),
-                "overW": float(over_W),
-                "source": row.get("source") or "mcmaster-catalog",
-            }
-        )
-
-    if not candidates:
-        return None
-
-    candidates.sort(key=lambda c: (c["area"], max(c["overL"], c["overW"])))
-    best = candidates[0]
-    return {
-        "len_in": float(best["len_in"]),
-        "wid_in": float(best["wid_in"]),
-        "thk_in": float(best["thk_in"]),
-        "mcmaster_part": best["mcmaster_part"],
-        "source": best.get("source") or "mcmaster-catalog",
-    }
+    return _pick_mcmaster_plate_sku_impl(
+        need_L_in,
+        need_W_in,
+        need_T_in,
+        material_key=material_key,
+        catalog_rows=catalog_rows,
+    )
 
 def _compute_pricing_ladder(
     subtotal: float | int | str | None,
