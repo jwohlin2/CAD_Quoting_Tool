@@ -112,28 +112,26 @@ from bucketizer import bucketize
 
 from quote_renderer import render_quote as _render_structured_quote
 
-# === ASCII TABLE ENGINE (monospaced) ===
-
+# === ASCII TABLE ENGINE ===
 from textwrap import wrap as _wrap
 
 
-def _cell_lines(text, width):
-    """Return a list of wrapped lines for a cell, width-aware, no hard truncation."""
+def _wrap_cell(text, width: int):
     s = "" if text is None else str(text)
-    # split existing newlines into paragraphs, wrap each, keep empty at least one line
-    chunks = []
+    lines = []
     for para in s.splitlines() or [""]:
-        w = _wrap(para, width=width) or [""]
-        chunks.extend(w)
-    return chunks
+        lines.extend(_wrap(para, width=width) or [""])
+    return lines
 
 
-def _pad(s, width, align="left"):
-    text = "" if s is None else str(s)
-    pad = width - len(text)
+def _pad(text, width: int, align: str):
+    s = "" if text is None else str(text)
+    if len(s) > width:  # we wrap BEFORE we pad, so this shouldn't trigger
+        s = s[:width]
+    pad = width - len(s)
     if align == "right":
-        return " " * pad + text
-    elif align == "center":
+        return " " * pad + s
+    if align == "center":
         left = pad // 2
         right = pad - left
         return " " * left + text + " " * right
@@ -141,43 +139,56 @@ def _pad(s, width, align="left"):
 
 
 def _hline(widths):
-    # one space padding on each side of cells => borders use width+2
+    # 1 space padding on both sides of each cell
     return "+" + "+".join("-" * (w + 2) for w in widths) + "+"
 
 
-def ascii_table(headers, rows, *, col_widths, col_aligns):
+def ascii_table(headers, rows, *, widths, aligns):
     """
     headers: list[str]
-    rows: list[list[str]]
-    col_widths: list[int]   (content width, not including the 1-space left/right padding)
-    col_aligns: list[str]   ("left"|"right"|"center")
+    rows:    list[list[Any]]
+    widths:  list[int] (content width per column, no padding)
+    aligns:  list[str] ("left" | "right" | "center")
     """
-    assert len(headers) == len(col_widths) == len(col_aligns)
+    assert len(headers) == len(widths) == len(aligns)
     out = []
-    top = _hline(col_widths)
-    out.append(top)
+    bar = _hline(widths)
+    out.append(bar)
 
-    # header row (single-line; wrap if you want, but better to size headers to fit)
+    # header (single line each)
     hdr = "|"
-    for h, w, a in zip(headers, col_widths, col_aligns):
+    for h, w, a in zip(headers, widths, aligns):
         hdr += " " + _pad(h, w, a) + " |"
     out.append(hdr)
-    out.append(top)
+    out.append(bar)
 
-    # data rows (wrapped, row height = max cell line-count)
+    # rows (wrapped; every row may become multiple lines)
     for r in rows:
-        # ensure row has same length as headers
         r = list(r) + [""] * (len(headers) - len(r))
-        wrapped_cols = [_cell_lines(c, w) for c, w in zip(r, col_widths)]
-        height = max(len(lines) for lines in wrapped_cols) if wrapped_cols else 1
+        wrapped = [_wrap_cell(val, w) for val, w in zip(r, widths)]
+        height = max(len(col) for col in wrapped) if wrapped else 1
         for i in range(height):
             line = "|"
-            for lines, w, a in zip(wrapped_cols, col_widths, col_aligns):
-                cell = lines[i] if i < len(lines) else ""
+            for col, w, a in zip(wrapped, widths, aligns):
+                cell = col[i] if i < len(col) else ""
                 line += " " + _pad(cell, w, a) + " |"
             out.append(line)
-        out.append(top)
+        out.append(bar)
     return "\n".join(out)
+
+
+MONOSPACED_FONT_CANDIDATES: tuple[str, ...] = (
+    "Courier New",
+    "Consolas",
+    "DejaVu Sans Mono",
+    "Courier",
+    "TkFixedFont",
+)
+
+ASCII_MONO_NOTICE = (
+    "NOTE: ASCII tables require a monospaced font to stay aligned. "
+    "Ensure your viewer uses a mono font.\n\n"
+)
 
 from appkit.geometry_shim import (
     read_cad_any,
@@ -4041,6 +4052,14 @@ def _display_rate_for_row(
         machine_hours, labor_hours = _split_hours_for_bucket(
             label, total_hours, render_state, cfg_obj
         )
+        bucket_role = _bucket_role_for_key(label)
+        if bucket_role == "labor_only":
+            labor_rate = float(getattr(cfg_obj, "labor_rate_per_hr", 0.0) or 0.0)
+            if labor_rate <= 0.0:
+                labor_rate = float(getattr(cfg_obj, "machine_rate_per_hr", 0.0) or 0.0)
+            if labor_rate > 0.0:
+                return f"labor ${labor_rate:.2f}/hr"
+            return "labor —"
         pieces: list[str] = []
         if machine_hours > 0:
             pieces.append(f"mach ${float(cfg_obj.machine_rate_per_hr):.2f}/hr")
@@ -6908,8 +6927,56 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                         stock_W_val = float(inferred_dims[1])
             if stock_L_val and stock_W_val and stock_T_val:
                 stock_dims_candidate = (float(stock_L_val), float(stock_W_val), float(stock_T_val))
+
+            def _extract_first_str(
+                candidates: tuple[Any, ...], keys: tuple[str, ...]
+            ) -> str:
+                for container in candidates:
+                    if not isinstance(container, _MappingABC):
+                        continue
+                    for key in keys:
+                        value = container.get(key)
+                        if isinstance(value, str):
+                            text = value.strip()
+                            if text:
+                                return text
+                return ""
+
+            part_candidate = _extract_first_str(
+                (
+                    material_stock_block,
+                    material,
+                    result if isinstance(result, _MappingABC) else None,
+                ),
+                ("mcmaster_part", "part_no", "stock_part", "stock_part_no"),
+            )
+            vendor_candidate = _extract_first_str(
+                (material_stock_block, material, result if isinstance(result, _MappingABC) else None),
+                ("vendor", "stock_vendor", "stock_source_tag", "stock_source", "source"),
+            )
+            vendor_display = vendor_candidate
+            if vendor_display:
+                normalized_vendor = vendor_display.strip()
+                if "mcmaster" in normalized_vendor.lower():
+                    vendor_display = "McMaster"
+                else:
+                    vendor_display = normalized_vendor
+            part_display = part_candidate.strip() if part_candidate else ""
+
+            extras_parts: list[str] = []
+            if vendor_display:
+                extras_parts.append(vendor_display)
+            if part_display:
+                extras_parts.append(part_display)
+
             if stock_L_val and stock_W_val and stock_T_val:
-                stock_line = f"{float(stock_L_val):.2f} × {float(stock_W_val):.2f} × {float(stock_T_val):.3f} in"
+                stock_line_core = (
+                    f"{float(stock_L_val):.2f} × {float(stock_W_val):.2f} × {float(stock_T_val):.3f} in"
+                )
+                if extras_parts:
+                    stock_line = f"{stock_line_core} ({', '.join(extras_parts)})"
+                else:
+                    stock_line = stock_line_core
             else:
                 inferred_dims = infer_plate_lw_in(g)
                 L_disp = stock_L_val
@@ -6931,6 +6998,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     if T_disp_val is not None:
                         T_disp = f"{float(T_disp_val):.3f}"
                     stock_line = f"— × — × {T_disp} in"
+                if extras_parts and "(" not in stock_line:
+                    stock_line = f"{stock_line} ({', '.join(extras_parts)})"
             if isinstance(mat_info, dict):
                 mat_info["stock_size_display"] = stock_line
             append_line(f"  Stock used: {stock_line}")
@@ -10350,20 +10419,28 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         except Exception:
             pass
 
-    if isinstance(material_stock_block, _MappingABC):
-        payload["material_stock"] = {
-            key: material_stock_block.get(key)
-            for key in (
-                "stock_L_in",
-                "stock_W_in",
-                "stock_T_in",
-                "stock_dims_in",
-                "stock_source_tag",
-                "source",
-                "mcmaster_part",
-            )
-            if key in material_stock_block
-        }
+    stock_meta: dict[str, Any] = {}
+    for source in (material_stock_block, material, mat_info):
+        if not isinstance(source, _MappingABC):
+            continue
+        for key in (
+            "stock_L_in",
+            "stock_W_in",
+            "stock_T_in",
+            "stock_dims_in",
+            "stock_source_tag",
+            "source",
+            "mcmaster_part",
+            "stock_size_display",
+        ):
+            if key in stock_meta:
+                continue
+            value = source.get(key)
+            if value is None:
+                continue
+            stock_meta[key] = value
+    if stock_meta:
+        payload["material_stock"] = stock_meta
 
     processes_entries: list[dict[str, Any]] = []
     cycle_metrics_entries: list[dict[str, Any]] = []
@@ -20081,10 +20158,7 @@ class App(tk.Tk):
 
         # GEO (single pane; CAD open handled by top bar)
         self.geo_txt = tk.Text(self.tab_geo, wrap="none"); self.geo_txt.pack(fill="both", expand=True)
-        try:
-            self.geo_txt.configure(font=("Courier New", 10))
-        except Exception:
-            pass
+        self._apply_monospaced_style(self.geo_txt)
 
         # LLM (hidden frame is still built to keep functionality without a visible tab)
         if hasattr(self, "_build_llm"):
@@ -20114,10 +20188,7 @@ class App(tk.Tk):
                 widget.tag_configure("rcol", tabs=("4.8i right",), tabstyle="tabular")
             except tk.TclError:
                 widget.tag_configure("rcol", tabs=("4.8i right",))
-            try:
-                widget.configure(font=("Courier New", 10), wrap="none")
-            except Exception:
-                pass
+            self._apply_monospaced_style(widget)
             self.output_text_widgets[name] = widget
 
         self.output_nb.select(self.output_tab_simplified)
@@ -20125,6 +20196,21 @@ class App(tk.Tk):
         self.LLM_SUGGEST = None
         self._llm_load_attempted = False
         self._llm_load_error: Exception | None = None
+
+    def _apply_monospaced_style(self, widget: tk.Text) -> None:
+        """Best-effort enforcement of monospaced rendering for Text widgets."""
+
+        try:
+            widget.configure(wrap="none")
+        except Exception:
+            pass
+
+        for family in MONOSPACED_FONT_CANDIDATES:
+            try:
+                widget.configure(font=(family, 10))
+                break
+            except Exception:
+                continue
 
     def _reset_llm_logs(self) -> None:
         self.llm_events.clear()
@@ -21738,10 +21824,7 @@ class App(tk.Tk):
         ttk.Checkbutton(parent, text="Apply LLM adjustments to params", variable=self.apply_llm_adj).grid(row=row, column=0, sticky="w", pady=(0,6)); row+=1
         ttk.Button(parent, text="Run LLM on current GEO", command=self.run_llm).grid(row=row, column=0, sticky="w", padx=5, pady=6); row+=1
         self.llm_txt = tk.Text(parent, wrap="none", height=24); self.llm_txt.grid(row=row, column=0, columnspan=3, sticky="nsew")
-        try:
-            self.llm_txt.configure(font=("Courier New", 10))
-        except Exception:
-            pass
+        self._apply_monospaced_style(self.llm_txt)
         parent.grid_columnconfigure(1, weight=1); parent.grid_rowconfigure(row, weight=1)
 
     def _pick_model(self):
@@ -21810,10 +21893,7 @@ class App(tk.Tk):
         win.geometry("900x700")
 
         txt = scrolledtext.ScrolledText(win, wrap="none")
-        try:
-            txt.configure(font=("Courier New", 10), wrap="none")
-        except Exception:
-            pass
+        self._apply_monospaced_style(txt)
         txt.pack(fill="both", expand=True)
         txt.insert("1.0", shown)
         txt.configure(state="disabled")
@@ -22067,9 +22147,9 @@ class App(tk.Tk):
             # painting. These files are overwritten on each run.
             try:
                 with open("latest_quote_simplified.txt", "w", encoding="utf-8") as f:
-                    f.write(simplified_report or "")
+                    f.write(ASCII_MONO_NOTICE + (simplified_report or ""))
                 with open("latest_quote_full.txt", "w", encoding="utf-8") as f:
-                    f.write(full_report or "")
+                    f.write(ASCII_MONO_NOTICE + (full_report or ""))
             except Exception:
                 # Non-fatal: continue to render in the UI even if writing fails
                 pass
