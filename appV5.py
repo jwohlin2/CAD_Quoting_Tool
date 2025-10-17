@@ -10224,6 +10224,87 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if nre_entries:
         payload["nre"] = nre_entries
 
+    drill_group_rows: list[dict[str, Any]] = []
+
+    def _normalize_drill_group(group: Mapping[str, Any]) -> dict[str, Any] | None:
+        minutes_val = _coerce_float_optional(
+            group.get("group_min")
+            or group.get("minutes_total")
+            or group.get("total_minutes")
+            or group.get("minutes")
+        )
+        if minutes_val is None or minutes_val <= 0:
+            qty_val = _coerce_float_optional(group.get("qty"))
+            per_hole_val = _coerce_float_optional(
+                group.get("t_per_hole_min")
+                or group.get("minutes_per_hole")
+                or group.get("t_per_hole")
+            )
+            if qty_val and qty_val > 0 and per_hole_val and per_hole_val > 0:
+                minutes_val = qty_val * per_hole_val
+        if minutes_val is None or minutes_val <= 0:
+            return None
+        label = (
+            group.get("group_label")
+            or group.get("label")
+            or group.get("group")
+            or group.get("op_name")
+            or group.get("op")
+            or ""
+        )
+        normalized = {
+            "label": str(label),
+            "group_label": str(label) if label else None,
+            "group_min": float(minutes_val),
+        }
+        for key in ("qty", "diameter_in", "depth_in", "sfm", "ipr", "rpm", "ipm"):
+            value = _coerce_float_optional(group.get(key))
+            if value is not None and value > 0:
+                normalized[key] = value
+        return normalized
+
+    def _collect_drill_groups(source: Mapping[str, Any] | None) -> None:
+        if not isinstance(source, _MappingABC):
+            return
+        groups_payload = source.get("groups")
+        if not isinstance(groups_payload, Sequence):
+            return
+        for group in groups_payload:
+            if not isinstance(group, _MappingABC):
+                continue
+            normalized = _normalize_drill_group(group)
+            if normalized is not None:
+                drill_group_rows.append(normalized)
+
+    process_plan_map = None
+    for candidate in (
+        locals().get("process_plan_summary_local"),
+        breakdown.get("process_plan") if isinstance(breakdown, _MappingABC) else None,
+        breakdown.get("process_plan_pricing") if isinstance(breakdown, _MappingABC) else None,
+    ):
+        if isinstance(candidate, _MappingABC):
+            process_plan_map = candidate
+            break
+
+    if isinstance(process_plan_map, _MappingABC):
+        _collect_drill_groups(process_plan_map.get("drilling"))
+
+    drilling_meta_block = breakdown.get("drilling_meta") if isinstance(breakdown, _MappingABC) else None
+    if not drill_group_rows and isinstance(drilling_meta_block, _MappingABC):
+        bins_list = drilling_meta_block.get("bins_list")
+        if isinstance(bins_list, Sequence):
+            for group in bins_list:
+                if not isinstance(group, _MappingABC):
+                    continue
+                normalized = _normalize_drill_group(group)
+                if normalized is not None:
+                    drill_group_rows.append(normalized)
+
+    if drill_group_rows:
+        drill_group_rows.sort(key=lambda row: row.get("group_min", 0.0), reverse=True)
+        payload["drilling_groups"] = drill_group_rows
+        payload["top_cycle_time"] = drill_group_rows[:5]
+
     cycle_reference_entries: list[dict[str, Any]] = []
     if isinstance(hour_summary_entries, _MappingABC):
         for label, data in hour_summary_entries.items():
@@ -10238,9 +10319,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             cycle_reference_entries.append({"label": str(label), "hours": round(hours_val, 2)})
     if cycle_reference_entries:
         payload["cycle_time_reference"] = cycle_reference_entries
-        top_cycle = sorted(cycle_reference_entries, key=lambda entry: entry.get("hours", 0), reverse=True)
-        if top_cycle:
-            payload["top_cycle_time"] = top_cycle[:5]
+        if "top_cycle_time" not in payload:
+            top_cycle = sorted(
+                cycle_reference_entries,
+                key=lambda entry: entry.get("hours", 0),
+                reverse=True,
+            )
+            if top_cycle:
+                payload["top_cycle_time"] = top_cycle[:5]
 
     traceability = None
     for source in (result, breakdown):
