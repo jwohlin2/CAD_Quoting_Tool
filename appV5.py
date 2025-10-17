@@ -1531,8 +1531,10 @@ else:  # pragma: no cover - fallback when ezdxf is unavailable at runtime
 
 if typing.TYPE_CHECKING:
     import pandas as pd
+    from pandas import DataFrame as PandasDataFrame
     from cad_quoter.domain import QuoteState as _QuoteState
 else:
+    PandasDataFrame = Any  # type: ignore[assignment]
     _QuoteState = QuoteState
 
 try:
