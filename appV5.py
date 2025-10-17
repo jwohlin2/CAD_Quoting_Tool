@@ -112,6 +112,76 @@ from bucketizer import bucketize
 
 from quote_renderer import render_quote as _render_structured_quote
 
+# === ASCII TABLE ENGINE (monospaced) ===
+
+from textwrap import wrap as _wrap
+
+
+def _cell_lines(text, width):
+    """Return a list of wrapped lines for a cell, width-aware, no hard truncation."""
+    s = "" if text is None else str(text)
+    # split existing newlines into paragraphs, wrap each, keep empty at least one line
+    chunks = []
+    for para in s.splitlines() or [""]:
+        w = _wrap(para, width=width) or [""]
+        chunks.extend(w)
+    return chunks
+
+
+def _pad(s, width, align="left"):
+    s = "" if s is None else str(s)
+    if len(s) > width:
+        # already wrapped before; this branch only fires if caller passed a long single line by mistake
+        s = s[:width]
+    pad = width - len(s)
+    if align == "right":
+        return " " * pad + s
+    elif align == "center":
+        left = pad // 2
+        right = pad - left
+        return " " * left + s + " " * right
+    return s + " " * pad  # left
+
+
+def _hline(widths):
+    # one space padding on each side of cells => borders use width+2
+    return "+" + "+".join("-" * (w + 2) for w in widths) + "+"
+
+
+def ascii_table(headers, rows, *, col_widths, col_aligns):
+    """
+    headers: list[str]
+    rows: list[list[str]]
+    col_widths: list[int]   (content width, not including the 1-space left/right padding)
+    col_aligns: list[str]   ("left"|"right"|"center")
+    """
+    assert len(headers) == len(col_widths) == len(col_aligns)
+    out = []
+    top = _hline(col_widths)
+    out.append(top)
+
+    # header row (single-line; wrap if you want, but better to size headers to fit)
+    hdr = "|"
+    for h, w, a in zip(headers, col_widths, col_aligns):
+        hdr += " " + _pad(h, w, a) + " |"
+    out.append(hdr)
+    out.append(top)
+
+    # data rows (wrapped, row height = max cell line-count)
+    for r in rows:
+        # ensure row has same length as headers
+        r = list(r) + [""] * (len(headers) - len(r))
+        wrapped_cols = [_cell_lines(c, w) for c, w in zip(r, col_widths)]
+        height = max(len(lines) for lines in wrapped_cols) if wrapped_cols else 1
+        for i in range(height):
+            line = "|"
+            for lines, w, a in zip(wrapped_cols, col_widths, col_aligns):
+                cell = lines[i] if i < len(lines) else ""
+                line += " " + _pad(cell, w, a) + " |"
+            out.append(line)
+        out.append(top)
+    return "\n".join(out)
+
 from appkit.geometry_shim import (
     read_cad_any,
     read_step_shape,
