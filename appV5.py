@@ -837,13 +837,15 @@ def _resolve_pricing_source_value(
     if text and text.lower() == "planner":
         return "planner"
 
-    if used_planner:
+    explicit_override = text is not None
+
+    if used_planner and not explicit_override:
         return "planner"
 
     # Delegate planner signal detection to the adapter helper
     from appkit.planner_adapter import _planner_signals_present as _planner_signals_present_helper
 
-    if _planner_signals_present_helper(
+    if not explicit_override and _planner_signals_present_helper(
         process_meta=process_meta,
         process_meta_raw=process_meta_raw,
         breakdown=breakdown,
