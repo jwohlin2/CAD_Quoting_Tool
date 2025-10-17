@@ -14767,6 +14767,60 @@ def estimate_programming_hours_from_geo(geo: Mapping[str, Any] | None) -> float:
     return float(max(0.6, min(hr, 6.0)))
 
 
+def _compute_programming_detail_minutes(
+    geo: Mapping[str, Any] | None,
+    plan: Mapping[str, Any] | None,
+) -> float:
+    """Return total programming minutes assuming one minute per feature detail."""
+
+    detail_count = 0.0
+
+    geo_ctx = geo if isinstance(geo, _MappingABC) else {}
+    hole_count_raw: Any = None
+    if isinstance(geo_ctx, _MappingABC):
+        hole_count_raw = geo_ctx.get("hole_count")
+        if hole_count_raw in (None, ""):
+            hole_diams = geo_ctx.get("hole_diams_mm")
+            if isinstance(hole_diams, Sequence) and not isinstance(
+                hole_diams, (str, bytes, bytearray)
+            ):
+                hole_count_raw = len(hole_diams)
+    hole_count = _coerce_float_or_none(hole_count_raw) or 0.0
+    if hole_count > 0:
+        detail_count += hole_count
+
+    plan_ctx = plan if isinstance(plan, _MappingABC) else {}
+    ops_candidate: Any = plan_ctx.get("ops") if isinstance(plan_ctx, _MappingABC) else None
+    ops_sequence: Sequence[Any]
+    if isinstance(ops_candidate, Sequence) and not isinstance(
+        ops_candidate, (str, bytes, bytearray)
+    ):
+        ops_sequence = ops_candidate
+    elif isinstance(plan, Sequence) and not isinstance(plan, (str, bytes, bytearray)):
+        ops_sequence = plan  # type: ignore[assignment]
+    else:
+        ops_sequence = []
+
+    for entry in ops_sequence:
+        op_name: str | None = None
+        if isinstance(entry, _MappingABC):
+            raw_name = entry.get("op")
+            if raw_name not in (None, ""):
+                op_name = str(raw_name)
+        else:
+            op_name = getattr(entry, "op", None)
+        if not op_name:
+            continue
+        op_lower = op_name.strip().lower()
+        if "wire_edm" in op_lower or "wedm" in op_lower:
+            detail_count += 1.0
+        elif "cnc" in op_lower:
+            detail_count += 1.0
+
+    minimum_detail_minutes = 1.0 if detail_count <= 0 else detail_count
+    return float(minimum_detail_minutes)
+
+
 def _coerce_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -16377,33 +16431,17 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
 
     app_meta: dict[str, Any] = {"used_planner": True} if planner_used else {}
 
-    planner_prog_hr: float | None = None
-    if app_meta.get("used_planner"):
-        try:
-            planner_prog_hr = _estimate_programming_hours_from_plan(
-                breakdown.get("process_plan", {}),
-                breakdown.get("geo_context", {}),
-            )
-        except Exception:
-            planner_prog_hr = None
-
     geo_context_for_prog = breakdown.get("geo_context")
     process_plan_for_prog = (
         breakdown.get("process_plan") if isinstance(breakdown, _MappingABC) else None
     )
-    geo_prog_hr = estimate_programming_hours_from_geo(geo_context_for_prog)
-    auto_prog_hr_model = _estimate_programming_hours_auto(
+    detail_minutes = _compute_programming_detail_minutes(
         geo_context_for_prog,
-        process_plan_for_prog if isinstance(process_plan_for_prog, _MappingABC) else {},
+        process_plan_for_prog,
     )
-    if not math.isfinite(auto_prog_hr_model) or auto_prog_hr_model <= 0:
-        auto_prog_hr_model = float(geo_prog_hr)
+    auto_prog_hr_model = detail_minutes / 60.0
+    geo_prog_hr = auto_prog_hr_model
     auto_prog_hr = float(auto_prog_hr_model)
-    if planner_prog_hr is not None and planner_prog_hr > 0:
-        try:
-            auto_prog_hr = float(planner_prog_hr)
-        except Exception:
-            auto_prog_hr = float(geo_prog_hr)
 
     overrides_map = state.user_overrides if isinstance(state.user_overrides, _MappingABC) else {}
     user_override_prog = (
@@ -16438,13 +16476,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         detail_map = {}
 
     detail_map["geo_prog_hr"] = float(geo_prog_hr)
-    if planner_prog_hr is not None and planner_prog_hr > 0:
-        try:
-            detail_map["planner_prog_hr"] = float(planner_prog_hr)
-        except Exception:
-            detail_map.pop("planner_prog_hr", None)
-    else:
-        detail_map.pop("planner_prog_hr", None)
+    detail_map["detail_minutes"] = float(detail_minutes)
+    detail_map["detail_count"] = float(detail_minutes)
+    detail_map.pop("planner_prog_hr", None)
     detail_map["auto_prog_hr_model"] = float(auto_prog_hr_model)
     detail_map["auto_prog_hr"] = float(auto_prog_hr)
     detail_map["prog_hr"] = float(final_prog_hr)
