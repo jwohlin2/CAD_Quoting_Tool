@@ -979,7 +979,11 @@ def _compute_direct_costs(
                 if val is not None and val > 0:
                     scrap_mass_lb = float(val)
                     break
-        if scrap_mass_lb and scrap_mass_lb > 0 and base_scrap_credit <= 0.0:
+        if (
+            scrap_mass_lb is not None
+            and scrap_mass_lb > 0
+            and base_scrap_credit <= 0.0
+        ):
             price_val = None
             if detail_map is not None:
                 price_val = _coerce_float_or_none(
@@ -999,9 +1003,16 @@ def _compute_direct_costs(
                 )
             if recovery_val is None or recovery_val <= 0:
                 recovery_val = SCRAP_RECOVERY_DEFAULT
-            if price_val is not None and price_val > 0 and recovery_val and recovery_val > 0:
-                computed_scrap_credit = float(scrap_mass_lb) * float(price_val) * float(
-                    recovery_val
+            if (
+                price_val is not None
+                and price_val > 0
+                and recovery_val is not None
+                and recovery_val > 0
+            ):
+                computed_scrap_credit = (
+                    float(scrap_mass_lb)
+                    * float(price_val)
+                    * float(recovery_val)
                 )
     if computed_scrap_credit > 0:
         subtotal -= float(computed_scrap_credit)
