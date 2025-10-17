@@ -6570,21 +6570,26 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 material_detail_for_breakdown.pop("scrap_credit_mass_lb", None)
 
             weight_lines: list[str] = []
+            weight_summary: dict[str, Any] = {}
             if (starting_mass_val and starting_mass_val > 0) or show_zeros:
                 weight_lines.append(
                     f"  Starting Weight: {_format_weight_lb_oz(starting_mass_val)}"
                 )
+                weight_summary["starting_mass_g"] = float(starting_mass_val)
             if (net_mass_val and net_mass_val > 0) or show_zeros:
                 weight_lines.append(
                     f"  Net Weight: {_format_weight_lb_oz(net_mass_val)}"
                 )
+                weight_summary["net_mass_g"] = float(net_mass_val)
             if scrap_mass_val is not None:
                 if scrap_mass_val > 0 or show_zeros:
                     weight_lines.append(
                         f"  Scrap Weight: {_format_weight_lb_oz(scrap_mass_val)}"
                     )
+                    weight_summary["scrap_mass_g"] = float(scrap_mass_val)
             elif show_zeros:
                 weight_lines.append("  Scrap Weight: 0 oz")
+                weight_summary["scrap_mass_g"] = 0.0
             computed_scrap_fraction: float | None = None
             if (
                 starting_mass_val is not None
@@ -6609,11 +6614,21 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     if scrap_hint_text and scrap_fraction_val is None:
                         scrap_line += f" ({scrap_hint_text})"
                     weight_lines.append(scrap_line)
+                    weight_summary["scrap_pct_computed"] = float(computed_scrap_fraction)
                 elif scrap is not None:
                     scrap_line = f"  Scrap Percentage: {_pct(scrap)}"
                     if scrap_hint_text:
                         scrap_line += f" ({scrap_hint_text})"
                     weight_lines.append(scrap_line)
+                    scrap_pct_val_display = scrap
+                    try:
+                        scrap_pct_val_display = float(scrap_pct_val_display)
+                    except Exception:
+                        scrap_pct_val_display = None
+                    if scrap_pct_val_display is not None:
+                        weight_summary["scrap_pct_entered"] = float(scrap_pct_val_display)
+                if scrap_hint_text:
+                    weight_summary["scrap_hint"] = scrap_hint_text
 
                 if scrap_fraction_val is not None:
                     geometry_line = (
@@ -6622,6 +6637,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     if scrap_hint_text:
                         geometry_line += f" ({scrap_hint_text})"
                     weight_lines.append(geometry_line)
+                    weight_summary["scrap_pct_geometry"] = float(scrap_fraction_val)
             # Historically the renderer would emit an extra weight-only line here when
             # ``scrap_adjusted_mass`` was available.  The value was the computed "with
             # scrap" mass, but because it lacked a label it rendered as a stray line like
@@ -6631,6 +6647,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             # already convey the information a customer needs.
 
             detail_lines.extend(weight_lines)
+            if weight_summary:
+                try:
+                    material_detail_for_breakdown["render_weight_summary"] = weight_summary
+                except Exception:
+                    pass
             scrap_credit_lines: list[str] = []
             if scrap_credit_entered and scrap_credit:
                 credit_display = _m(scrap_credit)
@@ -6732,6 +6753,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 ):
                     detail_lines.append("")
                 detail_lines.extend(price_lines)
+                try:
+                    existing_price_lines = material_detail_for_breakdown.setdefault(
+                        "render_price_lines", []
+                    )
+                    existing_price_lines.extend(price_lines)
+                except Exception:
+                    pass
             def _coerce_dims(candidate: Any) -> tuple[float, float, float] | None:
                 if isinstance(candidate, (list, tuple)) and len(candidate) >= 3:
                     try:
@@ -10052,6 +10080,15 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     payload: dict[str, Any] = {"summary": {k: v for k, v in summary_payload.items() if v not in (None, "")}}
 
+    if programming_is_amortized:
+        payload["programming_mode"] = "amortized"
+    else:
+        payload["programming_mode"] = "per_lot"
+
+    programming_per_lot_amount = _coerce_float_optional((nre or {}).get("programming_per_lot"))
+    if programming_per_lot_amount is not None:
+        payload["programming_per_lot"] = programming_per_lot_amount
+
     seen_drivers: set[str] = set()
     price_drivers: list[dict[str, Any]] = []
 
@@ -10148,7 +10185,41 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if materials_entries:
         payload["materials"] = materials_entries
 
+    weight_summary_payload = None
+    if isinstance(material_detail_for_breakdown, _MappingABC):
+        weight_summary_payload = material_detail_for_breakdown.get("render_weight_summary")
+    if isinstance(weight_summary_payload, _MappingABC):
+        payload["material_weight"] = dict(weight_summary_payload)
+
+    if isinstance(material_detail_for_breakdown, _MappingABC):
+        price_lines_payload = material_detail_for_breakdown.get("render_price_lines")
+        if isinstance(price_lines_payload, list) and price_lines_payload:
+            payload["material_price_lines"] = [str(line) for line in price_lines_payload if line]
+
+    material_cost_components_payload = locals().get("material_cost_components")
+    if isinstance(material_cost_components_payload, _MappingABC):
+        try:
+            payload["material_cost_components"] = dict(material_cost_components_payload)
+        except Exception:
+            pass
+
+    if isinstance(material_stock_block, _MappingABC):
+        payload["material_stock"] = {
+            key: material_stock_block.get(key)
+            for key in (
+                "stock_L_in",
+                "stock_W_in",
+                "stock_T_in",
+                "stock_dims_in",
+                "stock_source_tag",
+                "source",
+                "mcmaster_part",
+            )
+            if key in material_stock_block
+        }
+
     processes_entries: list[dict[str, Any]] = []
+    cycle_metrics_entries: list[dict[str, Any]] = []
     ordered_keys: list[str] = []
     if isinstance(canonical_bucket_order, list):
         ordered_keys = [key for key in canonical_bucket_order if key in process_cost_row_details]
@@ -10178,6 +10249,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             minutes_val = _coerce_float_optional(minutes_info.get("minutes"))
             if minutes_val is not None and minutes_val > 0 and "hours" not in entry:
                 entry["hours"] = round(minutes_val / 60.0, 2)
+            planning_minutes = _coerce_float_optional(minutes_info.get("minutes_planned") or minutes_info.get("minutes"))
+            billed_minutes = _coerce_float_optional(minutes_info.get("minutes_billed") or minutes_info.get("minutes"))
+        else:
+            planning_minutes = None
+            billed_minutes = None
         display_hours = _coerce_float_optional(entry.get("hours")) if isinstance(entry, dict) else None
         rate_display = _display_rate_for_row(
             canon_key,
@@ -10188,8 +10264,82 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if rate_display:
             entry["rate_display"] = rate_display
         processes_entries.append(entry)
+        if any(val is not None for val in (planning_minutes, billed_minutes, display_hours)):
+            cycle_metrics_entries.append(
+                {
+                    "label": label,
+                    "planning_minutes": planning_minutes,
+                    "billed_minutes": billed_minutes,
+                    "billed_hours": display_hours,
+                }
+            )
     if processes_entries:
         payload["processes"] = processes_entries
+    if cycle_metrics_entries:
+        payload["cycle_time_metrics"] = cycle_metrics_entries
+
+    drill_summary_candidate = None
+    for container in (
+        locals().get("process_plan_summary_local"),
+        process_plan_summary_map,
+        breakdown.get("process_plan_summary") if isinstance(breakdown, _MappingABC) else None,
+    ):
+        if isinstance(container, _MappingABC):
+            candidate = container.get("drilling")
+            if isinstance(candidate, _MappingABC):
+                drill_summary_candidate = candidate
+                break
+    if isinstance(drill_summary_candidate, _MappingABC):
+        groups_payload = drill_summary_candidate.get("groups")
+        sanitized_groups: list[dict[str, Any]] = []
+        if isinstance(groups_payload, Sequence) and not isinstance(groups_payload, (str, bytes)):
+            for group_entry in groups_payload:
+                if isinstance(group_entry, _MappingABC):
+                    group_data = dict(group_entry)
+                else:
+                    group_data = {
+                        attr: getattr(group_entry, attr)
+                        for attr in (
+                            "op",
+                            "op_name",
+                            "qty",
+                            "t_per_hole",
+                            "t_per_hole_min",
+                            "minutes",
+                            "minutes_total",
+                            "total_minutes",
+                        )
+                        if hasattr(group_entry, attr)
+                    }
+                qty_val = _coerce_float_optional(group_data.get("qty"))
+                per_hole_val = _coerce_float_optional(
+                    group_data.get("t_per_hole_min")
+                    or group_data.get("minutes_per_hole")
+                    or group_data.get("t_per_hole")
+                )
+                minutes_total = _coerce_float_optional(
+                    group_data.get("minutes_total")
+                    or group_data.get("total_minutes")
+                    or group_data.get("minutes")
+                )
+                if minutes_total is None and qty_val is not None and per_hole_val is not None:
+                    minutes_total = qty_val * per_hole_val
+                sanitized_groups.append(
+                    {
+                        "op": str(group_data.get("op") or group_data.get("op_name") or "").strip(),
+                        "qty": qty_val,
+                        "t_per_hole_min": per_hole_val,
+                        "minutes_total": minutes_total,
+                    }
+                )
+        if sanitized_groups:
+            sanitized_groups.sort(
+                key=lambda entry: (
+                    float(entry.get("minutes_total") or 0.0),
+                    float(entry.get("t_per_hole_min") or 0.0),
+                )
+            )
+            payload["drill_groups"] = sanitized_groups
 
     nre_entries: list[dict[str, Any]] = []
     if isinstance(nre_detail, _MappingABC):

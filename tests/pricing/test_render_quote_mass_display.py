@@ -1,4 +1,5 @@
 import appV5
+import pytest
 from cad_quoter.pricing.materials import LB_PER_KG
 
 
@@ -67,11 +68,11 @@ def test_render_quote_shows_net_mass_when_scrap_present() -> None:
     expected_scrap = _format_weight_lb_oz_for_test(24.0)
 
     assert "Mass:" not in rendered
-    assert "Starting Weight: 4.2 oz" in rendered
-    assert f"Scrap Weight: {expected_scrap}" in rendered
-    assert "Net Weight: 3.5 oz" in rendered
-    assert "Scrap Percentage: 20.0% (computed)" in rendered
-    assert "Scrap % (geometry hint): 20.0%" in rendered
+    assert "Weight Reference: Start 4.2 oz" in rendered
+    assert f"Scrap {expected_scrap}" in rendered
+    assert "Net 3.5 oz" in rendered
+    assert "Computed Scrap: 20.0%" in rendered
+    assert "Geometry Hint: 20.0%" in rendered
 
 
 def test_render_quote_prefers_removed_mass_estimate_for_scrap() -> None:
@@ -90,7 +91,7 @@ def test_render_quote_prefers_removed_mass_estimate_for_scrap() -> None:
 
     expected_scrap = _format_weight_lb_oz_for_test(removal_mass_g)
 
-    assert f"Scrap Weight: {expected_scrap}" in rendered
+    assert f"Scrap {expected_scrap}" in rendered
 
 
 def test_render_quote_uses_net_mass_g_fallback() -> None:
@@ -109,9 +110,9 @@ def test_render_quote_uses_net_mass_g_fallback() -> None:
 
     expected_scrap = _format_weight_lb_oz_for_test(start_g * material["scrap_pct"])
 
-    assert "Starting Weight: 32 lb 12.4 oz" in rendered
-    assert f"Scrap Weight: {expected_scrap}" in rendered
-    assert "Net Weight: 24 lb 9.3 oz" in rendered
+    assert "Weight Reference: Start 32 lb 12.4 oz" in rendered
+    assert f"Scrap {expected_scrap}" in rendered
+    assert "Net 24 lb 9.3 oz" in rendered
 
 
 def test_render_quote_prefers_mass_g_for_starting_weight() -> None:
@@ -133,9 +134,9 @@ def test_render_quote_prefers_mass_g_for_starting_weight() -> None:
         effective_g * material["scrap_pct"]
     )
 
-    assert "Starting Weight: 32 lb 12.4 oz" in rendered
-    assert f"Scrap Weight: {expected_scrap}" in rendered
-    assert "Net Weight: 24 lb 9.3 oz" in rendered
+    assert "Weight Reference: Start 32 lb 12.4 oz" in rendered
+    assert f"Scrap {expected_scrap}" in rendered
+    assert "Net 24 lb 9.3 oz" in rendered
 
 
 def test_render_quote_omits_unlabeled_scrap_adjusted_mass() -> None:
@@ -171,8 +172,8 @@ def test_render_quote_mentions_scrap_source_from_holes() -> None:
         _base_material_quote(material), currency="$", show_zeros=False
     )
 
-    assert "Scrap Percentage: 25.0% (computed)" in rendered
-    assert "Scrap % (geometry hint): 25.0% (holes)" in rendered
+    assert "Computed Scrap: 25.0% (holes)" in rendered
+    assert "Geometry Hint: 25.0% (holes)" in rendered
 
 
 def test_render_quote_mentions_scrap_source_label() -> None:
@@ -188,8 +189,8 @@ def test_render_quote_mentions_scrap_source_label() -> None:
         _base_material_quote(material), currency="$", show_zeros=False
     )
 
-    assert "Scrap Percentage: 18.0% (computed)" in rendered
-    assert "Scrap % (geometry hint): 18.0% (entered + holes)" in rendered
+    assert "Computed Scrap: 18.0% (entered + holes)" in rendered
+    assert "Geometry Hint: 18.0% (entered + holes)" in rendered
 
 
 def _base_material_quote(material: dict) -> dict:
@@ -337,9 +338,13 @@ def test_render_quote_does_not_duplicate_detail_lines() -> None:
     }
 
     rendered = appV5.render_quote(result, currency="$", show_zeros=False)
+    payload = result["breakdown"].get("render_payload", {})
+    labels = [entry.get("label") for entry in payload.get("processes", [])]
 
-    assert rendered.count("Programming (amortized)") == 1
-    assert rendered.count("Fixture Build (amortized)") == 1
+    assert labels.count("Programming (amortized)") == 1
+    assert labels.count("Fixture Build (amortized)") == 1
+    assert "Programming (amortized)" in rendered
+    assert "Fixture Build (amortized)" in rendered
     assert "Programmer 1.00 hr @ $45.00/hr" not in rendered
     assert "- Programmer (lot): 1.00 hr @ $45.00/hr" not in rendered
     assert "- Build labor (lot): 0.50 hr @ $60.00/hr" not in rendered
@@ -359,8 +364,7 @@ def test_render_quote_shows_amortized_nre_for_single_qty() -> None:
 
     assert "Programming (amortized)" in rendered
     assert "Fixture Build (amortized)" in rendered
-    assert "Programming & Eng:" in rendered
-    assert "Fixturing:" in rendered
+    assert "Programming & Eng (per lot)" in rendered
 
 
 def test_render_quote_uses_programming_per_lot_for_single_qty() -> None:
@@ -373,7 +377,9 @@ def test_render_quote_uses_programming_per_lot_for_single_qty() -> None:
     rendered = appV5.render_quote(result, currency="$", show_zeros=False)
 
     programming_line = next(
-        line for line in rendered.splitlines() if "Programming & Eng:" in line
+        line
+        for line in rendered.splitlines()
+        if "Programming & Eng (per lot)" in line
     )
     assert "$1,462.00" in programming_line
 
@@ -452,6 +458,14 @@ def test_render_quote_shows_flat_extras_when_no_hours() -> None:
     }
 
     rendered = appV5.render_quote(result, currency="$", show_zeros=False)
+    payload = result["breakdown"].get("render_payload", {})
 
     assert "includes $200.00 extras" not in rendered
-    assert "machine 2.22 hr @ $45/hr" in rendered
+    grinding_row = next(
+        entry
+        for entry in payload.get("processes", [])
+        if entry.get("label") == "Grinding"
+    )
+    assert pytest.approx(grinding_row.get("hours", 0.0), rel=1e-2) == 2.22
+    rate_display = str(grinding_row.get("rate_display") or "")
+    assert "$45.00" in rate_display
