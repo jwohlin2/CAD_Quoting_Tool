@@ -1368,6 +1368,140 @@ def _pick_mcmaster_plate_sku(
     }
 
 
+@lru_cache(maxsize=1)
+def _load_mcmaster_catalog_csv(path: str | None = None) -> list[dict[str, Any]]:
+    """Return rows from the McMaster stock catalog CSV."""
+
+    csv_path = path or os.getenv("CATALOG_CSV_PATH") or str(default_catalog_csv())
+    if not csv_path:
+        return []
+    try:
+        with open(csv_path, newline="", encoding="utf-8-sig") as handle:
+            reader = csv.DictReader(handle)
+            return [dict(row) for row in reader if row]
+    except FileNotFoundError:
+        return []
+    except Exception:
+        return []
+
+
+def _pick_mcmaster_plate_sku(
+    need_L_in: float,
+    need_W_in: float,
+    need_T_in: float,
+    *,
+    material_key: str = "MIC6",
+    catalog_rows: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """Return the smallest-area McMaster plate covering the requested envelope."""
+
+    import math as _math
+
+    if not all(val and val > 0 for val in (need_L_in, need_W_in, need_T_in)):
+        return None
+
+    rows = list(catalog_rows) if catalog_rows is not None else _load_mcmaster_catalog_csv()
+    if not rows:
+        return None
+
+    target_key = str(material_key or "").strip().lower()
+    if not target_key:
+        return None
+
+    tolerance = 0.02
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        material_text = str(
+            (row.get("material") or row.get("Material") or "")
+        ).strip().lower()
+        if not material_text:
+            continue
+        variants = {target_key}
+        if "_" in target_key:
+            variants.add(target_key.replace("_", " "))
+        if " " in target_key:
+            variants.add(target_key.replace(" ", ""))
+        normalised_material = material_text.replace("_", " ")
+        if not any(variant and variant in normalised_material for variant in variants):
+            continue
+        try:
+            length = float(
+                row.get("length_in")
+                or row.get("L_in")
+                or row.get("len_in")
+                or row.get("length")
+            )
+            width = float(
+                row.get("width_in")
+                or row.get("W_in")
+                or row.get("wid_in")
+                or row.get("width")
+            )
+            thickness = float(
+                row.get("thickness_in")
+                or row.get("T_in")
+                or row.get("thk_in")
+                or row.get("thickness")
+            )
+        except Exception:
+            continue
+        if not all(val and val > 0 for val in (length, width, thickness)):
+            continue
+        if abs(thickness - need_T_in) > tolerance:
+            continue
+        part_no = str(
+            row.get("mcmaster_part")
+            or row.get("part")
+            or row.get("sku")
+            or ""
+        ).strip()
+        if not part_no:
+            continue
+
+        def _covers(a: float, b: float, A: float, B: float) -> bool:
+            return (A >= a) and (B >= b)
+
+        ok1 = _covers(need_L_in, need_W_in, length, width)
+        ok2 = _covers(need_L_in, need_W_in, width, length)
+        if not (ok1 or ok2):
+            continue
+
+        area = length * width
+        overL1 = (length - need_L_in) if ok1 else _math.inf
+        overW1 = (width - need_W_in) if ok1 else _math.inf
+        overL2 = (width - need_L_in) if ok2 else _math.inf
+        overW2 = (length - need_W_in) if ok2 else _math.inf
+        over_L = min(overL1, overL2)
+        over_W = min(overW1, overW2)
+
+        candidates.append(
+            {
+                "len_in": float(length),
+                "wid_in": float(width),
+                "thk_in": float(thickness),
+                "mcmaster_part": part_no,
+                "area": float(area),
+                "overL": float(over_L),
+                "overW": float(over_W),
+                "source": row.get("source") or "mcmaster-catalog",
+            }
+        )
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda c: (c["area"], max(c["overL"], c["overW"])))
+    best = candidates[0]
+    return {
+        "len_in": float(best["len_in"]),
+        "wid_in": float(best["wid_in"]),
+        "thk_in": float(best["thk_in"]),
+        "mcmaster_part": best["mcmaster_part"],
+        "source": best.get("source") or "mcmaster-catalog",
+    }
+
 def _compute_pricing_ladder(
     subtotal: float | int | str | None,
     *,
@@ -4556,7 +4690,7 @@ def _charged_hours_by_bucket(
     cfg: "QuoteConfiguration" | None = None,
 ):
     """Return the hours that correspond to what we actually charged."""
-    charged: dict[str, float] = {}
+    out: dict[str, float] = {}
     for key, amount in (process_costs or {}).items():
         norm = _normalize_bucket_key(key)
         if norm.startswith("planner_"):
@@ -4578,126 +4712,62 @@ def _charged_hours_by_bucket(
             hr = (float(amount) / rate) if rate > 0 else None
         if hr is not None:
             label = _process_label(key)
-            charged[label] = charged.get(label, 0.0) + float(hr)
-
-    extra_map: Mapping[str, Any] = {}
+            out[label] = out.get(label, 0.0) + float(hr)
+    removal_hr = None
+    render_extra: Mapping[str, Any] | None = None
     if render_state is not None:
         try:
-            extra_candidate = getattr(render_state, "extra", {})
+            extra = getattr(render_state, "extra", {})
         except Exception:
-            extra_candidate = {}
-        if isinstance(extra_candidate, _MappingABC):
-            extra_map = extra_candidate
-
-    prefer_override = prefer_removal_drilling_hours
-    if cfg is not None:
-        prefer_override_candidate = getattr(cfg, "prefer_removal_drilling_hours", None)
-        if prefer_override_candidate is not None:
-            prefer_override = bool(prefer_override_candidate)
-
-    drill_machine_minutes = _coerce_float_or_none(extra_map.get("drill_machine_minutes"))
-    drill_labor_minutes = _coerce_float_or_none(extra_map.get("drill_labor_minutes"))
-    drill_total_minutes = _coerce_float_or_none(extra_map.get("drill_total_minutes"))
-
-    total_minutes_from_card: float | None = None
-    if drill_machine_minutes is not None or drill_labor_minutes is not None:
-        machine_minutes = max(0.0, float(drill_machine_minutes or 0.0))
-        labor_minutes = max(0.0, float(drill_labor_minutes or 0.0))
-        total_minutes_from_card = machine_minutes + labor_minutes
-    if (total_minutes_from_card is None or total_minutes_from_card <= 0.0) and drill_total_minutes is not None:
-        total_minutes_from_card = max(0.0, float(drill_total_minutes))
-
-    drill_card_hours: float | None = None
-    if total_minutes_from_card is not None and total_minutes_from_card >= 0.0:
-        drill_card_hours = float(total_minutes_from_card) / 60.0
-
-    if drill_card_hours is not None and prefer_override:
-        drill_labels = [
-            label
-            for label in charged
-            if _canonical_bucket_key(label) in {"drilling", "drill"}
-        ]
-        if drill_labels:
-            for label in drill_labels:
-                current = float(charged.get(label, 0.0) or 0.0)
-                if not math.isclose(current, drill_card_hours, rel_tol=1e-9, abs_tol=1e-6):
-                    logger.info(
-                        "[hours-sync] Overriding Drilling bucket hours from %.2f -> %.2f (source=removal_card)",
-                        current,
-                        drill_card_hours,
-                    )
-                charged[label] = float(drill_card_hours)
-        elif drill_card_hours > 0.0:
-            label = _process_label("drilling")
-            logger.info(
-                "[hours-sync] Injecting Drilling bucket hours %.2f (source=removal_card)",
-                drill_card_hours,
-            )
-            charged[label] = float(drill_card_hours)
-
-    removal_hr = drill_card_hours
-    if removal_hr is None and extra_map:
-        removal_candidate = extra_map.get("removal_drilling_hours")
-        removal_hr = _coerce_float_or_none(removal_candidate)
+            extra = {}
+        if isinstance(extra, _MappingABC):
+            render_extra = extra
+            removal_candidate = extra.get("removal_drilling_hours")
+            removal_hr = _coerce_float_or_none(removal_candidate)
     if removal_hr is None:
         removal_hr = _coerce_float_or_none(removal_drilling_hours)
     if removal_hr is not None and removal_hr < 0:
         removal_hr = None
-
-    if removal_hr is not None and prefer_override:
+    prefer_drill_hours = prefer_removal_drilling_hours
+    if cfg is not None:
+        prefer_from_cfg = getattr(cfg, "prefer_removal_drilling_hours", None)
+        if prefer_from_cfg is not None:
+            prefer_drill_hours = bool(prefer_from_cfg)
+    if removal_hr is not None and prefer_drill_hours:
         desired = max(0.0, float(removal_hr))
         drill_labels = [
             label
-            for label in charged
+            for label in out
             if _canonical_bucket_key(label) in {"drilling", "drill"}
         ]
         if drill_labels:
             for label in drill_labels:
-                current = float(charged.get(label, 0.0) or 0.0)
+                current = float(out.get(label, 0.0) or 0.0)
                 if not math.isclose(current, desired, rel_tol=1e-9, abs_tol=1e-6):
                     logger.info(
                         "[hours-sync] Overriding Drilling bucket hours from %.2f -> %.2f (source=removal_card)",
                         current,
                         desired,
                     )
-                charged[label] = desired
-        elif desired > 0.0:
+                out[label] = desired
+        else:
             label = _process_label("drilling")
             logger.info(
                 "[hours-sync] Injecting Drilling bucket hours %.2f (source=removal_card)",
                 desired,
             )
-            charged[label] = desired
+            out[label] = desired
 
-    def _fmt_value(value: Any, *, decimals: int, suffix: str = "") -> str:
-        if isinstance(value, (int, float)):
-            numeric = float(value)
-            if math.isfinite(numeric):
-                return f"{numeric:.{decimals}f}{suffix}"
-        return "nan"
+    if prefer_drill_hours and isinstance(render_extra, _MappingABC):
+        machine_minutes = render_extra.get("drill_machine_minutes")
+        labor_minutes = render_extra.get("drill_labor_minutes")
+        if isinstance(machine_minutes, (int, float)) and isinstance(labor_minutes, (int, float)):
+            drill_total_hr = (float(machine_minutes) + float(labor_minutes)) / 60.0
+            for key in list(out.keys()):
+                if _canonical_bucket_key(key) in {"drilling", "drill"}:
+                    out[key] = drill_total_hr
 
-    card_total_hours = None
-    if (
-        isinstance(drill_machine_minutes, (int, float))
-        and isinstance(drill_labor_minutes, (int, float))
-    ):
-        total_minutes = float(drill_machine_minutes) + float(drill_labor_minutes)
-        if math.isfinite(total_minutes):
-            card_total_hours = total_minutes / 60.0
-
-    charged_drilling_hours = charged.get("Drilling")
-    if charged_drilling_hours is None:
-        charged_drilling_hours = charged.get("drilling")
-
-    _log.info(
-        "[drill-sync] card_m=%s card_l=%s → card_total_hr=%s  | charged_drilling_hr=%s",
-        _fmt_value(drill_machine_minutes, decimals=2, suffix="min"),
-        _fmt_value(drill_labor_minutes, decimals=2, suffix="min"),
-        _fmt_value(card_total_hours, decimals=6, suffix="hr"),
-        _fmt_value(charged_drilling_hours, decimals=2, suffix="hr"),
-    )
-
-    return charged
+    return out
 
 def _planner_bucket_key_for_name(name: Any) -> str:
     text = str(name or "").lower()
