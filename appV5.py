@@ -24,7 +24,7 @@ import re
 import sys
 import time
 import typing
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 from collections import Counter
 from collections.abc import (
     Callable,
@@ -471,10 +471,10 @@ def _wieland_scrap_usd_per_lb(material_family: str | None) -> float | None:
         logger.warning("Wieland scrap price lookup failed for %s: %s", fam, exc)
         return None
 
-    try:
-        price_float = float(price)
-    except Exception:
+    price_val = _coerce_float_or_none(price)
+    if price_val is None:
         return None
+    price_float = float(price_val)
 
     if not math.isfinite(price_float) or price_float <= 0:
         return None
@@ -503,7 +503,7 @@ def _compute_direct_costs(
     if str(scrap_price_source or "").strip().lower() == "wieland":
         detail_map: Mapping[str, Any] | None
         detail_map = material_detail if isinstance(material_detail, _MappingABC) else None
-        scrap_mass_lb = None
+        scrap_mass_lb: float | None = None
         if detail_map is not None:
             for key in (
                 "scrap_credit_mass_lb",
@@ -512,10 +512,10 @@ def _compute_direct_costs(
             ):
                 val = _coerce_float_or_none(detail_map.get(key))
                 if val is not None and val > 0:
-                    scrap_mass_lb = float(val)
+                    scrap_mass_lb = cast(float, val)
                     break
-        if scrap_mass_lb and scrap_mass_lb > 0 and base_scrap_credit <= 0.0:
-            price_val = None
+        if scrap_mass_lb is not None and scrap_mass_lb > 0 and base_scrap_credit <= 0.0:
+            price_val: float | None = None
             if detail_map is not None:
                 price_val = _coerce_float_or_none(
                     detail_map.get("scrap_credit_unit_price_usd_per_lb")
@@ -527,17 +527,20 @@ def _compute_direct_costs(
                         "material_group"
                     )
                 price_val = _wieland_scrap_usd_per_lb(family_hint)
-            recovery_val = None
+            recovery_val: float | None = None
             if detail_map is not None:
                 recovery_val = _coerce_float_or_none(
                     detail_map.get("scrap_credit_recovery_pct")
                 )
             if recovery_val is None or recovery_val <= 0:
                 recovery_val = SCRAP_RECOVERY_DEFAULT
-            if price_val is not None and price_val > 0 and recovery_val and recovery_val > 0:
-                computed_scrap_credit = float(scrap_mass_lb) * float(price_val) * float(
-                    recovery_val
-                )
+            if (
+                price_val is not None
+                and price_val > 0
+                and recovery_val is not None
+                and recovery_val > 0
+            ):
+                computed_scrap_credit = scrap_mass_lb * price_val * recovery_val
     if computed_scrap_credit > 0:
         subtotal -= float(computed_scrap_credit)
     subtotal += sum(float(v or 0.0) for v in pt.values())
@@ -765,28 +768,27 @@ def _pick_mcmaster_plate_sku(
         normalised_material = material_text.replace("_", " ")
         if not any(variant and variant in normalised_material for variant in variants):
             continue
-        try:
-            length = float(
-                row.get("length_in")
-                or row.get("L_in")
-                or row.get("len_in")
-                or row.get("length")
-            )
-            width = float(
-                row.get("width_in")
-                or row.get("W_in")
-                or row.get("wid_in")
-                or row.get("width")
-            )
-            thickness = float(
-                row.get("thickness_in")
-                or row.get("T_in")
-                or row.get("thk_in")
-                or row.get("thickness")
-            )
-        except Exception:
+        length = _coerce_float_or_none(
+            row.get("length_in")
+            or row.get("L_in")
+            or row.get("len_in")
+            or row.get("length")
+        )
+        width = _coerce_float_or_none(
+            row.get("width_in")
+            or row.get("W_in")
+            or row.get("wid_in")
+            or row.get("width")
+        )
+        thickness = _coerce_float_or_none(
+            row.get("thickness_in")
+            or row.get("T_in")
+            or row.get("thk_in")
+            or row.get("thickness")
+        )
+        if length is None or width is None or thickness is None:
             continue
-        if not all(val and val > 0 for val in (length, width, thickness)):
+        if not all(val > 0 for val in (length, width, thickness)):
             continue
         if abs(thickness - need_T_in) > tolerance:
             continue
@@ -3619,8 +3621,8 @@ class PlannerBucketRenderState:
 def _split_hours_for_bucket(
     label: str,
     hours: float,
-    render_state: "PlannerBucketRenderState" | None,
-    cfg: "QuoteConfiguration" | None,
+    render_state: PlannerBucketRenderState | None,
+    cfg: QuoteConfiguration | None,
 ) -> tuple[float, float]:
     total_h = max(0.0, float(hours or 0.0))
     if not cfg or not getattr(cfg, "separate_machine_labor", False):
@@ -3663,7 +3665,10 @@ def _split_hours_for_bucket(
             for entry in ops_list:
                 if not isinstance(entry, _MappingABC):
                     continue
-                role = _op_role_for_name(entry.get("name"))
+                name_val = entry.get("name")
+                if not isinstance(name_val, str):
+                    continue
+                role = _op_role_for_name(name_val)
                 minutes_val = _coerce_float_or_none(entry.get("minutes"))
                 if minutes_val is None or minutes_val <= 0:
                     continue
@@ -3699,7 +3704,7 @@ def _build_planner_bucket_render_state(
     rates: Mapping[str, Any] | None = None,
     removal_drilling_hours: float | None = None,
     prefer_removal_drilling_hours: bool = True,
-    cfg: "QuoteConfiguration" | None = None,
+    cfg: QuoteConfiguration | None = None,
     bucket_ops: Mapping[str, typing.Sequence[Mapping[str, Any]]] | None = None,
 ) -> PlannerBucketRenderState:
     state = PlannerBucketRenderState()
@@ -3731,7 +3736,7 @@ def _build_planner_bucket_render_state(
     # preventing any stale entries from ``process_costs`` from sneaking into the render.
     state.process_costs_for_render = {}
 
-    bucket_ops_map: dict[str, list[dict[str, float]]] = {}
+    bucket_ops_map: dict[str, list[dict[str, float | str]]] = {}
 
     def _ingest_bucket_ops(source: Any) -> None:
         if isinstance(source, _MappingABC):
@@ -3742,12 +3747,13 @@ def _build_planner_bucket_render_state(
             canon_key = _canonical_bucket_key(raw_key) or _normalize_bucket_key(raw_key)
             if not canon_key:
                 continue
-            entries: list[dict[str, float]] = bucket_ops_map.setdefault(canon_key, [])
+            entries: list[dict[str, float | str]] = bucket_ops_map.setdefault(canon_key, [])
             if isinstance(raw_list, Sequence):
                 for item in raw_list:
                     if not isinstance(item, _MappingABC):
                         continue
-                    op_name = (item.get("name") or item.get("op") or "").strip()
+                    name_candidate = item.get("name") or item.get("op") or ""
+                    op_name = str(name_candidate).strip()
                     if not op_name:
                         continue
                     minutes_val = _coerce_float_or_none(item.get("minutes"))
@@ -3946,7 +3952,7 @@ def _build_planner_bucket_render_state(
 def _display_rate_for_row(
     label: str,
     *,
-    cfg: "QuoteConfiguration" | None,
+    cfg: QuoteConfiguration | None,
     render_state: PlannerBucketRenderState | None,
     hours: float | None,
 ) -> str:
@@ -4092,7 +4098,7 @@ def _charged_hours_by_bucket(
     render_state: PlannerBucketRenderState | None = None,
     removal_drilling_hours: float | None = None,
     prefer_removal_drilling_hours: bool = True,
-    cfg: "QuoteConfiguration" | None = None,
+    cfg: QuoteConfiguration | None = None,
 ):
     """Return the hours that correspond to what we actually charged."""
     charged: dict[str, float] = {}
@@ -4302,7 +4308,7 @@ def _prepare_bucket_view(raw_view: Mapping[str, Any] | None) -> dict[str, Any]:
                 continue
             prepared[key] = copy.deepcopy(value)
 
-    bucket_ops: dict[str, list[dict[str, float]]] = {}
+    bucket_ops: dict[str, list[dict[str, float | str]]] = {}
     if isinstance(raw_view, _MappingABC):
         operations = raw_view.get("operations")
         if isinstance(operations, Sequence):
@@ -4320,7 +4326,7 @@ def _prepare_bucket_view(raw_view: Mapping[str, Any] | None) -> dict[str, Any]:
                     minutes_val = _coerce_float_or_none(entry.get("mins"))
                 if minutes_val is None or minutes_val <= 0:
                     continue
-                op_name = (entry.get("name") or "").strip()
+                op_name = str(entry.get("name") or "").strip()
                 if not op_name:
                     continue
                 bucket_list = bucket_ops.setdefault(canon_bucket, [])
@@ -12113,7 +12119,7 @@ def _group_geo_by_diam(
         depth_vals = bucket.get("depth") or []
         depth_avg = sum(depth_vals) / len(depth_vals) if depth_vals else None
         grouped.append({"diam_in": float(diam_avg), "avg_depth_in": float(depth_avg) if depth_avg else None})
-    grouped.sort(key=lambda item: item.get("diam_in", 0.0))
+    grouped.sort(key=lambda item: float(item.get("diam_in") or 0.0))
     return grouped
 
 
@@ -12232,7 +12238,12 @@ def _dedupe_geo_rows(
         elif thickness is not None and thickness > 0:
             entry["depth_in"] = float(round(thickness, 3))
         out.append(entry)
-    out.sort(key=lambda item: (item.get("diam_in", 0.0), item.get("depth_in", 0.0)))
+    out.sort(
+        key=lambda item: (
+            float(item.get("diam_in") or 0.0),
+            float(item.get("depth_in") or 0.0),
+        )
+    )
     return out
 
 
@@ -12351,19 +12362,20 @@ def _normalize_hole_sets_for_geo(
             entry["depth_mm"] = float(round(depth_in * 25.4, 3))
         normalized.append(entry)
 
-    normalized.sort(key=lambda item: item.get("dia_mm", 0.0))
+    normalized.sort(key=lambda item: float(item.get("dia_mm") or 0.0))
 
-    try:
-        geo_context["hole_sets_source"] = source_used
-        geo_context["hole_merge_audit"] = {**audit, "source": source_used}
-    except Exception:
-        pass
+    if isinstance(geo_context, (dict, _MutableMappingABC)):
+        try:
+            geo_context["hole_sets_source"] = source_used
+            geo_context["hole_merge_audit"] = {**audit, "source": source_used}
+        except Exception:
+            pass
 
     return normalized
 
 
 def _ensure_geo_context_fields(
-    geo_payload: Mapping[str, Any] | None,
+    geo_payload: dict[str, Any] | None,
     value_map: Mapping[str, Any] | None,
     *,
     cfg: QuoteConfiguration | None = None,
