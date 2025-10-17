@@ -1539,6 +1539,17 @@ if typing.TYPE_CHECKING:
 else:
     PandasDataFrame = Any  # type: ignore[assignment]
     _QuoteState = QuoteState
+    try:
+        import pandas as pd  # type: ignore[import]
+    except Exception:  # pragma: no cover - optional dependency
+        pd = None  # type: ignore[assignment]
+        PandasDataFrame = typing.Any
+        PandasSeries = typing.Any
+        PandasIndex = typing.Any
+    else:
+        PandasDataFrame = pd.DataFrame
+        PandasSeries = pd.Series
+        PandasIndex = pd.Index
 
     SeriesLike: TypeAlias = Any
 
