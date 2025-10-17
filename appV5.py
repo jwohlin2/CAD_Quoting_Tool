@@ -71,7 +71,6 @@ from cad_quoter.utils.render_utils import (
     format_weight_lb_decimal,
     format_weight_lb_oz,
     QuoteDocRecorder,
-    render_quote_doc,
 )
 from cad_quoter.pricing import load_backup_prices_csv
 from cad_quoter.pricing.vendor_csv import (
@@ -100,6 +99,8 @@ from cad_quoter.domain import (
 from cad_quoter.vendors import ezdxf as _ezdxf_vendor
 
 from bucketizer import bucketize
+
+from quote_renderer import render_quote as _render_structured_quote
 
 from appkit.geometry_shim import (
     read_cad_any,
@@ -9709,8 +9710,234 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     except Exception:
         logger.exception("Failed to run final drilling debug block")
 
-    doc = doc_builder.build_doc()
-    return render_quote_doc(doc, divider=divider)
+    def _coerce_float_optional(value: Any) -> float | None:
+        try:
+            if value is None:
+                return None
+            if isinstance(value, str) and not value.strip():
+                return None
+            return float(value)
+        except Exception:
+            return None
+
+    summary_payload: dict[str, Any] = {
+        "qty": qty,
+        "unit_price": price if qty else price,
+        "final_price": price,
+        "subtotal": subtotal,
+        "subtotal_before_margin": subtotal_before_margin,
+        "margin_pct": applied_pcts.get("MarginPct"),
+        "lead_time": result.get("lead_time")
+        or breakdown.get("lead_time")
+        or result.get("lead_time_text")
+        or breakdown.get("lead_time_text"),
+        "currency": currency,
+    }
+    expedite_pct = applied_pcts.get("ExpeditePct") if isinstance(applied_pcts, _MappingABC) else None
+    if expedite_pct:
+        summary_payload["expedite_pct"] = expedite_pct
+    if expedite_cost:
+        summary_payload["expedite_cost"] = expedite_cost
+
+    payload: dict[str, Any] = {"summary": {k: v for k, v in summary_payload.items() if v not in (None, "")}}
+
+    seen_drivers: set[str] = set()
+    price_drivers: list[dict[str, Any]] = []
+
+    def _append_driver(label: str, detail: str) -> None:
+        text = str(detail or "").strip()
+        if not text:
+            return
+        key = text.lower()
+        if key in seen_drivers:
+            return
+        seen_drivers.add(key)
+        price_drivers.append({"label": label, "detail": text})
+
+    for flag in red_flags:
+        _append_driver("Flag", flag)
+    for note in notes_order:
+        _append_driver("LLM", note)
+    for part in why_parts:
+        _append_driver("Driver", part)
+
+    if price_drivers:
+        payload["price_drivers"] = price_drivers
+
+    cost_breakdown_entries: list[tuple[str, float]] = []
+    if ladder_directs > 0:
+        cost_breakdown_entries.append(("Direct Costs", float(ladder_directs)))
+    if machine_labor_total > 0:
+        cost_breakdown_entries.append(("Machine & Labor", float(machine_labor_total)))
+    if nre_per_part > 0:
+        cost_breakdown_entries.append(("Amortized NRE", float(nre_per_part)))
+    if expedite_cost:
+        cost_breakdown_entries.append(("Expedite Uplift", float(expedite_cost)))
+
+    if cost_breakdown_entries:
+        payload["cost_breakdown"] = cost_breakdown_entries
+
+    what_if_margins = result.get("what_if_margins") or breakdown.get("what_if_margins")
+    if what_if_margins:
+        payload["what_if_margins"] = what_if_margins
+    what_if_qty = result.get("what_if_quantities") or breakdown.get("what_if_quantities")
+    if what_if_qty:
+        payload["what_if_quantities"] = what_if_qty
+
+    materials_entries: list[dict[str, Any]] = []
+    material_amount: float | None = None
+    if isinstance(material_block, _MappingABC):
+        for key in (
+            "total_cost",
+            "total_material_cost",
+            "material_cost",
+            "material_direct_cost",
+            "material_cost_before_credit",
+            "net_cost",
+        ):
+            material_amount = _coerce_float_optional(material_block.get(key))
+            if material_amount is not None:
+                break
+    detail_parts: list[str] = []
+    if isinstance(material_stock_block, _MappingABC):
+        length = _coerce_float_optional(material_stock_block.get("stock_L_in"))
+        width = _coerce_float_optional(material_stock_block.get("stock_W_in"))
+        thickness = _coerce_float_optional(material_stock_block.get("stock_T_in"))
+        dims: list[str] = []
+        if length:
+            dims.append(format_dimension(length))
+        if width:
+            dims.append(format_dimension(width))
+        if thickness:
+            dims.append(format_dimension(thickness))
+        if dims:
+            detail_parts.append(" × ".join(dims) + " in")
+    scrap_pct_val = None
+    if isinstance(material_block, _MappingABC):
+        scrap_pct_val = _coerce_float_optional(material_block.get("scrap_pct"))
+    if scrap_pct_val is not None and scrap_pct_val > 0:
+        pct_value = scrap_pct_val * 100 if scrap_pct_val <= 1 else scrap_pct_val
+        detail_parts.append(f"Scrap {pct_value:.1f}%")
+    material_label = material_display_label or material_selection.get("material_display") if isinstance(material_selection, _MappingABC) else material_display_label
+    if material_label or material_amount is not None:
+        entry: dict[str, Any] = {"label": material_label or "Material"}
+        if detail_parts:
+            entry["detail"] = "; ".join(detail_parts)
+        if material_amount is not None:
+            entry["amount"] = material_amount
+        materials_entries.append(entry)
+    if isinstance(pass_through, _MappingABC):
+        for key, value in pass_through.items():
+            if str(key).strip().lower() == "material":
+                continue
+            amount = _coerce_float_optional(value)
+            if amount is None or not math.isfinite(amount) or abs(amount) <= 1e-9:
+                continue
+            materials_entries.append({"label": str(key), "detail": "Pass-through", "amount": amount})
+    if materials_entries:
+        payload["materials"] = materials_entries
+
+    processes_entries: list[dict[str, Any]] = []
+    ordered_keys: list[str] = []
+    if isinstance(canonical_bucket_order, list):
+        ordered_keys = [key for key in canonical_bucket_order if key in process_cost_row_details]
+    remaining_keys = [key for key in process_cost_row_details if key not in ordered_keys]
+    for canon_key in ordered_keys + remaining_keys:
+        hours_val, rate_val, amount_val = process_cost_row_details.get(canon_key, (0.0, 0.0, 0.0))
+        amount = _coerce_float_optional(amount_val)
+        hours = _coerce_float_optional(hours_val)
+        rate = _coerce_float_optional(rate_val)
+        if not any(val and val > 0 for val in (amount, hours)):
+            continue
+        label = canon_to_display_label.get(canon_key, canon_key.replace("_", " ").title())
+        entry = {"label": label}
+        if hours is not None and hours > 0:
+            entry["hours"] = round(hours, 2)
+        minutes_info = canonical_bucket_summary.get(canon_key) if isinstance(canonical_bucket_summary, _MappingABC) else None
+        if rate is None or rate <= 0:
+            if hours and hours > 0 and amount is not None:
+                derived_rate = amount / hours if hours else None
+                if derived_rate is not None and derived_rate > 0:
+                    rate = derived_rate
+        if rate is not None and rate > 0:
+            entry["rate"] = round(rate, 2)
+        if amount is not None:
+            entry["amount"] = round(amount, 2)
+        if isinstance(minutes_info, _MappingABC):
+            minutes_val = _coerce_float_optional(minutes_info.get("minutes"))
+            if minutes_val is not None and minutes_val > 0 and "hours" not in entry:
+                entry["hours"] = round(minutes_val / 60.0, 2)
+        processes_entries.append(entry)
+    if processes_entries:
+        payload["processes"] = processes_entries
+
+    nre_entries: list[dict[str, Any]] = []
+    if isinstance(nre_detail, _MappingABC):
+        for key, info in nre_detail.items():
+            label = str(key).replace("_", " ").title()
+            detail_text: list[str] = []
+            amount = None
+            if isinstance(info, _MappingABC):
+                amount = _coerce_float_optional(
+                    info.get("per_lot")
+                    or info.get("total")
+                    or info.get("amount")
+                    or info.get("cost")
+                )
+                hr_val = _coerce_float_optional(info.get("prog_hr") or info.get("hours"))
+                if hr_val is not None and hr_val > 0:
+                    detail_text.append(f"{hr_val:.2f} hr")
+                rate_val = _coerce_float_optional(info.get("prog_rate") or info.get("rate"))
+                if rate_val is not None and rate_val > 0:
+                    detail_text.append(f"{fmt_money(rate_val, currency)}/hr")
+            else:
+                amount = _coerce_float_optional(info)
+            if amount is None:
+                continue
+            entry = {"label": label, "amount": round(amount, 2)}
+            if detail_text:
+                if len(detail_text) == 2:
+                    entry["detail"] = f"{detail_text[0]} @ {detail_text[1]}"
+                else:
+                    entry["detail"] = detail_text[0]
+            nre_entries.append(entry)
+    if nre_entries:
+        payload["nre"] = nre_entries
+
+    cycle_reference_entries: list[dict[str, Any]] = []
+    if isinstance(hour_summary_entries, _MappingABC):
+        for label, data in hour_summary_entries.items():
+            if not isinstance(data, (tuple, list)) or not data:
+                continue
+            hours_val = _coerce_float_optional(data[0])
+            include_flag = bool(data[1]) if len(data) > 1 else True
+            if not include_flag:
+                continue
+            if hours_val is None or hours_val <= 0:
+                continue
+            cycle_reference_entries.append({"label": str(label), "hours": round(hours_val, 2)})
+    if cycle_reference_entries:
+        payload["cycle_time_reference"] = cycle_reference_entries
+        top_cycle = sorted(cycle_reference_entries, key=lambda entry: entry.get("hours", 0), reverse=True)
+        if top_cycle:
+            payload["top_cycle_time"] = top_cycle[:5]
+
+    traceability = None
+    for source in (result, breakdown):
+        if isinstance(source, _MappingABC):
+            candidate = source.get("traceability")
+            if candidate:
+                traceability = candidate
+                break
+    if traceability:
+        payload["traceability"] = traceability
+
+    if isinstance(result, _MutableMappingABC):
+        result["render_payload"] = payload
+    if isinstance(breakdown, _MutableMappingABC):
+        breakdown["render_payload"] = payload
+
+    return _render_structured_quote(payload)
 # ===== QUOTE CONFIG (edit-friendly) ==========================================
 CONFIG_INIT_ERRORS: list[str] = []
 

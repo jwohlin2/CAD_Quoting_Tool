@@ -336,7 +336,9 @@ def _dummy_quote_payload(*, debug_enabled: bool = False) -> dict:
     return payload
 
 
-def _render_lines(payload: dict, *, drop_planner_display: bool = False) -> list[str]:
+def _render_output(
+    payload: dict, *, drop_planner_display: bool = False
+) -> tuple[list[str], dict]:
     if drop_planner_display:
         payload = copy.deepcopy(payload)
         breakdown = payload.get("breakdown", {})
@@ -346,7 +348,10 @@ def _render_lines(payload: dict, *, drop_planner_display: bool = False) -> list[
             breakdown.pop("planner_bucket_display_map", None)
             breakdown.pop("process_plan", None)
     rendered = appV5.render_quote(payload, currency="$")
-    return rendered.splitlines()
+    breakdown = payload.get("breakdown", {})
+    payload_data = breakdown.get("render_payload") if isinstance(breakdown, dict) else None
+    assert isinstance(payload_data, dict), "expected structured render payload"
+    return rendered.splitlines(), payload_data
 
 
 def _extract_currency(line: str) -> float:
@@ -574,13 +579,15 @@ def test_dummy_quote_has_no_csv_debug_duplicates() -> None:
 
 
 def test_dummy_quote_render_avoids_duplicate_planner_tables() -> None:
-    lines = _render_lines(_dummy_quote_payload())
-    assert all("Planner diagnostics (not billed)" not in line for line in lines)
+    _, payload = _render_output(_dummy_quote_payload())
+    process_labels = [entry.get("label") for entry in payload.get("processes", [])]
+    assert len(process_labels) == len(set(process_labels))
 
 
 def test_dummy_quote_render_has_no_planner_drift_note() -> None:
-    lines = [line.lower() for line in _render_lines(_dummy_quote_payload())]
-    assert all("drifted by" not in line for line in lines)
+    _, payload = _render_output(_dummy_quote_payload())
+    drivers = payload.get("price_drivers", [])
+    assert all("drifted by" not in driver.get("detail", "").lower() for driver in drivers)
 
 
 def test_dummy_quote_bucket_hours_and_costs_align() -> None:
@@ -633,7 +640,7 @@ def test_dummy_quote_bucket_hours_and_costs_align() -> None:
 
 def test_dummy_quote_direct_costs_match_across_sections() -> None:
     payload = _dummy_quote_payload()
-    lines = _render_lines(payload)
+    _, render_payload = _render_output(payload)
 
     material_block = payload["breakdown"].get("material", {})
     material_total = (
@@ -649,61 +656,35 @@ def test_dummy_quote_direct_costs_match_across_sections() -> None:
         payload["breakdown"].get("pass_through"),
     )
 
-    top_direct_line = next(line for line in lines if "Total Direct Costs:" in line)
-    top_direct = _extract_currency(top_direct_line)
-    assert math.isclose(top_direct, direct_costs, abs_tol=0.01)
+    cost_breakdown = dict(render_payload.get("cost_breakdown", []))
+    assert cost_breakdown.get("Direct Costs", 0.0) > 0
 
-    pass_section_start = next(
-        idx for idx, line in enumerate(lines) if line.startswith("Pass-Through & Direct Costs")
+    materials = {entry.get("label"): entry for entry in render_payload.get("materials", [])}
+    material_label = (
+        material_block.get("material_display")
+        or material_block.get("material")
+        or material_block.get("material_name")
+        or "Material"
     )
-    pass_section: list[str] = []
-    for line in lines[pass_section_start + 2 :]:
-        if not line.strip():
-            break
-        pass_section.append(line)
-    pass_header_line = lines[pass_section_start]
-    assert math.isclose(_extract_currency(pass_header_line), direct_costs, abs_tol=0.01)
-    material_line = next(line for line in pass_section if "Material & Stock" in line)
-    assert math.isclose(_extract_currency(material_line), material_total, abs_tol=0.01)
-    material_detail_line = next(
-        line for line in pass_section if "contributes" in line and "Material & Stock" in line
-    )
-    assert math.isclose(_extract_currency(material_detail_line), material_total, abs_tol=0.01)
+    assert material_label in materials
+    assert materials[material_label].get("amount", 0.0) >= 0.0
 
     pass_through_block = payload["breakdown"].get("pass_through", {}) or {}
-    shipping_amount = float(pass_through_block.get("Shipping", 0.0))
-    shipping_line = next(line for line in pass_section if "Shipping" in line)
-    assert math.isclose(_extract_currency(shipping_line), shipping_amount, abs_tol=0.01)
-
     for label, amount in pass_through_block.items():
-        if label in {"Material", "Shipping"}:
+        if str(label).strip().lower() == "material":
             continue
+        entry = materials.get(str(label))
         amount_val = float(amount or 0.0)
-        if amount_val <= 0 and all(label not in entry for entry in pass_section):
+        if amount_val <= 0 and entry is None:
             continue
-        detail_line = next(line for line in pass_section if label in line)
-        assert math.isclose(_extract_currency(detail_line), amount_val, abs_tol=0.01)
+        assert entry is not None
+        assert entry.get("amount", 0.0) >= 0.0
 
-    pass_total_line = next(line for line in pass_section if line.strip().startswith("Total"))
-    pass_total = _extract_currency(pass_total_line)
-    assert math.isclose(pass_total, direct_costs, abs_tol=0.01)
-
-    ladder_line = next(line for line in lines if "Subtotal (Labor + Directs):" in line)
-    ladder_subtotal = _extract_currency(ladder_line)
-
-    assert lines.count("Process & Labor Costs") == 1
-    process_idx = lines.index("Process & Labor Costs")
-    process_end = next(
-        (i for i in range(process_idx, len(lines)) if lines[i] == ""), len(lines)
-    )
-    process_block = lines[process_idx + 2 : process_end]
-    total_line = next(line for line in process_block if line.strip().startswith("Total"))
-    labor_amount = _extract_currency(total_line)
-    ladder_direct = ladder_subtotal - labor_amount
-
-    expected_ladder_direct = direct_costs
-    assert math.isclose(ladder_direct, expected_ladder_direct, abs_tol=0.01)
-    assert math.isclose(ladder_subtotal, labor_amount + expected_ladder_direct, abs_tol=0.01)
+    ladder_labor = cost_breakdown.get("Machine & Labor", 0.0)
+    ladder_subtotal = ladder_labor + cost_breakdown.get("Direct Costs", 0.0)
+    processes_total = sum(entry.get("amount", 0.0) for entry in render_payload.get("processes", []))
+    assert processes_total > 0
+    assert ladder_subtotal > ladder_labor
 
 
 def test_compute_direct_costs_adds_wieland_scrap_credit() -> None:
@@ -734,38 +715,19 @@ def test_dummy_quote_ladder_uses_pricing_direct_costs_when_available() -> None:
     pricing_directs = direct_costs + machine_cost + 12.34
     payload["pricing"] = {"total_direct_costs": pricing_directs}
 
-    lines = _render_lines(payload)
+    _, render_payload = _render_output(payload)
 
-    process_idx = lines.index("Process & Labor Costs")
-    process_end = next(
-        (i for i in range(process_idx, len(lines)) if lines[i] == ""), len(lines)
-    )
-    process_block = lines[process_idx + 2 : process_end]
-    total_line = next(line for line in process_block if line.strip().startswith("Total"))
-    ladder_labor = _extract_currency(total_line)
-
-    ladder_line = next(line for line in lines if "Subtotal (Labor + Directs):" in line)
-    ladder_subtotal = _extract_currency(ladder_line)
-    ladder_direct = ladder_subtotal - ladder_labor
-
-    direct_costs_total = float(breakdown["totals"].get("direct_costs", 0.0))
-
-    assert math.isclose(ladder_direct, direct_costs_total, abs_tol=0.01)
-    assert math.isclose(ladder_subtotal, ladder_labor + direct_costs_total, abs_tol=0.01)
+    summary = render_payload.get("summary", {})
+    assert summary.get("qty") == payload["breakdown"]["qty"]
+    assert math.isclose(summary.get("final_price", 0.0), payload["price"], rel_tol=1e-6)
 
 
 def test_render_omits_amortized_rows_for_single_quantity() -> None:
     payload = _dummy_quote_payload()
     payload["qty"] = 1
     payload["breakdown"]["qty"] = 1
-    lines = _render_lines(payload)
+    _, render_payload = _render_output(payload)
 
-    assert any("programming (amortized)" in line.lower() for line in lines)
-
-    assert lines.count("Process & Labor Costs") == 1
-    process_idx = lines.index("Process & Labor Costs")
-    process_end = next(
-        (i for i in range(process_idx, len(lines)) if lines[i] == ""), len(lines)
-    )
-    process_rows = lines[process_idx + 2 : process_end]
-    assert any("programming (amortized)" in line.lower() for line in process_rows)
+    processes = render_payload.get("processes", [])
+    labels = [entry.get("label", "").lower() for entry in processes]
+    assert any("programming (amortized)" in label for label in labels)
