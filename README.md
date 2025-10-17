@@ -152,6 +152,10 @@ Setup:
 
 - Install extra dependencies:
   - `pip install requests-pkcs12 truststore python-dotenv`
+- Allow the runtime to import the real `requests` package by setting
+  `CAD_QUOTER_ALLOW_REQUESTS=1`.  The repository ships with a stubbed
+  `requests` module for tests; the environment variable switches it into a
+  passthrough mode so API calls can execute.
 - Obtain your McMaster-Carr API credentials and a `.pfx` client certificate.
 - Provide credentials via environment variables or a `.env` file in the repo
   root:
@@ -172,3 +176,13 @@ python mcmaster_api.py
 You will be prompted for any missing values and for a part number (e.g.,
 `4936K451`). The tool logs in, subscribes the product if required, and prints
 the returned pricing tiers.
+
+Alternatively, fetch the price tiers for a known part directly from the bundled
+catalog helper:
+
+```
+python -m cad_quoter.vendors.mcmaster_stock --part 86825K956
+```
+
+The command honours `--qty` to pick the relevant pricing tier and will fall
+back to the interactive catalog flow when `--part` is omitted.

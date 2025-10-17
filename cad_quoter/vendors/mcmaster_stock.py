@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import csv
 import os
 import re
@@ -246,8 +247,53 @@ def _get_env_or_prompt() -> tuple[str, str, str, str]:
     )
 
 
-def main() -> None:
+def _print_price_tiers(tiers: List[dict], *, qty: int = 1) -> None:
+    if not tiers:
+        print("No price tiers returned.")
+        return
+
+    tier = _best_unit_price_tier(tiers, qty=qty)
+    if not tier:
+        print(f"No eligible tier for qty={qty}.")
+        return
+
+    amount = tier.get("Amount")
+    uom = tier.get("UnitOfMeasure") or "Each"
+    if isinstance(amount, (int, float)):
+        print(f"Price @ qty={qty}: ${amount:.2f} {uom}")
+    else:
+        print(f"Price @ qty={qty}: {amount} {uom}")
+
+
+def main(argv: Optional[Iterable[str]] = None) -> None:
     """Simple CLI for testing catalog lookups and API integration."""
+
+    parser = argparse.ArgumentParser(description="McMaster-Carr plate helper")
+    parser.add_argument("--part", help="Fetch price tiers for an explicit McMaster part number")
+    parser.add_argument("--qty", type=int, default=1, help="Quantity for tier selection (default: 1)")
+    parser.add_argument("--length", type=float, help="Requested length in inches for catalog lookup")
+    parser.add_argument("--width", type=float, help="Requested width in inches for catalog lookup")
+    parser.add_argument("--thickness", type=float, help="Requested thickness in inches for catalog lookup")
+    parser.add_argument(
+        "--material",
+        help="Material label for catalog lookup (e.g., 'aluminum mic6')",
+    )
+
+    args = parser.parse_args(list(argv) if argv is not None else None)
+
+    if args.part:
+        user, password, pfx_path, pfx_password = _get_env_or_prompt()
+        api = McMasterAPI(
+            username=user,
+            password=password,
+            pfx_path=pfx_path,
+            pfx_password=pfx_password,
+        )
+        api.login()
+        tiers = api.get_price_tiers(args.part)
+        print(f"Fetched {len(tiers)} price tier(s) for part {args.part}.")
+        _print_price_tiers(tiers, qty=max(1, int(args.qty or 1)))
+        return
 
     csv_path = os.getenv("CATALOG_CSV_PATH") or str(default_catalog_csv())
     print(f"Using catalog CSV: {csv_path}")
@@ -267,14 +313,18 @@ def main() -> None:
         print("Catalog is empty after load.")
         return
 
-    try:
-        length = float(input('Length (in, numeric): ').strip().replace('"', ""))
-        width = float(input('Width  (in, numeric): ').strip().replace('"', ""))
-        thickness = float(input('Thick  (in, numeric): ').strip().replace('"', ""))
-    except Exception:
-        print("Please enter numeric inches for L/W/T (e.g., 12, 14, 2).")
-        return
-    material = input('Material (e.g., "aluminum mic6", "aluminum 5083", "tool steel a2"): ').strip()
+    if args.length is not None and args.width is not None and args.thickness is not None and args.material:
+        length, width, thickness = args.length, args.width, args.thickness
+        material = args.material
+    else:
+        try:
+            length = float(input('Length (in, numeric): ').strip().replace('"', ""))
+            width = float(input('Width  (in, numeric): ').strip().replace('"', ""))
+            thickness = float(input('Thick  (in, numeric): ').strip().replace('"', ""))
+        except Exception:
+            print("Please enter numeric inches for L/W/T (e.g., 12, 14, 2).")
+            return
+        material = input('Material (e.g., "aluminum mic6", "aluminum 5083", "tool steel a2"): ').strip()
 
     item = choose_item(catalog, material, length, width, thickness)
     if not item:
@@ -292,15 +342,4 @@ def main() -> None:
     api = McMasterAPI(username=user, password=password, pfx_path=pfx_path, pfx_password=pfx_password)
     api.login()
     tiers = api.get_price_tiers(item.part)
-    if not tiers:
-        print("No price tiers returned.")
-        return
-
-    tier = _best_unit_price_tier(tiers, qty=1)
-    if tier:
-        amount = tier["Amount"]
-        uom = tier["UnitOfMeasure"]
-        print(f"Price @ qty=1: ${amount:.2f} {uom}")
-    else:
-        print("No eligible tier for qty=1.")
-
+    _print_price_tiers(tiers, qty=max(1, int(args.qty or 1)))
