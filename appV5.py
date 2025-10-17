@@ -1340,7 +1340,14 @@ def _pick_mcmaster_plate_sku_impl(
             or row.get("thk_in")
             or row.get("thickness")
         )
-        if not all(val and val > 0 for val in (length, width, thickness)):
+        if (
+            length is None
+            or width is None
+            or thickness is None
+            or length <= 0
+            or width <= 0
+            or thickness <= 0
+        ):
             continue
         if abs(thickness - need_T_in) > tolerance:
             continue
