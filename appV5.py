@@ -10393,6 +10393,9 @@ class QuoteConfiguration:
     separate_machine_labor: bool = True
     machine_rate_per_hr: float = 45.0
     labor_rate_per_hr: float = 45.0
+    hole_source_preference: str = "table"  # "table" | "geometry" | "auto"
+    hole_merge_tol_diam_in: float = 0.001
+    hole_merge_tol_depth_in: float = 0.01
 
     def copy_default_params(self) -> Dict[str, Any]:
         """Return a deep copy of the default parameter set."""
@@ -12239,21 +12242,44 @@ def reconcile_holes(
     table_count = sum(max(1, _coerce_int_or_zero(row.get("qty"))) for row in table_list)
     geo_count = sum(max(1, _coerce_int_or_zero(row.get("qty") or row.get("count"))) for row in geo_list)
 
-    source_used = "geometry"
-    if preference == "table" and table_list:
-        final_rows = _fill_table_depths_from_geo(table_list, geo_list, cfg, plate_thickness_in=thickness)
-        source_used = "table"
-    elif preference == "geometry" or not table_list:
-        final_rows = _dedupe_geo_rows(geo_list, cfg, plate_thickness_in=thickness)
-        source_used = "geometry"
-    else:
-        rel = abs(table_count - geo_count) / max(table_count, 1)
-        if table_list and rel <= 0.15:
-            final_rows = _fill_table_depths_from_geo(table_list, geo_list, cfg, plate_thickness_in=thickness)
+    if table_list and preference in ("table", "auto"):
+        use_table = True
+        if preference == "auto" and geo_list:
+            rel = abs(table_count - geo_count) / max(table_count, 1) if table_count else 0.0
+            if rel > 0.15:
+                use_table = False
+        if use_table:
+            final_rows = _fill_table_depths_from_geo(
+                table_list,
+                geo_list,
+                cfg,
+                plate_thickness_in=thickness,
+            )
             source_used = "table"
         else:
-            final_rows = _dedupe_geo_rows(geo_list, cfg, plate_thickness_in=thickness)
+            final_rows = _dedupe_geo_rows(
+                geo_list,
+                cfg,
+                plate_thickness_in=thickness,
+            )
             source_used = "geometry"
+    elif geo_list:
+        final_rows = _dedupe_geo_rows(
+            geo_list,
+            cfg,
+            plate_thickness_in=thickness,
+        )
+        source_used = "geometry"
+    elif table_list and preference == "geometry":
+        final_rows = _dedupe_geo_rows(
+            geo_list,
+            cfg,
+            plate_thickness_in=thickness,
+        )
+        source_used = "geometry"
+    else:
+        final_rows = []
+        source_used = "geometry"
 
     cleaned: list[dict[str, Any]] = []
     for row in final_rows:
