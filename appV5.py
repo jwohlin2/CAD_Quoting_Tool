@@ -2918,6 +2918,14 @@ elif _occ_brep_module is not None:
             return brepgprop_VolumeProperties(shape, gprops)
 
     BRepGProp = _BRepGPropShim
+
+    if "GProp_GProps" not in globals():
+        class _MissingGPropGProps:
+            def __init__(self, *_args: Any, **_kwargs: Any) -> None:  # pragma: no cover - optional backend
+                raise RuntimeError("GProp_GProps backend unavailable")
+
+        GProp_GProps = typing.cast(Any, _MissingGPropGProps)
+
     BRepTools = cast(Any, _occ_breptools).BRepTools
 
     def _occ_uv_bounds(face: Any) -> Tuple[float, float, float, float]:
