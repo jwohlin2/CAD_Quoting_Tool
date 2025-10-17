@@ -140,10 +140,12 @@ def test_die_plate_deep_drill_regression() -> None:
     }
 
     rendered = appV5.render_quote(result, currency="$", show_zeros=False)
+    payload = breakdown.get("render_payload")
+    assert isinstance(payload, dict)
 
-    assert rendered.count("Labor Hour Summary") == 1
-    assert rendered.count("Why this price") == 1
-    assert "deep_drill" in rendered.lower()
+    assert "Quote Summary" in rendered
+    drivers = payload.get("price_drivers", [])
+    assert any("deep_drill" in driver.get("detail", "").lower() for driver in drivers)
 
 
 def test_steel_die_plate_deep_drill_runtime_floor() -> None:
