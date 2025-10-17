@@ -1292,7 +1292,7 @@ def _pick_mcmaster_plate_sku_impl(
 
     import math as _math
 
-    if not all(val and val > 0 for val in (need_L_in, need_W_in, need_T_in)):
+    if not all(val > 0 for val in (need_L_in, need_W_in, need_T_in)):
         return None
 
     rows = list(catalog_rows) if catalog_rows is not None else _load_mcmaster_catalog_csv()
@@ -1340,7 +1340,14 @@ def _pick_mcmaster_plate_sku_impl(
             or row.get("thk_in")
             or row.get("thickness")
         )
-        if not all(val and val > 0 for val in (length, width, thickness)):
+        if (
+            length is None
+            or width is None
+            or thickness is None
+            or length <= 0
+            or width <= 0
+            or thickness <= 0
+        ):
             continue
         if abs(thickness - need_T_in) > tolerance:
             continue
