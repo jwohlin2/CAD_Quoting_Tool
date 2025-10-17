@@ -176,6 +176,20 @@ def ascii_table(headers, rows, *, widths, aligns):
         out.append(bar)
     return "\n".join(out)
 
+
+MONOSPACED_FONT_CANDIDATES: tuple[str, ...] = (
+    "Courier New",
+    "Consolas",
+    "DejaVu Sans Mono",
+    "Courier",
+    "TkFixedFont",
+)
+
+ASCII_MONO_NOTICE = (
+    "NOTE: ASCII tables require a monospaced font to stay aligned. "
+    "Ensure your viewer uses a mono font.\n\n"
+)
+
 from appkit.geometry_shim import (
     read_cad_any,
     read_step_shape,
@@ -20077,10 +20091,7 @@ class App(tk.Tk):
 
         # GEO (single pane; CAD open handled by top bar)
         self.geo_txt = tk.Text(self.tab_geo, wrap="none"); self.geo_txt.pack(fill="both", expand=True)
-        try:
-            self.geo_txt.configure(font=("Courier New", 10))
-        except Exception:
-            pass
+        self._apply_monospaced_style(self.geo_txt)
 
         # LLM (hidden frame is still built to keep functionality without a visible tab)
         if hasattr(self, "_build_llm"):
@@ -20110,10 +20121,7 @@ class App(tk.Tk):
                 widget.tag_configure("rcol", tabs=("4.8i right",), tabstyle="tabular")
             except tk.TclError:
                 widget.tag_configure("rcol", tabs=("4.8i right",))
-            try:
-                widget.configure(font=("Courier New", 10), wrap="none")
-            except Exception:
-                pass
+            self._apply_monospaced_style(widget)
             self.output_text_widgets[name] = widget
 
         self.output_nb.select(self.output_tab_simplified)
@@ -20121,6 +20129,21 @@ class App(tk.Tk):
         self.LLM_SUGGEST = None
         self._llm_load_attempted = False
         self._llm_load_error: Exception | None = None
+
+    def _apply_monospaced_style(self, widget: tk.Text) -> None:
+        """Best-effort enforcement of monospaced rendering for Text widgets."""
+
+        try:
+            widget.configure(wrap="none")
+        except Exception:
+            pass
+
+        for family in MONOSPACED_FONT_CANDIDATES:
+            try:
+                widget.configure(font=(family, 10))
+                break
+            except Exception:
+                continue
 
     def _reset_llm_logs(self) -> None:
         self.llm_events.clear()
@@ -21734,10 +21757,7 @@ class App(tk.Tk):
         ttk.Checkbutton(parent, text="Apply LLM adjustments to params", variable=self.apply_llm_adj).grid(row=row, column=0, sticky="w", pady=(0,6)); row+=1
         ttk.Button(parent, text="Run LLM on current GEO", command=self.run_llm).grid(row=row, column=0, sticky="w", padx=5, pady=6); row+=1
         self.llm_txt = tk.Text(parent, wrap="none", height=24); self.llm_txt.grid(row=row, column=0, columnspan=3, sticky="nsew")
-        try:
-            self.llm_txt.configure(font=("Courier New", 10))
-        except Exception:
-            pass
+        self._apply_monospaced_style(self.llm_txt)
         parent.grid_columnconfigure(1, weight=1); parent.grid_rowconfigure(row, weight=1)
 
     def _pick_model(self):
@@ -21806,10 +21826,7 @@ class App(tk.Tk):
         win.geometry("900x700")
 
         txt = scrolledtext.ScrolledText(win, wrap="none")
-        try:
-            txt.configure(font=("Courier New", 10), wrap="none")
-        except Exception:
-            pass
+        self._apply_monospaced_style(txt)
         txt.pack(fill="both", expand=True)
         txt.insert("1.0", shown)
         txt.configure(state="disabled")
@@ -22063,9 +22080,9 @@ class App(tk.Tk):
             # painting. These files are overwritten on each run.
             try:
                 with open("latest_quote_simplified.txt", "w", encoding="utf-8") as f:
-                    f.write(simplified_report or "")
+                    f.write(ASCII_MONO_NOTICE + (simplified_report or ""))
                 with open("latest_quote_full.txt", "w", encoding="utf-8") as f:
-                    f.write(full_report or "")
+                    f.write(ASCII_MONO_NOTICE + (full_report or ""))
             except Exception:
                 # Non-fatal: continue to render in the UI even if writing fails
                 pass
