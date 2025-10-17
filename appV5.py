@@ -20975,11 +20975,12 @@ class App(tk.Tk):
 
             res.setdefault("quote_state", self.quote_state.to_dict())
             cfg = getattr(self, "quote_config", None)
-            geometry_ctx: Mapping[str, Any] | None = None
-            if isinstance(self.geo_context, dict) and self.geo_context:
-                geometry_ctx = self.geo_context
-            elif isinstance(self.geo, dict) and self.geo:
-                geometry_ctx = self.geo
+            geometry_loader = getattr(self, "geometry_loader", None)
+            geometry_ctx = (
+                getattr(geometry_loader, "geo_ctx", None)
+                if geometry_loader is not None
+                else None
+            )
 
             try:
                 simplified_report = render_quote(
