@@ -25,7 +25,7 @@ import sys
 import time
 import typing
 from functools import cmp_to_key, lru_cache
-from typing import Any, Mapping, MutableMapping
+from typing import Any, Mapping, MutableMapping, TYPE_CHECKING
 from collections import Counter
 from collections.abc import (
     Callable,
@@ -1340,7 +1340,14 @@ def _pick_mcmaster_plate_sku_impl(
             or row.get("thk_in")
             or row.get("thickness")
         )
-        if not all(val and val > 0 for val in (length, width, thickness)):
+        if (
+            length is None
+            or width is None
+            or thickness is None
+            or length <= 0
+            or width <= 0
+            or thickness <= 0
+        ):
             continue
         if abs(thickness - need_T_in) > tolerance:
             continue
@@ -1504,6 +1511,7 @@ from typing import (
     Protocol,
     Sequence,
     Tuple,
+    TypeAlias,
     TypeVar,
     cast,
     Literal,
@@ -1525,10 +1533,11 @@ else:  # pragma: no cover - fallback when ezdxf is unavailable at runtime
 if typing.TYPE_CHECKING:
     import pandas as pd
     from pandas import DataFrame as PandasDataFrame
-    from pandas import Index as PandasIndex
-    from pandas import Series as PandasSeries
     from cad_quoter.domain import QuoteState as _QuoteState
+
+    SeriesLike: TypeAlias = pd.Series[Any]
 else:
+    PandasDataFrame = Any  # type: ignore[assignment]
     _QuoteState = QuoteState
     try:
         import pandas as pd  # type: ignore[import]
@@ -1541,6 +1550,8 @@ else:
         PandasDataFrame = pd.DataFrame
         PandasSeries = pd.Series
         PandasIndex = pd.Index
+
+    SeriesLike: TypeAlias = Any
 
 try:
     from cad_quoter_legacy import compute_quote_from_df as _legacy_compute_quote_from_df  # type: ignore[import]
@@ -1562,7 +1573,7 @@ def _resolve_pricing_source_value(
     planner_process_minutes: Any = None,
     hour_summary_entries: Mapping[str, Any] | None = None,
     additional_sources: Sequence[Any] | None = None,
-    cfg: "QuoteConfiguration" | None = None,
+    cfg: QuoteConfiguration | None = None,
 ) -> str | None:
     """Return a normalized pricing source, honoring explicit selections."""
 
@@ -2085,6 +2096,24 @@ else:  # pragma: no cover - fallback definitions keep quoting functional without
     def explain_quote(*args, **kwargs) -> str:  # pragma: no cover - fallback
         return "LLM explanation unavailable."
 
+
+try:
+    import pandas as pd  # type: ignore[import]
+except Exception:  # pragma: no cover - optional dependency
+    pd = None  # type: ignore[assignment]
+
+if TYPE_CHECKING:  # pragma: no cover - import-time helper for type checkers
+    import pandas as _pandas
+
+    PandasDataFrame = _pandas.DataFrame
+    PandasSeries = _pandas.Series
+    PandasIndex = _pandas.Index
+else:  # pragma: no cover - fallback aliases when pandas is unavailable
+    PandasDataFrame = typing.Any
+    PandasSeries = typing.Any
+    PandasIndex = typing.Any
+
+pd = typing.cast(typing.Any, pd)
 from typing import TypedDict
 
 try:
@@ -2797,6 +2826,10 @@ def _missing_uv_bounds(_: Any) -> Tuple[float, float, float, float]:
 def _missing_brep_read(_: str):
     raise RuntimeError("BREP read is unavailable")
 
+
+def _missing_brep_check_analyzer(_: Any) -> Any:
+    raise RuntimeError("BRepCheck_Analyzer is unavailable")
+
 class _EzdxfModule(Protocol):
     def readfile(
         self,
@@ -2812,10 +2845,17 @@ class _OdafcModule(Protocol):
 
 BRepTools_UVBounds: Callable[[Any], Tuple[float, float, float, float]] = _missing_uv_bounds
 _brep_read = _missing_brep_read
+BRepCheck_Analyzer = cast(Any, _missing_brep_check_analyzer)
 
 _ocp_brep_module = _import_optional("OCP.BRep")
 _occ_brep_module = _import_optional("OCC.Core.BRep")
 _ocp_backend_ready = False
+
+# Provide default placeholders so type checkers consider these names bound even if
+# the optional OCC/OCP backends are unavailable at runtime.
+gp_Dir = cast(Any, None)
+gp_Pln = cast(Any, None)
+gp_Pnt = cast(Any, None)
 
 if _ocp_brep_module is not None:
     try:
@@ -2927,6 +2967,14 @@ elif _occ_brep_module is not None:
             return brepgprop_VolumeProperties(shape, gprops)
 
     BRepGProp = _BRepGPropShim
+
+    if "GProp_GProps" not in globals():
+        class _MissingGPropGProps:
+            def __init__(self, *_args: Any, **_kwargs: Any) -> None:  # pragma: no cover - optional backend
+                raise RuntimeError("GProp_GProps backend unavailable")
+
+        GProp_GProps = typing.cast(Any, _MissingGPropGProps)
+
     BRepTools = cast(Any, _occ_breptools).BRepTools
 
     def _occ_uv_bounds(face: Any) -> Tuple[float, float, float, float]:
@@ -2960,10 +3008,33 @@ else:
     def _occ_brep_read(path: str) -> Any:  # pragma: no cover
         raise RuntimeError("BREP read is unavailable")
 
+    def _missing_brep_builder(*_: Any, **__: Any) -> Any:  # pragma: no cover
+        raise RuntimeError("BRep_Builder is unavailable")
+
+    BRep_Builder = cast(Any, _missing_brep_builder)
     BRepTools = None  # type: ignore[assignment]
     TopTools_IndexedDataMapOfShapeListOfShape = None  # type: ignore[assignment]
+
+    class _MissingTopoDSShape:
+        def __init__(self, *_: Any, **__: Any) -> None:  # pragma: no cover - fallback sentinel
+            raise RuntimeError("TopoDS_Shape is unavailable (OCCT bindings required)")
+
+    class _MissingTopoDSFace(_MissingTopoDSShape):
+        pass
+
+    class _MissingTopoDSCompound(_MissingTopoDSShape):
+        pass
+
+    TopoDS_Shape = cast(Any, _MissingTopoDSShape)
+    TopoDS_Face = cast(Any, _MissingTopoDSFace)
+    TopoDS_Compound = cast(Any, _MissingTopoDSCompound)
     BRepTools_UVBounds = _occ_uv_bounds
     _brep_read = _occ_brep_read
+
+    def _missing_shape_fix_shape(_: Any) -> Any:  # pragma: no cover
+        raise RuntimeError("Shape healing is unavailable")
+
+    ShapeFix_Shape = cast(Any, _missing_shape_fix_shape)
 
 def _new_topods_shape() -> Any:
     ctor = cast(Any, TopoDS_Shape)
@@ -3549,7 +3620,6 @@ _MASTER_VARIABLES_CACHE: dict[str, Any] = {
     "full": None,
 }
 
-
 _SPEEDS_FEEDS_CACHE: dict[str, PandasDataFrame | None] = {}
 
 def _coerce_core_types(df_core: PandasDataFrame) -> PandasDataFrame:
@@ -3758,6 +3828,9 @@ def sanitize_vars_df(df_full: PandasDataFrame) -> PandasDataFrame:
     - Creates missing core columns as blanks.
     - Normalizes types.
     """
+    if pd is None:  # pragma: no cover - defensive guard for static analysers
+        raise RuntimeError("pandas is required to sanitize variables data frames")
+
     # Try to map any variant header names to our canon names (case/space tolerant)
     canon = {str(c).strip().lower(): c for c in df_full.columns}
 
@@ -3791,8 +3864,10 @@ def read_variables_file(
     Read .xlsx/.csv, keep original data intact, and return a sanitized copy for the estimator.
     - If return_full=True, returns (core_df, full_df); otherwise returns core_df only.
     """
-    if not _HAS_PANDAS:
+    if not _HAS_PANDAS or pd is None:
         raise RuntimeError("pandas required (conda/pip install pandas)")
+
+    assert pd is not None  # hint for type checkers
 
     lp = path.lower()
     if lp.endswith(".xlsx"):
@@ -3858,8 +3933,10 @@ def read_variables_file(
 
 def _load_master_variables() -> tuple[PandasDataFrame | None, PandasDataFrame | None]:
     """Load the packaged master variables sheet once and serve cached copies."""
-    if not _HAS_PANDAS:
+    if not _HAS_PANDAS or pd is None:
         return (None, None)
+
+    assert pd is not None  # hint for type checkers
 
     global _MASTER_VARIABLES_CACHE
     cache = _MASTER_VARIABLES_CACHE
@@ -3869,12 +3946,16 @@ def _load_master_variables() -> tuple[PandasDataFrame | None, PandasDataFrame | 
         full_cached = cache.get("full")
         core_copy = (
             core_cached.copy()
-            if _HAS_PANDAS and isinstance(core_cached, pd.DataFrame)
+            if _HAS_PANDAS
+            and pd is not None
+            and isinstance(core_cached, pd.DataFrame)
             else None
         )
         full_copy = (
             full_cached.copy()
-            if _HAS_PANDAS and isinstance(full_cached, pd.DataFrame)
+            if _HAS_PANDAS
+            and pd is not None
+            and isinstance(full_cached, pd.DataFrame)
             else None
         )
         return (core_copy, full_copy)
@@ -4266,11 +4347,16 @@ class PlannerBucketRenderState:
     rates: dict[str, float] = field(default_factory=dict)
 
 
+class _BucketOpEntry(TypedDict):
+    name: str
+    minutes: float
+
+
 def _split_hours_for_bucket(
     label: str,
     hours: float,
     render_state: "PlannerBucketRenderState" | None,
-    cfg: "QuoteConfiguration" | None,
+    cfg: QuoteConfiguration | None,
 ) -> tuple[float, float]:
     total_h = max(0.0, float(hours or 0.0))
     if not cfg or not getattr(cfg, "separate_machine_labor", False):
@@ -4314,7 +4400,10 @@ def _split_hours_for_bucket(
             for entry in ops_list:
                 if not isinstance(entry, _MappingABC):
                     continue
-                role = _op_role_for_name(entry.get("name"))
+                name_val = entry.get("name")
+                if not isinstance(name_val, str):
+                    continue
+                role = _op_role_for_name(name_val)
                 minutes_val = _coerce_float_or_none(entry.get("minutes"))
                 if minutes_val is None or minutes_val <= 0:
                     continue
@@ -4350,7 +4439,7 @@ def _build_planner_bucket_render_state(
     rates: Mapping[str, Any] | None = None,
     removal_drilling_hours: float | None = None,
     prefer_removal_drilling_hours: bool = True,
-    cfg: "QuoteConfiguration" | None = None,
+    cfg: QuoteConfiguration | None = None,
     bucket_ops: Mapping[str, typing.Sequence[Mapping[str, Any]]] | None = None,
     drill_machine_minutes: float | None = None,
     drill_labor_minutes: float | None = None,
@@ -4401,7 +4490,7 @@ def _build_planner_bucket_render_state(
         except Exception:
             state.extra["drill_total_minutes"] = drill_total_minutes
 
-    bucket_ops_map: dict[str, list[dict[str, float]]] = {}
+    bucket_ops_map: dict[str, list[_BucketOpEntry]] = {}
 
     def _ingest_bucket_ops(source: Any) -> None:
         if isinstance(source, _MappingABC):
@@ -4412,7 +4501,7 @@ def _build_planner_bucket_render_state(
             canon_key = _canonical_bucket_key(raw_key) or _normalize_bucket_key(raw_key)
             if not canon_key:
                 continue
-            entries: list[dict[str, float]] = bucket_ops_map.setdefault(canon_key, [])
+            entries: list[_BucketOpEntry] = bucket_ops_map.setdefault(canon_key, [])
             if isinstance(raw_list, Sequence):
                 for item in raw_list:
                     if not isinstance(item, _MappingABC):
@@ -4425,7 +4514,12 @@ def _build_planner_bucket_render_state(
                         minutes_val = _coerce_float_or_none(item.get("mins"))
                     if minutes_val is None or minutes_val <= 0:
                         continue
-                    entries.append({"name": op_name, "minutes": float(minutes_val)})
+                    entries.append(
+                        {
+                            "name": op_name,
+                            "minutes": float(minutes_val),
+                        }
+                    )
 
     if isinstance(bucket_view, _MappingABC):
         _ingest_bucket_ops(bucket_view.get("bucket_ops"))
@@ -4616,7 +4710,7 @@ def _build_planner_bucket_render_state(
 def _display_rate_for_row(
     label: str,
     *,
-    cfg: "QuoteConfiguration" | None,
+    cfg: QuoteConfiguration | None,
     render_state: PlannerBucketRenderState | None,
     hours: float | None,
 ) -> str:
@@ -4766,7 +4860,7 @@ def _charged_hours_by_bucket(
     render_state: PlannerBucketRenderState | None = None,
     removal_drilling_hours: float | None = None,
     prefer_removal_drilling_hours: bool = True,
-    cfg: "QuoteConfiguration" | None = None,
+    cfg: QuoteConfiguration | None = None,
 ):
     """Return the hours that correspond to what we actually charged."""
     out: dict[str, float] = {}
@@ -4963,6 +5057,13 @@ def _final_bucket_key(raw_key: Any) -> str:
         "finishing_deburr": "finishing_deburr",
     }.get(text, text)
 
+class BucketOpEntry(TypedDict):
+    """Canonical representation for a bucket operation entry."""
+
+    name: str
+    minutes: float
+
+
 def _prepare_bucket_view(raw_view: Mapping[str, Any] | None) -> dict[str, Any]:
     """Return the canonical bucket view used for display and rollups."""
 
@@ -4973,7 +5074,7 @@ def _prepare_bucket_view(raw_view: Mapping[str, Any] | None) -> dict[str, Any]:
                 continue
             prepared[key] = copy.deepcopy(value)
 
-    bucket_ops: dict[str, list[dict[str, float]]] = {}
+    bucket_ops: dict[str, list[BucketOpEntry]] = {}
     if isinstance(raw_view, _MappingABC):
         operations = raw_view.get("operations")
         if isinstance(operations, Sequence):
@@ -4994,8 +5095,11 @@ def _prepare_bucket_view(raw_view: Mapping[str, Any] | None) -> dict[str, Any]:
                 op_name = (entry.get("name") or "").strip()
                 if not op_name:
                     continue
-                bucket_list = bucket_ops.setdefault(canon_bucket, [])
-                bucket_list.append({"name": op_name, "minutes": float(minutes_val)})
+                if canon_bucket not in bucket_ops:
+                    bucket_ops[canon_bucket] = []
+                bucket_ops[canon_bucket].append(
+                    {"name": op_name, "minutes": float(minutes_val)}
+                )
     if bucket_ops:
         prepared.setdefault("bucket_ops", bucket_ops)
 
@@ -11098,6 +11202,9 @@ def _sum_time_from_series(
     exclude_mask: PandasSeries | None = None,
 ) -> float:
     """Shared implementation for extracting hour totals from sheet rows."""
+
+    if pd is None:
+        raise RuntimeError("pandas required (conda/pip install pandas)")
 
     try:
         if not mask.any():
