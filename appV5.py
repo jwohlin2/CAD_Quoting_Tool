@@ -11187,6 +11187,9 @@ def _sum_time_from_series(
 ) -> float:
     """Shared implementation for extracting hour totals from sheet rows."""
 
+    if pd is None:
+        raise RuntimeError("pandas required (conda/pip install pandas)")
+
     try:
         if not mask.any():
             return float(default)
