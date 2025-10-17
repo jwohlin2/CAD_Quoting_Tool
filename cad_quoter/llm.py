@@ -169,6 +169,28 @@ def _llama_load_error_msg(model_path: str, exc: Exception) -> str:
     return "\n".join(base)
 
 
+def _llama_inference_error_msg(model_path: str, exc: Exception) -> str:
+    """Return a readable message when llama.cpp fails during inference."""
+
+    base = [
+        "Local LLM inference failed mid-request.",
+        (
+            "Disable the LLM helper in Settings → LLM or fix the configured "
+            "Qwen model path before retrying."
+        ),
+    ]
+
+    path_hint = model_path.strip()
+    if path_hint:
+        base.append(f"Configured model: {path_hint}")
+
+    details = str(exc).strip()
+    if details:
+        base.append(f"Original error: {details}")
+
+    return "\n".join(base)
+
+
 @dataclass
 class _ModelConfig:
     model_path: str
@@ -225,7 +247,15 @@ class _LocalLLM:
 
     def create_chat_completion(self, **kwargs):
         self._ensure()
-        return self._llm.create_chat_completion(**kwargs)
+        try:
+            return self._llm.create_chat_completion(**kwargs)
+        except Exception as exc:
+            try:
+                self.close()
+            except Exception:
+                pass
+            msg = _llama_inference_error_msg(self._config.model_path, exc)
+            raise RuntimeError(msg) from exc
 
     def close(self) -> None:
         try:
