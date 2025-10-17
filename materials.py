@@ -346,6 +346,8 @@ def pick_stock_from_mcmaster(
     if L_val <= 0 or W_val <= 0 or thk_val <= 0:
         return None
 
+    need_thk = float(thk_val)
+
     scrap = max(0.0, float(scrap_fraction))
     raw_L = max(L_val, W_val)
     raw_W = min(L_val, W_val)
@@ -399,7 +401,6 @@ def pick_stock_from_mcmaster(
                         setattr(_mc, "ALLOW_NEXT_THICKER", original_allow)
                     except Exception:
                         pass
-            need_thk = float(thk_val)
             got_thk = need_thk
             if item:
                 got_thk = float(item.thickness)
@@ -410,6 +411,10 @@ def pick_stock_from_mcmaster(
                         need_thk,
                     )
                     item = None
+                    result["stock_piece_price_usd"] = None
+                    result["stock_piece_source"] = None
+                    result["stock_piece_api_price"] = None
+                    result["stock_piece_api_source"] = None
             if not item:
                 fb = None
                 csv_path = os.getenv("CATALOG_CSV_PATH") or catalog_path or ""
@@ -523,7 +528,7 @@ def pick_stock_from_mcmaster(
             length_in = width_in = thk_in = 0.0
         if length_in > 0 and width_in > 0 and thk_in > 0:
             try:
-                sku, price_each, _, _ = _mc.lookup_sku_and_price_for_mm(
+                sku, price_each, _, dims = _mc.lookup_sku_and_price_for_mm(
                     material_label,
                     length_in * 25.4,
                     width_in * 25.4,
@@ -531,7 +536,25 @@ def pick_stock_from_mcmaster(
                     qty=1,
                 )
             except Exception:
-                sku, price_each = None, None
+                sku, price_each, dims = None, None, None
+            got_thk = None
+            if dims and isinstance(dims, (tuple, list)) and len(dims) >= 3:
+                try:
+                    got_thk = float(dims[2])
+                except Exception:
+                    got_thk = None
+            if got_thk is not None and abs(got_thk - need_thk) > 0.05:
+                _log.warning(
+                    "[stock] rejecting API thickness %.3fin (need %.3fin)",
+                    got_thk,
+                    need_thk,
+                )
+                sku = None
+                price_each = None
+                result["stock_piece_price_usd"] = None
+                result["stock_piece_source"] = None
+                result["stock_piece_api_price"] = None
+                result["stock_piece_api_source"] = None
             if sku:
                 part_str = str(sku)
                 if part_str:
