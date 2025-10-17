@@ -2951,6 +2951,10 @@ else:
     def _occ_brep_read(path: str) -> Any:  # pragma: no cover
         raise RuntimeError("BREP read is unavailable")
 
+    def _missing_brep_builder(*_: Any, **__: Any) -> Any:  # pragma: no cover
+        raise RuntimeError("BRep_Builder is unavailable")
+
+    BRep_Builder = cast(Any, _missing_brep_builder)
     BRepTools = None  # type: ignore[assignment]
     TopTools_IndexedDataMapOfShapeListOfShape = None  # type: ignore[assignment]
     BRepTools_UVBounds = _occ_uv_bounds
