@@ -1408,7 +1408,15 @@ def _build_quote_header_lines(
         if value is None:
             return None
         text = str(value).strip()
-        return text or None
+        if not text:
+            return None
+        lowered = text.lower()
+        # normalize synonyms
+        if lowered in {"legacy", "est", "estimate", "estimator"}:
+            return "estimator"
+        if lowered in {"plan", "planner"}:
+            return "planner"
+        return text
 
     raw_pricing_source = None
     pricing_source_display = None
@@ -1442,6 +1450,9 @@ def _build_quote_header_lines(
         breakdown=breakdown if isinstance(breakdown, _MappingABC) else None,
         hour_summary_entries=hour_summary_entries,
     )
+
+    if isinstance(result, dict) and result.get("removal_summary"):
+        pricing_source_value = "estimator"
 
     normalized_pricing_source: str | None = None
     if pricing_source_value is not None:
