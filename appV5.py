@@ -37,7 +37,14 @@ from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
-from functools import lru_cache
+try:
+    from functools import lru_cache
+except ImportError:  # pragma: no cover - fallback for very old Python versions
+    def lru_cache(*_args, **_kwargs):
+        def _decorator(func):
+            return func
+
+        return _decorator
 
 from cad_quoter.app import runtime as _runtime
 from cad_quoter.app._value_utils import (
