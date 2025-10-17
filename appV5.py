@@ -6932,21 +6932,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 geometry_for_explainer = typing.cast(Mapping[str, Any], candidate)
                 break
 
-    try:
-        explanation_text = explain_quote(
-            breakdown,
-            hour_trace=hour_trace_data,
-            geometry=geometry_for_explainer,
-            render_state=bucket_state,
-        )
-    except Exception:
-        explanation_text = ""
-    if explanation_text:
-        for line in str(explanation_text).splitlines():
-            text = line.strip()
-            if text:
-                explanation_lines.append(text)
-
     def _norm(s: Any) -> str:
         import re
 
@@ -9266,6 +9251,69 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             for w in _tw.wrap(str(n), width=page_width):
                 append_line(f"- {w}")
         append_line("")
+
+    if not explanation_lines:
+        plan_info_for_explainer: Mapping[str, Any] | None = None
+        plan_info_payload: dict[str, Any] = {}
+
+        process_plan_for_explainer: Mapping[str, Any] | None = None
+        process_plan_candidate = locals().get("process_plan_summary_local")
+        if isinstance(process_plan_candidate, _MappingABC) and process_plan_candidate:
+            process_plan_for_explainer = process_plan_candidate
+        elif isinstance(breakdown, _MappingABC):
+            candidate_summary = breakdown.get("process_plan")
+            if isinstance(candidate_summary, _MappingABC) and candidate_summary:
+                process_plan_for_explainer = candidate_summary
+        if isinstance(process_plan_for_explainer, _MappingABC) and process_plan_for_explainer:
+            plan_info_payload["process_plan_summary"] = process_plan_for_explainer
+
+        if isinstance(breakdown, _MappingABC):
+            process_plan_map = breakdown.get("process_plan")
+            if isinstance(process_plan_map, _MappingABC) and process_plan_map:
+                plan_info_payload.setdefault("process_plan", process_plan_map)
+            plan_pricing_map = breakdown.get("process_plan_pricing")
+            if isinstance(plan_pricing_map, _MappingABC) and plan_pricing_map:
+                plan_info_payload.setdefault("pricing", plan_pricing_map)
+
+        if isinstance(planner_result, _MappingABC) and planner_result:
+            plan_info_payload["planner_pricing"] = planner_result
+
+        bucket_plan_info: dict[str, Any] = {}
+        if isinstance(bucket_state, PlannerBucketRenderState):
+            extra_map = getattr(bucket_state, "extra", None)
+            if isinstance(extra_map, _MappingABC) and extra_map:
+                try:
+                    bucket_plan_info.update(dict(extra_map))
+                except Exception:
+                    for key, value in extra_map.items():
+                        bucket_plan_info[key] = value
+            bucket_minutes_detail_map = getattr(bucket_state, "bucket_minutes_detail", None)
+            if isinstance(bucket_minutes_detail_map, _MappingABC) and bucket_minutes_detail_map:
+                bucket_plan_info.setdefault(
+                    "bucket_minutes_detail_for_render",
+                    bucket_minutes_detail_map,
+                )
+        if bucket_plan_info:
+            plan_info_payload["bucket_state_extra"] = bucket_plan_info
+
+        if plan_info_payload:
+            plan_info_for_explainer = plan_info_payload
+
+        try:
+            explanation_text = explain_quote(
+                breakdown,
+                hour_trace=hour_trace_data,
+                geometry=geometry_for_explainer,
+                render_state=bucket_state,
+                plan_info=plan_info_for_explainer,
+            )
+        except Exception:
+            explanation_text = ""
+        if explanation_text:
+            for line in str(explanation_text).splitlines():
+                text = line.strip()
+                if text:
+                    explanation_lines.append(text)
 
     if explanation_lines:
         why_lines.extend(explanation_lines)
