@@ -2808,6 +2808,10 @@ def _missing_uv_bounds(_: Any) -> Tuple[float, float, float, float]:
 def _missing_brep_read(_: str):
     raise RuntimeError("BREP read is unavailable")
 
+
+def _missing_brep_check_analyzer(_: Any) -> Any:
+    raise RuntimeError("BRepCheck_Analyzer is unavailable")
+
 class _EzdxfModule(Protocol):
     def readfile(
         self,
@@ -2823,6 +2827,7 @@ class _OdafcModule(Protocol):
 
 BRepTools_UVBounds: Callable[[Any], Tuple[float, float, float, float]] = _missing_uv_bounds
 _brep_read = _missing_brep_read
+BRepCheck_Analyzer = cast(Any, _missing_brep_check_analyzer)
 
 _ocp_brep_module = _import_optional("OCP.BRep")
 _occ_brep_module = _import_optional("OCC.Core.BRep")
