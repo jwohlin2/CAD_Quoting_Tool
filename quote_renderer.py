@@ -13,7 +13,21 @@ import unicodedata
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from text_tables import ascii_table, money, pct
+from text_tables import (
+    ascii_table,
+    money,
+    pct,
+    ellipsize,
+    draw_boxed_table,
+    draw_kv_table,
+    ColumnSpec,
+    DEFAULT_WIDTH,
+)
+
+# Used to surface a gentle hint when the pricing engine
+# produced a zero materials figure that likely indicates
+# missing inputs rather than truly free material.
+MATERIALS_WARNING_LABEL = "Note: Materials omitted (engine reported zero)"
 
 
 def _currency_from(data: Mapping[str, Any]) -> str:
@@ -177,6 +191,25 @@ def _render_cost_breakdown(data: Mapping[str, Any]) -> str | None:
             return None
         return amount / subtotal_basis if subtotal_basis else None
 
+    # Build source items for the breakdown table.
+    # Prefer an explicit "cost_breakdown" payload if present;
+    # otherwise, fall back to derived direct materials/labor
+    # and include margin when available.
+    cost_breakdown_source = data.get("cost_breakdown")
+    items: list[tuple[str, Any]] = []
+    if cost_breakdown_source:
+        try:
+            items = _to_pairs(cost_breakdown_source)  # type: ignore[arg-type]
+        except Exception:
+            items = []
+    if not items:
+        if direct_materials and direct_materials > 0:
+            items.append(("Materials (direct)", direct_materials))
+        if direct_labor and direct_labor > 0:
+            items.append(("Labor (direct)", direct_labor))
+        if margin_amount is not None and margin_amount > 0:
+            items.append(("Margin", margin_amount))
+
     rows: list[list[str]] = []
     for raw_label, raw_amount in items:
         label = str(raw_label)
@@ -281,13 +314,51 @@ def _render_quick_what_ifs(data: Mapping[str, Any]) -> str | None:
         qty_table = draw_boxed_table(("Quantity", "Unit Price"), qty_rows, specs)
         sections.append("Qty Breaks\n" + qty_table)
 
-    return ascii_table(
-        headers=["Scenario", "Price"],
-        rows=scenarios,
-        col_widths=[48, 20],
-        col_aligns=["left", "right"],
-        header_aligns=["left", "right"],
-    )
+    # Join the sub-sections we built above. If nothing was
+    # produced, return None so the caller can skip the section.
+    return "\n\n".join(sections) if sections else None
+
+
+def _sanitize_block(text: str) -> str:
+    """Normalize unicode and strip ANSI/control chars for email-safe ASCII.
+
+    - Converts common unicode punctuation to ASCII equivalents
+    - Removes ANSI escape sequences
+    - Replaces tabs with spaces
+    - Normalizes to NFKC and strips non-ASCII (except newlines)
+    """
+    if text is None:
+        return ""
+
+    # Normalize newlines first
+    s = str(text).replace("\r\n", "\n").replace("\r", "\n")
+
+    # Drop ANSI escape sequences (e.g., \x1b[31m ... \x1b[0m)
+    s = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", s)
+
+    # Replace tabs with a single space to avoid misalignment
+    s = s.replace("\t", " ")
+
+    # Replace a few common unicode punctuation characters
+    replacements = {
+        "\u2013": "-",  # en dash
+        "\u2014": "-",  # em dash
+        "\u2212": "-",  # minus sign
+        "\u2018": "'",  # left single quote
+        "\u2019": "'",  # right single quote
+        "\u201C": '"',  # left double quote
+        "\u201D": '"',  # right double quote
+        "\u2022": "-",  # bullet
+        "\u00A0": " ",  # non-breaking space
+    }
+    for k, v in replacements.items():
+        s = s.replace(k, v)
+
+    # Unicode normalization, then strip remaining non-ASCII (keep newlines)
+    s = unicodedata.normalize("NFKC", s)
+    s = "".join(ch for ch in s if ch == "\n" or 32 <= ord(ch) <= 126)
+
+    return s
 
 
 def _render_programming_nre(data: Mapping[str, Any]) -> str | None:
@@ -296,6 +367,31 @@ def _render_programming_nre(data: Mapping[str, Any]) -> str | None:
         return None
     currency = _currency_from(data.get("summary", {}) if isinstance(data.get("summary"), Mapping) else data)
     rows: list[list[str]] = []
+
+    # Primary source: explicit NRE entries from payload
+    entries = data.get("nre")
+    if not isinstance(entries, Sequence):
+        entries = []
+
+    # If no explicit entries and a per-lot value is present, synthesize
+    programming_per_lot = _coerce_float(data.get("programming_per_lot"))
+    if (not entries) and (programming_per_lot is not None):
+        entries = [
+            {
+                "label": "Programming & Eng (per lot)",
+                "detail": "",
+                "amount": programming_per_lot,
+            }
+        ]
+
+    # Always show computed/specified programming-per-lot when available
+    if programming_per_lot is not None and programming_per_lot > 0:
+        rows.append([
+            "Programming & Eng (per lot)",
+            "",
+            money(programming_per_lot, currency),
+        ])
+
     for entry in entries:
         if isinstance(entry, Mapping):
             label = entry.get("label") or entry.get("name") or ""
@@ -329,6 +425,9 @@ def _render_materials(data: Mapping[str, Any]) -> str | None:
         return None
 
     rows: list[list[str]] = []
+    entries = data.get("materials")
+    if not isinstance(entries, Sequence):
+        entries = []
 
     def _scrap_detail(entry: Mapping[str, Any], components: Mapping[str, Any]) -> str:
         parts: list[str] = []
