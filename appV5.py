@@ -4049,36 +4049,32 @@ def _charged_hours_by_bucket(
                 extra.get("drill_labor_minutes")
             )
 
-    drill_bucket_label = next(
-        (
-            key
-            for key in out
-            if _canonical_bucket_key(key) in {"drilling", "drill"}
-        ),
-        "",
-    )
-    drill_bucket_hours = (
-        _coerce_float_or_none(out.get(drill_bucket_label))
-        if drill_bucket_label
-        else None
-    )
-
-    def _fmt_diagnostic(value: float | None) -> str:
-        if value is None:
-            return "nan"
-        try:
+    def _fmt_value(value: Any, *, decimals: int, suffix: str = "") -> str:
+        if isinstance(value, (int, float)):
             numeric = float(value)
-        except Exception:
-            return "nan"
-        if not math.isfinite(numeric):
-            return "nan"
-        return f"{numeric:.2f}"
+            if math.isfinite(numeric):
+                return f"{numeric:.{decimals}f}{suffix}"
+        return "nan"
+
+    card_total_hours = None
+    if (
+        isinstance(drill_machine_minutes, (int, float))
+        and isinstance(drill_labor_minutes, (int, float))
+    ):
+        total_minutes = float(drill_machine_minutes) + float(drill_labor_minutes)
+        if math.isfinite(total_minutes):
+            card_total_hours = total_minutes / 60.0
+
+    charged_drilling_hours = charged.get("Drilling")
+    if charged_drilling_hours is None:
+        charged_drilling_hours = charged.get("drilling")
 
     _log.info(
-        "[drill-sync] card_m=%s card_l=%s charged_hr=%s",
-        _fmt_diagnostic(drill_machine_minutes),
-        _fmt_diagnostic(drill_labor_minutes),
-        _fmt_diagnostic(drill_bucket_hours),
+        "[drill-sync] card_m=%s card_l=%s → card_total_hr=%s  | charged_drilling_hr=%s",
+        _fmt_value(drill_machine_minutes, decimals=2, suffix="min"),
+        _fmt_value(drill_labor_minutes, decimals=2, suffix="min"),
+        _fmt_value(card_total_hours, decimals=6, suffix="hr"),
+        _fmt_value(charged_drilling_hours, decimals=2, suffix="hr"),
     )
 
     return out
