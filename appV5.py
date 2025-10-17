@@ -3948,6 +3948,7 @@ class PlannerBucketRenderState:
     process_costs_for_render: dict[str, float] = field(default_factory=dict)
     notes: dict[str, str] = field(default_factory=dict)
     extra: dict[str, Any] = field(default_factory=dict)
+    rates: dict[str, float] = field(default_factory=dict)
 
 
 def _split_hours_for_bucket(
@@ -3960,9 +3961,10 @@ def _split_hours_for_bucket(
     if not cfg or not getattr(cfg, "separate_machine_labor", False):
         return (0.0, total_h)
 
-    key = _canonical_bucket_key(label)
+    canon_label = _canonical_bucket_key(label)
+    key = canon_label or _normalize_bucket_key(label)
     if not key:
-        key = _normalize_bucket_key(label)
+        key = str(label or "")
 
     extra: Mapping[str, Any] | None = None
     if render_state is not None:
@@ -4040,6 +4042,28 @@ def _build_planner_bucket_render_state(
     drill_total_minutes: float | None = None,
 ) -> PlannerBucketRenderState:
     state = PlannerBucketRenderState()
+
+    def _flatten_rate_map(value: Any) -> dict[str, float]:
+        flat: dict[str, float] = {}
+        if not isinstance(value, _MappingABC):
+            return flat
+
+        def _walk(container: Mapping[str, Any]) -> None:
+            for key, raw in container.items():
+                if isinstance(raw, _MappingABC):
+                    _walk(raw)
+                    continue
+                try:
+                    numeric = float(raw)
+                except Exception:
+                    continue
+                if numeric > 0:
+                    flat[str(key)] = numeric
+
+        _walk(value)
+        return flat
+
+    state.rates = _flatten_rate_map(rates)
 
     # The canonical bucket view is the single source of truth for the Process & Labor table.
     # Start with an empty structure and allow the canonical buckets to populate it below,
@@ -4272,6 +4296,71 @@ def _build_planner_bucket_render_state(
         state.extra["_labor_total_hours"] = round(labor_hours_total, 2)
 
     return state
+
+
+def _display_rate_for_row(
+    label: str,
+    *,
+    cfg: "QuoteConfiguration" | None,
+    render_state: PlannerBucketRenderState | None,
+    hours: float | None,
+) -> str:
+    total_hours = max(0.0, float(hours or 0.0))
+    cfg_obj = cfg
+    if cfg_obj and getattr(cfg_obj, "separate_machine_labor", True):
+        machine_hours, labor_hours = _split_hours_for_bucket(
+            label, total_hours, render_state, cfg_obj
+        )
+        pieces: list[str] = []
+        if machine_hours > 0:
+            pieces.append(f"mach ${float(cfg_obj.machine_rate_per_hr):.2f}/hr")
+        if labor_hours > 0:
+            pieces.append(f"labor ${float(cfg_obj.labor_rate_per_hr):.2f}/hr")
+        if pieces:
+            return " / ".join(pieces)
+        fallback_rate = float(getattr(cfg_obj, "labor_rate_per_hr", 0.0) or 0.0)
+        if fallback_rate <= 0:
+            fallback_rate = float(getattr(cfg_obj, "machine_rate_per_hr", 0.0) or 0.0)
+        return f"${fallback_rate:.2f}/hr"
+
+    summary_map: Mapping[str, Any] | None = None
+    if isinstance(render_state, PlannerBucketRenderState):
+        summary_map = render_state.canonical_summary
+    if isinstance(summary_map, _MappingABC):
+        canon_key = _canonical_bucket_key(label)
+        candidates = [
+            canon_key,
+            _normalize_bucket_key(label),
+            str(label or ""),
+        ] if canon_key else [
+            _normalize_bucket_key(label),
+            str(label or ""),
+        ]
+        for candidate in candidates:
+            if not candidate:
+                continue
+            metrics = summary_map.get(candidate)
+            if not isinstance(metrics, _MappingABC):
+                continue
+            total_cost = _safe_float(metrics.get("total"), default=0.0)
+            hours_val = _safe_float(metrics.get("hours"), default=0.0)
+            if hours_val <= 0.0:
+                hours_val = total_hours
+            if hours_val > 0.0 and total_cost > 0.0:
+                return f"${(total_cost / hours_val):.2f}/hr"
+
+    rate_lookup = 0.0
+    if isinstance(render_state, PlannerBucketRenderState) and render_state.rates:
+        rate_lookup = _lookup_rate(str(label), render_state.rates, fallback=0.0)
+        if rate_lookup <= 0.0:
+            canon = _canonical_bucket_key(label)
+            if canon:
+                rate_lookup = _lookup_rate(canon, render_state.rates, fallback=0.0)
+    if rate_lookup <= 0.0 and cfg_obj is not None:
+        rate_lookup = float(getattr(cfg_obj, "labor_rate_per_hr", 0.0) or 0.0)
+        if rate_lookup <= 0.0:
+            rate_lookup = float(getattr(cfg_obj, "machine_rate_per_hr", 0.0) or 0.0)
+    return f"${rate_lookup:.2f}/hr"
 
 
 def _sync_drilling_bucket_view(
@@ -8122,6 +8211,23 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             self.rows.append(record)
             if record_canon:
                 self._index[record_canon] = len(self.rows) - 1
+            rate_display = _display_rate_for_row(
+                record_canon or display_label,
+                cfg=cfg,
+                render_state=bucket_state,
+                hours=hours_val,
+            )
+            detail_parts: list[str] = []
+            if rate_display:
+                detail_parts.append(str(rate_display))
+            existing_detail = detail_lookup.get(display_label)
+            if existing_detail not in (None, ""):
+                for segment in re.split(r";\s*", str(existing_detail)):
+                    cleaned = segment.strip()
+                    if not cleaned or cleaned.startswith("-"):
+                        continue
+                    if cleaned not in detail_parts:
+                        detail_parts.append(cleaned)
             self._rows.append(
                 {
                     "label": display_label,
@@ -8129,9 +8235,15 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     "rate": rate_val,
                     "cost": cost_val,
                     "canon_key": record_canon,
+                    "rate_display": rate_display,
                 }
             )
-            _add_labor_cost_line(display_label, cost, process_key=canon_key)
+            _add_labor_cost_line(
+                display_label,
+                cost,
+                process_key=canon_key,
+                detail_bits=detail_parts if detail_parts else None,
+            )
             try:
                 labor_costs_display[display_label] = float(cost or 0.0)
             except Exception:
@@ -8172,6 +8284,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     cost_val = 0.0
                 record.total = cost_val
                 row_dict["cost"] = cost_val
+            hours_for_display = row_dict.get("hours", 0.0)
+            rate_display = _display_rate_for_row(
+                canon_key or record.name,
+                cfg=cfg,
+                render_state=bucket_state,
+                hours=float(hours_for_display or 0.0),
+            )
+            row_dict["rate_display"] = rate_display
 
     def _prepare_amortized_details() -> dict[str, tuple[float, float]]:
         nonlocal amortized_nre_total, display_labor_for_ladder
