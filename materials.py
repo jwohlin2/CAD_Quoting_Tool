@@ -399,80 +399,77 @@ def pick_stock_from_mcmaster(
                         setattr(_mc, "ALLOW_NEXT_THICKER", original_allow)
                     except Exception:
                         pass
+            need_thk = float(thk_val)
+            got_thk = need_thk
             if item:
-                fallback_used = False
-                need_thk = float(thk_val)
                 got_thk = float(item.thickness)
                 if abs(got_thk - need_thk) > thickness_tol:
-                    forced = None
-                    for dims in dim_candidates:
-                        try:
-                            forced_candidate = _mc.choose_item(
-                                catalog, material_label, dims[0], dims[1], need_thk
-                            )
-                        except Exception:
-                            forced_candidate = None
-                        if forced_candidate and abs(float(forced_candidate.thickness) - need_thk) <= thickness_tol:
-                            forced = forced_candidate
-                            dims_used = dims
-                            break
-                    if forced:
-                        item = forced
-                        got_thk = float(item.thickness)
-                    else:
-                        fb = None
-                        csv_path = os.getenv("CATALOG_CSV_PATH") or catalog_path or ""
-                        for dims in dim_candidates:
-                            fb = _fallback_catalog_lookup(
-                                csv_path,
-                                material_label,
-                                dims[0],
-                                dims[1],
-                                need_thk,
-                            )
-                            if fb:
-                                dims_used = dims
-                                break
-                        if fb:
-                            fallback_used = True
-                            got_thk = float(fb["thk_in"])
-                            part_str = str(fb.get("part") or "").strip()
-                            updates = {
-                                "vendor": "McMaster",
-                                "len_in": float(fb["len_in"]),
-                                "wid_in": float(fb["wid_in"]),
-                                "thk_in": got_thk,
-                                "source": "mcmaster-catalog-csv",
-                                "stock_source_tag": "mcmaster-catalog-csv",
-                                "thickness_diff_in": abs(got_thk - need_thk),
-                            }
-                            if part_str:
-                                updates["mcmaster_part"] = part_str
-                                updates["part_no"] = part_str
-                            result.update(updates)
-                            got_thk = float(result.get("thk_in") or got_thk)
-                        else:
-                            result["thickness_upsize_reason"] = (
-                                "no exact thickness available "
-                                f"(need {need_thk:.2f}, got {got_thk:.2f})"
-                            )
-                thickness_diff = abs(got_thk - need_thk)
-                if not fallback_used:
-                    length = float(max(item.length, item.width))
-                    width = float(min(item.length, item.width))
-                    result.update(
-                        {
-                            "vendor": "McMaster",
-                            "len_in": length,
-                            "wid_in": width,
-                            "thk_in": float(item.thickness),
-                            "mcmaster_part": item.part,
-                            "part_no": item.part,
-                            "source": "mcmaster-catalog",
-                            "stock_source_tag": "mcmaster-catalog",
-                            "thickness_diff_in": thickness_diff,
-                        }
+                    _log.warning(
+                        "[stock] rejecting thickness upsize %.3fin (need %.3fin)",
+                        got_thk,
+                        need_thk,
                     )
+                    item = None
+            if not item:
+                fb = None
+                csv_path = os.getenv("CATALOG_CSV_PATH") or catalog_path or ""
+                for dims in dim_candidates:
+                    fb = _fallback_catalog_lookup(
+                        csv_path,
+                        material_label,
+                        dims[0],
+                        dims[1],
+                        need_thk,
+                    )
+                    if fb:
+                        dims_used = dims
+                        break
+                if fb:
+                    got_thk = float(fb["thk_in"])
+                    part_str = str(fb.get("part") or "").strip()
+                    updates = {
+                        "vendor": "McMaster",
+                        "len_in": float(fb["len_in"]),
+                        "wid_in": float(fb["wid_in"]),
+                        "thk_in": got_thk,
+                        "source": "mcmaster-catalog-csv",
+                        "stock_source_tag": "mcmaster-catalog-csv",
+                        "thickness_diff_in": abs(got_thk - need_thk),
+                    }
+                    if part_str:
+                        updates["mcmaster_part"] = part_str
+                        updates["part_no"] = part_str
+                    result.update(updates)
+                    result["stock_piece_price_usd"] = None
+                    result["stock_piece_source"] = "catalog-sku"
+                    result["stock_piece_api_price"] = None
+                    result["stock_piece_api_source"] = None
+                    if dim_candidates and dims_used != dim_candidates[0]:
+                        result["required_blank_len_in"] = float(dims_used[0])
+                        result["required_blank_wid_in"] = float(dims_used[1])
+                    return result
+                if abs(got_thk - need_thk) > thickness_tol:
+                    result["thickness_upsize_reason"] = (
+                        "no exact thickness available "
+                        f"(need {need_thk:.2f}, got {got_thk:.2f})"
+                    )
+            if item:
+                thickness_diff = abs(got_thk - need_thk)
+                length = float(max(item.length, item.width))
+                width = float(min(item.length, item.width))
+                result.update(
+                    {
+                        "vendor": "McMaster",
+                        "len_in": length,
+                        "wid_in": width,
+                        "thk_in": float(item.thickness),
+                        "mcmaster_part": item.part,
+                        "part_no": item.part,
+                        "source": "mcmaster-catalog",
+                        "stock_source_tag": "mcmaster-catalog",
+                        "thickness_diff_in": thickness_diff,
+                    }
+                )
 
     if not result.get("mcmaster_part"):
         csv_path = catalog_path or ""
