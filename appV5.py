@@ -1620,6 +1620,7 @@ def _resolve_pricing_source_value(
     planner_process_minutes: Any = None,
     hour_summary_entries: Mapping[str, Any] | None = None,
     additional_sources: Sequence[Any] | None = None,
+    cfg: "QuoteConfiguration" | None = None,
 ) -> str | None:
     """Return a normalized pricing source, honoring explicit selections."""
 
@@ -1683,6 +1684,7 @@ def _build_quote_header_lines(
     process_meta: Mapping[str, Any] | None,
     process_meta_raw: Mapping[str, Any] | None,
     hour_summary_entries: Mapping[str, Any] | None,
+    cfg: QuoteConfiguration | None = None,
 ) -> tuple[list[str], str | None]:
     """Construct the canonical QUOTE SUMMARY header lines."""
 
@@ -1773,10 +1775,19 @@ def _build_quote_header_lines(
         process_meta_raw=process_meta_raw if isinstance(process_meta_raw, _MappingABC) else None,
         breakdown=breakdown if isinstance(breakdown, _MappingABC) else None,
         hour_summary_entries=hour_summary_entries,
+        cfg=cfg,
     )
 
-    if isinstance(result, dict) and result.get("removal_summary"):
-        pricing_source_value = "estimator"
+    # === HEADER: PRICING SOURCE OVERRIDE ===
+    if getattr(cfg, "prefer_removal_drilling_hours", False):
+        normalized_value = (
+            str(pricing_source_value).strip().lower()
+            if pricing_source_value is not None
+            else ""
+        )
+        if not normalized_value or normalized_value == "legacy":
+            pricing_source_value = "Estimator"
+            pricing_source_display = "Estimator"
 
     normalized_pricing_source: str | None = None
     if pricing_source_value is not None:
@@ -5201,6 +5212,26 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     geometry: Mapping[str, Any] | None = None,
 ) -> str:
     """Pretty printer for a full quote with auto-included non-zero lines."""
+
+    overrides = (
+        ("prefer_removal_drilling_hours", True),
+        ("separate_machine_labor", True),
+        ("machine_rate_per_hr", 45.0),
+        ("labor_rate_per_hr", 45.0),
+    )
+
+    cfg_obj: QuoteConfiguration | Any = cfg or QuoteConfiguration()
+    for name, value in overrides:
+        try:
+            setattr(cfg_obj, name, value)
+        except Exception:
+            cfg_obj = QuoteConfiguration()
+            for name2, value2 in overrides:
+                setattr(cfg_obj, name2, value2)
+            break
+
+    cfg = cfg_obj
+
     breakdown    = result.get("breakdown", {}) or {}
 
     state_payload: Any | None = None
@@ -6196,6 +6227,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         process_meta=process_meta,
         process_meta_raw=process_meta_raw,
         hour_summary_entries=hour_summary_entries,
+        cfg=cfg,
     )
     append_lines(header_lines)
     append_line("")

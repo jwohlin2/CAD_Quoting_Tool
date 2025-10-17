@@ -8,7 +8,7 @@ from cad_quoter.llm import explain_quote
 
 def _render_payload(result: Mapping) -> dict:
     rendered = appV5.render_quote(result, currency="$")
-    assert "Quote Summary" in rendered
+    assert "QUOTE SUMMARY" in rendered
     breakdown = result.get("breakdown", {}) if isinstance(result, dict) else {}
     payload = breakdown.get("render_payload") if isinstance(breakdown, dict) else None
     if payload is None and isinstance(result, dict):
