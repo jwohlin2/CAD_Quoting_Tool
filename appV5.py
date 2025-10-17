@@ -4953,6 +4953,13 @@ def _final_bucket_key(raw_key: Any) -> str:
         "finishing_deburr": "finishing_deburr",
     }.get(text, text)
 
+class BucketOpEntry(TypedDict):
+    """Canonical representation for a bucket operation entry."""
+
+    name: str
+    minutes: float
+
+
 def _prepare_bucket_view(raw_view: Mapping[str, Any] | None) -> dict[str, Any]:
     """Return the canonical bucket view used for display and rollups."""
 
@@ -4963,7 +4970,7 @@ def _prepare_bucket_view(raw_view: Mapping[str, Any] | None) -> dict[str, Any]:
                 continue
             prepared[key] = copy.deepcopy(value)
 
-    bucket_ops: dict[str, list[dict[str, float]]] = {}
+    bucket_ops: dict[str, list[BucketOpEntry]] = {}
     if isinstance(raw_view, _MappingABC):
         operations = raw_view.get("operations")
         if isinstance(operations, Sequence):
@@ -4984,8 +4991,11 @@ def _prepare_bucket_view(raw_view: Mapping[str, Any] | None) -> dict[str, Any]:
                 op_name = (entry.get("name") or "").strip()
                 if not op_name:
                     continue
-                bucket_list = bucket_ops.setdefault(canon_bucket, [])
-                bucket_list.append({"name": op_name, "minutes": float(minutes_val)})
+                if canon_bucket not in bucket_ops:
+                    bucket_ops[canon_bucket] = []
+                bucket_ops[canon_bucket].append(
+                    {"name": op_name, "minutes": float(minutes_val)}
+                )
     if bucket_ops:
         prepared.setdefault("bucket_ops", bucket_ops)
 
