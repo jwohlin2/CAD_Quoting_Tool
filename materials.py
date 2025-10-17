@@ -347,8 +347,14 @@ def pick_stock_from_mcmaster(
         return None
 
     scrap = max(0.0, float(scrap_fraction))
-    L_need = max(L_val, W_val) * (1.0 + scrap)
-    W_need = min(L_val, W_val) * (1.0 + scrap)
+    raw_L = max(L_val, W_val)
+    raw_W = min(L_val, W_val)
+    dims_with_scrap = (raw_L * (1.0 + scrap), raw_W * (1.0 + scrap))
+    dims_without_scrap = (raw_L, raw_W)
+    dim_candidates: list[tuple[float, float]] = [dims_with_scrap]
+    if scrap > 0.0:
+        dim_candidates.append(dims_without_scrap)
+    L_need, W_need = dims_with_scrap
     material_label = str(material_display or "")
     catalog_path = _catalog_path_from_env()
 
@@ -359,11 +365,12 @@ def pick_stock_from_mcmaster(
     }
     enforce_exact = getattr(cfg, "enforce_exact_thickness", True)
     allow_thickness_upsize = bool(getattr(cfg, "allow_thickness_upsize", False))
-    thickness_target = 2.0
-    thickness_tol = 0.02
+    try:
+        thickness_tol = float(getattr(cfg, "thickness_tol_in", 0.02) or 0.02)
+    except Exception:
+        thickness_tol = 0.02
 
-    if enforce_exact and abs(thk_val - thickness_target) > thickness_tol:
-        return None
+    dims_used = dim_candidates[0]
 
     if _mc is not None and catalog_path:
         catalog = _load_mcmaster_catalog(catalog_path)
@@ -372,7 +379,18 @@ def pick_stock_from_mcmaster(
                 original_allow = getattr(_mc, "ALLOW_NEXT_THICKER", None)
                 if original_allow is not None and not allow_thickness_upsize:
                     setattr(_mc, "ALLOW_NEXT_THICKER", False)
-                item = _mc.choose_item(catalog, material_label, L_need, W_need, thk_val)
+                item = None
+                for dims in dim_candidates:
+                    try:
+                        candidate = _mc.choose_item(
+                            catalog, material_label, dims[0], dims[1], thk_val
+                        )
+                    except Exception:
+                        candidate = None
+                    if candidate:
+                        item = candidate
+                        dims_used = dims
+                        break
             except Exception:
                 item = None
             finally:
@@ -387,23 +405,34 @@ def pick_stock_from_mcmaster(
                 got_thk = float(item.thickness)
                 if abs(got_thk - need_thk) > thickness_tol:
                     forced = None
-                    try:
-                        forced = _mc.choose_item(
-                            catalog, material_label, L_need, W_need, need_thk
-                        )
-                    except Exception:
-                        forced = None
-                    if forced and abs(float(forced.thickness) - need_thk) <= thickness_tol:
+                    for dims in dim_candidates:
+                        try:
+                            forced_candidate = _mc.choose_item(
+                                catalog, material_label, dims[0], dims[1], need_thk
+                            )
+                        except Exception:
+                            forced_candidate = None
+                        if forced_candidate and abs(float(forced_candidate.thickness) - need_thk) <= thickness_tol:
+                            forced = forced_candidate
+                            dims_used = dims
+                            break
+                    if forced:
                         item = forced
                         got_thk = float(item.thickness)
                     else:
-                        fb = _fallback_catalog_lookup(
-                            os.getenv("CATALOG_CSV_PATH") or catalog_path or "",
-                            material_label,
-                            L_need,
-                            W_need,
-                            need_thk,
-                        )
+                        fb = None
+                        csv_path = os.getenv("CATALOG_CSV_PATH") or catalog_path or ""
+                        for dims in dim_candidates:
+                            fb = _fallback_catalog_lookup(
+                                csv_path,
+                                material_label,
+                                dims[0],
+                                dims[1],
+                                need_thk,
+                            )
+                            if fb:
+                                dims_used = dims
+                                break
                         if fb:
                             fallback_used = True
                             got_thk = float(fb["thk_in"])
@@ -448,9 +477,14 @@ def pick_stock_from_mcmaster(
     if not result.get("mcmaster_part"):
         csv_path = catalog_path or ""
         if csv_path and os.path.exists(csv_path):
-            fallback = _fallback_catalog_lookup(
-                csv_path, material_label, L_need, W_need, thk_val
-            )
+            fallback = None
+            for dims in dim_candidates:
+                fallback = _fallback_catalog_lookup(
+                    csv_path, material_label, dims[0], dims[1], thk_val
+                )
+                if fallback:
+                    dims_used = dims
+                    break
             if fallback:
                 part_number = str(fallback.get("part") or "").strip()
                 updates = {
@@ -517,6 +551,10 @@ def pick_stock_from_mcmaster(
                     result["price_usd"] = price_val
                     result["stock_piece_api_price"] = price_val
                     result["stock_piece_api_source"] = "mcmaster_api"
+
+    if dim_candidates and dims_used != dim_candidates[0]:
+        result["required_blank_len_in"] = float(dims_used[0])
+        result["required_blank_wid_in"] = float(dims_used[1])
 
     if result.get("vendor"):
         return result
@@ -769,9 +807,21 @@ def _compute_material_block(
                 float(L_in),
                 float(W_in),
                 float(t_in),
+                scrap_fraction=_STOCK_SCRAP_FRACTION,
             )
         except Exception:
             stock_info = None
+        if (not isinstance(stock_info, dict) or not stock_info) and _STOCK_SCRAP_FRACTION > 0:
+            try:
+                stock_info = _pick_plate_from_mcmaster(
+                    material_label,
+                    float(L_in),
+                    float(W_in),
+                    float(t_in),
+                    scrap_fraction=0.0,
+                )
+            except Exception:
+                stock_info = None
     if not isinstance(stock_info, dict) or not stock_info:
         stock_info = _pick_from_stdgrid(float(L_in), float(W_in), float(t_in))
 
