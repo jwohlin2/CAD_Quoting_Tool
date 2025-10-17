@@ -4351,6 +4351,42 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     """Pretty printer for a full quote with auto-included non-zero lines."""
     breakdown    = result.get("breakdown", {}) or {}
 
+    state_payload: Any | None = None
+    if isinstance(result, _MappingABC):
+        state_payload = result.get("quote_state")
+
+    quote_state_obj: QuoteState | None = None
+    if isinstance(state_payload, QuoteState):
+        quote_state_obj = state_payload
+    elif isinstance(state_payload, _MappingABC):
+        try:
+            quote_state_obj = QuoteState.from_dict(typing.cast(Mapping[str, Any], state_payload))
+        except Exception:
+            quote_state_obj = None
+
+    if quote_state_obj is not None:
+        reprice_with_effective(quote_state_obj)
+        effective_snapshot = dict(getattr(quote_state_obj, "effective", {}) or {})
+        effective_sources_snapshot = dict(
+            getattr(quote_state_obj, "effective_sources", {}) or {}
+        )
+
+        decision_state_obj = (
+            result.get("decision_state") if isinstance(result, _MappingABC) else None
+        )
+        if isinstance(decision_state_obj, _MutableMappingABC):
+            decision_state_obj["effective"] = effective_snapshot
+            decision_state_obj["effective_sources"] = effective_sources_snapshot
+        elif isinstance(decision_state_obj, _MappingABC):
+            decision_state_copy: dict[str, Any] = dict(decision_state_obj)
+            decision_state_copy["effective"] = effective_snapshot
+            decision_state_copy["effective_sources"] = effective_sources_snapshot
+            if isinstance(result, _MutableMappingABC):
+                result["decision_state"] = decision_state_copy
+
+        if isinstance(result, _MutableMappingABC):
+            result["quote_state"] = quote_state_obj.to_dict()
+
     # Force drill debug output to render by enabling the LLM debug flag for this run.
     app_meta_container = result.get("app_meta")
     if isinstance(app_meta_container, dict):
@@ -15197,18 +15233,23 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
 
     app_meta["llm_debug_enabled"] = APP_ENV.llm_debug_enabled
 
+    state_for_render = reprice_with_effective(state)
+    effective_snapshot = dict(getattr(state_for_render, "effective", {}) or {})
+    effective_sources_snapshot = dict(getattr(state_for_render, "effective_sources", {}) or {})
+
     result = {
         "decision_state": {
             "baseline": baseline,
-            "suggestions": state.suggestions,
-            "user_overrides": state.user_overrides,
-            "effective": state.effective,
-            "effective_sources": state.effective_sources,
+            "suggestions": state_for_render.suggestions,
+            "user_overrides": state_for_render.user_overrides,
+            "effective": effective_snapshot,
+            "effective_sources": effective_sources_snapshot,
         },
         "breakdown": breakdown,
         "geo": geo_ref,
         "geom": geo_ref,
         "app_meta": dict(app_meta),
+        "quote_state": state_for_render.to_dict(),
     }
 
     return result
