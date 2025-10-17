@@ -850,6 +850,8 @@ def _compute_material_block(
                 float(W_in),
                 float(t_in),
                 scrap_fraction=_STOCK_SCRAP_FRACTION,
+                allow_thickness_upsize=allow_thickness_upsize,
+                thickness_tolerance=thickness_tol,
             )
         except Exception:
             stock_info = None
@@ -861,6 +863,8 @@ def _compute_material_block(
                     float(W_in),
                     float(t_in),
                     scrap_fraction=0.0,
+                    allow_thickness_upsize=allow_thickness_upsize,
+                    thickness_tolerance=thickness_tol,
                 )
             except Exception:
                 stock_info = None
