@@ -129,18 +129,15 @@ def _cell_lines(text, width):
 
 
 def _pad(s, width, align="left"):
-    s = "" if s is None else str(s)
-    if len(s) > width:
-        # already wrapped before; this branch only fires if caller passed a long single line by mistake
-        s = s[:width]
-    pad = width - len(s)
+    text = "" if s is None else str(s)
+    pad = width - len(text)
     if align == "right":
-        return " " * pad + s
+        return " " * pad + text
     elif align == "center":
         left = pad // 2
         right = pad - left
-        return " " * left + s + " " * right
-    return s + " " * pad  # left
+        return " " * left + text + " " * right
+    return text + " " * pad  # left
 
 
 def _hline(widths):
@@ -10428,6 +10425,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             )
     if processes_entries:
         payload["processes"] = processes_entries
+    payload["labor_total_amount"] = round(labor_total_amount, 2)
     if cycle_metrics_entries:
         payload["cycle_time_metrics"] = cycle_metrics_entries
 

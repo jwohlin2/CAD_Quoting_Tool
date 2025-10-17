@@ -13,11 +13,12 @@ import unicodedata
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from cad_quoter.utils.render_utils import format_weight_lb_oz
+
 from text_tables import (
     ascii_table,
     money,
     pct,
-    ellipsize,
     draw_boxed_table,
     draw_kv_table,
     ColumnSpec,
@@ -27,7 +28,8 @@ from text_tables import (
 # Used to surface a gentle hint when the pricing engine
 # produced a zero materials figure that likely indicates
 # missing inputs rather than truly free material.
-MATERIALS_WARNING_LABEL = "Note: Materials omitted (engine reported zero)"
+MATERIALS_WARNING_LABEL = "⚠ MATERIALS MISSING"
+MATERIALS_WARNING_DETAIL = "Direct material cost reported as $0.00 (engine reported zero)"
 
 
 def _currency_from(data: Mapping[str, Any]) -> str:
@@ -218,7 +220,9 @@ def _render_cost_breakdown(data: Mapping[str, Any]) -> str | None:
         if subtotal_before_margin:
             percent = amount / subtotal_before_margin
         rows.append([label, money(amount, currency), pct(percent)])
-    warning_present = any(MATERIALS_WARNING_LABEL in row[0] for row in rows)
+    warning_present = any(
+        str(row[0]).startswith(MATERIALS_WARNING_LABEL) for row in rows
+    )
     materials_direct = None
     if isinstance(data, Mapping):
         materials_direct = _coerce_float(data.get("materials_direct"))
@@ -226,7 +230,7 @@ def _render_cost_breakdown(data: Mapping[str, Any]) -> str | None:
     if materials_missing and not warning_present:
         rows.append(
             [
-                ellipsize(MATERIALS_WARNING_LABEL, 60),
+                MATERIALS_WARNING_LABEL,
                 money(0.0, currency),
                 pct(0.0),
             ]
@@ -305,7 +309,7 @@ def _render_quick_what_ifs(data: Mapping[str, Any]) -> str | None:
                 formatted_value = (
                     money(numeric, currency) if numeric is not None else str(price_value)
                 )
-            qty_rows.append([ellipsize(str(qty_label), 40), formatted_value])
+            qty_rows.append([str(qty_label), formatted_value])
     if qty_rows:
         specs = (
             ColumnSpec(42, "L"),
@@ -356,7 +360,9 @@ def _sanitize_block(text: str) -> str:
 
     # Unicode normalization, then strip remaining non-ASCII (keep newlines)
     s = unicodedata.normalize("NFKC", s)
-    s = "".join(ch for ch in s if ch == "\n" or 32 <= ord(ch) <= 126)
+    s = "".join(
+        ch for ch in s if ch == "\n" or ch in {"⚠", "×"} or 32 <= ord(ch) <= 126
+    )
 
     return s
 
@@ -421,13 +427,28 @@ def _render_materials(data: Mapping[str, Any]) -> str | None:
     cost_components = data.get("material_cost_components")
     weight_summary = data.get("material_weight")
     stock_meta = data.get("material_stock")
-    if not any((cost_components, weight_summary, stock_meta)):
-        return None
 
     rows: list[list[str]] = []
     entries = data.get("materials")
     if not isinstance(entries, Sequence):
         entries = []
+
+    materials_direct = _coerce_float(data.get("materials_direct")) if isinstance(data, Mapping) else None
+    missing_flag = bool(data.get("materials_missing_warning")) if isinstance(data, Mapping) else False
+    materials_missing = missing_flag or (
+        materials_direct is not None and abs(materials_direct) <= 0.0005
+    )
+
+    if not any((cost_components, weight_summary, stock_meta, entries, materials_missing)):
+        return None
+
+    price_line_texts: list[str] = []
+    raw_price_lines = data.get("material_price_lines")
+    if isinstance(raw_price_lines, Sequence):
+        for raw_line in raw_price_lines:
+            text_line = str(raw_line or "").strip()
+            if text_line:
+                price_line_texts.append(text_line)
 
     def _scrap_detail(entry: Mapping[str, Any], components: Mapping[str, Any]) -> str:
         parts: list[str] = []
@@ -461,13 +482,78 @@ def _render_materials(data: Mapping[str, Any]) -> str | None:
             money(amount, currency),
         ])
 
-    return ascii_table(
+    warning_present = any(
+        isinstance(row, Sequence)
+        and row
+        and str(row[0]).startswith(MATERIALS_WARNING_LABEL)
+        for row in rows
+    )
+    if materials_missing and not warning_present:
+        rows.append(
+            [
+                MATERIALS_WARNING_LABEL,
+                MATERIALS_WARNING_DETAIL,
+                money(0.0, currency),
+            ]
+        )
+
+    weight_rows: list[list[str]] = []
+    if isinstance(weight_summary, Mapping):
+        hint_raw = weight_summary.get("scrap_hint")
+        hint = str(hint_raw).strip() if hint_raw is not None else ""
+        if hint:
+            hint = hint.replace("_", " ")
+            hint = hint.replace("+", " + ")
+            hint = " ".join(hint.split())
+
+        def _append_weight_line(text: str) -> None:
+            weight_rows.append([text, "", "—"])
+
+        start_mass = _coerce_float(
+            weight_summary.get("starting_mass_g")
+            or weight_summary.get("effective_mass_g")
+        )
+        if start_mass is not None and start_mass > 0:
+            _append_weight_line(
+                f"Weight Reference: Start {format_weight_lb_oz(start_mass)}"
+            )
+
+        scrap_mass = _coerce_float(weight_summary.get("scrap_mass_g"))
+        if scrap_mass is not None and scrap_mass > 0:
+            _append_weight_line(f"Scrap {format_weight_lb_oz(scrap_mass)}")
+
+        net_mass = _coerce_float(weight_summary.get("net_mass_g"))
+        if net_mass is not None and net_mass > 0:
+            _append_weight_line(f"Net {format_weight_lb_oz(net_mass)}")
+
+        computed_pct = _coerce_float(weight_summary.get("scrap_pct_computed"))
+        if computed_pct is not None and computed_pct > 0:
+            text = f"Computed Scrap: {pct(computed_pct)}"
+            if hint:
+                text = f"{text} ({hint})"
+            _append_weight_line(text)
+
+        geometry_pct = _coerce_float(weight_summary.get("scrap_pct_geometry"))
+        if geometry_pct is not None and geometry_pct > 0:
+            text = f"Geometry Hint: {pct(geometry_pct)}"
+            if hint:
+                text = f"{text} ({hint})"
+            _append_weight_line(text)
+
+    rows.extend(weight_rows)
+
+    table = ascii_table(
         headers=["Material", "Detail", "Amount (per part)"],
         rows=rows,
-        col_widths=[36, 45, 16],
+        col_widths=[40, 45, 16],
         col_aligns=["left", "left", "right"],
         header_aligns=["left", "left", "right"],
     )
+
+    if price_line_texts:
+        table = "\n".join([table] + price_line_texts)
+
+    return table
 
 
 def _render_processes(data: Mapping[str, Any]) -> str | None:
@@ -679,7 +765,7 @@ def _render_drill_groups(data: Mapping[str, Any]) -> str | None:
     for entry in groups:
         if not isinstance(entry, Mapping):
             continue
-        label = ellipsize(str(entry.get("op") or entry.get("op_name") or ""), 36)
+        label = str(entry.get("op") or entry.get("op_name") or "")
         qty = _coerce_float(entry.get("qty"))
         per_hole = _coerce_float(entry.get("t_per_hole_min"))
         total_minutes = _coerce_float(entry.get("minutes_total"))
@@ -768,7 +854,9 @@ def render_quote(data: Mapping[str, Any]) -> str:
     if trace:
         sections.append(_render_section("Traceability", trace))
 
-    return _sanitize_block("\n\n".join(sections))
+    sanitized = _sanitize_block("\n\n".join(sections))
+    sanitized = sanitized.replace("TIME PER HOLE - DRILL GROUPS", "TIME PER HOLE – DRILL GROUPS")
+    return sanitized
 
 
 __all__ = ["render_quote"]

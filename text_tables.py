@@ -81,15 +81,15 @@ def _coerce_alignment(value: str) -> str:
 
 
 def _pad(text: str, width: int, align: str) -> str:
-    truncated = ellipsize(text, width)
-    pad = max(width - len(truncated), 0)
+    raw = text if isinstance(text, str) else str(text)
+    pad = max(width - len(raw), 0)
     if align == "R":
-        return " " * pad + truncated
+        return " " * pad + raw
     if align == "C":
         left = pad // 2
         right = pad - left
-        return " " * left + truncated + " " * right
-    return truncated + " " * pad
+        return " " * left + raw + " " * right
+    return raw + " " * pad
 
 
 def draw_boxed_table(
