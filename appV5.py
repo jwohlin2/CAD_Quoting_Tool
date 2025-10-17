@@ -19257,18 +19257,23 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     if not material:
         material = geo.get("material_note")
 
+    table_hole_count = _coerce_int_or_zero(geo.get("hole_count"))
+    geom_hole_count = len(hole_diams_mm)
+
     result: dict[str, Any] = {
         "kind": "2D",
         "source": Path(path).suffix.lower().lstrip("."),
         "profile_length_mm": round(per * u2mm, 2),
         "hole_diams_mm": hole_diams_mm,
-        "hole_count": len(hole_diams_mm),
+        "hole_count": table_hole_count if table_hole_count > 0 else geom_hole_count,
         "thickness_mm": thickness_mm,
         "material": material,
         "geo": geo,
     }
-    if geo.get("hole_count"):
-        result["hole_count_table"] = geo.get("hole_count")
+    if table_hole_count > 0:
+        result["hole_count_table"] = table_hole_count
+    if geom_hole_count:
+        result.setdefault("hole_count_geom", geom_hole_count)
     if geo.get("tap_qty") or geo.get("cbore_qty") or geo.get("csk_qty"):
         result["feature_counts"] = {
             "tap_qty": geo.get("tap_qty", 0),
@@ -19314,9 +19319,12 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
                 result["hole_table_families_in"] = dict(table_families) if isinstance(table_families, dict) else {}
             hole_count_geom_val = _coerce_float_or_none(geo_read_more.get("hole_count_geom"))
             hole_count_geom = int(hole_count_geom_val) if hole_count_geom_val is not None else None
-            current_hole_count = _coerce_int_or_zero(result.get("hole_count"))
-            if hole_count_geom is not None and hole_count_geom > current_hole_count:
-                result["hole_count"] = hole_count_geom
+            if hole_count_geom is not None:
+                result["hole_count_geom"] = hole_count_geom
+                current_hole_count = _coerce_int_or_zero(result.get("hole_count"))
+                table_count_existing = _coerce_int_or_zero(result.get("hole_count_table"))
+                if table_count_existing <= 0 and hole_count_geom > current_hole_count:
+                    result["hole_count"] = hole_count_geom
             if geo_read_more.get("holes_from_back"):
                 result["holes_from_back"] = True
             if geo_read_more.get("material_note"):
