@@ -3966,9 +3966,10 @@ def _charged_hours_by_bucket(
     render_state: PlannerBucketRenderState | None = None,
     removal_drilling_hours: float | None = None,
     prefer_removal_drilling_hours: bool = True,
+    cfg: "QuoteConfiguration" | None = None,
 ):
     """Return the hours that correspond to what we actually charged."""
-    out: dict[str, float] = {}
+    charged: dict[str, float] = {}
     for key, amount in (process_costs or {}).items():
         norm = _normalize_bucket_key(key)
         if norm.startswith("planner_"):
@@ -3990,7 +3991,7 @@ def _charged_hours_by_bucket(
             hr = (float(amount) / rate) if rate > 0 else None
         if hr is not None:
             label = _process_label(key)
-            out[label] = out.get(label, 0.0) + float(hr)
+            charged[label] = charged.get(label, 0.0) + float(hr)
     removal_hr = None
     if render_state is not None:
         try:
@@ -4004,23 +4005,27 @@ def _charged_hours_by_bucket(
         removal_hr = _coerce_float_or_none(removal_drilling_hours)
     if removal_hr is not None and removal_hr < 0:
         removal_hr = None
-    if removal_hr is not None and prefer_removal_drilling_hours:
+    prefer_override = prefer_removal_drilling_hours
+    if cfg is not None:
+        prefer_override = bool(getattr(cfg, "prefer_removal_drilling_hours", prefer_override))
+
+    if removal_hr is not None and prefer_override:
         desired = max(0.0, float(removal_hr))
         drill_labels = [
             label
-            for label in out
+            for label in charged
             if _canonical_bucket_key(label) in {"drilling", "drill"}
         ]
         if drill_labels:
             for label in drill_labels:
-                current = float(out.get(label, 0.0) or 0.0)
+                current = float(charged.get(label, 0.0) or 0.0)
                 if not math.isclose(current, desired, rel_tol=1e-9, abs_tol=1e-6):
                     logger.info(
                         "[hours-sync] Overriding Drilling bucket hours from %.2f -> %.2f (source=removal_card)",
                         current,
                         desired,
                     )
-                out[label] = desired
+                charged[label] = desired
         else:
             label = _process_label("drilling")
             logger.info(
@@ -8237,6 +8242,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         render_state=bucket_state,
         removal_drilling_hours=removal_drilling_hours_precise,
         prefer_removal_drilling_hours=prefer_removal_drilling_hours,
+        cfg=cfg,
     )
     removal_hours_debug = None
     if isinstance(getattr(bucket_state, "extra", None), _MappingABC):
@@ -8545,6 +8551,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if not isinstance(extra_map, _MappingABC):
             extra_map = {}
         removal_card_hr = _coerce_float_or_none(extra_map.get("removal_drilling_hours"))
+        if removal_card_hr is None:
+            drill_minutes_extra = _coerce_float_or_none(extra_map.get("drill_total_minutes"))
+            if drill_minutes_extra is not None:
+                removal_card_hr = float(drill_minutes_extra) / 60.0
 
         charged_snapshot: Mapping[str, Any]
         if isinstance(charged_hours, _MappingABC):
@@ -8579,6 +8589,29 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 if coerced is None:
                     continue
                 hour_summary_map[str(label)] = float(coerced)
+
+        prefer_drill_summary = prefer_removal_drilling_hours
+        if cfg is not None:
+            prefer_drill_summary = bool(
+                getattr(cfg, "prefer_removal_drilling_hours", prefer_drill_summary)
+            )
+        if prefer_drill_summary:
+            drill_minutes_extra = _coerce_float_or_none(extra_map.get("drill_total_minutes"))
+            if drill_minutes_extra is not None:
+                override_hours_val = round(float(drill_minutes_extra) / 60.0, 2)
+                hour_summary_map["Drilling"] = override_hours_val
+                hour_summary_map["drilling"] = override_hours_val
+                if isinstance(hour_summary_entries, dict):
+                    for label_key in ("Drilling", "drilling"):
+                        existing_entry = hour_summary_entries.get(label_key)
+                        include_flag = True
+                        if isinstance(existing_entry, tuple) and len(existing_entry) == 2:
+                            include_flag = bool(existing_entry[1])
+                        hour_summary_entries[label_key] = (
+                            override_hours_val,
+                            include_flag,
+                        )
+
         summary_hr = None
         for key in ("Drilling", "drilling"):
             if key in hour_summary_map:
@@ -9281,12 +9314,21 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         else:
             total_drill_minutes_with_toolchange = subtotal_min + tool_add
 
+        render_state_obj: PlannerBucketRenderState | None = None
         if isinstance(bucket_state, PlannerBucketRenderState):
-            extra = getattr(bucket_state, "extra", None)
-            if isinstance(extra, dict):
-                extra["drill_machine_minutes"] = float(subtotal_min)
-                extra["drill_labor_minutes"] = float(tool_add)
-                extra["drill_total_minutes"] = float(total_drill_minutes_with_toolchange)
+            render_state_obj = bucket_state
+        else:
+            candidate_render_state = locals().get("render_state")
+            if isinstance(candidate_render_state, PlannerBucketRenderState):
+                render_state_obj = candidate_render_state
+        if render_state_obj is not None:
+            extra = getattr(render_state_obj, "extra", None)
+            if not isinstance(extra, dict):
+                extra = {}
+                render_state_obj.extra = extra
+            extra["drill_machine_minutes"] = float(subtotal_min)
+            extra["drill_labor_minutes"] = float(tool_add)
+            extra["drill_total_minutes"] = float(total_drill_minutes_with_toolchange)
 
         # === DRILLING BILLING TRUTH ===
         drill_meta = breakdown.setdefault("drilling_meta", {})
