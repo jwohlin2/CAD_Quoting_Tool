@@ -7039,7 +7039,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     explicit_programmer_rate = _safe_float(prog.get("prog_rate"))
     if explicit_programmer_rate > 0:
         has_programming_rate_detail = True
-    if programmer_rate_backfill > 0 and not has_programming_rate_detail:
+    if cfg.separate_machine_labor:
+        programmer_rate = fallback_programmer_rate
+    elif programmer_rate_backfill > 0 and not has_programming_rate_detail:
         programmer_rate = programmer_rate_backfill
     else:
         programmer_rate = fallback_programmer_rate
