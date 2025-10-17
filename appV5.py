@@ -7557,6 +7557,50 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         removal_drilling_hours_precise = float(removal_card_extra["removal_drilling_hours"])
         removal_drilling_minutes = removal_drilling_hours_precise * 60.0
 
+    machine_minutes_snapshot = max(0.0, float(drill_machine_minutes_estimate or 0.0))
+    labor_minutes_snapshot = max(0.0, float(drill_tool_minutes_estimate or 0.0))
+    total_minutes_snapshot = float(drill_total_minutes_estimate or 0.0)
+    if total_minutes_snapshot <= 0.0:
+        combined_minutes = machine_minutes_snapshot + labor_minutes_snapshot
+        if combined_minutes > 0.0:
+            total_minutes_snapshot = combined_minutes
+
+    drill_minutes_extra_targets: list[_MutableMappingABC[str, Any]] = []
+
+    def _stash_drill_minutes(owner: Any) -> _MutableMappingABC[str, Any] | None:
+        if owner is None:
+            return None
+        try:
+            extra_candidate = getattr(owner, "extra", None)
+        except Exception:
+            extra_candidate = None
+        extra_map: _MutableMappingABC[str, Any] | None
+        if isinstance(extra_candidate, _MutableMappingABC):
+            extra_map = extra_candidate
+        elif isinstance(owner, PlannerBucketRenderState):
+            extra_map = owner.extra
+        elif isinstance(owner, dict):
+            extra_map = owner.setdefault("extra", {})  # type: ignore[assignment]
+        elif isinstance(owner, _MutableMappingABC):
+            extra_map = owner.setdefault("extra", {})  # type: ignore[assignment]
+        else:
+            extra_map = None
+        if isinstance(extra_map, _MutableMappingABC):
+            extra_map["drill_machine_minutes"] = float(machine_minutes_snapshot)
+            extra_map["drill_labor_minutes"] = float(labor_minutes_snapshot)
+            extra_map["drill_total_minutes"] = float(total_minutes_snapshot)
+            return extra_map
+        return None
+
+    initial_stash_candidates: list[Any] = [locals().get("render_state")]
+    if isinstance(breakdown, _MappingABC):
+        for key in ("planner_render_state", "bucket_render_state", "render_state"):
+            initial_stash_candidates.append(breakdown.get(key))
+    for candidate_owner in initial_stash_candidates:
+        extra_map_candidate = _stash_drill_minutes(candidate_owner)
+        if extra_map_candidate is not None and extra_map_candidate not in drill_minutes_extra_targets:
+            drill_minutes_extra_targets.append(extra_map_candidate)
+
     append_line("Process & Labor Costs")
     append_line(divider)
 
@@ -7632,7 +7676,15 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     bucket_view_struct: Mapping[str, Any] | None = None
     if isinstance(breakdown, _MappingABC):
         candidate_view = breakdown.get("bucket_view")
-        if isinstance(candidate_view, _MappingABC):
+        if isinstance(candidate_view, _MutableMappingABC):
+            extra_map_candidate = _stash_drill_minutes(candidate_view)
+            if (
+                extra_map_candidate is not None
+                and extra_map_candidate not in drill_minutes_extra_targets
+            ):
+                drill_minutes_extra_targets.append(extra_map_candidate)
+            bucket_view_struct = typing.cast(Mapping[str, Any], candidate_view)
+        elif isinstance(candidate_view, _MappingABC):
             bucket_view_struct = typing.cast(Mapping[str, Any], candidate_view)
 
     if (
@@ -7674,6 +7726,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         drill_labor_minutes=drill_tool_minutes_estimate,
         drill_total_minutes=drill_total_minutes_estimate,
     )
+
+    bucket_state_extra_map = _stash_drill_minutes(bucket_state)
+    if (
+        bucket_state_extra_map is not None
+        and bucket_state_extra_map not in drill_minutes_extra_targets
+    ):
+        drill_minutes_extra_targets.append(bucket_state_extra_map)
 
     if removal_card_extra:
         extra_map = getattr(bucket_state, "extra", None)
