@@ -8876,6 +8876,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     material_display_amount = round(float(material_direct_contribution), 2)
     material_total_for_why = float(material_display_amount)
     material_net_cost = float(material_display_amount)
+    try:
+        materials_direct_amount = float(material_display_amount)
+    except Exception:
+        materials_direct_amount = None
+    materials_direct_missing = (
+        materials_direct_amount is not None and abs(materials_direct_amount) <= 0.005
+    )
     direct_costs_map: dict[Any, Any]
     if isinstance(pricing, dict):
         direct_costs_map = pricing.setdefault("direct_costs", {})
@@ -10085,6 +10092,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if expedite_cost:
         cost_breakdown_entries.append(("Expedite Uplift", float(expedite_cost)))
 
+    if materials_direct_missing and not any(
+        isinstance(item, (tuple, list))
+        and len(item) >= 1
+        and str(item[0]).strip().startswith("⚠ MATERIALS MISSING")
+        for item in cost_breakdown_entries
+    ):
+        cost_breakdown_entries.append(("⚠ MATERIALS MISSING", 0.0))
+
     if cost_breakdown_entries:
         payload["cost_breakdown"] = cost_breakdown_entries
 
@@ -10145,14 +10160,34 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if amount is None or not math.isfinite(amount) or abs(amount) <= 1e-9:
                 continue
             materials_entries.append({"label": str(key), "detail": "Pass-through", "amount": amount})
+    if (
+        materials_direct_missing
+        and not any(
+            isinstance(item, dict)
+            and str(item.get("label", "")).strip().startswith("⚠ MATERIALS MISSING")
+            for item in materials_entries
+        )
+    ):
+        warning_entry: dict[str, Any] = {
+            "label": "⚠ MATERIALS MISSING",
+            "detail": "Direct material cost reported as $0.00",
+        }
+        if materials_direct_amount is not None:
+            warning_entry["amount"] = 0.0
+        materials_entries.append(warning_entry)
     if materials_entries:
         payload["materials"] = materials_entries
+    if materials_direct_amount is not None:
+        payload["materials_direct"] = round(materials_direct_amount, 2)
+    if materials_direct_missing:
+        payload["materials_missing_warning"] = True
 
     processes_entries: list[dict[str, Any]] = []
     ordered_keys: list[str] = []
     if isinstance(canonical_bucket_order, list):
         ordered_keys = [key for key in canonical_bucket_order if key in process_cost_row_details]
     remaining_keys = [key for key in process_cost_row_details if key not in ordered_keys]
+    labor_total_amount = 0.0
     for canon_key in ordered_keys + remaining_keys:
         hours_val, rate_val, amount_val = process_cost_row_details.get(canon_key, (0.0, 0.0, 0.0))
         amount = _coerce_float_optional(amount_val)
@@ -10173,7 +10208,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if rate is not None and rate > 0:
             entry["rate"] = round(rate, 2)
         if amount is not None:
-            entry["amount"] = round(amount, 2)
+            amount_clean = float(amount)
+            entry["amount"] = round(amount_clean, 2)
+            labor_total_amount += amount_clean
         if isinstance(minutes_info, _MappingABC):
             minutes_val = _coerce_float_optional(minutes_info.get("minutes"))
             if minutes_val is not None and minutes_val > 0 and "hours" not in entry:
@@ -10190,6 +10227,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         processes_entries.append(entry)
     if processes_entries:
         payload["processes"] = processes_entries
+        payload["labor_total_amount"] = round(labor_total_amount, 2)
 
     nre_entries: list[dict[str, Any]] = []
     if isinstance(nre_detail, _MappingABC):

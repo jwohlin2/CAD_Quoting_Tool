@@ -22,6 +22,9 @@ from text_tables import (
 )
 
 
+MATERIALS_WARNING_LABEL = "⚠ MATERIALS MISSING"
+
+
 def _fmt_cell(value: object, align: str = "left", width: int = 12) -> str:
     text = f"{value}"
     if align == "right":
@@ -148,6 +151,19 @@ def _render_cost_breakdown(data: Mapping[str, Any]) -> str | None:
         if subtotal_before_margin:
             percent = amount / subtotal_before_margin
         rows.append([label, money(amount, currency), pct(percent)])
+    warning_present = any(MATERIALS_WARNING_LABEL in row[0] for row in rows)
+    materials_direct = None
+    if isinstance(data, Mapping):
+        materials_direct = _coerce_float(data.get("materials_direct"))
+    materials_missing = materials_direct is not None and abs(materials_direct) <= 0.0005
+    if materials_missing and not warning_present:
+        rows.append(
+            [
+                ellipsize(MATERIALS_WARNING_LABEL, 60),
+                money(0.0, currency),
+                pct(0.0),
+            ]
+        )
 
     specs = (
         ColumnSpec(62, "L"),
@@ -249,6 +265,19 @@ def _render_materials(data: Mapping[str, Any]) -> str | None:
                 ellipsize(str(label), 40),
                 ellipsize(str(detail), 44) if detail else "",
                 money(amount, currency),
+            ]
+        )
+    warning_present = any(MATERIALS_WARNING_LABEL in row[0] for row in rows)
+    materials_direct = None
+    if isinstance(data, Mapping):
+        materials_direct = _coerce_float(data.get("materials_direct"))
+    materials_missing = materials_direct is not None and abs(materials_direct) <= 0.0005
+    if materials_missing and not warning_present:
+        rows.append(
+            [
+                ellipsize(MATERIALS_WARNING_LABEL, 40),
+                ellipsize("Direct material cost reported as $0.00", 44),
+                money(0.0, currency),
             ]
         )
     specs = (
