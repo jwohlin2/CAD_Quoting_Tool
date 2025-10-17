@@ -9863,8 +9863,25 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if isinstance(plan_pricing_map, _MappingABC) and plan_pricing_map:
                 plan_info_payload.setdefault("pricing", plan_pricing_map)
 
-        if isinstance(planner_result, _MappingABC) and planner_result:
-            plan_info_payload["planner_pricing"] = planner_result
+        planner_pricing_for_explainer: Mapping[str, Any] | None = None
+        if isinstance(breakdown, _MappingABC):
+            candidate_planner = breakdown.get("process_plan_pricing")
+            if isinstance(candidate_planner, _MappingABC) and candidate_planner:
+                planner_pricing_for_explainer = candidate_planner
+        if (
+            planner_pricing_for_explainer is None
+            and isinstance(result, _MappingABC)
+        ):
+            candidate_planner = result.get("process_plan_pricing")
+            if isinstance(candidate_planner, _MappingABC) and candidate_planner:
+                planner_pricing_for_explainer = candidate_planner
+        if planner_pricing_for_explainer is None:
+            candidate_planner = locals().get("planner_result")
+            if isinstance(candidate_planner, _MappingABC) and candidate_planner:
+                planner_pricing_for_explainer = candidate_planner
+
+        if isinstance(planner_pricing_for_explainer, _MappingABC) and planner_pricing_for_explainer:
+            plan_info_payload["planner_pricing"] = planner_pricing_for_explainer
 
         bucket_plan_info: dict[str, Any] = {}
         if isinstance(bucket_state, PlannerBucketRenderState):
