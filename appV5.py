@@ -333,12 +333,13 @@ def _render_time_per_hole(
     index_min: float,
     peck_min_deep: float,
     peck_min_std: float,
-) -> tuple[float, bool, bool]:
+) -> tuple[float, bool, bool, list[dict[str, Any]]]:
     append_line("TIME PER HOLE – DRILL GROUPS")
     append_line("-" * 66)
     subtotal_min = 0.0
     seen_deep = False
     seen_std = False
+    rows: list[dict[str, Any]] = []
     for b in bins:
         try:
             op = (b.get("op") or b.get("op_name") or "").strip().lower()
@@ -358,6 +359,17 @@ def _render_time_per_hole(
             t_hole = (depth / max(ipm, 1e-6)) + float(index_min) + peck
             group_min = t_hole * qty
             subtotal_min += group_min
+            rows.append(
+                {
+                    "diameter_in": float(d_in),
+                    "qty": int(qty),
+                    "depth_in": float(depth),
+                    "sfm": float(sfm),
+                    "ipr": float(ipr),
+                    "minutes_per_hole": float(t_hole),
+                    "group_minutes": float(group_min),
+                }
+            )
             # single-line, no material
             append_line(
                 f'Dia {d_in:.3f}" × {qty}  | depth {depth:.3f}" | {int(round(sfm))} sfm | {ipr:.4f} ipr | '
@@ -366,7 +378,7 @@ def _render_time_per_hole(
         except Exception:
             continue
     append_line("")
-    return subtotal_min, seen_deep, seen_std
+    return subtotal_min, seen_deep, seen_std, rows
 
 
 if sys.platform == "win32":
@@ -9362,6 +9374,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     printed_subtotal = ladder_subtotal
 
     # Render MATERIAL REMOVAL card + TIME PER HOLE lines (replace legacy Time block)
+    time_per_hole_payload: dict[str, Any] | None = None
     try:
         drilling_meta = breakdown.get("drilling_meta", {}) or {}
         # pull safe fallbacks
@@ -9420,7 +9433,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             toolchange_min_std=tchg_std,
         )
 
-        subtotal_min, seen_deep, seen_std = _render_time_per_hole(
+        subtotal_min, seen_deep, seen_std, time_per_hole_rows = _render_time_per_hole(
             append_line,
             bins=bins, index_min=index_min, peck_min_deep=peck_min_deep, peck_min_std=peck_min_std,
         )
@@ -9432,6 +9445,37 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         removal_drilling_minutes = float(max(total_drill_minutes_with_toolchange, 0.0))
         if removal_drilling_minutes > 0.0:
             removal_drilling_hours_precise = removal_drilling_minutes / 60.0
+
+        if time_per_hole_rows:
+            rows_for_payload: list[dict[str, Any]] = []
+            for entry in time_per_hole_rows:
+                try:
+                    rows_for_payload.append(
+                        {
+                            "diameter_in": _safe_float(entry.get("diameter_in")),
+                            "qty": int(entry.get("qty") or 0),
+                            "depth_in": _safe_float(entry.get("depth_in")),
+                            "sfm": _safe_float(entry.get("sfm")),
+                            "ipr": _safe_float(entry.get("ipr")),
+                            "minutes_per_hole": _safe_float(entry.get("minutes_per_hole")),
+                            "group_minutes": _safe_float(entry.get("group_minutes")),
+                        }
+                    )
+                except Exception:
+                    continue
+            tool_components: list[dict[str, Any]] = []
+            if seen_deep:
+                tool_components.append({"label": "Deep-Drill", "minutes": float(tchg_deep)})
+            if seen_std:
+                tool_components.append({"label": "Drill", "minutes": float(tchg_std)})
+            time_per_hole_payload = {
+                "rows": rows_for_payload,
+                "subtotal_minutes": float(subtotal_min),
+                "toolchange_minutes": float(tool_add),
+                "total_minutes_with_toolchange": float(total_drill_minutes_with_toolchange),
+            }
+            if tool_components:
+                time_per_hole_payload["tool_components"] = tool_components
 
         def _stash_drill_minutes(owner: Any) -> _MutableMappingABC[str, Any] | None:
             if owner is None:
@@ -9496,6 +9540,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         drill_meta["total_minutes"] = float(removal_drilling_minutes)
         drill_meta["toolchange_minutes"] = float(tool_add)
         drill_meta["total_minutes_with_toolchange"] = float(total_drill_minutes_with_toolchange)
+        if time_per_hole_payload:
+            drill_meta["time_per_hole_detail"] = time_per_hole_payload
 
         bill_min = float(
             drilling_meta.get("total_minutes_billed")
@@ -10190,6 +10236,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         processes_entries.append(entry)
     if processes_entries:
         payload["processes"] = processes_entries
+
+    if time_per_hole_payload and time_per_hole_payload.get("rows"):
+        payload["drilling_time_per_hole"] = time_per_hole_payload
 
     nre_entries: list[dict[str, Any]] = []
     if isinstance(nre_detail, _MappingABC):
