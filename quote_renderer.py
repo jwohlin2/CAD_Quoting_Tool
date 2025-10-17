@@ -234,11 +234,29 @@ def _render_materials(data: Mapping[str, Any]) -> str | None:
         return None
     currency = _currency_from(data.get("summary", {}) if isinstance(data.get("summary"), Mapping) else data)
     rows: list[list[str]] = []
+
+    def _scrap_detail(entry: Mapping[str, Any], components: Mapping[str, Any]) -> str:
+        parts: list[str] = []
+        for key in ("scrap_credit_mass_lb", "scrap_mass_lb", "scrap_weight_lb"):
+            scrap_mass = _coerce_float(entry.get(key)) if isinstance(entry, Mapping) else None
+            if scrap_mass is not None and scrap_mass > 0:
+                parts.append(f"{scrap_mass:.2f} lb")
+                break
+        rate_text = components.get("scrap_rate_text") if isinstance(components, Mapping) else None
+        if rate_text:
+            parts.append(str(rate_text))
+        return "; ".join(part for part in parts if part)
+
     for entry in entries:
         if isinstance(entry, Mapping):
             label = entry.get("label") or entry.get("name") or ""
             detail = entry.get("detail") or entry.get("spec") or entry.get("notes") or ""
             amount = _coerce_float(entry.get("amount"))
+            components = (
+                entry.get("material_cost_components")
+                if isinstance(entry.get("material_cost_components"), Mapping)
+                else None
+            )
         else:
             label = entry[0] if entry else ""
             detail = entry[1] if len(entry) > 1 else ""
@@ -329,11 +347,27 @@ def _render_top_cycle_contributors(data: Mapping[str, Any]) -> str | None:
     entries = data.get("top_cycle_time") or data.get("cycle_top") or data.get("cycle_contributors")
     if not entries:
         return None
-    rows: list[list[str]] = []
-    for entry in entries[:5]:
+
+    def _coerce_minutes(entry: Mapping[str, Any] | Sequence[Any]) -> float | None:
         if isinstance(entry, Mapping):
-            label = entry.get("label") or entry.get("name") or ""
-            hours = _coerce_float(entry.get("hours"))
+            for key in (
+                "group_min",
+                "minutes",
+                "minutes_total",
+                "total_minutes",
+            ):
+                minutes_val = _coerce_float(entry.get(key))
+                if minutes_val is not None and minutes_val > 0:
+                    return minutes_val
+            hours_val = _coerce_float(entry.get("hours"))
+            if hours_val is not None and hours_val > 0:
+                return hours_val * 60.0
+            qty = _coerce_float(entry.get("qty"))
+            per_hole = _coerce_float(entry.get("t_per_hole_min")) or _coerce_float(
+                entry.get("minutes_per_hole")
+            )
+            if qty and per_hole:
+                return qty * per_hole
         else:
             label = entry[0] if entry else ""
             hours = _coerce_float(entry[1]) if len(entry) > 1 else None
