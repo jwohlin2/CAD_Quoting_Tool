@@ -3586,6 +3586,7 @@ def _split_hours_for_bucket(
             and (float(m_min) + float(l_min)) > 0.0
         ):
             return (float(m_min) / 60.0, float(l_min) / 60.0)
+        return (total_h, 0.0)
 
     bucket_ops: Mapping[str, Any] | None = None
     if isinstance(extra, _MappingABC):
@@ -3992,22 +3993,68 @@ def _charged_hours_by_bucket(
         if hr is not None:
             label = _process_label(key)
             charged[label] = charged.get(label, 0.0) + float(hr)
-    removal_hr = None
+
+    extra_map: Mapping[str, Any] = {}
     if render_state is not None:
         try:
-            extra = getattr(render_state, "extra", {})
+            extra_candidate = getattr(render_state, "extra", {})
         except Exception:
-            extra = {}
-        if isinstance(extra, _MappingABC):
-            removal_candidate = extra.get("removal_drilling_hours")
-            removal_hr = _coerce_float_or_none(removal_candidate)
+            extra_candidate = {}
+        if isinstance(extra_candidate, _MappingABC):
+            extra_map = extra_candidate
+
+    prefer_override = prefer_removal_drilling_hours
+    if cfg is not None:
+        prefer_override = bool(getattr(cfg, "prefer_removal_drilling_hours", prefer_override))
+
+    drill_machine_minutes = _coerce_float_or_none(extra_map.get("drill_machine_minutes"))
+    drill_labor_minutes = _coerce_float_or_none(extra_map.get("drill_labor_minutes"))
+    drill_total_minutes = _coerce_float_or_none(extra_map.get("drill_total_minutes"))
+
+    total_minutes_from_card: float | None = None
+    if drill_machine_minutes is not None or drill_labor_minutes is not None:
+        machine_minutes = max(0.0, float(drill_machine_minutes or 0.0))
+        labor_minutes = max(0.0, float(drill_labor_minutes or 0.0))
+        total_minutes_from_card = machine_minutes + labor_minutes
+    if (total_minutes_from_card is None or total_minutes_from_card <= 0.0) and drill_total_minutes is not None:
+        total_minutes_from_card = max(0.0, float(drill_total_minutes))
+
+    drill_card_hours: float | None = None
+    if total_minutes_from_card is not None and total_minutes_from_card >= 0.0:
+        drill_card_hours = float(total_minutes_from_card) / 60.0
+
+    if drill_card_hours is not None and prefer_override:
+        drill_labels = [
+            label
+            for label in charged
+            if _canonical_bucket_key(label) in {"drilling", "drill"}
+        ]
+        if drill_labels:
+            for label in drill_labels:
+                current = float(charged.get(label, 0.0) or 0.0)
+                if not math.isclose(current, drill_card_hours, rel_tol=1e-9, abs_tol=1e-6):
+                    logger.info(
+                        "[hours-sync] Overriding Drilling bucket hours from %.2f -> %.2f (source=removal_card)",
+                        current,
+                        drill_card_hours,
+                    )
+                charged[label] = float(drill_card_hours)
+        elif drill_card_hours > 0.0:
+            label = _process_label("drilling")
+            logger.info(
+                "[hours-sync] Injecting Drilling bucket hours %.2f (source=removal_card)",
+                drill_card_hours,
+            )
+            charged[label] = float(drill_card_hours)
+
+    removal_hr = drill_card_hours
+    if removal_hr is None and extra_map:
+        removal_candidate = extra_map.get("removal_drilling_hours")
+        removal_hr = _coerce_float_or_none(removal_candidate)
     if removal_hr is None:
         removal_hr = _coerce_float_or_none(removal_drilling_hours)
     if removal_hr is not None and removal_hr < 0:
         removal_hr = None
-    prefer_override = prefer_removal_drilling_hours
-    if cfg is not None:
-        prefer_override = bool(getattr(cfg, "prefer_removal_drilling_hours", prefer_override))
 
     if removal_hr is not None and prefer_override:
         desired = max(0.0, float(removal_hr))
@@ -4026,62 +4073,43 @@ def _charged_hours_by_bucket(
                         desired,
                     )
                 charged[label] = desired
-        else:
+        elif desired > 0.0:
             label = _process_label("drilling")
             logger.info(
                 "[hours-sync] Injecting Drilling bucket hours %.2f (source=removal_card)",
                 desired,
             )
-            out[label] = desired
+            charged[label] = desired
 
-    drill_machine_minutes = None
-    drill_labor_minutes = None
-    if render_state is not None:
-        try:
-            extra = getattr(render_state, "extra", None)
-        except Exception:
-            extra = None
-        if isinstance(extra, _MappingABC):
-            drill_machine_minutes = _coerce_float_or_none(
-                extra.get("drill_machine_minutes")
-            )
-            drill_labor_minutes = _coerce_float_or_none(
-                extra.get("drill_labor_minutes")
-            )
-
-    drill_bucket_label = next(
-        (
-            key
-            for key in out
-            if _canonical_bucket_key(key) in {"drilling", "drill"}
-        ),
-        "",
-    )
-    drill_bucket_hours = (
-        _coerce_float_or_none(out.get(drill_bucket_label))
-        if drill_bucket_label
-        else None
-    )
-
-    def _fmt_diagnostic(value: float | None) -> str:
-        if value is None:
-            return "nan"
-        try:
+    def _fmt_value(value: Any, *, decimals: int, suffix: str = "") -> str:
+        if isinstance(value, (int, float)):
             numeric = float(value)
-        except Exception:
-            return "nan"
-        if not math.isfinite(numeric):
-            return "nan"
-        return f"{numeric:.2f}"
+            if math.isfinite(numeric):
+                return f"{numeric:.{decimals}f}{suffix}"
+        return "nan"
+
+    card_total_hours = None
+    if (
+        isinstance(drill_machine_minutes, (int, float))
+        and isinstance(drill_labor_minutes, (int, float))
+    ):
+        total_minutes = float(drill_machine_minutes) + float(drill_labor_minutes)
+        if math.isfinite(total_minutes):
+            card_total_hours = total_minutes / 60.0
+
+    charged_drilling_hours = charged.get("Drilling")
+    if charged_drilling_hours is None:
+        charged_drilling_hours = charged.get("drilling")
 
     _log.info(
-        "[drill-sync] card_m=%s card_l=%s charged_hr=%s",
-        _fmt_diagnostic(drill_machine_minutes),
-        _fmt_diagnostic(drill_labor_minutes),
-        _fmt_diagnostic(drill_bucket_hours),
+        "[drill-sync] card_m=%s card_l=%s → card_total_hr=%s  | charged_drilling_hr=%s",
+        _fmt_value(drill_machine_minutes, decimals=2, suffix="min"),
+        _fmt_value(drill_labor_minutes, decimals=2, suffix="min"),
+        _fmt_value(card_total_hours, decimals=6, suffix="hr"),
+        _fmt_value(charged_drilling_hours, decimals=2, suffix="hr"),
     )
 
-    return out
+    return charged
 
 def _planner_bucket_key_for_name(name: Any) -> str:
     text = str(name or "").lower()
@@ -4793,24 +4821,31 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         machine_rate_value = 90.0
     rates["MachineRate"] = machine_rate_value
 
-    if "ProgrammerRate" not in rates:
-        programmer_fallback = (
-            engineer_rate_val if engineer_rate_val > 0 else _coerce_rate_value(rates.get("MillingRate"))
-        )
-        if programmer_fallback <= 0 and shop_rate_val > 0:
-            programmer_fallback = shop_rate_val
-        if programmer_fallback <= 0:
-            programmer_fallback = _coerce_rate_value(rates.get("LaborRate"))
-        if programmer_fallback <= 0:
-            programmer_fallback = 90.0
-        if programmer_fallback > 0:
-            programmer_fallback = max(programmer_fallback, 90.0)
-        rates.setdefault("ProgrammerRate", programmer_fallback)
+    cfg_programmer_rate: float | None = None
+    if cfg and getattr(cfg, "separate_machine_labor", False):
+        cfg_programmer_rate = _coerce_rate_value(getattr(cfg, "labor_rate_per_hr", None))
+        if cfg_programmer_rate <= 0:
+            cfg_programmer_rate = 45.0
 
-    programmer_rate_value = _coerce_rate_value(rates.get("ProgrammerRate"))
-    if separate_labor_cfg and cfg_labor_rate_value > 0.0:
-        programmer_rate_value = cfg_labor_rate_value
+    if cfg_programmer_rate is not None and cfg_programmer_rate > 0:
+        programmer_rate_value = float(cfg_programmer_rate)
+        programming_rate_value = float(cfg_programmer_rate)
     else:
+        if "ProgrammerRate" not in rates:
+            programmer_fallback = (
+                engineer_rate_val if engineer_rate_val > 0 else _coerce_rate_value(rates.get("MillingRate"))
+            )
+            if programmer_fallback <= 0 and shop_rate_val > 0:
+                programmer_fallback = shop_rate_val
+            if programmer_fallback <= 0:
+                programmer_fallback = _coerce_rate_value(rates.get("LaborRate"))
+            if programmer_fallback <= 0:
+                programmer_fallback = 90.0
+            if programmer_fallback > 0:
+                programmer_fallback = max(programmer_fallback, 90.0)
+            rates.setdefault("ProgrammerRate", programmer_fallback)
+
+        programmer_rate_value = _coerce_rate_value(rates.get("ProgrammerRate"))
         if programmer_rate_value <= 0:
             programmer_rate_value = (
                 engineer_rate_val
@@ -4825,12 +4860,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             programmer_rate_value = 90.0
         if programmer_rate_value > 0:
             programmer_rate_value = max(programmer_rate_value, 90.0)
-    rates["ProgrammerRate"] = programmer_rate_value
 
-    programming_rate_value = _coerce_rate_value(rates.get("ProgrammingRate"))
-    if separate_labor_cfg and cfg_labor_rate_value > 0.0:
-        programming_rate_value = cfg_labor_rate_value
-    else:
+        programming_rate_value = _coerce_rate_value(rates.get("ProgrammingRate"))
         if programming_rate_value <= 0:
             programming_rate_value = programmer_rate_value
         if programming_rate_value <= 0:
@@ -4839,6 +4870,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             programming_rate_value = 90.0
         if programming_rate_value > 0:
             programming_rate_value = max(programming_rate_value, 90.0)
+
+    rates["ProgrammerRate"] = programmer_rate_value
     rates["ProgrammingRate"] = programming_rate_value
 
     inspector_rate_value = _coerce_rate_value(rates.get("InspectorRate"))
@@ -6755,7 +6788,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     nre = breakdown.setdefault("nre", {})
     prog_hr = float(nre.get("programming_hr") or 0.0)
     if prog_hr > 0 and float(nre.get("programming_cost") or 0.0) == 0.0:
-        nre["programming_cost"] = round(prog_hr * rates["ProgrammingRate"], 2)
+        if cfg and getattr(cfg, "separate_machine_labor", False):
+            cfg_prog_rate = _coerce_float_or_none(getattr(cfg, "labor_rate_per_hr", None))
+            if cfg_prog_rate is None or cfg_prog_rate <= 0:
+                cfg_prog_rate = 45.0
+            programmer_rate_for_cost = float(cfg_prog_rate)
+        else:
+            programmer_rate_for_cost = float(_lookup_rate("programming", rates) or 90.0)
+        nre["programming_cost"] = round(prog_hr * programmer_rate_for_cost, 2)
 
     # ---- NRE / Setup costs ---------------------------------------------------
     append_line("NRE / Setup Costs (per lot)")
@@ -8543,16 +8583,42 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             summary_hours[label] = summary_hours.get(label, 0.0) + (minutes_val / 60.0)
 
         override_hours: float | None = None
-        if prefer_removal_drilling_hours:
+        prefer_drill_summary = prefer_removal_drilling_hours
+        if cfg is not None:
+            prefer_drill_summary = bool(
+                getattr(cfg, "prefer_removal_drilling_hours", prefer_drill_summary)
+            )
+        if prefer_drill_summary:
             extra_map = getattr(bucket_state, "extra", {})
             if isinstance(extra_map, _MappingABC):
                 candidate = extra_map.get("removal_drilling_hours")
-                if candidate is not None:
-                    try:
-                        override_hours = float(candidate)
-                    except Exception:
-                        override_hours = None
-            if override_hours is None and removal_drilling_hours_precise is not None:
+                override_hours = _coerce_float_or_none(candidate)
+                if override_hours is None:
+                    total_minutes_extra = _coerce_float_or_none(
+                        extra_map.get("drill_total_minutes")
+                    )
+                    if total_minutes_extra is None:
+                        machine_minutes_extra = _coerce_float_or_none(
+                            extra_map.get("drill_machine_minutes")
+                        )
+                        labor_minutes_extra = _coerce_float_or_none(
+                            extra_map.get("drill_labor_minutes")
+                        )
+                        if (
+                            machine_minutes_extra is not None
+                            or labor_minutes_extra is not None
+                        ):
+                            machine_minutes = float(machine_minutes_extra or 0.0)
+                            labor_minutes = float(labor_minutes_extra or 0.0)
+                            total_candidate = machine_minutes + labor_minutes
+                            if total_candidate > 0.0:
+                                total_minutes_extra = total_candidate
+                    if total_minutes_extra is not None:
+                        override_hours = float(total_minutes_extra) / 60.0
+            if (
+                override_hours is None
+                and removal_drilling_hours_precise is not None
+            ):
                 try:
                     override_hours = float(removal_drilling_hours_precise)
                 except Exception:
@@ -8571,7 +8637,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 include_flag = bool(existing[1])
             hour_summary_entries[label] = (round(hours_val, 2), include_flag)
 
-    if prefer_removal_drilling_hours:
+    prefer_drill_summary = prefer_removal_drilling_hours
+    if cfg is not None:
+        prefer_drill_summary = bool(
+            getattr(cfg, "prefer_removal_drilling_hours", prefer_drill_summary)
+        )
+    if prefer_drill_summary:
         extra_map = getattr(bucket_state, "extra", {})
         if not isinstance(extra_map, _MappingABC):
             extra_map = {}
@@ -15555,27 +15626,33 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         else {}
     )
     programmer_rate = 0.0
-    if isinstance(labor_bucket, _MappingABC):
-        for key in ("programmer", "Programmer", "PROGRAMMER"):
-            rate_value = labor_bucket.get(key)
-            if rate_value is None:
-                continue
-            try:
-                programmer_rate = float(rate_value)
-            except Exception:
-                continue
-            if programmer_rate > 0:
-                break
-    if programmer_rate <= 0:
-        programmer_rate = _lookup_rate(
-            "ProgrammingRate",
-            rates,
-            params,
-            default_rates,
-            fallback=85.0,
-        )
-    if programmer_rate <= 0:
-        programmer_rate = 85.0
+    if cfg and getattr(cfg, "separate_machine_labor", False):
+        cfg_rate = _coerce_float_or_none(getattr(cfg, "labor_rate_per_hr", None))
+        if cfg_rate is None or cfg_rate <= 0:
+            cfg_rate = 45.0
+        programmer_rate = float(cfg_rate)
+    else:
+        if isinstance(labor_bucket, _MappingABC):
+            for key in ("programmer", "Programmer", "PROGRAMMER"):
+                rate_value = labor_bucket.get(key)
+                if rate_value is None:
+                    continue
+                try:
+                    programmer_rate = float(rate_value)
+                except Exception:
+                    continue
+                if programmer_rate > 0:
+                    break
+        if programmer_rate <= 0:
+            programmer_rate = _lookup_rate(
+                "programming",
+                rates,
+                params,
+                default_rates,
+                fallback=90.0,
+            )
+        if programmer_rate <= 0:
+            programmer_rate = 90.0
 
     if programmer_rate > 0:
         if isinstance(merged_two_bucket_rates, dict):
