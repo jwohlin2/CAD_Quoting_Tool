@@ -655,16 +655,44 @@ def _material_cost_components(
             composed = f"{scrap_source_label} {scrap_rate_text}"
         scrap_rate_text = composed.strip()
 
+    base_for_total_calc: float
+    try:
+        base_for_total_calc = float(
+            core.get("stock_price_usd")
+            or core.get("base_usd")
+            or 0.0
+        )
+    except Exception:
+        base_for_total_calc = float(core.get("base_usd", 0.0) or 0.0)
+
+    try:
+        tax_for_total = float(core.get("tax_usd") or 0.0)
+    except Exception:
+        tax_for_total = 0.0
+
+    try:
+        scrap_for_total = abs(float(core.get("scrap_credit_usd") or 0.0))
+    except Exception:
+        scrap_for_total = 0.0
+
+    total_calc = max(base_for_total_calc + tax_for_total - scrap_for_total, 0.0)
+
+    total_usd_value: float
+    try:
+        total_usd_value = float(core.get("total_usd") or total_calc)
+    except Exception:
+        total_usd_value = float(total_calc)
+
     return {
         "stock_piece_usd": round(stock_piece_usd, 2) if stock_piece_usd is not None else None,
         "stock_source": _normalize_source(stock_source) if stock_source else "",
         "base_usd": round(base_value, 2),
         "base_source": _normalize_source(base_source) if base_source else "",
-        "tax_usd": round(float(core.get("tax_usd", 0.0)), 2),
-        "scrap_credit_usd": round(float(core.get("scrap_credit_usd", 0.0)), 2),
+        "tax_usd": round(tax_for_total, 2),
+        "scrap_credit_usd": round(scrap_for_total, 2),
         "scrap_rate_text": scrap_rate_text,
         "net_usd": round(float(core.get("net_usd", 0.0)), 2),
-        "total_usd": round(float(core.get("total_usd", 0.0)), 2),
+        "total_usd": round(total_usd_value, 2),
     }
 
 
@@ -6550,8 +6578,20 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     row("Scrap Credit", -round(scrap_val, 2), indent="  ")
                 base_for_total = float(base_usd_val)
                 tax_for_total = float(tax_val)
-                scrap_for_total = min(float(scrap_val), base_for_total + tax_for_total)
-                total_material_cost = round(base_for_total + tax_for_total - scrap_for_total, 2)
+                total_material_cost_val = mc.get("total_usd")
+                if total_material_cost_val is not None:
+                    try:
+                        total_material_cost = round(float(total_material_cost_val), 2)
+                    except Exception:
+                        total_material_cost = None
+                else:
+                    total_material_cost = None
+                if total_material_cost is None:
+                    scrap_for_total = min(float(scrap_val), base_for_total + tax_for_total)
+                    total_material_cost = round(
+                        base_for_total + tax_for_total - scrap_for_total,
+                        2,
+                    )
                 row("Total Material Cost :", total_material_cost, indent="  ")
             elif total_material_cost is not None:
                 row("Total Material Cost :", total_material_cost, indent="  ")
