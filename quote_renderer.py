@@ -409,6 +409,101 @@ def _render_processes(data: Mapping[str, Any]) -> str | None:
     )
 
 
+def _render_drilling_time_per_hole(data: Mapping[str, Any]) -> str | None:
+    detail = data.get("drilling_time_per_hole")
+    if not detail:
+        return None
+    if not isinstance(detail, Mapping):
+        return None
+    rows = detail.get("rows")
+    if not isinstance(rows, Sequence) or not rows:
+        return None
+
+    formatted_rows: list[str] = []
+    for row in rows:
+        if isinstance(row, Mapping):
+            source = row
+        elif isinstance(row, Sequence) and row:
+            # Accept tuple-like rows of the canonical order
+            source = {
+                "diameter_in": row[0] if len(row) > 0 else None,
+                "qty": row[1] if len(row) > 1 else None,
+                "depth_in": row[2] if len(row) > 2 else None,
+                "sfm": row[3] if len(row) > 3 else None,
+                "ipr": row[4] if len(row) > 4 else None,
+                "minutes_per_hole": row[5] if len(row) > 5 else None,
+                "group_minutes": row[6] if len(row) > 6 else None,
+            }
+        else:
+            continue
+        diameter = _coerce_float(source.get("diameter_in"))
+        depth = _coerce_float(source.get("depth_in"))
+        qty_raw = source.get("qty")
+        try:
+            qty = int(qty_raw)
+        except Exception:
+            qty = 0
+        sfm = _coerce_float(source.get("sfm"))
+        ipr = _coerce_float(source.get("ipr"))
+        minutes_per_hole = _coerce_float(source.get("minutes_per_hole"))
+        group_minutes = _coerce_float(source.get("group_minutes"))
+        if diameter is None or depth is None or minutes_per_hole is None:
+            continue
+        if sfm is None:
+            sfm = 0.0
+        if ipr is None:
+            ipr = 0.0
+        if group_minutes is None:
+            group_minutes = minutes_per_hole * max(qty, 0)
+        formatted_rows.append(
+            f'Dia {diameter:.3f}" × {qty}  | '
+            f'depth {depth:.3f}" | {int(round(sfm))} sfm | '
+            f'{ipr:.4f} ipr | t/hole {minutes_per_hole:.2f} min | '
+            f'group {qty}×{minutes_per_hole:.2f} = {group_minutes:.2f} min'
+        )
+
+    if not formatted_rows:
+        return None
+
+    tool_total = _coerce_float(detail.get("toolchange_minutes")) or 0.0
+    tool_components = detail.get("tool_components") if isinstance(detail.get("tool_components"), Sequence) else []
+    tool_parts: list[str] = []
+    if isinstance(tool_components, Sequence):
+        for component in tool_components:
+            if not isinstance(component, Mapping):
+                continue
+            label = str(component.get("label") or "").strip()
+            minutes = _coerce_float(component.get("minutes"))
+            if not label or minutes is None or minutes <= 0:
+                continue
+            tool_parts.append(f"{label} {minutes:.2f} min")
+
+    subtotal_minutes = _coerce_float(detail.get("subtotal_minutes"))
+    total_minutes = _coerce_float(detail.get("total_minutes_with_toolchange"))
+
+    divider = "-" * 66
+    lines: list[str] = [divider]
+    lines.extend(formatted_rows)
+    if tool_total > 0.0:
+        if tool_parts:
+            tool_text = " + ".join(tool_parts)
+            lines.append(f"Toolchange adders: {tool_text} = {tool_total:.2f} min")
+        else:
+            lines.append(f"Toolchange adders: {tool_total:.2f} min")
+    else:
+        lines.append("Toolchange adders: -")
+    lines.append(divider)
+    if subtotal_minutes is not None:
+        lines.append(
+            f"Subtotal (per-hole × qty) . {subtotal_minutes:.2f} min  ({(subtotal_minutes / 60.0):.2f} hr)"
+        )
+    if total_minutes is not None:
+        lines.append(
+            f"TOTAL DRILLING (with toolchange) . {total_minutes:.2f} min  ({(total_minutes / 60.0):.2f} hr)"
+        )
+    return "\n".join(lines)
+
+
 def _render_cycle_reference(data: Mapping[str, Any]) -> str | None:
     entries = data.get("cycle_time_metrics")
     if not entries:
@@ -557,6 +652,10 @@ def render_quote(data: Mapping[str, Any]) -> str:
     processes = _render_processes(data)
     if processes:
         sections.append(_render_section("Process & Labor (per part — chargeable view)", processes))
+
+    drilling_time = _render_drilling_time_per_hole(data)
+    if drilling_time:
+        sections.append(_render_section("TIME PER HOLE – DRILL GROUPS", drilling_time))
 
     cycle_reference = _render_cycle_reference(data)
     if cycle_reference:
