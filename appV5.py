@@ -2973,6 +2973,20 @@ else:
 
     BRepTools = None  # type: ignore[assignment]
     TopTools_IndexedDataMapOfShapeListOfShape = None  # type: ignore[assignment]
+
+    class _MissingTopoDSShape:
+        def __init__(self, *_: Any, **__: Any) -> None:  # pragma: no cover - fallback sentinel
+            raise RuntimeError("TopoDS_Shape is unavailable (OCCT bindings required)")
+
+    class _MissingTopoDSFace(_MissingTopoDSShape):
+        pass
+
+    class _MissingTopoDSCompound(_MissingTopoDSShape):
+        pass
+
+    TopoDS_Shape = cast(Any, _MissingTopoDSShape)
+    TopoDS_Face = cast(Any, _MissingTopoDSFace)
+    TopoDS_Compound = cast(Any, _MissingTopoDSCompound)
     BRepTools_UVBounds = _occ_uv_bounds
     _brep_read = _occ_brep_read
 
