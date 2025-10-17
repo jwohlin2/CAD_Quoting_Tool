@@ -504,6 +504,7 @@ def _compute_drilling_removal_section(
             subtotal_min = float(drill_machine_minutes_estimate)
         else:
             subtotal_min = float(subtotal_calc)
+        subtotal_min = float(max(subtotal_min, 0.0))
         if drill_tool_minutes_estimate > 0.0:
             tool_add = float(drill_tool_minutes_estimate)
         else:
@@ -515,9 +516,21 @@ def _compute_drilling_removal_section(
         else:
             total_drill_minutes_with_toolchange = subtotal_min + tool_add
 
-        extras["drill_machine_minutes"] = float(subtotal_min)
+        removal_drilling_minutes_subtotal = float(subtotal_min)
+        removal_drilling_minutes = float(max(total_drill_minutes_with_toolchange, 0.0))
+        removal_drilling_hours_precise: float | None = None
+        if removal_drilling_minutes > 0.0:
+            removal_drilling_hours_precise = removal_drilling_minutes / 60.0
+
+        extras["drill_machine_minutes"] = float(removal_drilling_minutes_subtotal)
         extras["drill_labor_minutes"] = float(tool_add)
         extras["drill_total_minutes"] = float(total_drill_minutes_with_toolchange)
+        extras["removal_drilling_minutes_subtotal"] = float(
+            removal_drilling_minutes_subtotal
+        )
+        extras["removal_drilling_minutes"] = float(removal_drilling_minutes)
+        if removal_drilling_hours_precise is not None:
+            extras["removal_drilling_hours"] = float(removal_drilling_hours_precise)
 
         breakdown_mutable: MutableMapping[str, Any]
         if isinstance(breakdown, _MutableMappingABC):
@@ -532,6 +545,8 @@ def _compute_drilling_removal_section(
             except Exception:
                 drill_meta = {}
             breakdown_mutable["drilling_meta"] = drill_meta
+        drill_meta["subtotal_minutes"] = float(removal_drilling_minutes_subtotal)
+        drill_meta["total_minutes"] = float(removal_drilling_minutes)
         drill_meta["toolchange_minutes"] = float(tool_add)
         drill_meta["total_minutes_with_toolchange"] = float(
             total_drill_minutes_with_toolchange
@@ -567,7 +582,7 @@ def _compute_drilling_removal_section(
         drill_min = plan_drill_min if plan_drill_min and plan_drill_min > 0.0 else bill_min
         bill_min = drill_min
         drill_hr = drill_min / 60.0 if drill_min else 0.0
-        if drill_hr > 0.0:
+        if drill_hr > 0.0 and "removal_drilling_hours" not in extras:
             extras["removal_drilling_hours"] = float(drill_hr)
         drill_meta["total_minutes_billed"] = drill_min
         drill_meta["bill_hours"] = float(drill_hr)
@@ -706,12 +721,10 @@ def _compute_drilling_removal_section(
                 updated_plan_summary = process_plan_summary_card
         if process_plan_summary_card is not None:
             drill_meta_summary = process_plan_summary_card.setdefault("drilling", {})
-            if subtotal_min > 0.0:
-                prior_total = _coerce_float_or_none(
-                    drill_meta_summary.get("total_minutes")
-                )
-                if prior_total is None or prior_total <= 0.0:
-                    drill_meta_summary["total_minutes"] = float(subtotal_min)
+            drill_meta_summary["subtotal_minutes"] = float(
+                removal_drilling_minutes_subtotal
+            )
+            drill_meta_summary["total_minutes"] = float(removal_drilling_minutes)
             drill_meta_summary["toolchange_minutes"] = float(tool_add)
             drill_meta_summary["total_minutes_with_toolchange"] = float(
                 total_drill_minutes_with_toolchange
@@ -7549,6 +7562,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         drill_machine_minutes_estimate = float(removal_card_extra["drill_machine_minutes"])
     if removal_card_extra.get("drill_labor_minutes") is not None:
         drill_tool_minutes_estimate = float(removal_card_extra["drill_labor_minutes"])
+    if removal_card_extra.get("removal_drilling_minutes") is not None:
+        removal_drilling_minutes = float(
+            removal_card_extra["removal_drilling_minutes"]
+        )
+        removal_drilling_hours_precise = removal_drilling_minutes / 60.0
     if removal_card_extra.get("drill_total_minutes") is not None:
         drill_total_minutes_estimate = float(removal_card_extra["drill_total_minutes"])
         removal_drilling_minutes = float(removal_card_extra["drill_total_minutes"])
