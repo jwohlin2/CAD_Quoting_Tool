@@ -2808,6 +2808,32 @@ _ocp_brep_module = _import_optional("OCP.BRep")
 _occ_brep_module = _import_optional("OCC.Core.BRep")
 _ocp_backend_ready = False
 
+
+def _missing_occt_callable(name: str):
+    def _missing(*_: Any, **__: Any) -> Any:
+        raise RuntimeError(
+            f"{name} is unavailable because no OpenCascade backend is installed"
+        )
+
+    return _missing
+
+
+# Provide fallbacks so type checkers see the names as bound even if imports fail.
+GeomAdaptor_Surface = cast(Any, _missing_occt_callable("GeomAdaptor_Surface"))
+GeomAbs_Plane = cast(Any, object())
+GeomAbs_Cylinder = cast(Any, object())
+GeomAbs_Torus = cast(Any, object())
+GeomAbs_Cone = cast(Any, object())
+GeomAbs_BSplineSurface = cast(Any, object())
+GeomAbs_BezierSurface = cast(Any, object())
+GeomAbs_Circle = cast(Any, object())
+gp_Pln = cast(Any, _missing_occt_callable("gp_Pln"))
+gp_Pnt = cast(Any, _missing_occt_callable("gp_Pnt"))
+gp_Dir = cast(Any, _missing_occt_callable("gp_Dir"))
+BRepAlgoAPI_Section = cast(Any, _missing_occt_callable("BRepAlgoAPI_Section"))
+ShapeAnalysis_Surface = cast(Any, _missing_occt_callable("ShapeAnalysis_Surface"))
+BRepAdaptor_Curve = cast(Any, _missing_occt_callable("BRepAdaptor_Curve"))
+
 if _ocp_brep_module is not None:
     try:
         from OCP.BRep import (  # type: ignore[import]
