@@ -8,26 +8,12 @@ plain data into a deterministic, email-safe ASCII presentation built on top of
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from cad_quoter.utils.render_utils import format_weight_lb_decimal, format_weight_lb_oz
-from text_tables import (
-    ColumnSpec,
-    DEFAULT_WIDTH,
-    draw_boxed_table,
-    draw_kv_table,
-    ellipsize,
-    money,
-    pct,
-)
-
-
-def _fmt_cell(value: object, align: str = "left", width: int = 12) -> str:
-    text = f"{value}"
-    if align == "right":
-        return text.rjust(width)
-    return text.ljust(width)
+from text_tables import ascii_table, money, pct
 
 
 def _currency_from(data: Mapping[str, Any]) -> str:
@@ -82,49 +68,51 @@ def _render_summary(data: Mapping[str, Any]) -> str:
 
     lead_time = summary.get("lead_time") or data.get("lead_time")
 
-    pairs: list[tuple[str, str]] = []
-    pairs.append(("Quantity", f"{int(qty)}"))
+    headers = ["Quantity", f"{qty:,.0f}"]
+    rows: list[list[str]] = []
     if unit_price is not None:
-        pairs.append(("Unit Price", money(unit_price, currency)))
+        rows.append(["Unit Price", money(unit_price, currency)])
     if subtotal_before_margin is not None:
-        pairs.append(("Subtotal (pre-margin)", money(subtotal_before_margin, currency)))
+        rows.append(["Subtotal (pre-margin)", money(subtotal_before_margin, currency)])
     if subtotal is not None and subtotal_before_margin != subtotal:
-        pairs.append(("Subtotal (with adjustments)", money(subtotal, currency)))
+        rows.append(["Subtotal (with adjustments)", money(subtotal, currency)])
     if margin_pct is not None:
-        pairs.append(("Margin", pct(margin_pct)))
+        rows.append(["Margin", pct(margin_pct)])
     if final_price is not None:
-        pairs.append(("Final Price", money(final_price, currency)))
+        rows.append(["Final Price", money(final_price, currency)])
     if lead_time:
-        pairs.append(("Lead Time", str(lead_time)))
+        rows.append(["Lead Time", str(lead_time)])
 
-    width_left = 46
-    width_right = DEFAULT_WIDTH - width_left - 3
-    return draw_kv_table(pairs, width_left, width_right)
+    return ascii_table(
+        headers=headers,
+        rows=rows,
+        col_widths=[46, 25],
+        col_aligns=["left", "right"],
+        header_aligns=["left", "right"],
+    )
 
 
 def _render_price_drivers(data: Mapping[str, Any]) -> str | None:
     drivers = data.get("price_drivers")
     if not drivers:
         return None
-    bullets: list[str] = []
+    rows: list[list[str]] = []
     for entry in drivers:
         if isinstance(entry, Mapping):
-            label = str(entry.get("label") or entry.get("name") or "").strip()
-            detail = str(entry.get("detail") or entry.get("value") or entry.get("reason") or "").strip()
+            label = str(entry.get("label") or entry.get("name") or "")
+            detail = entry.get("detail") or entry.get("value") or entry.get("reason") or ""
         else:
-            if isinstance(entry, Sequence) and not isinstance(entry, (str, bytes)):
-                label = str(entry[0]).strip() if entry else ""
-                detail = str(entry[1]).strip() if len(entry) > 1 else ""
-            else:
-                label = str(entry).strip()
-                detail = ""
-        bullet_body = detail or label
-        if not bullet_body:
-            continue
-        if label and detail and detail != bullet_body:
-            bullet_body = f"{label}: {detail}"
-        bullets.append(f"- {ellipsize(bullet_body, DEFAULT_WIDTH - 4)}")
-    return "\n".join(bullets) if bullets else None
+            label = str(entry[0])
+            detail = entry[1] if len(entry) > 1 else ""
+        rows.append([label, str(detail)])
+
+    return ascii_table(
+        headers=["Driver", "Detail"],
+        rows=rows,
+        col_widths=[40, 51],
+        col_aligns=["left", "left"],
+        header_aligns=["left", "left"],
+    )
 
 
 def _render_cost_breakdown(data: Mapping[str, Any]) -> str | None:
@@ -190,37 +178,21 @@ def _render_cost_breakdown(data: Mapping[str, Any]) -> str | None:
         return amount / subtotal_basis if subtotal_basis else None
 
     rows: list[list[str]] = []
-    rows.append([
-        "Direct Materials",
-        money(direct_materials, currency),
-        pct(_ratio(direct_materials)),
-    ])
-    rows.append([
-        "Direct Labor (incl. programming)",
-        money(direct_labor, currency),
-        pct(_ratio(direct_labor)),
-    ])
-    margin_label = "Margin"
-    if margin_pct is not None:
-        margin_label = f"Margin ({pct(margin_pct)})"
-    rows.append([
-        margin_label,
-        money(margin_amount, currency),
-        pct(_ratio(margin_amount)),
-    ])
-    rows.append([
-        "Final Price",
-        money(final_price, currency),
-        pct(_ratio(final_price)),
-    ])
+    for raw_label, raw_amount in items:
+        label = str(raw_label)
+        amount = _coerce_float(raw_amount) or 0.0
+        percent = 0.0
+        if subtotal_before_margin:
+            percent = amount / subtotal_before_margin
+        rows.append([label, money(amount, currency), pct(percent)])
 
-    specs = (
-        ColumnSpec(62, "L"),
-        ColumnSpec(28, "R"),
-        ColumnSpec(DEFAULT_WIDTH - 62 - 28 - 4, "R"),
+    return ascii_table(
+        headers=["Cost Element", "Amount", "% of Subtotal"],
+        rows=rows,
+        col_widths=[48, 18, 15],
+        col_aligns=["left", "right", "right"],
+        header_aligns=["left", "right", "right"],
     )
-    headers = ("Cost Element", "Amount", "% of Subtotal")
-    return draw_boxed_table(headers, rows, specs)
 
 
 def _render_quick_what_ifs(data: Mapping[str, Any]) -> str | None:
@@ -296,7 +268,13 @@ def _render_quick_what_ifs(data: Mapping[str, Any]) -> str | None:
         qty_table = draw_boxed_table(("Quantity", "Unit Price"), qty_rows, specs)
         sections.append("Qty Breaks\n" + qty_table)
 
-    return "\n\n".join(sections) if sections else None
+    return ascii_table(
+        headers=["Scenario", "Price"],
+        rows=scenarios,
+        col_widths=[48, 20],
+        col_aligns=["left", "right"],
+        header_aligns=["left", "right"],
+    )
 
 
 def _render_programming_nre(data: Mapping[str, Any]) -> str | None:
@@ -304,38 +282,29 @@ def _render_programming_nre(data: Mapping[str, Any]) -> str | None:
     if mode != "amortized":
         return None
     currency = _currency_from(data.get("summary", {}) if isinstance(data.get("summary"), Mapping) else data)
-    per_lot_amount = _coerce_float(data.get("programming_per_lot"))
-    detail_text = ""
-    nre_entries = data.get("nre") or data.get("nre_items")
-    if isinstance(nre_entries, Sequence):
-        for entry in nre_entries:
-            if isinstance(entry, Mapping):
-                label = str(entry.get("label") or entry.get("name") or "").lower()
-                if "program" in label:
-                    detail_text = str(entry.get("detail") or entry.get("notes") or "").strip()
-                    if per_lot_amount is None:
-                        per_lot_amount = _coerce_float(entry.get("amount"))
-                    break
-            elif isinstance(entry, Sequence) and not isinstance(entry, (str, bytes)) and entry:
-                label = str(entry[0]).lower()
-                if "program" in label:
-                    if len(entry) > 1:
-                        detail_text = str(entry[1]).strip()
-                    if per_lot_amount is None and len(entry) > 2:
-                        per_lot_amount = _coerce_float(entry[2])
-                    break
-    if per_lot_amount is None:
-        return None
-    rows = [
-        (
-            "Programming & Eng (per lot)",
-            money(per_lot_amount, currency),
-        )
-    ]
-    table = draw_kv_table(rows, 56, DEFAULT_WIDTH - 56 - 3, left_align="L", right_align="R")
-    if detail_text:
-        return table + f"\nDetail: {ellipsize(detail_text, DEFAULT_WIDTH - 8)}"
-    return table
+    rows: list[list[str]] = []
+    for entry in entries:
+        if isinstance(entry, Mapping):
+            label = entry.get("label") or entry.get("name") or ""
+            detail = entry.get("detail") or entry.get("notes") or ""
+            amount = _coerce_float(entry.get("amount"))
+        else:
+            label = entry[0] if entry else ""
+            detail = entry[1] if len(entry) > 1 else ""
+            amount = _coerce_float(entry[2]) if len(entry) > 2 else None
+        rows.append([
+            str(label),
+            str(detail) if detail else "",
+            money(amount, currency),
+        ])
+
+    return ascii_table(
+        headers=["Activity", "Detail", "Amount (per lot)"],
+        rows=rows,
+        col_widths=[38, 43, 16],
+        col_aligns=["left", "left", "right"],
+        header_aligns=["left", "left", "right"],
+    )
 
 
 def _render_materials(data: Mapping[str, Any]) -> str | None:
@@ -347,109 +316,46 @@ def _render_materials(data: Mapping[str, Any]) -> str | None:
         return None
 
     rows: list[list[str]] = []
-    if isinstance(cost_components, Mapping):
-        base_amount = _coerce_float(cost_components.get("base_usd"))
-        stock_piece_amount = _coerce_float(cost_components.get("stock_piece_usd"))
-        tax_amount = _coerce_float(cost_components.get("tax_usd"))
-        scrap_credit = _coerce_float(cost_components.get("scrap_credit_usd"))
-        total_amount = _coerce_float(cost_components.get("total_usd"))
-        base_source = str(cost_components.get("base_source") or cost_components.get("stock_source") or "").strip()
 
-        if base_amount is not None:
-            label = "Stock Piece" if stock_piece_amount is not None else "Base Material"
-            if base_source:
-                label = f"{label} ({base_source})"
-            detail = ""
-            if isinstance(stock_meta, Mapping):
-                dims = []
-                for key in ("stock_L_in", "stock_W_in", "stock_T_in"):
-                    dims.append(_coerce_float(stock_meta.get(key)))
-                dims_clean = [f"{float(val):.2f}" for val in dims if val is not None]
-                if len(dims_clean) == 3:
-                    detail = " × ".join(dims_clean[:2]) + f" × {dims_clean[2]} in"
-            rows.append([
-                ellipsize(label, 40),
-                ellipsize(detail, 44),
-                money(base_amount, currency),
-            ])
-        if tax_amount:
-            rows.append([
-                "Material Tax",
-                "",
-                money(tax_amount, currency),
-            ])
-        if scrap_credit and scrap_credit > 0:
-            scrap_detail = str(cost_components.get("scrap_rate_text") or "").strip()
-            amount_display = money(-scrap_credit, currency)
-            rows.append([
-                "Scrap Credit",
-                ellipsize(scrap_detail, 44),
-                amount_display,
-            ])
-        if total_amount is not None:
-            rows.append([
-                "Net Material Cost",
-                "",
-                money(total_amount, currency),
-            ])
-
-    if not rows:
-        return None
-
-    specs = (
-        ColumnSpec(40, "L"),
-        ColumnSpec(46, "L"),
-        ColumnSpec(DEFAULT_WIDTH - 40 - 46 - 5, "R"),
-    )
-    headers = ("Material", "Detail", "Amount (per part)")
-    table = draw_boxed_table(headers, rows, specs)
-
-    weight_lines: list[str] = []
-    if isinstance(weight_summary, Mapping):
-        starting = _coerce_float(weight_summary.get("starting_mass_g"))
-        net = _coerce_float(weight_summary.get("net_mass_g"))
-        scrap_mass = _coerce_float(weight_summary.get("scrap_mass_g"))
+    def _scrap_detail(entry: Mapping[str, Any], components: Mapping[str, Any]) -> str:
         parts: list[str] = []
-        if starting:
-            parts.append(f"Start {format_weight_lb_oz(starting)}")
-        if net:
-            parts.append(f"Net {format_weight_lb_oz(net)}")
-        if scrap_mass is not None:
-            parts.append(f"Scrap {format_weight_lb_oz(scrap_mass)}")
-        scrap_hint = str(weight_summary.get("scrap_hint") or "").strip()
-        if parts:
-            line = "Weight Reference: " + " | ".join(parts)
-            if scrap_hint:
-                line += f" ({scrap_hint})"
-            weight_lines.append(line)
-        geometry_pct = _coerce_float(weight_summary.get("scrap_pct_geometry"))
-        computed_pct = _coerce_float(weight_summary.get("scrap_pct_computed"))
-        entered_pct = _coerce_float(weight_summary.get("scrap_pct_entered"))
-        if computed_pct is not None:
-            extra = f"Computed Scrap: {pct(computed_pct)}"
-            if scrap_hint:
-                extra += f" ({scrap_hint})"
-            weight_lines.append(extra)
-        elif entered_pct is not None:
-            extra = f"Scrap Percentage: {pct(entered_pct)}"
-            if scrap_hint:
-                extra += f" ({scrap_hint})"
-            weight_lines.append(extra)
-        if geometry_pct is not None:
-            hint = f"Geometry Hint: {pct(geometry_pct)}"
-            if scrap_hint:
-                hint += f" ({scrap_hint})"
-            weight_lines.append(hint)
+        for key in ("scrap_credit_mass_lb", "scrap_mass_lb", "scrap_weight_lb"):
+            scrap_mass = _coerce_float(entry.get(key)) if isinstance(entry, Mapping) else None
+            if scrap_mass is not None and scrap_mass > 0:
+                parts.append(f"{scrap_mass:.2f} lb")
+                break
+        rate_text = components.get("scrap_rate_text") if isinstance(components, Mapping) else None
+        if rate_text:
+            parts.append(str(rate_text))
+        return "; ".join(part for part in parts if part)
 
-    extra_lines: list[str] = []
-    price_lines = data.get("material_price_lines")
-    if isinstance(price_lines, Sequence):
-        extra_lines.extend(str(line) for line in price_lines if line)
-    if weight_lines:
-        extra_lines.extend(weight_lines)
-    if extra_lines:
-        return table + "\n" + "\n".join(extra_lines)
-    return table
+    for entry in entries:
+        if isinstance(entry, Mapping):
+            label = entry.get("label") or entry.get("name") or ""
+            detail = entry.get("detail") or entry.get("spec") or entry.get("notes") or ""
+            amount = _coerce_float(entry.get("amount"))
+            components = (
+                entry.get("material_cost_components")
+                if isinstance(entry.get("material_cost_components"), Mapping)
+                else None
+            )
+        else:
+            label = entry[0] if entry else ""
+            detail = entry[1] if len(entry) > 1 else ""
+            amount = _coerce_float(entry[2]) if len(entry) > 2 else None
+        rows.append([
+            str(label),
+            str(detail) if detail else "",
+            money(amount, currency),
+        ])
+
+    return ascii_table(
+        headers=["Material", "Detail", "Amount (per part)"],
+        rows=rows,
+        col_widths=[36, 45, 16],
+        col_aligns=["left", "left", "right"],
+        header_aligns=["left", "left", "right"],
+    )
 
 
 def _render_processes(data: Mapping[str, Any]) -> str | None:
@@ -471,45 +377,23 @@ def _render_processes(data: Mapping[str, Any]) -> str | None:
             rate = _coerce_float(entry[2]) if len(entry) > 2 else None
             amount = _coerce_float(entry[3]) if len(entry) > 3 else None
             rate_display = None
-        label_text = _fmt_cell(ellipsize(str(label), 28), "left", 28)
-        hours_text = _fmt_cell(f"{hours:.2f} hr" if hours is not None else "—", "right", 10)
+        hours_text = f"{hours:.2f} hr" if hours is not None else "—"
         if rate_display:
-            rate_text = _fmt_cell(str(rate_display), "right", 16)
+            rate_text = str(rate_display)
         else:
-            rate_text = _fmt_cell(
-                money(rate, currency) + "/hr" if rate is not None else "—",
-                "right",
-                16,
+            rate_text = (
+                money(rate, currency) + "/hr" if rate is not None else "—"
             )
-        amount_text = _fmt_cell(money(amount, currency), "right", 18)
-        rows.append([label_text, hours_text, rate_text, amount_text])
-    total_amount = sum(
-        _coerce_float(entry.get("amount")) or 0.0
-        for entry in entries
-        if isinstance(entry, Mapping)
+        amount_text = money(amount, currency)
+        rows.append([str(label), hours_text, rate_text, amount_text])
+
+    return ascii_table(
+        headers=["Process", "Hours", "Rate", "Amount (per part)"],
+        rows=rows,
+        col_widths=[28, 10, 22, 16],
+        col_aligns=["left", "right", "right", "right"],
+        header_aligns=["left", "right", "right", "right"],
     )
-    if total_amount:
-        rows.append(
-            [
-                _fmt_cell("Total", "left", 28),
-                _fmt_cell("", "right", 10),
-                _fmt_cell("", "right", 16),
-                _fmt_cell(money(total_amount, currency), "right", 18),
-            ]
-        )
-    specs = (
-        ColumnSpec(28, "L"),
-        ColumnSpec(10, "R"),
-        ColumnSpec(16, "R"),
-        ColumnSpec(18, "R"),
-    )
-    headers = (
-        _fmt_cell("Process", "left", 28),
-        _fmt_cell("Hours", "right", 10),
-        _fmt_cell("Rate", "right", 16),
-        _fmt_cell("Amount (per part)", "right", 18),
-    )
-    return draw_boxed_table(headers, rows, specs)
 
 
 def _render_cycle_reference(data: Mapping[str, Any]) -> str | None:
@@ -518,48 +402,66 @@ def _render_cycle_reference(data: Mapping[str, Any]) -> str | None:
         return None
     rows: list[list[str]] = []
     for entry in entries:
-        if not isinstance(entry, Mapping):
-            continue
-        label = ellipsize(str(entry.get("label") or entry.get("name") or ""), 44)
-        planning_minutes = _coerce_float(entry.get("planning_minutes"))
-        billed_minutes = _coerce_float(entry.get("billed_minutes"))
-        billed_hours = _coerce_float(entry.get("billed_hours"))
-        if billed_hours is None and billed_minutes is not None:
-            billed_hours = billed_minutes / 60.0
-        rows.append(
-            [
-                label,
-                f"{planning_minutes:.1f} min" if planning_minutes is not None else "—",
-                f"{billed_hours:.2f} hr" if billed_hours is not None else "—",
-            ]
-        )
-    if not rows:
-        return None
-    specs = (
-        ColumnSpec(44, "L"),
-        ColumnSpec(24, "R"),
-        ColumnSpec(DEFAULT_WIDTH - 44 - 24 - 4, "R"),
+        if isinstance(entry, Mapping):
+            label = entry.get("label") or entry.get("name") or ""
+            time_val = _coerce_float(entry.get("time")) or _coerce_float(entry.get("hours"))
+            notes = entry.get("notes") or entry.get("detail") or ""
+        else:
+            label = entry[0] if entry else ""
+            time_val = _coerce_float(entry[1]) if len(entry) > 1 else None
+            notes = entry[2] if len(entry) > 2 else ""
+        rows.append([
+            str(label),
+            f"{time_val:.2f} hr" if time_val is not None else "—",
+            str(notes) if notes else "",
+        ])
+
+    return ascii_table(
+        headers=["Activity", "Cycle Time", "Notes"],
+        rows=rows,
+        col_widths=[38, 12, 36],
+        col_aligns=["left", "right", "left"],
+        header_aligns=["left", "right", "left"],
     )
-    headers = ("Activity", "Planning Minutes", "Chargeable Hours")
-    return draw_boxed_table(headers, rows, specs)
 
 
 def _render_top_cycle_contributors(data: Mapping[str, Any]) -> str | None:
     entries = data.get("top_cycle_time") or data.get("cycle_top") or data.get("cycle_contributors")
     if not entries:
         return None
-    rows: list[list[str]] = []
-    for entry in entries[:5]:
+
+    def _coerce_minutes(entry: Mapping[str, Any] | Sequence[Any]) -> float | None:
         if isinstance(entry, Mapping):
-            label = entry.get("label") or entry.get("name") or ""
-            hours = _coerce_float(entry.get("hours"))
+            for key in (
+                "group_min",
+                "minutes",
+                "minutes_total",
+                "total_minutes",
+            ):
+                minutes_val = _coerce_float(entry.get(key))
+                if minutes_val is not None and minutes_val > 0:
+                    return minutes_val
+            hours_val = _coerce_float(entry.get("hours"))
+            if hours_val is not None and hours_val > 0:
+                return hours_val * 60.0
+            qty = _coerce_float(entry.get("qty"))
+            per_hole = _coerce_float(entry.get("t_per_hole_min")) or _coerce_float(
+                entry.get("minutes_per_hole")
+            )
+            if qty and per_hole:
+                return qty * per_hole
         else:
             label = entry[0] if entry else ""
             hours = _coerce_float(entry[1]) if len(entry) > 1 else None
-        rows.append([ellipsize(str(label), 76), f"{hours:.2f} hr" if hours is not None else "—"])
-    left = 76
-    right = DEFAULT_WIDTH - left - 3
-    return draw_kv_table(rows, left, right, left_align="L", right_align="R")
+        rows.append([str(label), f"{hours:.2f} hr" if hours is not None else "—"])
+
+    return ascii_table(
+        headers=["Activity", "Hours"],
+        rows=rows,
+        col_widths=[64, 12],
+        col_aligns=["left", "right"],
+        header_aligns=["left", "right"],
+    )
 
 
 def _render_drill_groups(data: Mapping[str, Any]) -> str | None:
@@ -602,8 +504,14 @@ def _render_traceability(data: Mapping[str, Any]) -> str | None:
         pairs = _to_pairs(entries)
     else:
         pairs = [(str(item[0]), item[1]) if isinstance(item, Sequence) and len(item) >= 2 else (str(item), "") for item in entries]
-    formatted = [(ellipsize(str(k), 46), ellipsize(str(v), 60)) for k, v in pairs]
-    return draw_kv_table(formatted, 46, DEFAULT_WIDTH - 46 - 3, left_align="L", right_align="L")
+    formatted = [[str(k), str(v)] for k, v in pairs]
+    return ascii_table(
+        headers=["Item", "Detail"],
+        rows=formatted,
+        col_widths=[38, 50],
+        col_aligns=["left", "left"],
+        header_aligns=["left", "left"],
+    )
 
 
 def render_quote(data: Mapping[str, Any]) -> str:
@@ -649,8 +557,7 @@ def render_quote(data: Mapping[str, Any]) -> str:
     if trace:
         sections.append(_render_section("Traceability", trace))
 
-    return "\n\n".join(sections)
+    return _sanitize_block("\n\n".join(sections))
 
 
 __all__ = ["render_quote"]
-
