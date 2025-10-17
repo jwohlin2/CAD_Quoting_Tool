@@ -8,6 +8,8 @@ plain data into a deterministic, email-safe ASCII presentation built on top of
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -407,8 +409,7 @@ def render_quote(data: Mapping[str, Any]) -> str:
     if trace:
         sections.append(_render_section("Traceability", trace))
 
-    return "\n\n".join(sections)
+    return _sanitize_block("\n\n".join(sections))
 
 
 __all__ = ["render_quote"]
-
