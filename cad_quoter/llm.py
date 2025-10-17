@@ -1066,9 +1066,81 @@ def explain_quote(
         if isinstance(extra_candidate, Mapping):
             render_state_extra = extra_candidate
 
+    def _extract_direct_drill_minutes(mapping: Mapping[str, Any]) -> tuple[float | None, bool]:
+        minutes_found: float | None = None
+        present = False
+        for key in (
+            "drill_total_minutes",
+            "drill_total_minutes_with_toolchange",
+            "total_minutes_with_toolchange",
+            "total_minutes",
+            "removal_drilling_minutes",
+            "removal_drilling_minutes_subtotal",
+        ):
+            if key in mapping:
+                present = True
+                minutes_val = _coerce_float(mapping.get(key))
+                if minutes_val is not None and minutes_val > 0:
+                    minutes_found = max(minutes_found or 0.0, float(minutes_val))
+        machine_val = _coerce_float(mapping.get("drill_machine_minutes"))
+        labor_val = _coerce_float(mapping.get("drill_labor_minutes"))
+        if machine_val is not None or labor_val is not None:
+            present = True
+            total = float(machine_val or 0.0) + float(labor_val or 0.0)
+            if total > 0:
+                minutes_found = max(minutes_found or 0.0, total)
+        return minutes_found, present
+
     drill_card_minutes = 0.0
-    if isinstance(render_state_extra, Mapping):
-        drill_card_minutes = _coerce_float(render_state_extra.get("drill_total_minutes")) or 0.0
+    drill_minutes_present = False
+
+    def _maybe_update_drill_minutes(source: Mapping[str, Any] | None) -> None:
+        nonlocal drill_card_minutes, drill_minutes_present
+        if not isinstance(source, Mapping):
+            return
+        stack: list[Mapping[str, Any]] = [source]
+        seen: set[int] = set()
+        while stack:
+            current = stack.pop()
+            ident = id(current)
+            if ident in seen:
+                continue
+            seen.add(ident)
+            minutes, present = _extract_direct_drill_minutes(current)
+            if present:
+                drill_minutes_present = True
+            if minutes is not None and minutes > drill_card_minutes:
+                drill_card_minutes = minutes
+            for next_key in ("extra", "drilling_meta"):
+                candidate = current.get(next_key)
+                if isinstance(candidate, Mapping):
+                    stack.append(candidate)
+
+    _maybe_update_drill_minutes(render_state_extra)
+    if isinstance(render_state, Mapping):
+        _maybe_update_drill_minutes(render_state)
+
+    for mapping in plan_info_mappings:
+        _maybe_update_drill_minutes(mapping)
+        for key in (
+            "bucket_state_extra",
+            "planner_render_state",
+            "bucket_render_state",
+            "render_state",
+        ):
+            candidate = mapping.get(key) if isinstance(mapping, Mapping) else None
+            _maybe_update_drill_minutes(candidate)
+
+    if isinstance(breakdown, Mapping):
+        for key in (
+            "planner_render_state",
+            "bucket_render_state",
+            "removal_summary",
+            "drilling_meta",
+            "bucket_state_extra",
+        ):
+            _maybe_update_drill_minutes(breakdown.get(key))
+
     has_drilling = drill_card_minutes > 0.0
 
     should_note_drilling = hole_groups_flag or (removal_hr is not None and removal_hr > 0)
@@ -1189,15 +1261,8 @@ def explain_quote(
         if isinstance(extra_candidate, Mapping):
             render_state_extra = extra_candidate
 
-    raw_minutes = None
-    if isinstance(render_state_extra, Mapping):
-        raw_minutes = render_state_extra.get("drill_total_minutes")
-
-    minutes_val = _coerce_float(raw_minutes) if raw_minutes is not None else None
-    has_card_minutes = raw_minutes is not None
-    drilling_hours = None
-    if minutes_val is not None and minutes_val > 0:
-        drilling_hours = minutes_val / 60.0
+    drilling_hours = drill_card_minutes / 60.0 if drill_card_minutes > 0.0 else None
+    has_card_minutes = drill_minutes_present
 
     if drilling_hours is not None and "drilling" not in [p.lower() for p in top_procs]:
         top_procs.append("Drilling")
