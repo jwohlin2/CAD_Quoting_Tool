@@ -14047,10 +14047,6 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             scrap_credit_amount = credit_value
             net_material_cost = max(0.0, float(base_material_cost) - credit_value)
 
-            material_entry["material_scrap_credit"] = float(scrap_credit_amount)
-            material_entry["material_scrap_credit_entered"] = bool(scrap_credit_amount > 0)
-            mat_block["material_scrap_credit"] = float(scrap_credit_amount)
-            mat_block["material_scrap_credit_entered"] = bool(scrap_credit_amount > 0)
             if scrap_price_used is not None:
                 material_entry["scrap_credit_unit_price_usd_per_lb"] = float(scrap_price_used)
                 mat_block["scrap_credit_unit_price_usd_per_lb"] = float(scrap_price_used)
@@ -14061,7 +14057,26 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             if scrap_credit_source:
                 material_entry["scrap_credit_source"] = scrap_credit_source
                 mat_block["scrap_credit_source"] = scrap_credit_source
+
+            if scrap_credit_source == "wieland":
+                material_entry["computed_scrap_credit_usd"] = float(scrap_credit_amount)
+                mat_block["computed_scrap_credit_usd"] = float(scrap_credit_amount)
+                material_entry["scrap_price_source"] = "wieland"
+                mat_block["scrap_price_source"] = "wieland"
+                material_entry.pop("material_scrap_credit", None)
+                material_entry.pop("material_scrap_credit_entered", None)
+                mat_block.pop("material_scrap_credit", None)
+                mat_block.pop("material_scrap_credit_entered", None)
+            else:
+                material_entry.pop("computed_scrap_credit_usd", None)
+                mat_block.pop("computed_scrap_credit_usd", None)
+                material_entry["material_scrap_credit"] = float(scrap_credit_amount)
+                material_entry["material_scrap_credit_entered"] = bool(scrap_credit_amount > 0)
+                mat_block["material_scrap_credit"] = float(scrap_credit_amount)
+                mat_block["material_scrap_credit_entered"] = bool(scrap_credit_amount > 0)
         else:
+            material_entry.pop("computed_scrap_credit_usd", None)
+            mat_block.pop("computed_scrap_credit_usd", None)
             material_entry.pop("material_scrap_credit", None)
             material_entry.pop("material_scrap_credit_entered", None)
             mat_block.pop("material_scrap_credit", None)
