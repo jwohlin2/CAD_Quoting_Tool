@@ -4758,6 +4758,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         except Exception:
             return 0.0
 
+    separate_labor_cfg = bool(getattr(cfg, "separate_machine_labor", False)) if cfg else False
+    cfg_labor_rate_value = 0.0
+    if separate_labor_cfg:
+        cfg_labor_rate_value = _coerce_rate_value(getattr(cfg, "labor_rate_per_hr", 0.0))
+        if cfg_labor_rate_value <= 0.0:
+            cfg_labor_rate_value = 45.0
+
     if "ShopRate" not in rates:
         fallback_shop = _coerce_rate_value(rates.get("MillingRate"))
         rates.setdefault("ShopRate", fallback_shop)
@@ -4775,6 +4782,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         labor_rate_value = _coerce_rate_value(rates.get("ShopLaborRate"))
     if labor_rate_value <= 0:
         labor_rate_value = 85.0
+    if separate_labor_cfg and cfg_labor_rate_value > 0.0:
+        labor_rate_value = cfg_labor_rate_value
     rates["LaborRate"] = labor_rate_value
 
     machine_rate_value = _coerce_rate_value(rates.get("MachineRate"))
@@ -4799,27 +4808,37 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         rates.setdefault("ProgrammerRate", programmer_fallback)
 
     programmer_rate_value = _coerce_rate_value(rates.get("ProgrammerRate"))
-    if programmer_rate_value <= 0:
-        programmer_rate_value = engineer_rate_val if engineer_rate_val > 0 else _coerce_rate_value(rates.get("MillingRate"))
-    if programmer_rate_value <= 0 and shop_rate_val > 0:
-        programmer_rate_value = shop_rate_val
-    if programmer_rate_value <= 0:
-        programmer_rate_value = labor_rate_value
-    if programmer_rate_value <= 0:
-        programmer_rate_value = 90.0
-    if programmer_rate_value > 0:
-        programmer_rate_value = max(programmer_rate_value, 90.0)
+    if separate_labor_cfg and cfg_labor_rate_value > 0.0:
+        programmer_rate_value = cfg_labor_rate_value
+    else:
+        if programmer_rate_value <= 0:
+            programmer_rate_value = (
+                engineer_rate_val
+                if engineer_rate_val > 0
+                else _coerce_rate_value(rates.get("MillingRate"))
+            )
+        if programmer_rate_value <= 0 and shop_rate_val > 0:
+            programmer_rate_value = shop_rate_val
+        if programmer_rate_value <= 0:
+            programmer_rate_value = labor_rate_value
+        if programmer_rate_value <= 0:
+            programmer_rate_value = 90.0
+        if programmer_rate_value > 0:
+            programmer_rate_value = max(programmer_rate_value, 90.0)
     rates["ProgrammerRate"] = programmer_rate_value
 
     programming_rate_value = _coerce_rate_value(rates.get("ProgrammingRate"))
-    if programming_rate_value <= 0:
-        programming_rate_value = programmer_rate_value
-    if programming_rate_value <= 0:
-        programming_rate_value = labor_rate_value
-    if programming_rate_value <= 0:
-        programming_rate_value = 90.0
-    if programming_rate_value > 0:
-        programming_rate_value = max(programming_rate_value, 90.0)
+    if separate_labor_cfg and cfg_labor_rate_value > 0.0:
+        programming_rate_value = cfg_labor_rate_value
+    else:
+        if programming_rate_value <= 0:
+            programming_rate_value = programmer_rate_value
+        if programming_rate_value <= 0:
+            programming_rate_value = labor_rate_value
+        if programming_rate_value <= 0:
+            programming_rate_value = 90.0
+        if programming_rate_value > 0:
+            programming_rate_value = max(programming_rate_value, 90.0)
     rates["ProgrammingRate"] = programming_rate_value
 
     inspector_rate_value = _coerce_rate_value(rates.get("InspectorRate"))
@@ -6749,6 +6768,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     programmer_rate = _resolve_rate_with_fallback(
         prog.get("prog_rate"), "ProgrammingRate", "ProgrammerRate", "ShopRate"
     )
+    if separate_labor_cfg and cfg_labor_rate_value > 0.0:
+        programmer_rate = cfg_labor_rate_value
     engineer_rate = _resolve_rate_with_fallback(
         prog.get("eng_rate"), "EngineerRate", "ShopRate"
     )
@@ -7719,6 +7740,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 "ProgrammingRate",
                 "ShopRate",
             )
+            if separate_labor_cfg and cfg_labor_rate_value > 0.0:
+                prog_rate_detail = cfg_labor_rate_value
             per_lot_cost += prog_hr_detail * max(prog_rate_detail, 0.0)
             detail_hours += prog_hr_detail
             detail_args.append(
@@ -7756,6 +7779,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     "ProgrammingRate",
                     "ShopRate",
                 )
+            if separate_labor_cfg and cfg_labor_rate_value > 0.0:
+                remainder_rate = cfg_labor_rate_value
             per_lot_cost += remaining_hours * max(remainder_rate, 0.0)
 
         if total_programming_hours > 0:
