@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import argparse
 import copy
-import csv
 import importlib
 import json
 import math
@@ -24,7 +23,7 @@ import re
 import sys
 import time
 import typing
-from typing import Any, Mapping, cast
+from typing import Any, Mapping
 from collections import Counter
 from collections.abc import (
     Callable,
@@ -37,14 +36,6 @@ from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
-try:
-    from functools import lru_cache
-except ImportError:  # pragma: no cover - fallback for very old Python versions
-    def lru_cache(*_args, **_kwargs):
-        def _decorator(func):
-            return func
-
-        return _decorator
 
 from cad_quoter.app import runtime as _runtime
 from cad_quoter.app._value_utils import (
@@ -58,7 +49,6 @@ from cad_quoter.app.container import (
 from cad_quoter.resources import (
     default_app_settings_json,
     default_master_variables_csv,
-    default_catalog_csv,
 )
 from cad_quoter.config import (
     AppEnvironment,
@@ -81,6 +71,7 @@ from cad_quoter.utils.render_utils import (
     format_weight_lb_decimal,
     format_weight_lb_oz,
     QuoteDocRecorder,
+    render_quote_doc,
 )
 from cad_quoter.pricing import load_backup_prices_csv
 from cad_quoter.pricing.vendor_csv import (
@@ -109,78 +100,6 @@ from cad_quoter.domain import (
 from cad_quoter.vendors import ezdxf as _ezdxf_vendor
 
 from bucketizer import bucketize
-
-from quote_renderer import render_quote as _render_structured_quote
-
-# === ASCII TABLE ENGINE (monospaced) ===
-
-from textwrap import wrap as _wrap
-
-
-def _cell_lines(text, width):
-    """Return a list of wrapped lines for a cell, width-aware, no hard truncation."""
-    s = "" if text is None else str(text)
-    # split existing newlines into paragraphs, wrap each, keep empty at least one line
-    chunks = []
-    for para in s.splitlines() or [""]:
-        w = _wrap(para, width=width) or [""]
-        chunks.extend(w)
-    return chunks
-
-
-def _pad(s, width, align="left"):
-    s = "" if s is None else str(s)
-    if len(s) > width:
-        # already wrapped before; this branch only fires if caller passed a long single line by mistake
-        s = s[:width]
-    pad = width - len(s)
-    if align == "right":
-        return " " * pad + s
-    elif align == "center":
-        left = pad // 2
-        right = pad - left
-        return " " * left + s + " " * right
-    return s + " " * pad  # left
-
-
-def _hline(widths):
-    # one space padding on each side of cells => borders use width+2
-    return "+" + "+".join("-" * (w + 2) for w in widths) + "+"
-
-
-def ascii_table(headers, rows, *, col_widths, col_aligns):
-    """
-    headers: list[str]
-    rows: list[list[str]]
-    col_widths: list[int]   (content width, not including the 1-space left/right padding)
-    col_aligns: list[str]   ("left"|"right"|"center")
-    """
-    assert len(headers) == len(col_widths) == len(col_aligns)
-    out = []
-    top = _hline(col_widths)
-    out.append(top)
-
-    # header row (single-line; wrap if you want, but better to size headers to fit)
-    hdr = "|"
-    for h, w, a in zip(headers, col_widths, col_aligns):
-        hdr += " " + _pad(h, w, a) + " |"
-    out.append(hdr)
-    out.append(top)
-
-    # data rows (wrapped, row height = max cell line-count)
-    for r in rows:
-        # ensure row has same length as headers
-        r = list(r) + [""] * (len(headers) - len(r))
-        wrapped_cols = [_cell_lines(c, w) for c, w in zip(r, col_widths)]
-        height = max(len(lines) for lines in wrapped_cols) if wrapped_cols else 1
-        for i in range(height):
-            line = "|"
-            for lines, w, a in zip(wrapped_cols, col_widths, col_aligns):
-                cell = lines[i] if i < len(lines) else ""
-                line += " " + _pad(cell, w, a) + " |"
-            out.append(line)
-        out.append(top)
-    return "\n".join(out)
 
 from appkit.geometry_shim import (
     read_cad_any,
@@ -220,8 +139,6 @@ from appkit.merge_utils import (
     _collect_process_keys,
 )
 
-_log = logger
-
 from appkit.effective import (
     compute_effective_state,
     effective_to_overrides,
@@ -258,7 +175,7 @@ from appkit.scrap_helpers import (
     HOLE_SCRAP_CAP,
 )
 from appkit.planner_helpers import _process_plan_job
-from appkit.env_utils import FORCE_ESTIMATOR, FORCE_PLANNER
+from appkit.env_utils import FORCE_PLANNER
 from appkit.planner_adapter import resolve_planner
 
 from appkit.data import load_json, load_text
@@ -403,13 +320,12 @@ def _render_time_per_hole(
     index_min: float,
     peck_min_deep: float,
     peck_min_std: float,
-) -> tuple[float, bool, bool, list[dict[str, Any]]]:
+) -> tuple[float, bool, bool]:
     append_line("TIME PER HOLE – DRILL GROUPS")
     append_line("-" * 66)
     subtotal_min = 0.0
     seen_deep = False
     seen_std = False
-    rows: list[dict[str, Any]] = []
     for b in bins:
         try:
             op = (b.get("op") or b.get("op_name") or "").strip().lower()
@@ -429,17 +345,6 @@ def _render_time_per_hole(
             t_hole = (depth / max(ipm, 1e-6)) + float(index_min) + peck
             group_min = t_hole * qty
             subtotal_min += group_min
-            rows.append(
-                {
-                    "diameter_in": float(d_in),
-                    "qty": int(qty),
-                    "depth_in": float(depth),
-                    "sfm": float(sfm),
-                    "ipr": float(ipr),
-                    "minutes_per_hole": float(t_hole),
-                    "group_minutes": float(group_min),
-                }
-            )
             # single-line, no material
             append_line(
                 f'Dia {d_in:.3f}" × {qty}  | depth {depth:.3f}" | {int(round(sfm))} sfm | {ipr:.4f} ipr | '
@@ -448,430 +353,8 @@ def _render_time_per_hole(
         except Exception:
             continue
     append_line("")
-    return subtotal_min, seen_deep, seen_std, rows
+    return subtotal_min, seen_deep, seen_std
 
-
-@dataclass
-class RemovalCardResult:
-    lines: list[str] = field(default_factory=list)
-    removal_drilling_minutes: float | None = None
-    removal_drilling_minutes_subtotal: float | None = None
-    removal_drilling_hours_precise: float | None = None
-    total_minutes_with_toolchange: float | None = None
-    tool_add_minutes: float = 0.0
-    subtotal_minutes: float = 0.0
-    seen_deep: bool = False
-    seen_std: bool = False
-    time_per_hole_payload: dict[str, Any] | None = None
-    process_plan_summary: dict[str, Any] | None = None
-    error: str | None = None
-
-
-def _compute_removal_card_section(
-    breakdown: _MutableMappingABC[str, Any] | Mapping[str, Any],
-    *,
-    rates: Mapping[str, Any] | None,
-    prefer_removal_drilling_hours: bool,
-) -> RemovalCardResult:
-    result = RemovalCardResult()
-
-    def _append(line: str) -> None:
-        result.lines.append(str(line))
-
-    try:
-        drilling_meta_container = (
-            breakdown.get("drilling_meta")
-            if isinstance(breakdown, _MappingABC)
-            else None
-        )
-        if isinstance(drilling_meta_container, dict):
-            drilling_meta: dict[str, Any] = drilling_meta_container
-        elif isinstance(drilling_meta_container, _MappingABC):
-            drilling_meta = {str(k): v for k, v in drilling_meta_container.items()}
-            if isinstance(breakdown, _MutableMappingABC):
-                breakdown["drilling_meta"] = drilling_meta
-        else:
-            drilling_meta = {}
-            if isinstance(breakdown, _MutableMappingABC):
-                breakdown["drilling_meta"] = drilling_meta
-
-        mat_canon = str(
-            drilling_meta.get("material_canonical")
-            or drilling_meta.get("material")
-            or "-"
-        )
-        mat_group = drilling_meta.get("material_group") or drilling_meta.get("group") or "-"
-        row_group = (
-            drilling_meta.get("row_material_group")
-            or drilling_meta.get("row_group")
-            or None
-        )
-        holes_deep = int(drilling_meta.get("holes_deep") or 0)
-        holes_std = int(drilling_meta.get("holes_std") or 0)
-        dia_vals = _ensure_list(drilling_meta.get("dia_in_vals"))
-        depth_vals = _ensure_list(drilling_meta.get("depth_in_vals"))
-        sfm_deep = float(drilling_meta.get("sfm_deep") or 39.0)
-        sfm_std = float(drilling_meta.get("sfm_std") or 80.0)
-        ipr_deep_vals = (
-            _ensure_list(drilling_meta.get("ipr_deep_vals"), [0.0006, 0.0025])
-            or [0.0006, 0.0025]
-        )
-        ipr_std_val = float(drilling_meta.get("ipr_std_val") or 0.0060)
-        rpm_deep_vals = (
-            _ensure_list(drilling_meta.get("rpm_deep_vals"), [238, 1194])
-            or [238, 1194]
-        )
-        rpm_std_vals = (
-            _ensure_list(drilling_meta.get("rpm_std_vals"), [169, 407])
-            or [169, 407]
-        )
-        ipm_deep_vals = (
-            _ensure_list(drilling_meta.get("ipm_deep_vals"), [0.5, 1.0])
-            or [0.5, 1.0]
-        )
-        ipm_std_vals = (
-            _ensure_list(drilling_meta.get("ipm_std_vals"), [1.0, 2.4])
-            or [1.0, 2.4]
-        )
-        index_min = float(drilling_meta.get("index_min_per_hole") or 0.13)
-        peck_min_rng = (
-            _ensure_list(drilling_meta.get("peck_min_per_hole_vals"), [0.07, 0.08])
-            or [0.07, 0.08]
-        )
-        peck_min_deep = float(min(peck_min_rng))
-        peck_min_std = float(max(peck_min_rng))
-        tchg_deep = float(drilling_meta.get("toolchange_min_deep") or 8.00)
-        tchg_std = float(drilling_meta.get("toolchange_min_std") or 2.50)
-
-        bins = drilling_meta.get("bins_list")
-        if isinstance(bins, tuple):
-            bins = list(bins)
-        if not isinstance(bins, list):
-            bins_dict = drilling_meta.get("bins") or {}
-            bins = [
-                v
-                for _, v in sorted(
-                    bins_dict.items(),
-                    key=lambda kv: float(kv[1].get("diameter_in", 0.0))
-                    if isinstance(kv[1], dict)
-                    else 0.0,
-                )
-            ] if isinstance(bins_dict, dict) else []
-
-        _render_removal_card(
-            _append,
-            mat_canon=mat_canon,
-            mat_group=mat_group,
-            row_group=row_group,
-            holes_deep=holes_deep,
-            holes_std=holes_std,
-            dia_vals_in=dia_vals,
-            depth_vals_in=depth_vals,
-            sfm_deep=sfm_deep,
-            sfm_std=sfm_std,
-            ipr_deep_vals=ipr_deep_vals,
-            ipr_std_val=ipr_std_val,
-            rpm_deep_vals=rpm_deep_vals,
-            rpm_std_vals=rpm_std_vals,
-            ipm_deep_vals=ipm_deep_vals,
-            ipm_std_vals=ipm_std_vals,
-            index_min_per_hole=index_min,
-            peck_min_rng=peck_min_rng,
-            toolchange_min_deep=tchg_deep,
-            toolchange_min_std=tchg_std,
-        )
-
-        subtotal_min, seen_deep, seen_std, time_per_hole_rows = _render_time_per_hole(
-            _append,
-            bins=bins,
-            index_min=index_min,
-            peck_min_deep=peck_min_deep,
-            peck_min_std=peck_min_std,
-        )
-
-        subtotal_min = float(max(subtotal_min, 0.0))
-        tool_add = (tchg_deep if seen_deep else 0.0) + (tchg_std if seen_std else 0.0)
-        total_drill_minutes_with_toolchange = subtotal_min + tool_add
-        removal_drilling_minutes_subtotal = float(subtotal_min)
-        removal_drilling_minutes = float(max(total_drill_minutes_with_toolchange, 0.0))
-
-        result.subtotal_minutes = float(subtotal_min)
-        result.seen_deep = seen_deep
-        result.seen_std = seen_std
-        result.tool_add_minutes = float(tool_add)
-        result.total_minutes_with_toolchange = float(total_drill_minutes_with_toolchange)
-        result.removal_drilling_minutes_subtotal = removal_drilling_minutes_subtotal
-        result.removal_drilling_minutes = removal_drilling_minutes
-        if removal_drilling_minutes > 0.0:
-            result.removal_drilling_hours_precise = removal_drilling_minutes / 60.0
-
-        rows_for_payload: list[dict[str, Any]] = []
-        for entry in time_per_hole_rows:
-            try:
-                rows_for_payload.append(
-                    {
-                        "diameter_in": _safe_float(entry.get("diameter_in")),
-                        "qty": int(entry.get("qty") or 0),
-                        "depth_in": _safe_float(entry.get("depth_in")),
-                        "sfm": _safe_float(entry.get("sfm")),
-                        "ipr": _safe_float(entry.get("ipr")),
-                        "minutes_per_hole": _safe_float(entry.get("minutes_per_hole")),
-                        "group_minutes": _safe_float(entry.get("group_minutes")),
-                    }
-                )
-            except Exception:
-                continue
-
-        tool_components: list[dict[str, Any]] = []
-        if seen_deep:
-            tool_components.append({"label": "Deep-Drill", "minutes": float(tchg_deep)})
-        if seen_std:
-            tool_components.append({"label": "Drill", "minutes": float(tchg_std)})
-
-        time_per_hole_payload: dict[str, Any] | None = None
-        if rows_for_payload:
-            time_per_hole_payload = {
-                "rows": rows_for_payload,
-                "subtotal_minutes": float(subtotal_min),
-                "toolchange_minutes": float(tool_add),
-                "total_minutes_with_toolchange": float(total_drill_minutes_with_toolchange),
-            }
-            if tool_components:
-                time_per_hole_payload["tool_components"] = tool_components
-        result.time_per_hole_payload = time_per_hole_payload
-
-        drill_meta = drilling_meta
-        drill_meta["subtotal_minutes"] = float(removal_drilling_minutes_subtotal)
-        drill_meta["total_minutes"] = float(removal_drilling_minutes)
-        drill_meta["toolchange_minutes"] = float(tool_add)
-        drill_meta["total_minutes_with_toolchange"] = float(total_drill_minutes_with_toolchange)
-        if time_per_hole_payload:
-            drill_meta["time_per_hole_detail"] = time_per_hole_payload
-
-        bill_min = float(
-            drilling_meta.get("total_minutes_billed")
-            or drilling_meta.get("total_minutes_with_toolchange")
-            or drilling_meta.get("total_minutes")
-            or 0.0
-        )
-
-        plan_drill_min: float | None = None
-        plan_candidates = [
-            breakdown.get("process_plan") if isinstance(breakdown, _MappingABC) else None,
-        ]
-        for candidate in plan_candidates:
-            if not isinstance(candidate, _MappingABC):
-                continue
-            plan_drilling = candidate.get("drilling")
-            if not isinstance(plan_drilling, _MappingABC):
-                continue
-            plan_minutes = _coerce_float_or_none(
-                plan_drilling.get("total_minutes_with_toolchange")
-            )
-            if plan_minutes is not None and plan_minutes > 0.0:
-                plan_drill_min = float(plan_minutes)
-                break
-
-        drill_min = (
-            plan_drill_min if plan_drill_min and plan_drill_min > 0.0 else bill_min
-        )
-        bill_min = drill_min
-        drill_hr = drill_min / 60.0 if drill_min else 0.0
-        drill_meta["total_minutes_billed"] = drill_min
-        drill_meta["bill_hours"] = float(drill_hr)
-
-        pm_container = breakdown.setdefault("process_meta", {})
-        if not isinstance(pm_container, dict):
-            try:
-                pm_container = dict(pm_container or {})
-            except Exception:
-                pm_container = {}
-            breakdown["process_meta"] = pm_container
-        pm = pm_container.setdefault("drilling", {})
-        pm_container["Drilling"] = pm
-        pm["minutes"] = drill_min
-        pm["hr"] = drill_hr
-        pm["rate"] = float((rates or {}).get("DrillingRate") or 0.0)
-        pm["basis"] = ["minutes_engine"]
-
-        bucket_view_obj = breakdown.get("bucket_view")
-        if not isinstance(bucket_view_obj, dict):
-            if isinstance(bucket_view_obj, _MappingABC):
-                try:
-                    bucket_view_obj = dict(bucket_view_obj)
-                except Exception:
-                    bucket_view_obj = {}
-            else:
-                bucket_view_obj = {}
-            breakdown["bucket_view"] = bucket_view_obj
-
-        buckets_obj = bucket_view_obj.setdefault("buckets", {})
-        if not isinstance(buckets_obj, dict):
-            try:
-                buckets_obj = dict(buckets_obj)
-            except Exception:
-                buckets_obj = {}
-            bucket_view_obj["buckets"] = buckets_obj
-
-        old_entry = buckets_obj.pop("drilling", {}) if isinstance(buckets_obj, dict) else {}
-
-        new_minutes = round(drill_min, 2)
-        machine_rate = float(pm.get("rate") or 0.0)
-        billed_total = (
-            round((drill_min / 60.0) * machine_rate, 2)
-            if machine_rate > 0.0 and drill_min > 0.0
-            else 0.0
-        )
-        if billed_total <= 0.0:
-            billed_total = round(_safe_float((old_entry or {}).get("total$"), default=0.0), 2)
-        if new_minutes <= 0.0 and isinstance(old_entry, _MappingABC):
-            legacy_minutes = _safe_float(old_entry.get("minutes"), default=0.0)
-            if legacy_minutes > 0.0:
-                new_minutes = round(legacy_minutes, 2)
-        cost_mode = _bucket_cost_mode("drilling")
-        if cost_mode == "labor":
-            labor_cost = billed_total
-            machine_cost = 0.0
-        else:
-            machine_cost = billed_total
-            labor_cost = 0.0
-        new_total = round(machine_cost + labor_cost, 2)
-
-        if new_minutes <= 0.0 and new_total <= 0.0 and isinstance(old_entry, _MappingABC):
-            buckets_obj["drilling"] = dict(old_entry)
-        else:
-            drilling_entry = buckets_obj.setdefault(
-                "drilling",
-                {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0, "total$": 0.0},
-            )
-            drilling_entry["minutes"] = new_minutes
-            drilling_entry["machine$"] = machine_cost
-            drilling_entry["labor$"] = labor_cost
-            drilling_entry["total$"] = new_total
-
-            order_list = bucket_view_obj.setdefault("order", [])
-            if not isinstance(order_list, list):
-                try:
-                    order_list = list(order_list or [])
-                except Exception:
-                    order_list = []
-                bucket_view_obj["order"] = order_list
-            if "drilling" not in order_list:
-                order_list.append("drilling")
-
-        totals_map = bucket_view_obj.setdefault("totals", {})
-        if not isinstance(totals_map, dict):
-            try:
-                totals_map = dict(totals_map or {})
-            except Exception:
-                totals_map = {}
-            bucket_view_obj["totals"] = totals_map
-
-        minutes_sum = 0.0
-        machine_sum = 0.0
-        labor_sum = 0.0
-        total_sum = 0.0
-        for info in buckets_obj.values():
-            if not isinstance(info, _MappingABC):
-                continue
-            minutes_sum += _safe_float(info.get("minutes"), default=0.0)
-            machine_sum += _safe_float(info.get("machine$"), default=0.0)
-            labor_sum += _safe_float(info.get("labor$"), default=0.0)
-            total_sum += _safe_float(info.get("total$"), default=0.0)
-
-        totals_map["minutes"] = round(minutes_sum, 2)
-        totals_map["machine$"] = round(machine_sum, 2)
-        totals_map["labor$"] = round(labor_sum, 2)
-        totals_map["total$"] = round(total_sum, 2)
-
-        process_plan_summary_card: dict[str, Any] | None
-        process_plan_candidate = breakdown.get("process_plan") if isinstance(breakdown, _MappingABC) else None
-        if isinstance(process_plan_candidate, dict):
-            process_plan_summary_card = process_plan_candidate
-        elif isinstance(process_plan_candidate, _MappingABC):
-            try:
-                process_plan_summary_card = dict(process_plan_candidate)
-            except Exception:
-                process_plan_summary_card = {}
-            breakdown["process_plan"] = process_plan_summary_card
-        else:
-            process_plan_summary_card = breakdown.setdefault("process_plan", {})
-        result.process_plan_summary = process_plan_summary_card if isinstance(process_plan_summary_card, dict) else None
-        if isinstance(process_plan_summary_card, dict):
-            drill_meta_summary = process_plan_summary_card.setdefault("drilling", {})
-            drill_meta_summary["subtotal_minutes"] = float(removal_drilling_minutes_subtotal)
-            drill_meta_summary["total_minutes"] = float(removal_drilling_minutes)
-            drill_meta_summary["toolchange_minutes"] = float(tool_add)
-            drill_meta_summary["total_minutes_with_toolchange"] = float(total_drill_minutes_with_toolchange)
-            drill_meta_summary["total_minutes_billed"] = bill_min
-            drill_meta_summary["bill_hours"] = float(drill_hr)
-
-        _append(
-            "Toolchange adders: Deep-Drill {:.2f} min + Drill {:.2f} min = {:.2f} min".format(
-                tchg_deep,
-                tchg_std,
-                tool_add,
-            )
-            if tool_add > 0
-            else "Toolchange adders: -"
-        )
-        _append("-" * 66)
-        _append(
-            f"Subtotal (per-hole × qty) . {subtotal_min:.2f} min  ({fmt_hours(subtotal_min/60.0)})"
-        )
-        _append(
-            "TOTAL DRILLING (with toolchange) . {:.2f} min  ({:.2f} hr)".format(
-                total_drill_minutes_with_toolchange,
-                total_drill_minutes_with_toolchange / 60.0,
-            )
-        )
-        _append("")
-    except Exception as e:
-        _append(f"[MATERIAL REMOVAL block skipped: {e}]")
-        _append("")
-        result.error = str(e)
-
-    return result
-
-
-def _apply_removal_minutes_to_render_state(
-    result: RemovalCardResult | None,
-    *owners: Any,
-) -> None:
-    if result is None:
-        return
-
-    for owner in owners:
-        extra_candidate: Any
-        if owner is None:
-            continue
-        try:
-            extra_candidate = getattr(owner, "extra", None)
-        except Exception:
-            extra_candidate = None
-        extra_map: _MutableMappingABC[str, Any] | None
-        if isinstance(extra_candidate, _MutableMappingABC):
-            extra_map = extra_candidate
-        elif isinstance(owner, PlannerBucketRenderState):
-            extra_map = owner.extra
-        elif isinstance(owner, dict):
-            extra_map = owner.setdefault("extra", {})  # type: ignore[assignment]
-        else:
-            extra_map = None
-        if not isinstance(extra_map, _MutableMappingABC):
-            continue
-
-        if result.removal_drilling_minutes_subtotal is not None:
-            extra_map["drill_machine_minutes"] = float(result.removal_drilling_minutes_subtotal)
-            extra_map["removal_drilling_minutes_subtotal"] = float(result.removal_drilling_minutes_subtotal)
-        if result.tool_add_minutes is not None:
-            extra_map["drill_labor_minutes"] = float(result.tool_add_minutes)
-        if result.total_minutes_with_toolchange is not None:
-            extra_map["drill_total_minutes"] = float(result.total_minutes_with_toolchange)
-        if result.removal_drilling_minutes is not None:
-            extra_map["removal_drilling_minutes"] = float(result.removal_drilling_minutes)
-        if result.removal_drilling_hours_precise is not None:
-            extra_map["removal_drilling_hours"] = float(result.removal_drilling_hours_precise)
 
 if sys.platform == "win32":
     occ_bin = os.path.join(sys.prefix, "Library", "bin")
@@ -925,23 +408,6 @@ SCRAP_CREDIT_FALLBACK_USD_PER_LB = 0.35
 SCRAP_RECOVERY_DEFAULT = 0.85
 
 
-def _usd_per_lb(value: Any, unit_hint: Any | None = None) -> float | None:
-    """Normalize assorted unit hints down to USD/lb."""
-
-    if value in (None, ""):
-        return None
-    try:
-        v = float(value)
-    except Exception:
-        return None
-    unit = str(unit_hint or "").lower()
-    if "kg" in unit:
-        return v / LB_PER_KG
-    if "mt" in unit or "tonne" in unit or "/t" in unit:
-        return v / 1000.0 / LB_PER_KG
-    return v
-
-
 def _wieland_scrap_usd_per_lb(material_family: str | None) -> float | None:
     """Return the USD/lb scrap price from the Wieland scraper if available."""
 
@@ -975,10 +441,10 @@ def _wieland_scrap_usd_per_lb(material_family: str | None) -> float | None:
         logger.warning("Wieland scrap price lookup failed for %s: %s", fam, exc)
         return None
 
-    price_val = _coerce_float_or_none(price)
-    if price_val is None:
+    try:
+        price_float = float(price)
+    except Exception:
         return None
-    price_float = float(price_val)
 
     if not math.isfinite(price_float) or price_float <= 0:
         return None
@@ -1007,7 +473,7 @@ def _compute_direct_costs(
     if str(scrap_price_source or "").strip().lower() == "wieland":
         detail_map: Mapping[str, Any] | None
         detail_map = material_detail if isinstance(material_detail, _MappingABC) else None
-        scrap_mass_lb: float | None = None
+        scrap_mass_lb = None
         if detail_map is not None:
             for key in (
                 "scrap_credit_mass_lb",
@@ -1016,10 +482,10 @@ def _compute_direct_costs(
             ):
                 val = _coerce_float_or_none(detail_map.get(key))
                 if val is not None and val > 0:
-                    scrap_mass_lb = cast(float, val)
+                    scrap_mass_lb = float(val)
                     break
-        if scrap_mass_lb is not None and scrap_mass_lb > 0 and base_scrap_credit <= 0.0:
-            price_val: float | None = None
+        if scrap_mass_lb and scrap_mass_lb > 0 and base_scrap_credit <= 0.0:
+            price_val = None
             if detail_map is not None:
                 price_val = _coerce_float_or_none(
                     detail_map.get("scrap_credit_unit_price_usd_per_lb")
@@ -1031,20 +497,17 @@ def _compute_direct_costs(
                         "material_group"
                     )
                 price_val = _wieland_scrap_usd_per_lb(family_hint)
-            recovery_val: float | None = None
+            recovery_val = None
             if detail_map is not None:
                 recovery_val = _coerce_float_or_none(
                     detail_map.get("scrap_credit_recovery_pct")
                 )
             if recovery_val is None or recovery_val <= 0:
                 recovery_val = SCRAP_RECOVERY_DEFAULT
-            if (
-                price_val is not None
-                and price_val > 0
-                and recovery_val is not None
-                and recovery_val > 0
-            ):
-                computed_scrap_credit = scrap_mass_lb * price_val * recovery_val
+            if price_val is not None and price_val > 0 and recovery_val and recovery_val > 0:
+                computed_scrap_credit = float(scrap_mass_lb) * float(price_val) * float(
+                    recovery_val
+                )
     if computed_scrap_credit > 0:
         subtotal -= float(computed_scrap_credit)
     subtotal += sum(float(v or 0.0) for v in pt.values())
@@ -1091,36 +554,49 @@ def _material_cost_components(
         return raw
 
     overrides_map = overrides if isinstance(overrides, _MappingABC) else {}
-    core = _materials_material_cost_components(block, overrides=overrides_map, cfg=cfg)
 
-    tolerance = 0.51
-    base_value = float(core.get("base_usd", 0.0))
-    stock_piece_usd = core.get("stock_piece_usd")
-    if stock_piece_usd is not None:
-        try:
-            stock_piece_usd = float(stock_piece_usd)
-        except Exception:
-            stock_piece_usd = None
-
-    stock_source = core.get("stock_source") or _pick_text(
-        data.get("stock_price_source"),
-        data.get("stock_vendor"),
-        data.get("stock_source"),
-        data.get("unit_price_source"),
-        data.get("source"),
+    base_pre_credit = _first_numeric_or_none(
+        data.get("material_cost_before_credit"),
+        data.get("material_cost_pre_credit"),
+        data.get("material_cost_pre_scrap"),
+        data.get("material_cost_before_scrap"),
+        data.get("material_base_cost"),
     )
-    if not stock_source and cfg is not None:
-        source_hint = getattr(cfg, "stock_price_source", None)
-        if source_hint:
-            stock_source = str(source_hint)
 
-    base_source = core.get("base_source") or _pick_text(
-        data.get("unit_price_source"),
-        data.get("source"),
-        data.get("stock_vendor"),
+    scrap_credit_val = _coerce_float_or_none(data.get("material_scrap_credit"))
+    scrap_credit = max(0.0, float(scrap_credit_val)) if scrap_credit_val is not None else 0.0
+
+    tax_val = _coerce_float_or_none(data.get("material_tax"))
+    material_tax = max(0.0, float(tax_val)) if tax_val is not None else 0.0
+
+    net_candidate = _first_numeric_or_none(
+        data.get("total_material_cost"),
+        data.get("material_cost"),
+        data.get("material_direct_cost"),
+        data.get("material_total_cost"),
+        data.get("total_cost"),
     )
-    if not base_source and stock_source:
-        base_source = stock_source
+
+    if base_pre_credit is None:
+        if net_candidate is not None:
+            base_pre_credit = float(net_candidate) + float(scrap_credit)
+        else:
+            base_pre_credit = _first_numeric_or_none(
+                data.get("unit_price_each$"),
+                data.get("unit_price$"),
+                data.get("stock_price$"),
+                data.get("stock_price"),
+                data.get("supplier_min$"),
+                data.get("supplier_min"),
+                data.get("supplier_min_charge$"),
+                data.get("supplier_min_charge"),
+            )
+
+    base_value = float(base_pre_credit or 0.0)
+    scrap_value = max(0.0, float(scrap_credit))
+    tax_value = max(0.0, float(material_tax))
+    net_value = max(0.0, base_value - scrap_value)
+    total_value = max(0.0, base_value + tax_value - scrap_value)
 
     supplier_min = _first_numeric_or_none(
         data.get("supplier_min$"),
@@ -1128,11 +604,41 @@ def _material_cost_components(
         data.get("supplier_min_charge$"),
         data.get("supplier_min_charge"),
     )
-    if (
-        supplier_min is not None
-        and base_value > 0
-        and abs(float(supplier_min) - base_value) <= tolerance
-    ):
+
+    stock_price_candidate = _first_numeric_or_none(
+        data.get("unit_price_each$"),
+        data.get("unit_price$"),
+        data.get("stock_price$"),
+        data.get("stock_price"),
+    )
+
+    tolerance = 0.51
+    stock_piece_usd: float | None = None
+    if stock_price_candidate is not None and stock_price_candidate > 0:
+        if base_value <= 0 or abs(stock_price_candidate - base_value) <= tolerance:
+            stock_piece_usd = float(base_value if base_value > 0 else stock_price_candidate)
+
+    stock_source = _pick_text(
+        data.get("stock_price_source"),
+        data.get("stock_vendor"),
+        data.get("stock_source"),
+        data.get("unit_price_source"),
+        data.get("source"),
+    )
+    base_source = _pick_text(
+        data.get("unit_price_source"),
+        data.get("source"),
+        data.get("stock_vendor"),
+    )
+
+    if not stock_source and cfg is not None:
+        source_hint = getattr(cfg, "stock_price_source", None)
+        if source_hint:
+            stock_source = str(source_hint)
+    if not base_source and stock_source:
+        base_source = stock_source
+
+    if supplier_min is not None and base_value > 0 and abs(float(supplier_min) - base_value) <= tolerance:
         supplier_label = "Supplier Min"
         if base_source:
             supplier_label = f"{base_source} (supplier min)"
@@ -1162,189 +668,42 @@ def _material_cost_components(
         if scrap_hint:
             scrap_source = str(scrap_hint)
 
-    scrap_rate_text = core.get("scrap_rate_text")
-    scrap_source_label = _normalize_source(scrap_source) if scrap_source else ""
-    if scrap_rate_text and scrap_source_label:
-        rate_clean = scrap_rate_text.strip()
-        label_clean = str(scrap_source_label).strip()
-        if rate_clean.lower().startswith(label_clean.lower()):
-            composed = scrap_rate_text
+    scrap_price = _first_numeric_or_none(
+        data.get("scrap_credit_unit_price_usd_per_lb"),
+        data.get("scrap_price_usd_per_lb"),
+    )
+    scrap_recovery = _coerce_float_or_none(data.get("scrap_credit_recovery_pct"))
+    if scrap_recovery is None:
+        scrap_recovery = _coerce_float_or_none(data.get("scrap_recovery_pct"))
+
+    scrap_rate_segments: list[str] = []
+    if scrap_price is not None and scrap_price > 0:
+        scrap_rate_segments.append(f"{fmt_money(scrap_price, '$')}/lb")
+    if scrap_recovery is not None and scrap_recovery > 0:
+        recovery_val = float(scrap_recovery)
+        if recovery_val <= 1.0 + 1e-6:
+            recovery_pct = recovery_val * 100.0
         else:
-            composed = f"{scrap_source_label} {scrap_rate_text}"
-        scrap_rate_text = composed.strip()
+            recovery_pct = recovery_val
+        scrap_rate_segments.append(f"{recovery_pct:.0f}%")
 
-    base_for_total_calc: float
-    try:
-        base_for_total_calc = float(
-            core.get("stock_price_usd")
-            or core.get("base_usd")
-            or 0.0
-        )
-    except Exception:
-        base_for_total_calc = float(core.get("base_usd", 0.0) or 0.0)
-
-    try:
-        tax_for_total = float(core.get("tax_usd") or 0.0)
-    except Exception:
-        tax_for_total = 0.0
-
-    try:
-        scrap_for_total = abs(float(core.get("scrap_credit_usd") or 0.0))
-    except Exception:
-        scrap_for_total = 0.0
-
-    total_calc = max(base_for_total_calc + tax_for_total - scrap_for_total, 0.0)
-
-    total_usd_value: float
-    try:
-        total_usd_value = float(core.get("total_usd") or total_calc)
-    except Exception:
-        total_usd_value = float(total_calc)
+    scrap_rate_text = ""
+    if scrap_rate_segments:
+        scrap_rate_text = " × ".join(scrap_rate_segments)
+    scrap_source_label = _normalize_source(scrap_source) if scrap_source else ""
+    if scrap_source_label:
+        scrap_rate_text = f"{scrap_source_label} {scrap_rate_text}".strip()
 
     return {
         "stock_piece_usd": round(stock_piece_usd, 2) if stock_piece_usd is not None else None,
         "stock_source": _normalize_source(stock_source) if stock_source else "",
         "base_usd": round(base_value, 2),
         "base_source": _normalize_source(base_source) if base_source else "",
-        "tax_usd": round(tax_for_total, 2),
-        "scrap_credit_usd": round(scrap_for_total, 2),
+        "tax_usd": round(tax_value, 2),
+        "scrap_credit_usd": round(scrap_value, 2),
         "scrap_rate_text": scrap_rate_text,
-        "net_usd": round(float(core.get("net_usd", 0.0)), 2),
-        "total_usd": round(total_usd_value, 2),
-    }
-
-
-@lru_cache(maxsize=1)
-def _load_mcmaster_catalog_csv(path: str | None = None) -> list[dict[str, Any]]:
-    """Return rows from the McMaster stock catalog CSV."""
-
-    csv_path = path or os.getenv("CATALOG_CSV_PATH") or str(default_catalog_csv())
-    if not csv_path:
-        return []
-    try:
-        with open(csv_path, newline="", encoding="utf-8-sig") as handle:
-            reader = csv.DictReader(handle)
-            return [dict(row) for row in reader if row]
-    except FileNotFoundError:
-        return []
-    except Exception:
-        return []
-
-
-def _pick_mcmaster_plate_sku(
-    need_L_in: float,
-    need_W_in: float,
-    need_T_in: float,
-    *,
-    material_key: str = "MIC6",
-    catalog_rows: Sequence[Mapping[str, Any]] | None = None,
-) -> dict[str, Any] | None:
-    """Return the smallest-area McMaster plate covering the requested envelope."""
-
-    import math as _math
-
-    if not all(val and val > 0 for val in (need_L_in, need_W_in, need_T_in)):
-        return None
-
-    rows = list(catalog_rows) if catalog_rows is not None else _load_mcmaster_catalog_csv()
-    if not rows:
-        return None
-
-    target_key = str(material_key or "").strip().lower()
-    if not target_key:
-        return None
-
-    tolerance = 0.02
-    candidates: list[dict[str, Any]] = []
-    for row in rows:
-        if not isinstance(row, Mapping):
-            continue
-        material_text = str(
-            (row.get("material") or row.get("Material") or "")
-        ).strip().lower()
-        if not material_text:
-            continue
-        variants = {target_key}
-        if "_" in target_key:
-            variants.add(target_key.replace("_", " "))
-        if " " in target_key:
-            variants.add(target_key.replace(" ", ""))
-        normalised_material = material_text.replace("_", " ")
-        if not any(variant and variant in normalised_material for variant in variants):
-            continue
-        length = _coerce_float_or_none(
-            row.get("length_in")
-            or row.get("L_in")
-            or row.get("len_in")
-            or row.get("length")
-        )
-        width = _coerce_float_or_none(
-            row.get("width_in")
-            or row.get("W_in")
-            or row.get("wid_in")
-            or row.get("width")
-        )
-        thickness = _coerce_float_or_none(
-            row.get("thickness_in")
-            or row.get("T_in")
-            or row.get("thk_in")
-            or row.get("thickness")
-        )
-        if length is None or width is None or thickness is None:
-            continue
-        if not all(val > 0 for val in (length, width, thickness)):
-            continue
-        if abs(thickness - need_T_in) > tolerance:
-            continue
-        part_no = str(
-            row.get("mcmaster_part")
-            or row.get("part")
-            or row.get("sku")
-            or ""
-        ).strip()
-        if not part_no:
-            continue
-
-        def _covers(a: float, b: float, A: float, B: float) -> bool:
-            return (A >= a) and (B >= b)
-
-        ok1 = _covers(need_L_in, need_W_in, length, width)
-        ok2 = _covers(need_L_in, need_W_in, width, length)
-        if not (ok1 or ok2):
-            continue
-
-        area = length * width
-        overL1 = (length - need_L_in) if ok1 else _math.inf
-        overW1 = (width - need_W_in) if ok1 else _math.inf
-        overL2 = (width - need_L_in) if ok2 else _math.inf
-        overW2 = (length - need_W_in) if ok2 else _math.inf
-        over_L = min(overL1, overL2)
-        over_W = min(overW1, overW2)
-
-        candidates.append(
-            {
-                "len_in": float(length),
-                "wid_in": float(width),
-                "thk_in": float(thickness),
-                "mcmaster_part": part_no,
-                "area": float(area),
-                "overL": float(over_L),
-                "overW": float(over_W),
-                "source": row.get("source") or "mcmaster-catalog",
-            }
-        )
-
-    if not candidates:
-        return None
-
-    candidates.sort(key=lambda c: (c["area"], max(c["overL"], c["overW"])))
-    best = candidates[0]
-    return {
-        "len_in": float(best["len_in"]),
-        "wid_in": float(best["wid_in"]),
-        "thk_in": float(best["thk_in"]),
-        "mcmaster_part": best["mcmaster_part"],
-        "source": best.get("source") or "mcmaster-catalog",
+        "net_usd": round(net_value, 2),
+        "total_usd": round(total_value, 2),
     }
 
 
@@ -1427,7 +786,7 @@ from typing import (
     overload,
     no_type_check,
 )
-from functools import cmp_to_key, lru_cache
+from functools import cmp_to_key
 
 if typing.TYPE_CHECKING:  # pragma: no cover - import is for type checking only
     from ezdxf.document import Drawing  # type: ignore[attr-defined]
@@ -1466,23 +825,19 @@ def _resolve_pricing_source_value(
     planner_process_minutes: Any = None,
     hour_summary_entries: Mapping[str, Any] | None = None,
     additional_sources: Sequence[Any] | None = None,
-    ) -> str | None:
-    """Return a normalized pricing source, honoring explicit selections."""
+) -> str | None:
+    """Return a normalized pricing source, forcing planner when signals exist."""
 
-    fallback_text = None
+    text = None
     if base_value is not None:
-        candidate_text = str(base_value).strip()
-        if candidate_text:
-            lowered = candidate_text.lower()
-            if lowered == "planner":
-                return "planner"
-            if lowered not in {"legacy", "auto", "default", "fallback"}:
-                return candidate_text
-            fallback_text = candidate_text
+        text = str(base_value).strip()
+        if not text:
+            text = None
+
+    if text and text.lower() == "planner":
+        return "planner"
 
     if used_planner:
-        if fallback_text:
-            return fallback_text
         return "planner"
 
     # Delegate planner signal detection to the adapter helper
@@ -1496,14 +851,9 @@ def _resolve_pricing_source_value(
         hour_summary_entries=hour_summary_entries,
         additional_sources=list(additional_sources) if additional_sources is not None else None,
     ):
-        if fallback_text:
-            return fallback_text
         return "planner"
 
-    if fallback_text:
-        return fallback_text
-
-    return None
+    return text
 
 
 
@@ -1529,7 +879,6 @@ def _build_quote_header_lines(
     process_meta: Mapping[str, Any] | None,
     process_meta_raw: Mapping[str, Any] | None,
     hour_summary_entries: Mapping[str, Any] | None,
-    cfg: QuoteConfiguration | None = None,
 ) -> tuple[list[str], str | None]:
     """Construct the canonical QUOTE SUMMARY header lines."""
 
@@ -1613,17 +962,6 @@ def _build_quote_header_lines(
         breakdown=breakdown if isinstance(breakdown, _MappingABC) else None,
         hour_summary_entries=hour_summary_entries,
     )
-
-    # === HEADER: PRICING SOURCE OVERRIDE ===
-    if getattr(cfg, "prefer_removal_drilling_hours", False):
-        normalized_value = (
-            str(pricing_source_value).strip().lower()
-            if pricing_source_value is not None
-            else ""
-        )
-        if not normalized_value or normalized_value == "legacy":
-            pricing_source_value = "Estimator"
-            pricing_source_display = "Estimator"
 
     normalized_pricing_source: str | None = None
     if pricing_source_value is not None:
@@ -1838,7 +1176,7 @@ if __package__:
         _compute_scrap_mass_g as _compute_scrap_mass_g,
         _density_for_material as _density_for_material,
         _material_family as _material_family,
-        _material_cost_components as _materials_material_cost_components,
+        _material_cost_components as _material_cost_components,
         _material_price_from_choice as _material_price_from_choice,
         _material_price_per_g_from_choice as _material_price_per_g_from_choice,
         _nearest_std_side as _nearest_std_side,
@@ -1854,7 +1192,7 @@ else:
         _compute_scrap_mass_g as _compute_scrap_mass_g,
         _density_for_material as _density_for_material,
         _material_family as _material_family,
-        _material_cost_components as _materials_material_cost_components,
+        _material_cost_components as _material_cost_components,
         _material_price_from_choice as _material_price_from_choice,
         _material_price_per_g_from_choice as _material_price_per_g_from_choice,
         _nearest_std_side as _nearest_std_side,
@@ -4119,23 +3457,21 @@ class PlannerBucketRenderState:
     process_costs_for_render: dict[str, float] = field(default_factory=dict)
     notes: dict[str, str] = field(default_factory=dict)
     extra: dict[str, Any] = field(default_factory=dict)
-    rates: dict[str, float] = field(default_factory=dict)
 
 
 def _split_hours_for_bucket(
     label: str,
     hours: float,
-    render_state: PlannerBucketRenderState | None,
-    cfg: QuoteConfiguration | None,
+    render_state: "PlannerBucketRenderState" | None,
+    cfg: "QuoteConfiguration" | None,
 ) -> tuple[float, float]:
     total_h = max(0.0, float(hours or 0.0))
     if not cfg or not getattr(cfg, "separate_machine_labor", False):
         return (0.0, total_h)
 
-    canon_label = _canonical_bucket_key(label)
-    key = canon_label or _normalize_bucket_key(label)
+    key = _canonical_bucket_key(label)
     if not key:
-        key = str(label or "")
+        key = _normalize_bucket_key(label)
 
     extra: Mapping[str, Any] | None = None
     if render_state is not None:
@@ -4145,7 +3481,7 @@ def _split_hours_for_bucket(
     if extra is None:
         extra = {}
 
-    if canon_label == "drilling" or key == "drilling":
+    if key == "drilling":
         m_min = _coerce_float_or_none(extra.get("drill_machine_minutes"))
         l_min = _coerce_float_or_none(extra.get("drill_labor_minutes"))
         if (
@@ -4154,7 +3490,6 @@ def _split_hours_for_bucket(
             and (float(m_min) + float(l_min)) > 0.0
         ):
             return (float(m_min) / 60.0, float(l_min) / 60.0)
-        return (float(hours or 0.0), 0.0)
 
     bucket_ops: Mapping[str, Any] | None = None
     if isinstance(extra, _MappingABC):
@@ -4170,10 +3505,7 @@ def _split_hours_for_bucket(
             for entry in ops_list:
                 if not isinstance(entry, _MappingABC):
                     continue
-                name_val = entry.get("name")
-                if not isinstance(name_val, str):
-                    continue
-                role = _op_role_for_name(name_val)
+                role = _op_role_for_name(entry.get("name"))
                 minutes_val = _coerce_float_or_none(entry.get("minutes"))
                 if minutes_val is None or minutes_val <= 0:
                     continue
@@ -4209,39 +3541,17 @@ def _build_planner_bucket_render_state(
     rates: Mapping[str, Any] | None = None,
     removal_drilling_hours: float | None = None,
     prefer_removal_drilling_hours: bool = True,
-    cfg: QuoteConfiguration | None = None,
+    cfg: "QuoteConfiguration" | None = None,
     bucket_ops: Mapping[str, typing.Sequence[Mapping[str, Any]]] | None = None,
 ) -> PlannerBucketRenderState:
     state = PlannerBucketRenderState()
-
-    def _flatten_rate_map(value: Any) -> dict[str, float]:
-        flat: dict[str, float] = {}
-        if not isinstance(value, _MappingABC):
-            return flat
-
-        def _walk(container: Mapping[str, Any]) -> None:
-            for key, raw in container.items():
-                if isinstance(raw, _MappingABC):
-                    _walk(raw)
-                    continue
-                try:
-                    numeric = float(raw)
-                except Exception:
-                    continue
-                if numeric > 0:
-                    flat[str(key)] = numeric
-
-        _walk(value)
-        return flat
-
-    state.rates = _flatten_rate_map(rates)
 
     # The canonical bucket view is the single source of truth for the Process & Labor table.
     # Start with an empty structure and allow the canonical buckets to populate it below,
     # preventing any stale entries from ``process_costs`` from sneaking into the render.
     state.process_costs_for_render = {}
 
-    bucket_ops_map: dict[str, list[dict[str, float | str]]] = {}
+    bucket_ops_map: dict[str, list[dict[str, float]]] = {}
 
     def _ingest_bucket_ops(source: Any) -> None:
         if isinstance(source, _MappingABC):
@@ -4252,13 +3562,12 @@ def _build_planner_bucket_render_state(
             canon_key = _canonical_bucket_key(raw_key) or _normalize_bucket_key(raw_key)
             if not canon_key:
                 continue
-            entries: list[dict[str, float | str]] = bucket_ops_map.setdefault(canon_key, [])
+            entries: list[dict[str, float]] = bucket_ops_map.setdefault(canon_key, [])
             if isinstance(raw_list, Sequence):
                 for item in raw_list:
                     if not isinstance(item, _MappingABC):
                         continue
-                    name_candidate = item.get("name") or item.get("op") or ""
-                    op_name = str(name_candidate).strip()
+                    op_name = (item.get("name") or item.get("op") or "").strip()
                     if not op_name:
                         continue
                     minutes_val = _coerce_float_or_none(item.get("minutes"))
@@ -4454,67 +3763,6 @@ def _build_planner_bucket_render_state(
     return state
 
 
-def _display_rate_for_row(
-    label: str,
-    *,
-    cfg: QuoteConfiguration | None,
-    render_state: PlannerBucketRenderState | None,
-    hours: float | None,
-) -> str:
-    total_hours = max(0.0, float(hours or 0.0))
-    cfg_obj = cfg
-    if cfg_obj and getattr(cfg_obj, "separate_machine_labor", True):
-        machine_hours, labor_hours = _split_hours_for_bucket(
-            label, total_hours, render_state, cfg_obj
-        )
-        pieces: list[str] = []
-        if machine_hours > 0:
-            pieces.append(f"mach ${float(cfg_obj.machine_rate_per_hr):.2f}/hr")
-        if labor_hours > 0:
-            pieces.append(f"labor ${float(cfg_obj.labor_rate_per_hr):.2f}/hr")
-        if pieces:
-            return " / ".join(pieces)
-        fallback_rate = float(getattr(cfg_obj, "labor_rate_per_hr", 0.0) or 0.0)
-        if fallback_rate <= 0:
-            fallback_rate = float(getattr(cfg_obj, "machine_rate_per_hr", 0.0) or 0.0)
-        return f"${fallback_rate:.2f}/hr"
-
-    summary_map: Mapping[str, Any] | None = None
-    if isinstance(render_state, PlannerBucketRenderState):
-        summary_map = render_state.canonical_summary
-    if isinstance(summary_map, _MappingABC):
-        canon_key = _canonical_bucket_key(label)
-        candidates = [canon_key, _normalize_bucket_key(label), str(label or "")] if canon_key else [
-            _normalize_bucket_key(label),
-            str(label or ""),
-        ]
-        for candidate in candidates:
-            if not candidate:
-                continue
-            metrics = summary_map.get(candidate)
-            if not isinstance(metrics, _MappingABC):
-                continue
-            total_cost = _safe_float(metrics.get("total"), default=0.0)
-            hours_val = _safe_float(metrics.get("hours"), default=0.0)
-            if hours_val <= 0.0:
-                hours_val = total_hours
-            if hours_val > 0.0 and total_cost > 0.0:
-                return f"${(total_cost / hours_val):.2f}/hr"
-
-    rate_lookup = 0.0
-    if isinstance(render_state, PlannerBucketRenderState) and render_state.rates:
-        rate_lookup = _lookup_rate(str(label), render_state.rates, fallback=0.0)
-        if rate_lookup <= 0.0:
-            canon = _canonical_bucket_key(label)
-            if canon:
-                rate_lookup = _lookup_rate(canon, render_state.rates, fallback=0.0)
-    if rate_lookup <= 0.0 and cfg_obj is not None:
-        rate_lookup = float(getattr(cfg_obj, "labor_rate_per_hr", 0.0) or 0.0)
-        if rate_lookup <= 0.0:
-            rate_lookup = float(getattr(cfg_obj, "machine_rate_per_hr", 0.0) or 0.0)
-    return f"${rate_lookup:.2f}/hr"
-
-
 def _sync_drilling_bucket_view(
     bucket_view: Mapping[str, Any] | None,
     *,
@@ -4603,11 +3851,9 @@ def _charged_hours_by_bucket(
     render_state: PlannerBucketRenderState | None = None,
     removal_drilling_hours: float | None = None,
     prefer_removal_drilling_hours: bool = True,
-    cfg: QuoteConfiguration | None = None,
 ):
     """Return the hours that correspond to what we actually charged."""
-    charged: dict[str, float] = {}
-    render_extra: Mapping[str, Any] | None = None
+    out: dict[str, float] = {}
     for key, amount in (process_costs or {}).items():
         norm = _normalize_bucket_key(key)
         if norm.startswith("planner_"):
@@ -4629,7 +3875,7 @@ def _charged_hours_by_bucket(
             hr = (float(amount) / rate) if rate > 0 else None
         if hr is not None:
             label = _process_label(key)
-            charged[label] = charged.get(label, 0.0) + float(hr)
+            out[label] = out.get(label, 0.0) + float(hr)
     removal_hr = None
     if render_state is not None:
         try:
@@ -4637,77 +3883,37 @@ def _charged_hours_by_bucket(
         except Exception:
             extra = {}
         if isinstance(extra, _MappingABC):
-            render_extra = extra
             removal_candidate = extra.get("removal_drilling_hours")
             removal_hr = _coerce_float_or_none(removal_candidate)
-    prefer_drill_hours = prefer_removal_drilling_hours
-    if cfg is not None:
-        prefer_from_cfg = getattr(cfg, "prefer_removal_drilling_hours", None)
-        if prefer_from_cfg is not None:
-            prefer_drill_hours = bool(prefer_from_cfg)
-    prefer_card_minutes = bool(
-        prefer_drill_hours
-        and getattr(cfg, "prefer_removal_drilling_hours", prefer_drill_hours)
-    )
-    if prefer_card_minutes and isinstance(render_extra, _MappingABC):
-        machine_minutes = render_extra.get("drill_machine_minutes")
-        labor_minutes = render_extra.get("drill_labor_minutes")
-        if isinstance(machine_minutes, (int, float)) and isinstance(labor_minutes, (int, float)):
-            drill_hr = (float(machine_minutes) + float(labor_minutes)) / 60.0
-            for key in list(charged.keys()):
-                if _canonical_bucket_key(key) in {"drilling", "drill"}:
-                    charged[key] = float(drill_hr)
     if removal_hr is None:
         removal_hr = _coerce_float_or_none(removal_drilling_hours)
     if removal_hr is not None and removal_hr < 0:
         removal_hr = None
-    if removal_hr is not None and prefer_drill_hours:
+    if removal_hr is not None and prefer_removal_drilling_hours:
         desired = max(0.0, float(removal_hr))
         drill_labels = [
             label
-            for label in charged
+            for label in out
             if _canonical_bucket_key(label) in {"drilling", "drill"}
         ]
         if drill_labels:
             for label in drill_labels:
-                current = float(charged.get(label, 0.0) or 0.0)
+                current = float(out.get(label, 0.0) or 0.0)
                 if not math.isclose(current, desired, rel_tol=1e-9, abs_tol=1e-6):
                     logger.info(
                         "[hours-sync] Overriding Drilling bucket hours from %.2f -> %.2f (source=removal_card)",
                         current,
                         desired,
                     )
-                charged[label] = desired
+                out[label] = desired
         else:
             label = _process_label("drilling")
             logger.info(
                 "[hours-sync] Injecting Drilling bucket hours %.2f (source=removal_card)",
                 desired,
             )
-            charged[label] = desired
-
-    prefer_card_minutes = prefer_drill_hours and bool(
-        getattr(cfg, "prefer_removal_drilling_hours", True)
-    )
-    if prefer_card_minutes and isinstance(render_extra, _MappingABC):
-        machine_minutes = render_extra.get("drill_machine_minutes")
-        labor_minutes = render_extra.get("drill_labor_minutes")
-        card_total_hr = None
-        if isinstance(machine_minutes, (int, float)) and isinstance(labor_minutes, (int, float)):
-            card_total_hr = (float(machine_minutes) + float(labor_minutes)) / 60.0
-        _log.info(
-            "[drill-sync] card_m=%smin card_l=%smin → card_total_hr=%s  | charged_drilling_hr=%s",
-            machine_minutes,
-            labor_minutes,
-            card_total_hr,
-            charged.get("Drilling") or charged.get("drilling"),
-        )
-        if card_total_hr is not None:
-            for key in list(charged.keys()):
-                if _canonical_bucket_key(key) in {"drilling", "drill"}:
-                    charged[key] = card_total_hr
-
-    return charged
+            out[label] = desired
+    return out
 
 def _planner_bucket_key_for_name(name: Any) -> str:
     text = str(name or "").lower()
@@ -4834,7 +4040,7 @@ def _prepare_bucket_view(raw_view: Mapping[str, Any] | None) -> dict[str, Any]:
                 continue
             prepared[key] = copy.deepcopy(value)
 
-    bucket_ops: dict[str, list[dict[str, float | str]]] = {}
+    bucket_ops: dict[str, list[dict[str, float]]] = {}
     if isinstance(raw_view, _MappingABC):
         operations = raw_view.get("operations")
         if isinstance(operations, Sequence):
@@ -4852,7 +4058,7 @@ def _prepare_bucket_view(raw_view: Mapping[str, Any] | None) -> dict[str, Any]:
                     minutes_val = _coerce_float_or_none(entry.get("mins"))
                 if minutes_val is None or minutes_val <= 0:
                     continue
-                op_name = str(entry.get("name") or "").strip()
+                op_name = (entry.get("name") or "").strip()
                 if not op_name:
                     continue
                 bucket_list = bucket_ops.setdefault(canon_bucket, [])
@@ -5141,26 +4347,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     geometry: Mapping[str, Any] | None = None,
 ) -> str:
     """Pretty printer for a full quote with auto-included non-zero lines."""
-
-    overrides = (
-        ("prefer_removal_drilling_hours", True),
-        ("separate_machine_labor", True),
-        ("machine_rate_per_hr", 45.0),
-        ("labor_rate_per_hr", 45.0),
-    )
-
-    cfg_obj: QuoteConfiguration | Any = cfg or QuoteConfiguration()
-    for name, value in overrides:
-        try:
-            setattr(cfg_obj, name, value)
-        except Exception:
-            cfg_obj = QuoteConfiguration()
-            for name2, value2 in overrides:
-                setattr(cfg_obj, name2, value2)
-            break
-
-    cfg = cfg_obj
-
     breakdown    = result.get("breakdown", {}) or {}
 
     # Force drill debug output to render by enabling the LLM debug flag for this run.
@@ -6110,7 +5296,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     drill_debug_entries: list[str] = []
     # Selected removal summary (if available) for compact debug table later
     removal_summary_for_display: Mapping[str, Any] | None = None
-    removal_card_result: RemovalCardResult | None = None
     _accumulate_drill_debug(drill_debug_entries, result, breakdown)
     # Canonical QUOTE SUMMARY header (legacy variants removed in favour of this
     # block so the Speeds/Feeds status + Drill Debug output stay consistent).
@@ -6123,7 +5308,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         process_meta=process_meta,
         process_meta_raw=process_meta_raw,
         hour_summary_entries=hour_summary_entries,
-        cfg=cfg,
     )
     append_lines(header_lines)
     append_line("")
@@ -6852,55 +6036,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 else None
             )
 
-            picked_stock: dict[str, Any] | None = None
-            material_lookup_for_pick = normalized_material_key or ""
-            if not material_lookup_for_pick and material_display_label:
-                material_lookup_for_pick = _normalize_lookup_key(material_display_label)
-            try:
-                if need_len and need_wid and need_thk:
-                    picked_stock = _pick_mcmaster_plate_sku(
-                        float(need_len),
-                        float(need_wid),
-                        float(need_thk),
-                        material_key=material_lookup_for_pick or "MIC6",
-                    )
-            except Exception:
-                picked_stock = None
-            if picked_stock:
-                stock_len_val = float(picked_stock.get("len_in") or 0.0)
-                stock_wid_val = float(picked_stock.get("wid_in") or 0.0)
-                stock_thk_val = float(picked_stock.get("thk_in") or 0.0)
-                part_number = picked_stock.get("mcmaster_part")
-                source_hint = picked_stock.get("source") or "mcmaster-catalog"
-                if isinstance(material_stock_block, _MutableMappingABC):
-                    material_stock_block["stock_L_in"] = float(stock_len_val)
-                    material_stock_block["stock_W_in"] = float(stock_wid_val)
-                    material_stock_block["stock_T_in"] = float(stock_thk_val)
-                    material_stock_block.setdefault("stock_source_tag", source_hint)
-                    material_stock_block.setdefault("source", source_hint)
-                    if part_number:
-                        material_stock_block["mcmaster_part"] = part_number
-                if isinstance(material, _MutableMappingABC):
-                    material.setdefault("stock_source_tag", source_hint)
-                    material.setdefault("source", source_hint)
-                    if part_number:
-                        material.setdefault("mcmaster_part", part_number)
-                if isinstance(result, _MutableMappingABC):
-                    if part_number:
-                        result["mcmaster_part"] = part_number
-                    result["stock_source"] = source_hint
-            elif (
-                material_lookup_for_pick
-                and "mic6" in material_lookup_for_pick.lower()
-                and need_len
-                and need_wid
-                and need_thk
-            ):
-                blank_lines.append(
-                    "  WARNING: No McMaster MIC6 plate found for "
-                    f"{float(need_len):.2f}×{float(need_wid):.2f}×{float(need_thk):.3f} in with exact thickness"
-                )
-
             if (need_len is None or need_wid is None or need_thk is None) and isinstance(g, dict):
                 plan_guess = g.get("stock_plan_guess")
                 if isinstance(plan_guess, _MappingABC):
@@ -6936,14 +6071,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     source_tag = None
 
             if stock_len_val and stock_wid_val and stock_thk_val:
-                part_label = ""
-                if isinstance(result, Mapping):
-                    part_label = str(result.get("mcmaster_part") or "").strip()
-                part_display = part_label or "—"
                 stock_line = (
                     "  Rounded to catalog: "
                     f"{stock_len_val:.2f} × {stock_wid_val:.2f} × {stock_thk_val:.3f} in"
-                    f" (McMaster, {part_display})"
                 )
                 if source_tag:
                     stock_line += f" ({source_tag})"
@@ -7097,26 +6227,21 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 material_detail_for_breakdown.pop("scrap_credit_mass_lb", None)
 
             weight_lines: list[str] = []
-            weight_summary: dict[str, Any] = {}
             if (starting_mass_val and starting_mass_val > 0) or show_zeros:
                 weight_lines.append(
                     f"  Starting Weight: {_format_weight_lb_oz(starting_mass_val)}"
                 )
-                weight_summary["starting_mass_g"] = float(starting_mass_val)
             if (net_mass_val and net_mass_val > 0) or show_zeros:
                 weight_lines.append(
                     f"  Net Weight: {_format_weight_lb_oz(net_mass_val)}"
                 )
-                weight_summary["net_mass_g"] = float(net_mass_val)
             if scrap_mass_val is not None:
                 if scrap_mass_val > 0 or show_zeros:
                     weight_lines.append(
                         f"  Scrap Weight: {_format_weight_lb_oz(scrap_mass_val)}"
                     )
-                    weight_summary["scrap_mass_g"] = float(scrap_mass_val)
             elif show_zeros:
                 weight_lines.append("  Scrap Weight: 0 oz")
-                weight_summary["scrap_mass_g"] = 0.0
             computed_scrap_fraction: float | None = None
             if (
                 starting_mass_val is not None
@@ -7141,21 +6266,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     if scrap_hint_text and scrap_fraction_val is None:
                         scrap_line += f" ({scrap_hint_text})"
                     weight_lines.append(scrap_line)
-                    weight_summary["scrap_pct_computed"] = float(computed_scrap_fraction)
                 elif scrap is not None:
                     scrap_line = f"  Scrap Percentage: {_pct(scrap)}"
                     if scrap_hint_text:
                         scrap_line += f" ({scrap_hint_text})"
                     weight_lines.append(scrap_line)
-                    scrap_pct_val_display = scrap
-                    try:
-                        scrap_pct_val_display = float(scrap_pct_val_display)
-                    except Exception:
-                        scrap_pct_val_display = None
-                    if scrap_pct_val_display is not None:
-                        weight_summary["scrap_pct_entered"] = float(scrap_pct_val_display)
-                if scrap_hint_text:
-                    weight_summary["scrap_hint"] = scrap_hint_text
 
                 if scrap_fraction_val is not None:
                     geometry_line = (
@@ -7164,7 +6279,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     if scrap_hint_text:
                         geometry_line += f" ({scrap_hint_text})"
                     weight_lines.append(geometry_line)
-                    weight_summary["scrap_pct_geometry"] = float(scrap_fraction_val)
             # Historically the renderer would emit an extra weight-only line here when
             # ``scrap_adjusted_mass`` was available.  The value was the computed "with
             # scrap" mass, but because it lacked a label it rendered as a stray line like
@@ -7174,11 +6288,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             # already convey the information a customer needs.
 
             detail_lines.extend(weight_lines)
-            if weight_summary:
-                try:
-                    material_detail_for_breakdown["render_weight_summary"] = weight_summary
-                except Exception:
-                    pass
             scrap_credit_lines: list[str] = []
             if scrap_credit_entered and scrap_credit:
                 credit_display = _m(scrap_credit)
@@ -7280,13 +6389,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 ):
                     detail_lines.append("")
                 detail_lines.extend(price_lines)
-                try:
-                    existing_price_lines = material_detail_for_breakdown.setdefault(
-                        "render_price_lines", []
-                    )
-                    existing_price_lines.extend(price_lines)
-                except Exception:
-                    pass
             def _coerce_dims(candidate: Any) -> tuple[float, float, float] | None:
                 if isinstance(candidate, (list, tuple)) and len(candidate) >= 3:
                     try:
@@ -7303,47 +6405,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 stock_dims_candidate = _coerce_dims(
                     material_stock_block.get("stock_dims_in")
                 )
-
-            cached_stock_thk = None
-            if stock_dims_candidate:
-                try:
-                    cached_stock_thk = float(stock_dims_candidate[2])
-                except Exception:
-                    cached_stock_thk = None
-            if cached_stock_thk is None and isinstance(material_stock_block, _MappingABC):
-                cached_stock_thk = _coerce_float_or_none(
-                    material_stock_block.get("stock_T_in")
-                )
-            target_plate_thk = _plate_thickness_in_from_context(g)
-            if target_plate_thk is None and need_thk is not None:
-                try:
-                    target_plate_thk = float(need_thk)
-                except Exception:
-                    target_plate_thk = None
-            try:
-                thickness_tol_in = float(getattr(cfg, "thickness_tol_in", 0.05) or 0.05)
-            except Exception:
-                thickness_tol_in = 0.05
-            if (
-                target_plate_thk is not None
-                and cached_stock_thk is not None
-                and abs(float(cached_stock_thk) - float(target_plate_thk)) > thickness_tol_in
-            ):
-                _log.info(
-                    "[stock] clearing cached stock piece fields (cached %.3fin vs plate %.3fin)",
-                    float(cached_stock_thk),
-                    float(target_plate_thk),
-                )
-                for container in (material_stock_block, material, mat_info):
-                    if isinstance(container, dict):
-                        for key in (
-                            "stock_piece_price_usd",
-                            "stock_piece_source",
-                            "stock_piece_api_price",
-                            "stock_piece_api_source",
-                            "stock_piece_usd",
-                        ):
-                            container.pop(key, None)
 
             stock_L_val: float | None
             stock_W_val: float | None
@@ -7437,52 +6498,28 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     mc = None
             if mc:
                 stock_piece_val = mc.get("stock_piece_usd")
-                base_usd_val = float(mc.get("base_usd", 0.0))
-                base_source = mc.get("base_source") or ""
                 if stock_piece_val is not None:
-                    label_src = base_source or mc.get("stock_source") or "Stock piece"
-                    row(
-                        f"Stock Piece ({label_src})",
-                        round(base_usd_val, 2),
-                        indent="  ",
-                    )
+                    stock_src = mc.get("stock_source") or ""
+                    src_suffix = f" ({stock_src})" if stock_src else ""
+                    row(f"Stock Piece{src_suffix}", float(stock_piece_val), indent="  ")
                 else:
-                    label_src = base_source or "per-lb"
-                    row(
-                        f"Base Material @ {label_src}",
-                        round(base_usd_val, 2),
-                        indent="  ",
-                    )
-                tax_val = float(mc.get("tax_usd") or 0.0)
+                    base_source = mc.get("base_source") or ""
+                    base_label = "Base Material"
+                    if base_source:
+                        base_label = f"Base Material @ {base_source}"
+                    row(base_label, float(mc.get("base_usd", 0.0)), indent="  ")
+                tax_val = mc.get("tax_usd") or 0.0
                 if tax_val:
-                    row("Material Tax:", round(tax_val, 2), indent="  ")
-                scrap_val = float(mc.get("scrap_credit_usd") or 0.0)
-                scrap_text = mc.get("scrap_rate_text") or ""
-                if scrap_val and scrap_text:
-                    row(
-                        f"Scrap Credit @ {scrap_text}",
-                        -round(scrap_val, 2),
-                        indent="  ",
-                    )
-                elif scrap_val:
-                    row("Scrap Credit", -round(scrap_val, 2), indent="  ")
-                base_for_total = float(base_usd_val)
-                tax_for_total = float(tax_val)
-                total_material_cost_val = mc.get("total_usd")
-                if total_material_cost_val is not None:
-                    try:
-                        total_material_cost = round(float(total_material_cost_val), 2)
-                    except Exception:
-                        total_material_cost = None
-                else:
-                    total_material_cost = None
-                if total_material_cost is None:
-                    scrap_for_total = min(float(scrap_val), base_for_total + tax_for_total)
-                    total_material_cost = round(
-                        base_for_total + tax_for_total - scrap_for_total,
-                        2,
-                    )
-                row("Total Material Cost :", total_material_cost, indent="  ")
+                    row("Material Tax:", float(tax_val), indent="  ")
+                scrap_val = mc.get("scrap_credit_usd") or 0.0
+                if scrap_val:
+                    scrap_suffix = ""
+                    scrap_text = mc.get("scrap_rate_text") or ""
+                    if scrap_text:
+                        scrap_suffix = f" @ {scrap_text}"
+                    row(f"Scrap Credit{scrap_suffix}", -float(scrap_val), indent="  ")
+                total_material_cost = mc.get("total_usd", total_material_cost)
+                row("Total Material Cost :", float(total_material_cost or 0.0), indent="  ")
             elif total_material_cost is not None:
                 row("Total Material Cost :", total_material_cost, indent="  ")
             append_line("")
@@ -7497,13 +6534,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if prog_hr > 0 and float(nre.get("programming_cost") or 0.0) == 0.0:
         nre["programming_cost"] = round(prog_hr * rates["ProgrammingRate"], 2)
 
-    if removal_card_result is None:
-        removal_card_result = _compute_removal_card_section(
-            breakdown,
-            rates=rates,
-            prefer_removal_drilling_hours=prefer_removal_drilling_hours,
-        )
-
     # ---- NRE / Setup costs ---------------------------------------------------
     append_line("NRE / Setup Costs (per lot)")
     append_line(divider)
@@ -7512,24 +6542,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     programmer_hours = _safe_float(prog.get("prog_hr"))
     engineer_hours = _safe_float(prog.get("eng_hr"))
-    fallback_programmer_rate = float(getattr(cfg, "labor_rate_per_hr", 45.0) or 45.0)
-    if not math.isfinite(fallback_programmer_rate) or fallback_programmer_rate <= 0:
-        fallback_programmer_rate = 45.0
-    programmer_rate_backfill = _coerce_rate_value(rates.get("ProgrammerRate"))
-    has_programming_rate_detail = False
-    if isinstance(nre_cost_details, _MappingABC):
-        detail_key = "Programming & Eng (per lot)"
-        has_programming_rate_detail = bool(nre_cost_details.get(detail_key))
-    explicit_programmer_rate = _safe_float(prog.get("prog_rate"))
-    if explicit_programmer_rate > 0:
-        has_programming_rate_detail = True
-    if cfg.separate_machine_labor:
-        programmer_rate = fallback_programmer_rate
-    elif programmer_rate_backfill > 0 and not has_programming_rate_detail:
-        programmer_rate = programmer_rate_backfill
-    else:
-        programmer_rate = fallback_programmer_rate
-    engineer_rate = programmer_rate
+    programmer_rate = _resolve_rate_with_fallback(
+        prog.get("prog_rate"), "ProgrammingRate", "ProgrammerRate", "ShopRate"
+    )
+    engineer_rate = _resolve_rate_with_fallback(
+        prog.get("eng_rate"), "EngineerRate", "ShopRate"
+    )
 
     programming_per_lot_val = _safe_float(prog.get("per_lot"))
     nre_programming_per_lot = _safe_float(nre.get("programming_per_lot"))
@@ -7581,25 +6599,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         programming_rate_total = _coerce_rate_value(rates.get("ProgrammingRate"))
         nre["programming_cost"] = round(prog_hr_total * programming_rate_total, 2)
 
-    total_programming_hours = prog_hr_total if prog_hr_total > 0 else aggregated_programming_hours
-    if total_programming_hours <= 0:
-        total_programming_hours = programmer_hours + engineer_hours
-
     computed_programming_per_lot = 0.0
-    if total_programming_hours > 0 and programmer_rate > 0:
-        computed_programming_per_lot = round(total_programming_hours * programmer_rate, 2)
+    if programmer_hours > 0 and programmer_rate > 0:
+        computed_programming_per_lot += programmer_hours * programmer_rate
+    if engineer_hours > 0 and engineer_rate > 0:
+        computed_programming_per_lot += engineer_hours * engineer_rate
 
-    programming_cost_lot = computed_programming_per_lot if computed_programming_per_lot > 0 else 0.0
-    per_lot_source_for_amortized = programming_cost_lot
-    if per_lot_source_for_amortized <= 0 and programming_per_lot_val > 0:
-        per_lot_source_for_amortized = programming_per_lot_val
-    if per_lot_source_for_amortized <= 0 and nre_programming_per_lot > 0:
-        per_lot_source_for_amortized = nre_programming_per_lot
-    programming_cost_per_part = 0.0
-    if per_lot_source_for_amortized > 0:
-        programming_cost_per_part = round(
-            per_lot_source_for_amortized / max(qty_for_programming_float, 1.0), 2
-        )
     if programming_per_lot_val <= 0 and nre_programming_per_lot > 0:
         programming_per_lot_val = round(nre_programming_per_lot, 2)
     if programming_per_lot_val <= 0 and computed_programming_per_lot > 0:
@@ -7608,12 +6613,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     existing_programming_per_lot = _safe_float(nre.get("programming_per_lot"))
     if existing_programming_per_lot <= 0 and computed_programming_per_lot > 0:
         nre["programming_per_lot"] = computed_programming_per_lot
-    if programming_cost_per_part > 0:
-        try:
-            labor_cost_totals["Programming (amortized)"] = programming_cost_per_part
-        except Exception:
-            labor_cost_totals["Programming (amortized)"] = programming_cost_per_part
-    elif _safe_float(labor_cost_totals.get("Programming (amortized)")) <= 0:
+    if _safe_float(labor_cost_totals.get("Programming (amortized)")) <= 0:
         per_lot_source = computed_programming_per_lot
         if per_lot_source <= 0 and nre_programming_per_lot > 0:
             per_lot_source = nre_programming_per_lot
@@ -7621,7 +6621,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             per_lot_source = programming_per_lot_val
         try:
             labor_cost_totals["Programming (amortized)"] = round(
-                per_lot_source / max(qty_for_programming_float, 1.0), 2
+                per_lot_source / qty_for_programming_float, 2
             )
         except Exception:
             labor_cost_totals["Programming (amortized)"] = 0.0
@@ -7634,12 +6634,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if show_programming_row:
         row("Programming & Eng:", programming_per_lot_val)
         has_detail = False
-        if programming_per_lot_val > 0 or show_zeros:
-            row("Programming Cost:", programming_per_lot_val, indent="  ")
-            has_detail = True
-        if total_programming_hours > 0:
-            write_line(f"  Programming Hrs: {_h(total_programming_hours)}")
-            has_detail = True
         if programmer_hours > 0:
             has_detail = True
             write_line(
@@ -7925,7 +6919,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         cfg=cfg,
         bucket_ops=bucket_ops_map,
     )
-    render_state = bucket_state
 
     geometry_for_explainer: Mapping[str, Any] | None = None
     if isinstance(geometry, _MappingABC) and geometry:
@@ -7938,6 +6931,21 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if isinstance(candidate, _MappingABC) and candidate:
                 geometry_for_explainer = typing.cast(Mapping[str, Any], candidate)
                 break
+
+    try:
+        explanation_text = explain_quote(
+            breakdown,
+            hour_trace=hour_trace_data,
+            geometry=geometry_for_explainer,
+            render_state=bucket_state,
+        )
+    except Exception:
+        explanation_text = ""
+    if explanation_text:
+        for line in str(explanation_text).splitlines():
+            text = line.strip()
+            if text:
+                explanation_lines.append(text)
 
     def _norm(s: Any) -> str:
         import re
@@ -8422,46 +7430,74 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         programming_detail_local = (
             nre_detail.get("programming", {}) if isinstance(nre_detail, dict) else {}
         )
-        total_programming_hours_local = _safe_float(nre.get("programming_hr"))
+        total_programming_hours = _safe_float(nre.get("programming_hr"))
         accumulate_from_detail = False
-        if total_programming_hours_local <= 0:
-            total_programming_hours_local = 0.0
+        if total_programming_hours <= 0:
+            total_programming_hours = 0.0
             accumulate_from_detail = True
 
         detail_args: list[str] = []
         detail_hours = 0.0
+        per_lot_cost = 0.0
 
         prog_hr_detail = _safe_float(programming_detail_local.get("prog_hr"))
         if prog_hr_detail > 0:
             if accumulate_from_detail:
-                total_programming_hours_local += prog_hr_detail
+                total_programming_hours += prog_hr_detail
+            prog_rate_detail = _resolve_rate_with_fallback(
+                programming_detail_local.get("prog_rate"),
+                "ProgrammerRate",
+                "ProgrammingRate",
+                "ShopRate",
+            )
+            per_lot_cost += prog_hr_detail * max(prog_rate_detail, 0.0)
             detail_hours += prog_hr_detail
             detail_args.append(
-                f"- Programmer (lot): {_hours_with_rate_text(prog_hr_detail, programmer_rate)}"
+                f"- Programmer (lot): {_hours_with_rate_text(prog_hr_detail, prog_rate_detail)}"
             )
 
         eng_hr_detail = _safe_float(programming_detail_local.get("eng_hr"))
         if eng_hr_detail > 0:
             if accumulate_from_detail:
-                total_programming_hours_local += eng_hr_detail
+                total_programming_hours += eng_hr_detail
+            eng_rate_detail = _resolve_rate_with_fallback(
+                programming_detail_local.get("eng_rate"),
+                "EngineerRate",
+                "ProgrammingRate",
+                "ShopRate",
+            )
+            per_lot_cost += eng_hr_detail * max(eng_rate_detail, 0.0)
             detail_hours += eng_hr_detail
             detail_args.append(
-                f"- Engineering (lot): {_hours_with_rate_text(eng_hr_detail, programmer_rate)}"
+                f"- Engineering (lot): {_hours_with_rate_text(eng_hr_detail, eng_rate_detail)}"
             )
 
-        remaining_hours = max(total_programming_hours_local - detail_hours, 0.0)
+        remaining_hours = max(total_programming_hours - detail_hours, 0.0)
         if remaining_hours > 0:
-            detail_args.append(
-                f"Additional programming {fmt_hours(remaining_hours)} @ ${programmer_rate:.2f}/hr"
+            remainder_rate = _resolve_rate_with_fallback(
+                programming_detail_local.get("prog_rate"),
+                "ProgrammingRate",
+                "ProgrammerRate",
+                "ShopRate",
             )
+            if remainder_rate <= 0.0:
+                remainder_rate = _resolve_rate_with_fallback(
+                    programming_detail_local.get("eng_rate"),
+                    "EngineerRate",
+                    "ProgrammingRate",
+                    "ShopRate",
+                )
+            per_lot_cost += remaining_hours * max(remainder_rate, 0.0)
 
-        if total_programming_hours_local <= 0:
-            total_programming_hours_local = total_programming_hours
+        if total_programming_hours > 0:
+            programming_minutes = (total_programming_hours / qty_divisor) * 60.0
 
-        if total_programming_hours_local > 0:
-            programming_minutes = (total_programming_hours_local / qty_divisor) * 60.0
-
-        prog_pp = programming_cost_per_part
+        try:
+            prog_pp = float(programming_per_part_cost or 0.0)
+        except Exception:
+            prog_pp = 0.0
+        if per_lot_cost > 0:
+            prog_pp = per_lot_cost / qty_divisor
         if prog_pp <= 0:
             try:
                 prog_pp = float(labor_cost_totals.get("Programming (amortized)") or 0.0)
@@ -8930,8 +7966,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     billed_cost=billed_cost_sync,
                 )
 
-    _apply_removal_minutes_to_render_state(removal_card_result, bucket_state)
-
     charged_hours = _charged_hours_by_bucket(
         process_costs,
         process_meta,
@@ -8939,112 +7973,38 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         render_state=bucket_state,
         removal_drilling_hours=removal_drilling_hours_precise,
         prefer_removal_drilling_hours=prefer_removal_drilling_hours,
-        cfg=cfg,
     )
-
-    def _format_drill_value(value: float | None) -> str:
-        if value is None:
-            return "nan"
-        if not math.isfinite(value):
-            return "nan"
-        return f"{value:.2f}"
-
-    # === DEBUG: DRILL SYNC CHECK ===
-    extra_for_debug: Mapping[str, Any] | None = None
-    extra_candidate = getattr(bucket_state, "extra", None)
-    if isinstance(extra_candidate, _MappingABC):
-        extra_for_debug = extra_candidate
-
-    charged_for_debug: Mapping[str, Any] | None = None
-    if isinstance(charged_hours, _MappingABC):
-        charged_for_debug = charged_hours
-    else:
-        try:
-            charged_for_debug = dict(charged_hours or {})  # type: ignore[arg-type]
-        except Exception:
-            charged_for_debug = None
-
-    drill_machine_minutes_debug = (
-        _coerce_float_or_none(extra_for_debug.get("drill_machine_minutes"))
-        if extra_for_debug is not None
-        else None
-    )
-    drill_labor_minutes_debug = (
-        _coerce_float_or_none(extra_for_debug.get("drill_labor_minutes"))
-        if extra_for_debug is not None
-        else None
-    )
-    drill_bucket_debug = None
-    if charged_for_debug is not None:
-        drill_bucket_debug = next(
-            (
-                key
-                for key in charged_for_debug
-                if _canonical_bucket_key(key) in {"drilling", "drill"}
-            ),
-            None,
-        )
-    charged_drill_hours_debug = _coerce_float_or_none(
-        charged_for_debug.get(drill_bucket_debug)
-        if charged_for_debug is not None and drill_bucket_debug is not None
-        else None
-    )
-
-    _log.info(
-        "[drill-sync] card_m=%s card_l=%s bucket_hr=%s",
-        _format_drill_value(drill_machine_minutes_debug),
-        _format_drill_value(drill_labor_minutes_debug),
-        _format_drill_value(charged_drill_hours_debug),
-    )
-
-    extra_map: Mapping[str, Any] | None = None
+    removal_hours_debug = None
     if isinstance(getattr(bucket_state, "extra", None), _MappingABC):
-        extra_map = bucket_state.extra
-
-    drill_machine_minutes = (
-        _coerce_float_or_none(extra_map.get("drill_machine_minutes"))
-        if extra_map is not None
-        else None
-    )
-    drill_labor_minutes = (
-        _coerce_float_or_none(extra_map.get("drill_labor_minutes"))
-        if extra_map is not None
-        else None
-    )
-    drill_bucket_key = next(
-        (
-            raw_key
-            for raw_key in charged_hours
-            if _canonical_bucket_key(raw_key) in {"drilling", "drill"}
-        ),
-        None,
-    )
-    charged_drilling_hours = _coerce_float_or_none(
-        charged_hours.get(drill_bucket_key) if drill_bucket_key is not None else None
-    )
-
-    if (
-        drill_machine_minutes is not None
-        or drill_labor_minutes is not None
-        or charged_drilling_hours is not None
-    ):
-        _log.info(
-            "[drill-sync] card_m=%s card_l=%s charged_hr=%s",
-            _format_drill_value(drill_machine_minutes),
-            _format_drill_value(drill_labor_minutes),
-            _format_drill_value(charged_drilling_hours),
+        removal_hours_debug = _coerce_float_or_none(
+            bucket_state.extra.get("removal_drilling_hours")
         )
-
-    removal_hours_debug = (
-        _coerce_float_or_none(extra_map.get("removal_drilling_hours"))
-        if extra_map is not None
+    drill_bucket_key: str | None = None
+    for raw_key in charged_hours:
+        canon = _canonical_bucket_key(raw_key)
+        if canon in {"drilling", "drill"}:
+            drill_bucket_key = raw_key
+            break
+    bucket_hours_debug = (
+        _coerce_float_or_none(charged_hours.get(drill_bucket_key))
+        if drill_bucket_key
         else None
     )
-    bucket_hours_debug = charged_drilling_hours
     if removal_hours_debug is not None or bucket_hours_debug is not None:
+        def _fmt_debug(value: float | None) -> str:
+            if value is None:
+                return "nan"
+            try:
+                numeric = float(value)
+            except Exception:
+                return "nan"
+            if not math.isfinite(numeric):
+                return "nan"
+            return f"{numeric:.2f}"
+
         print(
             "[DEBUG] drilling_hours removal_card="
-            f"{_format_drill_value(removal_hours_debug)}  bucket={_format_drill_value(bucket_hours_debug)}"
+            f"{_fmt_debug(removal_hours_debug)}  bucket={_fmt_debug(bucket_hours_debug)}"
         )
     charged_hour_entries = sorted(charged_hours.items(), key=lambda kv: kv[0])
     charged_hours_by_canon: dict[str, float] = {}
@@ -9287,11 +8247,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             label = _display_bucket_label(canon_key, label_overrides)
             summary_hours[label] = summary_hours.get(label, 0.0) + (minutes_val / 60.0)
 
-        prefer_card_minutes = getattr(
-            cfg, "prefer_removal_drilling_hours", prefer_removal_drilling_hours
-        )
         override_hours: float | None = None
-        if prefer_card_minutes:
+        if prefer_removal_drilling_hours:
             extra_map = getattr(bucket_state, "extra", {})
             if isinstance(extra_map, _MappingABC):
                 candidate = extra_map.get("removal_drilling_hours")
@@ -9300,11 +8257,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                         override_hours = float(candidate)
                     except Exception:
                         override_hours = None
-            if (
-                override_hours is None
-                and removal_drilling_hours_precise is not None
-                and prefer_card_minutes
-            ):
+            if override_hours is None and removal_drilling_hours_precise is not None:
                 try:
                     override_hours = float(removal_drilling_hours_precise)
                 except Exception:
@@ -9312,14 +8265,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if override_hours is not None and override_hours >= 0:
             display_label = _display_bucket_label("drilling", label_overrides)
             summary_hours[display_label] = round(max(0.0, float(override_hours)), 2)
-
-        if prefer_card_minutes:
-            extra_map = getattr(bucket_state, "extra", {})
-            if isinstance(extra_map, _MappingABC):
-                drill_total_minutes = extra_map.get("drill_total_minutes")
-                if isinstance(drill_total_minutes, (int, float)):
-                    drill_label = _display_bucket_label("drilling", label_overrides)
-                    summary_hours[drill_label] = round(float(drill_total_minutes) / 60.0, 2)
 
         planner_labels = {"Planner Machine", "Planner Labor", "Planner Total"}
         for label, hours_val in summary_hours.items():
@@ -9391,20 +8336,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             _fmt_drill_debug(row_hr_debug),
             _fmt_drill_debug(summary_hr),
         )
-
-    prefer_summary_card = getattr(
-        cfg, "prefer_removal_drilling_hours", prefer_removal_drilling_hours
-    )
-    if prefer_summary_card:
-        extra_map = getattr(bucket_state, "extra", {})
-        if isinstance(extra_map, _MappingABC):
-            drill_total = extra_map.get("drill_total_minutes")
-            if isinstance(drill_total, (int, float)) and drill_total > 0:
-                drill_label = _display_bucket_label("drilling", label_overrides)
-                hour_summary_entries[drill_label] = (
-                    round(float(drill_total) / 60.0, 2),
-                    True,
-                )
 
     if hour_summary_entries:
         def _canonical_hour_label(value: Any) -> str:
@@ -9497,13 +8428,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     material_display_amount = round(float(material_direct_contribution), 2)
     material_total_for_why = float(material_display_amount)
     material_net_cost = float(material_display_amount)
-    try:
-        materials_direct_amount = float(material_display_amount)
-    except Exception:
-        materials_direct_amount = None
-    materials_direct_missing = (
-        materials_direct_amount is not None and abs(materials_direct_amount) <= 0.005
-    )
     direct_costs_map: dict[Any, Any]
     if isinstance(pricing, dict):
         direct_costs_map = pricing.setdefault("direct_costs", {})
@@ -9990,19 +8914,252 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     printed_subtotal = ladder_subtotal
 
     # Render MATERIAL REMOVAL card + TIME PER HOLE lines (replace legacy Time block)
-    time_per_hole_payload: dict[str, Any] | None = (
-        removal_card_result.time_per_hole_payload if removal_card_result else None
-    )
-    if (
-        removal_card_result
-        and removal_card_result.removal_drilling_hours_precise is not None
-    ):
-        removal_drilling_hours_precise = (
-            removal_card_result.removal_drilling_hours_precise
+    try:
+        drilling_meta = breakdown.get("drilling_meta", {}) or {}
+        # pull safe fallbacks
+        mat_canon = str(drilling_meta.get("material_canonical") or drilling_meta.get("material") or "-")
+        mat_group = drilling_meta.get("material_group") or drilling_meta.get("group") or "-"
+        row_group = drilling_meta.get("row_material_group") or drilling_meta.get("row_group") or None
+        holes_deep = int(drilling_meta.get("holes_deep") or 0)
+        holes_std  = int(drilling_meta.get("holes_std")  or 0)
+        dia_vals   = _ensure_list(drilling_meta.get("dia_in_vals"))
+        depth_vals = _ensure_list(drilling_meta.get("depth_in_vals"))
+        sfm_deep   = float(drilling_meta.get("sfm_deep") or 39.0)
+        sfm_std    = float(drilling_meta.get("sfm_std")  or 80.0)
+        ipr_deep_vals = _ensure_list(drilling_meta.get("ipr_deep_vals"), [0.0006, 0.0025]) or [0.0006, 0.0025]
+        ipr_std_val   = float(drilling_meta.get("ipr_std_val")  or 0.0060)
+        rpm_deep_vals = _ensure_list(drilling_meta.get("rpm_deep_vals"), [238, 1194]) or [238, 1194]
+        rpm_std_vals  = _ensure_list(drilling_meta.get("rpm_std_vals"), [169, 407]) or [169, 407]
+        ipm_deep_vals = _ensure_list(drilling_meta.get("ipm_deep_vals"), [0.5, 1.0]) or [0.5, 1.0]
+        ipm_std_vals  = _ensure_list(drilling_meta.get("ipm_std_vals"), [1.0, 2.4]) or [1.0, 2.4]
+        index_min     = float(drilling_meta.get("index_min_per_hole") or 0.13)
+        peck_min_rng  = _ensure_list(drilling_meta.get("peck_min_per_hole_vals"), [0.07, 0.08]) or [0.07, 0.08]
+        peck_min_deep = float(min(peck_min_rng))
+        peck_min_std  = float(max(peck_min_rng))
+        tchg_deep     = float(drilling_meta.get("toolchange_min_deep") or 8.00)
+        tchg_std      = float(drilling_meta.get("toolchange_min_std")  or 2.50)
+
+        bins = drilling_meta.get("bins_list")
+        if isinstance(bins, tuple):
+            bins = list(bins)
+        if not isinstance(bins, list):
+            bins_dict = drilling_meta.get("bins") or {}
+            bins = [v for _, v in sorted(
+                bins_dict.items(),
+                key=lambda kv: float(kv[1].get("diameter_in", 0.0)) if isinstance(kv[1], dict) else 0.0
+            )] if isinstance(bins_dict, dict) else []
+
+        _render_removal_card(
+            append_line,
+            mat_canon=mat_canon,
+            mat_group=mat_group,
+            row_group=row_group,
+            holes_deep=holes_deep,
+            holes_std=holes_std,
+            dia_vals_in=dia_vals,
+            depth_vals_in=depth_vals,
+            sfm_deep=sfm_deep,
+            sfm_std=sfm_std,
+            ipr_deep_vals=ipr_deep_vals,
+            ipr_std_val=ipr_std_val,
+            rpm_deep_vals=rpm_deep_vals,
+            rpm_std_vals=rpm_std_vals,
+            ipm_deep_vals=ipm_deep_vals,
+            ipm_std_vals=ipm_std_vals,
+            index_min_per_hole=index_min,
+            peck_min_rng=peck_min_rng,
+            toolchange_min_deep=tchg_deep,
+            toolchange_min_std=tchg_std,
         )
 
-    if removal_card_result and removal_card_result.lines:
-        append_lines(removal_card_result.lines)
+        subtotal_min, seen_deep, seen_std = _render_time_per_hole(
+            append_line,
+            bins=bins, index_min=index_min, peck_min_deep=peck_min_deep, peck_min_std=peck_min_std,
+        )
+
+        tool_add = (tchg_deep if seen_deep else 0.0) + (tchg_std if seen_std else 0.0)
+        total_drill_minutes_with_toolchange = subtotal_min + tool_add
+
+        if isinstance(bucket_state, PlannerBucketRenderState):
+            extra = getattr(bucket_state, "extra", None)
+            if isinstance(extra, dict):
+                extra["drill_machine_minutes"] = float(subtotal_min)
+                extra["drill_labor_minutes"] = float(tool_add)
+                extra["drill_total_minutes"] = float(total_drill_minutes_with_toolchange)
+
+        # === DRILLING BILLING TRUTH ===
+        drill_meta = breakdown.setdefault("drilling_meta", {})
+        if not isinstance(drill_meta, dict):
+            try:
+                drill_meta = dict(drill_meta or {})
+            except Exception:
+                drill_meta = {}
+            breakdown["drilling_meta"] = drill_meta
+        drill_meta["toolchange_minutes"] = float(tool_add)
+        drill_meta["total_minutes_with_toolchange"] = float(total_drill_minutes_with_toolchange)
+
+        bill_min = float(
+            drilling_meta.get("total_minutes_billed")
+            or drilling_meta.get("total_minutes_with_toolchange")
+            or drilling_meta.get("total_minutes")
+            or 0.0
+        )
+
+        plan_drill_min: float | None = None
+        plan_candidates = [
+            locals().get("process_plan_summary_local"),
+            breakdown.get("process_plan") if isinstance(breakdown, _MappingABC) else None,
+        ]
+        for candidate in plan_candidates:
+            if not isinstance(candidate, _MappingABC):
+                continue
+            plan_drilling = candidate.get("drilling")
+            if not isinstance(plan_drilling, _MappingABC):
+                continue
+            plan_minutes = _coerce_float_or_none(
+                plan_drilling.get("total_minutes_with_toolchange")
+            )
+            if plan_minutes is not None and plan_minutes > 0.0:
+                plan_drill_min = float(plan_minutes)
+                break
+
+        drill_min = plan_drill_min if plan_drill_min and plan_drill_min > 0.0 else bill_min
+        bill_min = drill_min
+        drill_hr = drill_min / 60.0 if drill_min else 0.0
+        drill_meta["total_minutes_billed"] = drill_min
+        drill_meta["bill_hours"] = float(drill_hr)
+
+        # Overwrite legacy planner meta
+        pm = breakdown.setdefault("process_meta", {}).setdefault("drilling", {})
+        # ensure meta is reachable under both 'drilling' and 'Drilling'
+        try:
+            breakdown["process_meta"]["Drilling"] = pm
+        except Exception:
+            pass
+        pm["minutes"] = drill_min
+        pm["hr"] = drill_hr
+        pm["rate"] = float(rates.get("DrillingRate") or 0.0)
+        pm["basis"] = ["minutes_engine"]  # replace any 'planner_drilling_override'
+
+        bucket_view_obj = breakdown.get("bucket_view")
+        if not isinstance(bucket_view_obj, dict):
+            if isinstance(bucket_view_obj, _MappingABC):
+                try:
+                    bucket_view_obj = dict(bucket_view_obj)
+                except Exception:
+                    bucket_view_obj = {}
+            else:
+                bucket_view_obj = {}
+            breakdown["bucket_view"] = bucket_view_obj
+
+        buckets_obj = bucket_view_obj.setdefault("buckets", {})
+        if not isinstance(buckets_obj, dict):
+            try:
+                buckets_obj = dict(buckets_obj)
+            except Exception:
+                buckets_obj = {}
+            bucket_view_obj["buckets"] = buckets_obj
+
+        old_entry = buckets_obj.pop("drilling", {}) if isinstance(buckets_obj, dict) else {}
+
+        new_minutes = round(drill_min, 2)
+        machine_rate = float(pm.get("rate") or 0.0)
+        billed_total = (
+            round((drill_min / 60.0) * machine_rate, 2)
+            if machine_rate > 0.0 and drill_min > 0.0
+            else 0.0
+        )
+        if billed_total <= 0.0:
+            billed_total = round(_safe_float((old_entry or {}).get("total$"), default=0.0), 2)
+        if new_minutes <= 0.0 and isinstance(old_entry, _MappingABC):
+            legacy_minutes = _safe_float(old_entry.get("minutes"), default=0.0)
+            if legacy_minutes > 0.0:
+                new_minutes = round(legacy_minutes, 2)
+        cost_mode = _bucket_cost_mode("drilling")
+        if cost_mode == "labor":
+            labor_cost = billed_total
+            machine_cost = 0.0
+        else:
+            machine_cost = billed_total
+            labor_cost = 0.0
+        new_total = round(machine_cost + labor_cost, 2)
+
+        if new_minutes <= 0.0 and new_total <= 0.0 and isinstance(old_entry, _MappingABC):
+            buckets_obj["drilling"] = dict(old_entry)
+        else:
+            drilling_entry = buckets_obj.setdefault(
+                "drilling",
+                {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0, "total$": 0.0},
+            )
+            drilling_entry["minutes"] = new_minutes
+            drilling_entry["machine$"] = machine_cost
+            drilling_entry["labor$"] = labor_cost
+            drilling_entry["total$"] = new_total
+
+            order_list = bucket_view_obj.setdefault("order", [])
+            if not isinstance(order_list, list):
+                try:
+                    order_list = list(order_list or [])
+                except Exception:
+                    order_list = []
+                bucket_view_obj["order"] = order_list
+            if "drilling" not in order_list:
+                order_list.append("drilling")
+
+        totals_map = bucket_view_obj.setdefault("totals", {})
+        if not isinstance(totals_map, dict):
+            try:
+                totals_map = dict(totals_map or {})
+            except Exception:
+                totals_map = {}
+            bucket_view_obj["totals"] = totals_map
+
+        minutes_sum = 0.0
+        machine_sum = 0.0
+        labor_sum = 0.0
+        total_sum = 0.0
+        for info in buckets_obj.values():
+            if not isinstance(info, _MappingABC):
+                continue
+            minutes_sum += _safe_float(info.get("minutes"), default=0.0)
+            machine_sum += _safe_float(info.get("machine$"), default=0.0)
+            labor_sum += _safe_float(info.get("labor$"), default=0.0)
+            total_sum += _safe_float(info.get("total$"), default=0.0)
+
+        totals_map["minutes"] = round(minutes_sum, 2)
+        totals_map["machine$"] = round(machine_sum, 2)
+        totals_map["labor$"] = round(labor_sum, 2)
+        totals_map["total$"] = round(total_sum, 2)
+
+        process_plan_summary_card: dict[str, Any] | None = None
+        if isinstance(process_plan_summary_local, dict):
+            process_plan_summary_card = process_plan_summary_local
+        else:
+            candidate_summary = breakdown.get("process_plan") if isinstance(breakdown, _MappingABC) else None
+            if isinstance(candidate_summary, dict):
+                process_plan_summary_card = candidate_summary
+                process_plan_summary_local = candidate_summary
+            else:
+                process_plan_summary_card = breakdown.setdefault("process_plan", {})
+                process_plan_summary_local = process_plan_summary_card
+        if process_plan_summary_card is not None:
+            drill_meta_summary = process_plan_summary_card.setdefault("drilling", {})
+            if subtotal_min > 0.0:
+                prior_total = _coerce_float_or_none(drill_meta_summary.get("total_minutes"))
+                if prior_total is None or prior_total <= 0.0:
+                    drill_meta_summary["total_minutes"] = float(subtotal_min)
+            drill_meta_summary["toolchange_minutes"] = float(tool_add)
+            drill_meta_summary["total_minutes_with_toolchange"] = float(total_drill_minutes_with_toolchange)
+            drill_meta_summary["total_minutes_billed"] = bill_min
+            drill_meta_summary["bill_hours"] = float(drill_hr)
+        append_line(f"Toolchange adders: Deep-Drill {tchg_deep:.2f} min + Drill {tchg_std:.2f} min = {tool_add:.2f} min" if tool_add > 0 else "Toolchange adders: -")
+        append_line("-" * 66)
+        append_line(f"Subtotal (per-hole × qty) . {subtotal_min:.2f} min  ({fmt_hours(subtotal_min/60.0)})")
+        append_line(f"TOTAL DRILLING (with toolchange) . {total_drill_minutes_with_toolchange:.2f} min  ({(total_drill_minutes_with_toolchange)/60.0:.2f} hr)")
+        append_line("")
+    except Exception as e:
+        append_line(f"[MATERIAL REMOVAL block skipped: {e}]")
+        append_line("")
 
     append_line("")
 
@@ -10109,57 +9266,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             for w in _tw.wrap(str(n), width=page_width):
                 append_line(f"- {w}")
         append_line("")
-
-    plan_info_for_explainer: dict[str, Any] = {}
-    if isinstance(process_plan_summary_local, _MappingABC) and process_plan_summary_local:
-        plan_info_for_explainer["process_plan_summary"] = process_plan_summary_local
-
-    if isinstance(breakdown, _MappingABC):
-        planner_pricing_for_explainer = breakdown.get("process_plan_pricing")
-        if isinstance(planner_pricing_for_explainer, _MappingABC) and planner_pricing_for_explainer:
-            plan_info_for_explainer.setdefault(
-                "planner_pricing",
-                planner_pricing_for_explainer,
-            )
-            for key in ("line_items", "plan_summary", "plan", "recognized_line_items"):
-                if key in planner_pricing_for_explainer:
-                    plan_info_for_explainer.setdefault(key, planner_pricing_for_explainer.get(key))
-
-        process_plan_card = breakdown.get("process_plan")
-        if isinstance(process_plan_card, _MappingABC) and process_plan_card:
-            plan_info_for_explainer.setdefault("process_plan", process_plan_card)
-
-        bucket_minutes_detail_for_render = breakdown.get("bucket_minutes_detail")
-        if isinstance(bucket_minutes_detail_for_render, _MappingABC) and bucket_minutes_detail_for_render:
-            plan_info_for_explainer.setdefault(
-                "bucket_minutes_detail",
-                bucket_minutes_detail_for_render,
-            )
-
-        bucket_view_for_plan = breakdown.get("bucket_view")
-        if isinstance(bucket_view_for_plan, _MappingABC) and bucket_view_for_plan:
-            plan_info_for_explainer.setdefault("bucket_view", bucket_view_for_plan)
-
-    if isinstance(bucket_state, PlannerBucketRenderState):
-        extra_for_plan = getattr(bucket_state, "extra", None)
-        if isinstance(extra_for_plan, _MappingABC) and extra_for_plan:
-            plan_info_for_explainer.setdefault("bucket_state_extra", extra_for_plan)
-
-    try:
-        explanation_text = explain_quote(
-            breakdown,
-            hour_trace=hour_trace_data,
-            geometry=geometry_for_explainer,
-            render_state=bucket_state,
-            plan_info=plan_info_for_explainer or None,
-        )
-    except Exception:
-        explanation_text = ""
-    if explanation_text:
-        for line in str(explanation_text).splitlines():
-            text = line.strip()
-            if text:
-                explanation_lines.append(text)
 
     if explanation_lines:
         why_lines.extend(explanation_lines)
@@ -10367,484 +9473,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     except Exception:
         logger.exception("Failed to run final drilling debug block")
 
-    def _coerce_float_optional(value: Any) -> float | None:
-        try:
-            if value is None:
-                return None
-            if isinstance(value, str) and not value.strip():
-                return None
-            return float(value)
-        except Exception:
-            return None
-
-    summary_payload: dict[str, Any] = {
-        "qty": qty,
-        "unit_price": price if qty else price,
-        "final_price": price,
-        "subtotal": subtotal,
-        "subtotal_before_margin": subtotal_before_margin,
-        "margin_pct": applied_pcts.get("MarginPct"),
-        "lead_time": result.get("lead_time")
-        or breakdown.get("lead_time")
-        or result.get("lead_time_text")
-        or breakdown.get("lead_time_text"),
-        "currency": currency,
-    }
-    expedite_pct = applied_pcts.get("ExpeditePct") if isinstance(applied_pcts, _MappingABC) else None
-    if expedite_pct:
-        summary_payload["expedite_pct"] = expedite_pct
-    if expedite_cost:
-        summary_payload["expedite_cost"] = expedite_cost
-
-    payload: dict[str, Any] = {"summary": {k: v for k, v in summary_payload.items() if v not in (None, "")}}
-
-    if programming_is_amortized:
-        payload["programming_mode"] = "amortized"
-    else:
-        payload["programming_mode"] = "per_lot"
-
-    programming_per_lot_amount = _coerce_float_optional((nre or {}).get("programming_per_lot"))
-    if programming_per_lot_amount is not None:
-        payload["programming_per_lot"] = programming_per_lot_amount
-
-    seen_drivers: set[str] = set()
-    price_drivers: list[dict[str, Any]] = []
-
-    def _append_driver(label: str, detail: str) -> None:
-        text = str(detail or "").strip()
-        if not text:
-            return
-        key = text.lower()
-        if key in seen_drivers:
-            return
-        seen_drivers.add(key)
-        price_drivers.append({"label": label, "detail": text})
-
-    for flag in red_flags:
-        _append_driver("Flag", flag)
-    for note in notes_order:
-        _append_driver("LLM", note)
-    for part in why_parts:
-        _append_driver("Driver", part)
-
-    if price_drivers:
-        payload["price_drivers"] = price_drivers
-
-    cost_breakdown_entries: list[tuple[str, float]] = []
-    if ladder_directs > 0:
-        cost_breakdown_entries.append(("Direct Costs", float(ladder_directs)))
-    if machine_labor_total > 0:
-        cost_breakdown_entries.append(("Machine & Labor", float(machine_labor_total)))
-    if nre_per_part > 0:
-        cost_breakdown_entries.append(("Amortized NRE", float(nre_per_part)))
-    if expedite_cost:
-        cost_breakdown_entries.append(("Expedite Uplift", float(expedite_cost)))
-
-    if materials_direct_missing and not any(
-        isinstance(item, (tuple, list))
-        and len(item) >= 1
-        and str(item[0]).strip().startswith("⚠ MATERIALS MISSING")
-        for item in cost_breakdown_entries
-    ):
-        cost_breakdown_entries.append(("⚠ MATERIALS MISSING", 0.0))
-
-    if cost_breakdown_entries:
-        payload["cost_breakdown"] = cost_breakdown_entries
-
-    what_if_margins = result.get("what_if_margins") or breakdown.get("what_if_margins")
-    if what_if_margins:
-        payload["what_if_margins"] = what_if_margins
-    what_if_qty = result.get("what_if_quantities") or breakdown.get("what_if_quantities")
-    if what_if_qty:
-        payload["what_if_quantities"] = what_if_qty
-
-    materials_entries: list[dict[str, Any]] = []
-    material_amount: float | None = None
-    if isinstance(material_block, _MappingABC):
-        for key in (
-            "total_cost",
-            "total_material_cost",
-            "material_cost",
-            "material_direct_cost",
-            "material_cost_before_credit",
-            "net_cost",
-        ):
-            material_amount = _coerce_float_optional(material_block.get(key))
-            if material_amount is not None:
-                break
-    detail_parts: list[str] = []
-    if isinstance(material_stock_block, _MappingABC):
-        length = _coerce_float_optional(material_stock_block.get("stock_L_in"))
-        width = _coerce_float_optional(material_stock_block.get("stock_W_in"))
-        thickness = _coerce_float_optional(material_stock_block.get("stock_T_in"))
-        dims: list[str] = []
-        if length:
-            dims.append(format_dimension(length))
-        if width:
-            dims.append(format_dimension(width))
-        if thickness:
-            dims.append(format_dimension(thickness))
-        if dims:
-            detail_parts.append(" × ".join(dims) + " in")
-    scrap_pct_val = None
-    if isinstance(material_block, _MappingABC):
-        scrap_pct_val = _coerce_float_optional(material_block.get("scrap_pct"))
-    if scrap_pct_val is not None and scrap_pct_val > 0:
-        pct_value = scrap_pct_val * 100 if scrap_pct_val <= 1 else scrap_pct_val
-        detail_parts.append(f"Scrap {pct_value:.1f}%")
-    material_label = material_display_label or material_selection.get("material_display") if isinstance(material_selection, _MappingABC) else material_display_label
-    if material_label or material_amount is not None:
-        entry: dict[str, Any] = {"label": material_label or "Material"}
-        if detail_parts:
-            entry["detail"] = "; ".join(detail_parts)
-        if material_amount is not None:
-            entry["amount"] = material_amount
-        materials_entries.append(entry)
-    if isinstance(pass_through, _MappingABC):
-        for key, value in pass_through.items():
-            if str(key).strip().lower() == "material":
-                continue
-            amount = _coerce_float_optional(value)
-            if amount is None or not math.isfinite(amount) or abs(amount) <= 1e-9:
-                continue
-            materials_entries.append({"label": str(key), "detail": "Pass-through", "amount": amount})
-    if (
-        materials_direct_missing
-        and not any(
-            isinstance(item, dict)
-            and str(item.get("label", "")).strip().startswith("⚠ MATERIALS MISSING")
-            for item in materials_entries
-        )
-    ):
-        warning_entry: dict[str, Any] = {
-            "label": "⚠ MATERIALS MISSING",
-            "detail": "Direct material cost reported as $0.00",
-        }
-        if materials_direct_amount is not None:
-            warning_entry["amount"] = 0.0
-        materials_entries.append(warning_entry)
-    if materials_entries:
-        payload["materials"] = materials_entries
-    if materials_direct_amount is not None:
-        payload["materials_direct"] = round(materials_direct_amount, 2)
-    if materials_direct_missing:
-        payload["materials_missing_warning"] = True
-
-    weight_summary_payload = None
-    if isinstance(material_detail_for_breakdown, _MappingABC):
-        weight_summary_payload = material_detail_for_breakdown.get("render_weight_summary")
-    if isinstance(weight_summary_payload, _MappingABC):
-        payload["material_weight"] = dict(weight_summary_payload)
-
-    if isinstance(material_detail_for_breakdown, _MappingABC):
-        price_lines_payload = material_detail_for_breakdown.get("render_price_lines")
-        if isinstance(price_lines_payload, list) and price_lines_payload:
-            payload["material_price_lines"] = [str(line) for line in price_lines_payload if line]
-
-    material_cost_components_payload = locals().get("material_cost_components")
-    if isinstance(material_cost_components_payload, _MappingABC):
-        try:
-            payload["material_cost_components"] = dict(material_cost_components_payload)
-        except Exception:
-            pass
-
-    if isinstance(material_stock_block, _MappingABC):
-        payload["material_stock"] = {
-            key: material_stock_block.get(key)
-            for key in (
-                "stock_L_in",
-                "stock_W_in",
-                "stock_T_in",
-                "stock_dims_in",
-                "stock_source_tag",
-                "source",
-                "mcmaster_part",
-            )
-            if key in material_stock_block
-        }
-
-    processes_entries: list[dict[str, Any]] = []
-    cycle_metrics_entries: list[dict[str, Any]] = []
-    ordered_keys: list[str] = []
-    if isinstance(canonical_bucket_order, list):
-        ordered_keys = [key for key in canonical_bucket_order if key in process_cost_row_details]
-    remaining_keys = [key for key in process_cost_row_details if key not in ordered_keys]
-    labor_total_amount = 0.0
-    for canon_key in ordered_keys + remaining_keys:
-        hours_val, rate_val, amount_val = process_cost_row_details.get(canon_key, (0.0, 0.0, 0.0))
-        amount = _coerce_float_optional(amount_val)
-        hours = _coerce_float_optional(hours_val)
-        rate = _coerce_float_optional(rate_val)
-        if not any(val and val > 0 for val in (amount, hours)):
-            continue
-        label = canon_to_display_label.get(canon_key, canon_key.replace("_", " ").title())
-        entry = {"label": label}
-        if hours is not None and hours > 0:
-            entry["hours"] = round(hours, 2)
-        minutes_info = canonical_bucket_summary.get(canon_key) if isinstance(canonical_bucket_summary, _MappingABC) else None
-        if rate is None or rate <= 0:
-            if hours and hours > 0 and amount is not None:
-                derived_rate = amount / hours if hours else None
-                if derived_rate is not None and derived_rate > 0:
-                    rate = derived_rate
-        if rate is not None and rate > 0:
-            entry["rate"] = round(rate, 2)
-        if amount is not None:
-            amount_clean = float(amount)
-            entry["amount"] = round(amount_clean, 2)
-            labor_total_amount += amount_clean
-        if isinstance(minutes_info, _MappingABC):
-            minutes_val = _coerce_float_optional(minutes_info.get("minutes"))
-            if minutes_val is not None and minutes_val > 0 and "hours" not in entry:
-                entry["hours"] = round(minutes_val / 60.0, 2)
-            planning_minutes = _coerce_float_optional(minutes_info.get("minutes_planned") or minutes_info.get("minutes"))
-            billed_minutes = _coerce_float_optional(minutes_info.get("minutes_billed") or minutes_info.get("minutes"))
-        else:
-            planning_minutes = None
-            billed_minutes = None
-        display_hours = _coerce_float_optional(entry.get("hours")) if isinstance(entry, dict) else None
-        rate_display = _display_rate_for_row(
-            canon_key,
-            cfg=cfg,
-            render_state=bucket_state,
-            hours=display_hours if display_hours is not None else hours,
-        )
-        if rate_display:
-            entry["rate_display"] = rate_display
-        processes_entries.append(entry)
-        if any(val is not None for val in (planning_minutes, billed_minutes, display_hours)):
-            cycle_metrics_entries.append(
-                {
-                    "label": label,
-                    "planning_minutes": planning_minutes,
-                    "billed_minutes": billed_minutes,
-                    "billed_hours": display_hours,
-                }
-            )
-    if processes_entries:
-        payload["processes"] = processes_entries
-    if cycle_metrics_entries:
-        payload["cycle_time_metrics"] = cycle_metrics_entries
-
-    drill_summary_candidate = None
-    for container in (
-        locals().get("process_plan_summary_local"),
-        process_plan_summary_map,
-        breakdown.get("process_plan_summary") if isinstance(breakdown, _MappingABC) else None,
-    ):
-        if isinstance(container, _MappingABC):
-            candidate = container.get("drilling")
-            if isinstance(candidate, _MappingABC):
-                drill_summary_candidate = candidate
-                break
-    if isinstance(drill_summary_candidate, _MappingABC):
-        groups_payload = drill_summary_candidate.get("groups")
-        sanitized_groups: list[dict[str, Any]] = []
-        if isinstance(groups_payload, Sequence) and not isinstance(groups_payload, (str, bytes)):
-            for group_entry in groups_payload:
-                if isinstance(group_entry, _MappingABC):
-                    group_data = dict(group_entry)
-                else:
-                    group_data = {
-                        attr: getattr(group_entry, attr)
-                        for attr in (
-                            "op",
-                            "op_name",
-                            "qty",
-                            "t_per_hole",
-                            "t_per_hole_min",
-                            "minutes",
-                            "minutes_total",
-                            "total_minutes",
-                        )
-                        if hasattr(group_entry, attr)
-                    }
-                qty_val = _coerce_float_optional(group_data.get("qty"))
-                per_hole_val = _coerce_float_optional(
-                    group_data.get("t_per_hole_min")
-                    or group_data.get("minutes_per_hole")
-                    or group_data.get("t_per_hole")
-                )
-                minutes_total = _coerce_float_optional(
-                    group_data.get("minutes_total")
-                    or group_data.get("total_minutes")
-                    or group_data.get("minutes")
-                )
-                if minutes_total is None and qty_val is not None and per_hole_val is not None:
-                    minutes_total = qty_val * per_hole_val
-                sanitized_groups.append(
-                    {
-                        "op": str(group_data.get("op") or group_data.get("op_name") or "").strip(),
-                        "qty": qty_val,
-                        "t_per_hole_min": per_hole_val,
-                        "minutes_total": minutes_total,
-                    }
-                )
-        if sanitized_groups:
-            sanitized_groups.sort(
-                key=lambda entry: (
-                    float(entry.get("minutes_total") or 0.0),
-                    float(entry.get("t_per_hole_min") or 0.0),
-                )
-            )
-            payload["drill_groups"] = sanitized_groups
-
-    if time_per_hole_payload and time_per_hole_payload.get("rows"):
-        payload["drilling_time_per_hole"] = time_per_hole_payload
-
-    nre_entries: list[dict[str, Any]] = []
-    if isinstance(nre_detail, _MappingABC):
-        for key, info in nre_detail.items():
-            label = str(key).replace("_", " ").title()
-            detail_text: list[str] = []
-            amount = None
-            if isinstance(info, _MappingABC):
-                amount = _coerce_float_optional(
-                    info.get("per_lot")
-                    or info.get("total")
-                    or info.get("amount")
-                    or info.get("cost")
-                )
-                hr_val = _coerce_float_optional(info.get("prog_hr") or info.get("hours"))
-                if hr_val is not None and hr_val > 0:
-                    detail_text.append(f"{hr_val:.2f} hr")
-                rate_val = _coerce_float_optional(info.get("prog_rate") or info.get("rate"))
-                if rate_val is not None and rate_val > 0:
-                    detail_text.append(f"{fmt_money(rate_val, currency)}/hr")
-            else:
-                amount = _coerce_float_optional(info)
-            if amount is None:
-                continue
-            entry = {"label": label, "amount": round(amount, 2)}
-            if detail_text:
-                if len(detail_text) == 2:
-                    entry["detail"] = f"{detail_text[0]} @ {detail_text[1]}"
-                else:
-                    entry["detail"] = detail_text[0]
-            nre_entries.append(entry)
-    if nre_entries:
-        payload["nre"] = nre_entries
-
-    drill_group_rows: list[dict[str, Any]] = []
-
-    def _normalize_drill_group(group: Mapping[str, Any]) -> dict[str, Any] | None:
-        minutes_val = _coerce_float_optional(
-            group.get("group_min")
-            or group.get("minutes_total")
-            or group.get("total_minutes")
-            or group.get("minutes")
-        )
-        if minutes_val is None or minutes_val <= 0:
-            qty_val = _coerce_float_optional(group.get("qty"))
-            per_hole_val = _coerce_float_optional(
-                group.get("t_per_hole_min")
-                or group.get("minutes_per_hole")
-                or group.get("t_per_hole")
-            )
-            if qty_val and qty_val > 0 and per_hole_val and per_hole_val > 0:
-                minutes_val = qty_val * per_hole_val
-        if minutes_val is None or minutes_val <= 0:
-            return None
-        label = (
-            group.get("group_label")
-            or group.get("label")
-            or group.get("group")
-            or group.get("op_name")
-            or group.get("op")
-            or ""
-        )
-        normalized = {
-            "label": str(label),
-            "group_label": str(label) if label else None,
-            "group_min": float(minutes_val),
-        }
-        for key in ("qty", "diameter_in", "depth_in", "sfm", "ipr", "rpm", "ipm"):
-            value = _coerce_float_optional(group.get(key))
-            if value is not None and value > 0:
-                normalized[key] = value
-        return normalized
-
-    def _collect_drill_groups(source: Mapping[str, Any] | None) -> None:
-        if not isinstance(source, _MappingABC):
-            return
-        groups_payload = source.get("groups")
-        if not isinstance(groups_payload, Sequence):
-            return
-        for group in groups_payload:
-            if not isinstance(group, _MappingABC):
-                continue
-            normalized = _normalize_drill_group(group)
-            if normalized is not None:
-                drill_group_rows.append(normalized)
-
-    process_plan_map = None
-    for candidate in (
-        locals().get("process_plan_summary_local"),
-        breakdown.get("process_plan") if isinstance(breakdown, _MappingABC) else None,
-        breakdown.get("process_plan_pricing") if isinstance(breakdown, _MappingABC) else None,
-    ):
-        if isinstance(candidate, _MappingABC):
-            process_plan_map = candidate
-            break
-
-    if isinstance(process_plan_map, _MappingABC):
-        _collect_drill_groups(process_plan_map.get("drilling"))
-
-    drilling_meta_block = breakdown.get("drilling_meta") if isinstance(breakdown, _MappingABC) else None
-    if not drill_group_rows and isinstance(drilling_meta_block, _MappingABC):
-        bins_list = drilling_meta_block.get("bins_list")
-        if isinstance(bins_list, Sequence):
-            for group in bins_list:
-                if not isinstance(group, _MappingABC):
-                    continue
-                normalized = _normalize_drill_group(group)
-                if normalized is not None:
-                    drill_group_rows.append(normalized)
-
-    if drill_group_rows:
-        drill_group_rows.sort(key=lambda row: row.get("group_min", 0.0), reverse=True)
-        payload["drilling_groups"] = drill_group_rows
-        payload["top_cycle_time"] = drill_group_rows[:5]
-
-    cycle_reference_entries: list[dict[str, Any]] = []
-    if isinstance(hour_summary_entries, _MappingABC):
-        for label, data in hour_summary_entries.items():
-            if not isinstance(data, (tuple, list)) or not data:
-                continue
-            hours_val = _coerce_float_optional(data[0])
-            include_flag = bool(data[1]) if len(data) > 1 else True
-            if not include_flag:
-                continue
-            if hours_val is None or hours_val <= 0:
-                continue
-            cycle_reference_entries.append({"label": str(label), "hours": round(hours_val, 2)})
-    if cycle_reference_entries:
-        payload["cycle_time_reference"] = cycle_reference_entries
-        if "top_cycle_time" not in payload:
-            top_cycle = sorted(
-                cycle_reference_entries,
-                key=lambda entry: entry.get("hours", 0),
-                reverse=True,
-            )
-            if top_cycle:
-                payload["top_cycle_time"] = top_cycle[:5]
-
-    traceability = None
-    for source in (result, breakdown):
-        if isinstance(source, _MappingABC):
-            candidate = source.get("traceability")
-            if candidate:
-                traceability = candidate
-                break
-    if traceability:
-        payload["traceability"] = traceability
-
-    if isinstance(result, _MutableMappingABC):
-        result["render_payload"] = payload
-    if isinstance(breakdown, _MutableMappingABC):
-        breakdown["render_payload"] = payload
-
-    return _render_structured_quote(payload)
+    doc = doc_builder.build_doc()
+    return render_quote_doc(doc, divider=divider)
 # ===== QUOTE CONFIG (edit-friendly) ==========================================
 CONFIG_INIT_ERRORS: list[str] = []
 
@@ -10995,9 +9625,6 @@ class QuoteConfiguration:
     separate_machine_labor: bool = True
     machine_rate_per_hr: float = 45.0
     labor_rate_per_hr: float = 45.0
-    hole_source_preference: str = "table"  # "table" | "geometry" | "auto"
-    hole_merge_tol_diam_in: float = 0.001
-    hole_merge_tol_depth_in: float = 0.01
 
     def copy_default_params(self) -> Dict[str, Any]:
         """Return a deep copy of the default parameter set."""
@@ -12707,7 +11334,7 @@ def _group_geo_by_diam(
         depth_vals = bucket.get("depth") or []
         depth_avg = sum(depth_vals) / len(depth_vals) if depth_vals else None
         grouped.append({"diam_in": float(diam_avg), "avg_depth_in": float(depth_avg) if depth_avg else None})
-    grouped.sort(key=lambda item: float(item.get("diam_in") or 0.0))
+    grouped.sort(key=lambda item: item.get("diam_in", 0.0))
     return grouped
 
 
@@ -12826,12 +11453,7 @@ def _dedupe_geo_rows(
         elif thickness is not None and thickness > 0:
             entry["depth_in"] = float(round(thickness, 3))
         out.append(entry)
-    out.sort(
-        key=lambda item: (
-            float(item.get("diam_in") or 0.0),
-            float(item.get("depth_in") or 0.0),
-        )
-    )
+    out.sort(key=lambda item: (item.get("diam_in", 0.0), item.get("depth_in", 0.0)))
     return out
 
 
@@ -12849,44 +11471,21 @@ def reconcile_holes(
     table_count = sum(max(1, _coerce_int_or_zero(row.get("qty"))) for row in table_list)
     geo_count = sum(max(1, _coerce_int_or_zero(row.get("qty") or row.get("count"))) for row in geo_list)
 
-    if table_list and preference in ("table", "auto"):
-        use_table = True
-        if preference == "auto" and geo_list:
-            rel = abs(table_count - geo_count) / max(table_count, 1) if table_count else 0.0
-            if rel > 0.15:
-                use_table = False
-        if use_table:
-            final_rows = _fill_table_depths_from_geo(
-                table_list,
-                geo_list,
-                cfg,
-                plate_thickness_in=thickness,
-            )
-            source_used = "table"
-        else:
-            final_rows = _dedupe_geo_rows(
-                geo_list,
-                cfg,
-                plate_thickness_in=thickness,
-            )
-            source_used = "geometry"
-    elif geo_list:
-        final_rows = _dedupe_geo_rows(
-            geo_list,
-            cfg,
-            plate_thickness_in=thickness,
-        )
-        source_used = "geometry"
-    elif table_list and preference == "geometry":
-        final_rows = _dedupe_geo_rows(
-            geo_list,
-            cfg,
-            plate_thickness_in=thickness,
-        )
+    source_used = "geometry"
+    if preference == "table" and table_list:
+        final_rows = _fill_table_depths_from_geo(table_list, geo_list, cfg, plate_thickness_in=thickness)
+        source_used = "table"
+    elif preference == "geometry" or not table_list:
+        final_rows = _dedupe_geo_rows(geo_list, cfg, plate_thickness_in=thickness)
         source_used = "geometry"
     else:
-        final_rows = []
-        source_used = "geometry"
+        rel = abs(table_count - geo_count) / max(table_count, 1)
+        if table_list and rel <= 0.15:
+            final_rows = _fill_table_depths_from_geo(table_list, geo_list, cfg, plate_thickness_in=thickness)
+            source_used = "table"
+        else:
+            final_rows = _dedupe_geo_rows(geo_list, cfg, plate_thickness_in=thickness)
+            source_used = "geometry"
 
     cleaned: list[dict[str, Any]] = []
     for row in final_rows:
@@ -12950,20 +11549,19 @@ def _normalize_hole_sets_for_geo(
             entry["depth_mm"] = float(round(depth_in * 25.4, 3))
         normalized.append(entry)
 
-    normalized.sort(key=lambda item: float(item.get("dia_mm") or 0.0))
+    normalized.sort(key=lambda item: item.get("dia_mm", 0.0))
 
-    if isinstance(geo_context, (dict, _MutableMappingABC)):
-        try:
-            geo_context["hole_sets_source"] = source_used
-            geo_context["hole_merge_audit"] = {**audit, "source": source_used}
-        except Exception:
-            pass
+    try:
+        geo_context["hole_sets_source"] = source_used
+        geo_context["hole_merge_audit"] = {**audit, "source": source_used}
+    except Exception:
+        pass
 
     return normalized
 
 
 def _ensure_geo_context_fields(
-    geo_payload: dict[str, Any] | None,
+    geo_payload: Mapping[str, Any] | None,
     value_map: Mapping[str, Any] | None,
     *,
     cfg: QuoteConfiguration | None = None,
@@ -15406,7 +14004,6 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         scrap_recovery_used: float | None = None
         scrap_credit_source: str | None = None
         wieland_scrap_price: float | None = None
-        wieland_computed_credit: float | None = None
 
         if credit_override_amount is not None:
             scrap_credit_amount = max(0.0, float(credit_override_amount))
@@ -15450,13 +14047,10 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             scrap_credit_amount = credit_value
             net_material_cost = max(0.0, float(base_material_cost) - credit_value)
 
-            if scrap_credit_source == "wieland":
-                wieland_computed_credit = float(scrap_credit_amount)
-            else:
-                material_entry["material_scrap_credit"] = float(scrap_credit_amount)
-                material_entry["material_scrap_credit_entered"] = bool(scrap_credit_amount > 0)
-                mat_block["material_scrap_credit"] = float(scrap_credit_amount)
-                mat_block["material_scrap_credit_entered"] = bool(scrap_credit_amount > 0)
+            material_entry["material_scrap_credit"] = float(scrap_credit_amount)
+            material_entry["material_scrap_credit_entered"] = bool(scrap_credit_amount > 0)
+            mat_block["material_scrap_credit"] = float(scrap_credit_amount)
+            mat_block["material_scrap_credit_entered"] = bool(scrap_credit_amount > 0)
             if scrap_price_used is not None:
                 material_entry["scrap_credit_unit_price_usd_per_lb"] = float(scrap_price_used)
                 mat_block["scrap_credit_unit_price_usd_per_lb"] = float(scrap_price_used)
@@ -15468,16 +14062,6 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 material_entry["scrap_credit_source"] = scrap_credit_source
                 mat_block["scrap_credit_source"] = scrap_credit_source
         else:
-            material_entry.pop("material_scrap_credit", None)
-            material_entry.pop("material_scrap_credit_entered", None)
-            mat_block.pop("material_scrap_credit", None)
-            mat_block.pop("material_scrap_credit_entered", None)
-
-        if wieland_computed_credit is not None:
-            material_entry["computed_scrap_credit_usd"] = float(wieland_computed_credit)
-            mat_block["computed_scrap_credit_usd"] = float(wieland_computed_credit)
-            material_entry["scrap_price_source"] = "wieland"
-            mat_block["scrap_price_source"] = "wieland"
             material_entry.pop("material_scrap_credit", None)
             material_entry.pop("material_scrap_credit_entered", None)
             mat_block.pop("material_scrap_credit", None)
@@ -16510,8 +15094,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         detail_map.pop("planner_prog_hr", None)
     detail_map["auto_prog_hr_model"] = float(auto_prog_hr_model)
     detail_map["auto_prog_hr"] = float(auto_prog_hr)
-    programming_hours = float(final_prog_hr)
-    detail_map["prog_hr"] = programming_hours
+    detail_map["prog_hr"] = float(final_prog_hr)
     if override_applied:
         detail_map["override_applied"] = True
         if override_source:
@@ -16525,10 +15108,28 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         if isinstance(merged_two_bucket_rates, _MappingABC)
         else {}
     )
-    # === PROGRAMMING RATE (LABOR-ONLY) ===
-    programmer_rate = float(getattr(cfg, "labor_rate_per_hr", 45.0) or 45.0)
-    if not math.isfinite(programmer_rate) or programmer_rate <= 0:
-        programmer_rate = 45.0
+    programmer_rate = 0.0
+    if isinstance(labor_bucket, _MappingABC):
+        for key in ("programmer", "Programmer", "PROGRAMMER"):
+            rate_value = labor_bucket.get(key)
+            if rate_value is None:
+                continue
+            try:
+                programmer_rate = float(rate_value)
+            except Exception:
+                continue
+            if programmer_rate > 0:
+                break
+    if programmer_rate <= 0:
+        programmer_rate = _lookup_rate(
+            "ProgrammingRate",
+            rates,
+            params,
+            default_rates,
+            fallback=85.0,
+        )
+    if programmer_rate <= 0:
+        programmer_rate = 85.0
 
     if programmer_rate > 0:
         if isinstance(merged_two_bucket_rates, dict):
@@ -16563,9 +15164,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     if not math.isfinite(qty_for_programming) or qty_for_programming <= 0:
         qty_for_programming = 1.0
 
-    programming_cost = round(programming_hours * programmer_rate, 2)
-    programming_per_part = programming_cost / max(1.0, qty_for_programming)
-    detail_map["per_lot"] = programming_cost
+    programming_total = round(final_prog_hr * programmer_rate, 2)
+    programming_per_part = programming_total / max(1.0, qty_for_programming)
+    detail_map["per_lot"] = programming_total
     detail_map["per_part"] = programming_per_part
 
     is_amortized = bool(amortized_programming and amortized_programming > 0)
@@ -16582,8 +15183,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         nre_block["programming_per_lot"] = 0.0
         nre_block["programming_per_part"] = 0.0
     else:
-        nre_block["programming_cost"] = programming_cost
-        nre_block["programming_per_lot"] = programming_cost
+        nre_block["programming_cost"] = programming_total
+        nre_block["programming_per_lot"] = programming_total
         nre_block["programming_per_part"] = programming_per_part
 
     if speeds_feeds_csv_path:
@@ -20100,9 +18701,6 @@ class App(tk.Tk):
             default_params=copy.deepcopy(self.default_params_template),
             default_material_display=self.default_material_display,
             prefer_removal_drilling_hours=True,
-            separate_machine_labor=True,
-            machine_rate_per_hr=45.0,
-            labor_rate_per_hr=45.0,
             stock_price_source="mcmaster_api",
             scrap_price_source="wieland",
         )
@@ -20277,11 +18875,7 @@ class App(tk.Tk):
             self.status_var.set("Configuration error: see dialog for details.")
 
         # GEO (single pane; CAD open handled by top bar)
-        self.geo_txt = tk.Text(self.tab_geo, wrap="none"); self.geo_txt.pack(fill="both", expand=True)
-        try:
-            self.geo_txt.configure(font=("Courier New", 10))
-        except Exception:
-            pass
+        self.geo_txt = tk.Text(self.tab_geo, wrap="word"); self.geo_txt.pack(fill="both", expand=True)
 
         # LLM (hidden frame is still built to keep functionality without a visible tab)
         if hasattr(self, "_build_llm"):
@@ -20301,9 +18895,9 @@ class App(tk.Tk):
 
         self.output_text_widgets: dict[str, tk.Text] = {}
 
-        simplified_txt = tk.Text(self.output_tab_simplified, wrap="none")
+        simplified_txt = tk.Text(self.output_tab_simplified, wrap="word")
         simplified_txt.pack(fill="both", expand=True)
-        full_txt = tk.Text(self.output_tab_full, wrap="none")
+        full_txt = tk.Text(self.output_tab_full, wrap="word")
         full_txt.pack(fill="both", expand=True)
 
         for name, widget in {"simplified": simplified_txt, "full": full_txt}.items():
@@ -20311,10 +18905,6 @@ class App(tk.Tk):
                 widget.tag_configure("rcol", tabs=("4.8i right",), tabstyle="tabular")
             except tk.TclError:
                 widget.tag_configure("rcol", tabs=("4.8i right",))
-            try:
-                widget.configure(font=("Courier New", 10), wrap="none")
-            except Exception:
-                pass
             self.output_text_widgets[name] = widget
 
         self.output_nb.select(self.output_tab_simplified)
@@ -21934,11 +20524,7 @@ class App(tk.Tk):
         row += 1
         ttk.Checkbutton(parent, text="Apply LLM adjustments to params", variable=self.apply_llm_adj).grid(row=row, column=0, sticky="w", pady=(0,6)); row+=1
         ttk.Button(parent, text="Run LLM on current GEO", command=self.run_llm).grid(row=row, column=0, sticky="w", padx=5, pady=6); row+=1
-        self.llm_txt = tk.Text(parent, wrap="none", height=24); self.llm_txt.grid(row=row, column=0, columnspan=3, sticky="nsew")
-        try:
-            self.llm_txt.configure(font=("Courier New", 10))
-        except Exception:
-            pass
+        self.llm_txt = tk.Text(parent, wrap="word", height=24); self.llm_txt.grid(row=row, column=0, columnspan=3, sticky="nsew")
         parent.grid_columnconfigure(1, weight=1); parent.grid_rowconfigure(row, weight=1)
 
     def _pick_model(self):
@@ -22006,11 +20592,7 @@ class App(tk.Tk):
         win.title(f"LLM Inspector — {latest.name}")
         win.geometry("900x700")
 
-        txt = scrolledtext.ScrolledText(win, wrap="none")
-        try:
-            txt.configure(font=("Courier New", 10), wrap="none")
-        except Exception:
-            pass
+        txt = scrolledtext.ScrolledText(win, wrap="word")
         txt.pack(fill="both", expand=True)
         txt.insert("1.0", shown)
         txt.configure(state="disabled")
@@ -22160,62 +20742,12 @@ class App(tk.Tk):
             )
             if not isinstance(res, dict):
                 res = {}
-            reprice_with_effective(self.quote_state)
-
-            effective_payload = (
-                self.quote_state.effective
-                if isinstance(self.quote_state.effective, _MappingABC)
-                else {}
-            )
-            effective_sources_payload = (
-                self.quote_state.effective_sources
-                if isinstance(self.quote_state.effective_sources, _MappingABC)
-                else {}
-            )
-            effective_snapshot = dict(effective_payload)
-            effective_sources_snapshot = dict(effective_sources_payload)
-
-            decision_state_payload = res.get("decision_state") if isinstance(res, dict) else None
-            if isinstance(decision_state_payload, _MutableMappingABC):
-                decision_state_payload["effective"] = effective_snapshot
-                decision_state_payload["effective_sources"] = effective_sources_snapshot
-            elif isinstance(decision_state_payload, _MappingABC):
-                refreshed_state = dict(decision_state_payload)
-                refreshed_state["effective"] = effective_snapshot
-                refreshed_state["effective_sources"] = effective_sources_snapshot
-                res["decision_state"] = refreshed_state
-            else:
-                baseline_payload = (
-                    self.quote_state.baseline
-                    if isinstance(self.quote_state.baseline, _MappingABC)
-                    else {}
-                )
-                suggestions_payload = (
-                    self.quote_state.suggestions
-                    if isinstance(self.quote_state.suggestions, _MappingABC)
-                    else {}
-                )
-                overrides_payload = (
-                    self.quote_state.user_overrides
-                    if isinstance(self.quote_state.user_overrides, _MappingABC)
-                    else {}
-                )
-                res["decision_state"] = {
-                    "baseline": dict(baseline_payload),
-                    "suggestions": dict(suggestions_payload),
-                    "user_overrides": dict(overrides_payload),
-                    "effective": effective_snapshot,
-                    "effective_sources": effective_sources_snapshot,
-                }
-
-            res.setdefault("quote_state", self.quote_state.to_dict())
             cfg = getattr(self, "quote_config", None)
-            geometry_loader = getattr(self, "geometry_loader", None)
-            geometry_ctx = (
-                getattr(geometry_loader, "geo_ctx", None)
-                if geometry_loader is not None
-                else None
-            )
+            geometry_ctx: Mapping[str, Any] | None = None
+            if isinstance(self.geo_context, dict) and self.geo_context:
+                geometry_ctx = self.geo_context
+            elif isinstance(self.geo, dict) and self.geo:
+                geometry_ctx = self.geo
 
             try:
                 simplified_report = render_quote(
