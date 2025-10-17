@@ -1292,7 +1292,7 @@ def _pick_mcmaster_plate_sku_impl(
 
     import math as _math
 
-    if not all(val and val > 0 for val in (need_L_in, need_W_in, need_T_in)):
+    if not all(val > 0 for val in (need_L_in, need_W_in, need_T_in)):
         return None
 
     rows = list(catalog_rows) if catalog_rows is not None else _load_mcmaster_catalog_csv()
