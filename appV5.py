@@ -3781,8 +3781,10 @@ def read_variables_file(
     Read .xlsx/.csv, keep original data intact, and return a sanitized copy for the estimator.
     - If return_full=True, returns (core_df, full_df); otherwise returns core_df only.
     """
-    if not _HAS_PANDAS:
+    if not _HAS_PANDAS or pd is None:
         raise RuntimeError("pandas required (conda/pip install pandas)")
+
+    assert pd is not None  # hint for type checkers
 
     lp = path.lower()
     if lp.endswith(".xlsx"):
@@ -3848,8 +3850,10 @@ def read_variables_file(
 
 def _load_master_variables() -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
     """Load the packaged master variables sheet once and serve cached copies."""
-    if not _HAS_PANDAS:
+    if not _HAS_PANDAS or pd is None:
         return (None, None)
+
+    assert pd is not None  # hint for type checkers
 
     global _MASTER_VARIABLES_CACHE
     cache = _MASTER_VARIABLES_CACHE
