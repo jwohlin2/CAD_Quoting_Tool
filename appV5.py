@@ -23,7 +23,7 @@ import re
 import sys
 import time
 import typing
-from typing import Any, Mapping
+from typing import Any, Mapping, MutableMapping
 from collections import Counter
 from collections.abc import (
     Callable,
@@ -356,6 +356,390 @@ def _render_time_per_hole(
             continue
     append_line("")
     return subtotal_min, seen_deep, seen_std
+
+
+def _compute_drilling_removal_section(
+    *,
+    breakdown: Mapping[str, Any] | MutableMapping[str, Any],
+    rates: Mapping[str, Any] | MutableMapping[str, Any],
+    drilling_meta_source: Mapping[str, Any] | None,
+    drilling_card_detail: Mapping[str, Any] | None,
+    drill_machine_minutes_estimate: float,
+    drill_tool_minutes_estimate: float,
+    drill_total_minutes_estimate: float,
+    process_plan_summary: Mapping[str, Any] | None,
+) -> tuple[dict[str, float], list[str], Mapping[str, Any] | None]:
+    """Return drill removal render lines + extras while updating breakdown state."""
+
+    lines: list[str] = []
+    extras: dict[str, float] = {}
+    updated_plan_summary = process_plan_summary
+
+    try:
+        drilling_meta_map: Mapping[str, Any] = (
+            drilling_meta_source
+            if isinstance(drilling_meta_source, _MappingABC)
+            else {}
+        )
+
+        mat_canon = str(
+            drilling_meta_map.get("material_canonical")
+            or drilling_meta_map.get("material")
+            or "-"
+        )
+        mat_group = (
+            drilling_meta_map.get("material_group")
+            or drilling_meta_map.get("group")
+            or "-"
+        )
+        row_group = (
+            drilling_meta_map.get("row_material_group")
+            or drilling_meta_map.get("row_group")
+            or None
+        )
+        holes_deep = int(drilling_meta_map.get("holes_deep") or 0)
+        holes_std = int(drilling_meta_map.get("holes_std") or 0)
+        dia_vals = _ensure_list(drilling_meta_map.get("dia_in_vals"))
+        depth_vals = _ensure_list(drilling_meta_map.get("depth_in_vals"))
+        sfm_deep = float(drilling_meta_map.get("sfm_deep") or 39.0)
+        sfm_std = float(drilling_meta_map.get("sfm_std") or 80.0)
+        ipr_deep_vals = (
+            _ensure_list(drilling_meta_map.get("ipr_deep_vals"), [0.0006, 0.0025])
+            or [0.0006, 0.0025]
+        )
+        ipr_std_val = float(drilling_meta_map.get("ipr_std_val") or 0.0060)
+        rpm_deep_vals = (
+            _ensure_list(drilling_meta_map.get("rpm_deep_vals"), [238, 1194])
+            or [238, 1194]
+        )
+        rpm_std_vals = (
+            _ensure_list(drilling_meta_map.get("rpm_std_vals"), [169, 407])
+            or [169, 407]
+        )
+        ipm_deep_vals = (
+            _ensure_list(drilling_meta_map.get("ipm_deep_vals"), [0.5, 1.0])
+            or [0.5, 1.0]
+        )
+        ipm_std_vals = (
+            _ensure_list(drilling_meta_map.get("ipm_std_vals"), [1.0, 2.4])
+            or [1.0, 2.4]
+        )
+        index_min = float(drilling_meta_map.get("index_min_per_hole") or 0.13)
+        peck_min_rng = (
+            _ensure_list(drilling_meta_map.get("peck_min_per_hole_vals"), [0.07, 0.08])
+            or [0.07, 0.08]
+        )
+        peck_min_deep = float(min(peck_min_rng))
+        peck_min_std = float(max(peck_min_rng))
+        tchg_deep = float(drilling_meta_map.get("toolchange_min_deep") or 8.00)
+        tchg_std = float(drilling_meta_map.get("toolchange_min_std") or 2.50)
+
+        bins: list[dict[str, Any]] | None = None
+        if isinstance(drilling_card_detail, _MappingABC):
+            detail_bins = drilling_card_detail.get("bins")
+            if isinstance(detail_bins, list) and detail_bins:
+                bins = [
+                    dict(entry)
+                    for entry in detail_bins
+                    if isinstance(entry, _MappingABC)
+                ]
+        if bins is None:
+            raw_bins = drilling_meta_map.get("bins_list")
+            if isinstance(raw_bins, tuple):
+                raw_bins = list(raw_bins)
+            if isinstance(raw_bins, list):
+                bins = [
+                    dict(entry)
+                    for entry in raw_bins
+                    if isinstance(entry, _MappingABC)
+                ]
+            else:
+                bins_dict = drilling_meta_map.get("bins") or {}
+                if isinstance(bins_dict, dict):
+                    bins = [
+                        dict(v)
+                        for _, v in sorted(
+                            bins_dict.items(),
+                            key=lambda kv: float(kv[1].get("diameter_in", 0.0))
+                            if isinstance(kv[1], dict)
+                            else 0.0,
+                        )
+                        if isinstance(v, _MappingABC)
+                    ]
+        if bins is None:
+            bins = []
+
+        _render_removal_card(
+            lines.append,
+            mat_canon=mat_canon,
+            mat_group=mat_group,
+            row_group=row_group,
+            holes_deep=holes_deep,
+            holes_std=holes_std,
+            dia_vals_in=dia_vals,
+            depth_vals_in=depth_vals,
+            sfm_deep=sfm_deep,
+            sfm_std=sfm_std,
+            ipr_deep_vals=ipr_deep_vals,
+            ipr_std_val=ipr_std_val,
+            rpm_deep_vals=rpm_deep_vals,
+            rpm_std_vals=rpm_std_vals,
+            ipm_deep_vals=ipm_deep_vals,
+            ipm_std_vals=ipm_std_vals,
+            index_min_per_hole=index_min,
+            peck_min_rng=peck_min_rng,
+            toolchange_min_deep=tchg_deep,
+            toolchange_min_std=tchg_std,
+        )
+
+        subtotal_calc, seen_deep_calc, seen_std_calc = _render_time_per_hole(
+            lines.append,
+            bins=bins,
+            index_min=index_min,
+            peck_min_deep=peck_min_deep,
+            peck_min_std=peck_min_std,
+        )
+
+        if drill_machine_minutes_estimate > 0.0:
+            subtotal_min = float(drill_machine_minutes_estimate)
+        else:
+            subtotal_min = float(subtotal_calc)
+        if drill_tool_minutes_estimate > 0.0:
+            tool_add = float(drill_tool_minutes_estimate)
+        else:
+            tool_add = (tchg_deep if seen_deep_calc else 0.0) + (
+                tchg_std if seen_std_calc else 0.0
+            )
+        if drill_total_minutes_estimate > 0.0:
+            total_drill_minutes_with_toolchange = float(drill_total_minutes_estimate)
+        else:
+            total_drill_minutes_with_toolchange = subtotal_min + tool_add
+
+        extras["drill_machine_minutes"] = float(subtotal_min)
+        extras["drill_labor_minutes"] = float(tool_add)
+        extras["drill_total_minutes"] = float(total_drill_minutes_with_toolchange)
+
+        breakdown_mutable: MutableMapping[str, Any]
+        if isinstance(breakdown, _MutableMappingABC):
+            breakdown_mutable = typing.cast(MutableMapping[str, Any], breakdown)
+        else:
+            breakdown_mutable = dict(breakdown)
+
+        drill_meta = breakdown_mutable.setdefault("drilling_meta", {})
+        if not isinstance(drill_meta, dict):
+            try:
+                drill_meta = dict(drill_meta or {})
+            except Exception:
+                drill_meta = {}
+            breakdown_mutable["drilling_meta"] = drill_meta
+        drill_meta["toolchange_minutes"] = float(tool_add)
+        drill_meta["total_minutes_with_toolchange"] = float(
+            total_drill_minutes_with_toolchange
+        )
+
+        bill_min = float(
+            drilling_meta_map.get("total_minutes_billed")
+            or drilling_meta_map.get("total_minutes_with_toolchange")
+            or drilling_meta_map.get("total_minutes")
+            or 0.0
+        )
+
+        plan_candidates = [
+            updated_plan_summary,
+            breakdown_mutable.get("process_plan")
+            if isinstance(breakdown_mutable, _MappingABC)
+            else None,
+        ]
+        plan_drill_min: float | None = None
+        for candidate in plan_candidates:
+            if not isinstance(candidate, _MappingABC):
+                continue
+            plan_drilling = candidate.get("drilling")
+            if not isinstance(plan_drilling, _MappingABC):
+                continue
+            plan_minutes = _coerce_float_or_none(
+                plan_drilling.get("total_minutes_with_toolchange")
+            )
+            if plan_minutes is not None and plan_minutes > 0.0:
+                plan_drill_min = float(plan_minutes)
+                break
+
+        drill_min = plan_drill_min if plan_drill_min and plan_drill_min > 0.0 else bill_min
+        bill_min = drill_min
+        drill_hr = drill_min / 60.0 if drill_min else 0.0
+        if drill_hr > 0.0:
+            extras["removal_drilling_hours"] = float(drill_hr)
+        drill_meta["total_minutes_billed"] = drill_min
+        drill_meta["bill_hours"] = float(drill_hr)
+
+        try:
+            rates_map = dict(rates)
+        except Exception:
+            rates_map = {}
+
+        pm_container = breakdown_mutable.setdefault("process_meta", {})
+        if not isinstance(pm_container, dict):
+            try:
+                pm_container = dict(pm_container)
+            except Exception:
+                pm_container = {}
+            breakdown_mutable["process_meta"] = pm_container
+        pm = pm_container.setdefault("drilling", {})
+        if not isinstance(pm, dict):
+            try:
+                pm = dict(pm)
+            except Exception:
+                pm = {}
+            pm_container["drilling"] = pm
+        pm["minutes"] = drill_min
+        pm["hr"] = drill_hr
+        pm["rate"] = float(rates_map.get("DrillingRate") or 0.0)
+        pm["basis"] = ["minutes_engine"]
+        try:
+            pm_container["Drilling"] = pm
+        except Exception:
+            pass
+
+        bucket_view_obj = breakdown_mutable.get("bucket_view")
+        if not isinstance(bucket_view_obj, dict):
+            if isinstance(bucket_view_obj, _MappingABC):
+                try:
+                    bucket_view_obj = dict(bucket_view_obj)
+                except Exception:
+                    bucket_view_obj = {}
+            else:
+                bucket_view_obj = {}
+            breakdown_mutable["bucket_view"] = bucket_view_obj
+
+        buckets_obj = bucket_view_obj.setdefault("buckets", {})
+        if not isinstance(buckets_obj, dict):
+            try:
+                buckets_obj = dict(buckets_obj)
+            except Exception:
+                buckets_obj = {}
+            bucket_view_obj["buckets"] = buckets_obj
+
+        old_entry = buckets_obj.pop("drilling", {}) if isinstance(buckets_obj, dict) else {}
+
+        new_minutes = round(drill_min, 2)
+        machine_rate = float(pm.get("rate") or 0.0)
+        billed_total = (
+            round((drill_min / 60.0) * machine_rate, 2)
+            if machine_rate > 0.0 and drill_min > 0.0
+            else 0.0
+        )
+        if billed_total <= 0.0:
+            billed_total = round(
+                _safe_float((old_entry or {}).get("total$"), default=0.0),
+                2,
+            )
+        if new_minutes <= 0.0 and isinstance(old_entry, _MappingABC):
+            legacy_minutes = _safe_float(old_entry.get("minutes"), default=0.0)
+            if legacy_minutes > 0.0:
+                new_minutes = round(legacy_minutes, 2)
+        cost_mode = _bucket_cost_mode("drilling")
+        if cost_mode == "labor":
+            labor_cost = billed_total
+            machine_cost = 0.0
+        else:
+            machine_cost = billed_total
+            labor_cost = 0.0
+        new_total = round(machine_cost + labor_cost, 2)
+
+        if new_minutes <= 0.0 and new_total <= 0.0 and isinstance(old_entry, _MappingABC):
+            buckets_obj["drilling"] = dict(old_entry)
+        else:
+            drilling_entry = buckets_obj.setdefault(
+                "drilling",
+                {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0, "total$": 0.0},
+            )
+            drilling_entry["minutes"] = new_minutes
+            drilling_entry["machine$"] = machine_cost
+            drilling_entry["labor$"] = labor_cost
+            drilling_entry["total$"] = new_total
+
+            order_list = bucket_view_obj.setdefault("order", [])
+            if not isinstance(order_list, list):
+                try:
+                    order_list = list(order_list or [])
+                except Exception:
+                    order_list = []
+                bucket_view_obj["order"] = order_list
+            if "drilling" not in order_list:
+                order_list.append("drilling")
+
+        totals_map = bucket_view_obj.setdefault("totals", {})
+        if not isinstance(totals_map, dict):
+            try:
+                totals_map = dict(totals_map or {})
+            except Exception:
+                totals_map = {}
+            bucket_view_obj["totals"] = totals_map
+
+        minutes_sum = 0.0
+        machine_sum = 0.0
+        labor_sum = 0.0
+        total_sum = 0.0
+        for info in buckets_obj.values():
+            if not isinstance(info, _MappingABC):
+                continue
+            minutes_sum += _safe_float(info.get("minutes"), default=0.0)
+            machine_sum += _safe_float(info.get("machine$"), default=0.0)
+            labor_sum += _safe_float(info.get("labor$"), default=0.0)
+            total_sum += _safe_float(info.get("total$"), default=0.0)
+
+        totals_map["minutes"] = round(minutes_sum, 2)
+        totals_map["machine$"] = round(machine_sum, 2)
+        totals_map["labor$"] = round(labor_sum, 2)
+        totals_map["total$"] = round(total_sum, 2)
+
+        process_plan_summary_card: dict[str, Any] | None = None
+        if isinstance(updated_plan_summary, dict):
+            process_plan_summary_card = updated_plan_summary
+        else:
+            candidate_summary = breakdown_mutable.get("process_plan")
+            if isinstance(candidate_summary, dict):
+                process_plan_summary_card = candidate_summary
+                updated_plan_summary = candidate_summary
+            else:
+                process_plan_summary_card = breakdown_mutable.setdefault("process_plan", {})
+                updated_plan_summary = process_plan_summary_card
+        if process_plan_summary_card is not None:
+            drill_meta_summary = process_plan_summary_card.setdefault("drilling", {})
+            if subtotal_min > 0.0:
+                prior_total = _coerce_float_or_none(
+                    drill_meta_summary.get("total_minutes")
+                )
+                if prior_total is None or prior_total <= 0.0:
+                    drill_meta_summary["total_minutes"] = float(subtotal_min)
+            drill_meta_summary["toolchange_minutes"] = float(tool_add)
+            drill_meta_summary["total_minutes_with_toolchange"] = float(
+                total_drill_minutes_with_toolchange
+            )
+            drill_meta_summary["total_minutes_billed"] = bill_min
+            drill_meta_summary["bill_hours"] = float(drill_hr)
+
+        lines.append(
+            (
+                f"Toolchange adders: Deep-Drill {tchg_deep:.2f} min + Drill {tchg_std:.2f} min = {tool_add:.2f} min"
+                if tool_add > 0
+                else "Toolchange adders: -"
+            )
+        )
+        lines.append("-" * 66)
+        lines.append(
+            f"Subtotal (per-hole × qty) . {subtotal_min:.2f} min  ({fmt_hours(subtotal_min/60.0)})"
+        )
+        lines.append(
+            f"TOTAL DRILLING (with toolchange) . {total_drill_minutes_with_toolchange:.2f} min  ({(total_drill_minutes_with_toolchange)/60.0:.2f} hr)"
+        )
+        lines.append("")
+    except Exception as exc:  # pragma: no cover - defensive belt + suspenders
+        lines.append(f"[MATERIAL REMOVAL block skipped: {exc}]")
+        lines.append("")
+        extras.clear()
+
+    return extras, lines, updated_plan_summary
 
 
 def _estimate_drilling_minutes_from_meta(
@@ -7080,6 +7464,41 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     "Late writer is overwriting bucket_view."
                 )
 
+    process_plan_summary_local = locals().get("process_plan_summary")
+    if not isinstance(process_plan_summary_local, _MappingABC):
+        process_plan_summary_local = (
+            breakdown.get("process_plan") if isinstance(breakdown, _MappingABC) else None
+        )
+
+    removal_card_lines: list[str] = []
+    removal_card_extra: dict[str, float] = {}
+    (
+        removal_card_extra,
+        removal_card_lines,
+        process_plan_summary_local,
+    ) = _compute_drilling_removal_section(
+        breakdown=breakdown,
+        rates=rates,
+        drilling_meta_source=drilling_meta_map,
+        drilling_card_detail=drilling_card_detail,
+        drill_machine_minutes_estimate=drill_machine_minutes_estimate,
+        drill_tool_minutes_estimate=drill_tool_minutes_estimate,
+        drill_total_minutes_estimate=drill_total_minutes_estimate,
+        process_plan_summary=process_plan_summary_local,
+    )
+
+    if removal_card_extra.get("drill_machine_minutes") is not None:
+        drill_machine_minutes_estimate = float(removal_card_extra["drill_machine_minutes"])
+    if removal_card_extra.get("drill_labor_minutes") is not None:
+        drill_tool_minutes_estimate = float(removal_card_extra["drill_labor_minutes"])
+    if removal_card_extra.get("drill_total_minutes") is not None:
+        drill_total_minutes_estimate = float(removal_card_extra["drill_total_minutes"])
+        removal_drilling_minutes = float(removal_card_extra["drill_total_minutes"])
+        removal_drilling_hours_precise = removal_drilling_minutes / 60.0
+    if removal_card_extra.get("removal_drilling_hours") is not None:
+        removal_drilling_hours_precise = float(removal_card_extra["removal_drilling_hours"])
+        removal_drilling_minutes = removal_drilling_hours_precise * 60.0
+
     append_line("Process & Labor Costs")
     append_line(divider)
 
@@ -7152,12 +7571,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     display_labor_for_ladder = 0.0
     display_machine = 0.0
 
-    process_plan_summary_local = locals().get("process_plan_summary")
-    if not isinstance(process_plan_summary_local, _MappingABC):
-        process_plan_summary_local = (
-            breakdown.get("process_plan") if isinstance(breakdown, _MappingABC) else None
-        )
-
     bucket_view_struct: Mapping[str, Any] | None = None
     if isinstance(breakdown, _MappingABC):
         candidate_view = breakdown.get("bucket_view")
@@ -7203,6 +7616,19 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         drill_labor_minutes=drill_tool_minutes_estimate,
         drill_total_minutes=drill_total_minutes_estimate,
     )
+
+    if removal_card_extra:
+        extra_map = getattr(bucket_state, "extra", None)
+        if not isinstance(extra_map, dict):
+            extra_map = {}
+            bucket_state.extra = extra_map
+        for key, value in removal_card_extra.items():
+            if value is None:
+                continue
+            try:
+                extra_map[key] = float(value)
+            except Exception:
+                extra_map[key] = value
 
     geometry_for_explainer: Mapping[str, Any] | None = None
     if isinstance(geometry, _MappingABC) and geometry:
@@ -9211,299 +9637,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     printed_subtotal = ladder_subtotal
 
     # Render MATERIAL REMOVAL card + TIME PER HOLE lines (replace legacy Time block)
-    try:
-        drilling_meta = breakdown.get("drilling_meta", {}) or {}
-        # pull safe fallbacks
-        mat_canon = str(drilling_meta.get("material_canonical") or drilling_meta.get("material") or "-")
-        mat_group = drilling_meta.get("material_group") or drilling_meta.get("group") or "-"
-        row_group = drilling_meta.get("row_material_group") or drilling_meta.get("row_group") or None
-        holes_deep = int(drilling_meta.get("holes_deep") or 0)
-        holes_std  = int(drilling_meta.get("holes_std")  or 0)
-        dia_vals   = _ensure_list(drilling_meta.get("dia_in_vals"))
-        depth_vals = _ensure_list(drilling_meta.get("depth_in_vals"))
-        sfm_deep   = float(drilling_meta.get("sfm_deep") or 39.0)
-        sfm_std    = float(drilling_meta.get("sfm_std")  or 80.0)
-        ipr_deep_vals = _ensure_list(drilling_meta.get("ipr_deep_vals"), [0.0006, 0.0025]) or [0.0006, 0.0025]
-        ipr_std_val   = float(drilling_meta.get("ipr_std_val")  or 0.0060)
-        rpm_deep_vals = _ensure_list(drilling_meta.get("rpm_deep_vals"), [238, 1194]) or [238, 1194]
-        rpm_std_vals  = _ensure_list(drilling_meta.get("rpm_std_vals"), [169, 407]) or [169, 407]
-        ipm_deep_vals = _ensure_list(drilling_meta.get("ipm_deep_vals"), [0.5, 1.0]) or [0.5, 1.0]
-        ipm_std_vals  = _ensure_list(drilling_meta.get("ipm_std_vals"), [1.0, 2.4]) or [1.0, 2.4]
-        index_min     = float(drilling_meta.get("index_min_per_hole") or 0.13)
-        peck_min_rng  = _ensure_list(drilling_meta.get("peck_min_per_hole_vals"), [0.07, 0.08]) or [0.07, 0.08]
-        peck_min_deep = float(min(peck_min_rng))
-        peck_min_std  = float(max(peck_min_rng))
-        tchg_deep     = float(drilling_meta.get("toolchange_min_deep") or 8.00)
-        tchg_std      = float(drilling_meta.get("toolchange_min_std")  or 2.50)
-
-        bins: list[dict[str, Any]] | None = None
-        if isinstance(drilling_card_detail, dict):
-            detail_bins = drilling_card_detail.get("bins")
-            if isinstance(detail_bins, list) and detail_bins:
-                bins = [
-                    dict(entry)
-                    for entry in detail_bins
-                    if isinstance(entry, _MappingABC)
-                ]
-        if bins is None:
-            raw_bins = drilling_meta.get("bins_list")
-            if isinstance(raw_bins, tuple):
-                raw_bins = list(raw_bins)
-            if isinstance(raw_bins, list):
-                bins = [
-                    dict(entry)
-                    for entry in raw_bins
-                    if isinstance(entry, _MappingABC)
-                ]
-            else:
-                bins_dict = drilling_meta.get("bins") or {}
-                if isinstance(bins_dict, dict):
-                    bins = [
-                        dict(v)
-                        for _, v in sorted(
-                            bins_dict.items(),
-                            key=lambda kv: float(kv[1].get("diameter_in", 0.0))
-                            if isinstance(kv[1], dict)
-                            else 0.0,
-                        )
-                        if isinstance(v, _MappingABC)
-                    ]
-        if bins is None:
-            bins = []
-
-        _render_removal_card(
-            append_line,
-            mat_canon=mat_canon,
-            mat_group=mat_group,
-            row_group=row_group,
-            holes_deep=holes_deep,
-            holes_std=holes_std,
-            dia_vals_in=dia_vals,
-            depth_vals_in=depth_vals,
-            sfm_deep=sfm_deep,
-            sfm_std=sfm_std,
-            ipr_deep_vals=ipr_deep_vals,
-            ipr_std_val=ipr_std_val,
-            rpm_deep_vals=rpm_deep_vals,
-            rpm_std_vals=rpm_std_vals,
-            ipm_deep_vals=ipm_deep_vals,
-            ipm_std_vals=ipm_std_vals,
-            index_min_per_hole=index_min,
-            peck_min_rng=peck_min_rng,
-            toolchange_min_deep=tchg_deep,
-            toolchange_min_std=tchg_std,
-        )
-
-        subtotal_calc, seen_deep_calc, seen_std_calc = _render_time_per_hole(
-            append_line,
-            bins=bins, index_min=index_min, peck_min_deep=peck_min_deep, peck_min_std=peck_min_std,
-        )
-
-        if drill_machine_minutes_estimate > 0.0:
-            subtotal_min = float(drill_machine_minutes_estimate)
-        else:
-            subtotal_min = float(subtotal_calc)
-        if drill_tool_minutes_estimate > 0.0:
-            tool_add = float(drill_tool_minutes_estimate)
-        else:
-            tool_add = (tchg_deep if seen_deep_calc else 0.0) + (
-                tchg_std if seen_std_calc else 0.0
-            )
-        if drill_total_minutes_estimate > 0.0:
-            total_drill_minutes_with_toolchange = float(drill_total_minutes_estimate)
-        else:
-            total_drill_minutes_with_toolchange = subtotal_min + tool_add
-
-        render_state_obj: PlannerBucketRenderState | None = None
-        if isinstance(bucket_state, PlannerBucketRenderState):
-            render_state_obj = bucket_state
-        else:
-            candidate_render_state = locals().get("render_state")
-            if isinstance(candidate_render_state, PlannerBucketRenderState):
-                render_state_obj = candidate_render_state
-        if render_state_obj is not None:
-            extra = getattr(render_state_obj, "extra", None)
-            if not isinstance(extra, dict):
-                extra = {}
-                render_state_obj.extra = extra
-            extra["drill_machine_minutes"] = float(subtotal_min)
-            extra["drill_labor_minutes"] = float(tool_add)
-            extra["drill_total_minutes"] = float(total_drill_minutes_with_toolchange)
-
-        # === DRILLING BILLING TRUTH ===
-        drill_meta = breakdown.setdefault("drilling_meta", {})
-        if not isinstance(drill_meta, dict):
-            try:
-                drill_meta = dict(drill_meta or {})
-            except Exception:
-                drill_meta = {}
-            breakdown["drilling_meta"] = drill_meta
-        drill_meta["toolchange_minutes"] = float(tool_add)
-        drill_meta["total_minutes_with_toolchange"] = float(total_drill_minutes_with_toolchange)
-
-        bill_min = float(
-            drilling_meta.get("total_minutes_billed")
-            or drilling_meta.get("total_minutes_with_toolchange")
-            or drilling_meta.get("total_minutes")
-            or 0.0
-        )
-
-        plan_drill_min: float | None = None
-        plan_candidates = [
-            locals().get("process_plan_summary_local"),
-            breakdown.get("process_plan") if isinstance(breakdown, _MappingABC) else None,
-        ]
-        for candidate in plan_candidates:
-            if not isinstance(candidate, _MappingABC):
-                continue
-            plan_drilling = candidate.get("drilling")
-            if not isinstance(plan_drilling, _MappingABC):
-                continue
-            plan_minutes = _coerce_float_or_none(
-                plan_drilling.get("total_minutes_with_toolchange")
-            )
-            if plan_minutes is not None and plan_minutes > 0.0:
-                plan_drill_min = float(plan_minutes)
-                break
-
-        drill_min = plan_drill_min if plan_drill_min and plan_drill_min > 0.0 else bill_min
-        bill_min = drill_min
-        drill_hr = drill_min / 60.0 if drill_min else 0.0
-        drill_meta["total_minutes_billed"] = drill_min
-        drill_meta["bill_hours"] = float(drill_hr)
-
-        # Overwrite legacy planner meta
-        pm = breakdown.setdefault("process_meta", {}).setdefault("drilling", {})
-        # ensure meta is reachable under both 'drilling' and 'Drilling'
-        try:
-            breakdown["process_meta"]["Drilling"] = pm
-        except Exception:
-            pass
-        pm["minutes"] = drill_min
-        pm["hr"] = drill_hr
-        pm["rate"] = float(rates.get("DrillingRate") or 0.0)
-        pm["basis"] = ["minutes_engine"]  # replace any 'planner_drilling_override'
-
-        bucket_view_obj = breakdown.get("bucket_view")
-        if not isinstance(bucket_view_obj, dict):
-            if isinstance(bucket_view_obj, _MappingABC):
-                try:
-                    bucket_view_obj = dict(bucket_view_obj)
-                except Exception:
-                    bucket_view_obj = {}
-            else:
-                bucket_view_obj = {}
-            breakdown["bucket_view"] = bucket_view_obj
-
-        buckets_obj = bucket_view_obj.setdefault("buckets", {})
-        if not isinstance(buckets_obj, dict):
-            try:
-                buckets_obj = dict(buckets_obj)
-            except Exception:
-                buckets_obj = {}
-            bucket_view_obj["buckets"] = buckets_obj
-
-        old_entry = buckets_obj.pop("drilling", {}) if isinstance(buckets_obj, dict) else {}
-
-        new_minutes = round(drill_min, 2)
-        machine_rate = float(pm.get("rate") or 0.0)
-        billed_total = (
-            round((drill_min / 60.0) * machine_rate, 2)
-            if machine_rate > 0.0 and drill_min > 0.0
-            else 0.0
-        )
-        if billed_total <= 0.0:
-            billed_total = round(_safe_float((old_entry or {}).get("total$"), default=0.0), 2)
-        if new_minutes <= 0.0 and isinstance(old_entry, _MappingABC):
-            legacy_minutes = _safe_float(old_entry.get("minutes"), default=0.0)
-            if legacy_minutes > 0.0:
-                new_minutes = round(legacy_minutes, 2)
-        cost_mode = _bucket_cost_mode("drilling")
-        if cost_mode == "labor":
-            labor_cost = billed_total
-            machine_cost = 0.0
-        else:
-            machine_cost = billed_total
-            labor_cost = 0.0
-        new_total = round(machine_cost + labor_cost, 2)
-
-        if new_minutes <= 0.0 and new_total <= 0.0 and isinstance(old_entry, _MappingABC):
-            buckets_obj["drilling"] = dict(old_entry)
-        else:
-            drilling_entry = buckets_obj.setdefault(
-                "drilling",
-                {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0, "total$": 0.0},
-            )
-            drilling_entry["minutes"] = new_minutes
-            drilling_entry["machine$"] = machine_cost
-            drilling_entry["labor$"] = labor_cost
-            drilling_entry["total$"] = new_total
-
-            order_list = bucket_view_obj.setdefault("order", [])
-            if not isinstance(order_list, list):
-                try:
-                    order_list = list(order_list or [])
-                except Exception:
-                    order_list = []
-                bucket_view_obj["order"] = order_list
-            if "drilling" not in order_list:
-                order_list.append("drilling")
-
-        totals_map = bucket_view_obj.setdefault("totals", {})
-        if not isinstance(totals_map, dict):
-            try:
-                totals_map = dict(totals_map or {})
-            except Exception:
-                totals_map = {}
-            bucket_view_obj["totals"] = totals_map
-
-        minutes_sum = 0.0
-        machine_sum = 0.0
-        labor_sum = 0.0
-        total_sum = 0.0
-        for info in buckets_obj.values():
-            if not isinstance(info, _MappingABC):
-                continue
-            minutes_sum += _safe_float(info.get("minutes"), default=0.0)
-            machine_sum += _safe_float(info.get("machine$"), default=0.0)
-            labor_sum += _safe_float(info.get("labor$"), default=0.0)
-            total_sum += _safe_float(info.get("total$"), default=0.0)
-
-        totals_map["minutes"] = round(minutes_sum, 2)
-        totals_map["machine$"] = round(machine_sum, 2)
-        totals_map["labor$"] = round(labor_sum, 2)
-        totals_map["total$"] = round(total_sum, 2)
-
-        process_plan_summary_card: dict[str, Any] | None = None
-        if isinstance(process_plan_summary_local, dict):
-            process_plan_summary_card = process_plan_summary_local
-        else:
-            candidate_summary = breakdown.get("process_plan") if isinstance(breakdown, _MappingABC) else None
-            if isinstance(candidate_summary, dict):
-                process_plan_summary_card = candidate_summary
-                process_plan_summary_local = candidate_summary
-            else:
-                process_plan_summary_card = breakdown.setdefault("process_plan", {})
-                process_plan_summary_local = process_plan_summary_card
-        if process_plan_summary_card is not None:
-            drill_meta_summary = process_plan_summary_card.setdefault("drilling", {})
-            if subtotal_min > 0.0:
-                prior_total = _coerce_float_or_none(drill_meta_summary.get("total_minutes"))
-                if prior_total is None or prior_total <= 0.0:
-                    drill_meta_summary["total_minutes"] = float(subtotal_min)
-            drill_meta_summary["toolchange_minutes"] = float(tool_add)
-            drill_meta_summary["total_minutes_with_toolchange"] = float(total_drill_minutes_with_toolchange)
-            drill_meta_summary["total_minutes_billed"] = bill_min
-            drill_meta_summary["bill_hours"] = float(drill_hr)
-        append_line(f"Toolchange adders: Deep-Drill {tchg_deep:.2f} min + Drill {tchg_std:.2f} min = {tool_add:.2f} min" if tool_add > 0 else "Toolchange adders: -")
-        append_line("-" * 66)
-        append_line(f"Subtotal (per-hole × qty) . {subtotal_min:.2f} min  ({fmt_hours(subtotal_min/60.0)})")
-        append_line(f"TOTAL DRILLING (with toolchange) . {total_drill_minutes_with_toolchange:.2f} min  ({(total_drill_minutes_with_toolchange)/60.0:.2f} hr)")
-        append_line("")
-    except Exception as e:
-        append_line(f"[MATERIAL REMOVAL block skipped: {e}]")
-        append_line("")
-
+    append_lines(removal_card_lines)
     append_line("")
 
     # ---- Pricing ladder ------------------------------------------------------
