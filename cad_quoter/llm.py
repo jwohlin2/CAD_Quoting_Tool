@@ -1291,22 +1291,19 @@ def explain_quote(
         if isinstance(extra_candidate, Mapping):
             render_state_extra = extra_candidate
 
-    drilling_hours = drill_card_minutes / 60.0 if drill_card_minutes > 0.0 else None
-    has_card_minutes = drill_minutes_present
+    raw_minutes = None
+    if isinstance(render_state_extra, Mapping):
+        raw_minutes = render_state_extra.get("drill_total_minutes")
 
-    render_state_drill_minutes: float | None = None
-    if render_state_extra:
-        render_state_drill_minutes = _coerce_float(
-            render_state_extra.get("drill_total_minutes")
-        )
-
-    include_drilling_in_top = False
-    if render_state_drill_minutes is not None and render_state_drill_minutes > 0:
-        include_drilling_in_top = True
+    minutes_val = _coerce_float(raw_minutes) if raw_minutes is not None else None
+    has_card_minutes = drill_minutes_present or raw_minutes is not None
+    drilling_hours = None
+    if minutes_val is not None and minutes_val > 0:
+        drilling_hours = minutes_val / 60.0
     elif drill_card_minutes > 0.0:
-        include_drilling_in_top = True
+        drilling_hours = drill_card_minutes / 60.0
 
-    if include_drilling_in_top and "drilling" not in [p.lower() for p in top_procs]:
+    if drilling_hours is not None and "drilling" not in [p.lower() for p in top_procs]:
         top_procs.append("Drilling")
 
     if has_card_minutes:
