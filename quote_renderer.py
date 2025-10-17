@@ -8,6 +8,8 @@ plain data into a deterministic, email-safe ASCII presentation built on top of
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -20,6 +22,39 @@ from text_tables import (
     money,
     pct,
 )
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+_ASCII_TRANSLATION = {
+    ord("–"): "-",
+    ord("—"): "-",
+    ord("‑"): "-",
+    ord("−"): "-",
+    ord("…"): "...",
+    ord("“"): '"',
+    ord("”"): '"',
+    ord("‘"): "'",
+    ord("’"): "'",
+    ord("•"): "*",
+    ord("·"): "*",
+    ord("µ"): "u",
+    ord("°"): " deg",
+    ord("±"): "+/-",
+    ord("×"): "x",
+    ord("÷"): "/",
+    ord("→"): "->",
+    ord("←"): "<-",
+}
+
+
+def _sanitize_block(block: str) -> str:
+    """Replace control characters and ensure ASCII-only output."""
+
+    cleaned = block.replace("\t", " ")
+    cleaned = _ANSI_ESCAPE_RE.sub("", cleaned)
+    normalized = unicodedata.normalize("NFKD", cleaned)
+    translated = normalized.translate(_ASCII_TRANSLATION)
+    ascii_text = translated.encode("ascii", "ignore").decode("ascii")
+    return ascii_text
 
 
 def _fmt_cell(value: object, align: str = "left", width: int = 12) -> str:
@@ -409,8 +444,7 @@ def render_quote(data: Mapping[str, Any]) -> str:
     if trace:
         sections.append(_render_section("Traceability", trace))
 
-    return "\n\n".join(sections)
+    return _sanitize_block("\n\n".join(sections))
 
 
 __all__ = ["render_quote"]
-
