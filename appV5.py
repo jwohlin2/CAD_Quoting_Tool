@@ -1350,26 +1350,28 @@ def _resolve_pricing_source_value(
     hour_summary_entries: Mapping[str, Any] | None = None,
     additional_sources: Sequence[Any] | None = None,
 ) -> str | None:
-    """Return a normalized pricing source, forcing planner when signals exist."""
+    """Return a normalized pricing source, honoring explicit selections."""
 
-    text = None
+    fallback_text: str | None = None
     if base_value is not None:
-        text = str(base_value).strip()
-        if not text:
-            text = None
+        candidate_text = str(base_value).strip()
+        if candidate_text:
+            lowered = candidate_text.lower()
+            if lowered == "planner":
+                return "planner"
+            if lowered not in {"legacy", "auto", "default", "fallback"}:
+                return candidate_text
+            fallback_text = candidate_text
 
-    if text and text.lower() == "planner":
-        return "planner"
-
-    explicit_override = text is not None
-
-    if used_planner and not explicit_override:
+    if used_planner:
+        if fallback_text:
+            return fallback_text
         return "planner"
 
     # Delegate planner signal detection to the adapter helper
     from appkit.planner_adapter import _planner_signals_present as _planner_signals_present_helper
 
-    if not explicit_override and _planner_signals_present_helper(
+    if _planner_signals_present_helper(
         process_meta=process_meta,
         process_meta_raw=process_meta_raw,
         breakdown=breakdown,
@@ -1377,9 +1379,14 @@ def _resolve_pricing_source_value(
         hour_summary_entries=hour_summary_entries,
         additional_sources=list(additional_sources) if additional_sources is not None else None,
     ):
+        if fallback_text:
+            return fallback_text
         return "planner"
 
-    return text
+    if fallback_text:
+        return fallback_text
+
+    return None
 
 
 
@@ -7259,14 +7266,28 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     programmer_hours = _safe_float(prog.get("prog_hr"))
     engineer_hours = _safe_float(prog.get("eng_hr"))
-    programmer_rate = _resolve_rate_with_fallback(
-        prog.get("prog_rate"), "ProgrammingRate", "ProgrammerRate", "ShopRate"
-    )
+    fallback_programmer_rate = float(getattr(cfg, "labor_rate_per_hr", 45.0) or 45.0)
+    if not math.isfinite(fallback_programmer_rate) or fallback_programmer_rate <= 0:
+        fallback_programmer_rate = 45.0
+    programmer_rate_backfill = _coerce_rate_value(rates.get("ProgrammerRate"))
+    if programmer_rate_backfill <= 0:
+        programmer_rate_backfill = _coerce_rate_value(rates.get("ProgrammingRate"))
+    has_programming_rate_detail = False
+    if isinstance(nre_cost_details, _MappingABC):
+        detail_key = "Programming & Eng (per lot)"
+        has_programming_rate_detail = bool(nre_cost_details.get(detail_key))
+    explicit_programmer_rate = _safe_float(prog.get("prog_rate"))
+    programmer_rate: float
+    if explicit_programmer_rate > 0:
+        has_programming_rate_detail = True
+        programmer_rate = explicit_programmer_rate
+    elif programmer_rate_backfill > 0 and not has_programming_rate_detail:
+        programmer_rate = programmer_rate_backfill
+    else:
+        programmer_rate = fallback_programmer_rate
     if separate_labor_cfg and cfg_labor_rate_value > 0.0:
         programmer_rate = cfg_labor_rate_value
-    engineer_rate = _resolve_rate_with_fallback(
-        prog.get("eng_rate"), "EngineerRate", "ShopRate"
-    )
+    engineer_rate = programmer_rate
 
     programming_per_lot_val = _safe_float(prog.get("per_lot"))
     nre_programming_per_lot = _safe_float(nre.get("programming_per_lot"))
@@ -7313,6 +7334,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         except Exception:
             pass
         prog_hr_total = aggregated_programming_hours
+    total_programming_hours = prog_hr_total
     programming_cost_total = float((nre.get("programming_cost") or 0.0) or 0.0)
     if prog_hr_total > 0 and programming_cost_total == 0.0:
         programming_rate_total = _coerce_rate_value(rates.get("ProgrammingRate"))
@@ -7353,6 +7375,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if show_programming_row:
         row("Programming & Eng:", programming_per_lot_val)
         has_detail = False
+        if programming_per_lot_val > 0 or show_zeros:
+            row("Programming Cost:", programming_per_lot_val, indent="  ")
+            has_detail = True
+        if total_programming_hours > 0:
+            write_line(f"  Programming Hrs: {_h(total_programming_hours)}")
+            has_detail = True
         if programmer_hours > 0:
             has_detail = True
             write_line(
