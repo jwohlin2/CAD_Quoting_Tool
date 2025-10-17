@@ -79,7 +79,7 @@ OP_TO_BUCKET: Dict[str, str] = {
 # inspection when the planner does not emit explicit inspection operations.
 INSPECTION_BASE_MIN = 6.0
 INSPECTION_PER_OP_MIN = 0.6
-INSPECTION_PER_HOLE_MIN = 0.03
+INSPECTION_PER_HOLE_MIN = 1.0
 INSPECTION_FRACTION_OF_TOTAL = 0.05
 
 
