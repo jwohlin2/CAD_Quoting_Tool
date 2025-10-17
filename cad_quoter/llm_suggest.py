@@ -987,6 +987,7 @@ def get_llm_quote_explanation(
     if LLMClient is None or not isinstance(LLMClient, type):
         return _render_explanation()
 
+    client: LLMClient | None = None
     try:
         client = LLMClient(
             model_path,
@@ -1026,7 +1027,8 @@ def get_llm_quote_explanation(
     except Exception:
         return _render_explanation()
     finally:
-        try:
-            client.close()
-        except Exception:
-            pass
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
