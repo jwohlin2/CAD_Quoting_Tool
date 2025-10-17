@@ -1173,6 +1173,10 @@ def explain_quote(
 
     has_drilling = drill_card_minutes > 0.0
 
+    drilling_hours: float | None = removal_hr
+    if drilling_hours is None and has_drilling:
+        drilling_hours = drill_card_minutes / 60.0 if drill_card_minutes > 0 else None
+
     should_note_drilling = hole_groups_flag or (removal_hr is not None and removal_hr > 0)
     if not should_note_drilling and plan_drilling_reasons:
         should_note_drilling = True
