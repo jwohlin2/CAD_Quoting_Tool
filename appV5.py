@@ -1548,7 +1548,7 @@ def _resolve_pricing_source_value(
     planner_process_minutes: Any = None,
     hour_summary_entries: Mapping[str, Any] | None = None,
     additional_sources: Sequence[Any] | None = None,
-    cfg: "QuoteConfiguration" | None = None,
+    cfg: QuoteConfiguration | None = None,
 ) -> str | None:
     """Return a normalized pricing source, honoring explicit selections."""
 
@@ -4260,7 +4260,7 @@ def _split_hours_for_bucket(
     label: str,
     hours: float,
     render_state: "PlannerBucketRenderState" | None,
-    cfg: "QuoteConfiguration" | None,
+    cfg: QuoteConfiguration | None,
 ) -> tuple[float, float]:
     total_h = max(0.0, float(hours or 0.0))
     if not cfg or not getattr(cfg, "separate_machine_labor", False):
@@ -4340,7 +4340,7 @@ def _build_planner_bucket_render_state(
     rates: Mapping[str, Any] | None = None,
     removal_drilling_hours: float | None = None,
     prefer_removal_drilling_hours: bool = True,
-    cfg: "QuoteConfiguration" | None = None,
+    cfg: QuoteConfiguration | None = None,
     bucket_ops: Mapping[str, typing.Sequence[Mapping[str, Any]]] | None = None,
     drill_machine_minutes: float | None = None,
     drill_labor_minutes: float | None = None,
@@ -4606,7 +4606,7 @@ def _build_planner_bucket_render_state(
 def _display_rate_for_row(
     label: str,
     *,
-    cfg: "QuoteConfiguration" | None,
+    cfg: QuoteConfiguration | None,
     render_state: PlannerBucketRenderState | None,
     hours: float | None,
 ) -> str:
@@ -4756,7 +4756,7 @@ def _charged_hours_by_bucket(
     render_state: PlannerBucketRenderState | None = None,
     removal_drilling_hours: float | None = None,
     prefer_removal_drilling_hours: bool = True,
-    cfg: "QuoteConfiguration" | None = None,
+    cfg: QuoteConfiguration | None = None,
 ):
     """Return the hours that correspond to what we actually charged."""
     out: dict[str, float] = {}
