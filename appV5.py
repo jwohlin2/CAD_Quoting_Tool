@@ -1414,23 +1414,6 @@ def _pick_mcmaster_plate_sku_impl(
     }
 
 
-@lru_cache(maxsize=1)
-def _load_mcmaster_catalog_csv(path: str | None = None) -> list[dict[str, Any]]:
-    """Return rows from the McMaster stock catalog CSV."""
-
-    csv_path = path or os.getenv("CATALOG_CSV_PATH") or str(default_catalog_csv())
-    if not csv_path:
-        return []
-    try:
-        with open(csv_path, newline="", encoding="utf-8-sig") as handle:
-            reader = csv.DictReader(handle)
-            return [dict(row) for row in reader if row]
-    except FileNotFoundError:
-        return []
-    except Exception:
-        return []
-
-
 def _pick_mcmaster_plate_sku(
     need_L_in: float,
     need_W_in: float,
