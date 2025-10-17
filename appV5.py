@@ -6868,6 +6868,47 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     material_stock_block.get("stock_dims_in")
                 )
 
+            cached_stock_thk = None
+            if stock_dims_candidate:
+                try:
+                    cached_stock_thk = float(stock_dims_candidate[2])
+                except Exception:
+                    cached_stock_thk = None
+            if cached_stock_thk is None and isinstance(material_stock_block, _MappingABC):
+                cached_stock_thk = _coerce_float_or_none(
+                    material_stock_block.get("stock_T_in")
+                )
+            target_plate_thk = _plate_thickness_in_from_context(g)
+            if target_plate_thk is None and need_thk is not None:
+                try:
+                    target_plate_thk = float(need_thk)
+                except Exception:
+                    target_plate_thk = None
+            try:
+                thickness_tol_in = float(getattr(cfg, "thickness_tol_in", 0.05) or 0.05)
+            except Exception:
+                thickness_tol_in = 0.05
+            if (
+                target_plate_thk is not None
+                and cached_stock_thk is not None
+                and abs(float(cached_stock_thk) - float(target_plate_thk)) > thickness_tol_in
+            ):
+                _log.info(
+                    "[stock] clearing cached stock piece fields (cached %.3fin vs plate %.3fin)",
+                    float(cached_stock_thk),
+                    float(target_plate_thk),
+                )
+                for container in (material_stock_block, material, mat_info):
+                    if isinstance(container, dict):
+                        for key in (
+                            "stock_piece_price_usd",
+                            "stock_piece_source",
+                            "stock_piece_api_price",
+                            "stock_piece_api_source",
+                            "stock_piece_usd",
+                        ):
+                            container.pop(key, None)
+
             stock_L_val: float | None
             stock_W_val: float | None
             stock_T_val: float | None
