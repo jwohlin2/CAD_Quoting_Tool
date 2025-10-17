@@ -37,6 +37,7 @@ from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
+from functools import lru_cache
 
 from cad_quoter.app import runtime as _runtime
 from cad_quoter.app._value_utils import (
