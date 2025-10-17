@@ -2076,6 +2076,9 @@ try:
     import pandas as pd  # type: ignore[import]
 except Exception:  # pragma: no cover - optional dependency
     pd = None  # type: ignore[assignment]
+
+if typing.TYPE_CHECKING:  # pragma: no cover - import is for type checking only
+    import pandas as pd  # type: ignore[import]
 from typing import TypedDict
 
 try:
@@ -14870,6 +14873,9 @@ def _load_speeds_feeds_table_from_path(path: str | None) -> tuple[pd.DataFrame |
     if not text:
         return None, False
 
+    if not _HAS_PANDAS or pd is None:
+        return None, False
+
     table: pd.DataFrame | None = None
     try:
         candidate = Path(text)
@@ -16740,6 +16746,9 @@ def extract_2d_features_from_pdf_vector(pdf_path: str) -> dict:
 REQUIRED_COLS = ["Item", "Example Values / Options", "Data Type / Input Method"]
 
 def default_variables_template() -> pd.DataFrame:
+    if not _HAS_PANDAS or pd is None:
+        raise RuntimeError("pandas is required to build the default variables template.")
+
     if _HAS_PANDAS:
         core_df, _ = _load_master_variables()
         if core_df is not None:
@@ -16814,6 +16823,10 @@ def default_variables_template() -> pd.DataFrame:
 
 def coerce_or_make_vars_df(df: pd.DataFrame | None) -> pd.DataFrame:
     """Ensure the variables dataframe has the required columns with tolerant matching."""
+
+    if not _HAS_PANDAS or pd is None:
+        raise RuntimeError("pandas is required to coerce variable dataframes.")
+
     if df is None:
         return default_variables_template().copy()
 
@@ -16940,6 +16953,9 @@ def _deep_get(d: dict, path):
     return cur
 
 def merge_estimate_into_vars(vars_df: pd.DataFrame, estimate: dict) -> pd.DataFrame:
+    if not _HAS_PANDAS or pd is None:
+        raise RuntimeError("pandas is required to merge estimates into variables.")
+
     for item, src in MAP_KEYS.items():
         value = _deep_get(estimate, src)
         if value is None:
