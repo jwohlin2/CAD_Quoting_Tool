@@ -165,3 +165,73 @@ def test_render_quote_process_payload_tracks_bucket_view() -> None:
         drilling = drilling_rows[0]
         assert math.isclose(drilling.get("hours", 0.0), 1.5, rel_tol=1e-6)
         assert math.isclose(drilling.get("amount", 0.0), 300.0, rel_tol=1e-6)
+
+
+def test_render_payload_obeys_pricing_math_guards() -> None:
+    bucket_view = {
+        "buckets": {
+            "milling": {
+                "total$": 480.0,
+                "machine$": 320.0,
+                "labor$": 160.0,
+                "minutes": 96.0,
+            },
+            "finishing": {
+                "total$": 240.0,
+                "labor$": 240.0,
+                "minutes": 60.0,
+            },
+        },
+        "order": ["milling", "finishing"],
+    }
+
+    breakdown = {
+        "qty": 2,
+        "totals": {
+            "labor_cost": 720.0,
+            "direct_costs": 260.0,
+            "subtotal": 980.0,
+            "with_expedite": 980.0,
+        },
+        "nre_detail": {},
+        "nre": {},
+        "material": {"total_cost": 260.0},
+        "process_costs": {},
+        "process_meta": {},
+        "pass_through": {"Material": 260.0},
+        "applied_pcts": {
+            "MarginPct": 0.1,
+        },
+        "rates": {},
+        "params": {},
+        "labor_cost_details": {},
+        "direct_cost_details": {},
+        "pricing_source": "planner",
+        "bucket_view": bucket_view,
+        "process_plan": {"bucket_view": bucket_view},
+        "process_plan_summary": {"bucket_view": bucket_view},
+    }
+
+    result = {"price": 1078.0, "breakdown": breakdown}
+
+    payload = _render_payload(result)
+    summary = payload["summary"]
+    subtotal_before_margin = summary.get("subtotal_before_margin")
+    assert subtotal_before_margin is not None
+
+    materials_direct = payload.get("materials_direct")
+    assert materials_direct is not None
+
+    processes = payload.get("processes", [])
+    labor_sum = sum(float(entry.get("amount", 0.0) or 0.0) for entry in processes)
+    assert math.isclose(subtotal_before_margin, materials_direct + labor_sum, abs_tol=0.01)
+
+    margin_pct = summary.get("margin_pct")
+    final_price = summary.get("final_price")
+    assert margin_pct is not None and final_price is not None
+    expected_final = round(subtotal_before_margin * (1 + margin_pct), 2)
+    assert math.isclose(final_price, expected_final, abs_tol=0.01)
+
+    reported_labor_total = payload.get("labor_total_amount")
+    assert reported_labor_total is not None
+    assert math.isclose(reported_labor_total, labor_sum, abs_tol=0.01)
