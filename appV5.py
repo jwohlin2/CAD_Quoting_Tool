@@ -4400,7 +4400,9 @@ def _charged_hours_by_bucket(
 
     prefer_override = prefer_removal_drilling_hours
     if cfg is not None:
-        prefer_override = bool(getattr(cfg, "prefer_removal_drilling_hours", prefer_override))
+        prefer_override_candidate = getattr(cfg, "prefer_removal_drilling_hours", None)
+        if prefer_override_candidate is not None:
+            prefer_override = bool(prefer_override_candidate)
 
     drill_machine_minutes = _coerce_float_or_none(extra_map.get("drill_machine_minutes"))
     drill_labor_minutes = _coerce_float_or_none(extra_map.get("drill_labor_minutes"))
@@ -7556,6 +7558,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if removal_card_extra.get("removal_drilling_hours") is not None:
         removal_drilling_hours_precise = float(removal_card_extra["removal_drilling_hours"])
         removal_drilling_minutes = removal_drilling_hours_precise * 60.0
+    if removal_drilling_minutes is not None and "removal_drilling_minutes" not in removal_card_extra:
+        try:
+            removal_card_extra["removal_drilling_minutes"] = float(removal_drilling_minutes)
+        except Exception:
+            removal_card_extra["removal_drilling_minutes"] = removal_drilling_minutes
 
     append_line("Process & Labor Costs")
     append_line(divider)
@@ -9008,9 +9015,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         override_hours: float | None = None
         prefer_drill_summary = prefer_removal_drilling_hours
         if cfg is not None:
-            prefer_drill_summary = bool(
-                getattr(cfg, "prefer_removal_drilling_hours", prefer_drill_summary)
+            prefer_summary_candidate = getattr(
+                cfg, "prefer_removal_drilling_hours", None
             )
+            if prefer_summary_candidate is not None:
+                prefer_drill_summary = bool(prefer_summary_candidate)
         if prefer_drill_summary:
             extra_map = getattr(bucket_state, "extra", {})
             if isinstance(extra_map, _MappingABC):
@@ -9062,9 +9071,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     prefer_drill_summary = prefer_removal_drilling_hours
     if cfg is not None:
-        prefer_drill_summary = bool(
-            getattr(cfg, "prefer_removal_drilling_hours", prefer_drill_summary)
+        prefer_summary_candidate = getattr(
+            cfg, "prefer_removal_drilling_hours", None
         )
+        if prefer_summary_candidate is not None:
+            prefer_drill_summary = bool(prefer_summary_candidate)
     if prefer_drill_summary:
         extra_map = getattr(bucket_state, "extra", {})
         if not isinstance(extra_map, _MappingABC):
@@ -9111,9 +9122,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
         prefer_drill_summary = prefer_removal_drilling_hours
         if cfg is not None:
-            prefer_drill_summary = bool(
-                getattr(cfg, "prefer_removal_drilling_hours", prefer_drill_summary)
+            prefer_summary_candidate = getattr(
+                cfg, "prefer_removal_drilling_hours", None
             )
+            if prefer_summary_candidate is not None:
+                prefer_drill_summary = bool(prefer_summary_candidate)
         if prefer_drill_summary:
             drill_minutes_extra = _coerce_float_or_none(extra_map.get("drill_total_minutes"))
             if drill_minutes_extra is not None:
