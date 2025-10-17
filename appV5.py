@@ -2956,6 +2956,11 @@ else:
     BRepTools_UVBounds = _occ_uv_bounds
     _brep_read = _occ_brep_read
 
+    def _missing_shape_fix_shape(_: Any) -> Any:  # pragma: no cover
+        raise RuntimeError("Shape healing is unavailable")
+
+    ShapeFix_Shape = cast(Any, _missing_shape_fix_shape)
+
 def _new_topods_shape() -> Any:
     ctor = cast(Any, TopoDS_Shape)
     return ctor()
