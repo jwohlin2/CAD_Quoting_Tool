@@ -9114,12 +9114,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         )
 
         subtotal_min = float(max(subtotal_min, 0.0))
-        removal_drilling_minutes = float(subtotal_min)
-        if removal_drilling_minutes > 0.0:
-            removal_drilling_hours_precise = removal_drilling_minutes / 60.0
-
         tool_add = (tchg_deep if seen_deep else 0.0) + (tchg_std if seen_std else 0.0)
         total_drill_minutes_with_toolchange = subtotal_min + tool_add
+        removal_drilling_minutes_subtotal = float(subtotal_min)
+        removal_drilling_minutes = float(max(total_drill_minutes_with_toolchange, 0.0))
+        if removal_drilling_minutes > 0.0:
+            removal_drilling_hours_precise = removal_drilling_minutes / 60.0
 
         def _stash_drill_minutes(owner: Any) -> _MutableMappingABC[str, Any] | None:
             if owner is None:
@@ -9138,9 +9138,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             else:
                 extra_map = None
             if isinstance(extra_map, _MutableMappingABC):
-                extra_map["drill_machine_minutes"] = float(subtotal_min)
+                extra_map["drill_machine_minutes"] = float(removal_drilling_minutes_subtotal)
                 extra_map["drill_labor_minutes"] = float(tool_add)
                 extra_map["drill_total_minutes"] = float(total_drill_minutes_with_toolchange)
+                extra_map["removal_drilling_minutes_subtotal"] = float(removal_drilling_minutes_subtotal)
+                extra_map["removal_drilling_minutes"] = float(removal_drilling_minutes)
+                if removal_drilling_minutes > 0.0:
+                    extra_map["removal_drilling_hours"] = float(removal_drilling_hours_precise)
                 return extra_map
             return None
 
@@ -9160,10 +9164,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 target_extra = None
             if target_extra is not None:
                 if target_extra not in extra_targets:
-                    target_extra["drill_machine_minutes"] = float(subtotal_min)
-                    target_extra["drill_labor_minutes"] = float(tool_add)
-                    target_extra["drill_total_minutes"] = float(total_drill_minutes_with_toolchange)
+                    target_extra["drill_machine_minutes"] = float(removal_drilling_minutes_subtotal)
+                target_extra["drill_labor_minutes"] = float(tool_add)
+                target_extra["drill_total_minutes"] = float(total_drill_minutes_with_toolchange)
                 target_extra["removal_drilling_minutes"] = float(removal_drilling_minutes)
+                target_extra["removal_drilling_minutes_subtotal"] = float(removal_drilling_minutes_subtotal)
                 if removal_drilling_minutes > 0.0:
                     target_extra["removal_drilling_hours"] = float(removal_drilling_hours_precise)
 
@@ -9175,6 +9180,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             except Exception:
                 drill_meta = {}
             breakdown["drilling_meta"] = drill_meta
+        drill_meta["subtotal_minutes"] = float(removal_drilling_minutes_subtotal)
         drill_meta["total_minutes"] = float(removal_drilling_minutes)
         drill_meta["toolchange_minutes"] = float(tool_add)
         drill_meta["total_minutes_with_toolchange"] = float(total_drill_minutes_with_toolchange)
@@ -9325,6 +9331,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 process_plan_summary_local = process_plan_summary_card
         if process_plan_summary_card is not None:
             drill_meta_summary = process_plan_summary_card.setdefault("drilling", {})
+            drill_meta_summary["subtotal_minutes"] = float(removal_drilling_minutes_subtotal)
             drill_meta_summary["total_minutes"] = float(removal_drilling_minutes)
             drill_meta_summary["toolchange_minutes"] = float(tool_add)
             drill_meta_summary["total_minutes_with_toolchange"] = float(total_drill_minutes_with_toolchange)
