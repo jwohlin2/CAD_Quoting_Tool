@@ -106,6 +106,9 @@ class HoleRow:
     raw_desc: str
 
 
+NUM_PATTERN = r"(?:\d*\.\d+|\d+)"
+
+
 def parse_hole_table_lines(lines: List[str]) -> List[HoleRow]:
     """Parse text lines of a HOLE TABLE into structured ops."""
     txt = "\n".join(lines)
@@ -164,7 +167,14 @@ def _parse_description(desc: str) -> List[Dict[str, Any]]:
                 }
             )
 
-    for m in re.finditer(r"Ø?\(?\s*(\d+(?:\.\d+)?)\s*\)?\s*(?:DRILL|THRU|TYP|$)", s):
+    tol_pattern = rf"(?:\s*[±\+\-]\s*{NUM_PATTERN})?"
+    for m in re.finditer(rf"Ø?\(?\s*({NUM_PATTERN})\s*\)?{tol_pattern}\s*(?:DRILL|THRU|TYP|$)", s):
+        start = m.start(1)
+        preceding = s[:start].rstrip()
+        if preceding:
+            prev_char = preceding[-1]
+            if prev_char in {"±", "+", "-"}:
+                continue
         d = parse_drill_token(m.group(1))
         if d:
             depth_mm, thru = _depth_or_thru(s)
@@ -180,16 +190,16 @@ def _parse_description(desc: str) -> List[Dict[str, Any]]:
                 }
             )
 
-    m = re.search(r"C['’]?BORE\s+X\s+(\d+(?:\.\d+)?)\s*DEEP", s)
+    m = re.search(rf"C['’]?BORE\s+X\s+({NUM_PATTERN})\s*DEEP", s)
     if m:
         depth = float(m.group(1)) * INCH_TO_MM
         d = None
-        m2 = re.search(r"(\d+(?:\.\d+)?)\s*C['’]?BORE", s)
+        m2 = re.search(rf"({NUM_PATTERN})\s*[Ø⌀\u00D8]?\s*C['’]?BORE", s)
         if m2:
             d = float(m2.group(1)) * INCH_TO_MM
         tokens.append({"type": "cbore", "dia_mm": d, "depth_mm": depth, "source": "desc"})
 
-    for m in re.finditer(r"(\d+)\s*\)\s*\.?(\d+(?:\.\d+)?)\s*X\s*45", s):
+    for m in re.finditer(rf"(\d+)\s*\)\s*({NUM_PATTERN})\s*X\s*45", s):
         qty = int(m.group(1))
         size_in = float(m.group(2))
         tokens.append(
@@ -207,7 +217,7 @@ def _parse_description(desc: str) -> List[Dict[str, Any]]:
 def _depth_or_thru(s: str) -> tuple[Optional[float], Optional[bool]]:
     if " THRU" in s:
         return None, True
-    m = re.search(r"X\s*\.?(\d+(?:\.\d+)?)\s*DEEP", s)
+    m = re.search(rf"X\s*({NUM_PATTERN})\s*DEEP", s)
     if m:
         return float(m.group(1)) * INCH_TO_MM, False
     return None, None
@@ -225,11 +235,21 @@ def _dedup_ops(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     seen = set()
     for it in items:
+        dia_raw = it.get("dia_mm", -1.0)
+        try:
+            dia_key = round(float(dia_raw), 3)
+        except Exception:
+            dia_key = -1.0
+        depth_raw = it.get("depth_mm", -1.0)
+        try:
+            depth_key = round(float(depth_raw), 1)
+        except Exception:
+            depth_key = -1.0
         key = (
             it.get("type"),
-            round(it.get("dia_mm", -1.0), 3),
+            dia_key,
             it.get("thru"),
-            round(it.get("depth_mm", -1.0), 1),
+            depth_key,
             it.get("thread"),
         )
         if key in seen:
