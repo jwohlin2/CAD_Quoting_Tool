@@ -19690,7 +19690,11 @@ class App(tk.Tk):
             self.status_var.set("Configuration error: see dialog for details.")
 
         # GEO (single pane; CAD open handled by top bar)
-        self.geo_txt = tk.Text(self.tab_geo, wrap="word"); self.geo_txt.pack(fill="both", expand=True)
+        self.geo_txt = tk.Text(self.tab_geo, wrap="none"); self.geo_txt.pack(fill="both", expand=True)
+        try:
+            self.geo_txt.configure(font=("Courier New", 10))
+        except Exception:
+            pass
 
         # LLM (hidden frame is still built to keep functionality without a visible tab)
         if hasattr(self, "_build_llm"):
@@ -19710,9 +19714,9 @@ class App(tk.Tk):
 
         self.output_text_widgets: dict[str, tk.Text] = {}
 
-        simplified_txt = tk.Text(self.output_tab_simplified, wrap="word")
+        simplified_txt = tk.Text(self.output_tab_simplified, wrap="none")
         simplified_txt.pack(fill="both", expand=True)
-        full_txt = tk.Text(self.output_tab_full, wrap="word")
+        full_txt = tk.Text(self.output_tab_full, wrap="none")
         full_txt.pack(fill="both", expand=True)
 
         for name, widget in {"simplified": simplified_txt, "full": full_txt}.items():
@@ -19720,6 +19724,10 @@ class App(tk.Tk):
                 widget.tag_configure("rcol", tabs=("4.8i right",), tabstyle="tabular")
             except tk.TclError:
                 widget.tag_configure("rcol", tabs=("4.8i right",))
+            try:
+                widget.configure(font=("Courier New", 10), wrap="none")
+            except Exception:
+                pass
             self.output_text_widgets[name] = widget
 
         self.output_nb.select(self.output_tab_simplified)
@@ -21339,7 +21347,11 @@ class App(tk.Tk):
         row += 1
         ttk.Checkbutton(parent, text="Apply LLM adjustments to params", variable=self.apply_llm_adj).grid(row=row, column=0, sticky="w", pady=(0,6)); row+=1
         ttk.Button(parent, text="Run LLM on current GEO", command=self.run_llm).grid(row=row, column=0, sticky="w", padx=5, pady=6); row+=1
-        self.llm_txt = tk.Text(parent, wrap="word", height=24); self.llm_txt.grid(row=row, column=0, columnspan=3, sticky="nsew")
+        self.llm_txt = tk.Text(parent, wrap="none", height=24); self.llm_txt.grid(row=row, column=0, columnspan=3, sticky="nsew")
+        try:
+            self.llm_txt.configure(font=("Courier New", 10))
+        except Exception:
+            pass
         parent.grid_columnconfigure(1, weight=1); parent.grid_rowconfigure(row, weight=1)
 
     def _pick_model(self):
@@ -21407,7 +21419,11 @@ class App(tk.Tk):
         win.title(f"LLM Inspector — {latest.name}")
         win.geometry("900x700")
 
-        txt = scrolledtext.ScrolledText(win, wrap="word")
+        txt = scrolledtext.ScrolledText(win, wrap="none")
+        try:
+            txt.configure(font=("Courier New", 10), wrap="none")
+        except Exception:
+            pass
         txt.pack(fill="both", expand=True)
         txt.insert("1.0", shown)
         txt.configure(state="disabled")
