@@ -6552,6 +6552,18 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if mat_total_val is None and isinstance(material, dict):
         mat_total_val = _coerce_float_or_none(material.get("material_cost"))
     mat_total = float(mat_total_val or 0.0)
+    # Recompute material total from components if needed
+    if mat_total == 0.0 and isinstance(material, dict):
+        base = float(material.get("base_cost") or 0.0)
+        tax = float(material.get("material_tax") or 0.0)
+        scrap_credit = float(material.get("material_scrap_credit") or 0.0)
+        recomputed = round(max(0.0, base + tax - scrap_credit), 2)
+        if recomputed > 0:
+            mat_total = recomputed
+            # surface it everywhere our renderers and directs look:
+            material["material_cost"] = mat_total
+            if isinstance(material_stock_block, dict):
+                material_stock_block["total_material_cost"] = mat_total
     if isinstance(mat_info, dict) and mat_total > 0:
         mat_info["material_cost"] = float(mat_total)
         if isinstance(material, dict):
