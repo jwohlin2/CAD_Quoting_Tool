@@ -2833,6 +2833,12 @@ _ocp_brep_module = _import_optional("OCP.BRep")
 _occ_brep_module = _import_optional("OCC.Core.BRep")
 _ocp_backend_ready = False
 
+# Provide default placeholders so type checkers consider these names bound even if
+# the optional OCC/OCP backends are unavailable at runtime.
+gp_Dir = cast(Any, None)
+gp_Pln = cast(Any, None)
+gp_Pnt = cast(Any, None)
+
 if _ocp_brep_module is not None:
     try:
         from OCP.BRep import (  # type: ignore[import]
