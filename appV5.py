@@ -6568,12 +6568,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     programmer_hours = _safe_float(prog.get("prog_hr"))
     engineer_hours = _safe_float(prog.get("eng_hr"))
-    programmer_rate = _resolve_rate_with_fallback(
-        prog.get("prog_rate"), "ProgrammingRate", "ProgrammerRate", "ShopRate"
-    )
-    engineer_rate = _resolve_rate_with_fallback(
-        prog.get("eng_rate"), "EngineerRate", "ShopRate"
-    )
+    programmer_rate = float(getattr(cfg, "labor_rate_per_hr", 45.0) or 45.0)
+    if not math.isfinite(programmer_rate) or programmer_rate <= 0:
+        programmer_rate = 45.0
+    engineer_rate = programmer_rate
 
     programming_per_lot_val = _safe_float(prog.get("per_lot"))
     nre_programming_per_lot = _safe_float(nre.get("programming_per_lot"))
@@ -6625,12 +6623,25 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         programming_rate_total = _coerce_rate_value(rates.get("ProgrammingRate"))
         nre["programming_cost"] = round(prog_hr_total * programming_rate_total, 2)
 
-    computed_programming_per_lot = 0.0
-    if programmer_hours > 0 and programmer_rate > 0:
-        computed_programming_per_lot += programmer_hours * programmer_rate
-    if engineer_hours > 0 and engineer_rate > 0:
-        computed_programming_per_lot += engineer_hours * engineer_rate
+    total_programming_hours = prog_hr_total if prog_hr_total > 0 else aggregated_programming_hours
+    if total_programming_hours <= 0:
+        total_programming_hours = programmer_hours + engineer_hours
 
+    computed_programming_per_lot = 0.0
+    if total_programming_hours > 0 and programmer_rate > 0:
+        computed_programming_per_lot = round(total_programming_hours * programmer_rate, 2)
+
+    programming_cost_lot = computed_programming_per_lot if computed_programming_per_lot > 0 else 0.0
+    per_lot_source_for_amortized = programming_cost_lot
+    if per_lot_source_for_amortized <= 0 and programming_per_lot_val > 0:
+        per_lot_source_for_amortized = programming_per_lot_val
+    if per_lot_source_for_amortized <= 0 and nre_programming_per_lot > 0:
+        per_lot_source_for_amortized = nre_programming_per_lot
+    programming_cost_per_part = 0.0
+    if per_lot_source_for_amortized > 0:
+        programming_cost_per_part = round(
+            per_lot_source_for_amortized / max(qty_for_programming_float, 1.0), 2
+        )
     if programming_per_lot_val <= 0 and nre_programming_per_lot > 0:
         programming_per_lot_val = round(nre_programming_per_lot, 2)
     if programming_per_lot_val <= 0 and computed_programming_per_lot > 0:
@@ -6639,7 +6650,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     existing_programming_per_lot = _safe_float(nre.get("programming_per_lot"))
     if existing_programming_per_lot <= 0 and computed_programming_per_lot > 0:
         nre["programming_per_lot"] = computed_programming_per_lot
-    if _safe_float(labor_cost_totals.get("Programming (amortized)")) <= 0:
+    if programming_cost_per_part > 0:
+        try:
+            labor_cost_totals["Programming (amortized)"] = programming_cost_per_part
+        except Exception:
+            labor_cost_totals["Programming (amortized)"] = programming_cost_per_part
+    elif _safe_float(labor_cost_totals.get("Programming (amortized)")) <= 0:
         per_lot_source = computed_programming_per_lot
         if per_lot_source <= 0 and nre_programming_per_lot > 0:
             per_lot_source = nre_programming_per_lot
@@ -6647,7 +6663,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             per_lot_source = programming_per_lot_val
         try:
             labor_cost_totals["Programming (amortized)"] = round(
-                per_lot_source / qty_for_programming_float, 2
+                per_lot_source / max(qty_for_programming_float, 1.0), 2
             )
         except Exception:
             labor_cost_totals["Programming (amortized)"] = 0.0
@@ -7442,74 +7458,46 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         programming_detail_local = (
             nre_detail.get("programming", {}) if isinstance(nre_detail, dict) else {}
         )
-        total_programming_hours = _safe_float(nre.get("programming_hr"))
+        total_programming_hours_local = _safe_float(nre.get("programming_hr"))
         accumulate_from_detail = False
-        if total_programming_hours <= 0:
-            total_programming_hours = 0.0
+        if total_programming_hours_local <= 0:
+            total_programming_hours_local = 0.0
             accumulate_from_detail = True
 
         detail_args: list[str] = []
         detail_hours = 0.0
-        per_lot_cost = 0.0
 
         prog_hr_detail = _safe_float(programming_detail_local.get("prog_hr"))
         if prog_hr_detail > 0:
             if accumulate_from_detail:
-                total_programming_hours += prog_hr_detail
-            prog_rate_detail = _resolve_rate_with_fallback(
-                programming_detail_local.get("prog_rate"),
-                "ProgrammerRate",
-                "ProgrammingRate",
-                "ShopRate",
-            )
-            per_lot_cost += prog_hr_detail * max(prog_rate_detail, 0.0)
+                total_programming_hours_local += prog_hr_detail
             detail_hours += prog_hr_detail
             detail_args.append(
-                f"- Programmer (lot): {_hours_with_rate_text(prog_hr_detail, prog_rate_detail)}"
+                f"- Programmer (lot): {_hours_with_rate_text(prog_hr_detail, programmer_rate)}"
             )
 
         eng_hr_detail = _safe_float(programming_detail_local.get("eng_hr"))
         if eng_hr_detail > 0:
             if accumulate_from_detail:
-                total_programming_hours += eng_hr_detail
-            eng_rate_detail = _resolve_rate_with_fallback(
-                programming_detail_local.get("eng_rate"),
-                "EngineerRate",
-                "ProgrammingRate",
-                "ShopRate",
-            )
-            per_lot_cost += eng_hr_detail * max(eng_rate_detail, 0.0)
+                total_programming_hours_local += eng_hr_detail
             detail_hours += eng_hr_detail
             detail_args.append(
-                f"- Engineering (lot): {_hours_with_rate_text(eng_hr_detail, eng_rate_detail)}"
+                f"- Engineering (lot): {_hours_with_rate_text(eng_hr_detail, programmer_rate)}"
             )
 
-        remaining_hours = max(total_programming_hours - detail_hours, 0.0)
+        remaining_hours = max(total_programming_hours_local - detail_hours, 0.0)
         if remaining_hours > 0:
-            remainder_rate = _resolve_rate_with_fallback(
-                programming_detail_local.get("prog_rate"),
-                "ProgrammingRate",
-                "ProgrammerRate",
-                "ShopRate",
+            detail_args.append(
+                f"Additional programming {fmt_hours(remaining_hours)} @ ${programmer_rate:.2f}/hr"
             )
-            if remainder_rate <= 0.0:
-                remainder_rate = _resolve_rate_with_fallback(
-                    programming_detail_local.get("eng_rate"),
-                    "EngineerRate",
-                    "ProgrammingRate",
-                    "ShopRate",
-                )
-            per_lot_cost += remaining_hours * max(remainder_rate, 0.0)
 
-        if total_programming_hours > 0:
-            programming_minutes = (total_programming_hours / qty_divisor) * 60.0
+        if total_programming_hours_local <= 0:
+            total_programming_hours_local = total_programming_hours
 
-        try:
-            prog_pp = float(programming_per_part_cost or 0.0)
-        except Exception:
-            prog_pp = 0.0
-        if per_lot_cost > 0:
-            prog_pp = per_lot_cost / qty_divisor
+        if total_programming_hours_local > 0:
+            programming_minutes = (total_programming_hours_local / qty_divisor) * 60.0
+
+        prog_pp = programming_cost_per_part
         if prog_pp <= 0:
             try:
                 prog_pp = float(labor_cost_totals.get("Programming (amortized)") or 0.0)
@@ -15317,37 +15305,10 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         if isinstance(merged_two_bucket_rates, _MappingABC)
         else {}
     )
-    programmer_rate = 0.0
-    if cfg and getattr(cfg, "separate_machine_labor", False):
-        programmer_rate = float(getattr(cfg, "labor_rate_per_hr", 45.0) or 45.0)
-    else:
-        if isinstance(labor_bucket, _MappingABC):
-            for key in ("programmer", "Programmer", "PROGRAMMER"):
-                rate_value = labor_bucket.get(key)
-                if rate_value is None:
-                    continue
-                try:
-                    programmer_rate = float(rate_value)
-                except Exception:
-                    continue
-                if programmer_rate > 0:
-                    break
-        if programmer_rate <= 0:
-            programmer_rate = _lookup_rate(
-                "programming",
-                rates,
-                fallback=0.0,
-            )
-        if programmer_rate <= 0:
-            programmer_rate = _lookup_rate(
-                "ProgrammingRate",
-                rates,
-                params,
-                default_rates,
-                fallback=90.0,
-            )
-        if programmer_rate <= 0:
-            programmer_rate = 90.0
+    # === PROGRAMMING RATE (LABOR-ONLY) ===
+    programmer_rate = float(getattr(cfg, "labor_rate_per_hr", 45.0) or 45.0)
+    if not math.isfinite(programmer_rate) or programmer_rate <= 0:
+        programmer_rate = 45.0
 
     if programmer_rate > 0:
         if isinstance(merged_two_bucket_rates, dict):
