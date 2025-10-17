@@ -59,6 +59,8 @@ from cad_quoter.config import (
 from cad_quoter.config import (
     describe_runtime_environment as _describe_runtime_environment,
 )
+
+_log = logger
 from cad_quoter.utils.geo_ctx import _should_include_outsourced_pass
 from cad_quoter.utils.render_utils import (
     fmt_hours,
@@ -4030,34 +4032,56 @@ def _charged_hours_by_bucket(
                 "[hours-sync] Injecting Drilling bucket hours %.2f (source=removal_card)",
                 desired,
             )
-            charged[label] = desired
+            out[label] = desired
 
-    if prefer_override:
-        extra_map: Mapping[str, Any] | None = None
-        if isinstance(render_state, PlannerBucketRenderState):
-            extra_candidate = getattr(render_state, "extra", None)
-            if isinstance(extra_candidate, _MappingABC):
-                extra_map = typing.cast(Mapping[str, Any], extra_candidate)
-        if extra_map is None and render_state is not None:
-            try:
-                extra_candidate = getattr(render_state, "extra", None)
-            except Exception:
-                extra_candidate = None
-            if isinstance(extra_candidate, _MappingABC):
-                extra_map = typing.cast(Mapping[str, Any], extra_candidate)
-        if extra_map is not None:
-            m = extra_map.get("drill_machine_minutes")
-            l = extra_map.get("drill_labor_minutes")
-            if isinstance(m, (int, float)) and isinstance(l, (int, float)):
-                drill_hr = (float(m) + float(l)) / 60.0
-                updated = False
-                for k in list(charged.keys()):
-                    if _canonical_bucket_key(k) in {"drilling", "drill"}:
-                        charged[k] = drill_hr
-                        updated = True
-                if not updated and drill_hr > 0:
-                    charged[_process_label("drilling")] = drill_hr
-    return charged
+    drill_machine_minutes = None
+    drill_labor_minutes = None
+    if render_state is not None:
+        try:
+            extra = getattr(render_state, "extra", None)
+        except Exception:
+            extra = None
+        if isinstance(extra, _MappingABC):
+            drill_machine_minutes = _coerce_float_or_none(
+                extra.get("drill_machine_minutes")
+            )
+            drill_labor_minutes = _coerce_float_or_none(
+                extra.get("drill_labor_minutes")
+            )
+
+    drill_bucket_label = next(
+        (
+            key
+            for key in out
+            if _canonical_bucket_key(key) in {"drilling", "drill"}
+        ),
+        "",
+    )
+    drill_bucket_hours = (
+        _coerce_float_or_none(out.get(drill_bucket_label))
+        if drill_bucket_label
+        else None
+    )
+
+    def _fmt_diagnostic(value: float | None) -> str:
+        if value is None:
+            return "nan"
+        try:
+            numeric = float(value)
+        except Exception:
+            return "nan"
+        if not math.isfinite(numeric):
+            return "nan"
+        return f"{numeric:.2f}"
+
+    _log.info(
+        "[drill-sync] card_m=%s card_l=%s charged_hr=%s",
+        _fmt_diagnostic(drill_machine_minutes),
+        _fmt_diagnostic(drill_labor_minutes),
+        _fmt_diagnostic(drill_bucket_hours),
+    )
+
+    return out
 
 def _planner_bucket_key_for_name(name: Any) -> str:
     text = str(name or "").lower()
@@ -19103,6 +19127,9 @@ class App(tk.Tk):
             default_params=copy.deepcopy(self.default_params_template),
             default_material_display=self.default_material_display,
             prefer_removal_drilling_hours=True,
+            separate_machine_labor=True,
+            machine_rate_per_hr=45.0,
+            labor_rate_per_hr=45.0,
             stock_price_source="mcmaster_api",
             scrap_price_source="wieland",
         )
