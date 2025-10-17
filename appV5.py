@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import csv
 import importlib
 import json
 import math
@@ -49,6 +50,7 @@ from cad_quoter.app.container import (
 from cad_quoter.resources import (
     default_app_settings_json,
     default_master_variables_csv,
+    default_catalog_csv,
 )
 from cad_quoter.config import (
     AppEnvironment,
@@ -504,6 +506,7 @@ def _compute_drilling_removal_section(
             subtotal_min = float(drill_machine_minutes_estimate)
         else:
             subtotal_min = float(subtotal_calc)
+        subtotal_min = float(max(subtotal_min, 0.0))
         if drill_tool_minutes_estimate > 0.0:
             tool_add = float(drill_tool_minutes_estimate)
         else:
@@ -515,9 +518,21 @@ def _compute_drilling_removal_section(
         else:
             total_drill_minutes_with_toolchange = subtotal_min + tool_add
 
-        extras["drill_machine_minutes"] = float(subtotal_min)
+        removal_drilling_minutes_subtotal = float(subtotal_min)
+        removal_drilling_minutes = float(max(total_drill_minutes_with_toolchange, 0.0))
+        removal_drilling_hours_precise: float | None = None
+        if removal_drilling_minutes > 0.0:
+            removal_drilling_hours_precise = removal_drilling_minutes / 60.0
+
+        extras["drill_machine_minutes"] = float(removal_drilling_minutes_subtotal)
         extras["drill_labor_minutes"] = float(tool_add)
         extras["drill_total_minutes"] = float(total_drill_minutes_with_toolchange)
+        extras["removal_drilling_minutes_subtotal"] = float(
+            removal_drilling_minutes_subtotal
+        )
+        extras["removal_drilling_minutes"] = float(removal_drilling_minutes)
+        if removal_drilling_hours_precise is not None:
+            extras["removal_drilling_hours"] = float(removal_drilling_hours_precise)
 
         breakdown_mutable: MutableMapping[str, Any]
         if isinstance(breakdown, _MutableMappingABC):
@@ -532,6 +547,8 @@ def _compute_drilling_removal_section(
             except Exception:
                 drill_meta = {}
             breakdown_mutable["drilling_meta"] = drill_meta
+        drill_meta["subtotal_minutes"] = float(removal_drilling_minutes_subtotal)
+        drill_meta["total_minutes"] = float(removal_drilling_minutes)
         drill_meta["toolchange_minutes"] = float(tool_add)
         drill_meta["total_minutes_with_toolchange"] = float(
             total_drill_minutes_with_toolchange
@@ -567,7 +584,7 @@ def _compute_drilling_removal_section(
         drill_min = plan_drill_min if plan_drill_min and plan_drill_min > 0.0 else bill_min
         bill_min = drill_min
         drill_hr = drill_min / 60.0 if drill_min else 0.0
-        if drill_hr > 0.0:
+        if drill_hr > 0.0 and "removal_drilling_hours" not in extras:
             extras["removal_drilling_hours"] = float(drill_hr)
         drill_meta["total_minutes_billed"] = drill_min
         drill_meta["bill_hours"] = float(drill_hr)
@@ -706,12 +723,10 @@ def _compute_drilling_removal_section(
                 updated_plan_summary = process_plan_summary_card
         if process_plan_summary_card is not None:
             drill_meta_summary = process_plan_summary_card.setdefault("drilling", {})
-            if subtotal_min > 0.0:
-                prior_total = _coerce_float_or_none(
-                    drill_meta_summary.get("total_minutes")
-                )
-                if prior_total is None or prior_total <= 0.0:
-                    drill_meta_summary["total_minutes"] = float(subtotal_min)
+            drill_meta_summary["subtotal_minutes"] = float(
+                removal_drilling_minutes_subtotal
+            )
+            drill_meta_summary["total_minutes"] = float(removal_drilling_minutes)
             drill_meta_summary["toolchange_minutes"] = float(tool_add)
             drill_meta_summary["total_minutes_with_toolchange"] = float(
                 total_drill_minutes_with_toolchange
@@ -1169,19 +1184,187 @@ def _material_cost_components(
     if scrap_rate_segments:
         scrap_rate_text = " × ".join(scrap_rate_segments)
     scrap_source_label = _normalize_source(scrap_source) if scrap_source else ""
-    if scrap_source_label:
-        scrap_rate_text = f"{scrap_source_label} {scrap_rate_text}".strip()
+    if scrap_rate_text and scrap_source_label:
+        rate_clean = scrap_rate_text.strip()
+        label_clean = str(scrap_source_label).strip()
+        if rate_clean.lower().startswith(label_clean.lower()):
+            composed = scrap_rate_text
+        else:
+            composed = f"{scrap_source_label} {scrap_rate_text}"
+        scrap_rate_text = composed.strip()
+
+    try:
+        base_for_total_calc = float(
+            block.get("stock_price_usd")
+            or block.get("base_usd")
+            or base_value
+            or 0.0
+        )
+    except Exception:
+        base_for_total_calc = float(base_value or 0.0)
+
+    try:
+        tax_for_total = float(block.get("tax_usd") or tax_value or 0.0)
+    except Exception:
+        tax_for_total = float(tax_value or 0.0)
+
+    try:
+        scrap_for_total = abs(float(block.get("scrap_credit_usd") or scrap_value or 0.0))
+    except Exception:
+        scrap_for_total = float(scrap_value or 0.0)
+
+    total_calc = max(base_for_total_calc + tax_for_total - scrap_for_total, 0.0)
+
+    try:
+        total_usd_value = float(block.get("total_usd") or total_calc)
+    except Exception:
+        total_usd_value = float(total_calc)
 
     return {
         "stock_piece_usd": round(stock_piece_usd, 2) if stock_piece_usd is not None else None,
         "stock_source": _normalize_source(stock_source) if stock_source else "",
         "base_usd": round(base_value, 2),
         "base_source": _normalize_source(base_source) if base_source else "",
-        "tax_usd": round(tax_value, 2),
-        "scrap_credit_usd": round(scrap_value, 2),
+        "tax_usd": round(tax_for_total, 2),
+        "scrap_credit_usd": round(scrap_for_total, 2),
         "scrap_rate_text": scrap_rate_text,
         "net_usd": round(net_value, 2),
-        "total_usd": round(total_value, 2),
+        "total_usd": round(total_usd_value, 2),
+    }
+
+
+@lru_cache(maxsize=1)
+def _load_mcmaster_catalog_csv(path: str | None = None) -> list[dict[str, Any]]:
+    """Return rows from the McMaster stock catalog CSV."""
+
+    csv_path = path or os.getenv("CATALOG_CSV_PATH") or str(default_catalog_csv())
+    if not csv_path:
+        return []
+    try:
+        with open(csv_path, newline="", encoding="utf-8-sig") as handle:
+            reader = csv.DictReader(handle)
+            return [dict(row) for row in reader if row]
+    except FileNotFoundError:
+        return []
+    except Exception:
+        return []
+
+
+def _pick_mcmaster_plate_sku(
+    need_L_in: float,
+    need_W_in: float,
+    need_T_in: float,
+    *,
+    material_key: str = "MIC6",
+    catalog_rows: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """Return the smallest-area McMaster plate covering the requested envelope."""
+
+    import math as _math
+
+    if not all(val and val > 0 for val in (need_L_in, need_W_in, need_T_in)):
+        return None
+
+    rows = list(catalog_rows) if catalog_rows is not None else _load_mcmaster_catalog_csv()
+    if not rows:
+        return None
+
+    target_key = str(material_key or "").strip().lower()
+    if not target_key:
+        return None
+
+    tolerance = 0.02
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        material_text = str(
+            (row.get("material") or row.get("Material") or "")
+        ).strip().lower()
+        if not material_text:
+            continue
+        variants = {target_key}
+        if "_" in target_key:
+            variants.add(target_key.replace("_", " "))
+        if " " in target_key:
+            variants.add(target_key.replace(" ", ""))
+        normalised_material = material_text.replace("_", " ")
+        if not any(variant and variant in normalised_material for variant in variants):
+            continue
+        try:
+            length = float(
+                row.get("length_in")
+                or row.get("L_in")
+                or row.get("len_in")
+                or row.get("length")
+            )
+            width = float(
+                row.get("width_in")
+                or row.get("W_in")
+                or row.get("wid_in")
+                or row.get("width")
+            )
+            thickness = float(
+                row.get("thickness_in")
+                or row.get("T_in")
+                or row.get("thk_in")
+                or row.get("thickness")
+            )
+        except Exception:
+            continue
+        if not all(val and val > 0 for val in (length, width, thickness)):
+            continue
+        if abs(thickness - need_T_in) > tolerance:
+            continue
+        part_no = str(
+            row.get("mcmaster_part")
+            or row.get("part")
+            or row.get("sku")
+            or ""
+        ).strip()
+        if not part_no:
+            continue
+
+        def _covers(a: float, b: float, A: float, B: float) -> bool:
+            return (A >= a) and (B >= b)
+
+        ok1 = _covers(need_L_in, need_W_in, length, width)
+        ok2 = _covers(need_L_in, need_W_in, width, length)
+        if not (ok1 or ok2):
+            continue
+
+        area = length * width
+        overL1 = (length - need_L_in) if ok1 else _math.inf
+        overW1 = (width - need_W_in) if ok1 else _math.inf
+        overL2 = (width - need_L_in) if ok2 else _math.inf
+        overW2 = (length - need_W_in) if ok2 else _math.inf
+        over_L = min(overL1, overL2)
+        over_W = min(overW1, overW2)
+
+        candidates.append(
+            {
+                "len_in": float(length),
+                "wid_in": float(width),
+                "thk_in": float(thickness),
+                "mcmaster_part": part_no,
+                "area": float(area),
+                "overL": float(over_L),
+                "overW": float(over_W),
+                "source": row.get("source") or "mcmaster-catalog",
+            }
+        )
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda c: (c["area"], max(c["overL"], c["overW"])))
+    best = candidates[0]
+    return {
+        "len_in": float(best["len_in"]),
+        "wid_in": float(best["wid_in"]),
+        "thk_in": float(best["thk_in"]),
+        "mcmaster_part": best["mcmaster_part"],
+        "source": best.get("source") or "mcmaster-catalog",
     }
 
 
@@ -1264,7 +1447,7 @@ from typing import (
     overload,
     no_type_check,
 )
-from functools import cmp_to_key
+from functools import cmp_to_key, lru_cache
 
 if typing.TYPE_CHECKING:  # pragma: no cover - import is for type checking only
     from ezdxf.document import Drawing  # type: ignore[attr-defined]
@@ -1304,26 +1487,28 @@ def _resolve_pricing_source_value(
     hour_summary_entries: Mapping[str, Any] | None = None,
     additional_sources: Sequence[Any] | None = None,
 ) -> str | None:
-    """Return a normalized pricing source, forcing planner when signals exist."""
+    """Return a normalized pricing source, honoring explicit selections."""
 
-    text = None
+    fallback_text: str | None = None
     if base_value is not None:
-        text = str(base_value).strip()
-        if not text:
-            text = None
+        candidate_text = str(base_value).strip()
+        if candidate_text:
+            lowered = candidate_text.lower()
+            if lowered == "planner":
+                return "planner"
+            if lowered not in {"legacy", "auto", "default", "fallback"}:
+                return candidate_text
+            fallback_text = candidate_text
 
-    if text and text.lower() == "planner":
-        return "planner"
-
-    explicit_override = text is not None
-
-    if used_planner and not explicit_override:
+    if used_planner:
+        if fallback_text:
+            return fallback_text
         return "planner"
 
     # Delegate planner signal detection to the adapter helper
     from appkit.planner_adapter import _planner_signals_present as _planner_signals_present_helper
 
-    if not explicit_override and _planner_signals_present_helper(
+    if _planner_signals_present_helper(
         process_meta=process_meta,
         process_meta_raw=process_meta_raw,
         breakdown=breakdown,
@@ -1331,9 +1516,14 @@ def _resolve_pricing_source_value(
         hour_summary_entries=hour_summary_entries,
         additional_sources=list(additional_sources) if additional_sources is not None else None,
     ):
+        if fallback_text:
+            return fallback_text
         return "planner"
 
-    return text
+    if fallback_text:
+        return fallback_text
+
+    return None
 
 
 
@@ -6674,6 +6864,54 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 else None
             )
 
+            picked_stock: dict[str, Any] | None = None
+            material_lookup_for_pick = normalized_material_key or ""
+            if not material_lookup_for_pick and material_display_label:
+                material_lookup_for_pick = _normalize_lookup_key(material_display_label)
+            try:
+                if need_len and need_wid and need_thk:
+                    picked_stock = _pick_mcmaster_plate_sku(
+                        float(need_len),
+                        float(need_wid),
+                        float(need_thk),
+                        material_key=material_lookup_for_pick or "MIC6",
+                    )
+            except Exception:
+                picked_stock = None
+            if picked_stock:
+                stock_len_val = float(picked_stock.get("len_in") or 0.0)
+                stock_wid_val = float(picked_stock.get("wid_in") or 0.0)
+                stock_thk_val = float(picked_stock.get("thk_in") or 0.0)
+                part_number = picked_stock.get("mcmaster_part")
+                source_hint = picked_stock.get("source") or "mcmaster-catalog"
+                if isinstance(material_stock_block, _MutableMappingABC):
+                    material_stock_block["stock_L_in"] = float(stock_len_val)
+                    material_stock_block["stock_W_in"] = float(stock_wid_val)
+                    material_stock_block["stock_T_in"] = float(stock_thk_val)
+                    material_stock_block.setdefault("stock_source_tag", source_hint)
+                    material_stock_block.setdefault("source", source_hint)
+                    if part_number:
+                        material_stock_block["mcmaster_part"] = part_number
+                if isinstance(material, _MutableMappingABC):
+                    material.setdefault("stock_source_tag", source_hint)
+                    material.setdefault("source", source_hint)
+                    if part_number:
+                        material.setdefault("mcmaster_part", part_number)
+                if isinstance(result, _MutableMappingABC):
+                    if part_number:
+                        result["mcmaster_part"] = part_number
+                    result["stock_source"] = source_hint
+            elif (
+                material_lookup_for_pick
+                and "mic6" in material_lookup_for_pick.lower()
+                and need_len
+                and need_wid
+                and need_thk
+            ):
+                raise RuntimeError(
+                    f"No McMaster MIC6 plate found for {float(need_len):.2f}×{float(need_wid):.2f}×{float(need_thk):.3f} in with exact thickness"
+                )
+
             if (need_len is None or need_wid is None or need_thk is None) and isinstance(g, dict):
                 plan_guess = g.get("stock_plan_guess")
                 if isinstance(plan_guess, _MappingABC):
@@ -6709,9 +6947,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     source_tag = None
 
             if stock_len_val and stock_wid_val and stock_thk_val:
+                part_label = ""
+                if isinstance(result, Mapping):
+                    part_label = str(result.get("mcmaster_part") or "").strip()
+                part_display = part_label or "—"
                 stock_line = (
                     "  Rounded to catalog: "
                     f"{stock_len_val:.2f} × {stock_wid_val:.2f} × {stock_thk_val:.3f} in"
+                    f" (McMaster, {part_display})"
                 )
                 if source_tag:
                     stock_line += f" ({source_tag})"
@@ -7146,18 +7389,45 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     if base_source:
                         base_label = f"Base Material @ {base_source}"
                     row(base_label, float(mc.get("base_usd", 0.0)), indent="  ")
-                tax_val = mc.get("tax_usd") or 0.0
+                try:
+                    tax_val = float(mc.get("tax_usd") or 0.0)
+                except Exception:
+                    tax_val = 0.0
                 if tax_val:
-                    row("Material Tax:", float(tax_val), indent="  ")
-                scrap_val = mc.get("scrap_credit_usd") or 0.0
-                if scrap_val:
-                    scrap_suffix = ""
-                    scrap_text = mc.get("scrap_rate_text") or ""
-                    if scrap_text:
-                        scrap_suffix = f" @ {scrap_text}"
-                    row(f"Scrap Credit{scrap_suffix}", -float(scrap_val), indent="  ")
-                total_material_cost = mc.get("total_usd", total_material_cost)
-                row("Total Material Cost :", float(total_material_cost or 0.0), indent="  ")
+                    row("Material Tax:", round(tax_val, 2), indent="  ")
+                try:
+                    scrap_val = float(mc.get("scrap_credit_usd") or 0.0)
+                except Exception:
+                    scrap_val = 0.0
+                scrap_text = mc.get("scrap_rate_text") or ""
+                if scrap_val and scrap_text:
+                    row(
+                        f"Scrap Credit @ {scrap_text}",
+                        -round(scrap_val, 2),
+                        indent="  ",
+                    )
+                elif scrap_val:
+                    row("Scrap Credit", -round(scrap_val, 2), indent="  ")
+                try:
+                    base_for_total = float(mc.get("base_usd") or 0.0)
+                except Exception:
+                    base_for_total = 0.0
+                tax_for_total = float(tax_val)
+                total_material_cost_val = mc.get("total_usd")
+                if total_material_cost_val is not None:
+                    try:
+                        total_material_cost = round(float(total_material_cost_val), 2)
+                    except Exception:
+                        total_material_cost = None
+                else:
+                    total_material_cost = None
+                if total_material_cost is None:
+                    scrap_for_total = min(float(scrap_val), base_for_total + tax_for_total)
+                    total_material_cost = round(
+                        base_for_total + tax_for_total - scrap_for_total,
+                        2,
+                    )
+                row("Total Material Cost :", total_material_cost, indent="  ")
             elif total_material_cost is not None:
                 row("Total Material Cost :", total_material_cost, indent="  ")
             append_line("")
@@ -7187,14 +7457,28 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     programmer_hours = _safe_float(prog.get("prog_hr"))
     engineer_hours = _safe_float(prog.get("eng_hr"))
-    programmer_rate = _resolve_rate_with_fallback(
-        prog.get("prog_rate"), "ProgrammingRate", "ProgrammerRate", "ShopRate"
-    )
+    fallback_programmer_rate = float(getattr(cfg, "labor_rate_per_hr", 45.0) or 45.0)
+    if not math.isfinite(fallback_programmer_rate) or fallback_programmer_rate <= 0:
+        fallback_programmer_rate = 45.0
+    programmer_rate_backfill = _coerce_rate_value(rates.get("ProgrammerRate"))
+    if programmer_rate_backfill <= 0:
+        programmer_rate_backfill = _coerce_rate_value(rates.get("ProgrammingRate"))
+    has_programming_rate_detail = False
+    if isinstance(nre_cost_details, _MappingABC):
+        detail_key = "Programming & Eng (per lot)"
+        has_programming_rate_detail = bool(nre_cost_details.get(detail_key))
+    explicit_programmer_rate = _safe_float(prog.get("prog_rate"))
+    programmer_rate: float
+    if explicit_programmer_rate > 0:
+        has_programming_rate_detail = True
+        programmer_rate = explicit_programmer_rate
+    elif programmer_rate_backfill > 0 and not has_programming_rate_detail:
+        programmer_rate = programmer_rate_backfill
+    else:
+        programmer_rate = fallback_programmer_rate
     if separate_labor_cfg and cfg_labor_rate_value > 0.0:
         programmer_rate = cfg_labor_rate_value
-    engineer_rate = _resolve_rate_with_fallback(
-        prog.get("eng_rate"), "EngineerRate", "ShopRate"
-    )
+    engineer_rate = programmer_rate
 
     programming_per_lot_val = _safe_float(prog.get("per_lot"))
     nre_programming_per_lot = _safe_float(nre.get("programming_per_lot"))
@@ -7241,6 +7525,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         except Exception:
             pass
         prog_hr_total = aggregated_programming_hours
+    total_programming_hours = prog_hr_total
     programming_cost_total = float((nre.get("programming_cost") or 0.0) or 0.0)
     if prog_hr_total > 0 and programming_cost_total == 0.0:
         programming_rate_total = _coerce_rate_value(rates.get("ProgrammingRate"))
@@ -7281,6 +7566,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if show_programming_row:
         row("Programming & Eng:", programming_per_lot_val)
         has_detail = False
+        if programming_per_lot_val > 0 or show_zeros:
+            row("Programming Cost:", programming_per_lot_val, indent="  ")
+            has_detail = True
+        if total_programming_hours > 0:
+            write_line(f"  Programming Hrs: {_h(total_programming_hours)}")
+            has_detail = True
         if programmer_hours > 0:
             has_detail = True
             write_line(
@@ -7550,6 +7841,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         drill_machine_minutes_estimate = float(removal_card_extra["drill_machine_minutes"])
     if removal_card_extra.get("drill_labor_minutes") is not None:
         drill_tool_minutes_estimate = float(removal_card_extra["drill_labor_minutes"])
+    if removal_card_extra.get("removal_drilling_minutes") is not None:
+        removal_drilling_minutes = float(
+            removal_card_extra["removal_drilling_minutes"]
+        )
+        removal_drilling_hours_precise = removal_drilling_minutes / 60.0
     if removal_card_extra.get("drill_total_minutes") is not None:
         drill_total_minutes_estimate = float(removal_card_extra["drill_total_minutes"])
         removal_drilling_minutes = float(removal_card_extra["drill_total_minutes"])
@@ -7557,6 +7853,50 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if removal_card_extra.get("removal_drilling_hours") is not None:
         removal_drilling_hours_precise = float(removal_card_extra["removal_drilling_hours"])
         removal_drilling_minutes = removal_drilling_hours_precise * 60.0
+
+    machine_minutes_snapshot = max(0.0, float(drill_machine_minutes_estimate or 0.0))
+    labor_minutes_snapshot = max(0.0, float(drill_tool_minutes_estimate or 0.0))
+    total_minutes_snapshot = float(drill_total_minutes_estimate or 0.0)
+    if total_minutes_snapshot <= 0.0:
+        combined_minutes = machine_minutes_snapshot + labor_minutes_snapshot
+        if combined_minutes > 0.0:
+            total_minutes_snapshot = combined_minutes
+
+    drill_minutes_extra_targets: list[_MutableMappingABC[str, Any]] = []
+
+    def _stash_drill_minutes(owner: Any) -> _MutableMappingABC[str, Any] | None:
+        if owner is None:
+            return None
+        try:
+            extra_candidate = getattr(owner, "extra", None)
+        except Exception:
+            extra_candidate = None
+        extra_map: _MutableMappingABC[str, Any] | None
+        if isinstance(extra_candidate, _MutableMappingABC):
+            extra_map = extra_candidate
+        elif isinstance(owner, PlannerBucketRenderState):
+            extra_map = owner.extra
+        elif isinstance(owner, dict):
+            extra_map = owner.setdefault("extra", {})  # type: ignore[assignment]
+        elif isinstance(owner, _MutableMappingABC):
+            extra_map = owner.setdefault("extra", {})  # type: ignore[assignment]
+        else:
+            extra_map = None
+        if isinstance(extra_map, _MutableMappingABC):
+            extra_map["drill_machine_minutes"] = float(machine_minutes_snapshot)
+            extra_map["drill_labor_minutes"] = float(labor_minutes_snapshot)
+            extra_map["drill_total_minutes"] = float(total_minutes_snapshot)
+            return extra_map
+        return None
+
+    initial_stash_candidates: list[Any] = [locals().get("render_state")]
+    if isinstance(breakdown, _MappingABC):
+        for key in ("planner_render_state", "bucket_render_state", "render_state"):
+            initial_stash_candidates.append(breakdown.get(key))
+    for candidate_owner in initial_stash_candidates:
+        extra_map_candidate = _stash_drill_minutes(candidate_owner)
+        if extra_map_candidate is not None and extra_map_candidate not in drill_minutes_extra_targets:
+            drill_minutes_extra_targets.append(extra_map_candidate)
 
     append_line("Process & Labor Costs")
     append_line(divider)
@@ -7633,7 +7973,15 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     bucket_view_struct: Mapping[str, Any] | None = None
     if isinstance(breakdown, _MappingABC):
         candidate_view = breakdown.get("bucket_view")
-        if isinstance(candidate_view, _MappingABC):
+        if isinstance(candidate_view, _MutableMappingABC):
+            extra_map_candidate = _stash_drill_minutes(candidate_view)
+            if (
+                extra_map_candidate is not None
+                and extra_map_candidate not in drill_minutes_extra_targets
+            ):
+                drill_minutes_extra_targets.append(extra_map_candidate)
+            bucket_view_struct = typing.cast(Mapping[str, Any], candidate_view)
+        elif isinstance(candidate_view, _MappingABC):
             bucket_view_struct = typing.cast(Mapping[str, Any], candidate_view)
 
     if (
@@ -7676,6 +8024,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         drill_total_minutes=drill_total_minutes_estimate,
     )
     render_state = bucket_state
+
+    bucket_state_extra_map = _stash_drill_minutes(bucket_state)
+    if (
+        bucket_state_extra_map is not None
+        and bucket_state_extra_map not in drill_minutes_extra_targets
+    ):
+        drill_minutes_extra_targets.append(bucket_state_extra_map)
 
     if removal_card_extra:
         extra_map = getattr(bucket_state, "extra", None)
@@ -10284,6 +10639,9 @@ class QuoteConfiguration:
     separate_machine_labor: bool = True
     machine_rate_per_hr: float = 45.0
     labor_rate_per_hr: float = 45.0
+    hole_source_preference: str = "table"  # "table" | "geometry" | "auto"
+    hole_merge_tol_diam_in: float = 0.001
+    hole_merge_tol_depth_in: float = 0.01
 
     def copy_default_params(self) -> Dict[str, Any]:
         """Return a deep copy of the default parameter set."""
@@ -12131,20 +12489,44 @@ def reconcile_holes(
     geo_count = sum(max(1, _coerce_int_or_zero(row.get("qty") or row.get("count"))) for row in geo_list)
 
     source_used = "geometry"
-    if preference == "table" and table_list:
-        final_rows = _fill_table_depths_from_geo(table_list, geo_list, cfg, plate_thickness_in=thickness)
-        source_used = "table"
-    elif preference == "geometry" or not table_list:
-        final_rows = _dedupe_geo_rows(geo_list, cfg, plate_thickness_in=thickness)
-        source_used = "geometry"
-    else:
-        rel = abs(table_count - geo_count) / max(table_count, 1)
-        if table_list and rel <= 0.15:
-            final_rows = _fill_table_depths_from_geo(table_list, geo_list, cfg, plate_thickness_in=thickness)
+    if table_list and preference in ("table", "auto"):
+        use_table = True
+        if preference == "auto" and geo_list:
+            rel = abs(table_count - geo_count) / max(table_count, 1) if table_count else 0.0
+            if rel > 0.15:
+                use_table = False
+        if use_table:
+            final_rows = _fill_table_depths_from_geo(
+                table_list,
+                geo_list,
+                cfg,
+                plate_thickness_in=thickness,
+            )
             source_used = "table"
         else:
-            final_rows = _dedupe_geo_rows(geo_list, cfg, plate_thickness_in=thickness)
+            final_rows = _dedupe_geo_rows(
+                geo_list,
+                cfg,
+                plate_thickness_in=thickness,
+            )
             source_used = "geometry"
+    elif geo_list:
+        final_rows = _dedupe_geo_rows(
+            geo_list,
+            cfg,
+            plate_thickness_in=thickness,
+        )
+        source_used = "geometry"
+    elif table_list and preference == "geometry":
+        final_rows = _dedupe_geo_rows(
+            geo_list,
+            cfg,
+            plate_thickness_in=thickness,
+        )
+        source_used = "geometry"
+    else:
+        final_rows = []
+        source_used = "geometry"
 
     cleaned: list[dict[str, Any]] = []
     for row in final_rows:
@@ -21431,11 +21813,12 @@ class App(tk.Tk):
             if not isinstance(res, dict):
                 res = {}
             cfg = getattr(self, "quote_config", None)
-            geometry_ctx: Mapping[str, Any] | None = None
-            if isinstance(self.geo_context, dict) and self.geo_context:
-                geometry_ctx = self.geo_context
-            elif isinstance(self.geo, dict) and self.geo:
-                geometry_ctx = self.geo
+            geometry_loader = getattr(self, "geometry_loader", None)
+            geometry_ctx = (
+                getattr(geometry_loader, "geo_ctx", None)
+                if geometry_loader is not None
+                else None
+            )
 
             try:
                 simplified_report = render_quote(
