@@ -22,6 +22,13 @@ from text_tables import (
 )
 
 
+def _fmt_cell(value: object, align: str = "left", width: int = 12) -> str:
+    text = f"{value}"
+    if align == "right":
+        return text.rjust(width)
+    return text.ljust(width)
+
+
 def _currency_from(data: Mapping[str, Any]) -> str:
     for key in ("currency", "unit_currency", "price_currency"):
         value = data.get(key)
@@ -264,27 +271,38 @@ def _render_processes(data: Mapping[str, Any]) -> str | None:
             label = entry.get("label") or entry.get("name") or ""
             hours = _coerce_float(entry.get("hours"))
             rate = _coerce_float(entry.get("rate"))
+            rate_display = entry.get("rate_display")
             amount = _coerce_float(entry.get("amount"))
         else:
             label = entry[0] if entry else ""
             hours = _coerce_float(entry[1]) if len(entry) > 1 else None
             rate = _coerce_float(entry[2]) if len(entry) > 2 else None
             amount = _coerce_float(entry[3]) if len(entry) > 3 else None
-        rows.append(
-            [
-                ellipsize(str(label), 40),
-                f"{hours:.2f} hr" if hours is not None else "—",
+            rate_display = None
+        label_text = _fmt_cell(ellipsize(str(label), 28), "left", 28)
+        hours_text = _fmt_cell(f"{hours:.2f} hr" if hours is not None else "—", "right", 10)
+        if rate_display:
+            rate_text = _fmt_cell(str(rate_display), "right", 16)
+        else:
+            rate_text = _fmt_cell(
                 money(rate, currency) + "/hr" if rate is not None else "—",
-                money(amount, currency),
-            ]
-        )
+                "right",
+                16,
+            )
+        amount_text = _fmt_cell(money(amount, currency), "right", 18)
+        rows.append([label_text, hours_text, rate_text, amount_text])
     specs = (
-        ColumnSpec(40, "L"),
+        ColumnSpec(28, "L"),
+        ColumnSpec(10, "R"),
         ColumnSpec(16, "R"),
-        ColumnSpec(20, "R"),
-        ColumnSpec(DEFAULT_WIDTH - 40 - 16 - 20 - 6, "R"),
+        ColumnSpec(18, "R"),
     )
-    headers = ("Process", "Hours", "Rate", "Amount (per part)")
+    headers = (
+        _fmt_cell("Process", "left", 28),
+        _fmt_cell("Hours", "right", 10),
+        _fmt_cell("Rate", "right", 16),
+        _fmt_cell("Amount (per part)", "right", 18),
+    )
     return draw_boxed_table(headers, rows, specs)
 
 
