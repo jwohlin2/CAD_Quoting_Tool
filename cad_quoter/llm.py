@@ -1278,40 +1278,22 @@ def explain_quote(
         if label_text:
             top_procs.append(label_text)
 
-    render_state_extra: Mapping[str, Any] | None = None
-    if isinstance(render_state, Mapping):
-        extra_candidate = render_state.get("extra")
-        if isinstance(extra_candidate, Mapping):
-            render_state_extra = extra_candidate
-    else:
-        try:
-            extra_candidate = getattr(render_state, "extra", None)
-        except Exception:
-            extra_candidate = None
-        if isinstance(extra_candidate, Mapping):
-            render_state_extra = extra_candidate
-
-    drilling_hours = drill_card_minutes / 60.0 if drill_card_minutes > 0.0 else None
-    has_card_minutes = drill_minutes_present
-
     render_state_drill_minutes: float | None = None
-    if render_state_extra:
-        render_state_drill_minutes = _coerce_float(
-            render_state_extra.get("drill_total_minutes")
-        )
+    if isinstance(render_state_extra, Mapping):
+        render_state_drill_minutes = _coerce_float(render_state_extra.get("drill_total_minutes"))
 
     include_drilling_in_top = False
     if render_state_drill_minutes is not None and render_state_drill_minutes > 0:
         include_drilling_in_top = True
-    elif drill_card_minutes > 0.0:
+    elif has_drilling:
         include_drilling_in_top = True
 
     if include_drilling_in_top and "drilling" not in [p.lower() for p in top_procs]:
         top_procs.append("Drilling")
 
-    if has_card_minutes:
-        if drilling_hours is not None:
-            hours_text = fmt_hours(drilling_hours)
+    if drill_minutes_present:
+        if has_drilling:
+            hours_text = fmt_hours(drill_card_minutes / 60.0)
             _add_reason(f"planner buckets allocate {hours_text} to drilling")
         else:
             _add_reason("planner buckets include drilling")
