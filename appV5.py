@@ -1169,8 +1169,14 @@ def _material_cost_components(
     if scrap_rate_segments:
         scrap_rate_text = " × ".join(scrap_rate_segments)
     scrap_source_label = _normalize_source(scrap_source) if scrap_source else ""
-    if scrap_source_label:
-        scrap_rate_text = f"{scrap_source_label} {scrap_rate_text}".strip()
+    if scrap_rate_text and scrap_source_label:
+        rate_clean = scrap_rate_text.strip()
+        label_clean = str(scrap_source_label).strip()
+        if rate_clean.lower().startswith(label_clean.lower()):
+            composed = scrap_rate_text
+        else:
+            composed = f"{scrap_source_label} {scrap_rate_text}"
+        scrap_rate_text = composed.strip()
 
     return {
         "stock_piece_usd": round(stock_piece_usd, 2) if stock_piece_usd is not None else None,
