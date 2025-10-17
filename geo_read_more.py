@@ -17,10 +17,12 @@ RE_TAP    = re.compile(r"(\(\s*\d+\s*\)\s*)?(#\s*\d{1,2}-\d+|M\d+(?:\.\d+)?x\d+(
 RE_CBORE  = re.compile(r"C[’']?BORE|CBORE|COUNTERBORE", re.I)
 RE_CSK    = re.compile(r"CSK|C['’]SINK|COUNTERSINK", re.I)
 RE_THRU   = re.compile(r"\bTHRU\b", re.I)
-RE_DEPTH  = re.compile(r"(\d+(?:\.\d+)?)\s*DEEP(?:\s+FROM\s+(FRONT|BACK))?", re.I)
+NUM_PATTERN = r"(?:\d*\.\d+|\d+)"
+
+RE_DEPTH  = re.compile(rf"({NUM_PATTERN})\s*DEEP(?:\s+FROM\s+(FRONT|BACK))?", re.I)
 RE_QTY    = re.compile(r"\((\d+)\)")
-RE_REF_D  = re.compile(r"\bREF\s*[Ø⌀]?\s*(\d+(?:\.\d+)?)", re.I)
-RE_DIA    = re.compile(r"[Ø⌀\u00D8]?\s*(\d+(?:\.\d+)?)")  # last resort
+RE_REF_D  = re.compile(rf"\bREF\s*[Ø⌀]?\s*({NUM_PATTERN})", re.I)
+RE_DIA    = re.compile(rf"[Ø⌀\u00D8]?\s*({NUM_PATTERN})")  # last resort
 RE_FROMBK = re.compile(r"\bFROM\s+BACK\b", re.I)
 
 RE_MAT    = re.compile(r"\b(MATERIAL|MAT)\b[:\s]*([A-Z0-9\-\s/\.]+)")
