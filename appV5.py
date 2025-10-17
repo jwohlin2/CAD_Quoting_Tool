@@ -1524,8 +1524,10 @@ else:  # pragma: no cover - fallback when ezdxf is unavailable at runtime
 
 if typing.TYPE_CHECKING:
     import pandas as pd
+    from pandas import DataFrame as PandasDataFrame
     from cad_quoter.domain import QuoteState as _QuoteState
 else:
+    PandasDataFrame = Any  # type: ignore[assignment]
     _QuoteState = QuoteState
 
 try:
@@ -3402,12 +3404,12 @@ def clamp_llm_hours(
     return cleaned
 
 def apply_llm_hours_to_variables(
-    df: pd.DataFrame | None,
+    df: PandasDataFrame | None,
     estimates: Mapping[str, Any] | None,
     *,
     allow_overwrite_nonzero: bool = False,
     log: dict | None = None,
-) -> pd.DataFrame | None:
+) -> PandasDataFrame | None:
     """Apply sanitized LLM hour estimates to a variables dataframe."""
 
     if not _HAS_PANDAS or df is None:
@@ -3540,9 +3542,9 @@ _MASTER_VARIABLES_CACHE: dict[str, Any] = {
     "full": None,
 }
 
-_SPEEDS_FEEDS_CACHE: dict[str, pd.DataFrame | None] = {}
+_SPEEDS_FEEDS_CACHE: dict[str, PandasDataFrame | None] = {}
 
-def _coerce_core_types(df_core: pd.DataFrame) -> pd.DataFrame:
+def _coerce_core_types(df_core: PandasDataFrame) -> PandasDataFrame:
     """Light normalization for estimator expectations."""
     core = df_core.copy()
     core["Item"] = core["Item"].astype(str)
@@ -3741,7 +3743,7 @@ def derive_editor_control_spec(dtype_source: str, example_value: Any) -> EditorC
         options=tuple(options),
     )
 
-def sanitize_vars_df(df_full: pd.DataFrame) -> pd.DataFrame:
+def sanitize_vars_df(df_full: PandasDataFrame) -> PandasDataFrame:
     """
     Return a copy containing only the 3 core columns the estimator needs.
     - Does NOT mutate or overwrite the original file.
@@ -3776,7 +3778,7 @@ def sanitize_vars_df(df_full: pd.DataFrame) -> pd.DataFrame:
 
 def read_variables_file(
     path: str, return_full: bool = False
-) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
+) -> PandasDataFrame | tuple[PandasDataFrame, PandasDataFrame]:
     """
     Read .xlsx/.csv, keep original data intact, and return a sanitized copy for the estimator.
     - If return_full=True, returns (core_df, full_df); otherwise returns core_df only.
@@ -3846,7 +3848,7 @@ def read_variables_file(
 
     return (core, df_full) if return_full else core
 
-def _load_master_variables() -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+def _load_master_variables() -> tuple[PandasDataFrame | None, PandasDataFrame | None]:
     """Load the packaged master variables sheet once and serve cached copies."""
     if not _HAS_PANDAS:
         return (None, None)
@@ -3881,8 +3883,8 @@ def _load_master_variables() -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
 
     try:
         core_df, full_df = read_variables_file(str(master_path), return_full=True)
-        core_df = cast(pd.DataFrame, core_df)
-        full_df = cast(pd.DataFrame, full_df)
+        core_df = cast(PandasDataFrame, core_df)
+        full_df = cast(PandasDataFrame, full_df)
     except Exception:
         logger.warning("Failed to load master variables CSV from %s", master_path, exc_info=True)
         cache["loaded"] = True
@@ -3894,8 +3896,8 @@ def _load_master_variables() -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
     cache["core"] = core_df
     cache["full"] = full_df
 
-    core_df_cast = cast(pd.DataFrame, core_df)
-    full_df_cast = cast(pd.DataFrame, full_df)
+    core_df_cast = cast(PandasDataFrame, core_df)
+    full_df_cast = cast(PandasDataFrame, full_df)
     return (core_df_cast.copy(), full_df_cast.copy())
 
 def find_variables_near(cad_path: str):
@@ -11626,7 +11628,7 @@ def _normalize_material_group_code(value: Any) -> str:
     return simplified or text
 
 def _select_speeds_feeds_row(
-    table: pd.DataFrame | None,
+    table: PandasDataFrame | None,
     operation: str,
     material_key: str | None = None,
     *,
@@ -13140,7 +13142,7 @@ def _legacy_estimate_drilling_hours(
     *,
     material_group: str | None = None,
     hole_groups: Sequence[Mapping[str, Any]] | None = None,
-    speeds_feeds_table: pd.DataFrame | None = None,
+    speeds_feeds_table: PandasDataFrame | None = None,
     machine_params: _TimeMachineParams | None = None,
     overhead_params: _TimeOverheadParams | None = None,
     warnings: list[str] | None = None,
@@ -14428,7 +14430,7 @@ def estimate_drilling_hours(
     *,
     material_group: str | None = None,
     hole_groups: Sequence[Mapping[str, Any]] | None = None,
-    speeds_feeds_table: pd.DataFrame | None = None,
+    speeds_feeds_table: PandasDataFrame | None = None,
     machine_params: _TimeMachineParams | None = None,
     overhead_params: _TimeOverheadParams | None = None,
     warnings: list[str] | None = None,
@@ -14861,7 +14863,7 @@ def _coerce_speeds_feeds_csv_path(*sources: Mapping[str, Any] | None) -> str | N
     return None
 
 
-def _load_speeds_feeds_table_from_path(path: str | None) -> tuple[pd.DataFrame | None, bool]:
+def _load_speeds_feeds_table_from_path(path: str | None) -> tuple[PandasDataFrame | None, bool]:
     """Load the Speeds/Feeds CSV at ``path`` into a DataFrame."""
 
     if not path:
@@ -14870,7 +14872,7 @@ def _load_speeds_feeds_table_from_path(path: str | None) -> tuple[pd.DataFrame |
     if not text:
         return None, False
 
-    table: pd.DataFrame | None = None
+    table: PandasDataFrame | None = None
     try:
         candidate = Path(text)
     except Exception:
@@ -16739,7 +16741,7 @@ def extract_2d_features_from_pdf_vector(pdf_path: str) -> dict:
 # ---------- PDF-driven variables + inference ----------
 REQUIRED_COLS = ["Item", "Example Values / Options", "Data Type / Input Method"]
 
-def default_variables_template() -> pd.DataFrame:
+def default_variables_template() -> PandasDataFrame:
     if _HAS_PANDAS:
         core_df, _ = _load_master_variables()
         if core_df is not None:
@@ -16812,7 +16814,7 @@ def default_variables_template() -> pd.DataFrame:
     ]
     return pd.DataFrame(rows, columns=REQUIRED_COLS)
 
-def coerce_or_make_vars_df(df: pd.DataFrame | None) -> pd.DataFrame:
+def coerce_or_make_vars_df(df: PandasDataFrame | None) -> PandasDataFrame:
     """Ensure the variables dataframe has the required columns with tolerant matching."""
     if df is None:
         return default_variables_template().copy()
@@ -16939,7 +16941,7 @@ def _deep_get(d: dict, path):
             return None
     return cur
 
-def merge_estimate_into_vars(vars_df: pd.DataFrame, estimate: dict) -> pd.DataFrame:
+def merge_estimate_into_vars(vars_df: PandasDataFrame, estimate: dict) -> PandasDataFrame:
     for item, src in MAP_KEYS.items():
         value = _deep_get(estimate, src)
         if value is None:
@@ -20041,8 +20043,8 @@ class App(tk.Tk):
 
         self.geometry_service = geometry_service or geometry.GeometryService()
 
-        self.vars_df: pd.DataFrame | None = None
-        self.vars_df_full: pd.DataFrame | None = None
+        self.vars_df: PandasDataFrame | None = None
+        self.vars_df_full: PandasDataFrame | None = None
         self.geo: dict[str, Any] | None = None
         self.geo_context: dict[str, Any] = {}
         if hasattr(self.configuration, "create_params"):
@@ -20464,7 +20466,7 @@ class App(tk.Tk):
         self._set_last_variables_path("")
         return defaults
 
-    def _refresh_variables_cache(self, core_df: pd.DataFrame, full_df: pd.DataFrame) -> None:
+    def _refresh_variables_cache(self, core_df: PandasDataFrame, full_df: PandasDataFrame) -> None:
         self.vars_df = core_df
         self.vars_df_full = full_df
 
@@ -20568,14 +20570,14 @@ class App(tk.Tk):
             pass
         return self.LLM_SUGGEST
 
-    def _populate_editor_tab(self, df: pd.DataFrame) -> None:
+    def _populate_editor_tab(self, df: PandasDataFrame) -> None:
         df = coerce_or_make_vars_df(df)
         if self.vars_df_full is None:
             _, master_full = _load_master_variables()
             if master_full is not None:
                 self.vars_df_full = master_full
         """Rebuild the Quote Editor tab using the latest variables dataframe."""
-        def _ensure_row(dataframe: pd.DataFrame, item: str, value: Any, dtype: str = "number") -> pd.DataFrame:
+        def _ensure_row(dataframe: PandasDataFrame, item: str, value: Any, dtype: str = "number") -> PandasDataFrame:
             mask = dataframe["Item"].astype(str).str.fullmatch(item, case=False)
             if mask.any():
                 return dataframe
@@ -21336,8 +21338,8 @@ class App(tk.Tk):
                     if vp:
                         try:
                             core_df, full_df = read_variables_file(vp, return_full=True)
-                            core_df_t = typing.cast(pd.DataFrame, core_df)
-                            full_df_t = typing.cast(pd.DataFrame, full_df)
+                            core_df_t = typing.cast(PandasDataFrame, core_df)
+                            full_df_t = typing.cast(PandasDataFrame, full_df)
                             self._refresh_variables_cache(core_df_t, full_df_t)
                             self._set_last_variables_path(vp)
                         except Exception as read_err:
@@ -21474,8 +21476,8 @@ class App(tk.Tk):
                 return
             try:
                 core_df, full_df = read_variables_file(vp, return_full=True)
-                core_df_t = typing.cast(pd.DataFrame, core_df)
-                full_df_t = typing.cast(pd.DataFrame, full_df)
+                core_df_t = typing.cast(PandasDataFrame, core_df)
+                full_df_t = typing.cast(PandasDataFrame, full_df)
                 self._refresh_variables_cache(core_df_t, full_df_t)
                 self._set_last_variables_path(vp)
             except Exception as e:
@@ -21510,7 +21512,7 @@ class App(tk.Tk):
         self.geo_context = dict(geo or {})
         self._log_geo(geo)
 
-        vars_df_for_editor = typing.cast(pd.DataFrame, self.vars_df)
+        vars_df_for_editor = typing.cast(PandasDataFrame, self.vars_df)
         self._populate_editor_tab(vars_df_for_editor)
         self.nb.select(self.tab_editor)
         self.status_var.set("Variables loaded. Review the Quote Editor and click Generate Quote.")
