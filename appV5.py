@@ -25,7 +25,7 @@ import sys
 import time
 import typing
 from functools import cmp_to_key, lru_cache
-from typing import Any, Mapping, MutableMapping
+from typing import Any, Mapping, MutableMapping, TypedDict
 from collections import Counter
 from collections.abc import (
     Callable,
@@ -1548,7 +1548,7 @@ def _resolve_pricing_source_value(
     planner_process_minutes: Any = None,
     hour_summary_entries: Mapping[str, Any] | None = None,
     additional_sources: Sequence[Any] | None = None,
-    cfg: "QuoteConfiguration" | None = None,
+    cfg: QuoteConfiguration | None = None,
 ) -> str | None:
     """Return a normalized pricing source, honoring explicit selections."""
 
@@ -4256,11 +4256,16 @@ class PlannerBucketRenderState:
     rates: dict[str, float] = field(default_factory=dict)
 
 
+class _BucketOpEntry(TypedDict):
+    name: str
+    minutes: float
+
+
 def _split_hours_for_bucket(
     label: str,
     hours: float,
-    render_state: "PlannerBucketRenderState" | None,
-    cfg: "QuoteConfiguration" | None,
+    render_state: PlannerBucketRenderState | None,
+    cfg: QuoteConfiguration | None,
 ) -> tuple[float, float]:
     total_h = max(0.0, float(hours or 0.0))
     if not cfg or not getattr(cfg, "separate_machine_labor", False):
@@ -4304,7 +4309,10 @@ def _split_hours_for_bucket(
             for entry in ops_list:
                 if not isinstance(entry, _MappingABC):
                     continue
-                role = _op_role_for_name(entry.get("name"))
+                name_val = entry.get("name")
+                if not isinstance(name_val, str):
+                    continue
+                role = _op_role_for_name(name_val)
                 minutes_val = _coerce_float_or_none(entry.get("minutes"))
                 if minutes_val is None or minutes_val <= 0:
                     continue
@@ -4340,7 +4348,7 @@ def _build_planner_bucket_render_state(
     rates: Mapping[str, Any] | None = None,
     removal_drilling_hours: float | None = None,
     prefer_removal_drilling_hours: bool = True,
-    cfg: "QuoteConfiguration" | None = None,
+    cfg: QuoteConfiguration | None = None,
     bucket_ops: Mapping[str, typing.Sequence[Mapping[str, Any]]] | None = None,
     drill_machine_minutes: float | None = None,
     drill_labor_minutes: float | None = None,
@@ -4391,7 +4399,7 @@ def _build_planner_bucket_render_state(
         except Exception:
             state.extra["drill_total_minutes"] = drill_total_minutes
 
-    bucket_ops_map: dict[str, list[dict[str, float]]] = {}
+    bucket_ops_map: dict[str, list[_BucketOpEntry]] = {}
 
     def _ingest_bucket_ops(source: Any) -> None:
         if isinstance(source, _MappingABC):
@@ -4402,7 +4410,7 @@ def _build_planner_bucket_render_state(
             canon_key = _canonical_bucket_key(raw_key) or _normalize_bucket_key(raw_key)
             if not canon_key:
                 continue
-            entries: list[dict[str, float]] = bucket_ops_map.setdefault(canon_key, [])
+            entries: list[_BucketOpEntry] = bucket_ops_map.setdefault(canon_key, [])
             if isinstance(raw_list, Sequence):
                 for item in raw_list:
                     if not isinstance(item, _MappingABC):
@@ -4415,7 +4423,12 @@ def _build_planner_bucket_render_state(
                         minutes_val = _coerce_float_or_none(item.get("mins"))
                     if minutes_val is None or minutes_val <= 0:
                         continue
-                    entries.append({"name": op_name, "minutes": float(minutes_val)})
+                    entries.append(
+                        {
+                            "name": op_name,
+                            "minutes": float(minutes_val),
+                        }
+                    )
 
     if isinstance(bucket_view, _MappingABC):
         _ingest_bucket_ops(bucket_view.get("bucket_ops"))
@@ -4606,7 +4619,7 @@ def _build_planner_bucket_render_state(
 def _display_rate_for_row(
     label: str,
     *,
-    cfg: "QuoteConfiguration" | None,
+    cfg: QuoteConfiguration | None,
     render_state: PlannerBucketRenderState | None,
     hours: float | None,
 ) -> str:
@@ -4756,7 +4769,7 @@ def _charged_hours_by_bucket(
     render_state: PlannerBucketRenderState | None = None,
     removal_drilling_hours: float | None = None,
     prefer_removal_drilling_hours: bool = True,
-    cfg: "QuoteConfiguration" | None = None,
+    cfg: QuoteConfiguration | None = None,
 ):
     """Return the hours that correspond to what we actually charged."""
     out: dict[str, float] = {}
