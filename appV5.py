@@ -5948,6 +5948,18 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     # Selected removal summary (if available) for compact debug table later
     removal_summary_for_display: Mapping[str, Any] | None = None
     _accumulate_drill_debug(drill_debug_entries, result, breakdown)
+    # If the removal summary has a total, force machine hours for drilling
+    removal = (result or {}).get("removal_summary") or {}
+    mins = float(removal.get("total_minutes") or 0.0)
+    if mins > 0:
+        drilling_machine_hr = round(mins / 60.0, 2)
+        # write into both the pricing state and the hour summary
+        hour_summary_entries["drilling"] = (drilling_machine_hr, True)
+        # also, if your bucket view structure is present, overwrite that slot:
+        buckets = (breakdown or {}).get("planner_buckets") or {}
+        if isinstance(buckets, dict) and "drilling" in buckets:
+            buckets["drilling"]["machine_hours"] = drilling_machine_hr
+            buckets["drilling"]["labor_hours"] = float(buckets["drilling"].get("labor_hours") or 0.0)
     # Canonical QUOTE SUMMARY header (legacy variants removed in favour of this
     # block so the Speeds/Feeds status + Drill Debug output stay consistent).
     header_lines, pricing_source_value = _build_quote_header_lines(
