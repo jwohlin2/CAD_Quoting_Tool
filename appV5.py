@@ -3732,6 +3732,7 @@ def _split_hours_for_bucket(
             and (float(m_min) + float(l_min)) > 0.0
         ):
             return (float(m_min) / 60.0, float(l_min) / 60.0)
+        return (float(hours or 0.0), 0.0)
 
     bucket_ops: Mapping[str, Any] | None = None
     if isinstance(extra, _MappingABC):
@@ -4184,6 +4185,7 @@ def _charged_hours_by_bucket(
 ):
     """Return the hours that correspond to what we actually charged."""
     charged: dict[str, float] = {}
+    render_extra: Mapping[str, Any] | None = None
     for key, amount in (process_costs or {}).items():
         norm = _normalize_bucket_key(key)
         if norm.startswith("planner_"):
@@ -4207,7 +4209,6 @@ def _charged_hours_by_bucket(
             label = _process_label(key)
             charged[label] = charged.get(label, 0.0) + float(hr)
     removal_hr = None
-    render_extra: Mapping[str, Any] | None = None
     if render_state is not None:
         try:
             extra = getattr(render_state, "extra", {})
@@ -4217,15 +4218,27 @@ def _charged_hours_by_bucket(
             render_extra = extra
             removal_candidate = extra.get("removal_drilling_hours")
             removal_hr = _coerce_float_or_none(removal_candidate)
-    if removal_hr is None:
-        removal_hr = _coerce_float_or_none(removal_drilling_hours)
-    if removal_hr is not None and removal_hr < 0:
-        removal_hr = None
     prefer_drill_hours = prefer_removal_drilling_hours
     if cfg is not None:
         prefer_from_cfg = getattr(cfg, "prefer_removal_drilling_hours", None)
         if prefer_from_cfg is not None:
             prefer_drill_hours = bool(prefer_from_cfg)
+    prefer_card_minutes = bool(
+        prefer_drill_hours
+        and getattr(cfg, "prefer_removal_drilling_hours", prefer_drill_hours)
+    )
+    if prefer_card_minutes and isinstance(render_extra, _MappingABC):
+        machine_minutes = render_extra.get("drill_machine_minutes")
+        labor_minutes = render_extra.get("drill_labor_minutes")
+        if isinstance(machine_minutes, (int, float)) and isinstance(labor_minutes, (int, float)):
+            drill_hr = (float(machine_minutes) + float(labor_minutes)) / 60.0
+            for key in list(charged.keys()):
+                if _canonical_bucket_key(key) in {"drilling", "drill"}:
+                    charged[key] = float(drill_hr)
+    if removal_hr is None:
+        removal_hr = _coerce_float_or_none(removal_drilling_hours)
+    if removal_hr is not None and removal_hr < 0:
+        removal_hr = None
     if removal_hr is not None and prefer_drill_hours:
         desired = max(0.0, float(removal_hr))
         drill_labels = [
@@ -4250,18 +4263,6 @@ def _charged_hours_by_bucket(
                 desired,
             )
             charged[label] = desired
-
-    prefer_card_minutes = prefer_drill_hours and bool(
-        getattr(cfg, "prefer_removal_drilling_hours", True)
-    )
-    if prefer_card_minutes and isinstance(render_extra, _MappingABC):
-        machine_minutes = render_extra.get("drill_machine_minutes")
-        labor_minutes = render_extra.get("drill_labor_minutes")
-        if isinstance(machine_minutes, (int, float)) and isinstance(labor_minutes, (int, float)):
-            drill_hr = (float(machine_minutes) + float(labor_minutes)) / 60.0
-            for key in list(charged.keys()):
-                if _canonical_bucket_key(key) in {"drilling", "drill"}:
-                    charged[key] = drill_hr
 
     return charged
 
@@ -8894,6 +8895,20 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             _fmt_drill_debug(row_hr_debug),
             _fmt_drill_debug(summary_hr),
         )
+
+    prefer_summary_card = getattr(
+        cfg, "prefer_removal_drilling_hours", prefer_removal_drilling_hours
+    )
+    if prefer_summary_card:
+        extra_map = getattr(bucket_state, "extra", {})
+        if isinstance(extra_map, _MappingABC):
+            drill_total = extra_map.get("drill_total_minutes")
+            if isinstance(drill_total, (int, float)) and drill_total > 0:
+                drill_label = _display_bucket_label("drilling", label_overrides)
+                hour_summary_entries[drill_label] = (
+                    round(float(drill_total) / 60.0, 2),
+                    True,
+                )
 
     if hour_summary_entries:
         def _canonical_hour_label(value: Any) -> str:
