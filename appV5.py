@@ -829,6 +829,8 @@ def _resolve_pricing_source_value(
             fallback_text = candidate_text
 
     if used_planner:
+        if fallback_text:
+            return fallback_text
         return "planner"
 
     # Delegate planner signal detection to the adapter helper
@@ -842,6 +844,8 @@ def _resolve_pricing_source_value(
         hour_summary_entries=hour_summary_entries,
         additional_sources=list(additional_sources) if additional_sources is not None else None,
     ):
+        if fallback_text:
+            return fallback_text
         return "planner"
 
     if fallback_text:
@@ -6615,9 +6619,21 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     programmer_hours = _safe_float(prog.get("prog_hr"))
     engineer_hours = _safe_float(prog.get("eng_hr"))
-    programmer_rate = float(getattr(cfg, "labor_rate_per_hr", 45.0) or 45.0)
-    if not math.isfinite(programmer_rate) or programmer_rate <= 0:
-        programmer_rate = 45.0
+    fallback_programmer_rate = float(getattr(cfg, "labor_rate_per_hr", 45.0) or 45.0)
+    if not math.isfinite(fallback_programmer_rate) or fallback_programmer_rate <= 0:
+        fallback_programmer_rate = 45.0
+    programmer_rate_backfill = _coerce_rate_value(rates.get("ProgrammerRate"))
+    has_programming_rate_detail = False
+    if isinstance(nre_cost_details, _MappingABC):
+        detail_key = "Programming & Eng (per lot)"
+        has_programming_rate_detail = bool(nre_cost_details.get(detail_key))
+    explicit_programmer_rate = _safe_float(prog.get("prog_rate"))
+    if explicit_programmer_rate > 0:
+        has_programming_rate_detail = True
+    if programmer_rate_backfill > 0 and not has_programming_rate_detail:
+        programmer_rate = programmer_rate_backfill
+    else:
+        programmer_rate = fallback_programmer_rate
     engineer_rate = programmer_rate
 
     programming_per_lot_val = _safe_float(prog.get("per_lot"))
@@ -6723,6 +6739,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if show_programming_row:
         row("Programming & Eng:", programming_per_lot_val)
         has_detail = False
+        if programming_per_lot_val > 0 or show_zeros:
+            row("Programming Cost:", programming_per_lot_val, indent="  ")
+            has_detail = True
+        if total_programming_hours > 0:
+            write_line(f"  Programming Hrs: {_h(total_programming_hours)}")
+            has_detail = True
         if programmer_hours > 0:
             has_detail = True
             write_line(
