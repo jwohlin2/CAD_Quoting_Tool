@@ -3748,6 +3748,9 @@ def sanitize_vars_df(df_full: pd.DataFrame) -> pd.DataFrame:
     - Creates missing core columns as blanks.
     - Normalizes types.
     """
+    if pd is None:  # pragma: no cover - defensive guard for static analysers
+        raise RuntimeError("pandas is required to sanitize variables data frames")
+
     # Try to map any variant header names to our canon names (case/space tolerant)
     canon = {str(c).strip().lower(): c for c in df_full.columns}
 
