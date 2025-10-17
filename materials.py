@@ -401,20 +401,37 @@ def pick_stock_from_mcmaster(
                         setattr(_mc, "ALLOW_NEXT_THICKER", original_allow)
                     except Exception:
                         pass
-            got_thk = need_thk
             if item:
+                fallback_used = False
+                need_thk = float(thk_val)
                 got_thk = float(item.thickness)
                 if abs(got_thk - need_thk) > thickness_tol:
-                    _log.warning(
-                        "[stock] rejecting thickness upsize %.3fin (need %.3fin)",
-                        got_thk,
-                        need_thk,
-                    )
-                    item = None
-                    result["stock_piece_price_usd"] = None
-                    result["stock_piece_source"] = None
-                    result["stock_piece_api_price"] = None
-                    result["stock_piece_api_source"] = None
+                    forced = None
+                    for dims in dim_candidates:
+                        try:
+                            forced_candidate = _mc.choose_item(
+                                catalog, material_label, dims[0], dims[1], need_thk
+                            )
+                        except Exception:
+                            forced_candidate = None
+                        if forced_candidate and abs(float(forced_candidate.thickness) - need_thk) <= thickness_tol:
+                            forced = forced_candidate
+                            dims_used = dims
+                            break
+                    if forced:
+                        item = forced
+                        got_thk = float(item.thickness)
+                    else:
+                        _log.warning(
+                            "[stock] rejecting thickness upsize %.3fin (need %.3fin)",
+                            got_thk,
+                            need_thk,
+                        )
+                        item = None
+                        result["stock_piece_price_usd"] = None
+                        result["stock_piece_source"] = None
+                        result["stock_piece_api_price"] = None
+                        result["stock_piece_api_source"] = None
             if not item:
                 fb = None
                 csv_path = os.getenv("CATALOG_CSV_PATH") or catalog_path or ""
@@ -458,6 +475,7 @@ def pick_stock_from_mcmaster(
                         "no exact thickness available "
                         f"(need {need_thk:.2f}, got {got_thk:.2f})"
                     )
+
             if item:
                 thickness_diff = abs(got_thk - need_thk)
                 length = float(max(item.length, item.width))
@@ -751,8 +769,13 @@ def _material_cost_components(
     scrap_credit = min(scrap_credit, base_usd + tax_usd)
 
     scrap_rate_text = None
-    if scrap_usd_lb_val > 0 and scrap_lb > 0 and recovery_val > 0:
-        scrap_rate_text = f"${scrap_usd_lb_val:.2f}/lb × {recovery_val:.0%}"
+    if scrap_usd_lb_val > 0 and scrap_lb > 0:
+        prefix = ""
+        if scrap_price_source == "wieland":
+            prefix = "Wieland "
+        elif scrap_price_source_raw:
+            prefix = f"{scrap_price_source_raw} "
+        scrap_rate_text = f"{prefix}${scrap_usd_lb_val:.2f}/lb × {recovery_val:.0%}"
 
     net_usd = max(0.0, base_usd - scrap_credit)
     total = round(base_usd + tax_usd - scrap_credit, 2)
