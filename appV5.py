@@ -4331,6 +4331,11 @@ class PlannerBucketRenderState:
     rates: dict[str, float] = field(default_factory=dict)
 
 
+class _BucketOpEntry(TypedDict):
+    name: str
+    minutes: float
+
+
 def _split_hours_for_bucket(
     label: str,
     hours: float,
@@ -4379,7 +4384,10 @@ def _split_hours_for_bucket(
             for entry in ops_list:
                 if not isinstance(entry, _MappingABC):
                     continue
-                role = _op_role_for_name(entry.get("name"))
+                name_val = entry.get("name")
+                if not isinstance(name_val, str):
+                    continue
+                role = _op_role_for_name(name_val)
                 minutes_val = _coerce_float_or_none(entry.get("minutes"))
                 if minutes_val is None or minutes_val <= 0:
                     continue
@@ -4466,7 +4474,7 @@ def _build_planner_bucket_render_state(
         except Exception:
             state.extra["drill_total_minutes"] = drill_total_minutes
 
-    bucket_ops_map: dict[str, list[dict[str, float]]] = {}
+    bucket_ops_map: dict[str, list[_BucketOpEntry]] = {}
 
     def _ingest_bucket_ops(source: Any) -> None:
         if isinstance(source, _MappingABC):
@@ -4477,7 +4485,7 @@ def _build_planner_bucket_render_state(
             canon_key = _canonical_bucket_key(raw_key) or _normalize_bucket_key(raw_key)
             if not canon_key:
                 continue
-            entries: list[dict[str, float]] = bucket_ops_map.setdefault(canon_key, [])
+            entries: list[_BucketOpEntry] = bucket_ops_map.setdefault(canon_key, [])
             if isinstance(raw_list, Sequence):
                 for item in raw_list:
                     if not isinstance(item, _MappingABC):
@@ -4490,7 +4498,12 @@ def _build_planner_bucket_render_state(
                         minutes_val = _coerce_float_or_none(item.get("mins"))
                     if minutes_val is None or minutes_val <= 0:
                         continue
-                    entries.append({"name": op_name, "minutes": float(minutes_val)})
+                    entries.append(
+                        {
+                            "name": op_name,
+                            "minutes": float(minutes_val),
+                        }
+                    )
 
     if isinstance(bucket_view, _MappingABC):
         _ingest_bucket_ops(bucket_view.get("bucket_ops"))
