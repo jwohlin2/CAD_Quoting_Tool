@@ -4786,6 +4786,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         except Exception:
             return 0.0
 
+    separate_labor_cfg = bool(getattr(cfg, "separate_machine_labor", False)) if cfg else False
+    cfg_labor_rate_value = 0.0
+    if separate_labor_cfg:
+        cfg_labor_rate_value = _coerce_rate_value(getattr(cfg, "labor_rate_per_hr", 0.0))
+        if cfg_labor_rate_value <= 0.0:
+            cfg_labor_rate_value = 45.0
+
     if "ShopRate" not in rates:
         fallback_shop = _coerce_rate_value(rates.get("MillingRate"))
         rates.setdefault("ShopRate", fallback_shop)
@@ -4803,6 +4810,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         labor_rate_value = _coerce_rate_value(rates.get("ShopLaborRate"))
     if labor_rate_value <= 0:
         labor_rate_value = 85.0
+    if separate_labor_cfg and cfg_labor_rate_value > 0.0:
+        labor_rate_value = cfg_labor_rate_value
     rates["LaborRate"] = labor_rate_value
 
     machine_rate_value = _coerce_rate_value(rates.get("MachineRate"))
@@ -6799,6 +6808,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     programmer_rate = _resolve_rate_with_fallback(
         prog.get("prog_rate"), "ProgrammingRate", "ProgrammerRate", "ShopRate"
     )
+    if separate_labor_cfg and cfg_labor_rate_value > 0.0:
+        programmer_rate = cfg_labor_rate_value
     engineer_rate = _resolve_rate_with_fallback(
         prog.get("eng_rate"), "EngineerRate", "ShopRate"
     )
@@ -7769,6 +7780,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 "ProgrammingRate",
                 "ShopRate",
             )
+            if separate_labor_cfg and cfg_labor_rate_value > 0.0:
+                prog_rate_detail = cfg_labor_rate_value
             per_lot_cost += prog_hr_detail * max(prog_rate_detail, 0.0)
             detail_hours += prog_hr_detail
             detail_args.append(
@@ -7806,6 +7819,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     "ProgrammingRate",
                     "ShopRate",
                 )
+            if separate_labor_cfg and cfg_labor_rate_value > 0.0:
+                remainder_rate = cfg_labor_rate_value
             per_lot_cost += remaining_hours * max(remainder_rate, 0.0)
 
         if total_programming_hours > 0:
