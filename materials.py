@@ -401,8 +401,9 @@ def pick_stock_from_mcmaster(
                         setattr(_mc, "ALLOW_NEXT_THICKER", original_allow)
                     except Exception:
                         pass
-            got_thk = need_thk
             if item:
+                fallback_used = False
+                need_thk = float(thk_val)
                 got_thk = float(item.thickness)
                 if abs(got_thk - need_thk) > thickness_tol:
                     forced = None
@@ -768,8 +769,13 @@ def _material_cost_components(
     scrap_credit = min(scrap_credit, base_usd + tax_usd)
 
     scrap_rate_text = None
-    if scrap_usd_lb_val > 0 and scrap_lb > 0 and recovery_val > 0:
-        scrap_rate_text = f"${scrap_usd_lb_val:.2f}/lb × {recovery_val:.0%}"
+    if scrap_usd_lb_val > 0 and scrap_lb > 0:
+        prefix = ""
+        if scrap_price_source == "wieland":
+            prefix = "Wieland "
+        elif scrap_price_source_raw:
+            prefix = f"{scrap_price_source_raw} "
+        scrap_rate_text = f"{prefix}${scrap_usd_lb_val:.2f}/lb × {recovery_val:.0%}"
 
     net_usd = max(0.0, base_usd - scrap_credit)
     total = round(base_usd + tax_usd - scrap_credit, 2)
