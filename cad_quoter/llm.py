@@ -1263,8 +1263,9 @@ def explain_quote(
 
     drilling_hours = drill_card_minutes / 60.0 if drill_card_minutes > 0.0 else None
     has_card_minutes = drill_minutes_present
+    has_drilling = bool(render_state_extra.get("drill_total_minutes")) if render_state_extra else False
 
-    if drilling_hours is not None and "drilling" not in [p.lower() for p in top_procs]:
+    if has_drilling and "drilling" not in [p.lower() for p in top_procs]:
         top_procs.append("Drilling")
 
     if has_card_minutes:
