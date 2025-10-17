@@ -2075,7 +2075,7 @@ else:  # pragma: no cover - fallback definitions keep quoting functional without
 try:
     import pandas as pd  # type: ignore[import]
 except Exception:  # pragma: no cover - optional dependency
-    pd = None  # type: ignore[assignment]
+    pd = typing.cast(typing.Any, None)
 from typing import TypedDict
 
 try:
