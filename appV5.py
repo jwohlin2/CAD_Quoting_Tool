@@ -16935,6 +16935,10 @@ def default_variables_template() -> PandasDataFrame:
 
 def coerce_or_make_vars_df(df: PandasDataFrame | None) -> PandasDataFrame:
     """Ensure the variables dataframe has the required columns with tolerant matching."""
+
+    if not _HAS_PANDAS or pd is None:
+        raise RuntimeError("pandas is required to coerce variable dataframes.")
+
     if df is None:
         return default_variables_template().copy()
 
