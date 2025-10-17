@@ -3586,6 +3586,7 @@ def _split_hours_for_bucket(
             and (float(m_min) + float(l_min)) > 0.0
         ):
             return (float(m_min) / 60.0, float(l_min) / 60.0)
+        return (total_h, 0.0)
 
     bucket_ops: Mapping[str, Any] | None = None
     if isinstance(extra, _MappingABC):
@@ -3992,22 +3993,68 @@ def _charged_hours_by_bucket(
         if hr is not None:
             label = _process_label(key)
             charged[label] = charged.get(label, 0.0) + float(hr)
-    removal_hr = None
+
+    extra_map: Mapping[str, Any] = {}
     if render_state is not None:
         try:
-            extra = getattr(render_state, "extra", {})
+            extra_candidate = getattr(render_state, "extra", {})
         except Exception:
-            extra = {}
-        if isinstance(extra, _MappingABC):
-            removal_candidate = extra.get("removal_drilling_hours")
-            removal_hr = _coerce_float_or_none(removal_candidate)
+            extra_candidate = {}
+        if isinstance(extra_candidate, _MappingABC):
+            extra_map = extra_candidate
+
+    prefer_override = prefer_removal_drilling_hours
+    if cfg is not None:
+        prefer_override = bool(getattr(cfg, "prefer_removal_drilling_hours", prefer_override))
+
+    drill_machine_minutes = _coerce_float_or_none(extra_map.get("drill_machine_minutes"))
+    drill_labor_minutes = _coerce_float_or_none(extra_map.get("drill_labor_minutes"))
+    drill_total_minutes = _coerce_float_or_none(extra_map.get("drill_total_minutes"))
+
+    total_minutes_from_card: float | None = None
+    if drill_machine_minutes is not None or drill_labor_minutes is not None:
+        machine_minutes = max(0.0, float(drill_machine_minutes or 0.0))
+        labor_minutes = max(0.0, float(drill_labor_minutes or 0.0))
+        total_minutes_from_card = machine_minutes + labor_minutes
+    if (total_minutes_from_card is None or total_minutes_from_card <= 0.0) and drill_total_minutes is not None:
+        total_minutes_from_card = max(0.0, float(drill_total_minutes))
+
+    drill_card_hours: float | None = None
+    if total_minutes_from_card is not None and total_minutes_from_card >= 0.0:
+        drill_card_hours = float(total_minutes_from_card) / 60.0
+
+    if drill_card_hours is not None and prefer_override:
+        drill_labels = [
+            label
+            for label in charged
+            if _canonical_bucket_key(label) in {"drilling", "drill"}
+        ]
+        if drill_labels:
+            for label in drill_labels:
+                current = float(charged.get(label, 0.0) or 0.0)
+                if not math.isclose(current, drill_card_hours, rel_tol=1e-9, abs_tol=1e-6):
+                    logger.info(
+                        "[hours-sync] Overriding Drilling bucket hours from %.2f -> %.2f (source=removal_card)",
+                        current,
+                        drill_card_hours,
+                    )
+                charged[label] = float(drill_card_hours)
+        elif drill_card_hours > 0.0:
+            label = _process_label("drilling")
+            logger.info(
+                "[hours-sync] Injecting Drilling bucket hours %.2f (source=removal_card)",
+                drill_card_hours,
+            )
+            charged[label] = float(drill_card_hours)
+
+    removal_hr = drill_card_hours
+    if removal_hr is None and extra_map:
+        removal_candidate = extra_map.get("removal_drilling_hours")
+        removal_hr = _coerce_float_or_none(removal_candidate)
     if removal_hr is None:
         removal_hr = _coerce_float_or_none(removal_drilling_hours)
     if removal_hr is not None and removal_hr < 0:
         removal_hr = None
-    prefer_override = prefer_removal_drilling_hours
-    if cfg is not None:
-        prefer_override = bool(getattr(cfg, "prefer_removal_drilling_hours", prefer_override))
 
     if removal_hr is not None and prefer_override:
         desired = max(0.0, float(removal_hr))
@@ -4026,28 +4073,13 @@ def _charged_hours_by_bucket(
                         desired,
                     )
                 charged[label] = desired
-        else:
+        elif desired > 0.0:
             label = _process_label("drilling")
             logger.info(
                 "[hours-sync] Injecting Drilling bucket hours %.2f (source=removal_card)",
                 desired,
             )
-            out[label] = desired
-
-    drill_machine_minutes = None
-    drill_labor_minutes = None
-    if render_state is not None:
-        try:
-            extra = getattr(render_state, "extra", None)
-        except Exception:
-            extra = None
-        if isinstance(extra, _MappingABC):
-            drill_machine_minutes = _coerce_float_or_none(
-                extra.get("drill_machine_minutes")
-            )
-            drill_labor_minutes = _coerce_float_or_none(
-                extra.get("drill_labor_minutes")
-            )
+            charged[label] = desired
 
     def _fmt_value(value: Any, *, decimals: int, suffix: str = "") -> str:
         if isinstance(value, (int, float)):
@@ -4077,7 +4109,7 @@ def _charged_hours_by_bucket(
         _fmt_value(charged_drilling_hours, decimals=2, suffix="hr"),
     )
 
-    return out
+    return charged
 
 def _planner_bucket_key_for_name(name: Any) -> str:
     text = str(name or "").lower()
@@ -8536,16 +8568,42 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             summary_hours[label] = summary_hours.get(label, 0.0) + (minutes_val / 60.0)
 
         override_hours: float | None = None
-        if prefer_removal_drilling_hours:
+        prefer_drill_summary = prefer_removal_drilling_hours
+        if cfg is not None:
+            prefer_drill_summary = bool(
+                getattr(cfg, "prefer_removal_drilling_hours", prefer_drill_summary)
+            )
+        if prefer_drill_summary:
             extra_map = getattr(bucket_state, "extra", {})
             if isinstance(extra_map, _MappingABC):
                 candidate = extra_map.get("removal_drilling_hours")
-                if candidate is not None:
-                    try:
-                        override_hours = float(candidate)
-                    except Exception:
-                        override_hours = None
-            if override_hours is None and removal_drilling_hours_precise is not None:
+                override_hours = _coerce_float_or_none(candidate)
+                if override_hours is None:
+                    total_minutes_extra = _coerce_float_or_none(
+                        extra_map.get("drill_total_minutes")
+                    )
+                    if total_minutes_extra is None:
+                        machine_minutes_extra = _coerce_float_or_none(
+                            extra_map.get("drill_machine_minutes")
+                        )
+                        labor_minutes_extra = _coerce_float_or_none(
+                            extra_map.get("drill_labor_minutes")
+                        )
+                        if (
+                            machine_minutes_extra is not None
+                            or labor_minutes_extra is not None
+                        ):
+                            machine_minutes = float(machine_minutes_extra or 0.0)
+                            labor_minutes = float(labor_minutes_extra or 0.0)
+                            total_candidate = machine_minutes + labor_minutes
+                            if total_candidate > 0.0:
+                                total_minutes_extra = total_candidate
+                    if total_minutes_extra is not None:
+                        override_hours = float(total_minutes_extra) / 60.0
+            if (
+                override_hours is None
+                and removal_drilling_hours_precise is not None
+            ):
                 try:
                     override_hours = float(removal_drilling_hours_precise)
                 except Exception:
@@ -8564,7 +8622,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 include_flag = bool(existing[1])
             hour_summary_entries[label] = (round(hours_val, 2), include_flag)
 
-    if prefer_removal_drilling_hours:
+    prefer_drill_summary = prefer_removal_drilling_hours
+    if cfg is not None:
+        prefer_drill_summary = bool(
+            getattr(cfg, "prefer_removal_drilling_hours", prefer_drill_summary)
+        )
+    if prefer_drill_summary:
         extra_map = getattr(bucket_state, "extra", {})
         if not isinstance(extra_map, _MappingABC):
             extra_map = {}
