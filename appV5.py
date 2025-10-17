@@ -3859,12 +3859,16 @@ def _load_master_variables() -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
         full_cached = cache.get("full")
         core_copy = (
             core_cached.copy()
-            if _HAS_PANDAS and isinstance(core_cached, pd.DataFrame)
+            if _HAS_PANDAS
+            and pd is not None
+            and isinstance(core_cached, pd.DataFrame)
             else None
         )
         full_copy = (
             full_cached.copy()
-            if _HAS_PANDAS and isinstance(full_cached, pd.DataFrame)
+            if _HAS_PANDAS
+            and pd is not None
+            and isinstance(full_cached, pd.DataFrame)
             else None
         )
         return (core_copy, full_copy)
