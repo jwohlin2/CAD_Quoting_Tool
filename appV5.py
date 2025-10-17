@@ -1511,6 +1511,7 @@ from typing import (
     Protocol,
     Sequence,
     Tuple,
+    TypeAlias,
     TypeVar,
     cast,
     Literal,
@@ -1533,9 +1534,13 @@ if typing.TYPE_CHECKING:
     import pandas as pd
     from pandas import DataFrame as PandasDataFrame
     from cad_quoter.domain import QuoteState as _QuoteState
+
+    SeriesLike: TypeAlias = pd.Series[Any]
 else:
     PandasDataFrame = Any  # type: ignore[assignment]
     _QuoteState = QuoteState
+
+    SeriesLike: TypeAlias = Any
 
 try:
     from cad_quoter_legacy import compute_quote_from_df as _legacy_compute_quote_from_df  # type: ignore[import]
