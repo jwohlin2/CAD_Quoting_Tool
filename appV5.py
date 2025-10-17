@@ -4052,6 +4052,14 @@ def _display_rate_for_row(
         machine_hours, labor_hours = _split_hours_for_bucket(
             label, total_hours, render_state, cfg_obj
         )
+        bucket_role = _bucket_role_for_key(label)
+        if bucket_role == "labor_only":
+            labor_rate = float(getattr(cfg_obj, "labor_rate_per_hr", 0.0) or 0.0)
+            if labor_rate <= 0.0:
+                labor_rate = float(getattr(cfg_obj, "machine_rate_per_hr", 0.0) or 0.0)
+            if labor_rate > 0.0:
+                return f"labor ${labor_rate:.2f}/hr"
+            return "labor —"
         pieces: list[str] = []
         if machine_hours > 0:
             pieces.append(f"mach ${float(cfg_obj.machine_rate_per_hr):.2f}/hr")
@@ -6919,8 +6927,56 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                         stock_W_val = float(inferred_dims[1])
             if stock_L_val and stock_W_val and stock_T_val:
                 stock_dims_candidate = (float(stock_L_val), float(stock_W_val), float(stock_T_val))
+
+            def _extract_first_str(
+                candidates: tuple[Any, ...], keys: tuple[str, ...]
+            ) -> str:
+                for container in candidates:
+                    if not isinstance(container, _MappingABC):
+                        continue
+                    for key in keys:
+                        value = container.get(key)
+                        if isinstance(value, str):
+                            text = value.strip()
+                            if text:
+                                return text
+                return ""
+
+            part_candidate = _extract_first_str(
+                (
+                    material_stock_block,
+                    material,
+                    result if isinstance(result, _MappingABC) else None,
+                ),
+                ("mcmaster_part", "part_no", "stock_part", "stock_part_no"),
+            )
+            vendor_candidate = _extract_first_str(
+                (material_stock_block, material, result if isinstance(result, _MappingABC) else None),
+                ("vendor", "stock_vendor", "stock_source_tag", "stock_source", "source"),
+            )
+            vendor_display = vendor_candidate
+            if vendor_display:
+                normalized_vendor = vendor_display.strip()
+                if "mcmaster" in normalized_vendor.lower():
+                    vendor_display = "McMaster"
+                else:
+                    vendor_display = normalized_vendor
+            part_display = part_candidate.strip() if part_candidate else ""
+
+            extras_parts: list[str] = []
+            if vendor_display:
+                extras_parts.append(vendor_display)
+            if part_display:
+                extras_parts.append(part_display)
+
             if stock_L_val and stock_W_val and stock_T_val:
-                stock_line = f"{float(stock_L_val):.2f} × {float(stock_W_val):.2f} × {float(stock_T_val):.3f} in"
+                stock_line_core = (
+                    f"{float(stock_L_val):.2f} × {float(stock_W_val):.2f} × {float(stock_T_val):.3f} in"
+                )
+                if extras_parts:
+                    stock_line = f"{stock_line_core} ({', '.join(extras_parts)})"
+                else:
+                    stock_line = stock_line_core
             else:
                 inferred_dims = infer_plate_lw_in(g)
                 L_disp = stock_L_val
@@ -6942,6 +6998,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     if T_disp_val is not None:
                         T_disp = f"{float(T_disp_val):.3f}"
                     stock_line = f"— × — × {T_disp} in"
+                if extras_parts and "(" not in stock_line:
+                    stock_line = f"{stock_line} ({', '.join(extras_parts)})"
             if isinstance(mat_info, dict):
                 mat_info["stock_size_display"] = stock_line
             append_line(f"  Stock used: {stock_line}")
@@ -10361,20 +10419,28 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         except Exception:
             pass
 
-    if isinstance(material_stock_block, _MappingABC):
-        payload["material_stock"] = {
-            key: material_stock_block.get(key)
-            for key in (
-                "stock_L_in",
-                "stock_W_in",
-                "stock_T_in",
-                "stock_dims_in",
-                "stock_source_tag",
-                "source",
-                "mcmaster_part",
-            )
-            if key in material_stock_block
-        }
+    stock_meta: dict[str, Any] = {}
+    for source in (material_stock_block, material, mat_info):
+        if not isinstance(source, _MappingABC):
+            continue
+        for key in (
+            "stock_L_in",
+            "stock_W_in",
+            "stock_T_in",
+            "stock_dims_in",
+            "stock_source_tag",
+            "source",
+            "mcmaster_part",
+            "stock_size_display",
+        ):
+            if key in stock_meta:
+                continue
+            value = source.get(key)
+            if value is None:
+                continue
+            stock_meta[key] = value
+    if stock_meta:
+        payload["material_stock"] = stock_meta
 
     processes_entries: list[dict[str, Any]] = []
     cycle_metrics_entries: list[dict[str, Any]] = []

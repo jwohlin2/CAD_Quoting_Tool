@@ -24,6 +24,8 @@ from text_tables import (
     DEFAULT_WIDTH,
 )
 
+LB_PER_KG = 2.2046226218
+
 # Used to surface a gentle hint when the pricing engine
 # produced a zero materials figure that likely indicates
 # missing inputs rather than truly free material.
@@ -36,6 +38,118 @@ def _currency_from(data: Mapping[str, Any]) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return "$"
+
+
+def _format_weight_lb_oz_text(mass_g: Any) -> str:
+    grams = _coerce_float(mass_g)
+    if grams is None or grams <= 0:
+        return "0 oz"
+    pounds_total = grams / 1000.0 * LB_PER_KG
+    total_ounces = pounds_total * 16.0
+    pounds = int(total_ounces // 16)
+    ounces = total_ounces - pounds * 16
+    precision = 1 if pounds > 0 or ounces >= 1.0 else 2
+    ounces = round(ounces, precision)
+    if ounces >= 16.0:
+        pounds += 1
+        ounces = 0.0
+    parts: list[str] = []
+    if pounds > 0:
+        parts.append(f"{pounds} lb" if pounds != 1 else "1 lb")
+    if ounces > 0 or pounds == 0:
+        ounce_text = f"{ounces:.{precision}f}".rstrip("0").rstrip(".")
+        if not ounce_text:
+            ounce_text = "0"
+        parts.append(f"{ounce_text} oz")
+    return " ".join(parts) if parts else "0 oz"
+
+
+def _format_percent_text(value: Any) -> str | None:
+    pct_val = _coerce_float(value)
+    if pct_val is None:
+        return None
+    if pct_val <= 1.0:
+        pct_val *= 100.0
+    return f"{pct_val:.1f}%"
+
+
+def _normalize_vendor_label(text: str) -> str:
+    cleaned = text.strip()
+    if not cleaned:
+        return ""
+    if "mcmaster" in cleaned.lower():
+        return "McMaster"
+    return cleaned
+
+
+def _format_stock_line(stock_meta: Any) -> str | None:
+    if not isinstance(stock_meta, Mapping):
+        return None
+    dims_raw = stock_meta.get("stock_dims_in")
+    length = width = thickness = None
+    if isinstance(dims_raw, Sequence) and len(dims_raw) >= 3:
+        try:
+            length = float(dims_raw[0])
+            width = float(dims_raw[1])
+            thickness = float(dims_raw[2])
+        except Exception:
+            length = width = thickness = None
+    if length is None:
+        length = _coerce_float(stock_meta.get("stock_L_in"))
+    if width is None:
+        width = _coerce_float(stock_meta.get("stock_W_in"))
+    if thickness is None:
+        thickness = _coerce_float(stock_meta.get("stock_T_in"))
+    dims_text = None
+    if length is not None and width is not None and thickness is not None:
+        dims_text = f"{length:.2f} × {width:.2f} × {thickness:.3f} in"
+    else:
+        display = stock_meta.get("stock_size_display")
+        if isinstance(display, str) and display.strip():
+            dims_text = display.strip()
+    vendor = ""
+    for key in ("stock_source_tag", "source"):
+        raw = stock_meta.get(key)
+        if isinstance(raw, str) and raw.strip():
+            vendor = _normalize_vendor_label(raw)
+            if vendor:
+                break
+    part = stock_meta.get("mcmaster_part")
+    part_text = part.strip() if isinstance(part, str) else ""
+    extras = [text for text in (vendor, part_text) if text]
+    if dims_text:
+        if extras and "(" not in dims_text:
+            dims_text = f"{dims_text} ({', '.join(extras)})"
+        return f"Stock used: {dims_text}"
+    if extras:
+        return f"Stock used: {', '.join(extras)}"
+    return None
+
+
+def _format_weight_lines(weight_summary: Any) -> list[str]:
+    if not isinstance(weight_summary, Mapping):
+        return []
+    lines: list[str] = []
+    start_mass = _coerce_float(weight_summary.get("starting_mass_g"))
+    if start_mass is not None and start_mass > 0:
+        lines.append(f"Weight Reference: Start {_format_weight_lb_oz_text(start_mass)}")
+    net_mass = _coerce_float(weight_summary.get("net_mass_g"))
+    if net_mass is not None and net_mass > 0:
+        lines.append(f"Net {_format_weight_lb_oz_text(net_mass)}")
+    scrap_mass = _coerce_float(weight_summary.get("scrap_mass_g"))
+    if scrap_mass is not None and scrap_mass > 0:
+        lines.append(f"Scrap {_format_weight_lb_oz_text(scrap_mass)}")
+    hint_raw = weight_summary.get("scrap_hint")
+    hint_text = ""
+    if isinstance(hint_raw, str) and hint_raw.strip():
+        hint_text = f" ({hint_raw.strip()})"
+    computed_pct_text = _format_percent_text(weight_summary.get("scrap_pct_computed"))
+    if computed_pct_text:
+        lines.append(f"Computed Scrap: {computed_pct_text}{hint_text}")
+    geometry_pct_text = _format_percent_text(weight_summary.get("scrap_pct_geometry"))
+    if geometry_pct_text:
+        lines.append(f"Geometry Hint: {geometry_pct_text}{hint_text}")
+    return lines
 
 
 def _safe_get(mapping: Mapping[str, Any], *keys: str) -> Any:
@@ -341,8 +455,6 @@ def _sanitize_block(text: str) -> str:
 
     # Replace a few common unicode punctuation characters
     replacements = {
-        "\u2013": "-",  # en dash
-        "\u2014": "-",  # em dash
         "\u2212": "-",  # minus sign
         "\u2018": "'",  # left single quote
         "\u2019": "'",  # right single quote
@@ -356,7 +468,10 @@ def _sanitize_block(text: str) -> str:
 
     # Unicode normalization, then strip remaining non-ASCII (keep newlines)
     s = unicodedata.normalize("NFKC", s)
-    s = "".join(ch for ch in s if ch == "\n" or 32 <= ord(ch) <= 126)
+    allowed_chars = {"×", "–", "—"}
+    s = "".join(
+        ch for ch in s if ch == "\n" or ch in allowed_chars or 32 <= ord(ch) <= 126
+    )
 
     return s
 
@@ -461,13 +576,32 @@ def _render_materials(data: Mapping[str, Any]) -> str | None:
             money(amount, currency),
         ])
 
-    return ascii_table(
+    table = ascii_table(
         headers=["Material", "Detail", "Amount (per part)"],
         rows=rows,
         col_widths=[36, 45, 16],
         col_aligns=["left", "left", "right"],
         header_aligns=["left", "left", "right"],
     )
+
+    supplemental_lines: list[str] = []
+
+    stock_line = _format_stock_line(stock_meta)
+    if stock_line:
+        supplemental_lines.append(stock_line)
+
+    supplemental_lines.extend(_format_weight_lines(weight_summary))
+
+    price_lines = data.get("material_price_lines")
+    if isinstance(price_lines, Sequence):
+        supplemental_lines.extend(
+            str(line).strip() for line in price_lines if isinstance(line, str) and line.strip()
+        )
+
+    if supplemental_lines:
+        return table + "\n" + "\n".join(supplemental_lines)
+
+    return table
 
 
 def _render_processes(data: Mapping[str, Any]) -> str | None:
@@ -538,27 +672,35 @@ def _render_drilling_time_per_hole(data: Mapping[str, Any]) -> str | None:
         diameter = _coerce_float(source.get("diameter_in"))
         depth = _coerce_float(source.get("depth_in"))
         qty_raw = source.get("qty")
-        try:
-            qty = int(qty_raw)
-        except Exception:
-            qty = 0
+        qty_val = _coerce_float(qty_raw)
+        if qty_val is None:
+            qty_val = 0.0
+        qty_display_value: float | int
+        if float(qty_val).is_integer():
+            qty_display_value = int(round(float(qty_val)))
+        else:
+            qty_display_value = float(qty_val)
+        qty_text = (
+            f"{qty_display_value}"
+            if isinstance(qty_display_value, int)
+            else f"{qty_display_value:.2f}".rstrip("0").rstrip(".")
+        )
         sfm = _coerce_float(source.get("sfm"))
         ipr = _coerce_float(source.get("ipr"))
         minutes_per_hole = _coerce_float(source.get("minutes_per_hole"))
-        group_minutes = _coerce_float(source.get("group_minutes"))
         if diameter is None or depth is None or minutes_per_hole is None:
             continue
         if sfm is None:
             sfm = 0.0
         if ipr is None:
             ipr = 0.0
-        if group_minutes is None:
-            group_minutes = minutes_per_hole * max(qty, 0)
+        qty_for_calc = max(float(qty_val), 0.0)
+        computed_group_minutes = minutes_per_hole * qty_for_calc
         formatted_rows.append(
-            f'Dia {diameter:.3f}" × {qty}  | '
+            f'Dia {diameter:.3f}" × {qty_text}  | '
             f'depth {depth:.3f}" | {int(round(sfm))} sfm | '
             f'{ipr:.4f} ipr | t/hole {minutes_per_hole:.2f} min | '
-            f'group {qty}×{minutes_per_hole:.2f} = {group_minutes:.2f} min'
+            f'group {qty_text}×{minutes_per_hole:.2f} = {computed_group_minutes:.2f} min'
         )
 
     if not formatted_rows:
