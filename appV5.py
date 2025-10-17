@@ -6369,8 +6369,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 and need_wid
                 and need_thk
             ):
-                raise RuntimeError(
-                    f"No McMaster MIC6 plate found for {float(need_len):.2f}×{float(need_wid):.2f}×{float(need_thk):.3f} in with exact thickness"
+                blank_lines.append(
+                    "  WARNING: No McMaster MIC6 plate found for "
+                    f"{float(need_len):.2f}×{float(need_wid):.2f}×{float(need_thk):.3f} in with exact thickness"
                 )
 
             if (need_len is None or need_wid is None or need_thk is None) and isinstance(g, dict):
