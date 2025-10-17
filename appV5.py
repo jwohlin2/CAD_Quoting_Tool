@@ -1306,24 +1306,24 @@ def _resolve_pricing_source_value(
 ) -> str | None:
     """Return a normalized pricing source, forcing planner when signals exist."""
 
-    text = None
+    fallback_text = None
     if base_value is not None:
-        text = str(base_value).strip()
-        if not text:
-            text = None
+        candidate_text = str(base_value).strip()
+        if candidate_text:
+            lowered = candidate_text.lower()
+            if lowered == "planner":
+                return "planner"
+            if lowered not in {"legacy", "auto", "default", "fallback"}:
+                return candidate_text
+            fallback_text = candidate_text
 
-    if text and text.lower() == "planner":
-        return "planner"
-
-    explicit_override = text is not None
-
-    if used_planner and not explicit_override:
+    if used_planner:
         return "planner"
 
     # Delegate planner signal detection to the adapter helper
     from appkit.planner_adapter import _planner_signals_present as _planner_signals_present_helper
 
-    if not explicit_override and _planner_signals_present_helper(
+    if _planner_signals_present_helper(
         process_meta=process_meta,
         process_meta_raw=process_meta_raw,
         breakdown=breakdown,
@@ -1333,7 +1333,10 @@ def _resolve_pricing_source_value(
     ):
         return "planner"
 
-    return text
+    if fallback_text:
+        return fallback_text
+
+    return None
 
 
 
@@ -7155,8 +7158,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     if scrap_text:
                         scrap_suffix = f" @ {scrap_text}"
                     row(f"Scrap Credit{scrap_suffix}", -float(scrap_val), indent="  ")
-                total_material_cost = mc.get("total_usd", total_material_cost)
-                row("Total Material Cost :", float(total_material_cost or 0.0), indent="  ")
+                base_for_total = float(mc.get("base_usd") or mc.get("stock_piece_usd") or 0.0)
+                tax_for_total = float(mc.get("tax_usd") or 0.0)
+                scrap_for_total = float(mc.get("scrap_credit_usd") or 0.0)
+                scrap_for_total = min(scrap_for_total, base_for_total + tax_for_total)
+                total_material_cost = round(base_for_total + tax_for_total - scrap_for_total, 2)
+                row("Total Material Cost :", total_material_cost, indent="  ")
             elif total_material_cost is not None:
                 row("Total Material Cost :", total_material_cost, indent="  ")
             append_line("")
