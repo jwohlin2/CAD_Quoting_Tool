@@ -151,16 +151,29 @@ def ascii_table(
     headers: Sequence[str] | None,
     rows: Sequence[Sequence[object]],
     *,
-    col_widths: Sequence[int],
-    col_aligns: Sequence[str] | None = None,
+    widths: Sequence[int] | None = None,
+    aligns: Sequence[str] | None = None,
     header_aligns: Sequence[str] | None = None,
+    col_widths: Sequence[int] | None = None,
+    col_aligns: Sequence[str] | None = None,
 ) -> str:
     """Render an ASCII table with optional headers and automatic wrapping."""
 
-    column_count = len(col_widths)
+    if widths is not None and col_widths is not None:
+        raise TypeError("Specify either 'widths' or 'col_widths', not both")
+    if widths is None:
+        if col_widths is None:
+            raise TypeError("'widths' is required when 'col_widths' is not provided")
+        widths = col_widths
+    if aligns is not None and col_aligns is not None:
+        raise TypeError("Specify either 'aligns' or 'col_aligns', not both")
+    if aligns is None:
+        aligns = col_aligns
+
+    column_count = len(widths)
     if column_count == 0:
         raise ValueError("at least one column is required")
-    if any(width <= 0 for width in col_widths):
+    if any(width <= 0 for width in widths):
         raise ValueError("column widths must be positive")
 
     def _normalize_alignments(values: Sequence[str] | None, fallback: str) -> list[str]:
@@ -173,7 +186,7 @@ def ascii_table(
             result.append(token if token in {"L", "C", "R"} else "L")
         return result
 
-    body_aligns = _normalize_alignments(col_aligns, "L")
+    body_aligns = _normalize_alignments(aligns, "L")
     header_aligns = _normalize_alignments(header_aligns, "C")
 
     def _wrap_cell(value: object, width: int) -> list[str]:
@@ -207,7 +220,7 @@ def ascii_table(
         return text + " " * pad
 
     def _render_row(cells: Sequence[object], aligns: Sequence[str]) -> list[str]:
-        wrapped_cells = [_wrap_cell(cell, col_widths[idx]) for idx, cell in enumerate(cells)]
+        wrapped_cells = [_wrap_cell(cell, widths[idx]) for idx, cell in enumerate(cells)]
         height = max((len(cell_lines) for cell_lines in wrapped_cells), default=1)
         lines: list[str] = []
         for line_idx in range(height):
@@ -215,11 +228,11 @@ def ascii_table(
             for col_idx in range(column_count):
                 cell_lines = wrapped_cells[col_idx]
                 segment = cell_lines[line_idx] if line_idx < len(cell_lines) else ""
-                pieces.append(_pad(segment, col_widths[col_idx], aligns[col_idx]))
+                pieces.append(_pad(segment, widths[col_idx], aligns[col_idx]))
             lines.append("|" + "|".join(pieces) + "|")
         return lines
 
-    horizontal = "+" + "+".join("-" * width for width in col_widths) + "+"
+    horizontal = "+" + "+".join("-" * width for width in widths) + "+"
     output: list[str] = [horizontal]
 
     if headers:

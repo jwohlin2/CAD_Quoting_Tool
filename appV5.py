@@ -10502,6 +10502,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             )
     if processes_entries:
         payload["processes"] = processes_entries
+        payload["labor_total_amount"] = round(labor_total_amount, 2)
     if cycle_metrics_entries:
         payload["cycle_time_metrics"] = cycle_metrics_entries
 

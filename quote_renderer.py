@@ -32,6 +32,34 @@ LB_PER_KG = 2.2046226218
 MATERIALS_WARNING_LABEL = "Note: Materials omitted (engine reported zero)"
 
 
+SUMMARY_TABLE_WIDTHS = [38, 23]
+SUMMARY_TABLE_ALIGNS = ["L", "R"]
+
+PRICE_DRIVER_TABLE_WIDTHS = [32, 46]
+PRICE_DRIVER_TABLE_ALIGNS = ["L", "L"]
+
+COST_BREAKDOWN_TABLE_WIDTHS = [40, 18, 18]
+COST_BREAKDOWN_TABLE_ALIGNS = ["L", "R", "R"]
+
+PROGRAMMING_TABLE_WIDTHS = [32, 32, 16]
+PROGRAMMING_TABLE_ALIGNS = ["L", "L", "R"]
+
+MATERIAL_TABLE_WIDTHS = [22, 40, 16]
+MATERIAL_TABLE_ALIGNS = ["L", "L", "R"]
+
+PROCESS_TABLE_WIDTHS = [26, 10, 26, 16]
+PROCESS_TABLE_ALIGNS = ["L", "R", "R", "R"]
+
+CYCLE_REFERENCE_TABLE_WIDTHS = [34, 12, 32]
+CYCLE_REFERENCE_TABLE_ALIGNS = ["L", "R", "L"]
+
+TOP_CYCLE_TABLE_WIDTHS = [60, 16]
+TOP_CYCLE_TABLE_ALIGNS = ["L", "R"]
+
+TRACEABILITY_TABLE_WIDTHS = [32, 46]
+TRACEABILITY_TABLE_ALIGNS = ["L", "L"]
+
+
 def _currency_from(data: Mapping[str, Any]) -> str:
     for key in ("currency", "unit_currency", "price_currency"):
         value = data.get(key)
@@ -214,9 +242,9 @@ def _render_summary(data: Mapping[str, Any]) -> str:
     return ascii_table(
         headers=headers,
         rows=rows,
-        col_widths=[46, 25],
-        col_aligns=["left", "right"],
-        header_aligns=["left", "right"],
+        widths=SUMMARY_TABLE_WIDTHS,
+        aligns=SUMMARY_TABLE_ALIGNS,
+        header_aligns=SUMMARY_TABLE_ALIGNS,
     )
 
 
@@ -237,9 +265,9 @@ def _render_price_drivers(data: Mapping[str, Any]) -> str | None:
     return ascii_table(
         headers=["Driver", "Detail"],
         rows=rows,
-        col_widths=[40, 51],
-        col_aligns=["left", "left"],
-        header_aligns=["left", "left"],
+        widths=PRICE_DRIVER_TABLE_WIDTHS,
+        aligns=PRICE_DRIVER_TABLE_ALIGNS,
+        header_aligns=PRICE_DRIVER_TABLE_ALIGNS,
     )
 
 
@@ -349,9 +377,9 @@ def _render_cost_breakdown(data: Mapping[str, Any]) -> str | None:
     return ascii_table(
         headers=["Cost Element", "Amount", "% of Subtotal"],
         rows=rows,
-        col_widths=[48, 18, 15],
-        col_aligns=["left", "right", "right"],
-        header_aligns=["left", "right", "right"],
+        widths=COST_BREAKDOWN_TABLE_WIDTHS,
+        aligns=COST_BREAKDOWN_TABLE_ALIGNS,
+        header_aligns=COST_BREAKDOWN_TABLE_ALIGNS,
     )
 
 
@@ -525,9 +553,9 @@ def _render_programming_nre(data: Mapping[str, Any]) -> str | None:
     return ascii_table(
         headers=["Activity", "Detail", "Amount (per lot)"],
         rows=rows,
-        col_widths=[38, 43, 16],
-        col_aligns=["left", "left", "right"],
-        header_aligns=["left", "left", "right"],
+        widths=PROGRAMMING_TABLE_WIDTHS,
+        aligns=PROGRAMMING_TABLE_ALIGNS,
+        header_aligns=PROGRAMMING_TABLE_ALIGNS,
     )
 
 
@@ -579,9 +607,9 @@ def _render_materials(data: Mapping[str, Any]) -> str | None:
     table = ascii_table(
         headers=["Material", "Detail", "Amount (per part)"],
         rows=rows,
-        col_widths=[36, 45, 16],
-        col_aligns=["left", "left", "right"],
-        header_aligns=["left", "left", "right"],
+        widths=MATERIAL_TABLE_WIDTHS,
+        aligns=MATERIAL_TABLE_ALIGNS,
+        header_aligns=MATERIAL_TABLE_ALIGNS,
     )
 
     supplemental_lines: list[str] = []
@@ -636,9 +664,9 @@ def _render_processes(data: Mapping[str, Any]) -> str | None:
     return ascii_table(
         headers=["Process", "Hours", "Rate", "Amount (per part)"],
         rows=rows,
-        col_widths=[28, 10, 22, 16],
-        col_aligns=["left", "right", "right", "right"],
-        header_aligns=["left", "right", "right", "right"],
+        widths=PROCESS_TABLE_WIDTHS,
+        aligns=PROCESS_TABLE_ALIGNS,
+        header_aligns=PROCESS_TABLE_ALIGNS,
     )
 
 
@@ -768,9 +796,9 @@ def _render_cycle_reference(data: Mapping[str, Any]) -> str | None:
     return ascii_table(
         headers=["Activity", "Cycle Time", "Notes"],
         rows=rows,
-        col_widths=[38, 12, 36],
-        col_aligns=["left", "right", "left"],
-        header_aligns=["left", "right", "left"],
+        widths=CYCLE_REFERENCE_TABLE_WIDTHS,
+        aligns=CYCLE_REFERENCE_TABLE_ALIGNS,
+        header_aligns=CYCLE_REFERENCE_TABLE_ALIGNS,
     )
 
 
@@ -807,9 +835,9 @@ def _render_top_cycle_contributors(data: Mapping[str, Any]) -> str | None:
     return ascii_table(
         headers=["Activity", "Hours"],
         rows=rows,
-        col_widths=[64, 12],
-        col_aligns=["left", "right"],
-        header_aligns=["left", "right"],
+        widths=TOP_CYCLE_TABLE_WIDTHS,
+        aligns=TOP_CYCLE_TABLE_ALIGNS,
+        header_aligns=TOP_CYCLE_TABLE_ALIGNS,
     )
 
 
@@ -857,9 +885,9 @@ def _render_traceability(data: Mapping[str, Any]) -> str | None:
     return ascii_table(
         headers=["Item", "Detail"],
         rows=formatted,
-        col_widths=[38, 50],
-        col_aligns=["left", "left"],
-        header_aligns=["left", "left"],
+        widths=TRACEABILITY_TABLE_WIDTHS,
+        aligns=TRACEABILITY_TABLE_ALIGNS,
+        header_aligns=TRACEABILITY_TABLE_ALIGNS,
     )
 
 
