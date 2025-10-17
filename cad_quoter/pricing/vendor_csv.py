@@ -139,6 +139,8 @@ def pick_plate_from_mcmaster(
     *,
     scrap_fraction: float = _SCRAP_FRACTION,
     catalog_path: str | None = None,
+    allow_thickness_upsize: bool = True,
+    thickness_tolerance: float = 0.02,
 ) -> dict[str, Any] | None:
     """Return the smallest McMaster plate that covers the requested envelope."""
 
@@ -153,8 +155,14 @@ def pick_plate_from_mcmaster(
     need_len_adj = float(max(need_len, need_wid)) * (1.0 + float(scrap_fraction))
     need_wid_adj = float(min(need_len, need_wid)) * (1.0 + float(scrap_fraction))
     need_thk_val = float(need_thk)
+    allow_upsize = bool(allow_thickness_upsize)
+    try:
+        tol = float(thickness_tolerance)
+    except Exception:
+        tol = 0.02
+    tol = max(0.0, tol)
 
-    candidates: list[dict[str, Any]] = []
+    candidates: list[tuple[float, float, float, float, float, dict[str, Any]]] = []
     for row in rows:
         row_mat = str(row.get("material") or "")
         if norm_mat and row_mat:
@@ -165,33 +173,51 @@ def pick_plate_from_mcmaster(
             continue
         if row_thk + 1e-4 < need_thk_val:
             continue
+        thickness_diff = abs(row_thk - need_thk_val)
+        if not allow_upsize and thickness_diff > tol + 1e-9:
+            continue
         if not _fits_blank(row, need_len_adj, need_wid_adj):
             continue
-        candidates.append(dict(row))
+        length_raw = float(row.get("len_in") or 0.0)
+        width_raw = float(row.get("wid_in") or 0.0)
+        area = length_raw * width_raw if length_raw and width_raw else float("inf")
+        candidates.append(
+            (
+                area,
+                thickness_diff,
+                row_thk,
+                length_raw,
+                width_raw,
+                dict(row),
+            )
+        )
 
     if not candidates:
         return None
 
     candidates.sort(
-        key=lambda r: (
-            float(r.get("len_in") or 0.0) * float(r.get("wid_in") or 0.0),
-            float(r.get("len_in") or 0.0),
-            float(r.get("wid_in") or 0.0),
+        key=lambda c: (
+            c[0],
+            c[1],
+            c[2],
+            max(c[3], c[4]),
+            min(c[3], c[4]),
         )
     )
-    best = candidates[0]
-    length = float(best.get("len_in") or need_len)
-    width = float(best.get("wid_in") or need_wid)
+    area, thickness_diff, best_thk, length_raw, width_raw, best_row = candidates[0]
+    length = float(length_raw or need_len)
+    width = float(width_raw or need_wid)
     if length < width:
         length, width = width, length
     return {
-        "vendor": best.get("vendor") or "McMaster",
-        "part_no": best.get("part_no"),
+        "vendor": best_row.get("vendor") or "McMaster",
+        "part_no": best_row.get("part_no"),
         "len_in": length,
         "wid_in": width,
-        "thk_in": float(best.get("thk_in") or need_thk_val),
-        "price_usd": best.get("price_usd"),
-        "min_charge_usd": best.get("min_charge_usd"),
+        "thk_in": float(best_row.get("thk_in") or need_thk_val),
+        "thickness_diff_in": float(thickness_diff),
+        "price_usd": best_row.get("price_usd"),
+        "min_charge_usd": best_row.get("min_charge_usd"),
     }
 
 

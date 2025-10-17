@@ -224,3 +224,49 @@ def test_plan_stock_blank_uses_configured_tolerance():
     assert plan["round_tol_in"] == pytest.approx(0.1)
     assert plan["need_len_in"] == pytest.approx(18.1)
     assert plan["stock_len_in"] == pytest.approx(18.0)
+
+
+def test_vendor_catalog_prefers_exact_thickness(monkeypatch):
+    from cad_quoter.pricing import vendor_csv
+
+    norm = vendor_csv._normalise_material_label("Aluminum MIC6")
+    rows = [
+        {
+            "material": norm,
+            "thk_in": 3.5,
+            "len_in": 12.0,
+            "wid_in": 24.0,
+            "vendor": "McMaster",
+            "part_no": "86825K626",
+            "price_usd": None,
+            "min_charge_usd": None,
+        },
+        {
+            "material": norm,
+            "thk_in": 2.0,
+            "len_in": 12.0,
+            "wid_in": 24.0,
+            "vendor": "McMaster",
+            "part_no": "86825K954",
+            "price_usd": None,
+            "min_charge_usd": None,
+        },
+    ]
+
+    monkeypatch.setattr(vendor_csv, "_load_catalog_rows", lambda _path=None: rows)
+
+    picked = vendor_csv.pick_plate_from_mcmaster(
+        "Aluminum MIC6",
+        12.0,
+        12.0,
+        2.0,
+        scrap_fraction=0.0,
+        allow_thickness_upsize=False,
+        thickness_tolerance=0.02,
+    )
+
+    assert picked is not None
+    assert picked["thk_in"] == pytest.approx(2.0)
+    assert picked["part_no"] == "86825K954"
+    assert picked["len_in"] == pytest.approx(24.0)
+    assert picked["wid_in"] == pytest.approx(12.0)
