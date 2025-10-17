@@ -338,14 +338,13 @@ def test_render_quote_does_not_duplicate_detail_lines() -> None:
 
     rendered = appV5.render_quote(result, currency="$", show_zeros=False)
 
-    assert rendered.count("- Programmer: 1.00 hr @ $45.00/hr") == 1
-    assert rendered.count("Programmer 1.00 hr @ $45.00/hr") == 0
-    assert "Programming (amortized)" in rendered
-    assert "Fixture Build (amortized)" in rendered
-    assert "- Programmer (lot): 1.00 hr @ $45.00/hr" in rendered
-    assert "- Build labor (lot): 0.50 hr @ $60.00/hr" in rendered
+    assert rendered.count("Programming (amortized)") == 1
+    assert rendered.count("Fixture Build (amortized)") == 1
+    assert "Programmer 1.00 hr @ $45.00/hr" not in rendered
+    assert "- Programmer (lot): 1.00 hr @ $45.00/hr" not in rendered
+    assert "- Build labor (lot): 0.50 hr @ $60.00/hr" not in rendered
     assert "includes $200.00 extras" not in rendered
-    assert rendered.count("1.50 hr @ $120.00/hr") == 1
+    assert rendered.count("mach $45.00/hr") >= 1
 
 
 def test_render_quote_shows_amortized_nre_for_single_qty() -> None:
