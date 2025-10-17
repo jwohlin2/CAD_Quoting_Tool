@@ -21,7 +21,7 @@ from cad_quoter.domain_models import (
     normalize_material_key,
 )
 from cad_quoter.llm_overrides import _plate_mass_properties, _plate_mass_from_dims
-from cad_quoter.pricing import LB_PER_KG
+LB_PER_KG = 2.20462262185
 
 
 def _usd_per_lb(value: Any, unit_hint: Any | None = None) -> float | None:
@@ -584,16 +584,20 @@ def _material_cost_components(
     scrap_lb = _grams_to_lb(block.get("scrap_mass_g") or block.get("scrap_g") or 0.0)
 
     per_lb_unit = block.get("unit_price_unit") or block.get("unit_price_basis")
-    per_lb = _usd_per_lb(block.get("unit_price_per_lb_usd"), per_lb_unit)
+    per_lb_raw = block.get("unit_price_per_lb_usd")
+    per_lb = _usd_per_lb(per_lb_raw, per_lb_unit)
     if per_lb is None:
-        per_lb = _coerce_float_or_none(block.get("unit_price_usd_per_lb"))
+        per_lb = _usd_per_lb(block.get("unit_price_usd_per_lb"), per_lb_unit)
     per_lb_val = float(per_lb or 0.0)
     per_lb_src = block.get("unit_price_per_lb_source") or block.get("unit_price_source")
 
-    scrap_unit = block.get("scrap_price_unit")
-    scrap_usd_lb = _usd_per_lb(block.get("scrap_price_usd_per_lb"), scrap_unit)
-    if scrap_usd_lb is None:
-        scrap_usd_lb = _usd_per_lb(overrides.get("scrap_usd_per_lb"), scrap_unit)
+    scrap_unit = block.get("scrap_price_unit") or block.get("scrap_credit_unit")
+    scrap_raw = block.get("scrap_price_usd_per_lb")
+    if scrap_raw in (None, ""):
+        scrap_raw = block.get("scrap_credit_unit_price_usd_per_lb")
+    if scrap_raw in (None, ""):
+        scrap_raw = overrides.get("scrap_usd_per_lb")
+    scrap_usd_lb = _usd_per_lb(scrap_raw, scrap_unit)
     if scrap_usd_lb is None:
         scrap_usd_lb = _coerce_float_or_none(overrides.get("scrap_usd_per_lb"))
 
@@ -605,7 +609,7 @@ def _material_cost_components(
         base_usd = float(stock_piece_usd)
         base_src = stock_source or "Stock piece"
     else:
-        base_usd = float(start_lb) * float(per_lb_val)
+        base_usd = float(start_lb * per_lb_val)
         base_src = f"{per_lb_src or 'per-lb'} @ ${per_lb_val:.2f}/lb"
 
     tax_usd = _coerce_float_or_none(
@@ -724,13 +728,8 @@ def _material_cost_components(
     scrap_credit = min(scrap_credit, base_usd + tax_usd)
 
     scrap_rate_text = None
-    if scrap_usd_lb_val > 0 and scrap_lb > 0:
-        prefix = ""
-        if scrap_price_source == "wieland":
-            prefix = "Wieland "
-        elif scrap_price_source_raw:
-            prefix = f"{scrap_price_source_raw} "
-        scrap_rate_text = f"{prefix}${scrap_usd_lb_val:.2f}/lb × {recovery_val:.0%}"
+    if scrap_usd_lb_val > 0 and scrap_lb > 0 and recovery_val > 0:
+        scrap_rate_text = f"${scrap_usd_lb_val:.2f}/lb × {recovery_val:.0%}"
 
     net_usd = max(0.0, base_usd - scrap_credit)
     total = round(base_usd + tax_usd - scrap_credit, 2)
