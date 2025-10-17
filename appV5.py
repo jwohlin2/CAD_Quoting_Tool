@@ -1504,6 +1504,7 @@ from typing import (
     Protocol,
     Sequence,
     Tuple,
+    TypeAlias,
     TypeVar,
     cast,
     Literal,
@@ -1525,8 +1526,12 @@ else:  # pragma: no cover - fallback when ezdxf is unavailable at runtime
 if typing.TYPE_CHECKING:
     import pandas as pd
     from cad_quoter.domain import QuoteState as _QuoteState
+
+    SeriesLike: TypeAlias = pd.Series[Any]
 else:
     _QuoteState = QuoteState
+
+    SeriesLike: TypeAlias = Any
 
 try:
     from cad_quoter_legacy import compute_quote_from_df as _legacy_compute_quote_from_df  # type: ignore[import]
@@ -11079,13 +11084,13 @@ def _tolerance_values_from_any(value: Any) -> list[float]:
     return results
 
 def _sum_time_from_series(
-    items: pd.Series,
-    values: pd.Series,
-    data_types: pd.Series,
-    mask: pd.Series,
+    items: SeriesLike,
+    values: SeriesLike,
+    data_types: SeriesLike,
+    mask: SeriesLike,
     *,
     default: float = 0.0,
-    exclude_mask: pd.Series | None = None,
+    exclude_mask: SeriesLike | None = None,
 ) -> float:
     """Shared implementation for extracting hour totals from sheet rows."""
 
@@ -20696,7 +20701,7 @@ class App(tk.Tk):
 
         # Build a lookup so each row can pull the descriptive columns from the
         # original spreadsheet while still operating on the sanitized df copy.
-        full_lookup: dict[str, pd.Series] = {}
+        full_lookup: dict[str, SeriesLike] = {}
         if self.vars_df_full is not None and "Item" in self.vars_df_full.columns:
             full_items = self.vars_df_full["Item"].astype(str)
             for idx, normalized in enumerate(full_items.apply(normalize_item)):
