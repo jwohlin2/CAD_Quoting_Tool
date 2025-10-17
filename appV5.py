@@ -25,7 +25,7 @@ import sys
 import time
 import typing
 from functools import cmp_to_key, lru_cache
-from typing import Any, Mapping, MutableMapping
+from typing import Any, Mapping, MutableMapping, TYPE_CHECKING
 from collections import Counter
 from collections.abc import (
     Callable,
@@ -1340,7 +1340,14 @@ def _pick_mcmaster_plate_sku_impl(
             or row.get("thk_in")
             or row.get("thickness")
         )
-        if not all(val and val > 0 for val in (length, width, thickness)):
+        if (
+            length is None
+            or width is None
+            or thickness is None
+            or length <= 0
+            or width <= 0
+            or thickness <= 0
+        ):
             continue
         if abs(thickness - need_T_in) > tolerance:
             continue
@@ -1548,7 +1555,7 @@ def _resolve_pricing_source_value(
     planner_process_minutes: Any = None,
     hour_summary_entries: Mapping[str, Any] | None = None,
     additional_sources: Sequence[Any] | None = None,
-    cfg: "QuoteConfiguration" | None = None,
+    cfg: QuoteConfiguration | None = None,
 ) -> str | None:
     """Return a normalized pricing source, honoring explicit selections."""
 
@@ -2076,6 +2083,19 @@ try:
     import pandas as pd  # type: ignore[import]
 except Exception:  # pragma: no cover - optional dependency
     pd = None  # type: ignore[assignment]
+
+if TYPE_CHECKING:  # pragma: no cover - import-time helper for type checkers
+    import pandas as _pandas
+
+    PandasDataFrame = _pandas.DataFrame
+    PandasSeries = _pandas.Series
+    PandasIndex = _pandas.Index
+else:  # pragma: no cover - fallback aliases when pandas is unavailable
+    PandasDataFrame = typing.Any
+    PandasSeries = typing.Any
+    PandasIndex = typing.Any
+
+pd = typing.cast(typing.Any, pd)
 from typing import TypedDict
 
 try:
@@ -2788,6 +2808,10 @@ def _missing_uv_bounds(_: Any) -> Tuple[float, float, float, float]:
 def _missing_brep_read(_: str):
     raise RuntimeError("BREP read is unavailable")
 
+
+def _missing_brep_check_analyzer(_: Any) -> Any:
+    raise RuntimeError("BRepCheck_Analyzer is unavailable")
+
 class _EzdxfModule(Protocol):
     def readfile(
         self,
@@ -2803,36 +2827,17 @@ class _OdafcModule(Protocol):
 
 BRepTools_UVBounds: Callable[[Any], Tuple[float, float, float, float]] = _missing_uv_bounds
 _brep_read = _missing_brep_read
+BRepCheck_Analyzer = cast(Any, _missing_brep_check_analyzer)
 
 _ocp_brep_module = _import_optional("OCP.BRep")
 _occ_brep_module = _import_optional("OCC.Core.BRep")
 _ocp_backend_ready = False
 
-
-def _missing_occt_callable(name: str):
-    def _missing(*_: Any, **__: Any) -> Any:
-        raise RuntimeError(
-            f"{name} is unavailable because no OpenCascade backend is installed"
-        )
-
-    return _missing
-
-
-# Provide fallbacks so type checkers see the names as bound even if imports fail.
-GeomAdaptor_Surface = cast(Any, _missing_occt_callable("GeomAdaptor_Surface"))
-GeomAbs_Plane = cast(Any, object())
-GeomAbs_Cylinder = cast(Any, object())
-GeomAbs_Torus = cast(Any, object())
-GeomAbs_Cone = cast(Any, object())
-GeomAbs_BSplineSurface = cast(Any, object())
-GeomAbs_BezierSurface = cast(Any, object())
-GeomAbs_Circle = cast(Any, object())
-gp_Pln = cast(Any, _missing_occt_callable("gp_Pln"))
-gp_Pnt = cast(Any, _missing_occt_callable("gp_Pnt"))
-gp_Dir = cast(Any, _missing_occt_callable("gp_Dir"))
-BRepAlgoAPI_Section = cast(Any, _missing_occt_callable("BRepAlgoAPI_Section"))
-ShapeAnalysis_Surface = cast(Any, _missing_occt_callable("ShapeAnalysis_Surface"))
-BRepAdaptor_Curve = cast(Any, _missing_occt_callable("BRepAdaptor_Curve"))
+# Provide default placeholders so type checkers consider these names bound even if
+# the optional OCC/OCP backends are unavailable at runtime.
+gp_Dir = cast(Any, None)
+gp_Pln = cast(Any, None)
+gp_Pnt = cast(Any, None)
 
 if _ocp_brep_module is not None:
     try:
@@ -2977,10 +2982,33 @@ else:
     def _occ_brep_read(path: str) -> Any:  # pragma: no cover
         raise RuntimeError("BREP read is unavailable")
 
+    def _missing_brep_builder(*_: Any, **__: Any) -> Any:  # pragma: no cover
+        raise RuntimeError("BRep_Builder is unavailable")
+
+    BRep_Builder = cast(Any, _missing_brep_builder)
     BRepTools = None  # type: ignore[assignment]
     TopTools_IndexedDataMapOfShapeListOfShape = None  # type: ignore[assignment]
+
+    class _MissingTopoDSShape:
+        def __init__(self, *_: Any, **__: Any) -> None:  # pragma: no cover - fallback sentinel
+            raise RuntimeError("TopoDS_Shape is unavailable (OCCT bindings required)")
+
+    class _MissingTopoDSFace(_MissingTopoDSShape):
+        pass
+
+    class _MissingTopoDSCompound(_MissingTopoDSShape):
+        pass
+
+    TopoDS_Shape = cast(Any, _MissingTopoDSShape)
+    TopoDS_Face = cast(Any, _MissingTopoDSFace)
+    TopoDS_Compound = cast(Any, _MissingTopoDSCompound)
     BRepTools_UVBounds = _occ_uv_bounds
     _brep_read = _occ_brep_read
+
+    def _missing_shape_fix_shape(_: Any) -> Any:  # pragma: no cover
+        raise RuntimeError("Shape healing is unavailable")
+
+    ShapeFix_Shape = cast(Any, _missing_shape_fix_shape)
 
 def _new_topods_shape() -> Any:
     ctor = cast(Any, TopoDS_Shape)
@@ -3428,12 +3456,12 @@ def clamp_llm_hours(
     return cleaned
 
 def apply_llm_hours_to_variables(
-    df: pd.DataFrame | None,
+    df: PandasDataFrame | None,
     estimates: Mapping[str, Any] | None,
     *,
     allow_overwrite_nonzero: bool = False,
     log: dict | None = None,
-) -> pd.DataFrame | None:
+) -> PandasDataFrame | None:
     """Apply sanitized LLM hour estimates to a variables dataframe."""
 
     if not _HAS_PANDAS or df is None:
@@ -3566,9 +3594,9 @@ _MASTER_VARIABLES_CACHE: dict[str, Any] = {
     "full": None,
 }
 
-_SPEEDS_FEEDS_CACHE: dict[str, pd.DataFrame | None] = {}
+_SPEEDS_FEEDS_CACHE: dict[str, PandasDataFrame | None] = {}
 
-def _coerce_core_types(df_core: pd.DataFrame) -> pd.DataFrame:
+def _coerce_core_types(df_core: PandasDataFrame) -> PandasDataFrame:
     """Light normalization for estimator expectations."""
     core = df_core.copy()
     core["Item"] = core["Item"].astype(str)
@@ -3767,7 +3795,7 @@ def derive_editor_control_spec(dtype_source: str, example_value: Any) -> EditorC
         options=tuple(options),
     )
 
-def sanitize_vars_df(df_full: pd.DataFrame) -> pd.DataFrame:
+def sanitize_vars_df(df_full: PandasDataFrame) -> PandasDataFrame:
     """
     Return a copy containing only the 3 core columns the estimator needs.
     - Does NOT mutate or overwrite the original file.
@@ -3802,7 +3830,7 @@ def sanitize_vars_df(df_full: pd.DataFrame) -> pd.DataFrame:
 
 def read_variables_file(
     path: str, return_full: bool = False
-) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
+) -> PandasDataFrame | tuple[PandasDataFrame, PandasDataFrame]:
     """
     Read .xlsx/.csv, keep original data intact, and return a sanitized copy for the estimator.
     - If return_full=True, returns (core_df, full_df); otherwise returns core_df only.
@@ -3872,7 +3900,7 @@ def read_variables_file(
 
     return (core, df_full) if return_full else core
 
-def _load_master_variables() -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+def _load_master_variables() -> tuple[PandasDataFrame | None, PandasDataFrame | None]:
     """Load the packaged master variables sheet once and serve cached copies."""
     if not _HAS_PANDAS:
         return (None, None)
@@ -3907,8 +3935,8 @@ def _load_master_variables() -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
 
     try:
         core_df, full_df = read_variables_file(str(master_path), return_full=True)
-        core_df = cast(pd.DataFrame, core_df)
-        full_df = cast(pd.DataFrame, full_df)
+        core_df = cast(PandasDataFrame, core_df)
+        full_df = cast(PandasDataFrame, full_df)
     except Exception:
         logger.warning("Failed to load master variables CSV from %s", master_path, exc_info=True)
         cache["loaded"] = True
@@ -3920,8 +3948,8 @@ def _load_master_variables() -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
     cache["core"] = core_df
     cache["full"] = full_df
 
-    core_df_cast = cast(pd.DataFrame, core_df)
-    full_df_cast = cast(pd.DataFrame, full_df)
+    core_df_cast = cast(PandasDataFrame, core_df)
+    full_df_cast = cast(PandasDataFrame, full_df)
     return (core_df_cast.copy(), full_df_cast.copy())
 
 def find_variables_near(cad_path: str):
@@ -4286,7 +4314,7 @@ def _split_hours_for_bucket(
     label: str,
     hours: float,
     render_state: "PlannerBucketRenderState" | None,
-    cfg: "QuoteConfiguration" | None,
+    cfg: QuoteConfiguration | None,
 ) -> tuple[float, float]:
     total_h = max(0.0, float(hours or 0.0))
     if not cfg or not getattr(cfg, "separate_machine_labor", False):
@@ -4366,7 +4394,7 @@ def _build_planner_bucket_render_state(
     rates: Mapping[str, Any] | None = None,
     removal_drilling_hours: float | None = None,
     prefer_removal_drilling_hours: bool = True,
-    cfg: "QuoteConfiguration" | None = None,
+    cfg: QuoteConfiguration | None = None,
     bucket_ops: Mapping[str, typing.Sequence[Mapping[str, Any]]] | None = None,
     drill_machine_minutes: float | None = None,
     drill_labor_minutes: float | None = None,
@@ -4632,7 +4660,7 @@ def _build_planner_bucket_render_state(
 def _display_rate_for_row(
     label: str,
     *,
-    cfg: "QuoteConfiguration" | None,
+    cfg: QuoteConfiguration | None,
     render_state: PlannerBucketRenderState | None,
     hours: float | None,
 ) -> str:
@@ -4782,7 +4810,7 @@ def _charged_hours_by_bucket(
     render_state: PlannerBucketRenderState | None = None,
     removal_drilling_hours: float | None = None,
     prefer_removal_drilling_hours: bool = True,
-    cfg: "QuoteConfiguration" | None = None,
+    cfg: QuoteConfiguration | None = None,
 ):
     """Return the hours that correspond to what we actually charged."""
     out: dict[str, float] = {}
@@ -11105,13 +11133,13 @@ def _tolerance_values_from_any(value: Any) -> list[float]:
     return results
 
 def _sum_time_from_series(
-    items: pd.Series,
-    values: pd.Series,
-    data_types: pd.Series,
-    mask: pd.Series,
+    items: PandasSeries,
+    values: PandasSeries,
+    data_types: PandasSeries,
+    mask: PandasSeries,
     *,
     default: float = 0.0,
-    exclude_mask: pd.Series | None = None,
+    exclude_mask: PandasSeries | None = None,
 ) -> float:
     """Shared implementation for extracting hour totals from sheet rows."""
 
@@ -11652,7 +11680,7 @@ def _normalize_material_group_code(value: Any) -> str:
     return simplified or text
 
 def _select_speeds_feeds_row(
-    table: pd.DataFrame | None,
+    table: PandasDataFrame | None,
     operation: str,
     material_key: str | None = None,
     *,
@@ -13166,7 +13194,7 @@ def _legacy_estimate_drilling_hours(
     *,
     material_group: str | None = None,
     hole_groups: Sequence[Mapping[str, Any]] | None = None,
-    speeds_feeds_table: pd.DataFrame | None = None,
+    speeds_feeds_table: PandasDataFrame | None = None,
     machine_params: _TimeMachineParams | None = None,
     overhead_params: _TimeOverheadParams | None = None,
     warnings: list[str] | None = None,
@@ -14454,7 +14482,7 @@ def estimate_drilling_hours(
     *,
     material_group: str | None = None,
     hole_groups: Sequence[Mapping[str, Any]] | None = None,
-    speeds_feeds_table: pd.DataFrame | None = None,
+    speeds_feeds_table: PandasDataFrame | None = None,
     machine_params: _TimeMachineParams | None = None,
     overhead_params: _TimeOverheadParams | None = None,
     warnings: list[str] | None = None,
@@ -14887,7 +14915,7 @@ def _coerce_speeds_feeds_csv_path(*sources: Mapping[str, Any] | None) -> str | N
     return None
 
 
-def _load_speeds_feeds_table_from_path(path: str | None) -> tuple[pd.DataFrame | None, bool]:
+def _load_speeds_feeds_table_from_path(path: str | None) -> tuple[PandasDataFrame | None, bool]:
     """Load the Speeds/Feeds CSV at ``path`` into a DataFrame."""
 
     if not path:
@@ -14896,7 +14924,7 @@ def _load_speeds_feeds_table_from_path(path: str | None) -> tuple[pd.DataFrame |
     if not text:
         return None, False
 
-    table: pd.DataFrame | None = None
+    table: PandasDataFrame | None = None
     try:
         candidate = Path(text)
     except Exception:
@@ -16765,7 +16793,7 @@ def extract_2d_features_from_pdf_vector(pdf_path: str) -> dict:
 # ---------- PDF-driven variables + inference ----------
 REQUIRED_COLS = ["Item", "Example Values / Options", "Data Type / Input Method"]
 
-def default_variables_template() -> pd.DataFrame:
+def default_variables_template() -> PandasDataFrame:
     if _HAS_PANDAS:
         core_df, _ = _load_master_variables()
         if core_df is not None:
@@ -16838,7 +16866,7 @@ def default_variables_template() -> pd.DataFrame:
     ]
     return pd.DataFrame(rows, columns=REQUIRED_COLS)
 
-def coerce_or_make_vars_df(df: pd.DataFrame | None) -> pd.DataFrame:
+def coerce_or_make_vars_df(df: PandasDataFrame | None) -> PandasDataFrame:
     """Ensure the variables dataframe has the required columns with tolerant matching."""
     if df is None:
         return default_variables_template().copy()
@@ -16965,7 +16993,7 @@ def _deep_get(d: dict, path):
             return None
     return cur
 
-def merge_estimate_into_vars(vars_df: pd.DataFrame, estimate: dict) -> pd.DataFrame:
+def merge_estimate_into_vars(vars_df: PandasDataFrame, estimate: dict) -> PandasDataFrame:
     for item, src in MAP_KEYS.items():
         value = _deep_get(estimate, src)
         if value is None:
@@ -20067,8 +20095,8 @@ class App(tk.Tk):
 
         self.geometry_service = geometry_service or geometry.GeometryService()
 
-        self.vars_df: pd.DataFrame | None = None
-        self.vars_df_full: pd.DataFrame | None = None
+        self.vars_df: PandasDataFrame | None = None
+        self.vars_df_full: PandasDataFrame | None = None
         self.geo: dict[str, Any] | None = None
         self.geo_context: dict[str, Any] = {}
         if hasattr(self.configuration, "create_params"):
@@ -20490,7 +20518,9 @@ class App(tk.Tk):
         self._set_last_variables_path("")
         return defaults
 
-    def _refresh_variables_cache(self, core_df: pd.DataFrame, full_df: pd.DataFrame) -> None:
+    def _refresh_variables_cache(
+        self, core_df: PandasDataFrame, full_df: PandasDataFrame
+    ) -> None:
         self.vars_df = core_df
         self.vars_df_full = full_df
 
@@ -20594,14 +20624,16 @@ class App(tk.Tk):
             pass
         return self.LLM_SUGGEST
 
-    def _populate_editor_tab(self, df: pd.DataFrame) -> None:
+    def _populate_editor_tab(self, df: PandasDataFrame) -> None:
         df = coerce_or_make_vars_df(df)
         if self.vars_df_full is None:
             _, master_full = _load_master_variables()
             if master_full is not None:
                 self.vars_df_full = master_full
         """Rebuild the Quote Editor tab using the latest variables dataframe."""
-        def _ensure_row(dataframe: pd.DataFrame, item: str, value: Any, dtype: str = "number") -> pd.DataFrame:
+        def _ensure_row(
+            dataframe: PandasDataFrame, item: str, value: Any, dtype: str = "number"
+        ) -> PandasDataFrame:
             mask = dataframe["Item"].astype(str).str.fullmatch(item, case=False)
             if mask.any():
                 return dataframe
@@ -20707,7 +20739,7 @@ class App(tk.Tk):
                 return re.sub(r"[^a-z0-9]", "", s)
 
             target = _norm_col(name)
-            column_sources: list[pd.Index] = []
+            column_sources: list[PandasIndex] = []
             if self.vars_df_full is not None:
                 column_sources.append(self.vars_df_full.columns)
             column_sources.append(df.columns)
@@ -20722,7 +20754,7 @@ class App(tk.Tk):
 
         # Build a lookup so each row can pull the descriptive columns from the
         # original spreadsheet while still operating on the sanitized df copy.
-        full_lookup: dict[str, pd.Series] = {}
+        full_lookup: dict[str, PandasSeries] = {}
         if self.vars_df_full is not None and "Item" in self.vars_df_full.columns:
             full_items = self.vars_df_full["Item"].astype(str)
             for idx, normalized in enumerate(full_items.apply(normalize_item)):
@@ -21362,8 +21394,8 @@ class App(tk.Tk):
                     if vp:
                         try:
                             core_df, full_df = read_variables_file(vp, return_full=True)
-                            core_df_t = typing.cast(pd.DataFrame, core_df)
-                            full_df_t = typing.cast(pd.DataFrame, full_df)
+                            core_df_t = typing.cast(PandasDataFrame, core_df)
+                            full_df_t = typing.cast(PandasDataFrame, full_df)
                             self._refresh_variables_cache(core_df_t, full_df_t)
                             self._set_last_variables_path(vp)
                         except Exception as read_err:
@@ -21500,8 +21532,8 @@ class App(tk.Tk):
                 return
             try:
                 core_df, full_df = read_variables_file(vp, return_full=True)
-                core_df_t = typing.cast(pd.DataFrame, core_df)
-                full_df_t = typing.cast(pd.DataFrame, full_df)
+                core_df_t = typing.cast(PandasDataFrame, core_df)
+                full_df_t = typing.cast(PandasDataFrame, full_df)
                 self._refresh_variables_cache(core_df_t, full_df_t)
                 self._set_last_variables_path(vp)
             except Exception as e:
@@ -21536,7 +21568,7 @@ class App(tk.Tk):
         self.geo_context = dict(geo or {})
         self._log_geo(geo)
 
-        vars_df_for_editor = typing.cast(pd.DataFrame, self.vars_df)
+        vars_df_for_editor = typing.cast(PandasDataFrame, self.vars_df)
         self._populate_editor_tab(vars_df_for_editor)
         self.nb.select(self.tab_editor)
         self.status_var.set("Variables loaded. Review the Quote Editor and click Generate Quote.")
