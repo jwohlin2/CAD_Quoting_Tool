@@ -12754,7 +12754,7 @@ def _group_geo_by_diam(
         depth_vals = bucket.get("depth") or []
         depth_avg = sum(depth_vals) / len(depth_vals) if depth_vals else None
         grouped.append({"diam_in": float(diam_avg), "avg_depth_in": float(depth_avg) if depth_avg else None})
-    grouped.sort(key=lambda item: item.get("diam_in", 0.0))
+    grouped.sort(key=lambda item: float(item.get("diam_in") or 0.0))
     return grouped
 
 
@@ -12873,7 +12873,12 @@ def _dedupe_geo_rows(
         elif thickness is not None and thickness > 0:
             entry["depth_in"] = float(round(thickness, 3))
         out.append(entry)
-    out.sort(key=lambda item: (item.get("diam_in", 0.0), item.get("depth_in", 0.0)))
+    out.sort(
+        key=lambda item: (
+            float(item.get("diam_in") or 0.0),
+            float(item.get("depth_in") or 0.0),
+        )
+    )
     return out
 
 
@@ -12993,24 +12998,23 @@ def _normalize_hole_sets_for_geo(
             entry["depth_mm"] = float(round(depth_in * 25.4, 3))
         normalized.append(entry)
 
-    normalized.sort(key=lambda item: item.get("dia_mm", 0.0))
+    normalized.sort(key=lambda item: float(item.get("dia_mm") or 0.0))
 
-    try:
-        geo_context["hole_sets_source"] = source_used
-        geo_context["hole_merge_audit"] = {**audit, "source": source_used}
-    except Exception:
-        pass
+    if isinstance(geo_context, _MutableMappingABC):
+        geo_context_mut = typing.cast(MutableMapping[str, Any], geo_context)
+        geo_context_mut["hole_sets_source"] = source_used
+        geo_context_mut["hole_merge_audit"] = {**audit, "source": source_used}
 
     return normalized
 
 
 def _ensure_geo_context_fields(
-    geo_payload: Mapping[str, Any] | None,
+    geo_payload: MutableMapping[str, Any] | None,
     value_map: Mapping[str, Any] | None,
     *,
     cfg: QuoteConfiguration | None = None,
 ) -> dict[str, Any]:
-    if not isinstance(geo_payload, dict):
+    if not isinstance(geo_payload, _MutableMappingABC):
         return {}
 
     derived = geo_payload.get("derived")
