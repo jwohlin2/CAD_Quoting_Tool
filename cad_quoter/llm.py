@@ -1288,7 +1288,7 @@ def explain_quote(
     elif has_drilling:
         include_drilling_in_top = True
 
-    if include_drilling_in_top and "drilling" not in [p.lower() for p in top_procs]:
+    if drilling_hours is not None and "drilling" not in [p.lower() for p in top_procs]:
         top_procs.append("Drilling")
 
     if drill_minutes_present:

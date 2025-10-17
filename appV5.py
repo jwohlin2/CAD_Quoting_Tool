@@ -4150,9 +4150,10 @@ def _split_hours_for_bucket(
     if not cfg or not getattr(cfg, "separate_machine_labor", False):
         return (0.0, total_h)
 
-    key = _canonical_bucket_key(label)
+    canon_label = _canonical_bucket_key(label)
+    key = canon_label or _normalize_bucket_key(label)
     if not key:
-        key = _normalize_bucket_key(label)
+        key = str(label or "")
 
     extra: Mapping[str, Any] | None = None
     if render_state is not None:
@@ -4162,7 +4163,7 @@ def _split_hours_for_bucket(
     if extra is None:
         extra = {}
 
-    if key == "drilling":
+    if canon_label == "drilling" or key == "drilling":
         m_min = _coerce_float_or_none(extra.get("drill_machine_minutes"))
         l_min = _coerce_float_or_none(extra.get("drill_labor_minutes"))
         if (
@@ -8022,6 +8023,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         drill_labor_minutes=drill_tool_minutes_estimate,
         drill_total_minutes=drill_total_minutes_estimate,
     )
+    render_state = bucket_state
 
     bucket_state_extra_map = _stash_drill_minutes(bucket_state)
     if (
@@ -9360,13 +9362,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             label = _display_bucket_label(canon_key, label_overrides)
             summary_hours[label] = summary_hours.get(label, 0.0) + (minutes_val / 60.0)
 
+        prefer_card_minutes = bool(
+            getattr(cfg, "prefer_removal_drilling_hours", prefer_removal_drilling_hours)
+        )
         override_hours: float | None = None
-        prefer_drill_summary = prefer_removal_drilling_hours
-        if cfg is not None:
-            prefer_drill_summary = bool(
-                getattr(cfg, "prefer_removal_drilling_hours", prefer_drill_summary)
-            )
-        if prefer_drill_summary:
+        if prefer_card_minutes:
             extra_map = getattr(bucket_state, "extra", {})
             if isinstance(extra_map, _MappingABC):
                 candidate = extra_map.get("removal_drilling_hours")
@@ -9396,6 +9396,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if (
                 override_hours is None
                 and removal_drilling_hours_precise is not None
+                and prefer_card_minutes
             ):
                 try:
                     override_hours = float(removal_drilling_hours_precise)
@@ -9404,6 +9405,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if override_hours is not None and override_hours >= 0:
             display_label = _display_bucket_label("drilling", label_overrides)
             summary_hours[display_label] = round(max(0.0, float(override_hours)), 2)
+
+        if prefer_card_minutes:
+            extra_map = getattr(bucket_state, "extra", {})
+            if isinstance(extra_map, _MappingABC):
+                drill_total_minutes = extra_map.get("drill_total_minutes")
+                if isinstance(drill_total_minutes, (int, float)):
+                    drill_label = _display_bucket_label("drilling", label_overrides)
+                    summary_hours[drill_label] = round(float(drill_total_minutes) / 60.0, 2)
 
         planner_labels = {"Planner Machine", "Planner Labor", "Planner Total"}
         for label, hours_val in summary_hours.items():
