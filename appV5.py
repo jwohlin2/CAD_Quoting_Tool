@@ -4081,36 +4081,32 @@ def _charged_hours_by_bucket(
             )
             charged[label] = desired
 
-    drill_bucket_label = next(
-        (
-            key
-            for key in charged
-            if _canonical_bucket_key(key) in {"drilling", "drill"}
-        ),
-        "",
-    )
-    drill_bucket_hours = (
-        _coerce_float_or_none(charged.get(drill_bucket_label))
-        if drill_bucket_label
-        else None
-    )
-
-    def _fmt_diagnostic(value: float | None) -> str:
-        if value is None:
-            return "nan"
-        try:
+    def _fmt_value(value: Any, *, decimals: int, suffix: str = "") -> str:
+        if isinstance(value, (int, float)):
             numeric = float(value)
-        except Exception:
-            return "nan"
-        if not math.isfinite(numeric):
-            return "nan"
-        return f"{numeric:.2f}"
+            if math.isfinite(numeric):
+                return f"{numeric:.{decimals}f}{suffix}"
+        return "nan"
+
+    card_total_hours = None
+    if (
+        isinstance(drill_machine_minutes, (int, float))
+        and isinstance(drill_labor_minutes, (int, float))
+    ):
+        total_minutes = float(drill_machine_minutes) + float(drill_labor_minutes)
+        if math.isfinite(total_minutes):
+            card_total_hours = total_minutes / 60.0
+
+    charged_drilling_hours = charged.get("Drilling")
+    if charged_drilling_hours is None:
+        charged_drilling_hours = charged.get("drilling")
 
     _log.info(
-        "[drill-sync] card_m=%s card_l=%s charged_hr=%s",
-        _fmt_diagnostic(drill_machine_minutes),
-        _fmt_diagnostic(drill_labor_minutes),
-        _fmt_diagnostic(drill_bucket_hours),
+        "[drill-sync] card_m=%s card_l=%s → card_total_hr=%s  | charged_drilling_hr=%s",
+        _fmt_value(drill_machine_minutes, decimals=2, suffix="min"),
+        _fmt_value(drill_labor_minutes, decimals=2, suffix="min"),
+        _fmt_value(card_total_hours, decimals=6, suffix="hr"),
+        _fmt_value(charged_drilling_hours, decimals=2, suffix="hr"),
     )
 
     return charged
@@ -4816,42 +4812,57 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         machine_rate_value = 90.0
     rates["MachineRate"] = machine_rate_value
 
-    if "ProgrammerRate" not in rates:
-        programmer_fallback = (
-            engineer_rate_val if engineer_rate_val > 0 else _coerce_rate_value(rates.get("MillingRate"))
-        )
-        if programmer_fallback <= 0 and shop_rate_val > 0:
-            programmer_fallback = shop_rate_val
-        if programmer_fallback <= 0:
-            programmer_fallback = _coerce_rate_value(rates.get("LaborRate"))
-        if programmer_fallback <= 0:
-            programmer_fallback = 90.0
-        if programmer_fallback > 0:
-            programmer_fallback = max(programmer_fallback, 90.0)
-        rates.setdefault("ProgrammerRate", programmer_fallback)
+    cfg_programmer_rate: float | None = None
+    if cfg and getattr(cfg, "separate_machine_labor", False):
+        cfg_programmer_rate = _coerce_rate_value(getattr(cfg, "labor_rate_per_hr", None))
+        if cfg_programmer_rate <= 0:
+            cfg_programmer_rate = 45.0
 
-    programmer_rate_value = _coerce_rate_value(rates.get("ProgrammerRate"))
-    if programmer_rate_value <= 0:
-        programmer_rate_value = engineer_rate_val if engineer_rate_val > 0 else _coerce_rate_value(rates.get("MillingRate"))
-    if programmer_rate_value <= 0 and shop_rate_val > 0:
-        programmer_rate_value = shop_rate_val
-    if programmer_rate_value <= 0:
-        programmer_rate_value = labor_rate_value
-    if programmer_rate_value <= 0:
-        programmer_rate_value = 90.0
-    if programmer_rate_value > 0:
-        programmer_rate_value = max(programmer_rate_value, 90.0)
+    if cfg_programmer_rate is not None and cfg_programmer_rate > 0:
+        programmer_rate_value = float(cfg_programmer_rate)
+        programming_rate_value = float(cfg_programmer_rate)
+    else:
+        if "ProgrammerRate" not in rates:
+            programmer_fallback = (
+                engineer_rate_val if engineer_rate_val > 0 else _coerce_rate_value(rates.get("MillingRate"))
+            )
+            if programmer_fallback <= 0 and shop_rate_val > 0:
+                programmer_fallback = shop_rate_val
+            if programmer_fallback <= 0:
+                programmer_fallback = _coerce_rate_value(rates.get("LaborRate"))
+            if programmer_fallback <= 0:
+                programmer_fallback = 90.0
+            if programmer_fallback > 0:
+                programmer_fallback = max(programmer_fallback, 90.0)
+            rates.setdefault("ProgrammerRate", programmer_fallback)
+
+        programmer_rate_value = _coerce_rate_value(rates.get("ProgrammerRate"))
+        if programmer_rate_value <= 0:
+            programmer_rate_value = (
+                engineer_rate_val
+                if engineer_rate_val > 0
+                else _coerce_rate_value(rates.get("MillingRate"))
+            )
+        if programmer_rate_value <= 0 and shop_rate_val > 0:
+            programmer_rate_value = shop_rate_val
+        if programmer_rate_value <= 0:
+            programmer_rate_value = labor_rate_value
+        if programmer_rate_value <= 0:
+            programmer_rate_value = 90.0
+        if programmer_rate_value > 0:
+            programmer_rate_value = max(programmer_rate_value, 90.0)
+
+        programming_rate_value = _coerce_rate_value(rates.get("ProgrammingRate"))
+        if programming_rate_value <= 0:
+            programming_rate_value = programmer_rate_value
+        if programming_rate_value <= 0:
+            programming_rate_value = labor_rate_value
+        if programming_rate_value <= 0:
+            programming_rate_value = 90.0
+        if programming_rate_value > 0:
+            programming_rate_value = max(programming_rate_value, 90.0)
+
     rates["ProgrammerRate"] = programmer_rate_value
-
-    programming_rate_value = _coerce_rate_value(rates.get("ProgrammingRate"))
-    if programming_rate_value <= 0:
-        programming_rate_value = programmer_rate_value
-    if programming_rate_value <= 0:
-        programming_rate_value = labor_rate_value
-    if programming_rate_value <= 0:
-        programming_rate_value = 90.0
-    if programming_rate_value > 0:
-        programming_rate_value = max(programming_rate_value, 90.0)
     rates["ProgrammingRate"] = programming_rate_value
 
     inspector_rate_value = _coerce_rate_value(rates.get("InspectorRate"))
@@ -6768,7 +6779,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     nre = breakdown.setdefault("nre", {})
     prog_hr = float(nre.get("programming_hr") or 0.0)
     if prog_hr > 0 and float(nre.get("programming_cost") or 0.0) == 0.0:
-        nre["programming_cost"] = round(prog_hr * rates["ProgrammingRate"], 2)
+        if cfg and getattr(cfg, "separate_machine_labor", False):
+            cfg_prog_rate = _coerce_float_or_none(getattr(cfg, "labor_rate_per_hr", None))
+            if cfg_prog_rate is None or cfg_prog_rate <= 0:
+                cfg_prog_rate = 45.0
+            programmer_rate_for_cost = float(cfg_prog_rate)
+        else:
+            programmer_rate_for_cost = float(_lookup_rate("programming", rates) or 90.0)
+        nre["programming_cost"] = round(prog_hr * programmer_rate_for_cost, 2)
 
     # ---- NRE / Setup costs ---------------------------------------------------
     append_line("NRE / Setup Costs (per lot)")
@@ -15593,27 +15611,33 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         else {}
     )
     programmer_rate = 0.0
-    if isinstance(labor_bucket, _MappingABC):
-        for key in ("programmer", "Programmer", "PROGRAMMER"):
-            rate_value = labor_bucket.get(key)
-            if rate_value is None:
-                continue
-            try:
-                programmer_rate = float(rate_value)
-            except Exception:
-                continue
-            if programmer_rate > 0:
-                break
-    if programmer_rate <= 0:
-        programmer_rate = _lookup_rate(
-            "ProgrammingRate",
-            rates,
-            params,
-            default_rates,
-            fallback=85.0,
-        )
-    if programmer_rate <= 0:
-        programmer_rate = 85.0
+    if cfg and getattr(cfg, "separate_machine_labor", False):
+        cfg_rate = _coerce_float_or_none(getattr(cfg, "labor_rate_per_hr", None))
+        if cfg_rate is None or cfg_rate <= 0:
+            cfg_rate = 45.0
+        programmer_rate = float(cfg_rate)
+    else:
+        if isinstance(labor_bucket, _MappingABC):
+            for key in ("programmer", "Programmer", "PROGRAMMER"):
+                rate_value = labor_bucket.get(key)
+                if rate_value is None:
+                    continue
+                try:
+                    programmer_rate = float(rate_value)
+                except Exception:
+                    continue
+                if programmer_rate > 0:
+                    break
+        if programmer_rate <= 0:
+            programmer_rate = _lookup_rate(
+                "programming",
+                rates,
+                params,
+                default_rates,
+                fallback=90.0,
+            )
+        if programmer_rate <= 0:
+            programmer_rate = 90.0
 
     if programmer_rate > 0:
         if isinstance(merged_two_bucket_rates, dict):
