@@ -24,6 +24,7 @@ import re
 import sys
 import time
 import typing
+from functools import cmp_to_key, lru_cache
 from typing import Any, Mapping, MutableMapping
 from collections import Counter
 from collections.abc import (
@@ -1581,7 +1582,6 @@ from typing import (
     overload,
     no_type_check,
 )
-from functools import cmp_to_key, lru_cache
 
 if typing.TYPE_CHECKING:  # pragma: no cover - import is for type checking only
     from ezdxf.document import Drawing  # type: ignore[attr-defined]
@@ -2144,7 +2144,10 @@ else:  # pragma: no cover - fallback definitions keep quoting functional without
         return "LLM explanation unavailable."
 
 
-import pandas as pd
+try:
+    import pandas as pd  # type: ignore[import]
+except Exception:  # pragma: no cover - optional dependency
+    pd = None  # type: ignore[assignment]
 from typing import TypedDict
 
 try:
@@ -2716,6 +2719,7 @@ def _shape_is_null(shape: Any) -> bool:
 # Safe casters: no-ops if already cast; unwrap list nodes; check kind
 # Choose stack
 _BRepGProp_mod = None
+_TO_EDGE = lambda s: s
 STACK_GPROP = "pythonocc"
 _ocp_brepgprop = _import_optional("OCP.BRepGProp")
 if _ocp_brepgprop is not None and hasattr(_ocp_brepgprop, "BRepGProp"):
@@ -2724,26 +2728,42 @@ if _ocp_brepgprop is not None and hasattr(_ocp_brepgprop, "BRepGProp"):
 else:
     _occ_brepgprop = _import_optional("OCC.Core.BRepGProp")
     if _occ_brepgprop is None:
-        raise ImportError("OCC.Core.BRepGProp is required for pythonocc backend")
-    if hasattr(_occ_brepgprop, "BRepGProp"):
-        _BRepGProp_mod = getattr(_occ_brepgprop, "BRepGProp")
-    else:
         from types import SimpleNamespace
 
+        def _missing_brepgprop(*_args, **_kwargs):  # pragma: no cover - optional backend
+            raise RuntimeError("BRepGProp backend unavailable")
+
         _BRepGProp_mod = SimpleNamespace(
-            LinearProperties=getattr(_occ_brepgprop, "brepgprop_LinearProperties"),
-            SurfaceProperties=getattr(_occ_brepgprop, "brepgprop_SurfaceProperties"),
-            VolumeProperties=getattr(_occ_brepgprop, "brepgprop_VolumeProperties"),
+            LinearProperties=_missing_brepgprop,
+            SurfaceProperties=_missing_brepgprop,
+            VolumeProperties=_missing_brepgprop,
         )
+        STACK_GPROP = "stub"
 
-    def _to_edge_occ(s):
-        try:
-            from OCC.Core.TopoDS import topods_Edge as _fn  # type: ignore[attr-defined]
-        except Exception:
-            from OCC.Core.TopoDS import Edge as _fn  # type: ignore[attr-defined]
-        return _fn(s)
+        def _to_edge_stub(s):
+            return s
 
-    _TO_EDGE = _to_edge_occ
+        _TO_EDGE = _to_edge_stub
+    else:
+        if hasattr(_occ_brepgprop, "BRepGProp"):
+            _BRepGProp_mod = getattr(_occ_brepgprop, "BRepGProp")
+        else:
+            from types import SimpleNamespace
+
+            _BRepGProp_mod = SimpleNamespace(
+                LinearProperties=getattr(_occ_brepgprop, "brepgprop_LinearProperties"),
+                SurfaceProperties=getattr(_occ_brepgprop, "brepgprop_SurfaceProperties"),
+                VolumeProperties=getattr(_occ_brepgprop, "brepgprop_VolumeProperties"),
+            )
+
+        def _to_edge_occ(s):
+            try:
+                from OCC.Core.TopoDS import topods_Edge as _fn  # type: ignore[attr-defined]
+            except Exception:
+                from OCC.Core.TopoDS import Edge as _fn  # type: ignore[attr-defined]
+            return _fn(s)
+
+        _TO_EDGE = _to_edge_occ
 
 # Resolve topods casters across bindings
 
@@ -2856,61 +2876,68 @@ class _OdafcModule(Protocol):
 BRepTools_UVBounds: Callable[[Any], Tuple[float, float, float, float]] = _missing_uv_bounds
 _brep_read = _missing_brep_read
 
-try:
-    # ---- OCP branch ----
-    from OCP.BRep import (  # type: ignore[import]
-        BRep_Builder,
-        BRep_Tool,  # OCP version
-    )  # type: ignore[import]
-    from OCP.BRepAdaptor import BRepAdaptor_Curve  # type: ignore[import]
-    from OCP.BRepAlgoAPI import BRepAlgoAPI_Section  # type: ignore[import]
-    from OCP.BRepCheck import BRepCheck_Analyzer  # type: ignore[import]
-    from OCP.BRepGProp import BRepGProp  # type: ignore[import]
-    from OCP.GeomAbs import (  # type: ignore[import]
-        GeomAbs_BezierSurface,
-        GeomAbs_BSplineSurface,
-        GeomAbs_Circle,
-        GeomAbs_Cone,
-        GeomAbs_Cylinder,
-        GeomAbs_Plane,
-        GeomAbs_Torus,
-    )
-    from OCP.GeomAdaptor import GeomAdaptor_Surface  # type: ignore[import]
-    from OCP.gp import gp_Dir, gp_Pln, gp_Pnt  # type: ignore[import]
-    from OCP.GProp import GProp_GProps  # type: ignore[import]
-    from OCP.ShapeAnalysis import ShapeAnalysis_Surface  # type: ignore[import]
-    from OCP.ShapeFix import ShapeFix_Shape  # type: ignore[import]
-    from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE  # type: ignore[import]
-    from OCP.TopExp import TopExp, TopExp_Explorer  # type: ignore[import]
-    from OCP.TopoDS import TopoDS_Compound, TopoDS_Face, TopoDS_Shape  # type: ignore[import]
+_ocp_brep_module = _import_optional("OCP.BRep")
+_occ_brep_module = _import_optional("OCC.Core.BRep")
+_ocp_backend_ready = False
 
-    # ADD THESE TWO IMPORTS
-    from OCP.BRepTools import BRepTools  # type: ignore[import]
-    from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape  # type: ignore[import]
-    BACKEND_OCC = "OCP"
+if _ocp_brep_module is not None:
+    try:
+        from OCP.BRep import (  # type: ignore[import]
+            BRep_Builder,
+            BRep_Tool,  # OCP version
+        )  # type: ignore[import]
+        from OCP.BRepAdaptor import BRepAdaptor_Curve  # type: ignore[import]
+        from OCP.BRepAlgoAPI import BRepAlgoAPI_Section  # type: ignore[import]
+        from OCP.BRepCheck import BRepCheck_Analyzer  # type: ignore[import]
+        from OCP.BRepGProp import BRepGProp  # type: ignore[import]
+        from OCP.GeomAbs import (  # type: ignore[import]
+            GeomAbs_BezierSurface,
+            GeomAbs_BSplineSurface,
+            GeomAbs_Circle,
+            GeomAbs_Cone,
+            GeomAbs_Cylinder,
+            GeomAbs_Plane,
+            GeomAbs_Torus,
+        )
+        from OCP.GeomAdaptor import GeomAdaptor_Surface  # type: ignore[import]
+        from OCP.gp import gp_Dir, gp_Pln, gp_Pnt  # type: ignore[import]
+        from OCP.GProp import GProp_GProps  # type: ignore[import]
+        from OCP.ShapeAnalysis import ShapeAnalysis_Surface  # type: ignore[import]
+        from OCP.ShapeFix import ShapeFix_Shape  # type: ignore[import]
+        from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE  # type: ignore[import]
+        from OCP.TopExp import TopExp, TopExp_Explorer  # type: ignore[import]
+        from OCP.TopoDS import TopoDS_Compound, TopoDS_Face, TopoDS_Shape  # type: ignore[import]
+        from OCP.BRepTools import BRepTools  # type: ignore[import]
+        from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape  # type: ignore[import]
 
-    def _ocp_uv_bounds(face: Any) -> Tuple[float, float, float, float]:
-        tools = cast(Any, BRepTools)
-        return tools.UVBounds(face)
+        BACKEND_OCC = "OCP"
 
-    def _ocp_brep_read(path: str) -> Any:
-        s = _new_topods_shape()
-        builder = BRep_Builder()  # type: ignore[call-arg]
-        read_s = getattr(BRepTools, "Read_s", None)
-        if callable(read_s):
-            ok = read_s(s, str(path), builder)
-        else:
+        def _ocp_uv_bounds(face: Any) -> Tuple[float, float, float, float]:
             tools = cast(Any, BRepTools)
-            ok = tools.Read(s, str(path), builder)
-        if ok is False:
-            raise RuntimeError("BREP read failed")
-        return s
+            return tools.UVBounds(face)
 
-    BRepTools_UVBounds = _ocp_uv_bounds
-    _brep_read = _ocp_brep_read
+        def _ocp_brep_read(path: str) -> Any:
+            s = _new_topods_shape()
+            builder = BRep_Builder()  # type: ignore[call-arg]
+            read_s = getattr(BRepTools, "Read_s", None)
+            if callable(read_s):
+                ok = read_s(s, str(path), builder)
+            else:
+                tools = cast(Any, BRepTools)
+                ok = tools.Read(s, str(path), builder)
+            if ok is False:
+                raise RuntimeError("BREP read failed")
+            return s
 
-except Exception:
-    # ---- OCC.Core branch ----
+        BRepTools_UVBounds = _ocp_uv_bounds
+        _brep_read = _ocp_brep_read
+        _ocp_backend_ready = True
+    except Exception:
+        _ocp_backend_ready = False
+
+if _ocp_backend_ready:
+    pass
+elif _occ_brep_module is not None:
     from OCC.Core.BRep import (
         BRep_Builder,
         BRep_Tool,  # ? OCC version
@@ -2938,28 +2965,31 @@ except Exception:
     )
     from OCC.Core.TopExp import TopExp_Explorer
     from OCC.Core.TopoDS import TopoDS_Compound, TopoDS_Face, TopoDS_Shape
-
-    # ADD TopTools import and TopoDS_Face for the fix below
     from OCC.Core.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
-    BACKEND_OCC = "OCC.Core"
 
-    # BRepGProp shim (pythonocc uses free functions)
     import OCC.Core.BRepGProp as _occ_brepgprop  # type: ignore[import]
+    import OCC.Core.BRepTools as _occ_breptools
+
+    BACKEND_OCC = "OCC.Core"
 
     brepgprop_LinearProperties = getattr(_occ_brepgprop, "brepgprop_LinearProperties")
     brepgprop_SurfaceProperties = getattr(_occ_brepgprop, "brepgprop_SurfaceProperties")
     brepgprop_VolumeProperties = getattr(_occ_brepgprop, "brepgprop_VolumeProperties")
+
     class _BRepGPropShim:
         @staticmethod
-        def SurfaceProperties_s(shape_or_face, gprops): brepgprop_SurfaceProperties(shape_or_face, gprops)
-        @staticmethod
-        def LinearProperties_s(edge, gprops):          brepgprop_LinearProperties(edge, gprops)
-        @staticmethod
-        def VolumeProperties_s(shape, gprops):         brepgprop_VolumeProperties(shape, gprops)
-    BRepGProp = _BRepGPropShim
+        def SurfaceProperties_s(shape_or_face, gprops):
+            return brepgprop_SurfaceProperties(shape_or_face, gprops)
 
-    # UV bounds and brep read are free functions
-    import OCC.Core.BRepTools as _occ_breptools
+        @staticmethod
+        def LinearProperties_s(edge, gprops):
+            return brepgprop_LinearProperties(edge, gprops)
+
+        @staticmethod
+        def VolumeProperties_s(shape, gprops):
+            return brepgprop_VolumeProperties(shape, gprops)
+
+    BRepGProp = _BRepGPropShim
     BRepTools = cast(Any, _occ_breptools).BRepTools
 
     def _occ_uv_bounds(face: Any) -> Tuple[float, float, float, float]:
@@ -2982,6 +3012,19 @@ except Exception:
             raise RuntimeError("BREP read failed")
         return s
 
+    BRepTools_UVBounds = _occ_uv_bounds
+    _brep_read = _occ_brep_read
+else:
+    BACKEND_OCC = "stub"
+
+    def _occ_uv_bounds(face: Any) -> Tuple[float, float, float, float]:  # pragma: no cover
+        raise RuntimeError("UV bounds function is unavailable")
+
+    def _occ_brep_read(path: str) -> Any:  # pragma: no cover
+        raise RuntimeError("BREP read is unavailable")
+
+    BRepTools = None  # type: ignore[assignment]
+    TopTools_IndexedDataMapOfShapeListOfShape = None  # type: ignore[assignment]
     BRepTools_UVBounds = _occ_uv_bounds
     _brep_read = _occ_brep_read
 
@@ -3557,8 +3600,7 @@ LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ----------------- Variables & quote -----------------
 try:
-    pd  # type: ignore[name-defined]
-    _HAS_PANDAS = True
+    _HAS_PANDAS = bool(pd is not None)  # type: ignore[name-defined]
 except NameError:
     _HAS_PANDAS = False
 
@@ -5519,6 +5561,81 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         material_selection.setdefault("material_group", group_material_breakdown)
     material = material_block
     material_detail_for_breakdown = material
+
+    MATERIAL_WARNING_LABEL = "⚠ MATERIALS MISSING"
+    material_warning_entries: list[Mapping[str, Any]] = []
+    cost_breakdown_entries: list[tuple[str, float]] = []
+
+    def _extend_material_entries(source: Any) -> None:
+        if isinstance(source, Sequence):
+            for entry in source:
+                if isinstance(entry, _MappingABC):
+                    material_warning_entries.append(entry)
+        elif isinstance(source, _MappingABC):
+            entries = source.get("entries")
+            if isinstance(entries, Sequence):
+                for entry in entries:
+                    if isinstance(entry, _MappingABC):
+                        material_warning_entries.append(entry)
+
+    raw_cost_breakdown: Any = None
+    if isinstance(result, _MappingABC):
+        _extend_material_entries(result.get("materials"))
+        raw_cost_breakdown = result.get("cost_breakdown")
+    if isinstance(breakdown, _MappingABC):
+        _extend_material_entries(breakdown.get("materials"))
+        _extend_material_entries(breakdown.get("material"))
+        if raw_cost_breakdown is None:
+            raw_cost_breakdown = breakdown.get("cost_breakdown")
+    _extend_material_entries(pricing.get("materials"))
+
+    if raw_cost_breakdown is None and isinstance(result, _MappingABC):
+        raw_cost_breakdown = result.get("cost_breakdown")
+    if raw_cost_breakdown is None and isinstance(breakdown, _MappingABC):
+        raw_cost_breakdown = breakdown.get("cost_breakdown")
+    if isinstance(raw_cost_breakdown, _MappingABC):
+        for key, value in raw_cost_breakdown.items():
+            amount = _coerce_float_or_none(value)
+            if amount is None:
+                continue
+            cost_breakdown_entries.append((str(key), float(amount)))
+    elif isinstance(raw_cost_breakdown, Sequence):
+        for entry in raw_cost_breakdown:
+            if isinstance(entry, Sequence) and len(entry) >= 2:
+                label = str(entry[0])
+                amount = _coerce_float_or_none(entry[1])
+                if amount is None:
+                    continue
+                cost_breakdown_entries.append((label, float(amount)))
+
+    def _material_entries_summary(entries: Sequence[Mapping[str, Any]]) -> tuple[float, bool]:
+        total = 0.0
+        has_label = False
+        for entry in entries:
+            amount = _coerce_float_or_none(entry.get("amount"))
+            if amount is not None:
+                total += float(amount)
+            if not has_label:
+                label_text = str(entry.get("label") or entry.get("detail") or "").strip()
+                if label_text:
+                    has_label = True
+        return total, has_label
+
+    material_entries_total, material_entries_have_label = _material_entries_summary(
+        material_warning_entries
+    )
+
+    materials_direct_total = _coerce_float_or_none(
+        result.get("materials_direct") if isinstance(result, _MappingABC) else None
+    )
+    if materials_direct_total is None and isinstance(breakdown, _MappingABC):
+        materials_direct_total = _coerce_float_or_none(breakdown.get("materials_direct"))
+    materials_direct_total = float(materials_direct_total or 0.0)
+
+    material_warning_summary = bool(material_entries_have_label) and (
+        material_entries_total <= 0.0 and materials_direct_total <= 0.0
+    )
+    material_warning_needed = material_warning_summary
     drilling_meta = breakdown.get("drilling_meta", {}) or {}
     process_costs_raw = breakdown.get("process_costs", {}) or {}
     process_costs = (
@@ -5737,6 +5854,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             )
         except Exception:
             material_total_for_directs = 0.0
+    if material_total_for_directs <= 0:
+        if materials_direct_total > 0:
+            material_total_for_directs = float(materials_direct_total)
+        elif material_entries_total > 0:
+            material_total_for_directs = float(material_entries_total)
     if material_total_for_directs <= 0 and isinstance(pass_through, dict):
         try:
             material_key = next(
@@ -6318,6 +6440,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         cfg=cfg,
     )
     append_lines(header_lines)
+    if material_warning_summary:
+        append_line(MATERIAL_WARNING_LABEL)
     append_line("")
 
     if isinstance(breakdown, _MutableMappingABC):
@@ -9827,6 +9951,18 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     material_display_amount = round(float(material_direct_contribution), 2)
     material_total_for_why = float(material_display_amount)
     material_net_cost = float(material_display_amount)
+    if material_display_amount <= 0.0:
+        fallback_amount = 0.0
+        if materials_direct_total > 0:
+            fallback_amount = float(materials_direct_total)
+        if material_entries_total > 0:
+            fallback_amount = max(fallback_amount, float(material_entries_total))
+        if fallback_amount > 0:
+            material_display_amount = round(fallback_amount, 2)
+            material_total_for_why = float(material_display_amount)
+            material_net_cost = float(material_display_amount)
+    if material_entries_have_label and material_display_amount <= 0.0:
+        material_warning_needed = True
     direct_costs_map: dict[Any, Any]
     if isinstance(pricing, dict):
         direct_costs_map = pricing.setdefault("direct_costs", {})
@@ -9963,6 +10099,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 f"Material & Stock (printed above) contributes {material_amount_text} to Direct Costs",
                 indent="    ",
             )
+    elif material_warning_needed and material_entries_have_label:
+        row("Materials & Stock", 0.0, indent="  ")
+        write_detail(
+            f"{MATERIAL_WARNING_LABEL} Material items are present but no material costs were recorded in the quote.",
+            indent="    ",
+        )
 
     for display_label, amount_val, raw_key in display_entries:
         if (amount_val > 0) or show_zeros:
@@ -9979,6 +10121,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     write_detail(str(detail_value), indent="    ")
 
     row("Total", total_direct_costs_value, indent="  ")
+    if cost_breakdown_entries:
+        append_line("")
+        append_line("Cost Breakdown")
+        append_line(divider)
+        for label, amount in cost_breakdown_entries:
+            row(label, amount, indent="  ")
     pass_through_total = float(sum(displayed_pass_through.values()))
 
     material_for_totals = material_display_amount
