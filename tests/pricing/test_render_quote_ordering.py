@@ -6,7 +6,7 @@ import appV5
 
 def _render_payload(result: Mapping) -> dict:
     rendered = appV5.render_quote(result, currency="$")
-    assert "Quote Summary" in rendered
+    assert "QUOTE SUMMARY" in rendered
     breakdown = result.get("breakdown", {}) if isinstance(result, dict) else {}
     payload = breakdown.get("render_payload") if isinstance(breakdown, dict) else None
     if payload is None and isinstance(result, dict):
@@ -235,3 +235,84 @@ def test_render_payload_obeys_pricing_math_guards() -> None:
     reported_labor_total = payload.get("labor_total_amount")
     assert reported_labor_total is not None
     assert math.isclose(reported_labor_total, labor_sum, abs_tol=0.01)
+
+
+
+def test_render_quote_promotes_planner_pricing_source() -> None:
+    result = {
+        "price": 0.0,
+        "breakdown": {
+            "qty": 1,
+            "totals": {
+                "labor_cost": 0.0,
+                "direct_costs": 0.0,
+                "subtotal": 0.0,
+                "with_expedite": 0.0,
+            },
+            "nre_detail": {},
+            "nre": {},
+            "material": {},
+            "process_costs": {"milling": 0.0},
+            "process_meta": {
+                "planner_total": {"minutes": 120.0},
+                "milling": {"hr": 0.0},
+            },
+            "pass_through": {"Material": 0.0},
+            "pricing_source": "legacy",
+            "applied_pcts": {
+                "MarginPct": 0.0,
+            },
+            "rates": {},
+            "params": {},
+            "labor_cost_details": {},
+            "direct_cost_details": {},
+        },
+    }
+
+    rendered = appV5.render_quote(result, currency="$")
+    lines = rendered.splitlines()
+
+    assert "Pricing Source: Estimator" in lines
+    assert all("Pricing Source: Legacy" not in line for line in lines)
+
+
+def test_render_quote_header_is_canonical() -> None:
+    result = {
+        "price": 0.0,
+        "app_meta": {"used_planner": True},
+        "speeds_feeds_path": "/mnt/speeds_feeds.csv",
+        "speeds_feeds_loaded": True,
+        "breakdown": {
+            "qty": 2,
+            "totals": {
+                "labor_cost": 0.0,
+                "direct_costs": 0.0,
+                "subtotal": 0.0,
+                "with_expedite": 0.0,
+            },
+            "nre_detail": {},
+            "nre": {},
+            "material": {},
+            "process_costs": {},
+            "process_meta": {},
+            "pass_through": {},
+            "pricing_source": "legacy",
+            "applied_pcts": {},
+            "rates": {},
+            "params": {},
+            "labor_cost_details": {},
+            "direct_cost_details": {},
+            "red_flags": [],
+        },
+    }
+
+    rendered = appV5.render_quote(result, currency="$")
+    lines = rendered.splitlines()
+
+    speeds_lines = [line for line in lines if line.startswith("Speeds/Feeds CSV:")]
+    pricing_lines = [line for line in lines if line.startswith("Pricing Source:")]
+
+    assert len(speeds_lines) == 1
+    assert speeds_lines[0].endswith("(loaded)")
+    assert len(pricing_lines) == 1
+    assert pricing_lines[0] == "Pricing Source: Estimator"
