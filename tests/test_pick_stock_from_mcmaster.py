@@ -16,7 +16,6 @@ sys.modules.setdefault("requests", requests_stub)
 import materials  # noqa: E402
 from materials import pick_stock_from_mcmaster  # noqa: E402
 
-
 @pytest.mark.parametrize(
     "length,width,thickness,expected_part",
     [
@@ -35,7 +34,6 @@ def test_pick_stock_prefers_smallest_plate_when_scrap_blocks_exact(
     assert result.get("mcmaster_part") == expected_part
     assert pytest.approx(24.0) == result["required_blank_len_in"]
     assert pytest.approx(12.0) == result["required_blank_wid_in"]
-
 
 def test_pick_stock_rejects_api_thickness_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
     if materials._mc is None:  # pragma: no cover - optional dependency missing
@@ -69,3 +67,4 @@ def test_pick_stock_rejects_api_thickness_mismatch(monkeypatch: pytest.MonkeyPat
     assert result.get("stock_piece_api_price") is None
     assert result.get("stock_piece_price_usd") is None
     assert result.get("stock_piece_source") is None
+
