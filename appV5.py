@@ -4690,7 +4690,7 @@ def _charged_hours_by_bucket(
     cfg: "QuoteConfiguration" | None = None,
 ):
     """Return the hours that correspond to what we actually charged."""
-    charged: dict[str, float] = {}
+    out: dict[str, float] = {}
     for key, amount in (process_costs or {}).items():
         norm = _normalize_bucket_key(key)
         if norm.startswith("planner_"):
@@ -4712,124 +4712,62 @@ def _charged_hours_by_bucket(
             hr = (float(amount) / rate) if rate > 0 else None
         if hr is not None:
             label = _process_label(key)
-            charged[label] = charged.get(label, 0.0) + float(hr)
-
-    extra_map: Mapping[str, Any] = {}
+            out[label] = out.get(label, 0.0) + float(hr)
+    removal_hr = None
+    render_extra: Mapping[str, Any] | None = None
     if render_state is not None:
         try:
-            extra_candidate = getattr(render_state, "extra", {})
+            extra = getattr(render_state, "extra", {})
         except Exception:
-            extra_candidate = {}
-        if isinstance(extra_candidate, _MappingABC):
-            extra_map = extra_candidate
-
-    prefer_override = prefer_removal_drilling_hours
-    if cfg is not None:
-        prefer_override = bool(getattr(cfg, "prefer_removal_drilling_hours", prefer_override))
-
-    drill_machine_minutes = _coerce_float_or_none(extra_map.get("drill_machine_minutes"))
-    drill_labor_minutes = _coerce_float_or_none(extra_map.get("drill_labor_minutes"))
-    drill_total_minutes = _coerce_float_or_none(extra_map.get("drill_total_minutes"))
-
-    total_minutes_from_card: float | None = None
-    if drill_machine_minutes is not None or drill_labor_minutes is not None:
-        machine_minutes = max(0.0, float(drill_machine_minutes or 0.0))
-        labor_minutes = max(0.0, float(drill_labor_minutes or 0.0))
-        total_minutes_from_card = machine_minutes + labor_minutes
-    if (total_minutes_from_card is None or total_minutes_from_card <= 0.0) and drill_total_minutes is not None:
-        total_minutes_from_card = max(0.0, float(drill_total_minutes))
-
-    drill_card_hours: float | None = None
-    if total_minutes_from_card is not None and total_minutes_from_card >= 0.0:
-        drill_card_hours = float(total_minutes_from_card) / 60.0
-
-    if drill_card_hours is not None and prefer_override:
-        drill_labels = [
-            label
-            for label in charged
-            if _canonical_bucket_key(label) in {"drilling", "drill"}
-        ]
-        if drill_labels:
-            for label in drill_labels:
-                current = float(charged.get(label, 0.0) or 0.0)
-                if not math.isclose(current, drill_card_hours, rel_tol=1e-9, abs_tol=1e-6):
-                    logger.info(
-                        "[hours-sync] Overriding Drilling bucket hours from %.2f -> %.2f (source=removal_card)",
-                        current,
-                        drill_card_hours,
-                    )
-                charged[label] = float(drill_card_hours)
-        elif drill_card_hours > 0.0:
-            label = _process_label("drilling")
-            logger.info(
-                "[hours-sync] Injecting Drilling bucket hours %.2f (source=removal_card)",
-                drill_card_hours,
-            )
-            charged[label] = float(drill_card_hours)
-
-    removal_hr = drill_card_hours
-    if removal_hr is None and extra_map:
-        removal_candidate = extra_map.get("removal_drilling_hours")
-        removal_hr = _coerce_float_or_none(removal_candidate)
+            extra = {}
+        if isinstance(extra, _MappingABC):
+            render_extra = extra
+            removal_candidate = extra.get("removal_drilling_hours")
+            removal_hr = _coerce_float_or_none(removal_candidate)
     if removal_hr is None:
         removal_hr = _coerce_float_or_none(removal_drilling_hours)
     if removal_hr is not None and removal_hr < 0:
         removal_hr = None
-
-    if removal_hr is not None and prefer_override:
+    prefer_drill_hours = prefer_removal_drilling_hours
+    if cfg is not None:
+        prefer_from_cfg = getattr(cfg, "prefer_removal_drilling_hours", None)
+        if prefer_from_cfg is not None:
+            prefer_drill_hours = bool(prefer_from_cfg)
+    if removal_hr is not None and prefer_drill_hours:
         desired = max(0.0, float(removal_hr))
         drill_labels = [
             label
-            for label in charged
+            for label in out
             if _canonical_bucket_key(label) in {"drilling", "drill"}
         ]
         if drill_labels:
             for label in drill_labels:
-                current = float(charged.get(label, 0.0) or 0.0)
+                current = float(out.get(label, 0.0) or 0.0)
                 if not math.isclose(current, desired, rel_tol=1e-9, abs_tol=1e-6):
                     logger.info(
                         "[hours-sync] Overriding Drilling bucket hours from %.2f -> %.2f (source=removal_card)",
                         current,
                         desired,
                     )
-                charged[label] = desired
-        elif desired > 0.0:
+                out[label] = desired
+        else:
             label = _process_label("drilling")
             logger.info(
                 "[hours-sync] Injecting Drilling bucket hours %.2f (source=removal_card)",
                 desired,
             )
-            charged[label] = desired
+            out[label] = desired
 
-    def _fmt_value(value: Any, *, decimals: int, suffix: str = "") -> str:
-        if isinstance(value, (int, float)):
-            numeric = float(value)
-            if math.isfinite(numeric):
-                return f"{numeric:.{decimals}f}{suffix}"
-        return "nan"
+    if prefer_drill_hours and isinstance(render_extra, _MappingABC):
+        machine_minutes = render_extra.get("drill_machine_minutes")
+        labor_minutes = render_extra.get("drill_labor_minutes")
+        if isinstance(machine_minutes, (int, float)) and isinstance(labor_minutes, (int, float)):
+            drill_total_hr = (float(machine_minutes) + float(labor_minutes)) / 60.0
+            for key in list(out.keys()):
+                if _canonical_bucket_key(key) in {"drilling", "drill"}:
+                    out[key] = drill_total_hr
 
-    card_total_hours = None
-    if (
-        isinstance(drill_machine_minutes, (int, float))
-        and isinstance(drill_labor_minutes, (int, float))
-    ):
-        total_minutes = float(drill_machine_minutes) + float(drill_labor_minutes)
-        if math.isfinite(total_minutes):
-            card_total_hours = total_minutes / 60.0
-
-    charged_drilling_hours = charged.get("Drilling")
-    if charged_drilling_hours is None:
-        charged_drilling_hours = charged.get("drilling")
-
-    _log.info(
-        "[drill-sync] card_m=%s card_l=%s → card_total_hr=%s  | charged_drilling_hr=%s",
-        _fmt_value(drill_machine_minutes, decimals=2, suffix="min"),
-        _fmt_value(drill_labor_minutes, decimals=2, suffix="min"),
-        _fmt_value(card_total_hours, decimals=6, suffix="hr"),
-        _fmt_value(charged_drilling_hours, decimals=2, suffix="hr"),
-    )
-
-    return charged
+    return out
 
 def _planner_bucket_key_for_name(name: Any) -> str:
     text = str(name or "").lower()
