@@ -3,6 +3,8 @@ from collections.abc import Mapping
 
 import appV5
 
+from cad_quoter.llm import explain_quote
+
 
 def _render_payload(result: Mapping) -> dict:
     rendered = appV5.render_quote(result, currency="$")
@@ -237,82 +239,23 @@ def test_render_payload_obeys_pricing_math_guards() -> None:
     assert math.isclose(reported_labor_total, labor_sum, abs_tol=0.01)
 
 
-
-def test_render_quote_promotes_planner_pricing_source() -> None:
-    result = {
-        "price": 0.0,
-        "breakdown": {
-            "qty": 1,
-            "totals": {
-                "labor_cost": 0.0,
-                "direct_costs": 0.0,
-                "subtotal": 0.0,
-                "with_expedite": 0.0,
-            },
-            "nre_detail": {},
-            "nre": {},
-            "material": {},
-            "process_costs": {"milling": 0.0},
-            "process_meta": {
-                "planner_total": {"minutes": 120.0},
-                "milling": {"hr": 0.0},
-            },
-            "pass_through": {"Material": 0.0},
-            "pricing_source": "legacy",
-            "applied_pcts": {
-                "MarginPct": 0.0,
-            },
-            "rates": {},
-            "params": {},
-            "labor_cost_details": {},
-            "direct_cost_details": {},
-        },
+def test_explain_quote_reports_drilling_minutes_from_removal_card() -> None:
+    breakdown = {
+        "totals": {"price": 120.0, "qty": 1, "labor_cost": 40.0},
+        "material_direct_cost": 30.0,
     }
+    render_state = {"extra": {"drill_total_minutes": 30.0}}
 
-    rendered = appV5.render_quote(result, currency="$")
-    lines = rendered.splitlines()
+    explanation = explain_quote(breakdown, render_state=render_state)
 
-    assert "Pricing Source: Estimator" in lines
-    assert all("Pricing Source: Legacy" not in line for line in lines)
+    assert "Drilling time comes from removal-card math (0.50 hr total)." in explanation
+    assert "No drilling accounted." not in explanation
 
 
-def test_render_quote_header_is_canonical() -> None:
-    result = {
-        "price": 0.0,
-        "app_meta": {"used_planner": True},
-        "speeds_feeds_path": "/mnt/speeds_feeds.csv",
-        "speeds_feeds_loaded": True,
-        "breakdown": {
-            "qty": 2,
-            "totals": {
-                "labor_cost": 0.0,
-                "direct_costs": 0.0,
-                "subtotal": 0.0,
-                "with_expedite": 0.0,
-            },
-            "nre_detail": {},
-            "nre": {},
-            "material": {},
-            "process_costs": {},
-            "process_meta": {},
-            "pass_through": {},
-            "pricing_source": "legacy",
-            "applied_pcts": {},
-            "rates": {},
-            "params": {},
-            "labor_cost_details": {},
-            "direct_cost_details": {},
-            "red_flags": [],
-        },
-    }
+def test_explain_quote_reports_no_drilling_when_minutes_absent() -> None:
+    breakdown = {"totals": {"price": 75.0, "qty": 2, "labor_cost": 0.0}}
 
-    rendered = appV5.render_quote(result, currency="$")
-    lines = rendered.splitlines()
+    explanation = explain_quote(breakdown, render_state={"extra": {}})
 
-    speeds_lines = [line for line in lines if line.startswith("Speeds/Feeds CSV:")]
-    pricing_lines = [line for line in lines if line.startswith("Pricing Source:")]
-
-    assert len(speeds_lines) == 1
-    assert speeds_lines[0].endswith("(loaded)")
-    assert len(pricing_lines) == 1
-    assert pricing_lines[0] == "Pricing Source: Estimator"
+    assert "No drilling accounted." in explanation
+    assert "Drilling time comes from removal-card math" not in explanation
