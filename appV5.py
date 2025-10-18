@@ -935,9 +935,12 @@ def _wieland_scrap_usd_per_lb(material_family: str | None) -> float | None:
         fam = "titanium"
 
     try:
-        price = get_scrap_price_per_lb(fam)
+        price: float | int | str | None = get_scrap_price_per_lb(fam)
     except Exception as exc:  # pragma: no cover - network/HTML failure
         logger.warning("Wieland scrap price lookup failed for %s: %s", fam, exc)
+        return None
+
+    if price is None:
         return None
 
     try:
@@ -1583,11 +1586,16 @@ else:  # pragma: no cover - fallback when ezdxf is unavailable at runtime
 if typing.TYPE_CHECKING:
     import pandas as pd
     from pandas import DataFrame as PandasDataFrame
+    from pandas import Index as PandasIndex
+    from pandas import Series as PandasSeries
     from cad_quoter.domain import QuoteState as _QuoteState
 
-    SeriesLike: TypeAlias = pd.Series[Any]
+    SeriesLike: TypeAlias = PandasSeries[Any]
 else:
     PandasDataFrame = Any  # type: ignore[assignment]
+    PandasSeries = Any  # type: ignore[assignment]
+    PandasIndex = Any  # type: ignore[assignment]
+    SeriesLike: TypeAlias = Any
     _QuoteState = QuoteState
     try:
         import pandas as pd  # type: ignore[import]
@@ -1616,8 +1624,6 @@ else:
             PandasDataFrame = typing.Any
             PandasSeries = typing.Any
             PandasIndex = typing.Any
-
-    SeriesLike: TypeAlias = Any
 
 try:
     from cad_quoter_legacy import compute_quote_from_df as _legacy_compute_quote_from_df  # type: ignore[import]
@@ -2922,6 +2928,14 @@ _ocp_backend_ready = False
 gp_Dir = cast(Any, None)
 gp_Pln = cast(Any, None)
 gp_Pnt = cast(Any, None)
+GeomAdaptor_Surface = cast(Any, None)
+GeomAbs_Plane = cast(Any, None)
+GeomAbs_Cylinder = cast(Any, None)
+GeomAbs_Torus = cast(Any, None)
+GeomAbs_Cone = cast(Any, None)
+GeomAbs_BSplineSurface = cast(Any, None)
+GeomAbs_BezierSurface = cast(Any, None)
+BRepAlgoAPI_Section = cast(Any, None)
 
 if _ocp_brep_module is not None:
     try:
