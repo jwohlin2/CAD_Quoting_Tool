@@ -18228,6 +18228,8 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
         if c_ref is None:
             c_ref = find_col("Ø")
 
+        print(f"[HOLE TABLE] col_ref={c_ref}, col_qty={c_qty}, col_desc={c_desc}")
+
         total = 0
         families: dict[float, int] = {}
         row_taps = 0
