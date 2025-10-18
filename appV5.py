@@ -26,7 +26,7 @@ import time
 import typing
 from functools import cmp_to_key, lru_cache
 from typing import Any, Mapping, MutableMapping, TYPE_CHECKING
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import (
     Callable,
     Iterator,
@@ -17856,6 +17856,231 @@ def _iter_table_text(doc):
         except Exception:
             continue
 
+
+# --- NEW: parse HOLE TABLE that's drawn with text + lines (no ACAD TABLE)
+def _iter_text_with_xy(doc):
+    if doc is None:
+        return
+
+    def _entity_xy(entity) -> tuple[float, float]:
+        def _get_point(attr: str):
+            try:
+                return getattr(entity.dxf, attr)
+            except Exception:
+                return None
+
+        point = (
+            _get_point("insert")
+            or _get_point("alignment_point")
+            or _get_point("align_point")
+            or _get_point("start")
+            or _get_point("position")
+        )
+        if point is None:
+            return (0.0, 0.0)
+
+        def _coord(value, idx):
+            try:
+                return float(value[idx])
+            except Exception:
+                try:
+                    return float(getattr(value, "xyz"[idx]))
+                except Exception:
+                    return 0.0
+
+        if hasattr(point, "xyz"):
+            x_val, y_val, _ = point.xyz
+            return float(x_val), float(y_val)
+
+        return _coord(point, 0), _coord(point, 1)
+
+    for sp in _spaces(doc):
+        try:
+            entities = sp.query("TEXT,MTEXT,INSERT")
+        except Exception:
+            entities = []
+        for entity in entities:
+            try:
+                kind = entity.dxftype()
+            except Exception:
+                kind = ""
+            if kind in {"TEXT", "MTEXT"}:
+                text = _extract_entity_text(entity)
+                if not text:
+                    continue
+                x, y = _entity_xy(entity)
+                yield text, x, y
+            elif kind == "INSERT":
+                try:
+                    virtuals = entity.virtual_entities()
+                except Exception:
+                    virtuals = []
+                for sub in virtuals:
+                    try:
+                        sub_kind = sub.dxftype()
+                    except Exception:
+                        sub_kind = ""
+                    if sub_kind not in {"TEXT", "MTEXT"}:
+                        continue
+                    text = _extract_entity_text(sub)
+                    if not text:
+                        continue
+                    x, y = _entity_xy(sub)
+                    yield text, x, y
+
+
+def _normalize(s: str) -> str:
+    return " ".join((s or "").replace("\u00D8", "Ø").replace("ø", "Ø").split())
+
+
+def _looks_like_hole_header(s: str) -> bool:
+    U = s.upper()
+    return (
+        ("HOLE" in U)
+        and ("REF" in U or "Ø" in U or "DIA" in U)
+        and ("QTY" in U)
+        and ("DESC" in U or "DESCRIPTION" in U)
+    )
+
+
+def extract_hole_table_from_text(doc, y_tol: float = 0.04, min_rows: int = 5):
+    """
+    Returns dict like:
+      {"hole_count": int, "hole_diam_families_in": {...}, "rows":[{"ref":".7500","qty":4,"desc":"..."}, ...]}
+    or {} if not found.
+    """
+
+    try:
+        texts = [(_normalize(t), x, y) for (t, x, y) in _iter_text_with_xy(doc) if _normalize(t)]
+    except Exception:
+        texts = []
+    if not texts:
+        return {}
+
+    by_y: defaultdict[float, list[tuple[str, float, float]]] = defaultdict(list)
+    for s, x, y in texts:
+        by_y[round(y, 4)].append((s, x, y))
+    y_levels = sorted(by_y.keys(), reverse=True)
+    header_idx = None
+    header_x: dict[str, float] | None = None
+    for i, y in enumerate(y_levels):
+        line_txt = " | ".join(s for (s, _, _) in sorted(by_y[y], key=lambda z: z[1]))
+        if _looks_like_hole_header(line_txt):
+            header_idx = i
+            xs: dict[str, float] = {}
+            for s, x, _ in by_y[y]:
+                U = s.upper()
+                if "REF" in U or "Ø" in U or "DIA" in U:
+                    xs["REF"] = x
+                elif "QTY" in U or "QUANTITY" in U:
+                    xs["QTY"] = x
+                elif "HOLE" == U or U.startswith("HOLE "):
+                    xs["HOLE"] = x
+                elif "DESC" in U or "DESCRIPTION" in U:
+                    xs["DESC"] = x
+            if {"REF", "QTY", "DESC"} <= set(xs.keys()):
+                header_x = xs
+                break
+    if header_idx is None or header_x is None:
+        return {}
+
+    cols = [
+        ("HOLE", header_x.get("HOLE", min(header_x.values()) - 1e3)),
+        ("REF", header_x["REF"]),
+        ("QTY", header_x["QTY"]),
+        ("DESC", header_x["DESC"]),
+    ]
+    cols_sorted = sorted(cols, key=lambda kv: kv[1])
+    bounds = [c[1] for c in cols_sorted]
+    splits = [(bounds[i] + bounds[i + 1]) * 0.5 for i in range(len(bounds) - 1)]
+
+    rows: list[dict[str, str]] = []
+    for y in y_levels[header_idx + 1 :]:
+        band: list[tuple[str, float]] = []
+        for s, x, yy in texts:
+            if abs(yy - y) <= y_tol:
+                band.append((s, x))
+        if not band:
+            continue
+
+        def col_of(xv: float) -> str:
+            if xv < splits[0]:
+                return "HOLE"
+            if xv < splits[1]:
+                return "REF"
+            if xv < splits[2]:
+                return "QTY"
+            return "DESC"
+
+        cells: dict[str, list[str]] = {"HOLE": [], "REF": [], "QTY": [], "DESC": []}
+        for s, x in sorted(band, key=lambda z: z[1]):
+            cells[col_of(x)].append(s)
+        hole = " ".join(cells["HOLE"]).strip()
+        ref = " ".join(cells["REF"]).strip()
+        qtys = " ".join(cells["QTY"]).strip()
+        desc = " ".join(cells["DESC"]).strip()
+        if not (ref or qtys or desc):
+            continue
+        joined = " ".join(filter(None, [hole, ref, qtys, desc])).strip()
+        if not joined:
+            continue
+        if _looks_like_hole_header(joined):
+            break
+        rows.append({"hole": hole, "ref": ref, "qty": qtys, "desc": desc})
+
+    if len(rows) < min_rows:
+        return {}
+
+    total = 0
+    families: dict[str, int] = {}
+
+    def parse_qty(s: str) -> int:
+        try:
+            return int(float((s or "").strip()))
+        except Exception:
+            m = re.search(r"\d+", s or "")
+            return int(m.group()) if m else 0
+
+    def parse_dia_inch(s: str) -> float | None:
+        s = (s or "").strip().lstrip("Ø⌀\u00D8 ").strip()
+        if re.fullmatch(r"\d+/\d+", s):
+            try:
+                return float(Fraction(s))
+            except Exception:
+                return None
+        if re.fullmatch(r"(?:\d+)?\.\d+|\d+(?:\.\d+)?", s):
+            try:
+                return float(s)
+            except Exception:
+                return None
+        return None
+
+    clean_rows: list[dict[str, Any]] = []
+    for r in rows:
+        q = parse_qty(r["qty"])
+        if q <= 0:
+            continue
+        d = parse_dia_inch(r["ref"])
+        if d is None:
+            mm = re.search(r"[Ø⌀\u00D8]?\s*((?:\d+)?\.\d+|\d+/\d+|\d+(?:\.\d+)?)", r["desc"])
+            d = parse_dia_inch(mm.group(1)) if mm else None
+        if d is None:
+            continue
+        key = f'{d:.4f}"'
+        families[key] = families.get(key, 0) + q
+        total += q
+        clean_rows.append({**r, "qty": q, "ref": key})
+
+    if total <= 0:
+        return {}
+
+    return {
+        "hole_count": total,
+        "hole_diam_families_in": families,
+        "rows": clean_rows,
+    }
+
+
 def _all_tables(doc) -> Iterator[Any]:
     if doc is None:
         return
@@ -19791,6 +20016,15 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
             chart_lines.append(ln)
 
     table_info = hole_count_from_acad_table(doc)
+    if (not table_info or not table_info.get("hole_count")) and doc is not None:
+        try:
+            text_table = extract_hole_table_from_text(doc)
+        except Exception:
+            text_table = {}
+        if text_table and text_table.get("hole_count"):
+            text_table = dict(text_table)
+            text_table.setdefault("provenance", "HOLE TABLE (TEXT)")
+            table_info = text_table
     if table_info and table_info.get("hole_count"):
         try:
             geo["hole_count"] = int(table_info.get("hole_count") or 0)
