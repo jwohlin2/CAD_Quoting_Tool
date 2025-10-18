@@ -1583,40 +1583,20 @@ else:  # pragma: no cover - fallback when ezdxf is unavailable at runtime
 if typing.TYPE_CHECKING:
     import pandas as pd
     from pandas import DataFrame as PandasDataFrame
+    from pandas import Index as PandasIndex
+    from pandas import Series as PandasSeries
     from cad_quoter.domain import QuoteState as _QuoteState
 
     SeriesLike: TypeAlias = pd.Series[Any]
 else:
-    PandasDataFrame = Any  # type: ignore[assignment]
     _QuoteState = QuoteState
     try:
         import pandas as pd  # type: ignore[import]
     except Exception:  # pragma: no cover - optional dependency
         pd = None  # type: ignore[assignment]
-        PandasDataFrame = typing.Any
-        PandasSeries = typing.Any
-        PandasIndex = typing.Any
-    else:
-        # Several of our test environments provide a light-weight pandas stub
-        # that implements only the minimal runtime surface we need.  Older
-        # versions of :mod:`appV5` eagerly accessed ``pd.Index`` which is not
-        # guaranteed to exist on these shims, resulting in AttributeError during
-        # import.  Guard each attribute lookup so that we gracefully fall back
-        # to ``typing.Any`` when the real dependency is unavailable.
-        PandasDataFrame = getattr(pd, "DataFrame", typing.Any)
-        PandasSeries = getattr(pd, "Series", typing.Any)
-        PandasIndex = getattr(pd, "Index", typing.Any)
-
-        if PandasDataFrame is typing.Any or PandasSeries is typing.Any:
-            # If any of the expected attributes are missing we treat ``pd`` as a
-            # stub and avoid leaking partially initialised aliases.  Keeping the
-            # ``pd`` reference allows downstream call sites to continue using
-            # helpers such as ``pd.to_numeric`` when they exist, while
-            # maintaining compatibility with the light-weight testing shim.
-            PandasDataFrame = typing.Any
-            PandasSeries = typing.Any
-            PandasIndex = typing.Any
-
+    PandasDataFrame: TypeAlias = Any
+    PandasSeries: TypeAlias = Any
+    PandasIndex: TypeAlias = Any
     SeriesLike: TypeAlias = Any
 
 try:
@@ -2167,17 +2147,6 @@ try:
     import pandas as pd  # type: ignore[import]
 except Exception:  # pragma: no cover - optional dependency
     pd = None  # type: ignore[assignment]
-
-if TYPE_CHECKING:  # pragma: no cover - import-time helper for type checkers
-    import pandas as _pandas
-
-    PandasDataFrame = _pandas.DataFrame
-    PandasSeries = _pandas.Series
-    PandasIndex = _pandas.Index
-else:  # pragma: no cover - fallback aliases when pandas is unavailable
-    PandasDataFrame = typing.Any
-    PandasSeries = typing.Any
-    PandasIndex = typing.Any
 
 pd = typing.cast(typing.Any, pd)
 from typing import TypedDict
@@ -17079,7 +17048,7 @@ def extract_2d_features_from_pdf_vector(pdf_path: str) -> dict:
 REQUIRED_COLS = ["Item", "Example Values / Options", "Data Type / Input Method"]
 
 def default_variables_template() -> PandasDataFrame:
-    if _HAS_PANDAS:
+    if _HAS_PANDAS and pd is not None:
         core_df, _ = _load_master_variables()
         if core_df is not None:
             updated = core_df.copy()
@@ -17114,6 +17083,8 @@ def default_variables_template() -> PandasDataFrame:
                     )
                     adjusted_rows.append(new_row)
             return pd.DataFrame(adjusted_rows, columns=columns)
+    if not _HAS_PANDAS or pd is None:
+        raise RuntimeError("pandas is required to build the default variables template.")
     rows = [
         ("Profit Margin %", 0.0, "number"),
         ("Programmer $/hr", 90.0, "number"),
@@ -17149,6 +17120,7 @@ def default_variables_template() -> PandasDataFrame:
         ("Material", "Aluminum MIC6", "text"),
         ("Thickness (in)", 2.0, "number"),
     ]
+    assert pd is not None  # for type checkers
     return pd.DataFrame(rows, columns=REQUIRED_COLS)
 
 def coerce_or_make_vars_df(df: PandasDataFrame | None) -> PandasDataFrame:
@@ -17283,6 +17255,11 @@ def _deep_get(d: dict, path):
     return cur
 
 def merge_estimate_into_vars(vars_df: PandasDataFrame, estimate: dict) -> PandasDataFrame:
+    if not _HAS_PANDAS or pd is None:
+        raise RuntimeError("pandas is required to merge PDF estimates into variables.")
+
+    assert pd is not None  # for type checkers
+
     for item, src in MAP_KEYS.items():
         value = _deep_get(estimate, src)
         if value is None:
