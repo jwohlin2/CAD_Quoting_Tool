@@ -17764,28 +17764,84 @@ def _spaces(doc) -> list[Any]:
         spaces.append(es)
     return spaces
 
+
+def _all_tables(doc):
+    """Yield every TABLE entity in model/layout spaces and inside block INSERTs."""
+
+    if doc is None:
+        return
+
+    seen: set[int] = set()
+
+    def _yield_from_insert(ins):
+        try:
+            virtual_entities = ins.virtual_entities()
+        except Exception:
+            return
+        for sub in virtual_entities:
+            try:
+                dxftype = sub.dxftype()
+            except Exception:
+                dxftype = ""
+            if dxftype == "TABLE":
+                key = id(sub)
+                if key not in seen:
+                    seen.add(key)
+                    yield sub
+            elif dxftype == "INSERT":
+                yield from _yield_from_insert(sub)
+
+    for sp in _spaces(doc):
+        try:
+            tables = sp.query("TABLE")
+        except Exception:
+            tables = []
+        for table in tables:
+            key = id(table)
+            if key not in seen:
+                seen.add(key)
+                yield table
+        try:
+            inserts = sp.query("INSERT")
+        except Exception:
+            inserts = []
+        for ins in inserts:
+            yield from _yield_from_insert(ins)
+
 def _iter_table_text(doc):
     if doc is None:
         return
-    for sp in _spaces(doc):
+    for t in _all_tables(doc):
         try:
-            for t in sp.query("TABLE"):
-                try:
-                    for r in range(t.dxf.n_rows):
-                        row = []
-                        for c in range(t.dxf.n_cols):
-                            try:
-                                cell = t.get_cell(r, c)
-                            except Exception:
-                                cell = None
-                            row.append(cell.get_text() if cell else "")
-                        line = " | ".join(s.strip() for s in row if s)
-                        if line:
-                            yield line
-                except Exception:
-                    continue
+            n_rows = int(getattr(t.dxf, "n_rows", 0))
+            n_cols = int(getattr(t.dxf, "n_cols", 0))
         except Exception:
-            pass
+            n_rows = 0
+            n_cols = 0
+        if n_rows <= 0 or n_cols <= 0:
+            continue
+        try:
+            for r in range(n_rows):
+                row: list[str] = []
+                for c in range(n_cols):
+                    try:
+                        cell = t.get_cell(r, c)
+                    except Exception:
+                        cell = None
+                    if cell is None:
+                        row.append("")
+                        continue
+                    try:
+                        text = cell.get_text()
+                    except Exception:
+                        text = ""
+                    row.append(text or "")
+                line = " | ".join(s.strip() for s in row if s)
+                if line:
+                    yield line
+        except Exception:
+            continue
+    for sp in _spaces(doc):
         try:
             for e in sp.query("MTEXT,TEXT"):
                 try:

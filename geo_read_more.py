@@ -47,6 +47,50 @@ def _spaces(doc):
         try: yield doc.layouts.get(n).entity_space
         except Exception: pass
 
+
+def _all_tables(doc):
+    """Yield every TABLE entity in model/layout spaces and inside block INSERTs."""
+
+    if doc is None:
+        return
+
+    seen: set[int] = set()
+
+    def _yield_from_insert(ins):
+        try:
+            virtual_entities = ins.virtual_entities()
+        except Exception:
+            return
+        for sub in virtual_entities:
+            try:
+                dxftype = sub.dxftype()
+            except Exception:
+                dxftype = ""
+            if dxftype == "TABLE":
+                key = id(sub)
+                if key not in seen:
+                    seen.add(key)
+                    yield sub
+            elif dxftype == "INSERT":
+                yield from _yield_from_insert(sub)
+
+    for sp in _spaces(doc):
+        try:
+            tables = sp.query("TABLE")
+        except Exception:
+            tables = []
+        for table in tables:
+            key = id(table)
+            if key not in seen:
+                seen.add(key)
+                yield table
+        try:
+            inserts = sp.query("INSERT")
+        except Exception:
+            inserts = []
+        for ins in inserts:
+            yield from _yield_from_insert(ins)
+
 def _is_ordinate(dim) -> bool:
     try: return (int(dim.dxf.dimtype) & 6) == 6 or int(dim.dxf.dimtype) == 6
     except Exception: return False
@@ -124,21 +168,42 @@ def harvest_holes_geometry(doc, to_in: float):
 
 # ---------- 4) Hole table / text harvest ----------
 def _iter_table_text(doc):
+    if doc is None:
+        return
+    for t in _all_tables(doc):
+        try:
+            n_rows = int(getattr(t.dxf, "n_rows", 0))
+            n_cols = int(getattr(t.dxf, "n_cols", 0))
+        except Exception:
+            n_rows = 0
+            n_cols = 0
+        if n_rows <= 0 or n_cols <= 0:
+            continue
+        try:
+            for r in range(n_rows):
+                row: list[str] = []
+                for c in range(n_cols):
+                    try:
+                        cell = t.get_cell(r, c)
+                    except Exception:
+                        cell = None
+                    if cell is None:
+                        row.append("")
+                        continue
+                    try:
+                        text = cell.get_text()
+                    except Exception:
+                        text = ""
+                    row.append(text or "")
+                s = " | ".join([x.strip() for x in row if x])
+                if s.strip():
+                    yield s
+        except Exception:
+            continue
     for sp in _spaces(doc):
         for e in sp.query("MTEXT,TEXT"):
             try:
                 yield e.plain_text() if e.dxftype()=="MTEXT" else e.dxf.text
-            except Exception:
-                pass
-        for t in sp.query("TABLE"):
-            try:
-                for r in range(t.dxf.n_rows):
-                    row = []
-                    for c in range(t.dxf.n_cols):
-                        cell = t.get_cell(r,c)
-                        row.append(cell.get_text() if cell else "")
-                    s = " | ".join([x for x in row if x])
-                    if s.strip(): yield s
             except Exception:
                 pass
 
