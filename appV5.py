@@ -1565,6 +1565,7 @@ from typing import (
     TypeVar,
     cast,
     Literal,
+    TypedDict,
     overload,
     no_type_check,
 )
@@ -1582,42 +1583,27 @@ else:  # pragma: no cover - fallback when ezdxf is unavailable at runtime
 
 if typing.TYPE_CHECKING:
     import pandas as pd
-    from pandas import DataFrame as PandasDataFrame
+    from pandas import (
+        DataFrame as PandasDataFrame,
+        Index as PandasIndex,
+        Series as PandasSeries,
+    )
     from cad_quoter.domain import QuoteState as _QuoteState
 
     SeriesLike: TypeAlias = pd.Series[Any]
 else:
-    PandasDataFrame = Any  # type: ignore[assignment]
+    PandasDataFrame: TypeAlias = Any
+    PandasSeries: TypeAlias = Any
+    PandasIndex: TypeAlias = Any
+    SeriesLike: TypeAlias = Any
+
     _QuoteState = QuoteState
     try:
         import pandas as pd  # type: ignore[import]
     except Exception:  # pragma: no cover - optional dependency
         pd = None  # type: ignore[assignment]
-        PandasDataFrame = typing.Any
-        PandasSeries = typing.Any
-        PandasIndex = typing.Any
     else:
-        # Several of our test environments provide a light-weight pandas stub
-        # that implements only the minimal runtime surface we need.  Older
-        # versions of :mod:`appV5` eagerly accessed ``pd.Index`` which is not
-        # guaranteed to exist on these shims, resulting in AttributeError during
-        # import.  Guard each attribute lookup so that we gracefully fall back
-        # to ``typing.Any`` when the real dependency is unavailable.
-        PandasDataFrame = getattr(pd, "DataFrame", typing.Any)
-        PandasSeries = getattr(pd, "Series", typing.Any)
-        PandasIndex = getattr(pd, "Index", typing.Any)
-
-        if PandasDataFrame is typing.Any or PandasSeries is typing.Any:
-            # If any of the expected attributes are missing we treat ``pd`` as a
-            # stub and avoid leaking partially initialised aliases.  Keeping the
-            # ``pd`` reference allows downstream call sites to continue using
-            # helpers such as ``pd.to_numeric`` when they exist, while
-            # maintaining compatibility with the light-weight testing shim.
-            PandasDataFrame = typing.Any
-            PandasSeries = typing.Any
-            PandasIndex = typing.Any
-
-    SeriesLike: TypeAlias = Any
+        pd = typing.cast(typing.Any, pd)
 
 try:
     from cad_quoter_legacy import compute_quote_from_df as _legacy_compute_quote_from_df  # type: ignore[import]
@@ -2162,25 +2148,6 @@ else:  # pragma: no cover - fallback definitions keep quoting functional without
     def explain_quote(*args, **kwargs) -> str:  # pragma: no cover - fallback
         return "LLM explanation unavailable."
 
-
-try:
-    import pandas as pd  # type: ignore[import]
-except Exception:  # pragma: no cover - optional dependency
-    pd = None  # type: ignore[assignment]
-
-if TYPE_CHECKING:  # pragma: no cover - import-time helper for type checkers
-    import pandas as _pandas
-
-    PandasDataFrame = _pandas.DataFrame
-    PandasSeries = _pandas.Series
-    PandasIndex = _pandas.Index
-else:  # pragma: no cover - fallback aliases when pandas is unavailable
-    PandasDataFrame = typing.Any
-    PandasSeries = typing.Any
-    PandasIndex = typing.Any
-
-pd = typing.cast(typing.Any, pd)
-from typing import TypedDict
 
 try:
     from geo_read_more import build_geo_from_dxf as build_geo_from_dxf_path
@@ -21734,7 +21701,16 @@ class App(tk.Tk):
             initial_raw = row_data.get(value_col_name, "")
             if full_row is not None:
                 initial_raw = full_row.get(value_col_name, initial_raw)
-            initial_value = "" if pd.isna(initial_raw) else str(initial_raw)
+            is_missing = False
+            if pd is not None:
+                try:
+                    is_missing = bool(pd.isna(initial_raw))
+                except Exception:
+                    is_missing = False
+            if is_missing:
+                initial_value = ""
+            else:
+                initial_value = "" if initial_raw is None else str(initial_raw)
 
             control_spec = derive_editor_control_spec(dtype_source, initial_raw)
             label_text = item_name
@@ -22678,7 +22654,13 @@ class App(tk.Tk):
             record: dict[str, Any] = {}
             for column, value in row.items():
                 column_name = str(column)
-                if pd.isna(value):
+                value_is_missing = False
+                if pd is not None:
+                    try:
+                        value_is_missing = bool(pd.isna(value))
+                    except Exception:
+                        value_is_missing = False
+                if value_is_missing:
                     record[column_name] = None
                 elif hasattr(value, "item"):
                     try:
@@ -22802,9 +22784,12 @@ class App(tk.Tk):
         vars_payload = payload.get("vars_df")
         has_records = isinstance(vars_payload, list) and len(vars_payload) > 0
         if isinstance(vars_payload, list):
-            try:
-                self.vars_df = pd.DataFrame.from_records(vars_payload)
-            except Exception:
+            if pd is not None and hasattr(pd, "DataFrame"):
+                try:
+                    self.vars_df = pd.DataFrame.from_records(vars_payload)
+                except Exception:
+                    self.vars_df = None
+            else:
                 self.vars_df = None
         else:
             self.vars_df = None
@@ -23040,19 +23025,21 @@ class App(tk.Tk):
                 self.update_idletasks()
             except Exception:
                 pass
-            if self.vars_df is None:
-                self.vars_df = coerce_or_make_vars_df(None)
+            vars_df_local = self.vars_df
+            if vars_df_local is None:
+                vars_df_local = coerce_or_make_vars_df(None)
+                self.vars_df = vars_df_local
             for item_name, string_var in self.quote_vars.items():
-                mask = self.vars_df["Item"] == item_name
+                mask = vars_df_local["Item"] == item_name
                 if mask.any():
-                    self.vars_df.loc[mask, "Example Values / Options"] = string_var.get()
+                    vars_df_local.loc[mask, "Example Values / Options"] = string_var.get()
 
             self.apply_overrides(notify=False)
 
             try:
                 ui_vars = {
                     str(row["Item"]): row["Example Values / Options"]
-                    for _, row in self.vars_df.iterrows()
+                    for _, row in vars_df_local.iterrows()
                 }
             except Exception:
                 ui_vars = {}
