@@ -18337,6 +18337,25 @@ def hole_count_from_text_table(doc, lines: Sequence[str] | None = None) -> tuple
 
     return (total, fam) if total else (None, None)
 
+
+def extract_hole_table_from_text(doc) -> dict[str, Any]:
+    """Return hole table metadata derived from text entities."""
+
+    count, families = hole_count_from_text_table(doc)
+    if not count:
+        return {}
+
+    formatted: dict[str, int] = {}
+    for diam, qty in (families or {}).items():
+        if qty:
+            formatted[f'{float(diam):.4f}"'] = int(qty)
+
+    result: dict[str, Any] = {"hole_count": int(count)}
+    if formatted:
+        result["hole_diam_families_in"] = formatted
+    result["provenance_holes"] = "HOLE TABLE (text)"
+    return result
+
 def hole_count_from_geometry(doc, to_in, plate_bbox=None) -> tuple[int, dict]:
     clustered = filtered_circles(doc, to_in, plate_bbox=plate_bbox)
     fam: dict[float, int] = {}
@@ -19805,6 +19824,10 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     if doc is None:
         raise RuntimeError("Failed to load DXF/DWG document")
 
+    table_info = hole_count_from_acad_table(doc) or {}
+    if not table_info.get("hole_count"):
+        table_info = extract_hole_table_from_text(doc) or {}
+
     sp = doc.modelspace()
     units = detect_units_scale(doc)
     to_in = float(units.get("to_in", 1.0) or 1.0)
@@ -19989,6 +20012,35 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
             geo["hole_diam_families_in"] = fam
             geo["hole_family_count"] = sum(fam.values())
 
+    if table_info.get("hole_count"):
+        try:
+            geo["hole_count"] = int(table_info["hole_count"])
+        except Exception:
+            pass
+        fam = table_info.get("hole_diam_families_in") or {}
+        if fam:
+            geo["hole_diam_families_in"] = fam
+            try:
+                geo["hole_family_count"] = int(
+                    sum(int(v) for v in fam.values())
+                )
+            except Exception:
+                geo["hole_family_count"] = sum(fam.values())
+        provenance_value = (
+            table_info.get("provenance")
+            or table_info.get("provenance_holes")
+            or "HOLE TABLE (text)"
+        )
+        provenance_entry = geo.get("provenance")
+        if isinstance(provenance_entry, dict):
+            provenance_entry["holes"] = provenance_value
+            geo["provenance"] = provenance_entry
+        else:
+            geo["provenance"] = {"holes": provenance_value}
+        top_level_hole_count = geo.get("hole_count", len(hole_diams_mm))
+    else:
+        top_level_hole_count = len(hole_diams_mm)
+
     chart_lines: list[str] = []
     chart_ops: list[dict[str, Any]] = []
     chart_reconcile: dict[str, Any] | None = None
@@ -20123,7 +20175,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     if not material:
         material = geo.get("material_note")
 
-    table_hole_count = _coerce_int_or_zero(geo.get("hole_count"))  # now set by ACAD table
+    table_hole_count = _coerce_int_or_zero(table_info.get("hole_count"))
     geom_hole_count = len(hole_diams_mm)
 
     result: dict[str, Any] = {
@@ -20132,7 +20184,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
         "profile_length_mm": round(per * u2mm, 2),
         "hole_diams_mm": hole_diams_mm,
         # prefer table when available, else geometry
-        "hole_count": table_hole_count if table_hole_count > 0 else geom_hole_count,
+        "hole_count": top_level_hole_count,
         "thickness_mm": thickness_mm,
         "material": material,
         "geo": geo,
