@@ -19976,42 +19976,47 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
         existing_geom = 0
     geo["hole_count_geom"] = max(existing_geom, len(hole_diams_mm))
 
-    def _fam_in_from_mm(vals_mm: list[float]) -> dict[str, int]:
-        from collections import Counter
+    from collections import Counter
 
-        vals_in = [v / 25.4 for v in vals_mm]
-        vals_in.sort()
-        buckets: list[list[float]] = []
-        bucket: list[float] = []
-        last: float | None = None
-        for v in vals_in:
-            if last is None or abs(v - last) <= 0.005:
-                bucket.append(v)
-                last = v if last is None else (v + last) / 2
-            else:
-                buckets.append(bucket)
-                bucket = [v]
-                last = v
-        if bucket:
-            buckets.append(bucket)
-        counts = Counter(round(sum(b) / len(b), 4) for b in buckets)
-        return {f'{k:.4f}"': int(c) for k, c in counts.items()}
-
-    if through_mm:
-        geom_families = _fam_in_from_mm(through_mm)
-        if geom_families:
-            if not geo.get("hole_diam_families_in"):
-                geo["hole_diam_families_in"] = geom_families
-            existing_family_total = 0
+    def _families_nearest_1over64_in(vals_mm: Iterable[float]) -> dict[str, int]:
+        quantized: list[float] = []
+        for raw in vals_mm:
             try:
-                existing_family_total = int(float(geo.get("hole_family_count") or 0))
+                val_in = float(raw) / 25.4
             except Exception:
-                existing_family_total = 0
-            geo["hole_family_count"] = max(
-                existing_family_total,
-                sum(geom_families.values()),
-            )
-        geo["hole_diam_families_in_geom"] = geom_families
+                continue
+            if not math.isfinite(val_in):
+                continue
+            quantized.append(round(val_in * 64) / 64)
+        if not quantized:
+            return {}
+        counts = Counter(round(q, 4) for q in quantized)
+        return {f'{k:.4f}"': int(v) for k, v in counts.items()}
+
+    geom_families = _families_nearest_1over64_in(hole_diams_mm)
+    geo["hole_diam_families_in_geom"] = geom_families
+
+    existing_families = geo.get("hole_diam_families_in")
+
+    def _family_total(families: Mapping[str, Any] | None) -> int:
+        if not isinstance(families, dict):
+            return 0
+        total = 0
+        for value in families.values():
+            try:
+                total += int(float(value))
+            except Exception:
+                continue
+        return total
+
+    existing_total = _family_total(existing_families)
+    existing_len = len(existing_families) if isinstance(existing_families, dict) else 0
+    if not isinstance(existing_families, dict) or existing_total <= existing_len:
+        geo["hole_diam_families_in"] = dict(geom_families)
+        existing_families = geo["hole_diam_families_in"]
+        existing_total = _family_total(existing_families)
+
+    geo["hole_family_count"] = int(existing_total)
 
     if table_info.get("hole_count"):
         try:
