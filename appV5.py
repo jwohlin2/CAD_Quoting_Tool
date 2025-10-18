@@ -1565,6 +1565,7 @@ from typing import (
     TypeVar,
     cast,
     Literal,
+    TypedDict,
     overload,
     no_type_check,
 )
@@ -1583,41 +1584,32 @@ else:  # pragma: no cover - fallback when ezdxf is unavailable at runtime
 if typing.TYPE_CHECKING:
     import pandas as pd
     from pandas import DataFrame as PandasDataFrame
+    from pandas import Index as PandasIndex
+    from pandas import Series as PandasSeries
     from cad_quoter.domain import QuoteState as _QuoteState
 
-    SeriesLike: TypeAlias = pd.Series[Any]
+    SeriesLike: TypeAlias = Any
 else:
     PandasDataFrame = Any  # type: ignore[assignment]
+    PandasSeries = Any  # type: ignore[assignment]
+    PandasIndex = Any  # type: ignore[assignment]
     _QuoteState = QuoteState
     try:
         import pandas as pd  # type: ignore[import]
     except Exception:  # pragma: no cover - optional dependency
         pd = None  # type: ignore[assignment]
-        PandasDataFrame = typing.Any
-        PandasSeries = typing.Any
-        PandasIndex = typing.Any
-    else:
-        # Several of our test environments provide a light-weight pandas stub
-        # that implements only the minimal runtime surface we need.  Older
-        # versions of :mod:`appV5` eagerly accessed ``pd.Index`` which is not
-        # guaranteed to exist on these shims, resulting in AttributeError during
-        # import.  Guard each attribute lookup so that we gracefully fall back
-        # to ``typing.Any`` when the real dependency is unavailable.
-        PandasDataFrame = getattr(pd, "DataFrame", typing.Any)
-        PandasSeries = getattr(pd, "Series", typing.Any)
-        PandasIndex = getattr(pd, "Index", typing.Any)
-
-        if PandasDataFrame is typing.Any or PandasSeries is typing.Any:
-            # If any of the expected attributes are missing we treat ``pd`` as a
-            # stub and avoid leaking partially initialised aliases.  Keeping the
-            # ``pd`` reference allows downstream call sites to continue using
-            # helpers such as ``pd.to_numeric`` when they exist, while
-            # maintaining compatibility with the light-weight testing shim.
-            PandasDataFrame = typing.Any
-            PandasSeries = typing.Any
-            PandasIndex = typing.Any
 
     SeriesLike: TypeAlias = Any
+
+
+def _is_pandas_dataframe(obj: Any) -> bool:
+    """Return True if *obj* looks like a pandas ``DataFrame`` instance."""
+
+    df_type = getattr(pd, "DataFrame", None)
+    try:
+        return bool(df_type) and isinstance(obj, df_type)  # type: ignore[arg-type]
+    except Exception:
+        return False
 
 try:
     from cad_quoter_legacy import compute_quote_from_df as _legacy_compute_quote_from_df  # type: ignore[import]
@@ -2162,25 +2154,6 @@ else:  # pragma: no cover - fallback definitions keep quoting functional without
     def explain_quote(*args, **kwargs) -> str:  # pragma: no cover - fallback
         return "LLM explanation unavailable."
 
-
-try:
-    import pandas as pd  # type: ignore[import]
-except Exception:  # pragma: no cover - optional dependency
-    pd = None  # type: ignore[assignment]
-
-if TYPE_CHECKING:  # pragma: no cover - import-time helper for type checkers
-    import pandas as _pandas
-
-    PandasDataFrame = _pandas.DataFrame
-    PandasSeries = _pandas.Series
-    PandasIndex = _pandas.Index
-else:  # pragma: no cover - fallback aliases when pandas is unavailable
-    PandasDataFrame = typing.Any
-    PandasSeries = typing.Any
-    PandasIndex = typing.Any
-
-pd = typing.cast(typing.Any, pd)
-from typing import TypedDict
 
 try:
     from geo_read_more import build_geo_from_dxf as build_geo_from_dxf_path
@@ -18151,22 +18124,8 @@ def extract_hole_table_from_text(doc, y_tol: float = 0.04, min_rows: int = 5):
         "hole_count": total,
         "hole_diam_families_in": families,
         "rows": clean_rows,
+        "provenance_holes": "HOLE TABLE (text)",
     }
-
-
-def _all_tables(doc) -> Iterator[Any]:
-    if doc is None:
-        return
-    seen: set[int] = set()
-    for sp in _spaces(doc):
-        try:
-            for tbl in sp.query("TABLE"):
-                if id(tbl) in seen:
-                    continue
-                seen.add(id(tbl))
-                yield tbl
-        except Exception:
-            continue
 
 
 def hole_count_from_acad_table(doc) -> dict[str, Any]:
@@ -18197,8 +18156,8 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
                 cells.append(" ".join(txt.split()))
             return cells
 
+        header_row = 0
         try:
-            header_row = 0
             hdr = _row_text(header_row)
 
             def _has_cols(row_txt: Sequence[str]) -> bool:
@@ -18403,24 +18362,6 @@ def hole_count_from_text_table(doc, lines: Sequence[str] | None = None) -> tuple
 
     return (total, fam) if total else (None, None)
 
-
-def extract_hole_table_from_text(doc) -> dict[str, Any]:
-    """Return hole table metadata derived from text entities."""
-
-    count, families = hole_count_from_text_table(doc)
-    if not count:
-        return {}
-
-    formatted: dict[str, int] = {}
-    for diam, qty in (families or {}).items():
-        if qty:
-            formatted[f'{float(diam):.4f}"'] = int(qty)
-
-    result: dict[str, Any] = {"hole_count": int(count)}
-    if formatted:
-        result["hole_diam_families_in"] = formatted
-    result["provenance_holes"] = "HOLE TABLE (text)"
-    return result
 
 def hole_count_from_geometry(doc, to_in, plate_bbox=None) -> tuple[int, dict]:
     clustered = filtered_circles(doc, to_in, plate_bbox=plate_bbox)
@@ -19597,7 +19538,6 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
 
     if cnt:
         combined_agg["hole_count"] = int(cnt)
-        geo["hole_count"] = int(cnt)
     if tap_classes_from_table:
         combined_agg["tap_class_counts"] = dict(tap_classes_from_table)
     if tap_qty_from_table:
@@ -19732,95 +19672,6 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
     if flags:
         geo["flags"] = flags
     return geo
-
-def _all_spaces(doc: Any) -> list[Any]:
-    """Return modelspace and all layouts for *doc* if available."""
-
-    if not doc:
-        return []
-
-    spaces: list[Any] = []
-    try:
-        modelspace = doc.modelspace()
-    except Exception:
-        modelspace = None
-    if modelspace is not None:
-        spaces.append(modelspace)
-
-    try:
-        layouts = getattr(doc, "layouts", None)
-        if layouts is not None:
-            names = getattr(layouts, "names", None)
-            get_layout = getattr(layouts, "get", None)
-            if callable(names) and callable(get_layout):
-                for name in names():
-                    if name == "Model":
-                        continue
-                    try:
-                        spaces.append(get_layout(name))
-                    except Exception:
-                        continue
-    except Exception:
-        pass
-
-    return spaces
-
-
-def _iter_text_with_xy(doc: Any) -> Iterator[tuple[str, float, float]]:
-    """Yield ``(text, x, y)`` tuples for TEXT/MTEXT entities in *doc*."""
-
-    def _iter_space(space: Any) -> Iterator[tuple[str, float, float]]:
-        if space is None:
-            return
-
-        for entity in space:
-            try:
-                dxftype = entity.dxftype()
-            except Exception:
-                continue
-
-            if dxftype not in {"TEXT", "MTEXT"}:
-                continue
-
-            try:
-                text = entity.plain_text() if dxftype == "MTEXT" else entity.dxf.text
-                insert = getattr(entity.dxf, "insert", None)
-                x, y = (float(insert[0]), float(insert[1])) if insert is not None else (0.0, 0.0)
-                yield (text or "", x, y)
-            except Exception:
-                continue
-
-        try:
-            for insert in space.query("INSERT"):
-                try:
-                    virtuals = insert.virtual_entities()
-                except Exception:
-                    continue
-
-                for sub in virtuals:
-                    try:
-                        sub_type = sub.dxftype()
-                    except Exception:
-                        continue
-
-                    if sub_type not in {"TEXT", "MTEXT"}:
-                        continue
-
-                    try:
-                        sub_text = sub.plain_text() if sub_type == "MTEXT" else sub.dxf.text
-                        sub_insert = getattr(sub.dxf, "insert", None)
-                        if sub_insert is None:
-                            continue
-                        sx, sy = float(sub_insert[0]), float(sub_insert[1])
-                        yield (sub_text or "", sx, sy)
-                    except Exception:
-                        continue
-        except Exception:
-            return
-
-    for space in _all_spaces(doc):
-        yield from _iter_space(space)
-
 
 def _extract_entity_text(entity: Any) -> str:
     """Return the textual content for TEXT/MTEXT entities.
@@ -21155,7 +21006,7 @@ class App(tk.Tk):
                 except Exception:
                     logger.warning("Failed to preload variables from %s", saved_vars_path, exc_info=True)
                 else:
-                    if isinstance(core_df, pd.DataFrame) and isinstance(full_df, pd.DataFrame):
+                    if _is_pandas_dataframe(core_df) and _is_pandas_dataframe(full_df):
                         self._refresh_variables_cache(core_df, full_df)
                     else:
                         logger.warning(
