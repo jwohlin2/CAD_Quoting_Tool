@@ -80,6 +80,10 @@ from cad_quoter.utils.render_utils import (
     render_quote_doc,
 )
 from cad_quoter.pricing import load_backup_prices_csv
+from cad_quoter.pricing.mcmaster_helpers import (
+    pick_mcmaster_plate_sku as _pick_mcmaster_plate_sku,
+    resolve_mcmaster_plate_for_quote as _resolve_mcmaster_plate_for_quote,
+)
 from cad_quoter.pricing.vendor_csv import (
     pick_from_stdgrid as _pick_from_stdgrid,
     pick_plate_from_mcmaster as _pick_plate_from_mcmaster,
@@ -1245,192 +1249,6 @@ def _material_cost_components(
         "total_usd": round(total_usd_value, 2),
     }
 
-
-@lru_cache(maxsize=1)
-def _load_mcmaster_catalog_csv(path: str | None = None) -> list[dict[str, Any]]:
-    """Return rows from the McMaster stock catalog CSV."""
-
-    csv_path = path or os.getenv("CATALOG_CSV_PATH") or str(default_catalog_csv())
-    if not csv_path:
-        return []
-    try:
-        with open(csv_path, newline="", encoding="utf-8-sig") as handle:
-            reader = csv.DictReader(handle)
-            return [dict(row) for row in reader if row]
-    except FileNotFoundError:
-        return []
-    except Exception:
-        return []
-
-
-def _coerce_inches_value(value: Any) -> float | None:
-    if value is None:
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-
-    text = str(value).strip().replace("\u00a0", " ")
-    if not text:
-        return None
-
-    try:
-        parsed = float(_parse_inches(text))
-    except Exception:
-        parsed = None
-    if parsed is not None and parsed > 0:
-        return parsed
-
-    try:
-        return float(text)
-    except Exception:
-        pass
-
-    try:
-        return float(Fraction(text))
-    except Exception:
-        return None
-
-
-def _pick_mcmaster_plate_sku_impl(
-    need_L_in: float,
-    need_W_in: float,
-    need_T_in: float,
-    *,
-    material_key: str = "MIC6",
-    catalog_rows: Sequence[Mapping[str, Any]] | None = None,
-) -> dict[str, Any] | None:
-    """Return the smallest-area McMaster plate covering the requested envelope."""
-
-    import math as _math
-
-    if not all(val > 0 for val in (need_L_in, need_W_in, need_T_in)):
-        return None
-
-    rows = list(catalog_rows) if catalog_rows is not None else _load_mcmaster_catalog_csv()
-    if not rows:
-        return None
-
-    target_key = str(material_key or "").strip().lower()
-    if not target_key:
-        return None
-
-    tolerance = 0.02
-    candidates: list[dict[str, Any]] = []
-    for row in rows:
-        if not isinstance(row, Mapping):
-            continue
-        material_text = str(
-            (row.get("material") or row.get("Material") or "")
-        ).strip().lower()
-        if not material_text:
-            continue
-        variants = {target_key}
-        if "_" in target_key:
-            variants.add(target_key.replace("_", " "))
-        if " " in target_key:
-            variants.add(target_key.replace(" ", ""))
-        normalised_material = material_text.replace("_", " ")
-        if not any(variant and variant in normalised_material for variant in variants):
-            continue
-
-        length = _coerce_inches_value(
-            row.get("length_in")
-            or row.get("L_in")
-            or row.get("len_in")
-            or row.get("length")
-        )
-        width = _coerce_inches_value(
-            row.get("width_in")
-            or row.get("W_in")
-            or row.get("wid_in")
-            or row.get("width")
-        )
-        thickness = _coerce_inches_value(
-            row.get("thickness_in")
-            or row.get("T_in")
-            or row.get("thk_in")
-            or row.get("thickness")
-        )
-        if (
-            length is None
-            or width is None
-            or thickness is None
-            or length <= 0
-            or width <= 0
-            or thickness <= 0
-        ):
-            continue
-        if abs(thickness - need_T_in) > tolerance:
-            continue
-        part_no = str(
-            row.get("mcmaster_part")
-            or row.get("part")
-            or row.get("sku")
-            or ""
-        ).strip()
-        if not part_no:
-            continue
-
-        def _covers(a: float, b: float, A: float, B: float) -> bool:
-            return (A >= a) and (B >= b)
-
-        ok1 = _covers(need_L_in, need_W_in, length, width)
-        ok2 = _covers(need_L_in, need_W_in, width, length)
-        if not (ok1 or ok2):
-            continue
-
-        area = length * width
-        overL1 = (length - need_L_in) if ok1 else _math.inf
-        overW1 = (width - need_W_in) if ok1 else _math.inf
-        overL2 = (width - need_L_in) if ok2 else _math.inf
-        overW2 = (length - need_W_in) if ok2 else _math.inf
-        over_L = min(overL1, overL2)
-        over_W = min(overW1, overW2)
-
-        candidates.append(
-            {
-                "len_in": float(length),
-                "wid_in": float(width),
-                "thk_in": float(thickness),
-                "mcmaster_part": part_no,
-                "area": float(area),
-                "overL": float(over_L),
-                "overW": float(over_W),
-                "source": row.get("source") or "mcmaster-catalog",
-            }
-        )
-
-    if not candidates:
-        return None
-
-    candidates.sort(key=lambda c: (c["area"], max(c["overL"], c["overW"])))
-    best = candidates[0]
-    return {
-        "len_in": float(best["len_in"]),
-        "wid_in": float(best["wid_in"]),
-        "thk_in": float(best["thk_in"]),
-        "mcmaster_part": best["mcmaster_part"],
-        "source": best.get("source") or "mcmaster-catalog",
-    }
-
-
-def _pick_mcmaster_plate_sku(
-    need_L_in: float,
-    need_W_in: float,
-    need_T_in: float,
-    *,
-    material_key: str = "MIC6",
-    catalog_rows: Sequence[Mapping[str, Any]] | None = None,
-) -> dict[str, Any] | None:
-    """Return the smallest-area McMaster plate covering the requested envelope."""
-
-    return _pick_mcmaster_plate_sku_impl(
-        need_L_in,
-        need_W_in,
-        need_T_in,
-        material_key=material_key,
-        catalog_rows=catalog_rows,
-    )
 
 def _compute_pricing_ladder(
     subtotal: float | int | str | None,
@@ -7236,16 +7054,16 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             material_lookup_for_pick = normalized_material_key or ""
             if not material_lookup_for_pick and material_display_label:
                 material_lookup_for_pick = _normalize_lookup_key(material_display_label)
-            try:
-                if need_len and need_wid and need_thk:
-                    picked_stock = _pick_mcmaster_plate_sku(
-                        float(need_len),
-                        float(need_wid),
-                        float(need_thk),
-                        material_key=material_lookup_for_pick or "MIC6",
-                    )
-            except Exception:
-                picked_stock = None
+            picked_stock = _resolve_mcmaster_plate_for_quote(
+                float(need_len) if need_len else None,
+                float(need_wid) if need_wid else None,
+                float(need_thk) if need_thk else None,
+                material_key=material_lookup_for_pick or "MIC6",
+                stock_L_in=float(stock_len_val) if stock_len_val else None,
+                stock_W_in=float(stock_wid_val) if stock_wid_val else None,
+                stock_T_in=float(stock_thk_val) if stock_thk_val else None,
+            )
+
             if picked_stock:
                 stock_len_val = float(picked_stock.get("len_in") or 0.0)
                 stock_wid_val = float(picked_stock.get("wid_in") or 0.0)
@@ -7256,18 +7074,35 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     material_stock_block["stock_L_in"] = float(stock_len_val)
                     material_stock_block["stock_W_in"] = float(stock_wid_val)
                     material_stock_block["stock_T_in"] = float(stock_thk_val)
-                    material_stock_block.setdefault("stock_source_tag", source_hint)
-                    material_stock_block.setdefault("source", source_hint)
+                    material_stock_block["stock_source_tag"] = source_hint
+                    material_stock_block["source"] = source_hint
                     if part_number:
                         material_stock_block["mcmaster_part"] = part_number
+                        material_stock_block["part_no"] = part_number
+                        if not material_stock_block.get("stock_price_source"):
+                            material_stock_block["stock_price_source"] = "mcmaster_api"
                 if isinstance(material, _MutableMappingABC):
-                    material.setdefault("stock_source_tag", source_hint)
-                    material.setdefault("source", source_hint)
+                    material["stock_source_tag"] = source_hint
+                    material["source"] = source_hint
                     if part_number:
-                        material.setdefault("mcmaster_part", part_number)
+                        material["mcmaster_part"] = part_number
+                        material["part_no"] = part_number
+                        if not material.get("stock_price_source"):
+                            material["stock_price_source"] = (
+                                material_stock_block.get("stock_price_source")
+                                if isinstance(material_stock_block, _MappingABC)
+                                else "mcmaster_api"
+                            )
                 if isinstance(result, _MutableMappingABC):
                     if part_number:
                         result["mcmaster_part"] = part_number
+                        result["part_no"] = part_number
+                        if not result.get("stock_price_source"):
+                            result["stock_price_source"] = (
+                                material_stock_block.get("stock_price_source")
+                                if isinstance(material_stock_block, _MappingABC)
+                                else "mcmaster_api"
+                            )
                     result["stock_source"] = source_hint
             elif (
                 material_lookup_for_pick
