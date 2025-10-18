@@ -1432,6 +1432,58 @@ def _pick_mcmaster_plate_sku(
         catalog_rows=catalog_rows,
     )
 
+
+def _resolve_mcmaster_plate_for_quote(
+    need_L_in: float | None,
+    need_W_in: float | None,
+    need_T_in: float | None,
+    *,
+    material_key: str,
+    stock_L_in: float | None = None,
+    stock_W_in: float | None = None,
+    stock_T_in: float | None = None,
+    catalog_rows: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """Return a McMaster plate candidate using quote needs and existing stock sizing.
+
+    The quote may already contain rounded stock dimensions. When the direct lookup
+    for the requested blank fails (for example, because the catalog is missing an
+    exact match for the required envelope), we fall back to searching with the
+    previously rounded stock dimensions so that we can still surface the McMaster
+    part number and pricing for that size.
+    """
+
+    candidate: dict[str, Any] | None = None
+
+    if need_L_in and need_W_in and need_T_in:
+        try:
+            candidate = _pick_mcmaster_plate_sku(
+                float(need_L_in),
+                float(need_W_in),
+                float(need_T_in),
+                material_key=material_key,
+                catalog_rows=catalog_rows,
+            )
+        except Exception:
+            candidate = None
+
+    if candidate:
+        return candidate
+
+    if stock_L_in and stock_W_in and stock_T_in:
+        try:
+            return _pick_mcmaster_plate_sku(
+                float(stock_L_in),
+                float(stock_W_in),
+                float(stock_T_in),
+                material_key=material_key,
+                catalog_rows=catalog_rows,
+            )
+        except Exception:
+            return None
+
+    return None
+
 def _compute_pricing_ladder(
     subtotal: float | int | str | None,
     *,
@@ -7236,16 +7288,16 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             material_lookup_for_pick = normalized_material_key or ""
             if not material_lookup_for_pick and material_display_label:
                 material_lookup_for_pick = _normalize_lookup_key(material_display_label)
-            try:
-                if need_len and need_wid and need_thk:
-                    picked_stock = _pick_mcmaster_plate_sku(
-                        float(need_len),
-                        float(need_wid),
-                        float(need_thk),
-                        material_key=material_lookup_for_pick or "MIC6",
-                    )
-            except Exception:
-                picked_stock = None
+            picked_stock = _resolve_mcmaster_plate_for_quote(
+                float(need_len) if need_len else None,
+                float(need_wid) if need_wid else None,
+                float(need_thk) if need_thk else None,
+                material_key=material_lookup_for_pick or "MIC6",
+                stock_L_in=float(stock_len_val) if stock_len_val else None,
+                stock_W_in=float(stock_wid_val) if stock_wid_val else None,
+                stock_T_in=float(stock_thk_val) if stock_thk_val else None,
+            )
+
             if picked_stock:
                 stock_len_val = float(picked_stock.get("len_in") or 0.0)
                 stock_wid_val = float(picked_stock.get("wid_in") or 0.0)
