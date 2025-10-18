@@ -1585,6 +1585,11 @@ else:  # pragma: no cover - fallback when ezdxf is unavailable at runtime
             def modelspace(self) -> Any: ...
 
 if typing.TYPE_CHECKING:
+    from cad_quoter.domain import QuoteState as _QuoteState
+else:
+    _QuoteState = QuoteState
+
+if typing.TYPE_CHECKING:
     import pandas as pd
     from pandas import DataFrame as PandasDataFrame
     from pandas import Index as PandasIndex
