@@ -19420,6 +19420,95 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
         geo["flags"] = flags
     return geo
 
+def _all_spaces(doc: Any) -> list[Any]:
+    """Return modelspace and all layouts for *doc* if available."""
+
+    if not doc:
+        return []
+
+    spaces: list[Any] = []
+    try:
+        modelspace = doc.modelspace()
+    except Exception:
+        modelspace = None
+    if modelspace is not None:
+        spaces.append(modelspace)
+
+    try:
+        layouts = getattr(doc, "layouts", None)
+        if layouts is not None:
+            names = getattr(layouts, "names", None)
+            get_layout = getattr(layouts, "get", None)
+            if callable(names) and callable(get_layout):
+                for name in names():
+                    if name == "Model":
+                        continue
+                    try:
+                        spaces.append(get_layout(name))
+                    except Exception:
+                        continue
+    except Exception:
+        pass
+
+    return spaces
+
+
+def _iter_text_with_xy(doc: Any) -> Iterator[tuple[str, float, float]]:
+    """Yield ``(text, x, y)`` tuples for TEXT/MTEXT entities in *doc*."""
+
+    def _iter_space(space: Any) -> Iterator[tuple[str, float, float]]:
+        if space is None:
+            return
+
+        for entity in space:
+            try:
+                dxftype = entity.dxftype()
+            except Exception:
+                continue
+
+            if dxftype not in {"TEXT", "MTEXT"}:
+                continue
+
+            try:
+                text = entity.plain_text() if dxftype == "MTEXT" else entity.dxf.text
+                insert = getattr(entity.dxf, "insert", None)
+                x, y = (float(insert[0]), float(insert[1])) if insert is not None else (0.0, 0.0)
+                yield (text or "", x, y)
+            except Exception:
+                continue
+
+        try:
+            for insert in space.query("INSERT"):
+                try:
+                    virtuals = insert.virtual_entities()
+                except Exception:
+                    continue
+
+                for sub in virtuals:
+                    try:
+                        sub_type = sub.dxftype()
+                    except Exception:
+                        continue
+
+                    if sub_type not in {"TEXT", "MTEXT"}:
+                        continue
+
+                    try:
+                        sub_text = sub.plain_text() if sub_type == "MTEXT" else sub.dxf.text
+                        sub_insert = getattr(sub.dxf, "insert", None)
+                        if sub_insert is None:
+                            continue
+                        sx, sy = float(sub_insert[0]), float(sub_insert[1])
+                        yield (sub_text or "", sx, sy)
+                    except Exception:
+                        continue
+        except Exception:
+            return
+
+    for space in _all_spaces(doc):
+        yield from _iter_space(space)
+
+
 def _extract_entity_text(entity: Any) -> str:
     """Return the textual content for TEXT/MTEXT entities.
 
