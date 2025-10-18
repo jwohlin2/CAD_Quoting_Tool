@@ -19671,8 +19671,8 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     if not material:
         material = geo.get("material_note")
 
-    table_count = _coerce_int_or_zero(geo.get("hole_count"))
-    geom_count = len(hole_diams_mm)
+    table_hole_count = _coerce_int_or_zero(geo.get("hole_count"))  # now set by ACAD table
+    geom_hole_count = len(hole_diams_mm)
 
     result: dict[str, Any] = {
         "kind": "2D",
@@ -19680,15 +19680,15 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
         "profile_length_mm": round(per * u2mm, 2),
         "hole_diams_mm": hole_diams_mm,
         # prefer table when available, else geometry
-        "hole_count": table_count if table_count > 0 else geom_count,
+        "hole_count": table_hole_count if table_hole_count > 0 else geom_hole_count,
         "thickness_mm": thickness_mm,
         "material": material,
         "geo": geo,
     }
-    if table_count > 0:
-        result["hole_count_table"] = table_count
-    if geom_count:
-        result.setdefault("hole_count_geom", geom_count)
+    if table_hole_count > 0:
+        result["hole_count_table"] = table_hole_count
+    if geom_hole_count:
+        result.setdefault("hole_count_geom", geom_hole_count)
     if geo.get("tap_qty") or geo.get("cbore_qty") or geo.get("csk_qty"):
         result["feature_counts"] = {
             "tap_qty": geo.get("tap_qty", 0),
