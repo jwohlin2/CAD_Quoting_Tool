@@ -1712,6 +1712,7 @@ def _build_quote_header_lines(
     """Construct the canonical QUOTE SUMMARY header lines."""
 
     header_lines: list[str] = [f"QUOTE SUMMARY - Qty {qty}", divider]
+    header_lines.append("Quote Summary (structured data attached below)")
 
     speeds_feeds_value = None
     if isinstance(result, _MappingABC):
@@ -4732,10 +4733,11 @@ def _build_planner_bucket_render_state(
             machine_hours_total += split_machine_hours
             labor_hours_total += split_labor_hours
             if used_split or (split_machine_hours > 0.0 or split_labor_hours > 0.0):
-                split_detail_line = (
-                    f"machine {split_machine_hours:.2f} hr @ ${cfg.machine_rate_per_hr:.0f}/hr, "
-                    f"labor {split_labor_hours:.2f} hr @ ${cfg.labor_rate_per_hr:.0f}/hr"
-                )
+                if split_machine_hours > 0.0 and split_labor_hours > 0.0:
+                    split_detail_line = (
+                        f"machine {split_machine_hours:.2f} hr @ ${cfg.machine_rate_per_hr:.0f}/hr, "
+                        f"labor {split_labor_hours:.2f} hr @ ${cfg.labor_rate_per_hr:.0f}/hr"
+                    )
 
         detail_text: str | None = None
         for candidate in (canon_key, label):
@@ -7552,6 +7554,26 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 scrap_credit_mass_lb = None
                 material_detail_for_breakdown.pop("scrap_credit_mass_lb", None)
 
+            legacy_weight_lines: list[str] = []
+            if (starting_mass_val and starting_mass_val > 0) or show_zeros:
+                legacy_weight_lines.append(
+                    f"  Weight Reference: Start {_format_weight_lb_oz(starting_mass_val)}"
+                )
+            if (net_mass_val and net_mass_val > 0) or show_zeros:
+                legacy_weight_lines.append(
+                    f"  Weight Reference: Net {_format_weight_lb_oz(net_mass_val)}"
+                )
+            if scrap_mass_val is not None:
+                if scrap_mass_val > 0 or show_zeros:
+                    legacy_weight_lines.append(
+                        f"  Weight Reference: Scrap {_format_weight_lb_oz(scrap_mass_val)}"
+                    )
+            elif show_zeros:
+                legacy_weight_lines.append("  Weight Reference: Scrap 0 oz")
+
+            if legacy_weight_lines:
+                detail_lines.extend(legacy_weight_lines)
+
             weight_lines: list[str] = []
             if (starting_mass_val and starting_mass_val > 0) or show_zeros:
                 weight_lines.append(
@@ -8039,13 +8061,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if programmer_hours > 0:
             has_detail = True
             write_line(
-                f"- Programmer: {_hours_with_rate_text(programmer_hours, programmer_rate)}",
+                f"- Programmer (lot): {_hours_with_rate_text(programmer_hours, programmer_rate)}",
                 "    ",
             )
         if engineer_hours > 0:
             has_detail = True
             write_line(
-                f"- Engineering: {_hours_with_rate_text(engineer_hours, engineer_rate)}",
+                f"- Engineering (lot): {_hours_with_rate_text(engineer_hours, engineer_rate)}",
                 "    ",
             )
         if not has_detail:
@@ -8065,7 +8087,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if fixture_build_hours > 0:
             has_detail = True
             write_line(
-                f"- Build Labor: {_hours_with_rate_text(fixture_build_hours, fixture_build_rate)}",
+                f"- Build labor (lot): {_hours_with_rate_text(fixture_build_hours, fixture_build_rate)}",
                 "    ",
             )
         if not has_detail:
@@ -8965,6 +8987,41 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                         continue
                     if cleaned not in detail_parts:
                         detail_parts.append(cleaned)
+            simple_hours_line: str | None = None
+            if hours_val > 0.0 and cost_val > 0.0:
+                rate_for_detail = cost_val / hours_val if hours_val else 0.0
+                planner_rate_override: float | None = None
+                if record_canon and bucket_state is not None:
+                    extra_payload = getattr(bucket_state, "extra", None)
+                    split_lookup: Mapping[str, Any] | None = None
+                    if isinstance(extra_payload, _MappingABC):
+                        split_source = extra_payload.get("bucket_hour_split")
+                        if isinstance(split_source, _MappingABC):
+                            split_lookup = split_source
+                    if isinstance(split_lookup, _MappingABC):
+                        split_entry = split_lookup.get(record_canon)
+                        if not isinstance(split_entry, _MappingABC) and canon_key and canon_key != record_canon:
+                            split_entry = split_lookup.get(canon_key)
+                        if not isinstance(split_entry, _MappingABC):
+                            alt_key = _canonical_bucket_key(record_canon)
+                            if alt_key and alt_key != record_canon:
+                                split_entry = split_lookup.get(alt_key)
+                        if isinstance(split_entry, _MappingABC):
+                            machine_split = _safe_float(split_entry.get("machine_hours"))
+                            labor_split = _safe_float(split_entry.get("labor_hours"))
+                            if machine_split > 0.0 and labor_split <= 0.0:
+                                meta_entry = _lookup_process_meta(record_canon) or _lookup_process_meta(display_label)
+                                if isinstance(meta_entry, _MappingABC):
+                                    base_extra_val = _safe_float(meta_entry.get("base_extra"))
+                                    meta_rate_val = _safe_float(meta_entry.get("rate"))
+                                    if base_extra_val > 0.0 and meta_rate_val > 0.0:
+                                        planner_rate_override = meta_rate_val
+                if planner_rate_override and planner_rate_override > 0.0:
+                    rate_for_detail = planner_rate_override
+                if rate_for_detail > 0.0:
+                    simple_hours_line = f"{hours_val:.2f} hr @ ${rate_for_detail:.2f}/hr"
+            if simple_hours_line and simple_hours_line not in detail_parts:
+                detail_parts.append(simple_hours_line)
             self._rows.append(
                 {
                     "label": display_label,
