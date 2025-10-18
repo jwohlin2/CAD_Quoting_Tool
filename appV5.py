@@ -19486,6 +19486,30 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     if not chart_lines:
         chart_lines = _extract_text_lines_from_ezdxf_doc(doc)
 
+    table_info = hole_count_from_acad_table(doc)
+    if table_info and table_info.get("hole_count"):
+        try:
+            geo["hole_count"] = int(table_info.get("hole_count") or 0)
+        except Exception:
+            pass
+        fam = table_info.get("hole_diam_families_in")
+        if isinstance(fam, dict) and fam:
+            geo["hole_diam_families_in"] = fam
+            geo["hole_family_count"] = sum(
+                int(v or 0) for v in fam.values()
+            )
+        prov = (
+            table_info.get("provenance")
+            or table_info.get("provenance_holes")
+            or "HOLE TABLE (ACAD_TABLE)"
+        )
+        provenance_entry = geo.get("provenance")
+        if isinstance(provenance_entry, dict):
+            provenance_entry["holes"] = prov
+            geo["provenance"] = provenance_entry
+        else:
+            geo["provenance"] = {"holes": prov}
+
     if chart_lines:
         chart_summary = summarize_hole_chart_lines(chart_lines)
     parser = _parse_hole_table_lines or parse_hole_table_lines
