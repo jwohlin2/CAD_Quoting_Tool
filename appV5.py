@@ -17856,6 +17856,21 @@ def _iter_table_text(doc):
         except Exception:
             continue
 
+def _all_tables(doc) -> Iterator[Any]:
+    if doc is None:
+        return
+    seen: set[int] = set()
+    for sp in _spaces(doc):
+        try:
+            for tbl in sp.query("TABLE"):
+                if id(tbl) in seen:
+                    continue
+                seen.add(id(tbl))
+                yield tbl
+        except Exception:
+            continue
+
+
 def hole_count_from_acad_table(doc) -> dict[str, Any]:
     """Extract hole and tap data from an AutoCAD TABLE entity."""
 
@@ -17865,73 +17880,72 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
 
     for t in _all_tables(doc):
         try:
-            n_rows = int(getattr(t.dxf, "n_rows", 0))
-            n_cols = int(getattr(t.dxf, "n_cols", 0))
+            n_rows = t.dxf.n_rows
+            n_cols = t.dxf.n_cols
         except Exception:
-            n_rows = 0
-            n_cols = 0
-        if n_rows <= 0 or n_cols <= 0:
             continue
 
-        def _cell_text(row: int, col: int) -> str:
-            if row < 0 or col < 0:
-                return ""
-            try:
-                cell = t.get_cell(row, col)
-            except Exception:
-                cell = None
-            if cell is None:
-                return ""
-            try:
-                text = cell.get_text()
-            except Exception:
-                text = ""
-            return text or ""
-
-        rows: list[tuple[list[str], list[str]]] = []
-        for r in range(n_rows):
-            raw_row: list[str] = []
-            normalized: list[str] = []
+        def _row_text(row_idx: int) -> list[str]:
+            cells: list[str] = []
             for c in range(n_cols):
-                text = _cell_text(r, c)
-                raw_row.append(text)
-                normalized.append(" ".join(text.split()).upper())
-            rows.append((raw_row, normalized))
+                try:
+                    cell = t.get_cell(row_idx, c)
+                except Exception:
+                    cell = None
+                try:
+                    txt = (cell.get_text() if cell else "") or ""
+                except Exception:
+                    txt = ""
+                cells.append(" ".join(txt.split()))
+            return cells
 
-        header_index: int | None = None
-        header: list[str] = []
-        header_markers = ("QTY", "QUANTITY", "REF", "DESCRIPTION", "DESC", "DIA", "SIZE", "HOLE")
-        for idx, (_raw, norm) in enumerate(rows):
-            non_empty = [s for s in norm if s]
-            if len(non_empty) <= 1:
-                continue
-            joined = " ".join(non_empty)
-            if any(marker in joined for marker in header_markers):
-                header_index = idx
-                header = norm
-                break
-        if header_index is None and rows:
-            header_index = 0
-            header = rows[0][1]
-        if header_index is None:
+        try:
+            header_row = 0
+            hdr = _row_text(header_row)
+
+            def _has_cols(row_txt: Sequence[str]) -> bool:
+                joined = " | ".join(row_txt).upper()
+                return ("QTY" in joined) and ("DESC" in joined or "DESCRIPTION" in joined)
+
+            if not _has_cols(hdr):
+                for try_r in range(1, min(5, n_rows)):
+                    row_txt = _row_text(try_r)
+                    if _has_cols(row_txt):
+                        header_row = try_r
+                        hdr = row_txt
+                        break
+        except Exception:
+            hdr = []
+
+        if not hdr or not any(hdr):
             continue
 
-        if "HOLE" not in " ".join(header):
+        first_rows = " ".join(
+            " ".join(_row_text(r)).upper() for r in range(min(5, n_rows))
+        )
+        if "HOLE" not in first_rows:
             continue
 
-        def col(rx_list: Sequence[str]) -> int | None:
-            for i, h in enumerate(header):
-                for rx in rx_list:
-                    if re.search(rx, h):
-                        return i
+        def find_col(name: str) -> int | None:
+            target = name.upper()
+            for idx, txt in enumerate(hdr):
+                if target in (txt or "").upper():
+                    return idx
             return None
 
-        c_ref = col([r"\bREF\b", r"\bREF[^A-Z0-9]*Ø", r"\bDIA\b", r"\bØ\b"])
-        c_qty = col([r"\bQTY\.?\b", r"\bQUANTITY\b"])
-        c_desc = col([r"\bDESC", r"\bDESCRIPTION\b"])
-
+        c_qty = find_col("QTY")
         if c_qty is None:
             continue
+
+        c_desc = find_col("DESC")
+        if c_desc is None:
+            c_desc = find_col("DESCRIPTION")
+
+        c_ref = find_col("REF")
+        if c_ref is None:
+            c_ref = find_col("DIA")
+        if c_ref is None:
+            c_ref = find_col("Ø")
 
         total = 0
         families: dict[float, int] = {}
@@ -17940,84 +17954,112 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
         from_back = False
         double_sided = False
 
-        def _coerce_qty(s: str) -> int:
-            s = (s or "").strip()
+        def _coerce_qty(text: str) -> int:
+            text = (text or "").strip()
             try:
-                return int(float(s))
+                return int(float(text))
             except Exception:
-                m = re.search(r"\d+", s)
-                return int(m.group()) if m else 0
+                digits = re.findall(r"\d+", text)
+                return int(digits[0]) if digits else 0
 
-        for r in range(header_index + 1, n_rows):
-            row_raw = rows[r][0]
-            qty_text = row_raw[c_qty] if c_qty < len(row_raw) else "0"
+        for r in range(header_row + 1, n_rows):
+            try:
+                qty_cell = t.get_cell(r, c_qty) if c_qty is not None else None
+            except Exception:
+                qty_cell = None
+            try:
+                qty_text = (qty_cell.get_text() if qty_cell else "") or "0"
+            except Exception:
+                qty_text = "0"
+
             qty = _coerce_qty(qty_text)
             if qty <= 0:
                 continue
             total += qty
 
             ref_txt = ""
-            desc = ""
             if c_ref is not None:
-                ref_txt = row_raw[c_ref] if c_ref < len(row_raw) else ""
-            if c_desc is not None:
-                desc = row_raw[c_desc] if c_desc < len(row_raw) else ""
-            u = " ".join([ref_txt, desc]).upper()
+                try:
+                    ref_cell = t.get_cell(r, c_ref)
+                except Exception:
+                    ref_cell = None
+                try:
+                    ref_txt = (ref_cell.get_text() if ref_cell else "") or ""
+                except Exception:
+                    ref_txt = ""
 
-            def _parse_dia(tok: str) -> float | None:
-                tok = (tok or "").strip().lstrip("Ø⌀\u00D8 ").strip()
-                if re.fullmatch(r"\d+/\d+", tok):
+            desc = ""
+            if c_desc is not None:
+                try:
+                    desc_cell = t.get_cell(r, c_desc)
+                except Exception:
+                    desc_cell = None
+                try:
+                    desc = (desc_cell.get_text() if desc_cell else "") or ""
+                except Exception:
+                    desc = ""
+
+            combined = f"{ref_txt} {desc}".strip()
+            upper_text = combined.upper()
+
+            def _parse_dia(token: str) -> float | None:
+                token = (token or "").strip().lstrip("Ø⌀\u00D8 ").strip()
+                if re.fullmatch(r"\d+/\d+", token):
                     try:
-                        return float(Fraction(tok))
+                        return float(Fraction(token))
                     except Exception:
                         return None
-                if re.fullmatch(r"(?:\d+)?\.\d+|\d+(?:\.\d+)?", tok):
+                if re.fullmatch(r"(?:\d+)?\.\d+|\d+(?:\.\d+)?", token):
                     try:
-                        return float(tok)
+                        return float(token)
                     except Exception:
                         return None
                 return None
 
-                dia_in = _parse_dia(ref_txt)
-                if dia_in is None:
-                    mm = re.search(
-                        r"[Ø⌀\u00D8]?\s*((?:\d+)?\.\d+|\d+/\d+|\d+(?:\.\d+)?)",
-                        desc,
-                    )
-                    dia_in = _parse_dia(mm.group(1)) if mm else None
-                if dia_in is not None:
-                    key = round(dia_in, 4)
-                    families[key] = families.get(key, 0) + qty
+            dia = _parse_dia(ref_txt)
+            if dia is None:
+                match = re.search(
+                    r"[Ø⌀\u00D8]?\s*((?:\d+)?\.\d+|\d+/\d+|\d+(?:\.\d+)?)",
+                    combined,
+                )
+                dia = _parse_dia(match.group(1)) if match else None
 
-                tap_cls = tap_classes_from_row_text(u, qty)
-                tap_sum = sum(tap_cls.values())
-                if tap_sum:
-                    for key, val in tap_cls.items():
-                        if val:
-                            tap_classes[key] = tap_classes.get(key, 0) + int(val)
-                    row_taps += tap_sum
-                elif "TAP" in u or "N.P.T" in u or "NPT" in u:
-                    row_taps += qty
+            if dia is not None:
+                key = round(dia, 4)
+                families[key] = families.get(key, 0) + qty
 
-                if re.search(r"\bFROM\s+BACK\b", u):
-                    from_back = True
-                if re.search(r"\b(FRONT\s*&\s*BACK|BOTH\s+SIDES)\b", u):
-                    double_sided = True
+            tap_cls = tap_classes_from_row_text(upper_text, qty)
+            tap_sum = sum(tap_cls.values())
+            if tap_sum:
+                for key, val in tap_cls.items():
+                    if val:
+                        tap_classes[key] = tap_classes.get(key, 0) + int(val)
+                row_taps += tap_sum
+            elif "TAP" in upper_text or "N.P.T" in upper_text or "NPT" in upper_text:
+                row_taps += qty
 
-            if total > 0:
-                filtered_classes = {k: int(v) for k, v in tap_classes.items() if v}
-                result = {
-                    "hole_count": total,
-                    "hole_diam_families_in": families,
-                    "tap_qty_from_table": row_taps,
-                    "tap_class_counts": filtered_classes,
-                    "provenance_holes": "HOLE TABLE (ACAD_TABLE)",
-                }
-                if from_back:
-                    result["from_back"] = True
-                if double_sided:
-                    result["double_sided_cbore"] = True
-                return result
+            if re.search(r"\bFROM\s+BACK\b", upper_text):
+                from_back = True
+            if re.search(r"\b(FRONT\s*&\s*BACK|BOTH\s+SIDES)\b", upper_text):
+                double_sided = True
+
+        if total > 0:
+            filtered_classes = {k: int(v) for k, v in tap_classes.items() if v}
+            families_formatted = {
+                f'{diam:.4f}"': count for diam, count in sorted(families.items())
+            }
+            result = {
+                "hole_count": total,
+                "hole_diam_families_in": families_formatted,
+                "tap_qty_from_table": row_taps,
+                "tap_class_counts": filtered_classes,
+                "provenance_holes": "HOLE TABLE (ACAD_TABLE)",
+            }
+            if from_back:
+                result["from_back"] = True
+            if double_sided:
+                result["double_sided_cbore"] = True
+            return result
 
     return result
 
@@ -19758,8 +19800,8 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     if not material:
         material = geo.get("material_note")
 
-    table_count = _coerce_int_or_zero(geo.get("hole_count"))
-    geom_count = len(hole_diams_mm)
+    table_hole_count = _coerce_int_or_zero(geo.get("hole_count"))  # now set by ACAD table
+    geom_hole_count = len(hole_diams_mm)
 
     result: dict[str, Any] = {
         "kind": "2D",
@@ -19767,15 +19809,15 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
         "profile_length_mm": round(per * u2mm, 2),
         "hole_diams_mm": hole_diams_mm,
         # prefer table when available, else geometry
-        "hole_count": table_count if table_count > 0 else geom_count,
+        "hole_count": table_hole_count if table_hole_count > 0 else geom_hole_count,
         "thickness_mm": thickness_mm,
         "material": material,
         "geo": geo,
     }
-    if table_count > 0:
-        result["hole_count_table"] = table_count
-    if geom_count:
-        result.setdefault("hole_count_geom", geom_count)
+    if table_hole_count > 0:
+        result["hole_count_table"] = table_hole_count
+    if geom_hole_count:
+        result.setdefault("hole_count_geom", geom_hole_count)
     if geo.get("tap_qty") or geo.get("cbore_qty") or geo.get("csk_qty"):
         result["feature_counts"] = {
             "tap_qty": geo.get("tap_qty", 0),
