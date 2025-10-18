@@ -1581,43 +1581,33 @@ else:  # pragma: no cover - fallback when ezdxf is unavailable at runtime
             def modelspace(self) -> Any: ...
 
 if typing.TYPE_CHECKING:
+    from cad_quoter.domain import QuoteState as _QuoteState
+else:
+    _QuoteState = QuoteState
+
+if typing.TYPE_CHECKING:
     import pandas as pd
     from pandas import DataFrame as PandasDataFrame
-    from cad_quoter.domain import QuoteState as _QuoteState
+    from pandas import Index as PandasIndex
+    from pandas import Series as PandasSeries
 
     SeriesLike: TypeAlias = pd.Series[Any]
 else:
-    PandasDataFrame = Any  # type: ignore[assignment]
-    _QuoteState = QuoteState
     try:
         import pandas as pd  # type: ignore[import]
     except Exception:  # pragma: no cover - optional dependency
         pd = None  # type: ignore[assignment]
-        PandasDataFrame = typing.Any
-        PandasSeries = typing.Any
-        PandasIndex = typing.Any
+        from typing import Any as PandasDataFrame
+        from typing import Any as PandasIndex
+        from typing import Any as PandasSeries
+
+        SeriesLike: TypeAlias = Any
     else:
-        # Several of our test environments provide a light-weight pandas stub
-        # that implements only the minimal runtime surface we need.  Older
-        # versions of :mod:`appV5` eagerly accessed ``pd.Index`` which is not
-        # guaranteed to exist on these shims, resulting in AttributeError during
-        # import.  Guard each attribute lookup so that we gracefully fall back
-        # to ``typing.Any`` when the real dependency is unavailable.
-        PandasDataFrame = getattr(pd, "DataFrame", typing.Any)
-        PandasSeries = getattr(pd, "Series", typing.Any)
-        PandasIndex = getattr(pd, "Index", typing.Any)
+        from pandas import DataFrame as PandasDataFrame  # type: ignore[import]
+        from pandas import Index as PandasIndex  # type: ignore[import]
+        from pandas import Series as PandasSeries  # type: ignore[import]
 
-        if PandasDataFrame is typing.Any or PandasSeries is typing.Any:
-            # If any of the expected attributes are missing we treat ``pd`` as a
-            # stub and avoid leaking partially initialised aliases.  Keeping the
-            # ``pd`` reference allows downstream call sites to continue using
-            # helpers such as ``pd.to_numeric`` when they exist, while
-            # maintaining compatibility with the light-weight testing shim.
-            PandasDataFrame = typing.Any
-            PandasSeries = typing.Any
-            PandasIndex = typing.Any
-
-    SeriesLike: TypeAlias = Any
+        SeriesLike: TypeAlias = pd.Series[Any]
 
 try:
     from cad_quoter_legacy import compute_quote_from_df as _legacy_compute_quote_from_df  # type: ignore[import]
@@ -2162,22 +2152,6 @@ else:  # pragma: no cover - fallback definitions keep quoting functional without
     def explain_quote(*args, **kwargs) -> str:  # pragma: no cover - fallback
         return "LLM explanation unavailable."
 
-
-try:
-    import pandas as pd  # type: ignore[import]
-except Exception:  # pragma: no cover - optional dependency
-    pd = None  # type: ignore[assignment]
-
-if TYPE_CHECKING:  # pragma: no cover - import-time helper for type checkers
-    import pandas as _pandas
-
-    PandasDataFrame = _pandas.DataFrame
-    PandasSeries = _pandas.Series
-    PandasIndex = _pandas.Index
-else:  # pragma: no cover - fallback aliases when pandas is unavailable
-    PandasDataFrame = typing.Any
-    PandasSeries = typing.Any
-    PandasIndex = typing.Any
 
 pd = typing.cast(typing.Any, pd)
 from typing import TypedDict
@@ -2922,6 +2896,10 @@ _ocp_backend_ready = False
 gp_Dir = cast(Any, None)
 gp_Pln = cast(Any, None)
 gp_Pnt = cast(Any, None)
+BRepAdaptor_Curve = cast(Any, None)
+GeomAbs_Circle = cast(Any, None)
+GeomAdaptor_Surface = cast(Any, None)
+ShapeAnalysis_Surface = cast(Any, None)
 
 if _ocp_brep_module is not None:
     try:
