@@ -19545,14 +19545,18 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
             chart_lines = extractor(dxf_text_path) or []
         except Exception:
             chart_lines = []
-    # ALWAYS also read ACAD_TABLE/MTEXT via ezdxf and merge (dedupe)
-    _lines_from_doc = _extract_text_lines_from_ezdxf_doc(doc)  # ACAD_TABLE aware
+    # Always also read ACAD_TABLE/MTEXT via ezdxf and merge/dedupe.
+    _lines_from_doc = _extract_text_lines_from_ezdxf_doc(doc) or []
     if _lines_from_doc:
-        seen = set(chart_lines)
+        seen: set[str] = {ln for ln in chart_lines if isinstance(ln, str)}
         for ln in _lines_from_doc:
-            if ln not in seen:
-                chart_lines.append(ln)
+            if isinstance(ln, str):
+                if ln in seen:
+                    continue
                 seen.add(ln)
+            elif ln in chart_lines:
+                continue
+            chart_lines.append(ln)
 
     table_info = hole_count_from_acad_table(doc)
     if table_info and table_info.get("hole_count"):
