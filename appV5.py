@@ -935,9 +935,12 @@ def _wieland_scrap_usd_per_lb(material_family: str | None) -> float | None:
         fam = "titanium"
 
     try:
-        price = get_scrap_price_per_lb(fam)
+        price: float | int | str | None = get_scrap_price_per_lb(fam)
     except Exception as exc:  # pragma: no cover - network/HTML failure
         logger.warning("Wieland scrap price lookup failed for %s: %s", fam, exc)
+        return None
+
+    if price is None:
         return None
 
     try:
@@ -2902,6 +2905,14 @@ _ocp_backend_ready = False
 gp_Dir = cast(Any, None)
 gp_Pln = cast(Any, None)
 gp_Pnt = cast(Any, None)
+GeomAdaptor_Surface = cast(Any, None)
+GeomAbs_Plane = cast(Any, None)
+GeomAbs_Cylinder = cast(Any, None)
+GeomAbs_Torus = cast(Any, None)
+GeomAbs_Cone = cast(Any, None)
+GeomAbs_BSplineSurface = cast(Any, None)
+GeomAbs_BezierSurface = cast(Any, None)
+BRepAlgoAPI_Section = cast(Any, None)
 
 if _ocp_brep_module is not None:
     try:
