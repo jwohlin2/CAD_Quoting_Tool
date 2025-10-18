@@ -1,5 +1,10 @@
 
-from appV5 import _aggregate_hole_entries, _dedupe_hole_entries, _parse_hole_line
+from appV5 import (
+    _aggregate_hole_entries,
+    _dedupe_hole_entries,
+    _parse_hole_line,
+    summarize_hole_chart_lines,
+)
 
 
 def test_leader_entries_duplicate_table_rows_are_ignored() -> None:
@@ -45,3 +50,8 @@ def test_aggregate_flags_back_side_from_hint() -> None:
     assert entry is not None
     agg = _aggregate_hole_entries([entry])
     assert agg["from_back"] is True
+
+
+def test_chart_summary_marks_back_side_without_depth() -> None:
+    summary = summarize_hole_chart_lines(["TAP THRU (FROM BACK)"])
+    assert summary["from_back"] is True
