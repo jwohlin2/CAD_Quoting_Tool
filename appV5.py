@@ -1583,27 +1583,22 @@ else:  # pragma: no cover - fallback when ezdxf is unavailable at runtime
 
 if typing.TYPE_CHECKING:
     import pandas as pd
-    from pandas import (
-        DataFrame as PandasDataFrame,
-        Index as PandasIndex,
-        Series as PandasSeries,
-    )
+    from pandas import DataFrame as PandasDataFrame
+    from pandas import Index as PandasIndex
+    from pandas import Series as PandasSeries
     from cad_quoter.domain import QuoteState as _QuoteState
 
     SeriesLike: TypeAlias = pd.Series[Any]
 else:
-    PandasDataFrame: TypeAlias = Any
-    PandasSeries: TypeAlias = Any
-    PandasIndex: TypeAlias = Any
-    SeriesLike: TypeAlias = Any
-
     _QuoteState = QuoteState
     try:
         import pandas as pd  # type: ignore[import]
     except Exception:  # pragma: no cover - optional dependency
         pd = None  # type: ignore[assignment]
-    else:
-        pd = typing.cast(typing.Any, pd)
+    PandasDataFrame: TypeAlias = Any
+    PandasSeries: TypeAlias = Any
+    PandasIndex: TypeAlias = Any
+    SeriesLike: TypeAlias = Any
 
 try:
     from cad_quoter_legacy import compute_quote_from_df as _legacy_compute_quote_from_df  # type: ignore[import]
@@ -2148,6 +2143,14 @@ else:  # pragma: no cover - fallback definitions keep quoting functional without
     def explain_quote(*args, **kwargs) -> str:  # pragma: no cover - fallback
         return "LLM explanation unavailable."
 
+
+try:
+    import pandas as pd  # type: ignore[import]
+except Exception:  # pragma: no cover - optional dependency
+    pd = None  # type: ignore[assignment]
+
+pd = typing.cast(typing.Any, pd)
+from typing import TypedDict
 
 try:
     from geo_read_more import build_geo_from_dxf as build_geo_from_dxf_path
@@ -17046,7 +17049,7 @@ def extract_2d_features_from_pdf_vector(pdf_path: str) -> dict:
 REQUIRED_COLS = ["Item", "Example Values / Options", "Data Type / Input Method"]
 
 def default_variables_template() -> PandasDataFrame:
-    if _HAS_PANDAS:
+    if _HAS_PANDAS and pd is not None:
         core_df, _ = _load_master_variables()
         if core_df is not None:
             updated = core_df.copy()
@@ -17081,6 +17084,8 @@ def default_variables_template() -> PandasDataFrame:
                     )
                     adjusted_rows.append(new_row)
             return pd.DataFrame(adjusted_rows, columns=columns)
+    if not _HAS_PANDAS or pd is None:
+        raise RuntimeError("pandas is required to build the default variables template.")
     rows = [
         ("Profit Margin %", 0.0, "number"),
         ("Programmer $/hr", 90.0, "number"),
@@ -17116,6 +17121,7 @@ def default_variables_template() -> PandasDataFrame:
         ("Material", "Aluminum MIC6", "text"),
         ("Thickness (in)", 2.0, "number"),
     ]
+    assert pd is not None  # for type checkers
     return pd.DataFrame(rows, columns=REQUIRED_COLS)
 
 def coerce_or_make_vars_df(df: PandasDataFrame | None) -> PandasDataFrame:
@@ -17250,6 +17256,11 @@ def _deep_get(d: dict, path):
     return cur
 
 def merge_estimate_into_vars(vars_df: PandasDataFrame, estimate: dict) -> PandasDataFrame:
+    if not _HAS_PANDAS or pd is None:
+        raise RuntimeError("pandas is required to merge PDF estimates into variables.")
+
+    assert pd is not None  # for type checkers
+
     for item, src in MAP_KEYS.items():
         value = _deep_get(estimate, src)
         if value is None:
