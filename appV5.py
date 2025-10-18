@@ -26,7 +26,7 @@ import time
 import typing
 from functools import cmp_to_key, lru_cache
 from typing import Any, Mapping, MutableMapping, TYPE_CHECKING
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import (
     Callable,
     Iterator,
@@ -1249,6 +1249,244 @@ def _material_cost_components(
         "total_usd": round(total_usd_value, 2),
     }
 
+
+@lru_cache(maxsize=1)
+def _load_mcmaster_catalog_csv(path: str | None = None) -> list[dict[str, Any]]:
+    """Return rows from the McMaster stock catalog CSV."""
+
+    csv_path = path or os.getenv("CATALOG_CSV_PATH") or str(default_catalog_csv())
+    if not csv_path:
+        return []
+    try:
+        with open(csv_path, newline="", encoding="utf-8-sig") as handle:
+            reader = csv.DictReader(handle)
+            return [dict(row) for row in reader if row]
+    except FileNotFoundError:
+        return []
+    except Exception:
+        return []
+
+
+def _coerce_inches_value(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    text = str(value).strip().replace("\u00a0", " ")
+    if not text:
+        return None
+
+    try:
+        parsed = float(_parse_inches(text))
+    except Exception:
+        parsed = None
+    if parsed is not None and parsed > 0:
+        return parsed
+
+    try:
+        return float(text)
+    except Exception:
+        pass
+
+    try:
+        return float(Fraction(text))
+    except Exception:
+        return None
+
+
+def _pick_mcmaster_plate_sku_impl(
+    need_L_in: float,
+    need_W_in: float,
+    need_T_in: float,
+    *,
+    material_key: str = "MIC6",
+    catalog_rows: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """Return the smallest-area McMaster plate covering the requested envelope."""
+
+    import math as _math
+
+    if not all(val > 0 for val in (need_L_in, need_W_in, need_T_in)):
+        return None
+
+    rows = list(catalog_rows) if catalog_rows is not None else _load_mcmaster_catalog_csv()
+    if not rows:
+        return None
+
+    target_key = str(material_key or "").strip().lower()
+    if not target_key:
+        return None
+
+    tolerance = 0.02
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        material_text = str(
+            (row.get("material") or row.get("Material") or "")
+        ).strip().lower()
+        if not material_text:
+            continue
+        variants = {target_key}
+        if "_" in target_key:
+            variants.add(target_key.replace("_", " "))
+        if " " in target_key:
+            variants.add(target_key.replace(" ", ""))
+        normalised_material = material_text.replace("_", " ")
+        if not any(variant and variant in normalised_material for variant in variants):
+            continue
+
+        length = _coerce_inches_value(
+            row.get("length_in")
+            or row.get("L_in")
+            or row.get("len_in")
+            or row.get("length")
+        )
+        width = _coerce_inches_value(
+            row.get("width_in")
+            or row.get("W_in")
+            or row.get("wid_in")
+            or row.get("width")
+        )
+        thickness = _coerce_inches_value(
+            row.get("thickness_in")
+            or row.get("T_in")
+            or row.get("thk_in")
+            or row.get("thickness")
+        )
+        if (
+            length is None
+            or width is None
+            or thickness is None
+            or length <= 0
+            or width <= 0
+            or thickness <= 0
+        ):
+            continue
+        if abs(thickness - need_T_in) > tolerance:
+            continue
+        part_no = str(
+            row.get("mcmaster_part")
+            or row.get("part")
+            or row.get("sku")
+            or ""
+        ).strip()
+        if not part_no:
+            continue
+
+        def _covers(a: float, b: float, A: float, B: float) -> bool:
+            return (A >= a) and (B >= b)
+
+        ok1 = _covers(need_L_in, need_W_in, length, width)
+        ok2 = _covers(need_L_in, need_W_in, width, length)
+        if not (ok1 or ok2):
+            continue
+
+        area = length * width
+        overL1 = (length - need_L_in) if ok1 else _math.inf
+        overW1 = (width - need_W_in) if ok1 else _math.inf
+        overL2 = (width - need_L_in) if ok2 else _math.inf
+        overW2 = (length - need_W_in) if ok2 else _math.inf
+        over_L = min(overL1, overL2)
+        over_W = min(overW1, overW2)
+
+        candidates.append(
+            {
+                "len_in": float(length),
+                "wid_in": float(width),
+                "thk_in": float(thickness),
+                "mcmaster_part": part_no,
+                "area": float(area),
+                "overL": float(over_L),
+                "overW": float(over_W),
+                "source": row.get("source") or "mcmaster-catalog",
+            }
+        )
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda c: (c["area"], max(c["overL"], c["overW"])))
+    best = candidates[0]
+    return {
+        "len_in": float(best["len_in"]),
+        "wid_in": float(best["wid_in"]),
+        "thk_in": float(best["thk_in"]),
+        "mcmaster_part": best["mcmaster_part"],
+        "source": best.get("source") or "mcmaster-catalog",
+    }
+
+
+def _pick_mcmaster_plate_sku(
+    need_L_in: float,
+    need_W_in: float,
+    need_T_in: float,
+    *,
+    material_key: str = "MIC6",
+    catalog_rows: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """Return the smallest-area McMaster plate covering the requested envelope."""
+
+    return _pick_mcmaster_plate_sku_impl(
+        need_L_in,
+        need_W_in,
+        need_T_in,
+        material_key=material_key,
+        catalog_rows=catalog_rows,
+    )
+
+
+def _resolve_mcmaster_plate_for_quote(
+    need_L_in: float | None,
+    need_W_in: float | None,
+    need_T_in: float | None,
+    *,
+    material_key: str,
+    stock_L_in: float | None = None,
+    stock_W_in: float | None = None,
+    stock_T_in: float | None = None,
+    catalog_rows: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """Return a McMaster plate candidate using quote needs and existing stock sizing.
+
+    The quote may already contain rounded stock dimensions. When the direct lookup
+    for the requested blank fails (for example, because the catalog is missing an
+    exact match for the required envelope), we fall back to searching with the
+    previously rounded stock dimensions so that we can still surface the McMaster
+    part number and pricing for that size.
+    """
+
+    candidate: dict[str, Any] | None = None
+
+    if need_L_in and need_W_in and need_T_in:
+        try:
+            candidate = _pick_mcmaster_plate_sku(
+                float(need_L_in),
+                float(need_W_in),
+                float(need_T_in),
+                material_key=material_key,
+                catalog_rows=catalog_rows,
+            )
+        except Exception:
+            candidate = None
+
+    if candidate:
+        return candidate
+
+    if stock_L_in and stock_W_in and stock_T_in:
+        try:
+            return _pick_mcmaster_plate_sku(
+                float(stock_L_in),
+                float(stock_W_in),
+                float(stock_T_in),
+                material_key=material_key,
+                catalog_rows=catalog_rows,
+            )
+        except Exception:
+            return None
+
+    return None
 
 def _compute_pricing_ladder(
     subtotal: float | int | str | None,
@@ -17691,6 +17929,231 @@ def _iter_table_text(doc):
         except Exception:
             continue
 
+
+# --- NEW: parse HOLE TABLE that's drawn with text + lines (no ACAD TABLE)
+def _iter_text_with_xy(doc):
+    if doc is None:
+        return
+
+    def _entity_xy(entity) -> tuple[float, float]:
+        def _get_point(attr: str):
+            try:
+                return getattr(entity.dxf, attr)
+            except Exception:
+                return None
+
+        point = (
+            _get_point("insert")
+            or _get_point("alignment_point")
+            or _get_point("align_point")
+            or _get_point("start")
+            or _get_point("position")
+        )
+        if point is None:
+            return (0.0, 0.0)
+
+        def _coord(value, idx):
+            try:
+                return float(value[idx])
+            except Exception:
+                try:
+                    return float(getattr(value, "xyz"[idx]))
+                except Exception:
+                    return 0.0
+
+        if hasattr(point, "xyz"):
+            x_val, y_val, _ = point.xyz
+            return float(x_val), float(y_val)
+
+        return _coord(point, 0), _coord(point, 1)
+
+    for sp in _spaces(doc):
+        try:
+            entities = sp.query("TEXT,MTEXT,INSERT")
+        except Exception:
+            entities = []
+        for entity in entities:
+            try:
+                kind = entity.dxftype()
+            except Exception:
+                kind = ""
+            if kind in {"TEXT", "MTEXT"}:
+                text = _extract_entity_text(entity)
+                if not text:
+                    continue
+                x, y = _entity_xy(entity)
+                yield text, x, y
+            elif kind == "INSERT":
+                try:
+                    virtuals = entity.virtual_entities()
+                except Exception:
+                    virtuals = []
+                for sub in virtuals:
+                    try:
+                        sub_kind = sub.dxftype()
+                    except Exception:
+                        sub_kind = ""
+                    if sub_kind not in {"TEXT", "MTEXT"}:
+                        continue
+                    text = _extract_entity_text(sub)
+                    if not text:
+                        continue
+                    x, y = _entity_xy(sub)
+                    yield text, x, y
+
+
+def _normalize(s: str) -> str:
+    return " ".join((s or "").replace("\u00D8", "Ø").replace("ø", "Ø").split())
+
+
+def _looks_like_hole_header(s: str) -> bool:
+    U = s.upper()
+    return (
+        ("HOLE" in U)
+        and ("REF" in U or "Ø" in U or "DIA" in U)
+        and ("QTY" in U)
+        and ("DESC" in U or "DESCRIPTION" in U)
+    )
+
+
+def extract_hole_table_from_text(doc, y_tol: float = 0.04, min_rows: int = 5):
+    """
+    Returns dict like:
+      {"hole_count": int, "hole_diam_families_in": {...}, "rows":[{"ref":".7500","qty":4,"desc":"..."}, ...]}
+    or {} if not found.
+    """
+
+    try:
+        texts = [(_normalize(t), x, y) for (t, x, y) in _iter_text_with_xy(doc) if _normalize(t)]
+    except Exception:
+        texts = []
+    if not texts:
+        return {}
+
+    by_y: defaultdict[float, list[tuple[str, float, float]]] = defaultdict(list)
+    for s, x, y in texts:
+        by_y[round(y, 4)].append((s, x, y))
+    y_levels = sorted(by_y.keys(), reverse=True)
+    header_idx = None
+    header_x: dict[str, float] | None = None
+    for i, y in enumerate(y_levels):
+        line_txt = " | ".join(s for (s, _, _) in sorted(by_y[y], key=lambda z: z[1]))
+        if _looks_like_hole_header(line_txt):
+            header_idx = i
+            xs: dict[str, float] = {}
+            for s, x, _ in by_y[y]:
+                U = s.upper()
+                if "REF" in U or "Ø" in U or "DIA" in U:
+                    xs["REF"] = x
+                elif "QTY" in U or "QUANTITY" in U:
+                    xs["QTY"] = x
+                elif "HOLE" == U or U.startswith("HOLE "):
+                    xs["HOLE"] = x
+                elif "DESC" in U or "DESCRIPTION" in U:
+                    xs["DESC"] = x
+            if {"REF", "QTY", "DESC"} <= set(xs.keys()):
+                header_x = xs
+                break
+    if header_idx is None or header_x is None:
+        return {}
+
+    cols = [
+        ("HOLE", header_x.get("HOLE", min(header_x.values()) - 1e3)),
+        ("REF", header_x["REF"]),
+        ("QTY", header_x["QTY"]),
+        ("DESC", header_x["DESC"]),
+    ]
+    cols_sorted = sorted(cols, key=lambda kv: kv[1])
+    bounds = [c[1] for c in cols_sorted]
+    splits = [(bounds[i] + bounds[i + 1]) * 0.5 for i in range(len(bounds) - 1)]
+
+    rows: list[dict[str, str]] = []
+    for y in y_levels[header_idx + 1 :]:
+        band: list[tuple[str, float]] = []
+        for s, x, yy in texts:
+            if abs(yy - y) <= y_tol:
+                band.append((s, x))
+        if not band:
+            continue
+
+        def col_of(xv: float) -> str:
+            if xv < splits[0]:
+                return "HOLE"
+            if xv < splits[1]:
+                return "REF"
+            if xv < splits[2]:
+                return "QTY"
+            return "DESC"
+
+        cells: dict[str, list[str]] = {"HOLE": [], "REF": [], "QTY": [], "DESC": []}
+        for s, x in sorted(band, key=lambda z: z[1]):
+            cells[col_of(x)].append(s)
+        hole = " ".join(cells["HOLE"]).strip()
+        ref = " ".join(cells["REF"]).strip()
+        qtys = " ".join(cells["QTY"]).strip()
+        desc = " ".join(cells["DESC"]).strip()
+        if not (ref or qtys or desc):
+            continue
+        joined = " ".join(filter(None, [hole, ref, qtys, desc])).strip()
+        if not joined:
+            continue
+        if _looks_like_hole_header(joined):
+            break
+        rows.append({"hole": hole, "ref": ref, "qty": qtys, "desc": desc})
+
+    if len(rows) < min_rows:
+        return {}
+
+    total = 0
+    families: dict[str, int] = {}
+
+    def parse_qty(s: str) -> int:
+        try:
+            return int(float((s or "").strip()))
+        except Exception:
+            m = re.search(r"\d+", s or "")
+            return int(m.group()) if m else 0
+
+    def parse_dia_inch(s: str) -> float | None:
+        s = (s or "").strip().lstrip("Ø⌀\u00D8 ").strip()
+        if re.fullmatch(r"\d+/\d+", s):
+            try:
+                return float(Fraction(s))
+            except Exception:
+                return None
+        if re.fullmatch(r"(?:\d+)?\.\d+|\d+(?:\.\d+)?", s):
+            try:
+                return float(s)
+            except Exception:
+                return None
+        return None
+
+    clean_rows: list[dict[str, Any]] = []
+    for r in rows:
+        q = parse_qty(r["qty"])
+        if q <= 0:
+            continue
+        d = parse_dia_inch(r["ref"])
+        if d is None:
+            mm = re.search(r"[Ø⌀\u00D8]?\s*((?:\d+)?\.\d+|\d+/\d+|\d+(?:\.\d+)?)", r["desc"])
+            d = parse_dia_inch(mm.group(1)) if mm else None
+        if d is None:
+            continue
+        key = f'{d:.4f}"'
+        families[key] = families.get(key, 0) + q
+        total += q
+        clean_rows.append({**r, "qty": q, "ref": key})
+
+    if total <= 0:
+        return {}
+
+    return {
+        "hole_count": total,
+        "hole_diam_families_in": families,
+        "rows": clean_rows,
+    }
+
+
 def _all_tables(doc) -> Iterator[Any]:
     if doc is None:
         return
@@ -17782,6 +18245,8 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
         if c_ref is None:
             c_ref = find_col("Ø")
 
+        print(f"[HOLE TABLE] col_ref={c_ref}, col_qty={c_qty}, col_desc={c_desc}")
+
         total = 0
         families: dict[float, int] = {}
         row_taps = 0
@@ -17789,30 +18254,26 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
         from_back = False
         double_sided = False
 
-        def _coerce_qty(text: str) -> int:
-            text = (text or "").strip()
-            try:
-                return int(float(text))
-            except Exception:
-                digits = re.findall(r"\d+", text)
-                return int(digits[0]) if digits else 0
-
         for r in range(header_row + 1, n_rows):
+            cell = None
+            if c_qty is not None:
+                try:
+                    cell = t.get_cell(r, c_qty)
+                except Exception:
+                    cell = None
             try:
-                qty_cell = t.get_cell(r, c_qty) if c_qty is not None else None
-            except Exception:
-                qty_cell = None
-            try:
-                qty_text = (qty_cell.get_text() if qty_cell else "") or "0"
+                qty_text = (cell.get_text() if cell else "0") or "0"
             except Exception:
                 qty_text = "0"
 
-            qty = _coerce_qty(qty_text)
+            mqty = re.search(r"(?<!\d)(\d+)(?!\d)", qty_text) or re.search(r"(\d+)\s*[xX]", qty_text)
+            qty = int(mqty.group(1)) if mqty else 0
             if qty <= 0:
                 continue
             total += qty
 
             ref_txt = ""
+            desc = ""
             if c_ref is not None:
                 try:
                     ref_cell = t.get_cell(r, c_ref)
@@ -17822,8 +18283,6 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
                     ref_txt = (ref_cell.get_text() if ref_cell else "") or ""
                 except Exception:
                     ref_txt = ""
-
-            desc = ""
             if c_desc is not None:
                 try:
                     desc_cell = t.get_cell(r, c_desc)
@@ -17834,34 +18293,31 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
                 except Exception:
                     desc = ""
 
+            def _parse_diam(s: str):
+                s = s.strip().upper()
+                m = re.search(r"(\d+(?:\.\d+)?)\s*(?:±\s*\d+(?:\.\d+)?)?$", s) or re.search(
+                    r"(\d+)\s*/\s*(\d+)", s
+                )
+                if m:
+                    if m.lastindex and m.lastindex >= 2 and m.group(2):
+                        try:
+                            return float(Fraction(f"{m.group(1)}/{m.group(2)}"))
+                        except Exception:
+                            return None
+                    try:
+                        return float(m.group(1))
+                    except Exception:
+                        return None
+                m = re.search(r"[Ø⌀]\s*(\d+(?:\.\d+)?)", s)
+                return float(m.group(1)) if m else None
+
+            d = _parse_diam(ref_txt) or _parse_diam(desc)
+            if d is not None:
+                d = round(d, 4)
+                families[d] = families.get(d, 0) + qty
+
             combined = f"{ref_txt} {desc}".strip()
             upper_text = combined.upper()
-
-            def _parse_dia(token: str) -> float | None:
-                token = (token or "").strip().lstrip("Ø⌀\u00D8 ").strip()
-                if re.fullmatch(r"\d+/\d+", token):
-                    try:
-                        return float(Fraction(token))
-                    except Exception:
-                        return None
-                if re.fullmatch(r"(?:\d+)?\.\d+|\d+(?:\.\d+)?", token):
-                    try:
-                        return float(token)
-                    except Exception:
-                        return None
-                return None
-
-            dia = _parse_dia(ref_txt)
-            if dia is None:
-                match = re.search(
-                    r"[Ø⌀\u00D8]?\s*((?:\d+)?\.\d+|\d+/\d+|\d+(?:\.\d+)?)",
-                    combined,
-                )
-                dia = _parse_dia(match.group(1)) if match else None
-
-            if dia is not None:
-                key = round(dia, 4)
-                families[key] = families.get(key, 0) + qty
 
             tap_cls = tap_classes_from_row_text(upper_text, qty)
             tap_sum = sum(tap_cls.values())
@@ -17946,6 +18402,25 @@ def hole_count_from_text_table(doc, lines: Sequence[str] | None = None) -> tuple
             fam[d] = fam.get(d, 0) + int(mqty.group(1))
 
     return (total, fam) if total else (None, None)
+
+
+def extract_hole_table_from_text(doc) -> dict[str, Any]:
+    """Return hole table metadata derived from text entities."""
+
+    count, families = hole_count_from_text_table(doc)
+    if not count:
+        return {}
+
+    formatted: dict[str, int] = {}
+    for diam, qty in (families or {}).items():
+        if qty:
+            formatted[f'{float(diam):.4f}"'] = int(qty)
+
+    result: dict[str, Any] = {"hole_count": int(count)}
+    if formatted:
+        result["hole_diam_families_in"] = formatted
+    result["provenance_holes"] = "HOLE TABLE (text)"
+    return result
 
 def hole_count_from_geometry(doc, to_in, plate_bbox=None) -> tuple[int, dict]:
     clustered = filtered_circles(doc, to_in, plate_bbox=plate_bbox)
@@ -19122,6 +19597,7 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
 
     if cnt:
         combined_agg["hole_count"] = int(cnt)
+        geo["hole_count"] = int(cnt)
     if tap_classes_from_table:
         combined_agg["tap_class_counts"] = dict(tap_classes_from_table)
     if tap_qty_from_table:
@@ -19415,6 +19891,10 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     if doc is None:
         raise RuntimeError("Failed to load DXF/DWG document")
 
+    table_info = hole_count_from_acad_table(doc) or {}
+    if not table_info.get("hole_count"):
+        table_info = extract_hole_table_from_text(doc) or {}
+
     sp = doc.modelspace()
     units = detect_units_scale(doc)
     to_in = float(units.get("to_in", 1.0) or 1.0)
@@ -19599,6 +20079,35 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
             geo["hole_diam_families_in"] = fam
             geo["hole_family_count"] = sum(fam.values())
 
+    if table_info.get("hole_count"):
+        try:
+            geo["hole_count"] = int(table_info["hole_count"])
+        except Exception:
+            pass
+        fam = table_info.get("hole_diam_families_in") or {}
+        if fam:
+            geo["hole_diam_families_in"] = fam
+            try:
+                geo["hole_family_count"] = int(
+                    sum(int(v) for v in fam.values())
+                )
+            except Exception:
+                geo["hole_family_count"] = sum(fam.values())
+        provenance_value = (
+            table_info.get("provenance")
+            or table_info.get("provenance_holes")
+            or "HOLE TABLE (text)"
+        )
+        provenance_entry = geo.get("provenance")
+        if isinstance(provenance_entry, dict):
+            provenance_entry["holes"] = provenance_value
+            geo["provenance"] = provenance_entry
+        else:
+            geo["provenance"] = {"holes": provenance_value}
+        top_level_hole_count = geo.get("hole_count", len(hole_diams_mm))
+    else:
+        top_level_hole_count = len(hole_diams_mm)
+
     chart_lines: list[str] = []
     chart_ops: list[dict[str, Any]] = []
     chart_reconcile: dict[str, Any] | None = None
@@ -19626,6 +20135,15 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
             chart_lines.append(ln)
 
     table_info = hole_count_from_acad_table(doc)
+    if (not table_info or not table_info.get("hole_count")) and doc is not None:
+        try:
+            text_table = extract_hole_table_from_text(doc)
+        except Exception:
+            text_table = {}
+        if text_table and text_table.get("hole_count"):
+            text_table = dict(text_table)
+            text_table.setdefault("provenance", "HOLE TABLE (TEXT)")
+            table_info = text_table
     if table_info and table_info.get("hole_count"):
         try:
             geo["hole_count"] = int(table_info.get("hole_count") or 0)
@@ -19724,7 +20242,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     if not material:
         material = geo.get("material_note")
 
-    table_hole_count = _coerce_int_or_zero(geo.get("hole_count"))  # now set by ACAD table
+    table_hole_count = _coerce_int_or_zero(table_info.get("hole_count"))
     geom_hole_count = len(hole_diams_mm)
 
     result: dict[str, Any] = {
@@ -19733,7 +20251,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
         "profile_length_mm": round(per * u2mm, 2),
         "hole_diams_mm": hole_diams_mm,
         # prefer table when available, else geometry
-        "hole_count": table_hole_count if table_hole_count > 0 else geom_hole_count,
+        "hole_count": top_level_hole_count,
         "thickness_mm": thickness_mm,
         "material": material,
         "geo": geo,
