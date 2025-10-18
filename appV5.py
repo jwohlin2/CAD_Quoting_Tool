@@ -18156,7 +18156,13 @@ def _parse_hole_line(line: str, to_in: float, *, source: str | None = None) -> d
             entry["side"] = side
 
     # side hints even without 'DEEP FROM ...'
-    if re.search(r"\((?:FROM\s+)?BACK\)", U) or re.search(r"\bFROM\s+BACK\b", U):
+    back_hint = bool(
+        re.search(r"\((?:FROM\s+)?BACK\)", U)
+        or re.search(r"\bFROM\s+BACK\b", U)
+        or re.search(r"\bBACK\s*SIDE\b", U)
+        or "BACKSIDE" in U
+    )
+    if back_hint and str(entry.get("side") or "").upper() != "BACK":
         entry["side"] = "BACK"
     if re.search(r"\b(FRONT\s*&\s*BACK|BOTH\s+SIDES)\b", U):
         entry["double_sided"] = True
