@@ -17870,13 +17870,38 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
                     except Exception:
                         desc = ""
                 u = (ref_txt + " " + desc).upper()
-                m = re.search(r"[Ø⌀]\s*(\d+(?:\.\d+)?)", u)
-                if m:
-                    try:
-                        d = round(float(m.group(1)), 4)
-                        families[d] = families.get(d, 0) + qty
-                    except Exception:
-                        pass
+
+                def _parse_dia(token: str) -> float | None:
+                    token = (token or "").strip().lstrip("Ø⌀").strip()
+                    if re.fullmatch(r"\d+/\d+", token):
+                        from fractions import Fraction
+
+                        try:
+                            return float(Fraction(token))
+                        except Exception:
+                            return None
+                    if re.fullmatch(r"(?:\d+)?\.\d+", token):
+                        try:
+                            return float(token)
+                        except Exception:
+                            return None
+                    if re.fullmatch(r"\d+(?:\.\d+)?", token):
+                        try:
+                            return float(token)
+                        except Exception:
+                            return None
+                    return None
+
+                dia_in = _parse_dia(ref_txt)
+                if dia_in is None:
+                    mm = re.search(
+                        r"[Ø⌀\u00D8]?\s*((?:\d+)?\.\d+|\d+/\d+|\d+(?:\.\d+)?)",
+                        u,
+                    )
+                    dia_in = _parse_dia(mm.group(1)) if mm else None
+                if dia_in is not None:
+                    key = round(dia_in, 4)
+                    families[key] = families.get(key, 0) + qty
 
                 tap_cls = tap_classes_from_row_text(u, qty)
                 tap_sum = sum(tap_cls.values())
