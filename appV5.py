@@ -19478,13 +19478,20 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     chart_summary: dict[str, Any] | None = None
 
     extractor = _extract_text_lines_from_dxf or extract_text_lines_from_dxf
+    chart_lines = []
     if extractor and dxf_text_path:
         try:
-            chart_lines = extractor(dxf_text_path)
+            chart_lines = extractor(dxf_text_path) or []
         except Exception:
             chart_lines = []
-    if not chart_lines:
-        chart_lines = _extract_text_lines_from_ezdxf_doc(doc)
+    # ALWAYS also read ACAD_TABLE/MTEXT via ezdxf and merge (dedupe)
+    _lines_from_doc = _extract_text_lines_from_ezdxf_doc(doc)  # ACAD_TABLE aware
+    if _lines_from_doc:
+        seen = set(chart_lines)
+        for ln in _lines_from_doc:
+            if ln not in seen:
+                chart_lines.append(ln)
+                seen.add(ln)
 
     if chart_lines:
         chart_summary = summarize_hole_chart_lines(chart_lines)
