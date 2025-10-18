@@ -19587,6 +19587,7 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
 
     if cnt:
         combined_agg["hole_count"] = int(cnt)
+        geo["hole_count"] = int(cnt)
     if tap_classes_from_table:
         combined_agg["tap_class_counts"] = dict(tap_classes_from_table)
     if tap_qty_from_table:
