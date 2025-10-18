@@ -50,11 +50,11 @@ def _geom(geom: dict) -> dict:
 
     # prefer table/derived before raw geometry fallbacks
     out["hole_count"] = _first_int(
-        "hole_count",  # top-level (we now set this from table)
+        "hole_count",  # top-level (table or dedup now flows here)
+        "geo.hole_count",  # explicit table count if nested
         "derived.hole_count",
+        "hole_count_geom",  # our dedup writes here
         "derived.hole_count_geom",
-        "geo.hole_count",  # if you pass the nested geo through
-        "hole_count_geom",
     )
     if out["hole_count"] <= 0:
         holes = g("hole_diams_mm", "derived.hole_diams_mm", default=())
