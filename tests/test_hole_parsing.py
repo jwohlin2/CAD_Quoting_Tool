@@ -26,3 +26,22 @@ def test_leader_entries_with_new_information_are_preserved() -> None:
 
     assert agg["hole_count"] == 6
     assert agg["cbore_qty"] == 2
+
+
+def test_from_back_hint_sets_side() -> None:
+    entry = _parse_hole_line("TAP THRU (FROM BACK)", 1.0, source="LEADER")
+    assert entry is not None
+    assert entry["side"] == "BACK"
+
+
+def test_front_and_back_marks_double_sided() -> None:
+    entry = _parse_hole_line("0.250 C'BORE FRONT & BACK", 1.0, source="LEADER")
+    assert entry is not None
+    assert entry["double_sided"] is True
+
+
+def test_aggregate_flags_back_side_from_hint() -> None:
+    entry = _parse_hole_line("QTY 2 TAP THRU (FROM BACK)", 1.0, source="LEADER")
+    assert entry is not None
+    agg = _aggregate_hole_entries([entry])
+    assert agg["from_back"] is True
