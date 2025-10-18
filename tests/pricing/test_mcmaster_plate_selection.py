@@ -1,6 +1,7 @@
 import math
 
 import appV5
+import materials
 
 
 def test_pick_mcmaster_plate_handles_quoted_thickness_strings() -> None:

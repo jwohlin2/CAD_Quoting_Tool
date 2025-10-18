@@ -80,6 +80,10 @@ from cad_quoter.utils.render_utils import (
     render_quote_doc,
 )
 from cad_quoter.pricing import load_backup_prices_csv
+from cad_quoter.pricing.mcmaster_helpers import (
+    pick_mcmaster_plate_sku as _pick_mcmaster_plate_sku,
+    resolve_mcmaster_plate_for_quote as _resolve_mcmaster_plate_for_quote,
+)
 from cad_quoter.pricing.vendor_csv import (
     pick_from_stdgrid as _pick_from_stdgrid,
     pick_plate_from_mcmaster as _pick_plate_from_mcmaster,

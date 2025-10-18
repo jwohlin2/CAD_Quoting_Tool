@@ -42,6 +42,7 @@ def _usd_per_lb(value: Any, unit_hint: Any | None = None) -> float | None:
 
 
 from cad_quoter.pricing import resolve_material_unit_price as _resolve_material_unit_price_raw
+from cad_quoter.pricing.mcmaster_helpers import resolve_mcmaster_plate_for_quote
 from cad_quoter.pricing.vendor_csv import (
     pick_from_stdgrid as _pick_from_stdgrid,
     pick_plate_from_mcmaster as _pick_plate_from_mcmaster,
@@ -910,6 +911,49 @@ def _compute_material_block(
         need_W_in = float(W_in) * (1.0 + _STOCK_SCRAP_FRACTION)
     if need_T_in is None:
         need_T_in = float(t_in)
+
+    fallback_part = str(
+        stock_info.get("part_no") or stock_info.get("mcmaster_part") or ""
+    ).strip()
+    normalized_material = _normalize_lookup_key(material_label or material_key or "")
+    fallback_key = normalized_material or _normalize_lookup_key(material_key)
+    if (
+        not fallback_part
+        and fallback_key
+        and stock_L_in > 0
+        and stock_W_in > 0
+        and stock_T_in > 0
+    ):
+        try:
+            candidate = resolve_mcmaster_plate_for_quote(
+                float(need_L_in) if need_L_in else None,
+                float(need_W_in) if need_W_in else None,
+                float(need_T_in) if need_T_in else None,
+                material_key=fallback_key,
+                stock_L_in=float(stock_L_in),
+                stock_W_in=float(stock_W_in),
+                stock_T_in=float(stock_T_in),
+            )
+        except Exception:
+            candidate = None
+        if candidate:
+            try:
+                stock_L_in = float(candidate.get("len_in") or stock_L_in)
+                stock_W_in = float(candidate.get("wid_in") or stock_W_in)
+                stock_T_in = float(candidate.get("thk_in") or stock_T_in)
+            except Exception:
+                pass
+            part = str(candidate.get("mcmaster_part") or "").strip()
+            if part:
+                stock_info["part_no"] = part
+                stock_info["mcmaster_part"] = part
+            stock_info["len_in"] = float(stock_L_in)
+            stock_info["wid_in"] = float(stock_W_in)
+            stock_info["thk_in"] = float(stock_T_in)
+            source_hint = candidate.get("source") or "mcmaster-catalog"
+            stock_info["vendor"] = "McMaster"
+            stock_info["source"] = source_hint
+            stock_info["stock_source_tag"] = source_hint
 
     thickness_diff_in = abs(float(stock_T_in) - float(need_T_in))
     stock_source_tag = str(
