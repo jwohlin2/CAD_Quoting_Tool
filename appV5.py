@@ -17813,44 +17813,50 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
         except Exception:
             tables = []
         for t in tables:
+            # Normalize header row and map columns by regex
             try:
                 hdr = [
                     " ".join((t.get_cell(0, c).get_text() or "").split()).upper()
-                    if t.get_cell(0, c)
-                    else ""
                     for c in range(t.dxf.n_cols)
                 ]
             except Exception:
-                continue
+                hdr = []
             if "HOLE" not in " ".join(hdr):
                 continue
 
-            def find_col(name: str) -> int | None:
-                for i, txt in enumerate(hdr):
-                    if name in txt:
-                        return i
+            def col(rx_list: Sequence[str]) -> int | None:
+                for i, h in enumerate(hdr):
+                    for rx in rx_list:
+                        if re.search(rx, h):
+                            return i
                 return None
 
-            c_qty = find_col("QTY")
-            c_desc = find_col("DESCRIPTION")
-            c_ref = find_col("REF")
+            c_ref = col([r"\bREF\b", r"\bREF[^A-Z0-9]*Ø", r"\bDIA\b", r"\bØ\b"])
+            c_qty = col([r"\bQTY\.?\b", r"\bQUANTITY\b"])
+            c_desc = col([r"\bDESC", r"\bDESCRIPTION\b"])
 
             total = 0
             families: dict[float, int] = {}
             row_taps = 0
             tap_classes = {"small": 0, "medium": 0, "large": 0, "npt": 0}
+            from_back = False
+            double_sided = False
+
+            def _coerce_qty(s: str) -> int:
+                s = (s or "").strip()
+                try:
+                    return int(float(s))
+                except Exception:
+                    m = re.search(r"\d+", s)
+                    return int(m.group()) if m else 0
 
             for r in range(1, t.dxf.n_rows):
-                cell = t.get_cell(r, c_qty) if c_qty is not None else None
+                qty_cell = t.get_cell(r, c_qty) if c_qty is not None else None
                 try:
-                    qty_text = (cell.get_text() if cell else "0") or "0"
+                    qty_text = qty_cell.get_text() if qty_cell else "0"
                 except Exception:
                     qty_text = "0"
-                try:
-                    qty = int(float(qty_text.strip() or "0"))
-                except Exception:
-                    digits = re.findall(r"\d+", qty_text)
-                    qty = int(digits[0]) if digits else 0
+                qty = _coerce_qty(qty_text)
                 if qty <= 0:
                     continue
                 total += qty
@@ -17869,25 +17875,18 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
                         desc = (desc_cell.get_text() if desc_cell else "") or ""
                     except Exception:
                         desc = ""
-                u = (ref_txt + " " + desc).upper()
+                u = " ".join([ref_txt, desc]).upper()
 
-                def _parse_dia(token: str) -> float | None:
-                    token = (token or "").strip().lstrip("Ø⌀").strip()
-                    if re.fullmatch(r"\d+/\d+", token):
-                        from fractions import Fraction
-
+                def _parse_dia(tok: str) -> float | None:
+                    tok = (tok or "").strip().lstrip("Ø⌀\u00D8 ").strip()
+                    if re.fullmatch(r"\d+/\d+", tok):
                         try:
-                            return float(Fraction(token))
+                            return float(Fraction(tok))
                         except Exception:
                             return None
-                    if re.fullmatch(r"(?:\d+)?\.\d+", token):
+                    if re.fullmatch(r"(?:\d+)?\.\d+|\d+(?:\.\d+)?", tok):
                         try:
-                            return float(token)
-                        except Exception:
-                            return None
-                    if re.fullmatch(r"\d+(?:\.\d+)?", token):
-                        try:
-                            return float(token)
+                            return float(tok)
                         except Exception:
                             return None
                     return None
@@ -17896,7 +17895,7 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
                 if dia_in is None:
                     mm = re.search(
                         r"[Ø⌀\u00D8]?\s*((?:\d+)?\.\d+|\d+/\d+|\d+(?:\.\d+)?)",
-                        u,
+                        desc,
                     )
                     dia_in = _parse_dia(mm.group(1)) if mm else None
                 if dia_in is not None:
@@ -17913,6 +17912,11 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
                 elif "TAP" in u or "N.P.T" in u or "NPT" in u:
                     row_taps += qty
 
+                if re.search(r"\bFROM\s+BACK\b", u):
+                    from_back = True
+                if re.search(r"\b(FRONT\s*&\s*BACK|BOTH\s+SIDES)\b", u):
+                    double_sided = True
+
             if total > 0:
                 filtered_classes = {k: int(v) for k, v in tap_classes.items() if v}
                 result = {
@@ -17922,6 +17926,10 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
                     "tap_class_counts": filtered_classes,
                     "provenance_holes": "HOLE TABLE (ACAD_TABLE)",
                 }
+                if from_back:
+                    result["from_back"] = True
+                if double_sided:
+                    result["double_sided_cbore"] = True
                 return result
 
     return result
