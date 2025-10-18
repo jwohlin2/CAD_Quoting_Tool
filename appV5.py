@@ -17764,28 +17764,84 @@ def _spaces(doc) -> list[Any]:
         spaces.append(es)
     return spaces
 
+
+def _all_tables(doc):
+    """Yield every TABLE entity in model/layout spaces and inside block INSERTs."""
+
+    if doc is None:
+        return
+
+    seen: set[int] = set()
+
+    def _yield_from_insert(ins):
+        try:
+            virtual_entities = ins.virtual_entities()
+        except Exception:
+            return
+        for sub in virtual_entities:
+            try:
+                dxftype = sub.dxftype()
+            except Exception:
+                dxftype = ""
+            if dxftype == "TABLE":
+                key = id(sub)
+                if key not in seen:
+                    seen.add(key)
+                    yield sub
+            elif dxftype == "INSERT":
+                yield from _yield_from_insert(sub)
+
+    for sp in _spaces(doc):
+        try:
+            tables = sp.query("TABLE")
+        except Exception:
+            tables = []
+        for table in tables:
+            key = id(table)
+            if key not in seen:
+                seen.add(key)
+                yield table
+        try:
+            inserts = sp.query("INSERT")
+        except Exception:
+            inserts = []
+        for ins in inserts:
+            yield from _yield_from_insert(ins)
+
 def _iter_table_text(doc):
     if doc is None:
         return
-    for sp in _spaces(doc):
+    for t in _all_tables(doc):
         try:
-            for t in sp.query("TABLE"):
-                try:
-                    for r in range(t.dxf.n_rows):
-                        row = []
-                        for c in range(t.dxf.n_cols):
-                            try:
-                                cell = t.get_cell(r, c)
-                            except Exception:
-                                cell = None
-                            row.append(cell.get_text() if cell else "")
-                        line = " | ".join(s.strip() for s in row if s)
-                        if line:
-                            yield line
-                except Exception:
-                    continue
+            n_rows = int(getattr(t.dxf, "n_rows", 0))
+            n_cols = int(getattr(t.dxf, "n_cols", 0))
         except Exception:
-            pass
+            n_rows = 0
+            n_cols = 0
+        if n_rows <= 0 or n_cols <= 0:
+            continue
+        try:
+            for r in range(n_rows):
+                row: list[str] = []
+                for c in range(n_cols):
+                    try:
+                        cell = t.get_cell(r, c)
+                    except Exception:
+                        cell = None
+                    if cell is None:
+                        row.append("")
+                        continue
+                    try:
+                        text = cell.get_text()
+                    except Exception:
+                        text = ""
+                    row.append(text or "")
+                line = " | ".join(s.strip() for s in row if s)
+                if line:
+                    yield line
+        except Exception:
+            continue
+    for sp in _spaces(doc):
         try:
             for e in sp.query("MTEXT,TEXT"):
                 try:
@@ -17807,89 +17863,120 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
     if doc is None:
         return result
 
-    for sp in _spaces(doc):
+    for t in _all_tables(doc):
         try:
-            tables = sp.query("TABLE")
+            n_rows = int(getattr(t.dxf, "n_rows", 0))
+            n_cols = int(getattr(t.dxf, "n_cols", 0))
         except Exception:
-            tables = []
-        for t in tables:
-            # Normalize header row and map columns by regex
+            n_rows = 0
+            n_cols = 0
+        if n_rows <= 0 or n_cols <= 0:
+            continue
+
+        def _cell_text(row: int, col: int) -> str:
+            if row < 0 or col < 0:
+                return ""
             try:
-                hdr = [
-                    " ".join((t.get_cell(0, c).get_text() or "").split()).upper()
-                    for c in range(t.dxf.n_cols)
-                ]
+                cell = t.get_cell(row, col)
             except Exception:
-                hdr = []
-            if "HOLE" not in " ".join(hdr):
+                cell = None
+            if cell is None:
+                return ""
+            try:
+                text = cell.get_text()
+            except Exception:
+                text = ""
+            return text or ""
+
+        rows: list[tuple[list[str], list[str]]] = []
+        for r in range(n_rows):
+            raw_row: list[str] = []
+            normalized: list[str] = []
+            for c in range(n_cols):
+                text = _cell_text(r, c)
+                raw_row.append(text)
+                normalized.append(" ".join(text.split()).upper())
+            rows.append((raw_row, normalized))
+
+        header_index: int | None = None
+        header: list[str] = []
+        header_markers = ("QTY", "QUANTITY", "REF", "DESCRIPTION", "DESC", "DIA", "SIZE", "HOLE")
+        for idx, (_raw, norm) in enumerate(rows):
+            non_empty = [s for s in norm if s]
+            if len(non_empty) <= 1:
                 continue
+            joined = " ".join(non_empty)
+            if any(marker in joined for marker in header_markers):
+                header_index = idx
+                header = norm
+                break
+        if header_index is None and rows:
+            header_index = 0
+            header = rows[0][1]
+        if header_index is None:
+            continue
 
-            def col(rx_list: Sequence[str]) -> int | None:
-                for i, h in enumerate(hdr):
-                    for rx in rx_list:
-                        if re.search(rx, h):
-                            return i
+        if "HOLE" not in " ".join(header):
+            continue
+
+        def col(rx_list: Sequence[str]) -> int | None:
+            for i, h in enumerate(header):
+                for rx in rx_list:
+                    if re.search(rx, h):
+                        return i
+            return None
+
+        c_ref = col([r"\bREF\b", r"\bREF[^A-Z0-9]*Ø", r"\bDIA\b", r"\bØ\b"])
+        c_qty = col([r"\bQTY\.?\b", r"\bQUANTITY\b"])
+        c_desc = col([r"\bDESC", r"\bDESCRIPTION\b"])
+
+        if c_qty is None:
+            continue
+
+        total = 0
+        families: dict[float, int] = {}
+        row_taps = 0
+        tap_classes = {"small": 0, "medium": 0, "large": 0, "npt": 0}
+        from_back = False
+        double_sided = False
+
+        def _coerce_qty(s: str) -> int:
+            s = (s or "").strip()
+            try:
+                return int(float(s))
+            except Exception:
+                m = re.search(r"\d+", s)
+                return int(m.group()) if m else 0
+
+        for r in range(header_index + 1, n_rows):
+            row_raw = rows[r][0]
+            qty_text = row_raw[c_qty] if c_qty < len(row_raw) else "0"
+            qty = _coerce_qty(qty_text)
+            if qty <= 0:
+                continue
+            total += qty
+
+            ref_txt = ""
+            desc = ""
+            if c_ref is not None:
+                ref_txt = row_raw[c_ref] if c_ref < len(row_raw) else ""
+            if c_desc is not None:
+                desc = row_raw[c_desc] if c_desc < len(row_raw) else ""
+            u = " ".join([ref_txt, desc]).upper()
+
+            def _parse_dia(tok: str) -> float | None:
+                tok = (tok or "").strip().lstrip("Ø⌀\u00D8 ").strip()
+                if re.fullmatch(r"\d+/\d+", tok):
+                    try:
+                        return float(Fraction(tok))
+                    except Exception:
+                        return None
+                if re.fullmatch(r"(?:\d+)?\.\d+|\d+(?:\.\d+)?", tok):
+                    try:
+                        return float(tok)
+                    except Exception:
+                        return None
                 return None
-
-            c_ref = col([r"\bREF\b", r"\bREF[^A-Z0-9]*Ø", r"\bDIA\b", r"\bØ\b"])
-            c_qty = col([r"\bQTY\.?\b", r"\bQUANTITY\b"])
-            c_desc = col([r"\bDESC", r"\bDESCRIPTION\b"])
-
-            total = 0
-            families: dict[float, int] = {}
-            row_taps = 0
-            tap_classes = {"small": 0, "medium": 0, "large": 0, "npt": 0}
-            from_back = False
-            double_sided = False
-
-            def _coerce_qty(s: str) -> int:
-                s = (s or "").strip()
-                try:
-                    return int(float(s))
-                except Exception:
-                    m = re.search(r"\d+", s)
-                    return int(m.group()) if m else 0
-
-            for r in range(1, t.dxf.n_rows):
-                qty_cell = t.get_cell(r, c_qty) if c_qty is not None else None
-                try:
-                    qty_text = qty_cell.get_text() if qty_cell else "0"
-                except Exception:
-                    qty_text = "0"
-                qty = _coerce_qty(qty_text)
-                if qty <= 0:
-                    continue
-                total += qty
-
-                ref_txt = ""
-                desc = ""
-                if c_ref is not None:
-                    ref_cell = t.get_cell(r, c_ref)
-                    try:
-                        ref_txt = (ref_cell.get_text() if ref_cell else "") or ""
-                    except Exception:
-                        ref_txt = ""
-                if c_desc is not None:
-                    desc_cell = t.get_cell(r, c_desc)
-                    try:
-                        desc = (desc_cell.get_text() if desc_cell else "") or ""
-                    except Exception:
-                        desc = ""
-                u = " ".join([ref_txt, desc]).upper()
-
-                def _parse_dia(tok: str) -> float | None:
-                    tok = (tok or "").strip().lstrip("Ø⌀\u00D8 ").strip()
-                    if re.fullmatch(r"\d+/\d+", tok):
-                        try:
-                            return float(Fraction(tok))
-                        except Exception:
-                            return None
-                    if re.fullmatch(r"(?:\d+)?\.\d+|\d+(?:\.\d+)?", tok):
-                        try:
-                            return float(tok)
-                        except Exception:
-                            return None
-                    return None
 
                 dia_in = _parse_dia(ref_txt)
                 if dia_in is None:
