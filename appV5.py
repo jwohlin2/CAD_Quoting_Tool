@@ -1582,42 +1582,26 @@ else:  # pragma: no cover - fallback when ezdxf is unavailable at runtime
 
 if typing.TYPE_CHECKING:
     import pandas as pd
-    from pandas import DataFrame as PandasDataFrame
+    from pandas import DataFrame as _PandasDataFrame
+    from pandas import Index as _PandasIndex
+    from pandas import Series as _PandasSeries
     from cad_quoter.domain import QuoteState as _QuoteState
 
+    PandasDataFrame: TypeAlias = _PandasDataFrame[Any]
+    PandasSeries: TypeAlias = _PandasSeries[Any]
+    PandasIndex: TypeAlias = _PandasIndex[Any]
     SeriesLike: TypeAlias = pd.Series[Any]
 else:
-    PandasDataFrame = Any  # type: ignore[assignment]
     _QuoteState = QuoteState
+    PandasDataFrame: TypeAlias = Any
+    PandasSeries: TypeAlias = Any
+    PandasIndex: TypeAlias = Any
+    SeriesLike: TypeAlias = Any
+
     try:
         import pandas as pd  # type: ignore[import]
     except Exception:  # pragma: no cover - optional dependency
         pd = None  # type: ignore[assignment]
-        PandasDataFrame = typing.Any
-        PandasSeries = typing.Any
-        PandasIndex = typing.Any
-    else:
-        # Several of our test environments provide a light-weight pandas stub
-        # that implements only the minimal runtime surface we need.  Older
-        # versions of :mod:`appV5` eagerly accessed ``pd.Index`` which is not
-        # guaranteed to exist on these shims, resulting in AttributeError during
-        # import.  Guard each attribute lookup so that we gracefully fall back
-        # to ``typing.Any`` when the real dependency is unavailable.
-        PandasDataFrame = getattr(pd, "DataFrame", typing.Any)
-        PandasSeries = getattr(pd, "Series", typing.Any)
-        PandasIndex = getattr(pd, "Index", typing.Any)
-
-        if PandasDataFrame is typing.Any or PandasSeries is typing.Any:
-            # If any of the expected attributes are missing we treat ``pd`` as a
-            # stub and avoid leaking partially initialised aliases.  Keeping the
-            # ``pd`` reference allows downstream call sites to continue using
-            # helpers such as ``pd.to_numeric`` when they exist, while
-            # maintaining compatibility with the light-weight testing shim.
-            PandasDataFrame = typing.Any
-            PandasSeries = typing.Any
-            PandasIndex = typing.Any
-
-    SeriesLike: TypeAlias = Any
 
 try:
     from cad_quoter_legacy import compute_quote_from_df as _legacy_compute_quote_from_df  # type: ignore[import]
@@ -2162,22 +2146,6 @@ else:  # pragma: no cover - fallback definitions keep quoting functional without
     def explain_quote(*args, **kwargs) -> str:  # pragma: no cover - fallback
         return "LLM explanation unavailable."
 
-
-try:
-    import pandas as pd  # type: ignore[import]
-except Exception:  # pragma: no cover - optional dependency
-    pd = None  # type: ignore[assignment]
-
-if TYPE_CHECKING:  # pragma: no cover - import-time helper for type checkers
-    import pandas as _pandas
-
-    PandasDataFrame = _pandas.DataFrame
-    PandasSeries = _pandas.Series
-    PandasIndex = _pandas.Index
-else:  # pragma: no cover - fallback aliases when pandas is unavailable
-    PandasDataFrame = typing.Any
-    PandasSeries = typing.Any
-    PandasIndex = typing.Any
 
 pd = typing.cast(typing.Any, pd)
 from typing import TypedDict
@@ -4010,20 +3978,23 @@ def _load_master_variables() -> tuple[PandasDataFrame | None, PandasDataFrame | 
     if cache.get("loaded"):
         core_cached = cache.get("core")
         full_cached = cache.get("full")
-        core_copy = (
-            core_cached.copy()
-            if _HAS_PANDAS
+
+        core_copy: PandasDataFrame | None = None
+        if (
+            _HAS_PANDAS
             and pd is not None
             and isinstance(core_cached, pd.DataFrame)
-            else None
-        )
-        full_copy = (
-            full_cached.copy()
-            if _HAS_PANDAS
+        ):
+            core_copy = core_cached.copy()
+
+        full_copy: PandasDataFrame | None = None
+        if (
+            _HAS_PANDAS
             and pd is not None
             and isinstance(full_cached, pd.DataFrame)
-            else None
-        )
+        ):
+            full_copy = full_cached.copy()
+
         return (core_copy, full_copy)
 
     master_path = default_master_variables_csv()
@@ -4051,9 +4022,7 @@ def _load_master_variables() -> tuple[PandasDataFrame | None, PandasDataFrame | 
     cache["core"] = core_df
     cache["full"] = full_df
 
-    core_df_cast = cast(PandasDataFrame, core_df)
-    full_df_cast = cast(PandasDataFrame, full_df)
-    return (core_df_cast.copy(), full_df_cast.copy())
+    return (core_df.copy(), full_df.copy())
 
 def find_variables_near(cad_path: str):
     """Look for variables.* in the same folder, then one level up."""
