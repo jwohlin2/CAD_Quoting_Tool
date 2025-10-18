@@ -19669,6 +19669,7 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
     if cnt is not None:
         geo["hole_count"] = int(cnt or 0)
     geo["hole_diam_families_in"] = fam or {}
+    hole_source = source
     if source:
         geo.setdefault("provenance", {})["holes"] = source
     geo["hole_count_geom"] = geom_cnt or 0
@@ -20187,6 +20188,10 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
             chart_lines.append(ln)
 
     table_info = hole_count_from_acad_table(doc)
+    table_counts_trusted = True
+    if hole_source and "GEOM" in str(hole_source).upper():
+        table_counts_trusted = False
+        table_info = {}
     if (not table_info or not table_info.get("hole_count")) and doc is not None:
         try:
             text_table = extract_hole_table_from_text(doc)
@@ -20196,7 +20201,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
             text_table = dict(text_table)
             text_table.setdefault("provenance", "HOLE TABLE (TEXT)")
             table_info = text_table
-    if table_info and table_info.get("hole_count"):
+    if table_info and table_info.get("hole_count") and table_counts_trusted:
         try:
             geo["hole_count"] = int(table_info.get("hole_count") or 0)
         except Exception:
@@ -20294,7 +20299,11 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     if not material:
         material = geo.get("material_note")
 
-    table_hole_count = _coerce_int_or_zero(table_info.get("hole_count"))
+    table_hole_count = (
+        _coerce_int_or_zero(table_info.get("hole_count"))
+        if table_counts_trusted
+        else 0
+    )
     geom_hole_count_dedup = int(geo.get("hole_count_geom_dedup") or 0)
     geom_hole_count_raw = int(geo.get("hole_count_geom_raw") or len(entity_holes_mm))
 
