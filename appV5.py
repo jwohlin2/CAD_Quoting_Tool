@@ -18235,30 +18235,26 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
         from_back = False
         double_sided = False
 
-        def _coerce_qty(text: str) -> int:
-            text = (text or "").strip()
-            try:
-                return int(float(text))
-            except Exception:
-                digits = re.findall(r"\d+", text)
-                return int(digits[0]) if digits else 0
-
         for r in range(header_row + 1, n_rows):
+            cell = None
+            if c_qty is not None:
+                try:
+                    cell = t.get_cell(r, c_qty)
+                except Exception:
+                    cell = None
             try:
-                qty_cell = t.get_cell(r, c_qty) if c_qty is not None else None
-            except Exception:
-                qty_cell = None
-            try:
-                qty_text = (qty_cell.get_text() if qty_cell else "") or "0"
+                qty_text = (cell.get_text() if cell else "0") or "0"
             except Exception:
                 qty_text = "0"
 
-            qty = _coerce_qty(qty_text)
+            mqty = re.search(r"(?<!\d)(\d+)(?!\d)", qty_text) or re.search(r"(\d+)\s*[xX]", qty_text)
+            qty = int(mqty.group(1)) if mqty else 0
             if qty <= 0:
                 continue
             total += qty
 
             ref_txt = ""
+            desc = ""
             if c_ref is not None:
                 try:
                     ref_cell = t.get_cell(r, c_ref)
@@ -18268,8 +18264,6 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
                     ref_txt = (ref_cell.get_text() if ref_cell else "") or ""
                 except Exception:
                     ref_txt = ""
-
-            desc = ""
             if c_desc is not None:
                 try:
                     desc_cell = t.get_cell(r, c_desc)
@@ -18280,34 +18274,31 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
                 except Exception:
                     desc = ""
 
+            def _parse_diam(s: str):
+                s = s.strip().upper()
+                m = re.search(r"(\d+(?:\.\d+)?)\s*(?:±\s*\d+(?:\.\d+)?)?$", s) or re.search(
+                    r"(\d+)\s*/\s*(\d+)", s
+                )
+                if m:
+                    if m.lastindex and m.lastindex >= 2 and m.group(2):
+                        try:
+                            return float(Fraction(f"{m.group(1)}/{m.group(2)}"))
+                        except Exception:
+                            return None
+                    try:
+                        return float(m.group(1))
+                    except Exception:
+                        return None
+                m = re.search(r"[Ø⌀]\s*(\d+(?:\.\d+)?)", s)
+                return float(m.group(1)) if m else None
+
+            d = _parse_diam(ref_txt) or _parse_diam(desc)
+            if d is not None:
+                d = round(d, 4)
+                families[d] = families.get(d, 0) + qty
+
             combined = f"{ref_txt} {desc}".strip()
             upper_text = combined.upper()
-
-            def _parse_dia(token: str) -> float | None:
-                token = (token or "").strip().lstrip("Ø⌀\u00D8 ").strip()
-                if re.fullmatch(r"\d+/\d+", token):
-                    try:
-                        return float(Fraction(token))
-                    except Exception:
-                        return None
-                if re.fullmatch(r"(?:\d+)?\.\d+|\d+(?:\.\d+)?", token):
-                    try:
-                        return float(token)
-                    except Exception:
-                        return None
-                return None
-
-            dia = _parse_dia(ref_txt)
-            if dia is None:
-                match = re.search(
-                    r"[Ø⌀\u00D8]?\s*((?:\d+)?\.\d+|\d+/\d+|\d+(?:\.\d+)?)",
-                    combined,
-                )
-                dia = _parse_dia(match.group(1)) if match else None
-
-            if dia is not None:
-                key = round(dia, 4)
-                families[key] = families.get(key, 0) + qty
 
             tap_cls = tap_classes_from_row_text(upper_text, qty)
             tap_sum = sum(tap_cls.values())
