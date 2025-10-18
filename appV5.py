@@ -19470,6 +19470,36 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     holes = list(sp.query("CIRCLE"))
     entity_holes_mm = [float(2.0 * c.dxf.radius * u2mm) for c in holes]
     hole_diams_mm = [round(val, 2) for val in entity_holes_mm]
+    # Persist geometry-based counts so planner can fall back sanely
+    geo["hole_count_geom"] = len(hole_diams_mm)
+    # Build inch families with a tight merge tolerance (±0.005")
+    def _cluster_families_mm(
+        vals_mm: list[float], tol_in: float = 0.005
+    ) -> dict[str, int]:
+        from collections import Counter
+
+        vals_in = sorted((v / 25.4 for v in vals_mm))
+        families: list[list[float]] = []
+        bucket: list[float] = []
+        last: float | None = None
+        for v in vals_in:
+            if (last is None) or abs(v - last) <= tol_in:
+                bucket.append(v)
+                last = v if last is None else (0.5 * (last + v))
+            else:
+                families.append(bucket)
+                bucket = [v]
+                last = v
+        if bucket:
+            families.append(bucket)
+        counts = Counter(round(sum(b) / len(b), 4) for b in families)
+        return {f'{k:.4f}"': int(c) for k, c in counts.items()}
+
+    if hole_diams_mm:
+        fam = _cluster_families_mm(entity_holes_mm)
+        if fam:
+            geo["hole_diam_families_in"] = fam
+            geo["hole_family_count"] = sum(fam.values())
 
     chart_lines: list[str] = []
     chart_ops: list[dict[str, Any]] = []
