@@ -20159,6 +20159,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
         top_level_hole_count = geo.get("hole_count", len(hole_diams_mm))
     else:
         top_level_hole_count = len(hole_diams_mm)
+        geo["hole_count"] = top_level_hole_count
 
     chart_lines: list[str] = []
     chart_ops: list[dict[str, Any]] = []
