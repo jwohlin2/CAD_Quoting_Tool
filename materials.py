@@ -1082,6 +1082,9 @@ def _compute_material_block(
         "total_material_cost": float(total_mat_cost),
     }
 
+    if stock_price_source:
+        result["stock_price_source"] = stock_price_source
+
     if api_price and api_price > 0 and api_price_source:
         result["stock_piece_price_usd"] = float(api_price)
         result["stock_piece_source"] = api_price_source

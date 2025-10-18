@@ -7312,18 +7312,35 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     material_stock_block["stock_L_in"] = float(stock_len_val)
                     material_stock_block["stock_W_in"] = float(stock_wid_val)
                     material_stock_block["stock_T_in"] = float(stock_thk_val)
-                    material_stock_block.setdefault("stock_source_tag", source_hint)
-                    material_stock_block.setdefault("source", source_hint)
+                    material_stock_block["stock_source_tag"] = source_hint
+                    material_stock_block["source"] = source_hint
                     if part_number:
                         material_stock_block["mcmaster_part"] = part_number
+                        material_stock_block["part_no"] = part_number
+                        if not material_stock_block.get("stock_price_source"):
+                            material_stock_block["stock_price_source"] = "mcmaster_api"
                 if isinstance(material, _MutableMappingABC):
-                    material.setdefault("stock_source_tag", source_hint)
-                    material.setdefault("source", source_hint)
+                    material["stock_source_tag"] = source_hint
+                    material["source"] = source_hint
                     if part_number:
-                        material.setdefault("mcmaster_part", part_number)
+                        material["mcmaster_part"] = part_number
+                        material["part_no"] = part_number
+                        if not material.get("stock_price_source"):
+                            material["stock_price_source"] = (
+                                material_stock_block.get("stock_price_source")
+                                if isinstance(material_stock_block, _MappingABC)
+                                else "mcmaster_api"
+                            )
                 if isinstance(result, _MutableMappingABC):
                     if part_number:
                         result["mcmaster_part"] = part_number
+                        result["part_no"] = part_number
+                        if not result.get("stock_price_source"):
+                            result["stock_price_source"] = (
+                                material_stock_block.get("stock_price_source")
+                                if isinstance(material_stock_block, _MappingABC)
+                                else "mcmaster_api"
+                            )
                     result["stock_source"] = source_hint
             elif (
                 material_lookup_for_pick
