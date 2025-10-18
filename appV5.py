@@ -19563,7 +19563,7 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
     fam: dict | None = None
     tap_classes_from_table: dict[str, int] | None = None
     tap_qty_from_table = 0
-    source = "HOLE TABLE (ACAD_TABLE)"
+    source: str | None = None
     if table_info:
         cnt = table_info.get("hole_count")
         fam = table_info.get("hole_diam_families_in")
@@ -19571,8 +19571,8 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
         if raw_classes:
             tap_classes_from_table = {k: int(v) for k, v in raw_classes.items() if v}
         tap_qty_from_table = int(table_info.get("tap_qty_from_table") or 0)
-        if table_info.get("provenance_holes"):
-            source = str(table_info.get("provenance_holes"))
+        if cnt:
+            source = str(table_info.get("provenance_holes") or "HOLE TABLE (ACAD_TABLE)")
     if not cnt:
         text_cnt, text_fam = hole_count_from_text_table(doc, table_lines)
         if text_cnt:
@@ -19666,9 +19666,11 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
         geo["chart_lines"] = list(table_lines)
     if inference_knobs:
         geo["inference_knobs"] = inference_knobs
-    geo["hole_count"] = int(cnt or 0)
+    if cnt is not None:
+        geo["hole_count"] = int(cnt or 0)
     geo["hole_diam_families_in"] = fam or {}
-    geo.setdefault("provenance", {})["holes"] = source
+    if source:
+        geo.setdefault("provenance", {})["holes"] = source
     geo["hole_count_geom"] = geom_cnt or 0
     if geom_fam:
         geo["hole_diam_families_geom_in"] = geom_fam
@@ -20044,40 +20046,90 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     for e in sp.query("ARC"):
         per += abs(e.dxf.end_angle - e.dxf.start_angle) * math.pi/180.0 * e.dxf.radius
 
-    # holes from circles
+    # holes from circles with concentric-dedup fallback
     holes = list(sp.query("CIRCLE"))
-    entity_holes_mm = [float(2.0 * c.dxf.radius * u2mm) for c in holes]
-    hole_diams_mm = [round(val, 2) for val in entity_holes_mm]
-    # Persist geometry-based counts so planner can fall back sanely
-    geo["hole_count_geom"] = len(hole_diams_mm)
-    # Build inch families with a tight merge tolerance (±0.005")
-    def _cluster_families_mm(
-        vals_mm: list[float], tol_in: float = 0.005
-    ) -> dict[str, int]:
+    circ: list[tuple[float, float, float]] = []
+    entity_holes_mm: list[float] = []
+    for c in holes:
+        try:
+            cx, cy = float(c.dxf.center.x), float(c.dxf.center.y)
+            d_mm = float(2.0 * c.dxf.radius * u2mm)
+        except Exception:
+            continue
+        entity_holes_mm.append(d_mm)
+        circ.append((cx, cy, d_mm))
+
+    def _quant(v: float, tol: float = 1e-3) -> float:
+        return round(v / tol) * tol
+
+    groups: dict[tuple[float, float], list[float]] = {}
+    for cx, cy, d_mm in circ:
+        key = (_quant(cx), _quant(cy))
+        groups.setdefault(key, []).append(d_mm)
+
+    through_mm: list[float] = []
+    cbore_pairs = 0
+    for ds in groups.values():
+        ds_sorted = sorted(ds)
+        if not ds_sorted:
+            continue
+        through_mm.append(ds_sorted[0])
+        if len(ds_sorted) > 1:
+            cbore_pairs += len(ds_sorted) - 1
+
+    hole_diams_mm = [round(v, 2) for v in through_mm]
+
+    try:
+        existing_cbore = int(float(geo.get("cbore_pairs_geom") or 0))
+    except Exception:
+        existing_cbore = 0
+    if cbore_pairs or "cbore_pairs_geom" not in geo:
+        geo["cbore_pairs_geom"] = max(existing_cbore, cbore_pairs)
+
+    geo["hole_count_geom_dedup"] = len(hole_diams_mm)
+    geo["hole_count_geom_raw"] = len(entity_holes_mm)
+    try:
+        existing_geom = int(float(geo.get("hole_count_geom") or 0))
+    except Exception:
+        existing_geom = 0
+    geo["hole_count_geom"] = max(existing_geom, len(hole_diams_mm))
+
+    def _fam_in_from_mm(vals_mm: list[float]) -> dict[str, int]:
         from collections import Counter
 
-        vals_in = sorted((v / 25.4 for v in vals_mm))
-        families: list[list[float]] = []
+        vals_in = [v / 25.4 for v in vals_mm]
+        vals_in.sort()
+        buckets: list[list[float]] = []
         bucket: list[float] = []
         last: float | None = None
         for v in vals_in:
-            if (last is None) or abs(v - last) <= tol_in:
+            if last is None or abs(v - last) <= 0.005:
                 bucket.append(v)
-                last = v if last is None else (0.5 * (last + v))
+                last = v if last is None else (v + last) / 2
             else:
-                families.append(bucket)
+                buckets.append(bucket)
                 bucket = [v]
                 last = v
         if bucket:
-            families.append(bucket)
-        counts = Counter(round(sum(b) / len(b), 4) for b in families)
+            buckets.append(bucket)
+        counts = Counter(round(sum(b) / len(b), 4) for b in buckets)
         return {f'{k:.4f}"': int(c) for k, c in counts.items()}
 
-    if hole_diams_mm:
-        fam = _cluster_families_mm(entity_holes_mm)
-        if fam:
-            geo["hole_diam_families_in"] = fam
-            geo["hole_family_count"] = sum(fam.values())
+    if through_mm:
+        geom_families = _fam_in_from_mm(through_mm)
+        if geom_families:
+            if not geo.get("hole_diam_families_in"):
+                geo["hole_diam_families_in"] = geom_families
+            existing_family_total = 0
+            try:
+                existing_family_total = int(float(geo.get("hole_family_count") or 0))
+            except Exception:
+                existing_family_total = 0
+            geo["hole_family_count"] = max(
+                existing_family_total,
+                sum(geom_families.values()),
+            )
+        geo["hole_diam_families_in_geom"] = geom_families
 
     if table_info.get("hole_count"):
         try:
@@ -20243,7 +20295,8 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
         material = geo.get("material_note")
 
     table_hole_count = _coerce_int_or_zero(table_info.get("hole_count"))
-    geom_hole_count = len(hole_diams_mm)
+    geom_hole_count_dedup = int(geo.get("hole_count_geom_dedup") or 0)
+    geom_hole_count_raw = int(geo.get("hole_count_geom_raw") or len(entity_holes_mm))
 
     result: dict[str, Any] = {
         "kind": "2D",
@@ -20257,9 +20310,16 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
         "geo": geo,
     }
     if table_hole_count > 0:
+        result["hole_count"] = table_hole_count
         result["hole_count_table"] = table_hole_count
-    if geom_hole_count:
-        result.setdefault("hole_count_geom", geom_hole_count)
+    elif geom_hole_count_dedup > 0:
+        result["hole_count"] = geom_hole_count_dedup
+        result["hole_count_geom"] = geom_hole_count_dedup
+        geo.setdefault("provenance", {})["holes"] = "GEOM (concentric-dedup)"
+    else:
+        result["hole_count"] = geom_hole_count_raw
+        if geom_hole_count_raw:
+            result["hole_count_geom"] = geom_hole_count_raw
     if geo.get("tap_qty") or geo.get("cbore_qty") or geo.get("csk_qty"):
         result["feature_counts"] = {
             "tap_qty": geo.get("tap_qty", 0),
