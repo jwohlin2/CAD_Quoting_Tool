@@ -1568,6 +1568,7 @@ from typing import (
     TypeVar,
     cast,
     Literal,
+    TypedDict,
     overload,
     no_type_check,
 )
@@ -1590,40 +1591,27 @@ if typing.TYPE_CHECKING:
     from pandas import Series as PandasSeries
     from cad_quoter.domain import QuoteState as _QuoteState
 
-    SeriesLike: TypeAlias = PandasSeries[Any]
-else:
-    PandasDataFrame = Any  # type: ignore[assignment]
-    PandasSeries = Any  # type: ignore[assignment]
-    PandasIndex = Any  # type: ignore[assignment]
     SeriesLike: TypeAlias = Any
+else:
     _QuoteState = QuoteState
     try:
         import pandas as pd  # type: ignore[import]
     except Exception:  # pragma: no cover - optional dependency
         pd = None  # type: ignore[assignment]
-        PandasDataFrame = typing.Any
-        PandasSeries = typing.Any
-        PandasIndex = typing.Any
-    else:
-        # Several of our test environments provide a light-weight pandas stub
-        # that implements only the minimal runtime surface we need.  Older
-        # versions of :mod:`appV5` eagerly accessed ``pd.Index`` which is not
-        # guaranteed to exist on these shims, resulting in AttributeError during
-        # import.  Guard each attribute lookup so that we gracefully fall back
-        # to ``typing.Any`` when the real dependency is unavailable.
-        PandasDataFrame = getattr(pd, "DataFrame", typing.Any)
-        PandasSeries = getattr(pd, "Series", typing.Any)
-        PandasIndex = getattr(pd, "Index", typing.Any)
+    PandasDataFrame: TypeAlias = Any
+    PandasSeries: TypeAlias = Any
+    PandasIndex: TypeAlias = Any
+    SeriesLike: TypeAlias = Any
 
-        if PandasDataFrame is typing.Any or PandasSeries is typing.Any:
-            # If any of the expected attributes are missing we treat ``pd`` as a
-            # stub and avoid leaking partially initialised aliases.  Keeping the
-            # ``pd`` reference allows downstream call sites to continue using
-            # helpers such as ``pd.to_numeric`` when they exist, while
-            # maintaining compatibility with the light-weight testing shim.
-            PandasDataFrame = typing.Any
-            PandasSeries = typing.Any
-            PandasIndex = typing.Any
+
+def _is_pandas_dataframe(obj: Any) -> bool:
+    """Return True if *obj* looks like a pandas ``DataFrame`` instance."""
+
+    df_type = getattr(pd, "DataFrame", None)
+    try:
+        return bool(df_type) and isinstance(obj, df_type)  # type: ignore[arg-type]
+    except Exception:
+        return False
 
 try:
     from cad_quoter_legacy import compute_quote_from_df as _legacy_compute_quote_from_df  # type: ignore[import]
@@ -2173,17 +2161,6 @@ try:
     import pandas as pd  # type: ignore[import]
 except Exception:  # pragma: no cover - optional dependency
     pd = None  # type: ignore[assignment]
-
-if TYPE_CHECKING:  # pragma: no cover - import-time helper for type checkers
-    import pandas as _pandas
-
-    PandasDataFrame = _pandas.DataFrame
-    PandasSeries = _pandas.Series
-    PandasIndex = _pandas.Index
-else:  # pragma: no cover - fallback aliases when pandas is unavailable
-    PandasDataFrame = typing.Any
-    PandasSeries = typing.Any
-    PandasIndex = typing.Any
 
 pd = typing.cast(typing.Any, pd)
 from typing import TypedDict
@@ -4435,7 +4412,7 @@ class _BucketOpEntry(TypedDict):
 def _split_hours_for_bucket(
     label: str,
     hours: float,
-    render_state: "PlannerBucketRenderState" | None,
+    render_state: "PlannerBucketRenderState | None",
     cfg: QuoteConfiguration | None,
 ) -> tuple[float, float]:
     total_h = max(0.0, float(hours or 0.0))
@@ -13110,12 +13087,12 @@ def _dedupe_geo_rows(
         buckets[key] = buckets.get(key, 0) + int(qty)
     out: list[dict[str, Any]] = []
     for (diam_key, depth_key), qty in buckets.items():
-        entry: dict[str, Any] = {"diam_in": diam_key, "qty": int(qty)}
+        normalized_entry: dict[str, Any] = {"diam_in": diam_key, "qty": int(qty)}
         if depth_key > 0:
-            entry["depth_in"] = depth_key
+            normalized_entry["depth_in"] = depth_key
         elif thickness is not None and thickness > 0:
-            entry["depth_in"] = float(round(thickness, 3))
-        out.append(entry)
+            normalized_entry["depth_in"] = float(round(thickness, 3))
+        out.append(normalized_entry)
     out.sort(
         key=lambda item: (
             float(item.get("diam_in") or 0.0),
@@ -13256,9 +13233,9 @@ def _ensure_geo_context_fields(
     value_map: Mapping[str, Any] | None,
     *,
     cfg: QuoteConfiguration | None = None,
-) -> dict[str, Any]:
+) -> MutableMapping[str, Any]:
     if not isinstance(geo_payload, _MutableMappingABC):
-        return {}
+        return typing.cast(MutableMapping[str, Any], {})
 
     derived = geo_payload.get("derived")
     if not isinstance(derived, dict):
@@ -15223,14 +15200,22 @@ def _load_speeds_feeds_table_from_path(path: str | None) -> tuple[PandasDataFram
     if not text:
         return None, False
 
+    if pd is None:
+        return None, False
+
+    dataframe_ctor = getattr(pd, "DataFrame", None)
+    read_csv = getattr(pd, "read_csv", None)
+    if not callable(dataframe_ctor):
+        return None, False
+
     table: PandasDataFrame | None = None
     try:
         candidate = Path(text)
     except Exception:
         candidate = None
-    if candidate is not None and candidate.is_file():
+    if candidate is not None and candidate.is_file() and callable(read_csv):
         try:
-            table = pd.read_csv(candidate)
+            table = typing.cast(PandasDataFrame, read_csv(candidate))
         except Exception:
             table = None
 
@@ -15241,12 +15226,20 @@ def _load_speeds_feeds_table_from_path(path: str | None) -> tuple[PandasDataFram
             records = []
         if records:
             try:
-                table = pd.DataFrame(records)
+                table = typing.cast(PandasDataFrame, dataframe_ctor(records))
             except Exception:
                 table = None
 
-    if table is not None and not table.empty:
-        return table, True
+    if table is not None:
+        try:
+            if not getattr(table, "empty"):
+                return table, True
+        except Exception:
+            try:
+                if len(table) > 0:  # type: ignore[arg-type]
+                    return table, True
+            except Exception:
+                pass
     return table, False
 
 
@@ -17093,7 +17086,7 @@ def extract_2d_features_from_pdf_vector(pdf_path: str) -> dict:
 REQUIRED_COLS = ["Item", "Example Values / Options", "Data Type / Input Method"]
 
 def default_variables_template() -> PandasDataFrame:
-    if _HAS_PANDAS:
+    if _HAS_PANDAS and pd is not None:
         core_df, _ = _load_master_variables()
         if core_df is not None:
             updated = core_df.copy()
@@ -17128,6 +17121,8 @@ def default_variables_template() -> PandasDataFrame:
                     )
                     adjusted_rows.append(new_row)
             return pd.DataFrame(adjusted_rows, columns=columns)
+    if not _HAS_PANDAS or pd is None:
+        raise RuntimeError("pandas is required to build the default variables template.")
     rows = [
         ("Profit Margin %", 0.0, "number"),
         ("Programmer $/hr", 90.0, "number"),
@@ -17163,6 +17158,7 @@ def default_variables_template() -> PandasDataFrame:
         ("Material", "Aluminum MIC6", "text"),
         ("Thickness (in)", 2.0, "number"),
     ]
+    assert pd is not None  # for type checkers
     return pd.DataFrame(rows, columns=REQUIRED_COLS)
 
 def coerce_or_make_vars_df(df: PandasDataFrame | None) -> PandasDataFrame:
@@ -17297,6 +17293,11 @@ def _deep_get(d: dict, path):
     return cur
 
 def merge_estimate_into_vars(vars_df: PandasDataFrame, estimate: dict) -> PandasDataFrame:
+    if not _HAS_PANDAS or pd is None:
+        raise RuntimeError("pandas is required to merge PDF estimates into variables.")
+
+    assert pd is not None  # for type checkers
+
     for item, src in MAP_KEYS.items():
         value = _deep_get(estimate, src)
         if value is None:
@@ -18165,22 +18166,8 @@ def extract_hole_table_from_text(doc, y_tol: float = 0.04, min_rows: int = 5):
         "hole_count": total,
         "hole_diam_families_in": families,
         "rows": clean_rows,
+        "provenance_holes": "HOLE TABLE (text)",
     }
-
-
-def _all_tables(doc) -> Iterator[Any]:
-    if doc is None:
-        return
-    seen: set[int] = set()
-    for sp in _spaces(doc):
-        try:
-            for tbl in sp.query("TABLE"):
-                if id(tbl) in seen:
-                    continue
-                seen.add(id(tbl))
-                yield tbl
-        except Exception:
-            continue
 
 
 def hole_count_from_acad_table(doc) -> dict[str, Any]:
@@ -18211,8 +18198,8 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
                 cells.append(" ".join(txt.split()))
             return cells
 
+        header_row = 0
         try:
-            header_row = 0
             hdr = _row_text(header_row)
 
             def _has_cols(row_txt: Sequence[str]) -> bool:
@@ -18417,24 +18404,6 @@ def hole_count_from_text_table(doc, lines: Sequence[str] | None = None) -> tuple
 
     return (total, fam) if total else (None, None)
 
-
-def extract_hole_table_from_text(doc) -> dict[str, Any]:
-    """Return hole table metadata derived from text entities."""
-
-    count, families = hole_count_from_text_table(doc)
-    if not count:
-        return {}
-
-    formatted: dict[str, int] = {}
-    for diam, qty in (families or {}).items():
-        if qty:
-            formatted[f'{float(diam):.4f}"'] = int(qty)
-
-    result: dict[str, Any] = {"hole_count": int(count)}
-    if formatted:
-        result["hole_diam_families_in"] = formatted
-    result["provenance_holes"] = "HOLE TABLE (text)"
-    return result
 
 def hole_count_from_geometry(doc, to_in, plate_bbox=None) -> tuple[int, dict]:
     clustered = filtered_circles(doc, to_in, plate_bbox=plate_bbox)
@@ -19611,7 +19580,6 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
 
     if cnt:
         combined_agg["hole_count"] = int(cnt)
-        geo["hole_count"] = int(cnt)
     if tap_classes_from_table:
         combined_agg["tap_class_counts"] = dict(tap_classes_from_table)
     if tap_qty_from_table:
@@ -19683,6 +19651,7 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
     if cnt is not None:
         geo["hole_count"] = int(cnt or 0)
     geo["hole_diam_families_in"] = fam or {}
+    hole_source = source
     if source:
         geo.setdefault("provenance", {})["holes"] = source
     geo["hole_count_geom"] = geom_cnt or 0
@@ -19746,95 +19715,6 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
     if flags:
         geo["flags"] = flags
     return geo
-
-def _all_spaces(doc: Any) -> list[Any]:
-    """Return modelspace and all layouts for *doc* if available."""
-
-    if not doc:
-        return []
-
-    spaces: list[Any] = []
-    try:
-        modelspace = doc.modelspace()
-    except Exception:
-        modelspace = None
-    if modelspace is not None:
-        spaces.append(modelspace)
-
-    try:
-        layouts = getattr(doc, "layouts", None)
-        if layouts is not None:
-            names = getattr(layouts, "names", None)
-            get_layout = getattr(layouts, "get", None)
-            if callable(names) and callable(get_layout):
-                for name in names():
-                    if name == "Model":
-                        continue
-                    try:
-                        spaces.append(get_layout(name))
-                    except Exception:
-                        continue
-    except Exception:
-        pass
-
-    return spaces
-
-
-def _iter_text_with_xy(doc: Any) -> Iterator[tuple[str, float, float]]:
-    """Yield ``(text, x, y)`` tuples for TEXT/MTEXT entities in *doc*."""
-
-    def _iter_space(space: Any) -> Iterator[tuple[str, float, float]]:
-        if space is None:
-            return
-
-        for entity in space:
-            try:
-                dxftype = entity.dxftype()
-            except Exception:
-                continue
-
-            if dxftype not in {"TEXT", "MTEXT"}:
-                continue
-
-            try:
-                text = entity.plain_text() if dxftype == "MTEXT" else entity.dxf.text
-                insert = getattr(entity.dxf, "insert", None)
-                x, y = (float(insert[0]), float(insert[1])) if insert is not None else (0.0, 0.0)
-                yield (text or "", x, y)
-            except Exception:
-                continue
-
-        try:
-            for insert in space.query("INSERT"):
-                try:
-                    virtuals = insert.virtual_entities()
-                except Exception:
-                    continue
-
-                for sub in virtuals:
-                    try:
-                        sub_type = sub.dxftype()
-                    except Exception:
-                        continue
-
-                    if sub_type not in {"TEXT", "MTEXT"}:
-                        continue
-
-                    try:
-                        sub_text = sub.plain_text() if sub_type == "MTEXT" else sub.dxf.text
-                        sub_insert = getattr(sub.dxf, "insert", None)
-                        if sub_insert is None:
-                            continue
-                        sx, sy = float(sub_insert[0]), float(sub_insert[1])
-                        yield (sub_text or "", sx, sy)
-                    except Exception:
-                        continue
-        except Exception:
-            return
-
-    for space in _all_spaces(doc):
-        yield from _iter_space(space)
-
 
 def _extract_entity_text(entity: Any) -> str:
     """Return the textual content for TEXT/MTEXT entities.
@@ -20108,42 +19988,47 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
         existing_geom = 0
     geo["hole_count_geom"] = max(existing_geom, len(hole_diams_mm))
 
-    def _fam_in_from_mm(vals_mm: list[float]) -> dict[str, int]:
-        from collections import Counter
+    from collections import Counter
 
-        vals_in = [v / 25.4 for v in vals_mm]
-        vals_in.sort()
-        buckets: list[list[float]] = []
-        bucket: list[float] = []
-        last: float | None = None
-        for v in vals_in:
-            if last is None or abs(v - last) <= 0.005:
-                bucket.append(v)
-                last = v if last is None else (v + last) / 2
-            else:
-                buckets.append(bucket)
-                bucket = [v]
-                last = v
-        if bucket:
-            buckets.append(bucket)
-        counts = Counter(round(sum(b) / len(b), 4) for b in buckets)
-        return {f'{k:.4f}"': int(c) for k, c in counts.items()}
-
-    if through_mm:
-        geom_families = _fam_in_from_mm(through_mm)
-        if geom_families:
-            if not geo.get("hole_diam_families_in"):
-                geo["hole_diam_families_in"] = geom_families
-            existing_family_total = 0
+    def _families_nearest_1over64_in(vals_mm: Iterable[float]) -> dict[str, int]:
+        quantized: list[float] = []
+        for raw in vals_mm:
             try:
-                existing_family_total = int(float(geo.get("hole_family_count") or 0))
+                val_in = float(raw) / 25.4
             except Exception:
-                existing_family_total = 0
-            geo["hole_family_count"] = max(
-                existing_family_total,
-                sum(geom_families.values()),
-            )
-        geo["hole_diam_families_in_geom"] = geom_families
+                continue
+            if not math.isfinite(val_in):
+                continue
+            quantized.append(round(val_in * 64) / 64)
+        if not quantized:
+            return {}
+        counts = Counter(round(q, 4) for q in quantized)
+        return {f'{k:.4f}"': int(v) for k, v in counts.items()}
+
+    geom_families = _families_nearest_1over64_in(hole_diams_mm)
+    geo["hole_diam_families_in_geom"] = geom_families
+
+    existing_families = geo.get("hole_diam_families_in")
+
+    def _family_total(families: Mapping[str, Any] | None) -> int:
+        if not isinstance(families, dict):
+            return 0
+        total = 0
+        for value in families.values():
+            try:
+                total += int(float(value))
+            except Exception:
+                continue
+        return total
+
+    existing_total = _family_total(existing_families)
+    existing_len = len(existing_families) if isinstance(existing_families, dict) else 0
+    if not isinstance(existing_families, dict) or existing_total <= existing_len:
+        geo["hole_diam_families_in"] = dict(geom_families)
+        existing_families = geo["hole_diam_families_in"]
+        existing_total = _family_total(existing_families)
+
+    geo["hole_family_count"] = int(existing_total)
 
     if table_info.get("hole_count"):
         try:
@@ -20173,6 +20058,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
         top_level_hole_count = geo.get("hole_count", len(hole_diams_mm))
     else:
         top_level_hole_count = len(hole_diams_mm)
+        geo["hole_count"] = top_level_hole_count
 
     chart_lines: list[str] = []
     chart_ops: list[dict[str, Any]] = []
@@ -20201,6 +20087,10 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
             chart_lines.append(ln)
 
     table_info = hole_count_from_acad_table(doc)
+    table_counts_trusted = True
+    if hole_source and "GEOM" in str(hole_source).upper():
+        table_counts_trusted = False
+        table_info = {}
     if (not table_info or not table_info.get("hole_count")) and doc is not None:
         try:
             text_table = extract_hole_table_from_text(doc)
@@ -20210,7 +20100,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
             text_table = dict(text_table)
             text_table.setdefault("provenance", "HOLE TABLE (TEXT)")
             table_info = text_table
-    if table_info and table_info.get("hole_count"):
+    if table_info and table_info.get("hole_count") and table_counts_trusted:
         try:
             geo["hole_count"] = int(table_info.get("hole_count") or 0)
         except Exception:
@@ -20308,7 +20198,11 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     if not material:
         material = geo.get("material_note")
 
-    table_hole_count = _coerce_int_or_zero(table_info.get("hole_count"))
+    table_hole_count = (
+        _coerce_int_or_zero(table_info.get("hole_count"))
+        if table_counts_trusted
+        else 0
+    )
     geom_hole_count_dedup = int(geo.get("hole_count_geom_dedup") or 0)
     geom_hole_count_raw = int(geo.get("hole_count_geom_raw") or len(entity_holes_mm))
 
@@ -21169,7 +21063,7 @@ class App(tk.Tk):
                 except Exception:
                     logger.warning("Failed to preload variables from %s", saved_vars_path, exc_info=True)
                 else:
-                    if isinstance(core_df, pd.DataFrame) and isinstance(full_df, pd.DataFrame):
+                    if _is_pandas_dataframe(core_df) and _is_pandas_dataframe(full_df):
                         self._refresh_variables_cache(core_df, full_df)
                     else:
                         logger.warning(
@@ -21748,7 +21642,16 @@ class App(tk.Tk):
             initial_raw = row_data.get(value_col_name, "")
             if full_row is not None:
                 initial_raw = full_row.get(value_col_name, initial_raw)
-            initial_value = "" if pd.isna(initial_raw) else str(initial_raw)
+            is_missing = False
+            if pd is not None:
+                try:
+                    is_missing = bool(pd.isna(initial_raw))
+                except Exception:
+                    is_missing = False
+            if is_missing:
+                initial_value = ""
+            else:
+                initial_value = "" if initial_raw is None else str(initial_raw)
 
             control_spec = derive_editor_control_spec(dtype_source, initial_raw)
             label_text = item_name
@@ -22692,7 +22595,13 @@ class App(tk.Tk):
             record: dict[str, Any] = {}
             for column, value in row.items():
                 column_name = str(column)
-                if pd.isna(value):
+                value_is_missing = False
+                if pd is not None:
+                    try:
+                        value_is_missing = bool(pd.isna(value))
+                    except Exception:
+                        value_is_missing = False
+                if value_is_missing:
                     record[column_name] = None
                 elif hasattr(value, "item"):
                     try:
@@ -22816,9 +22725,12 @@ class App(tk.Tk):
         vars_payload = payload.get("vars_df")
         has_records = isinstance(vars_payload, list) and len(vars_payload) > 0
         if isinstance(vars_payload, list):
-            try:
-                self.vars_df = pd.DataFrame.from_records(vars_payload)
-            except Exception:
+            if pd is not None and hasattr(pd, "DataFrame"):
+                try:
+                    self.vars_df = pd.DataFrame.from_records(vars_payload)
+                except Exception:
+                    self.vars_df = None
+            else:
                 self.vars_df = None
         else:
             self.vars_df = None
@@ -23054,19 +22966,21 @@ class App(tk.Tk):
                 self.update_idletasks()
             except Exception:
                 pass
-            if self.vars_df is None:
-                self.vars_df = coerce_or_make_vars_df(None)
+            vars_df_local = self.vars_df
+            if vars_df_local is None:
+                vars_df_local = coerce_or_make_vars_df(None)
+                self.vars_df = vars_df_local
             for item_name, string_var in self.quote_vars.items():
-                mask = self.vars_df["Item"] == item_name
+                mask = vars_df_local["Item"] == item_name
                 if mask.any():
-                    self.vars_df.loc[mask, "Example Values / Options"] = string_var.get()
+                    vars_df_local.loc[mask, "Example Values / Options"] = string_var.get()
 
             self.apply_overrides(notify=False)
 
             try:
                 ui_vars = {
                     str(row["Item"]): row["Example Values / Options"]
-                    for _, row in self.vars_df.iterrows()
+                    for _, row in vars_df_local.iterrows()
                 }
             except Exception:
                 ui_vars = {}
