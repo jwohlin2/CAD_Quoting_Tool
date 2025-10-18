@@ -1599,6 +1599,11 @@ if typing.TYPE_CHECKING:
     SeriesLike: TypeAlias = Any
 else:
     _QuoteState = QuoteState
+    PandasDataFrame: TypeAlias = Any
+    PandasSeries: TypeAlias = Any
+    PandasIndex: TypeAlias = Any
+    SeriesLike: TypeAlias = Any
+
     try:
         import pandas as pd  # type: ignore[import]
     except Exception:  # pragma: no cover - optional dependency
@@ -4006,20 +4011,23 @@ def _load_master_variables() -> tuple[PandasDataFrame | None, PandasDataFrame | 
     if cache.get("loaded"):
         core_cached = cache.get("core")
         full_cached = cache.get("full")
-        core_copy = (
-            core_cached.copy()
-            if _HAS_PANDAS
+
+        core_copy: PandasDataFrame | None = None
+        if (
+            _HAS_PANDAS
             and pd is not None
             and isinstance(core_cached, pd.DataFrame)
-            else None
-        )
-        full_copy = (
-            full_cached.copy()
-            if _HAS_PANDAS
+        ):
+            core_copy = core_cached.copy()
+
+        full_copy: PandasDataFrame | None = None
+        if (
+            _HAS_PANDAS
             and pd is not None
             and isinstance(full_cached, pd.DataFrame)
-            else None
-        )
+        ):
+            full_copy = full_cached.copy()
+
         return (core_copy, full_copy)
 
     master_path = default_master_variables_csv()
@@ -4047,9 +4055,7 @@ def _load_master_variables() -> tuple[PandasDataFrame | None, PandasDataFrame | 
     cache["core"] = core_df
     cache["full"] = full_df
 
-    core_df_cast = cast(PandasDataFrame, core_df)
-    full_df_cast = cast(PandasDataFrame, full_df)
-    return (core_df_cast.copy(), full_df_cast.copy())
+    return (core_df.copy(), full_df.copy())
 
 def find_variables_near(cad_path: str):
     """Look for variables.* in the same folder, then one level up."""
