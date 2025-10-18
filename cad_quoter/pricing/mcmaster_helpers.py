@@ -12,31 +12,6 @@ from cad_quoter.resources import default_catalog_csv
 from cad_quoter.vendors.mcmaster_stock import parse_inches as _parse_inches
 
 
-def _material_lookup_variants(value: str | None) -> set[str]:
-    text = str(value or "").strip().lower()
-    if not text:
-        return set()
-
-    collapsed = text.replace("_", " ").replace("-", " ")
-    normalized = " ".join(collapsed.split())
-
-    variants = {
-        text,
-        collapsed,
-        normalized,
-        normalized.replace(" ", ""),
-        "".join(ch for ch in normalized if ch.isalnum()),
-    }
-
-    parts = [part for part in normalized.split() if part]
-    variants.update(parts)
-    for left, right in zip(parts, parts[1:]):
-        variants.add(f"{left}{right}")
-
-    # Drop any empty strings that may have been produced by filtering.
-    return {variant for variant in variants if variant}
-
-
 @lru_cache(maxsize=1)
 def load_mcmaster_catalog_rows(path: str | None = None) -> list[dict[str, Any]]:
     """Return rows from the McMaster stock catalog CSV."""
@@ -105,10 +80,6 @@ def _pick_mcmaster_plate_sku_impl(
     if not target_key:
         return None
 
-    target_variants = _material_lookup_variants(target_key)
-    if not target_variants:
-        return None
-
     tolerance = 0.02
     candidates: list[dict[str, Any]] = []
     for row in rows:
@@ -119,8 +90,13 @@ def _pick_mcmaster_plate_sku_impl(
         ).strip().lower()
         if not material_text:
             continue
-        material_variants = _material_lookup_variants(material_text)
-        if target_variants.isdisjoint(material_variants):
+        variants = {target_key}
+        if "_" in target_key:
+            variants.add(target_key.replace("_", " "))
+        if " " in target_key:
+            variants.add(target_key.replace(" ", ""))
+        normalised_material = material_text.replace("_", " ")
+        if not any(variant and variant in normalised_material for variant in variants):
             continue
 
         length = _coerce_inches_value(
@@ -135,23 +111,12 @@ def _pick_mcmaster_plate_sku_impl(
             or row.get("wid_in")
             or row.get("width")
         )
-        thickness_source = (
+        thickness = _coerce_inches_value(
             row.get("thickness_in")
             or row.get("T_in")
             or row.get("thk_in")
             or row.get("thickness")
         )
-        thickness = _coerce_inches_value(thickness_source)
-        if thickness is not None and thickness >= 10.0:
-            if isinstance(thickness_source, bytes):
-                text = str(thickness_source, "utf-8", "ignore")
-            elif thickness_source is not None:
-                text = str(thickness_source)
-            else:
-                text = ""
-            text = text.strip()
-            if text.isdigit() and len(text) <= 3:
-                thickness = thickness / 10.0
         if (
             length is None
             or width is None
@@ -247,28 +212,14 @@ def resolve_mcmaster_plate_for_quote(
 ) -> dict[str, Any] | None:
     """Return a McMaster plate candidate using quote needs and existing stock sizing."""
 
-    def _coerce_candidate(value: Any) -> float | None:
-        coerced = _coerce_inches_value(value)
-        if coerced is None:
-            try:
-                coerced = float(value)  # type: ignore[arg-type]
-            except Exception:
-                return None
-        if coerced is None or coerced <= 0:
-            return None
-        return float(coerced)
-
     candidate: dict[str, Any] | None = None
 
-    need_L = _coerce_candidate(need_L_in)
-    need_W = _coerce_candidate(need_W_in)
-    need_T = _coerce_candidate(need_T_in)
-    if need_L and need_W and need_T:
+    if need_L_in and need_W_in and need_T_in:
         try:
             candidate = pick_mcmaster_plate_sku(
-                need_L,
-                need_W,
-                need_T,
+                float(need_L_in),
+                float(need_W_in),
+                float(need_T_in),
                 material_key=material_key,
                 catalog_rows=catalog_rows,
             )
@@ -278,15 +229,12 @@ def resolve_mcmaster_plate_for_quote(
     if candidate:
         return candidate
 
-    stock_L = _coerce_candidate(stock_L_in)
-    stock_W = _coerce_candidate(stock_W_in)
-    stock_T = _coerce_candidate(stock_T_in)
-    if stock_L and stock_W and stock_T:
+    if stock_L_in and stock_W_in and stock_T_in:
         try:
             return pick_mcmaster_plate_sku(
-                stock_L,
-                stock_W,
-                stock_T,
+                float(stock_L_in),
+                float(stock_W_in),
+                float(stock_T_in),
                 material_key=material_key,
                 catalog_rows=catalog_rows,
             )

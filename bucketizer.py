@@ -253,14 +253,56 @@ def bucketize(
                 fixture_rate * (per_min / 60.0),
             )
 
+    def _coerce_count(value: Any) -> int:
+        if value in (None, ""):
+            return 0
+        return max(0, int(_as_float(value)))
+
+    def _count_features(entries: Iterable[Any]) -> int:
+        total = 0
+        for entry in entries:
+            if isinstance(entry, dict):
+                qty = entry.get("qty") or entry.get("count") or entry.get("quantity")
+                qty_int = _coerce_count(qty)
+                if qty_int > 0:
+                    total += qty_int
+                    continue
+            total += 1
+        return total
+
     hole_features = list(_iter_geom_list(geom.get("drill")))
-    tapped_count = int(_as_float(geom.get("tapped_count")))
+    tapped_count = _coerce_count(geom.get("tapped_count"))
     cbore_entries = list(_iter_geom_list(geom.get("counterbore")))
     op_count = sum(1 for _ in line_items if isinstance(line_items, list))
 
+    hole_feature_qty = _count_features(hole_features)
+    cbore_qty = _count_features(cbore_entries)
+
+    fallback_counts = [
+        _coerce_count(geom.get("hole_count")),
+        _coerce_count(geom.get("hole_count_geom")),
+        _coerce_count(geom.get("hole_count_table")),
+    ]
+
+    derived = geom.get("derived") if isinstance(geom.get("derived"), dict) else {}
+    fallback_counts.extend(
+        [
+            _coerce_count(derived.get("hole_count")),
+            _coerce_count(derived.get("hole_count_geom")),
+        ]
+    )
+
+    hole_groups = list(_iter_geom_list(geom.get("hole_groups")))
+    hole_groups_qty = _count_features(hole_groups)
+    if hole_groups_qty > 0:
+        fallback_counts.append(hole_groups_qty)
+
+    if fallback_counts:
+        hole_feature_qty = max([hole_feature_qty] + [cnt for cnt in fallback_counts if cnt > 0])
+
     inspection_min = INSPECTION_BASE_MIN
     inspection_min += op_count * INSPECTION_PER_OP_MIN
-    inspection_min += (len(hole_features) + tapped_count + len(cbore_entries)) * INSPECTION_PER_HOLE_MIN
+    inspection_min += (hole_feature_qty + tapped_count + cbore_qty) * INSPECTION_PER_HOLE_MIN
 
     total_process_minutes = sum(entry["minutes"] for entry in buckets.values())
     floor_minutes = total_process_minutes * INSPECTION_FRACTION_OF_TOTAL

@@ -954,10 +954,6 @@ def _compute_material_block(
             stock_info["vendor"] = "McMaster"
             stock_info["source"] = source_hint
             stock_info["stock_source_tag"] = source_hint
-            if part and not stock_info.get("stock_price_source"):
-                stock_info["stock_price_source"] = "mcmaster_api"
-            if part and not stock_price_source:
-                stock_price_source = "mcmaster_api"
 
     thickness_diff_in = abs(float(stock_T_in) - float(need_T_in))
     stock_source_tag = str(
