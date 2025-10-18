@@ -1565,6 +1565,7 @@ from typing import (
     TypeVar,
     cast,
     Literal,
+    TypedDict,
     overload,
     no_type_check,
 )
@@ -21711,7 +21712,16 @@ class App(tk.Tk):
             initial_raw = row_data.get(value_col_name, "")
             if full_row is not None:
                 initial_raw = full_row.get(value_col_name, initial_raw)
-            initial_value = "" if pd.isna(initial_raw) else str(initial_raw)
+            is_missing = False
+            if pd is not None:
+                try:
+                    is_missing = bool(pd.isna(initial_raw))
+                except Exception:
+                    is_missing = False
+            if is_missing:
+                initial_value = ""
+            else:
+                initial_value = "" if initial_raw is None else str(initial_raw)
 
             control_spec = derive_editor_control_spec(dtype_source, initial_raw)
             label_text = item_name
@@ -22655,7 +22665,13 @@ class App(tk.Tk):
             record: dict[str, Any] = {}
             for column, value in row.items():
                 column_name = str(column)
-                if pd.isna(value):
+                value_is_missing = False
+                if pd is not None:
+                    try:
+                        value_is_missing = bool(pd.isna(value))
+                    except Exception:
+                        value_is_missing = False
+                if value_is_missing:
                     record[column_name] = None
                 elif hasattr(value, "item"):
                     try:
@@ -22779,9 +22795,12 @@ class App(tk.Tk):
         vars_payload = payload.get("vars_df")
         has_records = isinstance(vars_payload, list) and len(vars_payload) > 0
         if isinstance(vars_payload, list):
-            try:
-                self.vars_df = pd.DataFrame.from_records(vars_payload)
-            except Exception:
+            if pd is not None and hasattr(pd, "DataFrame"):
+                try:
+                    self.vars_df = pd.DataFrame.from_records(vars_payload)
+                except Exception:
+                    self.vars_df = None
+            else:
                 self.vars_df = None
         else:
             self.vars_df = None
@@ -23017,19 +23036,21 @@ class App(tk.Tk):
                 self.update_idletasks()
             except Exception:
                 pass
-            if self.vars_df is None:
-                self.vars_df = coerce_or_make_vars_df(None)
+            vars_df_local = self.vars_df
+            if vars_df_local is None:
+                vars_df_local = coerce_or_make_vars_df(None)
+                self.vars_df = vars_df_local
             for item_name, string_var in self.quote_vars.items():
-                mask = self.vars_df["Item"] == item_name
+                mask = vars_df_local["Item"] == item_name
                 if mask.any():
-                    self.vars_df.loc[mask, "Example Values / Options"] = string_var.get()
+                    vars_df_local.loc[mask, "Example Values / Options"] = string_var.get()
 
             self.apply_overrides(notify=False)
 
             try:
                 ui_vars = {
                     str(row["Item"]): row["Example Values / Options"]
-                    for _, row in self.vars_df.iterrows()
+                    for _, row in vars_df_local.iterrows()
                 }
             except Exception:
                 ui_vars = {}
