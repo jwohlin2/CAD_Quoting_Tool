@@ -1582,20 +1582,24 @@ else:  # pragma: no cover - fallback when ezdxf is unavailable at runtime
 
 if typing.TYPE_CHECKING:
     import pandas as pd
-    from pandas import DataFrame as PandasDataFrame
+    from pandas import DataFrame as _PandasDataFrame
+    from pandas import Index as _PandasIndex
+    from pandas import Series as _PandasSeries
     from cad_quoter.domain import QuoteState as _QuoteState
 
-    SeriesLike: TypeAlias = pd.Series[Any]
+    PandasDataFrame: TypeAlias = _PandasDataFrame
+    PandasSeries: TypeAlias = _PandasSeries
+    PandasIndex: TypeAlias = _PandasIndex
+    SeriesLike: TypeAlias = Any
 else:
-    PandasDataFrame = Any  # type: ignore[assignment]
     _QuoteState = QuoteState
     try:
         import pandas as pd  # type: ignore[import]
     except Exception:  # pragma: no cover - optional dependency
         pd = None  # type: ignore[assignment]
-        PandasDataFrame = typing.Any
-        PandasSeries = typing.Any
-        PandasIndex = typing.Any
+        _PandasDataFrame = typing.Any
+        _PandasSeries = typing.Any
+        _PandasIndex = typing.Any
     else:
         # Several of our test environments provide a light-weight pandas stub
         # that implements only the minimal runtime surface we need.  Older
@@ -1603,20 +1607,23 @@ else:
         # guaranteed to exist on these shims, resulting in AttributeError during
         # import.  Guard each attribute lookup so that we gracefully fall back
         # to ``typing.Any`` when the real dependency is unavailable.
-        PandasDataFrame = getattr(pd, "DataFrame", typing.Any)
-        PandasSeries = getattr(pd, "Series", typing.Any)
-        PandasIndex = getattr(pd, "Index", typing.Any)
+        _PandasDataFrame = getattr(pd, "DataFrame", typing.Any)
+        _PandasSeries = getattr(pd, "Series", typing.Any)
+        _PandasIndex = getattr(pd, "Index", typing.Any)
 
-        if PandasDataFrame is typing.Any or PandasSeries is typing.Any:
+        if _PandasDataFrame is typing.Any or _PandasSeries is typing.Any:
             # If any of the expected attributes are missing we treat ``pd`` as a
             # stub and avoid leaking partially initialised aliases.  Keeping the
             # ``pd`` reference allows downstream call sites to continue using
             # helpers such as ``pd.to_numeric`` when they exist, while
             # maintaining compatibility with the light-weight testing shim.
-            PandasDataFrame = typing.Any
-            PandasSeries = typing.Any
-            PandasIndex = typing.Any
+            _PandasDataFrame = typing.Any
+            _PandasSeries = typing.Any
+            _PandasIndex = typing.Any
 
+    PandasDataFrame: TypeAlias = _PandasDataFrame
+    PandasSeries: TypeAlias = _PandasSeries
+    PandasIndex: TypeAlias = _PandasIndex
     SeriesLike: TypeAlias = Any
 
 try:
@@ -2162,22 +2169,6 @@ else:  # pragma: no cover - fallback definitions keep quoting functional without
     def explain_quote(*args, **kwargs) -> str:  # pragma: no cover - fallback
         return "LLM explanation unavailable."
 
-
-try:
-    import pandas as pd  # type: ignore[import]
-except Exception:  # pragma: no cover - optional dependency
-    pd = None  # type: ignore[assignment]
-
-if TYPE_CHECKING:  # pragma: no cover - import-time helper for type checkers
-    import pandas as _pandas
-
-    PandasDataFrame = _pandas.DataFrame
-    PandasSeries = _pandas.Series
-    PandasIndex = _pandas.Index
-else:  # pragma: no cover - fallback aliases when pandas is unavailable
-    PandasDataFrame = typing.Any
-    PandasSeries = typing.Any
-    PandasIndex = typing.Any
 
 pd = typing.cast(typing.Any, pd)
 from typing import TypedDict
@@ -4421,7 +4412,7 @@ class _BucketOpEntry(TypedDict):
 def _split_hours_for_bucket(
     label: str,
     hours: float,
-    render_state: "PlannerBucketRenderState" | None,
+    render_state: "PlannerBucketRenderState | None",
     cfg: QuoteConfiguration | None,
 ) -> tuple[float, float]:
     total_h = max(0.0, float(hours or 0.0))
@@ -13096,12 +13087,12 @@ def _dedupe_geo_rows(
         buckets[key] = buckets.get(key, 0) + int(qty)
     out: list[dict[str, Any]] = []
     for (diam_key, depth_key), qty in buckets.items():
-        entry: dict[str, Any] = {"diam_in": diam_key, "qty": int(qty)}
+        normalized_entry: dict[str, Any] = {"diam_in": diam_key, "qty": int(qty)}
         if depth_key > 0:
-            entry["depth_in"] = depth_key
+            normalized_entry["depth_in"] = depth_key
         elif thickness is not None and thickness > 0:
-            entry["depth_in"] = float(round(thickness, 3))
-        out.append(entry)
+            normalized_entry["depth_in"] = float(round(thickness, 3))
+        out.append(normalized_entry)
     out.sort(
         key=lambda item: (
             float(item.get("diam_in") or 0.0),
@@ -13242,9 +13233,9 @@ def _ensure_geo_context_fields(
     value_map: Mapping[str, Any] | None,
     *,
     cfg: QuoteConfiguration | None = None,
-) -> dict[str, Any]:
+) -> MutableMapping[str, Any]:
     if not isinstance(geo_payload, _MutableMappingABC):
-        return {}
+        return typing.cast(MutableMapping[str, Any], {})
 
     derived = geo_payload.get("derived")
     if not isinstance(derived, dict):
@@ -15209,14 +15200,22 @@ def _load_speeds_feeds_table_from_path(path: str | None) -> tuple[PandasDataFram
     if not text:
         return None, False
 
+    if pd is None:
+        return None, False
+
+    dataframe_ctor = getattr(pd, "DataFrame", None)
+    read_csv = getattr(pd, "read_csv", None)
+    if not callable(dataframe_ctor):
+        return None, False
+
     table: PandasDataFrame | None = None
     try:
         candidate = Path(text)
     except Exception:
         candidate = None
-    if candidate is not None and candidate.is_file():
+    if candidate is not None and candidate.is_file() and callable(read_csv):
         try:
-            table = pd.read_csv(candidate)
+            table = typing.cast(PandasDataFrame, read_csv(candidate))
         except Exception:
             table = None
 
@@ -15227,12 +15226,20 @@ def _load_speeds_feeds_table_from_path(path: str | None) -> tuple[PandasDataFram
             records = []
         if records:
             try:
-                table = pd.DataFrame(records)
+                table = typing.cast(PandasDataFrame, dataframe_ctor(records))
             except Exception:
                 table = None
 
-    if table is not None and not table.empty:
-        return table, True
+    if table is not None:
+        try:
+            if not getattr(table, "empty"):
+                return table, True
+        except Exception:
+            try:
+                if len(table) > 0:  # type: ignore[arg-type]
+                    return table, True
+            except Exception:
+                pass
     return table, False
 
 
