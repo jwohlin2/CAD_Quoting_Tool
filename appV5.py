@@ -20338,7 +20338,9 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     elif geom_hole_count_dedup > 0:
         result["hole_count"] = geom_hole_count_dedup
         result["hole_count_geom"] = geom_hole_count_dedup
-        geo.setdefault("provenance", {})["holes"] = "GEOM (concentric-dedup)"
+        geo.setdefault("provenance", {})["holes"] = (
+            f"GEOM (concentric-dedup, center={CENTER_MM_TOL:.3f} mm)"
+        )
     else:
         result["hole_count"] = geom_hole_count_raw
         if geom_hole_count_raw:
