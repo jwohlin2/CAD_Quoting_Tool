@@ -19866,6 +19866,13 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
 
     geo = _build_geo_from_ezdxf_doc(doc)
 
+    hole_source: str | None = None
+    provenance_entry = geo.get("provenance")
+    if isinstance(provenance_entry, dict):
+        holes_prov = provenance_entry.get("holes")
+        if holes_prov:
+            hole_source = str(holes_prov)
+
     geo_read_more: dict[str, Any] | None = None
     extra_geo_loader = _build_geo_from_dxf_hook or build_geo_from_dxf_path
     if extra_geo_loader and dxf_text_path:
@@ -19971,6 +19978,12 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
                     geo["chart_lines"] = existing_lines
         else:
             geo.setdefault("geo_read_more_error", geo_read_more.get("error"))
+
+        provenance_entry = geo.get("provenance")
+        if isinstance(provenance_entry, dict):
+            holes_prov = provenance_entry.get("holes")
+            if holes_prov:
+                hole_source = str(holes_prov)
 
     # perimeter from lightweight polylines, polylines, arcs
     import math
