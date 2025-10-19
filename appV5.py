@@ -20028,27 +20028,58 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     for c in holes:
         try:
             cx, cy = float(c.dxf.center.x), float(c.dxf.center.y)
-            d_mm = float(2.0 * c.dxf.radius * u2mm)
+            r_du = float(c.dxf.radius)
+            d_mm = float(2.0 * r_du * u2mm)
         except Exception:
             continue
         entity_holes_mm.append(d_mm)
-        circ.append((cx, cy, d_mm))
+        circ.append((cx * u2mm, cy * u2mm, d_mm))
 
-    CENTER_TOL_UNITS = 1e-3
-    CENTER_MM_TOL = CENTER_TOL_UNITS * u2mm
+    import os
 
-    def _quant(v: float, tol: float = CENTER_TOL_UNITS) -> float:
-        return round(v / tol) * tol
+    try:
+        CENTER_MM_TOL = float(os.getenv("GEO_CENTER_TOL_MM", "0.06"))
+    except Exception:
+        CENTER_MM_TOL = 0.06
 
-    groups: dict[tuple[float, float], list[float]] = {}
-    for cx, cy, d_mm in circ:
-        key = (_quant(cx), _quant(cy))
-        groups.setdefault(key, []).append(d_mm)
+    def _key_mm(x_mm: float, y_mm: float, tol: float = CENTER_MM_TOL) -> tuple[int, int]:
+        return (round(x_mm / tol), round(y_mm / tol))
+
+    buckets: dict[tuple[int, int], list[tuple[float, float, float]]] = {}
+    for cx_mm, cy_mm, d_mm in circ:
+        key = _key_mm(cx_mm, cy_mm)
+        buckets.setdefault(key, []).append((cx_mm, cy_mm, d_mm))
+
+    def _merge_adjacent(
+        bmap: Mapping[tuple[int, int], list[tuple[float, float, float]]]
+    ) -> dict[tuple[int, int], list[tuple[float, float, float]]]:
+        seen: set[tuple[int, int]] = set()
+        merged: dict[tuple[int, int], list[tuple[float, float, float]]] = {}
+        for key in list(bmap.keys()):
+            if key in seen:
+                continue
+            stack = [key]
+            seen.add(key)
+            accum: list[tuple[float, float, float]] = []
+            while stack:
+                cur = stack.pop()
+                accum.extend(bmap.get(cur, []))
+                kx, ky = cur
+                for nx in range(kx - 1, kx + 2):
+                    for ny in range(ky - 1, ky + 2):
+                        nb = (nx, ny)
+                        if nb in bmap and nb not in seen:
+                            seen.add(nb)
+                            stack.append(nb)
+            merged[key] = accum
+        return merged
+
+    groups = _merge_adjacent(buckets)
 
     through_mm: list[float] = []
     cbore_pairs = 0
     for ds in groups.values():
-        ds_sorted = sorted(ds)
+        ds_sorted = sorted(d for *_coords, d in ds)
         if not ds_sorted:
             continue
         through_mm.append(ds_sorted[0])
