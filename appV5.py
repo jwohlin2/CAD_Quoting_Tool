@@ -20105,7 +20105,9 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
 
     from collections import Counter
 
-    def _families_nearest_1over64_in(vals_mm: Iterable[float]) -> dict[str, int]:
+    def _families_nearest_1over64_in(
+        vals_mm: Iterable[float],
+    ) -> tuple[dict[str, int], dict[float, int]]:
         quantized: list[float] = []
         for raw in vals_mm:
             try:
@@ -20116,12 +20118,20 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
                 continue
             quantized.append(round(val_in * 64) / 64)
         if not quantized:
-            return {}
+            return {}, {}
         counts = Counter(round(q, 4) for q in quantized)
-        return {f'{k:.4f}"': int(v) for k, v in counts.items()}
+        display = {f'{k:.4f}"': int(v) for k, v in counts.items()}
+        numeric = {round(k, 4): int(v) for k, v in counts.items()}
+        return display, numeric
 
-    geom_families = _families_nearest_1over64_in(hole_diams_mm)
-    geo["hole_diam_families_in_geom"] = geom_families
+    geom_families_display, geom_families_numeric = _families_nearest_1over64_in(
+        hole_diams_mm
+    )
+    geom_families = geom_families_display
+    geo["hole_diam_families_in_geom"] = geom_families_display
+    if geom_families_numeric:
+        geom_fam = {round(k, 4): int(v) for k, v in geom_families_numeric.items()}
+        geo["hole_diam_families_geom_in"] = geom_fam
 
     existing_families = geo.get("hole_diam_families_in")
 
