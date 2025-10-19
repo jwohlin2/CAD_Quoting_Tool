@@ -20034,7 +20034,10 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
         entity_holes_mm.append(d_mm)
         circ.append((cx, cy, d_mm))
 
-    def _quant(v: float, tol: float = 1e-3) -> float:
+    CENTER_TOL_UNITS = 1e-3
+    CENTER_MM_TOL = CENTER_TOL_UNITS * u2mm
+
+    def _quant(v: float, tol: float = CENTER_TOL_UNITS) -> float:
         return round(v / tol) * tol
 
     groups: dict[tuple[float, float], list[float]] = {}
@@ -20304,7 +20307,9 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     elif geom_hole_count_dedup > 0:
         result["hole_count"] = geom_hole_count_dedup
         result["hole_count_geom"] = geom_hole_count_dedup
-        geo.setdefault("provenance", {})["holes"] = "GEOM (concentric-dedup)"
+        geo.setdefault("provenance", {})["holes"] = (
+            f"GEOM (concentric-dedup, center={CENTER_MM_TOL:.3f} mm)"
+        )
     else:
         result["hole_count"] = geom_hole_count_raw
         if geom_hole_count_raw:
