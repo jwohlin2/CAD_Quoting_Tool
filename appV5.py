@@ -322,12 +322,9 @@ def _lookup_sfm_ipr(
     material_group: str | None,
     speeds_csv: dict | None,
 ) -> tuple[float, float | None]:
-    """Fallback lookups for SFM/IPR until CSV integration is wired."""
-
+    # TODO: if you have a loaded CSV mapping, consult it here; fallback below
     op = (op or "").lower()
-    sfm = _DEFAULT_SFM.get(op, 100.0)
-    ipr = _DEFAULT_IPR.get(op, None)
-    return sfm, ipr
+    return _DEFAULT_SFM.get(op, 100.0), _DEFAULT_IPR.get(op, None)
 
 
 def _rpm_from_sfm_diam(sfm: float, dia_in: float | None) -> float | None:
@@ -847,7 +844,7 @@ def _compute_drilling_removal_section(
     return extras, lines, updated_plan_summary
 
 
-# --- HOLE-TABLE OPS → CARDS (tapping / counterbore / spot / jig) -------------
+# === OPS CARDS (from geo.ops_summary.rows) ===================================
 _SIDE_BACK = re.compile(r"\bFROM\s+BACK\b", re.I)
 _SIDE_FRONT = re.compile(r"\bFROM\s+FRONT\b", re.I)
 _CBORE_RE = re.compile(r"(?:^|[ ;])([0-9.]+)\s*(?:C[\'’]?\s*BORE|CBORE|COUNTER\s*BORE)", re.I)
@@ -916,7 +913,7 @@ def _emit_tapping_card(
         return
     total = sum(g["qty"] for g in groups)
     front = sum(g["qty"] for g in groups if g["side"] == "FRONT")
-    back = sum(g["qty"] for g in groups if g["side"] == "BACK")
+    back = total - front
     lines += [
         "MATERIAL REMOVAL – TAPPING",
         "=" * 64,
@@ -934,9 +931,7 @@ def _emit_tapping_card(
         rpm_txt = "-" if g["rpm"] is None else f"{g['rpm']} rpm"
         ipm_txt = "-" if g["ipm"] is None else f"{g['ipm']:.3f} ipm"
         pilot = f' | pilot {g["pilot"]}' if g.get("pilot") else ""
-        lines.append(
-            f'{g["thread"]} × {g["qty"]}  ({g["side"]}){pilot} | depth {depth_txt} | {pitch_txt} | {rpm_txt} | {ipm_txt} | t/hole — | group — '
-        )
+        lines.append(f'{g["thread"]} × {g["qty"]}  ({g["side"]}){pilot} | depth {depth_txt} | {pitch_txt} | {rpm_txt} | {ipm_txt} | t/hole — | group — ')
     lines.append("")
 
 
@@ -969,7 +964,7 @@ def _emit_counterbore_card(
     items = sorted(groups.items(), key=lambda kv: (kv[0][0], kv[0][1]))
     total = sum(q for _, q in items)
     front = sum(q for (k, q) in items if k[1] == "FRONT")
-    back = sum(q for (k, q) in items if k[1] == "BACK")
+    back = total - front
     lines += [
         "MATERIAL REMOVAL – COUNTERBORE",
         "=" * 64,
@@ -11024,21 +11019,29 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     # Render MATERIAL REMOVAL card + TIME PER HOLE lines (replace legacy Time block)
     append_lines(removal_card_lines)
-    geo_map = (result or {}).get("geo") or (breakdown or {}).get("geo") or {}
-    material_group = (result or {}).get("material_group") or (breakdown or {}).get("material_group")
-    speeds_csv_cache = None  # TODO: pass your already-loaded CSV mapping if you have it
-    _emit_hole_table_ops_cards(
-        lines,
-        geo=geo_map,
-        material_group=material_group,
-        speeds_csv=speeds_csv_cache,
-    )
-    (
-        tapping_minutes_total,
-        cbore_minutes_total,
-        spot_minutes_total,
-        jig_minutes_total,
-    ) = _hole_table_minutes_from_geo(geo_map)
+    append_line("")
+    # ADD: Emit HOLE-TABLE derived cards (Tapping / Counterbore / Spot / Jig)
+    try:
+        geo_map = (
+            (breakdown.get("geo") if isinstance(breakdown, _MappingABC) else None)
+            or (result.get("geom") if isinstance(result, _MappingABC) else None)
+            or (result.get("geo") if isinstance(result, _MappingABC) else None)
+            or {}
+        )
+        material_group = (
+            (result.get("material_group") if isinstance(result, _MappingABC) else None)
+            or (breakdown.get("material_group") if isinstance(breakdown, _MappingABC) else None)
+        )
+        # If your speeds/feeds CSV is already loaded into a mapping, pass it here instead of None
+        _emit_hole_table_ops_cards(lines, geo=geo_map, material_group=material_group, speeds_csv=None)
+        append_line("")
+    except Exception:
+        # keep the quote render resilient even if ops rows are missing
+        pass
+    tapping_minutes_total = 0.0
+    cbore_minutes_total = 0.0
+    spot_minutes_total = 0.0
+    jig_minutes_total = 0.0
     _seed_bucket_minutes(
         breakdown_mutable,
         tapping_min=tapping_minutes_total,
