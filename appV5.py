@@ -11509,26 +11509,16 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if isinstance(geo_map, _MappingABC) and not isinstance(geo_map, dict):
         geo_map = dict(geo_map)
 
-    # Append HOLE-TABLE derived cards
-    try:
-        material_group = (
-            (result or {}).get("material_group")
-            or (breakdown or {}).get("material_group")
-        )
-        pre_emit_len = len(lines)
-        _emit_hole_table_ops_cards(
-            lines,
-            geo=geo_map,
-            material_group=material_group,
-            speeds_csv=None,
-        )
-        for idx in range(pre_emit_len, len(lines)):
-            text = lines[idx]
-            previous = lines[idx - 1] if idx > 0 else None
-            doc_builder.observe_line(idx, text, previous)
-        append_line("")
-    except Exception:
-        pass
+    material_group = (
+        (result or {}).get("material_group")
+        or (breakdown or {}).get("material_group")
+    )
+    _emit_hole_table_ops_cards(
+        lines,
+        geo=geo_map,
+        material_group=material_group,
+        speeds_csv=None,
+    )
 
     # PROBE: show how many HOLE-TABLE rows we have (temporary)
     ops_rows_candidate = (((geo_map or {}).get("ops_summary") or {}).get("rows") or [])
