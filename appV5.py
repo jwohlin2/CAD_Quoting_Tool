@@ -1000,6 +1000,45 @@ def _diameter_from_ops_row(entry: Mapping[str, Any]) -> float | None:
 def _drilling_groups_from_ops_summary(
     geo: Mapping[str, Any] | None,
 ) -> tuple[list[dict[str, Any]], int]:
+    table_groups: dict[float, dict[str, Any]] = {}
+    for ctx in _iter_geo_dicts_for_context(geo):
+        families = ctx.get("hole_table_families_in")
+        if not isinstance(families, _MappingABC):
+            continue
+        for raw_label, raw_qty in families.items():
+            qty_val = int(round(_coerce_float_or_none(raw_qty) or 0.0))
+            if qty_val <= 0:
+                continue
+            diameter_in: float | None
+            if isinstance(raw_label, (int, float)):
+                try:
+                    diameter_in = float(raw_label)
+                except Exception:
+                    diameter_in = None
+            else:
+                diameter_in = _parse_ref_to_inch(raw_label)
+                if diameter_in is None:
+                    dia_mm = _parse_dim_to_mm(raw_label)
+                    diameter_in = (dia_mm / 25.4) if dia_mm else None
+            if diameter_in is None or not math.isfinite(diameter_in) or diameter_in <= 0:
+                continue
+            key = round(float(diameter_in), 4)
+            bucket = table_groups.setdefault(
+                key,
+                {
+                    "diameter_in": float(round(float(diameter_in), 4)),
+                    "qty": 0,
+                },
+            )
+            bucket["qty"] += qty_val
+    if table_groups:
+        ordered_groups = [
+            {"diameter_in": data["diameter_in"], "qty": data["qty"]}
+            for _key, data in sorted(table_groups.items())
+        ]
+        total_qty = sum(group["qty"] for group in ordered_groups)
+        return ordered_groups, int(total_qty)
+
     detail_rows = _ops_row_details_from_geo(geo)
     if not detail_rows:
         return ([], 0)
@@ -1011,6 +1050,9 @@ def _drilling_groups_from_ops_summary(
             continue
         drill_ops = _coerce_float_or_none(per.get("drill"))
         if drill_ops is None or drill_ops <= 0:
+            continue
+        desc_val = entry.get("desc")
+        if isinstance(desc_val, str) and _SPOT_TOKENS.search(desc_val):
             continue
         qty = int(_coerce_float_or_none(entry.get("qty")) or 0)
         if qty <= 0:
