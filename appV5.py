@@ -1220,6 +1220,7 @@ def _emit_hole_table_ops_cards(
 
 def _estimate_drilling_minutes_from_meta(
     drilling_meta: Mapping[str, Any] | None,
+    geo_map: Mapping[str, Any] | None = None,
 ) -> tuple[float, float, float, dict[str, Any]]:
     """Return machine/toolchange/total minutes derived from drilling meta."""
 
@@ -8844,7 +8845,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             drill_tool_minutes_estimate,
             drill_total_minutes_estimate,
             drilling_card_detail,
-        ) = _estimate_drilling_minutes_from_meta(drilling_meta_map)
+        ) = _estimate_drilling_minutes_from_meta(drilling_meta_map, (result.get("geo") if isinstance(result, _MappingABC) else None) or (breakdown.get("geo") if isinstance(breakdown, _MappingABC) else None))
         if (
             drill_total_minutes_estimate > 0.0
             and isinstance(drilling_meta_mutable, dict)
@@ -11832,7 +11833,35 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         breakdown.setdefault("render_payload", render_payload)
 
     doc = doc_builder.build_doc()
-    return render_quote_doc(doc, divider=divider)
+    text = render_quote_doc(doc, divider=divider)
+
+    # ASCII-sanitize output to avoid mojibake like 'Ã—' on some Windows setups
+    try:
+        _REPL = {
+            "×": " x ",
+            "–": "-",
+            "—": "-",
+            "•": "-",
+            "…": "...",
+            "“": '"',
+            "”": '"',
+            "‘": "'",
+            "’": "'",
+            "µ": "u",
+            "μ": "u",
+            "±": "+/-",
+            "°": " deg ",
+            "¼": "1/4",
+            "½": "1/2",
+            "¾": "3/4",
+            " ": " ",  # non-breaking space
+        }
+        for _k, _v in _REPL.items():
+            text = text.replace(_k, _v)
+    except Exception:
+        pass
+
+    return text
 # ===== QUOTE CONFIG (edit-friendly) ==========================================
 CONFIG_INIT_ERRORS: list[str] = []
 
@@ -24258,8 +24287,7 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         import datetime as _dt
         with open("debug.log", "w", encoding="ascii", errors="replace") as _dbg:
-            _dbg.write(f"[app] start { _dt.datetime.now().isoformat() }
-")
+            _dbg.write(f"[app] start { _dt.datetime.now().isoformat() }\n")
     except Exception:
         pass
 
