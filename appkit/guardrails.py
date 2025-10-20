@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from typing import Any, Mapping, MutableMapping, TYPE_CHECKING
 
-from cad_quoter.coerce import to_float, to_int
 from cad_quoter.domain import (
     _as_float_or_none,
     _canonical_pass_label,
     canonicalize_pass_through_map,
 )
 from cad_quoter.domain_models import coerce_float_or_none as _coerce_float_or_none
+from cad_quoter.domain_models.values import to_float, to_int
 
 if TYPE_CHECKING:  # pragma: no cover - typing aid
     from cad_quoter.domain_models.state import QuoteState

@@ -7,18 +7,31 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from appkit.geometry_shim import (
-    enrich_geo_occ,
-    enrich_geo_stl,
-    extract_features_with_occ,
-    read_cad_any,
-    read_step_shape,
-    safe_bbox,
-)
+import cad_quoter.geometry as _geometry
+
+
+def _missing_geom_fn(name: str):
+    def _fn(*_a, **_k):
+        raise RuntimeError(f"geometry helper '{name}' is unavailable in this build")
+
+    return _fn
+
+
+def _export_geom(name: str):
+    return getattr(_geometry, name, _missing_geom_fn(name))
+
+
+enrich_geo_occ = _export_geom("enrich_geo_occ")
+enrich_geo_stl = _export_geom("enrich_geo_stl")
+extract_features_with_occ = _export_geom("extract_features_with_occ")
+read_cad_any = _export_geom("read_cad_any")
+read_step_shape = _export_geom("read_step_shape")
+safe_bbox = _export_geom("safe_bbox")
 from cad_quoter.app import runtime as _runtime
 from cad_quoter.resources import default_app_settings_json
 from cad_quoter.domain_models import DEFAULT_MATERIAL_DISPLAY
 from cad_quoter.domain_models import coerce_float_or_none as _coerce_float_or_none
+from cad_quoter.domain_models import normalize_material_key as _normalize_lookup_key
 
 from appkit.utils import _parse_length_to_mm
 
@@ -135,6 +148,40 @@ class LLMServices:
         n_threads: int | None = None,
     ):
         return self.vision_loader(n_ctx=n_ctx, n_gpu_layers=n_gpu_layers, n_threads=n_threads)
+
+
+@dataclass(slots=True)
+class QuoteConfiguration:
+    """Container for default parameter configuration used by the UI."""
+
+    default_params: dict[str, Any] | None = None
+    default_material_display: str = DEFAULT_MATERIAL_DISPLAY
+    prefer_removal_drilling_hours: bool = True
+    stock_price_source: str = "mcmaster_api"
+    scrap_price_source: str = "wieland"
+    enforce_exact_thickness: bool = True
+    allow_thickness_upsize: bool = False
+    round_tol_in: float = 0.05
+    stock_rounding_mode: str = "per_axis_min_area"
+    separate_machine_labor: bool = True
+    machine_rate_per_hr: float = 45.0
+    labor_rate_per_hr: float = 45.0
+    hole_source_preference: str = "table"  # "table" | "geometry" | "auto"
+    hole_merge_tol_diam_in: float = 0.001
+    hole_merge_tol_depth_in: float = 0.01
+
+    def __post_init__(self) -> None:
+        if self.default_params is None:
+            self.default_params = {}
+
+    def copy_default_params(self) -> dict[str, Any]:
+        """Return a deep copy of the default parameter set."""
+
+        return copy.deepcopy(self.default_params)
+
+    @property
+    def default_material_key(self) -> str:
+        return _normalize_lookup_key(self.default_material_display)
 
 
 def infer_geo_override_defaults(geo_data: dict[str, Any] | None) -> dict[str, Any]:

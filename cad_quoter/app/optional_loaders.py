@@ -13,7 +13,7 @@ except Exception:  # pragma: no cover - pandas is optional
 pd = typing.cast(typing.Any, _pd)
 
 try:  # pragma: no cover - optional DXF enrichment hook
-    from geo_read_more import build_geo_from_dxf as _build_geo_from_dxf_path
+    from cad_quoter.geometry.dxf_enrich import build_geo_from_dxf as _build_geo_from_dxf_path
 except Exception:  # pragma: no cover - defensive fallback
     _build_geo_from_dxf_path = None  # type: ignore[assignment]
 
@@ -27,7 +27,7 @@ def build_geo_from_dxf(path: str) -> Dict[str, Any]:
     loader = _build_geo_from_dxf_hook or _build_geo_from_dxf_path
     if loader is None:
         raise RuntimeError(
-            "DXF metadata loader is unavailable; install geo_read_more or register a hook."
+            "DXF metadata loader is unavailable; install cad_quoter.geometry extras or register a hook."
         )
     result = loader(path)
     if not isinstance(result, dict):

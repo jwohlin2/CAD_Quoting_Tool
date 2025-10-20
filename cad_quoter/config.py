@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from cad_quoter.rates import ensure_two_bucket_defaults, migrate_flat_to_two_bucket
-from cad_quoter.coerce import to_float
+from cad_quoter.domain_models.values import to_float
 
 RESOURCE_DIR = Path(__file__).resolve().parent / "resources"
 DEFAULT_VERSION = 1

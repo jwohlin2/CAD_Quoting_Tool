@@ -7,15 +7,15 @@ from collections.abc import Mapping as _MappingABC
 from typing import Any, Callable, Mapping, Protocol, TypeAlias, TYPE_CHECKING, cast
 
 # Use the shared numeric coercion helper exposed by the domain layer.
-from cad_quoter.coerce import coerce_float_or_none as _coerce_float_or_none
 from cad_quoter.domain import coerce_bounds
+from cad_quoter.domain_models.values import coerce_float_or_none as _coerce_float_or_none
 from cad_quoter.llm_overrides import (
     clamp,
     get_llm_bound_defaults,
     get_llm_overrides,
 )
 
-from appkit.geometry_shim import upsert_var_row
+from cad_quoter.geometry import upsert_var_row
 
 try:
     # Optional runtime dependency; may be missing in some environments

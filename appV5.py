@@ -24,7 +24,7 @@ import sys
 import time
 import typing
 from functools import cmp_to_key, lru_cache
-from typing import Any, Mapping, MutableMapping, TYPE_CHECKING
+from typing import Any, Mapping, MutableMapping, TYPE_CHECKING, TypeAlias
 from collections import Counter, defaultdict
 from collections.abc import (
     Callable,
@@ -134,26 +134,43 @@ from cad_quoter.geometry.dxf_enrich import (
 
 from bucketizer import bucketize
 
-from appkit.geometry_shim import (
-    read_cad_any,
-    read_step_shape,
-    convert_dwg_to_dxf,
-    enrich_geo_occ,
-    enrich_geo_stl,
-    safe_bbox,
-    parse_hole_table_lines,
-    extract_text_lines_from_dxf,
-    text_harvest,
-    upsert_var_row,
-    require_ezdxf,
-    get_dwg_converter_path,
-    get_import_diagnostics_text,
-    extract_features_with_occ,
-    _HAS_ODAFC,
-    _HAS_PYMUPDF,
-    fitz,
-    odafc,
+import cad_quoter.geometry as _geometry
+
+def _missing_geom_fn(name: str):
+    def _fn(*_a, **_k):
+        raise RuntimeError(f"geometry helper '{name}' is unavailable in this build")
+
+    return _fn
+
+
+def _export_geom(name: str):
+    return getattr(_geometry, name, _missing_geom_fn(name))
+
+
+read_cad_any = _export_geom("read_cad_any")
+read_step_shape = _export_geom("read_step_shape")
+convert_dwg_to_dxf = _export_geom("convert_dwg_to_dxf")
+enrich_geo_occ = _export_geom("enrich_geo_occ")
+enrich_geo_stl = _export_geom("enrich_geo_stl")
+safe_bbox = _export_geom("safe_bbox")
+parse_hole_table_lines = _export_geom("parse_hole_table_lines")
+extract_text_lines_from_dxf = _export_geom("extract_text_lines_from_dxf")
+text_harvest = _export_geom("text_harvest")
+upsert_var_row = _export_geom("upsert_var_row")
+require_ezdxf = _export_geom("require_ezdxf")
+get_dwg_converter_path = _export_geom("get_dwg_converter_path")
+get_import_diagnostics_text = _export_geom("get_import_diagnostics_text")
+extract_features_with_occ = _export_geom("extract_features_with_occ")
+
+_HAS_ODAFC = bool(getattr(_geometry, "HAS_ODAFC", False))
+_HAS_PYMUPDF = bool(
+    getattr(_geometry, "HAS_PYMUPDF", getattr(_geometry, "_HAS_PYMUPDF", False))
 )
+fitz = getattr(_geometry, "fitz", None)
+try:
+    odafc = _ezdxf_vendor.require_odafc() if _HAS_ODAFC else None
+except Exception:
+    odafc = None  # type: ignore[assignment]
 
 from appkit.llm_adapter import (
     apply_llm_hours_to_variables,
@@ -215,13 +232,6 @@ from appkit.occ_compat import (
     BRepTools,
 )
 
-from appkit.time_overhead_compat import (
-    _TIME_OVERHEAD_SUPPORTS_INDEX_SEC,
-    OverheadLike,
-    _assign_overhead_index_attr,
-    _ensure_overhead_index_attr,
-)
-
 from cad_quoter.utils.scrap import (
     HOLE_SCRAP_CAP,
     SCRAP_DEFAULT_GUESS,
@@ -241,11 +251,24 @@ from appkit.debug.debug_tables import (
     _accumulate_drill_debug,
     append_removal_debug_if_enabled,
 )
-
-
-PROGRAMMING_PER_PART_LABEL = "Programming (per part)"
-
-
+from appkit.ui.editor_controls import derive_editor_control_spec
+from appkit.ui.planner_render import (
+    PROGRAMMING_PER_PART_LABEL,
+    PlannerBucketRenderState,
+    _bucket_cost,
+    _bucket_cost_mode,
+    _canonical_bucket_key,
+    _display_bucket_label,
+    _display_rate_for_row,
+    _normalize_bucket_key,
+    _planner_bucket_key_for_name,
+    _prepare_bucket_view,
+    _seed_bucket_minutes,
+    _sync_drilling_bucket_view,
+    _charged_hours_by_bucket,
+    canonicalize_costs,
+)
+from appkit.ui.services import QuoteConfiguration
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers: formatting + removal card + per-hole lines (no material per line)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -791,9 +814,12 @@ def _compute_drilling_removal_section(
             or (result_geo_src.get("geo") if isinstance(result_geo_src, _MappingABC) else None)
             or {}
         )
-        ops_summary_for_debug = (
-            geo_map.get("ops_summary") if isinstance(geo_map, _MappingABC) else None
-        )
+        if not isinstance(geo_map, dict):
+            try:
+                geo_map = dict(geo_map)
+            except Exception:
+                geo_map = {}
+        ops_summary_for_debug = geo_map.get("ops_summary")
         rows_candidate: Any
         if isinstance(ops_summary_for_debug, _MappingABC):
             rows_candidate = ops_summary_for_debug.get("rows")
@@ -806,102 +832,62 @@ def _compute_drilling_removal_section(
                 ops_rows = list(rows_candidate or [])
             except Exception:
                 ops_rows = []
+        material_group = str(drilling_meta_map.get("material_group") or "").strip() or None
+        if not material_group:
+            material_group_candidate = None
+            if isinstance(breakdown, _MappingABC):
+                material_group_candidate = breakdown.get("material_group")
+            if not material_group_candidate and isinstance(result_geo_src, _MappingABC):
+                material_group_candidate = result_geo_src.get("material_group")
+            if isinstance(material_group_candidate, str):
+                material_group_candidate = material_group_candidate.strip()
+            material_group = material_group_candidate or None
         chart_lines_all: list[str] = []
-        if isinstance(geo_map, _MappingABC):
-            raw_chart_lines = geo_map.get("chart_lines")
-            if isinstance(raw_chart_lines, list):
-                for entry in raw_chart_lines:
-                    if isinstance(entry, str):
-                        chart_lines_all.append(entry)
-                    elif entry not in (None, ""):
-                        chart_lines_all.append(str(entry))
-            elif isinstance(raw_chart_lines, str):
-                chart_lines_all.append(raw_chart_lines)
-            geo_read_more = geo_map.get("geo_read_more")
-            if isinstance(geo_read_more, _MappingABC):
-                extra_chart_lines = geo_read_more.get("chart_lines")
-                if isinstance(extra_chart_lines, list):
-                    for entry in extra_chart_lines:
-                        if isinstance(entry, str):
-                            chart_lines_all.append(entry)
-                        elif entry not in (None, ""):
-                            chart_lines_all.append(str(entry))
-                elif isinstance(extra_chart_lines, str):
-                    chart_lines_all.append(extra_chart_lines)
-        lines.append(f"[DEBUG] ops_rows={len(ops_rows)}")
+        append_line(f"[DEBUG] ops_rows={len(ops_rows)}")
+        # Fallback: build ops rows from any chart lines we can find
         if not ops_rows:
-            chart_lines_all = _collect_chart_lines_context(result, breakdown, geo_map)
+            ctx_local = locals().get("ctx")
+            raw_candidates = (
+                ctx_local,
+                geo_map,
+                locals().get("geo"),
+                locals().get("breakdown"),
+                locals().get("quote"),
+            )
+            containers: list[dict] = []
+            for candidate in raw_candidates:
+                if isinstance(candidate, dict):
+                    containers.append(candidate)
+                elif isinstance(candidate, _MappingABC):
+                    try:
+                        containers.append(dict(candidate))
+                    except Exception:
+                        continue
+            chart_lines_all = _collect_chart_lines_context(*containers)
             built_rows = _build_ops_rows_from_lines_fallback(chart_lines_all)
-            lines.append(
+            append_line(
                 f"[DEBUG] chart_lines_found={len(chart_lines_all)} built_rows={len(built_rows)}"
             )
             if built_rows:
-                if not isinstance(geo_map, dict):
-                    if isinstance(geo_map, _MappingABC):
-                        try:
-                            geo_map = dict(geo_map)
-                        except Exception:
-                            geo_map = {}
-                    else:
-                        geo_map = {}
-                ops_summary_val = geo_map.get("ops_summary") if isinstance(geo_map, dict) else None
-                if not isinstance(ops_summary_val, dict):
-                    if isinstance(ops_summary_val, _MappingABC):
-                        ops_summary = dict(ops_summary_val)
-                    else:
-                        ops_summary = {}
-                else:
-                    ops_summary = ops_summary_val
-                ops_summary["rows"] = list(built_rows)
-                if isinstance(geo_map, dict):
-                    geo_map["ops_summary"] = ops_summary
-                if isinstance(result, _MappingABC):
-                    geo_in_result = result.get("geo")
-                    if isinstance(geo_in_result, dict):
-                        existing_ops = geo_in_result.get("ops_summary")
-                        if isinstance(existing_ops, dict):
-                            existing_ops.update(ops_summary)
-                        else:
-                            geo_in_result["ops_summary"] = dict(ops_summary)
-                    elif isinstance(geo_in_result, _MappingABC):
-                        try:
-                            result_geo_mut = dict(geo_in_result)
-                        except Exception:
-                            result_geo_mut = {}
-                        existing_ops = result_geo_mut.get("ops_summary")
-                        if isinstance(existing_ops, dict):
-                            existing_ops.update(ops_summary)
-                        else:
-                            result_geo_mut["ops_summary"] = dict(ops_summary)
-                        if isinstance(result, dict):
-                            result["geo"] = result_geo_mut
-                if isinstance(breakdown, _MappingABC):
-                    geo_in_breakdown = breakdown.get("geo")
-                    if isinstance(geo_in_breakdown, dict):
-                        existing_ops = geo_in_breakdown.get("ops_summary")
-                        if isinstance(existing_ops, dict):
-                            existing_ops.update(ops_summary)
-                        else:
-                            geo_in_breakdown["ops_summary"] = dict(ops_summary)
-                    elif isinstance(geo_in_breakdown, _MappingABC):
-                        try:
-                            breakdown_geo_mut = dict(geo_in_breakdown)
-                        except Exception:
-                            breakdown_geo_mut = {}
-                        existing_ops = breakdown_geo_mut.get("ops_summary")
-                        if isinstance(existing_ops, dict):
-                            existing_ops.update(ops_summary)
-                        else:
-                            breakdown_geo_mut["ops_summary"] = dict(ops_summary)
-                        if isinstance(breakdown, dict):
-                            breakdown["geo"] = breakdown_geo_mut
-                ops_rows = list(built_rows)
-        lines.append(
+                geo_map.setdefault("ops_summary", {})["rows"] = built_rows
+                ops_rows = built_rows
+        append_line(
             f"[DEBUG] has_tap_row={any('TAP' in (str(r.get('desc', '')).upper()) for r in ops_rows if isinstance(r, _MappingABC))}"
         )
         if not ops_rows and chart_lines_all:
             sample = chart_lines_all[:6]
-            lines.append(f"[DEBUG] sample_chart_lines={repr(sample)}")
+            append_line(f"[DEBUG] sample_chart_lines={repr(sample)}")
+
+        # Finally emit the cards (no-op if still empty)
+        try:
+            _emit_hole_table_ops_cards(
+                lines,
+                geo=geo_map,
+                material_group=material_group,
+                speeds_csv=None,
+            )
+        except Exception as e:  # pragma: no cover - debug guard
+            append_line(f"[DEBUG] emit_cards_failed={e.__class__.__name__}: {e}")
 
         if drill_machine_minutes_estimate > 0.0:
             subtotal_min = float(drill_machine_minutes_estimate)
@@ -1227,7 +1213,16 @@ def _rows_from_ops_summary(
                 fallback.append(base)
             if fallback:
                 return fallback
-    chart_lines = _collect_chart_lines_context(result, breakdown, geo_map)
+    _containers: list[dict] = []
+    for candidate in (result, breakdown, geo_map):
+        if isinstance(candidate, dict):
+            _containers.append(candidate)
+        elif isinstance(candidate, _MappingABC):
+            try:
+                _containers.append(dict(candidate))
+            except Exception:
+                continue
+    chart_lines = _collect_chart_lines_context(*_containers)
     if chart_lines:
         fallback_rows = _build_ops_rows_from_lines_fallback(chart_lines)
         if fallback_rows:
@@ -2893,7 +2888,7 @@ from cad_quoter.domain_models import (
 from cad_quoter.domain_models import (
     normalize_material_key,
 )
-from cad_quoter.coerce import safe_float as _safe_float, to_float, to_int
+from cad_quoter.domain_models.values import safe_float as _safe_float, to_float, to_int
 from cad_quoter.utils import compact_dict, jdump, json_safe_copy, sdict
 from cad_quoter.utils.text import _match_items_contains
 from cad_quoter.llm_suggest import (
@@ -3937,8 +3932,6 @@ def _turning_score(shape, areas_by_type):
 # --- APPLY LLM OUTPUT ---------------------------------------------------------
 # ================== LLM DECISION LOG / AUDIT ==================
 
-LOGS_DIR = Path(r"D:\\CAD_Quoting_Tool\\Logs")
-LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 # =============================================================
 
@@ -3966,196 +3959,6 @@ def _coerce_core_types(df_core: PandasDataFrame) -> PandasDataFrame:
     # Leave "Example Values / Options" as-is (can be text or number); estimator coerces later.
     return core
 
-@dataclass(frozen=True)
-class EditorControlSpec:
-    """Instruction for rendering a Quote Editor control."""
-
-    control: str
-    entry_value: str = ""
-    options: tuple[str, ...] = ()
-    base_text: str = ""
-    checkbox_state: bool = False
-    checkbox_label: str = "Enabled"
-    display_label: str = ""
-    guessed_dropdown: bool = False
-
-def _coerce_checkbox_state(value: Any, default: bool = False) -> bool:
-    """Best-effort conversion from spreadsheet text to a boolean."""
-
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        try:
-            if math.isnan(value):
-                return default
-        except Exception:
-            pass
-        return bool(value)
-
-    text = str(value).strip().lower()
-    if not text:
-        return default
-    if text in _TRUTHY_TOKENS or text.startswith("y"):
-        return True
-    if text in _FALSY_TOKENS or text.startswith("n"):
-        return False
-
-    for part in re.split(r"[/|,\s]+", text):
-        if part in _TRUTHY_TOKENS or part.startswith("y"):
-            return True
-        if part in _FALSY_TOKENS or part.startswith("n"):
-            return False
-
-    return default
-
-_BOOL_PAIR_RE = re.compile(
-    r"^\s*(true|false|yes|no|on|off)\s*(?:/|\||,|\s+or\s+)\s*(true|false|yes|no|on|off)\s*$",
-    re.IGNORECASE,
-)
-_TRUTHY_TOKENS = {"true", "1", "yes", "y", "on"}
-_FALSY_TOKENS = {"false", "0", "no", "n", "off"}
-
-def _split_editor_options(text: str) -> list[str]:
-    if not text:
-        return []
-    if _BOOL_PAIR_RE.match(text):
-        parts = re.split(r"[/|,]|\s+or\s+", text, flags=re.IGNORECASE)
-    else:
-        parts = re.split(r"[,\n;|]+", text)
-    return [p.strip() for p in parts if p and p.strip()]
-
-def _looks_like_bool_options(options: Sequence[str]) -> bool:
-    if not options or len(options) > 4:
-        return False
-    normalized = {opt.lower() for opt in options}
-    return bool(normalized & _TRUTHY_TOKENS) and bool(normalized & _FALSY_TOKENS)
-
-def _is_numeric_token(token: str) -> bool:
-    token = str(token).strip()
-    if not token:
-        return False
-    try:
-        float(token.replace(",", ""))
-        return True
-    except Exception:
-        return False
-
-def _format_numeric_entry_value(raw: str) -> tuple[str, bool]:
-    parsed = _coerce_float_or_none(raw)
-    if parsed is None:
-        return str(raw).strip(), False
-    txt = f"{float(parsed):.6f}".rstrip("0").rstrip(".")
-    return (txt if txt else "0", True)
-
-def derive_editor_control_spec(dtype_source: str, example_value: Any) -> EditorControlSpec:
-    """Classify a spreadsheet row into a UI control plan."""
-
-    dtype_raw = re.sub(
-        r"\s+",
-        " ",
-        str((dtype_source or "")).replace("\u00A0", " "),
-    ).strip().lower()
-    raw_value = ""
-    if example_value is not None and not (isinstance(example_value, float) and math.isnan(example_value)):
-        raw_value = str(example_value)
-    initial_value = raw_value.strip()
-
-    options = _split_editor_options(initial_value)
-    looks_like_bool = _looks_like_bool_options(options)
-    is_checkbox = "checkbox" in dtype_raw or looks_like_bool
-    declared_dropdown = "dropdown" in dtype_raw or "select" in dtype_raw
-    is_formula_like = any(term in dtype_raw for term in ("lookup", "calculated")) or (
-        "value" in dtype_raw and ("lookup" in dtype_raw or "calculated" in dtype_raw)
-    )
-    if not is_formula_like and "value" in dtype_raw and not declared_dropdown:
-        is_formula_like = True
-    is_numeric_dtype = any(term in dtype_raw for term in ("number", "numeric", "decimal", "integer", "float"))
-
-    has_formula_chars = bool(re.search(r"[=*()+{}]", initial_value))
-    non_numeric_options = [opt for opt in options if not _is_numeric_token(opt)]
-    guessed_dropdown = False
-
-    if is_checkbox:
-        normalized = initial_value.lower()
-        if normalized in _TRUTHY_TOKENS:
-            state = True
-        elif normalized in _FALSY_TOKENS:
-            state = False
-        elif options:
-            first = options[0].lower()
-            state = first in _TRUTHY_TOKENS or first.startswith("y")
-        else:
-            state = _coerce_checkbox_state(initial_value, False)
-
-        truthy_label = next(
-            (
-                opt.strip()
-                for opt in options
-                if opt and (opt.lower() in _TRUTHY_TOKENS or opt.lower().startswith("y"))
-            ),
-            "",
-        )
-        checkbox_label = truthy_label.title() if truthy_label else "Enabled"
-        if checkbox_label.lower() in {"true", "1"}:
-            checkbox_label = "Enabled"
-
-        display = dtype_source.strip() if isinstance(dtype_source, str) and dtype_source.strip() else "Checkbox"
-        return EditorControlSpec(
-            control="checkbox",
-            entry_value="True" if state else "False",
-            options=tuple(options),
-            checkbox_state=state,
-            checkbox_label=checkbox_label,
-            display_label=display,
-        )
-
-    if declared_dropdown or (not is_formula_like and not is_numeric_dtype and non_numeric_options and len(options) >= 2 and not has_formula_chars):
-        guessed_dropdown = not declared_dropdown
-        display = dtype_source.strip() if isinstance(dtype_source, str) and dtype_source.strip() else "Dropdown"
-        selected = initial_value or (options[0] if options else "")
-        if options and selected not in options:
-            selected = options[0]
-        return EditorControlSpec(
-            control="dropdown",
-            entry_value=selected,
-            options=tuple(options),
-            display_label=(display + " (auto)" if guessed_dropdown else display),
-            guessed_dropdown=guessed_dropdown,
-        )
-
-    if is_formula_like or has_formula_chars:
-        display = dtype_source.strip() if isinstance(dtype_source, str) and dtype_source.strip() else "Lookup / Calculated"
-        entry_value, parsed_ok = _format_numeric_entry_value(initial_value)
-        if not parsed_ok:
-            entry_value = ""
-        base_text = initial_value if initial_value else ""
-        return EditorControlSpec(
-            control="formula",
-            entry_value=entry_value,
-            base_text=base_text,
-            display_label=display,
-        )
-
-    if is_numeric_dtype or (_is_numeric_token(initial_value) and not non_numeric_options):
-        display = dtype_source.strip() if isinstance(dtype_source, str) and dtype_source.strip() else "Number"
-        entry_value = ""
-        if initial_value:
-            entry_value, parsed_ok = _format_numeric_entry_value(initial_value)
-            if not parsed_ok:
-                entry_value = initial_value
-        return EditorControlSpec(
-            control="number",
-            entry_value=entry_value,
-            display_label=display,
-        )
-
-    display = dtype_source.strip() if isinstance(dtype_source, str) and dtype_source.strip() else "Text"
-    return EditorControlSpec(
-        control="text",
-        entry_value=initial_value,
-        display_label=display,
-        options=tuple(options),
-    )
 
 def sanitize_vars_df(df_full: PandasDataFrame) -> PandasDataFrame:
     """
@@ -5529,252 +5332,127 @@ def _prepare_bucket_view(raw_view: Mapping[str, Any] | None) -> dict[str, Any]:
     if not isinstance(source, _MappingABC):
         source = raw_view if isinstance(raw_view, _MappingABC) else {}
 
-    folded: dict[str, dict[str, float]] = {}
+    core = sanitize_vars_df(df_full)
 
-    for raw_key, raw_info in source.items():
-        canon = _final_bucket_key(raw_key)
-        if not canon or canon in _FINAL_BUCKET_HIDE_KEYS:
-            continue
-        info_map = raw_info if isinstance(raw_info, _MappingABC) else {}
-        bucket = folded.setdefault(
-            canon,
-            {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0},
-        )
+    return (core, df_full) if return_full else core
 
-        minutes = _coerce_bucket_metric(info_map, "minutes")
-        labor = _coerce_bucket_metric(info_map, "labor$", "labor_cost", "labor")
-        machine = _coerce_bucket_metric(info_map, "machine$", "machine_cost", "machine")
+def _load_master_variables() -> tuple[PandasDataFrame | None, PandasDataFrame | None]:
+    """Load the packaged master variables sheet once and serve cached copies."""
+    if not _HAS_PANDAS or pd is None:
+        return (None, None)
 
-        bucket["minutes"] += minutes
-        bucket["labor$"] += labor
-        bucket["machine$"] += machine
+    assert pd is not None  # hint for type checkers
 
-    cleaned: dict[str, dict[str, float]] = {}
-    totals = {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0, "total$": 0.0}
+    global _MASTER_VARIABLES_CACHE
+    cache = _MASTER_VARIABLES_CACHE
 
-    for canon, metrics in folded.items():
-        minutes = round(float(metrics.get("minutes", 0.0)), 2)
-        labor = round(float(metrics.get("labor$", 0.0)), 2)
-        machine = round(float(metrics.get("machine$", 0.0)), 2)
-        total = round(labor + machine, 2)
+    if cache.get("loaded"):
+        core_cached = cache.get("core")
+        full_cached = cache.get("full")
 
+        core_copy: PandasDataFrame | None = None
         if (
-            math.isclose(minutes, 0.0, abs_tol=0.01)
-            and math.isclose(labor, 0.0, abs_tol=0.01)
-            and math.isclose(machine, 0.0, abs_tol=0.01)
-            and math.isclose(total, 0.0, abs_tol=0.01)
+            _HAS_PANDAS
+            and pd is not None
+            and isinstance(core_cached, pd.DataFrame)
         ):
-            continue
+            core_copy = core_cached.copy()
 
-        cleaned[canon] = {
-            "minutes": minutes,
-            "labor$": labor,
-            "machine$": machine,
-            "total$": total,
-        }
+        full_copy: PandasDataFrame | None = None
+        if (
+            _HAS_PANDAS
+            and pd is not None
+            and isinstance(full_cached, pd.DataFrame)
+        ):
+            full_copy = full_cached.copy()
 
-        totals["minutes"] += minutes
-        totals["labor$"] += labor
-        totals["machine$"] += machine
-        totals["total$"] += total
+        return (core_copy, full_copy)
 
-    prepared["buckets"] = cleaned
-    prepared["order"] = _preferred_order_then_alpha(cleaned.keys())
-    prepared["totals"] = {key: round(value, 2) for key, value in totals.items()}
-
-    return prepared
-
-def canonicalize_costs(process_costs: Mapping[str, Any] | None) -> dict[str, float]:
-    items: Iterable[tuple[Any, Any]]
-    if isinstance(process_costs, _MappingABC):
-        items = process_costs.items()
-    else:
-        try:
-            items = dict(process_costs or {}).items()  # type: ignore[arg-type]
-        except Exception:
-            items = []
-
-    debug_misc = os.environ.get("DEBUG_MISC") == "1"
-
-    out: dict[str, float] = {}
-    for raw_key, raw_value in items:
-        key = str(raw_key).strip().lower()
-        if not key:
-            continue
-        key = key.replace(" ", "_").replace("-", "_").replace("/", "_")
-        if not key:
-            continue
-        if key.startswith("planner_") or key in PLANNER_META:
-            continue
-        canon_key = CANON_MAP.get(key, key)
-        try:
-            amount = float(raw_value or 0.0)
-        except Exception:
-            amount = 0.0
-        out[canon_key] = out.get(canon_key, 0.0) + amount
-
-    misc_amount = out.get("misc")
-    if misc_amount is not None and not debug_misc:
-        try:
-            misc_val = float(misc_amount)
-        except Exception:
-            misc_val = 0.0
-        if abs(misc_val) < 50.0:
-            out.pop("misc", None)
-
-    return out
-
-def _process_label(key: str | None) -> str:
-    raw = str(key or "").strip().lower().replace(" ", "_")
-    canon = re.sub(r"[^a-z0-9]+", "_", raw).strip("_")
-    alias = {
-        "finishing_deburr": "finishing/deburr",
-        "deburr": "finishing/deburr",
-        "deburring": "finishing/deburr",
-        "finish_deburr": "finishing/deburr",
-        "saw_waterjet": "saw / waterjet",
-        "counter_bore": "counterbore",
-        "counter_sink": "countersink",
-        "prog_amortized": PROGRAMMING_PER_PART_LABEL.lower(),
-        "programming_amortized": PROGRAMMING_PER_PART_LABEL.lower(),
-        "fixture_build_amortized": "fixture build (amortized)",
-    }.get(canon, canon)
-    if alias == "saw / waterjet":
-        return "Saw / Waterjet"
-    text = alias.replace("_", " ")
-    if "(" in text:
-        prefix, suffix = text.split("(", 1)
-        return prefix.title().rstrip() + " (" + suffix
-    return text.title()
-
-def _canonical_hour_label(label: str | None) -> str:
-    text = re.sub(r"\s+", " ", str(label or "").strip())
-    if not text:
-        return ""
-    canonical_label, _ = _canonical_amortized_label(text)
-    if canonical_label:
-        text = canonical_label
-    lookup = {
-        "programming": "Programming",
-        "programming (lot)": "Programming",
-        PROGRAMMING_PER_PART_LABEL.lower(): PROGRAMMING_PER_PART_LABEL,
-        "fixture build": "Fixture Build",
-        "fixture build (lot)": "Fixture Build",
-        "fixture build (amortized)": "Fixture Build (amortized)",
-        "fixture build (amortized per part)": "Fixture Build (amortized)",
-    }
-    return lookup.get(text.lower(), text)
-
-def _display_bucket_label(
-    canon_key: str,
-    label_overrides: Mapping[str, str] | None = None,
-) -> str:
-    overrides = sdict(label_overrides)
-    if canon_key in overrides:
-        return overrides[canon_key]
-    return _process_label(canon_key)
-
-def _format_planner_bucket_line(
-    canon_key: str,
-    amount: float,
-    meta: Mapping[str, Any] | None,
-    *,
-    planner_bucket_display_map: Mapping[str, Mapping[str, Any]] | None = None,
-    label_overrides: Mapping[str, str] | None = None,
-    currency_formatter: Callable[[float], str] | None = None,
-) -> tuple[str | None, float, float, float]:
-    if not planner_bucket_display_map:
-        return (None, amount, 0.0, 0.0)
-    info = planner_bucket_display_map.get(canon_key)
-    if not isinstance(info, _MappingABC):
-        return (None, amount, 0.0, 0.0)
+    master_path = default_master_variables_csv()
+    fallback = Path(r"D:\CAD_Quoting_Tool\Master_Variables.csv")
+    if not master_path.exists() and fallback.exists():
+        master_path = fallback
+    if not master_path.exists():
+        cache["loaded"] = True
+        cache["core"] = None
+        cache["full"] = None
+        return (None, None)
 
     try:
-        minutes_val = float(info.get("minutes", 0.0) or 0.0)
+        core_df, full_df = read_variables_file(str(master_path), return_full=True)
+        core_df = cast(PandasDataFrame, core_df)
+        full_df = cast(PandasDataFrame, full_df)
     except Exception:
-        minutes_val = 0.0
+        logger.warning("Failed to load master variables CSV from %s", master_path, exc_info=True)
+        cache["loaded"] = True
+        cache["core"] = None
+        cache["full"] = None
+        return (None, None)
 
-    hr_val = 0.0
-    if _canonical_bucket_key(canon_key) == "drilling":
-        synced_hr_val: float | None = None
-        synced_source = info.get("synced_hours")
-        if synced_source is not None:
-            try:
-                synced_hr_val = float(synced_source)
-            except Exception:
-                synced_hr_val = None
-        if synced_hr_val is None:
-            synced_minutes = info.get("synced_minutes")
-            if synced_minutes is not None:
-                try:
-                    synced_hr_val = float(synced_minutes) / 60.0
-                except Exception:
-                    synced_hr_val = None
-        if synced_hr_val is not None and synced_hr_val > 0:
-            hr_val = float(synced_hr_val)
-            minutes_val = hr_val * 60.0
-    if isinstance(meta, _MappingABC):
+    cache["loaded"] = True
+    cache["core"] = core_df
+    cache["full"] = full_df
+
+    return (core_df.copy(), full_df.copy())
+
+def find_variables_near(cad_path: str):
+    """Look for variables.* in the same folder, then one level up."""
+    import os
+    folder = os.path.dirname(cad_path)
+    names = ["variables.xlsx", "variables.csv"]
+    subs  = ["variables", "vars"]
+
+    def _scan(dirpath):
         try:
-            hr_val = float(meta.get("hr", 0.0) or 0.0)
+            listing = os.listdir(dirpath)
         except Exception:
-            hr_val = 0.0
-    if hr_val <= 0 and minutes_val > 0:
-        hr_val = minutes_val / 60.0
+            return None
+        low = {e.lower(): e for e in listing}
+        for n in names:
+            if n in low:
+                return os.path.join(dirpath, low[n])
+        for e in listing:
+            le = e.lower()
+            if le.endswith((".xlsx", ".csv")) and any(s in le for s in subs):
+                return os.path.join(dirpath, e)
+        return None
 
-    total_cost = amount
-    for key_option in ("total_cost", "total$", "total"):
-        if key_option in info:
-            try:
-                candidate = float(info.get(key_option) or 0.0)
-            except Exception:
-                continue
-            if candidate:
-                total_cost = candidate
-                break
+    hit = _scan(folder)
+    if hit:
+        return hit
+    parent = os.path.dirname(folder)
+    if os.path.isdir(parent):
+        return _scan(parent)
+    return None
 
-    rate_val = 0.0
-    if isinstance(meta, _MappingABC):
-        try:
-            rate_val = float(meta.get("rate", 0.0) or 0.0)
-        except Exception:
-            rate_val = 0.0
-    if rate_val <= 0 and hr_val > 0 and total_cost > 0:
-        rate_val = total_cost / hr_val
+def parse_pct(x):
+    try:
+        v = float(x)
+    except Exception:
+        return 0.0
+    return v/100.0 if v > 1.0 else v
 
-    formatter: Callable[[float], str]
-    if currency_formatter is None:
-        formatter = lambda x: fmt_money(x, "$")  # pragma: no cover
-    else:
-        formatter = currency_formatter
+# ---------- Pretty printer for quote results ----------
 
-    hours_text = fmt_hours(hr_val) # pragma: no cover
-    if rate_val > 0:
-        rate_text = f"{formatter(rate_val)}/hr"
-    else:
-        rate_text = "—"
+PROCESS_LABEL_OVERRIDES: dict[str, str] = {
+    "finishing_deburr": "Finishing/Deburr",
+    "saw_waterjet": "Saw/Waterjet",
+}
 
-    display_override = (
-        f"{_display_bucket_label(canon_key, label_overrides)}: {hours_text} × {rate_text} →"
-    )
-    return (display_override, float(total_cost), hr_val, rate_val)
-
-def _extract_bucket_map(source: Mapping[str, Any] | None) -> dict[str, dict[str, Any]]:
-    bucket_map: dict[str, dict[str, Any]] = {}
-    if not isinstance(source, _MappingABC):
-        return bucket_map
-    struct: Mapping[str, Any] = source
-    buckets_obj = source.get("buckets") if isinstance(source, _MappingABC) else None
-    if isinstance(buckets_obj, _MappingABC):
-        struct = buckets_obj
-    for raw_key, raw_value in struct.items():
-        canon = _canonical_bucket_key(raw_key)
-        if not canon:
-            continue
-        if isinstance(raw_value, _MappingABC):
-            bucket_map[canon] = {str(k): v for k, v in raw_value.items()}
-        else:
-            bucket_map[canon] = {}
-    return bucket_map
+PREFERRED_PROCESS_BUCKET_ORDER: tuple[str, ...] = (
+    "milling",
+    "drilling",
+    "counterbore",
+    "countersink",
+    "tapping",
+    "grinding",
+    "finishing_deburr",
+    "saw_waterjet",
+    "inspection",
+    "assembly",
+    "packaging",
+    "misc",
+)
 
 @dataclass(frozen=True)
 class ProcessDisplayEntry:
@@ -5816,12 +5494,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         ("labor_rate_per_hr", 45.0),
     )
 
-    cfg_obj: QuoteConfiguration | Any = cfg or QuoteConfiguration()
+    cfg_obj: QuoteConfiguration | Any = cfg or QuoteConfiguration(
+        default_params=copy.deepcopy(PARAMS_DEFAULT)
+    )
     for name, value in overrides:
         try:
             setattr(cfg_obj, name, value)
         except Exception:
-            cfg_obj = QuoteConfiguration()
+            cfg_obj = QuoteConfiguration(default_params=copy.deepcopy(PARAMS_DEFAULT))
             for name2, value2 in overrides:
                 setattr(cfg_obj, name2, value2)
             break
@@ -11050,21 +10730,40 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     # Render MATERIAL REMOVAL card + TIME PER HOLE lines (replace legacy Time block)
     # NOTE: Patch 3 keeps the hole-table hook active so downstream cards continue to render.
     append_lines(removal_card_lines)
-    geo_map = ((breakdown or {}).get("geo") or (result or {}).get("geo") or {})
+
+    # === HOLE-TABLE CARDS (safe wrapper, no undefined names) ===
+    try:
+        # Try to pull context from whatever exists in this scope
+        # (these names may or may not exist; _first_dict ignores Nones)
+        ctx_a = locals().get("breakdown")
+        ctx_b = locals().get("result")
+        ctx_c = locals().get("quote")
+        ctx_d = locals().get("job")
+        ctx_e = locals().get("pricing_ctx")
+
+        ctx = _first_dict(ctx_a, ctx_b, ctx_c, ctx_d, ctx_e)
+        geo_map = _get_geo_map(ctx, locals().get("geo"), ctx_a, ctx_b)
+        material_group = _get_material_group(ctx, ctx_a, ctx_b)
+
+        # Probe
+        ops_rows = (((geo_map or {}).get("ops_summary") or {}).get("rows") or [])
+        append_line(f"[DEBUG] ops_rows={len(ops_rows)}")
+    except Exception as e:
+        append_line(f"[DEBUG] ops_probe_failed={e.__class__.__name__}: {e}")
+        geo_map = {}
+        material_group = None
+        ops_rows = []
+
     if isinstance(geo_map, _MappingABC) and not isinstance(geo_map, dict):
         geo_map = dict(geo_map)
 
-    material_group = (
-        (result or {}).get("material_group")
-        or (breakdown or {}).get("material_group")
-    )
     _emit_hole_table_ops_cards(
         lines,
         geo=geo_map,
         material_group=material_group,
         speeds_csv=None,
-        result=result,
-        breakdown=breakdown,
+        result=locals().get("result"),
+        breakdown=locals().get("breakdown"),
     )
 
     # PROBE: show how many HOLE-TABLE rows we have (temporary)
@@ -11778,34 +11477,6 @@ if not str(PARAMS_DEFAULT.get("SpeedsFeedsCSVPath", "")).strip():
 
 # ---- Service containers -----------------------------------------------------
 
-@dataclass
-class QuoteConfiguration:
-    """Container for default parameter configuration used by the UI."""
-
-    default_params: Dict[str, Any] = field(default_factory=lambda: copy.deepcopy(PARAMS_DEFAULT))
-    default_material_display: str = DEFAULT_MATERIAL_DISPLAY
-    prefer_removal_drilling_hours: bool = True
-    stock_price_source: str = "mcmaster_api"
-    scrap_price_source: str = "wieland"
-    enforce_exact_thickness: bool = True
-    allow_thickness_upsize: bool = False
-    round_tol_in: float = 0.05
-    stock_rounding_mode: str = "per_axis_min_area"
-    separate_machine_labor: bool = True
-    machine_rate_per_hr: float = 45.0
-    labor_rate_per_hr: float = 45.0
-    hole_source_preference: str = "table"  # "table" | "geometry" | "auto"
-    hole_merge_tol_diam_in: float = 0.001
-    hole_merge_tol_depth_in: float = 0.01
-
-    def copy_default_params(self) -> Dict[str, Any]:
-        """Return a deep copy of the default parameter set."""
-
-        return copy.deepcopy(self.default_params)
-
-    @property
-    def default_material_key(self) -> str:
-        return _normalize_lookup_key(self.default_material_display)
 
 # Common regex pieces (kept non-capturing to avoid pandas warnings)
 TIME_RE = r"\b(?:hours?|hrs?|hr|time|min(?:ute)?s?)\b"
@@ -12643,6 +12314,9 @@ def _machine_params_from_params(params: Mapping[str, Any] | None) -> _TimeMachin
         hp_to_mrr_factor=float(mrr_factor) if mrr_factor and mrr_factor > 0 else None,
     )
 
+OverheadLike: TypeAlias = _TimeOverheadParams | SimpleNamespace | Mapping[str, Any]
+
+
 def _drill_overhead_from_params(params: Mapping[str, Any] | None) -> OverheadLike:
     defaults = _DRILLING_COEFFS.get(
         "overhead_defaults",
@@ -12684,7 +12358,8 @@ def _drill_overhead_from_params(params: Mapping[str, Any] | None) -> OverheadLik
     index_sec = _coerce_float_or_none(index_source)
     if index_sec is None:
         index_sec = default_index_sec
-    overhead_kwargs = {
+
+    payload = {
         "toolchange_min": float(toolchange)
         if toolchange is not None and toolchange >= 0
         else float(defaults.get("toolchange_min", 0.5)),
@@ -12697,59 +12372,74 @@ def _drill_overhead_from_params(params: Mapping[str, Any] | None) -> OverheadLik
         "dwell_min": float(dwell)
         if dwell is not None and dwell >= 0
         else defaults.get("dwell_min"),
+        "index_sec_per_hole": float(index_sec) if index_sec is not None and index_sec >= 0 else None,
     }
-    index_kwarg = float(index_sec) if index_sec is not None and index_sec >= 0 else None
+
     try:
-        overhead = _TimeOverheadParams(**overhead_kwargs)
+        return _TimeOverheadParams(**payload)
     except TypeError:
         overhead = _TimeOverheadParams(
-            toolchange_min=overhead_kwargs.get("toolchange_min"),
-            approach_retract_in=overhead_kwargs.get("approach_retract_in"),
-            peck_penalty_min_per_in_depth=overhead_kwargs.get(
-                "peck_penalty_min_per_in_depth"
-            ),
-            dwell_min=overhead_kwargs.get("dwell_min"),
+            toolchange_min=payload.get("toolchange_min"),
+            approach_retract_in=payload.get("approach_retract_in"),
+            peck_penalty_min_per_in_depth=payload.get("peck_penalty_min_per_in_depth"),
+            dwell_min=payload.get("dwell_min"),
+            peck_min=defaults.get("peck_min"),
         )
-    assigned = _assign_overhead_index_attr(overhead, index_kwarg)
-    return _ensure_overhead_index_attr(overhead, index_kwarg, assigned=assigned)
+        index_val = payload.get("index_sec_per_hole")
+        if index_val is not None:
+            try:
+                object.__setattr__(overhead, "index_sec_per_hole", index_val)
+            except Exception:
+                setattr(overhead, "index_sec_per_hole", index_val)
+        return overhead
 
 def _make_time_overhead_params(
     params: Mapping[str, Any] | None,
-) -> tuple[OverheadLike, bool]:
+) -> tuple[_TimeOverheadParams, bool]:
     """Instantiate ``OverheadParams`` handling optional index compatibility."""
 
     kwargs: dict[str, Any] = {}
     if isinstance(params, _MappingABC):
         kwargs = {str(k): v for k, v in params.items()}
 
+    valid_keys = {
+        "toolchange_min",
+        "approach_retract_in",
+        "peck_penalty_min_per_in_depth",
+        "dwell_min",
+        "peck_min",
+        "index_sec_per_hole",
+    }
+    filtered: dict[str, Any] = {k: kwargs[k] for k in valid_keys if k in kwargs}
+
     index_kwarg: float | None = None
-    if "index_sec_per_hole" in kwargs:
-        try:
-            index_val = kwargs["index_sec_per_hole"]
-        except Exception:
-            index_val = None
-        else:
-            coerced = _coerce_float_or_none(index_val)
-            index_kwarg = float(coerced) if coerced is not None and coerced >= 0 else None
-        kwargs.pop("index_sec_per_hole", None)
+    if "index_sec_per_hole" in filtered:
+        index_val = filtered.pop("index_sec_per_hole")
+        coerced = _coerce_float_or_none(index_val)
+        if coerced is not None and coerced >= 0:
+            index_kwarg = float(coerced)
 
     try:
-        overhead = _TimeOverheadParams(**kwargs)
+        overhead = _TimeOverheadParams(**filtered)
     except TypeError:
         overhead = _TimeOverheadParams(
-            toolchange_min=kwargs.get("toolchange_min"),
-            approach_retract_in=kwargs.get("approach_retract_in"),
-            peck_penalty_min_per_in_depth=kwargs.get(
-                "peck_penalty_min_per_in_depth"
-            ),
-            dwell_min=kwargs.get("dwell_min"),
-            peck_min=kwargs.get("peck_min"),
+            toolchange_min=filtered.get("toolchange_min"),
+            approach_retract_in=filtered.get("approach_retract_in"),
+            peck_penalty_min_per_in_depth=filtered.get("peck_penalty_min_per_in_depth"),
+            dwell_min=filtered.get("dwell_min"),
+            peck_min=filtered.get("peck_min"),
         )
 
-    assigned = _assign_overhead_index_attr(overhead, index_kwarg)
-    dropped_index = index_kwarg is not None and not assigned
+    if index_kwarg is not None:
+        try:
+            overhead = replace(overhead, index_sec_per_hole=index_kwarg)
+        except Exception:
+            try:
+                object.__setattr__(overhead, "index_sec_per_hole", index_kwarg)
+            except Exception:
+                setattr(overhead, "index_sec_per_hole", index_kwarg)
 
-    return _ensure_overhead_index_attr(overhead, index_kwarg, assigned=assigned), dropped_index
+    return overhead, False
 
 def _coerce_overhead_dataclass(overhead: OverheadLike) -> _TimeOverheadParams:
     """Return a dataclass instance compatible with :func:`replace`."""
@@ -12758,6 +12448,10 @@ def _coerce_overhead_dataclass(overhead: OverheadLike) -> _TimeOverheadParams:
         return overhead
 
     payload: dict[str, Any] = {}
+    source_mapping: Mapping[str, Any] | None = None
+    if isinstance(overhead, _MappingABC):
+        source_mapping = overhead
+
     for name in (
         "toolchange_min",
         "approach_retract_in",
@@ -12765,12 +12459,16 @@ def _coerce_overhead_dataclass(overhead: OverheadLike) -> _TimeOverheadParams:
         "dwell_min",
         "peck_min",
     ):
-        if hasattr(overhead, name):
+        if source_mapping and name in source_mapping:
+            payload[name] = source_mapping.get(name)
+        elif hasattr(overhead, name):
             payload[name] = getattr(overhead, name)
 
     index_value = None
-    if _TIME_OVERHEAD_SUPPORTS_INDEX_SEC:
-        index_value = getattr(overhead, "index_sec_per_hole", None)
+    if source_mapping and "index_sec_per_hole" in source_mapping:
+        index_value = source_mapping.get("index_sec_per_hole")
+    elif hasattr(overhead, "index_sec_per_hole"):
+        index_value = getattr(overhead, "index_sec_per_hole")
 
     try:
         coerced = _TimeOverheadParams(**payload)
@@ -12782,12 +12480,17 @@ def _coerce_overhead_dataclass(overhead: OverheadLike) -> _TimeOverheadParams:
             dwell_min=payload.get("dwell_min"),
             peck_min=payload.get("peck_min"),
         )
-    assigned = _assign_overhead_index_attr(coerced, index_value)
-    if index_value is not None and not assigned:
+
+    coerced_index = _coerce_float_or_none(index_value)
+    if coerced_index is not None and coerced_index >= 0:
         try:
-            object.__setattr__(coerced, "index_sec_per_hole", index_value)
+            coerced = replace(coerced, index_sec_per_hole=float(coerced_index))
         except Exception:
-            pass
+            try:
+                object.__setattr__(coerced, "index_sec_per_hole", float(coerced_index))
+            except Exception:
+                setattr(coerced, "index_sec_per_hole", float(coerced_index))
+
     return coerced
 
 
@@ -13720,7 +13423,7 @@ def _normalize_hole_sets_for_geo(
     *,
     cfg: QuoteConfiguration | None = None,
 ) -> list[dict[str, Any]]:
-    cfg_obj = cfg or QuoteConfiguration()
+    cfg_obj = cfg or QuoteConfiguration(default_params=copy.deepcopy(PARAMS_DEFAULT))
     if not isinstance(geo_context, _MappingABC):
         return []
 
@@ -14583,26 +14286,13 @@ def _legacy_estimate_drilling_hours(
                     "dwell_min": dwell_val,
                     "peck_min": peck_min,
                 }
-                legacy_index_kwarg = None
-                if _TIME_OVERHEAD_SUPPORTS_INDEX_SEC:
-                    legacy_index_kwarg = getattr(
-                        overhead_for_calc,
-                        "index_sec_per_hole",
-                        None,
-                    )
-                    legacy_kwargs["index_sec_per_hole"] = legacy_index_kwarg
-                legacy_overhead_like, legacy_dropped_index = _make_time_overhead_params(
-                    legacy_kwargs
+                legacy_index_kwarg = to_float(
+                    getattr(overhead_for_calc, "index_sec_per_hole", None)
                 )
-                legacy_overhead = _coerce_overhead_dataclass(legacy_overhead_like)
-                if legacy_index_kwarg is not None and (
-                    legacy_dropped_index
-                    or not hasattr(legacy_overhead, "index_sec_per_hole")
-                ):
-                    try:
-                        setattr(legacy_overhead, "index_sec_per_hole", legacy_index_kwarg)
-                    except Exception:
-                        pass
+                if legacy_index_kwarg is not None and legacy_index_kwarg >= 0:
+                    legacy_kwargs["index_sec_per_hole"] = legacy_index_kwarg
+                legacy_overhead, _ = _make_time_overhead_params(legacy_kwargs)
+                legacy_overhead = _coerce_overhead_dataclass(legacy_overhead)
                 overhead_for_calc = legacy_overhead
                 tool_params = _TimeToolParams(teeth_z=1)
                 if debug_lines is not None:
@@ -14612,11 +14302,10 @@ def _legacy_estimate_drilling_hours(
                 )
                 if effective_index_sec is None or not math.isfinite(effective_index_sec):
                     effective_index_sec = _default_drill_index_seconds(op_name)
-                if _TIME_OVERHEAD_SUPPORTS_INDEX_SEC:
-                    legacy_overhead = replace(
-                        legacy_overhead,
-                        index_sec_per_hole=effective_index_sec,
-                    )
+                legacy_overhead = replace(
+                    legacy_overhead,
+                    index_sec_per_hole=effective_index_sec,
+                )
                 overhead_for_calc = legacy_overhead
                 minutes = _estimate_time_min(
                     geom=geom,
@@ -15802,7 +15491,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     cfg: QuoteConfiguration | None = None,
     **_: Any,
 ) -> dict[str, Any]:
-    cfg = cfg or QuoteConfiguration()
+    cfg = cfg or QuoteConfiguration(default_params=copy.deepcopy(PARAMS_DEFAULT))
     value_map = _df_to_value_map(df)
     quote_df_canonical: Any = None
     if _HAS_PANDAS and "pd" in globals():
@@ -17878,6 +17567,23 @@ RE_THICK  = _RE_DEPTH_OR_THICK
 
 def _norm_line(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "")).strip()
+
+
+_RE_QTY_LEAD = re.compile(r"^\s*\((\d+)\)\s*")
+_RE_FROM_SIDE = re.compile(r"\bFROM\s+(FRONT|BACK)\b", re.I)
+_RE_DEPTH = re.compile(r"[×x]\s*([0-9.]+)\b", re.I)
+_RE_THRU = re.compile(r"\bTHRU\b", re.I)
+_RE_DIA_ANY = re.compile(r'(?:Ø|⌀|DIA|O)\s*([0-9.]+)|\(([0-9.]+)\s*Ø?\)|\b([0-9.]+)\b')
+_RE_TAP = re.compile(
+    r"(\(\d+\)\s*)?("
+    r"#\s*\d{1,2}-\d+"
+    r"|(?:\d+/\d+)\s*-\s*\d+"
+    r"|(?:\d+(?:\.\d+)?)\s*-\s*\d+"
+    r"|M\d+(?:\.\d+)?\s*x\s*\d+(?:\.\d+)?"
+    r")\s*TAP",
+    re.I,
+)
+_RE_CBORE = re.compile(r"\b(C['’]?\s*BORE|CBORE|COUNTER\s*BORE)\b", re.I)
 
 
 _QTY_LEAD = re.compile(r'^\s*\((\d+)\)\s*')
@@ -21249,20 +20955,14 @@ def _extract_text_lines_from_ezdxf_doc(doc: Any) -> list[str]:
 
 # ===== Fallback HOLE-TABLE row builder (app layer) =========================
 
-_RE_DIA_ANY_FALLBACK = re.compile(
-    r"(?:Ø|⌀|DIA|O)\s*([0-9.]+)|\(([0-9.]+)\s*Ø?\)|\b([0-9.]+)\b"
-)
-
-
-def _coalesce_rows(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    agg: dict[tuple[str, str], int] = {}
-    order: list[tuple[str, str]] = []
-    for entry in rows:
-        if not isinstance(entry, _MappingABC):
+def _coalesce_rows(rows):
+    agg, order = {}, []
+    for r in rows:
+        if not isinstance(r, dict):
             continue
-        desc = str(entry.get("desc", ""))
-        ref = str(entry.get("ref", ""))
-        qty_val = int(_coerce_float_or_none(entry.get("qty")) or 0)
+        desc = r.get("desc", "") or ""
+        ref = r.get("ref", "") or ""
+        qty_val = int(r.get("qty") or 0)
         if qty_val <= 0:
             continue
         key = (desc, ref)
@@ -21271,123 +20971,94 @@ def _coalesce_rows(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
             order.append(key)
         else:
             agg[key] += qty_val
-    return [
-        {"hole": "", "ref": ref, "qty": agg[(desc, ref)], "desc": desc}
-        for (desc, ref) in order
-    ]
+    return [{"hole": "", "ref": ref, "qty": agg[(desc, ref)], "desc": desc} for (desc, ref) in order]
 
 
-def _build_ops_rows_from_lines_fallback(lines: Iterable[str]) -> list[dict[str, Any]]:
-    materialized = [
-        _norm_line(text)
-        for text in lines
-        if isinstance(text, str) and _norm_line(text)
-    ]
-    if not materialized:
+def _build_ops_rows_from_lines_fallback(lines: list[str]) -> list[dict]:
+    if not lines:
         return []
-
-    out: list[dict[str, Any]] = []
-    i = 0
-    while i < len(materialized):
-        ln = materialized[i]
-        upper = ln.upper()
-        if any(token in upper for token in ("BREAK ALL", "SHARP CORNERS", "RADIUS", "CHAMFER", "AS SHOWN")):
+    L = [_norm_line(s) for s in lines if _norm_line(s)]
+    out, i = [], 0
+    while i < len(L):
+        ln = L[i]
+        if any(k in ln.upper() for k in ("BREAK ALL", "SHARP CORNERS", "RADIUS", "CHAMFER", "AS SHOWN")):
             i += 1
             continue
-
         qty = 1
-        mqty = _QTY_LEAD.match(ln)
+        mqty = _RE_QTY_LEAD.match(ln)
         if mqty:
             qty = int(mqty.group(1))
-            ln = ln[mqty.end() :].strip()
-            upper = ln.upper()
-
-        mtap = RE_TAP.search(ln)
+            ln = ln[mqty.end():].strip()
+        mtap = _RE_TAP.search(ln)
         if mtap:
             thread = mtap.group(2).replace(" ", "")
-            tail = " ".join(materialized[i : i + 3])
+            tail = " ".join(L[i:i+3])
             desc = f"{thread} TAP"
-            if RE_THRU.search(tail):
+            if _RE_THRU.search(tail):
                 desc += " THRU"
-            md = RE_DEPTH.search(tail)
+            md = _RE_DEPTH.search(tail)
             if md and md.group(1):
                 desc += f' × {float(md.group(1)):.2f}"'
-            ms = _FROM_SIDE.search(tail)
+            ms = _RE_FROM_SIDE.search(tail)
             if ms:
                 desc += f' FROM {ms.group(1).upper()}'
             out.append({"hole": "", "ref": "", "qty": qty, "desc": desc})
             i += 1
             continue
-
-        if RE_CBORE.search(ln):
-            tail = " ".join(materialized[max(0, i - 1) : i + 2])
-            mda = _PAREN_DIA.search(tail) or _MM_IN_DIA.search(tail) or RE_DIA.search(tail) or _RE_DIA_ANY_FALLBACK.search(tail)
+        if _RE_CBORE.search(ln):
+            tail = " ".join(L[max(0, i-1):i+2])
+            mda = _RE_DIA_ANY.search(tail)
             dia = None
             if mda:
-                for group in mda.groups():
-                    if group:
-                        try:
-                            dia = float(group)
-                        except Exception:
-                            continue
+                for g in mda.groups():
+                    if g:
+                        dia = float(g)
                         break
             desc = (f"{dia:.4f} C’BORE" if dia is not None else "C’BORE")
-            md = RE_DEPTH.search(tail)
+            md = _RE_DEPTH.search(tail)
             if md and md.group(1):
                 desc += f' × {float(md.group(1)):.2f}"'
-            ms = _FROM_SIDE.search(tail)
+            ms = _RE_FROM_SIDE.search(tail)
             if ms:
                 desc += f' FROM {ms.group(1).upper()}'
             out.append({"hole": "", "ref": "", "qty": qty, "desc": desc})
             i += 1
             continue
-
-        if any(token in upper for token in ("C' DRILL", "C’DRILL", "CENTER DRILL", "SPOT DRILL")):
-            tail = " ".join(materialized[i : i + 2])
-            md = RE_DEPTH.search(tail)
+        if any(k in ln.upper() for k in ("C' DRILL", "C’DRILL", "CENTER DRILL", "SPOT DRILL")):
+            tail = " ".join(L[i:i+2])
+            md = _RE_DEPTH.search(tail)
             desc = "C’DRILL" + (f' × {float(md.group(1)):.2f}"' if (md and md.group(1)) else "")
             out.append({"hole": "", "ref": "", "qty": qty, "desc": desc})
             i += 1
             continue
-
-        if "DRILL" in upper and RE_THRU.search(ln):
-            mda = _PAREN_DIA.search(ln) or _MM_IN_DIA.search(ln) or RE_DIA.search(ln) or _RE_DIA_ANY_FALLBACK.search(ln)
+        if "DRILL" in ln.upper() and _RE_THRU.search(ln):
+            mda = _RE_DIA_ANY.search(ln)
             ref = ""
             if mda:
-                for group in mda.groups():
-                    if group:
-                        ref = group
+                for g in mda.groups():
+                    if g:
+                        ref = g
                         break
             out.append({"hole": "", "ref": ref, "qty": qty, "desc": (f"{ref} THRU").strip()})
             i += 1
             continue
-
         i += 1
-
     return _coalesce_rows(out)
 
 
-def _collect_chart_lines_context(
-    result: Mapping[str, Any] | None,
-    breakdown: Mapping[str, Any] | None,
-    geo: Mapping[str, Any] | None,
-) -> list[str]:
-    merged: list[str] = []
-    seen: set[str] = set()
-    for container in (geo, breakdown, result):
-        if not isinstance(container, _MappingABC):
+def _collect_chart_lines_context(*containers) -> list[str]:
+    keys = ("chart_lines", "hole_table_lines", "chart_text_lines", "hole_chart_lines")
+    merged, seen = [], set()
+    for d in containers:
+        if not isinstance(d, dict):
             continue
-        for key in ("chart_lines", "hole_table_lines", "chart_text_lines", "hole_chart_lines"):
-            candidate = container.get(key)
-            if not isinstance(candidate, list):
-                continue
-            for entry in candidate:
-                if not isinstance(entry, str):
-                    continue
-                if entry in seen:
-                    continue
-                seen.add(entry)
-                merged.append(entry)
+        for k in keys:
+            v = d.get(k)
+            if isinstance(v, list) and all(isinstance(x, str) for x in v):
+                for s in v:
+                    if s not in seen:
+                        seen.add(s)
+                        merged.append(s)
     return merged
 
 
