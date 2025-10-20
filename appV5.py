@@ -814,9 +814,12 @@ def _compute_drilling_removal_section(
             or (result_geo_src.get("geo") if isinstance(result_geo_src, _MappingABC) else None)
             or {}
         )
-        ops_summary_for_debug = (
-            geo_map.get("ops_summary") if isinstance(geo_map, _MappingABC) else None
-        )
+        if not isinstance(geo_map, dict):
+            try:
+                geo_map = dict(geo_map)
+            except Exception:
+                geo_map = {}
+        ops_summary_for_debug = geo_map.get("ops_summary")
         rows_candidate: Any
         if isinstance(ops_summary_for_debug, _MappingABC):
             rows_candidate = ops_summary_for_debug.get("rows")
@@ -829,102 +832,62 @@ def _compute_drilling_removal_section(
                 ops_rows = list(rows_candidate or [])
             except Exception:
                 ops_rows = []
+        material_group = str(drilling_meta_map.get("material_group") or "").strip() or None
+        if not material_group:
+            material_group_candidate = None
+            if isinstance(breakdown, _MappingABC):
+                material_group_candidate = breakdown.get("material_group")
+            if not material_group_candidate and isinstance(result_geo_src, _MappingABC):
+                material_group_candidate = result_geo_src.get("material_group")
+            if isinstance(material_group_candidate, str):
+                material_group_candidate = material_group_candidate.strip()
+            material_group = material_group_candidate or None
         chart_lines_all: list[str] = []
-        if isinstance(geo_map, _MappingABC):
-            raw_chart_lines = geo_map.get("chart_lines")
-            if isinstance(raw_chart_lines, list):
-                for entry in raw_chart_lines:
-                    if isinstance(entry, str):
-                        chart_lines_all.append(entry)
-                    elif entry not in (None, ""):
-                        chart_lines_all.append(str(entry))
-            elif isinstance(raw_chart_lines, str):
-                chart_lines_all.append(raw_chart_lines)
-            geo_read_more = geo_map.get("geo_read_more")
-            if isinstance(geo_read_more, _MappingABC):
-                extra_chart_lines = geo_read_more.get("chart_lines")
-                if isinstance(extra_chart_lines, list):
-                    for entry in extra_chart_lines:
-                        if isinstance(entry, str):
-                            chart_lines_all.append(entry)
-                        elif entry not in (None, ""):
-                            chart_lines_all.append(str(entry))
-                elif isinstance(extra_chart_lines, str):
-                    chart_lines_all.append(extra_chart_lines)
-        lines.append(f"[DEBUG] ops_rows={len(ops_rows)}")
+        append_line(f"[DEBUG] ops_rows={len(ops_rows)}")
+        # Fallback: build ops rows from any chart lines we can find
         if not ops_rows:
-            chart_lines_all = _collect_chart_lines_context(result, breakdown, geo_map)
+            ctx_local = locals().get("ctx")
+            raw_candidates = (
+                ctx_local,
+                geo_map,
+                locals().get("geo"),
+                locals().get("breakdown"),
+                locals().get("quote"),
+            )
+            containers: list[dict] = []
+            for candidate in raw_candidates:
+                if isinstance(candidate, dict):
+                    containers.append(candidate)
+                elif isinstance(candidate, _MappingABC):
+                    try:
+                        containers.append(dict(candidate))
+                    except Exception:
+                        continue
+            chart_lines_all = _collect_chart_lines_context(*containers)
             built_rows = _build_ops_rows_from_lines_fallback(chart_lines_all)
-            lines.append(
+            append_line(
                 f"[DEBUG] chart_lines_found={len(chart_lines_all)} built_rows={len(built_rows)}"
             )
             if built_rows:
-                if not isinstance(geo_map, dict):
-                    if isinstance(geo_map, _MappingABC):
-                        try:
-                            geo_map = dict(geo_map)
-                        except Exception:
-                            geo_map = {}
-                    else:
-                        geo_map = {}
-                ops_summary_val = geo_map.get("ops_summary") if isinstance(geo_map, dict) else None
-                if not isinstance(ops_summary_val, dict):
-                    if isinstance(ops_summary_val, _MappingABC):
-                        ops_summary = dict(ops_summary_val)
-                    else:
-                        ops_summary = {}
-                else:
-                    ops_summary = ops_summary_val
-                ops_summary["rows"] = list(built_rows)
-                if isinstance(geo_map, dict):
-                    geo_map["ops_summary"] = ops_summary
-                if isinstance(result, _MappingABC):
-                    geo_in_result = result.get("geo")
-                    if isinstance(geo_in_result, dict):
-                        existing_ops = geo_in_result.get("ops_summary")
-                        if isinstance(existing_ops, dict):
-                            existing_ops.update(ops_summary)
-                        else:
-                            geo_in_result["ops_summary"] = dict(ops_summary)
-                    elif isinstance(geo_in_result, _MappingABC):
-                        try:
-                            result_geo_mut = dict(geo_in_result)
-                        except Exception:
-                            result_geo_mut = {}
-                        existing_ops = result_geo_mut.get("ops_summary")
-                        if isinstance(existing_ops, dict):
-                            existing_ops.update(ops_summary)
-                        else:
-                            result_geo_mut["ops_summary"] = dict(ops_summary)
-                        if isinstance(result, dict):
-                            result["geo"] = result_geo_mut
-                if isinstance(breakdown, _MappingABC):
-                    geo_in_breakdown = breakdown.get("geo")
-                    if isinstance(geo_in_breakdown, dict):
-                        existing_ops = geo_in_breakdown.get("ops_summary")
-                        if isinstance(existing_ops, dict):
-                            existing_ops.update(ops_summary)
-                        else:
-                            geo_in_breakdown["ops_summary"] = dict(ops_summary)
-                    elif isinstance(geo_in_breakdown, _MappingABC):
-                        try:
-                            breakdown_geo_mut = dict(geo_in_breakdown)
-                        except Exception:
-                            breakdown_geo_mut = {}
-                        existing_ops = breakdown_geo_mut.get("ops_summary")
-                        if isinstance(existing_ops, dict):
-                            existing_ops.update(ops_summary)
-                        else:
-                            breakdown_geo_mut["ops_summary"] = dict(ops_summary)
-                        if isinstance(breakdown, dict):
-                            breakdown["geo"] = breakdown_geo_mut
-                ops_rows = list(built_rows)
-        lines.append(
+                geo_map.setdefault("ops_summary", {})["rows"] = built_rows
+                ops_rows = built_rows
+        append_line(
             f"[DEBUG] has_tap_row={any('TAP' in (str(r.get('desc', '')).upper()) for r in ops_rows if isinstance(r, _MappingABC))}"
         )
         if not ops_rows and chart_lines_all:
             sample = chart_lines_all[:6]
-            lines.append(f"[DEBUG] sample_chart_lines={repr(sample)}")
+            append_line(f"[DEBUG] sample_chart_lines={repr(sample)}")
+
+        # Finally emit the cards (no-op if still empty)
+        try:
+            _emit_hole_table_ops_cards(
+                lines,
+                geo=geo_map,
+                material_group=material_group,
+                speeds_csv=None,
+            )
+        except Exception as e:  # pragma: no cover - debug guard
+            append_line(f"[DEBUG] emit_cards_failed={e.__class__.__name__}: {e}")
 
         if drill_machine_minutes_estimate > 0.0:
             subtotal_min = float(drill_machine_minutes_estimate)
@@ -1231,7 +1194,16 @@ def _rows_from_ops_summary(
                 fallback.append(base)
             if fallback:
                 return fallback
-    chart_lines = _collect_chart_lines_context(result, breakdown, geo_map)
+    _containers: list[dict] = []
+    for candidate in (result, breakdown, geo_map):
+        if isinstance(candidate, dict):
+            _containers.append(candidate)
+        elif isinstance(candidate, _MappingABC):
+            try:
+                _containers.append(dict(candidate))
+            except Exception:
+                continue
+    chart_lines = _collect_chart_lines_context(*_containers)
     if chart_lines:
         fallback_rows = _build_ops_rows_from_lines_fallback(chart_lines)
         if fallback_rows:
@@ -16302,6 +16274,23 @@ def _norm_line(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "")).strip()
 
 
+_RE_QTY_LEAD = re.compile(r"^\s*\((\d+)\)\s*")
+_RE_FROM_SIDE = re.compile(r"\bFROM\s+(FRONT|BACK)\b", re.I)
+_RE_DEPTH = re.compile(r"[×x]\s*([0-9.]+)\b", re.I)
+_RE_THRU = re.compile(r"\bTHRU\b", re.I)
+_RE_DIA_ANY = re.compile(r'(?:Ø|⌀|DIA|O)\s*([0-9.]+)|\(([0-9.]+)\s*Ø?\)|\b([0-9.]+)\b')
+_RE_TAP = re.compile(
+    r"(\(\d+\)\s*)?("
+    r"#\s*\d{1,2}-\d+"
+    r"|(?:\d+/\d+)\s*-\s*\d+"
+    r"|(?:\d+(?:\.\d+)?)\s*-\s*\d+"
+    r"|M\d+(?:\.\d+)?\s*x\s*\d+(?:\.\d+)?"
+    r")\s*TAP",
+    re.I,
+)
+_RE_CBORE = re.compile(r"\b(C['’]?\s*BORE|CBORE|COUNTER\s*BORE)\b", re.I)
+
+
 _QTY_LEAD = re.compile(r'^\s*\((\d+)\)\s*')
 _MM_IN_DIA = re.compile(r"(?:Ø|⌀|O|DIA|\b)\s*([0-9.]+)")
 _PAREN_DIA = re.compile(r"\(([0-9.]+)\s*Ø?\)")
@@ -19671,20 +19660,14 @@ def _extract_text_lines_from_ezdxf_doc(doc: Any) -> list[str]:
 
 # ===== Fallback HOLE-TABLE row builder (app layer) =========================
 
-_RE_DIA_ANY_FALLBACK = re.compile(
-    r"(?:Ø|⌀|DIA|O)\s*([0-9.]+)|\(([0-9.]+)\s*Ø?\)|\b([0-9.]+)\b"
-)
-
-
-def _coalesce_rows(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    agg: dict[tuple[str, str], int] = {}
-    order: list[tuple[str, str]] = []
-    for entry in rows:
-        if not isinstance(entry, _MappingABC):
+def _coalesce_rows(rows):
+    agg, order = {}, []
+    for r in rows:
+        if not isinstance(r, dict):
             continue
-        desc = str(entry.get("desc", ""))
-        ref = str(entry.get("ref", ""))
-        qty_val = int(_coerce_float_or_none(entry.get("qty")) or 0)
+        desc = r.get("desc", "") or ""
+        ref = r.get("ref", "") or ""
+        qty_val = int(r.get("qty") or 0)
         if qty_val <= 0:
             continue
         key = (desc, ref)
@@ -19693,123 +19676,94 @@ def _coalesce_rows(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
             order.append(key)
         else:
             agg[key] += qty_val
-    return [
-        {"hole": "", "ref": ref, "qty": agg[(desc, ref)], "desc": desc}
-        for (desc, ref) in order
-    ]
+    return [{"hole": "", "ref": ref, "qty": agg[(desc, ref)], "desc": desc} for (desc, ref) in order]
 
 
-def _build_ops_rows_from_lines_fallback(lines: Iterable[str]) -> list[dict[str, Any]]:
-    materialized = [
-        _norm_line(text)
-        for text in lines
-        if isinstance(text, str) and _norm_line(text)
-    ]
-    if not materialized:
+def _build_ops_rows_from_lines_fallback(lines: list[str]) -> list[dict]:
+    if not lines:
         return []
-
-    out: list[dict[str, Any]] = []
-    i = 0
-    while i < len(materialized):
-        ln = materialized[i]
-        upper = ln.upper()
-        if any(token in upper for token in ("BREAK ALL", "SHARP CORNERS", "RADIUS", "CHAMFER", "AS SHOWN")):
+    L = [_norm_line(s) for s in lines if _norm_line(s)]
+    out, i = [], 0
+    while i < len(L):
+        ln = L[i]
+        if any(k in ln.upper() for k in ("BREAK ALL", "SHARP CORNERS", "RADIUS", "CHAMFER", "AS SHOWN")):
             i += 1
             continue
-
         qty = 1
-        mqty = _QTY_LEAD.match(ln)
+        mqty = _RE_QTY_LEAD.match(ln)
         if mqty:
             qty = int(mqty.group(1))
-            ln = ln[mqty.end() :].strip()
-            upper = ln.upper()
-
-        mtap = RE_TAP.search(ln)
+            ln = ln[mqty.end():].strip()
+        mtap = _RE_TAP.search(ln)
         if mtap:
             thread = mtap.group(2).replace(" ", "")
-            tail = " ".join(materialized[i : i + 3])
+            tail = " ".join(L[i:i+3])
             desc = f"{thread} TAP"
-            if RE_THRU.search(tail):
+            if _RE_THRU.search(tail):
                 desc += " THRU"
-            md = RE_DEPTH.search(tail)
+            md = _RE_DEPTH.search(tail)
             if md and md.group(1):
                 desc += f' × {float(md.group(1)):.2f}"'
-            ms = _FROM_SIDE.search(tail)
+            ms = _RE_FROM_SIDE.search(tail)
             if ms:
                 desc += f' FROM {ms.group(1).upper()}'
             out.append({"hole": "", "ref": "", "qty": qty, "desc": desc})
             i += 1
             continue
-
-        if RE_CBORE.search(ln):
-            tail = " ".join(materialized[max(0, i - 1) : i + 2])
-            mda = _PAREN_DIA.search(tail) or _MM_IN_DIA.search(tail) or RE_DIA.search(tail) or _RE_DIA_ANY_FALLBACK.search(tail)
+        if _RE_CBORE.search(ln):
+            tail = " ".join(L[max(0, i-1):i+2])
+            mda = _RE_DIA_ANY.search(tail)
             dia = None
             if mda:
-                for group in mda.groups():
-                    if group:
-                        try:
-                            dia = float(group)
-                        except Exception:
-                            continue
+                for g in mda.groups():
+                    if g:
+                        dia = float(g)
                         break
             desc = (f"{dia:.4f} C’BORE" if dia is not None else "C’BORE")
-            md = RE_DEPTH.search(tail)
+            md = _RE_DEPTH.search(tail)
             if md and md.group(1):
                 desc += f' × {float(md.group(1)):.2f}"'
-            ms = _FROM_SIDE.search(tail)
+            ms = _RE_FROM_SIDE.search(tail)
             if ms:
                 desc += f' FROM {ms.group(1).upper()}'
             out.append({"hole": "", "ref": "", "qty": qty, "desc": desc})
             i += 1
             continue
-
-        if any(token in upper for token in ("C' DRILL", "C’DRILL", "CENTER DRILL", "SPOT DRILL")):
-            tail = " ".join(materialized[i : i + 2])
-            md = RE_DEPTH.search(tail)
+        if any(k in ln.upper() for k in ("C' DRILL", "C’DRILL", "CENTER DRILL", "SPOT DRILL")):
+            tail = " ".join(L[i:i+2])
+            md = _RE_DEPTH.search(tail)
             desc = "C’DRILL" + (f' × {float(md.group(1)):.2f}"' if (md and md.group(1)) else "")
             out.append({"hole": "", "ref": "", "qty": qty, "desc": desc})
             i += 1
             continue
-
-        if "DRILL" in upper and RE_THRU.search(ln):
-            mda = _PAREN_DIA.search(ln) or _MM_IN_DIA.search(ln) or RE_DIA.search(ln) or _RE_DIA_ANY_FALLBACK.search(ln)
+        if "DRILL" in ln.upper() and _RE_THRU.search(ln):
+            mda = _RE_DIA_ANY.search(ln)
             ref = ""
             if mda:
-                for group in mda.groups():
-                    if group:
-                        ref = group
+                for g in mda.groups():
+                    if g:
+                        ref = g
                         break
             out.append({"hole": "", "ref": ref, "qty": qty, "desc": (f"{ref} THRU").strip()})
             i += 1
             continue
-
         i += 1
-
     return _coalesce_rows(out)
 
 
-def _collect_chart_lines_context(
-    result: Mapping[str, Any] | None,
-    breakdown: Mapping[str, Any] | None,
-    geo: Mapping[str, Any] | None,
-) -> list[str]:
-    merged: list[str] = []
-    seen: set[str] = set()
-    for container in (geo, breakdown, result):
-        if not isinstance(container, _MappingABC):
+def _collect_chart_lines_context(*containers) -> list[str]:
+    keys = ("chart_lines", "hole_table_lines", "chart_text_lines", "hole_chart_lines")
+    merged, seen = [], set()
+    for d in containers:
+        if not isinstance(d, dict):
             continue
-        for key in ("chart_lines", "hole_table_lines", "chart_text_lines", "hole_chart_lines"):
-            candidate = container.get(key)
-            if not isinstance(candidate, list):
-                continue
-            for entry in candidate:
-                if not isinstance(entry, str):
-                    continue
-                if entry in seen:
-                    continue
-                seen.add(entry)
-                merged.append(entry)
+        for k in keys:
+            v = d.get(k)
+            if isinstance(v, list) and all(isinstance(x, str) for x in v):
+                for s in v:
+                    if s not in seen:
+                        seen.add(s)
+                        merged.append(s)
     return merged
 
 
