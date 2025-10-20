@@ -1751,18 +1751,6 @@ EXTRA_DETAIL_RE = re.compile(r"^includes\b.*extras\b", re.IGNORECASE)
 # Helpers: formatting + removal card + per-hole lines (no material per line)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    """Best-effort float coercion used in multiple pricing paths."""
-
-    try:
-        coerced = float(value or 0.0)
-    except Exception:
-        return default
-    if math.isnan(coerced) or math.isinf(coerced):
-        return default
-    return coerced
-
-
 def _ensure_list(value: Any, fallback: Iterable[Any] | None = None) -> list[Any]:
     """Return ``value`` coerced to a list with an optional fallback."""
 
@@ -2322,57 +2310,6 @@ def _pick_mcmaster_plate_sku(
     )
 
 
-def _resolve_mcmaster_plate_for_quote(
-    need_L_in: float | None,
-    need_W_in: float | None,
-    need_T_in: float | None,
-    *,
-    material_key: str,
-    stock_L_in: float | None = None,
-    stock_W_in: float | None = None,
-    stock_T_in: float | None = None,
-    catalog_rows: Sequence[Mapping[str, Any]] | None = None,
-) -> dict[str, Any] | None:
-    """Return a McMaster plate candidate using quote needs and existing stock sizing.
-
-    The quote may already contain rounded stock dimensions. When the direct lookup
-    for the requested blank fails (for example, because the catalog is missing an
-    exact match for the required envelope), we fall back to searching with the
-    previously rounded stock dimensions so that we can still surface the McMaster
-    part number and pricing for that size.
-    """
-
-    candidate: dict[str, Any] | None = None
-
-    if need_L_in and need_W_in and need_T_in:
-        try:
-            candidate = _pick_mcmaster_plate_sku(
-                float(need_L_in),
-                float(need_W_in),
-                float(need_T_in),
-                material_key=material_key,
-                catalog_rows=catalog_rows,
-            )
-        except Exception:
-            candidate = None
-
-    if candidate:
-        return candidate
-
-    if stock_L_in and stock_W_in and stock_T_in:
-        try:
-            return _pick_mcmaster_plate_sku(
-                float(stock_L_in),
-                float(stock_W_in),
-                float(stock_T_in),
-                material_key=material_key,
-                catalog_rows=catalog_rows,
-            )
-        except Exception:
-            return None
-
-    return None
-
 def _compute_pricing_ladder(
     subtotal: float | int | str | None,
     *,
@@ -2812,7 +2749,7 @@ from cad_quoter.domain_models import (
 from cad_quoter.domain_models import (
     normalize_material_key,
 )
-from cad_quoter.coerce import to_float, to_int
+from cad_quoter.coerce import safe_float as _safe_float, to_float, to_int
 from cad_quoter.utils import compact_dict, jdump, json_safe_copy, sdict
 from cad_quoter.utils.text import _match_items_contains
 from cad_quoter.llm_suggest import (
@@ -6975,12 +6912,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if not canonical_key:
             return False
         return canonical_key.startswith("planner_") or canonical_key == "planner_total"
-
-    def _safe_float(value: Any, default: float = 0.0) -> float:
-        try:
-            return float(value or 0.0)
-        except Exception:
-            return default
 
     def _merge_process_meta(
         existing: Mapping[str, Any] | None, incoming: Mapping[str, Any] | Any

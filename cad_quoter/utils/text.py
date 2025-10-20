@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import re
 
-def _to_noncapturing(expr: str) -> str:
+
+def to_noncapturing(expr: str) -> str:
     """Convert every capturing ``(`` to a non-capturing ``(?:``."""
 
     out: list[str] = []
@@ -22,14 +23,17 @@ def _to_noncapturing(expr: str) -> str:
     return "".join(out)
 
 
+_to_noncapturing = to_noncapturing
+
+
 def _match_items_contains(items: "pd.Series", pattern: str) -> "pd.Series":
     """Case-insensitive regex match over Items, with safe fallback."""
 
-    pat = _to_noncapturing(pattern)
+    pat = to_noncapturing(pattern)
     try:
         return items.str.contains(pat, case=False, regex=True, na=False)
     except Exception:
         return items.str.contains(re.escape(pattern), case=False, regex=True, na=False)
 
 
-__all__ = ["_to_noncapturing", "_match_items_contains"]
+__all__ = ["to_noncapturing", "_to_noncapturing", "_match_items_contains"]

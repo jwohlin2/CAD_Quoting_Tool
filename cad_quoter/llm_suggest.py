@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TypeVar, cast
 
-from cad_quoter.coerce import to_float, to_int
+from cad_quoter.coerce import safe_float as _safe_float, to_float, to_int
 from cad_quoter.domain_models import DEFAULT_MATERIAL_DISPLAY
 from cad_quoter.llm_overrides import coerce_bounds
 from cad_quoter.utils import _first_non_none, compact_dict, jdump
@@ -21,20 +21,6 @@ except Exception:  # pragma: no cover - fallback keeps quoting functional
 from cad_quoter.utils.scrap import normalize_scrap_pct
 
 T = TypeVar("T")
-
-
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    """Best-effort float coercion used in multiple pricing paths."""
-
-    try:
-        coerced = float(value or 0.0)
-    except Exception:
-        return default
-    if coerced != coerced or coerced in {float("inf"), float("-inf")}:
-        return default
-    return coerced
-
-
 def _coerce_bool(value: object) -> bool | None:
     if isinstance(value, bool):
         return value
