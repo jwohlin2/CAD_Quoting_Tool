@@ -1087,8 +1087,14 @@ _DIA_TOKEN = re.compile(
 )
 
 
-def _rows_from_ops_summary(geo: dict) -> list[dict]:
-    ops = (geo or {}).get("ops_summary") or {}
+def _rows_from_ops_summary(
+    geo: Mapping[str, Any] | None,
+    *,
+    result: Mapping[str, Any] | None = None,
+    breakdown: Mapping[str, Any] | None = None,
+) -> list[dict]:
+    geo_map: Mapping[str, Any] = geo if isinstance(geo, _MappingABC) else {}
+    ops = (geo_map or {}).get("ops_summary") or {}
     rows = ops.get("rows") if isinstance(ops, dict) else None
     if rows:
         return list(rows)
@@ -1110,6 +1116,11 @@ def _rows_from_ops_summary(geo: dict) -> list[dict]:
                 fallback.append(base)
             if fallback:
                 return fallback
+    chart_lines = _collect_chart_lines_context(result, breakdown, geo_map)
+    if chart_lines:
+        fallback_rows = _build_ops_rows_from_lines_fallback(chart_lines)
+        if fallback_rows:
+            return fallback_rows
     return []
 
 
@@ -1343,11 +1354,13 @@ _THREAD_WITH_NPT_RE = re.compile(
 def _emit_tapping_card(
     lines: list[str],
     *,
-    geo: dict,
+    geo: Mapping[str, Any] | None,
     material_group: str | None,
     speeds_csv: dict | None,
+    result: Mapping[str, Any] | None = None,
+    breakdown: Mapping[str, Any] | None = None,
 ) -> None:
-    rows = _rows_from_ops_summary(geo)
+    rows = _rows_from_ops_summary(geo, result=result, breakdown=breakdown)
     groups: list[dict[str, Any]] = []
     for r in rows:
         desc = str(r.get("desc", ""))
@@ -1427,11 +1440,13 @@ def _emit_tapping_card(
 def _emit_counterbore_card(
     lines: list[str],
     *,
-    geo: dict,
+    geo: Mapping[str, Any] | None,
     material_group: str | None,
     speeds_csv: dict | None,
+    result: Mapping[str, Any] | None = None,
+    breakdown: Mapping[str, Any] | None = None,
 ) -> None:
-    rows = _rows_from_ops_summary(geo)
+    rows = _rows_from_ops_summary(geo, result=result, breakdown=breakdown)
     groups: defaultdict[tuple[float, str, float | None], int] = defaultdict(int)
     order: list[tuple[float, str, float | None]] = []
     for r in rows:
@@ -1482,11 +1497,13 @@ def _emit_counterbore_card(
 def _emit_spot_and_jig_cards(
     lines: list[str],
     *,
-    geo: dict,
+    geo: Mapping[str, Any] | None,
     material_group: str | None,
     speeds_csv: dict | None,
+    result: Mapping[str, Any] | None = None,
+    breakdown: Mapping[str, Any] | None = None,
 ) -> None:
-    rows = _rows_from_ops_summary(geo)
+    rows = _rows_from_ops_summary(geo, result=result, breakdown=breakdown)
     spot_qty = 0
     spot_depth: float | None = None
     for r in rows:
@@ -1543,9 +1560,11 @@ def _hole_table_section_present(lines: Sequence[str], header: str) -> bool:
 def _emit_hole_table_ops_cards(
     lines: list[str],
     *,
-    geo: dict,
+    geo: Mapping[str, Any] | None,
     material_group: str | None,
     speeds_csv: dict | None,
+    result: Mapping[str, Any] | None = None,
+    breakdown: Mapping[str, Any] | None = None,
 ) -> None:
     if not _hole_table_section_present(lines, "MATERIAL REMOVAL – TAPPING"):
         _emit_tapping_card(
@@ -1553,6 +1572,8 @@ def _emit_hole_table_ops_cards(
             geo=geo,
             material_group=material_group,
             speeds_csv=speeds_csv,
+            result=result,
+            breakdown=breakdown,
         )
     if not _hole_table_section_present(lines, "MATERIAL REMOVAL – COUNTERBORE"):
         _emit_counterbore_card(
@@ -1560,6 +1581,8 @@ def _emit_hole_table_ops_cards(
             geo=geo,
             material_group=material_group,
             speeds_csv=speeds_csv,
+            result=result,
+            breakdown=breakdown,
         )
     if not _hole_table_section_present(lines, "MATERIAL REMOVAL – SPOT (CENTER DRILL)"):
         _emit_spot_and_jig_cards(
@@ -1567,6 +1590,8 @@ def _emit_hole_table_ops_cards(
             geo=geo,
             material_group=material_group,
             speeds_csv=speeds_csv,
+            result=result,
+            breakdown=breakdown,
         )
 
 
@@ -10994,6 +11019,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         geo=geo_map,
         material_group=material_group,
         speeds_csv=None,
+        result=result,
+        breakdown=breakdown,
     )
 
     # PROBE: show how many HOLE-TABLE rows we have (temporary)
@@ -21137,6 +21164,150 @@ def _extract_text_lines_from_ezdxf_doc(doc: Any) -> list[str]:
         start = upper.index("HOLE TABLE")
         joined = joined[start:]
     return [ln for ln in joined.splitlines() if ln.strip()]
+
+
+# ===== Fallback HOLE-TABLE row builder (app layer) =========================
+
+_RE_DIA_ANY_FALLBACK = re.compile(
+    r"(?:Ø|⌀|DIA|O)\s*([0-9.]+)|\(([0-9.]+)\s*Ø?\)|\b([0-9.]+)\b"
+)
+
+
+def _coalesce_rows(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    agg: dict[tuple[str, str], int] = {}
+    order: list[tuple[str, str]] = []
+    for entry in rows:
+        if not isinstance(entry, _MappingABC):
+            continue
+        desc = str(entry.get("desc", ""))
+        ref = str(entry.get("ref", ""))
+        qty_val = int(_coerce_float_or_none(entry.get("qty")) or 0)
+        if qty_val <= 0:
+            continue
+        key = (desc, ref)
+        if key not in agg:
+            agg[key] = qty_val
+            order.append(key)
+        else:
+            agg[key] += qty_val
+    return [
+        {"hole": "", "ref": ref, "qty": agg[(desc, ref)], "desc": desc}
+        for (desc, ref) in order
+    ]
+
+
+def _build_ops_rows_from_lines_fallback(lines: Iterable[str]) -> list[dict[str, Any]]:
+    materialized = [
+        _norm_line(text)
+        for text in lines
+        if isinstance(text, str) and _norm_line(text)
+    ]
+    if not materialized:
+        return []
+
+    out: list[dict[str, Any]] = []
+    i = 0
+    while i < len(materialized):
+        ln = materialized[i]
+        upper = ln.upper()
+        if any(token in upper for token in ("BREAK ALL", "SHARP CORNERS", "RADIUS", "CHAMFER", "AS SHOWN")):
+            i += 1
+            continue
+
+        qty = 1
+        mqty = _QTY_LEAD.match(ln)
+        if mqty:
+            qty = int(mqty.group(1))
+            ln = ln[mqty.end() :].strip()
+            upper = ln.upper()
+
+        mtap = RE_TAP.search(ln)
+        if mtap:
+            thread = mtap.group(2).replace(" ", "")
+            tail = " ".join(materialized[i : i + 3])
+            desc = f"{thread} TAP"
+            if RE_THRU.search(tail):
+                desc += " THRU"
+            md = RE_DEPTH.search(tail)
+            if md and md.group(1):
+                desc += f' × {float(md.group(1)):.2f}"'
+            ms = _FROM_SIDE.search(tail)
+            if ms:
+                desc += f' FROM {ms.group(1).upper()}'
+            out.append({"hole": "", "ref": "", "qty": qty, "desc": desc})
+            i += 1
+            continue
+
+        if RE_CBORE.search(ln):
+            tail = " ".join(materialized[max(0, i - 1) : i + 2])
+            mda = _PAREN_DIA.search(tail) or _MM_IN_DIA.search(tail) or RE_DIA.search(tail) or _RE_DIA_ANY_FALLBACK.search(tail)
+            dia = None
+            if mda:
+                for group in mda.groups():
+                    if group:
+                        try:
+                            dia = float(group)
+                        except Exception:
+                            continue
+                        break
+            desc = (f"{dia:.4f} C’BORE" if dia is not None else "C’BORE")
+            md = RE_DEPTH.search(tail)
+            if md and md.group(1):
+                desc += f' × {float(md.group(1)):.2f}"'
+            ms = _FROM_SIDE.search(tail)
+            if ms:
+                desc += f' FROM {ms.group(1).upper()}'
+            out.append({"hole": "", "ref": "", "qty": qty, "desc": desc})
+            i += 1
+            continue
+
+        if any(token in upper for token in ("C' DRILL", "C’DRILL", "CENTER DRILL", "SPOT DRILL")):
+            tail = " ".join(materialized[i : i + 2])
+            md = RE_DEPTH.search(tail)
+            desc = "C’DRILL" + (f' × {float(md.group(1)):.2f}"' if (md and md.group(1)) else "")
+            out.append({"hole": "", "ref": "", "qty": qty, "desc": desc})
+            i += 1
+            continue
+
+        if "DRILL" in upper and RE_THRU.search(ln):
+            mda = _PAREN_DIA.search(ln) or _MM_IN_DIA.search(ln) or RE_DIA.search(ln) or _RE_DIA_ANY_FALLBACK.search(ln)
+            ref = ""
+            if mda:
+                for group in mda.groups():
+                    if group:
+                        ref = group
+                        break
+            out.append({"hole": "", "ref": ref, "qty": qty, "desc": (f"{ref} THRU").strip()})
+            i += 1
+            continue
+
+        i += 1
+
+    return _coalesce_rows(out)
+
+
+def _collect_chart_lines_context(
+    result: Mapping[str, Any] | None,
+    breakdown: Mapping[str, Any] | None,
+    geo: Mapping[str, Any] | None,
+) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for container in (geo, breakdown, result):
+        if not isinstance(container, _MappingABC):
+            continue
+        for key in ("chart_lines", "hole_table_lines", "chart_text_lines", "hole_chart_lines"):
+            candidate = container.get(key)
+            if not isinstance(candidate, list):
+                continue
+            for entry in candidate:
+                if not isinstance(entry, str):
+                    continue
+                if entry in seen:
+                    continue
+                seen.add(entry)
+                merged.append(entry)
+    return merged
 
 
 def _build_ops_rows_from_chart_lines(chart_lines: list[str]) -> list[dict]:
