@@ -9463,21 +9463,40 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     # Render MATERIAL REMOVAL card + TIME PER HOLE lines (replace legacy Time block)
     # NOTE: Patch 3 keeps the hole-table hook active so downstream cards continue to render.
     append_lines(removal_card_lines)
-    geo_map = ((breakdown or {}).get("geo") or (result or {}).get("geo") or {})
+
+    # === HOLE-TABLE CARDS (safe wrapper, no undefined names) ===
+    try:
+        # Try to pull context from whatever exists in this scope
+        # (these names may or may not exist; _first_dict ignores Nones)
+        ctx_a = locals().get("breakdown")
+        ctx_b = locals().get("result")
+        ctx_c = locals().get("quote")
+        ctx_d = locals().get("job")
+        ctx_e = locals().get("pricing_ctx")
+
+        ctx = _first_dict(ctx_a, ctx_b, ctx_c, ctx_d, ctx_e)
+        geo_map = _get_geo_map(ctx, locals().get("geo"), ctx_a, ctx_b)
+        material_group = _get_material_group(ctx, ctx_a, ctx_b)
+
+        # Probe
+        ops_rows = (((geo_map or {}).get("ops_summary") or {}).get("rows") or [])
+        append_line(f"[DEBUG] ops_rows={len(ops_rows)}")
+    except Exception as e:
+        append_line(f"[DEBUG] ops_probe_failed={e.__class__.__name__}: {e}")
+        geo_map = {}
+        material_group = None
+        ops_rows = []
+
     if isinstance(geo_map, _MappingABC) and not isinstance(geo_map, dict):
         geo_map = dict(geo_map)
 
-    material_group = (
-        (result or {}).get("material_group")
-        or (breakdown or {}).get("material_group")
-    )
     _emit_hole_table_ops_cards(
         lines,
         geo=geo_map,
         material_group=material_group,
         speeds_csv=None,
-        result=result,
-        breakdown=breakdown,
+        result=locals().get("result"),
+        breakdown=locals().get("breakdown"),
     )
 
     # PROBE: show how many HOLE-TABLE rows we have (temporary)
