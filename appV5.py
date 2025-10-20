@@ -258,6 +258,90 @@ def _rpm_from_sfm(sfm: float, d_in: float) -> float:
         return 0.0
 
 
+# === FEEDS/SPEEDS + THREAD HELPERS =========================================
+_NUMBER_MAJOR = {
+    "#0": 0.0600,
+    "#1": 0.0730,
+    "#2": 0.0860,
+    "#3": 0.0990,
+    "#4": 0.1120,
+    "#5": 0.1250,
+    "#6": 0.1380,
+    "#8": 0.1640,
+    "#10": 0.1900,
+    "#12": 0.2160,
+}
+
+
+def _parse_thread_major_in(thread: str) -> float | None:
+    """Return major diameter in inches from '5/16-18', '0.375-24', or '#10-32'."""
+
+    s = (thread or "").strip().upper()
+    m = re.match(r"^(#\d+)\s*-\s*\d+$", s)
+    if m:
+        return _NUMBER_MAJOR.get(m.group(1))
+    m = re.match(r"^(\d+/\d+|\d+(?:\.\d+)?)\s*-\s*\d+$", s)
+    if not m:
+        return None
+    tok = m.group(1)
+    if "/" in tok:
+        num, den = tok.split("/")
+        return float(num) / float(den)
+    return float(tok)
+
+
+def _parse_tpi(thread: str) -> int | None:
+    m = re.search(r"-(\d+)$", (thread or "").strip())
+    return int(m.group(1)) if m else None
+
+
+def _pitch_ipr_from_tpi(tpi: int | None) -> float | None:
+    return (1.0 / float(tpi)) if tpi else None
+
+
+def _round4(x: float | None) -> float | None:
+    return None if x is None else round(x, 4)
+
+
+_DEFAULT_SFM = {
+    "tapping": 60.0,
+    "counterbore": 150.0,
+    "spot": 200.0,
+}
+
+_DEFAULT_IPR = {
+    "tapping": None,
+    "counterbore": 0.005,
+    "spot": 0.004,
+}
+
+
+def _lookup_sfm_ipr(
+    op: str,
+    diameter_in: float | None,
+    material_group: str | None,
+    speeds_csv: dict | None,
+) -> tuple[float, float | None]:
+    """Fallback lookups for SFM/IPR until CSV integration is wired."""
+
+    op = (op or "").lower()
+    sfm = _DEFAULT_SFM.get(op, 100.0)
+    ipr = _DEFAULT_IPR.get(op, None)
+    return sfm, ipr
+
+
+def _rpm_from_sfm_diam(sfm: float, dia_in: float | None) -> float | None:
+    if not dia_in or dia_in <= 0:
+        return None
+    return (sfm * 3.82) / float(dia_in)
+
+
+def _ipm_from_rpm_ipr(rpm: float | None, ipr: float | None) -> float | None:
+    if rpm is None or ipr is None:
+        return None
+    return rpm * ipr
+
+
 def _render_removal_card(
     append_line: Callable[[str], None],
     *,
@@ -764,179 +848,213 @@ def _compute_drilling_removal_section(
 
 
 # --- HOLE-TABLE OPS → CARDS (tapping / counterbore / spot / jig) -------------
-_THREAD_RE = re.compile(r'((?:#\d+)|(?:\d+/\d+)|(?:\d+(?:\.\d+)?))-\s*(\d+)\s*TAP', re.I)
-_CBORE_RE = re.compile(r"(?:^|[ ;])([0-9.]+)\s*(?:C[\'’]?\s*BORE|CBORE)", re.I)
-_DEPTH_RE = re.compile(r'[×x]\s*([0-9.]+)\b')  # e.g. × .62
-_SIDE_BACK = re.compile(r'\bFROM\s+BACK\b', re.I)
-_SIDE_FRONT = re.compile(r'\bFROM\s+FRONT\b', re.I)
-_JIG_RE = re.compile(r'\bJIG\s*GRIND\b', re.I)
-_SPOT_RE = re.compile(r"(?:C[\'’]?\s*DRILL|CENTER\s*DRILL|SPOT\s*DRILL|SPOT)", re.I)
+_SIDE_BACK = re.compile(r"\bFROM\s+BACK\b", re.I)
+_SIDE_FRONT = re.compile(r"\bFROM\s+FRONT\b", re.I)
+_CBORE_RE = re.compile(r"(?:^|[ ;])([0-9.]+)\s*(?:C[\'’]?\s*BORE|CBORE|COUNTER\s*BORE)", re.I)
+_DEPTH_TOKEN = re.compile(r"[×x]\s*([0-9.]+)\b")  # e.g., × .62
 
 
-def _norm(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "")).strip()
+def _rows_from_ops_summary(geo: dict) -> list[dict]:
+    ops = (geo or {}).get("ops_summary") or {}
+    rows = ops.get("rows") if isinstance(ops, dict) else None
+    return rows or []
 
 
-def _ops_rows_from_geo(geo_map: Mapping[str, Any] | None) -> list[dict]:
-    if not isinstance(geo_map, _MappingABC):
-        return []
-    ops = geo_map.get("ops_summary") or {}
-    rows = ops.get("rows") if isinstance(ops, _MappingABC) else None
-    return [dict(r) for r in rows] if isinstance(rows, list) else []
-
-
-def _side(desc: str) -> str:
-    if _SIDE_BACK.search(desc):
+def _side_of(desc: str) -> str:
+    if _SIDE_BACK.search(desc or ""):
         return "BACK"
-    if _SIDE_FRONT.search(desc):
+    if _SIDE_FRONT.search(desc or ""):
         return "FRONT"
-    return "FRONT"  # default if not specified
+    return "FRONT"
 
 
-def _build_tap_groups(rows: list[dict]) -> list[dict]:
-    groups: dict[tuple[str, str, float | None], dict[str, Any]] = {}
+def _emit_tapping_card(
+    lines: list[str],
+    *,
+    geo: dict,
+    material_group: str | None,
+    speeds_csv: dict | None,
+) -> None:
+    rows = _rows_from_ops_summary(geo)
+    groups = []
     for r in rows:
-        d = _norm(str(r.get("desc", "")))
-        m = _THREAD_RE.search(d)
-        if not m:
+        desc = str(r.get("desc", ""))
+        if "TAP" not in desc.upper():
             continue
-        thread = f"{m.group(1)}-{m.group(2)}"
-        side = _side(d)
-        depth = _DEPTH_RE.search(d)
-        depth_in = float(depth.group(1)) if depth else None
-        pilot = _norm(str(r.get("ref") or ""))
-        key = (thread, side, depth_in)
-        groups.setdefault(key, {"qty": 0, "pilot": pilot})
-        groups[key]["qty"] += int(r.get("qty") or 0)
-        if not groups[key].get("pilot") and pilot:
-            groups[key]["pilot"] = pilot
-    out: list[dict[str, Any]] = []
-    for (thread, side, depth_in), info in groups.items():
-        out.append(
+        qty = int(r.get("qty") or 0)
+        side = _side_of(desc)
+        mth = re.search(
+            r"((?:#\d+)|(?:\d+/\d+)|(?:\d+(?:\.\d+)?))\s*-\s*(\d+)\s*TAP",
+            desc,
+            re.I,
+        )
+        if not mth:
+            continue
+        thread = f"{mth.group(1)}-{mth.group(2)}"
+        depth_m = _DEPTH_TOKEN.search(desc)
+        depth_in = float(depth_m.group(1)) if depth_m else None
+        pilot = (r.get("ref") or "").strip()
+        major = _parse_thread_major_in(thread)
+        tpi = _parse_tpi(thread)
+        pitch = _pitch_ipr_from_tpi(tpi)
+        sfm, _ipr_default = _lookup_sfm_ipr("tapping", major, material_group, speeds_csv)
+        rpm = _rpm_from_sfm_diam(sfm, major)
+        ipm = _ipm_from_rpm_ipr(rpm, pitch)
+        groups.append(
             {
                 "thread": thread,
                 "side": side,
+                "qty": qty,
                 "depth_in": depth_in,
-                "qty": info["qty"],
-                "pilot": info.get("pilot"),
+                "pilot": pilot,
+                "pitch_ipr": _round4(pitch),
+                "rpm": None if rpm is None else round(rpm),
+                "ipm": _round4(ipm),
             }
         )
-    # stable sort by thread then side
-    return sorted(out, key=lambda g: (g["thread"], g["side"]))
-
-
-def _build_cbore_groups(rows: list[dict]) -> list[dict]:
-    groups: dict[tuple[float, str, float | None], int] = {}
-    for r in rows:
-        d = _norm(str(r.get("desc", "")))
-        if "CBORE" not in d.upper() and "C'BORE" not in d.upper() and "COUNTER" not in d.upper():
-            continue
-        m = _CBORE_RE.search(d)
-        if not m:
-            continue
-        diam = float(m.group(1))
-        side = _side(d)
-        depth = _DEPTH_RE.search(d)
-        depth_in = float(depth.group(1)) if depth else None
-        key = (diam, side, depth_in)
-        groups[key] = groups.get(key, 0) + int(r.get("qty") or 0)
-    out: list[dict[str, Any]] = []
-    for (diam, side, depth_in), qty in groups.items():
-        out.append({"diam_in": diam, "side": side, "depth_in": depth_in, "qty": qty})
-    return sorted(out, key=lambda g: (g["diam_in"], g["side"]))
-
-
-def _count_misc(rows: list[dict]) -> tuple[int, int]:
-    jig = spot = 0
-    for r in rows:
-        d = _norm(str(r.get("desc", "")))
-        if _JIG_RE.search(d):
-            jig += int(r.get("qty") or 0)
-        if _SPOT_RE.search(d) and ("TAP" not in d.upper()) and ("THRU" not in d.upper()):
-            # pure spot (center-drill) rows only
-            spot += int(r.get("qty") or 0)
-    return jig, spot
-
-
-def _compute_hole_table_ops_cards(*, geo: Mapping[str, Any] | None) -> list[str]:
-    """Return lines for TAP / C'BORE / SPOT / JIG cards from geo.ops_summary.rows."""
-
-    rows = _ops_rows_from_geo(geo)
-    if not rows:
-        return []
-    lines: list[str] = []
-
-    # TAPPING
-    taps = _build_tap_groups(rows)
-    total_taps = sum(g["qty"] for g in taps)
-    front_taps = sum(g["qty"] for g in taps if g["side"] == "FRONT")
-    back_taps = sum(g["qty"] for g in taps if g["side"] == "BACK")
+    if not groups:
+        return
+    total = sum(g["qty"] for g in groups)
+    front = sum(g["qty"] for g in groups if g["side"] == "FRONT")
+    back = sum(g["qty"] for g in groups if g["side"] == "BACK")
     lines += [
         "MATERIAL REMOVAL – TAPPING",
         "=" * 64,
         "Inputs",
         "  Ops ............... Tapping (front + back), pre-drill counted in drilling",
-        f"  Taps .............. {total_taps} total  → {front_taps} front, {back_taps} back",
-        "  Threads ........... "
-        + ", ".join(sorted({g["thread"] for g in taps}))
-        if taps
-        else "  Threads ........... -",
+        f"  Taps .............. {total} total  → {front} front, {back} back",
+        "  Threads ........... " + ", ".join(sorted({g["thread"] for g in groups})),
         "",
+        "TIME PER HOLE – TAP GROUPS",
+        "-" * 66,
     ]
-    lines += ["TIME PER HOLE – TAP GROUPS", "-" * 66]
-    for g in taps:
+    for g in groups:
+        depth_txt = "THRU" if g["depth_in"] is None else f'{g["depth_in"]:.2f}"'
+        pitch_txt = "-" if g["pitch_ipr"] is None else f"{g['pitch_ipr']:.4f} ipr"
+        rpm_txt = "-" if g["rpm"] is None else f"{g['rpm']} rpm"
+        ipm_txt = "-" if g["ipm"] is None else f"{g['ipm']:.3f} ipm"
         pilot = f' | pilot {g["pilot"]}' if g.get("pilot") else ""
-        depth = "THRU" if g["depth_in"] is None else f'{g["depth_in"]:.2f}"'
         lines.append(
-            f'{g["thread"]} × {g["qty"]:d}  ({g["side"]}){pilot} | depth {depth} | pitch — | t/hole — | group — '
+            f'{g["thread"]} × {g["qty"]}  ({g["side"]}){pilot} | depth {depth_txt} | {pitch_txt} | {rpm_txt} | {ipm_txt} | t/hole — | group — '
         )
     lines.append("")
 
-    # COUNTERBORE
-    cbores = _build_cbore_groups(rows)
-    total_cb = sum(g["qty"] for g in cbores)
-    front_cb = sum(g["qty"] for g in cbores if g["side"] == "FRONT")
-    back_cb = sum(g["qty"] for g in cbores if g["side"] == "BACK")
+
+def _emit_counterbore_card(
+    lines: list[str],
+    *,
+    geo: dict,
+    material_group: str | None,
+    speeds_csv: dict | None,
+) -> None:
+    rows = _rows_from_ops_summary(geo)
+    groups = defaultdict(int)
+    details: dict[tuple[float, str, float | None], str] = {}
+    for r in rows:
+        desc = str(r.get("desc", ""))
+        if "BORE" not in desc.upper():
+            continue
+        m = _CBORE_RE.search(desc)
+        if not m:
+            continue
+        diam_in = float(m.group(1))
+        side = _side_of(desc)
+        depth_m = _DEPTH_TOKEN.search(desc)
+        depth_in = float(depth_m.group(1)) if depth_m else None
+        key = (round(diam_in, 4), side, depth_in)
+        groups[key] += int(r.get("qty") or 0)
+        details[key] = desc
+    if not groups:
+        return
+    items = sorted(groups.items(), key=lambda kv: (kv[0][0], kv[0][1]))
+    total = sum(q for _, q in items)
+    front = sum(q for (k, q) in items if k[1] == "FRONT")
+    back = sum(q for (k, q) in items if k[1] == "BACK")
     lines += [
         "MATERIAL REMOVAL – COUNTERBORE",
         "=" * 64,
         "Inputs",
         "  Ops ............... Counterbore (front + back)",
-        f"  Counterbores ...... {total_cb} total  → {front_cb} front, {back_cb} back",
+        f"  Counterbores ...... {total} total  → {front} front, {back} back",
         "",
         "TIME PER HOLE – C’BORE GROUPS",
         "-" * 66,
     ]
-    for g in cbores:
-        depth = "—" if g["depth_in"] is None else f'{g["depth_in"]:.2f}"'
+    for (diam_in, side, depth_in), qty in items:
+        sfm, ipr = _lookup_sfm_ipr("counterbore", diam_in, material_group, speeds_csv)
+        rpm = _rpm_from_sfm_diam(sfm, diam_in)
+        ipm = _ipm_from_rpm_ipr(rpm, ipr)
+        depth_txt = "—" if depth_in is None else f'{depth_in:.2f}"'
+        rpm_txt = "-" if rpm is None else f"{int(rpm)} rpm"
+        ipm_txt = "-" if ipm is None else f"{ipm:.3f} ipm"
         lines.append(
-            f'Ø{g["diam_in"]:.4f}" × {g["qty"]:d}  ({g["side"]}) | depth {depth} | t/hole — | group — '
+            f'Ø{diam_in:.4f}" × {qty}  ({side}) | depth {depth_txt} | {rpm_txt} | {ipm_txt} | t/hole — | group — '
         )
     lines.append("")
 
-    # SPOT + JIG (compact sections)
-    jig, spot = _count_misc(rows)
-    if spot > 0:
+
+def _emit_spot_and_jig_cards(
+    lines: list[str],
+    *,
+    geo: dict,
+    material_group: str | None,
+    speeds_csv: dict | None,
+) -> None:
+    rows = _rows_from_ops_summary(geo)
+    spot_qty = 0
+    spot_depth_in: float | None = None
+    for r in rows:
+        desc = str(r.get("desc", "")).upper()
+        if ("DRILL" in desc and "C" in desc) and ("THRU" not in desc) and ("TAP" not in desc):
+            m = _DEPTH_TOKEN.search(desc)
+            if m:
+                spot_depth_in = float(m.group(1))
+            spot_qty += int(r.get("qty") or 0)
+    jig_qty = sum(
+        int(r.get("qty") or 0)
+        for r in rows
+        if "JIG GRIND" in str(r.get("desc", "")).upper()
+    )
+    if spot_qty > 0:
+        sfm, ipr = _lookup_sfm_ipr("spot", 0.1875, material_group, speeds_csv)
+        rpm = _rpm_from_sfm_diam(sfm, 0.1875)
+        ipm = _ipm_from_rpm_ipr(rpm, ipr)
+        depth_txt = "—" if spot_depth_in is None else f'{spot_depth_in:.2f}"'
         lines += [
             "MATERIAL REMOVAL – SPOT (CENTER DRILL)",
             "=" * 64,
-            f"Spots .............. {spot} (front-side unless noted)",
+            f"Spots .............. {spot_qty} (front-side unless noted)",
             "TIME PER HOLE – SPOT GROUPS",
             "-" * 66,
-            f"Spot drill × {spot} | t/hole — | group — ",
+            (
+                f"Spot drill × {spot_qty} | depth {depth_txt} | {int(rpm) if rpm else '-'} rpm | {ipm:.3f} ipm"
+                if ipm
+                else f"Spot drill × {spot_qty} | depth {depth_txt} | rpm — | ipm —"
+            ),
             "",
         ]
-    if jig > 0:
+    if jig_qty > 0:
         lines += [
             "MATERIAL REMOVAL – JIG GRIND",
             "=" * 64,
-            f"Jig-grind features . {jig}",
+            f"Jig-grind features . {jig_qty}",
             "TIME PER FEATURE",
             "-" * 66,
-            f"Jig grind × {jig} | t/feat — | group — ",
+            f"Jig grind × {jig_qty} | t/feat — | group — ",
             "",
         ]
-    return lines
+
+
+def _emit_hole_table_ops_cards(
+    lines: list[str],
+    *,
+    geo: dict,
+    material_group: str | None,
+    speeds_csv: dict | None,
+) -> None:
+    _emit_tapping_card(lines, geo=geo, material_group=material_group, speeds_csv=speeds_csv)
+    _emit_counterbore_card(lines, geo=geo, material_group=material_group, speeds_csv=speeds_csv)
+    _emit_spot_and_jig_cards(lines, geo=geo, material_group=material_group, speeds_csv=speeds_csv)
 
 
 def _estimate_drilling_minutes_from_meta(
@@ -10852,8 +10970,25 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     # Render MATERIAL REMOVAL card + TIME PER HOLE lines (replace legacy Time block)
     append_lines(removal_card_lines)
     geo_map = (result or {}).get("geo") or (breakdown or {}).get("geo") or {}
-    lines.extend(_compute_hole_table_ops_cards(geo=geo_map))
-    # _seed_bucket_minutes(breakdown_mutable, tapping_min=0.0, cbore_min=0.0, spot_min=0.0, jig_min=0.0)
+    material_group = (result or {}).get("material_group") or (breakdown or {}).get("material_group")
+    speeds_csv_cache = None  # TODO: pass your already-loaded CSV mapping if you have it
+    _emit_hole_table_ops_cards(
+        lines,
+        geo=geo_map,
+        material_group=material_group,
+        speeds_csv=speeds_csv_cache,
+    )
+    tapping_minutes_total = 0.0
+    cbore_minutes_total = 0.0
+    spot_minutes_total = 0.0
+    jig_minutes_total = 0.0
+    _seed_bucket_minutes(
+        breakdown_mutable,
+        tapping_min=tapping_minutes_total,
+        cbore_min=cbore_minutes_total,
+        spot_min=spot_minutes_total,
+        jig_min=jig_minutes_total,
+    )
     append_line("")
 
     # ---- Pricing ladder ------------------------------------------------------
