@@ -28,6 +28,7 @@ from typing import Any, Mapping, MutableMapping, TYPE_CHECKING
 from collections import Counter, defaultdict
 from collections.abc import (
     Callable,
+    Iterable,
     Iterator,
     Mapping as _MappingABC,
     MutableMapping as _MutableMappingABC,
@@ -196,26 +197,141 @@ from appkit.debug.debug_tables import (
     _accumulate_drill_debug,
     append_removal_debug_if_enabled,
 )
-from appkit.ui.services import (
-    GeometryLoader,
-    LLMServices,
-    PricingRegistry,
-    UIConfiguration,
-    infer_geo_override_defaults,
-)
-from appkit.utils import (
-    _fmt_rng,
-    _ipm_from_rpm_ipr,
-    _jsonify_debug_summary,
-    _jsonify_debug_value,
-    _lookup_sfm_ipr,
-    _first_numeric_or_none,
-    _parse_length_to_mm,
-    _parse_thread_major_in,
-    _parse_tpi,
-    _rpm_from_sfm,
-    _rpm_from_sfm_diam,
-)
+
+
+PROGRAMMING_PER_PART_LABEL = "Programming (per part)"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Helpers: formatting + removal card + per-hole lines (no material per line)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _jsonify_debug_value(value: Any, depth: int = 0, max_depth: int = 6) -> Any:
+    """Proxy to :func:`appkit.debug.debug_tables._jsonify_debug_value`."""
+
+    return _debug_jsonify_value(value, depth=depth, max_depth=max_depth)
+
+
+def _jsonify_debug_summary(summary: Mapping[str, Any]) -> dict[str, Any]:
+    """Proxy to :func:`appkit.debug.debug_tables._jsonify_debug_summary`."""
+
+    return _debug_jsonify_summary(summary)
+
+
+def _first_numeric_or_none(*values: Any) -> float | None:
+    """Return the first value that can be coerced to a float, or ``None``."""
+
+    for value in values:
+        numeric = _coerce_float_or_none(value)
+        if numeric is not None:
+            return float(numeric)
+    return None
+
+
+# --- STOCK & MATERIAL HELPERS ------------------------------------------------
+
+def _fmt_rng(vals, prec=2, unit: str | None = None):
+    vs = []
+    for v in (vals or []):
+        try:
+            f = float(v)
+            if math.isfinite(f):
+                vs.append(f)
+        except Exception:
+            pass
+    if not vs:
+        return "-"
+    lo, hi = min(vs), max(vs)
+    s = (
+        f"{lo:.{prec}f}"
+        if abs(hi - lo) < 10 ** (-prec)
+        else f"{lo:.{prec}f}-{hi:.{prec}f}"
+    )
+    return f"{s}{unit}" if unit else s
+
+
+def _rpm_from_sfm(sfm: float, d_in: float) -> float:
+    try:
+        d = max(float(d_in), 1e-6)
+        return (float(sfm) * 12.0) / (math.pi * d)
+    except Exception:
+        return 0.0
+
+
+# === THREAD + FEEDS/SPEEDS HELPERS ==========================================
+_NUMBER_MAJOR = {
+    "#0": 0.0600,
+    "#1": 0.0730,
+    "#2": 0.0860,
+    "#3": 0.0990,
+    "#4": 0.1120,
+    "#5": 0.1250,
+    "#6": 0.1380,
+    "#8": 0.1640,
+    "#10": 0.1900,
+    "#12": 0.2160,
+}
+
+
+def _parse_thread_major_in(thread: str) -> float | None:
+    """Return major diameter in inches from '5/16-18', '0.375-24', or '#10-32'."""
+
+    s = (thread or "").strip().upper()
+    m = re.match(r"^(#\d+)\s*-\s*\d+$", s)
+    if m:
+        return _NUMBER_MAJOR.get(m.group(1))
+    m = re.match(r"^(\d+/\d+|\d+(?:\.\d+)?)\s*-\s*\d+$", s)
+    if not m:
+        return None
+    tok = m.group(1)
+    if "/" in tok:
+        num, den = tok.split("/")
+        return float(num) / float(den)
+    return float(tok)
+
+
+def _parse_tpi(thread: str) -> int | None:
+    m = re.search(r"-(\d+)$", (thread or "").strip())
+    return int(m.group(1)) if m else None
+
+
+_DEFAULT_SFM = {
+    "tapping": 60.0,
+    "counterbore": 150.0,
+    "spot": 200.0,
+}
+
+_DEFAULT_IPR = {
+    "tapping": None,
+    "counterbore": 0.005,
+    "spot": 0.004,
+}
+
+
+def _lookup_sfm_ipr(
+    op: str,
+    diameter_in: float | None,
+    material_group: str | None,
+    speeds_csv: dict | None,
+) -> tuple[float, float | None]:
+    # TODO: if you have a loaded CSV mapping, consult it here; fallback below
+    op = (op or "").lower()
+    return _DEFAULT_SFM.get(op, 100.0), _DEFAULT_IPR.get(op, None)
+
+
+def _rpm_from_sfm_diam(sfm: float, dia_in: float | None) -> float | None:
+    if not dia_in or dia_in <= 0:
+        return None
+    return (sfm * 3.82) / float(dia_in)
+
+
+def _ipm_from_rpm_ipr(rpm: float | None, ipr: float | None) -> float | None:
+    if rpm is None or ipr is None:
+        return None
+    return rpm * ipr
+
+
 def _render_removal_card(
     append_line: Callable[[str], None],
     *,
@@ -1347,6 +1463,16 @@ def _emit_spot_and_jig_cards(
         ]
 
 
+def _hole_table_section_present(lines: Sequence[str], header: str) -> bool:
+    if not header:
+        return False
+    header_norm = header.strip().upper()
+    for existing in lines:
+        if isinstance(existing, str) and existing.strip().upper() == header_norm:
+            return True
+    return False
+
+
 def _emit_hole_table_ops_cards(
     lines: list[str],
     *,
@@ -1354,24 +1480,27 @@ def _emit_hole_table_ops_cards(
     material_group: str | None,
     speeds_csv: dict | None,
 ) -> None:
-    _emit_tapping_card(
-        lines,
-        geo=geo,
-        material_group=material_group,
-        speeds_csv=speeds_csv,
-    )
-    _emit_counterbore_card(
-        lines,
-        geo=geo,
-        material_group=material_group,
-        speeds_csv=speeds_csv,
-    )
-    _emit_spot_and_jig_cards(
-        lines,
-        geo=geo,
-        material_group=material_group,
-        speeds_csv=speeds_csv,
-    )
+    if not _hole_table_section_present(lines, "MATERIAL REMOVAL – TAPPING"):
+        _emit_tapping_card(
+            lines,
+            geo=geo,
+            material_group=material_group,
+            speeds_csv=speeds_csv,
+        )
+    if not _hole_table_section_present(lines, "MATERIAL REMOVAL – COUNTERBORE"):
+        _emit_counterbore_card(
+            lines,
+            geo=geo,
+            material_group=material_group,
+            speeds_csv=speeds_csv,
+        )
+    if not _hole_table_section_present(lines, "MATERIAL REMOVAL – SPOT (CENTER DRILL)"):
+        _emit_spot_and_jig_cards(
+            lines,
+            geo=geo,
+            material_group=material_group,
+            speeds_csv=speeds_csv,
+        )
 
 
 def _estimate_drilling_minutes_from_meta(
@@ -6052,8 +6181,8 @@ def _process_label(key: str | None) -> str:
         "saw_waterjet": "saw / waterjet",
         "counter_bore": "counterbore",
         "counter_sink": "countersink",
-        "prog_amortized": "programming (amortized)",
-        "programming_amortized": "programming (amortized)",
+        "prog_amortized": PROGRAMMING_PER_PART_LABEL.lower(),
+        "programming_amortized": PROGRAMMING_PER_PART_LABEL.lower(),
         "fixture_build_amortized": "fixture build (amortized)",
     }.get(canon, canon)
     if alias == "saw / waterjet":
@@ -6068,11 +6197,13 @@ def _canonical_hour_label(label: str | None) -> str:
     text = re.sub(r"\s+", " ", str(label or "").strip())
     if not text:
         return ""
+    canonical_label, _ = _canonical_amortized_label(text)
+    if canonical_label:
+        text = canonical_label
     lookup = {
         "programming": "Programming",
         "programming (lot)": "Programming",
-        "programming (amortized)": "Programming (amortized)",
-        "programming (amortized per part)": "Programming (amortized)",
+        PROGRAMMING_PER_PART_LABEL.lower(): PROGRAMMING_PER_PART_LABEL,
         "fixture build": "Fixture Build",
         "fixture build (lot)": "Fixture Build",
         "fixture build (amortized)": "Fixture Build (amortized)",
@@ -8806,21 +8937,21 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         nre["programming_per_lot"] = computed_programming_per_lot
     if programming_cost_per_part > 0:
         try:
-            labor_cost_totals["Programming (amortized)"] = programming_cost_per_part
+            labor_cost_totals[PROGRAMMING_PER_PART_LABEL] = programming_cost_per_part
         except Exception:
-            labor_cost_totals["Programming (amortized)"] = programming_cost_per_part
-    elif _safe_float(labor_cost_totals.get("Programming (amortized)")) <= 0:
+            labor_cost_totals[PROGRAMMING_PER_PART_LABEL] = programming_cost_per_part
+    elif _safe_float(labor_cost_totals.get(PROGRAMMING_PER_PART_LABEL)) <= 0:
         per_lot_source = computed_programming_per_lot
         if per_lot_source <= 0 and nre_programming_per_lot > 0:
             per_lot_source = nre_programming_per_lot
         if per_lot_source <= 0 and programming_per_lot_val > 0:
             per_lot_source = programming_per_lot_val
         try:
-            labor_cost_totals["Programming (amortized)"] = round(
+            labor_cost_totals[PROGRAMMING_PER_PART_LABEL] = round(
                 per_lot_source / max(qty_for_programming_float, 1.0), 2
             )
         except Exception:
-            labor_cost_totals["Programming (amortized)"] = 0.0
+            labor_cost_totals[PROGRAMMING_PER_PART_LABEL] = 0.0
 
     show_programming_row = (
         programming_per_lot_val > 0
@@ -8912,7 +9043,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         return is_amortized and not show_amortized
 
     programming_meta_detail = (nre_detail or {}).get("programming") or {}
-    programming_per_part_cost = labor_cost_totals.get("Programming (amortized)")
+    programming_per_part_cost = labor_cost_totals.get(PROGRAMMING_PER_PART_LABEL)
     try:
         programming_per_part_cost = float(programming_per_part_cost or 0.0)
     except Exception:
@@ -9928,7 +10059,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         prog_pp = programming_cost_per_part
         if prog_pp <= 0:
             try:
-                prog_pp = float(labor_cost_totals.get("Programming (amortized)") or 0.0)
+                prog_pp = float(labor_cost_totals.get(PROGRAMMING_PER_PART_LABEL) or 0.0)
             except Exception:
                 prog_pp = 0.0
         if prog_pp <= 0:
@@ -9940,13 +10071,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if prog_pp > 0:
             prog_pp = round(float(prog_pp), 2)
             try:
-                labor_cost_totals["Programming (amortized)"] = prog_pp
+                labor_cost_totals[PROGRAMMING_PER_PART_LABEL] = prog_pp
             except Exception:
                 pass
             if qty > 1:
                 detail_args.append(f"Amortized across {qty} pcs")
             if detail_args:
-                detail_lookup["Programming (amortized)"] = "; ".join(detail_args)
+                detail_lookup[PROGRAMMING_PER_PART_LABEL] = "; ".join(detail_args)
             additions["programming_amortized"] = (prog_pp, programming_minutes)
             amortized_nre_total += prog_pp
             if "programming_amortized" not in canonical_bucket_summary:
@@ -10527,6 +10658,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     hours_val = minutes_val / 60.0
             if hours_val <= 0.0:
                 continue
+            if str(canon_key) == "programming_amortized":
+                continue
             label = _display_bucket_label(canon_key, label_overrides)
             if label in seen_hour_labels:
                 hour_summary_entries[label] = (
@@ -10586,13 +10719,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             )
 
         _record_hour_entry("Programming", round(programming_hours, 2))
-        if programming_is_amortized and qty_for_hours > 0:
-            per_part_prog_hr = programming_hours / qty_for_hours
-            _record_hour_entry(
-                "Programming (amortized)",
-                round(per_part_prog_hr, 2),
-                include_in_total=False,
-            )
         _record_hour_entry("Fixture Build", round(fixture_hours, 2))
         if fixture_is_amortized and qty_for_hours > 0:
             per_part_fixture_hr = fixture_hours / qty_for_hours
@@ -10611,6 +10737,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     continue
                 if canon_key.startswith("planner_"):
                     continue
+                if str(canon_key) == "programming_amortized":
+                    continue
                 hours_val = charged_hours_by_canon.get(canon_key)
                 if hours_val is None:
                     continue
@@ -10628,6 +10756,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 if canon_key in {"planner_labor", "planner_machine", "planner_total"}:
                     continue
                 if str(canon_key).startswith("planner_"):
+                    continue
+                if str(canon_key) == "programming_amortized":
                     continue
                 try:
                     hours_float = float(hours_val or 0.0)
@@ -10650,13 +10780,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 _record_hour_entry(display_label, hr_val)
 
         _record_hour_entry("Programming", programming_hours)
-        if programming_is_amortized and qty_for_hours > 0:
-            per_part_prog_hr = programming_hours / qty_for_hours
-            _record_hour_entry(
-                "Programming (amortized)",
-                per_part_prog_hr,
-                include_in_total=False,
-            )
         _record_hour_entry("Fixture Build", fixture_hours)
         if fixture_is_amortized and qty_for_hours > 0:
             per_part_fixture_hr = fixture_hours / qty_for_hours
@@ -10672,6 +10795,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             metrics = canonical_bucket_summary.get(canon_key) or {}
             minutes_val = _safe_float(metrics.get("minutes"), default=0.0)
             if minutes_val <= 0.0:
+                continue
+            if str(canon_key) == "programming_amortized":
                 continue
             label = _display_bucket_label(canon_key, label_overrides)
             summary_hours[label] = summary_hours.get(label, 0.0) + (minutes_val / 60.0)
@@ -10854,6 +10979,16 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         folded_entries: dict[str, list[Any]] = {}
         folded_display: dict[str, str] = {}
         folded_order: list[str] = []
+
+        def _coerce_hour_value(value: Any) -> float | None:
+            coerced = _coerce_float_or_none(value)
+            if coerced is None:
+                return None
+            try:
+                return float(coerced)
+            except Exception:
+                return None
+
         for label, (hr_val, include_in_total) in entries_iter:
             canonical_key, display_label = _canonical_hour_label(label)
             folded = folded_entries.get(canonical_key)
@@ -10861,9 +10996,34 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 folded_entries[canonical_key] = [hr_val, bool(include_in_total)]
                 folded_display[canonical_key] = display_label
                 folded_order.append(canonical_key)
+                continue
+
+            folded_display.setdefault(canonical_key, display_label)
+
+            existing_hr, existing_include = folded
+            hr_float = _coerce_hour_value(hr_val)
+            existing_float = _coerce_hour_value(existing_hr)
+            deduped = False
+
+            if hr_float is not None and existing_float is not None:
+                try:
+                    if math.isclose(existing_float, hr_float, rel_tol=1e-9, abs_tol=0.005):
+                        deduped = True
+                except Exception:
+                    deduped = False
+
+            if deduped:
+                folded[1] = existing_include or bool(include_in_total)
+                continue
+
+            if existing_float is not None or hr_float is not None:
+                folded[0] = (existing_float or 0.0) + (hr_float or 0.0)
             else:
-                folded[0] += hr_val
-                folded[1] = folded[1] or bool(include_in_total)
+                try:
+                    folded[0] = existing_hr + hr_val
+                except Exception:
+                    folded[0] = existing_hr
+            folded[1] = existing_include or bool(include_in_total)
         total_hours = 0.0
         for canonical_key in folded_order:
             hr_val, include_in_total = folded_entries[canonical_key]
@@ -11441,19 +11601,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     # Render MATERIAL REMOVAL card + TIME PER HOLE lines (replace legacy Time block)
     append_lines(removal_card_lines)
-    # PROBE: show how many HOLE-TABLE rows we have (temporary)
     geo_map = ((breakdown or {}).get("geo") or (result or {}).get("geo") or {})
     if isinstance(geo_map, _MappingABC) and not isinstance(geo_map, dict):
         geo_map = dict(geo_map)
-    ops_rows_candidate = (((geo_map or {}).get("ops_summary") or {}).get("rows") or [])
-    if isinstance(ops_rows_candidate, list):
-        ops_rows = ops_rows_candidate
-    else:
-        try:
-            ops_rows = list(ops_rows_candidate or [])
-        except Exception:
-            ops_rows = []
-    append_line(f"[DEBUG] ops_rows={len(ops_rows)}")
 
     # Append HOLE-TABLE derived cards
     try:
@@ -11475,6 +11625,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         append_line("")
     except Exception:
         pass
+
+    # PROBE: show how many HOLE-TABLE rows we have (temporary)
+    ops_rows_candidate = (((geo_map or {}).get("ops_summary") or {}).get("rows") or [])
+    if isinstance(ops_rows_candidate, list):
+        ops_rows = ops_rows_candidate
+    else:
+        try:
+            ops_rows = list(ops_rows_candidate or [])
+        except Exception:
+            ops_rows = []
+    append_line(f"[DEBUG] ops_rows={len(ops_rows)}")
     tapping_minutes_total = 0.0
     cbore_minutes_total = 0.0
     spot_minutes_total = 0.0
@@ -16882,16 +17043,26 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             for item in line_items:
                 if not isinstance(item, _MappingABC):
                     continue
-                label = str(item.get("op") or item.get("name") or "").strip().lower()
-                if not label or "amortized" not in label:
+                raw_label = item.get("op") or item.get("name") or ""
+                canonical_label, is_amortized = _canonical_amortized_label(raw_label)
+                normalized_label = str(canonical_label or raw_label or "").strip().lower()
+                if not is_amortized:
+                    if any(
+                        token in normalized_label
+                        for token in ("per part", "per pc", "per piece")
+                    ):
+                        is_amortized = True
+                if not is_amortized:
+                    continue
+                if not normalized_label:
                     continue
                 labor_amount = _coerce_float_or_none(item.get("labor_cost"))
                 if labor_amount is None:
                     continue
                 labor_value = float(labor_amount)
-                if "program" in label:
+                if "program" in normalized_label:
                     amortized_programming += labor_value
-                elif "fixture" in label:
+                elif "fixture" in normalized_label:
                     amortized_fixture += labor_value
 
         planner_machine_cost_total = machine_cost
@@ -21353,107 +21524,22 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
             chart_source = "dxf_text_regex"
             chart_reconcile = summarize_hole_chart_agreement(entity_holes_mm, chart_ops)
 
-            # Build normalized HOLE-TABLE rows for UI cards
-            rows_norm: list[dict[str, Any]] = []
-            for row in (hole_rows or []):
-                if row is None:
-                    continue
-                try:
-                    qty = int(getattr(row, "qty", 0) or 0)
-                except Exception:
-                    qty = 0
-                ref = (
-                    getattr(row, "ref", None)
-                    or getattr(row, "pilot", None)
-                    or getattr(row, "drill_ref", None)
-                    or ""
-                )
-                desc = (
-                    getattr(row, "description", None)
-                    or getattr(row, "desc", None)
-                    or ""
-                )
-                if not desc:
-                    features = list(getattr(row, "features", []) or [])
-                    parts: list[str] = []
-                    for feature in features:
-                        if not isinstance(feature, dict):
-                            continue
-                        ftype = str(feature.get("type", "")).lower()
-                        side = str(feature.get("side", "")).upper()
-                        if ftype == "tap":
-                            thread = feature.get("thread") or ""
-                            depth = feature.get("depth_in")
-                            piece = f"{thread} TAP"
-                            if isinstance(depth, (int, float)):
-                                piece += f" × {float(depth):.2f}"
-                            if side:
-                                piece += f" FROM {side}"
-                            parts.append(piece)
-                        elif ftype == "cbore":
-                            dia = feature.get("dia_in")
-                            depth = feature.get("depth_in")
-                            piece = f"{dia:.4f} C’BORE" if isinstance(dia, (int, float)) else "C’BORE"
-                            if isinstance(depth, (int, float)):
-                                piece += f" × {float(depth):.2f}"
-                            if side:
-                                piece += f" FROM {side}"
-                            parts.append(piece)
-                        elif ftype in {"csk", "countersink"}:
-                            dia = feature.get("dia_in")
-                            depth = feature.get("depth_in")
-                            piece = f"{dia:.4f} C’SINK" if isinstance(dia, (int, float)) else "C’SINK"
-                            if isinstance(depth, (int, float)):
-                                piece += f" × {float(depth):.2f}"
-                            if side:
-                                piece += f" FROM {side}"
-                            parts.append(piece)
-                        elif ftype == "drill":
-                            ref_local = feature.get("ref") or ref or ""
-                            thru = " THRU" if feature.get("thru", True) else ""
-                            parts.append(f"{ref_local}{thru}".strip())
-                        elif ftype == "spot":
-                            depth = feature.get("depth_in")
-                            piece = "C’DRILL"
-                            if isinstance(depth, (int, float)):
-                                piece += f" × {float(depth):.2f}"
-                            parts.append(piece)
-                        elif ftype == "jig":
-                            parts.append("JIG GRIND")
-                    desc = "; ".join([p for p in parts if p])
+        # --- NEW: publish HOLE-TABLE rows for UI cards ------------------------------
+        rows_norm: list[dict[str, Any]] = []
+        if hole_rows:
+            rows_norm = _normalize_ops_rows_from_hole_rows(hole_rows)
+        elif chart_ops:
+            rows_norm = _normalize_ops_rows_from_chart_ops(chart_ops)
 
-                rows_norm.append(
-                    {
-                        "hole": getattr(row, "hole_id", "")
-                        or getattr(row, "letter", "")
-                        or "",
-                        "ref": str(ref or ""),
-                        "qty": qty,
-                        "desc": str(desc or ""),
-                    }
-                )
-
-            if rows_norm:
-                existing_summary = geo.get("ops_summary")
-                if isinstance(existing_summary, _MappingABC) and not isinstance(existing_summary, dict):
-                    ops_summary_map: dict[str, Any] = dict(existing_summary)
-                elif isinstance(existing_summary, dict):
-                    ops_summary_map = dict(existing_summary)
-                else:
-                    ops_summary_map = {}
-                ops_summary_map["rows"] = rows_norm
-                aggregated = aggregate_ops(rows_norm) if rows_norm else {}
-                if aggregated:
-                    totals = aggregated.get("totals")
-                    if totals:
-                        ops_summary_map["totals"] = dict(totals)
-                    detail_rows = aggregated.get("rows_detail")
-                    if detail_rows:
-                        ops_summary_map["rows_detail"] = detail_rows
-                    for key in ("actions_total", "back_ops_total", "flip_required"):
-                        if key in aggregated:
-                            ops_summary_map[key] = aggregated[key]
-                geo["ops_summary"] = ops_summary_map
+        if rows_norm:
+            geo.setdefault("ops_summary", {})["rows"] = rows_norm
+            geo["ops_summary"]["source"] = chart_source or "hole_table"
+            try:
+                geo["ops_summary"]["tap_total"] = int(chart_summary.get("tap_qty") or 0)
+                geo["ops_summary"]["cbore_total"] = int(chart_summary.get("cbore_qty") or 0)
+                geo["ops_summary"]["csk_total"] = int(chart_summary.get("csk_qty") or 0)
+            except Exception:
+                pass
     if chart_summary:
         geo.setdefault("chart_summary", chart_summary)
         if chart_summary.get("tap_qty"):
@@ -21676,6 +21762,143 @@ def _extract_text_lines_from_ezdxf_doc(doc: Any) -> list[str]:
         start = upper.index("HOLE TABLE")
         joined = joined[start:]
     return [ln for ln in joined.splitlines() if ln.strip()]
+
+def _normalize_ops_rows_from_hole_rows(rows: Iterable[Any] | None) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in rows or []:
+        if row is None:
+            continue
+        qty = 0
+        try:
+            qty = int(getattr(row, "qty", 0) or 0)
+        except Exception:
+            pass
+        hole = getattr(row, "hole_id", "") or getattr(row, "letter", "") or ""
+        ref = (
+            getattr(row, "ref", None)
+            or getattr(row, "pilot", None)
+            or getattr(row, "drill_ref", None)
+            or ""
+        )
+        desc = (
+            getattr(row, "description", None)
+            or getattr(row, "desc", None)
+            or ""
+        )
+        if not desc:
+            parts = []
+            for f in list(getattr(row, "features", []) or []):
+                if not isinstance(f, dict):
+                    continue
+                t = str(f.get("type", "")).lower()
+                side = str(f.get("side", "")).upper()
+                if t == "tap":
+                    thread = f.get("thread") or ""
+                    depth = f.get("depth_in")
+                    parts.append(
+                        f"{thread} TAP"
+                        + (
+                            f" × {depth:.2f}\""
+                            if isinstance(depth, (int, float))
+                            else ""
+                        )
+                        + (f" FROM {side}" if side else "")
+                    )
+                elif t == "cbore":
+                    dia = f.get("dia_in")
+                    depth = f.get("depth_in")
+                    parts.append(
+                        f"{(dia or 0):.4f} C’BORE"
+                        + (
+                            f" × {depth:.2f}\""
+                            if isinstance(depth, (int, float))
+                            else ""
+                        )
+                        + (f" FROM {side}" if side else "")
+                    )
+                elif t in {"csk", "countersink"}:
+                    dia = f.get("dia_in")
+                    depth = f.get("depth_in")
+                    parts.append(
+                        f"{(dia or 0):.4f} C’SINK"
+                        + (
+                            f" × {depth:.2f}\""
+                            if isinstance(depth, (int, float))
+                            else ""
+                        )
+                        + (f" FROM {side}" if side else "")
+                    )
+                elif t == "drill":
+                    ref_local = f.get("ref") or ref or ""
+                    thru = " THRU" if f.get("thru", True) else ""
+                    parts.append(f"{ref_local}{thru}".strip())
+                elif t == "spot":
+                    depth = f.get("depth_in")
+                    parts.append(
+                        "C’DRILL"
+                        + (
+                            f" × {depth:.2f}\""
+                            if isinstance(depth, (int, float))
+                            else ""
+                        )
+                    )
+                elif t == "jig":
+                    parts.append("JIG GRIND")
+            desc = "; ".join([p for p in parts if p])
+        out.append({"hole": str(hole), "ref": str(ref), "qty": int(qty), "desc": str(desc)})
+    return out
+
+
+def _normalize_ops_rows_from_chart_ops(
+    chart_ops: Iterable[Mapping[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Collapse raw chart ops into conservative row descriptions."""
+
+    out: list[dict[str, Any]] = []
+    if not chart_ops:
+        return out
+    for op in chart_ops:
+        if not isinstance(op, dict):
+            continue
+        t = (op.get("type") or "").lower()
+        qty = int(round(float(op.get("qty") or 0)))
+        if qty <= 0:
+            continue
+        side = (op.get("side") or "").upper()
+        desc = ""
+        ref = str(op.get("ref") or "")
+        if t == "tap":
+            thread = op.get("thread") or ""
+            depth = op.get("depth_in")
+            desc = f"{thread} TAP" + (
+                f" × {depth:.2f}\"" if isinstance(depth, (int, float)) else ""
+            ) + (f" FROM {side}" if side else "")
+        elif t == "cbore":
+            dia = op.get("dia_in")
+            depth = op.get("depth_in")
+            desc = f"{(dia or 0):.4f} C’BORE" + (
+                f" × {depth:.2f}\"" if isinstance(depth, (int, float)) else ""
+            ) + (f" FROM {side}" if side else "")
+        elif t in {"csk", "countersink"}:
+            dia = op.get("dia_in")
+            depth = op.get("depth_in")
+            desc = f"{(dia or 0):.4f} C’SINK" + (
+                f" × {depth:.2f}\"" if isinstance(depth, (int, float)) else ""
+            ) + (f" FROM {side}" if side else "")
+        elif t == "spot":
+            depth = op.get("depth_in")
+            desc = "C’DRILL" + (
+                f" × {depth:.2f}\"" if isinstance(depth, (int, float)) else ""
+            )
+        elif t == "jig":
+            desc = "JIG GRIND"
+        elif t == "drill":
+            thru = " THRU" if (op.get("thru", True)) else ""
+            desc = f"{ref}{thru}".strip()
+        if desc:
+            out.append({"hole": "", "ref": ref, "qty": qty, "desc": desc})
+    return out
+
 
 def hole_rows_to_ops(rows: Iterable[Any] | None) -> list[dict[str, Any]]:
     """Flatten parsed HoleRow objects into estimator-friendly operations."""

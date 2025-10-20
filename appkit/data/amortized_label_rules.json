@@ -11,8 +11,8 @@
   "canonical_labels": [
     {
       "tokens_any": ["programming"],
-      "per_part": "Programming (amortized per part)",
-      "default": "Programming (amortized)"
+      "per_part": "Programming (per part)",
+      "default": "Programming (per part)"
     },
     {
       "tokens_any": ["fixture", "fixturing"],

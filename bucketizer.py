@@ -22,7 +22,7 @@ except ImportError:  # pragma: no cover - legacy path when vendored separately
 # Order matters: the rendered quote should display the buckets in this order.
 BUCKETS: tuple[str, ...] = (
     "Programming",
-    "Programming (amortized)",
+    "Programming (per part)",
     "Fixture Build",
     "Fixture Build (amortized)",
     "Milling",
@@ -239,7 +239,7 @@ def bucketize(
         if qty_int > 1:
             per_min = programming_min / qty_int
             add(
-                "Programming (amortized)",
+                "Programming (per part)",
                 per_min,
                 0.0,
                 programmer_rate * (per_min / 60.0),
