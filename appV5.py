@@ -18434,6 +18434,16 @@ _RE_DEPTH_OR_THICK = re.compile(r"(\d+(?:\.\d+)?)\s*DEEP(?:\s+FROM\s+(FRONT|BACK
 RE_DEPTH  = _RE_DEPTH_OR_THICK
 RE_DIA    = re.compile(r"[Ø⌀\u00D8]?\s*(\d+(?:\.\d+)?)", re.I)
 RE_THICK  = _RE_DEPTH_OR_THICK
+
+
+def _norm_line(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "")).strip()
+
+
+_QTY_LEAD = re.compile(r"^\s*\((\d+)\)\s*")
+_MM_IN_DIA = re.compile(r"(?:Ø|⌀|O|DIA|\b)\s*([0-9.]+)")
+_PAREN_DIA = re.compile(r"\(([0-9.]+)\s*Ø?\)")
+_FROM_SIDE = re.compile(r"\bFROM\s+(FRONT|BACK)\b", re.I)
 RE_MAT    = re.compile(r"\b(MATL?|MATERIAL)\b\s*[:=\-]?\s*([A-Z0-9 \-\+/\.]+)", re.I)
 RE_HARDNESS = re.compile(r"(\d+(?:\.\d+)?)\s*(?:[-–]\s*(\d+(?:\.\d+)?))?\s*HRC", re.I)
 RE_HEAT_TREAT = re.compile(r"HEAT\s*TREAT(?:ED|\s+TO)?|\bQUENCH\b|\bTEMPER\b", re.I)
@@ -21409,6 +21419,20 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
 
     if chart_lines:
         chart_summary = summarize_hole_chart_lines(chart_lines)
+
+        try:
+            rows_norm = _build_ops_rows_from_chart_lines(chart_lines or [])
+        except Exception:
+            rows_norm = []
+        if rows_norm:
+            geo.setdefault("ops_summary", {})["rows"] = rows_norm
+            geo["ops_summary"]["source"] = "chart_lines"
+            try:
+                geo["ops_summary"]["tap_total"] = int(chart_summary.get("tap_qty") or 0)
+                geo["ops_summary"]["cbore_total"] = int(chart_summary.get("cbore_qty") or 0)
+                geo["ops_summary"]["csk_total"] = int(chart_summary.get("csk_qty") or 0)
+            except Exception:
+                pass
     parser = _parse_hole_table_lines or parse_hole_table_lines
     if chart_lines and parser:
         try:
@@ -21427,7 +21451,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
         elif chart_ops:
             rows_norm = _normalize_ops_rows_from_chart_ops(chart_ops)
 
-        if rows_norm:
+        if rows_norm and not geo.get("ops_summary", {}).get("rows"):
             geo.setdefault("ops_summary", {})["rows"] = rows_norm
             geo["ops_summary"]["source"] = chart_source or "hole_table"
             try:
@@ -21658,6 +21682,104 @@ def _extract_text_lines_from_ezdxf_doc(doc: Any) -> list[str]:
         start = upper.index("HOLE TABLE")
         joined = joined[start:]
     return [ln for ln in joined.splitlines() if ln.strip()]
+
+
+def _build_ops_rows_from_chart_lines(chart_lines: list[str]) -> list[dict]:
+    rows: list[dict] = []
+    if not chart_lines:
+        return rows
+
+    lines = [_norm_line(x) for x in chart_lines]
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        if not ln:
+            i += 1
+            continue
+
+        if any(k in ln.upper() for k in ["BREAK ALL", "SHARP CORNERS", "RADIUS", "CHAMFER"]):
+            i += 1
+            continue
+
+        qty = 1
+        mqty = _QTY_LEAD.match(ln)
+        if mqty:
+            qty = int(mqty.group(1))
+            ln = ln[mqty.end() :].strip()
+
+        mtap = RE_TAP.search(ln)
+        if mtap:
+            thread = mtap.group(2).replace(" ", "")
+            desc = f"{thread} TAP"
+            tail = " ".join([ln] + lines[i + 1 : i + 3])
+            if RE_THRU.search(tail):
+                desc += " THRU"
+            md = RE_DEPTH.search(tail)
+            if md and md.group(1):
+                desc += f' × {float(md.group(1)):.2f}"'
+            ms = _FROM_SIDE.search(tail)
+            if ms:
+                desc += f' FROM {ms.group(1).upper()}'
+            rows.append({"hole": "", "ref": "", "qty": qty, "desc": desc})
+            i += 1
+            continue
+
+        if RE_CBORE.search(ln):
+            tail = " ".join([ln] + lines[i - 1 : i] + lines[i + 1 : i + 2])
+            md = _PAREN_DIA.search(tail) or _MM_IN_DIA.search(tail) or RE_DIA.search(tail)
+            dia = float(md.group(1)) if md else None
+            desc = f"{dia:.4f} C’BORE" if dia else "C’BORE"
+            mdp = RE_DEPTH.search(" ".join([ln] + lines[i + 1 : i + 2]))
+            if mdp and mdp.group(1):
+                desc += f' × {float(mdp.group(1)):.2f}"'
+            ms = _FROM_SIDE.search(" ".join([ln] + lines[i + 1 : i + 2]))
+            if ms:
+                desc += f' FROM {ms.group(1).upper()}'
+            rows.append({"hole": "", "ref": "", "qty": qty, "desc": desc})
+            i += 1
+            continue
+
+        if (
+            "C' DRILL" in ln.upper()
+            or "C’DRILL" in ln.upper()
+            or "CENTER DRILL" in ln.upper()
+            or "SPOT DRILL" in ln.upper()
+        ):
+            tail = " ".join([ln] + lines[i + 1 : i + 2])
+            md = RE_DEPTH.search(tail)
+            desc = "C’DRILL" + (
+                f' × {float(md.group(1)):.2f}"' if (md and md.group(1)) else ""
+            )
+            rows.append({"hole": "", "ref": "", "qty": qty, "desc": desc})
+            i += 1
+            continue
+
+        if "DRILL" in ln.upper() and RE_THRU.search(ln):
+            md = _PAREN_DIA.search(ln) or _MM_IN_DIA.search(ln) or RE_DIA.search(ln)
+            ref = (md.group(1) if md else "").strip()
+            rows.append({"hole": "", "ref": ref, "qty": qty, "desc": f"{ref} THRU".strip()})
+            i += 1
+            continue
+
+        if RE_NPT.search(ln):
+            rows.append({"hole": "", "ref": "", "qty": qty, "desc": _norm_line(ln)})
+            i += 1
+            continue
+
+        i += 1
+
+    agg: dict[tuple[str, str], int] = {}
+    order: list[tuple[str, str]] = []
+    for r in rows:
+        key = (r["desc"], r.get("ref", ""))
+        if key not in agg:
+            order.append(key)
+        agg[key] = agg.get(key, 0) + int(r.get("qty") or 0)
+    rows_out = [
+        {"hole": "", "ref": ref, "qty": agg[(desc, ref)], "desc": desc}
+        for (desc, ref) in order
+    ]
+    return rows_out
 
 def _normalize_ops_rows_from_hole_rows(rows: Iterable[Any] | None) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
