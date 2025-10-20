@@ -39,7 +39,6 @@ from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
 
-from cad_quoter.app import runtime as _runtime
 from cad_quoter.app._value_utils import (
     _format_value,
 )
@@ -47,6 +46,23 @@ from cad_quoter.app.container import (
     ServiceContainer,
     SupportsPricingEngine,
     create_default_container,
+)
+from cad_quoter.app.llm_helpers import (
+    DEFAULT_MM_PROJ_NAMES,
+    DEFAULT_VL_MODEL_NAMES,
+    LEGACY_MM_PROJ,
+    LEGACY_VL_MODEL,
+    MM_PROJ,
+    VL_MODEL,
+    ensure_runtime_dependencies,
+    find_default_qwen_model,
+    init_llm_integration,
+    load_qwen_vl,
+)
+from cad_quoter.app.optional_loaders import (
+    pd,
+    build_geo_from_dxf,
+    set_build_geo_from_dxf_hook,
 )
 from cad_quoter.resources import (
     default_app_settings_json,
@@ -2760,20 +2776,6 @@ from cad_quoter.geo2d.apply import apply_2d_features_to_variables
 _LABOR_SECTION_ABS_EPSILON = 0.51
 _PLANNER_BUCKET_ABS_EPSILON = 0.51
 
-ensure_runtime_dependencies = _runtime.ensure_runtime_dependencies
-find_default_qwen_model = _runtime.find_default_qwen_model
-load_qwen_vl = _runtime.load_qwen_vl
-
-ensure_runtime_dependencies()
-
-# Backwards compatibility: legacy module-level names expected by tests/scripts
-_DEFAULT_VL_MODEL_NAMES = _runtime.DEFAULT_VL_MODEL_NAMES
-_DEFAULT_MM_PROJ_NAMES = _runtime.DEFAULT_MM_PROJ_NAMES
-VL_MODEL = str(_runtime.LEGACY_VL_MODEL)
-MM_PROJ = str(_runtime.LEGACY_MM_PROJ)
-LEGACY_VL_MODEL = str(_runtime.LEGACY_VL_MODEL)
-LEGACY_MM_PROJ = str(_runtime.LEGACY_MM_PROJ)
-
 from cad_quoter.domain_models import (
     DEFAULT_MATERIAL_DISPLAY,
     DEFAULT_MATERIAL_KEY,
@@ -2905,132 +2907,23 @@ try:
 except FileNotFoundError:  # pragma: no cover - defensive fallback
     _DEFAULT_SYSTEM_SUGGEST = ""
 
-try:  # pragma: no cover - defensive guard when optional LLM helpers are absent
-    from cad_quoter import llm as _cad_llm  # type: ignore
-except Exception:  # pragma: no cover - tolerate partial installs
-    _cad_llm = None
+ensure_runtime_dependencies()
 
-# Default to the fallback prompt so that ``SYSTEM_SUGGEST`` is always defined,
-# even when optional helpers fail to import (for example in "exec" based
-# runtimes that evaluate this module with a constrained globals() mapping).
-SYSTEM_SUGGEST = _DEFAULT_SYSTEM_SUGGEST
+_llm_integration = init_llm_integration(_DEFAULT_SYSTEM_SUGGEST)
+SYSTEM_SUGGEST = _llm_integration.system_suggest
+SUGG_TO_EDITOR = _llm_integration.sugg_to_editor
+EDITOR_TO_SUGG = _llm_integration.editor_to_sugg
+EDITOR_FROM_UI = _llm_integration.editor_from_ui
+LLMClient = _llm_integration.llm_client
+_infer_hours_and_overrides_from_geo = _llm_integration.infer_hours_and_overrides_from_geo
+parse_llm_json = _llm_integration.parse_llm_json
+explain_quote = _llm_integration.explain_quote
 
-if _cad_llm is not None:
-    SUGG_TO_EDITOR = getattr(_cad_llm, "SUGG_TO_EDITOR", {})
-    EDITOR_TO_SUGG = getattr(_cad_llm, "EDITOR_TO_SUGG", {})
-    EDITOR_FROM_UI = getattr(_cad_llm, "EDITOR_FROM_UI", {})
-    SYSTEM_SUGGEST = getattr(_cad_llm, "SYSTEM_SUGGEST", _DEFAULT_SYSTEM_SUGGEST)
-    _LLMClient = getattr(_cad_llm, "LLMClient", None)
-    if _LLMClient is None:  # pragma: no cover - unexpected in older builds
-        class LLMClient:  # type: ignore[override]
-            """Placeholder used when the optional LLM helpers are unavailable."""
+# Backwards compatibility aliases expected by older integrations.
+_DEFAULT_VL_MODEL_NAMES = DEFAULT_VL_MODEL_NAMES
+_DEFAULT_MM_PROJ_NAMES = DEFAULT_MM_PROJ_NAMES
 
-            def __init__(self, *args, **kwargs) -> None:  # pragma: no cover - defensive
-                raise RuntimeError("LLM integration is not available in this environment.")
-
-            @property
-            def model_path(self) -> str:  # pragma: no cover - defensive
-                return ""
-
-            @property
-            def available(self) -> bool:  # pragma: no cover - defensive
-                return False
-
-            def ask_json(self, *args, **kwargs) -> tuple[dict, str, dict]:  # pragma: no cover - defensive
-                raise RuntimeError("LLM integration is not available in this environment.")
-
-            def close(self) -> None:  # pragma: no cover - defensive
-                return None
-
-    else:
-        LLMClient = _LLMClient
-    _infer_hours_and_overrides_from_geo = getattr(
-        _cad_llm,
-        "infer_hours_and_overrides_from_geo",
-        lambda *args, **kwargs: {},
-    )
-    parse_llm_json = getattr(_cad_llm, "parse_llm_json", lambda _text: {})
-    explain_quote = getattr(
-        _cad_llm,
-        "explain_quote",
-        lambda *args, **kwargs: "LLM explanation unavailable.",
-    )
-else:  # pragma: no cover - fallback definitions keep quoting functional without LLM extras
-    SUGG_TO_EDITOR: dict = {}
-    EDITOR_TO_SUGG: dict = {}
-    EDITOR_FROM_UI: dict = {}
-    SYSTEM_SUGGEST = _DEFAULT_SYSTEM_SUGGEST
-
-    class LLMClient:  # type: ignore[override]
-        """Placeholder used when the optional LLM helpers are unavailable."""
-
-        def __init__(self, *args, **kwargs) -> None:  # pragma: no cover - defensive
-            raise RuntimeError("LLM integration is not available in this environment.")
-
-        @property
-        def model_path(self) -> str:  # pragma: no cover - defensive
-            return ""
-
-        @property
-        def available(self) -> bool:  # pragma: no cover - defensive
-            return False
-
-        def ask_json(self, *args, **kwargs) -> tuple[dict, str, dict]:  # pragma: no cover - defensive
-            raise RuntimeError("LLM integration is not available in this environment.")
-
-        def close(self) -> None:  # pragma: no cover - defensive
-            return None
-
-    def _infer_hours_and_overrides_from_geo(*args, **kwargs):  # pragma: no cover - fallback
-        return {}
-
-    def parse_llm_json(_text: str) -> dict:  # pragma: no cover - fallback
-        return {}
-
-    def explain_quote(*args, **kwargs) -> str:  # pragma: no cover - fallback
-        return "LLM explanation unavailable."
-
-
-try:
-    import pandas as pd  # type: ignore[import]
-except Exception:  # pragma: no cover - optional dependency
-    pd = None  # type: ignore[assignment]
-
-pd = typing.cast(typing.Any, pd)
 from typing import TypedDict
-
-try:
-    from geo_read_more import build_geo_from_dxf as build_geo_from_dxf_path
-except Exception:
-    build_geo_from_dxf_path = None  # type: ignore[assignment]
-
-_build_geo_from_dxf_hook: Optional[Callable[[str], Dict[str, Any]]] = None
-
-def build_geo_from_dxf(path: str) -> dict[str, Any]:
-    """Return auxiliary DXF metadata via the configured loader."""
-
-    loader: Optional[Callable[[str], Dict[str, Any]]]
-    loader = _build_geo_from_dxf_hook or build_geo_from_dxf_path
-    if loader is None:
-        raise RuntimeError(
-            "DXF metadata loader is unavailable; install geo_read_more or register a hook."
-        )
-    result = loader(path)
-    if not isinstance(result, dict):
-        raise TypeError("DXF metadata loader must return a dictionary")
-    return result
-
-def set_build_geo_from_dxf_hook(
-    loader: Optional[Callable[[str], Dict[str, Any]]]
-) -> None:
-    """Register a callable used by :func:`build_geo_from_dxf`."""
-
-    if loader is not None and not callable(loader):
-        raise TypeError("DXF metadata hook must be callable or ``None``")
-
-    global _build_geo_from_dxf_hook
-    _build_geo_from_dxf_hook = loader
-
 
 def _scrap_value_provided(val: Any) -> bool:
     """Return ``True`` when ``val`` looks like a real scrap entry."""
@@ -21023,10 +20916,11 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
             hole_source = str(holes_prov)
 
     geo_read_more: dict[str, Any] | None = None
-    extra_geo_loader = _build_geo_from_dxf_hook or build_geo_from_dxf_path
-    if extra_geo_loader and dxf_text_path:
+    if dxf_text_path:
         try:
-            geo_read_more = extra_geo_loader(dxf_text_path)
+            geo_read_more = build_geo_from_dxf(dxf_text_path)
+        except RuntimeError:
+            geo_read_more = None
         except Exception as exc:  # pragma: no cover - diagnostic only
             geo_read_more = {"ok": False, "error": str(exc)}
 
@@ -24285,21 +24179,6 @@ class App(tk.Tk):
                 except Exception:
                     pass
 
-            # Persist latest outputs to disk for debugging/verification in case
-            # a platform-specific Tk quirk prevents the Text widget from
-            # painting. These files are overwritten on each run.
-            try:
-                for path, report in (
-                    ("latest_quote_simplified.txt", simplified_report),
-                    ("latest_quote_full.txt", full_report),
-                ):
-                    lines = (report or "").splitlines()
-                    with open(path, "w", encoding="utf-8", newline="") as f:
-                        f.write("\n".join(lines))
-            except Exception:
-                # Non-fatal: continue to render in the UI even if writing fails
-                pass
-
             for name, report_text in (
                 ("simplified", simplified_report),
                 ("full", full_report),
@@ -24378,28 +24257,4 @@ def _map_geo_to_double_underscore(g: dict) -> dict:
         except Exception:
             pass
     return out
-
-if __name__ == "__main__":
-    try:  # pragma: no cover - platform-specific console guard
-        sys.stdout.reconfigure(encoding="utf-8")
-    except Exception:
-        pass
-    from cad_quoter.app.cli import main as _cli_main
-
-    try:
-        sys.exit(
-            _cli_main(
-                app_cls=App,
-                pricing_engine_cls=PricingEngine,
-                pricing_registry_factory=create_default_registry,
-                app_env=APP_ENV,
-                env_setter=lambda env: globals().__setitem__("APP_ENV", env),
-            )
-        )
-    except Exception as exc:  # pragma: no cover - smoke guard
-        try:
-            print(jdump({"ok": False, "error": str(exc)}))
-        except Exception:
-            pass
-        sys.exit(1)
 
