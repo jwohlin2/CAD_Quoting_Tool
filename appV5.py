@@ -1161,6 +1161,74 @@ def _drilling_groups_from_ops_summary(
             )
             bucket["qty"] += qty_val
     if table_groups:
+        detail_rows = _ops_row_details_from_geo(geo)
+        if detail_rows:
+            drill_totals: Counter[float] = Counter()
+            non_drill_keys: set[float] = set()
+            for entry in detail_rows:
+                diameter_in = _diameter_from_ops_row(entry)
+                if diameter_in is None or diameter_in <= 0:
+                    continue
+                dia_key = round(float(diameter_in), 4)
+                total_map = entry.get("total") if isinstance(entry.get("total"), _MappingABC) else None
+                drill_total = _safe_float((total_map or {}).get("drill"), default=0.0)
+                if drill_total > 0:
+                    drill_totals[dia_key] += int(round(drill_total))
+                    continue
+
+                per_map = entry.get("per_hole") if isinstance(entry.get("per_hole"), _MappingABC) else None
+                if per_map is not None and not isinstance(per_map, dict):
+                    per_map = dict(per_map)
+
+                other_total = 0.0
+                if isinstance(total_map, _MappingABC):
+                    for op_key in (
+                        "spot_front",
+                        "spot_back",
+                        "cbore_front",
+                        "cbore_back",
+                        "csk_front",
+                        "csk_back",
+                        "tap_front",
+                        "tap_back",
+                    ):
+                        other_total += _safe_float(total_map.get(op_key), default=0.0)
+                if other_total <= 0 and isinstance(per_map, _MappingABC):
+                    qty_val = _safe_float(entry.get("qty"), default=0.0)
+                    for op_key in (
+                        "spot_front",
+                        "spot_back",
+                        "cbore_front",
+                        "cbore_back",
+                        "csk_front",
+                        "csk_back",
+                        "tap_front",
+                        "tap_back",
+                    ):
+                        per_val = _safe_float(per_map.get(op_key), default=0.0)
+                        if per_val > 0 and qty_val > 0:
+                            other_total += per_val * qty_val
+                if other_total > 0:
+                    non_drill_keys.add(dia_key)
+
+            for dia_key in list(table_groups.keys()):
+                if dia_key in drill_totals:
+                    qty_override = int(drill_totals[dia_key])
+                    if qty_override <= 0:
+                        table_groups.pop(dia_key, None)
+                        continue
+                    table_groups[dia_key]["qty"] = qty_override
+                elif dia_key in non_drill_keys:
+                    table_groups.pop(dia_key, None)
+
+            for dia_key, qty_val in drill_totals.items():
+                if qty_val <= 0 or dia_key in table_groups:
+                    continue
+                table_groups[dia_key] = {
+                    "diameter_in": float(dia_key),
+                    "qty": int(qty_val),
+                }
+
         ordered_groups = [
             {"diameter_in": data["diameter_in"], "qty": data["qty"]}
             for _key, data in sorted(table_groups.items())
