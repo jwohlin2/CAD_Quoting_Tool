@@ -10969,15 +10969,25 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     # Render MATERIAL REMOVAL card + TIME PER HOLE lines (replace legacy Time block)
     append_lines(removal_card_lines)
-    geo_map = (result or {}).get("geo") or (breakdown or {}).get("geo") or {}
-    material_group = (result or {}).get("material_group") or (breakdown or {}).get("material_group")
-    speeds_csv_cache = None  # TODO: pass your already-loaded CSV mapping if you have it
-    _emit_hole_table_ops_cards(
-        lines,
-        geo=geo_map,
-        material_group=material_group,
-        speeds_csv=speeds_csv_cache,
-    )
+    append_line("")
+    # ADD: Emit HOLE-TABLE derived cards (Tapping / Counterbore / Spot / Jig)
+    try:
+        geo_map = (
+            (breakdown.get("geo") if isinstance(breakdown, _MappingABC) else None)
+            or (result.get("geom") if isinstance(result, _MappingABC) else None)
+            or (result.get("geo") if isinstance(result, _MappingABC) else None)
+            or {}
+        )
+        material_group = (
+            (result.get("material_group") if isinstance(result, _MappingABC) else None)
+            or (breakdown.get("material_group") if isinstance(breakdown, _MappingABC) else None)
+        )
+        # If your speeds/feeds CSV is already loaded into a mapping, pass it here instead of None
+        _emit_hole_table_ops_cards(lines, geo=geo_map, material_group=material_group, speeds_csv=None)
+        append_line("")
+    except Exception:
+        # keep the quote render resilient even if ops rows are missing
+        pass
     tapping_minutes_total = 0.0
     cbore_minutes_total = 0.0
     spot_minutes_total = 0.0
