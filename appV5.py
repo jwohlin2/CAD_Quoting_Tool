@@ -806,10 +806,35 @@ def _compute_drilling_removal_section(
                 ops_rows = list(rows_candidate or [])
             except Exception:
                 ops_rows = []
+        chart_lines_all: list[str] = []
+        if isinstance(geo_map, _MappingABC):
+            raw_chart_lines = geo_map.get("chart_lines")
+            if isinstance(raw_chart_lines, list):
+                for entry in raw_chart_lines:
+                    if isinstance(entry, str):
+                        chart_lines_all.append(entry)
+                    elif entry not in (None, ""):
+                        chart_lines_all.append(str(entry))
+            elif isinstance(raw_chart_lines, str):
+                chart_lines_all.append(raw_chart_lines)
+            geo_read_more = geo_map.get("geo_read_more")
+            if isinstance(geo_read_more, _MappingABC):
+                extra_chart_lines = geo_read_more.get("chart_lines")
+                if isinstance(extra_chart_lines, list):
+                    for entry in extra_chart_lines:
+                        if isinstance(entry, str):
+                            chart_lines_all.append(entry)
+                        elif entry not in (None, ""):
+                            chart_lines_all.append(str(entry))
+                elif isinstance(extra_chart_lines, str):
+                    chart_lines_all.append(extra_chart_lines)
         lines.append(f"[DEBUG] ops_rows={len(ops_rows)}")
         lines.append(
             f"[DEBUG] has_tap_row={any('TAP' in (str(r.get('desc', '')).upper()) for r in ops_rows if isinstance(r, _MappingABC))}"
         )
+        if not ops_rows and chart_lines_all:
+            sample = chart_lines_all[:6]
+            lines.append(f"[DEBUG] sample_chart_lines={repr(sample)}")
 
         if drill_machine_minutes_estimate > 0.0:
             subtotal_min = float(drill_machine_minutes_estimate)
