@@ -449,6 +449,7 @@ def _compute_drilling_removal_section(
     drill_tool_minutes_estimate: float,
     drill_total_minutes_estimate: float,
     process_plan_summary: Mapping[str, Any] | None,
+    drilling_time_per_hole: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, float], list[str], Mapping[str, Any] | None]:
     """Return drill removal render lines + extras while updating breakdown state."""
 
@@ -473,6 +474,134 @@ def _compute_drilling_removal_section(
     if not isinstance(geo_map, _MappingABC):
         geo_map = {}
     ops_hole_count_from_table = 0
+
+    dtph_map = (
+        drilling_time_per_hole
+        if isinstance(drilling_time_per_hole, _MappingABC)
+        else None
+    )
+    dtph_rows = dtph_map.get("rows") if isinstance(dtph_map, _MappingABC) else None
+    if isinstance(dtph_rows, list) and dtph_rows:
+        sanitized_rows: list[dict[str, Any]] = []
+        subtotal_minutes = 0.0
+        for entry in dtph_rows:
+            if not isinstance(entry, _MappingABC):
+                continue
+            diameter_in = _coerce_float_or_none(entry.get("diameter_in"))
+            if diameter_in is None or diameter_in <= 0:
+                continue
+            qty_val = int(_coerce_float_or_none(entry.get("qty")) or 0)
+            if qty_val <= 0:
+                continue
+            depth_in = _coerce_float_or_none(entry.get("depth_in")) or 0.0
+            sfm_val = _coerce_float_or_none(entry.get("sfm")) or 0.0
+            ipr_val = _coerce_float_or_none(entry.get("ipr")) or 0.0
+            minutes_per = _coerce_float_or_none(entry.get("minutes_per_hole"))
+            if minutes_per is None:
+                minutes_per = _coerce_float_or_none(entry.get("t_per_hole_min"))
+            if minutes_per is None:
+                minutes_per = 0.0
+            group_minutes = _coerce_float_or_none(entry.get("group_minutes"))
+            if group_minutes is None:
+                group_minutes = float(minutes_per) * float(qty_val)
+            subtotal_minutes += float(group_minutes)
+            sanitized_rows.append(
+                {
+                    "diameter_in": float(diameter_in),
+                    "qty": qty_val,
+                    "depth_in": float(depth_in),
+                    "sfm": float(sfm_val),
+                    "ipr": float(ipr_val),
+                    "minutes_per_hole": float(minutes_per),
+                    "group_minutes": float(group_minutes),
+                }
+            )
+        if sanitized_rows:
+            lines.append("MATERIAL REMOVAL – DRILLING")
+            lines.append("=" * 64)
+            lines.append("TIME PER HOLE – DRILL GROUPS")
+            lines.append("-" * 66)
+            for row in sanitized_rows:
+                lines.append(
+                    f'Dia {row["diameter_in"]:.3f}" × {row["qty"]}  | depth {row["depth_in"]:.3f}" | '
+                    f"{int(round(row['sfm']))} sfm | {row['ipr']:.4f} ipr | t/hole {row['minutes_per_hole']:.2f} min | "
+                    f"group {row['qty']}×{row['minutes_per_hole']:.2f} = {row['group_minutes']:.2f} min"
+                )
+            lines.append("")
+
+            component_labels: list[str] = []
+            component_minutes = 0.0
+            tool_components = dtph_map.get("tool_components")
+            if isinstance(tool_components, list):
+                for comp in tool_components:
+                    if not isinstance(comp, _MappingABC):
+                        continue
+                    label = str(comp.get("label") or comp.get("name") or "").strip()
+                    minutes_val = _coerce_float_or_none(comp.get("minutes"))
+                    if minutes_val is None:
+                        minutes_val = _coerce_float_or_none(comp.get("mins"))
+                    minutes_f = float(minutes_val or 0.0)
+                    if not label:
+                        label = "-"
+                    if label != "-" or minutes_f > 0.0:
+                        component_labels.append(f"{label} {minutes_f:.2f} min")
+                    component_minutes += minutes_f
+
+            total_tool_minutes = _coerce_float_or_none(dtph_map.get("toolchange_minutes"))
+            if total_tool_minutes is None:
+                total_tool_minutes = component_minutes
+            total_tool_minutes = float(total_tool_minutes or 0.0)
+            if not math.isfinite(total_tool_minutes):
+                total_tool_minutes = component_minutes
+            if total_tool_minutes < 0.0:
+                total_tool_minutes = 0.0
+
+            if component_labels:
+                label_text = " + ".join(component_labels)
+                lines.append(
+                    f"Toolchange adders: {label_text} = {total_tool_minutes:.2f} min"
+                )
+            elif total_tool_minutes > 0.0:
+                lines.append(
+                    f"Toolchange adders: Toolchange {total_tool_minutes:.2f} min = {total_tool_minutes:.2f} min"
+                )
+            else:
+                lines.append("Toolchange adders: -")
+
+            lines.append("-" * 66)
+            subtotal_minutes_val = _coerce_float_or_none(
+                dtph_map.get("subtotal_minutes")
+            )
+            if subtotal_minutes_val is None:
+                subtotal_minutes_val = subtotal_minutes
+            subtotal_minutes_val = float(subtotal_minutes_val or 0.0)
+            total_minutes_val = (
+                _coerce_float_or_none(dtph_map.get("total_minutes_with_toolchange"))
+                or _coerce_float_or_none(dtph_map.get("total_minutes"))
+            )
+            if total_minutes_val is None:
+                total_minutes_val = subtotal_minutes_val + total_tool_minutes
+            total_minutes_val = float(total_minutes_val or 0.0)
+
+            lines.append(
+                f"Subtotal (per-hole × qty) . {subtotal_minutes_val:.2f} min  ("
+                f"{fmt_hours(subtotal_minutes_val/60.0)})"
+            )
+            lines.append(
+                f"TOTAL DRILLING (with toolchange) . {total_minutes_val:.2f} min  ("
+                f"{total_minutes_val/60.0:.2f} hr)"
+            )
+            lines.append("")
+
+            extras["drill_machine_minutes"] = float(subtotal_minutes_val)
+            extras["drill_labor_minutes"] = float(total_tool_minutes)
+            extras["drill_total_minutes"] = float(total_minutes_val)
+            extras["removal_drilling_minutes_subtotal"] = float(subtotal_minutes_val)
+            extras["removal_drilling_minutes"] = float(total_minutes_val)
+            if total_minutes_val > 0.0:
+                extras["removal_drilling_hours"] = float(total_minutes_val / 60.0)
+
+            return extras, lines, updated_plan_summary
 
     try:
         drilling_meta_map: Mapping[str, Any] = (
@@ -1272,13 +1401,6 @@ def _emit_hole_table_ops_cards(
     material_group: str | None,
     speeds_csv: dict | None,
 ) -> None:
-    if callable(append_target):
-        append_line = append_target
-    else:
-        append_method = getattr(append_target, "append", None)
-        if not callable(append_method):
-            raise TypeError("append_target must be callable or provide an append method")
-        append_line = append_method
     _emit_tapping_card(
         lines,
         geo=geo,
@@ -9016,6 +9138,16 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             breakdown.get("process_plan") if isinstance(breakdown, _MappingABC) else None
         )
 
+    drilling_time_per_hole_data: Mapping[str, Any] | None = None
+    if isinstance(result, _MappingABC):
+        candidate_dtph = result.get("drilling_time_per_hole")
+        if isinstance(candidate_dtph, _MappingABC):
+            drilling_time_per_hole_data = candidate_dtph
+    if drilling_time_per_hole_data is None and isinstance(breakdown, _MappingABC):
+        candidate_dtph = breakdown.get("drilling_time_per_hole")
+        if isinstance(candidate_dtph, _MappingABC):
+            drilling_time_per_hole_data = candidate_dtph
+
     removal_card_lines: list[str] = []
     removal_card_extra: dict[str, float] = {}
     (
@@ -9031,6 +9163,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         drill_tool_minutes_estimate=drill_tool_minutes_estimate,
         drill_total_minutes_estimate=drill_total_minutes_estimate,
         process_plan_summary=process_plan_summary_local,
+        drilling_time_per_hole=drilling_time_per_hole_data,
     )
 
     if removal_card_extra.get("drill_machine_minutes") is not None:
@@ -11944,8 +12077,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     # ASCII-sanitize output to avoid mojibake like 'Ã—' on some Windows setups
     try:
         _REPL = {
-            "×": " x ",
-            "–": "-",
             "—": "-",
             "•": "-",
             "…": "...",
