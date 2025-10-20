@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 import math
 import os
+import traceback
 from typing import Dict
 
 from cad_quoter.domain_models import (
@@ -15,8 +16,8 @@ from cad_quoter.domain_models import (
 LB_PER_KG = 2.2046226218
 BACKUP_CSV_NAME = "material_price_backup.csv"
 
-_MCM_DISABLE_ENV = os.environ.get("CAD_QUOTER_DISABLE_MCM_SCRAPER", "").strip().lower() in {"1", "true", "yes", "on"}
-_MCM_DISABLED = _MCM_DISABLE_ENV
+_MCM_DISABLE_ENV = False  # never disable via env; always attempt McMaster
+_MCM_DISABLED = False  # do not latch errors; evaluate per-call
 _MCM_CACHE: Dict[str, Dict[str, float | str]] = {}
 
 CM3_PER_IN3 = 16.387064
@@ -59,10 +60,16 @@ def _mcmaster_family_from_key(key: str) -> str:
     return ""
 
 
+def _mcm_log(message: str) -> None:
+    try:
+        with open("mcmaster_debug.log", "a", encoding="ascii", errors="replace") as _dbg:
+            _dbg.write(message.rstrip() + "\n")
+    except Exception:
+        pass
+
+
 def _maybe_get_mcmaster_price(display_name: str, normalized_key: str) -> Dict[str, float | str] | None:
-    global _MCM_DISABLED
-    if _MCM_DISABLED:
-        return None
+    # Always attempt live McMaster pricing for supported families.
 
     family = _mcmaster_family_from_key(normalized_key)
     if not family:
@@ -76,13 +83,17 @@ def _maybe_get_mcmaster_price(display_name: str, normalized_key: str) -> Dict[st
     if not request:
         return None
 
+    # Ensure the local requests shim proxies to the real package (required by requests-pkcs12)
+    os.environ.setdefault("CAD_QUOTER_ALLOW_REQUESTS", "1")
+
     try:
         from cad_quoter.vendors.mcmaster_stock import lookup_sku_and_price_for_mm
     except Exception:
         try:
             from mcmaster_stock import lookup_sku_and_price_for_mm
-        except Exception:
-            _MCM_DISABLED = True
+        except Exception as exc:
+            _mcm_log("[MCM] Import failure for mcmaster_stock: " + repr(exc))
+            _mcm_log(traceback.format_exc())
             return None
 
     try:
@@ -95,8 +106,9 @@ def _maybe_get_mcmaster_price(display_name: str, normalized_key: str) -> Dict[st
             dims_mm[2],
             qty=1,
         )
-    except Exception:
-        _MCM_DISABLED = True
+    except Exception as exc:
+        _mcm_log("[MCM] lookup_sku_and_price_for_mm error: " + repr(exc))
+        _mcm_log(traceback.format_exc())
         return None
 
     if not sku or not price_each or not dims_in:
@@ -137,6 +149,9 @@ def _maybe_get_mcmaster_price(display_name: str, normalized_key: str) -> Dict[st
         record["price$"] = float(price_each)
 
     _MCM_CACHE[family] = record
+    _mcm_log(
+        f"[MCM] Success: {display_name!r} -> sku={sku}, ${price_each}/each, dims_in={dims_in}, usd_per_lb={usd_per_lb:.4f}"
+    )
     return record
 
 

@@ -13,6 +13,11 @@ except Exception:
     # Optional: fall back to certifi/requests default trust store
     pass
 
+# Force the local requests stub to proxy to the real package when this module
+# is imported, so callers (including appV5) do not need to set any env vars.
+# This must be set BEFORE importing "requests" so the stub detects it.
+os.environ.setdefault("CAD_QUOTER_ALLOW_REQUESTS", "1")
+
 import requests
 from cad_quoter.utils import jdump
 

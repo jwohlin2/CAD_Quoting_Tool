@@ -183,10 +183,8 @@ def _get_env() -> dict:
 def _get_catalog() -> Dict[str, Dict[float, List[StockItem]]]:
     global _CATALOG_CACHE
     if _CATALOG_CACHE is None:
-        env = _get_env()
-        csv_path = env.get("CATALOG_CSV_PATH") or os.getenv("CATALOG_CSV_PATH")
-        if not csv_path:
-            csv_path = str(default_catalog_csv())
+        # Always use the packaged catalog to avoid bad env paths.
+        csv_path = str(default_catalog_csv())
         _CATALOG_CACHE = load_catalog(csv_path)
     return _CATALOG_CACHE
 

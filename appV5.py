@@ -23371,6 +23371,8 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
 
+    # (Removed) --mcmaster-live flag; mcmaster_api now enables real requests itself.
+
     # CLI override: force-enable removal debug output
     if getattr(args, "debug_removal", False):
         global APP_ENV
