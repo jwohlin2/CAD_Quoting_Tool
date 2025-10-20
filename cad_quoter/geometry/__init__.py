@@ -212,14 +212,41 @@ _EZDXF_VER = _ezdxf_vendor.EZDXF_VERSION
 
 # Hole chart helpers (optional)
 try:
-    from hole_table_parser import parse_hole_table_lines
+    from cad_quoter.geometry.hole_table_parser import parse_hole_table_lines
 except Exception:
     parse_hole_table_lines = None
 
 try:
-    from dxf_text_extract import extract_text_lines_from_dxf
+    from cad_quoter.geometry.dxf_text import extract_text_lines_from_dxf
 except Exception:
     extract_text_lines_from_dxf = None
+
+try:
+    from cad_quoter.geometry.dxf_enrich import (
+        build_geo_from_doc,
+        build_geo_from_dxf,
+        detect_units_scale as detect_dxf_units,
+        harvest_hole_geometry,
+        harvest_hole_table,
+        harvest_outline_metrics,
+        harvest_plate_dimensions,
+        harvest_title_notes,
+        iter_spaces as iter_dxf_spaces,
+        iter_table_entities,
+        iter_table_text,
+    )
+except Exception:
+    build_geo_from_doc = None  # type: ignore[assignment]
+    build_geo_from_dxf = None  # type: ignore[assignment]
+    detect_dxf_units = None  # type: ignore[assignment]
+    harvest_hole_geometry = None  # type: ignore[assignment]
+    harvest_hole_table = None  # type: ignore[assignment]
+    harvest_outline_metrics = None  # type: ignore[assignment]
+    harvest_plate_dimensions = None  # type: ignore[assignment]
+    harvest_title_notes = None  # type: ignore[assignment]
+    iter_dxf_spaces = None  # type: ignore[assignment]
+    iter_table_entities = None  # type: ignore[assignment]
+    iter_table_text = None  # type: ignore[assignment]
 
 
 # numpy is optional for a few small calcs; degrade gracefully if missing
@@ -1199,6 +1226,17 @@ __all__ = [
     "extract_features_with_occ",
     "parse_hole_table_lines",
     "extract_text_lines_from_dxf",
+    "build_geo_from_doc",
+    "build_geo_from_dxf",
+    "detect_dxf_units",
+    "harvest_plate_dimensions",
+    "harvest_outline_metrics",
+    "harvest_hole_geometry",
+    "harvest_hole_table",
+    "harvest_title_notes",
+    "iter_dxf_spaces",
+    "iter_table_entities",
+    "iter_table_text",
     "require_ezdxf",
     "get_dwg_converter_path",
     "have_dwg_support",
