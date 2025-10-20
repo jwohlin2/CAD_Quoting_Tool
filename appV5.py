@@ -184,7 +184,6 @@ from appkit.merge_utils import (
     ACCEPT_SCALAR_KEYS,
     SUGGESTION_SCALAR_KEYS,
     merge_effective,
-    _collect_process_keys,
 )
 
 from appkit.effective import (
@@ -194,7 +193,7 @@ from appkit.effective import (
     reprice_with_effective,
 )
 
-from appkit.ui.suggestions import iter_suggestion_rows
+from appkit.ui import suggestions as ui_suggestions
 
 from appkit.occ_compat import (
     BRep_Tool,
@@ -3221,180 +3220,7 @@ def ensure_accept_flags(state: QuoteState) -> None:
         accept["drilling_strategy"] = False
 
 def iter_suggestion_rows(state: QuoteState) -> list[dict]:
-    rows: list[dict] = []
-    baseline = state.baseline or {}
-    suggestions = state.suggestions or {}
-    overrides = state.user_overrides or {}
-    effective = state.effective or {}
-    sources = state.effective_sources or {}
-    accept_raw = state.accept_llm
-    accept = accept_raw if isinstance(accept_raw, dict) else {}
-
-    def _coerce_dict(container: dict[str, Any], key: str) -> dict[str, Any]:
-        value = container.get(key)
-        return value if isinstance(value, dict) else {}
-
-    def _append_row(
-        path: tuple[str, ...],
-        label: str,
-        kind: str,
-        *,
-        baseline_value: Any,
-        llm_value: Any,
-        user_value: Any,
-        accept_value: bool,
-        effective_value: Any,
-        source_value: Any,
-    ) -> None:
-        rows.append(
-            {
-                "path": path,
-                "label": label,
-                "kind": kind,
-                "baseline": baseline_value,
-                "llm": llm_value,
-                "user": user_value,
-                "accept": accept_value,
-                "effective": effective_value,
-                "source": source_value,
-            }
-        )
-
-    baseline_hours_raw = _coerce_dict(baseline, "process_hours")
-    baseline_hours: dict[str, float] = {}
-    for key, value in baseline_hours_raw.items():
-        try:
-            as_float = float(value)
-        except Exception:
-            continue
-        if abs(as_float) > 1e-6:
-            baseline_hours[key] = as_float
-
-    map_specs = [
-        {
-            "path": "process_hour_multipliers",
-            "label": "Process × {key}",
-            "kind": "multiplier",
-            "baseline": 1.0,
-        },
-        {
-            "path": "process_hour_adders",
-            "label": "Process +hr {key}",
-            "kind": "hours",
-            "baseline": 0.0,
-        },
-    ]
-
-    for spec in map_specs:
-        path_key = spec["path"]
-        label_template = spec["label"]
-        kind = spec["kind"]
-        baseline_default = spec["baseline"]
-        sugg_map = _coerce_dict(suggestions, path_key)
-        user_map = _coerce_dict(overrides, path_key)
-        eff_map = _coerce_dict(effective, path_key)
-        src_map = _coerce_dict(sources, path_key)
-        accept_map = _coerce_dict(accept, path_key)
-        keys = sorted(_collect_process_keys(baseline_hours, sugg_map, user_map))
-        for key in keys:
-            _append_row(
-                (path_key, key),
-                label_template.format(key=key),
-                kind,
-                baseline_value=baseline_default,
-                llm_value=sugg_map.get(key),
-                user_value=user_map.get(key),
-                accept_value=bool(accept_map.get(key)),
-                effective_value=eff_map.get(key, baseline_default),
-                source_value=src_map.get(key, "baseline"),
-            )
-
-    sugg_pass = (
-        canonicalize_pass_through_map(suggestions.get("add_pass_through"))
-        if isinstance(suggestions.get("add_pass_through"), dict)
-        else {}
-    )
-    over_pass = (
-        canonicalize_pass_through_map(overrides.get("add_pass_through"))
-        if isinstance(overrides.get("add_pass_through"), dict)
-        else {}
-    )
-    base_pass = (
-        canonicalize_pass_through_map(baseline.get("pass_through"))
-        if isinstance(baseline.get("pass_through"), dict)
-        else {}
-    )
-    eff_pass = (
-        canonicalize_pass_through_map(effective.get("add_pass_through"))
-        if isinstance(effective.get("add_pass_through"), dict)
-        else {}
-    )
-    src_pass_candidate = sources.get("add_pass_through")
-    src_pass_raw = src_pass_candidate if isinstance(src_pass_candidate, dict) else {}
-    accept_pass_raw = accept.get("add_pass_through")
-    accept_pass = accept_pass_raw if isinstance(accept_pass_raw, dict) else {}
-    src_pass: dict[str, Any] = {}
-    for key, value in src_pass_raw.items():
-        canon_key = _canonical_pass_label(key)
-        if canon_key:
-            src_pass[canon_key] = value
-    keys_pass = sorted(set(base_pass) | set(sugg_pass) | set(over_pass))
-    for key in keys_pass:
-        base_amount = base_pass.get(key)
-        label = f"Pass-through Î” {key}"
-        if base_amount not in (None, ""):
-            try:
-                label = f"{label} (base {_format_value(base_amount, 'currency')})"
-            except Exception:
-                pass
-        _append_row(
-            ("add_pass_through", key),
-            label,
-            "currency",
-            baseline_value=0.0,
-            llm_value=sugg_pass.get(key),
-            user_value=over_pass.get(key),
-            accept_value=bool(accept_pass.get(key)),
-            effective_value=eff_pass.get(key, 0.0),
-            source_value=src_pass.get(key, "baseline"),
-        )
-
-    scalar_specs = [
-        {"path": ("scrap_pct",), "label": "Scrap %", "kind": "percent"},
-        {"path": ("setups",), "label": "Setups", "kind": "int"},
-        {
-            "path": ("fixture",),
-            "label": "Fixture plan",
-            "kind": "text",
-            "presence": ("baseline", "llm", "user", "effective"),
-        },
-    ]
-
-    for spec in scalar_specs:
-        key = spec["path"][0]
-        values = {
-            "baseline": baseline.get(key),
-            "llm": suggestions.get(key),
-            "user": overrides.get(key),
-            "effective": effective.get(key),
-            "source": sources.get(key, "baseline"),
-            "accept": bool(accept.get(key)),
-        }
-        presence_fields = spec.get("presence", ("baseline", "llm", "user"))
-        if any(values[field] is not None for field in presence_fields):
-            _append_row(
-                spec["path"],
-                spec["label"],
-                spec["kind"],
-                baseline_value=values["baseline"],
-                llm_value=values["llm"],
-                user_value=values["user"],
-                accept_value=values["accept"],
-                effective_value=values["effective"],
-                source_value=values["source"],
-            )
-
-    return rows
+    return ui_suggestions.build_suggestion_rows(state)
 
 try:
     from cad_quoter.geometry.hole_table_parser import (
