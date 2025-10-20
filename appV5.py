@@ -18463,6 +18463,39 @@ def _norm_txt(s: str) -> str:
     return s
 
 
+def _ops_qty_from_value(value: Any) -> int:
+    """Best-effort coercion of a HOLE TABLE quantity value to an int."""
+
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        try:
+            # Treat floats as intentional numeric quantities (e.g., 4.0 -> 4).
+            return int(round(float(value)))
+        except Exception:
+            return 0
+    text = str(value).strip()
+    if not text:
+        return 0
+    try:
+        return int(round(float(text)))
+    except Exception:
+        match = re.search(r"\d+", text)
+        return int(match.group()) if match else 0
+
+
+def _sanitize_ops_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the minimal row payload required for ops cards."""
+
+    hole = str(row.get("hole") or row.get("id") or "").strip()
+    ref = str(row.get("ref") or "").strip()
+    desc = str(row.get("desc") or "").strip()
+    qty = _ops_qty_from_value(row.get("qty"))
+    return {"hole": hole, "ref": ref, "qty": qty, "desc": desc}
+
+
 def parse_ops_per_hole(desc: str) -> dict[str, int]:
     """Return ops per HOLE (not multiplied by QTY)."""
 
@@ -18539,25 +18572,22 @@ def parse_ops_per_hole(desc: str) -> dict[str, int]:
 def aggregate_ops(rows: list[dict[str, Any]]) -> dict[str, Any]:
     totals: defaultdict[str, int] = defaultdict(int)
     detail: list[dict[str, Any]] = []
+    simple_rows: list[dict[str, Any]] = []
     for r in rows:
-        per = parse_ops_per_hole(r.get("desc", ""))
-        try:
-            qty = int(r.get("qty", 0) or 0)
-        except Exception:
-            qty = 0
+        row_payload = _sanitize_ops_row(r)
+        per = parse_ops_per_hole(row_payload.get("desc", ""))
+        qty = row_payload.get("qty", 0) or 0
         row_total = {k: v * qty for k, v in per.items()}
         for k, v in row_total.items():
             totals[k] += v
         detail.append(
             {
-                "hole": r.get("hole") or r.get("id") or "",
-                "ref": r.get("ref", ""),
-                "qty": qty,
+                **row_payload,
                 "per_hole": per,
                 "total": row_total,
-                "desc": r.get("desc", ""),
             }
         )
+        simple_rows.append(row_payload)
 
     actions_total = sum(totals.values())
     back_ops_total = (
@@ -18569,7 +18599,8 @@ def aggregate_ops(rows: list[dict[str, Any]]) -> dict[str, Any]:
     flip_required = back_ops_total > 0
     return {
         "totals": dict(totals),
-        "rows": detail,
+        "rows": simple_rows,
+        "rows_detail": detail,
         "actions_total": int(actions_total),
         "back_ops_total": int(back_ops_total),
         "flip_required": bool(flip_required),
