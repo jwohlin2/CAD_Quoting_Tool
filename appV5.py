@@ -5243,6 +5243,61 @@ def _seed_bucket_minutes(
     _ins("grinding", jig_min)
 
 
+def _hole_table_minutes_from_geo(
+    geo: Mapping[str, Any] | None,
+) -> tuple[float, float, float, float]:
+    """Return (tap, cbore, spot, jig) minutes inferred from ``geo``."""
+
+    if not isinstance(geo, _MappingABC):
+        return (0.0, 0.0, 0.0, 0.0)
+
+    ops_summary = geo.get("ops_summary") if isinstance(geo, _MappingABC) else None
+    if isinstance(ops_summary, _MappingABC):
+        totals_map = ops_summary.get("totals")
+    else:
+        totals_map = None
+    if not isinstance(totals_map, _MappingABC):
+        totals: Mapping[str, Any] = {}
+    else:
+        totals = totals_map
+
+    def _ops_total(*keys: str) -> float:
+        total = 0.0
+        for key in keys:
+            total += _safe_float(totals.get(key), 0.0)
+        return total
+
+    tap_minutes = _safe_float(geo.get("tap_minutes_hint"), 0.0)
+    if tap_minutes <= 0.0:
+        details = geo.get("tap_details")
+        if isinstance(details, (list, tuple)):
+            tap_minutes = 0.0
+            for entry in details:
+                if isinstance(entry, _MappingABC):
+                    tap_minutes += _safe_float(entry.get("total_minutes"), 0.0)
+        if tap_minutes <= 0.0:
+            tap_count = _ops_total("tap_front", "tap_back")
+            if tap_count > 0.0:
+                tap_minutes = tap_count * TAP_MINUTES_BY_CLASS.get("medium", 0.3)
+
+    cbore_minutes = _safe_float(geo.get("cbore_minutes_hint"), 0.0)
+    if cbore_minutes <= 0.0:
+        cbore_qty = _ops_total("cbore_front", "cbore_back")
+        if cbore_qty > 0.0:
+            cbore_minutes = cbore_qty * CBORE_MIN_PER_SIDE_MIN
+
+    spot_minutes = _ops_total("spot_front", "spot_back") * SPOT_DRILL_MIN_PER_SIDE_MIN
+
+    jig_minutes = _ops_total("jig_grind",) * JIG_GRIND_MIN_PER_FEATURE
+
+    return (
+        float(max(tap_minutes, 0.0)),
+        float(max(cbore_minutes, 0.0)),
+        float(max(spot_minutes, 0.0)),
+        float(max(jig_minutes, 0.0)),
+    )
+
+
 def _charged_hours_by_bucket(
     process_costs,
     process_meta,
@@ -10978,10 +11033,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         material_group=material_group,
         speeds_csv=speeds_csv_cache,
     )
-    tapping_minutes_total = 0.0
-    cbore_minutes_total = 0.0
-    spot_minutes_total = 0.0
-    jig_minutes_total = 0.0
+    (
+        tapping_minutes_total,
+        cbore_minutes_total,
+        spot_minutes_total,
+        jig_minutes_total,
+    ) = _hole_table_minutes_from_geo(geo_map)
     _seed_bucket_minutes(
         breakdown_mutable,
         tapping_min=tapping_minutes_total,
@@ -17795,6 +17852,7 @@ TAP_MINUTES_BY_CLASS = {
 
 CBORE_MIN_PER_SIDE_MIN = 0.15
 CSK_MIN_PER_SIDE_MIN = 0.12
+SPOT_DRILL_MIN_PER_SIDE_MIN = 0.1
 NPT_INSPECTION_MIN_PER_HOLE = 2.5
 JIG_GRIND_MIN_PER_FEATURE = 15.0
 REAM_MIN_PER_FEATURE = 6.0
