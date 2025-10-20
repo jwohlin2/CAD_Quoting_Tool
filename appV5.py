@@ -23889,3 +23889,27 @@ def _map_geo_to_double_underscore(g: dict) -> dict:
             pass
     return out
 
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Entry point so ``python appV5.py`` mirrors the CLI launcher."""
+
+    from cad_quoter.app.cli import main as _cli_main
+    from cad_quoter.pricing import PricingEngine, create_default_registry
+
+    return _cli_main(
+        argv,
+        app_cls=App,
+        pricing_engine_cls=PricingEngine,
+        pricing_registry_factory=create_default_registry,
+        app_env=APP_ENV,
+        env_setter=lambda env: globals().__setitem__("APP_ENV", env),
+    )
+
+
+if __name__ == "__main__":  # pragma: no cover - manual invocation
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+    sys.exit(main())
+
