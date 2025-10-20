@@ -463,6 +463,24 @@ def _compute_drilling_removal_section(
     lines: list[str] = []
     extras: dict[str, float] = {}
     updated_plan_summary = process_plan_summary
+    geo_map: Mapping[str, Any] | dict[str, Any]
+    geo_map = {}
+    if isinstance(breakdown, _MappingABC):
+        candidate_geo = breakdown.get("geo")
+        if isinstance(candidate_geo, _MappingABC):
+            geo_map = candidate_geo
+    if not geo_map:
+        try:
+            result_map = result if isinstance(result, _MappingABC) else None  # type: ignore[name-defined]
+        except NameError:
+            result_map = None
+        if isinstance(result_map, _MappingABC):
+            candidate_geo = result_map.get("geo")
+            if isinstance(candidate_geo, _MappingABC):
+                geo_map = candidate_geo
+    if not isinstance(geo_map, _MappingABC):
+        geo_map = {}
+    ops_hole_count_from_table = 0
 
     try:
         drilling_meta_map: Mapping[str, Any] = (
@@ -820,6 +838,10 @@ def _compute_drilling_removal_section(
             )
             drill_meta_summary["total_minutes_billed"] = bill_min
             drill_meta_summary["bill_hours"] = float(drill_hr)
+            if ops_hole_count_from_table > 0:
+                drill_meta_summary["hole_count"] = int(ops_hole_count_from_table)
+            if bins:
+                drill_meta_summary["groups"] = [dict(entry) for entry in bins]
 
         lines.append(
             (
@@ -853,12 +875,135 @@ _SIDE_FRONT = re.compile(r"\bFROM\s+FRONT\b", re.I)
 _CBORE_RE = re.compile(r"(?:^|[ ;])([0-9.]+)\s*(?:C[\'’]?\s*BORE|CBORE|COUNTER\s*BORE)", re.I)
 _DEPTH_TOKEN = re.compile(r"[×xX]\s*([0-9.]+)\b")  # e.g., × .62
 _SPOT_TOKENS = re.compile(r"(C[\'’]?\s*DRILL|CENTER[-\s]*DRILL|SPOT[-\s]*DRILL)", re.I)
+_DIA_TOKEN = re.compile(
+    r"(?:Ø|⌀|REF|DIA)[^0-9]*((?:\d+\s*/\s*\d+)|(?:\d+)?\.\d+|\d+(?:\.\d+)?)",
+    re.I,
+)
 
 
 def _rows_from_ops_summary(geo: dict) -> list[dict]:
     ops = (geo or {}).get("ops_summary") or {}
     rows = ops.get("rows") if isinstance(ops, dict) else None
-    return rows or []
+    if rows:
+        return list(rows)
+    if isinstance(ops, dict):
+        detail = ops.get("rows_detail")
+        if isinstance(detail, list):
+            fallback: list[dict[str, Any]] = []
+            for entry in detail:
+                if not isinstance(entry, _MappingABC):
+                    continue
+                base = {
+                    "hole": entry.get("hole", ""),
+                    "ref": entry.get("ref", ""),
+                    "qty": entry.get("qty", 0),
+                    "desc": entry.get("desc", ""),
+                }
+                if entry.get("diameter_in") is not None:
+                    base["diameter_in"] = entry.get("diameter_in")
+                fallback.append(base)
+            if fallback:
+                return fallback
+    return []
+
+
+def _ops_row_details_from_geo(geo: Mapping[str, Any] | None) -> list[Mapping[str, Any]]:
+    if not isinstance(geo, _MappingABC):
+        return []
+    ops_summary = geo.get("ops_summary")
+    if not isinstance(ops_summary, _MappingABC):
+        return []
+    detail = ops_summary.get("rows_detail")
+    if not isinstance(detail, list):
+        return []
+    return [entry for entry in detail if isinstance(entry, _MappingABC)]
+
+
+def _parse_ref_to_inch(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            val = float(value)
+        except Exception:
+            return None
+        return val if math.isfinite(val) and val > 0 else None
+    text = str(value).strip()
+    if not text:
+        return None
+    cleaned = (
+        text.replace("\u00D8", "")
+        .replace("Ø", "")
+        .replace("⌀", "")
+        .replace("IN", "")
+        .replace("in", "")
+        .strip("\"' ")
+    )
+    if not cleaned:
+        return None
+    try:
+        if "/" in cleaned:
+            return float(Fraction(cleaned))
+        return float(cleaned)
+    except Exception:
+        try:
+            return float(Fraction(cleaned))
+        except Exception:
+            return None
+
+
+def _diameter_from_ops_row(entry: Mapping[str, Any]) -> float | None:
+    direct = _coerce_float_or_none(entry.get("diameter_in"))
+    if direct is not None and direct > 0:
+        return float(direct)
+    ref_val = _parse_ref_to_inch(entry.get("ref"))
+    if ref_val is not None and ref_val > 0:
+        return ref_val
+    desc = entry.get("desc")
+    if isinstance(desc, str):
+        for match in _DIA_TOKEN.finditer(desc):
+            candidate = _parse_ref_to_inch(match.group(1))
+            if candidate is not None and candidate > 0:
+                return candidate
+    return None
+
+
+def _drilling_groups_from_ops_summary(
+    geo: Mapping[str, Any] | None,
+) -> tuple[list[dict[str, Any]], int]:
+    detail_rows = _ops_row_details_from_geo(geo)
+    if not detail_rows:
+        return ([], 0)
+    groups: dict[float, dict[str, Any]] = {}
+    total_qty = 0
+    for entry in detail_rows:
+        per = entry.get("per_hole") if isinstance(entry, _MappingABC) else None
+        if not isinstance(per, _MappingABC):
+            continue
+        drill_ops = _coerce_float_or_none(per.get("drill"))
+        if drill_ops is None or drill_ops <= 0:
+            continue
+        qty = int(_coerce_float_or_none(entry.get("qty")) or 0)
+        if qty <= 0:
+            continue
+        diameter_in = _diameter_from_ops_row(entry)
+        if diameter_in is None or diameter_in <= 0:
+            continue
+        key = round(float(diameter_in), 4)
+        bucket = groups.setdefault(
+            key,
+            {
+                "diameter_in": float(diameter_in),
+                "qty": 0,
+            },
+        )
+        bucket["qty"] += qty
+        total_qty += qty
+    ordered = [
+        {"diameter_in": data["diameter_in"], "qty": data["qty"]}
+        for key, data in sorted(groups.items())
+    ]
+    return ordered, int(total_qty)
 
 
 def _side_of(desc: str) -> str:
@@ -1132,6 +1277,88 @@ def _estimate_drilling_minutes_from_meta(
             if isinstance(entry, _MappingABC):
                 sanitized_bins.append(dict(entry))
         bins = sanitized_bins
+
+    ops_groups_from_table, ops_hole_total = _drilling_groups_from_ops_summary(geo_map)
+    if ops_groups_from_table:
+        ops_hole_count_from_table = ops_hole_total
+        table_map = {
+            round(float(group.get("diameter_in", 0.0)), 4): group
+            for group in ops_groups_from_table
+            if _coerce_float_or_none(group.get("diameter_in"))
+        }
+        filtered_bins: list[dict[str, Any]] = []
+        for entry in bins:
+            if not isinstance(entry, _MappingABC):
+                continue
+            dia_val = _safe_float(entry.get("diameter_in"))
+            if dia_val <= 0:
+                continue
+            key = round(dia_val, 4)
+            group_info = table_map.get(key)
+            if not group_info:
+                continue
+            entry_copy = dict(entry)
+            entry_copy["qty"] = int(group_info.get("qty") or 0)
+            filtered_bins.append(entry_copy)
+        seen_keys: set[float] = set()
+        for entry in filtered_bins:
+            dia_val = _safe_float(entry.get("diameter_in"))
+            if dia_val > 0:
+                seen_keys.add(round(dia_val, 4))
+        for key, group_info in table_map.items():
+            if key in seen_keys:
+                continue
+            dia_in = _safe_float(group_info.get("diameter_in"))
+            if dia_in <= 0:
+                continue
+            filtered_bins.append(
+                {
+                    "op": "drill",
+                    "op_name": "drill",
+                    "diameter_in": dia_in,
+                    "diameter_mm": float(dia_in * 25.4),
+                    "qty": int(group_info.get("qty") or 0),
+                    "sfm": 80.0,
+                    "ipr": 0.0060,
+                }
+            )
+        if filtered_bins:
+            filtered_bins.sort(
+                key=lambda item: _safe_float(item.get("diameter_in"), 0.0)
+            )
+        bins = filtered_bins
+        holes_deep = sum(
+            int(entry.get("qty") or 0)
+            for entry in bins
+            if str(entry.get("op") or entry.get("op_name") or "")
+            .strip()
+            .lower()
+            .startswith("deep")
+        )
+        holes_std = sum(
+            int(entry.get("qty") or 0)
+            for entry in bins
+            if not str(entry.get("op") or entry.get("op_name") or "")
+            .strip()
+            .lower()
+            .startswith("deep")
+        )
+        dia_vals = [
+            _safe_float(entry.get("diameter_in"))
+            for entry in bins
+            if _safe_float(entry.get("diameter_in")) > 0
+        ]
+        depth_vals = [
+            _safe_float(entry.get("depth_in"))
+            for entry in bins
+            if _safe_float(entry.get("depth_in")) > 0
+        ]
+        if isinstance(drilling_meta_map, _MutableMappingABC):
+            drilling_meta_mut = typing.cast(MutableMapping[str, Any], drilling_meta_map)
+            drilling_meta_mut["bins_list"] = bins
+            drilling_meta_mut["hole_count"] = int(ops_hole_total)
+            drilling_meta_mut["holes_deep"] = int(holes_deep)
+            drilling_meta_mut["holes_std"] = int(holes_std)
 
     subtotal_min = 0.0
     seen_deep = False
@@ -11042,23 +11269,18 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     append_lines(removal_card_lines)
     append_line("")
     # ADD: Emit HOLE-TABLE derived cards (Tapping / Counterbore / Spot / Jig)
-    try:
-        geo_map = (
-            (breakdown.get("geo") if isinstance(breakdown, _MappingABC) else None)
-            or (result.get("geo") if isinstance(result, _MappingABC) else None)
-            or {}
-        )
-        material_group = (
-            (result.get("material_group") if isinstance(result, _MappingABC) else None)
-            or (breakdown.get("material_group") if isinstance(breakdown, _MappingABC) else None)
-        )
-        # If your speeds/feeds CSV is already loaded into a mapping, pass it here instead of None
-        _emit_hole_table_ops_cards(
-            append_line,
-            geo=geo_map,
-            material_group=material_group,
-            speeds_csv=None,
-        )
+        try:
+            material_group = (
+                (result.get("material_group") if isinstance(result, _MappingABC) else None)
+                or (breakdown.get("material_group") if isinstance(breakdown, _MappingABC) else None)
+            )
+            # If your speeds/feeds CSV is already loaded into a mapping, pass it here instead of None
+            _emit_hole_table_ops_cards(
+                append_line,
+                geo=dict(geo_map) if isinstance(geo_map, _MappingABC) else {},
+                material_group=material_group,
+                speeds_csv=None,
+            )
     except Exception:
         # keep the quote render resilient even if ops rows are missing
         pass
@@ -18571,6 +18793,7 @@ def parse_ops_per_hole(desc: str) -> dict[str, int]:
 
 def aggregate_ops(rows: list[dict[str, Any]]) -> dict[str, Any]:
     totals: defaultdict[str, int] = defaultdict(int)
+    rows_simple: list[dict[str, Any]] = []
     detail: list[dict[str, Any]] = []
     simple_rows: list[dict[str, Any]] = []
     for r in rows:
@@ -18580,6 +18803,18 @@ def aggregate_ops(rows: list[dict[str, Any]]) -> dict[str, Any]:
         row_total = {k: v * qty for k, v in per.items()}
         for k, v in row_total.items():
             totals[k] += v
+        simple_row = {
+            "hole": r.get("hole") or r.get("id") or "",
+            "ref": (r.get("ref") or "").strip(),
+            "qty": qty,
+            "desc": str(r.get("desc", "")),
+        }
+        if r.get("diameter_in") is not None:
+            try:
+                simple_row["diameter_in"] = float(r.get("diameter_in"))
+            except Exception:
+                pass
+        rows_simple.append(simple_row)
         detail.append(
             {
                 **row_payload,
@@ -18819,7 +19054,7 @@ def extract_hole_table_from_text(doc, y_tol: float = 0.04, min_rows: int = 5):
         key = f'{d:.4f}"'
         families[key] = families.get(key, 0) + q
         total += q
-        clean_rows.append({**r, "qty": q, "ref": key})
+        clean_rows.append({**r, "qty": q, "ref": key, "diameter_in": d})
 
     if total <= 0:
         return {}
@@ -19021,6 +19256,7 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
                     "ref": ref_txt.strip(),
                     "qty": qty,
                     "desc": desc.strip(),
+                    "diameter_in": d,
                 }
             )
 
