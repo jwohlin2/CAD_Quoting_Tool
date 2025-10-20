@@ -219,7 +219,7 @@ def _amortized_breakdown(qty: int, *, config_flags: dict | None = None) -> dict:
     labor_costs: dict[str, float] = {}
     if qty > 1:
         labor_costs = {
-            "Programming (amortized)": 150.0,
+            "Programming (per part)": 150.0,
             "Fixture Build (amortized)": 30.0,
         }
 
@@ -338,9 +338,9 @@ def test_render_quote_does_not_duplicate_detail_lines() -> None:
     }
 
     rendered = appV5.render_quote(result, currency="$", show_zeros=False)
-    assert rendered.count("- Programmer: 1.00 hr @ $45.00/hr") == 1
-    assert rendered.count("Programmer 1.00 hr @ $45.00/hr") == 0
-    assert "Programming (amortized)" in rendered
+    assert rendered.count("- Programmer (lot): 1.00 hr @ $45.00/hr") == 1
+    assert rendered.count("Programmer (lot) 1.00 hr @ $45.00/hr") == 0
+    assert "Programming (per part)" in rendered
     assert "Fixture Build (amortized)" in rendered
     assert "- Programmer (lot): 1.00 hr @ $45.00/hr" in rendered
     assert "- Build labor (lot): 0.50 hr @ $60.00/hr" in rendered
@@ -358,7 +358,7 @@ def test_render_quote_shows_amortized_nre_for_single_qty() -> None:
 
     rendered = appV5.render_quote(result, currency="$", show_zeros=False)
 
-    assert "Programming (amortized)" in rendered
+    assert "Programming (per part)" in rendered
     assert "Fixture Build (amortized)" in rendered
     assert "Programming & Eng:" in rendered
     assert "Fixturing:" in rendered
@@ -382,7 +382,7 @@ def test_render_quote_uses_programming_per_lot_for_single_qty() -> None:
 def test_render_quote_includes_amortized_labor_totals_for_single_qty() -> None:
     breakdown = _amortized_breakdown(1)
     breakdown["labor_costs"] = {
-        "Programming (amortized)": 150.0,
+        "Programming (per part)": 150.0,
         "Fixture Build (amortized)": 30.0,
         "Grinding": 25.0,
     }
@@ -394,7 +394,7 @@ def test_render_quote_includes_amortized_labor_totals_for_single_qty() -> None:
 
     rendered = appV5.render_quote(result, currency="$", show_zeros=False)
 
-    assert "Programming (amortized)" in rendered
+    assert "Programming (per part)" in rendered
     assert "Fixture Build (amortized)" in rendered
     assert "Grinding" in rendered
 
@@ -411,7 +411,7 @@ def test_render_quote_ignores_force_amortized_flag_for_single_qty() -> None:
 
     rendered = appV5.render_quote(result, currency="$", show_zeros=False)
 
-    assert "Programming (amortized)" in rendered
+    assert "Programming (per part)" in rendered
     assert "Fixture Build (amortized)" in rendered
     assert "Amortized across" not in rendered
 

@@ -534,7 +534,7 @@ def test_die_plate_163_holes_has_planner_totals(monkeypatch):
                     "labor_cost": 600.0,
                 },
                 {
-                    "op": "Programming (amortized)",
+                    "op": "Programming (per part)",
                     "minutes": 0.0,
                     "machine_cost": 0.0,
                     "labor_cost": 320.0,
