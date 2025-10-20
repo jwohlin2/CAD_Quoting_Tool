@@ -2432,11 +2432,6 @@ def _is_pandas_dataframe(obj: Any) -> bool:
     except Exception:
         return False
 
-try:
-    from cad_quoter_legacy import compute_quote_from_df as _legacy_compute_quote_from_df  # type: ignore[import]
-except Exception:
-    _legacy_compute_quote_from_df = None
-
 # ───────────────────────────────────────────────────────────────────────
 # Sync the estimator's drilling hours into all rendered views
 # ───────────────────────────────────────────────────────────────────────
