@@ -11527,6 +11527,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     printed_subtotal = ladder_subtotal
 
     # Render MATERIAL REMOVAL card + TIME PER HOLE lines (replace legacy Time block)
+    # NOTE: Patch 3 keeps the hole-table hook active so downstream cards continue to render.
     append_lines(removal_card_lines)
     geo_map = ((breakdown or {}).get("geo") or (result or {}).get("geo") or {})
     if isinstance(geo_map, _MappingABC) and not isinstance(geo_map, dict):
