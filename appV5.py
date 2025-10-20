@@ -18322,7 +18322,16 @@ def merge_estimate_into_vars(vars_df: PandasDataFrame, estimate: dict) -> Pandas
         vars_df.loc[mask, "Example Values / Options"] = value
     return vars_df
 # ---- 2D: DXF / DWG (ezdxf) ---------------------------------------------------
-RE_TAP    = re.compile(r"(\(\d+\)\s*)?(#\s*\d{1,2}-\d+|M\d+(?:\.\d+)?x\d+(?:\.\d+)?)\s*TAP", re.I)
+# Accept: #10-32, 5/8-11, 0.190-32, M8x1.25, etc.
+RE_TAP = re.compile(
+    r"(\(\d+\)\s*)?("
+    r"#\s*\d{1,2}-\d+"                 # #10-32
+    r"|(?:\d+/\d+)\s*-\s*\d+"          # 5/8-11
+    r"|(?:\d+(?:\.\d+)?)\s*-\s*\d+"    # 0.190-32
+    r"|M\d+(?:\.\d+)?\s*x\s*\d+(?:\.\d+)?"  # M8x1.25
+    r")\s*TAP",
+    re.I,
+)
 RE_NPT    = re.compile(r"(\d+\/\d+)\s*-\s*N\.?P\.?T\.?", re.I)
 RE_THRU   = re.compile(r"\bTHRU\b", re.I)
 RE_CBORE  = re.compile(r"C[’']?BORE|CBORE|COUNTERBORE", re.I)
