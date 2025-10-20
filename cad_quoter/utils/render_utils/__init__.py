@@ -5,10 +5,53 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+ELLIPSIS = "…"
+MISSING_VALUE = "—"
+
 
 # ---------------------------------------------------------------------------
 # Formatting helpers
 # ---------------------------------------------------------------------------
+
+
+def ellipsize(text: object, width: int) -> str:
+    """Clamp ``text`` to ``width`` characters using a single ellipsis if needed."""
+
+    if width <= 0:
+        return ""
+    clean = text if isinstance(text, str) else str(text)
+    if len(clean) <= width:
+        return clean
+    if width == 1:
+        return ELLIPSIS
+    return f"{clean[: width - 1]}{ELLIPSIS}"
+
+
+def money(value: float | int | None, currency: str = "$", *, missing: str = MISSING_VALUE) -> str:
+    """Format ``value`` as a money string with thousands separators."""
+
+    if value is None:
+        return missing
+    try:
+        number = float(value)
+    except Exception:
+        return missing
+    formatted = fmt_money(abs(number), currency)
+    return f"-{formatted}" if number < 0 else formatted
+
+
+def pct(value: float | int | None, *, decimals: int = 1, missing: str = MISSING_VALUE) -> str:
+    """Format a ratio (0.0–1.0) or percentage (0–100) with the desired precision."""
+
+    if value is None:
+        return missing
+    try:
+        number = float(value)
+    except Exception:
+        return missing
+    ratio = number / 100.0 if abs(number) > 1.0 else number
+    formatted = fmt_percent(ratio, decimals=decimals)
+    return formatted if formatted else missing
 
 
 def fmt_money(value: Any, currency: str) -> str:
@@ -44,10 +87,10 @@ def fmt_percent(value: Any, *, decimals: int = 1) -> str:
     """Return ``value`` as a percentage with a configurable precision."""
 
     try:
-        pct = float(value or 0.0)
+        pct_value = float(value or 0.0)
     except Exception:
-        pct = 0.0
-    return f"{pct * 100:.{decimals}f}%"
+        pct_value = 0.0
+    return f"{pct_value * 100:.{decimals}f}%"
 
 
 def fmt_range(
@@ -260,3 +303,35 @@ def render_quote_doc(doc: QuoteDoc, *, divider: str) -> str:
             output.append(divider)
         output.extend(row.text for row in section.rows)
     return "\n".join(output)
+
+
+from .tables import ColumnSpec, DEFAULT_WIDTH, ascii_table, draw_boxed_table, draw_kv_table
+
+__all__ = [
+    "ELLIPSIS",
+    "MISSING_VALUE",
+    "ColumnSpec",
+    "DEFAULT_WIDTH",
+    "QuoteDoc",
+    "QuoteDocRecorder",
+    "QuoteRow",
+    "QuoteSection",
+    "ascii_table",
+    "draw_boxed_table",
+    "draw_kv_table",
+    "ellipsize",
+    "fmt_hours",
+    "fmt_money",
+    "fmt_percent",
+    "fmt_range",
+    "format_currency",
+    "format_dimension",
+    "format_hours",
+    "format_hours_with_rate",
+    "format_percent",
+    "format_weight_lb_decimal",
+    "format_weight_lb_oz",
+    "money",
+    "pct",
+    "render_quote_doc",
+]
