@@ -18337,7 +18337,7 @@ def _norm_line(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "")).strip()
 
 
-_QTY_LEAD = re.compile(r"^\s*\((\d+)\)\s*")
+_QTY_LEAD = re.compile(r'^\s*\((\d+)\)\s*')
 _MM_IN_DIA = re.compile(r"(?:Ø|⌀|O|DIA|\b)\s*([0-9.]+)")
 _PAREN_DIA = re.compile(r"\(([0-9.]+)\s*Ø?\)")
 _FROM_SIDE = re.compile(r"\bFROM\s+(FRONT|BACK)\b", re.I)
@@ -21317,20 +21317,6 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
 
     if chart_lines:
         chart_summary = summarize_hole_chart_lines(chart_lines)
-
-        try:
-            rows_norm = _build_ops_rows_from_chart_lines(chart_lines or [])
-        except Exception:
-            rows_norm = []
-        if rows_norm:
-            geo.setdefault("ops_summary", {})["rows"] = rows_norm
-            geo["ops_summary"]["source"] = "chart_lines"
-            try:
-                geo["ops_summary"]["tap_total"] = int(chart_summary.get("tap_qty") or 0)
-                geo["ops_summary"]["cbore_total"] = int(chart_summary.get("cbore_qty") or 0)
-                geo["ops_summary"]["csk_total"] = int(chart_summary.get("csk_qty") or 0)
-            except Exception:
-                pass
     parser = _parse_hole_table_lines or parse_hole_table_lines
     if chart_lines and parser:
         try:
@@ -21342,22 +21328,131 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
             chart_source = "dxf_text_regex"
             chart_reconcile = summarize_hole_chart_agreement(entity_holes_mm, chart_ops)
 
-        # --- NEW: publish HOLE-TABLE rows for UI cards ------------------------------
-        rows_norm: list[dict[str, Any]] = []
-        if hole_rows:
-            rows_norm = _normalize_ops_rows_from_hole_rows(hole_rows)
-        elif chart_ops:
-            rows_norm = _normalize_ops_rows_from_chart_ops(chart_ops)
+        # --- publish HOLE-TABLE rows to geo["ops_summary"]["rows"] ---
+        try:
+            ops_rows = []
+            if hole_rows:
+                # Prefer the structured rows, synthesizing a description from features if needed
+                for row in hole_rows:
+                    if row is None:
+                        continue
+                    qty = int(getattr(row, "qty", 0) or 0)
+                    ref = (
+                        getattr(row, "ref", None)
+                        or getattr(row, "drill_ref", None)
+                        or getattr(row, "pilot", None)
+                        or ""
+                    )
+                    desc = (
+                        getattr(row, "description", None)
+                        or getattr(row, "desc", None)
+                        or ""
+                    )
+                    if not desc:
+                        parts = []
+                        for f in list(getattr(row, "features", []) or []):
+                            if not isinstance(f, dict):
+                                continue
+                            t = str(f.get("type", "")).lower()
+                            side = str(f.get("side", "")).upper()
+                            if t == "tap":
+                                thread = f.get("thread") or ""
+                                depth = f.get("depth_in")
+                                parts.append(
+                                    f"{thread} TAP"
+                                    + (
+                                        f" × {depth:.2f}\""
+                                        if isinstance(depth, (int, float))
+                                        else ""
+                                    )
+                                    + (f" FROM {side}" if side else "")
+                                )
+                            elif t == "cbore":
+                                dia = f.get("dia_in")
+                                depth = f.get("depth_in")
+                                parts.append(
+                                    (
+                                        f"{(dia or 0):.4f} "
+                                        if dia
+                                        else ""
+                                    )
+                                    + "C’BORE"
+                                    + (
+                                        f" × {depth:.2f}\""
+                                        if isinstance(depth, (int, float))
+                                        else ""
+                                    )
+                                    + (f" FROM {side}" if side else "")
+                                )
+                            elif t in {"csk", "countersink"}:
+                                dia = f.get("dia_in")
+                                depth = f.get("depth_in")
+                                parts.append(
+                                    (
+                                        f"{(dia or 0):.4f} "
+                                        if dia
+                                        else ""
+                                    )
+                                    + "C’SINK"
+                                    + (
+                                        f" × {depth:.2f}\""
+                                        if isinstance(depth, (int, float))
+                                        else ""
+                                    )
+                                    + (f" FROM {side}" if side else "")
+                                )
+                            elif t == "drill":
+                                ref_local = f.get("ref") or ref or ""
+                                thru = " THRU" if f.get("thru", True) else ""
+                                parts.append(f"{ref_local}{thru}".strip())
+                            elif t == "spot":
+                                depth = f.get("depth_in")
+                                parts.append(
+                                    "C’DRILL"
+                                    + (
+                                        f" × {depth:.2f}\""
+                                        if isinstance(depth, (int, float))
+                                        else ""
+                                    )
+                                )
+                            elif t == "jig":
+                                parts.append("JIG GRIND")
+                        desc = "; ".join([p for p in parts if p])
+                    ops_rows.append(
+                        {
+                            "hole": str(
+                                getattr(row, "hole_id", "")
+                                or getattr(row, "letter", "")
+                                or ""
+                            ),
+                            "ref": str(ref or ""),
+                            "qty": int(qty),
+                            "desc": str(desc or ""),
+                        }
+                    )
+            elif chart_lines:
+                # Fallback: derive rows directly from the free text chart
+                ops_rows = _build_ops_rows_from_chart_lines(chart_lines)
 
-        if rows_norm and not geo.get("ops_summary", {}).get("rows"):
-            geo.setdefault("ops_summary", {})["rows"] = rows_norm
-            geo["ops_summary"]["source"] = chart_source or "hole_table"
-            try:
-                geo["ops_summary"]["tap_total"] = int(chart_summary.get("tap_qty") or 0)
-                geo["ops_summary"]["cbore_total"] = int(chart_summary.get("cbore_qty") or 0)
-                geo["ops_summary"]["csk_total"] = int(chart_summary.get("csk_qty") or 0)
-            except Exception:
-                pass
+            if ops_rows:
+                geo.setdefault("ops_summary", {})["rows"] = ops_rows
+                geo.setdefault("ops_summary", {})["source"] = chart_source or "chart_lines"
+                try:
+                    if chart_summary:
+                        geo["ops_summary"]["tap_total"] = int(
+                            chart_summary.get("tap_qty") or 0
+                        )
+                        geo["ops_summary"]["cbore_total"] = int(
+                            chart_summary.get("cbore_qty") or 0
+                        )
+                        geo["ops_summary"]["csk_total"] = int(
+                            chart_summary.get("csk_qty") or 0
+                        )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # --- end publish rows ---
     if chart_summary:
         geo.setdefault("chart_summary", chart_summary)
         if chart_summary.get("tap_qty"):
@@ -21586,7 +21681,6 @@ def _build_ops_rows_from_chart_lines(chart_lines: list[str]) -> list[dict]:
     rows: list[dict] = []
     if not chart_lines:
         return rows
-
     lines = [_norm_line(x) for x in chart_lines]
     i = 0
     while i < len(lines):
@@ -21594,8 +21688,11 @@ def _build_ops_rows_from_chart_lines(chart_lines: list[str]) -> list[dict]:
         if not ln:
             i += 1
             continue
-
-        if any(k in ln.upper() for k in ["BREAK ALL", "SHARP CORNERS", "RADIUS", "CHAMFER"]):
+        # skip generic notes
+        if any(
+            k in ln.upper()
+            for k in ["BREAK ALL", "SHARP CORNERS", "RADIUS", "CHAMFER", "AS SHOWN"]
+        ):
             i += 1
             continue
 
@@ -21605,11 +21702,13 @@ def _build_ops_rows_from_chart_lines(chart_lines: list[str]) -> list[dict]:
             qty = int(mqty.group(1))
             ln = ln[mqty.end() :].strip()
 
+        # TAP
         mtap = RE_TAP.search(ln)
         if mtap:
+            # (group 2 holds the whole spec: "#10-32", "5/8-11", "0.190-32", "M8x1.25")
             thread = mtap.group(2).replace(" ", "")
             desc = f"{thread} TAP"
-            tail = " ".join([ln] + lines[i + 1 : i + 3])
+            tail = " ".join([ln] + lines[i + 1 : i + 3])  # look forward for depth / THRU / side
             if RE_THRU.search(tail):
                 desc += " THRU"
             md = RE_DEPTH.search(tail)
@@ -21622,11 +21721,12 @@ def _build_ops_rows_from_chart_lines(chart_lines: list[str]) -> list[dict]:
             i += 1
             continue
 
+        # COUNTERBORE
         if RE_CBORE.search(ln):
             tail = " ".join([ln] + lines[i - 1 : i] + lines[i + 1 : i + 2])
             md = _PAREN_DIA.search(tail) or _MM_IN_DIA.search(tail) or RE_DIA.search(tail)
             dia = float(md.group(1)) if md else None
-            desc = f"{dia:.4f} C’BORE" if dia else "C’BORE"
+            desc = f"{dia:.4f} C’BORE" if dia is not None else "C’BORE"
             mdp = RE_DEPTH.search(" ".join([ln] + lines[i + 1 : i + 2]))
             if mdp and mdp.group(1):
                 desc += f' × {float(mdp.group(1)):.2f}"'
@@ -21637,6 +21737,7 @@ def _build_ops_rows_from_chart_lines(chart_lines: list[str]) -> list[dict]:
             i += 1
             continue
 
+        # SPOT / CENTER DRILL
         if (
             "C' DRILL" in ln.upper()
             or "C’DRILL" in ln.upper()
@@ -21652,6 +21753,7 @@ def _build_ops_rows_from_chart_lines(chart_lines: list[str]) -> list[dict]:
             i += 1
             continue
 
+        # THRU drill with a ref size (e.g., "R (.339Ø) DRILL THRU")
         if "DRILL" in ln.upper() and RE_THRU.search(ln):
             md = _PAREN_DIA.search(ln) or _MM_IN_DIA.search(ln) or RE_DIA.search(ln)
             ref = (md.group(1) if md else "").strip()
@@ -21659,6 +21761,7 @@ def _build_ops_rows_from_chart_lines(chart_lines: list[str]) -> list[dict]:
             i += 1
             continue
 
+        # NPT etc
         if RE_NPT.search(ln):
             rows.append({"hole": "", "ref": "", "qty": qty, "desc": _norm_line(ln)})
             i += 1
@@ -21666,6 +21769,7 @@ def _build_ops_rows_from_chart_lines(chart_lines: list[str]) -> list[dict]:
 
         i += 1
 
+    # coalesce identical (desc, ref) pairs
     agg: dict[tuple[str, str], int] = {}
     order: list[tuple[str, str]] = []
     for r in rows:
@@ -21673,11 +21777,10 @@ def _build_ops_rows_from_chart_lines(chart_lines: list[str]) -> list[dict]:
         if key not in agg:
             order.append(key)
         agg[key] = agg.get(key, 0) + int(r.get("qty") or 0)
-    rows_out = [
+    return [
         {"hole": "", "ref": ref, "qty": agg[(desc, ref)], "desc": desc}
         for (desc, ref) in order
     ]
-    return rows_out
 
 def _normalize_ops_rows_from_hole_rows(rows: Iterable[Any] | None) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
