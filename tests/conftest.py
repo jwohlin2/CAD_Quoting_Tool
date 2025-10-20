@@ -546,7 +546,14 @@ def _ensure_geometry_helpers() -> None:
         geometry = importlib.import_module("cad_quoter.geometry")
     except Exception:
         geometry = types.ModuleType("cad_quoter.geometry")
-        geometry.__spec__ = ModuleSpec("cad_quoter.geometry", loader=None)
+        geometry_dir = Path(__file__).resolve().parent.parent / "cad_quoter" / "geometry"
+        geometry.__spec__ = ModuleSpec(
+            "cad_quoter.geometry",
+            loader=None,
+            origin=str(geometry_dir),
+            is_package=True,
+        )
+        geometry.__path__ = [str(geometry_dir)]
         sys.modules["cad_quoter.geometry"] = geometry
 
     def _return_none(*args, **kwargs):

@@ -109,6 +109,13 @@ from cad_quoter.domain import (
 
 from cad_quoter.vendors import ezdxf as _ezdxf_vendor
 
+from cad_quoter.geometry.dxf_enrich import (
+    detect_units_scale as _shared_detect_units_scale,
+    iter_spaces as _shared_iter_spaces,
+    iter_table_entities as _shared_iter_table_entities,
+    iter_table_text as _shared_iter_table_text,
+)
+
 from bucketizer import bucketize
 
 from appkit.geometry_shim import (
@@ -3475,12 +3482,16 @@ def iter_suggestion_rows(state: QuoteState) -> list[dict]:
     return rows
 
 try:
-    from hole_table_parser import parse_hole_table_lines as _parse_hole_table_lines
+    from cad_quoter.geometry.hole_table_parser import (
+        parse_hole_table_lines as _parse_hole_table_lines,
+    )
 except Exception:
     _parse_hole_table_lines = None
 
 try:
-    from dxf_text_extract import extract_text_lines_from_dxf as _extract_text_lines_from_dxf
+    from cad_quoter.geometry.dxf_text import (
+        extract_text_lines_from_dxf as _extract_text_lines_from_dxf,
+    )
 except Exception:
     _extract_text_lines_from_dxf = None
 
@@ -18499,12 +18510,7 @@ HANDLING_ADDER_RANGE_HR = (0.1, 0.3)
 LB_PER_IN3_PER_GCC = 0.036127292
 
 def detect_units_scale(doc) -> dict[str, float | int]:
-    try:
-        u = int(doc.header.get("$INSUNITS", 1))
-    except Exception:
-        u = 1
-    to_in = 1.0 if u == 1 else (1 / 25.4) if u in (4, 13) else 1.0
-    return {"insunits": u, "to_in": float(to_in)}
+    return _shared_detect_units_scale(doc)
 
 def harvest_ordinates(doc, to_in: float) -> dict[str, Any]:
     vals_x: list[float] = []
@@ -18928,125 +18934,15 @@ def quick_deburr_estimates(edge_len_in: float | None, hole_count: int | None) ->
     }
 
 def _spaces(doc) -> list[Any]:
-    spaces: list[Any] = []
-    if doc is None:
-        return spaces
-    seen: set[int] = set()
-    try:
-        msp = doc.modelspace()
-    except Exception:
-        msp = None
-    if msp is not None and id(msp) not in seen:
-        seen.add(id(msp))
-        spaces.append(msp)
-    try:
-        layout_names = list(doc.layouts.names_in_taborder())
-    except Exception:
-        layout_names = []
-    for layout_name in layout_names:
-        if layout_name.lower() in ("model", "defpoints"):
-            continue
-        try:
-            es = doc.layouts.get(layout_name).entity_space
-        except Exception:
-            continue
-        if es is None or id(es) in seen:
-            continue
-        seen.add(id(es))
-        spaces.append(es)
-    return spaces
+    return list(_shared_iter_spaces(doc))
 
 
 def _all_tables(doc):
-    """Yield every TABLE entity in model/layout spaces and inside block INSERTs."""
-
-    if doc is None:
-        return
-
-    seen: set[int] = set()
-
-    def _yield_from_insert(ins):
-        try:
-            virtual_entities = ins.virtual_entities()
-        except Exception:
-            return
-        for sub in virtual_entities:
-            try:
-                dxftype = sub.dxftype()
-            except Exception:
-                dxftype = ""
-            if dxftype == "TABLE":
-                key = id(sub)
-                if key not in seen:
-                    seen.add(key)
-                    yield sub
-            elif dxftype == "INSERT":
-                yield from _yield_from_insert(sub)
-
-    for sp in _spaces(doc):
-        try:
-            tables = sp.query("TABLE")
-        except Exception:
-            tables = []
-        for table in tables:
-            key = id(table)
-            if key not in seen:
-                seen.add(key)
-                yield table
-        try:
-            inserts = sp.query("INSERT")
-        except Exception:
-            inserts = []
-        for ins in inserts:
-            yield from _yield_from_insert(ins)
+    yield from _shared_iter_table_entities(doc)
 
 def _iter_table_text(doc):
-    if doc is None:
-        return
-    for t in _all_tables(doc):
-        try:
-            n_rows = int(getattr(t.dxf, "n_rows", 0))
-            n_cols = int(getattr(t.dxf, "n_cols", 0))
-        except Exception:
-            n_rows = 0
-            n_cols = 0
-        if n_rows <= 0 or n_cols <= 0:
-            continue
-        try:
-            for r in range(n_rows):
-                row: list[str] = []
-                for c in range(n_cols):
-                    try:
-                        cell = t.get_cell(r, c)
-                    except Exception:
-                        cell = None
-                    if cell is None:
-                        row.append("")
-                        continue
-                    try:
-                        text = cell.get_text()
-                    except Exception:
-                        text = ""
-                    row.append(text or "")
-                line = " | ".join(s.strip() for s in row if s)
-                if line:
-                    yield line
-        except Exception:
-            continue
-    for sp in _spaces(doc):
-        try:
-            for e in sp.query("MTEXT,TEXT"):
-                try:
-                    if e.dxftype() == "MTEXT":
-                        text = e.plain_text()
-                    else:
-                        text = e.dxf.text
-                except Exception:
-                    text = None
-                if text:
-                    yield text.strip()
-        except Exception:
-            continue
+    for text in _shared_iter_table_text(doc):
+        yield text
 
 
 # --- Ops parsing from HOLE TABLE DESCRIPTION ---------------------------------

@@ -21,7 +21,15 @@ from cad_quoter.domain_models import (
     normalize_material_key,
 )
 from cad_quoter.llm_overrides import _plate_mass_properties, _plate_mass_from_dims
-LB_PER_KG = 2.20462262185
+from cad_quoter.pricing.materials import (
+    LB_PER_KG as _LB_PER_KG,
+    get_mcmaster_unit_price as _shared_get_mcmaster_unit_price,
+    price_value_to_per_gram as price_value_to_per_gram,
+    usdkg_to_usdlb as usdkg_to_usdlb,
+)
+
+LB_PER_KG = _LB_PER_KG
+get_mcmaster_unit_price = _shared_get_mcmaster_unit_price
 
 
 def _usd_per_lb(value: Any, unit_hint: Any | None = None) -> float | None:
@@ -130,19 +138,14 @@ def _resolve_price_per_lb(material_key: str, display_name: str | None = None) ->
     except Exception:
         pass
 
-    if price <= 0:
+    if price <= 0 and get_mcmaster_unit_price is not None:
         try:
-            from cad_quoter.pricing.materials import get_mcmaster_unit_price
-        except Exception:  # pragma: no cover - optional dependency
-            get_mcmaster_unit_price = None  # type: ignore[assignment]
-        if get_mcmaster_unit_price is not None:
-            try:
-                mcm_price, mcm_source = get_mcmaster_unit_price(display, unit="lb")
-            except Exception:
-                mcm_price, mcm_source = None, ""
-            if mcm_price and float(mcm_price) > 0:
-                price = float(mcm_price)
-                source = mcm_source or "mcmaster"
+            mcm_price, mcm_source = get_mcmaster_unit_price(display, unit="lb")
+        except Exception:
+            mcm_price, mcm_source = None, ""
+        if mcm_price and float(mcm_price) > 0:
+            price = float(mcm_price)
+            source = mcm_source or "mcmaster"
 
     if price <= 0:
         try:
