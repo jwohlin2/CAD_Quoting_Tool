@@ -24402,10 +24402,13 @@ class App(tk.Tk):
             # a platform-specific Tk quirk prevents the Text widget from
             # painting. These files are overwritten on each run.
             try:
-                with open("latest_quote_simplified.txt", "w", encoding="utf-8") as f:
-                    f.write(simplified_report or "")
-                with open("latest_quote_full.txt", "w", encoding="utf-8") as f:
-                    f.write(full_report or "")
+                for path, report in (
+                    ("latest_quote_simplified.txt", simplified_report),
+                    ("latest_quote_full.txt", full_report),
+                ):
+                    lines = (report or "").splitlines()
+                    with open(path, "w", encoding="utf-8", newline="") as f:
+                        f.write("\n".join(lines))
             except Exception:
                 # Non-fatal: continue to render in the UI even if writing fails
                 pass
@@ -24591,6 +24594,10 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
     return 0
 
 if __name__ == "__main__":
+    try:  # pragma: no cover - platform-specific console guard
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
     try:
         sys.exit(_main())
     except Exception as exc:  # pragma: no cover - smoke guard
