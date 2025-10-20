@@ -20023,78 +20023,96 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
 
     # holes from circles with concentric-dedup fallback
     holes = list(sp.query("CIRCLE"))
-    circ: list[tuple[float, float, float]] = []
     entity_holes_mm: list[float] = []
+    # Build (cx_mm, cy_mm, dia_mm)
+    circ: list[tuple[float, float, float]] = []
     for c in holes:
         try:
             cx, cy = float(c.dxf.center.x), float(c.dxf.center.y)
             r_du = float(c.dxf.radius)
             d_mm = float(2.0 * r_du * u2mm)
+            circ.append((cx * u2mm, cy * u2mm, d_mm))
+            entity_holes_mm.append(d_mm)
         except Exception:
             continue
-        entity_holes_mm.append(d_mm)
-        circ.append((cx * u2mm, cy * u2mm, d_mm))
 
-    import os
+    # Tunables (env overrides allowed)
+    import os, math
 
-    try:
-        CENTER_MM_TOL = float(os.getenv("GEO_CENTER_TOL_MM", "0.06"))
-    except Exception:
-        CENTER_MM_TOL = 0.06
+    CENTER_BIN_MM = float(os.getenv("GEO_CENTER_TOL_MM", "0.06"))
+    CENTER_PROX_MM = float(os.getenv("GEO_CENTER_PROX_MM", "0.22"))
+    MIN_DD_MM = float(os.getenv("GEO_MIN_RING_DELTA_MM", "0.50"))
 
-    def _key_mm(x_mm: float, y_mm: float, tol: float = CENTER_MM_TOL) -> tuple[int, int]:
-        return (round(x_mm / tol), round(y_mm / tol))
+    # First pass: bin by center grids (mm)
+    def _key_mm(x: float, y: float, tol: float = CENTER_BIN_MM) -> tuple[int, int]:
+        return (round(x / tol), round(y / tol))
 
-    buckets: dict[tuple[int, int], list[tuple[float, float, float]]] = {}
-    for cx_mm, cy_mm, d_mm in circ:
-        key = _key_mm(cx_mm, cy_mm)
-        buckets.setdefault(key, []).append((cx_mm, cy_mm, d_mm))
+    bins: dict[tuple[int, int], list[tuple[float, float, float]]] = {}
+    for x_mm, y_mm, d_mm in circ:
+        bins.setdefault(_key_mm(x_mm, y_mm), []).append((x_mm, y_mm, d_mm))
 
+    # Merge adjacent bins (handles jitter on bin borders)
     def _merge_adjacent(
         bmap: Mapping[tuple[int, int], list[tuple[float, float, float]]]
     ) -> dict[tuple[int, int], list[tuple[float, float, float]]]:
         seen: set[tuple[int, int]] = set()
-        merged: dict[tuple[int, int], list[tuple[float, float, float]]] = {}
+        out: dict[tuple[int, int], list[tuple[float, float, float]]] = {}
         for key in list(bmap.keys()):
             if key in seen:
                 continue
+            acc: list[tuple[float, float, float]] = []
             stack = [key]
             seen.add(key)
-            accum: list[tuple[float, float, float]] = []
             while stack:
-                cur = stack.pop()
-                accum.extend(bmap.get(cur, []))
-                kx, ky = cur
+                kk = stack.pop()
+                acc.extend(bmap.get(kk, []))
+                kx, ky = kk
                 for nx in range(kx - 1, kx + 2):
                     for ny in range(ky - 1, ky + 2):
-                        nb = (nx, ny)
-                        if nb in bmap and nb not in seen:
-                            seen.add(nb)
-                            stack.append(nb)
-            merged[key] = accum
-        return merged
+                        nk = (nx, ny)
+                        if nk in bmap and nk not in seen:
+                            seen.add(nk)
+                            stack.append(nk)
+            out[key] = acc
+        return out
 
-    groups = _merge_adjacent(buckets)
+    groups = _merge_adjacent(bins)
 
+    # Second pass: within each merged group, suppress larger circles that are
+    # "near-concentric" to any smaller circle (distance <= CENTER_PROX_MM and
+    # dia gap >= MIN_DD_MM).
     through_mm: list[float] = []
     cbore_pairs = 0
-    for ds in groups.values():
-        ds_sorted = sorted(d for *_coords, d in ds)
-        if not ds_sorted:
+    for _, pts in groups.items():
+        if not pts:
             continue
-        through_mm.append(ds_sorted[0])
-        if len(ds_sorted) > 1:
-            cbore_pairs += len(ds_sorted) - 1
+        pts_sorted = sorted(pts, key=lambda t: t[2])
+        suppressed = [False] * len(pts_sorted)
+        for i in range(len(pts_sorted)):
+            if suppressed[i]:
+                continue
+            xi, yi, di = pts_sorted[i]
+            for j in range(i + 1, len(pts_sorted)):
+                if suppressed[j]:
+                    continue
+                xj, yj, dj = pts_sorted[j]
+                if (dj - di) < MIN_DD_MM:
+                    continue
+                if math.hypot(xj - xi, yj - yi) <= CENTER_PROX_MM:
+                    suppressed[j] = True
+                    cbore_pairs += 1
+        for k, (_x, _y, dk) in enumerate(pts_sorted):
+            if not suppressed[k]:
+                through_mm.append(dk)
 
+    # Round and expose results
     hole_diams_mm = [round(v, 2) for v in through_mm]
 
     try:
         existing_cbore = int(float(geo.get("cbore_pairs_geom") or 0))
     except Exception:
         existing_cbore = 0
-    if cbore_pairs or "cbore_pairs_geom" not in geo:
-        geo["cbore_pairs_geom"] = max(existing_cbore, cbore_pairs)
-
+    geo["cbore_pairs_geom"] = max(existing_cbore, cbore_pairs)
     geo["hole_count_geom_dedup"] = len(hole_diams_mm)
     geo["hole_count_geom_raw"] = len(entity_holes_mm)
     try:
@@ -20108,7 +20126,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     def _families_nearest_1over64_in(
         vals_mm: Iterable[float],
     ) -> tuple[dict[str, int], dict[float, int]]:
-        quantized: list[float] = []
+        vals_in: list[float] = []
         for raw in vals_mm:
             try:
                 val_in = float(raw) / 25.4
@@ -20116,44 +20134,33 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
                 continue
             if not math.isfinite(val_in):
                 continue
-            quantized.append(round(val_in * 64) / 64)
-        if not quantized:
+            vals_in.append(val_in)
+        if not vals_in:
             return {}, {}
-        counts = Counter(round(q, 4) for q in quantized)
-        display = {f'{k:.4f}"': int(v) for k, v in counts.items()}
-        numeric = {round(k, 4): int(v) for k, v in counts.items()}
+        quant = [round(x * 64) / 64 for x in vals_in]
+        cnt = Counter(round(q, 4) for q in quant)
+        display = {f'{k:.4f}"': int(v) for k, v in cnt.items()}
+        numeric = {round(k, 4): int(v) for k, v in cnt.items()}
         return display, numeric
 
     geom_families_display, geom_families_numeric = _families_nearest_1over64_in(
-        hole_diams_mm
+        through_mm
     )
-    geom_families = geom_families_display
     geo["hole_diam_families_in_geom"] = geom_families_display
     if geom_families_numeric:
-        geom_fam = {round(k, 4): int(v) for k, v in geom_families_numeric.items()}
+        geom_fam = dict(geom_families_numeric)
         geo["hole_diam_families_geom_in"] = geom_fam
+    else:
+        geom_fam = {}
+    if not geo.get("hole_diam_families_in"):
+        geo["hole_diam_families_in"] = dict(geo["hole_diam_families_in_geom"])
+    geo["hole_family_count"] = int(sum(geo["hole_diam_families_in"].values()))
 
-    existing_families = geo.get("hole_diam_families_in")
-
-    def _family_total(families: Mapping[str, Any] | None) -> int:
-        if not isinstance(families, dict):
-            return 0
-        total = 0
-        for value in families.values():
-            try:
-                total += int(float(value))
-            except Exception:
-                continue
-        return total
-
-    existing_total = _family_total(existing_families)
-    existing_len = len(existing_families) if isinstance(existing_families, dict) else 0
-    if not isinstance(existing_families, dict) or existing_total <= existing_len:
-        geo["hole_diam_families_in"] = dict(geom_families)
-        existing_families = geo["hole_diam_families_in"]
-        existing_total = _family_total(existing_families)
-
-    geo["hole_family_count"] = int(existing_total)
+    # Keep provenance explicit with the tuned mm thresholds
+    geo.setdefault("provenance", {})["holes"] = (
+        "GEOM (concentric-dedup, center="
+        f"{CENTER_BIN_MM:.3f} mm, prox={CENTER_PROX_MM:.3f} mm, Δ≥{MIN_DD_MM:.2f} mm)"
+    )
 
     if table_info.get("hole_count"):
         try:
