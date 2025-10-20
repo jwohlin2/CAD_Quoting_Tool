@@ -179,6 +179,14 @@ from appkit.ui.widgets import (
     ScrollableFrame,
 )
 
+# UI service containers and configuration helpers
+from appkit.ui.services import (
+    GeometryLoader,
+    LLMServices,
+    PricingRegistry,
+    UIConfiguration,
+)
+
 from appkit.guardrails import build_guard_context, apply_drilling_floor_notes
 from appkit.merge_utils import (
     ACCEPT_SCALAR_KEYS,
