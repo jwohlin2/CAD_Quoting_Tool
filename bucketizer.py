@@ -8,7 +8,7 @@ presenting totals that align with the traditional quoting experience.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable
+from typing import Any, Dict, Iterable, Mapping
 
 try:
     from cad_quoter.rates import OP_TO_LABOR, OP_TO_MACHINE, rate_for_role
@@ -37,6 +37,15 @@ BUCKETS: tuple[str, ...] = (
     "Deburr",
     "Inspection",
 )
+
+# Heuristic minutes used when planner line items are unavailable.  These mirror
+# the fallbacks in ``appV5._hole_table_minutes_from_geo`` so that the Process &
+# Labor view still surfaces key drilling sub-operations even when their cards
+# are not emitted.
+TAP_MINUTES_PER_HOLE = 0.3
+CBORE_MINUTES_PER_SIDE = 0.15
+CSK_MINUTES_PER_SIDE = 0.12
+JIG_GRIND_MINUTES_PER_FEATURE = 15.0
 
 # Explicit overrides for planner operation keys.  Any operation that does not
 # appear here will be routed through the fallback heuristics in
@@ -310,6 +319,104 @@ def bucketize(
 
     inspector_rate = _safe_rate_for_role(rates_two_bucket, "Inspector")
     add("Inspection", inspection_min, 0.0, inspector_rate * (inspection_min / 60.0))
+
+    def _ops_totals_map(data: Mapping[str, Any] | None) -> Mapping[str, Any]:
+        if isinstance(data, Mapping):
+            totals = data.get("totals")
+            if isinstance(totals, Mapping):
+                return totals
+        return {}
+
+    geom_mapping: Mapping[str, Any] | None = geom if isinstance(geom, Mapping) else None
+    ops_summary = geom_mapping.get("ops_summary") if geom_mapping else None
+    ops_totals = _ops_totals_map(ops_summary if isinstance(ops_summary, Mapping) else None)
+
+    def _ops_total(*keys: str) -> float:
+        total = 0.0
+        for key in keys:
+            if isinstance(ops_totals, Mapping):
+                total += _as_float(ops_totals.get(key))
+        return total
+
+    def _sum_minutes_from_details(entries: Iterable[Any] | None) -> float:
+        total = 0.0
+        if isinstance(entries, (list, tuple, set)):
+            for entry in entries:
+                if isinstance(entry, Mapping):
+                    total += _as_float(entry.get("total_minutes"))
+        return total
+
+    fallback_minutes: Dict[str, float] = {}
+
+    tap_minutes = 0.0
+    if geom_mapping:
+        tap_minutes = _as_float(geom_mapping.get("tap_minutes_hint"))
+        if tap_minutes <= 0.0:
+            tap_minutes = _sum_minutes_from_details(geom_mapping.get("tap_details"))
+    if tap_minutes <= 0.0:
+        tap_count = max(float(tapped_count), _ops_total("tap_front", "tap_back"))
+        if tap_count > 0.0:
+            tap_minutes = tap_count * TAP_MINUTES_PER_HOLE
+    if tap_minutes > 0.0:
+        fallback_minutes["Tapping"] = float(tap_minutes)
+
+    cbore_minutes = 0.0
+    if geom_mapping:
+        cbore_minutes = _as_float(geom_mapping.get("cbore_minutes_hint"))
+    if cbore_minutes <= 0.0:
+        cbore_count = max(float(cbore_qty), _ops_total("cbore_front", "cbore_back"))
+        if cbore_count > 0.0:
+            cbore_minutes = cbore_count * CBORE_MINUTES_PER_SIDE
+    if cbore_minutes > 0.0:
+        fallback_minutes["Counterbore"] = float(cbore_minutes)
+
+    csk_minutes = _ops_total("csk_front", "csk_back") * CSK_MINUTES_PER_SIDE
+    if csk_minutes > 0.0:
+        fallback_minutes["Countersink"] = float(csk_minutes)
+
+    jig_minutes = _ops_total("jig_grind") * JIG_GRIND_MINUTES_PER_FEATURE
+    if jig_minutes > 0.0:
+        fallback_minutes["Grinding"] = float(jig_minutes)
+
+    drilling_entry = buckets.get("Drilling")
+    if drilling_entry and fallback_minutes:
+        drilling_minutes = float(drilling_entry.get("minutes") or 0.0)
+        if drilling_minutes > 0.0:
+            original_machine = float(drilling_entry.get("machine$") or 0.0)
+            original_labor = float(drilling_entry.get("labor$") or 0.0)
+            allocated_minutes = 0.0
+            allocated_machine = 0.0
+            allocated_labor = 0.0
+            for name in ("Tapping", "Counterbore", "Countersink", "Grinding"):
+                minutes = fallback_minutes.get(name, 0.0)
+                if minutes <= 0.0:
+                    continue
+                existing = buckets.get(name)
+                if existing and (
+                    existing.get("minutes", 0.0) > 0.01 or abs(existing.get("total$", 0.0)) > 0.01
+                ):
+                    continue
+                remaining = drilling_minutes - allocated_minutes
+                if remaining <= 0.0:
+                    break
+                allocate = min(minutes, remaining)
+                if allocate <= 0.0:
+                    continue
+                share = allocate / drilling_minutes
+                machine_alloc = original_machine * share
+                labor_alloc = original_labor * share
+                allocated_minutes += allocate
+                allocated_machine += machine_alloc
+                allocated_labor += labor_alloc
+                add(name, allocate, machine_alloc, labor_alloc)
+            if allocated_minutes > 0.0:
+                drilling_entry["minutes"] = max(0.0, drilling_entry["minutes"] - allocated_minutes)
+                drilling_entry["machine$"] = max(0.0, drilling_entry["machine$"] - allocated_machine)
+                drilling_entry["labor$"] = max(0.0, drilling_entry["labor$"] - allocated_labor)
+                drilling_entry["total$"] = max(
+                    0.0,
+                    drilling_entry["total$"] - (allocated_machine + allocated_labor),
+                )
 
     cleaned_buckets: Dict[str, Dict[str, float]] = {}
     totals = {"minutes": 0.0, "machine$": 0.0, "labor$": 0.0, "total$": 0.0}
