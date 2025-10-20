@@ -845,10 +845,14 @@ def _compute_drilling_removal_section(
 
 
 # === OPS CARDS (from geo.ops_summary.rows) ===================================
+# TODO: If no cards appear, ensure extractor writes geo['ops_summary']['rows']
+#       (list of {hole, ref, qty, desc}) as outlined in the earlier extractor
+#       patch.
 _SIDE_BACK = re.compile(r"\bFROM\s+BACK\b", re.I)
 _SIDE_FRONT = re.compile(r"\bFROM\s+FRONT\b", re.I)
 _CBORE_RE = re.compile(r"(?:^|[ ;])([0-9.]+)\s*(?:C[\'’]?\s*BORE|CBORE|COUNTER\s*BORE)", re.I)
-_DEPTH_TOKEN = re.compile(r"[×x]\s*([0-9.]+)\b")  # e.g., × .62
+_DEPTH_TOKEN = re.compile(r"[×xX]\s*([0-9.]+)\b")  # e.g., × .62
+_SPOT_TOKENS = re.compile(r"(C[\'’]?\s*DRILL|CENTER[-\s]*DRILL|SPOT[-\s]*DRILL)", re.I)
 
 
 def _rows_from_ops_summary(geo: dict) -> list[dict]:
@@ -943,8 +947,8 @@ def _emit_counterbore_card(
     speeds_csv: dict | None,
 ) -> None:
     rows = _rows_from_ops_summary(geo)
-    groups = defaultdict(int)
-    details: dict[tuple[float, str, float | None], str] = {}
+    groups: dict[tuple[float, str, float | None], int] = {}
+    order: list[tuple[float, str, float | None]] = []
     for r in rows:
         desc = str(r.get("desc", ""))
         if "BORE" not in desc.upper():
@@ -957,11 +961,13 @@ def _emit_counterbore_card(
         depth_m = _DEPTH_TOKEN.search(desc)
         depth_in = float(depth_m.group(1)) if depth_m else None
         key = (round(diam_in, 4), side, depth_in)
+        if key not in groups:
+            groups[key] = 0
+            order.append(key)
         groups[key] += int(r.get("qty") or 0)
-        details[key] = desc
     if not groups:
         return
-    items = sorted(groups.items(), key=lambda kv: (kv[0][0], kv[0][1]))
+    items = [(key, groups[key]) for key in order]
     total = sum(q for _, q in items)
     front = sum(q for (k, q) in items if k[1] == "FRONT")
     back = total - front
@@ -999,11 +1005,15 @@ def _emit_spot_and_jig_cards(
     spot_qty = 0
     spot_depth_in: float | None = None
     for r in rows:
-        desc = str(r.get("desc", "")).upper()
-        if ("DRILL" in desc and "C" in desc) and ("THRU" not in desc) and ("TAP" not in desc):
-            m = _DEPTH_TOKEN.search(desc)
-            if m:
-                spot_depth_in = float(m.group(1))
+        desc = str(r.get("desc", ""))
+        desc_upper = desc.upper()
+        if _SPOT_TOKENS.search(desc) and ("THRU" not in desc_upper) and ("TAP" not in desc_upper):
+            m = _DEPTH_TOKEN.search(desc_upper)
+            if m and spot_depth_in is None:
+                try:
+                    spot_depth_in = float(m.group(1))
+                except Exception:
+                    spot_depth_in = None
             spot_qty += int(r.get("qty") or 0)
     jig_qty = sum(
         int(r.get("qty") or 0)
@@ -1015,17 +1025,15 @@ def _emit_spot_and_jig_cards(
         rpm = _rpm_from_sfm_diam(sfm, 0.1875)
         ipm = _ipm_from_rpm_ipr(rpm, ipr)
         depth_txt = "—" if spot_depth_in is None else f'{spot_depth_in:.2f}"'
+        rpm_txt = "-" if rpm is None else f"{int(round(rpm))} rpm"
+        ipm_txt = "-" if ipm is None else f"{ipm:.3f} ipm"
         lines += [
             "MATERIAL REMOVAL – SPOT (CENTER DRILL)",
             "=" * 64,
             f"Spots .............. {spot_qty} (front-side unless noted)",
             "TIME PER HOLE – SPOT GROUPS",
             "-" * 66,
-            (
-                f"Spot drill × {spot_qty} | depth {depth_txt} | {int(rpm) if rpm else '-'} rpm | {ipm:.3f} ipm"
-                if ipm
-                else f"Spot drill × {spot_qty} | depth {depth_txt} | rpm — | ipm —"
-            ),
+            f"Spot drill × {spot_qty} | depth {depth_txt} | {rpm_txt} | {ipm_txt} | t/hole — | group — ",
             "",
         ]
     if jig_qty > 0:
@@ -11024,7 +11032,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     try:
         geo_map = (
             (breakdown.get("geo") if isinstance(breakdown, _MappingABC) else None)
-            or (result.get("geom") if isinstance(result, _MappingABC) else None)
             or (result.get("geo") if isinstance(result, _MappingABC) else None)
             or {}
         )
@@ -11034,7 +11041,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         )
         # If your speeds/feeds CSV is already loaded into a mapping, pass it here instead of None
         _emit_hole_table_ops_cards(lines, geo=geo_map, material_group=material_group, speeds_csv=None)
-        append_line("")
     except Exception:
         # keep the quote render resilient even if ops rows are missing
         pass
