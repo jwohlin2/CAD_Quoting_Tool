@@ -18421,6 +18421,29 @@ def _sanitize_ops_row(row: Mapping[str, Any]) -> dict[str, Any]:
     return {"hole": hole, "ref": ref, "qty": qty, "desc": desc}
 
 
+def _count_ops_card_rows(rows: Iterable[Mapping[str, Any]] | None) -> int:
+    count = 0
+    for entry in rows or []:
+        if not isinstance(entry, _MappingABC):
+            continue
+        qty = _ops_qty_from_value(entry.get("qty"))
+        desc = str(entry.get("desc") or "").strip()
+        ref = str(entry.get("ref") or "").strip()
+        if qty > 0 or desc or ref:
+            count += 1
+    return count
+
+
+def _apply_built_rows(
+    ops_summary: MutableMapping[str, Any] | Mapping[str, Any] | None,
+    rows: Iterable[Mapping[str, Any]] | None,
+) -> int:
+    built_rows = _count_ops_card_rows(rows)
+    if isinstance(ops_summary, _MutableMappingABC):
+        typing.cast(MutableMapping[str, Any], ops_summary)["built_rows"] = int(built_rows)
+    return int(built_rows)
+
+
 def parse_ops_per_hole(desc: str) -> dict[str, int]:
     """Return ops per HOLE (not multiplied by QTY)."""
 
@@ -18535,6 +18558,7 @@ def aggregate_ops(rows: list[dict[str, Any]]) -> dict[str, Any]:
         + totals.get("spot_back", 0)
     )
     flip_required = back_ops_total > 0
+    built_rows = _count_ops_card_rows(simple_rows)
     return {
         "totals": dict(totals),
         "rows": simple_rows,
@@ -18542,6 +18566,7 @@ def aggregate_ops(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "actions_total": int(actions_total),
         "back_ops_total": int(back_ops_total),
         "flip_required": bool(flip_required),
+        "built_rows": int(built_rows),
     }
 
 
@@ -20947,8 +20972,10 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
                 ops_rows = _build_ops_rows_from_chart_lines(chart_lines)
 
             if ops_rows:
-                geo.setdefault("ops_summary", {})["rows"] = ops_rows
-                geo.setdefault("ops_summary", {})["source"] = chart_source or "chart_lines"
+                ops_summary_map = geo.setdefault("ops_summary", {})
+                ops_summary_map["rows"] = ops_rows
+                ops_summary_map["source"] = chart_source or "chart_lines"
+                _apply_built_rows(ops_summary_map, ops_rows)
                 try:
                     if chart_summary:
                         geo["ops_summary"]["tap_total"] = int(
