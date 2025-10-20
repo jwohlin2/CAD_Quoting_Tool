@@ -763,6 +763,182 @@ def _compute_drilling_removal_section(
     return extras, lines, updated_plan_summary
 
 
+# --- HOLE-TABLE OPS → CARDS (tapping / counterbore / spot / jig) -------------
+_THREAD_RE = re.compile(r'((?:#\d+)|(?:\d+/\d+)|(?:\d+(?:\.\d+)?))-\s*(\d+)\s*TAP', re.I)
+_CBORE_RE = re.compile(r"(?:^|[ ;])([0-9.]+)\s*(?:C[\'’]?\s*BORE|CBORE)", re.I)
+_DEPTH_RE = re.compile(r'[×x]\s*([0-9.]+)\b')  # e.g. × .62
+_SIDE_BACK = re.compile(r'\bFROM\s+BACK\b', re.I)
+_SIDE_FRONT = re.compile(r'\bFROM\s+FRONT\b', re.I)
+_JIG_RE = re.compile(r'\bJIG\s*GRIND\b', re.I)
+_SPOT_RE = re.compile(r"(?:C[\'’]?\s*DRILL|CENTER\s*DRILL|SPOT\s*DRILL|SPOT)", re.I)
+
+
+def _norm(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "")).strip()
+
+
+def _ops_rows_from_geo(geo_map: Mapping[str, Any] | None) -> list[dict]:
+    if not isinstance(geo_map, _MappingABC):
+        return []
+    ops = geo_map.get("ops_summary") or {}
+    rows = ops.get("rows") if isinstance(ops, _MappingABC) else None
+    return [dict(r) for r in rows] if isinstance(rows, list) else []
+
+
+def _side(desc: str) -> str:
+    if _SIDE_BACK.search(desc):
+        return "BACK"
+    if _SIDE_FRONT.search(desc):
+        return "FRONT"
+    return "FRONT"  # default if not specified
+
+
+def _build_tap_groups(rows: list[dict]) -> list[dict]:
+    groups: dict[tuple[str, str, float | None], dict[str, Any]] = {}
+    for r in rows:
+        d = _norm(str(r.get("desc", "")))
+        m = _THREAD_RE.search(d)
+        if not m:
+            continue
+        thread = f"{m.group(1)}-{m.group(2)}"
+        side = _side(d)
+        depth = _DEPTH_RE.search(d)
+        depth_in = float(depth.group(1)) if depth else None
+        pilot = _norm(str(r.get("ref") or ""))
+        key = (thread, side, depth_in)
+        groups.setdefault(key, {"qty": 0, "pilot": pilot})
+        groups[key]["qty"] += int(r.get("qty") or 0)
+        if not groups[key].get("pilot") and pilot:
+            groups[key]["pilot"] = pilot
+    out: list[dict[str, Any]] = []
+    for (thread, side, depth_in), info in groups.items():
+        out.append(
+            {
+                "thread": thread,
+                "side": side,
+                "depth_in": depth_in,
+                "qty": info["qty"],
+                "pilot": info.get("pilot"),
+            }
+        )
+    # stable sort by thread then side
+    return sorted(out, key=lambda g: (g["thread"], g["side"]))
+
+
+def _build_cbore_groups(rows: list[dict]) -> list[dict]:
+    groups: dict[tuple[float, str, float | None], int] = {}
+    for r in rows:
+        d = _norm(str(r.get("desc", "")))
+        if "CBORE" not in d.upper() and "C'BORE" not in d.upper() and "COUNTER" not in d.upper():
+            continue
+        m = _CBORE_RE.search(d)
+        if not m:
+            continue
+        diam = float(m.group(1))
+        side = _side(d)
+        depth = _DEPTH_RE.search(d)
+        depth_in = float(depth.group(1)) if depth else None
+        key = (diam, side, depth_in)
+        groups[key] = groups.get(key, 0) + int(r.get("qty") or 0)
+    out: list[dict[str, Any]] = []
+    for (diam, side, depth_in), qty in groups.items():
+        out.append({"diam_in": diam, "side": side, "depth_in": depth_in, "qty": qty})
+    return sorted(out, key=lambda g: (g["diam_in"], g["side"]))
+
+
+def _count_misc(rows: list[dict]) -> tuple[int, int]:
+    jig = spot = 0
+    for r in rows:
+        d = _norm(str(r.get("desc", "")))
+        if _JIG_RE.search(d):
+            jig += int(r.get("qty") or 0)
+        if _SPOT_RE.search(d) and ("TAP" not in d.upper()) and ("THRU" not in d.upper()):
+            # pure spot (center-drill) rows only
+            spot += int(r.get("qty") or 0)
+    return jig, spot
+
+
+def _compute_hole_table_ops_cards(*, geo: Mapping[str, Any] | None) -> list[str]:
+    """Return lines for TAP / C'BORE / SPOT / JIG cards from geo.ops_summary.rows."""
+
+    rows = _ops_rows_from_geo(geo)
+    if not rows:
+        return []
+    lines: list[str] = []
+
+    # TAPPING
+    taps = _build_tap_groups(rows)
+    total_taps = sum(g["qty"] for g in taps)
+    front_taps = sum(g["qty"] for g in taps if g["side"] == "FRONT")
+    back_taps = sum(g["qty"] for g in taps if g["side"] == "BACK")
+    lines += [
+        "MATERIAL REMOVAL – TAPPING",
+        "=" * 64,
+        "Inputs",
+        "  Ops ............... Tapping (front + back), pre-drill counted in drilling",
+        f"  Taps .............. {total_taps} total  → {front_taps} front, {back_taps} back",
+        "  Threads ........... "
+        + ", ".join(sorted({g["thread"] for g in taps}))
+        if taps
+        else "  Threads ........... -",
+        "",
+    ]
+    lines += ["TIME PER HOLE – TAP GROUPS", "-" * 66]
+    for g in taps:
+        pilot = f' | pilot {g["pilot"]}' if g.get("pilot") else ""
+        depth = "THRU" if g["depth_in"] is None else f'{g["depth_in"]:.2f}"'
+        lines.append(
+            f'{g["thread"]} × {g["qty"]:d}  ({g["side"]}){pilot} | depth {depth} | pitch — | t/hole — | group — '
+        )
+    lines.append("")
+
+    # COUNTERBORE
+    cbores = _build_cbore_groups(rows)
+    total_cb = sum(g["qty"] for g in cbores)
+    front_cb = sum(g["qty"] for g in cbores if g["side"] == "FRONT")
+    back_cb = sum(g["qty"] for g in cbores if g["side"] == "BACK")
+    lines += [
+        "MATERIAL REMOVAL – COUNTERBORE",
+        "=" * 64,
+        "Inputs",
+        "  Ops ............... Counterbore (front + back)",
+        f"  Counterbores ...... {total_cb} total  → {front_cb} front, {back_cb} back",
+        "",
+        "TIME PER HOLE – C’BORE GROUPS",
+        "-" * 66,
+    ]
+    for g in cbores:
+        depth = "—" if g["depth_in"] is None else f'{g["depth_in"]:.2f}"'
+        lines.append(
+            f'Ø{g["diam_in"]:.4f}" × {g["qty"]:d}  ({g["side"]}) | depth {depth} | t/hole — | group — '
+        )
+    lines.append("")
+
+    # SPOT + JIG (compact sections)
+    jig, spot = _count_misc(rows)
+    if spot > 0:
+        lines += [
+            "MATERIAL REMOVAL – SPOT (CENTER DRILL)",
+            "=" * 64,
+            f"Spots .............. {spot} (front-side unless noted)",
+            "TIME PER HOLE – SPOT GROUPS",
+            "-" * 66,
+            f"Spot drill × {spot} | t/hole — | group — ",
+            "",
+        ]
+    if jig > 0:
+        lines += [
+            "MATERIAL REMOVAL – JIG GRIND",
+            "=" * 64,
+            f"Jig-grind features . {jig}",
+            "TIME PER FEATURE",
+            "-" * 66,
+            f"Jig grind × {jig} | t/feat — | group — ",
+            "",
+        ]
+    return lines
+
+
 def _estimate_drilling_minutes_from_meta(
     drilling_meta: Mapping[str, Any] | None,
 ) -> tuple[float, float, float, dict[str, Any]]:
@@ -4920,6 +5096,33 @@ def _sync_drilling_bucket_view(
         )
 
     return True
+
+
+def _seed_bucket_minutes(
+    breakdown: MutableMapping[str, Any],
+    *,
+    tapping_min: float = 0.0,
+    cbore_min: float = 0.0,
+    spot_min: float = 0.0,
+    jig_min: float = 0.0,
+) -> None:
+    bucket_view_obj = breakdown.setdefault("bucket_view", {})
+    buckets_obj = bucket_view_obj.setdefault("buckets", {})
+
+    def _ins(name: str, minutes: float) -> None:
+        if minutes <= 0:
+            return
+        entry = buckets_obj.setdefault(
+            name,
+            {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0, "total$": 0.0},
+        )
+        entry["minutes"] = float(entry.get("minutes") or 0.0) + float(minutes)
+
+    _ins("tapping", tapping_min)
+    _ins("counterbore", cbore_min)
+    # spot and jig_grind can roll into "drilling" or "grinding"; keep explicit names if you expose them
+    _ins("drilling", spot_min)
+    _ins("grinding", jig_min)
 
 
 def _charged_hours_by_bucket(
@@ -10648,6 +10851,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     # Render MATERIAL REMOVAL card + TIME PER HOLE lines (replace legacy Time block)
     append_lines(removal_card_lines)
+    geo_map = (result or {}).get("geo") or (breakdown or {}).get("geo") or {}
+    lines.extend(_compute_hole_table_ops_cards(geo=geo_map))
+    # _seed_bucket_minutes(breakdown_mutable, tapping_min=0.0, cbore_min=0.0, spot_min=0.0, jig_min=0.0)
     append_line("")
 
     # ---- Pricing ladder ------------------------------------------------------
