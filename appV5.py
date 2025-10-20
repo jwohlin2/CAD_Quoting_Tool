@@ -22131,7 +22131,7 @@ class App(tk.Tk):
         menubar.add_cascade(label="Tools", menu=tools_menu)
         def _gen_quote_debug_menu() -> None:
             try:
-                with open("debug.log", "a", encoding="utf-8") as f:
+                with open("debug.log", "a", encoding="ascii", errors="replace") as f:
                     f.write("\n[UI] Tools > Generate Quote (debug)\n")
             except Exception:
                 pass
@@ -23967,7 +23967,7 @@ class App(tk.Tk):
         try:
             # Trace entry to help diagnose UI wiring issues and early exits
             try:
-                with open("debug.log", "a", encoding="utf-8") as _dbg:
+                with open("debug.log", "a", encoding="ascii", errors="replace") as _dbg:
                     _dbg.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] gen_quote: invoked (reuse_suggestions={reuse_suggestions})\n")
             except Exception:
                 pass
@@ -24033,7 +24033,7 @@ class App(tk.Tk):
                 import datetime
                 import traceback
                 try:
-                    with open("debug.log", "a", encoding="utf-8") as f:
+                    with open("debug.log", "a", encoding="ascii", errors="replace") as f:
                         f.write(f"\n[{datetime.datetime.now().isoformat()}] Quote blocked (ValueError):\n")
                         f.write(traceback.format_exc())
                         f.write("\n")
@@ -24054,7 +24054,7 @@ class App(tk.Tk):
                 import traceback
                 tb = traceback.format_exc()
                 try:
-                    with open("debug.log", "a", encoding="utf-8") as f:
+                    with open("debug.log", "a", encoding="ascii", errors="replace") as f:
                         f.write(f"\n[{datetime.datetime.now().isoformat()}] Quote error:\n{tb}\n")
                 except Exception:
                     pass
@@ -24112,7 +24112,7 @@ class App(tk.Tk):
                 import traceback as _tb
                 err_text = f"Quote rendering error: {e}"
                 try:
-                    with open("debug.log", "a", encoding="utf-8") as f:
+                    with open("debug.log", "a", encoding="ascii", errors="replace") as f:
                         f.write("\n[render_quote] AssertionError while rendering output\n")
                         f.write(_tb.format_exc())
                         f.write("\n")
