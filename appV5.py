@@ -870,7 +870,7 @@ def _side_of(desc: str) -> str:
 
 
 def _emit_tapping_card(
-    lines: list[str],
+    append_line: Callable[[str], None],
     *,
     geo: dict,
     material_group: str | None,
@@ -918,29 +918,30 @@ def _emit_tapping_card(
     total = sum(g["qty"] for g in groups)
     front = sum(g["qty"] for g in groups if g["side"] == "FRONT")
     back = total - front
-    lines += [
-        "MATERIAL REMOVAL – TAPPING",
-        "=" * 64,
-        "Inputs",
-        "  Ops ............... Tapping (front + back), pre-drill counted in drilling",
-        f"  Taps .............. {total} total  → {front} front, {back} back",
-        "  Threads ........... " + ", ".join(sorted({g["thread"] for g in groups})),
-        "",
-        "TIME PER HOLE – TAP GROUPS",
-        "-" * 66,
-    ]
+    append_line("MATERIAL REMOVAL – TAPPING")
+    append_line("=" * 64)
+    append_line("Inputs")
+    append_line("  Ops ............... Tapping (front + back), pre-drill counted in drilling")
+    append_line(f"  Taps .............. {total} total  → {front} front, {back} back")
+    append_line("  Threads ........... " + ", ".join(sorted({g["thread"] for g in groups})))
+    append_line("")
+    append_line("TIME PER HOLE – TAP GROUPS")
+    append_line("-" * 66)
     for g in groups:
         depth_txt = "THRU" if g["depth_in"] is None else f'{g["depth_in"]:.2f}"'
         pitch_txt = "-" if g["pitch_ipr"] is None else f"{g['pitch_ipr']:.4f} ipr"
         rpm_txt = "-" if g["rpm"] is None else f"{g['rpm']} rpm"
         ipm_txt = "-" if g["ipm"] is None else f"{g['ipm']:.3f} ipm"
         pilot = f' | pilot {g["pilot"]}' if g.get("pilot") else ""
-        lines.append(f'{g["thread"]} × {g["qty"]}  ({g["side"]}){pilot} | depth {depth_txt} | {pitch_txt} | {rpm_txt} | {ipm_txt} | t/hole — | group — ')
-    lines.append("")
+        append_line(
+            f'{g["thread"]} × {g["qty"]}  ({g["side"]}){pilot} | '
+            f"depth {depth_txt} | {pitch_txt} | {rpm_txt} | {ipm_txt} | t/hole — | group — "
+        )
+    append_line("")
 
 
 def _emit_counterbore_card(
-    lines: list[str],
+    append_line: Callable[[str], None],
     *,
     geo: dict,
     material_group: str | None,
@@ -971,16 +972,14 @@ def _emit_counterbore_card(
     total = sum(q for _, q in items)
     front = sum(q for (k, q) in items if k[1] == "FRONT")
     back = total - front
-    lines += [
-        "MATERIAL REMOVAL – COUNTERBORE",
-        "=" * 64,
-        "Inputs",
-        "  Ops ............... Counterbore (front + back)",
-        f"  Counterbores ...... {total} total  → {front} front, {back} back",
-        "",
-        "TIME PER HOLE – C’BORE GROUPS",
-        "-" * 66,
-    ]
+    append_line("MATERIAL REMOVAL – COUNTERBORE")
+    append_line("=" * 64)
+    append_line("Inputs")
+    append_line("  Ops ............... Counterbore (front + back)")
+    append_line(f"  Counterbores ...... {total} total  → {front} front, {back} back")
+    append_line("")
+    append_line("TIME PER HOLE – C’BORE GROUPS")
+    append_line("-" * 66)
     for (diam_in, side, depth_in), qty in items:
         sfm, ipr = _lookup_sfm_ipr("counterbore", diam_in, material_group, speeds_csv)
         rpm = _rpm_from_sfm_diam(sfm, diam_in)
@@ -988,14 +987,15 @@ def _emit_counterbore_card(
         depth_txt = "—" if depth_in is None else f'{depth_in:.2f}"'
         rpm_txt = "-" if rpm is None else f"{int(rpm)} rpm"
         ipm_txt = "-" if ipm is None else f"{ipm:.3f} ipm"
-        lines.append(
-            f'Ø{diam_in:.4f}" × {qty}  ({side}) | depth {depth_txt} | {rpm_txt} | {ipm_txt} | t/hole — | group — '
+        append_line(
+            f'Ø{diam_in:.4f}" × {qty}  ({side}) | '
+            f"depth {depth_txt} | {rpm_txt} | {ipm_txt} | t/hole — | group — "
         )
-    lines.append("")
+    append_line("")
 
 
 def _emit_spot_and_jig_cards(
-    lines: list[str],
+    append_line: Callable[[str], None],
     *,
     geo: dict,
     material_group: str | None,
@@ -1027,37 +1027,50 @@ def _emit_spot_and_jig_cards(
         depth_txt = "—" if spot_depth_in is None else f'{spot_depth_in:.2f}"'
         rpm_txt = "-" if rpm is None else f"{int(round(rpm))} rpm"
         ipm_txt = "-" if ipm is None else f"{ipm:.3f} ipm"
-        lines += [
-            "MATERIAL REMOVAL – SPOT (CENTER DRILL)",
-            "=" * 64,
-            f"Spots .............. {spot_qty} (front-side unless noted)",
-            "TIME PER HOLE – SPOT GROUPS",
-            "-" * 66,
-            f"Spot drill × {spot_qty} | depth {depth_txt} | {rpm_txt} | {ipm_txt} | t/hole — | group — ",
-            "",
-        ]
+        append_line("MATERIAL REMOVAL – SPOT (CENTER DRILL)")
+        append_line("=" * 64)
+        append_line(f"Spots .............. {spot_qty} (front-side unless noted)")
+        append_line("TIME PER HOLE – SPOT GROUPS")
+        append_line("-" * 66)
+        append_line(
+            f"Spot drill × {spot_qty} | depth {depth_txt} | {rpm_txt} | {ipm_txt} | t/hole — | group — "
+        )
+        append_line("")
     if jig_qty > 0:
-        lines += [
-            "MATERIAL REMOVAL – JIG GRIND",
-            "=" * 64,
-            f"Jig-grind features . {jig_qty}",
-            "TIME PER FEATURE",
-            "-" * 66,
-            f"Jig grind × {jig_qty} | t/feat — | group — ",
-            "",
-        ]
+        append_line("MATERIAL REMOVAL – JIG GRIND")
+        append_line("=" * 64)
+        append_line(f"Jig-grind features . {jig_qty}")
+        append_line("TIME PER FEATURE")
+        append_line("-" * 66)
+        append_line(f"Jig grind × {jig_qty} | t/feat — | group — ")
+        append_line("")
 
 
 def _emit_hole_table_ops_cards(
-    lines: list[str],
+    append_line: Callable[[str], None],
     *,
     geo: dict,
     material_group: str | None,
     speeds_csv: dict | None,
 ) -> None:
-    _emit_tapping_card(lines, geo=geo, material_group=material_group, speeds_csv=speeds_csv)
-    _emit_counterbore_card(lines, geo=geo, material_group=material_group, speeds_csv=speeds_csv)
-    _emit_spot_and_jig_cards(lines, geo=geo, material_group=material_group, speeds_csv=speeds_csv)
+    _emit_tapping_card(
+        append_line,
+        geo=geo,
+        material_group=material_group,
+        speeds_csv=speeds_csv,
+    )
+    _emit_counterbore_card(
+        append_line,
+        geo=geo,
+        material_group=material_group,
+        speeds_csv=speeds_csv,
+    )
+    _emit_spot_and_jig_cards(
+        append_line,
+        geo=geo,
+        material_group=material_group,
+        speeds_csv=speeds_csv,
+    )
 
 
 def _estimate_drilling_minutes_from_meta(
@@ -11040,7 +11053,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             or (breakdown.get("material_group") if isinstance(breakdown, _MappingABC) else None)
         )
         # If your speeds/feeds CSV is already loaded into a mapping, pass it here instead of None
-        _emit_hole_table_ops_cards(lines, geo=geo_map, material_group=material_group, speeds_csv=None)
+        _emit_hole_table_ops_cards(
+            append_line,
+            geo=geo_map,
+            material_group=material_group,
+            speeds_csv=None,
+        )
     except Exception:
         # keep the quote render resilient even if ops rows are missing
         pass
