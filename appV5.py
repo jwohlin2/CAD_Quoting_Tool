@@ -920,10 +920,11 @@ def _compute_drilling_removal_section(
             total_drill_minutes_with_toolchange = subtotal_min + tool_add
 
         removal_drilling_minutes_subtotal = float(subtotal_min)
-        removal_drilling_minutes = float(max(total_drill_minutes_with_toolchange, 0.0))
+        drill_minutes_total = float(max(total_drill_minutes_with_toolchange, 0.0))
+        removal_drilling_minutes = drill_minutes_total
         removal_drilling_hours_precise: float | None = None
-        if removal_drilling_minutes > 0.0:
-            removal_drilling_hours_precise = removal_drilling_minutes / 60.0
+        if drill_minutes_total > 0.0:
+            removal_drilling_hours_precise = drill_minutes_total / 60.0
 
         extras["drill_machine_minutes"] = float(removal_drilling_minutes_subtotal)
         extras["drill_labor_minutes"] = float(tool_add)
@@ -931,7 +932,8 @@ def _compute_drilling_removal_section(
         extras["removal_drilling_minutes_subtotal"] = float(
             removal_drilling_minutes_subtotal
         )
-        extras["removal_drilling_minutes"] = float(removal_drilling_minutes)
+        extras["removal_drilling_minutes"] = float(drill_minutes_total)
+        extras["drill_minutes_total"] = float(drill_minutes_total)
         if removal_drilling_hours_precise is not None:
             extras["removal_drilling_hours"] = float(removal_drilling_hours_precise)
 
@@ -1148,10 +1150,10 @@ def _compute_drilling_removal_section(
         )
         lines.append("-" * 66)
         lines.append(
-            f"Subtotal (per-hole × qty) . {subtotal_min:.2f} min  ({fmt_hours(subtotal_min/60.0)})"
+            f"Subtotal (per-hole × qty) . {drill_minutes_total:.2f} min  ({drill_minutes_total/60.0:.2f} hr)"
         )
         lines.append(
-            f"TOTAL DRILLING (with toolchange) . {total_drill_minutes_with_toolchange:.2f} min  ({(total_drill_minutes_with_toolchange)/60.0:.2f} hr)"
+            f"TOTAL DRILLING (with toolchange) . {drill_minutes_total:.2f} min  ({drill_minutes_total/60.0:.2f} hr)"
         )
         lines.append("")
     except Exception as exc:  # pragma: no cover - defensive belt + suspenders
@@ -5178,6 +5180,7 @@ def _seed_bucket_minutes(
     cbore_min: float = 0.0,
     spot_min: float = 0.0,
     jig_min: float = 0.0,
+    drilling_min: float = 0.0,
 ) -> None:
     bucket_view_obj = breakdown.setdefault("bucket_view", {})
     buckets_obj = bucket_view_obj.setdefault("buckets", {})
@@ -5195,6 +5198,7 @@ def _seed_bucket_minutes(
     _ins("counterbore", cbore_min)
     # spot and jig_grind can roll into "drilling" or "grinding"; keep explicit names if you expose them
     _ins("drilling", spot_min)
+    _ins("drilling", drilling_min)
     _ins("grinding", jig_min)
 
 
@@ -11051,13 +11055,23 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     cbore_minutes_total = 0.0
     spot_minutes_total = 0.0
     jig_minutes_total = 0.0
+    drilling_minutes_total = 0.0
+    if isinstance(removal_card_extra, _MappingABC):
+        drilling_minutes_total = _safe_float(
+            removal_card_extra.get("drill_minutes_total"),
+            default=0.0,
+        )
+    if drilling_minutes_total <= 0.0:
+        drilling_minutes_total = _safe_float(removal_drilling_minutes, default=0.0)
     _seed_bucket_minutes(
         breakdown_mutable,
         tapping_min=tapping_minutes_total,
         cbore_min=cbore_minutes_total,
         spot_min=spot_minutes_total,
         jig_min=jig_minutes_total,
+        drilling_min=drilling_minutes_total,
     )
+    append_line(f"[DEBUG] drilling_minutes_seeded={drilling_minutes_total:.2f}")
     append_line("")
 
     # ---- Pricing ladder ------------------------------------------------------
