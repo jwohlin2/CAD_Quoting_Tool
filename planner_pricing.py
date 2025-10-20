@@ -160,6 +160,24 @@ def _geom(geom: dict) -> dict:
     if thk_in is None:
         thk_in = 0.0
     out["thickness_in"] = thk_in
+
+    ops_summary = _dict(d.get("ops_summary"))
+    if not ops_summary:
+        ops_summary = _dict(_dict(d.get("geo")).get("ops_summary"))
+    ops_totals = _dict(ops_summary.get("totals"))
+    out["ops"] = {
+        "drill": int(_as_float(ops_totals.get("drill"), 0) or 0),
+        "tap_front": int(_as_float(ops_totals.get("tap_front"), 0) or 0),
+        "tap_back": int(_as_float(ops_totals.get("tap_back"), 0) or 0),
+        "cbore_front": int(_as_float(ops_totals.get("cbore_front"), 0) or 0),
+        "cbore_back": int(_as_float(ops_totals.get("cbore_back"), 0) or 0),
+        "csk_front": int(_as_float(ops_totals.get("csk_front"), 0) or 0),
+        "csk_back": int(_as_float(ops_totals.get("csk_back"), 0) or 0),
+        "spot_front": int(_as_float(ops_totals.get("spot_front"), 0) or 0),
+        "spot_back": int(_as_float(ops_totals.get("spot_back"), 0) or 0),
+        "jig_grind": int(_as_float(ops_totals.get("jig_grind"), 0) or 0),
+    }
+    out["flip_required"] = bool(ops_summary.get("flip_required"))
     return out
 
 def _material_factor(material: str | None) -> Tuple[float, float]:

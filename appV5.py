@@ -18013,6 +18013,143 @@ def _iter_table_text(doc):
             continue
 
 
+# --- Ops parsing from HOLE TABLE DESCRIPTION ---------------------------------
+# Output schema (per hole): {"drill":1, "tap_front":1, "tap_back":0, "cbore_front":0, ...}
+# Aggregated totals live in geo["ops_summary"] with per-row detail for auditing.
+
+_OP_WORDS = {
+    "cbore": r"(?:C['’]?\s*BORE|CBORE|COUNTER\s*BORE)",
+    "csk": r"(?:C['’]?\s*SINK|CSK|COUNTER\s*SINK)",
+    "cdrill": r"(?:C['’]?\s*DRILL|CENTER\s*DRILL|SPOT\s*DRILL|SPOT)",
+    "tap": r"\bTAP\b",
+    "thru": r"\bTHRU\b",
+    "jig": r"\bJIG\s*GRIND\b",
+}
+
+_SIDE_BOTH = re.compile(r"\b(FRONT\s*&\s*BACK|BOTH\s+SIDES)\b", re.I)
+_SIDE_BACK = re.compile(r"\b(?:FROM\s+)?BACK\b", re.I)
+_SIDE_FRONT = re.compile(r"\b(?:FROM\s+)?FRONT\b", re.I)
+
+
+def _norm_txt(s: str) -> str:
+    s = (s or "").replace("\u00D8", "Ø").replace("’", "'").upper()
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def parse_ops_per_hole(desc: str) -> dict[str, int]:
+    """Return ops per HOLE (not multiplied by QTY)."""
+
+    U = _norm_txt(desc)
+    ops = defaultdict(int)
+
+    clauses = re.split(r"[;]+", U) if ";" in U else [U]
+    for cl in clauses:
+        if not cl.strip():
+            continue
+        side = (
+            "both"
+            if _SIDE_BOTH.search(cl)
+            else (
+                "back"
+                if _SIDE_BACK.search(cl)
+                else ("front" if _SIDE_FRONT.search(cl) else None)
+            )
+        )
+
+        has_tap = re.search(_OP_WORDS["tap"], cl)
+        has_thru = re.search(_OP_WORDS["thru"], cl)
+        has_cbore = re.search(_OP_WORDS["cbore"], cl)
+        has_csk = re.search(_OP_WORDS["csk"], cl)
+        has_cdr = re.search(_OP_WORDS["cdrill"], cl)
+        has_jig = re.search(_OP_WORDS["jig"], cl)
+
+        if has_tap:
+            ops["drill"] += 1
+            if side == "back":
+                ops["tap_back"] += 1
+            elif side == "both":
+                ops["tap_front"] += 1
+                ops["tap_back"] += 1
+            else:
+                ops["tap_front"] += 1
+
+        if has_thru and not has_tap:
+            ops["drill"] += 1
+
+        if has_cbore:
+            if side == "back":
+                ops["cbore_back"] += 1
+            elif side == "both":
+                ops["cbore_front"] += 1
+                ops["cbore_back"] += 1
+            else:
+                ops["cbore_front"] += 1
+
+        if has_csk:
+            if side == "back":
+                ops["csk_back"] += 1
+            elif side == "both":
+                ops["csk_front"] += 1
+                ops["csk_back"] += 1
+            else:
+                ops["csk_front"] += 1
+
+        if has_cdr:
+            if side == "back":
+                ops["spot_back"] += 1
+            elif side == "both":
+                ops["spot_front"] += 1
+                ops["spot_back"] += 1
+            else:
+                ops["spot_front"] += 1
+
+        if has_jig:
+            ops["jig_grind"] += 1
+
+    return dict(ops)
+
+
+def aggregate_ops(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    totals: defaultdict[str, int] = defaultdict(int)
+    detail: list[dict[str, Any]] = []
+    for r in rows:
+        per = parse_ops_per_hole(r.get("desc", ""))
+        try:
+            qty = int(r.get("qty", 0) or 0)
+        except Exception:
+            qty = 0
+        row_total = {k: v * qty for k, v in per.items()}
+        for k, v in row_total.items():
+            totals[k] += v
+        detail.append(
+            {
+                "hole": r.get("hole") or r.get("id") or "",
+                "ref": r.get("ref", ""),
+                "qty": qty,
+                "per_hole": per,
+                "total": row_total,
+                "desc": r.get("desc", ""),
+            }
+        )
+
+    actions_total = sum(totals.values())
+    back_ops_total = (
+        totals.get("cbore_back", 0)
+        + totals.get("csk_back", 0)
+        + totals.get("tap_back", 0)
+        + totals.get("spot_back", 0)
+    )
+    flip_required = back_ops_total > 0
+    return {
+        "totals": dict(totals),
+        "rows": detail,
+        "actions_total": int(actions_total),
+        "back_ops_total": int(back_ops_total),
+        "flip_required": bool(flip_required),
+    }
+
+
 # --- NEW: parse HOLE TABLE that's drawn with text + lines (no ACAD TABLE)
 def _iter_text_with_xy(doc):
     if doc is None:
@@ -18230,12 +18367,17 @@ def extract_hole_table_from_text(doc, y_tol: float = 0.04, min_rows: int = 5):
     if total <= 0:
         return {}
 
-    return {
+    ops_summary = aggregate_ops(clean_rows) if clean_rows else {}
+
+    result = {
         "hole_count": total,
         "hole_diam_families_in": families,
         "rows": clean_rows,
         "provenance_holes": "HOLE TABLE (text)",
     }
+    if ops_summary:
+        result["ops_summary"] = ops_summary
+    return result
 
 
 def hole_count_from_acad_table(doc) -> dict[str, Any]:
@@ -18314,6 +18456,8 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
         if c_ref is None:
             c_ref = find_col("Ø")
 
+        c_hole = find_col("HOLE")
+
         print(f"[HOLE TABLE] col_ref={c_ref}, col_qty={c_qty}, col_desc={c_desc}")
 
         total = 0
@@ -18322,6 +18466,7 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
         tap_classes = {"small": 0, "medium": 0, "large": 0, "npt": 0}
         from_back = False
         double_sided = False
+        rows_norm: list[dict[str, Any]] = []
 
         for r in range(header_row + 1, n_rows):
             cell = None
@@ -18343,6 +18488,16 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
 
             ref_txt = ""
             desc = ""
+            hole_id = ""
+            if c_hole is not None:
+                try:
+                    hole_cell = t.get_cell(r, c_hole)
+                except Exception:
+                    hole_cell = None
+                try:
+                    hole_id = (hole_cell.get_text() if hole_cell else "") or ""
+                except Exception:
+                    hole_id = ""
             if c_ref is not None:
                 try:
                     ref_cell = t.get_cell(r, c_ref)
@@ -18403,11 +18558,21 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
             if re.search(r"\b(FRONT\s*&\s*BACK|BOTH\s+SIDES)\b", upper_text):
                 double_sided = True
 
+            rows_norm.append(
+                {
+                    "hole": hole_id.strip(),
+                    "ref": ref_txt.strip(),
+                    "qty": qty,
+                    "desc": desc.strip(),
+                }
+            )
+
         if total > 0:
             filtered_classes = {k: int(v) for k, v in tap_classes.items() if v}
             families_formatted = {
                 f'{diam:.4f}"': count for diam, count in sorted(families.items())
             }
+            ops_summary = aggregate_ops(rows_norm) if rows_norm else {}
             result = {
                 "hole_count": total,
                 "hole_diam_families_in": families_formatted,
@@ -18415,6 +18580,8 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
                 "tap_class_counts": filtered_classes,
                 "provenance_holes": "HOLE TABLE (ACAD_TABLE)",
             }
+            if ops_summary:
+                result["ops_summary"] = ops_summary
             if from_back:
                 result["from_back"] = True
             if double_sided:
@@ -19703,6 +19870,8 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
         "raw": {"holes": holes, "leaders": leaders, "leader_entries": leader_entries},
         "units": units,
     }
+    if table_info and table_info.get("ops_summary"):
+        geo["ops_summary"] = table_info["ops_summary"]
     geo.update(material_info)
     if hardware_notes.get("hardware_items") is not None:
         geo["hardware_items"] = hardware_notes.get("hardware_items")
@@ -19865,6 +20034,8 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     u2mm = to_in * 25.4
 
     geo = _build_geo_from_ezdxf_doc(doc)
+    if table_info.get("ops_summary"):
+        geo["ops_summary"] = table_info["ops_summary"]
 
     hole_source: str | None = None
     provenance_entry = geo.get("provenance")
