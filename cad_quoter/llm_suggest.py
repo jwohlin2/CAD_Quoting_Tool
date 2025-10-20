@@ -18,7 +18,7 @@ except Exception:  # pragma: no cover - fallback keeps quoting functional
     def parse_llm_json(_text: str) -> dict:  # type: ignore[override]
         return {}
 
-from appkit.scrap_helpers import normalize_scrap_pct
+from cad_quoter.utils.scrap import normalize_scrap_pct
 
 T = TypeVar("T")
 
