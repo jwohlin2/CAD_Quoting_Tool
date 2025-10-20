@@ -607,6 +607,44 @@ def _compute_drilling_removal_section(
             peck_min_std=peck_min_std,
         )
 
+        try:  # type: ignore[name-defined]
+            _result_for_debug = result
+        except NameError:  # pragma: no cover - defensive
+            _result_for_debug = None
+        if not isinstance(breakdown, _MappingABC):
+            breakdown_geo_src: Mapping[str, Any] | None = None
+        else:
+            breakdown_geo_src = breakdown
+        result_geo_src: Mapping[str, Any] | None
+        if isinstance(_result_for_debug, _MappingABC):
+            result_geo_src = _result_for_debug
+        else:
+            result_geo_src = None
+        geo_map = (
+            (breakdown_geo_src.get("geo") if isinstance(breakdown_geo_src, _MappingABC) else None)
+            or (result_geo_src.get("geo") if isinstance(result_geo_src, _MappingABC) else None)
+            or {}
+        )
+        ops_summary_for_debug = (
+            geo_map.get("ops_summary") if isinstance(geo_map, _MappingABC) else None
+        )
+        rows_candidate: Any
+        if isinstance(ops_summary_for_debug, _MappingABC):
+            rows_candidate = ops_summary_for_debug.get("rows")
+        else:
+            rows_candidate = None
+        if isinstance(rows_candidate, list):
+            ops_rows = rows_candidate
+        else:
+            try:
+                ops_rows = list(rows_candidate or [])
+            except Exception:
+                ops_rows = []
+        lines.append(f"[DEBUG] ops_rows={len(ops_rows)}")
+        lines.append(
+            f"[DEBUG] has_tap_row={any('TAP' in (str(r.get('desc', '')).upper()) for r in ops_rows if isinstance(r, _MappingABC))}"
+        )
+
         if drill_machine_minutes_estimate > 0.0:
             subtotal_min = float(drill_machine_minutes_estimate)
         else:
@@ -19307,6 +19345,7 @@ def hole_count_from_acad_table(doc) -> dict[str, Any]:
             result = {
                 "hole_count": total,
                 "hole_diam_families_in": families_formatted,
+                "rows": rows_norm,
                 "tap_qty_from_table": row_taps,
                 "tap_class_counts": filtered_classes,
                 "provenance_holes": "HOLE TABLE (ACAD_TABLE)",
