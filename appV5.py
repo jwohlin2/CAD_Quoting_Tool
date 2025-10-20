@@ -10982,6 +10982,16 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         folded_entries: dict[str, list[Any]] = {}
         folded_display: dict[str, str] = {}
         folded_order: list[str] = []
+
+        def _coerce_hour_value(value: Any) -> float | None:
+            coerced = _coerce_float_or_none(value)
+            if coerced is None:
+                return None
+            try:
+                return float(coerced)
+            except Exception:
+                return None
+
         for label, (hr_val, include_in_total) in entries_iter:
             canonical_key, display_label = _canonical_hour_label(label)
             folded = folded_entries.get(canonical_key)
@@ -10989,9 +10999,34 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 folded_entries[canonical_key] = [hr_val, bool(include_in_total)]
                 folded_display[canonical_key] = display_label
                 folded_order.append(canonical_key)
+                continue
+
+            folded_display.setdefault(canonical_key, display_label)
+
+            existing_hr, existing_include = folded
+            hr_float = _coerce_hour_value(hr_val)
+            existing_float = _coerce_hour_value(existing_hr)
+            deduped = False
+
+            if hr_float is not None and existing_float is not None:
+                try:
+                    if math.isclose(existing_float, hr_float, rel_tol=1e-9, abs_tol=0.005):
+                        deduped = True
+                except Exception:
+                    deduped = False
+
+            if deduped:
+                folded[1] = existing_include or bool(include_in_total)
+                continue
+
+            if existing_float is not None or hr_float is not None:
+                folded[0] = (existing_float or 0.0) + (hr_float or 0.0)
             else:
-                folded[0] += hr_val
-                folded[1] = folded[1] or bool(include_in_total)
+                try:
+                    folded[0] = existing_hr + hr_val
+                except Exception:
+                    folded[0] = existing_hr
+            folded[1] = existing_include or bool(include_in_total)
         total_hours = 0.0
         for canonical_key in folded_order:
             hr_val, include_in_total = folded_entries[canonical_key]
