@@ -2867,38 +2867,21 @@ from cad_quoter.pricing.time_estimator import (
     estimate_time_min as _estimate_time_min,
 )
 from cad_quoter.pricing.wieland import lookup_price as lookup_wieland_price
-if __package__:
-    from .materials import (
-        STANDARD_PLATE_SIDES_IN as STANDARD_PLATE_SIDES_IN,
-        _compute_material_block as _compute_material_block,
-        _compute_scrap_mass_g as _compute_scrap_mass_g,
-        _density_for_material as _density_for_material,
-        _material_family as _material_family,
-        _material_cost_components as _material_cost_components,
-        _material_price_from_choice as _material_price_from_choice,
-        _material_price_per_g_from_choice as _material_price_per_g_from_choice,
-        _nearest_std_side as _nearest_std_side,
-        _resolve_price_per_lb as _resolve_price_per_lb,
-        infer_plate_lw_in as infer_plate_lw_in,
-        net_mass_kg as net_mass_kg,
-        plan_stock_blank as plan_stock_blank,
-    )
-else:
-    from materials import (
-        STANDARD_PLATE_SIDES_IN as STANDARD_PLATE_SIDES_IN,
-        _compute_material_block as _compute_material_block,
-        _compute_scrap_mass_g as _compute_scrap_mass_g,
-        _density_for_material as _density_for_material,
-        _material_family as _material_family,
-        _material_cost_components as _material_cost_components,
-        _material_price_from_choice as _material_price_from_choice,
-        _material_price_per_g_from_choice as _material_price_per_g_from_choice,
-        _nearest_std_side as _nearest_std_side,
-        _resolve_price_per_lb as _resolve_price_per_lb,
-        infer_plate_lw_in as infer_plate_lw_in,
-        net_mass_kg as net_mass_kg,
-        plan_stock_blank as plan_stock_blank,
-    )
+from cad_quoter.pricing.materials import (
+    STANDARD_PLATE_SIDES_IN as STANDARD_PLATE_SIDES_IN,
+    _compute_material_block as _compute_material_block,
+    _compute_scrap_mass_g as _compute_scrap_mass_g,
+    _density_for_material as _density_for_material,
+    _material_family as _material_family,
+    _material_cost_components as _material_cost_components,
+    _material_price_from_choice as _material_price_from_choice,
+    _material_price_per_g_from_choice as _material_price_per_g_from_choice,
+    _nearest_std_side as _nearest_std_side,
+    _resolve_price_per_lb as _resolve_price_per_lb,
+    infer_plate_lw_in as infer_plate_lw_in,
+    net_mass_kg as net_mass_kg,
+    plan_stock_blank as plan_stock_blank,
+)
 from cad_quoter.rates import (
     ensure_two_bucket_defaults,
     migrate_flat_to_two_bucket,

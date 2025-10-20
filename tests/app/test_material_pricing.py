@@ -14,7 +14,7 @@ for _module_name in ("requests", "bs4", "lxml"):
         sys.modules[_module_name] = stub
 
 import appV5
-import materials
+import cad_quoter.pricing.materials as materials
 
 
 class _FailingPricingEngine:

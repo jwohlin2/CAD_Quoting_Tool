@@ -13,8 +13,8 @@ class _DummySession:
 requests_stub.Session = _DummySession
 sys.modules.setdefault("requests", requests_stub)
 
-import materials  # noqa: E402
-from materials import pick_stock_from_mcmaster  # noqa: E402
+import cad_quoter.pricing.materials as materials  # noqa: E402
+from cad_quoter.pricing.materials import pick_stock_from_mcmaster  # noqa: E402
 
 @pytest.mark.parametrize(
     "length,width,thickness,expected_part",
