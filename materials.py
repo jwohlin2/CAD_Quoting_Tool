@@ -58,10 +58,7 @@ except Exception:  # pragma: no cover - optional dependency / environment specif
 try:  # Optional dependency: McMaster catalog helpers
     import cad_quoter.vendors.mcmaster_stock as _mc  # type: ignore
 except Exception:  # pragma: no cover - optional dependency / environment specific
-    try:  # pragma: no cover - optional dependency / environment specific
-        import mcmaster_stock as _mc  # type: ignore
-    except Exception:  # pragma: no cover - optional dependency / environment specific
-        _mc = None  # type: ignore[assignment]
+    _mc = None  # type: ignore[assignment]
 
 _DEFAULT_MATERIAL_DENSITY_G_CC = MATERIAL_DENSITY_G_CC_BY_KEY.get(
     DEFAULT_MATERIAL_KEY, 7.85

@@ -89,7 +89,7 @@ from cad_quoter.pricing.vendor_csv import (
     pick_plate_from_mcmaster as _pick_plate_from_mcmaster,
 )
 from cad_quoter.pricing.process_cost_renderer import render_process_costs
-from cad_quoter.estimators import SpeedsFeedsUnavailableError
+from cad_quoter.estimators.base import SpeedsFeedsUnavailableError
 from cad_quoter.llm_overrides import (
     _plate_mass_properties,
     _plate_mass_from_dims,
@@ -2737,9 +2737,7 @@ from appkit.occ_compat import (
     linear_properties,
     map_shapes_and_ancestors,
 )
-from cad_quoter.geo2d import (
-    apply_2d_features_to_variables,
-)
+from cad_quoter.geo2d.apply import apply_2d_features_to_variables
 
 # Tolerance for invariant checks that guard against silent drift when rendering
 # cost sections.
@@ -15821,7 +15819,7 @@ def estimate_drilling_hours(
 ) -> float:
     """Adapter that invokes the drilling estimator plugin."""
 
-    from cad_quoter.estimators import EstimatorInput
+    from cad_quoter.estimators.base import EstimatorInput
     from cad_quoter.estimators.drilling import estimate as _drilling_estimate
 
     tables: dict[str, Any] = {}

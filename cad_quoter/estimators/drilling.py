@@ -6,7 +6,7 @@ from typing import Any, Mapping
 
 import pandas as pd
 
-from cad_quoter.estimators import EstimatorInput
+from cad_quoter.estimators.base import EstimatorInput
 
 import appV5 as _legacy
 

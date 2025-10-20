@@ -7,6 +7,11 @@ import os
 import traceback
 from typing import Dict
 
+try:  # Optional dependency: McMaster catalog helpers
+    from cad_quoter.vendors.mcmaster_stock import lookup_sku_and_price_for_mm
+except Exception:  # pragma: no cover - optional dependency / environment specific
+    lookup_sku_and_price_for_mm = None  # type: ignore[assignment]
+
 from cad_quoter.domain_models import (
     MATERIAL_DENSITY_G_CC_BY_KEYWORD,
     coerce_float_or_none,
@@ -86,15 +91,9 @@ def _maybe_get_mcmaster_price(display_name: str, normalized_key: str) -> Dict[st
     # Ensure the local requests shim proxies to the real package (required by requests-pkcs12)
     os.environ.setdefault("CAD_QUOTER_ALLOW_REQUESTS", "1")
 
-    try:
-        from cad_quoter.vendors.mcmaster_stock import lookup_sku_and_price_for_mm
-    except Exception:
-        try:
-            from mcmaster_stock import lookup_sku_and_price_for_mm
-        except Exception as exc:
-            _mcm_log("[MCM] Import failure for mcmaster_stock: " + repr(exc))
-            _mcm_log(traceback.format_exc())
-            return None
+    if lookup_sku_and_price_for_mm is None:
+        _mcm_log("[MCM] McMaster catalog helpers unavailable; skipping live price fetch.")
+        return None
 
     try:
         material_key, length_in, width_in, thickness_in = request
