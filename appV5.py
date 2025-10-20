@@ -6096,6 +6096,15 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     breakdown    = result.get("breakdown", {}) or {}
 
     state_payload: Any | None = None
+
+    # Ensure a mutable view of the breakdown for downstream helpers that update it
+    try:
+        if isinstance(breakdown, _MutableMappingABC):
+            breakdown_mutable = typing.cast(MutableMapping[str, Any], breakdown)
+        else:
+            breakdown_mutable = dict(breakdown)
+    except Exception:
+        breakdown_mutable = {}
     if isinstance(result, _MappingABC):
         state_payload = result.get("quote_state")
 
@@ -11269,18 +11278,18 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     append_lines(removal_card_lines)
     append_line("")
     # ADD: Emit HOLE-TABLE derived cards (Tapping / Counterbore / Spot / Jig)
-        try:
-            material_group = (
-                (result.get("material_group") if isinstance(result, _MappingABC) else None)
-                or (breakdown.get("material_group") if isinstance(breakdown, _MappingABC) else None)
-            )
-            # If your speeds/feeds CSV is already loaded into a mapping, pass it here instead of None
-            _emit_hole_table_ops_cards(
-                append_line,
-                geo=dict(geo_map) if isinstance(geo_map, _MappingABC) else {},
-                material_group=material_group,
-                speeds_csv=None,
-            )
+    try:
+        material_group = (
+            (result.get("material_group") if isinstance(result, _MappingABC) else None)
+            or (breakdown.get("material_group") if isinstance(breakdown, _MappingABC) else None)
+        )
+        # If your speeds/feeds CSV is already loaded into a mapping, pass it here instead of None
+        _emit_hole_table_ops_cards(
+            append_line,
+            geo=dict(geo_map) if isinstance(geo_map, _MappingABC) else {},
+            material_group=material_group,
+            speeds_csv=None,
+        )
     except Exception:
         # keep the quote render resilient even if ops rows are missing
         pass
