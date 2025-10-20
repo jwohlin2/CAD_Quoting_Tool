@@ -1192,12 +1192,19 @@ def _emit_spot_and_jig_cards(
 
 
 def _emit_hole_table_ops_cards(
-    append_line: Callable[[str], None],
+    append_target: Callable[[str], None] | list[str],
     *,
     geo: dict,
     material_group: str | None,
     speeds_csv: dict | None,
 ) -> None:
+    if callable(append_target):
+        append_line = append_target
+    else:
+        append_method = getattr(append_target, "append", None)
+        if not callable(append_method):
+            raise TypeError("append_target must be callable or provide an append method")
+        append_line = append_method
     _emit_tapping_card(
         append_line,
         geo=geo,
@@ -11277,23 +11284,26 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     # Render MATERIAL REMOVAL card + TIME PER HOLE lines (replace legacy Time block)
     append_lines(removal_card_lines)
+    # AFTER drilling lines are appended:
+    geo_map = ((breakdown or {}).get("geo") or (result or {}).get("geo") or {})
+    if isinstance(geo_map, _MappingABC) and not isinstance(geo_map, dict):
+        geo_map = dict(geo_map)
+    material_group = (
+        (result or {}).get("material_group")
+        or (breakdown or {}).get("material_group")
+    )
+    pre_emit_len = len(lines)
+    _emit_hole_table_ops_cards(
+        lines,
+        geo=geo_map,
+        material_group=material_group,
+        speeds_csv=None,
+    )
+    for idx in range(pre_emit_len, len(lines)):
+        text = lines[idx]
+        previous = lines[idx - 1] if idx > 0 else None
+        doc_builder.observe_line(idx, text, previous)
     append_line("")
-    # ADD: Emit HOLE-TABLE derived cards (Tapping / Counterbore / Spot / Jig)
-    try:
-        material_group = (
-            (result.get("material_group") if isinstance(result, _MappingABC) else None)
-            or (breakdown.get("material_group") if isinstance(breakdown, _MappingABC) else None)
-        )
-        # If your speeds/feeds CSV is already loaded into a mapping, pass it here instead of None
-        _emit_hole_table_ops_cards(
-            append_line,
-            geo=dict(geo_map) if isinstance(geo_map, _MappingABC) else {},
-            material_group=material_group,
-            speeds_csv=None,
-        )
-    except Exception:
-        # keep the quote render resilient even if ops rows are missing
-        pass
     tapping_minutes_total = 0.0
     cbore_minutes_total = 0.0
     spot_minutes_total = 0.0
