@@ -10757,10 +10757,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         )
 
     if hour_summary_entries:
-        def _canonical_hour_label(value: Any) -> str:
+        def _canonical_hour_label(value: Any) -> tuple[str, str]:
             text = str(value or "")
             text = re.sub(r"\s+", " ", text).strip()
-            return text
+            canonical = text.casefold()
+            return canonical, text
 
         append_line("")
         append_line("Labor Hour Summary")
@@ -10772,20 +10773,23 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 sorted(hour_summary_entries.items(), key=lambda kv: kv[1][0], reverse=True)
             )
         folded_entries: dict[str, list[Any]] = {}
+        folded_display: dict[str, str] = {}
         folded_order: list[str] = []
         for label, (hr_val, include_in_total) in entries_iter:
-            canonical_label = _canonical_hour_label(label)
-            folded = folded_entries.get(canonical_label)
+            canonical_key, display_label = _canonical_hour_label(label)
+            folded = folded_entries.get(canonical_key)
             if folded is None:
-                folded_entries[canonical_label] = [hr_val, bool(include_in_total)]
-                folded_order.append(canonical_label)
+                folded_entries[canonical_key] = [hr_val, bool(include_in_total)]
+                folded_display[canonical_key] = display_label
+                folded_order.append(canonical_key)
             else:
                 folded[0] += hr_val
                 folded[1] = folded[1] or bool(include_in_total)
         total_hours = 0.0
-        for canonical_label in folded_order:
-            hr_val, include_in_total = folded_entries[canonical_label]
-            hours_row(canonical_label, hr_val, indent="  ")
+        for canonical_key in folded_order:
+            hr_val, include_in_total = folded_entries[canonical_key]
+            display_label = folded_display.get(canonical_key, "")
+            hours_row(display_label, hr_val, indent="  ")
             if include_in_total and hr_val:
                 total_hours += hr_val
         hours_row("Total Hours", total_hours, indent="  ")
