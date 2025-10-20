@@ -283,7 +283,7 @@ def _minutes_die_plate(plan, ops, g, t, material):
     minutes["Fixture Build (amortized)"] = _fixture_build_minutes(setups, g, t)
     # Programming as mild curve on cut time
     total_cut_guess_hr = (_milling_minutes(g, thk, mrr) + _drilling_minutes(g, thk, g["tap_qty"], g["cbore_qty"], g["hole_count"])) / 60.0
-    minutes["Programming (amortized)"] = max(21.0, 12.0 + 9.0 * log1p(total_cut_guess_hr))
+    minutes["Programming (per part)"] = max(21.0, 12.0 + 9.0 * log1p(total_cut_guess_hr))
     # Machine buckets
     minutes["Milling"] = _milling_minutes(g, thk, mrr)
     minutes["Drilling"] = _drilling_minutes(g, thk, g["tap_qty"], g["cbore_qty"], g["hole_count"])
@@ -313,7 +313,7 @@ def _minutes_punch_or_pilot(plan, ops, g, t, material):
     minutes = {}
     minutes["Inspection"] = _inspection_minutes(g, t)
     # Programming mildly follows cut size
-    minutes["Programming (amortized)"] = 18.0 + 6.0 * log1p(max(0.0, g["edge_len_in"]) / 30.0)
+    minutes["Programming (per part)"] = 18.0 + 6.0 * log1p(max(0.0, g["edge_len_in"]) / 30.0)
     # Machine: WEDM outline (skims from op), small milling rough/time if present
     skims = 0
     for op in ops.get("wire_edm_outline", []):
@@ -503,7 +503,7 @@ def price_with_planner(
     # Labor buckets
     for nm, key in [("Inspection", "InspectionRate"),
                     ("Fixture Build (amortized)", "FixtureBuildRate"),
-                    ("Programming (amortized)", "ProgrammingRate"),
+                    ("Programming (per part)", "ProgrammingRate"),
                     ("Deburr", "DeburrRate"),
                     ("Lapping/Honing", "SurfaceGrindRate")]:
         if nm in minutes:

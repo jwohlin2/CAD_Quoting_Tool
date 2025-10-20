@@ -37,7 +37,7 @@ _LABEL_OVERRIDES: dict[str, str] = {
     "finishing_deburr": "Finishing/Deburr",
     "saw_waterjet": "Saw/Waterjet",
     "fixture_build_amortized": "Fixture Build (amortized)",
-    "programming_amortized": "Programming (amortized)",
+    "programming_amortized": "Programming (per part)",
     "wire_edm": "Wire EDM",
     "sinker_edm": "Sinker EDM",
     "misc": "Misc",

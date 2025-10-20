@@ -202,6 +202,9 @@ from appkit.debug.debug_tables import (
 )
 
 
+PROGRAMMING_PER_PART_LABEL = "Programming (per part)"
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers: formatting + removal card + per-hole lines (no material per line)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -6181,8 +6184,8 @@ def _process_label(key: str | None) -> str:
         "saw_waterjet": "saw / waterjet",
         "counter_bore": "counterbore",
         "counter_sink": "countersink",
-        "prog_amortized": "programming (amortized)",
-        "programming_amortized": "programming (amortized)",
+        "prog_amortized": PROGRAMMING_PER_PART_LABEL.lower(),
+        "programming_amortized": PROGRAMMING_PER_PART_LABEL.lower(),
         "fixture_build_amortized": "fixture build (amortized)",
     }.get(canon, canon)
     if alias == "saw / waterjet":
@@ -6197,11 +6200,13 @@ def _canonical_hour_label(label: str | None) -> str:
     text = re.sub(r"\s+", " ", str(label or "").strip())
     if not text:
         return ""
+    canonical_label, _ = _canonical_amortized_label(text)
+    if canonical_label:
+        text = canonical_label
     lookup = {
         "programming": "Programming",
         "programming (lot)": "Programming",
-        "programming (amortized)": "Programming (amortized)",
-        "programming (amortized per part)": "Programming (amortized)",
+        PROGRAMMING_PER_PART_LABEL.lower(): PROGRAMMING_PER_PART_LABEL,
         "fixture build": "Fixture Build",
         "fixture build (lot)": "Fixture Build",
         "fixture build (amortized)": "Fixture Build (amortized)",
@@ -8935,21 +8940,21 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         nre["programming_per_lot"] = computed_programming_per_lot
     if programming_cost_per_part > 0:
         try:
-            labor_cost_totals["Programming (amortized)"] = programming_cost_per_part
+            labor_cost_totals[PROGRAMMING_PER_PART_LABEL] = programming_cost_per_part
         except Exception:
-            labor_cost_totals["Programming (amortized)"] = programming_cost_per_part
-    elif _safe_float(labor_cost_totals.get("Programming (amortized)")) <= 0:
+            labor_cost_totals[PROGRAMMING_PER_PART_LABEL] = programming_cost_per_part
+    elif _safe_float(labor_cost_totals.get(PROGRAMMING_PER_PART_LABEL)) <= 0:
         per_lot_source = computed_programming_per_lot
         if per_lot_source <= 0 and nre_programming_per_lot > 0:
             per_lot_source = nre_programming_per_lot
         if per_lot_source <= 0 and programming_per_lot_val > 0:
             per_lot_source = programming_per_lot_val
         try:
-            labor_cost_totals["Programming (amortized)"] = round(
+            labor_cost_totals[PROGRAMMING_PER_PART_LABEL] = round(
                 per_lot_source / max(qty_for_programming_float, 1.0), 2
             )
         except Exception:
-            labor_cost_totals["Programming (amortized)"] = 0.0
+            labor_cost_totals[PROGRAMMING_PER_PART_LABEL] = 0.0
 
     show_programming_row = (
         programming_per_lot_val > 0
@@ -9041,7 +9046,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         return is_amortized and not show_amortized
 
     programming_meta_detail = (nre_detail or {}).get("programming") or {}
-    programming_per_part_cost = labor_cost_totals.get("Programming (amortized)")
+    programming_per_part_cost = labor_cost_totals.get(PROGRAMMING_PER_PART_LABEL)
     try:
         programming_per_part_cost = float(programming_per_part_cost or 0.0)
     except Exception:
@@ -10057,7 +10062,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         prog_pp = programming_cost_per_part
         if prog_pp <= 0:
             try:
-                prog_pp = float(labor_cost_totals.get("Programming (amortized)") or 0.0)
+                prog_pp = float(labor_cost_totals.get(PROGRAMMING_PER_PART_LABEL) or 0.0)
             except Exception:
                 prog_pp = 0.0
         if prog_pp <= 0:
@@ -10069,13 +10074,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if prog_pp > 0:
             prog_pp = round(float(prog_pp), 2)
             try:
-                labor_cost_totals["Programming (amortized)"] = prog_pp
+                labor_cost_totals[PROGRAMMING_PER_PART_LABEL] = prog_pp
             except Exception:
                 pass
             if qty > 1:
                 detail_args.append(f"Amortized across {qty} pcs")
             if detail_args:
-                detail_lookup["Programming (amortized)"] = "; ".join(detail_args)
+                detail_lookup[PROGRAMMING_PER_PART_LABEL] = "; ".join(detail_args)
             additions["programming_amortized"] = (prog_pp, programming_minutes)
             amortized_nre_total += prog_pp
             if "programming_amortized" not in canonical_bucket_summary:
@@ -10656,6 +10661,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     hours_val = minutes_val / 60.0
             if hours_val <= 0.0:
                 continue
+            if str(canon_key) == "programming_amortized":
+                continue
             label = _display_bucket_label(canon_key, label_overrides)
             if label in seen_hour_labels:
                 hour_summary_entries[label] = (
@@ -10715,13 +10722,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             )
 
         _record_hour_entry("Programming", round(programming_hours, 2))
-        if programming_is_amortized and qty_for_hours > 0:
-            per_part_prog_hr = programming_hours / qty_for_hours
-            _record_hour_entry(
-                "Programming (amortized)",
-                round(per_part_prog_hr, 2),
-                include_in_total=False,
-            )
         _record_hour_entry("Fixture Build", round(fixture_hours, 2))
         if fixture_is_amortized and qty_for_hours > 0:
             per_part_fixture_hr = fixture_hours / qty_for_hours
@@ -10740,6 +10740,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     continue
                 if canon_key.startswith("planner_"):
                     continue
+                if str(canon_key) == "programming_amortized":
+                    continue
                 hours_val = charged_hours_by_canon.get(canon_key)
                 if hours_val is None:
                     continue
@@ -10757,6 +10759,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 if canon_key in {"planner_labor", "planner_machine", "planner_total"}:
                     continue
                 if str(canon_key).startswith("planner_"):
+                    continue
+                if str(canon_key) == "programming_amortized":
                     continue
                 try:
                     hours_float = float(hours_val or 0.0)
@@ -10779,13 +10783,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 _record_hour_entry(display_label, hr_val)
 
         _record_hour_entry("Programming", programming_hours)
-        if programming_is_amortized and qty_for_hours > 0:
-            per_part_prog_hr = programming_hours / qty_for_hours
-            _record_hour_entry(
-                "Programming (amortized)",
-                per_part_prog_hr,
-                include_in_total=False,
-            )
         _record_hour_entry("Fixture Build", fixture_hours)
         if fixture_is_amortized and qty_for_hours > 0:
             per_part_fixture_hr = fixture_hours / qty_for_hours
@@ -10801,6 +10798,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             metrics = canonical_bucket_summary.get(canon_key) or {}
             minutes_val = _safe_float(metrics.get("minutes"), default=0.0)
             if minutes_val <= 0.0:
+                continue
+            if str(canon_key) == "programming_amortized":
                 continue
             label = _display_bucket_label(canon_key, label_overrides)
             summary_hours[label] = summary_hours.get(label, 0.0) + (minutes_val / 60.0)
@@ -17047,16 +17046,26 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             for item in line_items:
                 if not isinstance(item, _MappingABC):
                     continue
-                label = str(item.get("op") or item.get("name") or "").strip().lower()
-                if not label or "amortized" not in label:
+                raw_label = item.get("op") or item.get("name") or ""
+                canonical_label, is_amortized = _canonical_amortized_label(raw_label)
+                normalized_label = str(canonical_label or raw_label or "").strip().lower()
+                if not is_amortized:
+                    if any(
+                        token in normalized_label
+                        for token in ("per part", "per pc", "per piece")
+                    ):
+                        is_amortized = True
+                if not is_amortized:
+                    continue
+                if not normalized_label:
                     continue
                 labor_amount = _coerce_float_or_none(item.get("labor_cost"))
                 if labor_amount is None:
                     continue
                 labor_value = float(labor_amount)
-                if "program" in label:
+                if "program" in normalized_label:
                     amortized_programming += labor_value
-                elif "fixture" in label:
+                elif "fixture" in normalized_label:
                     amortized_fixture += labor_value
 
         planner_machine_cost_total = machine_cost
