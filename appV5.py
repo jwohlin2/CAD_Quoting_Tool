@@ -908,26 +908,43 @@ def _compute_drilling_removal_section(
         else:
             subtotal_min = float(subtotal_calc)
         subtotal_min = float(max(subtotal_min, 0.0))
+
+        removal_drilling_minutes_subtotal = float(max(subtotal_calc, 0.0))
+        if removal_drilling_minutes_subtotal <= 0.0:
+            removal_drilling_minutes_subtotal = float(subtotal_min)
+
+        tool_add = 0.0
         if drill_tool_minutes_estimate > 0.0:
             tool_add = float(drill_tool_minutes_estimate)
         else:
             tool_add = (tchg_deep if seen_deep_calc else 0.0) + (
                 tchg_std if seen_std_calc else 0.0
             )
+        tool_add = float(max(tool_add, 0.0))
+
+        removal_tool_add = 0.0
+        if seen_deep_calc:
+            removal_tool_add += _safe_float(tchg_deep, default=0.0)
+        if seen_std_calc:
+            removal_tool_add += _safe_float(tchg_std, default=0.0)
+        removal_tool_add = float(max(removal_tool_add, 0.0))
+        if removal_tool_add <= 0.0 and tool_add > 0.0:
+            removal_tool_add = float(tool_add)
+
+        drill_minutes_total = float(
+            max(removal_drilling_minutes_subtotal + removal_tool_add, 0.0)
+        )
         if drill_total_minutes_estimate > 0.0:
             total_drill_minutes_with_toolchange = float(drill_total_minutes_estimate)
         else:
             total_drill_minutes_with_toolchange = subtotal_min + tool_add
-
-        removal_drilling_minutes_subtotal = float(subtotal_min)
-        drill_minutes_total = float(max(total_drill_minutes_with_toolchange, 0.0))
         removal_drilling_minutes = drill_minutes_total
         removal_drilling_hours_precise: float | None = None
         if drill_minutes_total > 0.0:
             removal_drilling_hours_precise = drill_minutes_total / 60.0
 
         extras["drill_machine_minutes"] = float(removal_drilling_minutes_subtotal)
-        extras["drill_labor_minutes"] = float(tool_add)
+        extras["drill_labor_minutes"] = float(removal_tool_add)
         extras["drill_total_minutes"] = float(total_drill_minutes_with_toolchange)
         extras["removal_drilling_minutes_subtotal"] = float(
             removal_drilling_minutes_subtotal
