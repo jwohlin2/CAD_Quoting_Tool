@@ -155,6 +155,16 @@ from appkit.geometry_shim import (
     odafc,
 )
 
+from appkit.llm_adapter import (
+    apply_llm_hours_to_variables,
+    clamp_llm_hours,
+    configure_llm_integration,
+    infer_hours_and_overrides_from_geo,
+    infer_shop_overrides_from_geo,
+    normalize_item,
+    normalize_item_text,
+)
+
 from appkit.ui.tk_compat import (
     tk,
     filedialog,
@@ -164,10 +174,15 @@ from appkit.ui.tk_compat import (
     _ensure_tk,
 )
 
+from appkit.ui.widgets import (
+    CreateToolTip,
+    ScrollableFrame,
+)
+
+from appkit.guardrails import build_guard_context, apply_drilling_floor_notes
 from appkit.merge_utils import (
     ACCEPT_SCALAR_KEYS,
     merge_effective,
-    _collect_process_keys,
 )
 
 from appkit.effective import effective_to_overrides
@@ -177,7 +192,7 @@ from appkit.effective_helpers import (
     reprice_with_effective,
 )
 
-from appkit.ui.suggestions import iter_suggestion_rows
+from appkit.ui import suggestions as ui_suggestions
 
 from appkit.occ_compat import (
     BRep_Tool,
@@ -2764,23 +2779,6 @@ def _recognized_line_items_from_planner(pricing_result: Mapping[str, Any] | None
 
     return _count_recognized_ops(plan_summary)
 
-def _normalize_item_text(value: Any) -> str:
-    """Return a normalized key for matching variables rows."""
-
-    if value is None:
-        text = ""
-    else:
-        text = str(value)
-    text = text.replace("\u00A0", " ")
-    text = re.sub(r"\s+", " ", text).strip().lower()
-    text = re.sub(r"[^a-z0-9]+", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
-
-def normalize_item(value: Any) -> str:
-    """Public wrapper for item normalization used across the editor."""
-
-    return _normalize_item_text(value)
-
 import cad_quoter.geometry as geometry
 from appkit.occ_compat import (
     FACE_OF,
@@ -2936,9 +2934,10 @@ SUGG_TO_EDITOR = _llm_integration.sugg_to_editor
 EDITOR_TO_SUGG = _llm_integration.editor_to_sugg
 EDITOR_FROM_UI = _llm_integration.editor_from_ui
 LLMClient = _llm_integration.llm_client
-_infer_hours_and_overrides_from_geo = _llm_integration.infer_hours_and_overrides_from_geo
 parse_llm_json = _llm_integration.parse_llm_json
 explain_quote = _llm_integration.explain_quote
+
+configure_llm_integration(_llm_integration)
 
 # Backwards compatibility aliases expected by older integrations.
 _DEFAULT_VL_MODEL_NAMES = DEFAULT_VL_MODEL_NAMES
@@ -3104,180 +3103,7 @@ def effective_to_overrides(effective: dict, baseline: dict | None = None) -> dic
     return out
 
 def iter_suggestion_rows(state: QuoteState) -> list[dict]:
-    rows: list[dict] = []
-    baseline = state.baseline or {}
-    suggestions = state.suggestions or {}
-    overrides = state.user_overrides or {}
-    effective = state.effective or {}
-    sources = state.effective_sources or {}
-    accept_raw = state.accept_llm
-    accept = accept_raw if isinstance(accept_raw, dict) else {}
-
-    def _coerce_dict(container: dict[str, Any], key: str) -> dict[str, Any]:
-        value = container.get(key)
-        return value if isinstance(value, dict) else {}
-
-    def _append_row(
-        path: tuple[str, ...],
-        label: str,
-        kind: str,
-        *,
-        baseline_value: Any,
-        llm_value: Any,
-        user_value: Any,
-        accept_value: bool,
-        effective_value: Any,
-        source_value: Any,
-    ) -> None:
-        rows.append(
-            {
-                "path": path,
-                "label": label,
-                "kind": kind,
-                "baseline": baseline_value,
-                "llm": llm_value,
-                "user": user_value,
-                "accept": accept_value,
-                "effective": effective_value,
-                "source": source_value,
-            }
-        )
-
-    baseline_hours_raw = _coerce_dict(baseline, "process_hours")
-    baseline_hours: dict[str, float] = {}
-    for key, value in baseline_hours_raw.items():
-        try:
-            as_float = float(value)
-        except Exception:
-            continue
-        if abs(as_float) > 1e-6:
-            baseline_hours[key] = as_float
-
-    map_specs = [
-        {
-            "path": "process_hour_multipliers",
-            "label": "Process × {key}",
-            "kind": "multiplier",
-            "baseline": 1.0,
-        },
-        {
-            "path": "process_hour_adders",
-            "label": "Process +hr {key}",
-            "kind": "hours",
-            "baseline": 0.0,
-        },
-    ]
-
-    for spec in map_specs:
-        path_key = spec["path"]
-        label_template = spec["label"]
-        kind = spec["kind"]
-        baseline_default = spec["baseline"]
-        sugg_map = _coerce_dict(suggestions, path_key)
-        user_map = _coerce_dict(overrides, path_key)
-        eff_map = _coerce_dict(effective, path_key)
-        src_map = _coerce_dict(sources, path_key)
-        accept_map = _coerce_dict(accept, path_key)
-        keys = sorted(_collect_process_keys(baseline_hours, sugg_map, user_map))
-        for key in keys:
-            _append_row(
-                (path_key, key),
-                label_template.format(key=key),
-                kind,
-                baseline_value=baseline_default,
-                llm_value=sugg_map.get(key),
-                user_value=user_map.get(key),
-                accept_value=bool(accept_map.get(key)),
-                effective_value=eff_map.get(key, baseline_default),
-                source_value=src_map.get(key, "baseline"),
-            )
-
-    sugg_pass = (
-        canonicalize_pass_through_map(suggestions.get("add_pass_through"))
-        if isinstance(suggestions.get("add_pass_through"), dict)
-        else {}
-    )
-    over_pass = (
-        canonicalize_pass_through_map(overrides.get("add_pass_through"))
-        if isinstance(overrides.get("add_pass_through"), dict)
-        else {}
-    )
-    base_pass = (
-        canonicalize_pass_through_map(baseline.get("pass_through"))
-        if isinstance(baseline.get("pass_through"), dict)
-        else {}
-    )
-    eff_pass = (
-        canonicalize_pass_through_map(effective.get("add_pass_through"))
-        if isinstance(effective.get("add_pass_through"), dict)
-        else {}
-    )
-    src_pass_candidate = sources.get("add_pass_through")
-    src_pass_raw = src_pass_candidate if isinstance(src_pass_candidate, dict) else {}
-    accept_pass_raw = accept.get("add_pass_through")
-    accept_pass = accept_pass_raw if isinstance(accept_pass_raw, dict) else {}
-    src_pass: dict[str, Any] = {}
-    for key, value in src_pass_raw.items():
-        canon_key = _canonical_pass_label(key)
-        if canon_key:
-            src_pass[canon_key] = value
-    keys_pass = sorted(set(base_pass) | set(sugg_pass) | set(over_pass))
-    for key in keys_pass:
-        base_amount = base_pass.get(key)
-        label = f"Pass-through Î” {key}"
-        if base_amount not in (None, ""):
-            try:
-                label = f"{label} (base {_format_value(base_amount, 'currency')})"
-            except Exception:
-                pass
-        _append_row(
-            ("add_pass_through", key),
-            label,
-            "currency",
-            baseline_value=0.0,
-            llm_value=sugg_pass.get(key),
-            user_value=over_pass.get(key),
-            accept_value=bool(accept_pass.get(key)),
-            effective_value=eff_pass.get(key, 0.0),
-            source_value=src_pass.get(key, "baseline"),
-        )
-
-    scalar_specs = [
-        {"path": ("scrap_pct",), "label": "Scrap %", "kind": "percent"},
-        {"path": ("setups",), "label": "Setups", "kind": "int"},
-        {
-            "path": ("fixture",),
-            "label": "Fixture plan",
-            "kind": "text",
-            "presence": ("baseline", "llm", "user", "effective"),
-        },
-    ]
-
-    for spec in scalar_specs:
-        key = spec["path"][0]
-        values = {
-            "baseline": baseline.get(key),
-            "llm": suggestions.get(key),
-            "user": overrides.get(key),
-            "effective": effective.get(key),
-            "source": sources.get(key, "baseline"),
-            "accept": bool(accept.get(key)),
-        }
-        presence_fields = spec.get("presence", ("baseline", "llm", "user"))
-        if any(values[field] is not None for field in presence_fields):
-            _append_row(
-                spec["path"],
-                spec["label"],
-                spec["kind"],
-                baseline_value=values["baseline"],
-                llm_value=values["llm"],
-                user_value=values["user"],
-                accept_value=values["accept"],
-                effective_value=values["effective"],
-                source_value=values["source"],
-            )
-
-    return rows
+    return ui_suggestions.build_suggestion_rows(state)
 
 try:
     from cad_quoter.geometry.hole_table_parser import (
@@ -4042,253 +3868,6 @@ def _turning_score(shape, areas_by_type):
     length = max(Lx, Ly, Lz)
     maxod = sorted([Lx, Ly, Lz])[-2]
     return {"GEO_Turning_Score_0to1": round(score,3), "GEO_MaxOD_mm": round(maxod,3), "GEO_Length_mm": round(length,3)}
-
-# ---- LLM hours inference ----
-def infer_hours_and_overrides_from_geo(
-    geo: dict,
-    params: dict | None = None,
-    rates: dict | None = None,
-    *,
-    client: LLMClient | None = None,
-) -> dict:
-    """Delegate to the shared LLM module for hour estimation."""
-
-    return _infer_hours_and_overrides_from_geo(
-        geo,
-        params=params,
-        rates=rates,
-        client=client,
-    )
-
-_LLM_HOUR_ITEM_MAP: dict[str, str] = {
-    "Programming_Hours": "Programming Hours",
-    "CAM_Programming_Hours": "CAM Programming Hours",
-    "Engineering_Hours": "Engineering (Docs/Fixture Design) Hours",
-    "Fixture_Build_Hours": "Fixture Build Hours",
-    "Roughing_Cycle_Time_hr": "Roughing Cycle Time",
-    "Semi_Finish_Cycle_Time_hr": "Semi-Finish Cycle Time",
-    "Finishing_Cycle_Time_hr": "Finishing Cycle Time",
-    "InProcess_Inspection_Hours": "In-Process Inspection Hours",
-    "Final_Inspection_Hours": "Final Inspection Hours",
-    "CMM_Programming_Hours": "CMM Programming Hours",
-    "CMM_RunTime_min": "CMM Run Time min",
-    "Deburr_Hours": "Deburr Hours",
-    "Tumble_Hours": "Tumbling Hours",
-    "Blast_Hours": "Bead Blasting Hours",
-    "Laser_Mark_Hours": "Laser Mark Hours",
-    "Masking_Hours": "Masking Hours",
-    "Saw_Waterjet_Hours": "Sawing Hours",
-    "Assembly_Hours": "Assembly Hours",
-    "Packaging_Labor_Hours": "Packaging Labor Hours",
-}
-
-_LLM_SETUP_ITEM_MAP: dict[str, str] = {
-    "Milling_Setups": "Number of Milling Setups",
-    "Setup_Hours_per_Setup": "Setup Hours / Setup",
-}
-
-_LLM_INSPECTION_ITEM_MAP: dict[str, str] = {
-    "FAIR_Required": "FAIR Required",
-    "Source_Inspection_Required": "Source Inspection Requirement",
-}
-
-def clamp_llm_hours(
-    raw: Mapping[str, Any] | None,
-    geo: Mapping[str, Any] | None,
-    *,
-    params: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Sanitize LLM-derived hour estimates before applying them to the UI."""
-
-    cleaned: dict[str, Any] = {}
-    raw_map = cast(Mapping[str, Any], raw or {})
-    params_map = cast(Mapping[str, Any], params or {})
-    bounds_raw = params_map.get("bounds") if isinstance(params_map, _MappingABC) else None
-    bounds_map = bounds_raw if isinstance(bounds_raw, _MappingABC) else None
-    coerced_bounds = coerce_bounds(bounds_map)
-    adder_min_bound = coerced_bounds["adder_min_hr"]
-    adder_max_bound = coerced_bounds["adder_max_hr"]
-
-    hours_out: dict[str, float] = {}
-    hours_val = raw_map.get("hours")
-    if isinstance(hours_val, _MappingABC):
-        hours_src: Mapping[str, Any] = cast(Mapping[str, Any], hours_val)
-    else:
-        hours_src = {}
-    for key, value in hours_src.items():
-        val = _coerce_float_or_none(value)
-        if val is None:
-            continue
-        upper = 48.0
-        if str(key).endswith("_min"):
-            upper = 2400.0
-        hours_out[str(key)] = clamp(float(val), 0.0, upper, 0.0)
-    if hours_out:
-        cleaned["hours"] = hours_out
-
-    setups_out: dict[str, Any] = {}
-    setups_val = raw_map.get("setups")
-    if isinstance(setups_val, _MappingABC):
-        setups_src: Mapping[str, Any] = cast(Mapping[str, Any], setups_val)
-    else:
-        setups_src = {}
-    if setups_src:
-        count_raw = setups_src.get("Milling_Setups")
-        if count_raw is not None:
-            try:
-                setups_out["Milling_Setups"] = max(1, min(6, int(round(float(count_raw)))))
-            except Exception:
-                pass
-        setup_hours = _coerce_float_or_none(setups_src.get("Setup_Hours_per_Setup"))
-        if setup_hours is not None:
-            setups_out["Setup_Hours_per_Setup"] = clamp(
-                float(setup_hours), adder_min_bound, adder_max_bound, adder_min_bound
-            )
-    if setups_out:
-        cleaned["setups"] = setups_out
-
-    inspection_out: dict[str, bool] = {}
-    inspection_val = raw_map.get("inspection")
-    if isinstance(inspection_val, _MappingABC):
-        inspection_src: Mapping[str, Any] = cast(Mapping[str, Any], inspection_val)
-    else:
-        inspection_src = {}
-    for key in _LLM_INSPECTION_ITEM_MAP:
-        if key in inspection_src:
-            inspection_out[key] = bool(inspection_src.get(key))
-    if inspection_out:
-        cleaned["inspection"] = inspection_out
-
-    notes_raw = raw_map.get("notes")
-    if isinstance(notes_raw, list):
-        cleaned["notes"] = [str(n).strip() for n in notes_raw if str(n).strip()][:8]
-
-    meta_raw = raw_map.get("_meta")
-    if isinstance(meta_raw, _MappingABC):
-        cleaned["_meta"] = dict(meta_raw)
-
-    for key, value in raw_map.items():
-        if key in {"hours", "setups", "inspection", "notes", "_meta"}:
-            continue
-        cleaned.setdefault(str(key), value)
-
-    return cleaned
-
-def apply_llm_hours_to_variables(
-    df: PandasDataFrame | None,
-    estimates: Mapping[str, Any] | None,
-    *,
-    allow_overwrite_nonzero: bool = False,
-    log: dict | None = None,
-) -> PandasDataFrame | None:
-    """Apply sanitized LLM hour estimates to a variables dataframe."""
-
-    if not _HAS_PANDAS or df is None:
-        return df
-
-    estimates_map = cast(Mapping[str, Any], estimates or {})
-    df_out = df.copy(deep=True)
-    normalized_items = df_out["Item"].astype(str).apply(_normalize_item_text)
-    index_lookup = {norm: idx for idx, norm in zip(df_out.index, normalized_items)}
-
-    def _write_value(label: str, value: Any, *, dtype: str = "number") -> None:
-        nonlocal df_out, normalized_items, index_lookup
-        if value is None:
-            return
-        normalized = _normalize_item_text(label)
-        idx = index_lookup.get(normalized)
-        new_value = value
-        if idx is None:
-            df_out = upsert_var_row(df_out, label, new_value, dtype=dtype)
-            normalized_items = df_out["Item"].astype(str).apply(_normalize_item_text)
-            index_lookup = {norm: idx for idx, norm in zip(df_out.index, normalized_items)}
-            idx = index_lookup.get(normalized)
-            previous = None
-        else:
-            previous = df_out.at[idx, "Example Values / Options"]
-            if not allow_overwrite_nonzero:
-                existing_val = _coerce_float_or_none(previous)
-                if existing_val is not None and abs(existing_val) > 1e-9:
-                    return
-            df_out.at[idx, "Example Values / Options"] = new_value
-            df_out.at[idx, "Data Type / Input Method"] = dtype
-        if idx is None:
-            return
-        df_out.at[idx, "Example Values / Options"] = new_value
-        df_out.at[idx, "Data Type / Input Method"] = dtype
-        if log is not None:
-            log.setdefault("llm_hours", []).append({
-                "item": label,
-                "value": new_value,
-                "previous": previous,
-            })
-
-    hours_val = estimates_map.get("hours")
-    if isinstance(hours_val, _MappingABC):
-        hours_src: Mapping[str, Any] = cast(Mapping[str, Any], hours_val)
-    else:
-        hours_src = {}
-    for key, value in hours_src.items():
-        label = _LLM_HOUR_ITEM_MAP.get(str(key))
-        if not label:
-            continue
-        val = _coerce_float_or_none(value)
-        if val is None:
-            continue
-        _write_value(label, float(val), dtype="number")
-
-    setups_val = estimates_map.get("setups")
-    if isinstance(setups_val, _MappingABC):
-        setups_src: Mapping[str, Any] = cast(Mapping[str, Any], setups_val)
-    else:
-        setups_src = {}
-    for key, value in setups_src.items():
-        label = _LLM_SETUP_ITEM_MAP.get(str(key))
-        if not label:
-            continue
-        if key == "Milling_Setups":
-            try:
-                numeric = max(1, min(6, int(round(float(value)))))
-            except Exception:
-                continue
-            _write_value(label, numeric, dtype="number")
-        else:
-            val = _coerce_float_or_none(value)
-            if val is None:
-                continue
-            _write_value(label, float(val), dtype="number")
-
-    inspection_val = estimates_map.get("inspection")
-    if isinstance(inspection_val, _MappingABC):
-        inspection_src: Mapping[str, Any] = cast(Mapping[str, Any], inspection_val)
-    else:
-        inspection_src = {}
-    for key, value in inspection_src.items():
-        label = _LLM_INSPECTION_ITEM_MAP.get(str(key))
-        if not label:
-            continue
-        _write_value(label, "True" if bool(value) else "False", dtype="Checkbox")
-
-    return df_out
-
-def infer_shop_overrides_from_geo(
-    geo: Mapping[str, Any] | None,
-    *,
-    params: Mapping[str, Any] | None = None,
-    rates: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Return sanitized LLM output for the manual LLM tab."""
-
-    estimates_raw = infer_hours_and_overrides_from_geo(
-        dict(geo or {}),
-        params=dict(params or {}),
-        rates=dict(rates or {}),
-    )
-    cleaned = clamp_llm_hours(estimates_raw, geo or {}, params=params)
-    return {
-        "estimates": cleaned,
-        "LLM_Adjustments": {},
-    }
 
 # --- WHICH SHEET ROWS MATTER TO THE ESTIMATOR --------------------------------
 # --- APPLY LLM OUTPUT ---------------------------------------------------------
@@ -11409,6 +10988,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     printed_subtotal = ladder_subtotal
 
     # Render MATERIAL REMOVAL card + TIME PER HOLE lines (replace legacy Time block)
+    # NOTE: Patch 3 keeps the hole-table hook active so downstream cards continue to render.
     append_lines(removal_card_lines)
     geo_map = ((breakdown or {}).get("geo") or (result or {}).get("geo") or {})
     if isinstance(geo_map, _MappingABC) and not isinstance(geo_map, dict):
@@ -21912,175 +21492,6 @@ def summarize_hole_chart_agreement(entity_holes_mm: Iterable[Any] | None, chart_
 # ---- service containers ----------------------------------------------------
 
 
-# ---- tk tooltip helper -----------------------------------------------------
-
-class CreateToolTip:
-    """Attach a lightweight tooltip to a Tk widget."""
-
-    def __init__(
-        self,
-        widget: tk.Widget,
-        text: str,
-        *,
-        delay: int = 500,
-        wraplength: int = 320,
-    ) -> None:
-        self.widget = widget
-        self.text = text
-        self.delay = delay
-        self.wraplength = wraplength
-        self._after_id: str | None = None
-        self._tip_window: tk.Toplevel | None = None
-        self._label: tk.Label | ttk.Label | None = None
-        self._pinned = False
-
-        self.widget.bind("<Enter>", self._schedule_show, add="+")
-        self.widget.bind("<Leave>", self._hide, add="+")
-        self.widget.bind("<FocusIn>", self._schedule_show, add="+")
-        self.widget.bind("<FocusOut>", self._hide, add="+")
-        self.widget.bind("<ButtonPress>", self._on_button_press, add="+")
-        self.widget.bind("<Button-1>", self._toggle_pin, add="+")
-
-    def update_text(self, text: str) -> None:
-        self.text = text
-        if self._label is not None:
-            self._label.configure(text=text)
-
-    def _on_button_press(self, event: tk.Event | None = None) -> None:
-        if event is not None and getattr(event, "num", None) == 1:
-            return
-        self._hide()
-
-    def _toggle_pin(self, _event: tk.Event | None = None) -> None:
-        if self._pinned:
-            self._pinned = False
-            self._hide()
-        else:
-            self._pinned = True
-            self._cancel_scheduled()
-            self._show()
-
-    def _schedule_show(self, _event: tk.Event | None = None) -> None:
-        self._cancel_scheduled()
-        if not self.text:
-            return
-        self._after_id = self.widget.after(self.delay, self._show)
-
-    def _cancel_scheduled(self) -> None:
-        if self._after_id is not None:
-            try:
-                self.widget.after_cancel(self._after_id)
-            finally:
-                self._after_id = None
-
-    def _show(self) -> None:
-        if self._tip_window is not None or not self.text:
-            return
-
-        bbox: tuple[int, int, int, int] | None = None
-        bbox_method = getattr(self.widget, "bbox", None)
-        if callable(bbox_method):
-            try:
-                raw_bbox = bbox_method("insert")  # type: ignore[arg-type]
-                if isinstance(raw_bbox, (tuple, list)) and len(raw_bbox) >= 4:
-                    bbox = (
-                        int(raw_bbox[0]),
-                        int(raw_bbox[1]),
-                        int(raw_bbox[2]),
-                        int(raw_bbox[3]),
-                    )
-            except Exception:
-                bbox = None
-        if bbox:
-            x, y, width, height = bbox
-        else:
-            x = y = 0
-            width = self.widget.winfo_width()
-            height = self.widget.winfo_height()
-
-        root_x = self.widget.winfo_rootx()
-        root_y = self.widget.winfo_rooty()
-        x = root_x + x + width + 12
-        y = root_y + y + height + 12
-
-        master = self.widget.winfo_toplevel()
-        tip = tk.Toplevel(master)
-        tip.wm_overrideredirect(True)
-        try:
-            tip.transient(master)
-        except Exception:
-            tip.wm_transient(master)
-        tip.wm_geometry(f"+{x}+{y}")
-        tip.lift()
-        try:
-            tip.attributes("-topmost", True)
-        except Exception:
-            pass
-
-        label = tk.Label(
-            tip,
-            text=self.text,
-            justify="left",
-            background="#ffffe0",
-            relief=tk.SOLID,
-            borderwidth=1,
-            font=("tahoma", 8, "normal"),
-            wraplength=self.wraplength,
-        )
-        label.pack(ipadx=4, ipady=2)
-
-        self._tip_window = tip
-        self._label = label
-
-    def _hide(self, _event: tk.Event | None = None) -> None:
-        self._cancel_scheduled()
-        if self._pinned:
-            return
-        if self._tip_window is not None:
-            self._tip_window.destroy()
-            self._tip_window = None
-        self._label = None
-
-# ---- scrollable frame helper -----------------------------------------------
-class ScrollableFrame(ttk.Frame):
-    def __init__(self, parent, *args, **kwargs):
-        super().__init__(parent, *args, **kwargs)
-        self.canvas = tk.Canvas(self, highlightthickness=0)
-        self.vbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
-        self.inner = ttk.Frame(self.canvas)
-
-        self.inner.bind(
-            "<Configure>",
-            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-        )
-        self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
-        self.canvas.configure(yscrollcommand=self.vbar.set)
-
-        self.canvas.pack(side="left", fill="both", expand=True)
-        self.vbar.pack(side="right", fill="y")
-
-        # Bind wheel only while cursor is over this widget
-        self.inner.bind("<Enter>", self._bind_mousewheel)
-        self.inner.bind("<Leave>", self._unbind_mousewheel)
-
-    # Windows & macOS wheel
-    def _on_mousewheel(self, event):
-        self.canvas.yview_scroll(-int(event.delta/120), "units")
-
-    # Linux wheel
-    def _on_mousewheel_linux(self, event):
-        self.canvas.yview_scroll(-1 if event.num == 4 else 1, "units")
-
-    def _bind_mousewheel(self, _):
-        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
-        self.canvas.bind_all("<Button-4>",  self._on_mousewheel_linux)
-        self.canvas.bind_all("<Button-5>",  self._on_mousewheel_linux)
-
-    def _unbind_mousewheel(self, _):
-        self.canvas.unbind_all("<MouseWheel>")
-        self.canvas.unbind_all("<Button-4>")
-        self.canvas.unbind_all("<Button-5>")
-
 class App(tk.Tk):
     def __init__(
         self,
@@ -22709,7 +22120,7 @@ class App(tk.Tk):
         self.editor_widgets_frame.grid_columnconfigure(0, weight=1)
 
         items_series = df["Item"].astype(str)
-        normalized_items = items_series.apply(_normalize_item_text)
+        normalized_items = items_series.apply(normalize_item_text)
         qty_mask = normalized_items.isin({"quantity", "qty", "lot size"})
         if qty_mask.any():
             qty_raw = df.loc[qty_mask, "Example Values / Options"].iloc[0]
@@ -22735,7 +22146,7 @@ class App(tk.Tk):
             "Packaging $/hr",
             "Quantity", "Qty", "Lot Size",
         }
-        skip_items = {_normalize_item_text(item) for item in raw_skip_items}
+        skip_items = {normalize_item_text(item) for item in raw_skip_items}
 
         material_lookup: Dict[str, float] = {}
         for _, row_data in df.iterrows():
@@ -23668,7 +23079,7 @@ class App(tk.Tk):
                 self.param_vars["Quantity"].set(str(quantity_val))
 
         if self.vars_df is not None and raw_param_values:
-            normalized_items = self.vars_df["Item"].astype(str).apply(_normalize_item_text)
+            normalized_items = self.vars_df["Item"].astype(str).apply(normalize_item_text)
             param_to_items = {
                 "MarginPct": ["profit margin %", "margin %"],
                 "ExpeditePct": ["expedite %"],
