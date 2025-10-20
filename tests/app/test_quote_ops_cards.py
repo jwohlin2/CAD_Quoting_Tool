@@ -52,3 +52,14 @@ def test_emit_hole_table_ops_cards_renders_sections() -> None:
 
     spot_line = next(line for line in lines if line.startswith("Spot drill"))
     assert "rpm" in spot_line and "ipm" in spot_line
+
+
+def test_aggregate_ops_sets_built_rows() -> None:
+    rows = [
+        {"hole": "A1", "ref": "Ø0.257", "qty": 4, "desc": "Ø0.257 THRU"},
+        {"hole": "A2", "ref": "", "qty": 2, "desc": "1/4-20 TAP THRU"},
+    ]
+
+    summary = appV5.aggregate_ops(rows)
+
+    assert summary.get("built_rows") == 2
