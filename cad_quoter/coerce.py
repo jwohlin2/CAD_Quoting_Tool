@@ -1,6 +1,7 @@
 """Utility helpers for tolerant numeric coercion."""
 from __future__ import annotations
 
+import math
 from typing import Any
 
 
@@ -59,3 +60,15 @@ def coerce_float_or_none(value: Any) -> float | None:
         except Exception:
             return None
     return None
+
+
+def safe_float(value: Any, default: float = 0.0) -> float:
+    """Return ``value`` coerced to ``float`` with NaN/Inf protection."""
+
+    try:
+        coerced = float(value or 0.0)
+    except Exception:
+        return default
+    if not math.isfinite(coerced):
+        return default
+    return coerced

@@ -8,36 +8,13 @@ from cad_quoter.coerce import coerce_float_or_none as _coerce_float_or_none
 from cad_quoter.domain_models import DEFAULT_MATERIAL_DISPLAY
 from cad_quoter.geometry import upsert_var_row
 from cad_quoter.utils import _dict
+from cad_quoter.utils.text import _to_noncapturing, to_noncapturing
 
 __all__ = [
     "apply_2d_features_to_variables",
     "to_noncapturing",
     "_to_noncapturing",
 ]
-
-
-def to_noncapturing(expr: str) -> str:
-    """
-    Convert every capturing '(' to non-capturing '(?:', preserving escaped parens and
-    existing '(?...)' constructs.
-    """
-    out: list[str] = []
-    i = 0
-    while i < len(expr):
-        ch = expr[i]
-        prev = expr[i - 1] if i > 0 else ""
-        nxt = expr[i + 1] if i + 1 < len(expr) else ""
-        if ch == "(" and prev != "\\" and nxt != "?":
-            out.append("(?:")
-            i += 1
-            continue
-        out.append(ch)
-        i += 1
-    return "".join(out)
-
-
-# Backwards-compatible alias for older imports.
-_to_noncapturing = to_noncapturing
 
 
 def apply_2d_features_to_variables(df, g2d: dict, *, params: dict, rates: dict):

@@ -806,6 +806,28 @@ def _compute_drilling_removal_section(
                 ops_rows = list(rows_candidate or [])
             except Exception:
                 ops_rows = []
+        chart_lines_all: list[str] = []
+        if isinstance(geo_map, _MappingABC):
+            raw_chart_lines = geo_map.get("chart_lines")
+            if isinstance(raw_chart_lines, list):
+                for entry in raw_chart_lines:
+                    if isinstance(entry, str):
+                        chart_lines_all.append(entry)
+                    elif entry not in (None, ""):
+                        chart_lines_all.append(str(entry))
+            elif isinstance(raw_chart_lines, str):
+                chart_lines_all.append(raw_chart_lines)
+            geo_read_more = geo_map.get("geo_read_more")
+            if isinstance(geo_read_more, _MappingABC):
+                extra_chart_lines = geo_read_more.get("chart_lines")
+                if isinstance(extra_chart_lines, list):
+                    for entry in extra_chart_lines:
+                        if isinstance(entry, str):
+                            chart_lines_all.append(entry)
+                        elif entry not in (None, ""):
+                            chart_lines_all.append(str(entry))
+                elif isinstance(extra_chart_lines, str):
+                    chart_lines_all.append(extra_chart_lines)
         lines.append(f"[DEBUG] ops_rows={len(ops_rows)}")
         if not ops_rows:
             chart_lines_all = _collect_chart_lines_context(result, breakdown, geo_map)
@@ -877,6 +899,9 @@ def _compute_drilling_removal_section(
         lines.append(
             f"[DEBUG] has_tap_row={any('TAP' in (str(r.get('desc', '')).upper()) for r in ops_rows if isinstance(r, _MappingABC))}"
         )
+        if not ops_rows and chart_lines_all:
+            sample = chart_lines_all[:6]
+            lines.append(f"[DEBUG] sample_chart_lines={repr(sample)}")
 
         if drill_machine_minutes_estimate > 0.0:
             subtotal_min = float(drill_machine_minutes_estimate)
@@ -1154,8 +1179,14 @@ _DIA_TOKEN = re.compile(
 )
 
 
-def _rows_from_ops_summary(geo: dict) -> list[dict]:
-    ops = (geo or {}).get("ops_summary") or {}
+def _rows_from_ops_summary(
+    geo: Mapping[str, Any] | None,
+    *,
+    result: Mapping[str, Any] | None = None,
+    breakdown: Mapping[str, Any] | None = None,
+) -> list[dict]:
+    geo_map: Mapping[str, Any] = geo if isinstance(geo, _MappingABC) else {}
+    ops = (geo_map or {}).get("ops_summary") or {}
     rows = ops.get("rows") if isinstance(ops, dict) else None
     if rows:
         return list(rows)
@@ -1177,6 +1208,11 @@ def _rows_from_ops_summary(geo: dict) -> list[dict]:
                 fallback.append(base)
             if fallback:
                 return fallback
+    chart_lines = _collect_chart_lines_context(result, breakdown, geo_map)
+    if chart_lines:
+        fallback_rows = _build_ops_rows_from_lines_fallback(chart_lines)
+        if fallback_rows:
+            return fallback_rows
     return []
 
 
@@ -1410,11 +1446,13 @@ _THREAD_WITH_NPT_RE = re.compile(
 def _emit_tapping_card(
     lines: list[str],
     *,
-    geo: dict,
+    geo: Mapping[str, Any] | None,
     material_group: str | None,
     speeds_csv: dict | None,
+    result: Mapping[str, Any] | None = None,
+    breakdown: Mapping[str, Any] | None = None,
 ) -> None:
-    rows = _rows_from_ops_summary(geo)
+    rows = _rows_from_ops_summary(geo, result=result, breakdown=breakdown)
     groups: list[dict[str, Any]] = []
     for r in rows:
         desc = str(r.get("desc", ""))
@@ -1494,11 +1532,13 @@ def _emit_tapping_card(
 def _emit_counterbore_card(
     lines: list[str],
     *,
-    geo: dict,
+    geo: Mapping[str, Any] | None,
     material_group: str | None,
     speeds_csv: dict | None,
+    result: Mapping[str, Any] | None = None,
+    breakdown: Mapping[str, Any] | None = None,
 ) -> None:
-    rows = _rows_from_ops_summary(geo)
+    rows = _rows_from_ops_summary(geo, result=result, breakdown=breakdown)
     groups: defaultdict[tuple[float, str, float | None], int] = defaultdict(int)
     order: list[tuple[float, str, float | None]] = []
     for r in rows:
@@ -1549,11 +1589,13 @@ def _emit_counterbore_card(
 def _emit_spot_and_jig_cards(
     lines: list[str],
     *,
-    geo: dict,
+    geo: Mapping[str, Any] | None,
     material_group: str | None,
     speeds_csv: dict | None,
+    result: Mapping[str, Any] | None = None,
+    breakdown: Mapping[str, Any] | None = None,
 ) -> None:
-    rows = _rows_from_ops_summary(geo)
+    rows = _rows_from_ops_summary(geo, result=result, breakdown=breakdown)
     spot_qty = 0
     spot_depth: float | None = None
     for r in rows:
@@ -1610,9 +1652,11 @@ def _hole_table_section_present(lines: Sequence[str], header: str) -> bool:
 def _emit_hole_table_ops_cards(
     lines: list[str],
     *,
-    geo: dict,
+    geo: Mapping[str, Any] | None,
     material_group: str | None,
     speeds_csv: dict | None,
+    result: Mapping[str, Any] | None = None,
+    breakdown: Mapping[str, Any] | None = None,
 ) -> None:
     if not _hole_table_section_present(lines, "MATERIAL REMOVAL – TAPPING"):
         _emit_tapping_card(
@@ -1620,6 +1664,8 @@ def _emit_hole_table_ops_cards(
             geo=geo,
             material_group=material_group,
             speeds_csv=speeds_csv,
+            result=result,
+            breakdown=breakdown,
         )
     if not _hole_table_section_present(lines, "MATERIAL REMOVAL – COUNTERBORE"):
         _emit_counterbore_card(
@@ -1627,6 +1673,8 @@ def _emit_hole_table_ops_cards(
             geo=geo,
             material_group=material_group,
             speeds_csv=speeds_csv,
+            result=result,
+            breakdown=breakdown,
         )
     if not _hole_table_section_present(lines, "MATERIAL REMOVAL – SPOT (CENTER DRILL)"):
         _emit_spot_and_jig_cards(
@@ -1634,6 +1682,8 @@ def _emit_hole_table_ops_cards(
             geo=geo,
             material_group=material_group,
             speeds_csv=speeds_csv,
+            result=result,
+            breakdown=breakdown,
         )
 
 
@@ -1825,18 +1875,6 @@ EXTRA_DETAIL_RE = re.compile(r"^includes\b.*extras\b", re.IGNORECASE)
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers: formatting + removal card + per-hole lines (no material per line)
 # ──────────────────────────────────────────────────────────────────────────────
-
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    """Best-effort float coercion used in multiple pricing paths."""
-
-    try:
-        coerced = float(value or 0.0)
-    except Exception:
-        return default
-    if math.isnan(coerced) or math.isinf(coerced):
-        return default
-    return coerced
-
 
 def _ensure_list(value: Any, fallback: Iterable[Any] | None = None) -> list[Any]:
     """Return ``value`` coerced to a list with an optional fallback."""
@@ -2397,57 +2435,6 @@ def _pick_mcmaster_plate_sku(
     )
 
 
-def _resolve_mcmaster_plate_for_quote(
-    need_L_in: float | None,
-    need_W_in: float | None,
-    need_T_in: float | None,
-    *,
-    material_key: str,
-    stock_L_in: float | None = None,
-    stock_W_in: float | None = None,
-    stock_T_in: float | None = None,
-    catalog_rows: Sequence[Mapping[str, Any]] | None = None,
-) -> dict[str, Any] | None:
-    """Return a McMaster plate candidate using quote needs and existing stock sizing.
-
-    The quote may already contain rounded stock dimensions. When the direct lookup
-    for the requested blank fails (for example, because the catalog is missing an
-    exact match for the required envelope), we fall back to searching with the
-    previously rounded stock dimensions so that we can still surface the McMaster
-    part number and pricing for that size.
-    """
-
-    candidate: dict[str, Any] | None = None
-
-    if need_L_in and need_W_in and need_T_in:
-        try:
-            candidate = _pick_mcmaster_plate_sku(
-                float(need_L_in),
-                float(need_W_in),
-                float(need_T_in),
-                material_key=material_key,
-                catalog_rows=catalog_rows,
-            )
-        except Exception:
-            candidate = None
-
-    if candidate:
-        return candidate
-
-    if stock_L_in and stock_W_in and stock_T_in:
-        try:
-            return _pick_mcmaster_plate_sku(
-                float(stock_L_in),
-                float(stock_W_in),
-                float(stock_T_in),
-                material_key=material_key,
-                catalog_rows=catalog_rows,
-            )
-        except Exception:
-            return None
-
-    return None
-
 def _compute_pricing_ladder(
     subtotal: float | int | str | None,
     *,
@@ -2887,7 +2874,7 @@ from cad_quoter.domain_models import (
 from cad_quoter.domain_models import (
     normalize_material_key,
 )
-from cad_quoter.coerce import to_float, to_int
+from cad_quoter.coerce import safe_float as _safe_float, to_float, to_int
 from cad_quoter.utils import compact_dict, jdump, json_safe_copy, sdict
 from cad_quoter.utils.text import _match_items_contains
 from cad_quoter.llm_suggest import (
@@ -7051,12 +7038,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             return False
         return canonical_key.startswith("planner_") or canonical_key == "planner_total"
 
-    def _safe_float(value: Any, default: float = 0.0) -> float:
-        try:
-            return float(value or 0.0)
-        except Exception:
-            return default
-
     def _merge_process_meta(
         existing: Mapping[str, Any] | None, incoming: Mapping[str, Any] | Any
     ) -> dict[str, Any]:
@@ -11061,6 +11042,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         geo=geo_map,
         material_group=material_group,
         speeds_csv=None,
+        result=result,
+        breakdown=breakdown,
     )
 
     # PROBE: show how many HOLE-TABLE rows we have (temporary)
@@ -21206,64 +21189,148 @@ def _extract_text_lines_from_ezdxf_doc(doc: Any) -> list[str]:
     return [ln for ln in joined.splitlines() if ln.strip()]
 
 
+# ===== Fallback HOLE-TABLE row builder (app layer) =========================
+
+_RE_DIA_ANY_FALLBACK = re.compile(
+    r"(?:Ø|⌀|DIA|O)\s*([0-9.]+)|\(([0-9.]+)\s*Ø?\)|\b([0-9.]+)\b"
+)
+
+
+def _coalesce_rows(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    agg: dict[tuple[str, str], int] = {}
+    order: list[tuple[str, str]] = []
+    for entry in rows:
+        if not isinstance(entry, _MappingABC):
+            continue
+        desc = str(entry.get("desc", ""))
+        ref = str(entry.get("ref", ""))
+        qty_val = int(_coerce_float_or_none(entry.get("qty")) or 0)
+        if qty_val <= 0:
+            continue
+        key = (desc, ref)
+        if key not in agg:
+            agg[key] = qty_val
+            order.append(key)
+        else:
+            agg[key] += qty_val
+    return [
+        {"hole": "", "ref": ref, "qty": agg[(desc, ref)], "desc": desc}
+        for (desc, ref) in order
+    ]
+
+
+def _build_ops_rows_from_lines_fallback(lines: Iterable[str]) -> list[dict[str, Any]]:
+    materialized = [
+        _norm_line(text)
+        for text in lines
+        if isinstance(text, str) and _norm_line(text)
+    ]
+    if not materialized:
+        return []
+
+    out: list[dict[str, Any]] = []
+    i = 0
+    while i < len(materialized):
+        ln = materialized[i]
+        upper = ln.upper()
+        if any(token in upper for token in ("BREAK ALL", "SHARP CORNERS", "RADIUS", "CHAMFER", "AS SHOWN")):
+            i += 1
+            continue
+
+        qty = 1
+        mqty = _QTY_LEAD.match(ln)
+        if mqty:
+            qty = int(mqty.group(1))
+            ln = ln[mqty.end() :].strip()
+            upper = ln.upper()
+
+        mtap = RE_TAP.search(ln)
+        if mtap:
+            thread = mtap.group(2).replace(" ", "")
+            tail = " ".join(materialized[i : i + 3])
+            desc = f"{thread} TAP"
+            if RE_THRU.search(tail):
+                desc += " THRU"
+            md = RE_DEPTH.search(tail)
+            if md and md.group(1):
+                desc += f' × {float(md.group(1)):.2f}"'
+            ms = _FROM_SIDE.search(tail)
+            if ms:
+                desc += f' FROM {ms.group(1).upper()}'
+            out.append({"hole": "", "ref": "", "qty": qty, "desc": desc})
+            i += 1
+            continue
+
+        if RE_CBORE.search(ln):
+            tail = " ".join(materialized[max(0, i - 1) : i + 2])
+            mda = _PAREN_DIA.search(tail) or _MM_IN_DIA.search(tail) or RE_DIA.search(tail) or _RE_DIA_ANY_FALLBACK.search(tail)
+            dia = None
+            if mda:
+                for group in mda.groups():
+                    if group:
+                        try:
+                            dia = float(group)
+                        except Exception:
+                            continue
+                        break
+            desc = (f"{dia:.4f} C’BORE" if dia is not None else "C’BORE")
+            md = RE_DEPTH.search(tail)
+            if md and md.group(1):
+                desc += f' × {float(md.group(1)):.2f}"'
+            ms = _FROM_SIDE.search(tail)
+            if ms:
+                desc += f' FROM {ms.group(1).upper()}'
+            out.append({"hole": "", "ref": "", "qty": qty, "desc": desc})
+            i += 1
+            continue
+
+        if any(token in upper for token in ("C' DRILL", "C’DRILL", "CENTER DRILL", "SPOT DRILL")):
+            tail = " ".join(materialized[i : i + 2])
+            md = RE_DEPTH.search(tail)
+            desc = "C’DRILL" + (f' × {float(md.group(1)):.2f}"' if (md and md.group(1)) else "")
+            out.append({"hole": "", "ref": "", "qty": qty, "desc": desc})
+            i += 1
+            continue
+
+        if "DRILL" in upper and RE_THRU.search(ln):
+            mda = _PAREN_DIA.search(ln) or _MM_IN_DIA.search(ln) or RE_DIA.search(ln) or _RE_DIA_ANY_FALLBACK.search(ln)
+            ref = ""
+            if mda:
+                for group in mda.groups():
+                    if group:
+                        ref = group
+                        break
+            out.append({"hole": "", "ref": ref, "qty": qty, "desc": (f"{ref} THRU").strip()})
+            i += 1
+            continue
+
+        i += 1
+
+    return _coalesce_rows(out)
+
+
 def _collect_chart_lines_context(
-    result: Any, breakdown: Any, geo_map: Any
+    result: Mapping[str, Any] | None,
+    breakdown: Mapping[str, Any] | None,
+    geo: Mapping[str, Any] | None,
 ) -> list[str]:
-    contexts: list[_MappingABC[str, Any]] = []
-    seen_ctx: set[int] = set()
-
-    def _register(candidate: Any) -> None:
-        if isinstance(candidate, _MappingABC):
-            ident = id(candidate)
-            if ident not in seen_ctx:
-                seen_ctx.add(ident)
-                contexts.append(candidate)
-                nested = candidate.get("geo_read_more")
-                if isinstance(nested, _MappingABC):
-                    _register(nested)
-
-    _register(geo_map)
-    for container in (result, breakdown):
-        if isinstance(container, _MappingABC):
-            _register(container)
-            _register(container.get("geo"))
-            _register(container.get("geom"))
-
-    aggregated: list[str] = []
-    seen_lines: set[str] = set()
-    for ctx in contexts:
-        raw_lines = ctx.get("chart_lines") if isinstance(ctx, _MappingABC) else None
-        if isinstance(raw_lines, (list, tuple)):
-            for entry in raw_lines:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for container in (geo, breakdown, result):
+        if not isinstance(container, _MappingABC):
+            continue
+        for key in ("chart_lines", "hole_table_lines", "chart_text_lines", "hole_chart_lines"):
+            candidate = container.get(key)
+            if not isinstance(candidate, list):
+                continue
+            for entry in candidate:
                 if not isinstance(entry, str):
                     continue
-                if entry not in seen_lines:
-                    seen_lines.add(entry)
-                    aggregated.append(entry)
-    return aggregated
-
-
-def _build_ops_rows_from_lines_fallback(
-    chart_lines_all: Iterable[Any] | None,
-) -> list[dict[str, Any]]:
-    if not chart_lines_all:
-        return []
-    sanitized: list[str] = []
-    seen: set[str] = set()
-    for line in chart_lines_all:
-        if line is None:
-            continue
-        text = line if isinstance(line, str) else str(line)
-        if text in seen:
-            continue
-        seen.add(text)
-        sanitized.append(text)
-    if not sanitized:
-        return []
-    try:
-        return _build_ops_rows_from_chart_lines(sanitized)
-    except Exception:
-        return []
+                if entry in seen:
+                    continue
+                seen.add(entry)
+                merged.append(entry)
+    return merged
 
 
 def _build_ops_rows_from_chart_lines(chart_lines: list[str]) -> list[dict]:

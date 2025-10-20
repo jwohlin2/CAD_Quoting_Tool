@@ -13,6 +13,12 @@ from cad_quoter.coerce import to_float
 from cad_quoter.config import logger
 from cad_quoter.domain_models import QuoteState
 from cad_quoter.llm_suggest import build_suggest_payload as _build_suggest_payload
+from cad_quoter.pass_labels import (
+    HARDWARE_PASS_LABEL,
+    LEGACY_HARDWARE_PASS_LABEL,
+    _HARDWARE_LABEL_ALIASES,
+    _canonical_pass_label,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - for static type checkers only
     pass
@@ -88,23 +94,6 @@ def suggestions_to_overrides(*args, **kwargs):  # type: ignore[override]
     from appkit import llm_converters as _llm_converters
 
     return _llm_converters.suggestions_to_overrides(*args, **kwargs)
-
-
-HARDWARE_PASS_LABEL = "Hardware"
-LEGACY_HARDWARE_PASS_LABEL = "Hardware / BOM"
-_HARDWARE_LABEL_ALIASES = {
-    HARDWARE_PASS_LABEL.lower(),
-    LEGACY_HARDWARE_PASS_LABEL.lower(),
-    "hardware/bom",
-    "hardware bom",
-}
-
-
-def _canonical_pass_label(label: str | None) -> str:
-    name = str(label or "").strip()
-    if name.lower() in _HARDWARE_LABEL_ALIASES:
-        return HARDWARE_PASS_LABEL
-    return name
 
 
 def _canonicalize_pass_through_map(data: Any) -> dict[str, float]:

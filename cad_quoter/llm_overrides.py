@@ -12,17 +12,14 @@ from typing import Any, Mapping
 
 from cad_quoter.domain_models import coerce_float_or_none as _coerce_float_or_none
 from cad_quoter.llm import LLMClient, parse_llm_json
+from cad_quoter.pass_labels import (
+    HARDWARE_PASS_LABEL,
+    LEGACY_HARDWARE_PASS_LABEL,
+    _HARDWARE_LABEL_ALIASES,
+    _canonical_pass_label,
+)
 from cad_quoter.utils import jdump
 from cad_quoter.utils.render_utils import fmt_hours
-
-HARDWARE_PASS_LABEL = "Hardware"
-LEGACY_HARDWARE_PASS_LABEL = "Hardware / BOM"
-_HARDWARE_LABEL_ALIASES = {
-    HARDWARE_PASS_LABEL.lower(),
-    LEGACY_HARDWARE_PASS_LABEL.lower(),
-    "hardware/bom",
-    "hardware bom",
-}
 
 LLM_MULTIPLIER_MIN = 0.25
 LLM_MULTIPLIER_MAX = 4.0
@@ -41,15 +38,6 @@ def _as_float_or_none(value: Any) -> float | None:
     except Exception:
         return None
     return None
-
-
-def _canonical_pass_label(label: str | None) -> str:
-    name = str(label or "").strip()
-    if name.lower() in _HARDWARE_LABEL_ALIASES:
-        return HARDWARE_PASS_LABEL
-    return name
-
-
 def _plate_mass_properties(
     plate_L_in: Any,
     plate_W_in: Any,
