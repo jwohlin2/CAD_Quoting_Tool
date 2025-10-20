@@ -24,7 +24,7 @@ import sys
 import time
 import typing
 from functools import cmp_to_key, lru_cache
-from typing import Any, Mapping, MutableMapping, TYPE_CHECKING
+from typing import Any, Mapping, MutableMapping, TYPE_CHECKING, TypeAlias
 from collections import Counter, defaultdict
 from collections.abc import (
     Callable,
@@ -134,26 +134,43 @@ from cad_quoter.geometry.dxf_enrich import (
 
 from bucketizer import bucketize
 
-from appkit.geometry_shim import (
-    read_cad_any,
-    read_step_shape,
-    convert_dwg_to_dxf,
-    enrich_geo_occ,
-    enrich_geo_stl,
-    safe_bbox,
-    parse_hole_table_lines,
-    extract_text_lines_from_dxf,
-    text_harvest,
-    upsert_var_row,
-    require_ezdxf,
-    get_dwg_converter_path,
-    get_import_diagnostics_text,
-    extract_features_with_occ,
-    _HAS_ODAFC,
-    _HAS_PYMUPDF,
-    fitz,
-    odafc,
+import cad_quoter.geometry as _geometry
+
+def _missing_geom_fn(name: str):
+    def _fn(*_a, **_k):
+        raise RuntimeError(f"geometry helper '{name}' is unavailable in this build")
+
+    return _fn
+
+
+def _export_geom(name: str):
+    return getattr(_geometry, name, _missing_geom_fn(name))
+
+
+read_cad_any = _export_geom("read_cad_any")
+read_step_shape = _export_geom("read_step_shape")
+convert_dwg_to_dxf = _export_geom("convert_dwg_to_dxf")
+enrich_geo_occ = _export_geom("enrich_geo_occ")
+enrich_geo_stl = _export_geom("enrich_geo_stl")
+safe_bbox = _export_geom("safe_bbox")
+parse_hole_table_lines = _export_geom("parse_hole_table_lines")
+extract_text_lines_from_dxf = _export_geom("extract_text_lines_from_dxf")
+text_harvest = _export_geom("text_harvest")
+upsert_var_row = _export_geom("upsert_var_row")
+require_ezdxf = _export_geom("require_ezdxf")
+get_dwg_converter_path = _export_geom("get_dwg_converter_path")
+get_import_diagnostics_text = _export_geom("get_import_diagnostics_text")
+extract_features_with_occ = _export_geom("extract_features_with_occ")
+
+_HAS_ODAFC = bool(getattr(_geometry, "HAS_ODAFC", False))
+_HAS_PYMUPDF = bool(
+    getattr(_geometry, "HAS_PYMUPDF", getattr(_geometry, "_HAS_PYMUPDF", False))
 )
+fitz = getattr(_geometry, "fitz", None)
+try:
+    odafc = _ezdxf_vendor.require_odafc() if _HAS_ODAFC else None
+except Exception:
+    odafc = None  # type: ignore[assignment]
 
 from appkit.llm_adapter import (
     apply_llm_hours_to_variables,
@@ -213,13 +230,6 @@ from appkit.occ_compat import (
     TopoDS_Shape,
     TopTools_IndexedDataMapOfShapeListOfShape,
     BRepTools,
-)
-
-from appkit.time_overhead_compat import (
-    _TIME_OVERHEAD_SUPPORTS_INDEX_SEC,
-    OverheadLike,
-    _assign_overhead_index_attr,
-    _ensure_overhead_index_attr,
 )
 
 from cad_quoter.utils.scrap import (
@@ -2782,7 +2792,7 @@ from cad_quoter.domain_models import (
 from cad_quoter.domain_models import (
     normalize_material_key,
 )
-from cad_quoter.coerce import safe_float as _safe_float, to_float, to_int
+from cad_quoter.domain_models.values import safe_float as _safe_float, to_float, to_int
 from cad_quoter.utils import compact_dict, jdump, json_safe_copy, sdict
 from cad_quoter.utils.text import _match_items_contains
 from cad_quoter.llm_suggest import (
@@ -12518,6 +12528,9 @@ def _machine_params_from_params(params: Mapping[str, Any] | None) -> _TimeMachin
         hp_to_mrr_factor=float(mrr_factor) if mrr_factor and mrr_factor > 0 else None,
     )
 
+OverheadLike: TypeAlias = _TimeOverheadParams | SimpleNamespace | Mapping[str, Any]
+
+
 def _drill_overhead_from_params(params: Mapping[str, Any] | None) -> OverheadLike:
     defaults = _DRILLING_COEFFS.get(
         "overhead_defaults",
@@ -12559,7 +12572,8 @@ def _drill_overhead_from_params(params: Mapping[str, Any] | None) -> OverheadLik
     index_sec = _coerce_float_or_none(index_source)
     if index_sec is None:
         index_sec = default_index_sec
-    overhead_kwargs = {
+
+    payload = {
         "toolchange_min": float(toolchange)
         if toolchange is not None and toolchange >= 0
         else float(defaults.get("toolchange_min", 0.5)),
@@ -12572,59 +12586,74 @@ def _drill_overhead_from_params(params: Mapping[str, Any] | None) -> OverheadLik
         "dwell_min": float(dwell)
         if dwell is not None and dwell >= 0
         else defaults.get("dwell_min"),
+        "index_sec_per_hole": float(index_sec) if index_sec is not None and index_sec >= 0 else None,
     }
-    index_kwarg = float(index_sec) if index_sec is not None and index_sec >= 0 else None
+
     try:
-        overhead = _TimeOverheadParams(**overhead_kwargs)
+        return _TimeOverheadParams(**payload)
     except TypeError:
         overhead = _TimeOverheadParams(
-            toolchange_min=overhead_kwargs.get("toolchange_min"),
-            approach_retract_in=overhead_kwargs.get("approach_retract_in"),
-            peck_penalty_min_per_in_depth=overhead_kwargs.get(
-                "peck_penalty_min_per_in_depth"
-            ),
-            dwell_min=overhead_kwargs.get("dwell_min"),
+            toolchange_min=payload.get("toolchange_min"),
+            approach_retract_in=payload.get("approach_retract_in"),
+            peck_penalty_min_per_in_depth=payload.get("peck_penalty_min_per_in_depth"),
+            dwell_min=payload.get("dwell_min"),
+            peck_min=defaults.get("peck_min"),
         )
-    assigned = _assign_overhead_index_attr(overhead, index_kwarg)
-    return _ensure_overhead_index_attr(overhead, index_kwarg, assigned=assigned)
+        index_val = payload.get("index_sec_per_hole")
+        if index_val is not None:
+            try:
+                object.__setattr__(overhead, "index_sec_per_hole", index_val)
+            except Exception:
+                setattr(overhead, "index_sec_per_hole", index_val)
+        return overhead
 
 def _make_time_overhead_params(
     params: Mapping[str, Any] | None,
-) -> tuple[OverheadLike, bool]:
+) -> tuple[_TimeOverheadParams, bool]:
     """Instantiate ``OverheadParams`` handling optional index compatibility."""
 
     kwargs: dict[str, Any] = {}
     if isinstance(params, _MappingABC):
         kwargs = {str(k): v for k, v in params.items()}
 
+    valid_keys = {
+        "toolchange_min",
+        "approach_retract_in",
+        "peck_penalty_min_per_in_depth",
+        "dwell_min",
+        "peck_min",
+        "index_sec_per_hole",
+    }
+    filtered: dict[str, Any] = {k: kwargs[k] for k in valid_keys if k in kwargs}
+
     index_kwarg: float | None = None
-    if "index_sec_per_hole" in kwargs:
-        try:
-            index_val = kwargs["index_sec_per_hole"]
-        except Exception:
-            index_val = None
-        else:
-            coerced = _coerce_float_or_none(index_val)
-            index_kwarg = float(coerced) if coerced is not None and coerced >= 0 else None
-        kwargs.pop("index_sec_per_hole", None)
+    if "index_sec_per_hole" in filtered:
+        index_val = filtered.pop("index_sec_per_hole")
+        coerced = _coerce_float_or_none(index_val)
+        if coerced is not None and coerced >= 0:
+            index_kwarg = float(coerced)
 
     try:
-        overhead = _TimeOverheadParams(**kwargs)
+        overhead = _TimeOverheadParams(**filtered)
     except TypeError:
         overhead = _TimeOverheadParams(
-            toolchange_min=kwargs.get("toolchange_min"),
-            approach_retract_in=kwargs.get("approach_retract_in"),
-            peck_penalty_min_per_in_depth=kwargs.get(
-                "peck_penalty_min_per_in_depth"
-            ),
-            dwell_min=kwargs.get("dwell_min"),
-            peck_min=kwargs.get("peck_min"),
+            toolchange_min=filtered.get("toolchange_min"),
+            approach_retract_in=filtered.get("approach_retract_in"),
+            peck_penalty_min_per_in_depth=filtered.get("peck_penalty_min_per_in_depth"),
+            dwell_min=filtered.get("dwell_min"),
+            peck_min=filtered.get("peck_min"),
         )
 
-    assigned = _assign_overhead_index_attr(overhead, index_kwarg)
-    dropped_index = index_kwarg is not None and not assigned
+    if index_kwarg is not None:
+        try:
+            overhead = replace(overhead, index_sec_per_hole=index_kwarg)
+        except Exception:
+            try:
+                object.__setattr__(overhead, "index_sec_per_hole", index_kwarg)
+            except Exception:
+                setattr(overhead, "index_sec_per_hole", index_kwarg)
 
-    return _ensure_overhead_index_attr(overhead, index_kwarg, assigned=assigned), dropped_index
+    return overhead, False
 
 def _coerce_overhead_dataclass(overhead: OverheadLike) -> _TimeOverheadParams:
     """Return a dataclass instance compatible with :func:`replace`."""
@@ -12633,6 +12662,10 @@ def _coerce_overhead_dataclass(overhead: OverheadLike) -> _TimeOverheadParams:
         return overhead
 
     payload: dict[str, Any] = {}
+    source_mapping: Mapping[str, Any] | None = None
+    if isinstance(overhead, _MappingABC):
+        source_mapping = overhead
+
     for name in (
         "toolchange_min",
         "approach_retract_in",
@@ -12640,12 +12673,16 @@ def _coerce_overhead_dataclass(overhead: OverheadLike) -> _TimeOverheadParams:
         "dwell_min",
         "peck_min",
     ):
-        if hasattr(overhead, name):
+        if source_mapping and name in source_mapping:
+            payload[name] = source_mapping.get(name)
+        elif hasattr(overhead, name):
             payload[name] = getattr(overhead, name)
 
     index_value = None
-    if _TIME_OVERHEAD_SUPPORTS_INDEX_SEC:
-        index_value = getattr(overhead, "index_sec_per_hole", None)
+    if source_mapping and "index_sec_per_hole" in source_mapping:
+        index_value = source_mapping.get("index_sec_per_hole")
+    elif hasattr(overhead, "index_sec_per_hole"):
+        index_value = getattr(overhead, "index_sec_per_hole")
 
     try:
         coerced = _TimeOverheadParams(**payload)
@@ -12657,12 +12694,17 @@ def _coerce_overhead_dataclass(overhead: OverheadLike) -> _TimeOverheadParams:
             dwell_min=payload.get("dwell_min"),
             peck_min=payload.get("peck_min"),
         )
-    assigned = _assign_overhead_index_attr(coerced, index_value)
-    if index_value is not None and not assigned:
+
+    coerced_index = _coerce_float_or_none(index_value)
+    if coerced_index is not None and coerced_index >= 0:
         try:
-            object.__setattr__(coerced, "index_sec_per_hole", index_value)
+            coerced = replace(coerced, index_sec_per_hole=float(coerced_index))
         except Exception:
-            pass
+            try:
+                object.__setattr__(coerced, "index_sec_per_hole", float(coerced_index))
+            except Exception:
+                setattr(coerced, "index_sec_per_hole", float(coerced_index))
+
     return coerced
 
 
@@ -14458,26 +14500,13 @@ def _legacy_estimate_drilling_hours(
                     "dwell_min": dwell_val,
                     "peck_min": peck_min,
                 }
-                legacy_index_kwarg = None
-                if _TIME_OVERHEAD_SUPPORTS_INDEX_SEC:
-                    legacy_index_kwarg = getattr(
-                        overhead_for_calc,
-                        "index_sec_per_hole",
-                        None,
-                    )
-                    legacy_kwargs["index_sec_per_hole"] = legacy_index_kwarg
-                legacy_overhead_like, legacy_dropped_index = _make_time_overhead_params(
-                    legacy_kwargs
+                legacy_index_kwarg = to_float(
+                    getattr(overhead_for_calc, "index_sec_per_hole", None)
                 )
-                legacy_overhead = _coerce_overhead_dataclass(legacy_overhead_like)
-                if legacy_index_kwarg is not None and (
-                    legacy_dropped_index
-                    or not hasattr(legacy_overhead, "index_sec_per_hole")
-                ):
-                    try:
-                        setattr(legacy_overhead, "index_sec_per_hole", legacy_index_kwarg)
-                    except Exception:
-                        pass
+                if legacy_index_kwarg is not None and legacy_index_kwarg >= 0:
+                    legacy_kwargs["index_sec_per_hole"] = legacy_index_kwarg
+                legacy_overhead, _ = _make_time_overhead_params(legacy_kwargs)
+                legacy_overhead = _coerce_overhead_dataclass(legacy_overhead)
                 overhead_for_calc = legacy_overhead
                 tool_params = _TimeToolParams(teeth_z=1)
                 if debug_lines is not None:
@@ -14487,11 +14516,10 @@ def _legacy_estimate_drilling_hours(
                 )
                 if effective_index_sec is None or not math.isfinite(effective_index_sec):
                     effective_index_sec = _default_drill_index_seconds(op_name)
-                if _TIME_OVERHEAD_SUPPORTS_INDEX_SEC:
-                    legacy_overhead = replace(
-                        legacy_overhead,
-                        index_sec_per_hole=effective_index_sec,
-                    )
+                legacy_overhead = replace(
+                    legacy_overhead,
+                    index_sec_per_hole=effective_index_sec,
+                )
                 overhead_for_calc = legacy_overhead
                 minutes = _estimate_time_min(
                     geom=geom,

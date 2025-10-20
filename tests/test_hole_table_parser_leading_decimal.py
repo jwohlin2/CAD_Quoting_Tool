@@ -2,10 +2,7 @@ from __future__ import annotations
 
 import math
 
-try:
-    from cad_quoter.geometry.hole_table_parser import parse_hole_table_lines
-except ModuleNotFoundError:  # Geometry helpers may be stubbed in tests
-    from hole_table_parser import parse_hole_table_lines  # type: ignore
+from cad_quoter.geometry.hole_table_parser import parse_hole_table_lines
 
 
 def _find_feature(row, feature_type):

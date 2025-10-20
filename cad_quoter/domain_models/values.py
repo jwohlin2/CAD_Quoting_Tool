@@ -1,6 +1,7 @@
 """Domain-level value coercion helpers."""
 from __future__ import annotations
 
+import math
 import re
 from typing import Any
 
@@ -114,4 +115,53 @@ def coerce_float_or_none(value: Any) -> float | None:
     return None
 
 
-__all__ = ["coerce_float_or_none"]
+def to_float(value: Any) -> float | None:
+    """Best-effort conversion of ``value`` to a float."""
+
+    if value is None:
+        return None
+
+    if isinstance(value, str):
+        candidate = value.strip()
+        if not candidate:
+            return None
+        coerced = coerce_float_or_none(candidate)
+        return coerced
+
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def to_int(value: Any) -> int | None:
+    """Best-effort conversion of ``value`` to an integer via rounding."""
+
+    numeric = coerce_float_or_none(value)
+    if numeric is None:
+        return None
+
+    try:
+        return int(round(numeric))
+    except Exception:
+        return None
+
+
+def safe_float(value: Any, default: float = 0.0) -> float:
+    """Return ``value`` coerced to ``float`` with NaN/Inf protection."""
+
+    try:
+        coerced = float(value or 0.0)
+    except Exception:
+        return default
+    if not math.isfinite(coerced):
+        return default
+    return coerced
+
+
+__all__ = [
+    "coerce_float_or_none",
+    "safe_float",
+    "to_float",
+    "to_int",
+]

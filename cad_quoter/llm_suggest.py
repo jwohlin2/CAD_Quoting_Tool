@@ -5,8 +5,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TypeVar, cast
 
-from cad_quoter.coerce import safe_float as _safe_float, to_float, to_int
 from cad_quoter.domain_models import DEFAULT_MATERIAL_DISPLAY
+from cad_quoter.domain_models.values import safe_float as _safe_float, to_float, to_int
 from cad_quoter.llm_overrides import coerce_bounds
 from cad_quoter.utils import _first_non_none, compact_dict, jdump
 
