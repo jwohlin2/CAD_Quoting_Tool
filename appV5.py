@@ -1462,6 +1462,16 @@ def _emit_spot_and_jig_cards(
         ]
 
 
+def _hole_table_section_present(lines: Sequence[str], header: str) -> bool:
+    if not header:
+        return False
+    header_norm = header.strip().upper()
+    for existing in lines:
+        if isinstance(existing, str) and existing.strip().upper() == header_norm:
+            return True
+    return False
+
+
 def _emit_hole_table_ops_cards(
     lines: list[str],
     *,
@@ -1469,24 +1479,27 @@ def _emit_hole_table_ops_cards(
     material_group: str | None,
     speeds_csv: dict | None,
 ) -> None:
-    _emit_tapping_card(
-        lines,
-        geo=geo,
-        material_group=material_group,
-        speeds_csv=speeds_csv,
-    )
-    _emit_counterbore_card(
-        lines,
-        geo=geo,
-        material_group=material_group,
-        speeds_csv=speeds_csv,
-    )
-    _emit_spot_and_jig_cards(
-        lines,
-        geo=geo,
-        material_group=material_group,
-        speeds_csv=speeds_csv,
-    )
+    if not _hole_table_section_present(lines, "MATERIAL REMOVAL – TAPPING"):
+        _emit_tapping_card(
+            lines,
+            geo=geo,
+            material_group=material_group,
+            speeds_csv=speeds_csv,
+        )
+    if not _hole_table_section_present(lines, "MATERIAL REMOVAL – COUNTERBORE"):
+        _emit_counterbore_card(
+            lines,
+            geo=geo,
+            material_group=material_group,
+            speeds_csv=speeds_csv,
+        )
+    if not _hole_table_section_present(lines, "MATERIAL REMOVAL – SPOT (CENTER DRILL)"):
+        _emit_spot_and_jig_cards(
+            lines,
+            geo=geo,
+            material_group=material_group,
+            speeds_csv=speeds_csv,
+        )
 
 
 def _estimate_drilling_minutes_from_meta(
@@ -11556,19 +11569,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     # Render MATERIAL REMOVAL card + TIME PER HOLE lines (replace legacy Time block)
     append_lines(removal_card_lines)
-    # PROBE: show how many HOLE-TABLE rows we have (temporary)
     geo_map = ((breakdown or {}).get("geo") or (result or {}).get("geo") or {})
     if isinstance(geo_map, _MappingABC) and not isinstance(geo_map, dict):
         geo_map = dict(geo_map)
-    ops_rows_candidate = (((geo_map or {}).get("ops_summary") or {}).get("rows") or [])
-    if isinstance(ops_rows_candidate, list):
-        ops_rows = ops_rows_candidate
-    else:
-        try:
-            ops_rows = list(ops_rows_candidate or [])
-        except Exception:
-            ops_rows = []
-    append_line(f"[DEBUG] ops_rows={len(ops_rows)}")
 
     # Append HOLE-TABLE derived cards
     try:
@@ -11590,6 +11593,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         append_line("")
     except Exception:
         pass
+
+    # PROBE: show how many HOLE-TABLE rows we have (temporary)
+    ops_rows_candidate = (((geo_map or {}).get("ops_summary") or {}).get("rows") or [])
+    if isinstance(ops_rows_candidate, list):
+        ops_rows = ops_rows_candidate
+    else:
+        try:
+            ops_rows = list(ops_rows_candidate or [])
+        except Exception:
+            ops_rows = []
+    append_line(f"[DEBUG] ops_rows={len(ops_rows)}")
     tapping_minutes_total = 0.0
     cbore_minutes_total = 0.0
     spot_minutes_total = 0.0
