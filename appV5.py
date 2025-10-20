@@ -11495,43 +11495,39 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     # Render MATERIAL REMOVAL card + TIME PER HOLE lines (replace legacy Time block)
     append_lines(removal_card_lines)
-    # AFTER drilling lines are appended:
+    # PROBE: show how many HOLE-TABLE rows we have (temporary)
     geo_map = ((breakdown or {}).get("geo") or (result or {}).get("geo") or {})
     if isinstance(geo_map, _MappingABC) and not isinstance(geo_map, dict):
         geo_map = dict(geo_map)
-    material_group = (
-        (result or {}).get("material_group")
-        or (breakdown or {}).get("material_group")
-    )
-    pre_emit_len = len(lines)
-    _emit_hole_table_ops_cards(
-        lines,
-        geo=geo_map,
-        material_group=material_group,
-        speeds_csv=None,
-    )
-    for idx in range(pre_emit_len, len(lines)):
-        text = lines[idx]
-        previous = lines[idx - 1] if idx > 0 else None
-        doc_builder.observe_line(idx, text, previous)
-    append_line("")
-    # ADD: Emit HOLE-TABLE derived cards (Tapping / Counterbore / Spot / Jig)
+    ops_rows_candidate = (((geo_map or {}).get("ops_summary") or {}).get("rows") or [])
+    if isinstance(ops_rows_candidate, list):
+        ops_rows = ops_rows_candidate
+    else:
+        try:
+            ops_rows = list(ops_rows_candidate or [])
+        except Exception:
+            ops_rows = []
+    append_line(f"[DEBUG] ops_rows={len(ops_rows)}")
+
+    # Append HOLE-TABLE derived cards
     try:
         material_group = (
-            (result.get("material_group") if isinstance(result, _MappingABC) else None)
-            or (breakdown.get("material_group") if isinstance(breakdown, _MappingABC) else None)
+            (result or {}).get("material_group")
+            or (breakdown or {}).get("material_group")
         )
-        # If your speeds/feeds CSV is already loaded into a mapping, pass it here instead of None
-        ops_card_lines: list[str] = []
+        pre_emit_len = len(lines)
         _emit_hole_table_ops_cards(
-            ops_card_lines,
-            geo=dict(geo_map) if isinstance(geo_map, _MappingABC) else {},
+            lines,
+            geo=geo_map,
             material_group=material_group,
             speeds_csv=None,
         )
-        append_lines(ops_card_lines)
+        for idx in range(pre_emit_len, len(lines)):
+            text = lines[idx]
+            previous = lines[idx - 1] if idx > 0 else None
+            doc_builder.observe_line(idx, text, previous)
+        append_line("")
     except Exception:
-        # keep the quote render resilient even if ops rows are missing
         pass
     tapping_minutes_total = 0.0
     cbore_minutes_total = 0.0
@@ -21410,6 +21406,108 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
             chart_ops = hole_rows_to_ops(hole_rows)
             chart_source = "dxf_text_regex"
             chart_reconcile = summarize_hole_chart_agreement(entity_holes_mm, chart_ops)
+
+            # Build normalized HOLE-TABLE rows for UI cards
+            rows_norm: list[dict[str, Any]] = []
+            for row in (hole_rows or []):
+                if row is None:
+                    continue
+                try:
+                    qty = int(getattr(row, "qty", 0) or 0)
+                except Exception:
+                    qty = 0
+                ref = (
+                    getattr(row, "ref", None)
+                    or getattr(row, "pilot", None)
+                    or getattr(row, "drill_ref", None)
+                    or ""
+                )
+                desc = (
+                    getattr(row, "description", None)
+                    or getattr(row, "desc", None)
+                    or ""
+                )
+                if not desc:
+                    features = list(getattr(row, "features", []) or [])
+                    parts: list[str] = []
+                    for feature in features:
+                        if not isinstance(feature, dict):
+                            continue
+                        ftype = str(feature.get("type", "")).lower()
+                        side = str(feature.get("side", "")).upper()
+                        if ftype == "tap":
+                            thread = feature.get("thread") or ""
+                            depth = feature.get("depth_in")
+                            piece = f"{thread} TAP"
+                            if isinstance(depth, (int, float)):
+                                piece += f" × {float(depth):.2f}"
+                            if side:
+                                piece += f" FROM {side}"
+                            parts.append(piece)
+                        elif ftype == "cbore":
+                            dia = feature.get("dia_in")
+                            depth = feature.get("depth_in")
+                            piece = f"{dia:.4f} C’BORE" if isinstance(dia, (int, float)) else "C’BORE"
+                            if isinstance(depth, (int, float)):
+                                piece += f" × {float(depth):.2f}"
+                            if side:
+                                piece += f" FROM {side}"
+                            parts.append(piece)
+                        elif ftype in {"csk", "countersink"}:
+                            dia = feature.get("dia_in")
+                            depth = feature.get("depth_in")
+                            piece = f"{dia:.4f} C’SINK" if isinstance(dia, (int, float)) else "C’SINK"
+                            if isinstance(depth, (int, float)):
+                                piece += f" × {float(depth):.2f}"
+                            if side:
+                                piece += f" FROM {side}"
+                            parts.append(piece)
+                        elif ftype == "drill":
+                            ref_local = feature.get("ref") or ref or ""
+                            thru = " THRU" if feature.get("thru", True) else ""
+                            parts.append(f"{ref_local}{thru}".strip())
+                        elif ftype == "spot":
+                            depth = feature.get("depth_in")
+                            piece = "C’DRILL"
+                            if isinstance(depth, (int, float)):
+                                piece += f" × {float(depth):.2f}"
+                            parts.append(piece)
+                        elif ftype == "jig":
+                            parts.append("JIG GRIND")
+                    desc = "; ".join([p for p in parts if p])
+
+                rows_norm.append(
+                    {
+                        "hole": getattr(row, "hole_id", "")
+                        or getattr(row, "letter", "")
+                        or "",
+                        "ref": str(ref or ""),
+                        "qty": qty,
+                        "desc": str(desc or ""),
+                    }
+                )
+
+            if rows_norm:
+                existing_summary = geo.get("ops_summary")
+                if isinstance(existing_summary, _MappingABC) and not isinstance(existing_summary, dict):
+                    ops_summary_map: dict[str, Any] = dict(existing_summary)
+                elif isinstance(existing_summary, dict):
+                    ops_summary_map = dict(existing_summary)
+                else:
+                    ops_summary_map = {}
+                ops_summary_map["rows"] = rows_norm
+                aggregated = aggregate_ops(rows_norm) if rows_norm else {}
+                if aggregated:
+                    totals = aggregated.get("totals")
+                    if totals:
+                        ops_summary_map["totals"] = dict(totals)
+                    detail_rows = aggregated.get("rows_detail")
+                    if detail_rows:
+                        ops_summary_map["rows_detail"] = detail_rows
+                    for key in ("actions_total", "back_ops_total", "flip_required"):
+                        if key in aggregated:
+                            ops_summary_map[key] = aggregated[key]
+                geo["ops_summary"] = ops_summary_map
     if chart_summary:
         geo.setdefault("chart_summary", chart_summary)
         if chart_summary.get("tap_qty"):
