@@ -6,13 +6,13 @@ from collections.abc import Mapping as _MappingABC
 from typing import Any
 
 from appkit.planner_adapter import _coerce_bool
-from cad_quoter.coerce import to_float
 from cad_quoter.domain import (
     HARDWARE_PASS_LABEL,
     LEGACY_HARDWARE_PASS_LABEL,
     canonicalize_pass_through_map,
     coerce_bounds,
 )
+from cad_quoter.domain_models.values import to_float
 from appkit.guardrails import (
     enforce_finish_pass_guardrail,
     enforce_process_floor_guardrails,

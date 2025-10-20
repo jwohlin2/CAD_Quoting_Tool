@@ -7,14 +7,26 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from appkit.geometry_shim import (
-    enrich_geo_occ,
-    enrich_geo_stl,
-    extract_features_with_occ,
-    read_cad_any,
-    read_step_shape,
-    safe_bbox,
-)
+import cad_quoter.geometry as _geometry
+
+
+def _missing_geom_fn(name: str):
+    def _fn(*_a, **_k):
+        raise RuntimeError(f"geometry helper '{name}' is unavailable in this build")
+
+    return _fn
+
+
+def _export_geom(name: str):
+    return getattr(_geometry, name, _missing_geom_fn(name))
+
+
+enrich_geo_occ = _export_geom("enrich_geo_occ")
+enrich_geo_stl = _export_geom("enrich_geo_stl")
+extract_features_with_occ = _export_geom("extract_features_with_occ")
+read_cad_any = _export_geom("read_cad_any")
+read_step_shape = _export_geom("read_step_shape")
+safe_bbox = _export_geom("safe_bbox")
 from cad_quoter.app import runtime as _runtime
 from cad_quoter.resources import default_app_settings_json
 from cad_quoter.domain_models import DEFAULT_MATERIAL_DISPLAY

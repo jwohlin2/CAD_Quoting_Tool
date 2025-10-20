@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from cad_quoter.coerce import coerce_float_or_none as _coerce_float_or_none
 from cad_quoter.domain_models import DEFAULT_MATERIAL_DISPLAY
+from cad_quoter.domain_models.values import coerce_float_or_none as _coerce_float_or_none
 from cad_quoter.geometry import upsert_var_row
 from cad_quoter.utils import _dict
 from cad_quoter.utils.text import _to_noncapturing, to_noncapturing
