@@ -20043,6 +20043,9 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     CENTER_PROX_MM = float(os.getenv("GEO_CENTER_PROX_MM", "0.22"))
     MIN_DD_MM = float(os.getenv("GEO_MIN_RING_DELTA_MM", "0.50"))
 
+    # Back-compat alias (fixes NameError if any old refs remain)
+    CENTER_MM_TOL = CENTER_BIN_MM
+
     # First pass: bin by center grids (mm)
     def _key_mm(x: float, y: float, tol: float = CENTER_BIN_MM) -> tuple[int, int]:
         return (round(x / tol), round(y / tol))
@@ -20356,7 +20359,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
         result["hole_count"] = geom_hole_count_dedup
         result["hole_count_geom"] = geom_hole_count_dedup
         geo.setdefault("provenance", {})["holes"] = (
-            f"GEOM (concentric-dedup, center={CENTER_MM_TOL:.3f} mm)"
+            f"GEOM (concentric-dedup, center={CENTER_BIN_MM:.3f} mm)"
         )
     else:
         result["hole_count"] = geom_hole_count_raw
