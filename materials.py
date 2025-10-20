@@ -11,7 +11,7 @@ import sys
 from collections.abc import Mapping as _MappingABC, Sequence
 from typing import Any, Literal, Mapping, overload
 
-from appkit.scrap_helpers import normalize_scrap_pct
+from cad_quoter.utils.scrap import normalize_scrap_pct
 from cad_quoter.domain_models import (
     DEFAULT_MATERIAL_KEY,
     MATERIAL_DENSITY_G_CC_BY_KEY,

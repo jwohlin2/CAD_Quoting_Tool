@@ -201,11 +201,11 @@ from appkit.time_overhead_compat import (
     _ensure_overhead_index_attr,
 )
 
-from appkit.scrap_helpers import (
-    normalize_scrap_pct,
+from cad_quoter.utils.scrap import (
+    HOLE_SCRAP_CAP,
     SCRAP_DEFAULT_GUESS,
     _holes_scrap_fraction,
-    HOLE_SCRAP_CAP,
+    normalize_scrap_pct,
 )
 from appkit.planner_helpers import _process_plan_job
 from appkit.env_utils import FORCE_PLANNER
