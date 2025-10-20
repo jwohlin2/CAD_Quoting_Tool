@@ -10,13 +10,7 @@
                         {
                             "diam_in":  0.159,
                             "depth_in":  2.04,
-                            "qty":  3,
-                            "mode":  "deep"
-                        },
-                        {
-                            "diam_in":  0.187,
-                            "depth_in":  2.04,
-                            "qty":  3,
+                            "qty":  2,
                             "mode":  "deep"
                         },
                         {
@@ -77,12 +71,6 @@
                             "diam_in":  0.531,
                             "depth_in":  2.106,
                             "qty":  22,
-                            "mode":  "deep"
-                        },
-                        {
-                            "diam_in":  0.565,
-                            "depth_in":  2.113,
-                            "qty":  2,
                             "mode":  "deep"
                         },
                         {
