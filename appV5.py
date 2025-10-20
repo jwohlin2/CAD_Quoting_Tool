@@ -807,6 +807,73 @@ def _compute_drilling_removal_section(
             except Exception:
                 ops_rows = []
         lines.append(f"[DEBUG] ops_rows={len(ops_rows)}")
+        if not ops_rows:
+            chart_lines_all = _collect_chart_lines_context(result, breakdown, geo_map)
+            built_rows = _build_ops_rows_from_lines_fallback(chart_lines_all)
+            lines.append(
+                f"[DEBUG] chart_lines_found={len(chart_lines_all)} built_rows={len(built_rows)}"
+            )
+            if built_rows:
+                if not isinstance(geo_map, dict):
+                    if isinstance(geo_map, _MappingABC):
+                        try:
+                            geo_map = dict(geo_map)
+                        except Exception:
+                            geo_map = {}
+                    else:
+                        geo_map = {}
+                ops_summary_val = geo_map.get("ops_summary") if isinstance(geo_map, dict) else None
+                if not isinstance(ops_summary_val, dict):
+                    if isinstance(ops_summary_val, _MappingABC):
+                        ops_summary = dict(ops_summary_val)
+                    else:
+                        ops_summary = {}
+                else:
+                    ops_summary = ops_summary_val
+                ops_summary["rows"] = list(built_rows)
+                if isinstance(geo_map, dict):
+                    geo_map["ops_summary"] = ops_summary
+                if isinstance(result, _MappingABC):
+                    geo_in_result = result.get("geo")
+                    if isinstance(geo_in_result, dict):
+                        existing_ops = geo_in_result.get("ops_summary")
+                        if isinstance(existing_ops, dict):
+                            existing_ops.update(ops_summary)
+                        else:
+                            geo_in_result["ops_summary"] = dict(ops_summary)
+                    elif isinstance(geo_in_result, _MappingABC):
+                        try:
+                            result_geo_mut = dict(geo_in_result)
+                        except Exception:
+                            result_geo_mut = {}
+                        existing_ops = result_geo_mut.get("ops_summary")
+                        if isinstance(existing_ops, dict):
+                            existing_ops.update(ops_summary)
+                        else:
+                            result_geo_mut["ops_summary"] = dict(ops_summary)
+                        if isinstance(result, dict):
+                            result["geo"] = result_geo_mut
+                if isinstance(breakdown, _MappingABC):
+                    geo_in_breakdown = breakdown.get("geo")
+                    if isinstance(geo_in_breakdown, dict):
+                        existing_ops = geo_in_breakdown.get("ops_summary")
+                        if isinstance(existing_ops, dict):
+                            existing_ops.update(ops_summary)
+                        else:
+                            geo_in_breakdown["ops_summary"] = dict(ops_summary)
+                    elif isinstance(geo_in_breakdown, _MappingABC):
+                        try:
+                            breakdown_geo_mut = dict(geo_in_breakdown)
+                        except Exception:
+                            breakdown_geo_mut = {}
+                        existing_ops = breakdown_geo_mut.get("ops_summary")
+                        if isinstance(existing_ops, dict):
+                            existing_ops.update(ops_summary)
+                        else:
+                            breakdown_geo_mut["ops_summary"] = dict(ops_summary)
+                        if isinstance(breakdown, dict):
+                            breakdown["geo"] = breakdown_geo_mut
+                ops_rows = list(built_rows)
         lines.append(
             f"[DEBUG] has_tap_row={any('TAP' in (str(r.get('desc', '')).upper()) for r in ops_rows if isinstance(r, _MappingABC))}"
         )
@@ -21137,6 +21204,66 @@ def _extract_text_lines_from_ezdxf_doc(doc: Any) -> list[str]:
         start = upper.index("HOLE TABLE")
         joined = joined[start:]
     return [ln for ln in joined.splitlines() if ln.strip()]
+
+
+def _collect_chart_lines_context(
+    result: Any, breakdown: Any, geo_map: Any
+) -> list[str]:
+    contexts: list[_MappingABC[str, Any]] = []
+    seen_ctx: set[int] = set()
+
+    def _register(candidate: Any) -> None:
+        if isinstance(candidate, _MappingABC):
+            ident = id(candidate)
+            if ident not in seen_ctx:
+                seen_ctx.add(ident)
+                contexts.append(candidate)
+                nested = candidate.get("geo_read_more")
+                if isinstance(nested, _MappingABC):
+                    _register(nested)
+
+    _register(geo_map)
+    for container in (result, breakdown):
+        if isinstance(container, _MappingABC):
+            _register(container)
+            _register(container.get("geo"))
+            _register(container.get("geom"))
+
+    aggregated: list[str] = []
+    seen_lines: set[str] = set()
+    for ctx in contexts:
+        raw_lines = ctx.get("chart_lines") if isinstance(ctx, _MappingABC) else None
+        if isinstance(raw_lines, (list, tuple)):
+            for entry in raw_lines:
+                if not isinstance(entry, str):
+                    continue
+                if entry not in seen_lines:
+                    seen_lines.add(entry)
+                    aggregated.append(entry)
+    return aggregated
+
+
+def _build_ops_rows_from_lines_fallback(
+    chart_lines_all: Iterable[Any] | None,
+) -> list[dict[str, Any]]:
+    if not chart_lines_all:
+        return []
+    sanitized: list[str] = []
+    seen: set[str] = set()
+    for line in chart_lines_all:
+        if line is None:
+            continue
+        text = line if isinstance(line, str) else str(line)
+        if text in seen:
+            continue
+        seen.add(text)
+        sanitized.append(text)
+    if not sanitized:
+        return []
+    try:
+        return _build_ops_rows_from_chart_lines(sanitized)
+    except Exception:
+        return []
 
 
 def _build_ops_rows_from_chart_lines(chart_lines: list[str]) -> list[dict]:
