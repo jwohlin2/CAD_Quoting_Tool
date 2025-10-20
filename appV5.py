@@ -13,7 +13,6 @@ Single-file CAD Quoter (v8)
 """
 from __future__ import annotations
 
-import argparse
 import copy
 import csv
 import importlib
@@ -195,8 +194,6 @@ from appkit.utils.text_rules import (
     canonicalize_amortized_label as _canonical_amortized_label,
 )
 from appkit.debug.debug_tables import (
-    _jsonify_debug_value as _debug_jsonify_value,
-    _jsonify_debug_summary as _debug_jsonify_summary,
     _accumulate_drill_debug,
     append_removal_debug_if_enabled,
 )
@@ -22004,302 +22001,6 @@ def summarize_hole_chart_agreement(entity_holes_mm: Iterable[Any] | None, chart_
 # ----------------- GUI -----------------
 # ---- service containers ----------------------------------------------------
 
-@dataclass(slots=True)
-class UIConfiguration:
-    """Aggregate user-interface defaults for the desktop application."""
-
-    title: str = "Compos-AI"
-    window_geometry: str = "1260x900"
-    llm_enabled_default: bool = True
-    apply_llm_adjustments_default: bool = True
-    settings_path: Path = field(default_factory=default_app_settings_json)
-    default_llm_model_path: str | None = None
-    default_params: dict[str, Any] = field(default_factory=lambda: copy.deepcopy(PARAMS_DEFAULT))
-    default_material_display: str = DEFAULT_MATERIAL_DISPLAY
-
-    def create_params(self) -> dict[str, Any]:
-        return copy.deepcopy(self.default_params)
-
-class GeometryLoader:
-    """Facade around geometry helper functions used by the UI layer."""
-
-    def extract_pdf_all(self, path: str | Path, dpi: int = 300) -> dict:
-        return extract_pdf_all(Path(path), dpi=dpi)
-
-    def extract_2d_features_from_pdf_vector(self, path: str | Path) -> dict:
-        return extract_2d_features_from_pdf_vector(str(path))
-
-    def extract_2d_features_from_dxf_or_dwg(self, path: str | Path) -> dict:
-        return extract_2d_features_from_dxf_or_dwg(str(path))
-
-    def extract_features_with_occ(self, path: str | Path):
-        return extract_features_with_occ(str(path))
-
-    def enrich_geo_stl(self, path: str | Path):
-        return enrich_geo_stl(str(path))
-
-    def read_step_shape(self, path: str | Path) -> Any:
-        return read_step_shape(str(path))
-
-    def read_cad_any(self, path: str | Path) -> Any:
-        return read_cad_any(str(path))
-
-    def safe_bbox(self, shape: Any):
-        return safe_bbox(shape)
-
-    def enrich_geo_occ(self, shape: Any):
-        return enrich_geo_occ(shape)
-
-@dataclass(slots=True)
-class PricingRegistry:
-    """Provide mutable copies of editable pricing defaults to the UI."""
-
-    default_params: dict[str, Any] = field(default_factory=lambda: copy.deepcopy(PARAMS_DEFAULT))
-    default_rates: dict[str, float] = field(default_factory=lambda: copy.deepcopy(RATES_DEFAULT))
-
-    def create_params(self) -> dict[str, Any]:
-        return copy.deepcopy(self.default_params)
-
-    def create_rates(self) -> dict[str, float]:
-        return copy.deepcopy(self.default_rates)
-
-@dataclass(slots=True)
-class LLMServices:
-    """Helper hooks for locating default models and loading vision LLMs."""
-
-    default_model_locator: Callable[[], str] = find_default_qwen_model
-    vision_loader: Callable[..., Any] = load_qwen_vl
-
-    def default_model_path(self) -> str:
-        return self.default_model_locator() or ""
-
-    def load_vision_model(
-        self,
-        *,
-        n_ctx: int = 8192,
-        n_gpu_layers: int = 20,
-        n_threads: int | None = None,
-    ):
-        return self.vision_loader(n_ctx=n_ctx, n_gpu_layers=n_gpu_layers, n_threads=n_threads)
-
-# ---- GEO defaults helpers ---------------------------------------------------
-
-def _parse_numeric_text(value: str) -> float | None:
-    if not isinstance(value, str):
-        return _coerce_float_or_none(value)
-    text = value.strip()
-    if not text:
-        return None
-    cleaned = re.sub(r"[^0-9./\s-]", " ", text)
-    parts = [part.strip() for part in cleaned.split() if part.strip()]
-    if not parts:
-        return None
-    total = 0.0
-    for part in parts:
-        try:
-            total += float(Fraction(part))
-            continue
-        except Exception:
-            pass
-        try:
-            total += float(part)
-        except Exception:
-            return None
-    return total
-
-def _parse_length_to_mm(value: Any) -> float | None:
-    if value is None:
-        return None
-    if isinstance(value, (int, float)):
-        if math.isfinite(float(value)):
-            return float(value)
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    lower = text.lower()
-    unit = None
-    for suffix in ("millimeters", "millimetres", "millimeter", "millimetre", "mm"):
-        if lower.endswith(suffix):
-            unit = "mm"
-            text = text[: -len(suffix)]
-            break
-    if unit is None:
-        for suffix in ("inches", "inch", "in", "\""):
-            if lower.endswith(suffix):
-                unit = "in"
-                text = text[: -len(suffix)]
-                break
-    if unit is None and "\"" in text:
-        unit = "in"
-        text = text.replace("\"", "")
-    if unit is None and "mm" in lower:
-        unit = "mm"
-        text = re.sub(r"mm", "", text, flags=re.IGNORECASE)
-    numeric_val = _parse_numeric_text(text)
-    if numeric_val is None:
-        return None
-    if unit == "in":
-        return float(numeric_val) * 25.4
-    return float(numeric_val)
-
-def infer_geo_override_defaults(geo_data: dict[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(geo_data, dict):
-        return {}
-
-    sources: list[dict[str, Any]] = []
-    seen: set[int] = set()
-
-    def collect(obj: Any) -> None:
-        if not isinstance(obj, dict):
-            return
-        oid = id(obj)
-        if oid in seen:
-            return
-        seen.add(oid)
-        sources.append(obj)
-        for val in obj.values():
-            collect(val)
-
-    collect(geo_data)
-    if not sources:
-        return {}
-
-    def find_value(*keys: str) -> Any:
-        for key in keys:
-            for src in sources:
-                if key in src:
-                    val = src.get(key)
-                    if val not in (None, ""):
-                        return val
-        return None
-
-    overrides: dict[str, Any] = {}
-
-    plate_len_in = _coerce_float_or_none(find_value("plate_len_in", "plate_length_in"))
-    if plate_len_in is None:
-        plate_len_mm = _parse_length_to_mm(find_value("plate_len_mm", "plate_length_mm"))
-        if plate_len_mm is not None:
-            plate_len_in = float(plate_len_mm) / 25.4
-    if plate_len_in is not None and plate_len_in > 0:
-        overrides["Plate Length (in)"] = float(plate_len_in)
-
-    plate_wid_in = _coerce_float_or_none(find_value("plate_wid_in", "plate_width_in"))
-    if plate_wid_in is None:
-        plate_wid_mm = _parse_length_to_mm(find_value("plate_wid_mm", "plate_width_mm"))
-        if plate_wid_mm is not None:
-            plate_wid_in = float(plate_wid_mm) / 25.4
-    if plate_wid_in is not None and plate_wid_in > 0:
-        overrides["Plate Width (in)"] = float(plate_wid_in)
-
-    thickness_in = _coerce_float_or_none(
-        find_value("thickness_in_guess", "thickness_in", "deepest_hole_in")
-    )
-    if thickness_in is None:
-        thickness_mm = _parse_length_to_mm(find_value("thickness_mm", "thickness_mm_guess"))
-        if thickness_mm is not None:
-            thickness_in = float(thickness_mm) / 25.4
-    if thickness_in is not None and thickness_in > 0:
-        overrides["Thickness (in)"] = float(thickness_in)
-
-    scrap_pct_val = _coerce_float_or_none(find_value("scrap_pct", "scrap_percent"))
-    if scrap_pct_val is not None and scrap_pct_val > 0:
-        overrides["Scrap Percent (%)"] = float(scrap_pct_val) * 100.0
-
-    from_back = any(
-        bool(src.get(key))
-        for key in ("holes_from_back", "needs_back_face", "from_back")
-        for src in sources
-        if isinstance(src, dict)
-    )
-
-    setups_val = _coerce_float_or_none(find_value("setups", "milling_setups", "number_of_setups"))
-    setups_int = int(round(setups_val)) if setups_val and setups_val > 0 else None
-    if setups_int and setups_int > 0:
-        overrides["Number of Milling Setups"] = max(1, setups_int)
-    elif from_back:
-        overrides["Number of Milling Setups"] = 2
-
-    material_value = None
-    for key in ("material", "material_note", "stock_guess", "stock_material", "material_name"):
-        candidate = find_value(key)
-        if isinstance(candidate, str) and candidate.strip():
-            material_value = candidate.strip()
-            break
-    if material_value:
-        overrides["Material"] = material_value
-
-    fai_flag = find_value("fai_required", "fai")
-    if fai_flag is not None:
-        overrides["FAIR Required"] = 1 if bool(fai_flag) else 0
-
-    def _coerce_count(label: str, *keys: str) -> None:
-        val = _coerce_float_or_none(find_value(*keys))
-        if val is None:
-            return
-        try:
-            count = int(round(val))
-        except Exception:
-            return
-        if count > 0:
-            overrides[label] = count
-
-    _coerce_count("Tap Qty (LLM/GEO)", "tap_qty", "tap_count")
-    _coerce_count("Cbore Qty (LLM/GEO)", "cbore_qty", "counterbore_qty")
-    _coerce_count("Csk Qty (LLM/GEO)", "csk_qty", "countersink_qty")
-
-    hole_sum = 0.0
-    hole_total = 0
-
-    raw_holes_mm = find_value("hole_diams_mm", "hole_diams_mm_precise")
-    if isinstance(raw_holes_mm, (list, tuple)) and raw_holes_mm:
-        for entry in raw_holes_mm:
-            val = _coerce_float_or_none(entry)
-            if val is None and entry is not None:
-                val = _parse_length_to_mm(entry)
-            if val is None or val <= 0:
-                continue
-            hole_sum += float(val)
-            hole_total += 1
-
-    if hole_total == 0:
-        raw_holes_in = find_value("hole_diams_in")
-        if isinstance(raw_holes_in, (list, tuple)):
-            for entry in raw_holes_in:
-                val = _coerce_float_or_none(entry)
-                if val is None and entry is not None:
-                    try:
-                        val = float(Fraction(str(entry)))
-                    except Exception:
-                        val = None
-                if val is None or val <= 0:
-                    continue
-                hole_sum += float(val) * 25.4
-                hole_total += 1
-
-    if hole_total == 0:
-        bins_data = find_value("hole_bins", "hole_bins_top")
-        if isinstance(bins_data, dict):
-            for diam_key, count_val in bins_data.items():
-                count = _coerce_float_or_none(count_val)
-                if count is None or count <= 0:
-                    continue
-                diam_mm = _parse_length_to_mm(diam_key)
-                if diam_mm is None or diam_mm <= 0:
-                    continue
-                hole_sum += float(diam_mm) * float(count)
-                hole_total += int(round(count))
-
-    hole_count_val = _coerce_float_or_none(find_value("hole_count", "hole_count_geom"))
-    if hole_count_val is not None and hole_count_val > 0:
-        overrides["Hole Count (override)"] = int(round(hole_count_val))
-    elif hole_total:
-        overrides["Hole Count (override)"] = int(hole_total)
-
-    if hole_total and hole_sum > 0:
-        overrides["Avg Hole Diameter (mm)"] = hole_sum / float(hole_total)
-
-    return overrides
 
 # ---- tk tooltip helper -----------------------------------------------------
 
@@ -22486,9 +22187,26 @@ class App(tk.Tk):
 
         super().__init__()
 
-        self.configuration = configuration or UIConfiguration()
-        self.geometry_loader = geometry_loader or GeometryLoader()
-        self.pricing_registry = pricing_registry or PricingRegistry()
+        self.configuration = configuration or UIConfiguration(
+            default_params=copy.deepcopy(PARAMS_DEFAULT),
+            default_material_display=DEFAULT_MATERIAL_DISPLAY,
+            settings_path=default_app_settings_json(),
+        )
+        self.geometry_loader = geometry_loader or GeometryLoader(
+            extract_pdf_all_fn=extract_pdf_all,
+            extract_pdf_vector_fn=extract_2d_features_from_pdf_vector,
+            extract_dxf_or_dwg_fn=extract_2d_features_from_dxf_or_dwg,
+            occ_feature_fn=extract_features_with_occ,
+            stl_enricher=enrich_geo_stl,
+            step_reader=read_step_shape,
+            cad_reader=read_cad_any,
+            bbox_fn=safe_bbox,
+            occ_enricher=enrich_geo_occ,
+        )
+        self.pricing_registry = pricing_registry or PricingRegistry(
+            default_params=copy.deepcopy(PARAMS_DEFAULT),
+            default_rates=copy.deepcopy(RATES_DEFAULT),
+        )
         self.llm_services = llm_services or LLMServices()
         self.pricing: SupportsPricingEngine = pricing or _DEFAULT_PRICING_ENGINE
 
@@ -22563,7 +22281,10 @@ class App(tk.Tk):
         self.llm_events: list[dict[str, Any]] = []
         self.llm_errors: list[dict[str, Any]] = []
         self._llm_client_cache: LLMClient | None = None
-        self.settings_path = default_app_settings_json()
+        self.settings_path = (
+            getattr(self.configuration, "settings_path", None)
+            or default_app_settings_json()
+        )
 
         self.settings = self._load_settings()
         if not isinstance(self.settings, dict):
@@ -24762,114 +24483,23 @@ def _map_geo_to_double_underscore(g: dict) -> dict:
             pass
     return out
 
-def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="CAD Quoting Tool UI")
-    parser.add_argument(
-        "--print-env",
-        action="store_true",
-        help="Print a JSON dump of relevant environment configuration and exit.",
-    )
-    parser.add_argument(
-        "--no-gui",
-        action="store_true",
-        help="Initialise subsystems but do not launch the Tkinter GUI.",
-    )
-    parser.add_argument(
-        "--debug-removal",
-        action="store_true",
-        help="Force-enable material removal debug output (shows Material Removal Debug table).",
-    )
-    parser.add_argument(
-        "--geo-json",
-        type=str,
-        default=None,
-        help="Bypass CAD and load a prebuilt geometry JSON for debugging.",
-    )
-    return parser
-
-
-
-def _main(argv: Optional[Sequence[str]] = None) -> int:
-    configure_logging()
-    parser = build_arg_parser()
-    args = parser.parse_args(argv)
-
-    # Reset debug.log at start with ASCII to avoid garbled content from prior runs
-    try:
-        import datetime as _dt
-        with open("debug.log", "w", encoding="ascii", errors="replace") as _dbg:
-            _dbg.write(f"[app] start { _dt.datetime.now().isoformat() }\n")
-    except Exception:
-        pass
-
-    # (Removed) --mcmaster-live flag; mcmaster_api now enables real requests itself.
-
-    # CLI override: force-enable removal debug output
-    if getattr(args, "debug_removal", False):
-        global APP_ENV
-        APP_ENV = replace(APP_ENV, llm_debug_enabled=True)
-
-    if args.print_env:
-        logger.info("Runtime environment:\n%s", jdump(describe_runtime_environment(), default=None))
-        return 0
-
-    geo_json_payload: Mapping[str, Any] | None = None
-    geo_json_path = getattr(args, "geo_json", None)
-    if geo_json_path:
-        path_obj = Path(str(geo_json_path))
-        try:
-            with path_obj.open("r", encoding="utf-8") as handle:
-                raw_payload = json.load(handle)
-        except FileNotFoundError:
-            logger.error("Geometry JSON not found: %s", path_obj)
-            return 1
-        except json.JSONDecodeError as exc:
-            logger.error("Geometry JSON is invalid (%s): %s", path_obj, exc)
-            return 1
-        except Exception as exc:  # pragma: no cover - defensive guard
-            logger.error("Failed to read geometry JSON %s: %s", path_obj, exc)
-            return 1
-        if isinstance(raw_payload, _MappingABC):
-            geo_json_payload = typing.cast(Mapping[str, Any], raw_payload)
-        else:
-            logger.error(
-                "Geometry JSON must contain an object at the top level: %s",
-                path_obj,
-            )
-            return 1
-
-    if args.no_gui:
-        if geo_json_payload is not None:
-            logger.warning("--geo-json is ignored when --no-gui is supplied.")
-        return 0
-
-    pricing_registry = create_default_registry()
-    pricing_engine = PricingEngine(pricing_registry)
-
-    try:
-        app = App(pricing_engine)
-    except RuntimeError as exc:  # pragma: no cover - headless guard
-        logger.error("Unable to start the GUI: %s", exc)
-        return 1
-
-    if geo_json_payload is not None:
-        try:
-            app.apply_geometry_payload(geo_json_payload, source=geo_json_path)
-        except Exception as exc:  # pragma: no cover - defensive guard
-            logger.error("Failed to apply geometry JSON %s: %s", geo_json_path, exc)
-            return 1
-
-    app.mainloop()
-
-    return 0
-
 if __name__ == "__main__":
     try:  # pragma: no cover - platform-specific console guard
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:
         pass
+    from cad_quoter.app.cli import main as _cli_main
+
     try:
-        sys.exit(_main())
+        sys.exit(
+            _cli_main(
+                app_cls=App,
+                pricing_engine_cls=PricingEngine,
+                pricing_registry_factory=create_default_registry,
+                app_env=APP_ENV,
+                env_setter=lambda env: globals().__setitem__("APP_ENV", env),
+            )
+        )
     except Exception as exc:  # pragma: no cover - smoke guard
         try:
             print(jdump({"ok": False, "error": str(exc)}))
