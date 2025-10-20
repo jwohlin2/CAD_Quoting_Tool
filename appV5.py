@@ -29,6 +29,7 @@ from typing import Any, Mapping, MutableMapping, TYPE_CHECKING
 from collections import Counter, defaultdict
 from collections.abc import (
     Callable,
+    Iterable,
     Iterator,
     Mapping as _MappingABC,
     MutableMapping as _MutableMappingABC,
@@ -21517,107 +21518,22 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
             chart_source = "dxf_text_regex"
             chart_reconcile = summarize_hole_chart_agreement(entity_holes_mm, chart_ops)
 
-            # Build normalized HOLE-TABLE rows for UI cards
-            rows_norm: list[dict[str, Any]] = []
-            for row in (hole_rows or []):
-                if row is None:
-                    continue
-                try:
-                    qty = int(getattr(row, "qty", 0) or 0)
-                except Exception:
-                    qty = 0
-                ref = (
-                    getattr(row, "ref", None)
-                    or getattr(row, "pilot", None)
-                    or getattr(row, "drill_ref", None)
-                    or ""
-                )
-                desc = (
-                    getattr(row, "description", None)
-                    or getattr(row, "desc", None)
-                    or ""
-                )
-                if not desc:
-                    features = list(getattr(row, "features", []) or [])
-                    parts: list[str] = []
-                    for feature in features:
-                        if not isinstance(feature, dict):
-                            continue
-                        ftype = str(feature.get("type", "")).lower()
-                        side = str(feature.get("side", "")).upper()
-                        if ftype == "tap":
-                            thread = feature.get("thread") or ""
-                            depth = feature.get("depth_in")
-                            piece = f"{thread} TAP"
-                            if isinstance(depth, (int, float)):
-                                piece += f" × {float(depth):.2f}"
-                            if side:
-                                piece += f" FROM {side}"
-                            parts.append(piece)
-                        elif ftype == "cbore":
-                            dia = feature.get("dia_in")
-                            depth = feature.get("depth_in")
-                            piece = f"{dia:.4f} C’BORE" if isinstance(dia, (int, float)) else "C’BORE"
-                            if isinstance(depth, (int, float)):
-                                piece += f" × {float(depth):.2f}"
-                            if side:
-                                piece += f" FROM {side}"
-                            parts.append(piece)
-                        elif ftype in {"csk", "countersink"}:
-                            dia = feature.get("dia_in")
-                            depth = feature.get("depth_in")
-                            piece = f"{dia:.4f} C’SINK" if isinstance(dia, (int, float)) else "C’SINK"
-                            if isinstance(depth, (int, float)):
-                                piece += f" × {float(depth):.2f}"
-                            if side:
-                                piece += f" FROM {side}"
-                            parts.append(piece)
-                        elif ftype == "drill":
-                            ref_local = feature.get("ref") or ref or ""
-                            thru = " THRU" if feature.get("thru", True) else ""
-                            parts.append(f"{ref_local}{thru}".strip())
-                        elif ftype == "spot":
-                            depth = feature.get("depth_in")
-                            piece = "C’DRILL"
-                            if isinstance(depth, (int, float)):
-                                piece += f" × {float(depth):.2f}"
-                            parts.append(piece)
-                        elif ftype == "jig":
-                            parts.append("JIG GRIND")
-                    desc = "; ".join([p for p in parts if p])
+        # --- NEW: publish HOLE-TABLE rows for UI cards ------------------------------
+        rows_norm: list[dict[str, Any]] = []
+        if hole_rows:
+            rows_norm = _normalize_ops_rows_from_hole_rows(hole_rows)
+        elif chart_ops:
+            rows_norm = _normalize_ops_rows_from_chart_ops(chart_ops)
 
-                rows_norm.append(
-                    {
-                        "hole": getattr(row, "hole_id", "")
-                        or getattr(row, "letter", "")
-                        or "",
-                        "ref": str(ref or ""),
-                        "qty": qty,
-                        "desc": str(desc or ""),
-                    }
-                )
-
-            if rows_norm:
-                existing_summary = geo.get("ops_summary")
-                if isinstance(existing_summary, _MappingABC) and not isinstance(existing_summary, dict):
-                    ops_summary_map: dict[str, Any] = dict(existing_summary)
-                elif isinstance(existing_summary, dict):
-                    ops_summary_map = dict(existing_summary)
-                else:
-                    ops_summary_map = {}
-                ops_summary_map["rows"] = rows_norm
-                aggregated = aggregate_ops(rows_norm) if rows_norm else {}
-                if aggregated:
-                    totals = aggregated.get("totals")
-                    if totals:
-                        ops_summary_map["totals"] = dict(totals)
-                    detail_rows = aggregated.get("rows_detail")
-                    if detail_rows:
-                        ops_summary_map["rows_detail"] = detail_rows
-                    for key in ("actions_total", "back_ops_total", "flip_required"):
-                        if key in aggregated:
-                            ops_summary_map[key] = aggregated[key]
-                geo["ops_summary"] = ops_summary_map
+        if rows_norm:
+            geo.setdefault("ops_summary", {})["rows"] = rows_norm
+            geo["ops_summary"]["source"] = chart_source or "hole_table"
+            try:
+                geo["ops_summary"]["tap_total"] = int(chart_summary.get("tap_qty") or 0)
+                geo["ops_summary"]["cbore_total"] = int(chart_summary.get("cbore_qty") or 0)
+                geo["ops_summary"]["csk_total"] = int(chart_summary.get("csk_qty") or 0)
+            except Exception:
+                pass
     if chart_summary:
         geo.setdefault("chart_summary", chart_summary)
         if chart_summary.get("tap_qty"):
@@ -21840,6 +21756,143 @@ def _extract_text_lines_from_ezdxf_doc(doc: Any) -> list[str]:
         start = upper.index("HOLE TABLE")
         joined = joined[start:]
     return [ln for ln in joined.splitlines() if ln.strip()]
+
+def _normalize_ops_rows_from_hole_rows(rows: Iterable[Any] | None) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in rows or []:
+        if row is None:
+            continue
+        qty = 0
+        try:
+            qty = int(getattr(row, "qty", 0) or 0)
+        except Exception:
+            pass
+        hole = getattr(row, "hole_id", "") or getattr(row, "letter", "") or ""
+        ref = (
+            getattr(row, "ref", None)
+            or getattr(row, "pilot", None)
+            or getattr(row, "drill_ref", None)
+            or ""
+        )
+        desc = (
+            getattr(row, "description", None)
+            or getattr(row, "desc", None)
+            or ""
+        )
+        if not desc:
+            parts = []
+            for f in list(getattr(row, "features", []) or []):
+                if not isinstance(f, dict):
+                    continue
+                t = str(f.get("type", "")).lower()
+                side = str(f.get("side", "")).upper()
+                if t == "tap":
+                    thread = f.get("thread") or ""
+                    depth = f.get("depth_in")
+                    parts.append(
+                        f"{thread} TAP"
+                        + (
+                            f" × {depth:.2f}\""
+                            if isinstance(depth, (int, float))
+                            else ""
+                        )
+                        + (f" FROM {side}" if side else "")
+                    )
+                elif t == "cbore":
+                    dia = f.get("dia_in")
+                    depth = f.get("depth_in")
+                    parts.append(
+                        f"{(dia or 0):.4f} C’BORE"
+                        + (
+                            f" × {depth:.2f}\""
+                            if isinstance(depth, (int, float))
+                            else ""
+                        )
+                        + (f" FROM {side}" if side else "")
+                    )
+                elif t in {"csk", "countersink"}:
+                    dia = f.get("dia_in")
+                    depth = f.get("depth_in")
+                    parts.append(
+                        f"{(dia or 0):.4f} C’SINK"
+                        + (
+                            f" × {depth:.2f}\""
+                            if isinstance(depth, (int, float))
+                            else ""
+                        )
+                        + (f" FROM {side}" if side else "")
+                    )
+                elif t == "drill":
+                    ref_local = f.get("ref") or ref or ""
+                    thru = " THRU" if f.get("thru", True) else ""
+                    parts.append(f"{ref_local}{thru}".strip())
+                elif t == "spot":
+                    depth = f.get("depth_in")
+                    parts.append(
+                        "C’DRILL"
+                        + (
+                            f" × {depth:.2f}\""
+                            if isinstance(depth, (int, float))
+                            else ""
+                        )
+                    )
+                elif t == "jig":
+                    parts.append("JIG GRIND")
+            desc = "; ".join([p for p in parts if p])
+        out.append({"hole": str(hole), "ref": str(ref), "qty": int(qty), "desc": str(desc)})
+    return out
+
+
+def _normalize_ops_rows_from_chart_ops(
+    chart_ops: Iterable[Mapping[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Collapse raw chart ops into conservative row descriptions."""
+
+    out: list[dict[str, Any]] = []
+    if not chart_ops:
+        return out
+    for op in chart_ops:
+        if not isinstance(op, dict):
+            continue
+        t = (op.get("type") or "").lower()
+        qty = int(round(float(op.get("qty") or 0)))
+        if qty <= 0:
+            continue
+        side = (op.get("side") or "").upper()
+        desc = ""
+        ref = str(op.get("ref") or "")
+        if t == "tap":
+            thread = op.get("thread") or ""
+            depth = op.get("depth_in")
+            desc = f"{thread} TAP" + (
+                f" × {depth:.2f}\"" if isinstance(depth, (int, float)) else ""
+            ) + (f" FROM {side}" if side else "")
+        elif t == "cbore":
+            dia = op.get("dia_in")
+            depth = op.get("depth_in")
+            desc = f"{(dia or 0):.4f} C’BORE" + (
+                f" × {depth:.2f}\"" if isinstance(depth, (int, float)) else ""
+            ) + (f" FROM {side}" if side else "")
+        elif t in {"csk", "countersink"}:
+            dia = op.get("dia_in")
+            depth = op.get("depth_in")
+            desc = f"{(dia or 0):.4f} C’SINK" + (
+                f" × {depth:.2f}\"" if isinstance(depth, (int, float)) else ""
+            ) + (f" FROM {side}" if side else "")
+        elif t == "spot":
+            depth = op.get("depth_in")
+            desc = "C’DRILL" + (
+                f" × {depth:.2f}\"" if isinstance(depth, (int, float)) else ""
+            )
+        elif t == "jig":
+            desc = "JIG GRIND"
+        elif t == "drill":
+            thru = " THRU" if (op.get("thru", True)) else ""
+            desc = f"{ref}{thru}".strip()
+        if desc:
+            out.append({"hole": "", "ref": ref, "qty": qty, "desc": desc})
+    return out
+
 
 def hole_rows_to_ops(rows: Iterable[Any] | None) -> list[dict[str, Any]]:
     """Flatten parsed HoleRow objects into estimator-friendly operations."""
