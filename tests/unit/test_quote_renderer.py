@@ -1,6 +1,6 @@
 """Tests for the high level quote renderer helpers."""
 
-from quote_renderer import render_quote
+from appV5 import render_quote
 
 
 def test_render_quote_includes_drilling_time_per_hole_section() -> None:

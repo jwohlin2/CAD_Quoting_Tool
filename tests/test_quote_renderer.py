@@ -1,4 +1,4 @@
-from quote_renderer import render_quote
+from appV5 import render_quote
 
 
 def test_render_quote_sanitizes_special_characters() -> None:

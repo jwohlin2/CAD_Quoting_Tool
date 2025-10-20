@@ -144,9 +144,9 @@ The repository includes `mcmaster_api.py`, a simple CLI that authenticates to
 McMaster-Carr’s official API using mutual TLS (client PFX certificate) and
 prints price tiers for a given part number.
 
-The quoting helpers under `mcmaster_stock.py` consume the same API to resolve
-sheet SKUs and price-per-unit estimates programmatically, so no legacy web
-scrapers are required.
+The quoting helpers under `cad_quoter.vendors.mcmaster_stock` consume the same
+API to resolve sheet SKUs and price-per-unit estimates programmatically, so no
+legacy web scrapers are required.
 
 Setup:
 
