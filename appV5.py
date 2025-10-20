@@ -1055,7 +1055,10 @@ def _compute_drilling_removal_section(
 #       patch.
 _SIDE_BACK = re.compile(r"\bFROM\s+BACK\b", re.I)
 _SIDE_FRONT = re.compile(r"\bFROM\s+FRONT\b", re.I)
-_CBORE_RE = re.compile(r"(?:^|[ ;])([0-9.]+)\s*(?:C[\'’]?\s*BORE|CBORE|COUNTER\s*BORE)", re.I)
+_CBORE_RE = re.compile(
+    r"(?:^|[ ;])(?:Ø|⌀|DIA)?\s*((?:\d+\s*/\s*\d+)|(?:\d+(?:\.\d+)?))\s*(?:C[\'’]?\s*BORE|CBORE|COUNTER\s*BORE)",
+    re.I,
+)
 _DEPTH_TOKEN = re.compile(r"[×xX]\s*([0-9.]+)\b")  # e.g., × .62
 _DIA_TOKEN = re.compile(
     r"(?:Ø|⌀|REF|DIA)[^0-9]*((?:\d+\s*/\s*\d+)|(?:\d+)?\.\d+|\d+(?:\.\d+)?)",
@@ -1306,6 +1309,16 @@ def _side_of(desc: str) -> str:
     return "FRONT"
 
 
+_THREAD_WITH_TPI_RE = re.compile(
+    r"((?:#\d+)|(?:\d+/\d+)|(?:\d+(?:\.\d+)?))\s*-\s*(\d+)",
+    re.I,
+)
+_THREAD_WITH_NPT_RE = re.compile(
+    r"((?:#\d+)|(?:\d+/\d+)|(?:\d+(?:\.\d+)?))\s*-\s*(N\.?P\.?T\.?)",
+    re.I,
+)
+
+
 def _emit_tapping_card(
     lines: list[str],
     *,
@@ -1318,23 +1331,33 @@ def _emit_tapping_card(
     for r in rows:
         desc = str(r.get("desc", ""))
         desc_upper = desc.upper()
-        if "TAP" not in desc_upper:
+        desc_clean = desc_upper.replace(".", "")
+        if "TAP" not in desc_upper and "NPT" not in desc_clean:
             continue
         qty = int(r.get("qty") or 0)
-        side = _side_of(desc)
-        match = re.search(
-            r"((?:#\d+)|(?:\d+/\d+)|(?:\d+(?:\.\d+)?))\s*-\s*(\d+)\s*TAP",
-            desc,
-            re.I,
-        )
-        if not match:
+        if qty <= 0:
             continue
-        thread = f"{match.group(1)}-{match.group(2)}"
+        side = _side_of(desc)
+        match = _THREAD_WITH_TPI_RE.search(desc)
+        if match:
+            major_token = match.group(1).strip()
+            tpi_token = match.group(2).strip()
+            thread = f"{major_token}-{tpi_token}"
+            tpi = _parse_tpi(thread)
+            major = _parse_thread_major_in(thread)
+        else:
+            match = _THREAD_WITH_NPT_RE.search(desc)
+            if not match:
+                continue
+            major_token = match.group(1).strip()
+            thread = f"{major_token}-NPT"
+            tpi = None
+            major = _parse_thread_major_in(f"{major_token}-1")
+            if major is None:
+                major = _parse_ref_to_inch(major_token)
         depth_match = _DEPTH_TOKEN.search(desc)
         depth_in = float(depth_match.group(1)) if depth_match else None
         pilot = (r.get("ref") or "").strip()
-        major = _parse_thread_major_in(thread)
-        tpi = _parse_tpi(thread)
         pitch = (1.0 / float(tpi)) if tpi else None
         sfm, _ = _lookup_sfm_ipr("tapping", major, material_group, speeds_csv)
         rpm = _rpm_from_sfm_diam(sfm, major)
@@ -11521,15 +11544,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     )
 
     # PROBE: show how many HOLE-TABLE rows we have (temporary)
-    ops_rows_candidate = (((geo_map or {}).get("ops_summary") or {}).get("rows") or [])
-    if isinstance(ops_rows_candidate, list):
-        ops_rows = ops_rows_candidate
-    else:
-        try:
-            ops_rows = list(ops_rows_candidate or [])
-        except Exception:
-            ops_rows = []
-    append_line(f"[DEBUG] ops_rows={len(ops_rows)}")
     tapping_minutes_total = 0.0
     cbore_minutes_total = 0.0
     spot_minutes_total = 0.0
