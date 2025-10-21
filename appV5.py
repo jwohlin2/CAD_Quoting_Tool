@@ -11,7 +11,15 @@ Single-file CAD Quoter (v8)
 - STEP/IGES via OCP, STL via trimesh
 - Variables auto-detect, Overrides tab, LLM tab
 """
+
 from __future__ import annotations
+
+import sys
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8")  # py3.7+
+except Exception:
+    pass
 
 from cad_quoter.utils.numeric import coerce_positive_float as _coerce_positive_float
 from cad_quoter.app.quote_doc import (
@@ -29,7 +37,6 @@ import math
 import os
 import logging
 import re
-import sys
 import time
 import typing
 from functools import cmp_to_key, lru_cache
@@ -16621,10 +16628,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 if __name__ == "__main__":  # pragma: no cover - manual invocation
-    try:
-        sys.stdout.reconfigure(encoding="utf-8")
-    except Exception:
-        pass
     sys.exit(main())
 
 # Emit chart-debug key lines at most once globally per run
