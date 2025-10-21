@@ -2240,8 +2240,9 @@ def _jsonify_debug_summary(summary: Mapping[str, Any]) -> dict[str, Any]:
 try:
     import builtins as _builtins
 
-    if getattr(_builtins, "_fail_live_price", None) is None:  # pragma: no cover - test shim
-        setattr(_builtins, "_fail_live_price", _fail_live_price)
+    _builtins_any = typing.cast(Any, _builtins)
+    if getattr(_builtins_any, "_fail_live_price", None) is None:  # pragma: no cover - test shim
+        setattr(_builtins_any, "_fail_live_price", _fail_live_price)
 except Exception:  # pragma: no cover - defensive
     pass
 
