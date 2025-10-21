@@ -422,7 +422,7 @@ from cad_quoter.utils.scrap import (
 )
 from appkit.planner_helpers import _process_plan_job
 from appkit.env_utils import FORCE_PLANNER
-from appkit.planner_adapter import resolve_planner
+from appkit.planner_adapter import resolve_planner, resolve_pricing_source_value
 
 from appkit.data import load_json, load_text
 
@@ -1886,56 +1886,6 @@ def _is_pandas_dataframe(obj: Any) -> bool:
 # ───────────────────────────────────────────────────────────────────────
 T = TypeVar("T")
 
-def _resolve_pricing_source_value(
-    base_value: Any,
-    *,
-    used_planner: bool | None = None,
-    process_meta: Mapping[str, Any] | None = None,
-    process_meta_raw: Mapping[str, Any] | None = None,
-    breakdown: Mapping[str, Any] | None = None,
-    planner_process_minutes: Any = None,
-    hour_summary_entries: Mapping[str, Any] | None = None,
-    additional_sources: Sequence[Any] | None = None,
-    cfg: QuoteConfiguration | None = None,
-) -> str | None:
-    """Return a normalized pricing source, honoring explicit selections."""
-
-    fallback_text: str | None = None
-    if base_value is not None:
-        candidate_text = str(base_value).strip()
-        if candidate_text:
-            lowered = candidate_text.lower()
-            if lowered == "planner":
-                return "planner"
-            if lowered not in {"legacy", "auto", "default", "fallback"}:
-                return candidate_text
-            fallback_text = candidate_text
-
-    if used_planner:
-        if fallback_text:
-            return fallback_text
-        return "planner"
-
-    # Delegate planner signal detection to the adapter helper
-    from appkit.planner_adapter import _planner_signals_present as _planner_signals_present_helper
-
-    if _planner_signals_present_helper(
-        process_meta=process_meta,
-        process_meta_raw=process_meta_raw,
-        breakdown=breakdown,
-        planner_process_minutes=planner_process_minutes,
-        hour_summary_entries=hour_summary_entries,
-        additional_sources=list(additional_sources) if additional_sources is not None else None,
-    ):
-        if fallback_text:
-            return fallback_text
-        return "planner"
-
-    if fallback_text:
-        return fallback_text
-
-    return None
-
 
 
 def _wrap_header_text(text: Any, page_width: int, indent: str = "") -> list[str]:
@@ -2045,7 +1995,7 @@ def _build_quote_header_lines(
         if used_planner_flag is not None:
             break
 
-    pricing_source_value = _resolve_pricing_source_value(
+    pricing_source_value = resolve_pricing_source_value(
         raw_pricing_source,
         used_planner=used_planner_flag,
         process_meta=process_meta if isinstance(process_meta, _MappingABC) else None,
