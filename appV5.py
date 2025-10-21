@@ -15,11 +15,22 @@ Single-file CAD Quoter (v8)
 from __future__ import annotations
 
 import sys
+from io import TextIOWrapper
+from pathlib import Path
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8")  # py3.7+
-except Exception:
-    pass
+_stdout = sys.stdout
+if isinstance(_stdout, TextIOWrapper):
+    try:
+        _stdout.reconfigure(encoding="utf-8")  # py3.7+
+    except Exception:
+        pass
+
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_PKG_SRC = _SCRIPT_DIR / "cad_quoter_pkg" / "src"
+if _PKG_SRC.is_dir():
+    _pkg_src_str = str(_PKG_SRC)
+    if _pkg_src_str not in sys.path:
+        sys.path.insert(0, _pkg_src_str)
 
 from cad_quoter.app.quote_doc import (
     build_quote_header_lines,
@@ -36,7 +47,6 @@ import os
 import logging
 import re
 import time
-import typing
 from functools import cmp_to_key, lru_cache
 from typing import Any, Mapping, MutableMapping, Sequence, TYPE_CHECKING, TypeAlias
 from collections import Counter, defaultdict
@@ -50,7 +60,6 @@ from collections.abc import (
 )
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
-from pathlib import Path
 
 from cad_quoter.app._value_utils import (
     _format_value,
@@ -75,6 +84,44 @@ def _coerce_positive_float(value: _AnyForCoerce) -> float | None:
     except Exception:
         pass
     return number if number > 0 else None
+
+
+_MM_DIM_TOKEN = re.compile(
+    r"(?:Ø|⌀|DIA|REF)?\s*((?:\d+\s*/\s*\d+)|(?:\d+(?:\.\d+)?))\s*(?:MM|MILLIM(?:E|E)T(?:E|)RS?)",
+    re.IGNORECASE,
+)
+
+
+def _parse_dim_to_mm(value: Any) -> float | None:
+    """Parse a dimension string containing millimeter units to a float value."""
+
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            mm_val = float(value)
+        except Exception:
+            return None
+        return mm_val if math.isfinite(mm_val) and mm_val > 0 else None
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    match = _MM_DIM_TOKEN.search(text)
+    if not match:
+        return None
+
+    token = match.group(1).replace(" ", "")
+    try:
+        if "/" in token:
+            mm_val = float(Fraction(token))
+        else:
+            mm_val = float(token)
+    except Exception:
+        return None
+
+    return mm_val if math.isfinite(mm_val) and mm_val > 0 else None
 from cad_quoter.app.chart_lines import (
     collect_chart_lines_context as _collect_chart_lines_context,
 )
@@ -96,10 +143,12 @@ from cad_quoter.app.hole_ops import (
     _aggregate_hole_entries,
     _classify_thread_spec,
     _dedupe_hole_entries,
+    _DIA_TOKEN,
     _major_diameter_from_thread,
     _normalize_hole_text,
     _parse_hole_line,
     _parse_ref_to_inch,
+    _SPOT_TOKENS,
     summarize_hole_chart_lines,
 )
 from cad_quoter.app.container import (
@@ -266,64 +315,6 @@ def _seed_bucket_minutes_cost(
     entry["total$"] = round(entry["machine$"] + entry["labor$"], 2)
 
 
-def _infer_rect_from_holes(geo: Mapping[str, Any] | None) -> tuple[float, float]:
-    """Infer a rectangular blank size (W,H in inches) from geo context.
-
-    Tries, in order:
-    - required_blank_in / bbox_in maps with numeric w/h (inches)
-    - plate_len/plate_wid (inches) or synonyms
-    - derived or top-level bbox_mm converted to inches
-    - conservative guess based on hole diameters (4× max diameter)
-    """
-
-    if not isinstance(geo, _MappingABC):
-        return (0.0, 0.0)
-
-    def _wh_from(container: Mapping[str, Any] | None) -> tuple[float, float]:
-        if not isinstance(container, _MappingABC):
-            return (0.0, 0.0)
-        w = _coerce_positive_float(container.get("w"))
-        h = _coerce_positive_float(container.get("h"))
-        return (float(w) if w else 0.0, float(h) if h else 0.0)
-
-    w, h = _wh_from(geo.get("required_blank_in"))
-    if w > 0 and h > 0:
-        return (w, h)
-    w, h = _wh_from(geo.get("bbox_in"))
-    if w > 0 and h > 0:
-        return (w, h)
-
-    L_in = _coerce_positive_float(geo.get("plate_len_in") or geo.get("plate_length_in"))
-    W_in = _coerce_positive_float(geo.get("plate_wid_in") or geo.get("plate_width_in"))
-    if L_in and W_in:
-        return (float(W_in), float(L_in))
-
-    derived = geo.get("derived") if isinstance(geo, _MappingABC) else None
-    bbox_mm = None
-    if isinstance(derived, _MappingABC):
-        bbox_mm = derived.get("bbox_mm")
-    if not bbox_mm:
-        bbox_mm = geo.get("bbox_mm")
-    if isinstance(bbox_mm, (list, tuple)) and len(bbox_mm) >= 2:
-        mm_w = _coerce_positive_float(bbox_mm[0])
-        mm_h = _coerce_positive_float(bbox_mm[1])
-        if mm_w and mm_h:
-            return (float(mm_w) / 25.4, float(mm_h) / 25.4)
-
-    max_d_in = 0.0
-    diams_mm = geo.get("hole_diams_mm")
-    if isinstance(diams_mm, Sequence) and not isinstance(diams_mm, (str, bytes, bytearray)):
-        for d in diams_mm:
-            d_mm = _coerce_positive_float(d)
-            if d_mm and d_mm > 0:
-                max_d_in = max(max_d_in, float(d_mm) / 25.4)
-    if max_d_in > 0:
-        guess = max(2.0, max_d_in * 4.0)
-        return (guess, guess)
-
-    return (0.0, 0.0)
-
-
 def _emit_hole_table_ops_cards(
     lines: list[str],
     *,
@@ -453,6 +444,9 @@ from cad_quoter.geometry.dxf_enrich import (
 from cad_quoter.pricing.process_buckets import BUCKET_ROLE, PROCESS_BUCKETS, bucketize
 
 import cad_quoter.geometry as geometry
+from cad_quoter.geometry import upsert_var_row as geometry_upsert_var_row
+
+geometry = typing.cast(typing.Any, geometry)
 
 
 
@@ -788,7 +782,7 @@ def _resolve_part_thickness_in(
     return float(default)
 
 
-def _finalize_tap_row(row: dict[str, Any], thickness_in: float) -> None:
+def _finalize_tap_row(row: MutableMapping[str, Any], thickness_in: float) -> None:
     thread = row.get("thread") or row.get("desc") or ""
     ipr = _thread_ipr(thread)
     dia = _derive_major_dia_in(thread)
@@ -870,7 +864,7 @@ def _render_ops_card(
     append_line: Callable[[str], None],
     *,
     title: str,
-    rows: list[dict],
+    rows: Sequence[Mapping[str, Any]],
 ) -> float:
     if not rows:
         return 0.0
@@ -1056,12 +1050,18 @@ def _compute_drilling_removal_section(
 
     ops_hole_count_from_table = 0
 
-    dtph_map = (
+    dtph_map_candidate = (
         drilling_time_per_hole
         if isinstance(drilling_time_per_hole, _MappingABC)
         else None
     )
-    dtph_rows = dtph_map.get("rows") if isinstance(dtph_map, _MappingABC) else None
+    dtph_map: Mapping[str, Any]
+    if isinstance(dtph_map_candidate, _MappingABC):
+        dtph_map = typing.cast(Mapping[str, Any], dtph_map_candidate)
+    else:
+        dtph_map = {}
+
+    dtph_rows = dtph_map.get("rows")
     if isinstance(dtph_rows, list) and dtph_rows:
         sanitized_rows: list[dict[str, Any]] = []
         subtotal_minutes = 0.0
@@ -1205,9 +1205,17 @@ def _compute_drilling_removal_section(
                 labor_rate_per_hr=drill_lrate,
             )
 
-            try:
-                dbg_entry = (bucket_view_obj.get("buckets") or {}).get("drilling", {})
-            except Exception:
+            dbg_entry: Mapping[str, Any] | None = None
+            if isinstance(bucket_view_obj, _MappingABC):
+                try:
+                    buckets_snapshot = bucket_view_obj.get("buckets")
+                except Exception:
+                    buckets_snapshot = None
+                if isinstance(buckets_snapshot, _MappingABC):
+                    dbg_entry = typing.cast(
+                        Mapping[str, Any], buckets_snapshot
+                    ).get("drilling")
+            if not isinstance(dbg_entry, _MappingABC):
                 dbg_entry = {}
             _push(lines, f"[DEBUG] drilling_bucket={dbg_entry}")
 
@@ -1400,6 +1408,10 @@ def _estimate_drilling_minutes_from_meta(
 
     if not isinstance(drilling_meta, _MappingABC):
         return (0.0, 0.0, 0.0, {})
+
+    drilling_meta_map: Mapping[str, Any] | MutableMapping[str, Any] = typing.cast(
+        Mapping[str, Any] | MutableMapping[str, Any], drilling_meta
+    )
 
     try:
         index_min = float(drilling_meta.get("index_min_per_hole") or 0.0)
@@ -1915,12 +1927,12 @@ def _recognized_line_items_from_planner(pricing_result: Mapping[str, Any] | None
 import cad_quoter.geometry as geometry
 
 # Re-export legacy OCCT helpers via cad_quoter.geometry.
-FACE_OF = geometry.FACE_OF
-ensure_face = geometry.ensure_face
-face_surface = geometry.face_surface
-iter_faces = geometry.iter_faces
-linear_properties = geometry.linear_properties
-map_shapes_and_ancestors = geometry.map_shapes_and_ancestors
+FACE_OF = typing.cast(Any, getattr(geometry, "FACE_OF"))
+ensure_face = typing.cast(Any, getattr(geometry, "ensure_face"))
+face_surface = typing.cast(Any, getattr(geometry, "face_surface"))
+iter_faces = typing.cast(Any, getattr(geometry, "iter_faces"))
+linear_properties = typing.cast(Any, getattr(geometry, "linear_properties"))
+map_shapes_and_ancestors = typing.cast(Any, getattr(geometry, "map_shapes_and_ancestors"))
 from cad_quoter.geo2d.apply import apply_2d_features_to_variables
 
 # Tolerance for invariant checks that guard against silent drift when rendering
@@ -2001,6 +2013,7 @@ from cad_quoter.pricing.materials import (
     STANDARD_PLATE_SIDES_IN as STANDARD_PLATE_SIDES_IN,
     _compute_material_block as _compute_material_block,
     _compute_scrap_mass_g as _compute_scrap_mass_g,
+    _hole_margin_inches as _hole_margin_inches,
     _density_for_material as _density_for_material,
     _material_family as _material_family,
     _material_cost_components as _material_cost_components,
@@ -2084,6 +2097,12 @@ SYSTEM_SUGGEST = _llm_integration.system_suggest
 SUGG_TO_EDITOR = _llm_integration.sugg_to_editor
 EDITOR_TO_SUGG = _llm_integration.editor_to_sugg
 EDITOR_FROM_UI = _llm_integration.editor_from_ui
+
+if TYPE_CHECKING:
+    from cad_quoter.llm import LLMClient as LLMClientType
+else:  # pragma: no cover - typing fallback
+    LLMClientType = typing.Any
+
 LLMClient = _llm_integration.llm_client
 parse_llm_json = _llm_integration.parse_llm_json
 explain_quote = _llm_integration.explain_quote
@@ -3290,6 +3309,110 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if _is_total_label(label):
             _maybe_insert_total_separator(len(right))
         append_line(_render_kv_line(label, right, indent))
+
+    def _render_process_and_hours_from_buckets(
+        lines: list[str],
+        bucket_view_obj: Mapping[str, Any] | None,
+        rates: Mapping[str, Any] | None = None,
+    ) -> tuple[float, float]:
+        """Render process and labor hour tables from canonical bucket data."""
+
+        buckets_source: Mapping[str, Any] | None = None
+        if isinstance(bucket_view_obj, _MappingABC):
+            buckets_source = bucket_view_obj.get("buckets")
+        elif isinstance(bucket_view_obj, dict):
+            buckets_source = bucket_view_obj.get("buckets")
+
+        buckets: dict[str, Mapping[str, Any]]
+        if isinstance(buckets_source, dict):
+            buckets = buckets_source
+        elif isinstance(buckets_source, _MappingABC):
+            try:
+                buckets = dict(buckets_source)
+            except Exception:
+                buckets = {}
+        else:
+            buckets = {}
+
+        if not buckets:
+            return 0.0, 0.0
+
+        label = {
+            "programming": "Programming (amortized)",
+            "milling": "Milling",
+            "drilling": "Drilling",
+            "tapping": "Tapping",
+            "counterbore": "Counterbore",
+            "spot_drill": "Spot-Drill",
+            "jig_grind": "Jig-Grind",
+            "inspection": "Inspection",
+        }
+        order = [
+            "programming",
+            "milling",
+            "drilling",
+            "tapping",
+            "counterbore",
+            "spot_drill",
+            "jig_grind",
+            "inspection",
+        ]
+
+        _push(lines, "Process & Labor Costs")
+        _push(lines, "-" * 74)
+        total_cost = 0.0
+        printed: set[str] = set()
+
+        bucket_keys = list(order)
+        bucket_keys.extend(k for k in buckets.keys() if k not in printed and k not in order)
+
+        for key in bucket_keys:
+            if key in printed:
+                continue
+            entry = buckets.get(key)
+            if not isinstance(entry, _MappingABC):
+                continue
+            printed.add(key)
+            try:
+                minutes_val = float(entry.get("minutes", 0.0) or 0.0)
+            except Exception:
+                minutes_val = 0.0
+            hours_val = _minutes_to_hours(minutes_val)
+            try:
+                total_amount = float(entry.get("total$", 0.0) or 0.0)
+            except Exception:
+                total_amount = 0.0
+            total_cost += total_amount
+            display_label = label.get(key, key)
+            _push(
+                lines,
+                f"  {display_label.ljust(28)}${total_amount:>10,.2f}",
+            )
+            # Optional detail line (comment out if you want one line only):
+            # _push(lines, f"    {hours_val:.2f} hr")
+
+        _push(lines, " " * 66 + "-------")
+        _push(lines, f"  Total{' ' * 58 }${total_cost:>10,.2f}")
+        _push(lines, "")
+
+        _push(lines, "Labor Hour Summary")
+        _push(lines, "-" * 74)
+        total_hours = 0.0
+        for key in bucket_keys:
+            entry = buckets.get(key)
+            if not isinstance(entry, _MappingABC):
+                continue
+            hours_val = _minutes_to_hours(entry.get("minutes", 0.0))
+            if hours_val <= 0:
+                continue
+            display_label = label.get(key, key)
+            _push(lines, f"  {display_label.ljust(28)}{hours_val:.2f} hr")
+            total_hours += hours_val
+        _push(lines, " " * 66 + "-------")
+        _push(lines, f"  Total Hours{' ' * 49 }{total_hours:.2f} hr")
+        _push(lines, "")
+
+        return total_cost, total_hours
 
     def _is_extra_segment(segment: str) -> bool:
         try:
@@ -5564,38 +5687,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if not ((numeric_amount > 0.0) or show_zeros):
             return
 
-        row(label, numeric_amount, indent="  ")
-
-        details_rendered = False
-        if detail_bits:
-            for bit in detail_bits:
-                if bit in (None, ""):
-                    continue
-                write_detail(str(bit), indent="    ")
-                details_rendered = True
-
-        if not details_rendered:
-            detail_text = detail_lookup.get(label)
-            if detail_text not in (None, ""):
-                write_detail(str(detail_text), indent="    ")
-                details_rendered = True
-
-        if not details_rendered:
-            extra_detail = labor_cost_details.get(label)
-            if extra_detail not in (None, ""):
-                canon_key = label_to_canon.get(label)
-                if canon_key and canon_key in process_cost_row_details:
-                    extra_detail = None
-            if extra_detail not in (None, ""):
-                write_detail(str(extra_detail), indent="    ")
-                details_rendered = True
-
-        if not details_rendered:
-            canon_key = label_to_canon.get(label)
-            key_for_notes = process_key or canon_key
-            if key_for_notes:
-                add_process_notes(key_for_notes, indent="    ")
-
         proc_total += numeric_amount
 
     def _prepare_amortized_details() -> dict[str, tuple[float, float]]:
@@ -6236,15 +6327,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         labor_costs_display[display_label] = amount_val
         misc_total += amount_val
 
-    if misc_total > 0:
-        process_table.had_rows = True
-
-    if not process_table.had_rows and show_zeros:
-        row("No process costs", 0.0, indent="  ")
-
-    row("Total", proc_total, indent="  ")
-    process_total_row_index = len(lines) - 1
-
     hour_summary_entries.clear()
 
     if (
@@ -6694,154 +6776,30 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             _fmt_drill_debug(summary_hr),
         )
 
-    if hour_summary_entries:
-        def _canonical_hour_label(value: Any) -> tuple[str, str]:
+    if misc_total > 0:
+        process_table.had_rows = True
 
-            text = str(value or "")
-            text = re.sub(r"\s+", " ", text).strip()
-            canonical = text.casefold()
-            return canonical, text
+    bucket_view_for_render: Mapping[str, Any] | None
+    if isinstance(bucket_view_obj, (_MappingABC, dict)):
+        bucket_view_for_render = typing.cast(Mapping[str, Any], bucket_view_obj)
+    elif isinstance(bucket_view_struct, (_MappingABC, dict)):
+        bucket_view_for_render = typing.cast(Mapping[str, Any], bucket_view_struct)
+    else:
+        bucket_view_for_render = None
 
-        _push(lines, "")
-        _push(lines, "Labor Hour Summary")
-        _push(lines, divider)
-        if str(pricing_source_value).lower() == "planner":
-            entries_iter = list(hour_summary_entries.items())
-        else:
-            entries_iter = list(
-                sorted(hour_summary_entries.items(), key=lambda kv: kv[1][0], reverse=True)
-            )
-        folded_entries: dict[str, list[Any]] = {}
-        folded_display: dict[str, str] = {}
-        folded_order: list[str] = []
-
-        def _coerce_hour_value(value: Any) -> float | None:
-            coerced = _coerce_float_or_none(value)
-            if coerced is None:
-                return None
-            try:
-                return float(coerced)
-            except Exception:
-                return None
-
-        for label, (hr_val, include_in_total) in entries_iter:
-            canonical_key, display_label = _canonical_hour_label(label)
-            folded = folded_entries.get(canonical_key)
-            if folded is None:
-                folded_entries[canonical_key] = [hr_val, bool(include_in_total)]
-                folded_display[canonical_key] = display_label
-                folded_order.append(canonical_key)
-                continue
-
-            folded_display.setdefault(canonical_key, display_label)
-
-            existing_hr, existing_include = folded
-            hr_float = _coerce_hour_value(hr_val)
-            existing_float = _coerce_hour_value(existing_hr)
-            deduped = False
-
-            if hr_float is not None and existing_float is not None:
-                try:
-                    if math.isclose(existing_float, hr_float, rel_tol=1e-9, abs_tol=0.005):
-                        deduped = True
-                except Exception:
-                    deduped = False
-
-            if deduped:
-                folded[1] = existing_include or bool(include_in_total)
-                continue
-
-            if existing_float is not None or hr_float is not None:
-                folded[0] = (existing_float or 0.0) + (hr_float or 0.0)
-            else:
-                try:
-                    folded[0] = existing_hr + hr_val
-                except Exception:
-                    folded[0] = existing_hr
-            folded[1] = existing_include or bool(include_in_total)
-        def _extract_pricing_buckets(candidate: Any) -> Mapping[str, Any] | None:
-            if isinstance(candidate, _MutableMappingABC):
-                buckets_candidate = candidate.get("buckets")
-            elif isinstance(candidate, dict):
-                buckets_candidate = candidate.get("buckets")
-            elif isinstance(candidate, _MappingABC):
-                buckets_candidate = candidate.get("buckets")
-            else:
-                buckets_candidate = None
-            if isinstance(buckets_candidate, _MutableMappingABC):
-                return buckets_candidate
-            if isinstance(buckets_candidate, dict):
-                return buckets_candidate
-            if isinstance(buckets_candidate, _MappingABC):
-                try:
-                    return dict(buckets_candidate)
-                except Exception:
-                    return None
-            return None
-
-        pricing_bucket_candidates: list[Mapping[str, Any] | None] = []
-        pricing_bucket_candidates.append(_extract_pricing_buckets(locals().get("bucket_view_struct")))
-        breakdown_bucket_view: Any = None
-        if isinstance(breakdown, dict):
-            breakdown_bucket_view = breakdown.get("bucket_view")
-        elif isinstance(breakdown, _MappingABC):
-            breakdown_bucket_view = breakdown.get("bucket_view")
-        pricing_bucket_candidates.append(_extract_pricing_buckets(breakdown_bucket_view))
-        pricing_bucket_candidates.append(
-            _extract_pricing_buckets(locals().get("planner_bucket_view"))
-        )
-
-        pricing_buckets_for_summary: Mapping[str, Any] | None = None
-        for candidate in pricing_bucket_candidates:
-            if isinstance(candidate, Mapping) and candidate:
-                pricing_buckets_for_summary = candidate
+    process_section_start = len(lines)
+    proc_total_rendered, hrs_total_rendered = _render_process_and_hours_from_buckets(
+        lines,
+        bucket_view_for_render,
+        rates,
+    )
+    if proc_total_rendered or hrs_total_rendered:
+        for offset, text in enumerate(lines[process_section_start:]):
+            stripped = str(text or "").strip()
+            if stripped.lower().startswith("total") and "$" in stripped:
+                process_total_row_index = process_section_start + offset
                 break
-
-        drilling_minutes_bucket: float | None = None
-        if isinstance(pricing_buckets_for_summary, Mapping):
-            for key in ("drilling", "Drilling"):
-                bucket_entry = pricing_buckets_for_summary.get(key)
-                if isinstance(bucket_entry, (int, float)):
-                    drilling_minutes_bucket = float(bucket_entry)
-                elif isinstance(bucket_entry, _MappingABC):
-                    drilling_minutes_bucket = _coerce_float_or_none(bucket_entry.get("minutes"))
-                elif isinstance(bucket_entry, dict):
-                    drilling_minutes_bucket = _coerce_float_or_none(bucket_entry.get("minutes"))
-                if drilling_minutes_bucket is not None:
-                    break
-
-        total_hours = 0.0
-        for canonical_key in folded_order:
-            hr_val, include_in_total = folded_entries[canonical_key]
-            display_label = folded_display.get(canonical_key, "")
-            if (
-                drilling_minutes_bucket is not None
-                and str(display_label).strip().lower() == "drilling"
-            ):
-                hrs_drilling_precise = minutes_to_hours(float(drilling_minutes_bucket))
-                hrs_drilling = round(hrs_drilling_precise, 2)
-                folded_entries[canonical_key][0] = hrs_drilling
-                if isinstance(hour_summary_entries, (dict, _MutableMappingABC)):
-                    for label_key in list(hour_summary_entries.keys()):
-                        if str(label_key).strip().lower() != "drilling":
-                            continue
-                        existing_val = hour_summary_entries.get(label_key)
-                        include_flag = True
-                        if isinstance(existing_val, tuple) and len(existing_val) == 2:
-                            include_flag = bool(existing_val[1])
-                        hour_summary_entries[label_key] = (hrs_drilling, include_flag)
-                right = _h(hrs_drilling)
-                left = f"  {display_label}"
-                pad = max(1, page_width - len(left) - len(right))
-                _push(lines, f"{left}{' ' * pad}{right}")
-                if include_in_total and hrs_drilling:
-                    total_hours += hrs_drilling
-                continue
-            hours_row(display_label, hr_val, indent="  ")
-            if include_in_total and hr_val:
-                total_hours += hr_val
-        hours_row("Total Hours", total_hours, indent="  ")
-    _push(lines, "")
+    proc_total = proc_total_rendered
 
     # ---- Pass-Through & Direct (auto include non-zeros; sorted desc) --------
     _push(lines, "Pass-Through & Direct Costs")
@@ -8985,8 +8943,10 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         stock_price_source=stock_price_source,
         cfg=cfg,
     )
-    if isinstance(mat_block_raw, _MappingABC):
-        mat_block: dict[str, Any] = dict(mat_block_raw)
+    if isinstance(mat_block_raw, dict):
+        mat_block = mat_block_raw
+    elif isinstance(mat_block_raw, _MappingABC):
+        mat_block = dict(mat_block_raw)
     else:
         mat_block = {}
     breakdown["material_block"] = mat_block
@@ -10180,6 +10140,42 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 ),
             }
 
+            try:
+                drill_minutes_seed = float(drilling_bucket_prepared.get("minutes") or 0.0)
+            except Exception:
+                drill_minutes_seed = 0.0
+
+            drill_machine_rate_seed = (
+                _lookup_bucket_rate("drilling", rates)
+                or _lookup_bucket_rate("machine", rates)
+                or 0.0
+            )
+            drill_labor_rate_seed = (
+                _lookup_bucket_rate("drilling_labor", rates)
+                or _lookup_bucket_rate("labor", rates)
+                or 0.0
+            )
+
+            _seed_bucket_minutes_cost(
+                bucket_view,
+                "drilling",
+                drill_minutes_seed,
+                machine_rate_per_hr=float(drill_machine_rate_seed or 0.0),
+                labor_rate_per_hr=float(drill_labor_rate_seed or 0.0),
+            )
+
+            drilling_dbg_entry: Mapping[str, Any] | None = None
+            try:
+                buckets_dbg = bucket_view.get("buckets") if isinstance(bucket_view, dict) else None
+                if buckets_dbg is None and isinstance(bucket_view, _MappingABC):
+                    buckets_dbg = bucket_view.get("buckets")
+                if isinstance(buckets_dbg, (_MappingABC, dict)):
+                    drilling_dbg_entry = buckets_dbg.get("drilling")  # type: ignore[index]
+            except Exception:
+                drilling_dbg_entry = None
+
+            _push(lines, f"[DEBUG] drilling_bucket={drilling_dbg_entry or {}}")
+
     roughing_hours = _coerce_float_or_none(value_map.get("Roughing Cycle Time"))
     if roughing_hours is None:
         roughing_hours = _coerce_float_or_none(value_map.get("Roughing Cycle Time (hr)"))
@@ -10196,6 +10192,34 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             "rate": milling_rate,
             "basis": ["planner_milling_backfill"],
         }
+
+        milling_minutes_seed = float(roughing_hours * 60.0)
+        milling_machine_rate_seed = float(milling_rate or 0.0)
+        milling_labor_rate_seed = (
+            _lookup_bucket_rate("milling_labor", rates)
+            or _lookup_bucket_rate("labor", rates)
+            or 0.0
+        )
+
+        _seed_bucket_minutes_cost(
+            bucket_view,
+            "milling",
+            milling_minutes_seed,
+            machine_rate_per_hr=milling_machine_rate_seed,
+            labor_rate_per_hr=float(milling_labor_rate_seed or 0.0),
+        )
+
+        milling_dbg_entry: Mapping[str, Any] | None = None
+        try:
+            buckets_dbg = bucket_view.get("buckets") if isinstance(bucket_view, dict) else None
+            if buckets_dbg is None and isinstance(bucket_view, _MappingABC):
+                buckets_dbg = bucket_view.get("buckets")
+            if isinstance(buckets_dbg, (_MappingABC, dict)):
+                milling_dbg_entry = buckets_dbg.get("milling")  # type: ignore[index]
+        except Exception:
+            milling_dbg_entry = None
+
+        _push(lines, f"[DEBUG] milling_bucket={milling_dbg_entry or {}}")
 
     project_hours = _coerce_float_or_none(value_map.get("Project Management Hours")) or 0.0
     toolmaker_hours = _coerce_float_or_none(value_map.get("Tool & Die Maker Hours")) or 0.0
@@ -12905,13 +12929,14 @@ def _coerce_int_or_zero(value: Any) -> int:
     except Exception:
         return 0
 
-def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
+def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
     ezdxf_mod = geometry.require_ezdxf()
 
     # --- load doc ---
     dxf_text_path: str | None = None
     doc: Drawing | None = None
-    lower_path = path.lower()
+    path_str = str(path)
+    lower_path = path_str.lower()
     readfile: Callable[[str], Any] | None = getattr(ezdxf_mod, "readfile", None)
     if not callable(readfile):
         raise AttributeError("ezdxf module does not provide a callable 'readfile' function")
@@ -12926,14 +12951,14 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
                 raise RuntimeError(
                     "ezdxf.addons.odafc.readfile is unavailable; install ODAFileConverter support."
                 )
-            doc = cast(Drawing, readfile(path))
+            doc = cast(Drawing, readfile(path_str))
         else:
-            dxf_path = geometry.convert_dwg_to_dxf(path, out_ver="ACAD2018")
+            dxf_path = geometry.convert_dwg_to_dxf(path_str, out_ver="ACAD2018")
             dxf_text_path = dxf_path
             doc = cast(Drawing, readfile(dxf_path))
     else:
-        doc = cast(Drawing, readfile(path))
-        dxf_text_path = path
+        doc = cast(Drawing, readfile(path_str))
+        dxf_text_path = path_str
 
     if doc is None:
         raise RuntimeError("Failed to load DXF/DWG document")
@@ -13743,7 +13768,7 @@ class App(tk.Tk):
         self.quote_state = QuoteState()
         self.llm_events: list[dict[str, Any]] = []
         self.llm_errors: list[dict[str, Any]] = []
-        self._llm_client_cache: LLMClient | None = None
+        self._llm_client_cache: LLMClientType | None = None
         self.settings_path = (
             getattr(self.configuration, "settings_path", None)
             or default_app_settings_json()
@@ -13978,7 +14003,7 @@ class App(tk.Tk):
         except Exception:
             pass
 
-    def get_llm_client(self, model_path: str | None = None) -> LLMClient | None:
+    def get_llm_client(self, model_path: str | None = None) -> LLMClientType | None:
         path = (model_path or "").strip()
         if not path and hasattr(self, "llm_model_path"):
             path = (self.llm_model_path.get().strip() if self.llm_model_path.get() else "")
@@ -14213,7 +14238,7 @@ class App(tk.Tk):
             mask = dataframe["Item"].astype(str).str.fullmatch(item, case=False)
             if mask.any():
                 return dataframe
-            return geometry.upsert_var_row(dataframe, item, value, dtype=dtype)
+            return geometry_upsert_var_row(dataframe, item, value, dtype=dtype)
 
         df = _ensure_row(df, "Scrap Percent (%)", 15.0, dtype="number")
         df = _ensure_row(df, "Plate Length (in)", 12.0, dtype="number")
@@ -14244,7 +14269,11 @@ class App(tk.Tk):
         normalized_items = items_series.apply(normalize_item_text)
         qty_mask = normalized_items.isin({"quantity", "qty", "lot size"})
         if qty_mask.any():
-            qty_raw = df.loc[qty_mask, "Example Values / Options"].iloc[0]
+            qty_column = typing.cast(
+                PandasSeries,
+                df.loc[qty_mask, "Example Values / Options"],
+            )
+            qty_raw = qty_column.iloc[0]
             try:
                 qty_value = float(str(qty_raw).strip())
             except Exception:
@@ -15130,7 +15159,7 @@ class App(tk.Tk):
         # Merge GEO rows
         try:
             for k, v in geo.items():
-                self.vars_df = geometry.upsert_var_row(self.vars_df, k, v, dtype="number")
+                self.vars_df = geometry_upsert_var_row(self.vars_df, k, v, dtype="number")
         except Exception as e:
             messagebox.showerror("Variables", f"Failed to update variables with GEO rows:\n{e}")
             self.status_var.set("Ready")
@@ -15145,13 +15174,22 @@ class App(tk.Tk):
             client = self.get_llm_client(self.llm_model_path.get().strip() or None)
         est_raw = infer_hours_and_overrides_from_geo(geo, params=self.params, rates=self.rates, client=client)
         est = clamp_llm_hours(est_raw, geo, params=self.params)
-        self.vars_df = apply_llm_hours_to_variables(self.vars_df, est, allow_overwrite_nonzero=True, log=decision_log)
+        vars_df_before_llm = self.vars_df
+        vars_df_after_llm = apply_llm_hours_to_variables(
+            vars_df_before_llm, est, allow_overwrite_nonzero=True, log=decision_log
+        )
+        if vars_df_after_llm is None:
+            vars_df_after_llm = coerce_or_make_vars_df(vars_df_before_llm)
+        self.vars_df = vars_df_after_llm
+
         self.geo = geo
         self.geo_context = dict(geo or {})
         self._log_geo(geo)
 
-        vars_df_for_editor = typing.cast(PandasDataFrame, self.vars_df)
-        self._populate_editor_tab(vars_df_for_editor)
+        vars_df_for_editor = self.vars_df
+        if vars_df_for_editor is None:  # pragma: no cover - defensive type check
+            raise RuntimeError("Variables dataframe was not initialized")
+        self._populate_editor_tab(typing.cast(PandasDataFrame, vars_df_for_editor))
         self.nb.select(self.tab_editor)
         self.status_var.set("Variables loaded. Review the Quote Editor and click Generate Quote.")
         return
