@@ -3484,15 +3484,15 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     def _render_process_and_hours_from_buckets(
         lines: list[str],
         bucket_view_obj: Mapping[str, Any] | None,
-        rates: Mapping[str, Any] | None = None,
     ) -> tuple[float, float]:
-        """Render process and labor hour tables from canonical bucket data."""
+        """Render the Process & Labor + Labor Hour tables from planner buckets."""
 
         buckets_source: Mapping[str, Any] | None = None
-        if isinstance(bucket_view_obj, _MappingABC):
-            buckets_source = bucket_view_obj.get("buckets")
-        elif isinstance(bucket_view_obj, dict):
-            buckets_source = bucket_view_obj.get("buckets")
+        if isinstance(bucket_view_obj, (_MappingABC, dict)):
+            try:
+                buckets_source = bucket_view_obj.get("buckets")
+            except Exception:
+                buckets_source = None
 
         buckets: dict[str, Mapping[str, Any]]
         if isinstance(buckets_source, dict):
@@ -3508,7 +3508,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if not buckets:
             return 0.0, 0.0
 
-        label = {
+        labels = {
             "programming": "Programming (amortized)",
             "milling": "Milling",
             "drilling": "Drilling",
@@ -3518,7 +3518,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             "jig_grind": "Jig-Grind",
             "inspection": "Inspection",
         }
-        order = [
+        preferred_order = [
             "programming",
             "milling",
             "drilling",
@@ -3529,39 +3529,27 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             "inspection",
         ]
 
+        ordered_keys = list(preferred_order)
+        ordered_keys.extend(k for k in buckets if k not in preferred_order)
+
         _push(lines, "Process & Labor Costs")
         _push(lines, "-" * 74)
         total_cost = 0.0
-        printed: set[str] = set()
-
-        bucket_keys = list(order)
-        bucket_keys.extend(k for k in buckets.keys() if k not in printed and k not in order)
-
-        for key in bucket_keys:
-            if key in printed:
+        seen: set[str] = set()
+        for key in ordered_keys:
+            if key in seen:
                 continue
             entry = buckets.get(key)
             if not isinstance(entry, _MappingABC):
                 continue
-            printed.add(key)
-            try:
-                minutes_val = float(entry.get("minutes", 0.0) or 0.0)
-            except Exception:
-                minutes_val = 0.0
-            hours_val = _minutes_to_hours(minutes_val)
+            seen.add(key)
             try:
                 total_amount = float(entry.get("total$", 0.0) or 0.0)
             except Exception:
                 total_amount = 0.0
             total_cost += total_amount
-            display_label = label.get(key, key)
-            _push(
-                lines,
-                f"  {display_label.ljust(28)}${total_amount:>10,.2f}",
-            )
-            # Optional detail line (comment out if you want one line only):
-            # _push(lines, f"    {hours_val:.2f} hr")
-
+            display_label = labels.get(key, key)
+            _push(lines, f"  {display_label.ljust(28)}${total_amount:>10,.2f}")
         _push(lines, " " * 66 + "-------")
         _push(lines, f"  Total{' ' * 58 }${total_cost:>10,.2f}")
         _push(lines, "")
@@ -3569,14 +3557,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         _push(lines, "Labor Hour Summary")
         _push(lines, "-" * 74)
         total_hours = 0.0
-        for key in bucket_keys:
+        for key in ordered_keys:
             entry = buckets.get(key)
             if not isinstance(entry, _MappingABC):
                 continue
             hours_val = _minutes_to_hours(entry.get("minutes", 0.0))
             if hours_val <= 0:
                 continue
-            display_label = label.get(key, key)
+            display_label = labels.get(key, key)
             _push(lines, f"  {display_label.ljust(28)}{hours_val:.2f} hr")
             total_hours += hours_val
         _push(lines, " " * 66 + "-------")
@@ -6946,7 +6934,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     proc_total_rendered, hrs_total_rendered = _render_process_and_hours_from_buckets(
         lines,
         bucket_view_for_render,
-        rates,
     )
     if proc_total_rendered or hrs_total_rendered:
         for offset, text in enumerate(lines[process_section_start:]):
