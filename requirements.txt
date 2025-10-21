@@ -14,3 +14,9 @@ OCP>=7.7
 trimesh>=3.22
 ezdxf>=1.0
 llama-cpp-python>=0.2.0
+
+# Type information shims for optional dependencies
+pandas-stubs==2.2.2.240514
+types-ezdxf==1.0.0
+types-pythonocc-core==7.7.0.1
+types-PyMuPDF==1.24.3.20240525
