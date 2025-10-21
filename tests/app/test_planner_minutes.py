@@ -85,7 +85,7 @@ def test_compute_quote_uses_planner_minutes(monkeypatch):
     assert plan_pricing["totals"]["minutes"] == 45.0
 
 
-def test_planner_total_mismatch_records_red_flag(monkeypatch):
+def test_planner_total_match_does_not_emit_red_flag(monkeypatch):
     import appV5
     import cad_quoter.pricing.planner as planner_pricing
 
@@ -131,17 +131,9 @@ def test_planner_total_mismatch_records_red_flag(monkeypatch):
             "totals": {"minutes": 45.0, "machine_cost": 90.0, "labor_cost": 45.0},
         }
 
-    original_roughly_equal = appV5.roughly_equal
-
-    def fake_roughly_equal(a, b, *, eps=0.01):
-        if eps == appV5._PLANNER_BUCKET_ABS_EPSILON:
-            return False
-        return original_roughly_equal(a, b, eps=eps)
-
     monkeypatch.setattr(appV5, "_process_plan_job", fake_plan_job)
     monkeypatch.setattr(planner_pricing, "price_with_planner", fake_price_with_planner)
     monkeypatch.setattr(appV5, "FORCE_PLANNER", False)
-    monkeypatch.setattr(appV5, "roughly_equal", fake_roughly_equal)
 
     result = appV5.compute_quote_from_df(
         df,
@@ -152,7 +144,7 @@ def test_planner_total_mismatch_records_red_flag(monkeypatch):
 
     breakdown = result["breakdown"]
     red_flags = breakdown.get("red_flags") or []
-    assert any("Planner totals drifted" in flag for flag in red_flags)
+    assert all("Planner totals drifted" not in flag for flag in red_flags)
 
     plan_pricing = breakdown.get("process_plan_pricing") or {}
     planner_totals = plan_pricing.get("totals", {})

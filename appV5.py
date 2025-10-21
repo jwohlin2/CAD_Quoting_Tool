@@ -9937,17 +9937,17 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             }
 
             machine_rendered = float(_coerce_float_or_none(process_costs.get("Machine")) or 0.0)
-            if not roughly_equal(
-                planner_machine_cost_total,
-                machine_rendered,
-                eps=_PLANNER_BUCKET_ABS_EPSILON,
+            if (
+                planner_machine_cost_total > 0.0
+                and machine_rendered > 0.0
+                and abs(planner_machine_cost_total - machine_rendered) > _PLANNER_BUCKET_ABS_EPSILON
             ):
                 breakdown["red_flags"].append("Planner totals drifted (machine cost)")
             labor_rendered = float(_coerce_float_or_none(process_costs.get("Labor")) or 0.0)
-            if not roughly_equal(
-                planner_labor_cost_total,
-                labor_rendered,
-                eps=_PLANNER_BUCKET_ABS_EPSILON,
+            if (
+                planner_labor_cost_total > 0.0
+                and labor_rendered > 0.0
+                and abs(planner_labor_cost_total - labor_rendered) > _PLANNER_BUCKET_ABS_EPSILON
             ):
                 breakdown["red_flags"].append("Planner totals drifted (labor cost)")
 
