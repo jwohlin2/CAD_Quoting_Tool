@@ -15,11 +15,22 @@ Single-file CAD Quoter (v8)
 from __future__ import annotations
 
 import sys
+from io import TextIOWrapper
+from pathlib import Path
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8")  # py3.7+
-except Exception:
-    pass
+_stdout = sys.stdout
+if isinstance(_stdout, TextIOWrapper):
+    try:
+        _stdout.reconfigure(encoding="utf-8")  # py3.7+
+    except Exception:
+        pass
+
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_PKG_SRC = _SCRIPT_DIR / "cad_quoter_pkg" / "src"
+if _PKG_SRC.is_dir():
+    _pkg_src_str = str(_PKG_SRC)
+    if _pkg_src_str not in sys.path:
+        sys.path.insert(0, _pkg_src_str)
 
 from cad_quoter.app.quote_doc import (
     build_quote_header_lines,
@@ -50,7 +61,6 @@ from collections.abc import (
 )
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
-from pathlib import Path
 
 from cad_quoter.app._value_utils import (
     _format_value,
