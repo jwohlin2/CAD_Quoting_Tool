@@ -179,7 +179,6 @@ def _apply_drilling_meta_fallback(
     return (deep, std)
 import copy
 import csv
-import importlib
 import json
 import math
 import os
@@ -203,12 +202,17 @@ from collections.abc import (
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
-from types import SimpleNamespace
 
 from cad_quoter.app._value_utils import (
     _format_value,
 )
 from cad_quoter.app.chart_lines import (
+    RE_CBORE,
+    RE_DEPTH,
+    RE_DIA,
+    RE_NPT,
+    RE_TAP,
+    RE_THRU,
     build_ops_rows_from_lines_fallback as _build_ops_rows_from_lines_fallback,
     collect_chart_lines_context as _collect_chart_lines_context,
     norm_line as _norm_line,
@@ -347,6 +351,17 @@ import cad_quoter.geometry as geometry
 
 
 
+# Safe append to the current quote buffer
+def _push(_lines, text):
+    try:
+        if isinstance(_lines, list):
+            _lines.append(str(text))
+        else:
+            print(str(text))
+    except Exception:
+        pass
+
+
 _HAS_ODAFC = bool(getattr(geometry, "HAS_ODAFC", False))
 _HAS_PYMUPDF = bool(getattr(geometry, "HAS_PYMUPDF", getattr(geometry, "_HAS_PYMUPDF", False)))
 fitz = getattr(geometry, "fitz", None)
@@ -398,19 +413,6 @@ from appkit.effective import (
 )
 
 from appkit.ui import suggestions as ui_suggestions
-
-from appkit.occ_compat import (
-    BRep_Tool,
-    TopAbs_EDGE,
-    TopAbs_FACE,
-    TopExp,
-    TopExp_Explorer,
-    TopoDS,
-    TopoDS_Face,
-    TopoDS_Shape,
-    TopTools_IndexedDataMapOfShapeListOfShape,
-    BRepTools,
-)
 
 from cad_quoter.utils.scrap import (
     HOLE_SCRAP_CAP,
@@ -479,8 +481,7 @@ _RENDER_ASCII_REPLACEMENTS: dict[str, str] = {
     "½": "1/2",
     "¾": "3/4",
     " ": " ",  # non-breaking space
-    "⚠️": "[!]",
-    "⚠": "[!]",
+    "⚠️": "⚠",
 }
 
 _RENDER_PASSTHROUGH: dict[str, str] = {
@@ -488,6 +489,7 @@ _RENDER_PASSTHROUGH: dict[str, str] = {
     "×": "__MULTIPLY__",
     "≥": "__GEQ__",
     "≤": "__LEQ__",
+    "⚠": "__WARN__",
 }
 
 
@@ -519,7 +521,7 @@ def _sanitize_render_text(value: typing.Any) -> str:
 # Helpers: formatting + removal card + per-hole lines (no material per line)
 # ──────────────────────────────────────────────────────────────────────────────
 def _render_removal_card(
-    append_line: Callable[[str], None],
+    lines: list[str],
     *,
     mat_canon: str,
     mat_group: str | None,
@@ -541,58 +543,63 @@ def _render_removal_card(
     toolchange_min_deep: float,
     toolchange_min_std: float,
 ) -> None:
-    append_line("MATERIAL REMOVAL – DRILLING")
-    append_line("=" * 64)
+    _push(lines, "MATERIAL REMOVAL – DRILLING")
+    _push(lines, "=" * 64)
     # Inputs
-    append_line("Inputs")
-    append_line(f"  Material .......... {mat_canon}  [group {mat_group or '-'}]")
+    _push(lines, "Inputs")
+    _push(lines, f"  Material .......... {mat_canon}  [group {mat_group or '-'}]")
     mismatch = False
     if row_group:
         rg = str(row_group).upper()
         mg = str(mat_group or "").upper()
         mismatch = (rg != mg and (rg and mg))
         note = "   (!) mismatch – used row from different group" if mismatch else ""
-        append_line(f"  CSV row group ..... {row_group}{note}")
-    append_line("  Operations ........ Deep-Drill (L/D ≥ 3), Drill")
-    append_line(
+        _push(lines, f"  CSV row group ..... {row_group}{note}")
+    _push(lines, "  Operations ........ Deep-Drill (L/D ≥ 3), Drill")
+    _push(
+        lines,
         f"  Holes ............. {int(holes_deep)} deep + {int(holes_std)} std  = {int(holes_deep + holes_std)}"
     )
-    append_line(f'  Diameter range .... {_fmt_rng(dia_vals_in, 3)}"')
-    append_line(f"  Depth per hole .... {_fmt_rng(depth_vals_in, 2)} in")
-    append_line("")
+    _push(lines, f'  Diameter range .... {_fmt_rng(dia_vals_in, 3)}"')
+    _push(lines, f"  Depth per hole .... {_fmt_rng(depth_vals_in, 2)} in")
+    _push(lines, "")
     # Feeds & Speeds
-    append_line("Feeds & Speeds (used)")
-    append_line(f"  SFM ............... {int(round(sfm_deep))} (deep)   | {int(round(sfm_std))} (std)")
-    append_line(
+    _push(lines, "Feeds & Speeds (used)")
+    _push(lines, f"  SFM ............... {int(round(sfm_deep))} (deep)   | {int(round(sfm_std))} (std)")
+    _push(
+        lines,
         f"  IPR ............... {_fmt_rng(ipr_deep_vals, 4)} (deep) | {float(ipr_std_val):.4f} (std)"
     )
-    append_line(
+    _push(
+        lines,
         f"  RPM ............... {_fmt_rng(rpm_deep_vals, 0)} (deep)      | {_fmt_rng(rpm_std_vals, 0)} (std)"
     )
-    append_line(
+    _push(
+        lines,
         f"  IPM ............... {_fmt_rng(ipm_deep_vals, 1)} (deep)       | {_fmt_rng(ipm_std_vals, 1)} (std)"
     )
-    append_line("")
+    _push(lines, "")
     # Overheads
-    append_line("Overheads")
-    append_line(f"  Index per hole .... {float(index_min_per_hole):.2f} min")
-    append_line(f"  Peck per hole ..... {_fmt_rng(peck_min_rng, 2)} min")
-    append_line(
+    _push(lines, "Overheads")
+    _push(lines, f"  Index per hole .... {float(index_min_per_hole):.2f} min")
+    _push(lines, f"  Peck per hole ..... {_fmt_rng(peck_min_rng, 2)} min")
+    _push(
+        lines,
         f"  Toolchange ........ {float(toolchange_min_deep):.2f} min (deep) | {float(toolchange_min_std):.2f} min (std)"
     )
-    append_line("")
+    _push(lines, "")
 
 
 def _render_time_per_hole(
-    append_line: Callable[[str], None],
+    lines: list[str],
     *,
     bins: list[dict[str, Any]],
     index_min: float,
     peck_min_deep: float,
     peck_min_std: float,
 ) -> tuple[float, bool, bool]:
-    append_line("TIME PER HOLE – DRILL GROUPS")
-    append_line("-" * 66)
+    _push(lines, "TIME PER HOLE – DRILL GROUPS")
+    _push(lines, "-" * 66)
     subtotal_min = 0.0
     seen_deep = False
     seen_std = False
@@ -616,13 +623,14 @@ def _render_time_per_hole(
             group_min = t_hole * qty
             subtotal_min += group_min
             # single-line, no material
-            append_line(
+            _push(
+                lines,
                 f'Dia {d_in:.3f}" × {qty}  | depth {depth:.3f}" | {int(round(sfm))} sfm | {ipr:.4f} ipr | '
                 f't/hole {t_hole:.2f} min | group {qty}×{t_hole:.2f} = {group_min:.2f} min'
             )
         except Exception:
             continue
-    append_line("")
+    _push(lines, "")
     return subtotal_min, seen_deep, seen_std
 
 
@@ -641,6 +649,77 @@ def _compute_drilling_removal_section(
     """Return drill removal render lines + extras while updating breakdown state."""
 
     lines: list[str] = []
+
+    def _push(target: list[str], text: Any) -> None:
+        try:
+            target.append(str(text))
+        except Exception:
+            pass
+
+    pricing_buckets: MutableMapping[str, Any] | dict[str, Any] = {}
+    bucket_view_obj: MutableMapping[str, Any] | Mapping[str, Any] | None = None
+    try:
+        if isinstance(breakdown, dict):
+            bucket_view_obj = breakdown.setdefault("bucket_view", {})
+        elif isinstance(breakdown, _MutableMappingABC):
+            bucket_view_obj = typing.cast(
+                MutableMapping[str, Any],
+                breakdown.setdefault("bucket_view", {}),
+            )
+        elif isinstance(breakdown, _MappingABC):
+            bucket_view_obj = typing.cast(Mapping[str, Any], breakdown.get("bucket_view"))
+    except Exception:
+        bucket_view_obj = None
+
+    buckets_obj: MutableMapping[str, Any] | Mapping[str, Any] | None = None
+    if isinstance(bucket_view_obj, _MutableMappingABC):
+        buckets_obj = bucket_view_obj.setdefault("buckets", {})
+    elif isinstance(bucket_view_obj, dict):
+        buckets_obj = bucket_view_obj.setdefault("buckets", {})
+    elif isinstance(bucket_view_obj, _MappingABC):
+        buckets_obj = bucket_view_obj.get("buckets")
+
+    if isinstance(buckets_obj, _MutableMappingABC):
+        pricing_buckets = buckets_obj
+    elif isinstance(buckets_obj, dict):
+        pricing_buckets = buckets_obj
+        if isinstance(bucket_view_obj, _MutableMappingABC):
+            bucket_view_obj["buckets"] = pricing_buckets
+        elif isinstance(bucket_view_obj, dict):
+            bucket_view_obj["buckets"] = pricing_buckets
+    elif isinstance(buckets_obj, _MappingABC):
+        try:
+            pricing_buckets = dict(buckets_obj)
+            if isinstance(bucket_view_obj, _MutableMappingABC):
+                bucket_view_obj["buckets"] = pricing_buckets
+            elif isinstance(bucket_view_obj, dict):
+                bucket_view_obj["buckets"] = pricing_buckets
+        except Exception:
+            pricing_buckets = {}
+
+    def _seed_bucket_minutes(bucket_key: str, minutes: float) -> None:
+        try:
+            minutes_val = float(minutes)
+        except Exception:
+            return
+        if not isinstance(pricing_buckets, (_MutableMappingABC, dict)):
+            return
+        try:
+            entry = pricing_buckets.get(bucket_key) if isinstance(pricing_buckets, Mapping) else None
+            if not isinstance(entry, _MutableMappingABC):
+                if isinstance(entry, _MappingABC):
+                    entry = dict(entry)
+                elif isinstance(entry, dict):
+                    entry = entry
+                else:
+                    entry = {}
+            entry["minutes"] = minutes_val
+            if isinstance(pricing_buckets, _MutableMappingABC):
+                pricing_buckets[bucket_key] = entry  # type: ignore[index]
+            else:
+                pricing_buckets[bucket_key] = entry
+        except Exception:
+            pass
     extras: dict[str, float] = {}
     updated_plan_summary = process_plan_summary
     geo_map: Mapping[str, Any] | dict[str, Any]
@@ -770,23 +849,38 @@ def _compute_drilling_removal_section(
                 total_minutes_val = subtotal_minutes_val + total_tool_minutes
             total_minutes_val = float(total_minutes_val or 0.0)
 
-            lines.append(
-                f"Subtotal (per-hole × qty) . {subtotal_minutes_val:.2f} min  ("
-                f"{fmt_hours(subtotal_minutes_val/60.0)})"
+            drill_minutes_total = float(total_minutes_val or 0.0)
+            _push(
+                lines,
+                f"Subtotal (per-hole × qty) . {drill_minutes_total:.2f} min  ("
+                f"{fmt_hours(drill_minutes_total/60.0)})",
             )
-            lines.append(
-                f"TOTAL DRILLING (with toolchange) . {total_minutes_val:.2f} min  ("
-                f"{total_minutes_val/60.0:.2f} hr)"
+            _push(
+                lines,
+                f"TOTAL DRILLING (with toolchange) . {drill_minutes_total:.2f} min  ("
+                f"{drill_minutes_total/60.0:.2f} hr)",
             )
             lines.append("")
 
             extras["drill_machine_minutes"] = float(subtotal_minutes_val)
             extras["drill_labor_minutes"] = float(total_tool_minutes)
-            extras["drill_total_minutes"] = float(total_minutes_val)
+            extras["drill_total_minutes"] = float(drill_minutes_total)
             extras["removal_drilling_minutes_subtotal"] = float(subtotal_minutes_val)
-            extras["removal_drilling_minutes"] = float(total_minutes_val)
-            if total_minutes_val > 0.0:
-                extras["removal_drilling_hours"] = float(total_minutes_val / 60.0)
+            extras["removal_drilling_minutes"] = float(drill_minutes_total)
+            if drill_minutes_total > 0.0:
+                extras["removal_drilling_hours"] = float(drill_minutes_total / 60.0)
+
+            _seed_bucket_minutes("drilling", drill_minutes_total)
+            try:
+                dbg_entry = pricing_buckets.get("drilling") if isinstance(pricing_buckets, Mapping) else {}
+                if dbg_entry is None:
+                    dbg_entry = {}
+                _push(
+                    lines,
+                    f"[DEBUG] drilling_minutes_seeded={(dbg_entry or {}).get('minutes')}",
+                )
+            except Exception:
+                pass
 
             return extras, lines, updated_plan_summary
 
@@ -1475,7 +1569,7 @@ def _estimate_drilling_minutes_from_meta(
     seen_std = False
     if bins:
         subtotal_min, seen_deep, seen_std = _render_time_per_hole(
-            lambda _line: None,
+            lines,
             bins=bins,
             index_min=index_min,
             peck_min_deep=peck_min_deep,
@@ -2059,14 +2153,14 @@ def _recognized_line_items_from_planner(pricing_result: Mapping[str, Any] | None
     return _count_recognized_ops(plan_summary)
 
 import cad_quoter.geometry as geometry
-from appkit.occ_compat import (
-    FACE_OF,
-    ensure_face,
-    face_surface,
-    iter_faces,
-    linear_properties,
-    map_shapes_and_ancestors,
-)
+
+# Re-export legacy OCCT helpers via cad_quoter.geometry.
+FACE_OF = geometry.FACE_OF
+ensure_face = geometry.ensure_face
+face_surface = geometry.face_surface
+iter_faces = geometry.iter_faces
+linear_properties = geometry.linear_properties
+map_shapes_and_ancestors = geometry.map_shapes_and_ancestors
 from cad_quoter.geo2d.apply import apply_2d_features_to_variables
 
 # Tolerance for invariant checks that guard against silent drift when rendering
@@ -2157,9 +2251,8 @@ from cad_quoter.pricing.materials import (
     net_mass_kg as net_mass_kg,
     plan_stock_blank as plan_stock_blank,
 )
+from cad_quoter.config import _ensure_two_bucket_rates
 from cad_quoter.rates import (
-    ensure_two_bucket_defaults,
-    migrate_flat_to_two_bucket,
     two_bucket_to_flat,
 )
 from cad_quoter.vendors.mcmaster_stock import lookup_sku_and_price_for_mm
@@ -2308,132 +2401,33 @@ try:
 except Exception:
     _extract_text_lines_from_dxf = None
 
-# ---------- OCC / OCP compatibility ----------
+# ---------- OCC helpers delegated to cad_quoter.geometry ----------
 STACK = getattr(geometry, "STACK", "pythonocc")
-try:
-    bnd_add = geometry.bnd_add
-except AttributeError:  # pragma: no cover - optional geometry helpers
-    def bnd_add(*_args: Any, **_kwargs: Any) -> None:
-        return None
-
-def _import_optional(module_name: str):
-    """Safely import *module_name* and return ``None`` if it is unavailable."""
-
-    try:
-        return importlib.import_module(module_name)
-    except Exception:
-        return None
-
-def _resolve_face_of():
-    """Return a callable that casts a shape-like object to a TopoDS_Face."""
-
-    # Prefer helpers exposed by cad_quoter.geometry when available
-    fn = getattr(geometry, "FACE_OF", None)
-    if callable(fn):
-        return fn
-
-    # Try OCP's modern `topods.Face` helper first
-    try:  # pragma: no cover - depends on optional OCC bindings
-        from OCP.TopoDS import topods as _topods  # type: ignore[import-not-found]
-
-        if hasattr(_topods, "Face"):
-            return _topods.Face  # type: ignore[return-value]
-    except Exception:
-        pass
-
-    # pythonocc-core exposes either topods_Face or topods.Face
-    try:  # pragma: no cover - depends on optional OCC bindings
-        from OCC.Core.TopoDS import topods_Face  # type: ignore[import-not-found]
-
-        return topods_Face  # type: ignore[return-value]
-    except Exception:
-        pass
-    try:  # pragma: no cover - depends on optional OCC bindings
-        from OCC.Core.TopoDS import topods as _occ_topods  # type: ignore[import-not-found]
-
-        face_fn = getattr(_occ_topods, "Face", None)
-        if callable(face_fn):
-            return face_fn
-    except Exception:
-        pass
-
-    # Fall back to methods on the TopoDS namespace (OCP variants expose Face_s)
-    try:  # pragma: no cover - depends on optional OCC bindings
-        from OCP.TopoDS import TopoDS as _TopoDS  # type: ignore[import-not-found]
-
-        for attr in ("Face_s", "Face"):
-            face_fn = getattr(_TopoDS, attr, None)
-            if callable(face_fn):
-                return face_fn
-    except Exception:
-        pass
+STACK_GPROP = getattr(geometry, "STACK_GPROP", STACK)
 
 
-def _shape_is_null(shape: Any) -> bool:
-    """Return True if the passed shape reports itself as null."""
+def _missing_geo_helper(name: str) -> Callable[..., Any]:
+    def _raise(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError(f"{name} is unavailable (OCCT bindings required)")
 
-    if shape is None:
-        return True
-    is_null = getattr(shape, "IsNull", None)
-    if not callable(is_null):
-        raise AttributeError("Object does not expose a callable IsNull() method")
-    try:
-        return bool(is_null())
-    except Exception:
-        return True
+    return _raise
 
-# Safe casters: no-ops if already cast; unwrap list nodes; check kind
-# Choose stack
-_BRepGProp_mod = None
-_TO_EDGE = lambda s: s
-STACK_GPROP = "pythonocc"
-_ocp_brepgprop = _import_optional("OCP.BRepGProp")
-if _ocp_brepgprop is not None and hasattr(_ocp_brepgprop, "BRepGProp"):
-    _BRepGProp_mod = getattr(_ocp_brepgprop, "BRepGProp")
-    STACK_GPROP = "ocp"
-else:
-    _occ_brepgprop = _import_optional("OCC.Core.BRepGProp")
-    if _occ_brepgprop is None:
-        from types import SimpleNamespace
 
-        def _missing_brepgprop(*_args, **_kwargs):  # pragma: no cover - optional backend
-            raise RuntimeError("BRepGProp backend unavailable")
+BND_ADD_FALLBACK: Callable[..., Any] = lambda *_args, **_kwargs: None
+bnd_add = getattr(geometry, "bnd_add", BND_ADD_FALLBACK)
+BRepTools_UVBounds = getattr(
+    geometry, "uv_bounds", _missing_geo_helper("BRepTools.UVBounds")
+)
+BRepCheck_Analyzer = getattr(
+    geometry, "BRepCheck_Analyzer", _missing_geo_helper("BRepCheck_Analyzer")
+)
+brep_read = getattr(geometry, "brep_read", _missing_geo_helper("brep_read"))
 
-        _BRepGProp_mod = SimpleNamespace(
-            LinearProperties=_missing_brepgprop,
-            SurfaceProperties=_missing_brepgprop,
-            VolumeProperties=_missing_brepgprop,
-        )
-        STACK_GPROP = "stub"
 
-        def _to_edge_stub(s):
-            return s
+def read_step_or_iges_or_brep(path: str) -> Any:
+    """Backwards-compatible shim that forwards to :mod:`cad_quoter.geometry`."""
 
-        _TO_EDGE = _to_edge_stub
-    else:
-        if hasattr(_occ_brepgprop, "BRepGProp"):
-            _BRepGProp_mod = getattr(_occ_brepgprop, "BRepGProp")
-        else:
-            from types import SimpleNamespace
-
-            _BRepGProp_mod = SimpleNamespace(
-                LinearProperties=getattr(_occ_brepgprop, "brepgprop_LinearProperties"),
-                SurfaceProperties=getattr(_occ_brepgprop, "brepgprop_SurfaceProperties"),
-                VolumeProperties=getattr(_occ_brepgprop, "brepgprop_VolumeProperties"),
-            )
-
-        def _to_edge_occ(s):
-            try:
-                from OCC.Core.TopoDS import topods_Edge as _fn  # type: ignore[attr-defined]
-            except Exception:
-                from OCC.Core.TopoDS import Edge as _fn  # type: ignore[attr-defined]
-            return _fn(s)
-
-        _TO_EDGE = _to_edge_occ
-
-# Resolve topods casters across bindings
-
-# ---------- end compat ----------
+    return geometry.read_step_or_iges_or_brep(path)
 
 # ---- tiny helpers you can use elsewhere --------------------------------------
 # Optional PDF stack
@@ -2464,16 +2458,7 @@ def load_drawing(path: Path) -> Drawing:
         )
     return ezdxf_mod.readfile(str(path))  # DXF directly
 
-# ==== OpenCascade compat (works with OCP OR OCC.Core) ====
-def _missing_uv_bounds(_: Any) -> Tuple[float, float, float, float]:
-    raise RuntimeError("BRepTools_UVBounds is unavailable")
-
-def _missing_brep_read(_: str):
-    raise RuntimeError("BREP read is unavailable")
-
-
-def _missing_brep_check_analyzer(_: Any) -> Any:
-    raise RuntimeError("BRepCheck_Analyzer is unavailable")
+# ---- DXF protocol typing -----------------------------------------------------
 
 class _EzdxfModule(Protocol):
     def readfile(
@@ -2488,268 +2473,6 @@ class _OdafcModule(Protocol):
     def readfile(self, filename: str) -> "Drawing":
         ...
 
-BRepTools_UVBounds: Callable[[Any], Tuple[float, float, float, float]] = _missing_uv_bounds
-_brep_read = _missing_brep_read
-BRepCheck_Analyzer = cast(Any, _missing_brep_check_analyzer)
-
-_ocp_brep_module = _import_optional("OCP.BRep")
-_occ_brep_module = _import_optional("OCC.Core.BRep")
-_ocp_backend_ready = False
-
-# Provide default placeholders so type checkers consider these names bound even if
-# the optional OCC/OCP backends are unavailable at runtime.
-gp_Dir = cast(Any, None)
-gp_Pln = cast(Any, None)
-gp_Pnt = cast(Any, None)
-GeomAdaptor_Surface = cast(Any, None)
-GeomAbs_Plane = cast(Any, None)
-GeomAbs_Cylinder = cast(Any, None)
-GeomAbs_Torus = cast(Any, None)
-GeomAbs_Cone = cast(Any, None)
-GeomAbs_BSplineSurface = cast(Any, None)
-GeomAbs_BezierSurface = cast(Any, None)
-BRepAlgoAPI_Section = cast(Any, None)
-
-if _ocp_brep_module is not None:
-    try:
-        from OCP.BRep import (  # type: ignore[import]
-            BRep_Builder,
-            BRep_Tool,  # OCP version
-        )  # type: ignore[import]
-        from OCP.BRepAdaptor import BRepAdaptor_Curve  # type: ignore[import]
-        from OCP.BRepAlgoAPI import BRepAlgoAPI_Section  # type: ignore[import]
-        from OCP.BRepCheck import BRepCheck_Analyzer  # type: ignore[import]
-        from OCP.BRepGProp import BRepGProp  # type: ignore[import]
-        from OCP.GeomAbs import (  # type: ignore[import]
-            GeomAbs_BezierSurface,
-            GeomAbs_BSplineSurface,
-            GeomAbs_Circle,
-            GeomAbs_Cone,
-            GeomAbs_Cylinder,
-            GeomAbs_Plane,
-            GeomAbs_Torus,
-        )
-        from OCP.GeomAdaptor import GeomAdaptor_Surface  # type: ignore[import]
-        from OCP.gp import gp_Dir, gp_Pln, gp_Pnt  # type: ignore[import]
-        from OCP.GProp import GProp_GProps  # type: ignore[import]
-        from OCP.ShapeAnalysis import ShapeAnalysis_Surface  # type: ignore[import]
-        from OCP.ShapeFix import ShapeFix_Shape  # type: ignore[import]
-        from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE  # type: ignore[import]
-        from OCP.TopExp import TopExp, TopExp_Explorer  # type: ignore[import]
-        from OCP.TopoDS import TopoDS_Compound, TopoDS_Face, TopoDS_Shape  # type: ignore[import]
-        from OCP.BRepTools import BRepTools  # type: ignore[import]
-        from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape  # type: ignore[import]
-
-        BACKEND_OCC = "OCP"
-
-        def _ocp_uv_bounds(face: Any) -> Tuple[float, float, float, float]:
-            tools = cast(Any, BRepTools)
-            return tools.UVBounds(face)
-
-        def _ocp_brep_read(path: str) -> Any:
-            s = _new_topods_shape()
-            builder = BRep_Builder()  # type: ignore[call-arg]
-            read_s = getattr(BRepTools, "Read_s", None)
-            if callable(read_s):
-                ok = read_s(s, str(path), builder)
-            else:
-                tools = cast(Any, BRepTools)
-                ok = tools.Read(s, str(path), builder)
-            if ok is False:
-                raise RuntimeError("BREP read failed")
-            return s
-
-        BRepTools_UVBounds = _ocp_uv_bounds
-        _brep_read = _ocp_brep_read
-        _ocp_backend_ready = True
-    except Exception:
-        _ocp_backend_ready = False
-
-if _ocp_backend_ready:
-    pass
-elif _occ_brep_module is not None:
-    from OCC.Core.BRep import (
-        BRep_Builder,
-        BRep_Tool,  # ? OCC version
-    )
-    from OCC.Core.BRepAdaptor import BRepAdaptor_Curve
-    from OCC.Core.BRepAlgoAPI import BRepAlgoAPI_Section
-    from OCC.Core.BRepCheck import BRepCheck_Analyzer
-    from OCC.Core.GeomAbs import (
-        GeomAbs_BezierSurface,
-        GeomAbs_BSplineSurface,
-        GeomAbs_Circle,
-        GeomAbs_Cone,
-        GeomAbs_Cylinder,
-        GeomAbs_Plane,
-        GeomAbs_Torus,
-    )
-    from OCC.Core.GeomAdaptor import GeomAdaptor_Surface
-    from OCC.Core.gp import gp_Dir, gp_Pln, gp_Pnt
-    from OCC.Core.GProp import GProp_GProps
-    from OCC.Core.ShapeAnalysis import ShapeAnalysis_Surface
-    from OCC.Core.ShapeFix import ShapeFix_Shape
-    from OCC.Core.TopAbs import (
-        TopAbs_EDGE,
-        TopAbs_FACE,
-    )
-    from OCC.Core.TopExp import TopExp_Explorer
-    from OCC.Core.TopoDS import TopoDS_Compound, TopoDS_Face, TopoDS_Shape
-    from OCC.Core.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
-
-    import OCC.Core.BRepGProp as _occ_brepgprop  # type: ignore[import]
-    import OCC.Core.BRepTools as _occ_breptools
-
-    BACKEND_OCC = "OCC.Core"
-
-    brepgprop_LinearProperties = getattr(_occ_brepgprop, "brepgprop_LinearProperties")
-    brepgprop_SurfaceProperties = getattr(_occ_brepgprop, "brepgprop_SurfaceProperties")
-    brepgprop_VolumeProperties = getattr(_occ_brepgprop, "brepgprop_VolumeProperties")
-
-    class _BRepGPropShim:
-        @staticmethod
-        def SurfaceProperties_s(shape_or_face, gprops):
-            return brepgprop_SurfaceProperties(shape_or_face, gprops)
-
-        @staticmethod
-        def LinearProperties_s(edge, gprops):
-            return brepgprop_LinearProperties(edge, gprops)
-
-        @staticmethod
-        def VolumeProperties_s(shape, gprops):
-            return brepgprop_VolumeProperties(shape, gprops)
-
-    BRepGProp = _BRepGPropShim
-
-    if "GProp_GProps" not in globals():
-        class _MissingGPropGProps:
-            def __init__(self, *_args: Any, **_kwargs: Any) -> None:  # pragma: no cover - optional backend
-                raise RuntimeError("GProp_GProps backend unavailable")
-
-        GProp_GProps = typing.cast(Any, _MissingGPropGProps)
-
-    BRepTools = cast(Any, _occ_breptools).BRepTools
-
-    def _occ_uv_bounds(face: Any) -> Tuple[float, float, float, float]:
-        tools = cast(Any, BRepTools)
-        fn = getattr(tools, "UVBounds", None)
-        if fn is None:
-            legacy = getattr(_occ_breptools, "breptools_UVBounds", None)
-            if legacy is None:
-                raise RuntimeError("UV bounds function is unavailable")
-            return legacy(face)
-        return fn(face)
-
-    def _occ_brep_read(path: str) -> Any:
-        read_fn = getattr(_occ_breptools, "breptools_Read", None)
-        if read_fn is None:
-            raise RuntimeError("BREP read is unavailable")
-        s = _new_topods_shape()
-        ok = read_fn(s, str(path), BRep_Builder())
-        if not ok:
-            raise RuntimeError("BREP read failed")
-        return s
-
-    BRepTools_UVBounds = _occ_uv_bounds
-    _brep_read = _occ_brep_read
-else:
-    BACKEND_OCC = "stub"
-
-    def _occ_uv_bounds(face: Any) -> Tuple[float, float, float, float]:  # pragma: no cover
-        raise RuntimeError("UV bounds function is unavailable")
-
-    def _occ_brep_read(path: str) -> Any:  # pragma: no cover
-        raise RuntimeError("BREP read is unavailable")
-
-    def _missing_brep_builder(*_: Any, **__: Any) -> Any:  # pragma: no cover
-        raise RuntimeError("BRep_Builder is unavailable")
-
-    BRep_Builder = cast(Any, _missing_brep_builder)
-    BRepTools = None  # type: ignore[assignment]
-    TopTools_IndexedDataMapOfShapeListOfShape = None  # type: ignore[assignment]
-
-    class _MissingTopoDSShape:
-        def __init__(self, *_: Any, **__: Any) -> None:  # pragma: no cover - fallback sentinel
-            raise RuntimeError("TopoDS_Shape is unavailable (OCCT bindings required)")
-
-    class _MissingTopoDSFace(_MissingTopoDSShape):
-        pass
-
-    class _MissingTopoDSCompound(_MissingTopoDSShape):
-        pass
-
-    TopoDS_Shape = cast(Any, _MissingTopoDSShape)
-    TopoDS_Face = cast(Any, _MissingTopoDSFace)
-    TopoDS_Compound = cast(Any, _MissingTopoDSCompound)
-    BRepTools_UVBounds = _occ_uv_bounds
-    _brep_read = _occ_brep_read
-
-    def _missing_shape_fix_shape(_: Any) -> Any:  # pragma: no cover
-        raise RuntimeError("Shape healing is unavailable")
-
-    ShapeFix_Shape = cast(Any, _missing_shape_fix_shape)
-
-def _new_topods_shape() -> Any:
-    ctor = cast(Any, TopoDS_Shape)
-    return ctor()
-
-def _new_topods_compound() -> Any:
-    ctor = cast(Any, TopoDS_Compound)
-    return ctor()
-
-def _shape_from_reader(reader):
-    """Return a healed TopoDS_Shape from a STEP/IGES reader."""
-    transfer_count = 0
-    if hasattr(reader, "NbShapes"):
-        try:
-            transfer_count = reader.NbShapes()
-        except Exception:
-            transfer_count = 0
-    if not transfer_count and hasattr(reader, "NbRootsForTransfer"):
-        try:
-            transfer_count = reader.NbRootsForTransfer()
-        except Exception:
-            transfer_count = 0
-    if transfer_count <= 0:
-        raise RuntimeError("Reader produced zero shapes")
-
-    if transfer_count == 1:
-        shape = reader.Shape(1)
-    else:
-        builder = BRep_Builder()
-        compound = _new_topods_compound()
-        cast(Any, builder).MakeCompound(compound)
-        added = 0
-        for i in range(1, transfer_count + 1):
-            s = reader.Shape(i)
-            if s is None or _shape_is_null(s):
-                continue
-            cast(Any, builder).Add(compound, s)
-            added += 1
-        if added == 0:
-            raise RuntimeError("Reader produced only null sub-shapes")
-        shape = compound
-
-    if shape is None or _shape_is_null(shape):
-        raise RuntimeError("Reader produced a null TopoDS_Shape")
-
-    fixer = cast(Any, ShapeFix_Shape)(shape)
-    fixer.Perform()
-    healed = fixer.Shape()
-    if healed is None or _shape_is_null(healed):
-        raise RuntimeError("Shape healing failed (null shape)")
-
-    try:
-        analyzer = BRepCheck_Analyzer(healed)
-        # we do not require validity, but invoking the analyzer surfaces issues early
-        analyzer.IsValid()
-    except Exception:
-        pass
-
-    return healed
-
-def read_step_or_iges_or_brep(path: str) -> Any:
-    raise RuntimeError("read_step_or_iges_or_brep is no longer exposed via appV5; use cad_quoter.geometry.read_step_or_iges_or_brep")
 
 
 # --- WHICH SHEET ROWS MATTER TO THE ESTIMATOR --------------------------------
@@ -3572,7 +3295,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     rates.setdefault("ProgrammingRate", rates.get("ProgrammerRate", rates["LaborRate"]))
     rates.setdefault("InspectionRate", rates.get("InspectorRate", rates["LaborRate"]))
 
-    fallback_two_bucket_rates = _coerce_two_bucket_rates(rates)
+    fallback_two_bucket_rates = _normalized_two_bucket_rates(rates)
     fallback_flat_rates = two_bucket_to_flat(fallback_two_bucket_rates)
     for key, fallback_value in fallback_flat_rates.items():
         if _coerce_rate_value(rates.get(key)) <= 0.0:
@@ -3869,7 +3592,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         return False
 
     def write_line(s: str, indent: str = ""):
-        append_line(f"{indent}{s}")
+        _push(lines, f"{indent}{s}")
 
     def write_wrapped(text: str, indent: str = ""):
         if text is None:
@@ -3926,19 +3649,19 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             return f"{value:>{col_widths[idx]}}"
 
         if lines and lines[-1] != "":
-            append_line("")
+            _push(lines, "")
 
         diagnostic_banner = "=== Planner diagnostics (not billed) ==="
-        append_line(diagnostic_banner)
-        append_line("=" * min(page_width, len(diagnostic_banner)))
+        _push(lines, diagnostic_banner)
+        _push(lines, "=" * min(page_width, len(diagnostic_banner)))
 
         header_line = " | ".join(_fmt(header, idx) for idx, header in enumerate(headers))
         separator_line = " | ".join("-" * width for width in col_widths)
-        append_line(header_line)
-        append_line(separator_line)
+        _push(lines, header_line)
+        _push(lines, separator_line)
         for row_values in display_rows:
-            append_line(" | ".join(_fmt(value, idx) for idx, value in enumerate(row_values)))
-        append_line("")
+            _push(lines, " | ".join(_fmt(value, idx) for idx, value in enumerate(row_values)))
+        _push(lines, "")
 
     def _is_total_label(label: str) -> bool:
         clean = str(label or "").strip()
@@ -3960,7 +3683,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         short_divider = " " * pad + "-" * width
         if lines[-1] == short_divider:
             return
-        append_line(short_divider)
+        _push(lines, short_divider)
 
     def _format_row(label: str, val: float, indent: str = "") -> str:
         left = f"{indent}{label}"
@@ -3972,7 +3695,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         # left-label, right-amount aligned to page_width
         if _is_total_label(label):
             _ensure_total_separator(len(_m(val)))
-        append_line(_format_row(label, val, indent))
+        _push(lines, _format_row(label, val, indent))
 
     def hours_row(label: str, val: float, indent: str = ""):
         left = f"{indent}{label}"
@@ -3980,7 +3703,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if _is_total_label(label):
             _ensure_total_separator(len(right))
         pad = max(1, page_width - len(left) - len(right))
-        append_line(f"{left}{' ' * pad}{right}")
+        _push(lines, f"{left}{' ' * pad}{right}")
 
     def _is_extra_segment(segment: str) -> bool:
         try:
@@ -4119,27 +3842,21 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             llm_debug_enabled_flag = override
             break
 
-    
-
     # ---- header --------------------------------------------------------------
-    lines: list[str] = []
     doc_builder = QuoteDocRecorder(divider)
 
-    def append_line(text: str) -> None:
-        sanitized = _sanitize_render_text(text)
-        previous = lines[-1] if lines else None
-        lines.append(sanitized)
-        doc_builder.observe_line(len(lines) - 1, sanitized, previous)
+    class _QuoteLines(list[str]):
+        def append(self, text: str) -> None:  # type: ignore[override]
+            sanitized = _sanitize_render_text(text)
+            previous = self[-1] if self else None
+            super().append(sanitized)
+            doc_builder.observe_line(len(self) - 1, sanitized, previous)
+
+    lines: list[str] = _QuoteLines()
 
     def append_lines(values: Iterable[str]) -> None:
         for value in values:
-            append_line(value)
-
-    def _push(target: list[str], text: str) -> None:
-        if target is lines:
-            append_line(text)
-        else:
-            target.append(text)
+            _push(lines, value)
 
     def replace_line(index: int, text: str) -> None:
         sanitized = _sanitize_render_text(text)
@@ -4187,8 +3904,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     )
     append_lines(header_lines)
     if material_warning_summary:
-        append_line(MATERIAL_WARNING_LABEL)
-    append_line("")
+        _push(lines, MATERIAL_WARNING_LABEL)
+    _push(lines, "")
 
     if isinstance(breakdown, _MutableMappingABC):
         if pricing_source_value:
@@ -4212,8 +3929,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     baseline_state.pop("pricing_source", None)
 
     def render_drill_debug(entries: Sequence[str]) -> None:
-        append_line("Drill Debug")
-        append_line(divider)
+        _push(lines, "Drill Debug")
+        _push(lines, divider)
         prioritized_entries: list[tuple[int, int, str]] = []
         for idx, entry in enumerate(entries):
             if entry is None:
@@ -4239,11 +3956,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 for chunk in text.splitlines():
                     write_line(chunk, block_indent)
                 if lines and lines[-1] != "":
-                    append_line("")
+                    _push(lines, "")
             else:
                 write_wrapped(text, "  ")
         if lines and lines[-1] != "":
-            append_line("")
+            _push(lines, "")
 
     app_meta = result.setdefault("app_meta", {})
     # Only surface drill debug when LLM debug is enabled for this quote.
@@ -4287,12 +4004,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 if not flag.lower().startswith("labor totals drifted by")
             ]
         if display_red_flags:
-            append_line("")
-            append_line("Red Flags")
-            append_line(divider)
+            _push(lines, "")
+            _push(lines, "Red Flags")
+            _push(lines, divider)
             for flag in display_red_flags:
                 write_wrapped(f"⚠️ {flag}", "  ")
-    append_line("")
+    _push(lines, "")
 
     narrative = result.get("narrative") or breakdown.get("narrative")
     why_parts: list[str] = []
@@ -4776,8 +4493,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         material_cost_components: Mapping[str, Any] | None = None
 
         if have_any:
-            append_line("Material & Stock")
-            append_line(divider)
+            _push(lines, "Material & Stock")
+            _push(lines, divider)
             canonical_material_display = str(material_display_label or "").strip()
             if not canonical_material_display and isinstance(material_selection, _MappingABC):
                 canonical_material_display = str(
@@ -4821,7 +4538,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 material_display_label = str(material_name_display)
                 material_selection.setdefault("material_display", material_display_label)
                 material_display_for_debug = material_name_display
-                append_line(f"  Material used:  {material_name_display}")
+                _push(lines, f"  Material used:  {material_name_display}")
 
             blank_lines: list[str] = []
             need_len = _coerce_float_or_none(
@@ -5395,7 +5112,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     stock_line = f"— × — × {T_disp} in"
             if isinstance(mat_info, dict):
                 mat_info["stock_size_display"] = stock_line
-            append_line(f"  Stock used: {stock_line}")
+            _push(lines, f"  Stock used: {stock_line}")
             if detail_lines:
                 append_lines(detail_lines)
             mc: Mapping[str, Any] | None = material_cost_components
@@ -5461,7 +5178,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 row("Total Material Cost :", total_material_cost, indent="  ")
             elif total_material_cost is not None:
                 row("Total Material Cost :", total_material_cost, indent="  ")
-            append_line("")
+            _push(lines, "")
 
     rates.setdefault("LaborRate", 85.0)
     rates.setdefault(
@@ -5481,8 +5198,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         nre["programming_cost"] = round(prog_hr * programmer_rate_for_cost, 2)
 
     # ---- NRE / Setup costs ---------------------------------------------------
-    append_line("NRE / Setup Costs (per lot)")
-    append_line(divider)
+    _push(lines, "NRE / Setup Costs (per lot)")
+    _push(lines, divider)
     prog = nre_detail.get("programming") or {}
     fix  = nre_detail.get("fixture") or {}
 
@@ -5683,7 +5400,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 row(f"{label}:", amount_val)
             other_nre_total += amount_val
     if (prog or fix or other_nre_total > 0) and not lines[-1].strip() == "":
-        append_line("")
+        _push(lines, "")
 
     try:
         amortized_qty = int(result.get("qty") or breakdown.get("qty") or qty or 1)
@@ -5964,8 +5681,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if extra_map_candidate is not None and extra_map_candidate not in drill_minutes_extra_targets:
             drill_minutes_extra_targets.append(extra_map_candidate)
 
-    append_line("Process & Labor Costs")
-    append_line(divider)
+    _push(lines, "Process & Labor Costs")
+    _push(lines, divider)
 
     canonical_bucket_order: list[str] = []
     canonical_bucket_summary: dict[str, dict[str, float]] = {}
@@ -7600,9 +7317,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             canonical = text.casefold()
             return canonical, text
 
-        append_line("")
-        append_line("Labor Hour Summary")
-        append_line(divider)
+        _push(lines, "")
+        _push(lines, "Labor Hour Summary")
+        _push(lines, divider)
         if str(pricing_source_value).lower() == "planner":
             entries_iter = list(hour_summary_entries.items())
         else:
@@ -7657,20 +7374,94 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 except Exception:
                     folded[0] = existing_hr
             folded[1] = existing_include or bool(include_in_total)
+        def _extract_pricing_buckets(candidate: Any) -> Mapping[str, Any] | None:
+            if isinstance(candidate, _MutableMappingABC):
+                buckets_candidate = candidate.get("buckets")
+            elif isinstance(candidate, dict):
+                buckets_candidate = candidate.get("buckets")
+            elif isinstance(candidate, _MappingABC):
+                buckets_candidate = candidate.get("buckets")
+            else:
+                buckets_candidate = None
+            if isinstance(buckets_candidate, _MutableMappingABC):
+                return buckets_candidate
+            if isinstance(buckets_candidate, dict):
+                return buckets_candidate
+            if isinstance(buckets_candidate, _MappingABC):
+                try:
+                    return dict(buckets_candidate)
+                except Exception:
+                    return None
+            return None
+
+        pricing_bucket_candidates: list[Mapping[str, Any] | None] = []
+        pricing_bucket_candidates.append(_extract_pricing_buckets(locals().get("bucket_view_struct")))
+        breakdown_bucket_view: Any = None
+        if isinstance(breakdown, dict):
+            breakdown_bucket_view = breakdown.get("bucket_view")
+        elif isinstance(breakdown, _MappingABC):
+            breakdown_bucket_view = breakdown.get("bucket_view")
+        pricing_bucket_candidates.append(_extract_pricing_buckets(breakdown_bucket_view))
+        pricing_bucket_candidates.append(
+            _extract_pricing_buckets(locals().get("planner_bucket_view"))
+        )
+
+        pricing_buckets_for_summary: Mapping[str, Any] | None = None
+        for candidate in pricing_bucket_candidates:
+            if isinstance(candidate, Mapping) and candidate:
+                pricing_buckets_for_summary = candidate
+                break
+
+        drilling_minutes_bucket: float | None = None
+        if isinstance(pricing_buckets_for_summary, Mapping):
+            for key in ("drilling", "Drilling"):
+                bucket_entry = pricing_buckets_for_summary.get(key)
+                if isinstance(bucket_entry, (int, float)):
+                    drilling_minutes_bucket = float(bucket_entry)
+                elif isinstance(bucket_entry, _MappingABC):
+                    drilling_minutes_bucket = _coerce_float_or_none(bucket_entry.get("minutes"))
+                elif isinstance(bucket_entry, dict):
+                    drilling_minutes_bucket = _coerce_float_or_none(bucket_entry.get("minutes"))
+                if drilling_minutes_bucket is not None:
+                    break
+
         total_hours = 0.0
         for canonical_key in folded_order:
             hr_val, include_in_total = folded_entries[canonical_key]
             display_label = folded_display.get(canonical_key, "")
+            if (
+                drilling_minutes_bucket is not None
+                and str(display_label).strip().lower() == "drilling"
+            ):
+                hrs_drilling_precise = float(drilling_minutes_bucket) / 60.0
+                hrs_drilling = round(hrs_drilling_precise, 2)
+                folded_entries[canonical_key][0] = hrs_drilling
+                if isinstance(hour_summary_entries, (dict, _MutableMappingABC)):
+                    for label_key in list(hour_summary_entries.keys()):
+                        if str(label_key).strip().lower() != "drilling":
+                            continue
+                        existing_val = hour_summary_entries.get(label_key)
+                        include_flag = True
+                        if isinstance(existing_val, tuple) and len(existing_val) == 2:
+                            include_flag = bool(existing_val[1])
+                        hour_summary_entries[label_key] = (hrs_drilling, include_flag)
+                right = _h(hrs_drilling)
+                left = f"  {display_label}"
+                pad = max(1, page_width - len(left) - len(right))
+                _push(lines, f"{left}{' ' * pad}{right}")
+                if include_in_total and hrs_drilling:
+                    total_hours += hrs_drilling
+                continue
             hours_row(display_label, hr_val, indent="  ")
             if include_in_total and hr_val:
                 total_hours += hr_val
         hours_row("Total Hours", total_hours, indent="  ")
-    append_line("")
+    _push(lines, "")
 
     # ---- Pass-Through & Direct (auto include non-zeros; sorted desc) --------
-    append_line("Pass-Through & Direct Costs")
+    _push(lines, "Pass-Through & Direct Costs")
     pass_through_header_index = len(lines) - 1
-    append_line(divider)
+    _push(lines, divider)
     pass_total = 0.0
     pass_through_labor_total = 0.0
     displayed_pass_through: dict[str, float] = {}
@@ -7894,9 +7685,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     row("Total", total_direct_costs_value, indent="  ")
     if cost_breakdown_entries:
-        append_line("")
-        append_line("Cost Breakdown")
-        append_line(divider)
+        _push(lines, "")
+        _push(lines, "Cost Breakdown")
+        _push(lines, divider)
         for label, amount in cost_breakdown_entries:
             row(label, amount, indent="  ")
     pass_through_total = float(sum(displayed_pass_through.values()))
@@ -8236,12 +8027,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     # NOTE: Patch 3 keeps the hole-table hook active so downstream cards continue to render.
     append_lines(removal_card_lines)
 
-    # ===== MATERIAL REMOVAL: hole-table-driven cards (sole source) ============
-    def _push(_lines, text):
-        try:
-            (_lines if isinstance(_lines, list) else []).append(str(text))
-        except Exception:
-            pass
+    # ===== MATERIAL REMOVAL: HOLE-TABLE CARDS =================================
+    import re
 
     def _first_dict(*cands):
         for c in cands:
@@ -8258,35 +8045,111 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     def _get_material_group(*cands):
         for c in cands:
             if isinstance(c, dict) and c.get("material_group"):
-                return c.get("material_group")
+                return c["material_group"]
         return None
 
+    def _norm_line(s: str) -> str:
+        return re.sub(r"\s+", " ", (s or "")).strip()
+
+    # patterns
+    _RE_QTY_LEAD   = re.compile(r"^\s*\((\d+)\)\s*")
+    _RE_FROM_SIDE  = re.compile(r"\bFROM\s+(FRONT|BACK)\b", re.I)
+    _RE_DEPTH      = re.compile(r"[×x]\s*([0-9.]+)\b", re.I)
+    _RE_THRU       = re.compile(r"\bTHRU\b", re.I)
+    _RE_DIA_ANY    = re.compile(r'(?:Ø|⌀|DIA|O)\s*([0-9.]+)|\(([0-9.]+)\s*Ø?\)|\b([0-9.]+)\b')
+    _RE_TAP        = re.compile(r"(\(\d+\)\s*)?(#\s*\d{1,2}-\d+|(?:\d+/\d+)\s*-\s*\d+|(?:\d+(?:\.\d+)?)\s*-\s*\d+|M\d+(?:\.\d+)?\s*x\s*\d+(?:\.\d+)?)\s*TAP", re.I)
+    _RE_CBORE      = re.compile(r"\b(C[\'’]?\s*BORE|CBORE|COUNTER\s*BORE)\b", re.I)
+
+    def _coalesce_rows(rows):
+        agg, order = {}, []
+        for r in rows:
+            key = (r.get("desc",""), r.get("ref",""))
+            if key not in agg:
+                agg[key] = int(r.get("qty") or 0); order.append(key)
+            else:
+                agg[key] += int(r.get("qty") or 0)
+        return [{"hole":"", "ref": ref, "qty": agg[(desc,ref)], "desc": desc} for (desc,ref) in order]
+
+    def _build_ops_rows_from_lines(lines_in: list[str]) -> list[dict]:
+        if not lines_in: return []
+        L = [_norm_line(s) for s in lines_in if _norm_line(s)]
+        out, i = [], 0
+        while i < len(L):
+            ln = L[i]
+            if any(k in ln.upper() for k in ("BREAK ALL","SHARP CORNERS","RADIUS","CHAMFER","AS SHOWN")):
+                i += 1; continue
+            qty = 1
+            mqty = _RE_QTY_LEAD.match(ln)
+            if mqty: qty = int(mqty.group(1)); ln = ln[mqty.end():].strip()
+            mtap = _RE_TAP.search(ln)
+            if mtap:
+                thread = mtap.group(2).replace(" ", "")
+                tail = " ".join(L[i:i+3])
+                desc = f"{thread} TAP"
+                if _RE_THRU.search(tail): desc += " THRU"
+                md = _RE_DEPTH.search(tail)
+                if md and md.group(1): desc += f' × {float(md.group(1)):.2f}"'
+                ms = _RE_FROM_SIDE.search(tail)
+                if ms: desc += f' FROM {ms.group(1).upper()}'
+                out.append({"hole":"", "ref":"", "qty":qty, "desc":desc})
+                i += 1; continue
+            if _RE_CBORE.search(ln):
+                tail = " ".join(L[max(0,i-1):i+2])
+                mda = _RE_DIA_ANY.search(tail)
+                dia = None
+                if mda:
+                    for g in mda.groups():
+                        if g: dia = float(g); break
+                desc = (f"{dia:.4f} C’BORE" if dia is not None else "C’BORE")
+                md = _RE_DEPTH.search(tail)
+                if md and md.group(1): desc += f' × {float(md.group(1)):.2f}"'
+                ms = _RE_FROM_SIDE.search(tail)
+                if ms: desc += f' FROM {ms.group(1).upper()}'
+                out.append({"hole":"", "ref":"", "qty":qty, "desc":desc})
+                i += 1; continue
+            if any(k in ln.upper() for k in ("C' DRILL","C’DRILL","CENTER DRILL","SPOT DRILL")):
+                tail = " ".join(L[i:i+2])
+                md = _RE_DEPTH.search(tail)
+                desc = "C’DRILL" + (f' × {float(md.group(1)):.2f}"' if (md and md.group(1)) else "")
+                out.append({"hole":"", "ref":"", "qty":qty, "desc":desc})
+                i += 1; continue
+            i += 1
+        return _coalesce_rows(out)
+
     try:
-        # Context (grab whatever exists)
         ctx_a = locals().get("breakdown")
         ctx_b = locals().get("result")
         ctx_c = locals().get("quote")
-        ctx_d = locals().get("job")
-        ctx = _first_dict(ctx_a, ctx_b, ctx_c, ctx_d)
+        ctx   = _first_dict(ctx_a, ctx_b, ctx_c)
 
-        geo_map = _get_geo_map(ctx, locals().get("geo"), ctx_a, ctx_b)
+        geo_map        = _get_geo_map(ctx, locals().get("geo"), ctx_a, ctx_b)
         material_group = _get_material_group(ctx, ctx_a, ctx_b)
 
-        # Pull rows if extractor already provided them
         ops_rows = (((geo_map or {}).get("ops_summary") or {}).get("rows") or [])
         _push(lines, f"[DEBUG] ops_rows_pre={len(ops_rows)}")
 
-        # Fallback: build from chart lines if rows are empty
         if not ops_rows:
-            chart_lines_all_raw = _collect_chart_lines_context(ctx, geo_map, ctx_a, ctx_b)
-            chart_lines_all = [s for s in (_norm_line(x) for x in chart_lines_all_raw) if s]
-            built_rows = _build_ops_rows_from_lines_fallback(chart_lines_all)
-            _push(lines, f"[DEBUG] chart_lines_found={len(chart_lines_all)} built_rows={len(built_rows)}")
-            if built_rows:
-                geo_map.setdefault("ops_summary", {})["rows"] = built_rows
-                ops_rows = built_rows
+            # collect chart text wherever it lives
+            def _collect_chart_lines(*containers):
+                keys = ("chart_lines","hole_table_lines","chart_text_lines","hole_chart_lines")
+                merged, seen = [], set()
+                for d in containers:
+                    if not isinstance(d, dict): continue
+                    for k in keys:
+                        v = d.get(k)
+                        if isinstance(v, list) and all(isinstance(x, str) for x in v):
+                            for s in v:
+                                if s not in seen:
+                                    seen.add(s); merged.append(s)
+                return merged
+            chart_lines_all = _collect_chart_lines(ctx, geo_map, ctx_a, ctx_b)
+            built = _build_ops_rows_from_lines(chart_lines_all)
+            _push(lines, f"[DEBUG] chart_lines_found={len(chart_lines_all)} built_rows={len(built)}")
+            if built:
+                geo_map.setdefault("ops_summary", {})["rows"] = built
+                ops_rows = built
 
-        # Emit the cards (will no-op if no TAP/CBORE/SPOT rows)
+        # Emit the cards (will no-op if no TAP/CBore/Spot rows)
         _emit_hole_table_ops_cards(lines, geo=geo_map, material_group=material_group, speeds_csv=None)
 
     except Exception as e:
@@ -8294,8 +8157,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     # ========================================================================
 
     # ---- Pricing ladder ------------------------------------------------------
-    append_line("Pricing Ladder")
-    append_line(divider)
+    _push(lines, "Pricing Ladder")
+    _push(lines, divider)
 
     override_sources: list[Mapping[str, Any]] = []
 
@@ -8385,17 +8248,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         row(f"+ Expedite ({_pct(applied_pcts.get('ExpeditePct'))}):", expedite_cost)
     row("= Subtotal before Margin:", subtotal_before_margin)
     row(f"Final Price with Margin ({_pct(applied_pcts.get('MarginPct'))}):", price)
-    append_line("")
+    _push(lines, "")
 
     # ---- LLM adjustments bullets (optional) ---------------------------------
     if llm_notes:
-        append_line("LLM Adjustments")
-        append_line(divider)
+        _push(lines, "LLM Adjustments")
+        _push(lines, divider)
         import textwrap as _tw
         for n in llm_notes:
             for w in _tw.wrap(str(n), width=page_width):
-                append_line(f"- {w}")
-        append_line("")
+                _push(lines, f"- {w}")
+        _push(lines, "")
 
     if not explanation_lines:
         plan_info_for_explainer: Mapping[str, Any] | None = None
@@ -8484,13 +8347,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     if why_parts:
         if lines and lines[-1]:
-            append_line("")
-        append_line("Why this price")
-        append_line(divider)
+            _push(lines, "")
+        _push(lines, "Why this price")
+        _push(lines, divider)
         for part in why_parts:
             write_wrapped(part, "  ")
         if lines[-1]:
-            append_line("")
+            _push(lines, "")
         # Append the compact removal debug table (if available)
         append_removal_debug_if_enabled(lines, removal_summary_for_display)
 
@@ -8539,11 +8402,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if isinstance(_pmeta, _MappingABC):
                 _meta_hr = _coerce_float_or_none((_pmeta.get("drilling") or {}).get("hr"))
 
-            append_line("DEBUG — Drilling sanity")
-            append_line(divider)
+            _push(lines, "DEBUG — Drilling sanity")
+            _push(lines, divider)
             def _fmt(x, unit):
                 return "—" if x is None or not math.isfinite(float(x)) else f"{float(x):.2f} {unit}"
-            append_line(
+            _push(lines, 
                 "  bucket(planner): "
                 + _fmt(_planner_min, "min")
                 + "   canonical: "
@@ -8553,7 +8416,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 + "   meta: "
                 + _fmt(_meta_hr, "hr")
             )
-            append_line("")
+            _push(lines, "")
         except Exception:
             pass
 
@@ -8829,6 +8692,22 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 # ===== QUOTE CONFIG (edit-friendly) ==========================================
 CONFIG_INIT_ERRORS: list[str] = []
 
+
+def _normalized_two_bucket_rates(
+    candidate: Any | Mapping[str, Any],
+) -> dict[str, dict[str, float]]:
+    """Normalize rate mappings while preserving empty fallbacks."""
+
+    if not isinstance(candidate, _MappingABC):
+        return {"labor": {}, "machine": {}}
+    if not candidate:
+        return {"labor": {}, "machine": {}}
+
+    normalized = _ensure_two_bucket_rates(candidate)
+    if not any(normalized.get(kind) for kind in ("labor", "machine")):
+        return {"labor": {}, "machine": {}}
+    return normalized
+
 try:
     SERVICE_CONTAINER = create_default_container()
 except Exception as exc:
@@ -8839,70 +8718,24 @@ except Exception as exc:
 
     SERVICE_CONTAINER = ServiceContainer(
         load_params=_empty_params,
-        load_rates=lambda: {"labor": {}, "machine": {}},
+        load_rates=lambda: _normalized_two_bucket_rates({}),
         pricing_engine_factory=lambda: PricingEngine(create_default_registry()),
     )
-
-def _coerce_two_bucket_rates(value: Any) -> dict[str, dict[str, float]]:
-    if isinstance(value, dict):
-        labor_raw = value.get("labor")
-        machine_raw = value.get("machine")
-        if isinstance(labor_raw, dict) and isinstance(machine_raw, dict):
-            labor: dict[str, float] = {}
-            for key, raw in labor_raw.items():
-                try:
-                    labor[str(key)] = float(raw)
-                except Exception:
-                    continue
-            machine: dict[str, float] = {}
-            for key, raw in machine_raw.items():
-                try:
-                    machine[str(key)] = float(raw)
-                except Exception:
-                    continue
-            return ensure_two_bucket_defaults({"labor": labor, "machine": machine})
-
-        flat: dict[str, float] = {}
-        for key, raw in value.items():
-            try:
-                flat[str(key)] = float(raw)
-            except Exception:
-                continue
-        if flat:
-            return ensure_two_bucket_defaults(migrate_flat_to_two_bucket(flat))
-
-    return {"labor": {}, "machine": {}}
-
-
-def _merge_two_bucket_rates(*sources: typing.Any) -> dict[str, dict[str, float]]:
-    """Merge multiple two-bucket or flat rate mappings into a single structure."""
-
-    merged: dict[str, dict[str, float]] = {"labor": {}, "machine": {}}
-
-    for source in sources:
-        if source is None:
-            continue
-        coerced = _coerce_two_bucket_rates(source)
-        for bucket_type in ("labor", "machine"):
-            bucket = merged.setdefault(bucket_type, {})
-            for role, value in coerced.get(bucket_type, {}).items():
-                try:
-                    bucket[str(role)] = float(value)
-                except Exception:
-                    continue
-
-    return merged
 
 try:
     _rates_raw = SERVICE_CONTAINER.load_rates()
 except ConfigError as exc:
-    RATES_TWO_BUCKET_DEFAULT = {"labor": {}, "machine": {}}
+    RATES_TWO_BUCKET_DEFAULT = _normalized_two_bucket_rates({})
     CONFIG_INIT_ERRORS.append(f"Rates configuration error: {exc}")
 except Exception as exc:
-    RATES_TWO_BUCKET_DEFAULT = {"labor": {}, "machine": {}}
+    RATES_TWO_BUCKET_DEFAULT = _normalized_two_bucket_rates({})
     CONFIG_INIT_ERRORS.append(f"Unexpected rates configuration error: {exc}")
 else:
-    RATES_TWO_BUCKET_DEFAULT = _coerce_two_bucket_rates(_rates_raw)
+    RATES_TWO_BUCKET_DEFAULT = (
+        _normalized_two_bucket_rates(_rates_raw)
+        if isinstance(_rates_raw, _MappingABC)
+        else _normalized_two_bucket_rates({})
+    )
 
 RATES_DEFAULT = two_bucket_to_flat(RATES_TWO_BUCKET_DEFAULT)
 
@@ -10404,6 +10237,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             material_entry["source"] = mat_block.get("source")
         total_cost_val = _coerce_float_or_none(mat_block.get("total_material_cost"))
         base_material_cost = float(total_cost_val or 0.0)
+        base_material_cost = round(base_material_cost, 2)
         material_entry["material_cost_before_credit"] = float(base_material_cost)
         mat_block["material_cost_before_credit"] = float(base_material_cost)
 
@@ -10869,13 +10703,22 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     if os.environ.get("ASSERT_PLANNER"):
         assert str(breakdown.get("pricing_source", "")).strip().lower() == "planner", "Planner not engaged"
 
-    merged_two_bucket_rates = _merge_two_bucket_rates(
-        RATES_TWO_BUCKET_DEFAULT,
-        default_rates,
-        rates,
-    )
+    merged_two_bucket_rates: dict[str, dict[str, float]] = {"labor": {}, "machine": {}}
+    for candidate in (RATES_TWO_BUCKET_DEFAULT, default_rates, rates):
+        if not isinstance(candidate, _MappingABC):
+            continue
+        normalized = _normalized_two_bucket_rates(candidate)
+        if not any(normalized.get(kind) for kind in ("labor", "machine")):
+            continue
+        for bucket_type in ("labor", "machine"):
+            bucket = merged_two_bucket_rates.setdefault(bucket_type, {})
+            for role, value in normalized.get(bucket_type, {}).items():
+                try:
+                    bucket[str(role)] = float(value)
+                except Exception:
+                    continue
     if not any(merged_two_bucket_rates.get(kind) for kind in ("labor", "machine")):
-        merged_two_bucket_rates = copy.deepcopy(RATES_TWO_BUCKET_DEFAULT)
+        merged_two_bucket_rates = _normalized_two_bucket_rates(RATES_TWO_BUCKET_DEFAULT)
 
     bucketize_nre: dict[str, Any] = {}
     if isinstance(planner_result, _MappingABC):
@@ -12058,10 +11901,6 @@ def merge_estimate_into_vars(vars_df: PandasDataFrame, estimate: dict) -> Pandas
 RE_THICK  = RE_DEPTH
 
 
-_QTY_LEAD = re.compile(r'^\s*\((\d+)\)\s*')
-_MM_IN_DIA = re.compile(r"(?:Ø|⌀|O|DIA|\b)\s*([0-9.]+)")
-_PAREN_DIA = re.compile(r"\(([0-9.]+)\s*Ø?\)")
-_FROM_SIDE = re.compile(r"\bFROM\s+(FRONT|BACK)\b", re.I)
 RE_MAT    = re.compile(r"\b(MATL?|MATERIAL)\b\s*[:=\-]?\s*([A-Z0-9 \-\+/\.]+)", re.I)
 RE_HARDNESS = re.compile(r"(\d+(?:\.\d+)?)\s*(?:[-–]\s*(\d+(?:\.\d+)?))?\s*HRC", re.I)
 RE_HEAT_TREAT = re.compile(r"HEAT\s*TREAT(?:ED|\s+TO)?|\bQUENCH\b|\bTEMPER\b", re.I)
@@ -14819,7 +14658,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
                     )
             elif chart_lines:
                 # Fallback: derive rows directly from the free text chart
-                ops_rows = _build_ops_rows_from_chart_lines(chart_lines)
+                ops_rows = _build_ops_rows_from_lines_fallback(chart_lines)
 
             if ops_rows:
                 ops_summary_map = geo.setdefault("ops_summary", {})
@@ -15065,113 +14904,6 @@ def _extract_text_lines_from_ezdxf_doc(doc: Any) -> list[str]:
         joined = joined[start:]
     return [ln for ln in joined.splitlines() if ln.strip()]
 
-
-# ===== Fallback HOLE-TABLE row builder (delegates to cad_quoter.app.chart_lines) ===
-
-def _build_ops_rows_from_chart_lines(chart_lines: list[str]) -> list[dict]:
-    rows: list[dict] = []
-    if not chart_lines:
-        return rows
-    lines = [_norm_line(x) for x in chart_lines]
-    i = 0
-    while i < len(lines):
-        ln = lines[i]
-        if not ln:
-            i += 1
-            continue
-        # skip generic notes
-        if any(
-            k in ln.upper()
-            for k in ["BREAK ALL", "SHARP CORNERS", "RADIUS", "CHAMFER", "AS SHOWN"]
-        ):
-            i += 1
-            continue
-
-        qty = 1
-        mqty = _QTY_LEAD.match(ln)
-        if mqty:
-            qty = int(mqty.group(1))
-            ln = ln[mqty.end() :].strip()
-
-        # TAP
-        mtap = RE_TAP.search(ln)
-        if mtap:
-            # (group 2 holds the whole spec: "#10-32", "5/8-11", "0.190-32", "M8x1.25")
-            thread = mtap.group(2).replace(" ", "")
-            desc = f"{thread} TAP"
-            tail = " ".join([ln] + lines[i + 1 : i + 3])  # look forward for depth / THRU / side
-            if RE_THRU.search(tail):
-                desc += " THRU"
-            md = RE_DEPTH.search(tail)
-            if md and md.group(1):
-                desc += f' × {float(md.group(1)):.2f}"'
-            ms = _FROM_SIDE.search(tail)
-            if ms:
-                desc += f' FROM {ms.group(1).upper()}'
-            rows.append({"hole": "", "ref": "", "qty": qty, "desc": desc})
-            i += 1
-            continue
-
-        # COUNTERBORE
-        if RE_CBORE.search(ln):
-            tail = " ".join([ln] + lines[i - 1 : i] + lines[i + 1 : i + 2])
-            md = _PAREN_DIA.search(tail) or _MM_IN_DIA.search(tail) or RE_DIA.search(tail)
-            dia = float(md.group(1)) if md else None
-            desc = f"{dia:.4f} C’BORE" if dia is not None else "C’BORE"
-            mdp = RE_DEPTH.search(" ".join([ln] + lines[i + 1 : i + 2]))
-            if mdp and mdp.group(1):
-                desc += f' × {float(mdp.group(1)):.2f}"'
-            ms = _FROM_SIDE.search(" ".join([ln] + lines[i + 1 : i + 2]))
-            if ms:
-                desc += f' FROM {ms.group(1).upper()}'
-            rows.append({"hole": "", "ref": "", "qty": qty, "desc": desc})
-            i += 1
-            continue
-
-        # SPOT / CENTER DRILL
-        if (
-            "C' DRILL" in ln.upper()
-            or "C’DRILL" in ln.upper()
-            or "CENTER DRILL" in ln.upper()
-            or "SPOT DRILL" in ln.upper()
-        ):
-            tail = " ".join([ln] + lines[i + 1 : i + 2])
-            md = RE_DEPTH.search(tail)
-            desc = "C’DRILL" + (
-                f' × {float(md.group(1)):.2f}"' if (md and md.group(1)) else ""
-            )
-            rows.append({"hole": "", "ref": "", "qty": qty, "desc": desc})
-            i += 1
-            continue
-
-        # THRU drill with a ref size (e.g., "R (.339Ø) DRILL THRU")
-        if "DRILL" in ln.upper() and RE_THRU.search(ln):
-            md = _PAREN_DIA.search(ln) or _MM_IN_DIA.search(ln) or RE_DIA.search(ln)
-            ref = (md.group(1) if md else "").strip()
-            rows.append({"hole": "", "ref": ref, "qty": qty, "desc": f"{ref} THRU".strip()})
-            i += 1
-            continue
-
-        # NPT etc
-        if RE_NPT.search(ln):
-            rows.append({"hole": "", "ref": "", "qty": qty, "desc": _norm_line(ln)})
-            i += 1
-            continue
-
-        i += 1
-
-    # coalesce identical (desc, ref) pairs
-    agg: dict[tuple[str, str], int] = {}
-    order: list[tuple[str, str]] = []
-    for r in rows:
-        key = (r["desc"], r.get("ref", ""))
-        if key not in agg:
-            order.append(key)
-        agg[key] = agg.get(key, 0) + int(r.get("qty") or 0)
-    return [
-        {"hole": "", "ref": ref, "qty": agg[(desc, ref)], "desc": desc}
-        for (desc, ref) in order
-    ]
 
 def hole_rows_to_ops(rows: Iterable[Any] | None) -> list[dict[str, Any]]:
     """Flatten parsed HoleRow objects into estimator-friendly operations."""

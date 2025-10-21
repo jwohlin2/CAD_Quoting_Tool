@@ -9,6 +9,18 @@ __all__ = [
     "norm_line",
     "build_ops_rows_from_lines_fallback",
     "collect_chart_lines_context",
+    "coalesce_rows",
+    "RE_QTY_LEAD",
+    "RE_FROM_SIDE",
+    "RE_DEPTH",
+    "RE_THRU",
+    "RE_DIA",
+    "RE_DIA_ANY",
+    "RE_MM_IN_DIA",
+    "RE_PAREN_DIA",
+    "RE_TAP",
+    "RE_CBORE",
+    "RE_NPT",
 ]
 
 
@@ -20,7 +32,8 @@ def _norm_line(s: str) -> str:
 
 _RE_QTY_LEAD = re.compile(r"^\s*\((\d+)\)\s*")
 _RE_FROM_SIDE = re.compile(r"\bFROM\s+(FRONT|BACK)\b", re.I)
-_RE_DEPTH = re.compile(r"[×x]\s*([0-9.]+)\b", re.I)
+_RE_DEPTH_MULT = re.compile(r"[×x]\s*([0-9.]+)\b", re.I)
+_RE_DEPTH_DEEP = re.compile(r"(\d+(?:\.\d+)?)\s*DEEP(?:\s+FROM\s+(FRONT|BACK))?", re.I)
 _RE_THRU = re.compile(r"\bTHRU\b", re.I)
 _RE_DIA_ANY = re.compile(r"(?:Ø|⌀|DIA|O)\s*([0-9.]+)|\(([0-9.]+)\s*Ø?\)|\b([0-9.]+)\b")
 _RE_TAP = re.compile(
@@ -28,6 +41,10 @@ _RE_TAP = re.compile(
     re.I,
 )
 _RE_CBORE = re.compile(r"\b(C['’]?\s*BORE|CBORE|COUNTER\s*BORE)\b", re.I)
+_RE_NPT = re.compile(r"(\d+/\d+)\s*-\s*N\.?P\.?T\.?", re.I)
+_RE_MM_IN_DIA = re.compile(r"(?:Ø|⌀|O|DIA|\b)\s*([0-9.]+)")
+_RE_PAREN_DIA = re.compile(r"\(([0-9.]+)\s*Ø?\)")
+_RE_DIA_SIMPLE = re.compile(r"[Ø⌀\u00D8]?\s*(\d+(?:\.\d+)?)", re.I)
 
 
 
@@ -83,22 +100,33 @@ def _build_ops_rows_from_lines_fallback(lines: list[str]) -> list[dict]:
         mtap = _RE_TAP.search(ln)
         if mtap:
             thread = mtap.group(2).replace(" ", "")
-            tail = " ".join(L[i:i + 3])
+            tail = " ".join([ln] + L[i + 1:i + 3])
             desc = f"{thread} TAP"
             if _RE_THRU.search(tail):
                 desc += " THRU"
-            md = _RE_DEPTH.search(tail)
-            if md and md.group(1):
-                desc += f' × {float(md.group(1)):.2f}"'
-            ms = _RE_FROM_SIDE.search(tail)
+            depth_source = tail
+            depth_match = _RE_DEPTH_MULT.search(depth_source)
+            depth_value = depth_match.group(1) if depth_match else None
+            deep_match = _RE_DEPTH_DEEP.search(depth_source)
+            side_from_depth: str | None = None
+            if deep_match:
+                depth_value = depth_value or deep_match.group(1)
+                side_from_depth = (deep_match.group(2) or "").upper() or None
+            if depth_value:
+                desc += f' × {float(depth_value):.2f}"'
+            ms = side_from_depth or None
+            if not ms:
+                m_side = _RE_FROM_SIDE.search(tail)
+                if m_side:
+                    ms = m_side.group(1).upper()
             if ms:
-                desc += f' FROM {ms.group(1).upper()}'
+                desc += f" FROM {ms}"
             out.append({"hole": "", "ref": "", "qty": qty, "desc": desc})
             i += 1
             continue
         if _RE_CBORE.search(ln):
-            tail = " ".join(L[max(0, i - 1):i + 2])
-            mda = _RE_DIA_ANY.search(tail)
+            tail = " ".join([ln] + L[max(0, i - 1):i] + L[i + 1:i + 2])
+            mda = _RE_PAREN_DIA.search(tail) or _RE_MM_IN_DIA.search(tail) or _RE_DIA_ANY.search(tail)
             dia = None
             if mda:
                 for g in mda.groups():
@@ -106,19 +134,36 @@ def _build_ops_rows_from_lines_fallback(lines: list[str]) -> list[dict]:
                         dia = float(g)
                         break
             desc = (f"{dia:.4f} C’BORE" if dia is not None else "C’BORE")
-            md = _RE_DEPTH.search(tail)
-            if md and md.group(1):
-                desc += f' × {float(md.group(1)):.2f}"'
-            ms = _RE_FROM_SIDE.search(tail)
+            depth_source = " ".join([ln] + L[i + 1:i + 2])
+            depth_match = _RE_DEPTH_MULT.search(depth_source)
+            depth_value = depth_match.group(1) if depth_match else None
+            deep_match = _RE_DEPTH_DEEP.search(depth_source)
+            side_from_depth: str | None = None
+            if deep_match:
+                depth_value = depth_value or deep_match.group(1)
+                side_from_depth = (deep_match.group(2) or "").upper() or None
+            if depth_value:
+                desc += f' × {float(depth_value):.2f}"'
+            ms = side_from_depth or None
+            if not ms:
+                m_side = _RE_FROM_SIDE.search(" ".join([ln] + L[i + 1:i + 2]))
+                if m_side:
+                    ms = m_side.group(1).upper()
             if ms:
-                desc += f' FROM {ms.group(1).upper()}'
+                desc += f" FROM {ms}"
             out.append({"hole": "", "ref": "", "qty": qty, "desc": desc})
             i += 1
             continue
         if any(k in ln.upper() for k in ("C' DRILL", "C’DRILL", "CENTER DRILL", "SPOT DRILL")):
-            tail = " ".join(L[i:i + 2])
-            md = _RE_DEPTH.search(tail)
-            desc = "C’DRILL" + (f' × {float(md.group(1)):.2f}"' if (md and md.group(1)) else "")
+            tail = " ".join([ln] + L[i + 1:i + 2])
+            depth_match = _RE_DEPTH_MULT.search(tail)
+            depth_value = depth_match.group(1) if depth_match else None
+            if not depth_value:
+                deep_match = _RE_DEPTH_DEEP.search(tail)
+                depth_value = deep_match.group(1) if deep_match else None
+            desc = "C’DRILL"
+            if depth_value:
+                desc += f' × {float(depth_value):.2f}"'
             out.append({"hole": "", "ref": "", "qty": qty, "desc": desc})
             i += 1
             continue
@@ -131,6 +176,10 @@ def _build_ops_rows_from_lines_fallback(lines: list[str]) -> list[dict]:
                         ref = g
                         break
             out.append({"hole": "", "ref": ref, "qty": qty, "desc": (f"{ref} THRU").strip()})
+            i += 1
+            continue
+        if _RE_NPT.search(ln):
+            out.append({"hole": "", "ref": "", "qty": qty, "desc": _norm_line(ln)})
             i += 1
             continue
         i += 1
@@ -176,3 +225,24 @@ def collect_chart_lines_context(*containers: Mapping[str, object] | None) -> lis
     """Public wrapper around :func:`_collect_chart_lines_context`."""
 
     return _collect_chart_lines_context(*containers)
+
+
+def coalesce_rows(rows: Sequence[Mapping[str, object]] | Sequence[dict]) -> list[dict]:
+    """Public wrapper around :func:`_coalesce_rows`."""
+
+    return _coalesce_rows(rows)
+
+
+# -- Export commonly used regex patterns ------------------------------------
+
+RE_QTY_LEAD = _RE_QTY_LEAD
+RE_FROM_SIDE = _RE_FROM_SIDE
+RE_DEPTH = _RE_DEPTH_DEEP
+RE_THRU = _RE_THRU
+RE_DIA = _RE_DIA_SIMPLE
+RE_DIA_ANY = _RE_DIA_ANY
+RE_MM_IN_DIA = _RE_MM_IN_DIA
+RE_PAREN_DIA = _RE_PAREN_DIA
+RE_TAP = _RE_TAP
+RE_CBORE = _RE_CBORE
+RE_NPT = _RE_NPT
