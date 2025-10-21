@@ -3205,6 +3205,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             return False
         return False
 
+<<<<<<< HEAD
+=======
+    # Define before first use to avoid closure-order issues
+>>>>>>> 0de0cd07 (Fix: define _extract_llm_debug_override before first use (UnboundLocalError))
     def _extract_llm_debug_override(container: Mapping[str, Any] | None) -> bool | None:
         if not isinstance(container, _MappingABC):
             return None
