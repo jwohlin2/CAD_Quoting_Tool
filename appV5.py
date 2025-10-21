@@ -39,6 +39,261 @@ def _get_geo_map(*cands):
     return {}
 
 
+def _coerce_positive_float(value: Any) -> float | None:
+    """Return a positive finite float or None."""
+    try:
+        number = float(value)
+    except Exception:
+        return None
+    try:
+        if not math.isfinite(number):
+            return None
+    except Exception:
+        pass
+    return number if number > 0 else None
+
+
+def _ensure_geo_context_fields(
+    geom: dict[str, Any],
+    source: Mapping[str, Any] | None,
+    *,
+    cfg: Any | None = None,
+) -> None:
+    """Best-effort backfill of common geometry context fields.
+
+    This is intentionally tolerant and only fills when values are present
+    and reasonable. It never raises.
+    """
+
+    try:
+        src = source if isinstance(source, _MappingABC) else {}
+        # Quantity
+        qty = src.get("Quantity") if isinstance(src, _MappingABC) else None
+        try:
+            if "qty" not in geom and qty is not None:
+                qf = float(qty)
+                if math.isfinite(qf) and qf > 0:
+                    geom["qty"] = int(round(qf))
+        except Exception:
+            pass
+
+        # Dimensions (inches)
+        L_in = _coerce_positive_float(src.get("Plate Length (in)"))
+        W_in = _coerce_positive_float(src.get("Plate Width (in)"))
+        T_in = _coerce_positive_float(src.get("Thickness (in)"))
+        if L_in is not None and "plate_len_in" not in geom:
+            geom["plate_len_in"] = L_in
+        if W_in is not None and "plate_wid_in" not in geom:
+            geom["plate_wid_in"] = W_in
+        if T_in is not None and "thickness_in" not in geom:
+            geom["thickness_in"] = T_in
+
+        # Dimensions (mm) → convert if inch values missing
+        L_mm = _coerce_positive_float(src.get("Plate Length (mm)"))
+        W_mm = _coerce_positive_float(src.get("Plate Width (mm)"))
+        T_mm = _coerce_positive_float(src.get("Thickness (mm)"))
+        if L_mm is not None and "plate_len_in" not in geom:
+            geom["plate_len_in"] = float(L_mm) / 25.4
+        if W_mm is not None and "plate_wid_in" not in geom:
+            geom["plate_wid_in"] = float(W_mm) / 25.4
+        if T_mm is not None and "thickness_in" not in geom:
+            geom["thickness_in"] = float(T_mm) / 25.4
+        if T_mm is not None and "thickness_mm" not in geom:
+            geom["thickness_mm"] = T_mm
+    except Exception:
+        # Defensive: never let context backfill break pricing
+        pass
+
+
+def _holes_removed_mass_g(geo: Mapping[str, Any] | None) -> float | None:
+    """Estimate mass removed by holes using geometry context.
+
+    Uses hole diameters (mm), thickness (in), and density (g/cc) when available.
+    Returns grams or None if insufficient data.
+    """
+
+    if not isinstance(geo, _MappingABC):
+        return None
+
+    # Thickness: prefer inches, else convert from mm
+    t_in = _coerce_float_or_none(geo.get("thickness_in"))
+    if t_in is None:
+        t_mm = _coerce_positive_float(geo.get("thickness_mm"))
+        if t_mm is not None:
+            t_in = float(t_mm) / 25.4
+    if t_in is None or t_in <= 0:
+        return None
+
+    # Hole diameters
+    hole_diams_mm: list[float] = []
+    raw_list = geo.get("hole_diams_mm")
+    if isinstance(raw_list, Sequence) and not isinstance(raw_list, (str, bytes, bytearray)):
+        for v in raw_list:
+            val = _coerce_positive_float(v)
+            if val is not None:
+                hole_diams_mm.append(val)
+    if not hole_diams_mm:
+        families = geo.get("hole_diam_families_in")
+        if isinstance(families, _MappingABC):
+            for dia_in, qty in families.items():
+                d_in = _coerce_positive_float(dia_in)
+                q = _coerce_float_or_none(qty)
+                if d_in and q and q > 0:
+                    # accumulate as mm without expanding the list
+                    hole_diams_mm.extend([d_in * 25.4] * int(round(q)))
+    if not hole_diams_mm:
+        return None
+
+    # Density: try to infer from material text
+    density_g_cc = _coerce_float_or_none(geo.get("density_g_cc"))
+    if density_g_cc in (None, 0.0):
+        material_text = geo.get("material") or geo.get("material_name")
+        if isinstance(material_text, str) and material_text.strip():
+            norm_key = _normalize_lookup_key(material_text)
+            density_g_cc = (
+                MATERIAL_DENSITY_G_CC_BY_KEYWORD.get(norm_key)
+                or MATERIAL_DENSITY_G_CC_BY_KEY.get(norm_key)
+            )
+    if density_g_cc is None or density_g_cc <= 0:
+        return None
+
+    # Compute removed volume (cm^3)
+    removed_volume_cm3 = 0.0
+    for d_mm in hole_diams_mm:
+        d = _coerce_positive_float(d_mm)
+        if not d:
+            continue
+        area_mm2 = math.pi * (float(d) / 2.0) ** 2
+        volume_mm3 = area_mm2 * float(t_in) * 25.4  # thickness to mm
+        removed_volume_cm3 += volume_mm3 * 0.001  # mm^3 -> cm^3
+
+    if removed_volume_cm3 <= 0:
+        return None
+
+    return removed_volume_cm3 * float(density_g_cc)
+
+
+def build_drill_groups_from_geometry(
+    hole_diams_mm: Sequence[Any] | None,
+    thickness_in: Any | None,
+) -> list[dict[str, Any]]:
+    """Create simple drill groups from hole diameters and plate thickness.
+
+    Each group includes: ``diameter_in``, ``qty``, ``op`` (deep_drill/drill), and ``depth_in``.
+    Deep drilling is flagged when depth >= 3x diameter.
+    """
+
+    try:
+        t_in = float(thickness_in) if thickness_in is not None else None
+    except Exception:
+        t_in = None
+    if t_in is not None and (not math.isfinite(t_in) or t_in <= 0):
+        t_in = None
+
+    groups: dict[float, dict[str, Any]] = {}
+    if isinstance(hole_diams_mm, Sequence) and not isinstance(hole_diams_mm, (str, bytes, bytearray)):
+        for raw in hole_diams_mm:
+            d_mm = _coerce_positive_float(raw)
+            if d_mm is None:
+                continue
+            d_in = float(d_mm) / 25.4
+            if not (d_in > 0 and math.isfinite(d_in)):
+                continue
+            key = round(d_in, 4)
+            bucket = groups.setdefault(
+                key,
+                {
+                    "diameter_in": float(key),
+                    "qty": 0,
+                    "depth_in": t_in,
+                    "op": "deep_drill" if (t_in is not None and t_in >= 3.0 * float(key)) else "drill",
+                },
+            )
+            bucket["qty"] += 1
+
+    ordered = [groups[k] for k in sorted(groups.keys())]
+    return ordered
+
+
+def _apply_drilling_meta_fallback(
+    meta: Mapping[str, Any] | None,
+    groups: Sequence[Mapping[str, Any]] | None,
+) -> tuple[int, int]:
+    """Compute deep/std hole counts and backfill helper arrays in meta container.
+
+    Returns (holes_deep, holes_std).
+    """
+
+    deep = 0
+    std = 0
+    dia_vals: list[float] = []
+    depth_vals: list[float] = []
+
+    if isinstance(groups, Sequence):
+        for g in groups:
+            try:
+                qty = int(_coerce_float_or_none(g.get("qty")) or 0)
+            except Exception:
+                qty = 0
+            op = str(g.get("op") or "").strip().lower()
+            if op.startswith("deep"):
+                deep += qty
+            else:
+                std += qty
+            d_in = _coerce_float_or_none(g.get("diameter_in"))
+            if d_in and d_in > 0:
+                dia_vals.append(float(d_in))
+            z_in = _coerce_float_or_none(g.get("depth_in"))
+            if z_in and z_in > 0:
+                depth_vals.append(float(z_in))
+
+    # Backfill into a mutable container if provided
+    try:
+        if isinstance(meta, dict):
+            if dia_vals and not meta.get("dia_in_vals"):
+                meta["dia_in_vals"] = dia_vals
+            if depth_vals and not meta.get("depth_in_vals"):
+                meta["depth_in_vals"] = depth_vals
+    except Exception:
+        pass
+
+    return (deep, std)
+
+
+def _iter_geo_dicts_for_context(root: Mapping[str, Any] | None) -> Iterable[Mapping[str, Any]]:
+    """Yield candidate geo-like dicts to inspect for drilling groups.
+
+    Walks shallow nests commonly used in this app: the root mapping, any
+    nested ``geo`` mapping, and the ``result``/``breakdown`` maps plus their
+    ``geo`` children when present. Deduplicates by object id.
+    """
+
+    seen: set[int] = set()
+
+    def _push(obj: Any) -> None:
+        if isinstance(obj, _MappingABC):
+            oid = id(obj)
+            if oid not in seen:
+                seen.add(oid)
+                stack.append(obj)
+
+    stack: list[Mapping[str, Any]] = []
+    _push(root)
+
+    while stack:
+        ctx = stack.pop(0)
+        yield ctx
+        _push(ctx.get("geo"))
+        res = ctx.get("result")
+        brk = ctx.get("breakdown")
+        _push(res)
+        _push(brk)
+        if isinstance(res, _MappingABC):
+            _push(res.get("geo"))
+        if isinstance(brk, _MappingABC):
+            _push(brk.get("geo"))
+
+
 def _get_material_group(*cands):
     for c in cands:
         if isinstance(c, dict) and c.get("material_group"):
@@ -19523,14 +19778,13 @@ class App(tk.Tk):
                 ui_vars.setdefault("speeds_feeds_path", speeds_csv)
                 ui_vars.setdefault("Speeds/Feeds CSV", speeds_csv)
 
+            # Use LLM only if already available; avoid blocking loads during quote gen
             llm_suggest = self.LLM_SUGGEST
-            if self.llm_enabled.get() and llm_suggest is None:
-                llm_suggest = self._ensure_llm_loaded()
 
             try:
                 self._reset_llm_logs()
                 client = None
-                if self.llm_enabled.get():
+                if self.llm_enabled.get() and (llm_suggest is not None):
                     client = self.get_llm_client(self.llm_model_path.get().strip() or None)
                 res = compute_quote_from_df(
                     self.vars_df,
