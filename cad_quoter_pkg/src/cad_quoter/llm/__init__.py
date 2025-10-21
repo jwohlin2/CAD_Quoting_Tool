@@ -1221,8 +1221,8 @@ def explain_quote(
         lines.append(f"Includes a {scrap_text} scrap allowance.")
 
     def _top_drivers(bucket_view_obj, n=3):
-        b = (bucket_view_obj.get("buckets") or {}) if isinstance(bucket_view_obj, Mapping) else {}
-        items = [(k, float(v.get("total$", 0.0) or 0.0)) for k, v in b.items() if isinstance(v, Mapping)]
+        b = (bucket_view_obj.get("buckets") or {})
+        items = [(k, float(v.get("total$", 0.0) or 0.0)) for k, v in b.items()]
         items = [x for x in items if x[1] > 0]
         items.sort(key=lambda x: x[1], reverse=True)
         return items[:n]
