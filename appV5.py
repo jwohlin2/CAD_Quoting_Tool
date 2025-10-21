@@ -468,6 +468,8 @@ from appkit.ui.services import QuoteConfiguration
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_RE_SPLIT = re.split
+_RE_SUB = re.sub
 _RENDER_ASCII_REPLACEMENTS: dict[str, str] = {
     "—": "-",
     "•": "-",
@@ -3336,7 +3338,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         for candidate in (existing, new_value):
             if candidate is None:
                 continue
-            for segment in re.split(r";\s*", str(candidate)):
+            for segment in _RE_SPLIT(r";\s*", str(candidate)):
                 seg = segment.strip()
                 if not seg:
                     continue
@@ -3506,7 +3508,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
         label_text = label_text.replace("+", " + ")
         label_text = label_text.replace("_", " ")
-        label_text = re.sub(r"\s+", " ", label_text).strip()
+        label_text = _RE_SUB(r"\s+", " ", label_text).strip()
         return label_text or None
 
     def _is_truthy_flag(value) -> bool:
@@ -3551,7 +3553,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if not detail:
             return
         sanitized_detail = _sanitize_render_text(detail)
-        for segment in re.split(r";\s*", sanitized_detail):
+        for segment in _RE_SPLIT(r";\s*", sanitized_detail):
             write_wrapped(segment, indent)
 
     bucket_diag_env = os.getenv("SHOW_BUCKET_DIAGNOSTICS")
@@ -3665,7 +3667,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 segments.append(seg)
                 seen.add(seg)
         if existing:
-            for segment in re.split(r";\s*", str(existing)):
+            for segment in _RE_SPLIT(r";\s*", str(existing)):
                 seg = segment.strip()
                 if not seg or EXTRA_DETAIL_RE.match(seg):
                     continue
@@ -3676,7 +3678,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             return "; ".join(segments)
         if existing:
             filtered_existing: list[str] = []
-            for segment in re.split(r";\s*", str(existing)):
+            for segment in _RE_SPLIT(r";\s*", str(existing)):
                 seg = segment.strip()
                 if not seg or EXTRA_DETAIL_RE.match(seg):
                     continue
@@ -3960,7 +3962,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     material_total_for_why = 0.0
     if narrative:
         if isinstance(narrative, str):
-            parts = [seg.strip() for seg in re.split(r"(?<=\.)\s+", narrative) if seg.strip()]
+            parts = [seg.strip() for seg in _RE_SPLIT(r"(?<=\.)\s+", narrative) if seg.strip()]
             if not parts:
                 parts = [narrative.strip()]
         else:
@@ -5728,7 +5730,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     def _norm(s: Any) -> str:
         import re
 
-        return re.sub(r"[^a-z0-9]+", "_", str(s or "").lower()).strip("_")
+        return _RE_SUB(r"[^a-z0-9]+", "_", str(s or "").lower()).strip("_")
 
     laborish_aliases: set[str] = set()
     for bucket_key, role in BUCKET_ROLE.items():
@@ -6156,7 +6158,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 detail_parts.append(str(rate_display))
             existing_detail = detail_lookup.get(display_label)
             if existing_detail not in (None, ""):
-                for segment in re.split(r";\s*", str(existing_detail)):
+                for segment in _RE_SPLIT(r";\s*", str(existing_detail)):
                     cleaned = segment.strip()
                     if not cleaned or cleaned.startswith("-"):
                         continue
