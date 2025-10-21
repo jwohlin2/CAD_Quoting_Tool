@@ -9,6 +9,7 @@ from typing import Any, Callable, Mapping, TypedDict
 from collections.abc import Iterable, Mapping as _MappingABC, MutableMapping as _MutableMappingABC, Sequence
 
 from cad_quoter.config import logger
+from cad_quoter.app.hole_ops import TAP_MINUTES_BY_CLASS, CBORE_MIN_PER_SIDE_MIN
 from cad_quoter.domain_models import coerce_float_or_none as _coerce_float_or_none
 from cad_quoter.pricing.process_buckets import (
     BUCKET_ROLE,
@@ -28,6 +29,10 @@ from .services import QuoteConfiguration
 
 PROGRAMMING_PER_PART_LABEL = "Programming (per part)"
 PROGRAMMING_AMORTIZED_LABEL = "Programming (amortized)"
+
+# Heuristic fallbacks mirrored from appV5 for spot drill and jig grind minutes.
+SPOT_DRILL_MIN_PER_SIDE_MIN = 0.1
+JIG_GRIND_MIN_PER_FEATURE = 15.0
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:

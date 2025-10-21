@@ -361,6 +361,7 @@ from appkit.ui.planner_render import (
     _display_bucket_label,
     _display_rate_for_row,
     _hole_table_minutes_from_geo,
+    _lookup_bucket_rate,
     _normalize_bucket_key,
     _op_role_for_name,
     _planner_bucket_key_for_name,
@@ -1248,6 +1249,69 @@ def _hole_table_section_present(lines: Sequence[str], header: str) -> bool:
     return False
 
 
+def _add_bucket_minutes(
+    bucket_view: Mapping[str, Any] | MutableMapping[str, Any] | None,
+    bucket_key: str,
+    minutes: float,
+    *,
+    machine_rate: float = 0.0,
+    labor_rate: float = 0.0,
+    name: str = "",
+) -> None:
+    try:
+        minutes_val = float(minutes)
+    except Exception:
+        minutes_val = 0.0
+    if minutes_val <= 0.0:
+        return
+
+    if isinstance(bucket_view, dict):
+        target_view = bucket_view
+    elif isinstance(bucket_view, _MutableMappingABC):
+        target_view = typing.cast(MutableMapping[str, Any], bucket_view)
+    else:
+        return
+
+    buckets = target_view.setdefault(
+        "buckets",
+        {},
+    )
+    if not isinstance(buckets, dict):
+        try:
+            buckets = dict(buckets)  # type: ignore[arg-type]
+        except Exception:
+            buckets = {}
+        target_view["buckets"] = buckets
+
+    entry = buckets.setdefault(
+        bucket_key,
+        {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0, "total$": 0.0},
+    )
+    try:
+        entry_minutes = float(entry.get("minutes", 0.0))
+    except Exception:
+        entry_minutes = 0.0
+    entry["minutes"] = entry_minutes + minutes_val
+
+    hours = minutes_val / 60.0
+    mach_rate = _safe_float(machine_rate, 0.0)
+    lab_rate = _safe_float(labor_rate, 0.0)
+    entry["machine$"] = float(entry.get("machine$", 0.0)) + hours * mach_rate
+    entry["labor$"] = float(entry.get("labor$", 0.0)) + hours * lab_rate
+    entry["total$"] = round(float(entry.get("machine$", 0.0)) + float(entry.get("labor$", 0.0)), 2)
+
+    ops_map = target_view.setdefault("bucket_ops", {})
+    if not isinstance(ops_map, dict):
+        try:
+            ops_map = dict(ops_map)  # type: ignore[arg-type]
+        except Exception:
+            ops_map = {}
+        target_view["bucket_ops"] = ops_map
+    ops_list = ops_map.setdefault(bucket_key, [])
+    if isinstance(ops_list, list) and name:
+        ops_list.append({"name": name, "minutes": minutes_val})
+
+
 def _emit_hole_table_ops_cards(
     lines: list[str],
     *,
@@ -1256,7 +1320,44 @@ def _emit_hole_table_ops_cards(
     speeds_csv: dict | None,
     result: Mapping[str, Any] | None = None,
     breakdown: Mapping[str, Any] | None = None,
+    rates: Mapping[str, Any] | None = None,
 ) -> None:
+    tap_minutes_hint, cbore_minutes_hint, spot_minutes_hint, jig_minutes_hint = (
+        _hole_table_minutes_from_geo(geo)
+    )
+
+    bucket_view_obj: Mapping[str, Any] | MutableMapping[str, Any] | None = None
+    for candidate in (breakdown, result):
+        if isinstance(candidate, dict):
+            bucket_view_obj = candidate.setdefault("bucket_view", {})
+            break
+        if isinstance(candidate, _MutableMappingABC):
+            view = candidate.get("bucket_view")
+            if not isinstance(view, dict):
+                view = {}
+                try:
+                    candidate["bucket_view"] = view  # type: ignore[index]
+                except Exception:
+                    pass
+            bucket_view_obj = typing.cast(MutableMapping[str, Any], view)
+            break
+
+    rates_map: Mapping[str, Any]
+    if isinstance(breakdown, _MappingABC):
+        rates_candidate = breakdown.get("rates")
+        if isinstance(rates_candidate, _MappingABC):
+            rates_map = rates_candidate
+        elif isinstance(rates_candidate, dict):
+            rates_map = rates_candidate
+        else:
+            rates_map = {}
+    else:
+        rates_map = {}
+    if (not rates_map) and isinstance(rates, _MappingABC):
+        rates_map = rates
+    elif (not rates_map) and isinstance(rates, dict):
+        rates_map = rates
+
     if not _hole_table_section_present(lines, "MATERIAL REMOVAL – TAPPING"):
         _emit_tapping_card(
             lines,
@@ -1265,6 +1366,19 @@ def _emit_hole_table_ops_cards(
             speeds_csv=speeds_csv,
             result=result,
             breakdown=breakdown,
+        )
+        tap_labor_rate = _lookup_bucket_rate("tapping_labor", rates_map) or _lookup_bucket_rate(
+            "labor",
+            rates_map,
+        )
+        tap_machine_rate = _lookup_bucket_rate("tapping", rates_map) or 0.0
+        _add_bucket_minutes(
+            bucket_view_obj,
+            "tapping",
+            tap_minutes_hint,
+            machine_rate=tap_machine_rate,
+            labor_rate=tap_labor_rate,
+            name="Tapping ops",
         )
     if not _hole_table_section_present(lines, "MATERIAL REMOVAL – COUNTERBORE"):
         _emit_counterbore_card(
@@ -1275,6 +1389,22 @@ def _emit_hole_table_ops_cards(
             result=result,
             breakdown=breakdown,
         )
+        cbore_labor_rate = _lookup_bucket_rate("counterbore_labor", rates_map) or _lookup_bucket_rate(
+            "labor",
+            rates_map,
+        )
+        cbore_machine_rate = _lookup_bucket_rate("counterbore", rates_map) or _lookup_bucket_rate(
+            "drilling",
+            rates_map,
+        )
+        _add_bucket_minutes(
+            bucket_view_obj,
+            "counterbore",
+            cbore_minutes_hint,
+            machine_rate=cbore_machine_rate,
+            labor_rate=cbore_labor_rate,
+            name="Counterbore ops",
+        )
     if not _hole_table_section_present(lines, "MATERIAL REMOVAL – SPOT (CENTER DRILL)"):
         _emit_spot_and_jig_cards(
             lines,
@@ -1283,6 +1413,32 @@ def _emit_hole_table_ops_cards(
             speeds_csv=speeds_csv,
             result=result,
             breakdown=breakdown,
+        )
+        drill_labor_rate = _lookup_bucket_rate("drilling_labor", rates_map) or _lookup_bucket_rate(
+            "labor",
+            rates_map,
+        )
+        drill_machine_rate = _lookup_bucket_rate("drilling", rates_map) or 0.0
+        _add_bucket_minutes(
+            bucket_view_obj,
+            "drilling",
+            spot_minutes_hint,
+            machine_rate=drill_machine_rate,
+            labor_rate=drill_labor_rate,
+            name="Spot drill ops",
+        )
+        grind_labor_rate = _lookup_bucket_rate("grinding_labor", rates_map) or _lookup_bucket_rate(
+            "labor",
+            rates_map,
+        )
+        grind_machine_rate = _lookup_bucket_rate("grinding", rates_map) or 0.0
+        _add_bucket_minutes(
+            bucket_view_obj,
+            "grinding",
+            jig_minutes_hint,
+            machine_rate=grind_machine_rate,
+            labor_rate=grind_labor_rate,
+            name="Jig grind ops",
         )
 
 
@@ -7920,7 +8076,15 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 ops_rows = built
 
         # Emit the cards (will no-op if no TAP/CBore/Spot rows)
-        _emit_hole_table_ops_cards(lines, geo=geo_map, material_group=material_group, speeds_csv=None)
+        _emit_hole_table_ops_cards(
+            lines,
+            geo=geo_map,
+            material_group=material_group,
+            speeds_csv=None,
+            result=result,
+            breakdown=breakdown,
+            rates=rates,
+        )
 
     except Exception as e:
         _push(lines, f"[DEBUG] material_removal_emit_skipped={e.__class__.__name__}: {e}")
