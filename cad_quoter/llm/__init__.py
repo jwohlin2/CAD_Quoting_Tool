@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence
 
 from cad_quoter.utils import _dict, compact_dict, jdump, json_safe_copy
+from cad_quoter.utils.numeric import coerce_float, coerce_int
 from cad_quoter.utils.render_utils import fmt_hours, fmt_money, fmt_percent
 from appkit.data import load_text
 
@@ -839,26 +840,8 @@ def explain_quote(
     if not isinstance(breakdown, Mapping):
         return ""
 
-    def _coerce_float(value: Any) -> float | None:
-        try:
-            num = float(value)
-        except Exception:
-            return None
-        if not math.isfinite(num):
-            return None
-        return num
-
-    def _coerce_int(value: Any) -> int | None:
-        num = _coerce_float(value)
-        if num is None:
-            return None
-        try:
-            return int(round(num))
-        except Exception:
-            return None
-
     def _format_pct(value: Any) -> str | None:
-        pct = _coerce_float(value)
+        pct = coerce_float(value)
         if pct is None:
             return None
         if pct > 1.5:
@@ -884,7 +867,7 @@ def explain_quote(
         currency_prefix = currency_text
 
     def _format_money(value: Any) -> str | None:
-        num = _coerce_float(value)
+        num = coerce_float(value)
         if num is None:
             return None
         return fmt_money(num, currency_prefix)
@@ -923,12 +906,12 @@ def explain_quote(
         if source is None:
             return None
         if isinstance(source, Mapping):
-            direct = _coerce_float(source.get("removal_drilling_hours"))
+            direct = coerce_float(source.get("removal_drilling_hours"))
             if direct is not None:
                 return direct
             extra = source.get("extra")
             if isinstance(extra, Mapping):
-                from_extra = _coerce_float(extra.get("removal_drilling_hours"))
+                from_extra = coerce_float(extra.get("removal_drilling_hours"))
                 if from_extra is not None:
                     return from_extra
         try:
@@ -936,7 +919,7 @@ def explain_quote(
         except Exception:
             extra_attr = None
         if isinstance(extra_attr, Mapping):
-            from_attr = _coerce_float(extra_attr.get("removal_drilling_hours"))
+            from_attr = coerce_float(extra_attr.get("removal_drilling_hours"))
             if from_attr is not None:
                 return from_attr
         return None
@@ -1017,9 +1000,9 @@ def explain_quote(
             key_text = str(raw_key or "").strip().lower()
             if "drill" not in key_text:
                 continue
-            minutes_val = _coerce_float(raw_value)
+            minutes_val = coerce_float(raw_value)
             if minutes_val is None and isinstance(raw_value, Mapping):
-                minutes_val = _coerce_float(raw_value.get("minutes"))
+                minutes_val = coerce_float(raw_value.get("minutes"))
             if minutes_val is not None and minutes_val > 0:
                 hours_text = fmt_hours(minutes_val / 60.0)
                 _add_reason(f"planner buckets allocate {hours_text} to drilling")
@@ -1033,7 +1016,7 @@ def explain_quote(
     recognized_ops_from_plan = 0
     for mapping in plan_info_mappings:
         raw_recognized = mapping.get("recognized_line_items")
-        recognized_val = _coerce_int(raw_recognized)
+        recognized_val = coerce_int(raw_recognized)
         if recognized_val is not None and recognized_val > 0:
             recognized_ops_from_plan = max(recognized_ops_from_plan, recognized_val)
 
@@ -1109,11 +1092,11 @@ def explain_quote(
         ):
             if key in mapping:
                 present = True
-                minutes_val = _coerce_float(mapping.get(key))
+                minutes_val = coerce_float(mapping.get(key))
                 if minutes_val is not None and minutes_val > 0:
                     minutes_found = max(minutes_found or 0.0, float(minutes_val))
-        machine_val = _coerce_float(mapping.get("drill_machine_minutes"))
-        labor_val = _coerce_float(mapping.get("drill_labor_minutes"))
+        machine_val = coerce_float(mapping.get("drill_machine_minutes"))
+        labor_val = coerce_float(mapping.get("drill_labor_minutes"))
         if machine_val is not None or labor_val is not None:
             present = True
             total = float(machine_val or 0.0) + float(labor_val or 0.0)
@@ -1184,7 +1167,7 @@ def explain_quote(
         should_note_drilling = True
 
     price_text = _format_money(totals.get("price") or breakdown.get("price"))
-    qty_val = _coerce_int(totals.get("qty") or breakdown.get("qty") or breakdown.get("quantity"))
+    qty_val = coerce_int(totals.get("qty") or breakdown.get("qty") or breakdown.get("quantity"))
     if price_text:
         if qty_val and qty_val > 0:
             piece_label = "piece" if qty_val == 1 else "pieces"
@@ -1203,9 +1186,9 @@ def explain_quote(
     if material_canonical:
         lines.append(f"Material: {material_canonical}.")
 
-    labor_cost_rendered = _coerce_float(breakdown.get("labor_cost_rendered"))
+    labor_cost_rendered = coerce_float(breakdown.get("labor_cost_rendered"))
     if labor_cost_rendered is None:
-        labor_cost_rendered = _coerce_float(totals.get("labor_cost"))
+        labor_cost_rendered = coerce_float(totals.get("labor_cost"))
 
     labor_text = _format_money(labor_cost_rendered)
     material_text = _format_money(
@@ -1222,7 +1205,7 @@ def explain_quote(
         lines.append("Cost makeup: " + "; ".join(parts) + ".")
 
     scrap_text = _format_pct(breakdown.get("scrap_pct"))
-    if scrap_text and _coerce_float(breakdown.get("scrap_pct")):
+    if scrap_text and coerce_float(breakdown.get("scrap_pct")):
         lines.append(f"Includes a {scrap_text} scrap allowance.")
 
     # === WHY: CONSISTENT DRILLING TEXT ===
@@ -1252,7 +1235,7 @@ def explain_quote(
         else:
             return []
         for key, raw in items:
-            amount = _coerce_float(raw)
+            amount = coerce_float(raw)
             if amount is None or abs(amount) < 1e-2:
                 continue
             name = str(key).strip()
@@ -1284,7 +1267,7 @@ def explain_quote(
 
     render_state_drill_minutes: float | None = None
     if isinstance(render_state_extra, Mapping):
-        render_state_drill_minutes = _coerce_float(render_state_extra.get("drill_total_minutes"))
+        render_state_drill_minutes = coerce_float(render_state_extra.get("drill_total_minutes"))
 
     include_drilling_in_top = False
     if render_state_drill_minutes is not None and render_state_drill_minutes > 0:
