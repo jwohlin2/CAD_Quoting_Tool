@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 import cad_quoter.geometry as _geometry
 
@@ -33,6 +33,11 @@ from cad_quoter.domain_models import DEFAULT_MATERIAL_DISPLAY
 from cad_quoter.domain_models import coerce_float_or_none as _coerce_float_or_none
 from cad_quoter.domain_models import normalize_material_key as _normalize_lookup_key
 
+from cad_quoter.app.optional_loaders import (
+    build_pdf_llm_payload as _build_pdf_llm_payload,
+    pdf_document_to_structured as _pdf_document_to_structured,
+)
+
 from appkit.utils import _parse_length_to_mm
 
 
@@ -40,7 +45,7 @@ from appkit.utils import _parse_length_to_mm
 class GeometryLoader:
     """Facade around geometry helper functions used by the UI layer."""
 
-    extract_pdf_all_fn: Callable[[Path, int], dict] | None = None
+    extract_pdf_all_fn: Callable[[Path, int], dict] | None = _pdf_document_to_structured
     extract_pdf_vector_fn: Callable[[str | Path], dict] | None = None
     extract_dxf_or_dwg_fn: Callable[[str | Path], dict] | None = None
     occ_feature_fn: Callable[[str | Path], Any] = extract_features_with_occ
@@ -49,6 +54,9 @@ class GeometryLoader:
     cad_reader: Callable[[str | Path], Any] = read_cad_any
     bbox_fn: Callable[[Any], Any] = safe_bbox
     occ_enricher: Callable[[Any], Any] = enrich_geo_occ
+    build_pdf_llm_payload_fn: Callable[[Mapping[str, Any] | None, str | None], Any] | None = (
+        _build_pdf_llm_payload
+    )
 
     def extract_pdf_all(self, path: str | Path, dpi: int = 300) -> dict:
         if self.extract_pdf_all_fn is None:
@@ -82,6 +90,13 @@ class GeometryLoader:
 
     def enrich_geo_occ(self, shape: Any):
         return self.occ_enricher(shape)
+
+    def build_pdf_llm_payload(
+        self, structured: Mapping[str, Any] | None, image_path: str | None = None
+    ) -> Any:
+        if self.build_pdf_llm_payload_fn is None:
+            raise RuntimeError("build_pdf_llm_payload function not provided")
+        return self.build_pdf_llm_payload_fn(structured, image_path)
 
 
 @dataclass(slots=True)
