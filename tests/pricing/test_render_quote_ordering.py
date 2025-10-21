@@ -243,23 +243,24 @@ def test_explain_quote_reports_drilling_minutes_from_removal_card() -> None:
     breakdown = {
         "totals": {"price": 120.0, "qty": 1, "labor_cost": 40.0},
         "material_direct_cost": 30.0,
+        "bucket_view": {"buckets": {"drilling": {"total$": 90.0}}},
     }
     render_state = {"extra": {"drill_total_minutes": 30.0}}
 
     explanation = explain_quote(breakdown, render_state=render_state)
 
-    assert "Drilling time comes from removal-card math (0.50 hr total)." in explanation
-    assert "No drilling accounted." not in explanation
+    assert "Main cost drivers: Drilling $90.00." in explanation
+    assert "Cost drivers derive from planner buckets; no single dominant bucket." not in explanation
 
 
 def test_explain_quote_skips_legacy_drilling_text_when_bucket_present() -> None:
     breakdown = {
         "totals": {"price": 180.0, "qty": 1, "labor_cost": 60.0},
         "material_direct_cost": 45.0,
-        "bucket_view": {"buckets": {"drilling": {"minutes": 90.0}}},
+        "bucket_view": {"buckets": {"drilling": {"total$": 180.0}}},
     }
     render_state = {"extra": {"drill_total_minutes": 30.0}}
-    plan_info = {"bucket_view": {"buckets": {"drilling": {"minutes": 90.0}}}}
+    plan_info = {"bucket_view": {"buckets": {"drilling": {"total$": 180.0}}}}
 
     explanation = explain_quote(
         breakdown,
@@ -267,7 +268,7 @@ def test_explain_quote_skips_legacy_drilling_text_when_bucket_present() -> None:
         plan_info=plan_info,
     )
 
-    assert "Drilling time comes from removal-card math" not in explanation
+    assert "Main cost drivers: Drilling $180.00." in explanation
 
 
 def test_explain_quote_reports_no_drilling_when_minutes_absent() -> None:
@@ -275,5 +276,4 @@ def test_explain_quote_reports_no_drilling_when_minutes_absent() -> None:
 
     explanation = explain_quote(breakdown, render_state={"extra": {}})
 
-    assert "No drilling accounted." in explanation
-    assert "Drilling time comes from removal-card math" not in explanation
+    assert "Cost drivers derive from planner buckets; no single dominant bucket." in explanation
