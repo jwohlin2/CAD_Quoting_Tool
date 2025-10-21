@@ -42,6 +42,26 @@ def test_canonicalize_costs_groups_aliases_and_skips_planner_total() -> None:
     assert {"planner_total", "misc"}.issubset(PROCESS_BUCKETS.hide_in_cost)
 
 
+def test_canonicalize_costs_can_skip_planner_meta_and_misc(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DEBUG_MISC", raising=False)
+
+    costs = {
+        "Milling": 40.0,
+        "Deburr": 12.0,
+        "Misc": 10.0,
+        "Planner Total": 500.0,
+        "Planner Labor": 75.0,
+        "planner_misc": 5.0,
+    }
+
+    canon = canonicalize_costs(costs, skip_planner_meta=True, hide_misc_under=50.0)
+
+    assert set(canon) == {"milling", "finishing_deburr"}
+    assert canon["milling"] == pytest.approx(40.0)
+    assert canon["finishing_deburr"] == pytest.approx(12.0)
+    assert "misc" not in canon
+
+
 def test_render_process_costs_orders_rows_and_rates(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DEBUG_MISC", raising=False)
 
