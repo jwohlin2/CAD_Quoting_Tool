@@ -1,5 +1,4 @@
 """Shared helpers for process cost bucket normalisation and labelling."""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -7,6 +6,7 @@ from collections.abc import Iterable, Mapping
 import re
 from typing import Any, Dict, Iterable as _Iterable, Mapping as _Mapping, Tuple
 
+from cad_quoter.pricing.rate_buckets import RATE_BUCKETS
 from cad_quoter.rates import OP_TO_LABOR, OP_TO_MACHINE, rate_for_role
 
 
@@ -60,8 +60,8 @@ _BASE_BUCKET_SPECS: tuple[_BucketSpec, ...] = (
 
 
 # Additional buckets are surfaced by the planner UI but are not part of the
-# pricing renderer's default order.  They still benefit from the same labelling
-# and rate heuristics.
+# pricing renderer's legacy default order. They still benefit from the same
+# labelling and rate heuristics and are now part of the canonical ordering.
 _EXTRA_BUCKET_SPECS: dict[str, _BucketSpec] = {
     "programming": _BucketSpec(
         "programming",
@@ -69,12 +69,46 @@ _EXTRA_BUCKET_SPECS: dict[str, _BucketSpec] = {
         ("ProgrammingRate", "EngineerRate", "ProgrammerRate"),
     ),
     "fixture_build": _BucketSpec("fixture_build", "Fixture Build", ("FixtureBuildRate",)),
-    "countersink": _BucketSpec("countersink", "Countersink", ("CounterSinkRate", "DrillingRate")),
+    "countersink": _BucketSpec(
+        "countersink",
+        "Countersink",
+        ("CounterSinkRate", "DrillingRate"),
+    ),
 }
 
 
-ORDER: tuple[str, ...] = tuple(spec.key for spec in _BASE_BUCKET_SPECS)
-"""Canonical ordering for pricing process buckets."""
+_ALL_BUCKET_SPECS: dict[str, _BucketSpec] = {spec.key: spec for spec in _BASE_BUCKET_SPECS}
+_ALL_BUCKET_SPECS.update(_EXTRA_BUCKET_SPECS)
+
+
+CANONICAL_BUCKET_ORDER: tuple[str, ...] = tuple(
+    key
+    for key in (
+        "milling",
+        "drilling",
+        "counterbore",
+        "countersink",
+        "tapping",
+        "grinding",
+        "wire_edm",
+        "sinker_edm",
+        "finishing_deburr",
+        "saw_waterjet",
+        "inspection",
+        "toolmaker_support",
+        "fixture_build",
+        "fixture_build_amortized",
+        "programming",
+        "programming_amortized",
+        "misc",
+    )
+    if key in _ALL_BUCKET_SPECS
+)
+"""Canonical ordering for pricing process buckets, including planner-only buckets."""
+
+
+# ``ORDER`` is retained for compatibility with older imports.
+ORDER: tuple[str, ...] = CANONICAL_BUCKET_ORDER
 
 
 PLANNER_BUCKET_ORDER: tuple[str, ...] = (
@@ -97,13 +131,13 @@ PLANNER_BUCKET_ORDER: tuple[str, ...] = (
 """Display order for planner bucketised cost summaries."""
 
 
-_LABEL_MAP: dict[str, str] = {spec.key: spec.label for spec in _BASE_BUCKET_SPECS}
-_LABEL_MAP.update({key: spec.label for key, spec in _EXTRA_BUCKET_SPECS.items()})
+LABEL_MAP: dict[str, str] = {spec.key: spec.label for spec in _BASE_BUCKET_SPECS}
+LABEL_MAP.update({key: spec.label for key, spec in _EXTRA_BUCKET_SPECS.items()})
 
-_RATE_ALIAS_KEYS: dict[str, tuple[str, ...]] = {
+RATE_ALIAS_KEYS: dict[str, tuple[str, ...]] = {
     spec.key: spec.rate_aliases for spec in _BASE_BUCKET_SPECS if spec.rate_aliases
 }
-_RATE_ALIAS_KEYS.update(
+RATE_ALIAS_KEYS.update(
     {
         key: spec.rate_aliases
         for key, spec in _EXTRA_BUCKET_SPECS.items()
@@ -118,7 +152,7 @@ HIDE_IN_COST: frozenset[str] = frozenset(
 """Buckets that should be hidden from rendered totals."""
 
 
-_ALIAS_MAP: dict[str, str] = {
+ALIAS_MAP: dict[str, str] = {
     "machining": "milling",
     "mill": "milling",
     "cnc_milling": "milling",
@@ -162,9 +196,9 @@ _ALIAS_MAP: dict[str, str] = {
     "counter_bore": "counterbore",
     "counter_boring": "counterbore",
     "counterbore": "counterbore",
-    "counter_sink": "drilling",
-    "countersink": "drilling",
-    "csk": "drilling",
+    "counter_sink": "countersink",
+    "countersink": "countersink",
+    "csk": "countersink",
     "tap": "tapping",
     "taps": "tapping",
     "tapping": "tapping",
@@ -182,9 +216,12 @@ _ALIAS_MAP: dict[str, str] = {
 
 
 __all__ = [
+    "CANONICAL_BUCKET_ORDER",
     "ORDER",
     "PLANNER_BUCKET_ORDER",
     "HIDE_IN_COST",
+    "ALIAS_MAP",
+    "RATE_ALIAS_KEYS",
     "bucket_label",
     "bucketize",
     "canonical_bucket_key",
@@ -198,6 +235,17 @@ def normalize_bucket_key(name: Any) -> str:
     """Return a stable, lowercase/underscored representation of *name*."""
 
     return re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_")
+
+
+for _rate_bucket in RATE_BUCKETS:
+    norm_label = normalize_bucket_key(_rate_bucket.label)
+    canonical_norm = ALIAS_MAP.get(norm_label, norm_label)
+    for key in {norm_label, canonical_norm}:
+        if not key:
+            continue
+        existing_aliases = RATE_ALIAS_KEYS.get(key, ())
+        merged = tuple(dict.fromkeys((*_rate_bucket.rate_keys, *existing_aliases)))
+        RATE_ALIAS_KEYS[key] = merged
 
 
 def canonical_bucket_key(
@@ -227,7 +275,7 @@ def canonical_bucket_key(
         if norm in allowed_keys:
             return norm
 
-    alias = _ALIAS_MAP.get(norm)
+    alias = ALIAS_MAP.get(norm)
     if alias:
         norm = alias
 
@@ -245,8 +293,8 @@ def bucket_label(key: str) -> str:
 
     if not key:
         return ""
-    if key in _LABEL_MAP:
-        return _LABEL_MAP[key]
+    if key in LABEL_MAP:
+        return LABEL_MAP[key]
     return key.replace("_", " ").title()
 
 
@@ -254,7 +302,7 @@ def _rate_aliases_for(key: str) -> tuple[str, ...]:
     norm = normalize_bucket_key(key)
     if not norm:
         return ()
-    aliases = _RATE_ALIAS_KEYS.get(norm)
+    aliases = RATE_ALIAS_KEYS.get(norm)
     if aliases:
         return aliases
     return ()
