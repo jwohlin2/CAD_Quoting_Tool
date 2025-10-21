@@ -12,27 +12,11 @@ from cad_quoter.domain_models import (
     coerce_float_or_none as _coerce_float_or_none,
     normalize_material_key as _normalize_lookup_key,
 )
+from cad_quoter.utils.numeric import coerce_positive_float as _coerce_positive_float
 
 SCRAP_DEFAULT_GUESS = 0.15
 HOLE_SCRAP_MULT = 1.0  # tune 0.5–1.5 if you want holes to “count” more/less
 HOLE_SCRAP_CAP = 0.25
-
-
-def _coerce_positive_float(value: Any) -> float | None:
-    """Return a positive finite float or None."""
-
-    try:
-        number = float(value)
-    except Exception:
-        return None
-    try:
-        if not math.isfinite(number):
-            return None
-    except Exception:
-        pass
-    return number if number > 0 else None
-
-
 def _holes_removed_mass_g(geo: Mapping[str, Any] | None) -> float | None:
     """Estimate mass removed by holes using geometry context."""
 

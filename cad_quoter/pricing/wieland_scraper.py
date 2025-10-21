@@ -40,6 +40,7 @@ import ssl
 from cad_quoter.config import configure_logging, logger
 from cad_quoter.pricing.materials import LB_PER_KG, usdkg_to_usdlb
 from cad_quoter.utils import jdump
+from cad_quoter.utils.numeric import coerce_positive_float as _coerce_positive_float
 
 try:  # pragma: no cover - optional dependency in production
     from bs4 import BeautifulSoup  # type: ignore
@@ -922,18 +923,6 @@ def _canonical_scrap_family(material_family: Optional[str]) -> str:
         if any(token in family for token in tokens):
             return canonical
     return "aluminum"
-
-
-def _coerce_positive_float(value: Any) -> Optional[float]:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(number) or number <= 0:
-        return None
-    return number
-
-
 def _case_insensitive_lookup(mapping: Mapping[str, Any], key: str) -> Any:
     if key in mapping:
         return mapping[key]
