@@ -2,6 +2,7 @@ import math
 
 import appV5
 import pytest
+from cad_quoter.pricing import materials as materials_pricing
 
 
 pd = pytest.importorskip("pandas")
@@ -123,7 +124,7 @@ def test_scrap_credit_uses_wieland_price(monkeypatch: pytest.MonkeyPatch) -> Non
     material_block = result["breakdown"]["material_block"]
     base_cost = float(material_block.get("material_cost_before_credit") or 0.0)
     expected_credit = round(
-        min(base_cost, scrap_mass_lb * 2.0 * appV5.SCRAP_RECOVERY_DEFAULT),
+        min(base_cost, scrap_mass_lb * 2.0 * materials_pricing.SCRAP_RECOVERY_DEFAULT),
         2,
     )
     assert scrap_credit == pytest.approx(expected_credit)
@@ -137,7 +138,7 @@ def test_scrap_credit_uses_wieland_price(monkeypatch: pytest.MonkeyPatch) -> Non
 
     assert material.get("scrap_credit_unit_price_usd_per_lb") == pytest.approx(2.0)
     assert material.get("scrap_credit_recovery_pct") == pytest.approx(
-        appV5.SCRAP_RECOVERY_DEFAULT
+        materials_pricing.SCRAP_RECOVERY_DEFAULT
     )
 
 

@@ -1433,11 +1433,6 @@ def _ensure_list(value: Any, fallback: Iterable[Any] | None = None) -> list[Any]
     except Exception:
         return list(fallback) if fallback is not None else []
 
-
-SCRAP_CREDIT_FALLBACK_USD_PER_LB = 0.35
-SCRAP_RECOVERY_DEFAULT = 0.85
-
-
 def _wieland_scrap_usd_per_lb(material_family: str | None) -> float | None:
     """Return the USD/lb scrap price from the Wieland scraper if available."""
 
@@ -1495,67 +1490,67 @@ def _compute_direct_costs(
 ) -> float:
     """Return the rounded direct-cost total shared by math and rendering."""
 
-    pt = dict(pass_through or {})
-    pt.pop("Material", None)
-    subtotal = float(material_total or 0.0)
-    subtotal += float(material_tax or 0.0)
-    base_scrap_credit = float(scrap_credit or 0.0)
-    subtotal -= base_scrap_credit
+    block: dict[str, Any] = {}
+    if isinstance(material_detail, _MappingABC):
+        block.update(material_detail)
 
-    computed_scrap_credit = 0.0
-    if str(scrap_price_source or "").strip().lower() == "wieland":
-        detail_map: Mapping[str, Any] | None
-        detail_map = material_detail if isinstance(material_detail, _MappingABC) else None
-        scrap_mass_lb = None
-        if detail_map is not None:
-            for key in (
-                "scrap_credit_mass_lb",
-                "scrap_weight_lb",
-                "scrap_lb",
-            ):
-                val = _coerce_float_or_none(detail_map.get(key))
-                if val is not None and val > 0:
-                    scrap_mass_lb = float(val)
-                    break
-        if (
-            scrap_mass_lb is not None
-            and scrap_mass_lb > 0
-            and base_scrap_credit <= 0.0
-        ):
-            price_val = None
-            if detail_map is not None:
-                price_val = _coerce_float_or_none(
-                    detail_map.get("scrap_credit_unit_price_usd_per_lb")
-                )
-            if price_val is None or price_val <= 0:
-                family_hint = None
-                if detail_map is not None and isinstance(detail_map, _MappingABC):
-                    family_hint = detail_map.get("material_family") or detail_map.get(
-                        "material_group"
-                    )
-                price_val = _wieland_scrap_usd_per_lb(family_hint)
-            recovery_val = None
-            if detail_map is not None:
-                recovery_val = _coerce_float_or_none(
-                    detail_map.get("scrap_credit_recovery_pct")
-                )
-            if recovery_val is None or recovery_val <= 0:
-                recovery_val = SCRAP_RECOVERY_DEFAULT
-            if (
-                price_val is not None
-                and price_val > 0
-                and recovery_val is not None
-                and recovery_val > 0
-            ):
-                computed_scrap_credit = (
-                    float(scrap_mass_lb)
-                    * float(price_val)
-                    * float(recovery_val)
-                )
-    if computed_scrap_credit > 0:
-        subtotal -= float(computed_scrap_credit)
-    subtotal += sum(float(v or 0.0) for v in pt.values())
-    return round(subtotal, 2)
+    def _assign_if_missing(key: str, value: Any) -> None:
+        if key in block:
+            return
+        if value in (None, ""):
+            return
+        coerced = _coerce_float_or_none(value)
+        if coerced is None:
+            return
+        block[key] = float(coerced)
+
+    _assign_if_missing("material_cost_before_credit", material_total)
+    _assign_if_missing("material_cost", material_total)
+    _assign_if_missing("material_direct_cost", material_total)
+    _assign_if_missing("material_cost_pre_credit", material_total)
+    _assign_if_missing("material_base_cost", material_total)
+    _assign_if_missing("material_scrap_credit", scrap_credit)
+    _assign_if_missing("scrap_credit_usd", scrap_credit)
+    _assign_if_missing("material_tax", material_tax)
+    _assign_if_missing("material_tax_usd", material_tax)
+
+    if scrap_price_source:
+        try:
+            source_text = str(scrap_price_source).strip()
+        except Exception:
+            source_text = ""
+        if source_text:
+            block.setdefault("scrap_price_source", source_text)
+            block.setdefault("scrap_credit_source", source_text)
+
+    try:
+        components = _material_cost_components(block, overrides=None, cfg=None)
+    except Exception:
+        components = None
+
+    if isinstance(components, _MappingABC):
+        material_total_usd = _coerce_float_or_none(components.get("total_usd")) or 0.0
+    else:
+        base_val = _coerce_float_or_none(material_total) or 0.0
+        tax_val = _coerce_float_or_none(material_tax) or 0.0
+        scrap_val = _coerce_float_or_none(scrap_credit) or 0.0
+        material_total_usd = float(base_val) + float(tax_val) - float(scrap_val)
+
+    pass_through_total = 0.0
+    for key, raw_value in (pass_through or {}).items():
+        try:
+            if str(key).strip().lower() == "material":
+                continue
+        except Exception:
+            pass
+        amount = _coerce_float_or_none(raw_value)
+        if amount is not None:
+            pass_through_total += float(amount)
+
+    total = round(float(material_total_usd) + float(pass_through_total), 2)
+    if total < 0:
+        return 0.0
+    return total
 
 
 def _compute_pricing_ladder(
@@ -1988,6 +1983,7 @@ from cad_quoter.pricing.time_estimator import (
     estimate_time_min as _estimate_time_min,
 )
 from cad_quoter.pricing.wieland import lookup_price as lookup_wieland_price
+import cad_quoter.pricing.materials as _materials
 from cad_quoter.pricing.materials import (
     STANDARD_PLATE_SIDES_IN as STANDARD_PLATE_SIDES_IN,
     _compute_material_block as _compute_material_block,
@@ -2639,6 +2635,25 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         except Exception:
             material_selection = {}
 
+    def _material_cost_components_from(
+        *containers: Mapping[str, Any] | None,
+    ) -> Mapping[str, Any] | None:
+        for container in containers:
+            if not isinstance(container, _MappingABC):
+                continue
+            candidate = container.get("material_cost_components")
+            if isinstance(candidate, _MappingABC):
+                return candidate
+        return None
+
+    material_cost_components = _material_cost_components_from(
+        material_block,
+        material_stock_block,
+        material_selection,
+        breakdown.get("material"),
+        breakdown.get("material_block"),
+    )
+
     def _resolve_overrides_source(container: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
         if not isinstance(container, _MappingABC):
             return None
@@ -3058,6 +3073,27 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     material_tax_for_directs_val = _coerce_float_or_none(material_block.get("material_tax"))
     material_tax_for_directs = float(material_tax_for_directs_val or 0.0)
+
+    material_component_total: float | None = None
+    material_component_net: float | None = None
+    if isinstance(material_cost_components, _MappingABC):
+        base_component = _coerce_float_or_none(material_cost_components.get("base_usd"))
+        if base_component is not None:
+            material_total_for_directs = float(base_component)
+        scrap_component = _coerce_float_or_none(
+            material_cost_components.get("scrap_credit_usd")
+        )
+        if scrap_component is not None:
+            scrap_credit_for_directs = float(scrap_component)
+        tax_component = _coerce_float_or_none(material_cost_components.get("tax_usd"))
+        if tax_component is not None:
+            material_tax_for_directs = float(tax_component)
+        total_component = _coerce_float_or_none(material_cost_components.get("total_usd"))
+        if total_component is not None:
+            material_component_total = float(total_component)
+        net_component = _coerce_float_or_none(material_cost_components.get("net_usd"))
+        if net_component is not None:
+            material_component_net = float(net_component)
 
     def _merge_detail_text(existing: str | None, new_value: Any) -> str:
         segments: list[str] = []
@@ -7294,23 +7330,31 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         material_total_for_directs + material_tax_for_directs - scrap_credit_for_directs,
         2,
     )
-    material_display_amount_candidate = _coerce_float_or_none(
-        material_block.get("total_material_cost")
-    )
-    if material_display_amount_candidate is not None:
-        try:
-            material_direct_contribution = round(
-                float(material_display_amount_candidate),
-                2,
-            )
-        except Exception:
-            material_direct_contribution = round(
-                float(material_display_amount_candidate or 0.0),
-                2,
-            )
+    material_display_amount_candidate: float | None
+    if material_component_total is not None:
+        material_display_amount_candidate = float(material_component_total)
+        material_direct_contribution = round(float(material_component_total), 2)
+    else:
+        material_display_amount_candidate = _coerce_float_or_none(
+            material_block.get("total_material_cost")
+        )
+        if material_display_amount_candidate is not None:
+            try:
+                material_direct_contribution = round(
+                    float(material_display_amount_candidate),
+                    2,
+                )
+            except Exception:
+                material_direct_contribution = round(
+                    float(material_display_amount_candidate or 0.0),
+                    2,
+                )
     material_display_amount = round(float(material_direct_contribution), 2)
     material_total_for_why = float(material_display_amount)
-    material_net_cost = float(material_display_amount)
+    if material_component_net is not None:
+        material_net_cost = float(material_component_net)
+    else:
+        material_net_cost = float(material_display_amount)
     if material_display_amount <= 0.0:
         fallback_amount = 0.0
         if materials_direct_total > 0:
@@ -10111,7 +10155,11 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             scrap_credit_amount = max(0.0, float(credit_override_amount))
             scrap_credit_source = "override_amount"
         elif scrap_mass_lb is not None:
-            recovery = recovery_override if recovery_override is not None else SCRAP_RECOVERY_DEFAULT
+            recovery = (
+                recovery_override
+                if recovery_override is not None
+                else _materials.SCRAP_RECOVERY_DEFAULT
+            )
             scrap_recovery_used = recovery
             if unit_price_override is not None:
                 scrap_price_used = max(0.0, float(unit_price_override))
@@ -10132,7 +10180,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                     scrap_credit_source = "wieland"
                     mat_block["scrap_price_usd_per_lb"] = float(scrap_price_used)
                 else:
-                    scrap_price_used = SCRAP_CREDIT_FALLBACK_USD_PER_LB
+                    scrap_price_used = _materials.SCRAP_PRICE_FALLBACK_USD_PER_LB
                     scrap_credit_source = "default"
                     mat_block["scrap_price_usd_per_lb"] = float(scrap_price_used)
             scrap_credit_amount = float(scrap_mass_lb) * float(scrap_price_used or 0.0) * float(scrap_recovery_used or 0.0)
