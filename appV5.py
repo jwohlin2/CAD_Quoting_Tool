@@ -3305,6 +3305,110 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             _maybe_insert_total_separator(len(right))
         append_line(_render_kv_line(label, right, indent))
 
+    def _render_process_and_hours_from_buckets(
+        lines: list[str],
+        bucket_view_obj: Mapping[str, Any] | None,
+        rates: Mapping[str, Any] | None = None,
+    ) -> tuple[float, float]:
+        """Render process and labor hour tables from canonical bucket data."""
+
+        buckets_source: Mapping[str, Any] | None = None
+        if isinstance(bucket_view_obj, _MappingABC):
+            buckets_source = bucket_view_obj.get("buckets")
+        elif isinstance(bucket_view_obj, dict):
+            buckets_source = bucket_view_obj.get("buckets")
+
+        buckets: dict[str, Mapping[str, Any]]
+        if isinstance(buckets_source, dict):
+            buckets = buckets_source
+        elif isinstance(buckets_source, _MappingABC):
+            try:
+                buckets = dict(buckets_source)
+            except Exception:
+                buckets = {}
+        else:
+            buckets = {}
+
+        if not buckets:
+            return 0.0, 0.0
+
+        label = {
+            "programming": "Programming (amortized)",
+            "milling": "Milling",
+            "drilling": "Drilling",
+            "tapping": "Tapping",
+            "counterbore": "Counterbore",
+            "spot_drill": "Spot-Drill",
+            "jig_grind": "Jig-Grind",
+            "inspection": "Inspection",
+        }
+        order = [
+            "programming",
+            "milling",
+            "drilling",
+            "tapping",
+            "counterbore",
+            "spot_drill",
+            "jig_grind",
+            "inspection",
+        ]
+
+        _push(lines, "Process & Labor Costs")
+        _push(lines, "-" * 74)
+        total_cost = 0.0
+        printed: set[str] = set()
+
+        bucket_keys = list(order)
+        bucket_keys.extend(k for k in buckets.keys() if k not in printed and k not in order)
+
+        for key in bucket_keys:
+            if key in printed:
+                continue
+            entry = buckets.get(key)
+            if not isinstance(entry, _MappingABC):
+                continue
+            printed.add(key)
+            try:
+                minutes_val = float(entry.get("minutes", 0.0) or 0.0)
+            except Exception:
+                minutes_val = 0.0
+            hours_val = _minutes_to_hours(minutes_val)
+            try:
+                total_amount = float(entry.get("total$", 0.0) or 0.0)
+            except Exception:
+                total_amount = 0.0
+            total_cost += total_amount
+            display_label = label.get(key, key)
+            _push(
+                lines,
+                f"  {display_label.ljust(28)}${total_amount:>10,.2f}",
+            )
+            # Optional detail line (comment out if you want one line only):
+            # _push(lines, f"    {hours_val:.2f} hr")
+
+        _push(lines, " " * 66 + "-------")
+        _push(lines, f"  Total{' ' * 58 }${total_cost:>10,.2f}")
+        _push(lines, "")
+
+        _push(lines, "Labor Hour Summary")
+        _push(lines, "-" * 74)
+        total_hours = 0.0
+        for key in bucket_keys:
+            entry = buckets.get(key)
+            if not isinstance(entry, _MappingABC):
+                continue
+            hours_val = _minutes_to_hours(entry.get("minutes", 0.0))
+            if hours_val <= 0:
+                continue
+            display_label = label.get(key, key)
+            _push(lines, f"  {display_label.ljust(28)}{hours_val:.2f} hr")
+            total_hours += hours_val
+        _push(lines, " " * 66 + "-------")
+        _push(lines, f"  Total Hours{' ' * 49 }{total_hours:.2f} hr")
+        _push(lines, "")
+
+        return total_cost, total_hours
+
     def _is_extra_segment(segment: str) -> bool:
         try:
             return bool(EXTRA_DETAIL_RE.match(str(segment)))
@@ -5578,38 +5682,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if not ((numeric_amount > 0.0) or show_zeros):
             return
 
-        row(label, numeric_amount, indent="  ")
-
-        details_rendered = False
-        if detail_bits:
-            for bit in detail_bits:
-                if bit in (None, ""):
-                    continue
-                write_detail(str(bit), indent="    ")
-                details_rendered = True
-
-        if not details_rendered:
-            detail_text = detail_lookup.get(label)
-            if detail_text not in (None, ""):
-                write_detail(str(detail_text), indent="    ")
-                details_rendered = True
-
-        if not details_rendered:
-            extra_detail = labor_cost_details.get(label)
-            if extra_detail not in (None, ""):
-                canon_key = label_to_canon.get(label)
-                if canon_key and canon_key in process_cost_row_details:
-                    extra_detail = None
-            if extra_detail not in (None, ""):
-                write_detail(str(extra_detail), indent="    ")
-                details_rendered = True
-
-        if not details_rendered:
-            canon_key = label_to_canon.get(label)
-            key_for_notes = process_key or canon_key
-            if key_for_notes:
-                add_process_notes(key_for_notes, indent="    ")
-
         proc_total += numeric_amount
 
     def _prepare_amortized_details() -> dict[str, tuple[float, float]]:
@@ -6250,15 +6322,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         labor_costs_display[display_label] = amount_val
         misc_total += amount_val
 
-    if misc_total > 0:
-        process_table.had_rows = True
-
-    if not process_table.had_rows and show_zeros:
-        row("No process costs", 0.0, indent="  ")
-
-    row("Total", proc_total, indent="  ")
-    process_total_row_index = len(lines) - 1
-
     hour_summary_entries.clear()
 
     if (
@@ -6708,154 +6771,30 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             _fmt_drill_debug(summary_hr),
         )
 
-    if hour_summary_entries:
-        def _canonical_hour_label(value: Any) -> tuple[str, str]:
+    if misc_total > 0:
+        process_table.had_rows = True
 
-            text = str(value or "")
-            text = re.sub(r"\s+", " ", text).strip()
-            canonical = text.casefold()
-            return canonical, text
+    bucket_view_for_render: Mapping[str, Any] | None
+    if isinstance(bucket_view_obj, (_MappingABC, dict)):
+        bucket_view_for_render = typing.cast(Mapping[str, Any], bucket_view_obj)
+    elif isinstance(bucket_view_struct, (_MappingABC, dict)):
+        bucket_view_for_render = typing.cast(Mapping[str, Any], bucket_view_struct)
+    else:
+        bucket_view_for_render = None
 
-        _push(lines, "")
-        _push(lines, "Labor Hour Summary")
-        _push(lines, divider)
-        if str(pricing_source_value).lower() == "planner":
-            entries_iter = list(hour_summary_entries.items())
-        else:
-            entries_iter = list(
-                sorted(hour_summary_entries.items(), key=lambda kv: kv[1][0], reverse=True)
-            )
-        folded_entries: dict[str, list[Any]] = {}
-        folded_display: dict[str, str] = {}
-        folded_order: list[str] = []
-
-        def _coerce_hour_value(value: Any) -> float | None:
-            coerced = _coerce_float_or_none(value)
-            if coerced is None:
-                return None
-            try:
-                return float(coerced)
-            except Exception:
-                return None
-
-        for label, (hr_val, include_in_total) in entries_iter:
-            canonical_key, display_label = _canonical_hour_label(label)
-            folded = folded_entries.get(canonical_key)
-            if folded is None:
-                folded_entries[canonical_key] = [hr_val, bool(include_in_total)]
-                folded_display[canonical_key] = display_label
-                folded_order.append(canonical_key)
-                continue
-
-            folded_display.setdefault(canonical_key, display_label)
-
-            existing_hr, existing_include = folded
-            hr_float = _coerce_hour_value(hr_val)
-            existing_float = _coerce_hour_value(existing_hr)
-            deduped = False
-
-            if hr_float is not None and existing_float is not None:
-                try:
-                    if math.isclose(existing_float, hr_float, rel_tol=1e-9, abs_tol=0.005):
-                        deduped = True
-                except Exception:
-                    deduped = False
-
-            if deduped:
-                folded[1] = existing_include or bool(include_in_total)
-                continue
-
-            if existing_float is not None or hr_float is not None:
-                folded[0] = (existing_float or 0.0) + (hr_float or 0.0)
-            else:
-                try:
-                    folded[0] = existing_hr + hr_val
-                except Exception:
-                    folded[0] = existing_hr
-            folded[1] = existing_include or bool(include_in_total)
-        def _extract_pricing_buckets(candidate: Any) -> Mapping[str, Any] | None:
-            if isinstance(candidate, _MutableMappingABC):
-                buckets_candidate = candidate.get("buckets")
-            elif isinstance(candidate, dict):
-                buckets_candidate = candidate.get("buckets")
-            elif isinstance(candidate, _MappingABC):
-                buckets_candidate = candidate.get("buckets")
-            else:
-                buckets_candidate = None
-            if isinstance(buckets_candidate, _MutableMappingABC):
-                return buckets_candidate
-            if isinstance(buckets_candidate, dict):
-                return buckets_candidate
-            if isinstance(buckets_candidate, _MappingABC):
-                try:
-                    return dict(buckets_candidate)
-                except Exception:
-                    return None
-            return None
-
-        pricing_bucket_candidates: list[Mapping[str, Any] | None] = []
-        pricing_bucket_candidates.append(_extract_pricing_buckets(locals().get("bucket_view_struct")))
-        breakdown_bucket_view: Any = None
-        if isinstance(breakdown, dict):
-            breakdown_bucket_view = breakdown.get("bucket_view")
-        elif isinstance(breakdown, _MappingABC):
-            breakdown_bucket_view = breakdown.get("bucket_view")
-        pricing_bucket_candidates.append(_extract_pricing_buckets(breakdown_bucket_view))
-        pricing_bucket_candidates.append(
-            _extract_pricing_buckets(locals().get("planner_bucket_view"))
-        )
-
-        pricing_buckets_for_summary: Mapping[str, Any] | None = None
-        for candidate in pricing_bucket_candidates:
-            if isinstance(candidate, Mapping) and candidate:
-                pricing_buckets_for_summary = candidate
+    process_section_start = len(lines)
+    proc_total_rendered, hrs_total_rendered = _render_process_and_hours_from_buckets(
+        lines,
+        bucket_view_for_render,
+        rates,
+    )
+    if proc_total_rendered or hrs_total_rendered:
+        for offset, text in enumerate(lines[process_section_start:]):
+            stripped = str(text or "").strip()
+            if stripped.lower().startswith("total") and "$" in stripped:
+                process_total_row_index = process_section_start + offset
                 break
-
-        drilling_minutes_bucket: float | None = None
-        if isinstance(pricing_buckets_for_summary, Mapping):
-            for key in ("drilling", "Drilling"):
-                bucket_entry = pricing_buckets_for_summary.get(key)
-                if isinstance(bucket_entry, (int, float)):
-                    drilling_minutes_bucket = float(bucket_entry)
-                elif isinstance(bucket_entry, _MappingABC):
-                    drilling_minutes_bucket = _coerce_float_or_none(bucket_entry.get("minutes"))
-                elif isinstance(bucket_entry, dict):
-                    drilling_minutes_bucket = _coerce_float_or_none(bucket_entry.get("minutes"))
-                if drilling_minutes_bucket is not None:
-                    break
-
-        total_hours = 0.0
-        for canonical_key in folded_order:
-            hr_val, include_in_total = folded_entries[canonical_key]
-            display_label = folded_display.get(canonical_key, "")
-            if (
-                drilling_minutes_bucket is not None
-                and str(display_label).strip().lower() == "drilling"
-            ):
-                hrs_drilling_precise = minutes_to_hours(float(drilling_minutes_bucket))
-                hrs_drilling = round(hrs_drilling_precise, 2)
-                folded_entries[canonical_key][0] = hrs_drilling
-                if isinstance(hour_summary_entries, (dict, _MutableMappingABC)):
-                    for label_key in list(hour_summary_entries.keys()):
-                        if str(label_key).strip().lower() != "drilling":
-                            continue
-                        existing_val = hour_summary_entries.get(label_key)
-                        include_flag = True
-                        if isinstance(existing_val, tuple) and len(existing_val) == 2:
-                            include_flag = bool(existing_val[1])
-                        hour_summary_entries[label_key] = (hrs_drilling, include_flag)
-                right = _h(hrs_drilling)
-                left = f"  {display_label}"
-                pad = max(1, page_width - len(left) - len(right))
-                _push(lines, f"{left}{' ' * pad}{right}")
-                if include_in_total and hrs_drilling:
-                    total_hours += hrs_drilling
-                continue
-            hours_row(display_label, hr_val, indent="  ")
-            if include_in_total and hr_val:
-                total_hours += hr_val
-        hours_row("Total Hours", total_hours, indent="  ")
-    _push(lines, "")
+    proc_total = proc_total_rendered
 
     # ---- Pass-Through & Direct (auto include non-zeros; sorted desc) --------
     _push(lines, "Pass-Through & Direct Costs")
