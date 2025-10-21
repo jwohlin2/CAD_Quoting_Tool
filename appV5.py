@@ -14,6 +14,11 @@ Single-file CAD Quoter (v8)
 from __future__ import annotations
 
 from cad_quoter.utils.numeric import coerce_positive_float as _coerce_positive_float
+from cad_quoter.app.quote_doc import (
+    _build_quote_header_lines,
+    _sanitize_render_text,
+    _wrap_header_text,
+)
 
 
 def _ensure_geo_context_fields(
@@ -187,7 +192,6 @@ import re
 import sys
 import time
 import typing
-import unicodedata
 from functools import cmp_to_key, lru_cache
 from typing import Any, Mapping, MutableMapping, TYPE_CHECKING, TypeAlias
 from collections import Counter, defaultdict
@@ -466,58 +470,6 @@ from appkit.ui.planner_render import (
 from appkit.ui.services import QuoteConfiguration
 
 
-_ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
-_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-_RENDER_ASCII_REPLACEMENTS: dict[str, str] = {
-    "—": "-",
-    "•": "-",
-    "…": "...",
-    "“": '"',
-    "”": '"',
-    "‘": "'",
-    "’": "'",
-    "µ": "u",
-    "μ": "u",
-    "±": "+/-",
-    "°": " deg ",
-    "¼": "1/4",
-    "½": "1/2",
-    "¾": "3/4",
-    " ": " ",  # non-breaking space
-    "⚠️": "⚠",
-}
-
-_RENDER_PASSTHROUGH: dict[str, str] = {
-    "–": "__EN_DASH__",
-    "×": "__MULTIPLY__",
-    "≥": "__GEQ__",
-    "≤": "__LEQ__",
-    "⚠": "__WARN__",
-}
-
-
-def _sanitize_render_text(value: typing.Any) -> str:
-    if value is None:
-        return ""
-    text = str(value)
-    if not text:
-        return ""
-    for source, placeholder in _RENDER_PASSTHROUGH.items():
-        if source in text:
-            text = text.replace(source, placeholder)
-    text = text.replace("\t", " ")
-    text = text.replace("\r", "")
-    text = _ANSI_ESCAPE_RE.sub("", text)
-    for source, replacement in _RENDER_ASCII_REPLACEMENTS.items():
-        if source in text:
-            text = text.replace(source, replacement)
-    text = unicodedata.normalize("NFKD", text)
-    text = text.encode("ascii", "ignore").decode("ascii", "ignore")
-    text = _CONTROL_CHAR_RE.sub("", text)
-    for source, placeholder in _RENDER_PASSTHROUGH.items():
-        if placeholder in text:
-            text = text.replace(placeholder, source)
-    return text
 
 
 # ──────────────────────────────────────────────────────────────────────────────
