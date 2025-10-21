@@ -5,13 +5,39 @@ import math
 import os
 from typing import Any
 
+from cad_quoter.pricing.rate_buckets import RATE_BUCKETS
 from cad_quoter.pricing.process_buckets import (
-    HIDE_IN_COST,
-    ORDER,
-    bucket_label,
     canonical_bucket_key,
+    bucket_label,
     flatten_rates,
     lookup_rate,
+)
+
+
+ORDER: tuple[str, ...] = (
+    "milling",
+    "drilling",
+    "counterbore",
+    "tapping",
+    "grinding",
+    "wire_edm",
+    "sinker_edm",
+    "finishing_deburr",
+    "saw_waterjet",
+    "inspection",
+    "toolmaker_support",
+    "fixture_build_amortized",
+    "programming_amortized",
+    "misc",
+)
+
+HIDE_IN_COST: frozenset[str] = frozenset(
+    {
+        "planner_total",
+        "planner_labor",
+        "planner_machine",
+        "misc",
+    }
 )
 
 __all__ = ["ORDER", "canonicalize_costs", "render_process_costs"]

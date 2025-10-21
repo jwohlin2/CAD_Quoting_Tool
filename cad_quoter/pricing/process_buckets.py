@@ -382,7 +382,7 @@ def lookup_rate(
 
 
 # ---------------------------------------------------------------------------
-# Planner bucketisation helpers
+# Planner bucketisation helpers (mirrored by ``appkit.ui.planner_render``)
 # ---------------------------------------------------------------------------
 
 
