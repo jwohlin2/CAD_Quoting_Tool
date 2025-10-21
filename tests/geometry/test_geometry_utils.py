@@ -25,9 +25,21 @@ def test_map_geo_to_double_underscore_transforms_dimensions(sample_geo_metrics: 
     assert mapped["GEO__Area_to_Volume"] == pytest.approx(42000.0 / 180000.0)
 
 
-def test_update_variables_df_with_geo_updates_and_inserts(
-    sample_geo_metrics: dict, sample_geo_dataframe: pd.DataFrame
-) -> None:
+def test_update_variables_df_with_geo_updates_and_inserts(sample_geo_metrics: dict) -> None:
+    sample_geo_dataframe = pd.DataFrame(
+        [
+            {
+                "Item": "GEO__BBox_X_mm",
+                "Example Values / Options": 0.0,
+                "Data Type / Input Method": "number",
+            },
+            {
+                "Item": "Existing",
+                "Example Values / Options": 1.0,
+                "Data Type / Input Method": "number",
+            },
+        ]
+    )
     mapped = map_geo_to_double_underscore(sample_geo_metrics)
     updated = update_variables_df_with_geo(sample_geo_dataframe.copy(), mapped)
 
