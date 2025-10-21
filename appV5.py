@@ -1339,8 +1339,7 @@ def _compute_drilling_removal_section(
             )
             _push(
                 lines,
-                f"TOTAL DRILLING (with toolchange) . {drill_minutes_total:.2f} min  ("
-                f"{minutes_to_hours(drill_minutes_total):.2f} hr)",
+                f"TOTAL DRILLING (with toolchange) . {drill_minutes_total:.2f} min",
             )
             lines.append("")
 
