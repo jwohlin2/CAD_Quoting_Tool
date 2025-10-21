@@ -7,10 +7,11 @@ from typing import Any
 
 from cad_quoter.pricing.process_buckets import (
     PROCESS_BUCKETS,
-    canonical_bucket_key,
     bucket_label,
+    canonical_bucket_key,
     flatten_rates,
     lookup_rate,
+    normalize_bucket_key,
 )
 
 
@@ -40,9 +41,30 @@ def _to_float(value: Any) -> float | None:
         return None
 
 
-def canonicalize_costs(process_costs: Mapping[str, Any] | Iterable[Any] | None) -> dict[str, float]:
+def canonicalize_costs(
+    process_costs: Mapping[str, Any] | Iterable[Any] | None,
+    *,
+    skip_planner_meta: bool = False,
+    hide_misc_under: float | None = None,
+    respect_debug_misc_env: bool = True,
+) -> dict[str, float]:
+    """Fold raw process cost mappings into canonical buckets.
+
+    Parameters mirror the historical behaviour of both the pricing renderer and the
+    planner UI.  By default the behaviour matches the pricing engine, keeping
+    planner meta buckets and leaving ``misc`` untouched.  When the planner needs to
+    suppress its meta rows and filter out low-value misc buckets the optional
+    keyword arguments can be toggled.
+    """
+
     totals: dict[str, float] = {}
+    skip_keys: frozenset[str] = PROCESS_BUCKETS.planner_meta if skip_planner_meta else frozenset()
+    debug_misc = os.environ.get("DEBUG_MISC") == "1" if respect_debug_misc_env else False
+
     for key, raw in _iter_items(process_costs):
+        norm_key = normalize_bucket_key(key)
+        if skip_planner_meta and (norm_key in skip_keys or norm_key.startswith("planner_")):
+            continue
         canon = canonical_bucket_key(key)
         if not canon:
             continue
@@ -50,6 +72,17 @@ def canonicalize_costs(process_costs: Mapping[str, Any] | Iterable[Any] | None) 
         if amount is None:
             continue
         totals[canon] = totals.get(canon, 0.0) + amount
+
+    if hide_misc_under is not None and not debug_misc:
+        misc_amount = totals.get("misc")
+        if misc_amount is not None:
+            try:
+                misc_val = float(misc_amount)
+            except Exception:
+                misc_val = None
+            if misc_val is not None and abs(misc_val) < hide_misc_under:
+                totals.pop("misc", None)
+
     return totals
 
 
