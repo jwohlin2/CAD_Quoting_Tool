@@ -362,6 +362,17 @@ import cad_quoter.geometry as geometry
 
 
 
+# Safe append to the current quote buffer
+def _push(_lines, text):
+    try:
+        if isinstance(_lines, list):
+            _lines.append(str(text))
+        else:
+            print(str(text))
+    except Exception:
+        pass
+
+
 _HAS_ODAFC = bool(getattr(geometry, "HAS_ODAFC", False))
 _HAS_PYMUPDF = bool(getattr(geometry, "HAS_PYMUPDF", getattr(geometry, "_HAS_PYMUPDF", False)))
 fitz = getattr(geometry, "fitz", None)
@@ -521,7 +532,7 @@ def _sanitize_render_text(value: typing.Any) -> str:
 # Helpers: formatting + removal card + per-hole lines (no material per line)
 # ──────────────────────────────────────────────────────────────────────────────
 def _render_removal_card(
-    append_line: Callable[[str], None],
+    lines: list[str],
     *,
     mat_canon: str,
     mat_group: str | None,
@@ -543,58 +554,63 @@ def _render_removal_card(
     toolchange_min_deep: float,
     toolchange_min_std: float,
 ) -> None:
-    append_line("MATERIAL REMOVAL – DRILLING")
-    append_line("=" * 64)
+    _push(lines, "MATERIAL REMOVAL – DRILLING")
+    _push(lines, "=" * 64)
     # Inputs
-    append_line("Inputs")
-    append_line(f"  Material .......... {mat_canon}  [group {mat_group or '-'}]")
+    _push(lines, "Inputs")
+    _push(lines, f"  Material .......... {mat_canon}  [group {mat_group or '-'}]")
     mismatch = False
     if row_group:
         rg = str(row_group).upper()
         mg = str(mat_group or "").upper()
         mismatch = (rg != mg and (rg and mg))
         note = "   (!) mismatch – used row from different group" if mismatch else ""
-        append_line(f"  CSV row group ..... {row_group}{note}")
-    append_line("  Operations ........ Deep-Drill (L/D ≥ 3), Drill")
-    append_line(
+        _push(lines, f"  CSV row group ..... {row_group}{note}")
+    _push(lines, "  Operations ........ Deep-Drill (L/D ≥ 3), Drill")
+    _push(
+        lines,
         f"  Holes ............. {int(holes_deep)} deep + {int(holes_std)} std  = {int(holes_deep + holes_std)}"
     )
-    append_line(f'  Diameter range .... {_fmt_rng(dia_vals_in, 3)}"')
-    append_line(f"  Depth per hole .... {_fmt_rng(depth_vals_in, 2)} in")
-    append_line("")
+    _push(lines, f'  Diameter range .... {_fmt_rng(dia_vals_in, 3)}"')
+    _push(lines, f"  Depth per hole .... {_fmt_rng(depth_vals_in, 2)} in")
+    _push(lines, "")
     # Feeds & Speeds
-    append_line("Feeds & Speeds (used)")
-    append_line(f"  SFM ............... {int(round(sfm_deep))} (deep)   | {int(round(sfm_std))} (std)")
-    append_line(
+    _push(lines, "Feeds & Speeds (used)")
+    _push(lines, f"  SFM ............... {int(round(sfm_deep))} (deep)   | {int(round(sfm_std))} (std)")
+    _push(
+        lines,
         f"  IPR ............... {_fmt_rng(ipr_deep_vals, 4)} (deep) | {float(ipr_std_val):.4f} (std)"
     )
-    append_line(
+    _push(
+        lines,
         f"  RPM ............... {_fmt_rng(rpm_deep_vals, 0)} (deep)      | {_fmt_rng(rpm_std_vals, 0)} (std)"
     )
-    append_line(
+    _push(
+        lines,
         f"  IPM ............... {_fmt_rng(ipm_deep_vals, 1)} (deep)       | {_fmt_rng(ipm_std_vals, 1)} (std)"
     )
-    append_line("")
+    _push(lines, "")
     # Overheads
-    append_line("Overheads")
-    append_line(f"  Index per hole .... {float(index_min_per_hole):.2f} min")
-    append_line(f"  Peck per hole ..... {_fmt_rng(peck_min_rng, 2)} min")
-    append_line(
+    _push(lines, "Overheads")
+    _push(lines, f"  Index per hole .... {float(index_min_per_hole):.2f} min")
+    _push(lines, f"  Peck per hole ..... {_fmt_rng(peck_min_rng, 2)} min")
+    _push(
+        lines,
         f"  Toolchange ........ {float(toolchange_min_deep):.2f} min (deep) | {float(toolchange_min_std):.2f} min (std)"
     )
-    append_line("")
+    _push(lines, "")
 
 
 def _render_time_per_hole(
-    append_line: Callable[[str], None],
+    lines: list[str],
     *,
     bins: list[dict[str, Any]],
     index_min: float,
     peck_min_deep: float,
     peck_min_std: float,
 ) -> tuple[float, bool, bool]:
-    append_line("TIME PER HOLE – DRILL GROUPS")
-    append_line("-" * 66)
+    _push(lines, "TIME PER HOLE – DRILL GROUPS")
+    _push(lines, "-" * 66)
     subtotal_min = 0.0
     seen_deep = False
     seen_std = False
@@ -618,13 +634,14 @@ def _render_time_per_hole(
             group_min = t_hole * qty
             subtotal_min += group_min
             # single-line, no material
-            append_line(
+            _push(
+                lines,
                 f'Dia {d_in:.3f}" × {qty}  | depth {depth:.3f}" | {int(round(sfm))} sfm | {ipr:.4f} ipr | '
                 f't/hole {t_hole:.2f} min | group {qty}×{t_hole:.2f} = {group_min:.2f} min'
             )
         except Exception:
             continue
-    append_line("")
+    _push(lines, "")
     return subtotal_min, seen_deep, seen_std
 
 
@@ -1563,7 +1580,7 @@ def _estimate_drilling_minutes_from_meta(
     seen_std = False
     if bins:
         subtotal_min, seen_deep, seen_std = _render_time_per_hole(
-            lambda _line: None,
+            lines,
             bins=bins,
             index_min=index_min,
             peck_min_deep=peck_min_deep,
@@ -3586,7 +3603,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         return False
 
     def write_line(s: str, indent: str = ""):
-        append_line(f"{indent}{s}")
+        _push(lines, f"{indent}{s}")
 
     def write_wrapped(text: str, indent: str = ""):
         if text is None:
@@ -3643,19 +3660,19 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             return f"{value:>{col_widths[idx]}}"
 
         if lines and lines[-1] != "":
-            append_line("")
+            _push(lines, "")
 
         diagnostic_banner = "=== Planner diagnostics (not billed) ==="
-        append_line(diagnostic_banner)
-        append_line("=" * min(page_width, len(diagnostic_banner)))
+        _push(lines, diagnostic_banner)
+        _push(lines, "=" * min(page_width, len(diagnostic_banner)))
 
         header_line = " | ".join(_fmt(header, idx) for idx, header in enumerate(headers))
         separator_line = " | ".join("-" * width for width in col_widths)
-        append_line(header_line)
-        append_line(separator_line)
+        _push(lines, header_line)
+        _push(lines, separator_line)
         for row_values in display_rows:
-            append_line(" | ".join(_fmt(value, idx) for idx, value in enumerate(row_values)))
-        append_line("")
+            _push(lines, " | ".join(_fmt(value, idx) for idx, value in enumerate(row_values)))
+        _push(lines, "")
 
     def _is_total_label(label: str) -> bool:
         clean = str(label or "").strip()
@@ -3677,7 +3694,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         short_divider = " " * pad + "-" * width
         if lines[-1] == short_divider:
             return
-        append_line(short_divider)
+        _push(lines, short_divider)
 
     def _format_row(label: str, val: float, indent: str = "") -> str:
         left = f"{indent}{label}"
@@ -3689,7 +3706,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         # left-label, right-amount aligned to page_width
         if _is_total_label(label):
             _ensure_total_separator(len(_m(val)))
-        append_line(_format_row(label, val, indent))
+        _push(lines, _format_row(label, val, indent))
 
     def hours_row(label: str, val: float, indent: str = ""):
         left = f"{indent}{label}"
@@ -3697,7 +3714,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if _is_total_label(label):
             _ensure_total_separator(len(right))
         pad = max(1, page_width - len(left) - len(right))
-        append_line(f"{left}{' ' * pad}{right}")
+        _push(lines, f"{left}{' ' * pad}{right}")
 
     def _is_extra_segment(segment: str) -> bool:
         try:
@@ -3836,27 +3853,21 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             llm_debug_enabled_flag = override
             break
 
-    
-
     # ---- header --------------------------------------------------------------
-    lines: list[str] = []
     doc_builder = QuoteDocRecorder(divider)
 
-    def append_line(text: str) -> None:
-        sanitized = _sanitize_render_text(text)
-        previous = lines[-1] if lines else None
-        lines.append(sanitized)
-        doc_builder.observe_line(len(lines) - 1, sanitized, previous)
+    class _QuoteLines(list[str]):
+        def append(self, text: str) -> None:  # type: ignore[override]
+            sanitized = _sanitize_render_text(text)
+            previous = self[-1] if self else None
+            super().append(sanitized)
+            doc_builder.observe_line(len(self) - 1, sanitized, previous)
+
+    lines: list[str] = _QuoteLines()
 
     def append_lines(values: Iterable[str]) -> None:
         for value in values:
-            append_line(value)
-
-    def _push(target: list[str], text: str) -> None:
-        if target is lines:
-            append_line(text)
-        else:
-            target.append(text)
+            _push(lines, value)
 
     def replace_line(index: int, text: str) -> None:
         sanitized = _sanitize_render_text(text)
@@ -3904,8 +3915,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     )
     append_lines(header_lines)
     if material_warning_summary:
-        append_line(MATERIAL_WARNING_LABEL)
-    append_line("")
+        _push(lines, MATERIAL_WARNING_LABEL)
+    _push(lines, "")
 
     if isinstance(breakdown, _MutableMappingABC):
         if pricing_source_value:
@@ -3929,8 +3940,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     baseline_state.pop("pricing_source", None)
 
     def render_drill_debug(entries: Sequence[str]) -> None:
-        append_line("Drill Debug")
-        append_line(divider)
+        _push(lines, "Drill Debug")
+        _push(lines, divider)
         prioritized_entries: list[tuple[int, int, str]] = []
         for idx, entry in enumerate(entries):
             if entry is None:
@@ -3956,11 +3967,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 for chunk in text.splitlines():
                     write_line(chunk, block_indent)
                 if lines and lines[-1] != "":
-                    append_line("")
+                    _push(lines, "")
             else:
                 write_wrapped(text, "  ")
         if lines and lines[-1] != "":
-            append_line("")
+            _push(lines, "")
 
     app_meta = result.setdefault("app_meta", {})
     # Only surface drill debug when LLM debug is enabled for this quote.
@@ -4004,12 +4015,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 if not flag.lower().startswith("labor totals drifted by")
             ]
         if display_red_flags:
-            append_line("")
-            append_line("Red Flags")
-            append_line(divider)
+            _push(lines, "")
+            _push(lines, "Red Flags")
+            _push(lines, divider)
             for flag in display_red_flags:
                 write_wrapped(f"⚠️ {flag}", "  ")
-    append_line("")
+    _push(lines, "")
 
     narrative = result.get("narrative") or breakdown.get("narrative")
     why_parts: list[str] = []
@@ -4493,8 +4504,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         material_cost_components: Mapping[str, Any] | None = None
 
         if have_any:
-            append_line("Material & Stock")
-            append_line(divider)
+            _push(lines, "Material & Stock")
+            _push(lines, divider)
             canonical_material_display = str(material_display_label or "").strip()
             if not canonical_material_display and isinstance(material_selection, _MappingABC):
                 canonical_material_display = str(
@@ -4538,7 +4549,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 material_display_label = str(material_name_display)
                 material_selection.setdefault("material_display", material_display_label)
                 material_display_for_debug = material_name_display
-                append_line(f"  Material used:  {material_name_display}")
+                _push(lines, f"  Material used:  {material_name_display}")
 
             blank_lines: list[str] = []
             need_len = _coerce_float_or_none(
@@ -5112,7 +5123,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     stock_line = f"— × — × {T_disp} in"
             if isinstance(mat_info, dict):
                 mat_info["stock_size_display"] = stock_line
-            append_line(f"  Stock used: {stock_line}")
+            _push(lines, f"  Stock used: {stock_line}")
             if detail_lines:
                 append_lines(detail_lines)
             mc: Mapping[str, Any] | None = material_cost_components
@@ -5178,7 +5189,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 row("Total Material Cost :", total_material_cost, indent="  ")
             elif total_material_cost is not None:
                 row("Total Material Cost :", total_material_cost, indent="  ")
-            append_line("")
+            _push(lines, "")
 
     rates.setdefault("LaborRate", 85.0)
     rates.setdefault(
@@ -5198,8 +5209,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         nre["programming_cost"] = round(prog_hr * programmer_rate_for_cost, 2)
 
     # ---- NRE / Setup costs ---------------------------------------------------
-    append_line("NRE / Setup Costs (per lot)")
-    append_line(divider)
+    _push(lines, "NRE / Setup Costs (per lot)")
+    _push(lines, divider)
     prog = nre_detail.get("programming") or {}
     fix  = nre_detail.get("fixture") or {}
 
@@ -5400,7 +5411,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 row(f"{label}:", amount_val)
             other_nre_total += amount_val
     if (prog or fix or other_nre_total > 0) and not lines[-1].strip() == "":
-        append_line("")
+        _push(lines, "")
 
     try:
         amortized_qty = int(result.get("qty") or breakdown.get("qty") or qty or 1)
@@ -5681,8 +5692,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if extra_map_candidate is not None and extra_map_candidate not in drill_minutes_extra_targets:
             drill_minutes_extra_targets.append(extra_map_candidate)
 
-    append_line("Process & Labor Costs")
-    append_line(divider)
+    _push(lines, "Process & Labor Costs")
+    _push(lines, divider)
 
     canonical_bucket_order: list[str] = []
     canonical_bucket_summary: dict[str, dict[str, float]] = {}
@@ -7317,9 +7328,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             canonical = text.casefold()
             return canonical, text
 
-        append_line("")
-        append_line("Labor Hour Summary")
-        append_line(divider)
+        _push(lines, "")
+        _push(lines, "Labor Hour Summary")
+        _push(lines, divider)
         if str(pricing_source_value).lower() == "planner":
             entries_iter = list(hour_summary_entries.items())
         else:
@@ -7456,12 +7467,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if include_in_total and hr_val:
                 total_hours += hr_val
         hours_row("Total Hours", total_hours, indent="  ")
-    append_line("")
+    _push(lines, "")
 
     # ---- Pass-Through & Direct (auto include non-zeros; sorted desc) --------
-    append_line("Pass-Through & Direct Costs")
+    _push(lines, "Pass-Through & Direct Costs")
     pass_through_header_index = len(lines) - 1
-    append_line(divider)
+    _push(lines, divider)
     pass_total = 0.0
     pass_through_labor_total = 0.0
     displayed_pass_through: dict[str, float] = {}
@@ -7685,9 +7696,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     row("Total", total_direct_costs_value, indent="  ")
     if cost_breakdown_entries:
-        append_line("")
-        append_line("Cost Breakdown")
-        append_line(divider)
+        _push(lines, "")
+        _push(lines, "Cost Breakdown")
+        _push(lines, divider)
         for label, amount in cost_breakdown_entries:
             row(label, amount, indent="  ")
     pass_through_total = float(sum(displayed_pass_through.values()))
@@ -8157,8 +8168,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     # ========================================================================
 
     # ---- Pricing ladder ------------------------------------------------------
-    append_line("Pricing Ladder")
-    append_line(divider)
+    _push(lines, "Pricing Ladder")
+    _push(lines, divider)
 
     override_sources: list[Mapping[str, Any]] = []
 
@@ -8248,17 +8259,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         row(f"+ Expedite ({_pct(applied_pcts.get('ExpeditePct'))}):", expedite_cost)
     row("= Subtotal before Margin:", subtotal_before_margin)
     row(f"Final Price with Margin ({_pct(applied_pcts.get('MarginPct'))}):", price)
-    append_line("")
+    _push(lines, "")
 
     # ---- LLM adjustments bullets (optional) ---------------------------------
     if llm_notes:
-        append_line("LLM Adjustments")
-        append_line(divider)
+        _push(lines, "LLM Adjustments")
+        _push(lines, divider)
         import textwrap as _tw
         for n in llm_notes:
             for w in _tw.wrap(str(n), width=page_width):
-                append_line(f"- {w}")
-        append_line("")
+                _push(lines, f"- {w}")
+        _push(lines, "")
 
     if not explanation_lines:
         plan_info_for_explainer: Mapping[str, Any] | None = None
@@ -8347,13 +8358,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     if why_parts:
         if lines and lines[-1]:
-            append_line("")
-        append_line("Why this price")
-        append_line(divider)
+            _push(lines, "")
+        _push(lines, "Why this price")
+        _push(lines, divider)
         for part in why_parts:
             write_wrapped(part, "  ")
         if lines[-1]:
-            append_line("")
+            _push(lines, "")
         # Append the compact removal debug table (if available)
         append_removal_debug_if_enabled(lines, removal_summary_for_display)
 
@@ -8402,11 +8413,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if isinstance(_pmeta, _MappingABC):
                 _meta_hr = _coerce_float_or_none((_pmeta.get("drilling") or {}).get("hr"))
 
-            append_line("DEBUG — Drilling sanity")
-            append_line(divider)
+            _push(lines, "DEBUG — Drilling sanity")
+            _push(lines, divider)
             def _fmt(x, unit):
                 return "—" if x is None or not math.isfinite(float(x)) else f"{float(x):.2f} {unit}"
-            append_line(
+            _push(lines, 
                 "  bucket(planner): "
                 + _fmt(_planner_min, "min")
                 + "   canonical: "
@@ -8416,7 +8427,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 + "   meta: "
                 + _fmt(_meta_hr, "hr")
             )
-            append_line("")
+            _push(lines, "")
         except Exception:
             pass
 
