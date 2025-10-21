@@ -2302,9 +2302,7 @@ from cad_quoter.pricing.materials import (
     plan_stock_blank as plan_stock_blank,
 )
 from cad_quoter.config import _ensure_two_bucket_rates
-from cad_quoter.rates import (
-    two_bucket_to_flat,
-)
+from cad_quoter.rates import LABOR_RATE_KEYS, MACHINE_RATE_KEYS, two_bucket_to_flat
 from cad_quoter.vendors.mcmaster_stock import lookup_sku_and_price_for_mm
 
 _normalize_lookup_key = normalize_material_key
@@ -8770,32 +8768,6 @@ else:
     )
 
 RATES_DEFAULT = two_bucket_to_flat(RATES_TWO_BUCKET_DEFAULT)
-
-LABOR_RATE_KEYS: set[str] = {
-    "ProgrammingRate",
-    "EngineerRate",
-    "InspectionRate",
-    "FinishingRate",
-    "FixtureBuildRate",
-    "AssemblyRate",
-    "ProjectManagementRate",
-    "ToolmakerSupportRate",
-    "PackagingRate",
-    "DeburrRate",
-}
-
-MACHINE_RATE_KEYS: set[str] = {
-    "MillingRate",
-    "DrillingRate",
-    "TurningRate",
-    "WireEDMRate",
-    "SinkerEDMRate",
-    "SurfaceGrindRate",
-    "ODIDGrindRate",
-    "JigGrindRate",
-    "LappingRate",
-    "SawWaterjetRate",
-}
 
 try:
     PARAMS_DEFAULT = SERVICE_CONTAINER.load_params()
