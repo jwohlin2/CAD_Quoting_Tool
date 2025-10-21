@@ -593,6 +593,96 @@ def _render_time_per_hole(
     return subtotal_min, seen_deep, seen_std
 
 
+_thread_tpi = re.compile(r"#?\s*\d{1,2}\s*-\s*(\d+)", re.I)
+_thread_frac = re.compile(r"(\d+)\s*/\s*(\d+)\s*-\s*(\d+)", re.I)
+_thread_metric = re.compile(r"M\s*([\d.]+)\s*x\s*([\d.]+)", re.I)
+
+
+def _thread_ipr(thread_str: str) -> float:
+    """Return inches per revolution from thread designator."""
+
+    s = (thread_str or "").strip().upper()
+    m = _thread_tpi.search(s)
+    if m:
+        tpi = float(m.group(1))
+        return 1.0 / tpi if tpi > 0 else 0.0
+    m = _thread_frac.search(s)
+    if m:
+        tpi = float(m.group(3))
+        return 1.0 / tpi if tpi > 0 else 0.0
+    m = _thread_metric.search(s)
+    if m:
+        pitch_mm = float(m.group(2))
+        return (pitch_mm / 25.4) if pitch_mm > 0 else 0.0
+    return 0.0
+
+
+def _tap_rpm_for_dia(dia_in: float, sfm: float = 60.0, rpm_cap: float = 1500.0) -> float:
+    """Return an RPM estimate for a tap diameter."""
+
+    if not dia_in or dia_in <= 0:
+        return 400.0
+    rpm = (sfm * 3.82) / float(dia_in)
+    return max(100.0, min(rpm, rpm_cap))
+
+
+def _derive_major_dia_in(thread_str: str) -> float:
+    """Rough major diameter for taps; enough to get a reasonable RPM."""
+
+    s = (thread_str or "").strip().upper()
+    m = _thread_metric.search(s)
+    if m:
+        return float(m.group(1)) / 25.4
+    m = _thread_frac.search(s)
+    if m:
+        return float(m.group(1)) / float(m.group(2))
+    if s.startswith("#"):
+        num_map = {"#4": 0.112, "#6": 0.138, "#8": 0.164, "#10": 0.190, "#12": 0.216}
+        for key, value in num_map.items():
+            if s.startswith(key):
+                return value
+    return 0.25
+
+
+def _finalize_tap_row(row: dict[str, Any], thickness_in: float) -> None:
+    thread = row.get("thread") or row.get("desc") or ""
+    ipr = _thread_ipr(thread)
+    dia = _derive_major_dia_in(thread)
+    rpm = _tap_rpm_for_dia(dia)
+    ipm = rpm * ipr if ipr > 0 else 0.0
+
+    depth_in = row.get("depth_in")
+    depth_token = depth_in
+    if isinstance(depth_token, str):
+        if depth_token.strip().upper() in {"", "-", "THRU"}:
+            depth_in = float(thickness_in or 0.0)
+        else:
+            try:
+                depth_in = float(depth_token)
+            except Exception:
+                depth_in = float(thickness_in or 0.0)
+    elif depth_in in (None, ""):
+        depth_in = float(thickness_in or 0.0)
+    else:
+        try:
+            depth_in = float(depth_in)
+        except Exception:
+            depth_in = float(thickness_in or 0.0)
+
+    index_min = 0.08
+    retract_fac = 2.0
+    motion_min = (float(depth_in) / max(ipm, 1e-6)) * retract_fac if depth_in else 0.0
+    t_per = motion_min + index_min
+
+    row["ipr"] = round(ipr, 4)
+    row["rpm"] = int(round(rpm))
+    row["ipm"] = round(ipm, 3)
+    row["t_per_hole_min"] = round(t_per, 3)
+    row["feed_fmt"] = f'{row["ipr"]:.4f} ipr | {row["rpm"]} rpm | {row["ipm"]:.3f} ipm'
+    row["depth_in"] = float(depth_in)
+    row["depth_in_display"] = f'{float(depth_in):.2f}"'
+
+
 def _render_ops_card(
     append_line: Callable[[str], None],
     *,
@@ -605,19 +695,27 @@ def _render_ops_card(
     append_line("-" * 66)
     total_min = 0.0
     for r in rows:
-        qty = int(r.get("qty", 0) or 0)
-        depth = r.get("depth_in_display") or f'{float(r.get("depth_in", 0.0)):.3f}"'
-        t_ph = float(r.get("t_per_hole_min", 0.0))
-        group = qty * t_ph
-        total_min += group
-        line = (
-            f'{r.get("label", "?")} × {qty} {r.get("side", "").upper():>8} | '
-            f"depth {depth} | {r.get('feed_fmt', '-')} | "
-            f"t/hole {t_ph:.2f} min | group {qty}×{t_ph:.2f} = {group:.2f} min"
+        qty = int(r.get("qty") or 0)
+        t_ph = float(r.get("t_per_hole_min") or 0.0)
+        grp = qty * t_ph
+        total_min += grp
+        depth_display = r.get("depth_in_display")
+        if not depth_display:
+            try:
+                depth_val = float(r.get("depth_in", 0.0))
+                depth_display = f"{depth_val:.3f}\""
+            except Exception:
+                depth_display = "-"
+        feed_fmt = r.get("feed_fmt", "-")
+        append_line(
+            f'{r.get("label", r.get("desc", "?"))} × {qty}  '
+            f'({(r.get("side", "") or "").upper() or "FRONT"}) | '
+            f'depth {depth_display} | '
+            f'{feed_fmt} | '
+            f't/hole {t_ph:.2f} min | group {qty}×{t_ph:.2f} = {grp:.2f} min'
         )
-        append_line(line)
     append_line("")
-    return total_min
+    return round(total_min, 2)
 
 
 def _compute_drilling_removal_section(
