@@ -46,6 +46,7 @@ setattr(
 )
 
 import appV5
+from cad_quoter.pricing.validation import validate_quote_before_pricing
 from cad_quoter.app import runtime as app_runtime
 
 
@@ -292,7 +293,7 @@ def test_validate_quote_requires_material_hints_when_cost_low() -> None:
     process_costs = {"drilling": 0.0, "milling": 0.0}
 
     with pytest.raises(ValueError) as exc:
-        appV5.validate_quote_before_pricing(geo, process_costs, pass_through, {})
+        validate_quote_before_pricing(geo, process_costs, pass_through, {})
 
     assert "Material cost is near zero" in str(exc.value)
 

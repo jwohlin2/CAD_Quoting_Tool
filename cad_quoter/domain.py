@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping as _MappingABC
-from typing import Any, Callable, TYPE_CHECKING, cast
+from typing import Any, Callable, Mapping, TYPE_CHECKING, cast
 
 from cad_quoter.config import logger
 from cad_quoter.domain_models import QuoteState
@@ -34,6 +34,7 @@ __all__ = [
     "effective_to_overrides",
     "overrides_to_suggestions",
     "suggestions_to_overrides",
+    "apply_suggestions",
     "reprice_with_effective",
     "HARDWARE_PASS_LABEL",
     "LEGACY_HARDWARE_PASS_LABEL",
@@ -114,6 +115,21 @@ def suggestions_to_overrides(*args, **kwargs):  # type: ignore[override]
     from appkit import llm_converters as _llm_converters
 
     return _llm_converters.suggestions_to_overrides(*args, **kwargs)
+
+
+def apply_suggestions(baseline: Mapping[str, Any] | None, suggestions: Mapping[str, Any] | None) -> dict:
+    """Apply sanitized LLM suggestions onto a baseline quote snapshot."""
+
+    merged = merge_effective(dict(baseline or {}), dict(suggestions or {}), {})
+    merged.pop("_source_tags", None)
+    merged.pop("_clamp_notes", None)
+
+    notes = list(suggestions.get("notes") or []) if isinstance(suggestions, Mapping) else []
+    if isinstance(suggestions, Mapping) and suggestions.get("no_change_reason"):
+        notes.append(f"no_change: {suggestions['no_change_reason']}")
+    merged["_llm_notes"] = notes
+
+    return merged
 
 
 def _canonicalize_pass_through_map(data: Any) -> dict[str, float]:
