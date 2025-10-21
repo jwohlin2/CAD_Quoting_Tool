@@ -1356,14 +1356,18 @@ def _compute_drilling_removal_section(
             extras["drill_machine_minutes"] = float(drill_minutes_subtotal)
             extras["drill_labor_minutes"] = float(total_tool_minutes)
             extras["drill_total_minutes"] = drill_minutes_subtotal
+            logging.debug(
+                f"[removal] drill_total_minutes={extras['drill_total_minutes']}"
+            )
+            if "drill_total_hours" in extras:
+                logging.error(
+                    "[unit] Found drill_total_hours in extras (HOURS). This API expects MINUTES. Removing it."
+                )
+                extras.pop("drill_total_hours", None)
             extras["removal_drilling_minutes_subtotal"] = float(drill_minutes_subtotal)
             extras["removal_drilling_minutes"] = float(drill_minutes_total)
             if drill_minutes_total > 0.0:
                 extras["removal_drilling_hours"] = minutes_to_hours(drill_minutes_total)
-
-            logging.debug(
-                "[removal] drill_total_minutes=%s", extras.get("drill_total_minutes")
-            )
 
             meta_min = (((process_plan_summary or {}).get("drilling") or {}).get("total_minutes_billed"))
             removal_min = (extras or {}).get("drill_total_minutes", 0.0)
