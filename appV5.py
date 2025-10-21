@@ -345,6 +345,9 @@ def _seed_bucket_minutes_cost(
 
 
 def _normalize_buckets(bucket_view_obj: MutableMapping[str, Any] | Mapping[str, Any] | None) -> None:
+    if not isinstance(bucket_view_obj, (_MutableMappingABC, dict)):
+        return
+
     alias = {
         "programming_amortized": "programming",
         "spotdrill": "spot_drill",
@@ -353,21 +356,27 @@ def _normalize_buckets(bucket_view_obj: MutableMapping[str, Any] | Mapping[str, 
         "jig-grind": "jig_grind",
     }
 
-    if not isinstance(bucket_view_obj, (_MutableMappingABC, dict)):
-        return
-
     try:
         buckets_obj = bucket_view_obj.get("buckets")
     except Exception:
         buckets_obj = None
 
-    buckets_map = buckets_obj if isinstance(buckets_obj, _MappingABC) else {}
-    norm: dict[str, dict[str, float]] = {}
+    if isinstance(buckets_obj, dict):
+        source_items = buckets_obj.items()
+    elif isinstance(buckets_obj, _MappingABC):
+        source_items = buckets_obj.items()
+    else:
+        source_items = ()
 
-    for raw_key, entry in buckets_map.items():
-        if not isinstance(entry, _MappingABC):
+    norm: dict[str, dict[str, float]] = {}
+    for raw_key, entry in source_items:
+        try:
+            key = str(raw_key or "")
+        except Exception:
+            key = ""
+        if not key or not isinstance(entry, _MappingABC):
             continue
-        nk = alias.get(raw_key, raw_key)
+        nk = alias.get(key, key)
         dst = norm.setdefault(
             nk,
             {"minutes": 0.0, "machine$": 0.0, "labor$": 0.0, "total$": 0.0},

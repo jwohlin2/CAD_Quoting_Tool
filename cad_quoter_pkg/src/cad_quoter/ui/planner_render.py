@@ -44,6 +44,16 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
     except Exception:
         return default
 
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        coerced = float(value)
+    except Exception:
+        return default
+    if not math.isfinite(coerced):
+        return default
+    return coerced
+
 OP_ROLE: dict[str, str] = {
     "assemble_pair_on_fixture": "labor_only",
     "prep_carrier_or_tab": "labor_only",
@@ -158,7 +168,7 @@ def _bucket_cost_mode(key: str | None) -> str:
 def _normalize_buckets(
     bucket_view_obj: Mapping[str, Any] | _MutableMappingABC[str, Any] | None,
 ) -> None:
-    if bucket_view_obj is None:
+    if not isinstance(bucket_view_obj, (_MutableMappingABC, dict)):
         return
 
     alias = {
@@ -170,70 +180,40 @@ def _normalize_buckets(
     }
 
     try:
-        buckets_obj = bucket_view_obj.get("buckets") if isinstance(bucket_view_obj, _MappingABC) else None
+        buckets_obj = bucket_view_obj.get("buckets")
     except Exception:
         buckets_obj = None
 
     if isinstance(buckets_obj, dict):
-        source_items = list(buckets_obj.items())
+        source_items = buckets_obj.items()
     elif isinstance(buckets_obj, _MappingABC):
-        try:
-            source_items = list(buckets_obj.items())
-        except Exception:
-            return
-        buckets_obj = dict(buckets_obj)
+        source_items = buckets_obj.items()
     else:
-        return
+        source_items = ()
 
-    normalized: dict[str, dict[str, float]] = {}
-    for raw_key, raw_entry in source_items:
+    norm: dict[str, dict[str, float]] = {}
+    for raw_key, entry in source_items:
         try:
             key = str(raw_key or "")
         except Exception:
             key = ""
         if not key:
             continue
-        norm_key = alias.get(key, key)
-
-        entry: Mapping[str, Any] | None
-        if isinstance(raw_entry, dict):
-            entry = raw_entry
-        elif isinstance(raw_entry, _MappingABC):
-            entry = raw_entry
-        else:
-            entry = None
-
-        minutes = machine_cost = labor_cost = 0.0
-        if entry is not None:
-            try:
-                minutes = float(entry.get("minutes", 0.0) or 0.0)
-            except Exception:
-                minutes = 0.0
-            try:
-                machine_cost = float(entry.get("machine$", 0.0) or 0.0)
-            except Exception:
-                machine_cost = 0.0
-            try:
-                labor_cost = float(entry.get("labor$", 0.0) or 0.0)
-            except Exception:
-                labor_cost = 0.0
-
-        target = normalized.setdefault(
-            norm_key,
+        nk = alias.get(key, key)
+        dst = norm.setdefault(
+            nk,
             {"minutes": 0.0, "machine$": 0.0, "labor$": 0.0, "total$": 0.0},
         )
-        target["minutes"] = float(target.get("minutes", 0.0)) + minutes
-        target["machine$"] = float(target.get("machine$", 0.0)) + machine_cost
-        target["labor$"] = float(target.get("labor$", 0.0)) + labor_cost
-        target["total$"] = round(target["machine$"] + target["labor$"], 2)
+        if isinstance(entry, _MappingABC):
+            minutes_val = _as_float(entry.get("minutes"), 0.0)
+            machine_val = _as_float(entry.get("machine$"), 0.0)
+            labor_val = _as_float(entry.get("labor$"), 0.0)
+            dst["minutes"] += minutes_val
+            dst["machine$"] += machine_val
+            dst["labor$"] += labor_val
+            dst["total$"] = round(dst["machine$"] + dst["labor$"], 2)
 
-    try:
-        if isinstance(bucket_view_obj, (_MutableMappingABC, dict)):
-            bucket_view_obj["buckets"] = normalized  # type: ignore[index]
-        else:
-            cast(_MutableMappingABC[str, Any], bucket_view_obj)["buckets"] = normalized
-    except Exception:
-        return
+    bucket_view_obj["buckets"] = norm
 
 
 def _lookup_bucket_rate(
