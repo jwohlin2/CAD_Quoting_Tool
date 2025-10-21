@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Sequence
 
+from cad_quoter.pricing.process_buckets import RATE_BUCKET_META, normalize_bucket_key
 from cad_quoter.utils import _dict
 
 
@@ -22,40 +22,32 @@ DEFAULT_RATE_PER_HOUR: float = 90.0
 class RateBucket:
     """Describe how an operation maps to a two-bucket rate structure."""
 
+    key: str
     label: str
     bucket: str
     rate_keys: tuple[str, ...]
+    minute_keys: tuple[str, ...]
 
     def normalized_label(self) -> str:
-        return _normalize_key(self.label)
+        return normalize_bucket_key(self.label)
 
 
-RATE_BUCKETS: tuple[RateBucket, ...] = (
-    RateBucket("Inspection", "labor", ("InspectionRate",)),
-    RateBucket("Fixture Build (amortized)", "labor", ("FixtureBuildRate",)),
-    RateBucket("Programming (per part)", "labor", ("ProgrammingRate",)),
-    RateBucket("Deburr", "labor", ("DeburrRate", "FinishingRate")),
-    RateBucket("Lapping/Honing", "labor", ("SurfaceGrindRate", "GrindingRate")),
-    RateBucket(
-        "Drilling",
-        "machine",
-        ("DrillingRate", "CncVertical", "CncVerticalRate", "cnc_vertical"),
-    ),
-    RateBucket("Milling", "machine", ("MillingRate",)),
-    RateBucket("Wire EDM", "machine", ("WireEDMRate", "EDMRate")),
-    RateBucket(
-        "Grinding",
-        "machine",
-        ("SurfaceGrindRate", "GrindingRate", "ODIDGrindRate", "JigGrindRate"),
-    ),
-    RateBucket("Saw/Waterjet", "machine", ("SawWaterjetRate", "SawRate", "WaterjetRate")),
-    RateBucket("Sinker EDM", "machine", ("SinkerEDMRate", "EDMRate")),
-    RateBucket("Abrasive Flow", "machine", ("AbrasiveFlowRate",)),
-)
+def _build_rate_buckets() -> tuple[RateBucket, ...]:
+    buckets: list[RateBucket] = []
+    for meta in RATE_BUCKET_META:
+        buckets.append(
+            RateBucket(
+                key=meta.key,
+                label=meta.label,
+                bucket=meta.bucket,
+                rate_keys=meta.rate_aliases,
+                minute_keys=meta.minute_keys,
+            )
+        )
+    return tuple(buckets)
 
 
-def _normalize_key(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+RATE_BUCKETS: tuple[RateBucket, ...] = _build_rate_buckets()
 
 
 def _iter_rate_candidates(rate_keys: Sequence[str]) -> Iterable[str]:
@@ -63,7 +55,7 @@ def _iter_rate_candidates(rate_keys: Sequence[str]) -> Iterable[str]:
         if not key:
             continue
         yield key
-        norm = _normalize_key(key)
+        norm = normalize_bucket_key(key)
         if norm and norm != key:
             yield norm
         camel = "".join(part.title() for part in norm.split("_")) if norm else ""
@@ -114,10 +106,30 @@ def bucket_cost_breakdown(
 
     labor_min = machine_min = labor_cost = machine_cost = total_minutes = 0.0
 
+    minute_lookup: dict[str, float] = {}
+    for name, raw in minute_source.items():
+        try:
+            mins = float(raw or 0.0)
+        except Exception:
+            continue
+        norm = normalize_bucket_key(name)
+        if not norm:
+            continue
+        minute_lookup[norm] = minute_lookup.get(norm, 0.0) + mins
+
     for spec in RATE_BUCKETS:
-        mins = float(minute_source.get(spec.label, 0.0) or 0.0)
+        mins = 0.0
+        matched_keys: list[str] = []
+        for key in spec.minute_keys:
+            value = minute_lookup.get(key)
+            if value is None or value <= 0:
+                continue
+            mins += value
+            matched_keys.append(key)
         if mins <= 0:
             continue
+        for key in matched_keys:
+            minute_lookup[key] = 0.0
         rate = _lookup_rate(two_bucket_rates, spec, default_rate)
         cost = (mins / 60.0) * rate
         entry: dict[str, float | str] = {

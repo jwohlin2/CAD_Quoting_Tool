@@ -6,8 +6,34 @@ from collections.abc import Iterable, Mapping
 import re
 from typing import Any, Dict, Iterable as _Iterable, Mapping as _Mapping
 
-from cad_quoter.pricing.rate_buckets import RATE_BUCKETS
 from cad_quoter.rates import OP_TO_LABOR, OP_TO_MACHINE, rate_for_role
+
+
+def normalize_bucket_key(name: Any) -> str:
+    """Return a stable, lowercase/underscored representation of *name*."""
+
+    return re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_")
+
+
+@dataclass(frozen=True)
+class RateBucketProfile:
+    """Rate metadata attached to a canonical process bucket."""
+
+    bucket: str
+    label: str | None = None
+    rate_aliases: tuple[str, ...] = ()
+    minute_aliases: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RateBucketMeta:
+    """Flattened rate metadata for consumption by pricing helpers."""
+
+    key: str
+    label: str
+    bucket: str
+    rate_aliases: tuple[str, ...]
+    minute_keys: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -18,19 +44,46 @@ class _BucketSpec:
     label: str
     rate_aliases: tuple[str, ...] = ()
     hide_in_cost: bool = False
+    rate_profiles: tuple[RateBucketProfile, ...] = ()
+
+    def combined_rate_aliases(self) -> tuple[str, ...]:
+        if self.rate_profiles:
+            aliases: list[str] = []
+            for profile in self.rate_profiles:
+                if profile.rate_aliases:
+                    aliases.extend(profile.rate_aliases)
+            if aliases:
+                return tuple(dict.fromkeys(aliases))
+        return self.rate_aliases
 
 
 _BASE_BUCKET_SPECS: tuple[_BucketSpec, ...] = (
-    _BucketSpec("milling", "Milling", ("MillingRate",)),
+    _BucketSpec(
+        "milling",
+        "Milling",
+        rate_profiles=(
+            RateBucketProfile(
+                bucket="machine",
+                rate_aliases=("MillingRate",),
+                minute_aliases=("Milling",),
+            ),
+        ),
+    ),
     _BucketSpec(
         "drilling",
         "Drilling",
-        (
-            "DrillingRate",
-            "CncVertical",
-            "CncVerticalRate",
-            "cnc_vertical",
-            "MillingRate",
+        rate_profiles=(
+            RateBucketProfile(
+                bucket="machine",
+                rate_aliases=(
+                    "DrillingRate",
+                    "CncVertical",
+                    "CncVerticalRate",
+                    "cnc_vertical",
+                    "MillingRate",
+                ),
+                minute_aliases=("Drilling",),
+            ),
         ),
     ),
     _BucketSpec("counterbore", "Counterbore", ("CounterboreRate", "DrillingRate")),
@@ -38,23 +91,107 @@ _BASE_BUCKET_SPECS: tuple[_BucketSpec, ...] = (
     _BucketSpec(
         "grinding",
         "Grinding",
-        ("GrindingRate", "SurfaceGrindRate", "ODIDGrindRate", "JigGrindRate"),
+        rate_profiles=(
+            RateBucketProfile(
+                bucket="labor",
+                label="Lapping/Honing",
+                rate_aliases=("SurfaceGrindRate", "GrindingRate"),
+                minute_aliases=("Lapping/Honing", "Lapping", "Lap", "Honing"),
+            ),
+            RateBucketProfile(
+                bucket="machine",
+                label="Grinding",
+                rate_aliases=(
+                    "GrindingRate",
+                    "SurfaceGrindRate",
+                    "ODIDGrindRate",
+                    "JigGrindRate",
+                ),
+                minute_aliases=("Grinding",),
+            ),
+        ),
     ),
-    _BucketSpec("wire_edm", "Wire EDM", ("WireEDMRate", "EDMRate")),
-    _BucketSpec("sinker_edm", "Sinker EDM", ("SinkerEDMRate", "EDMRate")),
-    _BucketSpec("finishing_deburr", "Finishing/Deburr", ("FinishingRate", "DeburrRate")),
-    _BucketSpec("saw_waterjet", "Saw/Waterjet", ("SawWaterjetRate", "SawRate", "WaterjetRate")),
-    _BucketSpec("inspection", "Inspection", ("InspectionRate",)),
+    _BucketSpec(
+        "wire_edm",
+        "Wire EDM",
+        rate_profiles=(
+            RateBucketProfile(
+                bucket="machine",
+                rate_aliases=("WireEDMRate", "EDMRate"),
+                minute_aliases=("Wire EDM",),
+            ),
+        ),
+    ),
+    _BucketSpec(
+        "sinker_edm",
+        "Sinker EDM",
+        rate_profiles=(
+            RateBucketProfile(
+                bucket="machine",
+                rate_aliases=("SinkerEDMRate", "EDMRate"),
+                minute_aliases=("Sinker EDM",),
+            ),
+        ),
+    ),
+    _BucketSpec(
+        "finishing_deburr",
+        "Finishing/Deburr",
+        rate_profiles=(
+            RateBucketProfile(
+                bucket="labor",
+                rate_aliases=("FinishingRate", "DeburrRate"),
+                minute_aliases=("Finishing/Deburr", "Deburr", "Finishing"),
+            ),
+        ),
+    ),
+    _BucketSpec(
+        "saw_waterjet",
+        "Saw/Waterjet",
+        rate_profiles=(
+            RateBucketProfile(
+                bucket="machine",
+                rate_aliases=("SawWaterjetRate", "SawRate", "WaterjetRate"),
+                minute_aliases=("Saw/Waterjet", "Saw", "Waterjet"),
+            ),
+        ),
+    ),
+    _BucketSpec(
+        "inspection",
+        "Inspection",
+        rate_profiles=(
+            RateBucketProfile(
+                bucket="labor",
+                rate_aliases=("InspectionRate",),
+                minute_aliases=("Inspection",),
+            ),
+        ),
+    ),
     _BucketSpec(
         "toolmaker_support",
         "Toolmaker Support",
         ("ToolmakerRate", "ToolAndDieMakerRate", "LaborRate"),
     ),
-    _BucketSpec("fixture_build_amortized", "Fixture Build (amortized)", ("FixtureBuildRate",)),
+    _BucketSpec(
+        "fixture_build_amortized",
+        "Fixture Build (amortized)",
+        rate_profiles=(
+            RateBucketProfile(
+                bucket="labor",
+                rate_aliases=("FixtureBuildRate",),
+                minute_aliases=("Fixture Build (amortized)",),
+            ),
+        ),
+    ),
     _BucketSpec(
         "programming_amortized",
         "Programming (per part)",
-        ("ProgrammingRate", "EngineerRate", "ProgrammerRate"),
+        rate_profiles=(
+            RateBucketProfile(
+                bucket="labor",
+                rate_aliases=("ProgrammingRate", "EngineerRate", "ProgrammerRate"),
+                minute_aliases=("Programming (per part)", "Programming",),
+            ),
+        ),
     ),
     _BucketSpec(
         "misc",
@@ -72,19 +209,110 @@ _EXTRA_BUCKET_SPECS: dict[str, _BucketSpec] = {
     "programming": _BucketSpec(
         "programming",
         "Programming",
-        ("ProgrammingRate", "EngineerRate", "ProgrammerRate"),
+        rate_profiles=(
+            RateBucketProfile(
+                bucket="labor",
+                rate_aliases=("ProgrammingRate", "EngineerRate", "ProgrammerRate"),
+                minute_aliases=("Programming",),
+            ),
+        ),
     ),
-    "fixture_build": _BucketSpec("fixture_build", "Fixture Build", ("FixtureBuildRate",)),
+    "fixture_build": _BucketSpec(
+        "fixture_build",
+        "Fixture Build",
+        rate_profiles=(
+            RateBucketProfile(
+                bucket="labor",
+                rate_aliases=("FixtureBuildRate",),
+                minute_aliases=("Fixture Build",),
+            ),
+        ),
+    ),
     "countersink": _BucketSpec(
         "countersink",
         "Countersink",
         ("CounterSinkRate", "DrillingRate"),
+    ),
+    "abrasive_flow": _BucketSpec(
+        "abrasive_flow",
+        "Abrasive Flow",
+        rate_profiles=(
+            RateBucketProfile(
+                bucket="machine",
+                rate_aliases=("AbrasiveFlowRate",),
+                minute_aliases=("Abrasive Flow",),
+            ),
+        ),
     ),
 }
 
 
 _ALL_BUCKET_SPECS: dict[str, _BucketSpec] = {spec.key: spec for spec in _BASE_BUCKET_SPECS}
 _ALL_BUCKET_SPECS.update(_EXTRA_BUCKET_SPECS)
+
+
+_RATE_BUCKET_SEQUENCE: tuple[tuple[str, int], ...] = (
+    ("inspection", 0),
+    ("fixture_build_amortized", 0),
+    ("programming_amortized", 0),
+    ("finishing_deburr", 0),
+    ("grinding", 0),
+    ("drilling", 0),
+    ("milling", 0),
+    ("wire_edm", 0),
+    ("grinding", 1),
+    ("saw_waterjet", 0),
+    ("sinker_edm", 0),
+    ("abrasive_flow", 0),
+)
+
+
+def _rate_aliases_for_profile(spec: _BucketSpec, profile: RateBucketProfile) -> tuple[str, ...]:
+    if profile.rate_aliases:
+        return tuple(dict.fromkeys(profile.rate_aliases))
+    if spec.rate_aliases:
+        return spec.rate_aliases
+    return ()
+
+
+def _minute_keys_for_profile(spec: _BucketSpec, profile: RateBucketProfile) -> tuple[str, ...]:
+    aliases: list[str] = []
+    aliases.extend(profile.minute_aliases or ())
+    base_label = profile.label or spec.label
+    aliases.extend((base_label, spec.label, spec.key))
+    keys: list[str] = []
+    for name in aliases:
+        norm = normalize_bucket_key(name)
+        if norm and norm not in keys:
+            keys.append(norm)
+    return tuple(keys)
+
+
+def _build_rate_bucket_meta() -> tuple[RateBucketMeta, ...]:
+    meta: list[RateBucketMeta] = []
+    for key, index in _RATE_BUCKET_SEQUENCE:
+        spec = _ALL_BUCKET_SPECS.get(key)
+        if not spec:
+            continue
+        if index >= len(spec.rate_profiles):
+            continue
+        profile = spec.rate_profiles[index]
+        label = profile.label or spec.label
+        rate_aliases = _rate_aliases_for_profile(spec, profile)
+        minute_keys = _minute_keys_for_profile(spec, profile)
+        meta.append(
+            RateBucketMeta(
+                key=spec.key,
+                label=label,
+                bucket=profile.bucket,
+                rate_aliases=rate_aliases,
+                minute_keys=minute_keys,
+            )
+        )
+    return tuple(meta)
+
+
+RATE_BUCKET_META: tuple[RateBucketMeta, ...] = _build_rate_bucket_meta()
 
 
 CANONICAL_BUCKET_ORDER: tuple[str, ...] = tuple(
@@ -139,17 +367,6 @@ PLANNER_BUCKET_ORDER: tuple[str, ...] = (
 
 LABEL_MAP: dict[str, str] = {spec.key: spec.label for spec in _BASE_BUCKET_SPECS}
 LABEL_MAP.update({key: spec.label for key, spec in _EXTRA_BUCKET_SPECS.items()})
-
-RATE_ALIAS_KEYS: dict[str, tuple[str, ...]] = {
-    spec.key: spec.rate_aliases for spec in _BASE_BUCKET_SPECS if spec.rate_aliases
-}
-RATE_ALIAS_KEYS.update(
-    {
-        key: spec.rate_aliases
-        for key, spec in _EXTRA_BUCKET_SPECS.items()
-        if spec.rate_aliases
-    }
-)
 
 PLANNER_META: frozenset[str] = frozenset(
     {"planner_total", "planner_labor", "planner_machine"}
@@ -227,6 +444,33 @@ ALIAS_MAP: dict[str, str] = {
     "planner_labor": "misc",
     "planner_misc": "misc",
 }
+
+
+def _merge_rate_aliases(existing: tuple[str, ...], additions: tuple[str, ...]) -> tuple[str, ...]:
+    if not additions:
+        return existing
+    if not existing:
+        return additions
+    return tuple(dict.fromkeys((*existing, *additions)))
+
+
+RATE_ALIAS_KEYS: dict[str, tuple[str, ...]] = {}
+for _spec in _ALL_BUCKET_SPECS.values():
+    combined = _spec.combined_rate_aliases()
+    if combined:
+        RATE_ALIAS_KEYS[_spec.key] = combined
+
+for _meta in RATE_BUCKET_META:
+    if not _meta.rate_aliases:
+        continue
+    norm_label = normalize_bucket_key(_meta.label)
+    candidate_keys = {norm_label, _meta.key, *(_meta.minute_keys)}
+    canonical_norm = ALIAS_MAP.get(norm_label, norm_label)
+    if canonical_norm:
+        candidate_keys.add(canonical_norm)
+    for _key in filter(None, candidate_keys):
+        existing_aliases = RATE_ALIAS_KEYS.get(_key, ())
+        RATE_ALIAS_KEYS[_key] = _merge_rate_aliases(existing_aliases, _meta.rate_aliases)
 
 
 _alias_groups: dict[str, set[str]] = {}
@@ -350,6 +594,7 @@ __all__ = [
     "ALIASES_BY_CANONICAL",
     "BUCKET_ROLE",
     "PROCESS_BUCKETS",
+    "RATE_BUCKET_META",
     "RATE_ALIAS_KEYS",
     "bucket_aliases",
     "bucket_label",
@@ -359,23 +604,6 @@ __all__ = [
     "lookup_rate",
     "normalize_bucket_key",
 ]
-
-
-def normalize_bucket_key(name: Any) -> str:
-    """Return a stable, lowercase/underscored representation of *name*."""
-
-    return re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_")
-
-
-for _rate_bucket in RATE_BUCKETS:
-    norm_label = normalize_bucket_key(_rate_bucket.label)
-    canonical_norm = ALIAS_MAP.get(norm_label, norm_label)
-    for key in {norm_label, canonical_norm}:
-        if not key:
-            continue
-        existing_aliases = RATE_ALIAS_KEYS.get(key, ())
-        merged = tuple(dict.fromkeys((*_rate_bucket.rate_keys, *existing_aliases)))
-        RATE_ALIAS_KEYS[key] = merged
 
 
 def canonical_bucket_key(
