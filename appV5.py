@@ -359,6 +359,16 @@ from cad_quoter.app.optional_loaders import (
     build_geo_from_dxf,
     set_build_geo_from_dxf_hook,
 )
+from appkit.utils import (
+    _first_numeric_or_none,
+    _fmt_rng,
+    _ipm_from_rpm_ipr,
+    _lookup_sfm_ipr,
+    _parse_thread_major_in,
+    _parse_tpi,
+    _rpm_from_sfm,
+    _rpm_from_sfm_diam,
+)
 from cad_quoter.resources import (
     default_app_settings_json,
     default_master_variables_csv,
@@ -603,121 +613,6 @@ def _sanitize_render_text(value: typing.Any) -> str:
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers: formatting + removal card + per-hole lines (no material per line)
 # ──────────────────────────────────────────────────────────────────────────────
-
-
-def _first_numeric_or_none(*values: Any) -> float | None:
-    """Return the first value that can be coerced to a float, or ``None``."""
-
-    for value in values:
-        numeric = _coerce_float_or_none(value)
-        if numeric is not None:
-            return float(numeric)
-    return None
-
-
-# --- STOCK & MATERIAL HELPERS ------------------------------------------------
-
-def _fmt_rng(vals, prec=2, unit: str | None = None):
-    vs = []
-    for v in (vals or []):
-        try:
-            f = float(v)
-            if math.isfinite(f):
-                vs.append(f)
-        except Exception:
-            pass
-    if not vs:
-        return "-"
-    lo, hi = min(vs), max(vs)
-    s = (
-        f"{lo:.{prec}f}"
-        if abs(hi - lo) < 10 ** (-prec)
-        else f"{lo:.{prec}f}-{hi:.{prec}f}"
-    )
-    return f"{s}{unit}" if unit else s
-
-
-def _rpm_from_sfm(sfm: float, d_in: float) -> float:
-    try:
-        d = max(float(d_in), 1e-6)
-        return (float(sfm) * 12.0) / (math.pi * d)
-    except Exception:
-        return 0.0
-
-
-# === THREAD + FEEDS/SPEEDS HELPERS ==========================================
-_NUMBER_MAJOR = {
-    "#0": 0.0600,
-    "#1": 0.0730,
-    "#2": 0.0860,
-    "#3": 0.0990,
-    "#4": 0.1120,
-    "#5": 0.1250,
-    "#6": 0.1380,
-    "#8": 0.1640,
-    "#10": 0.1900,
-    "#12": 0.2160,
-}
-
-
-def _parse_thread_major_in(thread: str) -> float | None:
-    """Return major diameter in inches from '5/16-18', '0.375-24', or '#10-32'."""
-
-    s = (thread or "").strip().upper()
-    m = re.match(r"^(#\d+)\s*-\s*\d+$", s)
-    if m:
-        return _NUMBER_MAJOR.get(m.group(1))
-    m = re.match(r"^(\d+/\d+|\d+(?:\.\d+)?)\s*-\s*\d+$", s)
-    if not m:
-        return None
-    tok = m.group(1)
-    if "/" in tok:
-        num, den = tok.split("/")
-        return float(num) / float(den)
-    return float(tok)
-
-
-def _parse_tpi(thread: str) -> int | None:
-    m = re.search(r"-(\d+)$", (thread or "").strip())
-    return int(m.group(1)) if m else None
-
-
-_DEFAULT_SFM = {
-    "tapping": 60.0,
-    "counterbore": 150.0,
-    "spot": 200.0,
-}
-
-_DEFAULT_IPR = {
-    "tapping": None,
-    "counterbore": 0.005,
-    "spot": 0.004,
-}
-
-
-def _lookup_sfm_ipr(
-    op: str,
-    diameter_in: float | None,
-    material_group: str | None,
-    speeds_csv: dict | None,
-) -> tuple[float, float | None]:
-    # TODO: if you have a loaded CSV mapping, consult it here; fallback below
-    op = (op or "").lower()
-    return _DEFAULT_SFM.get(op, 100.0), _DEFAULT_IPR.get(op, None)
-
-
-def _rpm_from_sfm_diam(sfm: float, dia_in: float | None) -> float | None:
-    if not dia_in or dia_in <= 0:
-        return None
-    return (sfm * 3.82) / float(dia_in)
-
-
-def _ipm_from_rpm_ipr(rpm: float | None, ipr: float | None) -> float | None:
-    if rpm is None or ipr is None:
-        return None
-    return rpm * ipr
-
-
 def _render_removal_card(
     append_line: Callable[[str], None],
     *,
@@ -3086,6 +2981,8 @@ _coerce_overhead_dataclass = _drilling_legacy._coerce_overhead_dataclass
 _drill_overhead_from_params = _drilling_legacy._drill_overhead_from_params
 _machine_params_from_params = _drilling_legacy._machine_params_from_params
 _legacy_estimate_drilling_hours = _drilling_legacy.legacy_estimate_drilling_hours
+_apply_drill_minutes_clamp = _drilling_legacy._apply_drill_minutes_clamp
+_drill_minutes_per_hole_bounds = _drilling_legacy._drill_minutes_per_hole_bounds
 
 _CANONICAL_MIC6_DISPLAY = "Aluminum MIC6"
 _MIC6_NORMALIZED_KEY = _normalize_lookup_key(_CANONICAL_MIC6_DISPLAY)
