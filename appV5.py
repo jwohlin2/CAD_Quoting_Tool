@@ -560,6 +560,7 @@ from cad_quoter.ui.planner_render import (
     _display_bucket_label,
     _display_rate_for_row,
     _hole_table_minutes_from_geo,
+    _rate_key_for_bucket,
     _lookup_bucket_rate,
     _normalize_bucket_key,
     _op_role_for_name,
@@ -9127,6 +9128,10 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                     or geo_context.get("material_group")
                 )
             family_hint = family_hint or material_group_display or material_display
+            if family_hint is not None and not isinstance(family_hint, str):
+                family_hint = str(family_hint)
+            if isinstance(family_hint, str):
+                family_hint = family_hint.strip() or None
             price_candidate = _wieland_scrap_usd_per_lb(family_hint)
             if price_candidate is not None:
                 wieland_scrap_price = float(price_candidate)
@@ -9624,9 +9629,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         drilling_meta_container["material_lookup"] = material_key
         if material_group_display:
             drilling_meta_container["material_group"] = material_group_display
+    drill_debug_lines: list[str] = []
     if not use_planner:
         if hole_diams and thickness_in and drilling_rate > 0:
-            drill_debug_lines: list[str] = []
             drill_debug_summary: dict[str, dict[str, Any]] = {}
             hole_groups_for_estimate: list[dict[str, Any]] | None = None
             if isinstance(geo_payload, _MappingABC):
@@ -10174,7 +10179,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             except Exception:
                 drilling_dbg_entry = None
 
-            _push(lines, f"[DEBUG] drilling_bucket={drilling_dbg_entry or {}}")
+            _push(drill_debug_lines, f"[DEBUG] drilling_bucket={drilling_dbg_entry or {}}")
 
     roughing_hours = _coerce_float_or_none(value_map.get("Roughing Cycle Time"))
     if roughing_hours is None:
@@ -10219,7 +10224,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         except Exception:
             milling_dbg_entry = None
 
-        _push(lines, f"[DEBUG] milling_bucket={milling_dbg_entry or {}}")
+        _push(drill_debug_lines, f"[DEBUG] milling_bucket={milling_dbg_entry or {}}")
 
     project_hours = _coerce_float_or_none(value_map.get("Project Management Hours")) or 0.0
     toolmaker_hours = _coerce_float_or_none(value_map.get("Tool & Die Maker Hours")) or 0.0
@@ -13820,7 +13825,9 @@ class App(tk.Tk):
                     logger.warning("Failed to preload variables from %s", saved_vars_path, exc_info=True)
                 else:
                     if _is_pandas_dataframe(core_df) and _is_pandas_dataframe(full_df):
-                        self._refresh_variables_cache(core_df, full_df)
+                        core_df_t = typing.cast(PandasDataFrame, core_df)
+                        full_df_t = typing.cast(PandasDataFrame, full_df)
+                        self._refresh_variables_cache(core_df_t, full_df_t)
                     else:
                         logger.warning(
                             "Variables preload returned unexpected types: %s, %s",
@@ -14732,7 +14739,7 @@ class App(tk.Tk):
 
         try:
             if self.vars_df is not None:
-                self._populate_editor_tab(self.vars_df)
+                self._populate_editor_tab(typing.cast(PandasDataFrame, self.vars_df))
             else:
                 self._populate_editor_tab(coerce_or_make_vars_df(None))
         except Exception:
