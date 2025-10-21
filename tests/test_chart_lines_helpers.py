@@ -28,11 +28,29 @@ def test_build_ops_rows_from_lines_fallback_extracts_common_ops() -> None:
 
     rows = build_ops_rows_from_lines_fallback(lines)
 
-    assert rows == [
-        {"hole": "", "ref": "", "qty": 2, "desc": '1/4-20 TAP THRU × 0.25" FROM BACK'},
-        {"hole": "", "ref": "", "qty": 3, "desc": '0.7500 C’BORE × 0.25" FROM FRONT'},
-        {"hole": "", "ref": "", "qty": 1, "desc": "3/8 - NPT"},
-    ]
+    assert len(rows) == 3
+
+    tap_row, cbore_row, npt_row = rows
+
+    assert tap_row == {
+        "hole": "",
+        "ref": "",
+        "qty": 2,
+        "desc": '1/4-20 TAP THRU × 0.25" FROM BACK',
+        "t_per_hole_min": 0.085,
+        "feed_fmt": "0.0500 ipr | 917 rpm | 45.840 ipm",
+    }
+
+    assert cbore_row == {
+        "hole": "",
+        "ref": "",
+        "qty": 3,
+        "desc": '0.7500 C’BORE × 0.25" FROM FRONT',
+        "t_per_hole_min": 0.158,
+        "feed_fmt": "0.0050 ipr | 764 rpm | 3.820 ipm",
+    }
+
+    assert npt_row == {"hole": "", "ref": "", "qty": 1, "desc": "3/8 - NPT"}
 
 
 @pytest.mark.parametrize(
