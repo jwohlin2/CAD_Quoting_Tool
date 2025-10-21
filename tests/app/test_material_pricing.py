@@ -229,31 +229,41 @@ def test_plan_stock_blank_uses_configured_tolerance():
 def test_vendor_catalog_prefers_exact_thickness(monkeypatch):
     from cad_quoter.pricing import vendor_csv
 
-    norm = vendor_csv._normalise_material_label("Aluminum MIC6")
     rows = [
         {
-            "material": norm,
-            "thk_in": 3.5,
-            "len_in": 12.0,
-            "wid_in": 24.0,
+            "material": "Aluminum MIC6",
+            "thickness_in": "3.5",
+            "length_in": "12",
+            "width_in": "24",
             "vendor": "McMaster",
-            "part_no": "86825K626",
-            "price_usd": None,
-            "min_charge_usd": None,
+            "part": "86825K626",
         },
         {
-            "material": norm,
-            "thk_in": 2.0,
-            "len_in": 12.0,
-            "wid_in": 24.0,
+            "material": "Aluminum MIC6",
+            "thickness_in": "2",
+            "length_in": "12",
+            "width_in": "24",
             "vendor": "McMaster",
-            "part_no": "86825K954",
-            "price_usd": None,
-            "min_charge_usd": None,
+            "part": "86825K954",
         },
     ]
 
-    monkeypatch.setattr(vendor_csv, "_load_catalog_rows", lambda _path=None: rows)
+    calls: list[float] = []
+
+    def fake_pick(L, W, T, *, material_key, catalog_rows):
+        calls.append(T)
+        assert catalog_rows is rows
+        if pytest.approx(T, abs=1e-6) == pytest.approx(2.0):
+            return {
+                "len_in": 24.0,
+                "wid_in": 12.0,
+                "thk_in": T,
+                "mcmaster_part": "86825K954",
+            }
+        return None
+
+    monkeypatch.setattr(vendor_csv, "load_mcmaster_catalog_rows", lambda _path=None: rows)
+    monkeypatch.setattr(vendor_csv, "pick_mcmaster_plate_sku", fake_pick)
 
     picked = vendor_csv.pick_plate_from_mcmaster(
         "Aluminum MIC6",
@@ -265,6 +275,7 @@ def test_vendor_catalog_prefers_exact_thickness(monkeypatch):
         thickness_tolerance=0.02,
     )
 
+    assert calls, "helper should be consulted"
     assert picked is not None
     assert picked["thk_in"] == pytest.approx(2.0)
     assert picked["part_no"] == "86825K954"

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import re
 from collections import Counter
 from collections.abc import Mapping as _MappingABC, Sequence
 from dataclasses import replace
@@ -25,6 +24,12 @@ from cad_quoter.pricing import time_estimator as _time_estimator
 from cad_quoter.pricing.speeds_feeds_selector import (
     pick_speeds_row as _pick_speeds_row,
     unit_hp_cap as _unit_hp_cap,
+)
+from cad_quoter.speeds_feeds import (
+    coerce_table_to_records as _coerce_table_to_records,
+    material_label_from_records as _material_label_from_records,
+    select_group_rows as _select_group_rows,
+    select_operation_rows as _select_operation_rows,
 )
 from cad_quoter.pricing.time_estimator import (
     MachineParams as _TimeMachineParams,
@@ -74,81 +79,31 @@ DEFAULT_DEEP_DRILL_INDEX_SEC_PER_HOLE = float(
     _DRILLING_COEFFS.get("deep_drill", {}).get("index_sec_per_hole", 4.3038756)
 )
 
-def _coerce_speeds_feeds_records(table: Any | None) -> list[Mapping[str, Any]]:
-    if table is None:
-        return []
-    try:
-        if getattr(table, "empty"):
-            return []
-    except Exception:
-        try:
-            if len(table) == 0:
-                return []
-        except Exception:
-            pass
-    try:
-        records = table.to_dict("records")  # type: ignore[attr-defined]
-    except Exception:
-        records = getattr(table, "_rows", None)
-        if records is None:
-            records = []
-    if not records and isinstance(table, Sequence):
-        records = [row for row in table if isinstance(row, _MappingABC)]  # type: ignore[arg-type]
-    return records
-
-def _record_key_map(record: Mapping[str, Any]) -> dict[str, str]:
-    return {
-        re.sub(r"[^0-9a-z]+", "_", str(key).strip().lower()).strip("_"): key
-        for key in record.keys()
-    }
-
-
 def _material_label_from_table(
     table: Any | None,
     material_key: str | None,
     normalized_lookup: _NormalizedKey,
 ) -> str | None:
-    records = _coerce_speeds_feeds_records(table)
+    records = _coerce_table_to_records(table)
     if not records:
         return None
-    target_group = str(material_key or "").strip().upper()
-    for record in records:
-        key_map = _record_key_map(record)
-        mat_field = next(
-            (key_map[name] for name in ("material", "material_name", "canonical_material") if name in key_map),
-            None,
-        )
-        group_field = next(
-            (key_map[name] for name in ("material_group", "iso_group", "group") if name in key_map),
-            None,
-        )
-        if mat_field is None:
-            continue
-        row_material = record.get(mat_field)
-        if normalized_lookup:
-            if _normalize_lookup_key(str(row_material or "")) == normalized_lookup:
-                label = str(row_material).strip()
-                if label:
-                    return label
-        if group_field and target_group:
-            group_value = record.get(group_field)
-            if group_value and str(group_value).strip().upper() == target_group:
-                label = str(row_material).strip()
-                if label:
-                    return label
-    return None
+    return _material_label_from_records(
+        records,
+        normalized_lookup=normalized_lookup,
+        material_group=material_key,
+    )
 
 
-def _normalize_material_group_code(value: Any) -> str:
-    """Return a canonical material group code (e.g., ``N1`` → ``N``)."""
+_DRILL_OPERATION_ALIASES: Mapping[str, Sequence[str]] = {
+    "drill": ("drill", "drilling"),
+    "deep_drill": (
+        "deep_drill",
+        "deep drilling",
+        "deepdrill",
+        "deep drill",
+    ),
+}
 
-    text = "" if value is None else str(value).strip().upper()
-    if not text:
-        return ""
-    simplified = re.sub(r"[^A-Z0-9]+", "", text)
-    if re.fullmatch(r"[A-Z]\d+", simplified or ""):
-        return simplified[0]
-    return simplified or text
 
 def _select_speeds_feeds_row(
     table: PandasDataFrame | None,
@@ -159,87 +114,33 @@ def _select_speeds_feeds_row(
 ) -> Mapping[str, Any] | None:
     if table is None:
         return None
-    try:
-        if getattr(table, "empty"):
-            return None
-    except Exception:
-        try:
-            if len(table) == 0:
-                return None
-        except Exception:
-            pass
-    op_col = next((col for col in ("operation", "op", "process") if col in table.columns), None)
-    if op_col is None:
-        return None
-    op_raw = str(operation or "").strip().lower()
-    op_target = op_raw.replace("-", "_").replace(" ", "_")
-    op_variants: set[str] = set()
-    if op_target:
-        op_variants.add(op_target)
-        trimmed = op_target.rstrip("_")
-        if trimmed:
-            op_variants.add(trimmed)
-        if op_target.endswith("ing") and len(op_target) > 3:
-            op_variants.add(op_target[:-3])
-        op_variants.add(op_target.replace("_", " "))
-    drill_synonyms = {
-        "drill": {"drill", "drilling"},
-        "deep_drill": {
-            "deep_drill",
-            "deep drilling",
-            "deepdrill",
-            "deep drill",
-        },
-    }
-    for key, synonyms in drill_synonyms.items():
-        key_norm = key.replace("-", "_").replace(" ", "_")
-        if key_norm in op_variants:
-            for syn in synonyms:
-                syn_norm = syn.strip().lower().replace("-", "_").replace(" ", "_")
-                if syn_norm:
-                    op_variants.add(syn_norm)
-    op_variants = {variant for variant in op_variants if variant}
-    try:
-        records = table.to_dict("records")  # type: ignore[attr-defined]
-    except Exception:
-        records = getattr(table, "_rows", None)
-        if records is None:
-            records = []
+    records = _coerce_table_to_records(table)
     if not records:
         return None
 
-    def _normalize(text: Any) -> str:
-        raw = "" if text is None else str(text)
-        return raw.strip().lower().replace("-", "_").replace(" ", "_")
-
-    candidates = [
-        (idx, row, _normalize(row.get(op_col)))
-        for idx, row in enumerate(records)
-    ]
-    matches = [row for _, row, norm in candidates if norm in op_variants]
-    if not matches:
-        matches = [
-            row
-            for _, row, norm in candidates
-            if norm and any(norm.startswith(prefix) for prefix in op_variants)
-        ]
-    if not matches:
+    op_rows = _select_operation_rows(records, operation, aliases=_DRILL_OPERATION_ALIASES)
+    if not op_rows:
         return None
 
+    if material_group:
+        group_rows = _select_group_rows(
+            records,
+            operation,
+            material_group,
+            aliases=_DRILL_OPERATION_ALIASES,
+        )
+        if group_rows:
+            return group_rows[0]
+
     normalized_target = _normalize_lookup_key(material_key)
+    if normalized_target:
+        for row in op_rows:
+            row_key = str(row.get("_norm_material_key") or "")
+            if row_key and row_key == normalized_target:
+                return row
 
-    def _score(row: Mapping[str, Any]) -> tuple[int, int]:
-        group_val = row.get("material_group") or row.get("iso_group")
-        norm_group = _normalize_material_group_code(group_val)
-        norm_target = _normalize_material_group_code(material_group)
-        group_match = 1 if norm_group and norm_group == norm_target and norm_group else 0
-        material_val = row.get("material") or row.get("material_name")
-        norm_material = _normalize_lookup_key(material_val)
-        material_match = 1 if norm_material and norm_material == normalized_target else 0
-        return group_match, material_match
+    return op_rows[0]
 
-    scored = sorted(matches, key=_score, reverse=True)
-    return scored[0]
 
 def _machine_params_from_params(params: Mapping[str, Any] | None) -> _TimeMachineParams:
     rapid = _coerce_float_or_none(params.get("MachineRapidIPM")) if isinstance(params, _MappingABC) else None
