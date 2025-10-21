@@ -10,10 +10,8 @@ from appkit.debug.debug_tables import (
     _jsonify_debug_summary as _debug_jsonify_summary,
     _jsonify_debug_value as _debug_jsonify_value,
 )
-from cad_quoter.domain_models import (
-    coerce_float_or_none as _coerce_float_or_none,
-    parse_mixed_fraction as _parse_mixed_fraction,
-)
+from cad_quoter.domain_models import coerce_float_or_none as _coerce_float_or_none
+from cad_quoter.utils.numeric import parse_mixed_fraction as _parse_mixed_fraction
 from cad_quoter.pricing.feed_math import (
     approach_allowance_for_drill as _approach_allowance_for_drill,
     ipm_from_feed as _ipm_from_feed,
