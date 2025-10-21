@@ -546,7 +546,7 @@ from appkit.ui.planner_render import (
     _prepare_bucket_view,
     _extract_bucket_map,
     _process_label,
-    _seed_bucket_minutes,
+    _seed_bucket_minutes as _planner_seed_bucket_minutes,
     _split_hours_for_bucket,
     _sync_drilling_bucket_view,
     _charged_hours_by_bucket,
@@ -1180,6 +1180,8 @@ def _compute_drilling_removal_section(
             or drilling_meta_map.get("total_minutes")
             or 0.0
         )
+        if drill_minutes_total > 0.0:
+            bill_min = max(float(drill_minutes_total), bill_min)
 
         plan_candidates = [
             updated_plan_summary,
@@ -1202,6 +1204,8 @@ def _compute_drilling_removal_section(
                 break
 
         drill_min = plan_drill_min if plan_drill_min and plan_drill_min > 0.0 else bill_min
+        if drill_minutes_total > 0.0:
+            drill_min = max(drill_min, float(drill_minutes_total))
         bill_min = drill_min
         drill_hr = drill_min / 60.0 if drill_min else 0.0
         if drill_hr > 0.0 and "removal_drilling_hours" not in extras:
@@ -1368,8 +1372,33 @@ def _compute_drilling_removal_section(
         )
         _push(lines, "-" * 66)
 
-        # single source of truth
-        drill_minutes_total = float(drill_minutes_total)  # your computed subtotal minutes
+        # single source of truth for drilling minutes
+        try:
+            drill_minutes_total = float(drill_minutes_total)
+        except Exception:
+            drill_minutes_total = 0.0
+
+        def _seed_bucket_minutes(bucket_name: str, minutes: float) -> None:
+            if not bucket_name:
+                return
+            try:
+                minutes_val = float(minutes)
+            except Exception:
+                return
+            if minutes_val <= 0.0 or not math.isfinite(minutes_val):
+                return
+            keyword = f"{bucket_name}_min"
+            try:
+                _planner_seed_bucket_minutes(
+                    breakdown_mutable,
+                    **{keyword: minutes_val},
+                )
+            except TypeError:
+                entry = buckets_obj.setdefault(
+                    bucket_name,
+                    {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0, "total$": 0.0},
+                )
+                entry["minutes"] = minutes_val
 
         # print the subtotal using that exact value
         _push(
@@ -1378,10 +1407,7 @@ def _compute_drilling_removal_section(
         )
 
         # seed pricing bucket (MINUTES, not hours)
-        _seed_bucket_minutes(
-            breakdown_mutable,
-            drilling_min=drill_minutes_total,
-        )
+        _seed_bucket_minutes("drilling", drill_minutes_total)
         if isinstance(totals_map, _MutableMappingABC):
             try:
                 totals_map["minutes"] = round(
