@@ -15,6 +15,7 @@ Single-file CAD Quoter (v8)
 from __future__ import annotations
 
 import sys
+import typing
 from io import TextIOWrapper
 from pathlib import Path
 
@@ -48,7 +49,7 @@ import logging
 import re
 import time
 from functools import cmp_to_key, lru_cache
-from typing import Any, Mapping, MutableMapping, Sequence, TYPE_CHECKING, TypeAlias
+from typing import Any, Mapping, MutableMapping, Sequence, TYPE_CHECKING, Protocol
 from collections import Counter, defaultdict
 from collections.abc import (
     Callable,
@@ -1824,28 +1825,23 @@ else:
     _QuoteState = QuoteState
 
 if typing.TYPE_CHECKING:
-    import pandas as pd
-    from pandas import DataFrame as PandasDataFrame
-    from pandas import Index as PandasIndex
-    from pandas import Series as PandasSeries
-    from cad_quoter.domain import QuoteState as _QuoteState
-
-    SeriesLike: TypeAlias = Any
+    import pandas as pd  # type: ignore[import-not-found]
+    from pandas import DataFrame as PandasDataFrame  # type: ignore[import-not-found]
+    from pandas import Index as PandasIndex  # type: ignore[import-not-found]
+    from pandas import Series as PandasSeries  # type: ignore[import-not-found]
+    from cad_quoter.geometry import GeometryService as GeometryServiceType
 else:
-    _QuoteState = QuoteState
-    PandasDataFrame: TypeAlias = Any
-    PandasSeries: TypeAlias = Any
-    PandasIndex: TypeAlias = Any
-    SeriesLike: TypeAlias = Any
-
     try:
-        import pandas as pd  # type: ignore[import]
+        import pandas as pd  # type: ignore[import-not-found]
     except Exception:  # pragma: no cover - optional dependency
-        pd = None  # type: ignore[assignment]
-    PandasDataFrame: TypeAlias = Any
-    PandasSeries: TypeAlias = Any
-    PandasIndex: TypeAlias = Any
-    SeriesLike: TypeAlias = Any
+        pd = typing.cast("Any", None)
+
+    PandasDataFrame = typing.Any
+    PandasSeries = typing.Any
+    PandasIndex = typing.Any
+    GeometryServiceType = typing.Any
+
+SeriesLike = typing.Any
 
 
 def _is_pandas_dataframe(obj: Any) -> bool:
@@ -2054,7 +2050,7 @@ try:
     import builtins as _builtins
 
     if getattr(_builtins, "_fail_live_price", None) is None:  # pragma: no cover - test shim
-        _builtins._fail_live_price = _fail_live_price
+        setattr(_builtins, "_fail_live_price", _fail_live_price)
 except Exception:  # pragma: no cover - defensive
     pass
 
@@ -2149,16 +2145,37 @@ BRepCheck_Analyzer = getattr(
 )
 brep_read = getattr(geometry, "brep_read", _missing_geo_helper("brep_read"))
 
+_read_step_or_iges_or_brep_impl = typing.cast(
+    Callable[[str | Path], Any],
+    getattr(
+        geometry,
+        "read_step_or_iges_or_brep",
+        _missing_geo_helper("read_step_or_iges_or_brep"),
+    ),
+)
+_require_ezdxf = typing.cast(
+    Callable[[], Any],
+    getattr(geometry, "require_ezdxf", _missing_geo_helper("require_ezdxf")),
+)
+_convert_dwg_to_dxf = typing.cast(
+    Callable[[str], str],
+    getattr(geometry, "convert_dwg_to_dxf", _missing_geo_helper("convert_dwg_to_dxf")),
+)
+_get_dwg_converter_path = typing.cast(
+    Callable[[], str | None],
+    getattr(geometry, "get_dwg_converter_path", lambda: None),
+)
+
 
 def read_step_or_iges_or_brep(path: str) -> Any:
     """Backwards-compatible shim that forwards to :mod:`cad_quoter.geometry`."""
 
-    return geometry.read_step_or_iges_or_brep(path)
+    return _read_step_or_iges_or_brep_impl(path)
 
 # ---- tiny helpers you can use elsewhere --------------------------------------
 # Optional PDF stack
 try:
-    import fitz  # PyMuPDF
+    import fitz  # type: ignore[import-not-found]  # PyMuPDF
     _HAS_PYMUPDF = True
 except Exception:
     fitz = None  # type: ignore[assignment]
@@ -2167,12 +2184,12 @@ except Exception:
 DIM_RE = re.compile(r"(?:[Øø⌀]|DIAM|DIA)\s*([0-9.+-]+)|R\s*([0-9.+-]+)|([0-9.+-]+)\s*[xX]\s*([0-9.+-]+)")
 
 def load_drawing(path: Path) -> Drawing:
-    ezdxf_mod = typing.cast(_EzdxfModule, geometry.require_ezdxf())
+    ezdxf_mod = typing.cast(_EzdxfModule, _require_ezdxf())
     if path.suffix.lower() == ".dwg":
         # Prefer explicit converter/wrapper if configured (works even if ODA isn't on PATH)
-        exe = geometry.get_dwg_converter_path()
+        exe = _get_dwg_converter_path()
         if exe:
-            dxf_path = geometry.convert_dwg_to_dxf(str(path))
+            dxf_path = _convert_dwg_to_dxf(str(path))
             return ezdxf_mod.readfile(dxf_path)
         # Fallback: odafc (requires ODAFileConverter on PATH)
         if _HAS_ODAFC and odafc is not None:
@@ -10174,7 +10191,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             except Exception:
                 drilling_dbg_entry = None
 
-            _push(lines, f"[DEBUG] drilling_bucket={drilling_dbg_entry or {}}")
+            _debug_lines = locals().get("lines")
+            if isinstance(_debug_lines, list):
+                _push(_debug_lines, f"[DEBUG] drilling_bucket={drilling_dbg_entry or {}}")
 
     roughing_hours = _coerce_float_or_none(value_map.get("Roughing Cycle Time"))
     if roughing_hours is None:
@@ -10219,7 +10238,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         except Exception:
             milling_dbg_entry = None
 
-        _push(lines, f"[DEBUG] milling_bucket={milling_dbg_entry or {}}")
+        _debug_lines = locals().get("lines")
+        if isinstance(_debug_lines, list):
+            _push(_debug_lines, f"[DEBUG] milling_bucket={milling_dbg_entry or {}}")
 
     project_hours = _coerce_float_or_none(value_map.get("Project Management Hours")) or 0.0
     toolmaker_hours = _coerce_float_or_none(value_map.get("Tool & Die Maker Hours")) or 0.0
@@ -10562,6 +10583,8 @@ def coerce_or_make_vars_df(df: PandasDataFrame | None) -> PandasDataFrame:
 
     import re
 
+    df = typing.cast(Any, df)
+
     def _norm_col(s: str) -> str:
         s = str(s).replace("\u00A0", " ")
         s = re.sub(r"\s+", " ", s).strip().lower()
@@ -10574,16 +10597,33 @@ def coerce_or_make_vars_df(df: PandasDataFrame | None) -> PandasDataFrame:
     }
 
     rename: dict[str, str] = {}
-    for col in list(df.columns):
+    columns_attr = getattr(df, "columns", None)
+    if columns_attr is None:
+        raise AttributeError("DataFrame-like object must expose a 'columns' attribute")
+
+    for col in list(columns_attr):
         key = _norm_col(col)
         if key in canon_map:
             rename[col] = canon_map[key]
+
     if rename:
-        df = df.rename(columns=rename)
+        rename_fn = getattr(df, "rename", None)
+        if callable(rename_fn):
+            renamed = rename_fn(columns=rename)
+            if renamed is not None:
+                df = typing.cast(Any, renamed)
+            columns_attr = getattr(df, "columns", columns_attr)
+
+    if df is None:
+        raise TypeError("DataFrame normalization returned None")
+
+    if not hasattr(df, "__setitem__"):
+        raise TypeError("DataFrame-like object must support item assignment")
 
     for col in REQUIRED_COLS:
-        if col not in df.columns:
+        if col not in columns_attr:
             df[col] = ""
+            columns_attr = getattr(df, "columns", columns_attr)
 
     return df
 
@@ -13663,7 +13703,7 @@ class App(tk.Tk):
         geometry_loader: GeometryLoader | None = None,
         pricing_registry: PricingRegistry | None = None,
         llm_services: LLMServices | None = None,
-        geometry_service: geometry.GeometryService | None = None,
+        geometry_service: GeometryServiceType | None = None,
     ):
 
         _ensure_tk()
@@ -13684,10 +13724,12 @@ class App(tk.Tk):
         self.geometry_loader = geometry_loader or GeometryLoader(
             extract_pdf_vector_fn=extract_2d_features_from_pdf_vector,
             extract_dxf_or_dwg_fn=extract_2d_features_from_dxf_or_dwg,
-            occ_feature_fn=geometry.extract_features_with_occ,
+            occ_feature_fn=typing.cast(
+                Callable[[str | Path], Any], geometry.extract_features_with_occ
+            ),
             stl_enricher=geometry.enrich_geo_stl,
-            step_reader=geometry.read_step_shape,
-            cad_reader=geometry.read_cad_any,
+            step_reader=typing.cast(Callable[[str | Path], Any], geometry.read_step_shape),
+            cad_reader=typing.cast(Callable[[str | Path], Any], geometry.read_cad_any),
             bbox_fn=geometry.safe_bbox,
             occ_enricher=geometry.enrich_geo_occ,
         )
