@@ -14,7 +14,27 @@ Single-file CAD Quoter (v8)
 
 from __future__ import annotations
 
-import sys
+import os, sys, logging
+
+LOG_LEVEL = os.getenv("APP_LOG_LEVEL", "DEBUG").upper()
+logging.basicConfig(
+    stream=sys.stdout,
+    level=getattr(logging, LOG_LEVEL, logging.DEBUG),
+    format="[%(levelname)s] %(message)s",
+)
+
+
+def dbg(lines, msg: str):
+    """Log to terminal, and also mirror into the quote if `lines` is provided."""
+
+    logging.debug(msg)
+    try:
+        if lines is not None:
+            lines.append(f"[DEBUG] {msg}")
+    except Exception:
+        pass
+
+
 import typing
 from io import TextIOWrapper
 from pathlib import Path
@@ -44,8 +64,6 @@ import copy
 import csv
 import json
 import math
-import os
-import logging
 import re
 import time
 from functools import cmp_to_key, lru_cache
@@ -345,6 +363,9 @@ def _seed_bucket_minutes_cost(
 
 
 def _normalize_buckets(bucket_view_obj: MutableMapping[str, Any] | Mapping[str, Any] | None) -> None:
+    if not isinstance(bucket_view_obj, (_MutableMappingABC, dict)):
+        return
+
     alias = {
         "programming_amortized": "programming",
         "spotdrill": "spot_drill",
@@ -353,21 +374,27 @@ def _normalize_buckets(bucket_view_obj: MutableMapping[str, Any] | Mapping[str, 
         "jig-grind": "jig_grind",
     }
 
-    if not isinstance(bucket_view_obj, (_MutableMappingABC, dict)):
-        return
-
     try:
         buckets_obj = bucket_view_obj.get("buckets")
     except Exception:
         buckets_obj = None
 
-    buckets_map = buckets_obj if isinstance(buckets_obj, _MappingABC) else {}
-    norm: dict[str, dict[str, float]] = {}
+    if isinstance(buckets_obj, dict):
+        source_items = buckets_obj.items()
+    elif isinstance(buckets_obj, _MappingABC):
+        source_items = buckets_obj.items()
+    else:
+        source_items = ()
 
-    for raw_key, entry in buckets_map.items():
-        if not isinstance(entry, _MappingABC):
+    norm: dict[str, dict[str, float]] = {}
+    for raw_key, entry in source_items:
+        try:
+            key = str(raw_key or "")
+        except Exception:
+            key = ""
+        if not key or not isinstance(entry, _MappingABC):
             continue
-        nk = alias.get(raw_key, raw_key)
+        nk = alias.get(key, key)
         dst = norm.setdefault(
             nk,
             {"minutes": 0.0, "machine$": 0.0, "labor$": 0.0, "total$": 0.0},
@@ -382,12 +409,10 @@ def _normalize_buckets(bucket_view_obj: MutableMapping[str, Any] | Mapping[str, 
 
 def _as_float(x: Any, default: float = 0.0) -> float:
     try:
-        value = float(x)
-        if math.isfinite(value):
-            return value
+        v = float(x)
+        return v if math.isfinite(v) else default
     except Exception:
-        pass
-    return default
+        return default
 
 
 def _clamp_minutes(v: Any, lo: float = 0.0, hi: float = 10000.0) -> float:
@@ -1296,20 +1321,21 @@ def _compute_drilling_removal_section(
             )
             if subtotal_minutes_val is None:
                 subtotal_minutes_val = subtotal_minutes
-            subtotal_minutes_val = float(subtotal_minutes_val or 0.0)
+            drill_minutes_subtotal = float(subtotal_minutes_val or 0.0)
             total_minutes_val = (
                 _coerce_float_or_none(dtph_map.get("total_minutes_with_toolchange"))
                 or _coerce_float_or_none(dtph_map.get("total_minutes"))
             )
             if total_minutes_val is None:
-                total_minutes_val = subtotal_minutes_val + total_tool_minutes
+                total_minutes_val = drill_minutes_subtotal + total_tool_minutes
             total_minutes_val = float(total_minutes_val or 0.0)
 
             drill_minutes_total = float(total_minutes_val or 0.0)
             _push(lines, f"[DEBUG] drilling_minutes_total={drill_minutes_total:.2f} min")
             _push(
                 lines,
-                f"Subtotal (per-hole × qty) . {drill_minutes_total:.2f} min",
+                f"Subtotal (per-hole × qty) . {drill_minutes_subtotal:.2f} min  ("
+                f"{fmt_hours(minutes_to_hours(drill_minutes_subtotal))})",
             )
             _push(
                 lines,
@@ -1317,15 +1343,21 @@ def _compute_drilling_removal_section(
             )
             lines.append("")
 
-            extras["drill_machine_minutes"] = float(subtotal_minutes_val)
+            extras["drill_machine_minutes"] = float(drill_minutes_subtotal)
             extras["drill_labor_minutes"] = float(total_tool_minutes)
-            extras["drill_total_minutes"] = float(drill_minutes_total)
-            extras["removal_drilling_minutes_subtotal"] = float(subtotal_minutes_val)
+            extras["drill_total_minutes"] = round(drill_minutes_subtotal, 2)
+            extras["removal_drilling_minutes_subtotal"] = float(drill_minutes_subtotal)
             extras["removal_drilling_minutes"] = float(drill_minutes_total)
             if drill_minutes_total > 0.0:
                 extras["removal_drilling_hours"] = minutes_to_hours(drill_minutes_total)
 
+            meta_min = (((process_plan_summary or {}).get("drilling") or {}).get("total_minutes_billed"))
+            removal_min = (extras or {}).get("drill_total_minutes", 0.0)
             drill_minutes_total = _pick_drill_minutes(process_plan_summary, extras, lines)
+            meta_val = _safe_float(meta_min, 0.0)
+            removal_val = _safe_float(removal_min, 0.0)
+            chosen_val = _safe_float(drill_minutes_total, 0.0)
+            dbg(lines, f"drill_minutes_pick meta={meta_val:.2f} removal={removal_val:.2f} -> {chosen_val:.2f}")
             drill_mrate = (
                 _lookup_bucket_rate("drilling", rates)
                 or _lookup_bucket_rate("machine", rates)
@@ -1344,6 +1376,11 @@ def _compute_drilling_removal_section(
                 machine_rate_per_hr=drill_mrate,
                 labor_rate_per_hr=drill_lrate,
             )
+
+            drilling_bucket = None
+            if isinstance(bucket_view_obj, (_MappingABC, dict)):
+                drilling_bucket = (bucket_view_obj.get("buckets") or {}).get("drilling")
+            dbg(lines, f"drilling_bucket={drilling_bucket}")
 
             milling_hours_candidates: list[Any] = []
             if isinstance(drilling_card_detail, _MappingABC):
@@ -1396,6 +1433,11 @@ def _compute_drilling_removal_section(
 
             _normalize_buckets(bucket_view_obj)
 
+            buckets_final: Mapping[str, Any] | None = None
+            if isinstance(bucket_view_obj, (_MappingABC, dict)):
+                buckets_final = bucket_view_obj.get("buckets")
+            dbg(lines, f"buckets_final={buckets_final or {}}")
+
             drilling_dbg_entry: Mapping[str, Any] | None = None
             milling_dbg_entry: Mapping[str, Any] | None = None
             if isinstance(bucket_view_obj, _MappingABC):
@@ -1411,8 +1453,8 @@ def _compute_drilling_removal_section(
                 drilling_dbg_entry = {}
             if not isinstance(milling_dbg_entry, _MappingABC):
                 milling_dbg_entry = {}
-            _push(lines, f"[DEBUG] drilling_bucket={drilling_dbg_entry}")
-            _push(lines, f"[DEBUG] milling_bucket={milling_dbg_entry}")
+            dbg(lines, f"drilling_bucket={drilling_dbg_entry}")
+            dbg(lines, f"milling_bucket={milling_dbg_entry}")
 
             return extras, lines, updated_plan_summary
 
@@ -3555,26 +3597,25 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         append_line(_render_kv_line(label, right, indent))
 
     def _render_process_and_hours_from_buckets(
-        lines: list[str],
-        bucket_view_obj: Mapping[str, Any] | None,
-    ) -> tuple[float, float]:
-        """Render the Process & Labor + Labor Hour tables from planner buckets."""
-
-        buckets: dict[str, Mapping[str, Any]] = {}
-        if isinstance(bucket_view_obj, (_MappingABC, dict)):
+        lines: list[str], bucket_view_obj: Mapping[str, Any] | None
+    ) -> None:
+        try:
+            buckets_candidate = (
+                bucket_view_obj.get("buckets") if bucket_view_obj else None
+            )
+        except Exception:
+            buckets_candidate = None
+        if isinstance(buckets_candidate, dict):
+            buckets = buckets_candidate
+        elif isinstance(buckets_candidate, _MappingABC):
             try:
-                buckets_candidate = bucket_view_obj.get("buckets")
+                buckets = dict(buckets_candidate)
             except Exception:
-                buckets_candidate = None
-            if isinstance(buckets_candidate, dict):
-                buckets = buckets_candidate
-            elif isinstance(buckets_candidate, _MappingABC):
-                try:
-                    buckets = dict(buckets_candidate)
-                except Exception:
-                    buckets = {}
+                buckets = {}
+        else:
+            buckets = {}
 
-        labels = {
+        label = {
             "programming": "Programming (amortized)",
             "milling": "Milling",
             "drilling": "Drilling",
@@ -3584,7 +3625,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             "jig_grind": "Jig-Grind",
             "inspection": "Inspection",
         }
-        preferred_order = [
+        order = [
             "programming",
             "milling",
             "drilling",
@@ -3595,47 +3636,39 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             "inspection",
         ]
 
-        ordered_keys = preferred_order + [
-            key for key in buckets.keys() if key not in preferred_order
-        ]
-
-        _push(lines, "Process & Labor Costs")
-        _push(lines, "-" * 74)
+        lines.append("Process & Labor Costs")
+        lines.append("-" * 74)
         total_cost = 0.0
         seen: set[str] = set()
-        for key in ordered_keys:
-            if key in seen:
+        for k in list(order) + [k for k in buckets if k not in order]:
+            e = buckets.get(k)
+            if not isinstance(e, _MappingABC) or k in seen:
                 continue
-            entry = buckets.get(key)
-            if not isinstance(entry, _MappingABC):
-                continue
-            seen.add(key)
-            total_amount = _as_float(entry.get("total$"), 0.0)
-            total_cost += total_amount
-            display_label = labels.get(key, key)
-            _push(lines, f"  {display_label.ljust(28)}${total_amount:>10,.2f}")
-        _push(lines, " " * 66 + "-------")
-        _push(lines, f"  Total{' ' * 58}${total_cost:>10,.2f}")
-        _push(lines, "")
+            seen.add(k)
+            tot = _as_float(e.get("total$"), 0.0)
+            total_cost += tot
+            lines.append(f"  {label.get(k, k).ljust(28)}${tot:>10,.2f}")
+        lines.append(" " * 66 + "-------")
+        lines.append(f"  Total{' '*58}${total_cost:>10,.2f}")
+        lines.append("")
 
-        _push(lines, "Labor Hour Summary")
-        _push(lines, "-" * 74)
+        lines.append("Labor Hour Summary")
+        lines.append("-" * 74)
         total_hours = 0.0
-        for key in ordered_keys:
-            entry = buckets.get(key)
-            if not isinstance(entry, _MappingABC):
+        seen.clear()
+        for k in list(order) + [k for k in buckets if k not in order]:
+            e = buckets.get(k)
+            if not isinstance(e, _MappingABC) or k in seen:
                 continue
-            hours_val = _minutes_to_hours(entry.get("minutes", 0.0))
-            if hours_val <= 0:
+            seen.add(k)
+            hrs = _minutes_to_hours(e.get("minutes", 0.0))
+            if hrs <= 0:
                 continue
-            display_label = labels.get(key, key)
-            _push(lines, f"  {display_label.ljust(28)}{hours_val:.2f} hr")
-            total_hours += hours_val
-        _push(lines, " " * 66 + "-------")
-        _push(lines, f"  Total Hours{' ' * 49}{total_hours:.2f} hr")
-        _push(lines, "")
-
-        return total_cost, total_hours
+            lines.append(f"  {label.get(k, k).ljust(28)}{hrs:.2f} hr")
+            total_hours += hrs
+        lines.append(" " * 66 + "-------")
+        lines.append(f"  Total Hours{' '*49}{total_hours:.2f} hr")
+        lines.append("")
 
     def _is_extra_segment(segment: str) -> bool:
         try:
@@ -7015,7 +7048,50 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         _normalize_buckets(typing.cast(MutableMapping[str, Any], bucket_view_struct))
 
     process_section_start = len(lines)
-    proc_total_rendered, hrs_total_rendered = _render_process_and_hours_from_buckets(
+
+    bucket_entries_for_totals: Mapping[str, Any] | None = None
+    if isinstance(bucket_view_for_render, (_MappingABC, dict)):
+        try:
+            bucket_entries_candidate = bucket_view_for_render.get("buckets")
+        except Exception:
+            bucket_entries_candidate = None
+        if isinstance(bucket_entries_candidate, dict):
+            bucket_entries_for_totals = bucket_entries_candidate
+        elif isinstance(bucket_entries_candidate, _MappingABC):
+            try:
+                bucket_entries_for_totals = dict(bucket_entries_candidate)
+            except Exception:
+                bucket_entries_for_totals = {}
+    if bucket_entries_for_totals is None:
+        bucket_entries_for_totals = {}
+
+    preferred_bucket_order = [
+        "programming",
+        "milling",
+        "drilling",
+        "tapping",
+        "counterbore",
+        "spot_drill",
+        "jig_grind",
+        "inspection",
+    ]
+
+    proc_total_rendered = 0.0
+    hrs_total_rendered = 0.0
+    seen_bucket_keys: set[str] = set()
+    for bucket_key in list(preferred_bucket_order) + [
+        key for key in bucket_entries_for_totals if key not in preferred_bucket_order
+    ]:
+        entry = bucket_entries_for_totals.get(bucket_key)
+        if not isinstance(entry, _MappingABC) or bucket_key in seen_bucket_keys:
+            continue
+        seen_bucket_keys.add(bucket_key)
+        proc_total_rendered += _as_float(entry.get("total$"), 0.0)
+        hours_val = _minutes_to_hours(entry.get("minutes", 0.0))
+        if hours_val > 0:
+            hrs_total_rendered += hours_val
+
+    _render_process_and_hours_from_buckets(
         lines,
         bucket_view_for_render,
     )
@@ -10387,11 +10463,17 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 debug_lines if isinstance(debug_lines, list) else None
             )
 
+            meta_min = (((process_plan_summary or {}).get("drilling") or {}).get("total_minutes_billed"))
+            removal_min = (extra_map or {}).get("drill_total_minutes", 0.0)
             drill_minutes_total = _pick_drill_minutes(
                 process_plan_summary,
                 extra_map,
                 debug_lines_list,
             )
+            meta_val = _safe_float(meta_min, 0.0)
+            removal_val = _safe_float(removal_min, 0.0)
+            chosen_val = _safe_float(drill_minutes_total, 0.0)
+            dbg(debug_lines_list, f"drill_minutes_pick meta={meta_val:.2f} removal={removal_val:.2f} -> {chosen_val:.2f}")
             drill_mrate = (
                 _lookup_bucket_rate("drilling", rates)
                 or _lookup_bucket_rate("machine", rates)
@@ -10411,7 +10493,17 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 labor_rate_per_hr=drill_lrate,
             )
 
+            drilling_bucket = None
+            if isinstance(bucket_view, (_MappingABC, dict)):
+                drilling_bucket = (bucket_view.get("buckets") or {}).get("drilling")
+            dbg(debug_lines_list, f"drilling_bucket={drilling_bucket}")
+
             _normalize_buckets(bucket_view)
+
+            buckets_final: Mapping[str, Any] | None = None
+            if isinstance(bucket_view, (_MappingABC, dict)):
+                buckets_final = bucket_view.get("buckets")
+            dbg(debug_lines_list, f"buckets_final={buckets_final or {}}")
 
             drilling_dbg_entry: Mapping[str, Any] | None = None
             try:
@@ -10428,7 +10520,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 locals().get("lines") if "lines" in locals() else None,
             )
             if debug_lines is not None:
-                _push(debug_lines, f"[DEBUG] drilling_bucket={drilling_dbg_entry or {}}")
+                dbg(debug_lines, f"drilling_bucket={drilling_dbg_entry or {}}")
 
     roughing_hours = _coerce_float_or_none(value_map.get("Roughing Cycle Time"))
     if roughing_hours is None:
