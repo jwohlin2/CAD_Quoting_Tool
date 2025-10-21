@@ -12,6 +12,14 @@ from pathlib import Path
 from typing import Any
 
 from cad_quoter.domain_models import MATERIAL_DISPLAY_BY_KEY
+from cad_quoter.speeds_feeds import (
+    coerce_table_to_records,
+    normalize_operation as _normalize_operation,
+    normalize_records as _normalize_records,
+    select_group_rows,
+    select_material_rows,
+    select_operation_rows,
+)
 
 __all__ = [
     "load_csv_as_records",
@@ -76,20 +84,6 @@ def load_csv_as_records(path: str) -> list[dict[str, Any]]:
     return records
 
 
-def _normalise_rows(rows: Iterable[Mapping[str, Any]]) -> tuple[dict[str, Any], ...]:
-    normalised: list[dict[str, Any]] = []
-    for row in rows:
-        clean = {k: (v.strip() if isinstance(v, str) else v) for k, v in dict(row).items()}
-        op = str(clean.get("operation", "")).strip().lower().replace("-", "_")
-        if not op:
-            continue
-        clean["_norm_operation"] = op
-        clean["_norm_material"] = str(clean.get("material", "")).strip().lower()
-        clean["_iso_group"] = str(clean.get("material_group", "")).strip().upper()
-        normalised.append(clean)
-    return tuple(normalised)
-
-
 @lru_cache(maxsize=1)
 def _load_material_map() -> tuple[dict[str, Any], ...]:
     records = load_csv_as_records("material_map.csv")
@@ -107,28 +101,15 @@ def _load_material_map() -> tuple[dict[str, Any], ...]:
 @lru_cache(maxsize=1)
 def _load_speeds_table() -> tuple[dict[str, Any], ...]:
     records = load_csv_as_records("speeds_feeds_merged.csv")
-    return _normalise_rows(records)
+    return _normalize_records(records)
 
 
 def _coerce_records(table: Any | None) -> tuple[dict[str, Any], ...]:
     if table is None:
         return _load_speeds_table()
-    if hasattr(table, "to_dict"):
-        try:
-            records = table.to_dict("records")  # type: ignore[attr-defined]
-        except Exception:
-            records = None
-        if isinstance(records, list):
-            return _normalise_rows(records)
-    stub_rows = getattr(table, "_rows", None)
-    if isinstance(stub_rows, list) and stub_rows:
-        return _normalise_rows(stub_rows)
-    if isinstance(table, Sequence):
-        rows: list[Mapping[str, Any]] = [row for row in table if isinstance(row, Mapping)]  # type: ignore[arg-type]
-        if rows:
-            return _normalise_rows(rows)
-    if isinstance(table, Mapping):
-        return _normalise_rows([table])
+    records = coerce_table_to_records(table)
+    if records:
+        return records
     return _load_speeds_table()
 
 
@@ -186,45 +167,6 @@ def material_group_for_speeds_feeds(material_key: str | None) -> str | None:
             return group
 
     return None
-
-
-def _norm_operation(operation: str | None) -> str:
-    return str(operation or "").strip().lower().replace("-", "_")
-
-
-def _select_op_rows(records: Sequence[dict[str, Any]], operation: str) -> list[dict[str, Any]]:
-    target = _norm_operation(operation)
-    return [row for row in records if row.get("_norm_operation") == target]
-
-
-def _select_material_rows(
-    records: Sequence[dict[str, Any]],
-    operation: str,
-    material: str | None,
-) -> list[dict[str, Any]]:
-    if not material:
-        return []
-    target = material.strip().lower()
-    return [
-        row
-        for row in _select_op_rows(records, operation)
-        if row.get("_norm_material") == target
-    ]
-
-
-def _select_group_rows(
-    records: Sequence[dict[str, Any]],
-    operation: str,
-    group: str | None,
-) -> list[dict[str, Any]]:
-    if not group:
-        return []
-    target = group.strip().upper()
-    return [
-        row
-        for row in _select_op_rows(records, operation)
-        if row.get("_iso_group") == target
-    ]
 
 
 def pick_speeds_row(
@@ -392,7 +334,7 @@ def pick_speeds_row(
             group_key = str(group or "").strip().upper()
             if not group_key:
                 continue
-            rows = _select_group_rows(records, operation, group_key)
+            rows = select_group_rows(records, operation, group_key)
             if rows:
                 ordered = _order_by_diameter(rows)
                 if ordered:
@@ -407,19 +349,19 @@ def pick_speeds_row(
 
     selected: dict[str, Any] | None = None
     if iso:
-        group_rows = _select_group_rows(records, operation, iso)
+        group_rows = select_group_rows(records, operation, iso)
         if group_rows:
             ordered = _order_by_diameter(group_rows)
             if ordered:
                 selected = ordered[0]
     if selected is None:
-        exact = _select_material_rows(records, operation, canonical)
+        exact = select_material_rows(records, operation, canonical)
         if exact:
             ordered = _order_by_diameter(exact)
             if ordered:
                 selected = ordered[0]
     if selected is None:
-        op_rows = _select_op_rows(records, operation)
+        op_rows = select_operation_rows(records, operation)
         if op_rows:
             ordered = _order_by_diameter(op_rows)
             selected = ordered[0]
@@ -427,8 +369,8 @@ def pick_speeds_row(
                 "Using generic speeds/feeds row", extra={"operation": operation, "material": canonical}
             )
 
-    if selected is not None and restricted_material and not _norm_operation(operation).startswith("wire_edm"):
-        generic_rows = _select_op_rows(records, operation)
+    if selected is not None and restricted_material and not _normalize_operation(operation).startswith("wire_edm"):
+        generic_rows = select_operation_rows(records, operation)
         if generic_rows:
             selected = generic_rows[0]
         log.warning(
