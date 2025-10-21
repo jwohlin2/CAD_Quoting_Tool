@@ -12,6 +12,7 @@ from cad_quoter.domain_models import (
     coerce_float_or_none as _coerce_float_or_none,
     normalize_material_key as _normalize_lookup_key,
 )
+from cad_quoter.llm_overrides import _plate_mass_properties
 
 SCRAP_DEFAULT_GUESS = 0.15
 HOLE_SCRAP_MULT = 1.0  # tune 0.5–1.5 if you want holes to “count” more/less
@@ -84,19 +85,32 @@ def _holes_removed_mass_g(geo: Mapping[str, Any] | None) -> float | None:
     if density_g_cc is None or density_g_cc <= 0:
         return None
 
-    removed_volume_cm3 = 0.0
-    for d_mm in hole_diams_mm:
-        d = _coerce_positive_float(d_mm)
-        if not d:
-            continue
-        area_mm2 = math.pi * (float(d) / 2.0) ** 2
-        volume_mm3 = area_mm2 * float(t_in) * 25.4
-        removed_volume_cm3 += volume_mm3 * 0.001
+    plate_len_in = _coerce_float_or_none(geo.get("plate_len_in"))
+    plate_wid_in = _coerce_float_or_none(geo.get("plate_wid_in"))
+    if plate_len_in is None:
+        plate_len_mm = _coerce_positive_float(geo.get("plate_len_mm"))
+        if plate_len_mm is not None:
+            plate_len_in = float(plate_len_mm) / 25.4
+    if plate_wid_in is None:
+        plate_wid_mm = _coerce_positive_float(geo.get("plate_wid_mm"))
+        if plate_wid_mm is not None:
+            plate_wid_in = float(plate_wid_mm) / 25.4
 
-    if removed_volume_cm3 <= 0:
+    length_in = plate_len_in if plate_len_in and plate_len_in > 0 else 1.0
+    width_in = plate_wid_in if plate_wid_in and plate_wid_in > 0 else 1.0
+
+    _, removed_mass_g = _plate_mass_properties(
+        length_in,
+        width_in,
+        t_in,
+        density_g_cc,
+        hole_diams_mm,
+    )
+
+    if removed_mass_g is None or removed_mass_g <= 0:
         return None
 
-    return removed_volume_cm3 * float(density_g_cc)
+    return removed_mass_g
 
 
 def build_drill_groups_from_geometry(
