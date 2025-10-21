@@ -117,6 +117,10 @@ from cad_quoter.resources import (
     default_app_settings_json,
     default_master_variables_csv,
 )
+from cad_quoter.io.csv_utils import (
+    read_csv_as_dicts as _read_csv_as_dicts,
+    sniff_delimiter as _sniff_csv_delimiter,
+)
 from cad_quoter.config import (
     AppEnvironment,
     ConfigError,
@@ -2310,49 +2314,29 @@ def read_variables_file(
         sheet_name = "Variables" if "Variables" in xl.sheet_names else xl.sheet_names[0]
         df_full = pd.read_excel(path, sheet_name=sheet_name)
     elif lp.endswith(".csv"):
-        delimiter = ","
+        encoding = "utf-8-sig"
         try:
-            with open(path, encoding="utf-8-sig") as sniff:
+            with open(path, encoding=encoding) as sniff:
                 header_line = sniff.readline()
-            if "\t" in header_line:
-                delimiter = "\t"
         except Exception:
-            delimiter = ","
+            header_line = ""
+        delimiter = _sniff_csv_delimiter(header_line)
 
-        read_csv_kwargs: dict[str, Any] = {"encoding": "utf-8-sig"}
+        read_csv_kwargs: dict[str, Any] = {"encoding": encoding}
         if delimiter == "\t":
             read_csv_kwargs["sep"] = "\t"
 
         try:
             df_full = pd.read_csv(path, **read_csv_kwargs)
         except Exception as csv_err:
-            # When pandas' default engine hits irregular commas (extra columns
-            # from free-form notes, etc.) fall back to a more forgiving parser
-            # that collapses spill-over cells into the final column so that the
-            # sheet still loads for the estimator instead of forcing users back
-            # through the file picker.
-            import csv as _csv
-
-            csv_delimiter = "\t" if delimiter == "\t" else ","
-
-            with open(path, encoding="utf-8-sig", newline="") as f:
-                rows = list(_csv.reader(f, delimiter=csv_delimiter))
-
-            if not rows:
+            try:
+                normalized_dicts = _read_csv_as_dicts(
+                    path,
+                    encoding=encoding,
+                    delimiter=delimiter,
+                )
+            except Exception:
                 raise csv_err
-
-            header = rows[0]
-            if not header:
-                raise csv_err
-            normalized_dicts: list[dict[str, str]] = []
-            for row in rows[1:]:
-                if len(row) > len(header):
-                    keep = len(header) - 1
-                    merged_tail = csv_delimiter.join(row[keep:]) if keep >= 0 else ""
-                    row = row[:keep] + [merged_tail]
-                elif len(row) < len(header):
-                    row = row + [""] * (len(header) - len(row))
-                normalized_dicts.append(dict(zip(header, row)))
 
             try:
                 df_full = pd.DataFrame(normalized_dicts)
