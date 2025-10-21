@@ -453,6 +453,7 @@ from cad_quoter.geometry.dxf_enrich import (
 from cad_quoter.pricing.process_buckets import BUCKET_ROLE, PROCESS_BUCKETS, bucketize
 
 import cad_quoter.geometry as geometry
+from cad_quoter.geometry import upsert_var_row as geometry_upsert_var_row
 
 
 
@@ -14188,7 +14189,7 @@ class App(tk.Tk):
             mask = dataframe["Item"].astype(str).str.fullmatch(item, case=False)
             if mask.any():
                 return dataframe
-            return geometry.upsert_var_row(dataframe, item, value, dtype=dtype)
+            return geometry_upsert_var_row(dataframe, item, value, dtype=dtype)
 
         df = _ensure_row(df, "Scrap Percent (%)", 15.0, dtype="number")
         df = _ensure_row(df, "Plate Length (in)", 12.0, dtype="number")
@@ -14219,7 +14220,11 @@ class App(tk.Tk):
         normalized_items = items_series.apply(normalize_item_text)
         qty_mask = normalized_items.isin({"quantity", "qty", "lot size"})
         if qty_mask.any():
-            qty_raw = df.loc[qty_mask, "Example Values / Options"].iloc[0]
+            qty_column = typing.cast(
+                PandasSeries,
+                df.loc[qty_mask, "Example Values / Options"],
+            )
+            qty_raw = qty_column.iloc[0]
             try:
                 qty_value = float(str(qty_raw).strip())
             except Exception:
@@ -15105,7 +15110,7 @@ class App(tk.Tk):
         # Merge GEO rows
         try:
             for k, v in geo.items():
-                self.vars_df = geometry.upsert_var_row(self.vars_df, k, v, dtype="number")
+                self.vars_df = geometry_upsert_var_row(self.vars_df, k, v, dtype="number")
         except Exception as e:
             messagebox.showerror("Variables", f"Failed to update variables with GEO rows:\n{e}")
             self.status_var.set("Ready")
