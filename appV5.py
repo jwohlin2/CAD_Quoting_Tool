@@ -1296,21 +1296,21 @@ def _compute_drilling_removal_section(
             )
             if subtotal_minutes_val is None:
                 subtotal_minutes_val = subtotal_minutes
-            subtotal_minutes_val = float(subtotal_minutes_val or 0.0)
+            drill_minutes_subtotal = float(subtotal_minutes_val or 0.0)
             total_minutes_val = (
                 _coerce_float_or_none(dtph_map.get("total_minutes_with_toolchange"))
                 or _coerce_float_or_none(dtph_map.get("total_minutes"))
             )
             if total_minutes_val is None:
-                total_minutes_val = subtotal_minutes_val + total_tool_minutes
+                total_minutes_val = drill_minutes_subtotal + total_tool_minutes
             total_minutes_val = float(total_minutes_val or 0.0)
 
             drill_minutes_total = float(total_minutes_val or 0.0)
             _push(lines, f"[DEBUG] drilling_minutes_total={drill_minutes_total:.2f} min")
             _push(
                 lines,
-                f"Subtotal (per-hole × qty) . {drill_minutes_total:.2f} min  ("
-                f"{fmt_hours(minutes_to_hours(drill_minutes_total))})",
+                f"Subtotal (per-hole × qty) . {drill_minutes_subtotal:.2f} min  ("
+                f"{fmt_hours(minutes_to_hours(drill_minutes_subtotal))})",
             )
             _push(
                 lines,
@@ -1319,10 +1319,10 @@ def _compute_drilling_removal_section(
             )
             lines.append("")
 
-            extras["drill_machine_minutes"] = float(subtotal_minutes_val)
+            extras["drill_machine_minutes"] = float(drill_minutes_subtotal)
             extras["drill_labor_minutes"] = float(total_tool_minutes)
-            extras["drill_total_minutes"] = float(drill_minutes_total)
-            extras["removal_drilling_minutes_subtotal"] = float(subtotal_minutes_val)
+            extras["drill_total_minutes"] = round(drill_minutes_subtotal, 2)
+            extras["removal_drilling_minutes_subtotal"] = float(drill_minutes_subtotal)
             extras["removal_drilling_minutes"] = float(drill_minutes_total)
             if drill_minutes_total > 0.0:
                 extras["removal_drilling_hours"] = minutes_to_hours(drill_minutes_total)
