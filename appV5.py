@@ -42,6 +42,11 @@ from types import SimpleNamespace
 from cad_quoter.app._value_utils import (
     _format_value,
 )
+from cad_quoter.app.chart_lines import (
+    build_ops_rows_from_lines_fallback as _build_ops_rows_from_lines_fallback,
+    collect_chart_lines_context as _collect_chart_lines_context,
+    norm_line as _norm_line,
+)
 from cad_quoter.app.container import (
     ServiceContainer,
     SupportsPricingEngine,
@@ -17565,27 +17570,6 @@ RE_DIA    = re.compile(r"[Ø⌀\u00D8]?\s*(\d+(?:\.\d+)?)", re.I)
 RE_THICK  = _RE_DEPTH_OR_THICK
 
 
-def _norm_line(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "")).strip()
-
-
-_RE_QTY_LEAD = re.compile(r"^\s*\((\d+)\)\s*")
-_RE_FROM_SIDE = re.compile(r"\bFROM\s+(FRONT|BACK)\b", re.I)
-_RE_DEPTH = re.compile(r"[×x]\s*([0-9.]+)\b", re.I)
-_RE_THRU = re.compile(r"\bTHRU\b", re.I)
-_RE_DIA_ANY = re.compile(r'(?:Ø|⌀|DIA|O)\s*([0-9.]+)|\(([0-9.]+)\s*Ø?\)|\b([0-9.]+)\b')
-_RE_TAP = re.compile(
-    r"(\(\d+\)\s*)?("
-    r"#\s*\d{1,2}-\d+"
-    r"|(?:\d+/\d+)\s*-\s*\d+"
-    r"|(?:\d+(?:\.\d+)?)\s*-\s*\d+"
-    r"|M\d+(?:\.\d+)?\s*x\s*\d+(?:\.\d+)?"
-    r")\s*TAP",
-    re.I,
-)
-_RE_CBORE = re.compile(r"\b(C['’]?\s*BORE|CBORE|COUNTER\s*BORE)\b", re.I)
-
-
 _QTY_LEAD = re.compile(r'^\s*\((\d+)\)\s*')
 _MM_IN_DIA = re.compile(r"(?:Ø|⌀|O|DIA|\b)\s*([0-9.]+)")
 _PAREN_DIA = re.compile(r"\(([0-9.]+)\s*Ø?\)")
@@ -20953,114 +20937,7 @@ def _extract_text_lines_from_ezdxf_doc(doc: Any) -> list[str]:
     return [ln for ln in joined.splitlines() if ln.strip()]
 
 
-# ===== Fallback HOLE-TABLE row builder (app layer) =========================
-
-def _coalesce_rows(rows):
-    agg, order = {}, []
-    for r in rows:
-        if not isinstance(r, dict):
-            continue
-        desc = r.get("desc", "") or ""
-        ref = r.get("ref", "") or ""
-        qty_val = int(r.get("qty") or 0)
-        if qty_val <= 0:
-            continue
-        key = (desc, ref)
-        if key not in agg:
-            agg[key] = qty_val
-            order.append(key)
-        else:
-            agg[key] += qty_val
-    return [{"hole": "", "ref": ref, "qty": agg[(desc, ref)], "desc": desc} for (desc, ref) in order]
-
-
-def _build_ops_rows_from_lines_fallback(lines: list[str]) -> list[dict]:
-    if not lines:
-        return []
-    L = [_norm_line(s) for s in lines if _norm_line(s)]
-    out, i = [], 0
-    while i < len(L):
-        ln = L[i]
-        if any(k in ln.upper() for k in ("BREAK ALL", "SHARP CORNERS", "RADIUS", "CHAMFER", "AS SHOWN")):
-            i += 1
-            continue
-        qty = 1
-        mqty = _RE_QTY_LEAD.match(ln)
-        if mqty:
-            qty = int(mqty.group(1))
-            ln = ln[mqty.end():].strip()
-        mtap = _RE_TAP.search(ln)
-        if mtap:
-            thread = mtap.group(2).replace(" ", "")
-            tail = " ".join(L[i:i+3])
-            desc = f"{thread} TAP"
-            if _RE_THRU.search(tail):
-                desc += " THRU"
-            md = _RE_DEPTH.search(tail)
-            if md and md.group(1):
-                desc += f' × {float(md.group(1)):.2f}"'
-            ms = _RE_FROM_SIDE.search(tail)
-            if ms:
-                desc += f' FROM {ms.group(1).upper()}'
-            out.append({"hole": "", "ref": "", "qty": qty, "desc": desc})
-            i += 1
-            continue
-        if _RE_CBORE.search(ln):
-            tail = " ".join(L[max(0, i-1):i+2])
-            mda = _RE_DIA_ANY.search(tail)
-            dia = None
-            if mda:
-                for g in mda.groups():
-                    if g:
-                        dia = float(g)
-                        break
-            desc = (f"{dia:.4f} C’BORE" if dia is not None else "C’BORE")
-            md = _RE_DEPTH.search(tail)
-            if md and md.group(1):
-                desc += f' × {float(md.group(1)):.2f}"'
-            ms = _RE_FROM_SIDE.search(tail)
-            if ms:
-                desc += f' FROM {ms.group(1).upper()}'
-            out.append({"hole": "", "ref": "", "qty": qty, "desc": desc})
-            i += 1
-            continue
-        if any(k in ln.upper() for k in ("C' DRILL", "C’DRILL", "CENTER DRILL", "SPOT DRILL")):
-            tail = " ".join(L[i:i+2])
-            md = _RE_DEPTH.search(tail)
-            desc = "C’DRILL" + (f' × {float(md.group(1)):.2f}"' if (md and md.group(1)) else "")
-            out.append({"hole": "", "ref": "", "qty": qty, "desc": desc})
-            i += 1
-            continue
-        if "DRILL" in ln.upper() and _RE_THRU.search(ln):
-            mda = _RE_DIA_ANY.search(ln)
-            ref = ""
-            if mda:
-                for g in mda.groups():
-                    if g:
-                        ref = g
-                        break
-            out.append({"hole": "", "ref": ref, "qty": qty, "desc": (f"{ref} THRU").strip()})
-            i += 1
-            continue
-        i += 1
-    return _coalesce_rows(out)
-
-
-def _collect_chart_lines_context(*containers) -> list[str]:
-    keys = ("chart_lines", "hole_table_lines", "chart_text_lines", "hole_chart_lines")
-    merged, seen = [], set()
-    for d in containers:
-        if not isinstance(d, dict):
-            continue
-        for k in keys:
-            v = d.get(k)
-            if isinstance(v, list) and all(isinstance(x, str) for x in v):
-                for s in v:
-                    if s not in seen:
-                        seen.add(s)
-                        merged.append(s)
-    return merged
-
+# ===== Fallback HOLE-TABLE row builder (delegates to cad_quoter.app.chart_lines) ===
 
 def _build_ops_rows_from_chart_lines(chart_lines: list[str]) -> list[dict]:
     rows: list[dict] = []
