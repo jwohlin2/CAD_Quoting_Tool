@@ -221,7 +221,13 @@ def _fixture_build_minutes(setups: int, geom: dict, tol: dict) -> float:
     term_precision = 6.0 if (flat and flat <= 0.001) else 0.0
     return term_setup + term_holes + term_precision  # e.g. 3 setups ≈ ~54 min
 
-def _drilling_minutes(geom: dict, thickness_in: float, taps: int, cbrores: int, holes: int) -> float:
+def _drilling_minutes(
+    geom: dict,
+    thickness_in: float,
+    taps: int,
+    cbrores: int,
+    holes: int,
+) -> dict[str, float]:
     approach = 10.0
     peck = 6.0
     pecks = max(1, int(1 + thickness_in / 0.5))
@@ -230,7 +236,19 @@ def _drilling_minutes(geom: dict, thickness_in: float, taps: int, cbrores: int, 
     per_hole = approach + pecks * peck + cut
     taps_term = 12.0 * max(0, taps)
     cbore_term = 20.0 * max(0, cbrores)
-    return (holes * per_hole + taps_term + cbore_term) / 60.0
+
+    drill_cycle_seconds = holes * per_hole
+    taps_minutes = taps_term / 60.0
+    cbore_minutes = cbore_term / 60.0
+    spot_minutes = (holes * (approach + pecks * peck)) / 60.0
+    drill_total_minutes = (drill_cycle_seconds / 60.0) + taps_minutes + cbore_minutes
+
+    return {
+        "drill_total_min": drill_total_minutes,
+        "tapping_min": taps_minutes,
+        "counterbore_min": cbore_minutes,
+        "spot_min": spot_minutes,
+    }
 
 def _milling_minutes(geom: dict, thickness_in: float, mrr_in3_min: float) -> float:
     pocket_vol = max(0.0, float(geom["pocket_area_in2"])) * max(0.0, thickness_in)
@@ -277,11 +295,23 @@ def _minutes_die_plate(plan, ops, g, t, material):
     setups = 2
     minutes["Fixture Build (amortized)"] = _fixture_build_minutes(setups, g, t)
     # Programming as mild curve on cut time
-    total_cut_guess_hr = (_milling_minutes(g, thk, mrr) + _drilling_minutes(g, thk, g["tap_qty"], g["cbore_qty"], g["hole_count"])) / 60.0
+    drill_minutes = _drilling_minutes(
+        g,
+        thk,
+        g["tap_qty"],
+        g["cbore_qty"],
+        g["hole_count"],
+    )
+    total_cut_guess_hr = (
+        _milling_minutes(g, thk, mrr) + drill_minutes["drill_total_min"]
+    ) / 60.0
     minutes["Programming (per part)"] = max(21.0, 12.0 + 9.0 * log1p(total_cut_guess_hr))
     # Machine buckets
     minutes["Milling"] = _milling_minutes(g, thk, mrr)
-    minutes["Drilling"] = _drilling_minutes(g, thk, g["tap_qty"], g["cbore_qty"], g["hole_count"])
+    minutes["Drilling"] = drill_minutes["drill_total_min"]
+    minutes["Tapping"] = drill_minutes["tapping_min"]
+    minutes["Counterbore"] = drill_minutes["counterbore_min"]
+    minutes["Spot-Drill"] = drill_minutes["spot_min"]
     if "wire_edm_windows" in ops:
         # planner provides passes like "R+2S" on the op
         skims = 0
