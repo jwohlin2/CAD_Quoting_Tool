@@ -162,10 +162,24 @@ def safe_float(value: Any, default: float = 0.0) -> float:
     return coerced
 
 
+def to_positive_float(value: Any) -> float | None:
+    """Return ``value`` as a positive finite float when possible."""
+
+    numeric = coerce_float_or_none(value)
+    if numeric is None:
+        return None
+
+    if not math.isfinite(numeric):
+        return None
+
+    return numeric if numeric > 0 else None
+
+
 __all__ = [
     "parse_mixed_fraction",
     "coerce_float_or_none",
     "safe_float",
     "to_float",
     "to_int",
+    "to_positive_float",
 ]
