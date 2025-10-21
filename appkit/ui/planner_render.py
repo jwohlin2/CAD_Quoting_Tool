@@ -20,6 +20,9 @@ from .services import QuoteConfiguration
 
 PROGRAMMING_PER_PART_LABEL = "Programming (per part)"
 
+# Meta keys that should be hidden in certain bucket views
+PLANNER_META: frozenset[str] = frozenset({"planner_labor", "planner_machine", "planner_total"})
+
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
@@ -27,8 +30,6 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
     except Exception:
         return default
 
-
-PLANNER_META: frozenset[str] = frozenset({"planner_labor", "planner_machine", "planner_total"})
 
 _HIDE_IN_BUCKET_VIEW: frozenset[str] = frozenset({*PLANNER_META, "misc"})
 _PREFERRED_BUCKET_VIEW_ORDER: tuple[str, ...] = (
@@ -188,30 +189,6 @@ def _bucket_role_for_key(key: str) -> str:
 
 def _op_role_for_name(name: str) -> str:
     return OP_ROLE.get((name or "").strip(), "machine_only")
-_HIDE_IN_BUCKET_VIEW: frozenset[str] = frozenset({*PLANNER_META, "misc"})
-_PREFERRED_BUCKET_VIEW_ORDER: tuple[str, ...] = (
-    "programming",
-    "programming_amortized",
-    "fixture_build",
-    "fixture_build_amortized",
-    "milling",
-    "drilling",
-    "counterbore",
-    "countersink",
-    "tapping",
-    "grinding",
-    "finishing_deburr",
-    "saw_waterjet",
-    "wire_edm",
-    "sinker_edm",
-    "inspection",
-    "assembly",
-    "toolmaker_support",
-    "packaging",
-    "ehs_compliance",
-    "turning",
-    "lapping_honing",
-)
 
 def _normalize_bucket_key(name: str | None) -> str:
     text = re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_")

@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 # app_gui_occ_flow_v8_single_autollm.py
 r"""
 Single-file CAD Quoter (v8)
@@ -300,6 +300,7 @@ from appkit.ui.planner_render import (
     _canonical_bucket_key,
     _display_bucket_label,
     _display_rate_for_row,
+    _process_label,
     _normalize_bucket_key,
     _process_label,
     _planner_bucket_key_for_name,
@@ -9236,6 +9237,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
         proc_total += numeric_amount
 
+    @dataclass(slots=True)
     class _ProcessRowRecord:
         name: str
         hours: float
