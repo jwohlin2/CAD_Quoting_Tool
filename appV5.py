@@ -372,9 +372,6 @@ from cad_quoter.config import (
     configure_logging,
     logger,
 )
-from cad_quoter.config import (
-    describe_runtime_environment as _describe_runtime_environment,
-)
 
 _log = logger
 from cad_quoter.utils.geo_ctx import (
@@ -2840,16 +2837,6 @@ def _compute_pricing_ladder(
 # Formatting helpers
 # ---------------------------------------------------------------------------
 
-
-# Guardrails for LLM-generated process adjustments.
-
-def describe_runtime_environment() -> dict[str, str]:
-    """Return a redacted snapshot of runtime configuration for auditors."""
-
-    info = _describe_runtime_environment()
-    info["llm_debug_enabled"] = str(APP_ENV.llm_debug_enabled)
-    info["llm_debug_dir"] = str(APP_ENV.llm_debug_dir)
-    return info
 
 def roughly_equal(a: float | int | str | None, b: float | int | str | None, *, eps: float = 0.01) -> bool:
     """Return True when *a* and *b* are approximately equal within ``eps`` dollars."""
