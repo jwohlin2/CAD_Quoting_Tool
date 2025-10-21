@@ -252,6 +252,24 @@ def test_explain_quote_reports_drilling_minutes_from_removal_card() -> None:
     assert "No drilling accounted." not in explanation
 
 
+def test_explain_quote_skips_legacy_drilling_text_when_bucket_present() -> None:
+    breakdown = {
+        "totals": {"price": 180.0, "qty": 1, "labor_cost": 60.0},
+        "material_direct_cost": 45.0,
+        "bucket_view": {"buckets": {"drilling": {"minutes": 90.0}}},
+    }
+    render_state = {"extra": {"drill_total_minutes": 30.0}}
+    plan_info = {"bucket_view": {"buckets": {"drilling": {"minutes": 90.0}}}}
+
+    explanation = explain_quote(
+        breakdown,
+        render_state=render_state,
+        plan_info=plan_info,
+    )
+
+    assert "Drilling time comes from removal-card math" not in explanation
+
+
 def test_explain_quote_reports_no_drilling_when_minutes_absent() -> None:
     breakdown = {"totals": {"price": 75.0, "qty": 2, "labor_cost": 0.0}}
 

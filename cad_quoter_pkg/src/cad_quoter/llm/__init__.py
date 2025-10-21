@@ -951,6 +951,7 @@ def explain_quote(
         return count
 
     plan_drilling_reasons: list[str] = []
+    planner_has_drilling_bucket = False
 
     def _add_reason(text: str | None) -> None:
         if not text:
@@ -994,12 +995,15 @@ def explain_quote(
                     yield entry
 
     def _check_bucket_map(mapping: Mapping[str, Any] | None) -> None:
+        nonlocal planner_has_drilling_bucket
         if not isinstance(mapping, Mapping):
             return
         for raw_key, raw_value in mapping.items():
             key_text = str(raw_key or "").strip().lower()
             if "drill" not in key_text:
                 continue
+            if key_text == "drilling":
+                planner_has_drilling_bucket = True
             minutes_val = coerce_float(raw_value)
             if minutes_val is None and isinstance(raw_value, Mapping):
                 minutes_val = coerce_float(raw_value.get("minutes"))
@@ -1210,7 +1214,7 @@ def explain_quote(
 
     # === WHY: CONSISTENT DRILLING TEXT ===
     drill_detail_line: str | None = None
-    if has_drilling and drill_card_minutes > 0.0:
+    if has_drilling and drill_card_minutes > 0.0 and not planner_has_drilling_bucket:
         drill_detail_line = (
             f"Drilling time comes from removal-card math ({drill_card_minutes / 60.0:.2f} hr total)."
         )
