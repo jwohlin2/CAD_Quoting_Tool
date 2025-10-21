@@ -9,6 +9,11 @@ from fractions import Fraction
 from typing import Any
 
 
+from .chart_lines import (
+    _build_ops_rows_from_lines_fallback as _chart_build_ops_rows_from_lines_fallback,
+)
+
+
 RE_TAP = re.compile(
     r"(\(\d+\)\s*)?("
     r"#\s*\d{1,2}-\d+"  # #10-32
@@ -405,5 +410,19 @@ __all__ = [
     "_dedupe_hole_entries",
     "_parse_hole_line",
     "_aggregate_hole_entries",
+    "_build_ops_rows_from_lines_fallback",
+    "build_ops_rows_from_lines_fallback",
     "summarize_hole_chart_lines",
 ]
+
+
+def build_ops_rows_from_lines_fallback(lines: Iterable[str] | None) -> list[dict]:
+    """Proxy to the chart-line fallback parser exposed for hole operations helpers."""
+
+    seq = [str(s) for s in lines or [] if str(s)]
+    if not seq:
+        return []
+    return _chart_build_ops_rows_from_lines_fallback(seq)
+
+
+_build_ops_rows_from_lines_fallback = _chart_build_ops_rows_from_lines_fallback

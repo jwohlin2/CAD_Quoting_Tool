@@ -5,9 +5,10 @@ import math
 import pytest
 
 from appV5 import _density_for_material, render_quote
-from cad_quoter.domain_models import (
+from cad_quoter.domain_models import MATERIAL_DROPDOWN_OPTIONS
+from cad_quoter.material_density import (
     MATERIAL_DENSITY_G_CC_BY_KEY,
-    MATERIAL_DROPDOWN_OPTIONS,
+    density_for_material,
     normalize_material_key,
 )
 
@@ -20,11 +21,10 @@ def test_density_matches_dropdown_entries(display: str) -> None:
     key = normalize_material_key(display)
     expected = MATERIAL_DENSITY_G_CC_BY_KEY.get(key)
     assert expected is not None, f"Missing density mapping for {display}"
+    lookup_density = density_for_material(display)
+    assert math.isclose(lookup_density, expected, rel_tol=0.0, abs_tol=1e-6)
     assert math.isclose(
-        _density_for_material(display),
-        expected,
-        rel_tol=0.0,
-        abs_tol=1e-6,
+        _density_for_material(display), lookup_density, rel_tol=0.0, abs_tol=1e-6
     )
 
 
@@ -39,11 +39,10 @@ def test_density_matches_dropdown_entries(display: str) -> None:
 )
 def test_density_handles_common_aliases(alias: str, expected_key: str) -> None:
     expected = MATERIAL_DENSITY_G_CC_BY_KEY[normalize_material_key(expected_key)]
+    lookup_density = density_for_material(alias)
+    assert math.isclose(lookup_density, expected, rel_tol=0.0, abs_tol=1e-6)
     assert math.isclose(
-        _density_for_material(alias),
-        expected,
-        rel_tol=0.0,
-        abs_tol=1e-6,
+        _density_for_material(alias), lookup_density, rel_tol=0.0, abs_tol=1e-6
     )
 
 

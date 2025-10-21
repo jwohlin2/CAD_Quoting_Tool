@@ -16,46 +16,55 @@ for _module_name in ("requests", "bs4", "lxml"):
 import cad_quoter.pricing.materials as materials
 
 
-def test_resolve_material_unit_price_prefers_mcmaster(monkeypatch):
-    calls: list[tuple[str, str]] = []
+def test_resolve_price_per_lb_prefers_mcmaster_before_resolver(monkeypatch):
+    module = types.ModuleType("metals_api")
 
-    def _fake_mcmaster(name: str, key: str) -> dict[str, float | str]:
-        calls.append((name, key))
-        return {
-            "usd_per_kg": 123.45,
-            "usd_per_lb": 123.45 / materials.LB_PER_KG,
-            "source": "mcmaster:aluminum",
-        }
+    def _raise(_material_key: str) -> float:
+        raise RuntimeError("metals api unavailable")
 
-    monkeypatch.setattr(materials, "_maybe_get_mcmaster_price", _fake_mcmaster)
+    module.price_per_lb_for_material = _raise  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "metals_api", module)
 
-    price, source = materials.resolve_material_unit_price("Aluminum", unit="kg")
+    def _fake_mcmaster(name: str, *, unit: str = "kg") -> tuple[float, str]:
+        assert unit == "lb"
+        return 123.45, "mcmaster:aluminum"
 
-    assert calls and calls[0][0] == "Aluminum"
+    def _fail_resolver(name: str, *, unit: str = "kg") -> tuple[float, str]:
+        raise AssertionError("resolver should not run when McMaster succeeds")
+
+    monkeypatch.setattr(materials, "get_mcmaster_unit_price", _fake_mcmaster, raising=False)
+    monkeypatch.setattr(materials, "_resolve_material_unit_price", _fail_resolver, raising=False)
+
+    price, source = materials._resolve_price_per_lb("aluminum", "Aluminum")
+
     assert price == pytest.approx(123.45)
     assert source == "mcmaster:aluminum"
 
-
-def test_resolve_material_unit_price_uses_backup_when_live_sources_fail(monkeypatch):
-    monkeypatch.setattr(materials, "_maybe_get_mcmaster_price", lambda *_args, **_kw: None)
-
     wieland_module = types.ModuleType("cad_quoter.pricing.wieland_scraper")
 
-    def _fail_live_price(*_args, **_kwargs):
-        raise RuntimeError("wieland offline")
+def test_resolve_price_per_lb_uses_resolver_when_providers_fail(monkeypatch):
+    module = types.ModuleType("metals_api")
+    module.price_per_lb_for_material = lambda _material_key: None  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "metals_api", module)
 
     wieland_module.get_live_material_price = _fail_live_price  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "cad_quoter.pricing.wieland_scraper", wieland_module)
 
-    def _fake_loader(_path: str | None = None) -> dict[str, dict[str, float | str]]:
-        return {"6061": {"usd_per_kg": 321.0, "usd_per_lb": 321.0 / materials.LB_PER_KG}}
+    def _failing_mcmaster(_name: str, *, unit: str = "kg") -> tuple[float | None, str]:
+        return None, ""
 
-    monkeypatch.setattr(materials, "load_backup_prices_csv", _fake_loader)
+    def _fake_resolver(name: str, *, unit: str = "kg") -> tuple[float, str]:
+        fallback_calls.append((name, unit))
+        return 321.0, "backup_csv"
 
-    price, source = materials.resolve_material_unit_price("6061", unit="kg")
+    monkeypatch.setattr(materials, "get_mcmaster_unit_price", _failing_mcmaster, raising=False)
+    monkeypatch.setattr(materials, "_resolve_material_unit_price", _fake_resolver, raising=False)
 
+    price, source = materials._resolve_price_per_lb("6061", "6061")
+
+    assert fallback_calls == [("6061", "lb")]
     assert price == pytest.approx(321.0)
-    assert source.startswith("backup_csv")
+    assert source == "backup_csv"
 
 
 def test_material_price_helper_returns_fallback_price(monkeypatch):
@@ -63,7 +72,7 @@ def test_material_price_helper_returns_fallback_price(monkeypatch):
         assert unit == "kg"
         return 400.0, "backup_csv"
 
-    monkeypatch.setattr(materials, "_resolve_material_unit_price", _fake_resolver)
+    monkeypatch.setattr(materials, "_resolve_material_unit_price", _fake_resolver, raising=False)
 
     price_per_g, source = materials._material_price_per_g_from_choice("Stainless Steel", {})
 
@@ -87,7 +96,7 @@ def test_compute_material_block_uses_price_resolver(monkeypatch):
         assert unit == "lb"
         return 10.0, "resolver"
 
-    monkeypatch.setattr(materials, "_resolve_material_unit_price", _fake_resolver)
+    monkeypatch.setattr(materials, "_resolve_material_unit_price", _fake_resolver, raising=False)
 
     geo_ctx = {
         "material_display": "Aluminum 6061",

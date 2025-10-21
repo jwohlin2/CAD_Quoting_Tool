@@ -14,169 +14,14 @@ Single-file CAD Quoter (v8)
 from __future__ import annotations
 
 from cad_quoter.utils.numeric import coerce_positive_float as _coerce_positive_float
+from cad_quoter.app.quote_doc import (
+    _build_quote_header_lines,
+    _sanitize_render_text,
+    _wrap_header_text,
+)
 
 
-def _ensure_geo_context_fields(
-    geom: dict[str, Any],
-    source: Mapping[str, Any] | None,
-    *,
-    cfg: Any | None = None,
-) -> None:
-    """Best-effort backfill of common geometry context fields.
 
-    This is intentionally tolerant and only fills when values are present
-    and reasonable. It never raises.
-    """
-
-    try:
-        src = source if isinstance(source, _MappingABC) else {}
-        # Quantity
-        qty = src.get("Quantity") if isinstance(src, _MappingABC) else None
-        try:
-            if "qty" not in geom and qty is not None:
-                qf = float(qty)
-                if math.isfinite(qf) and qf > 0:
-                    geom["qty"] = int(round(qf))
-        except Exception:
-            pass
-
-        # Dimensions (inches)
-        L_in = _coerce_positive_float(src.get("Plate Length (in)"))
-        W_in = _coerce_positive_float(src.get("Plate Width (in)"))
-        T_in = _coerce_positive_float(src.get("Thickness (in)"))
-        if L_in is not None and "plate_len_in" not in geom:
-            geom["plate_len_in"] = L_in
-        if W_in is not None and "plate_wid_in" not in geom:
-            geom["plate_wid_in"] = W_in
-        if (
-            L_in is not None
-            and "plate_len_mm" not in geom
-            and math.isfinite(float(L_in))
-            and float(L_in) > 0
-        ):
-            geom["plate_len_mm"] = float(L_in) * 25.4
-        if (
-            W_in is not None
-            and "plate_wid_mm" not in geom
-            and math.isfinite(float(W_in))
-            and float(W_in) > 0
-        ):
-            geom["plate_wid_mm"] = float(W_in) * 25.4
-        if T_in is not None and "thickness_in" not in geom:
-            geom["thickness_in"] = T_in
-
-        # Dimensions (mm) → convert if inch values missing
-        L_mm = _coerce_positive_float(src.get("Plate Length (mm)"))
-        W_mm = _coerce_positive_float(src.get("Plate Width (mm)"))
-        T_mm = _coerce_positive_float(src.get("Thickness (mm)"))
-        if L_mm is not None and "plate_len_in" not in geom:
-            geom["plate_len_in"] = float(L_mm) / 25.4
-        if W_mm is not None and "plate_wid_in" not in geom:
-            geom["plate_wid_in"] = float(W_mm) / 25.4
-        if T_mm is not None and "thickness_in" not in geom:
-            geom["thickness_in"] = float(T_mm) / 25.4
-        if T_mm is not None and "thickness_mm" not in geom:
-            geom["thickness_mm"] = T_mm
-        thickness_in_val = geom.get("thickness_in")
-        if (
-            "thickness_mm" not in geom
-            and isinstance(thickness_in_val, (int, float))
-            and math.isfinite(thickness_in_val)
-            and thickness_in_val > 0
-        ):
-            geom["thickness_mm"] = float(thickness_in_val) * 25.4
-
-        L_mm_val = _coerce_positive_float(geom.get("plate_len_mm"))
-        W_mm_val = _coerce_positive_float(geom.get("plate_wid_mm"))
-        if (
-            "plate_bbox_area_mm2" not in geom
-            and L_mm_val is not None
-            and W_mm_val is not None
-        ):
-            geom["plate_bbox_area_mm2"] = float(L_mm_val) * float(W_mm_val)
-
-        if "hole_sets" not in geom or not geom.get("hole_sets"):
-            normalized_sets: list[dict[str, Any]] = []
-            raw_groups = geom.get("hole_groups")
-            if isinstance(raw_groups, Sequence) and not isinstance(raw_groups, (str, bytes, bytearray)):
-                for entry in raw_groups:
-                    if isinstance(entry, _MappingABC):
-                        dia_mm_val = _coerce_positive_float(entry.get("dia_mm") or entry.get("diameter_mm"))
-                        qty_val = _coerce_float_or_none(entry.get("count") or entry.get("qty"))
-                    else:
-                        dia_mm_val = _coerce_positive_float(getattr(entry, "dia_mm", None) or getattr(entry, "diameter_mm", None))
-                        qty_val = _coerce_float_or_none(getattr(entry, "count", None) or getattr(entry, "qty", None))
-                    if dia_mm_val and qty_val and qty_val > 0:
-                        normalized_sets.append({
-                            "dia_mm": float(dia_mm_val),
-                            "qty": int(round(float(qty_val))),
-                        })
-            if not normalized_sets:
-                diams_seq = geom.get("hole_diams_mm")
-                thickness_in_guess = geom.get("thickness_in")
-                if thickness_in_guess is None:
-                    thickness_mm_guess = _coerce_positive_float(geom.get("thickness_mm"))
-                    if thickness_mm_guess is not None:
-                        thickness_in_guess = float(thickness_mm_guess) / 25.4
-                drill_groups = build_drill_groups_from_geometry(diams_seq, thickness_in_guess)
-                for group in drill_groups:
-                    dia_in = _coerce_float_or_none(group.get("diameter_in"))
-                    qty_val = _coerce_float_or_none(group.get("qty"))
-                    if dia_in and dia_in > 0 and qty_val and qty_val > 0:
-                        normalized_sets.append({
-                            "dia_mm": float(dia_in) * 25.4,
-                            "qty": int(round(float(qty_val))),
-                        })
-            if normalized_sets:
-                geom["hole_sets"] = normalized_sets
-    except Exception:
-        # Defensive: never let context backfill break pricing
-        pass
-
-
-def _apply_drilling_meta_fallback(
-    meta: Mapping[str, Any] | None,
-    groups: Sequence[Mapping[str, Any]] | None,
-) -> tuple[int, int]:
-    """Compute deep/std hole counts and backfill helper arrays in meta container.
-
-    Returns (holes_deep, holes_std).
-    """
-
-    deep = 0
-    std = 0
-    dia_vals: list[float] = []
-    depth_vals: list[float] = []
-
-    if isinstance(groups, Sequence):
-        for g in groups:
-            try:
-                qty = int(_coerce_float_or_none(g.get("qty")) or 0)
-            except Exception:
-                qty = 0
-            op = str(g.get("op") or "").strip().lower()
-            if op.startswith("deep"):
-                deep += qty
-            else:
-                std += qty
-            d_in = _coerce_float_or_none(g.get("diameter_in"))
-            if d_in and d_in > 0:
-                dia_vals.append(float(d_in))
-            z_in = _coerce_float_or_none(g.get("depth_in"))
-            if z_in and z_in > 0:
-                depth_vals.append(float(z_in))
-
-    # Backfill into a mutable container if provided
-    try:
-        if isinstance(meta, dict):
-            if dia_vals and not meta.get("dia_in_vals"):
-                meta["dia_in_vals"] = dia_vals
-            if depth_vals and not meta.get("depth_in_vals"):
-                meta["depth_in_vals"] = depth_vals
-    except Exception:
-        pass
-
-    return (deep, std)
 import copy
 import csv
 import json
@@ -187,7 +32,6 @@ import re
 import sys
 import time
 import typing
-import unicodedata
 from functools import cmp_to_key, lru_cache
 from typing import Any, Mapping, MutableMapping, TYPE_CHECKING, TypeAlias
 from collections import Counter, defaultdict
@@ -207,15 +51,7 @@ from cad_quoter.app._value_utils import (
     _format_value,
 )
 from cad_quoter.app.chart_lines import (
-    RE_CBORE,
-    RE_DEPTH,
-    RE_DIA,
-    RE_NPT,
-    RE_TAP,
-    RE_THRU,
-    build_ops_rows_from_lines_fallback as _build_ops_rows_from_lines_fallback,
     collect_chart_lines_context as _collect_chart_lines_context,
-    norm_line as _norm_line,
 )
 from cad_quoter.app.hole_ops import (
     CBORE_MIN_PER_SIDE_MIN,
@@ -229,6 +65,7 @@ from cad_quoter.app.hole_ops import (
     RE_TAP,
     RE_THRU,
     TAP_MINUTES_BY_CLASS,
+    build_ops_rows_from_lines_fallback as _build_ops_rows_from_lines_fallback,
     _aggregate_hole_entries,
     _classify_thread_spec,
     _dedupe_hole_entries,
@@ -273,6 +110,10 @@ from cad_quoter.resources import (
     default_app_settings_json,
     default_master_variables_csv,
 )
+from cad_quoter.io.csv_utils import (
+    read_csv_as_dicts as _read_csv_as_dicts,
+    sniff_delimiter as _sniff_csv_delimiter,
+)
 from cad_quoter.config import (
     AppEnvironment,
     ConfigError,
@@ -283,6 +124,8 @@ from cad_quoter.config import (
 
 _log = logger
 from cad_quoter.utils.geo_ctx import (
+    _apply_drilling_meta_fallback,
+    _ensure_geo_context_fields,
     _iter_geo_contexts as _iter_geo_dicts_for_context,
     _should_include_outsourced_pass,
 )
@@ -420,9 +263,10 @@ from cad_quoter.utils.scrap import (
     _holes_scrap_fraction,
     normalize_scrap_pct,
 )
+from cad_quoter.utils.render_utils.tables import ascii_table, draw_kv_table
 from appkit.planner_helpers import _process_plan_job
 from appkit.env_utils import FORCE_PLANNER
-from appkit.planner_adapter import resolve_planner
+from appkit.planner_adapter import resolve_planner, resolve_pricing_source_value
 
 from appkit.data import load_json, load_text
 
@@ -466,58 +310,6 @@ from appkit.ui.planner_render import (
 from appkit.ui.services import QuoteConfiguration
 
 
-_ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
-_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-_RENDER_ASCII_REPLACEMENTS: dict[str, str] = {
-    "—": "-",
-    "•": "-",
-    "…": "...",
-    "“": '"',
-    "”": '"',
-    "‘": "'",
-    "’": "'",
-    "µ": "u",
-    "μ": "u",
-    "±": "+/-",
-    "°": " deg ",
-    "¼": "1/4",
-    "½": "1/2",
-    "¾": "3/4",
-    " ": " ",  # non-breaking space
-    "⚠️": "⚠",
-}
-
-_RENDER_PASSTHROUGH: dict[str, str] = {
-    "–": "__EN_DASH__",
-    "×": "__MULTIPLY__",
-    "≥": "__GEQ__",
-    "≤": "__LEQ__",
-    "⚠": "__WARN__",
-}
-
-
-def _sanitize_render_text(value: typing.Any) -> str:
-    if value is None:
-        return ""
-    text = str(value)
-    if not text:
-        return ""
-    for source, placeholder in _RENDER_PASSTHROUGH.items():
-        if source in text:
-            text = text.replace(source, placeholder)
-    text = text.replace("\t", " ")
-    text = text.replace("\r", "")
-    text = _ANSI_ESCAPE_RE.sub("", text)
-    for source, replacement in _RENDER_ASCII_REPLACEMENTS.items():
-        if source in text:
-            text = text.replace(source, replacement)
-    text = unicodedata.normalize("NFKD", text)
-    text = text.encode("ascii", "ignore").decode("ascii", "ignore")
-    text = _CONTROL_CHAR_RE.sub("", text)
-    for source, placeholder in _RENDER_PASSTHROUGH.items():
-        if placeholder in text:
-            text = text.replace(placeholder, source)
-    return text
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1634,11 +1426,6 @@ def _ensure_list(value: Any, fallback: Iterable[Any] | None = None) -> list[Any]
     except Exception:
         return list(fallback) if fallback is not None else []
 
-
-SCRAP_CREDIT_FALLBACK_USD_PER_LB = 0.35
-SCRAP_RECOVERY_DEFAULT = 0.85
-
-
 def _wieland_scrap_usd_per_lb(material_family: str | None) -> float | None:
     """Return the USD/lb scrap price from the Wieland scraper if available."""
 
@@ -1683,6 +1470,80 @@ def _wieland_scrap_usd_per_lb(material_family: str | None) -> float | None:
     if not math.isfinite(price_float) or price_float <= 0:
         return None
     return price_float
+
+
+def _compute_direct_costs(
+    material_total: float | int | str | None,
+    scrap_credit: float | int | str | None,
+    material_tax: float | int | str | None,
+    pass_through: _MappingABC[str, Any] | None,
+    *,
+    material_detail: Mapping[str, Any] | None = None,
+    scrap_price_source: str | None = None,
+) -> float:
+    """Return the rounded direct-cost total shared by math and rendering."""
+
+    block: dict[str, Any] = {}
+    if isinstance(material_detail, _MappingABC):
+        block.update(material_detail)
+
+    def _assign_if_missing(key: str, value: Any) -> None:
+        if key in block:
+            return
+        if value in (None, ""):
+            return
+        coerced = _coerce_float_or_none(value)
+        if coerced is None:
+            return
+        block[key] = float(coerced)
+
+    _assign_if_missing("material_cost_before_credit", material_total)
+    _assign_if_missing("material_cost", material_total)
+    _assign_if_missing("material_direct_cost", material_total)
+    _assign_if_missing("material_cost_pre_credit", material_total)
+    _assign_if_missing("material_base_cost", material_total)
+    _assign_if_missing("material_scrap_credit", scrap_credit)
+    _assign_if_missing("scrap_credit_usd", scrap_credit)
+    _assign_if_missing("material_tax", material_tax)
+    _assign_if_missing("material_tax_usd", material_tax)
+
+    if scrap_price_source:
+        try:
+            source_text = str(scrap_price_source).strip()
+        except Exception:
+            source_text = ""
+        if source_text:
+            block.setdefault("scrap_price_source", source_text)
+            block.setdefault("scrap_credit_source", source_text)
+
+    try:
+        components = _material_cost_components(block, overrides=None, cfg=None)
+    except Exception:
+        components = None
+
+    if isinstance(components, _MappingABC):
+        material_total_usd = _coerce_float_or_none(components.get("total_usd")) or 0.0
+    else:
+        base_val = _coerce_float_or_none(material_total) or 0.0
+        tax_val = _coerce_float_or_none(material_tax) or 0.0
+        scrap_val = _coerce_float_or_none(scrap_credit) or 0.0
+        material_total_usd = float(base_val) + float(tax_val) - float(scrap_val)
+
+    pass_through_total = 0.0
+    for key, raw_value in (pass_through or {}).items():
+        try:
+            if str(key).strip().lower() == "material":
+                continue
+        except Exception:
+            pass
+        amount = _coerce_float_or_none(raw_value)
+        if amount is not None:
+            pass_through_total += float(amount)
+
+    total = round(float(material_total_usd) + float(pass_through_total), 2)
+    if total < 0:
+        return 0.0
+    return total
 
 
 def _compute_pricing_ladder(
@@ -1812,56 +1673,6 @@ def _is_pandas_dataframe(obj: Any) -> bool:
 # ───────────────────────────────────────────────────────────────────────
 T = TypeVar("T")
 
-def _resolve_pricing_source_value(
-    base_value: Any,
-    *,
-    used_planner: bool | None = None,
-    process_meta: Mapping[str, Any] | None = None,
-    process_meta_raw: Mapping[str, Any] | None = None,
-    breakdown: Mapping[str, Any] | None = None,
-    planner_process_minutes: Any = None,
-    hour_summary_entries: Mapping[str, Any] | None = None,
-    additional_sources: Sequence[Any] | None = None,
-    cfg: QuoteConfiguration | None = None,
-) -> str | None:
-    """Return a normalized pricing source, honoring explicit selections."""
-
-    fallback_text: str | None = None
-    if base_value is not None:
-        candidate_text = str(base_value).strip()
-        if candidate_text:
-            lowered = candidate_text.lower()
-            if lowered == "planner":
-                return "planner"
-            if lowered not in {"legacy", "auto", "default", "fallback"}:
-                return candidate_text
-            fallback_text = candidate_text
-
-    if used_planner:
-        if fallback_text:
-            return fallback_text
-        return "planner"
-
-    # Delegate planner signal detection to the adapter helper
-    from appkit.planner_adapter import _planner_signals_present as _planner_signals_present_helper
-
-    if _planner_signals_present_helper(
-        process_meta=process_meta,
-        process_meta_raw=process_meta_raw,
-        breakdown=breakdown,
-        planner_process_minutes=planner_process_minutes,
-        hour_summary_entries=hour_summary_entries,
-        additional_sources=list(additional_sources) if additional_sources is not None else None,
-    ):
-        if fallback_text:
-            return fallback_text
-        return "planner"
-
-    if fallback_text:
-        return fallback_text
-
-    return None
-
 
 
 def _wrap_header_text(text: Any, page_width: int, indent: str = "") -> list[str]:
@@ -1971,7 +1782,7 @@ def _build_quote_header_lines(
         if used_planner_flag is not None:
             break
 
-    pricing_source_value = _resolve_pricing_source_value(
+    pricing_source_value = resolve_pricing_source_value(
         raw_pricing_source,
         used_planner=used_planner_flag,
         process_meta=process_meta if isinstance(process_meta, _MappingABC) else None,
@@ -2165,6 +1976,7 @@ from cad_quoter.pricing.time_estimator import (
     estimate_time_min as _estimate_time_min,
 )
 from cad_quoter.pricing.wieland import lookup_price as lookup_wieland_price
+import cad_quoter.pricing.materials as _materials
 from cad_quoter.pricing.materials import (
     STANDARD_PLATE_SIDES_IN as STANDARD_PLATE_SIDES_IN,
     _compute_material_block as _compute_material_block,
@@ -2410,49 +2222,29 @@ def read_variables_file(
         sheet_name = "Variables" if "Variables" in xl.sheet_names else xl.sheet_names[0]
         df_full = pd.read_excel(path, sheet_name=sheet_name)
     elif lp.endswith(".csv"):
-        delimiter = ","
+        encoding = "utf-8-sig"
         try:
-            with open(path, encoding="utf-8-sig") as sniff:
+            with open(path, encoding=encoding) as sniff:
                 header_line = sniff.readline()
-            if "\t" in header_line:
-                delimiter = "\t"
         except Exception:
-            delimiter = ","
+            header_line = ""
+        delimiter = _sniff_csv_delimiter(header_line)
 
-        read_csv_kwargs: dict[str, Any] = {"encoding": "utf-8-sig"}
+        read_csv_kwargs: dict[str, Any] = {"encoding": encoding}
         if delimiter == "\t":
             read_csv_kwargs["sep"] = "\t"
 
         try:
             df_full = pd.read_csv(path, **read_csv_kwargs)
         except Exception as csv_err:
-            # When pandas' default engine hits irregular commas (extra columns
-            # from free-form notes, etc.) fall back to a more forgiving parser
-            # that collapses spill-over cells into the final column so that the
-            # sheet still loads for the estimator instead of forcing users back
-            # through the file picker.
-            import csv as _csv
-
-            csv_delimiter = "\t" if delimiter == "\t" else ","
-
-            with open(path, encoding="utf-8-sig", newline="") as f:
-                rows = list(_csv.reader(f, delimiter=csv_delimiter))
-
-            if not rows:
+            try:
+                normalized_dicts = _read_csv_as_dicts(
+                    path,
+                    encoding=encoding,
+                    delimiter=delimiter,
+                )
+            except Exception:
                 raise csv_err
-
-            header = rows[0]
-            if not header:
-                raise csv_err
-            normalized_dicts: list[dict[str, str]] = []
-            for row in rows[1:]:
-                if len(row) > len(header):
-                    keep = len(header) - 1
-                    merged_tail = csv_delimiter.join(row[keep:]) if keep >= 0 else ""
-                    row = row[:keep] + [merged_tail]
-                elif len(row) < len(header):
-                    row = row + [""] * (len(header) - len(row))
-                normalized_dicts.append(dict(zip(header, row)))
 
             try:
                 df_full = pd.DataFrame(normalized_dicts)
@@ -2754,6 +2546,25 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             material_selection = dict(material_selection_raw or {})
         except Exception:
             material_selection = {}
+
+    def _material_cost_components_from(
+        *containers: Mapping[str, Any] | None,
+    ) -> Mapping[str, Any] | None:
+        for container in containers:
+            if not isinstance(container, _MappingABC):
+                continue
+            candidate = container.get("material_cost_components")
+            if isinstance(candidate, _MappingABC):
+                return candidate
+        return None
+
+    material_cost_components = _material_cost_components_from(
+        material_block,
+        material_stock_block,
+        material_selection,
+        breakdown.get("material"),
+        breakdown.get("material_block"),
+    )
 
     def _resolve_overrides_source(container: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
         if not isinstance(container, _MappingABC):
@@ -3175,13 +2986,34 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     material_tax_for_directs_val = _coerce_float_or_none(material_block.get("material_tax"))
     material_tax_for_directs = float(material_tax_for_directs_val or 0.0)
 
+    material_component_total: float | None = None
+    material_component_net: float | None = None
+    if isinstance(material_cost_components, _MappingABC):
+        base_component = _coerce_float_or_none(material_cost_components.get("base_usd"))
+        if base_component is not None:
+            material_total_for_directs = float(base_component)
+        scrap_component = _coerce_float_or_none(
+            material_cost_components.get("scrap_credit_usd")
+        )
+        if scrap_component is not None:
+            scrap_credit_for_directs = float(scrap_component)
+        tax_component = _coerce_float_or_none(material_cost_components.get("tax_usd"))
+        if tax_component is not None:
+            material_tax_for_directs = float(tax_component)
+        total_component = _coerce_float_or_none(material_cost_components.get("total_usd"))
+        if total_component is not None:
+            material_component_total = float(total_component)
+        net_component = _coerce_float_or_none(material_cost_components.get("net_usd"))
+        if net_component is not None:
+            material_component_net = float(net_component)
+
     def _merge_detail_text(existing: str | None, new_value: Any) -> str:
         segments: list[str] = []
         seen: set[str] = set()
         for candidate in (existing, new_value):
             if candidate is None:
                 continue
-            for segment in re.split(r";\s*", str(candidate)):
+            for segment in _RE_SPLIT(r";\s*", str(candidate)):
                 seg = segment.strip()
                 if not seg:
                     continue
@@ -3351,7 +3183,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
         label_text = label_text.replace("+", " + ")
         label_text = label_text.replace("_", " ")
-        label_text = re.sub(r"\s+", " ", label_text).strip()
+        label_text = _RE_SUB(r"\s+", " ", label_text).strip()
         return label_text or None
 
     def _is_truthy_flag(value) -> bool:
@@ -3396,7 +3228,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if not detail:
             return
         sanitized_detail = _sanitize_render_text(detail)
-        for segment in re.split(r";\s*", sanitized_detail):
+        for segment in _RE_SPLIT(r";\s*", sanitized_detail):
             write_wrapped(segment, indent)
 
     bucket_diag_env = os.getenv("SHOW_BUCKET_DIAGNOSTICS")
@@ -3431,11 +3263,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 width = max(width, len(row_values[idx]))
             col_widths.append(width)
 
-        def _fmt(value: str, idx: int) -> str:
-            if idx == 0:
-                return f"{value:<{col_widths[idx]}}"
-            return f"{value:>{col_widths[idx]}}"
-
         if lines and lines[-1] != "":
             _push(lines, "")
 
@@ -3443,12 +3270,26 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         _push(lines, diagnostic_banner)
         _push(lines, "=" * min(page_width, len(diagnostic_banner)))
 
-        header_line = " | ".join(_fmt(header, idx) for idx, header in enumerate(headers))
-        separator_line = " | ".join("-" * width for width in col_widths)
-        _push(lines, header_line)
-        _push(lines, separator_line)
-        for row_values in display_rows:
-            _push(lines, " | ".join(_fmt(value, idx) for idx, value in enumerate(row_values)))
+        table_text = ascii_table(
+            headers,
+            display_rows,
+            col_widths=col_widths,
+            col_aligns=("L", "R", "R", "R", "R"),
+            header_aligns=("L", "R", "R", "R", "R"),
+        )
+        table_lines = table_text.splitlines()
+
+        if len(table_lines) >= 4:
+            header_cells = table_lines[1].strip("|").split("|")
+            separator_line = " | ".join("-" * width for width in col_widths)
+            _push(lines, " | ".join(header_cells))
+            _push(lines, separator_line)
+            for body_line in table_lines[3:-1]:
+                if not body_line.startswith("|"):
+                    continue
+                body_cells = body_line.strip("|").split("|")
+                _push(lines, " | ".join(body_cells))
+
         _push(lines, "")
 
     def _is_total_label(label: str) -> bool:
@@ -3459,7 +3300,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         clean = clean.lstrip("= ")
         return clean.lower().startswith("total")
 
-    def _ensure_total_separator(width: int) -> None:
+    def _maybe_insert_total_separator(width: int) -> None:
         if not lines:
             return
         width = max(0, int(width))
@@ -3473,25 +3314,41 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             return
         _push(lines, short_divider)
 
-    def _format_row(label: str, val: float, indent: str = "") -> str:
+    def _render_kv_line(label: str, value: str, indent: str = "") -> str:
         left = f"{indent}{label}"
-        right = _m(val)
+        right = value
+        right_width = max(len(right), 1)
         pad = max(1, page_width - len(left) - len(right))
+        left_width = len(left) + pad
+        table_text = draw_kv_table(
+            [(left, right)],
+            left_width=left_width,
+            right_width=right_width,
+            left_align="L",
+            right_align="R",
+        )
+        for line in table_text.splitlines():
+            if line.startswith("|") and line.endswith("|"):
+                body = line[1:-1]
+                try:
+                    left_segment, right_segment = body.split("|", 1)
+                    return f"{left_segment}{right_segment}"
+                except ValueError:
+                    break
         return f"{left}{' ' * pad}{right}"
 
     def row(label: str, val: float, indent: str = ""):
         # left-label, right-amount aligned to page_width
+        right = _m(val)
         if _is_total_label(label):
-            _ensure_total_separator(len(_m(val)))
-        _push(lines, _format_row(label, val, indent))
+            _maybe_insert_total_separator(len(right))
+        _push(lines, _render_kv_line(label, right, indent))
 
     def hours_row(label: str, val: float, indent: str = ""):
-        left = f"{indent}{label}"
         right = _h(val)
         if _is_total_label(label):
-            _ensure_total_separator(len(right))
-        pad = max(1, page_width - len(left) - len(right))
-        _push(lines, f"{left}{' ' * pad}{right}")
+            _maybe_insert_total_separator(len(right))
+        _push(lines, _render_kv_line(label, right, indent))
 
     def _is_extra_segment(segment: str) -> bool:
         try:
@@ -3510,7 +3367,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 segments.append(seg)
                 seen.add(seg)
         if existing:
-            for segment in re.split(r";\s*", str(existing)):
+            for segment in _RE_SPLIT(r";\s*", str(existing)):
                 seg = segment.strip()
                 if not seg or EXTRA_DETAIL_RE.match(seg):
                     continue
@@ -3521,7 +3378,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             return "; ".join(segments)
         if existing:
             filtered_existing: list[str] = []
-            for segment in re.split(r";\s*", str(existing)):
+            for segment in _RE_SPLIT(r";\s*", str(existing)):
                 seg = segment.strip()
                 if not seg or EXTRA_DETAIL_RE.match(seg):
                     continue
@@ -3805,7 +3662,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     material_total_for_why = 0.0
     if narrative:
         if isinstance(narrative, str):
-            parts = [seg.strip() for seg in re.split(r"(?<=\.)\s+", narrative) if seg.strip()]
+            parts = [seg.strip() for seg in _RE_SPLIT(r"(?<=\.)\s+", narrative) if seg.strip()]
             if not parts:
                 parts = [narrative.strip()]
         else:
@@ -4229,6 +4086,114 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if _coerce_float_or_none(pricing.get("total_direct_costs")) is None:
             pricing["total_direct_costs"] = float(sum(directs.values()))
 
+    def _lookup_blank(container: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+        if not isinstance(container, _MappingABC):
+            return None
+        for key in ("required_blank_in", "bbox_in"):
+            entry = container.get(key)
+            if isinstance(entry, _MappingABC):
+                return entry
+        return None
+
+    blank_sources: list[Mapping[str, Any] | None] = []
+    for parent in (breakdown, result):
+        if isinstance(parent, _MappingABC):
+            blank_sources.append(_lookup_blank(parent.get("geo")))
+            blank_sources.append(_lookup_blank(parent.get("geo_context")))
+            blank_sources.append(_lookup_blank(parent.get("geom")))
+    blank_sources.append(_lookup_blank(geo_context if isinstance(geo_context, _MappingABC) else None))
+    blank_sources.append(_lookup_blank(g if isinstance(g, _MappingABC) else None))
+    blank_sources.append(_lookup_blank(pricing_geom if isinstance(pricing_geom, _MappingABC) else None))
+
+    req_map: Mapping[str, Any] | None = next((entry for entry in blank_sources if entry), None)
+    w_val = _coerce_positive_float(req_map.get("w")) if req_map else None
+    h_val = _coerce_positive_float(req_map.get("h")) if req_map else None
+    t_val = _coerce_positive_float(req_map.get("t")) if req_map else None
+    w = float(w_val) if w_val else 0.0
+    h = float(h_val) if h_val else 0.0
+    t = float(t_val) if t_val else 0.0
+    if t <= 0:
+        t = 2.0
+
+    if w <= 0 or h <= 0:
+        geo_candidates: list[Mapping[str, Any]] = []
+        for parent in (breakdown, result):
+            if isinstance(parent, _MappingABC):
+                for key in ("geo", "geo_context", "geom"):
+                    candidate = parent.get(key)
+                    if isinstance(candidate, _MappingABC):
+                        geo_candidates.append(candidate)
+        if isinstance(geo_context, _MappingABC):
+            geo_candidates.append(geo_context)
+        if isinstance(g, _MappingABC):
+            geo_candidates.append(g)
+        inferred_w = inferred_h = 0.0
+        for geo_candidate in geo_candidates:
+            inferred_w, inferred_h = _infer_rect_from_holes(geo_candidate)
+            if inferred_w > 0 and inferred_h > 0:
+                break
+        if inferred_w > 0 and w <= 0:
+            w = float(inferred_w)
+        if inferred_h > 0 and h <= 0:
+            h = float(inferred_h)
+
+    required_blank = (float(w), float(h), float(t))
+    blank_len = max(required_blank[0], required_blank[1]) if required_blank[0] > 0 and required_blank[1] > 0 else 0.0
+    blank_wid = min(required_blank[0], required_blank[1]) if required_blank[0] > 0 and required_blank[1] > 0 else 0.0
+
+    def _blank_has_dims(candidate: Mapping[str, Any] | None) -> bool:
+        if not isinstance(candidate, _MappingABC):
+            return False
+        return bool(
+            _coerce_positive_float(candidate.get("w"))
+            and _coerce_positive_float(candidate.get("h"))
+        )
+
+    def _apply_blank_hint(container: Mapping[str, Any] | None) -> None:
+        if not isinstance(container, _MutableMappingABC):
+            return
+        if required_blank[0] <= 0 or required_blank[1] <= 0:
+            return
+        hint_payload: dict[str, Any] = {"w": float(required_blank[0]), "h": float(required_blank[1])}
+        if required_blank[2] > 0:
+            hint_payload["t"] = float(required_blank[2])
+        existing_blank = container.get("required_blank_in")
+        if not _blank_has_dims(existing_blank):
+            container["required_blank_in"] = dict(hint_payload)
+        existing_bbox = container.get("bbox_in")
+        if not _blank_has_dims(existing_bbox):
+            container.setdefault("bbox_in", dict(hint_payload))
+
+    for context in (
+        geo_context if isinstance(geo_context, _MutableMappingABC) else None,
+        g if isinstance(g, _MutableMappingABC) else None,
+        pricing_geom if isinstance(pricing_geom, _MutableMappingABC) else None,
+    ):
+        _apply_blank_hint(context)
+    for parent in (breakdown, result):
+        if isinstance(parent, _MutableMappingABC):
+            for key in ("geo", "geo_context", "geom"):
+                _apply_blank_hint(parent.get(key))
+
+    for container in (
+        material if isinstance(material, _MutableMappingABC) else None,
+        material_stock_block if isinstance(material_stock_block, _MutableMappingABC) else None,
+    ):
+        _apply_blank_hint(container)
+
+    if blank_len > 0 and isinstance(material_stock_block, _MutableMappingABC):
+        if _coerce_positive_float(material_stock_block.get("required_blank_len_in")) is None:
+            material_stock_block["required_blank_len_in"] = float(blank_len)
+        if _coerce_positive_float(material_stock_block.get("required_blank_wid_in")) is None:
+            material_stock_block["required_blank_wid_in"] = float(blank_wid)
+        if required_blank[2] > 0 and _coerce_positive_float(
+            material_stock_block.get("required_blank_thk_in")
+        ) is None:
+            material_stock_block["required_blank_thk_in"] = float(required_blank[2])
+
+    required_blank_len = float(blank_len) if blank_len > 0 else 0.0
+    required_blank_wid = float(blank_wid) if blank_wid > 0 else 0.0
+
     # ---- material & stock (compact; shown only if we actually have data) -----
     if material:
         mass_g = material.get("mass_g")
@@ -4331,6 +4296,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 if isinstance(material_stock_block, _MappingABC)
                 else None
             )
+
+            if (need_len is None or need_len <= 0) and required_blank_len > 0:
+                need_len = float(required_blank_len)
+            if (need_wid is None or need_wid <= 0) and required_blank_wid > 0:
+                need_wid = float(required_blank_wid)
+            if (need_thk is None or need_thk <= 0) and required_blank[2] > 0:
+                need_thk = float(required_blank[2])
 
             stock_len_val = _coerce_float_or_none(
                 material_stock_block.get("stock_L_in")
@@ -5573,7 +5545,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     def _norm(s: Any) -> str:
         import re
 
-        return re.sub(r"[^a-z0-9]+", "_", str(s or "").lower()).strip("_")
+        return _RE_SUB(r"[^a-z0-9]+", "_", str(s or "").lower()).strip("_")
 
     laborish_aliases: set[str] = set()
     for bucket_key, role in BUCKET_ROLE.items():
@@ -6001,7 +5973,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 detail_parts.append(str(rate_display))
             existing_detail = detail_lookup.get(display_label)
             if existing_detail not in (None, ""):
-                for segment in re.split(r";\s*", str(existing_detail)):
+                for segment in _RE_SPLIT(r";\s*", str(existing_detail)):
                     cleaned = segment.strip()
                     if not cleaned or cleaned.startswith("-"):
                         continue
@@ -7270,23 +7242,31 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         material_total_for_directs + material_tax_for_directs - scrap_credit_for_directs,
         2,
     )
-    material_display_amount_candidate = _coerce_float_or_none(
-        material_block.get("total_material_cost")
-    )
-    if material_display_amount_candidate is not None:
-        try:
-            material_direct_contribution = round(
-                float(material_display_amount_candidate),
-                2,
-            )
-        except Exception:
-            material_direct_contribution = round(
-                float(material_display_amount_candidate or 0.0),
-                2,
-            )
+    material_display_amount_candidate: float | None
+    if material_component_total is not None:
+        material_display_amount_candidate = float(material_component_total)
+        material_direct_contribution = round(float(material_component_total), 2)
+    else:
+        material_display_amount_candidate = _coerce_float_or_none(
+            material_block.get("total_material_cost")
+        )
+        if material_display_amount_candidate is not None:
+            try:
+                material_direct_contribution = round(
+                    float(material_display_amount_candidate),
+                    2,
+                )
+            except Exception:
+                material_direct_contribution = round(
+                    float(material_display_amount_candidate or 0.0),
+                    2,
+                )
     material_display_amount = round(float(material_direct_contribution), 2)
     material_total_for_why = float(material_display_amount)
-    material_net_cost = float(material_display_amount)
+    if material_component_net is not None:
+        material_net_cost = float(material_component_net)
+    else:
+        material_net_cost = float(material_display_amount)
     if material_display_amount <= 0.0:
         fallback_amount = 0.0
         if materials_direct_total > 0:
@@ -7801,7 +7781,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     append_lines(removal_card_lines)
 
     # ===== MATERIAL REMOVAL: HOLE-TABLE CARDS =================================
-
     def _first_dict(*cands):
         for c in cands:
             if isinstance(c, dict) and c:
@@ -7820,74 +7799,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 return c["material_group"]
         return None
 
-    def _norm_line(s: str) -> str:
-        return re.sub(r"\s+", " ", (s or "")).strip()
-
-    # patterns
-    _RE_QTY_LEAD   = re.compile(r"^\s*\((\d+)\)\s*")
-    _RE_FROM_SIDE  = re.compile(r"\bFROM\s+(FRONT|BACK)\b", re.I)
-    _RE_DEPTH      = re.compile(r"[×x]\s*([0-9.]+)\b", re.I)
-    _RE_THRU       = re.compile(r"\bTHRU\b", re.I)
-    _RE_DIA_ANY    = re.compile(r'(?:Ø|⌀|DIA|O)\s*([0-9.]+)|\(([0-9.]+)\s*Ø?\)|\b([0-9.]+)\b')
-    _RE_TAP        = re.compile(r"(\(\d+\)\s*)?(#\s*\d{1,2}-\d+|(?:\d+/\d+)\s*-\s*\d+|(?:\d+(?:\.\d+)?)\s*-\s*\d+|M\d+(?:\.\d+)?\s*x\s*\d+(?:\.\d+)?)\s*TAP", re.I)
-    _RE_CBORE      = re.compile(r"\b(C[\'’]?\s*BORE|CBORE|COUNTER\s*BORE)\b", re.I)
-
-    def _coalesce_rows(rows):
-        agg, order = {}, []
-        for r in rows:
-            key = (r.get("desc",""), r.get("ref",""))
-            if key not in agg:
-                agg[key] = int(r.get("qty") or 0); order.append(key)
-            else:
-                agg[key] += int(r.get("qty") or 0)
-        return [{"hole":"", "ref": ref, "qty": agg[(desc,ref)], "desc": desc} for (desc,ref) in order]
-
-    def _build_ops_rows_from_lines(lines_in: list[str]) -> list[dict]:
-        if not lines_in: return []
-        L = [_norm_line(s) for s in lines_in if _norm_line(s)]
-        out, i = [], 0
-        while i < len(L):
-            ln = L[i]
-            if any(k in ln.upper() for k in ("BREAK ALL","SHARP CORNERS","RADIUS","CHAMFER","AS SHOWN")):
-                i += 1; continue
-            qty = 1
-            mqty = _RE_QTY_LEAD.match(ln)
-            if mqty: qty = int(mqty.group(1)); ln = ln[mqty.end():].strip()
-            mtap = _RE_TAP.search(ln)
-            if mtap:
-                thread = mtap.group(2).replace(" ", "")
-                tail = " ".join(L[i:i+3])
-                desc = f"{thread} TAP"
-                if _RE_THRU.search(tail): desc += " THRU"
-                md = _RE_DEPTH.search(tail)
-                if md and md.group(1): desc += f' × {float(md.group(1)):.2f}"'
-                ms = _RE_FROM_SIDE.search(tail)
-                if ms: desc += f' FROM {ms.group(1).upper()}'
-                out.append({"hole":"", "ref":"", "qty":qty, "desc":desc})
-                i += 1; continue
-            if _RE_CBORE.search(ln):
-                tail = " ".join(L[max(0,i-1):i+2])
-                mda = _RE_DIA_ANY.search(tail)
-                dia = None
-                if mda:
-                    for g in mda.groups():
-                        if g: dia = float(g); break
-                desc = (f"{dia:.4f} C’BORE" if dia is not None else "C’BORE")
-                md = _RE_DEPTH.search(tail)
-                if md and md.group(1): desc += f' × {float(md.group(1)):.2f}"'
-                ms = _RE_FROM_SIDE.search(tail)
-                if ms: desc += f' FROM {ms.group(1).upper()}'
-                out.append({"hole":"", "ref":"", "qty":qty, "desc":desc})
-                i += 1; continue
-            if any(k in ln.upper() for k in ("C' DRILL","C’DRILL","CENTER DRILL","SPOT DRILL")):
-                tail = " ".join(L[i:i+2])
-                md = _RE_DEPTH.search(tail)
-                desc = "C’DRILL" + (f' × {float(md.group(1)):.2f}"' if (md and md.group(1)) else "")
-                out.append({"hole":"", "ref":"", "qty":qty, "desc":desc})
-                i += 1; continue
-            i += 1
-        return _coalesce_rows(out)
-
     try:
         ctx_a = locals().get("breakdown")
         ctx_b = locals().get("result")
@@ -7902,20 +7813,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
         if not ops_rows:
             # collect chart text wherever it lives
-            def _collect_chart_lines(*containers):
-                keys = ("chart_lines","hole_table_lines","chart_text_lines","hole_chart_lines")
-                merged, seen = [], set()
-                for d in containers:
-                    if not isinstance(d, dict): continue
-                    for k in keys:
-                        v = d.get(k)
-                        if isinstance(v, list) and all(isinstance(x, str) for x in v):
-                            for s in v:
-                                if s not in seen:
-                                    seen.add(s); merged.append(s)
-                return merged
-            chart_lines_all = _collect_chart_lines(ctx, geo_map, ctx_a, ctx_b)
-            built = _build_ops_rows_from_lines(chart_lines_all)
+            chart_lines_all = _collect_chart_lines_context(ctx, geo_map, ctx_a, ctx_b)
+            built = _build_ops_rows_from_lines_fallback(chart_lines_all)
             _push(lines, f"[DEBUG] chart_lines_found={len(chart_lines_all)} built_rows={len(built)}")
             if built:
                 geo_map.setdefault("ops_summary", {})["rows"] = built
@@ -9597,7 +9496,11 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             scrap_credit_amount = max(0.0, float(credit_override_amount))
             scrap_credit_source = "override_amount"
         elif scrap_mass_lb is not None:
-            recovery = recovery_override if recovery_override is not None else SCRAP_RECOVERY_DEFAULT
+            recovery = (
+                recovery_override
+                if recovery_override is not None
+                else _materials.SCRAP_RECOVERY_DEFAULT
+            )
             scrap_recovery_used = recovery
             if unit_price_override is not None:
                 scrap_price_used = max(0.0, float(unit_price_override))
@@ -9618,7 +9521,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                     scrap_credit_source = "wieland"
                     mat_block["scrap_price_usd_per_lb"] = float(scrap_price_used)
                 else:
-                    scrap_price_used = SCRAP_CREDIT_FALLBACK_USD_PER_LB
+                    scrap_price_used = _materials.SCRAP_PRICE_FALLBACK_USD_PER_LB
                     scrap_credit_source = "default"
                     mat_block["scrap_price_usd_per_lb"] = float(scrap_price_used)
             scrap_credit_amount = float(scrap_mass_lb) * float(scrap_price_used or 0.0) * float(scrap_recovery_used or 0.0)
@@ -13042,6 +12945,34 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
             source = "HOLE TABLE (TEXT)"
 
     geom_cnt, geom_fam = hole_count_from_geometry(doc, float(to_in))
+    hole_cloud_points = filtered_circles(doc, float(to_in))
+    hole_bbox_in: dict[str, Any] | None = None
+    if hole_cloud_points:
+        scale = float(to_in)
+        xs_in = [float(x) * scale for x, _, _, _ in hole_cloud_points]
+        ys_in = [float(y) * scale for _, y, _, _ in hole_cloud_points]
+        if xs_in and ys_in:
+            xmin = min(xs_in)
+            xmax = max(xs_in)
+            ymin = min(ys_in)
+            ymax = max(ys_in)
+            span_w = max(0.0, xmax - xmin)
+            span_h = max(0.0, ymax - ymin)
+            margin_each = _hole_margin_inches(span_w, span_h)
+            width_with_margin = span_w + 2.0 * margin_each
+            height_with_margin = span_h + 2.0 * margin_each
+            hole_bbox_in = {
+                "xmin": round(xmin, 4),
+                "xmax": round(xmax, 4),
+                "ymin": round(ymin, 4),
+                "ymax": round(ymax, 4),
+                "span_w": round(span_w, 4),
+                "span_h": round(span_h, 4),
+                "margin_each_in": round(margin_each, 3),
+                "w": round(width_with_margin, 3),
+                "h": round(height_with_margin, 3),
+                "source": "hole_cloud",
+            }
     if not cnt and geom_cnt:
         cnt, fam = geom_cnt, geom_fam
         source = "GEOMETRY CIRCLE COUNT"
@@ -13193,6 +13124,75 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
     geo.update(deburr_hints)
     if deburr_prov:
         geo.setdefault("provenance", {})["deburr"] = deburr_prov
+    derived_entries: dict[str, Any] = {}
+    if hole_bbox_in:
+        geo["hole_cloud_bbox_in"] = hole_bbox_in
+        derived_entries["hole_cloud_bbox_in"] = hole_bbox_in
+
+    thickness_hint = _coerce_positive_float(thickness_guess)
+    if stock_plan:
+        need_len_in = _coerce_positive_float(stock_plan.get("need_len_in"))
+        need_wid_in = _coerce_positive_float(stock_plan.get("need_wid_in"))
+        need_thk_in = _coerce_positive_float(
+            stock_plan.get("need_thk_in") or stock_plan.get("stock_thk_in")
+        )
+        if need_thk_in:
+            thickness_hint = thickness_hint or float(need_thk_in)
+        if need_len_in and need_wid_in:
+            dims_sorted = sorted(
+                [float(need_len_in), float(need_wid_in)], reverse=True
+            )
+            blank_dict: dict[str, Any] = {
+                "h": round(dims_sorted[0], 3),
+                "w": round(dims_sorted[1], 3),
+            }
+            if thickness_hint:
+                blank_dict["t"] = round(float(thickness_hint), 3)
+            geo["required_blank_in"] = blank_dict
+            derived_entries["required_blank_in"] = blank_dict
+
+    if "required_blank_in" not in geo and hole_bbox_in:
+        hole_w = _coerce_positive_float(hole_bbox_in.get("w"))
+        hole_h = _coerce_positive_float(hole_bbox_in.get("h"))
+        if hole_w and hole_h:
+            dims_sorted = sorted([float(hole_h), float(hole_w)], reverse=True)
+            blank_dict = {
+                "h": round(dims_sorted[0], 3),
+                "w": round(dims_sorted[1], 3),
+            }
+            if thickness_hint:
+                blank_dict["t"] = round(float(thickness_hint), 3)
+            geo["required_blank_in"] = blank_dict
+            derived_entries.setdefault("required_blank_in", blank_dict)
+
+    len_hint = _coerce_positive_float(geo.get("plate_len_in"))
+    wid_hint = _coerce_positive_float(geo.get("plate_wid_in"))
+    if (len_hint is None or wid_hint is None) and hole_bbox_in:
+        span_h = _coerce_positive_float(hole_bbox_in.get("span_h"))
+        span_w = _coerce_positive_float(hole_bbox_in.get("span_w"))
+        if len_hint is None and span_h:
+            len_hint = float(span_h)
+        if wid_hint is None and span_w:
+            wid_hint = float(span_w)
+    if len_hint and wid_hint:
+        dims_sorted = sorted([float(len_hint), float(wid_hint)], reverse=True)
+        bbox_dict: dict[str, Any] = {
+            "h": round(dims_sorted[0], 3),
+            "w": round(dims_sorted[1], 3),
+        }
+        if thickness_hint:
+            bbox_dict["t"] = round(float(thickness_hint), 3)
+        geo.setdefault("bbox_in", bbox_dict)
+        derived_entries.setdefault("bbox_in", bbox_dict)
+
+    if derived_entries:
+        existing_derived = geo.get("derived")
+        if isinstance(existing_derived, _MappingABC):
+            merged = dict(existing_derived)
+            merged.update(derived_entries)
+            geo["derived"] = merged
+        else:
+            geo["derived"] = derived_entries
     if flags:
         geo["flags"] = flags
     return geo
@@ -14260,7 +14260,7 @@ class App(tk.Tk):
             or default_app_settings_json()
         )
 
-        self.settings = self._load_settings()
+        self.settings = self.llm_services.load_settings(self.settings_path)
         if not isinstance(self.settings, dict):
             self.settings = {}
 
@@ -14332,7 +14332,7 @@ class App(tk.Tk):
             self.llm_thread_limit.trace_add("write", self._on_llm_thread_limit_changed)
         elif hasattr(self.llm_thread_limit, "trace"):
             self.llm_thread_limit.trace("w", lambda *_: self._on_llm_thread_limit_changed())
-        self._apply_llm_thread_limit_env(persist=False)
+        self._sync_llm_thread_limit(persist=False)
 
         # Create a Menu Bar
         menubar = tk.Menu(self)
@@ -14492,7 +14492,7 @@ class App(tk.Tk):
         path = path.strip()
         if not path:
             return None
-        self._apply_llm_thread_limit_env(persist=False)
+        self._sync_llm_thread_limit(persist=False)
         cached = getattr(self, "_llm_client_cache", None)
         if cached and cached.model_path == path:
             return cached
@@ -14511,29 +14511,6 @@ class App(tk.Tk):
         self._llm_client_cache = client
         return client
 
-    def _load_settings(self) -> dict[str, Any]:
-        path = getattr(self, "settings_path", None)
-        if not isinstance(path, Path):
-            return {}
-        if not path.exists():
-            return {}
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return data
-        except Exception:
-            pass
-        return {}
-
-    def _save_settings(self) -> None:
-        path = getattr(self, "settings_path", None)
-        if not isinstance(path, Path):
-            return
-        try:
-            path.write_text(jdump(self.settings, default=None), encoding="utf-8")
-        except Exception:
-            pass
-
     def _get_last_variables_path(self) -> str:
         if isinstance(self.settings, dict):
             return str(self.settings.get("last_variables_path", "") or "").strip()
@@ -14544,7 +14521,7 @@ class App(tk.Tk):
             self.settings = {}
         value = str(path) if path else ""
         self.settings["last_variables_path"] = value
-        self._save_settings()
+        self.llm_services.save_settings(self.settings_path, self.settings)
 
     def _validate_thread_limit(self, proposed: str) -> bool:
         text = str(proposed).strip()
@@ -14575,20 +14552,20 @@ class App(tk.Tk):
                 pass
         self._llm_client_cache = None
 
-    def _apply_llm_thread_limit_env(self, *, persist: bool = True) -> int | None:
+    def _sync_llm_thread_limit(self, *, persist: bool) -> int | None:
+        """Apply the current thread limit via ``LLMServices`` and manage cache state."""
+
         limit = self._current_llm_thread_limit()
         prior = getattr(self, "_llm_thread_limit_applied", None)
 
-        if limit is None:
-            os.environ.pop("QWEN_N_THREADS", None)
-        else:
-            os.environ["QWEN_N_THREADS"] = str(limit)
-
-        if persist:
-            if not isinstance(self.settings, dict):
-                self.settings = {}
-            self.settings["llm_thread_limit"] = str(limit) if limit is not None else ""
-            self._save_settings()
+        updated_settings = self.llm_services.apply_thread_limit_env(
+            limit,
+            settings=self.settings,
+            persist=persist,
+            settings_path=self.settings_path if persist else None,
+        )
+        if isinstance(updated_settings, dict):
+            self.settings = updated_settings
 
         if limit != prior:
             self._llm_thread_limit_applied = limit
@@ -14597,7 +14574,7 @@ class App(tk.Tk):
         return limit
 
     def _on_llm_thread_limit_changed(self, *_: object) -> None:
-        self._apply_llm_thread_limit_env(persist=True)
+        self._sync_llm_thread_limit(persist=True)
 
     def _variables_dialog_defaults(self) -> dict[str, Any]:
         defaults: dict[str, Any] = {}
@@ -14640,7 +14617,7 @@ class App(tk.Tk):
             self.settings = {}
         self.settings["material_vendor_csv"] = path
         self.params["MaterialVendorCSVPath"] = path
-        self._save_settings()
+        self.llm_services.save_settings(self.settings_path, self.settings)
         try:
             self.pricing.clear_cache()
         except Exception:
@@ -14652,7 +14629,7 @@ class App(tk.Tk):
             self.settings = {}
         self.settings["material_vendor_csv"] = ""
         self.params["MaterialVendorCSVPath"] = ""
-        self._save_settings()
+        self.llm_services.save_settings(self.settings_path, self.settings)
         try:
             self.pricing.clear_cache()
         except Exception:
@@ -14679,7 +14656,7 @@ class App(tk.Tk):
 
         limit: int | None = None
         try:
-            limit = self._apply_llm_thread_limit_env(persist=False)
+            limit = self._sync_llm_thread_limit(persist=False)
             status = "Loading Vision LLM (GPU)…"
             if limit:
                 status = f"Loading Vision LLM (GPU, {limit} CPU threads)…"
@@ -14697,7 +14674,7 @@ class App(tk.Tk):
         except Exception as exc:
             self._llm_load_error = exc
             try:
-                limit = self._apply_llm_thread_limit_env(persist=False)
+                limit = self._sync_llm_thread_limit(persist=False)
                 msg = f"Vision LLM GPU load failed ({exc}); retrying CPU mode…"
                 if limit:
                     msg = f"{msg[:-1]} with {limit} CPU threads…)"
@@ -15227,7 +15204,7 @@ class App(tk.Tk):
         mode = str(self.rate_mode.get() or "").strip().lower()
         if isinstance(self.settings, dict):
             self.settings["rate_mode"] = mode
-            self._save_settings()
+            self.llm_services.save_settings(self.settings_path, self.settings)
 
         try:
             if self.vars_df is not None:
@@ -15947,7 +15924,7 @@ class App(tk.Tk):
                     self.llm_thread_limit.set(str(int(thread_limit)))
                 except Exception:
                     self.llm_thread_limit.set("")
-            self._apply_llm_thread_limit_env(persist=True)
+            self._sync_llm_thread_limit(persist=True)
 
         geo_payload = payload.get("geo")
         self.geo = dict(geo_payload) if isinstance(geo_payload, dict) else {}

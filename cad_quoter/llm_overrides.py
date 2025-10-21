@@ -30,6 +30,7 @@ from cad_quoter.pass_labels import (
     _HARDWARE_LABEL_ALIASES,
     _canonical_pass_label,
 )
+from cad_quoter.material_density import density_for_material as _lookup_density
 from cad_quoter.utils import jdump
 from cad_quoter.utils.render_utils import fmt_hours
 
@@ -291,7 +292,18 @@ def get_llm_overrides(
     part_mass_est = _as_float(features.get("part_mass_g_est")) or 0.0
     if part_mass_est <= 0 and density_feature > 0 and volume_feature > 0:
         part_mass_est = density_feature * volume_feature
-    density_for_stock = density_feature if density_feature > 0 else 7.85
+    density_for_stock = density_feature if density_feature > 0 else 0.0
+    if density_for_stock <= 0:
+        material_hint = (
+            features.get("material_key")
+            or features.get("material")
+            or features.get("material_name")
+        )
+        density_guess = _lookup_density(material_hint, default=None)
+        if density_guess and density_guess > 0:
+            density_for_stock = density_guess
+    if density_for_stock <= 0:
+        density_for_stock = 7.85
 
     bbox_feature_raw = features.get("bbox_mm")
     bbox_feature = bbox_feature_raw if isinstance(bbox_feature_raw, dict) else {}
