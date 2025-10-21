@@ -583,6 +583,8 @@ _RENDER_ASCII_REPLACEMENTS: dict[str, str] = {
 _RENDER_PASSTHROUGH: dict[str, str] = {
     "–": "__EN_DASH__",
     "×": "__MULTIPLY__",
+    "≥": "__GEQ__",
+    "≤": "__LEQ__",
 }
 
 
