@@ -264,6 +264,12 @@ from cad_quoter.app._value_utils import (
     _format_value,
 )
 from cad_quoter.app.chart_lines import (
+    RE_CBORE,
+    RE_DEPTH,
+    RE_DIA,
+    RE_NPT,
+    RE_TAP,
+    RE_THRU,
     build_ops_rows_from_lines_fallback as _build_ops_rows_from_lines_fallback,
     collect_chart_lines_context as _collect_chart_lines_context,
     norm_line as _norm_line,
@@ -12126,29 +12132,11 @@ def merge_estimate_into_vars(vars_df: PandasDataFrame, estimate: dict) -> Pandas
     return vars_df
 # ---- 2D: DXF / DWG (ezdxf) ---------------------------------------------------
 # Accept: #10-32, 5/8-11, 0.190-32, M8x1.25, etc.
-RE_TAP = re.compile(
-    r"(\(\d+\)\s*)?("
-    r"#\s*\d{1,2}-\d+"                 # #10-32
-    r"|(?:\d+/\d+)\s*-\s*\d+"          # 5/8-11
-    r"|(?:\d+(?:\.\d+)?)\s*-\s*\d+"    # 0.190-32
-    r"|M\d+(?:\.\d+)?\s*x\s*\d+(?:\.\d+)?"  # M8x1.25
-    r")\s*TAP",
-    re.I,
-)
-RE_NPT    = re.compile(r"(\d+\/\d+)\s*-\s*N\.?P\.?T\.?", re.I)
-RE_THRU   = re.compile(r"\bTHRU\b", re.I)
-RE_CBORE  = re.compile(r"C[’']?BORE|CBORE|COUNTERBORE", re.I)
 RE_CSK    = re.compile(r"CSK|C'SINK|COUNTERSINK", re.I)
 _RE_DEPTH_OR_THICK = re.compile(r"(\d+(?:\.\d+)?)\s*DEEP(?:\s+FROM\s+(FRONT|BACK))?", re.I)
-RE_DEPTH  = _RE_DEPTH_OR_THICK
-RE_DIA    = re.compile(r"[Ø⌀\u00D8]?\s*(\d+(?:\.\d+)?)", re.I)
 RE_THICK  = _RE_DEPTH_OR_THICK
 
 
-_QTY_LEAD = re.compile(r'^\s*\((\d+)\)\s*')
-_MM_IN_DIA = re.compile(r"(?:Ø|⌀|O|DIA|\b)\s*([0-9.]+)")
-_PAREN_DIA = re.compile(r"\(([0-9.]+)\s*Ø?\)")
-_FROM_SIDE = re.compile(r"\bFROM\s+(FRONT|BACK)\b", re.I)
 RE_MAT    = re.compile(r"\b(MATL?|MATERIAL)\b\s*[:=\-]?\s*([A-Z0-9 \-\+/\.]+)", re.I)
 RE_HARDNESS = re.compile(r"(\d+(?:\.\d+)?)\s*(?:[-–]\s*(\d+(?:\.\d+)?))?\s*HRC", re.I)
 RE_HEAT_TREAT = re.compile(r"HEAT\s*TREAT(?:ED|\s+TO)?|\bQUENCH\b|\bTEMPER\b", re.I)
@@ -15267,7 +15255,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
                     )
             elif chart_lines:
                 # Fallback: derive rows directly from the free text chart
-                ops_rows = _build_ops_rows_from_chart_lines(chart_lines)
+                ops_rows = _build_ops_rows_from_lines_fallback(chart_lines)
 
             if ops_rows:
                 ops_summary_map = geo.setdefault("ops_summary", {})
@@ -15513,113 +15501,6 @@ def _extract_text_lines_from_ezdxf_doc(doc: Any) -> list[str]:
         joined = joined[start:]
     return [ln for ln in joined.splitlines() if ln.strip()]
 
-
-# ===== Fallback HOLE-TABLE row builder (delegates to cad_quoter.app.chart_lines) ===
-
-def _build_ops_rows_from_chart_lines(chart_lines: list[str]) -> list[dict]:
-    rows: list[dict] = []
-    if not chart_lines:
-        return rows
-    lines = [_norm_line(x) for x in chart_lines]
-    i = 0
-    while i < len(lines):
-        ln = lines[i]
-        if not ln:
-            i += 1
-            continue
-        # skip generic notes
-        if any(
-            k in ln.upper()
-            for k in ["BREAK ALL", "SHARP CORNERS", "RADIUS", "CHAMFER", "AS SHOWN"]
-        ):
-            i += 1
-            continue
-
-        qty = 1
-        mqty = _QTY_LEAD.match(ln)
-        if mqty:
-            qty = int(mqty.group(1))
-            ln = ln[mqty.end() :].strip()
-
-        # TAP
-        mtap = RE_TAP.search(ln)
-        if mtap:
-            # (group 2 holds the whole spec: "#10-32", "5/8-11", "0.190-32", "M8x1.25")
-            thread = mtap.group(2).replace(" ", "")
-            desc = f"{thread} TAP"
-            tail = " ".join([ln] + lines[i + 1 : i + 3])  # look forward for depth / THRU / side
-            if RE_THRU.search(tail):
-                desc += " THRU"
-            md = RE_DEPTH.search(tail)
-            if md and md.group(1):
-                desc += f' × {float(md.group(1)):.2f}"'
-            ms = _FROM_SIDE.search(tail)
-            if ms:
-                desc += f' FROM {ms.group(1).upper()}'
-            rows.append({"hole": "", "ref": "", "qty": qty, "desc": desc})
-            i += 1
-            continue
-
-        # COUNTERBORE
-        if RE_CBORE.search(ln):
-            tail = " ".join([ln] + lines[i - 1 : i] + lines[i + 1 : i + 2])
-            md = _PAREN_DIA.search(tail) or _MM_IN_DIA.search(tail) or RE_DIA.search(tail)
-            dia = float(md.group(1)) if md else None
-            desc = f"{dia:.4f} C’BORE" if dia is not None else "C’BORE"
-            mdp = RE_DEPTH.search(" ".join([ln] + lines[i + 1 : i + 2]))
-            if mdp and mdp.group(1):
-                desc += f' × {float(mdp.group(1)):.2f}"'
-            ms = _FROM_SIDE.search(" ".join([ln] + lines[i + 1 : i + 2]))
-            if ms:
-                desc += f' FROM {ms.group(1).upper()}'
-            rows.append({"hole": "", "ref": "", "qty": qty, "desc": desc})
-            i += 1
-            continue
-
-        # SPOT / CENTER DRILL
-        if (
-            "C' DRILL" in ln.upper()
-            or "C’DRILL" in ln.upper()
-            or "CENTER DRILL" in ln.upper()
-            or "SPOT DRILL" in ln.upper()
-        ):
-            tail = " ".join([ln] + lines[i + 1 : i + 2])
-            md = RE_DEPTH.search(tail)
-            desc = "C’DRILL" + (
-                f' × {float(md.group(1)):.2f}"' if (md and md.group(1)) else ""
-            )
-            rows.append({"hole": "", "ref": "", "qty": qty, "desc": desc})
-            i += 1
-            continue
-
-        # THRU drill with a ref size (e.g., "R (.339Ø) DRILL THRU")
-        if "DRILL" in ln.upper() and RE_THRU.search(ln):
-            md = _PAREN_DIA.search(ln) or _MM_IN_DIA.search(ln) or RE_DIA.search(ln)
-            ref = (md.group(1) if md else "").strip()
-            rows.append({"hole": "", "ref": ref, "qty": qty, "desc": f"{ref} THRU".strip()})
-            i += 1
-            continue
-
-        # NPT etc
-        if RE_NPT.search(ln):
-            rows.append({"hole": "", "ref": "", "qty": qty, "desc": _norm_line(ln)})
-            i += 1
-            continue
-
-        i += 1
-
-    # coalesce identical (desc, ref) pairs
-    agg: dict[tuple[str, str], int] = {}
-    order: list[tuple[str, str]] = []
-    for r in rows:
-        key = (r["desc"], r.get("ref", ""))
-        if key not in agg:
-            order.append(key)
-        agg[key] = agg.get(key, 0) + int(r.get("qty") or 0)
-    return [
-        {"hole": "", "ref": ref, "qty": agg[(desc, ref)], "desc": desc}
-        for (desc, ref) in order
-    ]
 
 def hole_rows_to_ops(rows: Iterable[Any] | None) -> list[dict[str, Any]]:
     """Flatten parsed HoleRow objects into estimator-friendly operations."""
