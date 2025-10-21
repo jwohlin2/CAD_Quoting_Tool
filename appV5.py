@@ -14,7 +14,27 @@ Single-file CAD Quoter (v8)
 
 from __future__ import annotations
 
-import sys
+import os, sys, logging
+
+LOG_LEVEL = os.getenv("APP_LOG_LEVEL", "DEBUG").upper()
+logging.basicConfig(
+    stream=sys.stdout,
+    level=getattr(logging, LOG_LEVEL, logging.DEBUG),
+    format="[%(levelname)s] %(message)s",
+)
+
+
+def dbg(lines, msg: str):
+    """Log to terminal, and also mirror into the quote if `lines` is provided."""
+
+    logging.debug(msg)
+    try:
+        if lines is not None:
+            lines.append(f"[DEBUG] {msg}")
+    except Exception:
+        pass
+
+
 import typing
 from io import TextIOWrapper
 from pathlib import Path
@@ -44,8 +64,6 @@ import copy
 import csv
 import json
 import math
-import os
-import logging
 import re
 import time
 from functools import cmp_to_key, lru_cache
@@ -1334,7 +1352,13 @@ def _compute_drilling_removal_section(
             if drill_minutes_total > 0.0:
                 extras["removal_drilling_hours"] = minutes_to_hours(drill_minutes_total)
 
+            meta_min = (((process_plan_summary or {}).get("drilling") or {}).get("total_minutes_billed"))
+            removal_min = (extras or {}).get("drill_total_minutes", 0.0)
             drill_minutes_total = _pick_drill_minutes(process_plan_summary, extras, lines)
+            meta_val = _safe_float(meta_min, 0.0)
+            removal_val = _safe_float(removal_min, 0.0)
+            chosen_val = _safe_float(drill_minutes_total, 0.0)
+            dbg(lines, f"drill_minutes_pick meta={meta_val:.2f} removal={removal_val:.2f} -> {chosen_val:.2f}")
             drill_mrate = (
                 _lookup_bucket_rate("drilling", rates)
                 or _lookup_bucket_rate("machine", rates)
@@ -1353,6 +1377,11 @@ def _compute_drilling_removal_section(
                 machine_rate_per_hr=drill_mrate,
                 labor_rate_per_hr=drill_lrate,
             )
+
+            drilling_bucket = None
+            if isinstance(bucket_view_obj, (_MappingABC, dict)):
+                drilling_bucket = (bucket_view_obj.get("buckets") or {}).get("drilling")
+            dbg(lines, f"drilling_bucket={drilling_bucket}")
 
             milling_hours_candidates: list[Any] = []
             if isinstance(drilling_card_detail, _MappingABC):
@@ -1405,6 +1434,11 @@ def _compute_drilling_removal_section(
 
             _normalize_buckets(bucket_view_obj)
 
+            buckets_final: Mapping[str, Any] | None = None
+            if isinstance(bucket_view_obj, (_MappingABC, dict)):
+                buckets_final = bucket_view_obj.get("buckets")
+            dbg(lines, f"buckets_final={buckets_final or {}}")
+
             drilling_dbg_entry: Mapping[str, Any] | None = None
             milling_dbg_entry: Mapping[str, Any] | None = None
             if isinstance(bucket_view_obj, _MappingABC):
@@ -1420,8 +1454,8 @@ def _compute_drilling_removal_section(
                 drilling_dbg_entry = {}
             if not isinstance(milling_dbg_entry, _MappingABC):
                 milling_dbg_entry = {}
-            _push(lines, f"[DEBUG] drilling_bucket={drilling_dbg_entry}")
-            _push(lines, f"[DEBUG] milling_bucket={milling_dbg_entry}")
+            dbg(lines, f"drilling_bucket={drilling_dbg_entry}")
+            dbg(lines, f"milling_bucket={milling_dbg_entry}")
 
             return extras, lines, updated_plan_summary
 
@@ -10430,11 +10464,17 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 debug_lines if isinstance(debug_lines, list) else None
             )
 
+            meta_min = (((process_plan_summary or {}).get("drilling") or {}).get("total_minutes_billed"))
+            removal_min = (extra_map or {}).get("drill_total_minutes", 0.0)
             drill_minutes_total = _pick_drill_minutes(
                 process_plan_summary,
                 extra_map,
                 debug_lines_list,
             )
+            meta_val = _safe_float(meta_min, 0.0)
+            removal_val = _safe_float(removal_min, 0.0)
+            chosen_val = _safe_float(drill_minutes_total, 0.0)
+            dbg(debug_lines_list, f"drill_minutes_pick meta={meta_val:.2f} removal={removal_val:.2f} -> {chosen_val:.2f}")
             drill_mrate = (
                 _lookup_bucket_rate("drilling", rates)
                 or _lookup_bucket_rate("machine", rates)
@@ -10454,7 +10494,17 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 labor_rate_per_hr=drill_lrate,
             )
 
+            drilling_bucket = None
+            if isinstance(bucket_view, (_MappingABC, dict)):
+                drilling_bucket = (bucket_view.get("buckets") or {}).get("drilling")
+            dbg(debug_lines_list, f"drilling_bucket={drilling_bucket}")
+
             _normalize_buckets(bucket_view)
+
+            buckets_final: Mapping[str, Any] | None = None
+            if isinstance(bucket_view, (_MappingABC, dict)):
+                buckets_final = bucket_view.get("buckets")
+            dbg(debug_lines_list, f"buckets_final={buckets_final or {}}")
 
             drilling_dbg_entry: Mapping[str, Any] | None = None
             try:
@@ -10471,7 +10521,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 locals().get("lines") if "lines" in locals() else None,
             )
             if debug_lines is not None:
-                _push(debug_lines, f"[DEBUG] drilling_bucket={drilling_dbg_entry or {}}")
+                dbg(debug_lines, f"drilling_bucket={drilling_dbg_entry or {}}")
 
     roughing_hours = _coerce_float_or_none(value_map.get("Roughing Cycle Time"))
     if roughing_hours is None:
