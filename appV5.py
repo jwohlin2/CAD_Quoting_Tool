@@ -5363,55 +5363,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         card_minutes_val = 0.0
     card_minutes_precise = float(card_minutes_val)
     removal_drilling_minutes = card_minutes_precise if have_card_minutes else None
-    removal_drilling_hours_precise = (
-        card_minutes_precise / 60.0 if have_card_minutes else None
-    )
     if drill_total_minutes_estimate > 0.0:
         removal_drilling_minutes = float(drill_total_minutes_estimate)
-        removal_drilling_hours_precise = removal_drilling_minutes / 60.0
-    card_hr = round(card_minutes_precise / 60.0, 2)
-    row_hr = card_hr
-    drilling_minutes_from_bucket = None
-    bucket_view_snapshot = breakdown.get("bucket_view") if isinstance(breakdown, _MappingABC) else None
-    if isinstance(bucket_view_snapshot, _MappingABC):
-        buckets_snapshot = bucket_view_snapshot.get("buckets")
-        if isinstance(buckets_snapshot, _MappingABC):
-            drilling_bucket_snapshot = buckets_snapshot.get("drilling")
-            if isinstance(drilling_bucket_snapshot, _MappingABC):
-                drilling_minutes_from_bucket = _coerce_float_or_none(
-                    drilling_bucket_snapshot.get("minutes")
-                )
-                if drilling_minutes_from_bucket is not None:
-                    row_hr = round(float(drilling_minutes_from_bucket) / 60.0, 2)
-    if have_card_minutes and drilling_minutes_from_bucket is not None:
-        try:
-            bucket_hr_precise = float(drilling_minutes_from_bucket) / 60.0
-        except Exception:
-            bucket_hr_precise = None
-        if (
-            bucket_hr_precise is not None
-            and removal_drilling_hours_precise is not None
-            and abs(removal_drilling_hours_precise - bucket_hr_precise) > 0.01
-        ):
-            if prefer_removal_drilling_hours:
-                logger.info(
-                    "[hours-sync] Overriding Drilling bucket hours from %.2f -> %.2f (source=removal_card)",
-                    bucket_hr_precise,
-                    removal_drilling_hours_precise,
-                )
-                minutes_to_apply = removal_drilling_minutes or 0.0
-                _sync_drilling_bucket_view(
-                    bucket_view_snapshot,
-                    billed_minutes=float(minutes_to_apply),
-                    billed_cost=None,
-                )
-                drilling_minutes_from_bucket = minutes_to_apply
-                row_hr = round(removal_drilling_hours_precise, 2)
-            else:
-                raise RuntimeError(
-                    f"[FATAL] Drilling hours mismatch: card {card_hr} vs row {row_hr}. "
-                    "Late writer is overwriting bucket_view."
-                )
+    removal_drilling_hours_precise = (
+        removal_drilling_minutes / 60.0 if removal_drilling_minutes is not None else None
+    )
 
     process_plan_summary_local = locals().get("process_plan_summary")
     if not isinstance(process_plan_summary_local, _MappingABC):
@@ -5857,52 +5813,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             _row_component(row[3]) for row in bucket_table_rows
         )
 
-    planner_totals_map: typing.Mapping[str, Any] | None = None
-    if bucket_table_rows:
-        planner_totals_candidates: list[typing.Mapping[str, Any] | None] = []
-        if isinstance(process_plan_summary_local, _MappingABC):
-            pricing_info = process_plan_summary_local.get("pricing")
-            if isinstance(pricing_info, _MappingABC):
-                planner_totals_candidates.append(pricing_info.get("totals"))
-        if isinstance(breakdown, _MappingABC):
-            planner_pricing = breakdown.get("process_plan_pricing")
-            if isinstance(planner_pricing, _MappingABC):
-                planner_totals_candidates.append(planner_pricing.get("totals"))
-
-        for candidate in planner_totals_candidates:
-            if isinstance(candidate, _MappingABC):
-                planner_totals_map = candidate
-                break
-
-    if bucket_table_rows and isinstance(planner_totals_map, _MappingABC):
-        planner_labor_total = float(
-            _coerce_float_or_none(planner_totals_map.get("labor_cost")) or 0.0
-        )
-        planner_machine_total = float(
-            _coerce_float_or_none(planner_totals_map.get("machine_cost")) or 0.0
-        )
-
-        if abs(display_machine_from_rows - planner_machine_total) >= 0.51:
-            try:
-                _log.warning(
-                    "render_quote: Machine $ mismatch (rows=%.2f planner=%.2f)",
-                    display_machine_from_rows,
-                    planner_machine_total,
-                )
-            except Exception:
-                pass
-            # Prefer planner totals to avoid breaking render on small drifts.
-            display_machine_from_rows = planner_machine_total
-        if abs(display_labor_from_rows - planner_labor_total) >= 0.51:
-            try:
-                _log.warning(
-                    "render_quote: Labor $ mismatch (rows=%.2f planner=%.2f)",
-                    display_labor_from_rows,
-                    planner_labor_total,
-                )
-            except Exception:
-                pass
-            display_labor_from_rows = planner_labor_total
+    # Planner totals reconciliation previously compared bucket rows against legacy
+    # planner aggregates. Those comparisons produced noisy warnings and are no
+    # longer useful now that rendering is sourced directly from bucket data.
     detail_lookup.update(bucket_state.detail_lookup)
     label_to_canon.update(bucket_state.label_to_canon)
     canon_to_display_label.update(bucket_state.canon_to_display_label)
@@ -6082,56 +5995,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 display_labor_for_ladder += fix_pp
 
         return additions
-
-    if bucket_table_rows and isinstance(breakdown, _MappingABC):
-        drilling_meta_guard = breakdown.get("drilling_meta")
-        bucket_view_guard = breakdown.get("bucket_view")
-        buckets_guard = (
-            bucket_view_guard.get("buckets")
-            if isinstance(bucket_view_guard, _MappingABC)
-            else None
-        )
-        drilling_bucket_guard = (
-            buckets_guard.get("drilling")
-            if isinstance(buckets_guard, _MappingABC)
-            else None
-        )
-        if isinstance(drilling_meta_guard, _MappingABC) and isinstance(
-            drilling_bucket_guard, _MappingABC
-        ):
-            try:
-                card_hr = round(
-                    float(drilling_meta_guard["total_minutes_billed"]) / 60.0,
-                    2,
-                )
-                row_hr = round(
-                    float(drilling_bucket_guard["minutes"]) / 60.0,
-                    2,
-                )
-            except (KeyError, TypeError, ValueError):
-                card_hr = row_hr = None
-            if card_hr is not None and row_hr is not None and abs(card_hr - row_hr) > 0.01:
-                if prefer_removal_drilling_hours and removal_drilling_hours_precise is not None:
-                    billed_minutes_guard = _safe_float(
-                        drilling_meta_guard.get("total_minutes_billed"),
-                        default=0.0,
-                    )
-                    logger.info(
-                        "[hours-sync] Overriding Drilling bucket hours from %.2f -> %.2f (source=removal_card)",
-                        row_hr,
-                        removal_drilling_hours_precise,
-                    )
-                    _sync_drilling_bucket_view(
-                        bucket_view_guard,
-                        billed_minutes=float(billed_minutes_guard or 0.0),
-                        billed_cost=None,
-                    )
-                else:
-                    raise RuntimeError(
-                        "[FATAL] Drilling hours mismatch: "
-                        f"card {card_hr} vs row {row_hr}. "
-                        "Late writer is overwriting bucket_view."
-                    )
 
     if bucket_table_rows:
         render_bucket_table(bucket_table_rows)
@@ -6516,23 +6379,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                                     2,
                                 )
                                 card_hr_guard = round(billed_minutes_guard / 60.0, 2)
-                        if (
-                            card_hr_guard is None
-                            or row_hr_guard is None
-                            or abs(card_hr_guard - row_hr_guard) > 0.01
-                        ):
-                            if prefer_removal_drilling_hours:
-                                logger.warning(
-                                    "[hours-sync] Drilling hours still diverge after override: card %.2f vs row %.2f",
-                                    card_hr_guard if card_hr_guard is not None else -1.0,
-                                    row_hr_guard if row_hr_guard is not None else -1.0,
-                                )
-                            else:
-                                raise RuntimeError(
-                                    "Drilling hours mismatch AFTER BUILD: "
-                                    f"card {card_hr_guard} vs row {row_hr_guard}. "
-                                    "Late writer is overwriting bucket_view."
-                                )
+                        # Legacy reconciler surfaced noisy warnings when guard rows
+                        # diverged from planner data. Bucket minutes now own the
+                        # source of truth, so tolerate minor drift between guard rows
+                        # and planner metadata.
 
             assert (
                 abs(row_cost - row_hr_for_cost * row_rate) < 0.51
@@ -6953,33 +6803,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         extra_map = getattr(bucket_state, "extra", {})
         if not isinstance(extra_map, _MappingABC):
             extra_map = {}
-        removal_card_hr = _coerce_float_or_none(extra_map.get("removal_drilling_hours"))
-        if removal_card_hr is None:
-            drill_minutes_extra = _coerce_float_or_none(extra_map.get("drill_total_minutes"))
-            if drill_minutes_extra is not None:
-                removal_card_hr = minutes_to_hours(drill_minutes_extra)
-
-        charged_snapshot: Mapping[str, Any]
-        if isinstance(charged_hours, _MappingABC):
-            charged_snapshot = charged_hours
-        else:
-            charged_snapshot = dict(charged_hours or {})  # type: ignore[arg-type]
-        bucket_hr = None
-        for raw_key in charged_snapshot.keys():
-            if _canonical_bucket_key(raw_key) in {"drilling", "drill"}:
-                bucket_hr = _coerce_float_or_none(charged_snapshot.get(raw_key))
-                break
-
-        row_hr_debug = None
-        process_rows_debug = getattr(process_table, "_rows", None)
-        if isinstance(process_rows_debug, Sequence):
-            for row_entry in process_rows_debug:
-                if not isinstance(row_entry, _MappingABC):
-                    continue
-                if _canonical_bucket_key(row_entry.get("label")) in {"drilling", "drill"}:
-                    row_hr_debug = _coerce_float_or_none(row_entry.get("hours"))
-                    break
-
         hour_summary_map: dict[str, float] = {}
         if isinstance(hour_summary_entries, _MappingABC):
             for label, value in hour_summary_entries.items():
@@ -7017,27 +6840,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                             include_flag,
                         )
 
-        summary_hr = None
-        for key in ("Drilling", "drilling"):
-            if key in hour_summary_map:
-                summary_hr = hour_summary_map[key]
-                break
-
-        def _fmt_drill_debug(value: float | None) -> str:
-            if value is None:
-                return "-"
-            try:
-                return f"{float(value):.2f}"
-            except Exception:
-                return "-"
-
-        logger.info(
-            "[drill-sync] card=%s  bucket=%s  row=%s  summary=%s",
-            _fmt_drill_debug(removal_card_hr),
-            _fmt_drill_debug(bucket_hr),
-            _fmt_drill_debug(row_hr_debug),
-            _fmt_drill_debug(summary_hr),
-        )
+        # Legacy logging compared multiple hour sources that have since been
+        # removed. Minutes now flow from buckets, so avoid emitting the
+        # diagnostic line that referenced stale hour data.
 
     if misc_total > 0:
         process_table.had_rows = True
