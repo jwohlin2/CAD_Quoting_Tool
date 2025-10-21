@@ -2,8 +2,17 @@ from __future__ import annotations
 
 """Fallback helpers for parsing hole chart text into conservative operations."""
 
+import math
 import re
 from typing import Iterable, Mapping, Sequence
+
+from appkit.utils import (
+    _ipm_from_rpm_ipr,
+    _lookup_sfm_ipr,
+    _parse_thread_major_in,
+    _parse_tpi,
+    _rpm_from_sfm_diam,
+)
 
 __all__ = [
     "norm_line",
@@ -21,7 +30,103 @@ __all__ = [
     "RE_TAP",
     "RE_CBORE",
     "RE_NPT",
+    "RE_JIG_GRIND",
 ]
+
+
+_TAPPING_INDEX_MIN = 0.08
+_COUNTERBORE_INDEX_MIN = 0.06
+_COUNTERBORE_RETRACT_FACTOR = 1.3
+_COUNTERBORE_EXTRA_TRAVEL_IN = 0.05
+_SPOT_INDEX_MIN = 0.05
+_SPOT_DEFAULT_DEPTH_IN = 0.1
+_JIG_GRIND_RATE_IPM = 0.02
+_JIG_GRIND_INDEX_MIN = 0.25
+_MIN_IPM_DENOM = 0.1
+
+
+def _safe_float(value: object) -> float | None:
+    """Return ``value`` coerced to ``float`` when possible."""
+
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except Exception:
+        return None
+    if math.isnan(number) or math.isinf(number):
+        return None
+    return float(number)
+
+
+def _format_feed(ipr: float | None, rpm: float | None, ipm: float | None) -> str:
+    """Return a consistent feed summary string with dash placeholders."""
+
+    ipr_txt = "-" if ipr is None else f"{ipr:.4f}"
+    rpm_txt = "-" if rpm is None else f"{int(round(rpm))}"
+    ipm_txt = "-" if ipm is None else f"{ipm:.3f}"
+    return f"{ipr_txt} ipr | {rpm_txt} rpm | {ipm_txt} ipm"
+
+
+def _tapping_runtime(thread: str, depth_in: float | None, is_thru: bool) -> tuple[float | None, str]:
+    """Return tapping cycle minutes-per-hole and formatted feed string."""
+
+    tpi = _parse_tpi(thread)
+    ipr = (1.0 / float(tpi)) if tpi else None
+    major = _parse_thread_major_in(thread)
+    sfm, _ = _lookup_sfm_ipr("tapping", major, None, None)
+    rpm = _rpm_from_sfm_diam(sfm, major)
+    ipm = _ipm_from_rpm_ipr(rpm, ipr)
+    travel_in = depth_in
+    if travel_in is None and is_thru:
+        travel_in = None  # defer to upstream thickness context when available
+    minutes: float | None = None
+    if travel_in is not None and ipm is not None:
+        cycle = max(0.0, float(travel_in))
+        minutes = (cycle / max(_MIN_IPM_DENOM, ipm)) + _TAPPING_INDEX_MIN
+    feed_fmt = _format_feed(ipr, rpm, ipm)
+    return minutes, feed_fmt
+
+
+def _counterbore_runtime(diam_in: float | None, depth_in: float | None) -> tuple[float | None, str]:
+    """Return counterbore cycle minutes-per-hole and feed format string."""
+
+    sfm, ipr = _lookup_sfm_ipr("counterbore", diam_in, None, None)
+    rpm = _rpm_from_sfm_diam(sfm, diam_in)
+    ipm = _ipm_from_rpm_ipr(rpm, ipr)
+    travel_in = None if depth_in is None else max(0.0, float(depth_in))
+    minutes: float | None = None
+    if travel_in is not None and ipm is not None:
+        cycle = (travel_in * _COUNTERBORE_RETRACT_FACTOR) + _COUNTERBORE_EXTRA_TRAVEL_IN
+        minutes = (cycle / max(_MIN_IPM_DENOM, ipm)) + _COUNTERBORE_INDEX_MIN
+    feed_fmt = _format_feed(ipr, rpm, ipm)
+    return minutes, feed_fmt
+
+
+def _spot_runtime(depth_in: float | None) -> tuple[float | None, str]:
+    """Return spot drill minutes-per-hole and feed format string."""
+
+    sfm, ipr = _lookup_sfm_ipr("spot", 0.1875, None, None)
+    rpm = _rpm_from_sfm_diam(sfm, 0.1875)
+    ipm = _ipm_from_rpm_ipr(rpm, ipr)
+    travel = depth_in if depth_in is not None else _SPOT_DEFAULT_DEPTH_IN
+    minutes: float | None = None
+    if ipm is not None:
+        cycle = max(0.0, float(travel))
+        minutes = (cycle / max(_MIN_IPM_DENOM, ipm)) + _SPOT_INDEX_MIN
+    feed_fmt = _format_feed(ipr, rpm, ipm)
+    return minutes, feed_fmt
+
+
+def _jig_grind_runtime(depth_in: float | None) -> tuple[float | None, str]:
+    """Return jig-grind minutes-per-feature and feed format string."""
+
+    travel = _safe_float(depth_in)
+    ipm = _JIG_GRIND_RATE_IPM
+    minutes: float | None = None
+    if travel is not None:
+        denom = ipm if ipm and ipm > 0 else _MIN_IPM_DENOM
+        minutes = (max(0.0, travel) / denom) + _JIG_GRIND_INDEX_MIN
+    feed_fmt = _format_feed(None, None, ipm)
+    return minutes, feed_fmt
 
 
 def _norm_line(s: str) -> str:
@@ -45,13 +150,14 @@ _RE_NPT = re.compile(r"(\d+/\d+)\s*-\s*N\.?P\.?T\.?", re.I)
 _RE_MM_IN_DIA = re.compile(r"(?:Ø|⌀|O|DIA|\b)\s*([0-9.]+)")
 _RE_PAREN_DIA = re.compile(r"\(([0-9.]+)\s*Ø?\)")
 _RE_DIA_SIMPLE = re.compile(r"[Ø⌀\u00D8]?\s*(\d+(?:\.\d+)?)", re.I)
+_RE_JIG_GRIND = re.compile(r"\bJIG\s*GRIND\b", re.I)
 
 
 
 def _coalesce_rows(rows: Sequence[Mapping[str, object]] | Sequence[dict]) -> list[dict]:
     """Merge rows that share the same description/reference pair."""
 
-    agg: dict[tuple[str, str], int] = {}
+    agg: dict[tuple[str, str], dict] = {}
     order: list[tuple[str, str]] = []
     for r in rows:
         if not isinstance(r, Mapping):  # tolerate bare dicts without Mapping mixin
@@ -71,11 +177,15 @@ def _coalesce_rows(rows: Sequence[Mapping[str, object]] | Sequence[dict]) -> lis
             continue
         key = (desc, ref)
         if key not in agg:
-            agg[key] = qty_val
+            agg[key] = dict(candidate)
+            agg[key]["hole"] = ""
+            agg[key]["ref"] = ref
+            agg[key]["desc"] = desc
+            agg[key]["qty"] = qty_val
             order.append(key)
         else:
-            agg[key] += qty_val
-    return [{"hole": "", "ref": ref, "qty": agg[(desc, ref)], "desc": desc} for (desc, ref) in order]
+            agg[key]["qty"] = int(agg[key].get("qty") or 0) + qty_val
+    return [agg[key] for key in order]
 
 
 
@@ -102,7 +212,8 @@ def _build_ops_rows_from_lines_fallback(lines: list[str]) -> list[dict]:
             thread = mtap.group(2).replace(" ", "")
             tail = " ".join([ln] + L[i + 1:i + 3])
             desc = f"{thread} TAP"
-            if _RE_THRU.search(tail):
+            has_thru = bool(_RE_THRU.search(tail))
+            if has_thru:
                 desc += " THRU"
             depth_source = tail
             depth_match = _RE_DEPTH_MULT.search(depth_source)
@@ -112,6 +223,7 @@ def _build_ops_rows_from_lines_fallback(lines: list[str]) -> list[dict]:
             if deep_match:
                 depth_value = depth_value or deep_match.group(1)
                 side_from_depth = (deep_match.group(2) or "").upper() or None
+            depth_in = _safe_float(depth_value)
             if depth_value:
                 desc += f' × {float(depth_value):.2f}"'
             ms = side_from_depth or None
@@ -121,7 +233,12 @@ def _build_ops_rows_from_lines_fallback(lines: list[str]) -> list[dict]:
                     ms = m_side.group(1).upper()
             if ms:
                 desc += f" FROM {ms}"
-            out.append({"hole": "", "ref": "", "qty": qty, "desc": desc})
+            minutes, feed_fmt = _tapping_runtime(thread, depth_in, has_thru)
+            row = {"hole": "", "ref": "", "qty": qty, "desc": desc}
+            if minutes is not None:
+                row["t_per_hole_min"] = round(minutes, 3)
+            row["feed_fmt"] = feed_fmt
+            out.append(row)
             i += 1
             continue
         if _RE_CBORE.search(ln):
@@ -142,6 +259,7 @@ def _build_ops_rows_from_lines_fallback(lines: list[str]) -> list[dict]:
             if deep_match:
                 depth_value = depth_value or deep_match.group(1)
                 side_from_depth = (deep_match.group(2) or "").upper() or None
+            depth_in = _safe_float(depth_value)
             if depth_value:
                 desc += f' × {float(depth_value):.2f}"'
             ms = side_from_depth or None
@@ -151,7 +269,12 @@ def _build_ops_rows_from_lines_fallback(lines: list[str]) -> list[dict]:
                     ms = m_side.group(1).upper()
             if ms:
                 desc += f" FROM {ms}"
-            out.append({"hole": "", "ref": "", "qty": qty, "desc": desc})
+            minutes, feed_fmt = _counterbore_runtime(dia, depth_in)
+            row = {"hole": "", "ref": "", "qty": qty, "desc": desc}
+            if minutes is not None:
+                row["t_per_hole_min"] = round(minutes, 3)
+            row["feed_fmt"] = feed_fmt
+            out.append(row)
             i += 1
             continue
         if any(k in ln.upper() for k in ("C' DRILL", "C’DRILL", "CENTER DRILL", "SPOT DRILL")):
@@ -164,7 +287,32 @@ def _build_ops_rows_from_lines_fallback(lines: list[str]) -> list[dict]:
             desc = "C’DRILL"
             if depth_value:
                 desc += f' × {float(depth_value):.2f}"'
-            out.append({"hole": "", "ref": "", "qty": qty, "desc": desc})
+            depth_in = _safe_float(depth_value)
+            minutes, feed_fmt = _spot_runtime(depth_in)
+            row = {"hole": "", "ref": "", "qty": qty, "desc": desc}
+            if minutes is not None:
+                row["t_per_hole_min"] = round(minutes, 3)
+            row["feed_fmt"] = feed_fmt
+            out.append(row)
+            i += 1
+            continue
+        if _RE_JIG_GRIND.search(ln):
+            tail = " ".join([ln] + L[i + 1:i + 2])
+            depth_match = _RE_DEPTH_MULT.search(tail)
+            depth_value = depth_match.group(1) if depth_match else None
+            if not depth_value:
+                deep_match = _RE_DEPTH_DEEP.search(tail)
+                depth_value = deep_match.group(1) if deep_match else None
+            desc = _norm_line(ln)
+            depth_in = _safe_float(depth_value)
+            if depth_value and "×" not in desc:
+                desc += f' × {float(depth_value):.2f}"'
+            minutes, feed_fmt = _jig_grind_runtime(depth_in)
+            row = {"hole": "", "ref": "", "qty": qty, "desc": desc}
+            if minutes is not None:
+                row["t_per_hole_min"] = round(minutes, 3)
+            row["feed_fmt"] = feed_fmt
+            out.append(row)
             i += 1
             continue
         if "DRILL" in ln.upper() and _RE_THRU.search(ln):
