@@ -1407,13 +1407,11 @@ def _compute_drilling_removal_section(
             if drill_minutes_total > 0.0:
                 extras["removal_drilling_hours"] = minutes_to_hours(drill_minutes_total)
 
-            meta_min = (((process_plan_summary or {}).get("drilling") or {}).get("total_minutes_billed"))
-            removal_min = (extras or {}).get("drill_total_minutes", 0.0)
-            drill_minutes_total = _pick_drill_minutes(process_plan_summary, extras, lines)
-            meta_val = _safe_float(meta_min, 0.0)
-            removal_val = _safe_float(removal_min, 0.0)
-            chosen_val = _safe_float(drill_minutes_total, 0.0)
-            dbg(lines, f"drill_minutes_pick meta={meta_val:.2f} removal={removal_val:.2f} -> {chosen_val:.2f}")
+            extra_map = extras
+            drill_minutes_total = _pick_drill_minutes(
+                process_plan_summary,
+                extra_map,
+            )  # minutes
             drill_mrate = (
                 _lookup_bucket_rate("drilling", rates)
                 or _lookup_bucket_rate("machine", rates)
@@ -7894,19 +7892,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 default=0.0,
             )
 
-        drilling_row: _ProcessRowRecord | None = None
-        try:
-            for record in getattr(process_table, "rows", []):
-                if _process_row_canon(record) == "drilling":
-                    drilling_row = record
-                    break
-        except Exception:
-            drilling_row = None
-
-        row_hr = float(drilling_row.hours or 0.0) if drilling_row else 0.0
-        row_rate = float(drilling_row.rate or 0.0) if drilling_row else 0.0
-        row_cost = float(drilling_row.total or 0.0) if drilling_row else 0.0
-
         bucket_minutes_map = (
             breakdown.get("bucket_minutes_detail")
             if isinstance(breakdown, _MappingABC)
@@ -7918,33 +7903,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             (bucket_minutes_map or {}).get("drilling"),
             default=0.0,
         )
-
-        if (
-            drilling_row is not None
-            and abs(drill_min_card - 60.0 * row_hr) > 0.01
-        ):
-            logger.error(
-                "[DRILL_GUARD] Minutes mismatch before render: card %.2f min vs row %.2f min — forcing sync.",
-                drill_min_card,
-                60.0 * row_hr,
-            )
-            corrected_hr_precise = drill_min_card / 60.0
-            corrected_hr = round(corrected_hr_precise, 2)
-            new_cost = row_cost
-            if row_rate > 0.0:
-                new_cost = round(corrected_hr_precise * row_rate, 2)
-            process_table.update_row("drilling", hours=corrected_hr, cost=new_cost)
-            drilling_row.hours = corrected_hr
-            drilling_row.total = new_cost
-            process_cost_row_details["drilling"] = (corrected_hr, row_rate, new_cost)
-            process_costs_for_render["drilling"] = new_cost
-            labor_costs_display[drilling_row.name] = new_cost
-            bucket_minutes_detail["drilling"] = float(drill_min_card)
-            if isinstance(bucket_minutes_map, _MutableMappingABC):
-                bucket_minutes_map["drilling"] = float(drill_min_card)
-            row_hr = corrected_hr
-            drill_min_row = float(drill_min_card)
-
         programming_hr = 0.0
         if isinstance(nre_detail, _MappingABC):
             programming_detail = nre_detail.get("programming")
@@ -10299,21 +10257,14 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 debug_lines if isinstance(debug_lines, list) else None
             )
 
-            meta_min = (((process_plan_summary or {}).get("drilling") or {}).get("total_minutes_billed"))
-            removal_min = (extra_map or {}).get("drill_total_minutes", 0.0)
             drill_minutes_total = _pick_drill_minutes(
                 process_plan_summary,
                 extra_map,
-                debug_lines_list,
-            )
+            )  # minutes
             drill_minutes_total = _safe_float(drill_minutes_total, 0.0)
             assert 0 <= drill_minutes_total <= 10000, (
                 f"drilling minutes out of range: {drill_minutes_total}"
             )
-            meta_val = _safe_float(meta_min, 0.0)
-            removal_val = _safe_float(removal_min, 0.0)
-            chosen_val = _safe_float(drill_minutes_total, 0.0)
-            dbg(debug_lines_list, f"drill_minutes_pick meta={meta_val:.2f} removal={removal_val:.2f} -> {chosen_val:.2f}")
             drill_mrate = (
                 _lookup_bucket_rate("drilling", rates)
                 or _lookup_bucket_rate("machine", rates)

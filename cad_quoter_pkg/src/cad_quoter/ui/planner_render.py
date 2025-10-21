@@ -1384,24 +1384,6 @@ def _format_planner_bucket_line(
         minutes_val = 0.0
 
     hr_val = 0.0
-    if _canonical_bucket_key(canon_key) == "drilling":
-        synced_hr_val: float | None = None
-        synced_source = info.get("synced_hours")
-        if synced_source is not None:
-            try:
-                synced_hr_val = float(synced_source)
-            except Exception:
-                synced_hr_val = None
-        if synced_hr_val is None:
-            synced_minutes = info.get("synced_minutes")
-            if synced_minutes is not None:
-                try:
-                    synced_hr_val = float(synced_minutes) / 60.0
-                except Exception:
-                    synced_hr_val = None
-        if synced_hr_val is not None and synced_hr_val > 0:
-            hr_val = float(synced_hr_val)
-            minutes_val = hr_val * 60.0
     if isinstance(meta, _MappingABC):
         try:
             hr_val = float(meta.get("hr", 0.0) or 0.0)
