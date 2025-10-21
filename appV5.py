@@ -356,7 +356,7 @@ from cad_quoter.geometry.dxf_enrich import (
     iter_table_text as _shared_iter_table_text,
 )
 
-from cad_quoter.pricing.process_buckets import bucketize
+from cad_quoter.pricing.process_buckets import BUCKET_ROLE, PROCESS_BUCKETS, bucketize
 
 import cad_quoter.geometry as geometry
 
@@ -2734,20 +2734,7 @@ PROCESS_LABEL_OVERRIDES: dict[str, str] = {
     "saw_waterjet": "Saw/Waterjet",
 }
 
-PREFERRED_PROCESS_BUCKET_ORDER: tuple[str, ...] = (
-    "milling",
-    "drilling",
-    "counterbore",
-    "countersink",
-    "tapping",
-    "grinding",
-    "finishing_deburr",
-    "saw_waterjet",
-    "inspection",
-    "assembly",
-    "packaging",
-    "misc",
-)
+PREFERRED_PROCESS_BUCKET_ORDER: tuple[str, ...] = PROCESS_BUCKETS.order
 
 CANON_MAP: dict[str, str] = {
     "deburr": "finishing_deburr",
@@ -2789,53 +2776,6 @@ CANON_MAP: dict[str, str] = {
 PLANNER_META: frozenset[str] = frozenset({"planner_labor", "planner_machine", "planner_total"})
 
 # ---------- Bucket & Operation Roles ----------
-BUCKET_ROLE: dict[str, str] = {
-    "programming": "labor_only",
-    "inspection": "labor_only",
-    "deburr": "labor_only",
-    "deburring": "labor_only",
-    "finishing_deburr": "labor_only",
-    "finishing": "labor_only",
-    "finishing/deburr": "labor_only",
-
-    "drilling": "split",
-    "milling": "split",
-    "grinding": "split",
-    "sinker_edm": "split",
-
-    "wedm": "machine_only",
-    "wire_edm": "machine_only",
-    "waterjet": "machine_only",
-    "saw": "machine_only",
-    "saw_waterjet": "machine_only",
-
-    "_default": "machine_only",
-}
-
-_HIDE_IN_BUCKET_VIEW: frozenset[str] = frozenset({*PLANNER_META, "misc"})
-_PREFERRED_BUCKET_VIEW_ORDER: tuple[str, ...] = (
-    "programming",
-    "programming_amortized",
-    "fixture_build",
-    "fixture_build_amortized",
-    "milling",
-    "drilling",
-    "counterbore",
-    "countersink",
-    "tapping",
-    "grinding",
-    "finishing_deburr",
-    "saw_waterjet",
-    "wire_edm",
-    "sinker_edm",
-    "inspection",
-    "assembly",
-    "toolmaker_support",
-    "packaging",
-    "ehs_compliance",
-    "turning",
-    "lapping_honing",
-)
 @no_type_check
 def render_quote(  # type: ignore[reportGeneralTypeIssues]
     result: dict,
@@ -4374,20 +4314,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 return meta_entry
         return None
 
-    bucket_order = [
-        "milling",
-        "drilling",
-        "counterbore",
-        "countersink",
-        "tapping",
-        "grinding",
-        "finishing_deburr",
-        "saw_waterjet",
-        "inspection",
-        "assembly",
-        "packaging",
-        "misc",
-    ]
+    bucket_order = list(PROCESS_BUCKETS.order)
     bucket_keys = []
     seen_buckets: set[str] = set()
     for key in bucket_order:
@@ -5814,15 +5741,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
         return re.sub(r"[^a-z0-9]+", "_", str(s or "").lower()).strip("_")
 
-    LABORISH = {
-        "finishing_deburr",
-        "inspection",
-        "assembly",
-        "toolmaker_support",
-        "ehs_compliance",
-        "fixture_build_amortized",
-        "programming_amortized",
-    }
+    laborish_aliases: set[str] = set()
+    for bucket_key, role in BUCKET_ROLE.items():
+        if bucket_key == "_default" or role != "labor_only":
+            continue
+        for alias in PROCESS_BUCKETS.aliases(bucket_key):
+            laborish_aliases.add(alias)
+    LABORISH = {_norm(alias) for alias in laborish_aliases if alias}
 
     RATE_KEYS = {
         "milling": ["MillingRate"],
