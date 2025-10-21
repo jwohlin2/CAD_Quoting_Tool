@@ -546,7 +546,7 @@ from appkit.ui.planner_render import (
     _prepare_bucket_view,
     _extract_bucket_map,
     _process_label,
-    _seed_bucket_minutes,
+    _seed_bucket_minutes as _planner_seed_bucket_minutes,
     _split_hours_for_bucket,
     _sync_drilling_bucket_view,
     _charged_hours_by_bucket,
