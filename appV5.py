@@ -382,12 +382,10 @@ def _normalize_buckets(bucket_view_obj: MutableMapping[str, Any] | Mapping[str, 
 
 def _as_float(x: Any, default: float = 0.0) -> float:
     try:
-        value = float(x)
-        if math.isfinite(value):
-            return value
+        v = float(x)
+        return v if math.isfinite(v) else default
     except Exception:
-        pass
-    return default
+        return default
 
 
 def _clamp_minutes(v: Any, lo: float = 0.0, hi: float = 10000.0) -> float:
@@ -3557,26 +3555,25 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         append_line(_render_kv_line(label, right, indent))
 
     def _render_process_and_hours_from_buckets(
-        lines: list[str],
-        bucket_view_obj: Mapping[str, Any] | None,
-    ) -> tuple[float, float]:
-        """Render the Process & Labor + Labor Hour tables from planner buckets."""
-
-        buckets: dict[str, Mapping[str, Any]] = {}
-        if isinstance(bucket_view_obj, (_MappingABC, dict)):
+        lines: list[str], bucket_view_obj: Mapping[str, Any] | None
+    ) -> None:
+        try:
+            buckets_candidate = (
+                bucket_view_obj.get("buckets") if bucket_view_obj else None
+            )
+        except Exception:
+            buckets_candidate = None
+        if isinstance(buckets_candidate, dict):
+            buckets = buckets_candidate
+        elif isinstance(buckets_candidate, _MappingABC):
             try:
-                buckets_candidate = bucket_view_obj.get("buckets")
+                buckets = dict(buckets_candidate)
             except Exception:
-                buckets_candidate = None
-            if isinstance(buckets_candidate, dict):
-                buckets = buckets_candidate
-            elif isinstance(buckets_candidate, _MappingABC):
-                try:
-                    buckets = dict(buckets_candidate)
-                except Exception:
-                    buckets = {}
+                buckets = {}
+        else:
+            buckets = {}
 
-        labels = {
+        label = {
             "programming": "Programming (amortized)",
             "milling": "Milling",
             "drilling": "Drilling",
@@ -3586,7 +3583,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             "jig_grind": "Jig-Grind",
             "inspection": "Inspection",
         }
-        preferred_order = [
+        order = [
             "programming",
             "milling",
             "drilling",
@@ -3597,47 +3594,39 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             "inspection",
         ]
 
-        ordered_keys = preferred_order + [
-            key for key in buckets.keys() if key not in preferred_order
-        ]
-
-        _push(lines, "Process & Labor Costs")
-        _push(lines, "-" * 74)
+        lines.append("Process & Labor Costs")
+        lines.append("-" * 74)
         total_cost = 0.0
         seen: set[str] = set()
-        for key in ordered_keys:
-            if key in seen:
+        for k in list(order) + [k for k in buckets if k not in order]:
+            e = buckets.get(k)
+            if not isinstance(e, _MappingABC) or k in seen:
                 continue
-            entry = buckets.get(key)
-            if not isinstance(entry, _MappingABC):
-                continue
-            seen.add(key)
-            total_amount = _as_float(entry.get("total$"), 0.0)
-            total_cost += total_amount
-            display_label = labels.get(key, key)
-            _push(lines, f"  {display_label.ljust(28)}${total_amount:>10,.2f}")
-        _push(lines, " " * 66 + "-------")
-        _push(lines, f"  Total{' ' * 58}${total_cost:>10,.2f}")
-        _push(lines, "")
+            seen.add(k)
+            tot = _as_float(e.get("total$"), 0.0)
+            total_cost += tot
+            lines.append(f"  {label.get(k, k).ljust(28)}${tot:>10,.2f}")
+        lines.append(" " * 66 + "-------")
+        lines.append(f"  Total{' '*58}${total_cost:>10,.2f}")
+        lines.append("")
 
-        _push(lines, "Labor Hour Summary")
-        _push(lines, "-" * 74)
+        lines.append("Labor Hour Summary")
+        lines.append("-" * 74)
         total_hours = 0.0
-        for key in ordered_keys:
-            entry = buckets.get(key)
-            if not isinstance(entry, _MappingABC):
+        seen.clear()
+        for k in list(order) + [k for k in buckets if k not in order]:
+            e = buckets.get(k)
+            if not isinstance(e, _MappingABC) or k in seen:
                 continue
-            hours_val = _minutes_to_hours(entry.get("minutes", 0.0))
-            if hours_val <= 0:
+            seen.add(k)
+            hrs = _minutes_to_hours(e.get("minutes", 0.0))
+            if hrs <= 0:
                 continue
-            display_label = labels.get(key, key)
-            _push(lines, f"  {display_label.ljust(28)}{hours_val:.2f} hr")
-            total_hours += hours_val
-        _push(lines, " " * 66 + "-------")
-        _push(lines, f"  Total Hours{' ' * 49}{total_hours:.2f} hr")
-        _push(lines, "")
-
-        return total_cost, total_hours
+            lines.append(f"  {label.get(k, k).ljust(28)}{hrs:.2f} hr")
+            total_hours += hrs
+        lines.append(" " * 66 + "-------")
+        lines.append(f"  Total Hours{' '*49}{total_hours:.2f} hr")
+        lines.append("")
 
     def _is_extra_segment(segment: str) -> bool:
         try:
@@ -7017,7 +7006,50 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         _normalize_buckets(typing.cast(MutableMapping[str, Any], bucket_view_struct))
 
     process_section_start = len(lines)
-    proc_total_rendered, hrs_total_rendered = _render_process_and_hours_from_buckets(
+
+    bucket_entries_for_totals: Mapping[str, Any] | None = None
+    if isinstance(bucket_view_for_render, (_MappingABC, dict)):
+        try:
+            bucket_entries_candidate = bucket_view_for_render.get("buckets")
+        except Exception:
+            bucket_entries_candidate = None
+        if isinstance(bucket_entries_candidate, dict):
+            bucket_entries_for_totals = bucket_entries_candidate
+        elif isinstance(bucket_entries_candidate, _MappingABC):
+            try:
+                bucket_entries_for_totals = dict(bucket_entries_candidate)
+            except Exception:
+                bucket_entries_for_totals = {}
+    if bucket_entries_for_totals is None:
+        bucket_entries_for_totals = {}
+
+    preferred_bucket_order = [
+        "programming",
+        "milling",
+        "drilling",
+        "tapping",
+        "counterbore",
+        "spot_drill",
+        "jig_grind",
+        "inspection",
+    ]
+
+    proc_total_rendered = 0.0
+    hrs_total_rendered = 0.0
+    seen_bucket_keys: set[str] = set()
+    for bucket_key in list(preferred_bucket_order) + [
+        key for key in bucket_entries_for_totals if key not in preferred_bucket_order
+    ]:
+        entry = bucket_entries_for_totals.get(bucket_key)
+        if not isinstance(entry, _MappingABC) or bucket_key in seen_bucket_keys:
+            continue
+        seen_bucket_keys.add(bucket_key)
+        proc_total_rendered += _as_float(entry.get("total$"), 0.0)
+        hours_val = _minutes_to_hours(entry.get("minutes", 0.0))
+        if hours_val > 0:
+            hrs_total_rendered += hours_val
+
+    _render_process_and_hours_from_buckets(
         lines,
         bucket_view_for_render,
     )
