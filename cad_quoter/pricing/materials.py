@@ -16,11 +16,8 @@ from typing import Any, Dict, Literal, Mapping, overload
 from cad_quoter.utils.scrap import normalize_scrap_pct
 from cad_quoter.domain_models import (
     DEFAULT_MATERIAL_KEY,
-    MATERIAL_DENSITY_G_CC_BY_KEY,
-    MATERIAL_DENSITY_G_CC_BY_KEYWORD,
     MATERIAL_OTHER_KEY,
     coerce_float_or_none as _coerce_float_or_none,
-    normalize_material_key,
 )
 from cad_quoter.llm_overrides import _plate_mass_properties, _plate_mass_from_dims
 from cad_quoter.pricing.mcmaster_helpers import resolve_mcmaster_plate_for_quote
@@ -29,6 +26,13 @@ from cad_quoter.pricing.vendor_csv import (
     pick_plate_from_mcmaster as _pick_plate_from_mcmaster,
 )
 from cad_quoter.resources import default_catalog_csv as _default_catalog_csv
+from cad_quoter.material_density import (
+    DEFAULT_MATERIAL_DENSITY_G_CC,
+    MATERIAL_DENSITY_G_CC_BY_KEY,
+    MATERIAL_DENSITY_G_CC_BY_KEYWORD,
+    density_for_material as _density_for_material,
+    normalize_material_key,
+)
 
 try:  # Optional dependency: McMaster catalog helpers
     from cad_quoter.vendors.mcmaster_stock import lookup_sku_and_price_for_mm
@@ -391,7 +395,7 @@ except Exception:  # pragma: no cover - optional dependency / environment specif
     _mc = None  # type: ignore[assignment]
 
 _DEFAULT_MATERIAL_DENSITY_G_CC = MATERIAL_DENSITY_G_CC_BY_KEY.get(
-    DEFAULT_MATERIAL_KEY, 7.85
+    DEFAULT_MATERIAL_KEY, DEFAULT_MATERIAL_DENSITY_G_CC
 )
 _normalize_lookup_key = normalize_material_key
 
@@ -1536,41 +1540,6 @@ def _material_family(material: object | None) -> str:
         return "plastic"
 
     return "steel"
-
-
-def _density_for_material(
-    material: object | None, default: float = _DEFAULT_MATERIAL_DENSITY_G_CC
-) -> float:
-    """Return a rough density guess (g/cc) for the requested material."""
-
-    raw = str(material or "").strip()
-    if not raw:
-        return default
-
-    normalized = _normalize_lookup_key(raw)
-    collapsed = normalized.replace(" ", "")
-
-    for token in (normalized, collapsed):
-        if token and token in MATERIAL_DENSITY_G_CC_BY_KEYWORD:
-            return MATERIAL_DENSITY_G_CC_BY_KEYWORD[token]
-
-    for token, density in MATERIAL_DENSITY_G_CC_BY_KEYWORD.items():
-        if not token:
-            continue
-        if token in normalized or token in collapsed:
-            return density
-
-    lower = raw.lower()
-    if any(tag in lower for tag in ("plastic", "uhmw", "delrin", "acetal", "peek", "abs", "nylon")):
-        return 1.45
-    if any(tag in lower for tag in ("foam", "poly", "composite")):
-        return 1.10
-    if any(tag in lower for tag in ("magnesium", "az31", "az61")):
-        return 1.80
-    if "graphite" in lower:
-        return 1.85
-
-    return default
 
 
 @overload
