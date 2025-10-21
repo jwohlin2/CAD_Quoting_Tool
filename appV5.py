@@ -436,11 +436,22 @@ def _pick_drill_minutes(
         src = "planner_meta"
 
     chosen_clamped = _clamp_minutes(chosen)
+    try:
+        logger.info(
+            "[drill-pick] meta_min=%.2f removal_min=%.2f -> %.2f (%s%s)",
+            float(meta_min),
+            float(removal_min),
+            float(chosen_clamped),
+            src,
+            " CLAMPED" if chosen_clamped != chosen else "",
+        )
+    except Exception:
+        pass
     if lines is not None:
         try:
             lines.append(
-                "[DEBUG] drill_minutes_pick meta="
-                f"{meta_min:.2f} removal={removal_min:.2f} -> {chosen_clamped:.2f} "
+                "[drill-pick] meta_min="
+                f"{meta_min:.2f} removal_min={removal_min:.2f} -> {chosen_clamped:.2f} "
                 f"({src}{' CLAMPED' if chosen_clamped != chosen else ''})"
             )
         except Exception:
@@ -832,6 +843,7 @@ def _render_time_per_hole(
     _push(lines, "TIME PER HOLE – DRILL GROUPS")
     _push(lines, "-" * 66)
     subtotal_min = 0.0
+    groups_processed = 0
     seen_deep = False
     seen_std = False
     for b in bins:
@@ -850,9 +862,22 @@ def _render_time_per_hole(
             rpm = _rpm_from_sfm(sfm, d_in)
             ipm = rpm * ipr
             peck = float(peck_min_deep if deep else peck_min_std)
-            t_hole = (depth / max(ipm, 1e-6)) + float(index_min) + peck
+            cut_min = depth / max(ipm, 1e-6)
+            t_hole = cut_min + float(index_min) + peck
             group_min = t_hole * qty
             subtotal_min += group_min
+            n_pecks_val = (
+                _safe_float(b.get("peck_count"), 0.0)
+                or _safe_float(b.get("pecks"), 0.0)
+                or _safe_float(b.get("n_pecks"), 0.0)
+            )
+            n_pecks = int(n_pecks_val) if n_pecks_val and math.isfinite(n_pecks_val) else 0
+            logging.debug(
+                f"[removal/drill-line] dia={d_in:.4f} depth_in={depth:.4f} ipm={ipm:.4f} "
+                f"index_min={float(index_min):.3f} peck_min={peck:.3f} pecks={n_pecks} "
+                f"t_cut_min={cut_min:.4f} t_hole_min={t_hole:.4f} qty={qty}"
+            )
+            groups_processed += 1
             # single-line, no material
             _push(
                 lines,
@@ -862,6 +887,9 @@ def _render_time_per_hole(
         except Exception:
             continue
     _push(lines, "")
+    logging.info(
+        f"[removal/drill-sum] groups={groups_processed} subtotal_min={subtotal_min:.2f}"
+    )
     return subtotal_min, seen_deep, seen_std
 
 
@@ -1344,11 +1372,6 @@ def _compute_drilling_removal_section(
             logging.debug(
                 f"[removal] drill_total_minutes={extras['drill_total_minutes']}"
             )
-            if "drill_total_hours" in extras:
-                logging.error(
-                    "[unit] Found drill_total_hours in extras (HOURS). This API expects MINUTES. Removing it."
-                )
-                extras.pop("drill_total_hours", None)
             extras["removal_drilling_minutes_subtotal"] = float(drill_minutes_subtotal)
             extras["removal_drilling_minutes"] = float(drill_minutes_total)
             if drill_minutes_total > 0.0:
@@ -5470,7 +5493,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             extra_map["drill_labor_minutes"] = float(labor_minutes_snapshot)
             minutes_value = round(float(total_minutes_snapshot or 0.0), 2)
             extra_map["drill_total_minutes"] = minutes_value
-            logging.debug("[removal] drill_total_minutes=%s", minutes_value)
+            try:
+                logger.info("[removal] drill_total_minutes=%s", minutes_value)
+            except Exception:
+                pass
             return extra_map
         return None
 
@@ -6833,7 +6859,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             )
         except Exception:
             drilling_bucket_snapshot = None
-        logging.info(
+        logger.info(
             "[bucket] drilling_minutes=%s drilling_bucket=%s",
             drill_minutes_total,
             drilling_bucket_snapshot,
