@@ -14,8 +14,9 @@ from cad_quoter.pricing.process_buckets import (
     BUCKET_ROLE,
     PLANNER_BUCKET_ORDER,
     PLANNER_META,
-    RATE_ALIAS_KEYS,
     canonical_bucket_key as _shared_canonical_bucket_key,
+    flatten_rates as _flatten_rates,
+    lookup_rate as _shared_lookup_rate,
     normalize_bucket_key as _shared_normalize_bucket_key,
 )
 from cad_quoter.pricing.process_cost_renderer import (
@@ -157,38 +158,25 @@ def _bucket_cost_mode(key: str | None) -> str:
 def _lookup_bucket_rate(
     bucket_key: str | None, rates: Mapping[str, Any] | None
 ) -> float:
-    if not isinstance(rates, _MappingABC):
-        rates_map: Mapping[str, Any] = {}
-    else:
-        rates_map = rates
-
-    norm = _normalize_bucket_key(bucket_key)
+    flat_rates, normalized_rates = _flatten_rates(rates)
     canon_key = _canonical_bucket_key(bucket_key)
-    search_keys: list[str] = []
-    if norm:
-        search_keys.append(norm)
-    if canon_key and canon_key not in search_keys:
-        search_keys.append(canon_key)
+    search_key = canon_key or _normalize_bucket_key(bucket_key)
+    if not search_key:
+        return 0.0
 
-    seen_candidates: set[str] = set()
-    for key in search_keys:
-        for candidate in RATE_ALIAS_KEYS.get(key, ()):  # type: ignore[arg-type]
-            if candidate in seen_candidates:
-                continue
-            seen_candidates.add(candidate)
-            rate_val = rates_map.get(candidate)
-            if rate_val is None:
-                rate_val = rates_map.get(_shared_normalize_bucket_key(candidate))
-            coerced = _safe_float(rate_val, default=0.0)
-            if coerced > 0:
-                return coerced
+    mode = _bucket_cost_mode(search_key)
+    if mode == "labor":
+        fallbacks = ("LaborRate", "labor_rate", "labor")
+    else:
+        fallbacks = ("MachineRate", "machine_rate", "machine")
 
-    fallback_key = "LaborRate" if _bucket_cost_mode(norm) == "labor" else "MachineRate"
-    fallback_val = rates_map.get(fallback_key)
-    if fallback_val is None:
-        fallback_val = rates_map.get(_normalize_bucket_key(fallback_key))
-    coerced_fallback = _safe_float(fallback_val, default=0.0)
-    return coerced_fallback if coerced_fallback > 0 else 0.0
+    rate = _shared_lookup_rate(
+        search_key,
+        flat_rates,
+        normalized_rates,
+        fallbacks=fallbacks,
+    )
+    return float(rate or 0.0)
 
 
 @dataclass

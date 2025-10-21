@@ -1,9 +1,13 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Sequence
 
+from cad_quoter.pricing.process_buckets import (
+    RATE_ALIAS_KEYS,
+    canonical_bucket_key,
+    normalize_bucket_key,
+)
 from cad_quoter.utils import _dict
 
 
@@ -24,38 +28,47 @@ class RateBucket:
 
     label: str
     bucket: str
-    rate_keys: tuple[str, ...]
+    canonical_key: str | None = None
+    extra_rate_keys: tuple[str, ...] = ()
 
     def normalized_label(self) -> str:
-        return _normalize_key(self.label)
+        return normalize_bucket_key(self.label)
+
+    @property
+    def rate_keys(self) -> tuple[str, ...]:
+        """Return the configured rate aliases for this bucket."""
+
+        aliases: tuple[str, ...] = ()
+        if self.canonical_key:
+            canon = canonical_bucket_key(self.canonical_key, default=self.canonical_key)
+            if canon:
+                aliases = RATE_ALIAS_KEYS.get(canon, ())
+        if not aliases and self.canonical_key:
+            aliases = RATE_ALIAS_KEYS.get(self.canonical_key, ())
+        if self.extra_rate_keys:
+            aliases = tuple(
+                dict.fromkeys((*aliases, *self.extra_rate_keys))
+            )
+        if aliases:
+            return aliases
+        normalized = normalize_bucket_key(self.label)
+        return (self.label, normalized) if normalized and normalized != self.label else (self.label,)
 
 
 RATE_BUCKETS: tuple[RateBucket, ...] = (
-    RateBucket("Inspection", "labor", ("InspectionRate",)),
-    RateBucket("Fixture Build (amortized)", "labor", ("FixtureBuildRate",)),
-    RateBucket("Programming (per part)", "labor", ("ProgrammingRate",)),
-    RateBucket("Deburr", "labor", ("DeburrRate", "FinishingRate")),
-    RateBucket("Lapping/Honing", "labor", ("SurfaceGrindRate", "GrindingRate")),
-    RateBucket(
-        "Drilling",
-        "machine",
-        ("DrillingRate", "CncVertical", "CncVerticalRate", "cnc_vertical"),
-    ),
-    RateBucket("Milling", "machine", ("MillingRate",)),
-    RateBucket("Wire EDM", "machine", ("WireEDMRate", "EDMRate")),
-    RateBucket(
-        "Grinding",
-        "machine",
-        ("SurfaceGrindRate", "GrindingRate", "ODIDGrindRate", "JigGrindRate"),
-    ),
-    RateBucket("Saw/Waterjet", "machine", ("SawWaterjetRate", "SawRate", "WaterjetRate")),
-    RateBucket("Sinker EDM", "machine", ("SinkerEDMRate", "EDMRate")),
-    RateBucket("Abrasive Flow", "machine", ("AbrasiveFlowRate",)),
+    RateBucket("Inspection", "labor", "inspection"),
+    RateBucket("Fixture Build (amortized)", "labor", "fixture_build_amortized"),
+    RateBucket("Programming (per part)", "labor", "programming_amortized"),
+    RateBucket("Deburr", "labor", "finishing_deburr"),
+    RateBucket("Lapping/Honing", "labor", "grinding"),
+    RateBucket("Drilling", "machine", "drilling"),
+    RateBucket("Milling", "machine", "milling"),
+    RateBucket("Wire EDM", "machine", "wire_edm"),
+    RateBucket("Grinding", "machine", "grinding"),
+    RateBucket("Saw/Waterjet", "machine", "saw_waterjet"),
+    RateBucket("Sinker EDM", "machine", "sinker_edm"),
+    RateBucket("Abrasive Flow", "machine", extra_rate_keys=("AbrasiveFlowRate",)),
 )
-
-
-def _normalize_key(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
 
 
 def _iter_rate_candidates(rate_keys: Sequence[str]) -> Iterable[str]:
@@ -63,7 +76,7 @@ def _iter_rate_candidates(rate_keys: Sequence[str]) -> Iterable[str]:
         if not key:
             continue
         yield key
-        norm = _normalize_key(key)
+        norm = normalize_bucket_key(key)
         if norm and norm != key:
             yield norm
         camel = "".join(part.title() for part in norm.split("_")) if norm else ""
