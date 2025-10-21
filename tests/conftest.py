@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import importlib
+import importlib.resources as importlib_resources
 import types
 from importlib.machinery import ModuleSpec
 from pathlib import Path
@@ -546,14 +547,13 @@ def _ensure_geometry_helpers() -> None:
         geometry = importlib.import_module("cad_quoter.geometry")
     except Exception:
         geometry = types.ModuleType("cad_quoter.geometry")
-        geometry_dir = Path(__file__).resolve().parent.parent / "cad_quoter" / "geometry"
         geometry.__spec__ = ModuleSpec(
             "cad_quoter.geometry",
             loader=None,
-            origin=str(geometry_dir),
+            origin="cad_quoter.geometry",
             is_package=True,
         )
-        geometry.__path__ = [str(geometry_dir)]
+        geometry.__path__ = []  # type: ignore[attr-defined]
         sys.modules["cad_quoter.geometry"] = geometry
 
     def _return_none(*args, **kwargs):
@@ -682,14 +682,12 @@ def state_builder(fresh_quote_state: QuoteState) -> Callable[[dict], QuoteState]
 
 @pytest.fixture(autouse=True)
 def _configure_speeds_feeds_csv(monkeypatch: pytest.MonkeyPatch) -> None:
-    resource_csv = (
-        Path(__file__).resolve().parent.parent
-        / "cad_quoter"
-        / "pricing"
-        / "resources"
-        / "speeds_feeds_merged.csv"
-    )
-    if resource_csv.is_file():
-        monkeypatch.setenv("CADQ_SF_CSV", str(resource_csv))
-    else:
+    try:
+        resource_csv = (
+            importlib_resources.files("cad_quoter.pricing.resources")
+            / "speeds_feeds_merged.csv"
+        )
+    except (ModuleNotFoundError, FileNotFoundError):
         monkeypatch.delenv("CADQ_SF_CSV", raising=False)
+    else:
+        monkeypatch.setenv("CADQ_SF_CSV", str(resource_csv))
