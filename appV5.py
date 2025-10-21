@@ -261,6 +261,7 @@ from appkit.ui.planner_render import (
     _display_bucket_label,
     _display_rate_for_row,
     _normalize_bucket_key,
+    _process_label,
     _planner_bucket_key_for_name,
     _prepare_bucket_view,
     _seed_bucket_minutes,
@@ -5332,9 +5333,79 @@ def _prepare_bucket_view(raw_view: Mapping[str, Any] | None) -> dict[str, Any]:
     if not isinstance(source, _MappingABC):
         source = raw_view if isinstance(raw_view, _MappingABC) else {}
 
-    core = sanitize_vars_df(df_full)
+    folded: dict[str, dict[str, float]] = {}
 
-    return (core, df_full) if return_full else core
+    for raw_key, raw_info in source.items():
+        canon = _final_bucket_key(raw_key)
+        if not canon or canon in _FINAL_BUCKET_HIDE_KEYS:
+            continue
+        info_map = raw_info if isinstance(raw_info, _MappingABC) else {}
+        bucket = folded.setdefault(
+            canon,
+            {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0},
+        )
+
+        minutes = _coerce_bucket_metric(info_map, "minutes")
+        labor = _coerce_bucket_metric(info_map, "labor$", "labor_cost", "labor")
+        machine = _coerce_bucket_metric(info_map, "machine$", "machine_cost", "machine")
+
+        bucket["minutes"] += minutes
+        bucket["labor$"] += labor
+        bucket["machine$"] += machine
+
+    cleaned: dict[str, dict[str, float]] = {}
+    totals = {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0, "total$": 0.0}
+
+    for canon, metrics in folded.items():
+        minutes = round(float(metrics.get("minutes", 0.0)), 2)
+        labor = round(float(metrics.get("labor$", 0.0)), 2)
+        machine = round(float(metrics.get("machine$", 0.0)), 2)
+        total = round(labor + machine, 2)
+
+        if (
+            math.isclose(minutes, 0.0, abs_tol=0.01)
+            and math.isclose(labor, 0.0, abs_tol=0.01)
+            and math.isclose(machine, 0.0, abs_tol=0.01)
+            and math.isclose(total, 0.0, abs_tol=0.01)
+        ):
+            continue
+
+        cleaned[canon] = {
+            "minutes": minutes,
+            "labor$": labor,
+            "machine$": machine,
+            "total$": total,
+        }
+
+        totals["minutes"] += minutes
+        totals["labor$"] += labor
+        totals["machine$"] += machine
+        totals["total$"] += total
+
+    prepared["buckets"] = cleaned
+    prepared["order"] = _preferred_order_then_alpha(cleaned.keys())
+    prepared["totals"] = {key: round(value, 2) for key, value in totals.items()}
+
+    return prepared
+
+
+def _extract_bucket_map(source: Mapping[str, Any] | None) -> dict[str, dict[str, Any]]:
+    bucket_map: dict[str, dict[str, Any]] = {}
+    if not isinstance(source, _MappingABC):
+        return bucket_map
+    struct: Mapping[str, Any] = source
+    buckets_obj = source.get("buckets") if isinstance(source, _MappingABC) else None
+    if isinstance(buckets_obj, _MappingABC):
+        struct = buckets_obj
+    for raw_key, raw_value in struct.items():
+        canon = _canonical_bucket_key(raw_key)
+        if not canon:
+            continue
+        if isinstance(raw_value, _MappingABC):
+            bucket_map[canon] = {str(k): v for k, v in raw_value.items()}
+        else:
+            bucket_map[canon] = {}
+    return bucket_map
 
 def _load_master_variables() -> tuple[PandasDataFrame | None, PandasDataFrame | None]:
     """Load the packaged master variables sheet once and serve cached copies."""
@@ -9309,6 +9380,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     amortized_overrides = _prepare_amortized_details()
 
+    existing_amortized_specs = {spec.canon_key for spec in bucket_row_specs}
+
     for canon_key, (amount, minutes) in amortized_overrides.items():
         amount_val = max(0.0, _safe_float(amount))
         minutes_val = max(0.0, _safe_float(minutes))
@@ -9329,6 +9402,25 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         canon_to_display_label.setdefault(canon_key, label)
         if canon_key not in canonical_bucket_order:
             canonical_bucket_order.insert(0, canon_key)
+        if canon_key not in existing_amortized_specs:
+            hours_val = minutes_val / 60.0 if minutes_val > 0 else 0.0
+            rate_val = 0.0
+            if hours_val > 0 and amount_val > 0:
+                rate_val = amount_val / hours_val
+            bucket_row_specs.insert(
+                0,
+                _BucketRowSpec(
+                    label=label,
+                    hours=hours_val,
+                    rate=rate_val,
+                    total=amount_val,
+                    labor=amount_val,
+                    machine=0.0,
+                    canon_key=canon_key,
+                    minutes=minutes_val,
+                ),
+            )
+            existing_amortized_specs.add(canon_key)
         if isinstance(breakdown, dict):
             try:
                 bucket_view_obj = breakdown.setdefault("bucket_view", {})
@@ -15387,6 +15479,42 @@ def _coerce_bool(value: Any) -> bool:
         if lowered in {"0", "false", "f", "no", "n", "off"}:
             return False
     return bool(value)
+
+
+def _coerce_checkbox_state(value: Any, default: bool = False) -> bool:
+    """Best-effort conversion from spreadsheet checkbox text to a boolean."""
+
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        try:
+            if math.isnan(value):  # type: ignore[arg-type]
+                return default
+        except Exception:
+            pass
+        return bool(value)
+
+    text = str(value).strip().lower()
+    if not text:
+        return default
+
+    truthy_tokens = {"true", "1", "yes", "y", "on"}
+    falsy_tokens = {"false", "0", "no", "n", "off"}
+
+    if text in truthy_tokens or text.startswith("y"):
+        return True
+    if text in falsy_tokens or text.startswith("n"):
+        return False
+
+    for part in re.split(r"[/|,\s]+", text):
+        if not part:
+            continue
+        if part in truthy_tokens or part.startswith("y"):
+            return True
+        if part in falsy_tokens or part.startswith("n"):
+            return False
+
+    return default
 
 
 def _coerce_speeds_feeds_csv_path(*sources: Mapping[str, Any] | None) -> str | None:

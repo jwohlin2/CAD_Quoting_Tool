@@ -18,6 +18,7 @@ from .services import QuoteConfiguration
 
 
 PROGRAMMING_PER_PART_LABEL = "Programming (per part)"
+PROGRAMMING_AMORTIZED_LABEL = "Programming (amortized)"
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -25,6 +26,9 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except Exception:
         return default
+
+
+PLANNER_META: frozenset[str] = frozenset({"planner_labor", "planner_machine", "planner_total"})
 
 
 _HIDE_IN_BUCKET_VIEW: frozenset[str] = frozenset({*PLANNER_META, "misc"})
@@ -88,8 +92,6 @@ CANON_MAP: dict[str, str] = {
     "programming_amortized": "programming_amortized",
     "misc": "misc",
 }
-
-PLANNER_META: frozenset[str] = frozenset({"planner_labor", "planner_machine", "planner_total"})
 
 # ---------- Bucket & Operation Roles ----------
 BUCKET_ROLE: dict[str, str] = {
@@ -1300,8 +1302,9 @@ def _process_label(key: str | None) -> str:
         "saw_waterjet": "saw / waterjet",
         "counter_bore": "counterbore",
         "counter_sink": "countersink",
-        "prog_amortized": PROGRAMMING_PER_PART_LABEL.lower(),
-        "programming_amortized": PROGRAMMING_PER_PART_LABEL.lower(),
+        "prog_amortized": PROGRAMMING_AMORTIZED_LABEL.lower(),
+        "programming_amortized": PROGRAMMING_AMORTIZED_LABEL.lower(),
+        "programming_per_part": PROGRAMMING_PER_PART_LABEL.lower(),
         "fixture_build_amortized": "fixture build (amortized)",
     }.get(canon, canon)
     if alias == "saw / waterjet":
