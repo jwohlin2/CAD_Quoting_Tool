@@ -406,6 +406,16 @@ def _normalize_buckets(bucket_view_obj: MutableMapping[str, Any] | Mapping[str, 
 
     bucket_view_obj["buckets"] = norm
 
+    try:
+        buckets_snapshot = (
+            bucket_view_obj.get("buckets")
+            if isinstance(bucket_view_obj, (_MappingABC, dict))
+            else None
+        )
+    except Exception:
+        buckets_snapshot = None
+    logging.debug(f"[buckets-final] {buckets_snapshot or {}}")
+
 
 def _as_float(x: Any, default: float = 0.0) -> float:
     try:
@@ -10451,6 +10461,10 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 process_plan_summary,
                 extra_map,
                 debug_lines_list,
+            )
+            drill_minutes_total = _safe_float(drill_minutes_total, 0.0)
+            assert 0 <= drill_minutes_total <= 10000, (
+                f"drilling minutes out of range: {drill_minutes_total}"
             )
             meta_val = _safe_float(meta_min, 0.0)
             removal_val = _safe_float(removal_min, 0.0)
