@@ -11235,42 +11235,6 @@ def _coerce_bool(value: Any) -> bool:
     return bool(value)
 
 
-def _coerce_checkbox_state(value: Any, default: bool = False) -> bool:
-    """Best-effort conversion from spreadsheet checkbox text to a boolean."""
-
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        try:
-            if math.isnan(value):  # type: ignore[arg-type]
-                return default
-        except Exception:
-            pass
-        return bool(value)
-
-    text = str(value).strip().lower()
-    if not text:
-        return default
-
-    truthy_tokens = {"true", "1", "yes", "y", "on"}
-    falsy_tokens = {"false", "0", "no", "n", "off"}
-
-    if text in truthy_tokens or text.startswith("y"):
-        return True
-    if text in falsy_tokens or text.startswith("n"):
-        return False
-
-    for part in re.split(r"[/|,\s]+", text):
-        if not part:
-            continue
-        if part in truthy_tokens or part.startswith("y"):
-            return True
-        if part in falsy_tokens or part.startswith("n"):
-            return False
-
-    return default
-
-
 def _coerce_speeds_feeds_csv_path(*sources: Mapping[str, Any] | None) -> str | None:
     """Return the first non-empty Speeds/Feeds CSV path from ``sources``."""
 
