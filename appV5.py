@@ -10077,6 +10077,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             material_entry["source"] = mat_block.get("source")
         total_cost_val = _coerce_float_or_none(mat_block.get("total_material_cost"))
         base_material_cost = float(total_cost_val or 0.0)
+        base_material_cost = round(base_material_cost, 2)
         material_entry["material_cost_before_credit"] = float(base_material_cost)
         mat_block["material_cost_before_credit"] = float(base_material_cost)
 
