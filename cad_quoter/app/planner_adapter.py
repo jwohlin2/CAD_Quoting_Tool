@@ -3,11 +3,11 @@ from __future__ import annotations
 from typing import Any, Mapping, Sequence, TYPE_CHECKING
 from collections.abc import Mapping as _MappingABC
 
-from appkit.env_utils import FORCE_ESTIMATOR, FORCE_PLANNER, _coerce_env_bool
+from cad_quoter.app.env_flags import FORCE_ESTIMATOR, FORCE_PLANNER, _coerce_env_bool
 from cad_quoter.utils import coerce_bool
 
 if TYPE_CHECKING:
-    from appkit.ui.services import QuoteConfiguration
+    from cad_quoter.ui.services import QuoteConfiguration
 
 DEFAULT_PLANNER_MODE = "planner"
 

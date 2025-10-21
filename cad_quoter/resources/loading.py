@@ -1,4 +1,4 @@
-"""Helpers for loading static data files bundled with the appkit package."""
+"""Helpers for loading static data files bundled with the cad_quoter package."""
 from __future__ import annotations
 
 import json

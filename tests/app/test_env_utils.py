@@ -8,7 +8,7 @@ from cad_quoter.utils import coerce_bool
 
 
 def _reload_env_utils():
-    module = importlib.import_module("appkit.env_utils")
+    module = importlib.import_module("cad_quoter.app.env_flags")
     importlib.reload(module)
     return module
 

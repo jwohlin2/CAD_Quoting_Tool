@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from appkit.ui import session_io
+from cad_quoter.ui import session_io
 
 if "cad_quoter.geometry" not in sys.modules:
     geom_stub = types.ModuleType("cad_quoter.geometry")

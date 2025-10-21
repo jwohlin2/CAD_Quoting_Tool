@@ -114,7 +114,7 @@ from cad_quoter.app.variables import (
     sanitize_vars_df,
 )
 from cad_quoter.material_density import LB_PER_IN3_PER_GCC as _LB_PER_IN3_PER_GCC
-from appkit.utils import (
+from cad_quoter.utils.machining import (
     _first_numeric_or_none,
     _fmt_rng,
     _ipm_from_rpm_ipr,
@@ -396,7 +396,7 @@ try:
 except Exception:
     odafc = None  # type: ignore[assignment]
 
-from appkit.llm_adapter import (
+from cad_quoter.app.llm_adapter import (
     apply_llm_hours_to_variables,
     clamp_llm_hours,
     configure_llm_integration,
@@ -405,7 +405,7 @@ from appkit.llm_adapter import (
     normalize_item_text,
 )
 
-from appkit.ui.tk_compat import (
+from cad_quoter.ui.tk_compat import (
     tk,
     filedialog,
     messagebox,
@@ -413,32 +413,33 @@ from appkit.ui.tk_compat import (
     _ensure_tk,
 )
 
-from appkit.ui.widgets import (
+from cad_quoter.ui.widgets import (
     CreateToolTip,
     ScrollableFrame,
 )
 
 # UI service containers and configuration helpers
-from appkit.ui.services import (
+from cad_quoter.ui.services import (
     GeometryLoader,
     LLMServices,
     PricingRegistry,
     UIConfiguration,
+    infer_geo_override_defaults,
 )
 
-from appkit.guardrails import build_guard_context, apply_drilling_floor_notes
-from appkit.merge_utils import (
+from cad_quoter.app.guardrails import build_guard_context, apply_drilling_floor_notes
+from cad_quoter.app.merge_utils import (
     ACCEPT_SCALAR_KEYS,
     merge_effective,
 )
 
-from appkit.effective import (
+from cad_quoter.app.effective import (
     compute_effective_state,
     ensure_accept_flags,
     reprice_with_effective,
 )
 
-from appkit.ui import suggestions as ui_suggestions
+from cad_quoter.ui import suggestions as ui_suggestions
 
 from cad_quoter.utils.scrap import (
     HOLE_SCRAP_CAP,
@@ -447,26 +448,26 @@ from cad_quoter.utils.scrap import (
     normalize_scrap_pct,
 )
 from cad_quoter.utils.render_utils.tables import ascii_table, draw_kv_table
-from appkit.planner_helpers import _process_plan_job
-from appkit.env_utils import FORCE_PLANNER
-from appkit.planner_adapter import resolve_planner, resolve_pricing_source_value
+from cad_quoter.app.planner_helpers import _process_plan_job
+from cad_quoter.app.env_flags import FORCE_PLANNER
+from cad_quoter.app.planner_adapter import resolve_planner, resolve_pricing_source_value
 
-from appkit.data import load_json, load_text
+from cad_quoter.resources.loading import load_json, load_text
 
 # Mapping of PDF estimate keys to Quote Editor variables.
 MAP_KEYS = load_json("vl_pdf_map_keys.json")
-from appkit.utils.text_rules import (
+from cad_quoter.utils.text_rules import (
     PROC_MULT_TARGETS,
     canonicalize_amortized_label as _canonical_amortized_label,
 )
-from appkit.debug.debug_tables import (
+from cad_quoter.utils.debug_tables import (
     _accumulate_drill_debug,
     append_removal_debug_if_enabled,
 )
-from appkit.ui import llm_panel
-from appkit.ui import session_io
-from appkit.ui.editor_controls import coerce_checkbox_state, derive_editor_control_spec
-from appkit.ui.planner_render import (
+from cad_quoter.ui import llm_panel
+from cad_quoter.ui import session_io
+from cad_quoter.ui.editor_controls import coerce_checkbox_state, derive_editor_control_spec
+from cad_quoter.ui.planner_render import (
     PROGRAMMING_PER_PART_LABEL,
     PlannerBucketRenderState,
     _bucket_cost,
@@ -492,7 +493,12 @@ from appkit.ui.planner_render import (
     SHOW_BUCKET_DIAGNOSTICS_OVERRIDE,
     canonicalize_costs,
 )
-from appkit.ui.services import QuoteConfiguration
+from cad_quoter.ui.services import QuoteConfiguration
+from cad_quoter.pricing.validation import validate_quote_before_pricing
+from cad_quoter.utils.debug_tables import (
+    _jsonify_debug_summary as _debug_jsonify_summary,
+    _jsonify_debug_value as _debug_jsonify_value,
+)
 
 
 
@@ -1853,6 +1859,35 @@ from cad_quoter.pricing.materials import (
 from cad_quoter.config import _ensure_two_bucket_rates
 from cad_quoter.rates import LABOR_RATE_KEYS, MACHINE_RATE_KEYS, two_bucket_to_flat
 from cad_quoter.vendors.mcmaster_stock import lookup_sku_and_price_for_mm
+
+SCRAP_RECOVERY_DEFAULT = _materials.SCRAP_RECOVERY_DEFAULT
+
+
+def _fail_live_price(*_args: Any, **_kwargs: Any) -> None:
+    """Sentinel used by tests to simulate Wieland API failures."""
+
+    raise RuntimeError("live material pricing is unavailable")
+
+
+def _jsonify_debug_value(value: Any, depth: int = 0, max_depth: int = 6) -> Any:
+    """Proxy to :func:`cad_quoter.utils.debug_tables._jsonify_debug_value`."""
+
+    return _debug_jsonify_value(value, depth=depth, max_depth=max_depth)
+
+
+def _jsonify_debug_summary(summary: Mapping[str, Any]) -> dict[str, Any]:
+    """Proxy to :func:`cad_quoter.utils.debug_tables._jsonify_debug_summary`."""
+
+    return _debug_jsonify_summary(summary)
+
+
+try:
+    import builtins as _builtins
+
+    if getattr(_builtins, "_fail_live_price", None) is None:  # pragma: no cover - test shim
+        _builtins._fail_live_price = _fail_live_price
+except Exception:  # pragma: no cover - defensive
+    pass
 
 _normalize_lookup_key = normalize_material_key
 

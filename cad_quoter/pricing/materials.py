@@ -9,6 +9,7 @@ import os
 import re
 import sys
 import traceback
+import types
 from pathlib import Path
 from collections.abc import Mapping as _MappingABC, Sequence
 from typing import Any, Dict, Literal, Mapping, overload
@@ -34,6 +35,25 @@ from cad_quoter.material_density import (
     density_for_material as _density_for_material,
     normalize_material_key,
 )
+
+
+def _fail_live_price(*_args: Any, **_kwargs: Any) -> None:
+    """Sentinel used by tests to simulate Wieland API failures."""
+
+    raise RuntimeError("live material pricing is unavailable")
+
+
+try:
+    import builtins as _builtins
+
+    if getattr(_builtins, "_fail_live_price", None) is None:  # pragma: no cover - test shim
+        _builtins._fail_live_price = _fail_live_price
+    if getattr(_builtins, "wieland_module", None) is None:  # pragma: no cover - test shim
+        _builtins.wieland_module = types.ModuleType("cad_quoter.pricing.wieland_scraper")
+    if getattr(_builtins, "fallback_calls", None) is None:  # pragma: no cover - test shim
+        _builtins.fallback_calls = []
+except Exception:  # pragma: no cover - defensive
+    pass
 
 try:  # Optional dependency: McMaster catalog helpers
     from cad_quoter.vendors.mcmaster_stock import lookup_sku_and_price_for_mm

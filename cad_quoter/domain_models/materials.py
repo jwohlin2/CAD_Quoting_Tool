@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Dict, Set
 
-from appkit.data import load_json
+from cad_quoter.resources.loading import load_json
 
 from cad_quoter.material_density import (
     MATERIAL_DENSITY_G_CC_BY_KEY as _DENSITY_BY_KEY,

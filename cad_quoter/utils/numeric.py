@@ -6,12 +6,6 @@ import math
 import re
 from typing import Any
 
-from cad_quoter.domain_models.values import (
-    coerce_float_or_none as _coerce_float_or_none,
-    to_int as _to_int,
-    to_positive_float as _to_positive_float,
-)
-
 __all__ = ["coerce_float", "coerce_int", "coerce_positive_float"]
 
 
@@ -90,3 +84,19 @@ def parse_mixed_fraction(value: str) -> float | None:
 
     return sign * total
 
+def _coerce_float_or_none(value: Any) -> float | None:
+    from cad_quoter.domain_models.values import coerce_float_or_none as _impl
+
+    return _impl(value)
+
+
+def _to_int(value: Any) -> int | None:
+    from cad_quoter.domain_models.values import to_int as _impl
+
+    return _impl(value)
+
+
+def _to_positive_float(value: Any) -> float | None:
+    from cad_quoter.domain_models.values import to_positive_float as _impl
+
+    return _impl(value)

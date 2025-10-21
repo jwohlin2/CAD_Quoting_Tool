@@ -13,7 +13,7 @@ from cad_quoter.domain import (
     coerce_bounds,
 )
 from cad_quoter.domain_models.values import to_float
-from appkit.guardrails import (
+from cad_quoter.app.guardrails import (
     enforce_finish_pass_guardrail,
     enforce_process_floor_guardrails,
     enforce_setups_guardrail,

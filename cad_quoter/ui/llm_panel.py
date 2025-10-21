@@ -6,8 +6,8 @@ import os
 from pathlib import Path
 from typing import Any
 
-from appkit.llm_adapter import infer_shop_overrides_from_geo
-from appkit.ui.tk_compat import (
+from cad_quoter.app.llm_adapter import infer_shop_overrides_from_geo
+from cad_quoter.ui.tk_compat import (
     _ensure_tk,
     filedialog,
     messagebox,

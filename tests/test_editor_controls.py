@@ -7,7 +7,7 @@ try:
 except ImportError:  # pragma: no cover - optional dependency for tests
     default_variables_template = None
 
-from appkit.ui.editor_controls import coerce_checkbox_state, derive_editor_control_spec
+from cad_quoter.ui.editor_controls import coerce_checkbox_state, derive_editor_control_spec
 
 
 def test_number_control_from_declared_dtype():

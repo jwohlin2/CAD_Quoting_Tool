@@ -5,7 +5,7 @@ from typing import Any, Callable, Iterable, Mapping, MutableMapping
 
 from cad_quoter.domain_models.values import safe_float as _safe_float
 from cad_quoter.pricing.process_cost_renderer import render_process_costs
-from appkit.ui.planner_render import (
+from cad_quoter.ui.planner_render import (
     _canonical_bucket_key,
     _display_rate_for_row,
 )

@@ -4,7 +4,7 @@ The pricing layer consumes lead-times from a variety of sources.  Some
 vendors express the lead-time as a range (``"3-5 business days"``), while
 others provide calendar weeks or looser phrases such as ``"rush"``.  The UI
 surface needs to derive the same values so we keep a shared implementation
-here and allow other packages (such as :mod:`appkit`) to re-use it.
+here and allow other packages (such as the legacy app) to re-use it.
 """
 from __future__ import annotations
 

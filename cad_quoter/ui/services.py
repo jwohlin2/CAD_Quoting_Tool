@@ -41,7 +41,7 @@ from cad_quoter.app.optional_loaders import (
     pdf_document_to_structured as _pdf_document_to_structured,
 )
 
-from appkit.utils import _parse_length_to_mm
+from cad_quoter.utils.machining import _parse_length_to_mm
 
 
 @dataclass(slots=True)

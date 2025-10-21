@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Shared OCCT helpers that smooth over backend differences for appkit."""
+"""Shared OCCT helpers that smooth over backend differences for cad_quoter."""
 
 from importlib import import_module
 from typing import Any, Callable, Iterator

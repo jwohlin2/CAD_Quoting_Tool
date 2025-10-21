@@ -5,7 +5,7 @@ import re
 from fractions import Fraction
 from typing import Dict
 
-from appkit.data import load_json
+from cad_quoter.resources.loading import load_json
 
 
 LB_PER_IN3_PER_GCC = float(

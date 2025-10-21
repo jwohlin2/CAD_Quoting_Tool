@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable
 
+from .loading import load_json, load_text
+
 _RESOURCE_ROOT = Path(__file__).resolve().parent
 
 
@@ -50,4 +52,6 @@ __all__ = [
     "default_master_variables_csv",
     "default_app_settings_json",
     "default_catalog_csv",
+    "load_json",
+    "load_text",
 ]

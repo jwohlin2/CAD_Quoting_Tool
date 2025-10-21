@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from appkit.ui.tk_compat import tk, ttk
+from cad_quoter.ui.tk_compat import tk, ttk
 
 
 class CreateToolTip:

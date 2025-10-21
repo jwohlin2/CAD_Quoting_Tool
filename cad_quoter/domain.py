@@ -50,9 +50,9 @@ __all__ = [
 
 
 def _effective_module():
-    """Return the lazily-imported :mod:`appkit.effective` helpers."""
+    """Return the lazily-imported :mod:`cad_quoter.app.effective` helpers."""
 
-    from appkit import effective as _effective  # imported lazily to avoid cycles
+    from cad_quoter.app import effective as _effective  # imported lazily to avoid cycles
 
     return _effective
 
@@ -60,7 +60,7 @@ def _effective_module():
 def _merge_module():
     """Return the lazily-imported merge helpers."""
 
-    from appkit import merge_utils as _merge_utils  # imported lazily to avoid cycles
+    from cad_quoter.app import merge_utils as _merge_utils  # imported lazily to avoid cycles
 
     return _merge_utils
 
@@ -68,51 +68,51 @@ def _merge_module():
 def _suggestions_module():
     """Return the lazily-imported suggestion helpers."""
 
-    from appkit.ui import suggestions as _suggestions  # imported lazily to avoid cycles
+    from cad_quoter.ui import suggestions as _suggestions  # imported lazily to avoid cycles
 
     return _suggestions
 
 
 def merge_effective(*args, **kwargs):  # type: ignore[override]
-    """Proxy to :func:`appkit.merge_utils.merge_effective` for test visibility."""
+    """Proxy to :func:`cad_quoter.app.merge_utils.merge_effective` for test visibility."""
 
     merge_helpers = _merge_module()
     return merge_helpers.merge_effective(*args, **kwargs)
 
 
 def compute_effective_state(*args, **kwargs):  # type: ignore[override]
-    """Proxy to :func:`appkit.effective.compute_effective_state` for test visibility."""
+    """Proxy to :func:`cad_quoter.app.effective.compute_effective_state` for test visibility."""
 
     effective = _effective_module()
     return effective.compute_effective_state(*args, **kwargs)
 
 
 def reprice_with_effective(*args, **kwargs):  # type: ignore[override]
-    """Proxy to :func:`appkit.effective.reprice_with_effective` for test visibility."""
+    """Proxy to :func:`cad_quoter.app.effective.reprice_with_effective` for test visibility."""
 
     effective = _effective_module()
     return effective.reprice_with_effective(*args, **kwargs)
 
 
 def effective_to_overrides(*args, **kwargs):  # type: ignore[override]
-    """Proxy to :func:`appkit.effective.effective_to_overrides` for test visibility."""
+    """Proxy to :func:`cad_quoter.app.effective.effective_to_overrides` for test visibility."""
 
     effective = _effective_module()
     return effective.effective_to_overrides(*args, **kwargs)
 
 
 def overrides_to_suggestions(*args, **kwargs):  # type: ignore[override]
-    """Proxy to :func:`appkit.llm_converters.overrides_to_suggestions`."""
+    """Proxy to :func:`cad_quoter.llm.converters.overrides_to_suggestions`."""
 
-    from appkit import llm_converters as _llm_converters
+    from cad_quoter.llm import converters as _llm_converters
 
     return _llm_converters.overrides_to_suggestions(*args, **kwargs)
 
 
 def suggestions_to_overrides(*args, **kwargs):  # type: ignore[override]
-    """Proxy to :func:`appkit.llm_converters.suggestions_to_overrides`."""
+    """Proxy to :func:`cad_quoter.llm.converters.suggestions_to_overrides`."""
 
-    from appkit import llm_converters as _llm_converters
+    from cad_quoter.llm import converters as _llm_converters
 
     return _llm_converters.suggestions_to_overrides(*args, **kwargs)
 
@@ -232,7 +232,7 @@ def ensure_accept_flags(*args, **kwargs):  # type: ignore[override]
 
 
 def iter_suggestion_rows(*args, **kwargs):  # type: ignore[override]
-    """Proxy to :func:`appkit.ui.suggestions.iter_suggestion_rows` for tests."""
+    """Proxy to :func:`cad_quoter.ui.suggestions.iter_suggestion_rows` for tests."""
 
     suggestions = _suggestions_module()
     return suggestions.iter_suggestion_rows(*args, **kwargs)
