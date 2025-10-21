@@ -1188,6 +1188,11 @@ def _prepare_bucket_view(raw_view: Mapping[str, Any] | None) -> dict[str, Any]:
         )
 
         minutes = _coerce_bucket_metric(info_map, "minutes")
+        # clamp utterly broken payloads
+        if not math.isfinite(minutes) or minutes < 0:
+            minutes = 0.0
+        if minutes > 8 * 60 * 60:  # > 8 hours * 60 min * 60? (pick a sensible ceiling for one-part quotes)
+            minutes = 8 * 60 * 60
         labor = _coerce_bucket_metric(info_map, "labor$", "labor_cost", "labor")
         machine = _coerce_bucket_metric(info_map, "machine$", "machine_cost", "machine")
 
