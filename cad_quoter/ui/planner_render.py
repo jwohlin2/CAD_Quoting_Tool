@@ -4,7 +4,7 @@ import copy
 import math
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping, TypedDict
+from typing import Any, Callable, Mapping, TypedDict, cast
 from collections.abc import Iterable, Mapping as _MappingABC, MutableMapping as _MutableMappingABC, Sequence
 
 from cad_quoter.config import logger
@@ -153,6 +153,87 @@ def _rate_key_for_bucket(bucket: str | None) -> str | None:
 def _bucket_cost_mode(key: str | None) -> str:
     role = BUCKET_ROLE.get(_canonical_bucket_key(key), BUCKET_ROLE.get("_default", "machine_only"))
     return "labor" if role == "labor_only" else "machine"
+
+
+def _normalize_buckets(
+    bucket_view_obj: Mapping[str, Any] | _MutableMappingABC[str, Any] | None,
+) -> None:
+    if bucket_view_obj is None:
+        return
+
+    alias = {
+        "programming_amortized": "programming",
+        "spotdrill": "spot_drill",
+        "spot-drill": "spot_drill",
+        "jiggrind": "jig_grind",
+        "jig-grind": "jig_grind",
+    }
+
+    try:
+        buckets_obj = bucket_view_obj.get("buckets") if isinstance(bucket_view_obj, _MappingABC) else None
+    except Exception:
+        buckets_obj = None
+
+    if isinstance(buckets_obj, dict):
+        source_items = list(buckets_obj.items())
+    elif isinstance(buckets_obj, _MappingABC):
+        try:
+            source_items = list(buckets_obj.items())
+        except Exception:
+            return
+        buckets_obj = dict(buckets_obj)
+    else:
+        return
+
+    normalized: dict[str, dict[str, float]] = {}
+    for raw_key, raw_entry in source_items:
+        try:
+            key = str(raw_key or "")
+        except Exception:
+            key = ""
+        if not key:
+            continue
+        norm_key = alias.get(key, key)
+
+        entry: Mapping[str, Any] | None
+        if isinstance(raw_entry, dict):
+            entry = raw_entry
+        elif isinstance(raw_entry, _MappingABC):
+            entry = raw_entry
+        else:
+            entry = None
+
+        minutes = machine_cost = labor_cost = 0.0
+        if entry is not None:
+            try:
+                minutes = float(entry.get("minutes", 0.0) or 0.0)
+            except Exception:
+                minutes = 0.0
+            try:
+                machine_cost = float(entry.get("machine$", 0.0) or 0.0)
+            except Exception:
+                machine_cost = 0.0
+            try:
+                labor_cost = float(entry.get("labor$", 0.0) or 0.0)
+            except Exception:
+                labor_cost = 0.0
+
+        target = normalized.setdefault(
+            norm_key,
+            {"minutes": 0.0, "machine$": 0.0, "labor$": 0.0, "total$": 0.0},
+        )
+        target["minutes"] = float(target.get("minutes", 0.0)) + minutes
+        target["machine$"] = float(target.get("machine$", 0.0)) + machine_cost
+        target["labor$"] = float(target.get("labor$", 0.0)) + labor_cost
+        target["total$"] = round(target["machine$"] + target["labor$"], 2)
+
+    try:
+        if isinstance(bucket_view_obj, (_MutableMappingABC, dict)):
+            bucket_view_obj["buckets"] = normalized  # type: ignore[index]
+        else:
+            cast(_MutableMappingABC[str, Any], bucket_view_obj)["buckets"] = normalized
+    except Exception:
+        return
 
 
 def _lookup_bucket_rate(
@@ -750,6 +831,8 @@ def _seed_bucket_minutes(
     # spot and jig_grind can roll into "drilling" or "grinding"; keep explicit names if you expose them
     _ins("drilling", drilling_min or spot_min)
     _ins("grinding", jig_min)
+
+    _normalize_buckets(bucket_view_obj)
 
 
 def _normalize_ops_rows_from_hole_rows(rows: Iterable[Any] | None) -> list[dict[str, Any]]:
@@ -1436,6 +1519,7 @@ __all__ = [
     "_planner_bucket_key_for_name",
     "_canonical_bucket_key",
     "_bucket_cost",
+    "_normalize_buckets",
     "_preferred_order_then_alpha",
     "_coerce_bucket_metric",
     "_final_bucket_key",
