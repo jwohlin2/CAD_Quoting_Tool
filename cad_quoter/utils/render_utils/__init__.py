@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 ELLIPSIS = "…"
@@ -290,19 +291,34 @@ class QuoteDocRecorder:
         return QuoteDoc(title=title, sections=sections)
 
 
+def render_quote_doc_lines(doc: QuoteDoc, *, divider: str) -> list[str]:
+    """Return the rendered quote output as a list of text lines."""
+
+    lines: list[str] = []
+    if doc.title:
+        lines.append(doc.title)
+    for section in doc.sections:
+        if section.title:
+            if not lines or lines[-1] != section.title:
+                lines.append(section.title)
+            lines.append(divider)
+        lines.extend(row.text for row in section.rows)
+    return lines
+
+
 def render_quote_doc(doc: QuoteDoc, *, divider: str) -> str:
     """Render a :class:`QuoteDoc` back into legacy text output."""
 
-    output: list[str] = []
-    if doc.title:
-        output.append(doc.title)
-    for section in doc.sections:
-        if section.title:
-            if not output or output[-1] != section.title:
-                output.append(section.title)
-            output.append(divider)
-        output.extend(row.text for row in section.rows)
-    return "\n".join(output)
+    return "\n".join(render_quote_doc_lines(doc, divider=divider))
+
+
+def render_quote_doc_to_path(doc: QuoteDoc, *, divider: str, out_path: str | Path) -> None:
+    """Persist rendered quote text to ``out_path`` using UTF-8 encoding."""
+
+    lines = render_quote_doc_lines(doc, divider=divider)
+    path = Path(out_path)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        handle.write("\n".join(lines))
 
 
 from .tables import ColumnSpec, DEFAULT_WIDTH, ascii_table, draw_boxed_table, draw_kv_table
@@ -334,4 +350,6 @@ __all__ = [
     "money",
     "pct",
     "render_quote_doc",
+    "render_quote_doc_lines",
+    "render_quote_doc_to_path",
 ]

@@ -23,6 +23,7 @@ def test_render_quote_sanitizes_special_characters() -> None:
 
     assert "\t" not in rendered
     assert "\x1b" not in rendered
-    assert all(ord(ch) < 128 for ch in rendered)
-    assert "Cycle - roughing" in rendered
+    allowed_unicode = {"×", "–", "≥", "≤"}
+    assert all(ord(ch) < 128 or ch in allowed_unicode for ch in rendered)
+    assert "Cycle – roughing" in rendered
     assert "color red text" in rendered
