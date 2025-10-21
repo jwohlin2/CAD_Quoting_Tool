@@ -234,6 +234,23 @@ def get_logger(*names: str) -> logging.Logger:
 logger = get_logger()
 
 
+def append_debug_log(*lines: str) -> None:
+    """Append diagnostic lines to ``debug.log`` using ASCII encoding."""
+
+    if not lines:
+        return
+
+    try:
+        with open("debug.log", "a", encoding="ascii", errors="replace") as log:
+            for line in lines:
+                text = str(line)
+                log.write(text)
+                if not text.endswith("\n"):
+                    log.write("\n")
+    except Exception:
+        logger.debug("Failed to append to debug.log", exc_info=True)
+
+
 def configure_logging(level: int = logging.INFO, *, force: bool = False) -> None:
     """Initialise a basic logging configuration if none is present."""
 
@@ -253,6 +270,7 @@ __all__ = [
     "DEFAULT_VERSION",
     "LOGGER_NAME",
     "RESOURCE_DIR",
+    "append_debug_log",
     "configure_logging",
     "describe_runtime_environment",
     "get_logger",
