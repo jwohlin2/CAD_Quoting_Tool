@@ -849,6 +849,7 @@ def _render_time_per_hole(
     _push(lines, "TIME PER HOLE – DRILL GROUPS")
     _push(lines, "-" * 66)
     subtotal_min = 0.0
+    groups_processed = 0
     seen_deep = False
     seen_std = False
     for b in bins:
@@ -867,9 +868,22 @@ def _render_time_per_hole(
             rpm = _rpm_from_sfm(sfm, d_in)
             ipm = rpm * ipr
             peck = float(peck_min_deep if deep else peck_min_std)
-            t_hole = (depth / max(ipm, 1e-6)) + float(index_min) + peck
+            cut_min = depth / max(ipm, 1e-6)
+            t_hole = cut_min + float(index_min) + peck
             group_min = t_hole * qty
             subtotal_min += group_min
+            n_pecks_val = (
+                _safe_float(b.get("peck_count"), 0.0)
+                or _safe_float(b.get("pecks"), 0.0)
+                or _safe_float(b.get("n_pecks"), 0.0)
+            )
+            n_pecks = int(n_pecks_val) if n_pecks_val and math.isfinite(n_pecks_val) else 0
+            logging.debug(
+                f"[removal/drill-line] dia={d_in:.4f} depth_in={depth:.4f} ipm={ipm:.4f} "
+                f"index_min={float(index_min):.3f} peck_min={peck:.3f} pecks={n_pecks} "
+                f"t_cut_min={cut_min:.4f} t_hole_min={t_hole:.4f} qty={qty}"
+            )
+            groups_processed += 1
             # single-line, no material
             _push(
                 lines,
@@ -879,6 +893,9 @@ def _render_time_per_hole(
         except Exception:
             continue
     _push(lines, "")
+    logging.info(
+        f"[removal/drill-sum] groups={groups_processed} subtotal_min={subtotal_min:.2f}"
+    )
     return subtotal_min, seen_deep, seen_std
 
 
