@@ -52,6 +52,7 @@ import importlib
 import json
 import math
 import os
+import logging
 import re
 import sys
 import time
@@ -18670,6 +18671,12 @@ class App(tk.Tk):
         _ensure_tk()
 
         super().__init__()
+
+        # Quiet noisy INFO logs from speeds/feeds selector unless explicitly enabled
+        try:
+            logging.getLogger("cad_quoter.pricing.speeds_feeds_selector").setLevel(logging.WARNING)
+        except Exception:
+            pass
 
         self.configuration = configuration or UIConfiguration(
             default_params=copy.deepcopy(PARAMS_DEFAULT),
