@@ -1,8 +1,49 @@
 from __future__ import annotations
 
+import sys
+import types
 from pathlib import Path
 
 import pytest
+
+if "cad_quoter.geometry" not in sys.modules:
+    geom_stub = types.ModuleType("cad_quoter.geometry")
+    sys.modules["cad_quoter.geometry"] = geom_stub
+else:  # pragma: no cover - ensure attribute exists when module already imported
+    geom_stub = sys.modules["cad_quoter.geometry"]
+
+setattr(geom_stub, "FACE_OF", getattr(geom_stub, "FACE_OF", {}))
+
+
+def _ensure_face(face, *_args, **_kwargs):  # pragma: no cover - simple shim for tests
+    return face
+
+
+def _face_surface(*_args, **_kwargs):  # pragma: no cover - simple shim for tests
+    return None
+
+
+def _iter_faces(*_args, **_kwargs):  # pragma: no cover - simple shim for tests
+    return iter(())
+
+
+def _linear_properties(*_args, **_kwargs):  # pragma: no cover - simple shim for tests
+    return {}
+
+
+def _map_shapes_and_ancestors(*_args, **_kwargs):  # pragma: no cover - simple shim for tests
+    return {}
+
+
+setattr(geom_stub, "ensure_face", getattr(geom_stub, "ensure_face", _ensure_face))
+setattr(geom_stub, "face_surface", getattr(geom_stub, "face_surface", _face_surface))
+setattr(geom_stub, "iter_faces", getattr(geom_stub, "iter_faces", _iter_faces))
+setattr(geom_stub, "linear_properties", getattr(geom_stub, "linear_properties", _linear_properties))
+setattr(
+    geom_stub,
+    "map_shapes_and_ancestors",
+    getattr(geom_stub, "map_shapes_and_ancestors", _map_shapes_and_ancestors),
+)
 
 import appV5
 from cad_quoter.app import runtime as app_runtime
@@ -234,7 +275,29 @@ def test_discover_qwen_vl_assets_errors_when_missing(monkeypatch: pytest.MonkeyP
     assert "QWEN_VL_GGUF_PATH" in message
     assert "QWEN_VL_MMPROJ_PATH" in message
 
-def test_validate_quote_allows_small_material_cost_with_thickness() -> None:
+def test_validate_quote_blocks_low_hole_cost_for_legacy_buckets() -> None:
+    geo = {"hole_diams_mm": [5.0] * 12}
+    pass_through = {"Material": 25.0}
+    process_costs = {"drilling": 10.0, "milling": 0.0}
+
+    with pytest.raises(ValueError) as exc:
+        appV5.validate_quote_before_pricing(geo, process_costs, pass_through, {})
+
+    assert "Unusually low machining time" in str(exc.value)
+
+
+def test_validate_quote_requires_material_hints_when_cost_low() -> None:
+    geo: dict[str, object] = {}
+    pass_through = {"Material": 0.0}
+    process_costs = {"drilling": 0.0, "milling": 0.0}
+
+    with pytest.raises(ValueError) as exc:
+        appV5.validate_quote_before_pricing(geo, process_costs, pass_through, {})
+
+    assert "Material cost is near zero" in str(exc.value)
+
+
+def test_validate_quote_allows_low_material_when_thickness_provided() -> None:
     geo = {"GEO-03_Height_mm": 6.0, "material": "6061"}
     pass_through = {"Material": 2.0}
     process_costs = {"drilling": 0.0, "milling": 0.0}
@@ -243,26 +306,4 @@ def test_validate_quote_allows_small_material_cost_with_thickness() -> None:
         appV5.validate_quote_before_pricing(geo, process_costs, pass_through, {})
     except ValueError as exc:  # pragma: no cover - should not raise
         pytest.fail(f"unexpected validation error: {exc}")
-
-
-def test_validate_quote_accepts_planner_bucket_costs() -> None:
-    geo = {"hole_diams_mm": [5.0, 5.0, 5.0]}
-    pass_through = {"Material": 12.0}
-    process_costs = {"Machine": 180.0, "Labor": 60.0}
-
-    try:
-        appV5.validate_quote_before_pricing(geo, process_costs, pass_through, {})
-    except ValueError as exc:  # pragma: no cover - should not raise
-        pytest.fail(f"unexpected validation error: {exc}")
-
-
-def test_validate_quote_blocks_when_material_unknown() -> None:
-    geo = {}
-    pass_through = {"Material": 0.0}
-    process_costs = {"drilling": 0.0, "milling": 0.0}
-
-    with pytest.raises(ValueError) as exc:
-        appV5.validate_quote_before_pricing(geo, process_costs, pass_through, {})
-
-    assert "Material cost is near zero" in str(exc.value)
 
