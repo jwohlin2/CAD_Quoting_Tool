@@ -246,6 +246,7 @@ def resolve_mcmaster_plate_for_quote(
 
 __all__ = [
     "load_mcmaster_catalog_rows",
+    "_coerce_inches_value",
     "pick_mcmaster_plate_sku",
     "resolve_mcmaster_plate_for_quote",
 ]
