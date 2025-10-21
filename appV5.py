@@ -3835,15 +3835,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if not planner_has_drilling_bucket:
         planner_has_drilling_bucket = _has_planner_drilling_bucket(buckets)
 
-    if mins > 0:
-        drilling_machine_hr = round(mins / 60.0, 2)
-        # write into both the pricing state and the hour summary
-        if not planner_has_drilling_bucket:
-            hour_summary_entries["drilling"] = (drilling_machine_hr, True)
-        # also, if your bucket view structure is present, overwrite that slot:
-        if isinstance(buckets, dict) and "drilling" in buckets:
-            buckets["drilling"]["machine_hours"] = drilling_machine_hr
-            buckets["drilling"]["labor_hours"] = float(buckets["drilling"].get("labor_hours") or 0.0)
     # Canonical QUOTE SUMMARY header (legacy variants removed in favour of this
     # block so the Speeds/Feeds status + Drill Debug output stay consistent).
     header_lines, pricing_source_value = build_quote_header_lines(
@@ -5378,6 +5369,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         card_minutes_val = 0.0
     card_minutes_precise = float(card_minutes_val)
     removal_drilling_minutes = card_minutes_precise if have_card_minutes else None
+    removal_drilling_hours_precise: float | None = None
     if drill_total_minutes_estimate > 0.0:
         removal_drilling_minutes = float(drill_total_minutes_estimate)
         removal_drilling_hours_precise = removal_drilling_minutes / 60.0
@@ -5529,7 +5521,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     bucket_row_specs: list[_BucketRowSpec] = []
 
     labor_costs_display.clear()
-    hour_summary_entries.clear()
     display_labor_for_ladder = 0.0
     display_machine = 0.0
 
@@ -5836,7 +5827,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     else:
         display_labor_for_ladder = bucket_state.display_labor_total
         display_machine = bucket_state.display_machine_total
-    hour_summary_entries.update(bucket_state.hour_entries)
     bucket_minutes_detail: dict[str, float] = {}
     bucket_minutes_source = getattr(bucket_state, "bucket_minutes_detail", None)
     if isinstance(bucket_minutes_source, _MappingABC):
@@ -5851,6 +5841,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if isinstance(extra_bucket_minutes_detail, _MappingABC):
         for key, minutes in extra_bucket_minutes_detail.items():
             bucket_minutes_detail[str(key)] = _safe_float(minutes, default=0.0)
+
+    bucket_hour_summary: dict[str, tuple[float, bool]] = {}
+    for raw_key, minutes in bucket_minutes_detail.items():
+        minutes_val = _safe_float(minutes, default=0.0)
+        if minutes_val <= 0.0:
+            continue
+        canon_key = _canonical_bucket_key(raw_key) or _normalize_bucket_key(raw_key) or str(raw_key)
+        label = _display_bucket_label(canon_key, label_overrides)
+        bucket_hour_summary[label] = (round(minutes_val / 60.0, 2), True)
+    hour_summary_entries.clear()
+    hour_summary_entries.update(bucket_hour_summary)
     process_costs_for_render: dict[str, float] = {}
     bucket_costs_source = getattr(bucket_state, "process_costs_for_render", None)
     if isinstance(bucket_costs_source, _MappingABC):
@@ -6417,18 +6418,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             printed_bucket_labels.add(spec.label)
         for label in printed_bucket_labels:
             labor_cost_totals.pop(label, None)
-            spec = bucket_specs_for_render.get(label)
-            if spec is None:
-                continue
-            hours_val = _minutes_to_hours(spec.minutes)
-            existing_entry = hour_summary_entries.get(label)
-            include_flag = True
-            if isinstance(existing_entry, tuple) and len(existing_entry) == 2:
-                include_flag = bool(existing_entry[1])
-            if hours_val > 0.0:
-                hour_summary_entries[label] = (round(hours_val, 2), include_flag)
-            else:
-                hour_summary_entries.pop(label, None)
 
     misc_total = 0.0
     for label, amount in labor_cost_totals.items():
