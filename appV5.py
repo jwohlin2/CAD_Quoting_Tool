@@ -882,10 +882,11 @@ def _render_time_per_hole(
     peck_min_deep: float,
     peck_min_std: float,
     extra_map: MutableMapping[str, Any] | None = None,
-) -> tuple[float, bool, bool]:
+) -> tuple[float, bool, bool, list[dict[str, Any]]]:
     _push(lines, "TIME PER HOLE – DRILL GROUPS")
     _push(lines, "-" * 66)
     subtotal_minutes = 0.0
+    drill_groups: list[dict[str, Any]] = []
     groups_processed = 0
     seen_deep = False
     seen_std = False
@@ -940,6 +941,17 @@ def _render_time_per_hole(
                 f"qty={qty} t_group={t_group:.4f}"
             )
             groups_processed += 1
+            drill_groups.append(
+                {
+                    "diameter_in": float(dia_in),
+                    "qty": int(qty),
+                    "depth_in": float(depth_in),
+                    "sfm": float(sfm),
+                    "ipr": float(ipr),
+                    "t_hole_min": float(t_hole_min),
+                    "t_group_min": float(t_group),
+                }
+            )
             _push(
                 lines,
                 f'Dia {dia_in:.3f}" × {qty}  | depth {depth_in:.3f}" | {int(round(sfm))} sfm | '
@@ -959,10 +971,15 @@ def _render_time_per_hole(
         subtotal_minutes = 0.0
     if isinstance(extra_map, _MutableMappingABC):
         extra_map["drill_total_minutes"] = round(subtotal_minutes, 2)
+        if drill_groups:
+            try:
+                extra_map["drill_groups"] = [dict(group) for group in drill_groups]
+            except Exception:
+                extra_map["drill_groups"] = drill_groups
         logging.info(
             f"[removal] drill_total_minutes={extra_map['drill_total_minutes']}"
         )
-    return subtotal_minutes, seen_deep, seen_std
+    return subtotal_minutes, seen_deep, seen_std, drill_groups
 
 
 _thread_tpi = re.compile(r"#?\s*\d{1,2}\s*-\s*(\d+)", re.I)
@@ -1894,9 +1911,10 @@ def _estimate_drilling_minutes_from_meta(
     subtotal_min = 0.0
     seen_deep = False
     seen_std = False
+    drill_groups_for_detail: list[dict[str, Any]] = []
     if bins:
         _local_lines: list[str] = []
-        subtotal_min, seen_deep, seen_std = _render_time_per_hole(
+        subtotal_min, seen_deep, seen_std, drill_groups = _render_time_per_hole(
             _local_lines,
             bins=bins,
             index_min=index_min,
@@ -1904,6 +1922,12 @@ def _estimate_drilling_minutes_from_meta(
             peck_min_std=peck_min_std,
             extra_map=drilling_meta_mut,
         )
+        if drill_groups and isinstance(drilling_meta_mut, _MutableMappingABC):
+            try:
+                drilling_meta_mut["drill_groups"] = [dict(group) for group in drill_groups]
+            except Exception:
+                drilling_meta_mut["drill_groups"] = drill_groups
+        drill_groups_for_detail = drill_groups
 
     tool_minutes = (tchg_deep if seen_deep else 0.0) + (tchg_std if seen_std else 0.0)
     total_minutes = subtotal_min + tool_minutes
@@ -1920,6 +1944,7 @@ def _estimate_drilling_minutes_from_meta(
         "subtotal_minutes": subtotal_min,
         "tool_minutes": tool_minutes,
         "total_minutes": total_minutes,
+        "drill_groups": drill_groups_for_detail,
     }
 
     return subtotal_min, tool_minutes, total_minutes, detail
@@ -7594,6 +7619,99 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     # Render MATERIAL REMOVAL card + TIME PER HOLE lines (replace legacy Time block)
     # NOTE: Patch 3 keeps the hole-table hook active so downstream cards continue to render.
     append_lines(removal_card_lines)
+
+    removal_drill_heading = "MATERIAL REMOVAL – DRILLING"
+    removal_card_has_drill = False
+    for line_text in removal_card_lines:
+        if isinstance(line_text, str) and line_text.strip().upper().startswith(
+            removal_drill_heading
+        ):
+            removal_card_has_drill = True
+            break
+
+    if not removal_card_has_drill:
+        drill_groups_render: list[dict[str, float]] = []
+
+        def _extract_groups(rows: Sequence[Any] | None) -> bool:
+            nonlocal drill_groups_render
+            if not isinstance(rows, Sequence) or not rows:
+                return False
+            extracted: list[dict[str, float]] = []
+            for entry in rows:
+                if not isinstance(entry, _MappingABC):
+                    continue
+                qty_val = int(_coerce_float_or_none(entry.get("qty")) or 0)
+                if qty_val <= 0:
+                    continue
+                dia_val = _coerce_float_or_none(entry.get("diameter_in"))
+                if dia_val is None or dia_val <= 0:
+                    continue
+                depth_val = _coerce_float_or_none(entry.get("depth_in")) or 0.0
+                sfm_val = _coerce_float_or_none(entry.get("sfm")) or 0.0
+                ipr_val = _coerce_float_or_none(entry.get("ipr")) or 0.0
+                per_hole = (
+                    _coerce_float_or_none(entry.get("t_hole_min"))
+                    or _coerce_float_or_none(entry.get("t_per_hole_min"))
+                    or _coerce_float_or_none(entry.get("minutes_per_hole"))
+                )
+                group_total = (
+                    _coerce_float_or_none(entry.get("t_group_min"))
+                    or _coerce_float_or_none(entry.get("group_minutes"))
+                )
+                if per_hole is None and group_total is not None and qty_val > 0:
+                    per_hole = float(group_total) / float(qty_val)
+                if per_hole is None:
+                    per_hole = 0.0
+                if group_total is None:
+                    group_total = float(qty_val) * float(per_hole)
+                extracted.append(
+                    {
+                        "diameter_in": float(dia_val),
+                        "qty": float(qty_val),
+                        "depth_in": float(depth_val),
+                        "sfm": float(sfm_val),
+                        "ipr": float(ipr_val),
+                        "t_hole_min": float(per_hole),
+                        "t_group_min": float(group_total),
+                    }
+                )
+            if extracted:
+                drill_groups_render = extracted
+                return True
+            return False
+
+        dtph_rows_source = None
+        if isinstance(drilling_time_per_hole_data, _MappingABC):
+            dtph_rows_source = drilling_time_per_hole_data.get("rows")
+        if not _extract_groups(dtph_rows_source):
+            detail_groups = None
+            if isinstance(drilling_card_detail, _MappingABC):
+                detail_groups = drilling_card_detail.get("drill_groups")
+            if not _extract_groups(detail_groups):
+                meta_groups = None
+                if isinstance(drilling_meta_map, _MappingABC):
+                    meta_groups = drilling_meta_map.get("drill_groups")
+                    if not meta_groups:
+                        meta_groups = drilling_meta_map.get("bins_list")
+                _extract_groups(meta_groups)
+
+        if drill_groups_render:
+            append_line(removal_drill_heading)
+            append_line("-" * 66)
+            for group in drill_groups_render:
+                dia = float(group.get("diameter_in", 0.0))
+                qty = int(round(float(group.get("qty", 0.0))))
+                depth = float(group.get("depth_in", 0.0))
+                sfm = float(group.get("sfm", 0.0))
+                ipr = float(group.get("ipr", 0.0))
+                t_hole = float(group.get("t_hole_min", 0.0))
+                t_group = float(group.get("t_group_min", qty * t_hole))
+                append_line(
+                    f'Dia {dia:.3f}" × {qty}  | depth {depth:.3f}" | '
+                    f"{int(round(sfm))} sfm | {ipr:.4f} ipr | "
+                    f"t/hole {t_hole:.2f} min | group {qty}×{t_hole:.2f} = {t_group:.2f} min"
+                )
+            append_line("")
 
     # ===== MATERIAL REMOVAL: HOLE-TABLE CARDS =================================
     # use module-level 're'
