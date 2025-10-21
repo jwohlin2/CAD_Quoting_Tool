@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from collections.abc import Iterable, Mapping
 import re
-from typing import Any, Dict, Iterable as _Iterable, Mapping as _Mapping, Tuple
+from typing import Any, Dict, Iterable as _Iterable, Mapping as _Mapping
 
 from cad_quoter.pricing.rate_buckets import RATE_BUCKETS
 from cad_quoter.rates import OP_TO_LABOR, OP_TO_MACHINE, rate_for_role
@@ -25,7 +25,13 @@ _BASE_BUCKET_SPECS: tuple[_BucketSpec, ...] = (
     _BucketSpec(
         "drilling",
         "Drilling",
-        ("DrillingRate", "CncVertical", "CncVerticalRate", "cnc_vertical"),
+        (
+            "DrillingRate",
+            "CncVertical",
+            "CncVerticalRate",
+            "cnc_vertical",
+            "MillingRate",
+        ),
     ),
     _BucketSpec("counterbore", "Counterbore", ("CounterboreRate", "DrillingRate")),
     _BucketSpec("tapping", "Tapping", ("TappingRate", "DrillingRate")),
@@ -145,9 +151,13 @@ RATE_ALIAS_KEYS.update(
     }
 )
 
-HIDE_IN_COST: frozenset[str] = frozenset(
+PLANNER_META: frozenset[str] = frozenset(
     {"planner_total", "planner_labor", "planner_machine"}
-    | {spec.key for spec in _BASE_BUCKET_SPECS if spec.hide_in_cost}
+)
+"""Planner-only meta buckets that should be hidden from displays."""
+
+HIDE_IN_COST: frozenset[str] = frozenset(
+    {*PLANNER_META, *{spec.key for spec in _BASE_BUCKET_SPECS if spec.hide_in_cost}}
 )
 """Buckets that should be hidden from rendered totals."""
 
@@ -170,13 +180,16 @@ ALIAS_MAP: dict[str, str] = {
     "wire_edm_id_leave": "wire_edm",
     "wedm": "wire_edm",
     "edm": "wire_edm",
+    "deep_drill": "drilling",
     "sinker_edm": "sinker_edm",
     "sinkeredm": "sinker_edm",
     "sinker-edm": "sinker_edm",
     "sinker edm": "sinker_edm",
+    "sinker": "sinker_edm",
     "ram_edm": "sinker_edm",
     "ramedm": "sinker_edm",
     "ram-edm": "sinker_edm",
+    "ram edm": "sinker_edm",
     "sinker_edm_finish_burn": "sinker_edm",
     "lap": "grinding",
     "lapping": "grinding",
@@ -184,6 +197,7 @@ ALIAS_MAP: dict[str, str] = {
     "honing": "grinding",
     "deburr": "finishing_deburr",
     "deburring": "finishing_deburr",
+    "finish_deburr": "finishing_deburr",
     "finishing": "finishing_deburr",
     "finishing_misc": "finishing_deburr",
     "finishing_deburr": "finishing_deburr",
@@ -215,13 +229,129 @@ ALIAS_MAP: dict[str, str] = {
 }
 
 
+_alias_groups: dict[str, set[str]] = {}
+for _alias, _canonical in ALIAS_MAP.items():
+    if not _canonical:
+        continue
+    _alias_groups.setdefault(_canonical, set()).add(_alias)
+
+for _key in set(CANONICAL_BUCKET_ORDER) | set(PLANNER_BUCKET_ORDER) | {"misc"}:
+    if not _key:
+        continue
+    _alias_groups.setdefault(_key, set()).add(_key)
+
+ALIASES_BY_CANONICAL: dict[str, tuple[str, ...]] = {
+    key: tuple(sorted(values)) for key, values in _alias_groups.items()
+}
+
+
+BUCKET_ROLE: dict[str, str] = {
+    "programming": "labor_only",
+    "programming_amortized": "labor_only",
+    "fixture_build": "labor_only",
+    "fixture_build_amortized": "labor_only",
+    "inspection": "labor_only",
+    "finishing_deburr": "labor_only",
+    "toolmaker_support": "labor_only",
+    "assembly": "labor_only",
+    "ehs_compliance": "labor_only",
+    "drilling": "split",
+    "milling": "split",
+    "grinding": "split",
+    "sinker_edm": "split",
+    "wire_edm": "machine_only",
+    "saw_waterjet": "machine_only",
+    "_default": "machine_only",
+}
+
+
+@dataclass(frozen=True)
+class BucketRegistry:
+    """Expose canonical process bucket metadata for pricing and planner views."""
+
+    order: tuple[str, ...]
+    planner_order: tuple[str, ...]
+    labels: Mapping[str, str]
+    alias_map: Mapping[str, str]
+    alias_groups: Mapping[str, tuple[str, ...]]
+    hide_in_cost: frozenset[str]
+    planner_meta: frozenset[str]
+
+    def canonical_key(
+        self,
+        name: Any,
+        *,
+        allowed: Iterable[str] | None = None,
+        default: str = "misc",
+    ) -> str | None:
+        norm = normalize_bucket_key(name)
+        if not norm:
+            return None
+        if norm == "planner_total":
+            return None
+
+        if allowed is None:
+            allowed_keys: tuple[str, ...] = self.order
+        else:
+            allowed_keys = tuple(allowed)
+            if norm in allowed_keys:
+                return norm
+
+        alias = self.alias_map.get(norm)
+        if alias:
+            norm = alias
+
+        if norm in allowed_keys:
+            return norm
+
+        if norm.startswith("planner_"):
+            return default
+
+        return default
+
+    def label(self, key: str) -> str:
+        if not key:
+            return ""
+        if key in self.labels:
+            return self.labels[key]
+        return key.replace("_", " ").title()
+
+    def aliases(self, key: str) -> tuple[str, ...]:
+        norm = normalize_bucket_key(key)
+        if not norm:
+            return ()
+        aliases = self.alias_groups.get(norm)
+        if aliases:
+            return aliases
+        canon = self.alias_map.get(norm)
+        if canon:
+            return self.alias_groups.get(canon, (canon,))
+        return (norm,)
+
+
+PROCESS_BUCKETS = BucketRegistry(
+    order=CANONICAL_BUCKET_ORDER,
+    planner_order=PLANNER_BUCKET_ORDER,
+    labels=dict(LABEL_MAP),
+    alias_map=dict(ALIAS_MAP),
+    alias_groups=dict(ALIASES_BY_CANONICAL),
+    hide_in_cost=HIDE_IN_COST,
+    planner_meta=PLANNER_META,
+)
+
+
 __all__ = [
     "CANONICAL_BUCKET_ORDER",
     "ORDER",
     "PLANNER_BUCKET_ORDER",
+    "PLANNER_META",
     "HIDE_IN_COST",
     "ALIAS_MAP",
+    "ALIASES_BY_CANONICAL",
+    "BUCKET_ROLE",
+    "PROCESS_BUCKETS",
     "RATE_ALIAS_KEYS",
+    "bucket_aliases",
     "bucket_label",
     "bucketize",
     "canonical_bucket_key",
@@ -254,48 +384,21 @@ def canonical_bucket_key(
     allowed: Iterable[str] | None = None,
     default: str = "misc",
 ) -> str | None:
-    """Return the canonical bucket key for *name*.
+    """Return the canonical bucket key for *name*."""
 
-    When *allowed* is provided the normalised key is accepted before any alias
-    lookups.  This lets callers opt into planner-specific buckets (such as
-    countersink) without affecting the pricing renderer's canonicalisation.
-    """
-
-    norm = normalize_bucket_key(name)
-    if not norm:
-        return None
-    if norm == "planner_total":
-        return None
-
-    allowed_keys: Tuple[str, ...]
-    if allowed is None:
-        allowed_keys = ORDER
-    else:
-        allowed_keys = tuple(allowed)
-        if norm in allowed_keys:
-            return norm
-
-    alias = ALIAS_MAP.get(norm)
-    if alias:
-        norm = alias
-
-    if norm in allowed_keys:
-        return norm
-
-    if norm.startswith("planner_"):
-        return default
-
-    return default
+    return PROCESS_BUCKETS.canonical_key(name, allowed=allowed, default=default)
 
 
 def bucket_label(key: str) -> str:
     """Return the display label for a canonical bucket key."""
 
-    if not key:
-        return ""
-    if key in LABEL_MAP:
-        return LABEL_MAP[key]
-    return key.replace("_", " ").title()
+    return PROCESS_BUCKETS.label(key)
+
+
+def bucket_aliases(key: str) -> tuple[str, ...]:
+    """Return the known aliases for *key* including the canonical name."""
+
+    return PROCESS_BUCKETS.aliases(key)
 
 
 def _rate_aliases_for(key: str) -> tuple[str, ...]:

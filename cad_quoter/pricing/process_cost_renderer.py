@@ -5,8 +5,8 @@ import math
 import os
 from typing import Any
 
-from cad_quoter.pricing.rate_buckets import RATE_BUCKETS
 from cad_quoter.pricing.process_buckets import (
+    PROCESS_BUCKETS,
     canonical_bucket_key,
     bucket_label,
     flatten_rates,
@@ -14,31 +14,9 @@ from cad_quoter.pricing.process_buckets import (
 )
 
 
-ORDER: tuple[str, ...] = (
-    "milling",
-    "drilling",
-    "counterbore",
-    "tapping",
-    "grinding",
-    "wire_edm",
-    "sinker_edm",
-    "finishing_deburr",
-    "saw_waterjet",
-    "inspection",
-    "toolmaker_support",
-    "fixture_build_amortized",
-    "programming_amortized",
-    "misc",
-)
+ORDER: tuple[str, ...] = PROCESS_BUCKETS.order
 
-HIDE_IN_COST: frozenset[str] = frozenset(
-    {
-        "planner_total",
-        "planner_labor",
-        "planner_machine",
-        "misc",
-    }
-)
+HIDE_IN_COST: frozenset[str] = PROCESS_BUCKETS.hide_in_cost
 
 __all__ = ["ORDER", "canonicalize_costs", "render_process_costs"]
 
@@ -151,12 +129,9 @@ def render_process_costs(
         raw_amount = float(costs.get(key, 0.0))
         hours = max(0.0, float(minutes.get(key, 0.0)) / 60.0)
         rate = lookup_rate(key, flat_rates, normalized_rates)
-        inferred_amount: float | None = None
-        if hours > 0 and rate > 0:
-            inferred_amount = round(hours * rate, 2)
         amount = round(raw_amount, 2)
-        if inferred_amount is not None:
-            amount = inferred_amount
+        if hours > 0 and rate > 0 and math.isclose(amount, 0.0, abs_tol=1e-9):
+            amount = round(hours * rate, 2)
         costs[key] = amount
         if key in HIDE_IN_COST:
             if not math.isclose(amount, 0.0, abs_tol=1e-9):

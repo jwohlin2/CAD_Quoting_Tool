@@ -10,6 +10,14 @@ from collections.abc import Iterable, Mapping as _MappingABC, MutableMapping as 
 
 from cad_quoter.config import logger
 from cad_quoter.domain_models import coerce_float_or_none as _coerce_float_or_none
+from cad_quoter.pricing.process_buckets import (
+    BUCKET_ROLE,
+    PLANNER_BUCKET_ORDER,
+    PLANNER_META,
+    RATE_ALIAS_KEYS,
+    canonical_bucket_key as _shared_canonical_bucket_key,
+    normalize_bucket_key as _shared_normalize_bucket_key,
+)
 from cad_quoter.utils import sdict
 from cad_quoter.utils.render_utils import fmt_hours, fmt_money
 
@@ -21,101 +29,12 @@ from .services import QuoteConfiguration
 PROGRAMMING_PER_PART_LABEL = "Programming (per part)"
 PROGRAMMING_AMORTIZED_LABEL = "Programming (amortized)"
 
-# Meta keys that should be hidden in certain bucket views
-PLANNER_META: frozenset[str] = frozenset({"planner_labor", "planner_machine", "planner_total"})
-
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)
     except Exception:
         return default
-
-_HIDE_IN_BUCKET_VIEW: frozenset[str] = frozenset({*PLANNER_META, "misc"})
-_PREFERRED_BUCKET_VIEW_ORDER: tuple[str, ...] = (
-    "programming",
-    "programming_amortized",
-    "fixture_build",
-    "fixture_build_amortized",
-    "milling",
-    "drilling",
-    "counterbore",
-    "countersink",
-    "tapping",
-    "grinding",
-    "finishing_deburr",
-    "saw_waterjet",
-    "wire_edm",
-    "sinker_edm",
-    "inspection",
-    "assembly",
-    "toolmaker_support",
-    "packaging",
-    "ehs_compliance",
-    "turning",
-    "lapping_honing",
-)
-
-CANON_MAP: dict[str, str] = {
-    "deburr": "finishing_deburr",
-    "deburring": "finishing_deburr",
-    "finish_deburr": "finishing_deburr",
-    "finishing_deburr": "finishing_deburr",
-    "finishing": "finishing_deburr",
-    "finishing/deburr": "finishing_deburr",
-    "inspection": "inspection",
-    "milling": "milling",
-    "drilling": "drilling",
-    "deep_drill": "drilling",
-    "counterbore": "counterbore",
-    "tapping": "tapping",
-    "grinding": "grinding",
-    "wire_edm": "wire_edm",
-    "wire_edm_windows": "wire_edm",
-    "wire_edm_outline": "wire_edm",
-    "wire_edm_open_id": "wire_edm",
-    "wire_edm_cam_slot_or_profile": "wire_edm",
-    "wire_edm_id_leave": "wire_edm",
-    "wedm": "wire_edm",
-    "wireedm": "wire_edm",
-    "wire-edm": "wire_edm",
-    "wire edm": "wire_edm",
-    "sinker_edm": "sinker_edm",
-    "sinker_edm_finish_burn": "sinker_edm",
-    "sinker": "sinker_edm",
-    "ram_edm": "sinker_edm",
-    "ramedm": "sinker_edm",
-    "ram-edm": "sinker_edm",
-    "ram edm": "sinker_edm",
-    "saw_waterjet": "saw_waterjet",
-    "fixture_build_amortized": "fixture_build_amortized",
-    "programming_amortized": "programming_amortized",
-    "misc": "misc",
-}
-
-# ---------- Bucket & Operation Roles ----------
-BUCKET_ROLE: dict[str, str] = {
-    "programming": "labor_only",
-    "inspection": "labor_only",
-    "deburr": "labor_only",
-    "deburring": "labor_only",
-    "finishing_deburr": "labor_only",
-    "finishing": "labor_only",
-    "finishing/deburr": "labor_only",
-
-    "drilling": "split",
-    "milling": "split",
-    "grinding": "split",
-    "sinker_edm": "split",
-
-    "wedm": "machine_only",
-    "wire_edm": "machine_only",
-    "waterjet": "machine_only",
-    "saw": "machine_only",
-    "saw_waterjet": "machine_only",
-
-    "_default": "machine_only",
-}
 
 OP_ROLE: dict[str, str] = {
     "assemble_pair_on_fixture": "labor_only",
@@ -183,33 +102,22 @@ OP_ROLE: dict[str, str] = {
 
 
 def _bucket_role_for_key(key: str) -> str:
-    canon = _canonical_bucket_key(key) or _normalize_bucket_key(key) or ""
-    return BUCKET_ROLE.get(canon, BUCKET_ROLE["_default"])
+    canon = _canonical_bucket_key(key)
+    if not canon:
+        canon = _normalize_bucket_key(key)
+    role = BUCKET_ROLE.get(canon, BUCKET_ROLE.get("_default", "machine_only"))
+    return role
 
 
 def _op_role_for_name(name: str) -> str:
     return OP_ROLE.get((name or "").strip(), "machine_only")
 
 def _normalize_bucket_key(name: str | None) -> str:
-    text = re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_")
-    aliases = {
-        "finishing": "finishing_deburr",
-        "deburring": "finishing_deburr",
-        "finish_deburr": "finishing_deburr",
-        "finishing_deburr": "finishing_deburr",
-        "deburr": "finishing_deburr",
-        "saw": "saw_waterjet",
-        "saw_waterjet": "saw_waterjet",
-        "waterjet": "saw_waterjet",
-        "counter_bore": "counterbore",
-        "counter_bores": "counterbore",
-        "counterbore": "counterbore",
-        "counter_sink": "countersink",
-        "counter_sinks": "countersink",
-        "countersink": "countersink",
-        "thread_mill": "tapping",
-    }
-    return aliases.get(text, text)
+    normalized = _shared_normalize_bucket_key(name)
+    if not normalized:
+        return ""
+    canon = _shared_canonical_bucket_key(name, default=normalized)
+    return canon or normalized
 
 def _rate_key_for_bucket(bucket: str | None) -> str | None:
     canon = _normalize_bucket_key(bucket)
@@ -234,44 +142,9 @@ def _rate_key_for_bucket(bucket: str | None) -> str | None:
     return mapping.get(canon)
 
 
-_LABORISH_BUCKET_KEYS: frozenset[str] = frozenset(
-    {
-        "finishing_deburr",
-        "inspection",
-        "assembly",
-        "toolmaker_support",
-        "ehs_compliance",
-        "fixture_build_amortized",
-        "programming_amortized",
-    }
-)
-
-_BUCKET_RATE_CANDIDATES: dict[str, tuple[str, ...]] = {
-    "milling": ("MillingRate",),
-    "drilling": ("DrillingRate", "MillingRate"),
-    "counterbore": ("CounterboreRate", "DrillingRate"),
-    "countersink": ("CountersinkRate", "DrillingRate"),
-    "tapping": ("TappingRate", "DrillingRate"),
-    "grinding": (
-        "GrindingRate",
-        "SurfaceGrindRate",
-        "ODIDGrindRate",
-        "JigGrindRate",
-    ),
-    "finishing_deburr": ("FinishingRate", "DeburrRate"),
-    "saw_waterjet": ("SawWaterjetRate", "SawRate", "WaterjetRate"),
-    "inspection": ("InspectionRate",),
-    "wire_edm": ("WireEDMRate", "EDMRate"),
-    "sinker_edm": ("SinkerEDMRate", "EDMRate"),
-    "lapping_honing": ("LappingRate", "HoningRate"),
-}
-
-
 def _bucket_cost_mode(key: str | None) -> str:
-    norm = _normalize_bucket_key(key)
-    if norm in _LABORISH_BUCKET_KEYS:
-        return "labor"
-    return "machine"
+    role = BUCKET_ROLE.get(_canonical_bucket_key(key), BUCKET_ROLE.get("_default", "machine_only"))
+    return "labor" if role == "labor_only" else "machine"
 
 
 def _lookup_bucket_rate(
@@ -283,21 +156,22 @@ def _lookup_bucket_rate(
         rates_map = rates
 
     norm = _normalize_bucket_key(bucket_key)
-    candidates = _BUCKET_RATE_CANDIDATES.get(norm, ())
-    for candidate in candidates:
-        rate_val = rates_map.get(candidate)
-        if rate_val is None:
-            rate_val = rates_map.get(_normalize_bucket_key(candidate))
-        coerced = _safe_float(rate_val, default=0.0)
-        if coerced > 0:
-            return coerced
     canon_key = _canonical_bucket_key(bucket_key)
-    canon_norm = _normalize_bucket_key(canon_key)
-    if canon_key and canon_norm and canon_norm != norm:
-        for candidate in _BUCKET_RATE_CANDIDATES.get(canon_norm, ()): 
+    search_keys: list[str] = []
+    if norm:
+        search_keys.append(norm)
+    if canon_key and canon_key not in search_keys:
+        search_keys.append(canon_key)
+
+    seen_candidates: set[str] = set()
+    for key in search_keys:
+        for candidate in RATE_ALIAS_KEYS.get(key, ()):  # type: ignore[arg-type]
+            if candidate in seen_candidates:
+                continue
+            seen_candidates.add(candidate)
             rate_val = rates_map.get(candidate)
             if rate_val is None:
-                rate_val = rates_map.get(_normalize_bucket_key(candidate))
+                rate_val = rates_map.get(_shared_normalize_bucket_key(candidate))
             coerced = _safe_float(rate_val, default=0.0)
             if coerced > 0:
                 return coerced
@@ -1189,19 +1063,12 @@ def _planner_bucket_key_for_name(name: Any) -> str:
 
 
 def _canonical_bucket_key(name: str | None) -> str:
-    normalized = _normalize_bucket_key(name)
+    normalized = _shared_normalize_bucket_key(name)
     if not normalized:
         return ""
-    canon = CANON_MAP.get(normalized)
+    canon = _shared_canonical_bucket_key(name, default="")
     if canon:
         return canon
-
-    tokens = [tok for tok in normalized.split("_") if tok]
-    if any(tok.startswith("deburr") or tok.startswith("debur") for tok in tokens):
-        return "finishing_deburr"
-    if any(tok.startswith("finish") for tok in tokens):
-        return "finishing_deburr"
-
     return normalized
 
 def _bucket_cost(info: Mapping[str, Any] | None, *keys: str) -> float:
@@ -1222,7 +1089,7 @@ def _preferred_order_then_alpha(keys: Iterable[str]) -> list[str]:
     remaining = {key for key in keys if key}
     ordered: list[str] = []
 
-    for preferred in _PREFERRED_BUCKET_VIEW_ORDER:
+    for preferred in PLANNER_BUCKET_ORDER:
         if preferred in remaining:
             ordered.append(preferred)
             seen.add(preferred)
@@ -1244,7 +1111,7 @@ def _coerce_bucket_metric(data: Mapping[str, Any] | None, *candidates: str) -> f
                 continue
     return 0.0
 
-_FINAL_BUCKET_HIDE_KEYS = {"planner_total", "planner_labor", "planner_machine", "misc"}
+_FINAL_BUCKET_HIDE_KEYS = set(PLANNER_META) | {"misc"}
 
 SHOW_BUCKET_DIAGNOSTICS_OVERRIDE = False
 
@@ -1385,7 +1252,7 @@ def canonicalize_costs(process_costs: Mapping[str, Any] | None) -> dict[str, flo
             continue
         if key.startswith("planner_") or key in PLANNER_META:
             continue
-        canon_key = CANON_MAP.get(key, key)
+        canon_key = _canonical_bucket_key(key) or _normalize_bucket_key(key)
         try:
             amount = float(raw_value or 0.0)
         except Exception:

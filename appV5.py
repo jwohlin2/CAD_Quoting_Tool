@@ -4128,94 +4128,6 @@ PREFERRED_PROCESS_BUCKET_ORDER: tuple[str, ...] = (
     "misc",
 )
 
-CANON_MAP: dict[str, str] = {
-    "deburr": "finishing_deburr",
-    "deburring": "finishing_deburr",
-    "finish_deburr": "finishing_deburr",
-    "finishing_deburr": "finishing_deburr",
-    "finishing": "finishing_deburr",
-    "finishing/deburr": "finishing_deburr",
-    "inspection": "inspection",
-    "milling": "milling",
-    "drilling": "drilling",
-    "deep_drill": "drilling",
-    "counterbore": "counterbore",
-    "tapping": "tapping",
-    "grinding": "grinding",
-    "wire_edm": "wire_edm",
-    "wire_edm_windows": "wire_edm",
-    "wire_edm_outline": "wire_edm",
-    "wire_edm_open_id": "wire_edm",
-    "wire_edm_cam_slot_or_profile": "wire_edm",
-    "wire_edm_id_leave": "wire_edm",
-    "wedm": "wire_edm",
-    "wireedm": "wire_edm",
-    "wire-edm": "wire_edm",
-    "wire edm": "wire_edm",
-    "sinker_edm": "sinker_edm",
-    "sinker_edm_finish_burn": "sinker_edm",
-    "sinker": "sinker_edm",
-    "ram_edm": "sinker_edm",
-    "ramedm": "sinker_edm",
-    "ram-edm": "sinker_edm",
-    "ram edm": "sinker_edm",
-    "saw_waterjet": "saw_waterjet",
-    "fixture_build_amortized": "fixture_build_amortized",
-    "programming_amortized": "programming_amortized",
-    "misc": "misc",
-}
-
-PLANNER_META: frozenset[str] = frozenset({"planner_labor", "planner_machine", "planner_total"})
-
-# ---------- Bucket & Operation Roles ----------
-BUCKET_ROLE: dict[str, str] = {
-    "programming": "labor_only",
-    "inspection": "labor_only",
-    "deburr": "labor_only",
-    "deburring": "labor_only",
-    "finishing_deburr": "labor_only",
-    "finishing": "labor_only",
-    "finishing/deburr": "labor_only",
-
-    "drilling": "split",
-    "milling": "split",
-    "grinding": "split",
-    "sinker_edm": "split",
-
-    "wedm": "machine_only",
-    "wire_edm": "machine_only",
-    "waterjet": "machine_only",
-    "saw": "machine_only",
-    "saw_waterjet": "machine_only",
-
-    "_default": "machine_only",
-}
-
-_HIDE_IN_BUCKET_VIEW: frozenset[str] = frozenset({*PLANNER_META, "misc"})
-_PREFERRED_BUCKET_VIEW_ORDER: tuple[str, ...] = (
-    "programming",
-    "programming_amortized",
-    "fixture_build",
-    "fixture_build_amortized",
-    "milling",
-    "drilling",
-    "counterbore",
-    "countersink",
-    "tapping",
-    "grinding",
-    "finishing_deburr",
-    "saw_waterjet",
-    "wire_edm",
-    "sinker_edm",
-    "inspection",
-    "assembly",
-    "toolmaker_support",
-    "packaging",
-    "ehs_compliance",
-    "turning",
-    "lapping_honing",
-)
-
 
 def _display_rate_for_row(
     label: str,
@@ -8186,6 +8098,27 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 if isinstance(order_list, list) and canon_key not in order_list:
                     order_list.insert(0, canon_key)
 
+        if not any(spec.canon_key == canon_key for spec in bucket_row_specs):
+            hours_val = minutes_val / 60.0 if minutes_val > 0 else 0.0
+            if hours_val > 0:
+                rate_val = amount_val / hours_val if hours_val else 0.0
+            else:
+                rate_val = 0.0
+            if hours_val > 0 and rate_val <= 0.0:
+                rate_val = _rate_for_bucket(canon_key, rates or {})
+            bucket_row_specs.append(
+                _BucketRowSpec(
+                    label=_display_bucket_label(canon_key, label_overrides),
+                    hours=hours_val,
+                    rate=rate_val,
+                    total=amount_val,
+                    labor=amount_val,
+                    machine=0.0,
+                    canon_key=canon_key,
+                    minutes=minutes_val,
+                )
+            )
+
     for canon_key in process_costs_for_render:
         label = _display_bucket_label(canon_key, label_overrides)
         label_to_canon.setdefault(label, canon_key)
@@ -10127,6 +10060,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         "materials": materials_entries,
         "materials_direct": round(direct_total_amount, 2),
         "processes": processes_entries,
+        "labor_total_amount": round(labor_total_amount, 2),
         "ladder": {
             "labor_total": round(labor_total_amount, 2),
             "direct_total": round(direct_total_amount, 2),

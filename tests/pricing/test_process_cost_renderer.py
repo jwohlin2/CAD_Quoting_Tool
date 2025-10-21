@@ -1,10 +1,7 @@
 import pytest
 
-from cad_quoter.pricing.process_buckets import ORDER
-from cad_quoter.pricing.process_cost_renderer import (
-    canonicalize_costs,
-    render_process_costs,
-)
+from cad_quoter.pricing.process_buckets import ORDER, PROCESS_BUCKETS, bucket_aliases
+from cad_quoter.pricing.process_cost_renderer import canonicalize_costs, render_process_costs
 
 
 class TableCollector:
@@ -41,6 +38,8 @@ def test_canonicalize_costs_groups_aliases_and_skips_planner_total() -> None:
     assert canon["wire_edm"] == pytest.approx(23.0)
     assert canon["sinker_edm"] == pytest.approx(22.0)
     assert "planner_total" not in canon
+    assert "deep_drill" in bucket_aliases("drilling")
+    assert {"planner_total", "misc"}.issubset(PROCESS_BUCKETS.hide_in_cost)
 
 
 def test_render_process_costs_orders_rows_and_rates(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -73,7 +72,7 @@ def test_render_process_costs_orders_rows_and_rates(monkeypatch: pytest.MonkeyPa
         "Countersink",
         "Finishing/Deburr",
     ]
-    assert total == pytest.approx(201.25)
+    assert total == pytest.approx(135.0)
 
     expected_hours = {
         "Milling": 2.0,
@@ -86,9 +85,9 @@ def test_render_process_costs_orders_rows_and_rates(monkeypatch: pytest.MonkeyPa
         "Finishing/Deburr": 45.0,
     }
     expected_costs = {
-        "Milling": 120.0,
-        "Countersink": 13.75,
-        "Finishing/Deburr": 67.5,
+        "Milling": 100.0,
+        "Countersink": 5.0,
+        "Finishing/Deburr": 30.0,
     }
 
     for row in table.rows:
