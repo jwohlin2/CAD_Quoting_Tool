@@ -872,6 +872,12 @@ def explain_quote(
             return None
         return fmt_money(num, currency_prefix)
 
+    def _as_float(value: Any, default: float = 0.0) -> float:
+        num = coerce_float(value)
+        if num is None:
+            return default
+        return num
+
     lines: list[str] = []
 
     geometry_map: Mapping[str, Any] | None = geometry if isinstance(geometry, Mapping) else None
@@ -1221,9 +1227,11 @@ def explain_quote(
         lines.append(f"Includes a {scrap_text} scrap allowance.")
 
     def _top_drivers(bucket_view_obj, n=3):
-        b = (bucket_view_obj.get("buckets") or {})
-        items = [(k, float(v.get("total$", 0.0) or 0.0)) for k, v in b.items()]
-        items = [x for x in items if x[1] > 0]
+        items = []
+        for k, e in (bucket_view_obj.get("buckets") or {}).items():
+            tot = _as_float(e.get("total$", 0.0), 0.0)
+            if tot > 0:
+                items.append((k, tot))
         items.sort(key=lambda x: x[1], reverse=True)
         return items[:n]
 
@@ -1231,7 +1239,7 @@ def explain_quote(
     lines.append("Why this price")
     lines.append("-" * 74)
     if drivers:
-        txt = ", ".join([f"{k.replace('_', ' ').title()} ${v:,.2f}" for k, v in drivers])
+        txt = ", ".join(f"{k.replace('_', ' ').title()} ${v:,.2f}" for k, v in drivers)
         lines.append(f"  Main cost drivers: {txt}.")
     else:
         lines.append("  Main cost drivers derive from planner buckets; none dominate.")
