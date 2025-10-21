@@ -8,8 +8,8 @@ from typing import Any
 
 from cad_quoter.pricing.rate_buckets import RATE_BUCKETS
 from cad_quoter.pricing.process_buckets import (
-    bucket_label,
     canonical_bucket_key,
+    bucket_label,
     flatten_rates,
     lookup_rate,
 )

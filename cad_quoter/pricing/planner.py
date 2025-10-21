@@ -472,6 +472,10 @@ def price_with_planner(
 
     # ---- convert to costs (two-bucket rates)
     line_items, totals = bucket_cost_breakdown(minutes, rates)
+    for entry in line_items:
+        # Older callers expect both cost keys to be present on every item.
+        entry.setdefault("labor_cost", 0.0)
+        entry.setdefault("machine_cost", 0.0)
 
     ops_seen = sorted(ops.keys())
     if "wire_edm_windows" in ops and "wire_edm_outline" not in ops:

@@ -39,6 +39,261 @@ def _get_geo_map(*cands):
     return {}
 
 
+def _coerce_positive_float(value: Any) -> float | None:
+    """Return a positive finite float or None."""
+    try:
+        number = float(value)
+    except Exception:
+        return None
+    try:
+        if not math.isfinite(number):
+            return None
+    except Exception:
+        pass
+    return number if number > 0 else None
+
+
+def _ensure_geo_context_fields(
+    geom: dict[str, Any],
+    source: Mapping[str, Any] | None,
+    *,
+    cfg: Any | None = None,
+) -> None:
+    """Best-effort backfill of common geometry context fields.
+
+    This is intentionally tolerant and only fills when values are present
+    and reasonable. It never raises.
+    """
+
+    try:
+        src = source if isinstance(source, _MappingABC) else {}
+        # Quantity
+        qty = src.get("Quantity") if isinstance(src, _MappingABC) else None
+        try:
+            if "qty" not in geom and qty is not None:
+                qf = float(qty)
+                if math.isfinite(qf) and qf > 0:
+                    geom["qty"] = int(round(qf))
+        except Exception:
+            pass
+
+        # Dimensions (inches)
+        L_in = _coerce_positive_float(src.get("Plate Length (in)"))
+        W_in = _coerce_positive_float(src.get("Plate Width (in)"))
+        T_in = _coerce_positive_float(src.get("Thickness (in)"))
+        if L_in is not None and "plate_len_in" not in geom:
+            geom["plate_len_in"] = L_in
+        if W_in is not None and "plate_wid_in" not in geom:
+            geom["plate_wid_in"] = W_in
+        if T_in is not None and "thickness_in" not in geom:
+            geom["thickness_in"] = T_in
+
+        # Dimensions (mm) → convert if inch values missing
+        L_mm = _coerce_positive_float(src.get("Plate Length (mm)"))
+        W_mm = _coerce_positive_float(src.get("Plate Width (mm)"))
+        T_mm = _coerce_positive_float(src.get("Thickness (mm)"))
+        if L_mm is not None and "plate_len_in" not in geom:
+            geom["plate_len_in"] = float(L_mm) / 25.4
+        if W_mm is not None and "plate_wid_in" not in geom:
+            geom["plate_wid_in"] = float(W_mm) / 25.4
+        if T_mm is not None and "thickness_in" not in geom:
+            geom["thickness_in"] = float(T_mm) / 25.4
+        if T_mm is not None and "thickness_mm" not in geom:
+            geom["thickness_mm"] = T_mm
+    except Exception:
+        # Defensive: never let context backfill break pricing
+        pass
+
+
+def _holes_removed_mass_g(geo: Mapping[str, Any] | None) -> float | None:
+    """Estimate mass removed by holes using geometry context.
+
+    Uses hole diameters (mm), thickness (in), and density (g/cc) when available.
+    Returns grams or None if insufficient data.
+    """
+
+    if not isinstance(geo, _MappingABC):
+        return None
+
+    # Thickness: prefer inches, else convert from mm
+    t_in = _coerce_float_or_none(geo.get("thickness_in"))
+    if t_in is None:
+        t_mm = _coerce_positive_float(geo.get("thickness_mm"))
+        if t_mm is not None:
+            t_in = float(t_mm) / 25.4
+    if t_in is None or t_in <= 0:
+        return None
+
+    # Hole diameters
+    hole_diams_mm: list[float] = []
+    raw_list = geo.get("hole_diams_mm")
+    if isinstance(raw_list, Sequence) and not isinstance(raw_list, (str, bytes, bytearray)):
+        for v in raw_list:
+            val = _coerce_positive_float(v)
+            if val is not None:
+                hole_diams_mm.append(val)
+    if not hole_diams_mm:
+        families = geo.get("hole_diam_families_in")
+        if isinstance(families, _MappingABC):
+            for dia_in, qty in families.items():
+                d_in = _coerce_positive_float(dia_in)
+                q = _coerce_float_or_none(qty)
+                if d_in and q and q > 0:
+                    # accumulate as mm without expanding the list
+                    hole_diams_mm.extend([d_in * 25.4] * int(round(q)))
+    if not hole_diams_mm:
+        return None
+
+    # Density: try to infer from material text
+    density_g_cc = _coerce_float_or_none(geo.get("density_g_cc"))
+    if density_g_cc in (None, 0.0):
+        material_text = geo.get("material") or geo.get("material_name")
+        if isinstance(material_text, str) and material_text.strip():
+            norm_key = _normalize_lookup_key(material_text)
+            density_g_cc = (
+                MATERIAL_DENSITY_G_CC_BY_KEYWORD.get(norm_key)
+                or MATERIAL_DENSITY_G_CC_BY_KEY.get(norm_key)
+            )
+    if density_g_cc is None or density_g_cc <= 0:
+        return None
+
+    # Compute removed volume (cm^3)
+    removed_volume_cm3 = 0.0
+    for d_mm in hole_diams_mm:
+        d = _coerce_positive_float(d_mm)
+        if not d:
+            continue
+        area_mm2 = math.pi * (float(d) / 2.0) ** 2
+        volume_mm3 = area_mm2 * float(t_in) * 25.4  # thickness to mm
+        removed_volume_cm3 += volume_mm3 * 0.001  # mm^3 -> cm^3
+
+    if removed_volume_cm3 <= 0:
+        return None
+
+    return removed_volume_cm3 * float(density_g_cc)
+
+
+def build_drill_groups_from_geometry(
+    hole_diams_mm: Sequence[Any] | None,
+    thickness_in: Any | None,
+) -> list[dict[str, Any]]:
+    """Create simple drill groups from hole diameters and plate thickness.
+
+    Each group includes: ``diameter_in``, ``qty``, ``op`` (deep_drill/drill), and ``depth_in``.
+    Deep drilling is flagged when depth >= 3x diameter.
+    """
+
+    try:
+        t_in = float(thickness_in) if thickness_in is not None else None
+    except Exception:
+        t_in = None
+    if t_in is not None and (not math.isfinite(t_in) or t_in <= 0):
+        t_in = None
+
+    groups: dict[float, dict[str, Any]] = {}
+    if isinstance(hole_diams_mm, Sequence) and not isinstance(hole_diams_mm, (str, bytes, bytearray)):
+        for raw in hole_diams_mm:
+            d_mm = _coerce_positive_float(raw)
+            if d_mm is None:
+                continue
+            d_in = float(d_mm) / 25.4
+            if not (d_in > 0 and math.isfinite(d_in)):
+                continue
+            key = round(d_in, 4)
+            bucket = groups.setdefault(
+                key,
+                {
+                    "diameter_in": float(key),
+                    "qty": 0,
+                    "depth_in": t_in,
+                    "op": "deep_drill" if (t_in is not None and t_in >= 3.0 * float(key)) else "drill",
+                },
+            )
+            bucket["qty"] += 1
+
+    ordered = [groups[k] for k in sorted(groups.keys())]
+    return ordered
+
+
+def _apply_drilling_meta_fallback(
+    meta: Mapping[str, Any] | None,
+    groups: Sequence[Mapping[str, Any]] | None,
+) -> tuple[int, int]:
+    """Compute deep/std hole counts and backfill helper arrays in meta container.
+
+    Returns (holes_deep, holes_std).
+    """
+
+    deep = 0
+    std = 0
+    dia_vals: list[float] = []
+    depth_vals: list[float] = []
+
+    if isinstance(groups, Sequence):
+        for g in groups:
+            try:
+                qty = int(_coerce_float_or_none(g.get("qty")) or 0)
+            except Exception:
+                qty = 0
+            op = str(g.get("op") or "").strip().lower()
+            if op.startswith("deep"):
+                deep += qty
+            else:
+                std += qty
+            d_in = _coerce_float_or_none(g.get("diameter_in"))
+            if d_in and d_in > 0:
+                dia_vals.append(float(d_in))
+            z_in = _coerce_float_or_none(g.get("depth_in"))
+            if z_in and z_in > 0:
+                depth_vals.append(float(z_in))
+
+    # Backfill into a mutable container if provided
+    try:
+        if isinstance(meta, dict):
+            if dia_vals and not meta.get("dia_in_vals"):
+                meta["dia_in_vals"] = dia_vals
+            if depth_vals and not meta.get("depth_in_vals"):
+                meta["depth_in_vals"] = depth_vals
+    except Exception:
+        pass
+
+    return (deep, std)
+
+
+def _iter_geo_dicts_for_context(root: Mapping[str, Any] | None) -> Iterable[Mapping[str, Any]]:
+    """Yield candidate geo-like dicts to inspect for drilling groups.
+
+    Walks shallow nests commonly used in this app: the root mapping, any
+    nested ``geo`` mapping, and the ``result``/``breakdown`` maps plus their
+    ``geo`` children when present. Deduplicates by object id.
+    """
+
+    seen: set[int] = set()
+
+    def _push(obj: Any) -> None:
+        if isinstance(obj, _MappingABC):
+            oid = id(obj)
+            if oid not in seen:
+                seen.add(oid)
+                stack.append(obj)
+
+    stack: list[Mapping[str, Any]] = []
+    _push(root)
+
+    while stack:
+        ctx = stack.pop(0)
+        yield ctx
+        _push(ctx.get("geo"))
+        res = ctx.get("result")
+        brk = ctx.get("breakdown")
+        _push(res)
+        _push(brk)
+        if isinstance(res, _MappingABC):
+            _push(res.get("geo"))
+        if isinstance(brk, _MappingABC):
+            _push(brk.get("geo"))
+
+
 def _get_material_group(*cands):
     for c in cands:
         if isinstance(c, dict) and c.get("material_group"):
@@ -179,39 +434,13 @@ from cad_quoter.geometry.dxf_enrich import (
 
 from cad_quoter.pricing.process_buckets import bucketize
 
-import cad_quoter.geometry as _geometry
-
-def _missing_geom_fn(name: str):
-    def _fn(*_a, **_k):
-        raise RuntimeError(f"geometry helper '{name}' is unavailable in this build")
-
-    return _fn
+import cad_quoter.geometry as geometry
 
 
-def _export_geom(name: str):
-    return getattr(_geometry, name, _missing_geom_fn(name))
 
-
-read_cad_any = _export_geom("read_cad_any")
-read_step_shape = _export_geom("read_step_shape")
-convert_dwg_to_dxf = _export_geom("convert_dwg_to_dxf")
-enrich_geo_occ = _export_geom("enrich_geo_occ")
-enrich_geo_stl = _export_geom("enrich_geo_stl")
-safe_bbox = _export_geom("safe_bbox")
-parse_hole_table_lines = _export_geom("parse_hole_table_lines")
-extract_text_lines_from_dxf = _export_geom("extract_text_lines_from_dxf")
-text_harvest = _export_geom("text_harvest")
-upsert_var_row = _export_geom("upsert_var_row")
-require_ezdxf = _export_geom("require_ezdxf")
-get_dwg_converter_path = _export_geom("get_dwg_converter_path")
-get_import_diagnostics_text = _export_geom("get_import_diagnostics_text")
-extract_features_with_occ = _export_geom("extract_features_with_occ")
-
-_HAS_ODAFC = bool(getattr(_geometry, "HAS_ODAFC", False))
-_HAS_PYMUPDF = bool(
-    getattr(_geometry, "HAS_PYMUPDF", getattr(_geometry, "_HAS_PYMUPDF", False))
-)
-fitz = getattr(_geometry, "fitz", None)
+_HAS_ODAFC = bool(getattr(geometry, "HAS_ODAFC", False))
+_HAS_PYMUPDF = bool(getattr(geometry, "HAS_PYMUPDF", getattr(geometry, "_HAS_PYMUPDF", False)))
+fitz = getattr(geometry, "fitz", None)
 try:
     odafc = _ezdxf_vendor.require_odafc() if _HAS_ODAFC else None
 except Exception:
@@ -306,6 +535,7 @@ from appkit.ui.planner_render import (
     _display_rate_for_row,
     _hole_table_minutes_from_geo,
     _normalize_bucket_key,
+    _op_role_for_name,
     _planner_bucket_key_for_name,
     _preferred_order_then_alpha,
     _prepare_bucket_view,
@@ -3507,12 +3737,12 @@ except Exception:
 DIM_RE = re.compile(r"(?:[Øø⌀]|DIAM|DIA)\s*([0-9.+-]+)|R\s*([0-9.+-]+)|([0-9.+-]+)\s*[xX]\s*([0-9.+-]+)")
 
 def load_drawing(path: Path) -> Drawing:
-    ezdxf_mod = typing.cast(_EzdxfModule, require_ezdxf())
+    ezdxf_mod = typing.cast(_EzdxfModule, geometry.require_ezdxf())
     if path.suffix.lower() == ".dwg":
         # Prefer explicit converter/wrapper if configured (works even if ODA isn't on PATH)
-        exe = get_dwg_converter_path()
+        exe = geometry.get_dwg_converter_path()
         if exe:
-            dxf_path = convert_dwg_to_dxf(str(path))
+            dxf_path = geometry.convert_dwg_to_dxf(str(path))
             return ezdxf_mod.readfile(dxf_path)
         # Fallback: odafc (requires ODAFileConverter on PATH)
         if _HAS_ODAFC and odafc is not None:
@@ -3817,7 +4047,7 @@ DOT_TOL = math.cos(ANG_TOL)
 SMALL = 1e-7
 
 def _bbox(shape):
-    box = safe_bbox(shape)
+    box = geometry.safe_bbox(shape)
     xmin, ymin, zmin, xmax, ymax, zmax = box.Get()
     return (xmin, ymin, zmin, xmax, ymax, zmax)
 
@@ -4386,75 +4616,6 @@ BUCKET_ROLE: dict[str, str] = {
     "_default": "machine_only",
 }
 
-OP_ROLE: dict[str, str] = {
-    "assemble_pair_on_fixture": "labor_only",
-    "prep_carrier_or_tab": "labor_only",
-    "indicate_hardened_blank": "labor_only",
-    "indicate_on_shank": "labor_only",
-    "stability_check_after_ops": "labor_only",
-    "mark_id": "labor_only",
-    "saw_blank": "machine_only",
-    "saw_or_mill_rough_blocks": "machine_only",
-    "waterjet_or_saw_blanks": "machine_only",
-    "face_mill_pre": "split",
-    "cnc_rough_mill": "split",
-    "cnc_mill_rough": "split",
-    "finish_mill_windows": "split",
-    "finish_mill_cam_slot_or_profile": "split",
-    "spot_drill_all": "split",
-    "drill_patterns": "split",
-    "interpolate_critical_bores": "split",
-    "drill_ream_bore": "split",
-    "drill_ream_dowel_press": "split",
-    "ream_slip_in_assembly": "split",
-    "rigid_tap": "split",
-    "thread_mill": "split",
-    "drill_or_trepan_id": "split",
-    "wire_edm_windows": "machine_only",
-    "wire_edm_outline": "machine_only",
-    "wire_edm_open_id": "machine_only",
-    "wire_edm_cam_slot_or_profile": "machine_only",
-    "wire_edm_id_leave": "machine_only",
-    "machine_electrode": "labor_only",
-    "sinker_edm_finish_burn": "split",
-    "blanchard_grind_pre": "split",
-    "surface_grind_faces": "split",
-    "surface_grind_datums": "split",
-    "surface_or_profile_grind_bearing": "split",
-    "surface_or_profile_grind_od_cleanup": "split",
-    "profile_or_surface_grind_wear_faces": "split",
-    "profile_grind_pilot_od_to_tir": "split",
-    "profile_grind_flanks_and_reliefs_to_spec": "split",
-    "jig_bore_or_jig_grind_coaxial_bores": "split",
-    "jig_grind_id_to_size_and_roundness": "split",
-    "jig_grind_id_to_tenths_and_straightness": "split",
-    "light_grind_cleanup": "split",
-    "match_grind_set_for_gap_and_parallelism": "split",
-    "turn_or_mill_od": "split",
-    "purchase_od_ground_blank": "outsourced",
-    "lap_bearing_land": "labor_only",
-    "lap_id": "labor_only",
-    "lap_edges": "labor_only",
-    "hone_edge": "labor_only",
-    "edge_break": "labor_only",
-    "edge_prep": "labor_only",
-    "heat_treat": "outsourced",
-    "heat_treat_to_spec": "outsourced",
-    "heat_treat_if_wear_part": "outsourced",
-    "apply_coating": "outsourced",
-    "clean_degas_for_coating": "labor_only",
-    "start_ground_carbide_blank": "outsourced",
-    "start_ground_carbide_ring": "outsourced",
-    "verify_connected_passage_and_masking": "labor_only",
-    "abrasive_flow_polish": "outsourced",
-    "clean_and_flush_media": "labor_only",
-}
-
-
-
-
-def _op_role_for_name(name: str) -> str:
-    return OP_ROLE.get((name or "").strip(), "machine_only")
 _HIDE_IN_BUCKET_VIEW: frozenset[str] = frozenset({*PLANNER_META, "misc"})
 _PREFERRED_BUCKET_VIEW_ORDER: tuple[str, ...] = (
     "programming",
@@ -10557,77 +10718,6 @@ _TOLERANCE_VALUE_RE = re.compile(
 )
 _TIGHT_TOL_TRIGGER_RE = re.compile(r"(±\s*0\.000[12])|(tight\s*tolerance)", re.IGNORECASE)
 
-# Reference in-process tolerance (inches) used when scaling fixture estimates.
-INPROC_REF_TOL_IN = 0.005
-
-# --- In-process inspection estimation knobs ---------------------------------
-INPROC_ESTIMATE_REF_TOL_IN = 0.002   # reference tolerance where curve starts
-INPROC_BASE_HR = 0.30                # hours at/looser than the reference
-INPROC_SCALE_HR = 1.60               # additional hours as tolerance tightens
-INPROC_EXP = 0.60                    # curve shape (sub-linear to avoid spikes)
-
-# Bounded adders for scenarios with many tight callouts.
-INPROC_TIGHT_PER = 0.15   # +hr per extra tight tol (≤0.0015")
-INPROC_TIGHT_MAX = 0.60
-INPROC_SUBTHOU_PER = 0.20   # +hr per extra sub-thou tol (≤0.0005")
-INPROC_SUBTHOU_MAX = 0.40
-INPROC_MENTION_PER = 0.10   # textual mentions of "tight tolerance"
-INPROC_MENTION_MAX = 0.30
-
-def _estimate_inprocess_default_from_tolerance(
-    tolerance_map: Mapping[str, Any] | None,
-) -> float:
-    """Return a conservative in-process inspection estimate for a set of callouts.
-
-    The calculation mirrors the heuristics historically embedded in the UI: the
-    tightest tolerance establishes the base hours using a smooth, sub-linear
-    curve.  Additional tight or sub-thousandth callouts apply capped adders so
-    stacked tolerances remain reasonable.  Textual mentions of "tight tolerance"
-    provide a small nudge for lightly specified drawings.
-    """
-
-    if not isinstance(tolerance_map, _MappingABC) or not tolerance_map:
-        return INPROC_BASE_HR
-
-    values: list[float] = []
-    mention_score = 0.0
-    for key, raw in tolerance_map.items():
-        values.extend(_tolerance_values_from_any(raw))
-        text = f"{key} {raw}" if raw is not None else str(key)
-        if text and _TIGHT_TOL_TRIGGER_RE.search(str(text)):
-            mention_score += INPROC_MENTION_PER
-
-    values = [val for val in values if val > 0]
-    if not values:
-        return min(INPROC_BASE_HR + min(mention_score, INPROC_MENTION_MAX), INPROC_BASE_HR + INPROC_MENTION_MAX)
-
-    tightest = min(values)
-
-    if tightest <= 0:
-        base = INPROC_BASE_HR
-    else:
-        # ``tightness`` is zero when looser than the reference tolerance and
-        # smoothly increases as the tolerance tightens.  ``log10`` keeps the
-        # growth sub-linear while still rewarding dramatically tight callouts.
-        tightness = max(0.0, math.log10(INPROC_ESTIMATE_REF_TOL_IN / tightest))
-        base = INPROC_BASE_HR + INPROC_SCALE_HR * (tightness**INPROC_EXP)
-
-    tight_callouts = sum(1 for value in values if value <= 0.0015)
-    subthou_callouts = sum(1 for value in values if value <= 0.0005)
-
-    tight_bonus = max(0, tight_callouts - 1) * INPROC_TIGHT_PER
-    subthou_bonus = max(0, subthou_callouts - (1 if tightest <= 0.0005 else 0)) * INPROC_SUBTHOU_PER
-
-    total = base
-    if tight_bonus:
-        total += min(tight_bonus, INPROC_TIGHT_MAX)
-    if subthou_bonus:
-        total += min(subthou_bonus, INPROC_SUBTHOU_MAX)
-    if mention_score:
-        total += min(mention_score, INPROC_MENTION_MAX)
-
-    return max(total, INPROC_BASE_HR)
-
 def _tolerance_values_from_any(value: Any) -> list[float]:
     """Return tolerance magnitudes (inches) parsed from an arbitrary input value."""
 
@@ -16079,10 +16169,12 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
         notes.append("Hole chart references BACK operations.")
 
     tokens_parts: list[str] = []
-    try:
-        tokens_parts.extend(text_harvest(doc))
-    except Exception:
-        pass
+    text_harvest_fn = getattr(geometry, "text_harvest", None)
+    if callable(text_harvest_fn):
+        try:
+            tokens_parts.extend(text_harvest_fn(doc))
+        except Exception:
+            pass
     for line in table_lines:
         tokens_parts.append(line)
     tokens_parts.extend(leaders)
@@ -16347,7 +16439,7 @@ def _coerce_int_or_zero(value: Any) -> int:
         return 0
 
 def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
-    ezdxf_mod = require_ezdxf()
+    ezdxf_mod = geometry.require_ezdxf()
 
     # --- load doc ---
     dxf_text_path: str | None = None
@@ -16369,7 +16461,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
                 )
             doc = cast(Drawing, readfile(path))
         else:
-            dxf_path = convert_dwg_to_dxf(path, out_ver="ACAD2018")
+            dxf_path = geometry.convert_dwg_to_dxf(path, out_ver="ACAD2018")
             dxf_text_path = dxf_path
             doc = cast(Drawing, readfile(dxf_path))
     else:
@@ -16728,7 +16820,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     chart_source: str | None = None
     chart_summary: dict[str, Any] | None = None
 
-    extractor = _extract_text_lines_from_dxf or extract_text_lines_from_dxf
+    extractor = _extract_text_lines_from_dxf or geometry.extract_text_lines_from_dxf
     chart_lines = []
     if extractor and dxf_text_path:
         try:
@@ -16787,7 +16879,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
 
     if chart_lines:
         chart_summary = summarize_hole_chart_lines(chart_lines)
-    parser = _parse_hole_table_lines or parse_hole_table_lines
+    parser = _parse_hole_table_lines or geometry.parse_hole_table_lines
     if chart_lines and parser:
         try:
             hole_rows = parser(chart_lines)
@@ -17256,143 +17348,6 @@ def _build_ops_rows_from_chart_lines(chart_lines: list[str]) -> list[dict]:
         for (desc, ref) in order
     ]
 
-def _normalize_ops_rows_from_hole_rows(rows: Iterable[Any] | None) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for row in rows or []:
-        if row is None:
-            continue
-        qty = 0
-        try:
-            qty = int(getattr(row, "qty", 0) or 0)
-        except Exception:
-            pass
-        hole = getattr(row, "hole_id", "") or getattr(row, "letter", "") or ""
-        ref = (
-            getattr(row, "ref", None)
-            or getattr(row, "pilot", None)
-            or getattr(row, "drill_ref", None)
-            or ""
-        )
-        desc = (
-            getattr(row, "description", None)
-            or getattr(row, "desc", None)
-            or ""
-        )
-        if not desc:
-            parts = []
-            for f in list(getattr(row, "features", []) or []):
-                if not isinstance(f, dict):
-                    continue
-                t = str(f.get("type", "")).lower()
-                side = str(f.get("side", "")).upper()
-                if t == "tap":
-                    thread = f.get("thread") or ""
-                    depth = f.get("depth_in")
-                    parts.append(
-                        f"{thread} TAP"
-                        + (
-                            f" × {depth:.2f}\""
-                            if isinstance(depth, (int, float))
-                            else ""
-                        )
-                        + (f" FROM {side}" if side else "")
-                    )
-                elif t == "cbore":
-                    dia = f.get("dia_in")
-                    depth = f.get("depth_in")
-                    parts.append(
-                        f"{(dia or 0):.4f} C’BORE"
-                        + (
-                            f" × {depth:.2f}\""
-                            if isinstance(depth, (int, float))
-                            else ""
-                        )
-                        + (f" FROM {side}" if side else "")
-                    )
-                elif t in {"csk", "countersink"}:
-                    dia = f.get("dia_in")
-                    depth = f.get("depth_in")
-                    parts.append(
-                        f"{(dia or 0):.4f} C’SINK"
-                        + (
-                            f" × {depth:.2f}\""
-                            if isinstance(depth, (int, float))
-                            else ""
-                        )
-                        + (f" FROM {side}" if side else "")
-                    )
-                elif t == "drill":
-                    ref_local = f.get("ref") or ref or ""
-                    thru = " THRU" if f.get("thru", True) else ""
-                    parts.append(f"{ref_local}{thru}".strip())
-                elif t == "spot":
-                    depth = f.get("depth_in")
-                    parts.append(
-                        "C’DRILL"
-                        + (
-                            f" × {depth:.2f}\""
-                            if isinstance(depth, (int, float))
-                            else ""
-                        )
-                    )
-                elif t == "jig":
-                    parts.append("JIG GRIND")
-            desc = "; ".join([p for p in parts if p])
-        out.append({"hole": str(hole), "ref": str(ref), "qty": int(qty), "desc": str(desc)})
-    return out
-
-
-def _normalize_ops_rows_from_chart_ops(
-    chart_ops: Iterable[Mapping[str, Any]] | None,
-) -> list[dict[str, Any]]:
-    """Collapse raw chart ops into conservative row descriptions."""
-
-    out: list[dict[str, Any]] = []
-    if not chart_ops:
-        return out
-    for op in chart_ops:
-        if not isinstance(op, dict):
-            continue
-        t = (op.get("type") or "").lower()
-        qty = int(round(float(op.get("qty") or 0)))
-        if qty <= 0:
-            continue
-        side = (op.get("side") or "").upper()
-        desc = ""
-        ref = str(op.get("ref") or "")
-        if t == "tap":
-            thread = op.get("thread") or ""
-            depth = op.get("depth_in")
-            desc = f"{thread} TAP" + (
-                f" × {depth:.2f}\"" if isinstance(depth, (int, float)) else ""
-            ) + (f" FROM {side}" if side else "")
-        elif t == "cbore":
-            dia = op.get("dia_in")
-            depth = op.get("depth_in")
-            desc = f"{(dia or 0):.4f} C’BORE" + (
-                f" × {depth:.2f}\"" if isinstance(depth, (int, float)) else ""
-            ) + (f" FROM {side}" if side else "")
-        elif t in {"csk", "countersink"}:
-            dia = op.get("dia_in")
-            depth = op.get("depth_in")
-            desc = f"{(dia or 0):.4f} C’SINK" + (
-                f" × {depth:.2f}\"" if isinstance(depth, (int, float)) else ""
-            ) + (f" FROM {side}" if side else "")
-        elif t == "spot":
-            depth = op.get("depth_in")
-            desc = "C’DRILL" + (
-                f" × {depth:.2f}\"" if isinstance(depth, (int, float)) else ""
-            )
-        elif t == "jig":
-            desc = "JIG GRIND"
-        elif t == "drill":
-            thru = " THRU" if (op.get("thru", True)) else ""
-            desc = f"{ref}{thru}".strip()
-        if desc:
-            out.append({"hole": "", "ref": ref, "qty": qty, "desc": desc})
-    return out
-
-
 def hole_rows_to_ops(rows: Iterable[Any] | None) -> list[dict[str, Any]]:
     """Flatten parsed HoleRow objects into estimator-friendly operations."""
 
@@ -17526,12 +17481,12 @@ class App(tk.Tk):
             extract_pdf_all_fn=extract_pdf_all,
             extract_pdf_vector_fn=extract_2d_features_from_pdf_vector,
             extract_dxf_or_dwg_fn=extract_2d_features_from_dxf_or_dwg,
-            occ_feature_fn=extract_features_with_occ,
-            stl_enricher=enrich_geo_stl,
-            step_reader=read_step_shape,
-            cad_reader=read_cad_any,
-            bbox_fn=safe_bbox,
-            occ_enricher=enrich_geo_occ,
+            occ_feature_fn=geometry.extract_features_with_occ,
+            stl_enricher=geometry.enrich_geo_stl,
+            step_reader=geometry.read_step_shape,
+            cad_reader=geometry.read_cad_any,
+            bbox_fn=geometry.safe_bbox,
+            occ_enricher=geometry.enrich_geo_occ,
         )
         self.pricing_registry = pricing_registry or PricingRegistry(
             default_params=copy.deepcopy(PARAMS_DEFAULT),
@@ -17712,7 +17667,7 @@ class App(tk.Tk):
         menubar.add_cascade(label="Help", menu=help_menu)
         help_menu.add_command(
             label="Diagnostics",
-            command=lambda: messagebox.showinfo("Diagnostics", get_import_diagnostics_text())
+            command=lambda: messagebox.showinfo("Diagnostics", geometry.get_import_diagnostics_text())
         )
         # Tools menu with a debug trigger for Generate Quote in case button wiring misbehaves
         tools_menu = tk.Menu(menubar, tearoff=0)
@@ -18097,7 +18052,7 @@ class App(tk.Tk):
             mask = dataframe["Item"].astype(str).str.fullmatch(item, case=False)
             if mask.any():
                 return dataframe
-            return upsert_var_row(dataframe, item, value, dtype=dtype)
+            return geometry.upsert_var_row(dataframe, item, value, dtype=dtype)
 
         df = _ensure_row(df, "Scrap Percent (%)", 15.0, dtype="number")
         df = _ensure_row(df, "Plate Length (in)", 12.0, dtype="number")
@@ -18976,7 +18931,7 @@ class App(tk.Tk):
                         shape = self.geometry_service.read_step(path)
                     else:
                         shape = self.geometry_service.read_model(path)            # IGES/BREP and others
-                    _ = safe_bbox(shape)
+                    _ = geometry.safe_bbox(shape)
                     g = self.geometry_service.enrich_occ(shape)             # OCC-based geometry features
 
                     geo = _map_geo_to_double_underscore(g)
@@ -19017,7 +18972,7 @@ class App(tk.Tk):
         # Merge GEO rows
         try:
             for k, v in geo.items():
-                self.vars_df = upsert_var_row(self.vars_df, k, v, dtype="number")
+                self.vars_df = geometry.upsert_var_row(self.vars_df, k, v, dtype="number")
         except Exception as e:
             messagebox.showerror("Variables", f"Failed to update variables with GEO rows:\n{e}")
             self.status_var.set("Ready")
@@ -19502,14 +19457,13 @@ class App(tk.Tk):
                 ui_vars.setdefault("speeds_feeds_path", speeds_csv)
                 ui_vars.setdefault("Speeds/Feeds CSV", speeds_csv)
 
+            # Use LLM only if already available; avoid blocking loads during quote gen
             llm_suggest = self.LLM_SUGGEST
-            if self.llm_enabled.get() and llm_suggest is None:
-                llm_suggest = self._ensure_llm_loaded()
 
             try:
                 self._reset_llm_logs()
                 client = None
-                if self.llm_enabled.get():
+                if self.llm_enabled.get() and (llm_suggest is not None):
                     client = self.get_llm_client(self.llm_model_path.get().strip() or None)
                 res = compute_quote_from_df(
                     self.vars_df,
