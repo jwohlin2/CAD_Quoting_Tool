@@ -3243,61 +3243,6 @@ else:
 
 # Resolve topods casters across bindings
 
-# ---- modern wrappers (no deprecation warnings)
-# ---- modern wrappers (no deprecation warnings)
-def linear_properties(edge, gprops):
-    """Linear properties across OCP/pythonocc names."""
-    fn = getattr(_BRepGProp_mod, "LinearProperties", None)
-    if fn is None:
-        fn = getattr(_BRepGProp_mod, "LinearProperties_s", None)
-    if fn is None:
-        try:
-            from OCC.Core.BRepGProp import brepgprop_LinearProperties as _old  # type: ignore
-            return _old(edge, gprops)
-        except Exception:
-            raise
-    return fn(edge, gprops)
-
-def map_shapes_and_ancestors(
-    root_shape, sub_enum, anc_enum
-) -> Any:
-    """Return TopTools_IndexedDataMapOfShapeListOfShape for (sub → ancestors)."""
-    # Ensure we pass a *Shape*, not a Face
-    if root_shape is None:
-        raise TypeError("root_shape is None")
-    if not hasattr(root_shape, "IsNull") or _shape_is_null(root_shape):
-        # If someone handed us a Face, try to grab its TShape parent; else fail.
-        # Safer: require a real TopoDS_Shape from STEP/IGES root.
-        pass
-
-    amap = cast(
-        Any,
-        TopTools_IndexedDataMapOfShapeListOfShape(),  # type: ignore[call-overload]
-    )
-    # static/instance variants across wheels
-    fn = getattr(TopExp, "MapShapesAndAncestors", None) or getattr(TopExp, "MapShapesAndAncestors_s", None)
-    if fn is None:
-        raise RuntimeError("TopExp.MapShapesAndAncestors not available in this OCP wheel")
-    fn(root_shape, sub_enum, anc_enum, amap)
-    return amap
-
-# modern topods casters: topods.Edge(shape) / topods.Face(shape)
-# ---- Robust topods casters that are no-ops for already-cast objects ----
-def ensure_face(obj: Any) -> Any:
-    if obj is None:
-        raise TypeError("Expected a face, got None")
-    face_type = cast(type, TopoDS_Face)
-    try:
-        if isinstance(obj, face_type):
-            return cast(Any, obj)
-    except TypeError:
-        pass
-    if type(obj).__name__ == "TopoDS_Face":
-        return cast(Any, obj)
-    st = obj.ShapeType() if hasattr(obj, "ShapeType") else None
-    if st == TopAbs_FACE:
-        return cast(Any, FACE_OF(obj))
-    raise TypeError(f"Not a face: {type(obj).__name__}")
 # ---------- end compat ----------
 
 # ---- tiny helpers you can use elsewhere --------------------------------------
