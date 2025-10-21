@@ -15,6 +15,25 @@ Single-file CAD Quoter (v8)
 from __future__ import annotations
 
 import sys
+from pathlib import Path
+
+
+def _ensure_local_package_imports() -> None:
+    """Add local package directories to ``sys.path`` for bundled modules."""
+
+    script_dir = Path(__file__).resolve().parent
+    candidate_paths = [
+        script_dir / "cad_quoter_pkg" / "src",
+        script_dir,
+    ]
+    for candidate in candidate_paths:
+        if candidate.is_dir():
+            candidate_str = str(candidate)
+            if candidate_str not in sys.path:
+                sys.path.insert(0, candidate_str)
+
+
+_ensure_local_package_imports()
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")  # py3.7+
@@ -50,7 +69,6 @@ from collections.abc import (
 )
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
-from pathlib import Path
 
 from cad_quoter.app._value_utils import (
     _format_value,
@@ -788,7 +806,7 @@ def _resolve_part_thickness_in(
     return float(default)
 
 
-def _finalize_tap_row(row: dict[str, Any], thickness_in: float) -> None:
+def _finalize_tap_row(row: MutableMapping[str, Any], thickness_in: float) -> None:
     thread = row.get("thread") or row.get("desc") or ""
     ipr = _thread_ipr(thread)
     dia = _derive_major_dia_in(thread)
