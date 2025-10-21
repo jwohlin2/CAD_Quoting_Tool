@@ -1356,14 +1356,18 @@ def _compute_drilling_removal_section(
             extras["drill_machine_minutes"] = float(drill_minutes_subtotal)
             extras["drill_labor_minutes"] = float(total_tool_minutes)
             extras["drill_total_minutes"] = drill_minutes_subtotal
+            logging.debug(
+                f"[removal] drill_total_minutes={extras['drill_total_minutes']}"
+            )
+            if "drill_total_hours" in extras:
+                logging.error(
+                    "[unit] Found drill_total_hours in extras (HOURS). This API expects MINUTES. Removing it."
+                )
+                extras.pop("drill_total_hours", None)
             extras["removal_drilling_minutes_subtotal"] = float(drill_minutes_subtotal)
             extras["removal_drilling_minutes"] = float(drill_minutes_total)
             if drill_minutes_total > 0.0:
                 extras["removal_drilling_hours"] = minutes_to_hours(drill_minutes_total)
-
-            logging.debug(
-                "[removal] drill_total_minutes=%s", extras.get("drill_total_minutes")
-            )
 
             meta_min = (((process_plan_summary or {}).get("drilling") or {}).get("total_minutes_billed"))
             removal_min = (extras or {}).get("drill_total_minutes", 0.0)
@@ -5365,9 +5369,56 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     removal_drilling_minutes = card_minutes_precise if have_card_minutes else None
     if drill_total_minutes_estimate > 0.0:
         removal_drilling_minutes = float(drill_total_minutes_estimate)
-    removal_drilling_hours_precise = (
-        removal_drilling_minutes / 60.0 if removal_drilling_minutes is not None else None
-    )
+        removal_drilling_hours_precise = removal_drilling_minutes / 60.0
+    card_hr = round(card_minutes_precise / 60.0, 2)
+    row_hr = card_hr
+    drilling_minutes_from_bucket = None
+    bucket_view_snapshot = breakdown.get("bucket_view") if isinstance(breakdown, _MappingABC) else None
+    if isinstance(bucket_view_snapshot, _MappingABC):
+        buckets_snapshot = bucket_view_snapshot.get("buckets")
+        if isinstance(buckets_snapshot, _MappingABC):
+            drilling_bucket_snapshot = buckets_snapshot.get("drilling")
+            if isinstance(drilling_bucket_snapshot, _MappingABC):
+                drilling_minutes_from_bucket = _coerce_float_or_none(
+                    drilling_bucket_snapshot.get("minutes")
+                )
+                if drilling_minutes_from_bucket is not None:
+                    row_hr = round(float(drilling_minutes_from_bucket) / 60.0, 2)
+    if have_card_minutes and drilling_minutes_from_bucket is not None:
+        try:
+            bucket_minutes_precise = float(drilling_minutes_from_bucket)
+        except Exception:
+            bucket_minutes_precise = None
+        removal_drilling_minutes_precise = (
+            float(removal_drilling_minutes)
+            if removal_drilling_minutes is not None
+            else None
+        )
+        if (
+            bucket_minutes_precise is not None
+            and removal_drilling_minutes_precise is not None
+            and abs(removal_drilling_minutes_precise - bucket_minutes_precise) > 0.6
+        ):
+            if prefer_removal_drilling_hours:
+                logger.info(
+                    "[minutes-sync] Overriding Drilling bucket minutes from %.2f -> %.2f (source=removal_card)",
+                    bucket_minutes_precise,
+                    removal_drilling_minutes_precise,
+                )
+                minutes_to_apply = removal_drilling_minutes_precise
+                _sync_drilling_bucket_view(
+                    bucket_view_snapshot,
+                    billed_minutes=float(minutes_to_apply),
+                    billed_cost=None,
+                )
+                drilling_minutes_from_bucket = minutes_to_apply
+                row_hr = round(removal_drilling_minutes_precise / 60.0, 2)
+            else:
+                raise RuntimeError(
+                    "[FATAL] Drilling minutes mismatch: "
+                    f"card {round(removal_drilling_minutes_precise, 2)} vs row {round(bucket_minutes_precise, 2)}. "
+                    "Late writer is overwriting bucket_view."
+                )
 
     process_plan_summary_local = locals().get("process_plan_summary")
     if not isinstance(process_plan_summary_local, _MappingABC):
@@ -5996,6 +6047,66 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
         return additions
 
+    if bucket_table_rows and isinstance(breakdown, _MappingABC):
+        drilling_meta_guard = breakdown.get("drilling_meta")
+        bucket_view_guard = breakdown.get("bucket_view")
+        buckets_guard = (
+            bucket_view_guard.get("buckets")
+            if isinstance(bucket_view_guard, _MappingABC)
+            else None
+        )
+        drilling_bucket_guard = (
+            buckets_guard.get("drilling")
+            if isinstance(buckets_guard, _MappingABC)
+            else None
+        )
+        if isinstance(drilling_meta_guard, _MappingABC) and isinstance(
+            drilling_bucket_guard, _MappingABC
+        ):
+            try:
+                card_minutes_guard = float(
+                    drilling_meta_guard["total_minutes_billed"]
+                )
+                row_minutes_guard = float(drilling_bucket_guard["minutes"])
+            except (KeyError, TypeError, ValueError):
+                card_minutes_guard = row_minutes_guard = None
+            if (
+                card_minutes_guard is not None
+                and row_minutes_guard is not None
+                and abs(card_minutes_guard - row_minutes_guard) > 0.6
+            ):
+                removal_drilling_minutes_precise = (
+                    float(removal_drilling_minutes)
+                    if removal_drilling_minutes is not None
+                    else None
+                )
+                if (
+                    prefer_removal_drilling_hours
+                    and removal_drilling_hours_precise is not None
+                ):
+                    billed_minutes_guard = _safe_float(
+                        drilling_meta_guard.get("total_minutes_billed"),
+                        default=0.0,
+                    )
+                    logger.info(
+                        "[minutes-sync] Overriding Drilling bucket minutes from %.2f -> %.2f (source=removal_card)",
+                        row_minutes_guard,
+                        removal_drilling_minutes_precise
+                        if removal_drilling_minutes_precise is not None
+                        else billed_minutes_guard,
+                    )
+                    _sync_drilling_bucket_view(
+                        bucket_view_guard,
+                        billed_minutes=float(billed_minutes_guard or 0.0),
+                        billed_cost=None,
+                    )
+                else:
+                    raise RuntimeError(
+                        "[FATAL] Drilling minutes mismatch: "
+                        f"card {round(card_minutes_guard, 2)} vs row {round(row_minutes_guard, 2)}. "
+                        "Late writer is overwriting bucket_view."
+                    )
+
     if bucket_table_rows:
         render_bucket_table(bucket_table_rows)
 
@@ -6335,24 +6446,19 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     drilling_bucket_guard = None
                 if isinstance(drilling_bucket_guard, _MappingABC):
                     try:
-                        card_hr_guard = round(
-                            float(
-                                drilling_meta_for_guard.get("total_minutes_billed")
-                                or 0.0
-                            )
-                            / 60.0,
-                            2,
+                        card_minutes_guard = float(
+                            drilling_meta_for_guard.get("total_minutes_billed")
+                            or 0.0
                         )
-                        row_hr_guard = round(
-                            float(drilling_bucket_guard.get("minutes") or 0.0) / 60.0,
-                            2,
+                        row_minutes_guard = float(
+                            drilling_bucket_guard.get("minutes") or 0.0
                         )
                     except (TypeError, ValueError):
-                        card_hr_guard = row_hr_guard = None
+                        card_minutes_guard = row_minutes_guard = None
                     if (
-                        card_hr_guard is not None
-                        and row_hr_guard is not None
-                        and abs(card_hr_guard - row_hr_guard) > 0.01
+                        card_minutes_guard is not None
+                        and row_minutes_guard is not None
+                        and abs(card_minutes_guard - row_minutes_guard) > 0.6
                     ):
                         billed_minutes_guard = _safe_float(
                             drilling_meta_for_guard.get("total_minutes_billed"),
@@ -6370,19 +6476,38 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                             else:
                                 drilling_bucket_guard_ref = None
                             if isinstance(drilling_bucket_guard_ref, _MappingABC):
-                                row_hr_guard = round(
-                                    _safe_float(
-                                        drilling_bucket_guard_ref.get("minutes"),
-                                        default=0.0,
-                                    )
-                                    / 60.0,
-                                    2,
+                                row_minutes_guard = _safe_float(
+                                    drilling_bucket_guard_ref.get("minutes"),
+                                    default=0.0,
                                 )
-                                card_hr_guard = round(billed_minutes_guard / 60.0, 2)
-                        # Legacy reconciler surfaced noisy warnings when guard rows
-                        # diverged from planner data. Bucket minutes now own the
-                        # source of truth, so tolerate minor drift between guard rows
-                        # and planner metadata.
+                                card_minutes_guard = billed_minutes_guard
+                        if (
+                            card_minutes_guard is None
+                            or row_minutes_guard is None
+                            or abs(card_minutes_guard - row_minutes_guard) > 0.6
+                        ):
+                            card_minutes_display = (
+                                round(card_minutes_guard, 2)
+                                if card_minutes_guard is not None
+                                else -1.0
+                            )
+                            row_minutes_display = (
+                                round(row_minutes_guard, 2)
+                                if row_minutes_guard is not None
+                                else -1.0
+                            )
+                            if prefer_removal_drilling_hours:
+                                logger.warning(
+                                    "[minutes-sync] Drilling minutes still diverge after override: card %.2f vs row %.2f",
+                                    card_minutes_display,
+                                    row_minutes_display,
+                                )
+                            else:
+                                raise RuntimeError(
+                                    "Drilling minutes mismatch AFTER BUILD: "
+                                    f"card {card_minutes_display} vs row {row_minutes_display}. "
+                                    "Late writer is overwriting bucket_view."
+                                )
 
             assert (
                 abs(row_cost - row_hr_for_cost * row_rate) < 0.51
