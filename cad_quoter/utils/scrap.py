@@ -3,14 +3,138 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, Iterable
 
-from cad_quoter.domain_models import coerce_float_or_none as _coerce_float_or_none
+from cad_quoter.domain_models import (
+    MATERIAL_DENSITY_G_CC_BY_KEY,
+    MATERIAL_DENSITY_G_CC_BY_KEYWORD,
+    coerce_float_or_none as _coerce_float_or_none,
+    normalize_material_key as _normalize_lookup_key,
+)
 
 SCRAP_DEFAULT_GUESS = 0.15
 HOLE_SCRAP_MULT = 1.0  # tune 0.5–1.5 if you want holes to “count” more/less
 HOLE_SCRAP_CAP = 0.25
+
+
+def _coerce_positive_float(value: Any) -> float | None:
+    """Return a positive finite float or None."""
+
+    try:
+        number = float(value)
+    except Exception:
+        return None
+    try:
+        if not math.isfinite(number):
+            return None
+    except Exception:
+        pass
+    return number if number > 0 else None
+
+
+def _holes_removed_mass_g(geo: Mapping[str, Any] | None) -> float | None:
+    """Estimate mass removed by holes using geometry context."""
+
+    if not isinstance(geo, Mapping):
+        return None
+
+    t_in = _coerce_float_or_none(geo.get("thickness_in"))
+    if t_in is None:
+        t_mm = _coerce_positive_float(geo.get("thickness_mm"))
+        if t_mm is not None:
+            t_in = float(t_mm) / 25.4
+    if t_in is None or t_in <= 0:
+        return None
+
+    hole_diams_mm: list[float] = []
+    raw_list = geo.get("hole_diams_mm")
+    if isinstance(raw_list, Sequence) and not isinstance(raw_list, (str, bytes, bytearray)):
+        for v in raw_list:
+            val = _coerce_positive_float(v)
+            if val is not None:
+                hole_diams_mm.append(val)
+    if not hole_diams_mm:
+        families = geo.get("hole_diam_families_in")
+        if isinstance(families, Mapping):
+            for dia_in, qty in families.items():
+                d_in = _coerce_positive_float(dia_in)
+                q = _coerce_float_or_none(qty)
+                if d_in and q and q > 0:
+                    hole_diams_mm.extend([d_in * 25.4] * int(round(q)))
+    if not hole_diams_mm:
+        return None
+
+    density_g_cc = _coerce_float_or_none(geo.get("density_g_cc"))
+    if density_g_cc in (None, 0.0):
+        material_text = geo.get("material") or geo.get("material_name")
+        if isinstance(material_text, str) and material_text.strip():
+            norm_key = _normalize_lookup_key(material_text)
+            collapsed = norm_key.replace(" ", "")
+            density_g_cc = (
+                MATERIAL_DENSITY_G_CC_BY_KEYWORD.get(norm_key)
+                or MATERIAL_DENSITY_G_CC_BY_KEYWORD.get(collapsed)
+                or MATERIAL_DENSITY_G_CC_BY_KEY.get(norm_key)
+            )
+            if not density_g_cc:
+                for token, density in MATERIAL_DENSITY_G_CC_BY_KEYWORD.items():
+                    if token and (token in norm_key or token in collapsed):
+                        density_g_cc = density
+                        break
+    if density_g_cc is None or density_g_cc <= 0:
+        return None
+
+    removed_volume_cm3 = 0.0
+    for d_mm in hole_diams_mm:
+        d = _coerce_positive_float(d_mm)
+        if not d:
+            continue
+        area_mm2 = math.pi * (float(d) / 2.0) ** 2
+        volume_mm3 = area_mm2 * float(t_in) * 25.4
+        removed_volume_cm3 += volume_mm3 * 0.001
+
+    if removed_volume_cm3 <= 0:
+        return None
+
+    return removed_volume_cm3 * float(density_g_cc)
+
+
+def build_drill_groups_from_geometry(
+    hole_diams_mm: Sequence[Any] | None,
+    thickness_in: Any | None,
+) -> list[dict[str, Any]]:
+    """Create simple drill groups from hole diameters and plate thickness."""
+
+    try:
+        t_in = float(thickness_in) if thickness_in is not None else None
+    except Exception:
+        t_in = None
+    if t_in is not None and (not math.isfinite(t_in) or t_in <= 0):
+        t_in = None
+
+    groups: dict[float, dict[str, Any]] = {}
+    if isinstance(hole_diams_mm, Sequence) and not isinstance(hole_diams_mm, (str, bytes, bytearray)):
+        for raw in hole_diams_mm:
+            d_mm = _coerce_positive_float(raw)
+            if d_mm is None:
+                continue
+            d_in = float(d_mm) / 25.4
+            if not (d_in > 0 and math.isfinite(d_in)):
+                continue
+            key = round(d_in, 4)
+            bucket = groups.setdefault(
+                key,
+                {
+                    "diameter_in": float(key),
+                    "qty": 0,
+                    "depth_in": t_in,
+                    "op": "deep_drill" if (t_in is not None and t_in >= 3.0 * float(key)) else "drill",
+                },
+            )
+            bucket["qty"] += 1
+
+    ordered = [groups[k] for k in sorted(groups.keys())]
+    return ordered
 
 
 def _coerce_scrap_fraction(val: Any, cap: float = HOLE_SCRAP_CAP) -> float:
@@ -202,6 +326,8 @@ __all__ = [
     "SCRAP_DEFAULT_GUESS",
     "HOLE_SCRAP_MULT",
     "HOLE_SCRAP_CAP",
+    "_holes_removed_mass_g",
+    "build_drill_groups_from_geometry",
     "_coerce_scrap_fraction",
     "normalize_scrap_pct",
     "_iter_hole_diams_mm",
