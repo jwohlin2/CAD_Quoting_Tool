@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, MutableMapping
 from fractions import Fraction
-from typing import Any
+from typing import Any, Callable
 
 
 from .chart_lines import (
@@ -144,6 +144,166 @@ def _dedupe_hole_entries(
             seen.add(fingerprint)
         unique_entries.append(entry)
     return unique_entries
+
+
+def build_ops_summary_rows_from_hole_rows(
+    hole_rows: Iterable[Any] | None,
+) -> list[dict[str, Any]]:
+    """Convert parsed hole rows into ops-summary table rows."""
+
+    summary_rows: list[dict[str, Any]] = []
+    if not hole_rows:
+        return summary_rows
+
+    for row in hole_rows:
+        if row is None:
+            continue
+
+        try:
+            qty = int(getattr(row, "qty", 0) or 0)
+        except Exception:
+            qty = 0
+
+        ref = (
+            getattr(row, "ref", None)
+            or getattr(row, "drill_ref", None)
+            or getattr(row, "pilot", None)
+            or ""
+        )
+
+        desc = (
+            getattr(row, "description", None)
+            or getattr(row, "desc", None)
+            or ""
+        )
+
+        if not desc:
+            parts: list[str] = []
+            try:
+                features = list(getattr(row, "features", []) or [])
+            except Exception:
+                features = []
+            for feature in features:
+                if not isinstance(feature, dict):
+                    continue
+                feature_type = str(feature.get("type", "")).lower()
+                side = str(feature.get("side", "")).upper()
+                if feature_type == "tap":
+                    thread = feature.get("thread") or ""
+                    depth = feature.get("depth_in")
+                    tap_desc = f"{thread} TAP" if thread else "TAP"
+                    if isinstance(depth, (int, float)):
+                        tap_desc += f" × {depth:.2f}\""
+                    if side:
+                        tap_desc += f" FROM {side}"
+                    parts.append(tap_desc)
+                elif feature_type == "cbore":
+                    dia = feature.get("dia_in")
+                    depth = feature.get("depth_in")
+                    cbore_desc = ""
+                    if isinstance(dia, (int, float)):
+                        cbore_desc += f"{dia:.4f} "
+                    cbore_desc += "C’BORE"
+                    if isinstance(depth, (int, float)):
+                        cbore_desc += f" × {depth:.2f}\""
+                    if side:
+                        cbore_desc += f" FROM {side}"
+                    parts.append(cbore_desc)
+                elif feature_type in {"csk", "countersink"}:
+                    dia = feature.get("dia_in")
+                    depth = feature.get("depth_in")
+                    csk_desc = ""
+                    if isinstance(dia, (int, float)):
+                        csk_desc += f"{dia:.4f} "
+                    csk_desc += "C’SINK"
+                    if isinstance(depth, (int, float)):
+                        csk_desc += f" × {depth:.2f}\""
+                    if side:
+                        csk_desc += f" FROM {side}"
+                    parts.append(csk_desc)
+                elif feature_type == "drill":
+                    ref_local = feature.get("ref") or ref or ""
+                    thru = " THRU" if feature.get("thru", True) else ""
+                    parts.append(f"{ref_local}{thru}".strip())
+                elif feature_type == "spot":
+                    depth = feature.get("depth_in")
+                    spot_desc = "C’DRILL"
+                    if isinstance(depth, (int, float)):
+                        spot_desc += f" × {depth:.2f}\""
+                    parts.append(spot_desc)
+                elif feature_type == "jig":
+                    parts.append("JIG GRIND")
+            desc = "; ".join(part for part in parts if part)
+
+        summary_rows.append(
+            {
+                "hole": str(
+                    getattr(row, "hole_id", "")
+                    or getattr(row, "letter", "")
+                    or ""
+                ),
+                "ref": str(ref or ""),
+                "qty": int(qty),
+                "desc": str(desc or ""),
+            }
+        )
+
+    return summary_rows
+
+
+def update_geo_ops_summary_from_hole_rows(
+    geo: MutableMapping[str, Any],
+    *,
+    hole_rows: Iterable[Any] | None = None,
+    chart_lines: Iterable[str] | None = None,
+    chart_source: str | None = None,
+    chart_summary: Mapping[str, Any] | None = None,
+    apply_built_rows: Callable[[
+        MutableMapping[str, Any] | Mapping[str, Any] | None,
+        Iterable[Mapping[str, Any]] | None,
+    ], int]
+    | None = None,
+) -> list[dict[str, Any]]:
+    """Populate geo["ops_summary"] with rows derived from hole data."""
+
+    ops_rows = build_ops_summary_rows_from_hole_rows(hole_rows)
+    if not ops_rows and chart_lines:
+        ops_rows = _chart_build_ops_rows_from_lines_fallback(chart_lines)
+
+    if not ops_rows:
+        return []
+
+    ops_summary_map = geo.setdefault("ops_summary", {})
+    ops_summary_map["rows"] = ops_rows
+    ops_summary_map["source"] = chart_source or "chart_lines"
+
+    if apply_built_rows:
+        try:
+            apply_built_rows(ops_summary_map, ops_rows)
+        except Exception:
+            pass
+
+    if chart_summary and isinstance(chart_summary, Mapping):
+        try:
+            tap_qty = int(chart_summary.get("tap_qty") or 0)
+            if tap_qty:
+                ops_summary_map["tap_total"] = tap_qty
+        except Exception:
+            pass
+        try:
+            cbore_qty = int(chart_summary.get("cbore_qty") or 0)
+            if cbore_qty:
+                ops_summary_map["cbore_total"] = cbore_qty
+        except Exception:
+            pass
+        try:
+            csk_qty = int(chart_summary.get("csk_qty") or 0)
+            if csk_qty:
+                ops_summary_map["csk_total"] = csk_qty
+        except Exception:
+            pass
+
+    return ops_rows
 
 
 def _parse_hole_line(line: str, to_in: float, *, source: str | None = None) -> dict[str, Any] | None:
@@ -392,6 +552,77 @@ def summarize_hole_chart_lines(lines: Iterable[str] | None) -> dict[str, Any]:
     }
 
 
+def summarize_hole_chart_agreement(
+    entity_holes_mm: Iterable[Any] | None, chart_ops: Iterable[dict] | None
+) -> dict[str, Any]:
+    """Compare entity-detected hole sizes with chart-derived operations."""
+
+    def _as_qty(value: Any) -> int:
+        try:
+            qty = int(round(float(value)))
+        except Exception:
+            qty = 0
+        return qty if qty > 0 else 1
+
+    bin_key = lambda dia: round(float(dia), 1)
+
+    ent_bins: Counter[float] = Counter()
+    if entity_holes_mm:
+        for value in entity_holes_mm:
+            try:
+                dia = float(value)
+            except Exception:
+                continue
+            if dia > 0:
+                ent_bins[bin_key(dia)] += 1
+
+    chart_bins: Counter[float] = Counter()
+    tap_qty = 0
+    cbore_qty = 0
+    csk_qty = 0
+    if chart_ops:
+        for op in chart_ops:
+            if not isinstance(op, dict):
+                continue
+            op_type = str(op.get("type") or "").lower()
+            qty = _as_qty(op.get("qty"))
+            if op_type == "tap":
+                tap_qty += qty
+            if op_type == "cbore":
+                cbore_qty += qty
+            if op_type in {"csk", "countersink"}:
+                csk_qty += qty
+            if op_type != "drill":
+                continue
+            dia_raw = op.get("dia_mm")
+            if dia_raw is None:
+                continue
+            try:
+                dia_val = float(dia_raw)
+            except Exception:
+                continue
+            if dia_val <= 0:
+                continue
+            chart_bins[bin_key(dia_val)] += qty
+
+    entity_total = sum(ent_bins.values())
+    chart_total = sum(chart_bins.values())
+    max_total = max(entity_total, chart_total)
+    tolerance = max(5, 0.1 * max_total) if max_total else 5
+    agreement = abs(entity_total - chart_total) <= tolerance
+
+    return {
+        "entity_bins": {float(k): int(v) for k, v in ent_bins.items()},
+        "chart_bins": {float(k): int(v) for k, v in chart_bins.items()},
+        "tap_qty": int(tap_qty),
+        "cbore_qty": int(cbore_qty),
+        "csk_qty": int(csk_qty),
+        "agreement": bool(agreement),
+        "entity_total": int(entity_total),
+        "chart_total": int(chart_total),
+    }
+
+
 __all__ = [
     "RE_TAP",
     "RE_NPT",
@@ -408,11 +639,14 @@ __all__ = [
     "_classify_thread_spec",
     "_normalize_hole_text",
     "_dedupe_hole_entries",
+    "build_ops_summary_rows_from_hole_rows",
+    "update_geo_ops_summary_from_hole_rows",
     "_parse_hole_line",
     "_aggregate_hole_entries",
     "_build_ops_rows_from_lines_fallback",
     "build_ops_rows_from_lines_fallback",
     "summarize_hole_chart_lines",
+    "summarize_hole_chart_agreement",
 ]
 
 
