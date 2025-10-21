@@ -612,6 +612,54 @@ def _compute_drilling_removal_section(
                 geo_map = candidate_geo
     if not isinstance(geo_map, _MappingABC):
         geo_map = {}
+
+    (
+        tap_minutes_inferred,
+        cbore_minutes_inferred,
+        spot_minutes_inferred,
+        jig_minutes_inferred,
+    ) = _hole_table_minutes_from_geo(geo_map)
+
+    inferred_minutes = {
+        "tapping": tap_minutes_inferred,
+        "counterbore": cbore_minutes_inferred,
+        "drilling": spot_minutes_inferred,
+        "grinding": jig_minutes_inferred,
+    }
+
+    if any(minutes > 0.0 for minutes in inferred_minutes.values()):
+        seeded_via_planner = False
+        if isinstance(breakdown, (_MutableMappingABC, dict)):
+            try:
+                _planner_seed_bucket_minutes(
+                    typing.cast(MutableMapping[str, Any], breakdown),
+                    tapping_min=tap_minutes_inferred,
+                    cbore_min=cbore_minutes_inferred,
+                    spot_min=spot_minutes_inferred,
+                    jig_min=jig_minutes_inferred,
+                )
+                seeded_via_planner = True
+            except Exception:
+                seeded_via_planner = False
+
+        if not seeded_via_planner:
+            for bucket_key, minutes in inferred_minutes.items():
+                if minutes <= 0.0:
+                    continue
+                existing_minutes = 0.0
+                if isinstance(pricing_buckets, Mapping):
+                    current_entry = pricing_buckets.get(bucket_key)
+                    if isinstance(current_entry, _MappingABC):
+                        existing_minutes = float(
+                            _coerce_float_or_none(current_entry.get("minutes")) or 0.0
+                        )
+                    elif isinstance(current_entry, dict):
+                        try:
+                            existing_minutes = float(current_entry.get("minutes") or 0.0)
+                        except Exception:
+                            existing_minutes = 0.0
+                _seed_bucket_minutes(bucket_key, existing_minutes + float(minutes))
+
     ops_hole_count_from_table = 0
 
     dtph_map = (
