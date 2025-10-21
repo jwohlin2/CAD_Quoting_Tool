@@ -110,6 +110,9 @@ _MM_DIM_TOKEN = re.compile(
     re.IGNORECASE,
 )
 
+_DRILL_REMOVAL_MINUTES_MIN = 0.0
+_DRILL_REMOVAL_MINUTES_MAX = 600.0
+
 
 def _parse_dim_to_mm(value: Any) -> float | None:
     """Parse a dimension string containing millimeter units to a float value."""
@@ -141,6 +144,28 @@ def _parse_dim_to_mm(value: Any) -> float | None:
         return None
 
     return mm_val if math.isfinite(mm_val) and mm_val > 0 else None
+
+
+def _sanitize_drill_removal_minutes(minutes_value: Any) -> float:
+    """Clamp drill removal minutes to sane bounds before storing in extras."""
+
+    try:
+        minutes = float(minutes_value)
+    except Exception:
+        logging.error(
+            f"[unit] removal DRILL minutes insane; dropping. raw={minutes_value}"
+        )
+        return 0.0
+
+    if not math.isfinite(minutes) or not (
+        _DRILL_REMOVAL_MINUTES_MIN <= minutes <= _DRILL_REMOVAL_MINUTES_MAX
+    ):
+        logging.error(
+            f"[unit] removal DRILL minutes insane; dropping. raw={minutes}"
+        )
+        return 0.0
+
+    return minutes
 from cad_quoter.app.chart_lines import (
     collect_chart_lines_context as _collect_chart_lines_context,
 )
@@ -1333,13 +1358,16 @@ def _compute_drilling_removal_section(
             )
             if subtotal_minutes_val is None:
                 subtotal_minutes_val = subtotal_minutes
-            drill_minutes_subtotal = round(float(subtotal_minutes_val or 0.0), 2)
+            drill_minutes_subtotal_raw = _sanitize_drill_removal_minutes(
+                subtotal_minutes_val or 0.0
+            )
+            drill_minutes_subtotal = round(drill_minutes_subtotal_raw, 2)
             total_minutes_val = (
                 _coerce_float_or_none(dtph_map.get("total_minutes_with_toolchange"))
                 or _coerce_float_or_none(dtph_map.get("total_minutes"))
             )
             if total_minutes_val is None:
-                total_minutes_val = drill_minutes_subtotal + total_tool_minutes
+                total_minutes_val = drill_minutes_subtotal_raw + total_tool_minutes
             total_minutes_val = float(total_minutes_val or 0.0)
 
             drill_minutes_total = round(float(total_minutes_val or 0.0), 2)
@@ -1351,14 +1379,16 @@ def _compute_drilling_removal_section(
             )
             _push(
                 lines,
-                f"TOTAL DRILLING (with toolchange) . {drill_minutes_total:.2f} min",
+                "TOTAL DRILLING (with toolchange) . "
+                f"{drill_minutes_total:.2f} min  ("
+                f"{fmt_hours(minutes_to_hours(drill_minutes_total))})",
             )
             lines.append("")
 
             extras["drill_machine_minutes"] = float(drill_minutes_subtotal)
             extras["drill_labor_minutes"] = float(total_tool_minutes)
             extras["drill_total_minutes"] = drill_minutes_subtotal
-            logging.debug(
+            logging.info(
                 f"[removal] drill_total_minutes={extras['drill_total_minutes']}"
             )
             if "drill_total_hours" in extras:
@@ -5369,6 +5399,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         card_minutes_val = 0.0
     card_minutes_precise = float(card_minutes_val)
     removal_drilling_minutes = card_minutes_precise if have_card_minutes else None
+    removal_drilling_hours_precise: float | None = None
     if drill_total_minutes_estimate > 0.0:
         removal_drilling_minutes = float(drill_total_minutes_estimate)
         removal_drilling_hours_precise = removal_drilling_minutes / 60.0
@@ -5518,9 +5549,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if isinstance(extra_map, _MutableMappingABC):
             extra_map["drill_machine_minutes"] = float(machine_minutes_snapshot)
             extra_map["drill_labor_minutes"] = float(labor_minutes_snapshot)
-            minutes_value = round(float(total_minutes_snapshot or 0.0), 2)
+            total_minutes_sanitized = _sanitize_drill_removal_minutes(
+                total_minutes_snapshot or 0.0
+            )
+            minutes_value = round(total_minutes_sanitized, 2)
             extra_map["drill_total_minutes"] = minutes_value
-            logging.debug("[removal] drill_total_minutes=%s", minutes_value)
+            logging.info("[removal] drill_total_minutes=%s", minutes_value)
             return extra_map
         return None
 
@@ -6974,6 +7008,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if misc_total > 0:
         process_table.had_rows = True
 
+    bucket_view_obj = locals().get("bucket_view_obj") if "bucket_view_obj" in locals() else None
     bucket_view_for_render: Mapping[str, Any] | None
     if isinstance(bucket_view_obj, (_MappingABC, dict)):
         bucket_view_for_render = typing.cast(Mapping[str, Any], bucket_view_obj)
