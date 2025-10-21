@@ -1,6 +1,6 @@
 import pytest
 
-from bucketizer import (
+from cad_quoter.pricing.process_buckets import (
     INSPECTION_BASE_MIN,
     INSPECTION_PER_HOLE_MIN,
     bucketize,

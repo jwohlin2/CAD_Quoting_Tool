@@ -9,7 +9,7 @@ This guide documents how to replace the legacy worksheet-based process costing i
    - `family`: planner family identifier such as `"die_plate"` or `"punch"`.
    - `planner_params`: the logical inputs gathered from UI variables (material, tolerances, etc.).
    - `geom`: the geometric aggregates derived from CAD (perimeters, areas, hole lists, and the time-model inputs).
-3. Pass the payload to `planner_pricing.price_with_planner`. This function is the single workhorse that runs the planner, calculates cycle times, and returns a transparent cost breakdown.
+3. Pass the payload to `cad_quoter.pricing.planner.price_with_planner`. This function is the single workhorse that runs the planner, calculates cycle times, and returns a transparent cost breakdown.
 4. Persist the pricing results back onto the quote dictionary. Store the qualitative plan (`planner_plan`), line-item breakdown (`process_line_items`), machine vs. labor totals (`process_costs`), total minutes, and subtotal process cost so that downstream insurance/markup logic continues to work unchanged.
 5. Keep the rest of the quote math identical. Insurance, markup, and margin should continue to consume `quote["process_costs"]` and `quote["subtotal_process_cost"]` as they do today.
 
@@ -18,7 +18,7 @@ This guide documents how to replace the legacy worksheet-based process costing i
 Below is a template that can replace the legacy `validate_quote_before_pricing` helper in `appV5.py` (or whichever module is currently accumulating process costs by multiplying hours × rate):
 
 ```python
-from planner_pricing import price_with_planner
+from cad_quoter.pricing.planner import price_with_planner
 from rates import migrate_flat_to_two_bucket
 
 

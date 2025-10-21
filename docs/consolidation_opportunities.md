@@ -9,17 +9,11 @@ This repository still carries several legacy entry points and compatibility laye
 
 ## Process-cost bucketisation
 
-* `bucketizer.py` computes presentation buckets from planner line items, including hard-coded bucket names, heuristics, and inspection fallbacks. 【F:bucketizer.py†L1-L200】【F:bucketizer.py†L200-L338】
-* `cad_quoter/pricing/process_cost_renderer.py` performs the same normalisation and rendering with its own bucket ordering, alias table, and rate resolution logic. 【F:cad_quoter/pricing/process_cost_renderer.py†L1-L200】【F:cad_quoter/pricing/process_cost_renderer.py†L303-L382】
-
-Keeping two parallel implementations makes it easy for naming or rate rules to diverge (for example, when introducing new planner operations). Extracting the shared mapping/rate logic into a single module and having both the GUI and pricing engine depend on it would prevent the drift that currently requires mirrored test fixtures (`tests/pricing/test_bucketizer_drilling.py` vs. `tests/pricing/test_process_cost_renderer.py`). 【F:tests/pricing/test_bucketizer_drilling.py†L1-L95】【F:tests/pricing/test_process_cost_renderer.py†L1-L160】
+The standalone bucketiser has been folded into the pricing package so that both the GUI and the renderer share a single set of heuristics. Planner minutes now flow through the helpers in `cad_quoter/pricing/process_buckets.py`, which expose the canonical planner bucket order, inspection fallbacks, and cost aggregation logic. 【F:cad_quoter/pricing/process_buckets.py†L1-L410】
 
 ## Planner pricing duplication
 
-* `planner_pricing.py` both interprets the process-planner output and applies its own bucket-to-rate mapping, duplicating the rate lookups that also exist in the pricing package. 【F:planner_pricing.py†L437-L520】
-* The migration guide encourages new integrations to call `price_with_planner` directly, so the overlap between this script and `cad_quoter/pricing/process_cost_renderer.py` will persist until the rate logic is centralised. 【F:docs/planner_pricing_migration.md†L1-L48】
-
-Extracting the shared rate/bucket mapping into a reusable helper (and letting `planner_pricing` focus solely on translating planner minutes) would make the CLI and pricing engine share one codepath for dollars-per-minute conversions.
+Planner cost conversion lives alongside the rate metadata in `cad_quoter/pricing/planner.py`. The thin compatibility shim `planner_pricing.py` simply re-exports `price_with_planner`, allowing existing imports to continue working while the heavy lifting happens inside the package. The migration guide has been updated to point at the new module path. 【F:cad_quoter/pricing/planner.py†L1-L520】【F:planner_pricing.py†L1-L5】【F:docs/planner_pricing_migration.md†L1-L60】
 
 ## Drilling estimator location
 
