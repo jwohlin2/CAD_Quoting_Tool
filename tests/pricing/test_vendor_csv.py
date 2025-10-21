@@ -61,3 +61,19 @@ def test_pick_plate_from_mcmaster_forwards_to_helper(monkeypatch) -> None:
         "price_usd": 42.5,
         "min_charge_usd": None,
     }
+
+
+def test_extract_price_metadata_rejects_invalid_numbers() -> None:
+    vendor, part, price, min_charge = vendor_csv._extract_price_metadata(
+        {
+            "vendor": "Partner",
+            "mcmaster_part": "1234K",
+            "price_usd": "NaN",
+            "min_charge_usd": float("inf"),
+        }
+    )
+
+    assert vendor == "Partner"
+    assert part == "1234K"
+    assert price is None
+    assert min_charge is None

@@ -12,6 +12,8 @@ import math
 import re
 from typing import Any
 
+from cad_quoter.utils.numeric import coerce_float
+
 
 _RANGE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:-|to|–|—|/)\s*(\d+(?:\.\d+)?)", re.IGNORECASE)
 _TOKEN_RE = re.compile(
@@ -20,29 +22,6 @@ _TOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 _COMPACT_UNIT_RE = re.compile(r"(\d)([a-zA-Z])")
-
-
-def _coerce_float(value: Any) -> float | None:
-    """Best-effort conversion to a floating point value."""
-
-    if value is None:
-        return None
-    if isinstance(value, (int, float)):
-        try:
-            coerced = float(value)
-        except Exception:  # pragma: no cover - defensive guard
-            return None
-        return coerced if math.isfinite(coerced) else None
-    text = str(value).strip()
-    if not text:
-        return None
-    try:
-        coerced = float(text)
-    except Exception:
-        return None
-    return coerced if math.isfinite(coerced) else None
-
-
 def coerce_lead_time_days(value: Any, *, default: int | None = None) -> int | None:
     """Return a conservative day estimate from a vendor lead-time token.
 
@@ -52,7 +31,7 @@ def coerce_lead_time_days(value: Any, *, default: int | None = None) -> int | No
     towards safety.  The function always rounds up to a whole number of days.
     """
 
-    numeric = _coerce_float(value)
+    numeric = coerce_float(value)
     if numeric is not None:
         return math.ceil(max(0.0, numeric))
 
@@ -73,7 +52,7 @@ def coerce_lead_time_days(value: Any, *, default: int | None = None) -> int | No
     tokens: list[float] = []
 
     if range_match:
-        upper = _coerce_float(range_match.group(2))
+        upper = coerce_float(range_match.group(2))
         if upper is not None:
             tokens.append(upper)
         # Replace the range with the upper bound so the token regex can pick
@@ -82,7 +61,7 @@ def coerce_lead_time_days(value: Any, *, default: int | None = None) -> int | No
 
     total_days = 0.0
     for match in _TOKEN_RE.finditer(working):
-        raw_value = _coerce_float(match.group("value"))
+        raw_value = coerce_float(match.group("value"))
         if raw_value is None:
             continue
         unit = match.group("unit").strip().lower()
@@ -101,7 +80,7 @@ def coerce_lead_time_days(value: Any, *, default: int | None = None) -> int | No
     if not tokens:
         # Fall back to any digits we can find, taking the largest value.
         values = [
-            _coerce_float(token)
+            coerce_float(token)
             for token in re.findall(r"\d+(?:\.\d+)?", working)
         ]
         tokens = [float(val) for val in values if val is not None]

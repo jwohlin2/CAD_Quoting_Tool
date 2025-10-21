@@ -20,29 +20,12 @@ from cad_quoter.pricing.mcmaster_helpers import (
     _coerce_inches_value as _coerce_inches_value,
 )
 from cad_quoter.vendors.mcmaster_stock import norm_material
+from cad_quoter.utils.numeric import coerce_float
 
 from .base import PriceProvider
 
 
 _SCRAP_FRACTION = 0.05
-
-
-def _coerce_float(value: Any) -> float | None:
-    """Best-effort conversion to ``float`` with ``None`` on failure."""
-
-    try:
-        if value is None:
-            return None
-        if isinstance(value, (int, float)):
-            return float(value)
-        text = str(value).strip()
-        if not text:
-            return None
-        return float(text)
-    except Exception:
-        return None
-
-
 def _extract_price_metadata(row: Mapping[str, Any]) -> tuple[str, str | None, float | None, float | None]:
     vendor = str(row.get("vendor") or row.get("Vendor") or "McMaster").strip() or "McMaster"
     part_no = str(
@@ -51,13 +34,13 @@ def _extract_price_metadata(row: Mapping[str, Any]) -> tuple[str, str | None, fl
         or row.get("sku")
         or ""
     ).strip() or None
-    price = _coerce_float(
+    price = coerce_float(
         row.get("price_usd")
         or row.get("Price_usd")
         or row.get("price")
         or row.get("Price")
     )
-    min_charge = _coerce_float(
+    min_charge = coerce_float(
         row.get("min_charge_usd")
         or row.get("minimum_charge_usd")
         or row.get("min_charge")

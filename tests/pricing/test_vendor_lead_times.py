@@ -5,6 +5,7 @@ import math
 import pytest
 
 from cad_quoter.pricing import vendor_lead_times
+from cad_quoter.utils.numeric import coerce_float
 
 
 @pytest.mark.parametrize(
@@ -18,6 +19,8 @@ from cad_quoter.pricing import vendor_lead_times
         ("rush", 1),
         ("18hrs", 1),
         ("", None),
+        (float("nan"), None),
+        ("nan", None),
         (None, None),
     ],
 )
@@ -60,3 +63,9 @@ def test_apply_lead_time_adjustments_none() -> None:
 def test_business_day_conversion(calendar_days: float, weekend_days: float, expected: float) -> None:
     helper = vendor_lead_times._business_days_from_calendar  # type: ignore[attr-defined]
     assert math.isclose(helper(calendar_days, weekend_days=weekend_days), expected)
+
+
+def test_shared_coerce_float_rejects_non_finite_values() -> None:
+    assert coerce_float(float("inf")) is None
+    assert coerce_float("NaN") is None
+    assert coerce_float(" 42.5 ") == pytest.approx(42.5)
