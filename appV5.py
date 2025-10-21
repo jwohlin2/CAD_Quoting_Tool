@@ -5367,9 +5367,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         card_minutes_val = 0.0
     card_minutes_precise = float(card_minutes_val)
     removal_drilling_minutes = card_minutes_precise if have_card_minutes else None
-    removal_drilling_hours_precise = (
-        card_minutes_precise / 60.0 if have_card_minutes else None
-    )
     if drill_total_minutes_estimate > 0.0:
         removal_drilling_minutes = float(drill_total_minutes_estimate)
         removal_drilling_hours_precise = removal_drilling_minutes / 60.0
@@ -5867,52 +5864,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             _row_component(row[3]) for row in bucket_table_rows
         )
 
-    planner_totals_map: typing.Mapping[str, Any] | None = None
-    if bucket_table_rows:
-        planner_totals_candidates: list[typing.Mapping[str, Any] | None] = []
-        if isinstance(process_plan_summary_local, _MappingABC):
-            pricing_info = process_plan_summary_local.get("pricing")
-            if isinstance(pricing_info, _MappingABC):
-                planner_totals_candidates.append(pricing_info.get("totals"))
-        if isinstance(breakdown, _MappingABC):
-            planner_pricing = breakdown.get("process_plan_pricing")
-            if isinstance(planner_pricing, _MappingABC):
-                planner_totals_candidates.append(planner_pricing.get("totals"))
-
-        for candidate in planner_totals_candidates:
-            if isinstance(candidate, _MappingABC):
-                planner_totals_map = candidate
-                break
-
-    if bucket_table_rows and isinstance(planner_totals_map, _MappingABC):
-        planner_labor_total = float(
-            _coerce_float_or_none(planner_totals_map.get("labor_cost")) or 0.0
-        )
-        planner_machine_total = float(
-            _coerce_float_or_none(planner_totals_map.get("machine_cost")) or 0.0
-        )
-
-        if abs(display_machine_from_rows - planner_machine_total) >= 0.51:
-            try:
-                _log.warning(
-                    "render_quote: Machine $ mismatch (rows=%.2f planner=%.2f)",
-                    display_machine_from_rows,
-                    planner_machine_total,
-                )
-            except Exception:
-                pass
-            # Prefer planner totals to avoid breaking render on small drifts.
-            display_machine_from_rows = planner_machine_total
-        if abs(display_labor_from_rows - planner_labor_total) >= 0.51:
-            try:
-                _log.warning(
-                    "render_quote: Labor $ mismatch (rows=%.2f planner=%.2f)",
-                    display_labor_from_rows,
-                    planner_labor_total,
-                )
-            except Exception:
-                pass
-            display_labor_from_rows = planner_labor_total
+    # Planner totals reconciliation previously compared bucket rows against legacy
+    # planner aggregates. Those comparisons produced noisy warnings and are no
+    # longer useful now that rendering is sourced directly from bucket data.
     detail_lookup.update(bucket_state.detail_lookup)
     label_to_canon.update(bucket_state.label_to_canon)
     canon_to_display_label.update(bucket_state.canon_to_display_label)
@@ -6974,33 +6928,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         extra_map = getattr(bucket_state, "extra", {})
         if not isinstance(extra_map, _MappingABC):
             extra_map = {}
-        removal_card_hr = _coerce_float_or_none(extra_map.get("removal_drilling_hours"))
-        if removal_card_hr is None:
-            drill_minutes_extra = _coerce_float_or_none(extra_map.get("drill_total_minutes"))
-            if drill_minutes_extra is not None:
-                removal_card_hr = minutes_to_hours(drill_minutes_extra)
-
-        charged_snapshot: Mapping[str, Any]
-        if isinstance(charged_hours, _MappingABC):
-            charged_snapshot = charged_hours
-        else:
-            charged_snapshot = dict(charged_hours or {})  # type: ignore[arg-type]
-        bucket_hr = None
-        for raw_key in charged_snapshot.keys():
-            if _canonical_bucket_key(raw_key) in {"drilling", "drill"}:
-                bucket_hr = _coerce_float_or_none(charged_snapshot.get(raw_key))
-                break
-
-        row_hr_debug = None
-        process_rows_debug = getattr(process_table, "_rows", None)
-        if isinstance(process_rows_debug, Sequence):
-            for row_entry in process_rows_debug:
-                if not isinstance(row_entry, _MappingABC):
-                    continue
-                if _canonical_bucket_key(row_entry.get("label")) in {"drilling", "drill"}:
-                    row_hr_debug = _coerce_float_or_none(row_entry.get("hours"))
-                    break
-
         hour_summary_map: dict[str, float] = {}
         if isinstance(hour_summary_entries, _MappingABC):
             for label, value in hour_summary_entries.items():
@@ -7038,27 +6965,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                             include_flag,
                         )
 
-        summary_hr = None
-        for key in ("Drilling", "drilling"):
-            if key in hour_summary_map:
-                summary_hr = hour_summary_map[key]
-                break
-
-        def _fmt_drill_debug(value: float | None) -> str:
-            if value is None:
-                return "-"
-            try:
-                return f"{float(value):.2f}"
-            except Exception:
-                return "-"
-
-        logger.info(
-            "[drill-sync] card=%s  bucket=%s  row=%s  summary=%s",
-            _fmt_drill_debug(removal_card_hr),
-            _fmt_drill_debug(bucket_hr),
-            _fmt_drill_debug(row_hr_debug),
-            _fmt_drill_debug(summary_hr),
-        )
+        # Legacy logging compared multiple hour sources that have since been
+        # removed. Minutes now flow from buckets, so avoid emitting the
+        # diagnostic line that referenced stale hour data.
 
     if misc_total > 0:
         process_table.had_rows = True
