@@ -9,6 +9,7 @@ from cad_quoter.rates import (
     rate_for_role,
 )
 from cad_quoter.utils import _dict
+from cad_quoter.pricing.rate_buckets import bucket_cost_breakdown
 
 # -------- small utils
 LABOR_BUCKET_ROLES = {

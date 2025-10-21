@@ -6,6 +6,8 @@ import os
 import re
 from typing import Any
 
+from cad_quoter.pricing.rate_buckets import RATE_BUCKETS
+
 
 ORDER: tuple[str, ...] = (
     "milling",
@@ -85,6 +87,7 @@ _ALIAS_MAP: dict[str, str] = {
     "inspection": "inspection",
     "inspect": "inspection",
     "quality": "inspection",
+    "abrasive_flow": "misc",
     "counter_bore": "counterbore",
     "counter_boring": "counterbore",
     "counterbore": "counterbore",
@@ -142,6 +145,17 @@ __all__ = ["ORDER", "canonicalize_costs", "render_process_costs"]
 
 def _normalize_key(name: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_")
+
+
+for _bucket_spec in RATE_BUCKETS:
+    norm_label = _normalize_key(_bucket_spec.label)
+    canonical_norm = _ALIAS_MAP.get(norm_label, norm_label)
+    for key in {norm_label, canonical_norm}:
+        if not key:
+            continue
+        existing = _RATE_ALIAS_KEYS.get(key, ())
+        merged = tuple(dict.fromkeys((*_bucket_spec.rate_keys, *existing)))
+        _RATE_ALIAS_KEYS[key] = merged
 
 
 def _canonical_process_key(name: Any) -> str | None:
