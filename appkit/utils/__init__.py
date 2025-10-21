@@ -147,6 +147,15 @@ def _ipm_from_rpm_ipr(rpm: float | None, ipr: float | None) -> float | None:
     return rpm * ipr
 
 
+# Backwards-compatible exports for legacy modules.
+rpm_from_sfm = _rpm_from_sfm
+rpm_from_sfm_diam = _rpm_from_sfm_diam
+parse_thread_major_in = _parse_thread_major_in
+parse_tpi = _parse_tpi
+lookup_sfm_ipr = _lookup_sfm_ipr
+ipm_from_rpm_ipr = _ipm_from_rpm_ipr
+
+
 def _parse_numeric_text(value: str) -> float | None:
     """Parse a mixed numeric string ("3 1/2") into a floating-point value."""
 
@@ -219,11 +228,17 @@ __all__ = [
     "_first_numeric_or_none",
     "_fmt_rng",
     "_rpm_from_sfm",
+    "rpm_from_sfm",
     "_parse_thread_major_in",
+    "parse_thread_major_in",
     "_parse_tpi",
+    "parse_tpi",
     "_lookup_sfm_ipr",
+    "lookup_sfm_ipr",
     "_rpm_from_sfm_diam",
+    "rpm_from_sfm_diam",
     "_ipm_from_rpm_ipr",
+    "ipm_from_rpm_ipr",
     "_parse_numeric_text",
     "_parse_length_to_mm",
 ]
