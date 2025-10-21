@@ -176,39 +176,13 @@ from cad_quoter.geometry.dxf_enrich import (
 
 from cad_quoter.pricing.process_buckets import bucketize
 
-import cad_quoter.geometry as _geometry
-
-def _missing_geom_fn(name: str):
-    def _fn(*_a, **_k):
-        raise RuntimeError(f"geometry helper '{name}' is unavailable in this build")
-
-    return _fn
+import cad_quoter.geometry as geometry
 
 
-def _export_geom(name: str):
-    return getattr(_geometry, name, _missing_geom_fn(name))
 
-
-read_cad_any = _export_geom("read_cad_any")
-read_step_shape = _export_geom("read_step_shape")
-convert_dwg_to_dxf = _export_geom("convert_dwg_to_dxf")
-enrich_geo_occ = _export_geom("enrich_geo_occ")
-enrich_geo_stl = _export_geom("enrich_geo_stl")
-safe_bbox = _export_geom("safe_bbox")
-parse_hole_table_lines = _export_geom("parse_hole_table_lines")
-extract_text_lines_from_dxf = _export_geom("extract_text_lines_from_dxf")
-text_harvest = _export_geom("text_harvest")
-upsert_var_row = _export_geom("upsert_var_row")
-require_ezdxf = _export_geom("require_ezdxf")
-get_dwg_converter_path = _export_geom("get_dwg_converter_path")
-get_import_diagnostics_text = _export_geom("get_import_diagnostics_text")
-extract_features_with_occ = _export_geom("extract_features_with_occ")
-
-_HAS_ODAFC = bool(getattr(_geometry, "HAS_ODAFC", False))
-_HAS_PYMUPDF = bool(
-    getattr(_geometry, "HAS_PYMUPDF", getattr(_geometry, "_HAS_PYMUPDF", False))
-)
-fitz = getattr(_geometry, "fitz", None)
+_HAS_ODAFC = bool(getattr(geometry, "HAS_ODAFC", False))
+_HAS_PYMUPDF = bool(getattr(geometry, "HAS_PYMUPDF", getattr(geometry, "_HAS_PYMUPDF", False)))
+fitz = getattr(geometry, "fitz", None)
 try:
     odafc = _ezdxf_vendor.require_odafc() if _HAS_ODAFC else None
 except Exception:
@@ -3494,12 +3468,12 @@ except Exception:
 DIM_RE = re.compile(r"(?:[Øø⌀]|DIAM|DIA)\s*([0-9.+-]+)|R\s*([0-9.+-]+)|([0-9.+-]+)\s*[xX]\s*([0-9.+-]+)")
 
 def load_drawing(path: Path) -> Drawing:
-    ezdxf_mod = typing.cast(_EzdxfModule, require_ezdxf())
+    ezdxf_mod = typing.cast(_EzdxfModule, geometry.require_ezdxf())
     if path.suffix.lower() == ".dwg":
         # Prefer explicit converter/wrapper if configured (works even if ODA isn't on PATH)
-        exe = get_dwg_converter_path()
+        exe = geometry.get_dwg_converter_path()
         if exe:
-            dxf_path = convert_dwg_to_dxf(str(path))
+            dxf_path = geometry.convert_dwg_to_dxf(str(path))
             return ezdxf_mod.readfile(dxf_path)
         # Fallback: odafc (requires ODAFileConverter on PATH)
         if _HAS_ODAFC and odafc is not None:
@@ -3804,7 +3778,7 @@ DOT_TOL = math.cos(ANG_TOL)
 SMALL = 1e-7
 
 def _bbox(shape):
-    box = safe_bbox(shape)
+    box = geometry.safe_bbox(shape)
     xmin, ymin, zmin, xmax, ymax, zmax = box.Get()
     return (xmin, ymin, zmin, xmax, ymax, zmax)
 
@@ -16124,10 +16098,12 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
         notes.append("Hole chart references BACK operations.")
 
     tokens_parts: list[str] = []
-    try:
-        tokens_parts.extend(text_harvest(doc))
-    except Exception:
-        pass
+    text_harvest_fn = getattr(geometry, "text_harvest", None)
+    if callable(text_harvest_fn):
+        try:
+            tokens_parts.extend(text_harvest_fn(doc))
+        except Exception:
+            pass
     for line in table_lines:
         tokens_parts.append(line)
     tokens_parts.extend(leaders)
@@ -16392,7 +16368,7 @@ def _coerce_int_or_zero(value: Any) -> int:
         return 0
 
 def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
-    ezdxf_mod = require_ezdxf()
+    ezdxf_mod = geometry.require_ezdxf()
 
     # --- load doc ---
     dxf_text_path: str | None = None
@@ -16414,7 +16390,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
                 )
             doc = cast(Drawing, readfile(path))
         else:
-            dxf_path = convert_dwg_to_dxf(path, out_ver="ACAD2018")
+            dxf_path = geometry.convert_dwg_to_dxf(path, out_ver="ACAD2018")
             dxf_text_path = dxf_path
             doc = cast(Drawing, readfile(dxf_path))
     else:
@@ -16773,7 +16749,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
     chart_source: str | None = None
     chart_summary: dict[str, Any] | None = None
 
-    extractor = _extract_text_lines_from_dxf or extract_text_lines_from_dxf
+    extractor = _extract_text_lines_from_dxf or geometry.extract_text_lines_from_dxf
     chart_lines = []
     if extractor and dxf_text_path:
         try:
@@ -16832,7 +16808,7 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
 
     if chart_lines:
         chart_summary = summarize_hole_chart_lines(chart_lines)
-    parser = _parse_hole_table_lines or parse_hole_table_lines
+    parser = _parse_hole_table_lines or geometry.parse_hole_table_lines
     if chart_lines and parser:
         try:
             hole_rows = parser(chart_lines)
@@ -17571,12 +17547,12 @@ class App(tk.Tk):
             extract_pdf_all_fn=extract_pdf_all,
             extract_pdf_vector_fn=extract_2d_features_from_pdf_vector,
             extract_dxf_or_dwg_fn=extract_2d_features_from_dxf_or_dwg,
-            occ_feature_fn=extract_features_with_occ,
-            stl_enricher=enrich_geo_stl,
-            step_reader=read_step_shape,
-            cad_reader=read_cad_any,
-            bbox_fn=safe_bbox,
-            occ_enricher=enrich_geo_occ,
+            occ_feature_fn=geometry.extract_features_with_occ,
+            stl_enricher=geometry.enrich_geo_stl,
+            step_reader=geometry.read_step_shape,
+            cad_reader=geometry.read_cad_any,
+            bbox_fn=geometry.safe_bbox,
+            occ_enricher=geometry.enrich_geo_occ,
         )
         self.pricing_registry = pricing_registry or PricingRegistry(
             default_params=copy.deepcopy(PARAMS_DEFAULT),
@@ -17757,7 +17733,7 @@ class App(tk.Tk):
         menubar.add_cascade(label="Help", menu=help_menu)
         help_menu.add_command(
             label="Diagnostics",
-            command=lambda: messagebox.showinfo("Diagnostics", get_import_diagnostics_text())
+            command=lambda: messagebox.showinfo("Diagnostics", geometry.get_import_diagnostics_text())
         )
         # Tools menu with a debug trigger for Generate Quote in case button wiring misbehaves
         tools_menu = tk.Menu(menubar, tearoff=0)
@@ -18142,7 +18118,7 @@ class App(tk.Tk):
             mask = dataframe["Item"].astype(str).str.fullmatch(item, case=False)
             if mask.any():
                 return dataframe
-            return upsert_var_row(dataframe, item, value, dtype=dtype)
+            return geometry.upsert_var_row(dataframe, item, value, dtype=dtype)
 
         df = _ensure_row(df, "Scrap Percent (%)", 15.0, dtype="number")
         df = _ensure_row(df, "Plate Length (in)", 12.0, dtype="number")
@@ -19021,7 +18997,7 @@ class App(tk.Tk):
                         shape = self.geometry_service.read_step(path)
                     else:
                         shape = self.geometry_service.read_model(path)            # IGES/BREP and others
-                    _ = safe_bbox(shape)
+                    _ = geometry.safe_bbox(shape)
                     g = self.geometry_service.enrich_occ(shape)             # OCC-based geometry features
 
                     geo = _map_geo_to_double_underscore(g)
@@ -19062,7 +19038,7 @@ class App(tk.Tk):
         # Merge GEO rows
         try:
             for k, v in geo.items():
-                self.vars_df = upsert_var_row(self.vars_df, k, v, dtype="number")
+                self.vars_df = geometry.upsert_var_row(self.vars_df, k, v, dtype="number")
         except Exception as e:
             messagebox.showerror("Variables", f"Failed to update variables with GEO rows:\n{e}")
             self.status_var.set("Ready")
