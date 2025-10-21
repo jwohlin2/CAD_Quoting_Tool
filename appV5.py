@@ -6755,6 +6755,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         for value in values:
             append_line(value)
 
+    def _push(target: list[str], text: str) -> None:
+        if target is lines:
+            append_line(text)
+        else:
+            target.append(text)
+
     def replace_line(index: int, text: str) -> None:
         sanitized = _sanitize_render_text(text)
         if 0 <= index < len(lines):
@@ -10960,40 +10966,36 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     # NOTE: Patch 3 keeps the hole-table hook active so downstream cards continue to render.
     append_lines(removal_card_lines)
 
-    # === HOLE-TABLE CARDS (safe wrapper, no undefined names) ===
+    # ===== HOLE-TABLE CARDS (robust, no NameError) ============================
     try:
-        # Try to pull context from whatever exists in this scope
-        # (these names may or may not exist; _first_dict ignores Nones)
+        # Grab whatever context exists in this scope
         ctx_a = locals().get("breakdown")
         ctx_b = locals().get("result")
         ctx_c = locals().get("quote")
         ctx_d = locals().get("job")
         ctx_e = locals().get("pricing_ctx")
-
         ctx = _first_dict(ctx_a, ctx_b, ctx_c, ctx_d, ctx_e)
+
         geo_map = _get_geo_map(ctx, locals().get("geo"), ctx_a, ctx_b)
         material_group = _get_material_group(ctx, ctx_a, ctx_b)
 
-        # Probe
         ops_rows = (((geo_map or {}).get("ops_summary") or {}).get("rows") or [])
-        append_line(f"[DEBUG] ops_rows={len(ops_rows)}")
+        _push(lines, f"[DEBUG] ops_rows_pre={len(ops_rows)}")
+
+        # Fallback: build from chart lines if absent
+        if not ops_rows:
+            chart_lines_all = _collect_chart_lines_context(ctx, geo_map, ctx_a, ctx_b)
+            built_rows = _build_ops_rows_from_lines_fallback(chart_lines_all)
+            _push(lines, f"[DEBUG] chart_lines_found={len(chart_lines_all)} built_rows={len(built_rows)}")
+            if built_rows:
+                geo_map.setdefault("ops_summary", {})["rows"] = built_rows
+                ops_rows = built_rows
+
+        # Emit the cards (no-op if still empty)
+        _emit_hole_table_ops_cards(lines, geo=geo_map, material_group=material_group, speeds_csv=None)
+
     except Exception as e:
-        append_line(f"[DEBUG] ops_probe_failed={e.__class__.__name__}: {e}")
-        geo_map = {}
-        material_group = None
-        ops_rows = []
-
-    if isinstance(geo_map, _MappingABC) and not isinstance(geo_map, dict):
-        geo_map = dict(geo_map)
-
-    _emit_hole_table_ops_cards(
-        lines,
-        geo=geo_map,
-        material_group=material_group,
-        speeds_csv=None,
-        result=locals().get("result"),
-        breakdown=locals().get("breakdown"),
-    )
+        _push(lines, f"[DEBUG] material_removal_emit_skipped={e.__class__.__name__}: {e}")
 
     # PROBE: show how many HOLE-TABLE rows we have (temporary)
     tapping_minutes_total = 0.0
