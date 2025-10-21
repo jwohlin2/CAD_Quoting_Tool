@@ -798,7 +798,7 @@ def _resolve_part_thickness_in(
     return float(default)
 
 
-def _finalize_tap_row(row: dict[str, Any], thickness_in: float) -> None:
+def _finalize_tap_row(row: MutableMapping[str, Any], thickness_in: float) -> None:
     thread = row.get("thread") or row.get("desc") or ""
     ipr = _thread_ipr(thread)
     dia = _derive_major_dia_in(thread)
