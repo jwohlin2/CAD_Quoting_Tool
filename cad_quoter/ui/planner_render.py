@@ -4,6 +4,7 @@ import copy
 import logging
 import math
 import re
+import typing
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, MutableMapping, TypedDict, cast
 from collections.abc import Iterable, Mapping as _MappingABC, MutableMapping as _MutableMappingABC, Sequence
@@ -730,159 +731,83 @@ def _display_rate_for_row(
     return f"${rate_lookup:.2f}/hr"
 
 
-def _sync_drilling_bucket_view(
-    bucket_view: Mapping[str, Any] | None,
-    *,
-    billed_minutes: float,
-    billed_cost: float | None = None,
-) -> bool:
-    """Ensure the drilling bucket mirrors the authoritative planner minutes."""
-
-    if not isinstance(bucket_view, _MutableMappingABC):
-        return False
-
-    if billed_minutes <= 0.0:
-        return False
-
-    buckets_obj = bucket_view.get("buckets")
-    if not isinstance(buckets_obj, _MutableMappingABC):
-        if isinstance(bucket_view, dict):
-            buckets_obj = bucket_view.setdefault("buckets", {})
-        else:
-            return False
-
-    defaults = {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0, "total$": 0.0}
-    entry = buckets_obj.get("drilling")
-    if not isinstance(entry, _MutableMappingABC):
-        if isinstance(buckets_obj, dict):
-            entry = buckets_obj.setdefault("drilling", defaults.copy())
-        else:
-            try:
-                buckets_obj["drilling"] = defaults.copy()  # type: ignore[index]
-                entry = buckets_obj.get("drilling")  # type: ignore[index]
-            except Exception:
-                return False
-
-    if not isinstance(entry, _MutableMappingABC):
-        return False
-
-    for key, value in defaults.items():
-        entry.setdefault(key, value)
-
-    old_minutes = _safe_float(entry.get("minutes"))
-    old_machine = _safe_float(entry.get("machine$"))
-    old_labor = _safe_float(entry.get("labor$"))
-    old_total = _safe_float(entry.get("total$"))
-
-    drill_minutes = float(billed_minutes)
-    drill_hours = drill_minutes / 60.0
-
-    new_minutes = round(drill_minutes, 2)
-    entry["minutes"] = new_minutes
-    entry["synced_minutes"] = new_minutes
-    entry["synced_hours"] = round(drill_hours, 4)
-
-    rates_map = bucket_view.get("rates") if isinstance(bucket_view, _MappingABC) else {}
-    if not isinstance(rates_map, _MappingABC):
-        rates_map = {}
-
-    drill_machine_rate = (
-        _lookup_bucket_rate("drilling", rates_map)
-        or _lookup_bucket_rate("machine", rates_map)
-    )
-    drill_labor_rate = (
-        _lookup_bucket_rate("drilling_labor", rates_map)
-        or _lookup_bucket_rate("labor", rates_map)
-    )
-
-    machine_cost = drill_hours * max(0.0, float(drill_machine_rate or 0.0))
-    labor_cost = drill_hours * max(0.0, float(drill_labor_rate or 0.0))
-    total_cost = round(machine_cost + labor_cost, 2)
-
-    new_machine = round(machine_cost, 2)
-    new_labor = round(labor_cost, 2)
-
-    entry["machine$"] = new_machine
-    entry["labor$"] = new_labor
-    entry["total$"] = total_cost
-
-    totals_map = bucket_view.get("totals")
-    if isinstance(totals_map, _MutableMappingABC):
-        totals_map["minutes"] = round(
-            _safe_float(totals_map.get("minutes")) - old_minutes + new_minutes,
-            2,
-        )
-        totals_map["machine$"] = round(
-            _safe_float(totals_map.get("machine$"))
-            - old_machine
-            + entry["machine$"],
-            2,
-        )
-        totals_map["labor$"] = round(
-            _safe_float(totals_map.get("labor$")) - old_labor + entry["labor$"],
-            2,
-        )
-        totals_map["total$"] = round(
-            _safe_float(totals_map.get("total$")) - old_total + entry["total$"],
-            2,
-        )
-
-    return True
-
-
-def _seed_bucket_minutes_cost(
-    bucket_view: MutableMapping[str, Any] | Mapping[str, Any] | None,
+def _set_bucket_minutes_cost(
+    bvo: MutableMapping[str, Any] | Mapping[str, Any] | None,
     key: str,
     minutes: float,
-    *,
-    machine_rate_per_hr: float = 0.0,
-    labor_rate_per_hr: float = 0.0,
+    machine_rate: float,
+    labor_rate: float,
 ) -> None:
-    """Seed explicit minutes and dollars into a bucket view entry."""
-
-    if not isinstance(bucket_view, (_MutableMappingABC, dict)):
-        return
-
     minutes_val = _as_float(minutes, 0.0)
     if not (0.0 <= minutes_val <= 10_000.0):
         logging.warning(f"[bucket] ignoring {key} minutes out of range: {minutes}")
         minutes_val = 0.0
 
-    hours_val = minutes_val / 60.0
+    machine_rate_val = _as_float(machine_rate, 0.0)
+    labor_rate_val = _as_float(labor_rate, 0.0)
 
-    try:
-        buckets = bucket_view.setdefault("buckets", {})
-    except Exception:
+    buckets_obj: MutableMapping[str, Any] | None = None
+    if isinstance(bvo, dict):
+        buckets_obj = bvo.setdefault("buckets", {})
+    elif isinstance(bvo, _MutableMappingABC):
+        buckets_obj = typing.cast(MutableMapping[str, Any], bvo.setdefault("buckets", {}))
+    else:
         return
 
-    if not isinstance(buckets, dict):
-        try:
-            buckets = dict(buckets or {})
-        except Exception:
-            return
-        bucket_view["buckets"] = buckets
+    if buckets_obj is None:
+        return
 
-    entry = buckets.setdefault(
-        key,
-        {"minutes": 0.0, "machine$": 0.0, "labor$": 0.0, "total$": 0.0},
-    )
+    machine_cost = (minutes_val / 60.0) * machine_rate_val
+    labor_cost = (minutes_val / 60.0) * labor_rate_val
 
-    machine_rate = _as_float(machine_rate_per_hr, 0.0)
-    labor_rate = _as_float(labor_rate_per_hr, 0.0)
+    buckets_obj[key] = {
+        "minutes": minutes_val,
+        "machine$": round(machine_cost, 2),
+        "labor$": round(labor_cost, 2),
+        "total$": round(machine_cost + labor_cost, 2),
+    }
 
-    machine_cost = hours_val * machine_rate
-    labor_cost = hours_val * labor_rate
 
-    entry["minutes"] = round(_as_float(entry.get("minutes"), 0.0) + minutes_val, 2)
-    entry["machine$"] = round(
-        _as_float(entry.get("machine$"), 0.0) + machine_cost,
-        2,
-    )
-    entry["labor$"] = round(_as_float(entry.get("labor$"), 0.0) + labor_cost, 2)
-    entry["total$"] = round(
-        _as_float(entry.get("machine$"), 0.0) + _as_float(entry.get("labor$"), 0.0),
-        2,
-    )
+def _purge_legacy_drill_sync(bvo: Mapping[str, Any] | MutableMapping[str, Any] | None) -> None:
+    if not isinstance(bvo, (_MappingABC, dict)):
+        return
+
+    try:
+        buckets_obj = bvo.get("buckets") if isinstance(bvo, _MappingABC) else bvo.get("buckets")
+    except Exception:
+        buckets_obj = None
+
+    if not isinstance(buckets_obj, (_MappingABC, dict)):
+        return
+
+    drilling_entry = buckets_obj.get("drilling")
+    if not isinstance(drilling_entry, (_MappingABC, dict)):
+        return
+
+    if isinstance(drilling_entry, dict):
+        entry_mut = drilling_entry
+    elif isinstance(drilling_entry, _MutableMappingABC):
+        entry_mut = typing.cast(MutableMapping[str, Any], drilling_entry)
+    else:
+        entry_mut = dict(drilling_entry)
+        if isinstance(buckets_obj, dict):
+            buckets_obj["drilling"] = entry_mut
+        elif isinstance(buckets_obj, _MutableMappingABC):
+            buckets_obj["drilling"] = entry_mut  # type: ignore[index]
+
+    for legacy_key in ("synced_minutes", "synced_hours"):
+        if legacy_key in entry_mut:
+            entry_mut.pop(legacy_key, None)
+
+    minutes_val = _as_float(entry_mut.get("minutes"), 0.0)
+    if minutes_val > 10_000.0:
+        logging.warning(
+            f"[bucket] wiping legacy insane drilling minutes: {entry_mut.get('minutes')}"
+        )
+        entry_mut["minutes"] = 0.0
+        entry_mut["machine$"] = 0.0
+        entry_mut["labor$"] = 0.0
+        entry_mut["total$"] = 0.0
 
 
 def _seed_bucket_minutes(
@@ -1584,8 +1509,8 @@ __all__ = [
     "_build_planner_bucket_render_state",
     "_display_rate_for_row",
     "_pick_drill_minutes",
-    "_sync_drilling_bucket_view",
-    "_seed_bucket_minutes_cost",
+    "_purge_legacy_drill_sync",
+    "_set_bucket_minutes_cost",
     "_seed_bucket_minutes",
     "_normalize_ops_rows_from_hole_rows",
     "_normalize_ops_rows_from_chart_ops",
