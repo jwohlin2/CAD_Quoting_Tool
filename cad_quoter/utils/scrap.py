@@ -6,12 +6,13 @@ import math
 from collections.abc import Mapping, Sequence
 from typing import Any, Iterable
 
-from cad_quoter.domain_models import (
+from cad_quoter.domain_models import coerce_float_or_none as _coerce_float_or_none
+from cad_quoter.material_density import (
     MATERIAL_DENSITY_G_CC_BY_KEY,
     MATERIAL_DENSITY_G_CC_BY_KEYWORD,
-    coerce_float_or_none as _coerce_float_or_none,
     normalize_material_key as _normalize_lookup_key,
 )
+from cad_quoter.utils.numeric import coerce_positive_float as _coerce_positive_float
 from cad_quoter.llm_overrides import _plate_mass_properties
 
 SCRAP_DEFAULT_GUESS = 0.15
