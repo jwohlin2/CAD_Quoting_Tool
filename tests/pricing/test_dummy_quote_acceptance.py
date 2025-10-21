@@ -4,6 +4,7 @@ import re
 
 import appV5
 from cad_quoter.domain_models import normalize_material_key
+from cad_quoter.pricing import materials as materials_pricing
 from cad_quoter.pricing.speeds_feeds_selector import material_group_for_speeds_feeds
 
 
@@ -702,7 +703,7 @@ def test_compute_direct_costs_adds_wieland_scrap_credit() -> None:
         scrap_price_source="wieland",
     )
 
-    expected_credit = 5.0 * 2.5 * appV5.SCRAP_RECOVERY_DEFAULT
+    expected_credit = 5.0 * 2.5 * materials_pricing.SCRAP_RECOVERY_DEFAULT
     expected_total = round(100.0 - expected_credit, 2)
     assert math.isclose(total, expected_total, abs_tol=1e-6)
 

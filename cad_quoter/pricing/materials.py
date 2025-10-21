@@ -336,6 +336,9 @@ def resolve_material_unit_price(display_name: str, unit: str = "kg") -> tuple[fl
     return fallback, "hardcoded_default"
 
 
+SCRAP_PRICE_FALLBACK_USD_PER_LB = 0.35
+SCRAP_RECOVERY_DEFAULT = 0.85
+
 __all__ = [
     "BACKUP_CSV_NAME",
     "LB_PER_KG",
@@ -349,6 +352,8 @@ __all__ = [
     "plan_stock_blank",
     "price_value_to_per_gram",
     "resolve_material_unit_price",
+    "SCRAP_PRICE_FALLBACK_USD_PER_LB",
+    "SCRAP_RECOVERY_DEFAULT",
     "usdkg_to_usdlb",
     "_compute_material_block",
     "_compute_scrap_mass_g",
@@ -992,7 +997,7 @@ def _material_cost_components(
         )
     recovery_val = _coerce_float_or_none(recovery_hint)
     if recovery_val is None:
-        recovery_val = 0.85
+        recovery_val = SCRAP_RECOVERY_DEFAULT
     if recovery_val > 1.0 + 1e-6:
         recovery_val = recovery_val / 100.0
     recovery_val = max(0.0, min(1.0, float(recovery_val)))
