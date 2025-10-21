@@ -13,6 +13,11 @@ Single-file CAD Quoter (v8)
 """
 from __future__ import annotations
 
+_HOLE_MARGIN_MIN_IN = 0.25
+_HOLE_MARGIN_FRAC = 0.05
+_HOLE_MARGIN_MAX_IN = 1.0
+
+
 def _coerce_positive_float(value: Any) -> float | None:
     """Return a positive finite float or None."""
     try:
@@ -25,6 +30,79 @@ def _coerce_positive_float(value: Any) -> float | None:
     except Exception:
         pass
     return number if number > 0 else None
+
+
+def _hole_margin_inches(span_w: float | None, span_h: float | None) -> float:
+    """Return a per-side safety margin for a hole cloud envelope."""
+
+    spans = [value for value in (span_w, span_h) if isinstance(value, (int, float))]
+    if not spans:
+        return _HOLE_MARGIN_MIN_IN
+
+    max_span = max(float(v) for v in spans)
+    margin = max_span * _HOLE_MARGIN_FRAC
+    margin = max(_HOLE_MARGIN_MIN_IN, margin)
+    margin = min(_HOLE_MARGIN_MAX_IN, margin)
+    return float(margin)
+
+
+def _infer_rect_from_holes(geo_like: Mapping[str, Any] | None) -> tuple[float, float]:
+    """Infer a rectangular blank from hole positions when outlines are absent."""
+
+    if not isinstance(geo_like, _MappingABC):
+        return (0.0, 0.0)
+
+    containers: list[Mapping[str, Any]] = [geo_like]
+    derived = geo_like.get("derived")
+    if isinstance(derived, _MappingABC):
+        containers.append(derived)
+    read_more = geo_like.get("geo_read_more")
+    if isinstance(read_more, _MappingABC):
+        containers.append(read_more)
+
+    best_w = 0.0
+    best_h = 0.0
+
+    for container in containers:
+        bbox = container.get("hole_cloud_bbox_in")
+        if not isinstance(bbox, _MappingABC):
+            continue
+
+        w_val = _coerce_positive_float(
+            bbox.get("w")
+            or bbox.get("width")
+            or bbox.get("w_in")
+            or bbox.get("width_in")
+        )
+        h_val = _coerce_positive_float(
+            bbox.get("h")
+            or bbox.get("height")
+            or bbox.get("h_in")
+            or bbox.get("height_in")
+        )
+        span_w = _coerce_positive_float(
+            bbox.get("span_w") or bbox.get("span_x") or bbox.get("span_width")
+        )
+        span_h = _coerce_positive_float(
+            bbox.get("span_h") or bbox.get("span_y") or bbox.get("span_height")
+        )
+        margin_each = _coerce_positive_float(bbox.get("margin_each_in"))
+
+        if w_val and h_val:
+            width = float(w_val)
+            height = float(h_val)
+        elif span_w and span_h:
+            margin = float(margin_each) if margin_each else _hole_margin_inches(span_w, span_h)
+            width = float(span_w) + 2.0 * margin
+            height = float(span_h) + 2.0 * margin
+        else:
+            continue
+
+        if width * height > best_w * best_h:
+            best_w = width
+            best_h = height
+
+    return (best_w, best_h)
 
 
 def _ensure_geo_context_fields(
@@ -4748,6 +4826,114 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if _coerce_float_or_none(pricing.get("total_direct_costs")) is None:
             pricing["total_direct_costs"] = float(sum(directs.values()))
 
+    def _lookup_blank(container: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+        if not isinstance(container, _MappingABC):
+            return None
+        for key in ("required_blank_in", "bbox_in"):
+            entry = container.get(key)
+            if isinstance(entry, _MappingABC):
+                return entry
+        return None
+
+    blank_sources: list[Mapping[str, Any] | None] = []
+    for parent in (breakdown, result):
+        if isinstance(parent, _MappingABC):
+            blank_sources.append(_lookup_blank(parent.get("geo")))
+            blank_sources.append(_lookup_blank(parent.get("geo_context")))
+            blank_sources.append(_lookup_blank(parent.get("geom")))
+    blank_sources.append(_lookup_blank(geo_context if isinstance(geo_context, _MappingABC) else None))
+    blank_sources.append(_lookup_blank(g if isinstance(g, _MappingABC) else None))
+    blank_sources.append(_lookup_blank(pricing_geom if isinstance(pricing_geom, _MappingABC) else None))
+
+    req_map: Mapping[str, Any] | None = next((entry for entry in blank_sources if entry), None)
+    w_val = _coerce_positive_float(req_map.get("w")) if req_map else None
+    h_val = _coerce_positive_float(req_map.get("h")) if req_map else None
+    t_val = _coerce_positive_float(req_map.get("t")) if req_map else None
+    w = float(w_val) if w_val else 0.0
+    h = float(h_val) if h_val else 0.0
+    t = float(t_val) if t_val else 0.0
+    if t <= 0:
+        t = 2.0
+
+    if w <= 0 or h <= 0:
+        geo_candidates: list[Mapping[str, Any]] = []
+        for parent in (breakdown, result):
+            if isinstance(parent, _MappingABC):
+                for key in ("geo", "geo_context", "geom"):
+                    candidate = parent.get(key)
+                    if isinstance(candidate, _MappingABC):
+                        geo_candidates.append(candidate)
+        if isinstance(geo_context, _MappingABC):
+            geo_candidates.append(geo_context)
+        if isinstance(g, _MappingABC):
+            geo_candidates.append(g)
+        inferred_w = inferred_h = 0.0
+        for geo_candidate in geo_candidates:
+            inferred_w, inferred_h = _infer_rect_from_holes(geo_candidate)
+            if inferred_w > 0 and inferred_h > 0:
+                break
+        if inferred_w > 0 and w <= 0:
+            w = float(inferred_w)
+        if inferred_h > 0 and h <= 0:
+            h = float(inferred_h)
+
+    required_blank = (float(w), float(h), float(t))
+    blank_len = max(required_blank[0], required_blank[1]) if required_blank[0] > 0 and required_blank[1] > 0 else 0.0
+    blank_wid = min(required_blank[0], required_blank[1]) if required_blank[0] > 0 and required_blank[1] > 0 else 0.0
+
+    def _blank_has_dims(candidate: Mapping[str, Any] | None) -> bool:
+        if not isinstance(candidate, _MappingABC):
+            return False
+        return bool(
+            _coerce_positive_float(candidate.get("w"))
+            and _coerce_positive_float(candidate.get("h"))
+        )
+
+    def _apply_blank_hint(container: Mapping[str, Any] | None) -> None:
+        if not isinstance(container, _MutableMappingABC):
+            return
+        if required_blank[0] <= 0 or required_blank[1] <= 0:
+            return
+        hint_payload: dict[str, Any] = {"w": float(required_blank[0]), "h": float(required_blank[1])}
+        if required_blank[2] > 0:
+            hint_payload["t"] = float(required_blank[2])
+        existing_blank = container.get("required_blank_in")
+        if not _blank_has_dims(existing_blank):
+            container["required_blank_in"] = dict(hint_payload)
+        existing_bbox = container.get("bbox_in")
+        if not _blank_has_dims(existing_bbox):
+            container.setdefault("bbox_in", dict(hint_payload))
+
+    for context in (
+        geo_context if isinstance(geo_context, _MutableMappingABC) else None,
+        g if isinstance(g, _MutableMappingABC) else None,
+        pricing_geom if isinstance(pricing_geom, _MutableMappingABC) else None,
+    ):
+        _apply_blank_hint(context)
+    for parent in (breakdown, result):
+        if isinstance(parent, _MutableMappingABC):
+            for key in ("geo", "geo_context", "geom"):
+                _apply_blank_hint(parent.get(key))
+
+    for container in (
+        material if isinstance(material, _MutableMappingABC) else None,
+        material_stock_block if isinstance(material_stock_block, _MutableMappingABC) else None,
+    ):
+        _apply_blank_hint(container)
+
+    if blank_len > 0 and isinstance(material_stock_block, _MutableMappingABC):
+        if _coerce_positive_float(material_stock_block.get("required_blank_len_in")) is None:
+            material_stock_block["required_blank_len_in"] = float(blank_len)
+        if _coerce_positive_float(material_stock_block.get("required_blank_wid_in")) is None:
+            material_stock_block["required_blank_wid_in"] = float(blank_wid)
+        if required_blank[2] > 0 and _coerce_positive_float(
+            material_stock_block.get("required_blank_thk_in")
+        ) is None:
+            material_stock_block["required_blank_thk_in"] = float(required_blank[2])
+
+    required_blank_len = float(blank_len) if blank_len > 0 else 0.0
+    required_blank_wid = float(blank_wid) if blank_wid > 0 else 0.0
+
     # ---- material & stock (compact; shown only if we actually have data) -----
     if material:
         mass_g = material.get("mass_g")
@@ -4850,6 +5036,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 if isinstance(material_stock_block, _MappingABC)
                 else None
             )
+
+            if (need_len is None or need_len <= 0) and required_blank_len > 0:
+                need_len = float(required_blank_len)
+            if (need_wid is None or need_wid <= 0) and required_blank_wid > 0:
+                need_wid = float(required_blank_wid)
+            if (need_thk is None or need_thk <= 0) and required_blank[2] > 0:
+                need_thk = float(required_blank[2])
 
             stock_len_val = _coerce_float_or_none(
                 material_stock_block.get("stock_L_in")
@@ -14081,6 +14274,34 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
             source = "HOLE TABLE (TEXT)"
 
     geom_cnt, geom_fam = hole_count_from_geometry(doc, float(to_in))
+    hole_cloud_points = filtered_circles(doc, float(to_in))
+    hole_bbox_in: dict[str, Any] | None = None
+    if hole_cloud_points:
+        scale = float(to_in)
+        xs_in = [float(x) * scale for x, _, _, _ in hole_cloud_points]
+        ys_in = [float(y) * scale for _, y, _, _ in hole_cloud_points]
+        if xs_in and ys_in:
+            xmin = min(xs_in)
+            xmax = max(xs_in)
+            ymin = min(ys_in)
+            ymax = max(ys_in)
+            span_w = max(0.0, xmax - xmin)
+            span_h = max(0.0, ymax - ymin)
+            margin_each = _hole_margin_inches(span_w, span_h)
+            width_with_margin = span_w + 2.0 * margin_each
+            height_with_margin = span_h + 2.0 * margin_each
+            hole_bbox_in = {
+                "xmin": round(xmin, 4),
+                "xmax": round(xmax, 4),
+                "ymin": round(ymin, 4),
+                "ymax": round(ymax, 4),
+                "span_w": round(span_w, 4),
+                "span_h": round(span_h, 4),
+                "margin_each_in": round(margin_each, 3),
+                "w": round(width_with_margin, 3),
+                "h": round(height_with_margin, 3),
+                "source": "hole_cloud",
+            }
     if not cnt and geom_cnt:
         cnt, fam = geom_cnt, geom_fam
         source = "GEOMETRY CIRCLE COUNT"
@@ -14232,6 +14453,75 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
     geo.update(deburr_hints)
     if deburr_prov:
         geo.setdefault("provenance", {})["deburr"] = deburr_prov
+    derived_entries: dict[str, Any] = {}
+    if hole_bbox_in:
+        geo["hole_cloud_bbox_in"] = hole_bbox_in
+        derived_entries["hole_cloud_bbox_in"] = hole_bbox_in
+
+    thickness_hint = _coerce_positive_float(thickness_guess)
+    if stock_plan:
+        need_len_in = _coerce_positive_float(stock_plan.get("need_len_in"))
+        need_wid_in = _coerce_positive_float(stock_plan.get("need_wid_in"))
+        need_thk_in = _coerce_positive_float(
+            stock_plan.get("need_thk_in") or stock_plan.get("stock_thk_in")
+        )
+        if need_thk_in:
+            thickness_hint = thickness_hint or float(need_thk_in)
+        if need_len_in and need_wid_in:
+            dims_sorted = sorted(
+                [float(need_len_in), float(need_wid_in)], reverse=True
+            )
+            blank_dict: dict[str, Any] = {
+                "h": round(dims_sorted[0], 3),
+                "w": round(dims_sorted[1], 3),
+            }
+            if thickness_hint:
+                blank_dict["t"] = round(float(thickness_hint), 3)
+            geo["required_blank_in"] = blank_dict
+            derived_entries["required_blank_in"] = blank_dict
+
+    if "required_blank_in" not in geo and hole_bbox_in:
+        hole_w = _coerce_positive_float(hole_bbox_in.get("w"))
+        hole_h = _coerce_positive_float(hole_bbox_in.get("h"))
+        if hole_w and hole_h:
+            dims_sorted = sorted([float(hole_h), float(hole_w)], reverse=True)
+            blank_dict = {
+                "h": round(dims_sorted[0], 3),
+                "w": round(dims_sorted[1], 3),
+            }
+            if thickness_hint:
+                blank_dict["t"] = round(float(thickness_hint), 3)
+            geo["required_blank_in"] = blank_dict
+            derived_entries.setdefault("required_blank_in", blank_dict)
+
+    len_hint = _coerce_positive_float(geo.get("plate_len_in"))
+    wid_hint = _coerce_positive_float(geo.get("plate_wid_in"))
+    if (len_hint is None or wid_hint is None) and hole_bbox_in:
+        span_h = _coerce_positive_float(hole_bbox_in.get("span_h"))
+        span_w = _coerce_positive_float(hole_bbox_in.get("span_w"))
+        if len_hint is None and span_h:
+            len_hint = float(span_h)
+        if wid_hint is None and span_w:
+            wid_hint = float(span_w)
+    if len_hint and wid_hint:
+        dims_sorted = sorted([float(len_hint), float(wid_hint)], reverse=True)
+        bbox_dict: dict[str, Any] = {
+            "h": round(dims_sorted[0], 3),
+            "w": round(dims_sorted[1], 3),
+        }
+        if thickness_hint:
+            bbox_dict["t"] = round(float(thickness_hint), 3)
+        geo.setdefault("bbox_in", bbox_dict)
+        derived_entries.setdefault("bbox_in", bbox_dict)
+
+    if derived_entries:
+        existing_derived = geo.get("derived")
+        if isinstance(existing_derived, _MappingABC):
+            merged = dict(existing_derived)
+            merged.update(derived_entries)
+            geo["derived"] = merged
+        else:
+            geo["derived"] = derived_entries
     if flags:
         geo["flags"] = flags
     return geo

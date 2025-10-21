@@ -45,6 +45,10 @@ _MCM_CACHE: Dict[str, Dict[str, float | str]] = {}
 CM3_PER_IN3 = 16.387064
 MM_PER_INCH = 25.4
 
+_HOLE_MARGIN_MIN_IN = 0.25
+_HOLE_MARGIN_FRAC = 0.05
+_HOLE_MARGIN_MAX_IN = 1.0
+
 _STANDARD_MCM_REQUESTS: dict[str, tuple[str, float, float, float]] = {
     # material key, length_in, width_in, thickness_in
     "aluminum": ("aluminum 5083", 12.0, 12.0, 0.25),
@@ -398,23 +402,117 @@ def _nearest_std_side(x_in: float) -> float:
     return float(STANDARD_PLATE_SIDES_IN[-1])
 
 
+def _hole_margin_inches(span_w: float | None, span_h: float | None) -> float:
+    spans = [value for value in (span_w, span_h) if isinstance(value, (int, float))]
+    if not spans:
+        return _HOLE_MARGIN_MIN_IN
+    margin = max(float(v) for v in spans) * _HOLE_MARGIN_FRAC
+    margin = max(_HOLE_MARGIN_MIN_IN, margin)
+    margin = min(_HOLE_MARGIN_MAX_IN, margin)
+    return float(margin)
+
+
 def infer_plate_lw_in(geo: Mapping[str, Any] | None) -> tuple[float, float] | None:
     """Infer plate length/width in inches from geometry hints."""
 
     if not isinstance(geo, _MappingABC):
         return None
 
-    outline = geo.get("outline_bbox")
-    if isinstance(outline, _MappingABC):
-        L = outline.get("plate_len_in")
-        W = outline.get("plate_wid_in")
-        if L and W:
-            try:
-                return float(L), float(W)
-            except Exception:
-                pass
+    def _lookup_map(container: Mapping[str, Any] | None, key: str) -> Mapping[str, Any] | None:
+        if not isinstance(container, _MappingABC):
+            return None
+        entry = container.get(key)
+        return entry if isinstance(entry, _MappingABC) else None
 
-    area_mm2 = geo.get("plate_bbox_area_mm2")
+    def _iter_geo_containers(root: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        containers: list[Mapping[str, Any]] = [root]
+        derived = root.get("derived")
+        if isinstance(derived, _MappingABC):
+            containers.append(derived)
+        read_more = root.get("geo_read_more")
+        if isinstance(read_more, _MappingABC):
+            containers.append(read_more)
+        return containers
+
+    def _dims_from_map(mapping: Mapping[str, Any] | None) -> tuple[float, float] | None:
+        if not isinstance(mapping, _MappingABC):
+            return None
+
+        plate_len = _coerce_float_or_none(mapping.get("plate_len_in"))
+        plate_wid = _coerce_float_or_none(mapping.get("plate_wid_in"))
+        if plate_len and plate_wid:
+            dims_sorted = sorted([float(plate_len), float(plate_wid)], reverse=True)
+            return dims_sorted[0], dims_sorted[1]
+
+        outline = mapping.get("outline_bbox")
+        if isinstance(outline, _MappingABC):
+            out_len = _coerce_float_or_none(outline.get("plate_len_in"))
+            out_wid = _coerce_float_or_none(outline.get("plate_wid_in"))
+            if out_len and out_wid:
+                dims_sorted = sorted([float(out_len), float(out_wid)], reverse=True)
+                return dims_sorted[0], dims_sorted[1]
+
+        width_val = None
+        for key in ("w", "width", "wid", "wid_in", "width_in", "need_wid_in", "need_width_in"):
+            candidate = _coerce_float_or_none(mapping.get(key))
+            if candidate and candidate > 0:
+                width_val = float(candidate)
+                break
+
+        length_val = None
+        for key in ("h", "height", "len", "length", "l", "len_in", "length_in", "need_len_in"):
+            candidate = _coerce_float_or_none(mapping.get(key))
+            if candidate and candidate > 0:
+                length_val = float(candidate)
+                break
+
+        if width_val and length_val:
+            dims_sorted = sorted([length_val, width_val], reverse=True)
+            return dims_sorted[0], dims_sorted[1]
+
+        span_w = _coerce_float_or_none(mapping.get("span_w") or mapping.get("span_x") or mapping.get("span_width"))
+        span_h = _coerce_float_or_none(mapping.get("span_h") or mapping.get("span_y") or mapping.get("span_height"))
+        margin_each = _coerce_float_or_none(mapping.get("margin_each_in"))
+        if span_w and span_h:
+            margin = margin_each if margin_each and margin_each > 0 else _hole_margin_inches(span_w, span_h)
+            dims_sorted = sorted(
+                [float(span_h) + 2.0 * margin, float(span_w) + 2.0 * margin],
+                reverse=True,
+            )
+            return dims_sorted[0], dims_sorted[1]
+
+        return None
+
+    containers = _iter_geo_containers(geo)
+
+    for container in containers:
+        dims = _dims_from_map(_lookup_map(container, "required_blank_in"))
+        if dims:
+            return dims
+    for container in containers:
+        dims = _dims_from_map(_lookup_map(container, "bbox_in"))
+        if dims:
+            return dims
+    for container in containers:
+        dims = _dims_from_map(_lookup_map(container, "hole_cloud_bbox_in"))
+        if dims:
+            return dims
+    for container in containers:
+        dims = _dims_from_map(container)
+        if dims:
+            return dims
+
+    area_mm2: float | None = None
+    for container in containers:
+        candidate = container.get("plate_bbox_area_mm2")
+        if candidate:
+            try:
+                area_candidate = float(candidate)
+            except Exception:
+                continue
+            if area_candidate > 0:
+                area_mm2 = area_candidate
+                break
     if area_mm2:
         try:
             area_in2 = float(area_mm2) / 645.16
@@ -1123,7 +1221,72 @@ def _compute_material_block(
         t_in = float(geo_ctx.get("thickness_in_guess") or 0.0)
 
     dims = infer_plate_lw_in(geo_ctx)
+    def _lookup_blank_map(container: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+        if not isinstance(container, _MappingABC):
+            return None
+        for key in ("required_blank_in", "bbox_in", "hole_cloud_bbox_in"):
+            entry = container.get(key)
+            if isinstance(entry, _MappingABC):
+                return entry
+        return None
+
+    def _dims_from_blank_map(blank_map: Mapping[str, Any] | None) -> tuple[float, float] | None:
+        if not isinstance(blank_map, _MappingABC):
+            return None
+        width_val = None
+        for key in ("w", "width", "wid", "wid_in", "width_in", "need_wid_in", "need_width_in"):
+            candidate = _coerce_float_or_none(blank_map.get(key))
+            if candidate and candidate > 0:
+                width_val = float(candidate)
+                break
+        length_val = None
+        for key in ("h", "height", "len", "length", "l", "len_in", "length_in", "need_len_in"):
+            candidate = _coerce_float_or_none(blank_map.get(key))
+            if candidate and candidate > 0:
+                length_val = float(candidate)
+                break
+        if width_val and length_val:
+            dims_sorted = sorted([length_val, width_val], reverse=True)
+            return dims_sorted[0], dims_sorted[1]
+        span_w = _coerce_float_or_none(
+            blank_map.get("span_w") or blank_map.get("span_x") or blank_map.get("span_width")
+        )
+        span_h = _coerce_float_or_none(
+            blank_map.get("span_h") or blank_map.get("span_y") or blank_map.get("span_height")
+        )
+        margin_each = _coerce_float_or_none(blank_map.get("margin_each_in"))
+        if span_w and span_h:
+            margin = margin_each if margin_each and margin_each > 0 else _hole_margin_inches(span_w, span_h)
+            dims_sorted = sorted(
+                [float(span_h) + 2.0 * margin, float(span_w) + 2.0 * margin],
+                reverse=True,
+            )
+            return dims_sorted[0], dims_sorted[1]
+        return None
+
+    blank_hint = None
+    for container in (
+        geo_ctx,
+        geo_ctx.get("derived") if isinstance(geo_ctx, _MappingABC) else None,
+        geo_ctx.get("geo_read_more") if isinstance(geo_ctx, _MappingABC) else None,
+    ):
+        candidate = _lookup_blank_map(container)
+        if candidate:
+            blank_hint = candidate
+            break
+
+    dims_from_blank = _dims_from_blank_map(blank_hint)
+    if not dims and dims_from_blank:
+        dims = dims_from_blank
+    if not t_in and isinstance(blank_hint, _MappingABC):
+        t_candidate = _coerce_float_or_none(blank_hint.get("t"))
+        if t_candidate and t_candidate > 0:
+            t_in = float(t_candidate)
+
     if not dims or not t_in:
+        source_label = "insufficient-geometry"
+        if dims_from_blank:
+            source_label = "required-blank-only"
         return {
             "material": geo_ctx.get("material_display") or material_key,
             "stock_L_in": None,
@@ -1133,7 +1296,7 @@ def _compute_material_block(
             "net_lb": 0.0,
             "scrap_lb": 0.0,
             "scrap_pct": scrap_pct,
-            "source": "insufficient-geometry",
+            "source": source_label,
             "stock_dims_in": None,
             "supplier_min$": 0.0,
             "stock_price$": None,
