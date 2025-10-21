@@ -15,6 +15,14 @@ Single-file CAD Quoter (v8)
 from __future__ import annotations
 
 import sys
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent
+_PKG_SRC = _REPO_ROOT / "cad_quoter_pkg" / "src"
+if _PKG_SRC.exists():
+    _PKG_SRC_STR = str(_PKG_SRC)
+    if _PKG_SRC_STR not in sys.path:
+        sys.path.insert(0, _PKG_SRC_STR)
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")  # py3.7+
