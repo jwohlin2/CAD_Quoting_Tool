@@ -320,11 +320,11 @@ DUMMY_QUOTE_RESULT = {
             "Inspection": 40.0,
         },
         "labor_cost_details": {
-            "Milling": "6.00 hr @ $100.00/hr",
-            "Drilling": "1.50 hr @ $80.00/hr",
-            "Grinding": "2.00 hr @ $90.00/hr",
-            "Finishing/Deburr": "1.00 hr @ $80.00/hr",
-            "Inspection": "0.75 hr @ $95.00/hr",
+            "Milling": "mach $45.00/hr",
+            "Drilling": "mach $45.00/hr / labor $45.00/hr",
+            "Grinding": "mach $45.00/hr",
+            "Finishing/Deburr": "labor $45.00/hr",
+            "Inspection": "labor $45.00/hr",
         },
         "nre_detail": {
             "programming": {"prog_hr": 4.0, "prog_rate": 95.0, "amortized": False},

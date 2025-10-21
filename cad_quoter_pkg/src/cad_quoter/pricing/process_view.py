@@ -126,9 +126,7 @@ class _ProcessCostTableRecorder:
                     continue
                 if cleaned not in detail_parts:
                     detail_parts.append(cleaned)
-        simple_hours_line: str | None = None
         if hours_val > 0.0 and cost_val > 0.0:
-            rate_for_detail = cost_val / hours_val if hours_val else 0.0
             planner_rate_override: float | None = None
             if record_canon and self.bucket_state is not None:
                 extra_payload = getattr(self.bucket_state, "extra", None)
@@ -156,11 +154,7 @@ class _ProcessCostTableRecorder:
                                 if base_extra_val > 0.0 and meta_rate_val > 0.0:
                                     planner_rate_override = meta_rate_val
             if planner_rate_override and planner_rate_override > 0.0:
-                rate_for_detail = planner_rate_override
-            if rate_for_detail > 0.0:
-                simple_hours_line = f"{hours_val:.2f} hr @ ${rate_for_detail:.2f}/hr"
-        if simple_hours_line and simple_hours_line not in detail_parts:
-            detail_parts.append(simple_hours_line)
+                rate_val = planner_rate_override
         self._rows.append(
             {
                 "label": display_label,
