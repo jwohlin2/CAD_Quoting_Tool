@@ -1336,6 +1336,7 @@ def _compute_drilling_removal_section(
             if drill_minutes_total > 0.0:
                 extras["removal_drilling_hours"] = minutes_to_hours(drill_minutes_total)
 
+            drill_minutes_total = float(drill_minutes_total or 0.0)
             drill_mrate = (
                 _lookup_bucket_rate("drilling", rates)
                 or _lookup_bucket_rate("machine", rates)
@@ -1355,21 +1356,74 @@ def _compute_drilling_removal_section(
                 labor_rate_per_hr=drill_lrate,
             )
 
+            milling_hours_candidates: list[Any] = []
+            if isinstance(drilling_card_detail, _MappingABC):
+                for key in (
+                    "milling_hours",
+                    "roughing_hours",
+                    "milling_total_hours",
+                    "roughing_total_hours",
+                ):
+                    milling_hours_candidates.append(drilling_card_detail.get(key))
+            if isinstance(updated_plan_summary, _MappingABC):
+                milling_summary = updated_plan_summary.get("milling")
+                if isinstance(milling_summary, _MappingABC):
+                    for key in (
+                        "hours",
+                        "hr",
+                        "machine_hours",
+                        "total_hours",
+                        "roughing_hours",
+                    ):
+                        milling_hours_candidates.append(milling_summary.get(key))
+
+            milling_hours: float = 0.0
+            for candidate in milling_hours_candidates:
+                minutes_val = _coerce_float_or_none(candidate)
+                if minutes_val is not None and math.isfinite(minutes_val) and minutes_val > 0.0:
+                    milling_hours = float(minutes_val)
+                    break
+
+            milling_hours = float(milling_hours or 0.0)
+            milling_minutes_total = 60.0 * milling_hours
+            mill_mrate = (
+                _lookup_bucket_rate("milling", rates)
+                or _lookup_bucket_rate("machine", rates)
+                or 45.0
+            )
+            mill_lrate = (
+                _lookup_bucket_rate("milling_labor", rates)
+                or _lookup_bucket_rate("labor", rates)
+                or 45.0
+            )
+
+            _seed_bucket_minutes_cost(
+                bucket_view_obj,
+                "milling",
+                milling_minutes_total,
+                machine_rate_per_hr=mill_mrate,
+                labor_rate_per_hr=mill_lrate,
+            )
+
             _normalize_buckets(bucket_view_obj)
 
-            dbg_entry: Mapping[str, Any] | None = None
+            drilling_dbg_entry: Mapping[str, Any] | None = None
+            milling_dbg_entry: Mapping[str, Any] | None = None
             if isinstance(bucket_view_obj, _MappingABC):
                 try:
                     buckets_snapshot = bucket_view_obj.get("buckets")
                 except Exception:
                     buckets_snapshot = None
                 if isinstance(buckets_snapshot, _MappingABC):
-                    dbg_entry = typing.cast(
-                        Mapping[str, Any], buckets_snapshot
-                    ).get("drilling")
-            if not isinstance(dbg_entry, _MappingABC):
-                dbg_entry = {}
-            _push(lines, f"[DEBUG] drilling_bucket={dbg_entry}")
+                    buckets_snapshot_map = typing.cast(Mapping[str, Any], buckets_snapshot)
+                    drilling_dbg_entry = buckets_snapshot_map.get("drilling")
+                    milling_dbg_entry = buckets_snapshot_map.get("milling")
+            if not isinstance(drilling_dbg_entry, _MappingABC):
+                drilling_dbg_entry = {}
+            if not isinstance(milling_dbg_entry, _MappingABC):
+                milling_dbg_entry = {}
+            _push(lines, f"[DEBUG] drilling_bucket={drilling_dbg_entry}")
+            _push(lines, f"[DEBUG] milling_bucket={milling_dbg_entry}")
 
             return extras, lines, updated_plan_summary
 
