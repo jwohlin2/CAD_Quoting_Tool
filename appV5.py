@@ -15120,13 +15120,22 @@ class App(tk.Tk):
             client = self.get_llm_client(self.llm_model_path.get().strip() or None)
         est_raw = infer_hours_and_overrides_from_geo(geo, params=self.params, rates=self.rates, client=client)
         est = clamp_llm_hours(est_raw, geo, params=self.params)
-        self.vars_df = apply_llm_hours_to_variables(self.vars_df, est, allow_overwrite_nonzero=True, log=decision_log)
+        vars_df_before_llm = self.vars_df
+        vars_df_after_llm = apply_llm_hours_to_variables(
+            vars_df_before_llm, est, allow_overwrite_nonzero=True, log=decision_log
+        )
+        if vars_df_after_llm is None:
+            vars_df_after_llm = coerce_or_make_vars_df(vars_df_before_llm)
+        self.vars_df = vars_df_after_llm
+
         self.geo = geo
         self.geo_context = dict(geo or {})
         self._log_geo(geo)
 
-        vars_df_for_editor = typing.cast(PandasDataFrame, self.vars_df)
-        self._populate_editor_tab(vars_df_for_editor)
+        vars_df_for_editor = self.vars_df
+        if vars_df_for_editor is None:  # pragma: no cover - defensive type check
+            raise RuntimeError("Variables dataframe was not initialized")
+        self._populate_editor_tab(typing.cast(PandasDataFrame, vars_df_for_editor))
         self.nb.select(self.tab_editor)
         self.status_var.set("Variables loaded. Review the Quote Editor and click Generate Quote.")
         return
