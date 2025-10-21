@@ -13,6 +13,35 @@ K = TypeVar("K")
 V = TypeVar("V")
 
 
+_TRUTHY_STRINGS: frozenset[str] = frozenset({"1", "true", "t", "yes", "y", "on"})
+_FALSY_STRINGS: frozenset[str] = frozenset({"0", "false", "f", "no", "n", "off"})
+
+
+def coerce_bool(value: object, *, default: bool | None = None) -> bool | None:
+    """Best-effort conversion of *value* into a boolean.
+
+    ``None`` is returned when the input cannot be interpreted as a boolean and no
+    *default* is provided. When *default* is supplied, it is returned for unknown
+    values (including empty strings).
+    """
+
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if not normalized:
+            return default
+        if normalized in _TRUTHY_STRINGS:
+            return True
+        if normalized in _FALSY_STRINGS:
+            return False
+    return default
+
+
 def _dict(value: Mapping[Any, Any] | None) -> dict[Any, Any]:
     """Return *value* if it is a ``dict``; otherwise return an empty dict."""
 

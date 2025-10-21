@@ -8,20 +8,7 @@ import math
 from cad_quoter.domain import canonicalize_pass_through_map, coerce_bounds
 from cad_quoter.domain_models import coerce_float_or_none as _coerce_float_or_none
 from cad_quoter.llm_overrides import clamp
-
-
-def _coerce_bool(value: object) -> bool | None:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    if isinstance(value, str):
-        text = value.strip().lower()
-        if text in {"y", "yes", "true", "1", "on"}:
-            return True
-        if text in {"n", "no", "false", "0", "off"}:
-            return False
-    return None
+from cad_quoter.utils import coerce_bool
 
 
 def _clean_string(value: Any) -> str | None:
@@ -196,7 +183,7 @@ def overrides_to_suggestions(
     if packaging is not None:
         suggestions["packaging_flat_cost"] = float(packaging)
 
-    fai_required = _coerce_bool(overrides.get("fai_required"))
+    fai_required = coerce_bool(overrides.get("fai_required"))
     if fai_required is not None:
         suggestions["fai_required"] = bool(fai_required)
 
@@ -283,7 +270,7 @@ def suggestions_to_overrides(suggestions: Mapping[str, Any] | None) -> dict[str,
     if packaging is not None:
         overrides["packaging_flat_cost"] = float(packaging)
 
-    fai = _coerce_bool(suggestions.get("fai_required"))
+    fai = coerce_bool(suggestions.get("fai_required"))
     if fai is not None:
         overrides["fai_required"] = bool(fai)
 

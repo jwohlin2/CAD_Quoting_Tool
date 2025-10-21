@@ -3,7 +3,8 @@ from __future__ import annotations
 from typing import Any, Mapping
 from collections.abc import Mapping as _MappingABC
 
-from appkit.env_utils import FORCE_ESTIMATOR, FORCE_PLANNER, _coerce_bool, _coerce_env_bool
+from appkit.env_utils import FORCE_ESTIMATOR, FORCE_PLANNER, _coerce_env_bool
+from cad_quoter.utils import coerce_bool
 
 DEFAULT_PLANNER_MODE = "planner"
 
@@ -238,7 +239,7 @@ __all__ = [
     "_planner_total_has_values",
     "_planner_meta_signals_present",
     "_planner_signals_present",
-    "_coerce_bool",
+    "coerce_bool",
     "_coerce_env_bool",
     "FORCE_PLANNER",
 ]
