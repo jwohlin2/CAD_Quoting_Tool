@@ -475,8 +475,7 @@ _RENDER_ASCII_REPLACEMENTS: dict[str, str] = {
     "½": "1/2",
     "¾": "3/4",
     " ": " ",  # non-breaking space
-    "⚠️": "[!]",
-    "⚠": "[!]",
+    "⚠️": "⚠",
 }
 
 _RENDER_PASSTHROUGH: dict[str, str] = {
@@ -484,6 +483,7 @@ _RENDER_PASSTHROUGH: dict[str, str] = {
     "×": "__MULTIPLY__",
     "≥": "__GEQ__",
     "≤": "__LEQ__",
+    "⚠": "__WARN__",
 }
 
 
@@ -2153,9 +2153,8 @@ from cad_quoter.pricing.materials import (
     net_mass_kg as net_mass_kg,
     plan_stock_blank as plan_stock_blank,
 )
+from cad_quoter.config import _ensure_two_bucket_rates
 from cad_quoter.rates import (
-    ensure_two_bucket_defaults,
-    migrate_flat_to_two_bucket,
     two_bucket_to_flat,
 )
 from cad_quoter.vendors.mcmaster_stock import lookup_sku_and_price_for_mm
@@ -3198,7 +3197,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     rates.setdefault("ProgrammingRate", rates.get("ProgrammerRate", rates["LaborRate"]))
     rates.setdefault("InspectionRate", rates.get("InspectorRate", rates["LaborRate"]))
 
-    fallback_two_bucket_rates = _coerce_two_bucket_rates(rates)
+    fallback_two_bucket_rates = _normalized_two_bucket_rates(rates)
     fallback_flat_rates = two_bucket_to_flat(fallback_two_bucket_rates)
     for key, fallback_value in fallback_flat_rates.items():
         if _coerce_rate_value(rates.get(key)) <= 0.0:
@@ -8455,6 +8454,22 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 # ===== QUOTE CONFIG (edit-friendly) ==========================================
 CONFIG_INIT_ERRORS: list[str] = []
 
+
+def _normalized_two_bucket_rates(
+    candidate: Any | Mapping[str, Any],
+) -> dict[str, dict[str, float]]:
+    """Normalize rate mappings while preserving empty fallbacks."""
+
+    if not isinstance(candidate, _MappingABC):
+        return {"labor": {}, "machine": {}}
+    if not candidate:
+        return {"labor": {}, "machine": {}}
+
+    normalized = _ensure_two_bucket_rates(candidate)
+    if not any(normalized.get(kind) for kind in ("labor", "machine")):
+        return {"labor": {}, "machine": {}}
+    return normalized
+
 try:
     SERVICE_CONTAINER = create_default_container()
 except Exception as exc:
@@ -8465,70 +8480,24 @@ except Exception as exc:
 
     SERVICE_CONTAINER = ServiceContainer(
         load_params=_empty_params,
-        load_rates=lambda: {"labor": {}, "machine": {}},
+        load_rates=lambda: _normalized_two_bucket_rates({}),
         pricing_engine_factory=lambda: PricingEngine(create_default_registry()),
     )
-
-def _coerce_two_bucket_rates(value: Any) -> dict[str, dict[str, float]]:
-    if isinstance(value, dict):
-        labor_raw = value.get("labor")
-        machine_raw = value.get("machine")
-        if isinstance(labor_raw, dict) and isinstance(machine_raw, dict):
-            labor: dict[str, float] = {}
-            for key, raw in labor_raw.items():
-                try:
-                    labor[str(key)] = float(raw)
-                except Exception:
-                    continue
-            machine: dict[str, float] = {}
-            for key, raw in machine_raw.items():
-                try:
-                    machine[str(key)] = float(raw)
-                except Exception:
-                    continue
-            return ensure_two_bucket_defaults({"labor": labor, "machine": machine})
-
-        flat: dict[str, float] = {}
-        for key, raw in value.items():
-            try:
-                flat[str(key)] = float(raw)
-            except Exception:
-                continue
-        if flat:
-            return ensure_two_bucket_defaults(migrate_flat_to_two_bucket(flat))
-
-    return {"labor": {}, "machine": {}}
-
-
-def _merge_two_bucket_rates(*sources: typing.Any) -> dict[str, dict[str, float]]:
-    """Merge multiple two-bucket or flat rate mappings into a single structure."""
-
-    merged: dict[str, dict[str, float]] = {"labor": {}, "machine": {}}
-
-    for source in sources:
-        if source is None:
-            continue
-        coerced = _coerce_two_bucket_rates(source)
-        for bucket_type in ("labor", "machine"):
-            bucket = merged.setdefault(bucket_type, {})
-            for role, value in coerced.get(bucket_type, {}).items():
-                try:
-                    bucket[str(role)] = float(value)
-                except Exception:
-                    continue
-
-    return merged
 
 try:
     _rates_raw = SERVICE_CONTAINER.load_rates()
 except ConfigError as exc:
-    RATES_TWO_BUCKET_DEFAULT = {"labor": {}, "machine": {}}
+    RATES_TWO_BUCKET_DEFAULT = _normalized_two_bucket_rates({})
     CONFIG_INIT_ERRORS.append(f"Rates configuration error: {exc}")
 except Exception as exc:
-    RATES_TWO_BUCKET_DEFAULT = {"labor": {}, "machine": {}}
+    RATES_TWO_BUCKET_DEFAULT = _normalized_two_bucket_rates({})
     CONFIG_INIT_ERRORS.append(f"Unexpected rates configuration error: {exc}")
 else:
-    RATES_TWO_BUCKET_DEFAULT = _coerce_two_bucket_rates(_rates_raw)
+    RATES_TWO_BUCKET_DEFAULT = (
+        _normalized_two_bucket_rates(_rates_raw)
+        if isinstance(_rates_raw, _MappingABC)
+        else _normalized_two_bucket_rates({})
+    )
 
 RATES_DEFAULT = two_bucket_to_flat(RATES_TWO_BUCKET_DEFAULT)
 
@@ -10495,13 +10464,22 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     if os.environ.get("ASSERT_PLANNER"):
         assert str(breakdown.get("pricing_source", "")).strip().lower() == "planner", "Planner not engaged"
 
-    merged_two_bucket_rates = _merge_two_bucket_rates(
-        RATES_TWO_BUCKET_DEFAULT,
-        default_rates,
-        rates,
-    )
+    merged_two_bucket_rates: dict[str, dict[str, float]] = {"labor": {}, "machine": {}}
+    for candidate in (RATES_TWO_BUCKET_DEFAULT, default_rates, rates):
+        if not isinstance(candidate, _MappingABC):
+            continue
+        normalized = _normalized_two_bucket_rates(candidate)
+        if not any(normalized.get(kind) for kind in ("labor", "machine")):
+            continue
+        for bucket_type in ("labor", "machine"):
+            bucket = merged_two_bucket_rates.setdefault(bucket_type, {})
+            for role, value in normalized.get(bucket_type, {}).items():
+                try:
+                    bucket[str(role)] = float(value)
+                except Exception:
+                    continue
     if not any(merged_two_bucket_rates.get(kind) for kind in ("labor", "machine")):
-        merged_two_bucket_rates = copy.deepcopy(RATES_TWO_BUCKET_DEFAULT)
+        merged_two_bucket_rates = _normalized_two_bucket_rates(RATES_TWO_BUCKET_DEFAULT)
 
     bucketize_nre: dict[str, Any] = {}
     if isinstance(planner_result, _MappingABC):

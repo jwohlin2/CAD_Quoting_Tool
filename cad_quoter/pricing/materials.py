@@ -245,15 +245,28 @@ def ensure_material_backup_csv(path: str | None = None) -> str:
 def load_backup_prices_csv(path: str | None = None) -> Dict[str, Dict[str, float | str]]:
     """Load the packaged CSV of fallback material prices."""
 
-    import pandas as pd
-
     table_path = Path(path) if path else Path(ensure_material_backup_csv())
-    df = pd.read_csv(table_path)
     out: Dict[str, Dict[str, float | str]] = {}
-    for _, record in df.iterrows():
+
+    try:
+        import pandas as pd  # type: ignore
+    except Exception:  # pragma: no cover - optional dependency
+        pd = None  # type: ignore[assignment]
+
+    if pd is not None:
+        df = pd.read_csv(table_path)
+        records_iter = (record for _, record in df.iterrows())
+    else:
+        import csv
+
+        with table_path.open(newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            records_iter = tuple(reader)
+
+    for record in records_iter:
         key = normalize_material_key(record["material_key"])
-        usdkg = coerce_float_or_none(record.get("usd_per_kg"))
-        usdlb = coerce_float_or_none(record.get("usd_per_lb"))
+        usdkg = _coerce_float_or_none(record.get("usd_per_kg"))
+        usdlb = _coerce_float_or_none(record.get("usd_per_lb"))
         if usdkg and not usdlb:
             usdlb = usdkg_to_usdlb(usdkg)
         if usdlb and not usdkg:
