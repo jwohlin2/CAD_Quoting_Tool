@@ -2902,7 +2902,7 @@ from cad_quoter.domain_models import (
     normalize_material_key,
 )
 from cad_quoter.domain_models.values import safe_float as _safe_float, to_float, to_int
-from cad_quoter.utils import compact_dict, jdump, json_safe_copy, sdict
+from cad_quoter.utils import coerce_bool, compact_dict, jdump, json_safe_copy, sdict
 from cad_quoter.utils.text import _match_items_contains
 from cad_quoter.llm_suggest import (
     get_llm_quote_explanation,
@@ -11221,20 +11221,6 @@ def _compute_programming_detail_minutes(
     return float(minimum_detail_minutes)
 
 
-def _coerce_bool(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in {"1", "true", "t", "yes", "y", "on"}:
-            return True
-        if lowered in {"0", "false", "f", "no", "n", "off"}:
-            return False
-    return bool(value)
-
-
 def _coerce_checkbox_state(value: Any, default: bool = False) -> bool:
     """Best-effort conversion from spreadsheet checkbox text to a boolean."""
 
@@ -11251,6 +11237,10 @@ def _coerce_checkbox_state(value: Any, default: bool = False) -> bool:
     text = str(value).strip().lower()
     if not text:
         return default
+
+    direct_bool = coerce_bool(text)
+    if direct_bool is not None:
+        return direct_bool
 
     truthy_tokens = {"true", "1", "yes", "y", "on"}
     falsy_tokens = {"false", "0", "no", "n", "off"}
@@ -11563,7 +11553,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             scrap_source_label = scrap_source
 
     fai_value = value_map.get("FAIR Required")
-    fai_required = _coerce_bool(_coerce_checkbox_state(fai_value))
+    fai_required = coerce_bool(_coerce_checkbox_state(fai_value), default=False)
 
     baseline: dict[str, Any] = {
         "qty": qty,

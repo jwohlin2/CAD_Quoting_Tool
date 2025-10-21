@@ -8,7 +8,7 @@ from typing import Any, TypeVar, cast
 from cad_quoter.domain_models import DEFAULT_MATERIAL_DISPLAY
 from cad_quoter.domain_models.values import safe_float as _safe_float, to_float, to_int
 from cad_quoter.llm_overrides import coerce_bounds
-from cad_quoter.utils import _first_non_none, compact_dict, jdump
+from cad_quoter.utils import _first_non_none, coerce_bool, compact_dict, jdump
 
 try:  # pragma: no cover - tolerate optional dependency removal
     from cad_quoter.llm import LLMClient, parse_llm_json
@@ -21,18 +21,6 @@ except Exception:  # pragma: no cover - fallback keeps quoting functional
 from cad_quoter.utils.scrap import normalize_scrap_pct
 
 T = TypeVar("T")
-def _coerce_bool(value: object) -> bool | None:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    if isinstance(value, str):
-        text = value.strip().lower()
-        if text in {"y", "yes", "true", "1", "on"}:
-            return True
-        if text in {"n", "no", "false", "0", "off"}:
-            return False
-    return None
 
 
 @dataclass(slots=True)
@@ -221,7 +209,7 @@ def _coerce_suggestion_set(
         if raw_val is None:
             return None
         value, detail = _extract_detail(raw_val)
-        flag = _coerce_bool(value)
+        flag = coerce_bool(value)
         if flag is None:
             return None
         _store_meta(path, detail, flag)
