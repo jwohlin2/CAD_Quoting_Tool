@@ -276,64 +276,6 @@ def _seed_bucket_minutes_cost(
     entry["total$"] = round(entry["machine$"] + entry["labor$"], 2)
 
 
-def _infer_rect_from_holes(geo: Mapping[str, Any] | None) -> tuple[float, float]:
-    """Infer a rectangular blank size (W,H in inches) from geo context.
-
-    Tries, in order:
-    - required_blank_in / bbox_in maps with numeric w/h (inches)
-    - plate_len/plate_wid (inches) or synonyms
-    - derived or top-level bbox_mm converted to inches
-    - conservative guess based on hole diameters (4× max diameter)
-    """
-
-    if not isinstance(geo, _MappingABC):
-        return (0.0, 0.0)
-
-    def _wh_from(container: Mapping[str, Any] | None) -> tuple[float, float]:
-        if not isinstance(container, _MappingABC):
-            return (0.0, 0.0)
-        w = _coerce_positive_float(container.get("w"))
-        h = _coerce_positive_float(container.get("h"))
-        return (float(w) if w else 0.0, float(h) if h else 0.0)
-
-    w, h = _wh_from(geo.get("required_blank_in"))
-    if w > 0 and h > 0:
-        return (w, h)
-    w, h = _wh_from(geo.get("bbox_in"))
-    if w > 0 and h > 0:
-        return (w, h)
-
-    L_in = _coerce_positive_float(geo.get("plate_len_in") or geo.get("plate_length_in"))
-    W_in = _coerce_positive_float(geo.get("plate_wid_in") or geo.get("plate_width_in"))
-    if L_in and W_in:
-        return (float(W_in), float(L_in))
-
-    derived = geo.get("derived") if isinstance(geo, _MappingABC) else None
-    bbox_mm = None
-    if isinstance(derived, _MappingABC):
-        bbox_mm = derived.get("bbox_mm")
-    if not bbox_mm:
-        bbox_mm = geo.get("bbox_mm")
-    if isinstance(bbox_mm, (list, tuple)) and len(bbox_mm) >= 2:
-        mm_w = _coerce_positive_float(bbox_mm[0])
-        mm_h = _coerce_positive_float(bbox_mm[1])
-        if mm_w and mm_h:
-            return (float(mm_w) / 25.4, float(mm_h) / 25.4)
-
-    max_d_in = 0.0
-    diams_mm = geo.get("hole_diams_mm")
-    if isinstance(diams_mm, Sequence) and not isinstance(diams_mm, (str, bytes, bytearray)):
-        for d in diams_mm:
-            d_mm = _coerce_positive_float(d)
-            if d_mm and d_mm > 0:
-                max_d_in = max(max_d_in, float(d_mm) / 25.4)
-    if max_d_in > 0:
-        guess = max(2.0, max_d_in * 4.0)
-        return (guess, guess)
-
-    return (0.0, 0.0)
-
-
 def _emit_hole_table_ops_cards(
     lines: list[str],
     *,
@@ -880,7 +822,7 @@ def _render_ops_card(
     append_line: Callable[[str], None],
     *,
     title: str,
-    rows: list[dict],
+    rows: Sequence[Mapping[str, Any]],
 ) -> float:
     if not rows:
         return 0.0
