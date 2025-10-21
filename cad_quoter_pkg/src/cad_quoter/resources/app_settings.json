@@ -1,6 +1,6 @@
 {
   "rate_mode": "simple",
-  "last_variables_path": "",
+  "last_variables_path": "D:/CAD_Quoting_Tool/Cad Files/full_coverage_unused_numeric.csv",
   "pricing_defaults": {
     "params": {
       "ExpeditePct": 0.0,

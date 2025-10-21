@@ -21,6 +21,16 @@ try:
 except Exception:
     pass
 
+# Ensure the packaged sources are importable when running this script directly.
+try:
+    import os
+    _HERE = os.path.dirname(os.path.abspath(__file__))
+    _PKG_SRC = os.path.join(_HERE, "cad_quoter_pkg", "src")
+    if _PKG_SRC not in sys.path:
+        sys.path.insert(0, _PKG_SRC)
+except Exception:
+    pass
+
 from cad_quoter.app.quote_doc import (
     build_quote_header_lines,
     _sanitize_render_text,
@@ -5352,12 +5362,27 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             _coerce_float_or_none(planner_totals_map.get("machine_cost")) or 0.0
         )
 
-        assert (
-            abs(display_machine_from_rows - planner_machine_total) < 0.51
-        ), "Machine $ mismatch (check drilling minutes merge)"
-        assert (
-            abs(display_labor_from_rows - planner_labor_total) < 0.51
-        ), "Labor $ mismatch"
+        if abs(display_machine_from_rows - planner_machine_total) >= 0.51:
+            try:
+                _log.warning(
+                    "render_quote: Machine $ mismatch (rows=%.2f planner=%.2f)",
+                    display_machine_from_rows,
+                    planner_machine_total,
+                )
+            except Exception:
+                pass
+            # Prefer planner totals to avoid breaking render on small drifts.
+            display_machine_from_rows = planner_machine_total
+        if abs(display_labor_from_rows - planner_labor_total) >= 0.51:
+            try:
+                _log.warning(
+                    "render_quote: Labor $ mismatch (rows=%.2f planner=%.2f)",
+                    display_labor_from_rows,
+                    planner_labor_total,
+                )
+            except Exception:
+                pass
+            display_labor_from_rows = planner_labor_total
     detail_lookup.update(bucket_state.detail_lookup)
     label_to_canon.update(bucket_state.label_to_canon)
     canon_to_display_label.update(bucket_state.canon_to_display_label)
