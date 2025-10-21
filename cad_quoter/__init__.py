@@ -62,13 +62,7 @@ def _ensure_geometry_module() -> None:
         try:
             from cad_quoter.geometry import _hole_groups_from_cylinders as _hole_groups
         except Exception:
-            try:
-                from importlib import import_module as _import_module
-
-                _app_module = _import_module("appV5")
-                _hole_groups = getattr(_app_module, "_hole_groups_from_cylinders", None)
-            except Exception:
-                _hole_groups = None
+            _hole_groups = None
         stub._hole_groups_from_cylinders = (
             _hole_groups if callable(_hole_groups) else (lambda *_args, **_kwargs: [])
         )

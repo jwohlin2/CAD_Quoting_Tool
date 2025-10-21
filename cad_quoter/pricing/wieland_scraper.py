@@ -38,6 +38,7 @@ from typing import Any, Dict, Iterable, Mapping, Tuple, Optional, List
 import ssl
 
 from cad_quoter.config import configure_logging, logger
+from cad_quoter.pricing.materials import LB_PER_KG, usdkg_to_usdlb
 from cad_quoter.utils import jdump
 
 try:  # pragma: no cover - optional dependency in production
@@ -76,10 +77,6 @@ class ScrapeResult:
 
 
 # --------------------------------- utils -------------------------------------
-LB_PER_KG = 2.2046226218
-
-def _usdkg_to_usdlb(x: float) -> float:
-    return float(x) / LB_PER_KG if x is not None else x
 
 
 def _to_float(s: str) -> float:
@@ -643,7 +640,7 @@ def scrape_wieland_prices(force: bool = False, debug: bool = False) -> Dict[str,
     # LME settlement
     lme_map, asof = _parse_lme_usd_per_kg(soup, fx)
     data["lme_usd_per_kg"].update(lme_map)
-    data["lme_usd_per_lb"] = {k: round(_usdkg_to_usdlb(v), 6) for k, v in data["lme_usd_per_kg"].items()}
+    data["lme_usd_per_lb"] = {k: round(usdkg_to_usdlb(v), 6) for k, v in data["lme_usd_per_kg"].items()}
     data["asof"] = asof
 
     eur_rows, gbp_rows, usd_rows = _extract_price_rows(soup)
@@ -696,8 +693,8 @@ def scrape_wieland_prices(force: bool = False, debug: bool = False) -> Dict[str,
                 except Exception:
                     continue
 
-    data["wieland_usd_per_lb"] = {k: round(_usdkg_to_usdlb(v), 6) for k, v in data["wieland_usd_per_kg"].items()}
-    data["england_usd_per_lb"] = {k: round(_usdkg_to_usdlb(v), 6) for k, v in data["england_usd_per_kg"].items()}
+    data["wieland_usd_per_lb"] = {k: round(usdkg_to_usdlb(v), 6) for k, v in data["wieland_usd_per_kg"].items()}
+    data["england_usd_per_lb"] = {k: round(usdkg_to_usdlb(v), 6) for k, v in data["england_usd_per_kg"].items()}
 
     # cache
     _MEM_CACHE["data"] = (now, data)
@@ -909,7 +906,7 @@ def get_live_material_price(material_key: str, unit: str = "kg", fallback_usd_pe
     """
     price_kg, src = get_live_material_price_usd_per_kg(material_key, fallback_usd_per_kg=fallback_usd_per_kg)
     if unit.lower() == "lb":
-        return _usdkg_to_usdlb(price_kg), src.replace("USD/kg", "USD/lb") if "USD/kg" in src else src
+        return usdkg_to_usdlb(price_kg), src.replace("USD/kg", "USD/lb") if "USD/kg" in src else src
     return price_kg, src
 
 

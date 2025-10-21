@@ -9,7 +9,7 @@
 1. **`cad_quoter/config.py`** – isolate environment and settings management (e.g., `AppEnvironment`, `describe_runtime_environment`) so configuration can be loaded without pulling in Tkinter.【F:appV5.py†L24-L63】
 2. **`cad_quoter/geometry/` package** – house CAD ingestion and enrichment utilities (`load_cad_any`, STEP/STL enrichment helpers). This keeps OCC/trimesh dependencies away from non-geometry code and allows targeted unit tests.【F:appV5.py†L3333-L3572】
 3. **`cad_quoter/domain.py`** – keep data classes and calculations such as `QuoteState`, scrap calculations, and `build_suggest_payload` in a pure-Python module that can be exercised by tests or future services.【F:appV5.py†L673-L760】
-4. **`cad_quoter/llm.py`** – wrap `_LocalLLM`, prompt templates, and parsing helpers so model integration can be swapped or mocked independently of the UI.【F:appV5.py†L148-L160】【F:appV5.py†L3573-L3680】
+4. **`cad_quoter/llm/` package** – wrap `_LocalLLM`, prompt templates, and parsing helpers so model integration can be swapped or mocked independently of the UI.【F:appV5.py†L148-L160】【F:appV5.py†L3573-L3680】
 5. **`cad_quoter/pricing/` package** – move `PriceProvider`, `MetalsAPI`, `VendorCSV`, caching, and Wieland integration into a coherent subsystem with clear interfaces and dependency injection.【F:appV5.py†L4768-L4897】
 6. **`cad_quoter/ui/` package** – keep Tkinter widgets (`ScrollableFrame`, `App`) in their own module, importing the domain and services they depend on rather than defining everything inline.【F:appV5.py†L11249-L11409】
 

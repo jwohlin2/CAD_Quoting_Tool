@@ -4,13 +4,19 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping as _MappingABC
-from types import MappingProxyType
-from typing import Any, Callable, Mapping, TYPE_CHECKING, cast
+from typing import Any, Callable, TYPE_CHECKING, cast
 
 from cad_quoter.config import logger
 from cad_quoter.domain_models import QuoteState
 from cad_quoter.domain_models.values import to_float
 from cad_quoter.llm_suggest import build_suggest_payload as _build_suggest_payload
+from cad_quoter.llm_overrides import (
+    LLM_BOUND_DEFAULTS,
+    _as_float_or_none,
+    _default_llm_bounds_dict,
+    coerce_bounds,
+    get_llm_bound_defaults,
+)
 from cad_quoter.pass_labels import (
     HARDWARE_PASS_LABEL,
     LEGACY_HARDWARE_PASS_LABEL,
@@ -33,6 +39,7 @@ __all__ = [
     "LEGACY_HARDWARE_PASS_LABEL",
     "_canonical_pass_label",
     "_as_float_or_none",
+    "_default_llm_bounds_dict",
     "canonicalize_pass_through_map",
     "coerce_bounds",
     "get_llm_bound_defaults",
@@ -194,103 +201,6 @@ def canonicalize_pass_through_map(data: Any) -> dict[str, float]:
                 _add(entry[0], entry[1])
 
     return result
-
-
-LLM_MULTIPLIER_MIN = 0.25
-LLM_MULTIPLIER_MAX = 4.0
-LLM_ADDER_MAX = 8.0
-
-
-def _as_float_or_none(value: Any) -> float | None:
-    try:
-        if isinstance(value, (int, float)):
-            return float(value)
-        if isinstance(value, str):
-            cleaned = value.strip()
-            if not cleaned:
-                return None
-            return float(cleaned)
-    except Exception:  # pragma: no cover - defensive
-        return None
-    return None
-
-
-def coerce_bounds(bounds: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Normalize LLM bounds into a canonical structure."""
-
-    if bounds is None:
-        bounds_map: Mapping[str, Any] = {}
-    else:
-        bounds_map = bounds
-
-    mult_min = _as_float_or_none(bounds_map.get("mult_min"))
-    if mult_min is None:
-        mult_min = LLM_MULTIPLIER_MIN
-    else:
-        mult_min = max(LLM_MULTIPLIER_MIN, float(mult_min))
-
-    mult_max = _as_float_or_none(bounds_map.get("mult_max"))
-    if mult_max is None:
-        mult_max = LLM_MULTIPLIER_MAX
-    else:
-        mult_max = min(LLM_MULTIPLIER_MAX, float(mult_max))
-    mult_max = max(mult_max, mult_min)
-
-    adder_min = _as_float_or_none(bounds_map.get("adder_min_hr"))
-    if adder_min is None:
-        adder_min = _as_float_or_none(bounds_map.get("add_hr_min"))
-    adder_min = max(0.0, float(adder_min)) if adder_min is not None else 0.0
-
-    adder_max = _as_float_or_none(bounds_map.get("adder_max_hr"))
-    add_hr_cap = _as_float_or_none(bounds_map.get("add_hr_max"))
-    if adder_max is None and add_hr_cap is not None:
-        adder_max = float(add_hr_cap)
-    elif adder_max is not None and add_hr_cap is not None:
-        adder_max = min(float(adder_max), float(add_hr_cap))
-    if adder_max is None:
-        adder_max = LLM_ADDER_MAX
-    adder_max = max(adder_min, min(LLM_ADDER_MAX, float(adder_max)))
-
-    scrap_min = _as_float_or_none(bounds_map.get("scrap_min"))
-    scrap_min = max(0.0, float(scrap_min)) if scrap_min is not None else 0.0
-
-    scrap_max = _as_float_or_none(bounds_map.get("scrap_max"))
-    scrap_max = float(scrap_max) if scrap_max is not None else 0.25
-    scrap_max = max(scrap_max, scrap_min)
-
-    bucket_caps_raw = bounds_map.get("adder_bucket_max") or bounds_map.get("add_hr_bucket_max")
-    bucket_caps: dict[str, float] = {}
-    if isinstance(bucket_caps_raw, _MappingABC):
-        for key, raw in bucket_caps_raw.items():
-            cap_val = _as_float_or_none(raw)
-            if cap_val is None:
-                continue
-            bucket_caps[str(key).lower()] = max(adder_min, min(adder_max, float(cap_val)))
-
-    return {
-        "mult_min": mult_min,
-        "mult_max": mult_max,
-        "adder_min_hr": adder_min,
-        "adder_max_hr": adder_max,
-        "scrap_min": scrap_min,
-        "scrap_max": scrap_max,
-        "adder_bucket_max": bucket_caps,
-    }
-
-
-def _default_llm_bounds_dict() -> dict[str, Any]:
-    """Return the sanitized default LLM guardrail bounds."""
-
-    return coerce_bounds({})
-
-
-def get_llm_bound_defaults() -> dict[str, Any]:
-    """Return a mutable copy of the default LLM guardrail bounds."""
-
-    return dict(coerce_bounds(LLM_BOUND_DEFAULTS))
-
-
-LLM_BOUND_DEFAULTS: Mapping[str, Any] = MappingProxyType(_default_llm_bounds_dict())
 
 
 def build_suggest_payload(*args, **kwargs):  # type: ignore[override]

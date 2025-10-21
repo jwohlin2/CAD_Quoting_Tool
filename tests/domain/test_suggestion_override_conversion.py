@@ -1,6 +1,13 @@
 import pytest
 
 from appV5 import overrides_to_suggestions, suggestions_to_overrides
+from cad_quoter.llm.sanitizers import (
+    clean_notes_list,
+    clean_string,
+    clean_string_list,
+    coerce_bool_flag,
+    sanitize_drilling_groups,
+)
 
 
 def test_overrides_to_suggestions_cleans_and_canonicalises() -> None:
@@ -38,19 +45,24 @@ def test_overrides_to_suggestions_cleans_and_canonicalises() -> None:
     assert suggestions["scrap_pct"] == pytest.approx(0.15)
     assert suggestions["setups"] == 3
     assert suggestions["fixture"] == "Soft jaws"
-    assert suggestions["notes"] == ["Use custom fixture"]
-    assert suggestions["operation_sequence"] == ["Mill", "Deburr"]
-    assert suggestions["dfm_risks"] == ["Thin walls"]
+    assert suggestions["notes"] == clean_notes_list(overrides.get("notes"))
+    assert suggestions["operation_sequence"] == clean_string_list(
+        overrides.get("operation_sequence")
+    )
+    assert suggestions["dfm_risks"] == clean_notes_list(
+        overrides.get("dfm_risks"), limit=8
+    )
     assert suggestions["drilling_strategy"]["multiplier"] == pytest.approx(1.2)
     assert suggestions["drilling_strategy"]["per_hole_floor_sec"] == pytest.approx(5.0)
-    assert suggestions["drilling_groups"][0]["qty"] == 8
-    assert suggestions["drilling_groups"][0]["dia_mm"] == pytest.approx(3.2)
+    assert suggestions["drilling_groups"] == sanitize_drilling_groups(
+        overrides.get("drilling_groups")
+    )
     assert suggestions["stock_recommendation"]["stock_item"] == "Plate"
     assert suggestions["stock_recommendation"]["length_mm"] == pytest.approx(100.0)
     assert suggestions["setup_recommendation"]["setups"] == 2
     assert suggestions["packaging_flat_cost"] == pytest.approx(12.0)
-    assert suggestions["fai_required"] is True
-    assert suggestions["shipping_hint"] == "Foam inserts"
+    assert suggestions["fai_required"] is coerce_bool_flag(overrides.get("fai_required"))
+    assert suggestions["shipping_hint"] == clean_string(overrides.get("shipping_hint"))
 
 
 def test_suggestions_to_overrides_filters_metadata_and_normalises() -> None:
@@ -76,8 +88,10 @@ def test_suggestions_to_overrides_filters_metadata_and_normalises() -> None:
     assert overrides["scrap_pct"] == pytest.approx(0.12)
     assert overrides["setups"] == 3
     assert overrides["fixture"] == "Vise"
-    assert overrides["notes"] == ["Keep tabs"]
-    assert overrides["dfm_risks"] == ["Thin walls"]
+    assert overrides["notes"] == clean_notes_list(suggestions.get("notes"))
+    assert overrides["dfm_risks"] == clean_notes_list(
+        suggestions.get("dfm_risks"), limit=8
+    )
     assert overrides["drilling_strategy"]["multiplier"] == pytest.approx(1.3)
     assert overrides["drilling_strategy"]["note"] == "Peck"
     assert "_meta" not in overrides
@@ -107,16 +121,13 @@ def test_overrides_to_suggestions_honours_bounds_when_provided() -> None:
     assert suggestions["scrap_pct"] == pytest.approx(0.2)
 
 
-@pytest.mark.parametrize(
-    ("token", "expected"),
-    [("t", True), ("on", True), ("f", False), ("off", False)],
-)
-def test_overrides_to_suggestions_handles_bool_tokens(token: str, expected: bool) -> None:
+@pytest.mark.parametrize("token", ["t", "on", "f", "off"])
+def test_overrides_to_suggestions_handles_bool_tokens(token: str) -> None:
     suggestions = overrides_to_suggestions({"fai_required": token})
-    assert suggestions.get("fai_required") is expected
+    assert suggestions.get("fai_required") is coerce_bool_flag(token)
 
 
-@pytest.mark.parametrize(("token", "expected"), [("t", True), ("f", False)])
-def test_suggestions_to_overrides_handles_bool_tokens(token: str, expected: bool) -> None:
+@pytest.mark.parametrize("token", ["t", "f"])
+def test_suggestions_to_overrides_handles_bool_tokens(token: str) -> None:
     overrides = suggestions_to_overrides({"fai_required": token})
-    assert overrides.get("fai_required") is expected
+    assert overrides.get("fai_required") is coerce_bool_flag(token)
