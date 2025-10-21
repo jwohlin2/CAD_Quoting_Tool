@@ -280,6 +280,9 @@ def load_backup_prices_csv(path: str | None = None) -> Dict[str, Dict[str, float
     return out
 
 
+_ORIGINAL_LOAD_BACKUP_PRICES_CSV = load_backup_prices_csv
+
+
 def resolve_material_unit_price(display_name: str, unit: str = "kg") -> tuple[float, str]:
     """Resolve a material price in the requested unit with layered fallbacks."""
 
@@ -307,8 +310,8 @@ def resolve_material_unit_price(display_name: str, unit: str = "kg") -> tuple[fl
     def _load_prices(path: str | None = None) -> Dict[str, Dict[str, float | str]]:
         from cad_quoter import pricing as pricing_pkg
 
-        package_loader = getattr(pricing_pkg, "load_backup_prices_csv", load_backup_prices_csv)
-        if package_loader is load_backup_prices_csv:
+        package_loader = getattr(pricing_pkg, "load_backup_prices_csv", None)
+        if package_loader in (None, _ORIGINAL_LOAD_BACKUP_PRICES_CSV):
             return load_backup_prices_csv(path)
         return package_loader(path)
 

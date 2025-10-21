@@ -13,6 +13,9 @@ Matcher = Callable[[Any, str], Any]
 PctFunc = Callable[[Any, float | None], float | None]
 TimeAggregator = Callable[..., float]
 
+TIME_RE = r"\b(?:hours?|hrs?|hr|time|min(?:ute)?s?)\b"
+MONEY_RE = r"(?:rate|/hr|per\s*hour|per\s*hr|price|cost|\$)"
+
 
 def _as_bool_mask(mask: Any, fallback_length: int) -> Any:
     """Return *mask* coerced to a pandas ``Series`` when possible."""
@@ -150,6 +153,61 @@ def num_pct(
     return pct_func(base, default)
 
 
+def sum_time_from_series(
+    items: Any,
+    values: Any,
+    data_types: Any,
+    mask: Any,
+    *,
+    default: float = 0.0,
+    exclude_mask: Any | None = None,
+) -> float:
+    """Aggregate hour totals from worksheet-like series, minutes-aware."""
+
+    if pd is None:
+        raise RuntimeError("pandas required (install pandas) to aggregate time values")
+
+    try:
+        if not mask.any():
+            return float(default)
+    except Exception:
+        return float(default)
+
+    looks_time = items.str.contains(TIME_RE, case=False, regex=True, na=False)
+    looks_money = items.str.contains(MONEY_RE, case=False, regex=True, na=False)
+    typed_money = data_types.str.contains(r"(?:rate|currency|price|cost)", case=False, na=False)
+
+    excl = looks_money | typed_money
+    if exclude_mask is not None:
+        try:
+            excl = excl | exclude_mask
+        except Exception:
+            pass
+
+    matched = mask & ~excl & looks_time
+    try:
+        if not matched.any():
+            return float(default)
+    except Exception:
+        return float(default)
+
+    numeric_candidates = pd.to_numeric(values[matched], errors="coerce")
+    mask_numeric = pd.notna(numeric_candidates)
+    try:
+        has_numeric = mask_numeric.any()
+    except Exception:
+        has_numeric = any(bool(flag) for flag in mask_numeric)
+    if not has_numeric:
+        return float(default)
+
+    mins_mask = items.str.contains(r"\bmin(?:ute)?s?\b", case=False, regex=True, na=False) & matched
+    hrs_mask = matched & ~mins_mask
+
+    hrs_sum = pd.to_numeric(values[hrs_mask], errors="coerce").fillna(0.0).sum()
+    mins_sum = pd.to_numeric(values[mins_mask], errors="coerce").fillna(0.0).sum()
+    return float(hrs_sum) + float(mins_sum) / 60.0
+
+
 def sum_time(
     items: Any,
     values: Any,
@@ -238,6 +296,7 @@ __all__ = [
     "num",
     "strv",
     "num_pct",
+    "sum_time_from_series",
     "sum_time",
     "sheet_num",
     "sheet_pct",

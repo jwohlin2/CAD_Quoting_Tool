@@ -1,36 +1,37 @@
+from __future__ import annotations
+
+import sys
+import types
+
 import pytest
 
-import appV5
+import cad_quoter.pricing.materials as materials
 
 
-class _FailingPricingEngine:
-    def get_usd_per_kg(self, *args, **kwargs):
+def test_resolve_material_unit_price_uses_csv_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(materials, "_maybe_get_mcmaster_price", lambda *_args, **_kwargs: None)
+
+    wieland_module = types.ModuleType("cad_quoter.pricing.wieland_scraper")
+
+    def _fail_live_price(*_args, **_kwargs):
         raise RuntimeError("providers unavailable")
 
+    wieland_module.get_live_material_price = _fail_live_price  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "cad_quoter.pricing.wieland_scraper", wieland_module)
 
-def test_compute_material_cost_uses_csv_fallback(monkeypatch):
-    monkeypatch.setattr(appV5, "lookup_wieland_price", lambda _c: (None, ""))
+    def _fake_loader(_path: str | None = None) -> dict[str, dict[str, float | str]]:
+        key = materials.normalize_material_key("Aluminum 6061")
+        return {key: {"usd_per_kg": 200.0, "usd_per_lb": 200.0 / materials.LB_PER_KG}}
 
-    mass_kg = 2.0
-    scrap = 0.0
-    overrides = {}
-    vendor_csv = None
+    monkeypatch.setattr(materials, "load_backup_prices_csv", _fake_loader)
 
     material_name = "Aluminum 6061"
-    cost, detail = appV5.compute_material_cost(
-        material_name,
-        mass_kg,
-        scrap,
-        overrides,
-        vendor_csv,
-        pricing=_FailingPricingEngine(),
-    )
+    price, source = materials.resolve_material_unit_price(material_name, unit="kg")
 
-    expected_unit_price, expected_source = appV5._resolve_material_unit_price(
-        material_name,
-        unit="kg",
-    )
-    assert detail["unit_price_usd_per_kg"] == pytest.approx(expected_unit_price)
-    assert detail["source"].startswith("backup_csv")
-    assert detail["source"].endswith(appV5.BACKUP_CSV_NAME)
-    assert cost == pytest.approx(mass_kg * expected_unit_price)
+    assert price == pytest.approx(200.0)
+    assert source.startswith("backup_csv")
+    assert source.endswith(materials.BACKUP_CSV_NAME)
+
+    mass_kg = 2.0
+    expected_cost = mass_kg * price
+    assert expected_cost == pytest.approx(400.0)

@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 import appV5
+from cad_quoter.pricing.validation import validate_quote_before_pricing
 from cad_quoter.app import runtime as app_runtime
 
 
@@ -240,7 +241,7 @@ def test_validate_quote_allows_small_material_cost_with_thickness() -> None:
     process_costs = {"drilling": 0.0, "milling": 0.0}
 
     try:
-        appV5.validate_quote_before_pricing(geo, process_costs, pass_through, {})
+        validate_quote_before_pricing(geo, process_costs, pass_through, {})
     except ValueError as exc:  # pragma: no cover - should not raise
         pytest.fail(f"unexpected validation error: {exc}")
 
@@ -251,7 +252,7 @@ def test_validate_quote_accepts_planner_bucket_costs() -> None:
     process_costs = {"Machine": 180.0, "Labor": 60.0}
 
     try:
-        appV5.validate_quote_before_pricing(geo, process_costs, pass_through, {})
+        validate_quote_before_pricing(geo, process_costs, pass_through, {})
     except ValueError as exc:  # pragma: no cover - should not raise
         pytest.fail(f"unexpected validation error: {exc}")
 
@@ -262,7 +263,7 @@ def test_validate_quote_blocks_when_material_unknown() -> None:
     process_costs = {"drilling": 0.0, "milling": 0.0}
 
     with pytest.raises(ValueError) as exc:
-        appV5.validate_quote_before_pricing(geo, process_costs, pass_through, {})
+        validate_quote_before_pricing(geo, process_costs, pass_through, {})
 
     assert "Material cost is near zero" in str(exc.value)
 

@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from appV5 import _sum_time_from_series
+from cad_quoter.utils.sheet_helpers import sum_time_from_series
 
 
 def _build_series(values: list[str]) -> pd.Series:
@@ -14,7 +14,7 @@ def test_sum_time_uses_default_when_only_blank_values() -> None:
     types = _build_series(["number"])
     mask = items.str.contains(r"In-Process Inspection", case=False, regex=True, na=False)
 
-    result = _sum_time_from_series(items, vals, types, mask, default=1.0)
+    result = sum_time_from_series(items, vals, types, mask, default=1.0)
 
     assert pytest.approx(result, rel=1e-6) == 1.0
 
@@ -25,7 +25,7 @@ def test_sum_time_respects_explicit_zero_values() -> None:
     types = _build_series(["number"])
     mask = items.str.contains(r"In-Process Inspection", case=False, regex=True, na=False)
 
-    result = _sum_time_from_series(items, vals, types, mask, default=1.0)
+    result = sum_time_from_series(items, vals, types, mask, default=1.0)
 
     assert pytest.approx(result, rel=1e-6) == 0.0
 
@@ -36,6 +36,6 @@ def test_sum_time_converts_minutes_to_hours() -> None:
     types = _build_series(["number"])
     mask = items.str.contains(r"Inspection", case=False, regex=True, na=False)
 
-    result = _sum_time_from_series(items, vals, types, mask, default=0.0)
+    result = sum_time_from_series(items, vals, types, mask, default=0.0)
 
     assert pytest.approx(result, rel=1e-6) == 0.5

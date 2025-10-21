@@ -9,7 +9,7 @@ from cad_quoter.domain import (
     merge_effective,
     reprice_with_effective,
 )
-from appV5 import apply_suggestions
+from cad_quoter.domain import apply_suggestions
 
 
 def test_merge_effective_clamps_and_tracks_sources() -> None:

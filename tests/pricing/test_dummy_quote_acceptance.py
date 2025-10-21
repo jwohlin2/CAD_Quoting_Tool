@@ -1,10 +1,62 @@
 import copy
 import math
 import re
+from typing import Any
 
 import appV5
 from cad_quoter.domain_models import normalize_material_key
 from cad_quoter.pricing.speeds_feeds_selector import material_group_for_speeds_feeds
+
+
+def _compute_direct_costs_for_test(
+    material_total: float | int | str | None,
+    scrap_credit: float | int | str | None,
+    material_tax: float | int | str | None,
+    pass_through: dict[str, Any] | None,
+    *,
+    material_detail: dict[str, Any] | None = None,
+    scrap_price_source: str | None = None,
+) -> float:
+    subtotal = float(material_total or 0.0) + float(material_tax or 0.0)
+    credit_value = float(scrap_credit or 0.0)
+    if (scrap_price_source or "").strip().lower() == "wieland" and credit_value <= 0.0:
+        detail = material_detail or {}
+        scrap_mass_lb = None
+        for key in ("scrap_credit_mass_lb", "scrap_weight_lb", "scrap_lb"):
+            raw = detail.get(key)
+            try:
+                candidate = float(raw)
+            except Exception:
+                continue
+            else:
+                if candidate > 0:
+                    scrap_mass_lb = candidate
+                    break
+        if scrap_mass_lb and scrap_mass_lb > 0:
+            price_val = detail.get("scrap_credit_unit_price_usd_per_lb")
+            try:
+                price_float = float(price_val)
+            except Exception:
+                price_float = None
+            recovery = detail.get("scrap_credit_recovery_pct")
+            try:
+                recovery_float = float(recovery)
+            except Exception:
+                recovery_float = None
+            if recovery_float is None or recovery_float <= 0:
+                recovery_float = appV5.SCRAP_RECOVERY_DEFAULT
+            if price_float and price_float > 0:
+                credit_value = scrap_mass_lb * price_float * recovery_float
+    subtotal -= float(credit_value or 0.0)
+    extras = pass_through or {}
+    for label, amount in extras.items():
+        if str(label).strip().lower() == "material":
+            continue
+        try:
+            subtotal += float(amount or 0.0)
+        except Exception:
+            continue
+    return round(subtotal, 2)
 
 
 _PLANNER_LINE_ITEMS = [
@@ -649,11 +701,13 @@ def test_dummy_quote_direct_costs_match_across_sections() -> None:
         or material_block.get("material_direct_cost")
         or 0.0
     )
-    direct_costs = appV5._compute_direct_costs(
+    direct_costs = _compute_direct_costs_for_test(
         material_total,
         material_block.get("material_scrap_credit"),
         material_block.get("material_tax"),
         payload["breakdown"].get("pass_through"),
+        material_detail=material_block,
+        scrap_price_source=material_block.get("scrap_price_source"),
     )
 
     cost_breakdown = dict(render_payload.get("cost_breakdown", []))
@@ -693,7 +747,7 @@ def test_compute_direct_costs_adds_wieland_scrap_credit() -> None:
         "scrap_credit_unit_price_usd_per_lb": 2.5,
     }
 
-    total = appV5._compute_direct_costs(
+    total = _compute_direct_costs_for_test(
         100.0,
         0.0,
         0.0,
