@@ -1321,7 +1321,7 @@ def _compute_drilling_removal_section(
             )
             if subtotal_minutes_val is None:
                 subtotal_minutes_val = subtotal_minutes
-            drill_minutes_subtotal = float(subtotal_minutes_val or 0.0)
+            drill_minutes_subtotal = round(float(subtotal_minutes_val or 0.0), 2)
             total_minutes_val = (
                 _coerce_float_or_none(dtph_map.get("total_minutes_with_toolchange"))
                 or _coerce_float_or_none(dtph_map.get("total_minutes"))
@@ -1330,7 +1330,7 @@ def _compute_drilling_removal_section(
                 total_minutes_val = drill_minutes_subtotal + total_tool_minutes
             total_minutes_val = float(total_minutes_val or 0.0)
 
-            drill_minutes_total = float(total_minutes_val or 0.0)
+            drill_minutes_total = round(float(total_minutes_val or 0.0), 2)
             _push(lines, f"[DEBUG] drilling_minutes_total={drill_minutes_total:.2f} min")
             _push(
                 lines,
@@ -1345,11 +1345,15 @@ def _compute_drilling_removal_section(
 
             extras["drill_machine_minutes"] = float(drill_minutes_subtotal)
             extras["drill_labor_minutes"] = float(total_tool_minutes)
-            extras["drill_total_minutes"] = round(drill_minutes_subtotal, 2)
+            extras["drill_total_minutes"] = drill_minutes_subtotal
             extras["removal_drilling_minutes_subtotal"] = float(drill_minutes_subtotal)
             extras["removal_drilling_minutes"] = float(drill_minutes_total)
             if drill_minutes_total > 0.0:
                 extras["removal_drilling_hours"] = minutes_to_hours(drill_minutes_total)
+
+            logging.debug(
+                "[removal] drill_total_minutes=%s", extras.get("drill_total_minutes")
+            )
 
             meta_min = (((process_plan_summary or {}).get("drilling") or {}).get("total_minutes_billed"))
             removal_min = (extras or {}).get("drill_total_minutes", 0.0)
@@ -5476,6 +5480,15 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     machine_minutes_snapshot = max(0.0, float(drill_machine_minutes_estimate or 0.0))
     labor_minutes_snapshot = max(0.0, float(drill_tool_minutes_estimate or 0.0))
     total_minutes_snapshot = float(drill_total_minutes_estimate or 0.0)
+    if (
+        removal_drilling_hours_precise is not None
+        and math.isfinite(removal_drilling_hours_precise)
+    ):
+        hours_snapshot = float(removal_drilling_hours_precise)
+        if total_minutes_snapshot <= 0.0 and hours_snapshot > 0.0:
+            total_minutes_snapshot = hours_snapshot * 60.0
+        elif math.isclose(total_minutes_snapshot, hours_snapshot, rel_tol=1e-9, abs_tol=1e-6):
+            total_minutes_snapshot = hours_snapshot * 60.0
     if total_minutes_snapshot <= 0.0:
         combined_minutes = machine_minutes_snapshot + labor_minutes_snapshot
         if combined_minutes > 0.0:
@@ -5504,7 +5517,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if isinstance(extra_map, _MutableMappingABC):
             extra_map["drill_machine_minutes"] = float(machine_minutes_snapshot)
             extra_map["drill_labor_minutes"] = float(labor_minutes_snapshot)
-            extra_map["drill_total_minutes"] = float(total_minutes_snapshot)
+            minutes_value = round(float(total_minutes_snapshot or 0.0), 2)
+            extra_map["drill_total_minutes"] = minutes_value
+            logging.debug("[removal] drill_total_minutes=%s", minutes_value)
             return extra_map
         return None
 
