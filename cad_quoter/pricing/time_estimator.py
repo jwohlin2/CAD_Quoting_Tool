@@ -17,8 +17,14 @@ calculations.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import ceil, radians, tan
 from typing import Any, Mapping
+
+from cad_quoter.pricing.feed_math import (
+    approach_allowance_for_drill,
+    ipm_from_feed,
+    passes_for_depth,
+    rpm_from_sfm,
+)
 
 __all__ = [
     "MachineParams",
@@ -96,16 +102,6 @@ class _RowView:
             return row[name]  # type: ignore[index]
         except Exception:
             return None
-
-
-def rpm_from_sfm(sfm: float | None, diameter_in: float | None) -> float:
-    """Convert surface feet per minute to spindle RPM."""
-
-    sfm_val = to_num(sfm, 0.0)
-    diameter = max(to_num(diameter_in, 0.0), 1e-6)
-    return (sfm_val * 3.82) / diameter
-
-
 def pick_feed_value(row: _RowView, diameter_in: float | None) -> float | None:
     """Choose the appropriate feed value based on the tool diameter."""
 
@@ -138,58 +134,6 @@ def _precomputed_value(precomputed: Mapping[str, Any] | None, key: str) -> float
     except AttributeError:  # pragma: no cover - defensive
         return None
     return to_num(value)
-
-
-def ipm_from_feed(
-    feed_type: str,
-    feed_val: float | None,
-    rpm: float | None,
-    teeth_z: int | None,
-    *,
-    linear_cut_rate_ipm: float | None = None,
-) -> float:
-    """Convert a chip-load style feed to linear inches per minute."""
-
-    rpm_val = to_num(rpm, 0.0) or 0.0
-    if feed_type == "fz":
-        z = max(int(teeth_z or 1), 1)
-        return (feed_val or 0.0) * z * rpm_val
-    if feed_type in {"ipr", "fpr", "pitch"}:
-        return (feed_val or 0.0) * rpm_val
-    if feed_type == "linear":
-        return to_num(linear_cut_rate_ipm, 0.0) or 0.0
-    return 0.0
-
-
-def passes_for_depth(
-    depth_in: float | None,
-    doc_axial_in: Any,
-    pass_override: int | None = None,
-) -> tuple[int, float]:
-    """Return the number of passes and the per-pass step."""
-
-    depth = to_num(depth_in, 0.0) or 0.0
-    if pass_override is not None:
-        passes = max(int(pass_override), 1)
-        return passes, depth / passes if passes else depth
-    doc = max(to_num(doc_axial_in, 0.0) or 0.0, 1e-6)
-    passes = max(int(ceil(max(depth, 0.0) / doc)), 1)
-    return passes, depth / passes if passes else depth
-
-
-def approach_allowance_for_drill(
-    diameter_in: float | None,
-    point_angle_deg: float | None = None,
-) -> float:
-    """Approximate additional penetration required for the drill point."""
-
-    diameter = to_num(diameter_in, 0.0) or 0.0
-    if point_angle_deg is None:
-        return 0.3 * diameter
-    angle = max(float(point_angle_deg), 1e-6)
-    return 0.5 * diameter * tan(radians(90.0 - (angle / 2.0)))
-
-
 def cap_ipm_by_hp(
     ipm: float,
     operation: str,
