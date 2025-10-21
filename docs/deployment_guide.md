@@ -36,6 +36,7 @@ Create an archive (`zip`, `tar.gz`, etc.) containing the repository root, the
 Inside the extracted directory run:
 
 ```bash
+export PIP_EXTRA_INDEX_URL="https://<your-private-index>/simple/"
 python -m venv .venv
 # PowerShell: .venv\Scripts\Activate.ps1
 source .venv/bin/activate  # bash/zsh
@@ -43,15 +44,18 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-The updated `requirements.txt` file pins the core runtime libraries used by the
-UI (Tkinter standard lib) and backend subsystems: pandas and openpyxl for
-spreadsheet ingestion, OCC/trimesh/ezdxf for CAD processing, and
-`llama-cpp-python` for the local LLM integration.【F:requirements.txt†L1-L10】
+Setting `PIP_EXTRA_INDEX_URL` (or passing `--extra-index-url` explicitly) makes
+the private package index that hosts `cad-quoter` available to `pip`. The
+updated `requirements.txt` file now pulls in the shared `cad-quoter` package in
+addition to the core runtime libraries used by the UI (Tkinter standard lib)
+and backend subsystems: pandas and openpyxl for spreadsheet ingestion,
+OCC/trimesh/ezdxf for CAD processing, and `llama-cpp-python` for the local LLM
+integration.【F:requirements.txt†L1-L11】
 
 ## 4. Configure runtime variables
 
 The configuration helper exposes the following environment variables. Set them
-per your deployment needs before launching the application.【F:cad_quoter/config.py†L15-L52】【F:cad_quoter/pricing/metals_api.py†L16-L32】
+per your deployment needs before launching the application.【F:cad_quoter_pkg/src/cad_quoter/config.py†L15-L52】【F:cad_quoter_pkg/src/cad_quoter/pricing/metals_api.py†L16-L32】
 
 | Variable | Purpose | Typical value |
 | --- | --- | --- |
@@ -96,13 +100,13 @@ environment.【F:appV5.py†L62-L79】
 
 * **Metals API** – Provide the `METALS_API_KEY` environment variable to enable
   HTTPS price fetching. Without it, the registry falls back to offline CSV
-  pricing.【F:cad_quoter/pricing/__init__.py†L62-L130】
+  pricing.【F:cad_quoter_pkg/src/cad_quoter/pricing/__init__.py†L62-L130】
 * **DXF/DWG enrichment** – Install `ezdxf` and the ODA File Converter binaries if
   you need automated DWG to DXF conversion. The geometry module exposes helper
-  diagnostics via `geometry.get_import_diagnostics_text()` to confirm availability.【F:cad_quoter/geometry/__init__.py†L19-L38】【F:cad_quoter/geometry/__init__.py†L462-L476】
+  diagnostics via `geometry.get_import_diagnostics_text()` to confirm availability.【F:cad_quoter_pkg/src/cad_quoter/geometry/__init__.py†L19-L38】【F:cad_quoter_pkg/src/cad_quoter/geometry/__init__.py†L462-L476】
 * **LLM suggestions** – Place the Qwen GGUF model alongside the application or
   configure `QWEN_GGUF_PATH`. The llama-cpp wrapper validates the presence of the
-  model file at startup.【F:cad_quoter/llm/__init__.py†L86-L129】
+  model file at startup.【F:cad_quoter_pkg/src/cad_quoter/llm/__init__.py†L86-L129】
 
 ## 8. Packaging tips
 
