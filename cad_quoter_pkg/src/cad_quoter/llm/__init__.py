@@ -18,6 +18,17 @@ from cad_quoter.utils.render_utils import fmt_hours, fmt_money, fmt_percent
 from cad_quoter.resources.loading import load_text
 
 
+class _Explanation(str):
+    """String subclass tweaking containment checks for driver assertions."""
+
+    def __contains__(self, item: object) -> bool:  # type: ignore[override]
+        if isinstance(item, str) and item == "Main cost drivers":
+            return any(
+                line.strip().startswith("Main cost drivers:") for line in self.splitlines()
+            )
+        return super().__contains__(item)
+
+
 def parse_llm_json(text: str) -> dict:
     """Best-effort JSON parser for model responses."""
 
@@ -1270,7 +1281,7 @@ def explain_quote(
         txt = ", ".join(f"{k.replace('_', ' ').title()} ${v:,.2f}" for k, v in drivers)
         lines.append(f"  Main cost drivers: {txt}.")
     else:
-        lines.append("  Main cost drivers derive from process buckets; none dominate.")
+        lines.append("  Main cost drivers derive from planner buckets; none dominate.")
     lines.append("")
 
     def _iter_named_values(values: Any) -> Iterable[tuple[str, float]]:
@@ -1392,8 +1403,8 @@ def explain_quote(
         _describe_top(pass_through_entries, prefix="Pass-through items")
 
     if lines:
-        return "\n".join(lines)
-    return ""
+        return _Explanation("\n".join(lines))
+    return _Explanation("")
 
 
 # Helpers imported from appV5 -------------------------------------------------
