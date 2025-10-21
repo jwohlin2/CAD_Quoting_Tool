@@ -508,7 +508,7 @@ def test_explain_quote_notes_drilling_from_plan_info() -> None:
     explanation = llm.explain_quote(breakdown, plan_info=plan_info)
 
     assert "Main cost drivers: Drilling $120.00." in explanation
-    assert "Cost drivers derive from planner buckets; no single dominant bucket." not in explanation
+    assert "Main cost drivers derive from planner buckets; none dominate." not in explanation
 
 
 def test_explain_quote_ignores_non_numeric_drilling_minutes() -> None:
@@ -517,7 +517,7 @@ def test_explain_quote_ignores_non_numeric_drilling_minutes() -> None:
 
     explanation = llm.explain_quote(breakdown, render_state=render_state)
 
-    assert "Cost drivers derive from planner buckets; no single dominant bucket." in explanation
+    assert "Main cost drivers derive from planner buckets; none dominate." in explanation
     assert "Main cost drivers" not in explanation
 
 
