@@ -13,6 +13,39 @@ Single-file CAD Quoter (v8)
 """
 from __future__ import annotations
 
+# ----- safe append to the current quote buffer -----
+def _push(_lines, text):
+    try:
+        if isinstance(_lines, list):
+            _lines.append(str(text))
+        else:
+            print(str(text))
+    except Exception:
+        pass
+
+
+# ----- tiny context helpers -----
+def _first_dict(*cands):
+    for c in cands:
+        if isinstance(c, dict) and c:
+            return c
+    return {}
+
+
+def _get_geo_map(*cands):
+    for c in cands:
+        if isinstance(c, dict) and isinstance(c.get("geo"), dict):
+            return c["geo"]
+    return {}
+
+
+def _get_material_group(*cands):
+    for c in cands:
+        if isinstance(c, dict) and c.get("material_group"):
+            return c["material_group"]
+    return None
+
+
 import copy
 import csv
 import importlib
