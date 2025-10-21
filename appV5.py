@@ -23,9 +23,8 @@ except Exception:
 
 from cad_quoter.utils.numeric import coerce_positive_float as _coerce_positive_float
 from cad_quoter.app.quote_doc import (
-    _build_quote_header_lines,
+    build_quote_header_lines,
     _sanitize_render_text,
-    _wrap_header_text,
 )
 
 
@@ -1984,163 +1983,6 @@ def _is_pandas_dataframe(obj: Any) -> bool:
 # Sync the estimator's drilling hours into all rendered views
 # ───────────────────────────────────────────────────────────────────────
 T = TypeVar("T")
-
-
-
-def _wrap_header_text(text: Any, page_width: int, indent: str = "") -> list[str]:
-    """Helper mirroring :func:`write_wrapped` for header content."""
-
-    if text is None:
-        return []
-    txt = str(text).strip()
-    if not txt:
-        return []
-    wrapper = textwrap.TextWrapper(width=max(10, page_width - len(indent)))
-    return [f"{indent}{chunk}" for chunk in wrapper.wrap(txt)]
-
-
-def _build_quote_header_lines(
-    *,
-    qty: int,
-    result: Mapping[str, Any] | None,
-    breakdown: Mapping[str, Any] | None,
-    page_width: int,
-    divider: str,
-    process_meta: Mapping[str, Any] | None,
-    process_meta_raw: Mapping[str, Any] | None,
-    hour_summary_entries: Mapping[str, Any] | None,
-    cfg: QuoteConfiguration | None = None,
-) -> tuple[list[str], str | None]:
-    """Construct the canonical QUOTE SUMMARY header lines."""
-
-    header_lines: list[str] = [f"QUOTE SUMMARY - Qty {qty}", divider]
-    header_lines.append("Quote Summary (structured data attached below)")
-
-    speeds_feeds_value = None
-    if isinstance(result, _MappingABC):
-        speeds_feeds_value = result.get("speeds_feeds_path")
-    if speeds_feeds_value in (None, "") and isinstance(breakdown, _MappingABC):
-        speeds_feeds_value = breakdown.get("speeds_feeds_path")
-    path_text = str(speeds_feeds_value).strip() if speeds_feeds_value else ""
-
-    speeds_feeds_loaded_display: bool | None = None
-    for source in (result, breakdown):
-        if not isinstance(source, _MappingABC):
-            continue
-        if "speeds_feeds_loaded" in source:
-            raw_flag = source.get("speeds_feeds_loaded")
-            speeds_feeds_loaded_display = None if raw_flag is None else bool(raw_flag)
-            break
-
-    if speeds_feeds_loaded_display is True:
-        status_suffix = " (loaded)"
-    elif speeds_feeds_loaded_display is False:
-        status_suffix = " (not loaded)"
-    else:
-        status_suffix = ""
-
-    if path_text:
-        header_lines.extend(
-            _wrap_header_text(
-                f"Speeds/Feeds CSV: {path_text}{status_suffix}",
-                page_width,
-            )
-        )
-    elif status_suffix:
-        header_lines.extend(
-            _wrap_header_text(
-                f"Speeds/Feeds CSV: (not set){status_suffix}",
-                page_width,
-            )
-        )
-    else:
-        header_lines.append("Speeds/Feeds CSV: (not set)")
-
-    def _coerce_pricing_source(value: Any) -> str | None:
-        if value is None:
-            return None
-        text = str(value).strip()
-        if not text:
-            return None
-        lowered = text.lower()
-        # normalize synonyms
-        if lowered in {"legacy", "est", "estimate", "estimator"}:
-            return "estimator"
-        if lowered in {"plan", "planner"}:
-            return "planner"
-        return text
-
-    raw_pricing_source = None
-    pricing_source_display = None
-    if isinstance(breakdown, _MappingABC):
-        raw_pricing_source = _coerce_pricing_source(breakdown.get("pricing_source"))
-        if raw_pricing_source:
-            pricing_source_display = str(raw_pricing_source).title()
-
-    used_planner_flag: bool | None = None
-    for source in (result, breakdown):
-        if not isinstance(source, _MappingABC):
-            continue
-        for meta_key in ("app_meta", "app"):
-            candidate = source.get(meta_key)
-            if not isinstance(candidate, _MappingABC):
-                continue
-            if "used_planner" in candidate:
-                try:
-                    used_planner_flag = bool(candidate.get("used_planner"))
-                except Exception:
-                    used_planner_flag = True if candidate.get("used_planner") else False
-                break
-        if used_planner_flag is not None:
-            break
-
-    pricing_source_value = resolve_pricing_source_value(
-        raw_pricing_source,
-        used_planner=used_planner_flag,
-        process_meta=process_meta if isinstance(process_meta, _MappingABC) else None,
-        process_meta_raw=process_meta_raw if isinstance(process_meta_raw, _MappingABC) else None,
-        breakdown=breakdown if isinstance(breakdown, _MappingABC) else None,
-        hour_summary_entries=hour_summary_entries,
-        cfg=cfg,
-    )
-
-    # === HEADER: PRICING SOURCE OVERRIDE ===
-    if getattr(cfg, "prefer_removal_drilling_hours", False):
-        normalized_value = (
-            str(pricing_source_value).strip().lower()
-            if pricing_source_value is not None
-            else ""
-        )
-        if not normalized_value or normalized_value == "legacy":
-            pricing_source_value = "Estimator"
-            pricing_source_display = "Estimator"
-
-    normalized_pricing_source: str | None = None
-    if pricing_source_value is not None:
-        normalized_pricing_source = str(pricing_source_value).strip()
-        if not normalized_pricing_source:
-            normalized_pricing_source = None
-
-    if normalized_pricing_source:
-        normalized_pricing_source_lower = normalized_pricing_source.lower()
-        raw_pricing_source_lower = (
-            str(raw_pricing_source).strip().lower() if raw_pricing_source is not None else None
-        )
-
-        if (
-            isinstance(breakdown, _MutableMappingABC)
-            and raw_pricing_source_lower != normalized_pricing_source_lower
-        ):
-            breakdown["pricing_source"] = pricing_source_value
-
-        pricing_source_display = normalized_pricing_source.title()
-
-    if pricing_source_display:
-        display_value = pricing_source_display
-        header_lines.append(f"Pricing Source: {display_value}")
-
-    return header_lines, pricing_source_value
-
 def _count_recognized_ops(plan_summary: Mapping[str, Any] | None) -> int:
     """Return a conservative count of recognized planner operations."""
 
@@ -3352,6 +3194,30 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             return False
         return False
 
+    def _extract_llm_debug_override(container: Mapping[str, Any] | None) -> bool | None:
+        if not isinstance(container, _MappingABC):
+            return None
+        if "llm_debug_enabled" in container:
+            value = container.get("llm_debug_enabled")
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (int, float)):
+                return bool(value)
+            if isinstance(value, str):
+                lowered = value.strip().lower()
+                if lowered in {"1", "true", "t", "yes", "y", "on"}:
+                    return True
+                if lowered in {"0", "false", "f", "no", "n", "off", ""}:
+                    return False
+                return None
+            return bool(value)
+        for meta_key in ("app", "app_meta"):
+            meta = container.get(meta_key)
+            override = _extract_llm_debug_override(meta) if isinstance(meta, _MappingABC) else None
+            if override is not None:
+                return override
+        return None
+
     llm_debug_enabled_flag = bool(APP_ENV.llm_debug_enabled)
 
     for source in (result, breakdown):
@@ -3630,30 +3496,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if txt:
             write_line(str(txt), indent)
 
-    def _extract_llm_debug_override(container: Mapping[str, Any] | None) -> bool | None:
-        if not isinstance(container, _MappingABC):
-            return None
-        if "llm_debug_enabled" in container:
-            value = container.get("llm_debug_enabled")
-            if isinstance(value, bool):
-                return value
-            if isinstance(value, (int, float)):
-                return bool(value)
-            if isinstance(value, str):
-                lowered = value.strip().lower()
-                if lowered in {"1", "true", "t", "yes", "y", "on"}:
-                    return True
-                if lowered in {"0", "false", "f", "no", "n", "off", ""}:
-                    return False
-                return None
-            return bool(value)
-        for meta_key in ("app", "app_meta"):
-            meta = container.get(meta_key)
-            override = _extract_llm_debug_override(meta) if isinstance(meta, _MappingABC) else None
-            if override is not None:
-                return override
-        return None
-
     hour_summary_entries: dict[str, tuple[float, bool]] = {}
     ui_vars = result.get("ui_vars") or {}
     if not isinstance(ui_vars, dict):
@@ -3683,7 +3525,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             buckets["drilling"]["labor_hours"] = float(buckets["drilling"].get("labor_hours") or 0.0)
     # Canonical QUOTE SUMMARY header (legacy variants removed in favour of this
     # block so the Speeds/Feeds status + Drill Debug output stay consistent).
-    header_lines, pricing_source_value = _build_quote_header_lines(
+    header_lines, pricing_source_value = build_quote_header_lines(
         qty=qty,
         result=result if isinstance(result, _MappingABC) else None,
         breakdown=breakdown if isinstance(breakdown, _MappingABC) else None,
