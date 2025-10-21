@@ -5,7 +5,7 @@ import math
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, TypedDict
+from typing import Any, Callable, Mapping, TypedDict
 from collections.abc import Iterable, Mapping as _MappingABC, MutableMapping as _MutableMappingABC, Sequence
 
 from cad_quoter.config import logger
@@ -863,6 +863,141 @@ def _seed_bucket_minutes(
     _ins("grinding", jig_min)
 
 
+def _normalize_ops_rows_from_hole_rows(rows: Iterable[Any] | None) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for row in rows or []:
+        if row is None:
+            continue
+        try:
+            qty_val = int(getattr(row, "qty", 0) or 0)
+        except Exception:
+            qty_val = 0
+        hole_val = getattr(row, "hole_id", "") or getattr(row, "letter", "") or ""
+        ref_val = (
+            getattr(row, "ref", None)
+            or getattr(row, "pilot", None)
+            or getattr(row, "drill_ref", None)
+            or ""
+        )
+        desc_val = (
+            getattr(row, "description", None)
+            or getattr(row, "desc", None)
+            or ""
+        )
+        if not desc_val:
+            parts: list[str] = []
+            for feature in list(getattr(row, "features", []) or []):
+                if not isinstance(feature, dict):
+                    continue
+                feature_type = str(feature.get("type", "")).lower()
+                side_val = str(feature.get("side", "")).upper()
+                if feature_type == "tap":
+                    thread = feature.get("thread") or ""
+                    depth = feature.get("depth_in")
+                    parts.append(
+                        f"{thread} TAP"
+                        + (
+                            f" × {depth:.2f}\"" if isinstance(depth, (int, float)) else ""
+                        )
+                        + (f" FROM {side_val}" if side_val else "")
+                    )
+                elif feature_type == "cbore":
+                    dia = feature.get("dia_in")
+                    depth = feature.get("depth_in")
+                    parts.append(
+                        f"{(dia or 0):.4f} C’BORE"
+                        + (
+                            f" × {depth:.2f}\"" if isinstance(depth, (int, float)) else ""
+                        )
+                        + (f" FROM {side_val}" if side_val else "")
+                    )
+                elif feature_type in {"csk", "countersink"}:
+                    dia = feature.get("dia_in")
+                    depth = feature.get("depth_in")
+                    parts.append(
+                        f"{(dia or 0):.4f} C’SINK"
+                        + (
+                            f" × {depth:.2f}\"" if isinstance(depth, (int, float)) else ""
+                        )
+                        + (f" FROM {side_val}" if side_val else "")
+                    )
+                elif feature_type == "drill":
+                    ref_local = feature.get("ref") or ref_val or ""
+                    thru = " THRU" if feature.get("thru", True) else ""
+                    parts.append(f"{ref_local}{thru}".strip())
+                elif feature_type == "spot":
+                    depth = feature.get("depth_in")
+                    parts.append(
+                        "C’DRILL"
+                        + (
+                            f" × {depth:.2f}\"" if isinstance(depth, (int, float)) else ""
+                        )
+                    )
+                elif feature_type == "jig":
+                    parts.append("JIG GRIND")
+            desc_val = "; ".join([part for part in parts if part])
+        normalized.append(
+            {
+                "hole": str(hole_val),
+                "ref": str(ref_val),
+                "qty": int(qty_val),
+                "desc": str(desc_val),
+            }
+        )
+    return normalized
+
+
+def _normalize_ops_rows_from_chart_ops(
+    chart_ops: Iterable[Mapping[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Collapse raw chart ops into conservative row descriptions."""
+
+    normalized: list[dict[str, Any]] = []
+    if not chart_ops:
+        return normalized
+    for op in chart_ops:
+        if not isinstance(op, dict):
+            continue
+        op_type = (op.get("type") or "").lower()
+        qty = int(round(float(op.get("qty") or 0)))
+        if qty <= 0:
+            continue
+        side = (op.get("side") or "").upper()
+        ref = str(op.get("ref") or "")
+        desc = ""
+        if op_type == "tap":
+            thread = op.get("thread") or ""
+            depth = op.get("depth_in")
+            desc = f"{thread} TAP" + (
+                f" × {depth:.2f}\"" if isinstance(depth, (int, float)) else ""
+            ) + (f" FROM {side}" if side else "")
+        elif op_type == "cbore":
+            dia = op.get("dia_in")
+            depth = op.get("depth_in")
+            desc = f"{(dia or 0):.4f} C’BORE" + (
+                f" × {depth:.2f}\"" if isinstance(depth, (int, float)) else ""
+            ) + (f" FROM {side}" if side else "")
+        elif op_type in {"csk", "countersink"}:
+            dia = op.get("dia_in")
+            depth = op.get("depth_in")
+            desc = f"{(dia or 0):.4f} C’SINK" + (
+                f" × {depth:.2f}\"" if isinstance(depth, (int, float)) else ""
+            ) + (f" FROM {side}" if side else "")
+        elif op_type == "spot":
+            depth = op.get("depth_in")
+            desc = "C’DRILL" + (
+                f" × {depth:.2f}\"" if isinstance(depth, (int, float)) else ""
+            )
+        elif op_type == "jig":
+            desc = "JIG GRIND"
+        elif op_type == "drill":
+            thru = " THRU" if (op.get("thru", True)) else ""
+            desc = f"{ref}{thru}".strip()
+        if desc:
+            normalized.append({"hole": "", "ref": ref, "qty": qty, "desc": desc})
+    return normalized
+
+
 def _hole_table_minutes_from_geo(
     geo: Mapping[str, Any] | None,
 ) -> tuple[float, float, float, float]:
@@ -1436,6 +1571,8 @@ __all__ = [
     "_display_rate_for_row",
     "_sync_drilling_bucket_view",
     "_seed_bucket_minutes",
+    "_normalize_ops_rows_from_hole_rows",
+    "_normalize_ops_rows_from_chart_ops",
     "_hole_table_minutes_from_geo",
     "_charged_hours_by_bucket",
     "_planner_bucket_key_for_name",
