@@ -15,11 +15,22 @@ Single-file CAD Quoter (v8)
 from __future__ import annotations
 
 import sys
+from io import TextIOWrapper
+from pathlib import Path
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8")  # py3.7+
-except Exception:
-    pass
+_stdout = sys.stdout
+if isinstance(_stdout, TextIOWrapper):
+    try:
+        _stdout.reconfigure(encoding="utf-8")  # py3.7+
+    except Exception:
+        pass
+
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_PKG_SRC = _SCRIPT_DIR / "cad_quoter_pkg" / "src"
+if _PKG_SRC.is_dir():
+    _pkg_src_str = str(_PKG_SRC)
+    if _pkg_src_str not in sys.path:
+        sys.path.insert(0, _pkg_src_str)
 
 from cad_quoter.app.quote_doc import (
     build_quote_header_lines,
@@ -36,7 +47,6 @@ import os
 import logging
 import re
 import time
-import typing
 from functools import cmp_to_key, lru_cache
 from typing import Any, Mapping, MutableMapping, Sequence, TYPE_CHECKING, TypeAlias
 from collections import Counter, defaultdict
@@ -50,7 +60,6 @@ from collections.abc import (
 )
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
-from pathlib import Path
 
 from cad_quoter.app._value_utils import (
     _format_value,
@@ -75,6 +84,44 @@ def _coerce_positive_float(value: _AnyForCoerce) -> float | None:
     except Exception:
         pass
     return number if number > 0 else None
+
+
+_MM_DIM_TOKEN = re.compile(
+    r"(?:Ø|⌀|DIA|REF)?\s*((?:\d+\s*/\s*\d+)|(?:\d+(?:\.\d+)?))\s*(?:MM|MILLIM(?:E|E)T(?:E|)RS?)",
+    re.IGNORECASE,
+)
+
+
+def _parse_dim_to_mm(value: Any) -> float | None:
+    """Parse a dimension string containing millimeter units to a float value."""
+
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            mm_val = float(value)
+        except Exception:
+            return None
+        return mm_val if math.isfinite(mm_val) and mm_val > 0 else None
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    match = _MM_DIM_TOKEN.search(text)
+    if not match:
+        return None
+
+    token = match.group(1).replace(" ", "")
+    try:
+        if "/" in token:
+            mm_val = float(Fraction(token))
+        else:
+            mm_val = float(token)
+    except Exception:
+        return None
+
+    return mm_val if math.isfinite(mm_val) and mm_val > 0 else None
 from cad_quoter.app.chart_lines import (
     collect_chart_lines_context as _collect_chart_lines_context,
 )
@@ -96,10 +143,12 @@ from cad_quoter.app.hole_ops import (
     _aggregate_hole_entries,
     _classify_thread_spec,
     _dedupe_hole_entries,
+    _DIA_TOKEN,
     _major_diameter_from_thread,
     _normalize_hole_text,
     _parse_hole_line,
     _parse_ref_to_inch,
+    _SPOT_TOKENS,
     summarize_hole_chart_lines,
 )
 from cad_quoter.app.container import (
@@ -266,64 +315,6 @@ def _seed_bucket_minutes_cost(
     entry["total$"] = round(entry["machine$"] + entry["labor$"], 2)
 
 
-def _infer_rect_from_holes(geo: Mapping[str, Any] | None) -> tuple[float, float]:
-    """Infer a rectangular blank size (W,H in inches) from geo context.
-
-    Tries, in order:
-    - required_blank_in / bbox_in maps with numeric w/h (inches)
-    - plate_len/plate_wid (inches) or synonyms
-    - derived or top-level bbox_mm converted to inches
-    - conservative guess based on hole diameters (4× max diameter)
-    """
-
-    if not isinstance(geo, _MappingABC):
-        return (0.0, 0.0)
-
-    def _wh_from(container: Mapping[str, Any] | None) -> tuple[float, float]:
-        if not isinstance(container, _MappingABC):
-            return (0.0, 0.0)
-        w = _coerce_positive_float(container.get("w"))
-        h = _coerce_positive_float(container.get("h"))
-        return (float(w) if w else 0.0, float(h) if h else 0.0)
-
-    w, h = _wh_from(geo.get("required_blank_in"))
-    if w > 0 and h > 0:
-        return (w, h)
-    w, h = _wh_from(geo.get("bbox_in"))
-    if w > 0 and h > 0:
-        return (w, h)
-
-    L_in = _coerce_positive_float(geo.get("plate_len_in") or geo.get("plate_length_in"))
-    W_in = _coerce_positive_float(geo.get("plate_wid_in") or geo.get("plate_width_in"))
-    if L_in and W_in:
-        return (float(W_in), float(L_in))
-
-    derived = geo.get("derived") if isinstance(geo, _MappingABC) else None
-    bbox_mm = None
-    if isinstance(derived, _MappingABC):
-        bbox_mm = derived.get("bbox_mm")
-    if not bbox_mm:
-        bbox_mm = geo.get("bbox_mm")
-    if isinstance(bbox_mm, (list, tuple)) and len(bbox_mm) >= 2:
-        mm_w = _coerce_positive_float(bbox_mm[0])
-        mm_h = _coerce_positive_float(bbox_mm[1])
-        if mm_w and mm_h:
-            return (float(mm_w) / 25.4, float(mm_h) / 25.4)
-
-    max_d_in = 0.0
-    diams_mm = geo.get("hole_diams_mm")
-    if isinstance(diams_mm, Sequence) and not isinstance(diams_mm, (str, bytes, bytearray)):
-        for d in diams_mm:
-            d_mm = _coerce_positive_float(d)
-            if d_mm and d_mm > 0:
-                max_d_in = max(max_d_in, float(d_mm) / 25.4)
-    if max_d_in > 0:
-        guess = max(2.0, max_d_in * 4.0)
-        return (guess, guess)
-
-    return (0.0, 0.0)
-
-
 def _emit_hole_table_ops_cards(
     lines: list[str],
     *,
@@ -453,6 +444,7 @@ from cad_quoter.geometry.dxf_enrich import (
 from cad_quoter.pricing.process_buckets import BUCKET_ROLE, PROCESS_BUCKETS, bucketize
 
 import cad_quoter.geometry as geometry
+from cad_quoter.geometry import upsert_var_row as geometry_upsert_var_row
 
 
 
@@ -788,7 +780,7 @@ def _resolve_part_thickness_in(
     return float(default)
 
 
-def _finalize_tap_row(row: dict[str, Any], thickness_in: float) -> None:
+def _finalize_tap_row(row: MutableMapping[str, Any], thickness_in: float) -> None:
     thread = row.get("thread") or row.get("desc") or ""
     ipr = _thread_ipr(thread)
     dia = _derive_major_dia_in(thread)
@@ -870,7 +862,7 @@ def _render_ops_card(
     append_line: Callable[[str], None],
     *,
     title: str,
-    rows: list[dict],
+    rows: Sequence[Mapping[str, Any]],
 ) -> float:
     if not rows:
         return 0.0
@@ -1056,12 +1048,18 @@ def _compute_drilling_removal_section(
 
     ops_hole_count_from_table = 0
 
-    dtph_map = (
+    dtph_map_candidate = (
         drilling_time_per_hole
         if isinstance(drilling_time_per_hole, _MappingABC)
         else None
     )
-    dtph_rows = dtph_map.get("rows") if isinstance(dtph_map, _MappingABC) else None
+    dtph_map: Mapping[str, Any]
+    if isinstance(dtph_map_candidate, _MappingABC):
+        dtph_map = typing.cast(Mapping[str, Any], dtph_map_candidate)
+    else:
+        dtph_map = {}
+
+    dtph_rows = dtph_map.get("rows")
     if isinstance(dtph_rows, list) and dtph_rows:
         sanitized_rows: list[dict[str, Any]] = []
         subtotal_minutes = 0.0
@@ -1205,9 +1203,17 @@ def _compute_drilling_removal_section(
                 labor_rate_per_hr=drill_lrate,
             )
 
-            try:
-                dbg_entry = (bucket_view_obj.get("buckets") or {}).get("drilling", {})
-            except Exception:
+            dbg_entry: Mapping[str, Any] | None = None
+            if isinstance(bucket_view_obj, _MappingABC):
+                try:
+                    buckets_snapshot = bucket_view_obj.get("buckets")
+                except Exception:
+                    buckets_snapshot = None
+                if isinstance(buckets_snapshot, _MappingABC):
+                    dbg_entry = typing.cast(
+                        Mapping[str, Any], buckets_snapshot
+                    ).get("drilling")
+            if not isinstance(dbg_entry, _MappingABC):
                 dbg_entry = {}
             _push(lines, f"[DEBUG] drilling_bucket={dbg_entry}")
 
@@ -1400,6 +1406,10 @@ def _estimate_drilling_minutes_from_meta(
 
     if not isinstance(drilling_meta, _MappingABC):
         return (0.0, 0.0, 0.0, {})
+
+    drilling_meta_map: Mapping[str, Any] | MutableMapping[str, Any] = typing.cast(
+        Mapping[str, Any] | MutableMapping[str, Any], drilling_meta
+    )
 
     try:
         index_min = float(drilling_meta.get("index_min_per_hole") or 0.0)
@@ -1915,12 +1925,12 @@ def _recognized_line_items_from_planner(pricing_result: Mapping[str, Any] | None
 import cad_quoter.geometry as geometry
 
 # Re-export legacy OCCT helpers via cad_quoter.geometry.
-FACE_OF = geometry.FACE_OF
-ensure_face = geometry.ensure_face
-face_surface = geometry.face_surface
-iter_faces = geometry.iter_faces
-linear_properties = geometry.linear_properties
-map_shapes_and_ancestors = geometry.map_shapes_and_ancestors
+FACE_OF = typing.cast(Any, getattr(geometry, "FACE_OF"))
+ensure_face = typing.cast(Any, getattr(geometry, "ensure_face"))
+face_surface = typing.cast(Any, getattr(geometry, "face_surface"))
+iter_faces = typing.cast(Any, getattr(geometry, "iter_faces"))
+linear_properties = typing.cast(Any, getattr(geometry, "linear_properties"))
+map_shapes_and_ancestors = typing.cast(Any, getattr(geometry, "map_shapes_and_ancestors"))
 from cad_quoter.geo2d.apply import apply_2d_features_to_variables
 
 # Tolerance for invariant checks that guard against silent drift when rendering
@@ -8972,7 +8982,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     if not scrap_price_source:
         scrap_price_source = None
 
-    mat_block = _compute_material_block(
+    mat_block_raw = _compute_material_block(
         geo_context if isinstance(geo_context, dict) else {},
         mat_key,
         _coerce_float_or_none(density),
@@ -8980,6 +8990,12 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         stock_price_source=stock_price_source,
         cfg=cfg,
     )
+    if isinstance(mat_block_raw, dict):
+        mat_block = mat_block_raw
+    elif isinstance(mat_block_raw, _MappingABC):
+        mat_block = dict(mat_block_raw)
+    else:
+        mat_block = {}
     breakdown["material_block"] = mat_block
     grams_per_lb = 1000.0 / LB_PER_KG
     material_entry = breakdown.setdefault("material", {})
@@ -14188,7 +14204,7 @@ class App(tk.Tk):
             mask = dataframe["Item"].astype(str).str.fullmatch(item, case=False)
             if mask.any():
                 return dataframe
-            return geometry.upsert_var_row(dataframe, item, value, dtype=dtype)
+            return geometry_upsert_var_row(dataframe, item, value, dtype=dtype)
 
         df = _ensure_row(df, "Scrap Percent (%)", 15.0, dtype="number")
         df = _ensure_row(df, "Plate Length (in)", 12.0, dtype="number")
@@ -14219,7 +14235,11 @@ class App(tk.Tk):
         normalized_items = items_series.apply(normalize_item_text)
         qty_mask = normalized_items.isin({"quantity", "qty", "lot size"})
         if qty_mask.any():
-            qty_raw = df.loc[qty_mask, "Example Values / Options"].iloc[0]
+            qty_column = typing.cast(
+                PandasSeries,
+                df.loc[qty_mask, "Example Values / Options"],
+            )
+            qty_raw = qty_column.iloc[0]
             try:
                 qty_value = float(str(qty_raw).strip())
             except Exception:
@@ -15105,7 +15125,7 @@ class App(tk.Tk):
         # Merge GEO rows
         try:
             for k, v in geo.items():
-                self.vars_df = geometry.upsert_var_row(self.vars_df, k, v, dtype="number")
+                self.vars_df = geometry_upsert_var_row(self.vars_df, k, v, dtype="number")
         except Exception as e:
             messagebox.showerror("Variables", f"Failed to update variables with GEO rows:\n{e}")
             self.status_var.set("Ready")
