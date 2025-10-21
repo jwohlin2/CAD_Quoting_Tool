@@ -652,6 +652,77 @@ def _compute_drilling_removal_section(
     """Return drill removal render lines + extras while updating breakdown state."""
 
     lines: list[str] = []
+
+    def _push(target: list[str], text: Any) -> None:
+        try:
+            target.append(str(text))
+        except Exception:
+            pass
+
+    pricing_buckets: MutableMapping[str, Any] | dict[str, Any] = {}
+    bucket_view_obj: MutableMapping[str, Any] | Mapping[str, Any] | None = None
+    try:
+        if isinstance(breakdown, dict):
+            bucket_view_obj = breakdown.setdefault("bucket_view", {})
+        elif isinstance(breakdown, _MutableMappingABC):
+            bucket_view_obj = typing.cast(
+                MutableMapping[str, Any],
+                breakdown.setdefault("bucket_view", {}),
+            )
+        elif isinstance(breakdown, _MappingABC):
+            bucket_view_obj = typing.cast(Mapping[str, Any], breakdown.get("bucket_view"))
+    except Exception:
+        bucket_view_obj = None
+
+    buckets_obj: MutableMapping[str, Any] | Mapping[str, Any] | None = None
+    if isinstance(bucket_view_obj, _MutableMappingABC):
+        buckets_obj = bucket_view_obj.setdefault("buckets", {})
+    elif isinstance(bucket_view_obj, dict):
+        buckets_obj = bucket_view_obj.setdefault("buckets", {})
+    elif isinstance(bucket_view_obj, _MappingABC):
+        buckets_obj = bucket_view_obj.get("buckets")
+
+    if isinstance(buckets_obj, _MutableMappingABC):
+        pricing_buckets = buckets_obj
+    elif isinstance(buckets_obj, dict):
+        pricing_buckets = buckets_obj
+        if isinstance(bucket_view_obj, _MutableMappingABC):
+            bucket_view_obj["buckets"] = pricing_buckets
+        elif isinstance(bucket_view_obj, dict):
+            bucket_view_obj["buckets"] = pricing_buckets
+    elif isinstance(buckets_obj, _MappingABC):
+        try:
+            pricing_buckets = dict(buckets_obj)
+            if isinstance(bucket_view_obj, _MutableMappingABC):
+                bucket_view_obj["buckets"] = pricing_buckets
+            elif isinstance(bucket_view_obj, dict):
+                bucket_view_obj["buckets"] = pricing_buckets
+        except Exception:
+            pricing_buckets = {}
+
+    def _seed_bucket_minutes(bucket_key: str, minutes: float) -> None:
+        try:
+            minutes_val = float(minutes)
+        except Exception:
+            return
+        if not isinstance(pricing_buckets, (_MutableMappingABC, dict)):
+            return
+        try:
+            entry = pricing_buckets.get(bucket_key) if isinstance(pricing_buckets, Mapping) else None
+            if not isinstance(entry, _MutableMappingABC):
+                if isinstance(entry, _MappingABC):
+                    entry = dict(entry)
+                elif isinstance(entry, dict):
+                    entry = entry
+                else:
+                    entry = {}
+            entry["minutes"] = minutes_val
+            if isinstance(pricing_buckets, _MutableMappingABC):
+                pricing_buckets[bucket_key] = entry  # type: ignore[index]
+            else:
+                pricing_buckets[bucket_key] = entry
+        except Exception:
+            pass
     extras: dict[str, float] = {}
     updated_plan_summary = process_plan_summary
     geo_map: Mapping[str, Any] | dict[str, Any]
@@ -781,23 +852,38 @@ def _compute_drilling_removal_section(
                 total_minutes_val = subtotal_minutes_val + total_tool_minutes
             total_minutes_val = float(total_minutes_val or 0.0)
 
-            lines.append(
-                f"Subtotal (per-hole × qty) . {subtotal_minutes_val:.2f} min  ("
-                f"{fmt_hours(subtotal_minutes_val/60.0)})"
+            drill_minutes_total = float(total_minutes_val or 0.0)
+            _push(
+                lines,
+                f"Subtotal (per-hole × qty) . {drill_minutes_total:.2f} min  ("
+                f"{fmt_hours(drill_minutes_total/60.0)})",
             )
-            lines.append(
-                f"TOTAL DRILLING (with toolchange) . {total_minutes_val:.2f} min  ("
-                f"{total_minutes_val/60.0:.2f} hr)"
+            _push(
+                lines,
+                f"TOTAL DRILLING (with toolchange) . {drill_minutes_total:.2f} min  ("
+                f"{drill_minutes_total/60.0:.2f} hr)",
             )
             lines.append("")
 
             extras["drill_machine_minutes"] = float(subtotal_minutes_val)
             extras["drill_labor_minutes"] = float(total_tool_minutes)
-            extras["drill_total_minutes"] = float(total_minutes_val)
+            extras["drill_total_minutes"] = float(drill_minutes_total)
             extras["removal_drilling_minutes_subtotal"] = float(subtotal_minutes_val)
-            extras["removal_drilling_minutes"] = float(total_minutes_val)
-            if total_minutes_val > 0.0:
-                extras["removal_drilling_hours"] = float(total_minutes_val / 60.0)
+            extras["removal_drilling_minutes"] = float(drill_minutes_total)
+            if drill_minutes_total > 0.0:
+                extras["removal_drilling_hours"] = float(drill_minutes_total / 60.0)
+
+            _seed_bucket_minutes("drilling", drill_minutes_total)
+            try:
+                dbg_entry = pricing_buckets.get("drilling") if isinstance(pricing_buckets, Mapping) else {}
+                if dbg_entry is None:
+                    dbg_entry = {}
+                _push(
+                    lines,
+                    f"[DEBUG] drilling_minutes_seeded={(dbg_entry or {}).get('minutes')}",
+                )
+            except Exception:
+                pass
 
             return extras, lines, updated_plan_summary
 
@@ -7668,10 +7754,84 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 except Exception:
                     folded[0] = existing_hr
             folded[1] = existing_include or bool(include_in_total)
+        def _extract_pricing_buckets(candidate: Any) -> Mapping[str, Any] | None:
+            if isinstance(candidate, _MutableMappingABC):
+                buckets_candidate = candidate.get("buckets")
+            elif isinstance(candidate, dict):
+                buckets_candidate = candidate.get("buckets")
+            elif isinstance(candidate, _MappingABC):
+                buckets_candidate = candidate.get("buckets")
+            else:
+                buckets_candidate = None
+            if isinstance(buckets_candidate, _MutableMappingABC):
+                return buckets_candidate
+            if isinstance(buckets_candidate, dict):
+                return buckets_candidate
+            if isinstance(buckets_candidate, _MappingABC):
+                try:
+                    return dict(buckets_candidate)
+                except Exception:
+                    return None
+            return None
+
+        pricing_bucket_candidates: list[Mapping[str, Any] | None] = []
+        pricing_bucket_candidates.append(_extract_pricing_buckets(locals().get("bucket_view_struct")))
+        breakdown_bucket_view: Any = None
+        if isinstance(breakdown, dict):
+            breakdown_bucket_view = breakdown.get("bucket_view")
+        elif isinstance(breakdown, _MappingABC):
+            breakdown_bucket_view = breakdown.get("bucket_view")
+        pricing_bucket_candidates.append(_extract_pricing_buckets(breakdown_bucket_view))
+        pricing_bucket_candidates.append(
+            _extract_pricing_buckets(locals().get("planner_bucket_view"))
+        )
+
+        pricing_buckets_for_summary: Mapping[str, Any] | None = None
+        for candidate in pricing_bucket_candidates:
+            if isinstance(candidate, Mapping) and candidate:
+                pricing_buckets_for_summary = candidate
+                break
+
+        drilling_minutes_bucket: float | None = None
+        if isinstance(pricing_buckets_for_summary, Mapping):
+            for key in ("drilling", "Drilling"):
+                bucket_entry = pricing_buckets_for_summary.get(key)
+                if isinstance(bucket_entry, (int, float)):
+                    drilling_minutes_bucket = float(bucket_entry)
+                elif isinstance(bucket_entry, _MappingABC):
+                    drilling_minutes_bucket = _coerce_float_or_none(bucket_entry.get("minutes"))
+                elif isinstance(bucket_entry, dict):
+                    drilling_minutes_bucket = _coerce_float_or_none(bucket_entry.get("minutes"))
+                if drilling_minutes_bucket is not None:
+                    break
+
         total_hours = 0.0
         for canonical_key in folded_order:
             hr_val, include_in_total = folded_entries[canonical_key]
             display_label = folded_display.get(canonical_key, "")
+            if (
+                drilling_minutes_bucket is not None
+                and str(display_label).strip().lower() == "drilling"
+            ):
+                hrs_drilling_precise = float(drilling_minutes_bucket) / 60.0
+                hrs_drilling = round(hrs_drilling_precise, 2)
+                folded_entries[canonical_key][0] = hrs_drilling
+                if isinstance(hour_summary_entries, (dict, _MutableMappingABC)):
+                    for label_key in list(hour_summary_entries.keys()):
+                        if str(label_key).strip().lower() != "drilling":
+                            continue
+                        existing_val = hour_summary_entries.get(label_key)
+                        include_flag = True
+                        if isinstance(existing_val, tuple) and len(existing_val) == 2:
+                            include_flag = bool(existing_val[1])
+                        hour_summary_entries[label_key] = (hrs_drilling, include_flag)
+                right = _h(hrs_drilling)
+                left = f"  {display_label}"
+                pad = max(1, page_width - len(left) - len(right))
+                _push(lines, f"{left}{' ' * pad}{right}")
+                if include_in_total and hrs_drilling:
+                    total_hours += hrs_drilling
+                continue
             hours_row(display_label, hr_val, indent="  ")
             if include_in_total and hr_val:
                 total_hours += hr_val
