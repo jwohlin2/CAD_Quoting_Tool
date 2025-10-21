@@ -4,25 +4,11 @@ from __future__ import annotations
 
 import math
 import re
-import typing
-from collections import Counter, defaultdict
-from collections.abc import (
-    Iterable,
-    Mapping as _MappingABC,
-    MutableMapping as _MutableMappingABC,
-    Sequence,
-)
+from collections import Counter
+from collections.abc import Iterable, Mapping, MutableMapping
 from fractions import Fraction
-from typing import Any, Mapping, MutableMapping
+from typing import Any, Callable
 
-from appkit.utils import (
-    _ipm_from_rpm_ipr,
-    _lookup_sfm_ipr,
-    _parse_thread_major_in,
-    _parse_tpi,
-    _rpm_from_sfm_diam,
-)
-from cad_quoter.domain_models.values import safe_float as _safe_float
 
 from .chart_lines import (
     _build_ops_rows_from_lines_fallback as _chart_build_ops_rows_from_lines_fallback,
@@ -268,6 +254,166 @@ def _dedupe_hole_entries(
             seen.add(fingerprint)
         unique_entries.append(entry)
     return unique_entries
+
+
+def build_ops_summary_rows_from_hole_rows(
+    hole_rows: Iterable[Any] | None,
+) -> list[dict[str, Any]]:
+    """Convert parsed hole rows into ops-summary table rows."""
+
+    summary_rows: list[dict[str, Any]] = []
+    if not hole_rows:
+        return summary_rows
+
+    for row in hole_rows:
+        if row is None:
+            continue
+
+        try:
+            qty = int(getattr(row, "qty", 0) or 0)
+        except Exception:
+            qty = 0
+
+        ref = (
+            getattr(row, "ref", None)
+            or getattr(row, "drill_ref", None)
+            or getattr(row, "pilot", None)
+            or ""
+        )
+
+        desc = (
+            getattr(row, "description", None)
+            or getattr(row, "desc", None)
+            or ""
+        )
+
+        if not desc:
+            parts: list[str] = []
+            try:
+                features = list(getattr(row, "features", []) or [])
+            except Exception:
+                features = []
+            for feature in features:
+                if not isinstance(feature, dict):
+                    continue
+                feature_type = str(feature.get("type", "")).lower()
+                side = str(feature.get("side", "")).upper()
+                if feature_type == "tap":
+                    thread = feature.get("thread") or ""
+                    depth = feature.get("depth_in")
+                    tap_desc = f"{thread} TAP" if thread else "TAP"
+                    if isinstance(depth, (int, float)):
+                        tap_desc += f" × {depth:.2f}\""
+                    if side:
+                        tap_desc += f" FROM {side}"
+                    parts.append(tap_desc)
+                elif feature_type == "cbore":
+                    dia = feature.get("dia_in")
+                    depth = feature.get("depth_in")
+                    cbore_desc = ""
+                    if isinstance(dia, (int, float)):
+                        cbore_desc += f"{dia:.4f} "
+                    cbore_desc += "C’BORE"
+                    if isinstance(depth, (int, float)):
+                        cbore_desc += f" × {depth:.2f}\""
+                    if side:
+                        cbore_desc += f" FROM {side}"
+                    parts.append(cbore_desc)
+                elif feature_type in {"csk", "countersink"}:
+                    dia = feature.get("dia_in")
+                    depth = feature.get("depth_in")
+                    csk_desc = ""
+                    if isinstance(dia, (int, float)):
+                        csk_desc += f"{dia:.4f} "
+                    csk_desc += "C’SINK"
+                    if isinstance(depth, (int, float)):
+                        csk_desc += f" × {depth:.2f}\""
+                    if side:
+                        csk_desc += f" FROM {side}"
+                    parts.append(csk_desc)
+                elif feature_type == "drill":
+                    ref_local = feature.get("ref") or ref or ""
+                    thru = " THRU" if feature.get("thru", True) else ""
+                    parts.append(f"{ref_local}{thru}".strip())
+                elif feature_type == "spot":
+                    depth = feature.get("depth_in")
+                    spot_desc = "C’DRILL"
+                    if isinstance(depth, (int, float)):
+                        spot_desc += f" × {depth:.2f}\""
+                    parts.append(spot_desc)
+                elif feature_type == "jig":
+                    parts.append("JIG GRIND")
+            desc = "; ".join(part for part in parts if part)
+
+        summary_rows.append(
+            {
+                "hole": str(
+                    getattr(row, "hole_id", "")
+                    or getattr(row, "letter", "")
+                    or ""
+                ),
+                "ref": str(ref or ""),
+                "qty": int(qty),
+                "desc": str(desc or ""),
+            }
+        )
+
+    return summary_rows
+
+
+def update_geo_ops_summary_from_hole_rows(
+    geo: MutableMapping[str, Any],
+    *,
+    hole_rows: Iterable[Any] | None = None,
+    chart_lines: Iterable[str] | None = None,
+    chart_source: str | None = None,
+    chart_summary: Mapping[str, Any] | None = None,
+    apply_built_rows: Callable[[
+        MutableMapping[str, Any] | Mapping[str, Any] | None,
+        Iterable[Mapping[str, Any]] | None,
+    ], int]
+    | None = None,
+) -> list[dict[str, Any]]:
+    """Populate geo["ops_summary"] with rows derived from hole data."""
+
+    ops_rows = build_ops_summary_rows_from_hole_rows(hole_rows)
+    if not ops_rows and chart_lines:
+        ops_rows = _chart_build_ops_rows_from_lines_fallback(chart_lines)
+
+    if not ops_rows:
+        return []
+
+    ops_summary_map = geo.setdefault("ops_summary", {})
+    ops_summary_map["rows"] = ops_rows
+    ops_summary_map["source"] = chart_source or "chart_lines"
+
+    if apply_built_rows:
+        try:
+            apply_built_rows(ops_summary_map, ops_rows)
+        except Exception:
+            pass
+
+    if chart_summary and isinstance(chart_summary, Mapping):
+        try:
+            tap_qty = int(chart_summary.get("tap_qty") or 0)
+            if tap_qty:
+                ops_summary_map["tap_total"] = tap_qty
+        except Exception:
+            pass
+        try:
+            cbore_qty = int(chart_summary.get("cbore_qty") or 0)
+            if cbore_qty:
+                ops_summary_map["cbore_total"] = cbore_qty
+        except Exception:
+            pass
+        try:
+            csk_qty = int(chart_summary.get("csk_qty") or 0)
+            if csk_qty:
+                ops_summary_map["csk_total"] = csk_qty
+        except Exception:
+            pass
+
+    return ops_rows
 
 
 def _parse_hole_line(line: str, to_in: float, *, source: str | None = None) -> dict[str, Any] | None:
@@ -516,414 +662,75 @@ def summarize_hole_chart_lines(lines: Iterable[str] | None) -> dict[str, Any]:
     }
 
 
-def _emit_tapping_card(
-    lines: list[str],
-    *,
-    geo: Mapping[str, Any] | None,
-    material_group: str | None,
-    speeds_csv: dict | None,
-    result: Mapping[str, Any] | None = None,
-    breakdown: Mapping[str, Any] | None = None,
-) -> None:
-    rows = _rows_from_ops_summary(geo, result=result, breakdown=breakdown)
-    groups: list[dict[str, Any]] = []
-    for r in rows:
-        desc = str(r.get("desc", ""))
-        desc_upper = desc.upper()
-        desc_clean = desc_upper.replace(".", "")
-        if "TAP" not in desc_upper and "NPT" not in desc_clean:
-            continue
-        qty = int(r.get("qty") or 0)
-        if qty <= 0:
-            continue
-        side = _side_of(desc)
-        match = _THREAD_WITH_TPI_RE.search(desc)
-        major_token = None
-        tpi_token = None
-        if match:
+def summarize_hole_chart_agreement(
+    entity_holes_mm: Iterable[Any] | None, chart_ops: Iterable[dict] | None
+) -> dict[str, Any]:
+    """Compare entity-detected hole sizes with chart-derived operations."""
+
+    def _as_qty(value: Any) -> int:
+        try:
+            qty = int(round(float(value)))
+        except Exception:
+            qty = 0
+        return qty if qty > 0 else 1
+
+    bin_key = lambda dia: round(float(dia), 1)
+
+    ent_bins: Counter[float] = Counter()
+    if entity_holes_mm:
+        for value in entity_holes_mm:
             try:
-                major_token = match.group(1).strip()
-                tpi_token = match.group(2).strip()
-            except IndexError:
-                match = None
-        if match and major_token and tpi_token:
-            thread = f"{major_token}-{tpi_token}"
-            tpi = _parse_tpi(thread)
-            major = _parse_thread_major_in(thread)
-        else:
-            match = _THREAD_WITH_NPT_RE.search(desc)
-            if not match:
+                dia = float(value)
+            except Exception:
                 continue
-            major_token = match.group(1).strip()
-            thread = f"{major_token}-NPT"
-            tpi = None
-            major = _parse_thread_major_in(f"{major_token}-1")
-            if major is None:
-                major = _parse_ref_to_inch(major_token)
-        depth_match = _DEPTH_TOKEN.search(desc)
-        depth_in = float(depth_match.group(1)) if depth_match else None
-        pilot = (r.get("ref") or "").strip()
-        pitch = (1.0 / float(tpi)) if tpi else None
-        sfm, _ = _lookup_sfm_ipr("tapping", major, material_group, speeds_csv)
-        rpm = _rpm_from_sfm_diam(sfm, major)
-        ipm = _ipm_from_rpm_ipr(rpm, pitch)
-        groups.append(
-            {
-                "thread": thread,
-                "side": side,
-                "qty": qty,
-                "depth_in": depth_in,
-                "pilot": pilot,
-                "pitch_ipr": None if pitch is None else round(pitch, 4),
-                "rpm": None if rpm is None else int(round(rpm)),
-                "ipm": None if ipm is None else round(ipm, 3),
-            }
-        )
-    if not groups:
-        return
-    total = sum(g["qty"] for g in groups)
-    front = sum(g["qty"] for g in groups if g["side"] == "FRONT")
-    back = total - front
-    lines += [
-        "MATERIAL REMOVAL – TAPPING",
-        "=" * 64,
-        "Inputs",
-        "  Ops ............... Tapping (front + back), pre-drill counted in drilling",
-        f"  Taps .............. {total} total  → {front} front, {back} back",
-        "  Threads ........... " + ", ".join(sorted({g["thread"] for g in groups})),
-        "",
-        "TIME PER HOLE – TAP GROUPS",
-        "-" * 66,
-    ]
-    for g in groups:
-        depth_txt = "THRU" if g["depth_in"] is None else f'{g["depth_in"]:.2f}"'
-        lines.append(
-            f'{g["thread"]} × {g["qty"]}  ({g["side"]})'
-            f'{(" | pilot " + g["pilot"]) if g.get("pilot") else ""}'
-            f" | depth {depth_txt} | {g['pitch_ipr'] if g['pitch_ipr'] is not None else '-'} ipr"
-            f" | {g['rpm'] if g['rpm'] is not None else '-'} rpm"
-            f" | {g['ipm'] if g['ipm'] is not None else '-'} ipm"
-            f" | t/hole — | group — "
-        )
-    lines.append("")
+            if dia > 0:
+                ent_bins[bin_key(dia)] += 1
 
+    chart_bins: Counter[float] = Counter()
+    tap_qty = 0
+    cbore_qty = 0
+    csk_qty = 0
+    if chart_ops:
+        for op in chart_ops:
+            if not isinstance(op, dict):
+                continue
+            op_type = str(op.get("type") or "").lower()
+            qty = _as_qty(op.get("qty"))
+            if op_type == "tap":
+                tap_qty += qty
+            if op_type == "cbore":
+                cbore_qty += qty
+            if op_type in {"csk", "countersink"}:
+                csk_qty += qty
+            if op_type != "drill":
+                continue
+            dia_raw = op.get("dia_mm")
+            if dia_raw is None:
+                continue
+            try:
+                dia_val = float(dia_raw)
+            except Exception:
+                continue
+            if dia_val <= 0:
+                continue
+            chart_bins[bin_key(dia_val)] += qty
 
-def _emit_counterbore_card(
-    lines: list[str],
-    *,
-    geo: Mapping[str, Any] | None,
-    material_group: str | None,
-    speeds_csv: dict | None,
-    result: Mapping[str, Any] | None = None,
-    breakdown: Mapping[str, Any] | None = None,
-) -> None:
-    rows = _rows_from_ops_summary(geo, result=result, breakdown=breakdown)
-    groups: defaultdict[tuple[float, str, float | None], int] = defaultdict(int)
-    order: list[tuple[float, str, float | None]] = []
-    for r in rows:
-        desc = str(r.get("desc", ""))
-        if "BORE" not in desc.upper():
-            continue
-        match = _CBORE_RE.search(desc)
-        if not match:
-            continue
-        diam_in = float(match.group(1))
-        side = _side_of(desc)
-        depth_match = _DEPTH_TOKEN.search(desc)
-        depth_in = float(depth_match.group(1)) if depth_match else None
-        key = (round(diam_in, 4), side, depth_in)
-        if key not in groups:
-            order.append(key)
-        groups[key] += int(r.get("qty") or 0)
-    if not groups:
-        return
-    items = [(key, groups[key]) for key in sorted(order, key=lambda key: (key[0], key[1]))]
-    total = sum(qty for _, qty in items)
-    front = sum(qty for (key, qty) in items if key[1] == "FRONT")
-    back = total - front
-    lines += [
-        "MATERIAL REMOVAL – COUNTERBORE",
-        "=" * 64,
-        "Inputs",
-        "  Ops ............... Counterbore (front + back)",
-        f"  Counterbores ...... {total} total  → {front} front, {back} back",
-        "",
-        "TIME PER HOLE – C’BORE GROUPS",
-        "-" * 66,
-    ]
-    for (diam_in, side, depth_in), qty in items:
-        sfm, ipr = _lookup_sfm_ipr("counterbore", diam_in, material_group, speeds_csv)
-        rpm = _rpm_from_sfm_diam(sfm, diam_in)
-        ipm = _ipm_from_rpm_ipr(rpm, ipr)
-        depth_txt = "—" if depth_in is None else f'{depth_in:.2f}"'
-        rpm_txt = "-" if rpm is None else str(int(rpm))
-        ipm_txt = "-" if ipm is None else f"{ipm:.3f}"
-        lines.append(
-            f'Ø{diam_in:.4f}" × {qty}  ({side}) | depth {depth_txt} | {rpm_txt} rpm | '
-            f"{ipm_txt} ipm | t/hole — | group — "
-        )
-    lines.append("")
+    entity_total = sum(ent_bins.values())
+    chart_total = sum(chart_bins.values())
+    max_total = max(entity_total, chart_total)
+    tolerance = max(5, 0.1 * max_total) if max_total else 5
+    agreement = abs(entity_total - chart_total) <= tolerance
 
-
-def _emit_spot_and_jig_cards(
-    lines: list[str],
-    *,
-    geo: Mapping[str, Any] | None,
-    material_group: str | None,
-    speeds_csv: dict | None,
-    result: Mapping[str, Any] | None = None,
-    breakdown: Mapping[str, Any] | None = None,
-) -> None:
-    rows = _rows_from_ops_summary(geo, result=result, breakdown=breakdown)
-    spot_qty = 0
-    spot_depth: float | None = None
-    for r in rows:
-        desc_upper = str(r.get("desc", "")).upper()
-        if ("DRILL" in desc_upper and "C" in desc_upper) and ("THRU" not in desc_upper) and (
-            "TAP" not in desc_upper
-        ):
-            depth_match = _DEPTH_TOKEN.search(desc_upper)
-            if depth_match:
-                try:
-                    spot_depth = float(depth_match.group(1))
-                except Exception:
-                    spot_depth = None
-            spot_qty += int(r.get("qty") or 0)
-    jig_qty = sum(int(r.get("qty") or 0) for r in rows if "JIG GRIND" in str(r.get("desc", "")).upper())
-    if spot_qty > 0:
-        sfm, ipr = _lookup_sfm_ipr("spot", 0.1875, material_group, speeds_csv)
-        rpm = _rpm_from_sfm_diam(sfm, 0.1875)
-        ipm = _ipm_from_rpm_ipr(rpm, ipr)
-        depth_txt = "—" if spot_depth is None else f'{spot_depth:.2f}"'
-        rpm_txt = "-" if rpm is None else str(int(round(rpm)))
-        ipm_txt = "-" if ipm is None else f"{ipm:.3f}"
-        lines += [
-            "MATERIAL REMOVAL – SPOT (CENTER DRILL)",
-            "=" * 64,
-            f"Spots .............. {spot_qty} (front-side unless noted)",
-            "TIME PER HOLE – SPOT GROUPS",
-            "-" * 66,
-            f"Spot drill × {spot_qty} | depth {depth_txt} | {rpm_txt} rpm | {ipm_txt} ipm | t/hole — | group — ",
-            "",
-        ]
-    if jig_qty > 0:
-        lines += [
-            "MATERIAL REMOVAL – JIG GRIND",
-            "=" * 64,
-            f"Jig-grind features . {jig_qty}",
-            "TIME PER FEATURE",
-            "-" * 66,
-            f"Jig grind × {jig_qty} | t/feat — | group — ",
-            "",
-        ]
-
-
-def _hole_table_section_present(lines: Sequence[str], header: str) -> bool:
-    if not header:
-        return False
-    header_norm = header.strip().upper()
-    for existing in lines:
-        if isinstance(existing, str) and existing.strip().upper() == header_norm:
-            return True
-    return False
-
-
-def _add_bucket_minutes(
-    bucket_view: Mapping[str, Any] | MutableMapping[str, Any] | None,
-    bucket_key: str,
-    minutes: float,
-    *,
-    machine_rate: float = 0.0,
-    labor_rate: float = 0.0,
-    name: str = "",
-) -> None:
-    try:
-        minutes_val = float(minutes)
-    except Exception:
-        minutes_val = 0.0
-    if minutes_val <= 0.0:
-        return
-
-    if isinstance(bucket_view, dict):
-        target_view = bucket_view
-    elif isinstance(bucket_view, _MutableMappingABC):
-        target_view = typing.cast(MutableMapping[str, Any], bucket_view)
-    else:
-        return
-
-    buckets = target_view.setdefault(
-        "buckets",
-        {},
-    )
-    if not isinstance(buckets, dict):
-        try:
-            buckets = dict(buckets)  # type: ignore[arg-type]
-        except Exception:
-            buckets = {}
-        target_view["buckets"] = buckets
-
-    entry = buckets.setdefault(
-        bucket_key,
-        {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0, "total$": 0.0},
-    )
-    try:
-        entry_minutes = float(entry.get("minutes", 0.0))
-    except Exception:
-        entry_minutes = 0.0
-    entry["minutes"] = entry_minutes + minutes_val
-
-    hours = minutes_val / 60.0
-    mach_rate = _safe_float(machine_rate, 0.0)
-    lab_rate = _safe_float(labor_rate, 0.0)
-    entry["machine$"] = float(entry.get("machine$", 0.0)) + hours * mach_rate
-    entry["labor$"] = float(entry.get("labor$", 0.0)) + hours * lab_rate
-    entry["total$"] = round(float(entry.get("machine$", 0.0)) + float(entry.get("labor$", 0.0)), 2)
-
-    ops_map = target_view.setdefault("bucket_ops", {})
-    if not isinstance(ops_map, dict):
-        try:
-            ops_map = dict(ops_map)  # type: ignore[arg-type]
-        except Exception:
-            ops_map = {}
-        target_view["bucket_ops"] = ops_map
-    ops_list = ops_map.setdefault(bucket_key, [])
-    if isinstance(ops_list, list) and name:
-        ops_list.append({"name": name, "minutes": minutes_val})
-
-
-def _emit_hole_table_ops_cards(
-    lines: list[str],
-    *,
-    geo: Mapping[str, Any] | None,
-    material_group: str | None,
-    speeds_csv: dict | None,
-    result: Mapping[str, Any] | None = None,
-    breakdown: Mapping[str, Any] | None = None,
-    rates: Mapping[str, Any] | None = None,
-) -> None:
-    from appkit.ui.planner_render import (
-        _hole_table_minutes_from_geo,
-        _lookup_bucket_rate,
-    )
-
-    tap_minutes_hint, cbore_minutes_hint, spot_minutes_hint, jig_minutes_hint = (
-        _hole_table_minutes_from_geo(geo)
-    )
-
-    bucket_view_obj: Mapping[str, Any] | MutableMapping[str, Any] | None = None
-    for candidate in (breakdown, result):
-        if isinstance(candidate, dict):
-            bucket_view_obj = candidate.setdefault("bucket_view", {})
-            break
-        if isinstance(candidate, _MutableMappingABC):
-            view = candidate.get("bucket_view")
-            if not isinstance(view, dict):
-                view = {}
-                try:
-                    candidate["bucket_view"] = view  # type: ignore[index]
-                except Exception:
-                    pass
-            bucket_view_obj = typing.cast(MutableMapping[str, Any], view)
-            break
-
-    rates_map: Mapping[str, Any]
-    if isinstance(breakdown, _MappingABC):
-        rates_candidate = breakdown.get("rates")
-        if isinstance(rates_candidate, _MappingABC):
-            rates_map = rates_candidate
-        elif isinstance(rates_candidate, dict):
-            rates_map = rates_candidate
-        else:
-            rates_map = {}
-    else:
-        rates_map = {}
-    if (not rates_map) and isinstance(rates, _MappingABC):
-        rates_map = rates
-    elif (not rates_map) and isinstance(rates, dict):
-        rates_map = rates
-
-    if not _hole_table_section_present(lines, "MATERIAL REMOVAL – TAPPING"):
-        _emit_tapping_card(
-            lines,
-            geo=geo,
-            material_group=material_group,
-            speeds_csv=speeds_csv,
-            result=result,
-            breakdown=breakdown,
-        )
-        tap_labor_rate = _lookup_bucket_rate("tapping_labor", rates_map) or _lookup_bucket_rate(
-            "labor",
-            rates_map,
-        )
-        tap_machine_rate = _lookup_bucket_rate("tapping", rates_map) or 0.0
-        _add_bucket_minutes(
-            bucket_view_obj,
-            "tapping",
-            tap_minutes_hint,
-            machine_rate=tap_machine_rate,
-            labor_rate=tap_labor_rate,
-            name="Tapping ops",
-        )
-    if not _hole_table_section_present(lines, "MATERIAL REMOVAL – COUNTERBORE"):
-        _emit_counterbore_card(
-            lines,
-            geo=geo,
-            material_group=material_group,
-            speeds_csv=speeds_csv,
-            result=result,
-            breakdown=breakdown,
-        )
-        cbore_labor_rate = _lookup_bucket_rate("counterbore_labor", rates_map) or _lookup_bucket_rate(
-            "labor",
-            rates_map,
-        )
-        cbore_machine_rate = _lookup_bucket_rate("counterbore", rates_map) or _lookup_bucket_rate(
-            "drilling",
-            rates_map,
-        )
-        _add_bucket_minutes(
-            bucket_view_obj,
-            "counterbore",
-            cbore_minutes_hint,
-            machine_rate=cbore_machine_rate,
-            labor_rate=cbore_labor_rate,
-            name="Counterbore ops",
-        )
-    if not _hole_table_section_present(lines, "MATERIAL REMOVAL – SPOT (CENTER DRILL)"):
-        _emit_spot_and_jig_cards(
-            lines,
-            geo=geo,
-            material_group=material_group,
-            speeds_csv=speeds_csv,
-            result=result,
-            breakdown=breakdown,
-        )
-        drill_labor_rate = _lookup_bucket_rate("drilling_labor", rates_map) or _lookup_bucket_rate(
-            "labor",
-            rates_map,
-        )
-        drill_machine_rate = _lookup_bucket_rate("drilling", rates_map) or 0.0
-        _add_bucket_minutes(
-            bucket_view_obj,
-            "drilling",
-            spot_minutes_hint,
-            machine_rate=drill_machine_rate,
-            labor_rate=drill_labor_rate,
-            name="Spot drill ops",
-        )
-        grind_labor_rate = _lookup_bucket_rate("grinding_labor", rates_map) or _lookup_bucket_rate(
-            "labor",
-            rates_map,
-        )
-        grind_machine_rate = _lookup_bucket_rate("grinding", rates_map) or 0.0
-        _add_bucket_minutes(
-            bucket_view_obj,
-            "grinding",
-            jig_minutes_hint,
-            machine_rate=grind_machine_rate,
-            labor_rate=grind_labor_rate,
-            name="Jig grind ops",
-        )
+    return {
+        "entity_bins": {float(k): int(v) for k, v in ent_bins.items()},
+        "chart_bins": {float(k): int(v) for k, v in chart_bins.items()},
+        "tap_qty": int(tap_qty),
+        "cbore_qty": int(cbore_qty),
+        "csk_qty": int(csk_qty),
+        "agreement": bool(agreement),
+        "entity_total": int(entity_total),
+        "chart_total": int(chart_total),
+    }
 
 
 __all__ = [
@@ -953,17 +760,14 @@ __all__ = [
     "_classify_thread_spec",
     "_normalize_hole_text",
     "_dedupe_hole_entries",
+    "build_ops_summary_rows_from_hole_rows",
+    "update_geo_ops_summary_from_hole_rows",
     "_parse_hole_line",
     "_aggregate_hole_entries",
     "_build_ops_rows_from_lines_fallback",
     "build_ops_rows_from_lines_fallback",
     "summarize_hole_chart_lines",
-    "_emit_tapping_card",
-    "_emit_counterbore_card",
-    "_emit_spot_and_jig_cards",
-    "_hole_table_section_present",
-    "_add_bucket_minutes",
-    "_emit_hole_table_ops_cards",
+    "summarize_hole_chart_agreement",
 ]
 
 

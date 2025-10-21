@@ -78,6 +78,12 @@ def _wrap_header_text(text: Any, page_width: int, indent: str = "") -> list[str]
     return [f"{indent}{chunk}" for chunk in wrapper.wrap(txt)]
 
 
+def wrap_header_text(text: Any, page_width: int, indent: str = "") -> list[str]:
+    """Public wrapper for :func:`_wrap_header_text`."""
+
+    return _wrap_header_text(text, page_width, indent)
+
+
 def _resolve_pricing_source_value(
     base_value: Any,
     *,
@@ -274,10 +280,39 @@ def _build_quote_header_lines(
     return header_lines, pricing_source_value
 
 
+def build_quote_header_lines(
+    *,
+    qty: int,
+    result: Mapping[str, Any] | None,
+    breakdown: Mapping[str, Any] | None,
+    page_width: int,
+    divider: str,
+    process_meta: Mapping[str, Any] | None,
+    process_meta_raw: Mapping[str, Any] | None,
+    hour_summary_entries: Mapping[str, Any] | None,
+    cfg: QuoteConfiguration | None = None,
+) -> tuple[list[str], str | None]:
+    """Public wrapper for :func:`_build_quote_header_lines`."""
+
+    return _build_quote_header_lines(
+        qty=qty,
+        result=result,
+        breakdown=breakdown,
+        page_width=page_width,
+        divider=divider,
+        process_meta=process_meta,
+        process_meta_raw=process_meta_raw,
+        hour_summary_entries=hour_summary_entries,
+        cfg=cfg,
+    )
+
+
 __all__ = [
     "_sanitize_render_text",
     "_wrap_header_text",
+    "wrap_header_text",
     "_resolve_pricing_source_value",
     "_build_quote_header_lines",
+    "build_quote_header_lines",
 ]
 

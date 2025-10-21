@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from appkit.ui import session_io
+
 if "cad_quoter.geometry" not in sys.modules:
     geom_stub = types.ModuleType("cad_quoter.geometry")
     sys.modules["cad_quoter.geometry"] = geom_stub
@@ -203,6 +205,62 @@ def test_app_instantiation_smoke(monkeypatch: pytest.MonkeyPatch) -> None:
         assert isinstance(app.quote_state, appV5.QuoteState)
         assert isinstance(app.llm_enabled.get(), (type(None), bool))
         app.status_var.set("Ready")
+    finally:
+        app.destroy()
+
+
+def test_session_roundtrip(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    app = appV5.App()
+    try:
+        if appV5.pd is None:
+            pytest.skip("pandas is required for session round-trip test")
+
+        app.vars_df = appV5.pd.DataFrame(
+            [
+                {
+                    "Item": "Quantity",
+                    "Example Values / Options": 1,
+                    "Data Type / Input Method": "number",
+                }
+            ],
+            columns=appV5.REQUIRED_COLS,
+        )
+        app._populate_editor_tab = lambda df: setattr(app, "vars_df", df)  # type: ignore[assignment]
+
+        sample_param_key = next(iter(app.params))
+        app.params[sample_param_key] = 7
+        rate_key = next(iter(app.rates))
+        app.rates[rate_key] = 42.0
+        app.geo = {"width": 5.0}
+        app.geo_context = {"width": 5.0, "extra": True}
+        expected_params = dict(app.params)
+        expected_rates = dict(app.rates)
+        expected_geo_context = dict(app.geo_context)
+
+        export_path = tmp_path / "session.json"
+        monkeypatch.setattr(session_io.filedialog, "asksaveasfilename", lambda **_: str(export_path))
+        monkeypatch.setattr(session_io.filedialog, "askopenfilename", lambda **_: str(export_path))
+        monkeypatch.setattr(session_io.messagebox, "showinfo", lambda *a, **k: None)
+        monkeypatch.setattr(session_io.messagebox, "showerror", lambda *a, **k: None)
+
+        gen_calls: list[tuple[tuple, dict]] = []
+        app.gen_quote = lambda *a, **k: gen_calls.append((a, k))  # type: ignore[assignment]
+
+        session_io.export_quote_session(app)
+        assert export_path.exists()
+
+        app.params.clear()
+        app.rates.clear()
+        app.geo = {}
+        app.geo_context = {}
+        app.vars_df = None
+
+        session_io.import_quote_session(app)
+
+        assert app.params == expected_params
+        assert app.rates == expected_rates
+        assert app.geo_context == expected_geo_context
+        assert gen_calls, "Expected session import to trigger quote regeneration"
     finally:
         app.destroy()
 

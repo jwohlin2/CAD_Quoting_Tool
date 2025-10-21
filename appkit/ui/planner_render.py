@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import copy
 import math
-import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, TypedDict
@@ -18,6 +17,9 @@ from cad_quoter.pricing.process_buckets import (
     RATE_ALIAS_KEYS,
     canonical_bucket_key as _shared_canonical_bucket_key,
     normalize_bucket_key as _shared_normalize_bucket_key,
+)
+from cad_quoter.pricing.process_cost_renderer import (
+    canonicalize_costs as _shared_canonicalize_costs,
 )
 from cad_quoter.utils import sdict
 from cad_quoter.utils.render_utils import fmt_hours, fmt_money
@@ -1260,45 +1262,16 @@ def _prepare_bucket_view(raw_view: Mapping[str, Any] | None) -> dict[str, Any]:
 
     return prepared
 
-def canonicalize_costs(process_costs: Mapping[str, Any] | None) -> dict[str, float]:
-    items: Iterable[tuple[Any, Any]]
-    if isinstance(process_costs, _MappingABC):
-        items = process_costs.items()
-    else:
-        try:
-            items = dict(process_costs or {}).items()  # type: ignore[arg-type]
-        except Exception:
-            items = []
+def canonicalize_costs(
+    process_costs: Mapping[str, Any] | Iterable[Any] | None,
+) -> dict[str, float]:
+    """Planner-facing wrapper around the shared process cost canonicaliser."""
 
-    debug_misc = os.environ.get("DEBUG_MISC") == "1"
-
-    out: dict[str, float] = {}
-    for raw_key, raw_value in items:
-        key = str(raw_key).strip().lower()
-        if not key:
-            continue
-        key = key.replace(" ", "_").replace("-", "_").replace("/", "_")
-        if not key:
-            continue
-        if key.startswith("planner_") or key in PLANNER_META:
-            continue
-        canon_key = _canonical_bucket_key(key) or _normalize_bucket_key(key)
-        try:
-            amount = float(raw_value or 0.0)
-        except Exception:
-            amount = 0.0
-        out[canon_key] = out.get(canon_key, 0.0) + amount
-
-    misc_amount = out.get("misc")
-    if misc_amount is not None and not debug_misc:
-        try:
-            misc_val = float(misc_amount)
-        except Exception:
-            misc_val = 0.0
-        if abs(misc_val) < 50.0:
-            out.pop("misc", None)
-
-    return out
+    return _shared_canonicalize_costs(
+        process_costs,
+        skip_planner_meta=True,
+        hide_misc_under=50.0,
+    )
 
 def _process_label(key: str | None) -> str:
     raw = str(key or "").strip().lower().replace(" ", "_")
