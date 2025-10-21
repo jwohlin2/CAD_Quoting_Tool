@@ -14921,7 +14921,7 @@ class App(tk.Tk):
             or default_app_settings_json()
         )
 
-        self.settings = self._load_settings()
+        self.settings = self.llm_services.load_settings(self.settings_path)
         if not isinstance(self.settings, dict):
             self.settings = {}
 
@@ -14993,7 +14993,7 @@ class App(tk.Tk):
             self.llm_thread_limit.trace_add("write", self._on_llm_thread_limit_changed)
         elif hasattr(self.llm_thread_limit, "trace"):
             self.llm_thread_limit.trace("w", lambda *_: self._on_llm_thread_limit_changed())
-        self._apply_llm_thread_limit_env(persist=False)
+        self._sync_llm_thread_limit(persist=False)
 
         # Create a Menu Bar
         menubar = tk.Menu(self)
@@ -15153,7 +15153,7 @@ class App(tk.Tk):
         path = path.strip()
         if not path:
             return None
-        self._apply_llm_thread_limit_env(persist=False)
+        self._sync_llm_thread_limit(persist=False)
         cached = getattr(self, "_llm_client_cache", None)
         if cached and cached.model_path == path:
             return cached
@@ -15172,29 +15172,6 @@ class App(tk.Tk):
         self._llm_client_cache = client
         return client
 
-    def _load_settings(self) -> dict[str, Any]:
-        path = getattr(self, "settings_path", None)
-        if not isinstance(path, Path):
-            return {}
-        if not path.exists():
-            return {}
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return data
-        except Exception:
-            pass
-        return {}
-
-    def _save_settings(self) -> None:
-        path = getattr(self, "settings_path", None)
-        if not isinstance(path, Path):
-            return
-        try:
-            path.write_text(jdump(self.settings, default=None), encoding="utf-8")
-        except Exception:
-            pass
-
     def _get_last_variables_path(self) -> str:
         if isinstance(self.settings, dict):
             return str(self.settings.get("last_variables_path", "") or "").strip()
@@ -15205,7 +15182,7 @@ class App(tk.Tk):
             self.settings = {}
         value = str(path) if path else ""
         self.settings["last_variables_path"] = value
-        self._save_settings()
+        self.llm_services.save_settings(self.settings_path, self.settings)
 
     def _validate_thread_limit(self, proposed: str) -> bool:
         text = str(proposed).strip()
@@ -15236,20 +15213,20 @@ class App(tk.Tk):
                 pass
         self._llm_client_cache = None
 
-    def _apply_llm_thread_limit_env(self, *, persist: bool = True) -> int | None:
+    def _sync_llm_thread_limit(self, *, persist: bool) -> int | None:
+        """Apply the current thread limit via ``LLMServices`` and manage cache state."""
+
         limit = self._current_llm_thread_limit()
         prior = getattr(self, "_llm_thread_limit_applied", None)
 
-        if limit is None:
-            os.environ.pop("QWEN_N_THREADS", None)
-        else:
-            os.environ["QWEN_N_THREADS"] = str(limit)
-
-        if persist:
-            if not isinstance(self.settings, dict):
-                self.settings = {}
-            self.settings["llm_thread_limit"] = str(limit) if limit is not None else ""
-            self._save_settings()
+        updated_settings = self.llm_services.apply_thread_limit_env(
+            limit,
+            settings=self.settings,
+            persist=persist,
+            settings_path=self.settings_path if persist else None,
+        )
+        if isinstance(updated_settings, dict):
+            self.settings = updated_settings
 
         if limit != prior:
             self._llm_thread_limit_applied = limit
@@ -15258,7 +15235,7 @@ class App(tk.Tk):
         return limit
 
     def _on_llm_thread_limit_changed(self, *_: object) -> None:
-        self._apply_llm_thread_limit_env(persist=True)
+        self._sync_llm_thread_limit(persist=True)
 
     def _variables_dialog_defaults(self) -> dict[str, Any]:
         defaults: dict[str, Any] = {}
@@ -15301,7 +15278,7 @@ class App(tk.Tk):
             self.settings = {}
         self.settings["material_vendor_csv"] = path
         self.params["MaterialVendorCSVPath"] = path
-        self._save_settings()
+        self.llm_services.save_settings(self.settings_path, self.settings)
         try:
             self.pricing.clear_cache()
         except Exception:
@@ -15313,7 +15290,7 @@ class App(tk.Tk):
             self.settings = {}
         self.settings["material_vendor_csv"] = ""
         self.params["MaterialVendorCSVPath"] = ""
-        self._save_settings()
+        self.llm_services.save_settings(self.settings_path, self.settings)
         try:
             self.pricing.clear_cache()
         except Exception:
@@ -15340,7 +15317,7 @@ class App(tk.Tk):
 
         limit: int | None = None
         try:
-            limit = self._apply_llm_thread_limit_env(persist=False)
+            limit = self._sync_llm_thread_limit(persist=False)
             status = "Loading Vision LLM (GPU)…"
             if limit:
                 status = f"Loading Vision LLM (GPU, {limit} CPU threads)…"
@@ -15358,7 +15335,7 @@ class App(tk.Tk):
         except Exception as exc:
             self._llm_load_error = exc
             try:
-                limit = self._apply_llm_thread_limit_env(persist=False)
+                limit = self._sync_llm_thread_limit(persist=False)
                 msg = f"Vision LLM GPU load failed ({exc}); retrying CPU mode…"
                 if limit:
                     msg = f"{msg[:-1]} with {limit} CPU threads…)"
@@ -15888,7 +15865,7 @@ class App(tk.Tk):
         mode = str(self.rate_mode.get() or "").strip().lower()
         if isinstance(self.settings, dict):
             self.settings["rate_mode"] = mode
-            self._save_settings()
+            self.llm_services.save_settings(self.settings_path, self.settings)
 
         try:
             if self.vars_df is not None:
@@ -16608,7 +16585,7 @@ class App(tk.Tk):
                     self.llm_thread_limit.set(str(int(thread_limit)))
                 except Exception:
                     self.llm_thread_limit.set("")
-            self._apply_llm_thread_limit_env(persist=True)
+            self._sync_llm_thread_limit(persist=True)
 
         geo_payload = payload.get("geo")
         self.geo = dict(geo_payload) if isinstance(geo_payload, dict) else {}
