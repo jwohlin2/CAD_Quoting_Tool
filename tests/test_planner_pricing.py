@@ -1,4 +1,4 @@
-from planner_pricing import price_with_planner
+from cad_quoter.pricing.planner import price_with_planner
 
 
 def test_price_with_planner_uses_geometry_minutes() -> None:

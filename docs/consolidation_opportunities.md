@@ -13,7 +13,7 @@ The standalone bucketiser has been folded into the pricing package so that both 
 
 ## Planner pricing duplication
 
-Planner cost conversion lives alongside the rate metadata in `cad_quoter/pricing/planner.py`. The thin compatibility shim `planner_pricing.py` simply re-exports `price_with_planner`, allowing existing imports to continue working while the heavy lifting happens inside the package. The migration guide has been updated to point at the new module path. 【F:cad_quoter/pricing/planner.py†L1-L520】【F:planner_pricing.py†L1-L5】【F:docs/planner_pricing_migration.md†L1-L60】
+Planner cost conversion lives alongside the rate metadata in `cad_quoter/pricing/planner.py`. With the `planner_pricing.py` shim removed, callers now import `price_with_planner` directly from the package, matching the documented migration path. 【F:cad_quoter/pricing/planner.py†L1-L520】【F:docs/planner_pricing_migration.md†L1-L60】【F:tests/test_planner_pricing.py†L1-L87】
 
 ## Drilling estimator location
 
