@@ -420,6 +420,7 @@ from cad_quoter.utils.scrap import (
     _holes_scrap_fraction,
     normalize_scrap_pct,
 )
+from cad_quoter.utils.render_utils.tables import ascii_table, draw_kv_table
 from appkit.planner_helpers import _process_plan_job
 from appkit.env_utils import FORCE_PLANNER
 from appkit.planner_adapter import resolve_planner, resolve_pricing_source_value
@@ -3536,11 +3537,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 width = max(width, len(row_values[idx]))
             col_widths.append(width)
 
-        def _fmt(value: str, idx: int) -> str:
-            if idx == 0:
-                return f"{value:<{col_widths[idx]}}"
-            return f"{value:>{col_widths[idx]}}"
-
         if lines and lines[-1] != "":
             _push(lines, "")
 
@@ -3548,12 +3544,26 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         _push(lines, diagnostic_banner)
         _push(lines, "=" * min(page_width, len(diagnostic_banner)))
 
-        header_line = " | ".join(_fmt(header, idx) for idx, header in enumerate(headers))
-        separator_line = " | ".join("-" * width for width in col_widths)
-        _push(lines, header_line)
-        _push(lines, separator_line)
-        for row_values in display_rows:
-            _push(lines, " | ".join(_fmt(value, idx) for idx, value in enumerate(row_values)))
+        table_text = ascii_table(
+            headers,
+            display_rows,
+            col_widths=col_widths,
+            col_aligns=("L", "R", "R", "R", "R"),
+            header_aligns=("L", "R", "R", "R", "R"),
+        )
+        table_lines = table_text.splitlines()
+
+        if len(table_lines) >= 4:
+            header_cells = table_lines[1].strip("|").split("|")
+            separator_line = " | ".join("-" * width for width in col_widths)
+            _push(lines, " | ".join(header_cells))
+            _push(lines, separator_line)
+            for body_line in table_lines[3:-1]:
+                if not body_line.startswith("|"):
+                    continue
+                body_cells = body_line.strip("|").split("|")
+                _push(lines, " | ".join(body_cells))
+
         _push(lines, "")
 
     def _is_total_label(label: str) -> bool:
@@ -3564,7 +3574,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         clean = clean.lstrip("= ")
         return clean.lower().startswith("total")
 
-    def _ensure_total_separator(width: int) -> None:
+    def _maybe_insert_total_separator(width: int) -> None:
         if not lines:
             return
         width = max(0, int(width))
@@ -3578,25 +3588,41 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             return
         _push(lines, short_divider)
 
-    def _format_row(label: str, val: float, indent: str = "") -> str:
+    def _render_kv_line(label: str, value: str, indent: str = "") -> str:
         left = f"{indent}{label}"
-        right = _m(val)
+        right = value
+        right_width = max(len(right), 1)
         pad = max(1, page_width - len(left) - len(right))
+        left_width = len(left) + pad
+        table_text = draw_kv_table(
+            [(left, right)],
+            left_width=left_width,
+            right_width=right_width,
+            left_align="L",
+            right_align="R",
+        )
+        for line in table_text.splitlines():
+            if line.startswith("|") and line.endswith("|"):
+                body = line[1:-1]
+                try:
+                    left_segment, right_segment = body.split("|", 1)
+                    return f"{left_segment}{right_segment}"
+                except ValueError:
+                    break
         return f"{left}{' ' * pad}{right}"
 
     def row(label: str, val: float, indent: str = ""):
         # left-label, right-amount aligned to page_width
+        right = _m(val)
         if _is_total_label(label):
-            _ensure_total_separator(len(_m(val)))
-        _push(lines, _format_row(label, val, indent))
+            _maybe_insert_total_separator(len(right))
+        _push(lines, _render_kv_line(label, right, indent))
 
     def hours_row(label: str, val: float, indent: str = ""):
-        left = f"{indent}{label}"
         right = _h(val)
         if _is_total_label(label):
-            _ensure_total_separator(len(right))
-        pad = max(1, page_width - len(left) - len(right))
-        _push(lines, f"{left}{' ' * pad}{right}")
+            _maybe_insert_total_separator(len(right))
+        _push(lines, _render_kv_line(label, right, indent))
 
     def _is_extra_segment(segment: str) -> bool:
         try:
