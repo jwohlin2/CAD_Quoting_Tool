@@ -5798,74 +5798,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 return meta_entry
         return None
 
-    def _format_planner_bucket_line(
-        canon_key: str,
-        amount: float,
-        meta: Mapping[str, Any] | None,
-    ) -> tuple[str | None, float, float, float]:
-        if not planner_bucket_display_map:
-            return (None, amount, 0.0, 0.0)
-        info = planner_bucket_display_map.get(canon_key)
-        if not isinstance(info, _MappingABC):
-            return (None, amount, 0.0, 0.0)
-        try:
-            minutes_val = float(info.get("minutes", 0.0) or 0.0)
-        except Exception:
-            minutes_val = 0.0
-        hr_val = 0.0
-        if _canonical_bucket_key(canon_key) == "drilling":
-            synced_hr_val: float | None = None
-            synced_source = info.get("synced_hours")
-            if synced_source is not None:
-                try:
-                    synced_hr_val = float(synced_source)
-                except Exception:
-                    synced_hr_val = None
-            if synced_hr_val is None:
-                synced_minutes = info.get("synced_minutes")
-                if synced_minutes is not None:
-                    try:
-                        synced_hr_val = float(synced_minutes) / 60.0
-                    except Exception:
-                        synced_hr_val = None
-            if synced_hr_val is not None and synced_hr_val > 0:
-                hr_val = float(synced_hr_val)
-                minutes_val = hr_val * 60.0
-        if isinstance(meta, _MappingABC):
-            try:
-                hr_val = float(meta.get("hr", 0.0) or 0.0)
-            except Exception:
-                hr_val = 0.0
-        if hr_val <= 0 and minutes_val > 0:
-            hr_val = minutes_val / 60.0
-        total_cost = amount
-        for key_option in ("total_cost", "total$", "total"):
-            if key_option in info:
-                try:
-                    candidate = float(info.get(key_option) or 0.0)
-                except Exception:
-                    continue
-                if candidate:
-                    total_cost = candidate
-                    break
-        rate_val = 0.0
-        if isinstance(meta, _MappingABC):
-            try:
-                rate_val = float(meta.get("rate", 0.0) or 0.0)
-            except Exception:
-                rate_val = 0.0
-        if rate_val <= 0 and hr_val > 0 and total_cost > 0:
-            rate_val = total_cost / hr_val
-        hours_text = fmt_hours(hr_val)
-        if rate_val > 0:
-            rate_text = f"{_m(rate_val)}/hr"
-        else:
-            rate_text = "—"
-        display_override = (
-            f"{_display_bucket_label(canon_key, label_overrides)}: {hours_text} × {rate_text} →"
-        )
-        return (display_override, float(total_cost), hr_val, rate_val)
-
     bucket_order = [
         "milling",
         "drilling",
@@ -5880,27 +5812,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         "packaging",
         "misc",
     ]
-    def _planner_bucket_info(bucket_key: str) -> Mapping[str, Any]:
-        rollup_info = bucket_rollup_map.get(bucket_key)
-        display_info = (
-            planner_bucket_display_map.get(bucket_key)
-            if isinstance(planner_bucket_display_map, _MappingABC)
-            else None
-        )
-        if isinstance(display_info, _MappingABC):
-            merged: dict[str, Any] = {}
-            if isinstance(rollup_info, _MappingABC):
-                merged.update(rollup_info)
-            merged.update(display_info)
-            if isinstance(rollup_info, _MappingABC):
-                for extra_key in ("machine_cost", "machine$", "labor_cost", "labor$"):
-                    if extra_key not in merged and extra_key in rollup_info:
-                        merged[extra_key] = rollup_info[extra_key]
-            return merged
-        if isinstance(rollup_info, _MappingABC):
-            return rollup_info
-        return {}
-
     bucket_keys = []
     seen_buckets: set[str] = set()
     for key in bucket_order:
@@ -7229,51 +7140,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         minutes: float
 
     bucket_row_specs: list[_BucketRowSpec] = []
-
-    _PLANNER_ROLLUP_ABS_TOLERANCE = 0.05
-
-    def _derive_planner_rollup_hours_from_summary(
-        expected_total: float,
-    ) -> tuple[float, float] | None:
-        if expected_total <= 0.0:
-            return None
-        if not canonical_bucket_summary:
-            return None
-
-        machine_total = 0.0
-        labor_total = 0.0
-
-        for metrics in canonical_bucket_summary.values():
-            if not isinstance(metrics, _MappingABC):
-                continue
-
-            total_hours = _safe_float(metrics.get("hours"))
-            total_cost = _safe_float(metrics.get("total"))
-            machine_cost = max(0.0, _safe_float(metrics.get("machine")))
-            labor_cost = max(0.0, _safe_float(metrics.get("labor")))
-
-            if total_hours <= 0.0 or total_cost <= 0.0:
-                continue
-
-            try:
-                rate_val = total_cost / total_hours
-            except Exception:
-                rate_val = 0.0
-            if rate_val <= 0.0:
-                return None
-
-            if machine_cost > 0.0:
-                machine_total += machine_cost / rate_val
-            if labor_cost > 0.0:
-                labor_total += labor_cost / rate_val
-
-        derived_total = machine_total + labor_total
-        if derived_total <= 0.0:
-            return None
-        if abs(derived_total - expected_total) > _PLANNER_ROLLUP_ABS_TOLERANCE:
-            return None
-
-        return (labor_total, machine_total)
 
     labor_costs_display.clear()
     hour_summary_entries.clear()
