@@ -12,22 +12,12 @@ from cad_quoter.speeds_feeds import (
     select_group_rows,
     select_operation_rows,
 )
+from tests.data_loaders import load_speeds_feeds_samples
 
 
 @pytest.fixture()
 def sample_rows() -> list[dict[str, Any]]:
-    return [
-        {
-            "operation": "Drill",
-            "material": "6061 Aluminum",
-            "material_group": "N1",
-        },
-        {
-            "operation": "deep drilling",
-            "material": "Stainless Steel 303",
-            "material_group": "M2",
-        },
-    ]
+    return [dict(row) for row in load_speeds_feeds_samples()]
 
 
 def test_normalize_records_adds_helper_fields(sample_rows: list[dict[str, Any]]) -> None:

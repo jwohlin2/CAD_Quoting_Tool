@@ -1,0 +1,13 @@
+{
+  "metrics": {
+    "default": {
+      "GEO-01_Length_mm": 120.0,
+      "GEO-02_Width_mm": 60.0,
+      "GEO-03_Height_mm": 25.0,
+      "GEO-Volume_mm3": 180000.0,
+      "GEO-SurfaceArea_mm2": 42000.0,
+      "Feature_Face_Count": 8,
+      "GEO_WEDM_PathLen_mm": 95.0
+    }
+  }
+}
