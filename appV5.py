@@ -347,108 +347,49 @@ def _seed_bucket_minutes_cost(
     entry["total$"] = round(entry["machine$"] + entry["labor$"], 2)
 
 
-def _normalize_buckets(
-    bucket_view: MutableMapping[str, Any] | Mapping[str, Any] | None,
-) -> None:
-    """Deduplicate bucket entries when aliases collide."""
+def _normalize_buckets(bucket_view_obj: MutableMapping[str, Any] | Mapping[str, Any] | None) -> None:
+    alias = {
+        "programming_amortized": "programming",
+        "spotdrill": "spot_drill",
+        "spot-drill": "spot_drill",
+        "jiggrind": "jig_grind",
+        "jig-grind": "jig_grind",
+    }
 
-    if not isinstance(bucket_view, (_MutableMappingABC, dict)):
+    if not isinstance(bucket_view_obj, (_MutableMappingABC, dict)):
         return
 
     try:
-        buckets_obj = bucket_view.get("buckets")  # type: ignore[attr-defined]
+        buckets_obj = bucket_view_obj.get("buckets")
     except Exception:
         buckets_obj = None
 
-    if isinstance(buckets_obj, dict):
-        buckets: dict[str, Any] = buckets_obj
-    elif isinstance(buckets_obj, _MappingABC):
-        try:
-            buckets = dict(buckets_obj)
-        except Exception:
-            return
-        bucket_view["buckets"] = buckets
-    else:
-        return
+    b = buckets_obj if isinstance(buckets_obj, dict) else {}
+    norm: dict[str, dict[str, float]] = {}
 
-    canonical_to_key: dict[str, str] = {}
-
-    for raw_key in list(buckets.keys()):
-        canon = _canonical_bucket_key(raw_key) or str(raw_key)
-        entry_raw = buckets.get(raw_key)
-        if isinstance(entry_raw, dict):
-            entry = entry_raw
-        elif isinstance(entry_raw, _MappingABC):
-            entry = dict(entry_raw)
-            buckets[raw_key] = entry
-        else:
-            entry = {}
-            buckets[raw_key] = entry
-
-        if canon not in canonical_to_key:
-            canonical_to_key[canon] = raw_key
+    for k, e in b.items():
+        if not isinstance(e, _MappingABC):
             continue
-
-        preferred_key = canonical_to_key[canon]
-        preferred_entry_raw = buckets.get(preferred_key)
-        if isinstance(preferred_entry_raw, dict):
-            preferred_entry = preferred_entry_raw
-        elif isinstance(preferred_entry_raw, _MappingABC):
-            preferred_entry = dict(preferred_entry_raw)
-            buckets[preferred_key] = preferred_entry
-        else:
-            preferred_entry = {}
-            buckets[preferred_key] = preferred_entry
-
-        for field, precision in (
-            ("minutes", 2),
-            ("machine$", 2),
-            ("labor$", 2),
-            ("total$", 2),
-            ("machine_cost", 2),
-            ("labor_cost", 2),
-            ("total_cost", 2),
-            ("hr", 3),
-        ):
-            if field not in entry:
-                continue
-            try:
-                value = float(entry.get(field) or 0.0)
-            except Exception:
-                continue
-            if not math.isfinite(value):
-                continue
-            if abs(value) <= 0.0:
-                continue
-            preferred_entry[field] = round(value, precision)
-
-        if raw_key != preferred_key:
-            del buckets[raw_key]
-
-    order_obj = bucket_view.get("order") if isinstance(bucket_view, dict) else None
-    if order_obj is None and isinstance(bucket_view, _MutableMappingABC):
+        nk = alias.get(k, k)
+        dst = norm.setdefault(
+            nk,
+            {"minutes": 0.0, "machine$": 0.0, "labor$": 0.0, "total$": 0.0},
+        )
         try:
-            order_obj = bucket_view.get("order")
+            dst["minutes"] += float(e.get("minutes", 0.0) or 0.0)
         except Exception:
-            order_obj = None
+            pass
+        try:
+            dst["machine$"] += float(e.get("machine$", 0.0) or 0.0)
+        except Exception:
+            pass
+        try:
+            dst["labor$"] += float(e.get("labor$", 0.0) or 0.0)
+        except Exception:
+            pass
+        dst["total$"] = round(dst["machine$"] + dst["labor$"], 2)
 
-    if isinstance(order_obj, list):
-        new_order: list[str] = []
-        seen: set[str] = set()
-        for label in order_obj:
-            if not isinstance(label, str):
-                continue
-            canon = _canonical_bucket_key(label) or label
-            preferred_key = canonical_to_key.get(canon)
-            actual_key = preferred_key if preferred_key in buckets else label
-            if actual_key in buckets and actual_key not in seen:
-                new_order.append(actual_key)
-                seen.add(actual_key)
-        for preferred_key in canonical_to_key.values():
-            if preferred_key in buckets and preferred_key not in seen:
-                new_order.append(preferred_key)
-                seen.add(preferred_key)
-        bucket_view["order"] = new_order
+    bucket_view_obj["buckets"] = norm
 
 def _emit_hole_table_ops_cards(
     lines: list[str],
