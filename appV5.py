@@ -250,9 +250,9 @@ from appkit.merge_utils import (
     merge_effective,
 )
 
-from appkit.effective import effective_to_overrides
-from appkit.effective_helpers import (
+from appkit.effective import (
     compute_effective_state,
+    effective_to_overrides,
     ensure_accept_flags,
     reprice_with_effective,
 )

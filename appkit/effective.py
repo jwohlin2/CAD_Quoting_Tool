@@ -53,6 +53,13 @@ def ensure_accept_flags(state: QuoteState) -> None:
 
 
 def compute_effective_state(state: QuoteState) -> tuple[dict, dict]:
+    existing_guard_ctx = getattr(state, "guard_context", None)
+    if not isinstance(existing_guard_ctx, dict) or not existing_guard_ctx:
+        try:
+            state.guard_context = build_guard_context(state)
+        except Exception:
+            state.guard_context = dict(existing_guard_ctx or {})
+
     baseline = state.baseline or {}
     suggestions = state.suggestions or {}
     overrides = state.user_overrides or {}
