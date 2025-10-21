@@ -21,7 +21,6 @@ try:
 except Exception:
     pass
 
-from cad_quoter.utils.numeric import coerce_positive_float as _coerce_positive_float
 from cad_quoter.app.quote_doc import (
     build_quote_header_lines,
     _sanitize_render_text,
@@ -56,6 +55,26 @@ from pathlib import Path
 from cad_quoter.app._value_utils import (
     _format_value,
 )
+from typing import Any as _AnyForCoerce
+
+
+def _coerce_positive_float(value: _AnyForCoerce) -> float | None:
+    """Best-effort positive finite float coercion without importing utils early.
+
+    Avoids a circular import between utils.numeric and domain_models.values at
+    app startup by providing a local fallback.
+    """
+
+    try:
+        number = float(value)
+    except Exception:
+        return None
+    try:
+        if not math.isfinite(number):
+            return None
+    except Exception:
+        pass
+    return number if number > 0 else None
 from cad_quoter.app.chart_lines import (
     collect_chart_lines_context as _collect_chart_lines_context,
 )
@@ -174,7 +193,6 @@ from cad_quoter.pricing.vendor_csv import (
     pick_plate_from_mcmaster as _pick_plate_from_mcmaster,
 )
 from cad_quoter.pricing.process_view import (
-    render_process_costs,
     _ProcessCostTableRecorder,
     _ProcessRowRecord,
     _merge_process_meta,
@@ -5322,22 +5340,29 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         display_machine = bucket_state.display_machine_total
     hour_summary_entries.update(bucket_state.hour_entries)
     bucket_minutes_detail: dict[str, float] = {}
-    for canon_key, metrics in canonical_bucket_summary.items():
-        bucket_minutes_detail[canon_key] = _safe_float(
-            metrics.get("minutes"), default=0.0
-        )
+    bucket_minutes_source = getattr(bucket_state, "bucket_minutes_detail", None)
+    if isinstance(bucket_minutes_source, _MappingABC):
+        for key, minutes in bucket_minutes_source.items():
+            bucket_minutes_detail[str(key)] = _safe_float(minutes, default=0.0)
+    else:
+        for canon_key, metrics in canonical_bucket_summary.items():
+            bucket_minutes_detail[canon_key] = _safe_float(
+                metrics.get("minutes"), default=0.0
+            )
     extra_bucket_minutes_detail = breakdown.get("bucket_minutes_detail")
     if isinstance(extra_bucket_minutes_detail, _MappingABC):
         for key, minutes in extra_bucket_minutes_detail.items():
-            bucket_minutes_detail[key] = _safe_float(minutes)
+            bucket_minutes_detail[str(key)] = _safe_float(minutes, default=0.0)
     process_costs_for_render: dict[str, float] = {}
-    for canon_key, metrics in canonical_bucket_summary.items():
-        process_costs_for_render[canon_key] = _safe_float(
-            metrics.get("total"), default=0.0
-        )
-    for canon_key, amount in process_costs_canon.items():
-        if canon_key not in process_costs_for_render:
-            process_costs_for_render[canon_key] = _safe_float(amount, default=0.0)
+    bucket_costs_source = getattr(bucket_state, "process_costs_for_render", None)
+    if isinstance(bucket_costs_source, _MappingABC):
+        for key, amount in bucket_costs_source.items():
+            process_costs_for_render[str(key)] = _safe_float(amount, default=0.0)
+    else:
+        for canon_key, metrics in canonical_bucket_summary.items():
+            process_costs_for_render[canon_key] = _safe_float(
+                metrics.get("total"), default=0.0
+            )
 
     proc_total = 0.0
     amortized_nre_total = 0.0
@@ -5585,6 +5610,36 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         canon_to_display_label.setdefault(canon_key, label)
         if canon_key not in canonical_bucket_order:
             canonical_bucket_order.insert(0, canon_key)
+        hours_val = minutes_val / 60.0 if minutes_val > 0 else 0.0
+        rate_val = 0.0
+        if hours_val > 0.0 and amount_val > 0.0:
+            rate_val = amount_val / hours_val
+        elif hours_val > 0.0:
+            rate_val = _rate_for_bucket(canon_key, rates or {})
+            if rate_val < 0.0:
+                rate_val = 0.0
+        new_spec = _BucketRowSpec(
+            label=label,
+            hours=hours_val,
+            rate=rate_val,
+            total=amount_val,
+            labor=amount_val,
+            machine=0.0,
+            canon_key=canon_key,
+            minutes=minutes_val,
+        )
+        existing_index = None
+        for _idx, _spec in enumerate(bucket_row_specs):
+            if _spec.canon_key == canon_key:
+                existing_index = _idx
+                break
+        if existing_index is not None:
+            bucket_row_specs.pop(existing_index)
+        try:
+            insert_at = canonical_bucket_order.index(canon_key)
+        except ValueError:
+            insert_at = 0
+        bucket_row_specs.insert(max(insert_at, 0), new_spec)
         if isinstance(breakdown, dict):
             try:
                 bucket_view_obj = breakdown.setdefault("bucket_view", {})
@@ -5702,15 +5757,80 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if isinstance(process_plan_summary_local, _MappingABC):
         process_plan_summary_map = process_plan_summary_local
 
-    section_total = render_process_costs(
-        tbl=process_table,
-        process_costs=process_costs_for_render,
-        rates=rates,
-        minutes_detail=bucket_minutes_detail,
-        process_plan=process_plan_summary_map,
-    )
+    ordered_specs: list[_BucketRowSpec] = []
+    if bucket_row_specs:
+        seen_canon_specs: set[str] = set()
+        for canon_key in canonical_bucket_order:
+            if not canon_key:
+                continue
+            for spec in bucket_row_specs:
+                if spec.canon_key == canon_key and canon_key not in seen_canon_specs:
+                    ordered_specs.append(spec)
+                    seen_canon_specs.add(canon_key)
+                    break
+        for spec in bucket_row_specs:
+            canon_key = spec.canon_key
+            if canon_key and canon_key in seen_canon_specs:
+                continue
+            ordered_specs.append(spec)
+            if canon_key:
+                seen_canon_specs.add(canon_key)
+    else:
+        table_rows_snapshot = getattr(bucket_state, "table_rows", None)
+        if isinstance(table_rows_snapshot, Sequence):
+            for entry in table_rows_snapshot:
+                if not isinstance(entry, Sequence) or len(entry) < 5:
+                    continue
+                label_val, hours_val, labor_val, machine_val, total_val = entry[:5]
+                try:
+                    hours_numeric = float(hours_val or 0.0)
+                except Exception:
+                    hours_numeric = 0.0
+                try:
+                    total_numeric = float(total_val or 0.0)
+                except Exception:
+                    total_numeric = 0.0
+                try:
+                    labor_numeric = float(labor_val or 0.0)
+                except Exception:
+                    labor_numeric = 0.0
+                try:
+                    machine_numeric = float(machine_val or 0.0)
+                except Exception:
+                    machine_numeric = 0.0
+                minutes_numeric = hours_numeric * 60.0
+                rate_numeric = 0.0
+                if hours_numeric > 0.0 and total_numeric > 0.0:
+                    rate_numeric = total_numeric / hours_numeric
+                elif hours_numeric > 0.0:
+                    rate_lookup = _rate_for_bucket(
+                        label_to_canon.get(str(label_val)) or str(label_val),
+                        rates or {},
+                    )
+                    if rate_lookup > 0.0:
+                        rate_numeric = rate_lookup
+                canon_key = label_to_canon.get(str(label_val)) or _canonical_bucket_key(
+                    label_val
+                )
+                ordered_specs.append(
+                    _BucketRowSpec(
+                        label=str(label_val),
+                        hours=hours_numeric,
+                        rate=rate_numeric,
+                        total=total_numeric,
+                        labor=labor_numeric,
+                        machine=machine_numeric,
+                        canon_key=canon_key or str(label_val),
+                        minutes=minutes_numeric,
+                    )
+                )
 
-    proc_total = section_total
+    for spec in ordered_specs:
+        canon_key = spec.canon_key
+        if canon_key:
+            process_costs_for_render[canon_key] = _safe_float(spec.total, default=0.0)
+            bucket_minutes_detail[canon_key] = _safe_float(spec.minutes, default=0.0)
+        process_table.add_row(spec.label, spec.hours, spec.rate, spec.total)
 
     rows: tuple[_ProcessRowRecord, ...] = tuple(getattr(process_table, "rows", ()))
 
@@ -6058,33 +6178,33 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     planner_mode = str(pricing_source_value).lower() == "planner"
     planner_entry_baseline = len(hour_summary_entries)
-    if planner_mode:
-        seen_hour_labels: set[str] = set()
-        for canon_key in canonical_bucket_order:
-            if not canon_key:
-                continue
-            metrics = canonical_bucket_summary.get(canon_key)
-            if not isinstance(metrics, dict):
-                continue
-            hours_val = _safe_float(metrics.get("hours"))
-            if hours_val <= 0.0:
-                minutes_val = _safe_float(metrics.get("minutes"))
-                if minutes_val > 0.0:
-                    hours_val = minutes_val / 60.0
-            if hours_val <= 0.0:
-                continue
-            if str(canon_key) == "programming_amortized":
-                continue
-            label = _display_bucket_label(canon_key, label_overrides)
-            if label in seen_hour_labels:
-                hour_summary_entries[label] = (
-                    hour_summary_entries[label][0] + round(hours_val, 2),
-                    hour_summary_entries[label][1],
-                )
-            else:
-                _record_hour_entry(label, round(hours_val, 2))
-                seen_hour_labels.add(label)
+    seen_hour_labels: set[str] = set()
+    for canon_key in canonical_bucket_order:
+        if not canon_key:
+            continue
+        metrics = canonical_bucket_summary.get(canon_key)
+        if not isinstance(metrics, dict):
+            continue
+        hours_val = _safe_float(metrics.get("hours"))
+        if hours_val <= 0.0:
+            minutes_val = _safe_float(metrics.get("minutes"))
+            if minutes_val > 0.0:
+                hours_val = minutes_val / 60.0
+        if hours_val <= 0.0:
+            continue
+        if str(canon_key) == "programming_amortized":
+            continue
+        label = _display_bucket_label(canon_key, label_overrides)
+        if label in seen_hour_labels:
+            hour_summary_entries[label] = (
+                hour_summary_entries[label][0] + round(hours_val, 2),
+                hour_summary_entries[label][1],
+            )
+        else:
+            _record_hour_entry(label, round(hours_val, 2))
+            seen_hour_labels.add(label)
 
+    if planner_mode:
         buckets_for_hours = (
             bucket_view_struct.get("buckets")
             if isinstance(bucket_view_struct, _MappingABC)
@@ -6133,15 +6253,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 include_in_total=False,
             )
 
-        _record_hour_entry("Programming", round(programming_hours, 2))
-        _record_hour_entry("Fixture Build", round(fixture_hours, 2))
-        if fixture_is_amortized and qty_for_hours > 0:
-            per_part_fixture_hr = fixture_hours / qty_for_hours
-            _record_hour_entry(
-                "Fixture Build (amortized)",
-                round(per_part_fixture_hr, 2),
-                include_in_total=False,
-            )
     if (not planner_mode) or len(hour_summary_entries) == planner_entry_baseline:
         if charged_hour_entries:
             seen_hour_canon_keys: set[str] = set()
@@ -6180,29 +6291,15 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     hours_float = 0.0
                 label = _display_bucket_label(canon_key, label_overrides)
                 _record_hour_entry(label, round(hours_float, 2))
-        else:
-            for key, meta in sorted((process_meta or {}).items()):
-                meta = meta or {}
-                try:
-                    hr_val = float(meta.get("hr", 0.0) or 0.0)
-                except Exception:
-                    hr_val = 0.0
-                canon_key = _canonical_bucket_key(key)
-                if canon_key:
-                    display_label = _display_bucket_label(canon_key)
-                else:
-                    display_label = _process_label(key)
-                _record_hour_entry(display_label, hr_val)
-
-        _record_hour_entry("Programming", programming_hours)
-        _record_hour_entry("Fixture Build", fixture_hours)
-        if fixture_is_amortized and qty_for_hours > 0:
-            per_part_fixture_hr = fixture_hours / qty_for_hours
-            _record_hour_entry(
-                "Fixture Build (amortized)",
-                per_part_fixture_hr,
-                include_in_total=False,
-            )
+    _record_hour_entry("Programming", round(programming_hours, 2))
+    _record_hour_entry("Fixture Build", round(fixture_hours, 2))
+    if fixture_is_amortized and qty_for_hours > 0:
+        per_part_fixture_hr = fixture_hours / qty_for_hours
+        _record_hour_entry(
+            "Fixture Build (amortized)",
+            round(per_part_fixture_hr, 2),
+            include_in_total=False,
+        )
 
     if canonical_bucket_order and canonical_bucket_summary:
         summary_hours: dict[str, float] = {}

@@ -14,13 +14,21 @@ import pytest
 # ----- stub heavy optional dependencies before importing application code -----
 
 
+def _try_import(name: str) -> bool:
+    try:
+        importlib.import_module(name)
+    except ModuleNotFoundError:
+        return False
+    return True
+
+
 def _install_runtime_dependency_stubs() -> None:
-    if "requests" not in sys.modules:
+    if not _try_import("requests"):
         requests_stub = types.ModuleType("requests")
         requests_stub.__spec__ = ModuleSpec("requests", loader=None)
         sys.modules["requests"] = requests_stub
 
-    if "bs4" not in sys.modules:
+    if not _try_import("bs4"):
         bs4_stub = types.ModuleType("bs4")
         bs4_stub.__spec__ = ModuleSpec("bs4", loader=None)
 
@@ -32,7 +40,7 @@ def _install_runtime_dependency_stubs() -> None:
         bs4_stub.BeautifulSoup = _BeautifulSoup
         sys.modules["bs4"] = bs4_stub
 
-    if "lxml" not in sys.modules:
+    if not _try_import("lxml"):
         lxml_stub = types.ModuleType("lxml")
         lxml_stub.__spec__ = ModuleSpec("lxml", loader=None)
         sys.modules["lxml"] = lxml_stub
