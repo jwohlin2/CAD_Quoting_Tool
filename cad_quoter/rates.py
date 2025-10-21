@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Mapping
+from typing import Any, FrozenSet, Mapping
 
 from cad_quoter.utils import _dict
 
@@ -98,6 +98,29 @@ OLDKEY_TO_LABOR = {
     # "SupportRate": "Support",
     # If you treat manual grinding as labor (not machine), you could also map to "Grinder"
 }
+
+
+# ---- derived flat-key helpers ----
+
+
+LABOR_RATE_KEYS: FrozenSet[str] = frozenset(
+    set(OLDKEY_TO_LABOR.keys())
+    | set(LEGACY_PROGRAMMER_RATE_KEYS)
+    | set(HARD_LABOR_FALLBACKS.keys())
+    | {
+        "DeburrRate",
+        "PackagingRate",
+    }
+)
+
+
+MACHINE_RATE_KEYS: FrozenSet[str] = frozenset(
+    set(OLDKEY_TO_MACHINE.keys())
+    | set(HARD_MACHINE_FALLBACKS.keys())
+    | {
+        "LappingRate",
+    }
+)
 
 
 # Preferred canonical role names when flattening
@@ -557,6 +580,8 @@ __all__ = [
     "ROLES",
     "OLDKEY_TO_MACHINE",
     "OLDKEY_TO_LABOR",
+    "LABOR_RATE_KEYS",
+    "MACHINE_RATE_KEYS",
     "PREFERRED_ROLE_FOR_DUPES",
     "OP_TO_MACHINE",
     "OP_TO_LABOR",
