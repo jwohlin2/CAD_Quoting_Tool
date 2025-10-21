@@ -12,6 +12,12 @@ from appkit.debug.debug_tables import (
     _jsonify_debug_value as _debug_jsonify_value,
 )
 from cad_quoter.domain_models import coerce_float_or_none as _coerce_float_or_none
+from cad_quoter.pricing.feed_math import (
+    approach_allowance_for_drill as _approach_allowance_for_drill,
+    ipm_from_feed as _ipm_from_feed,
+    passes_for_depth as _passes_for_depth,
+    rpm_from_sfm as _rpm_from_sfm_shared,
+)
 
 
 def _jsonify_debug_value(value: Any, depth: int = 0, max_depth: int = 6) -> Any:
@@ -60,11 +66,7 @@ def _fmt_rng(vals, prec: int = 2, unit: str | None = None) -> str:
 def _rpm_from_sfm(sfm: float, d_in: float) -> float:
     """Return spindle RPM from surface feet per minute and diameter in inches."""
 
-    try:
-        diameter = max(float(d_in), 1e-6)
-    except Exception:  # pragma: no cover - defensive conversion
-        return 0.0
-    return (float(sfm) * 12.0) / (math.pi * diameter)
+    return _rpm_from_sfm_shared(sfm, d_in)
 
 
 _NUMBER_MAJOR = {
@@ -136,7 +138,7 @@ def _rpm_from_sfm_diam(sfm: float, dia_in: float | None) -> float | None:
 
     if not dia_in or dia_in <= 0:
         return None
-    return (sfm * 3.82) / float(dia_in)
+    return _rpm_from_sfm_shared(sfm, dia_in)
 
 
 def _ipm_from_rpm_ipr(rpm: float | None, ipr: float | None) -> float | None:
@@ -150,6 +152,9 @@ def _ipm_from_rpm_ipr(rpm: float | None, ipr: float | None) -> float | None:
 # Backwards-compatible exports for legacy modules.
 rpm_from_sfm = _rpm_from_sfm
 rpm_from_sfm_diam = _rpm_from_sfm_diam
+ipm_from_feed = _ipm_from_feed
+passes_for_depth = _passes_for_depth
+approach_allowance_for_drill = _approach_allowance_for_drill
 parse_thread_major_in = _parse_thread_major_in
 parse_tpi = _parse_tpi
 lookup_sfm_ipr = _lookup_sfm_ipr
@@ -229,6 +234,8 @@ __all__ = [
     "_fmt_rng",
     "_rpm_from_sfm",
     "rpm_from_sfm",
+    "_ipm_from_feed",
+    "ipm_from_feed",
     "_parse_thread_major_in",
     "parse_thread_major_in",
     "_parse_tpi",
@@ -237,6 +244,10 @@ __all__ = [
     "lookup_sfm_ipr",
     "_rpm_from_sfm_diam",
     "rpm_from_sfm_diam",
+    "_passes_for_depth",
+    "passes_for_depth",
+    "_approach_allowance_for_drill",
+    "approach_allowance_for_drill",
     "_ipm_from_rpm_ipr",
     "ipm_from_rpm_ipr",
     "_parse_numeric_text",
