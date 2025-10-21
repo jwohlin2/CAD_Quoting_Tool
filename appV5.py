@@ -122,7 +122,10 @@ from cad_quoter.config import (
 )
 
 _log = logger
-from cad_quoter.utils.geo_ctx import _should_include_outsourced_pass
+from cad_quoter.utils.geo_ctx import (
+    _iter_geo_contexts as _iter_geo_dicts_for_context,
+    _should_include_outsourced_pass,
+)
 from cad_quoter.utils.render_utils import (
     fmt_hours,
     fmt_money,
@@ -301,6 +304,7 @@ from appkit.ui.planner_render import (
     _canonical_bucket_key,
     _display_bucket_label,
     _display_rate_for_row,
+    _hole_table_minutes_from_geo,
     _normalize_bucket_key,
     _planner_bucket_key_for_name,
     _preferred_order_then_alpha,
@@ -323,7 +327,6 @@ _ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _RENDER_ASCII_REPLACEMENTS: dict[str, str] = {
     "—": "-",
-    "–": "-",
     "•": "-",
     "…": "...",
     "“": '"',
@@ -338,9 +341,13 @@ _RENDER_ASCII_REPLACEMENTS: dict[str, str] = {
     "½": "1/2",
     "¾": "3/4",
     " ": " ",  # non-breaking space
-    "×": "x",
     "⚠️": "[!]",
     "⚠": "[!]",
+}
+
+_RENDER_PASSTHROUGH: dict[str, str] = {
+    "–": "__EN_DASH__",
+    "×": "__MULTIPLY__",
 }
 
 
@@ -350,6 +357,9 @@ def _sanitize_render_text(value: typing.Any) -> str:
     text = str(value)
     if not text:
         return ""
+    for source, placeholder in _RENDER_PASSTHROUGH.items():
+        if source in text:
+            text = text.replace(source, placeholder)
     text = text.replace("\t", " ")
     text = text.replace("\r", "")
     text = _ANSI_ESCAPE_RE.sub("", text)
@@ -359,6 +369,9 @@ def _sanitize_render_text(value: typing.Any) -> str:
     text = unicodedata.normalize("NFKD", text)
     text = text.encode("ascii", "ignore").decode("ascii", "ignore")
     text = _CONTROL_CHAR_RE.sub("", text)
+    for source, placeholder in _RENDER_PASSTHROUGH.items():
+        if placeholder in text:
+            text = text.replace(placeholder, source)
     return text
 
 
@@ -4532,64 +4545,6 @@ def _display_rate_for_row(
             rate_lookup = float(getattr(cfg_obj, "machine_rate_per_hr", 0.0) or 0.0)
     return f"${rate_lookup:.2f}/hr"
 
-
-
-
-
-
-def _hole_table_minutes_from_geo(
-    geo: Mapping[str, Any] | None,
-) -> tuple[float, float, float, float]:
-    """Return (tap, cbore, spot, jig) minutes inferred from ``geo``."""
-
-    if not isinstance(geo, _MappingABC):
-        return (0.0, 0.0, 0.0, 0.0)
-
-    ops_summary = geo.get("ops_summary") if isinstance(geo, _MappingABC) else None
-    if isinstance(ops_summary, _MappingABC):
-        totals_map = ops_summary.get("totals")
-    else:
-        totals_map = None
-    if not isinstance(totals_map, _MappingABC):
-        totals: Mapping[str, Any] = {}
-    else:
-        totals = totals_map
-
-    def _ops_total(*keys: str) -> float:
-        total = 0.0
-        for key in keys:
-            total += _safe_float(totals.get(key), 0.0)
-        return total
-
-    tap_minutes = _safe_float(geo.get("tap_minutes_hint"), 0.0)
-    if tap_minutes <= 0.0:
-        details = geo.get("tap_details")
-        if isinstance(details, (list, tuple)):
-            tap_minutes = 0.0
-            for entry in details:
-                if isinstance(entry, _MappingABC):
-                    tap_minutes += _safe_float(entry.get("total_minutes"), 0.0)
-        if tap_minutes <= 0.0:
-            tap_count = _ops_total("tap_front", "tap_back")
-            if tap_count > 0.0:
-                tap_minutes = tap_count * TAP_MINUTES_BY_CLASS.get("medium", 0.3)
-
-    cbore_minutes = _safe_float(geo.get("cbore_minutes_hint"), 0.0)
-    if cbore_minutes <= 0.0:
-        cbore_qty = _ops_total("cbore_front", "cbore_back")
-        if cbore_qty > 0.0:
-            cbore_minutes = cbore_qty * CBORE_MIN_PER_SIDE_MIN
-
-    spot_minutes = _ops_total("spot_front", "spot_back") * SPOT_DRILL_MIN_PER_SIDE_MIN
-
-    jig_minutes = _ops_total("jig_grind",) * JIG_GRIND_MIN_PER_FEATURE
-
-    return (
-        float(max(tap_minutes, 0.0)),
-        float(max(cbore_minutes, 0.0)),
-        float(max(spot_minutes, 0.0)),
-        float(max(jig_minutes, 0.0)),
-    )
 
 
 @no_type_check
