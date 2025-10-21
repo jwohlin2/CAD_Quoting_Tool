@@ -4,6 +4,9 @@ import pytest
 
 from cad_quoter.utils.render_utils import (
     QuoteDocRecorder,
+    QuoteDoc,
+    QuoteRow,
+    QuoteSection,
     fmt_hours,
     fmt_money,
     fmt_percent,
@@ -16,6 +19,7 @@ from cad_quoter.utils.render_utils import (
     format_weight_lb_decimal,
     format_weight_lb_oz,
     render_quote_doc,
+    render_quote_doc_to_path,
 )
 
 
@@ -231,3 +235,29 @@ class TestQuoteDocRecorder:
             "lonely title",
             divider,
         ]
+
+
+def test_render_quote_doc_to_path_preserves_utf8(tmp_path) -> None:
+    doc = QuoteDoc(
+        title="Main × Header",
+        sections=[
+            QuoteSection(
+                title="Dimensions ≥ 3 × 5",
+                rows=[QuoteRow(index=1, text="Detail ≥ 2 × 4")],
+            )
+        ],
+    )
+    output_path = tmp_path / "quote.txt"
+
+    render_quote_doc_to_path(doc, divider="-" * 3, out_path=output_path)
+
+    expected = "\n".join([
+        "Main × Header",
+        "Dimensions ≥ 3 × 5",
+        "---",
+        "Detail ≥ 2 × 4",
+    ])
+
+    data = output_path.read_bytes()
+    assert data == expected.encode("utf-8")
+    assert "\r" not in output_path.read_text(encoding="utf-8")

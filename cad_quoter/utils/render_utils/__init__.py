@@ -316,8 +316,7 @@ def render_quote_doc_to_path(doc: QuoteDoc, *, divider: str, out_path: str | Pat
     """Persist rendered quote text to ``out_path`` using UTF-8 encoding."""
 
     lines = render_quote_doc_lines(doc, divider=divider)
-    path = Path(out_path)
-    with path.open("w", encoding="utf-8", newline="") as handle:
+    with open(out_path, "w", encoding="utf-8", newline="") as handle:
         handle.write("\n".join(lines))
 
 
