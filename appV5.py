@@ -5261,9 +5261,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if extra_map_candidate is not None and extra_map_candidate not in drill_minutes_extra_targets:
             drill_minutes_extra_targets.append(extra_map_candidate)
 
-    _push(lines, "Process & Labor Costs")
-    _push(lines, divider)
-
     canonical_bucket_order: list[str] = []
     canonical_bucket_summary: dict[str, dict[str, float]] = {}
     bucket_table_rows: list[tuple[str, float, float, float, float]] = []
@@ -6542,20 +6539,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             pl_mac = residual_machine
 
         planner_total_hr = round(max(total_planner_hours, pl_lab + pl_mac), 2)
-        if planner_total_hr > 0.0:
-            _record_hour_entry("Planner Total", planner_total_hr)
-        if pl_lab > 0.0:
-            _record_hour_entry(
-                "Planner Labor",
-                round(pl_lab, 2),
-                include_in_total=False,
-            )
-        if pl_mac > 0.0:
-            _record_hour_entry(
-                "Planner Machine",
-                round(pl_mac, 2),
-                include_in_total=False,
-            )
+        # Planner-specific summaries are now handled through the bucket table.
 
     if (not planner_mode) or len(hour_summary_entries) == planner_entry_baseline:
         if charged_hour_entries:
