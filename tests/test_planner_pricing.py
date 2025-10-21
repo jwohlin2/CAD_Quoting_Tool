@@ -47,6 +47,9 @@ def test_price_with_planner_uses_geometry_minutes() -> None:
     wire_items = [item for item in result["line_items"] if item["op"] == "Wire EDM"]
     assert wire_items, "expected Wire EDM bucket in planner pricing"
     assert wire_items[0]["minutes"] > 1.0
+    assert "machine_cost" in wire_items[0]
+    assert "labor_cost" in wire_items[0]
+    assert wire_items[0]["labor_cost"] == 0.0
 
 
 def test_price_with_planner_reads_geom_fallbacks() -> None:
@@ -82,3 +85,5 @@ def test_price_with_planner_reads_geom_fallbacks() -> None:
     drilling = [item for item in result["line_items"] if item["op"] == "Drilling"]
     assert drilling, "expected drilling minutes from derived geometry"
     assert drilling[0]["minutes"] > 0.0
+    assert drilling[0]["machine_cost"] > 0.0
+    assert drilling[0]["labor_cost"] == 0.0
