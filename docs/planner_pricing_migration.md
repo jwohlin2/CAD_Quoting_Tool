@@ -29,7 +29,7 @@ def validate_quote_before_pricing(quote: Dict[str, Any], overrides_flat: Dict[st
     # 2) Build the planner inputs from the quote worksheet (family + params + geom)
     family = quote["family"]              # e.g., "die_plate", "punch"
     params = quote["planner_params"]      # the logic inputs we defined (material, tolerances, etc.)
-    geom   = quote["geom"]                # perimeters, areas, hole lists, etc. (see time_models header)
+    geom   = quote["geom"]                # perimeters, areas, hole lists, etc. (see time_estimator inputs)
 
     # 3) Use the planner as THE workhorse
     priced = price_with_planner(family, params, geom, rates, oee=quote.get("oee", 0.85))
