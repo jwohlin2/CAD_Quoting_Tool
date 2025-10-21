@@ -233,8 +233,6 @@ from cad_quoter.utils.machining import (
     _lookup_sfm_ipr,
     _parse_thread_major_in,
     _parse_tpi,
-    _rpm_from_sfm,
-    _rpm_from_sfm_diam,
 )
 if TYPE_CHECKING:
     from cad_quoter_pkg.src.cad_quoter.resources import default_app_settings_json
@@ -433,6 +431,25 @@ def _as_float(x: Any, default: float = 0.0) -> float:
         return v if math.isfinite(v) else default
     except Exception:
         return default
+
+
+def _safe_rpm_from_sfm_diam(sfm: float, dia_in: float) -> float:
+    """Return a clamped RPM derived from surface speed and diameter."""
+
+    d = max(_as_float(dia_in, 0.0), 0.001)
+    rpm = (sfm * 12.0) / (math.pi * d)
+    if not math.isfinite(rpm) or rpm <= 0.0:
+        rpm = 300.0
+    return max(50.0, min(rpm, 10000.0))
+
+
+def _safe_ipm(ipr: float, rpm: float) -> float:
+    """Return a clamped inches-per-minute feed rate."""
+
+    ipr_val = max(_as_float(ipr, 0.0), 0.0001)
+    rpm_val = max(_as_float(rpm, 0.0), 1.0)
+    ipm = ipr_val * rpm_val
+    return max(0.05, min(ipm, 200.0))
 
 
 def _clamp_minutes(v: Any, lo: float = 0.0, hi: float = 10000.0) -> float:
@@ -864,58 +881,88 @@ def _render_time_per_hole(
     index_min: float,
     peck_min_deep: float,
     peck_min_std: float,
+    extra_map: MutableMapping[str, Any] | None = None,
 ) -> tuple[float, bool, bool]:
     _push(lines, "TIME PER HOLE – DRILL GROUPS")
     _push(lines, "-" * 66)
-    subtotal_min = 0.0
+    subtotal_minutes = 0.0
     groups_processed = 0
     seen_deep = False
     seen_std = False
     for b in bins:
         try:
             op = (b.get("op") or b.get("op_name") or "").strip().lower()
-            deep = op.startswith("deep")
-            if deep:
+            is_deep = op.startswith("deep")
+            if is_deep:
                 seen_deep = True
             else:
                 seen_std = True
-            d_in = _safe_float(b.get("diameter_in"))
-            depth = _safe_float(b.get("depth_in"))
-            qty = int(b.get("qty") or 0)
-            sfm = _safe_float(b.get("sfm"))
-            ipr = _safe_float(b.get("ipr"))
-            rpm = _rpm_from_sfm(sfm, d_in)
-            ipm = rpm * ipr
-            peck = float(peck_min_deep if deep else peck_min_std)
-            cut_min = depth / max(ipm, 1e-6)
-            t_hole = cut_min + float(index_min) + peck
-            group_min = t_hole * qty
-            subtotal_min += group_min
-            n_pecks_val = (
-                _safe_float(b.get("peck_count"), 0.0)
-                or _safe_float(b.get("pecks"), 0.0)
-                or _safe_float(b.get("n_pecks"), 0.0)
-            )
-            n_pecks = int(n_pecks_val) if n_pecks_val and math.isfinite(n_pecks_val) else 0
+            dia_in = _safe_float(b.get("diameter_in"))
+            depth_in = max(_safe_float(b.get("depth_in")), 0.0)
+            qty = int(_as_float(b.get("qty"), 0.0) or 0)
+            if dia_in <= 0.0 or depth_in <= 0.0 or qty <= 0:
+                continue
+
+            sfm = 39.0 if is_deep else 80.0
+            ipr = 0.0020 if is_deep else 0.0060
+            rpm = _safe_rpm_from_sfm_diam(sfm, dia_in)
+            ipm = _safe_ipm(ipr, rpm)
+
+            t_cut_min = depth_in / ipm
+            peck_min = float(peck_min_deep if is_deep else peck_min_std)
+
+            peck_step_in = _as_float(b.get("peck_step_in"), 0.0)
+            if peck_step_in <= 0.0:
+                peck_step_in = _as_float(b.get("peck_step"), 0.0)
+            if peck_step_in <= 0.0:
+                peck_step_in = _as_float(b.get("peck_depth_in"), 0.0)
+
+            n_pecks = 0
+            if peck_step_in > 0.0:
+                n_pecks = max(0, math.ceil(depth_in / max(peck_step_in, 0.001)) - 1)
+            else:
+                n_pecks_val = (
+                    _safe_float(b.get("peck_count"), 0.0)
+                    or _safe_float(b.get("pecks"), 0.0)
+                    or _safe_float(b.get("n_pecks"), 0.0)
+                )
+                if n_pecks_val and math.isfinite(n_pecks_val):
+                    n_pecks = max(0, int(n_pecks_val))
+
+            t_hole_min = t_cut_min + float(index_min) + n_pecks * peck_min
+            t_group = qty * t_hole_min
+            subtotal_minutes += t_group
             logging.debug(
-                f"[removal/drill-line] dia={d_in:.4f} depth_in={depth:.4f} ipm={ipm:.4f} "
-                f"index_min={float(index_min):.3f} peck_min={peck:.3f} pecks={n_pecks} "
-                f"t_cut_min={cut_min:.4f} t_hole_min={t_hole:.4f} qty={qty}"
+                f"[removal/drill-line] dia={dia_in:.4f} depth_in={depth_in:.4f} "
+                f"ipr={ipr:.4f} rpm={rpm:.1f} ipm={ipm:.3f} "
+                f"t_cut_min={t_cut_min:.4f} index={float(index_min):.3f} "
+                f"peck={peck_min:.3f}×{n_pecks} t_hole_min={t_hole_min:.4f} "
+                f"qty={qty} t_group={t_group:.4f}"
             )
             groups_processed += 1
-            # single-line, no material
             _push(
                 lines,
-                f'Dia {d_in:.3f}" × {qty}  | depth {depth:.3f}" | {int(round(sfm))} sfm | {ipr:.4f} ipr | '
-                f't/hole {t_hole:.2f} min | group {qty}×{t_hole:.2f} = {group_min:.2f} min'
+                f'Dia {dia_in:.3f}" × {qty}  | depth {depth_in:.3f}" | {int(round(sfm))} sfm | '
+                f'{ipr:.4f} ipr | t/hole {t_hole_min:.2f} min | '
+                f'group {qty}×{t_hole_min:.2f} = {t_group:.2f} min'
             )
         except Exception:
             continue
     _push(lines, "")
     logging.info(
-        f"[removal/drill-sum] groups={groups_processed} subtotal_min={subtotal_min:.2f}"
+        f"[removal/drill-sum] groups={groups_processed} subtotal_min={subtotal_minutes:.2f}"
     )
-    return subtotal_min, seen_deep, seen_std
+    if not (0.0 <= subtotal_minutes <= 600.0):
+        logging.error(
+            f"[unit] removal DRILL minutes insane; dropping. raw={subtotal_minutes}"
+        )
+        subtotal_minutes = 0.0
+    if isinstance(extra_map, _MutableMappingABC):
+        extra_map["drill_total_minutes"] = round(subtotal_minutes, 2)
+        logging.info(
+            f"[removal] drill_total_minutes={extra_map['drill_total_minutes']}"
+        )
+    return subtotal_minutes, seen_deep, seen_std
 
 
 _thread_tpi = re.compile(r"#?\s*\d{1,2}\s*-\s*(\d+)", re.I)
@@ -1710,6 +1757,7 @@ def _estimate_drilling_minutes_from_meta(
     drilling_meta_map: Mapping[str, Any] | MutableMapping[str, Any] = typing.cast(
         Mapping[str, Any] | MutableMapping[str, Any], drilling_meta
     )
+    drilling_meta_mut: MutableMapping[str, Any] | None = None
 
     try:
         index_min = float(drilling_meta.get("index_min_per_hole") or 0.0)
@@ -1856,6 +1904,7 @@ def _estimate_drilling_minutes_from_meta(
             index_min=index_min,
             peck_min_deep=peck_min_deep,
             peck_min_std=peck_min_std,
+            extra_map=drilling_meta_mut,
         )
 
     tool_minutes = (tchg_deep if seen_deep else 0.0) + (tchg_std if seen_std else 0.0)
