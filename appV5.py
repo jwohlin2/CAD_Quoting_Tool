@@ -6640,6 +6640,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         removal_drilling_hours=removal_drilling_hours_precise,
         prefer_removal_drilling_hours=prefer_removal_drilling_hours,
         cfg=cfg,
+        process_plan_summary=process_plan_summary_local,
     )
     removal_hours_debug = None
     if isinstance(getattr(bucket_state, "extra", None), _MappingABC):
