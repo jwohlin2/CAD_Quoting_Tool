@@ -26,6 +26,7 @@ DEFAULT_RATE_PER_HOUR: float = 90.0
 class RateBucket:
     """Describe how an operation maps to a two-bucket rate structure."""
 
+    key: str
     label: str
     bucket: str
     canonical_key: str | None = None
@@ -127,10 +128,30 @@ def bucket_cost_breakdown(
 
     labor_min = machine_min = labor_cost = machine_cost = total_minutes = 0.0
 
+    minute_lookup: dict[str, float] = {}
+    for name, raw in minute_source.items():
+        try:
+            mins = float(raw or 0.0)
+        except Exception:
+            continue
+        norm = normalize_bucket_key(name)
+        if not norm:
+            continue
+        minute_lookup[norm] = minute_lookup.get(norm, 0.0) + mins
+
     for spec in RATE_BUCKETS:
-        mins = float(minute_source.get(spec.label, 0.0) or 0.0)
+        mins = 0.0
+        matched_keys: list[str] = []
+        for key in spec.minute_keys:
+            value = minute_lookup.get(key)
+            if value is None or value <= 0:
+                continue
+            mins += value
+            matched_keys.append(key)
         if mins <= 0:
             continue
+        for key in matched_keys:
+            minute_lookup[key] = 0.0
         rate = _lookup_rate(two_bucket_rates, spec, default_rate)
         cost = (mins / 60.0) * rate
         entry: dict[str, float | str] = {
