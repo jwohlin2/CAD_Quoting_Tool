@@ -441,6 +441,33 @@ def _render_time_per_hole(
     return subtotal_min, seen_deep, seen_std
 
 
+def _render_ops_card(
+    append_line: Callable[[str], None],
+    *,
+    title: str,
+    rows: list[dict],
+) -> float:
+    if not rows:
+        return 0.0
+    append_line(title.upper())
+    append_line("-" * 66)
+    total_min = 0.0
+    for r in rows:
+        qty = int(r.get("qty", 0) or 0)
+        depth = r.get("depth_in_display") or f'{float(r.get("depth_in", 0.0)):.3f}"'
+        t_ph = float(r.get("t_per_hole_min", 0.0))
+        group = qty * t_ph
+        total_min += group
+        line = (
+            f'{r.get("label", "?")} × {qty} {r.get("side", "").upper():>8} | '
+            f"depth {depth} | {r.get('feed_fmt', '-')} | "
+            f"t/hole {t_ph:.2f} min | group {qty}×{t_ph:.2f} = {group:.2f} min"
+        )
+        append_line(line)
+    append_line("")
+    return total_min
+
+
 def _compute_drilling_removal_section(
     *,
     breakdown: Mapping[str, Any] | MutableMapping[str, Any],
@@ -1188,6 +1215,65 @@ def _hole_table_section_present(lines: Sequence[str], header: str) -> bool:
         if isinstance(existing, str) and existing.strip().upper() == header_norm:
             return True
     return False
+
+
+def _render_ops_cards_from_summary(
+    lines: list[str],
+    *,
+    ops_summary: Mapping[str, Any] | None,
+) -> bool:
+    if not isinstance(ops_summary, _MappingABC):
+        return False
+
+    cards_payload = ops_summary.get("cards")
+    card_items: list[tuple[str, Any]] = []
+    if isinstance(cards_payload, _MappingABC):
+        card_items.extend((str(key), value) for key, value in cards_payload.items())
+    elif isinstance(cards_payload, Sequence) and not isinstance(cards_payload, (str, bytes)):
+        for entry in cards_payload:
+            if isinstance(entry, _MappingABC):
+                title = str(entry.get("title") or entry.get("card") or entry.get("label") or "")
+                card_items.append((title, entry))
+
+    if not card_items:
+        return False
+
+    rendered = False
+    for default_title, payload in card_items:
+        if isinstance(payload, _MappingABC):
+            title = str(payload.get("title") or payload.get("card") or payload.get("label") or default_title)
+            rows_raw = payload.get("rows") or payload.get("entries") or payload.get("data")
+            rows: list[dict[str, Any]] = []
+            if isinstance(rows_raw, Sequence) and not isinstance(rows_raw, (str, bytes)):
+                rows = [dict(entry) for entry in rows_raw if isinstance(entry, _MappingABC)]
+            if not rows:
+                continue
+            header_lines = _ensure_list(payload.get("header"))
+            for header_line in header_lines:
+                try:
+                    lines.append(str(header_line))
+                except Exception:
+                    continue
+            total_minutes = _render_ops_card(lines.append, title=title, rows=rows)
+            footer_lines = _ensure_list(payload.get("footer"))
+            for footer_line in footer_lines:
+                try:
+                    lines.append(str(footer_line))
+                except Exception:
+                    continue
+            if isinstance(payload, _MutableMappingABC):
+                try:
+                    payload.setdefault("total_minutes", total_minutes)
+                except Exception:
+                    pass
+            rendered = True
+        elif isinstance(payload, Sequence) and not isinstance(payload, (str, bytes)):
+            rows = [dict(entry) for entry in payload if isinstance(entry, _MappingABC)]
+            if not rows:
+                continue
+            _render_ops_card(lines.append, title=default_title or "OPS", rows=rows)
+            rendered = True
+    return rendered
 
 
 def _emit_hole_table_ops_cards(
@@ -7832,7 +7918,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         geo_map        = _get_geo_map(ctx, locals().get("geo"), ctx_a, ctx_b)
         material_group = _get_material_group(ctx, ctx_a, ctx_b)
 
-        ops_rows = (((geo_map or {}).get("ops_summary") or {}).get("rows") or [])
+        ops_summary_payload = geo_map.get("ops_summary") if isinstance(geo_map, _MappingABC) else None
+        if isinstance(ops_summary_payload, _MutableMappingABC):
+            ops_summary_map = typing.cast(MutableMapping[str, Any], ops_summary_payload)
+        elif isinstance(ops_summary_payload, dict):
+            ops_summary_map = ops_summary_payload
+        else:
+            ops_summary_map = None
+        ops_rows = (((ops_summary_map or {}).get("rows") or []) if isinstance(ops_summary_map, _MappingABC) else [])
         _push(lines, f"[DEBUG] ops_rows_pre={len(ops_rows)}")
 
         if not ops_rows:
@@ -7841,11 +7934,28 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             built = _build_ops_rows_from_lines_fallback(chart_lines_all)
             _push(lines, f"[DEBUG] chart_lines_found={len(chart_lines_all)} built_rows={len(built)}")
             if built:
-                geo_map.setdefault("ops_summary", {})["rows"] = built
+                ops_summary_map = geo_map.setdefault("ops_summary", {})
+                if isinstance(ops_summary_map, _MutableMappingABC):
+                    typing.cast(MutableMapping[str, Any], ops_summary_map)["rows"] = built
+                else:
+                    ops_summary_map = typing.cast(dict[str, Any], ops_summary_map)
+                    ops_summary_map["rows"] = built
                 ops_rows = built
 
-        # Emit the cards (will no-op if no TAP/CBore/Spot rows)
-        _emit_hole_table_ops_cards(lines, geo=geo_map, material_group=material_group, speeds_csv=None)
+        rendered_ops_cards = False
+        try:
+            rendered_ops_cards = _render_ops_cards_from_summary(lines, ops_summary=ops_summary_map)
+        except Exception as ops_exc:
+            _push(lines, f"[DEBUG] ops_cards_render_failed={ops_exc.__class__.__name__}: {ops_exc}")
+
+        if not rendered_ops_cards:
+            # Emit the cards (will no-op if no TAP/CBore/Spot rows)
+            _emit_hole_table_ops_cards(
+                lines,
+                geo=geo_map,
+                material_group=material_group,
+                speeds_csv=None,
+            )
 
     except Exception as e:
         _push(lines, f"[DEBUG] material_removal_emit_skipped={e.__class__.__name__}: {e}")

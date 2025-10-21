@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 import appV5
 
 
@@ -63,3 +65,33 @@ def test_aggregate_ops_sets_built_rows() -> None:
     summary = appV5.aggregate_ops(rows)
 
     assert summary.get("built_rows") == 2
+
+
+def test_render_ops_cards_from_summary_helper() -> None:
+    lines: list[str] = []
+    ops_summary = {
+        "cards": {
+            "drilling": {
+                "title": "Time per hole – drill groups",
+                "header": ["MATERIAL REMOVAL – DRILLING", "=" * 64],
+                "rows": [
+                    {
+                        "label": "Dia 0.250",
+                        "qty": 6,
+                        "side": "front",
+                        "depth_in": 2.04,
+                        "feed_fmt": "39 sfm | 0.0020 ipr",
+                        "t_per_hole_min": 1.055,
+                    }
+                ],
+                "footer": ["Subtotal . 6.33 min"],
+            }
+        }
+    }
+
+    rendered = appV5._render_ops_cards_from_summary(lines, ops_summary=ops_summary)
+
+    assert rendered is True
+    assert "MATERIAL REMOVAL – DRILLING" in lines
+    assert any("DIA 0.250" in line.upper() for line in lines)
+    assert ops_summary["cards"]["drilling"].get("total_minutes") == pytest.approx(6.33, rel=1e-6)
