@@ -8697,7 +8697,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         "adjustments": inspection_adjustments,
     }
 
-    from planner_pricing import price_with_planner
+    from cad_quoter.pricing.planner import price_with_planner
 
     process_costs: dict[str, float] = {}
     process_plan_summary: dict[str, Any] = {}

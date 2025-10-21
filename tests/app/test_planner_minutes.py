@@ -14,7 +14,7 @@ def _disable_speeds_feeds_loader(monkeypatch):
 
 def test_compute_quote_uses_planner_minutes(monkeypatch):
     import appV5
-    import planner_pricing
+    import cad_quoter.pricing.planner as planner_pricing
 
     df = pd.DataFrame(columns=["Item", "Example Values / Options", "Data Type / Input Method"])
     geo = {
@@ -87,7 +87,7 @@ def test_compute_quote_uses_planner_minutes(monkeypatch):
 
 def test_planner_total_mismatch_records_red_flag(monkeypatch):
     import appV5
-    import planner_pricing
+    import cad_quoter.pricing.planner as planner_pricing
 
     df = pd.DataFrame(columns=["Item", "Example Values / Options", "Data Type / Input Method"])
     geo = {
@@ -169,7 +169,7 @@ def test_planner_total_mismatch_records_red_flag(monkeypatch):
 
 def test_planner_bucket_minutes_from_line_items_when_bucketize_empty(monkeypatch):
     import appV5
-    import planner_pricing
+    import cad_quoter.pricing.planner as planner_pricing
 
     df = pd.DataFrame(columns=["Item", "Example Values / Options", "Data Type / Input Method"])
     geo = {
@@ -237,7 +237,7 @@ def test_planner_bucket_minutes_from_line_items_when_bucketize_empty(monkeypatch
 
 def test_planner_does_not_emit_legacy_buckets_when_line_items_present(monkeypatch):
     import appV5
-    import planner_pricing
+    import cad_quoter.pricing.planner as planner_pricing
 
     df = pd.DataFrame(columns=["Item", "Example Values / Options", "Data Type / Input Method"])
     geo = {
@@ -296,7 +296,7 @@ def test_planner_does_not_emit_legacy_buckets_when_line_items_present(monkeypatc
 
 def test_planner_fallback_when_no_line_items(monkeypatch):
     import appV5
-    import planner_pricing
+    import cad_quoter.pricing.planner as planner_pricing
 
     df = pd.DataFrame(columns=["Item", "Example Values / Options", "Data Type / Input Method"])
     geo = {
@@ -363,7 +363,7 @@ def test_planner_fallback_when_no_line_items(monkeypatch):
 
 def test_planner_zero_totals_logs_flag_and_falls_back(monkeypatch):
     import appV5
-    import planner_pricing
+    import cad_quoter.pricing.planner as planner_pricing
 
     df = pd.DataFrame(columns=["Item", "Example Values / Options", "Data Type / Input Method"])
     geo = {
@@ -422,7 +422,7 @@ def test_planner_zero_totals_logs_flag_and_falls_back(monkeypatch):
 
 def test_planner_milling_bucket_backfills_from_estimator_when_planner_falls_back(monkeypatch):
     import appV5
-    import planner_pricing
+    import cad_quoter.pricing.planner as planner_pricing
 
     df = pd.DataFrame(
         [
@@ -497,7 +497,7 @@ def test_planner_milling_bucket_backfills_from_estimator_when_planner_falls_back
 
 def test_die_plate_163_holes_has_planner_totals(monkeypatch):
     import appV5
-    import planner_pricing
+    import cad_quoter.pricing.planner as planner_pricing
 
     df = pd.DataFrame(columns=["Item", "Example Values / Options", "Data Type / Input Method"])
     geo = {
