@@ -507,6 +507,33 @@ def _render_time_per_hole(
     return subtotal_min, seen_deep, seen_std
 
 
+def _render_ops_card(
+    append_line: Callable[[str], None],
+    *,
+    title: str,
+    rows: list[dict],
+) -> float:
+    if not rows:
+        return 0.0
+    append_line(title.upper())
+    append_line("-" * 66)
+    total_min = 0.0
+    for r in rows:
+        qty = int(r.get("qty", 0) or 0)
+        depth = r.get("depth_in_display") or f'{float(r.get("depth_in", 0.0)):.3f}"'
+        t_ph = float(r.get("t_per_hole_min", 0.0))
+        group = qty * t_ph
+        total_min += group
+        line = (
+            f'{r.get("label", "?")} × {qty} {r.get("side", "").upper():>8} | '
+            f"depth {depth} | {r.get('feed_fmt', '-')} | "
+            f"t/hole {t_ph:.2f} min | group {qty}×{t_ph:.2f} = {group:.2f} min"
+        )
+        append_line(line)
+    append_line("")
+    return total_min
+
+
 def _compute_drilling_removal_section(
     *,
     breakdown: Mapping[str, Any] | MutableMapping[str, Any],
@@ -8118,7 +8145,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         geo_map        = _get_geo_map(ctx, locals().get("geo"), ctx_a, ctx_b)
         material_group = _get_material_group(ctx, ctx_a, ctx_b)
 
-        ops_rows = (((geo_map or {}).get("ops_summary") or {}).get("rows") or [])
+        ops_summary_payload = geo_map.get("ops_summary") if isinstance(geo_map, _MappingABC) else None
+        if isinstance(ops_summary_payload, _MutableMappingABC):
+            ops_summary_map = typing.cast(MutableMapping[str, Any], ops_summary_payload)
+        elif isinstance(ops_summary_payload, dict):
+            ops_summary_map = ops_summary_payload
+        else:
+            ops_summary_map = None
+        ops_rows = (((ops_summary_map or {}).get("rows") or []) if isinstance(ops_summary_map, _MappingABC) else [])
         _push(lines, f"[DEBUG] ops_rows_pre={len(ops_rows)}")
 
         if not ops_rows:
@@ -8127,7 +8161,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             built = _build_ops_rows_from_lines_fallback(chart_lines_all)
             _push(lines, f"[DEBUG] chart_lines_found={len(chart_lines_all)} built_rows={len(built)}")
             if built:
-                geo_map.setdefault("ops_summary", {})["rows"] = built
+                ops_summary_map = geo_map.setdefault("ops_summary", {})
+                if isinstance(ops_summary_map, _MutableMappingABC):
+                    typing.cast(MutableMapping[str, Any], ops_summary_map)["rows"] = built
+                else:
+                    ops_summary_map = typing.cast(dict[str, Any], ops_summary_map)
+                    ops_summary_map["rows"] = built
                 ops_rows = built
 
         # Emit the cards (will no-op if no TAP/CBore/Spot rows)
