@@ -315,6 +315,109 @@ def _seed_bucket_minutes_cost(
     entry["total$"] = round(entry["machine$"] + entry["labor$"], 2)
 
 
+def _normalize_buckets(
+    bucket_view: MutableMapping[str, Any] | Mapping[str, Any] | None,
+) -> None:
+    """Deduplicate bucket entries when aliases collide."""
+
+    if not isinstance(bucket_view, (_MutableMappingABC, dict)):
+        return
+
+    try:
+        buckets_obj = bucket_view.get("buckets")  # type: ignore[attr-defined]
+    except Exception:
+        buckets_obj = None
+
+    if isinstance(buckets_obj, dict):
+        buckets: dict[str, Any] = buckets_obj
+    elif isinstance(buckets_obj, _MappingABC):
+        try:
+            buckets = dict(buckets_obj)
+        except Exception:
+            return
+        bucket_view["buckets"] = buckets
+    else:
+        return
+
+    canonical_to_key: dict[str, str] = {}
+
+    for raw_key in list(buckets.keys()):
+        canon = _canonical_bucket_key(raw_key) or str(raw_key)
+        entry_raw = buckets.get(raw_key)
+        if isinstance(entry_raw, dict):
+            entry = entry_raw
+        elif isinstance(entry_raw, _MappingABC):
+            entry = dict(entry_raw)
+            buckets[raw_key] = entry
+        else:
+            entry = {}
+            buckets[raw_key] = entry
+
+        if canon not in canonical_to_key:
+            canonical_to_key[canon] = raw_key
+            continue
+
+        preferred_key = canonical_to_key[canon]
+        preferred_entry_raw = buckets.get(preferred_key)
+        if isinstance(preferred_entry_raw, dict):
+            preferred_entry = preferred_entry_raw
+        elif isinstance(preferred_entry_raw, _MappingABC):
+            preferred_entry = dict(preferred_entry_raw)
+            buckets[preferred_key] = preferred_entry
+        else:
+            preferred_entry = {}
+            buckets[preferred_key] = preferred_entry
+
+        for field, precision in (
+            ("minutes", 2),
+            ("machine$", 2),
+            ("labor$", 2),
+            ("total$", 2),
+            ("machine_cost", 2),
+            ("labor_cost", 2),
+            ("total_cost", 2),
+            ("hr", 3),
+        ):
+            if field not in entry:
+                continue
+            try:
+                value = float(entry.get(field) or 0.0)
+            except Exception:
+                continue
+            if not math.isfinite(value):
+                continue
+            if abs(value) <= 0.0:
+                continue
+            preferred_entry[field] = round(value, precision)
+
+        if raw_key != preferred_key:
+            del buckets[raw_key]
+
+    order_obj = bucket_view.get("order") if isinstance(bucket_view, dict) else None
+    if order_obj is None and isinstance(bucket_view, _MutableMappingABC):
+        try:
+            order_obj = bucket_view.get("order")
+        except Exception:
+            order_obj = None
+
+    if isinstance(order_obj, list):
+        new_order: list[str] = []
+        seen: set[str] = set()
+        for label in order_obj:
+            if not isinstance(label, str):
+                continue
+            canon = _canonical_bucket_key(label) or label
+            preferred_key = canonical_to_key.get(canon)
+            actual_key = preferred_key if preferred_key in buckets else label
+            if actual_key in buckets and actual_key not in seen:
+                new_order.append(actual_key)
+                seen.add(actual_key)
+        for preferred_key in canonical_to_key.values():
+            if preferred_key in buckets and preferred_key not in seen:
+                new_order.append(preferred_key)
+                seen.add(preferred_key)
+        bucket_view["order"] = new_order
+
 def _emit_hole_table_ops_cards(
     lines: list[str],
     *,
@@ -10182,6 +10285,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 labor_rate_per_hr=float(drill_labor_rate_seed or 0.0),
             )
 
+            _normalize_buckets(bucket_view)
+
             drilling_dbg_entry: Mapping[str, Any] | None = None
             try:
                 buckets_dbg = bucket_view.get("buckets") if isinstance(bucket_view, dict) else None
@@ -10198,20 +10303,22 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     if roughing_hours is None:
         roughing_hours = _coerce_float_or_none(value_map.get("Roughing Cycle Time (hr)"))
     milling_rate = _lookup_rate("MillingRate", rates, params, default_rates, fallback=100.0)
-    if roughing_hours and roughing_hours > 0:
+    milling_hours = float(roughing_hours or 0.0)
+    if milling_hours > 0:
+        milling_minutes_total = milling_hours * 60.0
         bucket_view["milling"] = {
-            "minutes": roughing_hours * 60.0,
-            "machine_cost": roughing_hours * milling_rate,
+            "minutes": milling_minutes_total,
+            "machine_cost": milling_hours * milling_rate,
             "labor_cost": 0.0,
         }
         process_meta["milling"] = {
-            "hr": roughing_hours,
-            "minutes": roughing_hours * 60.0,
+            "hr": milling_hours,
+            "minutes": milling_minutes_total,
             "rate": milling_rate,
             "basis": ["planner_milling_backfill"],
         }
 
-        milling_minutes_seed = float(roughing_hours * 60.0)
+        milling_minutes_seed = float(milling_minutes_total)
         milling_machine_rate_seed = float(milling_rate or 0.0)
         milling_labor_rate_seed = (
             _lookup_bucket_rate("milling_labor", rates)
@@ -10226,6 +10333,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             machine_rate_per_hr=milling_machine_rate_seed,
             labor_rate_per_hr=float(milling_labor_rate_seed or 0.0),
         )
+
+        _normalize_buckets(bucket_view)
 
         milling_dbg_entry: Mapping[str, Any] | None = None
         try:
