@@ -650,40 +650,60 @@ def _sync_drilling_bucket_view(
         else:
             return False
 
+    defaults = {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0, "total$": 0.0}
     entry = buckets_obj.get("drilling")
     if not isinstance(entry, _MutableMappingABC):
         if isinstance(buckets_obj, dict):
-            entry = buckets_obj.setdefault("drilling", {})
+            entry = buckets_obj.setdefault("drilling", defaults.copy())
         else:
-            return False
+            try:
+                buckets_obj["drilling"] = defaults.copy()  # type: ignore[index]
+                entry = buckets_obj.get("drilling")  # type: ignore[index]
+            except Exception:
+                return False
+
+    if not isinstance(entry, _MutableMappingABC):
+        return False
+
+    for key, value in defaults.items():
+        entry.setdefault(key, value)
 
     old_minutes = _safe_float(entry.get("minutes"))
     old_machine = _safe_float(entry.get("machine$"))
     old_labor = _safe_float(entry.get("labor$"))
     old_total = _safe_float(entry.get("total$"))
 
-    new_minutes = round(float(billed_minutes), 2)
+    drill_minutes = float(billed_minutes)
+    drill_hours = drill_minutes / 60.0
+
+    new_minutes = round(drill_minutes, 2)
     entry["minutes"] = new_minutes
     entry["synced_minutes"] = new_minutes
-    entry["synced_hours"] = round(new_minutes / 60.0, 4)
+    entry["synced_hours"] = round(drill_hours, 4)
 
-    new_machine = old_machine
-    new_labor = old_labor
+    rates_map = bucket_view.get("rates") if isinstance(bucket_view, _MappingABC) else {}
+    if not isinstance(rates_map, _MappingABC):
+        rates_map = {}
 
-    if billed_cost is not None and billed_cost > 0.0:
-        billed_cost_val = round(float(billed_cost), 2)
-        if _bucket_cost_mode("drilling") == "labor":
-            new_labor = billed_cost_val
-            if new_machine <= 0.0:
-                new_machine = 0.0
-        else:
-            new_machine = billed_cost_val
-            if new_labor <= 0.0:
-                new_labor = 0.0
+    drill_machine_rate = (
+        _lookup_bucket_rate("drilling", rates_map)
+        or _lookup_bucket_rate("machine", rates_map)
+    )
+    drill_labor_rate = (
+        _lookup_bucket_rate("drilling_labor", rates_map)
+        or _lookup_bucket_rate("labor", rates_map)
+    )
 
-    entry["machine$"] = round(new_machine, 2)
-    entry["labor$"] = round(new_labor, 2)
-    entry["total$"] = round(entry["machine$"] + entry["labor$"], 2)
+    machine_cost = drill_hours * max(0.0, float(drill_machine_rate or 0.0))
+    labor_cost = drill_hours * max(0.0, float(drill_labor_rate or 0.0))
+    total_cost = round(machine_cost + labor_cost, 2)
+
+    new_machine = round(machine_cost, 2)
+    new_labor = round(labor_cost, 2)
+
+    entry["machine$"] = new_machine
+    entry["labor$"] = new_labor
+    entry["total$"] = total_cost
 
     totals_map = bucket_view.get("totals")
     if isinstance(totals_map, _MutableMappingABC):
