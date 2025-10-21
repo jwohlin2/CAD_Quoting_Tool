@@ -3207,11 +3207,6 @@ def apply_suggestions(baseline: dict, s: dict) -> dict:
     return merged
 
 
-
-
-def iter_suggestion_rows(state: QuoteState) -> list[dict]:
-    return ui_suggestions.build_suggestion_rows(state)
-
 try:
     from cad_quoter.geometry.hole_table_parser import (
         parse_hole_table_lines as _parse_hole_table_lines,

@@ -1,7 +1,6 @@
 import copy
 
-import appV5
-from appkit.ui.suggestions import build_suggestion_rows
+from appkit.ui.suggestions import build_suggestion_rows, iter_suggestion_rows
 from cad_quoter.domain import QuoteState
 
 
@@ -58,7 +57,7 @@ def test_suggestion_rows_align_between_ui_and_legacy():
 
     # exercise both implementations with separate state instances to avoid shared mutation
     rows_ui = build_suggestion_rows(_clone_state(state))
-    rows_legacy = appV5.iter_suggestion_rows(_clone_state(state))
+    rows_legacy = iter_suggestion_rows(_clone_state(state))
 
     assert rows_ui == rows_legacy
 
@@ -68,6 +67,6 @@ def test_suggestion_rows_empty_state_round_trip():
     state.accept_llm = True  # legacy UI can persist booleans here
 
     rows_ui = build_suggestion_rows(_clone_state(state))
-    rows_legacy = appV5.iter_suggestion_rows(_clone_state(state))
+    rows_legacy = iter_suggestion_rows(_clone_state(state))
 
     assert rows_ui == rows_legacy == []
