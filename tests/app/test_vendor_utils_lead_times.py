@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from appkit import vendor_utils
+from cad_quoter.pricing import vendor_utils
 from cad_quoter.pricing import vendor_lead_times
 
 

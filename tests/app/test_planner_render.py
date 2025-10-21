@@ -1,6 +1,6 @@
 import pytest
 
-from appkit.ui import planner_render
+from cad_quoter.ui import planner_render
 
 
 def test_planner_render_canonicalize_filters_meta_and_misc(monkeypatch: pytest.MonkeyPatch) -> None:

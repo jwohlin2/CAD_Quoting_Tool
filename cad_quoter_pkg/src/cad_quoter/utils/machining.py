@@ -6,11 +6,10 @@ import math
 import re
 from typing import Any, Callable, Mapping
 
-from appkit.debug.debug_tables import (
+from cad_quoter.utils.debug_tables import (
     _jsonify_debug_summary as _debug_jsonify_summary,
     _jsonify_debug_value as _debug_jsonify_value,
 )
-from cad_quoter.domain_models import coerce_float_or_none as _coerce_float_or_none
 from cad_quoter.utils.numeric import parse_mixed_fraction as _parse_mixed_fraction
 from cad_quoter.pricing.feed_math import (
     approach_allowance_for_drill as _approach_allowance_for_drill,
@@ -20,14 +19,20 @@ from cad_quoter.pricing.feed_math import (
 )
 
 
+def _coerce_float_or_none(value: Any) -> float | None:
+    from cad_quoter.domain_models.values import coerce_float_or_none as _coerce
+
+    return _coerce(value)
+
+
 def _jsonify_debug_value(value: Any, depth: int = 0, max_depth: int = 6) -> Any:
-    """Proxy to :func:`appkit.debug.debug_tables._jsonify_debug_value`."""
+    """Proxy to :func:`cad_quoter.utils.debug_tables._jsonify_debug_value`."""
 
     return _debug_jsonify_value(value, depth=depth, max_depth=max_depth)
 
 
 def _jsonify_debug_summary(summary: Mapping[str, Any]) -> dict[str, Any]:
-    """Proxy to :func:`appkit.debug.debug_tables._jsonify_debug_summary`."""
+    """Proxy to :func:`cad_quoter.utils.debug_tables._jsonify_debug_summary`."""
 
     return _debug_jsonify_summary(summary)
 

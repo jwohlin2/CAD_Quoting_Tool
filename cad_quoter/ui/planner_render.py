@@ -25,7 +25,7 @@ from cad_quoter.pricing.process_cost_renderer import (
 from cad_quoter.utils import sdict
 from cad_quoter.utils.render_utils import fmt_hours, fmt_money
 
-from appkit.utils.text_rules import canonicalize_amortized_label as _canonical_amortized_label
+from cad_quoter.utils.text_rules import canonicalize_amortized_label as _canonical_amortized_label
 
 from .services import QuoteConfiguration
 

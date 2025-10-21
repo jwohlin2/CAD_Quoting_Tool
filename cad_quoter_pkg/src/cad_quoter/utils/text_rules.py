@@ -5,7 +5,7 @@ import re
 from functools import lru_cache
 from typing import Any, Iterable, Mapping
 
-from appkit.data import load_json
+from cad_quoter.resources.loading import load_json
 
 
 @lru_cache(maxsize=None)

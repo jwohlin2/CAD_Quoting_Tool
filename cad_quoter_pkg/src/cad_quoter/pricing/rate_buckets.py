@@ -55,6 +55,19 @@ class RateBucket:
         normalized = normalize_bucket_key(self.label)
         return (self.label, normalized) if normalized and normalized != self.label else (self.label,)
 
+    @property
+    def minute_keys(self) -> tuple[str, ...]:
+        """Return normalized minute labels that map planner minutes to this bucket."""
+
+        keys: list[str] = []
+        for candidate in (self.key, self.label, self.canonical_key, self.bucket):
+            if not candidate:
+                continue
+            norm = normalize_bucket_key(candidate)
+            if norm and norm not in keys:
+                keys.append(norm)
+        return tuple(keys)
+
 
 RATE_BUCKETS: tuple[RateBucket, ...] = (
     RateBucket("Inspection", "labor", "inspection"),
@@ -68,7 +81,7 @@ RATE_BUCKETS: tuple[RateBucket, ...] = (
     RateBucket("Grinding", "machine", "grinding"),
     RateBucket("Saw/Waterjet", "machine", "saw_waterjet"),
     RateBucket("Sinker EDM", "machine", "sinker_edm"),
-    RateBucket("Abrasive Flow", "machine", extra_rate_keys=("AbrasiveFlowRate",)),
+    RateBucket("Abrasive Flow", "machine", "abrasive_flow", extra_rate_keys=("AbrasiveFlowRate",)),
 )
 
 

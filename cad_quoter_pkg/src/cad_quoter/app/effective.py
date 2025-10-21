@@ -8,8 +8,8 @@ from cad_quoter.domain import (
     QuoteState,
     canonicalize_pass_through_map,
 )
-from appkit.guardrails import apply_drilling_floor_notes, build_guard_context
-from appkit.merge_utils import (
+from cad_quoter.app.guardrails import apply_drilling_floor_notes, build_guard_context
+from cad_quoter.app.merge_utils import (
     ACCEPT_SCALAR_KEYS,
     SUGGESTION_SCALAR_KEYS,
     merge_effective,

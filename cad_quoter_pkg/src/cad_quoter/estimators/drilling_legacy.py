@@ -14,8 +14,8 @@ try:  # pragma: no cover - optional dependency
 except Exception:  # pragma: no cover - fallback when pandas is unavailable
     PandasDataFrame = Any  # type: ignore[misc, assignment]
 
-from appkit.data import load_json
-from appkit.utils import _jsonify_debug_value
+from cad_quoter.resources.loading import load_json
+from cad_quoter.utils.machining import _jsonify_debug_value
 from cad_quoter.domain_models import MATERIAL_DISPLAY_BY_KEY, normalize_material_key
 from cad_quoter.domain_models import coerce_float_or_none as _coerce_float_or_none
 from cad_quoter.domain_models.values import to_float

@@ -91,4 +91,3 @@ def parse_mixed_fraction(value: str) -> float | None:
         return None
 
     return sign * total
-

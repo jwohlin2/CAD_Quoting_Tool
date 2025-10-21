@@ -6,7 +6,7 @@ import math
 import re
 from typing import Iterable, Mapping, Sequence
 
-from appkit.utils import (
+from cad_quoter.utils.machining import (
     _ipm_from_rpm_ipr,
     _lookup_sfm_ipr,
     _parse_thread_major_in,

@@ -6,7 +6,7 @@ from cad_quoter.app._value_utils import _format_value
 from cad_quoter.domain import QuoteState, canonicalize_pass_through_map
 from cad_quoter.llm_overrides import _canonical_pass_label
 
-from appkit.merge_utils import _collect_process_keys
+from cad_quoter.app.merge_utils import _collect_process_keys
 
 __all__ = ["iter_suggestion_rows", "build_suggestion_rows"]
 

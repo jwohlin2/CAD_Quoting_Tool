@@ -7,8 +7,8 @@ import json
 import time
 from typing import Any
 
-from appkit.effective import ensure_accept_flags
-from appkit.ui.tk_compat import filedialog, messagebox
+from cad_quoter.app.effective import ensure_accept_flags
+from cad_quoter.ui.tk_compat import filedialog, messagebox
 from cad_quoter.app.optional_loaders import pd
 from cad_quoter.domain import QuoteState
 

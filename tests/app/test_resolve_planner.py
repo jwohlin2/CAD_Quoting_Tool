@@ -15,7 +15,7 @@ def reload_appv5(monkeypatch):
         )
 
     module = importlib.import_module("appV5")
-    planner_adapter = importlib.import_module("appkit.planner_adapter")
+    planner_adapter = importlib.import_module("cad_quoter.app.planner_adapter")
     monkeypatch.setattr(module, "FORCE_PLANNER", False)
     monkeypatch.setattr(planner_adapter, "FORCE_PLANNER", False)
     monkeypatch.setattr(module, "FORCE_ESTIMATOR", False, raising=False)
@@ -74,7 +74,7 @@ def test_resolve_planner_invalid_mode_falls_back(reload_appv5):
 
 def test_resolve_planner_force_flag_overrides_mode(monkeypatch, reload_appv5):
     module = reload_appv5
-    planner_adapter = importlib.import_module("appkit.planner_adapter")
+    planner_adapter = importlib.import_module("cad_quoter.app.planner_adapter")
     monkeypatch.setattr(module, "FORCE_PLANNER", True)
     monkeypatch.setattr(planner_adapter, "FORCE_PLANNER", True)
     used, mode = module.resolve_planner({"PlannerMode": "legacy"}, None)
@@ -84,7 +84,7 @@ def test_resolve_planner_force_flag_overrides_mode(monkeypatch, reload_appv5):
 
 def test_resolve_planner_force_estimator(monkeypatch, reload_appv5):
     module = reload_appv5
-    planner_adapter = importlib.import_module("appkit.planner_adapter")
+    planner_adapter = importlib.import_module("cad_quoter.app.planner_adapter")
     monkeypatch.setattr(module, "FORCE_PLANNER", False)
     monkeypatch.setattr(planner_adapter, "FORCE_PLANNER", False)
     monkeypatch.setattr(module, "FORCE_ESTIMATOR", True, raising=False)
