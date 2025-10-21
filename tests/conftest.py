@@ -634,10 +634,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import pandas as pd  # type: ignore
-
-
 from cad_quoter.domain import QuoteState  # noqa: E402  (import after stubs installed)
+from tests.data_loaders import load_geometry_samples
 
 
 @pytest.fixture
@@ -649,32 +647,9 @@ def fresh_quote_state() -> QuoteState:
 
 @pytest.fixture
 def sample_geo_metrics() -> dict:
-    return {
-        "GEO-01_Length_mm": 120.0,
-        "GEO-02_Width_mm": 60.0,
-        "GEO-03_Height_mm": 25.0,
-        "GEO-Volume_mm3": 180000.0,
-        "GEO-SurfaceArea_mm2": 42000.0,
-        "Feature_Face_Count": 8,
-        "GEO_WEDM_PathLen_mm": 95.0,
-    }
-
-
-@pytest.fixture
-def sample_geo_dataframe(sample_geo_metrics: dict) -> pd.DataFrame:
-    rows = [
-        {"Item": "GEO__BBox_X_mm", "Example Values / Options": 0.0, "Data Type / Input Method": "number"},
-        {"Item": "Existing", "Example Values / Options": 1.0, "Data Type / Input Method": "number"},
-    ]
-    return pd.DataFrame(rows)
-
-
-@pytest.fixture
-def sample_pricing_table() -> dict:
-    return {
-        "stainless steel": {"usd_per_kg": 5.0, "usd_per_lb": 5.0 / 2.2046226218, "notes": "test"},
-        "aluminum": {"usd_per_kg": 3.1, "usd_per_lb": 3.1 / 2.2046226218, "notes": "test"},
-    }
+    data = load_geometry_samples()
+    metrics = data.get("metrics", {}).get("default", {})
+    return dict(metrics)
 
 
 @pytest.fixture

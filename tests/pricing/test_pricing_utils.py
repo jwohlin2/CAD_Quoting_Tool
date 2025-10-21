@@ -27,8 +27,20 @@ def test_resolve_material_unit_price_prefers_wieland(monkeypatch: pytest.MonkeyP
 
 
 def test_resolve_material_unit_price_falls_back_to_csv(
-    monkeypatch: pytest.MonkeyPatch, sample_pricing_table: dict
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    sample_pricing_table = {
+        "stainless steel": {
+            "usd_per_kg": 5.0,
+            "usd_per_lb": 5.0 / 2.2046226218,
+            "notes": "test",
+        },
+        "aluminum": {
+            "usd_per_kg": 3.1,
+            "usd_per_lb": 3.1 / 2.2046226218,
+            "notes": "test",
+        },
+    }
     module = types.ModuleType("cad_quoter.pricing.wieland_scraper")
     module.get_live_material_price = lambda *args, **kwargs: (None, "wieland-offline")
     monkeypatch.setitem(sys.modules, "cad_quoter.pricing.wieland_scraper", module)

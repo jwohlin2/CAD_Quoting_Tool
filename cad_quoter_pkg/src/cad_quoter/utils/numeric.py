@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import math
 import re
+from functools import lru_cache
 from typing import Any
 
-from cad_quoter.domain_models.values import (
-    coerce_float_or_none as _coerce_float_or_none,
-    to_int as _to_int,
-    to_positive_float as _to_positive_float,
-)
+
+@lru_cache(maxsize=None)
+def _domain_values():
+    from cad_quoter.domain_models import values as _values
+
+    return _values
 
 __all__ = ["coerce_float", "coerce_int", "coerce_positive_float"]
 
@@ -18,7 +20,7 @@ __all__ = ["coerce_float", "coerce_int", "coerce_positive_float"]
 def coerce_float(value: Any) -> float | None:
     """Best-effort conversion to a finite ``float`` value."""
 
-    coerced = _coerce_float_or_none(value)
+    coerced = _domain_values().coerce_float_or_none(value)
     if coerced is None:
         return None
 
@@ -28,13 +30,13 @@ def coerce_float(value: Any) -> float | None:
 def coerce_int(value: Any) -> int | None:
     """Best-effort conversion to an integer via domain value helpers."""
 
-    return _to_int(value)
+    return _domain_values().to_int(value)
 
 
 def coerce_positive_float(value: Any) -> float | None:
     """Return *value* as a positive finite ``float`` when possible."""
 
-    return _to_positive_float(value)
+    return _domain_values().to_positive_float(value)
 
 
 def parse_mixed_fraction(value: str) -> float | None:
