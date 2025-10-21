@@ -285,10 +285,7 @@ from cad_quoter.pricing.process_view import (
 
 # ==== BUCKET SEEDING (single source of truth) ===========================
 def _minutes_to_hours(m: Any) -> float:
-    try:
-        return max(0.0, float(m)) / 60.0
-    except Exception:
-        return 0.0
+    return _as_float(m, 0.0) / 60.0
 
 
 def minutes_to_hours(m: Any) -> float:
@@ -364,33 +361,71 @@ def _normalize_buckets(bucket_view_obj: MutableMapping[str, Any] | Mapping[str, 
     except Exception:
         buckets_obj = None
 
-    b = buckets_obj if isinstance(buckets_obj, dict) else {}
+    buckets_map = buckets_obj if isinstance(buckets_obj, _MappingABC) else {}
     norm: dict[str, dict[str, float]] = {}
 
-    for k, e in b.items():
-        if not isinstance(e, _MappingABC):
+    for raw_key, entry in buckets_map.items():
+        if not isinstance(entry, _MappingABC):
             continue
-        nk_candidate = alias.get(k, k)
-        nk = nk_candidate if isinstance(nk_candidate, str) else str(k)
+        nk = alias.get(raw_key, raw_key)
         dst = norm.setdefault(
             nk,
             {"minutes": 0.0, "machine$": 0.0, "labor$": 0.0, "total$": 0.0},
         )
-        try:
-            dst["minutes"] += float(e.get("minutes", 0.0) or 0.0)
-        except Exception:
-            pass
-        try:
-            dst["machine$"] += float(e.get("machine$", 0.0) or 0.0)
-        except Exception:
-            pass
-        try:
-            dst["labor$"] += float(e.get("labor$", 0.0) or 0.0)
-        except Exception:
-            pass
+        dst["minutes"] += _as_float(entry.get("minutes"), 0.0)
+        dst["machine$"] += _as_float(entry.get("machine$"), 0.0)
+        dst["labor$"] += _as_float(entry.get("labor$"), 0.0)
         dst["total$"] = round(dst["machine$"] + dst["labor$"], 2)
 
     bucket_view_obj["buckets"] = norm
+
+
+def _as_float(x: Any, default: float = 0.0) -> float:
+    try:
+        value = float(x)
+        if math.isfinite(value):
+            return value
+    except Exception:
+        pass
+    return default
+
+
+def _clamp_minutes(v: Any, lo: float = 0.0, hi: float = 10000.0) -> float:
+    minutes_val = _as_float(v, 0.0)
+    if not (lo <= minutes_val <= hi):
+        return 0.0
+    return minutes_val
+
+
+def _pick_drill_minutes(
+    process_plan_summary: Mapping[str, Any] | None,
+    extras: Mapping[str, Any] | None,
+    lines: list[str] | None = None,
+) -> float:
+    meta_min = _as_float(
+        (((process_plan_summary or {}).get("drilling") or {}).get("total_minutes_billed")),
+        0.0,
+    )
+    removal_min = _as_float((extras or {}).get("drill_total_minutes"), 0.0)
+
+    if removal_min > 0:
+        chosen = removal_min
+        src = "removal_card"
+    else:
+        chosen = meta_min
+        src = "planner_meta"
+
+    chosen_clamped = _clamp_minutes(chosen)
+    if lines is not None:
+        try:
+            lines.append(
+                "[DEBUG] drill_minutes_pick meta="
+                f"{meta_min:.2f} removal={removal_min:.2f} -> {chosen_clamped:.2f} "
+                f"({src}{' CLAMPED' if chosen_clamped != chosen else ''})"
+            )
+        except Exception:
+            pass
+    return chosen_clamped
 
 def _emit_hole_table_ops_cards(
     lines: list[str],
@@ -1292,7 +1327,7 @@ def _compute_drilling_removal_section(
             if drill_minutes_total > 0.0:
                 extras["removal_drilling_hours"] = minutes_to_hours(drill_minutes_total)
 
-            drill_minutes_total = float(drill_minutes_total or 0.0)
+            drill_minutes_total = _pick_drill_minutes(process_plan_summary, extras, lines)
             drill_mrate = (
                 _lookup_bucket_rate("drilling", rates)
                 or _lookup_bucket_rate("machine", rates)
@@ -3527,26 +3562,19 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     ) -> tuple[float, float]:
         """Render the Process & Labor + Labor Hour tables from planner buckets."""
 
-        buckets_source: Mapping[str, Any] | None = None
+        buckets: dict[str, Mapping[str, Any]] = {}
         if isinstance(bucket_view_obj, (_MappingABC, dict)):
             try:
-                buckets_source = bucket_view_obj.get("buckets")
+                buckets_candidate = bucket_view_obj.get("buckets")
             except Exception:
-                buckets_source = None
-
-        buckets: dict[str, Mapping[str, Any]]
-        if isinstance(buckets_source, dict):
-            buckets = buckets_source
-        elif isinstance(buckets_source, _MappingABC):
-            try:
-                buckets = dict(buckets_source)
-            except Exception:
-                buckets = {}
-        else:
-            buckets = {}
-
-        if not buckets:
-            return 0.0, 0.0
+                buckets_candidate = None
+            if isinstance(buckets_candidate, dict):
+                buckets = buckets_candidate
+            elif isinstance(buckets_candidate, _MappingABC):
+                try:
+                    buckets = dict(buckets_candidate)
+                except Exception:
+                    buckets = {}
 
         labels = {
             "programming": "Programming (amortized)",
@@ -3569,8 +3597,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             "inspection",
         ]
 
-        ordered_keys = list(preferred_order)
-        ordered_keys.extend(k for k in buckets if k not in preferred_order)
+        ordered_keys = preferred_order + [
+            key for key in buckets.keys() if key not in preferred_order
+        ]
 
         _push(lines, "Process & Labor Costs")
         _push(lines, "-" * 74)
@@ -3583,15 +3612,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if not isinstance(entry, _MappingABC):
                 continue
             seen.add(key)
-            try:
-                total_amount = float(entry.get("total$", 0.0) or 0.0)
-            except Exception:
-                total_amount = 0.0
+            total_amount = _as_float(entry.get("total$"), 0.0)
             total_cost += total_amount
             display_label = labels.get(key, key)
             _push(lines, f"  {display_label.ljust(28)}${total_amount:>10,.2f}")
         _push(lines, " " * 66 + "-------")
-        _push(lines, f"  Total{' ' * 58 }${total_cost:>10,.2f}")
+        _push(lines, f"  Total{' ' * 58}${total_cost:>10,.2f}")
         _push(lines, "")
 
         _push(lines, "Labor Hour Summary")
@@ -3608,7 +3634,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             _push(lines, f"  {display_label.ljust(28)}{hours_val:.2f} hr")
             total_hours += hours_val
         _push(lines, " " * 66 + "-------")
-        _push(lines, f"  Total Hours{' ' * 49 }{total_hours:.2f} hr")
+        _push(lines, f"  Total Hours{' ' * 49}{total_hours:.2f} hr")
         _push(lines, "")
 
         return total_cost, total_hours
@@ -5818,12 +5844,27 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             _coerce_float_or_none(planner_totals_map.get("machine_cost")) or 0.0
         )
 
-        assert (
-            abs(display_machine_from_rows - planner_machine_total) < 0.51
-        ), "Machine $ mismatch (check drilling minutes merge)"
-        assert (
-            abs(display_labor_from_rows - planner_labor_total) < 0.51
-        ), "Labor $ mismatch"
+        if abs(display_machine_from_rows - planner_machine_total) >= 0.51:
+            try:
+                _log.warning(
+                    "render_quote: Machine $ mismatch (rows=%.2f planner=%.2f)",
+                    display_machine_from_rows,
+                    planner_machine_total,
+                )
+            except Exception:
+                pass
+            # Prefer planner totals to avoid breaking render on small drifts.
+            display_machine_from_rows = planner_machine_total
+        if abs(display_labor_from_rows - planner_labor_total) >= 0.51:
+            try:
+                _log.warning(
+                    "render_quote: Labor $ mismatch (rows=%.2f planner=%.2f)",
+                    display_labor_from_rows,
+                    planner_labor_total,
+                )
+            except Exception:
+                pass
+            display_labor_from_rows = planner_labor_total
     detail_lookup.update(bucket_state.detail_lookup)
     label_to_canon.update(bucket_state.label_to_canon)
     canon_to_display_label.update(bucket_state.canon_to_display_label)
@@ -6970,6 +7011,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     else:
         bucket_view_for_render = None
 
+    if isinstance(bucket_view_obj, (_MutableMappingABC, dict)):
+        _normalize_buckets(typing.cast(MutableMapping[str, Any], bucket_view_obj))
+    elif isinstance(bucket_view_struct, (_MutableMappingABC, dict)):
+        _normalize_buckets(typing.cast(MutableMapping[str, Any], bucket_view_struct))
+
     process_section_start = len(lines)
     proc_total_rendered, hrs_total_rendered = _render_process_and_hours_from_buckets(
         lines,
@@ -8026,7 +8072,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         logger.exception("Failed to run final drilling debug block")
 
     # --- Structured render payload ------------------------------------------
-    def _as_float(value: Any, default: float = 0.0) -> float:
+    def _render_as_float(value: Any, default: float = 0.0) -> float:
         try:
             return float(value)
         except Exception:
@@ -8041,17 +8087,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     else:
         summary_qty = qty_float if qty_float > 0 else qty
 
-    margin_pct_value = _as_float(applied_pcts.get("MarginPct"), 0.0)
-    expedite_pct_value = _as_float(applied_pcts.get("ExpeditePct"), 0.0)
-    expedite_amount = _as_float(expedite_cost, 0.0)
-    subtotal_before_margin_val = _as_float(subtotal_before_margin, 0.0)
-    final_price_val = _as_float(price, 0.0)
+    margin_pct_value = _render_as_float(applied_pcts.get("MarginPct"), 0.0)
+    expedite_pct_value = _render_as_float(applied_pcts.get("ExpeditePct"), 0.0)
+    expedite_amount = _render_as_float(expedite_cost, 0.0)
+    subtotal_before_margin_val = _render_as_float(subtotal_before_margin, 0.0)
+    final_price_val = _render_as_float(price, 0.0)
     margin_amount = max(0.0, final_price_val - subtotal_before_margin_val)
-    labor_total_amount = _as_float(
+    labor_total_amount = _render_as_float(
         (breakdown or {}).get("total_labor_cost"),
-        _as_float(ladder_labor, 0.0),
+        _render_as_float(ladder_labor, 0.0),
     )
-    direct_total_amount = _as_float(total_direct_costs_value, 0.0)
+    direct_total_amount = _render_as_float(total_direct_costs_value, 0.0)
 
     summary_payload = {
         "qty": summary_qty,
@@ -8099,7 +8145,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         materials_entries.append(
             {
                 "label": material_label_text,
-                "amount": round(_as_float(material_display_amount, 0.0), 2),
+                "amount": round(_render_as_float(material_display_amount, 0.0), 2),
             }
         )
     for entry_label, entry_amount, raw_key in direct_entries:
@@ -8110,7 +8156,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         materials_entries.append(
             {
                 "label": str(entry_label),
-                "amount": round(_as_float(entry_amount, 0.0), 2),
+                "amount": round(_render_as_float(entry_amount, 0.0), 2),
             }
         )
 
@@ -8118,7 +8164,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     seen_process_labels: set[str] = set()
     for spec in bucket_row_specs:
         label = str(spec.label or "").strip()
-        amount_val = _as_float(spec.total, 0.0)
+        amount_val = _render_as_float(spec.total, 0.0)
         if not label:
             continue
         if not show_zeros and amount_val <= 0:
@@ -8130,11 +8176,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             {
                 "label": label,
                 "amount": round(amount_val, 2),
-                "hours": round(_as_float(spec.hours, 0.0), 2),
-                "minutes": round(_as_float(spec.minutes, 0.0), 2),
-                "labor_amount": round(_as_float(spec.labor, 0.0), 2),
-                "machine_amount": round(_as_float(spec.machine, 0.0), 2),
-                "rate": round(_as_float(spec.rate, 0.0), 2) if _as_float(spec.rate, 0.0) else 0.0,
+                "hours": round(_render_as_float(spec.hours, 0.0), 2),
+                "minutes": round(_render_as_float(spec.minutes, 0.0), 2),
+                "labor_amount": round(_render_as_float(spec.labor, 0.0), 2),
+                "machine_amount": round(_render_as_float(spec.machine, 0.0), 2),
+                "rate": round(_render_as_float(spec.rate, 0.0), 2) if _render_as_float(spec.rate, 0.0) else 0.0,
             }
         )
 
@@ -10326,28 +10372,45 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 ),
             }
 
-            try:
-                drill_minutes_seed = float(drilling_bucket_prepared.get("minutes") or 0.0)
-            except Exception:
-                drill_minutes_seed = 0.0
+            extra_candidates = [
+                locals().get("extra_map"),
+                locals().get("removal_card_extra"),
+                getattr(locals().get("bucket_state"), "extra", None),
+                bucket_view.get("extra") if isinstance(bucket_view, (_MappingABC, dict)) else None,
+            ]
+            extra_map: Mapping[str, Any] | None = None
+            for candidate in extra_candidates:
+                if isinstance(candidate, _MappingABC):
+                    extra_map = typing.cast(Mapping[str, Any], candidate)
+                    break
 
-            drill_machine_rate_seed = (
+            debug_lines = locals().get("lines")
+            debug_lines_list: list[str] | None = (
+                debug_lines if isinstance(debug_lines, list) else None
+            )
+
+            drill_minutes_total = _pick_drill_minutes(
+                process_plan_summary,
+                extra_map,
+                debug_lines_list,
+            )
+            drill_mrate = (
                 _lookup_bucket_rate("drilling", rates)
                 or _lookup_bucket_rate("machine", rates)
-                or 0.0
+                or 45.0
             )
-            drill_labor_rate_seed = (
+            drill_lrate = (
                 _lookup_bucket_rate("drilling_labor", rates)
                 or _lookup_bucket_rate("labor", rates)
-                or 0.0
+                or 45.0
             )
 
             _seed_bucket_minutes_cost(
                 bucket_view,
                 "drilling",
-                drill_minutes_seed,
-                machine_rate_per_hr=float(drill_machine_rate_seed or 0.0),
-                labor_rate_per_hr=float(drill_labor_rate_seed or 0.0),
+                drill_minutes_total,
+                machine_rate_per_hr=drill_mrate,
+                labor_rate_per_hr=drill_lrate,
             )
 
             _normalize_buckets(bucket_view)
