@@ -4149,9 +4149,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     def _pct(x) -> str:
         return format_percent(x)
 
-    def _fmt_dim(val) -> str:
-        return format_dimension(val)
-
     def _format_weight_lb_decimal(mass_g: float | None) -> str:
         return format_weight_lb_decimal(mass_g)
 
@@ -4208,42 +4205,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if lowered in {"", "0", "false", "f", "no", "n", "off"}:
                 return False
             return False
-        return False
-
-    def _lookup_config_flag(*keys: str) -> bool:
-        """Return True if any mapping contains a truthy value for ``keys``.
-
-        Configuration toggles can be supplied via several payload containers.
-        Check the common locations so callers can opt-in to optional behaviours.
-        """
-
-        potential_sources: Sequence[Mapping[str, Any] | None] = (
-            result,
-            breakdown,
-            breakdown.get("config_flags") if isinstance(breakdown, _MappingABC) else None,
-            result.get("config_flags") if isinstance(result, _MappingABC) else None,
-            breakdown.get("config") if isinstance(breakdown, _MappingABC) else None,
-            result.get("config") if isinstance(result, _MappingABC) else None,
-            breakdown.get("flags") if isinstance(breakdown, _MappingABC) else None,
-            result.get("flags") if isinstance(result, _MappingABC) else None,
-            breakdown.get("ui_flags") if isinstance(breakdown, _MappingABC) else None,
-            result.get("ui_flags") if isinstance(result, _MappingABC) else None,
-            breakdown.get("ui_vars") if isinstance(breakdown, _MappingABC) else None,
-            result.get("ui_vars") if isinstance(result, _MappingABC) else None,
-            params if isinstance(params, _MappingABC) else None,
-        )
-
-        for source in potential_sources:
-            if not isinstance(source, _MappingABC):
-                continue
-            for key in keys:
-                if key in source:
-                    try:
-                        candidate = source.get(key)
-                    except Exception:
-                        candidate = None
-                    if candidate is not None:
-                        return _is_truthy_flag(candidate)
         return False
 
     def write_line(s: str, indent: str = ""):
