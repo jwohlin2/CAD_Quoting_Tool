@@ -1220,43 +1220,21 @@ def explain_quote(
     if scrap_text and coerce_float(breakdown.get("scrap_pct")):
         lines.append(f"Includes a {scrap_text} scrap allowance.")
 
-    def _top_drivers_from_buckets(
-        bucket_view_mapping: Mapping[str, Any] | None, n: int = 3
-    ) -> list[tuple[str, float]]:
-        if not isinstance(bucket_view_mapping, Mapping):
-            return []
-        buckets_obj = bucket_view_mapping.get("buckets")
-        if not isinstance(buckets_obj, Mapping):
-            return []
-        pairs: list[tuple[str, float]] = []
-        for key, entry in buckets_obj.items():
-            total_value: float | None
-            if isinstance(entry, Mapping):
-                total_value = coerce_float(entry.get("total$"))
-            else:
-                total_value = coerce_float(entry)
-            if total_value is None:
-                continue
-            total_float = float(total_value)
-            if total_float > 0:
-                pairs.append((str(key), total_float))
-        pairs.sort(key=lambda item: item[1], reverse=True)
-        return pairs[:n]
+    def _top_drivers(bucket_view_obj, n=3):
+        b = (bucket_view_obj.get("buckets") or {}) if isinstance(bucket_view_obj, Mapping) else {}
+        items = [(k, float(v.get("total$", 0.0) or 0.0)) for k, v in b.items() if isinstance(v, Mapping)]
+        items = [x for x in items if x[1] > 0]
+        items.sort(key=lambda x: x[1], reverse=True)
+        return items[:n]
 
-    top_drivers = _top_drivers_from_buckets(bucket_view_obj)
-    if top_drivers:
-        drivers_txt = ", ".join(
-            [f"{name.replace('_', ' ').title()} ${value:,.2f}" for name, value in top_drivers]
-        )
-        lines.append("Why this price")
-        lines.append("-" * 74)
-        lines.append(f"  Main cost drivers: {drivers_txt}.")
+    drivers = _top_drivers(bucket_view_obj)
+    lines.append("Why this price")
+    lines.append("-" * 74)
+    if drivers:
+        txt = ", ".join([f"{k.replace('_', ' ').title()} ${v:,.2f}" for k, v in drivers])
+        lines.append(f"  Main cost drivers: {txt}.")
     else:
-        lines.append("Why this price")
-        lines.append("-" * 74)
-        lines.append(
-            "  Cost drivers derive from planner buckets; no single dominant bucket."
-        )
+        lines.append("  Main cost drivers derive from planner buckets; none dominate.")
     lines.append("")
 
     def _iter_named_values(values: Any) -> Iterable[tuple[str, float]]:
