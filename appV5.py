@@ -8354,6 +8354,12 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     planner_inputs = dict(ui_vars or {})
     rates = dict(rates or {})
     geo_payload: dict[str, Any] = geo_context
+    if isinstance(geo_payload, dict):
+        existing_family = str(geo_payload.get("process_planner_family") or "").strip()
+        hole_count_val = _coerce_float_or_none(geo_payload.get("hole_count")) or 0.0
+        thickness_in_val = _coerce_float_or_none(geo_payload.get("thickness_in"))
+        if not existing_family and hole_count_val > 0 and thickness_in_val:
+            geo_payload["process_planner_family"] = "die_plate"
     state = _ensure_quote_state(quote_state)
 
     default_material_display = DEFAULT_MATERIAL_DISPLAY
