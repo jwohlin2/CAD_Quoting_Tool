@@ -102,7 +102,7 @@ environment.【F:appV5.py†L62-L79】
   diagnostics via `geometry.get_import_diagnostics_text()` to confirm availability.【F:cad_quoter/geometry/__init__.py†L19-L38】【F:cad_quoter/geometry/__init__.py†L462-L476】
 * **LLM suggestions** – Place the Qwen GGUF model alongside the application or
   configure `QWEN_GGUF_PATH`. The llama-cpp wrapper validates the presence of the
-  model file at startup.【F:cad_quoter/llm.py†L86-L129】
+  model file at startup.【F:cad_quoter/llm/__init__.py†L86-L129】
 
 ## 8. Packaging tips
 

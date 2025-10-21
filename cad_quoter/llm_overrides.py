@@ -12,6 +12,18 @@ from typing import Any, Mapping
 
 from cad_quoter.domain_models import coerce_float_or_none as _coerce_float_or_none
 from cad_quoter.llm import LLMClient, parse_llm_json
+from cad_quoter.llm.sanitizers import (
+    LLM_ADDER_MAX,
+    LLM_MULTIPLIER_MAX,
+    LLM_MULTIPLIER_MIN,
+    as_float as _sanitizer_as_float,
+    as_int as _sanitizer_as_int,
+    clean_notes_list as _sanitizer_clean_notes_list,
+    clamp,
+    merge_adder as _merge_adder_value,
+    merge_multiplier as _merge_multiplier_value,
+    sanitize_drilling_groups,
+)
 from cad_quoter.pass_labels import (
     HARDWARE_PASS_LABEL,
     LEGACY_HARDWARE_PASS_LABEL,
@@ -20,11 +32,6 @@ from cad_quoter.pass_labels import (
 )
 from cad_quoter.utils import jdump
 from cad_quoter.utils.render_utils import fmt_hours
-
-LLM_MULTIPLIER_MIN = 0.25
-LLM_MULTIPLIER_MAX = 4.0
-LLM_ADDER_MAX = 8.0
-
 
 def _as_float_or_none(value: Any) -> float | None:
     try:
@@ -272,17 +279,10 @@ def get_llm_overrides(
     out: dict[str, Any] = {}
 
     def _as_float(value):
-        res = _coerce_float_or_none(value)
-        return float(res) if res is not None else None
+        return _sanitizer_as_float(value)
 
     def _as_int(value, default: int = 0) -> int:
-        res = _as_float(value)
-        if res is None:
-            return default
-        try:
-            return int(round(res))
-        except Exception:
-            return default
+        return _sanitizer_as_int(value, default=default)
 
     hole_count_feature = max(0, _as_int(features.get("hole_count"), 0))
     thickness_feature = _as_float(features.get("thickness_mm")) or 0.0
@@ -598,51 +598,34 @@ def get_llm_overrides(
         return clean_adders
 
     def _merge_multiplier(name: str, value, source: str) -> None:
-        val = _as_float(value)
-        if val is None:
-            return
-        clamped = clamp(val, mult_min_bound, mult_max_bound, 1.0)
         container = _ensure_mults_dict()
-        norm = str(name).lower()
-        prev = container.get(norm)
-        if prev is None:
-            container[norm] = clamped
-            return
-        new_val = clamp(prev * clamped, mult_min_bound, mult_max_bound, 1.0)
-        if not math.isclose(prev * clamped, new_val, abs_tol=1e-6):
-            clamp_notes.append(f"{source} multiplier clipped for {norm}")
-        container[norm] = new_val
+        _merge_multiplier_value(
+            container,
+            name,
+            value,
+            min_bound=mult_min_bound,
+            max_bound=mult_max_bound,
+            clamp_notes=clamp_notes,
+            source=source,
+        )
 
     def _merge_adder(name: str, value, source: str) -> None:
-        val = _as_float(value)
-        if val is None:
-            return
-        norm = str(name).lower()
-        limit = _adder_limit(norm)
-        clamped = clamp(val, adder_min_bound, limit, adder_min_bound)
-        if clamped <= 0:
-            return
         container = _ensure_adders_dict()
-        prev = float(container.get(norm, 0.0))
-        new_val = clamp(prev + clamped, adder_min_bound, limit, adder_min_bound)
-        if not math.isclose(prev + clamped, new_val, abs_tol=1e-6):
-            clamp_notes.append(
-                f"{source} {fmt_hours(prev + clamped)} clipped to {fmt_hours(limit, decimals=1)} for {norm}"
-            )
-        container[norm] = new_val
+        _merge_adder_value(
+            container,
+            name,
+            value,
+            min_bound=adder_min_bound,
+            max_bound=adder_max_bound,
+            clamp_notes=clamp_notes,
+            source=source,
+            limit=_adder_limit(name),
+            format_total=lambda total: fmt_hours(total),
+            format_limit=lambda cap: fmt_hours(cap, decimals=1),
+        )
 
     def _clean_notes_list(values, limit: int = 6) -> list[str]:
-        clean: list[str] = []
-        if not isinstance(values, list):
-            return clean
-        for item in values:
-            text = str(item).strip()
-            if not text:
-                continue
-            clean.append(text[:200])
-            if len(clean) >= limit:
-                break
-        return clean
+        return _sanitizer_clean_notes_list(values, limit=limit)
 
     scr = parsed.get("scrap_pct_override", None)
     if scr is not None:
@@ -711,30 +694,11 @@ def get_llm_overrides(
         if hole_count_feature < 5:
             clamp_notes.append("ignored drilling_groups; hole_count < 5")
         else:
-            drill_groups_clean: list[dict[str, Any]] = []
-            for grp in drill_groups_raw:
-                if not isinstance(grp, dict):
-                    continue
-                dia = _as_float(grp.get("dia_mm") or grp.get("diameter_mm"))
-                qty = _as_int(grp.get("qty") or grp.get("count"), 0)
-                depth = _as_float(grp.get("depth_mm") or grp.get("depth"))
-                peck = grp.get("peck") or grp.get("strategy")
-                notes = grp.get("notes")
-                if dia is None or qty <= 0:
-                    continue
-                qty = max(1, min(hole_count_feature, qty))
-                cleaned_group: dict[str, Any] = {
-                    "dia_mm": round(dia, 3),
-                    "qty": qty,
-                }
-                if depth is not None and depth > 0:
-                    cleaned_group["depth_mm"] = round(depth, 3)
-                if isinstance(peck, str) and peck.strip():
-                    cleaned_group["strategy"] = peck.strip()[:120]
-                clean_notes = _clean_notes_list(notes)
-                if clean_notes:
-                    cleaned_group["notes"] = clean_notes
-                drill_groups_clean.append(cleaned_group)
+            drill_groups_clean = sanitize_drilling_groups(
+                drill_groups_raw,
+                qty_limit=hole_count_feature,
+                note_limit=6,
+            )
             if drill_groups_clean:
                 out["drilling_groups"] = drill_groups_clean
 
