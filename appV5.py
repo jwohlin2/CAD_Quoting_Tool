@@ -6499,6 +6499,28 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         for label in printed_bucket_labels:
             labor_cost_totals.pop(label, None)
 
+    emit_flags: dict[str, bool] = {}
+    if printed_bucket_labels:
+        emitted_canon_keys: set[str] = set()
+        for label in printed_bucket_labels:
+            canon = label_to_canon.get(label)
+            if not canon:
+                canon = _canonical_bucket_key(label)
+            if canon:
+                normalized = _canonical_bucket_key(canon) or _normalize_bucket_key(canon) or str(canon)
+                emitted_canon_keys.add(str(normalized))
+
+        def _bucket_emitted(key: str) -> bool:
+            canon_key = _canonical_bucket_key(key) or _normalize_bucket_key(key)
+            if canon_key:
+                return str(canon_key) in emitted_canon_keys
+            return str(key) in emitted_canon_keys
+
+        emit_flags = {bucket: _bucket_emitted(bucket) for bucket in ("milling", "drilling", "tapping", "inspection")}
+
+    if emit_flags and isinstance(process_plan_summary_local, (_MappingABC, dict)):
+        _zero_planner_if_row_suppressed(process_plan_summary_local, emit_flags)
+
     misc_total = 0.0
     for label, amount in labor_cost_totals.items():
         if _should_hide_amortized(label):
@@ -8355,7 +8377,65 @@ def _pricing_meta_key_for_normalized(normalized_key: str | None) -> str | None:
             meta_key = _MATERIAL_META_KEY_BY_NORMALIZED.get(display_key)
             if meta_key:
                 return meta_key
-    return None
+        return None
+
+
+def _zero_planner_if_row_suppressed(
+    pps: Mapping[str, Any] | MutableMapping[str, Any] | None,
+    emit_flags: Mapping[str, bool] | None,
+) -> None:
+    """Zero planner section minutes when the corresponding row is hidden."""
+
+    if not isinstance(pps, (_MutableMappingABC, dict)):
+        return
+
+    emit = emit_flags or {}
+
+    def _targets(container: Mapping[str, Any] | MutableMapping[str, Any] | None) -> list[MutableMapping[str, Any]]:
+        if isinstance(container, dict):
+            return [container]
+        if isinstance(container, _MutableMappingABC):
+            return [typing.cast(MutableMapping[str, Any], container)]
+        return []
+
+    sections: list[MutableMapping[str, Any]] = _targets(pps)
+    try:
+        planner_sections = pps.get("planner_sections")  # type: ignore[call-arg]
+    except Exception:
+        planner_sections = None
+    sections.extend(_targets(planner_sections))
+
+    if not sections:
+        return
+
+    for key in ("milling", "drilling", "tapping", "inspection"):
+        if emit.get(key, False):
+            continue
+        for container in sections:
+            try:
+                entry = container.get(key)
+            except Exception:
+                entry = None
+            if not isinstance(entry, (_MutableMappingABC, dict)):
+                continue
+            try:
+                entry["total_minutes_billed"] = 0.0
+            except Exception:
+                pass
+            try:
+                if "total_minutes_with_toolchange" in entry:
+                    entry["total_minutes_with_toolchange"] = 0.0
+            except Exception:
+                pass
+            try:
+                if "total_minutes" in entry:
+                    entry["total_minutes"] = 0.0
+            except Exception:
+                pass
+            try:
+                entry["source"] = "suppressed"
+            except Exception:
+                pass
 
 
 def compute_mass_and_scrap_after_removal(
