@@ -640,51 +640,37 @@ def test_dummy_quote_bucket_hours_and_costs_align() -> None:
 
 def test_dummy_quote_direct_costs_match_across_sections() -> None:
     payload = _dummy_quote_payload()
+    breakdown = payload["breakdown"]
+    totals = breakdown.get("totals", {})
+    declared_direct_costs = float(totals.get("direct_costs", 0.0))
+    assert declared_direct_costs > 0
+
     _, render_payload = _render_output(payload)
 
-    material_block = payload["breakdown"].get("material", {})
-    material_total = (
-        material_block.get("material_cost_before_credit")
-        or material_block.get("material_cost")
-        or material_block.get("material_direct_cost")
-        or 0.0
-    )
-    direct_costs = appV5._compute_direct_costs(
-        material_total,
-        material_block.get("material_scrap_credit"),
-        material_block.get("material_tax"),
-        payload["breakdown"].get("pass_through"),
-    )
+    breakdown_after = payload["breakdown"]
+    direct_costs_total = float(breakdown_after.get("total_direct_costs", 0.0))
+    assert math.isclose(direct_costs_total, declared_direct_costs, abs_tol=1e-6)
 
     cost_breakdown = dict(render_payload.get("cost_breakdown", []))
-    assert cost_breakdown.get("Direct Costs", 0.0) > 0
+    direct_costs_breakdown = float(cost_breakdown.get("Direct Costs", 0.0))
+    assert math.isclose(direct_costs_breakdown, direct_costs_total, abs_tol=1e-6)
 
-    materials = {entry.get("label"): entry for entry in render_payload.get("materials", [])}
-    material_label = (
-        material_block.get("material_display")
-        or material_block.get("material")
-        or material_block.get("material_name")
-        or "Material"
-    )
-    assert material_label in materials
-    assert materials[material_label].get("amount", 0.0) >= 0.0
+    ladder_payload = render_payload.get("ladder", {})
+    ladder_direct_total = float(ladder_payload.get("direct_total", 0.0))
+    assert math.isclose(ladder_direct_total, direct_costs_total, abs_tol=1e-6)
 
-    pass_through_block = payload["breakdown"].get("pass_through", {}) or {}
-    for label, amount in pass_through_block.items():
-        if str(label).strip().lower() == "material":
-            continue
-        entry = materials.get(str(label))
-        amount_val = float(amount or 0.0)
-        if amount_val <= 0 and entry is None:
-            continue
-        assert entry is not None
-        assert entry.get("amount", 0.0) >= 0.0
+    structured_direct_total = float(render_payload.get("materials_direct", 0.0))
+    assert math.isclose(structured_direct_total, direct_costs_total, abs_tol=1e-6)
 
-    ladder_labor = cost_breakdown.get("Machine & Labor", 0.0)
-    ladder_subtotal = ladder_labor + cost_breakdown.get("Direct Costs", 0.0)
-    processes_total = sum(entry.get("amount", 0.0) for entry in render_payload.get("processes", []))
+    materials_entries = render_payload.get("materials", [])
+    materials_total = sum(float(entry.get("amount", 0.0)) for entry in materials_entries)
+    assert math.isclose(materials_total, direct_costs_total, abs_tol=1e-6)
+
+    pass_through_total = float(breakdown_after.get("pass_through_total", 0.0))
+    assert 0.0 < pass_through_total <= direct_costs_total
+
+    processes_total = sum(float(entry.get("amount", 0.0)) for entry in render_payload.get("processes", []))
     assert processes_total > 0
-    assert ladder_subtotal > ladder_labor
 
 
 def test_compute_direct_costs_adds_wieland_scrap_credit() -> None:

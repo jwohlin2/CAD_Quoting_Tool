@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence, TYPE_CHECKING
 from collections.abc import Mapping as _MappingABC
 
 from appkit.env_utils import FORCE_ESTIMATOR, FORCE_PLANNER, _coerce_env_bool
 from cad_quoter.utils import coerce_bool
+
+if TYPE_CHECKING:
+    from appkit.ui.services import QuoteConfiguration
 
 DEFAULT_PLANNER_MODE = "planner"
 
@@ -234,11 +237,60 @@ def _planner_signals_present(
     return False
 
 
+def resolve_pricing_source_value(
+    base_value: Any,
+    *,
+    used_planner: bool | None = None,
+    process_meta: Mapping[str, Any] | None = None,
+    process_meta_raw: Mapping[str, Any] | None = None,
+    breakdown: Mapping[str, Any] | None = None,
+    planner_process_minutes: Any = None,
+    hour_summary_entries: Mapping[str, Any] | None = None,
+    additional_sources: Sequence[Any] | None = None,
+    cfg: "QuoteConfiguration" | None = None,
+) -> str | None:
+    """Return a normalized pricing source, honoring explicit selections."""
+
+    fallback_text: str | None = None
+    if base_value is not None:
+        candidate_text = str(base_value).strip()
+        if candidate_text:
+            lowered = candidate_text.lower()
+            if lowered == "planner":
+                return "planner"
+            if lowered not in {"legacy", "auto", "default", "fallback"}:
+                return candidate_text
+            fallback_text = candidate_text
+
+    if used_planner:
+        if fallback_text:
+            return fallback_text
+        return "planner"
+
+    if _planner_signals_present(
+        process_meta=process_meta,
+        process_meta_raw=process_meta_raw,
+        breakdown=breakdown,
+        planner_process_minutes=planner_process_minutes,
+        hour_summary_entries=hour_summary_entries,
+        additional_sources=list(additional_sources) if additional_sources is not None else None,
+    ):
+        if fallback_text:
+            return fallback_text
+        return "planner"
+
+    if fallback_text:
+        return fallback_text
+
+    return None
+
+
 __all__ = [
     "resolve_planner",
     "_planner_total_has_values",
     "_planner_meta_signals_present",
     "_planner_signals_present",
+    "resolve_pricing_source_value",
     "coerce_bool",
     "_coerce_env_bool",
     "FORCE_PLANNER",
