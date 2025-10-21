@@ -434,6 +434,9 @@ from appkit.env_utils import FORCE_PLANNER
 from appkit.planner_adapter import resolve_planner
 
 from appkit.data import load_json, load_text
+
+# Mapping of PDF estimate keys to Quote Editor variables.
+MAP_KEYS = load_json("vl_pdf_map_keys.json")
 from appkit.utils.text_rules import (
     PROC_MULT_TARGETS,
     canonicalize_amortized_label as _canonical_amortized_label,
@@ -11951,90 +11954,6 @@ def coerce_or_make_vars_df(df: PandasDataFrame | None) -> PandasDataFrame:
 
     return df
 
-def extract_pdf_all(pdf_path: Path, dpi: int = 300) -> dict:
-    if not _HAS_PYMUPDF:
-        raise RuntimeError("PyMuPDF (fitz) not installed. pip install pymupdf")
-    pdf_path = Path(pdf_path)
-    assert fitz is not None
-    fitz_mod = cast(Any, fitz)
-    doc = fitz_mod.open(pdf_path)
-    pages = []
-    for idx, page in enumerate(doc):
-        page_any = cast(Any, page)
-        text = str(page_any.get_text("text") or "")
-        blocks = page_any.get_text("blocks")
-        tables = []
-        try:
-            found = page_any.find_tables()
-            for table in getattr(found, "tables", []):
-                tables.append(table.extract())
-        except Exception:
-            pass
-        zoom = dpi / 72.0
-        pix = page_any.get_pixmap(matrix=fitz_mod.Matrix(zoom, zoom), alpha=False)
-        png_path = pdf_path.with_suffix(f".p{idx}.png")
-        pix.save(png_path)
-        pages.append({
-            "index": idx,
-            "text": text,
-            "blocks": blocks,
-            "tables": tables,
-            "image_path": str(png_path),
-            "char_count": len(text),
-            "table_count": len(tables),
-        })
-    if pages:
-        best = max(
-            pages,
-            key=lambda page: (
-                (page.get("table_count", 0) or 0) > 0,
-                page.get("char_count", 0) or 0,
-            ),
-        )
-    else:
-        best = {"text": "", "image_path": ""}
-    doc.close()
-    return {"pages": pages, "best": best}
-
-JSON_SCHEMA = load_json("vl_pdf_schema.json")
-MAP_KEYS = load_json("vl_pdf_map_keys.json")
-PDF_SYSTEM_PROMPT = load_text("vl_pdf_system_prompt.txt").strip()
-
-def _truncate_text(text: str, max_chars: int = 5000) -> str:
-    text = text or ""
-    if len(text) <= max_chars:
-        return text
-    head = text[: int(max_chars * 0.7)]
-    tail = text[-int(max_chars * 0.3):]
-    return f"{head}\n...\n{tail}"
-
-def build_llm_prompt(best_page: dict) -> dict:
-    text = _truncate_text(best_page.get("text", ""))
-    schema = jdump(JSON_SCHEMA)
-    system = PDF_SYSTEM_PROMPT
-    user = (
-        f"TEXT FROM PDF PAGE:\n{text}\n\n"
-        f"REQUIRED JSON SHAPE:\n{schema}\n\n"
-        "Return strictly JSON. If a field is unknown use null, and use 0/1 for flags."
-    )
-    return {"system": system, "user": user, "image_path": best_page.get("image_path", "")}
-
-def run_llm_json(system: str, user: str, image_path: str) -> dict:
-    """Adapter for the local VL model; override with real llama.cpp call."""
-    # Placeholder: integrate with your Qwen VL llama.cpp wrapper and return parsed JSON.
-    result_text = "{}"
-    try:
-        match = re.search(r"\{.*\}", result_text, flags=re.S)
-        return json.loads(match.group(0)) if match else {}
-    except Exception:
-        return {}
-
-def infer_pdf_estimate(structured: dict) -> dict:
-    best_page = structured.get("best", {})
-    prompt = build_llm_prompt(best_page)
-    return run_llm_json(prompt["system"], prompt["user"], prompt["image_path"])
-
-
 def _deep_get(d: dict, path):
     if isinstance(path, str):
         return d.get(path)
@@ -15314,7 +15233,6 @@ class App(tk.Tk):
             settings_path=default_app_settings_json(),
         )
         self.geometry_loader = geometry_loader or GeometryLoader(
-            extract_pdf_all_fn=extract_pdf_all,
             extract_pdf_vector_fn=extract_2d_features_from_pdf_vector,
             extract_dxf_or_dwg_fn=extract_2d_features_from_dxf_or_dwg,
             occ_feature_fn=geometry.extract_features_with_occ,
@@ -16668,10 +16586,7 @@ class App(tk.Tk):
                 self.vars_df = coerce_or_make_vars_df(self.vars_df)
 
                 if structured_pdf:
-                    try:
-                        estimate = infer_pdf_estimate(structured_pdf)
-                    except Exception:
-                        estimate = {}
+                    estimate = {}
                     if estimate:
                         self.vars_df = merge_estimate_into_vars(self.vars_df, estimate)
 
