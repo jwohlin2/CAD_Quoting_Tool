@@ -96,6 +96,7 @@ from cad_quoter.app.optional_loaders import (
     build_geo_from_dxf,
     set_build_geo_from_dxf_hook,
 )
+from cad_quoter.material_density import LB_PER_IN3_PER_GCC as _LB_PER_IN3_PER_GCC
 from appkit.utils import (
     _first_numeric_or_none,
     _fmt_rng,
@@ -193,6 +194,17 @@ from cad_quoter.pricing.process_buckets import BUCKET_ROLE, PROCESS_BUCKETS, buc
 import cad_quoter.geometry as geometry
 
 
+
+_RE_SPLIT = re.split
+_RE_SUB = re.sub
+
+
+def _infer_rect_from_holes(geo_candidate: Mapping[str, Any] | None) -> tuple[float, float]:
+    dims = infer_plate_lw_in(geo_candidate)
+    if not dims:
+        return (0.0, 0.0)
+    width, height = dims
+    return float(width), float(height)
 
 # Safe append to the current quote buffer
 def _push(_lines, text):
@@ -3090,6 +3102,18 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     )
     if not isinstance(g, dict):
         g = {}
+
+    geo_context: Mapping[str, Any] | None = None
+    if isinstance(breakdown, _MappingABC):
+        candidate = breakdown.get("geo_context")
+        if isinstance(candidate, _MappingABC):
+            geo_context = candidate
+    if geo_context is None and isinstance(result, _MappingABC):
+        candidate = result.get("geo_context")
+        if isinstance(candidate, _MappingABC):
+            geo_context = candidate
+    if geo_context is None and isinstance(geometry, _MappingABC):
+        geo_context = geometry
 
     # Optional: LLM decision bullets can be placed either on result or breakdown
     llm_notes = (result.get("llm_notes") or breakdown.get("llm_notes") or [])[:8]
@@ -10983,7 +11007,7 @@ REAM_MIN_PER_FEATURE = 6.0
 TIGHT_TOL_INSPECTION_MIN = 4.0
 TIGHT_TOL_CMM_MIN = 6.0
 HANDLING_ADDER_RANGE_HR = (0.1, 0.3)
-LB_PER_IN3_PER_GCC = 0.036127292
+LB_PER_IN3_PER_GCC = _LB_PER_IN3_PER_GCC
 
 def detect_units_scale(doc) -> dict[str, float | int]:
     return _shared_detect_units_scale(doc)

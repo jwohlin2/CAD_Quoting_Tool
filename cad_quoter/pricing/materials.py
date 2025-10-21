@@ -28,6 +28,7 @@ from cad_quoter.pricing.vendor_csv import (
 from cad_quoter.resources import default_catalog_csv as _default_catalog_csv
 from cad_quoter.material_density import (
     DEFAULT_MATERIAL_DENSITY_G_CC,
+    LB_PER_IN3_PER_GCC,
     MATERIAL_DENSITY_G_CC_BY_KEY,
     MATERIAL_DENSITY_G_CC_BY_KEYWORD,
     density_for_material as _density_for_material,
@@ -1478,9 +1479,8 @@ def _compute_material_block(
     rho = float(density_g_cc or 2.70)
     vol_net_in3 = float(L_in) * float(W_in) * float(t_in)
     vol_start_in3 = float(stock_L_in) * float(stock_W_in) * float(stock_T_in)
-    g_cc_to_lb_in3 = 0.0361273
-    net_lb = vol_net_in3 * rho * g_cc_to_lb_in3
-    start_lb = vol_start_in3 * rho * g_cc_to_lb_in3
+    net_lb = vol_net_in3 * rho * LB_PER_IN3_PER_GCC
+    start_lb = vol_start_in3 * rho * LB_PER_IN3_PER_GCC
     scrap_lb_geom = max(0.0, start_lb - net_lb)
     min_scrap_lb = max(0.0, start_lb * float(scrap_pct))
     scrap_lb = max(scrap_lb_geom, min_scrap_lb)
