@@ -3,12 +3,55 @@ from math import sqrt, log1p
 from typing import Any, Dict, Tuple, List
 
 from process_planner import plan_job  # uses your decision tree
+from cad_quoter.rates import (
+    ensure_two_bucket_defaults,
+    rate_for_machine,
+    rate_for_role,
+)
 from cad_quoter.utils import _dict
+from cad_quoter.pricing.rate_buckets import bucket_cost_breakdown
 
 # -------- small utils
-def _get_rate(rates2: dict, bucket: str, key: str, default: float = 90.0) -> float:
+LABOR_BUCKET_ROLES = {
+    "Inspection": "Inspector",
+    "Fixture Build (amortized)": "FixtureBuilder",
+    "Programming (per part)": "Programmer",
+    "Deburr": "Finisher",
+    "Lapping/Honing": "Lapper",
+}
+
+MACHINE_BUCKET_MACHINES = {
+    "Drilling": "DrillPress",
+    "Milling": "CNC_Mill",
+    "Wire EDM": "WireEDM",
+    "Grinding": "SurfaceGrind",
+    "Saw/Waterjet": "Waterjet",
+    "Sinker EDM": "SinkerEDM",
+    "Abrasive Flow": "ExtrudeHone",
+}
+
+
+def _bucket_rate(
+    rates2: dict[str, dict[str, float]],
+    bucket: str,
+    name: str,
+    default: float = 90.0,
+) -> float:
     try:
-        return float(rates2.get(bucket, {}).get(key, default) or default)
+        if bucket == "labor":
+            role = LABOR_BUCKET_ROLES.get(name)
+            if role:
+                return float(rate_for_role(rates2, role))
+        else:
+            machine = MACHINE_BUCKET_MACHINES.get(name)
+            if machine:
+                return float(rate_for_machine(rates2, machine))
+    except KeyError:
+        # Fall back to alias lookups below when canonical keys are missing.
+        pass
+
+    try:
+        return float(rates2[bucket][name])
     except Exception:
         return default
 
@@ -442,6 +485,7 @@ def price_with_planner(
     *,
     oee: float = 0.85,
 ) -> Dict[str, Any]:
+    rates = ensure_two_bucket_defaults(two_bucket_rates)
     plan = plan_job(family, planner_inputs)
     ops = _ops_by_name(plan)
 
@@ -478,12 +522,12 @@ def price_with_planner(
     li = []
     labor_min = machine_min = labor_cost = machine_cost = total_minutes = 0.0
 
-    def _add(name, bucket, rate_key):
+    def _add(name: str, bucket: str) -> None:
         nonlocal labor_min, machine_min, labor_cost, machine_cost, total_minutes
         mins = float(minutes.get(name, 0.0) or 0.0)
         if mins <= 0:
             return
-        rate = _get_rate(two_bucket_rates, "labor" if bucket=="labor" else "machine", rate_key, 90.0)
+        rate = _bucket_rate(rates, bucket, name, 90.0)
         cost = (mins / 60.0) * rate
         entry: Dict[str, Any] = {
             "op": name,
@@ -501,24 +545,28 @@ def price_with_planner(
             machine_cost += cost
 
     # Labor buckets
-    for nm, key in [("Inspection", "InspectionRate"),
-                    ("Fixture Build (amortized)", "FixtureBuildRate"),
-                    ("Programming (per part)", "ProgrammingRate"),
-                    ("Deburr", "DeburrRate"),
-                    ("Lapping/Honing", "SurfaceGrindRate")]:
+    for nm in [
+        "Inspection",
+        "Fixture Build (amortized)",
+        "Programming (per part)",
+        "Deburr",
+        "Lapping/Honing",
+    ]:
         if nm in minutes:
-            _add(nm, "labor", key)
+            _add(nm, "labor")
 
     # Machine buckets
-    for nm, key in [("Drilling", "DrillingRate"),
-                    ("Milling", "MillingRate"),
-                    ("Wire EDM", "WireEDMRate"),
-                    ("Grinding", "SurfaceGrindRate"),
-                    ("Saw/Waterjet", "SawWaterjetRate"),
-                    ("Sinker EDM", "SinkerEDMRate"),
-                    ("Abrasive Flow", "AbrasiveFlowRate")]:
+    for nm in [
+        "Drilling",
+        "Milling",
+        "Wire EDM",
+        "Grinding",
+        "Saw/Waterjet",
+        "Sinker EDM",
+        "Abrasive Flow",
+    ]:
         if nm in minutes:
-            _add(nm, "machine", key)
+            _add(nm, "machine")
 
     totals = {
         "labor_minutes": round(labor_min, 2),

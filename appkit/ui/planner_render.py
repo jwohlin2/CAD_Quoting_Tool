@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import math
 import os
 import re
@@ -26,6 +27,8 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
     except Exception:
         return default
 
+
+PLANNER_META: frozenset[str] = frozenset({"planner_labor", "planner_machine", "planner_total"})
 
 _HIDE_IN_BUCKET_VIEW: frozenset[str] = frozenset({*PLANNER_META, "misc"})
 _PREFERRED_BUCKET_VIEW_ORDER: tuple[str, ...] = (
@@ -88,8 +91,6 @@ CANON_MAP: dict[str, str] = {
     "programming_amortized": "programming_amortized",
     "misc": "misc",
 }
-
-PLANNER_META: frozenset[str] = frozenset({"planner_labor", "planner_machine", "planner_total"})
 
 # ---------- Bucket & Operation Roles ----------
 BUCKET_ROLE: dict[str, str] = {
@@ -864,6 +865,7 @@ def _seed_bucket_minutes(
     cbore_min: float = 0.0,
     spot_min: float = 0.0,
     jig_min: float = 0.0,
+    drilling_min: float = 0.0,
 ) -> None:
     bucket_view_obj = breakdown.setdefault("bucket_view", {})
     buckets_obj = bucket_view_obj.setdefault("buckets", {})
@@ -880,7 +882,7 @@ def _seed_bucket_minutes(
     _ins("tapping", tapping_min)
     _ins("counterbore", cbore_min)
     # spot and jig_grind can roll into "drilling" or "grinding"; keep explicit names if you expose them
-    _ins("drilling", spot_min)
+    _ins("drilling", drilling_min or spot_min)
     _ins("grinding", jig_min)
 
 
