@@ -7828,6 +7828,119 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     f"{int(round(sfm))} sfm | {ipr:.4f} ipr | "
                     f"t/hole {t_hole:.2f} min | group {qty}×{t_hole:.2f} = {t_group:.2f} min"
                 )
+            subtotal_minutes_raw = 0.0
+            for group in drill_groups_render:
+                try:
+                    subtotal_minutes_raw += float(group.get("t_group_min", 0.0))
+                except Exception:
+                    continue
+
+            subtotal_minutes_val = None
+            tool_components_source: Sequence[Any] | None = None
+            toolchange_total_min: float | None = None
+            total_minutes_val: float | None = None
+
+            def _resolve_mapping(candidate: Any) -> Mapping[str, Any] | None:
+                if isinstance(candidate, _MappingABC):
+                    return typing.cast(Mapping[str, Any], candidate)
+                if isinstance(candidate, dict):
+                    return candidate
+                return None
+
+            for source_candidate in (
+                drilling_time_per_hole_data,
+                drilling_card_detail,
+                drilling_meta_map,
+            ):
+                source_map = _resolve_mapping(source_candidate)
+                if not source_map:
+                    continue
+                if subtotal_minutes_val is None:
+                    subtotal_minutes_val = _coerce_float_or_none(
+                        source_map.get("subtotal_minutes")
+                    )
+                if tool_components_source is None:
+                    components = source_map.get("tool_components")
+                    if isinstance(components, Sequence) and components:
+                        tool_components_source = components
+                if toolchange_total_min is None:
+                    for key in ("toolchange_minutes", "toolchange_total"):
+                        candidate_val = _coerce_float_or_none(source_map.get(key))
+                        if candidate_val is not None:
+                            toolchange_total_min = float(candidate_val)
+                            break
+                if total_minutes_val is None:
+                    total_candidate = (
+                        _coerce_float_or_none(
+                            source_map.get("total_minutes_with_toolchange")
+                        )
+                        or _coerce_float_or_none(source_map.get("total_minutes"))
+                    )
+                    if total_candidate is not None:
+                        total_minutes_val = float(total_candidate)
+
+            component_labels: list[str] = []
+            component_minutes = 0.0
+            if isinstance(tool_components_source, Sequence):
+                for comp in tool_components_source:
+                    if not isinstance(comp, _MappingABC):
+                        continue
+                    label = str(comp.get("label") or comp.get("name") or "").strip()
+                    minutes_val = _coerce_float_or_none(comp.get("minutes"))
+                    if minutes_val is None:
+                        minutes_val = _coerce_float_or_none(comp.get("mins"))
+                    minutes_f = float(minutes_val or 0.0)
+                    if not label:
+                        label = "-"
+                    if label != "-" or minutes_f > 0.0:
+                        component_labels.append(f"{label} {minutes_f:.2f} min")
+                    component_minutes += minutes_f
+
+            if subtotal_minutes_val is None:
+                subtotal_minutes_val = subtotal_minutes_raw
+            drill_minutes_subtotal_raw = _sanitize_drill_removal_minutes(
+                subtotal_minutes_val or 0.0
+            )
+            drill_minutes_subtotal = round(drill_minutes_subtotal_raw, 2)
+
+            if toolchange_total_min is None:
+                toolchange_total_min = component_minutes
+            try:
+                toolchange_total_min = float(toolchange_total_min or 0.0)
+            except Exception:
+                toolchange_total_min = 0.0
+            if not math.isfinite(toolchange_total_min):
+                toolchange_total_min = component_minutes
+            if toolchange_total_min < 0.0:
+                toolchange_total_min = 0.0
+
+            if total_minutes_val is None:
+                total_minutes_val = drill_minutes_subtotal_raw + toolchange_total_min
+            total_minutes_val = _sanitize_drill_removal_minutes(total_minutes_val or 0.0)
+            drill_minutes_total = round(total_minutes_val, 2)
+
+            if component_labels:
+                label_text = " + ".join(component_labels)
+                append_line(
+                    f"Toolchange adders: {label_text} = {toolchange_total_min:.2f} min"
+                )
+            elif toolchange_total_min > 0.0:
+                append_line(
+                    f"Toolchange adders: Toolchange {toolchange_total_min:.2f} min = {toolchange_total_min:.2f} min"
+                )
+            else:
+                append_line("Toolchange adders: -")
+
+            append_line("-" * 66)
+            append_line(
+                f"Subtotal (per-hole × qty) . {drill_minutes_subtotal:.2f} min  ("
+                f"{fmt_hours(minutes_to_hours(drill_minutes_subtotal))})"
+            )
+            append_line(
+                "TOTAL DRILLING (with toolchange) . "
+                f"{drill_minutes_total:.2f} min  ("
+                f"{fmt_hours(minutes_to_hours(drill_minutes_total))})"
+            )
             append_line("")
 
     # ===== MATERIAL REMOVAL: HOLE-TABLE CARDS =================================
