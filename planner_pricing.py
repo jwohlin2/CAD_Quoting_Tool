@@ -3,10 +3,58 @@ from math import sqrt, log1p
 from typing import Any, Dict, Tuple, List
 
 from process_planner import plan_job  # uses your decision tree
+from cad_quoter.rates import (
+    ensure_two_bucket_defaults,
+    rate_for_machine,
+    rate_for_role,
+)
 from cad_quoter.utils import _dict
 from cad_quoter.pricing.rate_buckets import bucket_cost_breakdown
 
 # -------- small utils
+LABOR_BUCKET_ROLES = {
+    "Inspection": "Inspector",
+    "Fixture Build (amortized)": "FixtureBuilder",
+    "Programming (per part)": "Programmer",
+    "Deburr": "Finisher",
+    "Lapping/Honing": "Lapper",
+}
+
+MACHINE_BUCKET_MACHINES = {
+    "Drilling": "DrillPress",
+    "Milling": "CNC_Mill",
+    "Wire EDM": "WireEDM",
+    "Grinding": "SurfaceGrind",
+    "Saw/Waterjet": "Waterjet",
+    "Sinker EDM": "SinkerEDM",
+    "Abrasive Flow": "ExtrudeHone",
+}
+
+
+def _bucket_rate(
+    rates2: dict[str, dict[str, float]],
+    bucket: str,
+    name: str,
+    default: float = 90.0,
+) -> float:
+    try:
+        if bucket == "labor":
+            role = LABOR_BUCKET_ROLES.get(name)
+            if role:
+                return float(rate_for_role(rates2, role))
+        else:
+            machine = MACHINE_BUCKET_MACHINES.get(name)
+            if machine:
+                return float(rate_for_machine(rates2, machine))
+    except KeyError:
+        # Fall back to alias lookups below when canonical keys are missing.
+        pass
+
+    try:
+        return float(rates2[bucket][name])
+    except Exception:
+        return default
+
 def _as_float(x, default=None):
     try:
         return float(x)
@@ -437,6 +485,7 @@ def price_with_planner(
     *,
     oee: float = 0.85,
 ) -> Dict[str, Any]:
+    rates = ensure_two_bucket_defaults(two_bucket_rates)
     plan = plan_job(family, planner_inputs)
     ops = _ops_by_name(plan)
 
@@ -470,7 +519,63 @@ def price_with_planner(
         minutes = {"Inspection": _inspection_minutes(g, t), "Deburr": 6.0}
 
     # ---- convert to costs (two-bucket rates)
-    li, totals = bucket_cost_breakdown(minutes, two_bucket_rates)
+    li = []
+    labor_min = machine_min = labor_cost = machine_cost = total_minutes = 0.0
+
+    def _add(name: str, bucket: str) -> None:
+        nonlocal labor_min, machine_min, labor_cost, machine_cost, total_minutes
+        mins = float(minutes.get(name, 0.0) or 0.0)
+        if mins <= 0:
+            return
+        rate = _bucket_rate(rates, bucket, name, 90.0)
+        cost = (mins / 60.0) * rate
+        entry: Dict[str, Any] = {
+            "op": name,
+            "name": name,
+            "minutes": round(mins, 2),
+            f"{bucket}_cost": round(cost, 2),
+        }
+        li.append(entry)
+        total_minutes += mins
+        if bucket == "labor":
+            labor_min += mins
+            labor_cost += cost
+        else:
+            machine_min += mins
+            machine_cost += cost
+
+    # Labor buckets
+    for nm in [
+        "Inspection",
+        "Fixture Build (amortized)",
+        "Programming (per part)",
+        "Deburr",
+        "Lapping/Honing",
+    ]:
+        if nm in minutes:
+            _add(nm, "labor")
+
+    # Machine buckets
+    for nm in [
+        "Drilling",
+        "Milling",
+        "Wire EDM",
+        "Grinding",
+        "Saw/Waterjet",
+        "Sinker EDM",
+        "Abrasive Flow",
+    ]:
+        if nm in minutes:
+            _add(nm, "machine")
+
+    totals = {
+        "labor_minutes": round(labor_min, 2),
+        "machine_minutes": round(machine_min, 2),
+        "minutes": round(total_minutes, 2),
+        "labor_cost": round(labor_cost, 2),
+        "machine_cost": round(machine_cost, 2),
+        "total_cost": round(labor_cost + machine_cost, 2),
+    }
 
     ops_seen = sorted(ops.keys())
     if "wire_edm_windows" in ops and "wire_edm_outline" not in ops:
