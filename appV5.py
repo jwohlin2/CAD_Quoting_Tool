@@ -446,6 +446,8 @@ from cad_quoter.pricing.process_buckets import BUCKET_ROLE, PROCESS_BUCKETS, buc
 import cad_quoter.geometry as geometry
 from cad_quoter.geometry import upsert_var_row as geometry_upsert_var_row
 
+geometry = typing.cast(typing.Any, geometry)
+
 
 
 _RE_SPLIT = re.split
@@ -2011,6 +2013,7 @@ from cad_quoter.pricing.materials import (
     STANDARD_PLATE_SIDES_IN as STANDARD_PLATE_SIDES_IN,
     _compute_material_block as _compute_material_block,
     _compute_scrap_mass_g as _compute_scrap_mass_g,
+    _hole_margin_inches as _hole_margin_inches,
     _density_for_material as _density_for_material,
     _material_family as _material_family,
     _material_cost_components as _material_cost_components,
@@ -2094,6 +2097,12 @@ SYSTEM_SUGGEST = _llm_integration.system_suggest
 SUGG_TO_EDITOR = _llm_integration.sugg_to_editor
 EDITOR_TO_SUGG = _llm_integration.editor_to_sugg
 EDITOR_FROM_UI = _llm_integration.editor_from_ui
+
+if TYPE_CHECKING:
+    from cad_quoter.llm import LLMClient as LLMClientType
+else:  # pragma: no cover - typing fallback
+    LLMClientType = typing.Any
+
 LLMClient = _llm_integration.llm_client
 parse_llm_json = _llm_integration.parse_llm_json
 explain_quote = _llm_integration.explain_quote
@@ -12896,13 +12905,14 @@ def _coerce_int_or_zero(value: Any) -> int:
     except Exception:
         return 0
 
-def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
+def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
     ezdxf_mod = geometry.require_ezdxf()
 
     # --- load doc ---
     dxf_text_path: str | None = None
     doc: Drawing | None = None
-    lower_path = path.lower()
+    path_str = str(path)
+    lower_path = path_str.lower()
     readfile: Callable[[str], Any] | None = getattr(ezdxf_mod, "readfile", None)
     if not callable(readfile):
         raise AttributeError("ezdxf module does not provide a callable 'readfile' function")
@@ -12917,14 +12927,14 @@ def extract_2d_features_from_dxf_or_dwg(path: str) -> dict:
                 raise RuntimeError(
                     "ezdxf.addons.odafc.readfile is unavailable; install ODAFileConverter support."
                 )
-            doc = cast(Drawing, readfile(path))
+            doc = cast(Drawing, readfile(path_str))
         else:
-            dxf_path = geometry.convert_dwg_to_dxf(path, out_ver="ACAD2018")
+            dxf_path = geometry.convert_dwg_to_dxf(path_str, out_ver="ACAD2018")
             dxf_text_path = dxf_path
             doc = cast(Drawing, readfile(dxf_path))
     else:
-        doc = cast(Drawing, readfile(path))
-        dxf_text_path = path
+        doc = cast(Drawing, readfile(path_str))
+        dxf_text_path = path_str
 
     if doc is None:
         raise RuntimeError("Failed to load DXF/DWG document")
@@ -13734,7 +13744,7 @@ class App(tk.Tk):
         self.quote_state = QuoteState()
         self.llm_events: list[dict[str, Any]] = []
         self.llm_errors: list[dict[str, Any]] = []
-        self._llm_client_cache: LLMClient | None = None
+        self._llm_client_cache: LLMClientType | None = None
         self.settings_path = (
             getattr(self.configuration, "settings_path", None)
             or default_app_settings_json()
@@ -13969,7 +13979,7 @@ class App(tk.Tk):
         except Exception:
             pass
 
-    def get_llm_client(self, model_path: str | None = None) -> LLMClient | None:
+    def get_llm_client(self, model_path: str | None = None) -> LLMClientType | None:
         path = (model_path or "").strip()
         if not path and hasattr(self, "llm_model_path"):
             path = (self.llm_model_path.get().strip() if self.llm_model_path.get() else "")
