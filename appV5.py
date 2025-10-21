@@ -51,15 +51,7 @@ from cad_quoter.app._value_utils import (
     _format_value,
 )
 from cad_quoter.app.chart_lines import (
-    RE_CBORE,
-    RE_DEPTH,
-    RE_DIA,
-    RE_NPT,
-    RE_TAP,
-    RE_THRU,
-    build_ops_rows_from_lines_fallback as _build_ops_rows_from_lines_fallback,
     collect_chart_lines_context as _collect_chart_lines_context,
-    norm_line as _norm_line,
 )
 from cad_quoter.app.hole_ops import (
     CBORE_MIN_PER_SIDE_MIN,
@@ -73,6 +65,7 @@ from cad_quoter.app.hole_ops import (
     RE_TAP,
     RE_THRU,
     TAP_MINUTES_BY_CLASS,
+    build_ops_rows_from_lines_fallback as _build_ops_rows_from_lines_fallback,
     _aggregate_hole_entries,
     _classify_thread_spec,
     _dedupe_hole_entries,
@@ -7869,8 +7862,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     append_lines(removal_card_lines)
 
     # ===== MATERIAL REMOVAL: HOLE-TABLE CARDS =================================
-    import re
-
     def _first_dict(*cands):
         for c in cands:
             if isinstance(c, dict) and c:
@@ -7889,74 +7880,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 return c["material_group"]
         return None
 
-    def _norm_line(s: str) -> str:
-        return re.sub(r"\s+", " ", (s or "")).strip()
-
-    # patterns
-    _RE_QTY_LEAD   = re.compile(r"^\s*\((\d+)\)\s*")
-    _RE_FROM_SIDE  = re.compile(r"\bFROM\s+(FRONT|BACK)\b", re.I)
-    _RE_DEPTH      = re.compile(r"[×x]\s*([0-9.]+)\b", re.I)
-    _RE_THRU       = re.compile(r"\bTHRU\b", re.I)
-    _RE_DIA_ANY    = re.compile(r'(?:Ø|⌀|DIA|O)\s*([0-9.]+)|\(([0-9.]+)\s*Ø?\)|\b([0-9.]+)\b')
-    _RE_TAP        = re.compile(r"(\(\d+\)\s*)?(#\s*\d{1,2}-\d+|(?:\d+/\d+)\s*-\s*\d+|(?:\d+(?:\.\d+)?)\s*-\s*\d+|M\d+(?:\.\d+)?\s*x\s*\d+(?:\.\d+)?)\s*TAP", re.I)
-    _RE_CBORE      = re.compile(r"\b(C[\'’]?\s*BORE|CBORE|COUNTER\s*BORE)\b", re.I)
-
-    def _coalesce_rows(rows):
-        agg, order = {}, []
-        for r in rows:
-            key = (r.get("desc",""), r.get("ref",""))
-            if key not in agg:
-                agg[key] = int(r.get("qty") or 0); order.append(key)
-            else:
-                agg[key] += int(r.get("qty") or 0)
-        return [{"hole":"", "ref": ref, "qty": agg[(desc,ref)], "desc": desc} for (desc,ref) in order]
-
-    def _build_ops_rows_from_lines(lines_in: list[str]) -> list[dict]:
-        if not lines_in: return []
-        L = [_norm_line(s) for s in lines_in if _norm_line(s)]
-        out, i = [], 0
-        while i < len(L):
-            ln = L[i]
-            if any(k in ln.upper() for k in ("BREAK ALL","SHARP CORNERS","RADIUS","CHAMFER","AS SHOWN")):
-                i += 1; continue
-            qty = 1
-            mqty = _RE_QTY_LEAD.match(ln)
-            if mqty: qty = int(mqty.group(1)); ln = ln[mqty.end():].strip()
-            mtap = _RE_TAP.search(ln)
-            if mtap:
-                thread = mtap.group(2).replace(" ", "")
-                tail = " ".join(L[i:i+3])
-                desc = f"{thread} TAP"
-                if _RE_THRU.search(tail): desc += " THRU"
-                md = _RE_DEPTH.search(tail)
-                if md and md.group(1): desc += f' × {float(md.group(1)):.2f}"'
-                ms = _RE_FROM_SIDE.search(tail)
-                if ms: desc += f' FROM {ms.group(1).upper()}'
-                out.append({"hole":"", "ref":"", "qty":qty, "desc":desc})
-                i += 1; continue
-            if _RE_CBORE.search(ln):
-                tail = " ".join(L[max(0,i-1):i+2])
-                mda = _RE_DIA_ANY.search(tail)
-                dia = None
-                if mda:
-                    for g in mda.groups():
-                        if g: dia = float(g); break
-                desc = (f"{dia:.4f} C’BORE" if dia is not None else "C’BORE")
-                md = _RE_DEPTH.search(tail)
-                if md and md.group(1): desc += f' × {float(md.group(1)):.2f}"'
-                ms = _RE_FROM_SIDE.search(tail)
-                if ms: desc += f' FROM {ms.group(1).upper()}'
-                out.append({"hole":"", "ref":"", "qty":qty, "desc":desc})
-                i += 1; continue
-            if any(k in ln.upper() for k in ("C' DRILL","C’DRILL","CENTER DRILL","SPOT DRILL")):
-                tail = " ".join(L[i:i+2])
-                md = _RE_DEPTH.search(tail)
-                desc = "C’DRILL" + (f' × {float(md.group(1)):.2f}"' if (md and md.group(1)) else "")
-                out.append({"hole":"", "ref":"", "qty":qty, "desc":desc})
-                i += 1; continue
-            i += 1
-        return _coalesce_rows(out)
-
     try:
         ctx_a = locals().get("breakdown")
         ctx_b = locals().get("result")
@@ -7971,20 +7894,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
         if not ops_rows:
             # collect chart text wherever it lives
-            def _collect_chart_lines(*containers):
-                keys = ("chart_lines","hole_table_lines","chart_text_lines","hole_chart_lines")
-                merged, seen = [], set()
-                for d in containers:
-                    if not isinstance(d, dict): continue
-                    for k in keys:
-                        v = d.get(k)
-                        if isinstance(v, list) and all(isinstance(x, str) for x in v):
-                            for s in v:
-                                if s not in seen:
-                                    seen.add(s); merged.append(s)
-                return merged
-            chart_lines_all = _collect_chart_lines(ctx, geo_map, ctx_a, ctx_b)
-            built = _build_ops_rows_from_lines(chart_lines_all)
+            chart_lines_all = _collect_chart_lines_context(ctx, geo_map, ctx_a, ctx_b)
+            built = _build_ops_rows_from_lines_fallback(chart_lines_all)
             _push(lines, f"[DEBUG] chart_lines_found={len(chart_lines_all)} built_rows={len(built)}")
             if built:
                 geo_map.setdefault("ops_summary", {})["rows"] = built
