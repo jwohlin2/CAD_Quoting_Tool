@@ -520,6 +520,96 @@ def _render_time_per_hole(
     return subtotal_min, seen_deep, seen_std
 
 
+_thread_tpi = re.compile(r"#?\s*\d{1,2}\s*-\s*(\d+)", re.I)
+_thread_frac = re.compile(r"(\d+)\s*/\s*(\d+)\s*-\s*(\d+)", re.I)
+_thread_metric = re.compile(r"M\s*([\d.]+)\s*x\s*([\d.]+)", re.I)
+
+
+def _thread_ipr(thread_str: str) -> float:
+    """Return inches per revolution from thread designator."""
+
+    s = (thread_str or "").strip().upper()
+    m = _thread_tpi.search(s)
+    if m:
+        tpi = float(m.group(1))
+        return 1.0 / tpi if tpi > 0 else 0.0
+    m = _thread_frac.search(s)
+    if m:
+        tpi = float(m.group(3))
+        return 1.0 / tpi if tpi > 0 else 0.0
+    m = _thread_metric.search(s)
+    if m:
+        pitch_mm = float(m.group(2))
+        return (pitch_mm / 25.4) if pitch_mm > 0 else 0.0
+    return 0.0
+
+
+def _tap_rpm_for_dia(dia_in: float, sfm: float = 60.0, rpm_cap: float = 1500.0) -> float:
+    """Return an RPM estimate for a tap diameter."""
+
+    if not dia_in or dia_in <= 0:
+        return 400.0
+    rpm = (sfm * 3.82) / float(dia_in)
+    return max(100.0, min(rpm, rpm_cap))
+
+
+def _derive_major_dia_in(thread_str: str) -> float:
+    """Rough major diameter for taps; enough to get a reasonable RPM."""
+
+    s = (thread_str or "").strip().upper()
+    m = _thread_metric.search(s)
+    if m:
+        return float(m.group(1)) / 25.4
+    m = _thread_frac.search(s)
+    if m:
+        return float(m.group(1)) / float(m.group(2))
+    if s.startswith("#"):
+        num_map = {"#4": 0.112, "#6": 0.138, "#8": 0.164, "#10": 0.190, "#12": 0.216}
+        for key, value in num_map.items():
+            if s.startswith(key):
+                return value
+    return 0.25
+
+
+def _finalize_tap_row(row: dict[str, Any], thickness_in: float) -> None:
+    thread = row.get("thread") or row.get("desc") or ""
+    ipr = _thread_ipr(thread)
+    dia = _derive_major_dia_in(thread)
+    rpm = _tap_rpm_for_dia(dia)
+    ipm = rpm * ipr if ipr > 0 else 0.0
+
+    depth_in = row.get("depth_in")
+    depth_token = depth_in
+    if isinstance(depth_token, str):
+        if depth_token.strip().upper() in {"", "-", "THRU"}:
+            depth_in = float(thickness_in or 0.0)
+        else:
+            try:
+                depth_in = float(depth_token)
+            except Exception:
+                depth_in = float(thickness_in or 0.0)
+    elif depth_in in (None, ""):
+        depth_in = float(thickness_in or 0.0)
+    else:
+        try:
+            depth_in = float(depth_in)
+        except Exception:
+            depth_in = float(thickness_in or 0.0)
+
+    index_min = 0.08
+    retract_fac = 2.0
+    motion_min = (float(depth_in) / max(ipm, 1e-6)) * retract_fac if depth_in else 0.0
+    t_per = motion_min + index_min
+
+    row["ipr"] = round(ipr, 4)
+    row["rpm"] = int(round(rpm))
+    row["ipm"] = round(ipm, 3)
+    row["t_per_hole_min"] = round(t_per, 3)
+    row["feed_fmt"] = f'{row["ipr"]:.4f} ipr | {row["rpm"]} rpm | {row["ipm"]:.3f} ipm'
+    row["depth_in"] = float(depth_in)
+    row["depth_in_display"] = f'{float(depth_in):.2f}"'
+
+
 def _render_ops_card(
     append_line: Callable[[str], None],
     *,
@@ -532,19 +622,27 @@ def _render_ops_card(
     append_line("-" * 66)
     total_min = 0.0
     for r in rows:
-        qty = int(r.get("qty", 0) or 0)
-        depth = r.get("depth_in_display") or f'{float(r.get("depth_in", 0.0)):.3f}"'
-        t_ph = float(r.get("t_per_hole_min", 0.0))
-        group = qty * t_ph
-        total_min += group
-        line = (
-            f'{r.get("label", "?")} × {qty} {r.get("side", "").upper():>8} | '
-            f"depth {depth} | {r.get('feed_fmt', '-')} | "
-            f"t/hole {t_ph:.2f} min | group {qty}×{t_ph:.2f} = {group:.2f} min"
+        qty = int(r.get("qty") or 0)
+        t_ph = float(r.get("t_per_hole_min") or 0.0)
+        grp = qty * t_ph
+        total_min += grp
+        depth_display = r.get("depth_in_display")
+        if not depth_display:
+            try:
+                depth_val = float(r.get("depth_in", 0.0))
+                depth_display = f"{depth_val:.3f}\""
+            except Exception:
+                depth_display = "-"
+        feed_fmt = r.get("feed_fmt", "-")
+        append_line(
+            f'{r.get("label", r.get("desc", "?"))} × {qty}  '
+            f'({(r.get("side", "") or "").upper() or "FRONT"}) | '
+            f'depth {depth_display} | '
+            f'{feed_fmt} | '
+            f't/hole {t_ph:.2f} min | group {qty}×{t_ph:.2f} = {grp:.2f} min'
         )
-        append_line(line)
     append_line("")
-    return total_min
+    return round(total_min, 2)
 
 
 def _compute_drilling_removal_section(
@@ -1146,9 +1244,9 @@ def _emit_tapping_card(
     speeds_csv: dict | None,
     result: Mapping[str, Any] | None = None,
     breakdown: Mapping[str, Any] | None = None,
-) -> None:
+) -> float:
     rows = _rows_from_ops_summary(geo, result=result, breakdown=breakdown)
-    groups: list[dict[str, Any]] = []
+    tap_rows: list[dict[str, Any]] = []
     for r in rows:
         desc = str(r.get("desc", ""))
         desc_upper = desc.upper()
@@ -1158,70 +1256,102 @@ def _emit_tapping_card(
         qty = int(r.get("qty") or 0)
         if qty <= 0:
             continue
-        side = _side_of(desc)
+        side = (_side_of(desc) or "FRONT").upper()
         match = _THREAD_WITH_TPI_RE.search(desc)
         if match:
             major_token = match.group(1).strip()
             tpi_token = match.group(2).strip()
             thread = f"{major_token}-{tpi_token}"
-            tpi = _parse_tpi(thread)
-            major = _parse_thread_major_in(thread)
         else:
             match = _THREAD_WITH_NPT_RE.search(desc)
             if not match:
                 continue
             major_token = match.group(1).strip()
             thread = f"{major_token}-NPT"
-            tpi = None
-            major = _parse_thread_major_in(f"{major_token}-1")
-            if major is None:
-                major = _parse_ref_to_inch(major_token)
         depth_match = _DEPTH_TOKEN.search(desc)
-        depth_in = float(depth_match.group(1)) if depth_match else None
+        depth_in = depth_match.group(1) if depth_match else None
+        if depth_in is not None:
+            try:
+                depth_in_val = float(depth_in)
+            except Exception:
+                depth_in_val = depth_in
+        else:
+            depth_in_val = "THRU" if "THRU" in desc_upper else None
         pilot = (r.get("ref") or "").strip()
-        pitch = (1.0 / float(tpi)) if tpi else None
-        sfm, _ = _lookup_sfm_ipr("tapping", major, material_group, speeds_csv)
-        rpm = _rpm_from_sfm_diam(sfm, major)
-        ipm = _ipm_from_rpm_ipr(rpm, pitch)
-        groups.append(
+        tap_rows.append(
             {
+                "label": thread or desc or "Tap",
                 "thread": thread,
                 "side": side,
                 "qty": qty,
-                "depth_in": depth_in,
+                "depth_in": depth_in_val,
                 "pilot": pilot,
-                "pitch_ipr": None if pitch is None else round(pitch, 4),
-                "rpm": None if rpm is None else int(round(rpm)),
-                "ipm": None if ipm is None else round(ipm, 3),
+                "desc": desc or thread,
             }
         )
-    if not groups:
-        return
-    total = sum(g["qty"] for g in groups)
-    front = sum(g["qty"] for g in groups if g["side"] == "FRONT")
+    if not tap_rows:
+        return 0.0
+
+    def _extract_thickness(*candidates: Mapping[str, Any] | None) -> float:
+        def _pluck(container: Mapping[str, Any] | None) -> float | None:
+            if not isinstance(container, _MappingABC):
+                return None
+            val = container.get("t")
+            if val is not None:
+                try:
+                    return float(val)
+                except Exception:
+                    return _safe_float(val, 0.0)
+            return None
+
+        for candidate in candidates:
+            if not isinstance(candidate, _MappingABC):
+                continue
+            direct = _pluck(candidate)
+            if direct:
+                return float(direct)
+            geo_map = candidate.get("geo") if hasattr(candidate, "get") else None
+            if isinstance(geo_map, _MappingABC):
+                blank = geo_map.get("required_blank_in") if hasattr(geo_map, "get") else None
+                blank_val = _pluck(blank)
+                if blank_val:
+                    return float(blank_val)
+                bbox = geo_map.get("bbox_in") if hasattr(geo_map, "get") else None
+                bbox_val = _pluck(bbox)
+                if bbox_val:
+                    return float(bbox_val)
+                guess = geo_map.get("thickness_in_guess") if hasattr(geo_map, "get") else None
+                if guess is not None:
+                    try:
+                        return float(guess)
+                    except Exception:
+                        return _safe_float(guess, 0.0)
+        return 0.0
+
+    thickness_guess = _extract_thickness(breakdown, result, geo)
+    if thickness_guess <= 0:
+        thickness_guess = 2.0
+
+    for row in tap_rows:
+        _finalize_tap_row(row, thickness_in=float(thickness_guess))
+
+    total = sum(row.get("qty", 0) for row in tap_rows)
+    front = sum(row.get("qty", 0) for row in tap_rows if (row.get("side") or "FRONT").upper() == "FRONT")
     back = total - front
+    thread_set = sorted({(row.get("thread") or row.get("label") or "").strip() for row in tap_rows if row.get("thread") or row.get("label")})
+
     lines += [
         "MATERIAL REMOVAL – TAPPING",
         "=" * 64,
         "Inputs",
         "  Ops ............... Tapping (front + back), pre-drill counted in drilling",
         f"  Taps .............. {total} total  → {front} front, {back} back",
-        "  Threads ........... " + ", ".join(sorted({g["thread"] for g in groups})),
+        "  Threads ........... " + (", ".join(thread_set) if thread_set else "-"),
         "",
-        "TIME PER HOLE – TAP GROUPS",
-        "-" * 66,
     ]
-    for g in groups:
-        depth_txt = "THRU" if g["depth_in"] is None else f'{g["depth_in"]:.2f}"'
-        lines.append(
-            f'{g["thread"]} × {g["qty"]}  ({g["side"]})'
-            f'{(" | pilot " + g["pilot"]) if g.get("pilot") else ""}'
-            f" | depth {depth_txt} | {g['pitch_ipr'] if g['pitch_ipr'] is not None else '-'} ipr"
-            f" | {g['rpm'] if g['rpm'] is not None else '-'} rpm"
-            f" | {g['ipm'] if g['ipm'] is not None else '-'} ipm"
-            f" | t/hole — | group — "
-        )
-    lines.append("")
+
+    tap_minutes = _render_ops_card(lambda text: _push(lines, text), title="Time per hole – Tap groups", rows=tap_rows)
+    return float(tap_minutes or 0.0)
 
 
 def _emit_counterbore_card(
@@ -1407,6 +1537,62 @@ def _add_bucket_minutes(
         ops_list.append({"name": name, "minutes": minutes_val})
 
 
+def _seed_bucket_minutes_cost(
+    bucket_view: Mapping[str, Any] | MutableMapping[str, Any] | None,
+    bucket_key: str,
+    minutes: float,
+    machine_rate: float,
+    labor_rate: float,
+    *,
+    label: str | None = None,
+) -> None:
+    try:
+        minutes_val = float(minutes)
+    except Exception:
+        minutes_val = 0.0
+    if minutes_val <= 0.0:
+        return
+
+    target_view: MutableMapping[str, Any] | dict[str, Any] | None
+    if isinstance(bucket_view, _MutableMappingABC):
+        target_view = typing.cast(MutableMapping[str, Any], bucket_view)
+    elif isinstance(bucket_view, dict):
+        target_view = bucket_view
+    else:
+        return
+
+    buckets = target_view.setdefault("buckets", {})
+    if not isinstance(buckets, dict):
+        try:
+            buckets = dict(buckets)  # type: ignore[arg-type]
+        except Exception:
+            buckets = {}
+        target_view["buckets"] = buckets
+
+    entry = buckets.setdefault(
+        bucket_key,
+        {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0, "total$": 0.0},
+    )
+    entry["minutes"] = round(minutes_val, 3)
+    hours = minutes_val / 60.0
+    mach_rate = _safe_float(machine_rate, 0.0)
+    lab_rate = _safe_float(labor_rate, 0.0)
+    entry["machine$"] = round(hours * mach_rate, 2)
+    entry["labor$"] = round(hours * lab_rate, 2)
+    entry["total$"] = round(entry["machine$"] + entry["labor$"], 2)
+
+    if label:
+        ops_map = target_view.setdefault("bucket_ops", {})
+        if not isinstance(ops_map, dict):
+            try:
+                ops_map = dict(ops_map)  # type: ignore[arg-type]
+            except Exception:
+                ops_map = {}
+            target_view["bucket_ops"] = ops_map
+        ops_list = [{"name": label, "minutes": round(minutes_val, 3)}]
+        ops_map[bucket_key] = ops_list
+
+
 def _emit_hole_table_ops_cards(
     lines: list[str],
     *,
@@ -1453,8 +1639,9 @@ def _emit_hole_table_ops_cards(
     elif (not rates_map) and isinstance(rates, dict):
         rates_map = rates
 
+    tap_minutes_rendered = 0.0
     if not _hole_table_section_present(lines, "MATERIAL REMOVAL – TAPPING"):
-        _emit_tapping_card(
+        tap_minutes_rendered = _emit_tapping_card(
             lines,
             geo=geo,
             material_group=material_group,
@@ -1462,19 +1649,38 @@ def _emit_hole_table_ops_cards(
             result=result,
             breakdown=breakdown,
         )
-        tap_labor_rate = _lookup_bucket_rate("tapping_labor", rates_map) or _lookup_bucket_rate(
-            "labor",
-            rates_map,
-        )
-        tap_machine_rate = _lookup_bucket_rate("tapping", rates_map) or 0.0
-        _add_bucket_minutes(
-            bucket_view_obj,
-            "tapping",
-            tap_minutes_hint,
-            machine_rate=tap_machine_rate,
-            labor_rate=tap_labor_rate,
-            name="Tapping ops",
-        )
+    tap_minutes_total = tap_minutes_rendered if tap_minutes_rendered > 0 else _safe_float(tap_minutes_hint, 0.0)
+    tap_mrate = (
+        _lookup_bucket_rate("tapping", rates_map)
+        or _lookup_bucket_rate("machine", rates_map)
+        or 45.0
+    )
+    tap_lrate = (
+        _lookup_bucket_rate("tapping_labor", rates_map)
+        or _lookup_bucket_rate("labor", rates_map)
+        or 45.0
+    )
+    _seed_bucket_minutes_cost(
+        bucket_view_obj,
+        "tapping",
+        tap_minutes_total,
+        tap_mrate,
+        tap_lrate,
+        label="Tapping ops",
+    )
+    if bucket_view_obj:
+        try:
+            buckets = (
+                bucket_view_obj.get("buckets")
+                if isinstance(bucket_view_obj, _MappingABC)
+                else bucket_view_obj.get("buckets")
+                if isinstance(bucket_view_obj, dict)
+                else None
+            )
+        except Exception:
+            buckets = None
+        if isinstance(buckets, (_MappingABC, dict)):
+            _push(lines, f"[DEBUG] tapping_bucket={(dict(buckets)).get('tapping')}")
     if not _hole_table_section_present(lines, "MATERIAL REMOVAL – COUNTERBORE"):
         _emit_counterbore_card(
             lines,
