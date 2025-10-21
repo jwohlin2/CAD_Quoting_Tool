@@ -16,8 +16,15 @@ from __future__ import annotations
 
 import sys
 
+import typing
+from pathlib import Path
+
+_PKG_SRC = Path(__file__).resolve().parent / "cad_quoter_pkg" / "src"
+if _PKG_SRC.is_dir():
+    sys.path.insert(0, str(_PKG_SRC))
+
 try:
-    sys.stdout.reconfigure(encoding="utf-8")  # py3.7+
+    typing.cast(Any, sys.stdout).reconfigure(encoding="utf-8")  # py3.7+
 except Exception:
     pass
 
@@ -36,7 +43,6 @@ import os
 import logging
 import re
 import time
-import typing
 from functools import cmp_to_key, lru_cache
 from typing import Any, Mapping, MutableMapping, Sequence, TYPE_CHECKING, TypeAlias
 from collections import Counter, defaultdict
@@ -50,8 +56,6 @@ from collections.abc import (
 )
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
-from pathlib import Path
-
 from cad_quoter.app._value_utils import (
     _format_value,
 )
@@ -75,6 +79,44 @@ def _coerce_positive_float(value: _AnyForCoerce) -> float | None:
     except Exception:
         pass
     return number if number > 0 else None
+
+
+_MM_DIM_TOKEN = re.compile(
+    r"(?:Ø|⌀|DIA|REF)?\s*((?:\d+\s*/\s*\d+)|(?:\d+(?:\.\d+)?))\s*(?:MM|MILLIM(?:E|E)T(?:E|)RS?)",
+    re.IGNORECASE,
+)
+
+
+def _parse_dim_to_mm(value: Any) -> float | None:
+    """Parse a dimension string containing millimeter units to a float value."""
+
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            mm_val = float(value)
+        except Exception:
+            return None
+        return mm_val if math.isfinite(mm_val) and mm_val > 0 else None
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    match = _MM_DIM_TOKEN.search(text)
+    if not match:
+        return None
+
+    token = match.group(1).replace(" ", "")
+    try:
+        if "/" in token:
+            mm_val = float(Fraction(token))
+        else:
+            mm_val = float(token)
+    except Exception:
+        return None
+
+    return mm_val if math.isfinite(mm_val) and mm_val > 0 else None
 from cad_quoter.app.chart_lines import (
     collect_chart_lines_context as _collect_chart_lines_context,
 )
@@ -96,10 +138,12 @@ from cad_quoter.app.hole_ops import (
     _aggregate_hole_entries,
     _classify_thread_spec,
     _dedupe_hole_entries,
+    _DIA_TOKEN,
     _major_diameter_from_thread,
     _normalize_hole_text,
     _parse_hole_line,
     _parse_ref_to_inch,
+    _SPOT_TOKENS,
     summarize_hole_chart_lines,
 )
 from cad_quoter.app.container import (
@@ -1056,12 +1100,18 @@ def _compute_drilling_removal_section(
 
     ops_hole_count_from_table = 0
 
-    dtph_map = (
+    dtph_map_candidate = (
         drilling_time_per_hole
         if isinstance(drilling_time_per_hole, _MappingABC)
         else None
     )
-    dtph_rows = dtph_map.get("rows") if isinstance(dtph_map, _MappingABC) else None
+    dtph_map: Mapping[str, Any]
+    if isinstance(dtph_map_candidate, _MappingABC):
+        dtph_map = typing.cast(Mapping[str, Any], dtph_map_candidate)
+    else:
+        dtph_map = {}
+
+    dtph_rows = dtph_map.get("rows")
     if isinstance(dtph_rows, list) and dtph_rows:
         sanitized_rows: list[dict[str, Any]] = []
         subtotal_minutes = 0.0
@@ -1205,9 +1255,17 @@ def _compute_drilling_removal_section(
                 labor_rate_per_hr=drill_lrate,
             )
 
-            try:
-                dbg_entry = (bucket_view_obj.get("buckets") or {}).get("drilling", {})
-            except Exception:
+            dbg_entry: Mapping[str, Any] | None = None
+            if isinstance(bucket_view_obj, _MappingABC):
+                try:
+                    buckets_snapshot = bucket_view_obj.get("buckets")
+                except Exception:
+                    buckets_snapshot = None
+                if isinstance(buckets_snapshot, _MappingABC):
+                    dbg_entry = typing.cast(
+                        Mapping[str, Any], buckets_snapshot
+                    ).get("drilling")
+            if not isinstance(dbg_entry, _MappingABC):
                 dbg_entry = {}
             _push(lines, f"[DEBUG] drilling_bucket={dbg_entry}")
 
@@ -1400,6 +1458,10 @@ def _estimate_drilling_minutes_from_meta(
 
     if not isinstance(drilling_meta, _MappingABC):
         return (0.0, 0.0, 0.0, {})
+
+    drilling_meta_map: Mapping[str, Any] | MutableMapping[str, Any] = typing.cast(
+        Mapping[str, Any] | MutableMapping[str, Any], drilling_meta
+    )
 
     try:
         index_min = float(drilling_meta.get("index_min_per_hole") or 0.0)
@@ -1915,12 +1977,12 @@ def _recognized_line_items_from_planner(pricing_result: Mapping[str, Any] | None
 import cad_quoter.geometry as geometry
 
 # Re-export legacy OCCT helpers via cad_quoter.geometry.
-FACE_OF = geometry.FACE_OF
-ensure_face = geometry.ensure_face
-face_surface = geometry.face_surface
-iter_faces = geometry.iter_faces
-linear_properties = geometry.linear_properties
-map_shapes_and_ancestors = geometry.map_shapes_and_ancestors
+FACE_OF = typing.cast(Any, getattr(geometry, "FACE_OF"))
+ensure_face = typing.cast(Any, getattr(geometry, "ensure_face"))
+face_surface = typing.cast(Any, getattr(geometry, "face_surface"))
+iter_faces = typing.cast(Any, getattr(geometry, "iter_faces"))
+linear_properties = typing.cast(Any, getattr(geometry, "linear_properties"))
+map_shapes_and_ancestors = typing.cast(Any, getattr(geometry, "map_shapes_and_ancestors"))
 from cad_quoter.geo2d.apply import apply_2d_features_to_variables
 
 # Tolerance for invariant checks that guard against silent drift when rendering
