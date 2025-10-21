@@ -423,7 +423,6 @@ from cad_quoter.llm_overrides import (
 )
 
 from cad_quoter.domain import (
-    QuoteState,
     HARDWARE_PASS_LABEL,
     _canonical_pass_label,
     coerce_bounds,
@@ -431,6 +430,11 @@ from cad_quoter.domain import (
     overrides_to_suggestions,
     suggestions_to_overrides,
 )
+
+try:  # pragma: no cover - import shim for static analysers in the dev layout
+    from cad_quoter.domain import QuoteState
+except ImportError:  # pragma: no cover - fallback when namespace package is not resolved
+    from cad_quoter_pkg.src.cad_quoter.domain_models.state import QuoteState
 
 from cad_quoter.vendors import ezdxf as _ezdxf_vendor
 
@@ -444,7 +448,13 @@ from cad_quoter.geometry.dxf_enrich import (
 from cad_quoter.pricing.process_buckets import BUCKET_ROLE, PROCESS_BUCKETS, bucketize
 
 import cad_quoter.geometry as geometry
-from cad_quoter.geometry import upsert_var_row as geometry_upsert_var_row
+
+try:  # pragma: no cover - make the helper visible when namespace package resolution fails
+    from cad_quoter.geometry import upsert_var_row as geometry_upsert_var_row
+except ImportError:  # pragma: no cover - fallback for editors that skip namespace package hooks
+    from cad_quoter_pkg.src.cad_quoter.geometry import (
+        upsert_var_row as geometry_upsert_var_row,
+    )
 
 geometry = typing.cast(typing.Any, geometry)
 
@@ -1940,23 +1950,40 @@ from cad_quoter.geo2d.apply import apply_2d_features_to_variables
 _LABOR_SECTION_ABS_EPSILON = 0.51
 _PLANNER_BUCKET_ABS_EPSILON = 0.51
 
-from cad_quoter.domain_models import (
-    DEFAULT_MATERIAL_DISPLAY,
-    DEFAULT_MATERIAL_KEY,
-    MATERIAL_DENSITY_G_CC_BY_KEY,
-    MATERIAL_DENSITY_G_CC_BY_KEYWORD,
-    MATERIAL_DISPLAY_BY_KEY,
-    MATERIAL_DROPDOWN_OPTIONS,
-    MATERIAL_KEYWORDS,
-    MATERIAL_MAP,
-    MATERIAL_OTHER_KEY,
-)
-from cad_quoter.domain_models import (
-    coerce_float_or_none as _coerce_float_or_none,
-)
-from cad_quoter.domain_models import (
-    normalize_material_key,
-)
+try:  # pragma: no cover - ensure static analysers can resolve the re-exported constants
+    from cad_quoter.domain_models import (
+        DEFAULT_MATERIAL_DISPLAY,
+        DEFAULT_MATERIAL_KEY,
+        MATERIAL_DENSITY_G_CC_BY_KEY,
+        MATERIAL_DENSITY_G_CC_BY_KEYWORD,
+        MATERIAL_DISPLAY_BY_KEY,
+        MATERIAL_DROPDOWN_OPTIONS,
+        MATERIAL_KEYWORDS,
+        MATERIAL_MAP,
+        MATERIAL_OTHER_KEY,
+    )
+    from cad_quoter.domain_models import (
+        coerce_float_or_none as _coerce_float_or_none,
+    )
+    from cad_quoter.domain_models import (
+        normalize_material_key,
+    )
+except ImportError:  # pragma: no cover - fallback when namespace package merging is bypassed
+    from cad_quoter_pkg.src.cad_quoter.domain_models.materials import (
+        DEFAULT_MATERIAL_DISPLAY,
+        DEFAULT_MATERIAL_KEY,
+        MATERIAL_DENSITY_G_CC_BY_KEY,
+        MATERIAL_DENSITY_G_CC_BY_KEYWORD,
+        MATERIAL_DISPLAY_BY_KEY,
+        MATERIAL_DROPDOWN_OPTIONS,
+        MATERIAL_KEYWORDS,
+        MATERIAL_MAP,
+        MATERIAL_OTHER_KEY,
+        normalize_material_key,
+    )
+    from cad_quoter_pkg.src.cad_quoter.domain_models import (
+        coerce_float_or_none as _coerce_float_or_none,
+    )
 from cad_quoter.domain_models.values import safe_float as _safe_float, to_float, to_int
 from cad_quoter.utils import coerce_bool, compact_dict, jdump, json_safe_copy, sdict
 from cad_quoter.utils.text import _match_items_contains
