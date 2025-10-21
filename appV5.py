@@ -453,11 +453,22 @@ def _pick_drill_minutes(
         src = "planner_meta"
 
     chosen_clamped = _clamp_minutes(chosen)
+    try:
+        logger.info(
+            "[drill-pick] meta_min=%.2f removal_min=%.2f -> %.2f (%s%s)",
+            float(meta_min),
+            float(removal_min),
+            float(chosen_clamped),
+            src,
+            " CLAMPED" if chosen_clamped != chosen else "",
+        )
+    except Exception:
+        pass
     if lines is not None:
         try:
             lines.append(
-                "[DEBUG] drill_minutes_pick meta="
-                f"{meta_min:.2f} removal={removal_min:.2f} -> {chosen_clamped:.2f} "
+                "[drill-pick] meta_min="
+                f"{meta_min:.2f} removal_min={removal_min:.2f} -> {chosen_clamped:.2f} "
                 f"({src}{' CLAMPED' if chosen_clamped != chosen else ''})"
             )
         except Exception:
@@ -5520,7 +5531,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             extra_map["drill_labor_minutes"] = float(labor_minutes_snapshot)
             minutes_value = round(float(total_minutes_snapshot or 0.0), 2)
             extra_map["drill_total_minutes"] = minutes_value
-            logging.debug("[removal] drill_total_minutes=%s", minutes_value)
+            try:
+                logger.info("[removal] drill_total_minutes=%s", minutes_value)
+            except Exception:
+                pass
             return extra_map
         return None
 
@@ -7035,7 +7049,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             )
         except Exception:
             drilling_bucket_snapshot = None
-        logging.debug(
+        logger.info(
             "[bucket] drilling_minutes=%s drilling_bucket=%s",
             drill_minutes_total,
             drilling_bucket_snapshot,
