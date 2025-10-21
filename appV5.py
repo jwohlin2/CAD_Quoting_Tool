@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 # app_gui_occ_flow_v8_single_autollm.py
 r"""
 Single-file CAD Quoter (v8)
@@ -162,6 +162,64 @@ from cad_quoter.pricing.vendor_csv import (
     pick_plate_from_mcmaster as _pick_plate_from_mcmaster,
 )
 from cad_quoter.pricing.process_cost_renderer import render_process_costs
+
+
+def _infer_rect_from_holes(geo: Mapping[str, Any] | None) -> tuple[float, float]:
+    """Infer a rectangular blank size (W,H in inches) from geo context.
+
+    Tries, in order:
+    - required_blank_in / bbox_in maps with numeric w/h (inches)
+    - plate_len/plate_wid (inches) or synonyms
+    - derived or top-level bbox_mm converted to inches
+    - conservative guess based on hole diameters (4× max diameter)
+    """
+
+    if not isinstance(geo, _MappingABC):
+        return (0.0, 0.0)
+
+    def _wh_from(container: Mapping[str, Any] | None) -> tuple[float, float]:
+        if not isinstance(container, _MappingABC):
+            return (0.0, 0.0)
+        w = _coerce_positive_float(container.get("w"))
+        h = _coerce_positive_float(container.get("h"))
+        return (float(w) if w else 0.0, float(h) if h else 0.0)
+
+    w, h = _wh_from(geo.get("required_blank_in"))
+    if w > 0 and h > 0:
+        return (w, h)
+    w, h = _wh_from(geo.get("bbox_in"))
+    if w > 0 and h > 0:
+        return (w, h)
+
+    L_in = _coerce_positive_float(geo.get("plate_len_in") or geo.get("plate_length_in"))
+    W_in = _coerce_positive_float(geo.get("plate_wid_in") or geo.get("plate_width_in"))
+    if L_in and W_in:
+        return (float(W_in), float(L_in))
+
+    derived = geo.get("derived") if isinstance(geo, _MappingABC) else None
+    bbox_mm = None
+    if isinstance(derived, _MappingABC):
+        bbox_mm = derived.get("bbox_mm")
+    if not bbox_mm:
+        bbox_mm = geo.get("bbox_mm")
+    if isinstance(bbox_mm, (list, tuple)) and len(bbox_mm) >= 2:
+        mm_w = _coerce_positive_float(bbox_mm[0])
+        mm_h = _coerce_positive_float(bbox_mm[1])
+        if mm_w and mm_h:
+            return (float(mm_w) / 25.4, float(mm_h) / 25.4)
+
+    max_d_in = 0.0
+    diams_mm = geo.get("hole_diams_mm")
+    if isinstance(diams_mm, Sequence) and not isinstance(diams_mm, (str, bytes, bytearray)):
+        for d in diams_mm:
+            d_mm = _coerce_positive_float(d)
+            if d_mm and d_mm > 0:
+                max_d_in = max(max_d_in, float(d_mm) / 25.4)
+    if max_d_in > 0:
+        guess = max(2.0, max_d_in * 4.0)
+        return (guess, guess)
+
+    return (0.0, 0.0)
 from cad_quoter.estimators import drilling_legacy as _drilling_legacy
 from cad_quoter.estimators.base import SpeedsFeedsUnavailableError
 from cad_quoter.llm_overrides import (
@@ -1375,8 +1433,9 @@ def _estimate_drilling_minutes_from_meta(
     seen_deep = False
     seen_std = False
     if bins:
+        _local_lines: list[str] = []
         subtotal_min, seen_deep, seen_std = _render_time_per_hole(
-            lines,
+            _local_lines,
             bins=bins,
             index_min=index_min,
             peck_min_deep=peck_min_deep,
@@ -3025,7 +3084,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         for candidate in (existing, new_value):
             if candidate is None:
                 continue
-            for segment in _RE_SPLIT(r";\s*", str(candidate)):
+            # Split on semicolons and trim whitespace
+            for segment in str(candidate).split(";"):
                 seg = segment.strip()
                 if not seg:
                     continue
@@ -3183,6 +3243,20 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     def _format_weight_lb_oz(mass_g: float | None) -> str:
         return format_weight_lb_oz(mass_g)
 
+    def _format_row(label: Any, amount: Any) -> str:
+        """Format a left label and a right-aligned currency amount on one line."""
+
+        left = str(label or "").strip()
+        try:
+            amt = float(amount or 0.0)
+        except Exception:
+            amt = 0.0
+        right = _m(amt)
+        # leave at least 2 spaces between label and amount
+        total = max(10, int(page_width))
+        pad = max(2, total - len(left) - len(right))
+        return f"{left}{' ' * pad}{right}"
+
     def _scrap_source_hint(material_info: Mapping[str, Any] | None) -> str | None:
         if not isinstance(material_info, _MappingABC):
             return None
@@ -3207,7 +3281,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
         label_text = label_text.replace("+", " + ")
         label_text = label_text.replace("_", " ")
-        label_text = _RE_SUB(r"\s+", " ", label_text).strip()
+        label_text = " ".join(label_text.split())
         return label_text or None
 
     def _is_truthy_flag(value) -> bool:
@@ -3252,7 +3326,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if not detail:
             return
         sanitized_detail = _sanitize_render_text(detail)
-        for segment in _RE_SPLIT(r";\s*", sanitized_detail):
+        for segment in (s.strip() for s in sanitized_detail.split(";")):
             write_wrapped(segment, indent)
 
     bucket_diag_env = os.getenv("SHOW_BUCKET_DIAGNOSTICS")
@@ -3542,6 +3616,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         g = dict(g_source) if not isinstance(g_source, dict) else dict(g_source)
     else:
         g = {}
+    # Ensure a consistent alias used throughout this renderer
+    geo_context = g
     drill_debug_entries: list[str] = []
     # Selected removal summary (if available) for compact debug table later
     removal_summary_for_display: Mapping[str, Any] | None = None
@@ -5567,9 +5643,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 break
 
     def _norm(s: Any) -> str:
-        import re
-
-        return _RE_SUB(r"[^a-z0-9]+", "_", str(s or "").lower()).strip("_")
+        return re.sub(r"[^a-z0-9]+", "_", str(s or "").lower()).strip("_")
 
     laborish_aliases: set[str] = set()
     for bucket_key, role in BUCKET_ROLE.items():
@@ -5997,7 +6071,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 detail_parts.append(str(rate_display))
             existing_detail = detail_lookup.get(display_label)
             if existing_detail not in (None, ""):
-                for segment in _RE_SPLIT(r";\s*", str(existing_detail)):
+                for segment in str(existing_detail).split(";"):
                     cleaned = segment.strip()
                     if not cleaned or cleaned.startswith("-"):
                         continue
@@ -7079,7 +7153,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     if hour_summary_entries:
         def _canonical_hour_label(value: Any) -> tuple[str, str]:
-            import re
 
             text = str(value or "")
             text = re.sub(r"\s+", " ", text).strip()
@@ -7805,6 +7878,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     append_lines(removal_card_lines)
 
     # ===== MATERIAL REMOVAL: HOLE-TABLE CARDS =================================
+    # use module-level 're'
+
     def _first_dict(*cands):
         for c in cands:
             if isinstance(c, dict) and c:
@@ -10791,7 +10866,7 @@ def extract_2d_features_from_pdf_vector(pdf_path: str) -> dict:
                 _add_polyline([pt for pt in pts if pt is not None])
 
     # scrape thickness/material from text
-    import re
+    # use module-level 're'
     thickness_mm = None
     m = re.search(r"(thk|thickness)\s*[:=]?\s*([0-9.]+)\s*(mm|in|in\.|\")", text)
     if m:
@@ -16170,6 +16245,15 @@ class App(tk.Tk):
                     llm_suggest=llm_suggest,
 
                 )
+                try:
+                    import datetime as _dt
+                    append_debug_log(
+                        "",
+                        f"[{_dt.datetime.now().isoformat()}] compute_quote_from_df returned",
+                        f"top_keys={list(res.keys())[:20] if isinstance(res, dict) else type(res)}",
+                    )
+                except Exception:
+                    pass
             except ValueError as err:
                 # Log full traceback for debugging ambiguous DataFrame truthiness, etc.
                 import datetime
@@ -16252,6 +16336,14 @@ class App(tk.Tk):
                     cfg=cfg,
                     geometry=geometry_ctx,
                 )
+                # Persist reports for diagnosis even if UI widgets fail to update
+                try:
+                    with open("latest_quote_simplified.txt", "w", encoding="utf-8") as f:
+                        f.write(simplified_report or "")
+                    with open("latest_quote_full.txt", "w", encoding="utf-8") as f:
+                        f.write(full_report or "")
+                except Exception:
+                    pass
             except AssertionError as e:
                 # Be resilient to strict invariants inside render_quote; surface
                 # a readable fallback rather than crashing the UI.
@@ -16273,6 +16365,42 @@ class App(tk.Tk):
                 try:
                     with open("latest_quote_error.txt", "w", encoding="utf-8") as ef:
                         ef.write(err_text + "\n\n" + _tb.format_exc())
+                except Exception:
+                    pass
+                try:
+                    with open("latest_quote_simplified.txt", "w", encoding="utf-8") as f:
+                        f.write(simplified_report or "")
+                    with open("latest_quote_full.txt", "w", encoding="utf-8") as f:
+                        f.write(full_report or "")
+                except Exception:
+                    pass
+            except Exception as e:
+                # Catch any other errors from render_quote and still produce a fallback
+                import traceback as _tb
+                err_text = f"Quote rendering error (Exception): {e}"
+                append_debug_log(
+                    "",
+                    "[render_quote] Exception while rendering output",
+                    _tb.format_exc(),
+                    "",
+                )
+                fallback = (
+                    err_text
+                    + "\n\nShowing raw result as fallback.\n\n"
+                    + jdump(res, default=None)
+                )
+                simplified_report = fallback
+                full_report = fallback
+                try:
+                    with open("latest_quote_error.txt", "w", encoding="utf-8") as ef:
+                        ef.write(err_text + "\n\n" + _tb.format_exc())
+                except Exception:
+                    pass
+                try:
+                    with open("latest_quote_simplified.txt", "w", encoding="utf-8") as f:
+                        f.write(simplified_report or "")
+                    with open("latest_quote_full.txt", "w", encoding="utf-8") as f:
+                        f.write(full_report or "")
                 except Exception:
                     pass
 
