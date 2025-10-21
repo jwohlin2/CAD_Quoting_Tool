@@ -5,10 +5,26 @@ import pytest
 from cad_quoter.domain import (
     QuoteState,
     compute_effective_state,
-    effective_to_overrides,
-    merge_effective,
     reprice_with_effective,
 )
+from appkit.effective import effective_to_overrides
+from appkit.merge_utils import merge_effective
+
+import cad_quoter.geometry as _geometry
+
+_geometry_fallbacks = {
+    "FACE_OF": lambda obj: obj,
+    "ensure_face": lambda obj: obj,
+    "face_surface": lambda *_args, **_kwargs: None,
+    "iter_faces": lambda *_args, **_kwargs: iter(()),
+    "linear_properties": lambda *_args, **_kwargs: None,
+    "map_shapes_and_ancestors": lambda *_args, **_kwargs: {},
+}
+
+for _name, _stub in _geometry_fallbacks.items():
+    if not hasattr(_geometry, _name):
+        setattr(_geometry, _name, _stub)
+
 from appV5 import apply_suggestions
 
 
