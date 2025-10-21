@@ -15,7 +15,7 @@ from .materials import (
     normalize_material_key,
 )
 from .state import QuoteState
-from .values import coerce_float_or_none
+from .values import coerce_float_or_none, parse_mixed_fraction
 
 __all__ = [
     "DEFAULT_MATERIAL_DISPLAY",
@@ -30,6 +30,7 @@ __all__ = [
     "QuoteState",
     "canonical_material_key",
     "coerce_float_or_none",
+    "parse_mixed_fraction",
     "is_material_match",
     "normalize_material_key",
 ]
