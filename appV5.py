@@ -404,6 +404,8 @@ def _emit_hole_table_ops_cards(
             labor_rate_per_hr=float(tap_lrate or 0.0),
         )
 
+        _normalize_buckets(bucket_view_obj)
+
         dbg_entry: Mapping[str, Any] | None = None
         try:
             if isinstance(bucket_view_obj, _MappingABC):
@@ -579,6 +581,7 @@ from cad_quoter.ui.planner_render import (
     _extract_bucket_map,
     _process_label,
     _seed_bucket_minutes as _planner_seed_bucket_minutes,
+    _normalize_buckets,
     _split_hours_for_bucket,
     _sync_drilling_bucket_view,
     _charged_hours_by_bucket,
@@ -1215,6 +1218,8 @@ def _compute_drilling_removal_section(
                 labor_rate_per_hr=drill_lrate,
             )
 
+            _normalize_buckets(bucket_view_obj)
+
             dbg_entry: Mapping[str, Any] | None = None
             if isinstance(bucket_view_obj, _MappingABC):
                 try:
@@ -1230,6 +1235,8 @@ def _compute_drilling_removal_section(
             _push(lines, f"[DEBUG] drilling_bucket={dbg_entry}")
 
             return extras, lines, updated_plan_summary
+
+    _normalize_buckets(bucket_view_obj)
 
     return extras, lines, updated_plan_summary
 
