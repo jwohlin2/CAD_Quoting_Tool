@@ -7113,6 +7113,27 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 if isinstance(order_list, list) and canon_key not in order_list:
                     order_list.insert(0, canon_key)
 
+        if not any(spec.canon_key == canon_key for spec in bucket_row_specs):
+            hours_val = minutes_val / 60.0 if minutes_val > 0 else 0.0
+            if hours_val > 0:
+                rate_val = amount_val / hours_val if hours_val else 0.0
+            else:
+                rate_val = 0.0
+            if hours_val > 0 and rate_val <= 0.0:
+                rate_val = _rate_for_bucket(canon_key, rates or {})
+            bucket_row_specs.append(
+                _BucketRowSpec(
+                    label=_display_bucket_label(canon_key, label_overrides),
+                    hours=hours_val,
+                    rate=rate_val,
+                    total=amount_val,
+                    labor=amount_val,
+                    machine=0.0,
+                    canon_key=canon_key,
+                    minutes=minutes_val,
+                )
+            )
+
     for canon_key in process_costs_for_render:
         label = _display_bucket_label(canon_key, label_overrides)
         label_to_canon.setdefault(label, canon_key)
@@ -9162,6 +9183,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         "materials": materials_entries,
         "materials_direct": round(direct_total_amount, 2),
         "processes": processes_entries,
+        "labor_total_amount": round(labor_total_amount, 2),
         "ladder": {
             "labor_total": round(labor_total_amount, 2),
             "direct_total": round(direct_total_amount, 2),
