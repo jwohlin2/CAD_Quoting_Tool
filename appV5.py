@@ -49,7 +49,7 @@ import logging
 import re
 import time
 from functools import cmp_to_key, lru_cache
-from typing import Any, Mapping, MutableMapping, Sequence, TYPE_CHECKING, Protocol
+from typing import Any, Mapping, MutableMapping, Sequence, TYPE_CHECKING, Protocol, TypeGuard
 from collections import Counter, defaultdict
 from collections.abc import (
     Callable,
@@ -370,7 +370,8 @@ def _normalize_buckets(bucket_view_obj: MutableMapping[str, Any] | Mapping[str, 
     for k, e in b.items():
         if not isinstance(e, _MappingABC):
             continue
-        nk = alias.get(k, k)
+        nk_candidate = alias.get(k, k)
+        nk = nk_candidate if isinstance(nk_candidate, str) else str(k)
         dst = norm.setdefault(
             nk,
             {"minutes": 0.0, "machine$": 0.0, "labor$": 0.0, "total$": 0.0},
@@ -534,21 +535,22 @@ from cad_quoter.geometry.dxf_enrich import (
 
 from cad_quoter.pricing.process_buckets import BUCKET_ROLE, PROCESS_BUCKETS, bucketize
 
-import cad_quoter.geometry as geometry
-
-if typing.TYPE_CHECKING:  # pragma: no cover - help static analysers locate geometry helpers
+if typing.TYPE_CHECKING:  # pragma: no cover - expose rich geometry types to analysers
+    from cad_quoter_pkg.src.cad_quoter import geometry as geometry
     from cad_quoter_pkg.src.cad_quoter.geometry import (
         upsert_var_row as geometry_upsert_var_row,
     )
 else:
+    import cad_quoter.geometry as geometry  # type: ignore[import-not-found]
+
     try:
         from cad_quoter.geometry import upsert_var_row as geometry_upsert_var_row
-    except ImportError:
+    except ImportError:  # pragma: no cover - development fallback
         from cad_quoter_pkg.src.cad_quoter.geometry import (
             upsert_var_row as geometry_upsert_var_row,
         )
 
-geometry = typing.cast(typing.Any, geometry)
+    geometry = typing.cast(typing.Any, geometry)
 
 
 
@@ -1990,7 +1992,7 @@ if typing.TYPE_CHECKING:
     from pandas import DataFrame as PandasDataFrame  # type: ignore[import-not-found]
     from pandas import Index as PandasIndex  # type: ignore[import-not-found]
     from pandas import Series as PandasSeries  # type: ignore[import-not-found]
-    from cad_quoter.geometry import GeometryService as GeometryServiceType
+    from cad_quoter_pkg.src.cad_quoter.geometry import GeometryService as GeometryServiceType
 else:
     try:
         import pandas as pd  # type: ignore[import-not-found]
@@ -2005,7 +2007,7 @@ else:
 SeriesLike = typing.Any
 
 
-def _is_pandas_dataframe(obj: Any) -> bool:
+def _is_pandas_dataframe(obj: Any) -> TypeGuard[PandasDataFrame]:
     """Return True if *obj* looks like a pandas ``DataFrame`` instance."""
 
     df_type = getattr(pd, "DataFrame", None)
@@ -15290,7 +15292,8 @@ class App(tk.Tk):
                 )
                 self._log_geo(g2d)
 
-                self._populate_editor_tab(self.vars_df)
+                vars_df_for_editor = typing.cast(PandasDataFrame, self.vars_df)
+                self._populate_editor_tab(vars_df_for_editor)
                 self.nb.select(self.tab_editor)
                 self.status_var.set(f"{ext.upper()} variables loaded. Review the Quote Editor and generate the quote.")
                 return
@@ -15379,9 +15382,11 @@ class App(tk.Tk):
 
         self.vars_df = coerce_or_make_vars_df(self.vars_df)
 
+        geo_dict: dict[str, Any] = geo if isinstance(geo, dict) else dict(geo or {})
+
         # Merge GEO rows
         try:
-            for k, v in geo.items():
+            for k, v in geo_dict.items():
                 self.vars_df = geometry_upsert_var_row(self.vars_df, k, v, dtype="number")
         except Exception as e:
             messagebox.showerror("Variables", f"Failed to update variables with GEO rows:\n{e}")
@@ -15395,8 +15400,14 @@ class App(tk.Tk):
         client = None
         if self.llm_enabled.get():
             client = self.get_llm_client(self.llm_model_path.get().strip() or None)
-        est_raw = infer_hours_and_overrides_from_geo(geo, params=self.params, rates=self.rates, client=client)
-        est = clamp_llm_hours(est_raw, geo, params=self.params)
+        geo_for_llm = geo_dict
+        est_raw = infer_hours_and_overrides_from_geo(
+            geo_for_llm,
+            params=self.params,
+            rates=self.rates,
+            client=client,
+        )
+        est = clamp_llm_hours(est_raw, geo_for_llm, params=self.params)
         vars_df_before_llm = self.vars_df
         vars_df_after_llm = apply_llm_hours_to_variables(
             vars_df_before_llm, est, allow_overwrite_nonzero=True, log=decision_log
@@ -15405,9 +15416,9 @@ class App(tk.Tk):
             vars_df_after_llm = coerce_or_make_vars_df(vars_df_before_llm)
         self.vars_df = vars_df_after_llm
 
-        self.geo = geo
-        self.geo_context = dict(geo or {})
-        self._log_geo(geo)
+        self.geo = geo_for_llm
+        self.geo_context = dict(geo_for_llm)
+        self._log_geo(geo_for_llm)
 
         vars_df_for_editor = self.vars_df
         if vars_df_for_editor is None:  # pragma: no cover - defensive type check
@@ -15906,13 +15917,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Entry point so ``python appV5.py`` mirrors the CLI launcher."""
 
     from cad_quoter.app.cli import main as _cli_main
-    from cad_quoter.pricing import PricingEngine, create_default_registry
+
+    if typing.TYPE_CHECKING:
+        from cad_quoter_pkg.src.cad_quoter.pricing import (
+            PricingEngine as _PricingEngine,
+            create_default_registry as _create_default_registry,
+        )
+    else:  # pragma: no cover - executed at runtime
+        from cad_quoter.pricing import (
+            PricingEngine as _PricingEngine,
+            create_default_registry as _create_default_registry,
+        )
 
     return _cli_main(
         argv,
         app_cls=App,
-        pricing_engine_cls=PricingEngine,
-        pricing_registry_factory=create_default_registry,
+        pricing_engine_cls=_PricingEngine,
+        pricing_registry_factory=_create_default_registry,
         app_env=APP_ENV,
         env_setter=lambda env: globals().__setitem__("APP_ENV", env),
     )
