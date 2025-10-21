@@ -1361,11 +1361,6 @@ def _compute_drilling_removal_section(
             logging.debug(
                 f"[removal] drill_total_minutes={extras['drill_total_minutes']}"
             )
-            if "drill_total_hours" in extras:
-                logging.error(
-                    "[unit] Found drill_total_hours in extras (HOURS). This API expects MINUTES. Removing it."
-                )
-                extras.pop("drill_total_hours", None)
             extras["removal_drilling_minutes_subtotal"] = float(drill_minutes_subtotal)
             extras["removal_drilling_minutes"] = float(drill_minutes_total)
             if drill_minutes_total > 0.0:
