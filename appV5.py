@@ -324,16 +324,6 @@ def _seed_bucket_minutes_cost(
         return
 
     try:
-        minutes_val = float(minutes or 0.0)
-    except Exception:
-        minutes_val = 0.0
-
-    if (not math.isfinite(minutes_val)) or minutes_val < 0 or minutes_val > 1_000 * 60:
-        minutes_val = 0.0
-
-    hours_val = _minutes_to_hours(minutes_val)
-
-    try:
         buckets = bucket_view.setdefault("buckets", {})
     except Exception:
         return
@@ -350,16 +340,28 @@ def _seed_bucket_minutes_cost(
         {"minutes": 0.0, "machine$": 0.0, "labor$": 0.0, "total$": 0.0},
     )
 
-    machine_rate = float(machine_rate_per_hr or 0.0)
-    labor_rate = float(labor_rate_per_hr or 0.0)
+    minutes_val = _as_float(minutes, 0.0)
+    if not (0.0 <= minutes_val <= 10_000.0):
+        logging.warning(f"[bucket] ignoring {key} minutes out of range: {minutes}")
+        minutes_val = 0.0
 
+    machine_rate = _as_float(machine_rate_per_hr, 0.0)
+    labor_rate = _as_float(labor_rate_per_hr, 0.0)
+
+    hours_val = minutes_val / 60.0
     machine_cost = hours_val * machine_rate
     labor_cost = hours_val * labor_rate
 
-    entry["minutes"] = round(minutes_val, 2)
-    entry["machine$"] = round(machine_cost, 2)
-    entry["labor$"] = round(labor_cost, 2)
-    entry["total$"] = round(entry["machine$"] + entry["labor$"], 2)
+    entry["minutes"] = round(_as_float(entry.get("minutes"), 0.0) + minutes_val, 2)
+    entry["machine$"] = round(
+        _as_float(entry.get("machine$"), 0.0) + machine_cost,
+        2,
+    )
+    entry["labor$"] = round(_as_float(entry.get("labor$"), 0.0) + labor_cost, 2)
+    entry["total$"] = round(
+        _as_float(entry.get("machine$"), 0.0) + _as_float(entry.get("labor$"), 0.0),
+        2,
+    )
 
 
 def _normalize_buckets(bucket_view_obj: MutableMapping[str, Any] | Mapping[str, Any] | None) -> None:
@@ -7049,6 +7051,65 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         bucket_view_for_render = typing.cast(Mapping[str, Any], bucket_view_struct)
     else:
         bucket_view_for_render = None
+
+    bucket_seed_target: MutableMapping[str, Any] | Mapping[str, Any] | None = None
+    for candidate_name in ("bucket_view_obj", "bucket_view_struct"):
+        candidate = locals().get(candidate_name)
+        if isinstance(candidate, (_MutableMappingABC, dict)):
+            bucket_seed_target = typing.cast(MutableMapping[str, Any], candidate)
+            break
+
+    process_plan_summary_candidate: Mapping[str, Any] | None = None
+    for candidate_name in ("process_plan_summary", "process_plan_summary_local"):
+        candidate = locals().get(candidate_name)
+        if isinstance(candidate, _MappingABC):
+            process_plan_summary_candidate = typing.cast(Mapping[str, Any], candidate)
+            break
+
+    extra_map_candidate = locals().get("extra_map") if "extra_map" in locals() else None
+    if not isinstance(extra_map_candidate, _MappingABC):
+        extra_map_candidate = None
+    else:
+        extra_map_candidate = typing.cast(Mapping[str, Any], extra_map_candidate)
+
+    rates_candidate = locals().get("rates") if "rates" in locals() else None
+
+    drill_minutes_total = _pick_drill_minutes(
+        process_plan_summary_candidate,
+        typing.cast(Mapping[str, Any] | None, extra_map_candidate),
+    )
+    drill_mrate = (
+        _lookup_bucket_rate("drilling", rates_candidate)
+        or _lookup_bucket_rate("machine", rates_candidate)
+        or 45.0
+    )
+    drill_lrate = (
+        _lookup_bucket_rate("drilling_labor", rates_candidate)
+        or _lookup_bucket_rate("labor", rates_candidate)
+        or 45.0
+    )
+
+    if bucket_seed_target is not None:
+        _seed_bucket_minutes_cost(
+            bucket_seed_target,
+            "drilling",
+            drill_minutes_total,
+            machine_rate_per_hr=drill_mrate,
+            labor_rate_per_hr=drill_lrate,
+        )
+        try:
+            drilling_bucket_snapshot = (
+                (bucket_seed_target.get("buckets") or {}).get("drilling")
+                if isinstance(bucket_seed_target, (_MappingABC, dict))
+                else None
+            )
+        except Exception:
+            drilling_bucket_snapshot = None
+        logging.debug(
+            "[bucket] drilling_minutes=%s drilling_bucket=%s",
+            drill_minutes_total,
+            drilling_bucket_snapshot,
+        )
 
     if isinstance(bucket_view_obj, (_MutableMappingABC, dict)):
         _normalize_buckets(typing.cast(MutableMapping[str, Any], bucket_view_obj))

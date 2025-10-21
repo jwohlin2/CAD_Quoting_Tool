@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 import math
 import re
 from dataclasses import dataclass, field
@@ -845,12 +846,9 @@ def _seed_bucket_minutes_cost(
     if not isinstance(bucket_view, (_MutableMappingABC, dict)):
         return
 
-    try:
-        minutes_val = float(minutes or 0.0)
-    except Exception:
-        minutes_val = 0.0
-
-    if (not math.isfinite(minutes_val)) or minutes_val < 0 or minutes_val > 1_000 * 60:
+    minutes_val = _as_float(minutes, 0.0)
+    if not (0.0 <= minutes_val <= 10_000.0):
+        logging.warning(f"[bucket] ignoring {key} minutes out of range: {minutes}")
         minutes_val = 0.0
 
     hours_val = minutes_val / 60.0
@@ -872,16 +870,22 @@ def _seed_bucket_minutes_cost(
         {"minutes": 0.0, "machine$": 0.0, "labor$": 0.0, "total$": 0.0},
     )
 
-    machine_rate = float(machine_rate_per_hr or 0.0)
-    labor_rate = float(labor_rate_per_hr or 0.0)
+    machine_rate = _as_float(machine_rate_per_hr, 0.0)
+    labor_rate = _as_float(labor_rate_per_hr, 0.0)
 
     machine_cost = hours_val * machine_rate
     labor_cost = hours_val * labor_rate
 
-    entry["minutes"] = round(minutes_val, 2)
-    entry["machine$"] = round(machine_cost, 2)
-    entry["labor$"] = round(labor_cost, 2)
-    entry["total$"] = round(entry["machine$"] + entry["labor$"], 2)
+    entry["minutes"] = round(_as_float(entry.get("minutes"), 0.0) + minutes_val, 2)
+    entry["machine$"] = round(
+        _as_float(entry.get("machine$"), 0.0) + machine_cost,
+        2,
+    )
+    entry["labor$"] = round(_as_float(entry.get("labor$"), 0.0) + labor_cost, 2)
+    entry["total$"] = round(
+        _as_float(entry.get("machine$"), 0.0) + _as_float(entry.get("labor$"), 0.0),
+        2,
+    )
 
 
 def _seed_bucket_minutes(
