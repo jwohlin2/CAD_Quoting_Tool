@@ -5,14 +5,11 @@ from typing import Dict, Set
 
 from appkit.data import load_json
 
-
-def normalize_material_key(value: str) -> str:
-    """Return a canonical lookup key for material identifiers."""
-
-    import re
-
-    cleaned = re.sub(r"[^0-9a-z]+", " ", str(value).strip().lower())
-    return re.sub(r"\s+", " ", cleaned).strip()
+from cad_quoter.material_density import (
+    MATERIAL_DENSITY_G_CC_BY_KEY as _DENSITY_BY_KEY,
+    MATERIAL_DENSITY_G_CC_BY_KEYWORD as _DENSITY_BY_KEYWORD,
+    normalize_material_key,
+)
 
 
 _MATERIAL_DATA = load_json("materials.json")
@@ -82,23 +79,8 @@ for display, density in _MATERIAL_DATA.get("density_g_cc_by_display", {}).items(
     except Exception:
         continue
 
-MATERIAL_DENSITY_G_CC_BY_KEY: Dict[str, float] = {}
-MATERIAL_DENSITY_G_CC_BY_KEYWORD: Dict[str, float] = {}
-
-for display, density in _MATERIAL_DENSITY_G_CC_BY_DISPLAY.items():
-    key = normalize_material_key(display)
-    if not key or density is None:
-        continue
-    MATERIAL_DENSITY_G_CC_BY_KEY[key] = density
-
-for key, keywords in MATERIAL_KEYWORDS.items():
-    density = MATERIAL_DENSITY_G_CC_BY_KEY.get(key)
-    if density is None:
-        continue
-    for token in keywords:
-        if not token:
-            continue
-        MATERIAL_DENSITY_G_CC_BY_KEYWORD[token] = density
+MATERIAL_DENSITY_G_CC_BY_KEY: Dict[str, float] = _DENSITY_BY_KEY
+MATERIAL_DENSITY_G_CC_BY_KEYWORD: Dict[str, float] = _DENSITY_BY_KEYWORD
 
 MATERIAL_MAP: Dict[str, Dict[str, float | str]] = {}
 for key, meta in _MATERIAL_DATA.get("material_map", {}).items():

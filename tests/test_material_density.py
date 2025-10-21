@@ -3,11 +3,14 @@ import math
 import pytest
 
 from appV5 import _density_for_material, _material_family, net_mass_kg
+from cad_quoter.material_density import density_for_material
 
 
 def test_net_mass_kg_uses_copper_density():
+    density_lookup = density_for_material("Copper")
+    assert math.isclose(density_lookup, 8.96, rel_tol=0.02)
     density = _density_for_material("Copper")
-    assert math.isclose(density, 8.96, rel_tol=0.02)
+    assert math.isclose(density, density_lookup, rel_tol=0.0, abs_tol=1e-6)
 
     length_in = 4.0
     width_in = 3.0
@@ -21,7 +24,9 @@ def test_net_mass_kg_uses_copper_density():
 
 
 def test_net_mass_kg_optionally_returns_removed_mass() -> None:
+    density_lookup = density_for_material("Aluminum")
     density = _density_for_material("Aluminum")
+    assert math.isclose(density, density_lookup, rel_tol=0.0, abs_tol=1e-6)
     length_in = 6.0
     width_in = 2.0
     thickness_in = 0.5

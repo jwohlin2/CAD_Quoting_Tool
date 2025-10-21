@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -32,6 +34,7 @@ from cad_quoter.resources import default_app_settings_json
 from cad_quoter.domain_models import DEFAULT_MATERIAL_DISPLAY
 from cad_quoter.domain_models import coerce_float_or_none as _coerce_float_or_none
 from cad_quoter.domain_models import normalize_material_key as _normalize_lookup_key
+from cad_quoter.utils import jdump
 
 from cad_quoter.app.optional_loaders import (
     build_pdf_llm_payload as _build_pdf_llm_payload,
@@ -163,6 +166,62 @@ class LLMServices:
         n_threads: int | None = None,
     ):
         return self.vision_loader(n_ctx=n_ctx, n_gpu_layers=n_gpu_layers, n_threads=n_threads)
+
+    # ---- settings helpers -------------------------------------------------
+
+    def load_settings(self, path: Path | None) -> dict[str, Any]:
+        """Load persisted application settings from ``path``."""
+
+        if not isinstance(path, Path):
+            return {}
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        if isinstance(data, dict):
+            return data
+        return {}
+
+    def save_settings(self, path: Path | None, settings: Mapping[str, Any] | None) -> None:
+        """Persist application settings to disk if possible."""
+
+        if not isinstance(path, Path):
+            return
+        if not isinstance(settings, Mapping):
+            return
+        try:
+            path.write_text(jdump(dict(settings), default=None), encoding="utf-8")
+        except Exception:
+            pass
+
+    def apply_thread_limit_env(
+        self,
+        limit: int | None,
+        *,
+        settings: dict[str, Any] | None = None,
+        persist: bool = True,
+        settings_path: Path | None = None,
+    ) -> dict[str, Any] | None:
+        """Apply the requested thread ``limit`` to the environment and settings."""
+
+        if limit is None:
+            os.environ.pop("QWEN_N_THREADS", None)
+        else:
+            os.environ["QWEN_N_THREADS"] = str(limit)
+
+        if not persist:
+            return settings
+
+        if not isinstance(settings, dict):
+            settings = {}
+        settings["llm_thread_limit"] = str(limit) if limit is not None else ""
+
+        if settings_path is not None:
+            self.save_settings(settings_path, settings)
+
+        return settings
 
 
 @dataclass(slots=True)
