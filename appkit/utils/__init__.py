@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import math
 import re
-from fractions import Fraction
 from typing import Any, Callable, Mapping
 
 from appkit.debug.debug_tables import (
@@ -12,6 +11,7 @@ from appkit.debug.debug_tables import (
     _jsonify_debug_value as _debug_jsonify_value,
 )
 from cad_quoter.domain_models import coerce_float_or_none as _coerce_float_or_none
+from cad_quoter.utils.numeric import parse_mixed_fraction as _parse_mixed_fraction
 from cad_quoter.pricing.feed_math import (
     approach_allowance_for_drill as _approach_allowance_for_drill,
     ipm_from_feed as _ipm_from_feed,
@@ -166,25 +166,7 @@ def _parse_numeric_text(value: str) -> float | None:
 
     if not isinstance(value, str):
         return _coerce_float_or_none(value)
-    text = value.strip()
-    if not text:
-        return None
-    cleaned = re.sub(r"[^0-9./\s-]", " ", text)
-    parts = [part.strip() for part in cleaned.split() if part.strip()]
-    if not parts:
-        return None
-    total = 0.0
-    for part in parts:
-        try:
-            total += float(Fraction(part))
-            continue
-        except Exception:
-            pass
-        try:
-            total += float(part)
-        except Exception:
-            return None
-    return total
+    return _parse_mixed_fraction(value)
 
 
 def _parse_length_to_mm(value: Any) -> float | None:

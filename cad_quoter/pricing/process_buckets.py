@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from collections.abc import Iterable, Mapping
 import re
 from typing import Any, Dict, Iterable as _Iterable, Mapping as _Mapping
-
 from cad_quoter.rates import OP_TO_LABOR, OP_TO_MACHINE, rate_for_role
 
 
@@ -604,6 +603,12 @@ __all__ = [
     "lookup_rate",
     "normalize_bucket_key",
 ]
+
+
+def normalize_bucket_key(name: Any) -> str:
+    """Return a stable, lowercase/underscored representation of *name*."""
+
+    return re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_")
 
 
 def canonical_bucket_key(

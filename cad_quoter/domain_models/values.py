@@ -5,67 +5,11 @@ import math
 import re
 from typing import Any
 
+from cad_quoter.utils.numeric import parse_mixed_fraction
+
 
 _UNIT_PATTERN = re.compile(
     r"(?i)\b(?:inches?|millimeters?|cm|mm|in)\b\.?")
-
-
-def _parse_mixed_fraction(value: str) -> float | None:
-    """Parse strings like ``"1 1/2"`` or ``"3/4"`` into floats.
-
-    The CSV stock catalog that feeds our quoting tooling represents many
-    dimensions using imperial style measurements (for example ``1 1/2"`` or
-    ``3/4"``).  Prior to this helper ``coerce_float_or_none`` rejected those
-    values which meant downstream lookups silently lost legitimate catalog rows.
-    """
-
-    candidate = value.strip()
-    if not candidate:
-        return None
-
-    sign = 1.0
-    if candidate[0] in {"+", "-"}:
-        if candidate[0] == "-":
-            sign = -1.0
-        candidate = candidate[1:].strip()
-        if not candidate:
-            return None
-
-    # Replace separators that sometimes appear between the whole and fractional
-    # components with spaces so that ``split`` can isolate each term.
-    candidate = (
-        candidate.replace("\u00A0", " ")  # non-breaking space
-        .replace("\u2013", "-")
-        .replace("\u2014", "-")
-    )
-
-    # Hyphenated values (e.g. ``1-1/2``) should be treated like spaces between
-    # the whole number and the fraction.
-    candidate = re.sub(r"(?<=\d)-(?!\d)", " ", candidate)
-    candidate = candidate.replace("-", " ")
-
-    total = 0.0
-    seen_component = False
-    for part in candidate.split():
-        if not part:
-            continue
-        seen_component = True
-        if "/" in part:
-            num, _, denom = part.partition("/")
-            try:
-                total += float(num.strip()) / float(denom.strip())
-            except Exception:
-                return None
-        else:
-            try:
-                total += float(part)
-            except Exception:
-                return None
-
-    if not seen_component:
-        return None
-
-    return sign * total
 
 
 def coerce_float_or_none(value: Any) -> float | None:
@@ -103,7 +47,7 @@ def coerce_float_or_none(value: Any) -> float | None:
         try:
             return float(cleaned)
         except Exception:
-            parsed_fraction = _parse_mixed_fraction(cleaned)
+            parsed_fraction = parse_mixed_fraction(cleaned)
             if parsed_fraction is not None:
                 return parsed_fraction
             return None
@@ -159,9 +103,24 @@ def safe_float(value: Any, default: float = 0.0) -> float:
     return coerced
 
 
+def to_positive_float(value: Any) -> float | None:
+    """Return ``value`` as a positive finite float when possible."""
+
+    numeric = coerce_float_or_none(value)
+    if numeric is None:
+        return None
+
+    if not math.isfinite(numeric):
+        return None
+
+    return numeric if numeric > 0 else None
+
+
 __all__ = [
+    "parse_mixed_fraction",
     "coerce_float_or_none",
     "safe_float",
     "to_float",
     "to_int",
+    "to_positive_float",
 ]

@@ -3,7 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Sequence
 
-from cad_quoter.pricing.process_buckets import RATE_BUCKET_META, normalize_bucket_key
+from cad_quoter.pricing.process_buckets import (
+    RATE_ALIAS_KEYS,
+    canonical_bucket_key,
+    normalize_bucket_key,
+)
 from cad_quoter.utils import _dict
 
 
@@ -25,29 +29,47 @@ class RateBucket:
     key: str
     label: str
     bucket: str
-    rate_keys: tuple[str, ...]
-    minute_keys: tuple[str, ...]
+    canonical_key: str | None = None
+    extra_rate_keys: tuple[str, ...] = ()
 
     def normalized_label(self) -> str:
         return normalize_bucket_key(self.label)
 
+    @property
+    def rate_keys(self) -> tuple[str, ...]:
+        """Return the configured rate aliases for this bucket."""
 
-def _build_rate_buckets() -> tuple[RateBucket, ...]:
-    buckets: list[RateBucket] = []
-    for meta in RATE_BUCKET_META:
-        buckets.append(
-            RateBucket(
-                key=meta.key,
-                label=meta.label,
-                bucket=meta.bucket,
-                rate_keys=meta.rate_aliases,
-                minute_keys=meta.minute_keys,
+        aliases: tuple[str, ...] = ()
+        if self.canonical_key:
+            canon = canonical_bucket_key(self.canonical_key, default=self.canonical_key)
+            if canon:
+                aliases = RATE_ALIAS_KEYS.get(canon, ())
+        if not aliases and self.canonical_key:
+            aliases = RATE_ALIAS_KEYS.get(self.canonical_key, ())
+        if self.extra_rate_keys:
+            aliases = tuple(
+                dict.fromkeys((*aliases, *self.extra_rate_keys))
             )
-        )
-    return tuple(buckets)
+        if aliases:
+            return aliases
+        normalized = normalize_bucket_key(self.label)
+        return (self.label, normalized) if normalized and normalized != self.label else (self.label,)
 
 
-RATE_BUCKETS: tuple[RateBucket, ...] = _build_rate_buckets()
+RATE_BUCKETS: tuple[RateBucket, ...] = (
+    RateBucket("Inspection", "labor", "inspection"),
+    RateBucket("Fixture Build (amortized)", "labor", "fixture_build_amortized"),
+    RateBucket("Programming (per part)", "labor", "programming_amortized"),
+    RateBucket("Deburr", "labor", "finishing_deburr"),
+    RateBucket("Lapping/Honing", "labor", "grinding"),
+    RateBucket("Drilling", "machine", "drilling"),
+    RateBucket("Milling", "machine", "milling"),
+    RateBucket("Wire EDM", "machine", "wire_edm"),
+    RateBucket("Grinding", "machine", "grinding"),
+    RateBucket("Saw/Waterjet", "machine", "saw_waterjet"),
+    RateBucket("Sinker EDM", "machine", "sinker_edm"),
+    RateBucket("Abrasive Flow", "machine", extra_rate_keys=("AbrasiveFlowRate",)),
+)
 
 
 def _iter_rate_candidates(rate_keys: Sequence[str]) -> Iterable[str]:

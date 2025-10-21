@@ -76,11 +76,6 @@ from cad_quoter.app.hole_ops import (
     update_geo_ops_summary_from_hole_rows,
     _aggregate_hole_entries,
     _classify_thread_spec,
-    _emit_counterbore_card,
-    _emit_hole_table_ops_cards,
-    _emit_spot_and_jig_cards,
-    _emit_tapping_card,
-    _hole_table_section_present,
     _dedupe_hole_entries,
     _major_diameter_from_thread,
     _normalize_hole_text,
@@ -312,6 +307,33 @@ def _infer_rect_from_holes(geo: Mapping[str, Any] | None) -> tuple[float, float]
         return (guess, guess)
 
     return (0.0, 0.0)
+
+
+def _emit_hole_table_ops_cards(
+    lines: list[str],
+    *,
+    geo: Mapping[str, Any] | None,
+    material_group: str | None = None,
+    speeds_csv: Mapping[str, Any] | None = None,
+    result: Mapping[str, Any] | None = None,
+    breakdown: Mapping[str, Any] | MutableMapping[str, Any] | None = None,
+    rates: Mapping[str, Any] | None = None,
+) -> None:
+    """Minimal no-op renderer for hole-table derived ops cards.
+
+    Accepts the legacy signature and returns quietly to avoid duplicate
+    sections. The main removal section handles drilling/tapping/cbore details.
+    """
+
+    try:
+        ops = ((geo or {}).get("ops_summary") or {}) if isinstance(geo, _MappingABC) else {}
+        rows = ops.get("rows") if isinstance(ops, dict) else None
+        if not isinstance(rows, list) or not rows:
+            return
+        # No-op: keep compatibility without rendering duplicate content
+        return
+    except Exception:
+        return
 from cad_quoter.estimators import drilling_legacy as _drilling_legacy
 from cad_quoter.estimators.base import SpeedsFeedsUnavailableError
 from cad_quoter.llm_overrides import (
@@ -2877,6 +2899,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             return False
         return False
 
+    # Define before first use to avoid closure-order issues
     def _extract_llm_debug_override(container: Mapping[str, Any] | None) -> bool | None:
         if not isinstance(container, _MappingABC):
             return None
