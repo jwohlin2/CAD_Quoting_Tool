@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import importlib
+import importlib.resources as importlib_resources
 import types
 from importlib.machinery import ModuleSpec
 from pathlib import Path
@@ -13,13 +14,21 @@ import pytest
 # ----- stub heavy optional dependencies before importing application code -----
 
 
+def _try_import(name: str) -> bool:
+    try:
+        importlib.import_module(name)
+    except ModuleNotFoundError:
+        return False
+    return True
+
+
 def _install_runtime_dependency_stubs() -> None:
-    if "requests" not in sys.modules:
+    if not _try_import("requests"):
         requests_stub = types.ModuleType("requests")
         requests_stub.__spec__ = ModuleSpec("requests", loader=None)
         sys.modules["requests"] = requests_stub
 
-    if "bs4" not in sys.modules:
+    if not _try_import("bs4"):
         bs4_stub = types.ModuleType("bs4")
         bs4_stub.__spec__ = ModuleSpec("bs4", loader=None)
 
@@ -31,7 +40,7 @@ def _install_runtime_dependency_stubs() -> None:
         bs4_stub.BeautifulSoup = _BeautifulSoup
         sys.modules["bs4"] = bs4_stub
 
-    if "lxml" not in sys.modules:
+    if not _try_import("lxml"):
         lxml_stub = types.ModuleType("lxml")
         lxml_stub.__spec__ = ModuleSpec("lxml", loader=None)
         sys.modules["lxml"] = lxml_stub
@@ -546,14 +555,13 @@ def _ensure_geometry_helpers() -> None:
         geometry = importlib.import_module("cad_quoter.geometry")
     except Exception:
         geometry = types.ModuleType("cad_quoter.geometry")
-        geometry_dir = Path(__file__).resolve().parent.parent / "cad_quoter" / "geometry"
         geometry.__spec__ = ModuleSpec(
             "cad_quoter.geometry",
             loader=None,
-            origin=str(geometry_dir),
+            origin="cad_quoter.geometry",
             is_package=True,
         )
-        geometry.__path__ = [str(geometry_dir)]
+        geometry.__path__ = []  # type: ignore[attr-defined]
         sys.modules["cad_quoter.geometry"] = geometry
 
     def _return_none(*args, **kwargs):
@@ -657,14 +665,12 @@ def state_builder(fresh_quote_state: QuoteState) -> Callable[[dict], QuoteState]
 
 @pytest.fixture(autouse=True)
 def _configure_speeds_feeds_csv(monkeypatch: pytest.MonkeyPatch) -> None:
-    resource_csv = (
-        Path(__file__).resolve().parent.parent
-        / "cad_quoter"
-        / "pricing"
-        / "resources"
-        / "speeds_feeds_merged.csv"
-    )
-    if resource_csv.is_file():
-        monkeypatch.setenv("CADQ_SF_CSV", str(resource_csv))
-    else:
+    try:
+        resource_csv = (
+            importlib_resources.files("cad_quoter.pricing.resources")
+            / "speeds_feeds_merged.csv"
+        )
+    except (ModuleNotFoundError, FileNotFoundError):
         monkeypatch.delenv("CADQ_SF_CSV", raising=False)
+    else:
+        monkeypatch.setenv("CADQ_SF_CSV", str(resource_csv))

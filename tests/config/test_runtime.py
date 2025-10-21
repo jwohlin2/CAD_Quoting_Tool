@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -62,3 +63,28 @@ def test_load_default_rates_migrates_flat_schema(monkeypatch: pytest.MonkeyPatch
     assert migrated["labor"]["Programmer"] == pytest.approx(110.0)
     assert migrated["machine"]["WireEDM"] == pytest.approx(150.0)
     assert migrated["machine"]["Blanchard"] == pytest.approx(120.0)
+
+
+def test_load_app_settings_applies_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    override = tmp_path / "override.json"
+    override.write_text(
+        json.dumps(
+            {
+                "pricing_defaults": {
+                    "params": {"MarginPct": 0.5},
+                    "rates": {"labor": {"Programmer": 123.0}},
+                }
+            }
+        )
+    )
+
+    monkeypatch.setenv(config.APP_SETTINGS_ENV_VAR, str(override))
+
+    merged = config.load_app_settings(reload=True)
+
+    assert merged["pricing_defaults"]["params"]["MarginPct"] == pytest.approx(0.5)
+    assert merged["pricing_defaults"]["rates"]["labor"]["Programmer"] == pytest.approx(123.0)
+
+    monkeypatch.delenv(config.APP_SETTINGS_ENV_VAR, raising=False)
