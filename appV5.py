@@ -192,9 +192,12 @@ from cad_quoter.utils.machining import (
     _rpm_from_sfm,
     _rpm_from_sfm_diam,
 )
-from cad_quoter.resources import (
-    default_app_settings_json,
-)
+if TYPE_CHECKING:
+    from cad_quoter_pkg.src.cad_quoter.resources import default_app_settings_json
+else:
+    from cad_quoter.resources import (
+        default_app_settings_json,
+    )
 from cad_quoter.config import (
     AppEnvironment,
     ConfigError,
@@ -214,20 +217,48 @@ from cad_quoter.utils.scrap import (
     _holes_removed_mass_g,
     build_drill_groups_from_geometry,
 )
-from cad_quoter.utils.render_utils import (
-    fmt_hours,
-    fmt_money,
-    format_currency,
-    format_dimension,
-    format_hours,
-    format_hours_with_rate,
-    format_percent,
-    format_weight_lb_decimal,
-    format_weight_lb_oz,
-    QuoteDocRecorder,
-    render_quote_doc,
-)
-from cad_quoter.pricing import load_backup_prices_csv
+if TYPE_CHECKING:
+    from cad_quoter_pkg.src.cad_quoter.utils.render_utils import (
+        QuoteDocRecorder as _QuoteDocRecorder,
+        fmt_hours as _fmt_hours,
+        fmt_money as _fmt_money,
+        format_currency as _format_currency,
+        format_dimension as _format_dimension,
+        format_hours as _format_hours,
+        format_hours_with_rate as _format_hours_with_rate,
+        format_percent as _format_percent,
+        format_weight_lb_decimal as _format_weight_lb_decimal,
+        format_weight_lb_oz as _format_weight_lb_oz,
+        render_quote_doc as _render_quote_doc,
+    )
+    from cad_quoter_pkg.src.cad_quoter.pricing import load_backup_prices_csv
+else:
+    from cad_quoter.utils.render_utils import (
+        fmt_hours as _fmt_hours,
+        fmt_money as _fmt_money,
+        format_currency as _format_currency,
+        format_dimension as _format_dimension,
+        format_hours as _format_hours,
+        format_hours_with_rate as _format_hours_with_rate,
+        format_percent as _format_percent,
+        format_weight_lb_decimal as _format_weight_lb_decimal,
+        format_weight_lb_oz as _format_weight_lb_oz,
+        QuoteDocRecorder as _QuoteDocRecorder,
+        render_quote_doc as _render_quote_doc,
+    )
+    from cad_quoter.pricing import load_backup_prices_csv
+
+fmt_hours = _fmt_hours
+fmt_money = _fmt_money
+format_currency = _format_currency
+format_dimension = _format_dimension
+format_hours = _format_hours
+format_hours_with_rate = _format_hours_with_rate
+format_percent = _format_percent
+format_weight_lb_decimal = _format_weight_lb_decimal
+format_weight_lb_oz = _format_weight_lb_oz
+QuoteDocRecorder = _QuoteDocRecorder
+render_quote_doc = _render_quote_doc
 from cad_quoter.pricing.mcmaster_helpers import (
     load_mcmaster_catalog_rows as _load_mcmaster_catalog_rows,
     _coerce_inches_value,
@@ -519,7 +550,10 @@ def _emit_hole_table_ops_cards(
     except Exception as exc:
         _push(lines, f"[DEBUG] tapping_emit_skipped={exc.__class__.__name__}: {exc}")
         return
-from cad_quoter.estimators import drilling_legacy as _drilling_legacy
+if TYPE_CHECKING:
+    from cad_quoter_pkg.src.cad_quoter.estimators import drilling_legacy as _drilling_legacy
+else:
+    from cad_quoter.estimators import drilling_legacy as _drilling_legacy
 from cad_quoter.estimators.base import SpeedsFeedsUnavailableError
 from cad_quoter.llm_overrides import (
     _plate_mass_properties,
