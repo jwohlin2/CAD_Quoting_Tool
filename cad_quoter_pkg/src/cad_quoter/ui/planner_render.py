@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 import math
 import re
 from dataclasses import dataclass, field
@@ -73,22 +74,19 @@ def _pick_drill_minutes(
     removal_min = _as_float((extras or {}).get("drill_total_minutes"), 0.0)
 
     if removal_min > 0:
-        chosen = removal_min
-        src = "removal_card"
+        chosen, src = removal_min, "removal_card"
     else:
-        chosen = meta_min
-        src = "planner_meta"
+        chosen, src = meta_min, "planner_meta"
 
-    chosen_clamped = _clamp_minutes(chosen)
-    logger.debug(
-        "[drill-pick] meta_min=%.2f removal_min=%.2f -> %.2f (%s%s)",
-        meta_min,
-        removal_min,
-        chosen_clamped,
-        src,
-        " CLAMPED" if chosen_clamped != chosen else "",
+    chosen_c = _clamp_minutes(chosen)
+    if chosen_c != chosen:
+        logging.warning(
+            f"[unit/clamp] Drill minutes out-of-range; clamped to {chosen_c} (src={src}, raw={chosen})"
+        )
+    logging.debug(
+        f"[drill-pick] meta_min={meta_min:.2f} removal_min={removal_min:.2f} -> {chosen_c:.2f} ({src})"
     )
-    return chosen_clamped
+    return chosen_c
 
 OP_ROLE: dict[str, str] = {
     "assemble_pair_on_fixture": "labor_only",
