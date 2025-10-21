@@ -4,7 +4,7 @@ import copy
 import math
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping, TypedDict, cast
+from typing import Any, Callable, Mapping, MutableMapping, TypedDict, cast
 from collections.abc import Iterable, Mapping as _MappingABC, MutableMapping as _MutableMappingABC, Sequence
 
 from cad_quoter.config import logger
@@ -43,6 +43,52 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except Exception:
         return default
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        coerced = float(value)
+    except Exception:
+        return default
+    if not math.isfinite(coerced):
+        return default
+    return coerced
+
+
+def _clamp_minutes(value: Any, lo: float = 0.0, hi: float = 10000.0) -> float:
+    minutes_val = _as_float(value, 0.0)
+    if not (lo <= minutes_val <= hi):
+        return 0.0
+    return minutes_val
+
+
+def _pick_drill_minutes(
+    process_plan_summary: Mapping[str, Any] | None,
+    extras: Mapping[str, Any] | None,
+) -> float:
+    meta_min = _as_float(
+        (((process_plan_summary or {}).get("drilling") or {}).get("total_minutes_billed")),
+        0.0,
+    )
+    removal_min = _as_float((extras or {}).get("drill_total_minutes"), 0.0)
+
+    if removal_min > 0:
+        chosen = removal_min
+        src = "removal_card"
+    else:
+        chosen = meta_min
+        src = "planner_meta"
+
+    chosen_clamped = _clamp_minutes(chosen)
+    logger.debug(
+        "[drill-pick] meta_min=%.2f removal_min=%.2f -> %.2f (%s%s)",
+        meta_min,
+        removal_min,
+        chosen_clamped,
+        src,
+        " CLAMPED" if chosen_clamped != chosen else "",
+    )
+    return chosen_clamped
 
 OP_ROLE: dict[str, str] = {
     "assemble_pair_on_fixture": "labor_only",
@@ -513,25 +559,6 @@ def _build_planner_bucket_render_state(
         machine_raw = _safe_float(info.get("machine$"), default=0.0)
 
         hours_raw = minutes_val / 60.0 if minutes_val else 0.0
-        original_hours = hours_raw
-
-        if _canonical_bucket_key(canon_key) == "drilling" and removal_hr is not None:
-            if prefer_removal_drilling_hours:
-                override_hours = max(0.0, float(removal_hr))
-                override_minutes = override_hours * 60.0
-                if not math.isclose(original_hours, override_hours, rel_tol=1e-9, abs_tol=1e-6):
-                    state.notes["drilling_source"] = "removal_card"
-                    state.extra["drilling_hours_override"] = (
-                        float(original_hours),
-                        float(override_hours),
-                    )
-                hours_raw = override_hours
-                minutes_val = override_minutes
-            elif not math.isclose(original_hours, float(removal_hr), rel_tol=1e-9, abs_tol=1e-6):
-                state.extra["drilling_hours_override"] = (
-                    float(original_hours),
-                    float(removal_hr),
-                )
 
         split_machine_hours = 0.0
         split_labor_hours = 0.0
@@ -805,6 +832,58 @@ def _sync_drilling_bucket_view(
     return True
 
 
+def _seed_bucket_minutes_cost(
+    bucket_view: MutableMapping[str, Any] | Mapping[str, Any] | None,
+    key: str,
+    minutes: float,
+    *,
+    machine_rate_per_hr: float = 0.0,
+    labor_rate_per_hr: float = 0.0,
+) -> None:
+    """Seed explicit minutes and dollars into a bucket view entry."""
+
+    if not isinstance(bucket_view, (_MutableMappingABC, dict)):
+        return
+
+    try:
+        minutes_val = float(minutes or 0.0)
+    except Exception:
+        minutes_val = 0.0
+
+    if (not math.isfinite(minutes_val)) or minutes_val < 0 or minutes_val > 1_000 * 60:
+        minutes_val = 0.0
+
+    hours_val = minutes_val / 60.0
+
+    try:
+        buckets = bucket_view.setdefault("buckets", {})
+    except Exception:
+        return
+
+    if not isinstance(buckets, dict):
+        try:
+            buckets = dict(buckets or {})
+        except Exception:
+            return
+        bucket_view["buckets"] = buckets
+
+    entry = buckets.setdefault(
+        key,
+        {"minutes": 0.0, "machine$": 0.0, "labor$": 0.0, "total$": 0.0},
+    )
+
+    machine_rate = float(machine_rate_per_hr or 0.0)
+    labor_rate = float(labor_rate_per_hr or 0.0)
+
+    machine_cost = hours_val * machine_rate
+    labor_cost = hours_val * labor_rate
+
+    entry["minutes"] = round(minutes_val, 2)
+    entry["machine$"] = round(machine_cost, 2)
+    entry["labor$"] = round(labor_cost, 2)
+    entry["total$"] = round(entry["machine$"] + entry["labor$"], 2)
+
+
 def _seed_bucket_minutes(
     breakdown: MutableMapping[str, Any],
     *,
@@ -1034,6 +1113,7 @@ def _charged_hours_by_bucket(
     removal_drilling_hours: float | None = None,
     prefer_removal_drilling_hours: bool = True,
     cfg: QuoteConfiguration | None = None,
+    process_plan_summary: Mapping[str, Any] | None = None,
 ):
     """Return the hours that correspond to what we actually charged."""
     out: dict[str, float] = {}
@@ -1059,7 +1139,6 @@ def _charged_hours_by_bucket(
         if hr is not None:
             label = _process_label(key)
             out[label] = out.get(label, 0.0) + float(hr)
-    removal_hr = None
     render_extra: Mapping[str, Any] | None = None
     if render_state is not None:
         try:
@@ -1068,19 +1147,33 @@ def _charged_hours_by_bucket(
             extra = {}
         if isinstance(extra, _MappingABC):
             render_extra = extra
-            removal_candidate = extra.get("removal_drilling_hours")
-            removal_hr = _coerce_float_or_none(removal_candidate)
-    if removal_hr is None:
-        removal_hr = _coerce_float_or_none(removal_drilling_hours)
-    if removal_hr is not None and removal_hr < 0:
-        removal_hr = None
+
     prefer_drill_hours = prefer_removal_drilling_hours
     if cfg is not None:
         prefer_from_cfg = getattr(cfg, "prefer_removal_drilling_hours", None)
         if prefer_from_cfg is not None:
             prefer_drill_hours = bool(prefer_from_cfg)
-    if removal_hr is not None and prefer_drill_hours:
-        desired = max(0.0, float(removal_hr))
+
+    extras_source: Mapping[str, Any] | None = render_extra if prefer_drill_hours else {}
+    extras_for_pick: dict[str, Any] | None = None
+    if extras_source is not None:
+        extras_for_pick = dict(extras_source)
+
+    if prefer_drill_hours:
+        if extras_for_pick is None:
+            extras_for_pick = {}
+        removal_candidate = _coerce_float_or_none(removal_drilling_hours)
+        if removal_candidate is None and isinstance(render_extra, _MappingABC):
+            removal_candidate = _coerce_float_or_none(
+                render_extra.get("removal_drilling_hours")
+            )
+        if removal_candidate is not None and removal_candidate > 0:
+            extras_for_pick.setdefault("drill_total_minutes", removal_candidate * 60.0)
+
+    drill_minutes_total = _pick_drill_minutes(process_plan_summary, extras_for_pick)
+
+    if drill_minutes_total > 0.0:
+        drill_hours_total = drill_minutes_total / 60.0
         drill_labels = [
             label
             for label in out
@@ -1088,30 +1181,9 @@ def _charged_hours_by_bucket(
         ]
         if drill_labels:
             for label in drill_labels:
-                current = float(out.get(label, 0.0) or 0.0)
-                if not math.isclose(current, desired, rel_tol=1e-9, abs_tol=1e-6):
-                    logger.info(
-                        "[hours-sync] Overriding Drilling bucket hours from %.2f -> %.2f (source=removal_card)",
-                        current,
-                        desired,
-                    )
-                out[label] = desired
+                out[label] = drill_hours_total
         else:
-            label = _process_label("drilling")
-            logger.info(
-                "[hours-sync] Injecting Drilling bucket hours %.2f (source=removal_card)",
-                desired,
-            )
-            out[label] = desired
-
-    if prefer_drill_hours and isinstance(render_extra, _MappingABC):
-        machine_minutes = render_extra.get("drill_machine_minutes")
-        labor_minutes = render_extra.get("drill_labor_minutes")
-        if isinstance(machine_minutes, (int, float)) and isinstance(labor_minutes, (int, float)):
-            drill_total_hr = (float(machine_minutes) + float(labor_minutes)) / 60.0
-            for key in list(out.keys()):
-                if _canonical_bucket_key(key) in {"drilling", "drill"}:
-                    out[key] = drill_total_hr
+            out[_process_label("drilling")] = drill_hours_total
 
     return out
 
@@ -1510,7 +1582,9 @@ __all__ = [
     "_split_hours_for_bucket",
     "_build_planner_bucket_render_state",
     "_display_rate_for_row",
+    "_pick_drill_minutes",
     "_sync_drilling_bucket_view",
+    "_seed_bucket_minutes_cost",
     "_seed_bucket_minutes",
     "_normalize_ops_rows_from_hole_rows",
     "_normalize_ops_rows_from_chart_ops",
