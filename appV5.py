@@ -10360,9 +10360,12 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             except Exception:
                 drilling_dbg_entry = None
 
-            _debug_lines = locals().get("lines")
-            if isinstance(_debug_lines, list):
-                _push(_debug_lines, f"[DEBUG] drilling_bucket={drilling_dbg_entry or {}}")
+            debug_lines = typing.cast(
+                list[str] | None,
+                locals().get("lines") if "lines" in locals() else None,
+            )
+            if debug_lines is not None:
+                _push(debug_lines, f"[DEBUG] drilling_bucket={drilling_dbg_entry or {}}")
 
     roughing_hours = _coerce_float_or_none(value_map.get("Roughing Cycle Time"))
     if roughing_hours is None:
@@ -10411,9 +10414,12 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         except Exception:
             milling_dbg_entry = None
 
-        _debug_lines = locals().get("lines")
-        if isinstance(_debug_lines, list):
-            _push(_debug_lines, f"[DEBUG] milling_bucket={milling_dbg_entry or {}}")
+        debug_lines = typing.cast(
+            list[str] | None,
+            locals().get("lines") if "lines" in locals() else None,
+        )
+        if debug_lines is not None:
+            _push(debug_lines, f"[DEBUG] milling_bucket={milling_dbg_entry or {}}")
 
     project_hours = _coerce_float_or_none(value_map.get("Project Management Hours")) or 0.0
     toolmaker_hours = _coerce_float_or_none(value_map.get("Tool & Die Maker Hours")) or 0.0
