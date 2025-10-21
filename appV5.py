@@ -174,7 +174,7 @@ from cad_quoter.geometry.dxf_enrich import (
     iter_table_text as _shared_iter_table_text,
 )
 
-from bucketizer import bucketize
+from cad_quoter.pricing.process_buckets import bucketize
 
 import cad_quoter.geometry as _geometry
 

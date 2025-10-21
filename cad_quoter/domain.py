@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import importlib
 import math
-import sys
 from collections.abc import Mapping as _MappingABC
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, TYPE_CHECKING, cast
@@ -43,41 +41,48 @@ __all__ = [
 ]
 
 
-def _app_module():
-    """Return the lazily-imported :mod:`appV5` module."""
+def _effective_module():
+    """Return the lazily-imported :mod:`appkit.effective` helpers."""
 
-    module = sys.modules.get("appV5")
-    if module is None:
-        module = importlib.import_module("appV5")
-    return module
+    from appkit import effective as _effective  # imported lazily to avoid cycles
+
+    return _effective
+
+
+def _merge_module():
+    """Return the lazily-imported merge helpers."""
+
+    from appkit import merge_utils as _merge_utils  # imported lazily to avoid cycles
+
+    return _merge_utils
 
 
 def merge_effective(*args, **kwargs):  # type: ignore[override]
-    """Proxy to :func:`appV5.merge_effective` for test visibility."""
+    """Proxy to :func:`appkit.merge_utils.merge_effective` for test visibility."""
 
-    app = _app_module()
-    return app.merge_effective(*args, **kwargs)
+    merge_helpers = _merge_module()
+    return merge_helpers.merge_effective(*args, **kwargs)
 
 
 def compute_effective_state(*args, **kwargs):  # type: ignore[override]
-    """Proxy to :func:`appV5.compute_effective_state` for test visibility."""
+    """Proxy to :func:`appkit.effective.compute_effective_state` for test visibility."""
 
-    app = _app_module()
-    return app.compute_effective_state(*args, **kwargs)
+    effective = _effective_module()
+    return effective.compute_effective_state(*args, **kwargs)
 
 
 def reprice_with_effective(*args, **kwargs):  # type: ignore[override]
-    """Proxy to :func:`appV5.reprice_with_effective` for test visibility."""
+    """Proxy to :func:`appkit.effective.reprice_with_effective` for test visibility."""
 
-    app = _app_module()
-    return app.reprice_with_effective(*args, **kwargs)
+    effective = _effective_module()
+    return effective.reprice_with_effective(*args, **kwargs)
 
 
 def effective_to_overrides(*args, **kwargs):  # type: ignore[override]
-    """Proxy to :func:`appV5.effective_to_overrides` for test visibility."""
+    """Proxy to :func:`appkit.effective.effective_to_overrides` for test visibility."""
 
-    app = _app_module()
-    return app.effective_to_overrides(*args, **kwargs)
+    effective = _effective_module()
+    return effective.effective_to_overrides(*args, **kwargs)
 
 
 def overrides_to_suggestions(*args, **kwargs):  # type: ignore[override]

@@ -4,19 +4,19 @@ from __future__ import annotations
 from typing import Any, Callable
 
 try:
-    from process_planner import (
+    from cad_quoter.planning.process_planner import (
         PLANNERS as _PROCESS_PLANNERS,
     )
-    from process_planner import (
+    from cad_quoter.planning.process_planner import (
         choose_skims as _planner_choose_skims,
     )
-    from process_planner import (
+    from cad_quoter.planning.process_planner import (
         choose_wire_size as _planner_choose_wire_size,
     )
-    from process_planner import (
+    from cad_quoter.planning.process_planner import (
         needs_wedm_for_windows as _planner_needs_wedm_for_windows,
     )
-    from process_planner import (
+    from cad_quoter.planning.process_planner import (
         plan_job as _process_plan_job,
     )
 except Exception:  # pragma: no cover - planner is optional at runtime
