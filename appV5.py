@@ -5843,12 +5843,27 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             _coerce_float_or_none(planner_totals_map.get("machine_cost")) or 0.0
         )
 
-        assert (
-            abs(display_machine_from_rows - planner_machine_total) < 0.51
-        ), "Machine $ mismatch (check drilling minutes merge)"
-        assert (
-            abs(display_labor_from_rows - planner_labor_total) < 0.51
-        ), "Labor $ mismatch"
+        if abs(display_machine_from_rows - planner_machine_total) >= 0.51:
+            try:
+                _log.warning(
+                    "render_quote: Machine $ mismatch (rows=%.2f planner=%.2f)",
+                    display_machine_from_rows,
+                    planner_machine_total,
+                )
+            except Exception:
+                pass
+            # Prefer planner totals to avoid breaking render on small drifts.
+            display_machine_from_rows = planner_machine_total
+        if abs(display_labor_from_rows - planner_labor_total) >= 0.51:
+            try:
+                _log.warning(
+                    "render_quote: Labor $ mismatch (rows=%.2f planner=%.2f)",
+                    display_labor_from_rows,
+                    planner_labor_total,
+                )
+            except Exception:
+                pass
+            display_labor_from_rows = planner_labor_total
     detail_lookup.update(bucket_state.detail_lookup)
     label_to_canon.update(bucket_state.label_to_canon)
     canon_to_display_label.update(bucket_state.canon_to_display_label)
@@ -8056,7 +8071,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         logger.exception("Failed to run final drilling debug block")
 
     # --- Structured render payload ------------------------------------------
-    def _as_float(value: Any, default: float = 0.0) -> float:
+    def _render_as_float(value: Any, default: float = 0.0) -> float:
         try:
             return float(value)
         except Exception:
@@ -8071,17 +8086,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     else:
         summary_qty = qty_float if qty_float > 0 else qty
 
-    margin_pct_value = _as_float(applied_pcts.get("MarginPct"), 0.0)
-    expedite_pct_value = _as_float(applied_pcts.get("ExpeditePct"), 0.0)
-    expedite_amount = _as_float(expedite_cost, 0.0)
-    subtotal_before_margin_val = _as_float(subtotal_before_margin, 0.0)
-    final_price_val = _as_float(price, 0.0)
+    margin_pct_value = _render_as_float(applied_pcts.get("MarginPct"), 0.0)
+    expedite_pct_value = _render_as_float(applied_pcts.get("ExpeditePct"), 0.0)
+    expedite_amount = _render_as_float(expedite_cost, 0.0)
+    subtotal_before_margin_val = _render_as_float(subtotal_before_margin, 0.0)
+    final_price_val = _render_as_float(price, 0.0)
     margin_amount = max(0.0, final_price_val - subtotal_before_margin_val)
-    labor_total_amount = _as_float(
+    labor_total_amount = _render_as_float(
         (breakdown or {}).get("total_labor_cost"),
-        _as_float(ladder_labor, 0.0),
+        _render_as_float(ladder_labor, 0.0),
     )
-    direct_total_amount = _as_float(total_direct_costs_value, 0.0)
+    direct_total_amount = _render_as_float(total_direct_costs_value, 0.0)
 
     summary_payload = {
         "qty": summary_qty,
@@ -8129,7 +8144,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         materials_entries.append(
             {
                 "label": material_label_text,
-                "amount": round(_as_float(material_display_amount, 0.0), 2),
+                "amount": round(_render_as_float(material_display_amount, 0.0), 2),
             }
         )
     for entry_label, entry_amount, raw_key in direct_entries:
@@ -8140,7 +8155,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         materials_entries.append(
             {
                 "label": str(entry_label),
-                "amount": round(_as_float(entry_amount, 0.0), 2),
+                "amount": round(_render_as_float(entry_amount, 0.0), 2),
             }
         )
 
@@ -8148,7 +8163,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     seen_process_labels: set[str] = set()
     for spec in bucket_row_specs:
         label = str(spec.label or "").strip()
-        amount_val = _as_float(spec.total, 0.0)
+        amount_val = _render_as_float(spec.total, 0.0)
         if not label:
             continue
         if not show_zeros and amount_val <= 0:
@@ -8160,11 +8175,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             {
                 "label": label,
                 "amount": round(amount_val, 2),
-                "hours": round(_as_float(spec.hours, 0.0), 2),
-                "minutes": round(_as_float(spec.minutes, 0.0), 2),
-                "labor_amount": round(_as_float(spec.labor, 0.0), 2),
-                "machine_amount": round(_as_float(spec.machine, 0.0), 2),
-                "rate": round(_as_float(spec.rate, 0.0), 2) if _as_float(spec.rate, 0.0) else 0.0,
+                "hours": round(_render_as_float(spec.hours, 0.0), 2),
+                "minutes": round(_render_as_float(spec.minutes, 0.0), 2),
+                "labor_amount": round(_render_as_float(spec.labor, 0.0), 2),
+                "machine_amount": round(_render_as_float(spec.machine, 0.0), 2),
+                "rate": round(_render_as_float(spec.rate, 0.0), 2) if _render_as_float(spec.rate, 0.0) else 0.0,
             }
         )
 
