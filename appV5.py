@@ -391,6 +391,54 @@ def _normalize_buckets(bucket_view_obj: MutableMapping[str, Any] | Mapping[str, 
 
     bucket_view_obj["buckets"] = norm
 
+
+def _as_float(x: Any, default: float = 0.0) -> float:
+    try:
+        value = float(x)
+        if math.isfinite(value):
+            return value
+    except Exception:
+        pass
+    return default
+
+
+def _clamp_minutes(v: Any, lo: float = 0.0, hi: float = 10000.0) -> float:
+    minutes_val = _as_float(v, 0.0)
+    if not (lo <= minutes_val <= hi):
+        return 0.0
+    return minutes_val
+
+
+def _pick_drill_minutes(
+    process_plan_summary: Mapping[str, Any] | None,
+    extras: Mapping[str, Any] | None,
+    lines: list[str] | None = None,
+) -> float:
+    meta_min = _as_float(
+        (((process_plan_summary or {}).get("drilling") or {}).get("total_minutes_billed")),
+        0.0,
+    )
+    removal_min = _as_float((extras or {}).get("drill_total_minutes"), 0.0)
+
+    if removal_min > 0:
+        chosen = removal_min
+        src = "removal_card"
+    else:
+        chosen = meta_min
+        src = "planner_meta"
+
+    chosen_clamped = _clamp_minutes(chosen)
+    if lines is not None:
+        try:
+            lines.append(
+                "[DEBUG] drill_minutes_pick meta="
+                f"{meta_min:.2f} removal={removal_min:.2f} -> {chosen_clamped:.2f} "
+                f"({src}{' CLAMPED' if chosen_clamped != chosen else ''})"
+            )
+        except Exception:
+            pass
+    return chosen_clamped
+
 def _emit_hole_table_ops_cards(
     lines: list[str],
     *,
@@ -1290,7 +1338,7 @@ def _compute_drilling_removal_section(
             if drill_minutes_total > 0.0:
                 extras["removal_drilling_hours"] = minutes_to_hours(drill_minutes_total)
 
-            drill_minutes_total = float(drill_minutes_total or 0.0)
+            drill_minutes_total = _pick_drill_minutes(process_plan_summary, extras, lines)
             drill_mrate = (
                 _lookup_bucket_rate("drilling", rates)
                 or _lookup_bucket_rate("machine", rates)
@@ -10323,28 +10371,45 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 ),
             }
 
-            try:
-                drill_minutes_seed = float(drilling_bucket_prepared.get("minutes") or 0.0)
-            except Exception:
-                drill_minutes_seed = 0.0
+            extra_candidates = [
+                locals().get("extra_map"),
+                locals().get("removal_card_extra"),
+                getattr(locals().get("bucket_state"), "extra", None),
+                bucket_view.get("extra") if isinstance(bucket_view, (_MappingABC, dict)) else None,
+            ]
+            extra_map: Mapping[str, Any] | None = None
+            for candidate in extra_candidates:
+                if isinstance(candidate, _MappingABC):
+                    extra_map = typing.cast(Mapping[str, Any], candidate)
+                    break
 
-            drill_machine_rate_seed = (
+            debug_lines = locals().get("lines")
+            debug_lines_list: list[str] | None = (
+                debug_lines if isinstance(debug_lines, list) else None
+            )
+
+            drill_minutes_total = _pick_drill_minutes(
+                process_plan_summary,
+                extra_map,
+                debug_lines_list,
+            )
+            drill_mrate = (
                 _lookup_bucket_rate("drilling", rates)
                 or _lookup_bucket_rate("machine", rates)
-                or 0.0
+                or 45.0
             )
-            drill_labor_rate_seed = (
+            drill_lrate = (
                 _lookup_bucket_rate("drilling_labor", rates)
                 or _lookup_bucket_rate("labor", rates)
-                or 0.0
+                or 45.0
             )
 
             _seed_bucket_minutes_cost(
                 bucket_view,
                 "drilling",
-                drill_minutes_seed,
-                machine_rate_per_hr=float(drill_machine_rate_seed or 0.0),
-                labor_rate_per_hr=float(drill_labor_rate_seed or 0.0),
+                drill_minutes_total,
+                machine_rate_per_hr=drill_mrate,
+                labor_rate_per_hr=drill_lrate,
             )
 
             _normalize_buckets(bucket_view)
