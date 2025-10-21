@@ -13,18 +13,7 @@ Single-file CAD Quoter (v8)
 """
 from __future__ import annotations
 
-def _coerce_positive_float(value: Any) -> float | None:
-    """Return a positive finite float or None."""
-    try:
-        number = float(value)
-    except Exception:
-        return None
-    try:
-        if not math.isfinite(number):
-            return None
-    except Exception:
-        pass
-    return number if number > 0 else None
+from cad_quoter.utils.numeric import coerce_positive_float as _coerce_positive_float
 
 
 def _ensure_geo_context_fields(

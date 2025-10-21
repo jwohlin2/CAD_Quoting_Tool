@@ -17,23 +17,6 @@ from cad_quoter.llm_overrides import _plate_mass_properties
 SCRAP_DEFAULT_GUESS = 0.15
 HOLE_SCRAP_MULT = 1.0  # tune 0.5–1.5 if you want holes to “count” more/less
 HOLE_SCRAP_CAP = 0.25
-
-
-def _coerce_positive_float(value: Any) -> float | None:
-    """Return a positive finite float or None."""
-
-    try:
-        number = float(value)
-    except Exception:
-        return None
-    try:
-        if not math.isfinite(number):
-            return None
-    except Exception:
-        pass
-    return number if number > 0 else None
-
-
 def _holes_removed_mass_g(geo: Mapping[str, Any] | None) -> float | None:
     """Estimate mass removed by holes using geometry context."""
 
