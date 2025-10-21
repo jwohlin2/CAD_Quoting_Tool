@@ -1385,7 +1385,7 @@ def _format_planner_bucket_line(
             rate_val = float(meta.get("rate", 0.0) or 0.0)
         except Exception:
             rate_val = 0.0
-    if rate_val <= 0 and hr_val > 0 and total_cost > 0:
+    if rate_val <= 0 and hr_val >= 0.5 and total_cost > 0:
         rate_val = total_cost / hr_val
 
     formatter: Callable[[float], str]
