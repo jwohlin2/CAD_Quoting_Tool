@@ -15,6 +15,14 @@ Single-file CAD Quoter (v8)
 from __future__ import annotations
 
 import sys
+from pathlib import Path
+
+_PACKAGE_SRC = Path(__file__).resolve().parent / "cad_quoter_pkg" / "src"
+if _PACKAGE_SRC.exists():
+    package_src_text = str(_PACKAGE_SRC)
+    if package_src_text not in sys.path:
+        sys.path.insert(0, package_src_text)
+del _PACKAGE_SRC
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")  # py3.7+
@@ -50,7 +58,6 @@ from collections.abc import (
 )
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
-from pathlib import Path
 
 from cad_quoter.app._value_utils import (
     _format_value,
