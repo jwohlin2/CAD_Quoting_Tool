@@ -8972,7 +8972,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     if not scrap_price_source:
         scrap_price_source = None
 
-    mat_block = _compute_material_block(
+    mat_block_raw = _compute_material_block(
         geo_context if isinstance(geo_context, dict) else {},
         mat_key,
         _coerce_float_or_none(density),
@@ -8980,6 +8980,12 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         stock_price_source=stock_price_source,
         cfg=cfg,
     )
+    if isinstance(mat_block_raw, dict):
+        mat_block = mat_block_raw
+    elif isinstance(mat_block_raw, _MappingABC):
+        mat_block = dict(mat_block_raw)
+    else:
+        mat_block = {}
     breakdown["material_block"] = mat_block
     grams_per_lb = 1000.0 / LB_PER_KG
     material_entry = breakdown.setdefault("material", {})
