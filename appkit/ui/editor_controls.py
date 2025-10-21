@@ -30,7 +30,7 @@ _TRUTHY_TOKENS = {"true", "1", "yes", "y", "on"}
 _FALSY_TOKENS = {"false", "0", "no", "n", "off"}
 
 
-def _coerce_checkbox_state(value: Any, default: bool = False) -> bool:
+def coerce_checkbox_state(value: Any, default: bool = False) -> bool:
     """Best-effort conversion from spreadsheet text to a boolean."""
 
     if isinstance(value, bool):
@@ -58,6 +58,10 @@ def _coerce_checkbox_state(value: Any, default: bool = False) -> bool:
             return False
 
     return default
+
+
+# Backwards compatibility for internal imports that still use the private name.
+_coerce_checkbox_state = coerce_checkbox_state
 
 
 def _split_editor_options(text: str) -> list[str]:
@@ -138,7 +142,7 @@ def derive_editor_control_spec(dtype_source: str, example_value: Any) -> EditorC
             first = options[0].lower()
             state = first in _TRUTHY_TOKENS or first.startswith("y")
         else:
-            state = _coerce_checkbox_state(initial_value, False)
+            state = coerce_checkbox_state(initial_value, False)
 
         truthy_label = next(
             (

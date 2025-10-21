@@ -7,7 +7,7 @@ try:
 except ImportError:  # pragma: no cover - optional dependency for tests
     default_variables_template = None
 
-from appkit.ui.editor_controls import derive_editor_control_spec
+from appkit.ui.editor_controls import coerce_checkbox_state, derive_editor_control_spec
 
 
 def test_number_control_from_declared_dtype():
@@ -51,6 +51,27 @@ def test_options_without_dtype_are_promoted_to_dropdown():
     assert spec.control == "dropdown"
     assert spec.guessed_dropdown
     assert spec.options == ("Low", "Medium", "High")
+
+
+@pytest.mark.parametrize(
+    "value, default, expected",
+    [
+        (True, False, True),
+        (0, True, False),
+        (1.0, False, True),
+        (float("nan"), True, True),
+        ("Yes", False, True),
+        ("no", True, False),
+        (" y ", False, True),
+        ("N", True, False),
+        ("Yes / No", False, True),
+        ("Off / On", True, False),
+        ("maybe", True, True),
+        ("", False, False),
+    ],
+)
+def test_coerce_checkbox_state_handles_common_inputs(value, default, expected):
+    assert coerce_checkbox_state(value, default) is expected
 
 
 @pytest.mark.skipif(default_variables_template is None, reason="default template unavailable")

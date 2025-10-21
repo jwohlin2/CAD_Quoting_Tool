@@ -463,7 +463,7 @@ from appkit.debug.debug_tables import (
     append_removal_debug_if_enabled,
 )
 from appkit.ui import llm_panel
-from appkit.ui.editor_controls import _coerce_checkbox_state, derive_editor_control_spec
+from appkit.ui.editor_controls import coerce_checkbox_state, derive_editor_control_spec
 from appkit.ui.planner_render import (
     PROGRAMMING_PER_PART_LABEL,
     PlannerBucketRenderState,
@@ -9929,46 +9929,6 @@ def _compute_programming_detail_minutes(
     return float(minimum_detail_minutes)
 
 
-def _coerce_checkbox_state(value: Any, default: bool = False) -> bool:
-    """Best-effort conversion from spreadsheet checkbox text to a boolean."""
-
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        try:
-            if math.isnan(value):  # type: ignore[arg-type]
-                return default
-        except Exception:
-            pass
-        return bool(value)
-
-    text = str(value).strip().lower()
-    if not text:
-        return default
-
-    direct_bool = coerce_bool(text)
-    if direct_bool is not None:
-        return direct_bool
-
-    truthy_tokens = {"true", "1", "yes", "y", "on"}
-    falsy_tokens = {"false", "0", "no", "n", "off"}
-
-    if text in truthy_tokens or text.startswith("y"):
-        return True
-    if text in falsy_tokens or text.startswith("n"):
-        return False
-
-    for part in re.split(r"[/|,\s]+", text):
-        if not part:
-            continue
-        if part in truthy_tokens or part.startswith("y"):
-            return True
-        if part in falsy_tokens or part.startswith("n"):
-            return False
-
-    return default
-
-
 def _coerce_speeds_feeds_csv_path(*sources: Mapping[str, Any] | None) -> str | None:
     """Return the first non-empty Speeds/Feeds CSV path from ``sources``."""
 
@@ -10261,7 +10221,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             scrap_source_label = scrap_source
 
     fai_value = value_map.get("FAIR Required")
-    fai_required = coerce_bool(_coerce_checkbox_state(fai_value), default=False)
+    fai_required = coerce_bool(coerce_checkbox_state(fai_value), default=False)
 
     baseline: dict[str, Any] = {
         "qty": qty,
@@ -16588,7 +16548,7 @@ class App(tk.Tk):
 
                 def _sync_bool_from_string(*_args: Any) -> None:
                     current = var.get()
-                    parsed = _coerce_checkbox_state(current, bool_var.get())
+                    parsed = coerce_checkbox_state(current, bool_var.get())
                     if bool_var.get() != parsed:
                         bool_var.set(parsed)
 
