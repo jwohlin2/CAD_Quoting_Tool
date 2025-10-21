@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import math
 import os
 import re
@@ -19,6 +20,9 @@ from .services import QuoteConfiguration
 
 PROGRAMMING_PER_PART_LABEL = "Programming (per part)"
 PROGRAMMING_AMORTIZED_LABEL = "Programming (amortized)"
+
+# Meta keys that should be hidden in certain bucket views
+PLANNER_META: frozenset[str] = frozenset({"planner_labor", "planner_machine", "planner_total"})
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -189,30 +193,6 @@ def _bucket_role_for_key(key: str) -> str:
 
 def _op_role_for_name(name: str) -> str:
     return OP_ROLE.get((name or "").strip(), "machine_only")
-_HIDE_IN_BUCKET_VIEW: frozenset[str] = frozenset({*PLANNER_META, "misc"})
-_PREFERRED_BUCKET_VIEW_ORDER: tuple[str, ...] = (
-    "programming",
-    "programming_amortized",
-    "fixture_build",
-    "fixture_build_amortized",
-    "milling",
-    "drilling",
-    "counterbore",
-    "countersink",
-    "tapping",
-    "grinding",
-    "finishing_deburr",
-    "saw_waterjet",
-    "wire_edm",
-    "sinker_edm",
-    "inspection",
-    "assembly",
-    "toolmaker_support",
-    "packaging",
-    "ehs_compliance",
-    "turning",
-    "lapping_honing",
-)
 
 def _normalize_bucket_key(name: str | None) -> str:
     text = re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_")
@@ -866,6 +846,7 @@ def _seed_bucket_minutes(
     cbore_min: float = 0.0,
     spot_min: float = 0.0,
     jig_min: float = 0.0,
+    drilling_min: float = 0.0,
 ) -> None:
     bucket_view_obj = breakdown.setdefault("bucket_view", {})
     buckets_obj = bucket_view_obj.setdefault("buckets", {})
@@ -882,7 +863,7 @@ def _seed_bucket_minutes(
     _ins("tapping", tapping_min)
     _ins("counterbore", cbore_min)
     # spot and jig_grind can roll into "drilling" or "grinding"; keep explicit names if you expose them
-    _ins("drilling", spot_min)
+    _ins("drilling", drilling_min or spot_min)
     _ins("grinding", jig_min)
 
 

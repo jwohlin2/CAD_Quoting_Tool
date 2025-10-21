@@ -3,8 +3,9 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 import math
 import os
-import re
 from typing import Any
+
+from cad_quoter.pricing.rate_buckets import RATE_BUCKETS
 
 
 ORDER: tuple[str, ...] = (
@@ -85,6 +86,7 @@ _ALIAS_MAP: dict[str, str] = {
     "inspection": "inspection",
     "inspect": "inspection",
     "quality": "inspection",
+    "abrasive_flow": "misc",
     "counter_bore": "counterbore",
     "counter_boring": "counterbore",
     "counterbore": "counterbore",
@@ -144,6 +146,17 @@ def _normalize_key(name: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_")
 
 
+for _bucket_spec in RATE_BUCKETS:
+    norm_label = _normalize_key(_bucket_spec.label)
+    canonical_norm = _ALIAS_MAP.get(norm_label, norm_label)
+    for key in {norm_label, canonical_norm}:
+        if not key:
+            continue
+        existing = _RATE_ALIAS_KEYS.get(key, ())
+        merged = tuple(dict.fromkeys((*_bucket_spec.rate_keys, *existing)))
+        _RATE_ALIAS_KEYS[key] = merged
+
+
 def _canonical_process_key(name: Any) -> str | None:
     norm = _normalize_key(name)
     if not norm:
@@ -181,7 +194,7 @@ def _to_float(value: Any) -> float | None:
 def canonicalize_costs(process_costs: Mapping[str, Any] | Iterable[Any] | None) -> dict[str, float]:
     totals: dict[str, float] = {}
     for key, raw in _iter_items(process_costs):
-        canon = _canonical_process_key(key)
+        canon = canonical_bucket_key(key)
         if not canon:
             continue
         amount = _to_float(raw)
@@ -194,7 +207,7 @@ def canonicalize_costs(process_costs: Mapping[str, Any] | Iterable[Any] | None) 
 def _canonicalize_minutes(minutes_detail: Mapping[str, Any] | Iterable[Any] | None) -> dict[str, float]:
     totals: dict[str, float] = {}
     for key, raw in _iter_items(minutes_detail):
-        canon = _canonical_process_key(key)
+        canon = canonical_bucket_key(key)
         if not canon:
             continue
         minutes = _to_float(raw)
@@ -202,69 +215,6 @@ def _canonicalize_minutes(minutes_detail: Mapping[str, Any] | Iterable[Any] | No
             continue
         totals[canon] = totals.get(canon, 0.0) + minutes
     return totals
-
-
-def _flatten_rates(rates: Mapping[str, Any] | None) -> tuple[dict[str, float], dict[str, float]]:
-    flat: dict[str, float] = {}
-    normalized: dict[str, float] = {}
-
-    if not isinstance(rates, Mapping):
-        return flat, normalized
-
-    def _walk(mapping: Mapping[str, Any]) -> None:
-        for key, value in mapping.items():
-            if isinstance(value, Mapping):
-                _walk(value)
-                continue
-            amount = _to_float(value)
-            if amount is None:
-                continue
-            key_str = str(key)
-            flat[key_str] = amount
-            norm = _normalize_key(key_str)
-            if norm:
-                normalized.setdefault(norm, amount)
-
-    _walk(rates)
-    return flat, normalized
-
-
-def _label_for(key: str) -> str:
-    return _LABEL_OVERRIDES.get(key, key.replace("_", " ").title())
-
-
-def _rate_candidates(key: str) -> Iterable[str]:
-    norm = _normalize_key(key)
-    if not norm:
-        return ()
-    pieces = [part for part in norm.split("_") if part]
-    camel = "".join(piece.title() for piece in pieces)
-    spaced = " ".join(piece.title() for piece in pieces)
-    candidates = [
-        key,
-        norm,
-        camel,
-        f"{camel}Rate",
-        f"{camel}_rate",
-        spaced,
-        f"{spaced} Rate",
-        f"{spaced} rate",
-    ]
-    candidates.extend(_RATE_ALIAS_KEYS.get(norm, ()))
-    return tuple(dict.fromkeys(candidate for candidate in candidates if candidate))
-
-
-def _lookup_rate(key: str, flat: Mapping[str, float], normalized: Mapping[str, float]) -> float:
-    for candidate in _rate_candidates(key):
-        if candidate in flat:
-            return flat[candidate]
-        norm = _normalize_key(candidate)
-        if norm and norm in normalized:
-            return normalized[norm]
-    for fallback in ("labor", "labor_rate", "machine", "machine_rate"):
-        if fallback in normalized:
-            return normalized[fallback]
-    return 0.0
 
 
 def _emit_cost_row(
@@ -312,7 +262,7 @@ def render_process_costs(
 
     costs = canonicalize_costs(process_costs)
     minutes = _canonicalize_minutes(minutes_detail)
-    flat_rates, normalized_rates = _flatten_rates(rates)
+    flat_rates, normalized_rates = flatten_rates(rates)
 
     debug_misc = os.environ.get("DEBUG_MISC") == "1"
 
@@ -329,7 +279,7 @@ def render_process_costs(
     for key in ORDER:
         raw_amount = float(costs.get(key, 0.0))
         hours = max(0.0, float(minutes.get(key, 0.0)) / 60.0)
-        rate = _lookup_rate(key, flat_rates, normalized_rates)
+        rate = lookup_rate(key, flat_rates, normalized_rates)
         inferred_amount: float | None = None
         if hours > 0 and rate > 0:
             inferred_amount = round(hours * rate, 2)
@@ -354,7 +304,7 @@ def render_process_costs(
             if abs(row_hr - card_hr) > 1e-2:
                 row_hr = card_hr
             hours = row_hr
-        rate = _lookup_rate(key, flat_rates, normalized_rates)
+        rate = lookup_rate(key, flat_rates, normalized_rates)
         if rate <= 0 and hours > 0:
             rate = amount / hours
         if key == "drilling" and planner_drilling_minutes is not None and rate > 0:
@@ -362,7 +312,7 @@ def render_process_costs(
             costs[key] = amount
         _emit_cost_row(
             tbl,
-            label=_label_for(key),
+            label=bucket_label(key),
             hours=hours,
             rate=rate,
             cost=amount,

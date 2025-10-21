@@ -15,28 +15,57 @@ try:
 except ImportError:  # pragma: no cover - legacy path when vendored separately
     from rates import OP_TO_LABOR, OP_TO_MACHINE, rate_for_role
 
+try:  # pragma: no cover - legacy path when vendored separately
+    from cad_quoter.pricing.process_buckets import (
+        bucket_label,
+        canonical_bucket_key,
+    )
+except ImportError:  # pragma: no cover - fallback when vendored without package layout
+    import re
+
+    def bucket_label(key: str) -> str:  # type: ignore[misc]
+        text = str(key or "")
+        return text.replace("_", " ").title()
+
+    def canonical_bucket_key(  # type: ignore[misc]
+        name: Any,
+        *,
+        allowed: Iterable[str] | None = None,
+        default: str = "misc",
+    ) -> str | None:
+        norm = re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_")
+        if not norm:
+            return None
+        if allowed is not None:
+            allowed_tuple = tuple(allowed)
+            if norm in allowed_tuple:
+                return norm
+        return default
+
 # ---------------------------------------------------------------------------
 # Bucket configuration
 # ---------------------------------------------------------------------------
 
 # Order matters: the rendered quote should display the buckets in this order.
-BUCKETS: tuple[str, ...] = (
-    "Programming",
-    "Programming (per part)",
-    "Fixture Build",
-    "Fixture Build (amortized)",
-    "Milling",
-    "Drilling",
-    "Counterbore",
-    "Countersink",
-    "Tapping",
-    "Saw Waterjet",
-    "Wire EDM",
-    "Sinker EDM",
-    "Grinding",
-    "Deburr",
-    "Inspection",
+BUCKET_KEY_ORDER: tuple[str, ...] = (
+    "programming",
+    "programming_amortized",
+    "fixture_build",
+    "fixture_build_amortized",
+    "milling",
+    "drilling",
+    "counterbore",
+    "countersink",
+    "tapping",
+    "saw_waterjet",
+    "wire_edm",
+    "sinker_edm",
+    "grinding",
+    "finishing_deburr",
+    "inspection",
 )
+
+BUCKETS: tuple[str, ...] = tuple(bucket_label(key) for key in BUCKET_KEY_ORDER)
 
 # Heuristic minutes used when planner line items are unavailable.  These mirror
 # the fallbacks in ``appV5._hole_table_minutes_from_geo`` so that the Process &
@@ -52,36 +81,36 @@ JIG_GRIND_MINUTES_PER_FEATURE = 15.0
 # ``_resolve_bucket_for_op``.
 OP_TO_BUCKET: Dict[str, str] = {
     # Milling family
-    "cnc_rough_mill": "Milling",
-    "finish_mill_windows": "Milling",
-    "thread_mill": "Tapping",
+    "cnc_rough_mill": "milling",
+    "finish_mill_windows": "milling",
+    "thread_mill": "tapping",
     # Drilling family
-    "drill_patterns": "Drilling",
-    "drill_ream_bore": "Drilling",
-    "drill_ream_dowel_press": "Drilling",
-    "rigid_tap": "Tapping",
-    "counterbore_holes": "Counterbore",
+    "drill_patterns": "drilling",
+    "drill_ream_bore": "drilling",
+    "drill_ream_dowel_press": "drilling",
+    "rigid_tap": "tapping",
+    "counterbore_holes": "counterbore",
     # Saw / waterjet
-    "waterjet_or_saw_blanks": "Saw Waterjet",
+    "waterjet_or_saw_blanks": "saw_waterjet",
     # Grinding
-    "surface_grind_faces": "Grinding",
-    "surface_or_profile_grind_bearing": "Grinding",
-    "profile_or_surface_grind_wear_faces": "Grinding",
-    "profile_grind_cutting_edges_and_angles": "Grinding",
-    "match_grind_set_for_gap_and_parallelism": "Grinding",
-    "blanchard_grind_pre": "Grinding",
-    "jig_bore_or_jig_grind_coaxial_bores": "Grinding",
-    "jig_grind_ID_to_size_and_roundness": "Grinding",
-    "visual_contour_grind": "Grinding",
+    "surface_grind_faces": "grinding",
+    "surface_or_profile_grind_bearing": "grinding",
+    "profile_or_surface_grind_wear_faces": "grinding",
+    "profile_grind_cutting_edges_and_angles": "grinding",
+    "match_grind_set_for_gap_and_parallelism": "grinding",
+    "blanchard_grind_pre": "grinding",
+    "jig_bore_or_jig_grind_coaxial_bores": "grinding",
+    "jig_grind_ID_to_size_and_roundness": "grinding",
+    "visual_contour_grind": "grinding",
     # EDM
-    "wire_edm_windows": "Wire EDM",
-    "wire_edm_outline": "Wire EDM",
-    "sinker_edm_finish_burn": "Sinker EDM",
+    "wire_edm_windows": "wire_edm",
+    "wire_edm_outline": "wire_edm",
+    "sinker_edm_finish_burn": "sinker_edm",
     # Deburr / finishing
-    "edge_break": "Deburr",
-    "lap_bearing_land": "Deburr",
-    "lap_ID": "Deburr",
-    "abrasive_flow_polish": "Deburr",
+    "edge_break": "finishing_deburr",
+    "lap_bearing_land": "finishing_deburr",
+    "lap_ID": "finishing_deburr",
+    "abrasive_flow_polish": "finishing_deburr",
 }
 
 # Inspection heuristics.  These provide a simple, explainable estimate for
@@ -116,7 +145,7 @@ def _resolve_bucket_for_op(op: str) -> str:
     """Return the display bucket for a planner operation key."""
 
     if not op:
-        return "Milling"
+        return "milling"
 
     bucket = OP_TO_BUCKET.get(op)
     if bucket:
@@ -124,9 +153,9 @@ def _resolve_bucket_for_op(op: str) -> str:
 
     op_lower = op.lower()
     if any(token in op_lower for token in ("counterbore", "c'bore")):
-        return "Counterbore"
+        return "counterbore"
     if any(token in op_lower for token in ("countersink", "csk")):
-        return "Countersink"
+        return "countersink"
     if any(
         token in op_lower
         for token in (
@@ -137,7 +166,7 @@ def _resolve_bucket_for_op(op: str) -> str:
             "tap",
         )
     ):
-        return "Tapping"
+        return "tapping"
 
     if any(token in op_lower for token in ("mill", "pocket")) or (
         "profile" in op_lower
@@ -145,33 +174,33 @@ def _resolve_bucket_for_op(op: str) -> str:
         and "edm" not in op_lower
     ):
         if "thread_mill" not in op_lower and "thread mill" not in op_lower:
-            return "Milling"
+            return "milling"
 
     machine = OP_TO_MACHINE.get(op, "").lower()
     if machine:
         if "grind" in machine:
-            return "Grinding"
+            return "grinding"
         if "edm" in machine:
-            return "Wire EDM" if "wire" in machine else "Sinker EDM"
+            return "wire_edm" if "wire" in machine else "sinker_edm"
         if "counterbore" in machine:
-            return "Counterbore"
+            return "counterbore"
         if "countersink" in machine or "csk" in machine:
-            return "Countersink"
+            return "countersink"
         if "drill" in machine:
-            return "Drilling"
+            return "drilling"
         if "tap" in machine:
-            return "Tapping"
+            return "tapping"
         if "waterjet" in machine or "saw" in machine:
-            return "Saw Waterjet"
+            return "saw_waterjet"
 
     role = OP_TO_LABOR.get(op, "").lower()
     if role:
         if "inspect" in role:
-            return "Inspection"
+            return "inspection"
         if any(token in role for token in ("deburr", "lap", "finish")):
-            return "Deburr"
+            return "finishing_deburr"
 
-    return "Milling"
+    return "milling"
 
 
 def _iter_geom_list(value: Any) -> Iterable[Any]:
@@ -199,13 +228,16 @@ def bucketize(
         qty_int = 1
 
     buckets: Dict[str, Dict[str, float]] = {
-        name: {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0, "total$": 0.0}
-        for name in BUCKETS
+        key: {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0, "total$": 0.0}
+        for key in BUCKET_KEY_ORDER
     }
 
     def add(bucket: str, minutes: float, machine_cost: float, labor_cost: float) -> None:
+        canon = canonical_bucket_key(bucket, allowed=BUCKET_KEY_ORDER, default="milling")
+        if not canon:
+            return
         entry = buckets.setdefault(
-            bucket, {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0, "total$": 0.0}
+            canon, {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0, "total$": 0.0}
         )
         entry["minutes"] += minutes
         entry["machine$"] += machine_cost
@@ -221,7 +253,7 @@ def bucketize(
         machine_cost = _as_float(li.get("machine_cost"))
         labor_cost = _as_float(li.get("labor_cost"))
         bucket_name = _resolve_bucket_for_op(op_key)
-        if bucket_name.lower() == "drilling" and machine_cost > 0 and labor_cost <= 0:
+        if bucket_name == "drilling" and machine_cost > 0 and labor_cost <= 0:
             labor_cost = machine_cost
             machine_cost = 0.0
         add(bucket_name, minutes, machine_cost, labor_cost)
@@ -235,11 +267,11 @@ def bucketize(
     )
     if programming_min > 0:
         labor_cost = programmer_rate * (programming_min / 60.0)
-        add("Programming", programming_min, 0.0, labor_cost)
+        add("programming", programming_min, 0.0, labor_cost)
         if qty_int > 1:
             per_min = programming_min / qty_int
             add(
-                "Programming (per part)",
+                "programming_amortized",
                 per_min,
                 0.0,
                 programmer_rate * (per_min / 60.0),
@@ -252,11 +284,11 @@ def bucketize(
     )
     if fixture_min > 0:
         labor_cost = fixture_rate * (fixture_min / 60.0)
-        add("Fixture Build", fixture_min, 0.0, labor_cost)
+        add("fixture_build", fixture_min, 0.0, labor_cost)
         if qty_int > 1:
             per_min = fixture_min / qty_int
             add(
-                "Fixture Build (amortized)",
+                "fixture_build_amortized",
                 per_min,
                 0.0,
                 fixture_rate * (per_min / 60.0),
@@ -358,7 +390,7 @@ def bucketize(
         if tap_count > 0.0:
             tap_minutes = tap_count * TAP_MINUTES_PER_HOLE
     if tap_minutes > 0.0:
-        fallback_minutes["Tapping"] = float(tap_minutes)
+        fallback_minutes["tapping"] = float(tap_minutes)
 
     cbore_minutes = 0.0
     if geom_mapping:
@@ -368,17 +400,17 @@ def bucketize(
         if cbore_count > 0.0:
             cbore_minutes = cbore_count * CBORE_MINUTES_PER_SIDE
     if cbore_minutes > 0.0:
-        fallback_minutes["Counterbore"] = float(cbore_minutes)
+        fallback_minutes["counterbore"] = float(cbore_minutes)
 
     csk_minutes = _ops_total("csk_front", "csk_back") * CSK_MINUTES_PER_SIDE
     if csk_minutes > 0.0:
-        fallback_minutes["Countersink"] = float(csk_minutes)
+        fallback_minutes["countersink"] = float(csk_minutes)
 
     jig_minutes = _ops_total("jig_grind") * JIG_GRIND_MINUTES_PER_FEATURE
     if jig_minutes > 0.0:
-        fallback_minutes["Grinding"] = float(jig_minutes)
+        fallback_minutes["grinding"] = float(jig_minutes)
 
-    drilling_entry = buckets.get("Drilling")
+    drilling_entry = buckets.get("drilling")
     if drilling_entry and fallback_minutes:
         drilling_minutes = float(drilling_entry.get("minutes") or 0.0)
         if drilling_minutes > 0.0:
@@ -387,7 +419,7 @@ def bucketize(
             allocated_minutes = 0.0
             allocated_machine = 0.0
             allocated_labor = 0.0
-            for name in ("Tapping", "Counterbore", "Countersink", "Grinding"):
+            for name in ("tapping", "counterbore", "countersink", "grinding"):
                 minutes = fallback_minutes.get(name, 0.0)
                 if minutes <= 0.0:
                     continue
@@ -421,8 +453,8 @@ def bucketize(
     cleaned_buckets: Dict[str, Dict[str, float]] = {}
     totals = {"minutes": 0.0, "machine$": 0.0, "labor$": 0.0, "total$": 0.0}
 
-    for name in BUCKETS:
-        entry = buckets.get(name)
+    for key in BUCKET_KEY_ORDER:
+        entry = buckets.get(key)
         if not entry:
             continue
         if entry["minutes"] <= 0.01 and abs(entry["total$"]) <= 0.01:
@@ -433,7 +465,7 @@ def bucketize(
             "labor$": round(entry["labor$"], 2),
             "total$": round(entry["total$"], 2),
         }
-        cleaned_buckets[name] = rounded
+        cleaned_buckets[bucket_label(key)] = rounded
         totals["minutes"] += rounded["minutes"]
         totals["machine$"] += rounded["machine$"]
         totals["labor$"] += rounded["labor$"]
