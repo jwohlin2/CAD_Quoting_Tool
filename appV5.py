@@ -3547,8 +3547,41 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             return False
         return False
 
+    llm_debug_enabled_flag = bool(APP_ENV.llm_debug_enabled)
+
+    for source in (result, breakdown):
+        override = _extract_llm_debug_override(source if isinstance(source, _MappingABC) else None)
+        if override is not None:
+            llm_debug_enabled_flag = override
+            break
+
+    # ---- header --------------------------------------------------------------
+    doc_builder = QuoteDocRecorder(divider)
+
+    class _QuoteLines(list[str]):
+        def append(self, text: str) -> None:  # type: ignore[override]
+            sanitized = _sanitize_render_text(text)
+            previous = self[-1] if self else None
+            super().append(sanitized)
+            doc_builder.observe_line(len(self) - 1, sanitized, previous)
+
+    lines: list[str] = _QuoteLines()
+
+    def append_line(value: Any) -> None:
+        _push(lines, value)
+
+    def append_lines(values: Iterable[str]) -> None:
+        for value in values:
+            append_line(value)
+
+    def replace_line(index: int, text: str) -> None:
+        sanitized = _sanitize_render_text(text)
+        if 0 <= index < len(lines):
+            lines[index] = sanitized
+        doc_builder.replace_line(index, sanitized)
+
     def write_line(s: str, indent: str = ""):
-        _push(lines, f"{indent}{s}")
+        append_line(f"{indent}{s}")
 
     def write_wrapped(text: str, indent: str = ""):
         if text is None:
@@ -3571,6 +3604,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     show_bucket_diagnostics_flag = _is_truthy_flag(bucket_diag_env) or bool(
         SHOW_BUCKET_DIAGNOSTICS_OVERRIDE
     )
+
     def render_bucket_table(rows: Sequence[tuple[str, float, float, float, float]]):
         if not rows:
             return
@@ -3600,11 +3634,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             col_widths.append(width)
 
         if lines and lines[-1] != "":
-            _push(lines, "")
+            append_line("")
 
         diagnostic_banner = "=== Planner diagnostics (not billed) ==="
-        _push(lines, diagnostic_banner)
-        _push(lines, "=" * min(page_width, len(diagnostic_banner)))
+        append_line(diagnostic_banner)
+        append_line("=" * min(page_width, len(diagnostic_banner)))
 
         table_text = ascii_table(
             headers,
@@ -3618,15 +3652,15 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if len(table_lines) >= 4:
             header_cells = table_lines[1].strip("|").split("|")
             separator_line = " | ".join("-" * width for width in col_widths)
-            _push(lines, " | ".join(header_cells))
-            _push(lines, separator_line)
+            append_line(" | ".join(header_cells))
+            append_line(separator_line)
             for body_line in table_lines[3:-1]:
                 if not body_line.startswith("|"):
                     continue
                 body_cells = body_line.strip("|").split("|")
-                _push(lines, " | ".join(body_cells))
+                append_line(" | ".join(body_cells))
 
-        _push(lines, "")
+        append_line("")
 
     def _is_total_label(label: str) -> bool:
         clean = str(label or "").strip()
@@ -3648,7 +3682,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         short_divider = " " * pad + "-" * width
         if lines[-1] == short_divider:
             return
-        _push(lines, short_divider)
+        append_line(short_divider)
 
     def _render_kv_line(label: str, value: str, indent: str = "") -> str:
         left = f"{indent}{label}"
@@ -3674,17 +3708,16 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         return f"{left}{' ' * pad}{right}"
 
     def row(label: str, val: float, indent: str = ""):
-        # left-label, right-amount aligned to page_width
         right = _m(val)
         if _is_total_label(label):
             _maybe_insert_total_separator(len(right))
-        _push(lines, _render_kv_line(label, right, indent))
+        append_line(_render_kv_line(label, right, indent))
 
     def hours_row(label: str, val: float, indent: str = ""):
         right = _h(val)
         if _is_total_label(label):
             _maybe_insert_total_separator(len(right))
-        _push(lines, _render_kv_line(label, right, indent))
+        append_line(_render_kv_line(label, right, indent))
 
     def _is_extra_segment(segment: str) -> bool:
         try:
@@ -3815,35 +3848,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if override is not None:
                 return override
         return None
-
-    llm_debug_enabled_flag = bool(APP_ENV.llm_debug_enabled)
-    for source in (result, breakdown):
-        override = _extract_llm_debug_override(source if isinstance(source, _MappingABC) else None)
-        if override is not None:
-            llm_debug_enabled_flag = override
-            break
-
-    # ---- header --------------------------------------------------------------
-    doc_builder = QuoteDocRecorder(divider)
-
-    class _QuoteLines(list[str]):
-        def append(self, text: str) -> None:  # type: ignore[override]
-            sanitized = _sanitize_render_text(text)
-            previous = self[-1] if self else None
-            super().append(sanitized)
-            doc_builder.observe_line(len(self) - 1, sanitized, previous)
-
-    lines: list[str] = _QuoteLines()
-
-    def append_lines(values: Iterable[str]) -> None:
-        for value in values:
-            _push(lines, value)
-
-    def replace_line(index: int, text: str) -> None:
-        sanitized = _sanitize_render_text(text)
-        if 0 <= index < len(lines):
-            lines[index] = sanitized
-        doc_builder.replace_line(index, sanitized)
 
     hour_summary_entries: dict[str, tuple[float, bool]] = {}
     ui_vars = result.get("ui_vars") or {}
