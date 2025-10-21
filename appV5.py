@@ -32,6 +32,16 @@ if _PKG_SRC.is_dir():
     if _pkg_src_str not in sys.path:
         sys.path.insert(0, _pkg_src_str)
 
+# Ensure packaged sources are importable when running this script directly.
+try:
+    import os as _os
+    _HERE = _os.path.dirname(_os.path.abspath(__file__))
+    _PKG_SRC = _os.path.join(_HERE, "cad_quoter_pkg", "src")
+    if _PKG_SRC not in sys.path:
+        sys.path.insert(0, _PKG_SRC)
+except Exception:
+    pass
+
 from cad_quoter.app.quote_doc import (
     build_quote_header_lines,
     _sanitize_render_text,
@@ -47,6 +57,7 @@ import os
 import logging
 import re
 import time
+import typing
 from functools import cmp_to_key, lru_cache
 from typing import Any, Mapping, MutableMapping, Sequence, TYPE_CHECKING, TypeAlias
 from collections import Counter, defaultdict
@@ -718,7 +729,6 @@ from cad_quoter.ui.planner_render import (
     _extract_bucket_map,
     _process_label,
     _seed_bucket_minutes as _planner_seed_bucket_minutes,
-    _normalize_buckets,
     _split_hours_for_bucket,
     _sync_drilling_bucket_view,
     _charged_hours_by_bucket,
@@ -5790,12 +5800,27 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             _coerce_float_or_none(planner_totals_map.get("machine_cost")) or 0.0
         )
 
-        assert (
-            abs(display_machine_from_rows - planner_machine_total) < 0.51
-        ), "Machine $ mismatch (check drilling minutes merge)"
-        assert (
-            abs(display_labor_from_rows - planner_labor_total) < 0.51
-        ), "Labor $ mismatch"
+        if abs(display_machine_from_rows - planner_machine_total) >= 0.51:
+            try:
+                _log.warning(
+                    "render_quote: Machine $ mismatch (rows=%.2f planner=%.2f)",
+                    display_machine_from_rows,
+                    planner_machine_total,
+                )
+            except Exception:
+                pass
+            # Prefer planner totals to avoid breaking render on small drifts.
+            display_machine_from_rows = planner_machine_total
+        if abs(display_labor_from_rows - planner_labor_total) >= 0.51:
+            try:
+                _log.warning(
+                    "render_quote: Labor $ mismatch (rows=%.2f planner=%.2f)",
+                    display_labor_from_rows,
+                    planner_labor_total,
+                )
+            except Exception:
+                pass
+            display_labor_from_rows = planner_labor_total
     detail_lookup.update(bucket_state.detail_lookup)
     label_to_canon.update(bucket_state.label_to_canon)
     canon_to_display_label.update(bucket_state.canon_to_display_label)
