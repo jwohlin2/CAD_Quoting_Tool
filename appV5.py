@@ -11032,6 +11032,22 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             chart_lines_all = _collect_chart_lines_context(ctx, geo_map, ctx_a, ctx_b)
             built_rows = _build_ops_rows_from_lines_fallback(chart_lines_all)
             _push(lines, f"[DEBUG] chart_lines_found={len(chart_lines_all)} built_rows={len(built_rows)}")
+            if not chart_lines_all:
+                global _PRINTED_CHART_DEBUG_KEYS
+                if not _PRINTED_CHART_DEBUG_KEYS:
+                    try:
+                        _push(lines, f"[DEBUG] ctx_keys={list((ctx or {}).keys())[:30]}")
+                    except Exception:
+                        pass
+                    try:
+                        _push(lines, f"[DEBUG] geo_keys={list((geo_map or {}).keys())[:30]}")
+                    except Exception:
+                        pass
+                    try:
+                        _push(lines, f"[DEBUG] breakdown_keys={list((ctx_a or {}).keys())[:30]}")
+                    except Exception:
+                        pass
+                    _PRINTED_CHART_DEBUG_KEYS = True
             if built_rows:
                 geo_map.setdefault("ops_summary", {})["rows"] = built_rows
                 ops_rows = built_rows
@@ -20899,3 +20915,5 @@ if __name__ == "__main__":  # pragma: no cover - manual invocation
         pass
     sys.exit(main())
 
+# Emit chart-debug key lines at most once globally per run
+_PRINTED_CHART_DEBUG_KEYS = False
