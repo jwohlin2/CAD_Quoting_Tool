@@ -749,7 +749,6 @@ from cad_quoter.ui.planner_render import (
     _normalize_buckets,
     _split_hours_for_bucket,
     _sync_drilling_bucket_view,
-    _charged_hours_by_bucket,
     _build_planner_bucket_render_state,
     _FINAL_BUCKET_HIDE_KEYS,
     SHOW_BUCKET_DIAGNOSTICS_OVERRIDE,
@@ -3826,15 +3825,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if not planner_has_drilling_bucket:
         planner_has_drilling_bucket = _has_planner_drilling_bucket(buckets)
 
-    if mins > 0:
-        drilling_machine_hr = round(mins / 60.0, 2)
-        # write into both the pricing state and the hour summary
-        if not planner_has_drilling_bucket:
-            hour_summary_entries["drilling"] = (drilling_machine_hr, True)
-        # also, if your bucket view structure is present, overwrite that slot:
-        if isinstance(buckets, dict) and "drilling" in buckets:
-            buckets["drilling"]["machine_hours"] = drilling_machine_hr
-            buckets["drilling"]["labor_hours"] = float(buckets["drilling"].get("labor_hours") or 0.0)
     # Canonical QUOTE SUMMARY header (legacy variants removed in favour of this
     # block so the Speeds/Feeds status + Drill Debug output stay consistent).
     header_lines, pricing_source_value = build_quote_header_lines(
@@ -5369,6 +5359,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         card_minutes_val = 0.0
     card_minutes_precise = float(card_minutes_val)
     removal_drilling_minutes = card_minutes_precise if have_card_minutes else None
+    removal_drilling_hours_precise: float | None = None
     if drill_total_minutes_estimate > 0.0:
         removal_drilling_minutes = float(drill_total_minutes_estimate)
         removal_drilling_hours_precise = removal_drilling_minutes / 60.0
@@ -5553,7 +5544,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     bucket_row_specs: list[_BucketRowSpec] = []
 
     labor_costs_display.clear()
-    hour_summary_entries.clear()
     display_labor_for_ladder = 0.0
     display_machine = 0.0
 
@@ -5884,7 +5874,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     else:
         display_labor_for_ladder = bucket_state.display_labor_total
         display_machine = bucket_state.display_machine_total
-    hour_summary_entries.update(bucket_state.hour_entries)
     bucket_minutes_detail: dict[str, float] = {}
     bucket_minutes_source = getattr(bucket_state, "bucket_minutes_detail", None)
     if isinstance(bucket_minutes_source, _MappingABC):
@@ -5899,6 +5888,17 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     if isinstance(extra_bucket_minutes_detail, _MappingABC):
         for key, minutes in extra_bucket_minutes_detail.items():
             bucket_minutes_detail[str(key)] = _safe_float(minutes, default=0.0)
+
+    bucket_hour_summary: dict[str, tuple[float, bool]] = {}
+    for raw_key, minutes in bucket_minutes_detail.items():
+        minutes_val = _safe_float(minutes, default=0.0)
+        if minutes_val <= 0.0:
+            continue
+        canon_key = _canonical_bucket_key(raw_key) or _normalize_bucket_key(raw_key) or str(raw_key)
+        label = _display_bucket_label(canon_key, label_overrides)
+        bucket_hour_summary[label] = (round(minutes_val / 60.0, 2), True)
+    hour_summary_entries.clear()
+    hour_summary_entries.update(bucket_hour_summary)
     process_costs_for_render: dict[str, float] = {}
     bucket_costs_source = getattr(bucket_state, "process_costs_for_render", None)
     if isinstance(bucket_costs_source, _MappingABC):
@@ -6543,18 +6543,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             printed_bucket_labels.add(spec.label)
         for label in printed_bucket_labels:
             labor_cost_totals.pop(label, None)
-            spec = bucket_specs_for_render.get(label)
-            if spec is None:
-                continue
-            hours_val = _minutes_to_hours(spec.minutes)
-            existing_entry = hour_summary_entries.get(label)
-            include_flag = True
-            if isinstance(existing_entry, tuple) and len(existing_entry) == 2:
-                include_flag = bool(existing_entry[1])
-            if hours_val > 0.0:
-                hour_summary_entries[label] = (round(hours_val, 2), include_flag)
-            else:
-                hour_summary_entries.pop(label, None)
 
     misc_total = 0.0
     for label, amount in labor_cost_totals.items():
@@ -6579,397 +6567,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         labor_costs_display[display_label] = amount_val
         misc_total += amount_val
 
-    hour_summary_entries.clear()
-
-    if (
-        prefer_removal_drilling_hours
-        and isinstance(bucket_state.extra, dict)
-        and bucket_state.extra.get("removal_drilling_hours") is not None
-    ):
-        billed_minutes_sync = None
-        try:
-            billed_minutes_sync = (
-                float(bucket_state.extra.get("removal_drilling_hours", 0.0)) * 60.0
-            )
-        except Exception:
-            billed_minutes_sync = None
-        if billed_minutes_sync is not None and billed_minutes_sync > 0:
-            bucket_view_target: Mapping[str, Any] | None = None
-            if isinstance(breakdown, _MutableMappingABC):
-                candidate_view = breakdown.get("bucket_view")
-                if isinstance(candidate_view, _MutableMappingABC):
-                    bucket_view_target = candidate_view
-            if bucket_view_target is None and isinstance(bucket_view_struct, _MutableMappingABC):
-                bucket_view_target = bucket_view_struct
-            if isinstance(bucket_view_target, _MutableMappingABC):
-                billed_cost_sync: float | None = None
-                if isinstance(process_costs, _MappingABC):
-                    try:
-                        billed_cost_candidate = float(process_costs.get("drilling") or 0.0)
-                    except Exception:
-                        billed_cost_candidate = 0.0
-                    if billed_cost_candidate > 0.0:
-                        billed_cost_sync = billed_cost_candidate
-                _sync_drilling_bucket_view(
-                    bucket_view_target,
-                    billed_minutes=billed_minutes_sync,
-                    billed_cost=billed_cost_sync,
-                )
-
-    charged_hours = _charged_hours_by_bucket(
-        process_costs,
-        process_meta,
-        rates,
-        render_state=bucket_state,
-        removal_drilling_hours=removal_drilling_hours_precise,
-        prefer_removal_drilling_hours=prefer_removal_drilling_hours,
-        cfg=cfg,
-        process_plan_summary=process_plan_summary_local,
-    )
-    removal_hours_debug = None
-    if isinstance(getattr(bucket_state, "extra", None), _MappingABC):
-        removal_hours_debug = _coerce_float_or_none(
-            bucket_state.extra.get("removal_drilling_hours")
-        )
-    drill_bucket_key: str | None = None
-    for raw_key in charged_hours:
-        canon = _canonical_bucket_key(raw_key)
-        if canon in {"drilling", "drill"}:
-            drill_bucket_key = raw_key
-            break
-    bucket_hours_debug = (
-        _coerce_float_or_none(charged_hours.get(drill_bucket_key))
-        if drill_bucket_key
-        else None
-    )
-    if removal_hours_debug is not None or bucket_hours_debug is not None:
-        def _fmt_debug(value: float | None) -> str:
-            if value is None:
-                return "nan"
-            try:
-                numeric = float(value)
-            except Exception:
-                return "nan"
-            if not math.isfinite(numeric):
-                return "nan"
-            return f"{numeric:.2f}"
-
-        print(
-            "[DEBUG] drilling_hours removal_card="
-            f"{_fmt_debug(removal_hours_debug)}  bucket={_fmt_debug(bucket_hours_debug)}"
-        )
-    charged_hour_entries = sorted(charged_hours.items(), key=lambda kv: kv[0])
-    charged_hours_by_canon: dict[str, float] = {}
-    for raw_key, hour_val in charged_hour_entries:
-        canon_key = _canonical_bucket_key(raw_key)
-        if not canon_key:
-            canon_key = _normalize_bucket_key(raw_key)
-        try:
-            numeric_hours = float(hour_val or 0.0)
-        except Exception:
-            numeric_hours = 0.0
-        if not canon_key:
-            continue
-        charged_hours_by_canon[canon_key] = (
-            charged_hours_by_canon.get(canon_key, 0.0) + numeric_hours
-        )
-
-    def _record_hour_entry(label: str, value: float, *, include_in_total: bool = True) -> None:
-        try:
-            numeric_value = float(value or 0.0)
-        except Exception:
-            numeric_value = 0.0
-
-        if not ((numeric_value > 0) or show_zeros):
-            return
-
-        single_piece_qty = False
-        try:
-            single_piece_qty = qty_for_hours > 0 and (qty_for_hours == 1 or math.isclose(qty_for_hours, 1.0))
-        except Exception:
-            single_piece_qty = False
-
-        if single_piece_qty and numeric_value > 24.0:
-            warning = (
-                f"{label} hours capped at {fmt_hours(24.0, decimals=0)} for single-piece quote (was {fmt_hours(numeric_value)})."
-            )
-            if warning not in red_flags:
-                red_flags.append(warning)
-            numeric_value = 24.0
-
-        hour_summary_entries[label] = (numeric_value, include_in_total)
-
-    programming_meta = (nre_detail or {}).get("programming") or {}
-    try:
-        programming_hours = float(programming_meta.get("prog_hr", 0.0) or 0.0)
-    except Exception:
-        programming_hours = 0.0
-
-    fixture_meta = (nre_detail or {}).get("fixture") or {}
-    try:
-        fixture_hours = float(fixture_meta.get("build_hr", 0.0) or 0.0)
-    except Exception:
-        fixture_hours = 0.0
-
-    try:
-        qty_for_hours = float(qty)
-    except Exception:
-        qty_for_hours = 0.0
-    if qty_for_hours <= 0:
-        qty_for_hours = 0.0
-
-    try:
-        programming_per_part_amount = float(programming_per_part_cost or 0.0)
-    except Exception:
-        programming_per_part_amount = 0.0
-    programming_is_amortized = show_amortized and (
-        bool(programming_meta.get("amortized"))
-        or programming_per_part_amount > 0
-    )
-
-    try:
-        fixture_per_part_amount = float(fixture_labor_per_part_cost or 0.0)
-    except Exception:
-        fixture_per_part_amount = 0.0
-    fixture_is_amortized = show_amortized and (fixture_per_part_amount > 0)
-
-    planner_mode = str(pricing_source_value).lower() == "planner"
-    planner_entry_baseline = len(hour_summary_entries)
-    seen_hour_labels: set[str] = set()
-    for canon_key in canonical_bucket_order:
-        if not canon_key:
-            continue
-        metrics = canonical_bucket_summary.get(canon_key)
-        if not isinstance(metrics, dict):
-            continue
-        hours_val = _safe_float(metrics.get("hours"))
-        if hours_val <= 0.0:
-            minutes_val = _safe_float(metrics.get("minutes"))
-            if minutes_val > 0.0:
-                hours_val = minutes_val / 60.0
-        if hours_val <= 0.0:
-            continue
-        if str(canon_key) == "programming_amortized":
-            continue
-        label = _display_bucket_label(canon_key, label_overrides)
-        if label in seen_hour_labels:
-            hour_summary_entries[label] = (
-                hour_summary_entries[label][0] + round(hours_val, 2),
-                hour_summary_entries[label][1],
-            )
-        else:
-            _record_hour_entry(label, round(hours_val, 2))
-            seen_hour_labels.add(label)
-
-    if planner_mode:
-        buckets_for_hours = (
-            bucket_view_struct.get("buckets")
-            if isinstance(bucket_view_struct, _MappingABC)
-            else None
-        )
-        if not isinstance(buckets_for_hours, _MappingABC):
-            buckets_for_hours = {}
-
-        pl_lab = 0.0
-        pl_mac = 0.0
-        total_planner_hours = 0.0
-        for raw_key, info in buckets_for_hours.items():
-            if not isinstance(info, _MappingABC):
-                continue
-            minutes_val = _safe_float(info.get("minutes"), default=0.0)
-            if minutes_val <= 0.0:
-                continue
-            hours_val = minutes_val / 60.0
-            total_planner_hours += hours_val
-            canon_key = _canonical_bucket_key(raw_key)
-            norm_key = canon_key or _norm(raw_key)
-            if norm_key in LABORISH:
-                pl_lab += hours_val
-            else:
-                pl_mac += hours_val
-
-        residual_machine = total_planner_hours - pl_lab
-        if residual_machine < 0.0:
-            residual_machine = 0.0
-        if abs(pl_mac - residual_machine) > 0.01:
-            pl_mac = residual_machine
-
-        planner_total_hr = round(max(total_planner_hours, pl_lab + pl_mac), 2)
-        # Planner-specific summaries are now handled through the bucket table.
-
-    if (not planner_mode) or len(hour_summary_entries) == planner_entry_baseline:
-        if charged_hour_entries:
-            seen_hour_canon_keys: set[str] = set()
-            for canon_key in canonical_bucket_order:
-                if not canon_key:
-                    continue
-                if canon_key in {"planner_labor", "planner_machine", "planner_total"}:
-                    continue
-                if canon_key.startswith("planner_"):
-                    continue
-                if str(canon_key) == "programming_amortized":
-                    continue
-                hours_val = charged_hours_by_canon.get(canon_key)
-                if hours_val is None:
-                    continue
-                try:
-                    hours_float = float(hours_val or 0.0)
-                except Exception:
-                    hours_float = 0.0
-                label = _display_bucket_label(canon_key, label_overrides)
-                _record_hour_entry(label, round(hours_float, 2))
-                seen_hour_canon_keys.add(canon_key)
-
-            for canon_key, hours_val in sorted(charged_hours_by_canon.items()):
-                if not canon_key or canon_key in seen_hour_canon_keys:
-                    continue
-                if canon_key in {"planner_labor", "planner_machine", "planner_total"}:
-                    continue
-                if str(canon_key).startswith("planner_"):
-                    continue
-                if str(canon_key) == "programming_amortized":
-                    continue
-                try:
-                    hours_float = float(hours_val or 0.0)
-                except Exception:
-                    hours_float = 0.0
-                label = _display_bucket_label(canon_key, label_overrides)
-                _record_hour_entry(label, round(hours_float, 2))
-    _record_hour_entry("Programming", round(programming_hours, 2))
-    _record_hour_entry("Fixture Build", round(fixture_hours, 2))
-    if fixture_is_amortized and qty_for_hours > 0:
-        per_part_fixture_hr = fixture_hours / qty_for_hours
-        _record_hour_entry(
-            "Fixture Build (amortized)",
-            round(per_part_fixture_hr, 2),
-            include_in_total=False,
-        )
-
-    if canonical_bucket_order and canonical_bucket_summary:
-        summary_hours: dict[str, float] = {}
-        for canon_key in canonical_bucket_order:
-            metrics = canonical_bucket_summary.get(canon_key) or {}
-            minutes_val = _safe_float(metrics.get("minutes"), default=0.0)
-            if minutes_val <= 0.0:
-                continue
-            if str(canon_key) == "programming_amortized":
-                continue
-            label = _display_bucket_label(canon_key, label_overrides)
-            summary_hours[label] = summary_hours.get(label, 0.0) + minutes_to_hours(minutes_val)
-
-        prefer_card_minutes = bool(
-            getattr(cfg, "prefer_removal_drilling_hours", prefer_removal_drilling_hours)
-        )
-        override_hours: float | None = None
-        if prefer_card_minutes:
-            extra_map = getattr(bucket_state, "extra", {})
-            if isinstance(extra_map, _MappingABC):
-                candidate = extra_map.get("removal_drilling_hours")
-                override_hours = _coerce_float_or_none(candidate)
-                if override_hours is None:
-                    total_minutes_extra = _coerce_float_or_none(
-                        extra_map.get("drill_total_minutes")
-                    )
-                    if total_minutes_extra is None:
-                        machine_minutes_extra = _coerce_float_or_none(
-                            extra_map.get("drill_machine_minutes")
-                        )
-                        labor_minutes_extra = _coerce_float_or_none(
-                            extra_map.get("drill_labor_minutes")
-                        )
-                        if (
-                            machine_minutes_extra is not None
-                            or labor_minutes_extra is not None
-                        ):
-                            machine_minutes = float(machine_minutes_extra or 0.0)
-                            labor_minutes = float(labor_minutes_extra or 0.0)
-                            total_candidate = machine_minutes + labor_minutes
-                            if total_candidate > 0.0:
-                                total_minutes_extra = total_candidate
-                    if total_minutes_extra is not None:
-                        override_hours = minutes_to_hours(total_minutes_extra)
-            if (
-                override_hours is None
-                and removal_drilling_hours_precise is not None
-                and prefer_card_minutes
-            ):
-                try:
-                    override_hours = float(removal_drilling_hours_precise)
-                except Exception:
-                    override_hours = None
-        if override_hours is not None and override_hours >= 0:
-            display_label = _display_bucket_label("drilling", label_overrides)
-            summary_hours[display_label] = round(max(0.0, float(override_hours)), 2)
-
-        if prefer_card_minutes:
-            extra_map = getattr(bucket_state, "extra", {})
-            if isinstance(extra_map, _MappingABC):
-                drill_total_minutes = extra_map.get("drill_total_minutes")
-                if isinstance(drill_total_minutes, (int, float)):
-                    drill_label = _display_bucket_label("drilling", label_overrides)
-                    summary_hours[drill_label] = round(minutes_to_hours(drill_total_minutes), 2)
-
-        planner_labels = {"Planner Machine", "Planner Labor", "Planner Total"}
-        for label, hours_val in summary_hours.items():
-            if label in planner_labels and label in hour_summary_entries:
-                continue
-            include_flag = True
-            existing = hour_summary_entries.get(label)
-            if isinstance(existing, tuple) and len(existing) == 2:
-                include_flag = bool(existing[1])
-            hour_summary_entries[label] = (round(hours_val, 2), include_flag)
-
-    prefer_drill_summary = prefer_removal_drilling_hours
-    if cfg is not None:
-        prefer_summary_candidate = getattr(
-            cfg, "prefer_removal_drilling_hours", None
-        )
-        if prefer_summary_candidate is not None:
-            prefer_drill_summary = bool(prefer_summary_candidate)
-    if prefer_drill_summary:
-        extra_map = getattr(bucket_state, "extra", {})
-        if not isinstance(extra_map, _MappingABC):
-            extra_map = {}
-        hour_summary_map: dict[str, float] = {}
-        if isinstance(hour_summary_entries, _MappingABC):
-            for label, value in hour_summary_entries.items():
-                base_value: Any
-                if isinstance(value, (list, tuple)) and value:
-                    base_value = value[0]
-                else:
-                    base_value = value
-                coerced = _coerce_float_or_none(base_value)
-                if coerced is None:
-                    continue
-                hour_summary_map[str(label)] = float(coerced)
-
-        prefer_drill_summary = prefer_removal_drilling_hours
-        if cfg is not None:
-            prefer_summary_candidate = getattr(
-                cfg, "prefer_removal_drilling_hours", None
-            )
-            if prefer_summary_candidate is not None:
-                prefer_drill_summary = bool(prefer_summary_candidate)
-        if prefer_drill_summary:
-            drill_minutes_extra = _coerce_float_or_none(extra_map.get("drill_total_minutes"))
-            if drill_minutes_extra is not None:
-                override_hours_val = round(minutes_to_hours(drill_minutes_extra), 2)
-                hour_summary_map["Drilling"] = override_hours_val
-                hour_summary_map["drilling"] = override_hours_val
-                if isinstance(hour_summary_entries, dict):
-                    for label_key in ("Drilling", "drilling"):
-                        existing_entry = hour_summary_entries.get(label_key)
-                        include_flag = True
-                        if isinstance(existing_entry, tuple) and len(existing_entry) == 2:
-                            include_flag = bool(existing_entry[1])
-                        hour_summary_entries[label_key] = (
-                            override_hours_val,
-                            include_flag,
-                        )
-
-        # Legacy logging compared multiple hour sources that have since been
-        # removed. Minutes now flow from buckets, so avoid emitting the
-        # diagnostic line that referenced stale hour data.
 
     if misc_total > 0:
         process_table.had_rows = True
