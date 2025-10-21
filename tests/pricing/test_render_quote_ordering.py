@@ -250,7 +250,7 @@ def test_explain_quote_reports_drilling_minutes_from_removal_card() -> None:
     explanation = explain_quote(breakdown, render_state=render_state)
 
     assert "Main cost drivers: Drilling $90.00." in explanation
-    assert "Cost drivers derive from planner buckets; no single dominant bucket." not in explanation
+    assert "Main cost drivers derive from planner buckets; none dominate." not in explanation
 
 
 def test_explain_quote_skips_legacy_drilling_text_when_bucket_present() -> None:
@@ -276,4 +276,4 @@ def test_explain_quote_reports_no_drilling_when_minutes_absent() -> None:
 
     explanation = explain_quote(breakdown, render_state={"extra": {}})
 
-    assert "Cost drivers derive from planner buckets; no single dominant bucket." in explanation
+    assert "Main cost drivers derive from planner buckets; none dominate." in explanation

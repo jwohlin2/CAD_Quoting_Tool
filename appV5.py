@@ -346,6 +346,109 @@ def _seed_bucket_minutes_cost(
     entry["total$"] = round(entry["machine$"] + entry["labor$"], 2)
 
 
+def _normalize_buckets(
+    bucket_view: MutableMapping[str, Any] | Mapping[str, Any] | None,
+) -> None:
+    """Deduplicate bucket entries when aliases collide."""
+
+    if not isinstance(bucket_view, (_MutableMappingABC, dict)):
+        return
+
+    try:
+        buckets_obj = bucket_view.get("buckets")  # type: ignore[attr-defined]
+    except Exception:
+        buckets_obj = None
+
+    if isinstance(buckets_obj, dict):
+        buckets: dict[str, Any] = buckets_obj
+    elif isinstance(buckets_obj, _MappingABC):
+        try:
+            buckets = dict(buckets_obj)
+        except Exception:
+            return
+        bucket_view["buckets"] = buckets
+    else:
+        return
+
+    canonical_to_key: dict[str, str] = {}
+
+    for raw_key in list(buckets.keys()):
+        canon = _canonical_bucket_key(raw_key) or str(raw_key)
+        entry_raw = buckets.get(raw_key)
+        if isinstance(entry_raw, dict):
+            entry = entry_raw
+        elif isinstance(entry_raw, _MappingABC):
+            entry = dict(entry_raw)
+            buckets[raw_key] = entry
+        else:
+            entry = {}
+            buckets[raw_key] = entry
+
+        if canon not in canonical_to_key:
+            canonical_to_key[canon] = raw_key
+            continue
+
+        preferred_key = canonical_to_key[canon]
+        preferred_entry_raw = buckets.get(preferred_key)
+        if isinstance(preferred_entry_raw, dict):
+            preferred_entry = preferred_entry_raw
+        elif isinstance(preferred_entry_raw, _MappingABC):
+            preferred_entry = dict(preferred_entry_raw)
+            buckets[preferred_key] = preferred_entry
+        else:
+            preferred_entry = {}
+            buckets[preferred_key] = preferred_entry
+
+        for field, precision in (
+            ("minutes", 2),
+            ("machine$", 2),
+            ("labor$", 2),
+            ("total$", 2),
+            ("machine_cost", 2),
+            ("labor_cost", 2),
+            ("total_cost", 2),
+            ("hr", 3),
+        ):
+            if field not in entry:
+                continue
+            try:
+                value = float(entry.get(field) or 0.0)
+            except Exception:
+                continue
+            if not math.isfinite(value):
+                continue
+            if abs(value) <= 0.0:
+                continue
+            preferred_entry[field] = round(value, precision)
+
+        if raw_key != preferred_key:
+            del buckets[raw_key]
+
+    order_obj = bucket_view.get("order") if isinstance(bucket_view, dict) else None
+    if order_obj is None and isinstance(bucket_view, _MutableMappingABC):
+        try:
+            order_obj = bucket_view.get("order")
+        except Exception:
+            order_obj = None
+
+    if isinstance(order_obj, list):
+        new_order: list[str] = []
+        seen: set[str] = set()
+        for label in order_obj:
+            if not isinstance(label, str):
+                continue
+            canon = _canonical_bucket_key(label) or label
+            preferred_key = canonical_to_key.get(canon)
+            actual_key = preferred_key if preferred_key in buckets else label
+            if actual_key in buckets and actual_key not in seen:
+                new_order.append(actual_key)
+                seen.add(actual_key)
+        for preferred_key in canonical_to_key.values():
+            if preferred_key in buckets and preferred_key not in seen:
+                new_order.append(preferred_key)
+                seen.add(preferred_key)
+        bucket_view["order"] = new_order
+
 def _emit_hole_table_ops_cards(
     lines: list[str],
     *,
@@ -435,6 +538,8 @@ def _emit_hole_table_ops_cards(
             labor_rate_per_hr=float(tap_lrate or 0.0),
         )
 
+        _normalize_buckets(bucket_view_obj)
+
         dbg_entry: Mapping[str, Any] | None = None
         try:
             if isinstance(bucket_view_obj, _MappingABC):
@@ -456,31 +561,21 @@ from cad_quoter.llm_overrides import (
     clamp,
 )
 
-if TYPE_CHECKING:
-    from cad_quoter_pkg.src.cad_quoter.domain import (
-        QuoteState,
-        HARDWARE_PASS_LABEL,
-        _canonical_pass_label,
-        coerce_bounds,
-        build_suggest_payload,
-        overrides_to_suggestions,
-        suggestions_to_overrides,
-    )
-else:
-    from cad_quoter.domain import (
-        QuoteState,
-        HARDWARE_PASS_LABEL,
-        _canonical_pass_label,
-        coerce_bounds,
-        build_suggest_payload,
-        overrides_to_suggestions,
-        suggestions_to_overrides,
-    )
+from cad_quoter.domain import (
+    HARDWARE_PASS_LABEL,
+    _canonical_pass_label,
+    coerce_bounds,
+    build_suggest_payload,
+    overrides_to_suggestions,
+    suggestions_to_overrides,
+)
 
-if TYPE_CHECKING:
-    from cad_quoter_pkg.src.cad_quoter.vendors import ezdxf as _ezdxf_vendor
-else:
-    from cad_quoter.vendors import ezdxf as _ezdxf_vendor
+try:  # pragma: no cover - import shim for static analysers in the dev layout
+    from cad_quoter.domain import QuoteState
+except ImportError:  # pragma: no cover - fallback when namespace package is not resolved
+    from cad_quoter_pkg.src.cad_quoter.domain_models.state import QuoteState
+
+from cad_quoter.vendors import ezdxf as _ezdxf_vendor
 
 from cad_quoter.geometry.dxf_enrich import (
     detect_units_scale as _shared_detect_units_scale,
@@ -492,7 +587,13 @@ from cad_quoter.geometry.dxf_enrich import (
 from cad_quoter.pricing.process_buckets import BUCKET_ROLE, PROCESS_BUCKETS, bucketize
 
 import cad_quoter.geometry as geometry
-from cad_quoter.geometry import upsert_var_row as geometry_upsert_var_row
+
+try:  # pragma: no cover - make the helper visible when namespace package resolution fails
+    from cad_quoter.geometry import upsert_var_row as geometry_upsert_var_row
+except ImportError:  # pragma: no cover - fallback for editors that skip namespace package hooks
+    from cad_quoter_pkg.src.cad_quoter.geometry import (
+        upsert_var_row as geometry_upsert_var_row,
+    )
 
 geometry = typing.cast(typing.Any, geometry)
 
@@ -617,6 +718,7 @@ from cad_quoter.ui.planner_render import (
     _extract_bucket_map,
     _process_label,
     _seed_bucket_minutes as _planner_seed_bucket_minutes,
+    _normalize_buckets,
     _split_hours_for_bucket,
     _sync_drilling_bucket_view,
     _charged_hours_by_bucket,
@@ -1253,6 +1355,8 @@ def _compute_drilling_removal_section(
                 labor_rate_per_hr=drill_lrate,
             )
 
+            _normalize_buckets(bucket_view_obj)
+
             dbg_entry: Mapping[str, Any] | None = None
             if isinstance(bucket_view_obj, _MappingABC):
                 try:
@@ -1268,6 +1372,8 @@ def _compute_drilling_removal_section(
             _push(lines, f"[DEBUG] drilling_bucket={dbg_entry}")
 
             return extras, lines, updated_plan_summary
+
+    _normalize_buckets(bucket_view_obj)
 
     return extras, lines, updated_plan_summary
 
@@ -1988,23 +2094,40 @@ from cad_quoter.geo2d.apply import apply_2d_features_to_variables
 _LABOR_SECTION_ABS_EPSILON = 0.51
 _PLANNER_BUCKET_ABS_EPSILON = 0.51
 
-from cad_quoter.domain_models import (
-    DEFAULT_MATERIAL_DISPLAY,
-    DEFAULT_MATERIAL_KEY,
-    MATERIAL_DENSITY_G_CC_BY_KEY,
-    MATERIAL_DENSITY_G_CC_BY_KEYWORD,
-    MATERIAL_DISPLAY_BY_KEY,
-    MATERIAL_DROPDOWN_OPTIONS,
-    MATERIAL_KEYWORDS,
-    MATERIAL_MAP,
-    MATERIAL_OTHER_KEY,
-)
-from cad_quoter.domain_models import (
-    coerce_float_or_none as _coerce_float_or_none,
-)
-from cad_quoter.domain_models import (
-    normalize_material_key,
-)
+try:  # pragma: no cover - ensure static analysers can resolve the re-exported constants
+    from cad_quoter.domain_models import (
+        DEFAULT_MATERIAL_DISPLAY,
+        DEFAULT_MATERIAL_KEY,
+        MATERIAL_DENSITY_G_CC_BY_KEY,
+        MATERIAL_DENSITY_G_CC_BY_KEYWORD,
+        MATERIAL_DISPLAY_BY_KEY,
+        MATERIAL_DROPDOWN_OPTIONS,
+        MATERIAL_KEYWORDS,
+        MATERIAL_MAP,
+        MATERIAL_OTHER_KEY,
+    )
+    from cad_quoter.domain_models import (
+        coerce_float_or_none as _coerce_float_or_none,
+    )
+    from cad_quoter.domain_models import (
+        normalize_material_key,
+    )
+except ImportError:  # pragma: no cover - fallback when namespace package merging is bypassed
+    from cad_quoter_pkg.src.cad_quoter.domain_models.materials import (
+        DEFAULT_MATERIAL_DISPLAY,
+        DEFAULT_MATERIAL_KEY,
+        MATERIAL_DENSITY_G_CC_BY_KEY,
+        MATERIAL_DENSITY_G_CC_BY_KEYWORD,
+        MATERIAL_DISPLAY_BY_KEY,
+        MATERIAL_DROPDOWN_OPTIONS,
+        MATERIAL_KEYWORDS,
+        MATERIAL_MAP,
+        MATERIAL_OTHER_KEY,
+        normalize_material_key,
+    )
+    from cad_quoter_pkg.src.cad_quoter.domain_models import (
+        coerce_float_or_none as _coerce_float_or_none,
+    )
 from cad_quoter.domain_models.values import safe_float as _safe_float, to_float, to_int
 from cad_quoter.utils import coerce_bool, compact_dict, jdump, json_safe_copy, sdict
 from cad_quoter.utils.text import _match_items_contains
@@ -5309,9 +5432,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if extra_map_candidate is not None and extra_map_candidate not in drill_minutes_extra_targets:
             drill_minutes_extra_targets.append(extra_map_candidate)
 
-    _push(lines, "Process & Labor Costs")
-    _push(lines, divider)
-
     canonical_bucket_order: list[str] = []
     canonical_bucket_summary: dict[str, dict[str, float]] = {}
     bucket_table_rows: list[tuple[str, float, float, float, float]] = []
@@ -6590,20 +6710,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             pl_mac = residual_machine
 
         planner_total_hr = round(max(total_planner_hours, pl_lab + pl_mac), 2)
-        if planner_total_hr > 0.0:
-            _record_hour_entry("Planner Total", planner_total_hr)
-        if pl_lab > 0.0:
-            _record_hour_entry(
-                "Planner Labor",
-                round(pl_lab, 2),
-                include_in_total=False,
-            )
-        if pl_mac > 0.0:
-            _record_hour_entry(
-                "Planner Machine",
-                round(pl_mac, 2),
-                include_in_total=False,
-            )
+        # Planner-specific summaries are now handled through the bucket table.
 
     if (not planner_mode) or len(hour_summary_entries) == planner_entry_baseline:
         if charged_hour_entries:
@@ -10212,6 +10319,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 labor_rate_per_hr=float(drill_labor_rate_seed or 0.0),
             )
 
+            _normalize_buckets(bucket_view)
+
             drilling_dbg_entry: Mapping[str, Any] | None = None
             try:
                 buckets_dbg = bucket_view.get("buckets") if isinstance(bucket_view, dict) else None
@@ -10228,20 +10337,22 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     if roughing_hours is None:
         roughing_hours = _coerce_float_or_none(value_map.get("Roughing Cycle Time (hr)"))
     milling_rate = _lookup_rate("MillingRate", rates, params, default_rates, fallback=100.0)
-    if roughing_hours and roughing_hours > 0:
+    milling_hours = float(roughing_hours or 0.0)
+    if milling_hours > 0:
+        milling_minutes_total = milling_hours * 60.0
         bucket_view["milling"] = {
-            "minutes": roughing_hours * 60.0,
-            "machine_cost": roughing_hours * milling_rate,
+            "minutes": milling_minutes_total,
+            "machine_cost": milling_hours * milling_rate,
             "labor_cost": 0.0,
         }
         process_meta["milling"] = {
-            "hr": roughing_hours,
-            "minutes": roughing_hours * 60.0,
+            "hr": milling_hours,
+            "minutes": milling_minutes_total,
             "rate": milling_rate,
             "basis": ["planner_milling_backfill"],
         }
 
-        milling_minutes_seed = float(roughing_hours * 60.0)
+        milling_minutes_seed = float(milling_minutes_total)
         milling_machine_rate_seed = float(milling_rate or 0.0)
         milling_labor_rate_seed = (
             _lookup_bucket_rate("milling_labor", rates)
@@ -10256,6 +10367,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             machine_rate_per_hr=milling_machine_rate_seed,
             labor_rate_per_hr=float(milling_labor_rate_seed or 0.0),
         )
+
+        _normalize_buckets(bucket_view)
 
         milling_dbg_entry: Mapping[str, Any] | None = None
         try:
