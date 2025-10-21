@@ -1479,6 +1479,61 @@ def _compute_drilling_removal_section(
                 drill_lrate,
             )
 
+            summary_target: MutableMapping[str, Any]
+            if isinstance(updated_plan_summary, _MutableMappingABC):
+                summary_target = typing.cast(MutableMapping[str, Any], updated_plan_summary)
+            elif isinstance(updated_plan_summary, dict):
+                summary_target = updated_plan_summary
+            elif isinstance(updated_plan_summary, _MappingABC):
+                summary_target = dict(updated_plan_summary)
+            elif isinstance(process_plan_summary, _MutableMappingABC):
+                summary_target = typing.cast(MutableMapping[str, Any], process_plan_summary)
+            elif isinstance(process_plan_summary, dict):
+                summary_target = process_plan_summary
+            elif isinstance(process_plan_summary, _MappingABC):
+                summary_target = dict(process_plan_summary)
+            else:
+                summary_target = {}
+            updated_plan_summary = summary_target
+
+            drilling_summary_map = summary_target.setdefault("drilling", {})
+            if isinstance(drilling_summary_map, _MutableMappingABC):
+                drilling_summary = typing.cast(MutableMapping[str, Any], drilling_summary_map)
+            elif isinstance(drilling_summary_map, dict):
+                drilling_summary = drilling_summary_map
+                summary_target["drilling"] = drilling_summary
+            else:
+                drilling_summary = {}
+                summary_target["drilling"] = drilling_summary
+
+            drilling_summary["total_minutes_billed"] = float(drill_minutes_total)
+            drilling_summary["source"] = "removal_card"
+
+            buckets_for_cleanup: Mapping[str, Any] | None = None
+            if isinstance(bucket_view_obj, (_MappingABC, dict)):
+                try:
+                    buckets_for_cleanup = bucket_view_obj.get("buckets")
+                except Exception:
+                    buckets_for_cleanup = None
+
+            drilling_bucket_entry: MutableMapping[str, Any] | dict[str, Any] | None = None
+            if isinstance(buckets_for_cleanup, _MutableMappingABC):
+                candidate = buckets_for_cleanup.get("drilling")
+                if isinstance(candidate, _MutableMappingABC):
+                    drilling_bucket_entry = typing.cast(MutableMapping[str, Any], candidate)
+                elif isinstance(candidate, dict):
+                    drilling_bucket_entry = candidate
+            elif isinstance(buckets_for_cleanup, dict):
+                candidate = buckets_for_cleanup.get("drilling")
+                if isinstance(candidate, dict):
+                    drilling_bucket_entry = candidate
+                elif isinstance(candidate, _MutableMappingABC):
+                    drilling_bucket_entry = typing.cast(MutableMapping[str, Any], candidate)
+
+            if isinstance(drilling_bucket_entry, (_MutableMappingABC, dict)):
+                drilling_bucket_entry.pop("synced_minutes", None)
+                drilling_bucket_entry.pop("synced_hours", None)
+
             drilling_bucket = None
             if isinstance(bucket_view_obj, (_MappingABC, dict)):
                 drilling_bucket = (bucket_view_obj.get("buckets") or {}).get("drilling")
@@ -3721,42 +3776,102 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         else:
             buckets = {}
 
-        label = {
-            "programming": "Programming (amortized)",
-            "milling": "Milling",
-            "drilling": "Drilling",
-            "tapping": "Tapping",
-            "counterbore": "Counterbore",
-            "spot_drill": "Spot-Drill",
-            "jig_grind": "Jig-Grind",
-            "inspection": "Inspection",
-        }
         order = [
             "programming",
+            "programming_amortized",
             "milling",
+            "turning",
             "drilling",
             "tapping",
             "counterbore",
+            "countersink",
             "spot_drill",
+            "grinding",
             "jig_grind",
+            "finishing_deburr",
+            "saw_waterjet",
+            "wire_edm",
+            "sinker_edm",
+            "assembly",
             "inspection",
         ]
 
         lines.append("Process & Labor Costs")
         lines.append("-" * 74)
-        total_cost = 0.0
+        table_rows: list[tuple[str, float, float, float, float]] = []
         seen: set[str] = set()
         for k in list(order) + [k for k in buckets if k not in order]:
             e = buckets.get(k)
             if not isinstance(e, _MappingABC) or k in seen:
                 continue
             seen.add(k)
-            tot = _as_float(e.get("total$"), 0.0)
-            total_cost += tot
-            lines.append(f"  {label.get(k, k).ljust(28)}${tot:>10,.2f}")
-        lines.append(" " * 66 + "-------")
-        lines.append(f"  Total{' '*58}${total_cost:>10,.2f}")
-        lines.append("")
+            minutes_val = max(0.0, _as_float(e.get("minutes"), 0.0))
+            machine_val = max(0.0, _as_float(e.get("machine$"), 0.0))
+            labor_val = max(0.0, _as_float(e.get("labor$"), 0.0))
+            total_val = round(machine_val + labor_val, 2)
+            canon_key = _canonical_bucket_key(str(k)) or _normalize_bucket_key(str(k)) or str(k)
+            display_label = _display_bucket_label(canon_key, label_overrides)
+            if not display_label:
+                display_label = str(k)
+
+            table_rows.append(
+                (
+                    display_label,
+                    minutes_val,
+                    machine_val,
+                    labor_val,
+                    total_val,
+                )
+            )
+
+        total_cost = sum(row[4] for row in table_rows)
+
+        if table_rows:
+            headers = ("Process", "Minutes", "Machine $", "Labor $", "Total $")
+            display_rows: list[tuple[str, str, str, str, str]] = []
+            for name, minutes_val, machine_val, labor_val, total_val in table_rows:
+                display_rows.append(
+                    (
+                        str(name),
+                        f"{minutes_val:,.2f}",
+                        _m(machine_val),
+                        _m(labor_val),
+                        _m(total_val),
+                    )
+                )
+
+            total_row = ("Total", "", "", "", _m(total_cost))
+            width_candidates = display_rows + [total_row]
+            col_widths = [len(header) for header in headers]
+            for row_values in width_candidates:
+                for idx, value in enumerate(row_values):
+                    col_widths[idx] = max(col_widths[idx], len(value))
+
+            def _format_row(values: Sequence[str]) -> str:
+                pieces: list[str] = []
+                for idx, value in enumerate(values):
+                    align = "L" if idx == 0 else "R"
+                    width = col_widths[idx]
+                    if align == "L":
+                        pieces.append(value.ljust(width))
+                    else:
+                        pieces.append(value.rjust(width))
+                return "  " + "  ".join(pieces)
+
+            header_line = _format_row(headers)
+            separator_line = "  " + "  ".join("-" * width for width in col_widths)
+            lines.append(header_line)
+            lines.append(separator_line)
+            for row in display_rows:
+                lines.append(_format_row(row))
+            lines.append(separator_line)
+            lines.append(_format_row(total_row))
+            for display_label, *_ in table_rows:
+                add_process_notes(display_label)
+            lines.append("")
+        else:
+            lines.append("  (no bucket data)")
+            lines.append("")
 
     def _is_extra_segment(segment: str) -> bool:
         try:
@@ -4169,6 +4284,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     label_overrides = {
         "finishing_deburr": "Finishing/Deburr",
         "saw_waterjet": "Saw/Waterjet",
+        "programming": PROGRAMMING_PER_PART_LABEL,
+        "programming_amortized": PROGRAMMING_PER_PART_LABEL,
     }
 
     # Process & Labor table rendered later using the canonical planner bucket view
@@ -6447,23 +6564,23 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                             drilling_meta_for_guard.get("total_minutes_billed")
                             or 0.0
                         )
+                    except (TypeError, ValueError):
+                        card_minutes_guard = None
+                    try:
                         row_minutes_guard = float(
                             drilling_bucket_guard.get("minutes") or 0.0
                         )
                     except (TypeError, ValueError):
-                        card_minutes_guard = row_minutes_guard = None
-                    # Legacy guardrails relied on a sync path; retain the sanity check without forcing overrides.
+                        row_minutes_guard = None
                     if (
                         card_minutes_guard is not None
-                        and row_minutes_guard is not None
-                        and abs(card_minutes_guard - row_minutes_guard) > 0.6
+                        and card_minutes_guard > 0.0
+                        and (row_minutes_guard is None or row_minutes_guard <= 0.0)
                     ):
                         card_minutes_display = round(card_minutes_guard, 2)
-                        row_minutes_display = round(row_minutes_guard, 2)
                         logger.warning(
-                            "[minutes] Drilling minutes diverge: card %.2f vs row %.2f",
+                            "[minutes] Drilling bucket missing minutes; planner shows %.2f",
                             card_minutes_display,
-                            row_minutes_display,
                         )
 
             assert (
