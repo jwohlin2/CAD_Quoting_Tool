@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from collections import Counter
 from collections.abc import Iterable, Mapping, MutableMapping
@@ -11,6 +12,7 @@ from typing import Any, Callable
 
 from .chart_lines import (
     _build_ops_rows_from_lines_fallback as _chart_build_ops_rows_from_lines_fallback,
+    collect_chart_lines_context as _collect_chart_lines_context,
 )
 
 
@@ -61,6 +63,114 @@ TAP_MINUTES_BY_CLASS = {
 
 CBORE_MIN_PER_SIDE_MIN = 0.15
 CSK_MIN_PER_SIDE_MIN = 0.12
+
+_SPOT_TOKENS = re.compile(r"(?:C['’]?\s*DRILL|CENTER\s*DRILL|SPOT\s*DRILL|SPOT)", re.I)
+_THREAD_WITH_TPI_RE = re.compile(
+    r"((?:#\d+)|(?:\d+/\d+)|(?:\d+(?:\.\d+)?))\s*-\s*(\d+)",
+    re.I,
+)
+_THREAD_WITH_NPT_RE = re.compile(
+    r"((?:#\d+)|(?:\d+/\d+)|(?:\d+(?:\.\d+)?))\s*-\s*(N\.?P\.?T\.?)",
+    re.I,
+)
+_CBORE_RE = re.compile(
+    r"(?:^|[ ;])(?:Ø|⌀|DIA)?\s*((?:\d+\s*/\s*\d+)|(?:\d+(?:\.\d+)?))\s*(?:C['’]?\s*BORE|CBORE|COUNTER\s*BORE)",
+    re.I,
+)
+_SIDE_BACK = re.compile(r"\b(?:FROM\s+)?BACK\b", re.I)
+_SIDE_FRONT = re.compile(r"\b(?:FROM\s+)?FRONT\b", re.I)
+_DEPTH_TOKEN = re.compile(r"[×xX]\s*([0-9.]+)\b")
+_DIA_TOKEN = re.compile(
+    r"(?:Ø|⌀|REF|DIA)[^0-9]*((?:\d+\s*/\s*\d+)|(?:\d+)?\.\d+|\d+(?:\.\d+)?)",
+    re.I,
+)
+
+
+def _parse_ref_to_inch(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            val = float(value)
+        except Exception:
+            return None
+        return val if math.isfinite(val) and val > 0 else None
+    text = str(value).strip()
+    if not text:
+        return None
+    cleaned = (
+        text.replace("\u00D8", "")
+        .replace("Ø", "")
+        .replace("⌀", "")
+        .replace("IN", "")
+        .replace("in", "")
+        .strip("\"' ")
+    )
+    if not cleaned:
+        return None
+    try:
+        if "/" in cleaned:
+            return float(Fraction(cleaned))
+        return float(cleaned)
+    except Exception:
+        try:
+            return float(Fraction(cleaned))
+        except Exception:
+            return None
+
+
+def _rows_from_ops_summary(
+    geo: Mapping[str, Any] | None,
+    *,
+    result: Mapping[str, Any] | None = None,
+    breakdown: Mapping[str, Any] | None = None,
+) -> list[dict]:
+    geo_map: Mapping[str, Any] = geo if isinstance(geo, _MappingABC) else {}
+    ops = (geo_map or {}).get("ops_summary") or {}
+    rows = ops.get("rows") if isinstance(ops, dict) else None
+    if rows:
+        return list(rows)
+    if isinstance(ops, dict):
+        detail = ops.get("rows_detail")
+        if isinstance(detail, list):
+            fallback: list[dict[str, Any]] = []
+            for entry in detail:
+                if not isinstance(entry, _MappingABC):
+                    continue
+                base = {
+                    "hole": entry.get("hole", ""),
+                    "ref": entry.get("ref", ""),
+                    "qty": entry.get("qty", 0),
+                    "desc": entry.get("desc", ""),
+                }
+                if entry.get("diameter_in") is not None:
+                    base["diameter_in"] = entry.get("diameter_in")
+                fallback.append(base)
+            if fallback:
+                return fallback
+    _containers: list[dict] = []
+    for candidate in (result, breakdown, geo_map):
+        if isinstance(candidate, dict):
+            _containers.append(candidate)
+        elif isinstance(candidate, _MappingABC):
+            try:
+                _containers.append(dict(candidate))
+            except Exception:
+                continue
+    chart_lines = _collect_chart_lines_context(*_containers)
+    if chart_lines:
+        fallback_rows = _chart_build_ops_rows_from_lines_fallback(chart_lines)
+        if fallback_rows:
+            return fallback_rows
+    return []
+
+
+def _side_of(desc: str) -> str:
+    if _SIDE_BACK.search(desc or ""):
+        return "BACK"
+    if _SIDE_FRONT.search(desc or ""):
+        return "FRONT"
+    return "FRONT"
 
 
 def _major_diameter_from_thread(spec: str) -> float | None:
@@ -635,6 +745,17 @@ __all__ = [
     "TAP_MINUTES_BY_CLASS",
     "CBORE_MIN_PER_SIDE_MIN",
     "CSK_MIN_PER_SIDE_MIN",
+    "_SPOT_TOKENS",
+    "_THREAD_WITH_TPI_RE",
+    "_THREAD_WITH_NPT_RE",
+    "_CBORE_RE",
+    "_SIDE_BACK",
+    "_SIDE_FRONT",
+    "_DEPTH_TOKEN",
+    "_DIA_TOKEN",
+    "_parse_ref_to_inch",
+    "_rows_from_ops_summary",
+    "_side_of",
     "_major_diameter_from_thread",
     "_classify_thread_spec",
     "_normalize_hole_text",
