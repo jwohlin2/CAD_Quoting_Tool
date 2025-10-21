@@ -13,32 +13,6 @@ Single-file CAD Quoter (v8)
 """
 from __future__ import annotations
 
-# ----- safe append to the current quote buffer -----
-def _push(_lines, text):
-    try:
-        if isinstance(_lines, list):
-            _lines.append(str(text))
-        else:
-            print(str(text))
-    except Exception:
-        pass
-
-
-# ----- tiny context helpers -----
-def _first_dict(*cands):
-    for c in cands:
-        if isinstance(c, dict) and c:
-            return c
-    return {}
-
-
-def _get_geo_map(*cands):
-    for c in cands:
-        if isinstance(c, dict) and isinstance(c.get("geo"), dict):
-            return c["geo"]
-    return {}
-
-
 def _coerce_positive_float(value: Any) -> float | None:
     """Return a positive finite float or None."""
     try:
@@ -258,49 +232,6 @@ def _apply_drilling_meta_fallback(
         pass
 
     return (deep, std)
-
-
-def _iter_geo_dicts_for_context(root: Mapping[str, Any] | None) -> Iterable[Mapping[str, Any]]:
-    """Yield candidate geo-like dicts to inspect for drilling groups.
-
-    Walks shallow nests commonly used in this app: the root mapping, any
-    nested ``geo`` mapping, and the ``result``/``breakdown`` maps plus their
-    ``geo`` children when present. Deduplicates by object id.
-    """
-
-    seen: set[int] = set()
-
-    def _push(obj: Any) -> None:
-        if isinstance(obj, _MappingABC):
-            oid = id(obj)
-            if oid not in seen:
-                seen.add(oid)
-                stack.append(obj)
-
-    stack: list[Mapping[str, Any]] = []
-    _push(root)
-
-    while stack:
-        ctx = stack.pop(0)
-        yield ctx
-        _push(ctx.get("geo"))
-        res = ctx.get("result")
-        brk = ctx.get("breakdown")
-        _push(res)
-        _push(brk)
-        if isinstance(res, _MappingABC):
-            _push(res.get("geo"))
-        if isinstance(brk, _MappingABC):
-            _push(brk.get("geo"))
-
-
-def _get_material_group(*cands):
-    for c in cands:
-        if isinstance(c, dict) and c.get("material_group"):
-            return c["material_group"]
-    return None
-
-
 import copy
 import csv
 import importlib
@@ -7693,6 +7624,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     if hour_summary_entries:
         def _canonical_hour_label(value: Any) -> tuple[str, str]:
+            import re
+
             text = str(value or "")
             text = re.sub(r"\s+", " ", text).strip()
             canonical = text.casefold()
