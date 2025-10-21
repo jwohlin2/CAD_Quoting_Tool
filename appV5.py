@@ -38,7 +38,7 @@ import re
 import time
 import typing
 from functools import cmp_to_key, lru_cache
-from typing import Any, Mapping, MutableMapping, TYPE_CHECKING, TypeAlias
+from typing import Any, Mapping, MutableMapping, Sequence, TYPE_CHECKING, TypeAlias
 from collections import Counter, defaultdict
 from collections.abc import (
     Callable,
@@ -337,20 +337,94 @@ def _emit_hole_table_ops_cards(
     breakdown: Mapping[str, Any] | MutableMapping[str, Any] | None = None,
     rates: Mapping[str, Any] | None = None,
 ) -> None:
-    """Minimal no-op renderer for hole-table derived ops cards.
-
-    Accepts the legacy signature and returns quietly to avoid duplicate
-    sections. The main removal section handles drilling/tapping/cbore details.
-    """
+    """Render hole-table derived operation cards (tapping first pass)."""
 
     try:
-        ops = ((geo or {}).get("ops_summary") or {}) if isinstance(geo, _MappingABC) else {}
-        rows = ops.get("rows") if isinstance(ops, dict) else None
-        if not isinstance(rows, list) or not rows:
+        ops_summary = ((geo or {}).get("ops_summary") or {}) if isinstance(geo, _MappingABC) else {}
+        rows_obj: Any = ops_summary.get("rows") if isinstance(ops_summary, _MappingABC) else None
+        if not rows_obj:
             return
-        # No-op: keep compatibility without rendering duplicate content
-        return
-    except Exception:
+
+        if not isinstance(rows_obj, list):
+            try:
+                rows_list = list(rows_obj)
+            except Exception:
+                return
+            if isinstance(ops_summary, (_MutableMappingABC, dict)):
+                typing.cast(MutableMapping[str, Any], ops_summary)["rows"] = rows_list
+            rows = rows_list
+        else:
+            rows = rows_obj
+
+        if not rows:
+            return
+
+        thickness_in = _resolve_part_thickness_in(
+            geo,
+            (breakdown.get("geo") if isinstance(breakdown, _MappingABC) else None),
+            (result.get("geo") if isinstance(result, _MappingABC) else None),
+        )
+
+        tap_rows = _finalize_tapping_rows(rows, thickness_in=thickness_in)
+        if not tap_rows:
+            return
+
+        tap_total_min = _render_ops_card(
+            lambda text: _push(lines, text),
+            title="Material Removal – Tapping",
+            rows=tap_rows,
+        )
+
+        tap_total_min = float(tap_total_min or 0.0)
+
+        try:
+            if isinstance(ops_summary, (_MutableMappingABC, dict)):
+                typing.cast(MutableMapping[str, Any], ops_summary)["tap_minutes_total"] = tap_total_min
+        except Exception:
+            pass
+
+        bucket_view_obj: MutableMapping[str, Any] | Mapping[str, Any] | None = None
+        try:
+            if isinstance(breakdown, dict):
+                bucket_view_obj = breakdown.setdefault("bucket_view", {})
+            elif isinstance(breakdown, _MutableMappingABC):
+                bucket_view_obj = typing.cast(
+                    MutableMapping[str, Any],
+                    breakdown.setdefault("bucket_view", {}),
+                )
+            elif isinstance(breakdown, _MappingABC):
+                bucket_view_obj = typing.cast(Mapping[str, Any], breakdown.get("bucket_view"))
+        except Exception:
+            bucket_view_obj = None
+
+        tap_mrate = (
+            _lookup_bucket_rate("tapping", rates)
+            or _lookup_bucket_rate("machine", rates)
+            or 45.0
+        )
+        tap_lrate = (
+            _lookup_bucket_rate("tapping_labor", rates)
+            or _lookup_bucket_rate("labor", rates)
+            or 45.0
+        )
+
+        _seed_bucket_minutes_cost(
+            bucket_view_obj,
+            "tapping",
+            tap_total_min,
+            machine_rate_per_hr=float(tap_mrate or 0.0),
+            labor_rate_per_hr=float(tap_lrate or 0.0),
+        )
+
+        dbg_entry: Mapping[str, Any] | None = None
+        try:
+            if isinstance(bucket_view_obj, _MappingABC):
+                dbg_entry = (bucket_view_obj.get("buckets") or {}).get("tapping")  # type: ignore[assignment]
+        except Exception:
+            dbg_entry = None
+        _push(lines, f"[DEBUG] tapping_bucket={dbg_entry or {}}")
+    except Exception as exc:
+        _push(lines, f"[DEBUG] tapping_emit_skipped={exc.__class__.__name__}: {exc}")
         return
 from cad_quoter.estimators import drilling_legacy as _drilling_legacy
 from cad_quoter.estimators.base import SpeedsFeedsUnavailableError
@@ -690,6 +764,33 @@ def _derive_major_dia_in(thread_str: str) -> float:
     return 0.25
 
 
+def _resolve_part_thickness_in(
+    *contexts: Mapping[str, Any] | MutableMapping[str, Any] | None,
+    default: float = 2.0,
+) -> float:
+    """Best-effort thickness lookup from nested geo/breakdown contexts."""
+
+    def _maybe_t(container: Mapping[str, Any] | MutableMapping[str, Any] | None) -> float | None:
+        if not isinstance(container, _MappingABC):
+            return None
+        t_val = _coerce_positive_float(container.get("t"))
+        return float(t_val) if t_val else None
+
+    for ctx in contexts:
+        if not isinstance(ctx, _MappingABC):
+            continue
+        for nested_key in ("required_blank_in", "bbox_in"):
+            nested = ctx.get(nested_key)
+            t_guess = _maybe_t(nested if isinstance(nested, _MappingABC) else None)
+            if t_guess:
+                return t_guess
+        for key in ("thickness_in", "thk_in", "thickness", "t"):
+            t_guess = _coerce_positive_float(ctx.get(key))
+            if t_guess:
+                return float(t_guess)
+    return float(default)
+
+
 def _finalize_tap_row(row: dict[str, Any], thickness_in: float) -> None:
     thread = row.get("thread") or row.get("desc") or ""
     ipr = _thread_ipr(thread)
@@ -727,6 +828,45 @@ def _finalize_tap_row(row: dict[str, Any], thickness_in: float) -> None:
     row["feed_fmt"] = f'{row["ipr"]:.4f} ipr | {row["rpm"]} rpm | {row["ipm"]:.3f} ipm'
     row["depth_in"] = float(depth_in)
     row["depth_in_display"] = f'{float(depth_in):.2f}"'
+
+
+def _finalize_tapping_rows(
+    rows: Sequence[Any],
+    *,
+    thickness_in: float,
+) -> list[MutableMapping[str, Any]]:
+    """Normalize and finalize tapping rows, returning the mutable set."""
+
+    finalized: list[MutableMapping[str, Any]] = []
+    if not rows:
+        return finalized
+
+    for idx, entry in enumerate(rows):
+        row_map: MutableMapping[str, Any] | None
+        if isinstance(entry, dict):
+            row_map = typing.cast(MutableMapping[str, Any], entry)
+        elif isinstance(entry, _MutableMappingABC):
+            row_map = typing.cast(MutableMapping[str, Any], entry)
+        elif isinstance(entry, _MappingABC):
+            try:
+                row_dict = dict(entry)
+            except Exception:
+                continue
+            row_map = typing.cast(MutableMapping[str, Any], row_dict)
+            try:
+                rows[idx] = row_dict  # type: ignore[index]
+            except Exception:
+                pass
+        else:
+            continue
+
+        desc_text = str(row_map.get("desc", "") or "").upper()
+        if "TAP" not in desc_text:
+            continue
+        _finalize_tap_row(row_map, thickness_in)
+        finalized.append(row_map)
+
+    return finalized
 
 
 def _render_ops_card(
@@ -7279,6 +7419,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             built = _build_ops_rows_from_lines_fallback(chart_lines_all)
             _push(lines, f"[DEBUG] chart_lines_found={len(chart_lines_all)} built_rows={len(built)}")
             if built:
+                plate_thickness = _resolve_part_thickness_in(
+                    geo_map,
+                    ctx.get("geo") if isinstance(ctx, _MappingABC) else None,
+                    ctx_a.get("geo") if isinstance(ctx_a, _MappingABC) else None,
+                )
+                _finalize_tapping_rows(built, thickness_in=plate_thickness)
                 ops_summary_map = geo_map.setdefault("ops_summary", {})
                 if isinstance(ops_summary_map, _MutableMappingABC):
                     typing.cast(MutableMapping[str, Any], ops_summary_map)["rows"] = built
