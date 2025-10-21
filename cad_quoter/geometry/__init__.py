@@ -1,21 +1,92 @@
-"""Local aggregate package for development without installation."""
+"""Lightweight geometry fallbacks used when optional CAD dependencies are absent."""
 
 from __future__ import annotations
 
-import importlib
-import sys
-import types
-from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Iterator, Mapping
 
-_package_root = Path(__file__).resolve().parent
-__path__ = [str(_package_root)]
+EZDXF_VERSION = "unknown"
+HAS_EZDXF = False
+HAS_ODAFC = False
 
-_extra_src = _package_root.parent / "cad_quoter_pkg" / "src" / "cad_quoter"
-if _extra_src.exists():
-    extra_src_text = str(_extra_src)
-    if extra_src_text not in __path__:
-        __path__.append(extra_src_text)
+
+class GeometryService:
+    """Placeholder service exposing no-op geometry helpers."""
+
+    def __getattr__(self, name: str) -> Any:  # pragma: no cover - simple default
+        def _noop(*_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        return _noop
+
+
+def _return_none(*_args: Any, **_kwargs: Any) -> None:
+    return None
+
+
+def _return_empty_list(*_args: Any, **_kwargs: Any) -> list[Any]:
+    return []
+
+
+def _return_empty_dict(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+    return {}
+
+
+def convert_dwg_to_dxf(path: str, *, out_ver: str = "ACAD2018") -> str:
+    """Return the original path when DWG conversion is unavailable."""
+
+    return path
+
+
+def get_dwg_converter_path() -> str | None:
+    return ""
+
+
+def require_ezdxf() -> None:
+    raise RuntimeError("DXF operations require ezdxf, which is not installed")
+
+
+def extract_text_lines_from_dxf(_path: str, *, include_tables: bool = False) -> list[str]:
+    return []
+
+
+def parse_hole_table_lines(_lines: Iterable[str]) -> list[Mapping[str, Any]]:
+    return []
+
+
+def extract_features_with_occ(_path: str | Any, **_kwargs: Any) -> Mapping[str, Any] | None:
+    return None
+
+
+def enrich_geo_stl(_path: str | Any) -> Mapping[str, Any] | None:
+    return None
+
+
+def read_step_shape(_path: str | Any) -> Any:
+    return None
+
+
+def read_step_or_iges_or_brep(_path: str | Any) -> Any:
+    return None
+
+
+def read_cad_any(_path: str | Any) -> Any:
+    return None
+
+
+def safe_bbox(_shape: Any) -> tuple[float, float, float, float, float, float]:
+    return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+
+def enrich_geo_occ(_shape: Any) -> Mapping[str, Any]:
+    return {}
+
+
+def get_import_diagnostics_text() -> str:
+    return ""
+
+
+def _hole_groups_from_cylinders(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+    return []
 
 
 def _coerce_float(value: Any) -> float | None:
@@ -54,15 +125,17 @@ def _resolve_column_names(df: Any) -> tuple[str, str, str | None]:
     return item_col, value_col, dtype_col
 
 
-def _iter_indexed_rows(df: Any) -> Iterable[tuple[int, Mapping[str, Any]]]:
+def _iter_indexed_rows(df: Any) -> Iterator[tuple[int, Mapping[str, Any]]]:
+    if df is None:
+        return iter(())
     iterrows = getattr(df, "iterrows", None)
     if callable(iterrows):
         return ((idx, dict(row)) for idx, row in iterrows())
     if isinstance(df, Mapping):
-        return [(0, df)]
+        return iter(((0, df),))
     if isinstance(df, Iterable):
         return ((idx, dict(row)) for idx, row in enumerate(df))
-    return []
+    return iter(())
 
 
 def _ensure_column(df: Any, column: str) -> None:
@@ -95,21 +168,6 @@ def _assign_cell(df: Any, index: int, column: str, value: Any) -> None:
         df.loc[index, column] = value
     elif hasattr(df, "at"):
         df.at[index, column] = value
-
-
-def _get_cell(df: Any, index: int, column: str) -> Any:
-    if not column:
-        return None
-    if hasattr(df, "_rows"):
-        rows = getattr(df, "_rows")
-        if 0 <= index < len(rows):
-            return rows[index].get(column)
-        return None
-    if hasattr(df, "loc"):
-        return df.loc[index, column]
-    if hasattr(df, "at"):
-        return df.at[index, column]
-    return None
 
 
 def _append_row(
@@ -145,14 +203,31 @@ def _append_row(
     return new_index
 
 
-def _fallback_map_geo_to_double_underscore(geo: Mapping[str, Any] | None) -> dict[str, float]:
+def _normalise_geo_map(geo: Mapping[str, Any] | None) -> dict[str, float]:
+    result: dict[str, float] = {}
+    if not geo:
+        return result
+    for key, value in geo.items():
+        label = _normalise_label(key)
+        if not label:
+            continue
+        coerced = _coerce_float(value)
+        if coerced is None:
+            continue
+        result[label] = coerced
+    return result
+
+
+def map_geo_to_double_underscore(geo: Mapping[str, Any] | None) -> dict[str, float]:
+    """Return a subset of GEO metrics using the double-underscore naming scheme."""
+
     data = dict(geo or {})
 
     def _geo_value(*keys: str) -> float | None:
         for key in keys:
-            coerced = _coerce_float(data.get(key))
-            if coerced is not None:
-                return coerced
+            value = _coerce_float(data.get(key))
+            if value is not None:
+                return value
         return None
 
     mapped: dict[str, float] = {}
@@ -199,7 +274,9 @@ def _fallback_map_geo_to_double_underscore(geo: Mapping[str, Any] | None) -> dic
     return mapped
 
 
-def _fallback_collect_geo_features_from_df(df: Any) -> dict[str, float]:
+def collect_geo_features_from_df(df: Any) -> dict[str, float]:
+    """Extract GEO__ rows from a dataframe-like object into a mapping."""
+
     result: dict[str, float] = {}
     item_col, value_col, _ = _resolve_column_names(df)
     for _, row in _iter_indexed_rows(df):
@@ -213,17 +290,13 @@ def _fallback_collect_geo_features_from_df(df: Any) -> dict[str, float]:
     return result
 
 
-def _fallback_update_variables_df_with_geo(df: Any, geo: Mapping[str, Any] | None) -> Any:
+def update_variables_df_with_geo(df: Any, geo: Mapping[str, Any] | None) -> Any:
+    """Update or insert GEO__ rows within a dataframe-like object."""
+
     if df is None:
         return df
 
-    geo_map: dict[str, float] = {}
-    for key, value in (geo or {}).items():
-        label = _normalise_label(key)
-        coerced = _coerce_float(value)
-        if label and coerced is not None:
-            geo_map[label] = coerced
-
+    geo_map = _normalise_geo_map(geo)
     if not geo_map:
         return df
 
@@ -253,80 +326,77 @@ def _fallback_update_variables_df_with_geo(df: Any, geo: Mapping[str, Any] | Non
     return df
 
 
-def _load_module_from_path(name: str, path: Path) -> types.ModuleType | None:
-    if not path.exists():
+def _get_cell(df: Any, index: int, column: str) -> Any:
+    if not column:
         return None
-
-    try:
-        from importlib.machinery import SourceFileLoader
-        from importlib.util import module_from_spec, spec_from_loader
-
-        loader = SourceFileLoader(name, str(path))
-        spec = spec_from_loader(name, loader)
-        if spec is None or spec.loader is None:
-            return None
-        module = module_from_spec(spec)
-        sys.modules[name] = module
-        spec.loader.exec_module(module)  # type: ignore[attr-defined]
-        return module
-    except Exception:
+    if hasattr(df, "_rows"):
+        rows = getattr(df, "_rows")
+        if 0 <= index < len(rows):
+            return rows[index].get(column)
         return None
-
-
-def _load_real_geometry_module() -> types.ModuleType | None:
-    candidates = [
-        _extra_src / "geometry" / "__init__.py",
-        _package_root / "geometry" / "__init__.py",
-    ]
-    for path in candidates:
-        module = _load_module_from_path("_cad_quoter_geometry_real", path)
-        if module is not None:
-            return module
+    if hasattr(df, "loc"):
+        return df.loc[index, column]
+    if hasattr(df, "at"):
+        return df.at[index, column]
     return None
 
 
-def _load_geometry_submodule(name: str) -> types.ModuleType | None:
-    candidates = [
-        _extra_src / "geometry" / f"{name}.py",
-        _package_root / "geometry" / f"{name}.py",
-    ]
-    for path in candidates:
-        module = _load_module_from_path(f"_cad_quoter_geometry_{name}", path)
-        if module is not None:
-            sys.modules[f"cad_quoter.geometry.{name}"] = module
-            return module
-    return None
+def upsert_var_row(df: Any, key: str, value: Any, *, dtype: str = "number") -> Any:
+    """Insert or update a row in a dataframe-like object by Item label."""
+
+    if df is None:
+        return df
+
+    item_col, value_col, dtype_col = _resolve_column_names(df)
+    _ensure_column(df, item_col)
+    _ensure_column(df, value_col)
+    if dtype_col:
+        _ensure_column(df, dtype_col)
+
+    label = _normalise_label(key)
+    coerced_value = _coerce_float(value)
+    stored_value: Any = coerced_value if coerced_value is not None else value
+
+    label_to_index: dict[str, int] = {}
+    for idx, row in _iter_indexed_rows(df):
+        existing_label = _normalise_label(row.get(item_col))
+        if existing_label:
+            label_to_index[existing_label.casefold()] = idx
+
+    lookup = label.casefold()
+    if lookup in label_to_index:
+        index = label_to_index[lookup]
+        _assign_cell(df, index, item_col, label)
+        _assign_cell(df, index, value_col, stored_value)
+        if dtype_col:
+            _assign_cell(df, index, dtype_col, dtype)
+        return df
+
+    _append_row(df, item_col, value_col, dtype_col, label, stored_value, dtype)
+    return df
 
 
-def _ensure_geometry_stub() -> None:
-    module = sys.modules.get("cad_quoter.geometry")
-    if module is None:
-        module = types.ModuleType("cad_quoter.geometry")
-        module.__spec__ = None  # type: ignore[attr-defined]
-        sys.modules["cad_quoter.geometry"] = module
-
-    fallbacks = {
-        "map_geo_to_double_underscore": _fallback_map_geo_to_double_underscore,
-        "collect_geo_features_from_df": _fallback_collect_geo_features_from_df,
-        "update_variables_df_with_geo": _fallback_update_variables_df_with_geo,
-        "_hole_groups_from_cylinders": lambda *_args, **_kwargs: [],
-    }
-    for name, value in fallbacks.items():
-        if not hasattr(module, name):
-            setattr(module, name, value)
-
-    real_module = _load_real_geometry_module()
-    if real_module is not None:
-        exported = getattr(real_module, "__all__", [])
-        if not exported:
-            exported = [name for name in dir(real_module) if not name.startswith("_")]
-        for name in exported:
-            if hasattr(real_module, name):
-                setattr(module, name, getattr(real_module, name))
-        for submodule in ("dxf_enrich", "dxf_text", "hole_table_parser", "occ_compat"):
-            _load_geometry_submodule(submodule)
-
-
-_ensure_geometry_stub()
-
-__all__ = []
+__all__ = [
+    "GeometryService",
+    "EZDXF_VERSION",
+    "HAS_EZDXF",
+    "HAS_ODAFC",
+    "convert_dwg_to_dxf",
+    "get_dwg_converter_path",
+    "require_ezdxf",
+    "extract_text_lines_from_dxf",
+    "parse_hole_table_lines",
+    "extract_features_with_occ",
+    "enrich_geo_stl",
+    "read_step_shape",
+    "read_step_or_iges_or_brep",
+    "read_cad_any",
+    "safe_bbox",
+    "enrich_geo_occ",
+    "get_import_diagnostics_text",
+    "_hole_groups_from_cylinders",
+    "map_geo_to_double_underscore",
+    "collect_geo_features_from_df",
+    "update_variables_df_with_geo",
+    "upsert_var_row",
+]
