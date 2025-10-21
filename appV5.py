@@ -9001,6 +9001,8 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             breakdown["process_plan_pricing"] = planner_result
             baseline["process_plan_pricing"] = planner_result
             process_plan_summary["pricing"] = planner_result
+            if isinstance(breakdown, _MutableMappingABC):
+                breakdown["pricing_source"] = "Planner"
 
         if planner_exception is None and recognized_line_items > 0:
             use_planner = True
