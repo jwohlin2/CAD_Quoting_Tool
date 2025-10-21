@@ -10,7 +10,7 @@ _UNIT_PATTERN = re.compile(
     r"(?i)\b(?:inches?|millimeters?|cm|mm|in)\b\.?")
 
 
-def _parse_mixed_fraction(value: str) -> float | None:
+def parse_mixed_fraction(value: str) -> float | None:
     """Parse strings like ``"1 1/2"`` or ``"3/4"`` into floats.
 
     The CSV stock catalog that feeds our quoting tooling represents many
@@ -68,6 +68,9 @@ def _parse_mixed_fraction(value: str) -> float | None:
     return sign * total
 
 
+_parse_mixed_fraction = parse_mixed_fraction
+
+
 def coerce_float_or_none(value: Any) -> float | None:
     """Attempt to coerce the given value to ``float`` returning ``None`` on failure."""
 
@@ -103,7 +106,7 @@ def coerce_float_or_none(value: Any) -> float | None:
         try:
             return float(cleaned)
         except Exception:
-            parsed_fraction = _parse_mixed_fraction(cleaned)
+            parsed_fraction = parse_mixed_fraction(cleaned)
             if parsed_fraction is not None:
                 return parsed_fraction
             return None
@@ -160,6 +163,7 @@ def safe_float(value: Any, default: float = 0.0) -> float:
 
 
 __all__ = [
+    "parse_mixed_fraction",
     "coerce_float_or_none",
     "safe_float",
     "to_float",
