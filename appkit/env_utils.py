@@ -1,25 +1,12 @@
 import os
 
-
-def _coerce_bool(value):
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    if isinstance(value, str):
-        t = value.strip().lower()
-        if t in {"y", "yes", "true", "1", "on"}:
-            return True
-        if t in {"n", "no", "false", "0", "off"}:
-            return False
-    return None
+from cad_quoter.utils import coerce_bool
 
 
 def _coerce_env_bool(value: str | None) -> bool:
     if value is None:
         return False
-    c = _coerce_bool(value)
-    return bool(c)
+    return bool(coerce_bool(value, default=False))
 
 
 class _EnvBoolFlag:

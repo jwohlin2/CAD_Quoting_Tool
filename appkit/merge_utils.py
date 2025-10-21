@@ -5,7 +5,7 @@ import math
 from collections.abc import Mapping as _MappingABC
 from typing import Any
 
-from appkit.planner_adapter import _coerce_bool
+from cad_quoter.utils import coerce_bool
 from cad_quoter.domain import (
     HARDWARE_PASS_LABEL,
     LEGACY_HARDWARE_PASS_LABEL,
@@ -189,12 +189,12 @@ def merge_effective(
         value = base_val
         source = "baseline"
         if key in overrides:
-            cand = _coerce_bool(overrides.get(key))
+            cand = coerce_bool(overrides.get(key))
             if cand is not None:
                 value = cand
                 source = "user"
         elif key in suggestions:
-            cand = _coerce_bool(suggestions.get(key))
+            cand = coerce_bool(suggestions.get(key))
             if cand is not None:
                 value = cand
                 source = "llm"

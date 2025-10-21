@@ -105,3 +105,18 @@ def test_overrides_to_suggestions_honours_bounds_when_provided() -> None:
     assert suggestions["process_hour_multipliers"]["milling"] == pytest.approx(1.2)
     assert suggestions["process_hour_adders"]["inspection"] == pytest.approx(4.0)
     assert suggestions["scrap_pct"] == pytest.approx(0.2)
+
+
+@pytest.mark.parametrize(
+    ("token", "expected"),
+    [("t", True), ("on", True), ("f", False), ("off", False)],
+)
+def test_overrides_to_suggestions_handles_bool_tokens(token: str, expected: bool) -> None:
+    suggestions = overrides_to_suggestions({"fai_required": token})
+    assert suggestions.get("fai_required") is expected
+
+
+@pytest.mark.parametrize(("token", "expected"), [("t", True), ("f", False)])
+def test_suggestions_to_overrides_handles_bool_tokens(token: str, expected: bool) -> None:
+    overrides = suggestions_to_overrides({"fai_required": token})
+    assert overrides.get("fai_required") is expected
