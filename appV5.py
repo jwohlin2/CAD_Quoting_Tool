@@ -10165,6 +10165,42 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                 ),
             }
 
+            try:
+                drill_minutes_seed = float(drilling_bucket_prepared.get("minutes") or 0.0)
+            except Exception:
+                drill_minutes_seed = 0.0
+
+            drill_machine_rate_seed = (
+                _lookup_bucket_rate("drilling", rates)
+                or _lookup_bucket_rate("machine", rates)
+                or 0.0
+            )
+            drill_labor_rate_seed = (
+                _lookup_bucket_rate("drilling_labor", rates)
+                or _lookup_bucket_rate("labor", rates)
+                or 0.0
+            )
+
+            _seed_bucket_minutes_cost(
+                bucket_view,
+                "drilling",
+                drill_minutes_seed,
+                machine_rate_per_hr=float(drill_machine_rate_seed or 0.0),
+                labor_rate_per_hr=float(drill_labor_rate_seed or 0.0),
+            )
+
+            drilling_dbg_entry: Mapping[str, Any] | None = None
+            try:
+                buckets_dbg = bucket_view.get("buckets") if isinstance(bucket_view, dict) else None
+                if buckets_dbg is None and isinstance(bucket_view, _MappingABC):
+                    buckets_dbg = bucket_view.get("buckets")
+                if isinstance(buckets_dbg, (_MappingABC, dict)):
+                    drilling_dbg_entry = buckets_dbg.get("drilling")  # type: ignore[index]
+            except Exception:
+                drilling_dbg_entry = None
+
+            _push(lines, f"[DEBUG] drilling_bucket={drilling_dbg_entry or {}}")
+
     roughing_hours = _coerce_float_or_none(value_map.get("Roughing Cycle Time"))
     if roughing_hours is None:
         roughing_hours = _coerce_float_or_none(value_map.get("Roughing Cycle Time (hr)"))
@@ -10181,6 +10217,34 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             "rate": milling_rate,
             "basis": ["planner_milling_backfill"],
         }
+
+        milling_minutes_seed = float(roughing_hours * 60.0)
+        milling_machine_rate_seed = float(milling_rate or 0.0)
+        milling_labor_rate_seed = (
+            _lookup_bucket_rate("milling_labor", rates)
+            or _lookup_bucket_rate("labor", rates)
+            or 0.0
+        )
+
+        _seed_bucket_minutes_cost(
+            bucket_view,
+            "milling",
+            milling_minutes_seed,
+            machine_rate_per_hr=milling_machine_rate_seed,
+            labor_rate_per_hr=float(milling_labor_rate_seed or 0.0),
+        )
+
+        milling_dbg_entry: Mapping[str, Any] | None = None
+        try:
+            buckets_dbg = bucket_view.get("buckets") if isinstance(bucket_view, dict) else None
+            if buckets_dbg is None and isinstance(bucket_view, _MappingABC):
+                buckets_dbg = bucket_view.get("buckets")
+            if isinstance(buckets_dbg, (_MappingABC, dict)):
+                milling_dbg_entry = buckets_dbg.get("milling")  # type: ignore[index]
+        except Exception:
+            milling_dbg_entry = None
+
+        _push(lines, f"[DEBUG] milling_bucket={milling_dbg_entry or {}}")
 
     project_hours = _coerce_float_or_none(value_map.get("Project Management Hours")) or 0.0
     toolmaker_hours = _coerce_float_or_none(value_map.get("Tool & Die Maker Hours")) or 0.0
