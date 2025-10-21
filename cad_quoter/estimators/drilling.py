@@ -7,8 +7,7 @@ from typing import Any, Mapping
 import pandas as pd
 
 from cad_quoter.estimators.base import EstimatorInput
-
-import appV5 as _legacy
+from cad_quoter.estimators import drilling_legacy as _legacy
 
 
 def _resolve_speeds_feeds_table(tables: Mapping[str, Any] | None) -> pd.DataFrame | None:
@@ -42,7 +41,7 @@ def estimate(input_data: EstimatorInput) -> float:
             groups = None
     speeds_feeds_table = _resolve_speeds_feeds_table(input_data.tables)
 
-    return _legacy._legacy_estimate_drilling_hours(
+    return _legacy.legacy_estimate_drilling_hours(
         hole_diams_mm,
         thickness_in,
         input_data.material_key,
