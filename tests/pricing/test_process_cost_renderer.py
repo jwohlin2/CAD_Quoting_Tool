@@ -1,6 +1,10 @@
 import pytest
 
-from cad_quoter.pricing import ORDER, canonicalize_costs, render_process_costs
+from cad_quoter.pricing.process_buckets import ORDER
+from cad_quoter.pricing.process_cost_renderer import (
+    canonicalize_costs,
+    render_process_costs,
+)
 
 
 class TableCollector:
@@ -66,24 +70,24 @@ def test_render_process_costs_orders_rows_and_rates(monkeypatch: pytest.MonkeyPa
     labels = [row["label"] for row in table.rows]
     assert labels == [
         "Milling",
-        "Drilling",
+        "Countersink",
         "Finishing/Deburr",
     ]
     assert total == pytest.approx(201.25)
 
     expected_hours = {
         "Milling": 2.0,
-        "Drilling": 0.25,
+        "Countersink": 0.25,
         "Finishing/Deburr": 1.5,
     }
     expected_rates = {
         "Milling": 60.0,
-        "Drilling": 55.0,
+        "Countersink": 55.0,
         "Finishing/Deburr": 45.0,
     }
     expected_costs = {
         "Milling": 120.0,
-        "Drilling": 13.75,
+        "Countersink": 13.75,
         "Finishing/Deburr": 67.5,
     }
 
