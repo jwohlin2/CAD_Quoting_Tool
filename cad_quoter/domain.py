@@ -57,6 +57,14 @@ def _merge_module():
     return _merge_utils
 
 
+def _suggestions_module():
+    """Return the lazily-imported suggestion helpers."""
+
+    from appkit.ui import suggestions as _suggestions  # imported lazily to avoid cycles
+
+    return _suggestions
+
+
 def merge_effective(*args, **kwargs):  # type: ignore[override]
     """Proxy to :func:`appkit.merge_utils.merge_effective` for test visibility."""
 
@@ -298,8 +306,8 @@ def ensure_accept_flags(*args, **kwargs):  # type: ignore[override]
 
 
 def iter_suggestion_rows(*args, **kwargs):  # type: ignore[override]
-    """Proxy to :func:`appV5.iter_suggestion_rows` for test visibility."""
+    """Proxy to :func:`appkit.ui.suggestions.iter_suggestion_rows` for tests."""
 
-    app = _app_module()
-    return app.iter_suggestion_rows(*args, **kwargs)
+    suggestions = _suggestions_module()
+    return suggestions.iter_suggestion_rows(*args, **kwargs)
 
