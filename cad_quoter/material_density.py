@@ -2,9 +2,25 @@
 from __future__ import annotations
 
 import re
+from fractions import Fraction
 from typing import Dict
 
 from appkit.data import load_json
+
+
+LB_PER_IN3_PER_GCC = float(
+    # 1 in = 2.54 cm (exact) and 1 lb = 453.59237 g (exact).
+    # Therefore 1 g/cm^3 = (2.54^3 / 453.59237) lb/in^3.
+    Fraction(2048383, 125000) * Fraction(100000, 45359237)
+)
+
+
+def density_g_cc_to_lb_in3(density_g_cc: float | int | None) -> float | None:
+    """Convert a density in g/cc to lb/in^3 while preserving ``None``."""
+
+    if density_g_cc is None:
+        return None
+    return float(density_g_cc) * LB_PER_IN3_PER_GCC
 
 
 def normalize_material_key(value: object) -> str:
@@ -149,10 +165,12 @@ def density_for_material(material: object | None, default: float | None = None) 
 
 
 __all__ = [
+    "LB_PER_IN3_PER_GCC",
     "DEFAULT_MATERIAL_DENSITY_G_CC",
     "MATERIAL_DENSITY_G_CC_BY_DISPLAY",
     "MATERIAL_DENSITY_G_CC_BY_KEY",
     "MATERIAL_DENSITY_G_CC_BY_KEYWORD",
     "density_for_material",
+    "density_g_cc_to_lb_in3",
     "normalize_material_key",
 ]
