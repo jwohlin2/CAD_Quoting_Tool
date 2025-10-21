@@ -4,14 +4,9 @@ from typing import Any, Dict, Tuple, List
 
 from process_planner import plan_job  # uses your decision tree
 from cad_quoter.utils import _dict
+from cad_quoter.pricing.rate_buckets import bucket_cost_breakdown
 
 # -------- small utils
-def _get_rate(rates2: dict, bucket: str, key: str, default: float = 90.0) -> float:
-    try:
-        return float(rates2.get(bucket, {}).get(key, default) or default)
-    except Exception:
-        return default
-
 def _as_float(x, default=None):
     try:
         return float(x)
@@ -475,59 +470,7 @@ def price_with_planner(
         minutes = {"Inspection": _inspection_minutes(g, t), "Deburr": 6.0}
 
     # ---- convert to costs (two-bucket rates)
-    li = []
-    labor_min = machine_min = labor_cost = machine_cost = total_minutes = 0.0
-
-    def _add(name, bucket, rate_key):
-        nonlocal labor_min, machine_min, labor_cost, machine_cost, total_minutes
-        mins = float(minutes.get(name, 0.0) or 0.0)
-        if mins <= 0:
-            return
-        rate = _get_rate(two_bucket_rates, "labor" if bucket=="labor" else "machine", rate_key, 90.0)
-        cost = (mins / 60.0) * rate
-        entry: Dict[str, Any] = {
-            "op": name,
-            "name": name,
-            "minutes": round(mins, 2),
-            f"{bucket}_cost": round(cost, 2),
-        }
-        li.append(entry)
-        total_minutes += mins
-        if bucket == "labor":
-            labor_min += mins
-            labor_cost += cost
-        else:
-            machine_min += mins
-            machine_cost += cost
-
-    # Labor buckets
-    for nm, key in [("Inspection", "InspectionRate"),
-                    ("Fixture Build (amortized)", "FixtureBuildRate"),
-                    ("Programming (per part)", "ProgrammingRate"),
-                    ("Deburr", "DeburrRate"),
-                    ("Lapping/Honing", "SurfaceGrindRate")]:
-        if nm in minutes:
-            _add(nm, "labor", key)
-
-    # Machine buckets
-    for nm, key in [("Drilling", "DrillingRate"),
-                    ("Milling", "MillingRate"),
-                    ("Wire EDM", "WireEDMRate"),
-                    ("Grinding", "SurfaceGrindRate"),
-                    ("Saw/Waterjet", "SawWaterjetRate"),
-                    ("Sinker EDM", "SinkerEDMRate"),
-                    ("Abrasive Flow", "AbrasiveFlowRate")]:
-        if nm in minutes:
-            _add(nm, "machine", key)
-
-    totals = {
-        "labor_minutes": round(labor_min, 2),
-        "machine_minutes": round(machine_min, 2),
-        "minutes": round(total_minutes, 2),
-        "labor_cost": round(labor_cost, 2),
-        "machine_cost": round(machine_cost, 2),
-        "total_cost": round(labor_cost + machine_cost, 2),
-    }
+    li, totals = bucket_cost_breakdown(minutes, two_bucket_rates)
 
     ops_seen = sorted(ops.keys())
     if "wire_edm_windows" in ops and "wire_edm_outline" not in ops:
