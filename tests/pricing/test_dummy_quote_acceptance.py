@@ -545,6 +545,17 @@ def test_dummy_quote_hour_summary_aligns_with_planner_buckets() -> None:
     assert fixture_meta["build_hr"] == 3.0
 
 
+def test_dummy_quote_hour_summary_prefers_planner_bucket_minutes() -> None:
+    payload = _dummy_quote_payload()
+    breakdown = payload["breakdown"]
+    breakdown["removal_summary"] = {"total_minutes": 12.0}
+
+    _render_output(payload)
+
+    summary_entry = payload["breakdown"]["hour_summary"]["buckets"]["drilling"]
+    assert math.isclose(float(summary_entry["hr"]), 1.5, abs_tol=1e-6)
+
+
 def test_dummy_quote_has_no_planner_red_flags() -> None:
     payload = _dummy_quote_payload()
     assert "red_flags" not in payload["breakdown"]

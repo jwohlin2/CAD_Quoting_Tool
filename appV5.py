@@ -3273,12 +3273,42 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     # If the removal summary has a total, force machine hours for drilling
     removal = (result or {}).get("removal_summary") or {}
     mins = float(removal.get("total_minutes") or 0.0)
+
+    def _has_planner_drilling_bucket(candidate: Any) -> bool:
+        if isinstance(candidate, _MappingABC):
+            items_iter = candidate.items()
+        elif isinstance(candidate, dict):
+            items_iter = candidate.items()
+        else:
+            return False
+        for raw_key, raw_value in items_iter:
+            key_text = str(raw_key or "").strip().lower()
+            if key_text == "drilling":
+                return True
+            if key_text == "buckets" and raw_value is not candidate:
+                if _has_planner_drilling_bucket(raw_value):
+                    return True
+        return False
+
+    buckets = (breakdown or {}).get("planner_buckets") or {}
+    bucket_view_candidate: Any = None
+    if isinstance(breakdown, _MappingABC):
+        bucket_view_candidate = breakdown.get("bucket_view")
+    elif isinstance(breakdown, dict):
+        bucket_view_candidate = breakdown.get("bucket_view")
+
+    planner_has_drilling_bucket = False
+    if not planner_has_drilling_bucket:
+        planner_has_drilling_bucket = _has_planner_drilling_bucket(bucket_view_candidate)
+    if not planner_has_drilling_bucket:
+        planner_has_drilling_bucket = _has_planner_drilling_bucket(buckets)
+
     if mins > 0:
         drilling_machine_hr = round(mins / 60.0, 2)
         # write into both the pricing state and the hour summary
-        hour_summary_entries["drilling"] = (drilling_machine_hr, True)
+        if not planner_has_drilling_bucket:
+            hour_summary_entries["drilling"] = (drilling_machine_hr, True)
         # also, if your bucket view structure is present, overwrite that slot:
-        buckets = (breakdown or {}).get("planner_buckets") or {}
         if isinstance(buckets, dict) and "drilling" in buckets:
             buckets["drilling"]["machine_hours"] = drilling_machine_hr
             buckets["drilling"]["labor_hours"] = float(buckets["drilling"].get("labor_hours") or 0.0)
