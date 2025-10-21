@@ -2252,6 +2252,11 @@ CANON_MAP: dict[str, str] = {
 
 PLANNER_META: frozenset[str] = frozenset({"planner_labor", "planner_machine", "planner_total"})
 
+
+class PlannerBucketCost(TypedDict):
+    name: str
+    cost: float
+
 # ---------- Bucket & Operation Roles ----------
 @no_type_check
 def render_quote(  # type: ignore[reportGeneralTypeIssues]
@@ -8972,7 +8977,7 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
     if not scrap_price_source:
         scrap_price_source = None
 
-    mat_block = _compute_material_block(
+    mat_block_raw = _compute_material_block(
         geo_context if isinstance(geo_context, dict) else {},
         mat_key,
         _coerce_float_or_none(density),
@@ -8980,241 +8985,246 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
         stock_price_source=stock_price_source,
         cfg=cfg,
     )
+    if isinstance(mat_block_raw, _MappingABC):
+        mat_block: dict[str, Any] = dict(mat_block_raw)
+    else:
+        mat_block = {}
     breakdown["material_block"] = mat_block
     grams_per_lb = 1000.0 / LB_PER_KG
-    material_entry = breakdown.setdefault("material", {})
-    if isinstance(material_entry, dict):
-        if stock_price_source:
-            material_entry.setdefault("stock_price_source", stock_price_source)
-            if isinstance(mat_block, _MappingABC):
-                try:
-                    mat_block.setdefault("stock_price_source", stock_price_source)  # type: ignore[attr-defined]
-                except AttributeError:
-                    pass
-        if scrap_price_source:
-            material_entry.setdefault("scrap_price_source", scrap_price_source)
-        if isinstance(mat_block, _MappingABC) and scrap_price_source:
-            try:
-                mat_block.setdefault("scrap_price_source", scrap_price_source)  # type: ignore[attr-defined]
-            except AttributeError:
-                pass
-        stock_dims_raw = mat_block.get("stock_dims_in")
-        if isinstance(stock_dims_raw, (list, tuple)) and len(stock_dims_raw) >= 3:
-            try:
-                stock_dims_tuple = (
-                    float(stock_dims_raw[0]),
-                    float(stock_dims_raw[1]),
-                    float(stock_dims_raw[2]),
-                )
-                material_entry["stock_dims_in"] = stock_dims_tuple
-            except Exception:
-                pass
-        vendor_label = mat_block.get("stock_vendor")
-        if vendor_label:
-            material_entry["stock_vendor"] = vendor_label
-            material_entry.setdefault("source", vendor_label)
-        part_no = mat_block.get("part_no")
-        if part_no:
-            material_entry["part_no"] = part_no
-        supplier_min_val = _coerce_float_or_none(mat_block.get("supplier_min$"))
-        if supplier_min_val is not None:
-            material_entry["supplier_min$"] = float(supplier_min_val)
-            if _coerce_float_or_none(material_entry.get("supplier_min_charge")) is None:
-                material_entry["supplier_min_charge"] = float(supplier_min_val)
-            material_entry.setdefault("supplier_min_charge$", float(supplier_min_val))
-        stock_price_val = _coerce_float_or_none(mat_block.get("stock_price$"))
-        unit_price_each_val = _coerce_float_or_none(
-            mat_block.get("unit_price_each$") or mat_block.get("unit_price$")
-        )
-        if unit_price_each_val is not None and unit_price_each_val > 0:
-            material_entry["unit_price"] = float(unit_price_each_val)
-            material_entry.setdefault("stock_price$", float(unit_price_each_val))
-        elif stock_price_val is not None and stock_price_val > 0:
-            material_entry.setdefault("stock_price$", float(stock_price_val))
-        start_lb = _coerce_float_or_none(mat_block.get("start_lb"))
-        net_lb = _coerce_float_or_none(mat_block.get("net_lb"))
-        scrap_lb = _coerce_float_or_none(mat_block.get("scrap_lb"))
-        price_per_lb = _coerce_float_or_none(mat_block.get("price_per_lb"))
-        if start_lb is not None and start_lb > 0:
-            start_g = float(start_lb) * grams_per_lb
-            material_entry["mass_g"] = start_g
-            material_entry["starting_mass_g_est"] = start_g
-        if net_lb is not None and net_lb > 0:
-            material_entry["net_mass_g"] = float(net_lb) * grams_per_lb
-        if scrap_lb is not None and scrap_lb > 0:
-            material_entry["scrap_mass_g"] = float(scrap_lb) * grams_per_lb
-        if price_per_lb is not None and price_per_lb > 0:
-            material_entry["unit_price_usd_per_lb"] = float(price_per_lb)
-        price_source = mat_block.get("price_source")
-        if price_source:
-            material_entry.setdefault("unit_price_source", price_source)
-            material_entry.setdefault("source", price_source)
-        stock_L = _coerce_float_or_none(mat_block.get("stock_L_in"))
-        stock_W = _coerce_float_or_none(mat_block.get("stock_W_in"))
-        stock_T = _coerce_float_or_none(mat_block.get("stock_T_in"))
-        if stock_L is not None and stock_L > 0:
-            material_entry["stock_L_in"] = float(stock_L)
-        if stock_W is not None and stock_W > 0:
-            material_entry["stock_W_in"] = float(stock_W)
-        if stock_T is not None and stock_T > 0:
-            material_entry["thickness_in"] = float(stock_T)
-        if mat_block.get("source"):
-            material_entry["source"] = mat_block.get("source")
-        total_cost_val = _coerce_float_or_none(mat_block.get("total_material_cost"))
-        base_material_cost = float(total_cost_val or 0.0)
-        base_material_cost = round(base_material_cost, 2)
-        material_entry["material_cost_before_credit"] = float(base_material_cost)
-        mat_block["material_cost_before_credit"] = float(base_material_cost)
+    material_entry_raw = breakdown.setdefault("material", {})
+    if isinstance(material_entry_raw, dict):
+        material_entry: dict[str, Any] = material_entry_raw
+    elif isinstance(material_entry_raw, _MappingABC):
+        material_entry = dict(material_entry_raw)
+        breakdown["material"] = material_entry
+    else:
+        material_entry = {}
+        breakdown["material"] = material_entry
 
-        scrap_mass_lb_val = _coerce_float_or_none(
-            mat_block.get("scrap_weight_lb") or mat_block.get("scrap_lb")
-        )
-        scrap_mass_lb = (
-            float(scrap_mass_lb_val)
-            if scrap_mass_lb_val is not None and scrap_mass_lb_val > 0
-            else None
-        )
-        if scrap_mass_lb is not None:
-            mat_block["scrap_credit_mass_lb"] = float(scrap_mass_lb)
-            material_entry["scrap_credit_mass_lb"] = float(scrap_mass_lb)
+    if stock_price_source:
+        material_entry.setdefault("stock_price_source", stock_price_source)
+        mat_block.setdefault("stock_price_source", stock_price_source)
+    if scrap_price_source:
+        material_entry.setdefault("scrap_price_source", scrap_price_source)
+        mat_block.setdefault("scrap_price_source", scrap_price_source)
 
-        credit_override_amount: float | None = None
-        unit_price_override: float | None = None
-        recovery_override: float | None = None
-        if isinstance(overrides, _MappingABC):
-            for key in (
-                "Material Scrap / Remnant Value",
-                "material_scrap_credit",
-                "material_scrap_credit_usd",
-                "scrap_credit_usd",
-            ):
-                override_val = overrides.get(key)
-                if override_val in (None, ""):
-                    continue
-                coerced_override = _coerce_float_or_none(override_val)
-                if coerced_override is not None:
-                    credit_override_amount = abs(float(coerced_override))
-                    break
+    stock_dims_raw = mat_block.get("stock_dims_in")
+    if isinstance(stock_dims_raw, (list, tuple)) and len(stock_dims_raw) >= 3:
+        try:
+            stock_dims_tuple = (
+                float(stock_dims_raw[0]),
+                float(stock_dims_raw[1]),
+                float(stock_dims_raw[2]),
+            )
+            material_entry["stock_dims_in"] = stock_dims_tuple
+        except Exception:
+            pass
+    vendor_label = mat_block.get("stock_vendor")
+    if vendor_label:
+        material_entry["stock_vendor"] = vendor_label
+        material_entry.setdefault("source", vendor_label)
+    part_no = mat_block.get("part_no")
+    if part_no:
+        material_entry["part_no"] = part_no
+    supplier_min_val = _coerce_float_or_none(mat_block.get("supplier_min$"))
+    if supplier_min_val is not None:
+        material_entry["supplier_min$"] = float(supplier_min_val)
+        if _coerce_float_or_none(material_entry.get("supplier_min_charge")) is None:
+            material_entry["supplier_min_charge"] = float(supplier_min_val)
+        material_entry.setdefault("supplier_min_charge$", float(supplier_min_val))
+    stock_price_val = _coerce_float_or_none(mat_block.get("stock_price$"))
+    unit_price_each_val = _coerce_float_or_none(
+        mat_block.get("unit_price_each$") or mat_block.get("unit_price$")
+    )
+    if unit_price_each_val is not None and unit_price_each_val > 0:
+        material_entry["unit_price"] = float(unit_price_each_val)
+        material_entry.setdefault("stock_price$", float(unit_price_each_val))
+    elif stock_price_val is not None and stock_price_val > 0:
+        material_entry.setdefault("stock_price$", float(stock_price_val))
+    start_lb = _coerce_float_or_none(mat_block.get("start_lb"))
+    net_lb = _coerce_float_or_none(mat_block.get("net_lb"))
+    scrap_lb = _coerce_float_or_none(mat_block.get("scrap_lb"))
+    price_per_lb = _coerce_float_or_none(mat_block.get("price_per_lb"))
+    if start_lb is not None and start_lb > 0:
+        start_g = float(start_lb) * grams_per_lb
+        material_entry["mass_g"] = start_g
+        material_entry["starting_mass_g_est"] = start_g
+    if net_lb is not None and net_lb > 0:
+        material_entry["net_mass_g"] = float(net_lb) * grams_per_lb
+    if scrap_lb is not None and scrap_lb > 0:
+        material_entry["scrap_mass_g"] = float(scrap_lb) * grams_per_lb
+    if price_per_lb is not None and price_per_lb > 0:
+        material_entry["unit_price_usd_per_lb"] = float(price_per_lb)
+    price_source = mat_block.get("price_source")
+    if price_source:
+        material_entry.setdefault("unit_price_source", price_source)
+        material_entry.setdefault("source", price_source)
+    stock_L = _coerce_float_or_none(mat_block.get("stock_L_in"))
+    stock_W = _coerce_float_or_none(mat_block.get("stock_W_in"))
+    stock_T = _coerce_float_or_none(mat_block.get("stock_T_in"))
+    if stock_L is not None and stock_L > 0:
+        material_entry["stock_L_in"] = float(stock_L)
+    if stock_W is not None and stock_W > 0:
+        material_entry["stock_W_in"] = float(stock_W)
+    if stock_T is not None and stock_T > 0:
+        material_entry["thickness_in"] = float(stock_T)
+    if mat_block.get("source"):
+        material_entry["source"] = mat_block.get("source")
+    total_cost_val = _coerce_float_or_none(mat_block.get("total_material_cost"))
+    base_material_cost = float(total_cost_val or 0.0)
+    base_material_cost = round(base_material_cost, 2)
+    material_entry["material_cost_before_credit"] = float(base_material_cost)
+    mat_block["material_cost_before_credit"] = float(base_material_cost)
 
-            for key in (
-                "scrap_credit_unit_price_usd_per_lb",
-                "scrap_price_usd_per_lb",
-                "scrap_usd_per_lb",
-                "Scrap Price ($/lb)",
-                "Scrap Credit ($/lb)",
-                "Scrap Unit Price ($/lb)",
-            ):
-                price_val = overrides.get(key)
-                if price_val in (None, ""):
-                    continue
-                coerced_price = _coerce_float_or_none(price_val)
-                if coerced_price is not None and coerced_price >= 0:
-                    unit_price_override = float(coerced_price)
-                    break
+    scrap_mass_lb_val = _coerce_float_or_none(
+        mat_block.get("scrap_weight_lb") or mat_block.get("scrap_lb")
+    )
+    scrap_mass_lb = (
+        float(scrap_mass_lb_val)
+        if scrap_mass_lb_val is not None and scrap_mass_lb_val > 0
+        else None
+    )
+    if scrap_mass_lb is not None:
+        mat_block["scrap_credit_mass_lb"] = float(scrap_mass_lb)
+        material_entry["scrap_credit_mass_lb"] = float(scrap_mass_lb)
 
-            for key in (
-                "scrap_recovery_pct",
-                "Scrap Recovery (%)",
-                "scrap_recovery_fraction",
-            ):
-                recovery_val = overrides.get(key)
-                if recovery_val in (None, ""):
-                    continue
-                coerced_recovery = _coerce_float_or_none(recovery_val)
-                if coerced_recovery is None:
-                    continue
-                recovery_fraction = float(coerced_recovery)
-                if recovery_fraction > 1.0 + 1e-6:
-                    recovery_fraction = recovery_fraction / 100.0
-                recovery_override = max(0.0, min(1.0, recovery_fraction))
+    credit_override_amount: float | None = None
+    unit_price_override: float | None = None
+    recovery_override: float | None = None
+    if isinstance(overrides, _MappingABC):
+        for key in (
+            "Material Scrap / Remnant Value",
+            "material_scrap_credit",
+            "material_scrap_credit_usd",
+            "scrap_credit_usd",
+        ):
+            override_val = overrides.get(key)
+            if override_val in (None, ""):
+                continue
+            coerced_override = _coerce_float_or_none(override_val)
+            if coerced_override is not None:
+                credit_override_amount = abs(float(coerced_override))
                 break
 
-        scrap_credit_amount: float | None = None
-        scrap_price_used: float | None = None
-        scrap_recovery_used: float | None = None
-        scrap_credit_source: str | None = None
-        wieland_scrap_price: float | None = None
+        for key in (
+            "scrap_credit_unit_price_usd_per_lb",
+            "scrap_price_usd_per_lb",
+            "scrap_usd_per_lb",
+            "Scrap Price ($/lb)",
+            "Scrap Credit ($/lb)",
+            "Scrap Unit Price ($/lb)",
+        ):
+            price_val = overrides.get(key)
+            if price_val in (None, ""):
+                continue
+            coerced_price = _coerce_float_or_none(price_val)
+            if coerced_price is not None and coerced_price >= 0:
+                unit_price_override = float(coerced_price)
+                break
 
-        if credit_override_amount is not None:
-            scrap_credit_amount = max(0.0, float(credit_override_amount))
-            scrap_credit_source = "override_amount"
-        elif scrap_mass_lb is not None:
-            recovery = (
-                recovery_override
-                if recovery_override is not None
-                else _materials.SCRAP_RECOVERY_DEFAULT
-            )
-            scrap_recovery_used = recovery
-            if unit_price_override is not None:
-                scrap_price_used = max(0.0, float(unit_price_override))
-                scrap_credit_source = "override_unit_price"
+        for key in (
+            "scrap_recovery_pct",
+            "Scrap Recovery (%)",
+            "scrap_recovery_fraction",
+        ):
+            recovery_val = overrides.get(key)
+            if recovery_val in (None, ""):
+                continue
+            coerced_recovery = _coerce_float_or_none(recovery_val)
+            if coerced_recovery is None:
+                continue
+            recovery_fraction = float(coerced_recovery)
+            if recovery_fraction > 1.0 + 1e-6:
+                recovery_fraction = recovery_fraction / 100.0
+            recovery_override = max(0.0, min(1.0, recovery_fraction))
+            break
+
+    scrap_credit_amount: float | None = None
+    scrap_price_used: float | None = None
+    scrap_recovery_used: float | None = None
+    scrap_credit_source: str | None = None
+    wieland_scrap_price: float | None = None
+
+    if credit_override_amount is not None:
+        scrap_credit_amount = max(0.0, float(credit_override_amount))
+        scrap_credit_source = "override_amount"
+    elif scrap_mass_lb is not None:
+        recovery = (
+            recovery_override
+            if recovery_override is not None
+            else _materials.SCRAP_RECOVERY_DEFAULT
+        )
+        scrap_recovery_used = recovery
+        if unit_price_override is not None:
+            scrap_price_used = max(0.0, float(unit_price_override))
+            scrap_credit_source = "override_unit_price"
+            mat_block["scrap_price_usd_per_lb"] = float(scrap_price_used)
+        else:
+            family_hint = None
+            if isinstance(geo_context, dict):
+                family_hint = (
+                    geo_context.get("material_family")
+                    or geo_context.get("material_group")
+                )
+            family_hint = family_hint or material_group_display or material_display
+            price_candidate = _wieland_scrap_usd_per_lb(family_hint)
+            if price_candidate is not None:
+                wieland_scrap_price = float(price_candidate)
+                scrap_price_used = float(price_candidate)
+                scrap_credit_source = "wieland"
                 mat_block["scrap_price_usd_per_lb"] = float(scrap_price_used)
             else:
-                family_hint = None
-                if isinstance(geo_context, dict):
-                    family_hint = (
-                        geo_context.get("material_family")
-                        or geo_context.get("material_group")
-                    )
-                family_hint = family_hint or material_group_display or material_display
-                price_candidate = _wieland_scrap_usd_per_lb(family_hint)
-                if price_candidate is not None:
-                    wieland_scrap_price = float(price_candidate)
-                    scrap_price_used = float(price_candidate)
-                    scrap_credit_source = "wieland"
-                    mat_block["scrap_price_usd_per_lb"] = float(scrap_price_used)
-                else:
-                    scrap_price_used = _materials.SCRAP_PRICE_FALLBACK_USD_PER_LB
-                    scrap_credit_source = "default"
-                    mat_block["scrap_price_usd_per_lb"] = float(scrap_price_used)
-            scrap_credit_amount = float(scrap_mass_lb) * float(scrap_price_used or 0.0) * float(scrap_recovery_used or 0.0)
+                scrap_price_used = _materials.SCRAP_PRICE_FALLBACK_USD_PER_LB
+                scrap_credit_source = "default"
+                mat_block["scrap_price_usd_per_lb"] = float(scrap_price_used)
+        scrap_credit_amount = float(scrap_mass_lb) * float(scrap_price_used or 0.0) * float(scrap_recovery_used or 0.0)
 
-        if wieland_scrap_price is not None:
-            mat_block["scrap_price_usd_per_lb"] = float(wieland_scrap_price)
+    if wieland_scrap_price is not None:
+        mat_block["scrap_price_usd_per_lb"] = float(wieland_scrap_price)
 
-        net_material_cost = float(base_material_cost)
-        if scrap_credit_amount is not None:
-            credit_value = max(0.0, float(scrap_credit_amount))
-            if base_material_cost > 0:
-                credit_value = min(credit_value, float(base_material_cost))
-            credit_value = round(credit_value, 2)
-            scrap_credit_amount = credit_value
-            net_material_cost = max(0.0, float(base_material_cost) - credit_value)
+    net_material_cost = float(base_material_cost)
+    if scrap_credit_amount is not None:
+        credit_value = max(0.0, float(scrap_credit_amount))
+        if base_material_cost > 0:
+            credit_value = min(credit_value, float(base_material_cost))
+        credit_value = round(credit_value, 2)
+        scrap_credit_amount = credit_value
+        net_material_cost = max(0.0, float(base_material_cost) - credit_value)
 
-            if scrap_price_used is not None:
-                material_entry["scrap_credit_unit_price_usd_per_lb"] = float(scrap_price_used)
-                mat_block["scrap_credit_unit_price_usd_per_lb"] = float(scrap_price_used)
-                mat_block.setdefault("scrap_price_usd_per_lb", float(scrap_price_used))
-            if scrap_recovery_used is not None:
-                material_entry["scrap_credit_recovery_pct"] = float(scrap_recovery_used)
-                mat_block["scrap_credit_recovery_pct"] = float(scrap_recovery_used)
-            if scrap_credit_source:
-                material_entry["scrap_credit_source"] = scrap_credit_source
-                mat_block["scrap_credit_source"] = scrap_credit_source
+        if scrap_price_used is not None:
+            material_entry["scrap_credit_unit_price_usd_per_lb"] = float(scrap_price_used)
+            mat_block["scrap_credit_unit_price_usd_per_lb"] = float(scrap_price_used)
+            mat_block.setdefault("scrap_price_usd_per_lb", float(scrap_price_used))
+        if scrap_recovery_used is not None:
+            material_entry["scrap_credit_recovery_pct"] = float(scrap_recovery_used)
+            mat_block["scrap_credit_recovery_pct"] = float(scrap_recovery_used)
+        if scrap_credit_source:
+            material_entry["scrap_credit_source"] = scrap_credit_source
+            mat_block["scrap_credit_source"] = scrap_credit_source
 
-            if scrap_credit_source == "wieland":
-                material_entry["computed_scrap_credit_usd"] = float(scrap_credit_amount)
-                mat_block["computed_scrap_credit_usd"] = float(scrap_credit_amount)
-                material_entry["scrap_price_source"] = "wieland"
-                mat_block["scrap_price_source"] = "wieland"
-                material_entry.pop("material_scrap_credit", None)
-                material_entry.pop("material_scrap_credit_entered", None)
-                mat_block.pop("material_scrap_credit", None)
-                mat_block.pop("material_scrap_credit_entered", None)
-            else:
-                material_entry.pop("computed_scrap_credit_usd", None)
-                mat_block.pop("computed_scrap_credit_usd", None)
-                material_entry["material_scrap_credit"] = float(scrap_credit_amount)
-                material_entry["material_scrap_credit_entered"] = bool(scrap_credit_amount > 0)
-                mat_block["material_scrap_credit"] = float(scrap_credit_amount)
-                mat_block["material_scrap_credit_entered"] = bool(scrap_credit_amount > 0)
-        else:
-            material_entry.pop("computed_scrap_credit_usd", None)
-            mat_block.pop("computed_scrap_credit_usd", None)
+        if scrap_credit_source == "wieland":
+            material_entry["computed_scrap_credit_usd"] = float(scrap_credit_amount)
+            mat_block["computed_scrap_credit_usd"] = float(scrap_credit_amount)
+            material_entry["scrap_price_source"] = "wieland"
+            mat_block["scrap_price_source"] = "wieland"
             material_entry.pop("material_scrap_credit", None)
             material_entry.pop("material_scrap_credit_entered", None)
             mat_block.pop("material_scrap_credit", None)
             mat_block.pop("material_scrap_credit_entered", None)
+        else:
+            material_entry.pop("computed_scrap_credit_usd", None)
+            mat_block.pop("computed_scrap_credit_usd", None)
+            material_entry["material_scrap_credit"] = float(scrap_credit_amount)
+            material_entry["material_scrap_credit_entered"] = bool(scrap_credit_amount > 0)
+            mat_block["material_scrap_credit"] = float(scrap_credit_amount)
+            mat_block["material_scrap_credit_entered"] = bool(scrap_credit_amount > 0)
+    else:
+        material_entry.pop("computed_scrap_credit_usd", None)
+        mat_block.pop("computed_scrap_credit_usd", None)
+        material_entry.pop("material_scrap_credit", None)
+        material_entry.pop("material_scrap_credit_entered", None)
+        mat_block.pop("material_scrap_credit", None)
+        mat_block.pop("material_scrap_credit_entered", None)
 
         if net_material_cost > 0:
             material_entry["material_cost"] = float(net_material_cost)
@@ -9269,8 +9279,13 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
 
     breakdown.setdefault("pass_through_total", 0.0)
 
-    bucket_minutes_detail_for_render = breakdown.setdefault("bucket_minutes_detail", {})
-    if not isinstance(bucket_minutes_detail_for_render, dict):
+    bucket_minutes_detail_raw = breakdown.setdefault("bucket_minutes_detail", {})
+    if isinstance(bucket_minutes_detail_raw, dict):
+        bucket_minutes_detail_for_render = bucket_minutes_detail_raw
+    elif isinstance(bucket_minutes_detail_raw, _MappingABC):
+        bucket_minutes_detail_for_render = dict(bucket_minutes_detail_raw)
+        breakdown["bucket_minutes_detail"] = bucket_minutes_detail_for_render
+    else:
         bucket_minutes_detail_for_render = {}
         breakdown["bucket_minutes_detail"] = bucket_minutes_detail_for_render
 
@@ -9604,9 +9619,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             canon_key = _canonical_bucket_key(bucket_key) or bucket_key
             if not canon_key or canon_key in _FINAL_BUCKET_HIDE_KEYS:
                 continue
-            minutes_val = _safe_float(entry.get("minutes"))
-            machine_val = _bucket_cost(entry, "machine_cost", "machine$")
-            labor_val = _bucket_cost(entry, "labor_cost", "labor$")
+            minutes_val = float(_safe_float(entry.get("minutes")))
+            machine_val = float(_bucket_cost(entry, "machine_cost", "machine$"))
+            labor_val = float(_bucket_cost(entry, "labor_cost", "labor$"))
             if (
                 minutes_val <= 0.0
                 and machine_val <= 0.0
@@ -10082,10 +10097,10 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
 
         totals = {"minutes": 0.0, "machine$": 0.0, "labor$": 0.0, "total$": 0.0}
         for entry in buckets.values():
-            minutes_val = _safe_float(entry.get("minutes"))
-            machine_val = _safe_float(entry.get("machine$"))
-            labor_val = _safe_float(entry.get("labor$"))
-            total_val = _safe_float(entry.get("total$"))
+            minutes_val = float(_safe_float(entry.get("minutes")))
+            machine_val = float(_safe_float(entry.get("machine$")))
+            labor_val = float(_safe_float(entry.get("labor$")))
+            total_val = float(_safe_float(entry.get("total$")))
             if total_val <= 0.0:
                 total_val = machine_val + labor_val
             totals["minutes"] += minutes_val
@@ -10107,9 +10122,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             machine_minutes = 0.0
             labor_minutes = 0.0
             for metrics in aggregated_bucket_minutes.values():
-                minutes_val = _safe_float(metrics.get("minutes"))
-                machine_val = _safe_float(metrics.get("machine$"))
-                labor_val = _safe_float(metrics.get("labor$"))
+                minutes_val = float(_safe_float(metrics.get("minutes")))
+                machine_val = float(_safe_float(metrics.get("machine$")))
+                labor_val = float(_safe_float(metrics.get("labor$")))
                 if minutes_val <= 0.0:
                     continue
                 hours_val = minutes_val / 60.0
@@ -11237,11 +11252,9 @@ def aggregate_ops(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "qty": qty,
             "desc": str(r.get("desc", "")),
         }
-        if r.get("diameter_in") is not None:
-            try:
-                simple_row["diameter_in"] = float(r.get("diameter_in"))
-            except Exception:
-                pass
+        diameter_val = _coerce_float_or_none(r.get("diameter_in"))
+        if diameter_val is not None:
+            simple_row["diameter_in"] = float(diameter_val)
         rows_simple.append(simple_row)
         detail.append(
             {
@@ -12517,12 +12530,24 @@ def _build_geo_from_ezdxf_doc(doc) -> dict[str, Any]:
     text_harvest_fn = getattr(geometry, "text_harvest", None)
     if callable(text_harvest_fn):
         try:
-            tokens_parts.extend(text_harvest_fn(doc))
+            harvested_tokens = text_harvest_fn(doc)
         except Exception:
-            pass
+            harvested_tokens = None
+        else:
+            if isinstance(harvested_tokens, (str, bytes)):
+                tokens_parts.append(str(harvested_tokens))
+            elif isinstance(harvested_tokens, Iterable):
+                tokens_parts.extend(
+                    str(part)
+                    for part in harvested_tokens
+                    if part not in (None, "")
+                )
     for line in table_lines:
         tokens_parts.append(line)
-    tokens_parts.extend(leaders)
+    if isinstance(leaders, (str, bytes)):
+        tokens_parts.append(str(leaders))
+    elif isinstance(leaders, Iterable):
+        tokens_parts.extend(str(item) for item in leaders if item)
     tokens_blob = "\n".join(p for p in tokens_parts if p)
     tokens_upper = tokens_blob.upper()
     material_info = harvest_material_finish(tokens_blob)
