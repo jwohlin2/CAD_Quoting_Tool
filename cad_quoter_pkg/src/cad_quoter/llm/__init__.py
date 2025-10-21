@@ -1014,6 +1014,7 @@ def explain_quote(
                 _add_reason("planner buckets include drilling")
 
     plan_info_mappings: list[Mapping[str, Any]] = []
+    bucket_view_obj: Mapping[str, Any] | None = None
     if isinstance(plan_info, Mapping) and plan_info:
         plan_info_mappings.extend(_iter_plan_mappings(plan_info))
 
@@ -1060,6 +1061,8 @@ def explain_quote(
 
         bucket_view = mapping.get("bucket_view") if isinstance(mapping, Mapping) else None
         if isinstance(bucket_view, Mapping):
+            if bucket_view_obj is None:
+                bucket_view_obj = bucket_view
             buckets = bucket_view.get("buckets")
             if isinstance(buckets, Mapping):
                 _check_bucket_map(buckets)
@@ -1069,6 +1072,11 @@ def explain_quote(
     if not plan_drilling_reasons and recognized_ops_from_plan > 0:
         # Recognized operations present but no explicit drilling signal; treat as informational only.
         plan_drilling_reasons = []
+
+    if bucket_view_obj is None and isinstance(breakdown, Mapping):
+        bucket_candidate = breakdown.get("bucket_view")
+        if isinstance(bucket_candidate, Mapping):
+            bucket_view_obj = bucket_candidate
 
     render_state_extra: Mapping[str, Any] | None = None
     if isinstance(render_state, Mapping):
@@ -1212,23 +1220,44 @@ def explain_quote(
     if scrap_text and coerce_float(breakdown.get("scrap_pct")):
         lines.append(f"Includes a {scrap_text} scrap allowance.")
 
-    # === WHY: CONSISTENT DRILLING TEXT ===
-    drill_detail_line: str | None = None
-    if has_drilling and drill_card_minutes > 0.0 and not planner_has_drilling_bucket:
-        drill_detail_line = (
-            f"Drilling time comes from removal-card math ({drill_card_minutes / 60.0:.2f} hr total)."
+    def _top_drivers_from_buckets(
+        bucket_view_mapping: Mapping[str, Any] | None, n: int = 3
+    ) -> list[tuple[str, float]]:
+        if not isinstance(bucket_view_mapping, Mapping):
+            return []
+        buckets_obj = bucket_view_mapping.get("buckets")
+        if not isinstance(buckets_obj, Mapping):
+            return []
+        pairs: list[tuple[str, float]] = []
+        for key, entry in buckets_obj.items():
+            total_value: float | None
+            if isinstance(entry, Mapping):
+                total_value = coerce_float(entry.get("total$"))
+            else:
+                total_value = coerce_float(entry)
+            if total_value is None:
+                continue
+            total_float = float(total_value)
+            if total_float > 0:
+                pairs.append((str(key), total_float))
+        pairs.sort(key=lambda item: item[1], reverse=True)
+        return pairs[:n]
+
+    top_drivers = _top_drivers_from_buckets(bucket_view_obj)
+    if top_drivers:
+        drivers_txt = ", ".join(
+            [f"{name.replace('_', ' ').title()} ${value:,.2f}" for name, value in top_drivers]
         )
-    elif not should_note_drilling:
-        drill_detail_line = "No drilling accounted."
-    if drill_detail_line:
-        if has_drilling:
-            lowered_conflicts = ("no drilling", "does not involve drilling")
-            lines[:] = [
-                line
-                for line in lines
-                if not any(conflict in line.lower() for conflict in lowered_conflicts)
-            ]
-        lines.append(drill_detail_line)
+        lines.append("Why this price")
+        lines.append("-" * 74)
+        lines.append(f"  Main cost drivers: {drivers_txt}.")
+    else:
+        lines.append("Why this price")
+        lines.append("-" * 74)
+        lines.append(
+            "  Cost drivers derive from planner buckets; no single dominant bucket."
+        )
+    lines.append("")
 
     def _iter_named_values(values: Any) -> Iterable[tuple[str, float]]:
         items: Iterable[tuple[Any, Any]]
