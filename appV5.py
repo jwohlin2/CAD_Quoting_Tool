@@ -1233,21 +1233,56 @@ def _compute_drilling_removal_section(
             if bins:
                 drill_meta_summary["groups"] = [dict(entry) for entry in bins]
 
-        lines.append(
+        _push(
+            lines,
             (
                 f"Toolchange adders: Deep-Drill {tchg_deep:.2f} min + Drill {tchg_std:.2f} min = {tool_add:.2f} min"
                 if tool_add > 0
                 else "Toolchange adders: -"
-            )
+            ),
         )
-        lines.append("-" * 66)
-        lines.append(
-            f"Subtotal (per-hole × qty) . {drill_minutes_total:.2f} min  ({drill_minutes_total/60.0:.2f} hr)"
+        _push(lines, "-" * 66)
+
+        # single source of truth
+        drill_minutes_total = float(drill_minutes_total)  # your computed subtotal minutes
+
+        # print the subtotal using that exact value
+        _push(
+            lines,
+            f"Subtotal (per-hole × qty) . {drill_minutes_total:.2f} min  ({drill_minutes_total/60.0:.2f} hr)",
         )
-        lines.append(
-            f"TOTAL DRILLING (with toolchange) . {drill_minutes_total:.2f} min  ({drill_minutes_total/60.0:.2f} hr)"
+
+        # seed pricing bucket (MINUTES, not hours)
+        _seed_bucket_minutes(
+            breakdown_mutable,
+            drilling_min=drill_minutes_total,
         )
-        lines.append("")
+        if isinstance(totals_map, _MutableMappingABC):
+            try:
+                totals_map["minutes"] = round(
+                    sum(
+                        _safe_float(info.get("minutes"), default=0.0)
+                        for info in buckets_obj.values()
+                        if isinstance(info, _MappingABC)
+                    ),
+                    2,
+                )
+            except Exception:
+                pass
+
+        # debug: verify nothing overwrites it
+        try:
+            pricing_buckets = buckets_obj if isinstance(buckets_obj, dict) else {}
+            dbg_bucket = pricing_buckets.get("drilling") or {}
+            _push(lines, f"[DEBUG] drilling_minutes_seeded={dbg_bucket.get('minutes')}")
+        except Exception:
+            pass
+
+        _push(
+            lines,
+            f"TOTAL DRILLING (with toolchange) . {drill_minutes_total:.2f} min  ({drill_minutes_total/60.0:.2f} hr)",
+        )
+        _push(lines, "")
     except Exception as exc:  # pragma: no cover - defensive belt + suspenders
         lines.append(f"[MATERIAL REMOVAL block skipped: {exc}]")
         lines.append("")
@@ -10996,30 +11031,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     except Exception as e:
         _push(lines, f"[DEBUG] material_removal_emit_skipped={e.__class__.__name__}: {e}")
-
-    # PROBE: show how many HOLE-TABLE rows we have (temporary)
-    tapping_minutes_total = 0.0
-    cbore_minutes_total = 0.0
-    spot_minutes_total = 0.0
-    jig_minutes_total = 0.0
-    drilling_minutes_total = 0.0
-    if isinstance(removal_card_extra, _MappingABC):
-        drilling_minutes_total = _safe_float(
-            removal_card_extra.get("drill_minutes_total"),
-            default=0.0,
-        )
-    if drilling_minutes_total <= 0.0:
-        drilling_minutes_total = _safe_float(removal_drilling_minutes, default=0.0)
-    _seed_bucket_minutes(
-        breakdown_mutable,
-        tapping_min=tapping_minutes_total,
-        cbore_min=cbore_minutes_total,
-        spot_min=spot_minutes_total,
-        jig_min=jig_minutes_total,
-        drilling_min=drilling_minutes_total,
-    )
-    append_line(f"[DEBUG] drilling_minutes_seeded={drilling_minutes_total:.2f}")
-    append_line("")
 
     # ---- Pricing ladder ------------------------------------------------------
     append_line("Pricing Ladder")
