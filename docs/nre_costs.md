@@ -14,7 +14,8 @@ NRE section directly from the structured data returned by `compute_quote_from_df
   and *Documentation* because those activities are typically managed manually.
 * Fixturing hours continue to come from rows labeled *Fixture Build* or *Custom Fixture Build*.
 * The aggregated hours are multiplied by the configured shop rates, which default to $90/hour for
-  both programmers and fixture builders in `cad_quoter.resources.rates_v1`.
+  both programmers and fixture builders in `cad_quoter/resources/app_settings.json` under
+  `pricing_defaults.rates`.
 
 The resulting `nre_detail` dictionary is what renders the quote output that shows entries such as
 `Programmer: 0.85 hr @ $90.00/hr` and `Build Labor: 12.00 hr @ $90.00/hr`, with the programming

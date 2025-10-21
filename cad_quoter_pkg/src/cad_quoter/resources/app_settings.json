@@ -1,4 +1,103 @@
 {
-  "last_variables_path": "D:/CAD_Quoting_Tool/Cad Files/full_coverage_unused_numeric.csv",
-  "rate_mode": "simple"
+  "rate_mode": "simple",
+  "last_variables_path": "",
+  "pricing_defaults": {
+    "params": {
+      "ExpeditePct": 0.0,
+      "MarginPct": 0.35,
+      "InsurancePct": 0.0,
+      "VendorMarkupPct": 0.0,
+      "MinLotCharge": 0.0,
+      "Quantity": 1,
+      "MachineMaxRPM": 8000,
+      "MachineMaxTorqueNm": 70.0,
+      "MachineMaxZTravel_mm": 500.0,
+      "MachineRapidIPM": 300.0,
+      "MachineHorsepower": 15.0,
+      "MachineHpToMrrFactor": 1.0,
+      "SpeedsFeedsCSVPath": "",
+      "DrillToolchangeMinutes": 0.5,
+      "DrillApproachRetractIn": 0.25,
+      "DrillPeckPenaltyMinPerIn": 0.03,
+      "DrillDwellMinutes": 0.0,
+      "StockCatalog": [
+        {
+          "sku": "plate_steel_0.25_12x12",
+          "material": "steel",
+          "form": "plate",
+          "length_mm": 304.8,
+          "width_mm": 304.8,
+          "thickness_mm": 6.35,
+          "max_weight_kg": 7.0
+        },
+        {
+          "sku": "plate_steel_0.5_12x12",
+          "material": "steel",
+          "form": "plate",
+          "length_mm": 304.8,
+          "width_mm": 304.8,
+          "thickness_mm": 12.7,
+          "max_weight_kg": 14.0
+        },
+        {
+          "sku": "plate_aluminum_0.25_12x24",
+          "material": "aluminum",
+          "form": "plate",
+          "length_mm": 609.6,
+          "width_mm": 304.8,
+          "thickness_mm": 6.35,
+          "max_weight_kg": 12.0
+        },
+        {
+          "sku": "plate_aluminum_0.5_12x24",
+          "material": "aluminum",
+          "form": "plate",
+          "length_mm": 609.6,
+          "width_mm": 304.8,
+          "thickness_mm": 12.7,
+          "max_weight_kg": 24.0
+        }
+      ],
+      "ProgSimpleDim_mm": 80.0,
+      "ProgCapHr": 1.0,
+      "ProgMaxToMillingRatio": 1.5,
+      "OEE_EfficiencyPct": 1.0,
+      "FiveAxisMultiplier": 1.0,
+      "TightToleranceMultiplier": 1.0,
+      "MillingConsumablesPerHr": 4.0,
+      "TurningConsumablesPerHr": 3.0,
+      "EDMConsumablesPerHr": 6.0,
+      "GrindingConsumablesPerHr": 3.0,
+      "InspectionConsumablesPerHr": 1.0,
+      "UtilitiesPerSpindleHr": 2.5,
+      "ConsumablesFlat": 35.0,
+      "MaterialOther": 50.0,
+      "MaterialVendorCSVPath": "",
+      "LLMModelPath": ""
+    },
+    "rates": {
+      "labor": {
+        "Programmer": 90.0,
+        "Engineer": 90.0,
+        "ProjectManager": 90.0,
+        "Toolmaker": 90.0,
+        "FixtureBuilder": 90.0,
+        "Finisher": 90.0,
+        "Lapper": 90.0,
+        "Inspector": 85.0,
+        "Assembler": 90.0
+      },
+      "machine": {
+        "WireEDM": 90.0,
+        "SinkerEDM": 90.0,
+        "CNC_Mill": 90.0,
+        "DrillPress": 90.0,
+        "Lathe": 90.0,
+        "Waterjet": 90.0,
+        "SurfaceGrind": 90.0,
+        "ODIDGrind": 90.0,
+        "JigGrind": 90.0
+      }
+    }
+  }
 }
