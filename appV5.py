@@ -3652,24 +3652,6 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         lines.append(f"  Total{' '*58}${total_cost:>10,.2f}")
         lines.append("")
 
-        lines.append("Labor Hour Summary")
-        lines.append("-" * 74)
-        total_hours = 0.0
-        seen.clear()
-        for k in list(order) + [k for k in buckets if k not in order]:
-            e = buckets.get(k)
-            if not isinstance(e, _MappingABC) or k in seen:
-                continue
-            seen.add(k)
-            hrs = _minutes_to_hours(e.get("minutes", 0.0))
-            if hrs <= 0:
-                continue
-            lines.append(f"  {label.get(k, k).ljust(28)}{hrs:.2f} hr")
-            total_hours += hrs
-        lines.append(" " * 66 + "-------")
-        lines.append(f"  Total Hours{' '*49}{total_hours:.2f} hr")
-        lines.append("")
-
     def _is_extra_segment(segment: str) -> bool:
         try:
             return bool(EXTRA_DETAIL_RE.match(str(segment)))
