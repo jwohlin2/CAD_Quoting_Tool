@@ -31,10 +31,6 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
     except Exception:
         return default
 
-
-PLANNER_META: frozenset[str] = frozenset({"planner_labor", "planner_machine", "planner_total"})
-
-
 _HIDE_IN_BUCKET_VIEW: frozenset[str] = frozenset({*PLANNER_META, "misc"})
 _PREFERRED_BUCKET_VIEW_ORDER: tuple[str, ...] = (
     "programming",
