@@ -1215,27 +1215,44 @@ def explain_quote(
     if material_canonical:
         lines.append(f"Material: {material_canonical}.")
 
-    labor_cost_rendered = coerce_float(breakdown.get("labor_cost_rendered"))
-    if labor_cost_rendered is None:
-        labor_cost_rendered = coerce_float(totals.get("labor_cost"))
-
-    labor_text = _format_money(labor_cost_rendered)
     material_text = _format_money(
         breakdown.get("material_direct_cost")
         or totals.get("material_cost")
         or (breakdown.get("material") or {}).get("material_cost")
     )
-    if labor_text or material_text:
-        parts: list[str] = []
-        if material_text:
-            parts.append(f"material {material_text}")
-        if labor_text:
-            parts.append(f"labor & machine {labor_text}")
-        lines.append("Cost makeup: " + "; ".join(parts) + ".")
+    cost_makeup_parts: list[str] = []
+    if material_text:
+        cost_makeup_parts.append(f"material {material_text}")
 
+    scrap_line: str | None = None
     scrap_text = _format_pct(breakdown.get("scrap_pct"))
     if scrap_text and coerce_float(breakdown.get("scrap_pct")):
-        lines.append(f"Includes a {scrap_text} scrap allowance.")
+        scrap_line = f"Includes a {scrap_text} scrap allowance."
+
+    labor_machine_total = 0.0
+    labor_labor_total = 0.0
+    if isinstance(bucket_view_obj, Mapping):
+        buckets_obj = bucket_view_obj.get("buckets")
+        if isinstance(buckets_obj, Mapping):
+            for raw_value in buckets_obj.values():
+                if not isinstance(raw_value, Mapping):
+                    continue
+                labor_machine_total += _as_float(raw_value.get("machine$"), 0.0)
+                labor_labor_total += _as_float(raw_value.get("labor$"), 0.0)
+
+    labor_total = labor_machine_total + labor_labor_total
+    labor_total_text = _format_money(labor_total)
+    labor_machine_text = _format_money(labor_machine_total)
+    labor_labor_text = _format_money(labor_labor_total)
+    labor_totals_present = labor_total > 1e-2 and bool(labor_total_text)
+    if labor_totals_present and labor_total_text:
+        cost_makeup_parts.append(f"labor & machine {labor_total_text}")
+
+    if cost_makeup_parts:
+        lines.append("Cost makeup: " + "; ".join(cost_makeup_parts) + ".")
+
+    if scrap_line:
+        lines.append(scrap_line)
 
     def _top_drivers(bucket_view_obj: Any, n: int = 3) -> list[tuple[str, float]]:
         if not isinstance(bucket_view_obj, Mapping):
@@ -1282,6 +1299,17 @@ def explain_quote(
         lines.append(f"  Main cost drivers: {txt}.")
     else:
         lines.append("  Main cost drivers derive from planner buckets; none dominate.")
+    if labor_totals_present and labor_total_text:
+        detail_parts: list[str] = []
+        if labor_machine_total > 1e-2 and labor_machine_text:
+            detail_parts.append(f"machine {labor_machine_text}")
+        if labor_labor_total > 1e-2 and labor_labor_text:
+            detail_parts.append(f"manual labor {labor_labor_text}")
+        if detail_parts:
+            detail_text = "; ".join(detail_parts)
+            lines.append(f"  Buckets allocate {labor_total_text} across {detail_text}.")
+        else:
+            lines.append(f"  Buckets allocate {labor_total_text} of labor & machine work.")
     lines.append("")
 
     def _iter_named_values(values: Any) -> Iterable[tuple[str, float]]:
