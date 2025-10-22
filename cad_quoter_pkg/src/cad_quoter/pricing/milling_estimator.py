@@ -59,6 +59,47 @@ def _lookup_rate(
     return found_value
 
 
+def _lookup_fraction(
+    rates: Mapping[str, Any] | None,
+    *keys: str,
+    default: float,
+) -> float:
+    if not isinstance(rates, Mapping):
+        return default
+
+    search_keys = {str(key or "").strip().lower() for key in keys if key}
+    if not search_keys:
+        search_keys = set()
+
+    def _scan(mapping: Mapping[str, Any]) -> float | None:
+        for raw_key, raw_value in mapping.items():
+            key_text = str(raw_key or "").strip()
+            if key_text and key_text.lower() in search_keys:
+                try:
+                    value = float(raw_value)
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(value):
+                    return value
+        for raw_value in mapping.values():
+            if isinstance(raw_value, Mapping):
+                found = _scan(raw_value)
+                if found is not None:
+                    return found
+        return None
+
+    found_value = _scan(rates)
+    if found_value is None:
+        return default
+    if not math.isfinite(found_value):
+        return default
+    if found_value <= 0.0:
+        return 0.0
+    if found_value >= 1.0:
+        return 1.0
+    return float(found_value)
+
+
 def _iter_records(table: Any | None) -> Sequence[Mapping[str, Any]]:
     records = coerce_table_to_records(table)
     if records:
@@ -347,9 +388,17 @@ def estimate_milling_minutes_from_geometry(
 
     mach_rate = float(_lookup_rate(rates, "MillingRate", "CNC_Mill", default=95.0))
     labor_rate = float(_lookup_rate(rates, "MillingLaborRate", "LaborRate", default=45.0))
+    attend_ratio = _lookup_fraction(
+        rates,
+        "MillingAttendRatio",
+        "MillingAttendFraction",
+        "MillingAttendedFraction",
+        "MillingAttendance",
+        default=1.0,
+    )
 
     milling_minutes = float(total_minutes)
-    milling_attended_minutes = 0.0
+    milling_attended_minutes = milling_minutes * max(0.0, min(attend_ratio, 1.0))
 
     machine_cost = (milling_minutes / 60.0) * mach_rate
     labor_cost = (milling_attended_minutes / 60.0) * labor_rate
