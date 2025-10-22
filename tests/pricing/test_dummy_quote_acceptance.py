@@ -371,11 +371,11 @@ DUMMY_QUOTE_RESULT = {
 
 
 _EXPECTED_BUCKET_ROWS = {
-    "Milling": (6.0, 240.0, 360.0, 600.0),
-    "Drilling": (1.5, 90.0, 120.0, 210.0),
-    "Grinding": (2.0, 150.0, 180.0, 330.0),
-    "Finishing/Deburr": (1.0, 80.0, 0.0, 80.0),
-    "Inspection": (0.75, 40.0, 0.0, 40.0),
+    "Milling": (360.0, 240.0, 360.0, 600.0),
+    "Drilling": (90.0, 90.0, 120.0, 210.0),
+    "Grinding": (120.0, 150.0, 180.0, 330.0),
+    "Finishing/Deburr": (60.0, 80.0, 0.0, 80.0),
+    "Inspection": (45.0, 40.0, 0.0, 40.0),
 }
 
 
@@ -480,15 +480,15 @@ def test_dummy_quote_process_table_matches_planner_totals() -> None:
             "finishing_deburr": "Finishing/Deburr",
             "inspection": "Inspection",
         }[key]
-        hours_val = float(metrics.get("minutes", 0.0)) / 60.0
+        minutes_val = float(metrics.get("minutes", 0.0))
         labor_val = float(metrics.get("labor$", 0.0))
         machine_val = float(metrics.get("machine$", 0.0))
         total_val = float(metrics.get("total$", labor_val + machine_val))
-        table_rows[label] = (round(hours_val, 2), labor_val, machine_val, total_val)
+        table_rows[label] = (round(minutes_val, 2), labor_val, machine_val, total_val)
 
     assert table_rows == _EXPECTED_BUCKET_ROWS
 
-    total_hours = sum(row[0] for row in table_rows.values())
+    total_minutes = sum(row[0] for row in table_rows.values())
     total_labor = sum(row[1] for row in table_rows.values())
     total_machine = sum(row[2] for row in table_rows.values())
     total_cost = sum(row[3] for row in table_rows.values())
@@ -501,7 +501,7 @@ def test_dummy_quote_process_table_matches_planner_totals() -> None:
     assert math.isclose(total_cost, planner_total["cost"], abs_tol=0.01)
     assert math.isclose(total_machine, planner_machine["cost"], abs_tol=0.01)
     assert math.isclose(total_labor, planner_labor["cost"], abs_tol=0.01)
-    assert math.isclose(total_hours, planner_total["minutes"] / 60.0, abs_tol=0.01)
+    assert math.isclose(total_minutes, planner_total["minutes"], abs_tol=0.01)
 
 
 def test_dummy_quote_hour_summary_aligns_with_planner_buckets() -> None:
