@@ -2214,61 +2214,51 @@ def _render_ops_card(
 
 
 def _side_from(txt: str) -> str:
-    text = str(txt or "").lower()
-    if "(front" in text:
+    t = txt.lower()
+    if "(front" in t:
         return "front"
-    if "(back" in text:
+    if "(back" in t:
         return "back"
     return "unspecified"
 
 
-def summarize_actions(removal_lines, planner_ops):
-    import re
+def summarize_actions(removal_lines: list[str], planner_ops: list[dict]) -> None:
     from collections import defaultdict
-
     import re
-    from collections import defaultdict
 
-    side_of = lambda s: (
-        "front"
-        if "(front" in s.lower()
-        else "back" if "(back" in s.lower() else "unspecified"
-    )
-
+    # Counters (totals + per side)
     total = defaultdict(int)
     by_side = defaultdict(lambda: defaultdict(int))
 
-    drill_re = re.compile(r'^Dia\s+[\d\.]+" × (\d+).*(\(.*?\))?', re.IGNORECASE)
-    tap_re = re.compile(r'^\s*#?\d.*\bTAP\b.*×\s+(\d+).*(\(.*?\))?', re.IGNORECASE)
+    # --- From MATERIAL REMOVAL lines (Drilling/Tapping sections) ---
+    # Example lines:
+    #  'Dia 0.281" × 20  (FRONT) | ...'
+    #  '#10-32 TAP THRU × 2  (FRONT) | ...'
+    drill_re = re.compile(r'^Dia\s+[\d\.]+" × (\d+).*(\(.*?\))?', re.I)
+    tap_re = re.compile(r'^\s*#?\d.*\bTAP\b.*×\s+(\d+).*(\(.*?\))?', re.I)
 
-    for ln in removal_lines or []:
-        if not isinstance(ln, str):
-            continue
+    for ln in removal_lines:
         m = drill_re.search(ln)
         if m:
             qty = int(m.group(1))
+            side = _side_from(ln)
             total["drill"] += qty
-            by_side["drill"][side_of(ln)] += qty
+            by_side["drill"][side] += qty
             continue
         m = tap_re.search(ln)
         if m:
             qty = int(m.group(1))
+            side = _side_from(ln)
             total["tap"] += qty
-            by_side["tap"][side_of(ln)] += qty
+            by_side["tap"][side] += qty
 
-    # Planner-derived ops (counterbore, spot, jig-grind) if you have them there
+    # --- From planner ops (Counterbore / Spot / Jig-grind) ---
+    # Expect planner_ops items like {'name': 'counterbore', 'qty': 3, 'side': 'FRONT'}
     for op in planner_ops or []:
-        if not isinstance(op, dict):
-            continue
-        name = (op.get("name", "") or "").lower()
-        qty_raw = op.get("qty")
-        try:
-            qty = int(float(qty_raw))
-        except Exception:
-            qty = 0
-        if qty <= 0:
-            continue
-        side = (op.get("side", "unspecified") or "unspecified").lower()
+        name = op.get("name", "").lower()
+        qty = int(op.get("qty", 0) or 0)
+        side = (op.get("side") or "unspecified").lower()
+
         if "counterbore" in name or "c-bore" in name or "cbore" in name:
             total["counterbore"] += qty
             by_side["counterbore"][side] += qty
@@ -2279,27 +2269,8 @@ def summarize_actions(removal_lines, planner_ops):
             total["jig_grind"] += qty
             by_side["jig_grind"][side] += qty
 
-    drill_count = int(total.get("drill", 0))
-    tap_count = int(total.get("tap", 0))
-    cbor_count = int(total.get("counterbore", 0))
-    spot_count = int(total.get("spot", 0))
-    jig_count = int(total.get("jig_grind", 0))
-
-    actions = {
-        "Drills": drill_count,
-        "Taps": tap_count,
-        "Counterbores": cbor_count,
-        "Spot": spot_count,
-        "Jig-grind": jig_count,
-    }
-    actions_total = sum(actions.values())
-
-    print("Operation Counts")
-    print("--------------------------------------------------------------------------")
-    for k, v in actions.items():
-        print(f"  {k:<14} {v}")
-    print(f"  {'Actions total':<14} {actions_total}")
-
+    actions_total = sum(total.values())
+    print(f"[ACTIONS] totals={dict(total)} total={actions_total}")
     for k, sides in by_side.items():
         print(f"[ACTIONS/{k}] by_side={dict(sides)}")
 
@@ -6070,10 +6041,54 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     raw_rollup = breakdown.get("planner_bucket_rollup")
     if isinstance(raw_rollup, _MappingABC):
         for key, value in raw_rollup.items():
-            canon = _canonical_bucket_key(key)
-            if canon:
-                if isinstance(value, _MappingABC):
-                    bucket_rollup_map[canon] = {str(k): v for k, v in value.items()}
+    planner_ops_seen: set[tuple[str, int, str]] = set()
+
+    def _add_planner_op(name: str, qty: Any, side: Any) -> None:
+        name_text = str(name or "").strip()
+        if not name_text:
+            return
+        try:
+            qty_int = int(qty)
+        except Exception:
+            return
+        if qty_int <= 0:
+            return
+        if isinstance(side, str):
+            side_text = side.strip()
+        else:
+            side_text = str(side or "").strip()
+        if not side_text:
+            side_text = "unspecified"
+        key = (name_text.lower(), qty_int, side_text.lower())
+        if key in planner_ops_seen:
+            return
+        planner_ops_seen.add(key)
+        planner_ops_summary.append({"name": name_text, "qty": qty_int, "side": side_text})
+
+    def _extend_planner_ops_from_extra(source: Any) -> None:
+        mapping: Mapping[str, Any] | None
+        if isinstance(source, _MappingABC):
+            mapping = source
+        elif isinstance(source, dict):
+            mapping = source
+        else:
+            mapping = None
+        if not mapping:
+            return
+        extra_bucket_ops = mapping.get("bucket_ops")
+        if not isinstance(extra_bucket_ops, _MappingABC):
+            return
+        for entries in extra_bucket_ops.values():
+            if not isinstance(entries, Sequence):
+                continue
+            for entry in entries:
+                if not isinstance(entry, _MappingABC):
+                    continue
+                name_text = entry.get("name") or entry.get("op")
+                qty_value = entry.get("qty")
+                side_value = entry.get("side")
+                _add_planner_op(name_text, qty_value, side_value)
+            _add_planner_op(name_text, qty_val, side_val)
                 else:
                     bucket_rollup_map[canon] = {}
     if not bucket_rollup_map and planner_bucket_from_plan:
@@ -7625,6 +7640,23 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         prefer_removal_drilling_hours=prefer_removal_drilling_hours,
         cfg=cfg,
         bucket_ops=bucket_ops_map,
+    extra_map_for_ops = getattr(bucket_state, "extra", None)
+    if isinstance(extra_map_for_ops, (_MappingABC, dict)):
+        _extend_planner_ops_from_extra(extra_map_for_ops)
+
+    try:
+        summarize_actions(
+            [str(line) for line in removal_summary_lines if isinstance(line, str)],
+            planner_ops_summary,
+        )
+    except Exception as exc:
+        logging.debug(
+            "[actions-summary] skipped due to %s: %s",
+            exc.__class__.__name__,
+            exc,
+            exc_info=False,
+        )
+
         drill_machine_minutes=drill_machine_minutes_estimate,
         drill_labor_minutes=drill_tool_minutes_estimate,
         drill_total_minutes=drill_total_minutes_estimate,
@@ -9523,29 +9555,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     ops_summary_map["rows"] = built
                 ops_rows = built
 
-        # Emit the cards (will no-op if no TAP/CBore/Spot rows)
-        pre_ops_len = len(lines)
-
-        _emit_hole_table_ops_cards(
-            lines,
-            geo=geo_map,
-            material_group=material_group,
-            speeds_csv=None,
-            result=result,
-            breakdown=breakdown,
-            rates=rates,
-        )
-
-        new_ops_lines = []
-        try:
-            for entry in lines[pre_ops_len:]:
-                if not isinstance(entry, str):
-                    continue
-                if entry.startswith("[DEBUG]"):
-                    continue
-                new_ops_lines.append(entry)
-        except Exception:
-            new_ops_lines = []
+            _extend_planner_ops_from_extra(getattr(bucket_state, "extra", None))
         removal_summary_lines.extend(new_ops_lines)
 
         try:

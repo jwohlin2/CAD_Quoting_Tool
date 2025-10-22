@@ -1112,10 +1112,10 @@ def bucketize(
     if isinstance(milling_entry, dict):
         machine_component = float(milling_entry.get("machine$", 0.0) or 0.0)
         labor_component = float(milling_entry.get("labor$", 0.0) or 0.0)
-        if labor_component > 0.0:
-            milling_entry["machine$"] = machine_component + labor_component
-            milling_entry["labor$"] = 0.0
-            milling_entry["total$"] = milling_entry["machine$"]
+        total_component = float(milling_entry.get("total$", 0.0) or 0.0)
+        combined = machine_component + labor_component
+        if total_component <= 0.0 and combined > 0.0:
+            milling_entry["total$"] = combined
 
     for key in PLANNER_BUCKET_ORDER:
         entry = buckets.get(key)
