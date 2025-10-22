@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import logging
 import math
 import sys
 import types
@@ -35,6 +36,7 @@ from appV5 import (  # noqa: E402  # pylint: disable=wrong-import-position
     net_mass_kg,
     render_quote,
     summarize_hole_chart_lines,
+    hole_rows_to_ops,
 )
 
 try:  # noqa: E402  # pylint: disable=wrong-import-position
@@ -284,6 +286,81 @@ def test_parse_hole_table_handles_leading_decimal_tokens() -> None:
     row_c = next(row for row in rows if row.ref == "C")
     cbore_c = _find_feature(row_c, "cbore")
     assert math.isclose(cbore_c["depth_mm"], 0.62 * 25.4, rel_tol=1e-6)
+
+
+def test_parser_rules_v2_to_ops_matches_spec(caplog: pytest.LogCaptureFixture) -> None:
+    lines = [
+        "HOLE   REF Ø   QTY   DESCRIPTION",
+        "K      Ø.201  8     Ø.201 THRU",
+        "L      #7     4     1/4-20 TAP .50 DEEP FROM BACK",
+        "C      Ø1.000 2     Ø1.000 C'BORE X .25 DEEP FROM FRONT",
+        "D      Ø1.000 2     Ø1.000 C'BORE X .25 DEEP FROM BACK",
+        "H              3     Ø.250 SPOT DRILL",
+        "B      Ø.159  6     #21 10-32 TAP THRU",
+    ]
+
+    with caplog.at_level(logging.INFO):
+        rows = parse_hole_table_lines(lines, rules_v2=True, block_thickness_in=1.0)
+
+    assert len(rows) == 6
+
+    ops = hole_rows_to_ops(rows)
+    assert len(ops) == 10
+
+    ops_by_key = {(op["ref"], op["type"], op["side"]): op for op in ops}
+
+    drill_k = ops_by_key[("K", "drill", "front")]
+    assert drill_k["qty"] == 8
+    assert drill_k["thread"] is None
+    assert drill_k["depth_in"] == pytest.approx(1.05, rel=1e-6)
+    assert drill_k["ref_dia"] == pytest.approx(0.201, rel=1e-6)
+
+    drill_l = ops_by_key[("L", "drill", "back")]
+    assert drill_l["qty"] == 4
+    assert drill_l["depth_in"] == pytest.approx(0.5, rel=1e-6)
+    assert drill_l["ref_dia"] == pytest.approx(0.201, rel=1e-6)
+
+    tap_l = ops_by_key[("L", "tap", "back")]
+    assert tap_l["qty"] == 4
+    assert tap_l["thread"] == "1/4-20"
+    assert tap_l["depth_in"] == pytest.approx(0.5, rel=1e-6)
+    assert tap_l["ref_dia"] == pytest.approx(0.25, rel=1e-6)
+
+    cbore_c = ops_by_key[("C", "cbore", "front")]
+    assert cbore_c["qty"] == 2
+    assert cbore_c["depth_in"] == pytest.approx(0.25, rel=1e-6)
+    assert cbore_c["ref_dia"] == pytest.approx(1.0, rel=1e-6)
+
+    drill_c = ops_by_key[("C", "drill", "front")]
+    assert drill_c["qty"] == 2
+    assert drill_c["depth_in"] is None
+    assert drill_c["ref_dia"] == pytest.approx(1.0, rel=1e-6)
+
+    cbore_d = ops_by_key[("D", "cbore", "back")]
+    assert cbore_d["qty"] == 2
+    assert cbore_d["depth_in"] == pytest.approx(0.25, rel=1e-6)
+
+    drill_d = ops_by_key[("D", "drill", "back")]
+    assert drill_d["qty"] == 2
+    assert drill_d["depth_in"] is None
+    assert drill_d["ref_dia"] == pytest.approx(1.0, rel=1e-6)
+
+    spot_h = ops_by_key[("H", "spot", "front")]
+    assert spot_h["qty"] == 3
+    assert spot_h["ref_dia"] == pytest.approx(0.25, rel=1e-6)
+    assert spot_h["depth_in"] is None
+
+    drill_b = ops_by_key[("B", "drill", "front")]
+    assert drill_b["qty"] == 6
+    assert drill_b["depth_in"] == pytest.approx(1.05, rel=1e-6)
+    assert drill_b["ref_dia"] == pytest.approx(0.159, rel=1e-6)
+
+    tap_b = ops_by_key[("B", "tap", "front")]
+    assert tap_b["qty"] == 6
+    assert tap_b["thread"] == "10-32"
+    assert tap_b["depth_in"] == pytest.approx(1.05, rel=1e-6)
+
+    assert any("[rules]" in record.getMessage() for record in caplog.records)
 
 
 def test_build_ops_rows_from_lines_fallback_extracts_common_ops() -> None:
