@@ -5,6 +5,11 @@ from dataclasses import dataclass
 from collections.abc import Iterable, Mapping
 import re
 from typing import Any, Dict, Iterable as _Iterable, Mapping as _Mapping
+from cad_quoter.pricing.rate_defaults import (
+    fallback_keys_for_mode,
+    fallback_rate_for_bucket,
+    fallback_rate_for_role,
+)
 from cad_quoter.rates import OP_TO_LABOR, OP_TO_MACHINE, rate_for_role
 
 
@@ -697,24 +702,44 @@ def _rate_candidates(key: str) -> tuple[str, ...]:
 
 def lookup_rate(
     key: str,
-    flat: Mapping[str, float],
-    normalized: Mapping[str, float],
+    flat: Mapping[str, float] | None,
+    normalized: Mapping[str, float] | None,
     *,
-    fallbacks: Iterable[str] = ("labor", "labor_rate", "machine", "machine_rate"),
+    fallbacks: Iterable[str] | None = None,
+    mode: str | None = None,
+    bucket_role: str | None = None,
 ) -> float:
     """Return the rate for *key* using flattened/normalised rate maps."""
 
+    flat_map = flat if isinstance(flat, Mapping) else {}
+    normalized_map = normalized if isinstance(normalized, Mapping) else {}
+
     for candidate in _rate_candidates(key):
-        if candidate in flat:
-            return flat[candidate]
+        if candidate in flat_map:
+            return flat_map[candidate]
         norm = normalize_bucket_key(candidate)
-        if norm and norm in normalized:
-            return normalized[norm]
-    for fallback in fallbacks:
+        if norm and norm in normalized_map:
+            return normalized_map[norm]
+
+    fallback_keys = fallbacks if fallbacks is not None else fallback_keys_for_mode(mode)
+    for fallback in fallback_keys:
         norm = normalize_bucket_key(fallback)
-        if norm and norm in normalized:
-            return normalized[norm]
-    return 0.0
+        if norm and norm in normalized_map:
+            return normalized_map[norm]
+
+    normalized_key = normalize_bucket_key(key)
+    role = bucket_role or BUCKET_ROLE.get(normalized_key) or BUCKET_ROLE.get("_default")
+
+    fallback_bucket = fallback_rate_for_bucket(
+        normalized_key,
+        roles=BUCKET_ROLE,
+        mode=mode,
+        default_role=role,
+    )
+    if fallback_bucket:
+        return float(fallback_bucket)
+
+    return float(fallback_rate_for_role(role, mode=mode))
 
 
 # ---------------------------------------------------------------------------
