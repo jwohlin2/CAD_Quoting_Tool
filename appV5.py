@@ -4722,7 +4722,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             entry = canonical_entries.pop(candidate, None)
             if entry is not None:
                 programming_entry = entry
-                if candidate == "programming_amortized" or qty <= 1:
+                if candidate == "programming_amortized":
                     programming_entry_label = PROGRAMMING_AMORTIZED_LABEL
                 else:
                     programming_entry_label = PROGRAMMING_PER_PART_LABEL
@@ -4940,6 +4940,19 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if display_label:
             lookup_candidates.append(display_label)
 
+        skip_detail_labels = {
+            PROGRAMMING_PER_PART_LABEL,
+            PROGRAMMING_AMORTIZED_LABEL,
+            "Fixture Build (amortized)",
+        }
+
+        if display_label not in skip_detail_labels:
+            for candidate in lookup_candidates:
+                detail_candidate = detail_lookup.get(str(candidate or ""))
+                if detail_candidate not in (None, ""):
+                    write_detail(str(detail_candidate), indent)
+                    return
+
         for candidate in lookup_candidates:
             if bucket_minutes_val <= 0.0 and candidate in bucket_minutes_detail:
                 bucket_minutes_val = _safe_float(
@@ -5022,9 +5035,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 total_from_bucket = float(getattr(spec_for_bucket, "total", 0.0) or 0.0)
             except Exception:
                 total_from_bucket = 0.0
-        if total_from_bucket > 0.0 and footer_hours > 0.0:
-            rate_float = total_from_bucket / footer_hours
+        if total_from_bucket > 0.0:
             stored_cost = total_from_bucket
+            if footer_hours > 0.0 and rate_float <= 0.0:
+                rate_float = total_from_bucket / footer_hours
 
         # Milling/Drilling/Inspection: prefer canonical rates instead of
         # reverse-computing them from bucket totals, which can drift when the

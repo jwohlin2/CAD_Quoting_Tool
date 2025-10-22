@@ -8,6 +8,7 @@ from cad_quoter.pricing.process_buckets import (
     canonical_bucket_key,
     normalize_bucket_key,
 )
+from cad_quoter.pricing.process_rates import machine_rate
 from cad_quoter.utils import _dict
 
 
@@ -19,7 +20,7 @@ __all__ = [
 ]
 
 
-DEFAULT_RATE_PER_HOUR: float = 90.0
+DEFAULT_RATE_PER_HOUR: float = machine_rate("milling")
 
 
 @dataclass(frozen=True)
