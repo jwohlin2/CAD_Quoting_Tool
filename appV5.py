@@ -4531,9 +4531,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 or value_str
             )
 
+        try:
+            table_rows_local = list(table_rows)  # type: ignore[name-defined]
+        except Exception:
+            table_rows_local = []
+
         def _bucket_snapshot(target: str) -> dict[str, float]:
             target_canon = _canonical_label(target)
-            for label, minutes_val, machine_val, labor_val, total_val in table_rows:
+            for label, minutes_val, machine_val, labor_val, total_val in table_rows_local:
                 if _canonical_label(label) == target_canon:
                     return {
                         "minutes": round(float(minutes_val or 0.0), 2),
@@ -4548,17 +4553,15 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         print(f"[INFO] [bucket/milling] {mb}")
         print(f"[INFO] [bucket/drilling] {db}")
 
-        rows = list(table_rows)
+        rows_for_display = list(rows)
         print(
-            f"[CHECK/process-sum] machine$={sum(float(r[2]) for r in rows):.2f} "
-            f"labor$={sum(float(r[3]) for r in rows):.2f} "
-            f"total$={sum(float(r[4]) for r in rows):.2f}"
+            f"[CHECK/process-sum] machine$={sum(float(r[2]) for r in rows_for_display):.2f} "
+            f"labor$={sum(float(r[3]) for r in rows_for_display):.2f} "
+            f"total$={sum(float(r[4]) for r in rows_for_display):.2f}"
         )
 
-        total_cost = sum(row[4] for row in table_rows)
-
-        total_cost = sum(row[4] for row in rows)
-        total_minutes = sum(row[1] for row in rows)
+        total_cost = sum(row[4] for row in rows_for_display)
+        total_minutes = sum(row[1] for row in rows_for_display)
 
         if rows:
             headers = ("Process", "Minutes", "Machine $", "Labor $", "Total $")
@@ -4701,6 +4704,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     spec_for_bucket = spec_candidate
 
         meta = _lookup_process_meta(process_meta, key) or {}
+        canon_for_notes = str(
+            _canonical_bucket_key(key)
+            or _normalize_bucket_key(key)
+            or (key or "")
+        ).strip().lower()
         footer_hours = 0.0
         has_bucket_minutes = False
         if bucket_minutes_val > 0.0:
@@ -4757,6 +4765,95 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if total_from_bucket > 0.0 and footer_hours > 0.0:
             rate_float = total_from_bucket / footer_hours
             stored_cost = total_from_bucket
+
+        # Milling/Drilling/Inspection: prefer canonical rates instead of
+        # reverse-computing them from bucket totals, which can drift when the
+        # user overrides costs.
+        canonical_minutes = bucket_minutes_val
+        if canonical_minutes <= 0.0 and isinstance(bucket_entry, _MappingABC):
+            canonical_minutes = _safe_float(bucket_entry.get("minutes"), default=0.0)
+        if canonical_minutes <= 0.0 and footer_hours > 0.0:
+            canonical_minutes = footer_hours * 60.0
+
+        def _cfg_rate_fallback(attr: str) -> float:
+            try:
+                return float(getattr(cfg, attr, 0.0) or 0.0)
+            except Exception:
+                return 0.0
+
+        if canonical_minutes > 0.0 and canon_for_notes in {"milling", "drilling", "inspection"}:
+            hours_val = canonical_minutes / 60.0
+            machine_rate = 0.0
+            labor_rate = 0.0
+            labor_component = 0.0
+            if isinstance(bucket_entry, _MappingABC):
+                labor_component = _safe_float(bucket_entry.get("labor$"), default=0.0)
+
+            if canon_for_notes == "milling":
+                machine_rate = _resolve_rate_with_fallback(
+                    rates.get("MillingRate"), "MachineRate", "machine_rate", "machine"
+                )
+                if machine_rate <= 0.0:
+                    cfg_machine = _cfg_rate_fallback("machine_rate_per_hr")
+                    if cfg_machine > 0.0:
+                        machine_rate = cfg_machine
+                labor_rate = _resolve_rate_with_fallback(
+                    rates.get("MillingLaborRate"), "LaborRate", "labor_rate", "labor"
+                )
+                if labor_rate <= 0.0:
+                    cfg_labor = _cfg_rate_fallback("labor_rate_per_hr")
+                    if cfg_labor > 0.0:
+                        labor_rate = cfg_labor
+                line = f"Milling: {hours_val:.2f} hr"
+                if machine_rate > 0.0:
+                    line += f" @ ${machine_rate:.2f}/hr (machine)"
+                else:
+                    line += " (machine)"
+                if labor_component > 0.0 and labor_rate > 0.0:
+                    line += f" + ${labor_rate:.2f}/hr (labor)"
+                write_line(line, indent)
+                return
+
+            if canon_for_notes == "drilling":
+                machine_rate = _resolve_rate_with_fallback(
+                    rates.get("DrillingRate"), "MachineRate", "machine_rate", "machine"
+                )
+                if machine_rate <= 0.0:
+                    cfg_machine = _cfg_rate_fallback("machine_rate_per_hr")
+                    if cfg_machine > 0.0:
+                        machine_rate = cfg_machine
+                labor_rate = _resolve_rate_with_fallback(
+                    rates.get("DrillingLaborRate"), "LaborRate", "labor_rate", "labor"
+                )
+                if labor_rate <= 0.0:
+                    cfg_labor = _cfg_rate_fallback("labor_rate_per_hr")
+                    if cfg_labor > 0.0:
+                        labor_rate = cfg_labor
+                line = f"Drilling: {hours_val:.2f} hr"
+                if machine_rate > 0.0:
+                    line += f" @ ${machine_rate:.2f}/hr (machine)"
+                else:
+                    line += " (machine)"
+                if labor_component > 0.0 and labor_rate > 0.0:
+                    line += f" + ${labor_rate:.2f}/hr (labor)"
+                write_line(line, indent)
+                return
+
+            if canon_for_notes == "inspection":
+                labor_rate = _resolve_rate_with_fallback(
+                    rates.get("InspectionRate"), "LaborRate", "labor_rate", "labor"
+                )
+                if labor_rate <= 0.0:
+                    cfg_labor = _cfg_rate_fallback("labor_rate_per_hr")
+                    if cfg_labor > 0.0:
+                        labor_rate = cfg_labor
+                line = f"Inspection: {hours_val:.2f} hr"
+                if labor_rate > 0.0:
+                    line += f" @ ${labor_rate:.2f}/hr (labor)"
+                else:
+                    line += " (labor)"
+                write_line(line, indent)
+                return
 
         write_line(_hours_with_rate_text(footer_hours, rate_float), indent)
 
