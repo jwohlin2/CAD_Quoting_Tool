@@ -6374,6 +6374,32 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     removal_card_lines: list[str] = []
     removal_card_extra: dict[str, float] = {}
+    speeds_feeds_table = None
+    if isinstance(result, _MappingABC):
+        candidate_sf = result.get("speeds_feeds_table")
+        if candidate_sf is not None:
+            speeds_feeds_table = candidate_sf
+    if speeds_feeds_table is None and isinstance(breakdown, _MappingABC):
+        candidate_sf = breakdown.get("speeds_feeds_table")
+        if candidate_sf is not None:
+            speeds_feeds_table = candidate_sf
+
+    material_group_display: str | None = None
+    if isinstance(drilling_meta_map, _MappingABC):
+        for key in ("material_group", "group"):
+            candidate_group = drilling_meta_map.get(key)
+            if isinstance(candidate_group, str) and candidate_group.strip():
+                material_group_display = candidate_group.strip()
+                break
+    if material_group_display is None and isinstance(result, _MappingABC):
+        candidate_group = result.get("material_group")
+        if isinstance(candidate_group, str) and candidate_group.strip():
+            material_group_display = candidate_group.strip()
+    if material_group_display is None and isinstance(breakdown, _MappingABC):
+        candidate_group = breakdown.get("material_group")
+        if isinstance(candidate_group, str) and candidate_group.strip():
+            material_group_display = candidate_group.strip()
+
     (
         removal_card_extra,
         removal_card_lines,
@@ -8559,12 +8585,385 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         breakdown["final_price"] = final_price
     replace_line(final_price_row_index, _format_row("Final Price per Part:", price))
 
+    subtotal_before_margin_val = _safe_float(subtotal_before_margin, 0.0)
+    final_price_val = _safe_float(price, 0.0)
+    expedite_amount_val = _safe_float(expedite_cost, 0.0)
+    ladder_subtotal_val = _safe_float(ladder_totals.get("subtotal"), subtotal_before_margin_val - expedite_amount_val)
+
+    quick_what_if_entries: list[dict[str, Any]] = []
+    margin_slider_payload: dict[str, Any] | None = None
+    margin_slider_display_lines: list[str] = []
+
+    def _pct_label(value: float) -> str:
+        try:
+            pct_value = float(value)
+        except Exception:
+            pct_value = 0.0
+        if not math.isfinite(pct_value):
+            pct_value = 0.0
+        pct_value = max(0.0, pct_value)
+        text = f"{pct_value * 100:.1f}".rstrip("0").rstrip(".")
+        if not text:
+            text = "0"
+        return f"{text}%"
+
+    def _normalize_quick_entries(source: Any) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        seen_keys: set[tuple[str, float | None]] = set()
+
+        def _try_add(candidate: Mapping[str, Any]) -> None:
+            label = str(
+                candidate.get("label")
+                or candidate.get("name")
+                or candidate.get("title")
+                or candidate.get("scenario")
+                or ""
+            ).strip()
+            detail = str(
+                candidate.get("detail")
+                or candidate.get("description")
+                or candidate.get("notes")
+                or ""
+            ).strip()
+
+            unit_price_val: float | None = None
+            for price_key in (
+                "unit_price",
+                "unitPrice",
+                "price",
+                "unit_price_usd",
+                "unitPriceUsd",
+                "value",
+            ):
+                if price_key in candidate:
+                    try:
+                        unit_price_val = float(candidate[price_key])
+                    except Exception:
+                        continue
+                    else:
+                        break
+
+            delta_val: float | None = None
+            for delta_key in ("delta", "delta_price", "delta_amount", "change", "difference"):
+                if delta_key in candidate:
+                    try:
+                        delta_val = float(candidate[delta_key])
+                    except Exception:
+                        continue
+                    else:
+                        break
+
+            margin_val: float | None = None
+            for margin_key in ("margin_pct", "margin", "margin_percent", "marginPercent"):
+                if margin_key in candidate:
+                    try:
+                        margin_val = float(candidate[margin_key])
+                    except Exception:
+                        continue
+                    else:
+                        break
+
+            if (
+                not label
+                and not detail
+                and unit_price_val is None
+                and delta_val is None
+                and margin_val is None
+            ):
+                return
+
+            entry: dict[str, Any] = {}
+            if label:
+                entry["label"] = label
+            if unit_price_val is not None and math.isfinite(unit_price_val):
+                entry["unit_price"] = round(unit_price_val, 2)
+            if delta_val is not None and math.isfinite(delta_val):
+                entry["delta"] = round(delta_val, 2)
+            if detail:
+                entry["detail"] = detail
+            if margin_val is not None and math.isfinite(margin_val):
+                entry["margin_pct"] = float(margin_val)
+            entry["currency"] = currency
+
+            key = (entry.get("label", ""), entry.get("unit_price"))
+            if key in seen_keys:
+                return
+            seen_keys.add(key)
+            normalized.append(entry)
+
+        def _walk(obj: Any) -> None:
+            if len(normalized) >= 10:
+                return
+            if isinstance(obj, _MappingABC):
+                _try_add(obj)
+                for child in obj.values():
+                    if isinstance(child, (dict, _MappingABC, list, tuple, set)):
+                        _walk(child)
+            elif isinstance(obj, (list, tuple, set)):
+                for child in obj:
+                    if isinstance(child, (dict, _MappingABC, list, tuple, set)):
+                        _walk(child)
+
+        _walk(source)
+        return normalized
+
+    quick_source_value: Any | None = None
+    quick_key_candidates = (
+        "quick_what_ifs",
+        "quickWhatIfs",
+        "quick_what_if",
+        "quick_whatifs",
+        "what_if_options",
+        "what_if_scenarios",
+    )
+
+    for container in (result, breakdown):
+        if not isinstance(container, _MappingABC):
+            continue
+        for key in quick_key_candidates:
+            if key in container:
+                quick_source_value = container.get(key)
+                break
+        if quick_source_value is not None:
+            break
+        for key, value in container.items():
+            try:
+                key_text = str(key).strip().lower()
+            except Exception:
+                continue
+            if "quick" in key_text and "what" in key_text:
+                quick_source_value = value
+                break
+        if quick_source_value is not None:
+            break
+
+    if quick_source_value is None and isinstance(decision_state, _MappingABC):
+        for key in quick_key_candidates:
+            if key in decision_state:
+                quick_source_value = decision_state.get(key)
+                break
+        if quick_source_value is None:
+            for key, value in decision_state.items():
+                try:
+                    key_text = str(key).strip().lower()
+                except Exception:
+                    continue
+                if "quick" in key_text and "what" in key_text:
+                    quick_source_value = value
+                    break
+
+    if quick_source_value is not None:
+        try:
+            quick_what_if_entries = _normalize_quick_entries(quick_source_value)
+        except Exception:
+            quick_what_if_entries = []
+
+    if not quick_what_if_entries:
+        generated: list[dict[str, Any]] = []
+
+        if subtotal_before_margin_val > 0.0:
+            margin_step = 0.05
+            margin_down = round(max(0.0, margin_pct_value - margin_step), 4)
+            if margin_pct_value - margin_down >= 0.005:
+                price_down = round(subtotal_before_margin_val * (1.0 + margin_down), 2)
+                delta_down = round(price_down - final_price_val, 2)
+                generated.append(
+                    {
+                        "label": f"Margin {_pct_label(margin_down)}",
+                        "unit_price": price_down,
+                        "delta": delta_down,
+                        "detail": f"Adjust margin to {_pct_label(margin_down)}.",
+                        "margin_pct": float(margin_down),
+                        "currency": currency,
+                    }
+                )
+
+            margin_up = round(min(1.0, margin_pct_value + margin_step), 4)
+            if margin_up - margin_pct_value >= 0.005:
+                price_up = round(subtotal_before_margin_val * (1.0 + margin_up), 2)
+                delta_up = round(price_up - final_price_val, 2)
+                generated.append(
+                    {
+                        "label": f"Margin {_pct_label(margin_up)}",
+                        "unit_price": price_up,
+                        "delta": delta_up,
+                        "detail": f"Adjust margin to {_pct_label(margin_up)}.",
+                        "margin_pct": float(margin_up),
+                        "currency": currency,
+                    }
+                )
+
+        if expedite_pct_value > 0.0 and ladder_subtotal_val > 0.0:
+            price_without_expedite = round(ladder_subtotal_val * (1.0 + margin_pct_value), 2)
+            delta_expedite = round(price_without_expedite - final_price_val, 2)
+            generated.append(
+                {
+                    "label": "Remove expedite",
+                    "unit_price": price_without_expedite,
+                    "delta": delta_expedite,
+                    "detail": f"Removes expedite surcharge ({_pct_label(expedite_pct_value)}).",
+                    "margin_pct": float(margin_pct_value),
+                    "currency": currency,
+                }
+            )
+
+        quick_what_if_entries = generated
+
+    if quick_what_if_entries:
+        deduped: list[dict[str, Any]] = []
+        seen_labels: set[tuple[str, float | None]] = set()
+        for entry in quick_what_if_entries:
+            label_text = str(entry.get("label") or "").strip()
+            if not label_text:
+                label_text = f"Scenario {len(deduped) + 1}"
+                entry["label"] = label_text
+            try:
+                price_val = float(entry.get("unit_price", 0.0))
+            except Exception:
+                price_val = 0.0
+            key = (label_text.lower(), round(price_val, 2))
+            if key in seen_labels:
+                continue
+            seen_labels.add(key)
+            try:
+                entry["unit_price"] = round(float(entry.get("unit_price", 0.0)), 2)
+            except Exception:
+                entry.pop("unit_price", None)
+            if "delta" in entry:
+                try:
+                    entry["delta"] = round(float(entry["delta"]), 2)
+                except Exception:
+                    entry.pop("delta", None)
+            entry.setdefault("currency", currency)
+            deduped.append(entry)
+        quick_what_if_entries = deduped
+
+    if subtotal_before_margin_val > 0.0:
+        slider_min_pct = 0.0
+        slider_step_pct = 0.01
+        slider_max_pct = margin_pct_value + 0.1
+        slider_max_pct = max(slider_max_pct, 0.3)
+        slider_max_pct = min(max(slider_max_pct, margin_pct_value), 1.0)
+
+        slider_ticks: set[float] = set()
+        slider_ticks.add(round(slider_min_pct, 4))
+        slider_ticks.add(round(max(slider_min_pct, min(slider_max_pct, margin_pct_value)), 4))
+        slider_ticks.add(round(slider_max_pct, 4))
+
+        display_step = 0.05
+        if slider_max_pct > slider_min_pct and display_step > 0:
+            steps = int(math.floor((slider_max_pct - slider_min_pct) / display_step + 1e-6))
+            for idx in range(steps + 1):
+                pct_val = slider_min_pct + idx * display_step
+                if pct_val < slider_min_pct - 1e-9 or pct_val > slider_max_pct + 1e-9:
+                    continue
+                slider_ticks.add(round(max(slider_min_pct, min(slider_max_pct, pct_val)), 4))
+
+        slider_points: list[dict[str, Any]] = []
+        for pct_val in sorted(slider_ticks):
+            price_point = round(subtotal_before_margin_val * (1.0 + pct_val), 2)
+            slider_points.append(
+                {
+                    "margin_pct": float(pct_val),
+                    "label": _pct_label(pct_val),
+                    "unit_price": price_point,
+                    "currency": currency,
+                }
+            )
+
+        if slider_points:
+            margin_slider_payload = {
+                "base_unit_price": round(subtotal_before_margin_val, 2),
+                "current_pct": float(round(margin_pct_value, 6)),
+                "current_price": round(final_price_val, 2),
+                "min_pct": float(round(slider_min_pct, 6)),
+                "max_pct": float(round(slider_max_pct, 6)),
+                "step_pct": float(round(slider_step_pct, 6)),
+                "points": slider_points,
+                "currency": currency,
+            }
+
+            margin_slider_display_lines.append(
+                f"Current margin {_pct_label(margin_pct_value)} → {fmt_money(final_price_val, currency)}"
+            )
+
+            sample_points: list[dict[str, Any]] = []
+            min_point = slider_points[0]
+            max_point = slider_points[-1]
+            current_point = next(
+                (
+                    point
+                    for point in slider_points
+                    if math.isclose(point["margin_pct"], margin_pct_value, rel_tol=0.0, abs_tol=1e-6)
+                ),
+                None,
+            )
+            sample_points.append(min_point)
+            if current_point and current_point not in sample_points:
+                sample_points.append(current_point)
+            if len(slider_points) > 2:
+                mid_point = slider_points[len(slider_points) // 2]
+                if mid_point not in sample_points:
+                    sample_points.append(mid_point)
+            if max_point not in sample_points:
+                sample_points.append(max_point)
+
+            formatted_samples = " · ".join(
+                f"{point['label']}: {fmt_money(point['unit_price'], currency)}" for point in sample_points
+            )
+            if formatted_samples:
+                margin_slider_display_lines.append(formatted_samples)
+
+            step_display = max(1, int(round(slider_step_pct * 100)))
+            margin_slider_display_lines.append(
+                f"Range {_pct_label(slider_min_pct)}–{_pct_label(slider_max_pct)} (step {step_display}%)."
+            )
+
     row("Subtotal (Labor + Directs):", subtotal)
     if applied_pcts.get("ExpeditePct"):
         row(f"+ Expedite ({_pct(applied_pcts.get('ExpeditePct'))}):", expedite_cost)
     row("= Subtotal before Margin:", subtotal_before_margin)
     row(f"Final Price with Margin ({_pct(applied_pcts.get('MarginPct'))}):", price)
     _push(lines, "")
+
+    def _ensure_blank_line() -> None:
+        if lines and lines[-1] != "":
+            _push(lines, "")
+
+    if quick_what_if_entries:
+        _ensure_blank_line()
+        _push(lines, "Quick What-Ifs")
+        _push(lines, divider)
+        for entry in quick_what_if_entries:
+            label_text = str(entry.get("label") or "").strip() or "Scenario"
+            amount_val = _safe_float(entry.get("unit_price"), 0.0)
+            amount_text = fmt_money(amount_val, currency)
+            delta_val = entry.get("delta")
+            if delta_val is not None:
+                delta_float = _safe_float(delta_val, 0.0)
+                if delta_float < -0.01:
+                    delta_prefix = "-"
+                elif abs(delta_float) <= 0.01:
+                    delta_prefix = "±"
+                else:
+                    delta_prefix = "+"
+                delta_text = fmt_money(abs(delta_float), currency)
+                base_line = f"{label_text}: {amount_text} ({delta_prefix}{delta_text})"
+            else:
+                base_line = f"{label_text}: {amount_text}"
+            detail_text = str(entry.get("detail") or "").strip()
+            if detail_text:
+                base_line = f"{base_line} — {detail_text}"
+            _push(lines, base_line)
+        _ensure_blank_line()
+
+    if margin_slider_display_lines:
+        _ensure_blank_line()
+        _push(lines, "Margin Slider")
+        _push(lines, divider)
+        for text_line in margin_slider_display_lines:
+            _push(lines, text_line)
+        _ensure_blank_line()
 
     # ---- LLM adjustments bullets (optional) ---------------------------------
     if llm_notes:
@@ -8947,6 +9346,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             "final_price": round(final_price_val, 2),
         },
     }
+
+    if quick_what_if_entries:
+        render_payload["quick_what_ifs"] = quick_what_if_entries
+    if margin_slider_payload is not None:
+        render_payload["margin_slider"] = margin_slider_payload
 
     if isinstance(result, _MutableMappingABC):
         result.setdefault("render_payload", render_payload)

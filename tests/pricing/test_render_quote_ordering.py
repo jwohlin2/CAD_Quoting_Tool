@@ -6,7 +6,7 @@ import appV5
 from cad_quoter.llm import explain_quote
 
 
-def _render_payload(result: Mapping) -> dict:
+def _render_payload(result: Mapping) -> tuple[str, dict]:
     rendered = appV5.render_quote(result, currency="$")
     assert "QUOTE SUMMARY" in rendered
     breakdown = result.get("breakdown", {}) if isinstance(result, dict) else {}
@@ -14,7 +14,7 @@ def _render_payload(result: Mapping) -> dict:
     if payload is None and isinstance(result, dict):
         payload = result.get("render_payload")
     assert isinstance(payload, dict), "expected render payload attached to result"
-    return payload
+    return rendered, payload
 
 
 def test_render_quote_emits_structured_sections() -> None:
@@ -46,12 +46,27 @@ def test_render_quote_emits_structured_sections() -> None:
         },
     }
 
-    payload = _render_payload(result)
+    rendered_text, payload = _render_payload(result)
 
     summary = payload["summary"]
     assert summary["qty"] == 3
     assert math.isclose(summary["margin_pct"], 0.15, rel_tol=1e-6)
     assert math.isclose(summary["final_price"], result["price"], rel_tol=1e-6)
+
+    assert "Quick What-Ifs" in rendered_text
+    assert "Margin Slider" in rendered_text
+
+    quick_entries = payload.get("quick_what_ifs")
+    assert isinstance(quick_entries, list) and quick_entries
+
+    slider_payload = payload.get("margin_slider")
+    assert isinstance(slider_payload, Mapping)
+    assert slider_payload.get("points")
+    assert math.isclose(
+        float(slider_payload.get("current_pct", 0.0)),
+        summary["margin_pct"],
+        rel_tol=1e-6,
+    )
 
     drivers = payload.get("price_drivers", [])
     assert any("Tight tolerance" in driver.get("detail", "") for driver in drivers)
@@ -90,7 +105,7 @@ def test_render_quote_cost_breakdown_prefers_pricing_totals() -> None:
         },
     }
 
-    payload = _render_payload(result)
+    _, payload = _render_payload(result)
     cost_breakdown = dict(payload.get("cost_breakdown", []))
     assert math.isclose(cost_breakdown["Direct Costs"], 17.5, rel_tol=1e-6)
 
@@ -156,7 +171,7 @@ def test_render_quote_process_payload_tracks_bucket_view() -> None:
 
     result = {"price": 1450.0, "breakdown": breakdown}
 
-    payload = _render_payload(result)
+    _, payload = _render_payload(result)
     processes = payload.get("processes", [])
     labels = [entry["label"] for entry in processes]
     assert "Milling" in labels
@@ -216,7 +231,7 @@ def test_render_payload_obeys_pricing_math_guards() -> None:
 
     result = {"price": 1078.0, "breakdown": breakdown}
 
-    payload = _render_payload(result)
+    _, payload = _render_payload(result)
     summary = payload["summary"]
     subtotal_before_margin = summary.get("subtotal_before_margin")
     assert subtotal_before_margin is not None
@@ -282,4 +297,4 @@ def test_explain_quote_reports_no_drilling_when_minutes_absent() -> None:
 
     explanation = explain_quote(breakdown, render_state={"extra": {}})
 
-    assert "Main cost drivers derive from planner buckets; none dominate." in explanation
+    assert "Main cost drivers derive from bucket totals; none dominate." in explanation
