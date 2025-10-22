@@ -32,7 +32,7 @@ from cad_quoter.pass_labels import (
 )
 from cad_quoter.material_density import density_for_material as _lookup_density
 from cad_quoter.utils import jdump
-from cad_quoter.utils.render_utils import fmt_hours
+from cad_quoter.utils.rendering import fmt_hours
 
 def _as_float_or_none(value: Any) -> float | None:
     try:

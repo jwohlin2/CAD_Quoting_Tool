@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence
 
 from cad_quoter.utils import _dict, compact_dict, jdump, json_safe_copy
 from cad_quoter.utils.numeric import coerce_float, coerce_int
-from cad_quoter.utils.render_utils import fmt_hours, fmt_money, fmt_percent
+from cad_quoter.utils.rendering import fmt_hours, fmt_money, fmt_percent
 from cad_quoter.resources.loading import load_text
 
 

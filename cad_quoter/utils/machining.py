@@ -6,7 +6,7 @@ import math
 import re
 from typing import Any, Callable, Mapping
 
-from cad_quoter.utils.debug_tables import (
+from cad_quoter.utils.rendering import (
     _jsonify_debug_summary as _debug_jsonify_summary,
     _jsonify_debug_value as _debug_jsonify_value,
 )
@@ -26,13 +26,13 @@ def _coerce_float_or_none(value: Any) -> float | None:
 
 
 def _jsonify_debug_value(value: Any, depth: int = 0, max_depth: int = 6) -> Any:
-    """Proxy to :func:`cad_quoter.utils.debug_tables._jsonify_debug_value`."""
+    """Proxy to :func:`cad_quoter.utils.rendering._jsonify_debug_value`."""
 
     return _debug_jsonify_value(value, depth=depth, max_depth=max_depth)
 
 
 def _jsonify_debug_summary(summary: Mapping[str, Any]) -> dict[str, Any]:
-    """Proxy to :func:`cad_quoter.utils.debug_tables._jsonify_debug_summary`."""
+    """Proxy to :func:`cad_quoter.utils.rendering._jsonify_debug_summary`."""
 
     return _debug_jsonify_summary(summary)
 

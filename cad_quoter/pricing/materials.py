@@ -14,7 +14,7 @@ from pathlib import Path
 from collections.abc import Mapping as _MappingABC, Sequence
 from typing import Any, Dict, Literal, Mapping, overload
 
-from cad_quoter.utils.scrap import normalize_scrap_pct
+from cad_quoter.utils.geometry import normalize_scrap_pct
 from cad_quoter.domain_models import (
     DEFAULT_MATERIAL_KEY,
     MATERIAL_OTHER_KEY,

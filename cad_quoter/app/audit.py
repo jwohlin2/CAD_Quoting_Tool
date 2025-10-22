@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from cad_quoter.utils.render_utils import fmt_money, fmt_percent
+from cad_quoter.utils.rendering import fmt_money, fmt_percent
 
 
 LOGS_DIR = Path(r"D:\CAD_Quoting_Tool\Logs")
