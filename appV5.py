@@ -4805,22 +4805,24 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             for row_label, *_ in rows
         }
         if "tapping" not in row_canon_keys:
-            tapping_entry: Mapping[str, Any] | None = None
+            tapping_bucket: Mapping[str, Any] | None = None
             for candidate_key in ("tapping", "Tapping"):
                 entry = buckets.get(candidate_key)
                 if isinstance(entry, _MappingABC):
-                    tapping_entry = entry
+                    tapping_bucket = entry
                     break
-            if tapping_entry is None:
-                tapping_entry = {}
-            _append_process_row(
-                rows,
-                _label_for_bucket("tapping"),
-                tapping_entry.get("minutes", 0.0),
-                tapping_entry.get("machine$", 0.0),
-                tapping_entry.get("labor$", 0.0),
-                tapping_entry.get("total$", 0.0),
-            )
+            if tapping_bucket is None:
+                tapping_bucket = {}
+            tapping_total = _as_float(tapping_bucket.get("total$", 0.0), 0.0)
+            if tapping_total > 0.0:
+                _append_process_row(
+                    rows,
+                    _label_for_bucket("tapping"),
+                    tapping_bucket.get("minutes", 0.0),
+                    tapping_bucket.get("machine$", 0.0),
+                    tapping_bucket.get("labor$", 0.0),
+                    tapping_total,
+                )
 
         total_cost = sum(row[4] for row in rows)
         total_minutes = sum(row[1] for row in rows)
