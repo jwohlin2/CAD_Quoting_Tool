@@ -350,7 +350,10 @@ def test_planner_fallback_when_no_line_items(monkeypatch):
     assert drilling_bucket["machine_cost"] == pytest.approx(
         (expected_minutes / 60.0) * 75.0, abs=0.05
     )
-    assert drilling_bucket.get("labor_cost", 0.0) == pytest.approx(0.0, abs=1e-6)
+    expected_labor_cost = (expected_minutes / 60.0) * 45.0
+    assert drilling_bucket.get("labor_cost", 0.0) == pytest.approx(
+        expected_labor_cost, abs=0.05
+    )
 
 
 def test_planner_zero_totals_logs_flag_and_falls_back(monkeypatch):

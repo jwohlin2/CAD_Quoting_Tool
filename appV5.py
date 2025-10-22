@@ -11680,7 +11680,35 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             machine_cost_val = (drilling_minutes_for_bucket / 60.0) * drill_rate_value
         metrics["machine$"] = round(machine_cost_val, 2)
 
-        labor_cost_val = _safe_float(metrics.get("labor$"))
+        drilling_labor_rate = _lookup_rate(
+            "DrillingLaborRate", rates, params, default_rates, fallback=0.0
+        )
+        if drilling_labor_rate <= 0.0:
+            drilling_labor_rate = _lookup_rate(
+                "LaborRate", rates, params, default_rates, fallback=45.0
+            )
+
+        attended_fraction: float | None = None
+        if isinstance(drilling_meta_entry, _MappingABC):
+            for key in (
+                "attended_fraction",
+                "attended_frac",
+                "labor_fraction",
+                "labor_attended_fraction",
+            ):
+                attended_candidate = drilling_meta_entry.get(key)
+                if attended_candidate is None:
+                    continue
+                attended_value = _coerce_float_or_none(attended_candidate)
+                if attended_value is not None:
+                    attended_fraction = attended_value
+                    break
+        if attended_fraction is None:
+            attended_fraction = 1.0
+        attended_fraction = max(0.0, min(attended_fraction, 1.0))
+
+        labor_cost_val = (drilling_minutes_for_bucket / 60.0) * drilling_labor_rate
+        labor_cost_val *= attended_fraction
         metrics["labor$"] = round(labor_cost_val, 2) if labor_cost_val > 0.0 else 0.0
 
     if aggregated_bucket_minutes:
