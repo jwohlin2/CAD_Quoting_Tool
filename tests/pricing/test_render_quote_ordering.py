@@ -224,9 +224,15 @@ def test_render_payload_obeys_pricing_math_guards() -> None:
     materials_direct = payload.get("materials_direct")
     assert materials_direct is not None
 
-    processes = payload.get("processes", [])
-    labor_sum = sum(float(entry.get("amount", 0.0) or 0.0) for entry in processes)
-    assert math.isclose(subtotal_before_margin, materials_direct + labor_sum, abs_tol=0.01)
+    ladder = payload.get("ladder", {})
+    labor_total = ladder.get("labor_total")
+    direct_total = ladder.get("direct_total")
+    ladder_subtotal = ladder.get("subtotal_before_margin")
+    assert labor_total is not None
+    assert direct_total is not None
+    assert ladder_subtotal is not None
+    assert math.isclose(ladder_subtotal, labor_total + direct_total, abs_tol=0.01)
+    assert math.isclose(materials_direct, direct_total, abs_tol=0.01)
 
     margin_pct = summary.get("margin_pct")
     final_price = summary.get("final_price")
@@ -236,7 +242,7 @@ def test_render_payload_obeys_pricing_math_guards() -> None:
 
     reported_labor_total = payload.get("labor_total_amount")
     assert reported_labor_total is not None
-    assert math.isclose(reported_labor_total, labor_sum, abs_tol=0.01)
+    assert math.isclose(reported_labor_total, labor_total, abs_tol=0.01)
 
 
 def test_explain_quote_reports_drilling_minutes_from_removal_card() -> None:
