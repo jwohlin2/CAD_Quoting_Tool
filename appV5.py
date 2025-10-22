@@ -9748,6 +9748,82 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             if str(entry.get("label")) == PROGRAMMING_PER_PART_LABEL:
                 entry["label"] = PROGRAMMING_AMORTIZED_LABEL
 
+    def _process_table_rows_from_view(
+        view: Mapping[str, Any] | None,
+    ) -> list[list[str]]:
+        if not isinstance(view, _MappingABC):
+            return []
+        buckets_obj = view.get("buckets")
+        if not isinstance(buckets_obj, _MappingABC):
+            return []
+
+        def _as_float(value: Any) -> float:
+            try:
+                return float(value or 0.0)
+            except Exception:
+                return 0.0
+
+        canonical_buckets: dict[str, Mapping[str, Any]] = {}
+        for raw_key, raw_entry in buckets_obj.items():
+            if not isinstance(raw_entry, _MappingABC):
+                continue
+            key_text = str(raw_key or "").strip()
+            if not key_text:
+                continue
+            normalized_key = key_text.lower().replace(" ", "_")
+            canon_key = _canonical_bucket_key(key_text)
+            if canon_key:
+                canonical_buckets.setdefault(str(canon_key).lower(), raw_entry)
+            canonical_buckets.setdefault(normalized_key, raw_entry)
+
+        pretty_labels = {
+            "programming_amortized": PROGRAMMING_AMORTIZED_LABEL,
+            "programming": PROGRAMMING_PER_PART_LABEL,
+            "milling": "Milling",
+            "drilling": "Drilling",
+            "tapping": "Tapping",
+            "inspection": "Inspection",
+        }
+        ordered_keys = (
+            "programming_amortized",
+            "milling",
+            "drilling",
+            "tapping",
+            "inspection",
+        )
+
+        rows: list[list[str]] = []
+        for bucket_name in ordered_keys:
+            entry = canonical_buckets.get(bucket_name)
+            label_key = bucket_name
+            if entry is None and bucket_name == "programming_amortized":
+                entry = canonical_buckets.get("programming")
+                label_key = "programming"
+            if not isinstance(entry, _MappingABC):
+                continue
+            minutes_val = _as_float(entry.get("minutes"))
+            if minutes_val <= 0.0:
+                continue
+            machine_val = _as_float(entry.get("machine$"))
+            labor_val = _as_float(entry.get("labor$"))
+            total_val = _as_float(entry.get("total$"))
+            if total_val <= 0.0:
+                total_val = machine_val + labor_val
+            pretty_label = pretty_labels.get(
+                label_key,
+                str(label_key).replace("_", " ").title(),
+            )
+            rows.append(
+                [
+                    pretty_label,
+                    f"{minutes_val:.2f}",
+                    f"${machine_val:.2f}",
+                    f"${labor_val:.2f}",
+                    f"${total_val:.2f}",
+                ]
+            )
+        return rows
+
     render_payload = {
         "summary": summary_payload,
         "price_drivers": price_drivers_payload,
@@ -9765,6 +9841,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             "final_price": round(final_price_val, 2),
         },
     }
+
+    process_table_rows_payload = _process_table_rows_from_view(bucket_view_struct)
+    if not process_table_rows_payload:
+        process_table_rows_payload = _process_table_rows_from_view(bucket_view_obj)
+    if process_table_rows_payload:
+        render_payload["process_table"] = process_table_rows_payload
 
     if quick_what_if_entries:
         render_payload["quick_what_ifs"] = quick_what_if_entries
