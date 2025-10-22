@@ -1,16 +1,32 @@
-"""Runtime helpers shared by the desktop UI entrypoint."""
+"""Unified command-line runner and runtime utilities for the desktop UI."""
 from __future__ import annotations
 
+import argparse
 import gc
 import importlib.util
+import json
 import os
+import sys
+from collections.abc import Mapping as _MappingABC
+from dataclasses import replace
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
+from cad_quoter.config import (
+    AppEnvironment,
+    configure_logging,
+    describe_runtime_environment,
+    logger,
+)
 from cad_quoter.resources import default_catalog_csv
+from cad_quoter.utils import jdump
+
+# ---------------------------------------------------------------------------
+# Environment initialisation
+# ---------------------------------------------------------------------------
 
 # Ensure the McMaster stock selector uses the bundled catalog unless callers
-# explicitly override it via the environment.  This matches the historical
+# explicitly override it via the environment. This matches the historical
 # Windows installer behaviour where ``catalog.csv`` lived alongside the app.
 os.environ.setdefault("CATALOG_CSV_PATH", str(default_catalog_csv()))
 
@@ -18,11 +34,7 @@ os.environ.setdefault("CATALOG_CSV_PATH", str(default_catalog_csv()))
 # importing the optional dependency at module import time.
 Llama = None  # type: ignore[assignment]
 
-# Note: Avoid importing llama_cpp at module import time so the desktop UI can
-# launch in environments without the optional LLM runtime installed. We import
-# it lazily inside load_qwen_vl().
-
-# Runtime dependencies required when the desktop UI launches.  These are kept
+# Runtime dependencies required when the desktop UI launches. These are kept
 # here so they can be reused in tests without importing the enormous Tk UI
 # module.
 REQUIRED_RUNTIME_PACKAGES: dict[str, str] = {
@@ -31,17 +43,17 @@ REQUIRED_RUNTIME_PACKAGES: dict[str, str] = {
     "lxml": "lxml",
 }
 
-# Historical Windows installs placed the GGUF files in this directory.  We keep
+# Historical Windows installs placed the GGUF files in this directory. We keep
 # it in the search path so the upgraded runtime can still discover the models
 # automatically for those environments.
 PREFERRED_MODEL_DIRS: tuple[Path, ...] = (
-    Path(r"D:\CAD_Quoting_Tool\models"),
+    Path(r"D:\\CAD_Quoting_Tool\\models"),
 )
 
-# Legacy filenames from earlier builds.  The discovery helpers will fall back to
+# Legacy filenames from earlier builds. The discovery helpers will fall back to
 # these names if no explicit paths are provided.
-LEGACY_VL_MODEL = Path(r"D:\CAD_Quoting_Tool\models\qwen2.5-vl-7b-instruct-q4_k_m.gguf")
-LEGACY_MM_PROJ = Path(r"D:\CAD_Quoting_Tool\models\mmproj-Qwen2.5-VL-3B-Instruct-Q8_0.gguf")
+LEGACY_VL_MODEL = Path(r"D:\\CAD_Quoting_Tool\\models\\qwen2.5-vl-7b-instruct-q4_k_m.gguf")
+LEGACY_MM_PROJ = Path(r"D:\\CAD_Quoting_Tool\\models\\mmproj-Qwen2.5-VL-3B-Instruct-Q8_0.gguf")
 
 DEFAULT_VL_MODEL_NAMES = (
     LEGACY_VL_MODEL.name,
@@ -55,6 +67,146 @@ DEFAULT_MM_PROJ_NAMES = (
     "mmproj-Qwen2.5-VL-3B-Instruct-Q4_0.gguf",
     "mmproj-Qwen2-VL-7B-Instruct-Q4_0.gguf",
 )
+
+
+# ---------------------------------------------------------------------------
+# Command-line interface helpers
+# ---------------------------------------------------------------------------
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="CAD Quoting Tool UI")
+    parser.add_argument(
+        "--print-env",
+        action="store_true",
+        help="Print a JSON dump of relevant environment configuration and exit.",
+    )
+    parser.add_argument(
+        "--no-gui",
+        action="store_true",
+        help="Initialise subsystems but do not launch the Tkinter GUI.",
+    )
+    parser.add_argument(
+        "--debug-removal",
+        action="store_true",
+        help="Force-enable material removal debug output (shows Material Removal Debug table).",
+    )
+    parser.add_argument(
+        "--geo-json",
+        type=str,
+        default=None,
+        help="Bypass CAD and load a prebuilt geometry JSON for debugging.",
+    )
+    return parser
+
+
+def main(
+    argv: Optional[Sequence[str]] = None,
+    *,
+    app_cls: type | None = None,
+    pricing_engine_cls: type | None = None,
+    pricing_registry_factory: Callable[[], Any] | None = None,
+    app_env: AppEnvironment | None = None,
+    env_setter: Callable[[AppEnvironment], None] | None = None,
+) -> int:
+    """Run the Tkinter application entry point with command-line options."""
+
+    configure_logging()
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
+
+    if pricing_registry_factory is None or pricing_engine_cls is None or app_cls is None or app_env is None:
+        from cad_quoter.pricing import PricingEngine, create_default_registry
+        import appV5 as app_module
+
+        if pricing_registry_factory is None:
+            pricing_registry_factory = create_default_registry
+        if pricing_engine_cls is None:
+            pricing_engine_cls = PricingEngine
+        if app_cls is None:
+            app_cls = app_module.App
+        if app_env is None:
+            app_env = app_module.APP_ENV
+        if env_setter is None:
+            env_setter = lambda env: setattr(app_module, "APP_ENV", env)
+    if pricing_registry_factory is None or pricing_engine_cls is None or app_cls is None or app_env is None:
+        raise RuntimeError("CLI dependencies not provided and could not be resolved")
+
+    # Reset debug.log at start with ASCII to avoid garbled content from prior runs
+    try:
+        import datetime as _dt
+
+        with open("debug.log", "w", encoding="ascii", errors="replace") as _dbg:
+            _dbg.write(f"[app] start { _dt.datetime.now().isoformat() }\n")
+    except Exception:
+        pass
+
+    # CLI override: force-enable removal debug output
+    if getattr(args, "debug_removal", False):
+        updated_env = replace(app_env, llm_debug_enabled=True)
+        if env_setter is not None:
+            env_setter(updated_env)
+        app_env = updated_env
+
+    if args.print_env:
+        logger.info("Runtime environment:\n%s", jdump(describe_runtime_environment(), default=None))
+        return 0
+
+    geo_json_payload: Mapping[str, Any] | None = None
+    geo_json_path = getattr(args, "geo_json", None)
+    if geo_json_path:
+        path_obj = Path(str(geo_json_path))
+        try:
+            with path_obj.open("r", encoding="utf-8") as handle:
+                raw_payload = json.load(handle)
+        except FileNotFoundError:
+            logger.error("Geometry JSON not found: %s", path_obj)
+            return 1
+        except json.JSONDecodeError as exc:
+            logger.error("Geometry JSON is invalid (%s): %s", path_obj, exc)
+            return 1
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.error("Failed to read geometry JSON %s: %s", path_obj, exc)
+            return 1
+        if isinstance(raw_payload, _MappingABC):
+            geo_json_payload = raw_payload  # type: ignore[assignment]
+        else:
+            logger.error(
+                "Geometry JSON must contain an object at the top level: %s",
+                path_obj,
+            )
+            return 1
+
+    if args.no_gui:
+        if geo_json_payload is not None:
+            logger.warning("--geo-json is ignored when --no-gui is supplied.")
+        return 0
+
+    pricing_registry = pricing_registry_factory()
+    pricing_engine = pricing_engine_cls(pricing_registry)
+
+    app = None
+    try:
+        app = app_cls(pricing_engine)
+    except RuntimeError as exc:  # pragma: no cover - headless guard
+        logger.error("Unable to start the GUI: %s", exc)
+        return 1
+
+    if geo_json_payload is not None:
+        try:
+            app.apply_geometry_payload(geo_json_payload, source=geo_json_path)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.error("Failed to apply geometry JSON %s: %s", geo_json_path, exc)
+            return 1
+
+    app.mainloop()
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Runtime helpers
+# ---------------------------------------------------------------------------
 
 
 def ensure_runtime_dependencies() -> None:
@@ -338,6 +490,8 @@ def find_default_qwen_model() -> str:
 
 
 __all__ = [
+    "build_arg_parser",
+    "main",
     "DEFAULT_MM_PROJ_NAMES",
     "DEFAULT_VL_MODEL_NAMES",
     "LEGACY_MM_PROJ",
@@ -349,3 +503,18 @@ __all__ = [
     "find_default_qwen_model",
     "load_qwen_vl",
 ]
+
+
+if __name__ == "__main__":  # pragma: no cover - manual invocation
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+    try:
+        sys.exit(main())
+    except Exception as exc:
+        try:
+            print(jdump({"ok": False, "error": str(exc)}))
+        except Exception:
+            pass
+        sys.exit(1)

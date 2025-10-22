@@ -1124,9 +1124,12 @@ from cad_quoter.utils.scrap import (
     normalize_scrap_pct,
 )
 from cad_quoter.utils.render_utils.tables import ascii_table, draw_kv_table
-from cad_quoter.app.planner_helpers import _process_plan_job
 from cad_quoter.app.env_flags import FORCE_PLANNER
-from cad_quoter.app.planner_adapter import resolve_planner, resolve_pricing_source_value
+from cad_quoter.app.planner_support import (
+    _process_plan_job,
+    resolve_planner,
+    resolve_pricing_source_value,
+)
 
 from cad_quoter.resources.loading import load_json, load_text
 
@@ -17853,7 +17856,7 @@ class App(tk.Tk):
 def main(argv: Sequence[str] | None = None) -> int:
     """Entry point so ``python appV5.py`` mirrors the CLI launcher."""
 
-    from cad_quoter.app.cli import main as _cli_main
+    from cad_quoter.app.runner import main as _cli_main
 
     if typing.TYPE_CHECKING:
         from cad_quoter_pkg.src.cad_quoter.pricing import (
