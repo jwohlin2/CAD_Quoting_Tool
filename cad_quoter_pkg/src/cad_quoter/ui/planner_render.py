@@ -24,7 +24,7 @@ from cad_quoter.pricing.process_buckets import (
 from cad_quoter.pricing.process_cost_renderer import (
     canonicalize_costs as _shared_canonicalize_costs,
 )
-from cad_quoter.pricing.process_rates import (
+from cad_quoter.pricing.rate_defaults import (
     labor_rate as _process_labor_rate,
     machine_rate as _process_machine_rate,
 )

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import math
 import re
-from types import MappingProxyType
-from typing import Any, Dict, FrozenSet, Iterable, Mapping
+from functools import lru_cache
+from typing import Any, Dict, FrozenSet, Mapping
 
 from cad_quoter.utils import _dict
 
@@ -16,98 +16,63 @@ def _normalize_key(name: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "_", str(name or "").lower()).strip("_")
 
 
-_DEFAULT_RATE_DATA: Mapping[str, Mapping[str, float]] = MappingProxyType(
-    {
-        "labor": MappingProxyType(
-            {
-                "Programmer": 90.0,
-                "ProgrammingRate": 90.0,
-                "Engineer": 90.0,
-                "ProjectManager": 90.0,
-                "Toolmaker": 90.0,
-                "FixtureBuilder": 75.0,
-                "FixtureBuildRate": 75.0,
-                "Finisher": 45.0,
-                "FinishingRate": 45.0,
-                "DeburrRate": 45.0,
-                "Lapper": 60.0,
-                "Inspector": 85.0,
-                "InspectionRate": 85.0,
-                "Assembler": 60.0,
-                "Grinder": 55.0,
-                "EDMOperator": 60.0,
-                "Machinist": 45.0,
-                "LaborRate": 45.0,
-                "DefaultLaborRate": 45.0,
-                "Support": 40.0,
-            }
-        ),
-        "machine": MappingProxyType(
-            {
-                "CNC_Mill": 90.0,
-                "MillingRate": 90.0,
-                "CNC_Vertical": 90.0,
-                "cnc_vertical": 90.0,
-                "DrillingRate": 95.0,
-                "DrillPress": 95.0,
-                "SurfaceGrind": 95.0,
-                "SurfaceGrindRate": 95.0,
-                "GrindingRate": 95.0,
-                "ODIDGrind": 95.0,
-                "ODIDGrindRate": 95.0,
-                "JigGrind": 95.0,
-                "JigGrindRate": 95.0,
-                "Blanchard": 95.0,
-                "VisualContourGrind": 95.0,
-                "ExtrudeHone": 110.0,
-                "AbrasiveFlowRate": 110.0,
-                "WireEDM": 130.0,
-                "WireEDMRate": 130.0,
-                "SinkerEDM": 130.0,
-                "SinkerEDMRate": 130.0,
-                "SawWaterjetRate": 90.0,
-                "SawRate": 90.0,
-                "WaterjetRate": 90.0,
-                "Waterjet": 90.0,
-                "MachineRate": 90.0,
-                "DefaultMachineRate": 90.0,
-            }
-        ),
-    }
-)
+@lru_cache(maxsize=1)
+def _rate_defaults_module():
+    from cad_quoter.pricing import rate_defaults as _rate_defaults
 
-# ---- canonical names used by the planner ----
-MACHINES = [
-    "WireEDM",
-    "SinkerEDM",
-    "CNC_Mill",
-    "DrillPress",
-    "Lathe",
-    "Waterjet",
-    "Blanchard",
-    "SurfaceGrind",
-    "JigGrind",
-    "ODIDGrind",
-    "VisualContourGrind",
-    "ExtrudeHone",
-]
+    return _rate_defaults
 
 
-ROLES = [
-    "Programmer",
-    "Engineer",
-    "ProjectManager",
-    "Toolmaker",
-    "Machinist",
-    "EDMOperator",
-    "Grinder",
-    "Inspector",
-    "Assembler",
-    "FixtureBuilder",
-    "Finisher",
-    "Lapper",
-    "Support",
-]
+def _default_rate_data() -> Mapping[str, Mapping[str, float]]:
+    return _rate_defaults_module().LEGACY_TWO_BUCKET_RATES
+
+
+_HARD_LABOR_KEYS = ("Programmer", "ProgrammingRate", "Inspector", "InspectionRate")
+
+_HARD_MACHINE_SPECS: Mapping[str, tuple[str, tuple[str, ...]]] = {
+    "CNC_Mill": ("CNC_Mill", ("MillingRate", "CNC_Vertical", "cnc_vertical")),
+    "DrillPress": ("DrillPress", ("DrillingRate",)),
+    "SurfaceGrind": ("SurfaceGrind", ("SurfaceGrindRate", "GrindingRate")),
+    "ODIDGrind": ("ODIDGrind", ("ODIDGrindRate",)),
+    "JigGrind": ("JigGrind", ("JigGrindRate",)),
+    "WireEDM": ("WireEDM", ("WireEDMRate",)),
+    "SinkerEDM": ("SinkerEDM", ("SinkerEDMRate",)),
+}
+
+
+@lru_cache(maxsize=1)
+def _hard_labor_fallbacks() -> Mapping[str, float]:
+    labor_defaults = _default_rate_data().get("labor", {})
+    return {key: float(labor_defaults.get(key, 0.0)) for key in _HARD_LABOR_KEYS}
+
+
+@lru_cache(maxsize=1)
+def _hard_machine_fallbacks() -> Mapping[str, tuple[float, tuple[str, ...]]]:
+    machine_defaults = _default_rate_data().get("machine", {})
+    mapping: Dict[str, tuple[float, tuple[str, ...]]] = {}
+    for canonical, (source_key, aliases) in _HARD_MACHINE_SPECS.items():
+        mapping[canonical] = (float(machine_defaults.get(source_key, 0.0)), aliases)
+    return mapping
+
+
+def _default_process_rate(kind: str, process: str, *, default: float | None = None) -> float:
+    return _rate_defaults_module().default_process_rate(kind, process, default=default)
+
+
+def _default_machine_rate(process: str, *, default: float | None = None) -> float:
+    return _rate_defaults_module().default_machine_rate(process, default=default)
+
+
+def _default_labor_rate(process: str, *, default: float | None = None) -> float:
+    return _rate_defaults_module().default_labor_rate(process, default=default)
+
+
+def _rate_for_machine(rates: Mapping[str, Mapping[str, float]], machine: str) -> float:
+    return _rate_defaults_module().rate_for_machine(rates, machine)
+
+
+def _rate_for_role(rates: Mapping[str, Mapping[str, float]], role: str) -> float:
+    return _rate_defaults_module().rate_for_role(rates, role)
 
 
 # ---- mapping from current flat keys → new buckets ----
@@ -134,44 +99,6 @@ LEGACY_PROGRAMMER_RATE_KEYS = (
 )
 
 
-HARD_LABOR_FALLBACKS: Mapping[str, float] = {
-    key: float(_DEFAULT_RATE_DATA["labor"].get(key, 0.0))
-    for key in ("Programmer", "ProgrammingRate", "Inspector", "InspectionRate")
-}
-
-
-HARD_MACHINE_FALLBACKS: Mapping[str, tuple[float, tuple[str, ...]]] = {
-    "CNC_Mill": (
-        float(_DEFAULT_RATE_DATA["machine"].get("CNC_Mill", 0.0)),
-        ("MillingRate", "CNC_Vertical", "cnc_vertical"),
-    ),
-    "DrillPress": (
-        float(_DEFAULT_RATE_DATA["machine"].get("DrillPress", 0.0)),
-        ("DrillingRate",),
-    ),
-    "SurfaceGrind": (
-        float(_DEFAULT_RATE_DATA["machine"].get("SurfaceGrind", 0.0)),
-        ("SurfaceGrindRate", "GrindingRate"),
-    ),
-    "ODIDGrind": (
-        float(_DEFAULT_RATE_DATA["machine"].get("ODIDGrind", 0.0)),
-        ("ODIDGrindRate",),
-    ),
-    "JigGrind": (
-        float(_DEFAULT_RATE_DATA["machine"].get("JigGrind", 0.0)),
-        ("JigGrindRate",),
-    ),
-    "WireEDM": (
-        float(_DEFAULT_RATE_DATA["machine"].get("WireEDM", 0.0)),
-        ("WireEDMRate",),
-    ),
-    "SinkerEDM": (
-        float(_DEFAULT_RATE_DATA["machine"].get("SinkerEDM", 0.0)),
-        ("SinkerEDMRate",),
-    ),
-}
-
-
 OLDKEY_TO_LABOR = {
     "ProgrammingRate": "Programmer",
     "EngineerRate": "Engineer",
@@ -194,7 +121,7 @@ OLDKEY_TO_LABOR = {
 LABOR_RATE_KEYS: FrozenSet[str] = frozenset(
     set(OLDKEY_TO_LABOR.keys())
     | set(LEGACY_PROGRAMMER_RATE_KEYS)
-    | set(HARD_LABOR_FALLBACKS.keys())
+    | set(_HARD_LABOR_KEYS)
     | {
         "DeburrRate",
         "PackagingRate",
@@ -204,7 +131,7 @@ LABOR_RATE_KEYS: FrozenSet[str] = frozenset(
 
 MACHINE_RATE_KEYS: FrozenSet[str] = frozenset(
     set(OLDKEY_TO_MACHINE.keys())
-    | set(HARD_MACHINE_FALLBACKS.keys())
+    | set(_HARD_MACHINE_SPECS.keys())
     | {
         "LappingRate",
     }
@@ -346,9 +273,13 @@ def _finalize_two_bucket(
         except Exception:
             continue
 
-    default_labor_rate_value = float(_DEFAULT_RATE_DATA["labor"].get("LaborRate", 45.0))
+    rate_defaults = _default_rate_data()
+    labor_defaults = rate_defaults.get("labor", {})
+    machine_defaults = rate_defaults.get("machine", {})
+
+    default_labor_rate_value = float(labor_defaults.get("LaborRate", 45.0))
     default_machine_rate_value = float(
-        _DEFAULT_RATE_DATA["machine"].get("MachineRate", default_labor_rate_value)
+        machine_defaults.get("MachineRate", default_labor_rate_value)
     )
 
     labor_default = _mean(labor_candidates) or _mean(numeric_values) or default_labor_rate_value
@@ -364,7 +295,7 @@ def _finalize_two_bucket(
         "FinishingRate",
     }
     hard_machine_aliases = {
-        alias for _, alias_list in HARD_MACHINE_FALLBACKS.values() for alias in alias_list
+        alias for _, alias_list in _hard_machine_fallbacks().values() for alias in alias_list
     }
     expected_machine_keys = set(OLDKEY_TO_MACHINE.keys()) | {"AbrasiveFlowRate"}
 
@@ -381,7 +312,7 @@ def _finalize_two_bucket(
         if _as_positive(labor_output.get(key)) <= 0.0:
             labor_output[key] = labor_default
 
-    for canonical, fallback in HARD_LABOR_FALLBACKS.items():
+    for canonical, fallback in _hard_labor_fallbacks().items():
         if _as_positive(labor_output.get(canonical)) <= 0.0:
             labor_output[canonical] = fallback
         if canonical == "Programmer":
@@ -403,7 +334,7 @@ def _finalize_two_bucket(
         if alias and _as_positive(machine_output.get(alias)) <= 0.0:
             machine_output[alias] = machine_default
 
-    for canonical, (fallback_value, aliases) in HARD_MACHINE_FALLBACKS.items():
+    for canonical, (fallback_value, aliases) in _hard_machine_fallbacks().items():
         if _as_positive(machine_output.get(canonical)) <= 0.0:
             machine_output[canonical] = fallback_value
         canonical_value = _as_positive(machine_output.get(canonical)) or fallback_value
@@ -517,10 +448,10 @@ def _finalize_two_bucket(
     }
 
     if not labor_clean:
-        fallback = HARD_LABOR_FALLBACKS.get("Programmer", labor_default)
+        fallback = _hard_labor_fallbacks().get("Programmer", labor_default)
         labor_clean = {"ProgrammingRate": fallback, "Programmer": fallback}
     if not machine_clean:
-        fallback = HARD_MACHINE_FALLBACKS.get("CNC_Mill", (machine_default, ()))
+        fallback = _hard_machine_fallbacks().get("CNC_Mill", (machine_default, ()))
         default_machine = fallback[0]
         machine_clean = {"MillingRate": default_machine, "CNC_Mill": default_machine}
 
@@ -561,119 +492,43 @@ def ensure_two_bucket_defaults(
 # ---- helpers for costing layers ----
 
 
-_SHARED_TWO_BUCKET_RATE_DEFAULTS: dict[str, dict[str, float]] = ensure_two_bucket_defaults(
-    _DEFAULT_RATE_DATA
-)
-
-
-def _build_default_rate_index() -> Dict[str, Dict[str, float]]:
-    index: Dict[str, Dict[str, float]] = {}
-    for kind, mapping in _SHARED_TWO_BUCKET_RATE_DEFAULTS.items():
-        kind_index: Dict[str, float] = {}
-        for key, value in mapping.items():
-            kind_index[str(key)] = float(value)
-            normalized = _normalize_key(key)
-            if normalized and normalized not in kind_index:
-                kind_index[normalized] = float(value)
-        index[kind] = kind_index
-    return index
-
-
-_DEFAULT_RATE_INDEX = _build_default_rate_index()
-
-
-_PROCESS_RATE_ALIASES: dict[str, dict[str, tuple[str, ...]]] = {
-    "machine": {
-        "milling": ("CNC_Mill", "MillingRate", "CNC_Vertical", "cnc_vertical"),
-        "drilling": ("DrillPress", "DrillingRate"),
-        "grinding": (
-            "GrindingRate",
-            "SurfaceGrind",
-            "SurfaceGrindRate",
-            "Blanchard",
-            "JigGrind",
-            "JigGrindRate",
-            "ODIDGrind",
-            "ODIDGrindRate",
-        ),
-        "wire_edm": ("WireEDM", "WireEDMRate"),
-        "sinker_edm": ("SinkerEDM", "SinkerEDMRate"),
-        "saw_waterjet": ("SawWaterjetRate", "SawRate", "WaterjetRate", "Waterjet"),
-        "abrasive_flow": ("ExtrudeHone", "AbrasiveFlowRate"),
-    },
-    "labor": {
-        "milling": ("Machinist", "LaborRate", "DefaultLaborRate"),
-        "drilling": ("Machinist", "LaborRate", "DefaultLaborRate"),
-        "programming": ("Programmer", "ProgrammingRate"),
-        "programming_amortized": ("Programmer", "ProgrammingRate"),
-        "inspection": ("Inspector", "InspectionRate"),
-        "fixture_build": ("FixtureBuilder", "FixtureBuildRate"),
-        "fixture_build_amortized": ("FixtureBuilder", "FixtureBuildRate"),
-        "finishing": ("Finisher", "DeburrRate", "FinishingRate"),
-        "finishing_deburr": ("Finisher", "DeburrRate", "FinishingRate"),
-        "grinding": ("Grinder", "Finisher", "DeburrRate", "FinishingRate"),
-    },
-}
+@lru_cache(maxsize=1)
+def _shared_two_bucket_defaults_cached() -> dict[str, dict[str, float]]:
+    return ensure_two_bucket_defaults(_default_rate_data())
 
 
 def shared_two_bucket_rate_defaults() -> dict[str, dict[str, float]]:
     """Return the canonical two-bucket shop rate defaults."""
 
-    return {kind: dict(mapping) for kind, mapping in _SHARED_TWO_BUCKET_RATE_DEFAULTS.items()}
-
-
-def _iter_default_rate_candidates(kind: str, process: str) -> Iterable[str]:
-    yield process
-    normalized = _normalize_key(process)
-    if normalized and normalized != process:
-        yield normalized
-    aliases = _PROCESS_RATE_ALIASES.get(kind, {}).get(normalized)
-    if not aliases:
-        return
-    for alias in aliases:
-        yield alias
-        alias_norm = _normalize_key(alias)
-        if alias_norm and alias_norm != alias:
-            yield alias_norm
+    return {
+        kind: dict(mapping) for kind, mapping in _shared_two_bucket_defaults_cached().items()
+    }
 
 
 def default_process_rate(kind: str, process: str, *, default: float | None = None) -> float:
     """Return the shared default rate for ``process`` within ``kind``."""
 
-    mapping = _DEFAULT_RATE_INDEX.get(kind)
-    if not mapping:
-        return float(default or 0.0)
-
-    for candidate in _iter_default_rate_candidates(kind, process):
-        if not candidate:
-            continue
-        value = mapping.get(candidate)
-        if value is not None:
-            return float(value)
-
-    if default is not None:
-        return float(default)
-    return 0.0
+    return _default_process_rate(kind, process, default=default)
 
 
 def default_machine_rate(process: str, *, default: float | None = None) -> float:
     """Return the shared default machine rate for ``process``."""
 
-    return default_process_rate("machine", process, default=default)
+    return _default_machine_rate(process, default=default)
 
 
 def default_labor_rate(process: str, *, default: float | None = None) -> float:
     """Return the shared default labor rate for ``process``."""
 
-    return default_process_rate("labor", process, default=default)
+    return _default_labor_rate(process, default=default)
 
 
 def rate_for_machine(rates: dict[str, dict[str, float]], machine: str) -> float:
-    return float(rates["machine"][machine])
+    return _rate_for_machine(rates, machine)
 
 
 def rate_for_role(rates: dict[str, dict[str, float]], role: str) -> float:
-    return float(rates["labor"][role])
+    return _rate_for_role(rates, role)
 
 
 # ---- op → machine / labor maps that match process planner ops ----
@@ -780,8 +635,6 @@ def two_bucket_to_flat(rates: dict[str, dict[str, Any]]) -> dict[str, float]:
 
 
 __all__ = [
-    "MACHINES",
-    "ROLES",
     "OLDKEY_TO_MACHINE",
     "OLDKEY_TO_LABOR",
     "LABOR_RATE_KEYS",

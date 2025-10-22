@@ -6,11 +6,13 @@ from collections.abc import Iterable, Mapping
 import re
 from typing import Any, Dict, Iterable as _Iterable, Mapping as _Mapping
 from cad_quoter.pricing.rate_defaults import (
+    default_process_rate,
     fallback_keys_for_mode,
     fallback_rate_for_bucket,
     fallback_rate_for_role,
+    rate_for_role,
 )
-from cad_quoter.rates import OP_TO_LABOR, OP_TO_MACHINE, rate_for_role
+from cad_quoter.rates import OP_TO_LABOR, OP_TO_MACHINE
 
 
 def normalize_bucket_key(name: Any) -> str:
@@ -799,7 +801,16 @@ def _safe_rate_for_role(rates: Dict[str, Dict[str, float]], role: str) -> float:
     try:
         return rate_for_role(rates, role)
     except Exception:
-        return float(rates.get("labor", {}).get(role, 0.0))
+        labor_map = rates.get("labor", {}) if isinstance(rates, dict) else {}
+        raw = labor_map.get(role)
+        if raw is not None:
+            try:
+                value = float(raw)
+            except Exception:
+                value = 0.0
+            if value > 0.0:
+                return value
+        return default_process_rate("labor", role)
 
 
 def _resolve_bucket_for_op(op: str) -> str:

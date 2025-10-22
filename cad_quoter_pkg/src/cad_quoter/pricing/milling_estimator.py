@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Mapping as _MappingABC
 
 from cad_quoter.pricing.planner import _geom as _normalize_geom, _material_factor
-from cad_quoter.rates import default_labor_rate, default_machine_rate
+from cad_quoter.pricing.rate_defaults import default_labor_rate, default_machine_rate
 from cad_quoter.speeds_feeds import (
     coerce_table_to_records,
     normalize_material_group_code,

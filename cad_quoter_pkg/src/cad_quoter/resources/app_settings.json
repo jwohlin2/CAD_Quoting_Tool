@@ -75,5 +75,6 @@
       "MaterialVendorCSVPath": "",
       "LLMModelPath": ""
     }
-  }
+  },
+  "llm_thread_limit": ""
 }
