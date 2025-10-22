@@ -227,6 +227,31 @@ def test_planner_bucket_minutes_from_line_items_when_bucketize_empty(monkeypatch
     assert planner_meta["planner_labor"]["minutes"] == pytest.approx(10.0, abs=0.01)
 
 
+def test_planner_seed_bucket_minutes_uses_rates() -> None:
+    from cad_quoter.ui import planner_render
+
+    breakdown: dict[str, object] = {
+        "bucket_view": {"buckets": {}},
+        "rates": {"TappingRate": 90.0, "LaborRate": 120.0},
+    }
+
+    planner_render._seed_bucket_minutes(
+        breakdown,
+        tapping_min=12.0,
+    )
+
+    bucket_view = breakdown["bucket_view"]
+    assert isinstance(bucket_view, dict)
+    buckets = bucket_view.get("buckets")
+    assert isinstance(buckets, dict)
+    tapping = buckets.get("tapping")
+    assert isinstance(tapping, dict)
+    assert tapping["minutes"] == pytest.approx(12.0)
+    assert tapping["machine$"] == pytest.approx(18.0)
+    assert tapping["labor$"] == pytest.approx(24.0)
+    assert tapping["total$"] == pytest.approx(42.0)
+
+
 def test_planner_milling_defaults_to_machine_only(monkeypatch):
     import appV5
     import cad_quoter.pricing.planner as planner_pricing

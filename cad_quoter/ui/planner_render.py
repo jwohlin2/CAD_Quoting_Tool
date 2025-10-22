@@ -917,14 +917,112 @@ def _seed_bucket_minutes(
     bucket_view_obj = breakdown.setdefault("bucket_view", {})
     buckets_obj = bucket_view_obj.setdefault("buckets", {})
 
+    def _extract_rates_source() -> Mapping[str, Any] | None:
+        candidates: list[Mapping[str, Any]] = []
+        if isinstance(breakdown, _MappingABC):
+            rates_obj = breakdown.get("rates")
+            if isinstance(rates_obj, _MappingABC):
+                candidates.append(rates_obj)
+            render_payload = breakdown.get("render_payload")
+            if isinstance(render_payload, _MappingABC):
+                payload_rates = render_payload.get("rates")
+                if isinstance(payload_rates, _MappingABC):
+                    candidates.append(payload_rates)
+        if not candidates:
+            return None
+        merged: dict[str, Any] = {}
+        for source in candidates:
+            try:
+                merged.update({str(key): value for key, value in source.items()})
+            except Exception:
+                continue
+        return merged or None
+
+    rate_source = _extract_rates_source()
+    flat_rates, normalized_rates = _flatten_rates(rate_source)
+
+    def _bucket_rate(name: str, mode: str) -> float:
+        if not flat_rates and not normalized_rates:
+            return 0.0
+        fallbacks = ("LaborRate", "labor_rate", "labor") if mode == "labor" else (
+            "MachineRate",
+            "machine_rate",
+            "machine",
+        )
+        norm_key = _normalize_bucket_key(name)
+        role = BUCKET_ROLE.get(norm_key, BUCKET_ROLE.get("_default", "machine_only"))
+        candidates: list[str | None] = []
+        rate_key = _rate_key_for_bucket(name)
+        if mode != "labor" or role == "labor_only":
+            if rate_key:
+                candidates.append(rate_key)
+            candidates.extend((name, _display_bucket_label(name, None)))
+        else:
+            # For split buckets rely on explicit labor keys if present, otherwise fall back to shared labor rates.
+            candidates.append(f"{norm_key}_labor")
+        for candidate in candidates:
+            if not candidate:
+                continue
+            rate = _shared_lookup_rate(candidate, flat_rates, normalized_rates, fallbacks=fallbacks)
+            if rate:
+                return float(rate)
+        return 0.0
+
+    bucket_rates: dict[str, dict[str, float]] = {"machine": {}, "labor": {}}
+
+    for bucket_key in PLANNER_BUCKET_ORDER:
+        label = _display_bucket_label(bucket_key, None)
+        normalized = _normalize_bucket_key(bucket_key)
+        machine_rate = _bucket_rate(bucket_key, "machine")
+        labor_rate = _bucket_rate(bucket_key, "labor")
+        for container, rate in ((bucket_rates["machine"], machine_rate), (bucket_rates["labor"], labor_rate)):
+            if rate <= 0.0:
+                continue
+            container[bucket_key] = rate
+            if label:
+                container.setdefault(label, rate)
+            if normalized:
+                container.setdefault(normalized, rate)
+
+    def bucket_from_minutes(name: str, minutes: float) -> dict[str, float]:
+        minutes_val = max(0.0, float(minutes or 0.0))
+        hrs = minutes_val / 60.0
+        mach_rate = bucket_rates["machine"].get(name, 0.0)
+        labor_rate = bucket_rates["labor"].get(name, 0.0)
+        bucket = {
+            "minutes": minutes_val,
+            "machine$": round(hrs * mach_rate, 2),
+            "labor$": round(hrs * labor_rate, 2),
+        }
+        bucket["total$"] = round(bucket["machine$"] + bucket["labor$"], 2)
+        return bucket
+
     def _ins(name: str, minutes: float) -> None:
         if minutes <= 0:
             return
-        entry = buckets_obj.setdefault(
-            name,
-            {"minutes": 0.0, "labor$": 0.0, "machine$": 0.0, "total$": 0.0},
-        )
-        entry["minutes"] = float(entry.get("minutes") or 0.0) + float(minutes)
+        existing = buckets_obj.get(name)
+        existing_minutes = 0.0
+        existing_machine = existing_labor = existing_total = 0.0
+        if isinstance(existing, _MappingABC):
+            existing_minutes = _as_float(existing.get("minutes"), 0.0)
+            existing_machine = _as_float(existing.get("machine$"), 0.0)
+            existing_labor = _as_float(existing.get("labor$"), 0.0)
+            existing_total = _as_float(existing.get("total$"), 0.0)
+        elif isinstance(existing, dict):
+            existing_minutes = _as_float(existing.get("minutes"), 0.0)
+            existing_machine = _as_float(existing.get("machine$"), 0.0)
+            existing_labor = _as_float(existing.get("labor$"), 0.0)
+            existing_total = _as_float(existing.get("total$"), 0.0)
+
+        total_minutes = existing_minutes + float(minutes)
+
+        if existing and (existing_machine > 0.01 or existing_labor > 0.01 or existing_total > 0.01):
+            updated = dict(existing)
+            updated["minutes"] = total_minutes
+            buckets_obj[name] = updated
+            return
+
+        buckets_obj[name] = bucket_from_minutes(name, total_minutes)
 
     _ins("tapping", tapping_min)
     _ins("counterbore", cbore_min)
