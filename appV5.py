@@ -1144,6 +1144,7 @@ from cad_quoter.ui import llm_panel
 from cad_quoter.ui import session_io
 from cad_quoter.ui.editor_controls import coerce_checkbox_state, derive_editor_control_spec
 from cad_quoter.ui.planner_render import (
+    PROGRAMMING_AMORTIZED_LABEL,
     PROGRAMMING_PER_PART_LABEL,
     PlannerBucketRenderState,
     _bucket_cost,
@@ -4445,6 +4446,164 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     "total$": total_val,
                 }
 
+        milling_entry = canonical_entries.get("milling")
+        if milling_entry:
+            milling_meta = _lookup_process_meta(process_meta, "milling") or {}
+
+            def _maybe_float(value: Any) -> float | None:
+                try:
+                    number = float(value)
+                except Exception:
+                    return None
+                if not math.isfinite(number):
+                    return None
+                return number
+
+            milling_minutes = _safe_float(milling_entry.get("minutes"), default=0.0)
+            meta_minutes = _safe_float(milling_meta.get("minutes"), default=0.0)
+            meta_hours = _safe_float(milling_meta.get("hr"), default=0.0)
+            if meta_minutes > 0.0:
+                milling_minutes = meta_minutes
+            elif meta_hours > 0.0:
+                milling_minutes = meta_hours * 60.0
+
+            if milling_minutes > 0.0:
+                milling_hours = milling_minutes / 60.0
+
+                def _rate_from_candidates(
+                    mapping: Mapping[str, Any] | None,
+                    keys: Sequence[str],
+                    default: float,
+                ) -> float:
+                    if not isinstance(mapping, _MappingABC):
+                        mapping = {}
+                    for key in keys:
+                        if not key:
+                            continue
+                        try:
+                            raw = mapping.get(key)  # type: ignore[index]
+                        except Exception:
+                            raw = None
+                        rate_val = _maybe_float(raw)
+                        if rate_val is not None and rate_val > 0.0:
+                            return rate_val
+                    return default
+
+                machine_rate = _rate_from_candidates(
+                    rates,
+                    (
+                        "machine_per_hour",
+                        "machine_rate",
+                        "milling_rate",
+                        "MachineRate",
+                        "MillingRate",
+                        "ShopMachineRate",
+                        "ShopRate",
+                    ),
+                    90.0,
+                )
+                labor_rate = _rate_from_candidates(
+                    rates,
+                    (
+                        "labor_per_hour",
+                        "labor_rate",
+                        "milling_labor_rate",
+                        "LaborRate",
+                        "ShopLaborRate",
+                    ),
+                    45.0,
+                )
+
+                if cfg is not None:
+                    cfg_machine = _maybe_float(getattr(cfg, "machine_rate_per_hr", None))
+                    if cfg_machine is not None and cfg_machine > 0.0:
+                        machine_rate = cfg_machine
+                    cfg_labor = _maybe_float(getattr(cfg, "labor_rate_per_hr", None))
+                    if cfg_labor is not None and cfg_labor > 0.0:
+                        labor_rate = cfg_labor
+
+                config_sources: list[Mapping[str, Any]] = []
+
+                def _add_config_source(candidate: Any) -> None:
+                    if isinstance(candidate, dict):
+                        config_sources.append(candidate)
+                    elif isinstance(candidate, _MappingABC):
+                        config_sources.append(dict(candidate))
+
+                for container in (breakdown, result):
+                    if not isinstance(container, _MappingABC):
+                        continue
+                    _add_config_source(container.get("config"))
+                    _add_config_source(container.get("params"))
+
+                if isinstance(result, _MappingABC):
+                    quote_state_payload = result.get("quote_state")
+                    if isinstance(quote_state_payload, _MappingABC):
+                        _add_config_source(quote_state_payload.get("config"))
+                        _add_config_source(quote_state_payload.get("params"))
+
+                attended_frac: float | None = None
+                if cfg is not None:
+                    cfg_frac = _maybe_float(getattr(cfg, "milling_attended_fraction", None))
+                    if cfg_frac is not None:
+                        attended_frac = cfg_frac
+
+                for source in config_sources:
+                    try:
+                        candidate = source.get("milling_attended_fraction")
+                    except Exception:
+                        candidate = None
+                    frac_val = _maybe_float(candidate)
+                    if frac_val is not None:
+                        attended_frac = frac_val
+                        break
+
+                if attended_frac is None:
+                    attended_frac = 1.0
+                attended_frac = max(0.0, min(attended_frac, 1.0))
+                milling_labor_hours = milling_hours * attended_frac
+
+                machine_cost = milling_hours * machine_rate
+                labor_cost = milling_labor_hours * labor_rate
+                total_cost = machine_cost + labor_cost
+
+                milling_entry["minutes"] = round(milling_minutes, 2)
+                milling_entry["machine$"] = round(machine_cost, 2)
+                milling_entry["labor$"] = round(labor_cost, 2)
+                milling_entry["total$"] = round(total_cost, 2)
+                canonical_entries["milling"] = milling_entry
+
+                if isinstance(buckets, dict):
+                    milling_bucket = buckets.get("milling")
+                    if isinstance(milling_bucket, dict):
+                        milling_bucket.update(
+                            {
+                                "minutes": milling_entry["minutes"],
+                                "machine$": milling_entry["machine$"],
+                                "labor$": milling_entry["labor$"],
+                                "total$": milling_entry["total$"],
+                            }
+                        )
+
+                aggregated_metrics_container = locals().get("aggregated_bucket_minutes")
+                if isinstance(aggregated_metrics_container, dict):
+                    milling_metrics = aggregated_metrics_container.get("milling")
+                    if isinstance(milling_metrics, dict):
+                        milling_metrics.update(
+                            {
+                                "minutes": milling_entry["minutes"],
+                                "machine$": milling_entry["machine$"],
+                                "labor$": milling_entry["labor$"],
+                            }
+                        )
+
+                print(
+                    f"[CHECK/milling] min={milling_minutes:.2f} hr={milling_hours:.2f} "
+                    f"mach_rate={machine_rate:.2f}/hr labor_rate={labor_rate:.2f}/hr "
+                    f"machine$={milling_entry['machine$']:.2f} "
+                    f"labor$={milling_entry['labor$']:.2f} total$={milling_entry['total$']:.2f}"
+                )
+
         def _append_process_row(
             rows: list[tuple[str, float, float, float, float]],
             label: str,
@@ -4487,10 +4646,15 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         rows: list[tuple[str, float, float, float, float]] = []
 
         programming_entry: dict[str, float] | None = None
+        programming_entry_label = PROGRAMMING_PER_PART_LABEL
         for candidate in ("programming_amortized", "programming"):
             entry = canonical_entries.pop(candidate, None)
             if entry is not None:
                 programming_entry = entry
+                if candidate == "programming_amortized" or qty <= 1:
+                    programming_entry_label = PROGRAMMING_AMORTIZED_LABEL
+                else:
+                    programming_entry_label = PROGRAMMING_PER_PART_LABEL
                 break
 
         prog_minutes = 0.0
@@ -4516,12 +4680,65 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         if prog_total > 0.0 or prog_minutes > 0.0:
             _append_process_row(
                 rows,
-                PROGRAMMING_PER_PART_LABEL,
+                programming_entry_label,
                 prog_minutes,
                 0.0,
                 prog_total,
                 prog_total,
             )
+
+        table_rows_obj = locals().get("table_rows")
+        if isinstance(table_rows_obj, list):
+            table_rows = table_rows_obj
+        else:
+            table_rows = []
+            canonical_order_local: list[str] = []
+            for canon_key in order:
+                if canon_key in canonical_entries:
+                    canonical_order_local.append(canon_key)
+            remaining_keys = [
+                key for key in canonical_entries.keys() if key not in canonical_order_local
+            ]
+            if remaining_keys:
+                canonical_order_local.extend(sorted(remaining_keys))
+
+            for canon_key in canonical_order_local:
+                entry = canonical_entries.get(canon_key)
+                if not isinstance(entry, dict):
+                    continue
+                minutes_val = _safe_float(entry.get("minutes"), default=0.0)
+                machine_val = _safe_float(entry.get("machine$"), default=0.0)
+                labor_val = _safe_float(entry.get("labor$"), default=0.0)
+                total_val = _safe_float(entry.get("total$"), default=0.0)
+                if total_val <= 0.0:
+                    total_val = machine_val + labor_val
+                if (
+                    math.isclose(minutes_val, 0.0, abs_tol=0.01)
+                    and math.isclose(machine_val, 0.0, abs_tol=0.01)
+                    and math.isclose(labor_val, 0.0, abs_tol=0.01)
+                    and math.isclose(total_val, 0.0, abs_tol=0.01)
+                ):
+                    continue
+                label = _label_for_bucket(canon_key)
+                if not label:
+                    label = canon_key
+                table_rows.append(
+                    (
+                        label,
+                        minutes_val,
+                        machine_val,
+                        labor_val,
+                        total_val,
+                    )
+                )
+                _append_process_row(
+                    rows,
+                    label,
+                    minutes_val,
+                    machine_val,
+                    labor_val,
+                    total_val,
+                )
 
         def _canonical_label(value: Any) -> str:
             value_str = str(value)
@@ -9328,6 +9545,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 "rate": round(_render_as_float(spec.rate, 0.0), 2) if _render_as_float(spec.rate, 0.0) else 0.0,
             }
         )
+
+    if qty <= 1:
+        for entry in processes_entries:
+            if str(entry.get("label")) == PROGRAMMING_PER_PART_LABEL:
+                entry["label"] = PROGRAMMING_AMORTIZED_LABEL
 
     render_payload = {
         "summary": summary_payload,
