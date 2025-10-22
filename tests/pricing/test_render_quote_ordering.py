@@ -6,7 +6,7 @@ import appV5
 from cad_quoter.llm import explain_quote
 
 
-def _render_payload(result: Mapping) -> dict:
+def _render_payload(result: Mapping) -> tuple[str, dict]:
     rendered = appV5.render_quote(result, currency="$")
     assert "QUOTE SUMMARY" in rendered
     breakdown = result.get("breakdown", {}) if isinstance(result, dict) else {}
@@ -14,7 +14,7 @@ def _render_payload(result: Mapping) -> dict:
     if payload is None and isinstance(result, dict):
         payload = result.get("render_payload")
     assert isinstance(payload, dict), "expected render payload attached to result"
-    return payload
+    return rendered, payload
 
 
 def test_render_quote_emits_structured_sections() -> None:
@@ -46,12 +46,19 @@ def test_render_quote_emits_structured_sections() -> None:
         },
     }
 
-    payload = _render_payload(result)
+    rendered_text, payload = _render_payload(result)
 
     summary = payload["summary"]
     assert summary["qty"] == 3
     assert math.isclose(summary["margin_pct"], 0.15, rel_tol=1e-6)
     assert math.isclose(summary["final_price"], result["price"], rel_tol=1e-6)
+
+    assert "QUICK WHAT-IFS" not in rendered_text
+    assert "Margin slider" not in rendered_text
+
+    assert not payload.get("quick_what_ifs")
+    assert payload.get("margin_slider") is None
+    assert not payload.get("qty_breaks")
 
     drivers = payload.get("price_drivers", [])
     assert any("Tight tolerance" in driver.get("detail", "") for driver in drivers)
@@ -60,6 +67,41 @@ def test_render_quote_emits_structured_sections() -> None:
     cost_breakdown = dict(payload.get("cost_breakdown", []))
     assert math.isclose(cost_breakdown["Direct Costs"], 15.0, rel_tol=1e-6)
     assert "Machine & Labor" in cost_breakdown
+
+
+def test_render_quote_shows_expedite_toggle_when_applicable() -> None:
+    result = {
+        "price": 50.6,
+        "breakdown": {
+            "qty": 2,
+            "totals": {
+                "labor_cost": 20.0,
+                "direct_costs": 20.0,
+                "subtotal": 40.0,
+                "with_expedite": 44.0,
+            },
+            "nre_detail": {},
+            "nre": {},
+            "material": {},
+            "process_costs": {"machining": 20.0},
+            "process_meta": {},
+            "pass_through": {"Material": 20.0},
+            "applied_pcts": {
+                "MarginPct": 0.15,
+                "ExpeditePct": 0.1,
+            },
+            "rates": {},
+            "params": {},
+            "labor_cost_details": {},
+            "direct_cost_details": {},
+        },
+    }
+
+    rendered_text, payload = _render_payload(result)
+
+    assert "QUICK WHAT-IFS" not in rendered_text
+    assert "Remove expedite" not in rendered_text
+    assert not payload.get("quick_what_ifs")
 
 
 def test_render_quote_cost_breakdown_prefers_pricing_totals() -> None:
@@ -90,7 +132,7 @@ def test_render_quote_cost_breakdown_prefers_pricing_totals() -> None:
         },
     }
 
-    payload = _render_payload(result)
+    _, payload = _render_payload(result)
     cost_breakdown = dict(payload.get("cost_breakdown", []))
     assert math.isclose(cost_breakdown["Direct Costs"], 17.5, rel_tol=1e-6)
 
@@ -156,7 +198,7 @@ def test_render_quote_process_payload_tracks_bucket_view() -> None:
 
     result = {"price": 1450.0, "breakdown": breakdown}
 
-    payload = _render_payload(result)
+    _, payload = _render_payload(result)
     processes = payload.get("processes", [])
     labels = [entry["label"] for entry in processes]
     assert "Milling" in labels
@@ -216,7 +258,7 @@ def test_render_payload_obeys_pricing_math_guards() -> None:
 
     result = {"price": 1078.0, "breakdown": breakdown}
 
-    payload = _render_payload(result)
+    _, payload = _render_payload(result)
     summary = payload["summary"]
     subtotal_before_margin = summary.get("subtotal_before_margin")
     assert subtotal_before_margin is not None
@@ -282,4 +324,4 @@ def test_explain_quote_reports_no_drilling_when_minutes_absent() -> None:
 
     explanation = explain_quote(breakdown, render_state={"extra": {}})
 
-    assert "Main cost drivers derive from planner buckets; none dominate." in explanation
+    assert "Main cost drivers derive from bucket totals; none dominate." in explanation

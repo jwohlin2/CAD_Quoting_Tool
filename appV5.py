@@ -6274,6 +6274,32 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     removal_card_lines: list[str] = []
     removal_card_extra: dict[str, float] = {}
+    speeds_feeds_table = None
+    if isinstance(result, _MappingABC):
+        candidate_sf = result.get("speeds_feeds_table")
+        if candidate_sf is not None:
+            speeds_feeds_table = candidate_sf
+    if speeds_feeds_table is None and isinstance(breakdown, _MappingABC):
+        candidate_sf = breakdown.get("speeds_feeds_table")
+        if candidate_sf is not None:
+            speeds_feeds_table = candidate_sf
+
+    material_group_display: str | None = None
+    if isinstance(drilling_meta_map, _MappingABC):
+        for key in ("material_group", "group"):
+            candidate_group = drilling_meta_map.get(key)
+            if isinstance(candidate_group, str) and candidate_group.strip():
+                material_group_display = candidate_group.strip()
+                break
+    if material_group_display is None and isinstance(result, _MappingABC):
+        candidate_group = result.get("material_group")
+        if isinstance(candidate_group, str) and candidate_group.strip():
+            material_group_display = candidate_group.strip()
+    if material_group_display is None and isinstance(breakdown, _MappingABC):
+        candidate_group = breakdown.get("material_group")
+        if isinstance(candidate_group, str) and candidate_group.strip():
+            material_group_display = candidate_group.strip()
+
     (
         removal_card_extra,
         removal_card_lines,
@@ -8456,12 +8482,24 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         breakdown["final_price"] = final_price
     replace_line(final_price_row_index, _format_row("Final Price per Part:", price))
 
-    row("Subtotal (Labor + Directs):", subtotal)
-    if applied_pcts.get("ExpeditePct"):
-        row(f"+ Expedite ({_pct(applied_pcts.get('ExpeditePct'))}):", expedite_cost)
-    row("= Subtotal before Margin:", subtotal_before_margin)
-    row(f"Final Price with Margin ({_pct(applied_pcts.get('MarginPct'))}):", price)
-    _push(lines, "")
+    subtotal_before_margin_val = _safe_float(subtotal_before_margin, 0.0)
+    final_price_val = _safe_float(price, 0.0)
+    expedite_amount_val = _safe_float(expedite_cost, 0.0)
+    ladder_subtotal_val = _safe_float(ladder_totals.get("subtotal"), subtotal_before_margin_val - expedite_amount_val)
+
+    quick_what_if_entries: list[dict[str, Any]] = []
+    margin_slider_payload: dict[str, Any] | None = None
+    margin_slider_display_lines: list[str] = []
+    margin_slider_display_points: list[dict[str, Any]] = []
+    display_quick_toggle_entries: list[dict[str, Any]] = []
+
+    # Quick what-if sections have been removed from the rendered quote.
+    quick_what_if_entries = []
+    margin_slider_payload = None
+    margin_slider_display_lines = []
+    margin_slider_display_points = []
+    display_quick_toggle_entries = []
+    qty_break_payload: list[dict[str, Any]] = []
 
     # ---- LLM adjustments bullets (optional) ---------------------------------
     if llm_notes:
@@ -8844,6 +8882,13 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             "final_price": round(final_price_val, 2),
         },
     }
+
+    if quick_what_if_entries:
+        render_payload["quick_what_ifs"] = quick_what_if_entries
+    if margin_slider_payload is not None:
+        render_payload["margin_slider"] = margin_slider_payload
+    if qty_break_payload:
+        render_payload["qty_breaks"] = qty_break_payload
 
     if isinstance(result, _MutableMappingABC):
         result.setdefault("render_payload", render_payload)
