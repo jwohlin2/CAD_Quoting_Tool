@@ -7859,12 +7859,27 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                         hours=hours_numeric,
                         rate=rate_numeric,
                         total=total_numeric,
-    rows: tuple[_ProcessRowRecordType, ...] = tuple(getattr(process_table, "rows", ()))
-    def _process_row_canon(record: _ProcessRowRecordType) -> str:
-    def _find_process_row(target_canon: str) -> _ProcessRowRecordType | None:
+                        labor=labor_numeric,
+                        machine=machine_numeric,
+                        canon_key=canon_key or str(label_val),
                         minutes=minutes_numeric,
                     )
                 )
+
+    rows: tuple[_ProcessRowRecordType, ...] = tuple(getattr(process_table, "rows", ()))
+
+    def _process_row_canon(record: _ProcessRowRecordType) -> str:
+        if record.canon_key:
+            return record.canon_key
+        return _canonical_bucket_key(record.name)
+
+    def _find_process_row(target_canon: str) -> _ProcessRowRecordType | None:
+        if not target_canon:
+            return None
+        for record in rows:
+            if _process_row_canon(record) == target_canon:
+                return record
+        return None
 
     for spec in ordered_specs:
         canon_key = spec.canon_key
