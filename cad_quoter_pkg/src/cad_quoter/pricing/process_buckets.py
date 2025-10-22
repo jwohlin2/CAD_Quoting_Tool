@@ -1083,6 +1083,15 @@ def bucketize(
     cleaned_buckets: Dict[str, Dict[str, float]] = {}
     totals = {"minutes": 0.0, "machine$": 0.0, "labor$": 0.0, "total$": 0.0}
 
+    milling_entry = buckets.get("milling")
+    if isinstance(milling_entry, dict):
+        machine_component = float(milling_entry.get("machine$", 0.0) or 0.0)
+        labor_component = float(milling_entry.get("labor$", 0.0) or 0.0)
+        if labor_component > 0.0:
+            milling_entry["machine$"] = machine_component + labor_component
+            milling_entry["labor$"] = 0.0
+            milling_entry["total$"] = milling_entry["machine$"]
+
     for key in PLANNER_BUCKET_ORDER:
         entry = buckets.get(key)
         if not entry:

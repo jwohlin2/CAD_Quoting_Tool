@@ -4559,7 +4559,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                         break
 
                 if attended_frac is None:
-                    attended_frac = 1.0
+                    attended_frac = 0.0
                 attended_frac = max(0.0, min(attended_frac, 1.0))
                 milling_labor_hours = milling_hours * attended_frac
 
@@ -11261,6 +11261,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             minutes_val = float(_safe_float(entry.get("minutes")))
             machine_val = float(_bucket_cost(entry, "machine_cost", "machine$"))
             labor_val = float(_bucket_cost(entry, "labor_cost", "labor$"))
+            if canon_key == "milling" and labor_val > 0.0:
+                machine_val += labor_val
+                labor_val = 0.0
             if (
                 minutes_val <= 0.0
                 and machine_val <= 0.0
@@ -11756,6 +11759,9 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
                     entry_minutes = new_minutes if should_update_minutes or existing_entry is None else existing_minutes
                     entry_machine = new_machine if should_update_costs or existing_entry is None else existing_machine
                     entry_labor = new_labor if should_update_costs or existing_entry is None else existing_labor
+                    if entry_labor > 0.0:
+                        entry_machine += entry_labor
+                        entry_labor = 0.0
                     entry_total = entry_machine + entry_labor
 
                     buckets["milling"] = {
