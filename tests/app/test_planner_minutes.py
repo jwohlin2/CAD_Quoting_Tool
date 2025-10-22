@@ -227,6 +227,86 @@ def test_planner_bucket_minutes_from_line_items_when_bucketize_empty(monkeypatch
     assert planner_meta["planner_labor"]["minutes"] == pytest.approx(10.0, abs=0.01)
 
 
+def test_planner_milling_defaults_to_machine_only(monkeypatch):
+    import appV5
+    import cad_quoter.pricing.planner as planner_pricing
+
+    df = pd.DataFrame(columns=["Item", "Example Values / Options", "Data Type / Input Method"])
+    geo = {
+        "process_planner_family": "die_plate",
+        "material": "tool steel",
+        "thickness_mm": 25.4,
+    }
+
+    def fake_plan_job(family: str, inputs: dict[str, object]) -> dict[str, object]:
+        assert family == "die_plate"
+        assert isinstance(inputs, dict)
+        return {"ops": [{"op": "cnc_rough_mill"}]}
+
+    def fake_price_with_planner(
+        family: str,
+        inputs: dict[str, object],
+        geom_payload: dict[str, object],
+        rates: dict[str, object],
+        *,
+        oee: float,
+    ) -> dict[str, object]:
+        assert family == "die_plate"
+        assert geom_payload, "expected non-empty geom payload"
+        assert isinstance(rates, dict)
+        assert oee > 0
+        return {
+            "line_items": [
+                {
+                    "op": "cnc_rough_mill",
+                    "minutes": 60.0,
+                    "machine_cost": 45.0,
+                    "labor_cost": 45.0,
+                }
+            ],
+            "totals": {"minutes": 60.0, "machine_cost": 45.0, "labor_cost": 45.0},
+        }
+
+    monkeypatch.setattr(appV5, "_process_plan_job", fake_plan_job)
+    monkeypatch.setattr(planner_pricing, "price_with_planner", fake_price_with_planner)
+    monkeypatch.setattr(appV5, "FORCE_PLANNER", False)
+
+    result = appV5.compute_quote_from_df(
+        df,
+        params={"OEE_EfficiencyPct": 1.0},
+        rates={"MillingRate": 90.0, "LaborRate": 45.0},
+        geo=geo,
+        ui_vars={},
+    )
+
+    breakdown = result["breakdown"]
+    bucket_view = breakdown.get("bucket_view") or {}
+    milling_entry = (
+        bucket_view.get("milling")
+        or (bucket_view.get("buckets") or {}).get("milling")
+        or {}
+    )
+    machine_component = float(
+        milling_entry.get("machine$")
+        or milling_entry.get("machine_cost")
+        or 0.0
+    )
+    labor_component = float(
+        milling_entry.get("labor$")
+        or milling_entry.get("labor_cost")
+        or 0.0
+    )
+    total_component = float(
+        milling_entry.get("total$")
+        or milling_entry.get("total_cost")
+        or machine_component + labor_component
+    )
+
+    assert machine_component == pytest.approx(90.0, abs=0.01)
+    assert labor_component == pytest.approx(0.0, abs=1e-6)
+    assert total_component == pytest.approx(machine_component, abs=0.01)
+
+
 def test_planner_does_not_emit_legacy_buckets_when_line_items_present(monkeypatch):
     import appV5
     import cad_quoter.pricing.planner as planner_pricing
