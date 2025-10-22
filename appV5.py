@@ -4725,6 +4725,33 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     total_val,
                 )
 
+        has_tapping_row = False
+        for row_label, *_ in rows:
+            canon = _canonical_bucket_key(row_label) or _normalize_bucket_key(row_label)
+            if canon == "tapping":
+                has_tapping_row = True
+                break
+
+        if not has_tapping_row:
+            tapping_entry: Mapping[str, Any] | None = None
+            for candidate_key in ("tapping", "Tapping"):
+                entry = buckets.get(candidate_key)
+                if isinstance(entry, _MappingABC):
+                    tapping_entry = entry
+                    break
+
+            if tapping_entry is None:
+                tapping_entry = {}
+
+            _append_process_row(
+                rows,
+                _label_for_bucket("tapping"),
+                tapping_entry.get("minutes", 0.0),
+                tapping_entry.get("machine$", 0.0),
+                tapping_entry.get("labor$", 0.0),
+                tapping_entry.get("total$", 0.0),
+            )
+
         total_cost = sum(row[4] for row in rows)
         total_minutes = sum(row[1] for row in rows)
 
