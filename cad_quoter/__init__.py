@@ -5,6 +5,16 @@ from __future__ import annotations
 import importlib
 import sys
 import types
+from pathlib import Path
+
+_PACKAGE_ROOT = Path(__file__).resolve().parent
+_PKG_SRC_ROOT = _PACKAGE_ROOT.parent / "cad_quoter_pkg" / "src" / "cad_quoter"
+if _PKG_SRC_ROOT.is_dir():
+    pkg_path = list(__path__)  # type: ignore[name-defined]
+    pkg_src = str(_PKG_SRC_ROOT)
+    if pkg_src not in pkg_path:
+        pkg_path.append(pkg_src)
+        __path__ = pkg_path  # type: ignore[name-defined]
 
 
 def _ensure_geometry_module() -> None:
