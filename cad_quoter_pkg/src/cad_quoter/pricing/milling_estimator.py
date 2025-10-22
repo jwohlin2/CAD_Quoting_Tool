@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 import math
-from typing import Any
+import re
+from typing import Any, Mapping as _MappingABC
 
 from cad_quoter.pricing.planner import _geom as _normalize_geom, _material_factor
 from cad_quoter.speeds_feeds import (
     coerce_table_to_records,
     normalize_material_group_code,
     normalize_operation,
+    ipm_from_rpm_ipt,
+    rpm_from_sfm,
 )
 
 
@@ -67,26 +70,100 @@ def _iter_records(table: Any | None) -> Sequence[Mapping[str, Any]]:
     return tuple()
 
 
+_FZ_IPR_PATTERN = re.compile(r"fz_ipr_(\d+(?:_\d+)?)in\b")
+
+
+def _parse_fz_diameter(key: str) -> float | None:
+    match = _FZ_IPR_PATTERN.match(key.strip().lower())
+    if not match:
+        return None
+    token = match.group(1).replace("_", ".")
+    try:
+        return float(token)
+    except ValueError:
+        return None
+
+
+def _row_feed_per_rev(row: Mapping[str, Any], tool_diam_in: float | None) -> float:
+    candidates: list[tuple[float, float]] = []
+    for raw_key, raw_value in row.items():
+        if not isinstance(raw_key, str):
+            continue
+        diam = _parse_fz_diameter(raw_key)
+        if diam is None:
+            continue
+        value = _coerce_float(raw_value, 0.0)
+        if value <= 0.0:
+            continue
+        candidates.append((diam, value))
+
+    if candidates:
+        if tool_diam_in and tool_diam_in > 0.0:
+            candidates.sort(key=lambda item: (abs(item[0] - tool_diam_in), -item[1]))
+            return candidates[0][1]
+        return max(candidates, key=lambda item: item[1])[1]
+
+    for key in ("fz", "ipt", "ipr", "feed_per_tooth", "feed_per_rev"):
+        value = _coerce_float(row.get(key), 0.0)
+        if value > 0.0:
+            return value
+    return 0.0
+
+
+def _derive_feed_ipm(
+    row: Mapping[str, Any],
+    *,
+    tool_diam_in: float | None,
+    default_flutes: int,
+) -> float:
+    feed = 0.0
+    sfm = _coerce_float(row.get("sfm_start"), 0.0)
+    if sfm <= 0.0:
+        sfm = _coerce_float(row.get("sfm"), 0.0)
+
+    rpm = 0.0
+    if sfm > 0.0 and tool_diam_in and tool_diam_in > 0.0:
+        rpm = rpm_from_sfm(sfm, tool_diam_in)
+
+    feed_type = str(row.get("feed_type") or row.get("feed_unit") or "").strip().lower()
+    per_rev = _row_feed_per_rev(row, tool_diam_in)
+
+    if rpm > 0.0 and per_rev > 0.0:
+        if feed_type == "fz":
+            flutes = int(_coerce_float(row.get("flutes"), float(default_flutes)))
+            flutes = max(flutes, 1)
+            feed = ipm_from_rpm_ipt(rpm, flutes, per_rev)
+        elif feed_type == "ipr":
+            feed = rpm * per_rev
+
+    if feed <= 0.0:
+        feed = _coerce_float(row.get("feed_ipm"), 0.0)
+    return feed
+
+
 def _resolve_feed_ipm(
     table: Any | None,
     material_group: str | None,
     *,
     operations: Sequence[str],
-) -> float:
+    tool_diam_in: float | None,
+    default_flutes: int,
+) -> tuple[float, _MappingABC[str, Any] | None]:
     records = _iter_records(table)
     if not records:
-        return 0.0
+        return 0.0, None
 
     ops_lookup = {normalize_operation(op) for op in operations}
     ops_lookup = {op for op in ops_lookup if op}
 
     if not ops_lookup:
-        return 0.0
+        return 0.0, None
 
     group_text = str(material_group or "").strip().upper()
     simple_group = normalize_material_group_code(group_text) if group_text else ""
 
     best_rate = 0.0
+    best_row: _MappingABC[str, Any] | None = None
     for row in records:
         op = normalize_operation(row.get("operation"))
         if op not in ops_lookup:
@@ -94,18 +171,22 @@ def _resolve_feed_ipm(
 
         row_group = str(row.get("material_group") or row.get("iso_group") or "").strip().upper()
         row_simple = normalize_material_group_code(row_group) if row_group else ""
-        if group_text:
-            if row_group != group_text and (not simple_group or row_simple != simple_group):
-                continue
+        if group_text and row_group != group_text and (not simple_group or row_simple != simple_group):
+            continue
 
         rate = _coerce_float(row.get("linear_cut_rate_ipm"), 0.0)
         if rate <= 0.0:
             rate = _coerce_float(row.get("line_rate_ipm"), 0.0)
         if rate <= 0.0:
-            rate = _coerce_float(row.get("feed_ipm"), 0.0)
+            rate = _derive_feed_ipm(
+                row,
+                tool_diam_in=tool_diam_in,
+                default_flutes=default_flutes,
+            )
         if rate > best_rate:
             best_rate = rate
-    return best_rate
+            best_row = row
+    return best_rate, best_row
 
 
 def _default_finish_ipm(material: str | None) -> float:
@@ -149,6 +230,7 @@ def estimate_milling_minutes_from_geometry(
     """Estimate milling bucket metrics from geometry and rate inputs."""
 
     geometry = _normalize_geom(dict(geom or {}))
+    raw_geom = geom if isinstance(geom, Mapping) else {}
 
     thickness_in = max(0.0, _coerce_float(geometry.get("thickness_in"), 0.0))
     pocket_area_in2 = max(0.0, _coerce_float(geometry.get("pocket_area_in2"), 0.0))
@@ -165,13 +247,47 @@ def estimate_milling_minutes_from_geometry(
         removal_volume = pocket_area_in2 * thickness_in
         rough_minutes = (removal_volume / mrr_in3_min) * 60.0
 
-    finish_ipm = _resolve_feed_ipm(
+    def _raw_value(key: str) -> Any:
+        if not isinstance(raw_geom, Mapping):
+            return None
+        if key in raw_geom:
+            return raw_geom[key]
+        derived = raw_geom.get("derived")
+        if isinstance(derived, Mapping):
+            return derived.get(key)
+        return None
+
+    contour_tool_diam = 0.0
+    for key in (
+        "finish_tool_diam_in",
+        "perimeter_tool_diam_in",
+        "rough_tool_diam_in",
+        "tool_diam_in",
+    ):
+        candidate = _coerce_float(geometry.get(key), 0.0)
+        if candidate <= 0.0:
+            candidate = _coerce_float(_raw_value(key), 0.0)
+        if candidate > 0.0:
+            contour_tool_diam = candidate
+            break
+    if contour_tool_diam <= 0.0:
+        contour_tool_diam = max(
+            0.25,
+            min(0.75, math.sqrt(edge_len_in / math.pi) if edge_len_in > 0 else 0.5),
+        )
+        if not math.isfinite(contour_tool_diam) or contour_tool_diam <= 0.0:
+            contour_tool_diam = 0.5
+
+    finish_ipm, finish_row = _resolve_feed_ipm(
         sf_df,
         material_group,
         operations=("Endmill_Profile", "Finish_Mill", "Profile_Mill"),
+        tool_diam_in=contour_tool_diam,
+        default_flutes=4,
     )
     if finish_ipm <= 0.0:
         finish_ipm = _default_finish_ipm(material_label)
+        finish_row = None
 
     finish_minutes = 0.0
     if edge_len_in > 0.0 and finish_ipm > 0.0:
@@ -180,12 +296,48 @@ def estimate_milling_minutes_from_geometry(
     face_minutes = 0.0
     if plate_area_in2 > 0.0 and finish_ipm > 0.0:
         passes = 1 + int(bool(emit_bottom_face or flip_required))
-        stepover_in = _default_face_stepover(thickness_in)
+        face_tool_diam = 0.0
+        for key in ("face_tool_diam_in", "rough_face_tool_diam_in", "face_cutter_diam_in"):
+            candidate = _coerce_float(geometry.get(key), 0.0)
+            if candidate <= 0.0:
+                candidate = _coerce_float(_raw_value(key), 0.0)
+            if candidate > 0.0:
+                face_tool_diam = candidate
+                break
+        if face_tool_diam <= 0.0:
+            face_tool_diam = 2.0
+
+        face_ipm, face_row = _resolve_feed_ipm(
+            sf_df,
+            material_group,
+            operations=("FaceMill", "Face_Mill", "Facing", "Endmill_Profile"),
+            tool_diam_in=face_tool_diam,
+            default_flutes=6,
+        )
+
+        stepover_pct = 0.0
+        for candidate in (face_row, finish_row):
+            if not isinstance(candidate, Mapping):
+                continue
+            stepover_pct = _coerce_float(candidate.get("stepover_pct"), 0.0)
+            if stepover_pct <= 0.0:
+                stepover_pct = _coerce_float(candidate.get("woc_radial_pct"), 0.0)
+            if stepover_pct > 0.0:
+                break
+
+        if stepover_pct > 1.0:
+            stepover_pct /= 100.0
+        if stepover_pct > 0.0:
+            stepover_pct = max(0.05, min(stepover_pct, 1.0))
+            stepover_in = stepover_pct * face_tool_diam
+        else:
+            stepover_in = _default_face_stepover(thickness_in)
+
         effective_length = (plate_area_in2 / max(stepover_in, 1e-3)) * passes
-        face_feed = finish_ipm * 0.75
-        if face_feed <= 0.0:
-            face_feed = finish_ipm
-        face_minutes = (effective_length / max(face_feed, 1.0)) * 60.0
+
+        face_feed = face_ipm if face_ipm > 0.0 else finish_ipm
+        face_feed = max(face_feed * 0.75, 1.0) if face_feed > 0.0 else 1.0
+        face_minutes = (effective_length / face_feed) * 60.0
 
     total_minutes = rough_minutes + finish_minutes + face_minutes
     total_minutes = max(0.0, total_minutes)
