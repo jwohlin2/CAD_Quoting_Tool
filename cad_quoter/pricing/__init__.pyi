@@ -1,0 +1,73 @@
+from __future__ import annotations
+
+from typing import Any, Protocol, Sequence
+
+BACKUP_CSV_NAME: str
+LB_PER_KG: float
+
+class PriceProvider(Protocol):
+    ...
+
+class ProviderFactory(Protocol):
+    def __call__(self, *args: Any, **kwargs: Any) -> PriceProvider: ...
+
+class PriceQuote:
+    usd_per_kg: float
+    source: str
+    basis: str
+
+class PriceCacheEntry:
+    usd_per_kg: float
+    source: str
+    basis: str
+
+class PriceCache:
+    def get(self, key: str) -> PriceCacheEntry | None: ...
+    def clear(self) -> None: ...
+
+class ProviderRegistry:
+    def register(self, name: str, factory: ProviderFactory) -> None: ...
+    def create(self, name: str, **config: Any) -> PriceProvider: ...
+    def available(self) -> Sequence[str]: ...
+
+class PricingEngine:
+    def __init__(self, *args: Any, **kwargs: Any) -> None: ...
+    def clear_cache(self) -> None: ...
+    def get_usd_per_kg(
+        self,
+        symbol: str,
+        basis: str,
+        *,
+        vendor_csv: str | None = ...,
+        providers: Sequence[Any] | None = ...,
+    ) -> PriceQuote: ...
+
+
+def ensure_material_backup_csv(*args: Any, **kwargs: Any) -> str: ...
+
+def load_backup_prices_csv(path: str | None = ...) -> list[dict[str, Any]]: ...
+
+def get_mcmaster_unit_price(*args: Any, **kwargs: Any) -> float | None: ...
+
+def price_value_to_per_gram(*args: Any, **kwargs: Any) -> float: ...
+
+def resolve_material_unit_price(*args: Any, **kwargs: Any) -> float | None: ...
+
+def usdkg_to_usdlb(value: float) -> float: ...
+
+ORDER: Sequence[str]
+
+def canonicalize_costs(*args: Any, **kwargs: Any) -> dict[str, Any]: ...
+
+def render_process_costs(*args: Any, **kwargs: Any) -> dict[str, Any]: ...
+
+def create_default_registry(*args: Any, **kwargs: Any) -> ProviderRegistry: ...
+
+def load_csv_as_records(path: str, *, encoding: str | None = ...) -> list[dict[str, Any]]: ...
+
+def pick_speeds_row(*args: Any, **kwargs: Any) -> dict[str, Any] | None: ...
+
+def unit_hp_cap(*args: Any, **kwargs: Any) -> float: ...
+
+from . import time_estimator
+
