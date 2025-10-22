@@ -8,7 +8,7 @@ from cad_quoter.pricing.process_buckets import (
     canonical_bucket_key,
     normalize_bucket_key,
 )
-from cad_quoter.pricing.process_rates import machine_rate
+from cad_quoter.rates import default_machine_rate
 from cad_quoter.utils import _dict
 
 
@@ -20,7 +20,7 @@ __all__ = [
 ]
 
 
-DEFAULT_RATE_PER_HOUR: float = machine_rate("milling")
+DEFAULT_RATE_PER_HOUR: float = default_machine_rate("milling")
 
 
 @dataclass(frozen=True)
@@ -169,11 +169,15 @@ def bucket_cost_breakdown(
         rate = _lookup_rate(two_bucket_rates, spec, default_rate)
         cost = (mins / 60.0) * rate
         entry: dict[str, float | str] = {
-            "op": spec.label,
+            "op": spec.key,
             "name": spec.label,
             "minutes": round(mins, 2),
             f"{spec.bucket}_cost": round(cost, 2),
         }
+        if spec.bucket == "labor":
+            entry["labor_cost"] = round(cost, 2)
+        else:
+            entry["machine_cost"] = round(cost, 2)
         line_items.append(entry)
         total_minutes += mins
         if spec.bucket == "labor":
