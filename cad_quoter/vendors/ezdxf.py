@@ -1,11 +1,6 @@
 """Optional ezdxf / ODA File Converter bindings."""
 
-from __future__ import annotations
-
 import logging
-import os
-import subprocess
-import tempfile
 from pathlib import Path
 from typing import Any, Callable, Final
 
@@ -104,115 +99,21 @@ def _recover_document(doc_path: str, *, error: Exception) -> Any | None:
     return result
 
 
-def _configured_dwg_converter() -> Path | None:
-    """Return the configured DWG→DXF converter if available."""
-
-    exe = (
-        os.environ.get("ODA_CONVERTER_EXE")
-        or os.environ.get("DWG2DXF_EXE")
-        or str(Path(__file__).with_name("dwg2dxf_wrapper.bat"))
-        or r"D:\CAD_Quoting_Tool\dwg2dxf_wrapper.bat"
-    )
-    if not exe:
-        return None
-    path = Path(exe)
-    if not path.exists():
-        return None
-    return path
-
-
-def _convert_dwg_to_dxf(path: Path) -> Path | None:
-    """Convert ``path`` to DXF using the configured converter."""
-
-    converter = _configured_dwg_converter()
-    if converter is None:
-        return None
-
-    out_dir = Path(tempfile.mkdtemp(prefix="dwg2dxf_"))
-    out_dxf = out_dir / (path.stem + ".dxf")
-
-    exe_lower = converter.name.lower()
-    if exe_lower.endswith((".bat", ".cmd")):
-        cmd = ["cmd", "/c", str(converter), str(path), str(out_dxf)]
-    elif "odafileconverter" in exe_lower:
-        cmd = [
-            str(converter),
-            str(path.parent),
-            str(out_dir),
-            "ACAD2018",
-            "DXF",
-            "0",
-            "0",
-            path.name,
-        ]
-    else:
-        cmd = [str(converter), str(path), str(out_dxf)]
-
-    try:
-        subprocess.run(
-            cmd,
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-    except FileNotFoundError as exc:  # pragma: no cover - user environment
-        raise RuntimeError(f"DWG converter not found: {converter}") from exc
-    except subprocess.CalledProcessError as exc:  # pragma: no cover - converter runtime
-        raise RuntimeError(
-            "DWG→DXF conversion failed.\n"
-            f"cmd: {' '.join(cmd)}\n"
-            f"stdout:\n{exc.stdout}\n"
-            f"stderr:\n{exc.stderr}"
-        ) from exc
-
-    produced = out_dxf if out_dxf.exists() else out_dir / (path.stem + ".dxf")
-    if not produced.exists():  # pragma: no cover - unexpected converter behaviour
-        raise RuntimeError(
-            "Converter reported success but DXF was not produced.\n"
-            f"cmd: {' '.join(cmd)}\n"
-            f"checked: {out_dxf} | {produced}"
-        )
-    return produced
-
-
 def read_document(path: str | Path) -> Any:
     """Return an ezdxf drawing, falling back to odafc when available."""
 
-    path_obj = Path(path)
-    original_dwg: Path | None = None
-    converted_path: Path | None = None
+    doc_path = str(path)
     last_error: Exception | None = None
-
-    if path_obj.suffix.lower() == ".dwg":
-        original_dwg = path_obj
-        try:
-            converted_path = _convert_dwg_to_dxf(path_obj)
-        except Exception as exc:  # pragma: no cover - depends on env/converter
-            last_error = exc
-
-    candidate_paths: list[Path] = []
-    if converted_path is not None:
-        candidate_paths.append(converted_path)
-    if original_dwg is None:
-        candidate_paths.append(path_obj)
-    elif converted_path is None and _odafc_readfile is None:
-        # If we cannot convert and do not have odafc, still attempt ezdxf for diagnostic error
-        candidate_paths.append(path_obj)
-
     if _ezdxf_readfile is not None:
-        for candidate in candidate_paths:
-            doc_path = str(candidate)
-            try:
-                return _ezdxf_readfile(doc_path)
-            except Exception as exc:  # pragma: no cover - depends on dxfs supplied
-                last_error = exc
-                recovered = _recover_document(doc_path, error=exc)
-                if recovered is not None:
-                    return recovered
-
-    if original_dwg is not None and _odafc_readfile is not None:
-        doc_path = str(original_dwg)
+        try:
+            return _ezdxf_readfile(doc_path)
+        except Exception as exc:  # pragma: no cover - depends on dxfs supplied
+            last_error = exc
+            recovered = _recover_document(doc_path, error=exc)
+            if recovered is not None:
+                return recovered
+            raise
+    if _odafc_readfile is not None:
         try:
             return _odafc_readfile(doc_path)
         except Exception as exc:  # pragma: no cover - depends on dwgs supplied
@@ -220,7 +121,7 @@ def read_document(path: str | Path) -> Any:
             recovered = _recover_document(doc_path, error=exc)
             if recovered is not None:
                 return recovered
-
+            raise
     if last_error is not None:
         raise last_error
     raise RuntimeError(
