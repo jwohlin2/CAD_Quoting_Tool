@@ -2432,6 +2432,7 @@ from cad_quoter.pricing import time_estimator as _time_estimator
 from cad_quoter.pricing.speeds_feeds_selector import (
     pick_speeds_row as _pick_speeds_row,
 )
+from cad_quoter.pricing.milling_estimator import estimate_milling_minutes_from_geometry
 from cad_quoter.pricing.speeds_feeds_selector import (
     material_group_for_speeds_feeds as _material_group_for_speeds_feeds,
 )
@@ -10173,6 +10174,79 @@ def compute_quote_from_df(  # type: ignore[reportGeneralTypeIssues]
             buckets = {str(k): dict(v) for k, v in buckets_raw.items()}
         else:
             buckets = {}
+
+        geometry_for_milling: Mapping[str, Any] | None = None
+        if isinstance(planner_result, _MappingABC):
+            geom_candidate = planner_result.get("geometry")
+            if isinstance(geom_candidate, _MappingABC):
+                geometry_for_milling = geom_candidate
+            else:
+                geom_candidate = planner_result.get("geom")
+                if isinstance(geom_candidate, _MappingABC):
+                    geometry_for_milling = geom_candidate
+        if geometry_for_milling is None and isinstance(geo_payload, _MappingABC):
+            geometry_for_milling = geo_payload
+
+        milling_backfill = None
+        if geometry_for_milling is not None:
+            try:
+                milling_backfill = estimate_milling_minutes_from_geometry(
+                    geom=geometry_for_milling,
+                    sf_df=speeds_feeds_table,
+                    material_group=material_group_display,
+                    rates=rates,
+                    emit_bottom_face=bool(geometry_for_milling.get("flip_required")),
+                )
+            except Exception:
+                milling_backfill = None
+
+        if milling_backfill:
+            new_minutes = float(_safe_float(milling_backfill.get("minutes")))
+            new_machine = float(_safe_float(milling_backfill.get("machine$")))
+            new_labor = float(_safe_float(milling_backfill.get("labor$")))
+            new_total = float(_safe_float(milling_backfill.get("total$")))
+            if new_total <= 0.0:
+                new_total = new_machine + new_labor
+
+            if new_minutes > 0.0 and (new_machine > 0.0 or new_labor > 0.0):
+                existing_entry = buckets.get("milling")
+                existing_minutes = (
+                    float(_safe_float(existing_entry.get("minutes")))
+                    if isinstance(existing_entry, _MappingABC)
+                    else 0.0
+                )
+                existing_machine = (
+                    float(_safe_float(existing_entry.get("machine$")))
+                    if isinstance(existing_entry, _MappingABC)
+                    else 0.0
+                )
+                existing_labor = (
+                    float(_safe_float(existing_entry.get("labor$")))
+                    if isinstance(existing_entry, _MappingABC)
+                    else 0.0
+                )
+
+                should_update_minutes = existing_minutes <= 0.01
+                should_update_costs = abs(existing_machine) <= 0.01 and abs(existing_labor) <= 0.01
+
+                if should_update_minutes or should_update_costs or existing_entry is None:
+                    entry_minutes = new_minutes if should_update_minutes or existing_entry is None else existing_minutes
+                    entry_machine = new_machine if should_update_costs or existing_entry is None else existing_machine
+                    entry_labor = new_labor if should_update_costs or existing_entry is None else existing_labor
+                    entry_total = entry_machine + entry_labor
+
+                    buckets["milling"] = {
+                        "minutes": entry_minutes,
+                        "machine$": entry_machine,
+                        "labor$": entry_labor,
+                        "total$": entry_total,
+                    }
+                    aggregated_bucket_minutes["milling"] = {
+                        "minutes": entry_minutes,
+                        "machine$": entry_machine,
+                        "labor$": entry_labor,
+                    }
+                    print(f"[INFO] [bucket/milling] {buckets['milling']}")
 
         for canon_key, metrics in aggregated_bucket_minutes.items():
             if canon_key in _FINAL_BUCKET_HIDE_KEYS:
