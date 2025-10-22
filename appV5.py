@@ -897,14 +897,31 @@ def _emit_hole_table_ops_cards(
                 rows_list = list(rows_obj)
             except Exception:
                 return
-            if isinstance(ops_summary, (_MutableMappingABC, dict)):
-                typing.cast(MutableMapping[str, Any], ops_summary)["rows"] = rows_list
             rows = rows_list
         else:
             rows = rows_obj
 
-        if not rows:
+        mutable_rows: list[MutableMapping[str, Any]] = []
+        for entry in rows:
+            if isinstance(entry, dict):
+                mutable_rows.append(typing.cast(MutableMapping[str, Any], entry))
+            elif isinstance(entry, _MutableMappingABC):
+                mutable_rows.append(typing.cast(MutableMapping[str, Any], entry))
+            elif isinstance(entry, _MappingABC):
+                try:
+                    row_dict = dict(entry)
+                except Exception:
+                    continue
+                mutable_rows.append(typing.cast(MutableMapping[str, Any], row_dict))
+            else:
+                continue
+
+        if not mutable_rows:
             return
+
+        rows = mutable_rows
+        if isinstance(ops_summary, (_MutableMappingABC, dict)):
+            typing.cast(MutableMapping[str, Any], ops_summary)["rows"] = rows
 
         thickness_in = _resolve_part_thickness_in(
             geo,
@@ -913,8 +930,14 @@ def _emit_hole_table_ops_cards(
         )
 
         tap_rows = _finalize_tapping_rows(rows, thickness_in=thickness_in)
-        if not tap_rows:
-            return
+        tap_total_min = 0.0
+        if tap_rows:
+            tap_total_min = _render_ops_card(
+                lambda text: _push(lines, text),
+                title="Material Removal – Tapping",
+                rows=tap_rows,
+            )
+            tap_total_min = float(tap_total_min or 0.0)
 
         cbore_rows: list[MutableMapping[str, Any]] = []
         spot_rows: list[MutableMapping[str, Any]] = []
@@ -1052,11 +1075,39 @@ def _emit_hole_table_ops_cards(
         if tap_minutes_hint and tap_minutes_hint > tap_total_min:
             tap_total_min = tap_minutes_hint
 
-        try:
-            if isinstance(ops_summary, (_MutableMappingABC, dict)):
-                typing.cast(MutableMapping[str, Any], ops_summary)["tap_minutes_total"] = tap_total_min
-        except Exception:
-            pass
+        cbore_total_min = 0.0
+        spot_total_min = 0.0
+        jig_total_min = 0.0
+
+        if cbore_rows:
+            cbore_total_min = float(
+                _render_ops_card(
+                    lambda text: _push(lines, text),
+                    title="Material Removal – Counterbore",
+                    rows=cbore_rows,
+                )
+                or 0.0
+            )
+
+        if spot_rows:
+            spot_total_min = float(
+                _render_ops_card(
+                    lambda text: _push(lines, text),
+                    title="Material Removal – Spot (Center Drill)",
+                    rows=spot_rows,
+                )
+                or 0.0
+            )
+
+        if jig_rows:
+            jig_total_min = float(
+                _render_ops_card(
+                    lambda text: _push(lines, text),
+                    title="Material Removal – Jig Grind",
+                    rows=jig_rows,
+                )
+                or 0.0
+            )
 
         bucket_view_obj: MutableMapping[str, Any] | Mapping[str, Any] | None = None
         try:
@@ -1790,6 +1841,18 @@ def _finalize_tap_row(row: MutableMapping[str, Any], thickness_in: float) -> Non
     motion_min = (float(depth_in) / max(ipm, 1e-6)) * retract_fac if depth_in else 0.0
     t_per = motion_min + index_min
 
+    try:
+        tap_class, tap_minutes_hint, is_npt = _classify_thread_spec(str(thread))
+    except Exception:
+        tap_class, tap_minutes_hint, is_npt = ("unknown", TAP_MINUTES_BY_CLASS["medium"], False)
+
+    row["tap_class"] = tap_class
+    row["tap_minutes_hint"] = round(float(tap_minutes_hint or 0.0), 3)
+    row["tap_is_npt"] = bool(is_npt)
+
+    if t_per < float(tap_minutes_hint or 0.0):
+        t_per = float(tap_minutes_hint or 0.0)
+
     row["ipr"] = round(ipr, 4)
     row["rpm"] = int(round(rpm))
     row["ipm"] = round(ipm, 3)
@@ -1858,6 +1921,261 @@ def _finalize_tapping_rows(
         finalized.append(row_map)
 
     return finalized
+
+
+_SPOT_DRILL_MIN_PER_SIDE_MIN = 0.1
+_JIG_GRIND_MIN_PER_OP = 15.0
+
+
+def _ops_qty_from_value(value: Any) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        try:
+            return int(round(float(value)))
+        except Exception:
+            return 0
+    text = str(value).strip()
+    if not text:
+        return 0
+    try:
+        return int(round(float(text)))
+    except Exception:
+        match = re.search(r"\d+", text)
+        return int(match.group()) if match else 0
+
+
+def _parse_fractional_number(token: str, default: float) -> float:
+    cleaned = token.strip().strip('"').strip()
+    if not cleaned:
+        return default
+    if cleaned.startswith("."):
+        cleaned = f"0{cleaned}"
+    if cleaned.endswith("."):
+        cleaned = f"{cleaned}0"
+    try:
+        value = float(cleaned)
+        if value > 20.0:
+            return default
+        return value
+    except Exception:
+        try:
+            return float(Fraction(cleaned))
+        except Exception:
+            return default
+
+
+def _extract_diameter_in(entry: Mapping[str, Any]) -> float:
+    diameter = entry.get("diameter_in") if isinstance(entry, Mapping) else None
+    try:
+        if diameter is not None:
+            return float(diameter)
+    except Exception:
+        pass
+
+    ref_val = _parse_ref_to_inch(entry.get("ref")) if isinstance(entry, Mapping) else None
+    if ref_val:
+        return float(ref_val)
+
+    text_candidates = [str(entry.get("desc") or ""), str(entry.get("label") or "")]
+    for text in text_candidates:
+        if not text:
+            continue
+        match = _DIA_TOKEN.search(text)
+        if match:
+            token = match.group(1)
+            return _parse_fractional_number(token, 0.25)
+
+    return 0.25
+
+
+def _extract_depth_in(entry: Mapping[str, Any], default: float) -> float:
+    depth_value = entry.get("depth_in") if isinstance(entry, Mapping) else None
+    try:
+        if depth_value is not None:
+            return float(depth_value)
+    except Exception:
+        pass
+
+    desc_text = str(entry.get("desc") or "")
+    match = re.search(r"[×x]\s*([0-9./]+)", desc_text)
+    if match:
+        return _parse_fractional_number(match.group(1), default)
+    return default
+
+
+def _extract_side_from_desc(desc: str) -> str:
+    text = desc.upper()
+    if RE_FRONT_BACK.search(text):
+        return "FRONT/BACK"
+    if "BACK" in text and "FRONT" not in text:
+        return "BACK"
+    if "FRONT" in text and "BACK" not in text:
+        return "FRONT"
+    return "FRONT"
+
+
+def _rpm_for_tool(dia_in: float, sfm: float, *, rpm_cap: float = 4000.0) -> int:
+    safe_dia = float(dia_in or 0.0)
+    if safe_dia <= 0:
+        safe_dia = 0.25
+    rpm = (sfm * 3.82) / safe_dia
+    rpm = max(100.0, min(rpm, rpm_cap))
+    return int(round(rpm))
+
+
+def _format_feed(ipr: float, rpm: int) -> tuple[str, float]:
+    ipm = float(rpm) * float(ipr)
+    feed_fmt = f"{ipr:.4f} ipr | {rpm} rpm | {ipm:.3f} ipm"
+    return feed_fmt, ipm
+
+
+def _build_counterbore_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    built: list[dict[str, Any]] = []
+    for entry in rows or []:
+        if not isinstance(entry, _MappingABC):
+            continue
+        desc = str(entry.get("desc") or "")
+        if not RE_CBORE.search(desc):
+            continue
+        qty = _ops_qty_from_value(entry.get("qty"))
+        if qty <= 0:
+            continue
+        dia = _extract_diameter_in(entry)
+        depth = _extract_depth_in(entry, 0.25)
+        side = _extract_side_from_desc(desc)
+        ipr = 0.01
+        rpm = _rpm_for_tool(dia, 200.0, rpm_cap=3200.0)
+        feed_fmt, ipm = _format_feed(ipr, rpm)
+        motion_min = (depth / max(ipm, 1e-6)) * 2.0 if depth else 0.0
+        per_hole = max(CBORE_MIN_PER_SIDE_MIN, motion_min + 0.05)
+        built.append(
+            {
+                "label": f"Ø{dia:.4f} COUNTERBORE",
+                "qty": qty,
+                "side": side,
+                "depth_in": depth,
+                "depth_in_display": f"{depth:.3f}\"",
+                "feed_fmt": feed_fmt,
+                "t_per_hole_min": round(per_hole, 3),
+            }
+        )
+    return built
+
+
+def _build_spot_drill_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    built: list[dict[str, Any]] = []
+    for entry in rows or []:
+        if not isinstance(entry, _MappingABC):
+            continue
+        desc = str(entry.get("desc") or "")
+        if not _SPOT_TOKENS.search(desc):
+            continue
+        qty = _ops_qty_from_value(entry.get("qty"))
+        if qty <= 0:
+            continue
+        dia = _extract_diameter_in(entry)
+        depth = _extract_depth_in(entry, 0.06)
+        side = _extract_side_from_desc(desc)
+        ipr = 0.004
+        rpm = _rpm_for_tool(dia, 250.0, rpm_cap=4500.0)
+        feed_fmt, ipm = _format_feed(ipr, rpm)
+        motion_min = (depth / max(ipm, 1e-6)) * 2.0 if depth else 0.0
+        per_hole = max(_SPOT_DRILL_MIN_PER_SIDE_MIN, motion_min + 0.04)
+        built.append(
+            {
+                "label": f"Spot drill Ø{dia:.4f}",
+                "qty": qty,
+                "side": side,
+                "depth_in": depth,
+                "depth_in_display": f"{depth:.3f}\"",
+                "feed_fmt": feed_fmt,
+                "t_per_hole_min": round(per_hole, 3),
+            }
+        )
+    return built
+
+
+def _build_jig_grind_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    built: list[dict[str, Any]] = []
+    for entry in rows or []:
+        if not isinstance(entry, _MappingABC):
+            continue
+        desc = str(entry.get("desc") or "")
+        if "JIG" not in desc.upper() or "GRIND" not in desc.upper():
+            continue
+        qty = _ops_qty_from_value(entry.get("qty"))
+        if qty <= 0:
+            continue
+        dia = _extract_diameter_in(entry)
+        side = _extract_side_from_desc(desc)
+        built.append(
+            {
+                "label": f"Jig grind Ø{dia:.4f}",
+                "qty": qty,
+                "side": side,
+                "depth_in": 0.0,
+                "depth_in_display": "-",
+                "feed_fmt": "Manual grind",
+                "t_per_hole_min": round(float(_JIG_GRIND_MIN_PER_OP), 3),
+            }
+        )
+    return built
+
+
+def _append_bucket_op_entry(
+    bucket_view_obj: MutableMapping[str, Any] | Mapping[str, Any] | None,
+    bucket_key: str,
+    *,
+    name: str,
+    minutes: float,
+    machine_rate: float,
+    labor_rate: float,
+    qty: int | None = None,
+) -> None:
+    if minutes <= 0:
+        return
+    target: MutableMapping[str, Any] | None = None
+    if isinstance(bucket_view_obj, dict):
+        target = bucket_view_obj
+    elif isinstance(bucket_view_obj, _MutableMappingABC):
+        target = typing.cast(MutableMapping[str, Any], bucket_view_obj)
+    if target is None:
+        return
+
+    ops_map = target.setdefault("bucket_ops", {})
+    if not isinstance(ops_map, dict):
+        try:
+            ops_map = dict(ops_map)
+        except Exception:
+            ops_map = {}
+        target["bucket_ops"] = ops_map
+
+    bucket_list = ops_map.setdefault(bucket_key, [])
+    if not isinstance(bucket_list, list):
+        try:
+            bucket_list = list(bucket_list or [])
+        except Exception:
+            bucket_list = []
+        ops_map[bucket_key] = bucket_list
+
+    machine_rate_val = float(machine_rate or 0.0)
+    labor_rate_val = float(labor_rate or 0.0)
+    machine_cost = (minutes / 60.0) * machine_rate_val
+    labor_cost = (minutes / 60.0) * labor_rate_val
+
+    entry: dict[str, Any] = {
+        "name": name,
+        "minutes": round(float(minutes), 3),
+        "machine$": round(machine_cost, 2),
+        "labor$": round(labor_cost, 2),
+    }
+    entry["total$"] = round(entry["machine$"] + entry["labor$"], 2)
+    if qty is not None:
+        entry["qty"] = int(qty)
+    bucket_list.append(entry)
 
 
 def _render_ops_card(
