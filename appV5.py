@@ -4811,9 +4811,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         render_drill_debug(sorted_drill_entries)
     row("Final Price per Part:", price)
     final_price_row_index = len(lines) - 1
-    total_labor_label = "Total Labor Cost:"
-    row(total_labor_label, float(totals.get("labor_cost", 0.0)))
-    total_labor_row_index = len(lines) - 1
+    total_process_cost_label = "Total Process Cost:"
+    row(total_process_cost_label, float(totals.get("labor_cost", 0.0)))
+    total_process_cost_row_index = len(lines) - 1
     total_direct_costs_label = "Total Direct Costs:"
     row(total_direct_costs_label, 0.0)
     total_direct_costs_row_index = len(lines) - 1
@@ -7809,6 +7809,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     pass_total = float(directs)
 
+    total_process_cost_value = round(float(proc_total or 0.0), 2)
     computed_total_labor_cost = proc_total
     expected_labor_total = computed_total_labor_cost
     if declared_labor_total > computed_total_labor_cost + 0.01:
@@ -7892,12 +7893,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             display_machine = 0.0
     if isinstance(totals, dict):
         totals["labor_cost"] = computed_total_labor_cost
-    if 0 <= total_labor_row_index < len(lines):
+    if 0 <= total_process_cost_row_index < len(lines):
         replace_line(
-            total_labor_row_index,
+            total_process_cost_row_index,
             _format_row(
-                total_labor_label,
-                computed_total_labor_cost,
+                total_process_cost_label,
+                total_process_cost_value,
             ),
         )
 
@@ -8031,10 +8032,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     final_per_part = round(machine_labor_total + nre_per_part + ladder_directs, 2)
     ladder_subtotal = final_per_part
-    if 0 <= total_labor_row_index < len(lines):
+    if 0 <= total_process_cost_row_index < len(lines):
         replace_line(
-            total_labor_row_index,
-            _format_row(total_labor_label, ladder_labor),
+            total_process_cost_row_index,
+            _format_row(total_process_cost_label, total_process_cost_value),
         )
     if isinstance(pricing, dict):
         pricing["ladder_subtotal"] = ladder_subtotal
