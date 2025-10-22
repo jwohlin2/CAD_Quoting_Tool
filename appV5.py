@@ -757,18 +757,24 @@ def estimate_milling_minutes_from_geometry(
                     return float(val)
         return default
 
-    machine_rate = _rate_from_mapping(
-        ("machine_per_hour", "machine_rate", "milling_rate", "milling"),
-        45.0,
+    mach_rate = float(
+        _rate_from_mapping(("machine_per_hour", "machine_rate", "milling_rate", "milling"), 90.0)
     )
-    labor_rate = _rate_from_mapping(
-        ("labor_per_hour", "labor_rate", "milling_labor_rate", "labor"),
-        0.0,
+    labor_rate = float(
+        _rate_from_mapping(("labor_per_hour", "labor_rate", "milling_labor_rate", "labor"), 45.0)
     )
 
-    machine_cost = (total_min / 60.0) * machine_rate
-    labor_cost = (total_min / 60.0) * labor_rate * 0.0
+    milling_minutes = float(total_min)
+    milling_attended_minutes = max(toolchanges_min, 0.0)
+
+    machine_cost = (milling_minutes / 60.0) * mach_rate
+    labor_cost = (milling_attended_minutes / 60.0) * labor_rate
     total_cost = machine_cost + labor_cost
+
+    print(
+        f"[CHECK/mill-rate] min={milling_minutes:.2f} hr={milling_minutes / 60.0:.2f} "
+        f"mach_rate={mach_rate:.2f}/hr => machine$={machine_cost:.2f}"
+    )
 
     logging.info(
         "[INFO] [milling] face_top=%.2fmin face_bot=%.2fmin rough_perim=%.2fmin "
@@ -4517,28 +4523,39 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 prog_total,
             )
 
-        def _append_bucket_row(canon_key: str) -> None:
-            entry = canonical_entries.pop(canon_key, None)
-            if not entry:
-                return
-            label = _label_for_bucket(canon_key) or canon_key
-            _append_process_row(
-                rows,
-                label,
-                entry.get("minutes", 0.0),
-                entry.get("machine$", 0.0),
-                entry.get("labor$", 0.0),
-                entry.get("total$", 0.0),
+        def _canonical_label(value: Any) -> str:
+            value_str = str(value)
+            return (
+                _canonical_bucket_key(value_str)
+                or _normalize_bucket_key(value_str)
+                or value_str
             )
 
-        for bucket_key in order:
-            if bucket_key in {"programming", "programming_amortized"}:
-                continue
-            _append_bucket_row(bucket_key)
+        def _bucket_snapshot(target: str) -> dict[str, float]:
+            target_canon = _canonical_label(target)
+            for label, minutes_val, machine_val, labor_val, total_val in table_rows:
+                if _canonical_label(label) == target_canon:
+                    return {
+                        "minutes": round(float(minutes_val or 0.0), 2),
+                        "machine$": round(float(machine_val or 0.0), 2),
+                        "labor$": round(float(labor_val or 0.0), 2),
+                        "total$": round(float(total_val or 0.0), 2),
+                    }
+            return {}
 
-        remaining_keys = [key for key in canonical_entries.keys() if key]
-        for bucket_key in sorted(remaining_keys):
-            _append_bucket_row(bucket_key)
+        mb = _bucket_snapshot("milling")
+        db = _bucket_snapshot("drilling")
+        print(f"[INFO] [bucket/milling] {mb}")
+        print(f"[INFO] [bucket/drilling] {db}")
+
+        rows = list(table_rows)
+        print(
+            f"[CHECK/process-sum] machine$={sum(float(r[2]) for r in rows):.2f} "
+            f"labor$={sum(float(r[3]) for r in rows):.2f} "
+            f"total$={sum(float(r[4]) for r in rows):.2f}"
+        )
+
+        total_cost = sum(row[4] for row in table_rows)
 
         total_cost = sum(row[4] for row in rows)
         total_minutes = sum(row[1] for row in rows)
@@ -4684,23 +4701,19 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     spec_for_bucket = spec_candidate
 
         meta = _lookup_process_meta(process_meta, key) or {}
-        hr_val = 0.0
+        footer_hours = 0.0
+        has_bucket_minutes = False
         if bucket_minutes_val > 0.0:
-            hr_val = bucket_minutes_val / 60.0
-        else:
-            hr_val = stored_hours
-        if hr_val <= 0:
-            try:
-                hr_val = float(meta.get("hr", 0.0) or 0.0)
-            except Exception:
-                hr_val = 0.0
-        if hr_val <= 0:
-            try:
-                minutes_val = float(meta.get("minutes", 0.0) or 0.0)
-            except Exception:
-                minutes_val = 0.0
-            if minutes_val > 0:
-                hr_val = minutes_val / 60.0
+            footer_hours = bucket_minutes_val / 60.0
+            has_bucket_minutes = footer_hours > 0.0
+        elif isinstance(bucket_entry, _MappingABC):
+            entry_minutes = _safe_float(bucket_entry.get("minutes"), default=0.0)
+            if entry_minutes > 0.0:
+                footer_hours = entry_minutes / 60.0
+                has_bucket_minutes = footer_hours > 0.0
+        if not has_bucket_minutes:
+            return
+
         meta_rate = 0.0
         if meta:
             try:
@@ -4711,14 +4724,16 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             rate_float = meta_rate
         else:
             rate_float = stored_rate
-            if rate_float <= 0:
-                rate_val = meta.get("rate") if meta else None
+            if rate_float <= 0 and meta:
+                rate_val = meta.get("rate")
                 try:
                     rate_float = float(rate_val or 0.0)
                 except Exception:
                     rate_float = 0.0
-        if rate_float <= 0 and stored_cost > 0 and hr_val > 0:
-            rate_float = stored_cost / hr_val
+        if rate_float <= 0 and stored_cost > 0:
+            hours_for_rate = footer_hours if footer_hours > 0 else stored_hours
+            if hours_for_rate > 0:
+                rate_float = stored_cost / hours_for_rate
         if rate_float <= 0:
             rate_key = _rate_key_for_bucket(str(key))
             if rate_key:
@@ -4739,21 +4754,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 total_from_bucket = float(getattr(spec_for_bucket, "total", 0.0) or 0.0)
             except Exception:
                 total_from_bucket = 0.0
-        if total_from_bucket > 0.0 and hr_val > 0.0:
-            rate_float = total_from_bucket / hr_val
+        if total_from_bucket > 0.0 and footer_hours > 0.0:
+            rate_float = total_from_bucket / footer_hours
             stored_cost = total_from_bucket
 
-        try:
-            base_extra_val = float(meta.get("base_extra", 0.0) or 0.0)
-        except Exception:
-            base_extra_val = 0.0
-
-        if hr_val > 0:
-            write_line(_hours_with_rate_text(hr_val, rate_float), indent)
-        elif base_extra_val > 0 and rate_float > 0:
-            inferred_hours = base_extra_val / rate_float
-            if inferred_hours > 0:
-                write_line(_hours_with_rate_text(inferred_hours, rate_float), indent)
+        write_line(_hours_with_rate_text(footer_hours, rate_float), indent)
 
     def add_pass_basis(key: str, indent: str = "    "):
         basis_map = breakdown.get("pass_basis", {}) or {}
@@ -4906,9 +4911,9 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         render_drill_debug(sorted_drill_entries)
     row("Final Price per Part:", price)
     final_price_row_index = len(lines) - 1
-    total_labor_label = "Total Labor Cost:"
-    row(total_labor_label, float(totals.get("labor_cost", 0.0)))
-    total_labor_row_index = len(lines) - 1
+    total_process_cost_label = "Total Process Cost:"
+    row(total_process_cost_label, float(totals.get("labor_cost", 0.0)))
+    total_process_cost_row_index = len(lines) - 1
     total_direct_costs_label = "Total Direct Costs:"
     row(total_direct_costs_label, 0.0)
     total_direct_costs_row_index = len(lines) - 1
@@ -7906,6 +7911,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     pass_total = float(directs)
 
+    total_process_cost_value = round(float(proc_total or 0.0), 2)
     computed_total_labor_cost = proc_total
     expected_labor_total = computed_total_labor_cost
     if declared_labor_total > computed_total_labor_cost + 0.01:
@@ -7989,12 +7995,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             display_machine = 0.0
     if isinstance(totals, dict):
         totals["labor_cost"] = computed_total_labor_cost
-    if 0 <= total_labor_row_index < len(lines):
+    if 0 <= total_process_cost_row_index < len(lines):
         replace_line(
-            total_labor_row_index,
+            total_process_cost_row_index,
             _format_row(
-                total_labor_label,
-                computed_total_labor_cost,
+                total_process_cost_label,
+                total_process_cost_value,
             ),
         )
 
@@ -8128,10 +8134,10 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
 
     final_per_part = round(machine_labor_total + nre_per_part + ladder_directs, 2)
     ladder_subtotal = final_per_part
-    if 0 <= total_labor_row_index < len(lines):
+    if 0 <= total_process_cost_row_index < len(lines):
         replace_line(
-            total_labor_row_index,
-            _format_row(total_labor_label, ladder_labor),
+            total_process_cost_row_index,
+            _format_row(total_process_cost_label, total_process_cost_value),
         )
     if isinstance(pricing, dict):
         pricing["ladder_subtotal"] = ladder_subtotal
