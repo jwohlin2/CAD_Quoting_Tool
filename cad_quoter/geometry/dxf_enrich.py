@@ -470,7 +470,7 @@ def build_geo_from_dxf(path: str) -> Dict[str, Any]:
         return {"ok": False, "error": "ezdxf not installed"}
 
     try:
-        doc = _EZDXF.readfile(path)
+        doc = _ezdxf_vendor.read_document(path)
     except Exception as exc:
         return {"ok": False, "error": f"DXF read failed: {exc}"}
 
