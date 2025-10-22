@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from cad_quoter.app import runtime
+from cad_quoter.app import runner
 
 
 class _DummyLlama:
@@ -23,7 +23,7 @@ class _DummyLlama:
 
 @pytest.fixture(autouse=True)
 def patch_llama(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(runtime, "Llama", _DummyLlama)
+    monkeypatch.setattr(runner, "Llama", _DummyLlama)
 
 
 def _touch(path: Path) -> Path:
@@ -35,7 +35,7 @@ def test_load_qwen_vl_falls_back_to_legacy_chat(tmp_path: Path) -> None:
     model = _touch(tmp_path / "model.gguf")
     mmproj = _touch(tmp_path / "mmproj.gguf")
 
-    llm = runtime.load_qwen_vl(
+    llm = runner.load_qwen_vl(
         n_ctx=2048,
         n_gpu_layers=0,
         n_threads=2,

@@ -1,6 +1,6 @@
 import pytest
 
-from cad_quoter.app.planner_adapter import resolve_pricing_source_value
+from cad_quoter.app.planner_support import resolve_pricing_source_value
 
 
 @pytest.mark.parametrize(
