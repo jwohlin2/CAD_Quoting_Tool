@@ -1553,6 +1553,81 @@ def _render_ops_card(
     return round(total_min, 2)
 
 
+def _side_from(txt: str) -> str:
+    text = str(txt or "").lower()
+    if "(front" in text:
+        return "front"
+    if "(back" in text:
+        return "back"
+    return "unspecified"
+
+
+def summarize_actions(removal_lines: list[str], planner_ops: list[dict]) -> None:
+    """Log aggregated removal + planner operation counts for diagnostics."""
+
+    def _normalize_side(value: Any) -> str:
+        text = str(value or "").strip().lower()
+        if "front" in text:
+            return "front"
+        if "back" in text:
+            return "back"
+        return "unspecified"
+
+    total = defaultdict(int)
+    by_side = defaultdict(lambda: defaultdict(int))
+
+    drill_re = re.compile(r'^Dia\s+[\d\.]+" \u00D7 (\d+).*(\(.*?\))?', re.IGNORECASE)
+    tap_re = re.compile(r'^\s*#?\d.*\bTAP\b.*\u00D7\s+(\d+).*(\(.*?\))?', re.IGNORECASE)
+
+    for line in removal_lines or []:
+        if not isinstance(line, str):
+            continue
+        match = drill_re.search(line)
+        if match:
+            qty = int(match.group(1))
+            side = _side_from(line)
+            total["drill"] += qty
+            by_side["drill"][side] += qty
+            continue
+        match = tap_re.search(line)
+        if match:
+            qty = int(match.group(1))
+            side = _side_from(line)
+            total["tap"] += qty
+            by_side["tap"][side] += qty
+
+    for op in planner_ops or []:
+        if not isinstance(op, dict):
+            continue
+        name = str(op.get("name") or "").lower()
+        qty_raw = op.get("qty")
+        try:
+            qty_val = int(float(qty_raw))
+        except Exception:
+            qty_val = 0
+        if qty_val <= 0:
+            continue
+        side = _normalize_side(op.get("side"))
+        if "counterbore" in name or "c-bore" in name or "cbore" in name:
+            total["counterbore"] += qty_val
+            by_side["counterbore"][side] += qty_val
+        elif "spot" in name and "drill" in name:
+            total["spot"] += qty_val
+            by_side["spot"][side] += qty_val
+        elif "jig" in name and "grind" in name:
+            total["jig_grind"] += qty_val
+            by_side["jig_grind"][side] += qty_val
+
+    for side_counts in by_side.values():
+        for key in ("front", "back", "unspecified"):
+            side_counts.setdefault(key, 0)
+
+    actions_total = sum(total.values())
+    logging.info("[ACTIONS] totals=%s total=%s", dict(total), actions_total)
+    for kind, sides in by_side.items():
+        logging.info("[ACTIONS/%s] by_side=%s", kind, dict(sides))
+
+
 def _extract_milling_bucket(
     bucket_view: Mapping[str, Any] | None,
 ) -> Mapping[str, Any] | None:
@@ -5327,6 +5402,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     planner_total_meta = process_meta.get("planner_total", {}) if isinstance(process_meta, dict) else {}
     planner_line_items_meta = planner_total_meta.get("line_items") if isinstance(planner_total_meta, _MappingABC) else None
     bucket_ops_map: dict[str, list[PlannerBucketOp]] = {}
+    planner_ops_summary: list[dict[str, Any]] = []
     if isinstance(planner_line_items_meta, list):
         for entry in planner_line_items_meta:
             if not isinstance(entry, _MappingABC):
@@ -5347,6 +5423,23 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     "total": total_val,
                 }
             )
+
+            name_text = str(op_name or "").strip()
+            qty_candidate = entry.get("qty")
+            try:
+                qty_val = int(float(qty_candidate))
+            except Exception:
+                qty_val = 0
+            side_val = (
+                entry.get("side")
+                or entry.get("face")
+                or entry.get("orientation")
+                or entry.get("side_label")
+            )
+            if name_text:
+                planner_ops_summary.append(
+                    {"name": name_text, "qty": qty_val, "side": side_val}
+                )
 
     if bucket_ops_map:
         for ops in bucket_ops_map.values():
@@ -6701,6 +6794,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         material_group=material_group_display,
         drilling_time_per_hole=drilling_time_per_hole_data,
     )
+
+    removal_summary_lines: list[str] = [
+        str(line)
+        for line in removal_card_lines
+        if isinstance(line, str)
+    ]
 
     if removal_card_extra.get("drill_machine_minutes") is not None:
         drill_machine_minutes_estimate = float(removal_card_extra["drill_machine_minutes"])
@@ -8732,6 +8831,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 ops_rows = built
 
         # Emit the cards (will no-op if no TAP/CBore/Spot rows)
+        pre_ops_len = len(lines)
+
         _emit_hole_table_ops_cards(
             lines,
             geo=geo_map,
@@ -8741,6 +8842,50 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             breakdown=breakdown,
             rates=rates,
         )
+
+        new_ops_lines = []
+        try:
+            for entry in lines[pre_ops_len:]:
+                if not isinstance(entry, str):
+                    continue
+                if entry.startswith("[DEBUG]"):
+                    continue
+                new_ops_lines.append(entry)
+        except Exception:
+            new_ops_lines = []
+        removal_summary_lines.extend(new_ops_lines)
+
+        try:
+            extra_bucket_ops = None
+            extra_map_candidate = getattr(bucket_state, "extra", None)
+            if isinstance(extra_map_candidate, _MappingABC):
+                extra_bucket_ops = extra_map_candidate.get("bucket_ops")
+            if isinstance(extra_bucket_ops, _MappingABC):
+                for _, entries in extra_bucket_ops.items():
+                    if not isinstance(entries, Sequence):
+                        continue
+                    for entry in entries:
+                        if not isinstance(entry, _MappingABC):
+                            continue
+                        name_text = str(entry.get("name") or entry.get("op") or "").strip()
+                        qty_candidate = entry.get("qty")
+                        try:
+                            qty_val = int(float(qty_candidate))
+                        except Exception:
+                            qty_val = 0
+                        side_val = entry.get("side")
+                        if name_text:
+                            planner_ops_summary.append(
+                                {"name": name_text, "qty": qty_val, "side": side_val}
+                            )
+            summarize_actions(removal_summary_lines, planner_ops_summary)
+        except Exception as exc:
+            logging.debug(
+                "[actions-summary] skipped due to %s: %s",
+                exc.__class__.__name__,
+                exc,
+                exc_info=False,
+            )
 
         milling_bucket_obj = None
         bucket_view_snapshot = (
