@@ -49,7 +49,7 @@ setattr(
 
 import appV5
 from cad_quoter.pricing.validation import validate_quote_before_pricing
-from cad_quoter.app import runtime as app_runtime
+from cad_quoter.app import runner as app_runtime
 
 
 class _DummyVar:

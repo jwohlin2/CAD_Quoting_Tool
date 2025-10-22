@@ -1,5 +1,4 @@
 # Core runtime dependencies for appV5.py
-cad-quoter>=0.1.0
 beautifulsoup4>=4.12
 lxml>=4.9
 types-beautifulsoup4>=4.12
