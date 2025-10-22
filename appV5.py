@@ -1562,70 +1562,50 @@ def _side_from(txt: str) -> str:
     return "unspecified"
 
 
-def summarize_actions(removal_lines: list[str], planner_ops: list[dict]) -> None:
-    """Log aggregated removal + planner operation counts for diagnostics."""
+def summarize_actions(removal_lines, planner_ops):
+    import re
+    from collections import defaultdict
 
-    def _normalize_side(value: Any) -> str:
-        text = str(value or "").strip().lower()
-        if "front" in text:
-            return "front"
-        if "back" in text:
-            return "back"
-        return "unspecified"
+    side_of = lambda s: ("front" if "(front" in s.lower() else
+                         "back"  if "(back"  in s.lower() else "unspecified")
 
     total = defaultdict(int)
     by_side = defaultdict(lambda: defaultdict(int))
 
-    drill_re = re.compile(r'^Dia\s+[\d\.]+" \u00D7 (\d+).*(\(.*?\))?', re.IGNORECASE)
-    tap_re = re.compile(r'^\s*#?\d.*\bTAP\b.*\u00D7\s+(\d+).*(\(.*?\))?', re.IGNORECASE)
+    # Drills
+    drill_re = re.compile(r'^Dia\s+[\d\.]+" × (\d+).*(\(.*?\))?', re.I)
+    # Taps
+    tap_re   = re.compile(r'^\s*#?\d.*\bTAP\b.*×\s+(\d+).*(\(.*?\))?', re.I)
 
-    for line in removal_lines or []:
-        if not isinstance(line, str):
-            continue
-        match = drill_re.search(line)
-        if match:
-            qty = int(match.group(1))
-            side = _side_from(line)
+    for ln in removal_lines:
+        m = drill_re.search(ln)
+        if m:
+            qty = int(m.group(1))
             total["drill"] += qty
-            by_side["drill"][side] += qty
+            by_side["drill"][side_of(ln)] += qty
             continue
-        match = tap_re.search(line)
-        if match:
-            qty = int(match.group(1))
-            side = _side_from(line)
+        m = tap_re.search(ln)
+        if m:
+            qty = int(m.group(1))
             total["tap"] += qty
-            by_side["tap"][side] += qty
+            by_side["tap"][side_of(ln)] += qty
 
+    # Planner-derived ops (counterbore, spot, jig-grind) if you have them there
     for op in planner_ops or []:
-        if not isinstance(op, dict):
-            continue
-        name = str(op.get("name") or "").lower()
-        qty_raw = op.get("qty")
-        try:
-            qty_val = int(float(qty_raw))
-        except Exception:
-            qty_val = 0
-        if qty_val <= 0:
-            continue
-        side = _normalize_side(op.get("side"))
+        name = (op.get("name","") or "").lower()
+        qty  = int(op.get("qty", 0) or 0)
+        side = (op.get("side","unspecified") or "unspecified").lower()
         if "counterbore" in name or "c-bore" in name or "cbore" in name:
-            total["counterbore"] += qty_val
-            by_side["counterbore"][side] += qty_val
+            total["counterbore"] += qty; by_side["counterbore"][side] += qty
         elif "spot" in name and "drill" in name:
-            total["spot"] += qty_val
-            by_side["spot"][side] += qty_val
+            total["spot"] += qty; by_side["spot"][side] += qty
         elif "jig" in name and "grind" in name:
-            total["jig_grind"] += qty_val
-            by_side["jig_grind"][side] += qty_val
-
-    for side_counts in by_side.values():
-        for key in ("front", "back", "unspecified"):
-            side_counts.setdefault(key, 0)
+            total["jig_grind"] += qty; by_side["jig_grind"][side] += qty
 
     actions_total = sum(total.values())
-    logging.info("[ACTIONS] totals=%s total=%s", dict(total), actions_total)
-    for kind, sides in by_side.items():
-        logging.info("[ACTIONS/%s] by_side=%s", kind, dict(sides))
+    print(f"[ACTIONS] totals={dict(total)} total={actions_total}")
+    for k, sides in by_side.items():
+        print(f"[ACTIONS/{k}] by_side={dict(sides)}")
 
 
 def _extract_milling_bucket(
