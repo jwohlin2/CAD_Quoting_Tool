@@ -4589,23 +4589,19 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     spec_for_bucket = spec_candidate
 
         meta = _lookup_process_meta(process_meta, key) or {}
-        hr_val = 0.0
+        footer_hours = 0.0
+        has_bucket_minutes = False
         if bucket_minutes_val > 0.0:
-            hr_val = bucket_minutes_val / 60.0
-        else:
-            hr_val = stored_hours
-        if hr_val <= 0:
-            try:
-                hr_val = float(meta.get("hr", 0.0) or 0.0)
-            except Exception:
-                hr_val = 0.0
-        if hr_val <= 0:
-            try:
-                minutes_val = float(meta.get("minutes", 0.0) or 0.0)
-            except Exception:
-                minutes_val = 0.0
-            if minutes_val > 0:
-                hr_val = minutes_val / 60.0
+            footer_hours = bucket_minutes_val / 60.0
+            has_bucket_minutes = footer_hours > 0.0
+        elif isinstance(bucket_entry, _MappingABC):
+            entry_minutes = _safe_float(bucket_entry.get("minutes"), default=0.0)
+            if entry_minutes > 0.0:
+                footer_hours = entry_minutes / 60.0
+                has_bucket_minutes = footer_hours > 0.0
+        if not has_bucket_minutes:
+            return
+
         meta_rate = 0.0
         if meta:
             try:
@@ -4616,14 +4612,16 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             rate_float = meta_rate
         else:
             rate_float = stored_rate
-            if rate_float <= 0:
-                rate_val = meta.get("rate") if meta else None
+            if rate_float <= 0 and meta:
+                rate_val = meta.get("rate")
                 try:
                     rate_float = float(rate_val or 0.0)
                 except Exception:
                     rate_float = 0.0
-        if rate_float <= 0 and stored_cost > 0 and hr_val > 0:
-            rate_float = stored_cost / hr_val
+        if rate_float <= 0 and stored_cost > 0:
+            hours_for_rate = footer_hours if footer_hours > 0 else stored_hours
+            if hours_for_rate > 0:
+                rate_float = stored_cost / hours_for_rate
         if rate_float <= 0:
             rate_key = _rate_key_for_bucket(str(key))
             if rate_key:
@@ -4644,21 +4642,11 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 total_from_bucket = float(getattr(spec_for_bucket, "total", 0.0) or 0.0)
             except Exception:
                 total_from_bucket = 0.0
-        if total_from_bucket > 0.0 and hr_val > 0.0:
-            rate_float = total_from_bucket / hr_val
+        if total_from_bucket > 0.0 and footer_hours > 0.0:
+            rate_float = total_from_bucket / footer_hours
             stored_cost = total_from_bucket
 
-        try:
-            base_extra_val = float(meta.get("base_extra", 0.0) or 0.0)
-        except Exception:
-            base_extra_val = 0.0
-
-        if hr_val > 0:
-            write_line(_hours_with_rate_text(hr_val, rate_float), indent)
-        elif base_extra_val > 0 and rate_float > 0:
-            inferred_hours = base_extra_val / rate_float
-            if inferred_hours > 0:
-                write_line(_hours_with_rate_text(inferred_hours, rate_float), indent)
+        write_line(_hours_with_rate_text(footer_hours, rate_float), indent)
 
     def add_pass_basis(key: str, indent: str = "    "):
         basis_map = breakdown.get("pass_basis", {}) or {}
