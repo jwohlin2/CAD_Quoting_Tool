@@ -193,30 +193,9 @@ def _ensure_two_bucket_rates(raw: Mapping[str, Any]) -> dict[str, dict[str, floa
 
 
 def load_default_rates() -> dict[str, dict[str, float]]:
-    """Return the default shop rate configuration."""
+    """Return the canonical two-bucket shop rate configuration."""
 
-    defaults = shared_two_bucket_rate_defaults()
-
-    settings = load_app_settings()
-    pricing_defaults = settings.get("pricing_defaults")
-    if not isinstance(pricing_defaults, Mapping):
-        return defaults
-
-    overrides_raw = pricing_defaults.get("rates")
-    if not isinstance(overrides_raw, Mapping):
-        return defaults
-
-    overrides = _ensure_two_bucket_rates(overrides_raw)
-
-    merged: dict[str, dict[str, float]] = {
-        kind: dict(values) for kind, values in defaults.items()
-    }
-    for bucket, mapping in overrides.items():
-        bucket_key = str(bucket)
-        base = merged.setdefault(bucket_key, {})
-        base.update(mapping)
-
-    return ensure_two_bucket_defaults(merged)
+    return shared_two_bucket_rate_defaults()
 
 
 def load_default_params() -> dict[str, Any]:

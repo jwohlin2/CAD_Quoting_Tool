@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from cad_quoter import config
+from cad_quoter import rates as rate_helpers
 
 
 def test_app_environment_from_env_uses_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -44,11 +45,13 @@ def test_load_default_rates_returns_two_buckets() -> None:
     rates = config.load_default_rates()
 
     assert set(rates.keys()) == {"labor", "machine"}
-    assert rates["labor"]["Programmer"] == pytest.approx(90.0)
-    assert rates["machine"]["WireEDM"] == pytest.approx(130.0)
+    expected = rate_helpers.shared_two_bucket_rate_defaults()
+    assert rates == expected
 
 
-def test_load_default_rates_migrates_flat_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_default_rates_ignores_app_settings_rates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     def _fake_settings() -> dict[str, Any]:
         return {
             "pricing_defaults": {
@@ -64,9 +67,8 @@ def test_load_default_rates_migrates_flat_schema(monkeypatch: pytest.MonkeyPatch
 
     migrated = config.load_default_rates()
 
-    assert migrated["labor"]["Programmer"] == pytest.approx(110.0)
-    assert migrated["machine"]["WireEDM"] == pytest.approx(150.0)
-    assert migrated["machine"]["Blanchard"] == pytest.approx(120.0)
+    expected = rate_helpers.shared_two_bucket_rate_defaults()
+    assert migrated == expected
 
 
 def test_load_app_settings_applies_override(
