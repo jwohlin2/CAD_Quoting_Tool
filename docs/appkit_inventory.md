@@ -8,7 +8,7 @@ callers for every module that currently ships under `appkit/`.
 | Module | Key responsibilities | Primary production consumers |
 | --- | --- | --- |
 | `appkit/data/__init__.py` | Package resource helpers (`load_text`, `load_json`). | `cad_quoter/domain_models/materials.py`, `cad_quoter/estimators/drilling_legacy.py`, `cad_quoter/material_density.py`, `cad_quoter/llm/__init__.py`, `appV5.py` (via indirect imports). |
-| `appkit/debug/debug_tables.py` | JSON-friendly debug serialization helpers and drilling debug table formatter. | `appkit/utils.__init__` (re-export), `appV5.py` (debug table rendering). |
+| `appkit/debug/debug_tables.py` | JSON-friendly debug serialization helpers and drilling debug table formatter. | `cad_quoter/utils/rendering.py` (consolidated helpers), `appV5.py` (debug table rendering). |
 | `appkit/effective.py` | LLM suggestion acceptance flags, guardrail-aware merge, and conversion to overrides. | `appV5.py`, `cad_quoter/domain.py`, `tests/domain/test_effective_state.py`. |
 | `appkit/env_utils.py` | Lazy boolean flags backed by environment variables (`FORCE_ESTIMATOR`, `FORCE_PLANNER`). | `appV5.py`, `appkit/planner_adapter.py`. |
 | `appkit/guardrails.py` | Guardrail calculations for drilling/tapping floors, setup minimums, and finish pass cost enforcement. | `appkit/effective.py`, `appkit/merge_utils.py`, `appV5.py`. |
@@ -27,7 +27,7 @@ callers for every module that currently ships under `appkit/`.
 | `appkit/ui/tk_compat.py` | Tk compatibility imports/shims for UI modules. | `appkit/ui/*`, `appV5.py`. |
 | `appkit/ui/widgets.py` | Miscellaneous Tk widget helpers (scroll frames, etc.). | `appV5.py`. |
 | `appkit/utils/__init__.py` | Machining math helpers (feeds/speeds), numeric parsing, debug JSON adapters. | `cad_quoter/app/chart_lines.py`, `cad_quoter/estimators/drilling_legacy.py`, `appV5.py`. |
-| `appkit/utils/text_rules.py` | Text normalization rules for amortized cost labels. | `appkit/ui/planner_render.py`, `appV5.py`. |
+| `appkit/utils/text_rules.py` | Text normalization rules for amortized cost labels. | `cad_quoter/utils/sheets.py`, `appkit/ui/planner_render.py`, `appV5.py`. |
 | `appkit/vendor_utils.py` | Lead-time heuristics and partner metadata. | `tests/app/test_vendor_utils_lead_times.py`, `appV5.py`. |
 | `appkit/graveyard.py` | Historical helpers kept for reference (unused in production). | (Not imported by production modules; safe to drop or archive.) |
 

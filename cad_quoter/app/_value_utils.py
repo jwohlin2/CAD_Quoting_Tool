@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from cad_quoter.utils.render_utils import fmt_hours, fmt_money, fmt_percent
+from cad_quoter.utils.rendering import fmt_hours, fmt_money, fmt_percent
 
 
 def _coerce_user_value(raw: Any, kind: str) -> Any:

@@ -244,18 +244,16 @@ from cad_quoter.config import (
 )
 
 _log = logger
-from cad_quoter.utils.geo_ctx import (
+from cad_quoter.utils.geometry import (
     _apply_drilling_meta_fallback,
     _ensure_geo_context_fields,
+    _holes_removed_mass_g,
     _iter_geo_contexts as _iter_geo_dicts_for_context,
     _should_include_outsourced_pass,
-)
-from cad_quoter.utils.scrap import (
-    _holes_removed_mass_g,
     build_drill_groups_from_geometry,
 )
 if TYPE_CHECKING:
-    from cad_quoter.utils.render_utils import (
+    from cad_quoter.utils.rendering import (
         QuoteDocRecorder as _QuoteDocRecorder,
         fmt_hours as _fmt_hours,
         fmt_money as _fmt_money,
@@ -270,7 +268,7 @@ if TYPE_CHECKING:
     )
     from cad_quoter.pricing import load_backup_prices_csv
 else:
-    from cad_quoter.utils.render_utils import (
+    from cad_quoter.utils.rendering import (
         fmt_hours as _fmt_hours,
         fmt_money as _fmt_money,
         format_currency as _format_currency,
@@ -1112,13 +1110,13 @@ from cad_quoter.app.effective import (
 
 from cad_quoter.ui import suggestions as ui_suggestions
 
-from cad_quoter.utils.scrap import (
+from cad_quoter.utils.geometry import (
     HOLE_SCRAP_CAP,
     SCRAP_DEFAULT_GUESS,
     _holes_scrap_fraction,
     normalize_scrap_pct,
 )
-from cad_quoter.utils.render_utils.tables import ascii_table, draw_kv_table
+from cad_quoter.utils.rendering import ascii_table, draw_kv_table
 from cad_quoter.app.planner_helpers import _process_plan_job
 from cad_quoter.app.env_flags import FORCE_PLANNER
 from cad_quoter.app.planner_adapter import resolve_planner, resolve_pricing_source_value
@@ -1127,11 +1125,11 @@ from cad_quoter.resources.loading import load_json, load_text
 
 # Mapping of PDF estimate keys to Quote Editor variables.
 MAP_KEYS = load_json("vl_pdf_map_keys.json")
-from cad_quoter.utils.text_rules import (
+from cad_quoter.utils.sheets import (
     PROC_MULT_TARGETS,
     canonicalize_amortized_label as _canonical_amortized_label,
 )
-from cad_quoter.utils.debug_tables import (
+from cad_quoter.utils.rendering import (
     _accumulate_drill_debug,
     append_removal_debug_if_enabled,
 )
@@ -1168,7 +1166,7 @@ from cad_quoter.ui.planner_render import (
 )
 from cad_quoter.ui.services import QuoteConfiguration
 from cad_quoter.pricing.validation import validate_quote_before_pricing
-from cad_quoter.utils.debug_tables import (
+from cad_quoter.utils.rendering import (
     _jsonify_debug_summary as _debug_jsonify_summary,
     _jsonify_debug_value as _debug_jsonify_value,
 )
@@ -3092,7 +3090,7 @@ else:  # pragma: no cover - retain runtime namespace package fallback
         )
 from cad_quoter.domain_models.values import safe_float as _safe_float, to_float, to_int
 from cad_quoter.utils import coerce_bool, compact_dict, jdump, json_safe_copy, sdict
-from cad_quoter.utils.text import _match_items_contains
+from cad_quoter.utils.sheets import _match_items_contains
 from cad_quoter.llm_suggest import (
     get_llm_quote_explanation,
 )
@@ -3173,13 +3171,13 @@ def _fail_live_price(*_args: Any, **_kwargs: Any) -> None:
 
 
 def _jsonify_debug_value(value: Any, depth: int = 0, max_depth: int = 6) -> Any:
-    """Proxy to :func:`cad_quoter.utils.debug_tables._jsonify_debug_value`."""
+    """Proxy to :func:`cad_quoter.utils.rendering._jsonify_debug_value`."""
 
     return _debug_jsonify_value(value, depth=depth, max_depth=max_depth)
 
 
 def _jsonify_debug_summary(summary: Mapping[str, Any]) -> dict[str, Any]:
-    """Proxy to :func:`cad_quoter.utils.debug_tables._jsonify_debug_summary`."""
+    """Proxy to :func:`cad_quoter.utils.rendering._jsonify_debug_summary`."""
 
     return _debug_jsonify_summary(summary)
 

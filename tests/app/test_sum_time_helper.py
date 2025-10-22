@@ -43,7 +43,7 @@ setattr(
     getattr(geom_stub, "map_shapes_and_ancestors", _map_shapes_and_ancestors),
 )
 
-from cad_quoter.utils import sheet_helpers
+from cad_quoter.utils import sheets as sheet_helpers
 
 TIME_RE = re.compile(r"\b(?:hours?|hrs?|hr|time|min(?:ute)?s?)\b", re.IGNORECASE)
 MONEY_RE = re.compile(r"(?:rate|/hr|per\s*hour|per\s*hr|price|cost|\$)", re.IGNORECASE)
