@@ -77,6 +77,43 @@ def test_render_quote_emits_structured_sections() -> None:
     assert "Machine & Labor" in cost_breakdown
 
 
+def test_render_quote_shows_expedite_toggle_when_applicable() -> None:
+    result = {
+        "price": 50.6,
+        "breakdown": {
+            "qty": 2,
+            "totals": {
+                "labor_cost": 20.0,
+                "direct_costs": 20.0,
+                "subtotal": 40.0,
+                "with_expedite": 44.0,
+            },
+            "nre_detail": {},
+            "nre": {},
+            "material": {},
+            "process_costs": {"machining": 20.0},
+            "process_meta": {},
+            "pass_through": {"Material": 20.0},
+            "applied_pcts": {
+                "MarginPct": 0.15,
+                "ExpeditePct": 0.1,
+            },
+            "rates": {},
+            "params": {},
+            "labor_cost_details": {},
+            "direct_cost_details": {},
+        },
+    }
+
+    rendered_text, payload = _render_payload(result)
+
+    assert "QUICK WHAT-IFS (INTERNAL KNOBS)" in rendered_text
+    assert "Other quick toggles" in rendered_text
+    assert "Remove expedite" in rendered_text
+    assert "Margin 10%:" not in rendered_text
+    assert payload.get("quick_what_ifs")
+
+
 def test_render_quote_cost_breakdown_prefers_pricing_totals() -> None:
     result = {
         "price": 42.0,
