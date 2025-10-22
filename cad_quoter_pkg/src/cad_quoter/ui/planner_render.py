@@ -991,11 +991,51 @@ def _seed_bucket_minutes(
             if normalized:
                 container.setdefault(normalized, rate)
 
+    def _resolve_bucket_rate(name: str, mode: str) -> float:
+        containers = bucket_rates.get(mode)
+        if not isinstance(containers, dict):
+            containers = {}
+
+        search_keys: list[str] = []
+        if isinstance(name, str) and name:
+            search_keys.append(name)
+        else:
+            try:
+                coerced = str(name or "")
+            except Exception:
+                coerced = ""
+            if coerced:
+                search_keys.append(coerced)
+
+        normalized = _normalize_bucket_key(name)
+        if normalized and normalized not in search_keys:
+            search_keys.append(normalized)
+
+        label = _display_bucket_label(name, None)
+        if label and label not in search_keys:
+            search_keys.append(label)
+
+        for key in search_keys:
+            if not key:
+                continue
+            rate_val = containers.get(key, 0.0)
+            if rate_val and rate_val > 0.0:
+                return float(rate_val)
+
+        rate_val = _bucket_rate(name, mode)
+        if rate_val and rate_val > 0.0:
+            for key in search_keys:
+                if key and key not in containers:
+                    containers[key] = float(rate_val)
+            return float(rate_val)
+
+        return 0.0
+
     def bucket_from_minutes(name: str, minutes: float) -> dict[str, float]:
         minutes_val = max(0.0, float(minutes or 0.0))
         hrs = minutes_val / 60.0
-        mach_rate = bucket_rates["machine"].get(name, 0.0)
-        labor_rate = bucket_rates["labor"].get(name, 0.0)
+        mach_rate = _resolve_bucket_rate(name, "machine")
+        labor_rate = _resolve_bucket_rate(name, "labor")
         bucket = {
             "minutes": minutes_val,
             "machine$": round(hrs * mach_rate, 2),
