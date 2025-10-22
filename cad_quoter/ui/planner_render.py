@@ -423,6 +423,9 @@ def _build_planner_bucket_render_state(
     drill_total_minutes: float | None = None,
 ) -> PlannerBucketRenderState:
     state = PlannerBucketRenderState()
+    bucket_rate_detail: dict[str, dict[str, float]] = state.extra.setdefault(
+        "bucket_rate_detail", {}
+    )
 
     def _flatten_rate_map(value: Any) -> dict[str, float]:
         flat: dict[str, float] = {}
@@ -585,6 +588,10 @@ def _build_planner_bucket_render_state(
         split_machine_hours = 0.0
         split_labor_hours = 0.0
         used_split = False
+        machine_hours_used = 0.0
+        labor_hours_used = 0.0
+        machine_rate_used = 0.0
+        labor_rate_used = 0.0
         if cfg and getattr(cfg, "separate_machine_labor", False):
             split_machine_hours, split_labor_hours = _split_hours_for_bucket(
                 canon_key, hours_raw, state, cfg
@@ -595,11 +602,17 @@ def _build_planner_bucket_render_state(
                 machine_raw = float(split_machine_hours) * float(cfg.machine_rate_per_hr)
                 labor_raw = float(split_labor_hours) * float(cfg.labor_rate_per_hr)
                 used_split = True
+                machine_hours_used = max(0.0, float(split_machine_hours or 0.0))
+                labor_hours_used = max(0.0, float(split_labor_hours or 0.0))
+                machine_rate_used = float(cfg.machine_rate_per_hr or 0.0)
+                labor_rate_used = float(cfg.labor_rate_per_hr or 0.0)
         else:
             total_existing = orig_labor + orig_machine
             if hours_raw <= 0.0:
                 labor_raw = 0.0
                 machine_raw = 0.0
+                machine_hours_used = 0.0
+                labor_hours_used = 0.0
             else:
                 default_machine_rate = machine_rate_lookup
                 if default_machine_rate <= 0.0 and orig_machine > 0.0:
@@ -628,9 +641,17 @@ def _build_planner_bucket_render_state(
                 if bucket_mode == "labor":
                     labor_raw = hours_raw * max(default_labor_rate, 0.0)
                     machine_raw = 0.0
+                    labor_hours_used = max(hours_raw, 0.0)
+                    labor_rate_used = max(default_labor_rate, 0.0)
+                    machine_hours_used = 0.0
+                    machine_rate_used = 0.0
                 elif bucket_mode == "machine":
                     machine_raw = hours_raw * max(default_machine_rate, 0.0)
                     labor_raw = 0.0
+                    machine_hours_used = max(hours_raw, 0.0)
+                    machine_rate_used = max(default_machine_rate, 0.0)
+                    labor_hours_used = 0.0
+                    labor_rate_used = 0.0
                 else:
                     if total_existing > 0.0:
                         machine_fraction = orig_machine / total_existing
@@ -666,6 +687,10 @@ def _build_planner_bucket_render_state(
 
                     machine_raw = machine_hours * max(machine_rate, 0.0)
                     labor_raw = labor_hours * max(labor_rate, 0.0)
+                    machine_hours_used = max(machine_hours, 0.0)
+                    labor_hours_used = max(labor_hours, 0.0)
+                    machine_rate_used = max(machine_rate, 0.0)
+                    labor_rate_used = max(labor_rate, 0.0)
 
         total_raw = labor_raw + machine_raw
 
@@ -676,9 +701,17 @@ def _build_planner_bucket_render_state(
                 if _bucket_cost_mode(canon_key) == "labor":
                     labor_raw = injected_total
                     machine_raw = 0.0
+                    labor_rate_used = inferred_rate
+                    labor_hours_used = max(labor_hours_used, minutes_val / 60.0)
+                    machine_rate_used = 0.0
+                    machine_hours_used = 0.0
                 else:
                     machine_raw = injected_total
                     labor_raw = 0.0
+                    machine_rate_used = inferred_rate
+                    machine_hours_used = max(machine_hours_used, minutes_val / 60.0)
+                    labor_rate_used = 0.0
+                    labor_hours_used = 0.0
                 total_raw = labor_raw + machine_raw
 
         if total_raw <= 0.01 and hours_raw <= 0.01:
@@ -707,6 +740,18 @@ def _build_planner_bucket_render_state(
         state.display_labor_total += labor_raw
         state.display_machine_total += machine_raw
         state.hour_entries[label] = (hours_val, True)
+
+        detail_entry: dict[str, float] = {}
+        if machine_rate_used > 0.0:
+            detail_entry["machine_rate"] = float(machine_rate_used)
+            if machine_hours_used > 0.0:
+                detail_entry["machine_hours"] = float(machine_hours_used)
+        if labor_rate_used > 0.0:
+            detail_entry["labor_rate"] = float(labor_rate_used)
+            if labor_hours_used > 0.0:
+                detail_entry["labor_hours"] = float(labor_hours_used)
+        if detail_entry:
+            bucket_rate_detail[canon_key] = detail_entry
 
         split_detail_line: str | None = None
         if cfg and getattr(cfg, "separate_machine_labor", False):
@@ -770,15 +815,51 @@ def _display_rate_for_row(
 ) -> str:
     total_hours = max(0.0, float(hours or 0.0))
     cfg_obj = cfg
+    detail_entry: Mapping[str, Any] | None = None
+    if isinstance(render_state, PlannerBucketRenderState):
+        extra_payload = getattr(render_state, "extra", None)
+        if isinstance(extra_payload, _MappingABC):
+            rate_detail_map = extra_payload.get("bucket_rate_detail")
+            if isinstance(rate_detail_map, _MappingABC):
+                search_keys: list[str] = []
+                canon_key = _canonical_bucket_key(label)
+                if canon_key:
+                    search_keys.append(canon_key)
+                normalized_key = _normalize_bucket_key(label)
+                if normalized_key:
+                    search_keys.append(normalized_key)
+                key_str = str(label or "").strip()
+                if key_str:
+                    search_keys.append(key_str)
+                for key in search_keys:
+                    if not key:
+                        continue
+                    entry = rate_detail_map.get(key)
+                    if isinstance(entry, _MappingABC):
+                        detail_entry = entry
+                        break
     if cfg_obj and getattr(cfg_obj, "separate_machine_labor", True):
         machine_hours, labor_hours = _split_hours_for_bucket(
             label, total_hours, render_state, cfg_obj
         )
         pieces: list[str] = []
-        if machine_hours > 0:
-            pieces.append(f"mach ${float(cfg_obj.machine_rate_per_hr):.2f}/hr")
-        if labor_hours > 0:
-            pieces.append(f"labor ${float(cfg_obj.labor_rate_per_hr):.2f}/hr")
+        machine_rate_val = 0.0
+        labor_rate_val = 0.0
+        if isinstance(detail_entry, _MappingABC):
+            machine_rate_val = _safe_float(detail_entry.get("machine_rate"), default=0.0)
+            labor_rate_val = _safe_float(detail_entry.get("labor_rate"), default=0.0)
+        if machine_hours > 0 or machine_rate_val > 0:
+            rate_val = machine_rate_val
+            if rate_val <= 0.0:
+                rate_val = float(getattr(cfg_obj, "machine_rate_per_hr", 0.0) or 0.0)
+            if rate_val > 0.0:
+                pieces.append(f"mach ${rate_val:.2f}/hr")
+        if labor_hours > 0 or labor_rate_val > 0:
+            rate_val = labor_rate_val
+            if rate_val <= 0.0:
+                rate_val = float(getattr(cfg_obj, "labor_rate_per_hr", 0.0) or 0.0)
+            if rate_val > 0.0:
+                pieces.append(f"labor ${rate_val:.2f}/hr")
         if pieces:
             return " / ".join(pieces)
         fallback_rate = float(getattr(cfg_obj, "labor_rate_per_hr", 0.0) or 0.0)
