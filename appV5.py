@@ -903,14 +903,31 @@ def _emit_hole_table_ops_cards(
                 rows_list = list(rows_obj)
             except Exception:
                 return
-            if isinstance(ops_summary, (_MutableMappingABC, dict)):
-                typing.cast(MutableMapping[str, Any], ops_summary)["rows"] = rows_list
             rows = rows_list
         else:
             rows = rows_obj
 
-        if not rows:
+        mutable_rows: list[MutableMapping[str, Any]] = []
+        for entry in rows:
+            if isinstance(entry, dict):
+                mutable_rows.append(typing.cast(MutableMapping[str, Any], entry))
+            elif isinstance(entry, _MutableMappingABC):
+                mutable_rows.append(typing.cast(MutableMapping[str, Any], entry))
+            elif isinstance(entry, _MappingABC):
+                try:
+                    row_dict = dict(entry)
+                except Exception:
+                    continue
+                mutable_rows.append(typing.cast(MutableMapping[str, Any], row_dict))
+            else:
+                continue
+
+        if not mutable_rows:
             return
+
+        rows = mutable_rows
+        if isinstance(ops_summary, (_MutableMappingABC, dict)):
+            typing.cast(MutableMapping[str, Any], ops_summary)["rows"] = rows
 
         thickness_in = _resolve_part_thickness_in(
             geo,
@@ -919,22 +936,58 @@ def _emit_hole_table_ops_cards(
         )
 
         tap_rows = _finalize_tapping_rows(rows, thickness_in=thickness_in)
-        if not tap_rows:
-            return
+        tap_total_min = 0.0
+        if tap_rows:
+            tap_total_min = _render_ops_card(
+                lambda text: _push(lines, text),
+                title="Material Removal – Tapping",
+                rows=tap_rows,
+            )
+            tap_total_min = float(tap_total_min or 0.0)
 
-        tap_total_min = _render_ops_card(
-            lambda text: _push(lines, text),
-            title="Material Removal – Tapping",
-            rows=tap_rows,
-        )
+            try:
+                if isinstance(ops_summary, (_MutableMappingABC, dict)):
+                    typing.cast(MutableMapping[str, Any], ops_summary)["tap_minutes_total"] = tap_total_min
+            except Exception:
+                pass
 
-        tap_total_min = float(tap_total_min or 0.0)
+        cbore_rows = _build_counterbore_rows(rows)
+        spot_rows = _build_spot_drill_rows(rows)
+        jig_rows = _build_jig_grind_rows(rows)
 
-        try:
-            if isinstance(ops_summary, (_MutableMappingABC, dict)):
-                typing.cast(MutableMapping[str, Any], ops_summary)["tap_minutes_total"] = tap_total_min
-        except Exception:
-            pass
+        cbore_total_min = 0.0
+        spot_total_min = 0.0
+        jig_total_min = 0.0
+
+        if cbore_rows:
+            cbore_total_min = float(
+                _render_ops_card(
+                    lambda text: _push(lines, text),
+                    title="Material Removal – Counterbore",
+                    rows=cbore_rows,
+                )
+                or 0.0
+            )
+
+        if spot_rows:
+            spot_total_min = float(
+                _render_ops_card(
+                    lambda text: _push(lines, text),
+                    title="Material Removal – Spot (Center Drill)",
+                    rows=spot_rows,
+                )
+                or 0.0
+            )
+
+        if jig_rows:
+            jig_total_min = float(
+                _render_ops_card(
+                    lambda text: _push(lines, text),
+                    title="Material Removal – Jig Grind",
+                    rows=jig_rows,
+                )
+                or 0.0
+            )
 
         bucket_view_obj: MutableMapping[str, Any] | Mapping[str, Any] | None = None
         try:
@@ -968,6 +1021,104 @@ def _emit_hole_table_ops_cards(
             float(tap_mrate or 0.0),
             float(tap_lrate or 0.0),
         )
+
+        tap_qty_total = sum(_ops_qty_from_value(row.get("qty")) for row in tap_rows)
+        _append_bucket_op_entry(
+            bucket_view_obj,
+            "tapping",
+            name="Tapping ops",
+            minutes=tap_total_min,
+            machine_rate=float(tap_mrate or 0.0),
+            labor_rate=float(tap_lrate or 0.0),
+            qty=tap_qty_total if tap_qty_total > 0 else None,
+        )
+
+        if cbore_total_min > 0.0:
+            cbore_mrate = (
+                _lookup_bucket_rate("counterbore", rates)
+                or _lookup_bucket_rate("drilling", rates)
+                or 60.0
+            )
+            cbore_lrate = (
+                _lookup_bucket_rate("counterbore_labor", rates)
+                or _lookup_bucket_rate("labor", rates)
+                or 45.0
+            )
+            _set_bucket_minutes_cost(
+                bucket_view_obj,
+                "counterbore",
+                cbore_total_min,
+                float(cbore_mrate or 0.0),
+                float(cbore_lrate or 0.0),
+            )
+            cbore_qty = sum(_ops_qty_from_value(row.get("qty")) for row in cbore_rows)
+            _append_bucket_op_entry(
+                bucket_view_obj,
+                "counterbore",
+                name="Counterbore ops",
+                minutes=cbore_total_min,
+                machine_rate=float(cbore_mrate or 0.0),
+                labor_rate=float(cbore_lrate or 0.0),
+                qty=cbore_qty if cbore_qty > 0 else None,
+            )
+
+        if spot_total_min > 0.0:
+            spot_mrate = (
+                _lookup_bucket_rate("spot_drill", rates)
+                or _lookup_bucket_rate("drilling", rates)
+                or 55.0
+            )
+            spot_lrate = (
+                _lookup_bucket_rate("spot_drill_labor", rates)
+                or _lookup_bucket_rate("labor", rates)
+                or 45.0
+            )
+            _set_bucket_minutes_cost(
+                bucket_view_obj,
+                "drilling",
+                spot_total_min,
+                float(spot_mrate or 0.0),
+                float(spot_lrate or 0.0),
+            )
+            spot_qty = sum(_ops_qty_from_value(row.get("qty")) for row in spot_rows)
+            _append_bucket_op_entry(
+                bucket_view_obj,
+                "drilling",
+                name="Spot drill ops",
+                minutes=spot_total_min,
+                machine_rate=float(spot_mrate or 0.0),
+                labor_rate=float(spot_lrate or 0.0),
+                qty=spot_qty if spot_qty > 0 else None,
+            )
+
+        if jig_total_min > 0.0:
+            jig_mrate = (
+                _lookup_bucket_rate("jig_grind", rates)
+                or _lookup_bucket_rate("grinding", rates)
+                or 70.0
+            )
+            jig_lrate = (
+                _lookup_bucket_rate("jig_grind_labor", rates)
+                or _lookup_bucket_rate("labor", rates)
+                or 45.0
+            )
+            _set_bucket_minutes_cost(
+                bucket_view_obj,
+                "grinding",
+                jig_total_min,
+                float(jig_mrate or 0.0),
+                float(jig_lrate or 0.0),
+            )
+            jig_qty = sum(_ops_qty_from_value(row.get("qty")) for row in jig_rows)
+            _append_bucket_op_entry(
+                bucket_view_obj,
+                "grinding",
+                name="Jig grind ops",
+                minutes=jig_total_min,
+                machine_rate=float(jig_mrate or 0.0),
+                labor_rate=float(jig_lrate or 0.0),
+                qty=jig_qty if jig_qty > 0 else None,
+            )
 
         _normalize_buckets(bucket_view_obj)
 
@@ -1470,6 +1621,18 @@ def _finalize_tap_row(row: MutableMapping[str, Any], thickness_in: float) -> Non
     motion_min = (float(depth_in) / max(ipm, 1e-6)) * retract_fac if depth_in else 0.0
     t_per = motion_min + index_min
 
+    try:
+        tap_class, tap_minutes_hint, is_npt = _classify_thread_spec(str(thread))
+    except Exception:
+        tap_class, tap_minutes_hint, is_npt = ("unknown", TAP_MINUTES_BY_CLASS["medium"], False)
+
+    row["tap_class"] = tap_class
+    row["tap_minutes_hint"] = round(float(tap_minutes_hint or 0.0), 3)
+    row["tap_is_npt"] = bool(is_npt)
+
+    if t_per < float(tap_minutes_hint or 0.0):
+        t_per = float(tap_minutes_hint or 0.0)
+
     row["ipr"] = round(ipr, 4)
     row["rpm"] = int(round(rpm))
     row["ipm"] = round(ipm, 3)
@@ -1477,6 +1640,23 @@ def _finalize_tap_row(row: MutableMapping[str, Any], thickness_in: float) -> Non
     row["feed_fmt"] = f'{row["ipr"]:.4f} ipr | {row["rpm"]} rpm | {row["ipm"]:.3f} ipm'
     row["depth_in"] = float(depth_in)
     row["depth_in_display"] = f'{float(depth_in):.2f}"'
+
+    desc_text = str(row.get("desc") or "")
+    match_spec = re.search(r"([#0-9./\-]+-\d+)", desc_text)
+    label = None
+    if match_spec:
+        label = match_spec.group(1).replace(" ", "")
+    elif isinstance(thread, str) and thread.strip():
+        label = thread.strip()
+    if not label:
+        label = desc_text.strip() or "TAP"
+    row["label"] = label
+
+    desc_upper = desc_text.upper()
+    if "BACK" in desc_upper and "FRONT" not in desc_upper:
+        row["side"] = "BACK"
+    elif "FRONT" in desc_upper and "BACK" not in desc_upper:
+        row["side"] = "FRONT"
 
 
 def _finalize_tapping_rows(
@@ -1518,6 +1698,261 @@ def _finalize_tapping_rows(
     return finalized
 
 
+_SPOT_DRILL_MIN_PER_SIDE_MIN = 0.1
+_JIG_GRIND_MIN_PER_OP = 15.0
+
+
+def _ops_qty_from_value(value: Any) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        try:
+            return int(round(float(value)))
+        except Exception:
+            return 0
+    text = str(value).strip()
+    if not text:
+        return 0
+    try:
+        return int(round(float(text)))
+    except Exception:
+        match = re.search(r"\d+", text)
+        return int(match.group()) if match else 0
+
+
+def _parse_fractional_number(token: str, default: float) -> float:
+    cleaned = token.strip().strip('"').strip()
+    if not cleaned:
+        return default
+    if cleaned.startswith("."):
+        cleaned = f"0{cleaned}"
+    if cleaned.endswith("."):
+        cleaned = f"{cleaned}0"
+    try:
+        value = float(cleaned)
+        if value > 20.0:
+            return default
+        return value
+    except Exception:
+        try:
+            return float(Fraction(cleaned))
+        except Exception:
+            return default
+
+
+def _extract_diameter_in(entry: Mapping[str, Any]) -> float:
+    diameter = entry.get("diameter_in") if isinstance(entry, Mapping) else None
+    try:
+        if diameter is not None:
+            return float(diameter)
+    except Exception:
+        pass
+
+    ref_val = _parse_ref_to_inch(entry.get("ref")) if isinstance(entry, Mapping) else None
+    if ref_val:
+        return float(ref_val)
+
+    text_candidates = [str(entry.get("desc") or ""), str(entry.get("label") or "")]
+    for text in text_candidates:
+        if not text:
+            continue
+        match = _DIA_TOKEN.search(text)
+        if match:
+            token = match.group(1)
+            return _parse_fractional_number(token, 0.25)
+
+    return 0.25
+
+
+def _extract_depth_in(entry: Mapping[str, Any], default: float) -> float:
+    depth_value = entry.get("depth_in") if isinstance(entry, Mapping) else None
+    try:
+        if depth_value is not None:
+            return float(depth_value)
+    except Exception:
+        pass
+
+    desc_text = str(entry.get("desc") or "")
+    match = re.search(r"[×x]\s*([0-9./]+)", desc_text)
+    if match:
+        return _parse_fractional_number(match.group(1), default)
+    return default
+
+
+def _extract_side_from_desc(desc: str) -> str:
+    text = desc.upper()
+    if RE_FRONT_BACK.search(text):
+        return "FRONT/BACK"
+    if "BACK" in text and "FRONT" not in text:
+        return "BACK"
+    if "FRONT" in text and "BACK" not in text:
+        return "FRONT"
+    return "FRONT"
+
+
+def _rpm_for_tool(dia_in: float, sfm: float, *, rpm_cap: float = 4000.0) -> int:
+    safe_dia = float(dia_in or 0.0)
+    if safe_dia <= 0:
+        safe_dia = 0.25
+    rpm = (sfm * 3.82) / safe_dia
+    rpm = max(100.0, min(rpm, rpm_cap))
+    return int(round(rpm))
+
+
+def _format_feed(ipr: float, rpm: int) -> tuple[str, float]:
+    ipm = float(rpm) * float(ipr)
+    feed_fmt = f"{ipr:.4f} ipr | {rpm} rpm | {ipm:.3f} ipm"
+    return feed_fmt, ipm
+
+
+def _build_counterbore_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    built: list[dict[str, Any]] = []
+    for entry in rows or []:
+        if not isinstance(entry, _MappingABC):
+            continue
+        desc = str(entry.get("desc") or "")
+        if not RE_CBORE.search(desc):
+            continue
+        qty = _ops_qty_from_value(entry.get("qty"))
+        if qty <= 0:
+            continue
+        dia = _extract_diameter_in(entry)
+        depth = _extract_depth_in(entry, 0.25)
+        side = _extract_side_from_desc(desc)
+        ipr = 0.01
+        rpm = _rpm_for_tool(dia, 200.0, rpm_cap=3200.0)
+        feed_fmt, ipm = _format_feed(ipr, rpm)
+        motion_min = (depth / max(ipm, 1e-6)) * 2.0 if depth else 0.0
+        per_hole = max(CBORE_MIN_PER_SIDE_MIN, motion_min + 0.05)
+        built.append(
+            {
+                "label": f"Ø{dia:.4f} COUNTERBORE",
+                "qty": qty,
+                "side": side,
+                "depth_in": depth,
+                "depth_in_display": f"{depth:.3f}\"",
+                "feed_fmt": feed_fmt,
+                "t_per_hole_min": round(per_hole, 3),
+            }
+        )
+    return built
+
+
+def _build_spot_drill_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    built: list[dict[str, Any]] = []
+    for entry in rows or []:
+        if not isinstance(entry, _MappingABC):
+            continue
+        desc = str(entry.get("desc") or "")
+        if not _SPOT_TOKENS.search(desc):
+            continue
+        qty = _ops_qty_from_value(entry.get("qty"))
+        if qty <= 0:
+            continue
+        dia = _extract_diameter_in(entry)
+        depth = _extract_depth_in(entry, 0.06)
+        side = _extract_side_from_desc(desc)
+        ipr = 0.004
+        rpm = _rpm_for_tool(dia, 250.0, rpm_cap=4500.0)
+        feed_fmt, ipm = _format_feed(ipr, rpm)
+        motion_min = (depth / max(ipm, 1e-6)) * 2.0 if depth else 0.0
+        per_hole = max(_SPOT_DRILL_MIN_PER_SIDE_MIN, motion_min + 0.04)
+        built.append(
+            {
+                "label": f"Spot drill Ø{dia:.4f}",
+                "qty": qty,
+                "side": side,
+                "depth_in": depth,
+                "depth_in_display": f"{depth:.3f}\"",
+                "feed_fmt": feed_fmt,
+                "t_per_hole_min": round(per_hole, 3),
+            }
+        )
+    return built
+
+
+def _build_jig_grind_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    built: list[dict[str, Any]] = []
+    for entry in rows or []:
+        if not isinstance(entry, _MappingABC):
+            continue
+        desc = str(entry.get("desc") or "")
+        if "JIG" not in desc.upper() or "GRIND" not in desc.upper():
+            continue
+        qty = _ops_qty_from_value(entry.get("qty"))
+        if qty <= 0:
+            continue
+        dia = _extract_diameter_in(entry)
+        side = _extract_side_from_desc(desc)
+        built.append(
+            {
+                "label": f"Jig grind Ø{dia:.4f}",
+                "qty": qty,
+                "side": side,
+                "depth_in": 0.0,
+                "depth_in_display": "-",
+                "feed_fmt": "Manual grind",
+                "t_per_hole_min": round(float(_JIG_GRIND_MIN_PER_OP), 3),
+            }
+        )
+    return built
+
+
+def _append_bucket_op_entry(
+    bucket_view_obj: MutableMapping[str, Any] | Mapping[str, Any] | None,
+    bucket_key: str,
+    *,
+    name: str,
+    minutes: float,
+    machine_rate: float,
+    labor_rate: float,
+    qty: int | None = None,
+) -> None:
+    if minutes <= 0:
+        return
+    target: MutableMapping[str, Any] | None = None
+    if isinstance(bucket_view_obj, dict):
+        target = bucket_view_obj
+    elif isinstance(bucket_view_obj, _MutableMappingABC):
+        target = typing.cast(MutableMapping[str, Any], bucket_view_obj)
+    if target is None:
+        return
+
+    ops_map = target.setdefault("bucket_ops", {})
+    if not isinstance(ops_map, dict):
+        try:
+            ops_map = dict(ops_map)
+        except Exception:
+            ops_map = {}
+        target["bucket_ops"] = ops_map
+
+    bucket_list = ops_map.setdefault(bucket_key, [])
+    if not isinstance(bucket_list, list):
+        try:
+            bucket_list = list(bucket_list or [])
+        except Exception:
+            bucket_list = []
+        ops_map[bucket_key] = bucket_list
+
+    machine_rate_val = float(machine_rate or 0.0)
+    labor_rate_val = float(labor_rate or 0.0)
+    machine_cost = (minutes / 60.0) * machine_rate_val
+    labor_cost = (minutes / 60.0) * labor_rate_val
+
+    entry: dict[str, Any] = {
+        "name": name,
+        "minutes": round(float(minutes), 3),
+        "machine$": round(machine_cost, 2),
+        "labor$": round(labor_cost, 2),
+    }
+    entry["total$"] = round(entry["machine$"] + entry["labor$"], 2)
+    if qty is not None:
+        entry["qty"] = int(qty)
+    bucket_list.append(entry)
+
+
 def _render_ops_card(
     append_line: Callable[[str], None],
     *,
@@ -1551,6 +1986,81 @@ def _render_ops_card(
         )
     append_line("")
     return round(total_min, 2)
+
+
+def _side_from(txt: str) -> str:
+    text = str(txt or "").lower()
+    if "(front" in text:
+        return "front"
+    if "(back" in text:
+        return "back"
+    return "unspecified"
+
+
+def summarize_actions(removal_lines: list[str], planner_ops: list[dict]) -> None:
+    """Log aggregated removal + planner operation counts for diagnostics."""
+
+    def _normalize_side(value: Any) -> str:
+        text = str(value or "").strip().lower()
+        if "front" in text:
+            return "front"
+        if "back" in text:
+            return "back"
+        return "unspecified"
+
+    total = defaultdict(int)
+    by_side = defaultdict(lambda: defaultdict(int))
+
+    drill_re = re.compile(r'^Dia\s+[\d\.]+" \u00D7 (\d+).*(\(.*?\))?', re.IGNORECASE)
+    tap_re = re.compile(r'^\s*#?\d.*\bTAP\b.*\u00D7\s+(\d+).*(\(.*?\))?', re.IGNORECASE)
+
+    for line in removal_lines or []:
+        if not isinstance(line, str):
+            continue
+        match = drill_re.search(line)
+        if match:
+            qty = int(match.group(1))
+            side = _side_from(line)
+            total["drill"] += qty
+            by_side["drill"][side] += qty
+            continue
+        match = tap_re.search(line)
+        if match:
+            qty = int(match.group(1))
+            side = _side_from(line)
+            total["tap"] += qty
+            by_side["tap"][side] += qty
+
+    for op in planner_ops or []:
+        if not isinstance(op, dict):
+            continue
+        name = str(op.get("name") or "").lower()
+        qty_raw = op.get("qty")
+        try:
+            qty_val = int(float(qty_raw))
+        except Exception:
+            qty_val = 0
+        if qty_val <= 0:
+            continue
+        side = _normalize_side(op.get("side"))
+        if "counterbore" in name or "c-bore" in name or "cbore" in name:
+            total["counterbore"] += qty_val
+            by_side["counterbore"][side] += qty_val
+        elif "spot" in name and "drill" in name:
+            total["spot"] += qty_val
+            by_side["spot"][side] += qty_val
+        elif "jig" in name and "grind" in name:
+            total["jig_grind"] += qty_val
+            by_side["jig_grind"][side] += qty_val
+
+    for side_counts in by_side.values():
+        for key in ("front", "back", "unspecified"):
+            side_counts.setdefault(key, 0)
+
+    actions_total = sum(total.values())
+    logging.info("[ACTIONS] totals=%s total=%s", dict(total), actions_total)
+    for kind, sides in by_side.items():
+        logging.info("[ACTIONS/%s] by_side=%s", kind, dict(sides))
 
 
 def _extract_milling_bucket(
@@ -5305,6 +5815,7 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
     planner_total_meta = process_meta.get("planner_total", {}) if isinstance(process_meta, dict) else {}
     planner_line_items_meta = planner_total_meta.get("line_items") if isinstance(planner_total_meta, _MappingABC) else None
     bucket_ops_map: dict[str, list[PlannerBucketOp]] = {}
+    planner_ops_summary: list[dict[str, Any]] = []
     if isinstance(planner_line_items_meta, list):
         for entry in planner_line_items_meta:
             if not isinstance(entry, _MappingABC):
@@ -5325,6 +5836,23 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     "total": total_val,
                 }
             )
+
+            name_text = str(op_name or "").strip()
+            qty_candidate = entry.get("qty")
+            try:
+                qty_val = int(float(qty_candidate))
+            except Exception:
+                qty_val = 0
+            side_val = (
+                entry.get("side")
+                or entry.get("face")
+                or entry.get("orientation")
+                or entry.get("side_label")
+            )
+            if name_text:
+                planner_ops_summary.append(
+                    {"name": name_text, "qty": qty_val, "side": side_val}
+                )
 
     if bucket_ops_map:
         for ops in bucket_ops_map.values():
@@ -6679,6 +7207,12 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
         material_group=material_group_display,
         drilling_time_per_hole=drilling_time_per_hole_data,
     )
+
+    removal_summary_lines: list[str] = [
+        str(line)
+        for line in removal_card_lines
+        if isinstance(line, str)
+    ]
 
     if removal_card_extra.get("drill_machine_minutes") is not None:
         drill_machine_minutes_estimate = float(removal_card_extra["drill_machine_minutes"])
@@ -8710,6 +9244,8 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                 ops_rows = built
 
         # Emit the cards (will no-op if no TAP/CBore/Spot rows)
+        pre_ops_len = len(lines)
+
         _emit_hole_table_ops_cards(
             lines,
             geo=geo_map,
@@ -8719,6 +9255,50 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             breakdown=breakdown,
             rates=rates,
         )
+
+        new_ops_lines = []
+        try:
+            for entry in lines[pre_ops_len:]:
+                if not isinstance(entry, str):
+                    continue
+                if entry.startswith("[DEBUG]"):
+                    continue
+                new_ops_lines.append(entry)
+        except Exception:
+            new_ops_lines = []
+        removal_summary_lines.extend(new_ops_lines)
+
+        try:
+            extra_bucket_ops = None
+            extra_map_candidate = getattr(bucket_state, "extra", None)
+            if isinstance(extra_map_candidate, _MappingABC):
+                extra_bucket_ops = extra_map_candidate.get("bucket_ops")
+            if isinstance(extra_bucket_ops, _MappingABC):
+                for _, entries in extra_bucket_ops.items():
+                    if not isinstance(entries, Sequence):
+                        continue
+                    for entry in entries:
+                        if not isinstance(entry, _MappingABC):
+                            continue
+                        name_text = str(entry.get("name") or entry.get("op") or "").strip()
+                        qty_candidate = entry.get("qty")
+                        try:
+                            qty_val = int(float(qty_candidate))
+                        except Exception:
+                            qty_val = 0
+                        side_val = entry.get("side")
+                        if name_text:
+                            planner_ops_summary.append(
+                                {"name": name_text, "qty": qty_val, "side": side_val}
+                            )
+            summarize_actions(removal_summary_lines, planner_ops_summary)
+        except Exception as exc:
+            logging.debug(
+                "[actions-summary] skipped due to %s: %s",
+                exc.__class__.__name__,
+                exc,
+                exc_info=False,
+            )
 
         milling_bucket_obj = None
         bucket_view_snapshot = (
