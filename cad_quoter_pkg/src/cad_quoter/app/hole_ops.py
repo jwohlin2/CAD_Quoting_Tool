@@ -521,6 +521,72 @@ def _parse_hole_line(line: str, to_in: float, *, source: str | None = None) -> d
             except Exception:
                 entry["ref_dia_in"] = None
 
+    def _int_or_zero(value: Any) -> int:
+        if value in (None, ""):
+            return 0
+        try:
+            return int(value)
+        except Exception:
+            try:
+                return int(round(float(value)))
+            except Exception:
+                return 0
+
+    def _base_op_payload() -> dict[str, Any]:
+        qty = _int_or_zero(entry.get("qty"))
+        side_raw = str(entry.get("side") or "").strip().upper()
+        if not side_raw:
+            side_raw = "BACK" if entry.get("from_back") else "FRONT"
+        payload: dict[str, Any] = {
+            "qty": qty,
+            "side": side_raw,
+            "double_sided": bool(entry.get("double_sided")),
+            "from_back": bool(entry.get("from_back")),
+            "depth_in": entry.get("depth_in"),
+            "ref_dia_in": entry.get("ref_dia_in"),
+            "thru": bool(entry.get("thru")),
+            "source": entry.get("source"),
+        }
+        ref_val = entry.get("ref")
+        if ref_val:
+            payload["ref"] = ref_val
+        return payload
+
+    ops: list[dict[str, Any]] = []
+
+    if entry.get("tap"):
+        tap_payload = _base_op_payload()
+        tap_payload.update(
+            {
+                "type": "tap",
+                "thread": entry.get("tap"),
+                "tap_class": entry.get("tap_class"),
+                "tap_minutes_per": entry.get("tap_minutes_per"),
+                "tap_is_npt": entry.get("tap_is_npt"),
+            }
+        )
+        ops.append({k: v for k, v in tap_payload.items() if v not in (None, "")})
+
+    if entry.get("cbore"):
+        cbore_payload = _base_op_payload()
+        cbore_payload["type"] = "cbore"
+        ops.append({k: v for k, v in cbore_payload.items() if v not in (None, "")})
+
+    if entry.get("csk"):
+        csk_payload = _base_op_payload()
+        csk_payload["type"] = "csk"
+        ops.append({k: v for k, v in csk_payload.items() if v not in (None, "")})
+
+    if entry.get("thru") or entry.get("ref_dia_in"):
+        drill_payload = _base_op_payload()
+        drill_payload["type"] = "drill"
+        ops.append({k: v for k, v in drill_payload.items() if v not in (None, "")})
+
+    if ops:
+        entry["ops"] = ops
+        if not entry.get("type"):
+            entry["type"] = ops[0].get("type")
+
     return entry
 
 
