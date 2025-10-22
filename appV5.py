@@ -5490,14 +5490,22 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
                     break
             if tapping_bucket is None:
                 tapping_bucket = {}
+            tapping_minutes = _as_float(tapping_bucket.get("minutes", 0.0), 0.0)
+            tapping_machine = _as_float(tapping_bucket.get("machine$", 0.0), 0.0)
+            tapping_labor = _as_float(tapping_bucket.get("labor$", 0.0), 0.0)
             tapping_total = _as_float(tapping_bucket.get("total$", 0.0), 0.0)
-            if tapping_total > 0.0:
+            if (
+                tapping_minutes > 0.0
+                or tapping_machine > 0.0
+                or tapping_labor > 0.0
+                or tapping_total > 0.0
+            ):
                 _append_process_row(
                     rows,
                     _label_for_bucket("tapping"),
-                    tapping_bucket.get("minutes", 0.0),
-                    tapping_bucket.get("machine$", 0.0),
-                    tapping_bucket.get("labor$", 0.0),
+                    tapping_minutes,
+                    tapping_machine,
+                    tapping_labor,
                     tapping_total,
                 )
 
