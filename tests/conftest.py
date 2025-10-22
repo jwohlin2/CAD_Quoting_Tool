@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import importlib
 import importlib.resources as importlib_resources
+import os
 import types
 from importlib.machinery import ModuleSpec
 from pathlib import Path
@@ -39,6 +40,27 @@ def _install_runtime_dependency_stubs() -> None:
 
         bs4_stub.BeautifulSoup = _BeautifulSoup
         sys.modules["bs4"] = bs4_stub
+
+    dummy_pfx = Path(__file__).resolve().parent / "mcmaster_dummy.pfx"
+    try:
+        dummy_pfx.touch(exist_ok=True)
+    except Exception:
+        pass
+    os.environ.setdefault("MCMASTER_PFX_PATH", str(dummy_pfx))
+    os.environ.setdefault("MCMASTER_USER", "stub@example.com")
+    os.environ.setdefault("MCMASTER_PASS", "stub-password")
+    os.environ.setdefault("MCMASTER_PFX_PASS", "")
+
+    if not _try_import("requests_pkcs12"):
+        pkcs_stub = types.ModuleType("requests_pkcs12")
+
+        class _Pkcs12Adapter:
+            def __init__(self, *args, **kwargs):
+                self.args = args
+                self.kwargs = kwargs
+
+        pkcs_stub.Pkcs12Adapter = _Pkcs12Adapter
+        sys.modules["requests_pkcs12"] = pkcs_stub
 
     if not _try_import("lxml"):
         lxml_stub = types.ModuleType("lxml")

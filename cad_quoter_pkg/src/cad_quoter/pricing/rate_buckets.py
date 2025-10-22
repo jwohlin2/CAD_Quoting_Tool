@@ -8,7 +8,7 @@ from cad_quoter.pricing.process_buckets import (
     canonical_bucket_key,
     normalize_bucket_key,
 )
-from cad_quoter.rates import default_machine_rate
+from cad_quoter.pricing.rate_defaults import default_machine_rate
 from cad_quoter.utils import _dict
 
 

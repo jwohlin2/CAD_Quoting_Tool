@@ -24,6 +24,10 @@ from cad_quoter.pricing.process_buckets import (
 from cad_quoter.pricing.process_cost_renderer import (
     canonicalize_costs as _shared_canonicalize_costs,
 )
+from cad_quoter.pricing.rate_defaults import (
+    labor_rate as _process_labor_rate,
+    machine_rate as _process_machine_rate,
+)
 from cad_quoter.utils import sdict
 from cad_quoter.utils.render_utils import fmt_hours, fmt_money
 
@@ -34,6 +38,9 @@ from .services import QuoteConfiguration
 
 PROGRAMMING_PER_PART_LABEL = "Programming (per part)"
 PROGRAMMING_AMORTIZED_LABEL = "Programming (amortized)"
+
+_MILLING_MACHINE_RATE = _process_machine_rate("milling")
+_MILLING_LABOR_RATE = _process_labor_rate("milling")
 
 # Heuristic fallbacks mirrored from appV5 for spot drill and jig grind minutes.
 SPOT_DRILL_MIN_PER_SIDE_MIN = 0.1

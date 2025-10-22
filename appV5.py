@@ -995,11 +995,22 @@ def _emit_hole_table_ops_cards(
             or _lookup_bucket_rate("machine", rates)
             or 45.0
         )
-        tap_lrate = max(
-            _lookup_bucket_rate("tapping_labor", rates),
-            _lookup_bucket_rate("labor", rates),
-            45.0,
-        )
+        tap_labor_explicit: float | None = None
+        if isinstance(rates, _MappingABC):
+            for raw_key, raw_value in rates.items():
+                key_text = str(raw_key).strip().lower()
+                if key_text in {"tapping_labor", "tappinglaborrate", "tapping_labor_rate"}:
+                    candidate = _as_float(raw_value, 0.0)
+                    if candidate > 0:
+                        tap_labor_explicit = candidate
+                    break
+        if tap_labor_explicit is not None and tap_labor_explicit > 0:
+            tap_lrate = tap_labor_explicit
+        else:
+            tap_lrate = (
+                _lookup_bucket_rate("labor", rates)
+                or 45.0
+            )
 
         _set_bucket_minutes_cost(
             bucket_view_obj,
@@ -10370,6 +10381,21 @@ def _default_speeds_feeds_csv_path() -> str:
 
 
 DEFAULT_SPEEDS_FEEDS_CSV_PATH = _default_speeds_feeds_csv_path()
+if "parser_rules_v2" not in PARAMS_DEFAULT:
+    PARAMS_DEFAULT["parser_rules_v2"] = False
+
+def _truthy_env(value: str | None) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+_PARSER_RULES_ENV = os.getenv("CADQ_PARSER_RULES_V2")
+PARSER_RULES_V2_ENABLED = bool(PARAMS_DEFAULT.get("parser_rules_v2")) or _truthy_env(_PARSER_RULES_ENV)
+if PARSER_RULES_V2_ENABLED:
+    logging.info("[rules] parser_rules_v2=ON (env=%s, config=%s)", _PARSER_RULES_ENV, PARAMS_DEFAULT.get("parser_rules_v2"))
+else:
+    logging.info("[rules] parser_rules_v2=OFF (env=%s, config=%s)", _PARSER_RULES_ENV, PARAMS_DEFAULT.get("parser_rules_v2"))
+
 if not str(PARAMS_DEFAULT.get("SpeedsFeedsCSVPath", "")).strip():
     PARAMS_DEFAULT["SpeedsFeedsCSVPath"] = DEFAULT_SPEEDS_FEEDS_CSV_PATH
 
@@ -16356,8 +16382,19 @@ def extract_2d_features_from_dxf_or_dwg(path: str | Path) -> dict[str, Any]:
     if chart_lines:
         chart_summary = summarize_hole_chart_lines(chart_lines)
     parser = _parse_hole_table_lines or geometry.parse_hole_table_lines
+    parser_kwargs: dict[str, Any] = {}
+    if PARSER_RULES_V2_ENABLED:
+        parser_kwargs = {
+            "rules_v2": True,
+            "block_thickness_in": thickness_guess,
+        }
     if chart_lines and parser:
         try:
+            if parser_kwargs:
+                hole_rows = parser(chart_lines, **parser_kwargs)
+            else:
+                hole_rows = parser(chart_lines)
+        except TypeError:
             hole_rows = parser(chart_lines)
         except Exception:
             hole_rows = []
@@ -16604,12 +16641,98 @@ def _extract_text_lines_from_ezdxf_doc(doc: Any) -> list[str]:
     return [ln for ln in joined.splitlines() if ln.strip()]
 
 
+_MM_TO_IN = 1.0 / 25.4
+
+
 def hole_rows_to_ops(rows: Iterable[Any] | None) -> list[dict[str, Any]]:
     """Flatten parsed HoleRow objects into estimator-friendly operations."""
 
     ops: list[dict[str, Any]] = []
     if not rows:
         return ops
+
+    def _mm_to_in(value: Any) -> float | None:
+        if value is None:
+            return None
+        try:
+            return float(value) * _MM_TO_IN
+        except Exception:
+            return None
+
+    def _normalize_side(value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip().lower()
+        if not text:
+            return None
+        if "back" in text:
+            return "back"
+        if "front" in text:
+            return "front"
+        return None
+
+    def _feature_sides(feature: Mapping[str, Any]) -> list[str]:
+        sides: list[str] = []
+        sides_raw = feature.get("sides")
+        if isinstance(sides_raw, (list, tuple, set)):
+            for entry in sides_raw:
+                norm = _normalize_side(entry)
+                if norm and norm not in sides:
+                    sides.append(norm)
+        if feature.get("double_sided"):
+            for candidate in ("front", "back"):
+                if candidate not in sides:
+                    sides.append(candidate)
+        if feature.get("from_back") and "back" not in sides:
+            sides.append("back")
+        if not sides:
+            side = feature.get("side") or feature.get("from_face")
+            norm = _normalize_side(side)
+            if norm:
+                sides.append(norm)
+        if not sides:
+            sides.append("front")
+        return sides
+
+    def _resolve_depth(feature: Mapping[str, Any], thickness_in: float | None) -> float | None:
+        depth_in = feature.get("depth_in")
+        if isinstance(depth_in, (int, float)):
+            try:
+                return float(depth_in)
+            except Exception:
+                depth_in = None
+        depth_mm = feature.get("depth_mm")
+        depth = _mm_to_in(depth_mm) if depth_mm is not None else None
+        if depth is not None:
+            return depth
+        raw_depth = feature.get("depth")
+        if isinstance(raw_depth, (int, float)):
+            return float(raw_depth)
+        if feature.get("thru") and thickness_in is not None:
+            try:
+                return float(thickness_in) + 0.05
+            except Exception:
+                return None
+        return None
+
+    def _resolve_ref_dia(feature: Mapping[str, Any]) -> float | None:
+        for key in ("ref_dia", "ref_dia_in", "dia_in", "major_in"):
+            val = feature.get(key)
+            if isinstance(val, (int, float)):
+                return float(val)
+        for key in ("dia_mm", "major_mm"):
+            val = feature.get(key)
+            converted = _mm_to_in(val) if val is not None else None
+            if converted is not None:
+                return converted
+        return None
+
+    def _resolve_thread(feature: Mapping[str, Any]) -> str | None:
+        thread = feature.get("thread")
+        if not isinstance(thread, str):
+            return None
+        cleaned = thread.strip()
+        return cleaned or None
 
     for row in rows:
         if row is None:
@@ -16623,14 +16746,42 @@ def hole_rows_to_ops(rows: Iterable[Any] | None) -> list[dict[str, Any]]:
         except Exception:
             qty_val = 0
         ref_val = getattr(row, "ref", "")
+        thickness_in = getattr(row, "block_thickness_in", None)
+        if thickness_in is None:
+            thickness_in = getattr(row, "thickness_in", None)
         for feature in features:
             if not isinstance(feature, dict):
                 continue
-            op = dict(feature)
-            op.setdefault("qty", qty_val or op.get("qty") or 0)
-            op.setdefault("ref", ref_val)
-            ops.append(op)
+            feature_type = str(feature.get("type") or "").lower()
+            ref_dia = _resolve_ref_dia(feature)
+            depth_in = _resolve_depth(feature, thickness_in)
+            thread = _resolve_thread(feature)
+            for side in _feature_sides(feature):
+                qty = feature.get("qty")
+                if not isinstance(qty, int):
+                    qty = qty_val
+                op = {
+                    "type": feature_type,
+                    "ref": ref_val,
+                    "qty": qty,
+                    "ref_dia": ref_dia,
+                    "depth_in": depth_in,
+                    "thread": thread,
+                    "side": side,
+                }
+                ops.append(op)
+                if PARSER_RULES_V2_ENABLED:
+                    logging.info(
+                        "[rules] op %s/%s side=%s qty=%s depth=%s thread=%s",
+                        ref_val,
+                        feature_type or "?",
+                        side,
+                        qty,
+                        f"{depth_in:.3f}" if isinstance(depth_in, (int, float)) else "-",
+                        thread or "-",
+                    )
     return ops
+
 
 # ==== LLM DECISION ENGINE =====================================================
 
