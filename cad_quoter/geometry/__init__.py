@@ -366,11 +366,11 @@ DIM_RE = re.compile(r"(?:ï¿½|DIAM|DIA)\s*([0-9.+-]+)|R\s*([0-9.+-]+)|([0-9.+-
 def load_drawing(path: Path) -> Drawing:
     ezdxf_mod = require_ezdxf()
     if path.suffix.lower() == ".dwg":
-        # Prefer explicit converter/wrapper if configured (works even if ODA isnï¿½t on PATH)
+        # Prefer explicit converter/wrapper if configured (works even if ODA isn't on PATH)
         exe = get_dwg_converter_path()
         if exe:
             dxf_path = convert_dwg_to_dxf(str(path))
-            return ezdxf_mod.readfile(dxf_path)
+            return _ezdxf_vendor.read_document(dxf_path)
         # Fallback: odafc (requires ODAFileConverter on PATH)
         if _HAS_ODAFC:
 
@@ -380,7 +380,7 @@ def load_drawing(path: Path) -> Drawing:
             "DWG import needs ODA File Converter. Set ODA_CONVERTER_EXE to the exe "
             "or place dwg2dxf_wrapper.bat next to the script."
         )
-    return ezdxf_mod.readfile(str(path))  # DXF directly
+    return _ezdxf_vendor.read_document(str(path))  # DXF directly
 
 
 def dxf_to_structured(doc: Drawing) -> dict:
@@ -1292,8 +1292,8 @@ def read_dxf_as_occ_shape(dxf_path: str):
         sew.Perform()
         return sew.SewedShape()
 
-    ezdxf_mod = require_ezdxf()
-    doc = ezdxf_mod.readfile(dxf_path)
+    require_ezdxf()
+    doc = _ezdxf_vendor.read_document(dxf_path)
     msp = doc.modelspace()
     INSUNITS = doc.header.get("$INSUNITS", 1)  # 1=in, 4=mm, 2=ft, 6=m
     u2mm = {1:25.4, 4:1.0, 2:304.8, 6:1000.0}.get(INSUNITS, 1.0)
