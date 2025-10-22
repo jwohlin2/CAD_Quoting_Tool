@@ -1172,6 +1172,154 @@ def _render_ops_card(
     return round(total_min, 2)
 
 
+def _extract_milling_bucket(
+    bucket_view: Mapping[str, Any] | None,
+) -> Mapping[str, Any] | None:
+    if not isinstance(bucket_view, _MappingABC):
+        return None
+    try:
+        buckets_obj = bucket_view.get("buckets")
+    except Exception:
+        buckets_obj = None
+    if isinstance(buckets_obj, _MappingABC):
+        candidate = buckets_obj.get("milling")
+        if isinstance(candidate, _MappingABC):
+            return typing.cast(Mapping[str, Any], candidate)
+        if isinstance(candidate, dict):
+            return candidate
+    elif isinstance(buckets_obj, dict):
+        candidate = buckets_obj.get("milling")
+        if isinstance(candidate, _MappingABC):
+            return typing.cast(Mapping[str, Any], candidate)
+        if isinstance(candidate, dict):
+            return candidate
+    return None
+
+
+def _render_milling_removal_card(
+    append_line: Callable[[str], None],
+    lines: Sequence[Any] | None,
+    milling_bucket: Mapping[str, Any] | None,
+) -> bool:
+    if not isinstance(milling_bucket, _MappingABC):
+        return False
+
+    existing = False
+    if isinstance(lines, Sequence):
+        for entry in lines:
+            if not isinstance(entry, str):
+                continue
+            if entry.strip().upper().startswith("MATERIAL REMOVAL – MILLING"):
+                existing = True
+                break
+    if existing:
+        return False
+
+    detail_obj = milling_bucket.get("detail") if isinstance(milling_bucket, _MappingABC) else None
+    if not isinstance(detail_obj, _MappingABC):
+        return False
+
+    def _detail_int(key: str, default: int = 0) -> int:
+        value = detail_obj.get(key)
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, (int, float)) and math.isfinite(float(value)):
+            return int(round(float(value)))
+        if isinstance(value, str):
+            try:
+                parsed = float(value.strip())
+            except Exception:
+                return default
+            if math.isfinite(parsed):
+                return int(round(parsed))
+        return default
+
+    def _detail_float(key: str, default: float = 0.0) -> float:
+        val = _coerce_float_or_none(detail_obj.get(key))
+        if val is None or not math.isfinite(float(val)):
+            return float(default)
+        return float(val)
+
+    passes_face = _detail_int("passes_face")
+    passes_axial = _detail_int("passes_axial")
+    rpm_face = _detail_int("rpm_face")
+    rpm_contour = _detail_int("rpm_contour")
+    ipm_face = _detail_float("ipm_face")
+    ipm_contour = _detail_float("ipm_contour")
+    face_top_min = _detail_float("face_top_min")
+    face_bot_min = _detail_float("face_bot_min")
+    perim_rough_min = _detail_float("perim_rough_min")
+    perim_finish_min = _detail_float("perim_finish_min")
+    toolchanges_min = _detail_float("toolchanges_min")
+
+    if (
+        passes_face <= 0
+        and passes_axial <= 0
+        and face_top_min <= 0
+        and face_bot_min <= 0
+        and perim_rough_min <= 0
+        and perim_finish_min <= 0
+        and toolchanges_min <= 0
+    ):
+        return False
+
+    total_minutes_val = _coerce_float_or_none(milling_bucket.get("minutes"))
+    if total_minutes_val is None or not math.isfinite(total_minutes_val):
+        total_minutes_val = (
+            face_top_min
+            + max(0.0, face_bot_min)
+            + perim_rough_min
+            + perim_finish_min
+            + max(0.0, toolchanges_min)
+        )
+
+    append_line("MATERIAL REMOVAL – MILLING")
+    append_line("-" * 66)
+    append_line(
+        "FACE TOP | passes {passes} | {rpm} rpm | {ipm:.1f} ipm | t  {minutes:.2f} min".format(
+            passes=passes_face,
+            rpm=rpm_face,
+            ipm=ipm_face,
+            minutes=face_top_min,
+        )
+    )
+    if face_bot_min > 0:
+        append_line(
+            "FACE BOT | passes {passes} | {rpm} rpm | {ipm:.1f} ipm | t  {minutes:.2f} min".format(
+                passes=passes_face,
+                rpm=rpm_face,
+                ipm=ipm_face,
+                minutes=face_bot_min,
+            )
+        )
+    append_line(
+        "PERIM ROUGH | axial passes {passes} | {rpm} rpm | {ipm:.1f} ipm | t  {minutes:.2f} min".format(
+            passes=passes_axial,
+            rpm=rpm_contour,
+            ipm=ipm_contour,
+            minutes=perim_rough_min,
+        )
+    )
+    append_line(
+        "PERIM FINISH | {rpm} rpm | {ipm:.1f} ipm | t  {minutes:.2f} min".format(
+            rpm=rpm_contour,
+            ipm=ipm_contour,
+            minutes=perim_finish_min,
+        )
+    )
+    if toolchanges_min > 0:
+        append_line(f"Toolchange adders: {toolchanges_min:.2f} min")
+    append_line("-" * 66)
+    append_line(
+        "TOTAL MILLING . {minutes:.2f} min  ({hours:.2f} hr)".format(
+            minutes=total_minutes_val,
+            hours=minutes_to_hours(total_minutes_val),
+        )
+    )
+    append_line("")
+    return True
+
+
 def _compute_drilling_removal_section(
     *,
     breakdown: Mapping[str, Any] | MutableMapping[str, Any],
@@ -7324,6 +7472,15 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             removal_card_has_drill = True
             break
 
+    if removal_card_has_drill:
+        milling_bucket_obj = None
+        bucket_view_snapshot = (
+            breakdown.get("bucket_view") if isinstance(breakdown, _MappingABC) else None
+        )
+        if isinstance(bucket_view_snapshot, (_MappingABC, dict)):
+            milling_bucket_obj = _extract_milling_bucket(bucket_view_snapshot)
+        _render_milling_removal_card(append_line, lines, milling_bucket_obj)
+
     if not removal_card_has_drill:
         drill_groups_render: list[dict[str, float]] = []
 
@@ -7521,6 +7678,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             )
             append_line("")
 
+            milling_bucket_obj = None
+            bucket_view_snapshot = (
+                breakdown.get("bucket_view") if isinstance(breakdown, _MappingABC) else None
+            )
+            if isinstance(bucket_view_snapshot, (_MappingABC, dict)):
+                milling_bucket_obj = _extract_milling_bucket(bucket_view_snapshot)
+            _render_milling_removal_card(append_line, lines, milling_bucket_obj)
+
     # ===== MATERIAL REMOVAL: HOLE-TABLE CARDS =================================
     # use module-level 're'
 
@@ -7591,6 +7756,14 @@ def render_quote(  # type: ignore[reportGeneralTypeIssues]
             breakdown=breakdown,
             rates=rates,
         )
+
+        milling_bucket_obj = None
+        bucket_view_snapshot = (
+            breakdown.get("bucket_view") if isinstance(breakdown, _MappingABC) else None
+        )
+        if isinstance(bucket_view_snapshot, (_MappingABC, dict)):
+            milling_bucket_obj = _extract_milling_bucket(bucket_view_snapshot)
+        _render_milling_removal_card(append_line, lines, milling_bucket_obj)
 
     except Exception as e:
         _push(lines, f"[DEBUG] material_removal_emit_skipped={e.__class__.__name__}: {e}")
